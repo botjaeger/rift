@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Shift
+GenericName=Terminal
+Comment=GPU-accelerated terminal with block-based output
+Exec=shift-terminal
+Icon=shift
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=shell;terminal;console;

@@ -1,0 +1,11 @@
+[package]
+name = "shift-pty"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+shift-core.workspace = true
+alacritty_terminal.workspace = true
+log.workspace = true
+libc = "0.2"

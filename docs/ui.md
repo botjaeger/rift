@@ -1,6 +1,6 @@
 # UI Surfaces
 
-Every visual element in Runway, top to bottom. Layer order for compositing:
+Every visual element in Shift, top to bottom. Layer order for compositing:
 0 chrome → 1 terminal + editor → 2 completion/search → 3 settings → 4 palette.
 
 ## Window chrome
@@ -12,7 +12,7 @@ Every visual element in Runway, top to bottom. Layer order for compositing:
 
 ## Menu bar (macOS)
 
-Native menus: **Runway** (About, Settings…, Keyboard Shortcuts, Services,
+Native menus: **Shift** (About, Settings…, Keyboard Shortcuts, Services,
 Hide/Hide Others/Show All, Quit) · **File** (New Tab, New Window, Split Pane
 Right/Down, Reopen Closed Tab, Save Layout as Launch Configuration, Close
 Pane/Other Tabs/Window) · **Edit** (Undo, Redo, Cut, Copy, Paste, Select All,
@@ -82,7 +82,7 @@ through to the PTY otherwise — vim, password prompts, shells without
 integration). Sits at the bottom of the pane, or at the top with
 `input_position = "top"`.
 
-- **Prompt context** (design 01, above the input): `⇕ ~/zzz/runway on ⎇ main
+- **Prompt context** (design 01, above the input): `⇕ ~/zzz/shift on ⎇ main
   ↑2 ↓1 •` — cwd in the accent, branch in green, ahead/behind arrows and the
   dirty dot muted. Hidden in compact (split-pane) mode and in shell-prompt
   mode.
@@ -139,7 +139,7 @@ shortcut chips. Modes:
   keyboard selection scrolls through long result sets. Also includes `Toggle
   vim keybindings`, one
   `Launch configuration: <name>` row per file in
-  `~/.config/runway/launch_configs/` (re-scanned each time the palette opens),
+  `~/.config/shift/launch_configs/` (re-scanned each time the palette opens),
   `Theme: <name>` rows, plus recent commands.
 - **History** (⌃R from the editor) — imported zsh history + per-pane local
   history; Enter runs, or insert into the editor.
@@ -165,7 +165,7 @@ Disabled items are dimmed (e.g. Copy output on an output-less block).
 
 Header (`❯ Settings`), a five-entry sidebar with a per-page icon (arrow keys navigate pages;
 PageUp/PageDown scroll the body) and a scrollable body footed with
-`~/.config/runway/config.toml`. Every control writes that file live (the
+`~/.config/shift/config.toml`. Every control writes that file live (the
 hot-reload watcher applies changes < 300 ms, including external edits); the
 wheel scrolls the page body (24 px per line, clamped to the content) and
 switching pages resets the scroll. ✕ closes; clicks elsewhere in the overlay
@@ -195,7 +195,7 @@ are swallowed rather than reaching the terminal.
   - Input: `Vim keybindings` toggle, `Autosuggestions (ghost text)` toggle,
     `Completions menu` toggle, `Autocomplete quotes and brackets` toggle,
     `Input position` segmented `Bottom | Top`, `Prompt` segmented
-    `Runway | Shell (PS1)`, `Expand aliases as you type`, `Underline unknown
+    `Shift | Shell (PS1)`, `Expand aliases as you type`, `Underline unknown
     commands`, `Suggest corrections for failed commands` toggles.
   - Blocks & notifications: `Copy on select` toggle, `Notify when a long
     command finishes` toggle, `Notify after` stepper (s, ±5), `Bell` segmented
@@ -208,7 +208,7 @@ are swallowed rather than reaching the terminal.
   ⌘/⌃/⌥ (or a function/navigation key) becomes the shortcut, Esc cancels,
   ⌫ unbinds; a chord taken by another action moves over with a toast naming
   it. ⌃⌘K jumps straight here.
-- **Themes** — *Built-in themes plus `~/.config/runway/themes` (TOML or Warp
+- **Themes** — *Built-in themes plus `~/.config/shift/themes` (TOML or Warp
   YAML)*: a row per available theme with four swatches (background, accent,
   success, error), its display name and an `active` / `light` tag; clicking a
   row sets `theme`.

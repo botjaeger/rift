@@ -4,15 +4,15 @@
 
 | Path | Purpose |
 |---|---|
-| `~/.config/runway/config.toml` | User configuration (hot-reloaded < 300 ms, including external edits) |
-| `~/.config/runway/themes/*.toml` | User themes, Runway TOML (file stem = theme name) |
-| `~/.config/runway/themes/*.yaml` · `*.yml` | User themes, Warp YAML (same directory, same naming) |
-| `~/.config/runway/workflows/*.yaml` | User workflows (Warp-compatible YAML) |
-| `~/.config/runway/launch_configs/*.yaml` · `*.yml` | Launch configurations (Warp-compatible YAML) |
-| `~/.local/share/runway/` | Materialized shell-integration files |
-| `~/.local/share/runway/session.toml` | Saved session (tabs + cwds), written atomically |
+| `~/.config/shift/config.toml` | User configuration (hot-reloaded < 300 ms, including external edits) |
+| `~/.config/shift/themes/*.toml` | User themes, Shift TOML (file stem = theme name) |
+| `~/.config/shift/themes/*.yaml` · `*.yml` | User themes, Warp YAML (same directory, same naming) |
+| `~/.config/shift/workflows/*.yaml` | User workflows (Warp-compatible YAML) |
+| `~/.config/shift/launch_configs/*.yaml` · `*.yml` | Launch configurations (Warp-compatible YAML) |
+| `~/.local/share/shift/` | Materialized shell-integration files |
+| `~/.local/share/shift/session.toml` | Saved session (tabs + cwds), written atomically |
 
-`XDG_CONFIG_HOME` is honored for the config root.
+`XDG_CONFIG_HOME` and `XDG_DATA_HOME` are honored. Existing `runway` config and data directories remain active when the corresponding `shift` directory does not exist; move them to `shift` when you want the new paths.
 
 ## config.toml reference
 
@@ -25,7 +25,7 @@ font_size     = 13.0              # settings stepper clamps 8–28 (⌘= / ⌘- 
 line_height   = 1.65              # multiplier, clamped 1.0–2.2 when applied
 cursor_style  = "block"           # block | bar | underline
 cursor_blink  = true              # 1.1s steps blink
-theme         = "dark-default"    # builtin, or a stem in ~/.config/runway/themes
+theme         = "dark-default"    # builtin, or a stem in ~/.config/shift/themes
 theme_light   = "light-default"   # theme used while the OS is light (needs sync_os_theme)
 sync_os_theme = false             # follow the OS appearance: theme = dark, theme_light = light
 scrollback    = 10000             # lines kept per pane (stepper: 1000–1000000)
@@ -35,7 +35,7 @@ window_opacity = 1.0              # background opacity, clamped 0.3–1.0 (overl
 ligatures     = true              # JetBrains Mono ligatures + contextual alternates
 restore_session = true            # reopen last session's tabs + cwds on launch
 input_position = "bottom"         # bottom | top — where the command editor sits
-prompt        = "runway"          # runway = context row + ❯
+prompt        = "shift"          # shift = context row + ❯
                                   # shell   = keep the shell's own PS1 on screen, editor shows ›
 copy_on_select = false            # copy the selection on mouse release
 autosuggestions = true            # inline ghost text after the cursor
@@ -78,11 +78,11 @@ applies external edits without restarting.
 Built-ins, in picker order: `dark-default`, `light-default`,
 `catppuccin-mocha`, `tokyo-night`.
 
-A user theme is `~/.config/runway/themes/<name>.{toml,yaml,yml}`, referenced by
+A user theme is `~/.config/shift/themes/<name>.{toml,yaml,yml}`, referenced by
 file stem (`toml` wins if several exist). It appears in Settings → Themes and
 the palette's theme switcher.
 
-### Runway TOML themes
+### Shift TOML themes
 
 A theme TOML defines the full token set: background/surface/border colors,
 text tiers (`fg`, `text_bright`, `text_ui`, `text_muted`, `text_dim`), accent,
@@ -93,7 +93,7 @@ success/warning/error, cursor, selection, search highlight colors, the
 ### Warp YAML themes
 
 `.yaml` / `.yml` files use Warp's schema unchanged — drop a Warp theme in and
-it works. Warp carries only the base colors; every other Runway token is
+it works. Warp carries only the base colors; every other Shift token is
 derived from them (chrome/gutter sink away from the text, surfaces lift toward
 it, the hairline border is a low-alpha overlay).
 
@@ -123,7 +123,7 @@ Either theme format can name a wallpaper, drawn under every layer:
 
 ```toml
 [background_image]
-path = "wall.png"   # relative → resolved against ~/.config/runway/themes
+path = "wall.png"   # relative → resolved against ~/.config/shift/themes
 opacity = 0.5       # TOML: 0–1 (default 1.0). Warp YAML: 0–100.
 ```
 
@@ -132,7 +132,7 @@ Pair it with `window_opacity` for a translucent window over the desktop.
 ## Launch configurations
 
 Warp's launch-configuration YAML, read from
-`~/.config/runway/launch_configs/*.yaml` (`.yml` too) — Warp's own files from
+`~/.config/shift/launch_configs/*.yaml` (`.yml` too) — Warp's own files from
 `~/.warp/launch_configurations/` drop in unchanged.
 
 ```yaml
@@ -163,7 +163,7 @@ configurations are re-scanned when the palette opens.
 
 Semantics:
 
-- Runway has a single window, so **every window's tabs are concatenated** in
+- Shift has a single window, so **every window's tabs are concatenated** in
   document order into one flat tab list rather than taking `windows[0]`.
   `active_tab_index` is resolved against that flat list and clamped.
 - `cwd` gets `~` / `~/…` expanded via `$HOME`; a YAML-null `cwd: ~` means the
@@ -184,7 +184,7 @@ Semantics:
   `audible` = a sound (`afplay` on macOS, `paplay` / `canberra-gtk-play` on
   Linux), `both`, or `none`. A bell in a background tab also lights its
   activity dot.
-- `RUNWAY_NO_NOTIFY=1` suppresses both (notifications are logged instead) —
+- `SHIFT_NO_NOTIFY=1` suppresses both (notifications are logged instead) —
   useful for scripted runs.
 
 ## Keybinding overrides
@@ -218,8 +218,8 @@ Injected automatically at spawn; users' own rc files are always sourced.
 
 - Emits OSC 133 A/B/C/D (block boundaries + exit codes) and OSC 7 (cwd).
 - Environment: `TERM=xterm-256color`, `COLORTERM=truecolor`,
-  `TERM_PROGRAM=runway`.
+  `TERM_PROGRAM=shift`.
 - Coexists with iTerm2/other integrations that emit their own OSC 133 —
   duplicate markers are tolerated.
 - To opt out, unset the injection (zsh: launch with a custom `shell` pointing
-  at a wrapper) — Runway then behaves as a plain terminal without blocks.
+  at a wrapper) — Shift then behaves as a plain terminal without blocks.

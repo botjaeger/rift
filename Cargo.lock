@@ -2256,63 +2256,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
 
 [[package]]
-name = "runway-app"
-version = "0.1.0"
-dependencies = [
- "arboard",
- "env_logger",
- "global-hotkey",
- "log",
- "muda",
- "nucleo-matcher",
- "objc2 0.6.4",
- "objc2-app-kit 0.3.2",
- "png",
- "regex",
- "runway-core",
- "runway-pty",
- "runway-renderer",
- "wgpu",
- "winit",
-]
-
-[[package]]
-name = "runway-core"
-version = "0.1.0"
-dependencies = [
- "arc-swap",
- "git2",
- "log",
- "notify",
- "serde",
- "serde_yaml_ng",
- "toml",
-]
-
-[[package]]
-name = "runway-pty"
-version = "0.1.0"
-dependencies = [
- "alacritty_terminal",
- "libc",
- "log",
- "runway-core",
-]
-
-[[package]]
-name = "runway-renderer"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "glyphon",
- "image",
- "log",
- "pollster",
- "runway-core",
- "wgpu",
-]
-
-[[package]]
 name = "rustc-hash"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2478,6 +2421,63 @@ dependencies = [
  "ryu",
  "serde",
  "unsafe-libyaml",
+]
+
+[[package]]
+name = "shift-app"
+version = "0.1.0"
+dependencies = [
+ "arboard",
+ "env_logger",
+ "global-hotkey",
+ "log",
+ "muda",
+ "nucleo-matcher",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "png",
+ "regex",
+ "shift-core",
+ "shift-pty",
+ "shift-renderer",
+ "wgpu",
+ "winit",
+]
+
+[[package]]
+name = "shift-core"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "git2",
+ "log",
+ "notify",
+ "serde",
+ "serde_yaml_ng",
+ "toml",
+]
+
+[[package]]
+name = "shift-pty"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "libc",
+ "log",
+ "shift-core",
+]
+
+[[package]]
+name = "shift-renderer"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "glyphon",
+ "image",
+ "log",
+ "pollster",
+ "shift-core",
+ "wgpu",
 ]
 
 [[package]]

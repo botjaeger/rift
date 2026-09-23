@@ -1,10 +1,10 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/runway-core",
-    "crates/runway-pty",
-    "crates/runway-renderer",
-    "crates/runway-app",
+    "crates/shift-core",
+    "crates/shift-pty",
+    "crates/shift-renderer",
+    "crates/shift-app",
 ]
 
 [workspace.package]
@@ -13,9 +13,9 @@ edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
-runway-core = { path = "crates/runway-core" }
-runway-pty = { path = "crates/runway-pty" }
-runway-renderer = { path = "crates/runway-renderer" }
+shift-core = { path = "crates/shift-core" }
+shift-pty = { path = "crates/shift-pty" }
+shift-renderer = { path = "crates/shift-renderer" }
 
 # gfx — wgpu pinned to the major glyphon supports
 wgpu = "29"

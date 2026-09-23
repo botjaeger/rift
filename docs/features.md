@@ -115,17 +115,17 @@ turns the dropdown off (the ghost text and Tab still work).
 ## Workflows
 
 Warp-compatible YAML (`name`, `command`, `tags`, `arguments`) loaded from
-embedded samples plus `~/.config/runway/workflows/`. ⌃⇧R opens the picker;
+embedded samples plus `~/.config/shift/workflows/`. ⌃⇧R opens the picker;
 insertion activates `{{placeholder}}` spans — Tab cycles, typing replaces.
 Warp's community workflow files drop in unchanged.
 
 ## Launch configurations
 
-Warp-compatible YAML in `~/.config/runway/launch_configs/*.yaml` — a named set
+Warp-compatible YAML in `~/.config/shift/launch_configs/*.yaml` — a named set
 of tabs, each with a (possibly nested) split layout, cwds and startup commands.
 ⌘P → `Launch configuration: <name>` opens one: tabs are appended, splits are
 rebuilt, and each pane's `commands[].exec` are sent **at that pane's first
-prompt**. Runway has one window, so all windows' tabs are concatenated in
+prompt**. Shift has one window, so all windows' tabs are concatenated in
 document order; `~` in a `cwd` is expanded and a non-existent directory is
 ignored. Warp's own files drop in unchanged.
 
@@ -133,8 +133,8 @@ ignored. Warp's own files drop in unchanged.
 
 - **Themes**: four builtins (`dark-default`, `light-default`,
   `catppuccin-mocha`, `tokyo-night`) plus user themes in
-  `~/.config/runway/themes/` as Runway TOML **or Warp YAML** — a Warp theme
-  file works unchanged; Runway derives its full token set from Warp's base
+  `~/.config/shift/themes/` as Shift TOML **or Warp YAML** — a Warp theme
+  file works unchanged; Shift derives its full token set from Warp's base
   colors.
 - **OS theme sync** (`sync_os_theme`): follow the system appearance —
   `theme` while dark, `theme_light` while light — switching live when the OS
@@ -157,7 +157,7 @@ ignored. Warp's own files drop in unchanged.
 - **Bell** (`bell`): `visual` (120 ms full-window flash), `audible`
   (`afplay` / `paplay` / `canberra-gtk-play`), `both`, or `none`. A bell in a
   background tab also raises its activity dot.
-- `RUNWAY_NO_NOTIFY=1` suppresses both.
+- `SHIFT_NO_NOTIFY=1` suppresses both.
 
 ## Tabs, panes, session
 
@@ -167,22 +167,22 @@ ignored. Warp's own files drop in unchanged.
   (⌃⌘arrows), drag resize, zoom toggle (⇧⌘⏎), close (⌃⇧W/⌘W — last pane closes
   the tab, last tab exits).
 - **Session restore**: tab layout + cwds persisted atomically to
-  `~/.local/share/runway/session.toml` on every structural change; reopened on
+  `~/.local/share/shift/session.toml` on every structural change; reopened on
   launch when `restore_session = true`.
 
 ## Shell integration
 
-Materialized to `~/.local/share/runway/` on first spawn, injected
+Materialized to `~/.local/share/shift/` on first spawn, injected
 automatically:
 
 - **zsh** — ZDOTDIR shim that sources the user's real config first.
 - **bash** — spawned with `--rcfile <data dir>/bashrc`, a shim that replays
   bash's own startup files (profile files on macOS, `~/.bashrc` on Linux),
-  then sources `runway.bash`.
-- **fish** — `runway.fish` auto-loaded via a `vendor_conf.d` XDG_DATA_DIRS
+  then sources `shift.bash`.
+- **fish** — `shift.fish` auto-loaded via a `vendor_conf.d` XDG_DATA_DIRS
   append.
 
-Sets `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=runway`;
+Sets `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=shift`;
 emits OSC 133 (blocks) and OSC 7 (cwd tracking).
 
 ## Rendering & performance
@@ -222,11 +222,11 @@ palette.
 ## Global hotkey
 
 `global_hotkey = "alt+space"` registers a system-wide shortcut (macOS; X11 on
-Linux): from any app it brings Runway forward, and when Runway is already the
+Linux): from any app it brings Shift forward, and when Shift is already the
 focused app it hides it. Scripted runs and secondary windows never register
 one.
 
 ## Deferred (by decision, not gaps)
 
 SSH warpify, multi-cursor editing, vertical tabs, accessibility tree,
-`runway://` URI scheme, Warp Drive / cloud / teams, Windows.
+`shift://` URI scheme, Warp Drive / cloud / teams, Windows.

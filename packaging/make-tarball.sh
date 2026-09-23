@@ -8,7 +8,7 @@ cd "$(dirname "$0")/.."
 . packaging/lib.sh
 
 TRIPLE=""
-TARGET_DIR="$(runway_default_target_dir)"
+TARGET_DIR="$(shift_default_target_dir)"
 BUILD=1
 
 while [ $# -gt 0 ]; do
@@ -17,11 +17,11 @@ while [ $# -gt 0 ]; do
         --target-dir) TARGET_DIR="${2:?--target-dir needs a path}"; shift 2 ;;
         --no-build)   BUILD=0; shift ;;
         -h|--help)    sed -n '2,5p' "$0"; exit 0 ;;
-        *)            runway_die "unknown option: $1" ;;
+        *)            shift_die "unknown option: $1" ;;
     esac
 done
 
-VERSION="$(runway_version)"
+VERSION="$(shift_version)"
 
 case "$(uname -s)" in
     Darwin) OS=macos ;;
@@ -35,20 +35,20 @@ if [ "$BUILD" -eq 1 ]; then
 fi
 
 if [ -n "$TRIPLE" ]; then
-    BIN="$TARGET_DIR/$TRIPLE/release/runway"
+    BIN="$TARGET_DIR/$TRIPLE/release/shift-terminal"
 else
-    BIN="$TARGET_DIR/release/runway"
+    BIN="$TARGET_DIR/release/shift-terminal"
 fi
-[ -x "$BIN" ] || runway_die "no runway binary at $BIN"
+[ -x "$BIN" ] || shift_die "no shift-terminal binary at $BIN"
 
-NAME="runway-$VERSION-$OS-$ARCH"
+NAME="shift-terminal-$VERSION-$OS-$ARCH"
 STAGE="$TARGET_DIR/tarball/$NAME"
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
 
-install -m 0755 "$BIN" "$STAGE/runway"
-install -m 0644 packaging/runway.desktop "$STAGE/runway.desktop"
-install -m 0644 assets/icon/hicolor/256x256/apps/runway.png "$STAGE/runway.png"
+install -m 0755 "$BIN" "$STAGE/shift-terminal"
+install -m 0644 packaging/shift.desktop "$STAGE/shift.desktop"
+install -m 0644 assets/icon/hicolor/256x256/apps/shift.png "$STAGE/shift.png"
 cp -R docs "$STAGE/docs"
 if [ -f README.md ]; then
     install -m 0644 README.md "$STAGE/README.md"

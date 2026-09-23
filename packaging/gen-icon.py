@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Generate the Runway app icon (macOS .icns / .iconset, Linux hicolor PNGs).
+"""Generate the Shift app icon (macOS .icns / .iconset, Linux hicolor PNGs).
 
-Palette is read from crates/runway-core/src/theme/dark-default.toml (read-only)
+Palette is read from crates/shift-core/src/theme/dark-default.toml (read-only)
 so the icon accent always matches the shipped default theme.
 
 Usage:  python3 packaging/gen-icon.py
 Outputs (all under assets/icon/):
-  runway-1024.png
-  runway.iconset/icon_{16,32,128,256,512}x{..}.png (+ @2x)
-  runway.icns                       (macOS only, via iconutil)
-  hicolor/<size>x<size>/apps/runway.png
+  shift-1024.png
+  shift.iconset/icon_{16,32,128,256,512}x{..}.png (+ @2x)
+  shift.icns                       (macOS only, via iconutil)
+  hicolor/<size>x<size>/apps/shift.png
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 ROOT = Path(__file__).resolve().parent.parent
-THEME = ROOT / "crates" / "runway-core" / "src" / "theme" / "dark-default.toml"
+THEME = ROOT / "crates" / "shift-core" / "src" / "theme" / "dark-default.toml"
 OUT = ROOT / "assets" / "icon"
 
 # Canvas is rendered at SS x the final size and downsampled — cheap antialiasing
@@ -162,7 +162,7 @@ def render(size: int, accent: tuple[int, int, int]) -> Image.Image:
     else:
         draw_chevron_polygon(d, cx, cy, glyph_h, (*accent, 255))
 
-    # --- runway lights: three faint accent dashes ----------------------------
+    # --- prompt markers: three faint accent dashes ----------------------------
     dash_y = round(s * 0.735)
     dash_h = max(1, round(s * 0.030))
     gap = round(s * 0.045)
@@ -205,7 +205,7 @@ def main() -> int:
 
     OUT.mkdir(parents=True, exist_ok=True)
     master = render(SIZE, accent)
-    master_path = OUT / "runway-1024.png"
+    master_path = OUT / "shift-1024.png"
     master.save(master_path)
     print("wrote", master_path.relative_to(ROOT))
 
@@ -217,7 +217,7 @@ def main() -> int:
             (px, px), Image.Resampling.LANCZOS
         )
 
-    iconset = OUT / "runway.iconset"
+    iconset = OUT / "shift.iconset"
     if iconset.exists():
         shutil.rmtree(iconset)
     iconset.mkdir(parents=True)
@@ -229,17 +229,17 @@ def main() -> int:
     for px in HICOLOR_SIZES:
         p = OUT / "hicolor" / f"{px}x{px}" / "apps"
         p.mkdir(parents=True, exist_ok=True)
-        scaled(px).save(p / "runway.png")
+        scaled(px).save(p / "shift.png")
     print("wrote", (OUT / "hicolor").relative_to(ROOT), f"({len(HICOLOR_SIZES)} sizes)")
 
-    icns = OUT / "runway.icns"
+    icns = OUT / "shift.icns"
     if sys.platform == "darwin" and shutil.which("iconutil"):
         subprocess.run(
             ["iconutil", "-c", "icns", str(iconset), "-o", str(icns)], check=True
         )
         print("wrote", icns.relative_to(ROOT))
     else:
-        print("skipped runway.icns (iconutil is macOS-only)")
+        print("skipped shift.icns (iconutil is macOS-only)")
     return 0
 
 

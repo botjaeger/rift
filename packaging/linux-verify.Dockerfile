@@ -1,20 +1,20 @@
-# Headless Linux verification image for Runway.
+# Headless Linux verification image for Shift.
 #
-# Builds the release binary and drives it through `runway --script` with no
+# Builds the release binary and drives it through `shift-terminal --script` with no
 # GPU and no display: Xvfb provides the X server, Mesa's lavapipe provides a
 # software Vulkan device, so `shot` still goes through the real wgpu pipeline.
 #
-#   docker build -t runway-linux-verify -f packaging/linux-verify.Dockerfile packaging
+#   docker build -t shift-linux-verify -f packaging/linux-verify.Dockerfile packaging
 #   docker run --rm \
 #     -v "$PWD:/src" -v "$PWD/target/linux-out:/out" \
 #     -e CARGO_TARGET_DIR=/src/target/linux-docker \
 #     -e XDG_RUNTIME_DIR=/tmp/xdg \
-#     runway-linux-verify bash -c '
+#     shift-linux-verify bash -c '
 #       cargo build --release --locked --manifest-path /src/Cargo.toml &&
 #       mkdir -p /tmp/xdg && chmod 700 /tmp/xdg &&
 #       xvfb-run -s "-screen 0 1400x900x24" env \
-#         RUNWAY_NO_NOTIFY=1 RUST_LOG=info WGPU_BACKEND=vulkan \
-#         /src/target/linux-docker/release/runway --script /src/script.txt'
+#         SHIFT_NO_NOTIFY=1 RUST_LOG=info WGPU_BACKEND=vulkan \
+#         /src/target/linux-docker/release/shift-terminal --script /src/script.txt'
 #
 # Blocks only appear when the shell emits OSC 133: zsh (ZDOTDIR shim) and
 # bash (`--rcfile` shim) both work out of the box
@@ -35,4 +35,4 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     && rm -rf /var/lib/apt/lists/*
 
 ENV WINIT_UNIX_BACKEND=x11 \
-    RUNWAY_NO_NOTIFY=1
+    SHIFT_NO_NOTIFY=1

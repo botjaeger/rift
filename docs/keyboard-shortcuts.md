@@ -157,7 +157,7 @@ Esc close · Enter run selected · ↑/↓ move selection · type to filter.
 
 ## Customization
 
-`~/.config/runway/config.toml`:
+`~/.config/shift/config.toml`:
 
 ```toml
 [keybindings]

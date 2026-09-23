@@ -1,9 +1,9 @@
-# Runway
+# Shift
 
 A GPU-accelerated terminal emulator with block-based output, for macOS and Linux.
 Rust · winit · wgpu · glyphon · alacritty_terminal.
 
-![Runway](assets/screenshot.png)
+![Shift](assets/screenshot.png)
 
 ## Features
 
@@ -22,13 +22,13 @@ Rust · winit · wgpu · glyphon · alacritty_terminal.
   with resolved custom-shortcut chips, settings, themes, launch configurations
   and shell history.
 - **Settings** — five-page overlay (General, Appearance, Features,
-  Keybindings, Themes) writing `~/.config/runway/config.toml`, hot-reloaded
+  Keybindings, Themes) writing `~/.config/shift/config.toml`, hot-reloaded
   (arc-swap style, <300 ms), plus `⌃⇧F` search, four built-in themes (Dark
   Default, Light Default, Catppuccin Mocha, Tokyo Night), user themes in
-  `~/.config/runway/themes/` as TOML **or Warp YAML**, OS light/dark sync,
+  `~/.config/shift/themes/` as TOML **or Warp YAML**, OS light/dark sync,
   window opacity and theme background images.
 - **Launch configurations** — Warp-compatible YAML in
-  `~/.config/runway/launch_configs/`: tabs, nested splits, working directories
+  `~/.config/shift/launch_configs/`: tabs, nested splits, working directories
   and startup commands, opened from the palette.
 - **Selection & links** — drag/double(semantic)/triple(line) select with
   `⌘C` copy, optional copy-on-select, `⌘`-click opens URLs.
@@ -39,7 +39,7 @@ Rust · winit · wgpu · glyphon · alacritty_terminal.
   `⌃⇧↑/↓` jumps, sticky command header for tall outputs.
 - **History & workflows** — `⌃R` fuzzy shell-history search (imports
   `~/.zsh_history`), `⌃⇧R` Warp-compatible YAML workflows from
-  `~/.config/runway/workflows/` with Tab-cycled `{{placeholders}}`,
+  `~/.config/shift/workflows/` with Tab-cycled `{{placeholders}}`,
   `⌃→` accepts ghost suggestions word-by-word.
 - **Sessions & shells** — tabs and working directories restored on relaunch
   (`restore_session = false` to disable); zsh, bash and fish all integrate
@@ -49,22 +49,22 @@ Rust · winit · wgpu · glyphon · alacritty_terminal.
 
 Prebuilt packages are attached to every [release](../../releases).
 
-**macOS** — download `Runway-<version>-<arch>.dmg` (`arm64` for Apple silicon,
-`x86_64` for Intel), open it and drag Runway to Applications. The bundle is
+**macOS** — download `Shift-<version>-<arch>.dmg` (`arm64` for Apple silicon,
+`x86_64` for Intel), open it and drag Shift to Applications. The bundle is
 ad-hoc signed, so the first launch needs *right-click → Open* once.
 
-**Debian / Ubuntu** — download `runway_<version>_amd64.deb`:
+**Debian / Ubuntu** — download `shift-terminal_<version>_amd64.deb`:
 
 ```sh
-sudo dpkg -i runway_<version>_amd64.deb
+sudo dpkg -i shift-terminal_<version>_amd64.deb
 sudo apt-get install -f        # only if dpkg reports missing dependencies
 ```
 
-**AppImage** (any distro) — download `Runway-<version>-x86_64.AppImage`:
+**AppImage** (any distro) — download `Shift-<version>-x86_64.AppImage`:
 
 ```sh
-chmod +x Runway-<version>-x86_64.AppImage
-./Runway-<version>-x86_64.AppImage
+chmod +x Shift-<version>-x86_64.AppImage
+./Shift-<version>-x86_64.AppImage
 ```
 
 AppImages mount themselves with FUSE 2, which Ubuntu 24.04 no longer installs
@@ -72,22 +72,23 @@ by default. If you get `Cannot mount AppImage, please check your FUSE setup`,
 either `sudo apt install libfuse2t64` or run it without FUSE:
 
 ```sh
-./Runway-<version>-x86_64.AppImage --appimage-extract-and-run
+./Shift-<version>-x86_64.AppImage --appimage-extract-and-run
 ```
 
-**Tarball** — `runway-<version>-<os>-<arch>.tar.gz` holds the bare binary,
-the `.desktop` file, the icon and `docs/`; copy `runway` onto your `PATH`.
+**Tarball** — `shift-terminal-<version>-<os>-<arch>.tar.gz` holds the bare binary,
+the `.desktop` file, the icon and `docs/`; copy `shift-terminal` onto your `PATH`.
+The executable uses `shift-terminal` because `shift` is a shell builtin.
 
 ## Build
 
 ```sh
-cargo build --release          # both OSes; single binary target/release/runway
-packaging/make-app.sh          # macOS: build target/Runway.app
+cargo build --release          # both OSes; single binary target/release/shift-terminal
+packaging/make-app.sh          # macOS: build target/Shift.app
 ```
 
 Linux build deps: `libxkbcommon-dev libwayland-dev libxcb1-dev
 libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev pkg-config`.
-Install the binary plus `packaging/runway.desktop` for a launcher entry.
+Install the binary plus `packaging/shift.desktop` for a launcher entry.
 
 ### Build packages locally
 
@@ -97,18 +98,18 @@ honours `CARGO_TARGET_DIR`, and prints the artifact path it produced.
 | Script | Platform | Produces |
 |---|---|---|
 | `packaging/gen-icon.py` | any | `assets/icon/` — 1024 PNG, `.iconset`, `.icns`, hicolor PNGs |
-| `packaging/make-app.sh` | macOS | `target/Runway.app` (ad-hoc signed) |
-| `packaging/make-dmg.sh` | macOS | `target/Runway-<version>-<arch>.dmg` |
-| `packaging/make-deb.sh` | Linux | `target/runway_<version>_<arch>.deb` |
-| `packaging/make-appimage.sh` | Linux | `target/Runway-<version>-<arch>.AppImage` |
-| `packaging/make-tarball.sh` | both | `target/runway-<version>-<os>-<arch>.tar.gz` |
+| `packaging/make-app.sh` | macOS | `target/Shift.app` (ad-hoc signed) |
+| `packaging/make-dmg.sh` | macOS | `target/Shift-<version>-<arch>.dmg` |
+| `packaging/make-deb.sh` | Linux | `target/shift-terminal_<version>_<arch>.deb` |
+| `packaging/make-appimage.sh` | Linux | `target/Shift-<version>-<arch>.AppImage` |
+| `packaging/make-tarball.sh` | both | `target/shift-terminal-<version>-<os>-<arch>.tar.gz` |
 
 ```sh
 packaging/make-app.sh && packaging/make-dmg.sh          # macOS
 packaging/make-deb.sh && packaging/make-appimage.sh     # Linux
 ```
 
-`make-dmg.sh` packages an existing `target/Runway.app`, so run `make-app.sh`
+`make-dmg.sh` packages an existing `target/Shift.app`, so run `make-app.sh`
 first. `make-appimage.sh` downloads `appimagetool` into the target dir on first
 run. The icon is committed, so `gen-icon.py` only needs re-running when the
 default theme's accent changes.
@@ -120,14 +121,14 @@ the artifacts as a GitHub Release.
 
 Everything is injected at spawn — your own rc files are always sourced first:
 
-- **zsh** — a `ZDOTDIR` shim sources your real config, then the Runway hooks.
-- **bash** — spawned with `--rcfile ~/.local/share/runway/bashrc`, a shim that
+- **zsh** — a `ZDOTDIR` shim sources your real config, then the Shift hooks.
+- **bash** — spawned with `--rcfile ~/.local/share/shift/bashrc`, a shim that
   replays bash's own startup order (profile files on macOS, `~/.bashrc` on
-  Linux) and then sources `runway.bash`.
-- **fish** — `runway.fish` is picked up from a `vendor_conf.d` directory
+  Linux) and then sources `shift.bash`.
+- **fish** — `shift.fish` is picked up from a `vendor_conf.d` directory
   appended to `XDG_DATA_DIRS`.
 
-Without integration Runway degrades gracefully to a classic terminal
+Without integration Shift degrades gracefully to a classic terminal
 (no blocks, shell-side prompt and line editing).
 
 ## Default keybindings
@@ -155,7 +156,7 @@ new_tab = "cmd+n"
 
 ## Config
 
-`~/.config/runway/config.toml`, hot-reloaded on save:
+`~/.config/shift/config.toml`, hot-reloaded on save:
 
 ```toml
 font_size = 13.0
@@ -169,7 +170,7 @@ window_opacity = 1.0      # 0.3–1.0
 scrollback = 10000
 ligatures = true
 input_position = "bottom" # bottom | top
-prompt = "runway"         # runway | shell (keep your own PS1)
+prompt = "shift"         # shift | shell (keep your own PS1)
 vim_mode = false
 autocomplete_pairs = true # quotes, brackets and braces
 copy_on_select = false
@@ -181,7 +182,7 @@ notification/bell details: [docs/configuration.md](docs/configuration.md).
 
 ## Scripted verification
 
-`runway --script <file>` drives the real app with synthesized input — every
+`shift-terminal --script <file>` drives the real app with synthesized input — every
 step goes through the same key/mouse routing a user's events do, and `shot`
 captures the frame by offscreen readback, so nothing depends on screen-capture
 or accessibility permissions:
@@ -197,15 +198,15 @@ quit
 
 The full command list (`key`, `click`, `dblclick`, `rclick`, `drag`, `scroll`,
 `move`, `resize`, `focus`, `sh`, …) is the module doc comment at the top of
-`crates/runway-app/src/script.rs`.
+`crates/shift-app/src/script.rs`.
 
-`runway --version` prints the version; `runway --help` the usage line.
+`shift-terminal --version` prints the version; `shift-terminal --help` the usage line.
 
 ## Workspace layout
 
-- `runway-core` — config, themes, keymap, OSC 133 scanner, block model,
+- `shift-core` — config, themes, keymap, OSC 133 scanner, block model,
   tokenizer, completions, git worker (no gfx deps, fully unit-tested)
-- `runway-pty` — PTY sessions, reader threads, absolute-line tracking
-- `runway-renderer` — wgpu SDF quad pipeline + glyphon text engine
-- `runway-app` — winit app, views (terminal, tabs, editor, palette,
+- `shift-pty` — PTY sessions, reader threads, absolute-line tracking
+- `shift-renderer` — wgpu SDF quad pipeline + glyphon text engine
+- `shift-app` — winit app, views (terminal, tabs, editor, palette,
   completions, settings, search)

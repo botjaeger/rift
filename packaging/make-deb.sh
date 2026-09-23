@@ -8,7 +8,7 @@ cd "$(dirname "$0")/.."
 . packaging/lib.sh
 
 TRIPLE=""
-TARGET_DIR="$(runway_default_target_dir)"
+TARGET_DIR="$(shift_default_target_dir)"
 BUILD=1
 
 while [ $# -gt 0 ]; do
@@ -17,13 +17,13 @@ while [ $# -gt 0 ]; do
         --target-dir) TARGET_DIR="${2:?--target-dir needs a path}"; shift 2 ;;
         --no-build)   BUILD=0; shift ;;
         -h|--help)    sed -n '2,5p' "$0"; exit 0 ;;
-        *)            runway_die "unknown option: $1" ;;
+        *)            shift_die "unknown option: $1" ;;
     esac
 done
 
-command -v dpkg-deb >/dev/null || runway_die "dpkg-deb not found (apt-get install dpkg-dev)"
+command -v dpkg-deb >/dev/null || shift_die "dpkg-deb not found (apt-get install dpkg-dev)"
 
-VERSION="$(runway_version)"
+VERSION="$(shift_version)"
 ARCH="$(dpkg --print-architecture)"
 
 if [ "$BUILD" -eq 1 ]; then
@@ -31,21 +31,21 @@ if [ "$BUILD" -eq 1 ]; then
 fi
 
 if [ -n "$TRIPLE" ]; then
-    BIN="$TARGET_DIR/$TRIPLE/release/runway"
+    BIN="$TARGET_DIR/$TRIPLE/release/shift-terminal"
 else
-    BIN="$TARGET_DIR/release/runway"
+    BIN="$TARGET_DIR/release/shift-terminal"
 fi
-[ -x "$BIN" ] || runway_die "no runway binary at $BIN"
+[ -x "$BIN" ] || shift_die "no shift-terminal binary at $BIN"
 
 # Runtime dependencies, derived from the release binary itself. Note that
 # `ldd` alone is NOT enough here: winit and wgpu dlopen() their windowing and
 # GPU libraries by SONAME, so almost nothing shows up as a load-time link.
 #
-#   readelf -d target/release/runway | grep NEEDED
+#   readelf -d target/release/shift-terminal | grep NEEDED
 #     libz.so.1  libgcc_s.so.1  libm.so.6  libc.so.6
 #         -> zlib1g, libgcc-s1, libc6      (libm is part of libc6)
 #
-#   strings -a target/release/runway | grep -oE 'lib[A-Za-z0-9_+-]+\.so(\.[0-9]+)*'
+#   strings -a target/release/shift-terminal | grep -oE 'lib[A-Za-z0-9_+-]+\.so(\.[0-9]+)*'
 #     libxkbcommon.so.0      -> libxkbcommon0       (keymap handling)
 #     libxkbcommon-x11.so.0  -> libxkbcommon-x11-0  (X11 keymap bridge)
 #     libwayland-client.so.0 -> libwayland-client0
@@ -71,32 +71,32 @@ DEPENDS="libc6, libgcc-s1, zlib1g, libxkbcommon0, libxkbcommon-x11-0, libwayland
 # actually render.
 RECOMMENDS="libvulkan1 | libegl1"
 
-PKGROOT="$TARGET_DIR/deb/runway_${VERSION}_${ARCH}"
+PKGROOT="$TARGET_DIR/deb/shift-terminal_${VERSION}_${ARCH}"
 rm -rf "$PKGROOT"
 mkdir -p \
     "$PKGROOT/DEBIAN" \
     "$PKGROOT/usr/bin" \
     "$PKGROOT/usr/share/applications" \
-    "$PKGROOT/usr/share/doc/runway"
+    "$PKGROOT/usr/share/doc/shift-terminal"
 
-install -m 0755 "$BIN" "$PKGROOT/usr/bin/runway"
-command -v strip >/dev/null && strip "$PKGROOT/usr/bin/runway" || true
+install -m 0755 "$BIN" "$PKGROOT/usr/bin/shift-terminal"
+command -v strip >/dev/null && strip "$PKGROOT/usr/bin/shift-terminal" || true
 
-install -m 0644 packaging/runway.desktop "$PKGROOT/usr/share/applications/runway.desktop"
+install -m 0644 packaging/shift.desktop "$PKGROOT/usr/share/applications/shift.desktop"
 
 for dir in assets/icon/hicolor/*/; do
     size="$(basename "$dir")"
-    install -D -m 0644 "$dir/apps/runway.png" \
-        "$PKGROOT/usr/share/icons/hicolor/$size/apps/runway.png"
+    install -D -m 0644 "$dir/apps/shift.png" \
+        "$PKGROOT/usr/share/icons/hicolor/$size/apps/shift.png"
 done
 
-cat > "$PKGROOT/usr/share/doc/runway/copyright" <<'COPYRIGHT'
+cat > "$PKGROOT/usr/share/doc/shift-terminal/copyright" <<'COPYRIGHT'
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
-Upstream-Name: runway
+Upstream-Name: shift-terminal
 Source: https://github.com/botjaeger/runway
 
 Files: *
-Copyright: Runway contributors
+Copyright: Shift contributors
 License: MIT
 
 License: MIT
@@ -122,18 +122,18 @@ COPYRIGHT
 INSTALLED_SIZE="$(du -ks "$PKGROOT" | cut -f1)"
 
 cat > "$PKGROOT/DEBIAN/control" <<CONTROL
-Package: runway
+Package: shift-terminal
 Version: ${VERSION}
 Section: utils
 Priority: optional
 Architecture: ${ARCH}
-Maintainer: Runway contributors <noreply@github.com>
+Maintainer: Shift contributors <noreply@github.com>
 Installed-Size: ${INSTALLED_SIZE}
 Depends: ${DEPENDS}
 Recommends: ${RECOMMENDS}
 Homepage: https://github.com/botjaeger/runway
 Description: GPU-accelerated terminal emulator with block-based output
- Runway is a terminal emulator built on wgpu and winit. Every command is a
+ Shift is a terminal emulator built on wgpu and winit. Every command is a
  bounded block (via OSC 133 shell integration) with an exit-code coloured
  border, duration, collapse and one-click output copy.
  .
@@ -142,7 +142,7 @@ Description: GPU-accelerated terminal emulator with block-based output
  workflows and a hot-reloaded TOML configuration.
 CONTROL
 
-DEB="$TARGET_DIR/runway_${VERSION}_${ARCH}.deb"
+DEB="$TARGET_DIR/shift-terminal_${VERSION}_${ARCH}.deb"
 rm -f "$DEB"
 dpkg-deb --root-owner-group --build "$PKGROOT" "$DEB"
 

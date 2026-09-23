@@ -1,0 +1,18 @@
+# Shift bash shim (passed as `bash --rcfile`): replay bash's own startup
+# order for this platform, then layer the Shift integration on top.
+if [[ "$(uname -s)" == "Darwin" ]]; then
+    # macOS terminals run login shells: /etc/profile + the first profile file
+    [[ -f /etc/profile ]] && source /etc/profile
+    for _shift_f in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
+        if [[ -f "$_shift_f" ]]; then
+            source "$_shift_f"
+            break
+        fi
+    done
+    unset _shift_f
+else
+    # Linux terminals run interactive non-login shells: system + user rc
+    [[ -f /etc/bash.bashrc ]] && source /etc/bash.bashrc
+    [[ -f "$HOME/.bashrc" ]] && source "$HOME/.bashrc"
+fi
+[[ -f "$SHIFT_INTEGRATION_BASH" ]] && source "$SHIFT_INTEGRATION_BASH"

@@ -1,6 +1,6 @@
-# Runway Documentation
+# Shift Documentation
 
-Runway is a GPU-accelerated, block-based terminal emulator for macOS and Linux,
+Shift is a GPU-accelerated, block-based terminal emulator for macOS and Linux,
 built in Rust on wgpu + alacritty_terminal. Its interaction model follows Warp:
 commands become discrete blocks, the command line is an app-owned editor, and
 everything is keyboard-drivable.
@@ -16,17 +16,17 @@ everything is keyboard-drivable.
 ## Quick start
 
 ```sh
-cargo run -p runway-app        # dev build + launch (binary name: runway)
-packaging/make-app.sh          # macOS Runway.app bundle (release)
+cargo run -p shift-app        # dev build + launch (binary name: shift-terminal)
+packaging/make-app.sh          # macOS Shift.app bundle (release)
 ```
 
 Shell integration (zsh, bash, fish) is injected automatically on first spawn —
-no rc-file edits needed. Without it, Runway degrades gracefully to a plain
+no rc-file edits needed. Without it, Shift degrades gracefully to a plain
 terminal (no blocks).
 
 ## Architecture
 
 
 See the repository's `CLAUDE.md` for the four-crate architecture
-(`runway-core` / `runway-pty` / `runway-renderer` / `runway-app`), load-bearing
+(`shift-core` / `shift-pty` / `shift-renderer` / `shift-app`), load-bearing
 invariants, and dependency pins.

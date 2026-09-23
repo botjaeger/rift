@@ -34,7 +34,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build Runway.app
+      - name: Build Shift.app
         run: packaging/make-app.sh --target ${{ matrix.target }}
 
       - name: Build DMG
