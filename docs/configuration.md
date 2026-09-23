@@ -35,7 +35,7 @@ window_opacity = 1.0              # background opacity, clamped 0.3–1.0 (overl
 ligatures     = true              # JetBrains Mono ligatures + contextual alternates
 restore_session = true            # reopen last session's tabs + cwds on launch
 input_position = "bottom"         # bottom | top — where the command editor sits
-prompt        = "runway"          # runway = context chips + ❯
+prompt        = "runway"          # runway = context row + ❯
                                   # shell   = keep the shell's own PS1 on screen, editor shows ›
 copy_on_select = false            # copy the selection on mouse release
 autosuggestions = true            # inline ghost text after the cursor

@@ -12,6 +12,8 @@ const MIN_TAB_W: f32 = 96.0;
 
 pub struct TabInfo {
     pub title: String,
+    /// Pane count; > 1 shows the design-02 "N panes" pill after the title.
+    pub panes: usize,
     pub shell_label: String,
     pub activity: bool,
     /// Tab color (Warp tab colors): tints the underline and a leading dot.
@@ -66,6 +68,8 @@ pub fn render(
     engine: &mut TextEngine,
     theme: &Theme,
     tabs: &[TabInfo],
+    hint: &str,
+    hint_pill: bool,
     active: usize,
     w: f32,
     blink_on: bool,
@@ -87,9 +91,9 @@ pub fn render(
         }
     }
 
-    // right: palette hint (dropped when the strip gets crowded)
-    let hint = "⌘P palette";
-    let hint_w = engine.measure(hint, 11.5, mono_family(), Weight::NORMAL);
+    // right: palette / split hint (dropped when the strip gets crowded)
+    let hint_w = engine.measure(hint, 11.5, mono_family(), Weight::NORMAL)
+        + if hint_pill { 14.0 } else { 0.0 };
 
     // natural widths, then shrink evenly when the tabs overflow the strip
     let natural: Vec<f32> = tabs
@@ -107,7 +111,11 @@ pub fn render(
                 0.0
             };
             let sync_w = if tab.sync { 20.0 } else { 0.0 };
-            (16.0 + dot_w + shell_w + 8.0 + title_w + sync_w + 10.0 + 8.0 + 16.0).min(260.0)
+            let panes_w = panes_label(tab)
+                .map(|l| engine.measure(&l, 11.0, FONT_SANS, Weight::NORMAL) + 12.0 + 6.0)
+                .unwrap_or(0.0);
+            (16.0 + dot_w + shell_w + 8.0 + title_w + panes_w + sync_w + 10.0 + 8.0 + 16.0)
+                .min(300.0)
         })
         .collect();
     let avail = (w - TABS_X - 40.0 - hint_w - 28.0).max(MIN_TAB_W);
@@ -205,12 +213,41 @@ pub fn render(
             }
         } else {
             let sync_w = if tab.sync { 20.0 } else { 0.0 };
-            let title = elide(engine, &tab.title, 12.5, close_x - 10.0 - sync_w - cx);
+            let panes = panes_label(tab);
+            let panes_w = panes
+                .as_ref()
+                .map(|l| engine.measure(l, 11.0, FONT_SANS, Weight::NORMAL) + 12.0)
+                .unwrap_or(0.0);
+            let title = elide(
+                engine,
+                &tab.title,
+                12.5,
+                close_x - 10.0 - sync_w - panes_w - cx,
+            );
             if !title.is_empty() {
                 let title_w = engine.measure(&title, 12.5, FONT_SANS, Weight::NORMAL);
                 let title_buf = make_text(engine, &title, 12.5, FONT_SANS, Weight::NORMAL);
                 layer.text(title_buf, cx, (TAB_BAR_H - 17.0) / 2.0, text_color);
                 cx += title_w + 6.0;
+            }
+            // "2 panes" pill (design 02: 11px muted on a faint lift)
+            if let Some(label) = panes
+                && cx + panes_w <= close_x - 6.0
+            {
+                let lift = if theme.is_light() {
+                    Color::BLACK
+                } else {
+                    Color::WHITE
+                };
+                layer.rect(
+                    [cx, (TAB_BAR_H - 17.0) / 2.0],
+                    [panes_w, 17.0],
+                    lift.with_alpha(0.06),
+                    4.0,
+                );
+                let b = make_text(engine, &label, 11.0, FONT_SANS, Weight::NORMAL);
+                layer.text(b, cx + 6.0, (TAB_BAR_H - 14.5) / 2.0, theme.text_muted);
+                cx += panes_w + 6.0;
             }
             if tab.sync {
                 // two linked rings: inputs are broadcast across panes
@@ -274,13 +311,31 @@ pub fn render(
         target: ClickTarget::WindowDrag,
     });
 
-    if show_hint {
+    if show_hint && !hint.is_empty() {
+        let hx = w - hint_w - 14.0;
+        if hint_pill {
+            let lift = if theme.is_light() {
+                Color::BLACK
+            } else {
+                Color::WHITE
+            };
+            layer.rect(
+                [hx, (TAB_BAR_H - 19.0) / 2.0],
+                [hint_w, 19.0],
+                lift.with_alpha(0.05),
+                5.0,
+            );
+        }
         let hint_buf = make_text(engine, hint, 11.5, mono_family(), Weight::NORMAL);
         layer.text(
             hint_buf,
-            w - hint_w - 14.0,
+            hx + if hint_pill { 7.0 } else { 0.0 },
             (TAB_BAR_H - 15.0) / 2.0,
             theme.text_muted,
         );
     }
+}
+
+fn panes_label(tab: &TabInfo) -> Option<String> {
+    (tab.panes > 1).then(|| format!("{} panes", tab.panes))
 }

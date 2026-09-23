@@ -6,9 +6,9 @@ use runway_renderer::{Layer, TextEngine, mono_family};
 use crate::state::PaneState;
 use crate::vim::VimMode;
 
-/// Editor zone height for a single-line command (11px top pad + 22px
-/// context chips + 8px gap + input line + 17px bottom pad).
-pub const EDITOR_H: f32 = 78.0;
+/// Editor zone height for a single-line command (13px top pad + 16px
+/// context row + 8px gap + input line + 15px bottom pad, design 01).
+pub const EDITOR_H: f32 = 72.0;
 /// Compact per-pane editor inside splits (design 02: input line only).
 pub const EDITOR_COMPACT_H: f32 = 42.0;
 /// Input line height; every extra line of a multi-line command adds one.
@@ -99,6 +99,7 @@ pub fn render(
     area: [f32; 4],
     cell_w: f32, // still sizes the ❯ prompt offset below
     blink_on: bool,
+    focused: bool,
     compact: bool,
     ghost: &str,
     shell_env: Option<&runway_core::shell_env::ShellEnv>,
@@ -116,33 +117,23 @@ pub fn render(
     if compact || shell_prompt {
         input_y = y + 11.0;
     } else {
-        // ── context chips (Warp-style pills): [cwd] [branch ↑n •] ──
-        let ctx_y = y + 11.0;
-        let mut cx = x + PAD_X;
-
+        // ── prompt context (design 01): ⇕ ~/cwd on ⎇ branch ↑n ──
+        let ctx_y = y + 13.0;
         let cwd = pane.session.cwd.lock().unwrap().clone();
         let cwd_display = cwd
             .as_deref()
             .map(shorten_home)
             .unwrap_or_else(|| "~".into());
-
-        cx = chip(layer, engine, theme, cx, ctx_y, &cwd_display, theme.text_ui);
-
-        if let Some(git) = &pane.git {
-            let mut label = git.branch.clone();
-            if git.ahead > 0 {
-                label.push_str(&format!(" ↑{}", git.ahead));
-            }
-            if git.behind > 0 {
-                label.push_str(&format!(" ↓{}", git.behind));
-            }
-            if git.dirty {
-                label.push_str(" •");
-            }
-            let _ = chip(layer, engine, theme, cx, ctx_y, &label, theme.success);
-        }
-
-        input_y = ctx_y + 30.0;
+        context_row(
+            layer,
+            engine,
+            theme,
+            x + PAD_X,
+            ctx_y,
+            &cwd_display,
+            pane.git.as_ref(),
+        );
+        input_y = ctx_y + 24.0;
     }
     let font_size = FONT_SIZE;
     let line_h = LINE_H;
@@ -157,7 +148,7 @@ pub fn render(
         make_mono(engine, glyph, font_size, Weight::SEMIBOLD),
         x + PAD_X,
         input_y,
-        if shell_prompt {
+        if shell_prompt || !focused {
             theme.text_muted
         } else {
             prompt_color
@@ -456,40 +447,75 @@ pub fn render(
     ((text_x, input_y), (text_x + prefix_w, cursor_y))
 }
 
-/// Rounded context pill: bordered surface + mono label. Returns next x.
-fn chip(
+/// Prompt context line above the input (design 01/04, 12px mono, 9px gaps):
+/// up/down chevron icon + cwd in the accent, a muted "on", then a branch
+/// icon + branch in the success color and muted ahead/behind/dirty marks.
+fn context_row(
     layer: &mut Layer,
     engine: &mut TextEngine,
     theme: &Theme,
     x: f32,
     y: f32,
-    text: &str,
-    fg: Color,
-) -> f32 {
-    let tw = engine.measure(text, 12.0, mono_family(), Weight::NORMAL);
-    let w = tw + 18.0;
-    let h = 22.0;
-    // pills lift toward the text color so they read on light themes too
-    let lift = if theme.is_light() {
-        Color::BLACK
-    } else {
-        Color::WHITE
+    cwd: &str,
+    git: Option<&runway_core::git::GitInfo>,
+) {
+    const SIZE: f32 = 12.0;
+    const GAP: f32 = 9.0;
+    let dot = |layer: &mut Layer, px: f32, py: f32, c: Color| {
+        layer.rect([px, py], [1.7, 1.7], c, 0.85);
     };
+    let mid = y + SIZE * 0.7;
+    // chevrons: `M3 9l4-4 4 4 M3 15l4 4 4-4` on a 13px box
+    for i in 0..4 {
+        let d = i as f32 * 1.1;
+        dot(layer, x + 1.0 + d, mid - 2.0 - d, theme.accent);
+        dot(layer, x + 7.6 - d, mid - 2.0 - d, theme.accent);
+        dot(layer, x + 1.0 + d, mid + 1.5 + d, theme.accent);
+        dot(layer, x + 7.6 - d, mid + 1.5 + d, theme.accent);
+    }
+    let mut cx = x + 13.0 + GAP;
+    let mut word = |layer: &mut Layer, cx: &mut f32, text: &str, c: Color| {
+        layer.text(make_mono(engine, text, SIZE, Weight::NORMAL), *cx, y, c);
+        *cx += engine.measure(text, SIZE, mono_family(), Weight::NORMAL) + GAP;
+    };
+    word(layer, &mut cx, cwd, theme.accent);
+    let Some(git) = git else {
+        return;
+    };
+    word(layer, &mut cx, "on", theme.text_muted);
+    // branch icon: two stacked commits on a stem, a third forked right
+    let c = theme.success;
+    let (bx, by) = (cx, mid - 5.5);
+    layer.bordered([bx, by], [3.6, 3.6], Color::TRANSPARENT, c, 1.8, 1.1);
+    layer.bordered([bx, by + 7.4], [3.6, 3.6], Color::TRANSPARENT, c, 1.8, 1.1);
+    layer.rect([bx + 1.25, by + 3.6], [1.1, 3.8], c, 0.5);
     layer.bordered(
-        [x, y],
-        [w, h],
-        lift.with_alpha(0.035),
-        lift.with_alpha(0.12),
-        6.0,
-        1.0,
+        [bx + 6.6, by + 1.8],
+        [3.6, 3.6],
+        Color::TRANSPARENT,
+        c,
+        1.8,
+        1.1,
     );
-    layer.text(
-        make_mono(engine, text, 12.0, Weight::NORMAL),
-        x + 9.0,
-        y + 3.0,
-        fg,
-    );
-    x + w + 8.0
+    for i in 0..3 {
+        let d = i as f32 * 1.3;
+        dot(layer, bx + 7.4 - d, by + 5.4 + d * 0.8, c);
+    }
+    cx += 11.0 + 5.0;
+    word(layer, &mut cx, &git.branch, c);
+    let mut marks = Vec::new();
+    if git.ahead > 0 {
+        marks.push(format!("↑{}", git.ahead));
+    }
+    if git.behind > 0 {
+        marks.push(format!("↓{}", git.behind));
+    }
+    if git.dirty {
+        marks.push("•".into());
+    }
+    if !marks.is_empty() {
+        word(layer, &mut cx, &marks.join(" "), theme.text_muted);
+    }
 }
 
 fn mono_attrs() -> Attrs<'static> {
@@ -534,7 +560,7 @@ mod tests {
             editor_height("ls", true, PromptMode::Runway, 80),
             EDITOR_COMPACT_H
         );
-        // shell-prompt mode drops the chips row
+        // shell-prompt mode drops the context row
         assert_eq!(
             editor_height("ls", false, PromptMode::Shell, 80),
             EDITOR_COMPACT_H

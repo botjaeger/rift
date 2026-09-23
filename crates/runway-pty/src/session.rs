@@ -409,14 +409,95 @@ impl Session {
         // `abs = scrolled + screen_row` coherent by folding the history
         // delta into the counter (same term lock the reader thread uses).
         let mut term = self.term.lock();
-        let before = term.grid().history_size() as i64;
+        let old = RowLayout::of(&term);
         term.resize(size);
-        let after = term.grid().history_size() as i64;
-        let cur = self.scrolled.load(std::sync::atomic::Ordering::Acquire) as i64;
+        let new = RowLayout::of(&term);
+        let cur = self.scrolled.load(std::sync::atomic::Ordering::Acquire);
+        // the grid's top row keeps its abs index: base = scrolled - history
+        let base = cur.saturating_sub(old.history as u64);
         self.scrolled.store(
-            (cur + (after - before)).max(0) as u64,
+            base + new.history as u64,
             std::sync::atomic::Ordering::Release,
         );
+        // reflow (column change) re-wraps lines and moves every row after
+        // them; carry the block anchors along (same lock order as the reader)
+        if old.cols != new.cols || old.starts.len() != new.starts.len() {
+            self.blocks
+                .lock()
+                .unwrap()
+                .remap(|abs, col| old.map(&new, base, abs, col));
+        }
+    }
+}
+
+/// Grid rows grouped into logical (unwrapped) lines, for mapping positions
+/// across a reflowing resize. Row 0 is the oldest history row.
+struct RowLayout {
+    /// First row of each logical line.
+    starts: Vec<usize>,
+    rows: usize,
+    cols: usize,
+    history: usize,
+    /// Logical line holding the cursor (the fixed point between layouts:
+    /// reflow may trim history at the top and blank rows at the bottom).
+    cursor_line: usize,
+}
+
+impl RowLayout {
+    fn of(term: &Term<EventProxy>) -> Self {
+        use alacritty_terminal::term::cell::Flags;
+        let grid = term.grid();
+        let history = grid.history_size();
+        let rows = history + grid.screen_lines();
+        let cols = grid.columns();
+        let mut starts = Vec::new();
+        let mut wrapped = false;
+        for r in 0..rows {
+            if !wrapped {
+                starts.push(r);
+            }
+            let row = &grid[Line(r as i32 - history as i32)];
+            wrapped = cols > 0 && row[Column(cols - 1)].flags.contains(Flags::WRAPLINE);
+        }
+        let cursor_row = history + grid.cursor.point.line.0.max(0) as usize;
+        let cursor_line = starts
+            .partition_point(|&s| s <= cursor_row)
+            .saturating_sub(1);
+        Self {
+            starts,
+            rows,
+            cols,
+            history,
+            cursor_line,
+        }
+    }
+
+    /// Where (`abs`, `col`) in this layout lands in `new`.
+    fn map(&self, new: &RowLayout, base: u64, abs: u64, col: usize) -> (u64, usize) {
+        let Some(row) = abs.checked_sub(base).map(|r| r as usize) else {
+            return (abs, col); // already trimmed out of history
+        };
+        if row >= self.rows || self.starts.is_empty() || new.starts.is_empty() {
+            // past the grid (an end anchor on the last row): keep its
+            // distance from the bottom
+            let shifted = row as i64 + new.rows as i64 - self.rows as i64;
+            return (base + shifted.max(0) as u64, col);
+        }
+        let line = self.starts.partition_point(|&s| s <= row) - 1;
+        let offset = (row - self.starts[line]) * self.cols + col.min(self.cols);
+        let target = line as i64 - self.cursor_line as i64 + new.cursor_line as i64;
+        if target < 0 {
+            return (base.saturating_sub(1), 0); // reflow pushed it out of history
+        }
+        let target = target as usize;
+        if target >= new.starts.len() {
+            return (base + new.rows as u64, 0);
+        }
+        let start = new.starts[target];
+        let next = new.starts.get(target + 1).copied().unwrap_or(new.rows);
+        let cols = new.cols.max(1);
+        let sub = (offset / cols).min(next - start - 1);
+        (base + (start + sub) as u64, (offset - sub * cols).min(cols))
     }
 }
 
@@ -497,4 +578,43 @@ fn extract_text(
         continued = wraps;
     }
     out.trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn term(cols: usize, rows: usize) -> Term<EventProxy> {
+        let proxy = EventProxy {
+            pane: 0,
+            observer: Arc::new(|_, _| {}),
+            writer: File::create("/dev/null").unwrap(),
+            window_size: Arc::new(Mutex::new(WindowSize {
+                num_lines: rows as u16,
+                num_cols: cols as u16,
+                cell_width: 8,
+                cell_height: 16,
+            })),
+        };
+        Term::new(TermConfig::default(), &GridSize { cols, rows }, proxy)
+    }
+
+    #[test]
+    fn anchors_follow_reflow() {
+        let mut t = term(20, 6);
+        let mut parser: vte::ansi::Processor = vte::ansi::Processor::new();
+        // row 0-1: one 30-char logical line (wraps), row 2: "b", row 3: "c"
+        parser.advance(&mut t, format!("{}\r\nb\r\nc", "a".repeat(30)).as_bytes());
+        let old = RowLayout::of(&t);
+        assert_eq!(old.starts, vec![0, 2, 3, 4, 5]);
+        t.resize(GridSize { cols: 10, rows: 6 });
+        let new = RowLayout::of(&t);
+        // "a…" now takes 3 rows, so "b" and "c" move down one row each
+        assert_eq!(old.map(&new, 0, 2, 0), (3, 0));
+        assert_eq!(old.map(&new, 0, 3, 0), (4, 0));
+        // a point inside the wrapped line keeps its character offset
+        assert_eq!(old.map(&new, 0, 1, 5), (2, 5));
+        // below the tracked base: untouched
+        assert_eq!(old.map(&new, 10, 3, 0), (3, 0));
+    }
 }

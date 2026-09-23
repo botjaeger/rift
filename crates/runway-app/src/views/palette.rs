@@ -549,7 +549,16 @@ pub fn render(
         6.0,
         1.8,
     );
-    layer.rect([sx + 10.5, sy + 11.5], [5.5, 1.8], theme.text_dim, 1.0);
+    // diagonal handle (design: 45° stroke) stepped from round dots
+    for i in 0..4 {
+        let d = i as f32 * 1.2;
+        layer.rect(
+            [sx + 9.6 + d, sy + 10.6 + d],
+            [2.0, 2.0],
+            theme.text_dim,
+            1.0,
+        );
+    }
 
     let qx = sx + 17.0 + 12.0;
     if !state.query.is_empty() {
@@ -744,7 +753,10 @@ fn draw_icon(layer: &mut Layer, item: &Item, pos: [f32; 2], color: Color) {
                 4.0,
                 1.5,
             );
-            layer.rect([x + 8.0, y + 8.5], [4.0, 1.5], color, 1.0);
+            for i in 0..3 {
+                let d = i as f32 * 1.1;
+                layer.rect([x + 7.6 + d, y + 7.6 + d], [1.6, 1.6], color, 0.8);
+            }
         }
         PaletteAction::App(AppAction::SplitRight) => {
             layer.bordered(

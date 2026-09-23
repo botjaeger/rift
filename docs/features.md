@@ -55,7 +55,7 @@ copy cwd, copy git branch, re-run (only at a prompt), reinput into the editor
 - **Input position** (`input_position`): the editor sits at the bottom
   (default) or the top of the pane.
 - **Shell-prompt mode** (`prompt = "shell"`): the shell's own PS1 (starship,
-  p10k, …) stays visible on the grid and the editor drops the context chips,
+  p10k, …) stays visible on the grid and the editor drops the context row,
   showing a quiet `›` continuation glyph instead of `❯`.
 
 ## Vim mode

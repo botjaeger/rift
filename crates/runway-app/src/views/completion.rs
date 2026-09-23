@@ -39,15 +39,19 @@ fn sans(engine: &mut TextEngine, text: &str, size: f32, weight: Weight) -> Buffe
     b
 }
 
-/// Draw the floating completion list ABOVE the editor zone (the editor sits
-/// at the window bottom; design 04 shows it under the input line, flipped
-/// here to stay on-screen). `anchor` = (x, y) of the editor input line.
+/// Draw the floating completion list. Design 04 floats it under the input
+/// line; the editor usually sits at the window bottom, so it flips above the
+/// whole editor zone (never over the context row) when it cannot fit below.
+/// `anchor` = (x, y) of the input line, `zone` = the editor rect.
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     layer: &mut Layer,
     engine: &mut TextEngine,
     theme: &Theme,
     ui: &CompletionUi,
     anchor: (f32, f32),
+    zone: [f32; 4],
+    window_h: f32,
     prefix_len: usize,
 ) {
     if !ui.open || ui.items.is_empty() {
@@ -56,7 +60,13 @@ pub fn render(
     let shown = ui.items.len().min(MAX_ROWS);
     let list_h = shown as f32 * ROW_H + FOOTER_H;
     let x = anchor.0;
-    let y = anchor.1 - list_h - 10.0;
+    let below = anchor.1 + crate::views::editor::LINE_H + 12.0;
+    let above = zone[1] - list_h - 8.0;
+    let y = if below + list_h <= window_h - 8.0 || above < 0.0 {
+        below
+    } else {
+        above
+    };
 
     layer.shadow(
         [x, y + 8.0],
@@ -142,12 +152,30 @@ pub fn render(
         0.0,
     );
     layer.hline(x, fy, DROPDOWN_W, 1.0, Color::rgba(1.0, 1.0, 1.0, 0.07));
-    let hint = "⇥ accept   ↑↓ select";
-    let hbuf = sans(engine, hint, 10.5, Weight::NORMAL);
+    // key glyphs a step brighter than their labels (design 04 footer)
+    let mut hbuf = Buffer::new(&mut engine.font_system, Metrics::new(10.5, 14.0));
+    let sans_attrs = |c: Color| {
+        Attrs::new()
+            .family(Family::Name(FONT_SANS))
+            .color(text_color(c))
+    };
+    hbuf.set_rich_text(
+        &mut engine.font_system,
+        [
+            ("⇥", sans_attrs(theme.text_dim)),
+            (" accept     ", sans_attrs(theme.text_muted)),
+            ("↑↓", sans_attrs(theme.text_dim)),
+            (" select", sans_attrs(theme.text_muted)),
+        ],
+        &sans_attrs(theme.text_muted),
+        Shaping::Advanced,
+        None,
+    );
     layer.text(hbuf, x + 14.0, fy + 8.0, theme.text_muted);
+    let n = ui.items.len();
     let src = format!(
-        "{} completions · {}",
-        ui.items.len(),
+        "{n} completion{} · {}",
+        if n == 1 { "" } else { "s" },
         ui.items.first().map(|c| c.source).unwrap_or("shell")
     );
     let sw = engine.measure(&src, 10.5, FONT_SANS, Weight::NORMAL);

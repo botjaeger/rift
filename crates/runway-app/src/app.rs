@@ -2301,11 +2301,8 @@ impl App {
             .iter()
             .enumerate()
             .map(|(i, t)| tabbar::TabInfo {
-                title: if t.is_split() {
-                    format!("{} · {} panes", t.display_title(), t.panes.len())
-                } else {
-                    t.display_title()
-                },
+                title: t.display_title(),
+                panes: if t.is_split() { t.panes.len() } else { 1 },
                 shell_label: shell_label.clone(),
                 activity: t.activity,
                 color: t.color.map(|c| context_menu::tab_color(&theme, c)),
@@ -2318,6 +2315,24 @@ impl App {
                 editing_selected: self.rename_fresh,
             })
             .collect();
+        // right-edge hint (design 01 "⌘K palette" / design 02 "⌃⇧D split"
+        // pill), using whatever chord the keymap resolves today
+        let split_view = self.tabs.get(active_tab_idx).is_some_and(|t| t.is_split());
+        let hint_actions: &[&str] = if split_view {
+            &["split_vertical_alt", "split_vertical"]
+        } else {
+            &["palette"]
+        };
+        let tab_hint = hint_actions
+            .iter()
+            .find_map(|a| {
+                self.keymap
+                    .bindings_for(a)
+                    .first()
+                    .map(|b| b.chips().concat())
+            })
+            .map(|chord| format!("{chord} {}", if split_view { "split" } else { "palette" }))
+            .unwrap_or_default();
         let confirm = self.confirm.as_ref().map(|c| (c.scope, c.commands.clone()));
         let toast = self
             .toast
@@ -2357,6 +2372,7 @@ impl App {
         let mut any_running = false;
         let mut editor_active = false;
         let mut editor_anchor = (0.0f32, 0.0f32);
+        let mut editor_zone = [0.0f32; 4];
         let mut ime_spot: Option<(f32, f32)> = None;
         let completion_ghost = completion.ghost.clone();
 
@@ -2366,6 +2382,8 @@ impl App {
             engine,
             &theme,
             &tab_infos,
+            &tab_hint,
+            split_view,
             active_tab_idx,
             w,
             blink,
@@ -2644,6 +2662,7 @@ impl App {
                     area,
                     cell_w,
                     blink && is_active_pane,
+                    is_active_pane,
                     split,
                     if is_active_pane && autosuggest {
                         &completion_ghost
@@ -2660,6 +2679,7 @@ impl App {
                 );
                 if is_active_pane {
                     editor_anchor = anchor.0;
+                    editor_zone = area;
                     ime_spot = Some(anchor.1);
                 }
                 hits.push(Hit {
@@ -2751,6 +2771,8 @@ impl App {
                 &theme,
                 completion,
                 editor_anchor,
+                editor_zone,
+                h,
                 prefix_len,
             );
         }

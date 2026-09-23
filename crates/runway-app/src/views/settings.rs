@@ -104,6 +104,77 @@ fn lift(theme: &Theme, alpha: f32) -> Color {
     }
 }
 
+/// 16px sidebar icon at (x, y), after design 05's stroked SVGs: General =
+/// sun/gear, Appearance = palette, Features = sliders, Keybindings =
+/// keyboard, Themes = palette with filled paint dots.
+fn nav_icon(layer: &mut Layer, page: Page, x: f32, y: f32, c: Color) {
+    let (cx, cy) = (x + 8.0, y + 8.0);
+    let stroke = 1.3;
+    match page {
+        Page::General => {
+            layer.bordered(
+                [cx - 2.5, cy - 2.5],
+                [5.0, 5.0],
+                Color::TRANSPARENT,
+                c,
+                2.5,
+                stroke,
+            );
+            for i in 0..8 {
+                let a = i as f32 * std::f32::consts::FRAC_PI_4;
+                let (px, py) = (cx + 6.0 * a.cos(), cy + 6.0 * a.sin());
+                layer.rect([px - 1.0, py - 1.0], [2.0, 2.0], c, 1.0);
+            }
+        }
+        Page::Appearance | Page::Themes => {
+            layer.bordered(
+                [x + 1.0, y + 1.0],
+                [14.0, 14.0],
+                Color::TRANSPARENT,
+                c,
+                7.0,
+                stroke,
+            );
+            let filled = page == Page::Themes;
+            for (dx, dy) in [(5.5, 5.0), (9.0, 4.0), (11.0, 8.0), (4.5, 8.5)] {
+                if filled {
+                    layer.circle([x + dx, y + dy], 3.0, c);
+                } else {
+                    layer.bordered(
+                        [x + dx - 1.3, y + dy - 1.3],
+                        [2.6, 2.6],
+                        Color::TRANSPARENT,
+                        c,
+                        1.3,
+                        1.0,
+                    );
+                }
+            }
+        }
+        Page::Features => {
+            for (i, knob) in [4.0f32, 10.0, 6.5].iter().enumerate() {
+                let ly = y + 3.5 + i as f32 * 4.5;
+                layer.rect([x + 1.5, ly], [13.0, stroke], c, 0.6);
+                layer.circle([x + 1.5 + knob, ly + stroke / 2.0], 3.4, c);
+            }
+        }
+        Page::Keybindings => {
+            layer.bordered(
+                [x + 1.0, y + 4.0],
+                [14.0, 8.5],
+                Color::TRANSPARENT,
+                c,
+                2.0,
+                stroke,
+            );
+            for i in 0..4 {
+                layer.rect([x + 3.5 + i as f32 * 2.7, y + 6.3], [1.4, 1.4], c, 0.4);
+            }
+            layer.rect([x + 5.0, y + 9.2], [6.0, stroke], c, 0.5);
+        }
+    }
+}
+
 /// Full-window settings overlay (design 05).
 #[allow(clippy::too_many_arguments)]
 pub fn render(
@@ -156,24 +227,12 @@ pub fn render(
             );
             layer.rect([row[0], row[1]], [2.0, row[3]], theme.accent, 1.0);
         }
-        // icon: simple glyph box
         let icon_color = if selected {
             theme.accent
         } else {
             theme.text_dim
         };
-        layer.bordered(
-            [row[0] + 11.0, ny + 11.0],
-            [16.0, 16.0],
-            Color::TRANSPARENT,
-            icon_color,
-            if matches!(page, Page::Themes | Page::General) {
-                8.0
-            } else {
-                4.0
-            },
-            1.6,
-        );
+        nav_icon(layer, *page, row[0] + 11.0, ny + 11.0, icon_color);
         let color = if selected {
             theme.text_bright
         } else {
@@ -377,13 +436,27 @@ impl Form<'_> {
     }
 
     fn label(&mut self, text: &str, y: f32) {
+        self.label_desc(text, "", y);
+    }
+
+    /// Row label, with an optional muted description line under it.
+    fn label_desc(&mut self, text: &str, desc: &str, y: f32) {
         if self.visible(y, ROW_H) {
+            let ly = if desc.is_empty() { y + 17.0 } else { y + 9.0 };
             self.layer.text(
                 sans(self.engine, text, 13.5, Weight::NORMAL),
                 self.x + 18.0,
-                y + 17.0,
+                ly,
                 self.theme.text_ui,
             );
+            if !desc.is_empty() {
+                self.layer.text(
+                    sans(self.engine, desc, 11.5, Weight::NORMAL),
+                    self.x + 18.0,
+                    y + 29.0,
+                    self.theme.text_muted,
+                );
+            }
         }
     }
 
@@ -394,7 +467,11 @@ impl Form<'_> {
     }
 
     fn toggle(&mut self, y: f32, label: &str, on: bool, id: &'static str) {
-        self.label(label, y);
+        self.toggle_desc(y, label, "", on, id);
+    }
+
+    fn toggle_desc(&mut self, y: f32, label: &str, desc: &str, on: bool, id: &'static str) {
+        self.label_desc(label, desc, y);
         let ty = y + (ROW_H - 23.0) / 2.0;
         let x = self.right() - 40.0;
         if self.visible(ty, 23.0) {
@@ -415,7 +492,19 @@ impl Form<'_> {
     }
 
     fn stepper(&mut self, y: f32, label: &str, value: &str, unit: &str, id: &'static str) {
-        self.label(label, y);
+        self.stepper_desc(y, label, "", value, unit, id);
+    }
+
+    fn stepper_desc(
+        &mut self,
+        y: f32,
+        label: &str,
+        desc: &str,
+        value: &str,
+        unit: &str,
+        id: &'static str,
+    ) {
+        self.label_desc(label, desc, y);
         let ry = y + (ROW_H - 36.0) / 2.0;
         let right = self.right();
         let unit_w = if unit.is_empty() {
@@ -550,21 +639,68 @@ impl Form<'_> {
                 ry + 9.0,
                 self.theme.text_bright,
             );
-            self.layer.text(
-                sans(self.engine, "▾", 11.0, Weight::NORMAL),
-                sx + sel_w - 22.0,
-                ry + 10.0,
-                self.theme.text_dim,
-            );
+            self.chevron(sx + sel_w - 24.0, ry + 15.0);
         }
         self.push_hit([sx, ry, sel_w, 36.0], ClickTarget::SettingsCycle(id));
+    }
+
+    /// Theme picker (design 05 "Active theme"): background swatch ringed in
+    /// the theme's accent, then its display name in the UI font.
+    fn theme_select(&mut self, y: f32, label: &str, name: &str, id: &'static str) {
+        self.label(label, y);
+        let ry = y + (ROW_H - 36.0) / 2.0;
+        let sel_w = 240.0;
+        let sx = self.right() - sel_w;
+        if self.visible(ry, 36.0) {
+            let t = runway_core::theme::load_by_name(name);
+            self.layer.bordered(
+                [sx, ry],
+                [sel_w, 36.0],
+                lift(self.theme, 0.05),
+                lift(self.theme, 0.08),
+                8.0,
+                1.0,
+            );
+            self.layer.bordered(
+                [sx + 12.0, ry + 11.5],
+                [13.0, 13.0],
+                t.bg,
+                t.accent,
+                4.0,
+                1.0,
+            );
+            self.layer.text(
+                sans(self.engine, &t.name, 13.0, Weight::NORMAL),
+                sx + 34.0,
+                ry + 9.5,
+                self.theme.text_bright,
+            );
+            self.chevron(sx + sel_w - 24.0, ry + 15.0);
+        }
+        self.push_hit([sx, ry, sel_w, 36.0], ClickTarget::SettingsCycle(id));
+    }
+
+    /// Down chevron (design: 13px stroked `M6 9l6 6 6-6`) from stepped dots.
+    fn chevron(&mut self, x: f32, y: f32) {
+        let c = self.theme.text_dim;
+        for i in 0..4 {
+            let d = i as f32 * 1.4;
+            self.layer.rect([x + d, y + d], [1.9, 1.9], c, 0.9);
+            self.layer.rect([x + 8.4 - d, y + d], [1.9, 1.9], c, 0.9);
+        }
     }
 
     fn slider(&mut self, y: f32, label: &str, t: f32, value: &str, id: &'static str) {
         self.label(label, y);
         let ry = y + (ROW_H - 36.0) / 2.0;
         let slider_w = 170.0;
-        let sx = self.right() - slider_w - 44.0;
+        // value sits in its own box right of the track (design: 14px gap,
+        // 30px box) so "100%" never runs into the thumb
+        let value_w = self
+            .engine
+            .measure(value, 13.0, mono_family(), Weight::NORMAL)
+            .max(30.0);
+        let sx = self.right() - value_w - 14.0 - slider_w;
         let t = t.clamp(0.0, 1.0);
         if self.visible(ry, 36.0) {
             self.layer.rect(
@@ -579,7 +715,7 @@ impl Form<'_> {
                 .circle([sx + slider_w * t, ry + 18.0], 15.0, Color::WHITE);
             self.layer.text(
                 mono(self.engine, value, 13.0, Weight::NORMAL),
-                self.right() - 34.0,
+                self.right() - value_w,
                 ry + 9.0,
                 self.theme.text_bright,
             );
@@ -604,6 +740,19 @@ impl Form<'_> {
             );
         }
     }
+}
+
+/// `10000` → `10,000` (design 05 scrollback field).
+fn thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Row `i` of a card whose first row starts at `first`; draws the divider
@@ -654,12 +803,18 @@ fn appearance_page(form: &mut Form, config: &Config) {
         "cursor_style",
     );
     let y = row(form, r, 1);
-    form.toggle(y, "Cursor blink", config.cursor_blink, "cursor_blink");
+    form.toggle_desc(
+        y,
+        "Cursor blink",
+        "Pulse the cursor when the editor is focused",
+        config.cursor_blink,
+        "cursor_blink",
+    );
 
     form.group("Window & theme");
     let r = form.card(6);
     let y = row(form, r, 0);
-    form.select(y, "Theme", &config.theme, "theme");
+    form.theme_select(y, "Active theme", &config.theme, "theme");
     let y = row(form, r, 1);
     form.toggle(
         y,
@@ -668,7 +823,7 @@ fn appearance_page(form: &mut Form, config: &Config) {
         "sync_os_theme",
     );
     let y = row(form, r, 2);
-    form.select(
+    form.theme_select(
         y,
         "Light theme (OS sync)",
         &config.theme_light,
@@ -691,7 +846,13 @@ fn appearance_page(form: &mut Form, config: &Config) {
         "window_padding",
     );
     let y = row(form, r, 5);
-    form.toggle(y, "Font ligatures", config.ligatures, "ligatures");
+    form.toggle_desc(
+        y,
+        "Font ligatures",
+        "Render -> >= != as combined glyphs",
+        config.ligatures,
+        "ligatures",
+    );
 }
 
 fn general_page(form: &mut Form, config: &Config) {
@@ -705,10 +866,11 @@ fn general_page(form: &mut Form, config: &Config) {
     let y = row(form, r, 0);
     form.display(y, "Shell path", &shell);
     let y = row(form, r, 1);
-    form.stepper(
+    form.stepper_desc(
         y,
         "Scrollback",
-        &format!("{}", config.scrollback),
+        "Maximum lines kept in the buffer",
+        &thousands(config.scrollback),
         "lines",
         "scrollback",
     );
@@ -1091,7 +1253,15 @@ fn themes_page(form: &mut Form, config: &Config) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Page, SettingsState};
+    use super::{Page, SettingsState, thousands};
+
+    #[test]
+    fn thousands_groups_digits() {
+        assert_eq!(thousands(0), "0");
+        assert_eq!(thousands(999), "999");
+        assert_eq!(thousands(10000), "10,000");
+        assert_eq!(thousands(1234567), "1,234,567");
+    }
 
     #[test]
     fn keyboard_page_navigation_clamps_and_resets_scroll() {

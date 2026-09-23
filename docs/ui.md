@@ -45,13 +45,16 @@ Each command becomes a block via shell-integration OSC 133 markers:
   - collapse chevron `▾`/`▸` — click toggles collapse
   - command text (bright)
   - context: `~/path git:(branch)` — cwd and branch *at the time the command ran*
-    (dim; collapsed blocks show `N lines hidden` here instead)
-  - right side: status badge pill (`✓ 0` green / `✕ N` red / `● 1.2s` running /
-    `—` unknown), duration, copy-output button
+    (dim; collapsed blocks show an italic `N lines hidden` here instead)
+  - right side: status badge pill (`✓ 0` green / `✕ N` red / amber `running`
+    with a spinning ring /
+    `—` unknown), duration (live elapsed while running), copy-output button
 - **Left border**, 2 px, colored by state: accent = running, green = exit 0,
-  red = exit ≠ 0, muted = no exit info.
-- **Block wash** (full-width background tint): red tint across the entire block
-  for failed commands; accent tint + 3 px accent border for the selected block.
+  red = exit ≠ 0, muted = no exit info. Consecutive blocks' borders are 2 px
+  apart (design 01 block spacing).
+- **Block wash**: only the selected block gets an accent tint + 3 px accent
+  border; failed blocks are not tinted (exit state lives on the border and
+  badge, design 01).
 - **Selected block**: selected via click on the header or ⌘↑/⌘↓; target of
   ⇧⌘C / ⌥⇧⌘C / ⌘I / ⌘B / ⌃M; Esc or clicking again deselects.
 - **Sticky command header**: when a block's output scrolls but its header would
@@ -79,10 +82,12 @@ through to the PTY otherwise — vim, password prompts, shells without
 integration). Sits at the bottom of the pane, or at the top with
 `input_position = "top"`.
 
-- **Context chips** (Warp-style pills above the input): cwd chip
-  (`~/zzz/runway`) and git chip (`main ↑2 ↓1 •` — branch, ahead/behind arrows,
-  dirty dot). Hidden in compact (split-pane) mode and in shell-prompt mode.
-- **Prompt glyph** `❯` — green normally, red after a non-zero exit. In
+- **Prompt context** (design 01, above the input): `⇕ ~/zzz/runway on ⎇ main
+  ↑2 ↓1 •` — cwd in the accent, branch in green, ahead/behind arrows and the
+  dirty dot muted. Hidden in compact (split-pane) mode and in shell-prompt
+  mode.
+- **Prompt glyph** `❯` — green normally, red after a non-zero exit, muted in
+  an unfocused split pane. In
   shell-prompt mode (`prompt = "shell"`) the shell's own PS1 stays on the grid
   above and the editor shows a muted `›` instead.
 - **Live syntax highlighting**: command / flags / strings / operators.
@@ -105,6 +110,8 @@ integration). Sits at the bottom of the pane, or at the top with
   Tab or ⌃→ (word-at-a-time) accepts.
 - **Completion dropdown**: git subcommands with descriptions, path completions
   (with `~/` expansion), history matches. ↑/↓ navigate, Tab accepts, Esc closes.
+  Floats under the input line (design 04) and flips above the whole editor
+  zone when the editor sits at the window bottom.
 - **Workflow placeholders**: `{{placeholder}}` spans highlight and Tab-cycle;
   typing replaces the active span.
 - **Boot placeholder**: `Starting zsh…` (shell name from config) shown until
@@ -118,7 +125,9 @@ integration). Sits at the bottom of the pane, or at the top with
   the keyboard (±5% per press).
 - Zoom (⇧⌘⏎): the active pane temporarily takes the whole tab rect and renders
   like a single pane (full editor, no gutters). Navigating or splitting unzooms.
-- Compact editor (input line only, no context chips) inside splits.
+- Compact editor (input line only, no context row) inside splits.
+- The tab shows a `N panes` pill, and the tab strip's right edge swaps the
+  palette hint for a `⌃⇧D split` pill (chords follow the keymap).
 
 ## Command palette (⌘P)
 
@@ -154,7 +163,7 @@ Disabled items are dimmed (e.g. Copy output on an output-less block).
 
 ## Settings overlay (⌘,)
 
-Header (`❯ Settings`), a five-entry sidebar (arrow keys navigate pages;
+Header (`❯ Settings`), a five-entry sidebar with a per-page icon (arrow keys navigate pages;
 PageUp/PageDown scroll the body) and a scrollable body footed with
 `~/.config/runway/config.toml`. Every control writes that file live (the
 hot-reload watcher applies changes < 300 ms, including external edits); the
@@ -164,7 +173,8 @@ are swallowed rather than reaching the terminal.
 
 - **General** — *Shell and session behavior*.
   - Shell: `Shell path` (read-only: `shell` override, else `$SHELL`),
-    `Scrollback` stepper (lines, ±1000).
+    `Scrollback` stepper (lines, ±1000, shown as `10,000`; described
+    *Maximum lines kept in the buffer*).
   - Session: `Restore tabs on launch` toggle, `New tabs start in` segmented
     `Previous | Home | Custom` (a custom path is set in config.toml),
     `Warn before closing running commands` toggle.
@@ -174,10 +184,13 @@ are swallowed rather than reaching the terminal.
   - Font: `Font family` select (cycles the installed monospace families),
     `Font size` stepper (px), `Line height` slider.
   - Cursor: `Cursor style` segmented `Block | Bar | Underline`,
-    `Cursor blink` toggle.
-  - Window & theme: `Theme` select, `Sync with OS appearance` toggle,
-    `Light theme (OS sync)` select, `Window opacity` slider (%),
-    `Window padding` stepper (px, ±2), `Font ligatures` toggle.
+    `Cursor blink` toggle (*Pulse the cursor when the editor is focused*).
+  - Window & theme: `Active theme` select (background swatch ringed in the
+    theme's accent + display name), `Sync with OS appearance` toggle,
+    `Light theme (OS sync)` select (same swatch style), `Window opacity`
+    slider (%, value boxed right of the track),
+    `Window padding` stepper (px, ±2), `Font ligatures` toggle (*Render -> >=
+    != as combined glyphs*).
 - **Features** — *Input, blocks, notifications*.
   - Input: `Vim keybindings` toggle, `Autosuggestions (ghost text)` toggle,
     `Completions menu` toggle, `Autocomplete quotes and brackets` toggle,

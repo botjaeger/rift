@@ -34,6 +34,8 @@ pub struct GridLayout {
 
 /// Block content indent: 2px border + 14px padding (design).
 pub const BLOCK_INDENT: f32 = 16.0;
+/// Vertical gap between consecutive blocks' left borders (design 01).
+const BLOCK_GAP: f32 = 2.0;
 
 /// Clickable header rect reported back to the app for collapse toggling.
 pub struct HitRect {
@@ -686,24 +688,10 @@ pub fn render(
     });
     let row_selected = |abs: u64| selected_range.is_some_and(|(s, e)| abs >= s && abs < e);
 
-    // Warp-style block wash: selection wins, then failed commands get a
-    // red tint across the whole block
-    let row_bg = |abs: u64| -> Option<Color> {
-        if row_selected(abs) {
-            return Some(theme.accent.with_alpha(0.08));
-        }
-        for b in &blocks {
-            if abs >= b.prompt_start && abs < b.end.unwrap_or(u64::MAX) {
-                if let BlockState::Done { exit: Some(n), .. } = b.state
-                    && n != 0
-                {
-                    return Some(theme.error.with_alpha(0.07));
-                }
-                return None;
-            }
-        }
-        None
-    };
+    // only the keyboard-selected block gets a wash; exit state lives on the
+    // left border and badge alone (design 01: failed blocks are not tinted)
+    let row_bg =
+        |abs: u64| -> Option<Color> { row_selected(abs).then(|| theme.accent.with_alpha(0.08)) };
 
     // block membership for border drawing: abs line → block state color
     let border_color = |abs: u64| -> Option<Color> {
@@ -726,6 +714,28 @@ pub fn render(
         None
     };
 
+    // which block a display line belongs to: the last row before a change
+    // of block shortens its border so blocks sit 2px apart (design 01:
+    // `margin-bottom: 2px` on every block)
+    let owner = |dl: &DisplayLine| -> Option<BlockId> {
+        match dl {
+            DisplayLine::Header(bi) => Some(blocks[*bi].id),
+            DisplayLine::Grid(abs) => blocks
+                .iter()
+                .find(|b| *abs >= b.prompt_start && *abs < b.end.unwrap_or(u64::MAX))
+                .map(|b| b.id),
+            DisplayLine::Pad => None,
+        }
+    };
+    let border_h = |r: usize| -> f32 {
+        let this = owner(&visible[r]);
+        let next = visible.get(r + 1).and_then(owner);
+        if this.is_some() && next != this && visible.get(r + 1).is_some() {
+            grid.line_h - BLOCK_GAP
+        } else {
+            grid.line_h + 0.5
+        }
+    };
     for (r, dl) in visible.iter().enumerate() {
         let y = grid.y + r as f32 * grid.line_h;
         match dl {
@@ -744,9 +754,9 @@ pub fn render(
                     grid.x
                 } else if let Some(color) = border_color(*abs) {
                     if is_sel {
-                        layer.rect([grid.x, y], [3.0, grid.line_h + 0.5], theme.accent, 0.0);
+                        layer.rect([grid.x, y], [3.0, border_h(r)], theme.accent, 0.0);
                     } else {
-                        layer.rect([grid.x, y], [2.0, grid.line_h + 0.5], color, 0.0);
+                        layer.rect([grid.x, y], [2.0, border_h(r)], color, 0.0);
                     }
                     grid.x + BLOCK_INDENT
                 } else {
@@ -804,14 +814,8 @@ pub fn render(
             }
             DisplayLine::Header(bi) => {
                 let block = &blocks[*bi];
-                let hbg = if selected == Some(block.id) {
-                    Some(theme.accent.with_alpha(0.08))
-                } else if matches!(block.state, BlockState::Done { exit: Some(n), .. } if n != 0) {
-                    Some(theme.error.with_alpha(0.07))
-                } else {
-                    None
-                };
-                if let Some(bg) = hbg {
+                if selected == Some(block.id) {
+                    let bg = theme.accent.with_alpha(0.08);
                     layer.rect(
                         [grid.x, y],
                         [grid.right - grid.x, grid.line_h + 0.5],
@@ -827,7 +831,8 @@ pub fn render(
                     .as_ref()
                     .filter(|(id, _)| *id == block.id)
                     .map(|(_, n)| n.as_str());
-                render_header(layer, engine, theme, grid, block, y, note, &mut out);
+                let bh = border_h(r);
+                render_header(layer, engine, theme, grid, block, y, bh, note, &mut out);
             }
         }
     }
@@ -900,7 +905,17 @@ pub fn render_sticky_header(
         Color::rgba(1.0, 1.0, 1.0, 0.07),
     );
     let mut sink = RenderOutput::default();
-    render_header(layer, engine, theme, grid, &block, y, None, &mut sink);
+    render_header(
+        layer,
+        engine,
+        theme,
+        grid,
+        &block,
+        y,
+        grid.line_h + 0.5,
+        None,
+        &mut sink,
+    );
     Some(rect)
 }
 
@@ -1123,6 +1138,12 @@ fn render_grid_line(
     layer.text(buf, x, y, theme.fg);
 }
 
+/// Shared clock for running-block spinners (all spin in phase).
+fn block_spin_epoch() -> std::time::Instant {
+    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    *EPOCH.get_or_init(std::time::Instant::now)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_header(
     layer: &mut Layer,
@@ -1131,15 +1152,12 @@ fn render_header(
     grid: &GridLayout,
     block: &Block,
     y: f32,
+    border_h: f32,
     filter_note: Option<&str>,
     out: &mut RenderOutput,
 ) {
     let (border, badge_fg, badge_text) = match block.state {
-        BlockState::Running { started } => (
-            theme.accent,
-            theme.warning,
-            format!("● {}", format_duration(started.elapsed())),
-        ),
+        BlockState::Running { .. } => (theme.accent, theme.warning, "running".to_string()),
         BlockState::Done { exit: Some(0), .. } => (theme.success, theme.success, "✓ 0".into()),
         BlockState::Done { exit: Some(n), .. } => (theme.error, theme.error, format!("✕ {n}")),
         BlockState::Done { exit: None, .. } => (theme.text_muted, theme.text_muted, "—".into()),
@@ -1147,7 +1165,7 @@ fn render_header(
     };
 
     // left border across the header row
-    layer.rect([grid.x, y], [2.0, grid.line_h + 0.5], border, 0.0);
+    layer.rect([grid.x, y], [2.0, border_h], border, 0.0);
 
     let content_x = grid.x + BLOCK_INDENT;
 
@@ -1166,6 +1184,7 @@ fn render_header(
     // left text must stop before the right-side badge/duration/copy group
     let duration_text = match block.state {
         BlockState::Done { duration, .. } => format_duration(duration),
+        BlockState::Running { started } => format_duration(started.elapsed()),
         _ => String::new(),
     };
     let duration_w = if duration_text.is_empty() {
@@ -1173,7 +1192,10 @@ fn render_header(
     } else {
         duration_text.chars().count() as f32 * grid.cell_w * (12.0 / grid.font_size) + 11.0
     };
-    let badge_w = badge_text.chars().count() as f32 * 6.8 + 16.0;
+    let running = matches!(block.state, BlockState::Running { .. });
+    // running: a 9px spinner + 6px gap lead the label (design 02)
+    let spin_w = if running { 15.0 } else { 0.0 };
+    let badge_w = badge_text.chars().count() as f32 * 6.8 + 16.0 + spin_w;
     let left_limit = grid.right - 13.0 - 6.0 - 10.0 - duration_w - badge_w - 12.0;
 
     // command (bright), one line, ellipsized to the space it has
@@ -1216,8 +1238,22 @@ fn render_header(
     } else if block.collapsed
         && let Some((s, e)) = block.output_range()
     {
-        let note = format!("{} lines hidden", e - s);
-        let nbuf = make_text(engine, &note, 11.5, grid.line_h, FONT_SANS, Weight::NORMAL);
+        // design 01: italic mono, muted
+        let n = e - s;
+        let note = format!("{n} line{} hidden", if n == 1 { "" } else { "s" });
+        let mut nbuf = runway_renderer::glyphon::Buffer::new(
+            &mut engine.font_system,
+            runway_renderer::glyphon::Metrics::new(11.5, grid.line_h),
+        );
+        nbuf.set_text(
+            &mut engine.font_system,
+            &note,
+            &runway_renderer::glyphon::Attrs::new()
+                .family(runway_renderer::glyphon::Family::Name(mono_family()))
+                .style(runway_renderer::glyphon::Style::Italic),
+            runway_renderer::glyphon::Shaping::Advanced,
+            None,
+        );
         layer.text(nbuf, after_cmd_x, y, theme.text_muted);
     } else if block.cwd.is_some() || block.branch.is_some() {
         let mut ctx = block
@@ -1291,6 +1327,16 @@ fn render_header(
         badge_fg.with_alpha(0.13),
         5.0,
     );
+    if running {
+        // 9px ring with its top quarter open, one turn per 0.8 s
+        let (cx, cy) = (badge_x + 8.0 + 4.5, y + grid.line_h / 2.0);
+        let phase =
+            (block_spin_epoch().elapsed().as_secs_f32() / 0.8).fract() * std::f32::consts::TAU;
+        for i in 0..9 {
+            let a = phase + i as f32 * std::f32::consts::TAU / 12.0;
+            layer.circle([cx + 3.7 * a.cos(), cy + 3.7 * a.sin()], 1.7, badge_fg);
+        }
+    }
     let bbuf = make_text(
         engine,
         &badge_text,
@@ -1301,7 +1347,7 @@ fn render_header(
     );
     layer.text(
         bbuf,
-        badge_x + 8.0,
+        badge_x + 8.0 + spin_w,
         y + (grid.line_h - pill_h) / 2.0 + 1.0,
         badge_fg,
     );

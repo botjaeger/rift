@@ -175,6 +175,20 @@ impl BlockStore {
         }
     }
 
+    /// Move every anchor through `f(line, column) -> (line, column)`: a
+    /// column resize reflows wrapped lines, so rows shift under the anchors.
+    pub fn remap(&mut self, mut f: impl FnMut(AbsLine, usize) -> (AbsLine, usize)) {
+        for b in &mut self.blocks {
+            b.prompt_start = f(b.prompt_start, 0).0;
+            b.command_start = b.command_start.map(|(l, c)| f(l, c));
+            b.output_start = b.output_start.map(|o| f(o, 0).0);
+            b.end = b.end.map(|e| f(e, 0).0);
+        }
+        if let Some((line, rows)) = self.clear_pad {
+            self.clear_pad = Some((f(line, 0).0, rows));
+        }
+    }
+
     pub fn clear(&mut self) {
         self.blocks.clear();
         self.clear_pad = None;
