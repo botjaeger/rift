@@ -51,6 +51,44 @@ pub enum UserEvent {
     ConfigReloaded,
     HistoryLoaded(Vec<String>),
     ShellEnvLoaded(Arc<shift_core::shell_env::ShellEnv>),
+    /// Screen reader requests (initial tree, actions).
+    Access(accesskit_winit::Event),
+    /// A local control API request (see control.rs).
+    Control(crate::control::Pending),
+    /// A program asked for a notification (OSC 9 / 777 / 99).
+    PtyNotify(PaneId, String, String),
+}
+
+/// What an attention-center entry reports.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum AttentionKind {
+    Finished,
+    Failed,
+    Notify,
+    Bell,
+}
+
+/// One entry of the attention center (⇧⌘A): something that happened in a
+/// pane while you were looking elsewhere, or that a program flagged.
+#[derive(Debug, Clone)]
+struct Attention {
+    at: std::time::SystemTime,
+    pane: PaneId,
+    block: Option<shift_core::BlockId>,
+    kind: AttentionKind,
+    /// Command or notification title.
+    title: String,
+    /// Status, duration or notification body.
+    detail: String,
+    read: bool,
+}
+
+const ATTENTION_CAP: usize = 200;
+
+impl From<accesskit_winit::Event> for UserEvent {
+    fn from(e: accesskit_winit::Event) -> Self {
+        UserEvent::Access(e)
+    }
 }
 
 /// Spec metrics (logical px).
@@ -92,6 +130,8 @@ pub struct App {
     quads: Option<QuadPipeline>,
     /// Theme `background_image` (Warp-style), drawn under every layer.
     bg_image: Option<shift_renderer::ImagePipeline>,
+    /// Inline images (kitty graphics / iTerm2) on the GPU.
+    sprites: Option<shift_renderer::SpritePipeline>,
     bg_image_opacity: f32,
     text: Option<TextEngine>,
     git: Option<GitWorker>,
@@ -111,6 +151,8 @@ pub struct App {
     palette: PaletteState,
     palette_results: Vec<MatchedItem>,
     palette_row_hits: Vec<([f32; 4], usize)>,
+    /// Accessible names of the settings controls drawn last frame.
+    settings_names: Vec<([f32; 4], String)>,
     completion: CompletionUi,
     editor_anchor: (f32, f32),
     /// Soft-wrap columns of the active pane's editor (last frame).
@@ -153,6 +195,44 @@ pub struct App {
     pending_commands: std::collections::HashMap<PaneId, Vec<String>>,
     /// Running-process close/quit warning awaiting a decision.
     confirm: Option<ConfirmClose>,
+    /// Keys whose press went to a program reporting key events (kitty
+    /// flag 2), so their release follows them there.
+    keys_down: std::collections::HashSet<(PaneId, String)>,
+    /// Hint mode labels while active (⇧⌘H).
+    hints: Option<HintState>,
+    /// Transcript id to replay into the next spawned pane (session restore).
+    next_replay: Option<String>,
+    /// Session-service shell for the next spawned pane to reattach.
+    next_attach: Option<u64>,
+    /// Local control API socket (removed on drop).
+    control_server: Option<crate::control::Server>,
+    /// Other windows' tabs, fetched when the session switcher opens.
+    other_windows: Vec<(u32, std::path::PathBuf, Vec<crate::control::TabInfo>)>,
+    /// Detached session-service shells, fetched when the palette opens.
+    detached: Vec<shift_pty::ipc::SessionInfo>,
+    /// Attention center entries, newest last.
+    attention: Vec<Attention>,
+    /// Newest finished block already considered per pane.
+    attention_seen: std::collections::HashMap<PaneId, shift_core::BlockId>,
+    /// Newest finished block written to each pane's transcript.
+    transcript_saved: std::collections::HashMap<PaneId, shift_core::BlockId>,
+    /// ssh profiles listed in the palette (config + ~/.ssh/config).
+    ssh_profiles: Vec<shift_core::ssh::SshProfile>,
+    /// Pipe modal target: (pane, block, the block's output text).
+    pipe_target: Option<(PaneId, shift_core::BlockId, String)>,
+    /// Screen reader bridge (AccessKit); created before the window shows.
+    a11y: Option<accesskit_winit::Adapter>,
+    /// Rects behind actionable accessibility nodes (click targets).
+    a11y_targets: std::collections::HashMap<accesskit::NodeId, [f32; 4]>,
+    /// Last pushed tree (unchanged frames push nothing); empty = resend.
+    a11y_fingerprint: String,
+    /// Newest finished block announced per pane.
+    a11y_done: std::collections::HashMap<PaneId, shift_core::BlockId>,
+    a11y_announcement: Option<String>,
+    /// `SHIFT_LATENCY_LOG`: log key-to-frame latency of raw keystrokes.
+    latency_log: bool,
+    /// Raw key sent at .0; .1 = the program's output has arrived since.
+    latency_probe: Option<(Instant, bool)>,
     /// [cancel, destructive] button rects of the confirm modal.
     confirm_rects: [[f32; 4]; 2],
     /// Inline tab rename in progress: (tab index, edited title).
@@ -194,6 +274,94 @@ pub struct App {
     )>,
 }
 
+/// What a hint label acts on.
+#[derive(Debug, Clone, PartialEq)]
+enum HintTarget {
+    /// A URL or an existing path: open it (⇧: copy it).
+    Open(String),
+    /// A block header: select it (⇧: copy its output).
+    Block(PaneId, shift_core::BlockId),
+}
+
+struct HintState {
+    /// (label, on-screen rect, target)
+    items: Vec<(String, [f32; 4], HintTarget)>,
+    /// Label characters typed so far.
+    typed: String,
+}
+
+/// Hint labels in home-row order: one letter each while they fit, two
+/// letters for all of them beyond that (no label is a prefix of another).
+fn hint_labels(n: usize) -> Vec<String> {
+    const KEYS: &str = "asdfghjklqwertyuiopzxcvbnm";
+    let keys: Vec<char> = KEYS.chars().collect();
+    if n <= keys.len() {
+        return keys.iter().take(n).map(|c| c.to_string()).collect();
+    }
+    keys.iter()
+        .flat_map(|a| keys.iter().map(move |b| format!("{a}{b}")))
+        .take(n)
+        .collect()
+}
+
+/// Hand a URL or path to the OS opener (documents only, never script
+/// handlers).
+fn open_external(target: &str) {
+    if let Some((scheme, _)) = target.split_once("://")
+        && !matches!(
+            scheme.to_ascii_lowercase().as_str(),
+            "http" | "https" | "file" | "ftp"
+        )
+    {
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    let opener = "open";
+    #[cfg(not(target_os = "macos"))]
+    let opener = "xdg-open";
+    log::info!("open {target}");
+    let _ = std::process::Command::new(opener)
+        .arg(target)
+        .stdin(std::process::Stdio::null())
+        .spawn();
+}
+
+/// Write block output for "Send block output to a command" to a private
+/// (0600) file under the data dir; files older than a day are swept first.
+fn write_pipe_file(text: &str) -> Option<std::path::PathBuf> {
+    use std::io::Write as _;
+    let dir = shift_core::shell_integration::data_dir()?.join("pipe");
+    std::fs::create_dir_all(&dir).ok()?;
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for e in entries.flatten() {
+            let old = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age > Duration::from_secs(86_400));
+            if old {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let path = dir.join(format!("output-{}-{nanos}.txt", std::process::id()));
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(&path).ok()?;
+    f.write_all(text.as_bytes()).ok()?;
+    Some(path)
+}
+
 /// `YYYY-MM-DD HH:MM` (UTC) for `secs` since the epoch (no date crate).
 fn utc_stamp(secs: u64) -> String {
     let days = (secs / 86_400) as i64;
@@ -227,8 +395,23 @@ enum CloseScope {
     Window,
 }
 
+/// What the confirm modal is waiting to do.
+#[derive(Debug, Clone, PartialEq)]
+enum ConfirmAction {
+    Close(CloseScope),
+    /// Multiline text headed for a raw pane that has no bracketed paste:
+    /// every newline would press Enter.
+    Paste {
+        pane: PaneId,
+        text: String,
+    },
+    /// Write Shift's shell hooks to an ssh host (runs in a new tab).
+    InstallRemote(shift_core::ssh::SshProfile),
+}
+
 struct ConfirmClose {
-    scope: CloseScope,
+    action: ConfirmAction,
+    /// Running commands (close) or the first pasted lines (paste).
     commands: Vec<String>,
 }
 
@@ -245,6 +428,7 @@ impl App {
             gpu: None,
             quads: None,
             bg_image: None,
+            sprites: None,
             bg_image_opacity: 1.0,
             text: None,
             git: None,
@@ -264,6 +448,7 @@ impl App {
             palette: PaletteState::default(),
             palette_results: Vec::new(),
             palette_row_hits: Vec::new(),
+            settings_names: Vec::new(),
             completion: CompletionUi::default(),
             editor_anchor: (0.0, 0.0),
             editor_cols: 80,
@@ -294,6 +479,25 @@ impl App {
             launch_configs: Vec::new(),
             pending_commands: std::collections::HashMap::new(),
             confirm: None,
+            keys_down: Default::default(),
+            pipe_target: None,
+            ssh_profiles: Vec::new(),
+            hints: None,
+            next_replay: None,
+            next_attach: None,
+            control_server: None,
+            other_windows: Vec::new(),
+            detached: Vec::new(),
+            attention: Vec::new(),
+            attention_seen: Default::default(),
+            transcript_saved: Default::default(),
+            a11y: None,
+            a11y_targets: Default::default(),
+            a11y_fingerprint: String::new(),
+            a11y_done: Default::default(),
+            a11y_announcement: None,
+            latency_log: std::env::var_os("SHIFT_LATENCY_LOG").is_some(),
+            latency_probe: None,
             confirm_rects: [[0.0; 4]; 2],
             rename: None,
             rename_fresh: false,
@@ -830,6 +1034,8 @@ impl App {
                     MenuAction::FilterBlock,
                 )
                 .enabled(has_output),
+                MenuItem::new("Send output to command…", MenuAction::PipeOutput)
+                    .enabled(has_output && rerun_ok),
                 MenuItem::new(
                     if bookmarked {
                         "Remove bookmark"
@@ -1021,6 +1227,17 @@ impl App {
             }
             MenuAction::FilterBlock => {
                 self.toggle_block_filter(pane_id, block);
+                return;
+            }
+            MenuAction::PipeOutput => {
+                if let Some(p) = self
+                    .tabs
+                    .get_mut(self.active)
+                    .and_then(|t| t.pane_mut(pane_id))
+                {
+                    p.selected_block = Some(block);
+                }
+                self.open_pipe();
                 return;
             }
             _ => {}
@@ -1230,16 +1447,145 @@ impl App {
                 None => return false,
             },
         };
-        #[cfg(target_os = "macos")]
-        let opener = "open";
-        #[cfg(not(target_os = "macos"))]
-        let opener = "xdg-open";
-        log::info!("open {target}");
-        let _ = std::process::Command::new(opener)
-            .arg(&target)
-            .stdin(std::process::Stdio::null())
-            .spawn();
+        open_external(&target);
         true
+    }
+
+    /// Resolve a path token from `pane`'s output to an existing file
+    /// (absolute, `~/…`, or relative to the pane's working directory).
+    fn resolve_path(pane: &PaneState, path: &str) -> Option<String> {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let resolved = if let Some(rest) = path.strip_prefix("~/") {
+            std::path::Path::new(&home).join(rest)
+        } else if path.starts_with('/') {
+            std::path::PathBuf::from(path)
+        } else {
+            let cwd = pane.session.cwd.lock().unwrap().clone()?;
+            std::path::Path::new(&cwd).join(path)
+        };
+        resolved
+            .exists()
+            .then(|| resolved.to_string_lossy().into_owned())
+    }
+
+    /// Hint mode: label every visible link, existing path and block header
+    /// of the active tab; typing a label opens it (links, paths) or selects
+    /// it (blocks); ⇧ + label copies instead.
+    fn start_hints(&mut self) {
+        use crate::views::terminal::RowKind;
+        let mut targets: Vec<([f32; 4], HintTarget)> = Vec::new();
+        if let Some(tab) = self.tabs.get(self.active) {
+            for pane in &tab.panes {
+                let Some(g) = pane.last_grid else { continue };
+                for (rect, url) in &pane.url_hits {
+                    targets.push((*rect, HintTarget::Open(url.clone())));
+                }
+                for row in &pane.rows {
+                    let RowKind::Grid { abs, content_x } = row.kind else {
+                        continue;
+                    };
+                    let Some(text) = terminal::session_line_text(&pane.session, abs) else {
+                        continue;
+                    };
+                    for (col, len, token) in terminal::path_tokens(&text) {
+                        if let Some(path) = Self::resolve_path(pane, &token) {
+                            let rect = [
+                                content_x + col as f32 * g.cell_w,
+                                row.y,
+                                len as f32 * g.cell_w,
+                                g.line_h,
+                            ];
+                            targets.push((rect, HintTarget::Open(path)));
+                        }
+                    }
+                }
+            }
+        }
+        for h in &self.hits {
+            if let ClickTarget::Block(pane, block) = h.target {
+                targets.push((h.rect, HintTarget::Block(pane, block)));
+            }
+        }
+        if targets.is_empty() {
+            self.toast("No links, paths or blocks on screen".into());
+            return;
+        }
+        let labels = hint_labels(targets.len());
+        self.hints = Some(HintState {
+            items: labels
+                .into_iter()
+                .zip(targets)
+                .map(|(l, (r, t))| (l, r, t))
+                .collect(),
+            typed: String::new(),
+        });
+    }
+
+    /// Hint-mode keys. Returns true when consumed.
+    fn handle_hint_key(&mut self, event: &input::KeyPress) {
+        use winit::keyboard::{Key, NamedKey};
+        let Some(state) = self.hints.as_mut() else {
+            return;
+        };
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => {
+                self.hints = None;
+                return;
+            }
+            Key::Named(NamedKey::Backspace) => {
+                state.typed.pop();
+                return;
+            }
+            _ => {}
+        }
+        let Some(c) = event
+            .text
+            .as_deref()
+            .and_then(|t| t.chars().next())
+            .filter(char::is_ascii_alphabetic)
+        else {
+            return;
+        };
+        let copy = c.is_ascii_uppercase() || self.modifiers.shift_key();
+        state.typed.push(c.to_ascii_lowercase());
+        let typed = state.typed.clone();
+        if let Some((_, _, target)) = state.items.iter().find(|(l, _, _)| *l == typed) {
+            let target = target.clone();
+            self.hints = None;
+            match target {
+                HintTarget::Open(t) if copy => {
+                    self.copy_to_clipboard(t);
+                    self.toast("Copied".into());
+                }
+                HintTarget::Open(t) => open_external(&t),
+                HintTarget::Block(pane, block) => {
+                    if let Some(tab) = self.tabs.get_mut(self.active) {
+                        tab.active_pane = pane;
+                        if let Some(p) = tab.pane_mut(pane) {
+                            p.selected_block = Some(block);
+                        }
+                    }
+                    if copy {
+                        self.handle_action_copy_block(pane, block);
+                    }
+                }
+            }
+        } else if !state.items.iter().any(|(l, _, _)| l.starts_with(&typed)) {
+            self.hints = None;
+        }
+    }
+
+    /// ⇧ + block hint: copy that block's output.
+    fn handle_action_copy_block(&mut self, pane: PaneId, block: shift_core::BlockId) {
+        let text = self
+            .tabs
+            .get(self.active)
+            .and_then(|t| t.pane(pane))
+            .and_then(|p| terminal::block_output_text(&p.session, block));
+        if let Some(text) = text {
+            self.copy_to_clipboard(text);
+            self.toast("Copied block output".into());
+        }
     }
 
     /// An existing file or directory named by the text under the pointer
@@ -1263,19 +1609,8 @@ impl App {
         }
         let text = terminal::session_line_text(&pane.session, abs)?;
         let (path, _line) = terminal::path_token_at(&text, col as usize)?;
-        let home = std::env::var("HOME").unwrap_or_default();
-        let resolved = if let Some(rest) = path.strip_prefix("~/") {
-            std::path::Path::new(&home).join(rest)
-        } else if path.starts_with('/') {
-            std::path::PathBuf::from(&path)
-        } else {
-            // block output ran in the block's cwd; the pane's is the best guess
-            let cwd = pane.session.cwd.lock().unwrap().clone()?;
-            std::path::Path::new(&cwd).join(&path)
-        };
-        resolved
-            .exists()
-            .then(|| resolved.to_string_lossy().into_owned())
+        // block output ran in the block's cwd; the pane's is the best guess
+        Self::resolve_path(pane, &path)
     }
 
     /// Pointer shape: a hand over ⌘-clickable links, the I-beam over text.
@@ -1297,7 +1632,11 @@ impl App {
                 .is_some_and(|id| self.path_under_mouse(id).is_some());
         let icon = if over_link || over_path {
             CursorIcon::Pointer
-        } else if my > TAB_BAR_H && !self.settings.open && !self.palette.open {
+        } else if my > TAB_BAR_H
+            && self.mouse.0 > self.rail_w()
+            && !self.settings.open
+            && !self.palette.open
+        {
             CursorIcon::Text
         } else {
             CursorIcon::Default
@@ -1366,17 +1705,27 @@ impl App {
             .mode()
             .contains(TermMode::BRACKETED_PASTE);
         let id = pane.session.id;
-        let mut bytes = Vec::with_capacity(text.len() + 12);
         if bracketed {
-            // a pasted end marker must not terminate the paste early
-            bytes.extend_from_slice(b"\x1b[200~");
-            bytes.extend_from_slice(text.replace("\x1b[201~", "").as_bytes());
-            bytes.extend_from_slice(b"\x1b[201~");
-        } else {
-            // unbracketed: newlines submit, like typing them would
-            bytes.extend_from_slice(text.replace("\r\n", "\r").replace('\n', "\r").as_bytes());
+            self.write_synced(id, &input::bracketed_paste(text), false);
+            return;
         }
-        self.write_synced(id, &bytes, false);
+        // unbracketed: every newline presses Enter, so ask before sending
+        // more than one line
+        if self.config.confirm_multiline_paste && input::paste_submits_lines(text) {
+            let commands = text.lines().map(str::to_string).collect();
+            self.confirm = Some(ConfirmClose {
+                action: ConfirmAction::Paste {
+                    pane: id,
+                    text: text.to_string(),
+                },
+                commands,
+            });
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+            return;
+        }
+        self.write_synced(id, &input::unbracketed_paste(text), false);
     }
 
     /// Files dropped on the window: their shell-quoted paths are pasted.
@@ -1563,10 +1912,10 @@ impl App {
             PaletteMode::Commands => {
                 let launches: Vec<String> =
                     self.launch_configs.iter().map(|l| l.name.clone()).collect();
-                (
-                    palette::base_items(&Self::theme_names(), &launches, &self.keymap),
-                    pane_history,
-                )
+                let mut items = palette::base_items(&Self::theme_names(), &launches, &self.keymap);
+                items.extend(palette::ssh_items(&self.ssh_profiles));
+                items.extend(self.detached_items());
+                (items, pane_history)
             }
             PaletteMode::History => {
                 let mut all = self.shell_history.clone();
@@ -1574,6 +1923,23 @@ impl App {
                 (palette::history_items(&all), Vec::new())
             }
             PaletteMode::Workflows => (palette::workflow_items(&self.workflows), Vec::new()),
+            PaletteMode::Sessions => (self.session_items(), Vec::new()),
+            PaletteMode::Attention => {
+                // unread first, each group newest first
+                let mut items = self.attention_items();
+                items.sort_by_key(|i| i.section != palette::Section::Actions);
+                (items, Vec::new())
+            }
+            PaletteMode::PipeOutput => {
+                let output = self
+                    .pipe_target
+                    .as_ref()
+                    .map(|t| t.2.as_str())
+                    .unwrap_or_default();
+                self.palette_results = palette::pipe_items(&self.palette.query, output);
+                self.palette.selected = 0;
+                return;
+            }
         };
         self.palette_results = palette::rank(&items, &recent, &self.palette.query);
         if self.palette.selected >= self.palette_results.len() {
@@ -1581,16 +1947,340 @@ impl App {
         }
     }
 
+    /// Session switcher rows: every tab, every pane, and the newest
+    /// finished blocks of this window (titles carry what fuzzy search
+    /// should match: names, directories, running jobs, commands).
+    fn session_items(&self) -> Vec<palette::Item> {
+        use palette::{Item, PaletteAction, Section};
+        let mut items = Vec::new();
+        let row = |title: String, id: String, section: Section, action: PaletteAction| Item {
+            title,
+            id,
+            shortcut: Vec::new(),
+            section,
+            action,
+            mono_title: false,
+        };
+        for (ti, tab) in self.tabs.iter().enumerate() {
+            let panes = if tab.is_split() { tab.panes.len() } else { 1 };
+            items.push(row(
+                format!("{} — tab {}", tab.display_title(), ti + 1),
+                if ti == self.active {
+                    "current".into()
+                } else if panes > 1 {
+                    format!("{panes} panes")
+                } else {
+                    String::new()
+                },
+                Section::Tabs,
+                PaletteAction::FocusTab(ti),
+            ));
+        }
+        for (ti, tab) in self.tabs.iter().enumerate() {
+            if !tab.is_split() {
+                continue;
+            }
+            for p in &tab.panes {
+                let cwd = p
+                    .session
+                    .cwd
+                    .lock()
+                    .unwrap()
+                    .as_deref()
+                    .map(editor::shorten_home)
+                    .unwrap_or_default();
+                let job = p
+                    .session
+                    .has_foreground_job()
+                    .then(|| p.session.foreground_job_name())
+                    .flatten();
+                let title = match job {
+                    Some(j) => format!("{cwd} — {j}"),
+                    None => cwd,
+                };
+                items.push(row(
+                    title,
+                    format!("tab {}", ti + 1),
+                    Section::Panes,
+                    PaletteAction::FocusPane(ti, p.session.id),
+                ));
+            }
+        }
+        let mut blocks = Vec::new();
+        for (ti, tab) in self.tabs.iter().enumerate() {
+            for p in &tab.panes {
+                for b in p.session.blocks.lock().unwrap().snapshot() {
+                    if let shift_core::BlockState::Done { exit, .. } = b.state
+                        && !b.command.trim().is_empty()
+                    {
+                        blocks.push((b.id, ti, p.session.id, b.command, exit, b.cwd));
+                    }
+                }
+            }
+        }
+        // tabs of other Shift windows (their control sockets)
+        for (pid, _, tabs) in &self.other_windows {
+            for t in tabs {
+                let pane = t.panes.iter().find(|p| p.active).or(t.panes.first());
+                let cwd = pane
+                    .and_then(|p| p.cwd.as_deref())
+                    .map(editor::shorten_home)
+                    .unwrap_or_default();
+                items.push(row(
+                    format!("{} — other window", t.title),
+                    cwd,
+                    Section::Tabs,
+                    PaletteAction::FocusWindow(*pid, t.index, pane.map(|p| p.id).unwrap_or(0)),
+                ));
+            }
+        }
+        items.extend(self.detached_items());
+        // newest first across panes (ids are per pane; interleave by id)
+        blocks.sort_by_key(|a| std::cmp::Reverse(a.0));
+        for (id, ti, pane, command, exit, cwd) in blocks.into_iter().take(40) {
+            let status = match exit {
+                Some(0) | None => String::new(),
+                Some(c) => format!("exit {c} · "),
+            };
+            let dir = cwd.as_deref().map(editor::shorten_home).unwrap_or_default();
+            items.push(row(
+                command,
+                format!("{status}{dir} · tab {}", ti + 1),
+                Section::Blocks,
+                PaletteAction::ShowBlock(ti, pane, id),
+            ));
+        }
+        items
+    }
+
+    /// The pane is on screen and the window has focus.
+    fn pane_in_view(&self, pane: PaneId) -> bool {
+        self.focused
+            && self
+                .tabs
+                .get(self.active)
+                .is_some_and(|t| t.pane(pane).is_some() && t.zoomed.is_none_or(|z| z == pane))
+    }
+
+    fn push_attention(&mut self, a: Attention) {
+        self.attention.push(a);
+        if self.attention.len() > ATTENTION_CAP {
+            let extra = self.attention.len() - ATTENTION_CAP;
+            self.attention.drain(..extra);
+        }
+    }
+
+    /// Commands that finished since last time: out of view ones (and every
+    /// failure) go to the attention center.
+    fn record_completions(&mut self, pane: PaneId) {
+        let in_view = self.pane_in_view(pane);
+        let Some(p) = self
+            .tabs
+            .iter()
+            .flat_map(|t| &t.panes)
+            .find(|p| p.session.id == pane)
+        else {
+            return;
+        };
+        let seen = self.attention_seen.get(&pane).copied();
+        let fresh: Vec<(shift_core::BlockId, String, Option<i32>, Duration, bool)> = p
+            .session
+            .blocks
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|b| seen.is_none_or(|s| b.id > s))
+            .filter_map(|b| match b.state {
+                BlockState::Done { exit, duration } => {
+                    Some((b.id, b.command.clone(), exit, duration, b.restored))
+                }
+                _ => None,
+            })
+            .collect();
+        let Some(newest) = fresh.last().map(|f| f.0) else {
+            return;
+        };
+        self.attention_seen.insert(pane, newest);
+        for (id, command, exit, duration, restored) in fresh {
+            let failed = exit.is_some_and(|e| e != 0);
+            if restored || command.trim().is_empty() || (in_view && !failed) {
+                continue;
+            }
+            self.push_attention(Attention {
+                at: std::time::SystemTime::now(),
+                pane,
+                block: Some(id),
+                kind: if failed {
+                    AttentionKind::Failed
+                } else {
+                    AttentionKind::Finished
+                },
+                title: command,
+                detail: format!(
+                    "{} · {}",
+                    match exit {
+                        Some(0) | None => "finished".to_string(),
+                        Some(c) => format!("exit {c}"),
+                    },
+                    terminal::format_duration(duration)
+                ),
+                read: in_view,
+            });
+        }
+    }
+
+    /// Attention center rows, newest first.
+    fn attention_items(&self) -> Vec<palette::Item> {
+        let now = std::time::SystemTime::now();
+        self.attention
+            .iter()
+            .enumerate()
+            .rev()
+            .map(|(i, a)| {
+                let icon = match a.kind {
+                    AttentionKind::Finished => "✓",
+                    AttentionKind::Failed => "✗",
+                    AttentionKind::Notify => "●",
+                    AttentionKind::Bell => "♪",
+                };
+                let tab = self
+                    .tabs
+                    .iter()
+                    .position(|t| t.pane(a.pane).is_some())
+                    .map(|t| format!("tab {}", t + 1))
+                    .unwrap_or_else(|| "closed pane".into());
+                let ago = now
+                    .duration_since(a.at)
+                    .map(|d| match d.as_secs() {
+                        s if s < 60 => format!("{s}s"),
+                        s if s < 3600 => format!("{}m", s / 60),
+                        s => format!("{}h", s / 3600),
+                    })
+                    .unwrap_or_default();
+                palette::Item {
+                    title: format!("{icon} {}", a.title),
+                    id: [a.detail.as_str(), &tab, &format!("{ago} ago")]
+                        .iter()
+                        .filter(|s| !s.is_empty())
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(" · "),
+                    shortcut: Vec::new(),
+                    section: if a.read {
+                        palette::Section::Recent
+                    } else {
+                        palette::Section::Actions
+                    },
+                    action: palette::PaletteAction::ShowAttention(i),
+                    mono_title: matches!(a.kind, AttentionKind::Finished | AttentionKind::Failed),
+                }
+            })
+            .collect()
+    }
+
+    fn unread_attention(&self) -> usize {
+        self.attention.iter().filter(|a| !a.read).count()
+    }
+
+    /// Palette rows for detached session-service shells.
+    fn detached_items(&self) -> Vec<palette::Item> {
+        self.detached
+            .iter()
+            .map(|s| palette::Item {
+                title: format!(
+                    "Attach detached session: {}{}",
+                    s.cwd
+                        .as_deref()
+                        .map(editor::shorten_home)
+                        .unwrap_or_default(),
+                    s.job
+                        .as_deref()
+                        .map(|j| format!(" — {j}"))
+                        .unwrap_or_default()
+                ),
+                id: format!("pid {}", s.pid),
+                shortcut: Vec::new(),
+                section: palette::Section::Panes,
+                action: palette::PaletteAction::AttachService(s.id),
+                mono_title: false,
+            })
+            .collect()
+    }
+
+    /// Show the block output → command modal for the selected block (or
+    /// the newest finished one).
+    fn open_pipe(&mut self) {
+        let Some(pane) = self.tabs.get(self.active).and_then(|t| t.active()) else {
+            return;
+        };
+        let block = pane.selected_block.or_else(|| {
+            pane.session
+                .blocks
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|b| b.output_range().is_some())
+                .map(|b| b.id)
+        });
+        let Some(block) = block else {
+            self.toast("No block output to send".into());
+            return;
+        };
+        let output = terminal::block_output_text(&pane.session, block).unwrap_or_default();
+        self.pipe_target = Some((pane.session.id, block, output));
+        self.open_palette(crate::views::palette::PaletteMode::PipeOutput);
+    }
+
+    /// Run the pipe modal's command with the block output as its stdin.
+    fn run_pipe(&mut self) {
+        let command = self.palette.query.trim().to_string();
+        let Some((pane, _, output)) = self.pipe_target.take() else {
+            return;
+        };
+        if command.is_empty() {
+            return;
+        }
+        let Some(file) = write_pipe_file(&output) else {
+            self.toast("Could not write the output to a temporary file".into());
+            return;
+        };
+        let shell = shift_core::shell_integration::shell_name(self.config.shell.as_deref());
+        let line = palette::pipe_command(&command, &file.to_string_lossy(), &shell);
+        self.submit_to(pane, &line);
+    }
+
     fn open_palette(&mut self, mode: crate::views::palette::PaletteMode) {
         if mode == crate::views::palette::PaletteMode::Commands {
             // pick up files added while running
             self.launch_configs = shift_core::launch::load_all();
+            self.ssh_profiles = shift_core::ssh::all_profiles(&self.config.ssh_profiles);
+        }
+        if mode == crate::views::palette::PaletteMode::Sessions {
+            self.other_windows = crate::control::other_windows();
+        }
+        if matches!(
+            mode,
+            crate::views::palette::PaletteMode::Sessions
+                | crate::views::palette::PaletteMode::Commands
+        ) {
+            // shells the service keeps that no window shows
+            self.detached = shift_pty::service::list()
+                .into_iter()
+                .filter(|s| s.clients.is_empty())
+                .collect();
         }
         self.palette.open = true;
         self.palette.mode = mode;
         self.palette.query.clear();
         self.palette.selected = 0;
         self.refresh_palette();
+        if mode == crate::views::palette::PaletteMode::Attention {
+            // listed once = seen (the rows keep their unread grouping)
+            for a in &mut self.attention {
+                a.read = true;
+            }
+        }
         self.blink_epoch = Instant::now();
     }
 
@@ -1640,6 +2330,99 @@ impl App {
                         pane.editor.set_with_placeholders(cmd, spans);
                     }
                     self.completion.close();
+                }
+            }
+            PaletteAction::FocusTab(i) => {
+                if i < self.tabs.len() {
+                    self.active = i;
+                    self.tabs[i].activity = false;
+                }
+            }
+            PaletteAction::FocusPane(ti, pane) => {
+                if let Some(tab) = self.tabs.get_mut(ti) {
+                    self.active = ti;
+                    tab.activity = false;
+                    if tab.pane(pane).is_some() {
+                        tab.active_pane = pane;
+                        if tab.zoomed.is_some() {
+                            tab.zoomed = Some(pane);
+                        }
+                    }
+                }
+            }
+            PaletteAction::ShowBlock(ti, pane, block) => {
+                if let Some(tab) = self.tabs.get_mut(ti)
+                    && tab.pane(pane).is_some()
+                {
+                    self.active = ti;
+                    tab.activity = false;
+                    tab.active_pane = pane;
+                    if let Some(p) = tab.pane_mut(pane) {
+                        p.selected_block = Some(block);
+                    }
+                    self.jump_to_block(pane, block);
+                }
+            }
+            PaletteAction::RunPipe => self.run_pipe(),
+            PaletteAction::ShowAttention(i) => {
+                let Some(a) = self.attention.get(i).cloned() else {
+                    return;
+                };
+                let Some(ti) = self.tabs.iter().position(|t| t.pane(a.pane).is_some()) else {
+                    self.toast("That pane is closed".into());
+                    return;
+                };
+                self.active = ti;
+                let tab = &mut self.tabs[ti];
+                tab.activity = false;
+                tab.active_pane = a.pane;
+                if tab.zoomed.is_some() {
+                    tab.zoomed = Some(a.pane);
+                }
+                if let Some(block) = a.block {
+                    if let Some(p) = tab.pane_mut(a.pane) {
+                        p.selected_block = Some(block);
+                    }
+                    self.jump_to_block(a.pane, block);
+                }
+            }
+            PaletteAction::AttachService(id) => {
+                self.next_attach = Some(id);
+                self.spawn_tab_at(None);
+            }
+            PaletteAction::FocusWindow(pid, tab, pane) => {
+                let sock = crate::control::dir().map(|d| d.join(format!("{pid}.sock")));
+                let r = sock.map(|s| {
+                    crate::control::request(
+                        &s,
+                        &crate::control::Request::Focus {
+                            tab: Some(tab),
+                            pane: Some(pane),
+                        },
+                    )
+                });
+                if !matches!(r, Some(Ok(ref resp)) if resp.ok) {
+                    self.toast("That window is no longer running".into());
+                }
+            }
+            PaletteAction::Ssh(i) => {
+                if let Some(p) = self.ssh_profiles.get(i).cloned() {
+                    self.open_tab_running(&p.name, p.command());
+                }
+            }
+            PaletteAction::SshInstall(i) => {
+                if let Some(p) = self.ssh_profiles.get(i).cloned() {
+                    self.confirm = Some(ConfirmClose {
+                        commands: vec![
+                            "~/.local/share/shift/shift.{bash,zsh,fish}".into(),
+                            format!(
+                                "~/.bashrc, ~/.zshrc: one line ending {}",
+                                shift_core::ssh::RC_MARKER
+                            ),
+                            "~/.config/fish/conf.d/shift.fish".into(),
+                        ],
+                        action: ConfirmAction::InstallRemote(p),
+                    });
                 }
             }
             PaletteAction::RunHistory(cmd) => {
@@ -1878,19 +2661,133 @@ impl App {
                 }
                 SessionEvent::Exit => proxy.send_event(UserEvent::PtyExit(pane)),
                 SessionEvent::Bell => proxy.send_event(UserEvent::PtyBell(pane)),
+                SessionEvent::Notify { title, body } => {
+                    proxy.send_event(UserEvent::PtyNotify(pane, title, body))
+                }
             };
         });
-        Session::spawn(SpawnOptions {
+        // durable sessions: reattach a restored shell, else start one in
+        // the session service; fall back to a local shell if it fails
+        let attach = self.next_attach.take();
+        let service = self.config.durable_sessions.then_some(match attach {
+            Some(id) => shift_pty::ServiceTarget::Attach(id),
+            None => shift_pty::ServiceTarget::Spawn,
+        });
+        // a reattached shell replays its own output; no transcript on top
+        let replay = self
+            .next_replay
+            .take()
+            .filter(|_| self.config.save_transcripts && attach.is_none())
+            .and_then(|id| shift_core::transcript::load(&id))
+            .map(|t| (t.replay_bytes(), t.meta()));
+        let (cell_size, shell, scrollback) = (
+            self.cell_px(),
+            self.config.shell.clone(),
+            self.config.scrollback,
+        );
+        let opts = |service, replay| SpawnOptions {
             id,
             size: GridSize { cols, rows },
-            cell_size: (self.cell_w.round() as u16, self.line_h.round() as u16),
-            shell: self.config.shell.clone(),
-            working_directory: cwd,
+            cell_size,
+            shell: shell.clone(),
+            working_directory: cwd.clone(),
             env: vec![],
-            scrollback: self.config.scrollback,
-            observer,
-        })
-        .expect("spawn shell")
+            scrollback,
+            observer: observer.clone(),
+            replay,
+            service,
+        };
+        match Session::spawn(opts(service, replay.clone())) {
+            Ok(s) => s,
+            Err(e) if service.is_some() => {
+                log::warn!("session service: {e}");
+                // a shell that ended while detached: start a fresh one there
+                let retry = if matches!(service, Some(shift_pty::ServiceTarget::Attach(_))) {
+                    Session::spawn(opts(Some(shift_pty::ServiceTarget::Spawn), replay.clone())).ok()
+                } else {
+                    None
+                };
+                match retry {
+                    Some(s) => s,
+                    None => {
+                        let s = Session::spawn(opts(None, replay)).expect("spawn shell");
+                        self.toast(format!(
+                            "Session service unavailable ({e}); this shell is local"
+                        ));
+                        s
+                    }
+                }
+            }
+            Err(e) => panic!("spawn shell: {e}"),
+        }
+    }
+
+    /// Transcript of `pane`'s finished blocks (restored ones included, so a
+    /// history survives several relaunches, within the bounds).
+    fn pane_transcript(pane: &PaneState) -> shift_core::transcript::Transcript {
+        use shift_core::transcript::{SavedBlock, Transcript};
+        // snapshot first: block_output_text takes the blocks lock itself
+        let snapshot = pane.session.blocks.lock().unwrap().snapshot();
+        let blocks: Vec<SavedBlock> = snapshot
+            .into_iter()
+            .filter_map(|b| match b.state {
+                shift_core::BlockState::Done { exit, duration } => Some(SavedBlock {
+                    output: terminal::block_output_text(&pane.session, b.id).unwrap_or_default(),
+                    command: b.command,
+                    exit,
+                    duration_ms: duration.as_millis() as u64,
+                    cwd: b.cwd,
+                }),
+                _ => None,
+            })
+            .collect();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or_default();
+        Transcript::bounded(blocks, now)
+    }
+
+    /// Write `pane`'s transcript when a block finished since the last write.
+    fn save_transcript_if_changed(&mut self, pane_id: PaneId) {
+        if !self.config.save_transcripts || !self.persist_session {
+            return;
+        }
+        let Some(pane) = self
+            .tabs
+            .iter()
+            .flat_map(|t| &t.panes)
+            .find(|p| p.session.id == pane_id)
+        else {
+            return;
+        };
+        let newest = pane
+            .session
+            .blocks
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|b| matches!(b.state, shift_core::BlockState::Done { .. }))
+            .map(|b| b.id);
+        let Some(newest) = newest else { return };
+        if self.transcript_saved.get(&pane_id) == Some(&newest) {
+            return;
+        }
+        let id = pane.transcript_id.clone();
+        let t = Self::pane_transcript(pane);
+        shift_core::transcript::save(&id, &t);
+        self.transcript_saved.insert(pane_id, newest);
+    }
+
+    /// Palette "Clear saved block transcripts": delete every file.
+    fn clear_transcripts(&mut self) {
+        let n = shift_core::transcript::remove_except(&[]);
+        self.transcript_saved.clear();
+        self.toast(format!(
+            "Deleted {n} saved transcript{}",
+            if n == 1 { "" } else { "s" }
+        ));
     }
 
     fn spawn_tab(&mut self) {
@@ -1913,6 +2810,7 @@ impl App {
 
     fn spawn_tab_at(&mut self, cwd: Option<std::path::PathBuf>) {
         let (lw, lh) = self.logical_size();
+        let lw = lw - self.rail_w();
         let cols = ((lw - self.config.padding() * 2.0 - terminal::BLOCK_INDENT) / self.cell_w)
             .max(2.0) as usize;
         let rows = ((lh - TAB_BAR_H - TOP_PAD - EDITOR_H) / self.line_h).max(2.0) as usize;
@@ -1937,11 +2835,19 @@ impl App {
                 .clone()
                 .or_else(|| p.last_git_cwd.clone())
         }
-        fn layout(tab: &TabState, node: &crate::pane::PaneNode) -> SavedLayout {
+        // transcript ids are only recorded (and files only written) while
+        // `save_transcripts` is on
+        let transcripts = self.config.save_transcripts;
+        fn layout(tab: &TabState, node: &crate::pane::PaneNode, transcripts: bool) -> SavedLayout {
             match node {
                 crate::pane::PaneNode::Leaf(id) => SavedLayout::Pane {
                     cwd: tab.pane(*id).and_then(pane_cwd),
                     focused: *id == tab.active_pane,
+                    transcript: tab
+                        .pane(*id)
+                        .filter(|_| transcripts)
+                        .map(|p| p.transcript_id.clone()),
+                    service: tab.pane(*id).and_then(|p| p.session.service_id),
                 },
                 crate::pane::PaneNode::Split {
                     axis,
@@ -1954,8 +2860,8 @@ impl App {
                         Axis::Vertical => SavedAxis::Vertical,
                     },
                     *ratio,
-                    layout(tab, first),
-                    layout(tab, second),
+                    layout(tab, first, transcripts),
+                    layout(tab, second, transcripts),
                 ),
             }
         }
@@ -1969,7 +2875,13 @@ impl App {
                     .color
                     .and_then(|c| crate::state::TAB_COLORS.get(c))
                     .map(|s| s.to_string()),
-                layout: t.is_split().then(|| layout(t, &t.root)),
+                layout: t.is_split().then(|| layout(t, &t.root, transcripts)),
+                transcript: (transcripts && !t.is_split())
+                    .then(|| t.active().map(|p| p.transcript_id.clone()))
+                    .flatten(),
+                service: (!t.is_split())
+                    .then(|| t.active().and_then(|p| p.session.service_id))
+                    .flatten(),
             })
             .collect();
         save(&SavedSession {
@@ -1978,6 +2890,15 @@ impl App {
             window: self.window_frame(),
             ..Default::default()
         });
+        if transcripts {
+            let mut keep = Vec::new();
+            for p in self.tabs.iter().flat_map(|t| &t.panes) {
+                shift_core::transcript::save(&p.transcript_id, &Self::pane_transcript(p));
+                keep.push(p.transcript_id.clone());
+            }
+            // closed panes' transcripts go with them
+            shift_core::transcript::remove_except(&keep);
+        }
     }
 
     /// Current window frame in logical px (for session restore).
@@ -2013,8 +2934,22 @@ impl App {
                 .map(std::path::PathBuf::from)
                 .filter(|p| p.is_dir())
         });
+        let transcript = match &saved.layout {
+            Some(l) => l.first_transcript().map(str::to_string),
+            None => saved.transcript.clone(),
+        };
+        self.next_replay = transcript.clone();
+        self.next_attach = match &saved.layout {
+            Some(l) => l.first_service(),
+            None => saved.service,
+        };
         self.spawn_tab_at(top_cwd);
         let root = self.tabs[self.active].active_pane;
+        if let Some(id) = transcript
+            && let Some(p) = self.tabs[self.active].pane_mut(root)
+        {
+            p.transcript_id = id;
+        }
         if let Some(layout) = &saved.layout {
             self.build_saved(layout, root);
             let tab = &mut self.tabs[self.active];
@@ -2150,7 +3085,18 @@ impl App {
                     SavedAxis::Horizontal => Axis::Horizontal,
                     SavedAxis::Vertical => Axis::Vertical,
                 };
+                let transcript = second.first_transcript().map(str::to_string);
+                self.next_replay = transcript.clone();
+                self.next_attach = second.first_service();
                 let new_id = self.split_pane(pane, axis, leaf_cwd(second));
+                if let Some(id) = transcript
+                    && let Some(p) = self
+                        .tabs
+                        .get_mut(self.active)
+                        .and_then(|t| t.pane_mut(new_id))
+                {
+                    p.transcript_id = id;
+                }
                 self.build_saved(first, pane);
                 self.build_saved(second, new_id);
             }
@@ -2182,6 +3128,10 @@ impl App {
         else {
             return;
         };
+        // closing a pane ends its shell even when the session service owns it
+        if let Some(p) = self.tabs[tab_idx].pane(pane) {
+            p.session.terminate();
+        }
         let tab = &mut self.tabs[tab_idx];
         if tab.panes.len() <= 1 {
             // remember the cwd for ⇧⌘T (same source as save_session)
@@ -2246,6 +3196,28 @@ impl App {
         (self.blink_epoch.elapsed().as_millis() / BLINK_INTERVAL.as_millis()).is_multiple_of(2)
     }
 
+    /// Width taken by the vertical tab rail (0 with tabs on top).
+    /// Cell size in physical pixels (text-area size replies and inline
+    /// image sizing: programs compute image cell spans from these).
+    fn cell_px(&self) -> (u16, u16) {
+        let scale = self
+            .window
+            .as_ref()
+            .map(|w| w.scale_factor() as f32)
+            .unwrap_or(1.0);
+        (
+            (self.cell_w * scale).round() as u16,
+            (self.line_h * scale).round() as u16,
+        )
+    }
+
+    fn rail_w(&self) -> f32 {
+        match self.config.tab_layout {
+            shift_core::TabLayout::Vertical => tabbar::RAIL_W,
+            shift_core::TabLayout::Horizontal => 0.0,
+        }
+    }
+
     /// Layout the active tab's panes within the content area.
     fn pane_rects(&self, w: f32, h: f32) -> (Vec<PaneRect>, Vec<HandleRect>) {
         let mut panes = Vec::new();
@@ -2253,6 +3225,8 @@ impl App {
         let Some(tab) = self.tabs.get(self.active) else {
             return (panes, handles);
         };
+        let x0 = self.rail_w();
+        let w = w - x0;
         // ⇧⌘⏎ zoom: the zoomed pane takes the whole content rect (no handles
         // → no drag targets); hidden panes keep streaming, just not laid out
         if let Some(z) = tab.zoomed
@@ -2261,13 +3235,13 @@ impl App {
         {
             panes.push(PaneRect {
                 id: z,
-                rect: [0.0, TAB_BAR_H, w, h - TAB_BAR_H],
+                rect: [x0, TAB_BAR_H, w, h - TAB_BAR_H],
             });
             return (panes, handles);
         }
         if tab.is_split() {
             let area = [
-                SIDE_PAD,
+                x0 + SIDE_PAD,
                 TAB_BAR_H + SIDE_PAD,
                 w - SIDE_PAD * 2.0,
                 h - TAB_BAR_H - SIDE_PAD * 2.0,
@@ -2276,7 +3250,7 @@ impl App {
         } else {
             panes.push(PaneRect {
                 id: tab.active_pane,
-                rect: [0.0, TAB_BAR_H, w, h - TAB_BAR_H],
+                rect: [x0, TAB_BAR_H, w, h - TAB_BAR_H],
             });
         }
         (panes, handles)
@@ -2286,6 +3260,7 @@ impl App {
         let theme = self.theme.clone();
         let blink = self.blink_on() || !self.config.cursor_blink;
         let cell_w = self.cell_w;
+        let cell_px = self.cell_px();
         let font_size = self.font_size;
         let line_h = self.line_h;
         let ligatures = self.config.ligatures;
@@ -2317,8 +3292,26 @@ impl App {
                     .filter(|(ri, _)| *ri == i)
                     .map(|(_, s)| s.clone()),
                 editing_selected: self.rename_fresh,
+                subtitle: t
+                    .active()
+                    .map(|p| {
+                        let cwd = p
+                            .session
+                            .cwd
+                            .lock()
+                            .unwrap()
+                            .as_deref()
+                            .map(editor::shorten_home)
+                            .unwrap_or_default();
+                        match &p.git {
+                            Some(g) => format!("{cwd} · {}", g.branch),
+                            None => cwd,
+                        }
+                    })
+                    .unwrap_or_default(),
             })
             .collect();
+        let rail_w = self.rail_w();
         // right-edge hint (design 01 "⌘K palette" / design 02 "⌃⇧D split"
         // pill), using whatever chord the keymap resolves today
         let split_view = self.tabs.get(active_tab_idx).is_some_and(|t| t.is_split());
@@ -2337,7 +3330,26 @@ impl App {
             })
             .map(|chord| format!("{chord} {}", if split_view { "split" } else { "palette" }))
             .unwrap_or_default();
-        let confirm = self.confirm.as_ref().map(|c| (c.scope, c.commands.clone()));
+        // unread attention-center entries lead the hint
+        let unread = self.unread_attention();
+        let tab_hint = if unread > 0 {
+            let chord = self
+                .keymap
+                .bindings_for("attention_center")
+                .first()
+                .map(|b| b.chips().concat())
+                .unwrap_or_default();
+            format!(
+                "● {unread} alert{} {chord}   {tab_hint}",
+                if unread == 1 { "" } else { "s" }
+            )
+        } else {
+            tab_hint
+        };
+        let confirm = self
+            .confirm
+            .as_ref()
+            .map(|c| (c.action.clone(), c.commands.clone()));
         let toast = self
             .toast
             .as_ref()
@@ -2355,6 +3367,7 @@ impl App {
             palette,
             palette_results,
             palette_row_hits,
+            settings_names,
             settings: settings_state,
             config: config_ref,
             keymap: keymap_ref,
@@ -2381,18 +3394,43 @@ impl App {
         let completion_ghost = completion.ghost.clone();
 
         // ── layer 0: chrome ──
-        tabbar::render(
-            scene.layer(0),
-            engine,
-            &theme,
-            &tab_infos,
-            &tab_hint,
-            split_view,
-            active_tab_idx,
-            w,
-            blink,
-            &mut hits,
-        );
+        if rail_w > 0.0 {
+            tabbar::render(
+                scene.layer(0),
+                engine,
+                &theme,
+                &[],
+                &tab_hint,
+                split_view,
+                active_tab_idx,
+                w,
+                blink,
+                &mut hits,
+            );
+            tabbar::render_rail(
+                scene.layer(0),
+                engine,
+                &theme,
+                &tab_infos,
+                active_tab_idx,
+                h,
+                blink,
+                &mut hits,
+            );
+        } else {
+            tabbar::render(
+                scene.layer(0),
+                engine,
+                &theme,
+                &tab_infos,
+                &tab_hint,
+                split_view,
+                active_tab_idx,
+                w,
+                blink,
+                &mut hits,
+            );
+        }
 
         let Some(tab) = tabs.get_mut(active_tab_idx) else {
             self.hits = hits;
@@ -2402,9 +3440,12 @@ impl App {
 
         if split {
             // gutter fill
-            scene
-                .layer(0)
-                .rect([0.0, TAB_BAR_H], [w, h - TAB_BAR_H], theme.bg_gutter, 0.0);
+            scene.layer(0).rect(
+                [rail_w, TAB_BAR_H],
+                [w - rail_w, h - TAB_BAR_H],
+                theme.bg_gutter,
+                0.0,
+            );
         }
 
         // resize handles (drawn under panes is fine — gaps show gutter)
@@ -2439,7 +3480,7 @@ impl App {
             let editor_area_w = if split {
                 pr.rect[2] - PANE_PAD * 2.0
             } else {
-                w - side_pad * 2.0
+                pr.rect[2] - side_pad * 2.0
             };
             let ed_cols =
                 editor::input_cols(editor_area_w, cell_w, ed_char_w, pane.editor.vim_enabled());
@@ -2498,7 +3539,7 @@ impl App {
                     cols: grid.cols,
                     rows: grid.rows,
                 },
-                (cell_w.round() as u16, line_h.round() as u16),
+                cell_px,
             );
 
             // pane chrome (design 02)
@@ -2571,6 +3612,12 @@ impl App {
             pane.rows = out.rows;
             pane.last_grid = Some(grid);
             pane.alt_screen = out.alt_screen;
+            layer.sprites.extend(terminal::image_sprites(
+                &pane.session,
+                &pane.rows,
+                &grid,
+                out.alt_screen,
+            ));
             pane.has_selection = {
                 // cheap mirror: render computed to_range under the same lock
                 pane.session.term.lock().selection.is_some()
@@ -2604,10 +3651,12 @@ impl App {
             let sticky_block = out.sticky_block;
 
             // Warp-style boot placeholder until the shell's first byte
+            // (not over a replayed transcript)
             if !pane
                 .session
                 .saw_output
                 .load(std::sync::atomic::Ordering::Acquire)
+                && pane.session.blocks.lock().unwrap().last().is_none()
             {
                 let shell = shift_core::shell_integration::shell_name(config_ref.shell.as_deref());
                 let label = format!("Starting {shell}\u{2026}");
@@ -2654,8 +3703,18 @@ impl App {
                         pr.rect[2] - PANE_PAD * 2.0,
                         eh,
                     ],
-                    (false, false) => [side_pad, h - eh, w - side_pad * 2.0, eh],
-                    (false, true) => [side_pad, pr.rect[1] + 4.0, w - side_pad * 2.0, eh],
+                    (false, false) => [
+                        pr.rect[0] + side_pad,
+                        h - eh,
+                        pr.rect[2] - side_pad * 2.0,
+                        eh,
+                    ],
+                    (false, true) => [
+                        pr.rect[0] + side_pad,
+                        pr.rect[1] + 4.0,
+                        pr.rect[2] - side_pad * 2.0,
+                        eh,
+                    ],
                 };
                 let anchor = editor::render(
                     layer,
@@ -2869,6 +3928,7 @@ impl App {
                 w,
                 h,
                 &mut hits,
+                settings_names,
             );
         }
 
@@ -2896,29 +3956,71 @@ impl App {
         } else {
             self.context_menu_rects.clear();
         }
+        if let Some(hs) = &self.hints {
+            let items: Vec<(&str, [f32; 4], bool)> = hs
+                .items
+                .iter()
+                .map(|(l, r, t)| (l.as_str(), *r, matches!(t, HintTarget::Open(_))))
+                .collect();
+            crate::views::hints::render(scene.layer(5), engine, &theme, &items, &hs.typed);
+        }
 
         // ── layer 6: toast + close/quit warning (modal: eats every click) ──
         if let Some(msg) = &toast {
             crate::views::confirm::toast(scene.layer(6), engine, &theme, msg, w, h);
         }
-        if let Some((scope, commands)) = &confirm {
+        if let Some((action, commands)) = &confirm {
             hits.clear();
-            let (title, label) = match scope {
-                CloseScope::Pane(_) => ("Close pane?", "Close pane"),
-                CloseScope::Tab(_) => ("Close tab?", "Close tab"),
-                CloseScope::OtherTabs(_) => ("Close other tabs?", "Close tabs"),
-                CloseScope::Window => ("Quit Shift?", "Quit"),
+            use crate::views::confirm::Dialog;
+            let dialog = match action {
+                ConfirmAction::Close(scope) => {
+                    let (title, label) = match scope {
+                        CloseScope::Pane(_) => ("Close pane?", "Close pane"),
+                        CloseScope::Tab(_) => ("Close tab?", "Close tab"),
+                        CloseScope::OtherTabs(_) => ("Close other tabs?", "Close tabs"),
+                        CloseScope::Window => ("Quit Shift?", "Quit"),
+                    };
+                    let count = commands.len();
+                    Dialog {
+                        title,
+                        description: format!(
+                            "{count} running process{} will be terminated.",
+                            if count == 1 { "" } else { "es" }
+                        ),
+                        note: "This cannot be undone. Cancel to keep the session open.",
+                        lines: commands,
+                        empty_line: "<running shell process>",
+                        confirm_label: label,
+                        destructive: true,
+                    }
+                }
+                ConfirmAction::Paste { .. } => {
+                    let count = commands.len();
+                    Dialog {
+                        title: "Paste and run?",
+                        description: format!(
+                            "{count} line{} will be sent to this program as typed input.",
+                            if count == 1 { "" } else { "s" }
+                        ),
+                        note: "The program has not enabled bracketed paste, so each newline presses Enter.",
+                        lines: commands,
+                        empty_line: "<blank line>",
+                        confirm_label: "Paste",
+                        destructive: false,
+                    }
+                }
+                ConfirmAction::InstallRemote(p) => Dialog {
+                    title: "Install shell integration?",
+                    description: format!("Runs an installer over ssh on {} that writes:", p.host),
+                    note: "Hooks load only in Shift (LC_TERMINAL). Remove the files to undo.",
+                    lines: commands,
+                    empty_line: "",
+                    confirm_label: "Install",
+                    destructive: false,
+                },
             };
-            self.confirm_rects = crate::views::confirm::render(
-                scene.layer(6),
-                engine,
-                &theme,
-                title,
-                commands,
-                label,
-                w,
-                h,
-            );
+            self.confirm_rects =
+                crate::views::confirm::render(scene.layer(6), engine, &theme, &dialog, w, h);
         }
 
         hits.extend(focus_hits);
@@ -2961,10 +4063,21 @@ impl App {
             ranges.push(start..all_quads.len() as u32);
         }
 
-        let (Some(gpu), Some(quads), Some(text)) = (&mut self.gpu, &mut self.quads, &mut self.text)
-        else {
+        let (Some(gpu), Some(quads), Some(text), Some(sprites)) = (
+            &mut self.gpu,
+            &mut self.quads,
+            &mut self.text,
+            &mut self.sprites,
+        ) else {
             return;
         };
+        let sprite_layers: Vec<&[shift_renderer::Sprite]> = self
+            .scene
+            .layers
+            .iter()
+            .map(|l| l.sprites.as_slice())
+            .collect();
+        sprites.prepare(&gpu.device, &gpu.queue, [lw, lh], &sprite_layers);
         // prepared once; drawn first in every pass (main + capture)
         if let Some(img) = self.bg_image.as_mut()
             && img.has_image()
@@ -3010,7 +4123,24 @@ impl App {
             .collect();
         text.prepare_layers(&gpu.device, &gpu.queue, (pw, ph), text_layers);
 
-        let Some(frame) = gpu.acquire() else { return };
+        // script `shot`: offscreen, so it works even when the window
+        // surface is unavailable (occluded window, display asleep)
+        if let Some(path) = self.capture.take() {
+            crate::capture::capture_frame(
+                gpu,
+                quads,
+                text,
+                sprites,
+                bg_image,
+                &ranges,
+                self.theme.bg,
+                &path,
+            );
+        }
+        let Some(frame) = gpu.acquire() else {
+            text.trim();
+            return;
+        };
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -3039,25 +4169,23 @@ impl App {
             }
             for (i, range) in ranges.iter().cloned().enumerate() {
                 quads.render_range(&mut pass, range);
+                sprites.render_layer(i, true, &mut pass);
                 text.render_layer(i, &mut pass);
+                sprites.render_layer(i, false, &mut pass);
             }
         }
-        let capture_ranges = ranges;
         gpu.queue.submit([encoder.finish()]);
-        if let Some(path) = self.capture.take() {
-            crate::capture::capture_frame(
-                gpu,
-                quads,
-                text,
-                bg_image,
-                &capture_ranges,
-                self.theme.bg,
-                &path,
-            );
-        }
         window.pre_present_notify();
         frame.present();
         text.trim();
+        // SHIFT_LATENCY_LOG: key → program output → presented frame
+        if let Some((t, true)) = self.latency_probe {
+            log::info!(
+                "latency: key-to-frame {:.2}ms",
+                t.elapsed().as_secs_f64() * 1e3
+            );
+            self.latency_probe = None;
+        }
     }
 
     fn handle_action(&mut self, action: AppAction, event_loop: &ActiveEventLoop) {
@@ -3137,6 +4265,23 @@ impl App {
                 }
             }
             AppAction::SaveLaunchConfig => self.save_current_layout(),
+            AppAction::SessionSwitcher => {
+                self.open_palette(crate::views::palette::PaletteMode::Sessions)
+            }
+            AppAction::PipeBlockOutput => self.open_pipe(),
+            AppAction::ToggleTabLayout => {
+                self.config.tab_layout = match self.config.tab_layout {
+                    shift_core::TabLayout::Horizontal => shift_core::TabLayout::Vertical,
+                    shift_core::TabLayout::Vertical => shift_core::TabLayout::Horizontal,
+                };
+                self.save_config();
+                self.apply_config();
+            }
+            AppAction::HintMode => self.start_hints(),
+            AppAction::AttentionCenter => {
+                self.open_palette(crate::views::palette::PaletteMode::Attention)
+            }
+            AppAction::ClearTranscripts => self.clear_transcripts(),
             AppAction::TabNext => {
                 if !self.tabs.is_empty() {
                     self.switch_tab((self.active + 1) % self.tabs.len());
@@ -3835,7 +4980,10 @@ impl App {
         if self.config.confirm_close_running {
             let commands = self.running_in(scope);
             if !commands.is_empty() {
-                self.confirm = Some(ConfirmClose { scope, commands });
+                self.confirm = Some(ConfirmClose {
+                    action: ConfirmAction::Close(scope),
+                    commands,
+                });
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
@@ -3874,6 +5022,13 @@ impl App {
             }
             CloseScope::Window => {
                 self.save_session();
+                // durable shells outlive the window only when a relaunch
+                // will reattach them; otherwise they would be orphaned
+                if !self.persist_session || !self.config.restore_session {
+                    for p in self.tabs.iter().flat_map(|t| &t.panes) {
+                        p.session.terminate();
+                    }
+                }
                 event_loop.exit();
             }
         }
@@ -3890,11 +5045,47 @@ impl App {
             Key::Named(NamedKey::Escape) => self.confirm = None,
             Key::Named(NamedKey::Enter) => {
                 if let Some(c) = self.confirm.take() {
-                    self.perform_close(c.scope, event_loop);
+                    self.perform_confirmed(c.action, event_loop);
                 }
             }
             _ => {}
         }
+    }
+
+    fn perform_confirmed(&mut self, action: ConfirmAction, event_loop: &ActiveEventLoop) {
+        match action {
+            ConfirmAction::Close(scope) => self.perform_close(scope, event_loop),
+            ConfirmAction::Paste { pane, text } => {
+                self.write_synced(pane, &input::unbracketed_paste(&text), false);
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+            ConfirmAction::InstallRemote(profile) => {
+                let script = shift_core::shell_integration::data_dir()
+                    .map(|d| d.join("remote-install.sh"))
+                    .filter(|p| std::fs::write(p, shift_core::ssh::installer_script()).is_ok());
+                match script {
+                    Some(path) => {
+                        let title = format!("install on {}", profile.name);
+                        self.open_tab_running(&title, profile.install_command(&path));
+                    }
+                    None => self.toast("Could not write the installer script".into()),
+                }
+            }
+        }
+    }
+
+    /// New tab titled `title` that runs `command` at its first prompt (a
+    /// normal block: ssh prompts and output stay visible and interactive).
+    fn open_tab_running(&mut self, title: &str, command: String) {
+        self.spawn_tab_at(None);
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.custom_title = Some(title.to_string());
+            let pane = tab.active_pane;
+            self.pending_commands.insert(pane, vec![command]);
+        }
+        self.save_session();
     }
 
     /// Open another Shift window (a separate process that neither restores
@@ -4169,6 +5360,11 @@ impl App {
             window.request_redraw();
             return;
         }
+        if self.hints.is_some() {
+            self.handle_hint_key(event);
+            window.request_redraw();
+            return;
+        }
         if self.rename.is_some() {
             self.handle_rename_key(event);
             window.request_redraw();
@@ -4256,20 +5452,8 @@ impl App {
             }
             return;
         }
-        let Some(id) = self.tabs.get(self.active).map(|t| t.active_pane) else {
+        let Some((id, enc)) = self.raw_key_encoding() else {
             return;
-        };
-        let app_cursor = self
-            .tabs
-            .get(self.active)
-            .and_then(|t| t.pane(id))
-            .is_some_and(|p| {
-                use shift_pty::alacritty_terminal::term::TermMode;
-                p.session.term.lock().mode().contains(TermMode::APP_CURSOR)
-            });
-        let enc = input::KeyEncoding {
-            app_cursor,
-            option_as_meta: self.config.option_as_meta,
         };
         if let Some(bytes) = input::key_to_bytes(event, self.modifiers, enc) {
             if let Some(pane) = self.tabs.get_mut(self.active).and_then(|t| t.active_mut()) {
@@ -4277,6 +5461,50 @@ impl App {
                 pane.view_offset = 0;
                 pane.clear_selection();
             }
+            if enc.kitty_flags & crate::keyboard::EVENT_TYPES != 0 {
+                self.keys_down.insert((id, input::key_identity(event)));
+            }
+            if self.latency_log {
+                self.latency_probe = Some((Instant::now(), false));
+            }
+            self.write_synced(id, &bytes, false);
+        }
+    }
+
+    /// The active pane and how its program wants keys encoded.
+    fn raw_key_encoding(&self) -> Option<(PaneId, input::KeyEncoding)> {
+        use shift_pty::alacritty_terminal::term::TermMode;
+        let pane = self.tabs.get(self.active)?.active()?;
+        let mode = *pane.session.term.lock().mode();
+        Some((
+            pane.session.id,
+            input::KeyEncoding {
+                app_cursor: mode.contains(TermMode::APP_CURSOR),
+                option_as_meta: self.config.option_as_meta,
+                kitty_flags: crate::keyboard::flags_from_mode(mode),
+            },
+        ))
+    }
+
+    /// A key release: reported only to a program that asked for event
+    /// types (kitty flag 2), and only for keys whose press it received.
+    pub(crate) fn on_key_release(&mut self, event: &input::KeyPress) {
+        let Some((id, enc)) = self.raw_key_encoding() else {
+            return;
+        };
+        let pressed = self
+            .keys_down
+            .iter()
+            .find(|(_, k)| *k == input::key_identity(event))
+            .cloned();
+        let Some(pressed) = pressed else {
+            return;
+        };
+        self.keys_down.remove(&pressed);
+        if pressed.0 != id || self.editor_active {
+            return;
+        }
+        if let Some(bytes) = input::key_to_bytes(event, self.modifiers, enc) {
             self.write_synced(id, &bytes, false);
         }
     }
@@ -4469,7 +5697,7 @@ impl App {
         if self.confirm.is_some() {
             if inside(&self.confirm_rects[1]) {
                 if let Some(c) = self.confirm.take() {
-                    self.perform_close(c.scope, event_loop);
+                    self.perform_confirmed(c.action, event_loop);
                 }
             } else if inside(&self.confirm_rects[0]) {
                 self.confirm = None;
@@ -4673,6 +5901,18 @@ impl App {
                     "error_underline" => c.error_underline = !c.error_underline,
                     "command_corrections" => c.command_corrections = !c.command_corrections,
                     "confirm_close_running" => c.confirm_close_running = !c.confirm_close_running,
+                    "confirm_multiline_paste" => {
+                        c.confirm_multiline_paste = !c.confirm_multiline_paste
+                    }
+                    "durable_sessions" => c.durable_sessions = !c.durable_sessions,
+                    "save_transcripts" => {
+                        c.save_transcripts = !c.save_transcripts;
+                        if !c.save_transcripts {
+                            // off means gone, not just no longer updated
+                            shift_core::transcript::remove_except(&[]);
+                            self.transcript_saved.clear();
+                        }
+                    }
                     "mouse_reporting" => c.mouse_reporting = !c.mouse_reporting,
                     "option_as_meta" => c.option_as_meta = !c.option_as_meta,
                     _ => {}
@@ -4719,6 +5959,28 @@ impl App {
                             InputPosition::Top
                         } else {
                             InputPosition::Bottom
+                        }
+                    }
+                    "control_api" => {
+                        c.control_api = ["off", "navigate", "full"]
+                            .get(*v as usize)
+                            .unwrap_or(&"navigate")
+                            .to_string();
+                        // rebind with the new level (drop removes the socket)
+                        self.control_server = None;
+                        let proxy = self.proxy.clone();
+                        self.control_server = crate::control::serve(
+                            crate::control::Level::parse(&self.config.control_api),
+                            move |p| {
+                                let _ = proxy.send_event(UserEvent::Control(p));
+                            },
+                        );
+                    }
+                    "tab_layout" => {
+                        c.tab_layout = if *v == 1 {
+                            shift_core::TabLayout::Vertical
+                        } else {
+                            shift_core::TabLayout::Horizontal
                         }
                     }
                     "prompt" => {
@@ -5088,11 +6350,11 @@ impl App {
         if text.is_empty() {
             return;
         }
-        let press = input::KeyPress {
-            logical_key: winit::keyboard::Key::Character(text.into()),
-            text: Some(text.to_string()),
-            unmodified: None,
-        };
+        let press = input::KeyPress::new(
+            winit::keyboard::Key::Character(text.into()),
+            Some(text.to_string()),
+            None,
+        );
         let saved = self.modifiers;
         self.modifiers = ModifiersState::empty();
         self.on_key(&press, event_loop, window);
@@ -5341,6 +6603,29 @@ impl App {
     /// Terminal bell (BEL): visual flash, audible sound, tab activity.
     fn on_bell(&mut self, pane: PaneId) {
         use shift_core::Bell;
+        if !self.pane_in_view(pane) {
+            // coalesce repeated bells from the same pane
+            let recent = self.attention.last().is_some_and(|a| {
+                a.pane == pane
+                    && a.kind == AttentionKind::Bell
+                    && a.at.elapsed().is_ok_and(|d| d < Duration::from_secs(10))
+            });
+            if !recent {
+                let job = self
+                    .find_tab_of_pane(pane)
+                    .and_then(|(_, t)| t.pane(pane))
+                    .and_then(|p| p.session.foreground_job_name());
+                self.push_attention(Attention {
+                    at: std::time::SystemTime::now(),
+                    pane,
+                    block: None,
+                    kind: AttentionKind::Bell,
+                    title: "Bell".into(),
+                    detail: job.unwrap_or_default(),
+                    read: false,
+                });
+            }
+        }
         let bell = self.config.bell;
         if matches!(bell, Bell::Visual | Bell::Both) {
             self.bell_flash = Some(Instant::now());
@@ -5485,6 +6770,16 @@ impl App {
         match step {
             Step::Wait(_) => {}
             Step::Key(chord) => press(self, &chord),
+            Step::KeyUp(chord) => {
+                if let Some((mut p, mods)) = key_press(&chord) {
+                    p.released = true;
+                    p.text = None;
+                    let saved = self.modifiers;
+                    self.modifiers = mods;
+                    self.on_key_release(&p);
+                    self.modifiers = saved;
+                }
+            }
             Step::Type(text) => {
                 for ch in text.chars() {
                     if ch == '\n' {
@@ -5500,7 +6795,12 @@ impl App {
             }
             Step::Shot(path) => self.capture = Some(path),
             Step::Dump(path) => {
-                let text = self.dump_state();
+                let mut text = self.dump_state();
+                let snapshot = self.a11y_snapshot(window.scale_factor());
+                text.push_str("── accessibility ──\n");
+                text.push_str(&crate::a11y::describe(
+                    &crate::a11y::build(&snapshot).update,
+                ));
                 if let Err(e) = std::fs::write(&path, text) {
                     log::warn!("script: dump {}: {e}", path.display());
                 }
@@ -5552,6 +6852,7 @@ impl App {
             Step::Ime(text) => self.commit_text(&text, event_loop, window),
             Step::Preedit(text) => self.preedit = text,
             Step::Drop(path) => self.drop_file(&path),
+            Step::Paste(text) => self.paste_text(&text),
             Step::Mods(spec) => {
                 let mut m = ModifiersState::empty();
                 for part in spec.split('+').map(str::trim) {
@@ -5585,6 +6886,444 @@ impl App {
     }
 
     /// Textual snapshot of the app state for script assertions.
+    /// Tabs and panes as the control API reports them.
+    fn tabs_info(&self) -> Vec<crate::control::TabInfo> {
+        use crate::control::{PaneInfo, TabInfo};
+        self.tabs
+            .iter()
+            .enumerate()
+            .map(|(i, t)| TabInfo {
+                index: i,
+                title: t.display_title(),
+                active: i == self.active,
+                panes: t
+                    .panes
+                    .iter()
+                    .map(|p| {
+                        let last = p
+                            .session
+                            .blocks
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .rev()
+                            .find(|b| !b.command.is_empty())
+                            .map(|b| (b.command.clone(), b.exit_code()));
+                        PaneInfo {
+                            id: p.session.id,
+                            active: p.session.id == t.active_pane,
+                            cwd: p.session.cwd.lock().unwrap().clone(),
+                            job: p.session.foreground_job_name(),
+                            last_command: last.as_ref().map(|l| l.0.clone()),
+                            last_exit: last.and_then(|l| l.1),
+                            durable: p.session.service_id.is_some(),
+                        }
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
+
+    /// Answer one control API request (see control.rs; the level was
+    /// checked on the socket thread).
+    fn handle_control(&mut self, req: crate::control::Request) -> crate::control::Response {
+        use crate::control::{Request, Response};
+        let ok = |pane: Option<u64>| Response {
+            ok: true,
+            pane,
+            ..Default::default()
+        };
+        match req {
+            Request::List | Request::Status => Response {
+                ok: true,
+                pid: Some(std::process::id()),
+                version: Some(env!("CARGO_PKG_VERSION").into()),
+                tabs: self.tabs_info(),
+                ..Default::default()
+            },
+            Request::Focus { tab, pane } => {
+                let target = match (tab, pane) {
+                    (_, Some(p)) => self.find_tab_of_pane(p).map(|(i, _)| (i, Some(p))),
+                    (Some(t), None) if t < self.tabs.len() => Some((t, None)),
+                    (None, None) => Some((self.active, None)),
+                    _ => None,
+                };
+                let Some((ti, pane)) = target else {
+                    return Response::error("no such tab or pane");
+                };
+                self.active = ti;
+                self.tabs[ti].activity = false;
+                if let Some(p) = pane {
+                    self.tabs[ti].active_pane = p;
+                }
+                if let Some(w) = &self.window {
+                    w.set_minimized(false);
+                    w.focus_window();
+                }
+                ok(Some(self.tabs[ti].active_pane))
+            }
+            Request::Split { direction, cwd } => {
+                let axis = match direction.as_str() {
+                    "right" => Axis::Horizontal,
+                    "down" => Axis::Vertical,
+                    other => return Response::error(format!("direction {other:?}: right or down")),
+                };
+                let Some(pane) = self.tabs.get(self.active).map(|t| t.active_pane) else {
+                    return Response::error("no tab");
+                };
+                let cwd = cwd.map(std::path::PathBuf::from).filter(|p| p.is_dir());
+                let id = self.split_pane(pane, axis, cwd);
+                if let Some(tab) = self.tabs.get_mut(self.active) {
+                    tab.active_pane = id;
+                }
+                self.save_session();
+                ok(Some(id))
+            }
+            Request::Open { cwd, command } => {
+                let cwd = cwd.map(std::path::PathBuf::from).filter(|p| p.is_dir());
+                self.spawn_tab_at(cwd);
+                let id = self.tabs[self.active].active_pane;
+                if let Some(c) = command {
+                    self.pending_commands.insert(id, vec![c]);
+                }
+                ok(Some(id))
+            }
+            Request::SendText { pane, text } => {
+                match self.find_tab_of_pane(pane).and_then(|(_, t)| t.pane(pane)) {
+                    Some(p) => {
+                        p.session.write(text.as_bytes());
+                        ok(Some(pane))
+                    }
+                    None => Response::error("no such pane"),
+                }
+            }
+        }
+    }
+
+    /// Describe the current UI for screen readers (see `a11y`).
+    fn a11y_snapshot(&mut self, scale: f64) -> crate::a11y::Snapshot {
+        use crate::a11y::{BlockNode, Control, EditorNode, Overlay, PaneNode, Snapshot, TabNode};
+        use accesskit::Role;
+        let hit = |pred: &dyn Fn(&ClickTarget) -> bool| {
+            self.hits.iter().find(|h| pred(&h.target)).map(|h| h.rect)
+        };
+        let tabs = self
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(i, t)| TabNode {
+                title: t.display_title(),
+                selected: i == self.active,
+                rect: hit(&|c| *c == ClickTarget::TabSelect(i)),
+            })
+            .collect();
+
+        let mut panes = Vec::new();
+        let mut finished = Vec::new();
+        if let Some(tab) = self.tabs.get(self.active) {
+            for p in &tab.panes {
+                let id = p.session.id;
+                let visible = tab.zoomed.is_none_or(|z| z == id);
+                if !visible {
+                    continue;
+                }
+                let active = id == tab.active_pane;
+                let cwd = p.session.cwd.lock().unwrap().clone().unwrap_or_default();
+                let running = p.session.foreground_job_name();
+                let snapshot = p.session.blocks.lock().unwrap().snapshot();
+                let mut blocks = Vec::new();
+                for b in &snapshot {
+                    let status = match b.state {
+                        shift_core::BlockState::Prompt => continue,
+                        shift_core::BlockState::Running { .. } => "running".to_string(),
+                        shift_core::BlockState::Done { exit, duration } => format!(
+                            "{}, {:.1}s",
+                            match exit {
+                                Some(0) => "succeeded".to_string(),
+                                Some(c) => format!("failed with exit code {c}"),
+                                None => "finished".to_string(),
+                            },
+                            duration.as_secs_f32()
+                        ),
+                    };
+                    if matches!(b.state, shift_core::BlockState::Done { .. }) {
+                        finished.push((id, b.id, b.command.clone(), status.clone()));
+                    }
+                    blocks.push(BlockNode {
+                        id: b.id,
+                        command: b.command.clone(),
+                        output: terminal::block_output_text(&p.session, b.id).unwrap_or_default(),
+                        selected: p.selected_block == Some(b.id),
+                        rect: hit(&|c| *c == ClickTarget::Block(id, b.id)),
+                        status,
+                    });
+                }
+                let screen = p
+                    .rows
+                    .iter()
+                    .filter_map(|r| match r.kind {
+                        terminal::RowKind::Grid { abs, .. } => {
+                            terminal::session_line_text(&p.session, abs)
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let editor = (active && self.editor_active).then(|| EditorNode {
+                    value: p.editor.buffer.clone(),
+                    rect: hit(&|c| *c == ClickTarget::Editor(id)),
+                });
+                let mut label = format!("Pane {cwd}");
+                if let Some(job) = running.filter(|_| !self.editor_active || !active) {
+                    label.push_str(&format!(", running {job}"));
+                }
+                panes.push(PaneNode {
+                    id,
+                    label,
+                    active,
+                    rect: hit(&|c| *c == ClickTarget::PaneFocus(id)),
+                    blocks,
+                    screen,
+                    editor,
+                });
+            }
+        }
+
+        // announce the newest completion per pane once
+        for (pane, block, command, status) in finished {
+            let prev = self.a11y_done.insert(pane, block);
+            if prev.is_some_and(|b| b < block) {
+                self.a11y_announcement = Some(format!("{command} {status}"));
+            }
+        }
+
+        let overlay = if let Some(c) = &self.confirm {
+            let (title, description) = match &c.action {
+                ConfirmAction::Close(_) => (
+                    "Close with running commands?".to_string(),
+                    format!("Running: {}", c.commands.join(", ")),
+                ),
+                ConfirmAction::Paste { .. } => (
+                    "Paste and run?".to_string(),
+                    format!(
+                        "{} lines would run: {}",
+                        c.commands.len(),
+                        c.commands.join("; ")
+                    ),
+                ),
+                ConfirmAction::InstallRemote(p) => (
+                    "Install shell integration?".to_string(),
+                    format!("On {}, writes {}", p.host, c.commands.join("; ")),
+                ),
+            };
+            let label = match &c.action {
+                ConfirmAction::Close(_) => "Close",
+                ConfirmAction::Paste { .. } => "Paste",
+                ConfirmAction::InstallRemote(_) => "Install",
+            };
+            let button = |l: &str, r: [f32; 4]| Control {
+                label: l.into(),
+                role: Role::Button,
+                toggled: None,
+                selected: false,
+                rect: Some(r),
+            };
+            Some(Overlay::Alert {
+                title,
+                description,
+                buttons: vec![
+                    button("Cancel", self.confirm_rects[0]),
+                    button(label, self.confirm_rects[1]),
+                ],
+            })
+        } else if self.context_menu.open {
+            Some(Overlay::Menu {
+                items: self
+                    .context_menu
+                    .items
+                    .iter()
+                    .zip(&self.context_menu_rects)
+                    .enumerate()
+                    .filter(|(_, (item, _))| item.enabled)
+                    .map(|(i, (item, r))| Control {
+                        label: item.label.to_string(),
+                        role: Role::MenuItem,
+                        toggled: None,
+                        selected: self.context_menu.selected == Some(i),
+                        rect: Some(*r),
+                    })
+                    .collect(),
+            })
+        } else if self.palette.open {
+            Some(Overlay::Dialog {
+                label: "Command palette".into(),
+                input: Some(("Search commands".into(), self.palette.query.clone())),
+                status: Some(format!("{} results", self.palette_results.len())),
+                controls: self
+                    .palette_row_hits
+                    .iter()
+                    .filter_map(|(r, i)| {
+                        let m = self.palette_results.get(*i)?;
+                        let mut label = m.item.title.clone();
+                        if !m.item.shortcut.is_empty() {
+                            label.push_str(&format!(", {}", m.item.shortcut.join(" ")));
+                        }
+                        Some(Control {
+                            label,
+                            role: Role::ListBoxOption,
+                            toggled: None,
+                            selected: *i == self.palette.selected,
+                            rect: Some(*r),
+                        })
+                    })
+                    .collect(),
+                rect: None,
+            })
+        } else if self.settings.open {
+            let values = toml::Value::try_from(&self.config).ok();
+            let current = crate::views::settings::Page::ALL
+                .iter()
+                .position(|p| *p == self.settings.page);
+            let controls = self
+                .hits
+                .iter()
+                .filter_map(|h| {
+                    let (role, toggled, selected) = match &h.target {
+                        ClickTarget::SettingsNav(i) => {
+                            (Role::Tab, None, current == Some(*i as usize))
+                        }
+                        ClickTarget::SettingsToggle(id) => (
+                            Role::Switch,
+                            values
+                                .as_ref()
+                                .and_then(|v| v.get(*id))
+                                .and_then(|v| v.as_bool()),
+                            false,
+                        ),
+                        ClickTarget::SettingsSegment(..) | ClickTarget::SettingsTheme(_) => {
+                            (Role::RadioButton, None, false)
+                        }
+                        ClickTarget::SettingsClose
+                        | ClickTarget::SettingsStep(..)
+                        | ClickTarget::SettingsCycle(_)
+                        | ClickTarget::SettingsSlider(_)
+                        | ClickTarget::SettingsKeybind(_)
+                        | ClickTarget::SettingsKeybindReset(_) => (Role::Button, None, false),
+                        _ => return None,
+                    };
+                    let label = self
+                        .settings_names
+                        .iter()
+                        .find(|(r, _)| *r == h.rect)
+                        .map(|(_, n)| n.clone())?;
+                    Some(Control {
+                        label,
+                        role,
+                        toggled,
+                        selected,
+                        rect: Some(h.rect),
+                    })
+                })
+                .collect();
+            Some(Overlay::Dialog {
+                label: format!("Settings, {:?}", self.settings.page),
+                input: None,
+                status: None,
+                controls,
+                rect: None,
+            })
+        } else if self.search.open {
+            Some(Overlay::Dialog {
+                label: "Find".into(),
+                input: Some(("Find in terminal".into(), self.search.query.clone())),
+                status: Some(match &self.search.error {
+                    Some(e) => e.clone(),
+                    None if self.search.matches.is_empty() => "No matches".into(),
+                    None => format!(
+                        "Match {} of {}",
+                        self.search.current + 1,
+                        self.search.matches.len()
+                    ),
+                }),
+                controls: Vec::new(),
+                rect: None,
+            })
+        } else {
+            None
+        };
+
+        let (w, h) = self.logical_size();
+        Snapshot {
+            size: (w, h),
+            scale,
+            tabs,
+            panes,
+            overlay,
+            announcement: self.a11y_announcement.clone(),
+        }
+    }
+
+    /// Push the accessibility tree when a screen reader is attached and
+    /// something changed.
+    fn update_a11y(&mut self, window: &Window) {
+        let Some(mut adapter) = self.a11y.take() else {
+            return;
+        };
+        adapter.update_if_active(|| {
+            let snapshot = self.a11y_snapshot(window.scale_factor());
+            let built = crate::a11y::build(&snapshot);
+            self.a11y_targets = built.targets;
+            if built.fingerprint == self.a11y_fingerprint {
+                // unchanged: keep focus, send no nodes
+                return accesskit::TreeUpdate {
+                    nodes: Vec::new(),
+                    tree: None,
+                    tree_id: accesskit::TreeId::ROOT,
+                    focus: built.update.focus,
+                };
+            }
+            self.a11y_fingerprint = built.fingerprint;
+            built.update
+        });
+        self.a11y = Some(adapter);
+    }
+
+    fn on_access_event(
+        &mut self,
+        event: accesskit_winit::WindowEvent,
+        event_loop: &ActiveEventLoop,
+    ) {
+        use accesskit_winit::WindowEvent as A;
+        let Some(window) = self.window.clone() else {
+            return;
+        };
+        match event {
+            A::InitialTreeRequested => {
+                log::info!("accessibility: screen reader attached");
+                // the next update must carry the full tree
+                self.a11y_fingerprint.clear();
+                self.update_a11y(&window);
+            }
+            A::ActionRequested(req) => {
+                use accesskit::Action;
+                if !matches!(req.action, Action::Click | Action::Focus) {
+                    return;
+                }
+                let Some(r) = self.a11y_targets.get(&req.target_node).copied() else {
+                    return;
+                };
+                // act exactly like a pointer click on the node
+                let saved = self.mouse;
+                self.mouse = (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
+                self.on_left(ElementState::Pressed, event_loop, &window);
+                self.on_left(ElementState::Released, event_loop, &window);
+                self.mouse = saved;
+                window.request_redraw();
+            }
+            A::AccessibilityDeactivated => self.a11y_fingerprint.clear(),
+        }
+    }
+
     fn dump_state(&mut self) -> String {
         use std::fmt::Write as _;
         let mut out = String::new();
@@ -5627,12 +7366,21 @@ impl App {
         let _ = writeln!(
             out,
             "confirm={:?} rename={:?} filter_editing={} toast={:?} shell_env={}",
-            self.confirm.as_ref().map(|c| (c.scope, c.commands.clone())),
+            self.confirm
+                .as_ref()
+                .map(|c| (&c.action, c.commands.clone())),
             self.rename,
             self.filter_editing,
             self.toast.as_ref().map(|(m, _)| m.clone()),
             self.shell_env.is_some()
         );
+        for a in &self.attention {
+            let _ = writeln!(
+                out,
+                "attention pane={} kind={:?} read={} title={:?} detail={:?}",
+                a.pane, a.kind, a.read, a.title, a.detail
+            );
+        }
         if self.context_menu.open {
             let labels: Vec<&str> = self.context_menu.items.iter().map(|i| i.label).collect();
             let _ = writeln!(
@@ -5683,12 +7431,18 @@ impl App {
                 for b in blocks {
                     let _ = writeln!(
                         out,
-                        "    block {} state={} cmd={:?} exit={:?} collapsed={} bookmarked={} prompt_start={} output_start={:?} end={:?} cwd={:?}",
+                        "    block {} state={} duration_ms={:?} cmd={:?} exit={:?} collapsed={} bookmarked={} prompt_start={} output_start={:?} end={:?} cwd={:?}",
                         b.id,
                         match b.state {
                             shift_core::BlockState::Prompt => "prompt",
                             shift_core::BlockState::Running { .. } => "running",
                             shift_core::BlockState::Done { .. } => "done",
+                        },
+                        match b.state {
+                            shift_core::BlockState::Done { duration, .. } => {
+                                Some(duration.as_millis())
+                            }
+                            _ => None,
                         },
                         b.command,
                         b.exit_code(),
@@ -5760,7 +7514,19 @@ impl ApplicationHandler<UserEvent> for App {
                 .with_title_hidden(true);
         }
 
-        let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
+        // hidden until the accessibility adapter is attached (AccessKit
+        // must see the window before it is first shown)
+        let window = Arc::new(
+            event_loop
+                .create_window(attrs.with_visible(false))
+                .expect("create window"),
+        );
+        self.a11y = Some(accesskit_winit::Adapter::with_event_loop_proxy(
+            event_loop,
+            &window,
+            self.proxy.clone(),
+        ));
+        window.set_visible(true);
         // input methods (CJK composition, dead keys, emoji picker)
         window.set_ime_allowed(true);
         self.os_light = window.theme() == Some(winit::window::Theme::Light);
@@ -5768,6 +7534,10 @@ impl ApplicationHandler<UserEvent> for App {
         let gpu = Gpu::new(window.clone(), size.width, size.height);
         let quads = QuadPipeline::new(&gpu.device, gpu.config.format);
         self.bg_image = Some(shift_renderer::ImagePipeline::new(
+            &gpu.device,
+            gpu.config.format,
+        ));
+        self.sprites = Some(shift_renderer::SpritePipeline::new(
             &gpu.device,
             gpu.config.format,
         ));
@@ -5791,6 +7561,14 @@ impl ApplicationHandler<UserEvent> for App {
                 let _ = menu_proxy.send_event(UserEvent::Menu(e.id.0));
             }));
         }
+
+        let control_proxy = self.proxy.clone();
+        self.control_server = crate::control::serve(
+            crate::control::Level::parse(&self.config.control_api),
+            move |p| {
+                let _ = control_proxy.send_event(UserEvent::Control(p));
+            },
+        );
 
         self.window = Some(window);
         self.gpu = Some(gpu);
@@ -5835,6 +7613,9 @@ impl ApplicationHandler<UserEvent> for App {
         let Some(window) = self.window.clone() else {
             return;
         };
+        if let Some(a11y) = &mut self.a11y {
+            a11y.process_event(&window, &event);
+        }
 
         match event {
             WindowEvent::CloseRequested => {
@@ -5883,14 +7664,15 @@ impl ApplicationHandler<UserEvent> for App {
                 window.request_redraw();
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                if event.state != ElementState::Pressed {
+                let press = input::KeyPress::from(&event);
+                if press.released {
+                    self.on_key_release(&press);
                     return;
                 }
                 // the input method owns keys while it is composing
                 if !self.preedit.is_empty() {
                     return;
                 }
-                let press = input::KeyPress::from(&event);
                 self.on_key(&press, event_loop, &window);
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -5925,6 +7707,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::MouseWheel { delta, .. } => self.on_wheel(delta, &window),
             WindowEvent::RedrawRequested => {
                 self.redraw(&window);
+                self.update_a11y(&window);
                 if self.any_running {
                     window.request_redraw();
                 }
@@ -5936,6 +7719,11 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::PtyWakeup(pane) => {
+                if let Some((_, seen)) = &mut self.latency_probe {
+                    *seen = true;
+                }
+                self.record_completions(pane);
+                self.save_transcript_if_changed(pane);
                 self.flush_pending_commands(pane);
                 self.check_completion_notification(pane);
                 self.check_correction(pane);
@@ -6007,6 +7795,36 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::ShellEnvLoaded(env) => {
                 self.shell_env = Some(env);
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+            UserEvent::Access(e) => self.on_access_event(e.window_event, event_loop),
+            UserEvent::PtyNotify(pane, title, body) => {
+                let visible = self.pane_in_view(pane);
+                self.push_attention(Attention {
+                    at: std::time::SystemTime::now(),
+                    pane,
+                    block: None,
+                    kind: AttentionKind::Notify,
+                    title: if title.is_empty() {
+                        "Notification".into()
+                    } else {
+                        title.clone()
+                    },
+                    detail: body.clone(),
+                    read: visible,
+                });
+                if !visible {
+                    crate::notify::send(if title.is_empty() { "Shift" } else { &title }, &body);
+                }
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+            UserEvent::Control(p) => {
+                let response = self.handle_control(p.request);
+                let _ = p.reply.send(response);
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }

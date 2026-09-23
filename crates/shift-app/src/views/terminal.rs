@@ -161,6 +161,94 @@ pub fn path_token_at(text: &str, col: usize) -> Option<(String, Option<u32>)> {
     (!path.is_empty() && looks_like_path).then_some((path, line))
 }
 
+/// Sprites for the pane's image placements that touch a visible grid row.
+/// A placement's top is found from any of its visible rows, so an image
+/// that starts above the viewport still draws its lower part.
+pub fn image_sprites(
+    session: &Session,
+    rows: &[RowInfo],
+    grid: &GridLayout,
+    alt_screen: bool,
+) -> Vec<shift_renderer::Sprite> {
+    let g = session.graphics.lock().unwrap();
+    if g.placements.is_empty() {
+        return Vec::new();
+    }
+    let visible: Vec<(u64, f32, f32)> = rows
+        .iter()
+        .filter_map(|r| match r.kind {
+            RowKind::Grid { abs, content_x } => Some((abs, r.y, content_x)),
+            _ => None,
+        })
+        .collect();
+    let (Some(first), Some(last)) = (visible.first(), visible.last()) else {
+        return Vec::new();
+    };
+    let clip = [
+        grid.x,
+        first.1,
+        grid.right - grid.x,
+        last.1 + grid.line_h - first.1,
+    ];
+    let mut out = Vec::new();
+    for p in &g.placements {
+        if p.alt != alt_screen {
+            continue;
+        }
+        let end = p.line + p.rows as u64;
+        let Some(&(abs, y, content_x)) = visible.iter().find(|(a, _, _)| *a >= p.line && *a < end)
+        else {
+            continue;
+        };
+        let Some(img) = g.image(p.image) else {
+            continue;
+        };
+        let top = y - (abs - p.line) as f32 * grid.line_h;
+        out.push(shift_renderer::Sprite {
+            key: img.key,
+            rgba: img.rgba.clone(),
+            size: [img.width, img.height],
+            rect: [
+                content_x + p.col as f32 * grid.cell_w,
+                top,
+                p.cols as f32 * grid.cell_w,
+                p.rows as f32 * grid.line_h,
+            ],
+            src: p.src.map(|v| v as f32),
+            clip,
+            under_text: p.z < 0,
+        });
+    }
+    out
+}
+
+/// Every path-like token of `text`: (start col, char len, path). The span
+/// covers the whole token (including a `:line:col` suffix).
+pub fn path_tokens(text: &str) -> Vec<(usize, usize, String)> {
+    let chars: Vec<char> = text.chars().collect();
+    let stop = |c: char| c.is_whitespace() || "\"'`<>()[]{}|,;".contains(c);
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if stop(chars[i]) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < chars.len() && !stop(chars[i]) {
+            i += 1;
+        }
+        let token: String = chars[start..i].iter().collect();
+        if token.contains("://") {
+            continue; // URLs are hinted from the URL detector
+        }
+        if let Some((path, _)) = path_token_at(text, start) {
+            out.push((start, i - start, path));
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DisplayLine {
     Grid(u64),
@@ -964,6 +1052,9 @@ fn render_grid_line(
     }
     let mut spans: Vec<Span> = Vec::new();
     let cols = g.columns().min(grid.cols + 8);
+    // cell backgrounds (merged runs, block cursor) draw before decorations
+    let mut backs: Vec<([f32; 2], [f32; 2], Color, f32)> = Vec::new();
+    let mut decos: Vec<([f32; 2], [f32; 2], Color)> = Vec::new();
 
     for col in 0..cols {
         let cell = &row[Column(col)];
@@ -1008,22 +1099,26 @@ fn render_grid_line(
 
         let block_cursor = is_cursor && grid.cursor_style == CursorStyle::Block;
         if block_cursor {
-            layer.rect([cx, y], [cell_px, grid.line_h], theme.cursor, 1.5);
+            backs.push(([cx, y], [cell_px, grid.line_h], theme.cursor, 1.5));
         } else if bg != theme.bg {
-            layer.rect([cx, y], [cell_px, grid.line_h], bg, 0.0);
+            // one quad per run of equal backgrounds: per-cell quads left
+            // antialiased seams between cells (tmux status bars)
+            match backs.last_mut() {
+                Some((pos, size, c, r))
+                    if *r == 0.0 && *c == bg && (pos[0] + size[0] - cx).abs() < 0.01 =>
+                {
+                    size[0] += cell_px;
+                }
+                _ => backs.push(([cx, y], [cell_px, grid.line_h], bg, 0.0)),
+            }
         }
         if is_cursor {
             match grid.cursor_style {
                 CursorStyle::Block => {}
-                CursorStyle::Bar => {
-                    layer.rect([cx - 1.0, y], [2.0, grid.line_h], theme.cursor, 0.0)
+                CursorStyle::Bar => decos.push(([cx - 1.0, y], [2.0, grid.line_h], theme.cursor)),
+                CursorStyle::Underline => {
+                    decos.push(([cx, y + grid.line_h - 2.0], [cell_px, 2.0], theme.cursor))
                 }
-                CursorStyle::Underline => layer.rect(
-                    [cx, y + grid.line_h - 2.0],
-                    [cell_px, 2.0],
-                    theme.cursor,
-                    0.0,
-                ),
             }
         }
 
@@ -1049,13 +1144,13 @@ fn render_grid_line(
                 .unwrap_or(fg);
             let base = y + grid.font_size + (grid.line_h - grid.font_size) / 2.0 + 1.5;
             if flags.contains(Flags::DOUBLE_UNDERLINE) {
-                layer.rect([cx, base - 1.0], [cell_px, 1.0], deco, 0.0);
-                layer.rect([cx, base + 1.5], [cell_px, 1.0], deco, 0.0);
+                decos.push(([cx, base - 1.0], [cell_px, 1.0], deco));
+                decos.push(([cx, base + 1.5], [cell_px, 1.0], deco));
             } else if flags.contains(Flags::UNDERCURL) {
                 // two half-cell segments offset vertically read as a wave
                 let half = cell_px / 2.0;
-                layer.rect([cx, base], [half, 1.2], deco, 0.0);
-                layer.rect([cx + half, base + 1.4], [half, 1.2], deco, 0.0);
+                decos.push(([cx, base], [half, 1.2], deco));
+                decos.push(([cx + half, base + 1.4], [half, 1.2], deco));
             } else if flags.intersects(Flags::DOTTED_UNDERLINE | Flags::DASHED_UNDERLINE) {
                 let seg = if flags.contains(Flags::DOTTED_UNDERLINE) {
                     1.5
@@ -1064,14 +1159,14 @@ fn render_grid_line(
                 };
                 let mut sx = cx;
                 while sx < cx + cell_px {
-                    layer.rect([sx, base], [seg.min(cx + cell_px - sx), 1.0], deco, 0.0);
+                    decos.push(([sx, base], [seg.min(cx + cell_px - sx), 1.0], deco));
                     sx += seg * 2.0;
                 }
             } else if flags.contains(Flags::UNDERLINE) || cell.hyperlink().is_some() {
-                layer.rect([cx, base], [cell_px, 1.0], deco, 0.0);
+                decos.push(([cx, base], [cell_px, 1.0], deco));
             }
             if flags.contains(Flags::STRIKEOUT) {
-                layer.rect([cx, y + grid.line_h / 2.0], [cell_px, 1.0], fg, 0.0);
+                decos.push(([cx, y + grid.line_h / 2.0], [cell_px, 1.0], fg));
             }
         }
 
@@ -1087,9 +1182,25 @@ fn render_grid_line(
             }),
         }
     }
+    for (pos, size, color, radius) in backs {
+        layer.rect(pos, size, color, radius);
+    }
+    for (pos, size, color) in decos {
+        layer.rect(pos, size, color, 0.0);
+    }
 
     if spans.iter().all(|s| s.text.trim().is_empty()) {
         return;
+    }
+    // trailing blank cells draw nothing (backgrounds are quads), but shaping
+    // them cost ~40 KB per cached row: a 500k-line flood peaked near 3 GB
+    while let Some(last) = spans.last_mut() {
+        let kept = last.text.trim_end_matches(' ').len();
+        if kept > 0 {
+            last.text.truncate(kept);
+            break;
+        }
+        spans.pop();
     }
 
     // shape cache: identical styled content re-uses last frame's buffer, so
@@ -1183,6 +1294,10 @@ fn render_header(
 
     // left text must stop before the right-side badge/duration/copy group
     let duration_text = match block.state {
+        // replayed transcript: never looks like a live command
+        BlockState::Done { duration, .. } if block.restored => {
+            format!("restored · {}", format_duration(duration))
+        }
         BlockState::Done { duration, .. } => format_duration(duration),
         BlockState::Running { started } => format_duration(started.elapsed()),
         _ => String::new(),
@@ -1413,6 +1528,18 @@ mod tests {
         assert_eq!(path_token_at("x", 5), None);
     }
 
+    #[test]
+    fn every_path_token_of_a_line() {
+        assert_eq!(
+            super::path_tokens("see src/a.rs:3 and ~/b.txt, not https://x.io/y or words"),
+            vec![
+                (4, 10, "src/a.rs".to_string()),
+                (19, 7, "~/b.txt".to_string()),
+            ]
+        );
+        assert!(super::path_tokens("plain words only").is_empty());
+    }
+
     fn block(
         id: BlockId,
         prompt_start: u64,
@@ -1433,6 +1560,7 @@ mod tests {
             bookmarked: false,
             cwd: None,
             branch: None,
+            restored: false,
         }
     }
 

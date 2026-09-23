@@ -24,6 +24,8 @@ pub struct TabInfo {
     pub editing: Option<String>,
     /// The rename text is fully selected (first keystroke replaces it).
     pub editing_selected: bool,
+    /// Directory and git branch of the tab's focused pane (vertical rail).
+    pub subtitle: String,
 }
 
 fn make_text(
@@ -338,4 +340,155 @@ pub fn render(
 
 fn panes_label(tab: &TabInfo) -> Option<String> {
     (tab.panes > 1).then(|| format!("{} panes", tab.panes))
+}
+
+/// Width of the vertical tab rail (`tab_layout = "vertical"`).
+pub const RAIL_W: f32 = 220.0;
+const RAIL_ROW_H: f32 = 54.0;
+
+/// Vertical tab rail: one row per tab under the chrome strip, with the
+/// title, the directory and git branch, pane count, activity and color.
+#[allow(clippy::too_many_arguments)]
+pub fn render_rail(
+    layer: &mut Layer,
+    engine: &mut TextEngine,
+    theme: &Theme,
+    tabs: &[TabInfo],
+    active: usize,
+    h: f32,
+    blink_on: bool,
+    hits: &mut Vec<Hit>,
+) {
+    layer.rect(
+        [0.0, TAB_BAR_H],
+        [RAIL_W, h - TAB_BAR_H],
+        theme.bg_chrome,
+        0.0,
+    );
+    layer.rect(
+        [RAIL_W - 1.0, TAB_BAR_H],
+        [1.0, h - TAB_BAR_H],
+        theme.border,
+        0.0,
+    );
+
+    let mut y = TAB_BAR_H + 6.0;
+    for (i, tab) in tabs.iter().enumerate() {
+        if y + RAIL_ROW_H > h - 36.0 {
+            let more = format!("+{} more · palette lists all", tabs.len() - i);
+            let b = make_text(engine, &more, 11.0, FONT_SANS, Weight::NORMAL);
+            layer.text(b, 16.0, y + 8.0, theme.text_muted);
+            break;
+        }
+        let is_active = i == active;
+        let row = [6.0, y, RAIL_W - 12.0, RAIL_ROW_H - 4.0];
+        if is_active {
+            layer.rect(
+                [row[0], row[1]],
+                [row[2], row[3]],
+                tab.color.unwrap_or(theme.accent).with_alpha(0.10),
+                7.0,
+            );
+            layer.rect(
+                [row[0], row[1] + 8.0],
+                [2.5, row[3] - 16.0],
+                tab.color.unwrap_or(theme.accent),
+                1.0,
+            );
+        }
+        let mut cx = row[0] + 14.0;
+        let line1 = row[1] + 9.0;
+        if tab.activity && !is_active {
+            layer.circle([cx + 3.5, line1 + 8.0], 7.0, theme.success);
+            cx += 14.0;
+        } else if let Some(c) = tab.color {
+            layer.circle([cx + 3.5, line1 + 8.0], 8.0, c);
+            cx += 14.0;
+        }
+        let close_x = row[0] + row[2] - 20.0;
+        let shell_w = engine.measure(&tab.shell_label, 11.5, mono_family(), Weight::NORMAL);
+        let b = make_text(
+            engine,
+            &tab.shell_label,
+            11.5,
+            mono_family(),
+            Weight::NORMAL,
+        );
+        layer.text(b, cx, line1 + 1.0, theme.accent);
+        cx += shell_w + 7.0;
+
+        let title_color = if is_active {
+            theme.text_bright
+        } else {
+            theme.text_ui
+        };
+        if let Some(edit) = &tab.editing {
+            let fw = (close_x - 4.0 - cx).max(40.0);
+            layer.bordered(
+                [cx - 4.0, line1 - 2.0],
+                [fw, 20.0],
+                theme.bg,
+                theme.accent,
+                4.0,
+                1.0,
+            );
+            let tw = engine.measure(edit, 12.5, FONT_SANS, Weight::NORMAL);
+            if tab.editing_selected && !edit.is_empty() {
+                layer.rect([cx - 1.0, line1], [tw + 2.0, 16.0], theme.selection, 2.0);
+            }
+            if !edit.is_empty() {
+                let b = make_text(engine, edit, 12.5, FONT_SANS, Weight::NORMAL);
+                layer.text(b, cx, line1, theme.text_bright);
+            }
+            if blink_on {
+                layer.rect([cx + tw + 1.0, line1 + 1.0], [1.5, 15.0], theme.accent, 0.0);
+            }
+        } else {
+            let title = elide(engine, &tab.title, 12.5, close_x - 8.0 - cx);
+            let weight = if is_active {
+                Weight::MEDIUM
+            } else {
+                Weight::NORMAL
+            };
+            let b = make_text(engine, &title, 12.5, FONT_SANS, weight);
+            layer.text(b, cx, line1, title_color);
+        }
+
+        // second line: directory · branch, pane count, sync
+        let mut sub = tab.subtitle.clone();
+        if let Some(p) = panes_label(tab) {
+            sub = if sub.is_empty() {
+                p
+            } else {
+                format!("{sub} · {p}")
+            };
+        }
+        if tab.sync {
+            sub.push_str(" · synced");
+        }
+        let sub = elide(engine, &sub, 11.0, row[2] - 28.0);
+        if !sub.is_empty() {
+            let b = make_text(engine, &sub, 11.0, FONT_SANS, Weight::NORMAL);
+            layer.text(b, row[0] + 14.0, line1 + 20.0, theme.text_muted);
+        }
+
+        let close_buf = make_text(engine, "×", 14.0, FONT_SANS, Weight::NORMAL);
+        layer.text(
+            close_buf,
+            close_x,
+            line1 - 1.0,
+            theme
+                .text_muted
+                .with_alpha(if is_active { 1.0 } else { 0.7 }),
+        );
+        hits.push(Hit {
+            rect: [close_x - 4.0, line1 - 3.0, 18.0, 20.0],
+            target: ClickTarget::TabClose(i),
+        });
+        hits.push(Hit {
+            rect: row,
+            target: ClickTarget::TabSelect(i),
+        });
+        y += RAIL_ROW_H;
+    }
 }

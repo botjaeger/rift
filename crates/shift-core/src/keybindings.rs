@@ -171,6 +171,9 @@ pub fn defaults() -> Vec<(&'static str, &'static str)> {
         ("hide_app", "cmd+h"),
         ("toggle_fullscreen", "ctrl+cmd+f"),
         ("quit", "cmd+q"),
+        ("session_switcher", "shift+cmd+o"),
+        ("hint_mode", "shift+cmd+h"),
+        ("attention_center", "shift+cmd+a"),
     ]
 }
 
@@ -265,7 +268,14 @@ pub fn all_actions() -> Vec<&'static str> {
             out.push(base);
         }
     }
-    for extra in ["rename_tab", "close_other_tabs", "save_launch_config"] {
+    for extra in [
+        "rename_tab",
+        "close_other_tabs",
+        "save_launch_config",
+        "pipe_block_output",
+        "toggle_tab_layout",
+        "clear_transcripts",
+    ] {
         if !out.contains(&extra) {
             out.push(extra);
         }

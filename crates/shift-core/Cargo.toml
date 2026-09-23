@@ -12,3 +12,5 @@ log.workspace = true
 git2.workspace = true
 notify.workspace = true
 serde_yaml_ng.workspace = true
+serde_json.workspace = true
+dirs.workspace = true

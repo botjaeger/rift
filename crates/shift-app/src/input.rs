@@ -1,5 +1,5 @@
 use winit::event::KeyEvent;
-use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::keyboard::{Key, KeyLocation, ModifiersState, NamedKey};
 
 /// A key press decoupled from winit's `KeyEvent` (which cannot be
 /// constructed outside winit) so the script driver can synthesize input
@@ -11,6 +11,38 @@ pub struct KeyPress {
     /// The key with modifiers ignored (macOS Option-composed characters map
     /// back to the physical letter) — drives ctrl/meta chords.
     pub unmodified: Option<Key>,
+    /// Auto-repeat of a held key.
+    pub repeat: bool,
+    /// Key release (only forwarded to programs using the kitty keyboard
+    /// protocol's event reporting).
+    pub released: bool,
+    /// Left/right/numpad variant of the key.
+    pub location: KeyLocation,
+}
+
+impl KeyPress {
+    /// A press of `logical_key` producing `text` (standard location, no repeat).
+    pub fn new(logical_key: Key, text: Option<String>, unmodified: Option<Key>) -> Self {
+        KeyPress {
+            logical_key,
+            text,
+            unmodified,
+            repeat: false,
+            released: false,
+            location: KeyLocation::Standard,
+        }
+    }
+}
+
+/// Stable identity of a physical key across press and release (the key
+/// without modifiers, so a Shift change mid-press still matches).
+pub fn key_identity(event: &KeyPress) -> String {
+    let key = event.unmodified.as_ref().unwrap_or(&event.logical_key);
+    let key = match key {
+        Key::Character(s) => Key::Character(s.to_lowercase().into()),
+        other => other.clone(),
+    };
+    format!("{key:?}{:?}", event.location)
 }
 
 impl From<&KeyEvent> for KeyPress {
@@ -20,6 +52,9 @@ impl From<&KeyEvent> for KeyPress {
             logical_key: e.logical_key.clone(),
             text: e.text.as_ref().map(|t| t.to_string()),
             unmodified: Some(e.key_without_modifiers()),
+            repeat: e.repeat,
+            released: e.state == winit::event::ElementState::Released,
+            location: e.location,
         }
     }
 }
@@ -85,6 +120,18 @@ pub enum AppAction {
     RenameTab,
     CloseOtherTabs,
     SaveLaunchConfig,
+    /// Searchable switcher over tabs, panes and recent blocks.
+    SessionSwitcher,
+    /// Letter hints over visible links, paths and block headers.
+    HintMode,
+    /// Send the selected block's output to a new command's stdin.
+    PipeBlockOutput,
+    /// Tabs on top ↔ vertical rail.
+    ToggleTabLayout,
+    /// Delete saved block transcripts.
+    ClearTranscripts,
+    /// Finished commands, failures, notifications and bells.
+    AttentionCenter,
 }
 
 impl AppAction {
@@ -209,6 +256,12 @@ pub fn action_from_name(name: &str) -> Option<AppAction> {
         "rename_tab" => AppAction::RenameTab,
         "close_other_tabs" => AppAction::CloseOtherTabs,
         "save_launch_config" => AppAction::SaveLaunchConfig,
+        "session_switcher" => AppAction::SessionSwitcher,
+        "hint_mode" => AppAction::HintMode,
+        "pipe_block_output" => AppAction::PipeBlockOutput,
+        "toggle_tab_layout" => AppAction::ToggleTabLayout,
+        "clear_transcripts" => AppAction::ClearTranscripts,
+        "attention_center" => AppAction::AttentionCenter,
         _ => return None,
     })
 }
@@ -381,6 +434,8 @@ pub struct KeyEncoding {
     /// macOS Option acts as Meta (ESC prefix) instead of composing
     /// characters (Warp "Left Option key is Meta").
     pub option_as_meta: bool,
+    /// Active kitty keyboard protocol flags (0 = legacy xterm encoding).
+    pub kitty_flags: u8,
 }
 
 /// xterm modifier parameter: 1 + shift(1) + alt(2) + ctrl(4).
@@ -456,6 +511,12 @@ pub fn key_to_bytes(event: &KeyPress, mods: ModifiersState, enc: KeyEncoding) ->
     if mods.super_key() {
         return None;
     }
+    if enc.kitty_flags != 0 {
+        return crate::keyboard::encode(event, mods, enc);
+    }
+    if event.released {
+        return None;
+    }
     let ctrl = mods.control_key();
     let alt = mods.alt_key();
     let shift = mods.shift_key();
@@ -528,6 +589,26 @@ pub fn key_to_bytes(event: &KeyPress, mods: ModifiersState, enc: KeyEncoding) ->
     }
 }
 
+/// Bracketed paste (DECSET 2004): the text between the markers, with any
+/// embedded end marker removed so it cannot terminate the paste early.
+pub fn bracketed_paste(text: &str) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(text.len() + 12);
+    bytes.extend_from_slice(b"\x1b[200~");
+    bytes.extend_from_slice(text.replace("\x1b[201~", "").as_bytes());
+    bytes.extend_from_slice(b"\x1b[201~");
+    bytes
+}
+
+/// Unbracketed paste: newlines become Enter (CR), like typing them would.
+pub fn unbracketed_paste(text: &str) -> Vec<u8> {
+    text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
+}
+
+/// Whether an unbracketed paste of `text` would press Enter.
+pub fn paste_submits_lines(text: &str) -> bool {
+    text.contains(['\n', '\r'])
+}
+
 /// Quote `s` for a POSIX shell when it contains anything but safe path
 /// characters (dropped files, pasted paths).
 pub fn shell_quote(s: &str) -> String {
@@ -550,25 +631,34 @@ mod tests {
         assert_eq!(shell_quote(""), "''");
     }
 
+    #[test]
+    fn paste_encoding() {
+        assert_eq!(
+            bracketed_paste("a\x1b[201~b\n"),
+            b"\x1b[200~ab\n\x1b[201~".to_vec()
+        );
+        assert_eq!(unbracketed_paste("a\r\nb\nc"), b"a\rb\rc".to_vec());
+        assert!(paste_submits_lines("ls\n"));
+        assert!(paste_submits_lines("a\rb"));
+        assert!(!paste_submits_lines("echo one line"));
+    }
+
     fn named(k: NamedKey) -> KeyPress {
-        KeyPress {
-            logical_key: Key::Named(k),
-            text: None,
-            unmodified: None,
-        }
+        KeyPress::new(Key::Named(k), None, None)
     }
 
     fn ch(c: &str, text: Option<&str>, unmodified: &str) -> KeyPress {
-        KeyPress {
-            logical_key: Key::Character(c.into()),
-            text: text.map(str::to_string),
-            unmodified: Some(Key::Character(unmodified.into())),
-        }
+        KeyPress::new(
+            Key::Character(c.into()),
+            text.map(str::to_string),
+            Some(Key::Character(unmodified.into())),
+        )
     }
 
     const PLAIN: KeyEncoding = KeyEncoding {
         app_cursor: false,
         option_as_meta: false,
+        kitty_flags: 0,
     };
     const NONE: ModifiersState = ModifiersState::empty();
 

@@ -2,6 +2,7 @@ pub mod completion;
 pub mod confirm;
 pub mod context_menu;
 pub mod editor;
+pub mod hints;
 pub mod palette;
 pub mod search;
 pub mod settings;

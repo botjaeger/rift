@@ -6,13 +6,14 @@
 
 use std::path::Path;
 
-use shift_renderer::{Gpu, ImagePipeline, QuadPipeline, TextEngine, to_wgpu};
+use shift_renderer::{Gpu, ImagePipeline, QuadPipeline, SpritePipeline, TextEngine, to_wgpu};
 
 #[allow(clippy::too_many_arguments)]
 pub fn capture_frame(
     gpu: &Gpu,
     quads: &QuadPipeline,
     text: &TextEngine,
+    sprites: &SpritePipeline,
     bg_image: Option<&ImagePipeline>,
     ranges: &[std::ops::Range<u32>],
     clear: shift_core::Color,
@@ -68,7 +69,9 @@ pub fn capture_frame(
         }
         for (i, range) in ranges.iter().cloned().enumerate() {
             quads.render_range(&mut pass, range);
+            sprites.render_layer(i, true, &mut pass);
             text.render_layer(i, &mut pass);
+            sprites.render_layer(i, false, &mut pass);
         }
     }
     encoder.copy_texture_to_buffer(
@@ -119,7 +122,7 @@ pub fn capture_frame(
     for row in 0..h {
         let start = (row * bytes_per_row) as usize;
         let line = &data[start..start + (w * 4) as usize];
-        for px in line.chunks_exact(4) {
+        for px in line.as_chunks::<4>().0 {
             if bgra {
                 rgba.extend_from_slice(&[px[2], px[1], px[0], 255]);
             } else {

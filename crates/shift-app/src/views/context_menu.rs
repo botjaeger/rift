@@ -18,6 +18,8 @@ pub enum MenuAction {
     ScrollTopOfBlock,
     ScrollBottomOfBlock,
     FilterBlock,
+    /// Send the block's output to a new command's stdin.
+    PipeOutput,
     // terminal area
     Copy,
     Paste,

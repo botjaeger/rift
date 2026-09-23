@@ -37,6 +37,9 @@ pub struct Block {
     pub cwd: Option<String>,
     /// Git branch when the command ran (header context line).
     pub branch: Option<String>,
+    /// Replayed from a saved transcript: the command is not running and
+    /// the output is from a previous session.
+    pub restored: bool,
 }
 
 impl Block {
@@ -74,10 +77,22 @@ pub struct BlockStore {
     /// display list pads here so older content sits above the fold while
     /// staying reachable by scrolling (Warp behavior).
     clear_pad: Option<(AbsLine, usize)>,
+    /// When set, markers are timestamped with this instant instead of now
+    /// (output replayed from the session service keeps its original time).
+    clock: Option<Instant>,
 }
 
 impl BlockStore {
+    pub fn set_clock(&mut self, at: Option<Instant>) {
+        self.clock = at;
+    }
+
+    fn now(&self) -> Instant {
+        self.clock.unwrap_or_else(Instant::now)
+    }
+
     pub fn on_prompt_start(&mut self, abs: AbsLine) {
+        let now = self.now();
         // an unfinished Running block means we missed D — close it here
         if let Some(last) = self.blocks.back_mut() {
             match last.state {
@@ -91,7 +106,7 @@ impl BlockStore {
                     last.end = Some(abs);
                     last.state = BlockState::Done {
                         exit: None,
-                        duration: started.elapsed(),
+                        duration: now.saturating_duration_since(started),
                     };
                 }
                 BlockState::Done { .. } => {}
@@ -109,8 +124,25 @@ impl BlockStore {
             bookmarked: false,
             cwd: None,
             branch: None,
+            restored: false,
         });
         self.next_id += 1;
+    }
+
+    /// Mark every finished block as replayed from a transcript, giving each
+    /// its saved duration and directory (in order, oldest first).
+    pub fn mark_restored(&mut self, meta: &[(Duration, Option<String>)]) {
+        let done = self
+            .blocks
+            .iter_mut()
+            .filter(|b| matches!(b.state, BlockState::Done { .. }));
+        for (b, (d, cwd)) in done.zip(meta) {
+            if let BlockState::Done { duration, .. } = &mut b.state {
+                *duration = *d;
+            }
+            b.cwd = cwd.clone();
+            b.restored = true;
+        }
     }
 
     /// Attach prompt-time context to the newest block; existing values win
@@ -136,25 +168,25 @@ impl BlockStore {
     }
 
     pub fn on_output_start(&mut self, abs: AbsLine, command: String) {
+        let now = self.now();
         if let Some(last) = self.blocks.back_mut()
             && last.state == BlockState::Prompt
         {
             last.command = command;
             last.output_start = Some(abs);
-            last.state = BlockState::Running {
-                started: Instant::now(),
-            };
+            last.state = BlockState::Running { started: now };
         }
     }
 
     pub fn on_done(&mut self, abs: AbsLine, exit: Option<i32>) {
+        let now = self.now();
         if let Some(last) = self.blocks.back_mut()
             && let BlockState::Running { started } = last.state
         {
             last.end = Some(abs);
             last.state = BlockState::Done {
                 exit,
-                duration: started.elapsed(),
+                duration: now.saturating_duration_since(started),
             };
         }
     }

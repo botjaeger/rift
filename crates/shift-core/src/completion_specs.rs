@@ -1540,11 +1540,9 @@ pub fn ssh_hosts() -> Vec<(String, String)> {
     let mut seen = HashSet::new();
     if let Some(home) = std::env::var_os("HOME") {
         let base = PathBuf::from(home);
-        if let Ok(s) = fs::read_to_string(base.join(".ssh/config")) {
-            for h in parse_ssh_config(&s) {
-                if seen.insert(h.clone()) {
-                    names.push(h);
-                }
+        for h in crate::ssh::config_hosts(&base.join(".ssh/config")) {
+            if seen.insert(h.clone()) {
+                names.push(h);
             }
         }
         if let Ok(s) = fs::read_to_string(base.join(".ssh/known_hosts")) {
@@ -1562,27 +1560,6 @@ pub fn ssh_hosts() -> Vec<(String, String)> {
         .into_iter()
         .map(|n| (n, "ssh host".to_string()))
         .collect()
-}
-
-fn parse_ssh_config(content: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for line in content.lines() {
-        let l = line.trim();
-        let mut it = l.split_whitespace();
-        let Some(key) = it.next() else {
-            continue;
-        };
-        if !key.eq_ignore_ascii_case("host") {
-            continue;
-        }
-        for pat in it {
-            if pat.contains('*') || pat.contains('?') || pat.starts_with('!') {
-                continue;
-            }
-            out.push(pat.to_string());
-        }
-    }
-    out
 }
 
 fn parse_known_hosts(content: &str) -> Vec<String> {
@@ -1857,7 +1834,10 @@ mod tests {
                    Host *.internal\n  User admin\n\
                    Host web-*\n\
                    host DEV\n";
-        let hosts = parse_ssh_config(cfg);
+        let path = std::env::temp_dir().join(format!("shift-spec-ssh-{}", std::process::id()));
+        std::fs::write(&path, cfg).unwrap();
+        let hosts = crate::ssh::config_hosts(&path);
+        std::fs::remove_file(&path).ok();
         assert!(hosts.contains(&"prod".to_string()));
         assert!(hosts.contains(&"bastion".to_string()));
         assert!(

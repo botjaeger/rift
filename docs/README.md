@@ -12,6 +12,8 @@ everything is keyboard-drivable.
 | [keyboard-shortcuts.md](keyboard-shortcuts.md) | Full default keymap (Warp layout), editor keys, search keys, customization |
 | [configuration.md](configuration.md) | `config.toml` reference, themes, keybinding overrides, file locations |
 | [warp-parity.md](warp-parity.md) | Current non-AI Warp parity matrix, gaps, and implementation order |
+| [terminal-landscape-roadmap.md](terminal-landscape-roadmap.md) | Cross-platform terminal survey and prioritized Shift implementation plan |
+| [performance.md](performance.md) | Benchmark harness and the recorded performance/compatibility baseline |
 
 ## Quick start
 

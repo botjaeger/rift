@@ -20,6 +20,7 @@ listed alternates.
 | ⌘⇧↓ / ⌃⇧↓ | `bookmark_next` | Jump to next bookmarked block |
 | ⌥↑ / ⌥↓ | `bookmark_closest_prev` / `_next` | Same jumps (Warp's closest-bookmark keys) |
 | ⌘K | `clear_blocks` | Clear blocks + scrollback (destructive; `clear` is the soft variant) |
+| — | `pipe_block_output` | Send the selected (else newest) block's output to a command's stdin |
 | Esc | — | Deselect block (in raw mode also still reaches the app in the PTY) |
 
 ## Scrolling
@@ -40,6 +41,8 @@ listed alternates.
 | ⇧⌘{ / ⌃⇧Tab | `tab_prev` | Previous tab |
 | ⌃⇧← / ⌃⇧→ | `move_tab_left` / `_right` | Reorder current tab |
 | ⇧⌘T | `reopen_closed_tab` | Reopen last closed tab (restores cwd) |
+| ⇧⌘O | `session_switcher` | Fuzzy switcher over tabs, panes and recent blocks |
+| — | `toggle_tab_layout` | Tabs on top ↔ vertical rail |
 
 ## Panes
 
@@ -62,6 +65,9 @@ listed alternates.
 | ⌘, | `open_settings` | Settings overlay |
 | ⌃⌘K | `open_keybindings` | Settings → Keybindings page |
 | ⌘L | `focus_input` | Scroll to bottom, deselect, focus the editor |
+| ⇧⌘A | `attention_center` | Finished commands, failures, notifications and bells |
+| ⇧⌘H | `hint_mode` | Letter hints over visible links, paths and blocks: type one to open/select, ⇧ + letter copies |
+| — | `clear_transcripts` | Delete saved block transcripts |
 | ⌘= / ⇧⌘+ | `font_increase` | Font size +1 (persisted to config.toml) |
 | ⌘- | `font_decrease` | Font size −1 |
 | ⌘0 | `font_reset` | Font size → default (13) |

@@ -21,6 +21,12 @@ arboard.workspace = true
 png.workspace = true
 global-hotkey = "0.8"
 regex = { version = "1", default-features = false, features = ["std", "unicode-case", "unicode-perl"] }
+accesskit_winit = "0.34"
+accesskit = "0.25"
+toml.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 muda = { version = "0.20", default-features = false }

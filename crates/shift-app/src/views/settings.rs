@@ -1,4 +1,6 @@
-use shift_core::{Bell, Color, Config, CursorStyle, InputPosition, Keymap, PromptMode, Theme};
+use shift_core::{
+    Bell, Color, Config, CursorStyle, InputPosition, Keymap, PromptMode, TabLayout, Theme,
+};
 use shift_renderer::glyphon::{Attrs, Buffer, Family, Metrics, Shaping, Weight};
 use shift_renderer::{FONT_SANS, Layer, TextEngine, mono_family};
 
@@ -187,7 +189,9 @@ pub fn render(
     w: f32,
     h: f32,
     hits: &mut Vec<Hit>,
+    names: &mut Vec<([f32; 4], String)>,
 ) -> f32 {
+    names.clear();
     let top = TAB_BAR_H;
 
     // ── sidebar ──
@@ -257,6 +261,14 @@ pub fn render(
             rect: row,
             target: ClickTarget::SettingsNav(i as u8),
         });
+        names.push((
+            row,
+            format!(
+                "{}{}",
+                labels[i],
+                if selected { ", current page" } else { "" }
+            ),
+        ));
         ny += 41.0;
     }
 
@@ -316,6 +328,7 @@ pub fn render(
         rect: close,
         target: ClickTarget::SettingsClose,
     });
+    names.push((close, "Close settings".into()));
     layer.hline(
         SIDEBAR_W,
         top + 76.0,
@@ -337,6 +350,8 @@ pub fn render(
         clip_top: body_y - 12.0,
         clip_bottom: h,
         hits,
+        names,
+        row_label: String::new(),
     };
     match state.page {
         Page::Appearance => appearance_page(&mut form, config),
@@ -379,6 +394,10 @@ struct Form<'a> {
     clip_top: f32,
     clip_bottom: f32,
     hits: &'a mut Vec<Hit>,
+    /// Accessible name per pushed hit rect (screen readers).
+    names: &'a mut Vec<([f32; 4], String)>,
+    /// Label of the row being drawn; names its controls.
+    row_label: String,
 }
 
 impl Form<'_> {
@@ -441,6 +460,7 @@ impl Form<'_> {
 
     /// Row label, with an optional muted description line under it.
     fn label_desc(&mut self, text: &str, desc: &str, y: f32) {
+        self.row_label = text.to_string();
         if self.visible(y, ROW_H) {
             let ly = if desc.is_empty() { y + 17.0 } else { y + 9.0 };
             self.layer.text(
@@ -463,6 +483,16 @@ impl Form<'_> {
     fn push_hit(&mut self, rect: [f32; 4], target: ClickTarget) {
         if self.visible(rect[1], rect[3]) {
             self.hits.push(Hit { rect, target });
+            self.names.push((rect, self.row_label.clone()));
+        }
+    }
+
+    /// Accessible name of the control `push_hit` just added (if visible).
+    fn name_last(&mut self, name: String) {
+        if let (Some(hit), Some(last)) = (self.hits.last(), self.names.last_mut())
+            && hit.rect == last.0
+        {
+            last.1 = name;
         }
     }
 
@@ -562,9 +592,19 @@ impl Form<'_> {
             }
         }
         self.push_hit([sx, ry, 34.0, 36.0], ClickTarget::SettingsStep(id, -1));
+        self.name_last(
+            format!("Decrease {label}, {value} {unit}")
+                .trim()
+                .to_string(),
+        );
         self.push_hit(
             [sx + step_w - 34.0, ry, 34.0, 36.0],
             ClickTarget::SettingsStep(id, 1),
+        );
+        self.name_last(
+            format!("Increase {label}, {value} {unit}")
+                .trim()
+                .to_string(),
         );
     }
 
@@ -608,6 +648,10 @@ impl Form<'_> {
                 [bx, sy, seg_w, 34.0],
                 ClickTarget::SettingsSegment(id, i as u8),
             );
+            self.name_last(format!(
+                "{label}: {opt}{}",
+                if i == active { ", selected" } else { "" }
+            ));
         }
     }
 
@@ -642,6 +686,7 @@ impl Form<'_> {
             self.chevron(sx + sel_w - 24.0, ry + 15.0);
         }
         self.push_hit([sx, ry, sel_w, 36.0], ClickTarget::SettingsCycle(id));
+        self.name_last(format!("{label}: {value}"));
     }
 
     /// Theme picker (design 05 "Active theme"): background swatch ringed in
@@ -678,6 +723,7 @@ impl Form<'_> {
             self.chevron(sx + sel_w - 24.0, ry + 15.0);
         }
         self.push_hit([sx, ry, sel_w, 36.0], ClickTarget::SettingsCycle(id));
+        self.name_last(format!("{label}: {name}"));
     }
 
     /// Down chevron (design: 13px stroked `M6 9l6 6 6-6`) from stepped dots.
@@ -724,6 +770,7 @@ impl Form<'_> {
             [sx - 8.0, ry, slider_w + 16.0, 36.0],
             ClickTarget::SettingsSlider(id),
         );
+        self.name_last(format!("{label}: {value}"));
     }
 
     fn display(&mut self, y: f32, label: &str, value: &str) {
@@ -812,7 +859,7 @@ fn appearance_page(form: &mut Form, config: &Config) {
     );
 
     form.group("Window & theme");
-    let r = form.card(6);
+    let r = form.card(7);
     let y = row(form, r, 0);
     form.theme_select(y, "Active theme", &config.theme, "theme");
     let y = row(form, r, 1);
@@ -853,6 +900,17 @@ fn appearance_page(form: &mut Form, config: &Config) {
         config.ligatures,
         "ligatures",
     );
+    let y = row(form, r, 6);
+    form.segment(
+        y,
+        "Tabs",
+        &["Top", "Side"],
+        match config.tab_layout {
+            TabLayout::Horizontal => 0,
+            TabLayout::Vertical => 1,
+        },
+        "tab_layout",
+    );
 }
 
 fn general_page(form: &mut Form, config: &Config) {
@@ -876,7 +934,7 @@ fn general_page(form: &mut Form, config: &Config) {
     );
 
     form.group("Session");
-    let r = form.card(3);
+    let r = form.card(5);
     let y = row(form, r, 0);
     form.toggle(
         y,
@@ -904,9 +962,40 @@ fn general_page(form: &mut Form, config: &Config) {
         config.confirm_close_running,
         "confirm_close_running",
     );
+    let y = row(form, r, 3);
+    form.toggle_desc(
+        y,
+        "Save block output for restore",
+        "Output can contain secrets; turning this off deletes it",
+        config.save_transcripts,
+        "save_transcripts",
+    );
+    let y = row(form, r, 4);
+    form.toggle_desc(
+        y,
+        "Keep shells running when Shift quits",
+        "Session service; relaunch reattaches (new shells)",
+        config.durable_sessions,
+        "durable_sessions",
+    );
+
+    form.group("Automation");
+    let r = form.card(1);
+    let y = row(form, r, 0);
+    form.segment(
+        y,
+        "Control socket",
+        &["Off", "Navigate", "Full"],
+        match config.control_api.as_str() {
+            "off" => 0,
+            "full" => 2,
+            _ => 1,
+        },
+        "control_api",
+    );
 
     form.group("Terminal");
-    let rows = if cfg!(target_os = "macos") { 2 } else { 1 };
+    let rows = if cfg!(target_os = "macos") { 3 } else { 2 };
     let r = form.card(rows);
     let y = row(form, r, 0);
     form.toggle(
@@ -915,8 +1004,15 @@ fn general_page(form: &mut Form, config: &Config) {
         config.mouse_reporting,
         "mouse_reporting",
     );
+    let y = row(form, r, 1);
+    form.toggle(
+        y,
+        "Ask before pasting lines that would run",
+        config.confirm_multiline_paste,
+        "confirm_multiline_paste",
+    );
     if cfg!(target_os = "macos") {
-        let y = row(form, r, 1);
+        let y = row(form, r, 2);
         form.toggle(
             y,
             "Option key sends Meta",
@@ -1096,6 +1192,14 @@ fn keybindings_page(form: &mut Form, keymap: &Keymap, config: &Config, state: &S
         }
         let recording = state.recording.as_deref() == Some(action.as_str());
         let custom = config.keybindings.contains_key(action);
+        form.row_label = format!(
+            "{action}: {}",
+            if chips.is_empty() {
+                "unbound".to_string()
+            } else {
+                chips.join(" ")
+            }
+        );
         if recording {
             form.layer.rect(
                 [form.x + 6.0, ry + 2.0],
@@ -1125,6 +1229,7 @@ fn keybindings_page(form: &mut Form, keymap: &Keymap, config: &Config, state: &S
                 [chip_x, ry + 6.0, rw, 26.0],
                 ClickTarget::SettingsKeybindReset(action.clone()),
             );
+            form.name_last(format!("Reset {action} to default"));
             chip_x -= 8.0;
         }
         if recording {
@@ -1228,6 +1333,10 @@ fn themes_page(form: &mut Form, config: &Config) {
             Some("light")
         } else {
             None
+        };
+        form.row_label = match tag {
+            Some(tag) => format!("{}, {tag}", t.name),
+            None => t.name.clone(),
         };
         if let Some(tag) = tag {
             let aw = form.engine.measure(tag, 11.5, FONT_SANS, Weight::NORMAL);

@@ -631,6 +631,8 @@ pub struct PaneState {
     pub correction: Option<String>,
     /// Newest finished block already checked for a correction.
     pub correction_checked: Option<shift_core::BlockId>,
+    /// File id of this pane's saved block transcript (`save_transcripts`).
+    pub transcript_id: String,
 }
 
 impl PaneState {
@@ -652,6 +654,7 @@ impl PaneState {
             filter: None,
             correction: None,
             correction_checked: None,
+            transcript_id: shift_core::transcript::new_id(),
         }
     }
 

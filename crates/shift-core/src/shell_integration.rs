@@ -67,6 +67,13 @@ fn write_files() -> std::io::Result<Vec<(String, String)>> {
         format!("{xdg}:{}", base.to_string_lossy()),
     ));
     env.push(("TERM_PROGRAM".into(), "shift".into()));
+    // survives ssh (SendEnv LC_*): remote hooks installed by Shift load
+    // only when this arrives (see ssh.rs)
+    env.push(("LC_TERMINAL".into(), "Shift".into()));
+    env.push((
+        "LC_TERMINAL_VERSION".into(),
+        env!("CARGO_PKG_VERSION").into(),
+    ));
     Ok(env)
 }
 

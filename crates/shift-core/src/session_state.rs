@@ -10,9 +10,10 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Schema version stamped into freshly built sessions. `1` = the legacy
-/// `cwd`-only shape; `2` adds per-tab `title`, `color` and a nested `layout`.
+/// `cwd`-only shape; `2` adds per-tab `title`, `color` and a nested `layout`;
+/// `3` adds optional per-pane `transcript` ids (saved block output).
 /// A file with no `version` key loads as [`LEGACY_VERSION`].
-pub const CURRENT_VERSION: u32 = 2;
+pub const CURRENT_VERSION: u32 = 3;
 
 /// The version assumed for a file that predates the `version` key.
 pub const LEGACY_VERSION: u32 = 1;
@@ -80,6 +81,13 @@ pub struct SavedTab {
     /// pane whose directory is [`SavedTab::cwd`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout: Option<SavedLayout>,
+    /// Saved block transcript of an unsplit tab's pane (split tabs keep one
+    /// per leaf in `layout`). See `transcript.rs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<String>,
+    /// Session-service shell of an unsplit tab's pane (durable sessions).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<u64>,
 }
 
 /// A tab's pane tree: either one leaf pane or a binary split of two subtrees.
@@ -115,6 +123,12 @@ pub enum SavedLayout {
         /// Whether this pane held focus within its tab.
         #[serde(default)]
         focused: bool,
+        /// Saved block transcript id, when transcripts are enabled.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transcript: Option<String>,
+        /// Session-service shell to reattach (durable sessions).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        service: Option<u64>,
     },
     /// A split of exactly two children, divided along `axis` at `ratio`.
     Split {
@@ -136,6 +150,24 @@ impl SavedLayout {
         SavedLayout::Pane {
             cwd,
             focused: false,
+            transcript: None,
+            service: None,
+        }
+    }
+
+    /// Transcript id of the first leaf (the pane spawned for this subtree).
+    pub fn first_transcript(&self) -> Option<&str> {
+        match self {
+            SavedLayout::Pane { transcript, .. } => transcript.as_deref(),
+            SavedLayout::Split { first, .. } => first.first_transcript(),
+        }
+    }
+
+    /// Session-service shell of the first leaf.
+    pub fn first_service(&self) -> Option<u64> {
+        match self {
+            SavedLayout::Pane { service, .. } => *service,
+            SavedLayout::Split { first, .. } => first.first_service(),
         }
     }
 
@@ -160,7 +192,7 @@ impl SavedLayout {
     /// [`SavedTab::cwd`] in sync with a `layout`.
     pub fn focused_cwd(&self) -> Option<&str> {
         match self {
-            SavedLayout::Pane { cwd, focused } => {
+            SavedLayout::Pane { cwd, focused, .. } => {
                 if *focused {
                     cwd.as_deref()
                 } else {
@@ -257,6 +289,8 @@ mod tests {
             SavedLayout::Pane {
                 cwd: Some("/a".into()),
                 focused: true,
+                transcript: Some("1-2-3".into()),
+                service: Some(9),
             },
             SavedLayout::split(
                 SavedAxis::Vertical,
@@ -267,6 +301,8 @@ mod tests {
         );
         assert_eq!(layout.pane_count(), 3);
         assert_eq!(layout.focused_cwd(), Some("/a"));
+        assert_eq!(layout.first_transcript(), Some("1-2-3"));
+        assert_eq!(layout.first_service(), Some(9));
 
         let s = SavedSession {
             version: CURRENT_VERSION,
@@ -276,6 +312,8 @@ mod tests {
                 title: Some("build".into()),
                 color: Some("blue".into()),
                 layout: Some(layout),
+                transcript: None,
+                service: None,
             }],
             window: None,
         };

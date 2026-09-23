@@ -11,6 +11,7 @@
 //! ```text
 //! wait 500                 # sleep before the next step (ms)
 //! key cmd+t                # one chord (same syntax as [keybindings])
+//! keyup a                  # release of a key (kitty event reporting)
 //! type echo hello          # characters; `\n` submits (Enter)
 //! shot /tmp/frame.png      # capture the next rendered frame
 //! dump /tmp/state.txt      # write a textual state snapshot
@@ -26,6 +27,7 @@
 //! ime 한글                  # text committed by an input method
 //! preedit 하                # IME composition in progress ("" clears)
 //! drop /tmp/my file.txt     # a file dropped on the window
+//! paste a\nb                # clipboard paste into the active pane (`\n` = newline)
 //! menu action:new_tab       # choose a menu bar item by id (macOS)
 //! mods alt                  # hold modifiers for mouse steps (`mods none`)
 //! wait_prompt              # block until the shell shows its first prompt
@@ -43,6 +45,7 @@ use crate::input::KeyPress;
 pub enum Step {
     Wait(u64),
     Key(String),
+    KeyUp(String),
     Type(String),
     Shot(PathBuf),
     Dump(PathBuf),
@@ -58,6 +61,7 @@ pub enum Step {
     Ime(String),
     Preedit(String),
     Drop(PathBuf),
+    Paste(String),
     Menu(String),
     Mods(String),
     WaitPrompt,
@@ -165,6 +169,12 @@ pub fn parse(src: &str) -> Result<Vec<Step>, String> {
                 }
                 Step::Key(rest.to_string())
             }
+            "keyup" => {
+                if rest.is_empty() {
+                    return Err(bad("expected chord"));
+                }
+                Step::KeyUp(rest.to_string())
+            }
             "type" => Step::Type(unescape(rest)),
             "shot" => Step::Shot(PathBuf::from(rest)),
             "dump" => Step::Dump(PathBuf::from(rest)),
@@ -198,6 +208,7 @@ pub fn parse(src: &str) -> Result<Vec<Step>, String> {
             "ime" => Step::Ime(unescape(rest)),
             "preedit" => Step::Preedit(unescape(rest)),
             "drop" => Step::Drop(PathBuf::from(rest)),
+            "paste" => Step::Paste(unescape(rest)),
             "menu" => Step::Menu(rest.to_string()),
             "mods" => Step::Mods(rest.to_string()),
             "wait_prompt" => Step::WaitPrompt,
@@ -288,11 +299,11 @@ pub fn key_press(chord: &str) -> Option<(KeyPress, ModifiersState)> {
             NamedKey::Tab => Some("\t".to_string()),
             _ => None,
         };
-        KeyPress {
-            logical_key: Key::Named(n),
-            text: if b.ctrl || b.cmd { None } else { text },
-            unmodified: Some(Key::Named(n)),
-        }
+        KeyPress::new(
+            Key::Named(n),
+            if b.ctrl || b.cmd { None } else { text },
+            Some(Key::Named(n)),
+        )
     } else {
         let mut c = b.key.chars();
         let ch = c.next()?;
@@ -301,11 +312,11 @@ pub fn key_press(chord: &str) -> Option<(KeyPress, ModifiersState)> {
         }
         let ch = if b.shift { ch.to_ascii_uppercase() } else { ch };
         let s = ch.to_string();
-        KeyPress {
-            logical_key: Key::Character(s.clone().into()),
-            text: if b.ctrl || b.cmd { None } else { Some(s) },
-            unmodified: Some(Key::Character(b.key.clone().into())),
-        }
+        KeyPress::new(
+            Key::Character(s.clone().into()),
+            if b.ctrl || b.cmd { None } else { Some(s) },
+            Some(Key::Character(b.key.clone().into())),
+        )
     };
     Some((press, mods))
 }
@@ -319,11 +330,11 @@ pub fn char_press(ch: char) -> (KeyPress, ModifiersState) {
         ModifiersState::empty()
     };
     (
-        KeyPress {
-            logical_key: Key::Character(s.clone().into()),
-            text: Some(s.clone()),
-            unmodified: Some(Key::Character(s.to_lowercase().into())),
-        },
+        KeyPress::new(
+            Key::Character(s.clone().into()),
+            Some(s.clone()),
+            Some(Key::Character(s.to_lowercase().into())),
+        ),
         mods,
     )
 }

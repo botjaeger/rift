@@ -16,6 +16,13 @@ pub enum Marker {
     Done { exit: Option<i32> },
     /// OSC 7;file://host/path — working directory changed.
     Cwd(String),
+    /// APC `G…` — kitty graphics command (the bytes after `G`).
+    Graphics(Vec<u8>),
+    /// OSC 1337;File=… — iTerm2 inline image (the bytes after `File=`).
+    InlineImage(Vec<u8>),
+    /// A desktop-notification request: OSC 9 (iTerm2/ConEmu), OSC 777
+    /// `notify` (urxvt/VTE) or OSC 99 (kitty).
+    Notify { title: String, body: String },
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
@@ -26,9 +33,15 @@ enum State {
     Osc,
     /// ESC seen inside an OSC string (possible ST terminator).
     OscEsc,
+    /// APC string (`ESC _ … ESC \`).
+    Apc,
+    ApcEsc,
 }
 
 const MAX_OSC: usize = 4096;
+/// Inline images and graphics commands carry base64 payloads.
+const MAX_IMAGE: usize = 48 << 20;
+const ITERM_FILE: &[u8] = b"1337;File=";
 
 /// A piece of the input chunk: bytes `range` end either at a marker boundary
 /// (marker fires AFTER those bytes are parsed) or at the chunk end.
@@ -61,12 +74,30 @@ impl OscScanner {
                     }
                 }
                 State::Esc => {
-                    self.state = if b == b']' {
-                        self.buf.clear();
-                        State::Osc
-                    } else {
-                        State::Ground
+                    self.buf.clear();
+                    self.state = match b {
+                        b']' => State::Osc,
+                        b'_' => State::Apc,
+                        _ => State::Ground,
                     };
+                }
+                State::Apc => {
+                    if b == 0x1b {
+                        self.state = State::ApcEsc;
+                    } else if self.buf.len() < MAX_IMAGE && (!self.buf.is_empty() || b == b'G') {
+                        // only kitty graphics (`G`) bodies are kept
+                        self.buf.push(b);
+                    }
+                }
+                State::ApcEsc => {
+                    self.state = State::Ground;
+                    if b == b'\\' && self.buf.first() == Some(&b'G') && self.buf.len() < MAX_IMAGE {
+                        segments.push(Segment {
+                            end: i + 1,
+                            marker: Some(Marker::Graphics(self.buf[1..].to_vec())),
+                        });
+                    }
+                    self.buf.clear();
                 }
                 State::Osc => {
                     if b == 0x07 {
@@ -80,7 +111,9 @@ impl OscScanner {
                         self.buf.clear();
                     } else if b == 0x1b {
                         self.state = State::OscEsc;
-                    } else if self.buf.len() < MAX_OSC {
+                    } else if self.buf.len() < MAX_OSC
+                        || (self.buf.starts_with(ITERM_FILE) && self.buf.len() < MAX_IMAGE)
+                    {
                         self.buf.push(b);
                     }
                 }
@@ -107,6 +140,9 @@ impl OscScanner {
 }
 
 fn parse_osc(buf: &[u8]) -> Option<Marker> {
+    if let Some(rest) = buf.strip_prefix(ITERM_FILE) {
+        return (buf.len() < MAX_IMAGE).then(|| Marker::InlineImage(rest.to_vec()));
+    }
     let s = std::str::from_utf8(buf).ok()?;
     if let Some(rest) = s.strip_prefix("133;") {
         let mut parts = rest.split(';');
@@ -119,6 +155,43 @@ fn parse_osc(buf: &[u8]) -> Option<Marker> {
             }),
             _ => None,
         };
+    }
+    // notifications: text only, bounded
+    let clip = |t: &str| -> String { t.chars().filter(|c| !c.is_control()).take(256).collect() };
+    if let Some(rest) = s.strip_prefix("9;") {
+        // `9;4;…` is ConEmu progress, not a notification
+        if rest.starts_with("4;") || rest.is_empty() {
+            return None;
+        }
+        return Some(Marker::Notify {
+            title: clip(rest),
+            body: String::new(),
+        });
+    }
+    if let Some(rest) = s.strip_prefix("777;notify;") {
+        let (title, body) = rest.split_once(';').unwrap_or((rest, ""));
+        return Some(Marker::Notify {
+            title: clip(title),
+            body: clip(body),
+        });
+    }
+    if let Some(rest) = s.strip_prefix("99;") {
+        let (meta, payload) = rest.split_once(';')?;
+        if payload.is_empty() {
+            return None;
+        }
+        let is_body = meta.split(':').any(|kv| kv == "p=body");
+        return Some(if is_body {
+            Marker::Notify {
+                title: String::new(),
+                body: clip(payload),
+            }
+        } else {
+            Marker::Notify {
+                title: clip(payload),
+                body: String::new(),
+            }
+        });
     }
     if let Some(rest) = s.strip_prefix("7;") {
         // file://host/path — strip scheme + host, percent-decode the path
@@ -205,6 +278,50 @@ mod tests {
             markers(&mut s, b"\x1b]7;file://mac.local/Users/maya/my%20dir\x07"),
             vec![Marker::Cwd("/Users/maya/my dir".into())]
         );
+    }
+
+    #[test]
+    fn graphics_and_inline_images() {
+        let mut s = OscScanner::new();
+        assert_eq!(
+            markers(&mut s, b"\x1b_Ga=q,i=1;AAAA\x1b\\x"),
+            vec![Marker::Graphics(b"a=q,i=1;AAAA".to_vec())]
+        );
+        // other APC strings are skipped, split chunks still assemble
+        assert!(markers(&mut s, b"\x1b_Xjunk\x1b\\\x1b_Ga=T;").is_empty());
+        assert_eq!(
+            markers(&mut s, b"QUJD\x1b\\"),
+            vec![Marker::Graphics(b"a=T;QUJD".to_vec())]
+        );
+        // an inline image larger than the plain-OSC cap is kept whole
+        let mut osc = b"\x1b]1337;File=inline=1:".to_vec();
+        osc.extend(std::iter::repeat_n(b'A', 10_000));
+        osc.push(0x07);
+        let m = markers(&mut s, &osc);
+        assert!(matches!(&m[..], [Marker::InlineImage(b)] if b.len() == 9 + 10_000));
+    }
+
+    #[test]
+    fn notifications() {
+        let mut s = OscScanner::new();
+        let n = |t: &str, b: &str| Marker::Notify {
+            title: t.into(),
+            body: b.into(),
+        };
+        assert_eq!(
+            markers(
+                &mut s,
+                b"\x1b]9;build done\x07\x1b]777;notify;Tests;42 passed\x1b\\\x1b]99;i=1:p=body;hi\x07\x1b]99;;Title\x07"
+            ),
+            vec![
+                n("build done", ""),
+                n("Tests", "42 passed"),
+                n("", "hi"),
+                n("Title", "")
+            ]
+        );
+        // ConEmu progress and empty payloads are not notifications
+        assert!(markers(&mut s, b"\x1b]9;4;1;50\x07\x1b]99;i=1;\x07").is_empty());
     }
 
     #[test]

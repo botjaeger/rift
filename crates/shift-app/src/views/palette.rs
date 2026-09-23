@@ -23,6 +23,54 @@ pub enum PaletteAction {
     ToggleVim,
     Search,
     OpenHistory,
+    /// Session switcher: activate tab `.0`.
+    FocusTab(usize),
+    /// Session switcher: focus pane `.1` of tab `.0`.
+    FocusPane(usize, shift_pty::PaneId),
+    /// Session switcher: show block `.2` of pane `.1` in tab `.0`.
+    ShowBlock(usize, shift_pty::PaneId, shift_core::BlockId),
+    /// Pipe mode: run the typed command with the block output on stdin.
+    RunPipe,
+    /// Open a new tab connected to ssh profile `.0`.
+    Ssh(usize),
+    /// Attention center: go to entry `.0`.
+    ShowAttention(usize),
+    /// Open a tab reattached to session-service shell `.0`.
+    AttachService(u64),
+    /// Session switcher: raise window `.0` (pid) at tab `.1`, pane `.2`.
+    FocusWindow(u32, usize, u64),
+    /// Ask to install remote shell integration on ssh profile `.0`.
+    SshInstall(usize),
+}
+
+/// Palette rows for ssh profiles: connect, and install integration.
+pub fn ssh_items(profiles: &[shift_core::ssh::SshProfile]) -> Vec<Item> {
+    let mut out = Vec::new();
+    for (i, p) in profiles.iter().enumerate() {
+        out.push(Item {
+            title: format!("SSH: {}", p.name),
+            id: if p.name == p.host {
+                String::new()
+            } else {
+                p.host.clone()
+            },
+            shortcut: Vec::new(),
+            section: Section::Actions,
+            action: PaletteAction::Ssh(i),
+            mono_title: false,
+        });
+    }
+    for (i, p) in profiles.iter().enumerate() {
+        out.push(Item {
+            title: format!("Install Shift shell integration on {}", p.name),
+            id: String::new(),
+            shortcut: Vec::new(),
+            section: Section::Settings,
+            action: PaletteAction::SshInstall(i),
+            mono_title: false,
+        });
+    }
+    out
 }
 
 /// What the modal is searching over (Warp parity: ⌘K / ⌃R / ⌃⇧R).
@@ -32,6 +80,13 @@ pub enum PaletteMode {
     Commands,
     History,
     Workflows,
+    /// ⇧⌘O: tabs, panes and recent blocks of this window.
+    Sessions,
+    /// Block action: the query is a command; the rows preview the output
+    /// that will be its stdin.
+    PipeOutput,
+    /// ⇧⌘A: finished commands, failures, notifications and bells.
+    Attention,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -39,6 +94,10 @@ pub enum Section {
     Actions,
     Settings,
     Recent,
+    Tabs,
+    Panes,
+    Blocks,
+    Preview,
 }
 
 #[derive(Clone)]
@@ -89,6 +148,36 @@ pub fn base_items(
             "Workflows",
             "workflows",
             PaletteAction::App(AppAction::Workflows),
+        ),
+        item(
+            "Go to tab, pane or block",
+            "session_switcher",
+            PaletteAction::App(AppAction::SessionSwitcher),
+        ),
+        item(
+            "Attention center: finished commands and alerts",
+            "attention_center",
+            PaletteAction::App(AppAction::AttentionCenter),
+        ),
+        item(
+            "Show link and path hints",
+            "hint_mode",
+            PaletteAction::App(AppAction::HintMode),
+        ),
+        item(
+            "Send block output to a command",
+            "pipe_block_output",
+            PaletteAction::App(AppAction::PipeBlockOutput),
+        ),
+        item(
+            "Toggle vertical tabs",
+            "toggle_tab_layout",
+            PaletteAction::App(AppAction::ToggleTabLayout),
+        ),
+        item(
+            "Clear saved block transcripts",
+            "clear_transcripts",
+            PaletteAction::App(AppAction::ClearTranscripts),
         ),
         item("New tab", "new_tab", PaletteAction::App(AppAction::NewTab)),
         item(
@@ -394,6 +483,52 @@ pub fn workflow_items(workflows: &[shift_core::workflows::Workflow]) -> Vec<Item
         .collect()
 }
 
+/// Pipe mode rows: what runs, then a preview of the stdin text.
+pub fn pipe_items(query: &str, output: &str) -> Vec<MatchedItem> {
+    let lines: Vec<&str> = output.lines().collect();
+    let row = |title: String, section: Section, mono_title: bool| MatchedItem {
+        item: Item {
+            title,
+            id: String::new(),
+            shortcut: Vec::new(),
+            section,
+            action: PaletteAction::RunPipe,
+            mono_title,
+        },
+        indices: Vec::new(),
+        score: 0,
+    };
+    let head = if query.trim().is_empty() {
+        format!("Type a command to receive {} lines on stdin", lines.len())
+    } else {
+        format!("Run `{}` with {} lines on stdin", query.trim(), lines.len())
+    };
+    let mut out = vec![row(head, Section::Actions, false)];
+    for l in lines.iter().take(6) {
+        out.push(row(l.to_string(), Section::Preview, true));
+    }
+    if lines.len() > 6 {
+        out.push(row(
+            format!("… {} more lines", lines.len() - 6),
+            Section::Preview,
+            false,
+        ));
+    }
+    out
+}
+
+/// The shell command that runs `command` with `file` as its stdin. The
+/// output is never interpolated into the command line, only the (quoted)
+/// path of a private file holding it.
+pub fn pipe_command(command: &str, file: &str, shell: &str) -> String {
+    let quoted = crate::input::shell_quote(file);
+    if shell.ends_with("fish") {
+        format!("begin; {command}; end < {quoted}")
+    } else {
+        format!("( {command} ) < {quoted}")
+    }
+}
+
 /// Fuzzy-rank items + recent history against the query.
 pub fn rank(items: &[Item], history: &[String], query: &str) -> Vec<MatchedItem> {
     let mut all: Vec<Item> = items.to_vec();
@@ -436,7 +571,7 @@ pub fn rank(items: &[Item], history: &[String], query: &str) -> Vec<MatchedItem>
                 })
         })
         .collect();
-    out.sort_by(|a, b| b.score.cmp(&a.score));
+    out.sort_by_key(|a| std::cmp::Reverse(a.score));
     out
 }
 
@@ -564,6 +699,14 @@ pub fn render(
     if !state.query.is_empty() {
         let qbuf = mono(engine, &state.query, 15.0, Weight::NORMAL);
         layer.text(qbuf, qx, sy - 1.0, theme.text_bright);
+    } else if let Some(placeholder) = match state.mode {
+        PaletteMode::Sessions => Some("Go to tab, pane or block…"),
+        PaletteMode::Attention => Some("Filter alerts…"),
+        PaletteMode::PipeOutput => Some("Command that reads the output on stdin…"),
+        _ => None,
+    } {
+        let pbuf = mono(engine, placeholder, 15.0, Weight::NORMAL);
+        layer.text(pbuf, qx + 6.0, sy - 1.0, theme.text_muted);
     }
     // caret
     if blink_on {
@@ -593,6 +736,10 @@ pub fn render(
             let label = match m.item.section {
                 Section::Settings => "SETTINGS",
                 Section::Recent => "RECENT",
+                Section::Tabs => "TABS",
+                Section::Panes => "PANES",
+                Section::Blocks => "RECENT BLOCKS",
+                Section::Preview => "OUTPUT (STDIN)",
                 Section::Actions => "",
             };
             let lbuf = sans(engine, label, 10.5, Weight::SEMIBOLD);
@@ -647,8 +794,30 @@ pub fn render(
         } else {
             (13.5, FONT_SANS)
         };
+        // everything left of the shortcut chips must fit the row
+        let chips_w: f32 = m
+            .item
+            .shortcut
+            .iter()
+            .map(|k| engine.measure(k, 11.0, mono_family(), Weight::NORMAL) + 19.0)
+            .sum();
+        let max_right = mx + MODAL_W - 18.0 - chips_w - 8.0;
+        // a long title keeps at least 55% of the row; the detail gets the rest
+        let avail = max_right - tx;
+        let id_w = if m.item.id.is_empty() {
+            0.0
+        } else {
+            engine.measure(&m.item.id, 11.0, mono_family(), Weight::NORMAL) + 12.0
+        };
+        let full_w = engine.measure(&m.item.title, size, family, Weight::NORMAL);
+        let budget = if full_w + id_w <= avail {
+            avail
+        } else {
+            (avail - id_w).max(avail * 0.55)
+        };
+        let title = elide_to(engine, &m.item.title, size, family, budget);
         let mut tbuf = Buffer::new(&mut engine.font_system, Metrics::new(size, size * 1.35));
-        let chars: Vec<char> = m.item.title.chars().collect();
+        let chars: Vec<char> = title.chars().collect();
         let mut spans: Vec<(String, bool)> = Vec::new();
         for (ci, ch) in chars.iter().enumerate() {
             let matched = m.indices.contains(&(ci as u32));
@@ -678,18 +847,15 @@ pub fn render(
             Shaping::Advanced,
             None,
         );
-        let title_w = engine.measure(&m.item.title, size, family, Weight::NORMAL);
+        let title_w = engine.measure(&title, size, family, Weight::NORMAL);
         layer.text(tbuf, tx, y + (ROW_H - size * 1.35) / 2.0, title_color);
 
-        // action id
-        if !m.item.id.is_empty() {
-            let idbuf = mono(engine, &m.item.id, 11.0, Weight::NORMAL);
-            layer.text(
-                idbuf,
-                tx + title_w + 12.0,
-                y + (ROW_H - 14.0) / 2.0,
-                theme.text_muted,
-            );
+        // action id / detail, in whatever room is left
+        let id_x = tx + title_w + 12.0;
+        if !m.item.id.is_empty() && max_right - id_x > 30.0 {
+            let id = elide_to(engine, &m.item.id, 11.0, mono_family(), max_right - id_x);
+            let idbuf = mono(engine, &id, 11.0, Weight::NORMAL);
+            layer.text(idbuf, id_x, y + (ROW_H - 14.0) / 2.0, theme.text_muted);
         }
 
         // shortcut chips (right-aligned)
@@ -724,7 +890,12 @@ pub fn render(
     );
     layer.hline(mx, fy, MODAL_W, 1.0, Color::rgba(1.0, 1.0, 1.0, 0.07));
     let mut fx = mx + 18.0;
-    for (keys, label) in [("↑↓", " navigate"), ("↵", " run"), ("esc", " dismiss")] {
+    let enter = match state.mode {
+        PaletteMode::Sessions | PaletteMode::Attention => " go to",
+        PaletteMode::PipeOutput => " run with output on stdin",
+        _ => " run",
+    };
+    for (keys, label) in [("↑↓", " navigate"), ("↵", enter), ("esc", " dismiss")] {
         let kbuf = sans(engine, keys, 11.0, Weight::NORMAL);
         let kw = engine.measure(keys, 11.0, FONT_SANS, Weight::NORMAL);
         layer.text(kbuf, fx, fy + 12.0, theme.text_dim);
@@ -738,6 +909,32 @@ pub fn render(
     let bw = engine.measure(brand, 11.0, FONT_SANS, Weight::NORMAL);
     let bbuf = sans(engine, brand, 11.0, Weight::NORMAL);
     layer.text(bbuf, mx + MODAL_W - bw - 18.0, fy + 12.0, theme.accent);
+}
+
+/// Longest prefix of `text` (plus `…`) that fits `max_w`.
+fn elide_to(
+    engine: &mut TextEngine,
+    text: &str,
+    size: f32,
+    family: &'static str,
+    max_w: f32,
+) -> String {
+    if engine.measure(text, size, family, Weight::NORMAL) <= max_w {
+        return text.to_string();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    // binary search on the prefix length
+    let (mut lo, mut hi) = (0usize, chars.len());
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        let candidate: String = chars[..mid].iter().collect::<String>() + "…";
+        if engine.measure(&candidate, size, family, Weight::NORMAL) <= max_w {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    chars[..lo].iter().collect::<String>() + "…"
 }
 
 /// Tiny quad-drawn icons per item kind.
@@ -882,5 +1079,17 @@ mod tests {
             .find(|i| i.id == "open_settings")
             .expect("settings action");
         assert_eq!(settings.shortcut, vec!["⌃", ","]);
+    }
+
+    #[test]
+    fn pipe_rows_preview_output_and_never_embed_it() {
+        let rows = pipe_items("wc -l", "a\nb\n$(rm -rf ~)\n");
+        assert_eq!(rows[0].item.title, "Run `wc -l` with 3 lines on stdin");
+        assert_eq!(rows[3].item.title, "$(rm -rf ~)");
+        assert!(rows.iter().all(|r| r.item.action == PaletteAction::RunPipe));
+        let cmd = pipe_command("grep x | wc -l", "/tmp/shift pipe/1.txt", "/bin/zsh");
+        assert_eq!(cmd, "( grep x | wc -l ) < '/tmp/shift pipe/1.txt'");
+        let fish = pipe_command("wc -l", "/tmp/p.txt", "/opt/homebrew/bin/fish");
+        assert_eq!(fish, "begin; wc -l; end < /tmp/p.txt");
     }
 }

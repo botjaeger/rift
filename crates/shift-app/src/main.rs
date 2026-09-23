@@ -1,7 +1,10 @@
+mod a11y;
 mod app;
 mod capture;
+mod control;
 mod hotkey;
 mod input;
+mod keyboard;
 #[cfg(target_os = "macos")]
 mod menubar;
 mod mouse;
@@ -14,7 +17,7 @@ mod vim;
 
 use winit::event_loop::EventLoop;
 
-const USAGE: &str = "usage: shift-terminal [--script <file>] [--version] [--help]";
+const USAGE: &str = "usage: shift-terminal [--script <file>] [--version] [--help]\n       shift-terminal ctl <command>   (see `shift-terminal ctl help`)";
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -35,6 +38,19 @@ fn main() {
                         std::process::exit(2);
                     }
                 }
+            }
+            // the per-user session service (started on demand by windows
+            // with `durable_sessions = true`)
+            "--session-daemon" => {
+                if let Err(e) = shift_pty::daemon::run() {
+                    eprintln!("shift-terminal: session service: {e}");
+                    std::process::exit(1);
+                }
+                return;
+            }
+            "ctl" => {
+                let rest: Vec<String> = args.collect();
+                std::process::exit(control::cli(&rest));
             }
             "--version" | "-V" => {
                 println!("shift-terminal {}", env!("CARGO_PKG_VERSION"));

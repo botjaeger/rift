@@ -46,7 +46,7 @@ EOF
 ./target/debug/shift-terminal --script /tmp/t.shift
 ```
 
-One command per line, `#` comments; the full list is the module doc comment at the top of `script.rs` (`wait`, `key`, `type`, `shot`, `dump`, `resize`, `move`, `click`, `dblclick`, `rclick`, `drag`, `scroll`, `sh`, `focus`, `wait_prompt`, `quit`). Set `XDG_CONFIG_HOME=/tmp/rw-cfg` to run against an isolated config/theme/launch-config tree instead of the user's, and `SHIFT_NO_NOTIFY=1` to keep notifications and the audible bell out of the session.
+One command per line, `#` comments; the full list is the module doc comment at the top of `script.rs` (`wait`, `key`, `keyup`, `type`, `paste`, `shot`, `dump`, `resize`, `move`, `click`, `dblclick`, `rclick`, `drag`, `scroll`, `sh`, `focus`, `wait_prompt`, `quit`). `dump` also prints the accessibility tree and attention-center entries. `shot` renders offscreen, so it works even when the window surface is unavailable (display asleep). Also set `XDG_DATA_HOME` to a scratch dir when a test touches transcripts, pipe files, the session service or control sockets. Set `XDG_CONFIG_HOME=/tmp/rw-cfg` to run against an isolated config/theme/launch-config tree instead of the user's, and `SHIFT_NO_NOTIFY=1` to keep notifications and the audible bell out of the session.
 
 Theme/config hot-reload can be verified with zero keystrokes: write `~/.config/shift/config.toml` while the app runs and screenshot the repaint. Falling back to a real window plus `screencapture -x -R<x>,<y>,<w>,<h>` still works; if driving keys via osascript, check the frontmost process is `shift-terminal` first (synthetic keystrokes otherwise land in the user's other apps), and wait for the shell prompt before typing — earlier keys get kernel-echoed at the wrong grid line and look like rendering bugs.
 
@@ -55,7 +55,7 @@ Theme/config hot-reload can be verified with zero keystrokes: write `~/.config/s
 Four-crate workspace; dependencies flow strictly downward:
 
 - **shift-core** — no gfx deps, fully unit-testable: theme tokens + TOML themes (`theme/`), config + hot-reload watcher, keymap (defaults per spec §4, `[keybindings]` overrides win and also unbind the default), OSC 133/7 byte scanner (`osc.rs`), block model (`block.rs`), shell tokenizer, completion providers, git2 worker thread, shell-integration file materializer.
-- **shift-pty** — one `Session` per pane: spawns via `alacritty_terminal::tty`, owns a blocking reader thread that splits PTY bytes at OSC-marker boundaries, feeds each segment to the vte parser, and applies markers to the shared `BlockStore`.
+- **shift-pty** — one `Session` per pane: spawns via `alacritty_terminal::tty` (or, with `durable_sessions`, through the per-user session service in `daemon.rs`/`service.rs`/`ipc.rs`), owns a reader thread that splits output at OSC/APC-marker boundaries (`feed`), feeds each segment to the vte parser, and applies markers to the shared `BlockStore` and the inline-image model (`graphics.rs`).
 - **shift-renderer** — wgpu 29 SDF quad pipeline (`quad.wgsl`: rounded rects, borders, circles, soft shadows) + glyphon text engine. `Scene` is a per-frame draw list of layers; within a layer quads render first, then text; later layers composite over earlier ones (0 chrome, 1 terminal+editor, 2 completion/search, 3 settings, 4 palette).
 - **shift-app** — winit `ApplicationHandler`, all views, input routing, per-frame `Hit` rects for mouse targets.
 

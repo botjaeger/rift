@@ -20,6 +20,16 @@ pub enum InputPosition {
     Top,
 }
 
+/// Where the tabs sit: the top strip, or a vertical rail on the left that
+/// also shows each tab's directory and git branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TabLayout {
+    #[default]
+    Horizontal,
+    Vertical,
+}
+
 /// What renders above the editor: Shift's context chips, or the shell's
 /// own prompt (PS1 / starship / p10k) left visible (Warp "Use my shell's
 /// prompt").
@@ -61,6 +71,15 @@ pub struct Config {
     pub ligatures: bool,
     /// Reopen last session's tabs (with cwds) on launch.
     pub restore_session: bool,
+    /// Also save finished blocks (command, status, output) and show them
+    /// again on relaunch. Output may contain secrets, so this is opt-in.
+    pub save_transcripts: bool,
+    /// Shells run in the per-user session service, so closing or quitting
+    /// Shift leaves them running and relaunching reattaches them.
+    pub durable_sessions: bool,
+    /// Local control socket: "off", "navigate" (list/status/focus) or
+    /// "full" (also split/open/send-text). See control.rs.
+    pub control_api: String,
     pub shell: Option<String>,
     /// Theme used while the OS is in light mode when `sync_os_theme` is on.
     pub theme_light: String,
@@ -69,6 +88,7 @@ pub struct Config {
     /// Window background opacity, 0.3–1.0.
     pub window_opacity: f32,
     pub input_position: InputPosition,
+    pub tab_layout: TabLayout,
     pub prompt: PromptMode,
     /// Copy the selection to the clipboard as soon as the mouse is released.
     pub copy_on_select: bool,
@@ -89,6 +109,9 @@ pub struct Config {
     /// Warn before closing a pane, tab or window (or quitting) while a
     /// command is still running in it.
     pub confirm_close_running: bool,
+    /// Ask before pasting text containing a newline into a raw program that
+    /// has not enabled bracketed paste (each newline would press Enter).
+    pub confirm_multiline_paste: bool,
     /// Where new tabs and panes start: `"previous"` (the active pane's
     /// directory), `"home"`, or an absolute path (`~` expands).
     pub working_directory: String,
@@ -108,6 +131,9 @@ pub struct Config {
     /// clicks, drags and the wheel to apps that enable mouse reporting
     /// (vim, tmux, htop). Hold Shift to select text instead.
     pub mouse_reporting: bool,
+    /// Named ssh hosts (`[[ssh_profiles]]`); ~/.ssh/config hosts are added
+    /// to the palette automatically.
+    pub ssh_profiles: Vec<crate::ssh::SshProfile>,
     /// Overrides: action name → binding (e.g. `new_tab = "ctrl+shift+t"`).
     pub keybindings: BTreeMap<String, String>,
 }
@@ -125,11 +151,15 @@ impl Default for Config {
             window_padding: 8.0,
             ligatures: true,
             restore_session: true,
+            save_transcripts: false,
+            durable_sessions: false,
+            control_api: "navigate".into(),
             shell: None,
             theme_light: "light-default".into(),
             sync_os_theme: false,
             window_opacity: 1.0,
             input_position: InputPosition::Bottom,
+            tab_layout: TabLayout::Horizontal,
             prompt: PromptMode::Shift,
             copy_on_select: false,
             autosuggestions: true,
@@ -140,6 +170,7 @@ impl Default for Config {
             notify_threshold_secs: 10,
             bell: Bell::Visual,
             confirm_close_running: true,
+            confirm_multiline_paste: true,
             working_directory: "previous".into(),
             alias_expansion: false,
             error_underline: true,
@@ -147,6 +178,7 @@ impl Default for Config {
             global_hotkey: String::new(),
             option_as_meta: false,
             mouse_reporting: true,
+            ssh_profiles: Vec::new(),
             keybindings: BTreeMap::new(),
         }
     }

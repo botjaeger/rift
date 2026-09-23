@@ -34,6 +34,13 @@ window_padding = 8.0              # left/right content padding in px, clamped 0�
 window_opacity = 1.0              # background opacity, clamped 0.3–1.0 (overlays stay opaque)
 ligatures     = true              # JetBrains Mono ligatures + contextual alternates
 restore_session = true            # reopen last session's tabs + cwds on launch
+save_transcripts = false          # also save finished blocks' output and replay it
+                                  # (marked "restored") on relaunch; off = deleted
+tab_layout    = "horizontal"      # horizontal (tabs on top) | vertical (side rail)
+durable_sessions = false          # shells live in the session service: they keep
+                                  # running after quit and reattach on launch
+control_api   = "navigate"        # off | navigate (list/status/focus) | full (also
+                                  # split/open/send-text); `shift-terminal ctl`
 input_position = "bottom"         # bottom | top — where the command editor sits
 prompt        = "shift"          # shift = context row + ❯
                                   # shell   = keep the shell's own PS1 on screen, editor shows ›
@@ -46,6 +53,8 @@ notify_on_completion = true       # desktop notification for long commands (wind
 notify_threshold_secs = 10        # minimum duration for that notification (stepper: 0–3600, ±5)
 bell          = "visual"          # visual | audible | both | none
 confirm_close_running = true      # warn before closing a pane/tab/window with a running job
+confirm_multiline_paste = true    # ask before a paste with newlines reaches a program
+                                  # without bracketed paste (each newline presses Enter)
 working_directory = "previous"    # new tabs/panes: previous | home | "/abs/path" (~ expands)
 alias_expansion = false           # Space after an alias replaces it with its definition
 error_underline = true            # red underline under unknown command names
@@ -57,6 +66,11 @@ option_as_meta = false            # macOS: Option sends ESC-prefixed Meta keys i
 global_hotkey = ""                # system-wide show/hide chord, e.g. "alt+space";
                                   # empty = off (X11 on Linux)
 # shell        = "/bin/zsh"       # default: $SHELL
+
+# [[ssh_profiles]]                # palette "SSH: <name>" (hosts from ~/.ssh/config
+# name = "prod"                   # are listed automatically)
+# host = "me@prod.example.com"    # user@host or a Host alias
+# args = ["-p", "2222"]           # extra ssh arguments
 
 [keybindings]                     # action name → chord; overrides also unbind
 # new_tab = "cmd+n"               # the action's default alternates

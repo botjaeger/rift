@@ -49,18 +49,31 @@ pub fn toast(layer: &mut Layer, engine: &mut TextEngine, theme: &Theme, msg: &st
     );
 }
 
-/// Running-process close confirmation. Returns [cancel, destructive] hit rects.
-#[allow(clippy::too_many_arguments)]
+/// Contents of the confirm modal.
+pub struct Dialog<'a> {
+    pub title: &'a str,
+    pub description: String,
+    pub note: &'a str,
+    /// Up to three are listed (running commands, pasted lines).
+    pub lines: &'a [String],
+    /// Shown for a blank entry in `lines`.
+    pub empty_line: &'a str,
+    pub confirm_label: &'a str,
+    /// Red confirm button (close/quit) instead of the accent one.
+    pub destructive: bool,
+}
+
+/// Confirmation modal (close with running processes, multiline paste).
+/// Returns [cancel, confirm] hit rects.
 pub fn render(
     layer: &mut Layer,
     engine: &mut TextEngine,
     theme: &Theme,
-    title: &str,
-    commands: &[String],
-    destructive_label: &str,
+    dialog: &Dialog,
     w: f32,
     h: f32,
 ) -> [[f32; 4]; 2] {
+    let (title, commands, destructive_label) = (dialog.title, dialog.lines, dialog.confirm_label);
     layer.rect(
         [0.0, 0.0],
         [w, h],
@@ -104,25 +117,14 @@ pub fn render(
         theme.text_bright,
     );
 
-    let count = commands.len();
-    let description = format!(
-        "{count} running process{} will be terminated.",
-        if count == 1 { "" } else { "es" }
-    );
     layer.text(
-        text(engine, &description, 13.0, FONT_SANS, Weight::NORMAL),
+        text(engine, &dialog.description, 13.0, FONT_SANS, Weight::NORMAL),
         x + 24.0,
         y + 64.0,
         theme.text_ui,
     );
     layer.text(
-        text(
-            engine,
-            "This cannot be undone. Cancel to keep the session open.",
-            12.0,
-            FONT_SANS,
-            Weight::NORMAL,
-        ),
+        text(engine, dialog.note, 12.0, FONT_SANS, Weight::NORMAL),
         x + 24.0,
         y + 87.0,
         theme.text_dim,
@@ -132,7 +134,7 @@ pub fn render(
     for command in commands.iter().take(shown) {
         layer.circle([x + 30.0, command_y + 7.0], 5.0, theme.warning);
         let label = if command.trim().is_empty() {
-            "<running shell process>"
+            dialog.empty_line
         } else {
             command.trim()
         };
@@ -182,7 +184,11 @@ pub fn render(
     layer.rect(
         [destructive[0], destructive[1]],
         [destructive[2], destructive[3]],
-        theme.error,
+        if dialog.destructive {
+            theme.error
+        } else {
+            theme.accent
+        },
         7.0,
     );
     let label_w = engine.measure(destructive_label, 12.5, FONT_SANS, Weight::SEMIBOLD);

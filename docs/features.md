@@ -169,6 +169,30 @@ ignored. Warp's own files drop in unchanged.
 - **Session restore**: tab layout + cwds persisted atomically to
   `~/.local/share/shift/session.toml` on every structural change; reopened on
   launch when `restore_session = true`.
+- **Saved block output** (`save_transcripts`, off by default): each pane's
+  finished blocks (command, exit code, duration, directory, output — newest
+  200 blocks / 1 MiB) are written 0600 to `transcripts/<id>.json` when a
+  command finishes and on every session save. A relaunch replays them as
+  ordinary blocks marked **restored** above the new shell; the processes are
+  not running. Replay is text only (escape sequences stripped). Turning the
+  setting off, closing the pane, or "Clear saved block transcripts" deletes
+  the files; nothing is redacted, so keep it off where output holds secrets.
+- **Vertical tabs** (`tab_layout = "vertical"`, Settings → Appearance, or
+  "Toggle vertical tabs"): a 220px rail lists every tab with its shell,
+  title, directory and git branch, pane count, sync state, activity dot and
+  color; click selects, × closes.
+- **Session switcher** (⇧⌘O): one fuzzy list of tabs, panes of split tabs
+  (directory and running job), tabs of other Shift windows (focusing one
+  raises that window), detached session-service shells, and the 40 newest
+  finished blocks; Enter jumps there (a block is selected and scrolled into
+  view).
+- **Hint mode** (⇧⌘H): every visible URL, existing file path and block
+  header gets a letter label; typing it opens the link/path or selects the
+  block, ⇧ + letter copies it (a block copies its output). Esc cancels.
+- **Send output to a command** (block menu, palette): the block's output is
+  previewed, then written to a private temporary file and run as
+  `( command ) < file` (fish: `begin; …; end < file`) in the pane. The output
+  is never interpolated into the command line.
 
 ## Shell integration
 
@@ -193,6 +217,11 @@ emits OSC 133 (blocks) and OSC 7 (cwd tracking).
 - **Shape cache**: shaped text buffers are content-addressed and reused across
   frames — scrolling only shapes lines entering the viewport; the cursor line
   reshapes alone. Ages out after 300 unused frames past 4096 entries.
+  Trailing blank cells are never shaped (backgrounds are quads), which keeps
+  each cached row small during output floods.
+- **Baseline**: `packaging/bench.sh` measures startup, output throughput,
+  scrollback memory, key-to-frame latency and TUI round trips through the
+  script driver; recorded numbers live in [performance.md](performance.md).
 - Scroll input accumulates fractional trackpad deltas — no dropped events.
 - Full VT emulation via alacritty_terminal (vim/htop/alt-screen, 10k
   scrollback default), theme & config hot-reload < 300 ms.
@@ -211,6 +240,34 @@ palette.
 - **Keys** (raw mode): F1–F12, xterm modifier encoding for cursor/editing
   keys, DECCKM application cursor, control codes, Meta (see
   keyboard-shortcuts.md).
+- **Kitty keyboard protocol**: programs that push flags with `CSI > flags u`
+  (Neovim, Helix, fish, kakoune) get unambiguous `CSI u` keys —
+  disambiguation, repeat/release events, shifted alternates, every key as an
+  escape code, and associated text. `CSI ? u` queries are answered; programs
+  that never opt in keep the legacy xterm bytes.
+- **Synchronized output** (DECSET 2026): a frame drawn between begin/end
+  markers appears at once. A program that stalls mid-update is shown after
+  150 ms rather than freezing the pane; a shell marker inside an update
+  flushes it first so block anchors stay correct.
+- **Inline images**: the kitty graphics protocol (APC `G`: transmit, display,
+  put, delete, query; PNG, JPEG, GIF, WebP via `f=100`, raw RGB/RGBA `f=24/32`,
+  zlib `o=z`, chunked `m=1`, source crop, cell size, z-index under/over text,
+  `C=1`, quiet levels) and iTerm2 inline images (OSC 1337 `File=inline=1`, with
+  `width`/`height` in cells, px, % or auto and aspect ratio). Images anchor to
+  the absolute line model: they scroll with output, follow reflow on resize,
+  leave with their line from the scrollback, clear with ⌘K, and alternate-screen
+  images go when the program exits. Only direct transmission (`t=d`) is
+  accepted — file, temp-file and shared-memory transfers would let a program
+  (possibly over ssh) make the terminal read local files — and iTerm2
+  downloads (`inline=0`) are ignored. Bounds: 32 MiB payload and 40 M pixels
+  per image, 320 MiB decoded and 512 placements per pane, 256 MiB of GPU
+  textures (least recently drawn evicted). Sixel is not implemented: the
+  kitty and iTerm2 protocols cover the TUIs that draw images (yazi, timg,
+  chafa, icat, imgcat, viu), and a Sixel decoder would add the largest parser
+  surface for the least-used format.
+- **Paste**: bracketed paste when the program enables it. Otherwise text with
+  a newline asks first ("Paste and run?"), because each newline would press
+  Enter (`confirm_multiline_paste`).
 - **OSC 52** copy: programs (tmux, neovim, remote shells) can set the system
   clipboard. Reading the clipboard back is refused.
 - **Color queries** (OSC 4/10/11/12): answered from the active theme, so
@@ -218,6 +275,97 @@ palette.
 - **Text-area size queries** (CSI 14t/18t) are answered.
 - **OSC 0/2 titles** and title reset; **OSC 7** cwd; **OSC 8** hyperlinks.
 - **IME** composition and committed text in the editor and raw mode.
+
+## Durable sessions
+
+With `durable_sessions = true` (Settings → General), new shells run in a
+per-user **session service** (`shift-terminal --session-daemon`, started on
+demand) instead of the window process. Quitting Shift or closing the window
+leaves them running; the next launch restores the layout and **reattaches**
+each pane: the service replays the output it kept (the newest 8 MiB per
+shell) into a fresh terminal, with the original timing so block durations
+stay right, then continues live. Nothing is shown twice, and automatic
+terminal replies (device attributes, image OKs) are not re-sent during the
+replay.
+
+- Closing a pane (⌘W) ends its shell, as without the service. ⌘K also drops
+  the retained output, so a reattach does not bring it back.
+- Windows that do not restore sessions (secondary ⌘N windows, or
+  `restore_session = false`) end their shells on exit instead of orphaning
+  them.
+- Palette → "Attach detached session: …" opens a tab on any shell the
+  service keeps that no window shows.
+- The service listens on `~/.local/share/shift/sessiond/sock` (a 0700
+  directory; other users' connections are refused) and exits 10 s after its
+  last shell and window are gone. A slow window is disconnected rather than
+  buffering without bound; it reattaches and replays.
+- If the service cannot start, the shell runs locally and a toast says so.
+
+## Control API
+
+Each window listens on `~/.local/share/shift/control/<pid>.sock`
+(`control_api`, Settings → General → Automation):
+
+- `"navigate"` (default): `list`, `status`, `focus`.
+- `"full"`: also `split`, `open` (optionally running a command) and
+  `send-text` (types into a shell).
+- `"off"`: no socket.
+
+`shift-terminal ctl list|status|focus|split|open|send-text` is the client
+(`ctl help` for flags); requests are newline-delimited JSON, answered on the
+UI thread. The session switcher (⇧⌘O) uses it to list and focus tabs of
+other Shift windows.
+
+## Attention center
+
+⇧⌘A lists, newest first: commands that finished while their pane was out of
+view or the window unfocused, every failed command, programs' notification
+requests (OSC 9, OSC 777 `notify`, OSC 99), and bells from background panes —
+each with its tab, status, duration and age. Enter jumps to the pane and
+selects the block. Unread entries show as "● N alerts ⇧⌘A" in the top bar;
+opening the center marks them read. Notification requests from panes out of
+view also raise a desktop notification.
+
+## SSH profiles
+
+Palette → "SSH: <name>" opens a tab titled after the profile that runs the
+system `ssh` (so your ssh config, agent, `known_hosts` checking and prompts
+all apply). Profiles are `[[ssh_profiles]]` in config.toml plus every concrete
+`Host` of `~/.ssh/config` (and its `Include`s).
+
+"Install Shift shell integration on <name>" asks first, then runs an
+installer over ssh in a new tab: it writes `~/.local/share/shift/shift.{bash,
+zsh,fish}` on the host and adds one line ending `# shift-shell-integration`
+to `~/.bashrc` and `~/.zshrc` (plus `~/.config/fish/conf.d/shift.fish`). The
+hooks load only when `LC_TERMINAL=Shift` arrives with the session: Shift sets
+it and passes `-o SendEnv=LC_TERMINAL`, and most servers `AcceptEnv LC_*`.
+After reconnecting, remote commands become blocks with the owned editor,
+exit codes and the remote directory; images and tmux work over ssh as
+locally. Without the hooks (or the env), ssh is an ordinary raw terminal.
+The block of the `ssh` command itself ends when the remote prompt starts.
+
+## Accessibility
+
+Shift draws every surface itself, so it publishes an AccessKit tree
+(`crates/shift-app/src/a11y.rs`) to VoiceOver, Orca and other screen readers:
+
+- **Tabs** as a tab list (selected state; activating one switches tabs).
+- **Panes** as groups labelled with their directory and running job, each
+  holding a list of **command blocks** (label = command, description =
+  succeeded/failed with exit code and duration, value = output, last 4000
+  characters), the visible **terminal** text, and the owned **command
+  editor** as a text field.
+- **Overlays**: the palette (query field, result options, selection), find
+  bar (query and match count), settings (pages, switches with their state,
+  buttons and choices with their current values), block menu, and the
+  confirm dialogs.
+- **Announcements**: a polite live region says "`command` succeeded/failed …"
+  when a command finishes in the visible tab.
+- **Actions**: Click/Focus on a node clicks its on-screen rect through the
+  normal mouse routing, so it behaves exactly like the pointer.
+
+The tree is only built while an assistive technology is attached and is
+pushed only when it changes. The script driver's `dump` prints it.
 
 ## Global hotkey
 
@@ -228,5 +376,5 @@ one.
 
 ## Deferred (by decision, not gaps)
 
-SSH warpify, multi-cursor editing, vertical tabs, accessibility tree,
-`shift://` URI scheme, Warp Drive / cloud / teams, Windows.
+Multi-cursor editing, `shift://` URI scheme, Warp Drive / cloud / teams.
+Everything else on the [roadmap](terminal-landscape-roadmap.md) is planned.

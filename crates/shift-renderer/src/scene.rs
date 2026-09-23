@@ -19,6 +19,8 @@ pub struct TextItem {
 pub struct Layer {
     pub quads: Vec<Quad>,
     pub texts: Vec<TextItem>,
+    /// Inline images (drawn under or over this layer's text).
+    pub sprites: Vec<crate::sprite::Sprite>,
 }
 
 /// Per-frame draw list.
