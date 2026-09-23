@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Runway
+GenericName=Terminal
+Comment=GPU-accelerated terminal with block-based output
+Exec=runway
+Icon=runway
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=shell;terminal;console;

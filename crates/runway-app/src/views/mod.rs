@@ -1,0 +1,9 @@
+pub mod completion;
+pub mod confirm;
+pub mod context_menu;
+pub mod editor;
+pub mod palette;
+pub mod search;
+pub mod settings;
+pub mod tabbar;
+pub mod terminal;

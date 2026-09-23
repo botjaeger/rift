@@ -1,0 +1,46 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/runway-core",
+    "crates/runway-pty",
+    "crates/runway-renderer",
+    "crates/runway-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+runway-core = { path = "crates/runway-core" }
+runway-pty = { path = "crates/runway-pty" }
+runway-renderer = { path = "crates/runway-renderer" }
+
+# gfx — wgpu pinned to the major glyphon supports
+wgpu = "29"
+winit = "0.30"
+glyphon = "0.11"
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "0.4"
+
+# terminal
+alacritty_terminal = "0.26"
+
+# core
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+serde_yaml_ng = "0.10"
+arc-swap = "1.9"
+notify = "8.2"
+nucleo-matcher = "0.3"
+arboard = { version = "3.6", features = ["wayland-data-control"] }
+git2 = { version = "0.21", default-features = false }
+dirs = "6"
+log = "0.4"
+env_logger = "0.11"
+png = "0.18"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+
+[profile.release]
+lto = "thin"

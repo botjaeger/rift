@@ -1,0 +1,170 @@
+use std::io::Write;
+use std::path::PathBuf;
+
+pub const RUNWAY_ZSH: &str = include_str!("../../../shell/runway.zsh");
+pub const RUNWAY_BASH: &str = include_str!("../../../shell/runway.bash");
+pub const RUNWAY_FISH: &str = include_str!("../../../shell/runway.fish");
+const BASHRC: &str = include_str!("../../../shell/runway-bashrc");
+const ZSHENV: &str = include_str!("../../../shell/zdotdir/.zshenv");
+const ZPROFILE: &str = include_str!("../../../shell/zdotdir/.zprofile");
+const ZSHRC: &str = include_str!("../../../shell/zdotdir/.zshrc");
+const ZLOGIN: &str = include_str!("../../../shell/zdotdir/.zlogin");
+
+/// Materialize the shell-integration files under the user's data dir and
+/// return env vars to set on the spawned shell. Returns an empty list if the
+/// files can't be written (integration silently off, terminal still works).
+pub fn setup() -> Vec<(String, String)> {
+    match write_files() {
+        Ok(env) => env,
+        Err(e) => {
+            log::warn!("shell integration disabled: {e}");
+            Vec::new()
+        }
+    }
+}
+
+fn write_files() -> std::io::Result<Vec<(String, String)>> {
+    let base = data_dir().ok_or_else(|| std::io::Error::other("no data dir"))?;
+    let zdotdir = base.join("zdotdir");
+    std::fs::create_dir_all(&zdotdir)?;
+
+    let integration = base.join("runway.zsh");
+    write_if_changed(&integration, RUNWAY_ZSH)?;
+    // bash: no ZDOTDIR equivalent — the shell is spawned with
+    // `--rcfile <bashrc shim>` (see `bash_rcfile`), which replays the user's
+    // own startup files and then sources runway.bash
+    let bash_integration = base.join("runway.bash");
+    write_if_changed(&bash_integration, RUNWAY_BASH)?;
+    write_if_changed(&base.join("bashrc"), BASHRC)?;
+    // fish auto-loads vendor_conf.d from XDG_DATA_DIRS (appended at spawn)
+    let fish_dir = base.join("fish/vendor_conf.d");
+    std::fs::create_dir_all(&fish_dir)?;
+    write_if_changed(&fish_dir.join("runway.fish"), RUNWAY_FISH)?;
+    write_if_changed(&zdotdir.join(".zshenv"), ZSHENV)?;
+    write_if_changed(&zdotdir.join(".zprofile"), ZPROFILE)?;
+    write_if_changed(&zdotdir.join(".zshrc"), ZSHRC)?;
+    write_if_changed(&zdotdir.join(".zlogin"), ZLOGIN)?;
+
+    let mut env = vec![
+        (
+            "RUNWAY_INTEGRATION_ZSH".into(),
+            integration.to_string_lossy().into_owned(),
+        ),
+        (
+            "RUNWAY_INTEGRATION_BASH".into(),
+            bash_integration.to_string_lossy().into_owned(),
+        ),
+        ("ZDOTDIR".into(), zdotdir.to_string_lossy().into_owned()),
+    ];
+    if let Ok(orig) = std::env::var("ZDOTDIR") {
+        env.push(("RUNWAY_ORIG_ZDOTDIR".into(), orig));
+    }
+    // fish vendor_conf.d injection + terminal identification
+    let xdg =
+        std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".into());
+    env.push((
+        "XDG_DATA_DIRS".into(),
+        format!("{xdg}:{}", base.to_string_lossy()),
+    ));
+    env.push(("TERM_PROGRAM".into(), "runway".into()));
+    Ok(env)
+}
+
+/// Extra argv for `program` so its integration loads automatically: bash
+/// gets `--rcfile <shim>`; zsh (ZDOTDIR) and fish (vendor_conf.d) need none.
+pub fn shell_args(program: &str) -> Vec<String> {
+    let name = program.rsplit('/').next().unwrap_or(program);
+    if name == "bash"
+        && let Some(base) = data_dir()
+    {
+        return vec![
+            "--rcfile".into(),
+            base.join("bashrc").to_string_lossy().into_owned(),
+        ];
+    }
+    Vec::new()
+}
+
+/// The shell Runway will spawn: config override, else `$SHELL`, else zsh.
+pub fn resolve_shell(configured: Option<&str>) -> String {
+    let exists = |s: &String| !s.trim().is_empty() && std::path::Path::new(s.trim()).exists();
+    if let Some(c) = configured.map(str::to_string) {
+        if exists(&c) {
+            return c;
+        }
+        log::warn!("shell {c:?} not found, falling back");
+    }
+    // $SHELL, else the first installed of the usual shells: a spawn with a
+    // missing binary would abort the app (e.g. minimal Linux without zsh)
+    std::env::var("SHELL")
+        .ok()
+        .filter(exists)
+        .or_else(|| {
+            ["/bin/zsh", "/usr/bin/zsh", "/bin/bash", "/usr/bin/bash"]
+                .iter()
+                .map(|s| s.to_string())
+                .find(exists)
+        })
+        .unwrap_or_else(|| "/bin/sh".into())
+}
+
+/// Basename of the shell (`zsh`, `bash`, `fish`) for labels.
+pub fn shell_name(configured: Option<&str>) -> String {
+    let shell = resolve_shell(configured);
+    shell.rsplit('/').next().unwrap_or(&shell).to_string()
+}
+
+/// `$XDG_DATA_HOME/runway`, else `~/.local/share/runway`.
+pub fn data_dir() -> Option<PathBuf> {
+    std::env::var_os("XDG_DATA_HOME")
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+        .map(|d| d.join("runway"))
+}
+
+fn write_if_changed(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    if std::fs::read_to_string(path)
+        .map(|c| c == content)
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    let mut f = std::fs::File::create(path)?;
+    f.write_all(content.as_bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bash_gets_rcfile_others_do_not() {
+        if data_dir().is_none() {
+            return;
+        }
+        let args = shell_args("/bin/bash");
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0], "--rcfile");
+        assert_eq!(
+            std::path::Path::new(&args[1]),
+            data_dir().unwrap().join("bashrc")
+        );
+        assert!(shell_args("/bin/zsh").is_empty());
+        assert!(shell_args("/opt/homebrew/bin/fish").is_empty());
+    }
+
+    #[test]
+    fn shell_name_prefers_config() {
+        assert_eq!(shell_name(Some("/bin/sh")), "sh");
+        assert_eq!(resolve_shell(Some("/bin/sh")), "/bin/sh");
+        assert!(!shell_name(None).is_empty());
+    }
+
+    #[test]
+    fn missing_shell_falls_back_to_an_installed_one() {
+        let got = resolve_shell(Some("/definitely/not/a/shell"));
+        assert_ne!(got, "/definitely/not/a/shell");
+        assert!(std::path::Path::new(&got).exists());
+    }
+}

@@ -1,0 +1,18 @@
+# Runway bash shim (passed as `bash --rcfile`): replay bash's own startup
+# order for this platform, then layer the Runway integration on top.
+if [[ "$(uname -s)" == "Darwin" ]]; then
+    # macOS terminals run login shells: /etc/profile + the first profile file
+    [[ -f /etc/profile ]] && source /etc/profile
+    for _runway_f in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
+        if [[ -f "$_runway_f" ]]; then
+            source "$_runway_f"
+            break
+        fi
+    done
+    unset _runway_f
+else
+    # Linux terminals run interactive non-login shells: system + user rc
+    [[ -f /etc/bash.bashrc ]] && source /etc/bash.bashrc
+    [[ -f "$HOME/.bashrc" ]] && source "$HOME/.bashrc"
+fi
+[[ -f "$RUNWAY_INTEGRATION_BASH" ]] && source "$RUNWAY_INTEGRATION_BASH"
