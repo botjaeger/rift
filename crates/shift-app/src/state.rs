@@ -78,7 +78,6 @@ const UNDO_CAP: usize = 100;
 
 impl EditorState {
     /// True when the pane's editor is in vim mode.
-    #[allow(dead_code)]
     pub fn vim_enabled(&self) -> bool {
         self.vim.is_some()
     }
@@ -95,7 +94,6 @@ impl EditorState {
     }
 
     /// Current vim mode, or `None` when vim mode is disabled.
-    #[allow(dead_code)]
     pub fn vim_mode(&self) -> Option<VimMode> {
         self.vim.as_ref().map(|v| v.mode)
     }

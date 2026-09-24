@@ -112,10 +112,8 @@ pub fn render(
     // divider (full width, design: border-top on -8px margins)
     layer.hline(x - 8.0, y, w + 16.0, 1.0, theme.border);
 
-    #[allow(clippy::needless_late_init)]
-    let input_y;
-    if compact || shell_prompt {
-        input_y = y + 11.0;
+    let input_y = if compact || shell_prompt {
+        y + 11.0
     } else {
         // ── prompt context (design 01): ⇕ ~/cwd on ⎇ branch ↑n ──
         let ctx_y = y + 13.0;
@@ -133,8 +131,8 @@ pub fn render(
             &cwd_display,
             pane.git.as_ref(),
         );
-        input_y = ctx_y + 24.0;
-    }
+        ctx_y + 24.0
+    };
     let font_size = FONT_SIZE;
     let line_h = LINE_H;
     let prompt_color = match pane.last_exit {

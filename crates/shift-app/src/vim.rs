@@ -23,7 +23,6 @@ pub enum VimMode {
 }
 
 /// A key handed to [`EditorState::vim_key`].
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VimKey {
     Char(char),
@@ -37,7 +36,6 @@ pub enum VimKey {
 }
 
 /// What the app should do with a key after vim looked at it.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VimOutcome {
     /// Vim handled it; nothing else to do.
@@ -122,7 +120,6 @@ impl Pending {
 }
 
 /// Modal-editing state hung off [`EditorState`]; `None` there = vim disabled.
-#[allow(dead_code)]
 #[derive(Debug, Default)]
 pub struct VimState {
     pub mode: VimMode,
@@ -138,7 +135,6 @@ pub struct VimState {
 impl VimState {
     /// Back to Insert with no half-typed command — what users expect right
     /// after running a command (matches Warp).
-    #[allow(dead_code)]
     pub fn reset_insert(&mut self) {
         self.mode = VimMode::Insert;
         self.pending.reset();
@@ -360,7 +356,6 @@ fn toggle_case(c: char) -> String {
 impl EditorState {
     /// Feed one key to the vim layer. Returns [`VimOutcome::PassThrough`] when
     /// vim is disabled, or in Insert mode for everything except Escape.
-    #[allow(dead_code)]
     pub fn vim_key(&mut self, key: VimKey) -> VimOutcome {
         let Some(mut v) = self.vim.take() else {
             return VimOutcome::PassThrough;

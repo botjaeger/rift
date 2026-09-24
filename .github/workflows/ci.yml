@@ -1,5 +1,8 @@
 name: CI
 
+# Runs the same gate script as local development (scripts/gates.sh) with the
+# compiler pinned in rust-toolchain.toml, so a green local run predicts CI.
+
 on:
   push:
     branches: [main]
@@ -13,33 +16,28 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, ubuntu-24.04]
+        include:
+          - os: macos-14
+            gates: fmt clippy test doc release
+          - os: ubuntu-24.04
+            gates: fmt clippy test doc shell release
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Linux build deps (winit / wayland / x11)
+      - name: Install Linux build deps (winit / wayland / x11) + hook checkers
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             libxkbcommon-dev libwayland-dev libxcb1-dev libxcb-render0-dev \
-            libxcb-shape0-dev libxcb-xfixes0-dev libssl-dev pkg-config
+            libxcb-shape0-dev libxcb-xfixes0-dev libssl-dev pkg-config \
+            shellcheck zsh fish
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      - name: Install Rust (rust-toolchain.toml)
+        run: rustup toolchain install
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Format
-        run: cargo fmt --all --check
-
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Tests
-        run: cargo test --workspace
-
-      - name: Release build
-        run: cargo build --release
+      - name: Gates
+        run: scripts/gates.sh ${{ matrix.gates }}

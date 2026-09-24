@@ -2,7 +2,7 @@
 //!
 //! Each decoded image is uploaded once into its own texture, keyed by the
 //! image's process-unique key, and reused across frames. Textures unused for
-//! [`IDLE_FRAMES`] frames are dropped, and the cache never holds more than
+//! `IDLE_FRAMES` frames are dropped, and the cache never holds more than
 //! [`MAX_GPU_BYTES`]: when a new upload would exceed it, the least recently
 //! drawn textures go first (a sprite that still cannot fit is skipped).
 

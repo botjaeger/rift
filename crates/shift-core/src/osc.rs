@@ -12,7 +12,7 @@ pub enum Marker {
     CommandStart,
     /// OSC 133;C — command accepted, output begins.
     OutputStart,
-    /// OSC 133;D;<exit> — command finished.
+    /// OSC 133;D;`<exit>` — command finished.
     Done { exit: Option<i32> },
     /// OSC 7;file://host/path — working directory changed.
     Cwd(String),

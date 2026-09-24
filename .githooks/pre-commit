@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Fast gates before each commit. Enable once per clone:
+#   git config core.hooksPath .githooks
+# Skip for one commit with `git commit --no-verify`.
+exec "$(git rev-parse --show-toplevel)/scripts/gates.sh" fmt clippy docs

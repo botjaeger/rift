@@ -1,0 +1,8 @@
+# One compiler for local gates, CI and releases. Newer clippy releases add
+# lints, so an unpinned `stable` lets CI fail on code that passed locally.
+# Bump deliberately: change this line and the FROM in
+# packaging/linux-verify.Dockerfile, then run scripts/gates.sh all.
+[toolchain]
+channel = "1.98.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

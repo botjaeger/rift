@@ -318,7 +318,8 @@ pub fn filter_hidden(
     hidden
 }
 
-/// [`build_display_list`] minus `hidden` grid lines (block filter).
+/// The display-line list (`build_display_list`) minus `hidden` grid lines
+/// (block filter).
 #[allow(clippy::too_many_arguments)]
 pub fn build_display_list_filtered(
     blocks: &[Block],
