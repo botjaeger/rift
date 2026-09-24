@@ -7490,6 +7490,7 @@ impl ApplicationHandler<UserEvent> for App {
             .filter(|f| f.width >= 320.0 && f.height >= 200.0);
         let mut attrs = WindowAttributes::default()
             .with_title("Shift")
+            .with_window_icon(crate::icon::window_icon())
             // always transparent so `window_opacity` can change live
             .with_transparent(true)
             .with_inner_size(match frame {
@@ -7512,6 +7513,16 @@ impl ApplicationHandler<UserEvent> for App {
                 .with_titlebar_transparent(true)
                 .with_fullsize_content_view(true)
                 .with_title_hidden(true);
+            crate::icon::set_dock_icon();
+        }
+        // X11 WM_CLASS / Wayland app_id "shift" matches shift.desktop, so
+        // docks, taskbars and switchers show its hicolor icon
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            use winit::platform::wayland::WindowAttributesExtWayland;
+            use winit::platform::x11::WindowAttributesExtX11;
+            attrs = WindowAttributesExtX11::with_name(attrs, "shift", "shift");
+            attrs = WindowAttributesExtWayland::with_name(attrs, "shift", "shift");
         }
 
         // hidden until the accessibility adapter is attached (AccessKit

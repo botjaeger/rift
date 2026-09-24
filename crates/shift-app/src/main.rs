@@ -3,6 +3,7 @@ mod app;
 mod capture;
 mod control;
 mod hotkey;
+mod icon;
 mod input;
 mod keyboard;
 #[cfg(target_os = "macos")]
