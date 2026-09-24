@@ -1,34 +1,33 @@
-# Shift Documentation
+# Shift documentation
 
-Shift is a GPU-accelerated, block-based terminal emulator for macOS and Linux,
-built in Rust on wgpu + alacritty_terminal. Its interaction model follows Warp:
-commands become discrete blocks, the command line is an app-owned editor, and
-everything is keyboard-drivable.
+Shift is a GPU-accelerated, block-based terminal for macOS and Linux, written
+in Rust on wgpu and alacritty_terminal. Every command becomes a block, the
+command line is an app-owned editor, and every action is reachable from the
+keyboard. The [project README](../README.md) explains what Shift is and why.
+
+## Using Shift
 
 | Document | Contents |
 |---|---|
-| [ui.md](ui.md) | Every UI surface: tabs, blocks, editor, palette, settings, search, menus |
-| [features.md](features.md) | Feature inventory and behaviors (block lifecycle, clear semantics, selection, completions, workflows, session restore) |
-| [keyboard-shortcuts.md](keyboard-shortcuts.md) | Full default keymap (Warp layout), editor keys, search keys, customization |
-| [configuration.md](configuration.md) | `config.toml` reference, themes, keybinding overrides, file locations |
-| [warp-parity.md](warp-parity.md) | Current non-AI Warp parity matrix, gaps, and implementation order |
-| [terminal-landscape-roadmap.md](terminal-landscape-roadmap.md) | Cross-platform terminal survey and prioritized Shift implementation plan |
-| [performance.md](performance.md) | Benchmark harness and the recorded performance/compatibility baseline |
+| [getting-started.md](getting-started.md) | First launch, everyday tasks, troubleshooting, files Shift uses |
+| [features.md](features.md) | Every feature and its exact behavior |
+| [ui.md](ui.md) | Every UI surface: tabs, blocks, editor, palette, settings, dialogs |
+| [keyboard-shortcuts.md](keyboard-shortcuts.md) | Full default keymap (Warp layout), fixed keys, rebinding |
+| [configuration.md](configuration.md) | `config.toml` reference, themes, workflows, launch configs, file locations |
 
-## Quick start
+## Building Shift
 
-```sh
-cargo run -p shift-app        # dev build + launch (binary name: shift-terminal)
-packaging/make-app.sh          # macOS Shift.app bundle (release)
-```
+| Document | Contents |
+|---|---|
+| [development.md](development.md) | Setup, build, test, gates, UI verification, architecture, dependencies, releases |
+| [../DESIGN.md](../DESIGN.md) | Design tokens, metrics, typography, layers, visual rules |
+| [../CLAUDE.md](../CLAUDE.md) | Guide for coding agents (same as `AGENTS.md`): invariants, pins, safety |
+| [performance.md](performance.md) | Benchmark harness and recorded baseline |
 
-Shell integration (zsh, bash, fish) is injected automatically on first spawn —
-no rc-file edits needed. Without it, Shift degrades gracefully to a plain
-terminal (no blocks).
+## Plans
 
-## Architecture
-
-
-See the repository's `CLAUDE.md` for the four-crate architecture
-(`shift-core` / `shift-pty` / `shift-renderer` / `shift-app`), load-bearing
-invariants, and dependency pins.
+| Document | Contents |
+|---|---|
+| [terminal-landscape-roadmap.md](terminal-landscape-roadmap.md) | Terminal survey, prioritized plan and status |
+| [warp-parity.md](warp-parity.md) | Non-AI Warp parity matrix and gaps |
+| [mobile-remote-plan.md](mobile-remote-plan.md) | Mobile companion plan and open decisions |

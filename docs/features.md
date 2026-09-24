@@ -20,6 +20,11 @@ Per-block operations: select (click / ⌘↑ / ⌘↓), copy command/output/both
 copy cwd, copy git branch, re-run (only at a prompt), reinput into the editor
 (⌘I), bookmark (⌘B), collapse (chevron), jump to top/bottom of block.
 
+**Block filter** (⌥⇧F or block menu → *Filter output…*): the find bar edits
+a filter for one block; only output lines containing the text (case
+insensitive) stay visible. Running it again on the same block, or choosing
+*Clear output filter*, shows every line again.
+
 ## Clear semantics
 
 - **`clear` command (soft, Warp-style)** — detected via ED3 (`\e[3J`, terminfo
@@ -166,6 +171,9 @@ ignored. Warp's own files drop in unchanged.
 - Panes: split right/down, directional focus (⌥⌘arrows), keyboard resize
   (⌃⌘arrows), drag resize, zoom toggle (⇧⌘⏎), close (⌃⇧W/⌘W — last pane closes
   the tab, last tab exits).
+- **Synchronized inputs** (⌥⌘I, tab context menu or Window menu): typing and
+  submitting in one pane of a split tab goes to every pane of that tab; the
+  tab shows a sync marker while it is on.
 - **Session restore**: tab layout + cwds persisted atomically to
   `~/.local/share/shift/session.toml` on every structural change; reopened on
   launch when `restore_session = true`.

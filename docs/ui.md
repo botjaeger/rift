@@ -1,7 +1,9 @@
 # UI Surfaces
 
 Every visual element in Shift, top to bottom. Layer order for compositing:
-0 chrome → 1 terminal + editor → 2 completion/search → 3 settings → 4 palette.
+0 chrome → 1 terminal + editor → 2 completion/search → 3 settings → 4 palette
+→ 5 context menu and hints → 6 toasts and confirm dialogs. Visual tokens and
+metrics: [DESIGN.md](../DESIGN.md).
 
 ## Window chrome
 
@@ -35,7 +37,16 @@ every action).
   (OSC 0/2 title, else cwd basename; `· N panes` suffix when split).
 - Activity pulse dot on background tabs that produced output since last viewed.
 - `×` closes the tab (all its panes), `+` spawns a new tab.
-- Right side: `⌘P palette` hint.
+- Right side: `⌘P palette` hint, replaced by `● N alerts ⇧⌘A` while the
+  attention center has unread entries.
+- A tab with synchronized inputs on shows a sync marker.
+
+## Vertical tab rail
+
+`tab_layout = "vertical"` (Settings → Appearance → *Tabs: Side*) replaces the
+tab strip with a 220 px rail on the left: one 54 px row per tab with shell,
+title, directory, git branch, pane count, sync state, activity dot and tab
+color. Click selects, × closes; ⌘T adds a tab.
 
 ## Blocks (terminal area)
 
@@ -145,6 +156,30 @@ shortcut chips. Modes:
   history; Enter runs, or insert into the editor.
 - **Workflows** (⌃⇧R) — Warp-compatible YAML workflows; selecting one inserts
   its command with Tab-cyclable placeholders.
+- **Session switcher** (⇧⌘O) — tabs, panes of split tabs (directory and
+  running job), tabs of other Shift windows, detached session-service shells,
+  and the 40 newest finished blocks. Enter jumps there.
+- **Attention center** (⇧⌘A) — finished and failed commands, program
+  notifications and background bells, newest first, each with tab, status,
+  duration and age. Enter jumps to the block.
+
+Long rows are cut with `…` inside the dialog.
+
+## Hint mode (⇧⌘H)
+
+Every visible URL, existing file path and block header gets a short letter
+label drawn over it. Typing a label opens the link or path, or selects the
+block; ⇧ + label copies it (a block copies its output). Esc cancels.
+
+## Dialogs and toasts
+
+- **Confirm dialogs** — warning icon, title, the affected commands (at most a
+  few, then `and N more…`), Cancel and a confirm button. Used for closing
+  running commands, pasting multi-line text into a shell without bracketed
+  paste ("Paste and run?"), and installing shell integration on an SSH host.
+  Enter confirms, Esc cancels.
+- **Toasts** — short notices at the bottom (a keybinding moved from another
+  action, the session service could not start, …).
 
 ## Search (⌃⇧F / ⌘F)
 
@@ -154,11 +189,15 @@ Two toggle chips at the right: `Aa` match case (⌥C) and `.*` regular
 expression (⌥R); an invalid regex shows `invalid regex` in red instead of the
 counter.
 
+With a block filter active (⌥⇧F), the same bar edits the filter: only that
+block's output lines containing the text stay visible.
+
 ## Block context menu (right-click or ⌃M)
 
 Copy command · Copy output · Copy both · Copy working directory ·
 Copy git branch · Re-run command · Bookmark/Remove bookmark ·
-Collapse/Expand · Scroll to top of block · Scroll to bottom of block.
+Collapse/Expand · Filter output…/Clear output filter · Send output to
+command… · Scroll to top of block · Scroll to bottom of block.
 Disabled items are dimmed (e.g. Copy output on an output-less block).
 
 ## Settings overlay (⌘,)

@@ -20,6 +20,7 @@ listed alternates.
 | ⌘⇧↓ / ⌃⇧↓ | `bookmark_next` | Jump to next bookmarked block |
 | ⌥↑ / ⌥↓ | `bookmark_closest_prev` / `_next` | Same jumps (Warp's closest-bookmark keys) |
 | ⌘K | `clear_blocks` | Clear blocks + scrollback (destructive; `clear` is the soft variant) |
+| ⌥⇧F | `filter_block` | Show only the selected (else newest) block's output lines that contain the typed text; again clears |
 | — | `pipe_block_output` | Send the selected (else newest) block's output to a command's stdin |
 | Esc | — | Deselect block (in raw mode also still reaches the app in the PTY) |
 
@@ -54,6 +55,19 @@ listed alternates.
 | ⌃⌘← → ↑ ↓ | `resize_pane_*` | Move the split divider (±5 %) |
 | ⇧⌘⏎ | `maximize_pane` | Toggle pane zoom |
 | ⌘W / ⌃⇧W | `close_pane` | Close pane (last pane closes tab) |
+| ⌥⌘I | `toggle_sync_inputs` | Type and submit into every pane of the tab at once |
+
+## Window
+
+| Shortcut | Action name | Effect |
+|---|---|---|
+| ⌘N | `new_window` | New window |
+| ⇧⌘W | `close_window` | Close the window (warns about running commands) |
+| ⌘M | `minimize` | Minimize |
+| ⌘H | `hide_app` | Hide Shift |
+| ⌃⌘F | `toggle_fullscreen` | Full screen |
+| ⌘Q | `quit` | Quit (warns about running commands) |
+| ⌘A | `select_all` | Select the editor text, else all scrollback |
 
 ## App
 
