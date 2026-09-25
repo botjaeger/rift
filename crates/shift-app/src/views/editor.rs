@@ -14,7 +14,7 @@ pub const EDITOR_COMPACT_H: f32 = 42.0;
 /// Input line height; every extra line of a multi-line command adds one.
 pub const LINE_H: f32 = 20.0;
 pub const FONT_SIZE: f32 = 14.0;
-const PAD_X: f32 = 16.0;
+pub const PAD_X: f32 = 16.0;
 
 /// Terminal cells a character occupies (CJK, Hangul, fullwidth forms and
 /// emoji are double width).

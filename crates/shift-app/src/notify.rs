@@ -11,8 +11,14 @@ fn spawn(cmd: &str, args: &[&str]) {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn();
-    if let Err(e) = r {
-        log::debug!("notify: {cmd}: {e}");
+    match r {
+        // reap it off the main thread, or every sound leaves a zombie
+        Ok(mut child) => {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
+        Err(e) => log::debug!("notify: {cmd}: {e}"),
     }
 }
 
@@ -37,6 +43,28 @@ pub fn send(title: &str, body: &str) {
     } else {
         spawn("notify-send", &["--app-name=Shift", title, body]);
     }
+}
+
+/// Play an audio file (notification sounds, Settings preview).
+pub fn play(path: &std::path::Path) {
+    let p = path.to_string_lossy();
+    if std::env::var_os("SHIFT_NO_NOTIFY").is_some() {
+        log::info!("sound (suppressed): {p}");
+        return;
+    }
+    log::info!("sound: {p}");
+    if cfg!(target_os = "macos") {
+        spawn("afplay", &[&p]);
+    } else if which("paplay") {
+        spawn("paplay", &[&p]);
+    } else {
+        spawn("canberra-gtk-play", &["-f", &p]);
+    }
+}
+
+fn which(cmd: &str) -> bool {
+    std::env::var_os("PATH")
+        .is_some_and(|paths| std::env::split_paths(&paths).any(|d| d.join(cmd).is_file()))
 }
 
 /// Audible bell.

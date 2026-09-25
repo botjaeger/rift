@@ -33,8 +33,6 @@ pub enum PaletteAction {
     RunPipe,
     /// Open a new tab connected to ssh profile `.0`.
     Ssh(usize),
-    /// Attention center: go to entry `.0`.
-    ShowAttention(usize),
     /// Open a tab reattached to session-service shell `.0`.
     AttachService(u64),
     /// Session switcher: raise window `.0` (pid) at tab `.1`, pane `.2`.
@@ -85,8 +83,6 @@ pub enum PaletteMode {
     /// Block action: the query is a command; the rows preview the output
     /// that will be its stdin.
     PipeOutput,
-    /// ⇧⌘A: finished commands, failures, notifications and bells.
-    Attention,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -155,7 +151,7 @@ pub fn base_items(
             PaletteAction::App(AppAction::SessionSwitcher),
         ),
         item(
-            "Attention center: finished commands and alerts",
+            "Notifications: finished commands and alerts",
             "attention_center",
             PaletteAction::App(AppAction::AttentionCenter),
         ),
@@ -410,6 +406,21 @@ pub fn base_items(
             "Open keyboard shortcuts",
             "open_keybindings",
             PaletteAction::App(AppAction::OpenKeybindings),
+        ),
+        item(
+            "What's new",
+            "whats_new",
+            PaletteAction::App(AppAction::WhatsNew),
+        ),
+        item(
+            "Toggle file explorer",
+            "toggle_explorer",
+            PaletteAction::App(AppAction::ToggleExplorer),
+        ),
+        item(
+            "Toggle code review",
+            "toggle_review",
+            PaletteAction::App(AppAction::ToggleReview),
         ),
     ];
     items.push(Item {
@@ -701,7 +712,6 @@ pub fn render(
         layer.text(qbuf, qx, sy - 1.0, theme.text_bright);
     } else if let Some(placeholder) = match state.mode {
         PaletteMode::Sessions => Some("Go to tab, pane or block…"),
-        PaletteMode::Attention => Some("Filter alerts…"),
         PaletteMode::PipeOutput => Some("Command that reads the output on stdin…"),
         _ => None,
     } {
@@ -891,7 +901,7 @@ pub fn render(
     layer.hline(mx, fy, MODAL_W, 1.0, Color::rgba(1.0, 1.0, 1.0, 0.07));
     let mut fx = mx + 18.0;
     let enter = match state.mode {
-        PaletteMode::Sessions | PaletteMode::Attention => " go to",
+        PaletteMode::Sessions => " go to",
         PaletteMode::PipeOutput => " run with output on stdin",
         _ => " run",
     };

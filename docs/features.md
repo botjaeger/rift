@@ -238,10 +238,15 @@ emits OSC 133 (blocks) and OSC 7 (cwd tracking).
 
 ## Startup
 
-`Starting zsh…` placeholder until the shell's first byte. Session restore
+`Starting zsh…` placeholder on the input line until the shell's first prompt; no terminal
+cursor shows while it is up. For a shell without integration, the placeholder leaves and the
+cursor shows 1.5 s after its first byte. Session restore
 respawns tabs at their saved cwds. Shell history (`~/.zsh_history`, EXTENDED
 format, multiline entries, 0x83 unmetafy) imported once for the history
-palette.
+palette. The first launch after an update opens What's New (release notes
+from `CHANGELOG.md`); the last seen version lives in
+`~/.local/share/shift/last-seen-version`, and a first install only records
+it.
 
 ## Terminal protocol support
 
@@ -324,15 +329,48 @@ Each window listens on `~/.local/share/shift/control/<pid>.sock`
 UI thread. The session switcher (⇧⌘O) uses it to list and focus tabs of
 other Shift windows.
 
-## Attention center
+## Notifications (attention center)
 
-⇧⌘A lists, newest first: commands that finished while their pane was out of
-view or the window unfocused, every failed command, programs' notification
-requests (OSC 9, OSC 777 `notify`, OSC 99), and bells from background panes —
-each with its tab, status, duration and age. Enter jumps to the pane and
-selects the block. Unread entries show as "● N alerts ⇧⌘A" in the top bar;
-opening the center marks them read. Notification requests from panes out of
-view also raise a desktop notification.
+The inbox button in the top bar (or ⇧⌘A) opens a popover listing, newest
+first: commands that finished while their pane was out of view or the window
+unfocused, every failed command, programs' notification requests (OSC 9,
+OSC 777 `notify`, OSC 99), coding-agent notifications, password prompts in
+background panes, and bells from background panes — each with the agent,
+the pane's git branch at the time, the title, a status line and its age.
+Chips filter to all, unread or errors. A click or ⏎ jumps to the pane and
+selects the block. The list keeps the newest 200.
+
+- **Read state**: an entry is unread until you open it, look at its pane, or
+  press `Mark all as read`. Unread entries put an accent dot on the inbox
+  button and a kind-colored dot on their tab.
+- **Alerts** (Settings → Notifications, `[notifications]`): for a pane out
+  of view, an enabled event also raises a toast (Shift focused) or a desktop
+  notification (Shift in the background), and plays its sound. Events: long
+  command finished, command failed, agent task completed, needs attention,
+  password prompt.
+- **Coding agents**: Claude Code, Codex, OpenCode and Gemini CLI are
+  recognized from the running command; their notifications show the agent's
+  badge, and the wording sorts them into waiting (permission, approval,
+  input), error, or task completed. Setup per agent:
+  [configuration](configuration.md#notifications--bell).
+- **Password prompts**: a running command in a background pane whose cursor
+  line ends like `Password:` or `Enter passphrase for key …:` raises one
+  alert per command.
+
+## File explorer and code review
+
+⇧⌘E opens the file explorer: the active pane's project (git working tree,
+else its directory) as a lazily expanded tree with ignored files hidden and
+git status colors. A file opens in a read-only viewer over the pane area
+(line numbers, keyword/string/comment highlighting, 4 MB limit, binary
+detection); ⌥-click inserts its path into the command line.
+
+⇧⌘G opens code review: staged and unstaged changes (untracked included) as
+files, hunks and lines. Stage, unstage or revert a whole file or one hunk;
+revert asks first and only discards unstaged work. Hunk actions re-diff and
+match the hunk by its line ranges before writing, so a stale panel never
+applies the wrong hunk. The model loads on a background thread and reloads
+when a command finishes. Details in [ui.md](ui.md).
 
 ## SSH profiles
 

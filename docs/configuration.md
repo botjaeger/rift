@@ -11,6 +11,7 @@
 | `~/.config/shift/launch_configs/*.yaml` · `*.yml` | Launch configurations (Warp-compatible YAML) |
 | `~/.local/share/shift/` | Materialized shell-integration files |
 | `~/.local/share/shift/session.toml` | Saved session (tabs + cwds), written atomically |
+| `~/.local/share/shift/last-seen-version` | Version whose What's New was last shown (opens it once after an update) |
 
 `XDG_CONFIG_HOME` and `XDG_DATA_HOME` are honored. Existing `runway` config and data directories remain active when the corresponding `shift` directory does not exist; move them to `shift` when you want the new paths.
 
@@ -49,8 +50,8 @@ autosuggestions = true            # inline ghost text after the cursor
 completions_menu = true           # completion dropdown (Tab still accepts the ghost text)
 autocomplete_pairs = true         # auto-close quotes/brackets; Backspace removes empty pairs
 vim_mode      = false             # modal (vim) editing in the command editor
-notify_on_completion = true       # desktop notification for long commands (window unfocused)
-notify_threshold_secs = 10        # minimum duration for that notification (stepper: 0–3600, ±5)
+notify_on_completion = true       # alert when a long command finishes out of view
+notify_threshold_secs = 10        # what counts as long (stepper: 0–3600, ±5)
 bell          = "visual"          # visual | audible | both | none
 confirm_close_running = true      # warn before closing a pane/tab/window with a running job
 confirm_multiline_paste = true    # ask before a paste with newlines reaches a program
@@ -71,6 +72,21 @@ global_hotkey = ""                # system-wide show/hide chord, e.g. "alt+space
 # name = "prod"                   # are listed automatically)
 # host = "me@prod.example.com"    # user@host or a Host alias
 # args = ["-p", "2222"]           # extra ssh arguments
+
+[notifications]                   # Settings → Notifications
+enabled = true                    # master switch for toasts, desktop notifications, sounds
+command_failed = true             # a command failed out of view
+agent_task_completed = true       # Claude Code / Codex / OpenCode / Gemini CLI finished
+needs_attention = true            # OSC 9/777/99, an agent asking for input or approval
+password_prompt = true            # a running command shows a password prompt
+toasts = true                     # in-window cards while Shift is focused
+toast_secs = 8                    # 2–60; hovering keeps a toast
+play_sound = true
+sound = "default"                 # default | none | a name (Glass, Hero, a file stem
+                                  # in ~/Library/Sounds) | a path to an audio file
+sound_finished = ""               # per-event overrides; "" = use `sound`
+sound_failed = ""
+sound_attention = ""
 
 [keybindings]                     # action name → chord; overrides also unbind
 # new_tab = "cmd+n"               # the action's default alternates
@@ -191,15 +207,44 @@ Semantics:
 
 ## Notifications & bell
 
-- `notify_on_completion` fires a desktop notification when a command that ran
-  at least `notify_threshold_secs` finishes **while the window is unfocused**:
-  macOS `osascript display notification`, Linux `notify-send`.
+Every event lands in the notifications inbox. For a pane you are not looking
+at, an enabled event also alerts: a toast while Shift is focused, a desktop
+notification (macOS `osascript display notification`, Linux `notify-send`)
+while it is not, plus its sound.
+
+| Event | Switch | Default sound (macOS / Linux) |
+|---|---|---|
+| Long command finished (≥ `notify_threshold_secs`) | `notify_on_completion` | Glass / `complete` |
+| Command failed | `notifications.command_failed` (a long failure also alerts via `notify_on_completion`) | Basso / `dialog-error` |
+| Agent task completed | `notifications.agent_task_completed` | Glass / `complete` |
+| Program or agent needs attention; agent error | `notifications.needs_attention` | Ping / `message-new-instant` (Basso for errors) |
+| Password prompt | `notifications.password_prompt` | Ping / `message-new-instant` |
+
+- **Sounds**: `default` plays the event's sound above; `none` is silent; a
+  name is looked up as `<name>.{aiff,wav,caf,mp3,m4a,oga}` in
+  `~/Library/Sounds`, `~/.local/share/sounds`, `/System/Library/Sounds` and
+  `/usr/share/sounds/freedesktop/stereo`; a value with `/` is a file path.
+  Played with `afplay` (macOS) or `paplay` / `canberra-gtk-play` (Linux).
+  In Settings, clicking a sound picker steps to the next sound and plays it.
+- **Coding agents** are recognized from the running command (`claude`,
+  `codex`, `opencode`, `gemini`, also behind `npx`, `env`, `VAR=…` or `&&`).
+  Their notifications carry the agent's badge. Turn them on in the agent:
+  - Claude Code: `claude config set --global preferredNotifChannel iterm2`
+    (sends OSC 9).
+  - Codex: in `~/.codex/config.toml`, under `[tui]`:
+    `notification_method = "osc9"` (its `auto` rings the bell in terminals
+    it does not know) and `notification_condition = "always"`.
+  - Any other tool: print OSC 9 (`\e]9;message\a`) or OSC 777
+    (`\e]777;notify;title;body\a`).
+- The wording decides the kind: "permission", "approval", "waiting for your
+  input" → needs attention; "error", "failed" → error; "complete", "done"
+  from an agent → task completed.
 - `bell` handles BEL from the PTY: `visual` = a brief full-window flash,
   `audible` = a sound (`afplay` on macOS, `paplay` / `canberra-gtk-play` on
-  Linux), `both`, or `none`. A bell in a background tab also lights its
-  activity dot.
-- `SHIFT_NO_NOTIFY=1` suppresses both (notifications are logged instead) —
-  useful for scripted runs.
+  Linux), `both`, or `none`. A bell in a background tab also lands in the
+  inbox and marks the tab.
+- `SHIFT_NO_NOTIFY=1` suppresses desktop notifications and sounds (they are
+  logged instead) — useful for scripted runs.
 
 ## Keybinding overrides
 

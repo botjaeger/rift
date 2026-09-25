@@ -79,9 +79,14 @@ Other keyboard-first tools:
 
 - **Hint mode** ⇧⌘H: letters appear over every visible link, path and block.
   Type one to open it; ⇧ + letter copies it.
-- **Attention center** ⇧⌘A: commands that finished or failed while you were
-  elsewhere, program notifications and bells. The top bar shows
-  `● N alerts` when something is unread.
+- **Notifications** ⇧⌘A or the inbox button at the top right: commands that
+  finished or failed while you were elsewhere, coding-agent and program
+  notifications, password prompts and bells. A blue dot on the button means
+  something is unread; a toast pops up for tabs you are not looking at.
+  Settings → Notifications picks what alerts and which sounds play. To get
+  Claude Code's notifications run
+  `claude config set --global preferredNotifChannel iterm2`; for Codex see
+  [configuration](configuration.md#notifications--bell).
 
 ## Settings and themes
 

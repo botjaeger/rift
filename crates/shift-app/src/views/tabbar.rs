@@ -16,6 +16,9 @@ pub struct TabInfo {
     pub panes: usize,
     pub shell_label: String,
     pub activity: bool,
+    /// Kind of the tab's newest unread notification (shown in place of the
+    /// activity dot).
+    pub alert: Option<crate::views::notifications::Kind>,
     /// Tab color (Warp tab colors): tints the underline and a leading dot.
     pub color: Option<Color>,
     /// Synchronized inputs are on for this tab.
@@ -63,6 +66,33 @@ fn elide(engine: &mut TextEngine, text: &str, size: f32, max_w: f32) -> String {
     String::new()
 }
 
+/// State of the top-bar panel buttons.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PanelButtons {
+    pub explorer_open: bool,
+    pub review_open: bool,
+    /// Working-tree `(added, removed)` lines; `None` outside a repository.
+    pub diff: Option<(usize, usize)>,
+    pub notifications_open: bool,
+    /// Unread notifications (dot on the inbox button).
+    pub unread: usize,
+}
+
+/// A window outline with its left column filled (sidebar toggle).
+fn sidebar_icon(layer: &mut Layer, theme: &Theme, r: [f32; 4], color: Color) {
+    let (iw, ih) = (16.0, 13.0);
+    let (ix, iy) = (r[0] + (r[2] - iw) / 2.0, r[1] + (r[3] - ih) / 2.0);
+    layer.bordered(
+        [ix, iy],
+        [iw, ih],
+        theme.bg_chrome.with_alpha(0.0),
+        color,
+        2.5,
+        1.3,
+    );
+    layer.rect([ix, iy], [5.5, ih], color, 2.0);
+}
+
 /// Draw the 42px tab strip (design 01) and report click targets.
 #[allow(clippy::too_many_arguments)]
 pub fn render(
@@ -75,10 +105,124 @@ pub fn render(
     active: usize,
     w: f32,
     blink_on: bool,
+    panels: PanelButtons,
     hits: &mut Vec<Hit>,
 ) {
     layer.rect([0.0, 0.0], [w, TAB_BAR_H], theme.bg_chrome, 0.0);
     layer.hline(0.0, TAB_BAR_H - 1.0, w, 1.0, theme.border);
+
+    // Warp layout: the sidebar (file explorer) toggle right after the
+    // traffic lights, the code review button at the far right showing the
+    // working tree's `+added −removed`
+    let size = 28.0;
+    let by = (TAB_BAR_H - size) / 2.0;
+    let explorer = [TABS_X + 2.0, by, size, size];
+    if panels.explorer_open {
+        layer.rect(
+            [explorer[0], by],
+            [size, size],
+            theme.accent.with_alpha(0.14),
+            6.0,
+        );
+    }
+    sidebar_icon(
+        layer,
+        theme,
+        explorer,
+        if panels.explorer_open {
+            theme.accent
+        } else {
+            theme.text_dim
+        },
+    );
+    hits.push(Hit {
+        rect: explorer,
+        target: ClickTarget::ToggleExplorer,
+    });
+    let tabs_x = explorer[0] + size + 8.0;
+
+    let review_color = if panels.review_open {
+        theme.accent
+    } else {
+        theme.text_dim
+    };
+    let counts = panels
+        .diff
+        .filter(|(a, d)| a + d > 0)
+        .map(|(a, d)| (format!("+{a}"), format!("−{d}")));
+    let review_w = match &counts {
+        Some((a, d)) => {
+            14.0 + 12.0
+                + 6.0
+                + engine.measure(a, 11.5, mono_family(), Weight::MEDIUM)
+                + 6.0
+                + engine.measure(d, 11.5, mono_family(), Weight::MEDIUM)
+                + 10.0
+        }
+        None => size,
+    };
+    let review = [w - 10.0 - review_w, by, review_w, size];
+    if panels.review_open {
+        layer.rect(
+            [review[0], by],
+            [review_w, size],
+            theme.accent.with_alpha(0.14),
+            6.0,
+        );
+    }
+    // ± glyph as quads (crisp at any scale): alone when the tree is clean,
+    // followed by the counts otherwise
+    let gx = match &counts {
+        Some(_) => review[0] + 10.0,
+        None => review[0] + (size - 12.0) / 2.0,
+    };
+    let gy = by + 8.0;
+    layer.rect([gx + 5.25, gy], [1.5, 8.0], review_color, 0.5);
+    layer.rect([gx + 2.0, gy + 3.25], [8.0, 1.5], review_color, 0.5);
+    layer.rect([gx + 2.0, gy + 10.5], [8.0, 1.5], review_color, 0.5);
+    if let Some((a, d)) = &counts {
+        let mut tx = gx + 12.0 + 6.0;
+        for (s, c) in [(a, theme.success), (d, theme.error)] {
+            let b = make_text(engine, s, 11.5, mono_family(), Weight::MEDIUM);
+            layer.text(b, tx, (TAB_BAR_H - 15.0) / 2.0, c);
+            tx += engine.measure(s, 11.5, mono_family(), Weight::MEDIUM) + 6.0;
+        }
+    }
+    hits.push(Hit {
+        rect: review,
+        target: ClickTarget::ToggleReview,
+    });
+
+    // notifications inbox, left of the review button (Warp layout)
+    let inbox = [review[0] - 6.0 - size, by, size, size];
+    if panels.notifications_open {
+        layer.rect(
+            [inbox[0], by],
+            [size, size],
+            Color::WHITE.with_alpha(0.12),
+            6.0,
+        );
+    }
+    crate::views::notifications::inbox_icon(
+        layer,
+        inbox,
+        if panels.notifications_open {
+            theme.text_bright
+        } else {
+            theme.text_dim
+        },
+    );
+    if panels.unread > 0 {
+        let c = [inbox[0] + size - 7.0, by + 7.0];
+        layer.circle(c, 8.5, theme.bg_chrome);
+        layer.circle(c, 6.0, theme.accent);
+    }
+    hits.push(Hit {
+        rect: inbox,
+        target: ClickTarget::ToggleNotifications,
+    });
+    // everything else on the right lays out left of these buttons
+    let w = inbox[0] - 6.0;
 
     // traffic lights: native on macOS, drawn (and clickable) on Linux
     #[cfg(not(target_os = "macos"))]
@@ -107,11 +251,12 @@ pub fn render(
             let title_w = engine
                 .measure(title, 12.5, FONT_SANS, Weight::NORMAL)
                 .max(if tab.editing.is_some() { 90.0 } else { 0.0 });
-            let dot_w = if (tab.activity && i != active) || tab.color.is_some() {
-                15.0
-            } else {
-                0.0
-            };
+            let dot_w =
+                if (tab.activity && i != active) || tab.color.is_some() || tab.alert.is_some() {
+                    15.0
+                } else {
+                    0.0
+                };
             let sync_w = if tab.sync { 20.0 } else { 0.0 };
             let panes_w = panes_label(tab)
                 .map(|l| engine.measure(&l, 11.0, FONT_SANS, Weight::NORMAL) + 12.0 + 6.0)
@@ -120,18 +265,18 @@ pub fn render(
                 .min(300.0)
         })
         .collect();
-    let avail = (w - TABS_X - 40.0 - hint_w - 28.0).max(MIN_TAB_W);
+    let avail = (w - tabs_x - 40.0 - hint_w - 28.0).max(MIN_TAB_W);
     let total: f32 = natural.iter().sum();
     let (widths, show_hint): (Vec<f32>, bool) = if total <= avail {
         (natural, true)
     } else {
         // without the hint first, then squeeze
-        let avail = (w - TABS_X - 40.0).max(MIN_TAB_W);
+        let avail = (w - tabs_x - 40.0).max(MIN_TAB_W);
         let each = (avail / tabs.len().max(1) as f32).max(MIN_TAB_W);
         (natural.iter().map(|n| n.min(each)).collect(), false)
     };
 
-    let mut x = TABS_X;
+    let mut x = tabs_x;
     for (i, tab) in tabs.iter().enumerate() {
         let is_active = i == active;
         let tab_w = widths[i];
@@ -158,7 +303,10 @@ pub fn render(
             theme.text_dim
         };
 
-        if tab.activity && !is_active {
+        if let Some(kind) = tab.alert {
+            crate::views::notifications::tab_badge(layer, theme, kind, cx + 3.5, TAB_BAR_H / 2.0);
+            cx += 15.0;
+        } else if tab.activity && !is_active {
             layer.circle([cx + 3.5, TAB_BAR_H / 2.0], 7.0, theme.success);
             cx += 15.0;
         } else if let Some(c) = tab.color {
@@ -398,7 +546,10 @@ pub fn render_rail(
         }
         let mut cx = row[0] + 14.0;
         let line1 = row[1] + 9.0;
-        if tab.activity && !is_active {
+        if let Some(kind) = tab.alert {
+            crate::views::notifications::tab_badge(layer, theme, kind, cx + 3.5, line1 + 8.0);
+            cx += 14.0;
+        } else if tab.activity && !is_active {
             layer.circle([cx + 3.5, line1 + 8.0], 7.0, theme.success);
             cx += 14.0;
         } else if let Some(c) = tab.color {

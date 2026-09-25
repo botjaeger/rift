@@ -767,13 +767,22 @@ pub fn render(
     let show_cursor = term.mode().contains(TermMode::SHOW_CURSOR) && !grid.editor_owns_cursor;
     let cursor_abs = scrolled + cursor.point.line.0.max(0) as u64;
     let sel_range = term.selection.as_ref().and_then(|s| s.to_range(&term));
+    // an open (running) block ends at its last used row, the cursor row or
+    // the last non-blank line, not at the bottom of the blank screen tail
+    let live_end = {
+        let newest = scrolled + screen_lines as u64;
+        (cursor_abs + 1..newest)
+            .rev()
+            .find(|&abs| line_text(&term, scrolled, abs).is_some_and(|t| !t.trim().is_empty()))
+            .map_or(cursor_abs + 1, |abs| abs + 1)
+    };
 
     // keyboard-selected block: abs row range for the highlight treatment
     let selected_range = selected.and_then(|id| {
         blocks
             .iter()
             .find(|b| b.id == id)
-            .map(|b| (b.prompt_start, b.end.unwrap_or(u64::MAX)))
+            .map(|b| (b.prompt_start, b.end.unwrap_or(live_end)))
     });
     let row_selected = |abs: u64| selected_range.is_some_and(|(s, e)| abs >= s && abs < e);
 
@@ -786,7 +795,7 @@ pub fn render(
     let border_color = |abs: u64| -> Option<Color> {
         for b in &blocks {
             let start = b.prompt_start;
-            let end = b.end.unwrap_or(u64::MAX);
+            let end = b.end.unwrap_or(live_end);
             if abs >= start && abs < end {
                 if matches!(b.state, BlockState::Prompt) {
                     return None; // raw prompt rows, no border yet

@@ -174,6 +174,8 @@ pub fn defaults() -> Vec<(&'static str, &'static str)> {
         ("session_switcher", "shift+cmd+o"),
         ("hint_mode", "shift+cmd+h"),
         ("attention_center", "shift+cmd+a"),
+        ("toggle_explorer", "shift+cmd+e"),
+        ("toggle_review", "shift+cmd+g"),
     ]
 }
 
@@ -275,6 +277,7 @@ pub fn all_actions() -> Vec<&'static str> {
         "pipe_block_output",
         "toggle_tab_layout",
         "clear_transcripts",
+        "whats_new",
     ] {
         if !out.contains(&extra) {
             out.push(extra);

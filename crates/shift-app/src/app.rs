@@ -25,11 +25,16 @@ use crate::views::completion as completion_view;
 use crate::views::completion::CompletionUi;
 use crate::views::context_menu::{self, ContextMenuState, MenuAction, MenuItem};
 use crate::views::editor::{self, EDITOR_H};
+use crate::views::explorer::{ExplorerHit, ExplorerState};
+use crate::views::notifications::{Kind as AttentionKind, NotificationsHits, NotificationsState};
 use crate::views::palette::{self, MatchedItem, PaletteAction, PaletteState};
+use crate::views::review_panel::{ReviewHit, ReviewPanelState};
 use crate::views::search::{self, SearchState};
 use crate::views::settings::{self, SettingsState};
 use crate::views::tabbar::{self, TAB_BAR_H};
 use crate::views::terminal::{self, GridLayout};
+use crate::views::viewer::{ViewerHit, ViewerState};
+use crate::views::whats_new::{WhatsNewHits, WhatsNewState};
 
 /// Cross-thread wakeups.
 #[derive(Debug)]
@@ -57,30 +62,70 @@ pub enum UserEvent {
     Control(crate::control::Pending),
     /// A program asked for a notification (OSC 9 / 777 / 99).
     PtyNotify(PaneId, String, String),
+    /// Code review model for request `.0`; `None` outside a repository.
+    ReviewLoaded(u64, Option<Result<shift_core::review::Review, String>>),
 }
 
-/// What an attention-center entry reports.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum AttentionKind {
-    Finished,
-    Failed,
-    Notify,
-    Bell,
-}
-
-/// One entry of the attention center (⇧⌘A): something that happened in a
-/// pane while you were looking elsewhere, or that a program flagged.
+/// One entry of the attention center (⇧⌘A, the notifications popover):
+/// something that happened in a pane while you were looking elsewhere, or
+/// that a program flagged.
 #[derive(Debug, Clone)]
 struct Attention {
+    /// Stable id (list indices shift when the cap drops old entries).
+    id: u64,
     at: std::time::SystemTime,
     pane: PaneId,
     block: Option<shift_core::BlockId>,
     kind: AttentionKind,
+    /// Coding agent running in the pane (Claude Code, Codex, …).
+    agent: Option<shift_core::notifications::Agent>,
+    /// The pane's git branch when it happened.
+    branch: Option<String>,
     /// Command or notification title.
     title: String,
     /// Status, duration or notification body.
     detail: String,
     read: bool,
+}
+
+impl Attention {
+    /// A new unread entry; `push_attention` fills id, agent and branch.
+    fn new(pane: PaneId, kind: AttentionKind, title: String, detail: String) -> Self {
+        Attention {
+            id: 0,
+            at: std::time::SystemTime::now(),
+            pane,
+            block: None,
+            kind,
+            agent: None,
+            branch: None,
+            title,
+            detail,
+            read: false,
+        }
+    }
+
+    /// Title and body of its desktop notification.
+    fn desktop_text(&self) -> (String, String) {
+        let joined = |a: &str, b: &str| {
+            if b.is_empty() {
+                a.to_string()
+            } else {
+                format!("{a} · {b}")
+            }
+        };
+        match (self.agent, self.kind) {
+            (Some(agent), _) => (agent.name().to_string(), joined(&self.title, &self.detail)),
+            (None, AttentionKind::Finished) => {
+                ("Command finished".into(), joined(&self.title, &self.detail))
+            }
+            (None, AttentionKind::Failed) => {
+                ("Command failed".into(), joined(&self.title, &self.detail))
+            }
+            (None, AttentionKind::Request) => ("Needs your input".into(), self.title.clone()),
+            (None, _) => (self.title.clone(), self.detail.clone()),
+        }
+    }
 }
 
 const ATTENTION_CAP: usize = 200;
@@ -97,6 +142,8 @@ const TOP_PAD: f32 = 14.0;
 const DEFAULT_FONT_SIZE: f32 = 13.0;
 const BLINK_INTERVAL: Duration = Duration::from_millis(550);
 const BELL_FLASH: Duration = Duration::from_millis(120);
+/// How long the boot placeholder waits for a prompt after the first output.
+const BOOT_GRACE: Duration = Duration::from_millis(1500);
 /// Pane chrome (design 02).
 const PANE_RADIUS: f32 = 9.0;
 const PANE_PAD: f32 = 12.0;
@@ -147,6 +194,8 @@ pub struct App {
     any_running: bool,
     editor_active: bool,
     blink_epoch: Instant,
+    /// Earliest end of a pane's boot-placeholder grace (repaint then).
+    boot_until: Option<Instant>,
     drag: Option<DragState>,
     palette: PaletteState,
     palette_results: Vec<MatchedItem>,
@@ -187,8 +236,6 @@ pub struct App {
     focused: bool,
     /// Visual bell flash start.
     bell_flash: Option<Instant>,
-    /// Newest block id per pane already checked for a completion notification.
-    notified: std::collections::HashMap<PaneId, shift_core::BlockId>,
     /// Warp-style launch configurations (~/.config/shift/launch_configs).
     launch_configs: Vec<shift_core::launch::LaunchConfig>,
     /// Commands a launch configuration queued for a pane; sent at its first prompt.
@@ -212,6 +259,11 @@ pub struct App {
     detached: Vec<shift_pty::ipc::SessionInfo>,
     /// Attention center entries, newest last.
     attention: Vec<Attention>,
+    next_attention_id: u64,
+    /// In-window notification toasts: (attention id, shown since), newest
+    /// first; hovering resets the time.
+    note_toasts: Vec<(u64, Instant)>,
+    note_toast_hits: Vec<crate::views::notifications::ToastHit>,
     /// Newest finished block already considered per pane.
     attention_seen: std::collections::HashMap<PaneId, shift_core::BlockId>,
     /// Newest finished block written to each pane's transcript.
@@ -235,6 +287,25 @@ pub struct App {
     latency_probe: Option<(Instant, bool)>,
     /// [cancel, destructive] button rects of the confirm modal.
     confirm_rects: [[f32; 4]; 2],
+    /// What's New modal (views/whats_new.rs) and the releases it lists.
+    whats_new: WhatsNewState,
+    whats_new_hits: WhatsNewHits,
+    releases: Vec<shift_core::changelog::Release>,
+    /// Notifications popover (views/notifications.rs) under the inbox button.
+    notifications: NotificationsState,
+    notifications_hits: NotificationsHits,
+    /// Side panels (views/explorer.rs, views/review_panel.rs) and the file
+    /// viewer over the pane area, with their last frame's click targets.
+    explorer: ExplorerState,
+    explorer_hits: Vec<([f32; 4], ExplorerHit)>,
+    review: ReviewPanelState,
+    review_hits: Vec<([f32; 4], ReviewHit)>,
+    /// Directory the review model was last requested for.
+    review_cwd: Option<String>,
+    viewer: ViewerState,
+    viewer_hits: Vec<([f32; 4], ViewerHit)>,
+    /// Pane area the viewer covers (last frame).
+    viewer_rect: [f32; 4],
     /// Inline tab rename in progress: (tab index, edited title).
     rename: Option<(usize, String)>,
     /// Rename text still fully selected (first keystroke replaces it).
@@ -407,6 +478,12 @@ enum ConfirmAction {
     },
     /// Write Shift's shell hooks to an ssh host (runs in a new tab).
     InstallRemote(shift_core::ssh::SshProfile),
+    /// Discard unstaged changes to a file or one hunk (review panel).
+    Revert {
+        root: std::path::PathBuf,
+        path: String,
+        hunk: Option<shift_core::review::HunkId>,
+    },
 }
 
 struct ConfirmClose {
@@ -444,6 +521,7 @@ impl App {
             any_running: false,
             editor_active: false,
             blink_epoch: Instant::now(),
+            boot_until: None,
             drag: None,
             palette: PaletteState::default(),
             palette_results: Vec::new(),
@@ -475,7 +553,6 @@ impl App {
             os_light: false,
             focused: true,
             bell_flash: None,
-            notified: std::collections::HashMap::new(),
             launch_configs: Vec::new(),
             pending_commands: std::collections::HashMap::new(),
             confirm: None,
@@ -489,6 +566,9 @@ impl App {
             other_windows: Vec::new(),
             detached: Vec::new(),
             attention: Vec::new(),
+            next_attention_id: 0,
+            note_toasts: Vec::new(),
+            note_toast_hits: Vec::new(),
             attention_seen: Default::default(),
             transcript_saved: Default::default(),
             a11y: None,
@@ -499,6 +579,19 @@ impl App {
             latency_log: std::env::var_os("SHIFT_LATENCY_LOG").is_some(),
             latency_probe: None,
             confirm_rects: [[0.0; 4]; 2],
+            whats_new: WhatsNewState::on_launch(),
+            whats_new_hits: WhatsNewHits::default(),
+            releases: shift_core::changelog::releases(),
+            notifications: NotificationsState::default(),
+            notifications_hits: NotificationsHits::default(),
+            explorer: ExplorerState::default(),
+            explorer_hits: Vec::new(),
+            review: ReviewPanelState::default(),
+            review_hits: Vec::new(),
+            review_cwd: None,
+            viewer: ViewerState::default(),
+            viewer_hits: Vec::new(),
+            viewer_rect: [0.0; 4],
             rename: None,
             rename_fresh: false,
             filter_editing: false,
@@ -1613,10 +1706,93 @@ impl App {
         Self::resolve_path(pane, &path)
     }
 
-    /// Pointer shape: a hand over ⌘-clickable links, the I-beam over text.
+    /// Pointer shape: a hand over anything clickable (buttons, tabs, menu
+    /// and palette rows, ⌘-clickable links), resize arrows over split
+    /// handles, the I-beam over text. Checks surfaces in `on_left` order.
     fn update_cursor_icon(&mut self, window: &Window) {
         use winit::window::CursorIcon;
         let (mx, my) = self.mouse;
+        let inside =
+            |r: &[f32; 4]| mx >= r[0] && mx < r[0] + r[2] && my >= r[1] && my < r[1] + r[3];
+        let hand = |on: bool| {
+            if on {
+                CursorIcon::Pointer
+            } else {
+                CursorIcon::Default
+            }
+        };
+        let overlay = if self.confirm.is_some() {
+            Some(hand(self.confirm_rects.iter().any(inside)))
+        } else if self.whats_new.open {
+            let h = &self.whats_new_hits;
+            Some(hand(inside(&h.close) || inside(&h.done)))
+        } else if self.notifications.open {
+            let h = &self.notifications_hits;
+            Some(hand(
+                inside(&h.close)
+                    || inside(&h.mark_read)
+                    || h.chips.iter().any(|(r, _)| inside(r))
+                    || h.rows.iter().any(|(r, _)| inside(r))
+                    || !inside(&h.card)
+                        && self.hits.iter().any(|x| {
+                            matches!(x.target, ClickTarget::ToggleNotifications)
+                                && x.contains(mx, my)
+                        }),
+            ))
+        } else if self.note_toast_hits.iter().any(|t| inside(&t.rect)) {
+            Some(CursorIcon::Pointer)
+        } else if self.context_menu.open {
+            Some(hand(
+                self.context_menu_rects
+                    .iter()
+                    .zip(&self.context_menu.items)
+                    .any(|(r, item)| item.enabled && inside(r)),
+            ))
+        } else if self.palette.open {
+            Some(hand(self.palette_row_hits.iter().any(|(r, _)| inside(r))))
+        } else if self.search.open && self.search_chips.iter().any(inside) {
+            Some(CursorIcon::Pointer)
+        } else if !self.settings.open
+            && let Some(icon) = self.panel_cursor(&inside)
+        {
+            Some(icon)
+        } else {
+            let hit = self.hits.iter().find(|h| h.contains(mx, my));
+            match hit.map(|h| &h.target) {
+                // a handle is the gutter between panes: tall = side by side
+                Some(ClickTarget::HandleDrag(_)) => {
+                    let r = hit.map(|h| h.rect).unwrap_or_default();
+                    Some(if r[2] < r[3] {
+                        CursorIcon::ColResize
+                    } else {
+                        CursorIcon::RowResize
+                    })
+                }
+                Some(
+                    ClickTarget::BlockChevron(..)
+                    | ClickTarget::BlockCopy(..)
+                    | ClickTarget::TrafficLight(_)
+                    | ClickTarget::TabSelect(_)
+                    | ClickTarget::TabClose(_)
+                    | ClickTarget::TabNew
+                    | ClickTarget::ToggleExplorer
+                    | ClickTarget::ToggleReview
+                    | ClickTarget::ToggleNotifications
+                    | ClickTarget::JumpToBlock(..)
+                    | ClickTarget::SettingsNav(_)
+                    | ClickTarget::SettingsClose
+                    | ClickTarget::SettingsToggle(_)
+                    | ClickTarget::SettingsStep(..)
+                    | ClickTarget::SettingsSegment(..)
+                    | ClickTarget::SettingsCycle(_)
+                    | ClickTarget::SettingsSlider(_)
+                    | ClickTarget::SettingsTheme(_)
+                    | ClickTarget::SettingsKeybind(_)
+                    | ClickTarget::SettingsKeybindReset(_),
+                ) => Some(CursorIcon::Pointer),
+                _ => None,
+            }
+        };
         let over_link = self.modifiers.super_key()
             && self.tabs.get(self.active).is_some_and(|t| {
                 t.panes.iter().any(|p| {
@@ -1625,12 +1801,15 @@ impl App {
                     })
                 })
             });
-        let over_path = !over_link
+        let over_path = overlay.is_none()
+            && !over_link
             && self.modifiers.super_key()
             && self
                 .pane_under_mouse()
                 .is_some_and(|id| self.path_under_mouse(id).is_some());
-        let icon = if over_link || over_path {
+        let icon = if let Some(icon) = overlay {
+            icon
+        } else if over_link || over_path {
             CursorIcon::Pointer
         } else if my > TAB_BAR_H
             && self.mouse.0 > self.rail_w()
@@ -1924,12 +2103,6 @@ impl App {
             }
             PaletteMode::Workflows => (palette::workflow_items(&self.workflows), Vec::new()),
             PaletteMode::Sessions => (self.session_items(), Vec::new()),
-            PaletteMode::Attention => {
-                // unread first, each group newest first
-                let mut items = self.attention_items();
-                items.sort_by_key(|i| i.section != palette::Section::Actions);
-                (items, Vec::new())
-            }
             PaletteMode::PipeOutput => {
                 let output = self
                     .pipe_target
@@ -2062,12 +2235,212 @@ impl App {
                 .is_some_and(|t| t.pane(pane).is_some() && t.zoomed.is_none_or(|z| z == pane))
     }
 
-    fn push_attention(&mut self, a: Attention) {
+    /// Coding agent running in a pane: the running block's command, else the
+    /// foreground job (durable sessions, shells without integration).
+    fn pane_agent(p: &PaneState) -> Option<shift_core::notifications::Agent> {
+        use shift_core::notifications::Agent;
+        let running = p
+            .session
+            .blocks
+            .lock()
+            .unwrap()
+            .last()
+            .filter(|b| matches!(b.state, BlockState::Running { .. }))
+            .map(|b| b.command.clone());
+        running
+            .as_deref()
+            .and_then(Agent::from_command)
+            .or_else(|| {
+                p.session
+                    .foreground_job_name()
+                    .as_deref()
+                    .and_then(Agent::from_command)
+            })
+    }
+
+    /// Record an inbox entry (id, agent and branch filled here); returns its id.
+    fn push_attention(&mut self, mut a: Attention) -> u64 {
+        let pane = self.tabs.iter().find_map(|t| t.pane(a.pane));
+        a.branch = pane
+            .and_then(|p| p.git.as_ref())
+            .map(|g| g.branch.clone())
+            .filter(|b| !b.is_empty());
+        if a.agent.is_none() {
+            a.agent = pane.and_then(Self::pane_agent);
+        }
+        self.next_attention_id += 1;
+        a.id = self.next_attention_id;
+        let id = a.id;
         self.attention.push(a);
         if self.attention.len() > ATTENTION_CAP {
             let extra = self.attention.len() - ATTENTION_CAP;
             self.attention.drain(..extra);
         }
+        id
+    }
+
+    /// Inbox entry plus, for an `event` whose pane is out of view, the
+    /// alerts `[notifications]` allows: a toast while Shift is focused, a
+    /// desktop notification otherwise, and the event's sound.
+    fn raise(&mut self, mut a: Attention, event: Option<shift_core::notifications::Event>) {
+        let in_view = self.pane_in_view(a.pane);
+        a.read = a.read || in_view;
+        let id = self.push_attention(a);
+        let Some(event) = event else {
+            return;
+        };
+        let cfg = self.config.notifications.clone();
+        if in_view || !cfg.enabled {
+            return;
+        }
+        let Some(a) = self.attention.iter().find(|a| a.id == id) else {
+            return;
+        };
+        let (title, body) = a.desktop_text();
+        log::info!("alert {event:?}: {title} — {body}");
+        if self.focused {
+            if cfg.toasts {
+                self.note_toasts.insert(0, (id, Instant::now()));
+                self.note_toasts
+                    .truncate(crate::views::notifications::MAX_TOASTS);
+            }
+        } else {
+            crate::notify::send(&title, &body);
+        }
+        if cfg.play_sound
+            && let Some(path) = shift_core::notifications::resolve_sound(
+                cfg.sound_setting(event),
+                event,
+                &shift_core::notifications::sound_dirs(),
+            )
+        {
+            crate::notify::play(&path);
+        }
+        self.a11y_announcement = Some(format!("{title}: {body}"));
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    /// Settings → Notifications sound pickers: step to the next sound and
+    /// play it (the preview).
+    fn cycle_sound(&mut self, id: &str) {
+        use shift_core::notifications::{Event, available_sounds, resolve_sound, sound_dirs};
+        let dirs = sound_dirs();
+        let mut names = available_sounds(&dirs);
+        let n = &mut self.config.notifications;
+        let (slot, event) = match id {
+            "notifications.sound_finished" => (&mut n.sound_finished, Event::Finished),
+            "notifications.sound_failed" => (&mut n.sound_failed, Event::Failed),
+            "notifications.sound_attention" => (&mut n.sound_attention, Event::Attention),
+            _ => (&mut n.sound, Event::Finished),
+        };
+        if id != "notifications.sound" {
+            // per-event pickers start with "Same as Sound"
+            names.insert(0, String::new());
+        }
+        let cur = names
+            .iter()
+            .position(|s| s.eq_ignore_ascii_case(slot.trim()))
+            .unwrap_or(names.len() - 1);
+        *slot = names[(cur + 1) % names.len()].clone();
+        let value = self.config.notifications.sound_setting(event).to_string();
+        if let Some(path) = resolve_sound(&value, event, &dirs) {
+            crate::notify::play(&path);
+        }
+        self.save_config();
+        self.apply_config();
+    }
+
+    /// Drop expired notification toasts; the one under the mouse restarts
+    /// its time. True when one went.
+    fn prune_note_toasts(&mut self) -> bool {
+        let ttl = self.config.notifications.toast_duration();
+        let now = Instant::now();
+        let (mx, my) = self.mouse;
+        let hits = &self.note_toast_hits;
+        for (id, since) in &mut self.note_toasts {
+            let hovered = hits.iter().any(|h| {
+                h.id == *id
+                    && mx >= h.rect[0]
+                    && mx < h.rect[0] + h.rect[2]
+                    && my >= h.rect[1]
+                    && my < h.rect[1] + h.rect[3]
+            });
+            if hovered {
+                *since = now;
+            }
+        }
+        let before = self.note_toasts.len();
+        self.note_toasts
+            .retain(|(_, since)| now.duration_since(*since) < ttl);
+        before != self.note_toasts.len()
+    }
+
+    /// Entries whose pane you are looking at count as read; their toasts go.
+    fn mark_visible_read(&mut self) {
+        if !self.focused {
+            return;
+        }
+        let Some(tab) = self.tabs.get(self.active) else {
+            return;
+        };
+        let visible =
+            |pane: PaneId| tab.pane(pane).is_some() && tab.zoomed.is_none_or(|z| z == pane);
+        let mut changed = false;
+        for a in self.attention.iter_mut().filter(|a| !a.read) {
+            if visible(a.pane) {
+                a.read = true;
+                changed = true;
+            }
+        }
+        if changed || !self.note_toasts.is_empty() {
+            let attention = &self.attention;
+            self.note_toasts
+                .retain(|(id, _)| attention.iter().any(|a| a.id == *id && !a.read));
+        }
+    }
+
+    /// A running command in an out-of-view pane shows a password prompt
+    /// (once per command).
+    fn check_password_prompt(&mut self, pane: PaneId) {
+        if self.pane_in_view(pane) {
+            return;
+        }
+        let Some((_, tab)) = self.find_tab_of_pane(pane) else {
+            return;
+        };
+        let Some(p) = tab.pane_mut(pane) else { return };
+        let running = p
+            .session
+            .blocks
+            .lock()
+            .unwrap()
+            .last()
+            .filter(|b| matches!(b.state, BlockState::Running { .. }))
+            .map(|b| b.id);
+        let Some(block) = running else { return };
+        if p.password_block == Some(block) {
+            return;
+        }
+        let line = p.session.cursor_line_text();
+        if !shift_core::notifications::looks_like_password_prompt(&line) {
+            return;
+        }
+        p.password_block = Some(block);
+        let mut a = Attention::new(
+            pane,
+            AttentionKind::Request,
+            line.trim().to_string(),
+            "Waiting for a password.".into(),
+        );
+        a.block = Some(block);
+        let event = self
+            .config
+            .notifications
+            .password_prompt
+            .then_some(shift_core::notifications::Event::Attention);
+        self.raise(a, event);
     }
 
     /// Commands that finished since last time: out of view ones (and every
@@ -2101,81 +2474,115 @@ impl App {
             return;
         };
         self.attention_seen.insert(pane, newest);
+        // a finished command may have changed files: reload the panels
+        self.request_review();
+        use shift_core::notifications::Event;
+        let long = Duration::from_secs(self.config.notify_threshold_secs);
+        let long_on = self.config.notify_on_completion;
+        let failed_on = self.config.notifications.command_failed;
         for (id, command, exit, duration, restored) in fresh {
             let failed = exit.is_some_and(|e| e != 0);
             if restored || command.trim().is_empty() || (in_view && !failed) {
                 continue;
             }
-            self.push_attention(Attention {
-                at: std::time::SystemTime::now(),
-                pane,
-                block: Some(id),
-                kind: if failed {
-                    AttentionKind::Failed
-                } else {
-                    AttentionKind::Finished
-                },
-                title: command,
-                detail: format!(
-                    "{} · {}",
-                    match exit {
-                        Some(0) | None => "finished".to_string(),
-                        Some(c) => format!("exit {c}"),
-                    },
+            let is_long = long_on && duration >= long;
+            let (kind, event) = if failed {
+                (
+                    AttentionKind::Failed,
+                    (failed_on || is_long).then_some(Event::Failed),
+                )
+            } else {
+                (AttentionKind::Finished, is_long.then_some(Event::Finished))
+            };
+            let detail = match exit {
+                Some(0) | None => format!("Completed in {}.", terminal::format_duration(duration)),
+                Some(c) => format!(
+                    "Failed with exit {c} after {}.",
                     terminal::format_duration(duration)
                 ),
-                read: in_view,
-            });
+            };
+            let mut a = Attention::new(pane, kind, command, detail);
+            a.block = Some(id);
+            // the command itself is the agent that just exited, if any
+            a.agent = shift_core::notifications::Agent::from_command(&a.title);
+            self.raise(a, event);
         }
     }
 
-    /// Attention center rows, newest first.
-    fn attention_items(&self) -> Vec<palette::Item> {
+    /// Notifications popover rows, newest first.
+    fn notification_entries(&self) -> Vec<crate::views::notifications::Entry> {
         let now = std::time::SystemTime::now();
         self.attention
             .iter()
-            .enumerate()
             .rev()
-            .map(|(i, a)| {
-                let icon = match a.kind {
-                    AttentionKind::Finished => "✓",
-                    AttentionKind::Failed => "✗",
-                    AttentionKind::Notify => "●",
-                    AttentionKind::Bell => "♪",
-                };
-                let tab = self
-                    .tabs
-                    .iter()
-                    .position(|t| t.pane(a.pane).is_some())
-                    .map(|t| format!("tab {}", t + 1))
-                    .unwrap_or_else(|| "closed pane".into());
-                let ago = now
-                    .duration_since(a.at)
-                    .map(|d| match d.as_secs() {
-                        s if s < 60 => format!("{s}s"),
-                        s if s < 3600 => format!("{}m", s / 60),
-                        s => format!("{}h", s / 3600),
-                    })
-                    .unwrap_or_default();
-                palette::Item {
-                    title: format!("{icon} {}", a.title),
-                    id: [a.detail.as_str(), &tab, &format!("{ago} ago")]
-                        .iter()
-                        .filter(|s| !s.is_empty())
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join(" · "),
-                    shortcut: Vec::new(),
-                    section: if a.read {
-                        palette::Section::Recent
-                    } else {
-                        palette::Section::Actions
-                    },
-                    action: palette::PaletteAction::ShowAttention(i),
-                    mono_title: matches!(a.kind, AttentionKind::Finished | AttentionKind::Failed),
-                }
-            })
+            .map(|a| Self::entry_of(a, now))
             .collect()
+    }
+
+    fn entry_of(a: &Attention, now: std::time::SystemTime) -> crate::views::notifications::Entry {
+        crate::views::notifications::Entry {
+            id: a.id,
+            kind: a.kind,
+            agent: a.agent,
+            branch: a.branch.clone(),
+            title: a.title.clone(),
+            detail: a.detail.clone(),
+            age_secs: now.duration_since(a.at).map(|d| d.as_secs()).unwrap_or(0),
+            unread: !a.read,
+        }
+    }
+
+    /// The popover's rows under its current filter.
+    fn filtered_notifications(&self) -> Vec<crate::views::notifications::Entry> {
+        let filter = self.notifications.filter;
+        self.notification_entries()
+            .into_iter()
+            .filter(|e| filter.matches(e))
+            .collect()
+    }
+
+    fn open_notifications(&mut self) {
+        self.notifications.open();
+        self.palette.open = false;
+        self.context_menu.close();
+    }
+
+    fn close_notifications(&mut self) {
+        self.notifications.open = false;
+    }
+
+    fn mark_all_read(&mut self) {
+        for a in &mut self.attention {
+            a.read = true;
+        }
+        self.note_toasts.clear();
+    }
+
+    /// Open an entry: mark it read, drop its toast, go to its pane (and block).
+    fn show_attention(&mut self, id: u64) {
+        let Some(a) = self.attention.iter_mut().find(|a| a.id == id) else {
+            return;
+        };
+        a.read = true;
+        let a = a.clone();
+        self.note_toasts.retain(|(t, _)| *t != id);
+        let Some(ti) = self.tabs.iter().position(|t| t.pane(a.pane).is_some()) else {
+            self.toast("That pane is closed".into());
+            return;
+        };
+        self.active = ti;
+        let tab = &mut self.tabs[ti];
+        tab.activity = false;
+        tab.active_pane = a.pane;
+        if tab.zoomed.is_some() {
+            tab.zoomed = Some(a.pane);
+        }
+        if let Some(block) = a.block {
+            if let Some(p) = tab.pane_mut(a.pane) {
+                p.selected_block = Some(block);
+            }
+            self.jump_to_block(a.pane, block);
+        }
     }
 
     fn unread_attention(&self) -> usize {
@@ -2275,12 +2682,6 @@ impl App {
         self.palette.query.clear();
         self.palette.selected = 0;
         self.refresh_palette();
-        if mode == crate::views::palette::PaletteMode::Attention {
-            // listed once = seen (the rows keep their unread grouping)
-            for a in &mut self.attention {
-                a.read = true;
-            }
-        }
         self.blink_epoch = Instant::now();
     }
 
@@ -2364,28 +2765,6 @@ impl App {
                 }
             }
             PaletteAction::RunPipe => self.run_pipe(),
-            PaletteAction::ShowAttention(i) => {
-                let Some(a) = self.attention.get(i).cloned() else {
-                    return;
-                };
-                let Some(ti) = self.tabs.iter().position(|t| t.pane(a.pane).is_some()) else {
-                    self.toast("That pane is closed".into());
-                    return;
-                };
-                self.active = ti;
-                let tab = &mut self.tabs[ti];
-                tab.activity = false;
-                tab.active_pane = a.pane;
-                if tab.zoomed.is_some() {
-                    tab.zoomed = Some(a.pane);
-                }
-                if let Some(block) = a.block {
-                    if let Some(p) = tab.pane_mut(a.pane) {
-                        p.selected_block = Some(block);
-                    }
-                    self.jump_to_block(a.pane, block);
-                }
-            }
             PaletteAction::AttachService(id) => {
                 self.next_attach = Some(id);
                 self.spawn_tab_at(None);
@@ -2810,7 +3189,7 @@ impl App {
 
     fn spawn_tab_at(&mut self, cwd: Option<std::path::PathBuf>) {
         let (lw, lh) = self.logical_size();
-        let lw = lw - self.rail_w();
+        let (_, lw) = self.content_span(lw);
         let cols = ((lw - self.config.padding() * 2.0 - terminal::BLOCK_INDENT) / self.cell_w)
             .max(2.0) as usize;
         let rows = ((lh - TAB_BAR_H - TOP_PAD - EDITOR_H) / self.line_h).max(2.0) as usize;
@@ -3218,6 +3597,267 @@ impl App {
         }
     }
 
+    /// Widths of the open side panels (explorer left, review right) in a
+    /// window `w` wide. A panel that would squeeze the panes under
+    /// `MIN_CONTENT_W` is hidden, review first.
+    fn panel_widths(&self, w: f32) -> (f32, f32) {
+        const MIN_CONTENT_W: f32 = 360.0;
+        let room = w - self.rail_w();
+        let mut ex = if self.explorer.open {
+            crate::views::explorer::EXPLORER_W
+        } else {
+            0.0
+        };
+        let mut rv = if self.review.open {
+            crate::views::review_panel::REVIEW_W
+        } else {
+            0.0
+        };
+        if room - ex - rv < MIN_CONTENT_W {
+            rv = 0.0;
+        }
+        if room - ex - rv < MIN_CONTENT_W {
+            ex = 0.0;
+        }
+        (ex, rv)
+    }
+
+    /// Left edge and width of the pane area (between rail/explorer and
+    /// the review panel).
+    fn content_span(&self, w: f32) -> (f32, f32) {
+        let (ex, rv) = self.panel_widths(w);
+        let x0 = self.rail_w() + ex;
+        (x0, w - x0 - rv)
+    }
+
+    /// Reload the review model on a background thread: the top bar's
+    /// `+added −removed` button, the review panel and the explorer's git
+    /// colors all read it. The newest request wins.
+    fn request_review(&mut self) {
+        let Some(cwd) = self
+            .tabs
+            .get(self.active)
+            .and_then(|t| t.active())
+            .and_then(|p| p.session.cwd.lock().unwrap().clone())
+        else {
+            return;
+        };
+        self.review.generation += 1;
+        if self.review.model().is_none() {
+            self.review.load = crate::views::review_panel::Load::Loading;
+        }
+        let generation = self.review.generation;
+        let proxy = self.proxy.clone();
+        std::thread::Builder::new()
+            .name("review".into())
+            .spawn(move || {
+                let result = shift_core::review::load(std::path::Path::new(&cwd));
+                let _ = proxy.send_event(UserEvent::ReviewLoaded(generation, result));
+            })
+            .ok();
+    }
+
+    /// Reload the review model when the active pane's directory changes
+    /// (a `cd`, another tab or pane).
+    fn follow_review(&mut self) {
+        let cwd = self
+            .tabs
+            .get(self.active)
+            .and_then(|t| t.active())
+            .and_then(|p| p.session.cwd.lock().unwrap().clone());
+        if cwd.is_some() && cwd != self.review_cwd {
+            self.review_cwd = cwd;
+            self.request_review();
+        }
+    }
+
+    /// Point the explorer at the active pane's project (on cwd change).
+    fn follow_explorer(&mut self) {
+        if !self.explorer.open {
+            return;
+        }
+        let cwd = self
+            .tabs
+            .get(self.active)
+            .and_then(|t| t.active())
+            .and_then(|p| p.session.cwd.lock().unwrap().clone());
+        if let Some(cwd) = cwd
+            && self.explorer.follow(std::path::Path::new(&cwd))
+        {
+            self.request_review();
+        }
+    }
+
+    /// Run a review-panel write, then reload. Revert asks first.
+    fn review_action(&mut self, hit: ReviewHit) {
+        use crate::views::review_panel::Load;
+        use shift_core::review::{self, Op};
+        let Some(model) = self.review.model().cloned() else {
+            return;
+        };
+        let root = model.root.clone();
+        let run = |op: Op, path: &str, hunk| review::apply(&root, op, path, hunk);
+        let result = match hit {
+            ReviewHit::Refresh => {
+                self.review.notice = None;
+                self.explorer.refresh();
+                self.request_review();
+                return;
+            }
+            ReviewHit::ToggleSection(staged) => {
+                if !self.review.collapsed_sections.remove(&staged) {
+                    self.review.collapsed_sections.insert(staged);
+                }
+                return;
+            }
+            ReviewHit::ToggleFile(staged, path) => {
+                let key = (staged, path);
+                if !self.review.expanded.remove(&key) {
+                    self.review.expanded.insert(key);
+                }
+                return;
+            }
+            ReviewHit::Open(path) => {
+                self.viewer.open(&root.join(&path));
+                return;
+            }
+            ReviewHit::Stage(path, hunk) => run(Op::Stage, &path, hunk),
+            ReviewHit::Unstage(path, hunk) => run(Op::Unstage, &path, hunk),
+            ReviewHit::StageAll => model
+                .unstaged
+                .iter()
+                .try_for_each(|f| run(Op::Stage, &f.path, None)),
+            ReviewHit::UnstageAll => model
+                .staged
+                .iter()
+                .try_for_each(|f| run(Op::Unstage, &f.path, None)),
+            ReviewHit::Revert(path, hunk) => {
+                let what = match hunk {
+                    Some(id) => format!(
+                        "{path} · lines {}–{}",
+                        id.new_start,
+                        id.new_start + id.new_lines.saturating_sub(1)
+                    ),
+                    None => path.clone(),
+                };
+                self.confirm = Some(ConfirmClose {
+                    action: ConfirmAction::Revert { root, path, hunk },
+                    commands: vec![what],
+                });
+                return;
+            }
+        };
+        self.review.notice = result.err();
+        if matches!(self.review.load, Load::Ready(_)) {
+            self.request_review();
+        }
+    }
+
+    /// Rects of the visible explorer and review panels (zero width = hidden).
+    fn panel_rects(&self) -> ([f32; 4], [f32; 4]) {
+        let (w, h) = self.logical_size();
+        let (ex, rv) = self.panel_widths(w);
+        (
+            [self.rail_w(), TAB_BAR_H, ex, h - TAB_BAR_H],
+            [w - rv, TAB_BAR_H, rv, h - TAB_BAR_H],
+        )
+    }
+
+    /// Pointer over the viewer and side panels: a hand on buttons, review
+    /// rows and tree rows, the arrow elsewhere. `None` outside them.
+    fn panel_cursor(
+        &self,
+        inside: &impl Fn(&[f32; 4]) -> bool,
+    ) -> Option<winit::window::CursorIcon> {
+        use winit::window::CursorIcon;
+        let hand = |on: bool| {
+            if on {
+                CursorIcon::Pointer
+            } else {
+                CursorIcon::Default
+            }
+        };
+        if self.viewer.is_open() && inside(&self.viewer_rect) {
+            return Some(hand(self.viewer_hits.iter().any(|(r, _)| inside(r))));
+        }
+        let (ex_rect, rv_rect) = self.panel_rects();
+        if ex_rect[2] > 0.0 && inside(&ex_rect) {
+            return Some(hand(self.explorer_hits.iter().any(|(r, _)| inside(r))));
+        }
+        if rv_rect[2] > 0.0 && inside(&rv_rect) {
+            return Some(hand(self.review_hits.iter().any(|(r, _)| inside(r))));
+        }
+        None
+    }
+
+    /// A left click on the viewer or a side panel; true when it was theirs.
+    fn on_panel_click(&mut self, inside: impl Fn(&[f32; 4]) -> bool) -> bool {
+        if self.viewer.is_open() {
+            if let Some(hit) = self
+                .viewer_hits
+                .iter()
+                .find(|(r, _)| inside(r))
+                .map(|(_, h)| h.clone())
+            {
+                match hit {
+                    ViewerHit::Close => self.viewer.close(),
+                    ViewerHit::InsertPath => {
+                        if let Some(p) = self.viewer.path.clone() {
+                            self.viewer.close();
+                            self.drop_file(&p);
+                        }
+                    }
+                }
+                return true;
+            }
+            if inside(&self.viewer_rect) {
+                return true;
+            }
+        }
+        let (ex_rect, rv_rect) = self.panel_rects();
+        if ex_rect[2] > 0.0 && inside(&ex_rect) {
+            self.explorer.focused = true;
+            let hit = self
+                .explorer_hits
+                .iter()
+                .find(|(r, _)| inside(r))
+                .map(|(_, h)| h.clone());
+            match hit {
+                Some(ExplorerHit::Row(i)) => {
+                    if let Some(row) = self.explorer.rows.get(i).cloned() {
+                        self.explorer.selected = Some(row.path.clone());
+                        if self.modifiers.alt_key() {
+                            self.drop_file(&row.path);
+                        } else if row.is_dir {
+                            self.explorer.toggle(&row.path);
+                        } else {
+                            self.viewer.open(&row.path);
+                        }
+                    }
+                }
+                Some(ExplorerHit::Refresh) => {
+                    self.explorer.refresh();
+                    self.request_review();
+                }
+                Some(ExplorerHit::Collapse) => self.explorer.collapse_all(),
+                None => {}
+            }
+            return true;
+        }
+        if rv_rect[2] > 0.0 && inside(&rv_rect) {
+            if let Some(hit) = self
+                .review_hits
+                .iter()
+                .find(|(r, _)| inside(r))
+                .map(|(_, h)| h.clone())
+            {
+                self.review_action(hit);
+            }
+            return true;
+        }
+        false
+    }
+
     /// Layout the active tab's panes within the content area.
     fn pane_rects(&self, w: f32, h: f32) -> (Vec<PaneRect>, Vec<HandleRect>) {
         let mut panes = Vec::new();
@@ -3225,8 +3865,7 @@ impl App {
         let Some(tab) = self.tabs.get(self.active) else {
             return (panes, handles);
         };
-        let x0 = self.rail_w();
-        let w = w - x0;
+        let (x0, w) = self.content_span(w);
         // ⇧⌘⏎ zoom: the zoomed pane takes the whole content rect (no handles
         // → no drag targets); hidden panes keep streaming, just not laid out
         if let Some(z) = tab.zoomed
@@ -3272,7 +3911,55 @@ impl App {
         let bell_flash = self.bell_flash.is_some_and(|t| t.elapsed() < BELL_FLASH);
         let settings_open = self.settings.open;
         let active_tab_idx = self.active;
+        self.follow_explorer();
+        self.follow_review();
+        self.mark_visible_read();
+        self.prune_note_toasts();
+        let panel_buttons = tabbar::PanelButtons {
+            explorer_open: self.explorer.open,
+            review_open: self.review.open,
+            diff: self.review.model().map(|m| {
+                m.staged
+                    .iter()
+                    .chain(&m.unstaged)
+                    .fold((0, 0), |(a, d), f| (a + f.added, d + f.removed))
+            }),
+            notifications_open: self.notifications.open,
+            unread: self.unread_attention(),
+        };
+        let notification_entries = if self.notifications.open {
+            self.notification_entries()
+        } else {
+            Vec::new()
+        };
+        // toasts hide under the open popover and the settings overlay
+        let toast_entries: Vec<crate::views::notifications::Entry> =
+            if self.notifications.open || self.settings.open {
+                Vec::new()
+            } else {
+                let now = std::time::SystemTime::now();
+                self.note_toasts
+                    .iter()
+                    .filter_map(|(id, _)| self.attention.iter().find(|a| a.id == *id))
+                    .map(|a| Self::entry_of(a, now))
+                    .collect()
+            };
         let (pane_rects, handles) = self.pane_rects(w, h);
+        let (explorer_w, review_w) = self.panel_widths(w);
+        let (content_x, content_w) = self.content_span(w);
+        let viewer_label = self.viewer.path.as_ref().map(|p| {
+            self.explorer
+                .root
+                .as_ref()
+                .and_then(|r| p.strip_prefix(r).ok())
+                .or_else(|| {
+                    self.review
+                        .model()
+                        .and_then(|m| p.strip_prefix(&m.root).ok())
+                })
+                .map(|r| r.to_string_lossy().into_owned())
+                .unwrap_or_else(|| editor::shorten_home(&p.to_string_lossy()))
+        });
 
         let shell_label = shift_core::shell_integration::shell_name(self.config.shell.as_deref());
         let tab_infos: Vec<tabbar::TabInfo> = self
@@ -3284,6 +3971,12 @@ impl App {
                 panes: if t.is_split() { t.panes.len() } else { 1 },
                 shell_label: shell_label.clone(),
                 activity: t.activity,
+                alert: self
+                    .attention
+                    .iter()
+                    .rev()
+                    .find(|a| !a.read && t.pane(a.pane).is_some())
+                    .map(|a| a.kind),
                 color: t.color.map(|c| context_menu::tab_color(&theme, c)),
                 sync: t.sync_inputs && t.is_split(),
                 editing: self
@@ -3312,39 +4005,23 @@ impl App {
             })
             .collect();
         let rail_w = self.rail_w();
-        // right-edge hint (design 01 "⌘K palette" / design 02 "⌃⇧D split"
-        // pill), using whatever chord the keymap resolves today
+        // right-edge hint: design 02 "⌃⇧D split" pill in a split view, using
+        // whatever chord the keymap resolves today (design 01's "⌘K palette"
+        // label is dropped: user decision)
         let split_view = self.tabs.get(active_tab_idx).is_some_and(|t| t.is_split());
-        let hint_actions: &[&str] = if split_view {
-            &["split_vertical_alt", "split_vertical"]
+        let tab_hint = if split_view {
+            ["split_vertical_alt", "split_vertical"]
+                .iter()
+                .find_map(|a| {
+                    self.keymap
+                        .bindings_for(a)
+                        .first()
+                        .map(|b| b.chips().concat())
+                })
+                .map(|chord| format!("{chord} split"))
+                .unwrap_or_default()
         } else {
-            &["palette"]
-        };
-        let tab_hint = hint_actions
-            .iter()
-            .find_map(|a| {
-                self.keymap
-                    .bindings_for(a)
-                    .first()
-                    .map(|b| b.chips().concat())
-            })
-            .map(|chord| format!("{chord} {}", if split_view { "split" } else { "palette" }))
-            .unwrap_or_default();
-        // unread attention-center entries lead the hint
-        let unread = self.unread_attention();
-        let tab_hint = if unread > 0 {
-            let chord = self
-                .keymap
-                .bindings_for("attention_center")
-                .first()
-                .map(|b| b.chips().concat())
-                .unwrap_or_default();
-            format!(
-                "● {unread} alert{} {chord}   {tab_hint}",
-                if unread == 1 { "" } else { "s" }
-            )
-        } else {
-            tab_hint
+            String::new()
         };
         let confirm = self
             .confirm
@@ -3388,6 +4065,7 @@ impl App {
         let mut focus_hits = Vec::new(); // lowest priority, appended last
         let mut any_running = false;
         let mut editor_active = false;
+        let mut boot_until: Option<Instant> = None;
         let mut editor_anchor = (0.0f32, 0.0f32);
         let mut editor_zone = [0.0f32; 4];
         let mut ime_spot: Option<(f32, f32)> = None;
@@ -3405,6 +4083,7 @@ impl App {
                 active_tab_idx,
                 w,
                 blink,
+                panel_buttons,
                 &mut hits,
             );
             tabbar::render_rail(
@@ -3428,6 +4107,7 @@ impl App {
                 active_tab_idx,
                 w,
                 blink,
+                panel_buttons,
                 &mut hits,
             );
         }
@@ -3487,6 +4167,27 @@ impl App {
             if is_active_pane {
                 active_ed_cols = ed_cols;
             }
+            // Warp-style boot placeholder until the first prompt (not over a
+            // replayed transcript). The shell's first bytes (title, OSC 7)
+            // arrive before its prompt marker; hiding the placeholder then
+            // flashed the grid cursor at the top. Shells without integration
+            // never mark a prompt: their raw output shows after BOOT_GRACE.
+            let booting = pane.session.blocks.lock().unwrap().last().is_none()
+                && if pane
+                    .session
+                    .saw_output
+                    .load(std::sync::atomic::Ordering::Acquire)
+                {
+                    let first = *pane.first_output.get_or_insert_with(Instant::now);
+                    let until = first + BOOT_GRACE;
+                    let waiting = Instant::now() < until;
+                    if waiting {
+                        boot_until = Some(boot_until.map_or(until, |u: Instant| u.min(until)));
+                    }
+                    waiting
+                } else {
+                    true
+                };
 
             let grid = {
                 // inline grid_for (self is destructured)
@@ -3530,7 +4231,9 @@ impl App {
                     rows: (usable_h / line_h).floor().max(2.0) as usize,
                     ligatures,
                     cursor_style,
-                    editor_owns_cursor: editor_vis,
+                    // the boot placeholder sits in the input zone; no stray
+                    // grid cursor at the top while it shows
+                    editor_owns_cursor: editor_vis || booting,
                 }
             };
 
@@ -3650,14 +4353,7 @@ impl App {
             pane.url_hits = out.url_hits;
             let sticky_block = out.sticky_block;
 
-            // Warp-style boot placeholder until the shell's first byte
-            // (not over a replayed transcript)
-            if !pane
-                .session
-                .saw_output
-                .load(std::sync::atomic::Ordering::Acquire)
-                && pane.session.blocks.lock().unwrap().last().is_none()
-            {
+            if booting {
                 let shell = shift_core::shell_integration::shell_name(config_ref.shell.as_deref());
                 let label = format!("Starting {shell}\u{2026}");
                 let buf = {
@@ -3676,7 +4372,20 @@ impl App {
                     );
                     b
                 };
-                layer.text(buf, grid.x, grid.y, theme.syntax.string);
+                // where the input line will appear (compact editor row)
+                let (lx, zone_y) = if split {
+                    (pr.rect[0] + PANE_PAD, pr.rect[1] + PANE_PAD - 4.0)
+                } else {
+                    (pr.rect[0] + side_pad, pr.rect[1] + 4.0)
+                };
+                let ly = if input_top {
+                    zone_y
+                } else if split {
+                    pr.rect[1] + pr.rect[3] - editor::EDITOR_COMPACT_H
+                } else {
+                    h - editor::EDITOR_COMPACT_H
+                } + 11.0;
+                layer.text(buf, lx + editor::PAD_X, ly, theme.syntax.string);
             }
 
             pane.last_exit = pane
@@ -3779,6 +4488,23 @@ impl App {
                         bottom: (pr.rect[1] + pr.rect[3] - 2.0) as i32,
                     });
                 }
+            } else if explorer_w > 0.0 || review_w > 0.0 {
+                // side panels: keep long lines (editor context, output) off
+                // them, intersecting any clip the text already has
+                let (left, right) = (pr.rect[0] as i32, (pr.rect[0] + pr.rect[2]) as i32);
+                for t in &mut layer.texts[text_start..] {
+                    let b = t.bounds.unwrap_or(TextBounds {
+                        left,
+                        top: 0,
+                        right,
+                        bottom: h as i32,
+                    });
+                    t.bounds = Some(TextBounds {
+                        left: b.left.max(left),
+                        right: b.right.min(right),
+                        ..b
+                    });
+                }
             }
 
             // sticky command header (active pane only; layer 2 covers row text)
@@ -3810,6 +4536,50 @@ impl App {
             }
         }
 
+        // ── layer 1: side panels beside the panes ──
+        self.explorer_hits = if explorer_w > 0.0 {
+            crate::views::explorer::render(
+                scene.layer(1),
+                engine,
+                &theme,
+                &mut self.explorer,
+                [rail_w, TAB_BAR_H, explorer_w, h - TAB_BAR_H],
+            )
+        } else {
+            Vec::new()
+        };
+        self.review_hits = if review_w > 0.0 {
+            crate::views::review_panel::render(
+                scene.layer(1),
+                engine,
+                &theme,
+                &mut self.review,
+                [w - review_w, TAB_BAR_H, review_w, h - TAB_BAR_H],
+            )
+        } else {
+            Vec::new()
+        };
+        // ── layer 2: file viewer over the pane area ──
+        self.viewer_hits.clear();
+        if let Some(label) = &viewer_label {
+            self.viewer_rect = [content_x, TAB_BAR_H, content_w, h - TAB_BAR_H];
+            self.viewer_hits = crate::views::viewer::render(
+                scene.layer(2),
+                engine,
+                &theme,
+                &mut self.viewer,
+                label,
+                self.viewer_rect,
+            );
+            // the panes underneath take no clicks while it is up
+            hits.retain(|h| {
+                let [x, y, hw, hh] = h.rect;
+                let [vx, vy, vw, vh] = self.viewer_rect;
+                x + hw <= vx || x >= vx + vw || y + hh <= vy || y >= vy + vh
+            });
+            focus_hits.clear();
+        }
+
         // visual bell: brief full-window flash
         if bell_flash {
             scene
@@ -3835,6 +4605,7 @@ impl App {
                 completion,
                 editor_anchor,
                 editor_zone,
+                w,
                 h,
                 prefix_len,
             );
@@ -3956,6 +4727,36 @@ impl App {
         } else {
             self.context_menu_rects.clear();
         }
+        // notifications popover, dropped from the inbox button; toasts stack
+        // in the same corner while it is closed
+        let anchor = hits
+            .iter()
+            .find(|h| matches!(h.target, ClickTarget::ToggleNotifications))
+            .map(|h| h.rect)
+            .unwrap_or([w - 80.0, 7.0, 28.0, 28.0]);
+        self.note_toast_hits = crate::views::notifications::render_toasts(
+            scene.layer(5),
+            engine,
+            &theme,
+            &toast_entries,
+            anchor[1] + anchor[3] + 10.0,
+            w,
+        );
+        if self.notifications.open {
+            self.notifications_hits = crate::views::notifications::render(
+                scene.layer(5),
+                engine,
+                &theme,
+                &mut self.notifications,
+                &notification_entries,
+                anchor[0] + anchor[2] + 4.0,
+                anchor[1] + anchor[3] + 6.0,
+                w,
+                h,
+            );
+        } else {
+            self.notifications_hits = Default::default();
+        }
         if let Some(hs) = &self.hints {
             let items: Vec<(&str, [f32; 4], bool)> = hs
                 .items
@@ -3968,6 +4769,20 @@ impl App {
         // ── layer 6: toast + close/quit warning (modal: eats every click) ──
         if let Some(msg) = &toast {
             crate::views::confirm::toast(scene.layer(6), engine, &theme, msg, w, h);
+        }
+        // What's New sits under a confirm dialog (both modal, layer 6)
+        if self.whats_new.open {
+            hits.clear();
+            focus_hits.clear();
+            self.whats_new_hits = crate::views::whats_new::render(
+                scene.layer(6),
+                engine,
+                &theme,
+                &mut self.whats_new,
+                &self.releases,
+                w,
+                h,
+            );
         }
         if let Some((action, commands)) = &confirm {
             hits.clear();
@@ -4018,6 +4833,19 @@ impl App {
                     confirm_label: "Install",
                     destructive: false,
                 },
+                ConfirmAction::Revert { hunk, .. } => Dialog {
+                    title: if hunk.is_some() {
+                        "Revert this change?"
+                    } else {
+                        "Revert file?"
+                    },
+                    description: "Unstaged changes will be discarded:".into(),
+                    note: "This cannot be undone. Staged changes are kept.",
+                    lines: commands,
+                    empty_line: "",
+                    confirm_label: "Revert",
+                    destructive: true,
+                },
             };
             self.confirm_rects =
                 crate::views::confirm::render(scene.layer(6), engine, &theme, &dialog, w, h);
@@ -4027,6 +4855,7 @@ impl App {
         self.hits = hits;
         self.any_running = any_running;
         self.editor_active = editor_active;
+        self.boot_until = boot_until;
         self.editor_anchor = editor_anchor;
         self.editor_cols = active_ed_cols;
     }
@@ -4279,7 +5108,11 @@ impl App {
             }
             AppAction::HintMode => self.start_hints(),
             AppAction::AttentionCenter => {
-                self.open_palette(crate::views::palette::PaletteMode::Attention)
+                if self.notifications.open {
+                    self.close_notifications();
+                } else {
+                    self.open_notifications();
+                }
             }
             AppAction::ClearTranscripts => self.clear_transcripts(),
             AppAction::TabNext => {
@@ -4483,6 +5316,28 @@ impl App {
             AppAction::OpenKeybindings => {
                 self.settings
                     .open_page(crate::views::settings::Page::Keybindings);
+            }
+            AppAction::ToggleExplorer => {
+                self.explorer.open = !self.explorer.open;
+                self.explorer.focused = self.explorer.open;
+                if self.explorer.open {
+                    self.follow_explorer();
+                    self.request_review();
+                }
+            }
+            AppAction::ToggleReview => {
+                self.review.open = !self.review.open;
+                if self.review.open {
+                    self.review.notice = None;
+                    self.request_review();
+                }
+            }
+            AppAction::WhatsNew => {
+                self.palette.open = false;
+                self.settings.open = false;
+                self.context_menu.close();
+                self.whats_new.open();
+                shift_core::changelog::mark_seen();
             }
             AppAction::MaximizePane => {
                 if let Some(tab) = self.tabs.get_mut(self.active)
@@ -5052,6 +5907,117 @@ impl App {
         }
     }
 
+    /// Viewer keys: Esc closes; arrows, Page Up/Down, Space, Home/End
+    /// scroll. False for anything else.
+    fn handle_viewer_key(&mut self, event: &input::KeyPress) -> bool {
+        use winit::keyboard::{Key, NamedKey};
+        let page = self.viewer.page();
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => self.viewer.close(),
+            Key::Named(NamedKey::ArrowDown) => self.viewer.scroll_by(20.0),
+            Key::Named(NamedKey::ArrowUp) => self.viewer.scroll_by(-20.0),
+            Key::Named(NamedKey::PageDown | NamedKey::Space) => self.viewer.scroll_by(page),
+            Key::Named(NamedKey::PageUp) => self.viewer.scroll_by(-page),
+            Key::Named(NamedKey::Home) => self.viewer.scroll_by(f32::NEG_INFINITY),
+            Key::Named(NamedKey::End) => self.viewer.scroll_by(f32::INFINITY),
+            _ => return false,
+        }
+        true
+    }
+
+    /// Tree keys while the explorer has focus: ↑↓ move, ← collapse or go
+    /// to the parent, → expand, Enter opens (⌥Enter inserts the path), Esc
+    /// hands focus back to the terminal. False for anything else.
+    fn handle_explorer_key(&mut self, event: &input::KeyPress) -> bool {
+        use winit::keyboard::{Key, NamedKey};
+        match &event.logical_key {
+            Key::Named(NamedKey::ArrowDown) => self.explorer.move_selection(1),
+            Key::Named(NamedKey::ArrowUp) => self.explorer.move_selection(-1),
+            Key::Named(NamedKey::ArrowLeft) => self.explorer.left(),
+            Key::Named(NamedKey::ArrowRight) => self.explorer.right(),
+            Key::Named(NamedKey::Escape) => self.explorer.focused = false,
+            Key::Named(NamedKey::Enter) => {
+                let Some(row) = self.explorer.selected_row().cloned() else {
+                    return true;
+                };
+                if self.modifiers.alt_key() {
+                    self.explorer.focused = false;
+                    self.drop_file(&row.path);
+                } else if row.is_dir {
+                    self.explorer.toggle(&row.path);
+                } else {
+                    self.viewer.open(&row.path);
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// Popover keys: Esc closes, ↑/↓ highlight, ⏎ opens the highlighted
+    /// row, Tab / ⇧Tab switch the filter chip. Any other plain key closes it
+    /// and goes on to the usual routing (returns false).
+    fn handle_notifications_key(&mut self, event: &input::KeyPress) -> bool {
+        use winit::keyboard::{Key, NamedKey};
+        let chord =
+            self.modifiers.super_key() || self.modifiers.control_key() || self.modifiers.alt_key();
+        let len = self.filtered_notifications().len();
+        match &event.logical_key {
+            _ if event.released => return false,
+            // a lone modifier is the start of a chord
+            Key::Named(
+                NamedKey::Shift
+                | NamedKey::Control
+                | NamedKey::Alt
+                | NamedKey::Super
+                | NamedKey::Meta
+                | NamedKey::CapsLock,
+            ) => {}
+            Key::Named(NamedKey::Escape) => self.close_notifications(),
+            Key::Named(NamedKey::ArrowDown) => self.notifications.move_selection(1, len),
+            Key::Named(NamedKey::ArrowUp) => self.notifications.move_selection(-1, len),
+            Key::Named(NamedKey::Tab) => {
+                let delta = if self.modifiers.shift_key() { -1 } else { 1 };
+                let next = self.notifications.filter.cycle(delta);
+                self.notifications.set_filter(next);
+            }
+            Key::Named(NamedKey::Enter) => {
+                let target = self
+                    .notifications
+                    .selected
+                    .and_then(|s| self.filtered_notifications().get(s).map(|e| e.id));
+                self.close_notifications();
+                if let Some(id) = target {
+                    self.show_attention(id);
+                }
+            }
+            _ if !chord => {
+                self.close_notifications();
+                return false;
+            }
+            // chords (⇧⌘A toggles, ⌘P …) run as usual; their action decides
+            _ => return false,
+        }
+        true
+    }
+
+    /// What's New keys: Esc/Enter close, arrows, Page Up/Down, Space and
+    /// Home/End scroll; everything else is swallowed while it is up.
+    fn handle_whats_new_key(&mut self, event: &input::KeyPress) {
+        use winit::keyboard::{Key, NamedKey};
+        let page = self.whats_new.page();
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape | NamedKey::Enter) => self.whats_new.open = false,
+            Key::Named(NamedKey::ArrowDown) => self.whats_new.scroll_by(40.0),
+            Key::Named(NamedKey::ArrowUp) => self.whats_new.scroll_by(-40.0),
+            Key::Named(NamedKey::PageDown | NamedKey::Space) => self.whats_new.scroll_by(page),
+            Key::Named(NamedKey::PageUp) => self.whats_new.scroll_by(-page),
+            Key::Named(NamedKey::Home) => self.whats_new.scroll_by(f32::NEG_INFINITY),
+            Key::Named(NamedKey::End) => self.whats_new.scroll_by(f32::INFINITY),
+            _ => {}
+        }
+    }
+
     fn perform_confirmed(&mut self, action: ConfirmAction, event_loop: &ActiveEventLoop) {
         match action {
             ConfirmAction::Close(scope) => self.perform_close(scope, event_loop),
@@ -5071,6 +6037,16 @@ impl App {
                         self.open_tab_running(&title, profile.install_command(&path));
                     }
                     None => self.toast("Could not write the installer script".into()),
+                }
+            }
+            ConfirmAction::Revert { root, path, hunk } => {
+                let result =
+                    shift_core::review::apply(&root, shift_core::review::Op::Revert, &path, hunk);
+                self.review.notice = result.err();
+                self.explorer.refresh();
+                self.request_review();
+                if let Some(w) = &self.window {
+                    w.request_redraw();
                 }
             }
         }
@@ -5360,6 +6336,15 @@ impl App {
             window.request_redraw();
             return;
         }
+        if self.whats_new.open {
+            self.handle_whats_new_key(event);
+            window.request_redraw();
+            return;
+        }
+        if self.notifications.open && self.handle_notifications_key(event) {
+            window.request_redraw();
+            return;
+        }
         if self.hints.is_some() {
             self.handle_hint_key(event);
             window.request_redraw();
@@ -5410,6 +6395,26 @@ impl App {
             }
             window.request_redraw();
             return;
+        }
+        if self.viewer.is_open() {
+            if !self.handle_viewer_key(event) {
+                // app shortcuts still work; typing is swallowed (the command
+                // line is under the viewer)
+                if let Some(action) = input::app_action(event, self.modifiers, &self.keymap)
+                    && !action.needs_editor()
+                {
+                    self.handle_action(action, event_loop);
+                }
+            }
+            window.request_redraw();
+            return;
+        }
+        if self.explorer.focused && self.explorer.open {
+            if self.handle_explorer_key(event) {
+                window.request_redraw();
+                return;
+            }
+            self.explorer.focused = false;
         }
         // Escape clears the keyboard block selection before anything
         // else; in raw mode it still falls through so vim gets it.
@@ -5520,6 +6525,7 @@ impl App {
             && !self.settings.open
             && !self.context_menu.open
             && self.confirm.is_none()
+            && !self.whats_new.open
             && self.drag.is_none()
             && self.pending_sel.is_none()
             && self.editor_drag.is_none()
@@ -5588,7 +6594,13 @@ impl App {
     }
 
     pub(crate) fn on_right_press(&mut self, window: &Window) {
-        if self.palette.open || self.settings.open || self.confirm.is_some() {
+        if self.palette.open || self.settings.open || self.confirm.is_some() || self.whats_new.open
+        {
+            return;
+        }
+        if self.notifications.open {
+            self.close_notifications();
+            window.request_redraw();
             return;
         }
         if !self.context_menu.open && self.report_button(crate::mouse::RIGHT, true) {
@@ -5705,6 +6717,47 @@ impl App {
             window.request_redraw();
             return;
         }
+        if self.whats_new.open {
+            let h = self.whats_new_hits;
+            if inside(&h.close) || inside(&h.done) || !inside(&h.card) {
+                self.whats_new.open = false;
+            }
+            window.request_redraw();
+            return;
+        }
+        if self.notifications.open {
+            let h = self.notifications_hits.clone();
+            if inside(&h.close) {
+                self.close_notifications();
+            } else if inside(&h.mark_read) {
+                self.mark_all_read();
+            } else if let Some((_, f)) = h.chips.iter().find(|(r, _)| inside(r)) {
+                self.notifications.set_filter(*f);
+            } else if let Some((_, id)) = h.rows.iter().find(|(r, _)| inside(r)) {
+                self.close_notifications();
+                self.show_attention(*id);
+            } else if !inside(&h.card) {
+                // outside closes; the inbox button itself must not reopen it
+                self.close_notifications();
+            }
+            window.request_redraw();
+            return;
+        }
+        // notification toasts float over everything below the modals
+        if let Some(t) = self
+            .note_toast_hits
+            .iter()
+            .find(|t| inside(&t.rect))
+            .copied()
+        {
+            if inside(&t.close) {
+                self.note_toasts.retain(|(id, _)| *id != t.id);
+            } else {
+                self.show_attention(t.id);
+            }
+            window.request_redraw();
+            return;
+        }
         if let Some((i, _)) = &self.rename {
             // clicking anywhere commits the rename
             let i = *i;
@@ -5760,6 +6813,13 @@ impl App {
             window.request_redraw();
             return;
         }
+        if !self.settings.open && self.on_panel_click(inside) {
+            self.last_click = None;
+            window.request_redraw();
+            return;
+        }
+        // a click anywhere else leaves the tree's keyboard focus
+        self.explorer.focused = false;
         // a program tracking the mouse (vim, tmux, htop) gets the click
         if !self.settings.open && self.report_button(crate::mouse::LEFT, true) {
             self.last_click = None;
@@ -5820,6 +6880,15 @@ impl App {
                 self.request_close(CloseScope::Tab(*i), event_loop);
             }
             Some(ClickTarget::TabNew) => self.spawn_tab(),
+            Some(ClickTarget::ToggleExplorer) => {
+                self.handle_action(AppAction::ToggleExplorer, event_loop)
+            }
+            Some(ClickTarget::ToggleReview) => {
+                self.handle_action(AppAction::ToggleReview, event_loop)
+            }
+            Some(ClickTarget::ToggleNotifications) => {
+                self.handle_action(AppAction::AttentionCenter, event_loop)
+            }
             Some(ClickTarget::Editor(pane)) => {
                 let pane = *pane;
                 let clicks = self.click_count();
@@ -5915,6 +6984,23 @@ impl App {
                     }
                     "mouse_reporting" => c.mouse_reporting = !c.mouse_reporting,
                     "option_as_meta" => c.option_as_meta = !c.option_as_meta,
+                    "notifications.enabled" => c.notifications.enabled = !c.notifications.enabled,
+                    "notifications.toasts" => c.notifications.toasts = !c.notifications.toasts,
+                    "notifications.command_failed" => {
+                        c.notifications.command_failed = !c.notifications.command_failed
+                    }
+                    "notifications.agent_task_completed" => {
+                        c.notifications.agent_task_completed = !c.notifications.agent_task_completed
+                    }
+                    "notifications.needs_attention" => {
+                        c.notifications.needs_attention = !c.notifications.needs_attention
+                    }
+                    "notifications.password_prompt" => {
+                        c.notifications.password_prompt = !c.notifications.password_prompt
+                    }
+                    "notifications.play_sound" => {
+                        c.notifications.play_sound = !c.notifications.play_sound
+                    }
                     _ => {}
                 }
                 self.save_config();
@@ -5937,6 +7023,10 @@ impl App {
                     }
                     "window_padding" => {
                         c.window_padding = (c.padding() + d as f32 * 2.0).clamp(0.0, 40.0);
+                    }
+                    "notifications.toast_secs" => {
+                        let secs = c.notifications.toast_duration().as_secs() as i64;
+                        c.notifications.toast_secs = (secs + d).clamp(2, 60) as u64;
                     }
                     _ => {}
                 }
@@ -6016,6 +7106,9 @@ impl App {
                 self.save_config();
                 self.apply_config();
             }
+            Some(ClickTarget::SettingsCycle(id)) if id.starts_with("notifications.sound") => {
+                self.cycle_sound(id);
+            }
             Some(ClickTarget::SettingsCycle(id)) => {
                 let names = match *id {
                     "theme" | "theme_light" => shift_core::theme::available_themes(),
@@ -6091,6 +7184,59 @@ impl App {
 
     pub(crate) fn on_wheel(&mut self, delta: MouseScrollDelta, window: &Window) {
         use shift_pty::alacritty_terminal::term::TermMode;
+        // the What's New body scrolls by pixels: trackpad deltas stay smooth
+        // instead of snapping to whole lines
+        if self.whats_new.open && self.confirm.is_none() {
+            let px = match delta {
+                MouseScrollDelta::LineDelta(_, y) => y * 3.0 * 24.0,
+                MouseScrollDelta::PixelDelta(p) => p.y as f32,
+            };
+            // positive delta = wheel up = toward the top
+            self.whats_new.scroll_by(-px);
+            window.request_redraw();
+            return;
+        }
+        if self.notifications.open && self.confirm.is_none() {
+            let (mx, my) = self.mouse;
+            let c = self.notifications_hits.card;
+            if mx >= c[0] && mx < c[0] + c[2] && my >= c[1] && my < c[1] + c[3] {
+                let px = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y * 3.0 * 20.0,
+                    MouseScrollDelta::PixelDelta(p) => p.y as f32,
+                };
+                self.notifications.scroll_by(-px);
+                window.request_redraw();
+                return;
+            }
+        }
+        // the viewer and side panels scroll by pixels too
+        if !self.palette.open && !self.settings.open && self.confirm.is_none() {
+            let (mx, my) = self.mouse;
+            let inside = |r: &[f32; 4]| {
+                r[2] > 0.0 && mx >= r[0] && mx < r[0] + r[2] && my >= r[1] && my < r[1] + r[3]
+            };
+            let px = -match delta {
+                MouseScrollDelta::LineDelta(_, y) => y * 3.0 * 20.0,
+                MouseScrollDelta::PixelDelta(p) => p.y as f32,
+            };
+            let (ex_rect, rv_rect) = self.panel_rects();
+            let handled = if self.viewer.is_open() && inside(&self.viewer_rect) {
+                self.viewer.scroll_by(px);
+                true
+            } else if inside(&ex_rect) {
+                self.explorer.scroll_by(px);
+                true
+            } else if inside(&rv_rect) {
+                self.review.scroll_by(px);
+                true
+            } else {
+                false
+            };
+            if handled {
+                window.request_redraw();
+                return;
+            }
+        }
         // accumulate fractional deltas: trackpads emit many sub-line
         // pixel events that would each truncate to zero lines
         self.scroll_accum += match delta {
@@ -6329,6 +7475,7 @@ impl App {
         let overlay = self.palette.open
             || self.settings.open
             || self.confirm.is_some()
+            || self.whats_new.open
             || self.context_menu.open;
         if pressed && overlay {
             return;
@@ -6615,15 +7762,16 @@ impl App {
                     .find_tab_of_pane(pane)
                     .and_then(|(_, t)| t.pane(pane))
                     .and_then(|p| p.session.foreground_job_name());
-                self.push_attention(Attention {
-                    at: std::time::SystemTime::now(),
-                    pane,
-                    block: None,
-                    kind: AttentionKind::Bell,
-                    title: "Bell".into(),
-                    detail: job.unwrap_or_default(),
-                    read: false,
-                });
+                // inbox only: the bell setting decides flash and sound
+                self.raise(
+                    Attention::new(
+                        pane,
+                        AttentionKind::Bell,
+                        "Bell".into(),
+                        job.unwrap_or_default(),
+                    ),
+                    None,
+                );
             }
         }
         let bell = self.config.bell;
@@ -6682,52 +7830,45 @@ impl App {
         }
     }
 
-    /// Desktop notification for a long command that finished while the
-    /// window was not focused (Warp "notify on command completion").
-    fn check_completion_notification(&mut self, pane: PaneId) {
-        if !self.config.notify_on_completion {
-            return;
-        }
-        let threshold = Duration::from_secs(self.config.notify_threshold_secs);
-        let Some((_, tab)) = self.find_tab_of_pane(pane) else {
-            return;
+    /// OSC 9 / 777 / 99 notification. Its wording says what it means
+    /// (Warp's Complete / Request / Error): "needs your permission" and
+    /// "approval requested" wait on you, "turn complete" from an agent is a
+    /// finished task.
+    fn on_program_notification(&mut self, pane: PaneId, title: String, body: String) {
+        use shift_core::notifications::{Event, Meaning, classify};
+        let agent = self
+            .find_tab_of_pane(pane)
+            .and_then(|(_, t)| t.pane(pane))
+            .and_then(Self::pane_agent);
+        let cfg = &self.config.notifications;
+        let attention = cfg.needs_attention.then_some(Event::Attention);
+        let (kind, event, phrase) = match classify(&format!("{title} {body}")) {
+            Meaning::Request => (AttentionKind::Request, attention, "Waiting for your input."),
+            Meaning::Error => (
+                AttentionKind::Failed,
+                cfg.needs_attention.then_some(Event::Failed),
+                "Error.",
+            ),
+            Meaning::Complete if agent.is_some() => (
+                AttentionKind::Finished,
+                cfg.agent_task_completed.then_some(Event::Finished),
+                "Task completed.",
+            ),
+            Meaning::Complete | Meaning::Info => (AttentionKind::Notify, attention, ""),
         };
-        let Some(p) = tab.pane(pane) else { return };
-        let done: Vec<(shift_core::BlockId, String, Option<i32>, Duration)> = p
-            .session
-            .blocks
-            .lock()
-            .unwrap()
-            .iter()
-            .filter_map(|b| match b.state {
-                BlockState::Done { exit, duration } => {
-                    Some((b.id, b.command.clone(), exit, duration))
-                }
-                _ => None,
-            })
-            .collect();
-        let Some(&(newest, ..)) = done.last() else {
-            return;
+        let title = if title.trim().is_empty() {
+            "Notification".to_string()
+        } else {
+            title
         };
-        let seen = self.notified.get(&pane).copied();
-        self.notified.insert(pane, newest);
-        if self.focused {
-            return;
-        }
-        for (id, cmd, exit, duration) in done {
-            if seen.is_some_and(|s| id <= s) || duration < threshold {
-                continue;
-            }
-            let status = match exit {
-                Some(0) => "finished".to_string(),
-                Some(n) => format!("failed (exit {n})"),
-                None => "finished".to_string(),
-            };
-            crate::notify::send(
-                &format!("Command {status}"),
-                &format!("{cmd} · {}", terminal::format_duration(duration)),
-            );
-        }
+        let detail = if body.trim().is_empty() && agent.is_some() {
+            phrase.to_string()
+        } else {
+            body
+        };
+        let mut a = Attention::new(pane, kind, title, detail);
+        a.agent = agent;
+        self.raise(a, event);
     }
 
     /// Run every due script step (see script.rs).
@@ -7115,11 +8256,16 @@ impl App {
                     "Install shell integration?".to_string(),
                     format!("On {}, writes {}", p.host, c.commands.join("; ")),
                 ),
+                ConfirmAction::Revert { .. } => (
+                    "Revert changes?".to_string(),
+                    format!("Discards unstaged changes: {}", c.commands.join("; ")),
+                ),
             };
             let label = match &c.action {
                 ConfirmAction::Close(_) => "Close",
                 ConfirmAction::Paste { .. } => "Paste",
                 ConfirmAction::InstallRemote(_) => "Install",
+                ConfirmAction::Revert { .. } => "Revert",
             };
             let button = |l: &str, r: [f32; 4]| Control {
                 label: l.into(),
@@ -7135,6 +8281,95 @@ impl App {
                     button("Cancel", self.confirm_rects[0]),
                     button(label, self.confirm_rects[1]),
                 ],
+            })
+        } else if self.whats_new.open {
+            // the notes as one readable status string; the body is not focusable
+            let mut notes = Vec::new();
+            for r in &self.releases {
+                notes.push(format!("Version {} {}", r.version, r.date));
+                if !r.summary.is_empty() {
+                    notes.push(r.summary.clone());
+                }
+                for s in &r.sections {
+                    notes.push(s.title.clone());
+                    for i in &s.items {
+                        notes.push(format!("{}: {}", i.title, i.text));
+                    }
+                }
+            }
+            let button = |l: &str, r: [f32; 4]| Control {
+                label: l.into(),
+                role: Role::Button,
+                toggled: None,
+                selected: false,
+                rect: Some(r),
+            };
+            Some(Overlay::Dialog {
+                label: "What's new".into(),
+                input: None,
+                status: Some(notes.join(". ")),
+                controls: vec![
+                    button("Close", self.whats_new_hits.close),
+                    button("Got it", self.whats_new_hits.done),
+                ],
+                rect: Some(self.whats_new_hits.card),
+            })
+        } else if self.notifications.open {
+            let h = &self.notifications_hits;
+            let entries = self.notification_entries();
+            let shown = self.filtered_notifications();
+            let highlighted = self
+                .notifications
+                .selected
+                .and_then(|s| shown.get(s))
+                .map(|e| e.id);
+            let button = |l: String, r: [f32; 4], selected: bool| Control {
+                label: l,
+                role: Role::Button,
+                toggled: None,
+                selected,
+                rect: Some(r),
+            };
+            let mut controls = vec![button("Close".into(), h.close, false)];
+            if h.mark_read[2] > 0.0 {
+                controls.push(button("Mark all as read".into(), h.mark_read, false));
+            }
+            for (r, f) in &h.chips {
+                let n = entries.iter().filter(|e| f.matches(e)).count();
+                controls.push(Control {
+                    toggled: Some(*f == self.notifications.filter),
+                    ..button(format!("{} ({n})", f.label()), *r, false)
+                });
+            }
+            for (r, id) in &h.rows {
+                if let Some(e) = entries.iter().find(|e| e.id == *id) {
+                    let mut l = e
+                        .agent
+                        .map(|a| format!("{}: ", a.name()))
+                        .unwrap_or_default();
+                    l.push_str(&e.title);
+                    if !e.detail.is_empty() {
+                        l.push_str(&format!(", {}", e.detail));
+                    }
+                    if let Some(b) = &e.branch {
+                        l.push_str(&format!(", on {b}"));
+                    }
+                    l.push_str(&format!(
+                        ", {}",
+                        crate::views::notifications::relative_time(e.age_secs)
+                    ));
+                    if e.unread {
+                        l.push_str(", unread");
+                    }
+                    controls.push(button(l, *r, highlighted == Some(*id)));
+                }
+            }
+            Some(Overlay::Dialog {
+                label: "Notifications".into(),
+                input: None,
+                status: entries.is_empty().then(|| "No notifications".to_string()),
+                controls,
+                rect: Some(h.card),
             })
         } else if self.context_menu.open {
             Some(Overlay::Menu {
@@ -7194,9 +8429,10 @@ impl App {
                         }
                         ClickTarget::SettingsToggle(id) => (
                             Role::Switch,
-                            values
-                                .as_ref()
-                                .and_then(|v| v.get(*id))
+                            // dotted ids name nested tables (notifications.toasts)
+                            id.split('.')
+                                .try_fold(values.as_ref(), |v, key| Some(v?.get(key)))
+                                .flatten()
                                 .and_then(|v| v.as_bool()),
                             false,
                         ),
@@ -7253,6 +8489,7 @@ impl App {
         };
 
         let (w, h) = self.logical_size();
+        let panels = self.a11y_panels();
         Snapshot {
             size: (w, h),
             scale,
@@ -7260,7 +8497,137 @@ impl App {
             panes,
             overlay,
             announcement: self.a11y_announcement.clone(),
+            panels,
         }
+    }
+
+    /// Explorer rows, review files/hunks and the viewer as a11y regions,
+    /// built from the last frame's click targets.
+    fn a11y_panels(&self) -> Vec<crate::a11y::PanelNode> {
+        use crate::a11y::{Control, PanelNode};
+        use accesskit::Role;
+        let control = |label: String, role: Role, selected: bool, rect: [f32; 4]| Control {
+            label,
+            role,
+            toggled: None,
+            selected,
+            rect: Some(rect),
+        };
+        let mut out = Vec::new();
+        let (ex_rect, rv_rect) = self.panel_rects();
+        if ex_rect[2] > 0.0 {
+            let controls = self
+                .explorer_hits
+                .iter()
+                .map(|(r, hit)| match hit {
+                    ExplorerHit::Row(i) => {
+                        let row = &self.explorer.rows[*i];
+                        let kind = if !row.is_dir {
+                            "file"
+                        } else if self.explorer.expanded.contains(&row.path) {
+                            "folder, expanded"
+                        } else {
+                            "folder, collapsed"
+                        };
+                        control(
+                            format!("{}, {kind}", row.name),
+                            Role::TreeItem,
+                            self.explorer.selected.as_ref() == Some(&row.path),
+                            *r,
+                        )
+                    }
+                    ExplorerHit::Refresh => control("Refresh".into(), Role::Button, false, *r),
+                    ExplorerHit::Collapse => {
+                        control("Collapse all".into(), Role::Button, false, *r)
+                    }
+                })
+                .collect();
+            out.push(PanelNode {
+                label: "File explorer".into(),
+                rect: Some(ex_rect),
+                text: None,
+                controls,
+                focused: self.explorer.focused,
+            });
+        }
+        if rv_rect[2] > 0.0 {
+            let hunk_label = |id: &Option<shift_core::review::HunkId>| {
+                id.map(|h| {
+                    format!(
+                        " lines {}–{}",
+                        h.new_start,
+                        h.new_start + h.new_lines.saturating_sub(1)
+                    )
+                })
+                .unwrap_or_default()
+            };
+            let controls = self
+                .review_hits
+                .iter()
+                .map(|(r, hit)| {
+                    let label = match hit {
+                        ReviewHit::Refresh => "Refresh".to_string(),
+                        ReviewHit::ToggleSection(true) => "Staged changes".into(),
+                        ReviewHit::ToggleSection(false) => "Unstaged changes".into(),
+                        ReviewHit::ToggleFile(staged, p) => format!(
+                            "{p}, {}, {}",
+                            if *staged { "staged" } else { "unstaged" },
+                            if self.review.expanded.contains(&(*staged, p.clone())) {
+                                "expanded"
+                            } else {
+                                "collapsed"
+                            }
+                        ),
+                        ReviewHit::Open(p) => format!("Open {p}"),
+                        ReviewHit::Stage(p, h) => format!("Stage {p}{}", hunk_label(h)),
+                        ReviewHit::Unstage(p, h) => format!("Unstage {p}{}", hunk_label(h)),
+                        ReviewHit::Revert(p, h) => format!("Revert {p}{}", hunk_label(h)),
+                        ReviewHit::StageAll => "Stage all".into(),
+                        ReviewHit::UnstageAll => "Unstage all".into(),
+                    };
+                    control(label, Role::Button, false, *r)
+                })
+                .collect();
+            out.push(PanelNode {
+                label: "Code review".into(),
+                rect: Some(rv_rect),
+                text: None,
+                controls,
+                focused: false,
+            });
+        }
+        if let Some(path) = &self.viewer.path {
+            let mut text = self
+                .viewer
+                .error
+                .clone()
+                .unwrap_or_else(|| self.viewer.lines.join("\n"));
+            if text.len() > 20_000 {
+                let cut = (0..=20_000)
+                    .rev()
+                    .find(|&i| text.is_char_boundary(i))
+                    .unwrap_or(0);
+                text.truncate(cut);
+                text.push('…');
+            }
+            let controls = self
+                .viewer_hits
+                .iter()
+                .map(|(r, hit)| match hit {
+                    ViewerHit::Close => control("Close viewer".into(), Role::Button, false, *r),
+                    ViewerHit::InsertPath => control("Insert path".into(), Role::Button, false, *r),
+                })
+                .collect();
+            out.push(PanelNode {
+                label: format!("File viewer, {}", path.display()),
+                rect: Some(self.viewer_rect),
+                text: Some(text),
+                controls,
+                // it takes the keys while open
+                focused: true,
+            });
+        }
+        out
     }
 
     /// Push the accessibility tree when a screen reader is attached and
@@ -7329,11 +8696,14 @@ impl App {
         let mut out = String::new();
         let _ = writeln!(
             out,
-            "tabs={} active={} editor_active={} any_running={}",
+            "tabs={} active={} editor_active={} any_running={} mouse=({:.0},{:.0}) mouse_cursor={:?}",
             self.tabs.len(),
             self.active,
             self.editor_active,
-            self.any_running
+            self.any_running,
+            self.mouse.0,
+            self.mouse.1,
+            self.cursor_icon
         );
         let _ = writeln!(
             out,
@@ -7365,6 +8735,75 @@ impl App {
         );
         let _ = writeln!(
             out,
+            "explorer={} focused={} root={:?} rows={} selected={:?} scroll={:.0}",
+            self.explorer.open,
+            self.explorer.focused,
+            self.explorer.root,
+            self.explorer.rows.len(),
+            self.explorer
+                .selected
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().into_owned()),
+            self.explorer.scroll
+        );
+        let _ = writeln!(
+            out,
+            "review={} load={} staged={:?} unstaged={:?} expanded={} notice={:?} scroll={:.0}",
+            self.review.open,
+            match &self.review.load {
+                crate::views::review_panel::Load::Idle => "idle",
+                crate::views::review_panel::Load::Loading => "loading",
+                crate::views::review_panel::Load::NotARepo => "not-a-repo",
+                crate::views::review_panel::Load::Failed(_) => "failed",
+                crate::views::review_panel::Load::Ready(_) => "ready",
+            },
+            self.review.model().map(|m| m
+                .staged
+                .iter()
+                .map(|f| format!("{}{}", f.status, f.path))
+                .collect::<Vec<_>>()),
+            self.review.model().map(|m| m
+                .unstaged
+                .iter()
+                .map(|f| format!("{}{}", f.status, f.path))
+                .collect::<Vec<_>>()),
+            self.review.expanded.len(),
+            self.review.notice,
+            self.review.scroll
+        );
+        let _ = writeln!(
+            out,
+            "viewer={:?} lines={} error={:?} scroll={:.0}",
+            self.viewer.path,
+            self.viewer.lines.len(),
+            self.viewer.error,
+            self.viewer.scroll
+        );
+        let _ = writeln!(
+            out,
+            "whats_new={} scroll={:.0}/{:.0}",
+            self.whats_new.open,
+            self.whats_new.scroll,
+            (self.whats_new.content_h - self.whats_new.view_h).max(0.0)
+        );
+        let _ = writeln!(
+            out,
+            "note_toasts={:?} notifications={} filter={:?} selected={:?} rows={} unread={} scroll={:.0}/{:.0}",
+            self.note_toasts
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>(),
+            self.notifications.open,
+            self.notifications.filter,
+            self.notifications.selected,
+            self.notifications_hits.rows.len(),
+            self.unread_attention(),
+            self.notifications.scroll,
+            (self.notifications.content_h - self.notifications.view_h).max(0.0)
+        );
+        let _ = writeln!(
+            out,
             "confirm={:?} rename={:?} filter_editing={} toast={:?} shell_env={}",
             self.confirm
                 .as_ref()
@@ -7377,8 +8816,15 @@ impl App {
         for a in &self.attention {
             let _ = writeln!(
                 out,
-                "attention pane={} kind={:?} read={} title={:?} detail={:?}",
-                a.pane, a.kind, a.read, a.title, a.detail
+                "attention id={} pane={} kind={:?} agent={:?} read={} branch={:?} title={:?} detail={:?}",
+                a.id,
+                a.pane,
+                a.kind,
+                a.agent.map(|g| g.name()),
+                a.read,
+                a.branch,
+                a.title,
+                a.detail
             );
         }
         if self.context_menu.open {
@@ -7718,6 +9164,9 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::MouseWheel { delta, .. } => self.on_wheel(delta, &window),
             WindowEvent::RedrawRequested => {
                 self.redraw(&window);
+                // hit rects are rebuilt per frame: a dialog or menu that just
+                // opened under a still mouse gets the right shape
+                self.update_cursor_icon(&window);
                 self.update_a11y(&window);
                 if self.any_running {
                     window.request_redraw();
@@ -7736,7 +9185,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.record_completions(pane);
                 self.save_transcript_if_changed(pane);
                 self.flush_pending_commands(pane);
-                self.check_completion_notification(pane);
+                self.check_password_prompt(pane);
                 self.check_correction(pane);
                 let active_idx = self.active;
                 if let Some((idx, tab)) = self.find_tab_of_pane(pane) {
@@ -7812,23 +9261,30 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::Access(e) => self.on_access_event(e.window_event, event_loop),
             UserEvent::PtyNotify(pane, title, body) => {
-                let visible = self.pane_in_view(pane);
-                self.push_attention(Attention {
-                    at: std::time::SystemTime::now(),
-                    pane,
-                    block: None,
-                    kind: AttentionKind::Notify,
-                    title: if title.is_empty() {
-                        "Notification".into()
-                    } else {
-                        title.clone()
-                    },
-                    detail: body.clone(),
-                    read: visible,
-                });
-                if !visible {
-                    crate::notify::send(if title.is_empty() { "Shift" } else { &title }, &body);
+                self.on_program_notification(pane, title, body);
+                if let Some(w) = &self.window {
+                    w.request_redraw();
                 }
+            }
+            UserEvent::ReviewLoaded(generation, result) => {
+                use crate::views::review_panel::Load;
+                if generation != self.review.generation {
+                    return; // a newer request is in flight
+                }
+                self.review.load = match result {
+                    None => Load::NotARepo,
+                    Some(Err(e)) => Load::Failed(e),
+                    Some(Ok(r)) => {
+                        self.explorer.set_statuses(r.statuses(), r.dirty_dirs());
+                        Load::Ready(Arc::new(r))
+                    }
+                };
+                if !matches!(self.review.load, Load::Ready(_)) {
+                    self.explorer
+                        .set_statuses(Default::default(), Default::default());
+                }
+                // listings may have changed with the files
+                self.explorer.refresh();
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
@@ -7872,32 +9328,46 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
         }
-        // repaint once more when a toast expires
-        if let Some((_, at)) = &self.toast {
-            let until = *at + TOAST_TTL;
-            if Instant::now() >= until {
-                self.toast = None;
-                if let Some(w) = &self.window {
-                    w.request_redraw();
-                }
-            } else if !self.editor_active && !self.palette.open && !self.any_running {
-                event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(until));
-                return;
+        // every timed repaint (boot grace, toasts, cursor blink) wakes at the
+        // earliest of its deadlines
+        let now = Instant::now();
+        let mut repaint = false;
+        let mut deadlines: Vec<Instant> = Vec::new();
+        // boot placeholder grace ends (shell without a prompt marker)
+        if let Some(until) = self.boot_until {
+            if now >= until {
+                self.boot_until = None;
+                repaint = true;
+            } else {
+                deadlines.push(until);
             }
         }
+        // status toast
+        if let Some((_, at)) = &self.toast {
+            let until = *at + TOAST_TTL;
+            if now >= until {
+                self.toast = None;
+                repaint = true;
+            } else {
+                deadlines.push(until);
+            }
+        }
+        // notification toasts (a hovered one stays)
+        repaint |= self.prune_note_toasts();
+        let ttl = self.config.notifications.toast_duration();
+        deadlines.extend(self.note_toasts.iter().map(|(_, since)| *since + ttl));
         if (self.editor_active || self.palette.open || self.rename.is_some()) && !self.any_running {
             let elapsed = self.blink_epoch.elapsed().as_millis();
             let next_flip = BLINK_INTERVAL.as_millis() - (elapsed % BLINK_INTERVAL.as_millis());
-            event_loop.set_control_flow(winit::event_loop::ControlFlow::wait_duration(
-                Duration::from_millis(next_flip as u64 + 5),
-            ));
-            if next_flip > BLINK_INTERVAL.as_millis() - 30
-                && let Some(w) = &self.window
-            {
-                w.request_redraw();
-            }
-        } else {
-            event_loop.set_control_flow(winit::event_loop::ControlFlow::Wait);
+            deadlines.push(now + Duration::from_millis(next_flip as u64 + 5));
+            repaint |= next_flip > BLINK_INTERVAL.as_millis() - 30;
         }
+        if repaint && let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        event_loop.set_control_flow(match deadlines.into_iter().min() {
+            Some(t) => winit::event_loop::ControlFlow::WaitUntil(t),
+            None => winit::event_loop::ControlFlow::Wait,
+        });
     }
 }

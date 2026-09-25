@@ -28,8 +28,21 @@ cargo build --release            # release (thin LTO): target/release/shift-term
 packaging/make-app.sh            # macOS: target/Shift.app
 ```
 
+Dev builds optimize dependencies (`[profile.dev.package."*"] opt-level = 2`
+in `Cargo.toml`): text shaping and the GPU path dominate a debug frame, and a
+fully unoptimized build scrolls a large diff at ~11 ms per frame instead of
+~2 ms. Shift's own crates stay unoptimized, so incremental rebuilds stay
+around 1–2 s; the first build after a clean takes longer.
+
 The binary has no runtime assets: fonts, themes and shell hooks are embedded.
-`shift-terminal --help` prints the usage; `--version` the version.
+`shift-terminal --help` prints the usage; `--version` the version. On macOS,
+`crates/shift-app/build.rs` embeds a minimal Info.plist in the binary so an
+unbundled run shows "Shift" in the menu bar instead of `shift-terminal`. The
+Dock and ⌘Tab name a process after its bundle, so `cargo run` goes through
+`scripts/cargo-runner.sh` (`.cargo/config.toml`): it launches the binary from a
+dev bundle, `target/<profile>/Shift.app`, hard-linked to the fresh build.
+Running `target/debug/shift-terminal` directly still shows `shift-terminal`
+in the Dock.
 
 ## Test
 
@@ -178,7 +191,11 @@ Every script takes `--target <triple>`, `--target-dir <dir>` and
 | `packaging/make-appimage.sh` | Linux | `target/Shift-<version>-<arch>.AppImage` (downloads `appimagetool` once) |
 | `packaging/make-tarball.sh` | both | `target/shift-terminal-<version>-<os>-<arch>.tar.gz` |
 
-The version lives only in `[workspace.package]` of `Cargo.toml`. Pushing a
+The version lives only in `[workspace.package]` of `Cargo.toml`. Every bump
+needs a matching `## <version> — <date>` entry at the top of `CHANGELOG.md`:
+the app embeds that file as its What's New page, and
+`changelog::tests::embedded_changelog_lists_the_running_version_first` fails
+without it. Pushing a
 `v*` tag runs `.github/workflows/release.yml`, which builds every package and
 publishes a GitHub Release.
 

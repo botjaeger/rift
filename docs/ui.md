@@ -11,6 +11,9 @@ metrics: [DESIGN.md](../DESIGN.md).
 - The whole chrome strip doubles as a window-drag region on Linux.
 - The window reopens at its last position and size (maximized/fullscreen too)
   when `restore_session` is on.
+- Mouse pointer: a hand over anything clickable (tabs, buttons, dialog
+  buttons, menu and palette rows, settings controls, ⌘-hovered links),
+  resize arrows over split handles, the I-beam over terminal text.
 
 ## Menu bar (macOS)
 
@@ -19,10 +22,10 @@ Hide/Hide Others/Show All, Quit) · **File** (New Tab, New Window, Split Pane
 Right/Down, Reopen Closed Tab, Save Layout as Launch Configuration, Close
 Pane/Other Tabs/Window) · **Edit** (Undo, Redo, Cut, Copy, Paste, Select All,
 Find…, Filter Block Output…, Clear Blocks) · **View** (Command Palette,
-Workflows, Command History, Bigger/Smaller/Actual Size, Maximize Pane, Toggle
-Full Screen) · **Blocks** (select/copy/reinput/bookmark/scroll actions) ·
+Workflows, Command History, File Explorer, Code Review, Bigger/Smaller/Actual
+Size, Maximize Pane, Toggle Full Screen) · **Blocks** (select/copy/reinput/bookmark/scroll actions) ·
 **Window** (Minimize, Zoom, tab and pane navigation, Synchronize Inputs,
-Bring All to Front) · **Help** (Keyboard Shortcuts).
+Bring All to Front) · **Help** (What's New, Keyboard Shortcuts).
 
 Shortcut labels come from the live keymap (`[keybindings]` overrides show up
 after the reload); only ⌘ chords become menu key equivalents so ctrl chords
@@ -37,8 +40,14 @@ every action).
   (OSC 0/2 title, else cwd basename; `· N panes` suffix when split).
 - Activity pulse dot on background tabs that produced output since last viewed.
 - `×` closes the tab (all its panes), `+` spawns a new tab.
-- Right side: `⌘P palette` hint, replaced by `● N alerts ⇧⌘A` while the
-  attention center has unread entries.
+- No palette hint on the right (⌘P still opens it).
+- Panel buttons (Warp layout), accent while their panel is open: a sidebar
+  icon right after the traffic lights toggles the file explorer; at the far
+  right, `± +added −removed` for the active pane's repository (reloaded on
+  `cd`, tab or pane switch and after each command) toggles code review — a
+  bare `±` outside a repository or with no changes. Left of it, an inbox
+  icon opens the notifications popover; an accent dot marks unread
+  entries. The vertical-tab layout's top strip has the same buttons.
 - A tab with synchronized inputs on shows a sync marker.
 
 ## Vertical tab rail
@@ -47,6 +56,62 @@ every action).
 tab strip with a 220 px rail on the left: one 54 px row per tab with shell,
 title, directory, git branch, pane count, sync state, activity dot and tab
 color. Click selects, × closes; ⌘T adds a tab.
+
+## File explorer (⇧⌘E)
+
+A 260 px panel left of the panes (right of the vertical rail when it is on)
+showing the active pane's project: the enclosing git working tree, else the
+pane's directory. It follows the pane when `cd` leaves the project.
+
+- Header: project name, ⊟ collapse all, ↻ refresh.
+- Rows: folders first, then files, case-insensitive; `.git`, `.DS_Store` and
+  git-ignored entries hidden; at most 2 000 entries per folder. Folders show
+  ▸ / ▾ and a dot when they hold changes; changed files are tinted by status
+  with a letter at the right (`M` modified, `A` added, `U` untracked, `D`
+  deleted).
+- Click a folder to expand it, a file to open it in the viewer; ⌥-click
+  inserts the quoted path into the command line.
+- Keys once clicked: ↑ ↓ move, ← collapses or goes to the parent, → expands,
+  ⏎ opens (⌥⏎ inserts the path), Esc returns focus to the terminal. Any other
+  key goes to the terminal.
+- Listings and git colors reload when a command finishes, after a review
+  action, and on ↻.
+
+## File viewer
+
+Opens over the pane area from the explorer or the review panel's ↗: the
+path, a `read-only` chip, **Insert path** and ✕. Line numbers and
+highlighting for keywords, strings, comments and numbers (C-family and
+`#`-comment languages by extension; Markdown and text stay plain). Binary
+files and files over 4 MB show a notice instead. Wheel, arrows, Space, Page
+Up/Down and Home/End scroll; Esc or ✕ closes. While it is open, typing is
+swallowed (app shortcuts still work) and the terminal keeps running
+underneath.
+
+## Code review (⇧⌘G)
+
+A 460 px panel right of the panes listing the repository's changes. The
+header shows the branch and total `+added −removed`, and ↻ reloads.
+
+- **Staged** (HEAD → index) and **Changes** (index → working tree, untracked
+  files included) sections, each collapsible, with **Unstage all** / **Stage
+  all**.
+- File rows: status letter, name and folder, `+a −d`, then ↗ open in the
+  viewer, ↺ revert (unstaged only) and + stage / − unstage. Click a row to
+  expand its diff.
+- Hunks: the `@@` header with **Stage** / **Revert** (unstaged) or
+  **Unstage** (staged), then the lines with old and new line numbers, added
+  lines on a green wash and removed lines on a red one. A binary file shows a
+  note; a diff past 4 000 lines is cut with a note.
+- Revert asks first ("Revert this change?" / "Revert file?") and discards
+  only unstaged changes; reverting an untracked file deletes it.
+- A hunk action re-reads the diff first; if the hunk no longer matches the
+  file, nothing is written and the panel shows why above the list.
+- The panel reloads (off the UI thread) when it opens, when a command
+  finishes, after each action, and on ↻.
+
+Both panels hide when the window is too narrow to leave 360 px for the panes
+(review first).
 
 ## Blocks (terminal area)
 
@@ -125,8 +190,11 @@ integration). Sits at the bottom of the pane, or at the top with
   zone when the editor sits at the window bottom.
 - **Workflow placeholders**: `{{placeholder}}` spans highlight and Tab-cycle;
   typing replaces the active span.
-- **Boot placeholder**: `Starting zsh…` (shell name from config) shown until
-  the shell's first output byte.
+- **Boot placeholder**: `Starting zsh…` (shell name from config) shown on the
+  input line (bottom, or top with `input_position = "top"`) until the shell's
+  first prompt, with the terminal cursor hidden. A shell without integration
+  never marks a prompt; the placeholder leaves and its cursor shows 1.5 s after
+  its first byte.
 
 ## Split panes
 
@@ -137,8 +205,8 @@ integration). Sits at the bottom of the pane, or at the top with
 - Zoom (⇧⌘⏎): the active pane temporarily takes the whole tab rect and renders
   like a single pane (full editor, no gutters). Navigating or splitting unzooms.
 - Compact editor (input line only, no context row) inside splits.
-- The tab shows a `N panes` pill, and the tab strip's right edge swaps the
-  palette hint for a `⌃⇧D split` pill (chords follow the keymap).
+- The tab shows a `N panes` pill, and the tab strip's right edge shows a
+  `⌃⇧D split` pill (chords follow the keymap).
 
 ## Command palette (⌘P)
 
@@ -159,11 +227,43 @@ shortcut chips. Modes:
 - **Session switcher** (⇧⌘O) — tabs, panes of split tabs (directory and
   running job), tabs of other Shift windows, detached session-service shells,
   and the 40 newest finished blocks. Enter jumps there.
-- **Attention center** (⇧⌘A) — finished and failed commands, program
-  notifications and background bells, newest first, each with tab, status,
-  duration and age. Enter jumps to the block.
 
 Long rows are cut with `…` inside the dialog.
+
+## Notifications
+
+**Inbox popover** — dropped from the inbox button, or ⇧⌘A, 420 px wide and
+at most 620 px tall.
+
+- Header `Notifications`, `Mark all as read` (while anything is unread) and
+  ✕; chips `All tabs (N)`, `Unread (N)` and `Errors (N)` filter the list
+  (Tab / ⇧Tab cycle them).
+- Rows, newest first: a badge — the agent's (Claude Code orange `*`, Codex
+  `>_`, OpenCode `oc`, Gemini `G`) with a kind dot, or a tinted kind disc
+  (✓ finished, ✕ failed, `!` waiting on you, dot for a program
+  notification, bell) — an accent dot while unread, the agent name and
+  `⎇ branch`, the title (bold, wrapped, at most four lines, then `…`), its
+  detail (`Completed in 1.2s.`, `Failed with exit 1 after 3s.`,
+  `Waiting for your input.`, a notification body) and the age on the right
+  (`Just now`, `4 minutes ago`).
+- Click a row, or ↑/↓ then ⏎, to jump to its pane and block (marks it
+  read). The wheel scrolls the list. Esc, ✕, a right-click, a click outside
+  or a plain key closes it.
+- An entry turns read when you open it, when you look at its pane, or with
+  `Mark all as read`.
+- `No notifications`, `Nothing unread` or `No errors` when the list is
+  empty.
+
+**Toasts** — while Shift is focused, an alert from a pane you are not
+looking at appears as a 360 px card under the inbox button: badge, a kind
+stripe on the left edge, `agent · branch`, the title (two lines) and detail.
+At most two show, newest on top. Each stays `toast_secs` (default 8);
+hovering keeps it. A click jumps to the pane; ✕ dismisses. Toasts hide while
+the popover or Settings is open.
+
+**Tab markers** — a tab with unread entries shows a dot in the newest one's
+kind color (green finished, red failed, yellow waiting, accent notification)
+in place of the activity dot.
 
 ## Hint mode (⇧⌘H)
 
@@ -180,6 +280,13 @@ block; ⇧ + label copies it (a block copies its output). Esc cancels.
   Enter confirms, Esc cancels.
 - **Toasts** — short notices at the bottom (a keybinding moved from another
   action, the session service could not start, …).
+- **What's New** — release notes from `CHANGELOG.md`, newest first: title
+  with the current version and date, then each release's summary and its
+  New / Improved / Fixed items (section titles in accent / success / warning).
+  Opens from Help → What's New or the palette (`whats_new`), and once on the
+  first launch after an update (never on a first install). The body scrolls
+  with the wheel or trackpad, arrows, Space, Page Up/Down and Home/End; Esc,
+  Enter, ✕, **Got it** or a click outside the card closes it.
 
 ## Search (⌃⇧F / ⌘F)
 
@@ -202,7 +309,7 @@ Disabled items are dimmed (e.g. Copy output on an output-less block).
 
 ## Settings overlay (⌘,)
 
-Header (`❯ Settings`), a five-entry sidebar with a per-page icon (arrow keys navigate pages;
+Header (`❯ Settings`), a six-entry sidebar with a per-page icon (arrow keys navigate pages;
 PageUp/PageDown scroll the body) and a scrollable body footed with
 `~/.config/shift/config.toml`. Every control writes that file live (the
 hot-reload watcher applies changes < 300 ms, including external edits); the
@@ -230,15 +337,26 @@ are swallowed rather than reaching the terminal.
     slider (%, value boxed right of the track),
     `Window padding` stepper (px, ±2), `Font ligatures` toggle (*Render -> >=
     != as combined glyphs*).
-- **Features** — *Input, blocks, notifications*.
+- **Features** — *Input and blocks*.
   - Input: `Vim keybindings` toggle, `Autosuggestions (ghost text)` toggle,
     `Completions menu` toggle, `Autocomplete quotes and brackets` toggle,
     `Input position` segmented `Bottom | Top`, `Prompt` segmented
     `Shift | Shell (PS1)`, `Expand aliases as you type`, `Underline unknown
     commands`, `Suggest corrections for failed commands` toggles.
-  - Blocks & notifications: `Copy on select` toggle, `Notify when a long
-    command finishes` toggle, `Notify after` stepper (s, ±5), `Bell` segmented
-    `Visual | Audible | Both | None`.
+  - Blocks: `Copy on select` toggle.
+- **Notifications** (bell icon) — *Toasts, desktop notifications and sounds;
+  everything also lands in the inbox*.
+  - Alerts: `Notifications` master toggle, `In-window toasts` toggle,
+    `Toast duration` stepper (s, 2–60).
+  - Notify me when: `A long command finishes` toggle, `Long command
+    threshold` stepper (s, ±5), `A command fails`, `An agent finishes its
+    task`, `A program or agent needs attention`, `A password prompt appears`
+    toggles.
+  - Sounds: `Play notification sounds` toggle; `Sound`, `Finished`, `Failed`,
+    `Needs attention` selects — a click steps to the next sound (`Default`,
+    `None`, then every sound file found) and plays it; the per-event ones
+    start at `Same as Sound`.
+  - Terminal bell: `Bell` segmented `Visual | Audible | Both | None`.
 - **Keybindings** — *Click a shortcut to record a new one · type to filter*:
   a filter row, then every bindable action (including ones that ship unbound)
   with its first chord as chips; overridden rows get accent-edged chips and a

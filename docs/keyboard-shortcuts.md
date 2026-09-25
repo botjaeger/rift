@@ -79,9 +79,12 @@ listed alternates.
 | ⌘, | `open_settings` | Settings overlay |
 | ⌃⌘K | `open_keybindings` | Settings → Keybindings page |
 | ⌘L | `focus_input` | Scroll to bottom, deselect, focus the editor |
-| ⇧⌘A | `attention_center` | Finished commands, failures, notifications and bells |
+| ⇧⌘A | `attention_center` | Notifications popover: finished commands, failures, notifications and bells |
+| ⇧⌘E | `toggle_explorer` | File explorer panel (left) |
+| ⇧⌘G | `toggle_review` | Code review panel (right) |
 | ⇧⌘H | `hint_mode` | Letter hints over visible links, paths and blocks: type one to open/select, ⇧ + letter copies |
 | — | `clear_transcripts` | Delete saved block transcripts |
+| — | `whats_new` | What's New: release notes (also Help → What's New) |
 | ⌘= / ⇧⌘+ | `font_increase` | Font size +1 (persisted to config.toml) |
 | ⌘- | `font_decrease` | Font size −1 |
 | ⌘0 | `font_reset` | Font size → default (13) |

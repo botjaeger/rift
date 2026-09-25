@@ -97,6 +97,12 @@ pub enum AppAction {
     ScrollTop,
     ScrollBottom,
     OpenKeybindings,
+    /// What's New modal (release notes).
+    WhatsNew,
+    /// File explorer panel (left).
+    ToggleExplorer,
+    /// Code review panel (right).
+    ToggleReview,
     MaximizePane,
     ResizePaneLeft,
     ResizePaneRight,
@@ -233,6 +239,9 @@ pub fn action_from_name(name: &str) -> Option<AppAction> {
         "scroll_top" => AppAction::ScrollTop,
         "scroll_bottom" => AppAction::ScrollBottom,
         "open_keybindings" => AppAction::OpenKeybindings,
+        "whats_new" => AppAction::WhatsNew,
+        "toggle_explorer" => AppAction::ToggleExplorer,
+        "toggle_review" => AppAction::ToggleReview,
         "maximize_pane" => AppAction::MaximizePane,
         "resize_pane_left" => AppAction::ResizePaneLeft,
         "resize_pane_right" => AppAction::ResizePaneRight,

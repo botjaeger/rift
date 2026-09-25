@@ -39,6 +39,19 @@ pub struct Snapshot {
     pub panes: Vec<PaneNode>,
     pub overlay: Option<Overlay>,
     pub announcement: Option<String>,
+    /// Side panels and the file viewer (non-modal regions).
+    pub panels: Vec<PanelNode>,
+}
+
+/// A non-modal region: file explorer, code review, file viewer.
+pub struct PanelNode {
+    pub label: String,
+    pub rect: Option<[f32; 4]>,
+    /// Read-only text (the viewer's lines), if any.
+    pub text: Option<String>,
+    pub controls: Vec<Control>,
+    /// Keyboard focus is in the panel: its selected control gets focus.
+    pub focused: bool,
 }
 
 pub struct TabNode {
@@ -254,6 +267,36 @@ pub fn build(s: &Snapshot) -> Built {
         root_children.push(pane_id);
     }
 
+    // side panels and the viewer
+    for (pi, panel) in s.panels.iter().enumerate() {
+        let mut children = Vec::new();
+        if let Some(text) = &panel.text {
+            let id = id_of(("panel-text", pi));
+            let mut node = Node::new(Role::Document);
+            node.set_label(panel.label.as_str());
+            node.set_value(text.as_str());
+            node.set_read_only();
+            t.nodes.push((id, node));
+            children.push(id);
+            if panel.focused {
+                focus = id;
+            }
+        }
+        for (i, c) in panel.controls.iter().enumerate() {
+            let id = t.control(&panel.label, i, c);
+            if panel.focused && c.selected {
+                focus = id;
+            }
+            children.push(id);
+        }
+        let id = id_of(("panel", pi));
+        let mut group = Node::new(Role::Group);
+        group.set_label(panel.label.as_str());
+        group.set_children(children);
+        t.add(id, group, panel.rect, false);
+        root_children.push(id);
+    }
+
     // overlay
     if let Some(ov) = &s.overlay {
         match ov {
@@ -463,6 +506,7 @@ mod tests {
             }],
             overlay: None,
             announcement: Some("ls finished".into()),
+            panels: Vec::new(),
         }
     }
 

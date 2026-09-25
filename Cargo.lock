@@ -2948,6 +2948,7 @@ dependencies = [
  "accesskit_winit",
  "arboard",
  "env_logger",
+ "git2",
  "global-hotkey",
  "libc",
  "log",

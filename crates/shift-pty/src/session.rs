@@ -581,6 +581,17 @@ impl Session {
         self.foreground_job().filter(|n| !n.is_empty())
     }
 
+    /// Text of the cursor's row up to the cursor (password prompt check).
+    pub fn cursor_line_text(&self) -> String {
+        use alacritty_terminal::index::Column;
+        let term = self.term.lock();
+        let grid = term.grid();
+        let cursor = grid.cursor.point;
+        let row = &grid[cursor.line];
+        let end = cursor.column.0.min(grid.columns());
+        (0..end).map(|c| row[Column(c)].c).collect()
+    }
+
     /// The pane was closed on purpose: end a service-owned shell too (a
     /// local shell ends when the PTY drops). Quitting the app does not
     /// call this, which is what keeps durable sessions running.

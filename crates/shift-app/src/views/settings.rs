@@ -13,15 +13,17 @@ pub enum Page {
     #[default]
     Appearance,
     Features,
+    Notifications,
     Keybindings,
     Themes,
 }
 
 impl Page {
-    pub const ALL: [Page; 5] = [
+    pub const ALL: [Page; 6] = [
         Page::General,
         Page::Appearance,
         Page::Features,
+        Page::Notifications,
         Page::Keybindings,
         Page::Themes,
     ];
@@ -160,6 +162,19 @@ fn nav_icon(layer: &mut Layer, page: Page, x: f32, y: f32, c: Color) {
                 layer.circle([x + 1.5 + knob, ly + stroke / 2.0], 3.4, c);
             }
         }
+        Page::Notifications => {
+            // bell: dome, rim, clapper
+            layer.bordered(
+                [x + 3.5, y + 1.5],
+                [9.0, 11.0],
+                Color::TRANSPARENT,
+                c,
+                4.5,
+                stroke,
+            );
+            layer.rect([x + 1.5, y + 11.5], [13.0, stroke], c, 0.6);
+            layer.circle([x + 8.0, y + 14.3], 3.0, c);
+        }
         Page::Keybindings => {
             layer.bordered(
                 [x + 1.0, y + 4.0],
@@ -217,7 +232,14 @@ pub fn render(
     );
 
     // nav
-    let labels = ["General", "Appearance", "Features", "Keybindings", "Themes"];
+    let labels = [
+        "General",
+        "Appearance",
+        "Features",
+        "Notifications",
+        "Keybindings",
+        "Themes",
+    ];
     let mut ny = hy + 46.0;
     for (i, page) in Page::ALL.iter().enumerate() {
         let selected = state.page == *page;
@@ -287,7 +309,11 @@ pub fn render(
     let (title, subtitle) = match state.page {
         Page::General => ("General", "Shell and session behavior"),
         Page::Appearance => ("Appearance", "Fonts, cursor, window and theme"),
-        Page::Features => ("Features", "Input, blocks, notifications"),
+        Page::Features => ("Features", "Input and blocks"),
+        Page::Notifications => (
+            "Notifications",
+            "Toasts, desktop notifications and sounds; everything also lands in the inbox",
+        ),
         Page::Keybindings => (
             "Keybindings",
             "Click a shortcut to record a new one · type to filter",
@@ -357,6 +383,7 @@ pub fn render(
         Page::Appearance => appearance_page(&mut form, config),
         Page::General => general_page(&mut form, config),
         Page::Features => features_page(&mut form, config),
+        Page::Notifications => notifications_page(&mut form, config),
         Page::Keybindings => keybindings_page(&mut form, keymap, config, state),
         Page::Themes => themes_page(&mut form, config),
     }
@@ -1092,26 +1119,135 @@ fn features_page(form: &mut Form, config: &Config) {
         "command_corrections",
     );
 
-    form.group("Blocks & notifications");
-    let r = form.card(4);
+    form.group("Blocks");
+    let r = form.card(1);
     let y = row(form, r, 0);
     form.toggle(y, "Copy on select", config.copy_on_select, "copy_on_select");
-    let y = row(form, r, 1);
-    form.toggle(
+}
+
+/// Shown value of a sound setting (`""` = follow the main sound).
+pub fn sound_label(value: &str) -> String {
+    match value.trim() {
+        "" => "Same as Sound".into(),
+        v if v.eq_ignore_ascii_case("default") => "Default".into(),
+        v if v.eq_ignore_ascii_case("none") => "None".into(),
+        v => v.rsplit('/').next().unwrap_or(v).to_string(),
+    }
+}
+
+fn notifications_page(form: &mut Form, config: &Config) {
+    let n = &config.notifications;
+    form.group("Alerts");
+    let r = form.card(3);
+    let y = row(form, r, 0);
+    form.toggle_desc(
         y,
-        "Notify when a long command finishes",
-        config.notify_on_completion,
-        "notify_on_completion",
+        "Notifications",
+        "Toasts while Shift is focused, desktop notifications while it is not",
+        n.enabled,
+        "notifications.enabled",
+    );
+    let y = row(form, r, 1);
+    form.toggle_desc(
+        y,
+        "In-window toasts",
+        "Top-right cards for panes you are not looking at",
+        n.toasts,
+        "notifications.toasts",
     );
     let y = row(form, r, 2);
     form.stepper(
         y,
-        "Notify after",
+        "Toast duration",
+        &format!("{}", n.toast_duration().as_secs()),
+        "s",
+        "notifications.toast_secs",
+    );
+
+    form.group("Notify me when");
+    let r = form.card(6);
+    let y = row(form, r, 0);
+    form.toggle(
+        y,
+        "A long command finishes",
+        config.notify_on_completion,
+        "notify_on_completion",
+    );
+    let y = row(form, r, 1);
+    form.stepper(
+        y,
+        "Long command threshold",
         &format!("{}", config.notify_threshold_secs),
         "s",
         "notify_threshold_secs",
     );
+    let y = row(form, r, 2);
+    form.toggle(
+        y,
+        "A command fails",
+        n.command_failed,
+        "notifications.command_failed",
+    );
     let y = row(form, r, 3);
+    form.toggle_desc(
+        y,
+        "An agent finishes its task",
+        "Claude Code, Codex, OpenCode, Gemini CLI",
+        n.agent_task_completed,
+        "notifications.agent_task_completed",
+    );
+    let y = row(form, r, 4);
+    form.toggle_desc(
+        y,
+        "A program or agent needs attention",
+        "OSC 9 / 777 / 99, approval and input requests",
+        n.needs_attention,
+        "notifications.needs_attention",
+    );
+    let y = row(form, r, 5);
+    form.toggle(
+        y,
+        "A password prompt appears",
+        n.password_prompt,
+        "notifications.password_prompt",
+    );
+
+    form.group("Sounds");
+    let r = form.card(5);
+    let y = row(form, r, 0);
+    form.toggle(
+        y,
+        "Play notification sounds",
+        n.play_sound,
+        "notifications.play_sound",
+    );
+    let y = row(form, r, 1);
+    form.select(y, "Sound", &sound_label(&n.sound), "notifications.sound");
+    let y = row(form, r, 2);
+    form.select(
+        y,
+        "Finished",
+        &sound_label(&n.sound_finished),
+        "notifications.sound_finished",
+    );
+    let y = row(form, r, 3);
+    form.select(
+        y,
+        "Failed",
+        &sound_label(&n.sound_failed),
+        "notifications.sound_failed",
+    );
+    let y = row(form, r, 4);
+    form.select(
+        y,
+        "Needs attention",
+        &sound_label(&n.sound_attention),
+        "notifications.sound_attention",
+    );
+
+    form.group("Terminal bell");
+    let r = form.card(1);
+    let y = row(form, r, 0);
     form.segment(
         y,
         "Bell",

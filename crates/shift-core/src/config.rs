@@ -131,6 +131,9 @@ pub struct Config {
     /// clicks, drags and the wheel to apps that enable mouse reporting
     /// (vim, tmux, htop). Hold Shift to select text instead.
     pub mouse_reporting: bool,
+    /// Toasts, desktop notifications and sounds per event (`[notifications]`;
+    /// tables stay after the plain keys so the TOML writer accepts them).
+    pub notifications: crate::notifications::Notifications,
     /// Named ssh hosts (`[[ssh_profiles]]`); ~/.ssh/config hosts are added
     /// to the palette automatically.
     pub ssh_profiles: Vec<crate::ssh::SshProfile>,
@@ -178,6 +181,7 @@ impl Default for Config {
             global_hotkey: String::new(),
             option_as_meta: false,
             mouse_reporting: true,
+            notifications: Default::default(),
             ssh_profiles: Vec::new(),
             keybindings: BTreeMap::new(),
         }
@@ -300,7 +304,9 @@ mod tests {
             ..Default::default()
         };
         c.keybindings.insert("new_tab".into(), "cmd+t".into());
-        let s = toml::to_string(&c).unwrap();
+        c.notifications.sound_failed = "Basso".into();
+        c.notifications.toasts = false;
+        let s = toml::to_string_pretty(&c).unwrap();
         let back: Config = toml::from_str(&s).unwrap();
         assert_eq!(back, c);
     }

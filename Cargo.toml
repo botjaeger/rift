@@ -46,3 +46,9 @@ flate2 = "1"
 
 [profile.release]
 lto = "thin"
+
+# `cargo run` stays smooth: dependencies (glyphon, cosmic-text, wgpu,
+# alacritty_terminal) build optimized in dev; Shift's own crates keep fast
+# incremental debug builds.
+[profile.dev.package."*"]
+opt-level = 2

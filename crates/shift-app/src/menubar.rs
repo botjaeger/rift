@@ -197,6 +197,9 @@ pub fn install(keymap: &Keymap) -> Option<MenuBar> {
             &action(keymap, "Workflows", "workflows"),
             &chord(keymap, "Command History", "ctrl+r"),
             &sep(),
+            &action(keymap, "File Explorer", "toggle_explorer"),
+            &action(keymap, "Code Review", "toggle_review"),
+            &sep(),
             &action(keymap, "Bigger", "font_increase"),
             &action(keymap, "Smaller", "font_decrease"),
             &action(keymap, "Actual Size", "font_reset"),
@@ -253,7 +256,10 @@ pub fn install(keymap: &Keymap) -> Option<MenuBar> {
     let help = Submenu::with_items(
         "Help",
         true,
-        &[&action(keymap, "Keyboard Shortcuts", "open_keybindings")],
+        &[
+            &action(keymap, "What's New", "whats_new"),
+            &action(keymap, "Keyboard Shortcuts", "open_keybindings"),
+        ],
     )
     .ok()?;
     let menu = Menu::with_items(&[&app, &file, &edit, &view, &blocks, &window, &help]).ok()?;

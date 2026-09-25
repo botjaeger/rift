@@ -17,6 +17,11 @@ pub enum ClickTarget {
     TabSelect(usize),
     TabClose(usize),
     TabNew,
+    /// Top-bar sidebar toggles.
+    ToggleExplorer,
+    ToggleReview,
+    /// Top-bar inbox: the notifications popover.
+    ToggleNotifications,
     /// The owned command editor of a pane (click places the cursor).
     Editor(PaneId),
     PaneFocus(PaneId),
@@ -631,6 +636,10 @@ pub struct PaneState {
     pub correction_checked: Option<shift_core::BlockId>,
     /// File id of this pane's saved block transcript (`save_transcripts`).
     pub transcript_id: String,
+    /// When the app first saw the shell's output (boot placeholder grace).
+    pub first_output: Option<std::time::Instant>,
+    /// Running block whose password prompt already raised a notification.
+    pub password_block: Option<shift_core::BlockId>,
 }
 
 impl PaneState {
@@ -653,6 +662,8 @@ impl PaneState {
             correction: None,
             correction_checked: None,
             transcript_id: shift_core::transcript::new_id(),
+            first_output: None,
+            password_block: None,
         }
     }
 

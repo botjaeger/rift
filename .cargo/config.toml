@@ -1,0 +1,4 @@
+# `cargo run` on macOS starts shift-terminal from a dev Shift.app so the Dock
+# names it "Shift" (see scripts/cargo-runner.sh). Other platforms: no runner.
+[target.'cfg(target_os = "macos")']
+runner = "scripts/cargo-runner.sh"

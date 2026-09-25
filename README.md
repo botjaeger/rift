@@ -59,7 +59,9 @@ rebound. Full list: [keyboard shortcuts](docs/keyboard-shortcuts.md).
 | Session switcher (tabs, panes, other windows, recent blocks) | ⇧⌘O |
 | Hint mode (open or copy visible links, paths, blocks by letter) | ⇧⌘H |
 | Synchronized input to every pane of a tab | ⌥⌘I |
-| Attention center (finished and failed commands, notifications, bells) | ⇧⌘A |
+| Notifications — finished and failed commands, Claude Code / Codex and program notifications, password prompts; toasts, sounds per event | ⇧⌘A or the inbox button at the top right; Settings → Notifications |
+| **File explorer** — the project tree with git status, a read-only file viewer | ⇧⌘E or the sidebar button next to the traffic lights; click a file to view it, ⌥-click to insert its path |
+| **Code review** — staged and unstaged diffs; stage, unstage or revert a file or hunk | ⇧⌘G or the `± +N −M` button at the top right |
 | Session restore (tabs, splits, directories, window position) | On by default (`restore_session`) |
 | Saved block output across restarts | Settings → General → *Save block output for restore* |
 | Durable sessions (shells keep running after you quit) | Settings → General → *Keep shells running when Shift quits* |
@@ -70,7 +72,7 @@ rebound. Full list: [keyboard shortcuts](docs/keyboard-shortcuts.md).
 | Automation socket | `shift-terminal ctl list`, `focus`, `split`, `open`, `send-text` |
 | Themes — 4 built in, your TOML or Warp YAML, OS light/dark sync | Settings → Themes, or `~/.config/shift/themes/` |
 | Launch configurations (Warp YAML) | Palette → *Launch configuration: name* |
-| Desktop notification when a long command finishes | On by default, after 10 s |
+| Alert when a long command finishes out of view (toast, or desktop notification in the background) | On by default, after 10 s |
 | Screen readers (VoiceOver, Orca) | Automatic (AccessKit) |
 | Global hotkey to show or hide Shift | `global_hotkey = "alt+space"` in config.toml |
 

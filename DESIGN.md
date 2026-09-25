@@ -90,6 +90,8 @@ glyphon; shaped runs are cached by content.
 | Completion dropdown width / row | 560 px / 34 px | `DROPDOWN_W` |
 | Context menu width / row | 220 px / 30 px | `MENU_W` |
 | Settings sidebar width / row | 248 px / 52 px | `SIDEBAR_W` |
+| File explorer width / row | 260 px / 24 px | `EXPLORER_W`, `ROW_H` |
+| Code review width / diff line | 460 px / 22 px | `REVIEW_W` |
 | Block cursor | 8 × 18 px; bar and underline 2 px | — |
 
 ## Layers and compositing
@@ -99,11 +101,11 @@ glyphon; shaped runs are cached by content.
 | Layer | Contents |
 |---|---|
 | 0 | Chrome: tab bar or rail, gutters |
-| 1 | Terminal grid, blocks, images, command editor |
-| 2 | Completion dropdown, find bar |
+| 1 | Terminal grid, blocks, images, command editor; file explorer and code review panels (`bg_chrome`) |
+| 2 | Completion dropdown, find bar, file viewer (over the pane area) |
 | 3 | Settings overlay |
-| 4 | Palette and its modes (history, workflows, switcher, attention center) |
-| 5 | Block context menu, hint labels |
+| 4 | Palette and its modes (history, workflows, switcher) |
+| 5 | Block context menu, hint labels, notification toasts and popover |
 | 6 | Toasts, confirm dialogs |
 
 A theme's background image draws before layer 0. Inline images draw under
@@ -138,7 +140,20 @@ No other animation. Motion never delays input.
   match highlight and right-aligned shortcut chips resolved from the live
   keymap.
 - **Chips and pills**: rounded, muted text, used for shortcuts, counts
-  (`N panes`, `● N alerts`), and modes (`NORMAL`).
+  (`N panes`, `All tabs (N)`), and modes (`NORMAL`).
+- **Notifications popover**: `surface` card (radius 12, hairline border,
+  soft shadow) right-aligned under the inbox button, no backdrop. Kind colors
+  carry meaning: finished `success`, failed `error`, waiting on you
+  `warning`, program notification `accent`, bell `text_dim`. Kind badges are
+  those colors at 16 % with the mark in full color; an agent badge is its
+  brand disc (Claude `#d97757`, Codex `#f2f2f2`, OpenCode `#3b3b40`, Gemini
+  `#4285f4`) with a 9 px kind dot ringed in `surface`. Unread is a 6 px
+  `accent` dot; titles `text_bright` semibold 14, details `text_dim` 13,
+  ages `text_muted` 13.
+- **Notification toasts**: 360 px `surface` cards (radius 12) under the
+  inbox button, 8 px apart, a 3 px kind-colored stripe on the left edge,
+  title semibold 13.5 (two lines), detail 12.5. Tab markers: a 7 px kind
+  dot with a 12 px halo at 25 %.
 - **Split panes**: focused pane has an accent border and glow; inactive panes
   dim and use `pane_border_inactive`.
 
