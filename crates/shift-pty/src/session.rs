@@ -858,7 +858,8 @@ fn feed(parser: &mut vte::ansi::Processor, scanner: &mut OscScanner, bytes: &[u8
             Some(Marker::InlineImage(body)) => {
                 let cell = cell_px(&ctx.window_size);
                 let cols = term.grid().columns();
-                let out = ctx.graphics.lock().unwrap().iterm(&body, cell, cols);
+                let rows = term.grid().screen_lines();
+                let out = ctx.graphics.lock().unwrap().iterm(&body, cell, cols, rows);
                 if let Some(req) = out.place {
                     place_image(parser, &mut term, &mut scrolled_cur, ctx, &req);
                 }
@@ -907,8 +908,16 @@ fn place_image(
     if !req.move_cursor {
         return;
     }
-    let mut seq = "\n".repeat(req.rows.saturating_sub(1));
-    let col = (cursor.column.0 + req.cols).min(term.grid().columns() - 1);
+    let mut seq = "\n".repeat(
+        req.rows
+            .min(crate::graphics::MAX_CELL_SPAN)
+            .saturating_sub(1),
+    );
+    let col = cursor
+        .column
+        .0
+        .saturating_add(req.cols)
+        .min(term.grid().columns() - 1);
     seq.push_str(&format!("\x1b[{}G", col + 1));
     let mut abs = AbsTerm {
         term,

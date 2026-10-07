@@ -277,6 +277,17 @@ impl BlockStore {
     pub fn snapshot(&self) -> Vec<Block> {
         self.blocks.iter().cloned().collect()
     }
+
+    /// Working directory of the command whose output holds line `abs`
+    /// (`None` for prompt rows, unattributed output, or no recorded cwd).
+    pub fn cwd_at(&self, abs: AbsLine) -> Option<&str> {
+        self.blocks
+            .iter()
+            .rev()
+            .find(|b| b.output_start.is_some_and(|o| o <= abs) && b.end.is_none_or(|e| abs < e))?
+            .cwd
+            .as_deref()
+    }
 }
 
 #[cfg(test)]
@@ -296,6 +307,21 @@ mod tests {
         assert_eq!(b.exit_code(), Some(0));
         assert_eq!(b.suppressed_range(), Some((10, 12)));
         assert_eq!(b.output_range(), Some((12, 20)));
+    }
+
+    #[test]
+    fn cwd_at_follows_the_owning_command() {
+        let mut s = BlockStore::default();
+        s.on_prompt_start(0);
+        s.stamp_context(Some("/a".into()), None);
+        s.on_output_start(1, "ls".into());
+        s.on_done(3, Some(0));
+        s.on_prompt_start(3);
+        s.stamp_context(Some("/b".into()), None);
+        s.on_output_start(4, "ls".into());
+        assert_eq!(s.cwd_at(2), Some("/a"));
+        assert_eq!(s.cwd_at(9), Some("/b")); // still running
+        assert_eq!(s.cwd_at(0), None); // prompt row
     }
 
     #[test]

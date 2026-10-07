@@ -30,6 +30,8 @@ alacritty_terminal = "0.26"
 # core
 serde = { version = "1", features = ["derive"] }
 toml = "1"
+# Settings saves edit config.toml in place (comments, order, unknown keys)
+toml_edit = "0.25"
 serde_yaml_ng = "0.10"
 serde_json = "1"
 arc-swap = "1.9"

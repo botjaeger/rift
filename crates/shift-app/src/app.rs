@@ -54,6 +54,12 @@ pub enum UserEvent {
     Menu(String),
     GitStatus(PaneId, Option<GitInfo>),
     ConfigReloaded,
+    ViewerLoaded(Box<crate::views::viewer::ViewerState>),
+    WindowsLoaded(
+        Vec<(u32, std::path::PathBuf, Vec<crate::control::TabInfo>)>,
+        bool,
+    ),
+    DetachedLoaded(Vec<shift_pty::ipc::SessionInfo>),
     HistoryLoaded(Vec<String>),
     ShellEnvLoaded(Arc<shift_core::shell_env::ShellEnv>),
     /// Screen reader requests (initial tree, actions).
@@ -64,7 +70,46 @@ pub enum UserEvent {
     PtyNotify(PaneId, String, String),
     /// Code review model for request `.0`; `None` outside a repository.
     ReviewLoaded(u64, Option<Result<shift_core::review::Review, String>>),
+    /// A review-panel write finished (`Some` = why it failed).
+    ReviewWritten(Option<String>),
+    /// Completions for completion request `.0`.
+    Completions(u64, Vec<shift_core::completion::Completion>),
 }
+
+/// What the completion thread completes: one editor state and the
+/// histories and directory it is completed against.
+#[derive(Clone)]
+struct CompletionRequest {
+    generation: u64,
+    pane: PaneId,
+    buffer: String,
+    cursor: usize,
+    history: Vec<String>,
+    shell_history: Arc<Vec<String>>,
+    cwd: Option<String>,
+}
+
+impl CompletionRequest {
+    fn run(&self) -> Vec<shift_core::completion::Completion> {
+        shift_core::completion::complete(
+            &self.buffer,
+            self.cursor,
+            &self.history,
+            &self.shell_history,
+            self.cwd.as_deref(),
+        )
+    }
+}
+
+/// Review-panel writes, applied in order: (operation, path, hunk).
+type ReviewOps = Vec<(
+    shift_core::review::Op,
+    String,
+    Option<shift_core::review::HunkId>,
+)>;
+
+/// One queued review-panel write: the repository and its operations.
+type ReviewWrite = (std::path::PathBuf, ReviewOps);
 
 /// One entry of the attention center (⇧⌘A, the notifications popover):
 /// something that happened in a pane while you were looking elsewhere, or
@@ -218,7 +263,8 @@ pub struct App {
     last_click: Option<(Instant, (f32, f32), u8)>,
     context_menu: ContextMenuState,
     context_menu_rects: Vec<[f32; 4]>,
-    shell_history: Vec<String>,
+    /// Imported shell history (shared with the completion thread).
+    shell_history: Arc<Vec<String>>,
     workflows: Vec<shift_core::workflows::Workflow>,
     font_size: f32,
     line_h: f32,
@@ -257,6 +303,8 @@ pub struct App {
     other_windows: Vec<(u32, std::path::PathBuf, Vec<crate::control::TabInfo>)>,
     /// Detached session-service shells, fetched when the palette opens.
     detached: Vec<shift_pty::ipc::SessionInfo>,
+    windows_loading: bool,
+    detached_loading: bool,
     /// Attention center entries, newest last.
     attention: Vec<Attention>,
     next_attention_id: u64,
@@ -322,6 +370,20 @@ pub struct App {
     editor_drag: Option<PaneId>,
     /// Transient status message (text, shown at).
     toast: Option<(String, Instant)>,
+    /// Queue of the completion thread (started on the first request).
+    completion_tx: Option<std::sync::mpsc::Sender<CompletionRequest>>,
+    /// Latest completion request not yet answered.
+    completion_pending: Option<CompletionRequest>,
+    /// Counter identifying completion requests.
+    completion_gen: u64,
+    /// Editor buffer the shown completions and ghost belong to.
+    completion_buffer: String,
+    /// Queue of the review writer thread (started on the first write).
+    review_writer: Option<std::sync::mpsc::Sender<ReviewWrite>>,
+    /// Why config.toml was last rejected (unreadable or invalid). While set,
+    /// the live config is the last good one and Settings does not save, so
+    /// the user's file is never overwritten with defaults.
+    config_error: Option<String>,
     /// Mouse button held down while reporting to a mouse-tracking app:
     /// (pane, button code, last reported cell).
     mouse_report: Option<(PaneId, u8, (usize, usize))>,
@@ -375,26 +437,69 @@ fn hint_labels(n: usize) -> Vec<String> {
         .collect()
 }
 
+/// Space or Enter: presses a keyboard-focused control (Space can arrive as
+/// a character).
+fn press_key(key: &winit::keyboard::Key) -> bool {
+    use winit::keyboard::{Key, NamedKey};
+    match key {
+        Key::Named(NamedKey::Space | NamedKey::Enter) => true,
+        Key::Character(c) => c.as_str() == " ",
+        _ => false,
+    }
+}
+
+/// Shortest time a confirmation dialog is on screen before Enter accepts it.
+const CONFIRM_ARM: Duration = Duration::from_millis(300);
+
+/// Whether Enter accepts a confirmation shown for `shown`: never an
+/// auto-repeat, never before the dialog could have been read.
+fn confirm_accepts(repeat: bool, shown: Duration) -> bool {
+    !repeat && shown >= CONFIRM_ARM
+}
+
+/// How `pane`'s program wants keys encoded.
+fn key_encoding(pane: &PaneState, option_as_meta: bool) -> input::KeyEncoding {
+    use shift_pty::alacritty_terminal::term::TermMode;
+    let mode = *pane.session.term.lock().mode();
+    input::KeyEncoding {
+        app_cursor: mode.contains(TermMode::APP_CURSOR),
+        option_as_meta,
+        kitty_flags: crate::keyboard::flags_from_mode(mode),
+    }
+}
+
+/// Whether `pane`'s program enabled bracketed paste (DECSET 2004).
+fn bracketed_paste_on(pane: &PaneState) -> bool {
+    use shift_pty::alacritty_terminal::term::TermMode;
+    pane.session
+        .term
+        .lock()
+        .mode()
+        .contains(TermMode::BRACKETED_PASTE)
+}
+
 /// Hand a URL or path to the OS opener (documents only, never script
-/// handlers).
-fn open_external(target: &str) {
+/// handlers). `Err` says why nothing opened.
+fn open_external(target: &str) -> Result<(), String> {
     if let Some((scheme, _)) = target.split_once("://")
         && !matches!(
             scheme.to_ascii_lowercase().as_str(),
             "http" | "https" | "file" | "ftp"
         )
     {
-        return;
+        return Err(format!("{scheme}: links are not opened"));
     }
     #[cfg(target_os = "macos")]
     let opener = "open";
     #[cfg(not(target_os = "macos"))]
     let opener = "xdg-open";
     log::info!("open {target}");
-    let _ = std::process::Command::new(opener)
+    std::process::Command::new(opener)
         .arg(target)
         .stdin(std::process::Stdio::null())
-        .spawn();
+        .spawn()
+        .map(drop)
+        .map_err(|e| format!("{opener}: {e}"))
 }
 
 /// Write block output for "Send block output to a command" to a private
@@ -487,6 +592,8 @@ enum ConfirmAction {
 }
 
 struct ConfirmClose {
+    /// When the dialog appeared: Enter typed ahead of it does not accept.
+    opened: Instant,
     action: ConfirmAction,
     /// Running commands (close) or the first pasted lines (paste).
     commands: Vec<String>,
@@ -541,7 +648,7 @@ impl App {
             last_click: None,
             context_menu: ContextMenuState::default(),
             context_menu_rects: Vec::new(),
-            shell_history: Vec::new(),
+            shell_history: Arc::default(),
             workflows: Vec::new(),
             font_size: DEFAULT_FONT_SIZE,
             line_h: DEFAULT_FONT_SIZE * 1.65,
@@ -563,6 +670,8 @@ impl App {
             next_replay: None,
             next_attach: None,
             control_server: None,
+            windows_loading: false,
+            detached_loading: false,
             other_windows: Vec::new(),
             detached: Vec::new(),
             attention: Vec::new(),
@@ -600,6 +709,12 @@ impl App {
             tab_drag: None,
             editor_drag: None,
             toast: None,
+            config_error: None,
+            review_writer: None,
+            completion_tx: None,
+            completion_pending: None,
+            completion_gen: 0,
+            completion_buffer: String::new(),
             mouse_report: None,
             mouse_hover_cell: None,
             preedit: String::new(),
@@ -614,6 +729,7 @@ impl App {
 
     /// Re-apply everything derived from Config (theme, metrics, keymap).
     fn apply_config(&mut self) {
+        self.sync_control_server();
         self.theme = self.config.resolve_theme_for(self.os_light);
         let opacity = self.config.opacity();
         if opacity < 1.0 {
@@ -623,8 +739,8 @@ impl App {
             self.theme.bg_chrome = self.theme.bg_chrome.with_alpha(opacity);
             self.theme.bg_gutter = self.theme.bg_gutter.with_alpha(opacity);
         }
-        self.font_size = self.config.font_size.clamp(8.0, 28.0);
-        self.line_h = self.font_size * self.config.line_height.clamp(1.0, 2.2);
+        self.font_size = self.config.font_size();
+        self.line_h = self.font_size * self.config.line_height();
         self.keymap = Keymap::from_overrides(&self.config.keybindings);
         self.apply_global_hotkey();
         // menu shortcut labels follow the keymap
@@ -738,9 +854,35 @@ impl App {
         }
     }
 
-    fn save_config(&self) {
+    fn save_config(&mut self) {
+        if let Some(e) = &self.config_error {
+            let msg = format!("Settings not saved: fix config.toml first — {e}");
+            self.toast(msg);
+            return;
+        }
         if let Err(e) = self.config.save() {
             log::warn!("config save failed: {e}");
+            self.toast(format!("Could not save settings: {e}"));
+        }
+    }
+
+    /// Read config.toml. A file that cannot be read or parsed keeps the
+    /// current config (at startup: defaults with automation off) and says
+    /// why, instead of silently resetting every setting.
+    fn load_config(&mut self, startup: bool) {
+        match Config::try_load() {
+            Ok(c) => {
+                self.config = c.unwrap_or_default();
+                self.config_error = None;
+            }
+            Err(e) => {
+                log::warn!("config.toml rejected: {e}");
+                if startup {
+                    self.config = Config::fallback();
+                }
+                self.toast(format!("config.toml not applied: {e}"));
+                self.config_error = Some(e);
+            }
         }
     }
 
@@ -1540,20 +1682,33 @@ impl App {
                 None => return false,
             },
         };
-        open_external(&target);
+        if let Err(e) = open_external(&target) {
+            self.toast(format!("Could not open {target}: {e}"));
+        }
         true
     }
 
-    /// Resolve a path token from `pane`'s output to an existing file
-    /// (absolute, `~/…`, or relative to the pane's working directory).
-    fn resolve_path(pane: &PaneState, path: &str) -> Option<String> {
+    /// Resolve a path token on output line `abs` of `pane` to an existing
+    /// file (absolute, `~/…`, or relative to the directory the command that
+    /// printed it ran in; the pane's current one for unattributed rows).
+    fn resolve_path(pane: &PaneState, abs: u64, path: &str) -> Option<String> {
         let home = std::env::var("HOME").unwrap_or_default();
         let resolved = if let Some(rest) = path.strip_prefix("~/") {
             std::path::Path::new(&home).join(rest)
         } else if path.starts_with('/') {
             std::path::PathBuf::from(path)
         } else {
-            let cwd = pane.session.cwd.lock().unwrap().clone()?;
+            let block_cwd = pane
+                .session
+                .blocks
+                .lock()
+                .unwrap()
+                .cwd_at(abs)
+                .map(str::to_string);
+            let cwd = match block_cwd {
+                Some(cwd) => cwd,
+                None => pane.session.cwd.lock().unwrap().clone()?,
+            };
             std::path::Path::new(&cwd).join(path)
         };
         resolved
@@ -1581,7 +1736,7 @@ impl App {
                         continue;
                     };
                     for (col, len, token) in terminal::path_tokens(&text) {
-                        if let Some(path) = Self::resolve_path(pane, &token) {
+                        if let Some(path) = Self::resolve_path(pane, abs, &token) {
                             let rect = [
                                 content_x + col as f32 * g.cell_w,
                                 row.y,
@@ -1647,10 +1802,15 @@ impl App {
             self.hints = None;
             match target {
                 HintTarget::Open(t) if copy => {
-                    self.copy_to_clipboard(t);
-                    self.toast("Copied".into());
+                    if self.copy_to_clipboard(t) {
+                        self.toast("Copied".into());
+                    }
                 }
-                HintTarget::Open(t) => open_external(&t),
+                HintTarget::Open(t) => {
+                    if let Err(e) = open_external(&t) {
+                        self.toast(format!("Could not open {t}: {e}"));
+                    }
+                }
                 HintTarget::Block(pane, block) => {
                     if let Some(tab) = self.tabs.get_mut(self.active) {
                         tab.active_pane = pane;
@@ -1675,15 +1835,15 @@ impl App {
             .get(self.active)
             .and_then(|t| t.pane(pane))
             .and_then(|p| terminal::block_output_text(&p.session, block));
-        if let Some(text) = text {
-            self.copy_to_clipboard(text);
+        if let Some(text) = text
+            && self.copy_to_clipboard(text)
+        {
             self.toast("Copied block output".into());
         }
     }
 
     /// An existing file or directory named by the text under the pointer
-    /// (absolute, `~/…`, or relative to the pane's working directory;
-    /// `file:line:col` suffixes are dropped).
+    /// (resolved like `resolve_path`; `file:line:col` suffixes are dropped).
     fn path_under_mouse(&self, pane_id: PaneId) -> Option<String> {
         use crate::views::terminal::RowKind;
         let pane = self.tabs.get(self.active)?.pane(pane_id)?;
@@ -1702,8 +1862,7 @@ impl App {
         }
         let text = terminal::session_line_text(&pane.session, abs)?;
         let (path, _line) = terminal::path_token_at(&text, col as usize)?;
-        // block output ran in the block's cwd; the pane's is the best guess
-        Self::resolve_path(pane, &path)
+        Self::resolve_path(pane, abs, &path)
     }
 
     /// Pointer shape: a hand over anything clickable (buttons, tabs, menu
@@ -1838,23 +1997,49 @@ impl App {
         text.filter(|t| !t.is_empty())
     }
 
-    fn copy_to_clipboard(&mut self, text: String) {
+    /// The system clipboard, opened on first use; a backend that cannot be
+    /// opened is reported once per attempt.
+    fn clipboard(&mut self) -> Option<&mut arboard::Clipboard> {
         if self.clipboard.is_none() {
-            self.clipboard = arboard::Clipboard::new().ok();
+            match arboard::Clipboard::new() {
+                Ok(cb) => self.clipboard = Some(cb),
+                Err(e) => {
+                    log::warn!("clipboard unavailable: {e}");
+                    self.toast(format!("Clipboard unavailable: {e}"));
+                }
+            }
         }
-        if let Some(cb) = &mut self.clipboard
-            && let Err(e) = cb.set_text(text)
-        {
-            log::warn!("clipboard set failed: {e}");
+        self.clipboard.as_mut()
+    }
+
+    /// Copy `text`; `false` (after telling the user) when it failed.
+    fn copy_to_clipboard(&mut self, text: String) -> bool {
+        let Some(cb) = self.clipboard() else {
+            return false;
+        };
+        match cb.set_text(text) {
+            Ok(()) => true,
+            Err(e) => {
+                log::warn!("clipboard set failed: {e}");
+                self.toast(format!("Could not copy: {e}"));
+                false
+            }
         }
     }
 
     fn paste_from_clipboard(&mut self) {
-        if self.clipboard.is_none() {
-            self.clipboard = arboard::Clipboard::new().ok();
-        }
-        let Some(text) = self.clipboard.as_mut().and_then(|cb| cb.get_text().ok()) else {
+        let Some(cb) = self.clipboard() else {
             return;
+        };
+        let text = match cb.get_text() {
+            Ok(text) => text,
+            // empty or non-text clipboard: nothing to paste, not an error
+            Err(arboard::Error::ContentNotAvailable) => return,
+            Err(e) => {
+                log::warn!("clipboard read failed: {e}");
+                self.toast(format!("Could not paste: {e}"));
+                return;
+            }
         };
         self.paste_text(&text);
     }
@@ -1876,23 +2061,19 @@ impl App {
             self.update_completions();
             return;
         }
-        use shift_pty::alacritty_terminal::term::TermMode;
-        let bracketed = pane
-            .session
-            .term
-            .lock()
-            .mode()
-            .contains(TermMode::BRACKETED_PASTE);
         let id = pane.session.id;
-        if bracketed {
-            self.write_synced(id, &input::bracketed_paste(text), false);
-            return;
-        }
         // unbracketed: every newline presses Enter, so ask before sending
-        // more than one line
-        if self.config.confirm_multiline_paste && input::paste_submits_lines(text) {
+        // more than one line to any recipient without bracketed paste
+        let unbracketed = self.raw_targets(id).into_iter().any(|t| {
+            self.tabs
+                .iter()
+                .find_map(|tab| tab.pane(t))
+                .is_some_and(|p| !bracketed_paste_on(p))
+        });
+        if unbracketed && self.config.confirm_multiline_paste && input::paste_submits_lines(text) {
             let commands = text.lines().map(str::to_string).collect();
             self.confirm = Some(ConfirmClose {
+                opened: Instant::now(),
                 action: ConfirmAction::Paste {
                     pane: id,
                     text: text.to_string(),
@@ -1904,7 +2085,21 @@ impl App {
             }
             return;
         }
-        self.write_synced(id, &input::unbracketed_paste(text), false);
+        self.paste_raw(id, text);
+    }
+
+    /// Paste into `pane`'s program and its raw synchronized siblings, each
+    /// framed for its own bracketed-paste mode.
+    fn paste_raw(&mut self, pane: PaneId, text: &str) {
+        for target in self.raw_targets(pane) {
+            if let Some((_, tab)) = self.find_tab_of_pane(target)
+                && let Some(p) = tab.pane_mut(target)
+            {
+                let bytes = input::paste_bytes(text, bracketed_paste_on(p));
+                p.view_offset = 0;
+                p.session.write(&bytes);
+            }
+        }
     }
 
     /// Files dropped on the window: their shell-quoted paths are pasted.
@@ -1917,19 +2112,16 @@ impl App {
     /// Re-run the search over the active pane and jump near the latest match.
     fn refresh_search(&mut self, jump: bool) {
         let Some(pane) = self.tabs.get(self.active).and_then(|t| t.active()) else {
-            self.search.matches.clear();
+            self.search.set_matches(terminal::Found::default());
             return;
         };
-        self.search.matches = match self.search.matcher() {
-            Some(m) => terminal::collect_matches(&pane.session, &m, 500),
-            None => Vec::new(),
+        let found = match self.search.matcher() {
+            Some(m) => terminal::collect_matches(&pane.session, &m, search::MATCH_CAP),
+            None => terminal::Found::default(),
         };
-        self.search.current = 0;
-        if !self.search.matches.is_empty() {
-            self.search.current = self.search.matches.len() - 1;
-            if jump {
-                self.jump_to_match();
-            }
+        self.search.set_matches(found);
+        if jump && !self.search.matches.is_empty() {
+            self.jump_to_match();
         }
     }
 
@@ -2097,7 +2289,7 @@ impl App {
                 (items, pane_history)
             }
             PaletteMode::History => {
-                let mut all = self.shell_history.clone();
+                let mut all = (*self.shell_history).clone();
                 all.extend(pane_history);
                 (palette::history_items(&all), Vec::new())
             }
@@ -2657,25 +2849,46 @@ impl App {
         self.submit_to(pane, &line);
     }
 
+    fn open_viewer(&mut self, path: &std::path::Path) {
+        let proxy = self.proxy.clone();
+        self.viewer.open(path, move |loaded| {
+            let _ = proxy.send_event(UserEvent::ViewerLoaded(Box::new(loaded)));
+        });
+    }
+
     fn open_palette(&mut self, mode: crate::views::palette::PaletteMode) {
         if mode == crate::views::palette::PaletteMode::Commands {
             // pick up files added while running
             self.launch_configs = shift_core::launch::load_all();
             self.ssh_profiles = shift_core::ssh::all_profiles(&self.config.ssh_profiles);
         }
-        if mode == crate::views::palette::PaletteMode::Sessions {
-            self.other_windows = crate::control::other_windows();
+        if mode == crate::views::palette::PaletteMode::Sessions && !self.windows_loading {
+            self.windows_loading = true;
+            self.other_windows.clear();
+            let proxy = self.proxy.clone();
+            std::thread::spawn(move || {
+                crate::control::visit_other_windows(|window| {
+                    let _ = proxy.send_event(UserEvent::WindowsLoaded(vec![window], false));
+                });
+                let _ = proxy.send_event(UserEvent::WindowsLoaded(Vec::new(), true));
+            });
         }
         if matches!(
             mode,
             crate::views::palette::PaletteMode::Sessions
                 | crate::views::palette::PaletteMode::Commands
-        ) {
+        ) && !self.detached_loading
+        {
             // shells the service keeps that no window shows
-            self.detached = shift_pty::service::list()
-                .into_iter()
-                .filter(|s| s.clients.is_empty())
-                .collect();
+            self.detached_loading = true;
+            let proxy = self.proxy.clone();
+            std::thread::spawn(move || {
+                let detached = shift_pty::service::list()
+                    .into_iter()
+                    .filter(|s| s.clients.is_empty())
+                    .collect();
+                let _ = proxy.send_event(UserEvent::DetachedLoaded(detached));
+            });
         }
         self.palette.open = true;
         self.palette.mode = mode;
@@ -2792,6 +3005,7 @@ impl App {
             PaletteAction::SshInstall(i) => {
                 if let Some(p) = self.ssh_profiles.get(i).cloned() {
                     self.confirm = Some(ConfirmClose {
+                        opened: Instant::now(),
                         commands: vec![
                             "~/.local/share/shift/shift.{bash,zsh,fish}".into(),
                             format!(
@@ -2865,36 +3079,147 @@ impl App {
         true
     }
 
-    /// Recompute completions + ghost for the active editor.
+    /// Recompute completions + ghost for the active editor. Providers read
+    /// directories and repositories, so they run on the completion thread;
+    /// the result arrives as `UserEvent::Completions`. Until then the ghost
+    /// only shrinks by what was typed into it.
     fn update_completions(&mut self) {
         let Some(pane) = self.tabs.get(self.active).and_then(|t| t.active()) else {
+            self.completion_pending = None;
             self.completion.close();
             return;
         };
         if pane.editor.in_placeholder_mode() {
+            self.completion_pending = None;
             self.completion.close();
             return;
         }
         let buffer = pane.editor.buffer.clone();
         let cursor = pane.editor.cursor;
         if buffer.trim().is_empty() {
+            self.completion_pending = None;
             self.completion.close();
             return;
         }
+        // the lookup uses at most the newest 200 pane entries
+        let history = pane
+            .editor
+            .history
+            .iter()
+            .rev()
+            .take(200)
+            .rev()
+            .cloned()
+            .collect();
         let cwd = pane.session.cwd.lock().unwrap().clone();
-        let items = shift_core::completion::complete(
-            &buffer,
+        let pane_id = pane.session.id;
+        let typed = buffer
+            .strip_prefix(self.completion_buffer.as_str())
+            .filter(|_| cursor == buffer.len());
+        match typed {
+            Some(t) if self.completion.ghost.starts_with(t) => {
+                self.completion.ghost.drain(..t.len());
+            }
+            _ => self.completion.ghost.clear(),
+        }
+        self.completion_gen += 1;
+        let request = CompletionRequest {
+            generation: self.completion_gen,
+            pane: pane_id,
+            buffer,
             cursor,
-            &pane.editor.history,
-            &self.shell_history,
-            cwd.as_deref(),
-        );
+            history,
+            shell_history: self.shell_history.clone(),
+            cwd,
+        };
+        if self.completion_tx.is_none() {
+            let (tx, rx) = std::sync::mpsc::channel::<CompletionRequest>();
+            let proxy = self.proxy.clone();
+            let spawned = std::thread::Builder::new()
+                .name("completion".into())
+                .spawn(move || {
+                    while let Ok(mut req) = rx.recv() {
+                        // only the newest request matters
+                        while let Ok(newer) = rx.try_recv() {
+                            req = newer;
+                        }
+                        let items = req.run();
+                        let _ = proxy.send_event(UserEvent::Completions(req.generation, items));
+                    }
+                });
+            if spawned.is_ok() {
+                self.completion_tx = Some(tx);
+            }
+        }
+        let sent = self
+            .completion_tx
+            .as_ref()
+            .is_some_and(|tx| tx.send(request.clone()).is_ok());
+        self.completion_pending = Some(request);
+        if !sent {
+            // no worker thread: answer in place
+            self.completion_tx = None;
+            self.flush_completions();
+        }
+    }
 
+    /// Settle a completion request still in flight right now: keys that
+    /// read the menu or ghost (Tab, ⌃→, ↑/↓) must see the current answer.
+    fn flush_completions(&mut self) {
+        if let Some(request) = self.completion_pending.take()
+            && self.editing(&request)
+        {
+            let items = request.run();
+            self.apply_completions(&request.buffer, request.cursor, items);
+        }
+    }
+
+    /// Whether the active editor still holds exactly what `request` asked about.
+    fn editing(&self, request: &CompletionRequest) -> bool {
+        self.tabs
+            .get(self.active)
+            .and_then(|t| t.active())
+            .is_some_and(|p| {
+                p.session.id == request.pane
+                    && p.editor.cursor == request.cursor
+                    && p.editor.buffer == request.buffer
+            })
+    }
+
+    /// A completion answer from the worker: applied only when it answers
+    /// the latest request and the editor has not changed since.
+    fn on_completions(&mut self, generation: u64, items: Vec<shift_core::completion::Completion>) {
+        if self
+            .completion_pending
+            .as_ref()
+            .is_none_or(|r| r.generation != generation)
+        {
+            return; // superseded by a newer request
+        }
+        let Some(request) = self.completion_pending.take() else {
+            return;
+        };
+        if !self.editing(&request) {
+            return;
+        }
+        self.apply_completions(&request.buffer, request.cursor, items);
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    fn apply_completions(
+        &mut self,
+        buffer: &str,
+        cursor: usize,
+        items: Vec<shift_core::completion::Completion>,
+    ) {
+        self.completion_buffer = buffer.to_string();
         // ghost: best history match remainder, else the single completion
         self.completion.ghost = items
             .iter()
             .find(|c| c.source == "history")
-            .and_then(|c| c.insert.strip_prefix(&buffer).map(str::to_string))
+            .and_then(|c| c.insert.strip_prefix(buffer).map(str::to_string))
             .unwrap_or_default();
 
         // dropdown shows non-history items (history drives ghost text)
@@ -2905,7 +3230,7 @@ impl App {
         if self.completion.ghost.is_empty()
             && let Some(first) = dropdown.first()
         {
-            let (_, token) = shift_core::completion::current_token(&buffer, cursor);
+            let (_, token) = shift_core::completion::current_token(buffer, cursor);
             if cursor == buffer.len() {
                 self.completion.ghost = first
                     .insert
@@ -2928,6 +3253,7 @@ impl App {
 
     /// ⌃→: accept one word of the ghost suggestion.
     fn accept_ghost_word(&mut self) {
+        self.flush_completions();
         if self.completion.ghost.is_empty() {
             return;
         }
@@ -2949,6 +3275,7 @@ impl App {
 
     /// Accept the selected completion (Tab).
     fn accept_completion(&mut self) {
+        self.flush_completions();
         let (replacement, ghost) = if self.completion.open {
             (
                 self.completion
@@ -3690,14 +4017,12 @@ impl App {
 
     /// Run a review-panel write, then reload. Revert asks first.
     fn review_action(&mut self, hit: ReviewHit) {
-        use crate::views::review_panel::Load;
-        use shift_core::review::{self, Op};
+        use shift_core::review::Op;
         let Some(model) = self.review.model().cloned() else {
             return;
         };
         let root = model.root.clone();
-        let run = |op: Op, path: &str, hunk| review::apply(&root, op, path, hunk);
-        let result = match hit {
+        let ops: ReviewOps = match hit {
             ReviewHit::Refresh => {
                 self.review.notice = None;
                 self.explorer.refresh();
@@ -3718,19 +4043,21 @@ impl App {
                 return;
             }
             ReviewHit::Open(path) => {
-                self.viewer.open(&root.join(&path));
+                self.open_viewer(&root.join(&path));
                 return;
             }
-            ReviewHit::Stage(path, hunk) => run(Op::Stage, &path, hunk),
-            ReviewHit::Unstage(path, hunk) => run(Op::Unstage, &path, hunk),
+            ReviewHit::Stage(path, hunk) => vec![(Op::Stage, path, hunk)],
+            ReviewHit::Unstage(path, hunk) => vec![(Op::Unstage, path, hunk)],
             ReviewHit::StageAll => model
                 .unstaged
                 .iter()
-                .try_for_each(|f| run(Op::Stage, &f.path, None)),
+                .map(|f| (Op::Stage, f.path.clone(), None))
+                .collect(),
             ReviewHit::UnstageAll => model
                 .staged
                 .iter()
-                .try_for_each(|f| run(Op::Unstage, &f.path, None)),
+                .map(|f| (Op::Unstage, f.path.clone(), None))
+                .collect(),
             ReviewHit::Revert(path, hunk) => {
                 let what = match hunk {
                     Some(id) => format!(
@@ -3741,15 +4068,44 @@ impl App {
                     None => path.clone(),
                 };
                 self.confirm = Some(ConfirmClose {
+                    opened: Instant::now(),
                     action: ConfirmAction::Revert { root, path, hunk },
                     commands: vec![what],
                 });
                 return;
             }
         };
-        self.review.notice = result.err();
-        if matches!(self.review.load, Load::Ready(_)) {
-            self.request_review();
+        self.queue_review_write(root, ops);
+    }
+
+    /// Run review-panel writes (stage, unstage, revert) on the one review
+    /// writer thread: repository writes stay in order and never block input
+    /// or rendering. The result arrives as `UserEvent::ReviewWritten`.
+    fn queue_review_write(&mut self, root: std::path::PathBuf, ops: ReviewOps) {
+        if self.review_writer.is_none() {
+            let (tx, rx) = std::sync::mpsc::channel::<ReviewWrite>();
+            let proxy = self.proxy.clone();
+            let spawned = std::thread::Builder::new()
+                .name("review-write".into())
+                .spawn(move || {
+                    for (root, ops) in rx {
+                        let result = ops.into_iter().try_for_each(|(op, path, hunk)| {
+                            shift_core::review::apply(&root, op, &path, hunk)
+                        });
+                        let _ = proxy.send_event(UserEvent::ReviewWritten(result.err()));
+                    }
+                });
+            if let Err(e) = spawned {
+                self.review.notice = Some(format!("could not start the review writer: {e}"));
+                return;
+            }
+            self.review_writer = Some(tx);
+        }
+        if let Some(tx) = &self.review_writer
+            && tx.send((root, ops)).is_err()
+        {
+            self.review_writer = None;
+            self.review.notice = Some("the review writer stopped; try again".into());
         }
     }
 
@@ -3831,7 +4187,7 @@ impl App {
                         } else if row.is_dir {
                             self.explorer.toggle(&row.path);
                         } else {
-                            self.viewer.open(&row.path);
+                            self.open_viewer(&row.path.clone());
                         }
                     }
                 }
@@ -4701,6 +5057,20 @@ impl App {
                 &mut hits,
                 settings_names,
             );
+            // keyboard focus ring around the focused control
+            if let Some(focus) = &settings_state.focus
+                && let Some(hit) = hits.iter().find(|h| h.target == *focus)
+            {
+                let r = hit.rect;
+                scene.layer(3).bordered(
+                    [r[0] - 3.0, r[1] - 3.0],
+                    [r[2] + 6.0, r[3] + 6.0],
+                    theme.accent.with_alpha(0.0),
+                    theme.accent,
+                    8.0,
+                    2.0,
+                );
+            }
         }
 
         // ── layer 4: command palette ──
@@ -5237,6 +5607,15 @@ impl App {
                 }
             }
             AppAction::Paste => self.paste_from_clipboard(),
+            // with a file open, Find searches the file, not the terminal
+            AppAction::Search if self.viewer.is_open() => {
+                if self.viewer.find.is_some() {
+                    self.viewer.find = None;
+                } else {
+                    self.viewer.open_find();
+                }
+                self.blink_epoch = Instant::now();
+            }
             AppAction::Search => {
                 if self.search.open {
                     self.search.close();
@@ -5279,13 +5658,13 @@ impl App {
                     pane.view_offset = 0;
                     pane.last_display_len = 0;
                     pane.selected_block = None;
-                    self.search.matches.clear();
+                    self.search.set_matches(terminal::Found::default());
                 }
             }
             AppAction::FontIncrease | AppAction::FontDecrease | AppAction::FontReset => {
                 self.config.font_size = match action {
-                    AppAction::FontIncrease => (self.config.font_size + 1.0).clamp(8.0, 28.0),
-                    AppAction::FontDecrease => (self.config.font_size - 1.0).clamp(8.0, 28.0),
+                    AppAction::FontIncrease => (self.config.font_size() + 1.0).clamp(8.0, 28.0),
+                    AppAction::FontDecrease => (self.config.font_size() - 1.0).clamp(8.0, 28.0),
                     _ => DEFAULT_FONT_SIZE,
                 };
                 self.save_config();
@@ -5454,12 +5833,20 @@ impl App {
         self.save_session();
     }
 
-    fn handle_settings_key(&mut self, event: &input::KeyPress, window: &Window) -> bool {
+    fn handle_settings_key(
+        &mut self,
+        event: &input::KeyPress,
+        event_loop: &ActiveEventLoop,
+        window: &Window,
+    ) -> bool {
+        use crate::views::settings;
         use winit::keyboard::{Key, NamedKey};
 
-        if self.settings.page == crate::views::settings::Page::Keybindings
-            && self.handle_keybindings_key(event)
-        {
+        let recording = self.settings.recording.is_some();
+        if !recording && self.handle_settings_focus_key(event, event_loop, window) {
+            return true;
+        }
+        if self.settings.page == settings::Page::Keybindings && self.handle_keybindings_key(event) {
             return true;
         }
         let action = input::app_action(event, self.modifiers, &self.keymap);
@@ -5467,6 +5854,7 @@ impl App {
             || action == Some(AppAction::OpenSettings)
         {
             self.settings.open = false;
+            self.settings.focus = None;
             return true;
         }
         match event.logical_key {
@@ -5502,6 +5890,69 @@ impl App {
             }
             _ => false,
         }
+    }
+
+    /// Keyboard operation of the page controls: Tab / ⇧Tab move the focus,
+    /// Space / Enter press the focused control, ← / → adjust a focused
+    /// slider, Esc drops the focus (the next Esc closes Settings).
+    fn handle_settings_focus_key(
+        &mut self,
+        event: &input::KeyPress,
+        event_loop: &ActiveEventLoop,
+        window: &Window,
+    ) -> bool {
+        use crate::views::settings;
+        use winit::keyboard::{Key, NamedKey};
+        let mods = self.modifiers;
+        if mods.super_key() || mods.control_key() || mods.alt_key() {
+            return false;
+        }
+        let order = settings::focus_order(&self.hits);
+        // a control scrolled away or re-laid out loses the focus
+        let focused = self
+            .settings
+            .focus
+            .clone()
+            .and_then(|f| order.iter().find(|(t, _)| *t == f).cloned());
+        self.settings.focus = focused.as_ref().map(|(t, _)| t.clone());
+        match (&event.logical_key, focused) {
+            (Key::Named(NamedKey::Tab), current) => {
+                let delta = if mods.shift_key() { -1 } else { 1 };
+                self.settings.focus =
+                    settings::next_focus(&order, current.as_ref().map(|(t, _)| t), delta);
+            }
+            (Key::Named(NamedKey::Escape), Some(_)) => self.settings.focus = None,
+            (
+                Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowRight),
+                Some((ClickTarget::SettingsSlider(id), _)),
+            ) => {
+                let step = if matches!(event.logical_key, Key::Named(NamedKey::ArrowLeft)) {
+                    -0.05
+                } else {
+                    0.05
+                };
+                let t = match id {
+                    "line_height" => (self.config.line_height() - 1.0) / 1.2,
+                    "window_opacity" => (self.config.opacity() - 0.3) / 0.7,
+                    _ => return true,
+                };
+                self.set_slider(id, (t + step).clamp(0.0, 1.0));
+                self.save_config();
+            }
+            (key, Some((target, rect)))
+                if press_key(key) && !matches!(target, ClickTarget::SettingsSlider(_)) =>
+            {
+                // press it through the normal pointer routing
+                let saved = self.mouse;
+                self.mouse = (rect[0] + rect[2] / 2.0, rect[1] + rect[3] / 2.0);
+                self.on_left(ElementState::Pressed, event_loop, window);
+                self.on_left(ElementState::Released, event_loop, window);
+                self.mouse = saved;
+            }
+            _ => return false,
+        }
+        window.request_redraw();
+        true
     }
 
     /// Keybindings page keys: while recording, the next chord becomes the
@@ -5629,6 +6080,12 @@ impl App {
             pane.editor.replace_range(range, &expansion);
         }
         // completion popup intercepts navigation keys
+        if matches!(
+            key,
+            EditorKey::HistoryUp | EditorKey::HistoryDown | EditorKey::Dismiss
+        ) {
+            self.flush_completions();
+        }
         if self.completion.open {
             match key {
                 EditorKey::HistoryUp => {
@@ -5769,9 +6226,19 @@ impl App {
             self.write_synced(id, bytes, true);
         }
         // synchronized inputs: the same command runs in every pane of the tab
+        // only to siblings at a prompt: a pane running vim or another
+        // program would receive the command as keystrokes
         if let Some((id, cmd)) = submitted {
-            for other in self.input_targets(id).into_iter().skip(1) {
+            let ready = self.synced_siblings(id, true);
+            let busy = self.input_targets(id).len() - 1 - ready.len();
+            for other in ready {
                 self.submit_to(other, &cmd);
+            }
+            if busy > 0 {
+                self.toast(format!(
+                    "Not sent to {busy} synchronized pane{} running a program",
+                    if busy == 1 { "" } else { "s" }
+                ));
             }
         }
         if edited {
@@ -5836,6 +6303,7 @@ impl App {
             let commands = self.running_in(scope);
             if !commands.is_empty() {
                 self.confirm = Some(ConfirmClose {
+                    opened: Instant::now(),
                     action: ConfirmAction::Close(scope),
                     commands,
                 });
@@ -5899,7 +6367,14 @@ impl App {
         match event.logical_key {
             Key::Named(NamedKey::Escape) => self.confirm = None,
             Key::Named(NamedKey::Enter) => {
-                if let Some(c) = self.confirm.take() {
+                // a held or typed-ahead Enter (e.g. right after ⌘W or a
+                // paste) must not accept a dialog the user has not seen
+                if self
+                    .confirm
+                    .as_ref()
+                    .is_some_and(|c| confirm_accepts(event.repeat, c.opened.elapsed()))
+                    && let Some(c) = self.confirm.take()
+                {
                     self.perform_confirmed(c.action, event_loop);
                 }
             }
@@ -5946,7 +6421,7 @@ impl App {
                 } else if row.is_dir {
                     self.explorer.toggle(&row.path);
                 } else {
-                    self.viewer.open(&row.path);
+                    self.open_viewer(&row.path.clone());
                 }
             }
             _ => return false,
@@ -6022,7 +6497,7 @@ impl App {
         match action {
             ConfirmAction::Close(scope) => self.perform_close(scope, event_loop),
             ConfirmAction::Paste { pane, text } => {
-                self.write_synced(pane, &input::unbracketed_paste(&text), false);
+                self.paste_raw(pane, &text);
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
@@ -6040,14 +6515,7 @@ impl App {
                 }
             }
             ConfirmAction::Revert { root, path, hunk } => {
-                let result =
-                    shift_core::review::apply(&root, shift_core::review::Op::Revert, &path, hunk);
-                self.review.notice = result.err();
-                self.explorer.refresh();
-                self.request_review();
-                if let Some(w) = &self.window {
-                    w.request_redraw();
-                }
+                self.queue_review_write(root, vec![(shift_core::review::Op::Revert, path, hunk)]);
             }
         }
     }
@@ -6110,6 +6578,32 @@ impl App {
             }
             _ => vec![pane],
         }
+    }
+
+    /// Synchronized siblings of `pane` in one input mode: `at_prompt` picks
+    /// panes whose owned editor is live (they take submitted commands),
+    /// else panes running a raw program (they take raw keys and pastes).
+    /// A pane never receives input meant for the other mode.
+    fn synced_siblings(&self, pane: PaneId, at_prompt: bool) -> Vec<PaneId> {
+        let Some(tab) = self.tabs.iter().find(|t| t.pane(pane).is_some()) else {
+            return Vec::new();
+        };
+        self.input_targets(pane)
+            .into_iter()
+            .skip(1)
+            .filter(|id| {
+                tab.pane(*id)
+                    .is_some_and(|p| Self::editor_visible(p) == at_prompt)
+            })
+            .collect()
+    }
+
+    /// Recipients of raw input typed into `pane`: itself, then its raw
+    /// synchronized siblings.
+    fn raw_targets(&self, pane: PaneId) -> Vec<PaneId> {
+        let mut targets = vec![pane];
+        targets.extend(self.synced_siblings(pane, false));
+        targets
     }
 
     /// Byte offset in the active editor under the mouse (mono font: the
@@ -6374,7 +6868,7 @@ impl App {
             return;
         }
         if self.settings.open {
-            if self.handle_settings_key(event, window) {
+            if self.handle_settings_key(event, event_loop, window) {
                 window.request_redraw();
             }
             return;
@@ -6397,6 +6891,17 @@ impl App {
             return;
         }
         if self.viewer.is_open() {
+            // the file's find bar takes typing; chords stay app shortcuts
+            let mods = self.modifiers;
+            if self.viewer.find.is_some()
+                && !mods.super_key()
+                && !mods.control_key()
+                && input::app_action(event, mods, &self.keymap).is_none()
+                && self.viewer.handle_find_key(event, mods.shift_key())
+            {
+                window.request_redraw();
+                return;
+            }
             if !self.handle_viewer_key(event) {
                 // app shortcuts still work; typing is swallowed (the command
                 // line is under the viewer)
@@ -6457,60 +6962,78 @@ impl App {
             }
             return;
         }
-        let Some((id, enc)) = self.raw_key_encoding() else {
+        let Some(id) = self.active_pane_id() else {
             return;
         };
-        if let Some(bytes) = input::key_to_bytes(event, self.modifiers, enc) {
-            if let Some(pane) = self.tabs.get_mut(self.active).and_then(|t| t.active_mut()) {
-                // typing into a program scrolls back to it and drops the selection
-                pane.view_offset = 0;
-                pane.clear_selection();
+        // each recipient gets the bytes its own program asked for (cursor
+        // mode, kitty flags), never the active pane's encoding
+        let (mods, option_as_meta) = (self.modifiers, self.config.option_as_meta);
+        let identity = input::key_identity(event);
+        for target in self.raw_targets(id) {
+            let Some((_, tab)) = self.find_tab_of_pane(target) else {
+                continue;
+            };
+            let Some(p) = tab.pane_mut(target) else {
+                continue;
+            };
+            let enc = key_encoding(p, option_as_meta);
+            let Some(bytes) = input::key_to_bytes(event, mods, enc) else {
+                continue;
+            };
+            // typing into a program scrolls back to it and drops the selection
+            p.view_offset = 0;
+            if target == id {
+                p.clear_selection();
             }
+            p.session.write(&bytes);
             if enc.kitty_flags & crate::keyboard::EVENT_TYPES != 0 {
-                self.keys_down.insert((id, input::key_identity(event)));
+                self.keys_down.insert((target, identity.clone()));
             }
-            if self.latency_log {
+            if target == id && self.latency_log {
                 self.latency_probe = Some((Instant::now(), false));
             }
-            self.write_synced(id, &bytes, false);
         }
     }
 
-    /// The active pane and how its program wants keys encoded.
-    fn raw_key_encoding(&self) -> Option<(PaneId, input::KeyEncoding)> {
-        use shift_pty::alacritty_terminal::term::TermMode;
-        let pane = self.tabs.get(self.active)?.active()?;
-        let mode = *pane.session.term.lock().mode();
-        Some((
-            pane.session.id,
-            input::KeyEncoding {
-                app_cursor: mode.contains(TermMode::APP_CURSOR),
-                option_as_meta: self.config.option_as_meta,
-                kitty_flags: crate::keyboard::flags_from_mode(mode),
-            },
-        ))
+    /// Pointer coordinate along the tab strip's axis (x for the top bar,
+    /// y for the vertical rail).
+    fn tab_drag_coord(&self) -> f32 {
+        if self.config.tab_layout == shift_core::TabLayout::Vertical {
+            self.mouse.1
+        } else {
+            self.mouse.0
+        }
     }
 
-    /// A key release: reported only to a program that asked for event
-    /// types (kitty flag 2), and only for keys whose press it received.
+    fn active_pane_id(&self) -> Option<PaneId> {
+        Some(self.tabs.get(self.active)?.active()?.session.id)
+    }
+
+    /// A key release: reported only to programs that asked for event types
+    /// (kitty flag 2), and only to the panes that received the press.
     pub(crate) fn on_key_release(&mut self, event: &input::KeyPress) {
-        let Some((id, enc)) = self.raw_key_encoding() else {
-            return;
-        };
-        let pressed = self
+        let identity = input::key_identity(event);
+        let pressed: Vec<_> = self
             .keys_down
             .iter()
-            .find(|(_, k)| *k == input::key_identity(event))
-            .cloned();
-        let Some(pressed) = pressed else {
-            return;
-        };
-        self.keys_down.remove(&pressed);
-        if pressed.0 != id || self.editor_active {
-            return;
-        }
-        if let Some(bytes) = input::key_to_bytes(event, self.modifiers, enc) {
-            self.write_synced(id, &bytes, false);
+            .filter(|(_, k)| *k == identity)
+            .cloned()
+            .collect();
+        let active = self.active_pane_id();
+        let (mods, option_as_meta) = (self.modifiers, self.config.option_as_meta);
+        for entry in pressed {
+            self.keys_down.remove(&entry);
+            let target = entry.0;
+            if Some(target) == active && self.editor_active {
+                continue;
+            }
+            if let Some((_, tab)) = self.find_tab_of_pane(target)
+                && let Some(p) = tab.pane_mut(target)
+                && let Some(bytes) =
+                    input::key_to_bytes(event, mods, key_encoding(p, option_as_meta))
+            {
+                p.session.write(&bytes);
+            }
         }
     }
 
@@ -6564,23 +7087,30 @@ impl App {
             self.drag_editor(pane);
             window.request_redraw();
         }
-        if let Some((i, x0)) = self.tab_drag {
-            // drag a tab past a neighbour's midpoint to swap (Warp reorder)
-            let dx = self.mouse.0 - x0;
+        if let Some((i, start)) = self.tab_drag {
+            // drag a tab past a neighbour's midpoint to swap (Warp reorder);
+            // the vertical rail reorders along y
+            let vertical = self.config.tab_layout == shift_core::TabLayout::Vertical;
+            let pos = self.tab_drag_coord();
+            let delta = pos - start;
             let neighbour = self.hits.iter().find_map(|h| match h.target {
                 ClickTarget::TabSelect(j)
-                    if (dx > 0.0 && j == i + 1) || (dx < 0.0 && j + 1 == i) =>
+                    if (delta > 0.0 && j == i + 1) || (delta < 0.0 && j + 1 == i) =>
                 {
                     Some((j, h.rect))
                 }
                 _ => None,
             });
             if let Some((j, r)) = neighbour {
-                let mid = r[0] + r[2] / 2.0;
-                if (dx > 0.0 && self.mouse.0 > mid) || (dx < 0.0 && self.mouse.0 < mid) {
+                let mid = if vertical {
+                    r[1] + r[3] / 2.0
+                } else {
+                    r[0] + r[2] / 2.0
+                };
+                if (delta > 0.0 && pos > mid) || (delta < 0.0 && pos < mid) {
                     self.tabs.swap(i, j);
                     self.active = j;
-                    self.tab_drag = Some((j, self.mouse.0));
+                    self.tab_drag = Some((j, pos));
                     self.save_session();
                     window.request_redraw();
                 }
@@ -6872,7 +7402,7 @@ impl App {
                     if i != self.active {
                         self.switch_tab(i);
                     }
-                    self.tab_drag = Some((i, mx));
+                    self.tab_drag = Some((i, self.tab_drag_coord()));
                 }
             }
             Some(ClickTarget::TabClose(i)) => {
@@ -7056,15 +7586,6 @@ impl App {
                             .get(*v as usize)
                             .unwrap_or(&"navigate")
                             .to_string();
-                        // rebind with the new level (drop removes the socket)
-                        self.control_server = None;
-                        let proxy = self.proxy.clone();
-                        self.control_server = crate::control::serve(
-                            crate::control::Level::parse(&self.config.control_api),
-                            move |p| {
-                                let _ = proxy.send_event(UserEvent::Control(p));
-                            },
-                        );
                     }
                     "tab_layout" => {
                         c.tab_layout = if *v == 1 {
@@ -8020,8 +8541,7 @@ impl App {
                 }
             }
             Step::Quit => {
-                self.save_session();
-                event_loop.exit();
+                self.perform_close(CloseScope::Window, event_loop);
             }
         }
     }
@@ -8065,10 +8585,30 @@ impl App {
             .collect()
     }
 
-    /// Answer one control API request (see control.rs; the level was
-    /// checked on the socket thread).
+    /// Revoke the old listener and queued requests whenever the level changes.
+    fn sync_control_server(&mut self) {
+        let level = crate::control::Level::parse(&self.config.control_api);
+        if self
+            .control_server
+            .as_ref()
+            .map(|s| s.level)
+            .unwrap_or(crate::control::Level::Off)
+            == level
+        {
+            return;
+        }
+        self.control_server = None;
+        let proxy = self.proxy.clone();
+        self.control_server = crate::control::serve(level, move |p| {
+            let _ = proxy.send_event(UserEvent::Control(p));
+        });
+    }
+
     fn handle_control(&mut self, req: crate::control::Request) -> crate::control::Response {
         use crate::control::{Request, Response};
+        if req.level() > crate::control::Level::parse(&self.config.control_api) {
+            return Response::error("not allowed: control permissions changed");
+        }
         let ok = |pane: Option<u64>| Response {
             ok: true,
             pane,
@@ -8469,18 +9009,34 @@ impl App {
                 rect: None,
             })
         } else if self.search.open {
+            let (label, input, status) = if self.filter_editing {
+                let query = self
+                    .tabs
+                    .get(self.active)
+                    .and_then(|tab| tab.active())
+                    .and_then(|pane| pane.filter.as_ref())
+                    .map(|(_, query)| query.clone())
+                    .unwrap_or_default();
+                (
+                    "Filter block output",
+                    ("Filter output lines".into(), query),
+                    "Enter keeps filter, Escape clears".into(),
+                )
+            } else {
+                (
+                    "Find",
+                    ("Find in terminal".into(), self.search.query.clone()),
+                    match (&self.search.error, self.search.position()) {
+                        (Some(e), _) => e.clone(),
+                        (None, None) => "No matches".into(),
+                        (None, Some((n, total))) => format!("Match {n} of {total}"),
+                    },
+                )
+            };
             Some(Overlay::Dialog {
-                label: "Find".into(),
-                input: Some(("Find in terminal".into(), self.search.query.clone())),
-                status: Some(match &self.search.error {
-                    Some(e) => e.clone(),
-                    None if self.search.matches.is_empty() => "No matches".into(),
-                    None => format!(
-                        "Match {} of {}",
-                        self.search.current + 1,
-                        self.search.matches.len()
-                    ),
-                }),
+                label: label.into(),
+                input: Some(input),
+                status: Some(status),
                 controls: Vec::new(),
                 rect: None,
             })
@@ -8542,10 +9098,12 @@ impl App {
                     }
                 })
                 .collect();
+            // unreadable or cut folders: their notices are read out too
+            let notices: Vec<&str> = self.explorer.notices().collect();
             out.push(PanelNode {
                 label: "File explorer".into(),
                 rect: Some(ex_rect),
-                text: None,
+                text: (!notices.is_empty()).then(|| notices.join("\n")),
                 controls,
                 focused: self.explorer.focused,
             });
@@ -8672,8 +9230,7 @@ impl App {
                 self.update_a11y(&window);
             }
             A::ActionRequested(req) => {
-                use accesskit::Action;
-                if !matches!(req.action, Action::Click | Action::Focus) {
+                if !crate::a11y::activates(req.action) {
                     return;
                 }
                 let Some(r) = self.a11y_targets.get(&req.target_node).copied() else {
@@ -8694,6 +9251,11 @@ impl App {
     fn dump_state(&mut self) -> String {
         use std::fmt::Write as _;
         let mut out = String::new();
+        let _ = writeln!(
+            out,
+            "theme_bg={:?} control_api={}",
+            self.theme.bg, self.config.control_api
+        );
         let _ = writeln!(
             out,
             "tabs={} active={} editor_active={} any_running={} mouse=({:.0},{:.0}) mouse_cursor={:?}",
@@ -8721,17 +9283,32 @@ impl App {
         );
         let _ = writeln!(
             out,
-            "settings={} page={:?} search={} query={:?} matches={} current={} menu={} completion={} ghost={:?} items={}",
+            "settings={} page={:?} search={} query={:?} matches={} total={} current={} menu={} completion={} ghost={:?} items={}",
             self.settings.open,
             self.settings.page,
             self.search.open,
             self.search.query,
             self.search.matches.len(),
+            self.search.total,
             self.search.current,
             self.context_menu.open,
             self.completion.open,
             self.completion.ghost,
             self.completion.items.len()
+        );
+        let hint_targets: Vec<&str> = self
+            .hints
+            .iter()
+            .flat_map(|h| &h.items)
+            .filter_map(|(_, _, t)| match t {
+                HintTarget::Open(t) => Some(t.as_str()),
+                HintTarget::Block(..) => None,
+            })
+            .collect();
+        let _ = writeln!(
+            out,
+            "settings_focus={:?} config_error={:?} hints={hint_targets:?}",
+            self.settings.focus, self.config_error
         );
         let _ = writeln!(
             out,
@@ -8774,11 +9351,12 @@ impl App {
         );
         let _ = writeln!(
             out,
-            "viewer={:?} lines={} error={:?} scroll={:.0}",
+            "viewer={:?} lines={} error={:?} scroll={:.0} find={:?}",
             self.viewer.path,
             self.viewer.lines.len(),
             self.viewer.error,
-            self.viewer.scroll
+            self.viewer.scroll,
+            self.viewer.find.as_ref().map(|f| f.counter())
         );
         let _ = writeln!(
             out,
@@ -8923,7 +9501,7 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
 
-        self.config = Config::load();
+        self.load_config(true);
         let restored = if self.config.restore_session && self.persist_session {
             shift_core::session_state::load()
         } else {
@@ -8999,7 +9577,7 @@ impl ApplicationHandler<UserEvent> for App {
             gpu.config.format,
         ));
         let mut text = TextEngine::new(&gpu.device, &gpu.queue, gpu.config.format);
-        self.cell_w = text.mono_cell_width(self.config.font_size);
+        self.cell_w = text.mono_cell_width(self.config.font_size());
 
         let git_proxy = self.proxy.clone();
         self.git = Some(GitWorker::new(Arc::new(move |pane, info| {
@@ -9019,13 +9597,7 @@ impl ApplicationHandler<UserEvent> for App {
             }));
         }
 
-        let control_proxy = self.proxy.clone();
-        self.control_server = crate::control::serve(
-            crate::control::Level::parse(&self.config.control_api),
-            move |p| {
-                let _ = control_proxy.send_event(UserEvent::Control(p));
-            },
-        );
+        self.sync_control_server();
 
         self.window = Some(window);
         self.gpu = Some(gpu);
@@ -9037,10 +9609,11 @@ impl ApplicationHandler<UserEvent> for App {
         self.launch_configs = shift_core::launch::load_all();
 
         let hist_proxy = self.proxy.clone();
+        let shell = shift_core::shell_integration::resolve_shell(self.config.shell.as_deref());
         std::thread::Builder::new()
             .name("history-import".into())
             .spawn(move || {
-                let h = shift_core::history::load_shell_history(5000);
+                let h = shift_core::history::load_shell_history(&shell, 5000);
                 let _ = hist_proxy.send_event(UserEvent::HistoryLoaded(h));
             })
             .ok();
@@ -9266,6 +9839,15 @@ impl ApplicationHandler<UserEvent> for App {
                     w.request_redraw();
                 }
             }
+            UserEvent::Completions(generation, items) => self.on_completions(generation, items),
+            UserEvent::ReviewWritten(error) => {
+                self.review.notice = error;
+                self.explorer.refresh();
+                self.request_review();
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
             UserEvent::ReviewLoaded(generation, result) => {
                 use crate::views::review_panel::Load;
                 if generation != self.review.generation {
@@ -9290,7 +9872,12 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             UserEvent::Control(p) => {
-                let response = self.handle_control(p.request);
+                let response = if p.allowed(crate::control::Level::parse(&self.config.control_api))
+                {
+                    self.handle_control(p.request)
+                } else {
+                    crate::control::Response::error("not allowed: control permissions changed")
+                };
                 let _ = p.reply.send(response);
                 if let Some(w) = &self.window {
                     w.request_redraw();
@@ -9298,13 +9885,38 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::HistoryLoaded(mut history) => {
                 log::info!("shell history imported: {} entries", history.len());
-                self.shell_history.append(&mut history);
+                Arc::make_mut(&mut self.shell_history).append(&mut history);
             }
             UserEvent::ConfigReloaded => {
-                let fresh = Config::load();
-                if fresh != self.config {
-                    self.config = fresh;
-                    self.apply_config();
+                // Theme files can change without any change to config.toml.
+                self.load_config(false);
+                self.apply_config();
+            }
+            UserEvent::ViewerLoaded(loaded) => {
+                if self.viewer.accept(*loaded)
+                    && let Some(w) = &self.window
+                {
+                    w.request_redraw();
+                }
+            }
+            UserEvent::WindowsLoaded(windows, done) => {
+                self.other_windows.extend(windows);
+                self.windows_loading = !done;
+                if self.palette.open {
+                    self.refresh_palette();
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
+            }
+            UserEvent::DetachedLoaded(detached) => {
+                self.detached = detached;
+                self.detached_loading = false;
+                if self.palette.open {
+                    self.refresh_palette();
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
                 }
             }
             UserEvent::GitStatus(pane, info) => {
@@ -9369,5 +9981,17 @@ impl ApplicationHandler<UserEvent> for App {
             Some(t) => winit::event_loop::ControlFlow::WaitUntil(t),
             None => winit::event_loop::ControlFlow::Wait,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn confirm_ignores_repeat_and_typed_ahead_enter() {
+        assert!(!confirm_accepts(false, Duration::from_millis(5)));
+        assert!(!confirm_accepts(true, Duration::from_secs(2)));
+        assert!(confirm_accepts(false, CONFIRM_ARM));
     }
 }

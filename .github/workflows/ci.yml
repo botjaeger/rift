@@ -7,6 +7,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
 
 env:
   CARGO_TERM_COLOR: always
@@ -18,9 +19,9 @@ jobs:
       matrix:
         include:
           - os: macos-14
-            gates: fmt clippy test doc release
+            gates: fmt clippy test doc docs release
           - os: ubuntu-24.04
-            gates: fmt clippy test doc shell release
+            gates: fmt clippy test doc shell docs release
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -32,7 +33,7 @@ jobs:
           sudo apt-get install -y \
             libxkbcommon-dev libwayland-dev libxcb1-dev libxcb-render0-dev \
             libxcb-shape0-dev libxcb-xfixes0-dev libssl-dev pkg-config \
-            shellcheck zsh fish
+            shellcheck zsh fish xvfb libgl1-mesa-dri mesa-vulkan-drivers
 
       - name: Install Rust (rust-toolchain.toml)
         run: rustup toolchain install
@@ -41,3 +42,11 @@ jobs:
 
       - name: Gates
         run: scripts/gates.sh ${{ matrix.gates }}
+
+      - name: Scripted UI regressions (Linux software GPU)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a scripts/gates.sh ui
+        env:
+          SHIFT_TEST_BIN: target/release/shift-terminal
+          LIBGL_ALWAYS_SOFTWARE: '1'
+          WGPU_BACKEND: vulkan

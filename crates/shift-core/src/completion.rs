@@ -12,14 +12,74 @@ pub struct Completion {
     pub source: &'static str,
 }
 
-/// (start_byte, token) being completed — the word containing `cursor`.
+/// (start_byte, token) being completed — the shell word containing
+/// `cursor`, as typed. Whitespace escaped with `\` or inside quotes does
+/// not end the word.
 pub fn current_token(buffer: &str, cursor: usize) -> (usize, &str) {
     let before = &buffer[..cursor];
-    let start = before
-        .rfind(char::is_whitespace)
-        .map(|i| i + 1)
-        .unwrap_or(0);
+    let mut start = 0;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for (i, c) in before.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if quote == Some(c) {
+            quote = None;
+        } else if quote.is_some() {
+            escaped = c == '\\' && quote == Some('"');
+        } else if c == '\\' {
+            escaped = true;
+        } else if c == '\'' || c == '"' {
+            quote = Some(c);
+        } else if c.is_whitespace() {
+            start = i + c.len_utf8();
+        }
+    }
     (start, &before[start..])
+}
+
+/// The literal text of a typed shell word: quotes removed, `\x` → `x`.
+fn unescape_word(token: &str) -> String {
+    let mut out = String::with_capacity(token.len());
+    let mut quote: Option<char> = None;
+    let mut chars = token.chars();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (None, '\'' | '"') => quote = Some(c),
+            (Some(q), _) if c == q => quote = None,
+            (None, '\\') | (Some('"'), '\\') => {
+                if let Some(n) = chars.next() {
+                    out.push(n);
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Backslash-escape `s` as one bash/zsh/fish word. A leading `~/` stays
+/// unescaped so it still expands. `None` for control characters, which no
+/// form portable across the three shells can carry.
+pub fn escape_word(s: &str) -> Option<String> {
+    if s.chars().any(char::is_control) {
+        return None;
+    }
+    let (lead, rest) = match s.strip_prefix("~/") {
+        Some(rest) => ("~/", rest),
+        None => ("", s),
+    };
+    let mut out = String::from(lead);
+    for (i, c) in rest.char_indices() {
+        let at_start = lead.is_empty() && i == 0;
+        let safe =
+            c.is_alphanumeric() || "/._-+,:@%".contains(c) || (!at_start && "=~".contains(c));
+        if !safe {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    Some(out)
 }
 
 /// Executable names on `$PATH`, scanned once per process (sorted, deduped).
@@ -118,8 +178,9 @@ pub fn complete(
     }
 
     // paths: token that looks like one
-    if token.contains('/') || token.starts_with('.') || token.starts_with('~') {
-        out.extend(complete_path(token, cwd));
+    let word = unescape_word(token);
+    if word.contains('/') || word.starts_with('.') || word.starts_with('~') {
+        out.extend(complete_path(&word, cwd));
     }
 
     // history: whole-buffer prefix matches (drives ghost text); the pane's
@@ -230,8 +291,8 @@ fn generator_completions(kind: ArgKind, token: &str, cwd: Option<&str>) -> Vec<C
     };
     match kind {
         ArgKind::None => Vec::new(),
-        ArgKind::Path => complete_path(token, cwd),
-        ArgKind::Dir => complete_path(token, cwd)
+        ArgKind::Path => complete_path(&unescape_word(token), cwd),
+        ArgKind::Dir => complete_path(&unescape_word(token), cwd)
             .into_iter()
             .filter(|c| c.insert.ends_with('/'))
             .collect(),
@@ -251,6 +312,8 @@ fn generator_completions(kind: ArgKind, token: &str, cwd: Option<&str>) -> Vec<C
     }
 }
 
+/// Entries matching the literal (unescaped) path `token`; each `insert` is
+/// escaped as one shell word.
 fn complete_path(token: &str, cwd: Option<&str>) -> Vec<Completion> {
     // Expand only "~/…": expansion must not change the basename, or the
     // orig_dir arithmetic below breaks (bare "~" expanding to $HOME made
@@ -290,7 +353,10 @@ fn complete_path(token: &str, cwd: Option<&str>) -> Vec<Completion> {
             // keep the user's original dir prefix (incl. ~) in the insert
             let orig_dir = &token[..token.len().saturating_sub(file_part.len())];
             Some(Completion {
-                insert: format!("{orig_dir}{name}{}", if is_dir { "/" } else { "" }),
+                insert: escape_word(&format!(
+                    "{orig_dir}{name}{}",
+                    if is_dir { "/" } else { "" }
+                ))?,
                 description: if is_dir {
                     "directory".into()
                 } else {
@@ -331,6 +397,69 @@ mod tests {
         assert_eq!(current_token("git che", 7), (4, "che"));
         assert_eq!(current_token("ls", 2), (0, "ls"));
         assert_eq!(current_token("cargo build ", 12), (12, ""));
+    }
+
+    #[test]
+    fn token_respects_escapes_and_quotes() {
+        assert_eq!(current_token("cat my\\ di", 10), (4, "my\\ di"));
+        assert_eq!(current_token("cat 'my di", 10), (4, "'my di"));
+        assert_eq!(current_token("cat \"a b\" c", 11), (10, "c"));
+        assert_eq!(current_token("echo é f", 9), (8, "f"));
+    }
+
+    #[test]
+    fn escaped_words_round_trip() {
+        for name in [
+            "hello world.txt",
+            "it's",
+            "say \"hi\"",
+            "$HOME;rm (x)",
+            "back\\slash",
+            "a&b|c<d>e*f?g[h]{i}!j#k`l^",
+            "café",
+            "=eq",
+            "~tilde",
+        ] {
+            let escaped = escape_word(name).unwrap();
+            assert!(
+                !escaped.contains(' ') || escaped.contains("\\ "),
+                "{escaped}"
+            );
+            assert_eq!(
+                current_token(&escaped, escaped.len()),
+                (0, escaped.as_str())
+            );
+            assert_eq!(unescape_word(&escaped), name, "{escaped}");
+        }
+        assert_eq!(escape_word("~/a b").unwrap(), "~/a\\ b");
+        assert_eq!(escape_word("café/x-1.txt").unwrap(), "café/x-1.txt");
+        assert_eq!(escape_word("line\nbreak"), None);
+    }
+
+    #[test]
+    fn path_completion_inserts_one_shell_word() {
+        let dir = std::env::temp_dir().join(format!("shift-complete-quote-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("my dir")).unwrap();
+        std::fs::write(dir.join("hello world.txt"), "").unwrap();
+        std::fs::write(dir.join("it's;$x.txt"), "").unwrap();
+        std::fs::write(dir.join("my dir/inner.txt"), "").unwrap();
+        let cwd = dir.to_str();
+        let path_inserts = |buf: &str| -> Vec<String> {
+            complete(buf, buf.len(), &[], &[], cwd)
+                .into_iter()
+                .filter(|c| c.source == "path")
+                .map(|c| c.insert)
+                .collect()
+        };
+        assert_eq!(path_inserts("cat ./hel"), ["./hello\\ world.txt"]);
+        assert_eq!(path_inserts("cat ./it"), ["./it\\'s\\;\\$x.txt"]);
+        // directory continuation: the escaped prefix completes further
+        assert_eq!(path_inserts("cat ./my"), ["./my\\ dir/"]);
+        assert_eq!(path_inserts("cat ./my\\ dir/in"), ["./my\\ dir/inner.txt"]);
+        // a quoted token resolves too, and is replaced by the escaped form
+        assert_eq!(path_inserts("cat './my dir/in"), ["./my\\ dir/inner.txt"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -520,14 +520,32 @@ pub fn render_rail(
         0.0,
     );
 
-    let mut y = TAB_BAR_H + 6.0;
-    for (i, tab) in tabs.iter().enumerate() {
-        if y + RAIL_ROW_H > h - 36.0 {
-            let more = format!("+{} more · palette lists all", tabs.len() - i);
-            let b = make_text(engine, &more, 11.0, FONT_SANS, Weight::NORMAL);
-            layer.text(b, 16.0, y + 8.0, theme.text_muted);
-            break;
-        }
+    let top = TAB_BAR_H + 6.0;
+    let avail = (h - 36.0 - top).max(0.0);
+    let fits = (avail / RAIL_ROW_H).floor() as usize;
+    // overflowing: the "+N above" line takes a slot of its own at the top;
+    // "+N more" sits in the bottom margin under the last row
+    let capacity = if tabs.len() <= fits {
+        fits
+    } else {
+        ((avail - RAIL_MORE_H) / RAIL_ROW_H).floor().max(1.0) as usize
+    };
+    let window = rail_window(tabs.len(), active, capacity);
+    let mut y = top;
+    if window.start > 0 {
+        rail_overflow(
+            layer,
+            engine,
+            theme,
+            &format!("+{} above", window.start),
+            &tabs[..window.start],
+            y,
+            window.start - 1,
+            hits,
+        );
+        y += RAIL_MORE_H;
+    }
+    for (i, tab) in tabs.iter().enumerate().take(window.end).skip(window.start) {
         let is_active = i == active;
         let row = [6.0, y, RAIL_W - 12.0, RAIL_ROW_H - 4.0];
         if is_active {
@@ -641,5 +659,157 @@ pub fn render_rail(
             target: ClickTarget::TabSelect(i),
         });
         y += RAIL_ROW_H;
+    }
+    if window.end < tabs.len() {
+        let hidden = &tabs[window.end..];
+        rail_overflow(
+            layer,
+            engine,
+            theme,
+            &format!("+{} more · palette lists all", hidden.len()),
+            hidden,
+            y,
+            window.end,
+            hits,
+        );
+    }
+}
+
+/// Height of a "+N above" / "+N more" line in the rail.
+const RAIL_MORE_H: f32 = 28.0;
+
+/// The tabs the rail shows: at most `capacity` consecutive indices that
+/// always include `active`. Starts at tab 0 while `active` fits on the first
+/// page, then slides so `active` is the last visible row.
+pub fn rail_window(len: usize, active: usize, capacity: usize) -> std::ops::Range<usize> {
+    if len <= capacity {
+        return 0..len;
+    }
+    let cap = capacity.max(1);
+    let active = active.min(len - 1);
+    let start = (active + 1).saturating_sub(cap).min(len - cap);
+    start..start + cap
+}
+
+/// Severity order for the overflow marker: what most needs the user.
+fn alert_rank(kind: crate::views::notifications::Kind) -> u8 {
+    use crate::views::notifications::Kind;
+    match kind {
+        Kind::Request => 4,
+        Kind::Failed => 3,
+        Kind::Bell => 2,
+        Kind::Notify => 1,
+        Kind::Finished => 0,
+    }
+}
+
+/// The marker an overflow line carries: the worst alert among `hidden`, or
+/// activity when none has an alert.
+fn hidden_marker(hidden: &[TabInfo]) -> Option<Option<crate::views::notifications::Kind>> {
+    let worst = hidden
+        .iter()
+        .filter_map(|t| t.alert)
+        .max_by_key(|k| alert_rank(*k));
+    match worst {
+        Some(kind) => Some(Some(kind)),
+        None => hidden.iter().any(|t| t.activity).then_some(None),
+    }
+}
+
+/// One overflow line: the hidden tabs' marker (same badge as a row), the
+/// label, and a hit that selects the nearest hidden tab so the window
+/// slides toward it.
+#[allow(clippy::too_many_arguments)]
+fn rail_overflow(
+    layer: &mut Layer,
+    engine: &mut TextEngine,
+    theme: &Theme,
+    text: &str,
+    hidden: &[TabInfo],
+    y: f32,
+    nearest: usize,
+    hits: &mut Vec<Hit>,
+) {
+    let row = [6.0, y, RAIL_W - 12.0, RAIL_MORE_H - 4.0];
+    let (mx, cy) = (row[0] + 17.5, y + 12.0);
+    let mut tx = 16.0;
+    match hidden_marker(hidden) {
+        Some(Some(kind)) => {
+            crate::views::notifications::tab_badge(layer, theme, kind, mx, cy);
+            tx += 14.0;
+        }
+        Some(None) => {
+            layer.circle([mx, cy], 7.0, theme.success);
+            tx += 14.0;
+        }
+        None => {}
+    }
+    let b = make_text(engine, text, 11.0, FONT_SANS, Weight::NORMAL);
+    layer.text(b, tx, y + 5.0, theme.text_muted);
+    hits.push(Hit {
+        rect: row,
+        target: ClickTarget::TabSelect(nearest),
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::views::notifications::Kind;
+
+    #[test]
+    fn rail_window_keeps_the_active_tab_visible() {
+        let w = rail_window(8, 7, 4);
+        assert!(w.contains(&7));
+        assert_eq!(w, 4..8);
+        assert_eq!(rail_window(8, 0, 4), 0..4);
+        assert_eq!(rail_window(8, 3, 4), 0..4);
+        assert_eq!(rail_window(8, 5, 4), 2..6);
+        for active in 0..8 {
+            let w = rail_window(8, active, 3);
+            assert!(w.contains(&active), "active {active} in {w:?}");
+            assert_eq!(w.len(), 3);
+        }
+    }
+
+    #[test]
+    fn rail_window_shows_everything_when_it_fits() {
+        assert_eq!(rail_window(3, 2, 4), 0..3);
+        assert_eq!(rail_window(4, 3, 4), 0..4);
+        assert_eq!(rail_window(0, 0, 4), 0..0);
+        // no room at all still shows the active tab
+        assert_eq!(rail_window(5, 3, 0), 3..4);
+        // stale active index past the end clamps
+        assert_eq!(rail_window(5, 9, 2), 3..5);
+    }
+
+    fn tab(alert: Option<Kind>, activity: bool) -> TabInfo {
+        TabInfo {
+            title: String::new(),
+            panes: 1,
+            shell_label: String::new(),
+            activity,
+            alert,
+            color: None,
+            sync: false,
+            editing: None,
+            editing_selected: false,
+            subtitle: String::new(),
+        }
+    }
+
+    #[test]
+    fn overflow_marker_is_the_worst_hidden_alert() {
+        let hidden = [
+            tab(Some(Kind::Finished), false),
+            tab(Some(Kind::Request), false),
+            tab(Some(Kind::Failed), true),
+        ];
+        assert_eq!(hidden_marker(&hidden), Some(Some(Kind::Request)));
+        assert_eq!(
+            hidden_marker(&[tab(None, true), tab(None, false)]),
+            Some(None)
+        );
+        assert_eq!(hidden_marker(&[tab(None, false)]), None);
     }
 }

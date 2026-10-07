@@ -14,10 +14,13 @@
 //! thread, so a response reflects exactly what the window shows.
 
 use serde::{Deserialize, Serialize};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -126,6 +129,13 @@ impl Response {
 pub struct Pending {
     pub request: Request,
     pub reply: mpsc::Sender<Response>,
+    active: Arc<AtomicBool>,
+}
+
+impl Pending {
+    pub fn allowed(&self, level: Level) -> bool {
+        self.active.load(Ordering::Acquire) && self.request.level() <= level
+    }
 }
 
 pub fn dir() -> Option<PathBuf> {
@@ -140,10 +150,29 @@ fn own_path() -> Option<PathBuf> {
 /// it to the UI thread). The socket file is removed by [`Server`]'s drop.
 pub struct Server {
     path: PathBuf,
+    pub level: Level,
+    active: Arc<AtomicBool>,
+    connections: Arc<Mutex<Vec<Weak<UnixStream>>>>,
+    listener: Option<std::thread::JoinHandle<()>>,
+    wake: UnixStream,
 }
 
 impl Drop for Server {
     fn drop(&mut self) {
+        self.active.store(false, Ordering::Release);
+        let _ = self.wake.shutdown(std::net::Shutdown::Both);
+        if let Some(listener) = self.listener.take() {
+            let _ = listener.join();
+        }
+        for stream in self
+            .connections
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(Weak::upgrade)
+        {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        }
         let _ = std::fs::remove_file(&self.path);
     }
 }
@@ -169,34 +198,118 @@ pub fn serve(level: Level, deliver: impl Fn(Pending) + Send + Sync + 'static) ->
     }
     let path = own_path()?;
     let _ = std::fs::remove_file(&path);
+    start(path, level, deliver)
+}
+
+const MAX_CONNECTIONS: usize = 32;
+const MAX_REQUEST: usize = 1 << 20;
+const IO_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn start(
+    path: PathBuf,
+    level: Level,
+    deliver: impl Fn(Pending) + Send + Sync + 'static,
+) -> Option<Server> {
     let listener = UnixListener::bind(&path).ok()?;
-    let deliver = std::sync::Arc::new(deliver);
-    std::thread::Builder::new()
+    listener.set_nonblocking(true).ok()?;
+    let (wake, stop) = UnixStream::pair().ok()?;
+    let deliver = Arc::new(deliver);
+    let active = Arc::new(AtomicBool::new(true));
+    let connections = Arc::new(Mutex::new(Vec::<Weak<UnixStream>>::new()));
+    let running = active.clone();
+    let clients = connections.clone();
+    let listener = std::thread::Builder::new()
         .name("control".into())
         .spawn(move || {
             let me = unsafe { libc::getuid() };
-            for stream in listener.incoming().flatten() {
+            while running.load(Ordering::Acquire) {
+                let mut ready = [
+                    libc::pollfd {
+                        fd: listener.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    },
+                    libc::pollfd {
+                        fd: stop.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    },
+                ];
+                let result = unsafe { libc::poll(ready.as_mut_ptr(), 2, -1) };
+                if !running.load(Ordering::Acquire) {
+                    break;
+                }
+                if result < 0 {
+                    if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    break;
+                }
+                let stream = match listener.accept() {
+                    Ok((stream, _)) => stream,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        continue;
+                    }
+                    Err(_) => break,
+                };
                 if shift_pty::ipc::peer_uid(&stream) != Some(me) {
                     continue;
                 }
+                let stream = Arc::new(stream);
+                let mut clients = clients.lock().unwrap();
+                clients.retain(|c| c.strong_count() > 0);
+                if clients.len() >= MAX_CONNECTIONS {
+                    continue;
+                }
+                clients.push(Arc::downgrade(&stream));
                 let deliver = deliver.clone();
-                std::thread::spawn(move || handle_conn(stream, level, &*deliver));
+                let active = running.clone();
+                std::thread::spawn(move || handle_conn(stream, level, active, &*deliver));
             }
         })
         .ok()?;
-    Some(Server { path })
+    Some(Server {
+        path,
+        level,
+        active,
+        connections,
+        listener: Some(listener),
+        wake,
+    })
 }
 
-fn handle_conn(stream: UnixStream, level: Level, deliver: &dyn Fn(Pending)) {
+/// `take` bounds allocation even when no newline ever arrives.
+fn read_line_bounded(reader: &mut impl BufRead, limit: usize) -> std::io::Result<Option<String>> {
+    let mut line = String::new();
+    let n = reader.take(limit as u64 + 1).read_line(&mut line)?;
+    if n > limit {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "control line too large",
+        ));
+    }
+    Ok((n != 0).then_some(line))
+}
+
+fn handle_conn(
+    stream: Arc<UnixStream>,
+    level: Level,
+    active: Arc<AtomicBool>,
+    deliver: &dyn Fn(Pending),
+) {
+    if stream.set_read_timeout(Some(IO_TIMEOUT)).is_err()
+        || stream.set_write_timeout(Some(IO_TIMEOUT)).is_err()
+    {
+        return;
+    }
     let Ok(mut out) = stream.try_clone() else {
         return;
     };
-    let reader = BufReader::new(stream);
-    for line in reader.lines() {
-        let Ok(line) = line else { break };
-        if line.len() > 1 << 20 {
+    let mut reader = BufReader::new(&*stream);
+    while active.load(Ordering::Acquire) {
+        let Ok(Some(line)) = read_line_bounded(&mut reader, MAX_REQUEST) else {
             break;
-        }
+        };
         if line.trim().is_empty() {
             continue;
         }
@@ -208,7 +321,14 @@ fn handle_conn(stream: UnixStream, level: Level, deliver: &dyn Fn(Pending)) {
             )),
             Ok(request) => {
                 let (tx, rx) = mpsc::channel();
-                deliver(Pending { request, reply: tx });
+                if !active.load(Ordering::Acquire) {
+                    break;
+                }
+                deliver(Pending {
+                    request,
+                    reply: tx,
+                    active: active.clone(),
+                });
                 rx.recv_timeout(Duration::from_secs(5))
                     .unwrap_or_else(|_| Response::error("window did not answer"))
             }
@@ -242,28 +362,28 @@ pub fn sockets() -> Vec<PathBuf> {
 pub fn request(path: &std::path::Path, req: &Request) -> std::io::Result<Response> {
     let mut s = UnixStream::connect(path)?;
     s.set_read_timeout(Some(Duration::from_secs(6)))?;
+    s.set_write_timeout(Some(Duration::from_secs(6)))?;
     let mut body = serde_json::to_string(req).map_err(std::io::Error::other)?;
     body.push('\n');
     s.write_all(body.as_bytes())?;
-    let mut line = String::new();
-    BufReader::new(s).read_line(&mut line)?;
+    let line = read_line_bounded(&mut BufReader::new(s), 16 << 20)?
+        .ok_or_else(|| std::io::Error::other("window disconnected"))?;
     serde_json::from_str(&line).map_err(std::io::Error::other)
 }
 
 /// Other windows' tabs (for the session switcher): (pid, socket, tabs).
-pub fn other_windows() -> Vec<(u32, PathBuf, Vec<TabInfo>)> {
+pub fn visit_other_windows(mut found: impl FnMut((u32, PathBuf, Vec<TabInfo>))) {
     let me = std::process::id();
-    sockets()
-        .into_iter()
-        .filter_map(|p| {
-            let pid: u32 = p.file_stem()?.to_str()?.parse().ok()?;
-            if pid == me {
-                return None;
-            }
-            let r = request(&p, &Request::List).ok()?;
-            Some((pid, p, r.tabs))
-        })
-        .collect()
+    for window in sockets().into_iter().filter_map(|p| {
+        let pid: u32 = p.file_stem()?.to_str()?.parse().ok()?;
+        if pid == me {
+            return None;
+        }
+        let r = request(&p, &Request::List).ok()?;
+        Some((pid, p, r.tabs))
+    }) {
+        found(window);
+    }
 }
 
 const CLI_HELP: &str = "usage: shift-terminal ctl [--pid PID] <command>
@@ -368,6 +488,62 @@ mod tests {
     use super::*;
 
     #[test]
+    fn unterminated_requests_stop_at_the_limit() {
+        let mut infinite = BufReader::new(std::io::repeat(b'x'));
+        assert_eq!(
+            read_line_bounded(&mut infinite, MAX_REQUEST)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        let mut lines = std::io::Cursor::new(b"one\ntwo\n");
+        assert_eq!(
+            read_line_bounded(&mut lines, 4).unwrap().as_deref(),
+            Some("one\n")
+        );
+        assert_eq!(
+            read_line_bounded(&mut lines, 4).unwrap().as_deref(),
+            Some("two\n")
+        );
+        assert!(read_line_bounded(&mut lines, 4).unwrap().is_none());
+    }
+
+    #[test]
+    fn dropping_server_revokes_queued_work_and_open_connections() {
+        let path = std::env::temp_dir().join(format!("shift-revoke-{}.sock", std::process::id()));
+        let (tx, rx) = mpsc::channel();
+        let server = start(path.clone(), Level::Full, move |p| {
+            let _ = tx.send(p);
+        })
+        .unwrap();
+        let mut peer = UnixStream::connect(&path).unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        peer.write_all(b"{\"cmd\":\"send-text\",\"pane\":1,\"text\":\"x\"}\n")
+            .unwrap();
+        let pending = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(pending.allowed(Level::Full));
+        assert!(!pending.allowed(Level::Navigate));
+        drop(server);
+        assert!(!pending.allowed(Level::Full));
+        assert!(!path.exists());
+        assert_eq!(peer.read(&mut [0]).unwrap(), 0);
+        let _ = pending.reply.send(Response::error("revoked"));
+        let server = start(path.clone(), Level::Navigate, |p| {
+            let _ = p.reply.send(Response {
+                ok: true,
+                ..Default::default()
+            });
+        })
+        .unwrap();
+        assert!(request(&path, &Request::Status).unwrap().ok);
+        assert!(
+            !pending.allowed(Level::Full),
+            "rebinding cannot revive old work"
+        );
+        drop(server);
+    }
+
+    #[test]
     fn requests_parse_and_levels_gate() {
         let r: Request = serde_json::from_str(r#"{"cmd":"focus","pane":3}"#).unwrap();
         assert_eq!(
@@ -394,13 +570,18 @@ mod tests {
         let listener = UnixListener::bind(&path).unwrap();
         std::thread::spawn(move || {
             let (s, _) = listener.accept().unwrap();
-            handle_conn(s, Level::Navigate, &|p: Pending| {
-                let _ = p.reply.send(Response {
-                    ok: true,
-                    pid: Some(42),
-                    ..Default::default()
-                });
-            });
+            handle_conn(
+                Arc::new(s),
+                Level::Navigate,
+                Arc::new(AtomicBool::new(true)),
+                &|p: Pending| {
+                    let _ = p.reply.send(Response {
+                        ok: true,
+                        pid: Some(42),
+                        ..Default::default()
+                    });
+                },
+            );
         });
         let mut s = UnixStream::connect(&path).unwrap();
         s.write_all(

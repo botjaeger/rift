@@ -1,5 +1,6 @@
 use shift_core::git::GitInfo;
 use shift_pty::{PaneId, Session};
+use unicode_segmentation::GraphemeCursor;
 
 use crate::pane::{NodePath, PaneNode};
 use crate::vim::{VimMode, VimState};
@@ -347,20 +348,15 @@ impl EditorState {
         self.hist_idx = None;
     }
 
+    /// Start of the grapheme cluster before the cursor (extended clusters:
+    /// a combining sequence, ZWJ emoji or flag moves and deletes as one).
     fn prev_boundary(&self) -> usize {
-        self.buffer[..self.cursor]
-            .char_indices()
-            .next_back()
-            .map(|(i, _)| i)
-            .unwrap_or(0)
+        grapheme_prev(&self.buffer, self.cursor)
     }
 
+    /// End of the grapheme cluster after the cursor.
     fn next_boundary(&self) -> usize {
-        self.buffer[self.cursor..]
-            .chars()
-            .next()
-            .map(|c| self.cursor + c.len_utf8())
-            .unwrap_or(self.cursor)
+        grapheme_next(&self.buffer, self.cursor)
     }
 
     pub fn backspace(&mut self) {
@@ -392,16 +388,12 @@ impl EditorState {
         if self.cursor > 0 && self.cursor < self.buffer.len() {
             let prev = self.prev_boundary();
             let next = self.next_boundary();
-            let left = self.buffer[prev..self.cursor].chars().next();
-            let right = self.buffer[self.cursor..next].chars().next();
+            // whole clusters: `(` carrying a combining mark is not a bare opener
+            let left = &self.buffer[prev..self.cursor];
+            let right = &self.buffer[self.cursor..next];
             if matches!(
                 (left, right),
-                (Some('('), Some(')'))
-                    | (Some('['), Some(']'))
-                    | (Some('{'), Some('}'))
-                    | (Some('\''), Some('\''))
-                    | (Some('"'), Some('"'))
-                    | (Some('`'), Some('`'))
+                ("(", ")") | ("[", "]") | ("{", "}") | ("'", "'") | ("\"", "\"") | ("`", "`")
             ) {
                 self.replace_range(prev..next, "");
                 self.hist_idx = None;
@@ -432,10 +424,12 @@ impl EditorState {
     /// Whitespace-delimited word start left of the cursor.
     fn word_left_target(&self) -> usize {
         let trimmed = self.buffer[..self.cursor].trim_end();
-        trimmed
+        let i = trimmed
             .rfind(char::is_whitespace)
             .map(|i| i + 1)
-            .unwrap_or(0)
+            .unwrap_or(0);
+        // a space carrying a combining mark is one cluster: never stop inside it
+        grapheme_floor(&self.buffer, i)
     }
 
     /// Whitespace-delimited word end right of the cursor.
@@ -444,7 +438,7 @@ impl EditorState {
         let skipped = rest.len() - rest.trim_start().len();
         let word = &rest[skipped..];
         let end = word.find(char::is_whitespace).unwrap_or(word.len());
-        self.cursor + skipped + end
+        grapheme_ceil(&self.buffer, self.cursor + skipped + end)
     }
 
     // raw motions (selection-agnostic); `extend` wraps them for Shift
@@ -759,6 +753,47 @@ impl TabState {
     }
 }
 
+/// Start of the extended grapheme cluster ending at or before byte `i`.
+fn grapheme_prev(s: &str, i: usize) -> usize {
+    let mut c = GraphemeCursor::new(i.min(s.len()), s.len(), true);
+    // the chunk is the whole string, so no extra context is ever requested
+    c.prev_boundary(s, 0).ok().flatten().unwrap_or(0)
+}
+
+/// End of the extended grapheme cluster starting at or after byte `i`.
+fn grapheme_next(s: &str, i: usize) -> usize {
+    let i = i.min(s.len());
+    let mut c = GraphemeCursor::new(i, s.len(), true);
+    c.next_boundary(s, 0).ok().flatten().unwrap_or(s.len())
+}
+
+fn is_grapheme_boundary(s: &str, i: usize) -> bool {
+    s.is_char_boundary(i)
+        && GraphemeCursor::new(i, s.len(), true)
+            .is_boundary(s, 0)
+            .unwrap_or(true)
+}
+
+/// `i` if it is a cluster boundary, else the start of the cluster around it.
+fn grapheme_floor(s: &str, i: usize) -> usize {
+    let i = i.min(s.len());
+    if is_grapheme_boundary(s, i) {
+        i
+    } else {
+        grapheme_prev(s, i)
+    }
+}
+
+/// `i` if it is a cluster boundary, else the end of the cluster around it.
+fn grapheme_ceil(s: &str, i: usize) -> usize {
+    let i = i.min(s.len());
+    if is_grapheme_boundary(s, i) {
+        i
+    } else {
+        grapheme_next(s, i)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::EditorState;
@@ -930,5 +965,83 @@ mod tests {
         e.insert_with_pairs("\"");
         assert_eq!(e.buffer, "\"\"");
         assert_eq!(e.cursor, 1);
+    }
+
+    #[test]
+    fn backspace_removes_whole_combining_sequence() {
+        let mut e = EditorState::default();
+        e.insert("e\u{301}");
+        e.backspace();
+        assert_eq!(e.buffer, "");
+        assert_eq!(e.cursor, 0);
+        e.undo();
+        assert_eq!(e.buffer, "e\u{301}");
+    }
+
+    #[test]
+    fn mv_left_crosses_zwj_family_in_one_step() {
+        let mut e = EditorState::default();
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+        e.insert(family);
+        e.mv_left();
+        assert_eq!(e.cursor, 0);
+        e.mv_right();
+        assert_eq!(e.cursor, family.len());
+        // selection extension uses the same boundaries
+        e.extend(EditorState::mv_left);
+        assert_eq!(e.selected_text(), Some(family));
+    }
+
+    #[test]
+    fn backspace_keeps_flag_and_drops_toned_emoji() {
+        let mut e = EditorState::default();
+        e.insert("\u{1F1EF}\u{1F1F5}\u{1F44D}\u{1F3FD}");
+        e.backspace();
+        assert_eq!(e.buffer, "\u{1F1EF}\u{1F1F5}");
+        e.backspace();
+        assert_eq!(e.buffer, "");
+        e.undo();
+        assert_eq!(e.buffer, "\u{1F1EF}\u{1F1F5}");
+        e.undo();
+        assert_eq!(e.buffer, "\u{1F1EF}\u{1F1F5}\u{1F44D}\u{1F3FD}");
+    }
+
+    #[test]
+    fn delete_forward_removes_whole_combining_sequence() {
+        let mut e = EditorState::default();
+        e.insert("a\u{65}\u{301}\u{323}b");
+        e.home();
+        e.mv_right();
+        e.delete();
+        assert_eq!(e.buffer, "ab");
+        assert_eq!(e.cursor, 1);
+        e.undo();
+        assert_eq!(e.buffer, "a\u{65}\u{301}\u{323}b");
+    }
+
+    #[test]
+    fn pair_backspace_ignores_opener_with_combining_mark() {
+        let mut e = EditorState::default();
+        e.insert("(\u{301})");
+        e.mv_left();
+        e.backspace_with_pairs();
+        // only the "(́" cluster goes; the closer is not its pair
+        assert_eq!(e.buffer, ")");
+        e.undo();
+        assert_eq!(e.buffer, "(\u{301})");
+    }
+
+    #[test]
+    fn word_motions_never_stop_inside_a_cluster() {
+        let mut e = EditorState::default();
+        // " \u{301}" is one cluster (space + combining acute)
+        e.insert("ab \u{301}c");
+        e.word_left();
+        assert_eq!(e.cursor, 2);
+        e.home();
+        e.mv_right();
+        e.mv_right();
+        e.mv_right();
+        assert_eq!(e.cursor, 5);
     }
 }

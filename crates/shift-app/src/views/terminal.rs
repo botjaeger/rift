@@ -640,25 +640,46 @@ fn hyperlinks_in(
     out
 }
 
-/// All match anchors (abs line, char col) across kept history + screen.
-pub fn collect_matches(session: &Session, matcher: &Matcher, cap: usize) -> Vec<(u64, usize)> {
+/// Search result: the newest `cap` anchors plus the count of every match.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Found {
+    /// (abs line, char col) anchors, oldest first: the newest `cap` matches.
+    pub anchors: Vec<(u64, usize)>,
+    /// Every match in the scanned lines (>= `anchors.len()`).
+    pub total: usize,
+}
+
+/// Match anchors over `lines` (given oldest -> newest): scans newest first,
+/// keeps the newest `cap` anchors (returned oldest first) and counts every
+/// match, so older matches past the cap are counted but not stored.
+pub fn newest_matches<I>(lines: I, matcher: &Matcher, cap: usize) -> Found
+where
+    I: DoubleEndedIterator<Item = (u64, String)>,
+{
+    let mut found = Found::default();
+    for (abs, text) in lines.rev() {
+        let hits = matcher.find(&text);
+        found.total += hits.len();
+        for (col, _) in hits.into_iter().rev() {
+            if found.anchors.len() >= cap {
+                break;
+            }
+            found.anchors.push((abs, col));
+        }
+    }
+    found.anchors.reverse();
+    found
+}
+
+/// Match anchors across kept history + screen (see [`newest_matches`]).
+pub fn collect_matches(session: &Session, matcher: &Matcher, cap: usize) -> Found {
     let scrolled = session.scrolled.load(std::sync::atomic::Ordering::Acquire);
     let term = session.term.lock();
     let g = term.grid();
     let oldest = scrolled.saturating_sub(g.history_size() as u64);
     let newest = scrolled + g.screen_lines() as u64;
-    let mut out = Vec::new();
-    for abs in oldest..newest {
-        if let Some(text) = line_text(&term, scrolled, abs) {
-            for (col, _) in matcher.find(&text) {
-                out.push((abs, col));
-                if out.len() >= cap {
-                    return out;
-                }
-            }
-        }
-    }
-    out
+    let lines = (oldest..newest).filter_map(|abs| Some((abs, line_text(&term, scrolled, abs)?)));
+    newest_matches(lines, matcher, cap)
 }
 
 /// Text of the on-screen grid rows (trailing blank rows dropped) — what a
@@ -1518,6 +1539,27 @@ mod tests {
         assert_eq!(find("b", false, true, "가b"), vec![(1, 1)]);
         assert!(Matcher::new("(", false, true).is_err());
         assert!(Matcher::new("", false, false).unwrap().is_none());
+    }
+
+    #[test]
+    fn newest_matches_keeps_newest_and_counts_all() {
+        let m = Matcher::new("hit", false, false).unwrap().unwrap();
+        let lines = (0..600u64).map(|i| (i, format!("hit {i}")));
+        let found = newest_matches(lines, &m, 500);
+        assert_eq!(found.total, 600);
+        assert_eq!(found.anchors.len(), 500);
+        assert_eq!(found.anchors.first(), Some(&(100, 0)));
+        assert_eq!(found.anchors.last(), Some(&(599, 0)));
+        // several hits on one line: the cap keeps that line's last columns
+        let lines = vec![(0u64, "hit".to_string()), (1, "hit hit hit".to_string())];
+        let found = newest_matches(lines.into_iter(), &m, 2);
+        assert_eq!(found.total, 4);
+        assert_eq!(found.anchors, vec![(1, 4), (1, 8)]);
+        // under the cap: everything, oldest first
+        let lines = vec![(3u64, "x hit".to_string()), (7, "hit".to_string())];
+        let found = newest_matches(lines.into_iter(), &m, 500);
+        assert_eq!(found.total, 2);
+        assert_eq!(found.anchors, vec![(3, 2), (7, 0)]);
     }
 
     #[test]

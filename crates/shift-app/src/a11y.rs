@@ -16,9 +16,10 @@
 //! └─ Label (live region)         (command-finished announcements)
 //! ```
 //!
-//! Actions (Click / Focus) are answered by clicking the node's on-screen
-//! rect through the app's normal mouse routing, so they behave exactly like
-//! a pointer click.
+//! Click is answered by clicking the node's on-screen rect through the
+//! app's normal mouse routing, so it behaves exactly like a pointer click.
+//! Focus is not advertised: moving focus must never toggle a setting or
+//! accept a confirmation.
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -141,6 +142,12 @@ fn bounds(r: [f32; 4]) -> Rect {
     }
 }
 
+/// Whether an assistive-technology action request performs the node's
+/// action. Only Click does; focus requests must not toggle or confirm.
+pub fn activates(action: Action) -> bool {
+    action == Action::Click
+}
+
 struct Tree {
     nodes: Vec<(NodeId, Node)>,
     targets: HashMap<NodeId, [f32; 4]>,
@@ -152,7 +159,6 @@ impl Tree {
             node.set_bounds(bounds(r));
             if clickable {
                 node.add_action(Action::Click);
-                node.add_action(Action::Focus);
                 self.targets.insert(id, r);
             }
         }
@@ -586,5 +592,21 @@ mod tests {
         let text = describe(&build(&s).update);
         assert!(text.contains("AlertDialog \"Paste and run?\" desc=\"2 lines\""));
         assert!(text.contains("Button \"Paste\" [focus]"));
+    }
+
+    #[test]
+    fn only_click_activates() {
+        let built = build(&snapshot());
+        for (id, node) in &built.update.nodes {
+            assert!(
+                !node.supports_action(Action::Focus),
+                "{id:?} advertises Focus"
+            );
+            if built.targets.contains_key(id) {
+                assert!(node.supports_action(Action::Click));
+            }
+        }
+        assert!(activates(Action::Click));
+        assert!(!activates(Action::Focus));
     }
 }

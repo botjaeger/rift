@@ -215,17 +215,32 @@ pub fn socket_path() -> Option<std::path::PathBuf> {
     socket_dir("sessiond").map(|d| d.join("sock"))
 }
 
-/// `<data dir>/<name>` for Unix sockets, or `<temp dir>/shift-<uid>/<name>`
-/// when that path would exceed the ~104-byte socket path limit (a deep
-/// `XDG_DATA_HOME`). Created 0700 by the caller.
+/// `<data dir>/<name>` for Unix sockets, or a short, data-dir-specific path
+/// under `/tmp` when the original would exceed the Unix socket path limit.
+/// Created 0700 by the caller.
 pub fn socket_dir(name: &str) -> Option<std::path::PathBuf> {
-    let dir = shift_core::shell_integration::data_dir()?.join(name);
-    // room for "/<pid>.sock"
-    if dir.as_os_str().len() + 20 < 100 {
-        return Some(dir);
-    }
+    let data_dir = shift_core::shell_integration::data_dir()?;
     let uid = unsafe { libc::getuid() };
-    Some(std::env::temp_dir().join(format!("shift-{uid}")).join(name))
+    Some(socket_dir_for(&data_dir, name, uid))
+}
+
+fn socket_dir_for(data_dir: &std::path::Path, name: &str, uid: u32) -> std::path::PathBuf {
+    let dir = data_dir.join(name);
+    // Leave room for "/<pid>.sock" and keep separate XDG data dirs isolated.
+    if dir.as_os_str().len() + 20 < 100 {
+        return dir;
+    }
+    use std::os::unix::ffi::OsStrExt;
+    let hash = data_dir
+        .as_os_str()
+        .as_bytes()
+        .iter()
+        .fold(0xcbf29ce484222325u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+        });
+    std::path::Path::new("/tmp")
+        .join(format!("shift-{uid}-{hash:016x}"))
+        .join(name)
 }
 
 /// Uid of the process at the other end of a Unix socket.
@@ -275,6 +290,24 @@ pub fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn socket_fallback_is_scoped_to_data_dir() {
+        let a = std::path::PathBuf::from(format!("/tmp/{}", "a".repeat(100)));
+        let b = std::path::PathBuf::from(format!("/tmp/{}", "b".repeat(100)));
+        let a_control = socket_dir_for(&a, "control", 501);
+        let b_control = socket_dir_for(&b, "control", 501);
+        assert_ne!(a_control, b_control);
+        assert_eq!(
+            a_control.parent(),
+            socket_dir_for(&a, "sessiond", 501).parent()
+        );
+        assert!(a_control.as_os_str().len() + 20 < 100);
+        assert_eq!(
+            socket_dir_for(std::path::Path::new("/tmp/short"), "control", 501),
+            std::path::Path::new("/tmp/short/control")
+        );
+    }
 
     #[test]
     fn frames_roundtrip() {

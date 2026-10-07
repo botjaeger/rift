@@ -11,12 +11,16 @@
 //! why the feature is off by default and "Clear saved block transcripts"
 //! deletes every file.
 use serde::{Deserialize, Serialize};
+use std::io::Read;
 use std::path::PathBuf;
 use std::time::Duration;
 
 pub const VERSION: u32 = 1;
 pub const MAX_BLOCKS: usize = 200;
 pub const MAX_BYTES: usize = 1 << 20;
+pub const MAX_FIELD_BYTES: usize = 16 << 10;
+/// Worst-case JSON escaping plus per-block metadata.
+pub const MAX_FILE_BYTES: usize = MAX_BYTES * 6 + MAX_BLOCKS * 256;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Transcript {
@@ -45,11 +49,17 @@ impl Transcript {
         let mut total = 0usize;
         let mut keep = blocks.len();
         for (i, b) in blocks.iter_mut().enumerate().rev() {
+            truncate_field(&mut b.command);
+            if let Some(cwd) = &mut b.cwd {
+                truncate_field(cwd);
+            }
+            let fields = b.command.len() + b.cwd.as_ref().map_or(0, String::len);
             let room = MAX_BYTES.saturating_sub(total);
-            if room == 0 {
+            if room < fields || room == 0 {
                 keep = blocks.len() - i - 1;
                 break;
             }
+            let room = room - fields;
             if b.output.len() > room {
                 let mut cut = b.output.len() - room;
                 while !b.output.is_char_boundary(cut) {
@@ -57,7 +67,7 @@ impl Transcript {
                 }
                 b.output = b.output[cut..].to_string();
             }
-            total += b.output.len() + b.command.len();
+            total += b.output.len() + fields;
         }
         let skip = blocks.len() - keep;
         Transcript {
@@ -95,6 +105,33 @@ impl Transcript {
             .map(|b| (Duration::from_millis(b.duration_ms), b.cwd.clone()))
             .collect()
     }
+
+    fn valid(&self) -> bool {
+        self.version == VERSION
+            && self.blocks.len() <= MAX_BLOCKS
+            && self.blocks.iter().all(|b| {
+                b.command.len() <= MAX_FIELD_BYTES
+                    && b.cwd.as_ref().is_none_or(|c| c.len() <= MAX_FIELD_BYTES)
+            })
+            && self
+                .blocks
+                .iter()
+                .try_fold(0usize, |total, b| {
+                    total
+                        .checked_add(b.command.len())?
+                        .checked_add(b.output.len())?
+                        .checked_add(b.cwd.as_ref().map_or(0, String::len))
+                })
+                .is_some_and(|total| total <= MAX_BYTES)
+    }
+}
+
+fn truncate_field(s: &mut String) {
+    let mut end = s.len().min(MAX_FIELD_BYTES);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s.truncate(end);
 }
 
 /// Text only: drop ESC and other C0 controls except tab.
@@ -133,6 +170,9 @@ pub fn new_id() -> String {
 
 /// Atomic, private (0600) write.
 pub fn save(id: &str, t: &Transcript) {
+    if !t.valid() {
+        return;
+    }
     let (Some(path), Some(dir)) = (path(id), dir()) else {
         return;
     };
@@ -160,9 +200,25 @@ pub fn save(id: &str, t: &Transcript) {
 }
 
 pub fn load(id: &str) -> Option<Transcript> {
-    let body = std::fs::read(path(id)?).ok()?;
+    let path = path(id)?;
+    let meta = std::fs::metadata(&path).ok()?;
+    if !meta.is_file() || meta.len() > MAX_FILE_BYTES as u64 {
+        return None;
+    }
+    load_reader(std::fs::File::open(path).ok()?)
+}
+
+fn load_reader(reader: impl std::io::Read) -> Option<Transcript> {
+    let mut body = Vec::new();
+    reader
+        .take(MAX_FILE_BYTES as u64 + 1)
+        .read_to_end(&mut body)
+        .ok()?;
+    if body.len() > MAX_FILE_BYTES {
+        return None;
+    }
     let t: Transcript = serde_json::from_slice(&body).ok()?;
-    (t.version == VERSION).then_some(t)
+    t.valid().then_some(t)
 }
 
 /// Delete every saved transcript except `keep` (ids still referenced by the
@@ -247,5 +303,34 @@ mod tests {
         let back: Transcript = serde_json::from_str(&s).unwrap();
         assert_eq!(back, t);
         assert_eq!(back.meta()[0].0, Duration::from_millis(12));
+    }
+
+    #[test]
+    fn restored_data_is_bounded_before_replay() {
+        let read =
+            |t: &Transcript| load_reader(std::io::Cursor::new(serde_json::to_vec(t).unwrap()));
+        let valid = Transcript::bounded(vec![block("hi", "text")], 1);
+        assert_eq!(read(&valid), Some(valid.clone()));
+        let mut bad = valid.clone();
+        bad.version += 1;
+        assert!(read(&bad).is_none());
+        bad = valid.clone();
+        bad.blocks = vec![block("", ""); MAX_BLOCKS + 1];
+        assert!(read(&bad).is_none());
+        for field in ["command", "cwd", "output"] {
+            let mut bad = valid.clone();
+            match field {
+                "command" => bad.blocks[0].command = "x".repeat(MAX_FIELD_BYTES + 1),
+                "cwd" => bad.blocks[0].cwd = Some("x".repeat(MAX_FIELD_BYTES + 1)),
+                _ => bad.blocks[0].output = "x".repeat(MAX_BYTES + 1),
+            }
+            assert!(read(&bad).is_none());
+            let bounded = Transcript::bounded(bad.blocks, 1);
+            assert_eq!(read(&bounded), Some(bounded));
+        }
+        assert!(load_reader(std::io::repeat(b' ')).is_none());
+        assert!(load_reader(&b"{broken"[..]).is_none());
+        let escaped = Transcript::bounded(vec![block("\0", &"\0".repeat(MAX_BYTES))], 1);
+        assert_eq!(read(&escaped), Some(escaped));
     }
 }

@@ -47,6 +47,8 @@ insensitive) stay visible. Running it again on the same block, or choosing
   password prompts, integration-less shells). Bound keys that would shadow
   terminal keys (PageUp/PageDown/Home/End/⌃M) automatically fall through to
   the PTY when the editor is inactive.
+- Cursor motion and deletion step over whole grapheme clusters (an emoji
+  with modifiers, a letter with combining accents), never part of one.
 - Editor niceties: word motion & kills (whitespace-delimited), undo/redo
   (snapshot stack, cap 100, cleared on submit), history walk (↑/↓ preserving
   the in-progress line), ⌃R history palette, multi-source completion with
@@ -98,6 +100,11 @@ the whole buffer.
   encoding; ⇧ forces local selection. Focus in/out (1004) is reported when
   the window gains or loses focus.
 - ⌘-click opens URLs, OSC 8 hyperlinks and existing file paths (see ui.md).
+  A relative path resolves against the directory the command that printed
+  it ran in (the pane's current directory for output outside a block); hint
+  mode resolves paths the same way.
+- A copy, paste or open that fails shows a toast with the reason; `Copied`
+  appears only when the clipboard took the text.
 - Click a block header: select the block. Click its chevron: collapse.
 - **Copy on select** (`copy_on_select`, off by default): a drag-selection is
   copied to the clipboard as soon as the mouse is released.
@@ -108,6 +115,11 @@ Sources merged, deduped, capped at 50: **`$PATH` command names** (first word
 only, ≥ 2 chars, max 12 — scanned once per process from every executable on
 `$PATH`), command specs (subcommands and flags with descriptions for common tools — git, cargo, docker, npm and more; `completion_specs.rs`), filesystem paths (`~/` expanded;
 hidden files only when the prefix starts with `.`), and command history.
+
+Path completions are inserted backslash-escaped as one shell word (valid in
+bash, zsh and fish; a leading `~/` stays unescaped so it still expands), and
+a token typed with backslashes or quotes (`My\ Dir/`, `"My Dir/`) still
+completes. Names containing control characters are not offered.
 
 History matches drive the ghost text: whole-buffer prefix matches, the pane's
 own history first (last 200) then the imported shell history (newest 3000),
@@ -172,8 +184,13 @@ ignored. Warp's own files drop in unchanged.
   (⌃⌘arrows), drag resize, zoom toggle (⇧⌘⏎), close (⌃⇧W/⌘W — last pane closes
   the tab, last tab exits).
 - **Synchronized inputs** (⌥⌘I, tab context menu or Window menu): typing and
-  submitting in one pane of a split tab goes to every pane of that tab; the
-  tab shows a sync marker while it is on.
+  submitting in one pane of a split tab goes to the other panes of that tab;
+  the tab shows a sync marker while it is on. Input only reaches panes in the
+  same mode: raw keys and pastes go to the panes running a program, each
+  encoded for that pane's own cursor-key, kitty keyboard and bracketed-paste
+  modes; a command submitted from the editor runs only in the panes at a
+  prompt, and a toast counts the panes it skipped. A multi-line paste asks
+  first if any recipient lacks bracketed paste.
 - **Session restore**: tab layout + cwds persisted atomically to
   `~/.local/share/shift/session.toml` on every structural change; reopened on
   launch when `restore_session = true`.
@@ -185,15 +202,22 @@ ignored. Warp's own files drop in unchanged.
   not running. Replay is text only (escape sequences stripped). Turning the
   setting off, closing the pane, or "Clear saved block transcripts" deletes
   the files; nothing is redacted, so keep it off where output holds secrets.
+  Loading also enforces the 200-block / 1 MiB decoded text budget (including
+  commands and directories), with 16 KiB per command/directory and a bounded
+  JSON read. Oversized or malformed saved transcripts are ignored.
 - **Vertical tabs** (`tab_layout = "vertical"`, Settings → Appearance, or
   "Toggle vertical tabs"): a 220px rail lists every tab with its shell,
   title, directory and git branch, pane count, sync state, activity dot and
-  color; click selects, × closes.
+  color; click selects, × closes, dragging a row up or down reorders. When
+  the tabs do not fit, the active one stays visible and `+N above` /
+  `+N more` lines stand in for the rest, marked with the most urgent alert
+  among them.
 - **Session switcher** (⇧⌘O): one fuzzy list of tabs, panes of split tabs
   (directory and running job), tabs of other Shift windows (focusing one
   raises that window), detached session-service shells, and the 40 newest
   finished blocks; Enter jumps there (a block is selected and scrolled into
-  view).
+  view). Other windows and detached shells load in the background; the list
+  remains usable while an unresponsive window times out.
 - **Hint mode** (⇧⌘H): every visible URL, existing file path and block
   header gets a letter label; typing it opens the link/path or selects the
   block, ⇧ + letter copies it (a block copies its output). Esc cancels.
@@ -241,9 +265,13 @@ emits OSC 133 (blocks) and OSC 7 (cwd tracking).
 `Starting zsh…` placeholder on the input line until the shell's first prompt; no terminal
 cursor shows while it is up. For a shell without integration, the placeholder leaves and the
 cursor shows 1.5 s after its first byte. Session restore
-respawns tabs at their saved cwds. Shell history (`~/.zsh_history`, EXTENDED
-format, multiline entries, 0x83 unmetafy) imported once for the history
-palette. The first launch after an update opens What's New (release notes
+respawns tabs at their saved cwds. The shell's history is imported once for
+the history palette, from the configured shell's own file: zsh
+(`$HISTFILE`, else `~/.zsh_history`; EXTENDED format, multiline entries,
+0x83 unmetafy), bash (`$HISTFILE`, else `~/.bash_history`; `#<epoch>`
+timestamp lines skipped) or fish (`$XDG_DATA_HOME/fish/fish_history`, else
+`~/.local/share/fish/fish_history`). Only the last 4 MiB of the file is
+read. The first launch after an update opens What's New (release notes
 from `CHANGELOG.md`); the last seen version lives in
 `~/.local/share/shift/last-seen-version`, and a first install only records
 it.
@@ -274,7 +302,9 @@ it.
   (possibly over ssh) make the terminal read local files — and iTerm2
   downloads (`inline=0`) are ignored. Bounds: 32 MiB payload and 40 M pixels
   per image, 320 MiB decoded and 512 placements per pane, 256 MiB of GPU
-  textures (least recently drawn evicted). Sixel is not implemented: the
+  textures (least recently drawn evicted). Placements span at most 1,000 cells
+  in each dimension; percentage height uses the terminal's screen rows.
+  Invalid or non-finite iTerm dimensions are rejected. Sixel is not implemented: the
   kitty and iTerm2 protocols cover the TUIs that draw images (yazi, timg,
   chafa, icat, imgcat, viu), and a Sixel decoder would add the largest parser
   surface for the least-used format.
@@ -311,7 +341,9 @@ replay.
 - The service listens on `~/.local/share/shift/sessiond/sock` (a 0700
   directory; other users' connections are refused) and exits 10 s after its
   last shell and window are gone. A slow window is disconnected rather than
-  buffering without bound; it reattaches and replays.
+  buffering without bound; it reattaches and replays. If the configured data
+  directory is too long for a Unix socket path, Shift uses a shorter path
+  under `/tmp` specific to that data directory.
 - If the service cannot start, the shell runs locally and a toast says so.
 
 ## Control API
@@ -327,7 +359,10 @@ Each window listens on `~/.local/share/shift/control/<pid>.sock`
 `shift-terminal ctl list|status|focus|split|open|send-text` is the client
 (`ctl help` for flags); requests are newline-delimited JSON, answered on the
 UI thread. The session switcher (⇧⌘O) uses it to list and focus tabs of
-other Shift windows.
+other Shift windows. Permission changes from Settings or config reload revoke
+existing connections and queued requests before execution. Connections are
+limited to 32, with five-second read/write inactivity timeouts; request lines
+are bounded to 1 MiB while reading.
 
 ## Notifications (attention center)
 
@@ -351,7 +386,11 @@ selects the block. The list keeps the newest 200.
 - **Coding agents**: Claude Code, Codex, OpenCode and Gemini CLI are
   recognized from the running command; their notifications show the agent's
   badge, and the wording sorts them into waiting (permission, approval,
-  input), error, or task completed. Setup per agent:
+  input), error, or task completed. Words match whole (`incomplete` is not
+  `complete`); an explicit request (`needs your permission`) wins, then
+  error words (`permission denied`, `failed`) beat a bare `permission`, and
+  negated errors (`no errors`, `0 errors`, `without error`) do not count.
+  Setup per agent:
   [configuration](configuration.md#notifications--bell).
 - **Password prompts**: a running command in a background pane whose cursor
   line ends like `Password:` or `Enter passphrase for key …:` raises one
@@ -361,23 +400,32 @@ selects the block. The list keeps the newest 200.
 
 ⇧⌘E opens the file explorer: the active pane's project (git working tree,
 else its directory) as a lazily expanded tree with ignored files hidden and
-git status colors. A file opens in a read-only viewer over the pane area
+git status colors. A folder that cannot be read shows the error (e.g.
+`Permission denied`); one with more than 2,000 entries shows the first
+2,000 in display order, then `… more entries not shown` (a folder is read
+no further than 100,000 entries, ignored ones included). A file opens in a read-only viewer over the pane area
 (line numbers, keyword/string/comment highlighting, 4 MB limit, binary
-detection); ⌥-click inserts its path into the command line.
+detection, ⌘F finds in the file); ⌥-click inserts its path into the command
+line. Preview reads and
+highlighting run in the background. Only regular files are accepted, and
+the byte limit is enforced during reading, including when a file grows.
 
 ⇧⌘G opens code review: staged and unstaged changes (untracked included) as
 files, hunks and lines. Stage, unstage or revert a whole file or one hunk;
-revert asks first and only discards unstaged work. Hunk actions re-diff and
-match the hunk by its line ranges before writing, so a stale panel never
-applies the wrong hunk. The model loads on a background thread and reloads
-when a command finishes. Details in [ui.md](ui.md).
+revert asks first and only discards unstaged work. Hunk actions re-diff,
+match the hunk by its line ranges and content, and apply that same checked
+diff, so a stale panel never applies the wrong hunk. A hunk cut by the
+4,000-line limit offers only file actions. The model loads on a background
+thread and reloads when a command finishes; writes run in order on a
+background writer thread. Details in [ui.md](ui.md).
 
 ## SSH profiles
 
 Palette → "SSH: <name>" opens a tab titled after the profile that runs the
 system `ssh` (so your ssh config, agent, `known_hosts` checking and prompts
 all apply). Profiles are `[[ssh_profiles]]` in config.toml plus every concrete
-`Host` of `~/.ssh/config` (and its `Include`s).
+`Host` of `~/.ssh/config` (and its `Include`s); trailing comments are ignored
+and aliases containing `=` are preserved.
 
 "Install Shift shell integration on <name>" asks first, then runs an
 installer over ssh in a new tab: it writes `~/.local/share/shift/shift.{bash,
@@ -401,14 +449,19 @@ Shift draws every surface itself, so it publishes an AccessKit tree
   succeeded/failed with exit code and duration, value = output, last 4000
   characters), the visible **terminal** text, and the owned **command
   editor** as a text field.
+- **Panels**: the file explorer and code review, with their buttons; the
+  explorer's notices (an unreadable folder, a cut listing) are its text.
 - **Overlays**: the palette (query field, result options, selection), find
-  bar (query and match count), settings (pages, switches with their state,
+  bar (query and match count), block filter (its own label, query and
+  keep/clear instructions), settings (pages, switches with their state,
   buttons and choices with their current values), block menu, and the
   confirm dialogs.
 - **Announcements**: a polite live region says "`command` succeeded/failed …"
   when a command finishes in the visible tab.
-- **Actions**: Click/Focus on a node clicks its on-screen rect through the
-  normal mouse routing, so it behaves exactly like the pointer.
+- **Actions**: Click on a node clicks its on-screen rect through the normal
+  mouse routing, so it behaves exactly like the pointer. Only Click
+  activates; Focus is not advertised, so moving the screen reader's focus
+  never presses anything.
 
 The tree is only built while an assistive technology is attached and is
 pushed only when it changes. The script driver's `dump` prints it.

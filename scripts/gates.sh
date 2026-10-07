@@ -3,7 +3,7 @@
 # Shift quality gates: one runner for local checks and CI.
 #
 #   scripts/gates.sh                 # default set: fmt clippy test doc shell docs
-#   scripts/gates.sh all             # default set + release + linux
+#   scripts/gates.sh all             # default set + release + ui + linux
 #   scripts/gates.sh fmt clippy      # only the named gates
 #   scripts/gates.sh --list          # describe every gate
 #
@@ -17,7 +17,7 @@ set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
 DEFAULT=(fmt clippy test doc shell docs)
-ALL=(fmt clippy test doc shell docs release linux)
+ALL=(fmt clippy test doc shell docs release ui linux)
 
 describe() {
     cat <<'EOF'
@@ -28,7 +28,8 @@ doc      cargo doc --workspace --no-deps --locked, rustdoc warnings denied
 shell    shellcheck on packaging/*.sh, scripts/*.sh, .githooks/*, bash hooks; zsh -n and fish --no-execute on their hooks
 docs     CLAUDE.md and AGENTS.md identical; every relative link in *.md resolves
 release  cargo build --release --locked
-linux    clippy + test + release build inside packaging/linux-verify.Dockerfile (docker)
+ui       isolated scripted UI regressions (display or xvfb-run required)
+linux    clippy + test + release build + scripted UI (xvfb) inside packaging/linux-verify.Dockerfile (docker)
 EOF
 }
 
@@ -39,6 +40,7 @@ gate_clippy() { cargo clippy --workspace --all-targets --locked -- -D warnings; 
 gate_test() { cargo test --workspace --locked; }
 gate_doc() { RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked; }
 gate_release() { cargo build --release --locked; }
+gate_ui() { scripts/ui-smoke.sh; }
 
 gate_shell() {
     have shellcheck || { echo "shellcheck not installed (brew install shellcheck / apt install shellcheck)"; return 1; }
@@ -76,13 +78,17 @@ gate_docs() {
 gate_linux() {
     have docker || { echo "docker not installed"; return 1; }
     docker build -q -t shift-linux-verify -f packaging/linux-verify.Dockerfile packaging >/dev/null || return 1
-    docker run --rm -v "$PWD:/src" -w /src \
+    docker run --rm --init -v "$PWD:/src" -w /src \
         -v shift-cargo-registry:/usr/local/cargo/registry \
         -e CARGO_TARGET_DIR=/src/target/linux-docker \
         shift-linux-verify bash -c '
             cargo clippy --workspace --all-targets --locked -- -D warnings &&
             cargo test --workspace --locked &&
-            cargo build --release --locked'
+            cargo build --release --locked &&
+            mkdir -p /tmp/xdg && chmod 700 /tmp/xdg &&
+            XDG_RUNTIME_DIR=/tmp/xdg LIBGL_ALWAYS_SOFTWARE=1 WGPU_BACKEND=vulkan \
+            SHIFT_TEST_BIN=/src/target/linux-docker/release/shift-terminal \
+                xvfb-run -a scripts/ui-smoke.sh'
 }
 
 case "${1:-}" in

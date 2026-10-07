@@ -195,25 +195,34 @@ impl Agent {
     }
 
     /// Agent behind a command line: the program word of any of its
-    /// `;` / `&&` / `||` / `|` parts, after `VAR=value` assignments, `env`,
-    /// `npx`/`bunx`, and any directory prefix.
+    /// `;` / `&&` / `||` / `|` parts (quotes and backslashes respected),
+    /// after `VAR=value` assignments, `sudo`/`nohup`/`env`/`exec`/…,
+    /// `npx`/`bunx`/`pnpm dlx` and their flags, and any directory prefix.
     pub fn from_command(command: &str) -> Option<Agent> {
-        command
-            .split([';', '&', '|', '\n'])
-            .find_map(Self::from_simple_command)
+        split_commands(command)
+            .iter()
+            .find_map(|words| Self::from_simple_command(words))
     }
 
-    fn from_simple_command(command: &str) -> Option<Agent> {
-        let mut words = command.split_whitespace();
+    fn from_simple_command(words: &[String]) -> Option<Agent> {
+        let mut words = words.iter().map(String::as_str).peekable();
+        // after a prefix command, its `-flags` precede the program
+        let mut skip_flags = false;
         let program = loop {
             let w = words.next()?;
-            if w.contains('=') && !w.starts_with('=') {
+            if is_assignment(w) || (skip_flags && w.starts_with('-')) {
+                continue;
+            }
+            if matches!(w, "pnpm" | "yarn") && words.peek() == Some(&"dlx") {
+                words.next();
+                skip_flags = true;
                 continue;
             }
             if matches!(
                 w,
-                "env" | "npx" | "bunx" | "pnpx" | "exec" | "command" | "time"
+                "sudo" | "nohup" | "env" | "npx" | "bunx" | "pnpx" | "exec" | "command" | "time"
             ) {
+                skip_flags = true;
                 continue;
             }
             break w;
@@ -230,6 +239,73 @@ impl Agent {
     }
 }
 
+/// `NAME=value` (shell variable assignment).
+fn is_assignment(w: &str) -> bool {
+    w.split_once('=').is_some_and(|(name, _)| {
+        !name.is_empty()
+            && !name.starts_with(|c: char| c.is_ascii_digit())
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
+/// Split a command line into simple commands at unquoted `;`, `&`, `|`
+/// and newlines, each a list of words with quotes and backslash escapes
+/// removed. Empty commands are dropped.
+fn split_commands(line: &str) -> Vec<Vec<String>> {
+    let mut commands: Vec<Vec<String>> = Vec::new();
+    let mut words: Vec<String> = Vec::new();
+    let mut word = String::new();
+    let mut in_word = false;
+    let mut quote: Option<char> = None;
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some('\''), '\'') => quote = None,
+            (Some('\''), _) => word.push(c),
+            (Some('"'), '"') => quote = None,
+            (Some('"'), '\\') => match chars.next() {
+                Some(n @ ('"' | '\\' | '$' | '`')) => word.push(n),
+                Some(n) => {
+                    word.push('\\');
+                    word.push(n);
+                }
+                None => word.push('\\'),
+            },
+            (Some(_), _) => word.push(c),
+            (None, '\'' | '"') => {
+                quote = Some(c);
+                in_word = true;
+            }
+            (None, '\\') => {
+                if let Some(n) = chars.next() {
+                    word.push(n);
+                }
+                in_word = true;
+            }
+            (None, ';' | '&' | '|' | '\n') | (None, ' ' | '\t') => {
+                if in_word {
+                    words.push(std::mem::take(&mut word));
+                    in_word = false;
+                }
+                if !matches!(c, ' ' | '\t') && !words.is_empty() {
+                    commands.push(std::mem::take(&mut words));
+                }
+            }
+            (None, _) => {
+                word.push(c);
+                in_word = true;
+            }
+        }
+    }
+    if in_word {
+        words.push(word);
+    }
+    if !words.is_empty() {
+        commands.push(words);
+    }
+    commands
+}
+
 /// What a terminal notification's text means (Warp's Complete / Request /
 /// Error), from the wording agents use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -240,28 +316,76 @@ pub enum Meaning {
     Info,
 }
 
+/// Phrases are matched as whole words ("incomplete" is not "complete").
+/// Order: an explicit request phrase, then an error word (unless negated:
+/// "no errors", "0 errors", "without error"), then a bare request word
+/// ("Grant permission?"), then a completion word.
 pub fn classify(text: &str) -> Meaning {
     let t = text.to_lowercase();
-    let has = |words: &[&str]| words.iter().any(|w| t.contains(w));
+    let has = |phrases: &[&str]| phrases.iter().any(|p| phrase_at(&t, p).next().is_some());
+    let has_error = [
+        "permission denied",
+        "access denied",
+        "denied",
+        "failed",
+        "failure",
+        "failures",
+        "error",
+        "errors",
+        "errored",
+    ]
+    .iter()
+    .any(|p| phrase_at(&t, p).any(|at| !negated(&t[..at])));
     if has(&[
-        "permission",
-        "approval",
-        "approve",
+        "approval requested",
+        "needs your permission",
+        "requires your approval",
         "waiting for your input",
         "waiting for input",
-        "needs your",
         "input required",
+        "needs your",
         "requires your",
-        "confirm",
+        "please confirm",
+        "confirm?",
+        "confirmation required",
     ]) {
         Meaning::Request
-    } else if has(&["error", "failed", "failure"]) {
+    } else if has_error {
         Meaning::Error
-    } else if has(&["complete", "finished", "done", "turn ended", "task ended"]) {
+    } else if has(&["permission", "approval", "approve"]) {
+        Meaning::Request
+    } else if has(&[
+        "complete",
+        "completed",
+        "finished",
+        "done",
+        "turn ended",
+        "task ended",
+    ]) {
         Meaning::Complete
     } else {
         Meaning::Info
     }
+}
+
+/// Byte offsets where `phrase` occurs in `text` as whole words: no
+/// alphanumeric character directly before or after it.
+fn phrase_at<'a>(text: &'a str, phrase: &'a str) -> impl Iterator<Item = usize> + 'a {
+    let word = |c: Option<char>| c.is_some_and(char::is_alphanumeric);
+    text.match_indices(phrase).filter_map(move |(at, _)| {
+        let before = text[..at].chars().next_back();
+        let after = text[at + phrase.len()..].chars().next();
+        let edge_ok = |edge: Option<char>, inner: Option<char>| !(word(edge) && word(inner));
+        (edge_ok(before, phrase.chars().next()) && edge_ok(after, phrase.chars().next_back()))
+            .then_some(at)
+    })
+}
+
+/// `prefix` (text before an error word) ends with a negation: "no",
+/// "0", "zero", "without".
+fn negated(prefix: &str) -> bool {
+    let last = prefix.trim_end().rsplit(char::is_whitespace).next();
+    prefix.ends_with(char::is_whitespace) && matches!(last, Some("no" | "0" | "zero" | "without"))
 }
 
 /// A password prompt at the end of the cursor line (`Password:`,
@@ -360,6 +484,49 @@ mod tests {
         );
         assert_eq!(Agent::from_command("git commit -m claude"), None);
         assert_eq!(Agent::from_command(""), None);
+        // separators inside quotes or escaped do not split
+        assert_eq!(Agent::from_command("echo \"a; claude go\""), None);
+        assert_eq!(Agent::from_command("echo 'a | codex'"), None);
+        assert_eq!(Agent::from_command("echo a\\; claude"), None);
+        // prefix commands and their flags
+        assert_eq!(Agent::from_command("sudo claude"), Some(Agent::ClaudeCode));
+        assert_eq!(
+            Agent::from_command("nohup env -i FOO=1 gemini"),
+            Some(Agent::Gemini)
+        );
+        assert_eq!(Agent::from_command("npx -y codex"), Some(Agent::Codex));
+        assert_eq!(
+            Agent::from_command("pnpm dlx --silent opencode"),
+            Some(Agent::OpenCode)
+        );
+        assert_eq!(
+            Agent::from_command("\"claude\" -c"),
+            Some(Agent::ClaudeCode)
+        );
+    }
+
+    #[test]
+    fn meanings_by_whole_words() {
+        let cases = [
+            ("Permission denied (publickey)", Meaning::Error),
+            ("Access denied", Meaning::Error),
+            ("Confirmation complete", Meaning::Complete),
+            ("Task completed", Meaning::Complete),
+            ("No errors found", Meaning::Info),
+            ("Lint passed with 0 errors", Meaning::Info),
+            ("Finished without errors", Meaning::Complete),
+            ("No errors, 2 failures", Meaning::Error),
+            ("Task abandoned", Meaning::Info),
+            ("Build incomplete", Meaning::Info),
+            ("Terror alert", Meaning::Info),
+            ("Please confirm the deploy", Meaning::Request),
+            ("Deploy to prod, confirm?", Meaning::Request),
+            ("Confirmation required", Meaning::Request),
+            ("Requires your approval: rm -rf", Meaning::Request),
+        ];
+        for (text, want) in cases {
+            assert_eq!(classify(text), want, "{text}");
+        }
     }
 
     #[test]

@@ -72,11 +72,12 @@ display-line building). Rendering is verified with the script driver below.
 | `shell` | `shellcheck` on packaging, scripts, git hooks and the bash hooks; `zsh -n` and `fish --no-execute` on the zsh and fish hooks |
 | `docs` | `CLAUDE.md` and `AGENTS.md` are identical; every relative link in every Markdown file resolves |
 | `release` | `cargo build --release --locked` |
-| `linux` | `clippy`, `test` and `release` inside the Linux docker image |
+| `ui` | `scripts/ui-smoke.sh`: isolated scripted input, state assertions and PNG capture; requires Python 3 and a display (or `xvfb-run`) |
+| `linux` | `clippy`, `test`, `release` and the scripted UI regressions (Xvfb, software Vulkan) inside the Linux docker image |
 
 ```sh
 scripts/gates.sh                 # fmt clippy test doc shell docs
-scripts/gates.sh all             # + release + linux
+scripts/gates.sh all             # + release + ui + linux
 scripts/gates.sh clippy test     # a subset
 scripts/gates.sh --list
 ```
@@ -84,8 +85,16 @@ scripts/gates.sh --list
 Every requested gate runs even after one fails; the summary lists each result
 with its time and the commit. A gate whose tool is missing fails instead of
 passing silently. CI (`.github/workflows/ci.yml`) runs `scripts/gates.sh`
-on macOS 14 (fmt clippy test doc release) and Ubuntu 24.04 (the same plus
-`shell`), so a local pass predicts CI.
+on macOS 14 (fmt clippy test doc docs release) and Ubuntu 24.04 (the same plus
+`shell` and `ui` under Xvfb/Mesa). Release publication requires that same
+reusable validation workflow to pass on the tagged revision.
+
+The `ui` gate checks command blocks, palette input while another window's
+socket is stalled, background file preview, theme-only hot reload, automation
+config reload, and pane splitting. It uses scratch XDG config/data directories
+with notifications disabled and retains captures, state dumps and logs under
+`/tmp/shift-ui-*`. Set `SHIFT_TEST_BIN` to test an already built binary;
+otherwise it builds the debug binary first.
 
 ## Verifying UI changes
 
@@ -163,6 +172,7 @@ Workspace dependencies (`Cargo.toml`):
 | `bytemuck`, `pollster` | GPU buffers, blocking on adapter setup | |
 | `image`, `png`, `flate2` | Inline images, screenshots, kitty zlib payloads | |
 | `serde`, `toml`, `serde_yaml_ng`, `serde_json` | Config, themes, Warp YAML, IPC | |
+| `toml_edit` | Settings saves edit `config.toml` in place (comments, order, unknown keys) | |
 | `arc-swap`, `notify` | Lock-free config snapshot, hot reload | |
 | `nucleo-matcher` | Fuzzy ranking in the palette | |
 | `arboard` | Clipboard (Wayland data-control) | |
@@ -188,7 +198,7 @@ Every script takes `--target <triple>`, `--target-dir <dir>` and
 | `packaging/make-app.sh` | macOS | `target/Shift.app` (ad-hoc signed) |
 | `packaging/make-dmg.sh` | macOS | `target/Shift-<version>-<arch>.dmg` (run `make-app.sh` first) |
 | `packaging/make-deb.sh` | Linux | `target/shift-terminal_<version>_<arch>.deb` |
-| `packaging/make-appimage.sh` | Linux | `target/Shift-<version>-<arch>.AppImage` (downloads `appimagetool` once) |
+| `packaging/make-appimage.sh` | Linux | `target/Shift-<version>-<arch>.AppImage` (pins appimagetool 1.9.1 and verifies SHA-256 before every execution, including cached copies) |
 | `packaging/make-tarball.sh` | both | `target/shift-terminal-<version>-<os>-<arch>.tar.gz` |
 
 The version lives only in `[workspace.package]` of `Cargo.toml`. Every bump

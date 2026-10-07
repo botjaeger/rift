@@ -613,6 +613,15 @@ pub fn unbracketed_paste(text: &str) -> Vec<u8> {
     text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
 }
 
+/// Paste bytes for one recipient, framed for its own paste mode.
+pub fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
+    if bracketed {
+        bracketed_paste(text)
+    } else {
+        unbracketed_paste(text)
+    }
+}
+
 /// Whether an unbracketed paste of `text` would press Enter.
 pub fn paste_submits_lines(text: &str) -> bool {
     text.contains(['\n', '\r'])

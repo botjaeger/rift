@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -203,6 +203,87 @@ pub fn config_dir() -> Option<PathBuf> {
         })
 }
 
+/// Top-level `Option` settings: absent from a serialized default, so
+/// `merge_table` cannot tell them from unknown keys without this list.
+const OPTIONAL_KEYS: &[&str] = &["shell"];
+
+/// Make `doc` hold `new` (see `Config::edit_toml`). `default` is the same
+/// table for a default config; an empty `default` marks a map such as
+/// `[keybindings]`, whose entries are exactly those of `new`.
+fn merge_table(
+    doc: &mut dyn toml_edit::TableLike,
+    new: &toml::Table,
+    default: &toml::Table,
+    optional: &[&str],
+) {
+    let is_map = default.is_empty();
+    let stale: Vec<String> = doc
+        .iter()
+        .map(|(k, _)| k.to_string())
+        .filter(|k| {
+            !new.contains_key(k)
+                && (is_map || default.contains_key(k) || optional.contains(&k.as_str()))
+        })
+        .collect();
+    for k in stale {
+        doc.remove(&k);
+    }
+    let empty = toml::Table::new();
+    for (k, v) in new {
+        let dv = default.get(k);
+        let sub_default = dv.and_then(toml::Value::as_table).unwrap_or(&empty);
+        match (doc.get_mut(k), v) {
+            (Some(item), toml::Value::Table(nt)) if item.is_table_like() => {
+                if let Some(t) = item.as_table_like_mut() {
+                    merge_table(t, nt, sub_default, &[]);
+                }
+            }
+            (Some(item), _) => {
+                if plain_value(k, item).as_ref() != Some(v)
+                    && let Some(mut fresh) = edit_item(k, v)
+                {
+                    // keep the value's trailing comment and spacing
+                    if let (Some(old), Some(fresh_v)) = (item.as_value(), fresh.as_value_mut()) {
+                        *fresh_v.decor_mut() = old.decor().clone();
+                    }
+                    *item = fresh;
+                }
+            }
+            (None, toml::Value::Table(nt)) => {
+                let mut t = toml_edit::Table::new();
+                merge_table(&mut t, nt, sub_default, &[]);
+                if !t.is_empty() {
+                    doc.insert(k, toml_edit::Item::Table(t));
+                }
+            }
+            (None, _) => {
+                if dv != Some(v)
+                    && let Some(fresh) = edit_item(k, v)
+                {
+                    doc.insert(k, fresh);
+                }
+            }
+        }
+    }
+}
+
+/// `item` (stored under `key`) as a plain TOML value, for comparison.
+fn plain_value(key: &str, item: &toml_edit::Item) -> Option<toml::Value> {
+    let mut d = toml_edit::DocumentMut::new();
+    d.insert(key, item.clone());
+    toml::from_str::<toml::Table>(&d.to_string())
+        .ok()?
+        .remove(key)
+}
+
+/// `value` as an editable item, formatted like `toml::to_string_pretty`.
+fn edit_item(key: &str, value: &toml::Value) -> Option<toml_edit::Item> {
+    let mut t = toml::Table::new();
+    t.insert(key.to_string(), value.clone());
+    let mut d: toml_edit::DocumentMut = toml::to_string_pretty(&t).ok()?.parse().ok()?;
+    d.remove(key)
+}
+
 pub fn config_path() -> Option<PathBuf> {
     config_dir().map(|d| d.join("config.toml"))
 }
@@ -212,19 +293,33 @@ pub fn themes_dir() -> Option<PathBuf> {
 }
 
 impl Config {
-    pub fn load() -> Config {
-        let Some(path) = config_path() else {
-            return Config::default();
-        };
-        match std::fs::read_to_string(&path) {
-            Ok(s) => match toml::from_str(&s) {
-                Ok(c) => c,
-                Err(e) => {
-                    log::warn!("config.toml parse error, using defaults: {e}");
-                    Config::default()
-                }
-            },
-            Err(_) => Config::default(),
+    /// Read `config.toml`. `Ok(None)`: no file yet (first run, defaults
+    /// apply). `Err`: the file exists but cannot be read or parsed — the
+    /// caller keeps its last good config rather than resetting to defaults,
+    /// which would silently re-enable `control_api`.
+    pub fn try_load() -> Result<Option<Config>, String> {
+        match config_path() {
+            Some(path) => Self::try_load_from(&path),
+            None => Ok(None),
+        }
+    }
+
+    pub fn try_load_from(path: &Path) -> Result<Option<Config>, String> {
+        match std::fs::read_to_string(path) {
+            Ok(s) => toml::from_str(&s)
+                .map(Some)
+                .map_err(|e| format!("{}: {e}", path.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("{}: {e}", path.display())),
+        }
+    }
+
+    /// Settings for a config file that exists but is invalid at startup:
+    /// defaults, except automation stays off until the file is fixed.
+    pub fn fallback() -> Config {
+        Config {
+            control_api: "off".into(),
+            ..Config::default()
         }
     }
 
@@ -232,11 +327,98 @@ impl Config {
         let Some(path) = config_path() else {
             return Err(std::io::Error::other("no config dir"));
         };
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
+        self.save_to(&path)
+    }
+
+    /// Edit the file in place (see `edit_toml`), then replace it atomically:
+    /// write a sibling temp file, flush it, keep the old file's
+    /// permissions, rename over the target. A failed write never truncates
+    /// the existing config, and the hot-reload watcher never reads a
+    /// half-written file.
+    pub fn save_to(&self, path: &Path) -> std::io::Result<()> {
+        use std::io::Write;
+        let dir = path
+            .parent()
+            .ok_or_else(|| std::io::Error::other("config path has no parent"))?;
+        std::fs::create_dir_all(dir)?;
+        let existing = match std::fs::read_to_string(path) {
+            Ok(s) => Some(s),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e),
+        };
+        let body = self
+            .edit_toml(existing.as_deref())
+            .map_err(std::io::Error::other)?;
+        let tmp = dir.join(format!(".config.toml.tmp-{}", std::process::id()));
+        let result = (|| {
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(body.as_bytes())?;
+            f.sync_all()?;
+            if let Ok(meta) = std::fs::metadata(path) {
+                std::fs::set_permissions(&tmp, meta.permissions())?;
+            }
+            std::fs::rename(&tmp, path)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
         }
-        let body = toml::to_string_pretty(self).map_err(std::io::Error::other)?;
-        std::fs::write(path, body)
+        result
+    }
+
+    /// The user's file (`existing`) changed to hold this config. A changed
+    /// value is rewritten in place, keeping its comments; a setting the
+    /// file never mentioned is added only when it differs from the
+    /// default; comments, order and unknown keys stay. A file that does not
+    /// parse is never rewritten. Should the edit not read back as exactly
+    /// this config, the whole file is written instead.
+    pub fn edit_toml(&self, existing: Option<&str>) -> Result<String, String> {
+        let mut doc: toml_edit::DocumentMut = existing
+            .unwrap_or("")
+            .parse()
+            .map_err(|e| format!("config.toml does not parse, not overwriting it: {e}"))?;
+        // a file of only comments keeps them on top, above the new settings
+        let header = if doc.as_table().is_empty() {
+            let text = doc.trailing().as_str().unwrap_or_default().to_string();
+            doc.set_trailing("");
+            text
+        } else {
+            String::new()
+        };
+        let table = |c: &Config| match toml::Value::try_from(c) {
+            Ok(toml::Value::Table(t)) => Ok(t),
+            Ok(_) => Err("config is not a table".to_string()),
+            Err(e) => Err(e.to_string()),
+        };
+        merge_table(
+            doc.as_table_mut(),
+            &table(self)?,
+            &table(&Config::default())?,
+            OPTIONAL_KEYS,
+        );
+        let out = format!("{header}{doc}");
+        match toml::from_str::<Config>(&out) {
+            Ok(back) if back == *self => Ok(out),
+            _ => toml::to_string_pretty(self).map_err(|e| e.to_string()),
+        }
+    }
+
+    /// Font size in points: non-finite falls back to the default, then
+    /// clamps to the supported range.
+    pub fn font_size(&self) -> f32 {
+        if self.font_size.is_finite() {
+            self.font_size.clamp(8.0, 28.0)
+        } else {
+            13.0
+        }
+    }
+
+    /// Line-height multiplier, validated like `font_size()`.
+    pub fn line_height(&self) -> f32 {
+        if self.line_height.is_finite() {
+            self.line_height.clamp(1.0, 2.2)
+        } else {
+            1.65
+        }
     }
 
     /// Resolve the configured theme: builtin name or user theme file.
@@ -372,6 +554,140 @@ mod tests {
         assert_eq!(c.start_dir(None), Some(tmp));
         c.working_directory = "~".into();
         assert_eq!(c.start_dir(None), Some(home));
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("shift-config-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn invalid_file_is_an_error_not_defaults() {
+        let dir = scratch("invalid");
+        let path = dir.join("config.toml");
+        assert_eq!(Config::try_load_from(&path), Ok(None));
+        std::fs::write(&path, "control_api = \"off\"\nfont_size = 19.0\n").unwrap();
+        let good = Config::try_load_from(&path).unwrap().unwrap();
+        assert_eq!(good.control_api, "off");
+        std::fs::write(&path, "font_size = [\n").unwrap();
+        let err = Config::try_load_from(&path).unwrap_err();
+        assert!(err.contains("config.toml"), "{err}");
+        assert_eq!(Config::fallback().control_api, "off");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_is_atomic_under_concurrent_reads() {
+        let dir = scratch("atomic");
+        let path = dir.join("config.toml");
+        let mut c = Config::default();
+        for i in 0..400 {
+            c.keybindings
+                .insert(format!("action_{i}"), format!("cmd+{i}"));
+        }
+        c.save_to(&path).unwrap();
+        let reader_path = path.clone();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader_stop = stop.clone();
+        let reader = std::thread::spawn(move || {
+            let mut bad = 0;
+            while !reader_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                if Config::try_load_from(&reader_path).ok().flatten().is_none() {
+                    bad += 1;
+                }
+            }
+            bad
+        });
+        for _ in 0..200 {
+            c.save_to(&path).unwrap();
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(reader.join().unwrap(), 0, "a reader saw a partial config");
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name() != "config.toml")
+            .collect();
+        assert!(leftovers.is_empty(), "temp files left behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failed_save_keeps_the_original_bytes() {
+        let dir = scratch("failsave");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "# mine\nfont_size = 19.0\n").unwrap();
+        // a directory occupying the temp file's name makes the write fail
+        std::fs::create_dir(dir.join(format!(".config.toml.tmp-{}", std::process::id()))).unwrap();
+        assert!(Config::default().save_to(&path).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "# mine\nfont_size = 19.0\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_edits_in_place_keeping_comments_and_unknown_keys() {
+        let file = "# my setup\nfont_size = 19.0 # big\ntheme = \"dark-default\"\nfuture_option = 1\n\n# bindings\n[keybindings]\nnew_tab = \"cmd+t\"\ncopy = \"cmd+c\"\n";
+        let mut c: Config = toml::from_str(file).unwrap();
+        c.font_size = 15.0;
+        c.keybindings.remove("copy");
+        let out = c.edit_toml(Some(file)).unwrap();
+        assert_eq!(
+            out,
+            "# my setup\nfont_size = 15.0 # big\ntheme = \"dark-default\"\nfuture_option = 1\n\n# bindings\n[keybindings]\nnew_tab = \"cmd+t\"\n"
+        );
+        assert_eq!(toml::from_str::<Config>(&out).unwrap(), c);
+    }
+
+    #[test]
+    fn save_adds_only_changed_settings() {
+        assert_eq!(Config::default().edit_toml(None).unwrap(), "");
+        let mut c = Config {
+            font_size: 14.0,
+            shell: Some("/bin/zsh".into()),
+            ..Default::default()
+        };
+        c.notifications.toasts = false;
+        let out = c.edit_toml(Some("# hi\n")).unwrap();
+        assert!(out.starts_with("# hi\n"), "{out}");
+        assert!(out.contains("font_size = 14.0"), "{out}");
+        assert!(out.contains("[notifications]\ntoasts = false\n"), "{out}");
+        assert!(!out.contains("theme"), "unchanged defaults stay out: {out}");
+        assert_eq!(toml::from_str::<Config>(&out).unwrap(), c);
+        // clearing an optional setting removes its line
+        let cleared = Config {
+            shell: None,
+            ..c.clone()
+        };
+        let out = cleared.edit_toml(Some(&out)).unwrap();
+        assert!(!out.contains("shell"), "{out}");
+    }
+
+    #[test]
+    fn save_refuses_to_rewrite_an_unparseable_file() {
+        assert!(
+            Config::default()
+                .edit_toml(Some("font_size = [\n"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn font_metrics_reject_non_finite() {
+        let c: Config = toml::from_str("font_size = nan\nline_height = inf").unwrap();
+        assert_eq!(c.font_size(), 13.0);
+        assert_eq!(c.line_height(), 1.65);
+        let c = Config {
+            font_size: 99.0,
+            line_height: 0.1,
+            ..Default::default()
+        };
+        assert_eq!(c.font_size(), 28.0);
+        assert_eq!(c.line_height(), 1.0);
     }
 
     #[test]

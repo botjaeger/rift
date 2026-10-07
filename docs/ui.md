@@ -55,7 +55,12 @@ every action).
 `tab_layout = "vertical"` (Settings → Appearance → *Tabs: Side*) replaces the
 tab strip with a 220 px rail on the left: one 54 px row per tab with shell,
 title, directory, git branch, pane count, sync state, activity dot and tab
-color. Click selects, × closes; ⌘T adds a tab.
+color. Click selects, × closes; ⌘T adds a tab; drag a row up or down to
+reorder. When the tabs do not fit, the rail keeps the active tab visible: a
+`+N above` line at the top and a `+N more · palette lists all` line at the
+bottom stand in for the hidden tabs, each marked with the most urgent alert
+among them (waiting, then failed, bell, notification, finished; else the
+activity dot). Clicking one selects the nearest hidden tab.
 
 ## File explorer (⇧⌘E)
 
@@ -65,7 +70,10 @@ pane's directory. It follows the pane when `cd` leaves the project.
 
 - Header: project name, ⊟ collapse all, ↻ refresh.
 - Rows: folders first, then files, case-insensitive; `.git`, `.DS_Store` and
-  git-ignored entries hidden; at most 2 000 entries per folder. Folders show
+  git-ignored entries hidden; at most 2 000 entries per folder — a bigger
+  folder shows the first 2 000 in this order, then `… more entries not
+  shown`. A folder that cannot be read shows the error in its place (e.g.
+  `Permission denied`). Folders show
   ▸ / ▾ and a dot when they hold changes; changed files are tinted by status
   with a letter at the right (`M` modified, `A` added, `U` untracked, `D`
   deleted).
@@ -88,6 +96,11 @@ Up/Down and Home/End scroll; Esc or ✕ closes. While it is open, typing is
 swallowed (app shortcuts still work) and the terminal keeps running
 underneath.
 
+⌘F (the `search` shortcut) opens a find bar under the header for the file
+instead of the terminal search: case-insensitive plain text, the counter
+shows `n/total` or `No matches`, Enter / ⇧Enter step to the next / previous
+match (wrapping), Esc closes the bar (a second Esc closes the viewer).
+
 ## Code review (⇧⌘G)
 
 A 460 px panel right of the panes listing the repository's changes. The
@@ -102,11 +115,15 @@ header shows the branch and total `+added −removed`, and ↻ reloads.
 - Hunks: the `@@` header with **Stage** / **Revert** (unstaged) or
   **Unstage** (staged), then the lines with old and new line numbers, added
   lines on a green wash and removed lines on a red one. A binary file shows a
-  note; a diff past 4 000 lines is cut with a note.
+  note; a diff past 4 000 lines is cut with a note, and a hunk the cut runs
+  through shows `Too long · use file actions` instead of its buttons.
 - Revert asks first ("Revert this change?" / "Revert file?") and discards
   only unstaged changes; reverting an untracked file deletes it.
-- A hunk action re-reads the diff first; if the hunk no longer matches the
-  file, nothing is written and the panel shows why above the list.
+- A hunk action re-reads the diff first and checks the hunk's line ranges and
+  content against the same diff it applies; if the hunk no longer matches,
+  nothing is written and the panel shows why above the list.
+- Stage, unstage and revert run in order on a background writer thread, so
+  a slow repository never blocks input.
 - The panel reloads (off the UI thread) when it opens, when a command
   finishes, after each action, and on ↻.
 
@@ -220,8 +237,8 @@ shortcut chips. Modes:
   `Launch configuration: <name>` row per file in
   `~/.config/shift/launch_configs/` (re-scanned each time the palette opens),
   `Theme: <name>` rows, plus recent commands.
-- **History** (⌃R from the editor) — imported zsh history + per-pane local
-  history; Enter runs, or insert into the editor.
+- **History** (⌃R from the editor) — imported shell history (zsh, bash or
+  fish, from the configured shell's history file) + per-pane local history; Enter runs, or insert into the editor.
 - **Workflows** (⌃⇧R) — Warp-compatible YAML workflows; selecting one inserts
   its command with Tab-cyclable placeholders.
 - **Session switcher** (⇧⌘O) — tabs, panes of split tabs (directory and
@@ -277,9 +294,12 @@ block; ⇧ + label copies it (a block copies its output). Esc cancels.
   few, then `and N more…`), Cancel and a confirm button. Used for closing
   running commands, pasting multi-line text into a shell without bracketed
   paste ("Paste and run?"), and installing shell integration on an SSH host.
-  Enter confirms, Esc cancels.
+  Enter confirms, Esc cancels. An Enter that is auto-repeated, or that
+  arrives within 300 ms of the dialog opening (a held or typed-ahead key),
+  is ignored.
 - **Toasts** — short notices at the bottom (a keybinding moved from another
-  action, the session service could not start, …).
+  action, the session service could not start, config.toml was not applied,
+  a copy, paste, open or save failed, …).
 - **What's New** — release notes from `CHANGELOG.md`, newest first: title
   with the current version and date, then each release's summary and its
   New / Improved / Fixed items (section titles in accent / success / warning).
@@ -294,7 +314,12 @@ Bar overlay; live yellow highlight of all matches, orange for the current one.
 Enter/⇧Enter or ⌘G/⇧⌘G cycle matches (viewport jumps to each), Esc closes.
 Two toggle chips at the right: `Aa` match case (⌥C) and `.*` regular
 expression (⌥R); an invalid regex shows `invalid regex` in red instead of the
-counter.
+counter. The counter shows the current match's position among all matches
+(`n/total`); only the newest 500 matches are kept for navigation (older
+ones are counted, not visited), so with 600 matches it runs 101/600 …
+600/600. A query longer
+than the field scrolls so its end stays visible. With the file viewer open,
+⌘F finds in the file instead (see File viewer).
 
 With a block filter active (⌥⇧F), the same bar edits the filter: only that
 block's output lines containing the text stay visible.
@@ -311,8 +336,13 @@ Disabled items are dimmed (e.g. Copy output on an output-less block).
 
 Header (`❯ Settings`), a six-entry sidebar with a per-page icon (arrow keys navigate pages;
 PageUp/PageDown scroll the body) and a scrollable body footed with
-`~/.config/shift/config.toml`. Every control writes that file live (the
-hot-reload watcher applies changes < 300 ms, including external edits); the
+`~/.config/shift/config.toml`. Keyboard: Tab / ⇧Tab move a focus ring over
+the page's controls, Space or Enter presses the focused control, ← / →
+adjust a focused slider, and Esc drops the focus (the next Esc closes
+Settings). The arrow keys change page unless a slider is focused; Home /
+End jump to the first / last page. Every control writes that file live (the
+hot-reload watcher applies changes < 300 ms, including external edits); while
+config.toml is invalid, controls do not save and a toast says to fix it first; the
 wheel scrolls the page body (24 px per line, clamped to the content) and
 switching pages resets the scroll. ✕ closes; clicks elsewhere in the overlay
 are swallowed rather than reaching the terminal.

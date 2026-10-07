@@ -63,6 +63,9 @@ pub struct Hunk {
     /// `@@ -a,b +c,d @@ context`
     pub header: String,
     pub lines: Vec<Line>,
+    /// `MAX_LINES_PER_FILE` cut this hunk's `lines`: the panel does not show
+    /// all of it, so hunk operations refuse it (whole-file ones still work).
+    pub partial: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -193,6 +196,13 @@ fn path_str(p: Option<&Path>) -> Option<String> {
 }
 
 fn collect(diff: &Diff<'_>) -> Result<Vec<FileDiff>, String> {
+    collect_as(diff, false)
+}
+
+/// `collect` for a diff built with `reverse(true)`: hunk content hashes are
+/// computed as the forward diff's, so `HunkId::swapped` of a forward id
+/// matches the reversed diff's hunk.
+fn collect_as(diff: &Diff<'_>, reversed: bool) -> Result<Vec<FileDiff>, String> {
     let mut files = Vec::new();
     for idx in 0..diff.deltas().len() {
         let Some(delta) = diff.get_delta(idx) else {
@@ -221,7 +231,12 @@ fn collect(diff: &Diff<'_>) -> Result<Vec<FileDiff>, String> {
             let mut kept = 0usize;
             for h in 0..patch.num_hunks() {
                 let (hunk, n) = patch.hunk(h).map_err(err)?;
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                // The hash covers each side's text separately (old side:
+                // context + removed lines, new side: context + added lines),
+                // so it does not depend on how the diff aligned the change
+                // and is the same for the diff and its reverse.
+                let mut old_side = std::collections::hash_map::DefaultHasher::new();
+                let mut new_side = std::collections::hash_map::DefaultHasher::new();
                 let mut out = Hunk {
                     id: HunkId {
                         old_start: hunk.old_start(),
@@ -234,11 +249,26 @@ fn collect(diff: &Diff<'_>) -> Result<Vec<FileDiff>, String> {
                         .trim_end()
                         .to_string(),
                     lines: Vec::with_capacity(n),
+                    partial: false,
                 };
                 for l in 0..n {
                     let line = patch.line_in_hunk(h, l).map_err(err)?;
-                    line.origin().hash(&mut hasher);
-                    line.content().hash(&mut hasher);
+                    // (on the old side, on the new side) in this diff's terms;
+                    // EOF-newline markers count on the side they describe
+                    let (old, new) = match line.origin() {
+                        ' ' | '=' => (true, true),
+                        '-' | '<' => (true, false),
+                        '+' | '>' => (false, true),
+                        _ => (false, false),
+                    };
+                    let (old, new) = if reversed { (new, old) } else { (old, new) };
+                    let marker = matches!(line.origin(), '=' | '<' | '>');
+                    for (side, hasher) in [(old, &mut old_side), (new, &mut new_side)] {
+                        if side {
+                            marker.hash(hasher);
+                            line.content().hash(hasher);
+                        }
+                    }
                     let kind = match line.origin() {
                         '+' => LineKind::Added,
                         '-' => LineKind::Removed,
@@ -247,6 +277,7 @@ fn collect(diff: &Diff<'_>) -> Result<Vec<FileDiff>, String> {
                     };
                     if kept >= MAX_LINES_PER_FILE {
                         file.truncated = true;
+                        out.partial = true;
                         continue;
                     }
                     kept += 1;
@@ -258,6 +289,9 @@ fn collect(diff: &Diff<'_>) -> Result<Vec<FileDiff>, String> {
                         text: text.trim_end_matches(['\n', '\r']).to_string(),
                     });
                 }
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                old_side.finish().hash(&mut hasher);
+                new_side.finish().hash(&mut hasher);
                 out.id.content_hash = hasher.finish();
                 file.hunks.push(out);
                 if file.truncated {
@@ -335,62 +369,153 @@ fn apply_file(repo: &Repository, op: Op, path: &str) -> Result<(), String> {
     }
 }
 
+/// An untracked file's only hunk is the whole file: Stage writes the checked
+/// content to the index, Revert deletes the file if it still holds exactly
+/// that content. `diff` is the checked diff (reversed for Revert).
+fn apply_untracked_hunk(
+    repo: &Repository,
+    op: Op,
+    path: &str,
+    diff: &Diff<'_>,
+) -> Result<(), String> {
+    let moved = || Err::<(), String>("the change moved; refreshed".into());
+    let Some(idx) = (0..diff.deltas().len()).find(|&i| {
+        diff.get_delta(i).is_some_and(|d| {
+            path_str(d.new_file().path()).as_deref() == Some(path)
+                || path_str(d.old_file().path()).as_deref() == Some(path)
+        })
+    }) else {
+        return moved();
+    };
+    let Some(patch) = Patch::from_diff(diff, idx).map_err(err)? else {
+        return moved();
+    };
+    // the working-tree side: added lines forward, removed lines reversed
+    let side = if op == Op::Stage { '+' } else { '-' };
+    let mut content = Vec::new();
+    for h in 0..patch.num_hunks() {
+        for l in 0..patch.num_lines_in_hunk(h).map_err(err)? {
+            let line = patch.line_in_hunk(h, l).map_err(err)?;
+            if line.origin() == side {
+                content.extend_from_slice(line.content());
+            }
+        }
+    }
+    let root = repo.workdir().ok_or("bare repository")?;
+    let full = root.join(path);
+    match op {
+        Op::Stage => {
+            let delta = patch.delta();
+            let mut index = repo.index().map_err(err)?;
+            let entry = git2::IndexEntry {
+                ctime: git2::IndexTime::new(0, 0),
+                mtime: git2::IndexTime::new(0, 0),
+                dev: 0,
+                ino: 0,
+                mode: u32::from(delta.new_file().mode()),
+                uid: 0,
+                gid: 0,
+                file_size: 0,
+                id: git2::Oid::ZERO_SHA1,
+                flags: 0,
+                flags_extended: 0,
+                path: path.as_bytes().to_vec(),
+            };
+            index.add_frombuffer(&entry, &content).map_err(err)?;
+            index.write().map_err(err)
+        }
+        Op::Revert => {
+            let meta = full.symlink_metadata().map_err(|e| e.to_string())?;
+            let current = if meta.file_type().is_symlink() {
+                std::fs::read_link(&full).map(|t| t.to_string_lossy().into_owned().into_bytes())
+            } else {
+                std::fs::read(&full)
+            }
+            .map_err(|e| e.to_string())?;
+            if current != content {
+                return moved();
+            }
+            std::fs::remove_file(&full).map_err(|e| e.to_string())
+        }
+        Op::Unstage => moved(),
+    }
+}
+
+/// Diff options for one file's hunk write: limited to `path` (literally, no
+/// glob), reversed when the write undoes the change.
+fn hunk_options(op: Op, path: &str) -> DiffOptions {
+    let mut opts = match op {
+        // the file may be untracked, inside an untracked directory
+        Op::Stage | Op::Revert => unstaged_options(),
+        Op::Unstage => DiffOptions::new(),
+    };
+    opts.pathspec(path)
+        .disable_pathspec_match(true)
+        .reverse(op != Op::Stage);
+    opts
+}
+
 fn apply_hunk(repo: &Repository, op: Op, path: &str, id: HunkId) -> Result<(), String> {
     let index = repo.index().map_err(err)?;
-    let fresh = match op {
-        Op::Stage | Op::Revert => {
-            repo.diff_index_to_workdir(Some(&index), Some(&mut unstaged_options()))
-        }
-        Op::Unstage => {
-            let tree = head_tree(repo);
-            repo.diff_tree_to_index(tree.as_ref(), Some(&index), None)
-        }
-    }
-    .map_err(err)?;
-    if !collect(&fresh)?
-        .iter()
-        .any(|file| file.path == path && file.hunks.iter().any(|hunk| hunk.id == id))
-    {
-        return Err("the change moved; refreshed".into());
-    }
-    // the diff whose application performs the op, the hunk id as it appears
-    // in that diff, and where it applies
+    let mut opts = hunk_options(op, path);
+    // One diff is both content-checked and applied, so an edit landing in
+    // between cannot be written unseen: the patch carries the checked
+    // content, and applying it over different content fails.
+    // Stage applies the forward diff to the index; Unstage and Revert apply
+    // the reversed diff (index → HEAD, working tree → index), whose hunk
+    // carries the swapped line ranges and the same content hash.
     let (diff, want, location) = match op {
         Op::Stage => (
-            repo.diff_index_to_workdir(Some(&index), Some(&mut unstaged_options())),
+            repo.diff_index_to_workdir(Some(&index), Some(&mut opts)),
             id,
             ApplyLocation::Index,
         ),
         Op::Unstage => {
             let tree = head_tree(repo);
-            let mut opts = DiffOptions::new();
-            opts.reverse(true);
             (
                 repo.diff_tree_to_index(tree.as_ref(), Some(&index), Some(&mut opts)),
                 id.swapped(),
                 ApplyLocation::Index,
             )
         }
-        Op::Revert => {
-            let mut opts = unstaged_options();
-            opts.reverse(true);
-            (
-                repo.diff_index_to_workdir(Some(&index), Some(&mut opts)),
-                id.swapped(),
-                ApplyLocation::WorkDir,
-            )
-        }
+        Op::Revert => (
+            repo.diff_index_to_workdir(Some(&index), Some(&mut opts)),
+            id.swapped(),
+            ApplyLocation::WorkDir,
+        ),
     };
     let diff = diff.map_err(err)?;
+    let files = collect_as(&diff, op != Op::Stage)?;
+    let Some((file, hunk)) = files
+        .iter()
+        .filter(|file| file.path == path || file.old_path.as_deref() == Some(path))
+        .flat_map(|file| file.hunks.iter().map(move |hunk| (file, hunk)))
+        .find(|(_, hunk)| hunk.id == want)
+    else {
+        return Err("the change moved; refreshed".into());
+    };
+    if hunk.partial {
+        return Err(format!(
+            "this hunk is cut at {MAX_LINES_PER_FILE} lines; stage, unstage or revert the whole file"
+        ));
+    }
+    #[cfg(test)]
+    tests::between_check_and_apply();
+    if op != Op::Unstage && index.get_path(Path::new(path), 0).is_none() {
+        // git apply cannot take an untracked file's hunk: it has nothing in
+        // the index to patch (Stage errors, Revert is a silent no-op)
+        return apply_untracked_hunk(repo, op, path, &diff);
+    }
     let mut found = false;
-    let mut opts = ApplyOptions::new();
-    opts.delta_callback(|delta| {
+    let mut apply = ApplyOptions::new();
+    apply.delta_callback(|delta| {
         delta.is_some_and(|d| {
             path_str(d.new_file().path()).as_deref() == Some(path)
                 || path_str(d.old_file().path()).as_deref() == Some(path)
         })
     });
-    opts.hunk_callback(|hunk| {
+    // ranges identify the hunk within this diff, whose content was checked
+    apply.hunk_callback(|hunk| {
         let hit = hunk.is_some_and(|h| {
             h.old_start() == want.old_start
                 && h.old_lines() == want.old_lines
@@ -400,9 +525,12 @@ fn apply_hunk(repo: &Repository, op: Op, path: &str, id: HunkId) -> Result<(), S
         found |= hit;
         hit
     });
-    repo.apply(&diff, location, Some(&mut opts)).map_err(err)?;
-    drop(opts);
-    if found {
+    repo.apply(&diff, location, Some(&mut apply)).map_err(err)?;
+    drop(apply);
+    // libgit2 applies a whole-file add or delete (one hunk) without calling
+    // the hunk callback
+    let whole_file = matches!(file.status, 'A' | 'D') && file.hunks.len() == 1;
+    if found || whole_file {
         Ok(())
     } else {
         Err("the change moved; refreshed".into())
@@ -593,6 +721,177 @@ mod tests {
             fs::read_to_string(t.dir.join("a.txt")).unwrap(),
             lines(&[(2, "different edit")]),
         );
+    }
+
+    thread_local! {
+        static BETWEEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// Test seam: runs once, after `apply_hunk` content-checked the hunk and
+    /// before it writes.
+    pub(super) fn between_check_and_apply() {
+        if let Some(f) = BETWEEN.with(|b| b.borrow_mut().take()) {
+            f();
+        }
+    }
+
+    fn index_blob(t: &TempRepo, path: &str) -> String {
+        let mut index = t.repo.index().unwrap();
+        index.read(true).unwrap();
+        let entry = index.get_path(Path::new(path), 0).unwrap();
+        let blob = t.repo.find_blob(entry.id).unwrap();
+        String::from_utf8(blob.content().to_vec()).unwrap()
+    }
+
+    #[test]
+    fn an_edit_between_check_and_apply_is_never_reverted_unseen() {
+        let t = temp_repo("race-revert");
+        fs::write(t.dir.join("a.txt"), lines(&[])).unwrap();
+        commit_all(&t, "init");
+        fs::write(t.dir.join("a.txt"), lines(&[(2, "first edit")])).unwrap();
+        let id = review(&t).unstaged[0].hunks[0].id;
+
+        let file = t.dir.join("a.txt");
+        BETWEEN.with(|b| {
+            *b.borrow_mut() = Some(Box::new(move || {
+                fs::write(&file, lines(&[(2, "different edit")])).unwrap();
+            }))
+        });
+        assert!(apply(&t.dir, Op::Revert, "a.txt", Some(id)).is_err());
+        assert_eq!(
+            fs::read_to_string(t.dir.join("a.txt")).unwrap(),
+            lines(&[(2, "different edit")]),
+            "the unseen edit survives"
+        );
+        assert_eq!(index_blob(&t, "a.txt"), lines(&[]), "index untouched");
+    }
+
+    #[test]
+    fn an_edit_between_check_and_apply_is_never_staged_unseen() {
+        let t = temp_repo("race-stage");
+        fs::write(t.dir.join("a.txt"), lines(&[])).unwrap();
+        commit_all(&t, "init");
+        fs::write(t.dir.join("a.txt"), lines(&[(2, "first edit")])).unwrap();
+        let id = review(&t).unstaged[0].hunks[0].id;
+
+        let file = t.dir.join("a.txt");
+        BETWEEN.with(|b| {
+            *b.borrow_mut() = Some(Box::new(move || {
+                fs::write(&file, lines(&[(2, "different edit")])).unwrap();
+            }))
+        });
+        assert!(apply(&t.dir, Op::Stage, "a.txt", Some(id)).is_err());
+        assert_eq!(index_blob(&t, "a.txt"), lines(&[]), "index untouched");
+        assert_eq!(
+            fs::read_to_string(t.dir.join("a.txt")).unwrap(),
+            lines(&[(2, "different edit")]),
+            "the working tree is never written by a stage"
+        );
+    }
+
+    #[test]
+    fn reverts_the_hunk_of_an_untracked_file_unless_it_changed() {
+        let t = temp_repo("untracked-revert");
+        fs::write(t.dir.join("a.txt"), lines(&[])).unwrap();
+        commit_all(&t, "init");
+        fs::write(t.dir.join("b.txt"), "b\nno newline").unwrap();
+        let id = review(&t).unstaged[0].hunks[0].id;
+
+        let file = t.dir.join("b.txt");
+        BETWEEN.with(|b| {
+            *b.borrow_mut() = Some(Box::new(move || fs::write(&file, "edited\n").unwrap()))
+        });
+        assert!(apply(&t.dir, Op::Revert, "b.txt", Some(id)).is_err());
+        assert_eq!(fs::read_to_string(t.dir.join("b.txt")).unwrap(), "edited\n");
+
+        fs::write(t.dir.join("b.txt"), "b\nno newline").unwrap();
+        apply(&t.dir, Op::Revert, "b.txt", Some(id)).unwrap();
+        assert!(!t.dir.join("b.txt").exists());
+        assert!(review(&t).unstaged.is_empty());
+    }
+
+    #[test]
+    fn stages_a_hunk_of_a_file_in_an_untracked_directory() {
+        let t = temp_repo("untracked-dir");
+        fs::write(t.dir.join("a.txt"), lines(&[])).unwrap();
+        commit_all(&t, "init");
+        fs::write(t.dir.join("a.txt"), lines(&[(2, "two")])).unwrap();
+        fs::create_dir_all(t.dir.join("src/deep")).unwrap();
+        fs::write(t.dir.join("src/deep/new.rs"), "fn main() {}\n").unwrap();
+        fs::write(t.dir.join("src/deep/other.rs"), "other\n").unwrap();
+        let r = review(&t);
+        let new = r
+            .unstaged
+            .iter()
+            .find(|f| f.path == "src/deep/new.rs")
+            .unwrap();
+        apply(&t.dir, Op::Stage, "src/deep/new.rs", Some(new.hunks[0].id)).unwrap();
+        let r = review(&t);
+        assert_eq!(r.staged.len(), 1, "only the one file");
+        assert_eq!(index_blob(&t, "src/deep/new.rs"), "fn main() {}\n");
+
+        let staged = r.staged[0].hunks[0].id;
+        apply(&t.dir, Op::Unstage, "src/deep/new.rs", Some(staged)).unwrap();
+        let r = review(&t);
+        assert!(r.staged.is_empty(), "{:?}", r.staged);
+        assert!(r.unstaged.iter().any(|f| f.path == "src/deep/new.rs"));
+    }
+
+    #[test]
+    fn hunk_ops_on_a_deleted_file() {
+        let t = temp_repo("deleted");
+        fs::write(t.dir.join("a.txt"), lines(&[])).unwrap();
+        fs::write(t.dir.join("b.txt"), "b\n").unwrap();
+        commit_all(&t, "init");
+        fs::remove_file(t.dir.join("a.txt")).unwrap();
+        fs::remove_file(t.dir.join("b.txt")).unwrap();
+
+        let r = review(&t);
+        let hunk = |f: &str| r.unstaged.iter().find(|x| x.path == f).unwrap().hunks[0].id;
+        apply(&t.dir, Op::Revert, "a.txt", Some(hunk("a.txt"))).unwrap();
+        assert_eq!(fs::read_to_string(t.dir.join("a.txt")).unwrap(), lines(&[]));
+        apply(&t.dir, Op::Stage, "b.txt", Some(hunk("b.txt"))).unwrap();
+        let r = review(&t);
+        assert_eq!((r.staged.len(), r.staged[0].status), (1, 'D'));
+        assert!(r.unstaged.is_empty());
+    }
+
+    #[test]
+    fn a_hunk_cut_by_the_line_cap_is_partial_and_refused() {
+        let t = temp_repo("partial");
+        let text = |changed: bool| {
+            (1..=5100)
+                .map(|n| {
+                    if changed && (n == 2 || n >= 100) {
+                        format!("changed {n}\n")
+                    } else {
+                        format!("line {n}\n")
+                    }
+                })
+                .collect::<String>()
+        };
+        fs::write(t.dir.join("a.txt"), text(false)).unwrap();
+        commit_all(&t, "init");
+        fs::write(t.dir.join("a.txt"), text(true)).unwrap();
+
+        let r = review(&t);
+        let file = &r.unstaged[0];
+        assert!(file.truncated);
+        assert_eq!(file.hunks.len(), 2);
+        assert!(!file.hunks[0].partial);
+        let last = file.hunks.last().unwrap();
+        assert!(last.partial, "5,000 changed lines are cut at the cap");
+
+        for op in [Op::Stage, Op::Revert] {
+            let e = apply(&t.dir, op, "a.txt", Some(last.id)).unwrap_err();
+            assert!(e.contains("whole file"), "{e}");
+        }
+        assert_eq!(fs::read_to_string(t.dir.join("a.txt")).unwrap(), text(true));
+        assert!(review(&t).staged.is_empty());
+        // the complete hunk above it still applies
+        apply(&t.dir, Op::Stage, "a.txt", Some(file.hunks[0].id)).unwrap();
+        assert_eq!(review(&t).staged[0].hunks.len(), 1);
     }
 
     #[test]

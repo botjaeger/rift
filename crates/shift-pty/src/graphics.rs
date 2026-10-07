@@ -26,6 +26,7 @@ pub const MAX_PAYLOAD: usize = 32 << 20;
 pub const MAX_PIXELS: u64 = 40_000_000;
 pub const MAX_STORED_BYTES: usize = 320 << 20;
 pub const MAX_PLACEMENTS: usize = 512;
+pub const MAX_CELL_SPAN: usize = 1000;
 
 /// A decoded image. `key` is unique for the process (renderer cache key).
 #[derive(Debug, Clone)]
@@ -423,7 +424,13 @@ impl Graphics {
     }
 
     /// Handle an iTerm2 `File=` OSC (the bytes after `1337;File=`).
-    pub fn iterm(&mut self, body: &[u8], cell_px: (u32, u32), screen_cols: usize) -> Outcome {
+    pub fn iterm(
+        &mut self,
+        body: &[u8],
+        cell_px: (u32, u32),
+        screen_cols: usize,
+        screen_rows: usize,
+    ) -> Outcome {
         let Some(colon) = body.iter().position(|b| *b == b':') else {
             return Outcome::default();
         };
@@ -453,53 +460,58 @@ impl Graphics {
         let Ok((w, h, rgba)) = decode_encoded(&raw) else {
             return Outcome::default();
         };
-        let id = self.anon_id();
-        let key = self.store(id, w, h, rgba);
-        let (cw, ch) = (cell_px.0.max(1) as f32, cell_px.1.max(1) as f32);
-        let span = |spec: &str, px: u32, cell: f32, total_cells: usize| -> Option<f32> {
+        let (cw, ch) = (cell_px.0.max(1) as f64, cell_px.1.max(1) as f64);
+        let span = |spec: &str, cell: f64, total_cells: usize| -> Result<Option<f64>, ()> {
             if spec.is_empty() || spec == "auto" {
-                return None;
+                return Ok(None);
             }
-            if let Some(p) = spec.strip_suffix("px") {
-                return p.parse::<f32>().ok().map(|v| v / cell);
+            let (number, scale) = if let Some(p) = spec.strip_suffix("px") {
+                (p, 1.0 / cell)
+            } else if let Some(p) = spec.strip_suffix('%') {
+                (p, total_cells as f64 / 100.0)
+            } else {
+                (spec, 1.0)
+            };
+            let value = number.parse::<f64>().map_err(|_| ())? * scale;
+            if !value.is_finite() || value <= 0.0 {
+                return Err(());
             }
-            if let Some(p) = spec.strip_suffix('%') {
-                return p
-                    .parse::<f32>()
-                    .ok()
-                    .map(|v| total_cells as f32 * v / 100.0);
-            }
-            let _ = px;
-            spec.parse::<f32>().ok()
+            Ok(Some(value.min(MAX_CELL_SPAN as f64)))
         };
-        let natural = (w as f32 / cw, h as f32 / ch);
-        let mut cols = span(&want_w, w, cw, screen_cols);
-        let mut rows = span(&want_h, h, ch, usize::MAX / 2);
+        let natural = (w as f64 / cw, h as f64 / ch);
+        let (Ok(mut cols), Ok(mut rows)) = (
+            span(&want_w, cw, screen_cols),
+            span(&want_h, ch, screen_rows),
+        ) else {
+            return Outcome::default();
+        };
         if keep_aspect {
             match (cols, rows) {
-                (Some(c), None) => rows = Some(c * cw * h as f32 / w as f32 / ch),
-                (None, Some(r)) => cols = Some(r * ch * w as f32 / h as f32 / cw),
+                (Some(c), None) => rows = Some(c * cw * h as f64 / w as f64 / ch),
+                (None, Some(r)) => cols = Some(r * ch * w as f64 / h as f64 / cw),
                 _ => {}
             }
         }
         let mut cols = cols.unwrap_or(natural.0);
         let mut rows = rows.unwrap_or(natural.1);
         // never wider than the screen
-        if cols > screen_cols as f32 {
-            let k = screen_cols as f32 / cols;
+        if cols > screen_cols as f64 {
+            let k = screen_cols as f64 / cols;
             cols *= k;
             if keep_aspect {
                 rows *= k;
             }
         }
+        let id = self.anon_id();
+        let key = self.store(id, w, h, rgba);
         Outcome {
             reply: None,
             place: Some(PlaceRequest {
                 image: key,
                 image_id: 0,
                 placement_id: 0,
-                cols: cols.ceil().max(1.0) as usize,
-                rows: rows.ceil().max(1.0) as usize,
+                cols: cols.ceil().clamp(1.0, MAX_CELL_SPAN as f64) as usize,
+                rows: rows.ceil().clamp(1.0, MAX_CELL_SPAN as f64) as usize,
                 src: [0, 0, w, h],
                 z: 0,
                 move_cursor: true,
@@ -589,8 +601,8 @@ fn place_request(ctrl: &Control, img: &ImageData, cell_px: (u32, u32)) -> PlaceR
         image: img.key,
         image_id: ctrl.id,
         placement_id: ctrl.placement,
-        cols: cols.clamp(1, 1000) as usize,
-        rows: rows.clamp(1, 1000) as usize,
+        cols: (cols as usize).clamp(1, MAX_CELL_SPAN),
+        rows: (rows as usize).clamp(1, MAX_CELL_SPAN),
         src: [sx, sy, sw, sh],
         z: ctrl.z,
         move_cursor: !ctrl.no_cursor_move,
@@ -694,14 +706,34 @@ mod tests {
     fn iterm_inline_image_sizes() {
         let mut g = Graphics::default();
         let body = format!("inline=1;width=5:{}", b64(&png(100, 50)));
-        let place = g.iterm(body.as_bytes(), (10, 20), 80).place.unwrap();
+        let place = g.iterm(body.as_bytes(), (10, 20), 80, 24).place.unwrap();
         assert_eq!((place.cols, place.rows), (5, 2)); // aspect kept: 50px tall
         let body = format!("inline=1:{}", b64(&png(100, 50)));
-        let place = g.iterm(body.as_bytes(), (10, 20), 8).place.unwrap();
+        let place = g.iterm(body.as_bytes(), (10, 20), 8, 24).place.unwrap();
         assert_eq!(place.cols, 8, "clamped to the screen width");
         // not inline: ignored (no download support)
         let body = format!("name=eA==;inline=0:{}", b64(&png(2, 2)));
-        assert_eq!(g.iterm(body.as_bytes(), (10, 20), 80), Outcome::default());
+        assert_eq!(
+            g.iterm(body.as_bytes(), (10, 20), 80, 24),
+            Outcome::default()
+        );
+        for height in ["NaN", "inf", "-1", "1e999%"] {
+            let body = format!("inline=1;height={height}:{}", b64(&png(2, 2)));
+            assert!(g.iterm(body.as_bytes(), (10, 20), 80, 24).place.is_none());
+        }
+        for (height, expected) in [("50%", 12), ("999999999999", MAX_CELL_SPAN)] {
+            let body = format!(
+                "inline=1;width=1;preserveAspectRatio=0;height={height}:{}",
+                b64(&png(2, 2))
+            );
+            assert_eq!(
+                g.iterm(body.as_bytes(), (10, 20), 80, 24)
+                    .place
+                    .unwrap()
+                    .rows,
+                expected
+            );
+        }
     }
 
     #[test]

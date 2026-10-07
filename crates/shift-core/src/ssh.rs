@@ -49,11 +49,18 @@ fn collect(path: &Path, depth: usize, out: &mut Vec<String>) {
     };
     let ssh_dir = dirs::home_dir().map(|h| h.join(".ssh")).unwrap_or_default();
     for line in body.lines() {
-        // `Key value`, `Key=value` and `Key = value` are all valid
-        let line = line.trim().replacen('=', " ", 1);
-        let mut words = line.split_whitespace();
-        let Some(key) = words.next() else { continue };
-        let rest: Vec<&str> = words.collect();
+        // `Key value`, `Key=value` and `Key = value` are all valid.
+        // Split the key first: `=` inside a Host alias is part of the alias.
+        let line = line.trim();
+        let key_end = line
+            .find(|c: char| c == '=' || c.is_whitespace())
+            .unwrap_or(line.len());
+        let (key, tail) = line.split_at(key_end);
+        let tail = tail.trim_start_matches(|c: char| c == '=' || c.is_whitespace());
+        let rest: Vec<&str> = tail
+            .split_whitespace()
+            .take_while(|word| !word.starts_with('#'))
+            .collect();
         if key.eq_ignore_ascii_case("host") {
             for h in rest {
                 if !h.contains(['*', '?', '!']) {
@@ -209,6 +216,26 @@ mod tests {
             vec!["prod", "web-1", "staging", "db"]
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn host_comments_are_not_profiles() {
+        let dir = std::env::temp_dir().join(format!("shift-ssh-comments-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("included"), "Host child # another comment\n").unwrap();
+        std::fs::write(
+            dir.join("config"),
+            format!(
+                "Host alpha # not host names\nHost alpha#literal alpha=literal\nInclude {} # note\n",
+                dir.join("included").display()
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            config_hosts(&dir.join("config")),
+            vec!["alpha", "alpha#literal", "alpha=literal", "child"]
+        );
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

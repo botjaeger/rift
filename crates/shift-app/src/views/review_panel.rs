@@ -62,6 +62,9 @@ impl ReviewPanelState {
     }
 }
 
+/// Shown in place of a partial hunk's Stage/Unstage/Revert buttons.
+const PARTIAL_HUNK_NOTE: &str = "Too long · use file actions";
+
 /// What a click in the panel does.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ReviewHit {
@@ -559,7 +562,23 @@ pub fn render(
                     );
                 }
                 let mut right = x + w - 12.0;
-                if fully(ry, rh) {
+                if hunk.partial {
+                    // cut by the diff line cap: hunk actions would apply a
+                    // truncated patch (core refuses them); the file row's
+                    // buttons act on the whole file
+                    let note = PARTIAL_HUNK_NOTE;
+                    let nw = engine.measure(note, 11.0, FONT_SANS, Weight::NORMAL);
+                    right -= nw;
+                    if fully(ry, rh) {
+                        layer.text(
+                            text(engine, note, 11.0, FONT_SANS, Weight::NORMAL),
+                            right,
+                            ry + (rh - 15.0) / 2.0,
+                            theme.text_muted,
+                        );
+                    }
+                    right -= 4.0;
+                } else if fully(ry, rh) {
                     let mut add = |label: &str, hit: ReviewHit, color: Color| {
                         let r = button(layer, engine, label, right, ry, rh, color);
                         right = r[0] - 4.0;

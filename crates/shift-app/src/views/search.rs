@@ -1,5 +1,5 @@
 use shift_core::{Color, Theme};
-use shift_renderer::glyphon::{Attrs, Buffer, Family, Metrics, Shaping, Weight};
+use shift_renderer::glyphon::{Attrs, Buffer, Family, Metrics, Shaping, TextBounds, Weight};
 use shift_renderer::{FONT_SANS, Layer, TextEngine, mono_family};
 
 use crate::views::tabbar::TAB_BAR_H;
@@ -9,8 +9,11 @@ use crate::views::tabbar::TAB_BAR_H;
 pub struct SearchState {
     pub open: bool,
     pub query: String,
-    /// (abs line, char col) anchors, oldest first.
+    /// (abs line, char col) anchors, oldest first: the newest
+    /// [`MATCH_CAP`] matches only.
     pub matches: Vec<(u64, usize)>,
+    /// Every match in the pane, including older ones past the cap.
+    pub total: usize,
     pub current: usize,
     /// "Aa" toggle: match case exactly (⌥C).
     pub case_sensitive: bool,
@@ -25,8 +28,26 @@ impl SearchState {
         self.open = false;
         self.query.clear();
         self.matches.clear();
+        self.total = 0;
         self.current = 0;
         self.error = None;
+    }
+
+    /// Store a fresh result; selects the newest match.
+    pub fn set_matches(&mut self, found: crate::views::terminal::Found) {
+        self.total = found.total;
+        self.matches = found.anchors;
+        self.current = self.matches.len().saturating_sub(1);
+    }
+
+    /// (1-based position among all matches, total). The kept window is
+    /// the newest matches, so the oldest kept one is `total - kept + 1`.
+    pub fn position(&self) -> Option<(usize, usize)> {
+        if self.matches.is_empty() {
+            return None;
+        }
+        let total = self.total.max(self.matches.len());
+        Some((total - self.matches.len() + self.current + 1, total))
     }
 
     /// Compile the query with the current toggles (records a regex error).
@@ -60,20 +81,28 @@ impl SearchState {
     }
 }
 
-/// Counter text for find mode (`3/12`, `0 results`, placeholder).
+/// Most anchors kept per search (the newest ones; older matches are
+/// counted but not navigable).
+pub const MATCH_CAP: usize = 500;
+
+/// Counter text for find mode (`3/12`, `0 results`, placeholder). The
+/// number is the match's position among ALL matches, so with 600 matches
+/// and 500 kept, navigation runs 101/600 ..= 600/600.
 pub fn counter(state: &SearchState) -> String {
     if state.error.is_some() {
         return "invalid regex".to_string();
     }
-    if state.matches.is_empty() {
-        if state.query.is_empty() {
-            "search".to_string()
-        } else {
-            "0 results".to_string()
-        }
-    } else {
-        format!("{}/{}", state.current + 1, state.matches.len())
+    match state.position() {
+        Some((n, total)) => format!("{n}/{total}"),
+        None if state.query.is_empty() => "search".to_string(),
+        None => "0 results".to_string(),
     }
+}
+
+/// Left shift of the query text so its end (the caret) stays inside a
+/// viewport `avail` px wide; `text_w` includes the caret.
+pub fn query_scroll(text_w: f32, avail: f32) -> f32 {
+    (text_w - avail.max(0.0)).max(0.0)
 }
 
 /// Floating search bar, top-right (spec: search overlay, match colors §1).
@@ -145,23 +174,6 @@ pub fn render(
         layer.rect([x + 23.5, y + 24.5], [5.0, 1.7], theme.text_dim, 1.0);
     }
 
-    // query + caret
-    if !query.is_empty() {
-        let mut buf = Buffer::new(&mut engine.font_system, Metrics::new(13.5, 18.0));
-        buf.set_text(
-            &mut engine.font_system,
-            query,
-            &Attrs::new().family(Family::Name(mono_family())),
-            Shaping::Advanced,
-            None,
-        );
-        layer.text(buf, qx, y + 13.0, theme.text_bright);
-    }
-    if blink_on {
-        let qw = engine.measure(query, 13.5, mono_family(), Weight::NORMAL);
-        layer.rect([qx + qw + 1.0, y + 12.0], [2.0, 18.0], theme.accent, 0.0);
-    }
-
     // toggle chips: Aa (match case) and .* (regex), right edge
     let mut rects = Vec::new();
     let mut right = x + bar_w - 12.0;
@@ -219,5 +231,83 @@ pub fn render(
         y + 15.0,
         if error { theme.error } else { theme.text_muted },
     );
+
+    // query + caret, clipped to the space left of the counter; long
+    // queries scroll left so the caret (always at the end) stays visible
+    let q_right = right - cw - 8.0;
+    let avail = (q_right - qx).max(0.0);
+    let qw = engine.measure(query, 13.5, mono_family(), Weight::NORMAL);
+    let scroll = query_scroll(qw + 3.0, avail);
+    if !query.is_empty() {
+        let mut buf = Buffer::new(&mut engine.font_system, Metrics::new(13.5, 18.0));
+        buf.set_text(
+            &mut engine.font_system,
+            query,
+            &Attrs::new().family(Family::Name(mono_family())),
+            Shaping::Advanced,
+            None,
+        );
+        layer.text_clipped(
+            buf,
+            qx - scroll,
+            y + 13.0,
+            theme.text_bright,
+            TextBounds {
+                left: qx.floor() as i32,
+                top: y as i32,
+                right: q_right.ceil() as i32,
+                bottom: (y + bar_h) as i32,
+            },
+        );
+    }
+    if blink_on && avail > 0.0 {
+        layer.rect(
+            [qx + qw - scroll + 1.0, y + 12.0],
+            [2.0, 18.0],
+            theme.accent,
+            0.0,
+        );
+    }
     rects
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::views::terminal::Found;
+
+    #[test]
+    fn query_scroll_keeps_caret_visible() {
+        assert_eq!(query_scroll(50.0, 200.0), 0.0);
+        assert_eq!(query_scroll(200.0, 200.0), 0.0);
+        assert_eq!(query_scroll(260.0, 200.0), 60.0);
+        // no room at all: the whole text scrolls out
+        assert_eq!(query_scroll(40.0, -5.0), 40.0);
+        // caret end after the shift sits at the viewport's right edge
+        let (w, avail) = (731.5, 120.0);
+        assert_eq!(w - query_scroll(w, avail), avail);
+    }
+
+    #[test]
+    fn counter_reports_position_among_all_matches() {
+        let mut s = SearchState {
+            query: "hit".into(),
+            ..Default::default()
+        };
+        assert_eq!(counter(&s), "0 results");
+        s.set_matches(Found {
+            anchors: (100..600).map(|i| (i, 0)).collect(),
+            total: 600,
+        });
+        assert_eq!(counter(&s), "600/600");
+        s.current = 0;
+        assert_eq!(counter(&s), "101/600");
+        s.set_matches(Found {
+            anchors: vec![(1, 0), (2, 0)],
+            total: 2,
+        });
+        assert_eq!(counter(&s), "2/2");
+        s.close();
+        assert_eq!(counter(&s), "search");
+    }
 }

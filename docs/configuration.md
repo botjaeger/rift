@@ -103,6 +103,19 @@ maximized, fullscreen); the next launch reopens at the same place.
 The Settings overlay (⌘,) edits the same file live; the hot-reload watcher
 applies external edits without restarting.
 
+- **Invalid or unreadable file**: it is not applied. The last good config
+  stays live (at startup, the defaults with `control_api = "off"`), a toast
+  names the error, and Settings refuses to save over the broken file until it
+  is fixed. A missing file means defaults.
+- **Saves are atomic**: Shift writes a temporary file next to `config.toml`,
+  keeps the old file's permissions and renames it over, so a failed write
+  never truncates the config.
+- **Saves edit the file in place**: Settings changes only the lines whose
+  values changed, keeping comments, key order and unknown keys. A setting
+  the file never mentioned is added only when it differs from its default.
+- A non-finite `font_size` or `line_height` (`nan`, `inf`) falls back to its
+  default.
+
 ## Themes
 
 Built-ins, in picker order: `dark-default`, `light-default`,
@@ -110,7 +123,8 @@ Built-ins, in picker order: `dark-default`, `light-default`,
 
 A user theme is `~/.config/shift/themes/<name>.{toml,yaml,yml}`, referenced by
 file stem (`toml` wins if several exist). It appears in Settings → Themes and
-the palette's theme switcher.
+the palette's theme switcher. Editing the selected theme file reloads its
+colors without changing `config.toml` or restarting.
 
 ### Shift TOML themes
 

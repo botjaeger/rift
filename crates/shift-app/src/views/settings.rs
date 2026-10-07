@@ -41,12 +41,16 @@ pub struct SettingsState {
     pub kb_filter: String,
     /// Keybindings page: action waiting for its new shortcut.
     pub recording: Option<String>,
+    /// Page control with keyboard focus (Tab / ⇧Tab); `None` = the arrow
+    /// keys move between pages.
+    pub focus: Option<ClickTarget>,
 }
 
 impl SettingsState {
     pub fn open_page(&mut self, page: Page) {
         if self.page != page {
             self.scroll = 0.0;
+            self.focus = None;
         }
         self.page = page;
         self.open = true;
@@ -67,6 +71,54 @@ impl SettingsState {
         let max = (self.content_h - viewport_h).max(0.0);
         self.scroll = (self.scroll - lines * 24.0).clamp(0.0, max);
     }
+}
+
+/// The page's keyboard-focusable controls in reading order (top to bottom,
+/// left to right): every body control of this frame's `hits`.
+pub fn focus_order(hits: &[Hit]) -> Vec<(ClickTarget, [f32; 4])> {
+    let mut order: Vec<_> = hits
+        .iter()
+        .filter(|h| {
+            matches!(
+                h.target,
+                ClickTarget::SettingsToggle(_)
+                    | ClickTarget::SettingsStep(..)
+                    | ClickTarget::SettingsSegment(..)
+                    | ClickTarget::SettingsCycle(_)
+                    | ClickTarget::SettingsSlider(_)
+                    | ClickTarget::SettingsTheme(_)
+                    | ClickTarget::SettingsKeybind(_)
+                    | ClickTarget::SettingsKeybindReset(_)
+            )
+        })
+        .map(|h| (h.target.clone(), h.rect))
+        .collect();
+    order.sort_by(|a, b| {
+        (a.1[1].round(), a.1[0].round())
+            .partial_cmp(&(b.1[1].round(), b.1[0].round()))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    order.dedup_by(|a, b| a.0 == b.0);
+    order
+}
+
+/// Focus after Tab (`delta` 1) or ⇧Tab (−1), wrapping; from no focus, Tab
+/// starts at the first control and ⇧Tab at the last.
+pub fn next_focus(
+    order: &[(ClickTarget, [f32; 4])],
+    current: Option<&ClickTarget>,
+    delta: isize,
+) -> Option<ClickTarget> {
+    if order.is_empty() {
+        return None;
+    }
+    let n = order.len() as isize;
+    let i = match current.and_then(|c| order.iter().position(|(t, _)| t == c)) {
+        Some(i) => (i as isize + delta).rem_euclid(n),
+        None if delta < 0 => n - 1,
+        None => 0,
+    };
+    Some(order[i as usize].0.clone())
 }
 
 const SIDEBAR_W: f32 = 248.0;
@@ -1498,7 +1550,49 @@ fn themes_page(form: &mut Form, config: &Config) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Page, SettingsState, thousands};
+    use super::{Page, SettingsState, focus_order, next_focus, thousands};
+    use crate::state::{ClickTarget, Hit};
+
+    #[test]
+    fn tab_walks_controls_in_reading_order() {
+        let hit = |target, x, y| Hit {
+            rect: [x, y, 40.0, 20.0],
+            target,
+        };
+        let hits = vec![
+            hit(ClickTarget::SettingsNav(0), 0.0, 0.0),
+            hit(ClickTarget::SettingsToggle("b"), 300.0, 200.0),
+            hit(ClickTarget::SettingsSegment("seg", 1), 360.0, 100.0),
+            hit(ClickTarget::SettingsSegment("seg", 0), 300.0, 100.0),
+            hit(ClickTarget::SettingsClose, 900.0, 0.0),
+        ];
+        let order = focus_order(&hits);
+        let targets: Vec<_> = order.iter().map(|(t, _)| t.clone()).collect();
+        assert_eq!(
+            targets,
+            [
+                ClickTarget::SettingsSegment("seg", 0),
+                ClickTarget::SettingsSegment("seg", 1),
+                ClickTarget::SettingsToggle("b"),
+            ]
+        );
+        let first = next_focus(&order, None, 1);
+        assert_eq!(first, Some(ClickTarget::SettingsSegment("seg", 0)));
+        assert_eq!(
+            next_focus(&order, None, -1),
+            Some(ClickTarget::SettingsToggle("b"))
+        );
+        let wrapped = next_focus(&order, Some(&ClickTarget::SettingsToggle("b")), 1);
+        assert_eq!(wrapped, first);
+        assert_eq!(next_focus(&[], None, 1), None);
+        // changing page drops the focus
+        let mut state = SettingsState {
+            focus: first,
+            ..Default::default()
+        };
+        state.move_page(1);
+        assert_eq!(state.focus, None);
+    }
 
     #[test]
     fn thousands_groups_digits() {

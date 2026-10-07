@@ -111,6 +111,23 @@ struct Client {
     pid: u32,
     tx: SyncSender<Out>,
     alive: Arc<AtomicBool>,
+    socket: Arc<UnixStream>,
+}
+
+impl Client {
+    fn send(&self, out: Out) -> bool {
+        if !self.alive.load(Ordering::Acquire) {
+            return false;
+        }
+        match self.tx.try_send(out) {
+            Ok(()) => true,
+            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
+                self.alive.store(false, Ordering::Release);
+                let _ = self.socket.shutdown(std::net::Shutdown::Both);
+                false
+            }
+        }
+    }
 }
 
 struct Shell {
@@ -127,19 +144,7 @@ struct Shell {
 
 impl Shell {
     fn broadcast(&self, make: impl Fn() -> Out) {
-        self.clients.lock().unwrap().retain(|c| {
-            if !c.alive.load(Ordering::Acquire) {
-                return false;
-            }
-            match c.tx.try_send(make()) {
-                Ok(()) => true,
-                // too slow: cut it loose; its window reattaches and replays
-                Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
-                    c.alive.store(false, Ordering::Release);
-                    false
-                }
-            }
-        });
+        self.clients.lock().unwrap().retain(|c| c.send(make()));
     }
 
     fn info(&self) -> SessionInfo {
@@ -235,6 +240,7 @@ pub fn run() -> std::io::Result<()> {
 }
 
 fn serve(state: Arc<State>, stream: UnixStream) {
+    let stream = Arc::new(stream);
     state.clients.fetch_add(1, Ordering::AcqRel);
     let (tx, rx) = sync_channel::<Out>(CLIENT_QUEUE);
     let alive = Arc::new(AtomicBool::new(true));
@@ -247,7 +253,7 @@ fn serve(state: Arc<State>, stream: UnixStream) {
         std::thread::spawn(move || write_loop(write_half, rx, alive))
     };
     let mut peer_pid = 0u32;
-    let mut read_half = stream;
+    let mut read_half = &*stream;
     while alive.load(Ordering::Acquire) {
         let frame = match ipc::read_frame(&mut read_half) {
             Ok(Some(f)) => f,
@@ -268,7 +274,7 @@ fn serve(state: Arc<State>, stream: UnixStream) {
                     }));
                     continue;
                 };
-                handle(&state, req, &tx, &alive, &mut peer_pid);
+                handle(&state, req, &tx, &alive, &stream, &mut peer_pid);
             }
             Frame::Output { .. } => {}
         }
@@ -281,7 +287,13 @@ fn serve(state: Arc<State>, stream: UnixStream) {
 }
 
 fn write_loop(mut s: UnixStream, rx: Receiver<Out>, alive: Arc<AtomicBool>) {
-    for out in rx {
+    let _ = s.set_write_timeout(Some(Duration::from_secs(5)));
+    while alive.load(Ordering::Acquire) {
+        let out = match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(out) => out,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(_) => break,
+        };
         let r = match out {
             Out::Event(e) => ipc::send_json(&mut s, &e),
             Out::Output {
@@ -304,6 +316,7 @@ fn handle(
     req: Request,
     tx: &SyncSender<Out>,
     alive: &Arc<AtomicBool>,
+    socket: &Arc<UnixStream>,
     peer_pid: &mut u32,
 ) {
     let reply = |e: Event| {
@@ -365,6 +378,7 @@ fn handle(
                 pid: *peer_pid,
                 tx: tx.clone(),
                 alive: alive.clone(),
+                socket: socket.clone(),
             });
         }
         Request::Resize {
@@ -486,6 +500,40 @@ fn spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_client_queue_disconnects_the_socket() {
+        let (socket, mut peer) = UnixStream::pair().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        let (tx, _rx) = sync_channel(1);
+        let alive = Arc::new(AtomicBool::new(true));
+        let c = Client {
+            pid: 1,
+            tx,
+            alive: alive.clone(),
+            socket: Arc::new(socket),
+        };
+        assert!(c.send(Out::Event(Event::ReplayDone { session: 1 })));
+        assert!(!c.send(Out::Event(Event::ReplayDone { session: 1 })));
+        assert!(!alive.load(Ordering::Acquire));
+        assert_eq!(peer.read(&mut [0]).unwrap(), 0);
+    }
+
+    #[test]
+    fn idle_writer_exits_even_while_a_sender_survives() {
+        let (socket, _peer) = UnixStream::pair().unwrap();
+        let (_tx, rx) = sync_channel(1);
+        let alive = Arc::new(AtomicBool::new(true));
+        let running = alive.clone();
+        let (done, finished) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            write_loop(socket, rx, running);
+            done.send(()).unwrap();
+        });
+        alive.store(false, Ordering::Release);
+        finished.recv_timeout(Duration::from_secs(2)).unwrap();
+        worker.join().unwrap();
+    }
 
     #[test]
     fn ring_bounds_and_replays_from_any_point() {

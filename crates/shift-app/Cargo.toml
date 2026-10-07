@@ -28,6 +28,7 @@ git2.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 libc = "0.2"
+unicode-segmentation = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 muda = { version = "0.20", default-features = false }

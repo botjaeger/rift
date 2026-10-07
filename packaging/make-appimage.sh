@@ -62,26 +62,27 @@ ln -sf usr/bin/shift-terminal "$APPDIR/AppRun"
 # Cached in its own subdirectory, never next to the artifacts: the release
 # workflow globs <target>/*.AppImage and would otherwise publish the 14 MB
 # appimagetool as a release asset.
-TOOL="$TARGET_DIR/appimagetool/appimagetool-$ARCH.AppImage"
-if [ ! -x "$TOOL" ]; then
-    mkdir -p "$TARGET_DIR/appimagetool"
-    URLS="
-https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-$ARCH.AppImage
-https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-$ARCH.AppImage
-"
-    ok=0
-    for url in $URLS; do
-        echo "downloading $url"
-        if curl -fsSL --retry 3 -o "$TOOL.part" "$url"; then
-            mv "$TOOL.part" "$TOOL"
-            ok=1
-            break
-        fi
-    done
-    rm -f "$TOOL.part"
-    [ "$ok" -eq 1 ] || shift_die "could not download appimagetool for $ARCH (no network?)"
-    chmod +x "$TOOL"
+# Digests from https://api.github.com/repos/AppImage/appimagetool/releases/tags/1.9.1
+# Update version and digests together; never execute an unchecked cached tool.
+TOOL_VERSION=1.9.1
+case "$ARCH" in
+    x86_64) TOOL_SHA256=ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0 ;;
+    aarch64) TOOL_SHA256=f0837e7448a0c1e4e650a93bb3e85802546e60654ef287576f46c71c126a9158 ;;
+    armhf) TOOL_SHA256=42b61cba5495d8aaf418a5c9a015a49b85ad92efabcbd3c341f1540440e4e23d ;;
+    i686) TOOL_SHA256=7ad9ff47c203aae0149b18f6df9e3018b2e2f470ea644a0413e3ded39e9e3bdb ;;
+    *) shift_die "unsupported appimagetool architecture: $ARCH" ;;
+esac
+TOOL="$TARGET_DIR/appimagetool/$TOOL_VERSION/appimagetool-$ARCH.AppImage"
+if [ ! -f "$TOOL" ]; then
+    mkdir -p "$(dirname "$TOOL")"
+    url="https://github.com/AppImage/appimagetool/releases/download/$TOOL_VERSION/appimagetool-$ARCH.AppImage"
+    trap 'rm -f "$TOOL.part"' EXIT
+    curl -fsSL --retry 3 -o "$TOOL.part" "$url"
+    printf '%s  %s\n' "$TOOL_SHA256" "$TOOL.part" | sha256sum -c - || shift_die "appimagetool checksum mismatch"
+    mv "$TOOL.part" "$TOOL"
 fi
+printf '%s  %s\n' "$TOOL_SHA256" "$TOOL" | sha256sum -c - || shift_die "cached appimagetool checksum mismatch"
+chmod +x "$TOOL"
 
 OUT="$TARGET_DIR/Shift-$VERSION-$ARCH.AppImage"
 rm -f "$OUT"

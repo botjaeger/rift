@@ -33,7 +33,7 @@ blocks, ⌘P = palette).
 
 ```sh
 scripts/gates.sh               # quality gates: fmt clippy test doc shell docs
-scripts/gates.sh all           # + release build + Linux gates in docker
+scripts/gates.sh all           # + release build + scripted UI + Linux gates in docker
 scripts/gates.sh --list        # what each gate runs
 cargo run -p shift-app         # dev build + launch (binary: shift-terminal)
 cargo test -p shift-core osc   # one module's tests

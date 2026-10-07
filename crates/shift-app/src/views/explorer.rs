@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use shift_core::fs_tree::{self, Entry};
+use shift_core::fs_tree::{self, Listing};
 use shift_core::{Color, Theme};
 use shift_renderer::glyphon::{Attrs, Buffer, Family, Metrics, Shaping, TextBounds, Weight};
 use shift_renderer::{FONT_SANS, Layer, TextEngine, mono_family};
@@ -25,13 +25,16 @@ pub struct ExplorerState {
     last_cwd: Option<PathBuf>,
     repo: Option<git2::Repository>,
     pub expanded: HashSet<PathBuf>,
-    children: HashMap<PathBuf, Vec<Entry>>,
+    children: HashMap<PathBuf, Listing>,
     pub selected: Option<PathBuf>,
     /// Vertical scroll (logical px, ≥ 0).
     pub scroll: f32,
     pub view_h: f32,
-    /// Visible tree of the last frame, in order.
+    /// Visible tree of the last frame, in order: files and folders only
+    /// (indices of `ExplorerHit::Row`).
     pub rows: Vec<Row>,
+    /// What the body draws, top to bottom: `rows` interleaved with notices.
+    lines: Vec<Line>,
     /// Git status per repository-relative path, and folders holding
     /// changes (from the review model).
     statuses: HashMap<String, char>,
@@ -44,6 +47,16 @@ pub struct Row {
     pub name: String,
     pub depth: usize,
     pub is_dir: bool,
+}
+
+/// One drawn line of the tree body.
+#[derive(Debug, Clone, PartialEq)]
+enum Line {
+    /// Index into `rows`.
+    Row(usize),
+    /// A muted, non-actionable line: a folder that could not be read
+    /// (the read error), or a listing cut at `fs_tree::MAX_ENTRIES`.
+    Notice { depth: usize, text: String },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -87,27 +100,44 @@ impl ExplorerState {
         }
     }
 
-    fn listing(&mut self, dir: &Path) -> &Vec<Entry> {
+    fn listing(&mut self, dir: &Path) -> &Listing {
         if !self.children.contains_key(dir) {
-            let list = fs_tree::list(dir, self.repo.as_ref());
+            let list = fs_tree::listing(dir, self.repo.as_ref());
             self.children.insert(dir.to_path_buf(), list);
         }
         &self.children[dir]
     }
 
-    /// Flatten the expanded tree into `rows`.
+    /// Flatten the expanded tree into `rows` (files and folders) and `lines`
+    /// (what is drawn, top to bottom: rows plus notices).
     pub fn rebuild_rows(&mut self) {
         let mut rows = Vec::new();
+        let mut lines = Vec::new();
         if let Some(root) = self.root.clone() {
-            self.walk(&root, 0, &mut rows);
+            self.walk(&root, 0, &mut rows, &mut lines);
         }
         self.rows = rows;
+        self.lines = lines;
     }
 
-    fn walk(&mut self, dir: &Path, depth: usize, rows: &mut Vec<Row>) {
-        let entries = self.listing(dir).clone();
+    fn walk(&mut self, dir: &Path, depth: usize, rows: &mut Vec<Row>, lines: &mut Vec<Line>) {
+        let Listing {
+            entries,
+            error,
+            truncated,
+        } = self.listing(dir).clone();
+        if let Some(error) = error {
+            // "Permission denied (os error 13)" → "Permission denied"
+            let text = match error.find(" (os error") {
+                Some(cut) => error[..cut].to_string(),
+                None => error,
+            };
+            lines.push(Line::Notice { depth, text });
+            return;
+        }
         for e in entries {
             let open = e.is_dir && self.expanded.contains(&e.path);
+            lines.push(Line::Row(rows.len()));
             rows.push(Row {
                 path: e.path.clone(),
                 name: e.name,
@@ -115,9 +145,31 @@ impl ExplorerState {
                 is_dir: e.is_dir,
             });
             if open {
-                self.walk(&e.path, depth + 1, rows);
+                self.walk(&e.path, depth + 1, rows, lines);
             }
         }
+        if truncated {
+            lines.push(Line::Notice {
+                depth,
+                text: "… more entries not shown".into(),
+            });
+        }
+    }
+
+    /// Text of the notice lines (unreadable or cut folders), top to bottom.
+    pub fn notices(&self) -> impl Iterator<Item = &str> {
+        self.lines.iter().filter_map(|l| match l {
+            Line::Notice { text, .. } => Some(text.as_str()),
+            Line::Row(_) => None,
+        })
+    }
+
+    /// Drawn position of file row `i` (rows and notices interleave).
+    fn line_of(&self, i: usize) -> usize {
+        self.lines
+            .iter()
+            .position(|l| *l == Line::Row(i))
+            .unwrap_or(i)
     }
 
     pub fn toggle(&mut self, path: &Path) {
@@ -132,7 +184,7 @@ impl ExplorerState {
     }
 
     pub fn scroll_by(&mut self, px: f32) {
-        let max = (self.rows.len() as f32 * ROW_H - self.view_h + 8.0).max(0.0);
+        let max = (self.lines.len() as f32 * ROW_H - self.view_h + 8.0).max(0.0);
         self.scroll = (self.scroll + px).clamp(0.0, max);
     }
 
@@ -155,7 +207,7 @@ impl ExplorerState {
     }
 
     fn reveal(&mut self, i: usize) {
-        let top = i as f32 * ROW_H;
+        let top = self.line_of(i) as f32 * ROW_H;
         if top < self.scroll {
             self.scroll = top;
         } else if top + ROW_H > self.scroll + self.view_h {
@@ -286,8 +338,23 @@ pub fn render(
     let root = state.root.clone().unwrap_or_default();
     let first = (state.scroll / ROW_H).floor() as usize;
     let last = ((state.scroll + body_h) / ROW_H).ceil() as usize + 1;
-    for (i, row) in state.rows.iter().enumerate().take(last).skip(first) {
-        let ry = body_top + 4.0 + i as f32 * ROW_H - state.scroll;
+    for (li, line) in state.lines.iter().enumerate().take(last).skip(first) {
+        let ry = body_top + 4.0 + li as f32 * ROW_H - state.scroll;
+        let i = match line {
+            Line::Row(i) => *i,
+            // muted, no hit: never actionable as a file
+            Line::Notice { depth, text, .. } => {
+                layer.text_clipped(
+                    label(engine, text, 12.0, Weight::NORMAL),
+                    x + 26.0 + *depth as f32 * INDENT,
+                    ry + 5.0,
+                    theme.text_muted,
+                    bounds,
+                );
+                continue;
+            }
+        };
+        let row = &state.rows[i];
         let row_rect = [x, ry, w - 1.0, ROW_H];
         if state.selected.as_ref() == Some(&row.path) {
             let wash = if state.focused { 0.22 } else { 0.12 };
@@ -356,7 +423,7 @@ pub fn render(
             ));
         }
     }
-    if state.rows.is_empty() {
+    if state.lines.is_empty() {
         layer.text(
             label(engine, "Empty folder", 12.0, Weight::NORMAL),
             x + 14.0,
@@ -365,4 +432,87 @@ pub fn render(
         );
     }
     hits
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("shift-explorer-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn state_at(root: &Path) -> ExplorerState {
+        let mut s = ExplorerState::default();
+        s.follow(root);
+        // a scratch dir under /tmp is never inside a repository, but pin it
+        s.root = Some(root.to_path_buf());
+        s.repo = None;
+        s
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_folder_shows_its_error_not_an_empty_folder() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = scratch("denied");
+        let locked = root.join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::write(root.join("a.txt"), "").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = std::fs::read_dir(&locked).is_ok(); // root ignores modes
+        let mut s = state_at(&root);
+        s.toggle(&locked);
+        s.rebuild_rows();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        if readable {
+            return;
+        }
+        let names: Vec<_> = s.rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["locked", "a.txt"], "notices are not file rows");
+        assert_eq!(s.notices().collect::<Vec<_>>(), ["Permission denied"]);
+        // drawn right under the folder, before its sibling
+        assert_eq!(
+            s.lines[1],
+            Line::Notice {
+                depth: 1,
+                text: "Permission denied".into()
+            }
+        );
+        assert_eq!(s.line_of(1), 2, "a.txt sits below the notice");
+    }
+
+    #[test]
+    fn a_cut_listing_ends_with_a_more_entries_line() {
+        let root = scratch("cut");
+        for i in 0..=fs_tree::MAX_ENTRIES {
+            std::fs::write(root.join(format!("f{i:05}")), "").unwrap();
+        }
+        let mut s = state_at(&root);
+        s.rebuild_rows();
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(s.rows.len(), fs_tree::MAX_ENTRIES);
+        assert_eq!(s.lines.len(), fs_tree::MAX_ENTRIES + 1);
+        assert_eq!(
+            s.notices().collect::<Vec<_>>(),
+            ["… more entries not shown"]
+        );
+        assert!(matches!(s.lines.last(), Some(Line::Notice { .. })));
+    }
+
+    #[test]
+    fn a_full_listing_has_no_notice() {
+        let root = scratch("plain");
+        std::fs::write(root.join("a"), "").unwrap();
+        let mut s = state_at(&root);
+        s.rebuild_rows();
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(s.rows.len(), 1);
+        assert_eq!(s.notices().count(), 0);
+    }
 }

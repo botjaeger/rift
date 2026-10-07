@@ -12,6 +12,9 @@ permissions:
   contents: write
 
 jobs:
+  validate:
+    uses: ./.github/workflows/ci.yml
+
   macos:
     name: macOS ${{ matrix.arch }}
     strategy:
@@ -94,7 +97,7 @@ jobs:
 
   release:
     name: Publish release
-    needs: [macos, linux]
+    needs: [validate, macos, linux]
     runs-on: ubuntu-24.04
     # A workflow_dispatch run has no tag to attach a release to, so it stops
     # after building and uploading the artifacts.

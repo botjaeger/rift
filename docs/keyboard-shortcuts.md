@@ -156,6 +156,9 @@ below are implemented.
 | ⌥R | Toggle regular expression (`.*`) |
 | Esc | Close search, snap back to bottom |
 
+With the file viewer open, ⌘F finds in the file instead: type the query
+(case-insensitive), Enter / ⇧Enter next / previous match, Esc closes the bar.
+
 ## Mouse
 
 | Gesture | Effect |
