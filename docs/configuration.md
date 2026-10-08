@@ -114,7 +114,8 @@ applies external edits without restarting.
   values changed, keeping comments, key order and unknown keys. A setting
   the file never mentioned is added only when it differs from its default.
 - A non-finite `font_size` or `line_height` (`nan`, `inf`) falls back to its
-  default.
+  default. The value stays accepted and is kept as written on save, along
+  with the file's comments and unknown keys.
 
 ## Themes
 

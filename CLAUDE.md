@@ -27,7 +27,11 @@ blocks, ⌘P = palette).
   them the scripted instance reads the user's config, writes their session
   file, and can attach to the user's live session service and control sockets.
 - `--script` synthesizes input inside the app (no OS input), but it still opens
-  a real window. On a machine without a display, use the Linux docker image.
+  a real window that takes focus, and the user's typing then lands in it. Add
+  `--headless` to every agent run: the window is never shown or focused, the
+  clipboard is private to the run, and links, new windows and the global
+  hotkey are skipped. On a machine without a display, use the Linux docker
+  image.
 
 ## Commands
 
@@ -70,7 +74,7 @@ dump /tmp/shift-t/a.txt
 quit
 EOF
 XDG_CONFIG_HOME=/tmp/shift-t/cfg XDG_DATA_HOME=/tmp/shift-t/data SHIFT_NO_NOTIFY=1 \
-  ./target/debug/shift-terminal --script /tmp/shift-t/t.shift
+  ./target/debug/shift-terminal --script /tmp/shift-t/t.shift --headless
 ```
 
 Commands (one per line, `#` comments; full list in the `script.rs` module

@@ -91,14 +91,71 @@ struct CompletionRequest {
 
 impl CompletionRequest {
     fn run(&self) -> Vec<shift_core::completion::Completion> {
+        // the whole word around the cursor is completed (zsh without
+        // `complete_in_word`); `accept_completion` replaces that same span
         shift_core::completion::complete(
             &self.buffer,
-            self.cursor,
+            shift_core::completion::token_end(&self.buffer, self.cursor),
             &self.history,
             &self.shell_history,
             self.cwd.as_deref(),
         )
     }
+}
+
+/// Pause before starting a new completion thread after one failed.
+const COMPLETION_RETRY: Duration = Duration::from_secs(5);
+
+/// Queue of the completion thread, started on the first request. Providers
+/// read the filesystem and Git, so they never run on the UI thread: when the
+/// thread cannot start or has died, completion pauses for
+/// `COMPLETION_RETRY` and the next request after that starts a new one.
+struct CompletionWorker<T> {
+    tx: Option<std::sync::mpsc::Sender<T>>,
+    retry_at: Option<Instant>,
+}
+
+impl<T> Default for CompletionWorker<T> {
+    fn default() -> Self {
+        CompletionWorker {
+            tx: None,
+            retry_at: None,
+        }
+    }
+}
+
+impl<T> CompletionWorker<T> {
+    /// Hand `req` to the thread, starting it with `spawn` when there is
+    /// none. False while paused; the caller must not answer it itself.
+    fn send(
+        &mut self,
+        req: T,
+        now: Instant,
+        spawn: impl FnOnce() -> Option<std::sync::mpsc::Sender<T>>,
+    ) -> bool {
+        if self.tx.is_none() {
+            if self.retry_at.is_some_and(|t| now < t) {
+                return false;
+            }
+            self.tx = spawn();
+        }
+        if self.tx.as_ref().is_some_and(|tx| tx.send(req).is_ok()) {
+            self.retry_at = None;
+            return true;
+        }
+        self.tx = None;
+        self.retry_at = Some(now + COMPLETION_RETRY);
+        false
+    }
+}
+
+/// A completion key deferred until the pending request is answered.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum CompletionIntent {
+    /// Tab
+    Accept,
+    /// ⌃→
+    AcceptGhostWord,
 }
 
 /// Review-panel writes, applied in order: (operation, path, hunk).
@@ -274,6 +331,11 @@ pub struct App {
     _watcher: Option<shift_core::watch::ConfigWatcher>,
     /// `--script` driver (see script.rs).
     script: Option<crate::script::Script>,
+    /// `--headless`: the window is never shown, focused or raised, and no
+    /// global hotkey is registered (scripts only; `shot` reads offscreen).
+    headless: bool,
+    /// Clipboard of a headless run: the system clipboard is never touched.
+    headless_clipboard: String,
     /// Next frame is also rendered offscreen and written to this PNG.
     capture: Option<std::path::PathBuf>,
     /// OS appearance is light (drives `sync_os_theme`).
@@ -371,9 +433,12 @@ pub struct App {
     /// Transient status message (text, shown at).
     toast: Option<(String, Instant)>,
     /// Queue of the completion thread (started on the first request).
-    completion_tx: Option<std::sync::mpsc::Sender<CompletionRequest>>,
+    completion_worker: CompletionWorker<CompletionRequest>,
     /// Latest completion request not yet answered.
     completion_pending: Option<CompletionRequest>,
+    /// Key that read the menu or ghost while `completion_pending` was in
+    /// flight: applied once, when that request's answer arrives.
+    completion_intent: Option<CompletionIntent>,
     /// Counter identifying completion requests.
     completion_gen: u64,
     /// Editor buffer the shown completions and ghost belong to.
@@ -600,7 +665,11 @@ struct ConfirmClose {
 }
 
 impl App {
-    pub fn new(proxy: EventLoopProxy<UserEvent>, script: Option<crate::script::Script>) -> Self {
+    pub fn new(
+        proxy: EventLoopProxy<UserEvent>,
+        script: Option<crate::script::Script>,
+        headless: bool,
+    ) -> Self {
         // scripted runs and secondary windows never touch the user's session
         // file (a script run used to overwrite it)
         let persist_session = (script.is_none()
@@ -656,6 +725,8 @@ impl App {
             closed_tabs: Vec::new(),
             _watcher: None,
             script,
+            headless,
+            headless_clipboard: String::new(),
             capture: None,
             os_light: false,
             focused: true,
@@ -711,8 +782,9 @@ impl App {
             toast: None,
             config_error: None,
             review_writer: None,
-            completion_tx: None,
+            completion_worker: CompletionWorker::default(),
             completion_pending: None,
+            completion_intent: None,
             completion_gen: 0,
             completion_buffer: String::new(),
             mouse_report: None,
@@ -786,7 +858,7 @@ impl App {
             return;
         }
         self.global_hotkey = None; // drop unregisters the old key
-        if spec.is_empty() || !self.persist_session || self.window.is_none() {
+        if spec.is_empty() || !self.persist_session || self.window.is_none() || self.headless {
             return;
         }
         let proxy = self.proxy.clone();
@@ -804,10 +876,16 @@ impl App {
         }
     }
 
+    /// The window, unless headless: minimize, maximize and fullscreen would
+    /// put a hidden window on screen.
+    fn shown_window(&self) -> Option<&Arc<Window>> {
+        self.window.as_ref().filter(|_| !self.headless)
+    }
+
     /// Global hotkey: bring Shift forward, or hide it when it is already
     /// the focused app (Warp hotkey window behavior).
     fn toggle_visibility(&mut self) {
-        let Some(window) = self.window.clone() else {
+        let Some(window) = self.window.clone().filter(|_| !self.headless) else {
             return;
         };
         #[cfg(target_os = "macos")]
@@ -1682,10 +1760,19 @@ impl App {
                 None => return false,
             },
         };
-        if let Err(e) = open_external(&target) {
+        self.open_target(&target);
+        true
+    }
+
+    /// Open a link or path with the OS opener; a headless run only reports
+    /// it (an opened browser or editor would take the user's focus).
+    fn open_target(&mut self, target: &str) {
+        if self.headless {
+            log::info!("headless: not opening {target}");
+            self.toast(format!("Headless: not opening {target}"));
+        } else if let Err(e) = open_external(target) {
             self.toast(format!("Could not open {target}: {e}"));
         }
-        true
     }
 
     /// Resolve a path token on output line `abs` of `pane` to an existing
@@ -1806,11 +1893,7 @@ impl App {
                         self.toast("Copied".into());
                     }
                 }
-                HintTarget::Open(t) => {
-                    if let Err(e) = open_external(&t) {
-                        self.toast(format!("Could not open {t}: {e}"));
-                    }
-                }
+                HintTarget::Open(t) => self.open_target(&t),
                 HintTarget::Block(pane, block) => {
                     if let Some(tab) = self.tabs.get_mut(self.active) {
                         tab.active_pane = pane;
@@ -2014,6 +2097,10 @@ impl App {
 
     /// Copy `text`; `false` (after telling the user) when it failed.
     fn copy_to_clipboard(&mut self, text: String) -> bool {
+        if self.headless {
+            self.headless_clipboard = text;
+            return true;
+        }
         let Some(cb) = self.clipboard() else {
             return false;
         };
@@ -2028,6 +2115,11 @@ impl App {
     }
 
     fn paste_from_clipboard(&mut self) {
+        if self.headless {
+            let text = self.headless_clipboard.clone();
+            self.paste_text(&text);
+            return;
+        }
         let Some(cb) = self.clipboard() else {
             return;
         };
@@ -3084,6 +3176,8 @@ impl App {
     /// the result arrives as `UserEvent::Completions`. Until then the ghost
     /// only shrinks by what was typed into it.
     fn update_completions(&mut self) {
+        // a deferred Tab / ⌃→ belonged to the editor state being replaced
+        self.completion_intent = None;
         let Some(pane) = self.tabs.get(self.active).and_then(|t| t.active()) else {
             self.completion_pending = None;
             self.completion.close();
@@ -3132,9 +3226,9 @@ impl App {
             shell_history: self.shell_history.clone(),
             cwd,
         };
-        if self.completion_tx.is_none() {
+        let proxy = self.proxy.clone();
+        let spawn = move || {
             let (tx, rx) = std::sync::mpsc::channel::<CompletionRequest>();
-            let proxy = self.proxy.clone();
             let spawned = std::thread::Builder::new()
                 .name("completion".into())
                 .spawn(move || {
@@ -3147,31 +3241,36 @@ impl App {
                         let _ = proxy.send_event(UserEvent::Completions(req.generation, items));
                     }
                 });
-            if spawned.is_ok() {
-                self.completion_tx = Some(tx);
+            match spawned {
+                Ok(_) => Some(tx),
+                Err(e) => {
+                    log::warn!("completion thread: {e}");
+                    None
+                }
             }
-        }
-        let sent = self
-            .completion_tx
-            .as_ref()
-            .is_some_and(|tx| tx.send(request.clone()).is_ok());
-        self.completion_pending = Some(request);
-        if !sent {
-            // no worker thread: answer in place
-            self.completion_tx = None;
-            self.flush_completions();
+        };
+        if self
+            .completion_worker
+            .send(request.clone(), Instant::now(), spawn)
+        {
+            self.completion_pending = Some(request);
+        } else {
+            // completion is paused; editing is not
+            self.completion_pending = None;
+            self.completion.close();
         }
     }
 
-    /// Settle a completion request still in flight right now: keys that
-    /// read the menu or ghost (Tab, ⌃→, ↑/↓) must see the current answer.
-    fn flush_completions(&mut self) {
-        if let Some(request) = self.completion_pending.take()
-            && self.editing(&request)
-        {
-            let items = request.run();
-            self.apply_completions(&request.buffer, request.cursor, items);
+    /// Keys that read the menu or ghost (Tab, ⌃→) must see the answer to
+    /// the current editor state. Providers never run on this thread, so
+    /// while that answer is in flight the key is remembered and applied
+    /// when it arrives; true when deferred.
+    fn defer_completion_key(&mut self, intent: CompletionIntent) -> bool {
+        if self.completion_pending.is_none() {
+            return false;
         }
+        self.completion_intent = Some(intent);
+        true
     }
 
     /// Whether the active editor still holds exactly what `request` asked about.
@@ -3199,10 +3298,16 @@ impl App {
         let Some(request) = self.completion_pending.take() else {
             return;
         };
+        let intent = self.completion_intent.take();
         if !self.editing(&request) {
             return;
         }
         self.apply_completions(&request.buffer, request.cursor, items);
+        match intent {
+            Some(CompletionIntent::Accept) => self.accept_completion(),
+            Some(CompletionIntent::AcceptGhostWord) => self.accept_ghost_word(),
+            None => {}
+        }
         if let Some(w) = &self.window {
             w.request_redraw();
         }
@@ -3253,7 +3358,9 @@ impl App {
 
     /// ⌃→: accept one word of the ghost suggestion.
     fn accept_ghost_word(&mut self) {
-        self.flush_completions();
+        if self.defer_completion_key(CompletionIntent::AcceptGhostWord) {
+            return;
+        }
         if self.completion.ghost.is_empty() {
             return;
         }
@@ -3275,7 +3382,9 @@ impl App {
 
     /// Accept the selected completion (Tab).
     fn accept_completion(&mut self) {
-        self.flush_completions();
+        if self.defer_completion_key(CompletionIntent::Accept) {
+            return;
+        }
         let (replacement, ghost) = if self.completion.open {
             (
                 self.completion
@@ -3299,9 +3408,12 @@ impl App {
             let buffer = pane.editor.buffer.clone();
             let cursor = pane.editor.cursor;
             let (start, _) = shift_core::completion::current_token(&buffer, cursor);
+            // the whole word: a closing quote or the suffix right of a
+            // mid-word cursor would otherwise survive next to `insert`
+            let end = shift_core::completion::token_end(&buffer, cursor);
             // through the single mutation point: keeps placeholder spans
             // valid and makes the completion undoable
-            pane.editor.replace_range(start..cursor, &insert);
+            pane.editor.replace_range(start..end, &insert);
         }
         self.completion.close();
         self.update_completions();
@@ -4949,9 +5061,10 @@ impl App {
                 .get(active_tab_idx)
                 .and_then(|t| t.active())
                 .map(|p| {
-                    let (_, token) =
-                        shift_core::completion::current_token(&p.editor.buffer, p.editor.cursor);
-                    token.len()
+                    // the whole word is the completed prefix (see `CompletionRequest::run`)
+                    let (b, c) = (&p.editor.buffer, p.editor.cursor);
+                    let (start, _) = shift_core::completion::current_token(b, c);
+                    shift_core::completion::token_end(b, c) - start
                 })
                 .unwrap_or(0);
             completion_view::render(
@@ -5403,7 +5516,7 @@ impl App {
             }
             AppAction::NewWindow => self.open_new_window(),
             AppAction::Minimize => {
-                if let Some(w) = &self.window {
+                if let Some(w) = self.shown_window() {
                     w.set_minimized(true);
                 }
             }
@@ -5414,12 +5527,12 @@ impl App {
                     event_loop.hide_application();
                 }
                 #[cfg(not(target_os = "macos"))]
-                if let Some(w) = &self.window {
+                if let Some(w) = self.shown_window() {
                     w.set_minimized(true);
                 }
             }
             AppAction::ToggleFullscreen => {
-                if let Some(w) = &self.window {
+                if let Some(w) = self.shown_window() {
                     let full = w.fullscreen().is_some();
                     w.set_fullscreen(
                         (!full).then_some(winit::window::Fullscreen::Borderless(None)),
@@ -6079,13 +6192,13 @@ impl App {
         {
             pane.editor.replace_range(range, &expansion);
         }
-        // completion popup intercepts navigation keys
-        if matches!(
-            key,
-            EditorKey::HistoryUp | EditorKey::HistoryDown | EditorKey::Dismiss
-        ) {
-            self.flush_completions();
+        // Escape cancels a request in flight: its late answer is dropped
+        // and can neither reopen the menu nor run a deferred Tab
+        if key == EditorKey::Dismiss {
+            self.completion_pending = None;
+            self.completion_intent = None;
         }
+        // completion popup intercepts navigation keys
         if self.completion.open {
             match key {
                 EditorKey::HistoryUp => {
@@ -6534,7 +6647,13 @@ impl App {
 
     /// Open another Shift window (a separate process that neither restores
     /// nor overwrites this window's saved session).
-    fn open_new_window(&self) {
+    fn open_new_window(&mut self) {
+        if self.headless {
+            // a second, ordinary window would show and take focus
+            log::info!("headless: not opening a new window");
+            self.toast("Headless: no new windows".into());
+            return;
+        }
         let cwd = self.start_dir();
         match std::env::current_exe() {
             Ok(exe) => {
@@ -7465,12 +7584,14 @@ impl App {
             }
             Some(ClickTarget::TrafficLight(i)) => match i {
                 0 => self.request_close(CloseScope::Window, event_loop),
+                _ if self.headless => {}
                 1 => window.set_minimized(true),
                 _ => window.set_maximized(!window.is_maximized()),
             },
-            Some(ClickTarget::WindowDrag) => {
+            Some(ClickTarget::WindowDrag) if !self.headless => {
                 let _ = window.drag_window();
             }
+            Some(ClickTarget::WindowDrag) => {}
             Some(ClickTarget::JumpToBlock(pane, id)) => {
                 self.jump_to_block(*pane, *id);
             }
@@ -8637,7 +8758,7 @@ impl App {
                 if let Some(p) = pane {
                     self.tabs[ti].active_pane = p;
                 }
-                if let Some(w) = &self.window {
+                if let Some(w) = self.window.as_ref().filter(|_| !self.headless) {
                     w.set_minimized(false);
                     w.focus_window();
                 }
@@ -9485,12 +9606,17 @@ impl App {
                 }
             }
         }
-        let clip = self
-            .clipboard
-            .as_mut()
-            .and_then(|c| c.get_text().ok())
-            .unwrap_or_default();
+        let clip = if self.headless {
+            self.headless_clipboard.clone()
+        } else {
+            self.clipboard
+                .as_mut()
+                .and_then(|c| c.get_text().ok())
+                .unwrap_or_default()
+        };
         let _ = writeln!(out, "clipboard={clip:?}");
+        let visible = self.window.as_ref().and_then(|w| w.is_visible());
+        let _ = writeln!(out, "headless={} window_visible={visible:?}", self.headless);
         out
     }
 }
@@ -9537,7 +9663,9 @@ impl ApplicationHandler<UserEvent> for App {
                 .with_titlebar_transparent(true)
                 .with_fullsize_content_view(true)
                 .with_title_hidden(true);
-            crate::icon::set_dock_icon();
+            if !self.headless {
+                crate::icon::set_dock_icon();
+            }
         }
         // X11 WM_CLASS / Wayland app_id "shift" matches shift.desktop, so
         // docks, taskbars and switchers show its hicolor icon
@@ -9561,7 +9689,9 @@ impl ApplicationHandler<UserEvent> for App {
             &window,
             self.proxy.clone(),
         ));
-        window.set_visible(true);
+        if !self.headless {
+            window.set_visible(true);
+        }
         // input methods (CJK composition, dead keys, emoji picker)
         window.set_ime_allowed(true);
         self.os_light = window.theme() == Some(winit::window::Theme::Light);
@@ -9993,5 +10123,42 @@ mod tests {
         assert!(!confirm_accepts(false, Duration::from_millis(5)));
         assert!(!confirm_accepts(true, Duration::from_secs(2)));
         assert!(confirm_accepts(false, CONFIRM_ARM));
+    }
+
+    #[test]
+    fn completion_worker_pauses_after_failed_start() {
+        let mut w = CompletionWorker::<u32>::default();
+        let t0 = Instant::now();
+        let mut spawns = 0;
+        assert!(!w.send(1, t0, || {
+            spawns += 1;
+            None
+        }));
+        // paused: no new start, nothing queued
+        assert!(!w.send(2, t0 + Duration::from_secs(1), || panic!("respawned")));
+        assert!(w.tx.is_none());
+        // after the back-off a working start takes the newest request only
+        let (tx, rx) = std::sync::mpsc::channel();
+        assert!(w.send(3, t0 + COMPLETION_RETRY, || {
+            spawns += 1;
+            Some(tx)
+        }));
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), [3]);
+        assert_eq!(spawns, 2);
+        assert!(w.retry_at.is_none());
+    }
+
+    #[test]
+    fn completion_worker_recovers_from_a_dead_thread() {
+        let mut w = CompletionWorker::<u32>::default();
+        let t0 = Instant::now();
+        let (tx, rx) = std::sync::mpsc::channel();
+        assert!(w.send(1, t0, || Some(tx)));
+        drop(rx); // the thread died (its receiver is gone)
+        assert!(!w.send(2, t0, || panic!("a live sender needs no start")));
+        assert!(!w.send(3, t0 + Duration::from_secs(1), || panic!("respawned")));
+        let (tx, rx) = std::sync::mpsc::channel();
+        assert!(w.send(4, t0 + COMPLETION_RETRY, || Some(tx)));
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), [4]);
     }
 }

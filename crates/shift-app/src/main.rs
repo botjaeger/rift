@@ -18,15 +18,19 @@ mod vim;
 
 use winit::event_loop::EventLoop;
 
-const USAGE: &str = "usage: shift-terminal [--script <file>] [--version] [--help]\n       shift-terminal ctl <command>   (see `shift-terminal ctl help`)";
+const USAGE: &str = "usage: shift-terminal [--script <file> [--headless]] [--version] [--help]\n       shift-terminal ctl <command>   (see `shift-terminal ctl help`)";
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let mut script = None;
+    let mut headless = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
+            // debugging/testing: the scripted window is never shown and
+            // never takes focus, so the user's own typing cannot reach it
+            "--headless" => headless = true,
             "--script" => {
                 let Some(path) = args.next() else {
                     eprintln!("{USAGE}");
@@ -68,11 +72,23 @@ fn main() {
         }
     }
 
-    let event_loop = EventLoop::<app::UserEvent>::with_user_event()
-        .build()
-        .expect("create event loop");
+    if headless && script.is_none() {
+        eprintln!("shift-terminal: --headless needs --script\n{USAGE}");
+        std::process::exit(2);
+    }
+
+    let mut builder = EventLoop::<app::UserEvent>::with_user_event();
+    #[cfg(target_os = "macos")]
+    if headless {
+        use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
+        // no Dock icon or menu bar, and launching does not steal focus
+        builder
+            .with_activation_policy(ActivationPolicy::Accessory)
+            .with_activate_ignoring_other_apps(false);
+    }
+    let event_loop = builder.build().expect("create event loop");
     let proxy = event_loop.create_proxy();
 
-    let mut application = app::App::new(proxy, script);
+    let mut application = app::App::new(proxy, script, headless);
     event_loop.run_app(&mut application).expect("event loop");
 }

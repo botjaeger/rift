@@ -33,6 +33,11 @@
 //! wait_prompt              # block until the shell shows its first prompt
 //! quit                     # exit the app
 //! ```
+//!
+//! `--headless` (debugging/testing) keeps the window hidden and unfocused:
+//! `shot` still renders offscreen, the clipboard is private to the run, and
+//! links, new windows, window-manager actions and the global hotkey are
+//! skipped (see `App::headless`).
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};

@@ -38,6 +38,33 @@ pub fn current_token(buffer: &str, cursor: usize) -> (usize, &str) {
     (start, &before[start..])
 }
 
+/// End byte of the shell word containing `cursor` (see [`current_token`]):
+/// the first unquoted, unescaped whitespace or `|;&<>()` at or after
+/// `cursor`. Completion replaces `start..end`, so a closing quote or the
+/// rest of a word the cursor sits inside is replaced, not kept.
+pub fn token_end(buffer: &str, cursor: usize) -> usize {
+    let (start, _) = current_token(buffer, cursor);
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for (i, c) in buffer[start..].char_indices() {
+        let at = start + i;
+        if escaped {
+            escaped = false;
+        } else if quote == Some(c) {
+            quote = None;
+        } else if quote.is_some() {
+            escaped = c == '\\' && quote == Some('"');
+        } else if c == '\\' {
+            escaped = true;
+        } else if c == '\'' || c == '"' {
+            quote = Some(c);
+        } else if at >= cursor && (c.is_whitespace() || "|;&<>()".contains(c)) {
+            return at;
+        }
+    }
+    buffer.len()
+}
+
 /// The literal text of a typed shell word: quotes removed, `\x` → `x`.
 fn unescape_word(token: &str) -> String {
     let mut out = String::with_capacity(token.len());
@@ -47,11 +74,20 @@ fn unescape_word(token: &str) -> String {
         match (quote, c) {
             (None, '\'' | '"') => quote = Some(c),
             (Some(q), _) if c == q => quote = None,
-            (None, '\\') | (Some('"'), '\\') => {
+            (None, '\\') => {
                 if let Some(n) = chars.next() {
                     out.push(n);
                 }
             }
+            // inside "…" a backslash escapes only `$ ` " \` and newline
+            // (bash, zsh and fish alike); before anything else it is literal
+            (Some('"'), '\\') => match chars.clone().next() {
+                Some(n) if "$`\"\\\n".contains(n) => {
+                    chars.next();
+                    out.push(n);
+                }
+                _ => out.push('\\'),
+            },
             _ => out.push(c),
         }
     }
@@ -405,6 +441,60 @@ mod tests {
         assert_eq!(current_token("cat 'my di", 10), (4, "'my di"));
         assert_eq!(current_token("cat \"a b\" c", 11), (10, "c"));
         assert_eq!(current_token("echo é f", 9), (8, "f"));
+    }
+
+    #[test]
+    fn double_quotes_keep_backslashes_that_escape_nothing() {
+        assert_eq!(unescape_word(r#""./a\b""#), r"./a\b");
+        assert_eq!(unescape_word(r#""a\$b\`c\"d\\e""#), r#"a$b`c"d\e"#);
+        assert_eq!(unescape_word(r"./a\b"), "./ab"); // unquoted: escapes any char
+        assert_eq!(unescape_word(r"'./a\b'"), r"./a\b"); // single quotes: literal
+        assert_eq!(unescape_word(r#""a\"#), r"a\"); // trailing backslash stays
+    }
+
+    #[test]
+    fn quoted_backslash_prefix_picks_the_backslash_file() {
+        let dir = std::env::temp_dir().join(format!("shift-complete-bs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(r"d\x")).unwrap();
+        std::fs::write(dir.join(r"a\b.txt"), "").unwrap();
+        std::fs::write(dir.join("ab.txt"), "").unwrap();
+        std::fs::write(dir.join(r"d\x/in.txt"), "").unwrap();
+        let cwd = dir.to_str();
+        let paths = |buf: &str| -> Vec<String> {
+            complete(buf, buf.len(), &[], &[], cwd)
+                .into_iter()
+                .filter(|c| c.source == "path")
+                .map(|c| c.insert)
+                .collect()
+        };
+        assert_eq!(paths(r#"cat "./a\b""#), [r"./a\\b.txt"]);
+        assert_eq!(paths(r#"cat "./a\b"#), [r"./a\\b.txt"]);
+        assert_eq!(paths(r"cat ./a\\b"), [r"./a\\b.txt"]);
+        assert_eq!(paths(r"cat ./ab"), ["./ab.txt"]);
+        assert_eq!(paths(r#"cat "./d\x/i"#), [r"./d\\x/in.txt"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn token_end_spans_the_whole_word() {
+        // closing quote right of the cursor belongs to the word
+        let b = "cat \"./hel\"";
+        assert_eq!(token_end(b, b.len() - 1), b.len());
+        // mid-word: the suffix up to the next argument is part of the word
+        let b = "cat ./hello.txt --other";
+        assert_eq!(token_end(b, 9), 15);
+        // end of buffer and at a space
+        assert_eq!(token_end("cat ./hel", 9), 9);
+        assert_eq!(token_end("cat  x", 4), 4);
+        // quoted / escaped whitespace does not end the word
+        let b = "cat 'my di' x";
+        assert_eq!(token_end(b, 7), 11);
+        let b = "cat my\\ di x";
+        assert_eq!(token_end(b, 5), 10);
+        // operators end it; whitespace before the cursor never counts
+        assert_eq!(token_end("ls ./a|grep x", 5), 6);
+        assert_eq!(token_end("echo é\u{3000}f", 7), 7);
     }
 
     #[test]

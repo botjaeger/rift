@@ -195,7 +195,8 @@ cargo test --workspace    # unit tests only
 ```
 
 CI runs the same script. Rendering is verified with the scripted UI driver
-(`shift-terminal --script`), described in the
+(`shift-terminal --script`, with `--headless` for a run that never shows a
+window or takes focus), described in the
 [development guide](docs/development.md#verifying-ui-changes).
 
 ## Documentation

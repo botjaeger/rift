@@ -424,9 +424,11 @@ impl EditorState {
     /// Whitespace-delimited word start left of the cursor.
     fn word_left_target(&self) -> usize {
         let trimmed = self.buffer[..self.cursor].trim_end();
+        // step past the whole whitespace char: U+3000/U+00A0 are multi-byte
         let i = trimmed
-            .rfind(char::is_whitespace)
-            .map(|i| i + 1)
+            .char_indices()
+            .rfind(|&(_, c)| c.is_whitespace())
+            .map(|(i, c)| i + c.len_utf8())
             .unwrap_or(0);
         // a space carrying a combining mark is one cluster: never stop inside it
         grapheme_floor(&self.buffer, i)
@@ -755,14 +757,16 @@ impl TabState {
 
 /// Start of the extended grapheme cluster ending at or before byte `i`.
 fn grapheme_prev(s: &str, i: usize) -> usize {
-    let mut c = GraphemeCursor::new(i.min(s.len()), s.len(), true);
+    // GraphemeCursor panics on an offset inside a char
+    let i = s.floor_char_boundary(i);
+    let mut c = GraphemeCursor::new(i, s.len(), true);
     // the chunk is the whole string, so no extra context is ever requested
     c.prev_boundary(s, 0).ok().flatten().unwrap_or(0)
 }
 
 /// End of the extended grapheme cluster starting at or after byte `i`.
 fn grapheme_next(s: &str, i: usize) -> usize {
-    let i = i.min(s.len());
+    let i = s.ceil_char_boundary(i);
     let mut c = GraphemeCursor::new(i, s.len(), true);
     c.next_boundary(s, 0).ok().flatten().unwrap_or(s.len())
 }
@@ -776,7 +780,7 @@ fn is_grapheme_boundary(s: &str, i: usize) -> bool {
 
 /// `i` if it is a cluster boundary, else the start of the cluster around it.
 fn grapheme_floor(s: &str, i: usize) -> usize {
-    let i = i.min(s.len());
+    let i = s.floor_char_boundary(i);
     if is_grapheme_boundary(s, i) {
         i
     } else {
@@ -786,7 +790,7 @@ fn grapheme_floor(s: &str, i: usize) -> usize {
 
 /// `i` if it is a cluster boundary, else the end of the cluster around it.
 fn grapheme_ceil(s: &str, i: usize) -> usize {
-    let i = i.min(s.len());
+    let i = s.ceil_char_boundary(i);
     if is_grapheme_boundary(s, i) {
         i
     } else {
@@ -1043,5 +1047,63 @@ mod tests {
         e.mv_right();
         e.mv_right();
         assert_eq!(e.cursor, 5);
+    }
+
+    #[test]
+    fn word_ops_step_over_multibyte_whitespace() {
+        for (text, ws) in [
+            ("a\u{3000}b", "\u{3000}"),
+            ("a\u{a0}b", "\u{a0}"),
+            ("a\u{2003}b", "\u{2003}"),
+            ("a b", " "),
+            ("a\tb", "\t"),
+            ("a \u{3000}\u{a0}b", " \u{3000}\u{a0}"),
+        ] {
+            let b_at = 1 + ws.len();
+            let mut e = EditorState::default();
+            e.insert(text);
+            e.word_left();
+            assert_eq!(e.cursor, b_at, "word_left {text:?}");
+
+            e.end();
+            e.extend(EditorState::mv_word_left);
+            assert_eq!(e.selection(), Some(b_at..text.len()), "select {text:?}");
+
+            e.end();
+            e.delete_word_back();
+            assert_eq!(e.buffer, format!("a{ws}"), "delete {text:?}");
+            e.undo();
+            assert_eq!(e.buffer, text, "undo {text:?}");
+
+            e.home();
+            e.word_right();
+            assert_eq!(e.cursor, 1, "word_right {text:?}");
+        }
+    }
+
+    #[test]
+    fn word_back_keeps_combining_marks_whole() {
+        let mut e = EditorState::default();
+        // "e\u{301}" is one cluster after the U+3000 boundary
+        e.insert("x\u{3000}e\u{301}y");
+        e.delete_word_back();
+        assert_eq!(e.buffer, "x\u{3000}");
+        e.undo();
+        e.insert(" \u{1F468}\u{200D}\u{1F469}");
+        e.backspace();
+        assert_eq!(e.buffer, "x\u{3000}e\u{301}y ");
+    }
+
+    #[test]
+    fn grapheme_helpers_snap_interior_offsets() {
+        let s = "a\u{3000}b";
+        for i in 0..=s.len() {
+            let f = super::grapheme_floor(s, i);
+            let c = super::grapheme_ceil(s, i);
+            assert!(s.is_char_boundary(f) && s.is_char_boundary(c), "{i}");
+            assert!(f <= i && c >= i, "{i}");
+        }
+        assert_eq!(super::grapheme_floor(s, 2), 1);
+        assert_eq!(super::grapheme_ceil(s, 2), 4);
     }
 }

@@ -396,8 +396,14 @@ impl Config {
             OPTIONAL_KEYS,
         );
         let out = format!("{header}{doc}");
+        // compared as TOML text: an accepted `nan` never equals itself as
+        // f32, and the lossy fallback would drop comments and unknown keys
+        let same = |back: &Config| match (toml::to_string(back), toml::to_string(self)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        };
         match toml::from_str::<Config>(&out) {
-            Ok(back) if back == *self => Ok(out),
+            Ok(back) if same(&back) => Ok(out),
             _ => toml::to_string_pretty(self).map_err(|e| e.to_string()),
         }
     }
@@ -700,5 +706,33 @@ mod tests {
         assert_eq!(c.opacity(), 1.0);
         c.window_opacity = f32::NAN;
         assert_eq!(c.opacity(), 1.0);
+    }
+
+    #[test]
+    fn save_keeps_comments_next_to_non_finite_floats() {
+        for key in [
+            "font_size",
+            "line_height",
+            "window_padding",
+            "window_opacity",
+        ] {
+            for value in ["nan", "inf", "-inf", "13.0"] {
+                let file = format!(
+                    "# keep me\n{key} = {value}\nfuture_option = 42\ncontrol_api = \"off\"\n"
+                );
+                let mut c: Config = toml::from_str(&file).unwrap();
+                c.notifications.toasts = !c.notifications.toasts;
+                let out = c.edit_toml(Some(&file)).unwrap();
+                let case = format!("{key} = {value}");
+                assert!(out.starts_with("# keep me\n"), "{case}: {out}");
+                assert!(out.contains("future_option = 42"), "{case}: {out}");
+                assert!(out.contains(&case), "{case}: {out}");
+                let back: Config = toml::from_str(&out).unwrap();
+                assert_eq!(back.control_api, "off", "{case}");
+                assert_eq!(back.notifications.toasts, c.notifications.toasts, "{case}");
+                assert_eq!(back.font_size(), c.font_size(), "{case}");
+                assert_eq!(back.line_height(), c.line_height(), "{case}");
+            }
+        }
     }
 }

@@ -105,11 +105,36 @@ steps = [
     "key escape",
     # filename completion inserts one shell word
     "type cat ./my",
+    "wait 300",
     "key tab",
+    "wait 300",
     f"dump {scratch}/complete.txt",
     "key enter",
     "wait 500",
     f"dump {scratch}/complete-run.txt",
+    # completion replaces the whole word: closing quote and mid-word suffix
+    'paste cat "./my"',
+    "key left",
+    "wait 300",
+    "key tab",
+    "wait 300",
+    f"dump {scratch}/complete-quoted.txt",
+    "key cmd+a",
+    "key backspace",
+    "paste cat ./my --other",
+    *["key left"] * len("y --other"),
+    "wait 300",
+    "key tab",
+    "wait 300",
+    f"dump {scratch}/complete-mid.txt",
+    # word motion over multi-byte whitespace (U+3000) must not panic
+    "key cmd+a",
+    "key backspace",
+    "paste a　b",
+    "key alt+left",
+    f"dump {scratch}/word-left.txt",
+    "key cmd+a",
+    "key backspace",
     # relative paths resolve against the directory their command ran in
     f"type cd {scratch}/a\\n",
     "wait 400",
@@ -167,7 +192,9 @@ env = dict(os.environ, XDG_CONFIG_HOME=str(scratch / "cfg"),
            XDG_DATA_HOME=str(scratch / "data"), SHIFT_NO_NOTIFY="1")
 started = time.monotonic()
 with (scratch / "app.log").open("w") as log:
-    app = subprocess.Popen([str(binary), "--script", str(script)], env=env, stdout=log, stderr=log)
+    # headless: never shown or focused, so typing elsewhere cannot leak in
+    app = subprocess.Popen([str(binary), "--script", str(script), "--headless"],
+                           env=env, stdout=log, stderr=log)
     # The palette snapshot must appear promptly after the prompt snapshot,
     # well before the stalled socket's six-second response timeout.
     deadline = time.monotonic() + 40
@@ -191,6 +218,8 @@ def state(name):
     return (scratch / f"{name}.txt").read_text()
 
 assert "editor_active=true" in state("prompt"), state("prompt")
+assert "headless=true" in state("prompt") and "window_visible=Some(true)" not in state("prompt"), \
+    state("prompt")
 assert "shift-audit-ok" in state("prompt"), state("prompt")
 assert 'palette=true mode=Sessions query="audit"' in state("palette"), state("palette")
 assert 'lines=1 error=None' in state("viewer"), state("viewer")
@@ -209,6 +238,9 @@ assert 'toast=Some("Settings not saved' in state("invalid-save"), state("invalid
 assert (scratch / "after-save.toml").read_text() == "font_size = [\n", "Settings overwrote an invalid config"
 assert 'editor="cat ./my\\\\ file.txt"' in state("complete"), state("complete")
 assert "one-arg-ok" in state("complete-run"), state("complete-run")
+assert 'editor="cat ./my\\\\ file.txt" cursor=18' in state("complete-quoted"), state("complete-quoted")
+assert 'editor="cat ./my\\\\ file.txt --other" cursor=18' in state("complete-mid"), state("complete-mid")
+assert 'editor="a\\u{3000}b" cursor=4' in state("word-left"), state("word-left")
 assert f'{scratch}/a/src/only_a.rs"' in state("hints"), state("hints")
 found = re.search(r"matches=(\d+) total=(\d+)", state("find"))
 assert found and found[1] == "500" and int(found[2]) >= 600, state("find")

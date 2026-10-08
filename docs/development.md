@@ -116,12 +116,23 @@ dump /tmp/shift-t/a.txt
 quit
 EOF
 XDG_CONFIG_HOME=/tmp/shift-t/cfg XDG_DATA_HOME=/tmp/shift-t/data SHIFT_NO_NOTIFY=1 \
-  ./target/debug/shift-terminal --script /tmp/shift-t/t.shift
+  ./target/debug/shift-terminal --script /tmp/shift-t/t.shift --headless
 ```
 
 Always isolate config and data directories: otherwise the scripted instance
 uses your real config, session file, session service and control sockets.
 The command list is the module comment of `crates/shift-app/src/script.rs`.
+
+**`--headless`** (debugging and testing only; needs `--script`). The window
+is created but never shown or focused, so you can keep working while a script
+runs and your typing cannot land in it. `shot` still renders offscreen and
+`dump` reports `headless=true window_visible=Some(false)`. The run uses a
+private clipboard (copy, paste and `dump`'s `clipboard=` never touch the
+system clipboard). It does not open links or new windows (a toast says
+`Headless: …` instead), never minimizes, maximizes or goes fullscreen,
+ignores the control API's `focus` raise, and registers no global hotkey. On
+macOS it has no Dock icon and launching does not activate it.
+`scripts/gates.sh ui` runs headless.
 
 **Headless Linux.** `packaging/linux-verify.Dockerfile` has Xvfb and Mesa's
 software Vulkan, so the same scripts render on a machine without a GPU. The

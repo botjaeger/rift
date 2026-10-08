@@ -121,6 +121,24 @@ bash, zsh and fish; a leading `~/` stays unescaped so it still expands), and
 a token typed with backslashes or quotes (`My\ Dir/`, `"My Dir/`) still
 completes. Names containing control characters are not offered.
 
+Completion works on the whole word around the cursor, wherever the cursor
+sits in it (like zsh without `complete_in_word`): accepting replaces that
+word, including a closing quote or the rest of the word right of the cursor,
+and leaves the following arguments untouched (`cat "./hel"` and
+`cat ./hel|lo.txt --other` both become `cat ./hello.txt …`).
+
+A typed word is read by shell rules: unquoted, a backslash escapes any
+character; inside `"…"` it escapes only `$`, `` ` ``, `"`, `\` and newline and is
+otherwise literal (`"./a\b"` completes `a\b.txt`, not `ab.txt`); inside `'…'`
+everything is literal.
+
+Providers run on a background thread, never on the UI thread. Tab or ⌃→
+pressed while an answer is still in flight is applied once, when it arrives,
+and only if the pane, buffer and cursor are unchanged; Escape cancels the
+request, so a late answer cannot reopen the menu. If that thread cannot start
+or has died, completion pauses (no menu or ghost text; editing is unaffected)
+and the first edit after 5 seconds starts a new one.
+
 History matches drive the ghost text: whole-buffer prefix matches, the pane's
 own history first (last 200) then the imported shell history (newest 3000),
 max 5. Inline ghost text shows the top suggestion; Tab accepts (placeholder
