@@ -33,6 +33,7 @@ blocks, ⌘P = palette).
 
 ```sh
 scripts/gates.sh               # quality gates: fmt clippy test doc shell docs
+scripts/gates.sh ui            # scripted UI regressions (scripts/ui-smoke.py)
 scripts/gates.sh all           # + release build + scripted UI + Linux gates in docker
 scripts/gates.sh --list        # what each gate runs
 cargo run -p shift-app         # dev build + launch (binary: shift-terminal)
@@ -75,7 +76,11 @@ XDG_CONFIG_HOME=/tmp/shift-t/cfg XDG_DATA_HOME=/tmp/shift-t/data SHIFT_NO_NOTIFY
 Commands (one per line, `#` comments; full list in the `script.rs` module
 doc): `wait`, `wait_prompt`, `key`, `keyup`, `type`, `paste`, `shot`, `dump`,
 `resize`, `move`, `click`, `dblclick`, `rclick`, `drag`, `scroll`, `sh`,
-`focus`, `quit`.
+`focus`, `quit`. `menu` (native menu bar) works on macOS only; scripts that
+must also pass on Linux use key chords instead.
+
+Lasting UI regressions belong in `scripts/ui-smoke.py` (the `ui` gate): add
+steps and assert on the `dump` output there.
 
 Config hot-reload needs no keystrokes: write the scratch `config.toml` while
 the app runs and `shot` the repaint.
@@ -83,7 +88,8 @@ the app runs and `shot` the repaint.
 **Linux, headless:** `packaging/linux-verify.Dockerfile` (Xvfb + Mesa
 lavapipe software Vulkan) builds the release binary and runs the same script
 files; its header has the `docker build`/`docker run` lines.
-`scripts/gates.sh linux` runs clippy, tests and a release build in it.
+`scripts/gates.sh linux` runs clippy, tests, a release build and the scripted
+UI regressions (under Xvfb) in it — the same checks CI runs on Linux.
 
 ## Architecture
 

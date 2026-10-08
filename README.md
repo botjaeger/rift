@@ -1,6 +1,14 @@
-<img src="assets/icon/shift-1024.png" alt="" width="96" align="right">
+<p align="center">
+  <img src="assets/icon/shift-1024.png" alt="Shift logo" width="128">
+</p>
 
-# Shift
+<h1 align="center">Shift</h1>
+
+<p align="center">
+  <a href="https://github.com/botjaeger/shift">github.com/botjaeger/shift</a> ·
+  <a href="https://github.com/botjaeger/shift/releases">Releases</a> ·
+  <a href="docs/README.md">Documentation</a>
+</p>
 
 A GPU-accelerated terminal for macOS and Linux that turns every command into a
 **block** — its command, output, exit status and duration in one unit you can
@@ -81,7 +89,8 @@ Behavior details: [features](docs/features.md) · every screen:
 
 ## Install
 
-Prebuilt packages are attached to each [release](../../releases).
+Prebuilt packages are attached to each
+[release](https://github.com/botjaeger/shift/releases).
 
 **macOS** — download `Shift-<version>-<arch>.dmg` (`arm64` for Apple silicon,
 `x86_64` for Intel), open it and drag Shift to Applications. The bundle is
@@ -121,22 +130,57 @@ the `.desktop` file, the icon and `docs/`; put `shift-terminal` on your
 
 More in [getting started](docs/getting-started.md).
 
-## Build from source
+## Requirements
 
-Requirements:
+To run a release:
 
-- Rust 1.98.0 — `rustup` installs it automatically from `rust-toolchain.toml`.
-- macOS 11+ with Xcode Command Line Tools, or Linux with a Vulkan, GL or
-  Wayland/X11 GPU driver.
-- Linux build packages: `libxkbcommon-dev libwayland-dev libxcb1-dev
+- **macOS** 11 or newer (Apple silicon or Intel).
+- **Linux** x86_64 with a Vulkan, OpenGL or software (Mesa) GPU driver, on
+  X11 or Wayland.
+- A shell: zsh, bash or fish. Command blocks need one of these; any other
+  shell still runs as a plain terminal.
+
+To build from source, additionally:
+
+- [rustup](https://rustup.rs). It installs the pinned Rust 1.98.0 (with
+  rustfmt and clippy) from `rust-toolchain.toml` on first use.
+- macOS: Xcode Command Line Tools (`xcode-select --install`).
+- Linux (Debian/Ubuntu names): `libxkbcommon-dev libwayland-dev libxcb1-dev
   libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libssl-dev
   pkg-config`.
+- Optional, for the quality gates: `shellcheck`, `zsh`, `fish`, `python3`
+  (scripted UI checks) and Docker (Linux gate).
+
+## Start, stop, clean
 
 ```sh
-cargo run -p shift-app                 # debug build and launch
-cargo build --release                  # target/release/shift-terminal
-packaging/make-app.sh                  # macOS: target/Shift.app
+git clone https://github.com/botjaeger/shift.git
+cd shift
+
+cargo run -p shift-app                 # start: debug build, then launch
+cargo run --release -p shift-app       # start: optimized build
+cargo build --release                  # binary only: target/release/shift-terminal
+packaging/make-app.sh                  # macOS app bundle: target/Shift.app
 ```
+
+**Stop** — quit with ⌘Q (Linux: Super+Q) or close the last window; ⌃C in the
+terminal that ran `cargo run` also stops it. With durable sessions on
+(Settings → General), your shells keep running in the background session
+service, which exits by itself 10 s after its last shell is closed. Close the
+panes (⌘W) to end those shells.
+
+**Clean** — build output lives only in `target/`:
+
+```sh
+cargo clean                            # delete target/ (all builds, packages, test artifacts)
+docker rmi shift-linux-verify          # Linux gate image, if you ran it
+docker volume rm shift-cargo-registry  # Linux gate crate cache
+```
+
+Shift keeps your settings in `~/.config/shift/` and its session, shell
+integration and saved output in `~/.local/share/shift/`. Delete those two
+directories only to reset Shift completely — this removes your settings,
+themes and workflows.
 
 Packages (`.dmg`, `.deb`, AppImage, tarball) and releases:
 [development guide](docs/development.md#packaging-and-releases).
@@ -145,7 +189,8 @@ Packages (`.dmg`, `.deb`, AppImage, tarball) and releases:
 
 ```sh
 scripts/gates.sh          # fmt, clippy, tests, rustdoc, shell hooks, docs
-scripts/gates.sh all      # also a release build and the Linux gates in docker
+scripts/gates.sh ui       # scripted UI regressions in an isolated instance
+scripts/gates.sh all      # also a release build, the UI checks and the Linux gate in docker
 cargo test --workspace    # unit tests only
 ```
 
@@ -154,6 +199,8 @@ CI runs the same script. Rendering is verified with the scripted UI driver
 [development guide](docs/development.md#verifying-ui-changes).
 
 ## Documentation
+
+Start at the [documentation index](docs/README.md).
 
 | Document | Contents |
 |---|---|
@@ -166,6 +213,8 @@ CI runs the same script. Rendering is verified with the scripted UI driver
 | [Design](DESIGN.md) | Design tokens, metrics and visual rules |
 | [Performance](docs/performance.md) | Benchmark harness and baseline |
 | [Roadmap](docs/terminal-landscape-roadmap.md) | What is done and what is next |
+| [Agent guide](CLAUDE.md) | For coding agents (`CLAUDE.md` = `AGENTS.md`): commands, invariants, safety |
+| [Changelog](CHANGELOG.md) | Release notes |
 
 ## License
 

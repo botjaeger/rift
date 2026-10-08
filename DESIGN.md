@@ -156,6 +156,17 @@ No other animation. Motion never delays input.
   dot with a 12 px halo at 25 %.
 - **Split panes**: focused pane has an accent border and glow; inactive panes
   dim and use `pane_border_inactive`.
+- **Keyboard focus** (Settings controls): a 2 px `accent` ring, radius 8,
+  3 px outside the control; no fill.
+- **Find highlights**: `search_match`, the current match `search_active`,
+  text on a highlight `#1e1e1e` — in the terminal and the file viewer alike.
+  The find field clips its query and scrolls it so the caret stays visible;
+  it never runs under the counter or toggles.
+- **Vertical rail overflow**: `+N above` / `+N more` lines carry the most
+  urgent hidden tab's marker (same tab-marker colors), so a hidden alert is
+  never invisible.
+- **Notices in lists** (unreadable folder, cut listing, a review hunk too long
+  to act on): muted text in the row's place, never clickable.
 
 ## App icon
 
