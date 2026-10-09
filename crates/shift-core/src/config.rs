@@ -189,9 +189,21 @@ impl Default for Config {
 }
 
 pub fn config_dir() -> Option<PathBuf> {
-    std::env::var_os("XDG_CONFIG_HOME")
+    config_dir_from(
+        std::env::var_os("XDG_CONFIG_HOME"),
+        std::env::var_os("HOME"),
+    )
+}
+
+/// `config_dir` over explicit env values; an empty `XDG_CONFIG_HOME` counts
+/// as unset (a relative path would put the config in the working directory).
+fn config_dir_from(
+    xdg: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    xdg.filter(|d| !d.is_empty())
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .or_else(|| home.map(|h| PathBuf::from(h).join(".config")))
         .map(|root| {
             let current = root.join("shift");
             let legacy = root.join("runway");
@@ -201,6 +213,15 @@ pub fn config_dir() -> Option<PathBuf> {
                 current
             }
         })
+}
+
+/// Expand a leading `~` or `~/`; `~root` stays a literal name.
+fn expand_tilde(path: &str, home: Option<&Path>) -> PathBuf {
+    match home {
+        Some(h) if path == "~" => h.to_path_buf(),
+        Some(h) if path.starts_with("~/") => h.join(path[2..].trim_start_matches('/')),
+        _ => PathBuf::from(path),
+    }
 }
 
 /// Top-level `Option` settings: absent from a serialized default, so
@@ -337,6 +358,16 @@ impl Config {
     /// half-written file.
     pub fn save_to(&self, path: &Path) -> std::io::Result<()> {
         use std::io::Write;
+        // a symlinked config.toml (dotfiles, stow) is edited through the
+        // link: rename onto the link itself would replace it with a file
+        let resolved;
+        let path = match std::fs::symlink_metadata(path) {
+            Ok(m) if m.file_type().is_symlink() => {
+                resolved = std::fs::canonicalize(path)?;
+                resolved.as_path()
+            }
+            _ => path,
+        };
         let dir = path
             .parent()
             .ok_or_else(|| std::io::Error::other("config path has no parent"))?;
@@ -451,13 +482,7 @@ impl Config {
         let dir = match setting {
             "" | "previous" => previous.map(PathBuf::from).or(home.clone()),
             "home" => home.clone(),
-            path => {
-                let expanded = match (path.strip_prefix("~"), &home) {
-                    (Some(rest), Some(h)) => h.join(rest.trim_start_matches('/')),
-                    _ => PathBuf::from(path),
-                };
-                Some(expanded)
-            }
+            path => Some(expand_tilde(path, home.as_deref())),
         };
         dir.filter(|d| d.is_dir()).or(home)
     }
@@ -469,6 +494,12 @@ impl Config {
         } else {
             8.0
         }
+    }
+
+    /// Scrollback lines clamped to 0–1,000,000 (a hand-edited file can hold
+    /// any `usize`, and the terminal allocates per line).
+    pub fn scrollback_lines(&self) -> usize {
+        self.scrollback.min(1_000_000)
     }
 
     /// Window opacity clamped to the supported range.
@@ -560,6 +591,68 @@ mod tests {
         assert_eq!(c.start_dir(None), Some(tmp));
         c.working_directory = "~".into();
         assert_eq!(c.start_dir(None), Some(home));
+    }
+
+    #[test]
+    fn start_dir_expands_only_tilde_and_tilde_slash() {
+        let h = Path::new("/home/u");
+        assert_eq!(expand_tilde("~", Some(h)), PathBuf::from("/home/u"));
+        assert_eq!(expand_tilde("~/", Some(h)), PathBuf::from("/home/u"));
+        assert_eq!(expand_tilde("~/a/b", Some(h)), PathBuf::from("/home/u/a/b"));
+        // `~root` is a literal name, never $HOME/root
+        assert_eq!(expand_tilde("~root", Some(h)), PathBuf::from("~root"));
+        assert_eq!(expand_tilde("/abs", Some(h)), PathBuf::from("/abs"));
+        assert_eq!(expand_tilde("~/a", None), PathBuf::from("~/a"));
+    }
+
+    #[test]
+    fn empty_xdg_config_home_is_unset() {
+        use std::ffi::OsString;
+        let home = Some(OsString::from("/home/u"));
+        let want = Some(PathBuf::from("/home/u/.config/shift"));
+        assert_eq!(config_dir_from(Some(OsString::new()), home.clone()), want);
+        assert_eq!(config_dir_from(None, home.clone()), want);
+        assert_eq!(
+            config_dir_from(Some(OsString::from("/x")), home),
+            Some(PathBuf::from("/x/shift"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_through_symlink_keeps_the_link() {
+        let dir = scratch("symlink");
+        let real_dir = dir.join("dotfiles");
+        std::fs::create_dir_all(&real_dir).unwrap();
+        let real = real_dir.join("config.toml");
+        std::fs::write(&real, "# mine\nfont_size = 15.0\n").unwrap();
+        let link = dir.join("config.toml");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let c = Config {
+            font_size: 17.0,
+            ..Config::default()
+        };
+        c.save_to(&link).unwrap();
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "link replaced by a regular file"
+        );
+        let body = std::fs::read_to_string(&real).unwrap();
+        assert!(body.contains("# mine") && body.contains("17"), "{body}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scrollback_lines_is_bounded() {
+        let c = Config {
+            scrollback: usize::MAX,
+            ..Config::default()
+        };
+        assert_eq!(c.scrollback_lines(), 1_000_000);
+        assert_eq!(Config::default().scrollback_lines(), 10_000);
     }
 
     fn scratch(tag: &str) -> PathBuf {

@@ -128,7 +128,9 @@ header shows the branch and total `+added −removed`, and ↻ reloads.
   finishes, after each action, and on ↻.
 
 Both panels hide when the window is too narrow to leave 360 px for the panes
-(review first).
+(review first). While the review panel is hidden this way, its toolbar button
+is not lit, and ⇧⌘G / the button show a "Window too narrow" toast instead of
+toggling; widening the window brings the panel back.
 
 ## Blocks (terminal area)
 
@@ -353,9 +355,16 @@ are swallowed rather than reaching the terminal.
     *Maximum lines kept in the buffer*).
   - Session: `Restore tabs on launch` toggle, `New tabs start in` segmented
     `Previous | Home | Custom` (a custom path is set in config.toml),
-    `Warn before closing running commands` toggle.
-  - Terminal: `Mouse reporting to programs (Shift selects)` toggle, and on
-    macOS `Option key sends Meta`.
+    `Warn before closing running commands` toggle,
+    `Save block output for restore` toggle (*Output can contain secrets;
+    turning this off deletes it*; `save_transcripts`),
+    `Keep shells running when Shift quits` toggle (*Session service;
+    relaunch reattaches (new shells)*; `durable_sessions`).
+  - Automation: `Control socket` segmented `Off | Navigate | Full`
+    (`control_api`).
+  - Terminal: `Mouse reporting to programs (Shift selects)` toggle,
+    `Ask before pasting lines that would run` toggle, and on macOS
+    `Option key sends Meta`.
 - **Appearance** — *Fonts, cursor, window and theme*.
   - Font: `Font family` select (cycles the installed monospace families),
     `Font size` stepper (px), `Line height` slider.

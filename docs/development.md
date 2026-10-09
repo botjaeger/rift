@@ -10,7 +10,7 @@ How to build, test, verify and release Shift. Agent-specific rules are in
 |---|---|
 | Rust | 1.98.0, pinned in `rust-toolchain.toml` (rustup installs it and rustfmt + clippy on first use) |
 | macOS | 11 or newer, Xcode Command Line Tools (`xcode-select --install`) |
-| Linux build packages | `libxkbcommon-dev libwayland-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libssl-dev pkg-config` |
+| Linux build packages | `libxkbcommon-dev libwayland-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev pkg-config` |
 | Gate tools | `shellcheck`, `zsh`, `fish` (shell gate); `docker` (linux gate) |
 | Packaging (optional) | `python3` + Pillow (`gen-icon.py`), `dpkg-dev`, `file`, `libfuse2` (AppImage) |
 

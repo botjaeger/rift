@@ -112,8 +112,7 @@ impl PaneNode {
                 let [x, y, w, h] = area;
                 match axis {
                     Axis::Horizontal => {
-                        let fw = ((w - HANDLE) * ratio).max(60.0);
-                        let sw = (w - HANDLE - fw).max(60.0);
+                        let (fw, sw) = split_sizes(w, *ratio);
                         let mut p1 = path.clone();
                         p1.push(false);
                         first.layout([x, y, fw, h], panes, handles, p1);
@@ -128,8 +127,7 @@ impl PaneNode {
                         second.layout([x + fw + HANDLE, y, sw, h], panes, handles, p2);
                     }
                     Axis::Vertical => {
-                        let fh = ((h - HANDLE) * ratio).max(60.0);
-                        let sh = (h - HANDLE - fh).max(60.0);
+                        let (fh, sh) = split_sizes(h, *ratio);
                         let mut p1 = path.clone();
                         p1.push(false);
                         first.layout([x, y, w, fh], panes, handles, p1);
@@ -260,9 +258,35 @@ fn center(r: [f32; 4]) -> (f32, f32) {
     (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0)
 }
 
+/// Sizes of the two children of a split along an extent `total` (handle
+/// excluded): each keeps 60px when it fits, and the pair never exceeds the
+/// space — below 120px the children shrink evenly instead of overflowing.
+fn split_sizes(total: f32, ratio: f32) -> (f32, f32) {
+    let avail = (total - HANDLE).max(0.0);
+    let min = 60.0_f32.min(avail / 2.0);
+    let first = (avail * ratio).clamp(min, avail - min);
+    (first, avail - first)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn narrow_splits_never_overflow_the_parent() {
+        for total in [0.0, 30.0, 100.0, 130.0, 200.0, 800.0] {
+            for ratio in [0.05, 0.5, 0.95] {
+                let (a, b) = split_sizes(total, ratio);
+                assert!(a >= 0.0 && b >= 0.0);
+                assert!(
+                    a + b + HANDLE <= total.max(HANDLE) + 0.001,
+                    "{total} {ratio}"
+                );
+            }
+        }
+        assert_eq!(split_sizes(810.0, 0.5), (400.0, 400.0));
+        assert_eq!(split_sizes(810.0, 0.01), (60.0, 740.0));
+    }
 
     #[test]
     fn split_and_remove() {

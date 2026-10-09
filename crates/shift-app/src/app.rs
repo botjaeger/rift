@@ -5,7 +5,7 @@ use shift_core::git::{GitInfo, GitWorker};
 use shift_core::{BlockState, Config, Keymap, Theme};
 use shift_pty::{GridSize, PaneId, Session, SessionEvent, SpawnOptions};
 use shift_renderer::glyphon::{TextArea, TextBounds};
-use shift_renderer::{Gpu, QuadPipeline, Scene, TextEngine, to_wgpu};
+use shift_renderer::{Gpu, QuadPipeline, Scene, TextEngine};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
@@ -261,7 +261,10 @@ struct DragState {
 /// the pointer moves past a small threshold.
 struct PendingSelection {
     pane: PaneId,
-    point: APoint,
+    /// Anchor row as an absolute line: a grid `Line` would drift when output
+    /// scrolls the screen before the drag starts.
+    abs: i64,
+    col: ACol,
     side: ASide,
     origin: (f32, f32),
     started: bool,
@@ -342,6 +345,8 @@ pub struct App {
     os_light: bool,
     /// Window has keyboard focus (completion notifications fire only when it doesn't).
     focused: bool,
+    /// Pane that was last told it has focus (DECSET 1004), if any.
+    focus_pane: Option<PaneId>,
     /// Visual bell flash start.
     bell_flash: Option<Instant>,
     /// Warp-style launch configurations (~/.config/shift/launch_configs).
@@ -543,9 +548,99 @@ fn bracketed_paste_on(pane: &PaneState) -> bool {
         .contains(TermMode::BRACKETED_PASTE)
 }
 
+/// The local path a link target names (`/abs/path` or `file://` URL).
+fn local_path_of(target: &str) -> Option<std::path::PathBuf> {
+    let rest = match target.get(..7) {
+        Some(p) if p.eq_ignore_ascii_case("file://") => {
+            let r = &target[7..];
+            r.strip_prefix("localhost").unwrap_or(r)
+        }
+        _ if target.contains("://") => return None,
+        _ => target,
+    };
+    if !rest.starts_with('/') {
+        return None;
+    }
+    // percent-decode (file:// URLs only; plain paths keep a literal '%')
+    if target.len() == rest.len() {
+        return Some(rest.into());
+    }
+    let b = rest.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = |c: u8| (c as char).to_digit(16);
+        if b[i] == b'%'
+            && i + 2 < b.len()
+            && let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2]))
+        {
+            out.push((h * 16 + l) as u8);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    Some(String::from_utf8_lossy(&out).into_owned().into())
+}
+
+/// Whether opening `path` would run code (app bundles, scripts, workflows,
+/// Terminal `.command` files, anything executable) instead of showing a
+/// document.
+fn opens_as_program(path: &std::path::Path) -> bool {
+    const PROGRAM_EXTS: &[&str] = &[
+        "app", "command", "terminal", "workflow", "action", "scpt", "scptd", "tool", "sh", "pkg",
+        "mpkg", "dmg", "jar", "desktop", "appimage",
+    ];
+    if path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| PROGRAM_EXTS.contains(&e.to_ascii_lowercase().as_str()))
+    {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(m) = std::fs::metadata(path) {
+            return m.is_file() && m.permissions().mode() & 0o111 != 0;
+        }
+    }
+    false
+}
+
+/// Show `path` in the file manager without running it.
+fn reveal_external(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let (opener, args): (&str, Vec<std::ffi::OsString>) =
+        ("open", vec!["-R".into(), path.as_os_str().to_owned()]);
+    #[cfg(not(target_os = "macos"))]
+    let (opener, args): (&str, Vec<std::ffi::OsString>) = (
+        "xdg-open",
+        vec![
+            path.parent()
+                .unwrap_or(std::path::Path::new("/"))
+                .as_os_str()
+                .to_owned(),
+        ],
+    );
+    log::info!("reveal {}", path.display());
+    std::process::Command::new(opener)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .spawn()
+        .map(drop)
+        .map_err(|e| format!("{opener}: {e}"))
+}
+
 /// Hand a URL or path to the OS opener (documents only, never script
-/// handlers). `Err` says why nothing opened.
+/// handlers; programs are revealed, not run). `Err` says why nothing opened.
 fn open_external(target: &str) -> Result<(), String> {
+    if let Some(path) = local_path_of(target)
+        && opens_as_program(&path)
+    {
+        return reveal_external(&path);
+    }
     if let Some((scheme, _)) = target.split_once("://")
         && !matches!(
             scheme.to_ascii_lowercase().as_str(),
@@ -730,6 +825,7 @@ impl App {
             capture: None,
             os_light: false,
             focused: true,
+            focus_pane: None,
             bell_flash: None,
             launch_configs: Vec::new(),
             pending_commands: std::collections::HashMap::new(),
@@ -1007,7 +1103,9 @@ impl App {
         let line = ALine((abs as i64 - scrolled as i64) as i32);
         let colf = ((mx - content_x) / grid.cell_w).max(0.0);
         let col = (colf.floor() as usize).min(grid.cols.saturating_sub(1));
-        let side = if colf.fract() >= 0.5 {
+        // past the last cell the pointer is right of its text: take the
+        // cell's right half so the last char is included
+        let side = if colf >= grid.cols as f32 || colf.fract() >= 0.5 {
             ASide::Right
         } else {
             ASide::Left
@@ -1070,6 +1168,10 @@ impl App {
             pane.clear_selection();
             return;
         };
+        let scrolled = pane
+            .session
+            .scrolled
+            .load(std::sync::atomic::Ordering::Acquire);
         match clicks {
             2 | 3 => {
                 let ty = if clicks == 2 {
@@ -1081,7 +1183,8 @@ impl App {
                 pane.has_selection = true;
                 self.pending_sel = Some(PendingSelection {
                     pane: pane_id,
-                    point,
+                    abs: point.line.0 as i64 + scrolled as i64,
+                    col: point.column,
                     side,
                     origin: (mx, my),
                     started: true,
@@ -1093,7 +1196,8 @@ impl App {
                 pane.clear_selection();
                 self.pending_sel = Some(PendingSelection {
                     pane: pane_id,
-                    point,
+                    abs: point.line.0 as i64 + scrolled as i64,
+                    col: point.column,
                     side,
                     origin: (mx, my),
                     started: false,
@@ -1117,7 +1221,8 @@ impl App {
             pending.started = true;
         }
         let pane_id = pending.pane;
-        let (anchor, anchor_side, block) = (pending.point, pending.side, pending.block);
+        let (anchor_abs, anchor_col, anchor_side, block) =
+            (pending.abs, pending.col, pending.side, pending.block);
         let Some(pane) = self
             .tabs
             .get_mut(self.active)
@@ -1128,6 +1233,11 @@ impl App {
         let Some((point, side)) = Self::grid_point_at(pane, mx, my) else {
             return;
         };
+        let scrolled = pane
+            .session
+            .scrolled
+            .load(std::sync::atomic::Ordering::Acquire);
+        let anchor = APoint::new(ALine((anchor_abs - scrolled as i64) as i32), anchor_col);
         let mut term = pane.session.term.lock();
         if term.selection.is_none() {
             let ty = if block {
@@ -1770,6 +1880,12 @@ impl App {
         if self.headless {
             log::info!("headless: not opening {target}");
             self.toast(format!("Headless: not opening {target}"));
+        } else if let Some(path) = local_path_of(target).filter(|p| opens_as_program(p)) {
+            // a program: show it in the file manager instead of running it
+            match reveal_external(&path) {
+                Ok(()) => self.toast(format!("Revealed {} (not run)", path.display())),
+                Err(e) => self.toast(format!("Could not reveal {}: {e}", path.display())),
+            }
         } else if let Err(e) = open_external(target) {
             self.toast(format!("Could not open {target}: {e}"));
         }
@@ -1814,6 +1930,10 @@ impl App {
                 let Some(g) = pane.last_grid else { continue };
                 for (rect, url) in &pane.url_hits {
                     targets.push((*rect, HintTarget::Open(url.clone())));
+                }
+                // the sticky header stands in for a block scrolled off the top
+                if let Some((rect, block)) = pane.sticky_hit {
+                    targets.push((rect, HintTarget::Block(pane.session.id, block)));
                 }
                 for row in &pane.rows {
                     let RowKind::Grid { abs, content_x } = row.kind else {
@@ -1895,11 +2015,17 @@ impl App {
                 }
                 HintTarget::Open(t) => self.open_target(&t),
                 HintTarget::Block(pane, block) => {
+                    let mut sticky = false;
                     if let Some(tab) = self.tabs.get_mut(self.active) {
                         tab.active_pane = pane;
                         if let Some(p) = tab.pane_mut(pane) {
                             p.selected_block = Some(block);
+                            sticky = p.sticky_hit.is_some_and(|(_, b)| b == block);
                         }
+                    }
+                    // its header is off screen: bring it into view
+                    if sticky {
+                        self.jump_to_block(pane, block);
                     }
                     if copy {
                         self.handle_action_copy_block(pane, block);
@@ -2148,7 +2274,8 @@ impl App {
             return;
         };
         if editor_active {
-            pane.editor.insert(text);
+            let clean = input::sanitize_editor_paste(text);
+            pane.editor.insert(&clean);
             pane.selected_block = None;
             self.update_completions();
             return;
@@ -3501,7 +3628,7 @@ impl App {
         let (cell_size, shell, scrollback) = (
             self.cell_px(),
             self.config.shell.clone(),
-            self.config.scrollback,
+            self.config.scrollback_lines(),
         );
         let opts = |service, replay| SpawnOptions {
             id,
@@ -4385,7 +4512,8 @@ impl App {
         self.prune_note_toasts();
         let panel_buttons = tabbar::PanelButtons {
             explorer_open: self.explorer.open,
-            review_open: self.review.open,
+            // lit only while the panel is actually on screen
+            review_open: self.review.open && self.panel_widths(self.logical_size().0).1 > 0.0,
             diff: self.review.model().map(|m| {
                 m.staged
                     .iter()
@@ -4819,6 +4947,7 @@ impl App {
                 });
             }
             pane.url_hits = out.url_hits;
+            pane.sticky_hit = None;
             let sticky_block = out.sticky_block;
 
             if booting {
@@ -4987,6 +5116,7 @@ impl App {
                     sticky,
                 )
             {
+                pane.sticky_hit = Some((rect, sticky));
                 hits.push(Hit {
                     rect,
                     target: ClickTarget::JumpToBlock(pr.id, sticky),
@@ -5466,7 +5596,7 @@ impl App {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(to_wgpu(self.theme.bg)),
+                        load: wgpu::LoadOp::Clear(gpu.clear_color(self.theme.bg)),
                         store: wgpu::StoreOp::Store,
                     },
                     depth_slice: None,
@@ -5521,8 +5651,9 @@ impl App {
                 }
             }
             AppAction::HideApp => {
+                // a headless run has nothing on screen to hide
                 #[cfg(target_os = "macos")]
-                {
+                if !self.headless {
                     use winit::platform::macos::ActiveEventLoopExtMacOS;
                     event_loop.hide_application();
                 }
@@ -5818,10 +5949,21 @@ impl App {
                 }
             }
             AppAction::ToggleReview => {
-                self.review.open = !self.review.open;
-                if self.review.open {
-                    self.review.notice = None;
-                    self.request_review();
+                let too_narrow =
+                    |app: &Self| app.review.open && app.panel_widths(app.logical_size().0).1 == 0.0;
+                // open but auto-hidden: closing it would change nothing
+                // visible, so say why it is not showing instead
+                if too_narrow(self) {
+                    self.toast("Window too narrow for the review panel: widen it".into());
+                } else {
+                    self.review.open = !self.review.open;
+                    if self.review.open {
+                        self.review.notice = None;
+                        self.request_review();
+                        if too_narrow(self) {
+                            self.toast("Window too narrow for the review panel: widen it".into());
+                        }
+                    }
                 }
             }
             AppAction::WhatsNew => {
@@ -7026,6 +7168,7 @@ impl App {
                 // line is under the viewer)
                 if let Some(action) = input::app_action(event, self.modifiers, &self.keymap)
                     && !action.needs_editor()
+                    && (!event.repeat || action.repeatable())
                 {
                     self.handle_action(action, event_loop);
                 }
@@ -7059,6 +7202,9 @@ impl App {
             // actions still belong to vim/less when the editor isn't
             // active — fall through to raw byte passthrough
             if !action.needs_editor() || self.editor_active {
+                if event.repeat && !action.repeatable() {
+                    return;
+                }
                 log::debug!("key action: {action:?} (mods {:?})", self.modifiers);
                 self.handle_action(action, event_loop);
                 return;
@@ -8179,22 +8325,38 @@ impl App {
         window.request_redraw();
     }
 
-    /// Tell the program in the active pane that the window gained/lost focus
-    /// when it asked for focus events (DECSET 1004: vim autoread, tmux).
-    fn report_focus(&self, focused: bool) {
+    /// Keep programs that asked for focus events (DECSET 1004: vim autoread,
+    /// tmux) told which pane has focus: focus-out to the pane that lost it
+    /// (window deactivated, other pane or tab selected), focus-in to the one
+    /// that gained it. Independent of the mouse-reporting setting.
+    fn sync_focus(&mut self) {
         use shift_pty::alacritty_terminal::term::TermMode;
-        if !self.config.mouse_reporting {
+        let want = if self.focused {
+            self.active_pane_id()
+        } else {
+            None
+        };
+        if want == self.focus_pane {
             return;
         }
-        if let Some(p) = self.tabs.get(self.active).and_then(|t| t.active())
-            && p.session
-                .term
-                .lock()
-                .mode()
-                .contains(TermMode::FOCUS_IN_OUT)
-        {
-            p.session.write(if focused { b"\x1b[I" } else { b"\x1b[O" });
+        let notify = |tabs: &[TabState], id: PaneId, seq: &[u8]| {
+            if let Some(p) = tabs.iter().find_map(|t| t.pane(id))
+                && p.session
+                    .term
+                    .lock()
+                    .mode()
+                    .contains(TermMode::FOCUS_IN_OUT)
+            {
+                p.session.write(seq);
+            }
+        };
+        if let Some(old) = self.focus_pane {
+            notify(&self.tabs, old, b"\x1b[O");
         }
+        if let Some(new) = want {
+            notify(&self.tabs, new, b"\x1b[I");
+        }
+        self.focus_pane = want;
     }
 }
 
@@ -8529,6 +8691,7 @@ impl App {
                 log::info!("script: {step:?}");
             }
             self.run_step(step, event_loop, &window);
+            self.sync_focus();
             window.request_redraw();
         }
     }
@@ -8616,6 +8779,14 @@ impl App {
                 self.on_cursor_moved((x2, y2), window);
                 self.on_left(ElementState::Released, event_loop, window);
             }
+            Step::Press(x, y) => {
+                self.on_cursor_moved((x, y), window);
+                self.on_left(ElementState::Pressed, event_loop, window);
+            }
+            Step::Release(x, y) => {
+                self.on_cursor_moved((x, y), window);
+                self.on_left(ElementState::Released, event_loop, window);
+            }
             Step::Scroll(lines) => {
                 self.on_wheel(MouseScrollDelta::LineDelta(0.0, lines / 3.0), window);
             }
@@ -8627,10 +8798,8 @@ impl App {
                 log::info!("script: sh {cmd:?} -> {status:?}");
             }
             Step::Focus(f) => {
-                if self.focused != f {
-                    self.report_focus(f);
-                }
                 self.focused = f;
+                self.sync_focus();
             }
             Step::Ime(text) => self.commit_text(&text, event_loop, window),
             Step::Preedit(text) => self.preedit = text,
@@ -9417,13 +9586,14 @@ impl App {
             self.completion.ghost,
             self.completion.items.len()
         );
-        let hint_targets: Vec<&str> = self
+        // links/paths as-is; blocks as `block <label> <block id>`
+        let hint_targets: Vec<String> = self
             .hints
             .iter()
             .flat_map(|h| &h.items)
-            .filter_map(|(_, _, t)| match t {
-                HintTarget::Open(t) => Some(t.as_str()),
-                HintTarget::Block(..) => None,
+            .map(|(label, _, t)| match t {
+                HintTarget::Open(t) => t.clone(),
+                HintTarget::Block(_, b) => format!("block {label} {b:?}"),
             })
             .collect();
         let _ = writeln!(
@@ -9447,7 +9617,7 @@ impl App {
         );
         let _ = writeln!(
             out,
-            "review={} load={} staged={:?} unstaged={:?} expanded={} notice={:?} scroll={:.0}",
+            "review={} load={} staged={:?} unstaged={:?} expanded={} notice={:?} scroll={:.0} shown={}",
             self.review.open,
             match &self.review.load {
                 crate::views::review_panel::Load::Idle => "idle",
@@ -9468,7 +9638,8 @@ impl App {
                 .collect::<Vec<_>>()),
             self.review.expanded.len(),
             self.review.notice,
-            self.review.scroll
+            self.review.scroll,
+            self.panel_widths(self.logical_size().0).1 > 0.0
         );
         let _ = writeln!(
             out,
@@ -9572,6 +9743,28 @@ impl App {
                     p.filter,
                     p.correction
                 );
+                // screen geometry for scripted mouse steps: cell size and
+                // the y of every grid row (`abs:y`) with the x of its text
+                if let Some(g) = p.last_grid {
+                    let rows: Vec<String> = p
+                        .rows
+                        .iter()
+                        .filter_map(|r| match r.kind {
+                            terminal::RowKind::Grid { abs, content_x } => {
+                                Some(format!("{abs}:{:.1}@{content_x:.1}", r.y))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    let _ = writeln!(
+                        out,
+                        "    geometry cell_w={:.2} line_h={:.2} cols={} rows=[{}]",
+                        g.cell_w,
+                        g.line_h,
+                        g.cols,
+                        rows.join(" ")
+                    );
+                }
                 let blocks = p.session.blocks.lock().unwrap().snapshot();
                 for b in blocks {
                     let _ = writeln!(
@@ -9797,10 +9990,8 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::Focused(f) => {
-                if self.focused != f {
-                    self.report_focus(f);
-                }
                 self.focused = f;
+                self.sync_focus();
                 window.request_redraw();
             }
             WindowEvent::Ime(ime) => match ime {
@@ -10063,6 +10254,7 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.sync_focus();
         if self.script.is_some() {
             self.drive_script(event_loop);
             if let Some(due) = self.script.as_ref().and_then(|s| s.due()) {
@@ -10117,6 +10309,40 @@ impl ApplicationHandler<UserEvent> for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn programs_are_revealed_not_opened() {
+        use std::path::Path;
+        assert_eq!(
+            local_path_of("file:///tmp/My%20App.app"),
+            Some("/tmp/My App.app".into())
+        );
+        assert_eq!(local_path_of("/tmp/100%25"), Some("/tmp/100%25".into()));
+        assert_eq!(local_path_of("https://example.com/x.app"), None);
+        for p in [
+            "/x/Foo.app",
+            "/x/run.COMMAND",
+            "/x/a.workflow",
+            "/x/t.terminal",
+        ] {
+            assert!(opens_as_program(Path::new(p)), "{p}");
+        }
+        assert!(!opens_as_program(Path::new("/x/notes.txt")));
+        // an executable regular file is a program whatever its name
+        let dir = std::env::temp_dir().join(format!("shift-exec-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("tool");
+        std::fs::write(&exe, "#!/bin/sh\n").unwrap();
+        assert!(!opens_as_program(&exe));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(opens_as_program(&exe));
+        }
+        assert!(!opens_as_program(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn confirm_ignores_repeat_and_typed_ahead_enter() {

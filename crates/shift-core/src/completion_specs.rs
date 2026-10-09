@@ -1301,7 +1301,7 @@ pub fn resolve(cmd: &CommandSpec, args: &[String]) -> Resolved {
 // ==========================================================================
 
 /// Byte offset in `prefix` at which the last top-level command begins, i.e.
-/// just after the final unquoted `|`, `||`, `&&`, or `;`. Returns 0 when there
+/// just after the final unquoted `|`, `||`, `&&`, `;` or newline. Returns 0 when there
 /// is no separator. The returned index is always a char boundary.
 pub fn segment_start(prefix: &str) -> usize {
     let b = prefix.as_bytes();
@@ -1323,7 +1323,7 @@ pub fn segment_start(prefix: &str) -> usize {
                     i += 1;
                 }
                 b'\\' => i += 2,
-                b';' => {
+                b';' | b'\n' => {
                     i += 1;
                     start = i;
                 }
@@ -1434,8 +1434,21 @@ fn find_git_dir(cwd: Option<&str>) -> Option<PathBuf> {
     None
 }
 
+/// Directory holding the shared refs and config: the git dir itself, or, in
+/// a linked worktree (`<repo>/.git/worktrees/<n>`), its `commondir`.
+fn common_git_dir(gitdir: PathBuf) -> PathBuf {
+    match fs::read_to_string(gitdir.join("commondir")) {
+        Ok(s) if !s.trim().is_empty() => {
+            let p = PathBuf::from(s.trim());
+            if p.is_absolute() { p } else { gitdir.join(p) }
+        }
+        _ => gitdir,
+    }
+}
+
 fn collect_refs(
     root: &Path,
+    prefix_filter: &str,
     kind: &str,
     seen: &mut HashSet<String>,
     out: &mut Vec<(String, String)>,
@@ -1458,7 +1471,7 @@ fn collect_refs(
             let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
             if is_dir {
                 stack.push((e.path(), rel));
-            } else if seen.insert(rel.clone()) {
+            } else if rel.starts_with(prefix_filter) && seen.insert(rel.clone()) {
                 out.push((rel, kind.to_string()));
                 if out.len() >= MAX_GEN {
                     return;
@@ -1469,16 +1482,35 @@ fn collect_refs(
 }
 
 /// All git refs reachable from `cwd`: local branches, remote branches, tags.
-/// Value = ref name, description = "branch" / "remote" / "tag".
-pub fn git_refs(cwd: Option<&str>) -> Vec<(String, String)> {
+/// Value = ref name, description = "branch" / "remote" / "tag". Only names
+/// starting with `prefix` count towards the `MAX_GEN` cap.
+pub fn git_refs(cwd: Option<&str>, prefix: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
-    let Some(gitdir) = find_git_dir(cwd) else {
+    let Some(gitdir) = find_git_dir(cwd).map(common_git_dir) else {
         return out;
     };
     let mut seen = HashSet::new();
-    collect_refs(&gitdir.join("refs/heads"), "branch", &mut seen, &mut out);
-    collect_refs(&gitdir.join("refs/remotes"), "remote", &mut seen, &mut out);
-    collect_refs(&gitdir.join("refs/tags"), "tag", &mut seen, &mut out);
+    collect_refs(
+        &gitdir.join("refs/heads"),
+        prefix,
+        "branch",
+        &mut seen,
+        &mut out,
+    );
+    collect_refs(
+        &gitdir.join("refs/remotes"),
+        prefix,
+        "remote",
+        &mut seen,
+        &mut out,
+    );
+    collect_refs(
+        &gitdir.join("refs/tags"),
+        prefix,
+        "tag",
+        &mut seen,
+        &mut out,
+    );
 
     if let Ok(s) = fs::read_to_string(gitdir.join("packed-refs")) {
         for line in s.lines() {
@@ -1498,7 +1530,7 @@ pub fn git_refs(cwd: Option<&str>) -> Vec<(String, String)> {
             } else {
                 continue;
             };
-            if seen.insert(name.to_string()) {
+            if name.starts_with(prefix) && seen.insert(name.to_string()) {
                 out.push((name.to_string(), kind.to_string()));
             }
             if out.len() >= MAX_GEN {
@@ -1511,7 +1543,7 @@ pub fn git_refs(cwd: Option<&str>) -> Vec<(String, String)> {
 
 /// Configured git remotes (parsed from `.git/config`).
 pub fn git_remotes(cwd: Option<&str>) -> Vec<(String, String)> {
-    let Some(gitdir) = find_git_dir(cwd) else {
+    let Some(gitdir) = find_git_dir(cwd).map(common_git_dir) else {
         return Vec::new();
     };
     let Ok(s) = fs::read_to_string(gitdir.join("config")) else {
@@ -1535,19 +1567,19 @@ fn parse_git_remotes(config: &str) -> Vec<(String, String)> {
 
 /// Hosts from `~/.ssh/config` (`Host` entries, wildcards skipped) and plain
 /// hostnames from `~/.ssh/known_hosts`.
-pub fn ssh_hosts() -> Vec<(String, String)> {
+pub fn ssh_hosts(prefix: &str) -> Vec<(String, String)> {
     let mut names: Vec<String> = Vec::new();
     let mut seen = HashSet::new();
     if let Some(home) = std::env::var_os("HOME") {
         let base = PathBuf::from(home);
         for h in crate::ssh::config_hosts(&base.join(".ssh/config")) {
-            if seen.insert(h.clone()) {
+            if h.starts_with(prefix) && seen.insert(h.clone()) {
                 names.push(h);
             }
         }
         if let Ok(s) = fs::read_to_string(base.join(".ssh/known_hosts")) {
             for h in parse_known_hosts(&s) {
-                if seen.insert(h.clone()) {
+                if h.starts_with(prefix) && seen.insert(h.clone()) {
                     names.push(h);
                 }
                 if names.len() >= MAX_GEN {
@@ -1588,17 +1620,17 @@ fn parse_known_hosts(content: &str) -> Vec<String> {
 }
 
 /// Targets declared in a Makefile in `cwd`.
-pub fn make_targets(cwd: Option<&str>) -> Vec<(String, String)> {
+pub fn make_targets(cwd: Option<&str>, prefix: &str) -> Vec<(String, String)> {
     let base = cwd_path(cwd);
     for name in ["Makefile", "makefile", "GNUmakefile"] {
         if let Ok(s) = fs::read_to_string(base.join(name)) {
-            return parse_make_targets(&s);
+            return parse_make_targets(&s, prefix);
         }
     }
     Vec::new()
 }
 
-fn parse_make_targets(content: &str) -> Vec<(String, String)> {
+fn parse_make_targets(content: &str, prefix: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
     for line in content.lines() {
@@ -1621,7 +1653,7 @@ fn parse_make_targets(content: &str) -> Vec<(String, String)> {
             if t.starts_with('.') || t.contains('%') || t.contains('$') {
                 continue; // special targets, pattern rules, variable refs
             }
-            if seen.insert(t.to_string()) {
+            if t.starts_with(prefix) && seen.insert(t.to_string()) {
                 out.push((t.to_string(), "target".to_string()));
             }
         }
@@ -1634,15 +1666,85 @@ fn parse_make_targets(content: &str) -> Vec<(String, String)> {
 
 /// Script names (and their commands as descriptions) from a package.json in
 /// `cwd`. Uses a minimal hand-rolled scan — no serde_json dependency.
-pub fn package_scripts(cwd: Option<&str>) -> Vec<(String, String)> {
+pub fn package_scripts(cwd: Option<&str>, prefix: &str) -> Vec<(String, String)> {
     let base = cwd_path(cwd);
     let Ok(s) = fs::read_to_string(base.join("package.json")) else {
         return Vec::new();
     };
-    parse_package_scripts(&s)
+    parse_package_scripts(&s, prefix)
 }
 
-fn parse_package_scripts(json: &str) -> Vec<(String, String)> {
+/// Read the JSON string whose opening quote is at `b[start]`; returns the
+/// decoded text and the index just past the closing quote.
+fn read_json_string(b: &[u8], start: usize) -> (String, usize) {
+    fn hex4(b: &[u8], at: usize) -> Option<u32> {
+        let h = std::str::from_utf8(b.get(at..at + 4)?).ok()?;
+        u32::from_str_radix(h, 16).ok()
+    }
+    fn push_char(val: &mut Vec<u8>, c: char) {
+        let mut buf = [0u8; 4];
+        val.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+    }
+    let mut j = start + 1;
+    let mut val: Vec<u8> = Vec::new();
+    while j < b.len() {
+        match b[j] {
+            b'\\' if j + 1 < b.len() => match b[j + 1] {
+                b'n' => {
+                    val.push(b'\n');
+                    j += 2;
+                }
+                b't' => {
+                    val.push(b'\t');
+                    j += 2;
+                }
+                b'r' => {
+                    val.push(b'\r');
+                    j += 2;
+                }
+                b'b' => {
+                    val.push(0x08);
+                    j += 2;
+                }
+                b'f' => {
+                    val.push(0x0c);
+                    j += 2;
+                }
+                b'u' => {
+                    let Some(mut cp) = hex4(b, j + 2) else {
+                        val.push(b'u');
+                        j += 2;
+                        continue;
+                    };
+                    j += 6;
+                    if (0xD800..0xDC00).contains(&cp)
+                        && b.get(j) == Some(&b'\\')
+                        && b.get(j + 1) == Some(&b'u')
+                        && let Some(lo) = hex4(b, j + 2)
+                        && (0xDC00..0xE000).contains(&lo)
+                    {
+                        cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                        j += 6;
+                    }
+                    push_char(&mut val, char::from_u32(cp).unwrap_or('\u{FFFD}'));
+                }
+                // `\"`, `\\`, `\/` and anything else: the byte itself
+                c => {
+                    val.push(c);
+                    j += 2;
+                }
+            },
+            b'"' => break,
+            c => {
+                val.push(c);
+                j += 1;
+            }
+        }
+    }
+    (String::from_utf8_lossy(&val).into_owned(), j + 1)
+}
+
+fn parse_package_scripts(json: &str, prefix: &str) -> Vec<(String, String)> {
     let Some(pos) = json.find("\"scripts\"") else {
         return Vec::new();
     };
@@ -1662,34 +1764,18 @@ fn parse_package_scripts(json: &str) -> Vec<(String, String)> {
     while i < b.len() && depth >= 1 {
         match b[i] {
             b'"' => {
-                // read a JSON string starting at i
-                let mut j = i + 1;
-                let mut val = String::new();
-                while j < b.len() {
-                    match b[j] {
-                        b'\\' if j + 1 < b.len() => {
-                            val.push(b[j + 1] as char);
-                            j += 2;
-                        }
-                        b'"' => break,
-                        c => {
-                            val.push(c as char);
-                            j += 1;
-                        }
-                    }
-                }
-                i = j + 1;
+                let (val, next) = read_json_string(b, i);
+                i = next;
                 if depth == 1 {
                     if expect_key {
-                        if seen.insert(val.clone()) {
+                        if val.starts_with(prefix) && seen.insert(val.clone()) {
                             out.push((val, String::new()));
                             last_key = Some(out.len() - 1);
                         }
                         expect_key = false;
                     } else if let Some(k) = last_key.take() {
-                        let mut d = val;
-                        d.truncate(80);
-                        out[k].1 = d;
+                        // 80 characters: never cut inside a multi-byte one
+                        out[k].1 = val.chars().take(80).collect();
                     }
                 }
             }
@@ -1805,7 +1891,7 @@ mod tests {
         )
         .unwrap();
 
-        let refs = git_refs(Some(dir.to_str().unwrap()));
+        let refs = git_refs(Some(dir.to_str().unwrap()), "");
         let names: Vec<&str> = refs.iter().map(|(n, _)| n.as_str()).collect();
         assert!(names.contains(&"main"), "loose branch: {names:?}");
         assert!(
@@ -1875,7 +1961,7 @@ mod tests {
                   clean test:\n\
                   \trm -rf out\n\
                   %.o: %.c\n";
-        let t = parse_make_targets(mk);
+        let t = parse_make_targets(mk, "");
         let names: Vec<&str> = t.iter().map(|(n, _)| n.as_str()).collect();
         assert!(names.contains(&"all"));
         assert!(names.contains(&"build"));
@@ -1898,13 +1984,90 @@ mod tests {
                    \"scripts\": {\n    \"build\": \"tsc -p .\",\n\
                    \"test\": \"jest --ci\",\n    \"dev\": \"vite\"\n  },\n\
                    \"dependencies\": { \"left-pad\": \"^1.0.0\" }\n}\n";
-        let s = parse_package_scripts(pkg);
+        let s = parse_package_scripts(pkg, "");
         let names: Vec<&str> = s.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, vec!["build", "test", "dev"]);
         // description carries the script's command, and we stop at the closing
         // brace (dependencies keys are not scripts)
         assert_eq!(s[0].1, "tsc -p .");
         assert!(!names.contains(&"left-pad"));
+    }
+
+    #[test]
+    fn package_scripts_decode_non_ascii_and_escapes_without_panicking() {
+        // > 80 bytes, every char multi-byte: a byte-wise truncate(80) would
+        // land inside one
+        let long = "é".repeat(60);
+        let pkg = format!(
+            "{{\"scripts\": {{\"a\": \"{long}\", \"b\": \"caf\\u00e9 \\ud83d\\ude80 \\\"q\\\" \\n\", \
+             \"c\": \"日本語\"}}}}"
+        );
+        let s = parse_package_scripts(&pkg, "");
+        assert_eq!(s[0].1, "é".repeat(60), "60 chars < 80 chars: kept whole");
+        assert_eq!(s[1].1, "café 🚀 \"q\" \n");
+        assert_eq!(s[2].1, "日本語");
+        let long = "é".repeat(100);
+        let pkg = format!("{{\"scripts\": {{\"a\": \"{long}\"}}}}");
+        assert_eq!(parse_package_scripts(&pkg, "")[0].1, "é".repeat(80));
+    }
+
+    #[test]
+    fn generators_filter_by_prefix_before_the_cap() {
+        let dir = unique_tmp("cap");
+        let heads = dir.join(".git/refs/heads");
+        fs::create_dir_all(&heads).unwrap();
+        for n in 0..(MAX_GEN + 50) {
+            fs::write(heads.join(format!("a{n:04}")), "0\n").unwrap();
+        }
+        fs::write(heads.join("zzz-wanted"), "0\n").unwrap();
+        let cwd = dir.to_str();
+        assert!(git_refs(cwd, "").len() <= MAX_GEN);
+        let r = git_refs(cwd, "zzz");
+        assert_eq!(r, vec![("zzz-wanted".to_string(), "branch".to_string())]);
+        let mk: String = (0..MAX_GEN + 50)
+            .map(|n| format!("t{n}:\n"))
+            .collect::<String>()
+            + "wanted:\n";
+        assert_eq!(parse_make_targets(&mk, "wan").len(), 1);
+        let mut pkg = String::from("{\"scripts\": {");
+        for n in 0..MAX_GEN + 50 {
+            pkg.push_str(&format!("\"s{n}\": \"x\", "));
+        }
+        pkg.push_str("\"wanted\": \"y\"}}");
+        assert_eq!(parse_package_scripts(&pkg, "wan").len(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn linked_worktree_reads_refs_and_remotes_from_the_common_dir() {
+        let main = unique_tmp("wt-main");
+        let common = main.join(".git");
+        fs::create_dir_all(common.join("refs/heads")).unwrap();
+        fs::create_dir_all(common.join("refs/remotes/origin")).unwrap();
+        fs::write(common.join("refs/heads/main"), "0\n").unwrap();
+        fs::write(common.join("refs/remotes/origin/dev"), "0\n").unwrap();
+        fs::write(common.join("config"), "[remote \"origin\"]\n\turl = x\n").unwrap();
+        let wtgit = common.join("worktrees/feature");
+        fs::create_dir_all(&wtgit).unwrap();
+        fs::write(wtgit.join("commondir"), "../..\n").unwrap();
+        let wt = unique_tmp("wt-linked");
+        fs::write(wt.join(".git"), format!("gitdir: {}\n", wtgit.display())).unwrap();
+        let cwd = wt.to_str();
+        let names: Vec<String> = git_refs(cwd, "").into_iter().map(|(n, _)| n).collect();
+        assert!(names.contains(&"main".to_string()), "{names:?}");
+        assert!(names.contains(&"origin/dev".to_string()), "{names:?}");
+        assert_eq!(git_remotes(cwd), vec![("origin".into(), "remote".into())]);
+        let _ = fs::remove_dir_all(&main);
+        let _ = fs::remove_dir_all(&wt);
+    }
+
+    #[test]
+    fn newline_starts_a_new_segment() {
+        let p = "ls\ngit ";
+        assert_eq!(&p[segment_start(p)..], "git ");
+        // a newline inside quotes is not a separator
+        let p = "echo 'a\nb' ";
+        assert_eq!(segment_start(p), 0);
     }
 
     // temp dir helper: unique path under the system temp dir

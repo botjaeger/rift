@@ -21,6 +21,8 @@
 //! dblclick 400 300         # double click (word selection)
 //! rclick 400 300           # right click (block context menu)
 //! drag 100 200 400 200     # left-drag between two points
+//! press 100 200            # left button down at a point (hold: use `move`, `release`)
+//! release 400 200          # left button up at a point
 //! scroll 5                 # wheel: +N lines up, −N down
 //! sh touch /tmp/x          # run a shell command synchronously
 //! focus off                # pretend the window lost/gained focus
@@ -60,6 +62,8 @@ pub enum Step {
     DoubleClick(f32, f32),
     RightClick(f32, f32),
     Drag(f32, f32, f32, f32),
+    Press(f32, f32),
+    Release(f32, f32),
     Scroll(f32),
     Sh(String),
     Focus(bool),
@@ -206,6 +210,14 @@ pub fn parse(src: &str) -> Result<Vec<Step>, String> {
             "drag" => {
                 let v = nums(4)?;
                 Step::Drag(v[0], v[1], v[2], v[3])
+            }
+            "press" => {
+                let v = nums(2)?;
+                Step::Press(v[0], v[1])
+            }
+            "release" => {
+                let v = nums(2)?;
+                Step::Release(v[0], v[1])
             }
             "scroll" => Step::Scroll(nums(1)?[0]),
             "sh" => Step::Sh(rest.to_string()),

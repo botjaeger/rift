@@ -69,6 +69,8 @@ pub struct Graphics {
     pending: Option<(Control, Vec<u8>)>,
     /// Ids for images sent without one (`a=T` with no `i`, iTerm2).
     next_anon_id: u32,
+    /// kitty image number (`I=`) -> id of the newest image sent with it.
+    numbers: HashMap<u32, u32>,
 }
 
 fn next_key() -> u64 {
@@ -356,6 +358,9 @@ impl Graphics {
             ctrl.id
         };
         let key = self.store(id, w, h, rgba);
+        if ctrl.number != 0 {
+            self.numbers.insert(ctrl.number, id);
+        }
         let mut out = self.reply(&ctrl, Ok(()));
         if ctrl.action == b'T' {
             let img = self.images[&id].clone();
@@ -365,19 +370,34 @@ impl Graphics {
         out
     }
 
+    /// `a=d`: the selectors `a`/`A` (everything), `i`/`I` (image id, optional
+    /// placement id) and `n`/`N` (newest image with number `I`). Uppercase
+    /// also frees the image data. Any other selector (cursor, column, row,
+    /// z-index, ...) is not implemented and deletes nothing: wiping every
+    /// image for a narrower request would destroy what the program meant to
+    /// keep.
     fn delete(&mut self, ctrl: &Control) {
-        // lowercase: remove placements; uppercase: also free the image data
         let free = ctrl.delete.is_ascii_uppercase();
-        let keys: Vec<u64> = match ctrl.delete.to_ascii_lowercase() {
-            b'i' => self
-                .images
-                .get(&ctrl.id)
-                .map(|i| vec![i.key])
-                .unwrap_or_default(),
-            // a / 0 (default): everything visible
-            _ => self.images.values().map(|i| i.key).collect(),
+        let (keys, pid): (Vec<u64>, u32) = match ctrl.delete.to_ascii_lowercase() {
+            // `d` omitted (0) means `a`
+            0 | b'a' => (self.images.values().map(|i| i.key).collect(), 0),
+            b'i' => (
+                self.images
+                    .get(&ctrl.id)
+                    .map(|i| vec![i.key])
+                    .unwrap_or_default(),
+                ctrl.placement,
+            ),
+            b'n' => (
+                self.numbers
+                    .get(&ctrl.number)
+                    .and_then(|id| self.images.get(id))
+                    .map(|i| vec![i.key])
+                    .unwrap_or_default(),
+                ctrl.placement,
+            ),
+            _ => return,
         };
-        let pid = ctrl.placement;
         self.placements
             .retain(|p| !(keys.contains(&p.image) && (pid == 0 || p.placement_id == pid)));
         if free {
@@ -680,6 +700,51 @@ mod tests {
         assert_eq!(g.placements.len(), 1);
         g.kitty(b"a=d,d=I,i=7", (10, 20));
         assert!(g.placements.is_empty());
+        assert_eq!(g.stored_bytes(), 0);
+    }
+
+    #[test]
+    fn delete_selectors_are_scoped() {
+        let px = b64(&[255, 0, 0, 255]);
+        let put = |g: &mut Graphics, cmd: &str| {
+            let out = g.kitty(format!("{cmd};{px}").as_bytes(), (10, 20));
+            g.place(out.place.as_ref().unwrap(), 5, 0, false);
+        };
+        let setup = || {
+            let mut g = Graphics::default();
+            put(&mut g, "a=T,f=32,s=1,v=1,i=1,p=1");
+            put(&mut g, "a=T,f=32,s=1,v=1,i=2,I=77,p=1");
+            put(&mut g, "a=T,f=32,s=1,v=1,i=3,p=1");
+            assert_eq!(g.placements.len(), 3);
+            g
+        };
+        // selectors that are not implemented delete nothing
+        for d in ["c", "C", "x", "y", "z", "r", "f", "q", "p", "P"] {
+            let mut g = setup();
+            g.kitty(format!("a=d,d={d}").as_bytes(), (10, 20));
+            assert_eq!(g.placements.len(), 3, "d={d}");
+            assert_eq!(g.images.len(), 3, "d={d}");
+        }
+        // by id: only that image's placements; uppercase frees the data
+        let mut g = setup();
+        g.kitty(b"a=d,d=i,i=1", (10, 20));
+        assert_eq!(g.placements.len(), 2);
+        assert_eq!(g.images.len(), 3);
+        g.kitty(b"a=d,d=I,i=3", (10, 20));
+        assert_eq!(g.placements.len(), 1);
+        assert_eq!(g.images.len(), 2);
+        // by number
+        let mut g = setup();
+        g.kitty(b"a=d,d=N,I=77", (10, 20));
+        assert_eq!(g.placements.len(), 2);
+        assert!(!g.images.contains_key(&2));
+        // a / A (and the default) delete everything
+        let mut g = setup();
+        g.kitty(b"a=d", (10, 20));
+        assert!(g.placements.is_empty());
+        assert_eq!(g.images.len(), 3);
+        g.kitty(b"a=d,d=A", (10, 20));
+        assert_eq!(g.images.len(), 0);
         assert_eq!(g.stored_bytes(), 0);
     }
 

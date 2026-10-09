@@ -39,5 +39,5 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let uv = u.uv_offset + in.uv * u.uv_scale;
     let c = textureSample(tex, samp, uv);
-    return vec4<f32>(c.rgb, c.a * u.opacity);
+    return vec4<f32>(c.rgb * u.opacity, c.a * u.opacity);
 }

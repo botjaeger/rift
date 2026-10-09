@@ -249,10 +249,13 @@ ignored. Warp's own files drop in unchanged.
 Materialized to `~/.local/share/shift/` on first spawn, injected
 automatically:
 
-- **zsh** — ZDOTDIR shim that sources the user's real config first.
+- **zsh** — ZDOTDIR shim that sources the user's real config first (a
+  `ZDOTDIR` set in the user's `~/.zshenv` is honoured for their other files).
 - **bash** — spawned with `--rcfile <data dir>/bashrc`, a shim that replays
   bash's own startup files (profile files on macOS, `~/.bashrc` on Linux),
-  then sources `shift.bash`.
+  then sources `shift.bash`. The command-start marker uses `PS0` on bash
+  4.4+ and a `DEBUG` trap before that; `PROMPT_COMMAND` may be a string or an
+  array (5.1+).
 - **fish** — `shift.fish` auto-loaded via a `vendor_conf.d` XDG_DATA_DIRS
   append.
 
@@ -309,7 +312,8 @@ it.
   150 ms rather than freezing the pane; a shell marker inside an update
   flushes it first so block anchors stay correct.
 - **Inline images**: the kitty graphics protocol (APC `G`: transmit, display,
-  put, delete, query; PNG, JPEG, GIF, WebP via `f=100`, raw RGB/RGBA `f=24/32`,
+  put, delete, query; delete selectors `a`/`A`, `i`/`I` and `n`/`N` only —
+  others are ignored; PNG, JPEG, GIF, WebP via `f=100`, raw RGB/RGBA `f=24/32`,
   zlib `o=z`, chunked `m=1`, source crop, cell size, z-index under/over text,
   `C=1`, quiet levels) and iTerm2 inline images (OSC 1337 `File=inline=1`, with
   `width`/`height` in cells, px, % or auto and aspect ratio). Images anchor to
@@ -359,7 +363,10 @@ replay.
 - The service listens on `~/.local/share/shift/sessiond/sock` (a 0700
   directory; other users' connections are refused) and exits 10 s after its
   last shell and window are gone. A slow window is disconnected rather than
-  buffering without bound; it reattaches and replays. If the configured data
+  buffering without bound; the pane reattaches on its own and replays only
+  what it missed (it closes only when the shell is really gone). A lock file
+  next to the socket keeps concurrent starts from replacing each other's
+  socket. If the configured data
   directory is too long for a Unix socket path, Shift uses a shorter path
   under `/tmp` specific to that data directory.
 - If the service cannot start, the shell runs locally and a toast says so.
@@ -372,7 +379,10 @@ Each window listens on `~/.local/share/shift/control/<pid>.sock`
 - `"navigate"` (default): `list`, `status`, `focus`.
 - `"full"`: also `split`, `open` (optionally running a command) and
   `send-text` (types into a shell).
-- `"off"`: no socket.
+- `"off"`: no socket. Any unrecognised value (`"false"`, a typo) is
+  treated as `"off"` and logs a warning.
+- `ctl focus --tab N` / `--pane ID`: tabs count from 0, as in `ctl list`;
+  a non-numeric value is rejected with exit code 2.
 
 `shift-terminal ctl list|status|focus|split|open|send-text` is the client
 (`ctl help` for flags); requests are newline-delimited JSON, answered on the

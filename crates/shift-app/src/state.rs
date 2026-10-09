@@ -621,6 +621,8 @@ pub struct PaneState {
     pub has_selection: bool,
     /// Visible URL spans from the last frame: (rect, url).
     pub url_hits: Vec<([f32; 4], String)>,
+    /// The sticky command header shown at the top last frame: (rect, block).
+    pub sticky_hit: Option<([f32; 4], shift_core::BlockId)>,
     /// Keyboard-selected block (⌘↑/⌘↓), target of ⇧⌘C / ⌘I / ⌃M / ⌘B.
     pub selected_block: Option<shift_core::BlockId>,
     /// Per-block output filter (Warp block filter): only output lines of
@@ -653,6 +655,7 @@ impl PaneState {
             alt_screen: false,
             has_selection: false,
             url_hits: Vec::new(),
+            sticky_hit: None,
             selected_block: None,
             filter: None,
             correction: None,

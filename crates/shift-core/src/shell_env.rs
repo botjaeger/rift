@@ -184,6 +184,10 @@ impl ShellEnv {
         if is_assignment(word) {
             return true;
         }
+        // `$EDITOR`, `${VAR}`, `$(cmd)`: only the shell can resolve these
+        if word.contains('$') || word.contains('`') {
+            return true;
+        }
         if self.aliases.contains_key(word)
             || self.functions.contains(word)
             || self.builtins.contains(word)
@@ -452,9 +456,33 @@ pub fn first_command_word_ranges(buffer: &str) -> Vec<Range<usize>> {
     let mut out = Vec::new();
     for (start, end) in segment_bounds(buffer) {
         let seg = &buffer[start..end];
+        // the transparent prefix whose options are being skipped, if any
+        let mut prefix: Option<&str> = None;
+        let mut skip_value = false;
+        let mut options_done = false;
         for tok in token_ranges(seg, start) {
             let word = &buffer[tok.clone()];
-            if is_assignment(word) || COMMAND_PREFIXES.contains(&word) {
+            if skip_value {
+                skip_value = false;
+                continue;
+            }
+            if let Some(p) = prefix
+                && !options_done
+                && word.starts_with('-')
+            {
+                if word == "--" {
+                    options_done = true;
+                } else {
+                    skip_value = prefix_option_takes_value(p, word);
+                }
+                continue;
+            }
+            if is_assignment(word) {
+                continue;
+            }
+            if let Some(p) = COMMAND_PREFIXES.iter().find(|p| **p == word) {
+                prefix = Some(p);
+                options_done = false;
                 continue;
             }
             out.push(tok);
@@ -462,6 +490,24 @@ pub fn first_command_word_ranges(buffer: &str) -> Vec<Range<usize>> {
         }
     }
     out
+}
+
+/// Whether `opt` (an option of the transparent prefix `prefix`) takes its
+/// value as the next word (`sudo -u bob cmd`, `env -u HOME cmd`), so that
+/// word is not mistaken for the command.
+fn prefix_option_takes_value(prefix: &str, opt: &str) -> bool {
+    let takes: &[&str] = match prefix {
+        "sudo" => &[
+            "-u", "-g", "-h", "-p", "-C", "-D", "-R", "-T", "-U", "-r", "-t",
+        ],
+        "doas" => &["-u", "-C"],
+        "env" => &["-u", "-C", "-S", "-P"],
+        "nice" => &["-n"],
+        "stdbuf" => &["-i", "-o", "-e"],
+        "exec" => &["-a"],
+        _ => &[],
+    };
+    takes.contains(&opt)
 }
 
 /// Damerau-Levenshtein (optimal string alignment) distance between two strings,
@@ -795,8 +841,8 @@ fn token_ranges(seg: &str, base: usize) -> Vec<Range<usize>> {
 }
 
 /// Byte ranges of pipeline stages: `buffer` split on the unquoted shell command
-/// separators `;` `|` `&` `\n` `(` `)` (and the doubled `&&`/`||`). Empty spans
-/// are omitted.
+/// separators `;` `|` `&` `\n` `(` `)` (and the doubled `&&`/`||`); the `&` of a
+/// redirection (`2>&1`, `&>file`) is not a separator. Empty spans are omitted.
 fn segment_bounds(buffer: &str) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     let mut start = 0usize;
@@ -815,6 +861,9 @@ fn segment_bounds(buffer: &str) -> Vec<(usize, usize)> {
                 }
                 start = i + 1;
             }
+            // `2>&1`, `>&2`, `<&3`, `&>file`, `&>>file`: redirections, not `&`
+            '&' if (i > 0 && matches!(bytes[i - 1], b'>' | b'<'))
+                || matches!(bytes.get(i + 1), Some(b'>')) => {}
             '|' | '&' => {
                 if start < i {
                     out.push((start, i));
@@ -973,6 +1022,48 @@ mod tests {
             .map(|r| &buf[r])
             .collect();
         assert_eq!(words, vec!["run"]);
+    }
+
+    fn cmd_words(buf: &str) -> Vec<&str> {
+        first_command_word_ranges(buf)
+            .into_iter()
+            .map(|r| &buf[r])
+            .collect()
+    }
+
+    #[test]
+    fn redirections_do_not_split_the_segment() {
+        assert_eq!(cmd_words("cmd 2>&1"), vec!["cmd"]);
+        assert_eq!(cmd_words("cmd >&2"), vec!["cmd"]);
+        assert_eq!(cmd_words("cmd &> out.log"), vec!["cmd"]);
+        assert_eq!(cmd_words("cmd &>> out.log"), vec!["cmd"]);
+        assert_eq!(cmd_words("cmd <&3"), vec!["cmd"]);
+        assert_eq!(cmd_words("a 2>&1 | b && c &"), vec!["a", "b", "c"]);
+        assert_eq!(cmd_words("sleep 1 & echo hi"), vec!["sleep", "echo"]);
+    }
+
+    #[test]
+    fn prefix_options_are_not_command_words() {
+        assert_eq!(cmd_words("sudo -u bob cmd arg"), vec!["cmd"]);
+        assert_eq!(cmd_words("sudo -E -n cmd"), vec!["cmd"]);
+        assert_eq!(cmd_words("sudo -- cmd"), vec!["cmd"]);
+        assert_eq!(cmd_words("env -i cmd"), vec!["cmd"]);
+        assert_eq!(cmd_words("env -u HOME FOO=1 cmd"), vec!["cmd"]);
+        assert_eq!(cmd_words("nice -n 10 cmd"), vec!["cmd"]);
+        assert_eq!(cmd_words("sudo env -i FOO=1 cmd"), vec!["cmd"]);
+        assert_eq!(cmd_words("time -p cmd"), vec!["cmd"]);
+        // an option of the command itself is untouched
+        assert_eq!(cmd_words("cmd -u bob"), vec!["cmd"]);
+    }
+
+    #[test]
+    fn variable_command_words_are_known() {
+        let env = env_with(&[], &[]);
+        assert!(env.is_known("$EDITOR"));
+        assert!(env.is_known("${EDITOR}"));
+        assert!(env.is_known("\"$cmd\""));
+        assert!(!env.is_known("definitely-not-a-command-xyz"));
+        assert_eq!(env.suggest_correction("$EDITR file"), None);
     }
 
     #[test]

@@ -156,7 +156,7 @@ impl SpritePipeline {
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
@@ -207,7 +207,8 @@ impl SpritePipeline {
             let victim = self
                 .textures
                 .iter()
-                .filter(|(k, _)| !keep.contains(k))
+                // never evict a texture already queued for this frame
+                .filter(|(k, t)| !keep.contains(k) && t.last_frame != self.frame)
                 .min_by_key(|(_, t)| t.last_frame)
                 .map(|(k, _)| *k);
             let Some(k) = victim else { break };
@@ -231,6 +232,8 @@ impl SpritePipeline {
         if self.gpu_bytes + bytes > MAX_GPU_BYTES {
             return false;
         }
+        let mut pm = s.rgba.to_vec();
+        crate::color::premultiply_rgba8(&mut pm);
         let extent = wgpu::Extent3d {
             width: s.size[0],
             height: s.size[1],
@@ -253,7 +256,7 @@ impl SpritePipeline {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &s.rgba,
+            &pm,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(s.size[0] * 4),

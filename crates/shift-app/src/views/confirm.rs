@@ -20,6 +20,49 @@ fn text(
     buffer
 }
 
+/// Longest prefix of `value` (plus `…`) that fits `max_w`.
+fn elide(
+    engine: &mut TextEngine,
+    value: &str,
+    size: f32,
+    family: &'static str,
+    max_w: f32,
+) -> String {
+    if engine.measure(value, size, family, Weight::NORMAL) <= max_w {
+        return value.to_string();
+    }
+    let mut out = value.to_string();
+    while out.pop().is_some() {
+        let candidate = format!("{}…", out.trim_end());
+        if engine.measure(&candidate, size, family, Weight::NORMAL) <= max_w {
+            return candidate;
+        }
+    }
+    String::new()
+}
+
+/// Greedy word wrap of `value` into lines no wider than `max_w`.
+fn wrap(engine: &mut TextEngine, value: &str, size: f32, max_w: f32) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for word in value.split_whitespace() {
+        let next = if cur.is_empty() {
+            word.to_string()
+        } else {
+            format!("{cur} {word}")
+        };
+        if cur.is_empty() || engine.measure(&next, size, FONT_SANS, Weight::NORMAL) <= max_w {
+            cur = next;
+        } else {
+            lines.push(std::mem::replace(&mut cur, word.to_string()));
+        }
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    lines
+}
+
 /// Bottom-center status toast (saved files, copied text, …).
 pub fn toast(layer: &mut Layer, engine: &mut TextEngine, theme: &Theme, msg: &str, w: f32, h: f32) {
     let tw = engine.measure(msg, 12.5, FONT_SANS, Weight::NORMAL);
@@ -82,10 +125,15 @@ pub fn render(
     );
 
     let shown = commands.len().min(3);
-    let modal_w = 520.0;
-    let modal_h = 190.0 + shown as f32 * 25.0;
+    let modal_w = 520.0_f32.min((w - 32.0).max(120.0));
+    let text_w = modal_w - 48.0;
+    let desc_lines = wrap(engine, &dialog.description, 13.0, text_w);
+    let note_lines = wrap(engine, dialog.note, 12.0, text_w);
+    let extra = (desc_lines.len().saturating_sub(1) as f32) * 18.0
+        + (note_lines.len().saturating_sub(1) as f32) * 16.0;
+    let modal_h = 190.0 + shown as f32 * 25.0 + extra;
     let x = (w - modal_w) / 2.0;
-    let y = (h - modal_h) / 2.0;
+    let y = ((h - modal_h) / 2.0).max(8.0);
 
     layer.shadow(
         [x, y + 10.0],
@@ -110,27 +158,36 @@ pub fn render(
         y + 21.5,
         theme.warning,
     );
+    let title = elide(engine, title, 19.0, FONT_SANS, modal_w - 56.0 - 20.0);
     layer.text(
-        text(engine, title, 19.0, FONT_SANS, Weight::SEMIBOLD),
+        text(engine, &title, 19.0, FONT_SANS, Weight::SEMIBOLD),
         x + 56.0,
         y + 20.0,
         theme.text_bright,
     );
 
-    layer.text(
-        text(engine, &dialog.description, 13.0, FONT_SANS, Weight::NORMAL),
-        x + 24.0,
-        y + 64.0,
-        theme.text_ui,
-    );
-    layer.text(
-        text(engine, dialog.note, 12.0, FONT_SANS, Weight::NORMAL),
-        x + 24.0,
-        y + 87.0,
-        theme.text_dim,
-    );
+    let mut ty = y + 64.0;
+    for line in &desc_lines {
+        layer.text(
+            text(engine, line, 13.0, FONT_SANS, Weight::NORMAL),
+            x + 24.0,
+            ty,
+            theme.text_ui,
+        );
+        ty += 18.0;
+    }
+    ty += 5.0;
+    for line in &note_lines {
+        layer.text(
+            text(engine, line, 12.0, FONT_SANS, Weight::NORMAL),
+            x + 24.0,
+            ty,
+            theme.text_dim,
+        );
+        ty += 16.0;
+    }
 
-    let mut command_y = y + 116.0;
+    let mut command_y = y + 116.0 + extra;
     for command in commands.iter().take(shown) {
         layer.circle([x + 30.0, command_y + 7.0], 5.0, theme.warning);
         let label = if command.trim().is_empty() {
@@ -138,7 +195,7 @@ pub fn render(
         } else {
             command.trim()
         };
-        let clipped: String = label.chars().take(56).collect();
+        let clipped = elide(engine, label, 12.0, mono_family(), modal_w - 42.0 - 20.0);
         layer.text(
             text(engine, &clipped, 12.0, mono_family(), Weight::NORMAL),
             x + 42.0,

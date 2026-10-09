@@ -13,8 +13,8 @@ pub struct Completion {
 }
 
 /// (start_byte, token) being completed — the shell word containing
-/// `cursor`, as typed. Whitespace escaped with `\` or inside quotes does
-/// not end the word.
+/// `cursor`, as typed. Whitespace or an operator (`|;&<>()`) ends the word
+/// (as in [`token_end`]) unless escaped with `\` or inside quotes.
 pub fn current_token(buffer: &str, cursor: usize) -> (usize, &str) {
     let before = &buffer[..cursor];
     let mut start = 0;
@@ -31,7 +31,7 @@ pub fn current_token(buffer: &str, cursor: usize) -> (usize, &str) {
             escaped = true;
         } else if c == '\'' || c == '"' {
             quote = Some(c);
-        } else if c.is_whitespace() {
+        } else if c.is_whitespace() || "|;&<>()".contains(c) {
             start = i + c.len_utf8();
         }
     }
@@ -157,6 +157,8 @@ pub fn complete(
 ) -> Vec<Completion> {
     let (token_start, token) = current_token(buffer, cursor);
     let mut out = Vec::new();
+    // a spec path/dir argument is completed by its generator alone
+    let mut generic_paths = true;
 
     // Which command are we completing inside? A pipe / `;` / `&&` / `||`
     // starts a fresh command, so only look at the current segment.
@@ -208,6 +210,7 @@ pub fn complete(
                         }
                     }
                 }
+                generic_paths = !matches!(res.args, ArgKind::Path | ArgKind::Dir);
                 out.extend(generator_completions(res.args, token, cwd));
             }
         }
@@ -215,7 +218,7 @@ pub fn complete(
 
     // paths: token that looks like one
     let word = unescape_word(token);
-    if word.contains('/') || word.starts_with('.') || word.starts_with('~') {
+    if generic_paths && (word.contains('/') || word.starts_with('.') || word.starts_with('~')) {
         out.extend(complete_path(&word, cwd));
     }
 
@@ -243,13 +246,19 @@ pub fn complete(
         }
     }
 
-    out.dedup_by(|a, b| a.insert == b.insert);
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|c| seen.insert(c.insert.clone()));
     out.truncate(50);
     out
 }
 
 /// Option / flag completions for a token beginning with `-`.
 fn option_completions(res: &completion_specs::Resolved, token: &str) -> Vec<Completion> {
+    // `--opt=va…`: the value is not an option name, and an option insert
+    // would replace the whole token and drop `=va…`
+    if token.contains('=') {
+        return Vec::new();
+    }
     let key = token.split('=').next().unwrap_or(token);
     let mut out = Vec::new();
     for o in &res.options {
@@ -292,15 +301,20 @@ fn option_completions(res: &completion_specs::Resolved, token: &str) -> Vec<Comp
 
 /// Values produced by a spec argument generator, prefix-filtered by `token`.
 fn generator_completions(kind: ArgKind, token: &str, cwd: Option<&str>) -> Vec<Completion> {
+    // generator values are literal text: match against the unescaped token
+    // and insert escaped, so a ref named `x$(cmd)` cannot run on Enter
+    let want = unescape_word(token);
     let vals_to_completions =
         |items: Vec<(String, String)>, src: &'static str| -> Vec<Completion> {
             items
                 .into_iter()
-                .filter(|(v, _)| v.starts_with(token))
-                .map(|(v, desc)| Completion {
-                    insert: v,
-                    description: desc,
-                    source: src,
+                .filter(|(v, _)| v.starts_with(&want))
+                .filter_map(|(v, desc)| {
+                    Some(Completion {
+                        insert: escape_word(&v)?,
+                        description: desc,
+                        source: src,
+                    })
                 })
                 .take(50)
                 .collect()
@@ -309,18 +323,18 @@ fn generator_completions(kind: ArgKind, token: &str, cwd: Option<&str>) -> Vec<C
     let refs = |items: Vec<(String, String)>| -> Vec<Completion> {
         items
             .into_iter()
-            .filter(|(v, _)| v.starts_with(token))
-            .map(|(v, desc)| {
+            .filter(|(v, _)| v.starts_with(&want))
+            .filter_map(|(v, desc)| {
                 let src = match desc.as_str() {
                     "branch" => "branch",
                     "tag" => "tag",
                     _ => "remote-branch",
                 };
-                Completion {
-                    insert: v,
+                Some(Completion {
+                    insert: escape_word(&v)?,
                     description: desc,
                     source: src,
-                }
+                })
             })
             .take(50)
             .collect()
@@ -332,19 +346,21 @@ fn generator_completions(kind: ArgKind, token: &str, cwd: Option<&str>) -> Vec<C
             .into_iter()
             .filter(|c| c.insert.ends_with('/'))
             .collect(),
-        ArgKind::GitRef => refs(completion_specs::git_refs(cwd)),
+        ArgKind::GitRef => refs(completion_specs::git_refs(cwd, &want)),
         ArgKind::GitBranch => refs(
-            completion_specs::git_refs(cwd)
+            completion_specs::git_refs(cwd, &want)
                 .into_iter()
                 .filter(|(_, d)| d == "branch")
                 .collect(),
         ),
         ArgKind::GitRemote => vals_to_completions(completion_specs::git_remotes(cwd), "remote"),
-        ArgKind::SshHost => vals_to_completions(completion_specs::ssh_hosts(), "ssh-host"),
+        ArgKind::SshHost => vals_to_completions(completion_specs::ssh_hosts(&want), "ssh-host"),
         ArgKind::MakeTarget => {
-            vals_to_completions(completion_specs::make_targets(cwd), "make-target")
+            vals_to_completions(completion_specs::make_targets(cwd, &want), "make-target")
         }
-        ArgKind::PkgScript => vals_to_completions(completion_specs::package_scripts(cwd), "script"),
+        ArgKind::PkgScript => {
+            vals_to_completions(completion_specs::package_scripts(cwd, &want), "script")
+        }
     }
 }
 
@@ -385,7 +401,11 @@ fn complete_path(token: &str, cwd: Option<&str>) -> Vec<Completion> {
             if !name.starts_with(file_part) || (file_part.is_empty() && name.starts_with('.')) {
                 return None;
             }
-            let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            // follow symlinks: a link to a directory is a directory
+            let is_dir = std::fs::metadata(e.path())
+                .map(|m| m.is_dir())
+                .or_else(|_| e.file_type().map(|t| t.is_dir()))
+                .unwrap_or(false);
             // keep the user's original dir prefix (incl. ~) in the insert
             let orig_dir = &token[..token.len().saturating_sub(file_part.len())];
             Some(Completion {
@@ -713,5 +733,115 @@ mod tests {
                 .all(|c| c.source != "branch" || c.insert.starts_with("de"))
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "shift-complete-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn generator_values_are_escaped_and_matched_unescaped() {
+        let dir = scratch("inject");
+        let heads = dir.join(".git/refs/heads");
+        std::fs::create_dir_all(&heads).unwrap();
+        let evil = "x$(touch${IFS}pwn);id";
+        std::fs::write(heads.join(evil), "0\n").unwrap();
+        let cwd = dir.to_str();
+        let want = escape_word(evil).unwrap();
+        assert!(!want.contains("$(") || want.contains("\\$\\("));
+        for buf in [
+            "git checkout x",
+            "git checkout x\\$\\(to",
+            "git checkout 'x$(to",
+        ] {
+            let out = complete(buf, buf.len(), &[], &[], cwd);
+            let got: Vec<&str> = out
+                .iter()
+                .filter(|c| c.source == "branch")
+                .map(|c| c.insert.as_str())
+                .collect();
+            assert_eq!(got, [want.as_str()], "{buf}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn script_and_remote_generators_escape_too() {
+        let dir = scratch("inject2");
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"scripts": {"x;touch pwn": "echo", "ok": "echo"}}"#,
+        )
+        .unwrap();
+        let cwd = dir.to_str();
+        let out = complete("npm run x", 9, &[], &[], cwd);
+        let got: Vec<&str> = out
+            .iter()
+            .filter(|c| c.source == "script")
+            .map(|c| c.insert.as_str())
+            .collect();
+        assert_eq!(got, ["x\\;touch\\ pwn"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dir_completion_has_no_files_and_no_duplicates() {
+        let dir = scratch("dirs");
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("file.txt"), "").unwrap();
+        let cwd = dir.to_str();
+        let inserts = |buf: &str| -> Vec<String> {
+            complete(buf, buf.len(), &[], &[], cwd)
+                .into_iter()
+                .map(|c| c.insert)
+                .collect()
+        };
+        assert_eq!(inserts("cd ./"), ["./sub/"]);
+        assert_eq!(inserts("cat ./"), ["./file.txt", "./sub/"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_directories_complete_as_directories() {
+        let dir = scratch("symlink");
+        std::fs::create_dir_all(dir.join("real")).unwrap();
+        std::os::unix::fs::symlink(dir.join("real"), dir.join("link")).unwrap();
+        let cwd = dir.to_str();
+        let out = complete("cd ./li", 7, &[], &[], cwd);
+        assert_eq!(
+            out.iter().map(|c| c.insert.as_str()).collect::<Vec<_>>(),
+            ["./link/"]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn option_with_a_value_is_not_completed_as_an_option() {
+        let out = complete("git commit --mess", 17, &[], &[], None);
+        assert!(out.iter().any(|c| c.insert == "--message"));
+        let out = complete("git commit --message=al", 23, &[], &[], None);
+        assert!(out.iter().all(|c| c.source != "option"), "{out:?}");
+    }
+
+    #[test]
+    fn redirects_and_newlines_bound_the_token_and_the_command() {
+        assert_eq!(current_token("cat a >fi", 9), (7, "fi"));
+        assert_eq!(current_token("a|ls", 4), (2, "ls"));
+        assert_eq!(current_token("cat 'a>b", 8), (4, "'a>b"));
+        let out = complete("ls\ngit ch", 9, &[], &[], None);
+        assert!(
+            out.iter()
+                .any(|c| c.source == "shell" && c.insert == "checkout")
+        );
     }
 }

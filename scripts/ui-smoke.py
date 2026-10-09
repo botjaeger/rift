@@ -39,6 +39,7 @@ for project in ("a/src", "b"):
 (scratch / "a/src/only_a.rs").write_text("")
 (scratch / "plain.sh").write_text('printf "\\033[?2004l"\nexec cat -v\n')
 (scratch / "bracketed.sh").write_text('printf "\\033[?2004h"\nexec cat -v\n')
+(scratch / "focus.sh").write_text('printf "\\033[?1004h"\nexec cat -v\n')
 
 # A same-user window that accepts connections but never answers. Discovery
 # must not delay palette input. No real window/service is contacted.
@@ -184,6 +185,26 @@ steps = [
     "paste zz",
     "wait 400",
     f"dump {scratch}/sync.txt",
+    # DECSET 1004: switching tabs tells the programs who lost/gained focus,
+    # whatever the mouse-reporting setting (a headless window starts unfocused)
+    "focus on",
+    "key cmd+t",
+    "wait_prompt",
+    f"type sh {scratch}/focus.sh\\n",
+    "wait 400",
+    "key cmd+1",
+    "key cmd+2",
+    "wait 300",
+    f"dump {scratch}/focus-tabs.txt",
+    # wide glyphs: find sees "日本" across the spacer cell
+    "key cmd+t",
+    "wait_prompt",
+    "type printf '\\346\\227\\245\\346\\234\\254 wide\\n'\\n",
+    "wait 500",
+    "key cmd+f",
+    "type 日本",
+    f"dump {scratch}/find-wide.txt",
+    "key escape",
     "quit",
 ]
 script = scratch / "smoke.shift"
@@ -255,7 +276,122 @@ assert "panes=2" in state("split"), state("split")
 sync = state("sync").split("\n  pane ")
 assert "| zz" in sync[1] and "200~zz" not in sync[1], "plain pane got a bracketed paste"
 assert "| ^[[200~zz^[[201~" in sync[2], "bracketed pane lost its paste framing"
+assert "^[[O^[[I" in state("focus-tabs"), state("focus-tabs")
+wide = re.search(r"matches=(\d+) total=(\d+)", state("find-wide"))
+assert wide and int(wide[2]) >= 1, state("find-wide")
 assert "wait_prompt timed out" not in (scratch / "app.log").read_text()
+# --- second run: fresh state, fixed 1000x700 window, mouse and hint geometry ---
+geo = scratch / "geo"
+(geo / "cfg/shift").mkdir(parents=True)
+(geo / "data/shift").mkdir(parents=True)
+(geo / "cfg/shift/config.toml").write_text(
+    'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
+    'sync_os_theme = false\n' + f'working_directory = {json.dumps(str(work))}\n')
+(geo / "stream.sh").write_text(
+    "for i in $(seq 1 60); do echo line$i; done\nsleep 2\n"
+    "for i in $(seq 61 120); do echo line$i; done\n")
+geo_steps = [
+    "wait_prompt",
+    "focus on",
+    "resize 1000 700",
+    "wait 300",
+    "key cmd+k",
+    "wait 300",
+    # output scrolling between press and the first drag move must not shift
+    # the selection anchor: press while static, scroll, then drag
+    f"type sh {geo}/stream.sh\\n",
+    "wait 1000",
+    f"dump {geo}/stream-press.txt",
+    "press 100 300",
+    "wait 2800",
+    "move 300 360",
+    "move 400 360",
+    "release 400 360",
+    "key cmd+c",
+    f"dump {geo}/stream-drag.txt",
+    "key escape",
+    # hint mode labels the sticky header when its block header is scrolled off
+    "type seq 1 60\\n",
+    "wait 800",
+    "key shift+cmd+h",
+    "wait 200",
+    f"dump {geo}/hints-sticky.txt",
+    "type a",
+    "wait 200",
+    f"dump {geo}/hints-picked.txt",
+    # the review panel auto-hides in a narrow window: button unlit, toast
+    "resize 600 500",
+    "wait 300",
+    "key shift+cmd+g",
+    "wait 300",
+    f"dump {geo}/review-narrow.txt",
+    "resize 1500 600",
+    "wait 300",
+    f"dump {geo}/review-wide.txt",
+    "quit",
+]
+(geo / "geo.shift").write_text("\n".join(geo_steps) + "\n")
+geo_env = dict(env, XDG_CONFIG_HOME=str(geo / "cfg"), XDG_DATA_HOME=str(geo / "data"))
+with (geo / "app.log").open("w") as log:
+    rc = subprocess.run([str(binary), "--script", str(geo / "geo.shift"), "--headless"],
+                        env=geo_env, stdout=log, stderr=log, timeout=120).returncode
+assert rc == 0, f"geometry run failed; see {geo}/app.log"
+
+def gstate(name):
+    return (geo / f"{name}.txt").read_text()
+
+def clipboard(name):
+    line = next(l for l in gstate(name).splitlines() if l.startswith("clipboard="))
+    return json.loads(line[len("clipboard="):])
+
+press = gstate("stream-press")
+geometry = next(l for l in press.splitlines() if l.strip().startswith("geometry "))
+line_h = float(re.search(r"line_h=([\d.]+)", geometry)[1])
+rows = re.findall(r"(\d+):([\d.]+)@", geometry)
+# dragging into the right margin includes the last column's character: fill
+# every column, then release a quarter cell past the grid (font metrics differ
+# per platform, so the point comes from this run's geometry)
+cell_w = float(re.search(r"cell_w=([\d.]+)", geometry)[1])
+cols = int(re.search(r"cols=(\d+)", geometry)[1])
+grid_x = float(re.search(r"@([\d.]+)", geometry)[1])
+edge_x = grid_x + (cols + 0.25) * cell_w
+assert edge_x < 1000, (edge_x, geometry)
+full = "0" * (cols - 1) + "9"
+edge_steps = [
+    "wait_prompt",
+    "focus on",
+    "resize 1000 700",
+    "wait 300",
+    "key cmd+k",
+    "wait 300",
+    f"type printf '%0{cols - 1}d9' 0; echo\\n",
+    "wait 600",
+    f"drag {grid_x + 1:.1f} 170 {edge_x:.1f} 170",
+    "key cmd+c",
+    f"dump {geo}/right-edge.txt",
+    "quit",
+]
+(geo / "edge.shift").write_text("\n".join(edge_steps) + "\n")
+with (geo / "edge.log").open("w") as log:
+    rc = subprocess.run([str(binary), "--script", str(geo / "edge.shift"), "--headless"],
+                        env=geo_env, stdout=log, stderr=log, timeout=120).returncode
+assert rc == 0, f"right-edge run failed; see {geo}/edge.log"
+assert clipboard("right-edge").rstrip("\n") == full, clipboard("right-edge")
+row = next(i for i, (_, y) in enumerate(rows) if float(y) <= 300 < float(y) + line_h)
+screen = [l[6:] for l in press.splitlines() if l.startswith("    | ")]
+# the first selected line is the (cut) row under the press, the next one the
+# row below it — not rows that scrolled in after the press
+assert clipboard("stream-drag").split("\n")[1] == screen[row + 1].rstrip(), \
+    (screen[row + 1], clipboard("stream-drag")[:80])
+sticky = gstate("hints-sticky")
+assert re.search(r'hints=\["block a \d+"\]', sticky) and "No links" not in sticky, sticky[:600]
+assert "selected_block=None" in sticky
+assert "selected_block=Some(" in gstate("hints-picked"), gstate("hints-picked")[:900]
+narrow, wide = gstate("review-narrow"), gstate("review-wide")
+assert "review=true" in narrow and "shown=false" in narrow, narrow
+assert 'toast=Some("Window too narrow for the review panel' in narrow, narrow
+assert "review=true" in wide and "shown=true" in wide, wide
+
 for client in clients:
     client.close()
 stalled.close()

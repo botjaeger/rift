@@ -4,13 +4,17 @@
 # marking natively — duplicates are harmless, Shift's parser is idempotent.
 
 status is-interactive; or exit 0
-if set -q SHIFT_SHELL_INTEGRATION
+# Shell-local guard (not exported): a nested or exec'd fish must load its own
+# hooks, which an exported variable would suppress.
+if set -q __shift_loaded
     exit 0
 end
-set -gx SHIFT_SHELL_INTEGRATION 1
+set -g __shift_loaded 1
 
+# OSC 7 wants a percent-encoded path: `%`, spaces and control characters
+# (BEL/ESC would end or inject sequences) must not travel raw.
 function __shift_report_cwd --on-variable PWD
-    printf '\e]7;file://%s%s\a' (hostname) "$PWD"
+    printf '\e]7;file://%s%s\a' (hostname) (string escape --style=url -- $PWD)
 end
 
 function __shift_preexec --on-event fish_preexec
@@ -23,12 +27,17 @@ function __shift_postexec --on-event fish_postexec
     set -e __shift_cmd_ran
 end
 
-# wrap fish_prompt: A before, B after
-functions -c fish_prompt __shift_orig_prompt
-function fish_prompt
-    printf '\e]133;A\a'
-    __shift_orig_prompt
-    printf '\e]133;B\a'
+# Wrap fish_prompt (A before, B after) right before each prompt is drawn, so a
+# fish_prompt defined later (config.fish, a prompt framework) is wrapped too.
+function __shift_wrap_prompt --on-event fish_prompt
+    functions fish_prompt | string match -q '*__shift_orig_prompt*'; and return
+    functions -e __shift_orig_prompt
+    functions -c fish_prompt __shift_orig_prompt
+    function fish_prompt
+        printf '\e]133;A\a'
+        __shift_orig_prompt
+        printf '\e]133;B\a'
+    end
 end
 
 __shift_report_cwd

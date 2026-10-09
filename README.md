@@ -146,8 +146,7 @@ To build from source, additionally:
   rustfmt and clippy) from `rust-toolchain.toml` on first use.
 - macOS: Xcode Command Line Tools (`xcode-select --install`).
 - Linux (Debian/Ubuntu names): `libxkbcommon-dev libwayland-dev libxcb1-dev
-  libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libssl-dev
-  pkg-config`.
+  libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev pkg-config`.
 - Optional, for the quality gates: `shellcheck`, `zsh`, `fish`, `python3`
   (scripted UI checks) and Docker (Linux gate).
 

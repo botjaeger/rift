@@ -44,6 +44,9 @@ listed alternates.
 | ⇧⌘T | `reopen_closed_tab` | Reopen last closed tab (restores cwd) |
 | ⇧⌘O | `session_switcher` | Fuzzy switcher over tabs, panes and recent blocks |
 | — | `toggle_tab_layout` | Tabs on top ↔ vertical rail |
+| — | `rename_tab` | Rename the current tab |
+| — | `close_other_tabs` | Close every tab except the current one |
+| — | `save_launch_config` | Save the current tabs and panes as a launch configuration |
 
 ## Panes
 
@@ -112,6 +115,10 @@ Active only while the app owns the command line.
 | ⌃B / ⌃F | Cursor left / right (emacs) |
 | ⌃U | Clear line |
 | ⌘Z / ⇧⌘Z | Undo / redo |
+| ⇧← / ⇧→ | Extend the selection by one character |
+| ⌥⇧← / ⌥⇧→ | Extend the selection by one word |
+| ⇧⌘← / ⇧⌘→, ⇧Home / ⇧End | Extend the selection to line start / end |
+| ⌘X | Cut the selection (⌘C copies it, ⌘A selects all) |
 | ⌃R | History palette |
 | ⌃C | Interrupt (clears line, sends SIGINT) |
 | ⌃D | EOF (only when the line is empty) |

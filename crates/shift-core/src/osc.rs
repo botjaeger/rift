@@ -33,9 +33,18 @@ enum State {
     Osc,
     /// ESC seen inside an OSC string (possible ST terminator).
     OscEsc,
-    /// APC string (`ESC _ … ESC \`).
+    /// First byte of an APC string (`ESC _ … ESC \`): `G` = kitty graphics.
+    ApcStart,
+    /// Body of a kitty graphics APC string.
     Apc,
+    /// Body of any other APC string (skipped; a stray `G` inside is data).
+    ApcSkip,
     ApcEsc,
+}
+
+/// CAN and SUB abort any control string.
+const fn is_abort(b: u8) -> bool {
+    b == 0x18 || b == 0x1a
 }
 
 const MAX_OSC: usize = 4096;
@@ -62,6 +71,17 @@ impl OscScanner {
         Self::default()
     }
 
+    /// The byte after an ESC: starts an OSC or APC string, or is not ours.
+    fn after_esc(&mut self, b: u8) {
+        self.buf.clear();
+        self.state = match b {
+            b']' => State::Osc,
+            b'_' => State::ApcStart,
+            0x1b => State::Esc,
+            _ => State::Ground,
+        };
+    }
+
     /// Split `chunk` at marker boundaries. Segment ends are cumulative
     /// offsets into `chunk`; the last segment always reaches `chunk.len()`.
     pub fn scan(&mut self, chunk: &[u8]) -> Vec<Segment> {
@@ -73,34 +93,58 @@ impl OscScanner {
                         self.state = State::Esc;
                     }
                 }
-                State::Esc => {
-                    self.buf.clear();
-                    self.state = match b {
-                        b']' => State::Osc,
-                        b'_' => State::Apc,
-                        _ => State::Ground,
-                    };
+                State::Esc => self.after_esc(b),
+                State::ApcStart => {
+                    if b == 0x1b {
+                        self.state = State::ApcEsc;
+                    } else if is_abort(b) {
+                        self.state = State::Ground;
+                    } else if b == b'G' {
+                        // only kitty graphics (`G`) bodies are kept
+                        self.buf.push(b);
+                        self.state = State::Apc;
+                    } else {
+                        self.state = State::ApcSkip;
+                    }
                 }
                 State::Apc => {
                     if b == 0x1b {
                         self.state = State::ApcEsc;
-                    } else if self.buf.len() < MAX_IMAGE && (!self.buf.is_empty() || b == b'G') {
-                        // only kitty graphics (`G`) bodies are kept
+                    } else if is_abort(b) {
+                        self.state = State::Ground;
+                        self.buf.clear();
+                    } else if self.buf.len() < MAX_IMAGE {
                         self.buf.push(b);
                     }
                 }
-                State::ApcEsc => {
-                    self.state = State::Ground;
-                    if b == b'\\' && self.buf.first() == Some(&b'G') && self.buf.len() < MAX_IMAGE {
-                        segments.push(Segment {
-                            end: i + 1,
-                            marker: Some(Marker::Graphics(self.buf[1..].to_vec())),
-                        });
+                State::ApcSkip => {
+                    if b == 0x1b {
+                        self.state = State::ApcEsc;
+                    } else if is_abort(b) {
+                        self.state = State::Ground;
                     }
-                    self.buf.clear();
+                }
+                State::ApcEsc => {
+                    if b == b'\\' {
+                        self.state = State::Ground;
+                        if self.buf.first() == Some(&b'G') && self.buf.len() < MAX_IMAGE {
+                            segments.push(Segment {
+                                end: i + 1,
+                                marker: Some(Marker::Graphics(self.buf[1..].to_vec())),
+                            });
+                        }
+                        self.buf.clear();
+                    } else {
+                        // ESC inside the string starts a new sequence: the
+                        // unterminated one is dropped, this byte is re-read
+                        self.after_esc(b);
+                    }
                 }
                 State::Osc => {
-                    if b == 0x07 {
+                    if is_abort(b) {
+                        self.state = State::Ground;
+                        self.buf.clear();
+                    } else if b == 0x07 {
                         self.state = State::Ground;
                         if let Some(marker) = parse_osc(&self.buf) {
                             segments.push(Segment {
@@ -118,16 +162,20 @@ impl OscScanner {
                     }
                 }
                 State::OscEsc => {
-                    self.state = State::Ground;
-                    if b == b'\\'
-                        && let Some(marker) = parse_osc(&self.buf)
-                    {
-                        segments.push(Segment {
-                            end: i + 1,
-                            marker: Some(marker),
-                        });
+                    if b == b'\\' {
+                        self.state = State::Ground;
+                        if let Some(marker) = parse_osc(&self.buf) {
+                            segments.push(Segment {
+                                end: i + 1,
+                                marker: Some(marker),
+                            });
+                        }
+                        self.buf.clear();
+                    } else {
+                        // ESC inside the string starts a new sequence (the
+                        // unterminated OSC is dropped, as vte does)
+                        self.after_esc(b);
                     }
-                    self.buf.clear();
                 }
             }
         }
@@ -322,6 +370,49 @@ mod tests {
         );
         // ConEmu progress and empty payloads are not notifications
         assert!(markers(&mut s, b"\x1b]9;4;1;50\x07\x1b]99;i=1;\x07").is_empty());
+    }
+
+    #[test]
+    fn esc_inside_unterminated_string_starts_the_next_sequence() {
+        let mut s = OscScanner::new();
+        // unterminated OSC, then a real marker: the marker must not be lost
+        assert_eq!(
+            markers(&mut s, b"\x1b]0;title\x1b]133;A\x07"),
+            vec![Marker::PromptStart]
+        );
+        // unterminated APC, then a marker
+        assert_eq!(
+            markers(&mut s, b"\x1b_Xjunk\x1b]133;B\x07"),
+            vec![Marker::CommandStart]
+        );
+        // unterminated OSC, then a kitty graphics command
+        assert_eq!(
+            markers(&mut s, b"\x1b]2;t\x1b_Ga=q;\x1b\\"),
+            vec![Marker::Graphics(b"a=q;".to_vec())]
+        );
+        // a stray G inside a non-kitty APC is data, not a graphics command
+        assert!(markers(&mut s, b"\x1b_XabcGdef\x1b\\").is_empty());
+        assert!(markers(&mut s, b"\x1b_Xa\x1b\\").is_empty());
+    }
+
+    #[test]
+    fn can_and_sub_abort_strings() {
+        let mut s = OscScanner::new();
+        for abort in [0x18u8, 0x1a] {
+            let mut input = b"\x1b]133;A".to_vec();
+            input.push(abort);
+            input.extend_from_slice(b"\x07text");
+            assert!(markers(&mut s, &input).is_empty());
+            // the scanner is back in ground state
+            assert_eq!(
+                markers(&mut s, b"\x1b]133;C\x07"),
+                vec![Marker::OutputStart]
+            );
+        }
+        let mut input = b"\x1b_Ga=T;".to_vec();
+        input.push(0x18);
+        input.extend_from_slice(b"AAAA\x1b\\");
+        assert!(markers(&mut s, &input).is_empty());
     }
 
     #[test]

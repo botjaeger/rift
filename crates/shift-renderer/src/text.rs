@@ -238,17 +238,27 @@ impl TextEngine {
             ));
         }
         for (i, areas) in layers.into_iter().enumerate() {
-            self.renderers[i]
-                .prepare(
+            let prepare = |this: &mut Self, areas: Vec<TextArea<'_>>| {
+                this.renderers[i].prepare(
                     device,
                     queue,
-                    &mut self.font_system,
-                    &mut self.atlas,
-                    &self.viewport,
+                    &mut this.font_system,
+                    &mut this.atlas,
+                    &this.viewport,
                     areas,
-                    &mut self.swash,
+                    &mut this.swash,
                 )
-                .expect("glyphon prepare");
+            };
+            if prepare(self, areas.clone()).is_err() {
+                // atlas full: free glyphs not used this frame, retry once
+                self.atlas.trim();
+                if let Err(e) = prepare(self, areas) {
+                    // degrade: drop this layer's text for the frame rather
+                    // than crash (empty prepare clears stale vertices)
+                    log::error!("text layer {i} skipped: {e}");
+                    let _ = prepare(self, Vec::new());
+                }
+            }
         }
     }
 

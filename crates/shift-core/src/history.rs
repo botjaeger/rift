@@ -70,7 +70,10 @@ pub fn parse_zsh_history(raw: &[u8]) -> Vec<String> {
                 .to_string();
             current = Some(cmd);
         } else if let Some(c) = &mut current {
-            // continuation of a multiline entry
+            // continuation of a multiline entry: zsh wrote `\` + newline
+            if c.ends_with('\\') {
+                c.pop();
+            }
             c.push('\n');
             c.push_str(line);
         } else {
@@ -278,11 +281,10 @@ mod tests {
 
     #[test]
     fn multiline_entry() {
-        let raw = b": 1719400000:0;for f in *; do\\\n  echo $f\ndone\n: 1719400001:0;pwd\n";
+        let raw = b": 1719400000:0;for f in *; do\\\n  echo $f\\\ndone\n: 1719400001:0;pwd\n";
         let parsed = parse_zsh_history(raw);
         assert_eq!(parsed.len(), 2);
-        assert!(parsed[0].starts_with("for f in *; do"));
-        assert!(parsed[0].contains("done"));
+        assert_eq!(parsed[0], "for f in *; do\n  echo $f\ndone");
         assert_eq!(parsed[1], "pwd");
     }
 

@@ -192,7 +192,16 @@ fn status_char(delta: Delta) -> char {
 }
 
 fn path_str(p: Option<&Path>) -> Option<String> {
-    p.map(|p| p.to_string_lossy().replace('\\', "/"))
+    p.map(|p| {
+        let s = p.to_string_lossy();
+        // a backslash separates path components only on Windows; on unix it
+        // is a legal file-name character
+        if cfg!(windows) {
+            s.replace('\\', "/")
+        } else {
+            s.into_owned()
+        }
+    })
 }
 
 fn collect(diff: &Diff<'_>) -> Result<Vec<FileDiff>, String> {
@@ -339,9 +348,39 @@ fn apply_file(repo: &Repository, op: Op, path: &str) -> Result<(), String> {
             index.write().map_err(err)
         }
         Op::Unstage => match repo.head().ok().and_then(|h| h.peel_to_commit().ok()) {
-            Some(commit) => repo
-                .reset_default(Some(commit.as_object()), [path])
-                .map_err(err),
+            Some(commit) => {
+                // literal path: reset_default would read `a[12].txt` as a glob
+                let mut index = repo.index().map_err(err)?;
+                match commit.tree().map_err(err)?.get_path(rel) {
+                    Ok(entry) => {
+                        let size = repo
+                            .find_blob(entry.id())
+                            .map(|b| b.size() as u32)
+                            .unwrap_or(0);
+                        index
+                            .add(&git2::IndexEntry {
+                                ctime: git2::IndexTime::new(0, 0),
+                                mtime: git2::IndexTime::new(0, 0),
+                                dev: 0,
+                                ino: 0,
+                                mode: entry.filemode() as u32,
+                                uid: 0,
+                                gid: 0,
+                                file_size: size,
+                                id: entry.id(),
+                                flags: 0,
+                                flags_extended: 0,
+                                path: path.as_bytes().to_vec(),
+                            })
+                            .map_err(err)?;
+                    }
+                    // not in HEAD: unstaging a new file drops it from the index
+                    Err(_) => {
+                        let _ = index.remove_path(rel);
+                    }
+                }
+                index.write().map_err(err)
+            }
             // unborn HEAD: unstaging drops the entry from the index
             None => {
                 let mut index = repo.index().map_err(err)?;
@@ -350,21 +389,23 @@ fn apply_file(repo: &Repository, op: Op, path: &str) -> Result<(), String> {
             }
         },
         Op::Revert => {
-            let tracked = repo.index().map_err(err)?.get_path(rel, 0).is_some();
-            if tracked {
+            let index = repo.index().map_err(err)?;
+            if index.get_path(rel, 0).is_some() {
                 let mut checkout = CheckoutBuilder::new();
-                checkout.force().path(path);
-                repo.checkout_index(None, Some(&mut checkout)).map_err(err)
-            } else {
-                // untracked: reverting means deleting it
-                let full = root.join(rel);
-                if full.is_dir() {
-                    std::fs::remove_dir_all(&full)
-                } else {
-                    std::fs::remove_file(&full)
-                }
-                .map_err(|e| e.to_string())
+                checkout.force().path(path).disable_pathspec_match(true);
+                return repo.checkout_index(None, Some(&mut checkout)).map_err(err);
             }
+            if (1..=3).any(|stage| index.get_path(rel, stage).is_some()) {
+                return Err("merge conflict: resolve it instead of reverting".into());
+            }
+            // untracked: reverting means deleting the file. Never a directory:
+            // it may be a nested repository or hold work git does not list.
+            let full = root.join(rel);
+            let meta = full.symlink_metadata().map_err(|e| e.to_string())?;
+            if meta.is_dir() {
+                return Err("not reverting an untracked directory; delete it yourself".into());
+            }
+            std::fs::remove_file(&full).map_err(|e| e.to_string())
         }
     }
 }
@@ -918,6 +959,101 @@ mod tests {
         apply(&t.dir, Op::Revert, "b.txt", None).unwrap();
         assert!(!t.dir.join("b.txt").exists());
         assert!(review(&t).unstaged.is_empty());
+    }
+
+    #[test]
+    fn revert_never_deletes_an_untracked_directory_or_nested_repo() {
+        let t = temp_repo("revert-dir");
+        fs::write(t.dir.join("a.txt"), "a\n").unwrap();
+        commit_all(&t, "init");
+        let sub = t.dir.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        Repository::init(&sub).unwrap();
+        fs::write(sub.join("work.txt"), "precious\n").unwrap();
+        fs::create_dir_all(t.dir.join("plain")).unwrap();
+        fs::write(t.dir.join("plain/x.txt"), "x\n").unwrap();
+        for p in ["sub", "sub/", "plain"] {
+            assert!(apply(&t.dir, Op::Revert, p, None).is_err(), "{p}");
+        }
+        assert!(sub.join(".git").exists());
+        assert!(sub.join("work.txt").exists());
+        assert!(t.dir.join("plain/x.txt").exists());
+    }
+
+    #[test]
+    fn revert_refuses_a_conflicted_file() {
+        let t = temp_repo("revert-conflict");
+        fs::write(t.dir.join("a.txt"), "base\n").unwrap();
+        commit_all(&t, "init");
+        let blob = |s: &str| t.repo.blob(s.as_bytes()).unwrap();
+        let entry = |id: git2::Oid, stage: u16| git2::IndexEntry {
+            ctime: git2::IndexTime::new(0, 0),
+            mtime: git2::IndexTime::new(0, 0),
+            dev: 0,
+            ino: 0,
+            mode: 0o100644,
+            uid: 0,
+            gid: 0,
+            file_size: 0,
+            id,
+            flags: stage << 12,
+            flags_extended: 0,
+            path: b"a.txt".to_vec(),
+        };
+        let mut index = t.repo.index().unwrap();
+        index.remove_path(Path::new("a.txt")).unwrap();
+        for (content, stage) in [("base\n", 1), ("ours\n", 2), ("theirs\n", 3)] {
+            index.add(&entry(blob(content), stage)).unwrap();
+        }
+        index.write().unwrap();
+        assert!(index.has_conflicts());
+        fs::write(t.dir.join("a.txt"), "my resolution\n").unwrap();
+        assert!(apply(&t.dir, Op::Revert, "a.txt", None).is_err());
+        assert_eq!(
+            fs::read_to_string(t.dir.join("a.txt")).unwrap(),
+            "my resolution\n"
+        );
+    }
+
+    #[test]
+    fn whole_file_ops_treat_the_path_literally() {
+        let t = temp_repo("literal");
+        for f in ["a1.txt", "a2.txt", "a[12].txt"] {
+            fs::write(t.dir.join(f), "old\n").unwrap();
+        }
+        commit_all(&t, "init");
+        for f in ["a1.txt", "a2.txt", "a[12].txt"] {
+            fs::write(t.dir.join(f), "new\n").unwrap();
+        }
+        apply(&t.dir, Op::Revert, "a[12].txt", None).unwrap();
+        assert_eq!(
+            fs::read_to_string(t.dir.join("a[12].txt")).unwrap(),
+            "old\n"
+        );
+        assert_eq!(fs::read_to_string(t.dir.join("a1.txt")).unwrap(), "new\n");
+        assert_eq!(fs::read_to_string(t.dir.join("a2.txt")).unwrap(), "new\n");
+
+        for f in ["a1.txt", "a2.txt", "a[12].txt"] {
+            fs::write(t.dir.join(f), "newer\n").unwrap();
+            apply(&t.dir, Op::Stage, f, None).unwrap();
+        }
+        apply(&t.dir, Op::Unstage, "a[12].txt", None).unwrap();
+        let r = review(&t);
+        let staged: Vec<_> = r.staged.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(staged, ["a1.txt", "a2.txt"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backslash_in_a_file_name_survives() {
+        let t = temp_repo("backslash");
+        fs::write(t.dir.join("a.txt"), "a\n").unwrap();
+        commit_all(&t, "init");
+        fs::write(t.dir.join("a\\b.txt"), "x\n").unwrap();
+        let r = review(&t);
+        assert!(r.unstaged.iter().any(|f| f.path == "a\\b.txt"));
+        apply(&t.dir, Op::Stage, "a\\b.txt", None).unwrap();
+        assert_eq!(review(&t).staged[0].path, "a\\b.txt");
     }
 
     #[test]

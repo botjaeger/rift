@@ -309,8 +309,8 @@ pub fn filter_hidden(
     let scrolled = session.scrolled.load(std::sync::atomic::Ordering::Acquire);
     let term = session.term.lock();
     for abs in start..end {
-        let keep =
-            line_text(&term, scrolled, abs).is_some_and(|t| t.to_lowercase().contains(&query));
+        let keep = search_text(&term, scrolled, abs)
+            .is_some_and(|t| t.replace('\0', "").to_lowercase().contains(&query));
         if !keep {
             hidden.insert(abs);
         }
@@ -365,11 +365,14 @@ pub fn build_display_list_filtered(
                 && abs == s
             {
                 display.push(DisplayLine::Header(bi));
-                abs = if block.collapsed {
+                let next = if block.collapsed {
                     block.end.unwrap_or(o).max(o)
                 } else {
                     o
                 };
+                // always advance: anchors squeezed onto one row (output
+                // start at or above the prompt) would otherwise loop forever
+                abs = next.max(abs + 1);
                 replaced = true;
                 break;
             }
@@ -545,8 +548,33 @@ impl Matcher {
         Ok(Some(Matcher::Plain { needle, case }))
     }
 
-    /// Match starts (char column, char len) in `text`.
+    /// Match starts (char column, char len) in `text`. NUL chars (the right
+    /// half of a wide glyph, see `search_text`) are invisible to the match
+    /// but keep their column, so "日本" matches the cells `日 NUL 本 NUL`.
     pub fn find(&self, text: &str) -> Vec<(usize, usize)> {
+        if !text.contains('\0') {
+            return self.find_cols(text);
+        }
+        let mut cols: Vec<usize> = Vec::new();
+        let mut plain = String::new();
+        for (i, c) in text.chars().enumerate() {
+            if c != '\0' {
+                cols.push(i);
+                plain.push(c);
+            }
+        }
+        let total = text.chars().count();
+        self.find_cols(&plain)
+            .into_iter()
+            .map(|(s, n)| {
+                let start = cols[s];
+                let end = cols.get(s + n).copied().unwrap_or(total);
+                (start, end - start)
+            })
+            .collect()
+    }
+
+    fn find_cols(&self, text: &str) -> Vec<(usize, usize)> {
         match self {
             Matcher::Plain { needle, case } => {
                 let hay: Vec<char> = text
@@ -588,7 +616,8 @@ fn fold(c: char) -> char {
     c.to_lowercase().next().unwrap_or(c)
 }
 
-/// Line text of one absolute grid line (trailing spaces trimmed).
+/// Line text of one absolute grid line (trailing spaces trimmed). One char
+/// per cell, so a char index is a grid column.
 fn line_text(
     term: &shift_pty::alacritty_terminal::term::Term<EventProxy>,
     scrolled: u64,
@@ -605,6 +634,71 @@ fn line_text(
         text.pop();
     }
     Some(text)
+}
+
+/// `line_text` for searching: the spacer cell right of a wide glyph is NUL
+/// (ignored by `Matcher::find`) instead of a space, so "日本" is found.
+fn search_text<T>(
+    term: &shift_pty::alacritty_terminal::term::Term<T>,
+    scrolled: u64,
+    abs: u64,
+) -> Option<String> {
+    let g = term.grid();
+    let rel = abs as i64 - scrolled as i64;
+    if rel < -(g.history_size() as i64) || rel >= g.screen_lines() as i64 {
+        return None;
+    }
+    let row = &g[Line(rel as i32)];
+    let mut text: String = (0..g.columns())
+        .map(|c| {
+            let cell = &row[Column(c)];
+            if cell.flags.intersects(WIDE_SPACERS) {
+                '\0'
+            } else {
+                cell.c
+            }
+        })
+        .collect();
+    while text.ends_with([' ', '\0']) {
+        text.pop();
+    }
+    Some(text)
+}
+
+const WIDE_SPACERS: Flags = Flags::WIDE_CHAR_SPACER.union(Flags::LEADING_WIDE_CHAR_SPACER);
+
+/// Text of one grid line for copying: no wide-glyph spacers, combining marks
+/// kept. The flag is true when the row soft-wraps into the next one (its
+/// trailing spaces are content then and are kept).
+fn copy_line<T>(
+    term: &shift_pty::alacritty_terminal::term::Term<T>,
+    scrolled: u64,
+    abs: u64,
+) -> Option<(String, bool)> {
+    let g = term.grid();
+    let rel = abs as i64 - scrolled as i64;
+    if rel < -(g.history_size() as i64) || rel >= g.screen_lines() as i64 {
+        return None;
+    }
+    let row = &g[Line(rel as i32)];
+    let cols = g.columns();
+    let wrapped = cols > 0 && row[Column(cols - 1)].flags.contains(Flags::WRAPLINE);
+    let mut text = String::new();
+    for c in 0..cols {
+        let cell = &row[Column(c)];
+        if cell.flags.intersects(WIDE_SPACERS) {
+            continue;
+        }
+        text.push(cell.c);
+        if let Some(zw) = cell.zerowidth() {
+            text.extend(zw);
+        }
+    }
+    if !wrapped {
+        let trimmed = text.trim_end_matches(' ').len();
+        text.truncate(trimmed);
+    }
+    Some((text, wrapped))
 }
 
 /// Text of absolute line `abs` of `session` (trailing spaces trimmed).
@@ -678,7 +772,7 @@ pub fn collect_matches(session: &Session, matcher: &Matcher, cap: usize) -> Foun
     let g = term.grid();
     let oldest = scrolled.saturating_sub(g.history_size() as u64);
     let newest = scrolled + g.screen_lines() as u64;
-    let lines = (oldest..newest).filter_map(|abs| Some((abs, line_text(&term, scrolled, abs)?)));
+    let lines = (oldest..newest).filter_map(|abs| Some((abs, search_text(&term, scrolled, abs)?)));
     newest_matches(lines, matcher, cap)
 }
 
@@ -707,9 +801,12 @@ pub fn block_output_text(session: &Session, block_id: BlockId) -> Option<String>
     let term = session.term.lock();
     let mut out = String::new();
     for abs in start..end {
-        if let Some(text) = line_text(&term, scrolled, abs) {
+        if let Some((text, wrapped)) = copy_line(&term, scrolled, abs) {
             out.push_str(&text);
-            out.push('\n');
+            // a soft-wrapped row continues on the next one: no line break
+            if !wrapped {
+                out.push('\n');
+            }
         }
     }
     Some(out)
@@ -1065,7 +1162,7 @@ fn render_grid_line(
     // search highlighting: per-column match state on this line
     let mut match_cols: Vec<(usize, bool)> = Vec::new(); // (col, is_current)
     if let Some(ctx) = search
-        && let Some(text) = line_text(term, scrolled, abs)
+        && let Some(text) = search_text(term, scrolled, abs)
     {
         for (col, len) in ctx.matcher.find(&text) {
             let is_current = ctx.current == Some((abs, col));
@@ -1525,6 +1622,59 @@ mod tests {
     use super::*;
     use std::time::Duration as StdDuration;
 
+    struct Noop;
+    impl shift_pty::alacritty_terminal::event::EventListener for Noop {}
+
+    /// A 8x2 grid: row 0 "日本x" + soft wrap flag at the last column, row 1
+    /// "é" (e + combining acute) then "y".
+    fn sample_term() -> shift_pty::alacritty_terminal::term::Term<Noop> {
+        use shift_pty::alacritty_terminal::term::{Config, test::TermSize};
+        let mut t = shift_pty::alacritty_terminal::term::Term::new(
+            Config::default(),
+            &TermSize::new(8, 2),
+            Noop,
+        );
+        let g = t.grid_mut();
+        for (i, c) in ['日', ' ', '本', ' ', 'x'].into_iter().enumerate() {
+            let cell = &mut g[Line(0)][Column(i)];
+            cell.c = c;
+            if c == '日' || c == '本' {
+                cell.flags.insert(Flags::WIDE_CHAR);
+            }
+        }
+        g[Line(0)][Column(1)].flags.insert(Flags::WIDE_CHAR_SPACER);
+        g[Line(0)][Column(3)].flags.insert(Flags::WIDE_CHAR_SPACER);
+        g[Line(0)][Column(7)].flags.insert(Flags::WRAPLINE);
+        g[Line(0)][Column(5)].c = ' ';
+        g[Line(1)][Column(0)].c = 'e';
+        g[Line(1)][Column(0)].push_zerowidth('\u{301}');
+        g[Line(1)][Column(1)].c = 'y';
+        t
+    }
+
+    #[test]
+    fn copy_text_skips_spacers_keeps_marks_and_joins_wraps() {
+        let t = sample_term();
+        // row 0 soft-wraps: no spacers, trailing blanks kept as content
+        assert_eq!(copy_line(&t, 0, 0), Some(("日本x   ".into(), true)));
+        assert_eq!(copy_line(&t, 0, 1), Some(("e\u{301}y".into(), false)));
+        // search text keeps one char per cell, spacers as NUL
+        assert_eq!(search_text(&t, 0, 0).as_deref(), Some("日\0本\0x"));
+        let m = Matcher::new("日本", true, false).unwrap().unwrap();
+        assert_eq!(m.find(&search_text(&t, 0, 0).unwrap()), vec![(0, 4)]);
+    }
+
+    #[test]
+    fn matcher_skips_wide_glyph_spacers() {
+        // cells of "日本語 ok": each wide glyph is followed by a NUL spacer
+        let text = "日\0本\0語\0 ok";
+        let find = |q: &str, re| Matcher::new(q, true, re).unwrap().unwrap().find(text);
+        assert_eq!(find("日本", false), vec![(0, 4)]);
+        assert_eq!(find("本語", false), vec![(2, 4)]);
+        assert_eq!(find("ok", false), vec![(7, 2)]);
+        assert_eq!(find("日.語", true), vec![(0, 6)]);
+    }
+
     #[test]
     fn matcher_modes() {
         let find =
@@ -1653,6 +1803,23 @@ mod tests {
         assert_eq!(d[1], DisplayLine::Header(0));
         assert_eq!(d[2], DisplayLine::Grid(2));
         assert_eq!(d.len(), 6);
+    }
+
+    #[test]
+    fn squeezed_anchors_never_stall_the_display_list() {
+        // output_start at (or above) prompt_start: the header still shows and
+        // the walk moves on (this used to spin forever inside redraw)
+        for (o, end, collapsed) in [(1, 3, false), (0, 3, false), (1, 1, true), (0, 0, true)] {
+            let blocks = vec![block(7, 1, Some(o), Some(end), done(), collapsed)];
+            let d = build_display_list(&blocks, 0, 4, 0, false, false, None);
+            assert_eq!(d[0], DisplayLine::Grid(0), "{o} {end} {collapsed}");
+            assert_eq!(d[1], DisplayLine::Header(0), "{o} {end} {collapsed}");
+            assert_eq!(
+                d.last(),
+                Some(&DisplayLine::Grid(3)),
+                "{o} {end} {collapsed}"
+            );
+        }
     }
 
     #[test]

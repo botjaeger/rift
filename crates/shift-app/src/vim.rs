@@ -434,17 +434,26 @@ impl EditorState {
         let ci = l.index(self.cursor);
         let n = l.n();
 
-        // vim special case: `cw` on a non-blank behaves like `ce`.
-        let mut m = m;
+        // vim special case: `cw` on a non-blank behaves like `ce`, except
+        // that when the cursor already sits on the last char of its word the
+        // first word is just that char (it does not jump to the next word).
+        let mut special = None;
         if op == Some(Op::Change)
             && let Motion::WordFwd(big) = m
             && ci < n
             && !l.chars[ci].is_whitespace()
         {
-            m = Motion::WordEnd(big);
+            let mut i = ci;
+            for k in 0..count {
+                let at_end = i + 1 >= n || class(l.chars[i + 1], big) != class(l.chars[i], big);
+                if !(k == 0 && at_end) {
+                    i = word_end(&l, i, big);
+                }
+            }
+            special = Some((i, true));
         }
 
-        let Some((t, inclusive)) = resolve(&l, ci, m, count) else {
+        let Some((t, inclusive)) = special.or_else(|| resolve(&l, ci, m, count)) else {
             v.pending.reset();
             return VimOutcome::Consumed;
         };
@@ -909,6 +918,20 @@ mod tests {
         assert_eq!(e.vim_mode(), Some(VimMode::Insert));
         e.insert("svn");
         assert_eq!(e.buffer, "svn commit");
+
+        // cw on the last char of a word / a one-char word changes just it
+        let mut e = ed("ab cd");
+        esc(&mut e);
+        keys(&mut e, "0lcw");
+        assert_eq!(e.buffer, "a cd");
+        let mut e = ed("a b c");
+        esc(&mut e);
+        keys(&mut e, "0cw");
+        assert_eq!(e.buffer, " b c");
+        let mut e = ed("a b c");
+        esc(&mut e);
+        keys(&mut e, "0c2w");
+        assert_eq!(e.buffer, " c");
 
         // D / C from mid-line
         let mut e = ed("echo hi");

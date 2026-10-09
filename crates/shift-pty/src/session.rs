@@ -102,11 +102,49 @@ impl PtyWriter {
     fn muted(&self) -> bool {
         matches!(self, PtyWriter::Service { muted, .. } if muted.load(Ordering::Acquire))
     }
+}
 
-    /// Terminal-generated replies to the program (dropped during replay).
+/// Replies the terminal sends to the program on its own (device attributes,
+/// cursor position, graphics OKs), queued to a writer thread. They are
+/// produced while the term lock is held; a blocking write there would stall
+/// the reader (and with it the program, which is then never read from) as soon
+/// as a program floods queries without reading its stdin. A full queue drops
+/// the reply: a program that stopped reading input does not want it.
+#[derive(Clone)]
+pub(crate) struct Replier {
+    writer: PtyWriter,
+    queue: std::sync::mpsc::SyncSender<Vec<u8>>,
+}
+
+/// Replies waiting for the writer thread.
+const REPLY_QUEUE: usize = 256;
+
+impl Replier {
+    pub(crate) fn new(writer: PtyWriter) -> Self {
+        let (queue, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(REPLY_QUEUE);
+        let sink = writer.clone();
+        // ends when the last Replier (the Term's event proxy) is dropped
+        std::thread::Builder::new()
+            .name("pty-reply".into())
+            .spawn(move || {
+                for bytes in rx {
+                    sink.write(&bytes);
+                }
+            })
+            .expect("spawn pty reply writer");
+        Self { writer, queue }
+    }
+
+    /// Replaying retained output after a (re)attach.
+    fn muted(&self) -> bool {
+        self.writer.muted()
+    }
+
+    /// Terminal-generated replies to the program (dropped during replay and
+    /// when the queue is full). Never blocks.
     fn reply(&self, bytes: &[u8]) {
         if !self.muted() {
-            self.write(bytes);
+            let _ = self.queue.try_send(bytes.to_vec());
         }
     }
 }
@@ -115,7 +153,7 @@ impl PtyWriter {
 pub struct EventProxy {
     pane: PaneId,
     observer: Observer,
-    writer: PtyWriter,
+    writer: Replier,
     /// Current grid/cell size (CSI 14 t / 18 t text-area queries).
     window_size: Arc<Mutex<WindowSize>>,
 }
@@ -293,8 +331,18 @@ enum Source {
         stream: std::os::unix::net::UnixStream,
         muted: Arc<AtomicBool>,
         job: Arc<Mutex<Option<String>>>,
+        /// The connection `PtyWriter` sends input on (replaced on resume).
+        conn: Arc<Mutex<std::os::unix::net::UnixStream>>,
+        /// Reattach after the byte `u64` (see [`crate::service::resume`]).
+        resume: Resume,
     },
 }
+
+/// Opens a fresh service connection streaming output after the given byte.
+type Resume = Box<dyn FnMut(u64) -> std::io::Result<std::os::unix::net::UnixStream> + Send>;
+
+/// Consecutive failed resumes (no output in between) before the pane gives up.
+const MAX_RESUMES: u32 = 5;
 
 /// The pane's reader thread: parses output into the Term and block model.
 struct Reader {
@@ -368,18 +416,46 @@ impl Reader {
                 mut stream,
                 muted,
                 job,
+                conn,
+                mut resume,
             } => {
                 use crate::ipc::{Event as Ev, Frame, read_frame};
+                // first byte not yet fed to the parser, and resumes since
+                // the last output
+                let (mut next_seq, mut resumes) = (0u64, 0u32);
                 loop {
                     if self.sync_timeout(&mut parser, &stream) {
                         continue;
                     }
                     let frame = match read_frame(&mut stream) {
                         Ok(Some(f)) => f,
-                        _ => break,
+                        // The socket ended without an `Exited` frame: the
+                        // service dropped this (slow) client, or it died.
+                        // The shell may well be running: reattach after the
+                        // last byte seen; only a session that is really gone
+                        // closes the pane.
+                        _ => {
+                            resumes += 1;
+                            if resumes > MAX_RESUMES {
+                                break;
+                            }
+                            muted.store(true, Ordering::Release);
+                            std::thread::sleep(std::time::Duration::from_millis(
+                                100 * u64::from(resumes),
+                            ));
+                            let Ok(fresh) = resume(next_seq) else { break };
+                            let Ok(writer) = fresh.try_clone() else { break };
+                            *conn.lock().unwrap() = writer;
+                            stream = fresh;
+                            continue;
+                        }
                     };
                     match frame {
-                        Frame::Output { bytes, at_ms, .. } => {
+                        Frame::Output {
+                            bytes, at_ms, seq, ..
+                        } => {
+                            resumes = 0;
+                            next_seq = seq + bytes.len() as u64;
                             self.saw_output.store(true, Ordering::Release);
                             // replayed output keeps its original timing,
                             // so block durations survive a reattach
@@ -468,6 +544,8 @@ impl Session {
                     stream,
                     muted,
                     job: job.clone(),
+                    conn: conn.clone(),
+                    resume: Box::new(move |from| crate::service::resume(session, from)),
                 };
                 (Backend::Service { conn, session, job }, writer, source)
             }
@@ -484,13 +562,14 @@ impl Session {
             kitty_keyboard: true,
             ..TermConfig::default()
         };
+        let replier = Replier::new(writer.clone());
         let term = Term::new(
             term_config,
             &size,
             EventProxy {
                 pane: id,
                 observer: observer.clone(),
-                writer: writer.clone(),
+                writer: replier.clone(),
                 window_size: window_size_shared.clone(),
             },
         );
@@ -509,7 +588,7 @@ impl Session {
             cwd: cwd.clone(),
             graphics: graphics.clone(),
             window_size: window_size_shared.clone(),
-            reply: Some(writer.clone()),
+            reply: Some(replier),
             notify: Some((id, observer.clone())),
         };
 
@@ -670,6 +749,17 @@ impl Session {
             cell_height: cell_size.1,
         };
         *self.window_size.lock().unwrap() = ws;
+        // Resize the Term first and signal the PTY while still holding the
+        // term lock: the program's redraw after SIGWINCH is then parsed by the
+        // reader against the new grid, never the old one.
+        let mut term = self.term.lock();
+        resize_term(
+            &mut term,
+            size,
+            &self.scrolled,
+            &self.blocks,
+            &self.graphics,
+        );
         match &mut self.backend {
             Backend::Local(pty) => pty.on_resize(ws),
             Backend::Service { conn, session, .. } => {
@@ -685,32 +775,56 @@ impl Session {
                 );
             }
         }
-        // Row-count changes move lines between history and screen; keep
-        // `abs = scrolled + screen_row` coherent by folding the history
-        // delta into the counter (same term lock the reader thread uses).
-        let mut term = self.term.lock();
-        let old = RowLayout::of(&term);
-        term.resize(size);
-        let new = RowLayout::of(&term);
-        let cur = self.scrolled.load(std::sync::atomic::Ordering::Acquire);
-        // the grid's top row keeps its abs index: base = scrolled - history
-        let base = cur.saturating_sub(old.history as u64);
-        self.scrolled.store(
-            base + new.history as u64,
-            std::sync::atomic::Ordering::Release,
-        );
-        // reflow (column change) re-wraps lines and moves every row after
-        // them; carry the block anchors along (same lock order as the reader)
-        if old.cols != new.cols || old.starts.len() != new.starts.len() {
-            self.blocks
-                .lock()
-                .unwrap()
-                .remap(|abs, col| old.map(&new, base, abs, col));
-            self.graphics
-                .lock()
-                .unwrap()
-                .remap(|abs, col| old.map(&new, base, abs, col));
-        }
+        drop(term);
+    }
+}
+
+/// Resize the grid and keep every abs anchor on its line. Row-count changes
+/// move lines between history and screen; keep `abs = scrolled + screen_row`
+/// coherent by folding the history delta into the counter (same term lock
+/// the reader thread uses).
+fn resize_term(
+    term: &mut Term<EventProxy>,
+    size: GridSize,
+    scrolled: &AtomicU64,
+    blocks: &Mutex<BlockStore>,
+    graphics: &Mutex<Graphics>,
+) {
+    use alacritty_terminal::term::TermMode;
+    // Anchors live on the primary grid, which `Term::resize` reflows even
+    // while a full-screen program shows the alt grid. Measure the primary:
+    // leave the alt screen (no reset that way), resize, then return and put
+    // the alt contents back (entering the alt screen clears it).
+    let alt = term
+        .mode()
+        .contains(TermMode::ALT_SCREEN)
+        .then(|| term.grid().clone());
+    if alt.is_some() {
+        term.swap_alt();
+    }
+    let old = RowLayout::of(term);
+    term.resize(size);
+    let new = RowLayout::of(term);
+    if let Some(mut grid) = alt {
+        grid.resize(false, size.rows, size.cols);
+        term.swap_alt();
+        *term.grid_mut() = grid;
+    }
+    let cur = scrolled.load(Ordering::Acquire);
+    // the grid's top row keeps its abs index: base = scrolled - history
+    let base = cur.saturating_sub(old.history as u64);
+    scrolled.store(base + new.history as u64, Ordering::Release);
+    // reflow (column change) re-wraps lines and moves every row after
+    // them; carry the block anchors along (same lock order as the reader)
+    if old.cols != new.cols || old.starts.len() != new.starts.len() {
+        blocks
+            .lock()
+            .unwrap()
+            .remap(|abs, col| old.map(&new, base, abs, col));
+        graphics
+            .lock()
+            .unwrap()
+            .remap(|abs, col| old.map(&new, base, abs, col));
     }
 }
 
@@ -798,7 +912,7 @@ struct FeedCtx {
     graphics: Arc<Mutex<Graphics>>,
     window_size: Arc<Mutex<WindowSize>>,
     /// PTY write-back for graphics protocol replies.
-    reply: Option<PtyWriter>,
+    reply: Option<Replier>,
     /// Where notification requests (OSC 9/777/99) go.
     notify: Option<(PaneId, Observer)>,
 }
@@ -875,10 +989,13 @@ fn feed(parser: &mut vte::ansi::Processor, scanner: &mut OscScanner, bytes: &[u8
             None => {}
         }
     }
-    // prune blocks and images that fell out of scrollback
-    let oldest = scrolled_cur.saturating_sub(term.grid().history_size() as u64);
-    ctx.blocks.lock().unwrap().prune(oldest);
-    ctx.graphics.lock().unwrap().prune(oldest);
+    // prune blocks and images that fell out of scrollback; the alt grid has
+    // no history, so only the primary grid says what is still kept
+    if !term.mode().contains(TermMode::ALT_SCREEN) {
+        let oldest = scrolled_cur.saturating_sub(term.grid().history_size() as u64);
+        ctx.blocks.lock().unwrap().prune(oldest);
+        ctx.graphics.lock().unwrap().prune(oldest);
+    }
     ctx.scrolled.store(scrolled_cur, Ordering::Release);
 }
 
@@ -1035,7 +1152,9 @@ mod tests {
         let proxy = EventProxy {
             pane: 0,
             observer: Arc::new(|_, _| {}),
-            writer: PtyWriter::File(Arc::new(File::create("/dev/null").unwrap())),
+            writer: Replier::new(PtyWriter::File(Arc::new(
+                File::create("/dev/null").unwrap(),
+            ))),
             window_size: Arc::new(Mutex::new(WindowSize {
                 num_lines: rows as u16,
                 num_cols: cols as u16,
@@ -1105,6 +1224,299 @@ mod tests {
         // scrolling past the (default 10k-line) history drops the image
         feed(&mut p, &mut s, "\n".repeat(10_100).as_bytes(), &c);
         assert!(c.graphics.lock().unwrap().placements.is_empty());
+    }
+
+    #[test]
+    fn alt_screen_output_keeps_blocks_in_primary_history() {
+        let c = ctx(20, 5);
+        let mut p = vte::ansi::Processor::new();
+        let mut s = OscScanner::new();
+        let block = "\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07out\r\n\x1b]133;D;0\x07";
+        feed(&mut p, &mut s, block.as_bytes(), &c);
+        // push the finished block into scrollback
+        feed(&mut p, &mut s, "\r\n".repeat(20).as_bytes(), &c);
+        assert_eq!(c.blocks.lock().unwrap().iter().count(), 1);
+        // a full-screen program draws on the alt screen (history 0)
+        feed(&mut p, &mut s, b"\x1b[?1049hvim\r\n", &c);
+        feed(&mut p, &mut s, b"more\x1b[?1049l", &c);
+        assert_eq!(
+            c.blocks.lock().unwrap().iter().count(),
+            1,
+            "block pruned on alt screen"
+        );
+    }
+
+    /// Text of abs line `abs` on the active grid.
+    fn abs_text(c: &FeedCtx, abs: u64) -> String {
+        let t = c.term.lock();
+        let line = abs as i64 - c.scrolled.load(Ordering::Acquire) as i64;
+        let row = &t.grid()[Line(line as i32)];
+        let s: String = (0..t.grid().columns()).map(|i| row[Column(i)].c).collect();
+        s.trim_end().to_string()
+    }
+
+    #[test]
+    fn resize_on_alt_screen_keeps_primary_anchors() {
+        for (rows, cols) in [(5, 20), (14, 20), (8, 6), (8, 40)] {
+            let c = ctx(20, 8);
+            let mut p = vte::ansi::Processor::new();
+            let mut s = OscScanner::new();
+            let block = "\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07out\r\n\x1b]133;D;0\x07";
+            feed(&mut p, &mut s, block.as_bytes(), &c);
+            feed(&mut p, &mut s, "x\r\n".repeat(4).as_bytes(), &c);
+            feed(&mut p, &mut s, b"\x1b[?1049h\x1b[Hvim", &c);
+            resize_term(
+                &mut c.term.lock(),
+                GridSize { cols, rows },
+                &c.scrolled,
+                &c.blocks,
+                &c.graphics,
+            );
+            // the alt screen keeps what the program drew
+            assert_eq!(abs_text(&c, c.scrolled.load(Ordering::Acquire)), "vim");
+            feed(&mut p, &mut s, b"\x1b[?1049l", &c);
+            let b = c.blocks.lock().unwrap().snapshot()[0].clone();
+            let case = format!("{rows}x{cols}");
+            assert_eq!(abs_text(&c, b.prompt_start), "$ ls", "{case}");
+            assert_eq!(abs_text(&c, b.output_start.unwrap()), "out", "{case}");
+        }
+    }
+
+    /// A pane's reader over a fake service connection; the returned receiver
+    /// yields the pane's `Exit` events.
+    fn service_reader(
+        c: FeedCtx,
+        stream: std::os::unix::net::UnixStream,
+        resume: Resume,
+    ) -> (std::thread::JoinHandle<()>, std::sync::mpsc::Receiver<()>) {
+        let (conn, _conn_peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        std::mem::forget(_conn_peer);
+        let (exit_tx, exit_rx) = std::sync::mpsc::channel();
+        let exit_tx = Mutex::new(exit_tx);
+        let reader = Reader {
+            id: 1,
+            ctx: c,
+            dirty: Arc::new(AtomicBool::new(false)),
+            saw_output: Arc::new(AtomicBool::new(false)),
+            observer: Arc::new(move |_, ev| {
+                if matches!(ev, SessionEvent::Exit) {
+                    let _ = exit_tx.lock().unwrap().send(());
+                }
+            }),
+        };
+        let source = Source::Service {
+            stream,
+            muted: Arc::new(AtomicBool::new(false)),
+            job: Arc::new(Mutex::new(None)),
+            conn: Arc::new(Mutex::new(conn)),
+            resume,
+        };
+        (std::thread::spawn(move || reader.run(source)), exit_rx)
+    }
+
+    #[test]
+    fn dropped_service_connection_resumes_instead_of_closing_the_pane() {
+        use crate::ipc::{Event as Ev, send_json, send_output};
+        use std::os::unix::net::UnixStream;
+        use std::sync::atomic::AtomicU64;
+        let c = ctx(20, 5);
+        let term = c.term.clone();
+        let (first, mut first_peer) = UnixStream::pair().unwrap();
+        let (second, mut second_peer) = UnixStream::pair().unwrap();
+        send_output(&mut first_peer, 9, 0, 1, b"ab").unwrap();
+        // the service drops this client: EOF without an `Exited` frame
+        drop(first_peer);
+        send_output(&mut second_peer, 9, 2, 1, b"cd").unwrap();
+        send_json(&mut second_peer, &Ev::ReplayDone { session: 9 }).unwrap();
+        send_json(&mut second_peer, &Ev::Exited { session: 9 }).unwrap();
+        let asked = Arc::new(AtomicU64::new(u64::MAX));
+        let (asked_in, mut second) = (asked.clone(), Some(second));
+        let (reader, exited) = service_reader(
+            c,
+            first,
+            Box::new(move |from| {
+                asked_in.store(from, Ordering::Release);
+                second.take().ok_or_else(|| std::io::Error::other("gone"))
+            }),
+        );
+        exited
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+        reader.join().unwrap();
+        assert_eq!(
+            asked.load(Ordering::Acquire),
+            2,
+            "resumes after the last byte seen"
+        );
+        let row: String = {
+            let t = term.lock();
+            (0..4).map(|i| t.grid()[Line(0)][Column(i)].c).collect()
+        };
+        assert_eq!(row, "abcd", "output before and after the drop, once each");
+        assert!(exited.try_recv().is_err(), "one Exit");
+    }
+
+    #[test]
+    fn vanished_service_session_still_closes_the_pane() {
+        use crate::ipc::send_output;
+        use std::os::unix::net::UnixStream;
+        let (first, mut first_peer) = UnixStream::pair().unwrap();
+        send_output(&mut first_peer, 9, 0, 1, b"ab").unwrap();
+        drop(first_peer);
+        let (reader, exited) = service_reader(
+            ctx(20, 5),
+            first,
+            Box::new(|_| Err(std::io::Error::from(std::io::ErrorKind::NotFound))),
+        );
+        exited
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+        reader.join().unwrap();
+    }
+
+    #[test]
+    fn reply_flood_never_blocks_the_reader() {
+        let mut fds = [0i32; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        use std::os::fd::FromRawFd;
+        // nobody reads the pipe: the program stopped reading its stdin
+        let _stuck_reader = unsafe { File::from_raw_fd(fds[0]) };
+        let sink = unsafe { File::from_raw_fd(fds[1]) };
+        let replier = Replier::new(PtyWriter::File(Arc::new(sink)));
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // far more than a pipe (or a PTY input queue) holds
+            for _ in 0..200_000 {
+                replier.reply(b"\x1b[?62;4c");
+            }
+            done.send(()).unwrap();
+        });
+        finished
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("replying blocked on a program that does not read input");
+    }
+
+    #[test]
+    fn resize_signals_the_pty_only_after_the_term_is_resized() {
+        use std::os::fd::AsRawFd;
+        let ws = WindowSize {
+            num_lines: 24,
+            num_cols: 80,
+            cell_width: 8,
+            cell_height: 16,
+        };
+        let opts = tty::Options {
+            // dies on the SIGHUP that dropping the Pty sends (an
+            // interactive sh ignores it and the drop would wait forever)
+            shell: Some(tty::Shell::new("/bin/sleep".into(), vec!["600".into()])),
+            working_directory: None,
+            drain_on_exit: false,
+            env: std::collections::HashMap::new(),
+        };
+        let pty = tty::new(&opts, ws, 0).unwrap();
+        let fd = pty.file().as_raw_fd();
+        let writer = PtyWriter::File(Arc::new(pty.file().try_clone().unwrap()));
+        let c = ctx(80, 24);
+        let rows = move || {
+            let mut w: libc::winsize = unsafe { std::mem::zeroed() };
+            assert_eq!(unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut w) }, 0);
+            w.ws_row
+        };
+        let mut session = Session {
+            id: 0,
+            term: c.term.clone(),
+            blocks: c.blocks.clone(),
+            graphics: c.graphics.clone(),
+            scrolled: c.scrolled.clone(),
+            cwd: c.cwd.clone(),
+            dirty: Arc::new(AtomicBool::new(false)),
+            saw_output: Arc::new(AtomicBool::new(false)),
+            service_id: None,
+            writer,
+            backend: Backend::Local(pty),
+            size: GridSize { cols: 80, rows: 24 },
+            window_size: c.window_size.clone(),
+            scrollback: 100,
+        };
+        assert_eq!(rows(), 24);
+        // the reader is mid-parse (holds the term lock) while the window resizes
+        let term = c.term.clone();
+        let held = term.lock();
+        let resizing = std::thread::spawn(move || {
+            session.resize(
+                GridSize {
+                    cols: 100,
+                    rows: 30,
+                },
+                (8, 16),
+            );
+            session
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(
+            rows(),
+            24,
+            "the PTY was resized before the term lock was free"
+        );
+        drop(held);
+        let session = resizing.join().unwrap();
+        assert_eq!(rows(), 30);
+        assert_eq!(term.lock().grid().screen_lines(), 30);
+        drop(session);
+    }
+
+    #[test]
+    fn autowrap_on_the_bottom_row_counts_the_scrolled_line() {
+        let c = ctx(10, 3);
+        let mut p = vte::ansi::Processor::new();
+        let mut s = OscScanner::new();
+        // fill the screen, then a 25-char line on the bottom row wraps twice
+        feed(&mut p, &mut s, b"a\r\nb\r\n", &c);
+        feed(&mut p, &mut s, "x".repeat(25).as_bytes(), &c);
+        let history = c.term.lock().grid().history_size() as u64;
+        assert_eq!(history, 2);
+        assert_eq!(c.scrolled.load(Ordering::Acquire), history);
+        // CSI M on the top row of the full screen scrolls into history too
+        feed(&mut p, &mut s, b"\x1b[H\x1b[M", &c);
+        let history = c.term.lock().grid().history_size() as u64;
+        assert_eq!(c.scrolled.load(Ordering::Acquire), history, "delete_lines");
+    }
+
+    #[test]
+    fn resize_on_alt_screen_rewraps_a_running_command() {
+        // the command line fits at 40 cols, wraps at 20, fits again at 40;
+        // the program (less) entered the alt screen right after 133;C
+        let c = ctx(40, 8);
+        let mut p = vte::ansi::Processor::new();
+        let mut s = OscScanner::new();
+        let cmd = "less /some/long/path/f.txt"; // 2 + 26 = 28 cols
+        let start = format!(
+            "{}\x1b]133;A\x07$ \x1b]133;B\x07{cmd}\r\n\x1b]133;C\x07",
+            "x\r\n".repeat(20)
+        );
+        feed(&mut p, &mut s, start.as_bytes(), &c);
+        feed(&mut p, &mut s, b"\x1b[?1049h\x1b[Hpage", &c);
+        let resize = |cols, rows| {
+            resize_term(
+                &mut c.term.lock(),
+                GridSize { cols, rows },
+                &c.scrolled,
+                &c.blocks,
+                &c.graphics,
+            )
+        };
+        resize(20, 5);
+        let b = c.blocks.lock().unwrap().snapshot()[0].clone();
+        assert_eq!(
+            b.output_start.unwrap(),
+            b.prompt_start + 2,
+            "narrow: command wraps onto two rows"
+        );
+        resize(40, 12);
+        feed(&mut p, &mut s, b"\x1b[?1049l\x1b]133;D;0\x07", &c);
+        let b = c.blocks.lock().unwrap().snapshot()[0].clone();
+        assert_eq!(abs_text(&c, b.prompt_start), format!("$ {cmd}"));
+        assert_eq!(b.output_start.unwrap(), b.prompt_start + 1, "wide again");
     }
 
     #[test]

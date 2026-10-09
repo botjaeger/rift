@@ -589,6 +589,8 @@ pub fn rank(items: &[Item], history: &[String], query: &str) -> Vec<MatchedItem>
 const MODAL_W: f32 = 600.0;
 const ROW_H: f32 = 42.0;
 const SECTION_H: f32 = 28.0;
+/// Height of the "No matches" band shown for an empty result list.
+const EMPTY_H: f32 = 56.0;
 
 fn sans(engine: &mut TextEngine, text: &str, size: f32, weight: Weight) -> Buffer {
     let mut buf = Buffer::new(&mut engine.font_system, Metrics::new(size, size * 1.35));
@@ -640,12 +642,16 @@ pub fn render(
         0.0,
     );
 
-    let mx = (w - MODAL_W) / 2.0;
+    // the modal narrows with the window (16px margin each side)
+    let modal_w = MODAL_W.min((w - 32.0).max(160.0));
+    let mx = (w - modal_w) / 2.0;
     let my = crate::views::tabbar::TAB_BAR_H + 46.0;
 
     // Keep the keyboard-selected row visible when the result list is longer
     // than the modal. Row hit indices remain absolute into `results`.
-    let max_rows = 8usize;
+    // (fewer rows when the window is short: the modal must fit under the tab bar)
+    let room = h - crate::views::tabbar::TAB_BAR_H - 46.0 - 49.0 - 38.0 - 14.0 - 8.0 - SECTION_H;
+    let max_rows = ((room / ROW_H).max(0.0) as usize).clamp(1, 8);
     let shown = results.len().min(max_rows);
     let start = state
         .selected
@@ -662,6 +668,10 @@ pub fn render(
         last_section = Some(m.item.section);
         list_h += ROW_H;
     }
+    // no results: a short "No matches" band instead of a blank gap
+    if visible.is_empty() {
+        list_h += EMPTY_H;
+    }
     let search_h = 49.0;
     let footer_h = 38.0;
     let modal_h = search_h + list_h + footer_h;
@@ -669,14 +679,14 @@ pub fn render(
     // modal shadow + surface
     layer.shadow(
         [mx, my + 10.0],
-        [MODAL_W, modal_h],
+        [modal_w, modal_h],
         Color::hex("#000000").unwrap().with_alpha(0.55),
         13.0,
         18.0,
     );
     layer.bordered(
         [mx, my],
-        [MODAL_W, modal_h],
+        [modal_w, modal_h],
         theme.surface,
         Color::rgba(1.0, 1.0, 1.0, 0.11),
         13.0,
@@ -713,7 +723,9 @@ pub fn render(
     } else if let Some(placeholder) = match state.mode {
         PaletteMode::Sessions => Some("Go to tab, pane or block…"),
         PaletteMode::PipeOutput => Some("Command that reads the output on stdin…"),
-        _ => None,
+        PaletteMode::History => Some("Search command history…"),
+        PaletteMode::Workflows => Some("Search workflows…"),
+        PaletteMode::Commands => None,
     } {
         let pbuf = mono(engine, placeholder, 15.0, Weight::NORMAL);
         layer.text(pbuf, qx + 6.0, sy - 1.0, theme.text_muted);
@@ -727,18 +739,33 @@ pub fn render(
     let count = format!("{} results", results.len());
     let cw = engine.measure(&count, 11.0, FONT_SANS, Weight::NORMAL);
     let cbuf = sans(engine, &count, 11.0, Weight::NORMAL);
-    layer.text(cbuf, mx + MODAL_W - cw - 18.0, sy + 2.0, theme.text_muted);
+    // (dropped when it would run into the query)
+    let qw_now = engine.measure(&state.query, 15.0, mono_family(), Weight::NORMAL);
+    if qx + qw_now + 24.0 < mx + modal_w - cw - 18.0 {
+        layer.text(cbuf, mx + modal_w - cw - 18.0, sy + 2.0, theme.text_muted);
+    }
 
     layer.hline(
         mx,
         my + search_h,
-        MODAL_W,
+        modal_w,
         1.0,
         Color::rgba(1.0, 1.0, 1.0, 0.07),
     );
 
     // ── results ──
     let mut y = my + search_h + 7.0;
+    if visible.is_empty() {
+        let msg = "No matches";
+        let mw = engine.measure(msg, 13.0, FONT_SANS, Weight::NORMAL);
+        let mbuf = sans(engine, msg, 13.0, Weight::NORMAL);
+        layer.text(
+            mbuf,
+            mx + (modal_w - mw) / 2.0,
+            y + (EMPTY_H - 17.5) / 2.0,
+            theme.text_muted,
+        );
+    }
     let mut last_section = None;
     for (visible_i, m) in visible.iter().enumerate() {
         let i = start + visible_i;
@@ -758,7 +785,7 @@ pub fn render(
         }
         last_section = Some(m.item.section);
 
-        let row_rect = [mx + 7.0, y, MODAL_W - 14.0, ROW_H];
+        let row_rect = [mx + 7.0, y, modal_w - 14.0, ROW_H];
         let selected = i == state.selected;
         if selected {
             layer.rect(
@@ -811,7 +838,7 @@ pub fn render(
             .iter()
             .map(|k| engine.measure(k, 11.0, mono_family(), Weight::NORMAL) + 19.0)
             .sum();
-        let max_right = mx + MODAL_W - 18.0 - chips_w - 8.0;
+        let max_right = mx + modal_w - 18.0 - chips_w - 8.0;
         // a long title keeps at least 55% of the row; the detail gets the rest
         let avail = max_right - tx;
         let id_w = if m.item.id.is_empty() {
@@ -869,7 +896,7 @@ pub fn render(
         }
 
         // shortcut chips (right-aligned)
-        let mut chip_x = mx + MODAL_W - 18.0;
+        let mut chip_x = mx + modal_w - 18.0;
         for key in m.item.shortcut.iter().rev() {
             let kw = engine.measure(key, 11.0, mono_family(), Weight::NORMAL);
             let chip_w = kw + 14.0;
@@ -894,11 +921,11 @@ pub fn render(
     let fy = my + modal_h - footer_h;
     layer.rect(
         [mx, fy],
-        [MODAL_W, footer_h],
+        [modal_w, footer_h],
         Color::hex("#000000").unwrap().with_alpha(0.18),
         0.0,
     );
-    layer.hline(mx, fy, MODAL_W, 1.0, Color::rgba(1.0, 1.0, 1.0, 0.07));
+    layer.hline(mx, fy, modal_w, 1.0, Color::rgba(1.0, 1.0, 1.0, 0.07));
     let mut fx = mx + 18.0;
     let enter = match state.mode {
         PaletteMode::Sessions => " go to",
@@ -912,17 +939,22 @@ pub fn render(
         fx += kw;
         let lbuf = sans(engine, label, 11.0, Weight::NORMAL);
         let lw = engine.measure(label, 11.0, FONT_SANS, Weight::NORMAL);
+        if fx + lw > mx + modal_w - 18.0 {
+            break;
+        }
         layer.text(lbuf, fx, fy + 12.0, theme.text_muted);
         fx += lw + 18.0;
     }
     let brand = "Shift palette";
     let bw = engine.measure(brand, 11.0, FONT_SANS, Weight::NORMAL);
     let bbuf = sans(engine, brand, 11.0, Weight::NORMAL);
-    layer.text(bbuf, mx + MODAL_W - bw - 18.0, fy + 12.0, theme.accent);
+    if mx + modal_w - bw - 18.0 > fx {
+        layer.text(bbuf, mx + modal_w - bw - 18.0, fy + 12.0, theme.accent);
+    }
 }
 
 /// Longest prefix of `text` (plus `…`) that fits `max_w`.
-fn elide_to(
+pub(crate) fn elide_to(
     engine: &mut TextEngine,
     text: &str,
     size: f32,

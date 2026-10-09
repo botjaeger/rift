@@ -9,6 +9,8 @@ pub const TAB_BAR_H: f32 = 42.0;
 const TABS_X: f32 = 78.0;
 /// Narrowest a tab gets before titles are elided to nothing.
 const MIN_TAB_W: f32 = 96.0;
+/// Width of the `‹N` / `N›` chips for tabs scrolled out of the strip.
+const OVERFLOW_CHIP_W: f32 = 34.0;
 
 pub struct TabInfo {
     pub title: String,
@@ -267,17 +269,53 @@ pub fn render(
         .collect();
     let avail = (w - tabs_x - 40.0 - hint_w - 28.0).max(MIN_TAB_W);
     let total: f32 = natural.iter().sum();
+    let n = tabs.len();
+    // visible window `start..end`; everything outside it collapses into the
+    // `‹N` / `N›` chips so the active tab always stays on screen
+    let (mut start, mut end) = (0, n);
     let (widths, show_hint): (Vec<f32>, bool) = if total <= avail {
         (natural, true)
     } else {
-        // without the hint first, then squeeze
+        // without the hint first, then squeeze, then scroll around the active tab
         let avail = (w - tabs_x - 40.0).max(MIN_TAB_W);
-        let each = (avail / tabs.len().max(1) as f32).max(MIN_TAB_W);
-        (natural.iter().map(|n| n.min(each)).collect(), false)
+        if MIN_TAB_W * n as f32 <= avail {
+            let each = avail / n.max(1) as f32;
+            (natural.iter().map(|x| x.min(each)).collect(), false)
+        } else {
+            let k = (((avail - 2.0 * OVERFLOW_CHIP_W) / MIN_TAB_W) as usize).clamp(1, n);
+            start = active.min(n - 1).saturating_sub(k / 2).min(n - k);
+            end = start + k;
+            let chips = (start > 0) as u8 as f32 + (end < n) as u8 as f32;
+            let each = (avail - chips * OVERFLOW_CHIP_W) / k as f32;
+            (natural.iter().map(|x| x.min(each)).collect(), false)
+        }
     };
 
     let mut x = tabs_x;
-    for (i, tab) in tabs.iter().enumerate() {
+    let chip = |layer: &mut Layer,
+                engine: &mut TextEngine,
+                hits: &mut Vec<Hit>,
+                x: f32,
+                label: String,
+                to: usize| {
+        let tw = engine.measure(&label, 11.5, mono_family(), Weight::NORMAL);
+        let b = make_text(engine, &label, 11.5, mono_family(), Weight::NORMAL);
+        layer.text(
+            b,
+            x + (OVERFLOW_CHIP_W - tw) / 2.0,
+            (TAB_BAR_H - 15.0) / 2.0,
+            theme.text_dim,
+        );
+        hits.push(Hit {
+            rect: [x, 0.0, OVERFLOW_CHIP_W, TAB_BAR_H],
+            target: ClickTarget::TabSelect(to),
+        });
+    };
+    if start > 0 {
+        chip(layer, engine, hits, x, format!("‹{start}"), start - 1);
+        x += OVERFLOW_CHIP_W;
+    }
+    for (i, tab) in tabs.iter().enumerate().skip(start).take(end - start) {
         let is_active = i == active;
         let tab_w = widths[i];
 
@@ -434,7 +472,7 @@ pub fn render(
         });
 
         // hairline between inactive neighbours
-        if !is_active && i + 1 < tabs.len() && i + 1 != active {
+        if !is_active && i + 1 < end && i + 1 != active {
             layer.rect(
                 [x + tab_w - 0.5, 12.0],
                 [1.0, TAB_BAR_H - 24.0],
@@ -444,6 +482,11 @@ pub fn render(
         }
 
         x += tab_w;
+    }
+
+    if end < n {
+        chip(layer, engine, hits, x, format!("{}›", n - end), end);
+        x += OVERFLOW_CHIP_W;
     }
 
     // + new tab
@@ -736,11 +779,11 @@ fn rail_overflow(
     match hidden_marker(hidden) {
         Some(Some(kind)) => {
             crate::views::notifications::tab_badge(layer, theme, kind, mx, cy);
-            tx += 14.0;
+            tx += 20.0;
         }
         Some(None) => {
             layer.circle([mx, cy], 7.0, theme.success);
-            tx += 14.0;
+            tx += 20.0;
         }
         None => {}
     }

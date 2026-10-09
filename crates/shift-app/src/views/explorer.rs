@@ -300,7 +300,7 @@ pub fn render(
         .as_ref()
         .and_then(|r| r.file_name())
         .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "No folder".into());
+        .unwrap_or_else(|| "Explorer".into());
     layer.text(
         label(engine, &title.to_uppercase(), 11.0, Weight::SEMIBOLD),
         x + 14.0,
@@ -424,8 +424,14 @@ pub fn render(
         }
     }
     if state.lines.is_empty() {
+        // no root yet: the shell has not reported its directory
+        let msg = if state.root.is_some() {
+            "Empty folder"
+        } else {
+            "Waiting for the shell…"
+        };
         layer.text(
-            label(engine, "Empty folder", 12.0, Weight::NORMAL),
+            label(engine, msg, 12.0, Weight::NORMAL),
             x + 14.0,
             body_top + 12.0,
             theme.text_muted,

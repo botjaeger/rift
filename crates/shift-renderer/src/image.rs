@@ -12,6 +12,26 @@
 use bytemuck::{Pod, Zeroable};
 use std::path::Path;
 
+/// Largest background image texture we upload (RGBA bytes).
+const MAX_BG_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Reject images the GPU cannot hold: empty, wider/taller than the device's
+/// 2D texture limit, or more than `MAX_BG_BYTES` of RGBA.
+fn check_size(width: u32, height: u32, limit: u32) -> Result<(), String> {
+    if width == 0 || height == 0 {
+        return Err("empty image".into());
+    }
+    if width > limit || height > limit {
+        return Err(format!(
+            "{width}x{height} exceeds the GPU texture limit of {limit}px"
+        ));
+    }
+    if u64::from(width) * u64::from(height) * 4 > MAX_BG_BYTES {
+        return Err(format!("{width}x{height} is too large (max 256 MiB RGBA)"));
+    }
+    Ok(())
+}
+
 /// Per-frame shader uniforms. 32 bytes, 16-byte aligned.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
@@ -121,8 +141,8 @@ impl ImagePipeline {
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
-                    // same blend as quad.rs → compositing stays in sRGB space
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    // premultiplied textures (no filter fringes); still an sRGB-space composite
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
@@ -164,13 +184,21 @@ impl ImagePipeline {
     ) -> Result<(), String> {
         self.loaded = None;
 
-        let decoded = ::image::open(path)
+        // check the header size before decoding: wgpu's default uncaptured
+        // error handler panics on an oversized texture
+        let limit = device.limits().max_texture_dimension_2d;
+        let (hw, hh) = ::image::image_dimensions(path)
+            .map_err(|e| format!("background_image {}: {e}", path.display()))?;
+        check_size(hw, hh, limit)
+            .map_err(|e| format!("background_image {}: {e}", path.display()))?;
+
+        let mut decoded = ::image::open(path)
             .map_err(|e| format!("background_image {}: {e}", path.display()))?
             .to_rgba8();
         let (width, height) = decoded.dimensions();
-        if width == 0 || height == 0 {
-            return Err(format!("background_image {}: empty image", path.display()));
-        }
+        check_size(width, height, limit)
+            .map_err(|e| format!("background_image {}: {e}", path.display()))?;
+        crate::color::premultiply_rgba8(&mut decoded);
 
         let extent = wgpu::Extent3d {
             width,
@@ -274,6 +302,16 @@ impl ImagePipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn check_size_rejects_oversized_and_empty() {
+        assert!(check_size(1920, 1080, 16384).is_ok());
+        assert!(check_size(0, 10, 16384).is_err());
+        assert!(check_size(20000, 10, 16384).is_err());
+        assert!(check_size(10, 20000, 16384).is_err());
+        // within the dimension limit but over the byte cap
+        assert!(check_size(16384, 16384, 16384).is_err());
+    }
 
     /// uv span of the sampled rectangle on each axis.
     fn span(offset: [f32; 2], scale: [f32; 2]) -> ([f32; 2], [f32; 2]) {

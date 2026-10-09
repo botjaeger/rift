@@ -182,6 +182,7 @@ pub fn installer_script() -> String {
     for (rc, file) in [(".bashrc", "shift.bash"), (".zshrc", "shift.zsh")] {
         s.push_str(&format!(
             "if ! grep -qs '{RC_MARKER}' \"$HOME/{rc}\"; then\n  \
+             if [ -s \"$HOME/{rc}\" ] && [ -n \"$(tail -c1 \"$HOME/{rc}\")\" ]; then echo >> \"$HOME/{rc}\"; fi\n  \
              printf '%s\\n' '[ \"$LC_TERMINAL\" = Shift ] && [ -r \"$HOME/.local/share/shift/{file}\" ] && . \"$HOME/.local/share/shift/{file}\" {RC_MARKER}' >> \"$HOME/{rc}\"\n\
              fi\n"
         ));
@@ -299,6 +300,17 @@ mod tests {
             "second run adds nothing"
         );
         assert!(home.join(".local/share/shift/shift.zsh").exists());
+        // an rc file without a trailing newline keeps its last line intact
+        std::fs::write(home.join(".zshrc"), "export A=1").unwrap();
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&s)
+            .env("HOME", &home)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        let zshrc = std::fs::read_to_string(home.join(".zshrc")).unwrap();
+        assert!(zshrc.starts_with("export A=1\n["), "{zshrc:?}");
         std::fs::remove_dir_all(&home).ok();
     }
 }

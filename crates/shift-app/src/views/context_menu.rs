@@ -131,7 +131,12 @@ pub fn render(
     h: f32,
 ) -> Vec<[f32; 4]> {
     let seps = state.items.iter().filter(|i| i.separator).count() as f32;
-    let menu_h = state.items.len() as f32 * ROW_H + seps * SEP_H + 12.0;
+    // rows (and separators) shrink together so a tall menu still fits the
+    // window and every item stays reachable
+    let natural_h = state.items.len() as f32 * ROW_H + seps * SEP_H;
+    let scale = ((h - 16.0 - 12.0) / natural_h.max(1.0)).clamp(0.5, 1.0);
+    let (row_h, sep_h) = (ROW_H * scale, SEP_H * scale);
+    let menu_h = state.items.len() as f32 * row_h + seps * sep_h + 12.0;
     let x = state.pos.0.min(w - MENU_W - 8.0).max(8.0);
     let y = state.pos.1.min(h - menu_h - 8.0).max(8.0);
 
@@ -149,14 +154,15 @@ pub fn render(
     };
     layer.bordered([x, y], [MENU_W, menu_h], theme.surface, edge, 10.0, 1.0);
 
+    let font = if row_h < 24.0 { 12.0 } else { 13.0 };
     let mut rects = Vec::new();
     let mut ry = y + 6.0;
     for (i, item) in state.items.iter().enumerate() {
         if item.separator {
-            layer.hline(x + 10.0, ry + SEP_H / 2.0, MENU_W - 20.0, 1.0, edge);
-            ry += SEP_H;
+            layer.hline(x + 10.0, ry + sep_h / 2.0, MENU_W - 20.0, 1.0, edge);
+            ry += sep_h;
         }
-        let rect = [x + 5.0, ry, MENU_W - 10.0, ROW_H];
+        let rect = [x + 5.0, ry, MENU_W - 10.0, row_h];
         if state.selected == Some(i) && item.enabled {
             layer.rect(
                 [rect[0], rect[1]],
@@ -173,17 +179,17 @@ pub fn render(
         // tab-color rows carry a swatch
         let mut tx = rect[0] + 12.0;
         if let MenuAction::SetTabColor(_, Some(c)) = item.action {
-            layer.circle([tx + 5.0, ry + ROW_H / 2.0], 10.0, tab_color(theme, c));
+            layer.circle([tx + 5.0, ry + row_h / 2.0], 10.0, tab_color(theme, c));
             tx += 18.0;
         }
         layer.text(
-            sans(engine, item.label, 13.0, Weight::NORMAL),
+            sans(engine, item.label, font, Weight::NORMAL),
             tx,
-            ry + 6.5,
+            ry + (row_h - font * 1.35) / 2.0,
             color,
         );
         rects.push(rect);
-        ry += ROW_H;
+        ry += row_h;
     }
     rects
 }

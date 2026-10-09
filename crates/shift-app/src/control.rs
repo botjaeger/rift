@@ -31,11 +31,17 @@ pub enum Level {
 }
 
 impl Level {
+    /// An unknown value ("Off", "false", a typo) never grants access: it
+    /// parses as `Off`, with a warning.
     pub fn parse(s: &str) -> Level {
-        match s.trim() {
+        match s.trim().to_ascii_lowercase().as_str() {
             "off" => Level::Off,
+            "navigate" => Level::Navigate,
             "full" => Level::Full,
-            _ => Level::Navigate,
+            other => {
+                log::warn!("control_api = {other:?} is not off|navigate|full; control is off");
+                Level::Off
+            }
         }
     }
 }
@@ -250,7 +256,12 @@ fn start(
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         continue;
                     }
-                    Err(_) => break,
+                    // transient (ECONNABORTED, EMFILE, EINTR ...): keep serving
+                    Err(e) => {
+                        log::warn!("control: accept failed: {e}");
+                        std::thread::sleep(Duration::from_millis(50));
+                        continue;
+                    }
                 };
                 if shift_pty::ipc::peer_uid(&stream) != Some(me) {
                     continue;
@@ -390,7 +401,8 @@ const CLI_HELP: &str = "usage: shift-terminal ctl [--pid PID] <command>
 
   list                          tabs and panes of every window (JSON)
   status                        this window's pid, version, tabs
-  focus [--tab N] [--pane ID]   raise the window, select a tab or pane
+  focus [--tab N] [--pane ID]   raise the window, select a tab (N counts from 0,
+                                as in `list`) or a pane
   split right|down [--cwd DIR]  split the active pane        (control_api = \"full\")
   open [--cwd DIR] [-- CMD…]    new tab, optionally running CMD (\"full\")
   send-text --pane ID TEXT      type TEXT into a pane         (\"full\")
@@ -415,6 +427,10 @@ pub fn cli(args: &[String]) -> i32 {
         println!("{CLI_HELP}");
         return 2;
     };
+    if matches!(cmd.as_str(), "help" | "--help" | "-h") {
+        println!("{CLI_HELP}");
+        return 0;
+    }
     let mut rest: Vec<String> = args[1..].to_vec();
     let req = match cmd.as_str() {
         "list" => {
@@ -429,10 +445,31 @@ pub fn cli(args: &[String]) -> i32 {
             return 0;
         }
         "status" => Request::Status,
-        "focus" => Request::Focus {
-            tab: flag(&mut rest, "--tab").and_then(|v| v.parse().ok()),
-            pane: flag(&mut rest, "--pane").and_then(|v| v.parse().ok()),
-        },
+        "focus" => {
+            // a given but unusable value is an error, never "focus the
+            // current tab"
+            let number = |rest: &mut Vec<String>, name: &str| -> Result<Option<u64>, String> {
+                let given = rest.iter().any(|a| a == name);
+                match flag(rest, name) {
+                    None if given => Err(format!("{name} needs a number")),
+                    None => Ok(None),
+                    Some(v) => v
+                        .parse()
+                        .map(Some)
+                        .map_err(|_| format!("{name} needs a number, got {v:?}")),
+                }
+            };
+            match (number(&mut rest, "--tab"), number(&mut rest, "--pane")) {
+                (Ok(tab), Ok(pane)) => Request::Focus {
+                    tab: tab.map(|t| t as usize),
+                    pane,
+                },
+                (Err(e), _) | (_, Err(e)) => {
+                    eprintln!("focus: {e}");
+                    return 2;
+                }
+            }
+        }
         "split" => Request::Split {
             cwd: flag(&mut rest, "--cwd"),
             direction: rest.first().cloned().unwrap_or_else(|| "right".into()),
@@ -559,7 +596,11 @@ mod tests {
         assert_eq!(r.level(), Level::Full);
         assert!(serde_json::from_str::<Request>(r#"{"cmd":"rm-rf"}"#).is_err());
         assert_eq!(Level::parse("full"), Level::Full);
-        assert_eq!(Level::parse("nonsense"), Level::Navigate);
+        assert_eq!(Level::parse("navigate"), Level::Navigate);
+        assert_eq!(Level::parse("Full"), Level::Full);
+        for bad in ["nonsense", "false", "", "OFF "] {
+            assert_eq!(Level::parse(bad), Level::Off, "{bad:?}");
+        }
     }
 
     #[test]

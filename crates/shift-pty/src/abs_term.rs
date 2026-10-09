@@ -107,7 +107,12 @@ impl<L: EventListener> Handler for AbsTerm<'_, L> {
     }
 
     fn input(&mut self, a0: char) {
-        self.term.input(a0);
+        // a char past the last column auto-wraps first: on the bottom row
+        // that wrap scrolls a line into history like a linefeed
+        let wraps = self.term.grid().cursor.input_needs_wrap
+            && self.term.mode().contains(TermMode::LINE_WRAP);
+        let push = usize::from(wraps && self.at_bottom_primary());
+        self.track(push, |t| t.input(a0));
     }
 
     fn goto(&mut self, a0: i32, a1: usize) {
@@ -191,7 +196,8 @@ impl<L: EventListener> Handler for AbsTerm<'_, L> {
     }
 
     fn delete_lines(&mut self, a0: usize) {
-        self.term.delete_lines(a0);
+        // on the top row of a full-screen region this scrolls into history
+        self.track(0, |t| t.delete_lines(a0));
     }
 
     fn erase_chars(&mut self, a0: usize) {

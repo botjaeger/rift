@@ -218,6 +218,14 @@ impl Agent {
                 skip_flags = true;
                 continue;
             }
+            // `command -v claude` looks the program up; it does not run it
+            if w == "command"
+                && words
+                    .peek()
+                    .is_some_and(|n| n.starts_with('-') && n.contains(['v', 'V']))
+            {
+                return None;
+            }
             if matches!(
                 w,
                 "sudo" | "nohup" | "env" | "npx" | "bunx" | "pnpx" | "exec" | "command" | "time"
@@ -381,11 +389,22 @@ fn phrase_at<'a>(text: &'a str, phrase: &'a str) -> impl Iterator<Item = usize> 
     })
 }
 
-/// `prefix` (text before an error word) ends with a negation: "no",
-/// "0", "zero", "without".
+/// `prefix` (text before an error word) carries a negation within the three
+/// words before it, in the same clause: "no", "0", "zero", "without" ("no
+/// errors", "no test failures").
 fn negated(prefix: &str) -> bool {
-    let last = prefix.trim_end().rsplit(char::is_whitespace).next();
-    prefix.ends_with(char::is_whitespace) && matches!(last, Some("no" | "0" | "zero" | "without"))
+    if !prefix.ends_with(char::is_whitespace) {
+        return false;
+    }
+    let clause = prefix
+        .rsplit(['.', ',', ';', ':', '!', '?', '(', ')'])
+        .next()
+        .unwrap_or("");
+    clause
+        .split_whitespace()
+        .rev()
+        .take(3)
+        .any(|w| matches!(w, "no" | "0" | "zero" | "without"))
 }
 
 /// A password prompt at the end of the cursor line (`Password:`,
@@ -483,6 +502,12 @@ mod tests {
             Some(Agent::Codex)
         );
         assert_eq!(Agent::from_command("git commit -m claude"), None);
+        assert_eq!(Agent::from_command("command -v claude"), None);
+        assert_eq!(Agent::from_command("command -V codex"), None);
+        assert_eq!(
+            Agent::from_command("command claude"),
+            Some(Agent::ClaudeCode)
+        );
         assert_eq!(Agent::from_command(""), None);
         // separators inside quotes or escaped do not split
         assert_eq!(Agent::from_command("echo \"a; claude go\""), None);
@@ -516,6 +541,8 @@ mod tests {
             ("Lint passed with 0 errors", Meaning::Info),
             ("Finished without errors", Meaning::Complete),
             ("No errors, 2 failures", Meaning::Error),
+            ("Completed, no test failures", Meaning::Complete),
+            ("Done with zero lint errors", Meaning::Complete),
             ("Task abandoned", Meaning::Info),
             ("Build incomplete", Meaning::Info),
             ("Terror alert", Meaning::Info),

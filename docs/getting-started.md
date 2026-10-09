@@ -125,7 +125,7 @@ blocks too. Details: [SSH profiles](features.md#ssh-profiles).
 
 ```sh
 shift-terminal ctl list                    # tabs and panes of every window (JSON)
-shift-terminal ctl focus --tab 2
+shift-terminal ctl focus --tab 2           # --tab/--pane count from 0, like `list`
 shift-terminal ctl open --cwd ~/src -- make test   # needs control_api = "full"
 ```
 

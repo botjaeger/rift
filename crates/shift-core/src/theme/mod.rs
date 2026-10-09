@@ -27,6 +27,10 @@ impl Color {
     /// Parse `#rgb`, `#rrggbb` or `#rrggbbaa`.
     pub fn hex(s: &str) -> Result<Self, ColorParseError> {
         let h = s.trim().trim_start_matches('#');
+        // from_str_radix would accept a leading `+` (`#+12345`)
+        if !h.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(ColorParseError(s.into()));
+        }
         let (r, g, b, a) = match h.len() {
             3 => {
                 let v = u16::from_str_radix(h, 16).map_err(|_| ColorParseError(s.into()))?;
@@ -288,6 +292,8 @@ mod tests {
         let c = Color::hex("#ffffff80").unwrap();
         assert!((c.a - 0.502).abs() < 0.01);
         assert!(Color::hex("nope").is_err());
+        assert!(Color::hex("#+12345").is_err());
+        assert!(Color::hex("#-12345").is_err());
     }
 
     #[test]

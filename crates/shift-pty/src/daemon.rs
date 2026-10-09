@@ -148,14 +148,21 @@ impl Shell {
     }
 
     fn info(&self) -> SessionInfo {
+        // One lock per statement: temporaries in a struct literal live to its
+        // end, so `clients` would be held while taking `ring` — the reader
+        // thread takes them the other way round (ring, then clients).
+        let cwd = self.cwd.lock().unwrap().clone();
+        let job = self.job.lock().unwrap().clone().filter(|j| !j.is_empty());
+        let clients = self.clients.lock().unwrap().iter().map(|c| c.pid).collect();
+        let retained_bytes = self.ring.lock().unwrap().bytes as u64;
         SessionInfo {
             id: self.id,
             pid: self.pid,
-            cwd: self.cwd.lock().unwrap().clone(),
-            job: self.job.lock().unwrap().clone().filter(|j| !j.is_empty()),
+            cwd,
+            job,
             started: self.started,
-            clients: self.clients.lock().unwrap().iter().map(|c| c.pid).collect(),
-            retained_bytes: self.ring.lock().unwrap().bytes as u64,
+            clients,
+            retained_bytes,
         }
     }
 }
@@ -165,6 +172,60 @@ struct State {
     shells: Mutex<HashMap<u64, Arc<Shell>>>,
     next_id: Mutex<u64>,
     clients: AtomicUsize,
+}
+
+/// How long a starter waits for a running (or exiting) service to resolve.
+const LOCK_WAIT: Duration = Duration::from_secs(3);
+
+/// Take the service lock (`flock` on `lock_path`, released when the returned
+/// file or the process goes away). `None` when a live service holds it and
+/// answers on `socket`. While the holder has not bound yet (it just won the
+/// race) or is exiting (it unlinked the socket but has not quit), wait up to
+/// `wait` for either outcome.
+fn acquire_lock(
+    lock_path: &std::path::Path,
+    socket: &std::path::Path,
+    wait: Duration,
+) -> std::io::Result<Option<std::fs::File>> {
+    use std::os::fd::AsRawFd;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(lock_path)?;
+    let deadline = Instant::now() + wait;
+    loop {
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(Some(file));
+        }
+        let err = std::io::Error::last_os_error();
+        if err.kind() != std::io::ErrorKind::WouldBlock {
+            return Err(err);
+        }
+        if UnixStream::connect(socket).is_ok() {
+            return Ok(None);
+        }
+        if Instant::now() > deadline {
+            return Err(std::io::Error::other("session service lock is busy"));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Identity of the file at `path` (device, inode).
+fn file_id(path: &std::path::Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
+}
+
+/// Remove `path` only when it is still the file we bound (`id`): never
+/// another instance's socket.
+fn unlink_if_ours(path: &std::path::Path, id: Option<(u64, u64)>) -> bool {
+    if id.is_some() && file_id(path) == id {
+        let _ = std::fs::remove_file(path);
+        return true;
+    }
+    false
 }
 
 /// Run the service until it is idle. Returns early (Ok) when another
@@ -177,11 +238,18 @@ pub fn run() -> std::io::Result<()> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
     }
-    if UnixStream::connect(&path).is_ok() {
+    // One service at a time: the lock is held for this process's lifetime,
+    // so a second starter can neither unlink the socket we serve nor bind
+    // over it.
+    let Some(_lock) = acquire_lock(&dir.join("lock"), &path, LOCK_WAIT)? else {
         return Ok(()); // already running
+    };
+    if UnixStream::connect(&path).is_ok() {
+        return Ok(()); // an instance from before the lock existed
     }
     let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path)?;
+    let bound = file_id(&path);
     let state = Arc::new(State::default());
     *state.next_id.lock().unwrap() = ipc::now_ms(); // ids stay unique across restarts
 
@@ -217,7 +285,7 @@ pub fn run() -> std::io::Result<()> {
                 match (idle, idle_since) {
                     (true, None) => idle_since = Some(Instant::now()),
                     (true, Some(t)) if t.elapsed() > IDLE_EXIT => {
-                        let _ = std::fs::remove_file(&path);
+                        unlink_if_ours(&path, bound);
                         std::process::exit(0);
                     }
                     (false, _) => idle_since = None,
@@ -500,6 +568,121 @@ fn spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A real (idle) shell on a PTY, without shell integration.
+    fn test_shell() -> Shell {
+        let opts = tty::Options {
+            // dies on the SIGHUP that dropping the Pty sends (an
+            // interactive sh ignores it and the drop would wait forever)
+            shell: Some(tty::Shell::new("/bin/sleep".into(), vec!["600".into()])),
+            working_directory: None,
+            drain_on_exit: false,
+            env: HashMap::new(),
+        };
+        let ws = WindowSize {
+            num_lines: 24,
+            num_cols: 80,
+            cell_width: 8,
+            cell_height: 16,
+        };
+        let pty = tty::new(&opts, ws, 0).unwrap();
+        let writer = pty.file().try_clone().unwrap();
+        Shell {
+            id: 1,
+            pid: pty.child().id(),
+            started: 0,
+            pty: Mutex::new(pty),
+            writer: Mutex::new(writer),
+            ring: Mutex::new(Ring::default()),
+            clients: Mutex::new(Vec::new()),
+            cwd: Mutex::new(None),
+            job: Mutex::new(None),
+        }
+    }
+
+    #[test]
+    fn info_does_not_deadlock_against_the_reader_lock_order() {
+        let sh = Arc::new(test_shell());
+        let (done, finished) = std::sync::mpsc::channel();
+        // the reader thread's order: ring, then clients (push + broadcast)
+        let reader = {
+            let (sh, done) = (sh.clone(), done.clone());
+            std::thread::spawn(move || {
+                for _ in 0..50_000 {
+                    let _ring = sh.ring.lock().unwrap();
+                    sh.broadcast(|| Out::Event(Event::ReplayDone { session: 1 }));
+                }
+                done.send(()).unwrap();
+            })
+        };
+        let lister = {
+            let sh = sh.clone();
+            std::thread::spawn(move || {
+                for _ in 0..50_000 {
+                    sh.info();
+                }
+                done.send(()).unwrap();
+            })
+        };
+        for _ in 0..2 {
+            finished
+                .recv_timeout(Duration::from_secs(20))
+                .expect("Shell::info deadlocked against the reader's ring -> clients order");
+        }
+        reader.join().unwrap();
+        lister.join().unwrap();
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("shift-daemon-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn only_one_starter_holds_the_service_lock() {
+        let dir = scratch("lock");
+        let (lock, sock) = (dir.join("lock"), dir.join("sock"));
+        let first = acquire_lock(&lock, &sock, Duration::from_millis(100)).unwrap();
+        assert!(first.is_some());
+        // a second starter must not get past the lock (nothing answers on
+        // the socket, so it times out instead of unlinking/binding)
+        assert!(acquire_lock(&lock, &sock, Duration::from_millis(100)).is_err());
+        // with a live service on the socket it backs off quietly
+        let _listener = UnixListener::bind(&sock).unwrap();
+        assert!(
+            acquire_lock(&lock, &sock, Duration::from_millis(100))
+                .unwrap()
+                .is_none()
+        );
+        // and once the holder is gone the lock is free again
+        drop(first);
+        assert!(
+            acquire_lock(&lock, &sock, Duration::from_millis(100))
+                .unwrap()
+                .is_some()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn idle_exit_only_unlinks_the_socket_it_bound() {
+        let dir = scratch("unlink");
+        let sock = dir.join("sock");
+        std::fs::write(&sock, b"a").unwrap();
+        let mine = file_id(&sock);
+        // keep the first inode alive so the replacement cannot reuse it
+        let _held = std::fs::File::open(&sock).unwrap();
+        // another instance replaced the socket
+        std::fs::write(dir.join("other"), b"b").unwrap();
+        std::fs::rename(dir.join("other"), &sock).unwrap();
+        assert!(!unlink_if_ours(&sock, mine));
+        assert!(sock.exists(), "the other instance's socket survives");
+        assert!(unlink_if_ours(&sock, file_id(&sock)));
+        assert!(!sock.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn full_client_queue_disconnects_the_socket() {

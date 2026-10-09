@@ -122,7 +122,13 @@ pub fn next_focus(
 }
 
 const SIDEBAR_W: f32 = 248.0;
+/// Icon-only sidebar used when the window is too narrow for labels.
+const SIDEBAR_COMPACT_W: f32 = 64.0;
+/// Below this window width the sidebar collapses to icons.
+const COMPACT_BELOW_W: f32 = 700.0;
 const ROW_H: f32 = 52.0;
+/// Default width reserved for a row's control (toggle, stepper) when its label is elided.
+const DEFAULT_RESERVE: f32 = 130.0;
 
 fn sans(engine: &mut TextEngine, text: &str, size: f32, weight: Weight) -> Buffer {
     let mut b = Buffer::new(&mut engine.font_system, Metrics::new(size, size * 1.35));
@@ -260,14 +266,25 @@ pub fn render(
 ) -> f32 {
     names.clear();
     let top = TAB_BAR_H;
+    let compact = w < COMPACT_BELOW_W;
+    let sidebar_w = if compact {
+        SIDEBAR_COMPACT_W
+    } else {
+        SIDEBAR_W
+    };
+    let pad = if compact { 20.0 } else { 32.0 };
 
     // ── sidebar ──
-    layer.rect([0.0, top], [SIDEBAR_W, h - top], theme.bg_chrome, 0.0);
-    layer.rect([SIDEBAR_W - 1.0, top], [1.0, h - top], theme.border, 0.0);
-    layer.rect([SIDEBAR_W, top], [w - SIDEBAR_W, h - top], theme.bg, 0.0);
+    layer.rect([0.0, top], [sidebar_w, h - top], theme.bg_chrome, 0.0);
+    layer.rect([sidebar_w - 1.0, top], [1.0, h - top], theme.border, 0.0);
+    layer.rect([sidebar_w, top], [w - sidebar_w, h - top], theme.bg, 0.0);
 
     // header: ❯ logo + "Settings"
-    let hx = 22.0;
+    let hx = if compact {
+        (sidebar_w - 26.0) / 2.0
+    } else {
+        22.0
+    };
     let hy = top + 22.0;
     layer.rect([hx, hy], [26.0, 26.0], theme.accent, 7.0);
     layer.text(
@@ -276,12 +293,14 @@ pub fn render(
         hy + 4.5,
         Color::WHITE,
     );
-    layer.text(
-        sans(engine, "Settings", 16.0, Weight::SEMIBOLD),
-        hx + 36.0,
-        hy + 3.0,
-        theme.text_bright,
-    );
+    if !compact {
+        layer.text(
+            sans(engine, "Settings", 16.0, Weight::SEMIBOLD),
+            hx + 36.0,
+            hy + 3.0,
+            theme.text_bright,
+        );
+    }
 
     // nav
     let labels = [
@@ -295,7 +314,7 @@ pub fn render(
     let mut ny = hy + 46.0;
     for (i, page) in Page::ALL.iter().enumerate() {
         let selected = state.page == *page;
-        let row = [14.0, ny, SIDEBAR_W - 28.0, 38.0];
+        let row = [14.0, ny, sidebar_w - 28.0, 38.0];
         if selected {
             layer.rect(
                 [row[0], row[1]],
@@ -316,21 +335,23 @@ pub fn render(
         } else {
             theme.text_dim
         };
-        layer.text(
-            sans(
-                engine,
-                labels[i],
-                13.5,
-                if selected {
-                    Weight::MEDIUM
-                } else {
-                    Weight::NORMAL
-                },
-            ),
-            row[0] + 38.0,
-            ny + 10.0,
-            color,
-        );
+        if !compact {
+            layer.text(
+                sans(
+                    engine,
+                    labels[i],
+                    13.5,
+                    if selected {
+                        Weight::MEDIUM
+                    } else {
+                        Weight::NORMAL
+                    },
+                ),
+                row[0] + 38.0,
+                ny + 10.0,
+                color,
+            );
+        }
         hits.push(Hit {
             rect: row,
             target: ClickTarget::SettingsNav(i as u8),
@@ -348,16 +369,19 @@ pub fn render(
 
     // sidebar footer: config path
     let footer = "~/.config/shift/config.toml";
-    layer.hline(14.0, h - 44.0, SIDEBAR_W - 28.0, 1.0, theme.border);
-    layer.text(
-        mono(engine, footer, 11.0, Weight::NORMAL),
-        22.0,
-        h - 32.0,
-        theme.text_muted,
-    );
+    // (hidden when it would not clear the nav rows)
+    if !compact && h - 44.0 > ny {
+        layer.hline(14.0, h - 44.0, sidebar_w - 28.0, 1.0, theme.border);
+        layer.text(
+            mono(engine, footer, 11.0, Weight::NORMAL),
+            22.0,
+            h - 32.0,
+            theme.text_muted,
+        );
+    }
 
     // ── content header ──
-    let cx = SIDEBAR_W + 32.0;
+    let cx = sidebar_w + pad;
     let (title, subtitle) = match state.page {
         Page::General => ("General", "Shell and session behavior"),
         Page::Appearance => ("Appearance", "Fonts, cursor, window and theme"),
@@ -381,8 +405,11 @@ pub fn render(
         top + 24.0,
         theme.text_bright,
     );
+    // the close button sits at the right edge; the header text stops before it
+    let head_w = (w - 46.0 - 12.0 - cx).max(40.0);
+    let subtitle = super::palette::elide_to(engine, subtitle, 12.5, FONT_SANS, head_w);
     layer.text(
-        sans(engine, subtitle, 12.5, Weight::NORMAL),
+        sans(engine, &subtitle, 12.5, Weight::NORMAL),
         cx,
         top + 52.0,
         theme.text_dim,
@@ -408,9 +435,9 @@ pub fn render(
     });
     names.push((close, "Close settings".into()));
     layer.hline(
-        SIDEBAR_W,
+        sidebar_w,
         top + 76.0,
-        w - SIDEBAR_W,
+        w - sidebar_w,
         1.0,
         theme.border.with_alpha(0.05),
     );
@@ -424,12 +451,13 @@ pub fn render(
         theme,
         x: cx,
         y: body_y - state.scroll,
-        card_w: w - cx - 32.0,
+        card_w: w - cx - pad,
         clip_top: body_y - 12.0,
         clip_bottom: h,
         hits,
         names,
         row_label: String::new(),
+        reserve: DEFAULT_RESERVE,
     };
     match state.page {
         Page::Appearance => appearance_page(&mut form, config),
@@ -443,7 +471,7 @@ pub fn render(
     // scrolled content stays inside the body: clip text, drop hits above it
     for t in &mut layer.texts[text_start..] {
         t.bounds = Some(shift_renderer::glyphon::TextBounds {
-            left: SIDEBAR_W as i32,
+            left: sidebar_w as i32,
             top: (body_y - 12.0) as i32,
             right: w as i32,
             bottom: h as i32,
@@ -477,6 +505,9 @@ struct Form<'a> {
     names: &'a mut Vec<([f32; 4], String)>,
     /// Label of the row being drawn; names its controls.
     row_label: String,
+    /// Width the next row's control claims on the right; its label stops
+    /// short of it on narrow cards (reset to the default after each label).
+    reserve: f32,
 }
 
 impl Form<'_> {
@@ -540,17 +571,26 @@ impl Form<'_> {
     /// Row label, with an optional muted description line under it.
     fn label_desc(&mut self, text: &str, desc: &str, y: f32) {
         self.row_label = text.to_string();
+        let reserve = std::mem::replace(&mut self.reserve, DEFAULT_RESERVE);
         if self.visible(y, ROW_H) {
             let ly = if desc.is_empty() { y + 17.0 } else { y + 9.0 };
+            // on narrow cards keep room for the control on the right
+            let max_w = if self.card_w < 520.0 {
+                (self.card_w - 36.0 - reserve).max(60.0)
+            } else {
+                f32::MAX
+            };
+            let shown = super::palette::elide_to(self.engine, text, 13.5, FONT_SANS, max_w);
             self.layer.text(
-                sans(self.engine, text, 13.5, Weight::NORMAL),
+                sans(self.engine, &shown, 13.5, Weight::NORMAL),
                 self.x + 18.0,
                 ly,
                 self.theme.text_ui,
             );
             if !desc.is_empty() {
+                let desc = super::palette::elide_to(self.engine, desc, 11.5, FONT_SANS, max_w);
                 self.layer.text(
-                    sans(self.engine, desc, 11.5, Weight::NORMAL),
+                    sans(self.engine, &desc, 11.5, Weight::NORMAL),
                     self.x + 18.0,
                     y + 29.0,
                     self.theme.text_muted,
@@ -613,6 +653,7 @@ impl Form<'_> {
         unit: &str,
         id: &'static str,
     ) {
+        self.reserve = 122.0 + 40.0;
         self.label_desc(label, desc, y);
         let ry = y + (ROW_H - 36.0) / 2.0;
         let right = self.right();
@@ -688,6 +729,8 @@ impl Form<'_> {
     }
 
     fn segment(&mut self, y: f32, label: &str, options: &[&str], active: usize, id: &'static str) {
+        let seg_w = if options.len() > 3 { 70.0 } else { 82.0 };
+        self.reserve = seg_w * options.len() as f32 + 3.0 * (options.len() as f32 + 1.0) + 12.0;
         self.label(label, y);
         let sy = y + (ROW_H - 34.0) / 2.0;
         let seg_w = if options.len() > 3 { 70.0 } else { 82.0 };
@@ -736,6 +779,7 @@ impl Form<'_> {
 
     /// Select-style control; clicking cycles to the next value.
     fn select(&mut self, y: f32, label: &str, value: &str, id: &'static str) {
+        self.reserve = 252.0;
         self.label(label, y);
         let ry = y + (ROW_H - 36.0) / 2.0;
         let sel_w = 240.0;
@@ -771,6 +815,7 @@ impl Form<'_> {
     /// Theme picker (design 05 "Active theme"): background swatch ringed in
     /// the theme's accent, then its display name in the UI font.
     fn theme_select(&mut self, y: f32, label: &str, name: &str, id: &'static str) {
+        self.reserve = 252.0;
         self.label(label, y);
         let ry = y + (ROW_H - 36.0) / 2.0;
         let sel_w = 240.0;
@@ -816,6 +861,7 @@ impl Form<'_> {
     }
 
     fn slider(&mut self, y: f32, label: &str, t: f32, value: &str, id: &'static str) {
+        self.reserve = 170.0 + 60.0 + 14.0;
         self.label(label, y);
         let ry = y + (ROW_H - 36.0) / 2.0;
         let slider_w = 170.0;
@@ -1396,8 +1442,28 @@ fn keybindings_page(form: &mut Form, keymap: &Keymap, config: &Config, state: &S
                 7.0,
             );
         }
+        // the action name stops before the shortcut chips / recording hint
+        let reserve = if recording {
+            form.engine.measure(
+                "Press a shortcut · Esc cancels · ⌫ unbinds",
+                12.0,
+                FONT_SANS,
+                Weight::NORMAL,
+            )
+        } else if chips.is_empty() {
+            60.0
+        } else {
+            let keys: f32 = chips
+                .iter()
+                .map(|k| form.engine.measure(k, 11.0, mono_family(), Weight::NORMAL) + 19.0)
+                .sum();
+            keys + if custom { 30.0 } else { 0.0 }
+        };
+        let name_w = (form.card_w - 36.0 - reserve - 12.0).max(40.0);
+        let action_shown =
+            super::palette::elide_to(form.engine, action, 12.5, mono_family(), name_w);
         form.layer.text(
-            mono(form.engine, action, 12.5, Weight::NORMAL),
+            mono(form.engine, &action_shown, 12.5, Weight::NORMAL),
             form.x + 18.0,
             ry + 11.0,
             form.theme.text_ui,
@@ -1509,8 +1575,11 @@ fn themes_page(form: &mut Form, config: &Config) {
             );
             sx += 22.0;
         }
+        // the name stops before the "active" chip
+        let name_w = (form.x + form.card_w - 100.0 - (sx + 12.0)).max(30.0);
+        let shown = super::palette::elide_to(form.engine, &t.name, 13.5, FONT_SANS, name_w);
         form.layer.text(
-            sans(form.engine, &t.name, 13.5, Weight::MEDIUM),
+            sans(form.engine, &shown, 13.5, Weight::MEDIUM),
             sx + 12.0,
             ry + 16.0,
             form.theme.text_bright,

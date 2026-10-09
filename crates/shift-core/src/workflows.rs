@@ -96,27 +96,35 @@ tags: [files]
 "#,
 ];
 
+/// Append every `*.yaml`/`*.yml` workflow in `dir`, in file-name order
+/// (`read_dir` order is unspecified, so the palette order would drift).
+fn load_dir(dir: &std::path::Path, out: &mut Vec<Workflow>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut paths: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+    paths.sort();
+    for p in paths {
+        let ext = p.extension().and_then(|s| s.to_str());
+        if matches!(ext, Some("yaml") | Some("yml"))
+            && let Ok(body) = std::fs::read_to_string(&p)
+        {
+            match Workflow::parse(&body) {
+                Ok(w) => out.push(w),
+                Err(err) => log::warn!("workflow {p:?}: {err}"),
+            }
+        }
+    }
+}
+
 /// Embedded samples + user files from `~/.config/shift/workflows/`.
 pub fn load_all() -> Vec<Workflow> {
     let mut out: Vec<Workflow> = SAMPLES
         .iter()
         .filter_map(|s| Workflow::parse(s).ok())
         .collect();
-    if let Some(dir) = crate::config::config_dir().map(|d| d.join("workflows"))
-        && let Ok(entries) = std::fs::read_dir(dir)
-    {
-        for e in entries.flatten() {
-            let p = e.path();
-            let ext = p.extension().and_then(|s| s.to_str());
-            if matches!(ext, Some("yaml") | Some("yml"))
-                && let Ok(body) = std::fs::read_to_string(&p)
-            {
-                match Workflow::parse(&body) {
-                    Ok(w) => out.push(w),
-                    Err(err) => log::warn!("workflow {p:?}: {err}"),
-                }
-            }
-        }
+    if let Some(dir) = crate::config::config_dir().map(|d| d.join("workflows")) {
+        load_dir(&dir, &mut out);
     }
     out
 }
@@ -124,6 +132,25 @@ pub fn load_all() -> Vec<Workflow> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn user_files_load_in_name_order() {
+        let dir = std::env::temp_dir().join(format!("shift-wf-order-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for n in ["d", "b", "e", "a", "c"] {
+            std::fs::write(
+                dir.join(format!("{n}.yaml")),
+                format!("name: wf-{n}\ncommand: echo {n}\n"),
+            )
+            .unwrap();
+        }
+        std::fs::write(dir.join("skip.txt"), "name: no\ncommand: x\n").unwrap();
+        let mut out = Vec::new();
+        load_dir(&dir, &mut out);
+        let names: Vec<_> = out.iter().map(|w| w.name.as_str()).collect();
+        assert_eq!(names, ["wf-a", "wf-b", "wf-c", "wf-d", "wf-e"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn parses_warp_format_with_block_scalar() {

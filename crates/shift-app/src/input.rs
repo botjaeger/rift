@@ -143,6 +143,37 @@ pub enum AppAction {
 impl AppAction {
     /// Actions bound to plain terminal keys (PageUp, Home, ⌃M…) that must
     /// fall through to the PTY when the owned editor is not active.
+    /// Whether holding the key keeps firing the action. Everything else
+    /// (close, quit, split, new tab, palette ...) runs once per press: an
+    /// OS auto-repeat of ⌘W must not close panes down to quitting.
+    pub fn repeatable(self) -> bool {
+        matches!(
+            self,
+            AppAction::ScrollUp
+                | AppAction::ScrollDown
+                | AppAction::ScrollPageUp
+                | AppAction::ScrollPageDown
+                | AppAction::ScrollTop
+                | AppAction::ScrollBottom
+                | AppAction::FontIncrease
+                | AppAction::FontDecrease
+                | AppAction::TabNext
+                | AppAction::TabPrev
+                | AppAction::FocusLeft
+                | AppAction::FocusRight
+                | AppAction::FocusUp
+                | AppAction::FocusDown
+                | AppAction::ResizePaneLeft
+                | AppAction::ResizePaneRight
+                | AppAction::ResizePaneUp
+                | AppAction::ResizePaneDown
+                | AppAction::SelectBlockPrev
+                | AppAction::SelectBlockNext
+                | AppAction::BookmarkPrev
+                | AppAction::BookmarkNext
+        )
+    }
+
     pub fn needs_editor(self) -> bool {
         matches!(
             self,
@@ -384,7 +415,7 @@ pub fn editor_key(event: &KeyPress, mods: ModifiersState) -> Option<EditorKey> {
             NamedKey::ArrowDown => Some(EditorKey::HistoryDown),
             NamedKey::Home => Some(EditorKey::Home),
             NamedKey::End => Some(EditorKey::End),
-            NamedKey::Space => Some(EditorKey::Insert(" ".into())),
+            NamedKey::Space if !ctrl => Some(EditorKey::Insert(" ".into())),
             _ => None,
         };
         if key.is_some() {
@@ -498,6 +529,35 @@ fn special_key(named: &NamedKey, m: u8, app_cursor: bool) -> Option<Vec<u8>> {
     })
 }
 
+/// `c` with Shift held on a US layout (letters upper-cased, digits and
+/// punctuation mapped to their shifted symbol).
+fn shifted_char(c: char) -> char {
+    match c {
+        '1' => '!',
+        '2' => '@',
+        '3' => '#',
+        '4' => '$',
+        '5' => '%',
+        '6' => '^',
+        '7' => '&',
+        '8' => '*',
+        '9' => '(',
+        '0' => ')',
+        '-' => '_',
+        '=' => '+',
+        '[' => '{',
+        ']' => '}',
+        '\\' => '|',
+        ';' => ':',
+        '\'' => '"',
+        ',' => '<',
+        '.' => '>',
+        '/' => '?',
+        '`' => '~',
+        c => c.to_ascii_uppercase(),
+    }
+}
+
 /// Control code for ctrl+`c` (`None` when the key has none).
 fn control_byte(c: char) -> Option<u8> {
     match c.to_ascii_lowercase() {
@@ -507,7 +567,7 @@ fn control_byte(c: char) -> Option<u8> {
         '\\' | '4' => Some(0x1c),
         ']' | '5' => Some(0x1d),
         '^' | '6' => Some(0x1e),
-        '_' | '7' | '/' => Some(0x1f),
+        '_' | '7' | '/' | '-' => Some(0x1f),
         '8' => Some(0x7f),
         _ => None,
     }
@@ -584,7 +644,7 @@ pub fn key_to_bytes(event: &KeyPress, mods: ModifiersState, enc: KeyEncoding) ->
 
     // Meta+key: ESC + the unmodified character (shifted when shift is held)
     if meta && let Some(c) = base {
-        let c = if shift { c.to_ascii_uppercase() } else { c };
+        let c = if shift { shifted_char(c) } else { c };
         let mut bytes = vec![0x1b];
         let mut tmp = [0u8; 4];
         bytes.extend_from_slice(c.encode_utf8(&mut tmp).as_bytes());
@@ -603,9 +663,29 @@ pub fn key_to_bytes(event: &KeyPress, mods: ModifiersState, enc: KeyEncoding) ->
 pub fn bracketed_paste(text: &str) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(text.len() + 12);
     bytes.extend_from_slice(b"\x1b[200~");
-    bytes.extend_from_slice(text.replace("\x1b[201~", "").as_bytes());
+    // Strip to a fixpoint: removing one marker can splice a new one together.
+    let mut clean = text.to_string();
+    while clean.contains("\x1b[201~") {
+        clean = clean.replace("\x1b[201~", "");
+    }
+    bytes.extend_from_slice(clean.as_bytes());
     bytes.extend_from_slice(b"\x1b[201~");
     bytes
+}
+
+/// Text for the owned command editor: line breaks become `\n`, tabs stay,
+/// and every other control character (ESC, ^C, ^U, DEL, C1 ...) is dropped so
+/// a paste cannot smuggle keystrokes into the submitted command.
+pub fn sanitize_editor_paste(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .chars()
+        .filter_map(|c| match c {
+            '\r' => Some('\n'),
+            '\n' | '\t' => Some(c),
+            c if c.is_control() => None,
+            c => Some(c),
+        })
+        .collect()
 }
 
 /// Unbracketed paste: newlines become Enter (CR), like typing them would.
@@ -654,6 +734,15 @@ mod tests {
         assert_eq!(
             bracketed_paste("a\x1b[201~b\n"),
             b"\x1b[200~ab\n\x1b[201~".to_vec()
+        );
+        // a marker spliced together by the removal of another is stripped too
+        assert_eq!(
+            bracketed_paste("\x1b[2\x1b[201~01~"),
+            b"\x1b[200~\x1b[201~".to_vec()
+        );
+        assert_eq!(
+            sanitize_editor_paste("a\x15b\x1b[31m\x03\r\nc\rd\te\x7f"),
+            "ab[31m\nc\nd\te"
         );
         assert_eq!(unbracketed_paste("a\r\nb\nc"), b"a\rb\rc".to_vec());
         assert!(paste_submits_lines("ls\n"));
@@ -742,6 +831,33 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_minus_and_meta_shift_symbols() {
+        let minus = ch("-", Some("-"), "-");
+        assert_eq!(
+            key_to_bytes(&minus, ModifiersState::CONTROL, PLAIN).unwrap(),
+            [0x1f]
+        );
+        let one = ch("!", Some("!"), "1");
+        let meta = KeyEncoding {
+            option_as_meta: true,
+            ..PLAIN
+        };
+        assert_eq!(
+            key_to_bytes(&one, ModifiersState::ALT | ModifiersState::SHIFT, meta).unwrap(),
+            b"\x1b!"
+        );
+        // ctrl+space must not type a space into the editor
+        assert_eq!(
+            editor_key(&named(NamedKey::Space), ModifiersState::CONTROL),
+            None
+        );
+        assert_eq!(
+            editor_key(&named(NamedKey::Space), NONE),
+            Some(EditorKey::Insert(" ".into()))
+        );
+    }
+
+    #[test]
     fn option_as_meta_sends_escape_prefix() {
         // macOS Option+b composes "∫"; as Meta it must send ESC b
         let press = ch("∫", Some("∫"), "b");
@@ -764,6 +880,15 @@ mod tests {
                 "∫".as_bytes()
             );
         }
+    }
+
+    #[test]
+    fn held_shortcuts_do_not_repeat_destructive_actions() {
+        assert!(!AppAction::ClosePane.repeatable());
+        assert!(!AppAction::Quit.repeatable());
+        assert!(!AppAction::NewTab.repeatable());
+        assert!(AppAction::ScrollUp.repeatable());
+        assert!(AppAction::FontIncrease.repeatable());
     }
 
     #[test]

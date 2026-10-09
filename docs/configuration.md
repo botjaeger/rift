@@ -236,7 +236,7 @@ while it is not, plus its sound.
 | Password prompt | `notifications.password_prompt` | Ping / `message-new-instant` |
 
 - **Sounds**: `default` plays the event's sound above; `none` is silent; a
-  name is looked up as `<name>.{aiff,wav,caf,mp3,m4a,oga}` in
+  name is looked up as `<name>.{aiff,aif,wav,caf,mp3,m4a,oga}` in
   `~/Library/Sounds`, `~/.local/share/sounds`, `/System/Library/Sounds` and
   `/usr/share/sounds/freedesktop/stereo`; a value with `/` is a file path.
   Played with `afplay` (macOS) or `paplay` / `canberra-gtk-play` (Linux).

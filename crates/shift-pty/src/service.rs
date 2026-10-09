@@ -134,6 +134,21 @@ pub fn open(
     Ok((s, session))
 }
 
+/// Reattach to `session` on a fresh connection after the service dropped
+/// this one (it does so to a client that falls too far behind). Streams the
+/// output after byte `from_seq`, then `ReplayDone`, then live output. Never
+/// starts the service: if it is gone, so is the shell.
+pub fn resume(session: u64, from_seq: u64) -> std::io::Result<UnixStream> {
+    let path = ipc::socket_path().ok_or_else(|| std::io::Error::other("no data dir"))?;
+    let mut s = handshake(UnixStream::connect(path)?)?;
+    ipc::send_json(&mut s, &Request::Attach { session, from_seq })?;
+    match next_event(&mut s)? {
+        Event::Attached { .. } => Ok(s),
+        Event::Error { message } => Err(std::io::Error::new(ErrorKind::NotFound, message)),
+        other => Err(std::io::Error::other(format!("unexpected {other:?}"))),
+    }
+}
+
 /// Sessions the service is running (empty when it is not running; never
 /// starts it).
 pub fn list() -> Vec<ipc::SessionInfo> {

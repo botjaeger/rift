@@ -520,9 +520,15 @@ pub fn render(
                     theme.text_muted,
                     bounds,
                 );
-                // a long name stops before the counts
+                // a long name stops before the counts, ending in `…`
+                let name_room = (cx - 8.0 - (x + 44.0)).max(10.0);
+                let name_shown = if name_w > name_room {
+                    super::palette::elide_to(engine, name, 12.5, FONT_SANS, name_room)
+                } else {
+                    name.to_string()
+                };
                 layer.text_clipped(
-                    text(engine, name, 12.5, FONT_SANS, Weight::MEDIUM),
+                    text(engine, &name_shown, 12.5, FONT_SANS, Weight::MEDIUM),
                     x + 44.0,
                     ry + 6.0,
                     theme.text_bright,
@@ -607,8 +613,11 @@ pub fn render(
                     right: (right - 6.0) as i32,
                     ..bounds
                 };
+                let header_room = (right - 6.0 - (x + 14.0)).max(10.0);
+                let header_shown =
+                    super::palette::elide_to(engine, &hunk.header, 11.0, mono, header_room);
                 layer.text_clipped(
-                    text(engine, &hunk.header, 11.0, mono, Weight::NORMAL),
+                    text(engine, &header_shown, 11.0, mono, Weight::NORMAL),
                     x + 14.0,
                     ry + 5.0,
                     theme.accent,
@@ -633,6 +642,16 @@ pub fn render(
                 let gutter = format!("{:>5} {:>5} ", num(line.old_no), num(line.new_no));
                 // tabs as 4 spaces: glyphon's tab stops ignore the gutter
                 let body = line.text.replace('\t', "    ");
+                // a long line ends in `…` instead of being cut mid-glyph
+                let adv = engine.measure("0", 12.0, mono, Weight::NORMAL).max(1.0);
+                let max_chars = ((w - 4.0 - 10.0) / adv) as usize;
+                let body_room = max_chars.saturating_sub(gutter.chars().count() + 2);
+                let body = if body.chars().count() > body_room {
+                    let keep = body_room.saturating_sub(1);
+                    body.chars().take(keep).collect::<String>() + "…"
+                } else {
+                    body
+                };
                 let spans = [
                     (gutter.as_str(), theme.text_muted),
                     (sign, tint.unwrap_or(theme.text_muted)),
