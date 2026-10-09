@@ -308,7 +308,10 @@ fn handle_conn(
     active: Arc<AtomicBool>,
     deliver: &dyn Fn(Pending),
 ) {
-    if stream.set_read_timeout(Some(IO_TIMEOUT)).is_err()
+    // macOS (BSD) accepted sockets inherit the listener's O_NONBLOCK; the
+    // bounded reader below needs blocking reads with a timeout, not WouldBlock
+    if stream.set_nonblocking(false).is_err()
+        || stream.set_read_timeout(Some(IO_TIMEOUT)).is_err()
         || stream.set_write_timeout(Some(IO_TIMEOUT)).is_err()
     {
         return;
@@ -578,6 +581,40 @@ mod tests {
             "rebinding cannot revive old work"
         );
         drop(server);
+    }
+
+    #[test]
+    fn delayed_split_and_repeated_requests_are_served() {
+        let path = std::env::temp_dir().join(format!("shift-delay-{}.sock", std::process::id()));
+        let server = start(path.clone(), Level::Navigate, |p| {
+            let _ = p.reply.send(Response {
+                ok: true,
+                pid: Some(7),
+                ..Default::default()
+            });
+        })
+        .unwrap();
+        let mut peer = UnixStream::connect(&path).unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let mut lines = BufReader::new(peer.try_clone().unwrap()).lines();
+        // first byte arrives after accept
+        std::thread::sleep(Duration::from_millis(150));
+        peer.write_all(b"{\"cmd\":\"status\"}\n").unwrap();
+        let r: Response = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+        assert!(r.ok && r.pid == Some(7));
+        // one request split across writes, then a later second request
+        peer.write_all(b"{\"cmd\":").unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+        peer.write_all(b"\"status\"}\n").unwrap();
+        let r: Response = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+        assert!(r.ok);
+        std::thread::sleep(Duration::from_millis(150));
+        peer.write_all(b"{\"cmd\":\"status\"}\n").unwrap();
+        let r: Response = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+        assert!(r.ok);
+        // a healthy idle connection is still revoked when the server goes
+        drop(server);
+        assert_eq!(peer.read(&mut [0]).unwrap(), 0);
     }
 
     #[test]

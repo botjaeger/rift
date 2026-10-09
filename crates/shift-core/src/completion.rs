@@ -166,27 +166,11 @@ pub fn complete(
     let seg_prefix = &buffer[seg_start..token_start];
     let first_word = seg_prefix.trim().is_empty();
 
-    // command names: first word of the segment, from $PATH (Warp-style)
-    if first_word
-        && token.len() >= 2
-        && !token.contains('/')
-        && !token.starts_with('.')
-        && !token.starts_with('~')
-    {
-        let cmds = path_commands();
-        let start = cmds.partition_point(|c| c.as_str() < token);
-        for name in cmds[start..].iter().take_while(|c| c.starts_with(token)) {
-            if name != token {
-                out.push(Completion {
-                    insert: name.clone(),
-                    description: String::new(),
-                    source: "command",
-                });
-            }
-            if out.len() >= 12 {
-                break;
-            }
-        }
+    // command names: first word of the segment, from $PATH (Warp-style).
+    // Names are filenames: insert them escaped so `;`, quotes or `$` in a
+    // basename stay one word; names with control characters are skipped.
+    if first_word {
+        out.extend(command_completions(path_commands(), token));
     }
 
     // spec-driven: subcommands, options, and argument generators
@@ -250,6 +234,32 @@ pub fn complete(
     out.retain(|c| seen.insert(c.insert.clone()));
     out.truncate(50);
     out
+}
+
+/// Command-name completions for `token` (as typed) from the sorted `cmds`,
+/// at most 12. Inserts are [`escape_word`]-escaped.
+fn command_completions(cmds: &[String], token: &str) -> Vec<Completion> {
+    let typed = unescape_word(token);
+    if typed.chars().count() < 2
+        || typed.contains('/')
+        || typed.starts_with('.')
+        || typed.starts_with('~')
+    {
+        return Vec::new();
+    }
+    let start = cmds.partition_point(|c| c.as_str() < typed.as_str());
+    cmds[start..]
+        .iter()
+        .take_while(|c| c.starts_with(&typed))
+        .filter(|c| **c != typed)
+        .filter_map(|name| escape_word(name))
+        .take(12)
+        .map(|insert| Completion {
+            insert,
+            description: String::new(),
+            source: "command",
+        })
+        .collect()
 }
 
 /// Option / flag completions for a token beginning with `-`.
@@ -439,6 +449,42 @@ mod tests {
         assert!(names.contains(&"cherry-pick"));
         assert!(names.contains(&"check-ignore"));
         assert!(!names.contains(&"commit"));
+    }
+
+    #[test]
+    fn command_names_are_escaped() {
+        let mut cmds: Vec<String> = [
+            "zzprobe;echo X",
+            "zzsafe",
+            "zz q'\"$`\\",
+            "zz\tctl",
+            "zz sp",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        cmds.sort();
+        let inserts = |token: &str| -> Vec<String> {
+            command_completions(&cmds, token)
+                .into_iter()
+                .map(|c| c.insert)
+                .collect()
+        };
+        let all = inserts("zz");
+        assert!(all.contains(&"zzprobe\\;echo\\ X".to_string()));
+        assert!(all.contains(&"zzsafe".to_string()));
+        assert!(all.contains(&"zz\\ q\\'\\\"\\$\\`\\\\".to_string()));
+        assert!(all.contains(&"zz\\ sp".to_string()));
+        // control characters cannot be carried portably: not offered
+        assert!(!all.iter().any(|s| s.contains('\t')));
+        // a typed escaped prefix matches the real name
+        assert_eq!(inserts("zz\\ s"), vec!["zz\\ sp".to_string()]);
+        // round trip: the shell word unescapes to exactly the filename
+        for name in &cmds {
+            if let Some(w) = escape_word(name) {
+                assert_eq!(&unescape_word(&w), name);
+            }
+        }
     }
 
     #[test]

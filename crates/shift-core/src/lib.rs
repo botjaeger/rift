@@ -22,7 +22,7 @@ pub mod transcript;
 pub mod watch;
 pub mod workflows;
 
-pub use block::{AbsLine, Block, BlockId, BlockState, BlockStore};
+pub use block::{AbsLine, Block, BlockId, BlockState, BlockStore, Restored};
 pub use config::{Bell, Config, CursorStyle, InputPosition, PromptMode, TabLayout};
 pub use keybindings::{Binding, Keymap};
 pub use osc::{Marker, OscScanner};

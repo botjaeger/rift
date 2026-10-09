@@ -28,6 +28,11 @@ __shift_report_cwd() {
 
 __shift_precmd() {
     local __shift_exit=$?
+    # a child zsh has returned: this shell's own ZDOTDIR again
+    if (( ${+__shift_user_zdotdir} )); then
+        ZDOTDIR=$__shift_user_zdotdir
+        unset __shift_user_zdotdir
+    fi
     if [[ -n "$__shift_cmd_ran" ]]; then
         printf '\e]133;D;%s\a' "$__shift_exit"
         unset __shift_cmd_ran
@@ -50,6 +55,21 @@ __shift_preexec() {
     printf '\e]133;C\a'
 }
 
+# Children: an interactive `zsh` or `exec zsh` typed here starts with ZDOTDIR
+# on the Shift shim, which reads your real config (SHIFT_ORIG_ZDOTDIR) and
+# then loads this file. Only that command sees the shim; this shell and every
+# other command keep your ZDOTDIR. `zsh -c`, scripts and `command zsh` are
+# left alone.
+typeset -g __shift_shim=${SHIFT_INTEGRATION_ZSH:h}/zdotdir
+typeset -g __shift_child_re='^[[:space:]]*(exec[[:space:]]+)?([^[:space:]]*/)?zsh([[:space:]]+-[a-bd-zA-Z]+)*[[:space:]]*$'
+__shift_child_zdotdir() {
+    [[ -f $__shift_shim/.zshrc && $1 =~ $__shift_child_re ]] || return 0
+    typeset -g __shift_user_zdotdir=${ZDOTDIR:-$HOME}
+    export SHIFT_ORIG_ZDOTDIR=$__shift_user_zdotdir
+    export ZDOTDIR=$__shift_shim
+}
+
 add-zsh-hook precmd __shift_precmd
 add-zsh-hook precmd __shift_precmd_end
 add-zsh-hook preexec __shift_preexec
+add-zsh-hook preexec __shift_child_zdotdir

@@ -33,5 +33,5 @@ unicode-segmentation = "1"
 [target.'cfg(target_os = "macos")'.dependencies]
 muda = { version = "0.20", default-features = false }
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSImage", "NSResponder", "NSRunningApplication"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSColor", "NSImage", "NSResponder", "NSRunningApplication", "NSView", "NSWindow"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData"] }

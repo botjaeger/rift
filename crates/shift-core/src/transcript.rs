@@ -98,11 +98,21 @@ impl Transcript {
         out
     }
 
-    /// (duration, cwd) per block, for `BlockStore::mark_restored`.
-    pub fn meta(&self) -> Vec<(Duration, Option<String>)> {
+    /// (duration, cwd, command) per block, for `BlockStore::mark_restored`.
+    /// The command keeps its newlines and tabs but no other control
+    /// characters: it can be reinput and run again.
+    pub fn meta(&self) -> Vec<crate::Restored> {
         self.blocks
             .iter()
-            .map(|b| (Duration::from_millis(b.duration_ms), b.cwd.clone()))
+            .map(|b| {
+                let duration = Duration::from_millis(b.duration_ms);
+                let command = b
+                    .command
+                    .chars()
+                    .filter(|&c| c == '\n' || c == '\t' || !c.is_control())
+                    .collect();
+                (duration, b.cwd.clone(), command)
+            })
             .collect()
     }
 
@@ -303,6 +313,9 @@ mod tests {
         let back: Transcript = serde_json::from_str(&s).unwrap();
         assert_eq!(back, t);
         assert_eq!(back.meta()[0].0, Duration::from_millis(12));
+        // the exact command survives, minus control characters
+        let t = Transcript::bounded(vec![block("printf 'a\n\tb'\x1b]0;x\x07 e\u{301}", "")], 42);
+        assert_eq!(t.meta()[0].2, "printf 'a\n\tb']0;x e\u{301}");
     }
 
     #[test]

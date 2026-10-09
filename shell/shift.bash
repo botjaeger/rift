@@ -6,8 +6,14 @@
 # ~/.bashrc is harmless (guarded below).
 
 # Shell-local guard (not exported): a nested or exec'd bash must load its own
-# hooks, which an exported variable would suppress.
-[[ -n "${__shift_loaded-}" ]] && return
+# hooks, which an exported variable would suppress. A second source (the shim
+# runs this file after your rc, which may have sourced it and then appended
+# to PROMPT_COMMAND) only puts our last entry back last before the first
+# prompt.
+if [[ -n "${__shift_loaded-}" ]]; then
+    __shift_keep_last
+    return
+fi
 __shift_loaded=1
 
 __shift_b=$'\e]133;B\a'
@@ -39,6 +45,10 @@ __shift_preexec() {
     # an empty Enter armed the trap too: the next prompt cycle starts with
     # our own entry, which is not a user command
     if [[ -n "$__shift_at_prompt" && "$BASH_COMMAND" != __shift_prompt_command ]]; then
+        # PROMPT_COMMAND entries appended after ours still run after
+        # __shift_prompt_end in this cycle (the order is restored from the
+        # next one): not user commands
+        [[ -n "$__shift_late" && "$__shift_late" == *"$BASH_COMMAND"* ]] && return
         __shift_at_prompt=
         __shift_cmd_ran=1
         printf '\e]133;C\a'
@@ -54,7 +64,23 @@ __shift_prompt_command() {
     __shift_at_prompt=
     __shift_report_cwd
     printf '\e]133;A\a'
+    __shift_late_entries
     __shift_keep_last
+}
+
+# The text of the PROMPT_COMMAND entries after __shift_prompt_end: this
+# cycle runs them after it, whatever __shift_keep_last changes now.
+__shift_late_entries() {
+    __shift_late=
+    if [[ "$(declare -p PROMPT_COMMAND 2>/dev/null)" == "declare -a"* ]]; then
+        local e seen=
+        for e in "${PROMPT_COMMAND[@]}"; do
+            [[ -n $seen ]] && __shift_late+=$e$'\n'
+            [[ $e == __shift_prompt_end ]] && seen=1
+        done
+    elif [[ $PROMPT_COMMAND == *__shift_prompt_end* ]]; then
+        __shift_late=${PROMPT_COMMAND##*__shift_prompt_end}
+    fi
 }
 
 # Runs after every other PROMPT_COMMAND entry, so it sees the final PS1.
@@ -91,6 +117,18 @@ if [[ "$(declare -p PROMPT_COMMAND 2>/dev/null)" == "declare -a"* ]]; then
     PROMPT_COMMAND=(__shift_prompt_command "${PROMPT_COMMAND[@]}" __shift_prompt_end)
 else
     PROMPT_COMMAND="__shift_prompt_command${PROMPT_COMMAND:+$'\n'$PROMPT_COMMAND}"$'\n'__shift_prompt_end
+fi
+
+# Children: bash has no ZDOTDIR, only `--rcfile` reaches a child, so `bash`
+# and `exec bash` typed at this prompt get it through an alias (the trailing
+# space of `exec ` lets the alias expand after it). Non-interactive uses
+# (`bash -c`, scripts) ignore --rcfile. Your own aliases of these names win.
+if [[ -f "${SHIFT_INTEGRATION_BASH%/*}/bashrc-child" ]]; then
+    printf -v __shift_child_rc '%q' "${SHIFT_INTEGRATION_BASH%/*}/bashrc-child"
+    # shellcheck disable=SC2139  # the path is meant to expand now
+    alias bash >/dev/null 2>&1 || alias bash="bash --rcfile $__shift_child_rc"
+    alias exec >/dev/null 2>&1 || alias exec='exec '
+    unset __shift_child_rc
 fi
 
 # C marker. bash >= 4.4 expands PS0 right after a command is read and before

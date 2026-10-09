@@ -36,6 +36,9 @@ pub enum SessionEvent {
         body: String,
     },
     Bell,
+    /// Something the user should know about the pane's connection (a
+    /// durable session reconnected with output or input lost).
+    Notice(String),
     Exit,
 }
 
@@ -71,12 +74,75 @@ impl Dimensions for GridSize {
     }
 }
 
+/// Input typed while a dropped service connection is being replaced, at
+/// most this many bytes (a paste larger than this is cut and reported).
+const MAX_PENDING_INPUT: usize = 64 * 1024;
+
+/// The connection to the session service that input and requests go on.
+pub(crate) struct ServiceConn {
+    stream: std::os::unix::net::UnixStream,
+    /// `Some` while the connection is down: input waits here, in order, and
+    /// goes out on the replacement (see [`ServiceConn::reconnected`]).
+    pending: Option<Vec<u8>>,
+    /// Input bytes dropped because `pending` was full.
+    dropped: usize,
+}
+
+impl ServiceConn {
+    fn new(stream: std::os::unix::net::UnixStream) -> Self {
+        Self {
+            stream,
+            pending: None,
+            dropped: 0,
+        }
+    }
+
+    /// Send input, or hold it while the connection is down. A frame is
+    /// written whole or not at all as far as the service is concerned (it
+    /// drops a partial frame with the connection), so the chunk that failed
+    /// and everything after it are held, never one already sent.
+    fn input(&mut self, session: u64, bytes: &[u8]) {
+        if self.pending.is_none() {
+            for (i, chunk) in bytes.chunks(crate::ipc::MAX_INPUT_CHUNK).enumerate() {
+                if crate::ipc::send_input(&mut self.stream, session, chunk).is_err() {
+                    self.pending = Some(Vec::new());
+                    self.hold(&bytes[i * crate::ipc::MAX_INPUT_CHUNK..]);
+                    return;
+                }
+            }
+            return;
+        }
+        self.hold(bytes);
+    }
+
+    fn hold(&mut self, bytes: &[u8]) {
+        let pending = self.pending.get_or_insert_with(Vec::new);
+        let room = MAX_PENDING_INPUT.saturating_sub(pending.len());
+        pending.extend_from_slice(&bytes[..bytes.len().min(room)]);
+        self.dropped += bytes.len().saturating_sub(room);
+    }
+
+    /// The connection dropped: hold input from now on.
+    fn down(&mut self) {
+        self.pending.get_or_insert_with(Vec::new);
+    }
+
+    /// Switch to `stream` and send the input held meanwhile. Returns the
+    /// number of input bytes that were dropped (pending was full).
+    fn reconnected(&mut self, stream: std::os::unix::net::UnixStream, session: u64) -> usize {
+        self.stream = stream;
+        let held = self.pending.take().unwrap_or_default();
+        self.input(session, &held);
+        std::mem::take(&mut self.dropped)
+    }
+}
+
 /// Where bytes for the shell go: the local PTY, or the session service.
 #[derive(Clone)]
 pub(crate) enum PtyWriter {
     File(Arc<File>),
     Service {
-        conn: Arc<Mutex<std::os::unix::net::UnixStream>>,
+        conn: Arc<Mutex<ServiceConn>>,
         session: u64,
         /// Set while retained output is replayed after (re)attaching: the
         /// terminal's automatic replies (device attributes, graphics OKs)
@@ -93,7 +159,7 @@ impl PtyWriter {
                 let _ = (&**f).write_all(bytes);
             }
             PtyWriter::Service { conn, session, .. } => {
-                let _ = crate::ipc::send_input(&mut *conn.lock().unwrap(), *session, bytes);
+                conn.lock().unwrap().input(*session, bytes);
             }
         }
     }
@@ -214,8 +280,9 @@ pub struct Session {
     scrollback: usize,
 }
 
-/// A transcript to replay: terminal bytes, and (duration, cwd) per block.
-pub type Replay = (Vec<u8>, Vec<(std::time::Duration, Option<String>)>);
+/// A transcript to replay: terminal bytes, and (duration, cwd, command) per
+/// block.
+pub type Replay = (Vec<u8>, Vec<shift_core::Restored>);
 
 /// Who owns the shell.
 enum Backend {
@@ -223,7 +290,7 @@ enum Backend {
     Local(tty::Pty),
     /// The session service: the shell outlives this window.
     Service {
-        conn: Arc<Mutex<std::os::unix::net::UnixStream>>,
+        conn: Arc<Mutex<ServiceConn>>,
         session: u64,
         /// Foreground job reported by the service.
         job: Arc<Mutex<Option<String>>>,
@@ -332,14 +399,16 @@ enum Source {
         muted: Arc<AtomicBool>,
         job: Arc<Mutex<Option<String>>>,
         /// The connection `PtyWriter` sends input on (replaced on resume).
-        conn: Arc<Mutex<std::os::unix::net::UnixStream>>,
+        conn: Arc<Mutex<ServiceConn>>,
+        session: u64,
         /// Reattach after the byte `u64` (see [`crate::service::resume`]).
         resume: Resume,
     },
 }
 
-/// Opens a fresh service connection streaming output after the given byte.
-type Resume = Box<dyn FnMut(u64) -> std::io::Result<std::os::unix::net::UnixStream> + Send>;
+/// Opens a fresh service connection streaming output after the given byte;
+/// true when output before it was no longer retained.
+type Resume = Box<dyn FnMut(u64) -> std::io::Result<(std::os::unix::net::UnixStream, bool)> + Send>;
 
 /// Consecutive failed resumes (no output in between) before the pane gives up.
 const MAX_RESUMES: u32 = 5;
@@ -390,6 +459,10 @@ impl Reader {
         true
     }
 
+    fn notice(&self, message: &str) {
+        (self.observer)(self.id, SessionEvent::Notice(message.into()));
+    }
+
     fn run(self, source: Source) {
         let mut parser: vte::ansi::Processor = vte::ansi::Processor::new();
         let mut scanner = OscScanner::new();
@@ -417,6 +490,7 @@ impl Reader {
                 muted,
                 job,
                 conn,
+                session,
                 mut resume,
             } => {
                 use crate::ipc::{Event as Ev, Frame, read_frame};
@@ -440,13 +514,48 @@ impl Reader {
                                 break;
                             }
                             muted.store(true, Ordering::Release);
+                            // typing goes on while we reconnect: hold it
+                            conn.lock().unwrap().down();
                             std::thread::sleep(std::time::Duration::from_millis(
                                 100 * u64::from(resumes),
                             ));
-                            let Ok(fresh) = resume(next_seq) else { break };
+                            let Ok((fresh, truncated)) = resume(next_seq) else {
+                                break;
+                            };
                             let Ok(writer) = fresh.try_clone() else { break };
-                            *conn.lock().unwrap() = writer;
+                            let dropped = {
+                                let mut c = conn.lock().unwrap();
+                                // the window may have changed while down
+                                let ws = *self.ctx.window_size.lock().unwrap();
+                                let _ = crate::ipc::send_json(
+                                    &mut &writer,
+                                    &crate::ipc::Request::Resize {
+                                        session,
+                                        cols: ws.num_cols,
+                                        rows: ws.num_lines,
+                                        cell_w: ws.cell_width,
+                                        cell_h: ws.cell_height,
+                                    },
+                                );
+                                c.reconnected(writer, session)
+                            };
                             stream = fresh;
+                            if truncated {
+                                // the replay starts at an arbitrary byte,
+                                // maybe inside an escape sequence
+                                parser = vte::ansi::Processor::new();
+                                scanner = OscScanner::new();
+                                self.notice(
+                                    "Reconnected to the session service; output produced \
+                                     meanwhile was too long to keep and is missing.",
+                                );
+                            }
+                            if dropped > 0 {
+                                self.notice(&format!(
+                                    "Reconnected to the session service; {dropped} bytes of \
+                                     input typed meanwhile were dropped."
+                                ));
+                            }
                             continue;
                         }
                     };
@@ -532,7 +641,7 @@ impl Session {
                     env,
                     window_size,
                 )?;
-                let conn = Arc::new(Mutex::new(stream.try_clone()?));
+                let conn = Arc::new(Mutex::new(ServiceConn::new(stream.try_clone()?)));
                 let muted = Arc::new(AtomicBool::new(true));
                 let job = Arc::new(Mutex::new(None));
                 let writer = PtyWriter::Service {
@@ -545,6 +654,7 @@ impl Session {
                     muted,
                     job: job.clone(),
                     conn: conn.clone(),
+                    session,
                     resume: Box::new(move |from| crate::service::resume(session, from)),
                 };
                 (Backend::Service { conn, session, job }, writer, source)
@@ -677,7 +787,7 @@ impl Session {
     pub fn terminate(&self) {
         if let Backend::Service { conn, session, .. } = &self.backend {
             let _ = crate::ipc::send_json(
-                &mut *conn.lock().unwrap(),
+                &mut conn.lock().unwrap().stream,
                 &crate::ipc::Request::Kill { session: *session },
             );
         }
@@ -727,7 +837,7 @@ impl Session {
         // a reattach must not bring the cleared output back
         if let Backend::Service { conn, session, .. } = &self.backend {
             let _ = crate::ipc::send_json(
-                &mut *conn.lock().unwrap(),
+                &mut conn.lock().unwrap().stream,
                 &crate::ipc::Request::ClearHistory { session: *session },
             );
         }
@@ -764,7 +874,7 @@ impl Session {
             Backend::Local(pty) => pty.on_resize(ws),
             Backend::Service { conn, session, .. } => {
                 let _ = crate::ipc::send_json(
-                    &mut *conn.lock().unwrap(),
+                    &mut conn.lock().unwrap().stream,
                     &crate::ipc::Request::Resize {
                         session: *session,
                         cols: ws.num_cols,
@@ -985,7 +1095,15 @@ fn feed(parser: &mut vte::ansi::Processor, scanner: &mut OscScanner, bytes: &[u8
                     observer(*id, SessionEvent::Notify { title, body });
                 }
             }
-            Some(marker) => apply_marker(marker, &term, scrolled_cur, &ctx.blocks, &ctx.cwd),
+            Some(marker) => {
+                if matches!(marker, Marker::Done { .. })
+                    && ctx.blocks.lock().unwrap().any_running()
+                    && end_partial_line(parser, &mut term, &mut scrolled_cur, ctx.scrollback)
+                {
+                    ctx.blocks.lock().unwrap().mark_unterminated();
+                }
+                apply_marker(marker, &term, scrolled_cur, &ctx.blocks, &ctx.cwd)
+            }
             None => {}
         }
     }
@@ -997,6 +1115,34 @@ fn feed(parser: &mut vte::ansi::Processor, scanner: &mut OscScanner, bytes: &[u8
         ctx.graphics.lock().unwrap().prune(oldest);
     }
     ctx.scrolled.store(scrolled_cur, Ordering::Release);
+}
+
+/// Output that ended without a newline leaves the cursor mid-row when the
+/// command finishes (133;D). Move to a fresh row locally (zsh PROMPT_SP
+/// style, never written to the PTY) so the partial row stays inside the
+/// block's output range and the next prompt does not share it. True when it
+/// moved.
+fn end_partial_line(
+    parser: &mut vte::ansi::Processor,
+    term: &mut Term<EventProxy>,
+    scrolled: &mut u64,
+    scrollback: usize,
+) -> bool {
+    use alacritty_terminal::term::TermMode;
+    let cursor = &term.grid().cursor;
+    if term.mode().contains(TermMode::ALT_SCREEN)
+        || (cursor.point.column.0 == 0 && !cursor.input_needs_wrap)
+    {
+        return false;
+    }
+    let mut abs = AbsTerm {
+        term,
+        scrolled,
+        scrollback_cap: scrollback,
+        saw_clear_saved: false,
+    };
+    parser.advance(&mut abs, b"\r\n");
+    true
 }
 
 fn cell_px(ws: &Mutex<WindowSize>) -> (u32, u32) {
@@ -1124,10 +1270,16 @@ fn extract_text(
         let cols = grid.columns();
         let from = if abs == start_line { start_col } else { 0 };
         let wraps = cols > 0 && row[Column(cols - 1)].flags.contains(Flags::WRAPLINE);
-        let mut text: String = (from..cols)
-            .filter(|c| !row[Column(*c)].flags.contains(Flags::WIDE_CHAR_SPACER))
-            .map(|c| row[Column(c)].c)
-            .collect();
+        let mut text = String::new();
+        for c in from..cols {
+            let cell = &row[Column(c)];
+            if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                continue;
+            }
+            text.push(cell.c);
+            // combining marks belong to the command (e + U+0301 is "é")
+            text.extend(cell.zerowidth().unwrap_or_default());
+        }
         if !wraps {
             while text.ends_with(' ') {
                 text.pop();
@@ -1188,7 +1340,8 @@ mod tests {
         FeedCtx {
             term: Arc::new(FairMutex::new(term(cols, rows))),
             scrolled: Arc::new(AtomicU64::new(0)),
-            scrollback: 100,
+            // the grid's own cap (TermConfig::default)
+            scrollback: 10_000,
             blocks: Arc::new(Mutex::new(BlockStore::default())),
             cwd: Arc::new(Mutex::new(None)),
             graphics: Arc::new(Mutex::new(Graphics::default())),
@@ -1244,6 +1397,45 @@ mod tests {
             1,
             "block pruned on alt screen"
         );
+    }
+
+    #[test]
+    fn output_without_final_newline_stays_in_its_block() {
+        let c = ctx(20, 6);
+        let mut p = vte::ansi::Processor::new();
+        let mut s = OscScanner::new();
+        let run = |cmd: &str, out: &str| {
+            format!(
+                "\x1b]133;A\x07$ \x1b]133;B\x07{cmd}\r\n\x1b]133;C\x07{out}\x1b]133;D;0\x07\x1b]133;A\x07$ "
+            )
+        };
+        feed(&mut p, &mut s, run("printf X", "NO_NEWLINE").as_bytes(), &c);
+        let b = c.blocks.lock().unwrap().snapshot();
+        let (o, e) = b[0].output_range().expect("partial row is output");
+        assert_eq!((o, e), (1, 2));
+        assert_eq!(abs_text(&c, 1), "NO_NEWLINE");
+        assert!(b[0].unterminated);
+        // the next prompt starts on its own row
+        assert_eq!(b[1].prompt_start, 2);
+        assert_eq!(abs_text(&c, 2), "$");
+        // newline-terminated and multi-line-plus-tail output are unchanged
+        let c = ctx(20, 8);
+        feed(&mut p, &mut s, run("a", "one\r\n").as_bytes(), &c);
+        feed(&mut p, &mut s, b"\r", &c);
+        feed(&mut p, &mut s, run("b", "x\r\ny\r\ntail").as_bytes(), &c);
+        let b = c.blocks.lock().unwrap().snapshot();
+        assert_eq!(b[0].output_range(), Some((1, 2)));
+        assert!(!b[0].unterminated);
+        assert_eq!(b[1].output_range(), Some((3, 6)));
+        assert!(b[1].unterminated);
+        assert_eq!(abs_text(&c, 5), "tail");
+        assert_eq!(b[2].prompt_start, 6);
+        // empty output: no range, no extra row
+        let c = ctx(20, 6);
+        feed(&mut p, &mut s, run("true", "").as_bytes(), &c);
+        let b = c.blocks.lock().unwrap().snapshot();
+        assert_eq!(b[0].output_range(), None);
+        assert_eq!(b[1].prompt_start, 1);
     }
 
     /// Text of abs line `abs` on the active grid.
@@ -1308,7 +1500,8 @@ mod tests {
             stream,
             muted: Arc::new(AtomicBool::new(false)),
             job: Arc::new(Mutex::new(None)),
-            conn: Arc::new(Mutex::new(conn)),
+            conn: Arc::new(Mutex::new(ServiceConn::new(conn))),
+            session: 9,
             resume,
         };
         (std::thread::spawn(move || reader.run(source)), exit_rx)
@@ -1336,7 +1529,8 @@ mod tests {
             first,
             Box::new(move |from| {
                 asked_in.store(from, Ordering::Release);
-                second.take().ok_or_else(|| std::io::Error::other("gone"))
+                let s = second.take().ok_or_else(|| std::io::Error::other("gone"))?;
+                Ok((s, false))
             }),
         );
         exited
@@ -1354,6 +1548,117 @@ mod tests {
         };
         assert_eq!(row, "abcd", "output before and after the drop, once each");
         assert!(exited.try_recv().is_err(), "one Exit");
+    }
+
+    /// Every input byte the service side of `peer` received, in order.
+    fn received_input(peer: std::os::unix::net::UnixStream) -> Vec<u8> {
+        let mut peer = peer;
+        let mut got = Vec::new();
+        while let Ok(Some(f)) = crate::ipc::read_frame(&mut peer) {
+            if let crate::ipc::Frame::Input { session: 9, bytes } = f {
+                got.extend(bytes);
+            }
+        }
+        got
+    }
+
+    #[test]
+    fn input_typed_while_reconnecting_arrives_once_in_order() {
+        use std::os::unix::net::UnixStream;
+        let (old, old_peer) = UnixStream::pair().unwrap();
+        let mut conn = ServiceConn::new(old);
+        conn.input(9, b"one ");
+        let old_got = std::thread::spawn(move || received_input(old_peer));
+        // the service drops this client after reading what it was sent
+        conn.stream.shutdown(std::net::Shutdown::Write).unwrap();
+        assert_eq!(old_got.join().unwrap(), b"one ");
+        // the write fails on the dead connection: held, not lost
+        conn.input(9, b"two ");
+        assert!(conn.pending.is_some());
+        conn.down();
+        conn.input(9, b"three ");
+        let (new, new_peer) = UnixStream::pair().unwrap();
+        assert_eq!(conn.reconnected(new, 9), 0);
+        conn.input(9, b"four");
+        drop(conn);
+        // sent on the old connection is not sent again
+        assert_eq!(received_input(new_peer), b"two three four");
+    }
+
+    #[test]
+    fn input_held_past_the_bound_is_cut_and_counted() {
+        use std::os::unix::net::UnixStream;
+        let (old, _old_peer) = UnixStream::pair().unwrap();
+        let mut conn = ServiceConn::new(old);
+        conn.down();
+        conn.input(9, &vec![b'x'; MAX_PENDING_INPUT - 1]);
+        conn.input(9, b"yz!");
+        let (new, new_peer) = UnixStream::pair().unwrap();
+        // more than a socket buffer: read while it is sent
+        let got = std::thread::spawn(move || received_input(new_peer));
+        assert_eq!(conn.reconnected(new, 9), 2, "two bytes did not fit");
+        drop(conn);
+        let got = got.join().unwrap();
+        assert_eq!(got.len(), MAX_PENDING_INPUT);
+        assert!(got.ends_with(b"xy"));
+    }
+
+    #[test]
+    fn truncated_resume_resets_the_parser_and_tells_the_user() {
+        use crate::ipc::{Event as Ev, send_json, send_output};
+        use std::os::unix::net::UnixStream;
+        let c = ctx(20, 5);
+        let term = c.term.clone();
+        let (first, mut first_peer) = UnixStream::pair().unwrap();
+        let (second, mut second_peer) = UnixStream::pair().unwrap();
+        // the drop cuts an escape sequence (ECH, CSI 3 X) in half
+        send_output(&mut first_peer, 9, 0, 1, b"ab\x1b[3").unwrap();
+        drop(first_peer);
+        send_output(&mut second_peer, 9, 900, 1, b"Xy").unwrap();
+        send_json(&mut second_peer, &Ev::ReplayDone { session: 9 }).unwrap();
+        send_json(&mut second_peer, &Ev::Exited { session: 9 }).unwrap();
+        let (conn, _conn_peer) = UnixStream::pair().unwrap();
+        let notices = Arc::new(Mutex::new(Vec::new()));
+        let (seen, (done_tx, done)) = (notices.clone(), std::sync::mpsc::channel());
+        let done_tx = Mutex::new(done_tx);
+        let reader = Reader {
+            id: 1,
+            ctx: c,
+            dirty: Arc::new(AtomicBool::new(false)),
+            saw_output: Arc::new(AtomicBool::new(false)),
+            observer: Arc::new(move |_, ev| match ev {
+                SessionEvent::Notice(m) => seen.lock().unwrap().push(m),
+                SessionEvent::Exit => {
+                    let _ = done_tx.lock().unwrap().send(());
+                }
+                _ => {}
+            }),
+        };
+        let mut second = Some(second);
+        let source = Source::Service {
+            stream: first,
+            muted: Arc::new(AtomicBool::new(false)),
+            job: Arc::new(Mutex::new(None)),
+            conn: Arc::new(Mutex::new(ServiceConn::new(conn))),
+            session: 9,
+            resume: Box::new(move |_| {
+                let s = second.take().ok_or(std::io::ErrorKind::NotFound)?;
+                Ok((s, true))
+            }),
+        };
+        let handle = std::thread::spawn(move || reader.run(source));
+        done.recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+        handle.join().unwrap();
+        let row: String = {
+            let t = term.lock();
+            (0..4).map(|i| t.grid()[Line(0)][Column(i)].c).collect()
+        };
+        // without the reset, "X" would end the cut sequence and vanish
+        assert_eq!(row, "abXy");
+        let notices = notices.lock().unwrap();
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].contains("missing"));
     }
 
     #[test]

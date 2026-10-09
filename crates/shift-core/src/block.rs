@@ -3,6 +3,9 @@ use std::time::{Duration, Instant};
 pub type BlockId = u64;
 /// Monotone absolute line index (never reused, survives scrollback trim).
 pub type AbsLine = u64;
+/// A transcript block's (duration, directory, exact command), for
+/// [`BlockStore::mark_restored`].
+pub type Restored = (Duration, Option<String>, String);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum BlockState {
@@ -30,6 +33,10 @@ pub struct Block {
     pub output_start: Option<AbsLine>,
     /// One past the last output line (OSC 133;D).
     pub end: Option<AbsLine>,
+    /// The output's last row has no newline of its own (`printf x`): the
+    /// terminal moved to a fresh row for the prompt, so a copy must not
+    /// end in one.
+    pub unterminated: bool,
     pub collapsed: bool,
     /// Marked for quick navigation (Warp-style block bookmarks).
     pub bookmarked: bool,
@@ -80,6 +87,10 @@ pub struct BlockStore {
     /// When set, markers are timestamped with this instant instead of now
     /// (output replayed from the session service keeps its original time).
     clock: Option<Instant>,
+    /// Exact text the app submitted from its editor, waiting for 133;C. It
+    /// wins over the text read back from the screen, which loses combining
+    /// marks and turns continuation prompts (PS2) into command text.
+    submitted: Option<String>,
 }
 
 impl BlockStore {
@@ -93,6 +104,8 @@ impl BlockStore {
 
     pub fn on_prompt_start(&mut self, abs: AbsLine) {
         let now = self.now();
+        // a new prompt without 133;C: the submission ran nothing
+        self.submitted = None;
         // an unfinished Running block means we missed D — close it here
         if let Some(last) = self.blocks.back_mut() {
             match last.state {
@@ -120,6 +133,7 @@ impl BlockStore {
             command_start: None,
             output_start: None,
             end: None,
+            unterminated: false,
             collapsed: false,
             bookmarked: false,
             cwd: None,
@@ -130,17 +144,19 @@ impl BlockStore {
     }
 
     /// Mark every finished block as replayed from a transcript, giving each
-    /// its saved duration and directory (in order, oldest first).
-    pub fn mark_restored(&mut self, meta: &[(Duration, Option<String>)]) {
+    /// its saved duration, directory and exact command (in order, oldest
+    /// first) — the replayed screen text flattens newlines.
+    pub fn mark_restored(&mut self, meta: &[Restored]) {
         let done = self
             .blocks
             .iter_mut()
             .filter(|b| matches!(b.state, BlockState::Done { .. }));
-        for (b, (d, cwd)) in done.zip(meta) {
+        for (b, (d, cwd, command)) in done.zip(meta) {
             if let BlockState::Done { duration, .. } = &mut b.state {
                 *duration = *d;
             }
             b.cwd = cwd.clone();
+            b.command = command.clone();
             b.restored = true;
         }
     }
@@ -159,6 +175,19 @@ impl BlockStore {
         }
     }
 
+    /// The app submitted `command` from its editor: stamp prompt-time
+    /// context and keep the exact text for the block 133;C starts.
+    pub fn stamp_submit(&mut self, cwd: Option<String>, branch: Option<String>, command: &str) {
+        self.stamp_context(cwd, branch);
+        if self
+            .blocks
+            .back()
+            .is_some_and(|b| b.state == BlockState::Prompt)
+        {
+            self.submitted = Some(command.to_string());
+        }
+    }
+
     pub fn on_command_start(&mut self, abs: AbsLine, col: usize) {
         if let Some(last) = self.blocks.back_mut()
             && last.state == BlockState::Prompt
@@ -167,12 +196,15 @@ impl BlockStore {
         }
     }
 
+    /// `command` is the text read back from the screen; a submission from
+    /// the app's editor ([`BlockStore::stamp_submit`]) replaces it.
     pub fn on_output_start(&mut self, abs: AbsLine, command: String) {
         let now = self.now();
+        let submitted = self.submitted.take();
         if let Some(last) = self.blocks.back_mut()
             && last.state == BlockState::Prompt
         {
-            last.command = command;
+            last.command = submitted.unwrap_or(command);
             last.output_start = Some(abs);
             last.state = BlockState::Running { started: now };
         }
@@ -188,6 +220,16 @@ impl BlockStore {
                 exit,
                 duration: now.saturating_duration_since(started),
             };
+        }
+    }
+
+    /// The running command's output ended mid-row (see
+    /// [`Block::unterminated`]); call before its 133;D.
+    pub fn mark_unterminated(&mut self) {
+        if let Some(last) = self.blocks.back_mut()
+            && matches!(last.state, BlockState::Running { .. })
+        {
+            last.unterminated = true;
         }
     }
 
@@ -307,6 +349,34 @@ mod tests {
         assert_eq!(b.exit_code(), Some(0));
         assert_eq!(b.suppressed_range(), Some((10, 12)));
         assert_eq!(b.output_range(), Some((12, 20)));
+    }
+
+    #[test]
+    fn submitted_text_wins_over_screen_text() {
+        let mut s = BlockStore::default();
+        s.on_prompt_start(0);
+        let exact = "printf 'first\nsecond\n' caf\u{65}\u{301}";
+        s.stamp_submit(None, None, exact);
+        s.on_output_start(2, "printf 'first cont> second' cafe".into());
+        assert_eq!(s.last().unwrap().command, exact);
+        s.on_done(3, Some(0));
+        // raw passthrough (no submission): the screen text is all there is
+        s.on_prompt_start(3);
+        s.on_output_start(4, "ls".into());
+        assert_eq!(s.last().unwrap().command, "ls");
+        s.on_done(5, Some(0));
+        // a submission that ran nothing does not label the next command
+        s.on_prompt_start(5);
+        s.stamp_submit(None, None, "# comment");
+        s.on_prompt_start(6);
+        s.on_output_start(7, "pwd".into());
+        assert_eq!(s.last().unwrap().command, "pwd");
+        // nor does one made while a command is running
+        s.stamp_submit(None, None, "typed ahead");
+        s.on_done(8, Some(0));
+        s.on_prompt_start(8);
+        s.on_output_start(9, "date".into());
+        assert_eq!(s.last().unwrap().command, "date");
     }
 
     #[test]

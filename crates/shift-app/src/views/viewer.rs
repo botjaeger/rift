@@ -359,10 +359,10 @@ pub fn render(
 ) -> Vec<([f32; 4], ViewerHit)> {
     let [x, y, w, h] = rect;
     let mut hits = Vec::new();
-    layer.rect([x, y], [w, h], theme.bg, 0.0);
+    layer.rect([x, y], [w, h], theme.ground(theme.bg), 0.0);
 
     // ── header: path, read-only chip, insert path, close ──
-    layer.rect([x, y], [w, HEADER_H], theme.bg_chrome, 0.0);
+    layer.rect([x, y], [w, HEADER_H], theme.ground(theme.bg_chrome), 0.0);
     layer.text(
         sans(engine, rel, 12.5, Weight::MEDIUM),
         x + 16.0,

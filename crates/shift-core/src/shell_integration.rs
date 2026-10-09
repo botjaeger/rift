@@ -5,6 +5,7 @@ pub const SHIFT_ZSH: &str = include_str!("../../../shell/shift.zsh");
 pub const SHIFT_BASH: &str = include_str!("../../../shell/shift.bash");
 pub const SHIFT_FISH: &str = include_str!("../../../shell/shift.fish");
 const BASHRC: &str = include_str!("../../../shell/shift-bashrc");
+const BASHRC_CHILD: &str = include_str!("../../../shell/shift-bashrc-child");
 const ZSHENV: &str = include_str!("../../../shell/zdotdir/.zshenv");
 const ZPROFILE: &str = include_str!("../../../shell/zdotdir/.zprofile");
 const ZSHRC: &str = include_str!("../../../shell/zdotdir/.zshrc");
@@ -36,6 +37,7 @@ fn write_files() -> std::io::Result<Vec<(String, String)>> {
     let bash_integration = base.join("shift.bash");
     write_if_changed(&bash_integration, SHIFT_BASH)?;
     write_if_changed(&base.join("bashrc"), BASHRC)?;
+    write_if_changed(&base.join("bashrc-child"), BASHRC_CHILD)?;
     // fish auto-loads vendor_conf.d from XDG_DATA_DIRS (appended at spawn)
     let fish_dir = base.join("fish/vendor_conf.d");
     std::fs::create_dir_all(&fish_dir)?;

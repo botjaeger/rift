@@ -181,9 +181,48 @@ pub struct Theme {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background_image: Option<BackgroundImage>,
+
+    /// Window opacity (`window_opacity`), set by the app, never by a theme
+    /// file. Below 1 the window ground goes translucent the way Warp's does
+    /// (see [`Theme::window_ground`] and [`Theme::ground`]).
+    #[serde(skip, default = "one")]
+    pub ground_alpha: f32,
 }
 
 impl Theme {
+    /// Fill for a surface that is part of the window ground (tab bar, side
+    /// panels, split gutter, pane body): its own colour while the window is
+    /// opaque; none while translucent, so the uniform ground shows through
+    /// — Warp's tab bar, panels and panes have no fill of their own.
+    pub fn ground(&self, c: Color) -> Color {
+        if self.ground_alpha < 1.0 {
+            c.with_alpha(0.0)
+        } else {
+            c
+        }
+    }
+
+    /// The window ground (the frame's clear colour, straight alpha). Opaque:
+    /// `bg`. Translucent, as Warp draws it: `surface_2` (bg + 10 % fg) at the
+    /// window opacity, then `bg` at the window opacity over it — two layers,
+    /// so the covered fraction is `1 − (1 − a)²`.
+    pub fn window_ground(&self) -> Color {
+        let a = self.ground_alpha;
+        if a >= 1.0 {
+            return self.bg;
+        }
+        // Warp's neutral_2: fg at alpha byte 25 (10 %) blended onto bg
+        let surface_2 = self.bg.mix(self.fg.with_alpha(self.bg.a), 25.0 / 255.0);
+        let out_a = a + a * (1.0 - a);
+        let ch = |top: f32, bottom: f32| (a * top + (1.0 - a) * a * bottom) / out_a;
+        Color {
+            r: ch(self.bg.r, surface_2.r),
+            g: ch(self.bg.g, surface_2.g),
+            b: ch(self.bg.b, surface_2.b),
+            a: out_a,
+        }
+    }
+
     pub fn parse_toml(s: &str) -> Result<Self, toml::de::Error> {
         toml::from_str(s)
     }
@@ -307,6 +346,22 @@ mod tests {
             assert!(back.background_image.is_none(), "{}", t.name);
         }
         assert_eq!(builtin::all().len(), BUILTIN_NAMES.len());
+    }
+
+    #[test]
+    fn window_ground_matches_warp_layers() {
+        let mut t = Theme::default();
+        assert_eq!(t.window_ground(), t.bg);
+        assert_eq!(t.ground(t.bg_chrome), t.bg_chrome);
+        t.ground_alpha = 0.5;
+        let g = t.window_ground();
+        // two stacked layers at 0.5 cover 0.75
+        assert!((g.a - 0.75).abs() < 1e-6);
+        // composite over black: 0.5·bg + 0.25·surface_2, surface_2 = bg + ~10 % fg
+        let surface_2 = t.bg.r + (t.fg.r - t.bg.r) * (25.0 / 255.0);
+        assert!((g.r * g.a - (0.5 * t.bg.r + 0.25 * surface_2)).abs() < 1e-5);
+        // ground surfaces draw nothing of their own while translucent
+        assert_eq!(t.ground(t.bg_chrome).a, 0.0);
     }
 
     #[test]

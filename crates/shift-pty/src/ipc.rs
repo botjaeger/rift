@@ -167,9 +167,12 @@ pub fn send_output(
     )
 }
 
+/// Input bytes per frame: large pastes are split to stay under the frame
+/// limit.
+pub const MAX_INPUT_CHUNK: usize = MAX_FRAME / 2;
+
 pub fn send_input(w: &mut impl Write, session: u64, bytes: &[u8]) -> std::io::Result<()> {
-    // large pastes are split to stay under the frame limit
-    for chunk in bytes.chunks(MAX_FRAME / 2) {
+    for chunk in bytes.chunks(MAX_INPUT_CHUNK) {
         write_frame(w, FRAME_INPUT, &[&session.to_be_bytes(), chunk])?;
     }
     Ok(())

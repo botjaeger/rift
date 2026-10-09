@@ -110,7 +110,12 @@ pub fn render(
     panels: PanelButtons,
     hits: &mut Vec<Hit>,
 ) {
-    layer.rect([0.0, 0.0], [w, TAB_BAR_H], theme.bg_chrome, 0.0);
+    layer.rect(
+        [0.0, 0.0],
+        [w, TAB_BAR_H],
+        theme.ground(theme.bg_chrome),
+        0.0,
+    );
     layer.hline(0.0, TAB_BAR_H - 1.0, w, 1.0, theme.border);
 
     // Warp layout: the sidebar (file explorer) toggle right after the
@@ -216,7 +221,7 @@ pub fn render(
     );
     if panels.unread > 0 {
         let c = [inbox[0] + size - 7.0, by + 7.0];
-        layer.circle(c, 8.5, theme.bg_chrome);
+        layer.circle(c, 8.5, theme.ground(theme.bg_chrome));
         layer.circle(c, 6.0, theme.accent);
     }
     hits.push(Hit {
@@ -553,7 +558,7 @@ pub fn render_rail(
     layer.rect(
         [0.0, TAB_BAR_H],
         [RAIL_W, h - TAB_BAR_H],
-        theme.bg_chrome,
+        theme.ground(theme.bg_chrome),
         0.0,
     );
     layer.rect(

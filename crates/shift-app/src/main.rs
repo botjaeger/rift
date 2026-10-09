@@ -13,6 +13,8 @@ mod notify;
 mod pane;
 mod script;
 mod state;
+#[cfg(target_os = "macos")]
+mod translucency;
 mod views;
 mod vim;
 

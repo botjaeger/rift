@@ -5,7 +5,6 @@
 
 use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::index::Line;
 use alacritty_terminal::term::{Term, TermMode};
 use alacritty_terminal::vte::ansi::{
     Attr, CharsetIndex, ClearMode, CursorShape, CursorStyle, Handler, Hyperlink, KeyboardModes,
@@ -21,9 +20,8 @@ use alacritty_terminal::vte::ansi::{
 pub struct AbsTerm<'a, L: EventListener> {
     pub term: &'a mut Term<L>,
     pub scrolled: &'a mut u64,
-    /// Configured scrollback cap — the at-cap estimate below must only fire
-    /// once history has actually reached it (a scroll-region rotation also
-    /// leaves history_size unchanged and would otherwise phantom-count).
+    /// Configured scrollback cap (the grid's history limit), restored after
+    /// every tracked operation.
     pub scrollback_cap: usize,
     /// Set when ED3 (ClearMode::Saved) ran on the primary screen — only the
     /// `clear` command emits it (terminfo E3), never full-screen TUIs, so the
@@ -32,45 +30,42 @@ pub struct AbsTerm<'a, L: EventListener> {
 }
 
 impl<L: EventListener> AbsTerm<'_, L> {
-    fn at_bottom_primary(&self) -> bool {
-        let grid = self.term.grid();
-        !self.term.mode().contains(TermMode::ALT_SCREEN)
-            && grid.cursor.point.line >= Line(grid.screen_lines() as i32 - 1)
-    }
-
     fn primary(&self) -> bool {
         !self.term.mode().contains(TermMode::ALT_SCREEN)
     }
 
-    /// history delta across `f`, with an estimate for the at-cap case where
-    /// history_size() stops growing but lines are still pushed (and trimmed)
-    fn track(&mut self, would_push: usize, f: impl FnOnce(&mut Term<L>)) {
-        let before = self.term.grid().history_size();
-        f(self.term);
-        let after = self.term.grid().history_size();
-        if after > before {
-            *self.scrolled += (after - before) as u64;
-        } else if would_push > 0 && after == before && before >= self.scrollback_cap {
-            // at cap: growth invisible, use the caller's estimate
-            *self.scrolled += would_push as u64;
+    /// Count the lines `f` pushes into primary history. At (or near) the cap
+    /// alacritty pushes and trims in one rotation, so history_size() alone
+    /// cannot see it: lift the limit by a screen first (one operation pushes
+    /// at most a screen of lines), measure the exact growth, then trim back
+    /// to the cap. The alternate screen has no history and pushes nothing.
+    fn track(&mut self, f: impl FnOnce(&mut Term<L>)) {
+        if !self.primary() {
+            f(self.term);
+            return;
         }
+        let grid = self.term.grid_mut();
+        let before = grid.history_size();
+        let headroom = before.max(self.scrollback_cap) + grid.screen_lines();
+        grid.update_history(headroom);
+        f(self.term);
+        let grid = self.term.grid_mut();
+        *self.scrolled += grid.history_size().saturating_sub(before) as u64;
+        grid.update_history(self.scrollback_cap);
     }
 }
 
 impl<L: EventListener> Handler for AbsTerm<'_, L> {
     fn linefeed(&mut self) {
-        let push = usize::from(self.at_bottom_primary());
-        self.track(push, |t| t.linefeed());
+        self.track(|t| t.linefeed());
     }
 
     fn newline(&mut self) {
-        let push = usize::from(self.at_bottom_primary());
-        self.track(push, |t| t.newline());
+        self.track(|t| t.newline());
     }
 
     fn scroll_up(&mut self, count: usize) {
-        let push = if self.primary() { count } else { 0 };
-        self.track(push, |t| t.scroll_up(count));
+        self.track(|t| t.scroll_up(count));
     }
 
     fn clear_screen(&mut self, mode: ClearMode) {
@@ -82,12 +77,7 @@ impl<L: EventListener> Handler for AbsTerm<'_, L> {
             return;
         }
         // alacritty scrolls the viewport into history on ClearMode::All
-        let push = if self.primary() && matches!(mode, ClearMode::All) {
-            (self.term.grid().cursor.point.line.0 + 1).max(0) as usize
-        } else {
-            0
-        };
-        self.track(push, |t| t.clear_screen(mode));
+        self.track(|t| t.clear_screen(mode));
     }
 
     fn reset_state(&mut self) {
@@ -107,12 +97,16 @@ impl<L: EventListener> Handler for AbsTerm<'_, L> {
     }
 
     fn input(&mut self, a0: char) {
-        // a char past the last column auto-wraps first: on the bottom row
-        // that wrap scrolls a line into history like a linefeed
-        let wraps = self.term.grid().cursor.input_needs_wrap
-            && self.term.mode().contains(TermMode::LINE_WRAP);
-        let push = usize::from(wraps && self.at_bottom_primary());
-        self.track(push, |t| t.input(a0));
+        // only a char at the last column can wrap (a pending wrap, or a wide
+        // glyph that does not fit) and so scroll a line into history; the
+        // rest skip the tracking cost
+        let grid = self.term.grid();
+        let cursor = &grid.cursor;
+        if cursor.input_needs_wrap || cursor.point.column.0 + 1 >= grid.columns() {
+            self.track(|t| t.input(a0));
+        } else {
+            self.term.input(a0);
+        }
     }
 
     fn goto(&mut self, a0: i32, a1: usize) {
@@ -197,7 +191,7 @@ impl<L: EventListener> Handler for AbsTerm<'_, L> {
 
     fn delete_lines(&mut self, a0: usize) {
         // on the top row of a full-screen region this scrolls into history
-        self.track(0, |t| t.delete_lines(a0));
+        self.track(|t| t.delete_lines(a0));
     }
 
     fn erase_chars(&mut self, a0: usize) {
@@ -388,5 +382,60 @@ mod tests {
         // exact byte sequence /usr/bin/clear emits for xterm-256color
         parser.advance(&mut abs, b"\x1b[3J\x1b[H\x1b[2J");
         assert!(abs.saw_clear_saved);
+    }
+
+    /// `scrolled` delta of `seq` on a 5×3 grid after four lines filled
+    /// history up to `cap`.
+    fn delta(cap: usize, seq: &str) -> u64 {
+        let size = TermSize::new(5, 3);
+        let config = TermConfig {
+            scrolling_history: cap,
+            ..TermConfig::default()
+        };
+        let mut term = Term::new(config, &size, Noop);
+        let mut scrolled = 0u64;
+        let mut parser: vte::ansi::Processor = vte::ansi::Processor::new();
+        let mut run = |term: &mut Term<Noop>, scrolled: &mut u64, bytes: &[u8]| {
+            let mut abs = AbsTerm {
+                term,
+                scrolled,
+                scrollback_cap: cap,
+                saw_clear_saved: false,
+            };
+            parser.advance(&mut abs, bytes);
+        };
+        run(&mut term, &mut scrolled, b"one\r\ntwo\r\nthree\r\nfour\r\n");
+        assert_eq!(scrolled, 2, "fill, cap {cap}");
+        assert_eq!(term.grid().history_size(), cap.min(2));
+        let before = scrolled;
+        run(&mut term, &mut scrolled, seq.as_bytes());
+        // the grid never keeps more history than its cap
+        assert!(term.grid().history_size() <= cap);
+        scrolled - before
+    }
+
+    #[test]
+    fn pushes_counted_exactly_below_and_at_the_cap() {
+        for cap in [0, 1, 2, 100] {
+            for (name, seq, want) in [
+                ("ordinary wrap", "abcdeX", 1),
+                ("combining mark at the margin", "abcde\u{301}", 0),
+                ("wide glyph early wrap", "abcd界", 1),
+                ("delete lines on the top row", "\x1b[1;1H\x1b[M", 1),
+                ("partial scroll region", "\x1b[2;3r\x1b[S", 0),
+                ("huge scroll up", "\x1b[999S", 3),
+                ("linefeeds crossing the cap", "a\r\nb\r\nc\r\nd\r\n", 4),
+                ("clear screen (two used rows)", "\x1b[H\x1b[2J", 2),
+            ] {
+                assert_eq!(delta(cap, seq), want, "{name}, cap {cap}");
+            }
+        }
+    }
+
+    #[test]
+    fn alternate_screen_pushes_nothing() {
+        for cap in [0, 2, 100] {
+            assert_eq!(delta(cap, "\x1b[?1049h\x1b[999S\r\n\r\n\r\n\r\n"), 0);
+        }
     }
 }

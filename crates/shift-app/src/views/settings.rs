@@ -984,7 +984,9 @@ fn appearance_page(form: &mut Form, config: &Config) {
     );
 
     form.group("Window & theme");
-    let r = form.card(7);
+    // blur exists on macOS only (Warp: not supported on Linux)
+    let blur = cfg!(target_os = "macos");
+    let r = form.card(if blur { 8 } else { 7 });
     let y = row(form, r, 0);
     form.theme_select(y, "Active theme", &config.theme, "theme");
     let y = row(form, r, 1);
@@ -1005,11 +1007,23 @@ fn appearance_page(form: &mut Form, config: &Config) {
     form.slider(
         y,
         "Window opacity",
-        (config.opacity() - 0.3) / 0.7,
+        opacity_slider(config.opacity()),
         &format!("{:.0}%", config.opacity() * 100.0),
         "window_opacity",
     );
-    let y = row(form, r, 4);
+    let mut next = 4;
+    if blur {
+        let y = row(form, r, next);
+        form.slider(
+            y,
+            "Window blur radius",
+            blur_slider(config.blur()),
+            &format!("{} px", config.blur()),
+            "window_blur",
+        );
+        next += 1;
+    }
+    let y = row(form, r, next);
     form.stepper(
         y,
         "Window padding",
@@ -1017,7 +1031,7 @@ fn appearance_page(form: &mut Form, config: &Config) {
         "px",
         "window_padding",
     );
-    let y = row(form, r, 5);
+    let y = row(form, r, next + 1);
     form.toggle_desc(
         y,
         "Font ligatures",
@@ -1025,7 +1039,7 @@ fn appearance_page(form: &mut Form, config: &Config) {
         config.ligatures,
         "ligatures",
     );
-    let y = row(form, r, 6);
+    let y = row(form, r, next + 2);
     form.segment(
         y,
         "Tabs",
@@ -1615,6 +1629,16 @@ fn themes_page(form: &mut Form, config: &Config) {
             ClickTarget::SettingsTheme(i as u8),
         );
     }
+}
+
+/// `window_opacity` (0.01–1.0) as a slider position.
+pub fn opacity_slider(opacity: f32) -> f32 {
+    (opacity - 0.01) / 0.99
+}
+
+/// `window_blur` (1–64 px) as a slider position.
+pub fn blur_slider(blur: u8) -> f32 {
+    (f32::from(blur) - 1.0) / 63.0
 }
 
 #[cfg(test)]

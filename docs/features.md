@@ -15,6 +15,14 @@ Blocks are delimited by shell-integration OSC 133 markers
 - Prompt-time context: the app stamps cwd + git branch onto the block at
   submit; the PTY reader fills cwd for raw-passthrough commands. Old blocks
   keep the context that was true when they ran.
+- The block's command is the exact text submitted from the editor (newlines
+  and combining marks included), so reinput, re-run and copy-command reuse
+  it unchanged. Commands typed in raw passthrough are read back from the
+  screen instead; transcripts keep the exact text.
+- Output that ends without a newline (`printf x`) stays in its block: when
+  the command finishes mid-row, the terminal moves to a fresh row for the
+  prompt (never sent to the shell), and copying the output adds no newline
+  it did not have.
 
 Per-block operations: select (click / ⌘↑ / ⌘↓), copy command/output/both,
 copy cwd, copy git branch, re-run (only at a prompt), reinput into the editor
@@ -174,8 +182,16 @@ ignored. Warp's own files drop in unchanged.
 - **OS theme sync** (`sync_os_theme`): follow the system appearance —
   `theme` while dark, `theme_light` while light — switching live when the OS
   does.
-- **Window opacity** (`window_opacity`, 0.3–1.0): only the terminal grounds
-  (background, chrome, gutter) go translucent; overlays keep full contrast.
+- **Window opacity** (`window_opacity`, 1–100 %), as Warp draws it: below
+  100 % the tab bar, side panels, gutter and panes lose their own fills and
+  share one window ground — Warp's `surface_2` (bg + 10 % fg) at the opacity
+  with `bg` at the opacity over it, so 50 % covers 75 %. Overlays, modals,
+  text and non-default cell colours stay opaque. With a theme background
+  image the image is drawn at the opacity and veiled by `bg` at
+  `(1 − image opacity) × opacity`. The window keeps its macOS shadow.
+- **Window blur** (`window_blur`, 1–64 px, macOS): blurs what is behind a
+  translucent window (Warp's private `CGSSetWindowBackgroundBlurRadius`);
+  1 is effectively none.
 - **Background image**: a theme's `background_image` (path + opacity) is drawn
   under every layer; relative paths resolve against the themes directory.
 - **Font family** (`font_family`): any installed monospace family; an
@@ -251,11 +267,18 @@ automatically:
 
 - **zsh** — ZDOTDIR shim that sources the user's real config first (a
   `ZDOTDIR` set in the user's `~/.zshenv` is honoured for their other files).
+  An interactive `zsh` or `exec zsh` typed at a Shift prompt gets the shim
+  too (for that command only; the shell keeps the user's `ZDOTDIR`).
 - **bash** — spawned with `--rcfile <data dir>/bashrc`, a shim that replays
   bash's own startup files (profile files on macOS, `~/.bashrc` on Linux),
   then sources `shift.bash`. The command-start marker uses `PS0` on bash
   4.4+ and a `DEBUG` trap before that; `PROMPT_COMMAND` may be a string or an
-  array (5.1+).
+  array (5.1+), and entries a user rc appends after sourcing `shift.bash`
+  itself are moved before Shift's last entry before the first prompt.
+  `bash` and `exec bash` typed at a Shift prompt start the child with
+  `--rcfile <data dir>/bashrc-child` (`~/.bashrc`, then `shift.bash`) through
+  the aliases `bash` and `exec ` — not added when the user already has
+  aliases of those names. `command bash`, `/bin/bash` and scripts bypass it.
 - **fish** — `shift.fish` auto-loaded via a `vendor_conf.d` XDG_DATA_DIRS
   append.
 
@@ -364,7 +387,10 @@ replay.
   directory; other users' connections are refused) and exits 10 s after its
   last shell and window are gone. A slow window is disconnected rather than
   buffering without bound; the pane reattaches on its own and replays only
-  what it missed (it closes only when the shell is really gone). A lock file
+  what it missed (it closes only when the shell is really gone). Input typed
+  meanwhile is held (up to 64 KiB) and sent, in order, once reconnected; a
+  toast says so if some of it did not fit, or if output produced meanwhile
+  had already left the 8 MiB the service keeps. A lock file
   next to the socket keeps concurrent starts from replacing each other's
   socket. If the configured data
   directory is too long for a Unix socket path, Shift uses a shorter path

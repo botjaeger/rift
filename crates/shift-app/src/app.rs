@@ -68,6 +68,8 @@ pub enum UserEvent {
     Control(crate::control::Pending),
     /// A program asked for a notification (OSC 9 / 777 / 99).
     PtyNotify(PaneId, String, String),
+    /// A pane's connection notice (see `SessionEvent::Notice`).
+    PtyNotice(String),
     /// Code review model for request `.0`; `None` outside a repository.
     ReviewLoaded(u64, Option<Result<shift_core::review::Review, String>>),
     /// A review-panel write finished (`Some` = why it failed).
@@ -899,13 +901,13 @@ impl App {
     fn apply_config(&mut self) {
         self.sync_control_server();
         self.theme = self.config.resolve_theme_for(self.os_light);
-        let opacity = self.config.opacity();
-        if opacity < 1.0 {
-            // only the window grounds go translucent; text, borders and
-            // overlays keep their contrast (Warp "window opacity")
-            self.theme.bg = self.theme.bg.with_alpha(opacity);
-            self.theme.bg_chrome = self.theme.bg_chrome.with_alpha(opacity);
-            self.theme.bg_gutter = self.theme.bg_gutter.with_alpha(opacity);
+        // Warp "window opacity": only the window ground goes translucent
+        // (Theme::window_ground / Theme::ground); text, overlays, modals and
+        // non-default cell colours stay opaque
+        self.theme.ground_alpha = self.config.opacity();
+        #[cfg(target_os = "macos")]
+        if let Some(w) = &self.window {
+            crate::translucency::apply(w, self.config.blur());
         }
         self.font_size = self.config.font_size();
         self.line_h = self.font_size * self.config.line_height();
@@ -3609,6 +3611,7 @@ impl App {
                 SessionEvent::Notify { title, body } => {
                     proxy.send_event(UserEvent::PtyNotify(pane, title, body))
                 }
+                SessionEvent::Notice(message) => proxy.send_event(UserEvent::PtyNotice(message)),
             };
         });
         // durable sessions: reattach a restored shell, else start one in
@@ -4631,6 +4634,15 @@ impl App {
         let filter_editing = self.filter_editing;
         let shell_env = self.shell_env.clone();
         let error_underline = self.config.error_underline;
+        // Warp with a background image and translucency: the image at the
+        // window opacity, then bg at (1 − image opacity) × window opacity
+        let image_veil = (theme.ground_alpha < 1.0
+            && self.bg_image.as_ref().is_some_and(|p| p.has_image()))
+        .then(|| {
+            theme
+                .bg
+                .with_alpha((1.0 - self.bg_image_opacity) * theme.ground_alpha)
+        });
 
         let Self {
             scene,
@@ -4657,6 +4669,9 @@ impl App {
         let mut active_ed_cols = 80usize;
 
         scene.clear();
+        if let Some(veil) = image_veil {
+            scene.layer(0).rect([0.0, 0.0], [w, h], veil, 0.0);
+        }
         let mut hits = Vec::new();
         let mut focus_hits = Vec::new(); // lowest priority, appended last
         let mut any_running = false;
@@ -4719,7 +4734,7 @@ impl App {
             scene.layer(0).rect(
                 [rail_w, TAB_BAR_H],
                 [w - rail_w, h - TAB_BAR_H],
-                theme.bg_gutter,
+                theme.ground(theme.bg_gutter),
                 0.0,
             );
         }
@@ -4855,7 +4870,7 @@ impl App {
                     layer0.bordered(
                         [pr.rect[0], pr.rect[1]],
                         [pr.rect[2], pr.rect[3]],
-                        theme.bg,
+                        theme.ground(theme.bg),
                         theme.accent,
                         PANE_RADIUS,
                         2.0,
@@ -4864,7 +4879,7 @@ impl App {
                     layer0.bordered(
                         [pr.rect[0], pr.rect[1]],
                         [pr.rect[2], pr.rect[3]],
-                        theme.bg,
+                        theme.ground(theme.bg),
                         theme.pane_border_inactive,
                         PANE_RADIUS,
                         1.0,
@@ -5524,7 +5539,14 @@ impl App {
         if let Some(img) = self.bg_image.as_mut()
             && img.has_image()
         {
-            img.prepare(&gpu.queue, [pw as f32, ph as f32], self.bg_image_opacity);
+            // translucent (Warp): the image at the window opacity, veiled by
+            // bg in `build_scene`; opaque: the image over the bg clear
+            let alpha = if self.theme.ground_alpha < 1.0 {
+                self.theme.ground_alpha
+            } else {
+                self.bg_image_opacity
+            };
+            img.prepare(&gpu.queue, [pw as f32, ph as f32], alpha);
         }
         let bg_image = self.bg_image.as_ref().filter(|p| p.has_image());
 
@@ -5564,19 +5586,19 @@ impl App {
             })
             .collect();
         text.prepare_layers(&gpu.device, &gpu.queue, (pw, ph), text_layers);
+        // the window ground; with a translucent background image the image
+        // and its veil are the ground (Warp draws no surface_2 under them)
+        let ground = if bg_image.is_some() && self.theme.ground_alpha < 1.0 {
+            self.theme.bg.with_alpha(0.0)
+        } else {
+            self.theme.window_ground()
+        };
 
         // script `shot`: offscreen, so it works even when the window
         // surface is unavailable (occluded window, display asleep)
         if let Some(path) = self.capture.take() {
             crate::capture::capture_frame(
-                gpu,
-                quads,
-                text,
-                sprites,
-                bg_image,
-                &ranges,
-                self.theme.bg,
-                &path,
+                gpu, quads, text, sprites, bg_image, &ranges, ground, &path,
             );
         }
         let Some(frame) = gpu.acquire() else {
@@ -5596,7 +5618,7 @@ impl App {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(gpu.clear_color(self.theme.bg)),
+                        load: wgpu::LoadOp::Clear(gpu.clear_color(ground)),
                         store: wgpu::StoreOp::Store,
                     },
                     depth_slice: None,
@@ -6188,7 +6210,8 @@ impl App {
                 };
                 let t = match id {
                     "line_height" => (self.config.line_height() - 1.0) / 1.2,
-                    "window_opacity" => (self.config.opacity() - 0.3) / 0.7,
+                    "window_opacity" => settings::opacity_slider(self.config.opacity()),
+                    "window_blur" => settings::blur_slider(self.config.blur()),
                     _ => return true,
                 };
                 self.set_slider(id, (t + step).clamp(0.0, 1.0));
@@ -6452,7 +6475,7 @@ impl App {
                     .blocks
                     .lock()
                     .unwrap()
-                    .stamp_context(cwd, branch);
+                    .stamp_submit(cwd, branch, &cmd);
                 pane.session.write(cmd.as_bytes());
                 pane.session.write(b"\n");
                 submitted = Some((pane.session.id, cmd));
@@ -7071,7 +7094,7 @@ impl App {
             .blocks
             .lock()
             .unwrap()
-            .stamp_context(cwd, branch);
+            .stamp_submit(cwd, branch, cmd);
         pane.session.write(cmd.as_bytes());
         pane.session.write(b"\n");
     }
@@ -8478,7 +8501,9 @@ impl App {
     fn set_slider(&mut self, id: &str, t: f32) {
         match id {
             "line_height" => self.config.line_height = 1.0 + 1.2 * t,
-            "window_opacity" => self.config.window_opacity = 0.3 + 0.7 * t,
+            // whole percents and pixels, as Warp's sliders
+            "window_opacity" => self.config.window_opacity = (1.0 + 99.0 * t).round() / 100.0,
+            "window_blur" => self.config.window_blur = (1.0 + 63.0 * t).round() as u8,
             _ => return,
         }
         self.apply_config();
@@ -9034,7 +9059,7 @@ impl App {
                     .iter()
                     .filter_map(|r| match r.kind {
                         terminal::RowKind::Grid { abs, .. } => {
-                            terminal::session_line_text(&p.session, abs)
+                            terminal::session_read_text(&p.session, abs)
                         }
                         _ => None,
                     })
@@ -10160,6 +10185,7 @@ impl ApplicationHandler<UserEvent> for App {
                     w.request_redraw();
                 }
             }
+            UserEvent::PtyNotice(message) => self.toast(message),
             UserEvent::Completions(generation, items) => self.on_completions(generation, items),
             UserEvent::ReviewWritten(error) => {
                 self.review.notice = error;

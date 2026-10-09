@@ -291,7 +291,7 @@ pub fn render(
 ) -> Vec<([f32; 4], ExplorerHit)> {
     let [x, y, w, h] = rect;
     let mut hits = Vec::new();
-    layer.rect([x, y], [w, h], theme.bg_chrome, 0.0);
+    layer.rect([x, y], [w, h], theme.ground(theme.bg_chrome), 0.0);
     layer.rect([x + w - 1.0, y], [1.0, h], theme.border, 0.0);
 
     // ── header: project name, collapse-all, refresh ──

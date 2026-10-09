@@ -143,6 +143,7 @@ pub fn parse_warp_yaml(name: &str, src: &str) -> Result<Theme, String> {
             path: b.path,
             opacity: (b.opacity / 100.0).clamp(0.0, 1.0),
         }),
+        ground_alpha: 1.0,
     })
 }
 

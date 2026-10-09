@@ -319,7 +319,9 @@ expression (⌥R); an invalid regex shows `invalid regex` in red instead of the
 counter. The counter shows the current match's position among all matches
 (`n/total`); only the newest 500 matches are kept for navigation (older
 ones are counted, not visited), so with 600 matches it runs 101/600 …
-600/600. A query longer
+600/600. Text is matched as printed: wide glyphs (日本) and combining marks
+(a decomposed `é`, e + U+0301) are found, and a match highlights whole
+cells; hidden (SGR 8) text is not searchable. A query longer
 than the field scrolls so its end stays visible. With the file viewer open,
 ⌘F finds in the file instead (see File viewer).
 
@@ -373,7 +375,8 @@ are swallowed rather than reaching the terminal.
   - Window & theme: `Active theme` select (background swatch ringed in the
     theme's accent + display name), `Sync with OS appearance` toggle,
     `Light theme (OS sync)` select (same swatch style), `Window opacity`
-    slider (%, value boxed right of the track),
+    slider (1–100 %, value boxed right of the track), `Window blur radius`
+    slider (1–64 px, macOS only),
     `Window padding` stepper (px, ±2), `Font ligatures` toggle (*Render -> >=
     != as combined glyphs*).
 - **Features** — *Input and blocks*.

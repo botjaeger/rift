@@ -85,8 +85,11 @@ pub struct Config {
     pub theme_light: String,
     /// Follow the OS light/dark appearance (`theme` = dark, `theme_light` = light).
     pub sync_os_theme: bool,
-    /// Window background opacity, 0.3–1.0.
+    /// Window background opacity, 0.01–1.0 (Warp: 1–100 %).
     pub window_opacity: f32,
+    /// macOS background blur radius behind the window, 1–64 px (Warp:
+    /// default 1, i.e. none). Visible only below full opacity.
+    pub window_blur: u8,
     pub input_position: InputPosition,
     pub tab_layout: TabLayout,
     pub prompt: PromptMode,
@@ -161,6 +164,7 @@ impl Default for Config {
             theme_light: "light-default".into(),
             sync_os_theme: false,
             window_opacity: 1.0,
+            window_blur: 1,
             input_position: InputPosition::Bottom,
             tab_layout: TabLayout::Horizontal,
             prompt: PromptMode::Shift,
@@ -502,13 +506,19 @@ impl Config {
         self.scrollback.min(1_000_000)
     }
 
-    /// Window opacity clamped to the supported range.
+    /// Window opacity clamped to the supported range. The floor is Warp's
+    /// 1 %: at 0 Metal shows the previous frame's pixels.
     pub fn opacity(&self) -> f32 {
         if self.window_opacity.is_finite() {
-            self.window_opacity.clamp(0.3, 1.0)
+            self.window_opacity.clamp(0.01, 1.0)
         } else {
             1.0
         }
+    }
+
+    /// Background blur radius clamped to Warp's 1–64 px.
+    pub fn blur(&self) -> u8 {
+        self.window_blur.clamp(1, 64)
     }
 }
 
@@ -794,11 +804,18 @@ mod tests {
         let mut c = Config::default();
         assert_eq!(c.opacity(), 1.0);
         c.window_opacity = 0.1;
-        assert_eq!(c.opacity(), 0.3);
+        assert_eq!(c.opacity(), 0.1);
+        c.window_opacity = 0.0;
+        assert_eq!(c.opacity(), 0.01);
         c.window_opacity = 7.0;
         assert_eq!(c.opacity(), 1.0);
         c.window_opacity = f32::NAN;
         assert_eq!(c.opacity(), 1.0);
+        assert_eq!(c.blur(), 1);
+        c.window_blur = 0;
+        assert_eq!(c.blur(), 1);
+        c.window_blur = 200;
+        assert_eq!(c.blur(), 64);
     }
 
     #[test]

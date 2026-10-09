@@ -310,7 +310,7 @@ pub fn filter_hidden(
     let term = session.term.lock();
     for abs in start..end {
         let keep = search_text(&term, scrolled, abs)
-            .is_some_and(|t| t.replace('\0', "").to_lowercase().contains(&query));
+            .is_some_and(|t| t.text.to_lowercase().contains(&query));
         if !keep {
             hidden.insert(abs);
         }
@@ -548,30 +548,24 @@ impl Matcher {
         Ok(Some(Matcher::Plain { needle, case }))
     }
 
-    /// Match starts (char column, char len) in `text`. NUL chars (the right
-    /// half of a wide glyph, see `search_text`) are invisible to the match
-    /// but keep their column, so "日本" matches the cells `日 NUL 本 NUL`.
-    pub fn find(&self, text: &str) -> Vec<(usize, usize)> {
-        if !text.contains('\0') {
-            return self.find_cols(text);
-        }
-        let mut cols: Vec<usize> = Vec::new();
-        let mut plain = String::new();
-        for (i, c) in text.chars().enumerate() {
-            if c != '\0' {
-                cols.push(i);
-                plain.push(c);
-            }
-        }
-        let total = text.chars().count();
-        self.find_cols(&plain)
+    /// Matches in a grid line as (grid column, column span). A match that
+    /// covers any char of a cell covers the whole cell: a wide glyph spans
+    /// two columns, and a combining mark belongs to its base cell.
+    pub fn find_line(&self, line: &SearchLine) -> Vec<(usize, usize)> {
+        self.find_cols(&line.text)
             .into_iter()
             .map(|(s, n)| {
-                let start = cols[s];
-                let end = cols.get(s + n).copied().unwrap_or(total);
-                (start, end - start)
+                let start = line.cols[s];
+                (start, line.ends[s + n - 1] - start)
             })
             .collect()
+    }
+
+    /// [`Matcher::find_line`] over `text` read as cells: one char per
+    /// column, NUL standing for the right half of a wide glyph.
+    #[cfg(test)]
+    pub fn find(&self, text: &str) -> Vec<(usize, usize)> {
+        self.find_line(&SearchLine::from_cells(text))
     }
 
     fn find_cols(&self, text: &str) -> Vec<(usize, usize)> {
@@ -636,33 +630,84 @@ fn line_text(
     Some(text)
 }
 
-/// `line_text` for searching: the spacer cell right of a wide glyph is NUL
-/// (ignored by `Matcher::find`) instead of a space, so "日本" is found.
+/// Searchable text of one grid line: each cell's char followed by its
+/// combining marks, wide-glyph spacers left out (so "日本" and decomposed
+/// "café" are found). `cols[i]` is the grid column of char `i`, `ends[i]`
+/// the column after its cell.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct SearchLine {
+    pub text: String,
+    cols: Vec<usize>,
+    ends: Vec<usize>,
+}
+
+impl SearchLine {
+    fn push(&mut self, c: char, col: usize, end: usize) {
+        self.text.push(c);
+        self.cols.push(col);
+        self.ends.push(end);
+    }
+
+    /// Trailing blank cells dropped.
+    fn trim_end(&mut self) {
+        while self.text.ends_with(' ') {
+            self.text.pop();
+            self.cols.pop();
+            self.ends.pop();
+        }
+    }
+
+    /// `text` as cells: one char per column; NUL is the right half of the
+    /// wide glyph before it (no char of its own).
+    #[cfg(test)]
+    pub fn from_cells(text: &str) -> SearchLine {
+        let cells: Vec<char> = text.chars().collect();
+        let mut line = SearchLine::default();
+        for (col, &c) in cells.iter().enumerate() {
+            if c != '\0' {
+                let end = col + 1 + cells[col + 1..].iter().take_while(|&&n| n == '\0').count();
+                line.push(c, col, end);
+            }
+        }
+        line
+    }
+}
+
 fn search_text<T>(
     term: &shift_pty::alacritty_terminal::term::Term<T>,
     scrolled: u64,
     abs: u64,
-) -> Option<String> {
+) -> Option<SearchLine> {
     let g = term.grid();
     let rel = abs as i64 - scrolled as i64;
     if rel < -(g.history_size() as i64) || rel >= g.screen_lines() as i64 {
         return None;
     }
     let row = &g[Line(rel as i32)];
-    let mut text: String = (0..g.columns())
-        .map(|c| {
-            let cell = &row[Column(c)];
-            if cell.flags.intersects(WIDE_SPACERS) {
-                '\0'
+    let mut line = SearchLine::default();
+    for col in 0..g.columns() {
+        let cell = &row[Column(col)];
+        if cell.flags.intersects(WIDE_SPACERS) {
+            continue;
+        }
+        let end = col
+            + if cell.flags.contains(Flags::WIDE_CHAR) {
+                2
             } else {
-                cell.c
-            }
-        })
-        .collect();
-    while text.ends_with([' ', '\0']) {
-        text.pop();
+                1
+            };
+        // hidden (SGR 8) text stays unsearchable, as it is undrawn
+        if cell.flags.contains(Flags::HIDDEN) {
+            line.push(' ', col, end);
+            continue;
+        }
+        line.push(cell.c, col, end);
+        for &zw in cell.zerowidth().unwrap_or_default() {
+            line.push(zw, col, end);
+        }
     }
-    Some(text)
+    line.trim_end();
+    Some(line)
 }
 
 const WIDE_SPACERS: Flags = Flags::WIDE_CHAR_SPACER.union(Flags::LEADING_WIDE_CHAR_SPACER);
@@ -708,6 +753,15 @@ pub fn session_line_text(session: &Session, abs: u64) -> Option<String> {
     line_text(&term, scrolled, abs)
 }
 
+/// Readable text of absolute line `abs` (combining marks kept, wide-glyph
+/// spacers and trailing spaces dropped) — for screen readers, unlike the
+/// column-indexed [`session_line_text`].
+pub fn session_read_text(session: &Session, abs: u64) -> Option<String> {
+    let scrolled = session.scrolled.load(std::sync::atomic::Ordering::Acquire);
+    let term = session.term.lock();
+    copy_line(&term, scrolled, abs).map(|(text, _)| text.trim_end_matches(' ').to_string())
+}
+
 /// OSC 8 hyperlink runs on one absolute line: (col, len, uri).
 fn hyperlinks_in(
     term: &shift_pty::alacritty_terminal::term::Term<EventProxy>,
@@ -748,11 +802,11 @@ pub struct Found {
 /// match, so older matches past the cap are counted but not stored.
 pub fn newest_matches<I>(lines: I, matcher: &Matcher, cap: usize) -> Found
 where
-    I: DoubleEndedIterator<Item = (u64, String)>,
+    I: DoubleEndedIterator<Item = (u64, SearchLine)>,
 {
     let mut found = Found::default();
-    for (abs, text) in lines.rev() {
-        let hits = matcher.find(&text);
+    for (abs, line) in lines.rev() {
+        let hits = matcher.find_line(&line);
         found.total += hits.len();
         for (col, _) in hits.into_iter().rev() {
             if found.anchors.len() >= cap {
@@ -793,9 +847,11 @@ pub fn visible_text(session: &Session) -> String {
 
 /// Output text of a block (for the copy button / copy action).
 pub fn block_output_text(session: &Session, block_id: BlockId) -> Option<String> {
-    let (start, end) = {
+    let (start, end, unterminated) = {
         let blocks = session.blocks.lock().unwrap();
-        blocks.iter().find(|b| b.id == block_id)?.output_range()?
+        let block = blocks.iter().find(|b| b.id == block_id)?;
+        let (start, end) = block.output_range()?;
+        (start, end, block.unterminated)
     };
     let scrolled = session.scrolled.load(std::sync::atomic::Ordering::Acquire);
     let term = session.term.lock();
@@ -808,6 +864,10 @@ pub fn block_output_text(session: &Session, block_id: BlockId) -> Option<String>
                 out.push('\n');
             }
         }
+    }
+    // the last row's line break was the terminal's, not the output's
+    if unterminated && out.ends_with('\n') {
+        out.pop();
     }
     Some(out)
 }
@@ -1164,7 +1224,7 @@ fn render_grid_line(
     if let Some(ctx) = search
         && let Some(text) = search_text(term, scrolled, abs)
     {
-        for (col, len) in ctx.matcher.find(&text) {
+        for (col, len) in ctx.matcher.find_line(&text) {
             let is_current = ctx.current == Some((abs, col));
             for c in col..col + len {
                 match_cols.push((c, is_current));
@@ -1298,16 +1358,26 @@ fn render_grid_line(
             }
         }
 
-        match spans.last_mut() {
-            Some(last) if last.fg == fg && last.weight == weight && last.italic == italic => {
-                last.text.push(ch)
-            }
-            _ => spans.push(Span {
-                text: ch.to_string(),
+        if !spans
+            .last()
+            .is_some_and(|l| l.fg == fg && l.weight == weight && l.italic == italic)
+        {
+            spans.push(Span {
+                text: String::new(),
                 fg,
                 weight,
                 italic,
-            }),
+            });
+        }
+        let Some(span) = spans.last_mut() else {
+            continue;
+        };
+        span.text.push(ch);
+        // combining marks shape onto their base char (zero advance)
+        if !flags.contains(Flags::HIDDEN)
+            && let Some(zw) = cell.zerowidth()
+        {
+            span.text.extend(zw);
         }
     }
     for (pos, size, color, radius) in backs {
@@ -1658,10 +1728,28 @@ mod tests {
         // row 0 soft-wraps: no spacers, trailing blanks kept as content
         assert_eq!(copy_line(&t, 0, 0), Some(("日本x   ".into(), true)));
         assert_eq!(copy_line(&t, 0, 1), Some(("e\u{301}y".into(), false)));
-        // search text keeps one char per cell, spacers as NUL
-        assert_eq!(search_text(&t, 0, 0).as_deref(), Some("日\0本\0x"));
+        // search text: no spacers; a wide match spans both columns
+        assert_eq!(search_text(&t, 0, 0).unwrap().text, "日本x");
         let m = Matcher::new("日本", true, false).unwrap().unwrap();
-        assert_eq!(m.find(&search_text(&t, 0, 0).unwrap()), vec![(0, 4)]);
+        assert_eq!(m.find_line(&search_text(&t, 0, 0).unwrap()), vec![(0, 4)]);
+        // combining marks are searchable and map onto their base cell
+        let row1 = search_text(&t, 0, 1).unwrap();
+        assert_eq!(row1.text, "e\u{301}y");
+        let m = Matcher::new("e\u{301}", true, false).unwrap().unwrap();
+        assert_eq!(m.find_line(&row1), vec![(0, 1)]);
+        let m = Matcher::new("\u{301}y", true, false).unwrap().unwrap();
+        assert_eq!(m.find_line(&row1), vec![(0, 2)]);
+        let m = Matcher::new("e\u{301}y", true, true).unwrap().unwrap();
+        assert_eq!(m.find_line(&row1), vec![(0, 2)]);
+    }
+
+    #[test]
+    fn hidden_cells_are_not_searchable() {
+        let mut t = sample_term();
+        let cell = &mut t.grid_mut()[Line(1)][Column(1)];
+        cell.flags.insert(Flags::HIDDEN);
+        let row1 = search_text(&t, 0, 1).unwrap();
+        assert_eq!(row1.text, "e\u{301}");
     }
 
     #[test]
@@ -1694,19 +1782,20 @@ mod tests {
     #[test]
     fn newest_matches_keeps_newest_and_counts_all() {
         let m = Matcher::new("hit", false, false).unwrap().unwrap();
-        let lines = (0..600u64).map(|i| (i, format!("hit {i}")));
+        let cells = |s: &str| SearchLine::from_cells(s);
+        let lines = (0..600u64).map(|i| (i, cells(&format!("hit {i}"))));
         let found = newest_matches(lines, &m, 500);
         assert_eq!(found.total, 600);
         assert_eq!(found.anchors.len(), 500);
         assert_eq!(found.anchors.first(), Some(&(100, 0)));
         assert_eq!(found.anchors.last(), Some(&(599, 0)));
         // several hits on one line: the cap keeps that line's last columns
-        let lines = vec![(0u64, "hit".to_string()), (1, "hit hit hit".to_string())];
+        let lines = vec![(0u64, cells("hit")), (1, cells("hit hit hit"))];
         let found = newest_matches(lines.into_iter(), &m, 2);
         assert_eq!(found.total, 4);
         assert_eq!(found.anchors, vec![(1, 4), (1, 8)]);
         // under the cap: everything, oldest first
-        let lines = vec![(3u64, "x hit".to_string()), (7, "hit".to_string())];
+        let lines = vec![(3u64, cells("x hit")), (7, cells("hit"))];
         let found = newest_matches(lines.into_iter(), &m, 500);
         assert_eq!(found.total, 2);
         assert_eq!(found.anchors, vec![(3, 2), (7, 0)]);
@@ -1758,6 +1847,7 @@ mod tests {
             command_start: None,
             output_start,
             end,
+            unterminated: false,
             collapsed,
             bookmarked: false,
             cwd: None,

@@ -44,7 +44,7 @@ gate_ui() { scripts/ui-smoke.sh; }
 
 gate_shell() {
     have shellcheck || { echo "shellcheck not installed (brew install shellcheck / apt install shellcheck)"; return 1; }
-    shellcheck packaging/*.sh scripts/*.sh .githooks/* shell/shift.bash shell/shift-bashrc || return 1
+    shellcheck packaging/*.sh scripts/*.sh .githooks/* shell/shift.bash shell/shift-bashrc shell/shift-bashrc-child || return 1
     # zsh and fish hooks: syntax only (shellcheck has no zsh/fish mode).
     # A missing shell is a failure: the hook would ship unchecked.
     local rc=0

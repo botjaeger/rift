@@ -392,6 +392,76 @@ assert "review=true" in narrow and "shown=false" in narrow, narrow
 assert 'toast=Some("Window too narrow for the review panel' in narrow, narrow
 assert "review=true" in wide and "shown=true" in wide, wide
 
+# --- third run: shell-syntax filenames, Unicode text, partial lines, child shells ---
+edge = scratch / "edge"
+for directory in ("cfg/shift", "data/shift", "bin", "home"):
+    (edge / directory).mkdir(parents=True)
+(edge / "cfg/shift/config.toml").write_text(
+    'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
+    'sync_os_theme = false\n' + f'working_directory = {json.dumps(str(work))}\n')
+(edge / "home/.bashrc").write_text("PS1='edge$ '\n")
+(edge / "home/.bash_profile").write_text("source ~/.bashrc\n")
+for name in ("zzprobe;echo INJECTED", "zzsafe"):
+    exe = edge / "bin" / name
+    exe.write_text('#!/bin/sh\nprintf "RAN %s\\n" "$(basename "$0")"\n')
+    exe.chmod(0o755)
+edge_steps = [
+    "wait_prompt",
+    # a completed executable name stays one shell word
+    "type zzpr",
+    "wait 400",
+    "key tab",
+    "wait 300",
+    "key enter",
+    "wait 500",
+    f"dump {edge}/completion.txt",
+    # combining marks: searchable, and reinput runs the exact command
+    "paste echo café",
+    "key enter",
+    "wait 400",
+    "key cmd+i",
+    f"dump {edge}/reinput.txt",
+    "key cmd+a",
+    "key backspace",
+    "key cmd+f",
+    "type café",
+    "wait 300",
+    f"dump {edge}/find-mark.txt",
+    "key escape",
+    # output without a final newline stays in its block
+    "type printf NO_NEWLINE\\n",
+    "wait 500",
+    f"dump {edge}/partial.txt",
+    # a child shell keeps the block integration
+    "type exec bash\\n",
+    "wait 800",
+    "type echo INNER_OK\\n",
+    "wait 500",
+    f"dump {edge}/child.txt",
+    "quit",
+]
+(edge / "edge.shift").write_text("\n".join(edge_steps) + "\n")
+edge_env = dict(env, XDG_CONFIG_HOME=str(edge / "cfg"), XDG_DATA_HOME=str(edge / "data"),
+                HOME=str(edge / "home"), BASH_SILENCE_DEPRECATION_WARNING="1",
+                PATH=f"{edge / 'bin'}:{os.environ['PATH']}")
+with (edge / "app.log").open("w") as log:
+    rc = subprocess.run([str(binary), "--script", str(edge / "edge.shift"), "--headless"],
+                        env=edge_env, stdout=log, stderr=log, timeout=120).returncode
+assert rc == 0, f"edge-case run failed; see {edge}/app.log"
+
+def estate(name):
+    return (edge / f"{name}.txt").read_text()
+
+completion = estate("completion")
+assert "RAN zzprobe;echo INJECTED" in completion and "| INJECTED" not in completion, completion
+assert 'editor="echo cafe\\u{301}"' in estate("reinput"), estate("reinput")
+marks = re.search(r"matches=(\d+) total=(\d+)", estate("find-mark"))
+assert marks and int(marks[2]) >= 1, estate("find-mark")
+assert 'ListItem "printf NO_NEWLINE" desc="succeeded' in estate("partial") and \
+    'value="NO_NEWLINE"' in estate("partial"), estate("partial")
+child = estate("child")
+assert 'cmd="echo INNER_OK" exit=Some(0)' in child and "editor_active=true" in child, child
+
 for client in clients:
     client.close()
 stalled.close()
