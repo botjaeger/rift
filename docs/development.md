@@ -73,7 +73,7 @@ display-line building). Rendering is verified with the script driver below.
 | `docs` | `CLAUDE.md` and `AGENTS.md` are identical; every relative link in every Markdown file resolves |
 | `release` | `cargo build --release --locked` |
 | `ui` | `scripts/ui-smoke.sh`: isolated scripted input, state assertions and PNG capture; requires Python 3 and a display (or `xvfb-run`) |
-| `linux` | `clippy`, `test`, `release` and the scripted UI regressions (Xvfb, software Vulkan) inside the Linux docker image |
+| `linux` | `shell` (with the shellcheck 0.9 CI uses), `clippy`, `test`, `release` and the scripted UI regressions (Xvfb, software Vulkan) inside the Linux docker image |
 
 ```sh
 scripts/gates.sh                 # fmt clippy test doc shell docs

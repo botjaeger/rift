@@ -31,7 +31,9 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
       libxkbcommon0 libxkbcommon-x11-0 libwayland-client0 \
       libx11-6 libx11-xcb1 libxcursor1 libxi6 libxrandr2 \
       # shells whose integration is exercised
-      zsh \
+      zsh fish \
+      # shell gate: same shellcheck major as CI (ubuntu-24.04 ships 0.9)
+      shellcheck \
     && rm -rf /var/lib/apt/lists/*
 
 ENV WINIT_UNIX_BACKEND=x11 \

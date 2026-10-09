@@ -42,7 +42,7 @@ rm -rf "$APPDIR"
 mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/applications"
 
 install -m 0755 "$BIN" "$APPDIR/usr/bin/shift-terminal"
-command -v strip >/dev/null && strip "$APPDIR/usr/bin/shift-terminal" || true
+if command -v strip >/dev/null; then strip "$APPDIR/usr/bin/shift-terminal"; fi
 
 install -m 0644 packaging/shift.desktop "$APPDIR/usr/share/applications/shift.desktop"
 

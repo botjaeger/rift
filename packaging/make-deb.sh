@@ -80,7 +80,7 @@ mkdir -p \
     "$PKGROOT/usr/share/doc/shift-terminal"
 
 install -m 0755 "$BIN" "$PKGROOT/usr/bin/shift-terminal"
-command -v strip >/dev/null && strip "$PKGROOT/usr/bin/shift-terminal" || true
+if command -v strip >/dev/null; then strip "$PKGROOT/usr/bin/shift-terminal"; fi
 
 install -m 0644 packaging/shift.desktop "$PKGROOT/usr/share/applications/shift.desktop"
 

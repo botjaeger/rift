@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2329  # gate_* functions are called as "gate_$g"
+# shellcheck disable=SC2317,SC2329  # gate_* functions are called as "gate_$g" (SC2317 on shellcheck <0.10)
 # Shift quality gates: one runner for local checks and CI.
 #
 #   scripts/gates.sh                 # default set: fmt clippy test doc shell docs
@@ -29,7 +29,7 @@ shell    shellcheck on packaging/*.sh, scripts/*.sh, .githooks/*, bash hooks; zs
 docs     CLAUDE.md and AGENTS.md identical; every relative link in *.md resolves
 release  cargo build --release --locked
 ui       isolated scripted UI regressions (display or xvfb-run required)
-linux    clippy + test + release build + scripted UI (xvfb) inside packaging/linux-verify.Dockerfile (docker)
+linux    shell (CI shellcheck version) + clippy + test + release build + scripted UI (xvfb) inside packaging/linux-verify.Dockerfile (docker)
 EOF
 }
 
@@ -82,6 +82,7 @@ gate_linux() {
         -v shift-cargo-registry:/usr/local/cargo/registry \
         -e CARGO_TARGET_DIR=/src/target/linux-docker \
         shift-linux-verify bash -c '
+            scripts/gates.sh shell &&
             cargo clippy --workspace --all-targets --locked -- -D warnings &&
             cargo test --workspace --locked &&
             cargo build --release --locked &&
