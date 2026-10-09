@@ -92,8 +92,10 @@ the app runs and `shot` the repaint.
 **Linux, headless:** `packaging/linux-verify.Dockerfile` (Xvfb + Mesa
 lavapipe software Vulkan) builds the release binary and runs the same script
 files; its header has the `docker build`/`docker run` lines.
-`scripts/gates.sh linux` runs the shell gate (with CI's shellcheck 0.9), clippy,
-tests, a release build and the scripted UI regressions (under Xvfb) in it — the same checks CI runs on Linux.
+`scripts/gates.sh linux` runs clippy, tests and a release build in it, then
+the shell gate and the scripted UI regressions (under Xvfb) in
+`packaging/ci-ubuntu.Dockerfile`, which installs the CI runner's packages
+(`packaging/ci-apt.txt`) — the same checks CI runs on Linux.
 
 ## Architecture
 

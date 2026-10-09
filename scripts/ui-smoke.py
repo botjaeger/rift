@@ -59,6 +59,11 @@ threading.Thread(target=accept_stalled, daemon=True).start()
 def cp(source, target):
     return "sh cp " + shlex.quote(str(source)) + " " + shlex.quote(str(target))
 
+def died(what, log):
+    # CI keeps no artifacts: the log tail is the only trace of the cause
+    tail = "\n".join(Path(log).read_text(errors="replace").splitlines()[-20:])
+    return f"{what}; {log}:\n{tail}"
+
 steps = [
     "wait_prompt",
     "key escape",
@@ -165,6 +170,9 @@ steps = [
     # Settings controls work from the keyboard
     "key cmd+,",
     "wait 200",
+    # font size, not font family: a machine with one monospace font has
+    # nothing to cycle to
+    "key tab",
     "key tab",
     f"dump {scratch}/settings-focus.txt",
     cp(cfg / "config.toml", scratch / "settings-before.toml"),
@@ -220,20 +228,20 @@ with (scratch / "app.log").open("w") as log:
     # well before the stalled socket's six-second response timeout.
     deadline = time.monotonic() + 40
     while not (scratch / "prompt.txt").exists():
-        assert app.poll() is None, f"app exited; see {scratch}/app.log"
+        assert app.poll() is None, died("app exited", scratch / "app.log")
         assert time.monotonic() < deadline, "prompt snapshot timed out"
         time.sleep(0.02)
     prompt_at = time.monotonic()
     while not (scratch / "palette.txt").exists():
-        assert app.poll() is None, f"app exited; see {scratch}/app.log"
+        assert app.poll() is None, died("app exited", scratch / "app.log")
         assert time.monotonic() - prompt_at < 3, "session discovery blocked palette input"
         time.sleep(0.02)
     while not (scratch / "off.txt").exists():
-        assert app.poll() is None, f"app exited; see {scratch}/app.log"
+        assert app.poll() is None, died("app exited", scratch / "app.log")
         assert time.monotonic() < deadline, "config reload snapshot timed out"
         time.sleep(0.02)
     assert not (data / f"control/{app.pid}.sock").exists(), "disabled automation kept its socket"
-    assert app.wait(timeout=60) == 0, f"app failed; see {scratch}/app.log"
+    assert app.wait(timeout=60) == 0, died("app failed", scratch / "app.log")
 
 def state(name):
     return (scratch / f"{name}.txt").read_text()
@@ -266,7 +274,7 @@ assert f'{scratch}/a/src/only_a.rs"' in state("hints"), state("hints")
 found = re.search(r"matches=(\d+) total=(\d+)", state("find"))
 assert found and found[1] == "500" and int(found[2]) >= 600, state("find")
 assert "confirm=Some" in state("confirm") and "tabs=1" in state("confirm"), state("confirm")
-assert "settings_focus=Some(" in state("settings-focus"), state("settings-focus")
+assert 'settings_focus=Some(SettingsStep("font_size"' in state("settings-focus"), state("settings-focus")
 assert (scratch / "settings-before.toml").read_text() != (scratch / "settings-after.toml").read_text(), \
     "Space did not press the focused Settings control"
 settings_after = (scratch / "settings-after.toml").read_text()
@@ -335,7 +343,7 @@ geo_env = dict(env, XDG_CONFIG_HOME=str(geo / "cfg"), XDG_DATA_HOME=str(geo / "d
 with (geo / "app.log").open("w") as log:
     rc = subprocess.run([str(binary), "--script", str(geo / "geo.shift"), "--headless"],
                         env=geo_env, stdout=log, stderr=log, timeout=120).returncode
-assert rc == 0, f"geometry run failed; see {geo}/app.log"
+assert rc == 0, died("geometry run failed", geo / "app.log")
 
 def gstate(name):
     return (geo / f"{name}.txt").read_text()
@@ -447,7 +455,7 @@ edge_env = dict(env, XDG_CONFIG_HOME=str(edge / "cfg"), XDG_DATA_HOME=str(edge /
 with (edge / "app.log").open("w") as log:
     rc = subprocess.run([str(binary), "--script", str(edge / "edge.shift"), "--headless"],
                         env=edge_env, stdout=log, stderr=log, timeout=120).returncode
-assert rc == 0, f"edge-case run failed; see {edge}/app.log"
+assert rc == 0, died("edge-case run failed", edge / "app.log")
 
 def estate(name):
     return (edge / f"{name}.txt").read_text()

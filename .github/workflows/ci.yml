@@ -26,14 +26,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Linux build deps (winit / wayland / x11) + hook checkers
+      # Build deps, the libraries winit dlopens, hook checkers, Xvfb + lavapipe.
+      # packaging/ci-ubuntu.Dockerfile installs the same list for the local linux gate.
+      - name: Install Linux packages (packaging/ci-apt.txt)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            libxkbcommon-dev libwayland-dev libxcb1-dev libxcb-render0-dev \
-            libxcb-shape0-dev libxcb-xfixes0-dev pkg-config \
-            shellcheck zsh fish xvfb libgl1-mesa-dri mesa-vulkan-drivers
+          xargs -a packaging/ci-apt.txt sudo apt-get install -y
 
       - name: Install Rust (rust-toolchain.toml)
         run: rustup toolchain install

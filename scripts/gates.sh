@@ -29,7 +29,7 @@ shell    shellcheck on packaging/*.sh, scripts/*.sh, .githooks/*, bash hooks; zs
 docs     CLAUDE.md and AGENTS.md identical; every relative link in *.md resolves
 release  cargo build --release --locked
 ui       isolated scripted UI regressions (display or xvfb-run required)
-linux    shell (CI shellcheck version) + clippy + test + release build + scripted UI (xvfb) inside packaging/linux-verify.Dockerfile (docker)
+linux    clippy + test + release build in packaging/linux-verify.Dockerfile, then shell + scripted UI (xvfb) on the CI runner's packages in packaging/ci-ubuntu.Dockerfile (docker)
 EOF
 }
 
@@ -82,14 +82,17 @@ gate_linux() {
         -v shift-cargo-registry:/usr/local/cargo/registry \
         -e CARGO_TARGET_DIR=/src/target/linux-docker \
         shift-linux-verify bash -c '
-            scripts/gates.sh shell &&
             cargo clippy --workspace --all-targets --locked -- -D warnings &&
             cargo test --workspace --locked &&
-            cargo build --release --locked &&
-            mkdir -p /tmp/xdg && chmod 700 /tmp/xdg &&
-            XDG_RUNTIME_DIR=/tmp/xdg LIBGL_ALWAYS_SOFTWARE=1 WGPU_BACKEND=vulkan \
-            SHIFT_TEST_BIN=/src/target/linux-docker/release/shift-terminal \
-                xvfb-run -a scripts/ui-smoke.sh'
+            cargo build --release --locked' || return 1
+    # The shell and UI gates run on the CI runner's packages, with the
+    # environment of ci.yml's UI step: a library, font or shellcheck version
+    # the runner differs on fails here first.
+    docker build -q -t shift-ci-ubuntu -f packaging/ci-ubuntu.Dockerfile packaging >/dev/null || return 1
+    docker run --rm --init -v "$PWD:/src:ro" -w /src \
+        -e SHIFT_TEST_BIN=/src/target/linux-docker/release/shift-terminal \
+        -e LIBGL_ALWAYS_SOFTWARE=1 -e WGPU_BACKEND=vulkan \
+        shift-ci-ubuntu bash -c 'scripts/gates.sh shell && xvfb-run -a scripts/gates.sh ui'
 }
 
 case "${1:-}" in
