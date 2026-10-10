@@ -32,7 +32,7 @@ pub fn render(
             [w, 17.0],
             Color::BLACK.with_alpha(0.4),
             4.0,
-            6.0,
+            4.0,
         );
         layer.rect([x, y], [w, 17.0], theme.warning, 4.0);
         let mut buf = Buffer::new(&mut engine.font_system, Metrics::new(12.0, 15.0));

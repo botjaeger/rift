@@ -13,7 +13,7 @@ cd "$(dirname "$0")/.."
 source packaging/lib.sh
 
 if [[ -z "${SHIFT_BIN:-}" ]]; then
-    cargo build --release -p shift-app >&2
+    cargo build --release -p shift-terminal >&2
     SHIFT_BIN="$(shift_default_target_dir)/release/shift-terminal"
 fi
 [[ -x "$SHIFT_BIN" ]] || shift_die "no binary at $SHIFT_BIN"

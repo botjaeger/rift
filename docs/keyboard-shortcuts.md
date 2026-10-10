@@ -79,7 +79,7 @@ listed alternates.
 | ⌘P / ⌃⇧P | `palette` | Command palette |
 | ⌘F / ⌃⇧F | `search` | Scrollback search |
 | ⌃⇧R | `workflows` | Workflow picker |
-| ⌘, | `open_settings` | Settings overlay |
+| ⌘, | `open_settings` | Settings tab (again: back to the shell tab) |
 | ⌃⌘K | `open_keybindings` | Settings → Keybindings page |
 | ⌘L | `focus_input` | Scroll to bottom, deselect, focus the editor |
 | ⇧⌘A | `attention_center` | Notifications popover: finished commands, failures, notifications and bells |
@@ -103,9 +103,10 @@ Active only while the app owns the command line.
 | Enter | Submit command |
 | ⇧⏎ / ⌥⏎ | Insert a newline (multi-line command; Enter still submits) |
 | Tab | Cycle workflow placeholder, else accept completion |
+| ⇧Tab | Next completion source tab (All · Path · History …) while the panel is open |
 | Esc | Close completion / exit placeholder mode (after deselecting any block) |
-| ↑ / ↓ | History up / down (or move completion selection while the dropdown is open) |
-| ← / → | Move cursor; ⌃→ accepts one ghost-text word |
+| ↑ / ↓ | History up / down (or move completion selection while the completion panel is open) |
+| ← / → | Move cursor; → at the end of the line accepts the ghost text, ⌃→ one word of it |
 | ⌥← / ⌥→ | Word left / right |
 | ⌘← / ⌘→, ⌃A / ⌃E | Line start / end |
 | ⌫ / ⌦ (Delete) | Delete back / forward |
@@ -119,14 +120,14 @@ Active only while the app owns the command line.
 | ⌥⇧← / ⌥⇧→ | Extend the selection by one word |
 | ⇧⌘← / ⇧⌘→, ⇧Home / ⇧End | Extend the selection to line start / end |
 | ⌘X | Cut the selection (⌘C copies it, ⌘A selects all) |
-| ⌃R | History palette |
+| ⌃R | History pane above the command line (again: next scope); in it ↑/↓ move, ⏎ runs, ⇥ edits first, ⌘⏎ runs in a new split, Esc closes |
 | ⌃C | Interrupt (clears line, sends SIGINT) |
 | ⌃D | EOF (only when the line is empty) |
 | ⌃L | Clear screen (shell redraw; blocks survive) |
 
 ## Vim mode
 
-Active in the owned editor when `vim_mode = true` (Settings → Features, or the
+Active in the owned editor when `vim_mode = true` (Settings → Input, or the
 palette's *Toggle vim keybindings*). The buffer is one command: motions are
 within-line and "linewise" operators act on the whole buffer. Only the keys
 below are implemented.
@@ -148,7 +149,7 @@ below are implemented.
 | `r` + char | Replace the character under the cursor |
 | `~` | Toggle case and advance |
 | `p` / `P` | Put the unnamed register after / before the cursor |
-| `u` / **`U`** | Undo / **redo** (⌃R stays the history palette) |
+| `u` / **`U`** | Undo / **redo** (⌃R stays the history pane) |
 | `k` / `j` | History previous / next (also ↑ / ↓) |
 | digits | Count, before and/or after the operator — the two multiply (`2d3w`) |
 
@@ -176,6 +177,11 @@ With the file viewer open, ⌘F finds in the file instead: type the query
 | ⌘-click | Open a URL, OSC 8 hyperlink or existing file path |
 | wheel | Scroll the pane under the pointer (reported to mouse-tracking programs) |
 | drop files | Paste their shell-quoted paths |
+| drag a tab | Reorder tabs (Esc while dragging puts it back) |
+| drag a pane title bar | Move the pane: a pane's half splits, its middle swaps, a tab joins (hold 600 ms to open it), the empty strip makes a new tab; Esc cancels |
+
+In the Settings tab, typing outside Keybindings searches every page (⌫
+edits, Esc clears, a second Esc closes the tab); ⌘W or ⌘, leave it.
 
 ## Raw-mode keys
 
@@ -186,7 +192,7 @@ ESC-prefixed Meta for ⌥ (always on Linux; on macOS with `option_as_meta`).
 
 ## Palette keys
 
-Esc close · Enter run selected · ↑/↓ move selection · type to filter.
+Esc close · Enter run selected · ↑/↓ move selection · type to filter · ⇥ next mode · `>` `#` `!` `@` typed into an empty query switch to Actions, History, Workflows, Sessions.
 
 ## Customization
 

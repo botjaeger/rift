@@ -4,8 +4,10 @@ members = [
     "crates/shift-core",
     "crates/shift-pty",
     "crates/shift-renderer",
-    "crates/shift-app",
+    "crates/shift-terminal",
 ]
+# plain `cargo run` / `cargo build` target the app; gates pass --workspace
+default-members = ["crates/shift-terminal"]
 
 [workspace.package]
 version = "0.1.0"

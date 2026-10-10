@@ -4,6 +4,7 @@ use shift_renderer::glyphon::{Attrs, Buffer, Family, Metrics, Shaping, Weight, W
 use shift_renderer::{Layer, TextEngine, mono_family};
 
 use crate::state::PaneState;
+use crate::views::icons::{self, Icon};
 use crate::vim::VimMode;
 
 /// Editor zone height for a single-line command (13px top pad + 16px
@@ -13,7 +14,7 @@ pub const EDITOR_H: f32 = 72.0;
 pub const EDITOR_COMPACT_H: f32 = 42.0;
 /// Input line height; every extra line of a multi-line command adds one.
 pub const LINE_H: f32 = 20.0;
-pub const FONT_SIZE: f32 = 14.0;
+pub const FONT_SIZE: f32 = 13.0;
 pub const PAD_X: f32 = 16.0;
 
 /// Terminal cells a character occupies (CJK, Hangul, fullwidth forms and
@@ -76,13 +77,23 @@ pub fn input_cols(area_w: f32, cell_w: f32, char_w: f32, vim: bool) -> usize {
 
 /// Editor zone height for the given buffer (grows with ⇧⏎ newlines and
 /// soft-wrapped rows).
-pub fn editor_height(buffer: &str, compact: bool, prompt: PromptMode, cols: usize) -> f32 {
-    let base = if compact || prompt == PromptMode::Shell {
+pub fn editor_height(buffer: &str, prompt: PromptMode, cols: usize) -> f32 {
+    let base = if prompt == PromptMode::Shell {
         EDITOR_COMPACT_H
     } else {
         EDITOR_H
     };
     base + (wrap_rows(buffer, cols).len().saturating_sub(1)) as f32 * LINE_H
+}
+
+/// Offset of the input line from the editor zone's top: below the prompt
+/// context row, or right under the divider in shell-prompt mode.
+pub fn input_offset(prompt: PromptMode) -> f32 {
+    if prompt == PromptMode::Shell {
+        11.0
+    } else {
+        13.0 + 24.0
+    }
 }
 
 /// Draw the owned input editor.
@@ -100,7 +111,6 @@ pub fn render(
     cell_w: f32, // still sizes the ❯ prompt offset below
     blink_on: bool,
     focused: bool,
-    compact: bool,
     ghost: &str,
     shell_env: Option<&shift_core::shell_env::ShellEnv>,
     hint: Option<&str>,
@@ -112,8 +122,8 @@ pub fn render(
     // divider (full width, design: border-top on -8px margins)
     layer.hline(x - 8.0, y, w + 16.0, 1.0, theme.border);
 
-    let input_y = if compact || shell_prompt {
-        y + 11.0
+    let input_y = if shell_prompt {
+        y + input_offset(config.prompt)
     } else {
         // ── prompt context (design 01): ⇕ ~/cwd on ⎇ branch ↑n ──
         let ctx_y = y + 13.0;
@@ -126,12 +136,12 @@ pub fn render(
             layer,
             engine,
             theme,
-            x + PAD_X,
+            [x + PAD_X, x + w - PAD_X],
             ctx_y,
             &cwd_display,
             pane.git.as_ref(),
         );
-        ctx_y + 24.0
+        y + input_offset(config.prompt)
     };
     let font_size = FONT_SIZE;
     let line_h = LINE_H;
@@ -139,13 +149,14 @@ pub fn render(
         Some(n) if n != 0 => theme.error,
         _ => theme.success,
     };
-    // shell-prompt mode: the shell's own PS1 stays on the grid right above,
-    // so the editor shows a quiet continuation glyph instead of ❯
-    let glyph = if shell_prompt { "›" } else { "❯" };
-    layer.text(
-        make_mono(engine, glyph, font_size, Weight::SEMIBOLD),
-        x + PAD_X,
-        input_y,
+    // the logo's chevron (exit status colors it); shell-prompt mode keeps
+    // the shell's own PS1 on the grid right above, so it is a quiet one
+    // the size of a capital letter, centred on the block cursor
+    let chevron_h = if shell_prompt { 9.0 } else { 11.0 };
+    prompt_chevron(
+        layer,
+        [x + PAD_X, input_y - 1.0 + CURSOR_H / 2.0],
+        chevron_h,
         if shell_prompt || !focused {
             theme.text_muted
         } else {
@@ -326,11 +337,36 @@ pub fn render(
     };
     let cursor_y = input_y + row as f32 * line_h;
 
-    // inline ghost text (design 04): dimmed completion preview after cursor
-    if !ghost.is_empty() && pane.editor.cursor == buffer.len() && config.autosuggestions {
-        let gx = text_x + prefix_w + 9.0;
+    // inline ghost text (Warp): the dimmed completion continues the line
+    // right at the cursor (its first glyph shows through the cursor), then
+    // a small → chip names the accept key
+    let ghost_on =
+        !ghost.is_empty() && pane.editor.cursor == buffer.len() && config.autosuggestions;
+    if ghost_on {
+        let gx = text_x + prefix_w;
+        let gw = engine.measure(ghost, font_size, mono_family(), Weight::NORMAL);
         let gbuf = make_mono(engine, ghost, font_size, Weight::NORMAL);
         layer.text(gbuf, gx, cursor_y, theme.syntax.ghost);
+        let key = "→";
+        let kw = engine.measure(key, 11.0, shift_renderer::FONT_SANS, Weight::NORMAL);
+        let chip = [gx + gw + 8.0, cursor_y, kw + 10.0, 16.0];
+        layer.bordered(
+            [chip[0], chip[1]],
+            [chip[2], chip[3]],
+            Color::TRANSPARENT,
+            theme.text_muted.with_alpha(0.6),
+            4.0,
+            1.0,
+        );
+        let mut kb = Buffer::new(&mut engine.font_system, Metrics::new(11.0, 16.0));
+        kb.set_text(
+            &mut engine.font_system,
+            key,
+            &Attrs::new().family(Family::Name(shift_renderer::FONT_SANS)),
+            Shaping::Advanced,
+            None,
+        );
+        layer.text(kb, (chip[0] + 5.0).round(), chip[1] - 0.5, theme.text_dim);
     }
 
     // correction / hint shown in an empty editor (Warp command corrections)
@@ -355,7 +391,7 @@ pub fn render(
             [hw + 12.0, 20.0],
             theme.accent.with_alpha(0.10),
             theme.accent.with_alpha(0.35),
-            5.0,
+            4.0,
             1.0,
         );
         layer.text(
@@ -393,7 +429,7 @@ pub fn render(
     // cursor: config style (block 8×18 / bar / underline), 1.1s steps
     // blink; vim NORMAL always draws a solid block. Translucent when a
     // glyph sits on it so the glyph (drawn above quads) stays readable.
-    let over_glyph = pane.editor.cursor < buffer.len();
+    let over_glyph = pane.editor.cursor < buffer.len() || ghost_on;
     let style = if vim_normal {
         CursorStyle::Block
     } else {
@@ -403,11 +439,19 @@ pub fn render(
         let (rect_pos, rect_size, alpha) = match style {
             CursorStyle::Block => (
                 [text_x + prefix_w, cursor_y - 1.0],
-                [8.0, 18.0],
+                [8.0, CURSOR_H],
                 if over_glyph { 0.45 } else { 1.0 },
             ),
-            CursorStyle::Bar => ([text_x + prefix_w - 1.0, cursor_y - 1.0], [2.0, 18.0], 1.0),
-            CursorStyle::Underline => ([text_x + prefix_w, cursor_y + 15.0], [8.0, 2.0], 1.0),
+            CursorStyle::Bar => (
+                [text_x + prefix_w - 1.0, cursor_y - 1.0],
+                [2.0, CURSOR_H],
+                1.0,
+            ),
+            CursorStyle::Underline => (
+                [text_x + prefix_w, cursor_y + CURSOR_H - 3.0],
+                [8.0, 2.0],
+                1.0,
+            ),
         };
         layer.rect(rect_pos, rect_size, theme.cursor.with_alpha(alpha), 1.0);
     }
@@ -452,68 +496,141 @@ fn context_row(
     layer: &mut Layer,
     engine: &mut TextEngine,
     theme: &Theme,
-    x: f32,
+    [x, right]: [f32; 2],
     y: f32,
     cwd: &str,
     git: Option<&shift_core::git::GitInfo>,
 ) {
-    const SIZE: f32 = 12.0;
-    const GAP: f32 = 9.0;
-    let dot = |layer: &mut Layer, px: f32, py: f32, c: Color| {
-        layer.rect([px, py], [1.7, 1.7], c, 0.85);
+    let measure = |engine: &mut TextEngine, t: &str| {
+        engine.measure(t, CHIP_SIZE, mono_family(), Weight::NORMAL)
     };
-    let mid = y + SIZE * 0.7;
-    // chevrons: `M3 9l4-4 4 4 M3 15l4 4 4-4` on a 13px box
-    for i in 0..4 {
-        let d = i as f32 * 1.1;
-        dot(layer, x + 1.0 + d, mid - 2.0 - d, theme.accent);
-        dot(layer, x + 7.6 - d, mid - 2.0 - d, theme.accent);
-        dot(layer, x + 1.0 + d, mid + 1.5 + d, theme.accent);
-        dot(layer, x + 7.6 - d, mid + 1.5 + d, theme.accent);
+    let mut marks = Vec::new();
+    if let Some(git) = git {
+        if git.ahead > 0 {
+            marks.push(format!("↑{}", git.ahead));
+        }
+        if git.behind > 0 {
+            marks.push(format!("↓{}", git.behind));
+        }
+        if git.dirty {
+            marks.push("•".into());
+        }
     }
-    let mut cx = x + 13.0 + GAP;
-    let mut word = |layer: &mut Layer, cx: &mut f32, text: &str, c: Color| {
-        layer.text(make_mono(engine, text, SIZE, Weight::NORMAL), *cx, y, c);
-        *cx += engine.measure(text, SIZE, mono_family(), Weight::NORMAL) + GAP;
+    let marks = marks.join(" ");
+    // chip = pad, icon, gap, text, pad
+    let chip_w = |text_w: f32| CHIP_PAD + CHIP_ICON + 5.0 + text_w + CHIP_PAD;
+    // a narrow pane keeps the cwd's tail (`…/project/dir`) and the branch
+    // instead of cutting either mid-glyph at the pane edge
+    let git_w = git.map_or(0.0, |g| {
+        let marks_w = if marks.is_empty() {
+            0.0
+        } else {
+            6.0 + measure(engine, &marks)
+        };
+        CHIP_GAP + chip_w(measure(engine, &g.branch) + marks_w)
+    });
+    let cwd_room = (right - x - chip_w(0.0) - git_w).max(80.0);
+    let cwd = elide_head(cwd, cwd_room, |t| measure(engine, t));
+    let top = y - 2.0;
+    let chip = |layer: &mut Layer,
+                engine: &mut TextEngine,
+                cx: f32,
+                icon: Icon,
+                icon_color: Color,
+                texts: &[(&str, Color)]|
+     -> f32 {
+        let text_w: f32 = texts.iter().map(|(t, _)| measure(engine, t)).sum::<f32>()
+            + 6.0 * texts.len().saturating_sub(1) as f32;
+        let w = chip_w(text_w);
+        layer.bordered(
+            [cx, top],
+            [w, CHIP_H],
+            theme.fg.with_alpha(0.04),
+            theme.border,
+            4.0,
+            1.0,
+        );
+        icons::draw(
+            layer,
+            icon,
+            [cx + CHIP_PAD + CHIP_ICON / 2.0, top + CHIP_H / 2.0],
+            CHIP_ICON,
+            icon_color,
+        );
+        let mut tx = cx + CHIP_PAD + CHIP_ICON + 5.0;
+        for (t, c) in texts {
+            // the line box centred in the chip
+            let ty = top + (CHIP_H - CHIP_SIZE * 1.4) / 2.0;
+            layer.text(make_mono(engine, t, CHIP_SIZE, Weight::NORMAL), tx, ty, *c);
+            tx += measure(engine, t) + 6.0;
+        }
+        cx + w
     };
-    word(layer, &mut cx, cwd, theme.accent);
-    let Some(git) = git else {
+    let cx = chip(
+        layer,
+        engine,
+        x,
+        Icon::Folder,
+        theme.text_dim,
+        &[(&cwd, theme.text_bright)],
+    );
+    // what still does not fit is dropped whole
+    let Some(git) = git.filter(|_| cx + git_w <= right) else {
         return;
     };
-    word(layer, &mut cx, "on", theme.text_muted);
-    // branch icon: two stacked commits on a stem, a third forked right
-    let c = theme.success;
-    let (bx, by) = (cx, mid - 5.5);
-    layer.bordered([bx, by], [3.6, 3.6], Color::TRANSPARENT, c, 1.8, 1.1);
-    layer.bordered([bx, by + 7.4], [3.6, 3.6], Color::TRANSPARENT, c, 1.8, 1.1);
-    layer.rect([bx + 1.25, by + 3.6], [1.1, 3.8], c, 0.5);
-    layer.bordered(
-        [bx + 6.6, by + 1.8],
-        [3.6, 3.6],
-        Color::TRANSPARENT,
-        c,
-        1.8,
-        1.1,
-    );
-    for i in 0..3 {
-        let d = i as f32 * 1.3;
-        dot(layer, bx + 7.4 - d, by + 5.4 + d * 0.8, c);
-    }
-    cx += 11.0 + 5.0;
-    word(layer, &mut cx, &git.branch, c);
-    let mut marks = Vec::new();
-    if git.ahead > 0 {
-        marks.push(format!("↑{}", git.ahead));
-    }
-    if git.behind > 0 {
-        marks.push(format!("↓{}", git.behind));
-    }
-    if git.dirty {
-        marks.push("•".into());
-    }
+    let mut texts = vec![(git.branch.as_str(), theme.text_ui)];
     if !marks.is_empty() {
-        word(layer, &mut cx, &marks.join(" "), theme.text_muted);
+        texts.push((marks.as_str(), theme.text_muted));
     }
+    chip(
+        layer,
+        engine,
+        cx + CHIP_GAP,
+        Icon::Branch,
+        theme.success,
+        &texts,
+    );
+}
+
+/// Context chips: text size, height, inner padding, icon size, gap.
+const CHIP_SIZE: f32 = 12.0;
+const CHIP_H: f32 = 18.0;
+const CHIP_PAD: f32 = 5.0;
+const CHIP_ICON: f32 = 10.0;
+const CHIP_GAP: f32 = 6.0;
+
+/// Block cursor height; the prompt chevron matches it.
+const CURSOR_H: f32 = 17.0;
+
+/// The logo's chevron (`>` of the app icon: 170 wide, 304 tall with its
+/// round caps on the 1024 grid), `h` px tall overall, its left cap at
+/// `at[0]`, vertically centred on `at[1]`. The stroke stays text-weight:
+/// the logo's 96 units would be bold at prompt size.
+fn prompt_chevron(layer: &mut Layer, at: [f32; 2], h: f32, color: Color) {
+    let k = h / (304.0 + 96.0);
+    let stroke = (96.0 * k).min(2.2);
+    let (w, hh) = (170.0 * k, 152.0 * k);
+    let left = at[0] + stroke / 2.0;
+    let tip = [left + w, at[1]];
+    layer.line([left, at[1] - hh], tip, stroke, color);
+    layer.line([left, at[1] + hh], tip, stroke, color);
+}
+
+/// `text` cut from the front to fit `max_w` (`…` + its tail): for paths,
+/// whose end says where you are.
+pub(crate) fn elide_head(text: &str, max_w: f32, mut measure: impl FnMut(&str) -> f32) -> String {
+    if measure(text) <= max_w {
+        return text.to_string();
+    }
+    let mut start = 0;
+    for (i, _) in text.char_indices().skip(1) {
+        start = i;
+        let candidate = format!("…{}", &text[start..]);
+        if measure(&candidate) <= max_w {
+            return candidate;
+        }
+    }
+    format!("…{}", &text[start..])
 }
 
 fn mono_attrs() -> Attrs<'static> {
@@ -548,24 +665,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn elide_head_keeps_the_path_tail() {
+        let w = |t: &str| t.chars().count() as f32;
+        assert_eq!(elide_head("~/zzz/shift", 20.0, w), "~/zzz/shift");
+        assert_eq!(elide_head("/private/tmp/a/b/c", 7.0, w), "…/a/b/c");
+        assert_eq!(elide_head("abc", 0.0, w), "…c");
+    }
+
+    #[test]
     fn height_grows_per_line() {
-        assert_eq!(editor_height("ls", false, PromptMode::Shift, 80), EDITOR_H);
+        assert_eq!(editor_height("ls", PromptMode::Shift, 80), EDITOR_H);
         assert_eq!(
-            editor_height("a\nb\nc", false, PromptMode::Shift, 80),
+            editor_height("a\nb\nc", PromptMode::Shift, 80),
             EDITOR_H + 2.0 * LINE_H
         );
-        assert_eq!(
-            editor_height("ls", true, PromptMode::Shift, 80),
-            EDITOR_COMPACT_H
-        );
         // shell-prompt mode drops the context row
-        assert_eq!(
-            editor_height("ls", false, PromptMode::Shell, 80),
-            EDITOR_COMPACT_H
-        );
+        assert_eq!(editor_height("ls", PromptMode::Shell, 80), EDITOR_COMPACT_H);
         // a long line soft-wraps into extra rows
         assert_eq!(
-            editor_height(&"x".repeat(25), false, PromptMode::Shift, 10),
+            editor_height(&"x".repeat(25), PromptMode::Shift, 10),
             EDITOR_H + 2.0 * LINE_H
         );
     }

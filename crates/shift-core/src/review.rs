@@ -33,6 +33,9 @@ pub struct Line {
     pub new_no: Option<u32>,
     /// Without the trailing newline.
     pub text: String,
+    /// The part that differs from its paired removed/added line (byte
+    /// range into `text`): the panel highlights it, like Warp.
+    pub emph: Option<std::ops::Range<usize>>,
 }
 
 /// A hunk's line ranges and content: its identity for stage/unstage/revert.
@@ -83,6 +86,9 @@ pub struct FileDiff {
     /// Lines past `MAX_LINES_PER_FILE` were dropped.
     pub truncated: bool,
     pub hunks: Vec<Hunk>,
+    /// The new side's lines, for the panel's "N unmodified lines" rows
+    /// between hunks. `None` for added, deleted, binary and large files.
+    pub source: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -173,8 +179,8 @@ fn load_repo(repo: &Repository, root: PathBuf) -> Result<Review, String> {
     Ok(Review {
         root,
         branch: branch_name(repo),
-        staged: collect(&staged)?,
-        unstaged: collect(&unstaged)?,
+        staged: collect_as(&staged, false, Some((repo, false)))?,
+        unstaged: collect_as(&unstaged, false, Some((repo, true)))?,
     })
 }
 
@@ -204,14 +210,16 @@ fn path_str(p: Option<&Path>) -> Option<String> {
     })
 }
 
-fn collect(diff: &Diff<'_>) -> Result<Vec<FileDiff>, String> {
-    collect_as(diff, false)
-}
-
-/// `collect` for a diff built with `reverse(true)`: hunk content hashes are
-/// computed as the forward diff's, so `HunkId::swapped` of a forward id
-/// matches the reversed diff's hunk.
-fn collect_as(diff: &Diff<'_>, reversed: bool) -> Result<Vec<FileDiff>, String> {
+/// Files, hunks and lines of `diff`. `reversed` for a diff built with
+/// `reverse(true)`: hunk content hashes are computed as the forward diff's,
+/// so `HunkId::swapped` of a forward id matches the reversed diff's hunk.
+/// `source` (repository, new side is the working tree) loads each modified
+/// file's new side for the panel.
+fn collect_as(
+    diff: &Diff<'_>,
+    reversed: bool,
+    source: Option<(&Repository, bool)>,
+) -> Result<Vec<FileDiff>, String> {
     let mut files = Vec::new();
     for idx in 0..diff.deltas().len() {
         let Some(delta) = diff.get_delta(idx) else {
@@ -231,6 +239,7 @@ fn collect_as(diff: &Diff<'_>, reversed: bool) -> Result<Vec<FileDiff>, String> 
             binary: delta.flags().is_binary(),
             truncated: false,
             hunks: Vec::new(),
+            source: None,
         };
         if let Some(patch) = Patch::from_diff(diff, idx).map_err(err)? {
             file.binary |= patch.delta().flags().is_binary();
@@ -296,8 +305,10 @@ fn collect_as(diff: &Diff<'_>, reversed: bool) -> Result<Vec<FileDiff>, String> 
                         old_no: line.old_lineno(),
                         new_no: line.new_lineno(),
                         text: text.trim_end_matches(['\n', '\r']).to_string(),
+                        emph: None,
                     });
                 }
+                mark_changes(&mut out.lines);
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
                 old_side.finish().hash(&mut hasher);
                 new_side.finish().hash(&mut hasher);
@@ -308,9 +319,109 @@ fn collect_as(diff: &Diff<'_>, reversed: bool) -> Result<Vec<FileDiff>, String> 
                 }
             }
         }
+        if let Some((repo, workdir)) = source
+            && !file.binary
+        {
+            file.source = new_side(repo, &delta, workdir);
+        }
         files.push(file);
     }
     Ok(files)
+}
+
+/// Largest file whose new side is loaded for the "unmodified lines" rows.
+const MAX_SOURCE_BYTES: usize = 1 << 20;
+
+/// A modified file's new side as lines: the index blob for a staged diff,
+/// the working-tree file for an unstaged one.
+fn new_side(repo: &Repository, delta: &git2::DiffDelta<'_>, workdir: bool) -> Option<Vec<String>> {
+    if !matches!(
+        delta.status(),
+        Delta::Modified | Delta::Renamed | Delta::Copied
+    ) {
+        return None;
+    }
+    let file = delta.new_file();
+    let bytes = if workdir {
+        let full = repo.workdir()?.join(file.path()?);
+        let meta = full.symlink_metadata().ok()?;
+        if !meta.is_file() || meta.len() > MAX_SOURCE_BYTES as u64 {
+            return None;
+        }
+        std::fs::read(full).ok()?
+    } else {
+        let blob = repo.find_blob(file.id()).ok()?;
+        if blob.size() > MAX_SOURCE_BYTES {
+            return None;
+        }
+        blob.content().to_vec()
+    };
+    if bytes.contains(&0) {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&bytes)
+            .lines()
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+/// Pair each run of removed lines with the added run right after it, line
+/// by line, and mark the part of each pair that differs.
+fn mark_changes(lines: &mut [Line]) {
+    let mut i = 0;
+    while i < lines.len() {
+        if lines[i].kind != LineKind::Removed {
+            i += 1;
+            continue;
+        }
+        let removed = i;
+        while i < lines.len() && lines[i].kind == LineKind::Removed {
+            i += 1;
+        }
+        let added = i;
+        while i < lines.len() && lines[i].kind == LineKind::Added {
+            i += 1;
+        }
+        // in order, each removed line with the next added line it resembles
+        // (an inserted line between them is skipped)
+        let mut next = added;
+        for a in removed..added {
+            let found = (next..i)
+                .find_map(|b| changed_span(&lines[a].text, &lines[b].text).map(|spans| (b, spans)));
+            if let Some((b, (ra, rb))) = found {
+                lines[a].emph = Some(ra);
+                lines[b].emph = Some(rb);
+                next = b + 1;
+            }
+        }
+    }
+}
+
+/// The differing middle of two lines (byte ranges between their common
+/// prefix and suffix), or `None` when they share under a quarter of the
+/// longer one: a rewritten line is highlighted whole by its row tint.
+fn changed_span(a: &str, b: &str) -> Option<(std::ops::Range<usize>, std::ops::Range<usize>)> {
+    let prefix = a
+        .char_indices()
+        .zip(b.chars())
+        .take_while(|((_, x), y)| x == y)
+        .last()
+        .map_or(0, |((i, x), _)| i + x.len_utf8());
+    // the prefix is equal text, so it ends at the same byte in both
+    let suffix: usize = a[prefix..]
+        .chars()
+        .rev()
+        .zip(b[prefix..].chars().rev())
+        .take_while(|(x, y)| x == y)
+        .map(|(x, _)| x.len_utf8())
+        .sum();
+    let common = prefix + suffix;
+    if common == 0 || common * 4 < a.len().max(b.len()) {
+        return None;
+    }
+    Some((prefix..a.len() - suffix, prefix..b.len() - suffix))
 }
 
 /// A review-panel write.
@@ -526,7 +637,7 @@ fn apply_hunk(repo: &Repository, op: Op, path: &str, id: HunkId) -> Result<(), S
         ),
     };
     let diff = diff.map_err(err)?;
-    let files = collect_as(&diff, op != Op::Stage)?;
+    let files = collect_as(&diff, op != Op::Stage, None)?;
     let Some((file, hunk)) = files
         .iter()
         .filter(|file| file.path == path || file.old_path.as_deref() == Some(path))
@@ -673,6 +784,77 @@ mod tests {
         assert_eq!(new.hunks[0].lines[0].text, "fn main() {}");
         assert_eq!(r.statuses().get("src/new.rs"), Some(&'?'));
         assert!(r.dirty_dirs().contains("src"));
+    }
+
+    #[test]
+    fn marks_changed_words_and_loads_the_new_side() {
+        let t = temp_repo("emph");
+        fs::write(
+            t.dir.join("a.txt"),
+            lines(&[(5, "cargo run -p shift-app  # dev")]),
+        )
+        .unwrap();
+        commit_all(&t, "init");
+        fs::write(
+            t.dir.join("a.txt"),
+            lines(&[(5, "cargo run  # dev"), (28, "x")]),
+        )
+        .unwrap();
+
+        let r = review(&t);
+        let a = &r.unstaged[0];
+        let src = a
+            .source
+            .as_ref()
+            .expect("a modified file loads its new side");
+        assert_eq!((src.len(), src[4].as_str()), (30, "cargo run  # dev"));
+        let find = |hunk: usize, kind| {
+            a.hunks[hunk]
+                .lines
+                .iter()
+                .find(|l| l.kind == kind)
+                .unwrap()
+                .clone()
+        };
+        let (old, new) = (find(0, LineKind::Removed), find(0, LineKind::Added));
+        assert_eq!(&old.text[old.emph.clone().unwrap()], "-p shift-app ");
+        assert_eq!(new.emph, Some(10..10), "pure deletion: empty span");
+        // "line 28" → "x" shares nothing: the row tint is the highlight
+        assert_eq!(find(1, LineKind::Removed).emph, None);
+
+        // staged: the new side is the index blob, not the working tree
+        apply(&t.dir, Op::Stage, "a.txt", None).unwrap();
+        fs::write(t.dir.join("a.txt"), lines(&[(5, "later")])).unwrap();
+        let r = review(&t);
+        assert_eq!(r.staged[0].source.as_ref().unwrap()[4], "cargo run  # dev");
+        assert_eq!(r.unstaged[0].source.as_ref().unwrap()[4], "later");
+    }
+
+    #[test]
+    fn changed_span_keeps_char_boundaries() {
+        let (a, b) = changed_span("héllo wörld", "héllo world").unwrap();
+        assert_eq!((&"héllo wörld"[a], &"héllo world"[b]), ("ö", "o"));
+        assert_eq!(changed_span("abc", "xyz"), None);
+    }
+
+    #[test]
+    fn pairs_a_removed_line_past_an_inserted_one() {
+        let line = |kind, text: &str| Line {
+            kind,
+            old_no: None,
+            new_no: None,
+            text: text.into(),
+            emph: None,
+        };
+        let mut lines = vec![
+            line(LineKind::Removed, "let v = compute(40);"),
+            line(LineKind::Added, "println!(\"inserted\");"),
+            line(LineKind::Added, "let v = recompute(40);"),
+        ];
+        mark_changes(&mut lines);
+        assert_eq!(lines[1].emph, None);
+        assert_eq!(&lines[2].text[lines[2].emph.clone().unwrap()], "re");
+        assert_eq!(lines[0].emph, Some(8..8));
     }
 
     #[test]

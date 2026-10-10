@@ -348,22 +348,23 @@ pub enum EditorKey {
     HistoryUp,
     HistoryDown,
     Submit,
-    Interrupt,       // ⌃C
-    Eof,             // ⌃D on empty line
-    Complete,        // ⇥
-    Dismiss,         // esc
-    HistorySearch,   // ⌃R (editor mode only — passthrough keeps raw 0x12)
-    AcceptGhostWord, // ⌃→
-    ClearScreen,     // ⌃L (passes \x0c to the shell)
-    Undo,            // ⌘Z
-    Redo,            // ⇧⌘Z
-    Cut,             // ⌘X (editor selection)
-    SelectLeft,      // ⇧←
-    SelectRight,     // ⇧→
-    SelectWordLeft,  // ⌥⇧←
-    SelectWordRight, // ⌥⇧→
-    SelectHome,      // ⇧⌘← / ⇧Home
-    SelectEnd,       // ⇧⌘→ / ⇧End
+    Interrupt,            // ⌃C
+    Eof,                  // ⌃D on empty line
+    Complete,             // ⇥
+    NextCompletionSource, // ⇧⇥ (completion panel source tabs)
+    Dismiss,              // esc
+    HistorySearch,        // ⌃R (editor mode only — passthrough keeps raw 0x12)
+    AcceptGhostWord,      // ⌃→
+    ClearScreen,          // ⌃L (passes \x0c to the shell)
+    Undo,                 // ⌘Z
+    Redo,                 // ⇧⌘Z
+    Cut,                  // ⌘X (editor selection)
+    SelectLeft,           // ⇧←
+    SelectRight,          // ⇧→
+    SelectWordLeft,       // ⌥⇧←
+    SelectWordRight,      // ⌥⇧→
+    SelectHome,           // ⇧⌘← / ⇧Home
+    SelectEnd,            // ⇧⌘→ / ⇧End
 }
 
 pub fn editor_key(event: &KeyPress, mods: ModifiersState) -> Option<EditorKey> {
@@ -396,6 +397,7 @@ pub fn editor_key(event: &KeyPress, mods: ModifiersState) -> Option<EditorKey> {
             // ⇧⏎ / ⌥⏎: newline inside the command (multi-line editing)
             NamedKey::Enter if mods.shift_key() || alt => Some(EditorKey::Insert("\n".into())),
             NamedKey::Enter => Some(EditorKey::Submit),
+            NamedKey::Tab if mods.shift_key() => Some(EditorKey::NextCompletionSource),
             NamedKey::Tab => Some(EditorKey::Complete),
             NamedKey::Escape => Some(EditorKey::Dismiss),
             NamedKey::Backspace if cmd => Some(EditorKey::KillToStart),

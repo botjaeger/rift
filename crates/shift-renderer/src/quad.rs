@@ -11,7 +11,15 @@ pub struct Quad {
     pub radius: f32,
     pub border_width: f32,
     pub softness: f32,
-    pub _pad: f32,
+    /// 0 = rounded box, 1 = line segment (`line` holds its end points).
+    pub kind: f32,
+    /// Segment end points `[ax, ay, bx, by]` (kind 1).
+    pub line: [f32; 4],
+    /// Rounded clip `[x, y, w, h]`; `w <= 0` = unclipped (CSS
+    /// `overflow: hidden` on a rounded parent).
+    pub clip: [f32; 4],
+    pub clip_radius: f32,
+    pub _pad: [f32; 3],
 }
 
 impl Quad {
@@ -20,11 +28,8 @@ impl Quad {
             pos,
             size,
             color,
-            border_color: [0.0; 4],
             radius,
-            border_width: 0.0,
-            softness: 0.0,
-            _pad: 0.0,
+            ..Zeroable::zeroed()
         }
     }
 
@@ -37,14 +42,9 @@ impl Quad {
         border_width: f32,
     ) -> Self {
         Quad {
-            pos,
-            size,
-            color: fill,
             border_color: border,
-            radius,
             border_width,
-            softness: 0.0,
-            _pad: 0.0,
+            ..Quad::rect(pos, size, fill, radius)
         }
     }
 
@@ -60,14 +60,22 @@ impl Quad {
     /// Soft shadow / glow behind other quads.
     pub fn shadow(pos: [f32; 2], size: [f32; 2], color: [f32; 4], radius: f32, sigma: f32) -> Self {
         Quad {
-            pos,
-            size,
-            color,
-            border_color: [0.0; 4],
-            radius,
-            border_width: 0.0,
             softness: sigma,
-            _pad: 0.0,
+            ..Quad::rect(pos, size, color, radius)
+        }
+    }
+
+    /// Anti-aliased line from `a` to `b`, `width` px thick with round caps
+    /// (icon strokes: ×, chevrons, checkmarks).
+    pub fn line(a: [f32; 2], b: [f32; 2], width: f32, color: [f32; 4]) -> Self {
+        let pad = width * 0.5 + 1.0;
+        let (x0, y0) = (a[0].min(b[0]) - pad, a[1].min(b[1]) - pad);
+        let (x1, y1) = (a[0].max(b[0]) + pad, a[1].max(b[1]) + pad);
+        Quad {
+            border_width: width,
+            kind: 1.0,
+            line: [a[0], a[1], b[0], b[1]],
+            ..Quad::rect([x0, y0], [x1 - x0, y1 - y0], color, 0.0)
         }
     }
 }
@@ -139,6 +147,10 @@ impl QuadPipeline {
                 4 => Float32,   // radius
                 5 => Float32,   // border_width
                 6 => Float32,   // softness
+                7 => Float32,   // kind
+                8 => Float32x4, // line
+                9 => Float32x4, // clip
+                10 => Float32,  // clip_radius
             ],
         };
 

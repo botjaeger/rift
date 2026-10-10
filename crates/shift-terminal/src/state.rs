@@ -26,6 +26,25 @@ pub enum ClickTarget {
     /// The owned command editor of a pane (click places the cursor).
     Editor(PaneId),
     PaneFocus(PaneId),
+    /// A split pane's title bar: a press focuses the pane and arms
+    /// drag-to-move (Warp pane header).
+    PaneHeader(PaneId),
+    /// A palette mode chip (`views::palette::MODES` index).
+    PaletteMode(u8),
+    /// The history pane's scope chips, row `i` (of the results) and ×.
+    HistoryScope(crate::views::history::Scope),
+    HistoryRow(usize),
+    HistoryClose,
+    /// The completion panel's source tab `i` (0 = all) and row `i`.
+    CompletionSource(u8),
+    CompletionRow(usize),
+    /// A row of the welcome list on a fresh session (`app::welcome_entries`).
+    Welcome(u8),
+    /// The title bar's split (new pane to the right), ⋮ (pane menu) and ×
+    /// (close pane).
+    PaneSplit(PaneId),
+    PaneMenu(PaneId),
+    PaneClose(PaneId),
     HandleDrag(NodePath),
     JumpToBlock(PaneId, shift_core::BlockId),
     // settings overlay controls
@@ -35,7 +54,14 @@ pub enum ClickTarget {
     SettingsToggle(&'static str),
     SettingsStep(&'static str, i8),
     SettingsSegment(&'static str, u8),
+    /// A select: opens its option list.
     SettingsCycle(&'static str),
+    /// Option `i` of the open select's list.
+    SettingsOption(usize),
+    /// ↺ beside a setting changed from its default.
+    SettingsReset(&'static str),
+    /// The sidebar's "Open config.toml".
+    SettingsOpenConfig,
     SettingsSlider(&'static str),
     SettingsTheme(u8),
     /// Keybindings page row: record a new shortcut for the action.
@@ -638,6 +664,8 @@ pub struct PaneState {
     pub first_output: Option<std::time::Instant>,
     /// Running block whose password prompt already raised a notification.
     pub password_block: Option<shift_core::BlockId>,
+    /// This pane's own window title (OSC 0/2): its title bar in a split.
+    pub title: String,
 }
 
 impl PaneState {
@@ -663,6 +691,7 @@ impl PaneState {
             transcript_id: shift_core::transcript::new_id(),
             first_output: None,
             password_block: None,
+            title: String::new(),
         }
     }
 
@@ -735,8 +764,9 @@ impl TabState {
 
     /// Split chrome (gutters, compact editor, pane borders) applies only
     /// when split AND not zoomed — a zoomed pane renders like a single pane.
+    /// The viewer pane counts as a leaf here: it lays out like any split.
     pub fn effective_split(&self) -> bool {
-        self.is_split() && self.zoomed.is_none()
+        self.root.is_split() && !(self.is_split() && self.zoomed.is_some())
     }
 
     pub fn display_title(&self) -> String {

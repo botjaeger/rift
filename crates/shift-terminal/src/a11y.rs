@@ -70,6 +70,8 @@ pub struct PaneNode {
     /// Visible terminal rows, top to bottom.
     pub screen: String,
     pub editor: Option<EditorNode>,
+    /// Title bar buttons (split, menu, close) and welcome rows.
+    pub controls: Vec<Control>,
 }
 
 pub struct BlockNode {
@@ -264,6 +266,10 @@ pub fn build(s: &Snapshot) -> Built {
             if pane.active {
                 focus = ed_id;
             }
+        }
+
+        for (i, c) in pane.controls.iter().enumerate() {
+            children.push(t.control(&format!("pane-{}", pane.id), i, c));
         }
 
         let mut group = Node::new(Role::Group);
@@ -509,6 +515,13 @@ mod tests {
                     value: "git st".into(),
                     rect: Some([0.0, 540.0, 800.0, 40.0]),
                 }),
+                controls: vec![Control {
+                    label: "Close pane".into(),
+                    role: Role::Button,
+                    toggled: None,
+                    selected: false,
+                    rect: Some([780.0, 40.0, 20.0, 20.0]),
+                }],
             }],
             overlay: None,
             announcement: Some("ls finished".into()),
@@ -527,8 +540,10 @@ mod tests {
         assert!(text.contains("Label value=\"ls finished\""));
         // every node is reachable from the root exactly once
         assert_eq!(text.lines().count(), built.update.nodes.len());
+        // the pane's title bar buttons sit in its group
+        assert!(text.contains("Button \"Close pane\""), "{text}");
         // clickable nodes carry their rect for action routing
-        assert_eq!(built.targets.len(), 4);
+        assert_eq!(built.targets.len(), 5);
     }
 
     #[test]

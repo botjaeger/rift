@@ -283,7 +283,7 @@ pub fn render(
         [x, y + 10.0],
         [modal_w, modal_h],
         Color::BLACK.with_alpha(0.62),
-        14.0,
+        8.0,
         20.0,
     );
     layer.bordered(
@@ -291,7 +291,7 @@ pub fn render(
         [modal_w, modal_h],
         theme.surface,
         Color::WHITE.with_alpha(0.12),
-        14.0,
+        8.0,
         1.0,
     );
 
@@ -315,7 +315,7 @@ pub fn render(
             [px, y + 25.0],
             [pill_w, 20.0],
             theme.accent.with_alpha(0.14),
-            5.0,
+            4.0,
         );
         layer.text(
             label(engine, &pill, 11.0, mono_family(), Weight::MEDIUM),
@@ -329,15 +329,15 @@ pub fn render(
         [close[0], close[1]],
         [close[2], close[3]],
         Color::WHITE.with_alpha(0.06),
-        7.0,
+        4.0,
     );
-    layer.text(
-        label(engine, "✕", 12.0, FONT_SANS, Weight::NORMAL),
-        close[0] + 9.0,
-        close[1] + 6.0,
+    super::close_icon(
+        layer,
+        [close[0] + close[2] / 2.0, close[1] + close[3] / 2.0],
+        4.0,
         theme.text_muted,
     );
-    layer.hline(x, y + HEADER_H, modal_w, 1.0, theme.border);
+    layer.hline(x + 1.0, y + HEADER_H, modal_w - 2.0, 1.0, theme.border);
 
     // ── body: the cached layout, scrolled, culled and clipped ──
     let body_top = y + HEADER_H + 1.0;

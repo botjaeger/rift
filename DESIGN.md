@@ -19,7 +19,7 @@ constant.
 - **One look across themes.** Views read colors from the active `Theme`, so a
   user theme (TOML or Warp YAML) restyles every surface.
 - **Accessible by construction.** Every interactive surface has an AccessKit
-  node with a name, role and state (`crates/shift-app/src/a11y.rs`).
+  node with a name, role and state (`crates/shift-terminal/src/a11y.rs`).
 
 ## Color tokens
 
@@ -33,12 +33,12 @@ Every rendered color resolves from a theme token (`shift_core::Theme`,
 | `bg_gutter` | `#1a1a1a` | Space between split panes |
 | `surface` | `#232326` | Modals, dropdowns, menus |
 | `border` | `#ffffff12` | Hairlines (white 7 %) |
-| `pane_border_inactive` | `#3c3c3c` | Unfocused pane outline |
+| `pane_border_inactive` | `#3c3c3c` | Split pane divider |
 | `fg` | `#d4d4d4` | Default terminal text |
 | `text_bright` | `#f0f1f3` | Commands, emphasized text |
 | `text_ui` | `#e6e7ea` | Chrome labels |
-| `text_dim` | `#8a8d96` | Secondary text |
-| `text_muted` | `#6f7178` | Tertiary text, metadata, hints |
+| `text_dim` | `#a1a4ad` | Secondary text |
+| `text_muted` | `#868993` | Tertiary text, metadata, hints |
 | `accent` | `#569cd6` | Focus, selection wash, running state, links |
 | `success` | `#22c55e` | Exit 0, prompt glyph, git branch |
 | `error` | `#ef4444` | Non-zero exit, invalid input |
@@ -59,12 +59,17 @@ and shadows, and white hairlines and hover tints at fixed alpha. New code uses
 tokens; mix or alpha them (`Color::with_alpha`, `Color::mix`) instead of
 adding hex values.
 
+Shadows are the shape's box blurred by a gaussian (`Layer::shadow`, sigma in
+px), like CSS `box-shadow`: past a corner they fade to a quarter of the edge's
+darkness, so a rounded card keeps round corners. Hairlines inside a bordered
+card stop 1 px short of each side so they never cross the border.
+
 ## Typography
 
 | Role | Face | Size |
 |---|---|---|
 | Terminal grid | JetBrains Mono (config `font_family`, embedded fallback) | 13 px default (`font_size`), line height 1.65 |
-| Command editor | JetBrains Mono | 14 px, 20 px lines |
+| Command editor | JetBrains Mono | 13 px, 20 px lines (Warp's size) |
 | UI chrome, palette, settings | Inter (variable, embedded) | per spec per surface |
 | Emphasis | JetBrains Mono Bold, Italic, Bold Italic (static weights) | — |
 
@@ -76,23 +81,29 @@ glyphon; shaped runs are cached by content.
 | Element | Value | Constant |
 |---|---|---|
 | Tab bar height | 42 px | `TAB_BAR_H` |
+| Traffic light centres (x; y = strip middle) | 20 / 40 / 60 px | `TRAFFIC_X`, `TRAFFIC_GAP` |
 | First tab x (after traffic lights) | 78 px | `TABS_X` |
-| Minimum tab width | 96 px | `MIN_TAB_W` |
+| Tab width (natural / squeezed minimum) | 150–240 px / 120 px | `TAB_W`, `MAX_TAB_W`, `MIN_TAB_W` |
+| Chrome icon button | 26 px, icon 16 px | `tabbar::icon_button` |
 | Vertical rail width / row height | 220 px / 54 px | `RAIL_W`, `RAIL_ROW_H` |
-| Pane corner radius / padding | 9 px / 12 px | `PANE_RADIUS`, `PANE_PAD` |
-| Split drag handle | 10 px | `HANDLE` |
+| Split pane padding | 8 px | `PANE_PAD` |
+| Split pane title bar (and file viewer header) | 28 px | `PANE_HEADER_H`, `viewer::HEADER_H` |
+| Split divider / grab width | 1 px / +4 px each side | `HANDLE`, `HANDLE_GRAB` |
 | Block left border / gap between blocks | 2 px / 2 px | `BLOCK_GAP` |
 | Selected block border | 3 px accent | — |
 | Block indent | 16 px | `BLOCK_INDENT` |
-| Editor height / compact (split) | 72 px / 42 px | `EDITOR_H`, `EDITOR_COMPACT_H` |
+| Editor height / shell-prompt mode | 72 px / 42 px | `EDITOR_H`, `EDITOR_COMPACT_H` |
 | Editor extra line | +20 px per line | `LINE_H` |
-| Palette width / row | 600 px / 42 px | `MODAL_W`, `ROW_H` |
-| Completion dropdown width / row | 560 px / 34 px | `DROPDOWN_W` |
-| Context menu width / row | 220 px / 30 px | `MENU_W` |
-| Settings sidebar width / row | 248 px / 52 px | `SIDEBAR_W` |
+| Palette width / search / mode chips / row | 640 px / 48 px / 40 px / 36 px | `MODAL_W`, `SEARCH_H`, `MODES_H`, `ROW_H` |
+| Completion panel header / row / footer | 32 px / 28 px / 30 px (pane width, ≤ 8 rows) | `HEADER_H`, `ROW_H`, `FOOTER_H` |
+| History pane header / row / footer | 32 px / 28 px / 30 px (pane width, ≤ 8 rows) | `history::HEADER_H`, `ROW_H`, `FOOTER_H` |
+| Context menu width / row | 240 px / 28 px | `MENU_W`, `ROW_H` |
+| Settings sidebar width / row / body | 232 px / 52 px / ≤ 720 px | `SIDEBAR_W`, `ROW_H`, `BODY_MAX_W` |
+| Settings controls | 28 px tall; toggle 34 × 20; select 220 px | `CONTROL_H` |
+| Welcome list width / row | 560 px / 36 px | `welcome::WIDTH`, `ROW_H` |
 | File explorer width / row | 260 px / 24 px | `EXPLORER_W`, `ROW_H` |
-| Code review width / diff line | 460 px / 22 px | `REVIEW_W` |
-| Block cursor | 8 × 18 px; bar and underline 2 px | — |
+| Code review width / diff line / file card | 460 px / 22 px / inset 10, radius 6 | `REVIEW_W`, `CARD_X` |
+| Block cursor | 8 × 17 px; bar and underline 2 px | `CURSOR_H` |
 
 ## Layers and compositing
 
@@ -102,16 +113,44 @@ glyphon; shaped runs are cached by content.
 |---|---|
 | 0 | Chrome: tab bar or rail, gutters |
 | 1 | Terminal grid, blocks, images, command editor; file explorer and code review panels (`bg_chrome`) |
-| 2 | Completion dropdown, find bar, file viewer (over the pane area) |
-| 3 | Settings overlay |
-| 4 | Palette and its modes (history, workflows, switcher) |
-| 5 | Block context menu, hint labels, notification toasts and popover |
-| 6 | Toasts, confirm dialogs |
+| 2 | Completion panel, history pane, find bar, file viewer (over the pane area) |
+| 3 | The Settings tab's page |
+| 4 | Palette and its modes (history, workflows, switcher); an open Settings select list |
+| 5 | Block context menu, hint labels, notification toasts and popover, pane drop zone, a lifted tab |
+| 6 | Toasts, confirm dialogs, the dragged pane's chip |
 
 A theme's background image draws before layer 0. Inline images draw under
 or over text by their z-index. Blending happens in sRGB
 space (non-sRGB surface, glyphon `ColorMode::Web`) to match the mock's CSS
 compositing — do not switch to linear.
+
+Children of a rounded panel (selected rows, accent edges, footers) are drawn
+under a rounded clip set to the panel's inner edge (`Layer::set_clip`), so
+they follow its corners instead of squaring them off.
+
+## Radii
+
+| Radius | Used for |
+|---|---|
+| 0 | Docked surfaces: panes and their title bars, tabs, the completion panel, the history pane, side panels |
+| 4 | Controls and menus: buttons, icon buttons, selects and their lists, segmented controls, steppers, chips, key caps, context menus, palette rows |
+| 8 | Floating cards: palette, confirm dialogs, notifications popover and toasts, find bar, What's New |
+| Pill | Toggles, block status badges |
+
+Nothing is rounder than 8.
+
+## Icons
+
+One stroked set (`views::icons::Icon`, drawn by `icons::draw`): a 16-unit
+grid, 1.5 px strokes with round caps at 16 px, the caller's color. Icons are
+line, outline and dot quads, never font glyphs, so they sit centred on the
+pixel grid in every font. Sizes: 16 px in chrome and lists, 14 px in rows
+and title bars, 11–12 px for × and steppers. Colors: `text_dim` at rest,
+`text_ui` on hover, `accent` when on, `error` on destructive rows. The set:
+terminal, sidebar, split right/down, plus, minus, close, more (⋮), grip,
+search, history, revert, refresh, folder, file, inbox, settings, branch,
+copy, check, open (↗), chevrons, warning, sync, maximize, keyboard,
+bookmark, filter, appearance, themes, launch.
 
 ## Motion
 
@@ -131,17 +170,50 @@ No other animation. Motion never delays input.
   `~/path git:(branch)` (`text_dim`), then right-aligned badge pill, duration
   and copy button. A long command is cut with `…` before the badge group; the
   context shows only when it fits.
-- **Editor**: context row (`⇕ cwd on ⎇ branch ↑n ↓n •`: cwd in `accent`,
-  branch in `success`, arrows and dirty dot muted), then `❯` in `success`
-  (`error` after a failure, muted when unfocused). Shell-prompt mode shows a
-  muted `›`.
+- **Editor**: context chips (18 px tall, 5 px padding, 10 px icon, `fg` 4 % fill,
+  `border` hairline, radius 4, 6 px apart, 12 px mono label centred):
+  folder icon + cwd in `text_bright`, branch icon in `success` + branch in
+  `text_ui` + arrows and dirty dot muted. Then the logo's chevron (11 px
+  tall, centred on the block cursor, the logo's proportions with a 2.2 px
+  stroke) in `success` (`error` after a failure, muted when unfocused).
+  Shell-prompt mode shows a 9 px muted chevron.
+- **Tabs**: no icon on a shell tab (the sync icon in `accent` when its
+  inputs are synced, the settings icon on the Settings tab), the title in
+  Inter 12.5, a pane count
+  chip (`3`) when split. The active tab sits on the pane ground (no rule
+  under it) with a 2 px `accent` top edge (a tab color wins); a hovered tab
+  lifts 3 %; tabs are divided by 1 px `border`. × shows on the active and
+  hovered tab, else the alert badge or a 6 px `accent` activity dot sits in
+  its place. A dragged tab lifts onto the pane ground with a shadow and
+  follows the pointer; its slot shows a 2 px `accent` caret.
+- **Buttons**: 28 px, radius 4, Inter 12.5 medium. Primary `accent` fill
+  with `bg` text; secondary 6 % white with a 12 % hairline; ghost text only;
+  destructive `error` darkened 18 % with white text. Icon buttons are 24–26
+  px with a 8 % hover lift. Key caps (`⏎`, `esc`) sit inside buttons that
+  have a key.
+- **Selects** (Settings): 220 × 28 px field, value and a chevron; a click
+  opens a list under it (above when there is no room): 28 px rows, a check
+  on the current value, theme rows with their ground ringed in their accent,
+  up to 12 rows with a `n–m of N` note. ↑ ↓ ⏎ Esc work in the list; a click
+  outside closes it. Selects never cycle on click.
+- **Segmented controls, steppers, toggles** (Settings): 28 px bordered
+  groups (radius 4), the selected segment on 11 % white in `text_bright`;
+  steppers are − value + with hairline dividers; toggles 34 × 20, knob 14.
 - **Modals** (palette and its modes, confirm dialogs): `surface`
-  ground, hairline border, soft shadow, dimmed backdrop. Rows show a fuzzy
-  match highlight and right-aligned shortcut chips resolved from the live
-  keymap.
-- **Chips and pills**: rounded, muted text, used for shortcuts, counts
-  (`N panes`, `All tabs (N)`), and modes (`NORMAL`).
-- **Notifications popover**: `surface` card (radius 12, hairline border,
+  ground, hairline border, soft shadow, 40 % black backdrop, radius 8. Rows
+  show a fuzzy match highlight and right-aligned key caps resolved from the
+  live keymap. The confirm dialog has a `warning` disc with the warning icon,
+  the affected commands in a mono box, and Cancel `esc` / confirm `⏎`.
+- **Docked panels** (completion, history): opaque `bg`, pane width, square,
+  a hairline on the edge toward the output. Header 32 px (source tabs or
+  scope chips in small caps), rows 28 px with a 7 % selection (history adds a
+  2 px `accent` edge), a key-hint footer of caps and labels.
+- **Context menus**: 240 px `surface`, radius 4, 28 px rows: icon column,
+  label, the shortcut in `text_muted` at the right; rows that close
+  something are `error`; separators are hairlines.
+- **Chips and pills**: radius 4 (badges keep their pill), muted text, used
+  for shortcuts, counts (`3`, `All tabs (N)`), and modes (`NORMAL`).
+- **Notifications popover**: `surface` card (radius 8, hairline border,
   soft shadow) right-aligned under the inbox button, no backdrop. Kind colors
   carry meaning: finished `success`, failed `error`, waiting on you
   `warning`, program notification `accent`, bell `text_dim`. Kind badges are
@@ -150,14 +222,48 @@ No other animation. Motion never delays input.
   `#4285f4`) with a 9 px kind dot ringed in `surface`. Unread is a 6 px
   `accent` dot; titles `text_bright` semibold 14, details `text_dim` 13,
   ages `text_muted` 13.
-- **Notification toasts**: 360 px `surface` cards (radius 12) under the
+- **Notification toasts**: 360 px `surface` cards (radius 8) under the
   inbox button, 8 px apart, a 3 px kind-colored stripe on the left edge,
   title semibold 13.5 (two lines), detail 12.5. Tab markers: a 7 px kind
   dot with a 12 px halo at 25 %.
-- **Split panes**: focused pane has an accent border and glow; inactive panes
-  dim and use `pane_border_inactive`.
-- **Keyboard focus** (Settings controls): a 2 px `accent` ring, radius 8,
-  3 px outside the control; no fill.
+- **Split panes** (Warp style): flush, square-cornered panes divided by a
+  1 px `pane_border_inactive` line; the focused pane's title bar carries a
+  2 px `accent` top edge, the others recede under 14 % black
+  (`INACTIVE_DIM`). Each title bar is the pane ground shaded 8 % black: a
+  terminal icon (`accent` when focused), the title centered in Inter 12
+  (`text_bright` when focused, `text_dim` otherwise), and split, ⋮ and × at
+  the right while the pane is focused or hovered. While a pane is dragged by
+  its bar, it fades under 60 % `bg`, a 220 × 34 `surface` chip (grip, icon,
+  title) follows the pointer, and the drop zone (half of the target pane,
+  its whole rect for a swap, a tab, or a tab-sized slot at `+`) shows a 16 %
+  `accent` fill with a 1.5 px `accent` border and an `accent` pill naming
+  the drop (`Split right`, `Swap`, `New tab`); the pointer is a grabbing
+  hand.
+- **File viewer header** (Warp's file pane): the same shaded bar with a file
+  icon, the path centred in Inter 12, then a segmented **Rendered | Raw**
+  switch (Markdown only; 22 px tall, radius 4, 10 % white hairline; the
+  selected segment raised on 11 % white in `text_bright`, the other
+  `text_dim`), ⋮ and ×.
+- **Welcome list** (a fresh session): the 40 px app icon (`welcome::logo`,
+  the *App icon* geometry), *New session* in Inter 17 semibold over
+  `shell · cwd · branch`, then five 36 px rows (icon tile, name,
+  `text_dim` description, key caps); hover lifts a row 5 %. It sits on a
+  94 % `bg` backing (radius 8) so it stays readable over a background
+  image or a translucent window.
+- **Settings tab**: a 232 px `bg_chrome` sidebar (search field, page rows
+  with icons, *Open config.toml* at the foot) and a body at most 720 px wide:
+  title Inter 22 semibold, subtitle `text_dim`, group labels in small caps,
+  flat 52 px rows divided by 6 % hairlines, label left (description
+  `text_muted` under it), control right. A setting changed from its default
+  shows a 6 px `accent` dot after its label and ↺ left of its control.
+- **Rendered Markdown**: 28 px side padding; body Inter 13.5/22 in `fg`;
+  H1 24, H2 19 (both over a `border` rule), H3 16, H4–H6 14, semibold
+  `text_bright`; bold `text_bright` semibold; links `accent`; inline code
+  in the mono font on 8 % white (radius 4); code blocks mono 12.5/19 on
+  4.5 % white (radius 4); quotes `text_dim` beside a 3 px `border` bar;
+  tables bordered in `border`, header row semibold on 4.5 % white.
+- **Keyboard focus** (Settings controls): a 2 px `accent` ring, radius 6,
+  2 px outside the control; no fill.
 - **Find highlights**: `search_match`, the current match `search_active`,
   text on a highlight `#1e1e1e` — in the terminal and the file viewer alike.
   The find field clips its query and scrolls it so the caret stays visible;

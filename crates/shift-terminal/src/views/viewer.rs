@@ -1,11 +1,14 @@
-//! Read-only file viewer: opens from the explorer or the review panel over
-//! the active tab's pane area. Line numbers, lightweight highlighting
+//! Read-only file viewer: opens from the explorer or the review panel as a
+//! pane of the active tab's split. Line numbers, lightweight highlighting
 //! (`shift_core::code_highlight`), only the lines on screen are shaped.
+//! Markdown files open rendered (`markdown_view`), with a Rendered | Raw
+//! switch in the header.
 //! Esc or ✕ closes it; the terminal underneath keeps running. ⌘F opens a
 //! find bar scoped to the open file (case-insensitive plain text).
 
 use std::path::{Path, PathBuf};
 
+use crate::views::icons::{self, Icon};
 use shift_core::code_highlight::{self, Kind, Lang, State};
 use shift_core::{Color, Theme};
 use shift_renderer::glyphon::{Attrs, Buffer, Family, Metrics, Shaping, TextBounds, Weight};
@@ -13,7 +16,8 @@ use shift_renderer::{FONT_SANS, Layer, TextEngine, mono_family, text_color};
 
 /// Files past this are not loaded.
 pub const MAX_BYTES: u64 = 4 * 1024 * 1024;
-pub const HEADER_H: f32 = 38.0;
+/// Same height as a split pane's title bar (the viewer is a pane).
+pub const HEADER_H: f32 = 28.0;
 const FONT: f32 = 13.0;
 const LINE: f32 = 20.0;
 /// Height of the find strip under the header while find is open.
@@ -114,12 +118,32 @@ pub struct ViewerState {
     generation: u64,
     /// Open find bar (⌘F); reset whenever a file opens, loads or closes.
     pub find: Option<ViewerFind>,
+    /// Markdown blocks (empty for other files): the *Rendered* view.
+    pub markdown: Vec<shift_core::markdown::Block>,
+    /// Showing the rendered Markdown rather than the source (Warp's
+    /// Rendered | Raw toggle); on when a Markdown file loads.
+    pub rendered: bool,
+    md_layout: super::markdown_view::MdLayout,
+    /// Horizontal scroll of the source view (px).
+    pub scroll_x: f32,
+    /// Horizontal scroll of each rendered code block (by block index).
+    pub code_scroll: std::collections::HashMap<usize, f32>,
+    /// Widest source line (measured once per file).
+    max_line_w: Option<f32>,
+    /// Source view width including the gutter, and the last frame's
+    /// viewport (for clamping between frames).
+    content_w: f32,
+    view_w: f32,
+    body_top: f32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ViewerHit {
     Close,
-    InsertPath,
+    /// The ⋮ button: the viewer menu (insert path, copy path, find).
+    Menu,
+    /// Rendered | Raw segments (Markdown files).
+    Mode(bool),
 }
 
 impl ViewerState {
@@ -199,13 +223,48 @@ impl ViewerState {
                         })
                         .collect();
                     self.lang = Some(lang);
+                    if shift_core::markdown::is_markdown(path) {
+                        self.markdown = shift_core::markdown::parse(&self.lines);
+                        self.rendered = true;
+                    }
                 }
             },
         }
     }
 
     pub fn content_h(&self) -> f32 {
+        if self.showing_rendered() && self.md_layout.height > 0.0 {
+            return self.md_layout.height;
+        }
         self.lines.len() as f32 * LINE + 24.0
+    }
+
+    /// Scroll sideways by `px` with the pointer at window `y`: the source
+    /// view as a whole, or (rendered) the code block under the pointer.
+    pub fn scroll_x_by(&mut self, px: f32, y: f32) {
+        if self.showing_rendered() {
+            let at = y - self.body_top + self.scroll;
+            if let Some((i, max)) = self.md_layout.code_at(at) {
+                let s = self.code_scroll.entry(i).or_insert(0.0);
+                *s = (*s + px).clamp(0.0, max);
+            }
+            return;
+        }
+        let max = (self.content_w - self.view_w).max(0.0);
+        self.scroll_x = (self.scroll_x + px).clamp(0.0, max);
+    }
+
+    /// A Markdown file shown rendered.
+    pub fn showing_rendered(&self) -> bool {
+        self.rendered && !self.markdown.is_empty()
+    }
+
+    /// Switch between the rendered page and the source (top of the file).
+    pub fn set_rendered(&mut self, on: bool) {
+        if self.rendered != on {
+            self.rendered = on;
+            self.scroll = 0.0;
+        }
     }
 
     pub fn scroll_by(&mut self, px: f32) {
@@ -220,6 +279,8 @@ impl ViewerState {
     /// Open (or keep) the find bar; a no-op while no file is open.
     pub fn open_find(&mut self) {
         if self.is_open() && self.find.is_none() {
+            // find works on the source lines
+            self.set_rendered(false);
             self.find = Some(ViewerFind::default());
         }
     }
@@ -356,66 +417,126 @@ pub fn render(
     state: &mut ViewerState,
     rel: &str,
     rect: [f32; 4],
+    focused: bool,
 ) -> Vec<([f32; 4], ViewerHit)> {
     let [x, y, w, h] = rect;
     let mut hits = Vec::new();
-    layer.rect([x, y], [w, h], theme.ground(theme.bg), 0.0);
+    // opaque even with `window_opacity` below 100 %: the viewer covers the
+    // pane's own output, which must not show through it
+    layer.rect([x, y], [w, h], theme.bg, 0.0);
 
-    // ── header: path, read-only chip, insert path, close ──
-    layer.rect([x, y], [w, HEADER_H], theme.ground(theme.bg_chrome), 0.0);
-    layer.text(
-        sans(engine, rel, 12.5, Weight::MEDIUM),
-        x + 16.0,
-        y + 11.0,
-        theme.text_bright,
+    // ── header (the pane's title bar, Warp's file pane): the path centred,
+    // then Rendered | Raw (Markdown), ⋮ and × at the right ──
+    let cy = y + HEADER_H / 2.0;
+    // the shell panes' title bar shade, a file icon (accent while focused)
+    layer.rect([x, y], [w, HEADER_H], Color::BLACK.with_alpha(0.08), 0.0);
+    icons::draw(
+        layer,
+        Icon::File,
+        [x + 8.0 + 7.0, cy],
+        14.0,
+        if focused {
+            theme.accent
+        } else {
+            theme.text_dim
+        },
     );
-    let rel_w = engine.measure(rel, 12.5, FONT_SANS, Weight::MEDIUM);
-    let chip = "read-only";
-    let chip_w = engine.measure(chip, 10.5, FONT_SANS, Weight::MEDIUM) + 12.0;
-    layer.rect(
-        [x + 16.0 + rel_w + 10.0, y + 10.0],
-        [chip_w, 18.0],
-        Color::WHITE.with_alpha(0.06),
-        5.0,
+    let close = [x + w - 28.0, cy - 12.0, 24.0, 24.0];
+    let menu = [close[0] - 2.0 - 24.0, close[1], 24.0, 24.0];
+    icons::draw(
+        layer,
+        Icon::Close,
+        [close[0] + 12.0, cy],
+        11.0,
+        theme.text_dim,
     );
-    layer.text(
-        sans(engine, chip, 10.5, Weight::MEDIUM),
-        x + 16.0 + rel_w + 16.0,
-        y + 12.0,
-        theme.text_muted,
-    );
-    let close = [x + w - 36.0, y + 7.0, 24.0, 24.0];
-    layer.text(
-        sans(engine, "✕", 12.0, Weight::NORMAL),
-        close[0] + 7.0,
-        close[1] + 4.0,
-        theme.text_muted,
+    icons::draw(
+        layer,
+        Icon::More,
+        [menu[0] + 12.0, cy],
+        14.0,
+        theme.text_dim,
     );
     hits.push((close, ViewerHit::Close));
-    let insert_label = "Insert path";
-    let iw = engine.measure(insert_label, 11.0, FONT_SANS, Weight::MEDIUM) + 14.0;
-    let insert = [close[0] - 8.0 - iw, y + 9.0, iw, 20.0];
-    layer.rect(
-        [insert[0], insert[1]],
-        [insert[2], insert[3]],
-        Color::WHITE.with_alpha(0.06),
-        5.0,
-    );
-    layer.text(
-        sans(engine, insert_label, 11.0, Weight::MEDIUM),
-        insert[0] + 7.0,
-        insert[1] + 3.0,
-        theme.text_ui,
-    );
-    hits.push((insert, ViewerHit::InsertPath));
-    layer.hline(x, y + HEADER_H, w, 1.0, theme.border);
-
-    let mut body_top = y + HEADER_H + 1.0;
+    hits.push((menu, ViewerHit::Menu));
+    let mut controls_left = menu[0] - 6.0;
+    if !state.markdown.is_empty() {
+        // segmented control: the selected segment raised, the other dim
+        let labels = [("Rendered", true), ("Raw", false)];
+        let seg_w: Vec<f32> = labels
+            .iter()
+            .map(|(l, _)| engine.measure(l, 11.5, FONT_SANS, Weight::MEDIUM) + 22.0)
+            .collect();
+        let total = seg_w.iter().sum::<f32>() + 4.0;
+        let bx = controls_left - total;
+        if bx > x + 16.0 {
+            layer.bordered(
+                [bx, cy - 11.0],
+                [total, 22.0],
+                Color::WHITE.with_alpha(0.03),
+                Color::WHITE.with_alpha(0.10),
+                4.0,
+                1.0,
+            );
+            let mut sx = bx + 2.0;
+            for ((label, mode), sw) in labels.iter().zip(&seg_w) {
+                let on = state.rendered == *mode;
+                if on {
+                    layer.rect(
+                        [sx, cy - 9.0],
+                        [*sw, 18.0],
+                        Color::WHITE.with_alpha(0.11),
+                        4.5,
+                    );
+                }
+                let tw = engine.measure(label, 11.5, FONT_SANS, Weight::MEDIUM);
+                layer.text(
+                    sans(engine, label, 11.5, Weight::MEDIUM),
+                    (sx + (sw - tw) / 2.0).round(),
+                    (cy - 7.75).round(),
+                    if on {
+                        theme.text_bright
+                    } else {
+                        theme.text_dim
+                    },
+                );
+                hits.push(([sx, cy - 11.0, *sw, 22.0], ViewerHit::Mode(*mode)));
+                sx += sw;
+            }
+            controls_left = bx - 8.0;
+        }
+    }
+    // the path centres on the pane; when that would cut it, it starts at
+    // the left edge instead, elided (tail kept) clear of the controls
+    let mid = x + w / 2.0;
+    let centred = (2.0 * (mid - (x + 16.0)).min(controls_left - mid)).max(0.0);
+    let full = engine.measure(rel, 12.0, FONT_SANS, Weight::NORMAL);
+    let left_room = (controls_left - (x + 16.0)).max(0.0);
+    let room = if full <= centred { centred } else { left_room };
+    let rel = super::editor::elide_head(rel, room, |t| {
+        engine.measure(t, 12.0, FONT_SANS, Weight::NORMAL)
+    });
+    if room > 0.0 {
+        let tw = engine.measure(&rel, 12.0, FONT_SANS, Weight::NORMAL);
+        layer.text(
+            sans(engine, &rel, 12.0, Weight::NORMAL),
+            if full <= centred {
+                (mid - tw / 2.0).round()
+            } else {
+                x + 16.0
+            },
+            (cy - 8.0).round(),
+            if focused { theme.fg } else { theme.text_dim },
+        );
+    }
+    let mut body_top = y + HEADER_H;
     if let Some(find) = &state.find {
         render_find_bar(layer, engine, theme, find, [x, body_top, w]);
         body_top += FIND_H + 1.0;
     }
     state.view_h = (y + h - body_top).max(0.0);
+    state.view_w = w;
+    state.body_top = body_top;
     state.scroll_by(0.0);
     if let Some(e) = &state.error {
         layer.text(
@@ -424,6 +545,27 @@ pub fn render(
             body_top + 16.0,
             theme.text_muted,
         );
+        return hits;
+    }
+    if state.showing_rendered() {
+        let bounds = TextBounds {
+            left: x as i32,
+            top: body_top as i32,
+            right: (x + w) as i32,
+            bottom: (y + h) as i32,
+        };
+        super::markdown_view::layout(&mut state.md_layout, engine, theme, &state.markdown, w);
+        state.scroll_by(0.0);
+        super::markdown_view::render(
+            layer,
+            &state.md_layout,
+            theme,
+            x,
+            body_top - state.scroll,
+            bounds,
+            &state.code_scroll,
+        );
+        scrollbar(layer, state, x, w, body_top);
         return hits;
     }
 
@@ -435,6 +577,22 @@ pub fn render(
         top: body_top as i32,
         right: (x + w) as i32,
         bottom: (y + h) as i32,
+    };
+    // horizontal scroll: the line numbers stay, the text slides under them
+    if state.max_line_w.is_none() {
+        let longest = state
+            .lines
+            .iter()
+            .max_by_key(|l| l.chars().count())
+            .map_or(0.0, |l| engine.measure(l, FONT, mono, Weight::NORMAL));
+        state.max_line_w = Some(longest);
+    }
+    state.content_w = gutter + state.max_line_w.unwrap_or(0.0) + 24.0;
+    state.scroll_x_by(0.0, body_top);
+    let sx = state.scroll_x;
+    let text_bounds = TextBounds {
+        left: (x + gutter - 2.0) as i32,
+        ..bounds
     };
     let lang = state.lang.unwrap_or(Lang::Plain);
     let first = ((state.scroll - 12.0) / LINE).floor().max(0.0) as usize;
@@ -457,10 +615,12 @@ pub fn render(
             let mw = engine.measure(&line[start..start + len], FONT, mono, Weight::NORMAL);
             let top = ly.max(body_top);
             let bottom = (ly + LINE).min(y + h);
-            if bottom > top {
+            let left = (x + gutter + mx - sx).max(x + gutter - 2.0);
+            let right = x + gutter + mx - sx + mw.max(2.0);
+            if bottom > top && right > left {
                 layer.rect(
-                    [x + gutter + mx, top],
-                    [mw.max(2.0), bottom - top],
+                    [left, top],
+                    [right - left, bottom - top],
                     if current == Some(from + k) {
                         theme.search_active
                     } else {
@@ -526,9 +686,14 @@ pub fn render(
             Shaping::Advanced,
             None,
         );
-        layer.text_clipped(buf, x + gutter, ly, theme.fg, bounds);
+        layer.text_clipped(buf, x + gutter - sx, ly, theme.fg, text_bounds);
     }
+    scrollbar(layer, state, x, w, body_top);
+    hits
+}
 
+/// Scroll thumb at the right edge while the content overflows.
+fn scrollbar(layer: &mut Layer, state: &ViewerState, x: f32, w: f32, body_top: f32) {
     let content = state.content_h();
     if content > state.view_h {
         let track = state.view_h - 12.0;
@@ -542,7 +707,6 @@ pub fn render(
             1.5,
         );
     }
-    hits
 }
 
 /// Find strip under the header: field with magnifier, query + caret, counter
@@ -561,7 +725,7 @@ fn render_find_bar(
         [field[2], field[3]],
         theme.surface,
         Color::rgba(1.0, 1.0, 1.0, 0.11),
-        6.0,
+        4.0,
         1.0,
     );
     let my = field[1] + (field[3] - 11.0) / 2.0;
@@ -570,7 +734,7 @@ fn render_find_bar(
         [11.0, 11.0],
         Color::TRANSPARENT,
         theme.text_dim,
-        5.5,
+        4.0,
         1.6,
     );
     layer.rect([field[0] + 19.5, my + 9.5], [5.0, 1.7], theme.text_dim, 1.0);
@@ -784,6 +948,37 @@ mod tests {
         viewer.close();
         assert!(!viewer.accept(rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap()));
         assert!(!viewer.is_open());
+        assert!(
+            !viewer.showing_rendered(),
+            "source files have no rendered view"
+        );
+        // Markdown opens rendered; find (on the source lines) switches to raw
+        let md = dir.join("README.md");
+        std::fs::write(&md, "# Title\n\nbody\n").unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        viewer.open(&md, move |loaded| {
+            tx.send(loaded).unwrap();
+        });
+        assert!(viewer.accept(rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap()));
+        assert!(viewer.showing_rendered());
+        assert_eq!(viewer.markdown.len(), 2);
+        viewer.scroll = 40.0;
+        viewer.set_rendered(false);
+        assert_eq!(viewer.scroll, 0.0, "switching views starts at the top");
+        viewer.set_rendered(true);
+        // sideways scroll of the source view stops at both ends
+        viewer.rendered = false;
+        viewer.content_w = 900.0;
+        viewer.view_w = 600.0;
+        viewer.scroll_x_by(250.0, 0.0);
+        assert_eq!(viewer.scroll_x, 250.0);
+        viewer.scroll_x_by(500.0, 0.0);
+        assert_eq!(viewer.scroll_x, 300.0, "clamped to the widest line");
+        viewer.scroll_x_by(-1000.0, 0.0);
+        assert_eq!(viewer.scroll_x, 0.0);
+        viewer.rendered = true;
+        viewer.open_find();
+        assert!(!viewer.rendered && viewer.find.is_some());
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

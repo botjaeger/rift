@@ -5,7 +5,8 @@ use shift_renderer::glyphon::{Attrs, Buffer, Family, Metrics, Shaping, Weight};
 use shift_renderer::{FONT_SANS, Layer, TextEngine, mono_family, text_color};
 
 use crate::input::AppAction;
-use crate::state::Hit;
+use crate::state::{ClickTarget, Hit};
+use crate::views::icons::{self, Icon};
 
 /// What running a palette row does.
 #[derive(Debug, Clone, PartialEq)]
@@ -586,11 +587,34 @@ pub fn rank(items: &[Item], history: &[String], query: &str) -> Vec<MatchedItem>
     out
 }
 
-const MODAL_W: f32 = 600.0;
-const ROW_H: f32 = 42.0;
+const MODAL_W: f32 = 640.0;
+const ROW_H: f32 = 36.0;
 const SECTION_H: f32 = 28.0;
 /// Height of the "No matches" band shown for an empty result list.
 const EMPTY_H: f32 = 56.0;
+const SEARCH_H: f32 = 48.0;
+const MODES_H: f32 = 40.0;
+const FOOTER_H: f32 = 34.0;
+
+/// The palette's switchable modes, their chip labels and typed prefixes.
+pub const MODES: [(PaletteMode, &str, char); 4] = [
+    (PaletteMode::Commands, "Actions", '>'),
+    (PaletteMode::History, "History", '#'),
+    (PaletteMode::Workflows, "Workflows", '!'),
+    (PaletteMode::Sessions, "Sessions", '@'),
+];
+
+/// The mode a typed prefix switches to (`#` history, `!` workflows, `@`
+/// sessions, `>` actions).
+pub fn mode_for_prefix(c: char) -> Option<PaletteMode> {
+    MODES.iter().find(|m| m.2 == c).map(|m| m.0)
+}
+
+/// ⇥: the next switchable mode, wrapping.
+pub fn next_mode(mode: PaletteMode) -> PaletteMode {
+    let i = MODES.iter().position(|m| m.0 == mode).unwrap_or(0);
+    MODES[(i + 1) % MODES.len()].0
+}
 
 fn sans(engine: &mut TextEngine, text: &str, size: f32, weight: Weight) -> Buffer {
     let mut buf = Buffer::new(&mut engine.font_system, Metrics::new(size, size * 1.35));
@@ -618,8 +642,17 @@ fn mono(engine: &mut TextEngine, text: &str, size: f32, weight: Weight) -> Buffe
     buf
 }
 
-/// Render the palette modal over a dimmed backdrop (design 03).
-/// Returns click targets: (row_rect, index).
+fn lift(theme: &Theme, alpha: f32) -> Color {
+    if theme.is_light() {
+        Color::BLACK.with_alpha(alpha)
+    } else {
+        Color::WHITE.with_alpha(alpha)
+    }
+}
+
+/// Render the palette modal over a dimmed backdrop: the query, the mode
+/// chips, grouped rows with icons and shortcut caps, and a key-hint footer.
+/// Row targets go to `row_hits` as (row_rect, index); mode chips to `hits`.
 #[allow(clippy::too_many_arguments)]
 pub fn render(
     layer: &mut Layer,
@@ -633,25 +666,23 @@ pub fn render(
     hits: &mut Vec<Hit>,
     row_hits: &mut Vec<([f32; 4], usize)>,
 ) {
-    let _ = hits;
-    // dim backdrop below the tab bar
-    layer.rect(
-        [0.0, crate::views::tabbar::TAB_BAR_H],
-        [w, h - crate::views::tabbar::TAB_BAR_H],
-        Color::hex("#0d0d0f").unwrap().with_alpha(0.66),
-        0.0,
-    );
+    layer.rect([0.0, 0.0], [w, h], Color::BLACK.with_alpha(0.4), 0.0);
 
     // the modal narrows with the window (16px margin each side)
     let modal_w = MODAL_W.min((w - 32.0).max(160.0));
     let mx = (w - modal_w) / 2.0;
-    let my = crate::views::tabbar::TAB_BAR_H + 46.0;
+    let my = crate::views::tabbar::TAB_BAR_H + 54.0;
+    let modes_h = if state.mode == PaletteMode::PipeOutput {
+        0.0
+    } else {
+        MODES_H
+    };
 
     // Keep the keyboard-selected row visible when the result list is longer
     // than the modal. Row hit indices remain absolute into `results`.
     // (fewer rows when the window is short: the modal must fit under the tab bar)
-    let room = h - crate::views::tabbar::TAB_BAR_H - 46.0 - 49.0 - 38.0 - 14.0 - 8.0 - SECTION_H;
-    let max_rows = ((room / ROW_H).max(0.0) as usize).clamp(1, 8);
+    let room = h - my - SEARCH_H - modes_h - FOOTER_H - 14.0 - 8.0 - SECTION_H;
+    let max_rows = ((room / ROW_H).max(0.0) as usize).clamp(1, 9);
     let shown = results.len().min(max_rows);
     let start = state
         .selected
@@ -659,10 +690,10 @@ pub fn render(
         .saturating_sub(max_rows)
         .min(results.len().saturating_sub(shown));
     let visible = &results[start..start + shown];
-    let mut list_h = 7.0 * 2.0;
+    let mut list_h = 6.0 * 2.0;
     let mut last_section = None;
     for m in visible {
-        if last_section != Some(m.item.section) && m.item.section != Section::Actions {
+        if last_section != Some(m.item.section) {
             list_h += SECTION_H;
         }
         last_section = Some(m.item.section);
@@ -672,95 +703,138 @@ pub fn render(
     if visible.is_empty() {
         list_h += EMPTY_H;
     }
-    let search_h = 49.0;
-    let footer_h = 38.0;
-    let modal_h = search_h + list_h + footer_h;
+    let modal_h = SEARCH_H + modes_h + list_h + FOOTER_H;
 
-    // modal shadow + surface
     layer.shadow(
-        [mx, my + 10.0],
+        [mx, my + 12.0],
         [modal_w, modal_h],
-        Color::hex("#000000").unwrap().with_alpha(0.55),
-        13.0,
-        18.0,
+        Color::BLACK.with_alpha(0.55),
+        8.0,
+        24.0,
     );
     layer.bordered(
         [mx, my],
         [modal_w, modal_h],
         theme.surface,
-        Color::rgba(1.0, 1.0, 1.0, 0.11),
-        13.0,
+        lift(theme, 0.1),
+        8.0,
         1.0,
     );
+    layer.set_clip(Some((
+        [mx + 1.0, my + 1.0, modal_w - 2.0, modal_h - 2.0],
+        7.0,
+    )));
 
-    // ── search box ──
-    let sx = mx + 18.0;
-    let sy = my + 15.0;
-    // magnifier icon: ring + handle
-    layer.bordered(
-        [sx, sy + 1.0],
-        [12.0, 12.0],
-        Color::TRANSPARENT,
+    // ── search row: magnifier, query, esc ──
+    let cy = my + SEARCH_H / 2.0;
+    icons::draw(
+        layer,
+        Icon::Search,
+        [mx + 16.0 + 8.0, cy],
+        16.0,
         theme.text_dim,
-        6.0,
-        1.8,
     );
-    // diagonal handle (design: 45° stroke) stepped from round dots
-    for i in 0..4 {
-        let d = i as f32 * 1.2;
-        layer.rect(
-            [sx + 9.6 + d, sy + 10.6 + d],
-            [2.0, 2.0],
-            theme.text_dim,
+    let qx = mx + 16.0 + 16.0 + 10.0;
+    if !state.query.is_empty() {
+        layer.text(
+            sans(engine, &state.query, 15.0, Weight::NORMAL),
+            qx,
+            cy - 10.0,
+            theme.text_bright,
+        );
+    } else {
+        let placeholder = match state.mode {
+            PaletteMode::Sessions => "Go to tab, pane or block…",
+            PaletteMode::PipeOutput => "Command that reads the output on stdin…",
+            PaletteMode::History => "Search command history…",
+            PaletteMode::Workflows => "Search workflows…",
+            PaletteMode::Commands => "Search actions, or type # ! @ to switch…",
+        };
+        layer.text(
+            sans(engine, placeholder, 15.0, Weight::NORMAL),
+            qx + 4.0,
+            cy - 10.0,
+            theme.text_muted,
+        );
+    }
+    if blink_on {
+        let qw = engine.measure(&state.query, 15.0, FONT_SANS, Weight::NORMAL);
+        layer.rect([qx + qw + 1.0, cy - 9.0], [2.0, 18.0], theme.accent, 0.0);
+    }
+    // result count, then the esc cap
+    let esc_w = (engine.measure("esc", 10.5, FONT_SANS, Weight::MEDIUM) + 10.0).max(18.0);
+    let esc_x = mx + modal_w - 16.0 - esc_w;
+    super::completion::key_cap(layer, engine, theme, "esc", esc_x, cy);
+    let count = format!("{} results", results.len());
+    let cw = engine.measure(&count, 11.5, FONT_SANS, Weight::NORMAL);
+    let qw_now = engine.measure(&state.query, 15.0, FONT_SANS, Weight::NORMAL);
+    if qx + qw_now + 24.0 < esc_x - 12.0 - cw {
+        layer.text(
+            sans(engine, &count, 11.5, Weight::NORMAL),
+            esc_x - 12.0 - cw,
+            cy - 7.8,
+            theme.text_muted,
+        );
+    }
+    layer.hline(mx + 1.0, my + SEARCH_H, modal_w - 2.0, 1.0, theme.border);
+
+    // ── mode chips ──
+    if modes_h > 0.0 {
+        let ccy = my + SEARCH_H + MODES_H / 2.0;
+        let mut cx = mx + 12.0;
+        for (i, (mode, label, prefix)) in MODES.iter().enumerate() {
+            let on = state.mode == *mode;
+            let lw = engine.measure(label, 12.0, FONT_SANS, Weight::MEDIUM);
+            let pw = engine.measure(&prefix.to_string(), 11.0, mono_family(), Weight::NORMAL);
+            let r = [cx, ccy - 12.0, 10.0 + lw + 6.0 + pw + 10.0, 24.0];
+            if on {
+                layer.bordered(
+                    [r[0], r[1]],
+                    [r[2], r[3]],
+                    lift(theme, 0.08),
+                    lift(theme, 0.1),
+                    4.0,
+                    1.0,
+                );
+            }
+            layer.text(
+                sans(engine, label, 12.0, Weight::MEDIUM),
+                r[0] + 10.0,
+                ccy - 8.1,
+                if on {
+                    theme.text_bright
+                } else {
+                    theme.text_dim
+                },
+            );
+            layer.text(
+                mono(engine, &prefix.to_string(), 11.0, Weight::NORMAL),
+                r[0] + 10.0 + lw + 6.0,
+                ccy - 7.4,
+                theme.text_muted,
+            );
+            hits.push(Hit {
+                rect: r,
+                target: ClickTarget::PaletteMode(i as u8),
+            });
+            cx += r[2] + 4.0;
+        }
+        layer.hline(
+            mx + 1.0,
+            my + SEARCH_H + MODES_H,
+            modal_w - 2.0,
             1.0,
+            theme.border,
         );
     }
 
-    let qx = sx + 17.0 + 12.0;
-    if !state.query.is_empty() {
-        let qbuf = mono(engine, &state.query, 15.0, Weight::NORMAL);
-        layer.text(qbuf, qx, sy - 1.0, theme.text_bright);
-    } else if let Some(placeholder) = match state.mode {
-        PaletteMode::Sessions => Some("Go to tab, pane or block…"),
-        PaletteMode::PipeOutput => Some("Command that reads the output on stdin…"),
-        PaletteMode::History => Some("Search command history…"),
-        PaletteMode::Workflows => Some("Search workflows…"),
-        PaletteMode::Commands => None,
-    } {
-        let pbuf = mono(engine, placeholder, 15.0, Weight::NORMAL);
-        layer.text(pbuf, qx + 6.0, sy - 1.0, theme.text_muted);
-    }
-    // caret
-    if blink_on {
-        let qw = engine.measure(&state.query, 15.0, mono_family(), Weight::NORMAL);
-        layer.rect([qx + qw + 1.0, sy - 2.0], [2.0, 18.0], theme.accent, 0.0);
-    }
-    // result count
-    let count = format!("{} results", results.len());
-    let cw = engine.measure(&count, 11.0, FONT_SANS, Weight::NORMAL);
-    let cbuf = sans(engine, &count, 11.0, Weight::NORMAL);
-    // (dropped when it would run into the query)
-    let qw_now = engine.measure(&state.query, 15.0, mono_family(), Weight::NORMAL);
-    if qx + qw_now + 24.0 < mx + modal_w - cw - 18.0 {
-        layer.text(cbuf, mx + modal_w - cw - 18.0, sy + 2.0, theme.text_muted);
-    }
-
-    layer.hline(
-        mx,
-        my + search_h,
-        modal_w,
-        1.0,
-        Color::rgba(1.0, 1.0, 1.0, 0.07),
-    );
-
     // ── results ──
-    let mut y = my + search_h + 7.0;
+    let mut y = my + SEARCH_H + modes_h + 6.0;
     if visible.is_empty() {
         let msg = "No matches";
         let mw = engine.measure(msg, 13.0, FONT_SANS, Weight::NORMAL);
-        let mbuf = sans(engine, msg, 13.0, Weight::NORMAL);
         layer.text(
-            mbuf,
+            sans(engine, msg, 13.0, Weight::NORMAL),
             mx + (modal_w - mw) / 2.0,
             y + (EMPTY_H - 17.5) / 2.0,
             theme.text_muted,
@@ -769,58 +843,64 @@ pub fn render(
     let mut last_section = None;
     for (visible_i, m) in visible.iter().enumerate() {
         let i = start + visible_i;
-        if last_section != Some(m.item.section) && m.item.section != Section::Actions {
+        if last_section != Some(m.item.section) {
             let label = match m.item.section {
+                Section::Actions => match state.mode {
+                    PaletteMode::History => "HISTORY",
+                    PaletteMode::Workflows => "WORKFLOWS",
+                    _ => "ACTIONS",
+                },
                 Section::Settings => "SETTINGS",
-                Section::Recent => "RECENT",
+                Section::Recent => "RECENT COMMANDS",
                 Section::Tabs => "TABS",
                 Section::Panes => "PANES",
                 Section::Blocks => "RECENT BLOCKS",
                 Section::Preview => "OUTPUT (STDIN)",
-                Section::Actions => "",
             };
-            let lbuf = sans(engine, label, 10.5, Weight::SEMIBOLD);
-            layer.text(lbuf, mx + 18.0, y + 9.0, theme.text_muted);
+            let mut lb = Buffer::new(&mut engine.font_system, Metrics::new(11.0, 14.0));
+            lb.set_text(
+                &mut engine.font_system,
+                label,
+                &Attrs::new()
+                    .family(Family::Name(FONT_SANS))
+                    .weight(Weight::SEMIBOLD)
+                    .letter_spacing(0.06),
+                Shaping::Advanced,
+                None,
+            );
+            layer.text(lb, mx + 16.0, y + 10.0, theme.text_muted);
             y += SECTION_H;
         }
         last_section = Some(m.item.section);
 
-        let row_rect = [mx + 7.0, y, modal_w - 14.0, ROW_H];
+        let row_rect = [mx + 6.0, y, modal_w - 12.0, ROW_H];
         let selected = i == state.selected;
         if selected {
             layer.rect(
                 [row_rect[0], row_rect[1]],
                 [row_rect[2], row_rect[3]],
-                theme.accent.with_alpha(0.14),
-                8.0,
-            );
-            layer.rect(
-                [row_rect[0], row_rect[1]],
-                [2.0, row_rect[3]],
-                theme.accent,
-                1.0,
+                theme.accent.with_alpha(0.16),
+                4.0,
             );
         }
         row_hits.push((row_rect, i));
 
-        // icon box
-        let ix = row_rect[0] + 11.0;
-        let iy = y + (ROW_H - 24.0) / 2.0;
-        let icon_bg = if m.item.section == Section::Actions {
-            theme.accent.with_alpha(if selected { 0.16 } else { 0.12 })
-        } else {
-            Color::rgba(1.0, 1.0, 1.0, 0.05)
-        };
-        layer.rect([ix, iy], [24.0, 24.0], icon_bg, 6.0);
-        let icon_color = if m.item.section == Section::Actions {
-            theme.accent
+        let rcy = y + ROW_H / 2.0;
+        let icon_color = if selected {
+            theme.text_ui
         } else {
             theme.text_dim
         };
-        draw_icon(layer, &m.item, [ix + 5.5, iy + 5.5], icon_color);
+        icons::draw(
+            layer,
+            item_icon(&m.item),
+            [row_rect[0] + 10.0 + 8.0, rcy],
+            16.0,
+            icon_color,
+        );
 
         // title with match highlighting
-        let tx = ix + 24.0 + 13.0;
+        let tx = row_rect[0] + 10.0 + 16.0 + 12.0;
         let title_color = if selected {
             theme.text_bright
         } else {
@@ -831,14 +911,14 @@ pub fn render(
         } else {
             (13.5, FONT_SANS)
         };
-        // everything left of the shortcut chips must fit the row
-        let chips_w: f32 = m
+        // everything left of the shortcut caps must fit the row
+        let caps_w: f32 = m
             .item
             .shortcut
             .iter()
-            .map(|k| engine.measure(k, 11.0, mono_family(), Weight::NORMAL) + 19.0)
+            .map(|k| (engine.measure(k, 10.5, FONT_SANS, Weight::MEDIUM) + 10.0).max(18.0) + 4.0)
             .sum();
-        let max_right = mx + modal_w - 18.0 - chips_w - 8.0;
+        let max_right = mx + modal_w - 16.0 - caps_w - 8.0;
         // a long title keeps at least 55% of the row; the detail gets the rest
         let avail = max_right - tx;
         let id_w = if m.item.id.is_empty() {
@@ -870,7 +950,9 @@ pub fn render(
                 if *matched {
                     (
                         s.as_str(),
-                        attrs.weight(Weight::BOLD).color(text_color(theme.accent)),
+                        attrs
+                            .weight(Weight::SEMIBOLD)
+                            .color(text_color(theme.accent)),
                     )
                 } else {
                     (s.as_str(), attrs.color(text_color(title_color)))
@@ -891,66 +973,56 @@ pub fn render(
         let id_x = tx + title_w + 12.0;
         if !m.item.id.is_empty() && max_right - id_x > 30.0 {
             let id = elide_to(engine, &m.item.id, 11.0, mono_family(), max_right - id_x);
-            let idbuf = mono(engine, &id, 11.0, Weight::NORMAL);
-            layer.text(idbuf, id_x, y + (ROW_H - 14.0) / 2.0, theme.text_muted);
+            layer.text(
+                mono(engine, &id, 11.0, Weight::NORMAL),
+                id_x,
+                y + (ROW_H - 14.85) / 2.0,
+                theme.text_muted,
+            );
         }
 
-        // shortcut chips (right-aligned)
-        let mut chip_x = mx + modal_w - 18.0;
-        for key in m.item.shortcut.iter().rev() {
-            let kw = engine.measure(key, 11.0, mono_family(), Weight::NORMAL);
-            let chip_w = kw + 14.0;
-            chip_x -= chip_w;
-            layer.bordered(
-                [chip_x, y + (ROW_H - 20.0) / 2.0],
-                [chip_w, 20.0],
-                Color::rgba(1.0, 1.0, 1.0, 0.08),
-                Color::rgba(1.0, 1.0, 1.0, 0.08),
-                5.0,
-                1.0,
-            );
-            let kbuf = mono(engine, key, 11.0, Weight::NORMAL);
-            layer.text(kbuf, chip_x + 7.0, y + (ROW_H - 14.0) / 2.0, theme.text_ui);
-            chip_x -= 5.0;
+        // shortcut caps (right-aligned)
+        let mut kx = mx + modal_w - 16.0 - caps_w + 4.0;
+        for key in &m.item.shortcut {
+            kx += super::completion::key_cap(layer, engine, theme, key, kx, rcy) + 4.0;
         }
 
         y += ROW_H;
     }
 
     // ── footer ──
-    let fy = my + modal_h - footer_h;
+    let fy = my + modal_h - FOOTER_H;
     layer.rect(
         [mx, fy],
-        [modal_w, footer_h],
-        Color::hex("#000000").unwrap().with_alpha(0.18),
+        [modal_w, FOOTER_H],
+        Color::BLACK.with_alpha(0.14),
         0.0,
     );
-    layer.hline(mx, fy, modal_w, 1.0, Color::rgba(1.0, 1.0, 1.0, 0.07));
-    let mut fx = mx + 18.0;
+    layer.hline(mx + 1.0, fy, modal_w - 2.0, 1.0, theme.border);
     let enter = match state.mode {
-        PaletteMode::Sessions => " go to",
-        PaletteMode::PipeOutput => " run with output on stdin",
-        _ => " run",
+        PaletteMode::Sessions => "go to",
+        PaletteMode::PipeOutput => "run with output on stdin",
+        _ => "run",
     };
-    for (keys, label) in [("↑↓", " navigate"), ("↵", enter), ("esc", " dismiss")] {
-        let kbuf = sans(engine, keys, 11.0, Weight::NORMAL);
-        let kw = engine.measure(keys, 11.0, FONT_SANS, Weight::NORMAL);
-        layer.text(kbuf, fx, fy + 12.0, theme.text_dim);
-        fx += kw;
-        let lbuf = sans(engine, label, 11.0, Weight::NORMAL);
-        let lw = engine.measure(label, 11.0, FONT_SANS, Weight::NORMAL);
-        if fx + lw > mx + modal_w - 18.0 {
-            break;
-        }
-        layer.text(lbuf, fx, fy + 12.0, theme.text_muted);
-        fx += lw + 18.0;
-    }
-    let brand = "Shift palette";
-    let bw = engine.measure(brand, 11.0, FONT_SANS, Weight::NORMAL);
-    let bbuf = sans(engine, brand, 11.0, Weight::NORMAL);
-    if mx + modal_w - bw - 18.0 > fx {
-        layer.text(bbuf, mx + modal_w - bw - 18.0, fy + 12.0, theme.accent);
-    }
+    let hints: Vec<(&[&str], &str)> = if modes_h > 0.0 {
+        vec![
+            (&["↑", "↓"], "navigate"),
+            (&["⏎"], enter),
+            (&["⇥"], "next mode"),
+        ]
+    } else {
+        vec![(&["↑", "↓"], "navigate"), (&["⏎"], enter)]
+    };
+    super::completion::key_hints(
+        layer,
+        engine,
+        theme,
+        &hints,
+        mx + 16.0,
+        fy + FOOTER_H / 2.0,
+        mx + modal_w - 16.0,
+    );
+    layer.set_clip(None);
 }
 
 /// Longest prefix of `text` (plus `…`) that fits `max_w`.
@@ -979,124 +1051,32 @@ pub(crate) fn elide_to(
     chars[..lo].iter().collect::<String>() + "…"
 }
 
-/// Tiny quad-drawn icons per item kind.
-fn draw_icon(layer: &mut Layer, item: &Item, pos: [f32; 2], color: Color) {
-    let [x, y] = pos;
+/// The row icon of an item, from the shared icon set.
+fn item_icon(item: &Item) -> Icon {
     match &item.action {
-        PaletteAction::Search => {
-            layer.bordered(
-                [x + 1.0, y + 1.0],
-                [8.0, 8.0],
-                Color::TRANSPARENT,
-                color,
-                4.0,
-                1.5,
-            );
-            for i in 0..3 {
-                let d = i as f32 * 1.1;
-                layer.rect([x + 7.6 + d, y + 7.6 + d], [1.6, 1.6], color, 0.8);
-            }
+        PaletteAction::Search => Icon::Search,
+        PaletteAction::App(AppAction::SplitRight) => Icon::SplitRight,
+        PaletteAction::App(AppAction::SplitDown) => Icon::SplitDown,
+        PaletteAction::App(AppAction::NewTab) => Icon::Plus,
+        PaletteAction::App(AppAction::ClosePane) => Icon::Close,
+        PaletteAction::App(AppAction::ToggleExplorer) => Icon::Sidebar,
+        PaletteAction::OpenSettings => Icon::Settings,
+        PaletteAction::SwitchTheme(_) => Icon::Themes,
+        PaletteAction::Launch(_) => Icon::Launch,
+        PaletteAction::InsertWorkflow(_) => Icon::Bookmark,
+        PaletteAction::InsertCommand(_)
+        | PaletteAction::RunHistory(_)
+        | PaletteAction::OpenHistory => Icon::History,
+        PaletteAction::ToggleVim => Icon::Keyboard,
+        PaletteAction::FocusTab(_)
+        | PaletteAction::FocusPane(..)
+        | PaletteAction::FocusWindow(..) => Icon::Terminal,
+        PaletteAction::ShowBlock(..) => Icon::ChevronRight,
+        PaletteAction::RunPipe => Icon::Filter,
+        PaletteAction::Ssh(_) | PaletteAction::SshInstall(_) | PaletteAction::AttachService(_) => {
+            Icon::Open
         }
-        PaletteAction::App(AppAction::SplitRight) => {
-            layer.bordered(
-                [x, y + 1.0],
-                [5.5, 11.0],
-                Color::TRANSPARENT,
-                color,
-                1.5,
-                1.3,
-            );
-            layer.bordered(
-                [x + 7.5, y + 1.0],
-                [5.5, 11.0],
-                Color::TRANSPARENT,
-                color,
-                1.5,
-                1.3,
-            );
-        }
-        PaletteAction::App(AppAction::SplitDown) => {
-            layer.bordered(
-                [x + 1.0, y],
-                [11.0, 5.5],
-                Color::TRANSPARENT,
-                color,
-                1.5,
-                1.3,
-            );
-            layer.bordered(
-                [x + 1.0, y + 7.5],
-                [11.0, 5.5],
-                Color::TRANSPARENT,
-                color,
-                1.5,
-                1.3,
-            );
-        }
-        PaletteAction::App(AppAction::NewTab) => {
-            layer.rect([x + 5.5, y + 1.0], [2.0, 11.0], color, 1.0);
-            layer.rect([x + 1.0, y + 5.5], [11.0, 2.0], color, 1.0);
-        }
-        PaletteAction::App(AppAction::ClosePane) => {
-            layer.bordered(
-                [x + 1.0, y + 1.0],
-                [11.0, 11.0],
-                Color::TRANSPARENT,
-                color,
-                2.0,
-                1.3,
-            );
-        }
-        PaletteAction::OpenSettings | PaletteAction::SwitchTheme(_) => {
-            layer.bordered(
-                [x + 3.0, y + 3.0],
-                [7.0, 7.0],
-                Color::TRANSPARENT,
-                color,
-                3.5,
-                1.5,
-            );
-            layer.rect([x + 6.0, y], [1.4, 3.0], color, 0.7);
-            layer.rect([x + 6.0, y + 10.0], [1.4, 3.0], color, 0.7);
-            layer.rect([x, y + 6.0], [3.0, 1.4], color, 0.7);
-            layer.rect([x + 10.0, y + 6.0], [3.0, 1.4], color, 0.7);
-        }
-        PaletteAction::InsertWorkflow(_) => {
-            layer.bordered(
-                [x + 1.0, y + 1.0],
-                [11.0, 11.0],
-                Color::TRANSPARENT,
-                color,
-                2.5,
-                1.3,
-            );
-            layer.rect([x + 3.5, y + 6.0], [6.0, 1.4], color, 0.7);
-        }
-        PaletteAction::InsertCommand(_) | PaletteAction::RunHistory(_) => {
-            layer.bordered(
-                [x + 1.0, y + 1.0],
-                [11.0, 11.0],
-                Color::TRANSPARENT,
-                color,
-                5.5,
-                1.4,
-            );
-            layer.rect([x + 6.0, y + 3.5], [1.4, 3.5], color, 0.7);
-            layer.rect([x + 6.0, y + 6.0], [3.0, 1.4], color, 0.7);
-        }
-        _ => {
-            // Generic command glyph for actions without a specialized icon.
-            // Every palette row should remain visually identifiable.
-            layer.bordered(
-                [x + 2.0, y + 2.0],
-                [9.0, 9.0],
-                Color::TRANSPARENT,
-                color,
-                4.5,
-                1.3,
-            );
-            layer.rect([x + 5.0, y + 5.0], [3.0, 3.0], color, 1.5);
-        }
+        _ => Icon::ChevronRight,
     }
 }
 

@@ -3,7 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 if [ -z "${SHIFT_TEST_BIN:-}" ]; then
-    cargo build -p shift-app --locked
+    cargo build -p shift-terminal --locked
     export SHIFT_TEST_BIN="${CARGO_TARGET_DIR:-target}/debug/shift-terminal"
 fi
 python3 scripts/ui-smoke.py "$SHIFT_TEST_BIN"

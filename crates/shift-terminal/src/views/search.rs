@@ -130,7 +130,7 @@ pub fn render(
         [x, y + 6.0],
         [bar_w, bar_h],
         Color::hex("#000000").unwrap().with_alpha(0.5),
-        10.0,
+        8.0,
         12.0,
     );
     let edge = if label.is_some() {
@@ -148,7 +148,7 @@ pub fn render(
             [x + 10.0, y + 13.0],
             [lw + 12.0, 18.0],
             theme.warning.with_alpha(0.15),
-            5.0,
+            4.0,
         );
         let mut lb = Buffer::new(&mut engine.font_system, Metrics::new(11.0, 15.0));
         lb.set_text(
@@ -168,7 +168,7 @@ pub fn render(
             [11.0, 11.0],
             Color::TRANSPARENT,
             theme.text_dim,
-            5.5,
+            4.0,
             1.6,
         );
         layer.rect([x + 23.5, y + 24.5], [5.0, 1.7], theme.text_dim, 1.0);
@@ -187,7 +187,7 @@ pub fn render(
                     [r[0], r[1]],
                     [r[2], r[3]],
                     theme.accent.with_alpha(0.22),
-                    5.0,
+                    4.0,
                 );
             }
             let tw = engine.measure(text, 12.0, mono_family(), Weight::NORMAL);

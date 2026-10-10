@@ -19,7 +19,7 @@ use shift_pty::alacritty_terminal::index::{
 use shift_pty::alacritty_terminal::selection::{Selection, SelectionType};
 
 use crate::input::{self, AppAction, EditorKey};
-use crate::pane::{Axis, HandleRect, NodePath, PaneRect, focus_neighbor};
+use crate::pane::{Axis, HandleRect, NodePath, PaneRect, VIEWER_PANE, focus_neighbor};
 use crate::state::{ClickTarget, Hit, PaneState, TabState};
 use crate::views::completion as completion_view;
 use crate::views::completion::CompletionUi;
@@ -248,9 +248,68 @@ const BLINK_INTERVAL: Duration = Duration::from_millis(550);
 const BELL_FLASH: Duration = Duration::from_millis(120);
 /// How long the boot placeholder waits for a prompt after the first output.
 const BOOT_GRACE: Duration = Duration::from_millis(1500);
-/// Pane chrome (design 02).
-const PANE_RADIUS: f32 = 9.0;
-const PANE_PAD: f32 = 12.0;
+/// Padding inside a split pane (design 02).
+const PANE_PAD: f32 = SIDE_PAD;
+/// Title bar of a split pane (Warp pane header): title, ⋮ menu, × close.
+const PANE_HEADER_H: f32 = 28.0;
+/// Pointer travel before a press on a pane header becomes a pane drag.
+const PANE_DRAG_SLOP: f32 = 4.0;
+
+/// A split pane being dragged by its title bar.
+struct PaneDrag {
+    pane: PaneId,
+    /// Tab the pane lives in.
+    from_tab: usize,
+    press: (f32, f32),
+    /// Past the slop: drop zones show, release moves the pane.
+    live: bool,
+    /// Drop target under the pointer (None: release leaves it in place).
+    target: Option<PaneDrop>,
+    /// Tab under the pointer and since when: held there for
+    /// [`TAB_HOVER_OPEN`] it opens, so the pane can land among its panes.
+    hover_tab: Option<(usize, Instant)>,
+}
+
+/// How long a dragged pane hovers over a tab before that tab opens.
+const TAB_HOVER_OPEN: Duration = Duration::from_millis(600);
+
+/// What picking a history row does.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HistoryUse {
+    Run,
+    Edit,
+    RunInSplit,
+}
+
+/// A tab being reordered by dragging it along the strip.
+#[derive(Clone, Copy)]
+struct TabDrag {
+    /// Current index (the tab moves as it passes neighbours).
+    index: usize,
+    /// Index at the press, restored by Esc.
+    origin: usize,
+    /// Pointer coordinate at the last reorder.
+    start: f32,
+    /// Pointer coordinate at the press.
+    press: f32,
+    /// Pointer offset inside the tab at the press (the lifted tab keeps it).
+    grab: f32,
+    /// Past the slop: the tab lifts and follows the pointer.
+    live: bool,
+}
+
+/// Where a dragged pane lands on release.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PaneDrop {
+    /// Beside a pane of the shown tab, on that edge.
+    Pane(PaneId, crate::pane::Edge),
+    /// In place of a pane of the same tab (the two trade places).
+    Swap(PaneId),
+    /// Into another tab (split right of its focused pane).
+    Tab(usize),
+    /// Out into a tab of its own (the empty tab strip).
+    NewTab,
+}
 
 struct DragState {
     path: NodePath,
@@ -417,12 +476,19 @@ pub struct App {
     explorer_hits: Vec<([f32; 4], ExplorerHit)>,
     review: ReviewPanelState,
     review_hits: Vec<([f32; 4], ReviewHit)>,
+    /// The hit rects under the pointer (folded indices into `hits`) and how
+    /// often a change of them repainted: hover styling follows the mouse.
+    hover_sig: u64,
+    hover_repaints: u32,
     /// Directory the review model was last requested for.
     review_cwd: Option<String>,
     viewer: ViewerState,
     viewer_hits: Vec<([f32; 4], ViewerHit)>,
     /// Pane area the viewer covers (last frame).
     viewer_rect: [f32; 4],
+    /// The viewer pane (`VIEWER_PANE` leaf) has keyboard focus rather than
+    /// its tab's `active_pane` shell.
+    viewer_focus: bool,
     /// Inline tab rename in progress: (tab index, edited title).
     rename: Option<(usize, String)>,
     /// Rename text still fully selected (first keystroke replaces it).
@@ -433,8 +499,12 @@ pub struct App {
     shell_env: Option<Arc<shift_core::shell_env::ShellEnv>>,
     /// Session file is read/written (off for secondary windows and scripts).
     persist_session: bool,
-    /// Tab being dragged in the tab bar: (index, press x).
-    tab_drag: Option<(usize, f32)>,
+    /// Tab being dragged in the tab bar.
+    tab_drag: Option<TabDrag>,
+    /// ⌃R command history pane above the command line.
+    history: crate::views::history::HistoryPane,
+    /// Split pane being moved by its title bar.
+    pane_drag: Option<PaneDrag>,
     /// Editor mouse selection in progress (pane).
     editor_drag: Option<PaneId>,
     /// Transient status message (text, shown at).
@@ -493,6 +563,75 @@ struct HintState {
     items: Vec<(String, [f32; 4], HintTarget)>,
     /// Label characters typed so far.
     typed: String,
+}
+
+/// Black over unfocused split panes: the panes you are not in recede.
+const INACTIVE_DIM: f32 = 0.14;
+/// The same on a light theme (black reads much heavier on a light ground).
+const INACTIVE_DIM_LIGHT: f32 = 0.05;
+
+fn inactive_dim(theme: &shift_core::Theme) -> shift_core::Color {
+    shift_core::Color::BLACK.with_alpha(if theme.is_light() {
+        INACTIVE_DIM_LIGHT
+    } else {
+        INACTIVE_DIM
+    })
+}
+
+/// The welcome list's rows, with shortcuts from the live keymap (row `i`
+/// runs `welcome_action(i)`).
+fn welcome_entries(keymap: &shift_core::Keymap) -> Vec<crate::views::welcome::Entry> {
+    use crate::views::icons::Icon;
+    use crate::views::welcome::Entry;
+    let keys = |actions: &[&str]| {
+        actions
+            .iter()
+            .find_map(|a| keymap.bindings_for(a).first().map(|b| b.chips()))
+            .unwrap_or_default()
+    };
+    vec![
+        Entry {
+            icon: Icon::SplitRight,
+            title: "Split pane",
+            detail: "Run two things side by side",
+            keys: keys(&["split_vertical_alt", "split_vertical"]),
+        },
+        Entry {
+            icon: Icon::Search,
+            title: "Command palette",
+            detail: "Every action, by name",
+            keys: keys(&["palette"]),
+        },
+        Entry {
+            icon: Icon::History,
+            title: "Command history",
+            detail: "Search everything you ran",
+            keys: vec!["⌃".into(), "R".into()],
+        },
+        Entry {
+            icon: Icon::Folder,
+            title: "File explorer",
+            detail: "Browse and read project files",
+            keys: keys(&["toggle_explorer"]),
+        },
+        Entry {
+            icon: Icon::Settings,
+            title: "Settings",
+            detail: "Theme, fonts, keys",
+            keys: keys(&["open_settings"]),
+        },
+    ]
+}
+
+/// Native traffic lights, centred on the tab strip like Linux's drawn ones.
+#[cfg(target_os = "macos")]
+fn place_traffic_lights(window: &Window) {
+    crate::traffic_lights::place(
+        window,
+        TAB_BAR_H as f64,
+        tabbar::TRAFFIC_X as f64,
+        tabbar::TRAFFIC_GAP as f64,
+    );
 }
 
 /// Hint labels in home-row order: one letter each while they fit, two
@@ -866,16 +1005,21 @@ impl App {
             explorer_hits: Vec::new(),
             review: ReviewPanelState::default(),
             review_hits: Vec::new(),
+            hover_sig: 0,
+            hover_repaints: 0,
             review_cwd: None,
             viewer: ViewerState::default(),
             viewer_hits: Vec::new(),
             viewer_rect: [0.0; 4],
+            viewer_focus: false,
             rename: None,
             rename_fresh: false,
             filter_editing: false,
             shell_env: None,
             persist_session,
             tab_drag: None,
+            history: Default::default(),
+            pane_drag: None,
             editor_drag: None,
             toast: None,
             config_error: None,
@@ -908,6 +1052,7 @@ impl App {
         #[cfg(target_os = "macos")]
         if let Some(w) = &self.window {
             crate::translucency::apply(w, self.config.blur());
+            place_traffic_lights(w);
         }
         self.font_size = self.config.font_size();
         self.line_h = self.font_size * self.config.line_height();
@@ -1488,20 +1633,52 @@ impl App {
             .get(self.active)
             .and_then(|t| t.pane(pane_id))
             .is_some_and(|p| p.has_selection);
+        let split = self.tabs.get(self.active).is_some_and(|t| t.is_split());
+        let mut items = vec![
+            MenuItem::new("Copy", MenuAction::Copy).enabled(has_sel),
+            MenuItem::new("Paste", MenuAction::Paste),
+            MenuItem::new("Select all", MenuAction::SelectAll),
+            MenuItem::new("Split pane right", MenuAction::SplitRight).sep(),
+            MenuItem::new("Split pane down", MenuAction::SplitDown),
+        ];
+        if split {
+            items.push(MenuItem::new("Maximize pane", MenuAction::Maximize));
+            items.push(MenuItem::new("Move to new tab", MenuAction::MoveToNewTab));
+        }
+        items.push(MenuItem::new("Clear blocks", MenuAction::ClearBlocks).sep());
+        items.push(MenuItem::new("Close pane", MenuAction::ClosePane));
         self.context_menu = ContextMenuState {
             open: true,
             pane: pane_id,
             block: 0,
             pos,
-            items: vec![
-                MenuItem::new("Copy", MenuAction::Copy).enabled(has_sel),
-                MenuItem::new("Paste", MenuAction::Paste),
-                MenuItem::new("Select all", MenuAction::SelectAll),
-                MenuItem::new("Split pane right", MenuAction::SplitRight).sep(),
-                MenuItem::new("Split pane down", MenuAction::SplitDown),
-                MenuItem::new("Clear blocks", MenuAction::ClearBlocks).sep(),
-                MenuItem::new("Close pane", MenuAction::ClosePane),
-            ],
+            items,
+            selected: None,
+        };
+    }
+
+    /// The file viewer's ⋮ menu.
+    fn open_viewer_menu(&mut self, pos: (f32, f32)) {
+        let markdown = !self.viewer.markdown.is_empty();
+        let mut items = vec![
+            MenuItem::new("Insert path", MenuAction::ViewerInsertPath),
+            MenuItem::new("Copy path", MenuAction::ViewerCopyPath),
+            MenuItem::new("Find in file", MenuAction::ViewerFind).sep(),
+        ];
+        if markdown {
+            items.push(if self.viewer.rendered {
+                MenuItem::new("Show raw", MenuAction::ViewerRendered(false))
+            } else {
+                MenuItem::new("Show rendered", MenuAction::ViewerRendered(true))
+            });
+        }
+        items.push(MenuItem::new("Close", MenuAction::ViewerClose).sep());
+        self.context_menu = ContextMenuState {
+            open: true,
+            pane: VIEWER_PANE,
+            block: 0,
+            pos,
+            items,
             selected: None,
         };
     }
@@ -1598,8 +1775,44 @@ impl App {
             MenuAction::ClearBlocks => {
                 return self.handle_action(AppAction::ClearBlocks, event_loop);
             }
+            MenuAction::Maximize => {
+                if let Some(tab) = self.tabs.get_mut(self.active) {
+                    tab.active_pane = pane_id;
+                }
+                return self.handle_action(AppAction::MaximizePane, event_loop);
+            }
+            MenuAction::MoveToNewTab => {
+                let from = self.active;
+                return self.drop_pane(pane_id, from, PaneDrop::NewTab);
+            }
             MenuAction::ClosePane => {
                 return self.request_close(CloseScope::Pane(pane_id), event_loop);
+            }
+            MenuAction::ViewerInsertPath => {
+                if let Some(p) = self.viewer.path.clone() {
+                    self.viewer.close();
+                    self.drop_file(&p);
+                }
+                return;
+            }
+            MenuAction::ViewerCopyPath => {
+                if let Some(p) = self.viewer.path.clone() {
+                    self.copy_to_clipboard(p.to_string_lossy().into_owned());
+                }
+                return;
+            }
+            MenuAction::ViewerFind => {
+                self.viewer.open_find();
+                self.viewer_focus = true;
+                return;
+            }
+            MenuAction::ViewerRendered(on) => {
+                self.viewer.set_rendered(on);
+                return;
+            }
+            MenuAction::ViewerClose => {
+                self.viewer.close();
+                return;
             }
             MenuAction::RenameTab(i) => {
                 self.start_rename(i);
@@ -2091,7 +2304,9 @@ impl App {
                 CursorIcon::Default
             }
         };
-        let overlay = if self.confirm.is_some() {
+        let overlay = if self.pane_drag.as_ref().is_some_and(|d| d.live) {
+            Some(CursorIcon::Grabbing)
+        } else if self.confirm.is_some() {
             Some(hand(self.confirm_rects.iter().any(inside)))
         } else if self.whats_new.open {
             let h = &self.whats_new_hits;
@@ -2119,7 +2334,12 @@ impl App {
                     .any(|(r, item)| item.enabled && inside(r)),
             ))
         } else if self.palette.open {
-            Some(hand(self.palette_row_hits.iter().any(|(r, _)| inside(r))))
+            Some(hand(
+                self.palette_row_hits.iter().any(|(r, _)| inside(r))
+                    || self.hits.iter().any(|h| {
+                        matches!(h.target, ClickTarget::PaletteMode(_)) && inside(&h.rect)
+                    }),
+            ))
         } else if self.search.open && self.search_chips.iter().any(inside) {
             Some(CursorIcon::Pointer)
         } else if !self.settings.open
@@ -2145,6 +2365,18 @@ impl App {
                     | ClickTarget::TabSelect(_)
                     | ClickTarget::TabClose(_)
                     | ClickTarget::TabNew
+                    | ClickTarget::PaneMenu(_)
+                    | ClickTarget::PaneSplit(_)
+                    | ClickTarget::Welcome(_)
+                    | ClickTarget::CompletionSource(_)
+                    | ClickTarget::CompletionRow(_)
+                    | ClickTarget::HistoryScope(_)
+                    | ClickTarget::HistoryRow(_)
+                    | ClickTarget::HistoryClose
+                    | ClickTarget::SettingsOption(_)
+                    | ClickTarget::SettingsReset(_)
+                    | ClickTarget::SettingsOpenConfig
+                    | ClickTarget::PaneClose(_)
                     | ClickTarget::ToggleExplorer
                     | ClickTarget::ToggleReview
                     | ClickTarget::ToggleNotifications
@@ -2737,29 +2969,121 @@ impl App {
 
     /// Settings → Notifications sound pickers: step to the next sound and
     /// play it (the preview).
-    fn cycle_sound(&mut self, id: &str) {
-        use shift_core::notifications::{Event, available_sounds, resolve_sound, sound_dirs};
-        let dirs = sound_dirs();
-        let mut names = available_sounds(&dirs);
-        let n = &mut self.config.notifications;
-        let (slot, event) = match id {
-            "notifications.sound_finished" => (&mut n.sound_finished, Event::Finished),
-            "notifications.sound_failed" => (&mut n.sound_failed, Event::Failed),
-            "notifications.sound_attention" => (&mut n.sound_attention, Event::Attention),
-            _ => (&mut n.sound, Event::Finished),
-        };
-        if id != "notifications.sound" {
-            // per-event pickers start with "Same as Sound"
-            names.insert(0, String::new());
+    /// A Settings select's options as (config value, label), and the
+    /// current value.
+    fn select_options(&self, id: &str) -> (Vec<(String, String)>, String) {
+        use shift_core::notifications::{available_sounds, sound_dirs};
+        let n = &self.config.notifications;
+        match id {
+            "theme" | "theme_light" => {
+                let current = if id == "theme" {
+                    &self.config.theme
+                } else {
+                    &self.config.theme_light
+                };
+                let options = shift_core::theme::available_themes()
+                    .into_iter()
+                    .map(|name| {
+                        let label = shift_core::theme::load_by_name(&name).name;
+                        (name, label)
+                    })
+                    .collect();
+                (options, current.clone())
+            }
+            "font_family" => (
+                self.text
+                    .as_ref()
+                    .map(|t| t.monospace_families())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|f| (f.clone(), f))
+                    .collect(),
+                self.config.font_family.clone(),
+            ),
+            _ if id.starts_with("notifications.sound") => {
+                let mut names = available_sounds(&sound_dirs());
+                if id != "notifications.sound" {
+                    // per-event pickers start with "Same as Sound"
+                    names.insert(0, String::new());
+                }
+                let current = match id {
+                    "notifications.sound_finished" => &n.sound_finished,
+                    "notifications.sound_failed" => &n.sound_failed,
+                    "notifications.sound_attention" => &n.sound_attention,
+                    _ => &n.sound,
+                };
+                (
+                    names
+                        .into_iter()
+                        .map(|s| {
+                            let label = crate::views::settings::sound_label(&s);
+                            (s, label)
+                        })
+                        .collect(),
+                    current.trim().to_string(),
+                )
+            }
+            _ => (Vec::new(), String::new()),
         }
-        let cur = names
+    }
+
+    /// Open select `id`'s list with the current value highlighted.
+    fn open_select(&mut self, id: &'static str) {
+        let (options, current) = self.select_options(id);
+        if options.is_empty() {
+            return;
+        }
+        let current = options
             .iter()
-            .position(|s| s.eq_ignore_ascii_case(slot.trim()))
-            .unwrap_or(names.len() - 1);
-        *slot = names[(cur + 1) % names.len()].clone();
-        let value = self.config.notifications.sound_setting(event).to_string();
-        if let Some(path) = resolve_sound(&value, event, &dirs) {
-            crate::notify::play(&path);
+            .position(|(v, _)| v.eq_ignore_ascii_case(&current));
+        self.settings.dropdown = Some(crate::views::settings::Dropdown {
+            id,
+            options,
+            highlight: current.unwrap_or(0),
+            current,
+        });
+    }
+
+    /// Set select `id` to `value`; a sound plays so it can be heard.
+    fn set_select(&mut self, id: &str, value: String) {
+        use shift_core::notifications::{Event, resolve_sound, sound_dirs};
+        let n = &mut self.config.notifications;
+        let event = match id {
+            "theme" => {
+                self.config.theme = value;
+                None
+            }
+            "theme_light" => {
+                self.config.theme_light = value;
+                None
+            }
+            "font_family" => {
+                self.config.font_family = value;
+                None
+            }
+            "notifications.sound_finished" => {
+                n.sound_finished = value;
+                Some(Event::Finished)
+            }
+            "notifications.sound_failed" => {
+                n.sound_failed = value;
+                Some(Event::Failed)
+            }
+            "notifications.sound_attention" => {
+                n.sound_attention = value;
+                Some(Event::Attention)
+            }
+            "notifications.sound" => {
+                n.sound = value;
+                Some(Event::Finished)
+            }
+            _ => return,
+        };
+        if let Some(event) = event {
+            let setting = self.config.notifications.sound_setting(event).to_string();
+            if let Some(path) = resolve_sound(&setting, event, &sound_dirs()) {
+                crate::notify::play(&path);
+            }
         }
         self.save_config();
         self.apply_config();
@@ -2977,6 +3301,7 @@ impl App {
             return;
         };
         a.read = true;
+        self.settings.open = false;
         let a = a.clone();
         self.note_toasts.retain(|(t, _)| *t != id);
         let Some(ti) = self.tabs.iter().position(|t| t.pane(a.pane).is_some()) else {
@@ -3070,11 +3395,243 @@ impl App {
         self.submit_to(pane, &line);
     }
 
+    /// Keys go to the viewer: it is open in this tab and focused.
+    fn viewer_focused(&self) -> bool {
+        self.viewer_focus
+            && self.viewer.is_open()
+            && self
+                .tabs
+                .get(self.active)
+                .is_some_and(|t| t.root.contains(VIEWER_PANE))
+    }
+
+    /// Keep the viewer state and its pane leaf in step: a closed viewer
+    /// leaves the split tree, a leaf whose tab went away closes the viewer.
+    fn sync_viewer_pane(&mut self) {
+        if self.viewer.is_open() {
+            if !self.tabs.iter().any(|t| t.root.contains(VIEWER_PANE)) {
+                self.viewer.close();
+            }
+        } else {
+            for tab in &mut self.tabs {
+                if tab.root.contains(VIEWER_PANE) {
+                    tab.root.remove(VIEWER_PANE);
+                }
+            }
+        }
+        if !self.viewer.is_open() {
+            self.viewer_focus = false;
+        }
+    }
+
+    /// Open `path` in the viewer pane: the tab's leftmost column, next to the
+    /// explorer, reused when this tab already has one.
     fn open_viewer(&mut self, path: &std::path::Path) {
+        for (i, tab) in self.tabs.iter_mut().enumerate() {
+            if i != self.active && tab.root.contains(VIEWER_PANE) {
+                tab.root.remove(VIEWER_PANE);
+            }
+        }
+        if let Some(tab) = self.tabs.get_mut(self.active)
+            && !tab.root.contains(VIEWER_PANE)
+        {
+            // the leftmost column, next to the explorer, taking an equal
+            // share with the shell panes side by side
+            tab.zoomed = None;
+            let columns = tab.root.leaves().len() as f32;
+            tab.root = crate::pane::PaneNode::Split {
+                axis: Axis::Horizontal,
+                ratio: (1.0 / (columns + 1.0)).clamp(0.25, 0.5),
+                first: Box::new(crate::pane::PaneNode::Leaf(VIEWER_PANE)),
+                second: Box::new(tab.root.clone()),
+            };
+        }
+        self.viewer_focus = true;
         let proxy = self.proxy.clone();
         self.viewer.open(path, move |loaded| {
             let _ = proxy.send_event(UserEvent::ViewerLoaded(Box::new(loaded)));
         });
+    }
+
+    /// ⌃R: the history pane above the command line (again: next scope).
+    /// Rows: this window's finished commands (newest first, with status,
+    /// directory and age), then the imported shell history.
+    fn open_history(&mut self) {
+        use crate::views::history::{Entry, dedupe};
+        if self.history.open {
+            let scope = self.history.scope.next();
+            self.history.set_scope(scope);
+            return;
+        }
+        let active = self.active_pane_id();
+        let mut entries: Vec<Entry> = Vec::new();
+        for tab in &self.tabs {
+            for p in &tab.panes {
+                let here = Some(p.session.id) == active;
+                let blocks = p.session.blocks.lock().unwrap();
+                for b in blocks.iter() {
+                    if matches!(b.state, shift_core::BlockState::Done { .. }) {
+                        entries.push(Entry {
+                            command: b.command.clone(),
+                            cwd: b.cwd.as_deref().map(editor::shorten_home),
+                            exit: b.exit_code(),
+                            finished: b.finished_at,
+                            here,
+                        });
+                    }
+                }
+            }
+        }
+        // newest first: finish time, unknown (replayed) last
+        entries.sort_by_key(|e| std::cmp::Reverse(e.finished));
+        // the pane's own typed history, then the shell's, newest first
+        if let Some(p) = self.tabs.get(self.active).and_then(|t| t.active()) {
+            entries.extend(p.editor.history.iter().rev().map(|c| Entry {
+                command: c.clone(),
+                cwd: None,
+                exit: None,
+                finished: None,
+                here: true,
+            }));
+        }
+        entries.extend(self.shell_history.iter().rev().map(|c| Entry {
+            command: c.clone(),
+            cwd: None,
+            exit: None,
+            finished: None,
+            here: false,
+        }));
+        let query = self
+            .tabs
+            .get(self.active)
+            .and_then(|t| t.active())
+            .map(|p| p.editor.buffer.clone())
+            .unwrap_or_default();
+        // no completion answer in flight may reopen the panel under it
+        self.completion.close();
+        self.completion_pending = None;
+        self.completion_intent = None;
+        self.history.open(dedupe(entries), &query);
+        self.history.pane = active;
+    }
+
+    /// Keys for the open history pane; `false` lets the key edit the command
+    /// line (the query).
+    fn handle_history_key(&mut self, event: &input::KeyPress) -> bool {
+        use winit::keyboard::{Key, NamedKey};
+        let mods = self.modifiers;
+        // nothing matches: ⏎ runs the typed line as usual; ⇥ only closes the
+        // pane, so completions show before a second ⇥ accepts one
+        if self.history.current().is_none() {
+            match event.logical_key {
+                Key::Named(NamedKey::Enter) => {
+                    self.history.close();
+                    return false;
+                }
+                Key::Named(NamedKey::Tab) => {
+                    self.history.close();
+                    self.update_completions();
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => self.history.close(),
+            Key::Named(NamedKey::ArrowUp) => self.history.move_by(-1),
+            Key::Named(NamedKey::ArrowDown) => self.history.move_by(1),
+            Key::Named(NamedKey::PageUp) => self.history.move_by(-8),
+            Key::Named(NamedKey::PageDown) => self.history.move_by(8),
+            Key::Named(NamedKey::Tab) => self.take_history(HistoryUse::Edit),
+            Key::Named(NamedKey::Enter)
+                if mods.super_key()
+                    && !mods.shift_key()
+                    && !mods.control_key()
+                    && !mods.alt_key() =>
+            {
+                self.take_history(HistoryUse::RunInSplit)
+            }
+            Key::Named(NamedKey::Enter)
+                if !mods.shift_key()
+                    && !mods.alt_key()
+                    && !mods.control_key()
+                    && !mods.super_key() =>
+            {
+                self.take_history(HistoryUse::Run)
+            }
+            Key::Character(c) if mods.control_key() && c.eq_ignore_ascii_case("r") => {
+                self.open_history()
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// Use the selected history row: run it, put it on the command line, or
+    /// run it in a new split beside the pane.
+    fn take_history(&mut self, how: HistoryUse) {
+        let Some(command) = self.history.current().map(|e| e.command.clone()) else {
+            return;
+        };
+        self.history.close();
+        match how {
+            HistoryUse::RunInSplit => {
+                let Some(target) = self.active_pane_id() else {
+                    return;
+                };
+                // the query was only a search: this pane's line empties
+                if let Some(p) = self.tabs.get_mut(self.active).and_then(|t| t.active_mut()) {
+                    let len = p.editor.buffer.len();
+                    p.editor.replace_range(0..len, "");
+                }
+                self.completion.close();
+                let cwd = self
+                    .tabs
+                    .get(self.active)
+                    .and_then(|t| t.active())
+                    .and_then(|p| p.session.cwd.lock().unwrap().clone())
+                    .map(std::path::PathBuf::from);
+                let new = self.split_pane(target, Axis::Horizontal, cwd);
+                self.pending_commands.insert(new, vec![command]);
+            }
+            HistoryUse::Edit | HistoryUse::Run => {
+                if let Some(p) = self.tabs.get_mut(self.active).and_then(|t| t.active_mut()) {
+                    let len = p.editor.buffer.len();
+                    p.editor.replace_range(0..len, &command);
+                }
+                self.completion.close();
+                if how == HistoryUse::Run {
+                    self.handle_editor_key(EditorKey::Submit);
+                } else {
+                    self.update_completions();
+                }
+                self.blink_epoch = Instant::now();
+            }
+        }
+    }
+
+    /// Follow the command line: it is the history pane's query. The pane
+    /// closes when the line is no longer the app's (a program took over).
+    fn sync_history(&mut self) {
+        if !self.history.open {
+            return;
+        }
+        let Some(p) = self.tabs.get(self.active).and_then(|t| t.active()) else {
+            self.history.close();
+            return;
+        };
+        if !Self::editor_visible(p)
+            || self.history.pane != Some(p.session.id)
+            || self.viewer_focused()
+            || self.settings.open
+            || self.palette.open
+            || self.search.open
+        {
+            self.history.close();
+        } else if p.editor.buffer != self.history.query {
+            let q = p.editor.buffer.clone();
+            self.history.filter(&q);
+        }
     }
 
     fn open_palette(&mut self, mode: crate::views::palette::PaletteMode) {
@@ -3124,7 +3681,7 @@ impl App {
         match action {
             PaletteAction::App(a) => self.handle_action(a, event_loop),
             PaletteAction::OpenSettings => {
-                self.settings.open = true;
+                self.settings.open_page(self.settings.page);
             }
             PaletteAction::SwitchTheme(i) => {
                 let names = shift_core::theme::available_themes();
@@ -3168,12 +3725,14 @@ impl App {
                 }
             }
             PaletteAction::FocusTab(i) => {
+                self.settings.open = false;
                 if i < self.tabs.len() {
                     self.active = i;
                     self.tabs[i].activity = false;
                 }
             }
             PaletteAction::FocusPane(ti, pane) => {
+                self.settings.open = false;
                 if let Some(tab) = self.tabs.get_mut(ti) {
                     self.active = ti;
                     tab.activity = false;
@@ -3186,6 +3745,7 @@ impl App {
                 }
             }
             PaletteAction::ShowBlock(ti, pane, block) => {
+                self.settings.open = false;
                 if let Some(tab) = self.tabs.get_mut(ti)
                     && tab.pane(pane).is_some()
                 {
@@ -3256,6 +3816,7 @@ impl App {
         event: &input::KeyPress,
         event_loop: &ActiveEventLoop,
     ) -> bool {
+        use crate::views::palette::PaletteMode;
         use winit::keyboard::{Key, NamedKey};
         match &event.logical_key {
             Key::Named(NamedKey::Escape) => {
@@ -3275,6 +3836,10 @@ impl App {
                     self.palette.selected += 1;
                 }
             }
+            Key::Named(NamedKey::Tab) if self.palette.mode != PaletteMode::PipeOutput => {
+                let next = crate::views::palette::next_mode(self.palette.mode);
+                self.open_palette(next);
+            }
             Key::Named(NamedKey::Backspace) => {
                 self.palette.query.pop();
                 self.palette.selected = 0;
@@ -3290,9 +3855,24 @@ impl App {
                     && !text.is_empty()
                     && !text.chars().any(|c| c.is_control())
                 {
-                    self.palette.query.push_str(text);
-                    self.palette.selected = 0;
-                    self.refresh_palette();
+                    // a prefix typed into an empty query switches mode
+                    let prefix = text
+                        .chars()
+                        .next()
+                        .filter(|_| {
+                            self.palette.query.is_empty()
+                                && text.chars().count() == 1
+                                && self.palette.mode != PaletteMode::PipeOutput
+                        })
+                        .and_then(crate::views::palette::mode_for_prefix)
+                        .filter(|m| *m != self.palette.mode);
+                    if let Some(mode) = prefix {
+                        self.open_palette(mode);
+                    } else {
+                        self.palette.query.push_str(text);
+                        self.palette.selected = 0;
+                        self.refresh_palette();
+                    }
                 }
             }
         }
@@ -3449,6 +4029,11 @@ impl App {
         items: Vec<shift_core::completion::Completion>,
     ) {
         self.completion_buffer = buffer.to_string();
+        // the history pane owns the line while it is open
+        if self.history.open {
+            self.completion.close();
+            return;
+        }
         // ghost: best history match remainder, else the single completion
         self.completion.ghost = items
             .iter()
@@ -3456,11 +4041,10 @@ impl App {
             .and_then(|c| c.insert.strip_prefix(buffer).map(str::to_string))
             .unwrap_or_default();
 
-        // dropdown shows non-history items (history drives ghost text)
-        let dropdown: Vec<_> = items
-            .into_iter()
-            .filter(|c| c.source != "history")
-            .collect();
+        // the panel lists the token candidates, then the history lines (the
+        // best history line also drives the ghost text)
+        let (mut dropdown, history): (Vec<_>, Vec<_>) =
+            items.into_iter().partition(|c| c.source != "history");
         if self.completion.ghost.is_empty()
             && let Some(first) = dropdown.first()
         {
@@ -3476,13 +4060,12 @@ impl App {
         if !self.config.autosuggestions {
             self.completion.ghost.clear();
         }
-        self.completion.items = if self.config.completions_menu {
-            dropdown
-        } else {
-            Vec::new()
-        };
-        self.completion.selected = 0;
-        self.completion.open = !self.completion.items.is_empty();
+        // history lines join a panel the word candidates open; alone they
+        // stay the ghost text (no panel on every keystroke)
+        let show = self.config.completions_menu && !dropdown.is_empty();
+        dropdown.extend(history);
+        self.completion
+            .set(if show { dropdown } else { Vec::new() });
     }
 
     /// ⌃→: accept one word of the ghost suggestion.
@@ -3519,7 +4102,7 @@ impl App {
                 self.completion
                     .items
                     .get(self.completion.selected)
-                    .map(|c| c.insert.clone()),
+                    .map(|c| (c.insert.clone(), c.source == "history")),
                 None,
             )
         } else if !self.completion.ghost.is_empty() {
@@ -3533,7 +4116,11 @@ impl App {
         if let Some(ghost) = ghost {
             pane.editor.end();
             pane.editor.insert(&ghost);
-        } else if let Some(insert) = replacement {
+        } else if let Some((line, true)) = replacement {
+            // a history line replaces the whole command line
+            let len = pane.editor.buffer.len();
+            pane.editor.replace_range(0..len, &line);
+        } else if let Some((insert, false)) = replacement {
             let buffer = pane.editor.buffer.clone();
             let cursor = pane.editor.cursor;
             let (start, _) = shift_core::completion::current_token(&buffer, cursor);
@@ -3757,6 +4344,7 @@ impl App {
     }
 
     fn spawn_tab_at(&mut self, cwd: Option<std::path::PathBuf>) {
+        self.settings.open = false;
         let (lw, lh) = self.logical_size();
         let (_, lw) = self.content_span(lw);
         let cols = ((lw - self.config.padding() * 2.0 - terminal::BLOCK_INDENT) / self.cell_w)
@@ -3823,7 +4411,9 @@ impl App {
                     .color
                     .and_then(|c| crate::state::TAB_COLORS.get(c))
                     .map(|s| s.to_string()),
-                layout: t.is_split().then(|| layout(t, &t.root, transcripts)),
+                layout: t
+                    .is_split()
+                    .then(|| layout(t, &t.root.without_viewer(), transcripts)),
                 transcript: (transcripts && !t.is_split())
                     .then(|| t.active().map(|p| p.transcript_id.clone()))
                     .flatten(),
@@ -3983,7 +4573,7 @@ impl App {
                 .iter()
                 .map(|t| LaunchTab {
                     title: t.custom_title.clone(),
-                    layout: layout(t, &t.root),
+                    layout: layout(t, &t.root.without_viewer()),
                 })
                 .collect(),
             active_tab: self.active,
@@ -4113,7 +4703,13 @@ impl App {
         tab.root.remove(pane);
         tab.panes.retain(|p| p.session.id != pane);
         if tab.active_pane == pane {
-            tab.active_pane = tab.root.leaves()[0];
+            // the first remaining shell (the viewer leaf is not one)
+            tab.active_pane = tab
+                .root
+                .leaves()
+                .into_iter()
+                .find(|id| *id != VIEWER_PANE)
+                .unwrap_or(tab.panes[0].session.id);
         }
         self.save_session();
     }
@@ -4284,6 +4880,10 @@ impl App {
                 }
                 return;
             }
+            ReviewHit::Reveal(staged, path, gap) => {
+                self.review.reveal(staged, &path, gap);
+                return;
+            }
             ReviewHit::Open(path) => {
                 self.open_viewer(&root.join(&path));
                 return;
@@ -4397,18 +4997,36 @@ impl App {
                 .find(|(r, _)| inside(r))
                 .map(|(_, h)| h.clone())
             {
+                self.viewer_focus = true;
                 match hit {
                     ViewerHit::Close => self.viewer.close(),
-                    ViewerHit::InsertPath => {
-                        if let Some(p) = self.viewer.path.clone() {
-                            self.viewer.close();
-                            self.drop_file(&p);
-                        }
+                    ViewerHit::Mode(rendered) => self.viewer.set_rendered(rendered),
+                    ViewerHit::Menu => {
+                        // drops down from the ⋮ button
+                        let at = self
+                            .viewer_hits
+                            .iter()
+                            .find(|(_, h)| *h == ViewerHit::Menu)
+                            .map_or(self.mouse, |(r, _)| (r[0], r[1] + r[3] + 4.0));
+                        self.open_viewer_menu(at);
                     }
                 }
                 return true;
             }
             if inside(&self.viewer_rect) {
+                self.viewer_focus = true;
+                // its header bar is the pane's title bar: drag to move
+                let [x, y, w, _] = self.viewer_rect;
+                if inside(&[x, y, w, crate::views::viewer::HEADER_H]) {
+                    self.pane_drag = Some(PaneDrag {
+                        pane: VIEWER_PANE,
+                        from_tab: self.active,
+                        press: self.mouse,
+                        live: false,
+                        target: None,
+                        hover_tab: None,
+                    });
+                }
                 return true;
             }
         }
@@ -4476,13 +5094,10 @@ impl App {
             });
             return (panes, handles);
         }
-        if tab.is_split() {
-            let area = [
-                x0 + SIDE_PAD,
-                TAB_BAR_H + SIDE_PAD,
-                w - SIDE_PAD * 2.0,
-                h - TAB_BAR_H - SIDE_PAD * 2.0,
-            ];
+        if tab.root.is_split() {
+            // flush panes (Warp): the whole content rect, 1px dividers; the
+            // viewer pane is one of the leaves
+            let area = [x0, TAB_BAR_H, w, h - TAB_BAR_H];
             tab.root.layout(area, &mut panes, &mut handles, vec![]);
         } else {
             panes.push(PaneRect {
@@ -4494,6 +5109,8 @@ impl App {
     }
 
     fn build_scene(&mut self, w: f32, h: f32) {
+        self.sync_viewer_pane();
+        self.sync_history();
         let theme = self.theme.clone();
         let blink = self.blink_on() || !self.config.cursor_blink;
         let cell_w = self.cell_w;
@@ -4504,7 +5121,7 @@ impl App {
         let cursor_style = self.config.cursor_style;
         let prompt_mode = self.config.prompt;
         let input_top = self.config.input_position == shift_core::InputPosition::Top;
-        let autosuggest = self.config.autosuggestions;
+        let autosuggest = self.config.autosuggestions && !self.history.open;
         let side_pad = self.config.padding();
         let bell_flash = self.bell_flash.is_some_and(|t| t.elapsed() < BELL_FLASH);
         let settings_open = self.settings.open;
@@ -4545,7 +5162,6 @@ impl App {
             };
         let (pane_rects, handles) = self.pane_rects(w, h);
         let (explorer_w, review_w) = self.panel_widths(w);
-        let (content_x, content_w) = self.content_span(w);
         let viewer_label = self.viewer.path.as_ref().map(|p| {
             self.explorer
                 .root
@@ -4559,6 +5175,14 @@ impl App {
                 .map(|r| r.to_string_lossy().into_owned())
                 .unwrap_or_else(|| editor::shorten_home(&p.to_string_lossy()))
         });
+        // the viewer's own pane in this tab's split, and whether it (rather
+        // than the tab's active shell) has focus
+        let viewer_pane = pane_rects
+            .iter()
+            .find(|p| p.id == VIEWER_PANE)
+            .map(|p| p.rect)
+            .filter(|_| viewer_label.is_some());
+        let viewer_has_focus = self.viewer_focused();
 
         let shell_label = shift_core::shell_integration::shell_name(self.config.shell.as_deref());
         let tab_infos: Vec<tabbar::TabInfo> = self
@@ -4567,8 +5191,7 @@ impl App {
             .enumerate()
             .map(|(i, t)| tabbar::TabInfo {
                 title: t.display_title(),
-                panes: if t.is_split() { t.panes.len() } else { 1 },
-                shell_label: shell_label.clone(),
+                panes: t.root.leaves().len(),
                 activity: t.activity,
                 alert: self
                     .attention
@@ -4601,27 +5224,39 @@ impl App {
                         }
                     })
                     .unwrap_or_default(),
+                settings: false,
             })
+            .chain(self.settings.tab.then(|| tabbar::TabInfo {
+                title: "Settings".into(),
+                panes: 0,
+                activity: false,
+                alert: None,
+                color: None,
+                sync: false,
+                editing: None,
+                editing_selected: false,
+                subtitle: self.settings.page.label().into(),
+                settings: true,
+            }))
             .collect();
-        let rail_w = self.rail_w();
-        // right-edge hint: design 02 "⌃⇧D split" pill in a split view, using
-        // whatever chord the keymap resolves today (design 01's "⌘K palette"
-        // label is dropped: user decision)
-        let split_view = self.tabs.get(active_tab_idx).is_some_and(|t| t.is_split());
-        let tab_hint = if split_view {
-            ["split_vertical_alt", "split_vertical"]
-                .iter()
-                .find_map(|a| {
-                    self.keymap
-                        .bindings_for(a)
-                        .first()
-                        .map(|b| b.chips().concat())
-                })
-                .map(|chord| format!("{chord} split"))
-                .unwrap_or_default()
+        // the strip's lit tab: the Settings tab (last) while it shows
+        let strip_active = if self.settings.open && self.settings.tab {
+            self.tabs.len()
         } else {
-            String::new()
+            self.active
         };
+        let rail_w = self.rail_w();
+        // chrome hover follows the pointer unless a modal surface covers it
+        let chrome_mouse = (!self.palette.open && self.confirm.is_none() && !self.whats_new.open)
+            .then_some(self.mouse);
+        // a tab dragged past the slop floats under the pointer
+        let lifted_tab =
+            self.tab_drag
+                .filter(|d| d.live && rail_w == 0.0)
+                .map(|d| tabbar::Lifted {
+                    index: d.index,
+                    x: self.mouse.0 - d.grab,
+                });
         let confirm = self
             .confirm
             .as_ref()
@@ -4679,22 +5314,25 @@ impl App {
         let mut boot_until: Option<Instant> = None;
         let mut editor_anchor = (0.0f32, 0.0f32);
         let mut editor_zone = [0.0f32; 4];
+        let mut editor_pane = [0.0f32; 4];
         let mut ime_spot: Option<(f32, f32)> = None;
         let completion_ghost = completion.ghost.clone();
 
         // ── layer 0: chrome ──
+        let mut over = shift_renderer::Layer::default();
         if rail_w > 0.0 {
             tabbar::render(
                 scene.layer(0),
+                &mut over,
                 engine,
                 &theme,
                 &[],
-                &tab_hint,
-                split_view,
                 active_tab_idx,
                 w,
                 blink,
                 panel_buttons,
+                chrome_mouse,
+                None,
                 &mut hits,
             );
             tabbar::render_rail(
@@ -4702,7 +5340,7 @@ impl App {
                 engine,
                 &theme,
                 &tab_infos,
-                active_tab_idx,
+                strip_active,
                 h,
                 blink,
                 &mut hits,
@@ -4710,18 +5348,23 @@ impl App {
         } else {
             tabbar::render(
                 scene.layer(0),
+                &mut over,
                 engine,
                 &theme,
                 &tab_infos,
-                &tab_hint,
-                split_view,
-                active_tab_idx,
+                strip_active,
                 w,
                 blink,
                 panel_buttons,
+                chrome_mouse,
+                lifted_tab,
                 &mut hits,
             );
         }
+        // the lifted tab floats over everything below the menus
+        let l5 = scene.layer(5);
+        l5.quads.extend(over.quads);
+        l5.texts.extend(over.texts);
 
         let Some(tab) = tabs.get_mut(active_tab_idx) else {
             self.hits = hits;
@@ -4739,30 +5382,31 @@ impl App {
             );
         }
 
-        // resize handles (drawn under panes is fine — gaps show gutter)
-        for handle in &handles {
+        // dividers: the 1px gap between flush panes, grabbable a few px
+        // either side (these hits precede the panes' own)
+        for handle in handles.iter().filter(|_| !settings_open) {
             let [hx, hy, hw, hh] = handle.rect;
-            let (gx, gy, gw, gh) = match handle.axis {
-                Axis::Horizontal => (hx + hw / 2.0 - 1.5, hy + hh / 2.0 - 19.0, 3.0, 38.0),
-                Axis::Vertical => (hx + hw / 2.0 - 19.0, hy + hh / 2.0 - 1.5, 38.0, 3.0),
+            scene
+                .layer(0)
+                .rect([hx, hy], [hw, hh], theme.pane_border_inactive, 0.0);
+            let g = crate::pane::HANDLE_GRAB;
+            let grab = match handle.axis {
+                Axis::Horizontal => [hx - g, hy, hw + 2.0 * g, hh],
+                Axis::Vertical => [hx, hy - g, hw, hh + 2.0 * g],
             };
-            scene.layer(0).rect(
-                [gx, gy],
-                [gw, gh],
-                shift_core::Color::rgba(1.0, 1.0, 1.0, 0.16),
-                2.0,
-            );
             hits.push(Hit {
-                rect: handle.rect,
+                rect: grab,
                 target: ClickTarget::HandleDrag(handle.path.clone()),
             });
         }
 
-        for pr in &pane_rects {
+        // the Settings tab covers the shell tab: none of its panes draw (a
+        // translucent window would show them through the page)
+        for pr in pane_rects.iter().filter(|_| !settings_open) {
             let Some(pane) = tab.panes.iter_mut().find(|p| p.session.id == pr.id) else {
                 continue;
             };
-            let is_active_pane = pr.id == tab.active_pane;
+            let is_active_pane = pr.id == tab.active_pane && !viewer_has_focus;
             let editor_vis = Self::editor_visible(pane);
             if is_active_pane {
                 editor_active = editor_vis;
@@ -4800,9 +5444,20 @@ impl App {
                     true
                 };
 
+            // a split pane's content sits below its title bar
+            let body = if split {
+                [
+                    pr.rect[0],
+                    pr.rect[1] + PANE_HEADER_H,
+                    pr.rect[2],
+                    pr.rect[3] - PANE_HEADER_H,
+                ]
+            } else {
+                pr.rect
+            };
             let grid = {
                 // inline grid_for (self is destructured)
-                let rect = pr.rect;
+                let rect = body;
                 let (x, y, pw, ph) = if split {
                     (
                         rect[0] + PANE_PAD,
@@ -4821,7 +5476,7 @@ impl App {
                 let editor_h = if !editor_vis {
                     if split { PANE_PAD } else { SIDE_PAD }
                 } else {
-                    editor::editor_height(&pane.editor.buffer, split, prompt_mode, ed_cols)
+                    editor::editor_height(&pane.editor.buffer, prompt_mode, ed_cols)
                 };
                 let usable_w = (pw - terminal::BLOCK_INDENT).max(cell_w);
                 let usable_h = (ph - editor_h).max(line_h);
@@ -4858,33 +5513,37 @@ impl App {
 
             // pane chrome (design 02)
             if split {
-                let layer0 = scene.layer(0);
-                if is_active_pane {
-                    layer0.shadow(
-                        [pr.rect[0], pr.rect[1]],
-                        [pr.rect[2], pr.rect[3]],
-                        theme.accent.with_alpha(0.10),
-                        PANE_RADIUS,
-                        4.0,
-                    );
-                    layer0.bordered(
-                        [pr.rect[0], pr.rect[1]],
-                        [pr.rect[2], pr.rect[3]],
-                        theme.ground(theme.bg),
-                        theme.accent,
-                        PANE_RADIUS,
-                        2.0,
-                    );
+                // flush, square panes; focus shows as the corner mark and the
+                // wash over the others (Warp's style)
+                scene.layer(0).rect(
+                    [pr.rect[0], pr.rect[1]],
+                    [pr.rect[2], pr.rect[3]],
+                    theme.ground(theme.bg),
+                    0.0,
+                );
+                // title bar: the program's title, else the directory
+                let title = if pane.title.is_empty() {
+                    pane.session
+                        .cwd
+                        .lock()
+                        .unwrap()
+                        .as_deref()
+                        .map(editor::shorten_home)
+                        .unwrap_or_else(|| shell_label.clone())
                 } else {
-                    layer0.bordered(
-                        [pr.rect[0], pr.rect[1]],
-                        [pr.rect[2], pr.rect[3]],
-                        theme.ground(theme.bg),
-                        theme.pane_border_inactive,
-                        PANE_RADIUS,
-                        1.0,
-                    );
-                }
+                    pane.title.clone()
+                };
+                crate::views::pane_header::render(
+                    scene.layer(1),
+                    engine,
+                    &theme,
+                    [pr.rect[0], pr.rect[1], pr.rect[2], PANE_HEADER_H],
+                    &title,
+                    is_active_pane,
+                    chrome_mouse.filter(|_| self.pane_drag.is_none()),
+                    pr.id,
+                    &mut hits,
+                );
                 focus_hits.push(Hit {
                     rect: pr.rect,
                     target: ClickTarget::PaneFocus(pr.id),
@@ -4984,19 +5643,23 @@ impl App {
                     );
                     b
                 };
-                // where the input line will appear (compact editor row)
+                // where the input line will appear
                 let (lx, zone_y) = if split {
-                    (pr.rect[0] + PANE_PAD, pr.rect[1] + PANE_PAD - 4.0)
+                    (body[0] + PANE_PAD, body[1] + PANE_PAD - 4.0)
                 } else {
                     (pr.rect[0] + side_pad, pr.rect[1] + 4.0)
                 };
-                let ly = if input_top {
+                let top = if input_top {
                     zone_y
                 } else if split {
-                    pr.rect[1] + pr.rect[3] - editor::EDITOR_COMPACT_H
+                    pr.rect[1] + pr.rect[3] - editor::editor_height("", prompt_mode, 1)
                 } else {
-                    h - editor::EDITOR_COMPACT_H
-                } + 11.0;
+                    h - editor::editor_height("", prompt_mode, 1)
+                };
+                // the editor's divider, already where it will be (Warp)
+                let zone_w = pr.rect[2] - 2.0 * if split { PANE_PAD } else { side_pad };
+                layer.hline(lx - 8.0, top, zone_w + 16.0, 1.0, theme.border);
+                let ly = top + editor::input_offset(prompt_mode);
                 layer.text(buf, lx + editor::PAD_X, ly, theme.syntax.string);
             }
 
@@ -5010,7 +5673,7 @@ impl App {
                 .find_map(|b| b.exit_code());
 
             if editor_vis {
-                let eh = editor::editor_height(&pane.editor.buffer, split, prompt_mode, ed_cols);
+                let eh = editor::editor_height(&pane.editor.buffer, prompt_mode, ed_cols);
                 let area = match (split, input_top) {
                     (true, false) => [
                         pr.rect[0] + PANE_PAD,
@@ -5019,8 +5682,8 @@ impl App {
                         eh,
                     ],
                     (true, true) => [
-                        pr.rect[0] + PANE_PAD,
-                        pr.rect[1] + PANE_PAD - 4.0,
+                        body[0] + PANE_PAD,
+                        body[1] + PANE_PAD - 4.0,
                         pr.rect[2] - PANE_PAD * 2.0,
                         eh,
                     ],
@@ -5047,7 +5710,6 @@ impl App {
                     cell_w,
                     blink && is_active_pane,
                     is_active_pane,
-                    split,
                     if is_active_pane && autosuggest {
                         &completion_ghost
                     } else {
@@ -5064,12 +5726,70 @@ impl App {
                 if is_active_pane {
                     editor_anchor = anchor.0;
                     editor_zone = area;
+                    editor_pane = body;
                     ime_spot = Some(anchor.1);
                 }
                 hits.push(Hit {
                     rect: area,
                     target: ClickTarget::Editor(pr.id),
                 });
+                // a fresh session: the welcome list above the command line,
+                // until its first command
+                let fresh = !booting
+                    && pane
+                        .session
+                        .blocks
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .all(|b| b.command.trim().is_empty());
+                let above = if input_top {
+                    [
+                        pr.rect[0],
+                        area[1] + area[3],
+                        pr.rect[2],
+                        pr.rect[1] + pr.rect[3] - area[1] - area[3],
+                    ]
+                } else {
+                    [pr.rect[0], pr.rect[1], pr.rect[2], area[1] - pr.rect[1]]
+                };
+                let entries = welcome_entries(keymap_ref);
+                if fresh
+                    && !split
+                    && above[3] >= crate::views::welcome::height(entries.len()) + 40.0
+                    && above[2] >= 420.0
+                {
+                    let cwd = pane
+                        .session
+                        .cwd
+                        .lock()
+                        .unwrap()
+                        .as_deref()
+                        .map(editor::shorten_home)
+                        .unwrap_or_default();
+                    let mut subtitle = vec![
+                        shift_core::shell_integration::shell_name(config_ref.shell.as_deref()),
+                        cwd,
+                    ];
+                    if let Some(g) = &pane.git {
+                        subtitle.push(g.branch.clone());
+                    }
+                    let rects = crate::views::welcome::render(
+                        layer,
+                        engine,
+                        &theme,
+                        above,
+                        &subtitle.join(" · "),
+                        &entries,
+                        chrome_mouse,
+                    );
+                    for (i, rect) in rects.into_iter().enumerate() {
+                        hits.push(Hit {
+                            rect,
+                            target: ClickTarget::Welcome(i as u8),
+                        });
+                    }
+                }
             } else if is_active_pane {
                 // raw mode: the program's cursor cell
                 let (line, col) = {
@@ -5095,7 +5815,7 @@ impl App {
                 for t in &mut layer.texts[text_start..] {
                     t.bounds = Some(TextBounds {
                         left: (pr.rect[0] + 2.0) as i32,
-                        top: (pr.rect[1] + 2.0) as i32,
+                        top: body[1] as i32,
                         right: (pr.rect[0] + pr.rect[2] - 2.0) as i32,
                         bottom: (pr.rect[1] + pr.rect[3] - 2.0) as i32,
                     });
@@ -5138,19 +5858,20 @@ impl App {
                 });
             }
 
-            // inactive pane dim (design: 62% opacity)
+            // inactive panes recede under a dim; the focused one's title bar
+            // carries the accent edge
             if split && !is_active_pane {
                 scene.layer(2).rect(
                     [pr.rect[0], pr.rect[1]],
                     [pr.rect[2], pr.rect[3]],
-                    theme.bg_gutter.with_alpha(0.38),
-                    PANE_RADIUS,
+                    inactive_dim(&theme),
+                    0.0,
                 );
             }
         }
 
         // ── layer 1: side panels beside the panes ──
-        self.explorer_hits = if explorer_w > 0.0 {
+        self.explorer_hits = if explorer_w > 0.0 && !settings_open {
             crate::views::explorer::render(
                 scene.layer(1),
                 engine,
@@ -5161,7 +5882,7 @@ impl App {
         } else {
             Vec::new()
         };
-        self.review_hits = if review_w > 0.0 {
+        self.review_hits = if review_w > 0.0 && !settings_open {
             crate::views::review_panel::render(
                 scene.layer(1),
                 engine,
@@ -5172,25 +5893,35 @@ impl App {
         } else {
             Vec::new()
         };
-        // ── layer 2: file viewer over the pane area ──
+        // ── layer 2: the file viewer in its own pane of the split ──
         self.viewer_hits.clear();
-        if let Some(label) = &viewer_label {
-            self.viewer_rect = [content_x, TAB_BAR_H, content_w, h - TAB_BAR_H];
+        self.viewer_rect = [0.0; 4];
+        if let (Some(label), Some(rect), false) = (&viewer_label, viewer_pane, settings_open) {
+            self.viewer_rect = rect;
             self.viewer_hits = crate::views::viewer::render(
                 scene.layer(2),
                 engine,
                 &theme,
                 &mut self.viewer,
                 label,
-                self.viewer_rect,
+                rect,
+                viewer_has_focus,
             );
-            // the panes underneath take no clicks while it is up
-            hits.retain(|h| {
-                let [x, y, hw, hh] = h.rect;
-                let [vx, vy, vw, vh] = self.viewer_rect;
-                x + hw <= vx || x >= vx + vw || y + hh <= vy || y >= vy + vh
-            });
-            focus_hits.clear();
+            // focus marks as for a shell pane; the dim goes one layer up so
+            // it also covers the viewer's own text (layer 2 text draws above
+            // layer 2 quads)
+            if viewer_has_focus {
+                scene
+                    .layer(2)
+                    .rect([rect[0], rect[1]], [rect[2], 2.0], theme.accent, 0.0);
+            } else {
+                scene.layer(3).rect(
+                    [rect[0], rect[1]],
+                    [rect[2], rect[3]],
+                    inactive_dim(&theme),
+                    0.0,
+                );
+            }
         }
 
         // visual bell: brief full-window flash
@@ -5200,28 +5931,42 @@ impl App {
                 .rect([0.0, 0.0], [w, h], theme.fg.with_alpha(0.10), 0.0);
         }
 
+        // ── layer 2: history pane, docked like the completion panel ──
+        if editor_active && self.history.open && !palette.open {
+            crate::views::history::render(
+                scene.layer(2),
+                engine,
+                &theme,
+                &self.history,
+                editor_zone,
+                editor_pane,
+                chrome_mouse,
+                &mut hits,
+            );
+        }
         // ── layer 2: completion popup (above editor) ──
-        if editor_active && completion.open && !palette.open {
-            let prefix_len = tabs
+        if editor_active && completion.open && !palette.open && !self.history.open {
+            let (prefix_len, line_len) = tabs
                 .get(active_tab_idx)
                 .and_then(|t| t.active())
                 .map(|p| {
                     // the whole word is the completed prefix (see `CompletionRequest::run`)
                     let (b, c) = (&p.editor.buffer, p.editor.cursor);
                     let (start, _) = shift_core::completion::current_token(b, c);
-                    shift_core::completion::token_end(b, c) - start
+                    (shift_core::completion::token_end(b, c) - start, b.len())
                 })
-                .unwrap_or(0);
+                .unwrap_or((0, 0));
             completion_view::render(
                 scene.layer(2),
                 engine,
                 &theme,
                 completion,
-                editor_anchor,
                 editor_zone,
-                w,
-                h,
+                editor_pane,
                 prefix_len,
+                line_len,
+                chrome_mouse,
+                &mut hits,
             );
         }
 
@@ -5299,33 +6044,42 @@ impl App {
             self.search_chips.clear();
         }
 
-        // ── layer 3: settings overlay ──
+        // ── layer 3: the Settings tab's page ──
         if settings_open {
-            // the overlay covers the terminal: its controls must win hit-testing
-            hits.clear();
+            // it covers the content area: only the tab strip (and rail)
+            // stays clickable beside its controls
+            let area = [rail_w, TAB_BAR_H, w - rail_w, h - TAB_BAR_H];
+            hits.retain(|h| h.rect[1] + h.rect[3] <= TAB_BAR_H || h.rect[0] + h.rect[2] <= rail_w);
+            focus_hits.clear();
+            let mut list = shift_renderer::Layer::default();
             settings_state.content_h = settings::render(
                 scene.layer(3),
+                &mut list,
                 engine,
                 &theme,
                 settings_state,
                 config_ref,
                 keymap_ref,
-                w,
-                h,
+                area,
+                chrome_mouse,
+                blink,
                 &mut hits,
                 settings_names,
             );
+            let l4 = scene.layer(4);
+            l4.quads.extend(list.quads);
+            l4.texts.extend(list.texts);
             // keyboard focus ring around the focused control
             if let Some(focus) = &settings_state.focus
                 && let Some(hit) = hits.iter().find(|h| h.target == *focus)
             {
                 let r = hit.rect;
                 scene.layer(3).bordered(
-                    [r[0] - 3.0, r[1] - 3.0],
-                    [r[2] + 6.0, r[3] + 6.0],
+                    [r[0] - 2.0, r[1] - 2.0],
+                    [r[2] + 4.0, r[3] + 4.0],
                     theme.accent.with_alpha(0.0),
                     theme.accent,
-                    8.0,
+                    6.0,
                     2.0,
                 );
             }
@@ -5350,8 +6104,15 @@ impl App {
 
         // ── layer 5: context menu ──
         if self.context_menu.open {
-            self.context_menu_rects =
-                context_menu::render(scene.layer(5), engine, &theme, &self.context_menu, w, h);
+            self.context_menu_rects = context_menu::render(
+                scene.layer(5),
+                engine,
+                &theme,
+                &self.context_menu,
+                keymap_ref,
+                w,
+                h,
+            );
         } else {
             self.context_menu_rects.clear();
         }
@@ -5477,6 +6238,77 @@ impl App {
             };
             self.confirm_rects =
                 crate::views::confirm::render(scene.layer(6), engine, &theme, &dialog, w, h);
+        }
+
+        // pane drag: the drop zone under the pointer (the half of a pane, a
+        // tab, or the empty strip for a new tab)
+        if let Some(d) = self.pane_drag.as_ref().filter(|d| d.live) {
+            // the pane being moved fades in place
+            if let Some(src) = pane_rects.iter().find(|p| p.id == d.pane) {
+                scene.layer(5).rect(
+                    [src.rect[0], src.rect[1]],
+                    [src.rect[2], src.rect[3]],
+                    theme.ground(theme.bg).with_alpha(0.6),
+                    0.0,
+                );
+            }
+            let zone = d.target.and_then(|target| match target {
+                PaneDrop::Pane(id, edge) => pane_rects
+                    .iter()
+                    .find(|p| p.id == id)
+                    .map(|p| (edge.zone(p.rect), edge.label())),
+                PaneDrop::Swap(id) => pane_rects
+                    .iter()
+                    .find(|p| p.id == id)
+                    .map(|p| (p.rect, "Swap")),
+                PaneDrop::Tab(j) => hits
+                    .iter()
+                    .find(|h| h.target == ClickTarget::TabSelect(j))
+                    .map(|h| (h.rect, "")),
+                PaneDrop::NewTab if rail_w > 0.0 => {
+                    Some(([0.0, TAB_BAR_H, rail_w, h - TAB_BAR_H], "New tab"))
+                }
+                // a tab-sized slot where the new tab will appear
+                PaneDrop::NewTab => hits
+                    .iter()
+                    .find(|h| h.target == ClickTarget::TabNew)
+                    .map(|h| ([h.rect[0], 0.0, 160.0, TAB_BAR_H], "")),
+            });
+            let layer = scene.layer(5);
+            if let Some((zone, label)) = zone {
+                crate::views::pane_header::drop_zone(layer, engine, &theme, zone, label);
+            }
+            // a chip with the pane's title follows the pointer
+            let title = if d.pane == VIEWER_PANE {
+                viewer_label.clone().unwrap_or_default()
+            } else {
+                tabs.get(d.from_tab)
+                    .and_then(|t| t.pane(d.pane))
+                    .map(|p| {
+                        if p.title.is_empty() {
+                            p.session
+                                .cwd
+                                .lock()
+                                .unwrap()
+                                .as_deref()
+                                .map(editor::shorten_home)
+                                .unwrap_or_default()
+                        } else {
+                            p.title.clone()
+                        }
+                    })
+                    .unwrap_or_default()
+            };
+            crate::views::pane_header::drag_ghost(
+                scene.layer(6),
+                engine,
+                &theme,
+                &title,
+                d.pane == VIEWER_PANE,
+                (self.mouse.0 + 14.0, self.mouse.1 + 22.0),
+                w,
+                h,
+            );
         }
 
         hits.extend(focus_hits);
@@ -5656,7 +6488,10 @@ impl App {
         match action {
             AppAction::NewTab => self.spawn_tab(),
             AppAction::ClosePane => {
-                if let Some(tab) = self.tabs.get(self.active) {
+                // ⌘W on the viewer pane closes the viewer
+                if self.viewer_focused() {
+                    self.viewer.close();
+                } else if let Some(tab) = self.tabs.get(self.active) {
                     self.request_close(CloseScope::Pane(tab.active_pane), event_loop);
                 }
             }
@@ -5821,7 +6656,11 @@ impl App {
                 }
             }
             AppAction::OpenSettings => {
-                self.settings.open = !self.settings.open;
+                if self.settings.open {
+                    self.settings.open = false;
+                } else {
+                    self.settings.open_page(self.settings.page);
+                }
             }
             AppAction::BookmarkToggle => {
                 // selected block wins; else the most recent finished block
@@ -5874,7 +6713,7 @@ impl App {
             }
             AppAction::Paste => self.paste_from_clipboard(),
             // with a file open, Find searches the file, not the terminal
-            AppAction::Search if self.viewer.is_open() => {
+            AppAction::Search if self.viewer_focused() => {
                 if self.viewer.find.is_some() {
                     self.viewer.find = None;
                 } else {
@@ -5907,13 +6746,25 @@ impl App {
                 }
                 let (lw, lh) = self.logical_size();
                 let (rects, _) = self.pane_rects(lw, lh);
-                if let Some(tab) = self.tabs.get_mut(self.active)
-                    && let Some(next) = focus_neighbor(&rects, tab.active_pane, dir)
-                {
-                    if let Some(prev) = tab.active_mut() {
-                        prev.selected_block = None;
+                let from_viewer = self.viewer_focused();
+                if let Some(tab) = self.tabs.get_mut(self.active) {
+                    let from = if from_viewer {
+                        VIEWER_PANE
+                    } else {
+                        tab.active_pane
+                    };
+                    match focus_neighbor(&rects, from, dir) {
+                        // the viewer pane takes focus without being a shell
+                        Some(VIEWER_PANE) => self.viewer_focus = true,
+                        Some(next) => {
+                            if let Some(prev) = tab.active_mut() {
+                                prev.selected_block = None;
+                            }
+                            tab.active_pane = next;
+                            self.viewer_focus = false;
+                        }
+                        None => {}
                     }
-                    tab.active_pane = next;
                 }
             }
             AppAction::ClearBlocks => {
@@ -6102,6 +6953,7 @@ impl App {
 
     /// Switch to tab `idx`, clearing transient state on the pane being left.
     fn switch_tab(&mut self, idx: usize) {
+        self.settings.open = false;
         if let Some(pane) = self.tabs.get_mut(self.active).and_then(|t| t.active_mut()) {
             pane.selected_block = None;
         }
@@ -6119,6 +6971,24 @@ impl App {
         use crate::views::settings;
         use winit::keyboard::{Key, NamedKey};
 
+        // an open select list: ↑ ↓ move, ⏎ picks, Esc closes
+        if let Some(dd) = self.settings.dropdown.as_mut() {
+            let n = dd.options.len();
+            match &event.logical_key {
+                Key::Named(NamedKey::ArrowUp) => dd.highlight = dd.highlight.saturating_sub(1),
+                Key::Named(NamedKey::ArrowDown) => {
+                    dd.highlight = (dd.highlight + 1).min(n.saturating_sub(1))
+                }
+                Key::Named(NamedKey::Enter | NamedKey::Space) => {
+                    let dd = self.settings.dropdown.take().unwrap_or_default();
+                    if let Some((value, _)) = dd.options.get(dd.highlight) {
+                        self.set_select(dd.id, value.clone());
+                    }
+                }
+                _ => self.settings.dropdown = None,
+            }
+            return true;
+        }
         let recording = self.settings.recording.is_some();
         if !recording && self.handle_settings_focus_key(event, event_loop, window) {
             return true;
@@ -6126,13 +6996,63 @@ impl App {
         if self.settings.page == settings::Page::Keybindings && self.handle_keybindings_key(event) {
             return true;
         }
-        let action = input::app_action(event, self.modifiers, &self.keymap);
-        if matches!(event.logical_key, Key::Named(NamedKey::Escape))
-            || action == Some(AppAction::OpenSettings)
-        {
-            self.settings.open = false;
-            self.settings.focus = None;
+        let mods = self.modifiers;
+        let action = input::app_action(event, mods, &self.keymap);
+        // Esc clears the search first, then closes the Settings tab
+        if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+            if self.settings.query.is_empty() {
+                self.settings.close_tab();
+            } else {
+                self.settings.query.clear();
+                self.settings.scroll = 0.0;
+            }
             return true;
+        }
+        match action {
+            Some(AppAction::OpenSettings) => {
+                self.settings.open = false;
+                self.settings.focus = None;
+                return true;
+            }
+            // ⌘W in the Settings tab closes it
+            Some(AppAction::ClosePane) => {
+                self.settings.close_tab();
+                return true;
+            }
+            // tabs, palette and the rest act as from any tab (leaving this one)
+            Some(a) => {
+                self.settings.open = false;
+                self.settings.focus = None;
+                self.handle_action(a, event_loop);
+                return true;
+            }
+            None => {}
+        }
+        // typing searches every page (Keybindings filters its own list)
+        let plain = !mods.control_key() && !mods.super_key() && !mods.alt_key();
+        if plain && self.settings.page != settings::Page::Keybindings {
+            match &event.logical_key {
+                Key::Named(NamedKey::Backspace) if !self.settings.query.is_empty() => {
+                    self.settings.query.pop();
+                    self.settings.scroll = 0.0;
+                    return true;
+                }
+                Key::Named(NamedKey::Space) if !self.settings.query.is_empty() => {
+                    self.settings.query.push(' ');
+                    return true;
+                }
+                _ => {
+                    if let Some(text) = &event.text
+                        && !text.is_empty()
+                        && !text.chars().any(|c| c.is_control() || c == ' ')
+                    {
+                        self.settings.query.push_str(text);
+                        self.settings.scroll = 0.0;
+                        self.settings.focus = None;
+                        return true;
+                    }
+                }
+            }
         }
         match event.logical_key {
             Key::Named(NamedKey::ArrowUp | NamedKey::ArrowLeft) => {
@@ -6400,11 +7320,38 @@ impl App {
             return;
         }
         if key == EditorKey::HistorySearch {
-            self.open_palette(crate::views::palette::PaletteMode::History);
+            self.open_history();
+            return;
+        }
+        if key == EditorKey::NextCompletionSource {
+            if self.completion.open {
+                self.completion.cycle_source();
+            }
             return;
         }
         if key == EditorKey::AcceptGhostWord {
             self.accept_ghost_word();
+            self.blink_epoch = Instant::now();
+            return;
+        }
+        // → at the end of the line takes the whole ghost (Warp; the → chip)
+        if key == EditorKey::Right
+            && !self.completion.ghost.is_empty()
+            && self.completion_pending.is_none()
+            && self
+                .tabs
+                .get(self.active)
+                .and_then(|t| t.active())
+                .is_some_and(|p| {
+                    p.editor.cursor == p.editor.buffer.len() && p.editor.selection().is_none()
+                })
+        {
+            let ghost = self.completion.ghost.clone();
+            if let Some(pane) = self.tabs.get_mut(self.active).and_then(|t| t.active_mut()) {
+                pane.editor.insert(&ghost);
+            }
+            self.completion.close();
+            self.update_completions();
             self.blink_epoch = Instant::now();
             return;
         }
@@ -6460,9 +7407,10 @@ impl App {
                 pane.editor.exit_placeholder_mode();
                 edited = false;
             }
-            EditorKey::Complete | EditorKey::HistorySearch | EditorKey::AcceptGhostWord => {
-                edited = false
-            }
+            EditorKey::Complete
+            | EditorKey::NextCompletionSource
+            | EditorKey::HistorySearch
+            | EditorKey::AcceptGhostWord => edited = false,
             EditorKey::Submit => {
                 pane.correction = None;
                 let cmd = pane.editor.submit();
@@ -6669,6 +7617,10 @@ impl App {
             Key::Named(NamedKey::Escape) => self.viewer.close(),
             Key::Named(NamedKey::ArrowDown) => self.viewer.scroll_by(20.0),
             Key::Named(NamedKey::ArrowUp) => self.viewer.scroll_by(-20.0),
+            // ← → scroll the source view sideways (rendered: the code block
+            // under the pointer)
+            Key::Named(NamedKey::ArrowRight) => self.viewer.scroll_x_by(40.0, self.mouse.1),
+            Key::Named(NamedKey::ArrowLeft) => self.viewer.scroll_x_by(-40.0, self.mouse.1),
             Key::Named(NamedKey::PageDown | NamedKey::Space) => self.viewer.scroll_by(page),
             Key::Named(NamedKey::PageUp) => self.viewer.scroll_by(-page),
             Key::Named(NamedKey::Home) => self.viewer.scroll_by(f32::NEG_INFINITY),
@@ -7109,6 +8061,32 @@ impl App {
         event_loop: &ActiveEventLoop,
         window: &Window,
     ) {
+        // Esc while dragging: a tab springs back to where it was pressed, a
+        // pane stays where it is
+        if matches!(
+            event.logical_key,
+            winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape)
+        ) && (self.tab_drag.is_some_and(|d| d.live)
+            || self.pane_drag.as_ref().is_some_and(|d| d.live))
+        {
+            if let Some(d) = self.tab_drag.take() {
+                let tab = self.tabs.remove(d.index);
+                let to = d.origin.min(self.tabs.len());
+                self.tabs.insert(to, tab);
+                self.active = to;
+                self.save_session();
+            }
+            // a pane drag that opened another tab goes back to the pane's own
+            if let Some(d) = self.pane_drag.take()
+                && d.from_tab != self.active
+                && d.from_tab < self.tabs.len()
+            {
+                self.switch_tab(d.from_tab);
+            }
+            self.update_cursor_icon(window);
+            window.request_redraw();
+            return;
+        }
         if self.confirm.is_some() {
             self.handle_confirm_key(event, event_loop);
             window.request_redraw();
@@ -7157,6 +8135,13 @@ impl App {
             }
             return;
         }
+        // (closes first if its pane no longer owns the keys: raw mode, another
+        // pane, the viewer, an overlay)
+        self.sync_history();
+        if self.history.open && self.handle_history_key(event) {
+            window.request_redraw();
+            return;
+        }
         if self.search.open && self.filter_editing {
             self.handle_filter_key(event);
             window.request_redraw();
@@ -7174,7 +8159,7 @@ impl App {
             window.request_redraw();
             return;
         }
-        if self.viewer.is_open() {
+        if self.viewer_focused() {
             // the file's find bar takes typing; chords stay app shortcuts
             let mods = self.modifiers;
             if self.viewer.find.is_some()
@@ -7293,6 +8278,215 @@ impl App {
         }
     }
 
+    /// Pointer moved during a pane-header press: go live past the slop and
+    /// track the drop target under the pointer.
+    fn track_pane_drag(&mut self) {
+        let (mx, my) = self.mouse;
+        let Some(d) = self.pane_drag.as_ref() else {
+            return;
+        };
+        let (pane, from) = (d.pane, d.from_tab);
+        let live = d.live || (mx - d.press.0).hypot(my - d.press.1) > PANE_DRAG_SLOP;
+        let target = if live {
+            self.pane_drop_at(pane, from, mx, my)
+        } else {
+            None
+        };
+        // held over another tab: open it, so the pane can land among its panes
+        let hover_tab = match (target, d.hover_tab) {
+            (Some(PaneDrop::Tab(j)), Some((k, since))) if j == k => Some((j, since)),
+            (Some(PaneDrop::Tab(j)), _) => Some((j, Instant::now())),
+            _ => None,
+        };
+        if let Some(d) = self.pane_drag.as_mut() {
+            d.live = live;
+            d.target = target;
+            d.hover_tab = hover_tab;
+        }
+        if let Some((j, since)) = hover_tab
+            && since.elapsed() >= TAB_HOVER_OPEN
+            && j != self.active
+        {
+            self.switch_tab(j);
+            if let Some(d) = self.pane_drag.as_mut() {
+                d.hover_tab = None;
+            }
+        }
+    }
+
+    /// Where `pane` (of tab `from`) would land if released at the point.
+    fn pane_drop_at(&self, pane: PaneId, from: usize, mx: f32, my: f32) -> Option<PaneDrop> {
+        let hit = self
+            .hits
+            .iter()
+            .find(|h| h.contains(mx, my))
+            .map(|h| h.target.clone());
+        // the Settings tab takes no panes
+        if let Some(ClickTarget::SettingsClose) = hit {
+            return None;
+        }
+        if let Some(ClickTarget::TabSelect(j) | ClickTarget::TabClose(j)) = hit {
+            return (j < self.tabs.len() && (j != from || j != self.active))
+                .then_some(PaneDrop::Tab(j));
+        }
+        let rail = self.rail_w();
+        let in_strip = if rail > 0.0 {
+            mx < rail && my > TAB_BAR_H
+        } else {
+            my < TAB_BAR_H
+        };
+        if in_strip {
+            // a tab of its own needs a shell left behind; the viewer never
+            // stands alone
+            let alone = self.tabs.get(from).is_none_or(|t| t.panes.len() <= 1);
+            return (pane != VIEWER_PANE && !alone).then_some(PaneDrop::NewTab);
+        }
+        let (lw, lh) = self.logical_size();
+        let (rects, _) = self.pane_rects(lw, lh);
+        let r = rects.iter().find(|r| {
+            mx >= r.rect[0]
+                && mx < r.rect[0] + r.rect[2]
+                && my >= r.rect[1]
+                && my < r.rect[1] + r.rect[3]
+        })?;
+        if r.id == pane {
+            return None;
+        }
+        // the viewer leaf has one id in every tab: no landing beside another
+        // tab's viewer, nor the viewer into a tab that already shows one
+        if from != self.active
+            && (r.id == VIEWER_PANE
+                || (pane == VIEWER_PANE
+                    && self
+                        .tabs
+                        .get(self.active)
+                        .is_some_and(|t| t.root.contains(VIEWER_PANE))))
+        {
+            return None;
+        }
+        // the middle third swaps (same tab only); elsewhere the nearest half
+        Some(
+            if from == self.active && crate::pane::Edge::in_centre(r.rect, mx, my) {
+                PaneDrop::Swap(r.id)
+            } else {
+                PaneDrop::Pane(r.id, crate::pane::Edge::nearest(r.rect, mx, my))
+            },
+        )
+    }
+
+    /// Move `pane` out of tab `from` to `target` (pane header drag and drop).
+    /// A shell keeps its session; a tab left without shells goes away.
+    fn drop_pane(&mut self, pane: PaneId, from: usize, target: PaneDrop) {
+        if !self.tabs.get(from).is_some_and(|t| t.root.contains(pane)) {
+            return;
+        }
+        let viewer = pane == VIEWER_PANE;
+        // a pane of another tab (that tab was opened by hovering it): land
+        // beside it there
+        let mut beside = None;
+        let to = match target {
+            PaneDrop::Swap(onto) => {
+                let tab = &mut self.tabs[from];
+                if onto == pane || !tab.root.contains(onto) {
+                    return;
+                }
+                tab.zoomed = None;
+                tab.root.swap(pane, onto);
+                self.save_session();
+                return;
+            }
+            PaneDrop::Pane(onto, edge) if !self.tabs[from].root.contains(onto) => {
+                let Some(to) = self.tabs.iter().position(|t| t.root.contains(onto)) else {
+                    return;
+                };
+                beside = Some((onto, edge));
+                Some(to)
+            }
+            PaneDrop::Pane(onto, edge) => {
+                let tab = &mut self.tabs[from];
+                if onto == pane {
+                    return;
+                }
+                tab.zoomed = None;
+                tab.root.remove(pane);
+                tab.root.insert(onto, pane, edge);
+                if viewer {
+                    self.viewer_focus = true;
+                } else {
+                    tab.active_pane = pane;
+                    self.viewer_focus = false;
+                }
+                self.save_session();
+                return;
+            }
+            PaneDrop::Tab(to) if to == from || to >= self.tabs.len() => return,
+            PaneDrop::Tab(to) => Some(to),
+            PaneDrop::NewTab => None,
+        };
+        // out of the source tab
+        let src = &mut self.tabs[from];
+        let empties = !viewer && src.panes.len() <= 1;
+        if to.is_none() && (viewer || empties) {
+            return;
+        }
+        let state = src
+            .panes
+            .iter()
+            .position(|p| p.session.id == pane)
+            .map(|i| src.panes.remove(i));
+        if !empties {
+            src.zoomed = None;
+            src.root.remove(pane);
+            if src.active_pane == pane {
+                src.active_pane = src
+                    .root
+                    .leaves()
+                    .into_iter()
+                    .find(|id| *id != VIEWER_PANE)
+                    .unwrap_or(src.panes[0].session.id);
+            }
+        }
+        // into the destination
+        let dest = match to {
+            Some(to) => {
+                let dst = &mut self.tabs[to];
+                dst.zoomed = None;
+                let anchor = dst.active_pane;
+                let placed = match beside {
+                    Some((onto, edge)) => dst.root.insert(onto, pane, edge),
+                    None => dst.root.split(anchor, pane, Axis::Horizontal),
+                };
+                if !placed {
+                    dst.root = crate::pane::PaneNode::Split {
+                        axis: Axis::Horizontal,
+                        ratio: 0.5,
+                        first: Box::new(dst.root.clone()),
+                        second: Box::new(crate::pane::PaneNode::Leaf(pane)),
+                    };
+                }
+                if let Some(state) = state {
+                    dst.panes.push(state);
+                    dst.active_pane = pane;
+                }
+                to
+            }
+            None => {
+                let Some(state) = state else { return };
+                self.tabs.insert(from + 1, TabState::new(state));
+                from + 1
+            }
+        };
+        let dest = if empties {
+            self.tabs.remove(from);
+            if dest > from { dest - 1 } else { dest }
+        } else {
+            dest
+        };
+        self.rename = None;
+        self.viewer_focus = viewer;
+        self.switch_tab(dest);
+    }
+
     fn active_pane_id(&self) -> Option<PaneId> {
         Some(self.tabs.get(self.active)?.active()?.session.id)
     }
@@ -7328,6 +8522,22 @@ impl App {
     pub(crate) fn on_cursor_moved(&mut self, pos: (f32, f32), window: &Window) {
         self.mouse = pos;
         self.update_cursor_icon(window);
+        // tabs, welcome rows, pane controls and settings rows draw their
+        // hover from the mouse at render time: repaint as soon as the pointer
+        // enters or leaves one, not on the next unrelated frame
+        let sig = self
+            .hits
+            .iter()
+            .enumerate()
+            .filter(|(_, h)| h.contains(pos.0, pos.1))
+            .fold(0u64, |s, (i, _)| {
+                s.wrapping_mul(31).wrapping_add(i as u64 + 1)
+            });
+        if sig != self.hover_sig {
+            self.hover_sig = sig;
+            self.hover_repaints += 1;
+            window.request_redraw();
+        }
         if self.mouse_report.is_some() {
             self.report_motion();
             return;
@@ -7341,6 +8551,7 @@ impl App {
             && self.pending_sel.is_none()
             && self.editor_drag.is_none()
             && self.tab_drag.is_none()
+            && self.pane_drag.is_none()
             && self.slider_drag.is_none();
         if idle && self.report_motion() {
             return;
@@ -7375,15 +8586,38 @@ impl App {
             self.drag_editor(pane);
             window.request_redraw();
         }
-        if let Some((i, start)) = self.tab_drag {
+        if self.pane_drag.is_some() {
+            self.track_pane_drag();
+            self.update_cursor_icon(window);
+            window.request_redraw();
+        }
+        if let Some(TabDrag {
+            index: i,
+            start,
+            press,
+            ..
+        }) = self.tab_drag
+        {
             // drag a tab past a neighbour's midpoint to swap (Warp reorder);
             // the vertical rail reorders along y
             let vertical = self.config.tab_layout == shift_core::TabLayout::Vertical;
             let pos = self.tab_drag_coord();
+            if let Some(d) = self.tab_drag.as_mut()
+                && !d.live
+                && (pos - press).abs() > PANE_DRAG_SLOP
+            {
+                d.live = true;
+            }
+            if self.tab_drag.is_some_and(|d| d.live) {
+                window.request_redraw();
+            }
             let delta = pos - start;
+            // shell tabs only: the Settings tab after them never swaps
+            let n_tabs = self.tabs.len();
             let neighbour = self.hits.iter().find_map(|h| match h.target {
                 ClickTarget::TabSelect(j)
-                    if (delta > 0.0 && j == i + 1) || (delta < 0.0 && j + 1 == i) =>
+                    if j < n_tabs
+                        && ((delta > 0.0 && j == i + 1) || (delta < 0.0 && j + 1 == i)) =>
                 {
                     Some((j, h.rect))
                 }
@@ -7398,7 +8632,10 @@ impl App {
                 if (delta > 0.0 && pos > mid) || (delta < 0.0 && pos < mid) {
                     self.tabs.swap(i, j);
                     self.active = j;
-                    self.tab_drag = Some((j, pos));
+                    if let Some(d) = self.tab_drag.as_mut() {
+                        d.index = j;
+                        d.start = pos;
+                    }
                     self.save_session();
                     window.request_redraw();
                 }
@@ -7412,8 +8649,7 @@ impl App {
     }
 
     pub(crate) fn on_right_press(&mut self, window: &Window) {
-        if self.palette.open || self.settings.open || self.confirm.is_some() || self.whats_new.open
-        {
+        if self.palette.open || self.confirm.is_some() || self.whats_new.open {
             return;
         }
         if self.notifications.open {
@@ -7421,7 +8657,10 @@ impl App {
             window.request_redraw();
             return;
         }
-        if !self.context_menu.open && self.report_button(crate::mouse::RIGHT, true) {
+        if !self.context_menu.open
+            && !self.settings.open
+            && self.report_button(crate::mouse::RIGHT, true)
+        {
             window.request_redraw();
             return;
         }
@@ -7438,6 +8677,10 @@ impl App {
         if let Some(i) = tab_hit {
             self.open_tab_menu(i, self.mouse);
             window.request_redraw();
+            return;
+        }
+        // the Settings tab's page has no context menus
+        if self.settings.open {
             return;
         }
         // resolve the block under the cursor via the frame row cache
@@ -7506,6 +8749,19 @@ impl App {
                 self.save_session(); // divider position
             }
             self.tab_drag = None;
+            if let Some(d) = self.pane_drag.take() {
+                if d.live
+                    && let Some(target) = d.target
+                {
+                    self.drop_pane(d.pane, d.from_tab, target);
+                } else if d.live && d.from_tab != self.active && d.from_tab < self.tabs.len() {
+                    // released nowhere after opening another tab: back home
+                    self.switch_tab(d.from_tab);
+                }
+                self.update_cursor_icon(window);
+                window.request_redraw();
+                return;
+            }
             if self.editor_drag.take().is_some() {
                 return;
             }
@@ -7600,6 +8856,15 @@ impl App {
             return;
         }
         if self.palette.open {
+            let chip = self.hits.iter().find_map(|h| match h.target {
+                ClickTarget::PaletteMode(i) if h.contains(mx, my) => Some(i as usize),
+                _ => None,
+            });
+            if let Some(mode) = chip.and_then(|i| crate::views::palette::MODES.get(i)) {
+                self.open_palette(mode.0);
+                window.request_redraw();
+                return;
+            }
             let row = self
                 .palette_row_hits
                 .iter()
@@ -7636,8 +8901,12 @@ impl App {
             window.request_redraw();
             return;
         }
-        // a click anywhere else leaves the tree's keyboard focus
+        // a click anywhere else leaves the tree's keyboard focus, and one in
+        // a shell pane takes focus from the viewer pane
         self.explorer.focused = false;
+        if !self.settings.open && self.mouse.1 > TAB_BAR_H {
+            self.viewer_focus = false;
+        }
         // a program tracking the mouse (vim, tmux, htop) gets the click
         if !self.settings.open && self.report_button(crate::mouse::LEFT, true) {
             self.last_click = None;
@@ -7652,6 +8921,40 @@ impl App {
         // any click but another row ends a shortcut recording
         if !matches!(target, Some(ClickTarget::SettingsKeybind(_))) {
             self.settings.recording = None;
+        }
+        // a click outside the history pane (and its command line) closes it
+        if self.history.open
+            && !matches!(
+                target,
+                Some(
+                    ClickTarget::HistoryRow(_)
+                        | ClickTarget::HistoryScope(_)
+                        | ClickTarget::HistoryClose
+                        | ClickTarget::Editor(_)
+                )
+            )
+        {
+            self.history.close();
+        }
+        // an open select list: a click outside its options only closes it
+        if self.settings.dropdown.is_some()
+            && !matches!(target, Some(ClickTarget::SettingsOption(_)))
+        {
+            self.settings.dropdown = None;
+            window.request_redraw();
+            return;
+        }
+        // the tab strip leaves the Settings tab for a shell tab (its own
+        // entry, after the shells, shows it again)
+        if let Some(ClickTarget::TabSelect(i)) = target {
+            if i >= self.tabs.len() {
+                if self.settings.tab {
+                    self.settings.open = true;
+                }
+                window.request_redraw();
+                return;
+            }
+            self.settings.open = false;
         }
         match &target {
             Some(ClickTarget::Block(pane, id)) => {
@@ -7690,7 +8993,22 @@ impl App {
                     if i != self.active {
                         self.switch_tab(i);
                     }
-                    self.tab_drag = Some((i, self.tab_drag_coord()));
+                    let pos = self.tab_drag_coord();
+                    let vertical = self.config.tab_layout == shift_core::TabLayout::Vertical;
+                    let grab = self
+                        .hits
+                        .iter()
+                        .find(|h| h.target == ClickTarget::TabSelect(i))
+                        .map(|h| pos - if vertical { h.rect[1] } else { h.rect[0] })
+                        .unwrap_or(0.0);
+                    self.tab_drag = Some(TabDrag {
+                        index: i,
+                        origin: i,
+                        start: pos,
+                        press: pos,
+                        grab,
+                        live: false,
+                    });
                 }
             }
             Some(ClickTarget::TabClose(i)) => {
@@ -7730,6 +9048,80 @@ impl App {
                     self.press_selection(id, clicks);
                 }
             }
+            Some(ClickTarget::PaneHeader(id)) => {
+                // focus the pane; dragging the bar past the slop moves it
+                let id = *id;
+                if let Some(tab) = self.tabs.get_mut(self.active) {
+                    if tab.active_pane != id
+                        && let Some(prev) = tab.active_mut()
+                    {
+                        prev.selected_block = None;
+                    }
+                    tab.active_pane = id;
+                }
+                self.pane_drag = Some(PaneDrag {
+                    pane: id,
+                    from_tab: self.active,
+                    press: self.mouse,
+                    live: false,
+                    target: None,
+                    hover_tab: None,
+                });
+            }
+            Some(ClickTarget::PaneMenu(id)) => {
+                let id = *id;
+                if let Some(tab) = self.tabs.get_mut(self.active) {
+                    tab.active_pane = id;
+                }
+                // drops down from the ⋮ button
+                let at = self
+                    .hits
+                    .iter()
+                    .find(|h| h.target == ClickTarget::PaneMenu(id))
+                    .map_or(self.mouse, |h| (h.rect[0], h.rect[1] + h.rect[3] + 4.0));
+                self.open_terminal_menu(id, at);
+            }
+            Some(ClickTarget::PaneClose(id)) => {
+                self.request_close(CloseScope::Pane(*id), event_loop);
+            }
+            Some(ClickTarget::PaletteMode(i)) => {
+                if let Some(m) = crate::views::palette::MODES.get(*i as usize) {
+                    self.open_palette(m.0);
+                }
+            }
+            Some(ClickTarget::HistoryScope(scope)) => self.history.set_scope(*scope),
+            Some(ClickTarget::HistoryClose) => self.history.close(),
+            Some(ClickTarget::HistoryRow(i)) => {
+                // a click picks the row onto the command line; a second runs it
+                if self.history.selected == *i && self.click_count() >= 2 {
+                    self.take_history(HistoryUse::Run);
+                } else {
+                    self.history.selected = *i;
+                    self.take_history(HistoryUse::Edit);
+                }
+            }
+            Some(ClickTarget::CompletionSource(i)) => {
+                self.completion.pick_source(*i as usize);
+            }
+            Some(ClickTarget::CompletionRow(i)) => {
+                self.completion.selected = *i;
+                self.accept_completion();
+                self.blink_epoch = Instant::now();
+            }
+            Some(ClickTarget::Welcome(i)) => match i {
+                0 => self.handle_action(AppAction::SplitRight, event_loop),
+                1 => self.handle_action(AppAction::TogglePalette, event_loop),
+                2 => self.open_history(),
+                3 => self.handle_action(AppAction::ToggleExplorer, event_loop),
+                _ => self.handle_action(AppAction::OpenSettings, event_loop),
+            },
+            Some(ClickTarget::PaneSplit(id)) => {
+                if let Some(tab) = self.tabs.get_mut(self.active) {
+                    tab.active_pane = *id;
+                }
+                self.viewer_focus = false;
+                self.split_active(Axis::Horizontal);
+            }
             Some(ClickTarget::HandleDrag(path)) => {
                 // find the split node's area from the current layout
                 let (lw, lh) = self.logical_size();
@@ -7757,8 +9149,14 @@ impl App {
                 1 => window.set_minimized(true),
                 _ => window.set_maximized(!window.is_maximized()),
             },
+            // the empty strip: a double-click zooms the window (the titlebar's
+            // own gesture), a press drags it
             Some(ClickTarget::WindowDrag) if !self.headless => {
-                let _ = window.drag_window();
+                if self.click_count() == 2 {
+                    window.set_maximized(!window.is_maximized());
+                } else {
+                    let _ = window.drag_window();
+                }
             }
             Some(ClickTarget::WindowDrag) => {}
             Some(ClickTarget::JumpToBlock(pane, id)) => {
@@ -7770,8 +9168,26 @@ impl App {
                 let page = Page::ALL.get(*i as usize).copied().unwrap_or(Page::General);
                 self.settings.open_page(page);
             }
-            Some(ClickTarget::SettingsClose) => {
-                self.settings.open = false;
+            Some(ClickTarget::SettingsClose) => self.settings.close_tab(),
+            Some(ClickTarget::SettingsOption(i)) => {
+                if let Some(dd) = self.settings.dropdown.take()
+                    && let Some((value, _)) = dd.options.get(*i)
+                {
+                    self.set_select(dd.id, value.clone());
+                }
+            }
+            Some(ClickTarget::SettingsReset(id)) => {
+                if let Some(config) = crate::views::settings::reset_setting(&self.config, id) {
+                    self.config = config;
+                    self.save_config();
+                    self.apply_config();
+                }
+            }
+            Some(ClickTarget::SettingsOpenConfig) => {
+                if let Some(path) = shift_core::config::config_path() {
+                    self.settings.open = false;
+                    self.open_viewer(&path);
+                }
             }
             Some(ClickTarget::SettingsToggle(id)) => {
                 let c = &mut self.config;
@@ -7917,34 +9333,7 @@ impl App {
                 self.save_config();
                 self.apply_config();
             }
-            Some(ClickTarget::SettingsCycle(id)) if id.starts_with("notifications.sound") => {
-                self.cycle_sound(id);
-            }
-            Some(ClickTarget::SettingsCycle(id)) => {
-                let names = match *id {
-                    "theme" | "theme_light" => shift_core::theme::available_themes(),
-                    "font_family" => self
-                        .text
-                        .as_ref()
-                        .map(|t| t.monospace_families())
-                        .unwrap_or_default(),
-                    _ => Vec::new(),
-                };
-                if !names.is_empty() {
-                    let slot = match *id {
-                        "theme" => &mut self.config.theme,
-                        "theme_light" => &mut self.config.theme_light,
-                        _ => &mut self.config.font_family,
-                    };
-                    let cur = names
-                        .iter()
-                        .position(|n| n.eq_ignore_ascii_case(slot))
-                        .unwrap_or(names.len() - 1);
-                    *slot = names[(cur + 1) % names.len()].clone();
-                }
-                self.save_config();
-                self.apply_config();
-            }
+            Some(ClickTarget::SettingsCycle(id)) => self.open_select(id),
             Some(ClickTarget::SettingsSlider(id)) => {
                 let rect = self
                     .hits
@@ -8032,7 +9421,20 @@ impl App {
             };
             let (ex_rect, rv_rect) = self.panel_rects();
             let handled = if self.viewer.is_open() && inside(&self.viewer_rect) {
+                // sideways: a trackpad's x, or ⇧ + a mouse wheel
+                let dx = -match delta {
+                    MouseScrollDelta::LineDelta(x, _) => x * 3.0 * 20.0,
+                    MouseScrollDelta::PixelDelta(p) => p.x as f32,
+                };
+                let (px, dx) = if self.modifiers.shift_key() && dx == 0.0 {
+                    (0.0, px)
+                } else {
+                    (px, dx)
+                };
                 self.viewer.scroll_by(px);
+                if dx != 0.0 {
+                    self.viewer.scroll_x_by(dx, my);
+                }
                 true
             } else if inside(&ex_rect) {
                 self.explorer.scroll_by(px);
@@ -8812,8 +10214,8 @@ impl App {
                 self.on_cursor_moved((x, y), window);
                 self.on_left(ElementState::Released, event_loop, window);
             }
-            Step::Scroll(lines) => {
-                self.on_wheel(MouseScrollDelta::LineDelta(0.0, lines / 3.0), window);
+            Step::Scroll(lines, cols) => {
+                self.on_wheel(MouseScrollDelta::LineDelta(cols / 3.0, lines / 3.0), window);
             }
             Step::Sh(cmd) => {
                 let status = std::process::Command::new("sh")
@@ -8938,6 +10340,7 @@ impl App {
                 ..Default::default()
             },
             Request::Focus { tab, pane } => {
+                self.settings.open = false;
                 let target = match (tab, pane) {
                     (_, Some(p)) => self.find_tab_of_pane(p).map(|(i, _)| (i, Some(p))),
                     (Some(t), None) if t < self.tabs.len() => Some((t, None)),
@@ -9003,20 +10406,28 @@ impl App {
         let hit = |pred: &dyn Fn(&ClickTarget) -> bool| {
             self.hits.iter().find(|h| pred(&h.target)).map(|h| h.rect)
         };
+        let settings_shown = self.settings.open && self.settings.tab;
+        let n = self.tabs.len();
         let tabs = self
             .tabs
             .iter()
             .enumerate()
             .map(|(i, t)| TabNode {
                 title: t.display_title(),
-                selected: i == self.active,
+                selected: i == self.active && !settings_shown,
                 rect: hit(&|c| *c == ClickTarget::TabSelect(i)),
             })
+            .chain(self.settings.tab.then(|| TabNode {
+                title: "Settings".into(),
+                selected: settings_shown,
+                rect: hit(&|c| *c == ClickTarget::TabSelect(n)),
+            }))
             .collect();
 
         let mut panes = Vec::new();
         let mut finished = Vec::new();
-        if let Some(tab) = self.tabs.get(self.active) {
+        // the Settings tab covers the shell tab's panes
+        if let Some(tab) = self.tabs.get(self.active).filter(|_| !settings_shown) {
             for p in &tab.panes {
                 let id = p.session.id;
                 let visible = tab.zoomed.is_none_or(|z| z == id);
@@ -9073,6 +10484,31 @@ impl App {
                 if let Some(job) = running.filter(|_| !self.editor_active || !active) {
                     label.push_str(&format!(", running {job}"));
                 }
+                // title bar buttons, and the welcome rows of a fresh pane
+                let welcome = welcome_entries(&self.keymap);
+                let controls = self
+                    .hits
+                    .iter()
+                    .filter_map(|h| {
+                        let label = match h.target {
+                            ClickTarget::PaneSplit(p) if p == id => "Split pane right".into(),
+                            ClickTarget::PaneMenu(p) if p == id => "Pane menu".into(),
+                            ClickTarget::PaneClose(p) if p == id => "Close pane".into(),
+                            ClickTarget::Welcome(i) if active => {
+                                let e = welcome.get(i as usize)?;
+                                format!("{}, {}", e.title, e.keys.concat())
+                            }
+                            _ => return None,
+                        };
+                        Some(Control {
+                            label,
+                            role: Role::Button,
+                            toggled: None,
+                            selected: false,
+                            rect: Some(h.rect),
+                        })
+                    })
+                    .collect();
                 panes.push(PaneNode {
                     id,
                     label,
@@ -9081,6 +10517,7 @@ impl App {
                     blocks,
                     screen,
                     editor,
+                    controls,
                 });
             }
         }
@@ -9249,10 +10686,25 @@ impl App {
                 label: "Command palette".into(),
                 input: Some(("Search commands".into(), self.palette.query.clone())),
                 status: Some(format!("{} results", self.palette_results.len())),
+                // the mode chips, then the rows
                 controls: self
-                    .palette_row_hits
+                    .hits
                     .iter()
-                    .filter_map(|(r, i)| {
+                    .filter_map(|h| match h.target {
+                        ClickTarget::PaletteMode(i) => {
+                            let (mode, label, prefix) =
+                                crate::views::palette::MODES.get(i as usize)?;
+                            Some(Control {
+                                label: format!("{label} mode, prefix {prefix}"),
+                                role: Role::RadioButton,
+                                toggled: None,
+                                selected: *mode == self.palette.mode,
+                                rect: Some(h.rect),
+                            })
+                        }
+                        _ => None,
+                    })
+                    .chain(self.palette_row_hits.iter().filter_map(|(r, i)| {
                         let m = self.palette_results.get(*i)?;
                         let mut label = m.item.title.clone();
                         if !m.item.shortcut.is_empty() {
@@ -9265,7 +10717,7 @@ impl App {
                             selected: *i == self.palette.selected,
                             rect: Some(*r),
                         })
-                    })
+                    }))
                     .collect(),
                 rect: None,
             })
@@ -9294,10 +10746,20 @@ impl App {
                         ClickTarget::SettingsSegment(..) | ClickTarget::SettingsTheme(_) => {
                             (Role::RadioButton, None, false)
                         }
+                        ClickTarget::SettingsOption(i) => (
+                            Role::ListBoxOption,
+                            None,
+                            self.settings
+                                .dropdown
+                                .as_ref()
+                                .is_some_and(|d| d.current == Some(*i)),
+                        ),
                         ClickTarget::SettingsClose
                         | ClickTarget::SettingsStep(..)
                         | ClickTarget::SettingsCycle(_)
                         | ClickTarget::SettingsSlider(_)
+                        | ClickTarget::SettingsReset(_)
+                        | ClickTarget::SettingsOpenConfig
                         | ClickTarget::SettingsKeybind(_)
                         | ClickTarget::SettingsKeybindReset(_) => (Role::Button, None, false),
                         _ => return None,
@@ -9317,9 +10779,53 @@ impl App {
                 })
                 .collect();
             Some(Overlay::Dialog {
-                label: format!("Settings, {:?}", self.settings.page),
-                input: None,
+                label: format!("Settings, {}", self.settings.page.label()),
+                input: Some(("Search settings".into(), self.settings.query.clone())),
                 status: None,
+                controls,
+                rect: None,
+            })
+        } else if self.history.open {
+            let hp = &self.history;
+            let controls = self
+                .hits
+                .iter()
+                .filter_map(|h| {
+                    let (label, role, selected) = match h.target {
+                        ClickTarget::HistoryRow(i) => {
+                            let e = &hp.entries[*hp.results.get(i)?];
+                            let status = match e.exit {
+                                Some(0) => "succeeded",
+                                Some(_) => "failed",
+                                None => "status unknown",
+                            };
+                            (
+                                format!("{}, {status}", e.command),
+                                Role::ListBoxOption,
+                                i == hp.selected,
+                            )
+                        }
+                        ClickTarget::HistoryScope(s) => {
+                            (s.label().to_string(), Role::RadioButton, s == hp.scope)
+                        }
+                        ClickTarget::HistoryClose => {
+                            ("Close history".to_string(), Role::Button, false)
+                        }
+                        _ => return None,
+                    };
+                    Some(Control {
+                        label,
+                        role,
+                        toggled: None,
+                        selected,
+                        rect: Some(h.rect),
+                    })
+                })
+                .collect();
+            Some(Overlay::Dialog {
+                label: format!("Command history, {}", hp.scope.label()),
+                input: Some(("Search history".into(), hp.query.clone())),
+                status: Some(format!("{} of {}", hp.results.len(), hp.entries.len())),
                 controls,
                 rect: None,
             })
@@ -9451,6 +10957,7 @@ impl App {
                                 "collapsed"
                             }
                         ),
+                        ReviewHit::Reveal(_, p, _) => format!("Show unmodified lines of {p}"),
                         ReviewHit::Open(p) => format!("Open {p}"),
                         ReviewHit::Stage(p, h) => format!("Stage {p}{}", hunk_label(h)),
                         ReviewHit::Unstage(p, h) => format!("Unstage {p}{}", hunk_label(h)),
@@ -9488,7 +10995,13 @@ impl App {
                 .iter()
                 .map(|(r, hit)| match hit {
                     ViewerHit::Close => control("Close viewer".into(), Role::Button, false, *r),
-                    ViewerHit::InsertPath => control("Insert path".into(), Role::Button, false, *r),
+                    ViewerHit::Menu => control("Viewer menu".into(), Role::Button, false, *r),
+                    ViewerHit::Mode(m) => control(
+                        if *m { "Rendered" } else { "Raw" }.into(),
+                        Role::RadioButton,
+                        self.viewer.rendered == *m,
+                        *r,
+                    ),
                 })
                 .collect();
             out.push(PanelNode {
@@ -9611,6 +11124,18 @@ impl App {
             self.completion.ghost,
             self.completion.items.len()
         );
+        let _ = writeln!(
+            out,
+            "settings_tab={} settings_query={:?} settings_select={:?} completion_source={:?} history={} scope={:?} history_rows={} history_selected={:?}",
+            self.settings.tab,
+            self.settings.query,
+            self.settings.dropdown.as_ref().map(|d| d.id),
+            self.completion.filter,
+            self.history.open,
+            self.history.scope,
+            self.history.results.len(),
+            self.history.current().map(|e| e.command.as_str()),
+        );
         // links/paths as-is; blocks as `block <label> <block id>`
         let hint_targets: Vec<String> = self
             .hints
@@ -9642,7 +11167,7 @@ impl App {
         );
         let _ = writeln!(
             out,
-            "review={} load={} staged={:?} unstaged={:?} expanded={} notice={:?} scroll={:.0} shown={}",
+            "review={} load={} staged={:?} unstaged={:?} expanded={} revealed={} notice={:?} scroll={:.0} shown={} hover_repaints={}",
             self.review.open,
             match &self.review.load {
                 crate::views::review_panel::Load::Idle => "idle",
@@ -9662,9 +11187,11 @@ impl App {
                 .map(|f| format!("{}{}", f.status, f.path))
                 .collect::<Vec<_>>()),
             self.review.expanded.len(),
+            self.review.revealed.values().sum::<u32>(),
             self.review.notice,
             self.review.scroll,
-            self.panel_widths(self.logical_size().0).1 > 0.0
+            self.panel_widths(self.logical_size().0).1 > 0.0,
+            self.hover_repaints
         );
         let _ = writeln!(
             out,
@@ -10003,6 +11530,8 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(gpu) = &mut self.gpu {
                     gpu.resize(size.width, size.height);
                 }
+                #[cfg(target_os = "macos")]
+                place_traffic_lights(&window);
                 window.request_redraw();
             }
             WindowEvent::ScaleFactorChanged { .. } => {
@@ -10017,6 +11546,9 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::Focused(f) => {
                 self.focused = f;
                 self.sync_focus();
+                // AppKit may lay the titlebar out again on key-state changes
+                #[cfg(target_os = "macos")]
+                place_traffic_lights(&window);
                 window.request_redraw();
             }
             WindowEvent::Ime(ime) => match ime {
@@ -10127,6 +11659,9 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::PtyTitle(pane, title) => {
                 if let Some((_, tab)) = self.find_tab_of_pane(pane) {
+                    if let Some(p) = tab.pane_mut(pane) {
+                        p.title = title.clone();
+                    }
                     tab.title = title;
                 }
                 if let Some(w) = &self.window {
@@ -10310,6 +11845,21 @@ impl ApplicationHandler<UserEvent> for App {
                 repaint = true;
             } else {
                 deadlines.push(until);
+            }
+        }
+        // a dragged pane held still over a tab opens it after TAB_HOVER_OPEN
+        if let Some((_, since)) = self
+            .pane_drag
+            .as_ref()
+            .and_then(|d| d.hover_tab)
+            .filter(|(j, _)| *j != self.active)
+        {
+            let due = since + TAB_HOVER_OPEN;
+            if now >= due {
+                self.track_pane_drag();
+                repaint = true;
+            } else {
+                deadlines.push(due);
             }
         }
         // notification toasts (a hovered one stays)

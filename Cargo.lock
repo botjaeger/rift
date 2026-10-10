@@ -2941,36 +2941,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "shift-app"
-version = "0.1.0"
-dependencies = [
- "accesskit",
- "accesskit_winit",
- "arboard",
- "env_logger",
- "git2",
- "global-hotkey",
- "libc",
- "log",
- "muda",
- "nucleo-matcher",
- "objc2 0.6.4",
- "objc2-app-kit 0.3.2",
- "objc2-foundation 0.3.2",
- "png",
- "regex",
- "serde",
- "serde_json",
- "shift-core",
- "shift-pty",
- "shift-renderer",
- "toml",
- "unicode-segmentation",
- "wgpu",
- "winit",
-]
-
-[[package]]
 name = "shift-core"
 version = "0.1.0"
 dependencies = [
@@ -3011,6 +2981,36 @@ dependencies = [
  "pollster",
  "shift-core",
  "wgpu",
+]
+
+[[package]]
+name = "shift-terminal"
+version = "0.1.0"
+dependencies = [
+ "accesskit",
+ "accesskit_winit",
+ "arboard",
+ "env_logger",
+ "git2",
+ "global-hotkey",
+ "libc",
+ "log",
+ "muda",
+ "nucleo-matcher",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "png",
+ "regex",
+ "serde",
+ "serde_json",
+ "shift-core",
+ "shift-pty",
+ "shift-renderer",
+ "toml",
+ "unicode-segmentation",
+ "wgpu",
+ "winit",
 ]
 
 [[package]]

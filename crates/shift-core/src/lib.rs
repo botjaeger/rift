@@ -10,6 +10,7 @@ pub mod highlight;
 pub mod history;
 pub mod keybindings;
 pub mod launch;
+pub mod markdown;
 pub mod notifications;
 pub mod osc;
 pub mod review;

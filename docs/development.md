@@ -16,7 +16,7 @@ How to build, test, verify and release Shift. Agent-specific rules are in
 
 ```sh
 git clone <repo> && cd shift
-cargo run -p shift-app          # builds and opens a window
+cargo run                             # builds and opens a window
 git config core.hooksPath .githooks   # optional: fmt + clippy + docs before each commit
 ```
 
@@ -36,7 +36,7 @@ around 1–2 s; the first build after a clean takes longer.
 
 The binary has no runtime assets: fonts, themes and shell hooks are embedded.
 `shift-terminal --help` prints the usage; `--version` the version. On macOS,
-`crates/shift-app/build.rs` embeds a minimal Info.plist in the binary so an
+`crates/shift-terminal/build.rs` embeds a minimal Info.plist in the binary so an
 unbundled run shows "Shift" in the menu bar instead of `shift-terminal`. The
 Dock and ⌘Tab name a process after its bundle, so `cargo run` goes through
 `scripts/cargo-runner.sh` (`.cargo/config.toml`): it launches the binary from a
@@ -121,7 +121,7 @@ XDG_CONFIG_HOME=/tmp/shift-t/cfg XDG_DATA_HOME=/tmp/shift-t/data SHIFT_NO_NOTIFY
 
 Always isolate config and data directories: otherwise the scripted instance
 uses your real config, session file, session service and control sockets.
-The command list is the module comment of `crates/shift-app/src/script.rs`.
+The command list is the module comment of `crates/shift-terminal/src/script.rs`.
 
 **`--headless`** (debugging and testing only; needs `--script`). The window
 is created but never shown or focused, so you can keep working while a script
@@ -145,7 +145,7 @@ memory, key-to-frame latency and TUI round trips; compare against
 ## Architecture
 
 ```
-shift-app       winit app, views, input routing, a11y, control socket, script driver
+shift-terminal     winit app, views, input routing, a11y, control socket, script driver
   ├── shift-renderer   wgpu quad + sprite pipelines, glyphon text, Scene layers
   ├── shift-pty        PTY sessions, reader threads, vte, images, session service
   └── shift-core       config, themes, keymap, OSC scanner, blocks, completions, git

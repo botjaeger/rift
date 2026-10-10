@@ -24,6 +24,7 @@
 //! press 100 200            # left button down at a point (hold: use `move`, `release`)
 //! release 400 200          # left button up at a point
 //! scroll 5                 # wheel: +N lines up, −N down
+//! scroll 0 -4              # optional 2nd number: sideways, +N left, −N right
 //! sh touch /tmp/x          # run a shell command synchronously
 //! focus off                # pretend the window lost/gained focus
 //! ime 한글                  # text committed by an input method
@@ -64,7 +65,7 @@ pub enum Step {
     Drag(f32, f32, f32, f32),
     Press(f32, f32),
     Release(f32, f32),
-    Scroll(f32),
+    Scroll(f32, f32),
     Sh(String),
     Focus(bool),
     Ime(String),
@@ -219,7 +220,19 @@ pub fn parse(src: &str) -> Result<Vec<Step>, String> {
                 let v = nums(2)?;
                 Step::Release(v[0], v[1])
             }
-            "scroll" => Step::Scroll(nums(1)?[0]),
+            "scroll" => {
+                // optional second number: sideways (+N left, −N right)
+                let v: Vec<f32> = rest
+                    .split_whitespace()
+                    .map(|s| s.parse::<f32>())
+                    .collect::<Result<_, _>>()
+                    .map_err(|_| bad("expected numbers"))?;
+                match v[..] {
+                    [y] => Step::Scroll(y, 0.0),
+                    [y, x] => Step::Scroll(y, x),
+                    _ => return Err(bad("expected 1 or 2 numbers")),
+                }
+            }
             "sh" => Step::Sh(rest.to_string()),
             "focus" => Step::Focus(matches!(rest, "on" | "true" | "1")),
             "ime" => Step::Ime(unescape(rest)),
@@ -369,7 +382,7 @@ mod tests {
         assert_eq!(steps[0], Step::Wait(10));
         assert_eq!(steps[2], Step::Type("echo hi\n".into()));
         assert_eq!(steps[10], Step::Drag(1.0, 2.0, 3.0, 4.0));
-        assert_eq!(steps[11], Step::Scroll(-3.0));
+        assert_eq!(steps[11], Step::Scroll(-3.0, 0.0));
         assert_eq!(steps[14], Step::Quit);
     }
 

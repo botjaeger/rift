@@ -325,29 +325,6 @@ pub fn relative_time(secs: u64) -> String {
     }
 }
 
-/// Inbox tray outline (tab-bar button), centered in `r`.
-pub fn inbox_icon(layer: &mut Layer, r: [f32; 4], color: Color) {
-    let (iw, ih) = (16.0, 13.0);
-    let (ix, iy) = (
-        (r[0] + (r[2] - iw) / 2.0).round(),
-        (r[1] + (r[3] - ih) / 2.0).round(),
-    );
-    let t = 1.3;
-    layer.bordered([ix, iy], [iw, ih], color.with_alpha(0.0), color, 3.0, t);
-    // the tray lip: a shelf with a dip in the middle
-    let (shelf, dip, side) = (iy + 6.0, 3.2, 4.8);
-    layer.rect([ix, shelf], [side, t], color, 0.0);
-    layer.rect([ix + iw - side, shelf], [side, t], color, 0.0);
-    layer.rect([ix + side - t, shelf], [t, dip], color, 0.0);
-    layer.rect([ix + iw - side, shelf], [t, dip], color, 0.0);
-    layer.rect(
-        [ix + side - t, shelf + dip - t],
-        [iw - 2.0 * side + 2.0 * t, t],
-        color,
-        0.0,
-    );
-}
-
 /// Git branch glyph: two stacked commits and a side branch.
 fn branch_icon(layer: &mut Layer, x: f32, y: f32, color: Color) {
     let t = 1.2;
@@ -446,15 +423,6 @@ pub fn tab_badge(layer: &mut Layer, theme: &Theme, kind: Kind, cx: f32, cy: f32)
     layer.circle([cx, cy], 7.0, c);
 }
 
-/// ✕ from two diagonal dot runs (crisp, no font dependency).
-fn cross(layer: &mut Layer, cx: f32, cy: f32, half: i32, color: Color) {
-    for i in -half..=half {
-        let f = i as f32;
-        layer.rect([cx + f - 0.75, cy + f - 0.75], [1.5, 1.5], color, 0.5);
-        layer.rect([cx + f - 0.75, cy - f - 0.75], [1.5, 1.5], color, 0.5);
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 pub fn render(
     layer: &mut Layer,
@@ -506,7 +474,7 @@ pub fn render(
         [x, y + 8.0],
         [card_w, card_h],
         Color::BLACK.with_alpha(0.55),
-        12.0,
+        8.0,
         18.0,
     );
     layer.bordered(
@@ -514,7 +482,7 @@ pub fn render(
         [card_w, card_h],
         theme.surface,
         Color::WHITE.with_alpha(0.12),
-        12.0,
+        8.0,
         1.0,
     );
 
@@ -526,7 +494,12 @@ pub fn render(
         theme.text_bright,
     );
     let close = [x + card_w - 12.0 - 28.0, y + 12.0, 28.0, 28.0];
-    cross(layer, close[0] + 14.0, close[1] + 14.0, 4, theme.text_ui);
+    super::close_icon(
+        layer,
+        [close[0] + 14.0, close[1] + 14.0],
+        4.5,
+        theme.text_ui,
+    );
     let unread = entries.iter().filter(|e| e.unread).count();
     let mut mark_read = [0.0; 4];
     if unread > 0 {
@@ -554,8 +527,8 @@ pub fn render(
             layer.rect(
                 [r[0], r[1]],
                 [r[2], r[3]],
-                Color::WHITE.with_alpha(0.14),
-                7.0,
+                theme.accent.with_alpha(0.16),
+                4.0,
             );
         }
         layer.text(
@@ -571,7 +544,7 @@ pub fn render(
         chips.push((r, filter));
         cx += r[2] + 6.0;
     }
-    layer.hline(x, list_top - 1.0, card_w, 1.0, theme.border);
+    layer.hline(x + 1.0, list_top - 1.0, card_w - 2.0, 1.0, theme.border);
 
     // ── rows ──
     let clip = TextBounds {
@@ -612,7 +585,7 @@ pub fn render(
                 [rect[0] + 5.0, rect[1]],
                 [rect[2] - 10.0, rect[3]],
                 Color::WHITE.with_alpha(0.06),
-                8.0,
+                4.0,
             );
         }
         rows.push((rect, entry.id));
@@ -728,7 +701,7 @@ pub fn render_toasts(
             [x, y + 6.0],
             [tw, h],
             Color::BLACK.with_alpha(0.5),
-            12.0,
+            8.0,
             14.0,
         );
         layer.bordered(
@@ -736,7 +709,7 @@ pub fn render_toasts(
             [tw, h],
             theme.surface,
             Color::WHITE.with_alpha(0.12),
-            12.0,
+            8.0,
             1.0,
         );
         // kind stripe on the left edge
@@ -772,7 +745,12 @@ pub fn render_toasts(
             layer.text(d, text_x, ty + 2.0, theme.text_dim);
         }
         let close = [x + tw - 30.0, y + 8.0, 22.0, 22.0];
-        cross(layer, close[0] + 11.0, close[1] + 11.0, 3, theme.text_muted);
+        super::close_icon(
+            layer,
+            [close[0] + 11.0, close[1] + 11.0],
+            3.5,
+            theme.text_muted,
+        );
         hits.push(ToastHit {
             id: e.id,
             rect: [x, y, tw, h],

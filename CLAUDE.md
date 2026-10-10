@@ -40,7 +40,7 @@ scripts/gates.sh               # quality gates: fmt clippy test doc shell docs
 scripts/gates.sh ui            # scripted UI regressions (scripts/ui-smoke.py)
 scripts/gates.sh all           # + release build + scripted UI + Linux gates in docker
 scripts/gates.sh --list        # what each gate runs
-cargo run -p shift-app         # dev build + launch (binary: shift-terminal)
+cargo run                      # dev build + launch (binary: shift-terminal)
 cargo test -p shift-core osc   # one module's tests
 cargo fmt --all                # format
 packaging/make-app.sh          # macOS Shift.app (release)
@@ -57,7 +57,7 @@ Optional pre-commit hook (fmt + clippy): `git config core.hooksPath .githooks`.
 ## Verifying UI changes
 
 Rendering has no unit tests. Use the script driver
-(`crates/shift-app/src/script.rs`): it synthesizes keys and mouse events
+(`crates/shift-terminal/src/script.rs`): it synthesizes keys and mouse events
 through the app's real routing (`App::on_key`, `App::on_left`, …); `shot`
 writes a PNG by offscreen readback (works with the display asleep, needs no
 Screen Recording permission); `dump` writes a state snapshot (tabs, panes,
@@ -114,14 +114,15 @@ Four crates; dependencies flow strictly downward.
   parser, and applies markers to the `BlockStore` and the inline-image model
   (`graphics.rs`).
 - **shift-renderer** — wgpu SDF quad pipeline (`quad.wgsl`: rounded rects,
-  borders, circles, soft shadows), image sprites (`sprite.rs`), glyphon text.
+  borders, circles, line strokes, soft shadows, rounded clips), image sprites
+  (`sprite.rs`), glyphon text.
   `Scene` is a per-frame list of layers; within a layer quads draw first, then
   text; later layers composite over earlier ones (0 chrome, 1 terminal +
   editor, 2 completion/search, 3 settings, 4 palette, 5 context menu/hints,
   6 toasts/dialogs).
-- **shift-app** — winit `ApplicationHandler` (`app.rs`), views, input routing,
-  per-frame `Hit` rects, kitty keyboard encoder (`keyboard.rs`), AccessKit
-  tree (`a11y.rs`), control socket and `ctl` client (`control.rs`), script
+- **shift-terminal** — winit `ApplicationHandler` (`app.rs`), views, input
+  routing, per-frame `Hit` rects, kitty keyboard encoder (`keyboard.rs`),
+  AccessKit tree (`a11y.rs`), control socket and `ctl` client (`control.rs`), script
   driver, offscreen capture.
 
 ### Load-bearing invariants

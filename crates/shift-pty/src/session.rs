@@ -926,6 +926,8 @@ fn resize_term(
     scrolled.store(base + new.history as u64, Ordering::Release);
     // reflow (column change) re-wraps lines and moves every row after
     // them; carry the block anchors along (same lock order as the reader)
+    // a prompt redrawn after this keeps its pre-resize anchor
+    blocks.lock().unwrap().note_resize();
     if old.cols != new.cols || old.starts.len() != new.starts.len() {
         blocks
             .lock()

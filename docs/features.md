@@ -59,7 +59,7 @@ insensitive) stay visible. Running it again on the same block, or choosing
   with modifiers, a letter with combining accents), never part of one.
 - Editor niceties: word motion & kills (whitespace-delimited), undo/redo
   (snapshot stack, cap 100, cleared on submit), history walk (↑/↓ preserving
-  the in-progress line), ⌃R history palette, multi-source completion with
+  the in-progress line), ⌃R history pane, multi-source completion with
   ghost text, workflow placeholder cycling, and configurable quote/bracket
   auto-pairing (typing a closer steps over it; Backspace removes an empty pair).
 - Cmd-chords never insert text into the editor nor leak bytes to the PTY.
@@ -71,11 +71,11 @@ insensitive) stay visible. Running it again on the same block, or choosing
   (default) or the top of the pane.
 - **Shell-prompt mode** (`prompt = "shell"`): the shell's own PS1 (starship,
   p10k, …) stays visible on the grid and the editor drops the context row,
-  showing a quiet `›` continuation glyph instead of `❯`.
+  showing a smaller muted chevron instead of the green one.
 
 ## Vim mode
 
-`vim_mode = true` (Settings → Features, or the palette's *Toggle vim
+`vim_mode = true` (Settings → Input, or the palette's *Toggle vim
 keybindings*) puts the owned editor into modal editing. The buffer is one
 command, so every motion is within-line and the "linewise" operators act on
 the whole buffer.
@@ -92,7 +92,7 @@ the whole buffer.
 - Edits: `x` `X` `s` `S` `C` `D` `r`<char> `~` `p` `P` (unnamed register).
 - Insert entry: `i` `a` `I` `A`.
 - Counts: digits before and/or after the operator, multiplied (`2d3w`).
-- Undo `u`, **redo `U`** (not `⌃R` — that stays the history palette).
+- Undo `u`, **redo `U`** (not `⌃R` — that stays the history pane).
 - History recall: `k` = previous entry, `j` = next (also ↑/↓).
 
 ## Selection & mouse
@@ -152,8 +152,18 @@ own history first (last 200) then the imported shell history (newest 3000),
 max 5. Inline ghost text shows the top suggestion; Tab accepts (placeholder
 cycling wins when active), ⌃→ accepts one word.
 
+The completion panel lists the word candidates, then the history lines; its
+header has a tab per source with counts (⇧⇥ or a click narrows to one), and
+accepting a history line replaces the whole command line.
+
+**History pane** (⌃R): this window's finished commands (exit status,
+directory, finish time), the pane's typed history and the shell's history
+file, one row per command, newest first; the command line filters it, ⌃R
+cycles the scope (this pane, all shells, failed), ⏎ runs, ⇥ edits first,
+⌘⏎ runs in a new split.
+
 `autosuggestions = false` turns the ghost text off; `completions_menu = false`
-turns the dropdown off (the ghost text and Tab still work).
+turns the completion panel off (the ghost text and Tab still work).
 
 ## Workflows
 
@@ -196,7 +206,10 @@ ignored. Warp's own files drop in unchanged.
   under every layer; relative paths resolve against the themes directory.
 - **Font family** (`font_family`): any installed monospace family; an
   unavailable name logs a warning and falls back to the embedded JetBrains
-  Mono. Settings → Appearance cycles through the installed families.
+  Mono. Settings → Appearance lists the installed families.
+- **Settings tab** (⌘,): a tab beside the shells, not an overlay; a sidebar
+  search finds a setting on any page, a changed setting shows a dot and a
+  reset button, selects open a list.
 
 ## Notifications & bell
 
@@ -212,11 +225,20 @@ ignored. Warp's own files drop in unchanged.
 
 ## Tabs, panes, session
 
-- Tabs: create, close, reorder (⌃⇧←/→), select by number (⌘1–9, ⌘9 = last),
-  reopen closed (⇧⌘T restores the tab's cwd, stack of 10).
+- Tabs: create, close, reorder (⌃⇧←/→ or drag: the tab lifts and follows the
+  pointer; Esc puts it back), select by number (⌘1–9, ⌘9 = last), reopen
+  closed (⇧⌘T restores the tab's cwd, stack of 10).
+- A fresh session shows a welcome list (split, palette, history, explorer,
+  settings, with their shortcuts) until its first command.
 - Panes: split right/down, directional focus (⌥⌘arrows), keyboard resize
-  (⌃⌘arrows), drag resize, zoom toggle (⇧⌘⏎), close (⌃⇧W/⌘W — last pane closes
-  the tab, last tab exits).
+  (⌃⌘arrows), drag resize, zoom toggle (⇧⌘⏎), close (⌃⇧W/⌘W or the title
+  bar's × — last pane closes the tab, last tab exits).
+- Pane title bars (split tabs): split, ⋮ and × on the focused or hovered
+  pane; drag one to move the pane beside another pane (on the side under the
+  pointer), swap it with one (the middle third), into another tab (hold to
+  open it and place the pane among its panes), or out into a new tab; the
+  shell keeps running and keeps its scrollback. The pane menu adds Maximize
+  pane and Move to new tab.
 - **Synchronized inputs** (⌥⌘I, tab context menu or Window menu): typing and
   submitting in one pane of a split tab goes to the other panes of that tab;
   the tab shows a sync marker while it is on. Input only reaches panes in the
@@ -240,7 +262,7 @@ ignored. Warp's own files drop in unchanged.
   commands and directories), with 16 KiB per command/directory and a bounded
   JSON read. Oversized or malformed saved transcripts are ignored.
 - **Vertical tabs** (`tab_layout = "vertical"`, Settings → Appearance, or
-  "Toggle vertical tabs"): a 220px rail lists every tab with its shell,
+  "Toggle vertical tabs"): a 220px rail lists every tab with its icon,
   title, directory and git branch, pane count, sync state, activity dot and
   color; click selects, × closes, dragging a row up or down reorders. When
   the tabs do not fit, the active one stays visible and `+N above` /
@@ -310,7 +332,7 @@ emits OSC 133 (blocks) and OSC 7 (cwd tracking).
 cursor shows while it is up. For a shell without integration, the placeholder leaves and the
 cursor shows 1.5 s after its first byte. Session restore
 respawns tabs at their saved cwds. The shell's history is imported once for
-the history palette, from the configured shell's own file: zsh
+the history pane and the palette's History mode, from the configured shell's own file: zsh
 (`$HISTFILE`, else `~/.zsh_history`; EXTENDED format, multiline entries,
 0x83 unmetafy), bash (`$HISTFILE`, else `~/.bash_history`; `#<epoch>`
 timestamp lines skipped) or fish (`$XDG_DATA_HOME/fish/fish_history`, else
@@ -457,15 +479,18 @@ else its directory) as a lazily expanded tree with ignored files hidden and
 git status colors. A folder that cannot be read shows the error (e.g.
 `Permission denied`); one with more than 2,000 entries shows the first
 2,000 in display order, then `… more entries not shown` (a folder is read
-no further than 100,000 entries, ignored ones included). A file opens in a read-only viewer over the pane area
+no further than 100,000 entries, ignored ones included). A file opens in a read-only viewer pane, the leftmost column of the tab
 (line numbers, keyword/string/comment highlighting, 4 MB limit, binary
-detection, ⌘F finds in the file); ⌥-click inserts its path into the command
+detection, ⌘F finds in the file; Markdown opens rendered, with a Rendered |
+Raw switch); ⌥-click inserts its path into the command
 line. Preview reads and
 highlighting run in the background. Only regular files are accepted, and
 the byte limit is enforced during reading, including when a file grows.
 
 ⇧⌘G opens code review: staged and unstaged changes (untracked included) as
-files, hunks and lines. Stage, unstage or revert a whole file or one hunk;
+file cards of hunks: line numbers, syntax colors, the changed characters of
+an edited line highlighted, and "N unmodified lines" bands that open the
+unchanged lines between hunks. Stage, unstage or revert a whole file or one hunk;
 revert asks first and only discards unstaged work. Hunk actions re-diff,
 match the hunk by its line ranges and content, and apply that same checked
 diff, so a stale panel never applies the wrong hunk. A hunk cut by the
@@ -495,7 +520,7 @@ The block of the `ssh` command itself ends when the remote prompt starts.
 ## Accessibility
 
 Shift draws every surface itself, so it publishes an AccessKit tree
-(`crates/shift-app/src/a11y.rs`) to VoiceOver, Orca and other screen readers:
+(`crates/shift-terminal/src/a11y.rs`) to VoiceOver, Orca and other screen readers:
 
 - **Tabs** as a tab list (selected state; activating one switches tabs).
 - **Panes** as groups labelled with their directory and running job, each

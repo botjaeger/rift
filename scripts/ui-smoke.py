@@ -327,6 +327,112 @@ geo_steps = [
     "type a",
     "wait 200",
     f"dump {geo}/hints-picked.txt",
+    "key escape",
+    # → at the end of the line takes the whole history ghost
+    "type seq 1",
+    "wait 800",
+    "key right",
+    "wait 200",
+    f"dump {geo}/ghost-right.txt",
+    "key cmd+a",
+    "key backspace",
+    # a split pane's title bar drags the pane: onto the bottom half of its
+    # neighbour, then onto the empty tab strip (a tab of its own)
+    "key cmd+d",
+    "wait 1500",
+    f"dump {geo}/pane-split.txt",
+    "press 200 56",
+    "move 210 58",
+    "move 750 650",
+    "wait 200",
+    f"dump {geo}/pane-dragging.txt",
+    "release 750 650",
+    "wait 300",
+    f"dump {geo}/pane-below.txt",
+    "press 300 56",
+    "move 310 58",
+    "move 700 20",
+    "release 700 20",
+    "wait 300",
+    f"dump {geo}/pane-tab.txt",
+    # a dragged tab lifts and reorders live; Esc puts it back where it was
+    "press 180 21",
+    "move 186 21",
+    "move 600 21",
+    "wait 100",
+    f"dump {geo}/tabs-dragging.txt",
+    "key escape",
+    "release 600 21",
+    "wait 200",
+    f"dump {geo}/tabs-esc.txt",
+    # a pane header dropped on the middle third of its neighbour swaps them
+    "key cmd+d",
+    "wait 1500",
+    f"dump {geo}/swap-before.txt",
+    "press 200 56",
+    "move 210 58",
+    "move 750 380",
+    "wait 100",
+    "release 750 380",
+    "wait 300",
+    f"dump {geo}/swap-after.txt",
+    # ⌃R: the history pane filters by the command line; ⌃R again changes scope
+    "type echo hist1\\n",
+    "wait 500",
+    "key ctrl+r",
+    "type hist",
+    "wait 200",
+    f"dump {geo}/history-open.txt",
+    "key ctrl+r",
+    f"dump {geo}/history-scope.txt",
+    "key escape",
+    "key cmd+a",
+    "key backspace",
+    # palette: a typed prefix switches mode, ⇥ moves to the next one
+    "key cmd+p",
+    "type #",
+    "wait 100",
+    f"dump {geo}/palette-prefix.txt",
+    "key tab",
+    f"dump {geo}/palette-tab.txt",
+    "key escape",
+    # Settings is a tab: typing searches; a shell tab hides it; Esc closes it
+    "key cmd+,",
+    "wait 200",
+    "type curs",
+    f"dump {geo}/settings-search.txt",
+    "key escape",
+    "click 180 21",
+    "wait 200",
+    f"dump {geo}/settings-hidden.txt",
+    "key cmd+,",
+    "wait 200",
+    "key escape",
+    f"dump {geo}/settings-closed.txt",
+    # a shell tab dragged past the Settings tab never swaps with it (panicked)
+    "key cmd+,",
+    "wait 200",
+    "click 180 21",
+    "wait 200",
+    "press 180 21",
+    "move 190 21",
+    "move 700 21",
+    "move 950 21",
+    "release 950 21",
+    "wait 200",
+    f"dump {geo}/settings-drag.txt",
+    "key cmd+,",
+    "key escape",
+    # ⏎ with no history match runs the typed line; a click outside closes it
+    "key ctrl+r",
+    "type nomatchqq",
+    "key enter",
+    "wait 500",
+    f"dump {geo}/history-fallthrough.txt",
+    "key ctrl+r",
+    "wait 100",
+    "click 500 200",
+    f"dump {geo}/history-click.txt",
     # the review panel auto-hides in a narrow window: button unlit, toast
     "resize 600 500",
     "wait 300",
@@ -395,6 +501,41 @@ sticky = gstate("hints-sticky")
 assert re.search(r'hints=\["block a \d+"\]', sticky) and "No links" not in sticky, sticky[:600]
 assert "selected_block=None" in sticky
 assert "selected_block=Some(" in gstate("hints-picked"), gstate("hints-picked")[:900]
+assert 'editor="seq 1 60"' in gstate("ghost-right"), gstate("ghost-right")[:900]
+split = re.search(r"layout=Split \{ axis: Horizontal, ratio: [\d.]+, first: Leaf\((\d+)\), "
+                  r"second: Leaf\((\d+)\) \}", gstate("pane-split"))
+assert split, gstate("pane-split")[:900]
+left, right = split[1], split[2]
+assert "mouse_cursor=Grabbing" in gstate("pane-dragging"), gstate("pane-dragging")[:300]
+assert re.search(rf"layout=Split \{{ axis: Vertical, ratio: [\d.]+, first: Leaf\({right}\), "
+                 rf"second: Leaf\({left}\) \}}", gstate("pane-below")), gstate("pane-below")[:900]
+moved = gstate("pane-tab")
+assert "tabs=2 active=1" in moved, moved[:300]
+assert f"layout=Leaf({right})" in moved and f"layout=Leaf({left})" in moved, moved[:900]
+def tab_leaves(name):
+    return re.findall(r"^tab \d+ .*?\n  layout=(.*)$", gstate(name), re.M)
+
+assert tab_leaves("tabs-dragging") != tab_leaves("pane-tab"), gstate("tabs-dragging")[:600]
+assert tab_leaves("tabs-esc") == tab_leaves("pane-tab"), gstate("tabs-esc")[:600]
+swap = re.search(r"layout=Split \{ axis: Horizontal, ratio: [\d.]+, first: Leaf\((\d+)\), "
+                 r"second: Leaf\((\d+)\) \}", gstate("swap-before"))
+assert swap, gstate("swap-before")[:900]
+assert re.search(rf"layout=Split \{{ axis: Horizontal, ratio: [\d.]+, first: Leaf\({swap[2]}\), "
+                 rf"second: Leaf\({swap[1]}\) \}}", gstate("swap-after")), gstate("swap-after")[:900]
+history = gstate("history-open")
+assert 'history=true scope=All' in history and 'history_selected=Some("echo hist1")' in history, \
+    history[:1200]
+assert "history=true scope=Failed" in gstate("history-scope"), gstate("history-scope")[:1200]
+assert "palette=true mode=History" in gstate("palette-prefix"), gstate("palette-prefix")[:300]
+assert "palette=true mode=Workflows" in gstate("palette-tab"), gstate("palette-tab")[:300]
+assert 'settings=true' in gstate("settings-search") and \
+    'settings_tab=true settings_query="curs"' in gstate("settings-search"), gstate("settings-search")[:1200]
+assert "settings=false" in gstate("settings-hidden") and \
+    "settings_tab=true" in gstate("settings-hidden"), gstate("settings-hidden")[:1200]
+assert "settings_tab=false" in gstate("settings-closed"), gstate("settings-closed")[:1200]
+assert "settings_tab=true" in gstate("settings-drag"), gstate("settings-drag")[:1200]
+assert 'cmd="nomatchqq"' in gstate("history-fallthrough"), gstate("history-fallthrough")[:1500]
+assert "history=false" in gstate("history-click"), gstate("history-click")[:1200]
 narrow, wide = gstate("review-narrow"), gstate("review-wide")
 assert "review=true" in narrow and "shown=false" in narrow, narrow
 assert 'toast=Some("Window too narrow for the review panel' in narrow, narrow
@@ -469,6 +610,65 @@ assert 'ListItem "printf NO_NEWLINE" desc="succeeded' in estate("partial") and \
     'value="NO_NEWLINE"' in estate("partial"), estate("partial")
 child = estate("child")
 assert 'cmd="echo INNER_OK" exit=Some(0)' in child and "editor_active=true" in child, child
+
+# review diff: a file card expands into hunks; a gap row opens the
+# unmodified lines between hunks (all of a short gap at once)
+rv = scratch / "review"
+(rv / "repo").mkdir(parents=True)
+for d in ("cfg", "data"):
+    (rv / d).mkdir()
+git = ["git", "-C", str(rv / "repo"), "-c", "user.name=t", "-c", "user.email=t@e.x"]
+src = [f"    let v{n} = compute({n});" for n in range(1, 81)]
+(rv / "repo" / "main.rs").write_text("\n".join(["fn main() {", *src, "}"]) + "\n")
+subprocess.run(["git", "init", "-q", str(rv / "repo")], check=True)
+subprocess.run([*git, "add", "-A"], check=True)
+subprocess.run([*git, "commit", "-qm", "init"], check=True)
+src[4] = "    let v5 = compute_fast(5);"
+src[39] = "    let v40 = recompute(40);"
+(rv / "repo" / "main.rs").write_text("\n".join(["fn main() {", *src, "}"]) + "\n")
+rv_steps = [
+    # hover repaints when the pointer crosses into another welcome row, and
+    # only then (rows at y 240 and 278 in a 1000×700 window)
+    "resize 1000 700",
+    "wait_prompt",
+    "wait 300",
+    "move 500 400",
+    f"dump {rv}/hover0.txt",
+    "move 500 240",
+    "move 520 241",
+    f"dump {rv}/hover1.txt",
+    "move 500 278",
+    f"dump {rv}/hover2.txt",
+    "resize 1400 900",
+    "wait 300",
+    f"type cd {rv / 'repo'}\\n",
+    "wait 500",
+    "key shift+cmd+g",
+    "wait 800",
+    "click 1000 131",
+    "wait 200",
+    f"dump {rv}/expanded.txt",
+    # rows: header 32, gap 24, 8 lines of 22 → the gap above hunk 2
+    "click 1000 359",
+    "wait 200",
+    f"dump {rv}/revealed.txt",
+    "quit",
+]
+(rv / "rv.shift").write_text("\n".join(rv_steps) + "\n")
+with (rv / "app.log").open("w") as log:
+    rc = subprocess.run([str(binary), "--script", str(rv / "rv.shift"), "--headless"],
+                        env=dict(env, XDG_CONFIG_HOME=str(rv / "cfg"),
+                                 XDG_DATA_HOME=str(rv / "data")),
+                        stdout=log, stderr=log, timeout=120).returncode
+assert rc == 0, died("review run failed", rv / "app.log")
+hovers = [int(re.search(r"hover_repaints=(\d+)", (rv / f"hover{i}.txt").read_text())[1])
+          for i in range(3)]
+assert hovers[1] == hovers[0] + 1 and hovers[2] == hovers[1] + 1, hovers
+expanded = (rv / "expanded.txt").read_text()
+assert "expanded=1 revealed=0" in expanded, expanded
+revealed = (rv / "revealed.txt").read_text()
+# lines 10..37 sit between the hunks around lines 6 and 41
+assert "expanded=1 revealed=28" in revealed, revealed
 
 for client in clients:
     client.close()

@@ -179,7 +179,7 @@ The desktop implementation will need:
 
 Keep networking and protocol logic outside the main application coordinator. A
 dedicated crate, tentatively `shift-remote`, can own protocol types, framing,
-authentication, synchronization, and transport adapters while `shift-app`
+authentication, synchronization, and transport adapters while `shift-terminal`
 bridges those messages to application actions.
 
 ## Delivery phases

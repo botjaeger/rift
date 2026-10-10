@@ -3,20 +3,24 @@ use shift_renderer::glyphon::Weight;
 use shift_renderer::{FONT_SANS, Layer, TextEngine, mono_family};
 
 use crate::state::{ClickTarget, Hit};
+use crate::views::icons::{self, Icon};
 
 pub const TAB_BAR_H: f32 = 42.0;
 /// Where the first tab starts (room for the traffic lights).
 const TABS_X: f32 = 78.0;
+/// Centre of the first traffic light and the distance between centres
+/// (native buttons on macOS are moved there, Linux draws its own).
+pub const TRAFFIC_X: f32 = 20.0;
+pub const TRAFFIC_GAP: f32 = 20.0;
 /// Narrowest a tab gets before titles are elided to nothing.
-const MIN_TAB_W: f32 = 96.0;
+const MIN_TAB_W: f32 = 120.0;
 /// Width of the `‹N` / `N›` chips for tabs scrolled out of the strip.
 const OVERFLOW_CHIP_W: f32 = 34.0;
 
 pub struct TabInfo {
     pub title: String,
-    /// Pane count; > 1 shows the design-02 "N panes" pill after the title.
+    /// Pane count; > 1 shows the count chip after the title.
     pub panes: usize,
-    pub shell_label: String,
     pub activity: bool,
     /// Kind of the tab's newest unread notification (shown in place of the
     /// activity dot).
@@ -31,6 +35,8 @@ pub struct TabInfo {
     pub editing_selected: bool,
     /// Directory and git branch of the tab's focused pane (vertical rail).
     pub subtitle: String,
+    /// The Settings tab (a page, not a shell): settings icon, × closes it.
+    pub settings: bool,
 }
 
 fn make_text(
@@ -80,34 +86,79 @@ pub struct PanelButtons {
     pub unread: usize,
 }
 
-/// A window outline with its left column filled (sidebar toggle).
-fn sidebar_icon(layer: &mut Layer, theme: &Theme, r: [f32; 4], color: Color) {
-    let (iw, ih) = (16.0, 13.0);
-    let (ix, iy) = (r[0] + (r[2] - iw) / 2.0, r[1] + (r[3] - ih) / 2.0);
-    layer.bordered(
-        [ix, iy],
-        [iw, ih],
-        theme.bg_chrome.with_alpha(0.0),
+/// A 26 px chrome icon button: hover lift, accent tint while `on`.
+#[allow(clippy::too_many_arguments)]
+fn icon_button(
+    layer: &mut Layer,
+    theme: &Theme,
+    r: [f32; 4],
+    icon: Icon,
+    size: f32,
+    on: bool,
+    hover: bool,
+) {
+    if on {
+        layer.rect(
+            [r[0], r[1]],
+            [r[2], r[3]],
+            theme.accent.with_alpha(0.14),
+            4.0,
+        );
+    } else if hover {
+        layer.rect([r[0], r[1]], [r[2], r[3]], lift(theme, 0.08), 4.0);
+    }
+    let color = if on {
+        theme.accent
+    } else if hover {
+        theme.text_ui
+    } else {
+        theme.text_dim
+    };
+    icons::draw(
+        layer,
+        icon,
+        [r[0] + r[2] / 2.0, r[1] + r[3] / 2.0],
+        size,
         color,
-        2.5,
-        1.3,
     );
-    layer.rect([ix, iy], [5.5, ih], color, 2.0);
 }
 
-/// Draw the 42px tab strip (design 01) and report click targets.
+/// White on dark themes, black on light ones, at `alpha` (hover lifts).
+fn lift(theme: &Theme, alpha: f32) -> Color {
+    if theme.is_light() {
+        Color::BLACK.with_alpha(alpha)
+    } else {
+        Color::WHITE.with_alpha(alpha)
+    }
+}
+
+fn inside(r: [f32; 4], p: Option<(f32, f32)>) -> bool {
+    p.is_some_and(|(x, y)| x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3])
+}
+
+/// The tab being dragged: its index and the pointer-following left edge.
+#[derive(Clone, Copy, Debug)]
+pub struct Lifted {
+    pub index: usize,
+    pub x: f32,
+}
+
+/// Draw the 42 px tab strip and report click targets. `mouse` drives hover
+/// states; a `lifted` tab is drawn on `over` (a layer above the strip) so
+/// it floats over its neighbours, while its slot shows the drop caret.
 #[allow(clippy::too_many_arguments)]
 pub fn render(
     layer: &mut Layer,
+    over: &mut Layer,
     engine: &mut TextEngine,
     theme: &Theme,
     tabs: &[TabInfo],
-    hint: &str,
-    hint_pill: bool,
     active: usize,
     w: f32,
     blink_on: bool,
     panels: PanelButtons,
+    mouse: Option<(f32, f32)>,
+    lifted: Option<Lifted>,
     hits: &mut Vec<Hit>,
 ) {
     layer.rect(
@@ -121,26 +172,17 @@ pub fn render(
     // Warp layout: the sidebar (file explorer) toggle right after the
     // traffic lights, the code review button at the far right showing the
     // working tree's `+added −removed`
-    let size = 28.0;
+    let size = 26.0;
     let by = (TAB_BAR_H - size) / 2.0;
     let explorer = [TABS_X + 2.0, by, size, size];
-    if panels.explorer_open {
-        layer.rect(
-            [explorer[0], by],
-            [size, size],
-            theme.accent.with_alpha(0.14),
-            6.0,
-        );
-    }
-    sidebar_icon(
+    icon_button(
         layer,
         theme,
         explorer,
-        if panels.explorer_open {
-            theme.accent
-        } else {
-            theme.text_dim
-        },
+        Icon::Sidebar,
+        16.0,
+        panels.explorer_open,
+        inside(explorer, mouse),
     );
     hits.push(Hit {
         rect: explorer,
@@ -148,51 +190,50 @@ pub fn render(
     });
     let tabs_x = explorer[0] + size + 8.0;
 
-    let review_color = if panels.review_open {
-        theme.accent
-    } else {
-        theme.text_dim
-    };
     let counts = panels
         .diff
         .filter(|(a, d)| a + d > 0)
         .map(|(a, d)| (format!("+{a}"), format!("−{d}")));
     let review_w = match &counts {
         Some((a, d)) => {
-            14.0 + 12.0
+            16.0 + engine.measure(a, 12.0, mono_family(), Weight::MEDIUM)
                 + 6.0
-                + engine.measure(a, 11.5, mono_family(), Weight::MEDIUM)
-                + 6.0
-                + engine.measure(d, 11.5, mono_family(), Weight::MEDIUM)
-                + 10.0
+                + engine.measure(d, 12.0, mono_family(), Weight::MEDIUM)
         }
         None => size,
     };
     let review = [w - 10.0 - review_w, by, review_w, size];
+    let review_hover = inside(review, mouse);
     if panels.review_open {
         layer.rect(
             [review[0], by],
             [review_w, size],
             theme.accent.with_alpha(0.14),
-            6.0,
+            4.0,
         );
+    } else if review_hover {
+        layer.rect([review[0], by], [review_w, size], lift(theme, 0.08), 4.0);
     }
-    // ± glyph as quads (crisp at any scale): alone when the tree is clean,
-    // followed by the counts otherwise
-    let gx = match &counts {
-        Some(_) => review[0] + 10.0,
-        None => review[0] + (size - 12.0) / 2.0,
-    };
-    let gy = by + 8.0;
-    layer.rect([gx + 5.25, gy], [1.5, 8.0], review_color, 0.5);
-    layer.rect([gx + 2.0, gy + 3.25], [8.0, 1.5], review_color, 0.5);
-    layer.rect([gx + 2.0, gy + 10.5], [8.0, 1.5], review_color, 0.5);
-    if let Some((a, d)) = &counts {
-        let mut tx = gx + 12.0 + 6.0;
-        for (s, c) in [(a, theme.success), (d, theme.error)] {
-            let b = make_text(engine, s, 11.5, mono_family(), Weight::MEDIUM);
-            layer.text(b, tx, (TAB_BAR_H - 15.0) / 2.0, c);
-            tx += engine.measure(s, 11.5, mono_family(), Weight::MEDIUM) + 6.0;
+    match &counts {
+        Some((a, d)) => {
+            let mut tx = review[0] + 8.0;
+            for (s, c) in [(a, theme.success), (d, theme.error)] {
+                let b = make_text(engine, s, 12.0, mono_family(), Weight::MEDIUM);
+                layer.text(b, tx, (TAB_BAR_H - 15.6) / 2.0, c);
+                tx += engine.measure(s, 12.0, mono_family(), Weight::MEDIUM) + 6.0;
+            }
+        }
+        None => {
+            // ± as quads (crisp at any scale) when the tree is clean
+            let color = if panels.review_open {
+                theme.accent
+            } else {
+                theme.text_dim
+            };
+            let (gx, gy) = (review[0] + (size - 12.0) / 2.0, by + 7.0);
+            layer.rect([gx + 5.25, gy], [1.5, 8.0], color, 0.5);
+            layer.rect([gx + 2.0, gy + 3.25], [8.0, 1.5], color, 0.5);
+            layer.rect([gx + 2.0, gy + 10.5], [8.0, 1.5], color, 0.5);
         }
     }
     hits.push(Hit {
@@ -201,27 +242,19 @@ pub fn render(
     });
 
     // notifications inbox, left of the review button (Warp layout)
-    let inbox = [review[0] - 6.0 - size, by, size, size];
-    if panels.notifications_open {
-        layer.rect(
-            [inbox[0], by],
-            [size, size],
-            Color::WHITE.with_alpha(0.12),
-            6.0,
-        );
-    }
-    crate::views::notifications::inbox_icon(
+    let inbox = [review[0] - 4.0 - size, by, size, size];
+    icon_button(
         layer,
+        theme,
         inbox,
-        if panels.notifications_open {
-            theme.text_bright
-        } else {
-            theme.text_dim
-        },
+        Icon::Inbox,
+        16.0,
+        panels.notifications_open,
+        inside(inbox, mouse),
     );
     if panels.unread > 0 {
         let c = [inbox[0] + size - 7.0, by + 7.0];
-        layer.circle(c, 8.5, theme.ground(theme.bg_chrome));
+        layer.circle(c, 9.0, theme.ground(theme.bg_chrome));
         layer.circle(c, 6.0, theme.accent);
     }
     hits.push(Hit {
@@ -235,7 +268,7 @@ pub fn render(
     #[cfg(not(target_os = "macos"))]
     {
         for (i, c) in ["#ff5f57", "#febc2e", "#28c840"].iter().enumerate() {
-            let cx = 12.0 + 6.0 + i as f32 * 20.0;
+            let cx = TRAFFIC_X + i as f32 * TRAFFIC_GAP;
             layer.circle([cx, TAB_BAR_H / 2.0], 12.0, Color::hex(c).unwrap());
             hits.push(Hit {
                 rect: [cx - 8.0, TAB_BAR_H / 2.0 - 8.0, 16.0, 16.0],
@@ -244,56 +277,43 @@ pub fn render(
         }
     }
 
-    // right: palette / split hint (dropped when the strip gets crowded)
-    let hint_w = engine.measure(hint, 11.5, mono_family(), Weight::NORMAL)
-        + if hint_pill { 14.0 } else { 0.0 };
-
     // natural widths, then shrink evenly when the tabs overflow the strip
     let natural: Vec<f32> = tabs
         .iter()
-        .enumerate()
-        .map(|(i, tab)| {
-            let shell_w = engine.measure(&tab.shell_label, 12.0, mono_family(), Weight::NORMAL);
+        .map(|tab| {
             let title = tab.editing.as_deref().unwrap_or(&tab.title);
             let title_w = engine
                 .measure(title, 12.5, FONT_SANS, Weight::NORMAL)
                 .max(if tab.editing.is_some() { 90.0 } else { 0.0 });
-            let dot_w =
-                if (tab.activity && i != active) || tab.color.is_some() || tab.alert.is_some() {
-                    15.0
-                } else {
-                    0.0
-                };
-            let sync_w = if tab.sync { 20.0 } else { 0.0 };
-            let panes_w = panes_label(tab)
-                .map(|l| engine.measure(&l, 11.0, FONT_SANS, Weight::NORMAL) + 12.0 + 6.0)
+            let chip_w = chip_label(tab)
+                .map(|l| engine.measure(&l, 10.5, FONT_SANS, Weight::MEDIUM) + 12.0 + 6.0)
                 .unwrap_or(0.0);
-            (16.0 + dot_w + shell_w + 8.0 + title_w + panes_w + sync_w + 10.0 + 8.0 + 16.0)
-                .min(300.0)
+            let icon_w = if tab.settings || tab.sync {
+                14.0 + 8.0
+            } else {
+                0.0
+            };
+            (TAB_PAD_L + icon_w + title_w + chip_w + 8.0 + CLOSE_BOX + 8.0).clamp(TAB_W, MAX_TAB_W)
         })
         .collect();
-    let avail = (w - tabs_x - 40.0 - hint_w - 28.0).max(MIN_TAB_W);
+    let avail = (w - tabs_x - 40.0).max(MIN_TAB_W);
     let total: f32 = natural.iter().sum();
     let n = tabs.len();
     // visible window `start..end`; everything outside it collapses into the
     // `‹N` / `N›` chips so the active tab always stays on screen
     let (mut start, mut end) = (0, n);
-    let (widths, show_hint): (Vec<f32>, bool) = if total <= avail {
-        (natural, true)
+    let widths: Vec<f32> = if total <= avail {
+        natural
+    } else if MIN_TAB_W * n as f32 <= avail {
+        let each = avail / n.max(1) as f32;
+        natural.iter().map(|x| x.min(each)).collect()
     } else {
-        // without the hint first, then squeeze, then scroll around the active tab
-        let avail = (w - tabs_x - 40.0).max(MIN_TAB_W);
-        if MIN_TAB_W * n as f32 <= avail {
-            let each = avail / n.max(1) as f32;
-            (natural.iter().map(|x| x.min(each)).collect(), false)
-        } else {
-            let k = (((avail - 2.0 * OVERFLOW_CHIP_W) / MIN_TAB_W) as usize).clamp(1, n);
-            start = active.min(n - 1).saturating_sub(k / 2).min(n - k);
-            end = start + k;
-            let chips = (start > 0) as u8 as f32 + (end < n) as u8 as f32;
-            let each = (avail - chips * OVERFLOW_CHIP_W) / k as f32;
-            (natural.iter().map(|x| x.min(each)).collect(), false)
-        }
+        let k = (((avail - 2.0 * OVERFLOW_CHIP_W) / MIN_TAB_W) as usize).clamp(1, n);
+        start = active.min(n - 1).saturating_sub(k / 2).min(n - k);
+        end = start + k;
+        let chips = (start > 0) as u8 as f32 + (end < n) as u8 as f32;
+        let each = (avail - chips * OVERFLOW_CHIP_W) / k as f32;
+        natural.iter().map(|x| x.min(each)).collect()
     };
 
     let mut x = tabs_x;
@@ -303,8 +323,8 @@ pub fn render(
                 x: f32,
                 label: String,
                 to: usize| {
-        let tw = engine.measure(&label, 11.5, mono_family(), Weight::NORMAL);
-        let b = make_text(engine, &label, 11.5, mono_family(), Weight::NORMAL);
+        let tw = engine.measure(&label, 11.5, FONT_SANS, Weight::MEDIUM);
+        let b = make_text(engine, &label, 11.5, FONT_SANS, Weight::MEDIUM);
         layer.text(
             b,
             x + (OVERFLOW_CHIP_W - tw) / 2.0,
@@ -317,225 +337,252 @@ pub fn render(
         });
     };
     if start > 0 {
-        chip(layer, engine, hits, x, format!("‹{start}"), start - 1);
+        chip(layer, engine, hits, x, format!("‹ {start}"), start - 1);
         x += OVERFLOW_CHIP_W;
     }
     for (i, tab) in tabs.iter().enumerate().skip(start).take(end - start) {
-        let is_active = i == active;
         let tab_w = widths[i];
-
-        if is_active {
-            // gradient hint + 2px underline (the tab color wins)
-            layer.rect(
-                [x, 0.0],
-                [tab_w, TAB_BAR_H],
-                tab.color.unwrap_or(theme.accent).with_alpha(0.07),
-                0.0,
-            );
-        }
-        match (tab.color, is_active) {
-            (Some(c), _) => layer.rect([x, TAB_BAR_H - 2.0], [tab_w, 2.0], c, 0.0),
-            (None, true) => layer.rect([x, TAB_BAR_H - 2.0], [tab_w, 2.0], theme.accent, 0.0),
-            _ => {}
-        }
-
-        let mut cx = x + 16.0;
-        let text_color = if is_active {
-            theme.text_ui
-        } else {
-            theme.text_dim
-        };
-
-        if let Some(kind) = tab.alert {
-            crate::views::notifications::tab_badge(layer, theme, kind, cx + 3.5, TAB_BAR_H / 2.0);
-            cx += 15.0;
-        } else if tab.activity && !is_active {
-            layer.circle([cx + 3.5, TAB_BAR_H / 2.0], 7.0, theme.success);
-            cx += 15.0;
-        } else if let Some(c) = tab.color {
-            layer.circle([cx + 3.5, TAB_BAR_H / 2.0], 8.0, c);
-            cx += 15.0;
-        }
-
-        let shell_w = engine.measure(&tab.shell_label, 12.0, mono_family(), Weight::NORMAL);
-        let close_x = x + tab_w - 16.0 - 8.0;
-        let room = (close_x - 10.0 - (cx + shell_w + 8.0)).max(0.0);
-        if room > 0.0 || tab.editing.is_some() {
-            let shell_buf = make_text(
+        let slot = [x, 0.0, tab_w, TAB_BAR_H];
+        let lift_x = lifted
+            .filter(|l| l.index == i)
+            .map(|l| l.x.clamp(tabs_x, (w - tab_w).max(tabs_x)));
+        let hovered = lifted.is_none() && inside(slot, mouse);
+        match lift_x {
+            Some(lx) => {
+                // the slot it will land in: an empty well with a caret
+                layer.rect([x, 0.0], [tab_w, TAB_BAR_H - 1.0], lift(theme, 0.02), 0.0);
+                layer.rect([x, 6.0], [2.0, TAB_BAR_H - 12.0], theme.accent, 1.0);
+                draw_tab(
+                    over,
+                    engine,
+                    theme,
+                    tab,
+                    [lx, -4.0, tab_w, TAB_BAR_H],
+                    i == active,
+                    true,
+                    true,
+                    blink_on,
+                );
+            }
+            None => draw_tab(
+                layer,
                 engine,
-                &tab.shell_label,
-                12.0,
-                mono_family(),
-                Weight::NORMAL,
-            );
-            layer.text(shell_buf, cx, (TAB_BAR_H - 16.0) / 2.0, theme.accent);
-            cx += shell_w + 8.0;
+                theme,
+                tab,
+                slot,
+                i == active,
+                hovered,
+                false,
+                blink_on,
+            ),
         }
-
-        if let Some(edit) = &tab.editing {
-            // inline rename field
-            let fw = (close_x - 6.0 - cx).max(60.0);
-            layer.bordered(
-                [cx - 5.0, 9.0],
-                [fw, TAB_BAR_H - 18.0],
-                theme.bg,
-                theme.accent,
-                5.0,
-                1.0,
-            );
-            let tw = engine.measure(edit, 12.5, FONT_SANS, Weight::NORMAL);
-            if tab.editing_selected && !edit.is_empty() {
-                layer.rect(
-                    [cx - 1.0, 12.0],
-                    [tw + 2.0, TAB_BAR_H - 24.0],
-                    theme.selection,
-                    2.0,
-                );
-            }
-            if !edit.is_empty() {
-                let b = make_text(engine, edit, 12.5, FONT_SANS, Weight::NORMAL);
-                layer.text(b, cx, (TAB_BAR_H - 17.0) / 2.0, theme.text_bright);
-            }
-            if blink_on {
-                layer.rect(
-                    [cx + tw + 1.0, 13.0],
-                    [1.5, TAB_BAR_H - 26.0],
-                    theme.accent,
-                    0.0,
-                );
-            }
-        } else {
-            let sync_w = if tab.sync { 20.0 } else { 0.0 };
-            let panes = panes_label(tab);
-            let panes_w = panes
-                .as_ref()
-                .map(|l| engine.measure(l, 11.0, FONT_SANS, Weight::NORMAL) + 12.0)
-                .unwrap_or(0.0);
-            let title = elide(
-                engine,
-                &tab.title,
-                12.5,
-                close_x - 10.0 - sync_w - panes_w - cx,
-            );
-            if !title.is_empty() {
-                let title_w = engine.measure(&title, 12.5, FONT_SANS, Weight::NORMAL);
-                let title_buf = make_text(engine, &title, 12.5, FONT_SANS, Weight::NORMAL);
-                layer.text(title_buf, cx, (TAB_BAR_H - 17.0) / 2.0, text_color);
-                cx += title_w + 6.0;
-            }
-            // "2 panes" pill (design 02: 11px muted on a faint lift)
-            if let Some(label) = panes
-                && cx + panes_w <= close_x - 6.0
-            {
-                let lift = if theme.is_light() {
-                    Color::BLACK
-                } else {
-                    Color::WHITE
-                };
-                layer.rect(
-                    [cx, (TAB_BAR_H - 17.0) / 2.0],
-                    [panes_w, 17.0],
-                    lift.with_alpha(0.06),
-                    4.0,
-                );
-                let b = make_text(engine, &label, 11.0, FONT_SANS, Weight::NORMAL);
-                layer.text(b, cx + 6.0, (TAB_BAR_H - 14.5) / 2.0, theme.text_muted);
-                cx += panes_w + 6.0;
-            }
-            if tab.sync {
-                // two linked rings: inputs are broadcast across panes
-                let y = TAB_BAR_H / 2.0 - 3.5;
-                for dx in [0.0, 5.0] {
-                    layer.bordered(
-                        [cx + dx, y],
-                        [8.0, 7.0],
-                        Color::TRANSPARENT,
-                        theme.warning,
-                        3.5,
-                        1.3,
-                    );
-                }
-            }
+        let close = close_rect(slot);
+        if i == active || hovered || tab.editing.is_some() {
+            hits.push(Hit {
+                rect: close,
+                target: close_target(tab, i),
+            });
         }
-
-        // close ×
-        let close_color = if is_active {
-            theme.text_muted
-        } else {
-            theme.text_muted.with_alpha(0.7)
-        };
-        let close_buf = make_text(engine, "×", 14.0, FONT_SANS, Weight::NORMAL);
-        layer.text(close_buf, close_x, (TAB_BAR_H - 19.0) / 2.0, close_color);
         hits.push(Hit {
-            rect: [close_x - 4.0, 6.0, 18.0, TAB_BAR_H - 12.0],
-            target: ClickTarget::TabClose(i),
-        });
-
-        hits.push(Hit {
-            rect: [x, 0.0, tab_w - 26.0, TAB_BAR_H],
+            rect: slot,
             target: ClickTarget::TabSelect(i),
         });
-
-        // hairline between inactive neighbours
-        if !is_active && i + 1 < end && i + 1 != active {
-            layer.rect(
-                [x + tab_w - 0.5, 12.0],
-                [1.0, TAB_BAR_H - 24.0],
-                theme.border,
-                0.0,
-            );
-        }
-
         x += tab_w;
     }
 
     if end < n {
-        chip(layer, engine, hits, x, format!("{}›", n - end), end);
+        chip(layer, engine, hits, x, format!("{} ›", n - end), end);
         x += OVERFLOW_CHIP_W;
     }
 
     // + new tab
-    let plus_buf = make_text(engine, "+", 17.0, FONT_SANS, Weight::NORMAL);
-    layer.text(plus_buf, x + 12.0, (TAB_BAR_H - 22.0) / 2.0, theme.text_dim);
+    let plus = [x + 6.0, by, size, size];
+    icon_button(
+        layer,
+        theme,
+        plus,
+        Icon::Plus,
+        14.0,
+        false,
+        inside(plus, mouse),
+    );
     hits.push(Hit {
-        rect: [x + 2.0, 6.0, 28.0, TAB_BAR_H - 12.0],
+        rect: plus,
         target: ClickTarget::TabNew,
     });
 
-    // empty strip drags the window (Linux has no native titlebar)
-    #[cfg(not(target_os = "macos"))]
+    // the empty strip drags the window (macOS: the native titlebar ends at
+    // the traffic lights; Linux has none)
     hits.push(Hit {
-        rect: [x + 34.0, 0.0, (w - x - 140.0).max(0.0), TAB_BAR_H],
+        rect: [x + 34.0, 0.0, (w - x - 34.0).max(0.0), TAB_BAR_H],
         target: ClickTarget::WindowDrag,
     });
+}
 
-    if show_hint && !hint.is_empty() {
-        let hx = w - hint_w - 14.0;
-        if hint_pill {
-            let lift = if theme.is_light() {
-                Color::BLACK
-            } else {
-                Color::WHITE
-            };
+/// Left padding, the close button box and the tab width bounds.
+const TAB_PAD_L: f32 = 14.0;
+const CLOSE_BOX: f32 = 20.0;
+const TAB_W: f32 = 150.0;
+const MAX_TAB_W: f32 = 240.0;
+
+fn close_rect(slot: [f32; 4]) -> [f32; 4] {
+    [
+        slot[0] + slot[2] - 8.0 - CLOSE_BOX,
+        (TAB_BAR_H - CLOSE_BOX) / 2.0,
+        CLOSE_BOX,
+        CLOSE_BOX,
+    ]
+}
+
+/// One tab: terminal (or sync) icon, title, pane count chip, then × when
+/// active or hovered, else its alert or activity dot.
+#[allow(clippy::too_many_arguments)]
+fn draw_tab(
+    layer: &mut Layer,
+    engine: &mut TextEngine,
+    theme: &Theme,
+    tab: &TabInfo,
+    r: [f32; 4],
+    is_active: bool,
+    hovered: bool,
+    floating: bool,
+    blink_on: bool,
+) {
+    let [x, y, tw, th] = r;
+    let mid = y + th / 2.0;
+    if floating {
+        layer.shadow([x, y], [tw, th], Color::BLACK.with_alpha(0.55), 0.0, 10.0);
+        layer.bordered(
+            [x, y],
+            [tw, th],
+            theme.ground(theme.bg),
+            lift(theme, 0.12),
+            0.0,
+            1.0,
+        );
+    } else if is_active {
+        // joins the pane below: covers the strip's bottom hairline
+        layer.rect([x, y], [tw, th], theme.ground(theme.bg), 0.0);
+    } else if hovered {
+        layer.rect([x, y], [tw, th - 1.0], lift(theme, 0.03), 0.0);
+    }
+    // top edge: accent on the active tab, the tab color on any colored one
+    match (tab.color, is_active) {
+        (Some(c), _) => layer.rect([x, y], [tw, 2.0], c, 0.0),
+        (None, true) => layer.rect([x, y], [tw, 2.0], theme.accent, 0.0),
+        _ => {}
+    }
+    if !floating {
+        // both edges: the left one lands on the previous tab's right edge,
+        // and gives the first tab a left edge against the sidebar button
+        layer.rect([x - 1.0, y], [1.0, th - 1.0], theme.border, 0.0);
+        layer.rect([x + tw - 1.0, y], [1.0, th - 1.0], theme.border, 0.0);
+    }
+
+    let text_color = if is_active || hovered {
+        theme.text_ui
+    } else {
+        theme.text_dim
+    };
+    let mut cx = x + TAB_PAD_L;
+    // shell tabs carry no icon; Settings and synced tabs say what they are
+    let icon = if tab.settings {
+        Some((Icon::Settings, text_color))
+    } else if tab.sync {
+        Some((Icon::Sync, theme.accent))
+    } else {
+        None
+    };
+    if let Some((icon, icon_color)) = icon {
+        icons::draw(layer, icon, [cx + 7.0, mid], 14.0, icon_color);
+        cx += 14.0 + 8.0;
+    }
+
+    let close = close_rect(r);
+    let close = [close[0], mid - CLOSE_BOX / 2.0, CLOSE_BOX, CLOSE_BOX];
+    if let Some(edit) = &tab.editing {
+        // inline rename field
+        let fw = (close[0] - 6.0 - cx).max(60.0);
+        layer.bordered(
+            [cx - 5.0, mid - 12.0],
+            [fw, 24.0],
+            theme.bg,
+            theme.accent,
+            3.0,
+            1.0,
+        );
+        let ew = engine.measure(edit, 12.5, FONT_SANS, Weight::NORMAL);
+        if tab.editing_selected && !edit.is_empty() {
             layer.rect(
-                [hx, (TAB_BAR_H - 19.0) / 2.0],
-                [hint_w, 19.0],
-                lift.with_alpha(0.05),
-                5.0,
+                [cx - 1.0, mid - 9.0],
+                [ew + 2.0, 18.0],
+                theme.selection,
+                2.0,
             );
         }
-        let hint_buf = make_text(engine, hint, 11.5, mono_family(), Weight::NORMAL);
-        layer.text(
-            hint_buf,
-            hx + if hint_pill { 7.0 } else { 0.0 },
-            (TAB_BAR_H - 15.0) / 2.0,
-            theme.text_muted,
+        if !edit.is_empty() {
+            let b = make_text(engine, edit, 12.5, FONT_SANS, Weight::NORMAL);
+            layer.text(b, cx, mid - 8.5, theme.text_bright);
+        }
+        if blink_on {
+            layer.rect([cx + ew + 1.0, mid - 8.0], [1.5, 16.0], theme.accent, 0.0);
+        }
+    } else {
+        let chip = chip_label(tab);
+        let chip_w = chip
+            .as_ref()
+            .map(|l| engine.measure(l, 10.5, FONT_SANS, Weight::MEDIUM) + 12.0)
+            .unwrap_or(0.0);
+        let room = close[0] - 8.0 - cx - if chip_w > 0.0 { chip_w + 6.0 } else { 0.0 };
+        let title = elide(engine, &tab.title, 12.5, room);
+        if !title.is_empty() {
+            let title_w = engine.measure(&title, 12.5, FONT_SANS, Weight::NORMAL);
+            let b = make_text(engine, &title, 12.5, FONT_SANS, Weight::NORMAL);
+            layer.text(b, cx, mid - 8.5, text_color);
+            cx += title_w + 6.0;
+        }
+        if let Some(label) = chip
+            && cx + chip_w <= close[0] - 4.0
+        {
+            layer.rect([cx, mid - 8.0], [chip_w, 16.0], lift(theme, 0.07), 3.0);
+            let b = make_text(engine, &label, 10.5, FONT_SANS, Weight::MEDIUM);
+            layer.text(b, cx + 6.0, mid - 7.0, theme.text_dim);
+        }
+    }
+
+    // right end: × while active or hovered, else the tab's alert / activity
+    let (ccx, ccy) = (close[0] + CLOSE_BOX / 2.0, mid);
+    if is_active || hovered || tab.editing.is_some() {
+        icons::draw(
+            layer,
+            Icon::Close,
+            [ccx, ccy],
+            10.0,
+            if hovered && !floating {
+                theme.text_ui
+            } else {
+                theme.text_dim
+            },
         );
+    } else if let Some(kind) = tab.alert {
+        crate::views::notifications::tab_badge(layer, theme, kind, ccx, ccy);
+    } else if tab.activity {
+        layer.circle([ccx, ccy], 6.0, theme.accent.with_alpha(0.85));
     }
 }
 
-fn panes_label(tab: &TabInfo) -> Option<String> {
-    (tab.panes > 1).then(|| format!("{} panes", tab.panes))
+/// The × of a tab: the Settings tab closes itself, a shell tab its panes.
+fn close_target(tab: &TabInfo, i: usize) -> ClickTarget {
+    if tab.settings {
+        ClickTarget::SettingsClose
+    } else {
+        ClickTarget::TabClose(i)
+    }
+}
+
+/// The pane count chip (`3`) of a split tab.
+fn chip_label(tab: &TabInfo) -> Option<String> {
+    (tab.panes > 1).then(|| tab.panes.to_string())
 }
 
 /// Width of the vertical tab rail (`tab_layout = "vertical"`).
@@ -595,19 +642,20 @@ pub fn render_rail(
     }
     for (i, tab) in tabs.iter().enumerate().take(window.end).skip(window.start) {
         let is_active = i == active;
-        let row = [6.0, y, RAIL_W - 12.0, RAIL_ROW_H - 4.0];
+        let row = [0.0, y, RAIL_W - 1.0, RAIL_ROW_H];
         if is_active {
+            // square row on the pane ground, edged in the accent
             layer.rect(
                 [row[0], row[1]],
                 [row[2], row[3]],
-                tab.color.unwrap_or(theme.accent).with_alpha(0.10),
-                7.0,
+                theme.ground(theme.bg),
+                0.0,
             );
             layer.rect(
-                [row[0], row[1] + 8.0],
-                [2.5, row[3] - 16.0],
+                [row[0], row[1]],
+                [2.0, row[3]],
                 tab.color.unwrap_or(theme.accent),
-                1.0,
+                0.0,
             );
         }
         let mut cx = row[0] + 14.0;
@@ -623,16 +671,24 @@ pub fn render_rail(
             cx += 14.0;
         }
         let close_x = row[0] + row[2] - 20.0;
-        let shell_w = engine.measure(&tab.shell_label, 11.5, mono_family(), Weight::NORMAL);
-        let b = make_text(
-            engine,
-            &tab.shell_label,
-            11.5,
-            mono_family(),
-            Weight::NORMAL,
-        );
-        layer.text(b, cx, line1 + 1.0, theme.accent);
-        cx += shell_w + 7.0;
+        let icon = if tab.settings {
+            Some((
+                Icon::Settings,
+                if is_active {
+                    theme.text_ui
+                } else {
+                    theme.text_dim
+                },
+            ))
+        } else if tab.sync {
+            Some((Icon::Sync, theme.accent))
+        } else {
+            None
+        };
+        if let Some((icon, icon_color)) = icon {
+            icons::draw(layer, icon, [cx + 7.0, line1 + 8.5], 14.0, icon_color);
+            cx += 14.0 + 8.0;
+        }
 
         let title_color = if is_active {
             theme.text_bright
@@ -673,7 +729,7 @@ pub fn render_rail(
 
         // second line: directory · branch, pane count, sync
         let mut sub = tab.subtitle.clone();
-        if let Some(p) = panes_label(tab) {
+        if let Some(p) = (tab.panes > 1).then(|| format!("{} panes", tab.panes)) {
             sub = if sub.is_empty() {
                 p
             } else {
@@ -689,18 +745,17 @@ pub fn render_rail(
             layer.text(b, row[0] + 14.0, line1 + 20.0, theme.text_muted);
         }
 
-        let close_buf = make_text(engine, "×", 14.0, FONT_SANS, Weight::NORMAL);
-        layer.text(
-            close_buf,
-            close_x,
-            line1 - 1.0,
+        super::close_icon(
+            layer,
+            [close_x + 5.0, line1 + 7.0],
+            3.5,
             theme
                 .text_muted
                 .with_alpha(if is_active { 1.0 } else { 0.7 }),
         );
         hits.push(Hit {
             rect: [close_x - 4.0, line1 - 3.0, 18.0, 20.0],
-            target: ClickTarget::TabClose(i),
+            target: close_target(tab, i),
         });
         hits.push(Hit {
             rect: row,
@@ -835,7 +890,6 @@ mod tests {
         TabInfo {
             title: String::new(),
             panes: 1,
-            shell_label: String::new(),
             activity,
             alert,
             color: None,
@@ -843,6 +897,7 @@ mod tests {
             editing: None,
             editing_selected: false,
             subtitle: String::new(),
+            settings: false,
         }
     }
 

@@ -59,7 +59,7 @@ rebound. Full list: [keyboard shortcuts](docs/keyboard-shortcuts.md).
 | Multi-line commands | ⇧⏎ adds a line, ⏎ runs |
 | History search | ⌃R |
 | Workflows (saved commands with `{{placeholders}}`) | ⌃⇧R; Tab moves between placeholders |
-| Vim keys in the editor | Settings → Features → *Vim keybindings* |
+| Vim keys in the editor | Settings → Input → *Vim keybindings* |
 | **Command palette** — every action, setting, theme, launch config | ⌘P |
 | Find in scrollback (case and regex toggles) | ⌘F |
 | **Tabs and split panes** | ⌘T tab, ⌘D split right, ⇧⌘D split down, ⌥⌘arrows move, ⇧⌘⏎ zoom |
@@ -156,8 +156,8 @@ To build from source, additionally:
 git clone https://github.com/botjaeger/shift.git
 cd shift
 
-cargo run -p shift-app                 # start: debug build, then launch
-cargo run --release -p shift-app       # start: optimized build
+cargo run                              # start: debug build, then launch
+cargo run --release                    # start: optimized build
 cargo build --release                  # binary only: target/release/shift-terminal
 packaging/make-app.sh                  # macOS app bundle: target/Shift.app
 ```

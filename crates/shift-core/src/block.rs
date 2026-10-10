@@ -47,6 +47,9 @@ pub struct Block {
     /// Replayed from a saved transcript: the command is not running and
     /// the output is from a previous session.
     pub restored: bool,
+    /// Wall-clock time the command finished (history ages); `None` while
+    /// it runs and for replayed blocks.
+    pub finished_at: Option<std::time::SystemTime>,
 }
 
 impl Block {
@@ -91,9 +94,21 @@ pub struct BlockStore {
     /// wins over the text read back from the screen, which loses combining
     /// marks and turns continuation prompts (PS2) into command text.
     submitted: Option<String>,
+    /// The grid was resized while the prompt was up: the shell's redraw of
+    /// the prompt that follows (zsh on SIGWINCH) can land below a reflowed
+    /// copy of the old one, which must stay hidden with it.
+    resized_at_prompt: bool,
 }
 
 impl BlockStore {
+    /// The grid changed size; a prompt redraw may follow.
+    pub fn note_resize(&mut self) {
+        self.resized_at_prompt = self
+            .blocks
+            .back()
+            .is_some_and(|b| b.state == BlockState::Prompt);
+    }
+
     pub fn set_clock(&mut self, at: Option<Instant>) {
         self.clock = at;
     }
@@ -106,12 +121,17 @@ impl BlockStore {
         let now = self.now();
         // a new prompt without 133;C: the submission ran nothing
         self.submitted = None;
+        let after_resize = std::mem::take(&mut self.resized_at_prompt);
         // an unfinished Running block means we missed D — close it here
         if let Some(last) = self.blocks.back_mut() {
             match last.state {
                 BlockState::Prompt => {
-                    // empty enter / redrawn prompt: move the anchor
-                    last.prompt_start = abs;
+                    // empty enter / redrawn prompt: move the anchor. A redraw
+                    // after a resize keeps the earlier anchor, so the
+                    // reflowed old prompt above it stays in the hidden range
+                    if !(after_resize && abs > last.prompt_start) {
+                        last.prompt_start = abs;
+                    }
                     last.command_start = None;
                     return;
                 }
@@ -121,6 +141,7 @@ impl BlockStore {
                         exit: None,
                         duration: now.saturating_duration_since(started),
                     };
+                    last.finished_at = Some(std::time::SystemTime::now());
                 }
                 BlockState::Done { .. } => {}
             }
@@ -139,6 +160,7 @@ impl BlockStore {
             cwd: None,
             branch: None,
             restored: false,
+            finished_at: None,
         });
         self.next_id += 1;
     }
@@ -220,6 +242,7 @@ impl BlockStore {
                 exit,
                 duration: now.saturating_duration_since(started),
             };
+            last.finished_at = Some(std::time::SystemTime::now());
         }
     }
 
@@ -349,6 +372,26 @@ mod tests {
         assert_eq!(b.exit_code(), Some(0));
         assert_eq!(b.suppressed_range(), Some((10, 12)));
         assert_eq!(b.output_range(), Some((12, 20)));
+    }
+
+    #[test]
+    fn prompt_redrawn_after_resize_keeps_its_anchor() {
+        let mut s = BlockStore::default();
+        s.on_prompt_start(0);
+        // a narrower grid reflows the prompt; zsh redraws it a row lower
+        s.note_resize();
+        s.on_prompt_start(1);
+        assert_eq!(s.last().unwrap().prompt_start, 0);
+        // without a resize, a redrawn prompt (empty Enter) moves the anchor
+        s.on_prompt_start(3);
+        assert_eq!(s.last().unwrap().prompt_start, 3);
+        // a resize while a command runs is not a prompt redraw
+        s.on_command_start(3, 2);
+        s.on_output_start(4, "ls".into());
+        s.note_resize();
+        s.on_done(6, Some(0));
+        s.on_prompt_start(6);
+        assert_eq!(s.last().unwrap().prompt_start, 6);
     }
 
     #[test]

@@ -1479,16 +1479,19 @@ fn render_header(
     let content_x = grid.x + BLOCK_INDENT;
 
     // chevron
-    let chevron = if block.collapsed { "▸" } else { "▾" };
-    let cbuf = make_text(
-        engine,
-        chevron,
-        11.0,
-        grid.line_h,
-        mono_family(),
-        Weight::NORMAL,
+    let dir = if block.collapsed {
+        super::Dir::Right
+    } else {
+        super::Dir::Down
+    };
+    super::chevron(
+        layer,
+        [content_x + 3.5, y + grid.line_h / 2.0],
+        3.0,
+        dir,
+        1.3,
+        theme.text_muted,
     );
-    layer.text(cbuf, content_x, y, theme.text_muted);
 
     // left text must stop before the right-side badge/duration/copy group
     let duration_text = match block.state {
@@ -1853,6 +1856,7 @@ mod tests {
             cwd: None,
             branch: None,
             restored: false,
+            finished_at: None,
         }
     }
 

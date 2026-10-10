@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 use shift_core::fs_tree::{self, Listing};
 use shift_core::{Color, Theme};
 use shift_renderer::glyphon::{Attrs, Buffer, Family, Metrics, Shaping, TextBounds, Weight};
-use shift_renderer::{FONT_SANS, Layer, TextEngine, mono_family};
+use shift_renderer::{FONT_SANS, Layer, TextEngine};
+
+use crate::views::icons::{self, Icon};
 
 pub const EXPLORER_W: f32 = 260.0;
 pub const HEADER_H: f32 = 38.0;
@@ -246,19 +248,6 @@ impl ExplorerState {
     }
 }
 
-/// Chevrons come from the mono face (Inter has no ▸ ▾), like block headers.
-fn mono(engine: &mut TextEngine, text: &str, size: f32) -> Buffer {
-    let mut b = Buffer::new(&mut engine.font_system, Metrics::new(size, size * 1.35));
-    b.set_text(
-        &mut engine.font_system,
-        text,
-        &Attrs::new().family(Family::Name(mono_family())),
-        Shaping::Advanced,
-        None,
-    );
-    b
-}
-
 fn label(engine: &mut TextEngine, text: &str, size: f32, weight: Weight) -> Buffer {
     let mut b = Buffer::new(&mut engine.font_system, Metrics::new(size, size * 1.35));
     b.set_text(
@@ -309,15 +298,16 @@ pub fn render(
     );
     let refresh = [x + w - 34.0, y + 7.0, 24.0, 24.0];
     let collapse = [refresh[0] - 26.0, y + 7.0, 24.0, 24.0];
-    for (r, glyph, hit) in [
-        (collapse, "⊟", ExplorerHit::Collapse),
-        (refresh, "↻", ExplorerHit::Refresh),
+    for (r, icon, hit) in [
+        (collapse, Icon::ChevronUp, ExplorerHit::Collapse),
+        (refresh, Icon::Refresh, ExplorerHit::Refresh),
     ] {
-        layer.text(
-            label(engine, glyph, 13.0, Weight::NORMAL),
-            r[0] + 6.0,
-            r[1] + 3.0,
-            theme.text_muted,
+        icons::draw(
+            layer,
+            icon,
+            [r[0] + r[2] / 2.0, r[1] + r[3] / 2.0],
+            14.0,
+            theme.text_dim,
         );
         hits.push((r, hit));
     }
@@ -338,6 +328,8 @@ pub fn render(
     let root = state.root.clone().unwrap_or_default();
     let first = (state.scroll / ROW_H).floor() as usize;
     let last = ((state.scroll + body_h) / ROW_H).ceil() as usize + 1;
+    // rows scrolled half under the header are cut at the body's edge
+    layer.set_clip(Some(([x, body_top, w - 1.0, body_h], 0.0)));
     for (li, line) in state.lines.iter().enumerate().take(last).skip(first) {
         let ry = body_top + 4.0 + li as f32 * ROW_H - state.scroll;
         let i = match line {
@@ -375,17 +367,18 @@ pub fn render(
         let status = state.statuses.get(&key).copied();
         let dirty = row.is_dir && state.dirty_dirs.contains(&key);
         if row.is_dir {
-            let chevron = if state.expanded.contains(&row.path) {
-                "▾"
+            let dir = if state.expanded.contains(&row.path) {
+                super::Dir::Down
             } else {
-                "▸"
+                super::Dir::Right
             };
-            layer.text_clipped(
-                mono(engine, chevron, 11.0),
-                ix,
-                ry + 6.0,
+            super::chevron(
+                layer,
+                [ix + 3.5, ry + ROW_H / 2.0],
+                3.0,
+                dir,
+                1.3,
                 theme.text_muted,
-                bounds,
             );
         }
         let name_color = match status {
@@ -393,9 +386,24 @@ pub fn render(
             None if row.is_dir => theme.text_ui,
             None => theme.text_dim,
         };
+        // folder / file icon (tinted with the file's git status)
+        let cy = ry + ROW_H / 2.0;
+        if cy - 7.0 >= body_top && cy + 7.0 <= y + h {
+            icons::draw(
+                layer,
+                if row.is_dir { Icon::Folder } else { Icon::File },
+                [ix + 14.0 + 7.0, cy],
+                14.0,
+                if row.is_dir {
+                    theme.text_dim
+                } else {
+                    name_color
+                },
+            );
+        }
         layer.text_clipped(
             label(engine, &row.name, 12.5, Weight::NORMAL),
-            ix + 14.0,
+            ix + 14.0 + 20.0,
             ry + 4.0,
             name_color,
             bounds,
@@ -423,6 +431,7 @@ pub fn render(
             ));
         }
     }
+    layer.set_clip(None);
     if state.lines.is_empty() {
         // no root yet: the shell has not reported its directory
         let msg = if state.root.is_some() {

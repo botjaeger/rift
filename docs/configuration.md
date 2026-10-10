@@ -44,11 +44,11 @@ durable_sessions = false          # shells live in the session service: they kee
 control_api   = "navigate"        # off | navigate (list/status/focus) | full (also
                                   # split/open/send-text); `shift-terminal ctl`
 input_position = "bottom"         # bottom | top — where the command editor sits
-prompt        = "shift"          # shift = context row + ❯
+prompt        = "shift"          # shift = context chips + chevron
                                   # shell   = keep the shell's own PS1 on screen, editor shows ›
 copy_on_select = false            # copy the selection on mouse release
 autosuggestions = true            # inline ghost text after the cursor
-completions_menu = true           # completion dropdown (Tab still accepts the ghost text)
+completions_menu = true           # completion panel (Tab still accepts the ghost text)
 autocomplete_pairs = true         # auto-close quotes/brackets; Backspace removes empty pairs
 vim_mode      = false             # modal (vim) editing in the command editor
 notify_on_completion = true       # alert when a long command finishes out of view
@@ -101,7 +101,7 @@ by another action moves over; the other action keeps its remaining shortcut.
 The session file also stores the window frame (`[window]` position, size,
 maximized, fullscreen); the next launch reopens at the same place.
 
-The Settings overlay (⌘,) edits the same file live; the hot-reload watcher
+The Settings tab (⌘,) edits the same file live; the hot-reload watcher
 applies external edits without restarting.
 
 - **Invalid or unreadable file**: it is not applied. The last good config
@@ -241,7 +241,7 @@ while it is not, plus its sound.
   `~/Library/Sounds`, `~/.local/share/sounds`, `/System/Library/Sounds` and
   `/usr/share/sounds/freedesktop/stereo`; a value with `/` is a file path.
   Played with `afplay` (macOS) or `paplay` / `canberra-gtk-play` (Linux).
-  In Settings, clicking a sound picker steps to the next sound and plays it.
+  In Settings, a sound picker opens the list of sounds; picking one plays it.
 - **Coding agents** are recognized from the running command (`claude`,
   `codex`, `opencode`, `gemini`, also behind `npx`, `env`, `VAR=…` or `&&`).
   Their notifications carry the agent's badge. Turn them on in the agent:

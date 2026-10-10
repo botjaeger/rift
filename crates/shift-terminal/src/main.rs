@@ -14,6 +14,8 @@ mod pane;
 mod script;
 mod state;
 #[cfg(target_os = "macos")]
+mod traffic_lights;
+#[cfg(target_os = "macos")]
 mod translucency;
 mod views;
 mod vim;
