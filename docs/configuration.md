@@ -293,7 +293,8 @@ Injected automatically at spawn; users' own rc files are always sourced.
 
 - Emits OSC 133 A/B/C/D (block boundaries + exit codes) and OSC 7 (cwd).
 - Environment: `TERM=xterm-256color`, `COLORTERM=truecolor`,
-  `TERM_PROGRAM=shift`.
+  `TERM_PROGRAM=shift`, `TERM_PROGRAM_VERSION` (Shift's version, not the
+  launching terminal's).
 - Coexists with iTerm2/other integrations that emit their own OSC 133 —
   duplicate markers are tolerated.
 - To opt out, unset the injection (zsh: launch with a custom `shell` pointing

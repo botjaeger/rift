@@ -46,7 +46,7 @@ Every rendered color resolves from a theme token (`shift_core::Theme`,
 | `cursor` | `#d4d4d4` | Cursor |
 | `selection` | `#264f78` | Text selection |
 | `search_match` / `search_active` | `#ffd700` / `#ff8000` | Find highlights |
-| `syntax.command` / `flag` / `string` / `ghost` | `#569cd6` / `#9cdcfe` / `#ce9178` / `#5a5c63` | Editor highlighting and ghost text |
+| `syntax.command` / `flag` / `string` / `ghost` | `#569cd6` / `#9cdcfe` / `#ce9178` / `#5a5c63` | `string` and `ghost` in the editor (its command and flags are white); `command`, `flag` color keywords and numbers in the file viewer and review diff |
 | `ansi[0..16]` | xterm values | Program colors |
 
 Builtin themes: `dark-default`, `light-default`, `catppuccin-mocha`,
@@ -175,7 +175,7 @@ No other animation. Motion never delays input.
   folder icon + cwd in `text_bright`, branch icon in `success` + branch in
   `text_ui` + arrows and dirty dot muted. Then the logo's chevron (11 px
   tall, centred on the block cursor, the logo's proportions with a 2.2 px
-  stroke) in `success` (`error` after a failure, muted when unfocused).
+  stroke) in `accent`, the logo's blue (`error` after a failure, muted when unfocused).
   Shell-prompt mode shows a 9 px muted chevron.
 - **Tabs**: no icon on a shell tab (the sync icon in `accent` when its
   inputs are synced, the settings icon on the Settings tab), the title in

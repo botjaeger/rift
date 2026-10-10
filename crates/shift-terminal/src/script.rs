@@ -34,6 +34,8 @@
 //! menu action:new_tab       # choose a menu bar item by id (macOS)
 //! mods alt                  # hold modifiers for mouse steps (`mods none`)
 //! wait_prompt              # block until the shell shows its first prompt
+//! wait_file /tmp/done 600000  # until a file exists (or the ms timeout);
+//!                          # unlike `sh`, the app keeps running meanwhile
 //! quit                     # exit the app
 //! ```
 //!
@@ -75,6 +77,8 @@ pub enum Step {
     Menu(String),
     Mods(String),
     WaitPrompt,
+    /// Until the path exists, or the timeout (ms) passes.
+    WaitFile(PathBuf, u64),
     Quit,
 }
 
@@ -121,7 +125,7 @@ impl Script {
         let now = Instant::now();
         let since = *self.waiting_since.get_or_insert(now);
         if now.duration_since(since) > timeout {
-            log::warn!("script: wait_prompt timed out");
+            log::warn!("script: wait timed out");
             self.waiting_since = None;
             return true;
         }
@@ -137,7 +141,7 @@ impl Script {
         }
         let step = self.steps[self.idx].clone();
         self.idx += 1;
-        if step != Step::WaitPrompt {
+        if !matches!(step, Step::WaitPrompt | Step::WaitFile(..)) {
             self.waiting_since = None;
         }
         self.due = now
@@ -242,6 +246,16 @@ pub fn parse(src: &str) -> Result<Vec<Step>, String> {
             "menu" => Step::Menu(rest.to_string()),
             "mods" => Step::Mods(rest.to_string()),
             "wait_prompt" => Step::WaitPrompt,
+            "wait_file" => {
+                let (path, ms) = match rest.rsplit_once(char::is_whitespace) {
+                    Some((p, ms)) if ms.parse::<u64>().is_ok() => (p, ms.parse().unwrap()),
+                    _ => (rest, 60_000),
+                };
+                if path.is_empty() {
+                    return Err(bad("expected a path"));
+                }
+                Step::WaitFile(PathBuf::from(path), ms)
+            }
             "quit" => Step::Quit,
             other => return Err(bad(&format!("unknown command {other:?}"))),
         };
@@ -372,6 +386,19 @@ pub fn char_press(ch: char) -> (KeyPress, ModifiersState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wait_file_takes_an_optional_timeout() {
+        let steps = parse("wait_file /tmp/a b 5000\nwait_file /tmp/c\n").unwrap();
+        assert_eq!(
+            steps,
+            [
+                Step::WaitFile(PathBuf::from("/tmp/a b"), 5000),
+                Step::WaitFile(PathBuf::from("/tmp/c"), 60_000),
+            ]
+        );
+        assert!(parse("wait_file\n").is_err());
+    }
 
     #[test]
     fn parses_every_command() {

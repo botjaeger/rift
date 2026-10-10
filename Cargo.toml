@@ -6,6 +6,7 @@ members = [
     "crates/shift-renderer",
     "crates/shift-terminal",
 ]
+exclude = ["vendor"]
 # plain `cargo run` / `cargo build` target the app; gates pass --workspace
 default-members = ["crates/shift-terminal"]
 
@@ -47,6 +48,13 @@ env_logger = "0.11"
 png = "0.18"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 flate2 = "1"
+
+# The VT parser and grid are vendored (vendor/README.md) and extended for
+# VT420/xterm parity: rectangle editing, left/right margins, selective
+# erase, line attributes, national character sets and the query replies.
+[patch.crates-io]
+vte = { path = "vendor/vte" }
+alacritty_terminal = { path = "vendor/alacritty_terminal" }
 
 [profile.release]
 lto = "thin"

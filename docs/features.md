@@ -61,7 +61,8 @@ insensitive) stay visible. Running it again on the same block, or choosing
   (snapshot stack, cap 100, cleared on submit), history walk (↑/↓ preserving
   the in-progress line), ⌃R history pane, multi-source completion with
   ghost text, workflow placeholder cycling, and configurable quote/bracket
-  auto-pairing (typing a closer steps over it; Backspace removes an empty pair).
+  auto-pairing (typing a closer steps over it; Backspace removes an empty pair;
+  inside a quoted string nothing pairs, so `'[a'` stays `'[a'`).
 - Cmd-chords never insert text into the editor nor leak bytes to the PTY.
 - **Multi-line editing**: ⇧⏎ / ⌥⏎ insert a newline into the command instead of
   submitting; the editor zone grows one line (20 px) per newline and extra
@@ -71,7 +72,7 @@ insensitive) stay visible. Running it again on the same block, or choosing
   (default) or the top of the pane.
 - **Shell-prompt mode** (`prompt = "shell"`): the shell's own PS1 (starship,
   p10k, …) stays visible on the grid and the editor drops the context row,
-  showing a smaller muted chevron instead of the green one.
+  showing a smaller muted chevron instead of the blue one.
 
 ## Vim mode
 
@@ -304,7 +305,8 @@ automatically:
 - **fish** — `shift.fish` auto-loaded via a `vendor_conf.d` XDG_DATA_DIRS
   append.
 
-Sets `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=shift`;
+Sets `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=shift`,
+`TERM_PROGRAM_VERSION` (Shift's own);
 emits OSC 133 (blocks) and OSC 7 (cwd tracking).
 
 ## Rendering & performance
@@ -320,9 +322,13 @@ emits OSC 133 (blocks) and OSC 7 (cwd tracking).
 - **Baseline**: `packaging/bench.sh` measures startup, output throughput,
   scrollback memory, key-to-frame latency and TUI round trips through the
   script driver; recorded numbers live in [performance.md](performance.md).
+- **Frame pacing**: frames that program output or the running-command
+  spinner ask for come at most every 8.3 ms (120 Hz), so drawing never keeps
+  the terminal locked away from the thread parsing the output.
 - Scroll input accumulates fractional trackpad deltas — no dropped events.
 - Full VT emulation via alacritty_terminal (vim/htop/alt-screen, 10k
-  scrollback default), theme & config hot-reload < 300 ms.
+  scrollback default; VT420 level, see [Terminal protocol
+  support](#terminal-protocol-support)), theme & config hot-reload < 300 ms.
 - Git status (branch, ahead/behind, dirty) resolved on a background git2
   worker; never blocks a frame.
 
@@ -380,10 +386,49 @@ it.
   Enter (`confirm_multiline_paste`).
 - **OSC 52** copy: programs (tmux, neovim, remote shells) can set the system
   clipboard. Reading the clipboard back is refused.
-- **Color queries** (OSC 4/10/11/12): answered from the active theme, so
+- **Colors** (OSC 4/5/10–12, resets OSC 104/105/110–112): set, query and
+  reset the 256-color palette, the special colors and the default
+  foreground, background and cursor; queries answer from the active theme, so
   programs that probe the background (vim, delta, bat) pick matching colors.
-- **Text-area size queries** (CSI 14t/18t) are answered.
-- **OSC 0/2 titles** and title reset; **OSC 7** cwd; **OSC 8** hyperlinks.
+  Color specs take every X11 form: names, `#rgb`…`#rrrrggggbbbb`, `rgb:`,
+  `rgbi:` and the device-independent `CIEXYZ:`, `CIEuvY:`, `CIExyY:`,
+  `CIELab:`, `CIELuv:` and `TekHVC:` (ported from Xlib's Xcms, with its gamut
+  clipping).
+- **Window operations** (XTWINOPS `CSI … t`): iconify, move, resize in
+  pixels or characters (the window follows), raise, refresh, maximize,
+  fullscreen, and reports of the window state, position, size in pixels and
+  characters, screen size, icon label and title; the title stack (22/23).
+- **OSC 0/1/2 titles** and icon names, title reset; **OSC 7** cwd; **OSC 8**
+  hyperlinks.
+- **VT420 emulation** (DA1 answers level 4, `CSI ? 64 ; … c`); the vendored
+  `vte` and `alacritty_terminal` carry it:
+  - left/right margins (DECLRMM, DECSLRM) for cursor motion, wrapping,
+    scrolling, insert/delete line and character, and erase; DECBI/DECFI,
+    DECIC/DECDC;
+  - rectangular editing: copy (DECCRA), fill (DECFRA), erase and selective
+    erase (DECERA, DECSERA), attribute change and reverse (DECCARA, DECRARA,
+    extent by DECSACE);
+  - protected text: DECSCA with selective erase (DECSED, DECSEL), and ISO
+    protected areas (SPA/EPA);
+  - double-width and double-height lines (DECDWL, DECDHL): each cell draws
+    two columns wide, double-height halves at twice the size; selection and
+    mouse reports map to the characters drawn;
+  - 132-column mode (DECCOLM when `?40` allows it, DECNCSM), DECSLPP page
+    length; the window resizes to fit;
+  - reports: DECRQCRA checksums, DECRQSS, DECRQM for ANSI and DEC modes,
+    presentation state (DECCIR, DECTABSR, restored by DECRSPS), DECRQTSR,
+    DECXCPR, the DSR family, DA2/DA3, XTVERSION and XTGETTCAP;
+  - DECSTR soft reset, DECSCL conformance levels, S7C1T/S8C1T (replies stay
+    7-bit), the DEC locator, NRCS national charsets and the DEC supplemental
+    and technical sets, reverse wraparound (`?45` as xterm 383+, `?1045`
+    extended), XTSAVE/XTRESTORE, blinking text (SGR 5, 600 ms) and reverse
+    screen (DECSCNM).
+- **Unicode widths** follow wcwidth, the table ucs-detect measures against:
+  VS16 widens a text-default emoji to two cells and draws it in color, VS15
+  narrows an emoji to one cell and draws its text glyph, ZWJ sequences, flags
+  and skin tones are one cluster, Indic conjuncts take two cells. The command
+  editor wraps by the same widths. The tables are generated
+  (`scripts/gen-width-tables.py`).
 - **IME** composition and committed text in the editor and raw mode.
 
 ## Durable sessions

@@ -21,12 +21,12 @@ ALL=(fmt clippy test doc shell docs release ui linux)
 
 describe() {
     cat <<'EOF'
-fmt      cargo fmt --all --check
-clippy   cargo clippy --workspace --all-targets --locked -- -D warnings
-test     cargo test --workspace --locked
+fmt      cargo fmt --all --check, and on each vendored crate
+clippy   cargo clippy --workspace --all-targets --locked -- -D warnings, and on each vendored crate (all features)
+test     cargo test --workspace --locked, and each vendored crate (all features)
 doc      cargo doc --workspace --no-deps --locked, rustdoc warnings denied
 shell    shellcheck on packaging/*.sh, scripts/*.sh, .githooks/*, bash hooks; zsh -n and fish --no-execute on their hooks
-docs     CLAUDE.md and AGENTS.md identical; every relative link in *.md resolves
+docs     CLAUDE.md and AGENTS.md identical; every relative link in *.md resolves (vendored crates' upstream docs excepted)
 release  cargo build --release --locked
 ui       isolated scripted UI regressions (display or xvfb-run required)
 linux    clippy + test + release build in packaging/linux-verify.Dockerfile, then shell + scripted UI (xvfb) on the CI runner's packages in packaging/ci-ubuntu.Dockerfile (docker)
@@ -35,9 +35,26 @@ EOF
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
-gate_fmt() { cargo fmt --all --check; }
-gate_clippy() { cargo clippy --workspace --all-targets --locked -- -D warnings; }
-gate_test() { cargo test --workspace --locked; }
+# The vendored vte and alacritty_terminal (patched in through
+# [patch.crates-io]) are workspaces of their own: every gate that checks the
+# workspace runs on them too, built into target/vendor.
+VENDORED=(vendor/vte vendor/alacritty_terminal)
+vendored() {
+    local sub=$1 crate rc=0
+    shift
+    for crate in "${VENDORED[@]}"; do
+        CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target}/vendor" \
+            cargo "$sub" --manifest-path "$crate/Cargo.toml" "$@" || rc=1
+    done
+    return "$rc"
+}
+
+gate_fmt() { cargo fmt --all --check && vendored fmt --check; }
+gate_clippy() {
+    cargo clippy --workspace --all-targets --locked -- -D warnings &&
+        vendored clippy --all-targets --all-features --locked -- -D warnings
+}
+gate_test() { cargo test --workspace --locked && vendored test --all-features --locked; }
 gate_doc() { RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked; }
 gate_release() { cargo build --release --locked; }
 gate_ui() { scripts/ui-smoke.sh; }
@@ -71,7 +88,9 @@ gate_docs() {
                 rc=1
             fi
         done < <(grep -o '\]([^)]*)' "$md" | sed 's/^](//; s/)$//' | grep -v -E '^(https?|mailto):|^#' || true)
-    done < <(git ls-files --cached --others --exclude-standard '*.md')
+    # vendored crates keep their upstream docs, whose links point into
+    # repositories not copied here
+    done < <(git ls-files --cached --others --exclude-standard '*.md' ':!vendor/*/*')
     return "$rc"
 }
 
@@ -82,8 +101,7 @@ gate_linux() {
         -v shift-cargo-registry:/usr/local/cargo/registry \
         -e CARGO_TARGET_DIR=/src/target/linux-docker \
         shift-linux-verify bash -c '
-            cargo clippy --workspace --all-targets --locked -- -D warnings &&
-            cargo test --workspace --locked &&
+            scripts/gates.sh clippy test &&
             cargo build --release --locked' || return 1
     # The shell and UI gates run on the CI runner's packages, with the
     # environment of ci.yml's UI step: a library, font or shellcheck version

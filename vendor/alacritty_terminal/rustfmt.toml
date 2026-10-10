@@ -1,0 +1,6 @@
+# Alacritty's own rustfmt.toml (not shipped in the crates.io package),
+# stable options only.
+match_block_trailing_comma = true
+use_field_init_shorthand = true
+use_small_heuristics = "Max"
+use_try_shorthand = true

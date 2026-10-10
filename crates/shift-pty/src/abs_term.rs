@@ -1,16 +1,21 @@
 // GENERATED delegation (see M3 notes): forwards every vte Handler method to
 // the wrapped Term, intercepting the few that can push lines into scrollback
 // history so we can keep a monotone absolute-line counter (`scrolled`).
-// Generated against vte 0.15 — regenerate if the Handler trait changes.
+// Generated against the vendored vte (vendor/vte); `every_handler_method_is_forwarded`
+// fails when its Handler trait gains a method this file does not forward.
 
 use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::{Term, TermMode};
 use alacritty_terminal::vte::ansi::{
-    Attr, CharsetIndex, ClearMode, CursorShape, CursorStyle, Handler, Hyperlink, KeyboardModes,
-    KeyboardModesApplyBehavior, LineClearMode, Mode, ModifyOtherKeys, PrivateMode, Rgb,
-    ScpCharPath, ScpUpdateMode, StandardCharset, TabulationClearMode,
+    Attr, CharsetIndex, ClearMode, CursorShape, CursorStyle, DcsRequest, Handler, Hyperlink,
+    KeyboardModes, KeyboardModesApplyBehavior, LineAttribute, LineClearMode, Mode, ModifyOtherKeys,
+    PrivateMode, Rect, Rgb, ScpCharPath, ScpUpdateMode, StandardCharset, TabulationClearMode,
 };
+
+/// Applies a program's resize to the term: rows, cols, and the scrolled
+/// counter the anchors are kept against.
+pub type ResizeFn<'f, L> = dyn Fn(&mut Term<L>, usize, usize, &mut u64) + 'f;
 
 /// Wraps a Term to observe lines entering scrollback history.
 ///
@@ -27,9 +32,23 @@ pub struct AbsTerm<'a, L: EventListener> {
     /// `clear` command emits it (terminfo E3), never full-screen TUIs, so the
     /// reader thread uses it to wipe the block list Warp-style.
     pub saw_clear_saved: bool,
+    /// Applies a resize the program asked for (XTWINOPS 8, DECCOLM, DECSLPP)
+    /// right away, with the anchor bookkeeping a resize needs: rows, cols,
+    /// and the scrolled counter.
+    pub on_resize: Option<&'a ResizeFn<'a, L>>,
 }
 
 impl<L: EventListener> AbsTerm<'_, L> {
+    /// Carry out a program's resize request before the next byte is parsed:
+    /// a query right after it must already see the new size.
+    fn apply_pending_resize(&mut self) {
+        if let Some(resize) = self.on_resize
+            && let Some((rows, cols)) = self.term.take_pending_resize()
+        {
+            resize(self.term, rows, cols, self.scrolled);
+        }
+    }
+
     fn primary(&self) -> bool {
         !self.term.mode().contains(TermMode::ALT_SCREEN)
     }
@@ -82,6 +101,7 @@ impl<L: EventListener> Handler for AbsTerm<'_, L> {
 
     fn reset_state(&mut self) {
         self.term.reset_state();
+        self.apply_pending_resize();
     }
 
     fn set_title(&mut self, a0: Option<String>) {
@@ -252,10 +272,12 @@ impl<L: EventListener> Handler for AbsTerm<'_, L> {
 
     fn set_private_mode(&mut self, a0: PrivateMode) {
         self.term.set_private_mode(a0);
+        self.apply_pending_resize();
     }
 
     fn unset_private_mode(&mut self, a0: PrivateMode) {
         self.term.unset_private_mode(a0);
+        self.apply_pending_resize();
     }
 
     fn report_private_mode(&mut self, a0: PrivateMode) {
@@ -353,6 +375,148 @@ impl<L: EventListener> Handler for AbsTerm<'_, L> {
     fn set_scp(&mut self, a0: ScpCharPath, a1: ScpUpdateMode) {
         self.term.set_scp(a0, a1);
     }
+
+    fn request_checksum(&mut self, a0: u16, a1: Rect) {
+        self.term.request_checksum(a0, a1);
+    }
+
+    fn dcs_request(&mut self, a0: DcsRequest) {
+        self.term.dcs_request(a0);
+    }
+
+    fn dec_device_status(&mut self, a0: u16, a1: u16) {
+        self.term.dec_device_status(a0, a1);
+    }
+
+    fn report_version(&mut self) {
+        self.term.report_version();
+    }
+
+    fn window_op(&mut self, a0: &[Option<u16>]) {
+        self.term.window_op(a0);
+        self.apply_pending_resize();
+    }
+
+    fn csi_s(&mut self, a0: u16, a1: u16) {
+        self.term.csi_s(a0, a1);
+    }
+
+    fn copy_rect(&mut self, a0: Rect, a1: u16, a2: u16) {
+        self.term.copy_rect(a0, a1, a2);
+    }
+
+    fn fill_rect(&mut self, a0: char, a1: Rect) {
+        self.term.fill_rect(a0, a1);
+    }
+
+    fn erase_rect(&mut self, a0: Rect, a1: bool) {
+        self.term.erase_rect(a0, a1);
+    }
+
+    fn change_rect_attrs(&mut self, a0: Rect, a1: &[u16], a2: bool) {
+        self.term.change_rect_attrs(a0, a1, a2);
+    }
+
+    fn set_attr_change_extent(&mut self, a0: bool) {
+        self.term.set_attr_change_extent(a0);
+    }
+
+    fn insert_columns(&mut self, a0: usize) {
+        self.term.insert_columns(a0);
+    }
+
+    fn delete_columns(&mut self, a0: usize) {
+        self.term.delete_columns(a0);
+    }
+
+    fn set_protection(&mut self, a0: bool) {
+        self.term.set_protection(a0);
+    }
+
+    fn selective_erase_display(&mut self, a0: ClearMode) {
+        self.term.selective_erase_display(a0);
+    }
+
+    fn selective_erase_line(&mut self, a0: LineClearMode) {
+        self.term.selective_erase_line(a0);
+    }
+
+    fn back_index(&mut self) {
+        self.term.back_index();
+    }
+
+    fn forward_index(&mut self) {
+        self.term.forward_index();
+    }
+
+    fn line_attribute(&mut self, a0: LineAttribute) {
+        self.term.line_attribute(a0);
+    }
+
+    fn set_conformance_level(&mut self, a0: u16, a1: u16) {
+        self.term.set_conformance_level(a0, a1);
+    }
+
+    fn soft_reset(&mut self) {
+        self.term.soft_reset();
+    }
+
+    fn set_c1_mode(&mut self, a0: bool) {
+        self.term.set_c1_mode(a0);
+    }
+
+    fn set_page_size(&mut self, a0: Option<u16>, a1: Option<u16>) {
+        self.term.set_page_size(a0, a1);
+        self.apply_pending_resize();
+    }
+
+    fn request_presentation_state(&mut self, a0: u16) {
+        self.term.request_presentation_state(a0);
+    }
+
+    fn request_terminal_state(&mut self, a0: u16) {
+        self.term.request_terminal_state(a0);
+    }
+
+    fn locator(&mut self, a0: char, a1: &[u16]) {
+        self.term.locator(a0, a1);
+    }
+
+    fn status_line(&mut self, a0: char, a1: u16) {
+        self.term.status_line(a0, a1);
+    }
+
+    fn set_icon_name(&mut self, a0: Option<String>) {
+        self.term.set_icon_name(a0);
+    }
+
+    fn save_private_modes(&mut self, a0: &[u16]) {
+        self.term.save_private_modes(a0);
+    }
+
+    fn restore_private_modes(&mut self, a0: &[u16]) {
+        self.term.restore_private_modes(a0);
+    }
+
+    fn set_attr_change_extent_raw(&mut self, a0: u16) {
+        self.term.set_attr_change_extent_raw(a0);
+    }
+
+    fn protected_area(&mut self, a0: bool) {
+        self.term.protected_area(a0);
+    }
+
+    fn set_special_color(&mut self, a0: usize, a1: Rgb) {
+        self.term.set_special_color(a0, a1);
+    }
+
+    fn special_color_query(&mut self, a0: String, a1: usize, a2: &str) {
+        self.term.special_color_query(a0, a1, a2);
+    }
+
+    fn reset_special_color(&mut self, a0: usize) {
+        self.term.reset_special_color(a0);
+    }
 }
 
 #[cfg(test)]
@@ -367,6 +531,48 @@ mod tests {
         fn send_event(&self, _: Event) {}
     }
 
+    /// Method names of the first `impl`/`trait` block starting at `start`.
+    fn block_fns(src: &str, start: &str) -> Vec<String> {
+        let body = &src[src.find(start).expect(start)..];
+        let mut depth = 0i32;
+        let mut names = Vec::new();
+        for line in body.lines() {
+            if depth == 1
+                && let Some(rest) = line.trim_start().strip_prefix("fn ")
+            {
+                names.push(rest.split(['(', '<']).next().unwrap_or_default().to_owned());
+            }
+            depth += line.matches('{').count() as i32 - line.matches('}').count() as i32;
+            if depth == 0 && line.contains('}') {
+                break;
+            }
+        }
+        names
+    }
+
+    /// A Handler method the wrapper does not forward runs the trait's
+    /// default no-op: the sequence silently does nothing. Every method of
+    /// the vendored vte's Handler must be delegated.
+    #[test]
+    fn every_handler_method_is_forwarded() {
+        let trait_fns = block_fns(
+            include_str!("../../../vendor/vte/src/ansi.rs"),
+            "pub trait Handler {",
+        );
+        let forwarded = block_fns(
+            include_str!("abs_term.rs"),
+            "impl<L: EventListener> Handler for AbsTerm<'_, L> {",
+        );
+        assert!(trait_fns.len() > 100, "{trait_fns:?}");
+        // Term keeps the default no-op for these too
+        let not_in_term = ["set_mouse_cursor_icon"];
+        let missing: Vec<_> = trait_fns
+            .iter()
+            .filter(|f| !forwarded.contains(f) && !not_in_term.contains(&f.as_str()))
+            .collect();
+        assert!(missing.is_empty(), "AbsTerm does not forward {missing:?}");
+    }
+
     #[test]
     fn ed3_sets_saw_clear_saved() {
         let size = TermSize::new(80, 24);
@@ -378,6 +584,7 @@ mod tests {
             scrolled: &mut scrolled,
             scrollback_cap: 10_000,
             saw_clear_saved: false,
+            on_resize: None,
         };
         // exact byte sequence /usr/bin/clear emits for xterm-256color
         parser.advance(&mut abs, b"\x1b[3J\x1b[H\x1b[2J");
@@ -401,6 +608,7 @@ mod tests {
                 scrolled,
                 scrollback_cap: cap,
                 saw_clear_saved: false,
+                on_resize: None,
             };
             parser.advance(&mut abs, bytes);
         };

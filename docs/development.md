@@ -65,12 +65,12 @@ display-line building). Rendering is verified with the script driver below.
 
 | Gate | Runs |
 |---|---|
-| `fmt` | `cargo fmt --all --check` |
-| `clippy` | `cargo clippy --workspace --all-targets --locked -- -D warnings` |
-| `test` | `cargo test --workspace --locked` |
+| `fmt` | `cargo fmt --all --check`, and on each vendored crate |
+| `clippy` | `cargo clippy --workspace --all-targets --locked -- -D warnings`, and on each vendored crate (all features) |
+| `test` | `cargo test --workspace --locked`, and each vendored crate (all features; built into `target/vendor`) |
 | `doc` | `cargo doc --workspace --no-deps --locked` with rustdoc warnings denied |
 | `shell` | `shellcheck` on packaging, scripts, git hooks and the bash hooks; `zsh -n` and `fish --no-execute` on the zsh and fish hooks |
-| `docs` | `CLAUDE.md` and `AGENTS.md` are identical; every relative link in every Markdown file resolves |
+| `docs` | `CLAUDE.md` and `AGENTS.md` are identical; every relative link in every Markdown file resolves (the vendored crates' upstream docs excepted) |
 | `release` | `cargo build --release --locked` |
 | `ui` | `scripts/ui-smoke.sh`: isolated scripted input, state assertions and PNG capture; requires Python 3 and a display (or `xvfb-run`) |
 | `linux` | `clippy`, `test` and `release` inside the Linux docker image, then `shell` and the scripted UI regressions (Xvfb, software Vulkan) in `packaging/ci-ubuntu.Dockerfile`, which installs the CI runner's packages from `packaging/ci-apt.txt` |
@@ -179,7 +179,7 @@ Workspace dependencies (`Cargo.toml`):
 | `wgpu` 29 | GPU rendering | Pinned: glyphon 0.11 requires `^29` |
 | `glyphon` 0.11 | Text shaping and glyph atlas | |
 | `winit` 0.30 | Windows, input, IME | 0.31 is beta |
-| `alacritty_terminal` 0.26 | VT emulation, PTY spawn | Only `tty`, `Term`, `vte`, `FairMutex` |
+| `alacritty_terminal` 0.26, `vte` 0.15 | VT emulation, PTY spawn | Vendored in `vendor/` with the VT420 emulation, Xcms colors and wcwidth cluster widths; only `tty`, `Term`, `vte`, `FairMutex` are used |
 | `bytemuck`, `pollster` | GPU buffers, blocking on adapter setup | |
 | `image`, `png`, `flate2` | Inline images, screenshots, kitty zlib payloads | |
 | `serde`, `toml`, `serde_yaml_ng`, `serde_json` | Config, themes, Warp YAML, IPC | |

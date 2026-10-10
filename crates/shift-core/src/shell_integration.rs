@@ -69,6 +69,12 @@ fn write_files() -> std::io::Result<Vec<(String, String)>> {
         format!("{xdg}:{}", base.to_string_lossy()),
     ));
     env.push(("TERM_PROGRAM".into(), "shift".into()));
+    // ours, not the launching terminal's (a Shift started from Warp passed
+    // Warp's version on, and tools pair it with TERM_PROGRAM)
+    env.push((
+        "TERM_PROGRAM_VERSION".into(),
+        env!("CARGO_PKG_VERSION").into(),
+    ));
     // survives ssh (SendEnv LC_*): remote hooks installed by Shift load
     // only when this arrives (see ssh.rs)
     env.push(("LC_TERMINAL".into(), "Shift".into()));

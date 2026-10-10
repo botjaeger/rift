@@ -24,19 +24,26 @@ if [[ -n "${BENCH_KEEP:-}" ]]; then
 else
     trap 'rm -rf "$WORK"' EXIT
 fi
-mkdir -p "$WORK/cfg/shift"
-export XDG_CONFIG_HOME="$WORK/cfg" SHIFT_NO_NOTIFY=1
+mkdir -p "$WORK/cfg/shift" "$WORK/data"
+# isolated config, data (session file, history) and a window that never
+# shows or takes focus (CLAUDE.md: every --script run)
+export XDG_CONFIG_HOME="$WORK/cfg" XDG_DATA_HOME="$WORK/data" SHIFT_NO_NOTIFY=1
 
 now_ms() { perl -MTime::HiRes=time -e 'printf "%d\n", time()*1000'; }
+
+# A headless window presents no frames, so key-to-frame latency needs a shown
+# one: BENCH_VISIBLE=1 runs that scenario visibly (it takes focus; do not type
+# while it runs). Everything else always runs headless.
+HEADLESS=--headless
 
 # run_script <name>: runs $WORK/<name>.shift, captures stderr and peak RSS (KiB)
 run_script() {
     local name=$1
     if [[ "$(uname)" == Darwin ]]; then
-        /usr/bin/time -l "$SHIFT_BIN" --script "$WORK/$name.shift" >"$WORK/$name.log" 2>&1
+        /usr/bin/time -l "$SHIFT_BIN" --script "$WORK/$name.shift" $HEADLESS >"$WORK/$name.log" 2>&1
         awk '/maximum resident set size/ { printf "%d\n", $1 / 1048576 }' "$WORK/$name.log"
     else
-        /usr/bin/time -v "$SHIFT_BIN" --script "$WORK/$name.shift" >"$WORK/$name.log" 2>&1
+        /usr/bin/time -v "$SHIFT_BIN" --script "$WORK/$name.shift" $HEADLESS >"$WORK/$name.log" 2>&1
         awk -F: '/Maximum resident set size/ { gsub(/ /, "", $2); printf "%d\n", $2 / 1024 }' "$WORK/$name.log"
     fi
 }
@@ -112,7 +119,9 @@ rm "$WORK/cfg/shift/config.toml"
     echo "wait 200"
     echo "quit"
 } >"$WORK/latency.shift"
+[[ -n "${BENCH_VISIBLE:-}" ]] && HEADLESS=
 SHIFT_LATENCY_LOG=1 RUST_LOG=info run_script latency >/dev/null
+HEADLESS=--headless
 { grep -o 'key-to-frame [0-9.]*' "$WORK/latency.log" || true; } | awk '{print $2}' | sort -n >"$WORK/lat.txt"
 n=$(wc -l <"$WORK/lat.txt" | tr -d ' ')
 if [[ $n -gt 0 ]]; then
@@ -120,7 +129,7 @@ if [[ $n -gt 0 ]]; then
     p95=$(awk -v n="$n" 'NR == int(n * 0.95 + 0.999)' "$WORK/lat.txt")
     echo "| Key-to-frame latency ($n keys) | p50 ${p50} ms, p95 ${p95} ms | |"
 else
-    echo "| Key-to-frame latency | no samples | |"
+    echo "| Key-to-frame latency | skipped: headless presents no frames (BENCH_VISIBLE=1) | |"
 fi
 
 # 5. TUIs enter and leave the alternate screen and keep keyboard input

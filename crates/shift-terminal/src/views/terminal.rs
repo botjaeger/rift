@@ -8,7 +8,7 @@ use shift_pty::alacritty_terminal::term::TermMode;
 use shift_pty::alacritty_terminal::term::cell::Flags;
 use shift_pty::alacritty_terminal::vte::ansi::{self, NamedColor};
 use shift_pty::{EventProxy, Session};
-use shift_renderer::glyphon::{Attrs, Buffer, Family, Metrics, Shaping, Weight};
+use shift_renderer::glyphon::{Attrs, Buffer, Family, Metrics, Shaping, TextBounds, Weight};
 use shift_renderer::{FONT_SANS, Layer, TextEngine, mono_family};
 
 /// Terminal cell metrics + content origin, all logical px.
@@ -30,7 +30,12 @@ pub struct GridLayout {
     /// The owned editor draws the cursor; the grid's own cursor stays hidden
     /// (shell-prompt mode keeps the prompt rows visible without it).
     pub editor_owns_cursor: bool,
+    /// Blinking text (SGR 5) is in its visible phase.
+    pub text_blink_on: bool,
 }
+
+/// Set when a frame drew blinking text: the app keeps repainting to blink it.
+pub static BLINK_DRAWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Block content indent: 2px border + 14px padding (design).
 pub const BLOCK_INDENT: f32 = 16.0;
@@ -83,6 +88,10 @@ pub struct RenderOutput {
     /// Block whose header scrolled above the viewport while its rows are
     /// still visible at the top (drives the sticky command header).
     pub sticky_block: Option<BlockId>,
+    /// Whether the sticky block has not ended yet (from the blocks snapshot
+    /// this frame took: the app must not lock them again while the reader
+    /// thread is busy).
+    pub sticky_open: bool,
 }
 
 /// Byte-scan for http(s) URLs in a line: (char col, char len, url).
@@ -401,6 +410,67 @@ fn cube_component(v: u8) -> f32 {
     }
 }
 
+fn rgb_color(c: ansi::Rgb) -> Color {
+    Color::rgba(
+        c.r as f32 / 255.0,
+        c.g as f32 / 255.0,
+        c.b as f32 / 255.0,
+        1.0,
+    )
+}
+
+/// Palette slot `index` as the program sees it: its own OSC 4/10/11/12
+/// setting, else the theme's (0–255 palette, 256 foreground, 257
+/// background, 258 cursor).
+pub fn palette_color(theme: &Theme, session: &Session, index: usize) -> Option<Color> {
+    if let Some(rgb) = session.term.lock().colors()[index] {
+        return Some(rgb_color(rgb));
+    }
+    match index {
+        0..=255 => Some(indexed_color(theme, index as u8)),
+        256 => Some(theme.fg),
+        257 => Some(theme.bg.with_alpha(1.0)),
+        258 => Some(theme.cursor),
+        _ => None,
+    }
+}
+
+/// This pane's default colors when the program changed them: OSC 4 for the
+/// 16 ANSI colors, OSC 10/11/12 for foreground, background and cursor, and
+/// DECSCNM (`CSI ? 5 h`) swapping foreground and background. `None` while
+/// the theme applies unchanged.
+pub fn pane_theme(theme: &Theme, session: &Session) -> Option<Theme> {
+    let term = session.term.lock();
+    let reversed = term.reverse_screen();
+    let colors = term.colors();
+    let overridden = (0..16).chain(256..=258).any(|i| colors[i].is_some());
+    if !reversed && !overridden {
+        return None;
+    }
+    let mut t = theme.clone();
+    for (i, slot) in t.ansi.iter_mut().enumerate() {
+        if let Some(rgb) = colors[i] {
+            *slot = rgb_color(rgb);
+        }
+    }
+    if let Some(rgb) = colors[NamedColor::Foreground as usize] {
+        t.fg = rgb_color(rgb);
+    }
+    if let Some(rgb) = colors[NamedColor::Background as usize] {
+        t.bg = rgb_color(rgb);
+    }
+    if let Some(rgb) = colors[NamedColor::Cursor as usize] {
+        t.cursor = rgb_color(rgb);
+    }
+    if reversed {
+        std::mem::swap(&mut t.fg, &mut t.bg);
+        // the block header's command reads on the light ground too
+        t.text_bright = t.fg;
+        t.text_ui = t.fg;
+    }
+    Some(t)
+}
+
 pub fn indexed_color(theme: &Theme, idx: u8) -> Color {
     match idx {
         0..=15 => theme.ansi[idx as usize],
@@ -710,7 +780,48 @@ fn search_text<T>(
     Some(line)
 }
 
+/// How a cell's cluster asks to be drawn: VS16 (U+FE0F) selects the emoji,
+/// VS15 (U+FE0E) the text glyph. Font fallback alone picks whichever font
+/// has the character first (a text heart for "❤️", a color watch for "⌚︎").
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Presentation {
+    Default,
+    Emoji,
+    Text,
+}
+
+fn presentation(zerowidth: Option<&[char]>) -> Presentation {
+    match zerowidth {
+        Some(zw) if zw.contains(&'\u{fe0f}') => Presentation::Emoji,
+        Some(zw) if zw.contains(&'\u{fe0e}') => Presentation::Text,
+        _ => Presentation::Default,
+    }
+}
+
+/// Color emoji font for emoji presentation (fallback covers its absence).
+#[cfg(target_os = "macos")]
+const EMOJI_FAMILY: &str = "Apple Color Emoji";
+#[cfg(not(target_os = "macos"))]
+const EMOJI_FAMILY: &str = "Noto Color Emoji";
+/// Monochrome symbol font for text presentation.
+#[cfg(target_os = "macos")]
+const SYMBOL_FAMILY: &str = "Apple Symbols";
+#[cfg(not(target_os = "macos"))]
+const SYMBOL_FAMILY: &str = "DejaVu Sans";
+
 const WIDE_SPACERS: Flags = Flags::WIDE_CHAR_SPACER.union(Flags::LEADING_WIDE_CHAR_SPACER);
+
+/// The glyph a cell draws. alacritty keeps a tab's first cell as '\t' (for
+/// copying); shaped, it would jump to the font's tab stop and push the rest
+/// of the row right (vttest's "tab to right margin" letters landed past
+/// column 80). Hidden (SGR 8) text draws nothing.
+fn drawn_char(c: char, flags: Flags) -> char {
+    if flags.contains(Flags::HIDDEN) || c == '\t' {
+        ' '
+    } else {
+        c
+    }
+}
 
 /// Text of one grid line for copying: no wide-glyph spacers, combining marks
 /// kept. The flag is true when the row soft-wraps into the next one (its
@@ -1116,13 +1227,12 @@ pub fn render(
     // sticky command header: first visible row belongs to a block whose
     // header row is above the viewport
     if !alt_screen && let Some(DisplayLine::Grid(top_abs)) = visible.first() {
-        out.sticky_block = blocks
-            .iter()
-            .find(|b| {
-                b.suppressed_range()
-                    .is_some_and(|(s, _)| s < *top_abs && *top_abs < b.end.unwrap_or(u64::MAX))
-            })
-            .map(|b| b.id);
+        let sticky = blocks.iter().find(|b| {
+            b.suppressed_range()
+                .is_some_and(|(s, _)| s < *top_abs && *top_abs < b.end.unwrap_or(u64::MAX))
+        });
+        out.sticky_block = sticky.map(|b| b.id);
+        out.sticky_open = sticky.is_some_and(|b| b.end.is_none());
     }
 
     // bookmark indicator dots on the right edge (position ∝ place in history)
@@ -1218,6 +1328,9 @@ fn render_grid_line(
     }
     let line = Line(rel as i32);
     let row = &g[line];
+    // DECDWL/DECDHL: every cell is two columns wide
+    let attr = LineSize::of(row.attr);
+    let sx = if attr == LineSize::Single { 1.0 } else { 2.0 };
 
     // search highlighting: per-column match state on this line
     let mut match_cols: Vec<(usize, bool)> = Vec::new(); // (col, is_current)
@@ -1237,9 +1350,10 @@ fn render_grid_line(
         fg: Color,
         weight: Weight,
         italic: bool,
+        presentation: Presentation,
     }
     let mut spans: Vec<Span> = Vec::new();
-    let cols = g.columns().min(grid.cols + 8);
+    let cols = (g.columns() / sx as usize).min(grid.cols + 8);
     // cell backgrounds (merged runs, block cursor) draw before decorations
     let mut backs: Vec<([f32; 2], [f32; 2], Color, f32)> = Vec::new();
     let mut decos: Vec<([f32; 2], [f32; 2], Color)> = Vec::new();
@@ -1251,8 +1365,16 @@ fn render_grid_line(
             continue;
         }
 
-        let mut fg = resolve_color(theme, cell.fg);
-        let mut bg = resolve_color(theme, cell.bg);
+        // 256-color slots the program redefined (OSC 4); the 16 ANSI ones
+        // and the defaults arrive already applied in `theme` (`pane_theme`)
+        let palette = |c: ansi::Color| match c {
+            ansi::Color::Indexed(i) if i >= 16 => term.colors()[i as usize]
+                .map(rgb_color)
+                .unwrap_or_else(|| resolve_color(theme, c)),
+            c => resolve_color(theme, c),
+        };
+        let mut fg = palette(cell.fg);
+        let mut bg = palette(cell.bg);
         if flags.contains(Flags::INVERSE) {
             std::mem::swap(&mut fg, &mut bg);
         }
@@ -1282,8 +1404,8 @@ fn render_grid_line(
             grid.cell_w * 2.0
         } else {
             grid.cell_w
-        };
-        let cx = x + col as f32 * grid.cell_w;
+        } * sx;
+        let cx = x + col as f32 * grid.cell_w * sx;
 
         let block_cursor = is_cursor && grid.cursor_style == CursorStyle::Block;
         if block_cursor {
@@ -1317,11 +1439,14 @@ fn render_grid_line(
             Weight::NORMAL
         };
         let italic = flags.contains(Flags::ITALIC);
-        let ch = if flags.contains(Flags::HIDDEN) {
-            ' '
-        } else {
-            cell.c
-        };
+        let mut ch = drawn_char(cell.c, flags);
+        let presentation = presentation(cell.zerowidth());
+        if flags.contains(Flags::BLINK) {
+            BLINK_DRAWN.store(true, std::sync::atomic::Ordering::Relaxed);
+            if !grid.text_blink_on {
+                ch = ' ';
+            }
+        }
 
         // SGR decorations: underline variants (colored by SGR 58 when set)
         // and strikethrough, drawn as quads under the glyph layer
@@ -1358,15 +1483,15 @@ fn render_grid_line(
             }
         }
 
-        if !spans
-            .last()
-            .is_some_and(|l| l.fg == fg && l.weight == weight && l.italic == italic)
-        {
+        if !spans.last().is_some_and(|l| {
+            l.fg == fg && l.weight == weight && l.italic == italic && l.presentation == presentation
+        }) {
             spans.push(Span {
                 text: String::new(),
                 fg,
                 weight,
                 italic,
+                presentation,
             });
         }
         let Some(span) = spans.last_mut() else {
@@ -1409,28 +1534,55 @@ fn render_grid_line(
     grid.font_size.to_bits().hash(&mut h);
     grid.line_h.to_bits().hash(&mut h);
     grid.ligatures.hash(&mut h);
+    attr.hash(&mut h);
+    grid.cell_w.to_bits().hash(&mut h);
     for s in &spans {
         s.text.hash(&mut h);
         s.weight.0.hash(&mut h);
         s.italic.hash(&mut h);
+        s.presentation.hash(&mut h);
         s.fg.r.to_bits().hash(&mut h);
         s.fg.g.to_bits().hash(&mut h);
         s.fg.b.to_bits().hash(&mut h);
         s.fg.a.to_bits().hash(&mut h);
     }
+    // double-height lines shape at twice the size and show one half;
+    // double-width lines space each glyph across two cells
+    let tall = matches!(attr, LineSize::Top | LineSize::Bottom);
+    let (font_size, line_h) = if tall {
+        (grid.font_size * 2.0, grid.line_h * 2.0)
+    } else {
+        (grid.font_size, grid.line_h)
+    };
+    let spacing = if attr == LineSize::Wide {
+        grid.cell_w / grid.font_size
+    } else {
+        0.0
+    };
     let buf = engine.shaped(h.finish(), |fs| {
-        let mut buf = Buffer::new(fs, Metrics::new(grid.font_size, grid.line_h));
-        buf.set_size(fs, None, Some(grid.line_h));
+        let mut buf = Buffer::new(fs, Metrics::new(font_size, line_h));
+        buf.set_size(fs, None, Some(line_h));
         let rich: Vec<(&str, Attrs)> = spans
             .iter()
             .map(|s| {
                 let attrs = mono_attrs(grid.ligatures)
                     .weight(s.weight)
                     .color(shift_renderer::text_color(s.fg));
+                // only DECDWL lines set tracking
+                let attrs = if spacing > 0.0 {
+                    attrs.letter_spacing(spacing)
+                } else {
+                    attrs
+                };
                 let attrs = if s.italic {
                     attrs.style(shift_renderer::glyphon::Style::Italic)
                 } else {
                     attrs
+                };
+                let attrs = match s.presentation {
+                    Presentation::Default => attrs,
+                    Presentation::Emoji => attrs.family(Family::Name(EMOJI_FAMILY)),
+                    Presentation::Text => attrs.family(Family::Name(SYMBOL_FAMILY)),
                 };
                 (s.text.as_str(), attrs)
             })
@@ -1444,7 +1596,47 @@ fn render_grid_line(
         );
         buf
     });
-    layer.text(buf, x, y, theme.fg);
+    match attr {
+        LineSize::Single => layer.text(buf, x, y, theme.fg),
+        LineSize::Wide => layer.text(buf, x + grid.cell_w / 2.0, y, theme.fg),
+        LineSize::Top | LineSize::Bottom => {
+            let bounds = TextBounds {
+                left: x.floor() as i32,
+                top: y.floor() as i32,
+                right: (x + cols as f32 * grid.cell_w * sx).ceil() as i32,
+                bottom: (y + grid.line_h).ceil() as i32,
+            };
+            let top = if attr == LineSize::Top {
+                y
+            } else {
+                y - grid.line_h
+            };
+            layer.text_clipped(buf, x, top, theme.fg, bounds);
+        }
+    }
+}
+
+/// A line's DEC size (`row.attr`: ESC # 3/4/6, ESC # 5 resets).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum LineSize {
+    Single,
+    /// DECDWL: double width.
+    Wide,
+    /// DECDHL top half.
+    Top,
+    /// DECDHL bottom half.
+    Bottom,
+}
+
+impl LineSize {
+    fn of(attr: u8) -> Self {
+        match attr {
+            3 => Self::Top,
+            4 => Self::Bottom,
+            6 => Self::Wide,
+            _ => Self::Single,
+        }
+    }
 }
 
 /// Shared clock for running-block spinners (all spin in phase).
@@ -1694,6 +1886,21 @@ fn render_header(
 mod tests {
     use super::*;
     use std::time::Duration as StdDuration;
+
+    #[test]
+    fn tab_and_hidden_cells_draw_blank() {
+        assert_eq!(drawn_char('\t', Flags::empty()), ' ');
+        assert_eq!(drawn_char('x', Flags::HIDDEN), ' ');
+        assert_eq!(drawn_char('x', Flags::BOLD), 'x');
+    }
+
+    #[test]
+    fn variation_selectors_pick_the_presentation() {
+        assert_eq!(presentation(None), Presentation::Default);
+        assert_eq!(presentation(Some(&['\u{301}'])), Presentation::Default);
+        assert_eq!(presentation(Some(&['\u{fe0f}'])), Presentation::Emoji);
+        assert_eq!(presentation(Some(&['\u{fe0e}'])), Presentation::Text);
+    }
 
     struct Noop;
     impl shift_pty::alacritty_terminal::event::EventListener for Noop {}

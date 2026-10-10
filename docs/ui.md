@@ -205,7 +205,12 @@ Each command becomes a block via shell-integration OSC 133 markers:
   ⇧⌘C / ⌥⇧⌘C / ⌘I / ⌘B / ⌃M; Esc or clicking again deselects.
 - **Sticky command header**: when a block's output scrolls but its header would
   leave the viewport, the header pins to the top edge; clicking it jumps to the
-  block.
+  block. Not over a command that is still running while the view follows its
+  output: the program owns the whole PTY height and redraws its top row
+  (vttest, progress UIs). Scrolled up, or once the command ends, it pins again.
+- **Reverse screen** (DECSCNM, `CSI ? 5 h`, used by vttest and `tput flash`):
+  the pane's default foreground and background trade places until the program
+  resets it (or a terminal reset).
 - **Bookmark dots** on the right edge (position proportional to scrollback
   position); click jumps to the bookmarked block.
 - **Header overflow**: a long command is cut with `…` before the badge group;
@@ -218,8 +223,17 @@ Each command becomes a block via shell-integration OSC 133 markers:
   are accepted) — ⌘-click opens it with the system opener. Only http, https,
   file, mailto and ftp targets open.
 - **Cell styles**: bold, italic (embedded JetBrains Mono Italic/Bold Italic),
-  dim, inverse, hidden, strikethrough, and underline variants (single, double,
-  curly, dotted, dashed; SGR 58 colored).
+  dim, inverse, hidden, strikethrough, blinking (SGR 5: hidden and shown every
+  600 ms), and underline variants (single, double, curly, dotted, dashed; SGR
+  58 colored).
+- **Line sizes**: double-width lines (DECDWL, `ESC # 6`) draw each character
+  across two cells; double-height lines (DECDHL, `ESC # 3` and `ESC # 4`) draw
+  the top and bottom halves of twice-size text. Double clicks and mouse reports
+  map to the character drawn under the pointer.
+- **Emoji presentation**: an emoji followed by VS16 (U+FE0F) draws from the
+  color emoji font (Apple Color Emoji, Noto Color Emoji) across two cells; a
+  character followed by VS15 (U+FE0E) draws its monochrome text glyph (Apple
+  Symbols, DejaVu Sans) in one cell.
 
 ## Command editor (input zone)
 
@@ -233,11 +247,11 @@ integration). Sits at the bottom of the pane, or at the top with
   branch icon, the branch and the ahead/behind arrows and dirty dot, muted.
   A narrow pane keeps the cwd's tail and drops the branch chip whole. In
   every pane of a split; hidden in shell-prompt mode.
-- **Prompt glyph**: the logo's chevron, drawn (not a font glyph) — green
+- **Prompt glyph**: the logo's chevron, drawn (not a font glyph) — the logo's blue (`accent`)
   normally, red after a non-zero exit, muted in an unfocused split pane. In
   shell-prompt mode (`prompt = "shell"`) the shell's own PS1 stays on the grid
   above and the editor shows a smaller muted chevron instead.
-- **Live syntax highlighting**: command / flags / strings / operators.
+- **Live syntax highlighting**: command and flags in white (`text_bright` / `fg`), strings in `syntax.string`, operators muted.
 - **Multi-line commands**: ⇧⏎ / ⌥⏎ add a line; the zone grows 20 px per extra
   line and each continuation row carries a dim `…` in the prompt column.
 - **Soft wrap**: a line longer than the editor wraps onto more rows (wide

@@ -652,6 +652,20 @@ rv_steps = [
     "click 1000 359",
     "wait 200",
     f"dump {rv}/revealed.txt",
+    # no sticky header over a command still running and followed live: it
+    # would hide the program's top row; finished, it pins again
+    "type seq 1 300; sleep 3\\n",
+    "wait 1200",
+    f"dump {rv}/sticky-running.txt",
+    "wait 3500",
+    f"dump {rv}/sticky-done.txt",
+    # DECSCNM reverses the pane while set; typed brackets inside quotes pair
+    # nothing (the closing quote used to leave `]'` behind)
+    "type printf '\\\\033[?5h'; sleep 2; printf '\\\\033[?5l'\\n",
+    "wait 1000",
+    f"dump {rv}/reverse-on.txt",
+    "wait 2000",
+    f"dump {rv}/reverse-off.txt",
     "quit",
 ]
 (rv / "rv.shift").write_text("\n".join(rv_steps) + "\n")
@@ -669,6 +683,54 @@ assert "expanded=1 revealed=0" in expanded, expanded
 revealed = (rv / "revealed.txt").read_text()
 # lines 10..37 sit between the hunks around lines 6 and 41
 assert "expanded=1 revealed=28" in revealed, revealed
+running = (rv / "sticky-running.txt").read_text()
+assert "sticky=None" in running and "sticky=Some" not in running, running
+done = (rv / "sticky-done.txt").read_text()
+assert "sticky=Some(" in done, done
+assert "reverse_screen=true" in (rv / "reverse-on.txt").read_text()
+off = (rv / "reverse-off.txt").read_text()
+assert "reverse_screen=false" in off, off
+assert "cmd=\"printf '\\\\033[?5h'; sleep 2; printf '\\\\033[?5l'\" exit" in off, off
+
+# DEC double-height (ESC # 3/4) and double-width (ESC # 6) lines draw every
+# cell two columns wide: a double click maps the pointer to the word drawn
+# under it, not to the single-width column there
+dec = scratch / "dec"
+for sub in ("cfg", "data"):
+    (dec / sub).mkdir(parents=True, exist_ok=True)
+(dec / "lines.txt").write_text(
+    "normal line\n\x1b#3Double height\n\x1b#4Double height\n\x1b#6Double width\nnormal again\n")
+dec_steps = [
+    "resize 700 400",
+    "wait_prompt",
+    f"type cat {dec / 'lines.txt'}\\n",
+    "wait 800",
+    "dblclick 170 152",
+    "wait 200",
+    "key cmd+c",
+    "key cmd+v",
+    "wait 200",
+    f"dump {dec}/wide.txt",
+    "dblclick 60 120",
+    "wait 200",
+    "key cmd+c",
+    "key cmd+a",
+    "key cmd+v",
+    "wait 200",
+    f"dump {dec}/tall.txt",
+    "quit",
+]
+(dec / "dec.shift").write_text("\n".join(dec_steps) + "\n")
+with (dec / "app.log").open("w") as log:
+    rc = subprocess.run([str(binary), "--script", str(dec / "dec.shift"), "--headless"],
+                        env=dict(env, XDG_CONFIG_HOME=str(dec / "cfg"),
+                                 XDG_DATA_HOME=str(dec / "data")),
+                        stdout=log, stderr=log, timeout=60).returncode
+assert rc == 0, died("DEC line run failed", dec / "app.log")
+wide = (dec / "wide.txt").read_text()
+assert 'editor="width"' in wide, wide
+tall = (dec / "tall.txt").read_text()
+assert 'editor="Double"' in tall, tall
 
 for client in clients:
     client.close()

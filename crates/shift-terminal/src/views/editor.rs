@@ -1,5 +1,6 @@
 use shift_core::highlight::{TokenKind, tokenize};
 use shift_core::{Color, Config, CursorStyle, PromptMode, Theme};
+use shift_pty::alacritty_terminal::term::width::{Cluster, Placement};
 use shift_renderer::glyphon::{Attrs, Buffer, Family, Metrics, Shaping, Weight, Wrap};
 use shift_renderer::{Layer, TextEngine, mono_family};
 
@@ -17,23 +18,6 @@ pub const LINE_H: f32 = 20.0;
 pub const FONT_SIZE: f32 = 13.0;
 pub const PAD_X: f32 = 16.0;
 
-/// Terminal cells a character occupies (CJK, Hangul, fullwidth forms and
-/// emoji are double width).
-fn char_cells(c: char) -> usize {
-    let u = c as u32;
-    let wide = matches!(u,
-        0x1100..=0x115F
-        | 0x2E80..=0xA4CF
-        | 0xAC00..=0xD7A3
-        | 0xF900..=0xFAFF
-        | 0xFE30..=0xFE4F
-        | 0xFF00..=0xFF60
-        | 0xFFE0..=0xFFE6
-        | 0x1F300..=0x1FAFF
-        | 0x20000..=0x3FFFD);
-    if wide { 2 } else { 1 }
-}
-
 /// Visual rows of the buffer: logical lines (split at `\n`) soft-wrapped
 /// every `cols` cells. Byte ranges exclude the newline.
 pub fn wrap_rows(buffer: &str, cols: usize) -> Vec<std::ops::Range<usize>> {
@@ -43,14 +27,23 @@ pub fn wrap_rows(buffer: &str, cols: usize) -> Vec<std::ops::Range<usize>> {
     for line in buffer.split('\n') {
         let mut start = line_start;
         let mut used = 0;
+        // cells as the terminal counts them: a cluster (combining marks,
+        // ZWJ emoji, flags, VS16) never splits across rows
+        let mut cluster = Cluster::default();
         for (i, c) in line.char_indices() {
-            let w = char_cells(c);
-            if used + w > cols && used > 0 {
-                rows.push(start..line_start + i);
-                start = line_start + i;
-                used = 0;
+            match cluster.next(c) {
+                Some(Placement::New(w)) => {
+                    if used + w > cols && used > 0 {
+                        rows.push(start..line_start + i);
+                        start = line_start + i;
+                        used = 0;
+                    }
+                    used += w;
+                }
+                Some(Placement::JoinWiden) => used += 1,
+                Some(Placement::JoinNarrow) => used = used.saturating_sub(1),
+                Some(Placement::Join) | None => {}
             }
-            used += w;
         }
         rows.push(start..line_start + line.len());
         line_start += line.len() + 1;
@@ -147,7 +140,7 @@ pub fn render(
     let line_h = LINE_H;
     let prompt_color = match pane.last_exit {
         Some(n) if n != 0 => theme.error,
-        _ => theme.success,
+        _ => theme.accent,
     };
     // the logo's chevron (exit status colors it); shell-prompt mode keeps
     // the shell's own PS1 on the grid right above, so it is a quiet one
@@ -155,7 +148,7 @@ pub fn render(
     let chevron_h = if shell_prompt { 9.0 } else { 11.0 };
     prompt_chevron(
         layer,
-        [x + PAD_X, input_y - 1.0 + CURSOR_H / 2.0],
+        [x + PAD_X, input_y + CURSOR_TOP + CURSOR_H / 2.0],
         chevron_h,
         if shell_prompt || !focused {
             theme.text_muted
@@ -172,8 +165,8 @@ pub fn render(
     let tokens = tokenize(buffer);
     let color_of = |kind: TokenKind| -> Color {
         match kind {
-            TokenKind::Command => theme.syntax.command,
-            TokenKind::Flag => theme.syntax.flag,
+            TokenKind::Command => theme.text_bright,
+            TokenKind::Flag => theme.fg,
             TokenKind::Str => theme.syntax.string,
             TokenKind::Op => theme.text_muted,
             TokenKind::Plain => theme.fg,
@@ -345,11 +338,23 @@ pub fn render(
     if ghost_on {
         let gx = text_x + prefix_w;
         let gw = engine.measure(ghost, font_size, mono_family(), Weight::NORMAL);
-        let gbuf = make_mono(engine, ghost, font_size, Weight::NORMAL);
+        let mut gbuf = Buffer::new(&mut engine.font_system, Metrics::new(font_size, line_h));
+        gbuf.set_text(
+            &mut engine.font_system,
+            ghost,
+            &mono_attrs(),
+            Shaping::Advanced,
+            None,
+        );
         layer.text(gbuf, gx, cursor_y, theme.syntax.ghost);
         let key = "→";
         let kw = engine.measure(key, 11.0, shift_renderer::FONT_SANS, Weight::NORMAL);
-        let chip = [gx + gw + 8.0, cursor_y, kw + 10.0, 16.0];
+        let chip = [
+            gx + gw + 8.0,
+            cursor_y + CURSOR_TOP + (CURSOR_H - 16.0) / 2.0,
+            kw + 10.0,
+            16.0,
+        ];
         layer.bordered(
             [chip[0], chip[1]],
             [chip[2], chip[3]],
@@ -438,17 +443,17 @@ pub fn render(
     if blink_on || vim_normal {
         let (rect_pos, rect_size, alpha) = match style {
             CursorStyle::Block => (
-                [text_x + prefix_w, cursor_y - 1.0],
+                [text_x + prefix_w, cursor_y + CURSOR_TOP],
                 [8.0, CURSOR_H],
                 if over_glyph { 0.45 } else { 1.0 },
             ),
             CursorStyle::Bar => (
-                [text_x + prefix_w - 1.0, cursor_y - 1.0],
+                [text_x + prefix_w - 1.0, cursor_y + CURSOR_TOP],
                 [2.0, CURSOR_H],
                 1.0,
             ),
             CursorStyle::Underline => (
-                [text_x + prefix_w, cursor_y + CURSOR_H - 3.0],
+                [text_x + prefix_w, cursor_y + CURSOR_TOP + CURSOR_H - 2.0],
                 [8.0, 2.0],
                 1.0,
             ),
@@ -599,8 +604,11 @@ const CHIP_PAD: f32 = 5.0;
 const CHIP_ICON: f32 = 10.0;
 const CHIP_GAP: f32 = 6.0;
 
-/// Block cursor height; the prompt chevron matches it.
+/// Block cursor height, and its top below the input line's top: it spans
+/// the 13 px text's ascenders to descenders in the 20 px line. The prompt
+/// chevron and the ghost text's → chip centre on it.
 const CURSOR_H: f32 = 17.0;
+const CURSOR_TOP: f32 = 2.0;
 
 /// The logo's chevron (`>` of the app icon: 170 wide, 304 tall with its
 /// round caps on the 1024 grid), `h` px tall overall, its left cap at
@@ -696,6 +704,11 @@ mod tests {
         // wide characters count two cells
         let s = "가나다";
         assert_eq!(wrap_rows(s, 4), vec![0..6, 6..9]);
+        // a combining mark adds no cell; a ZWJ family is one wide cluster
+        // and never splits across rows
+        assert_eq!(wrap_rows("abce\u{301}", 4), vec![0..6]);
+        let family = "ab\u{1f468}\u{200d}\u{1f469}";
+        assert_eq!(wrap_rows(family, 4), vec![0..family.len()]);
         // the cursor on a wrap boundary sits at the start of the next row
         let rows = wrap_rows("abcdefgh", 4);
         assert_eq!(row_of(&rows, 4), 1);

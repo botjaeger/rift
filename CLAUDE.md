@@ -129,10 +129,11 @@ Four crates; dependencies flow strictly downward.
 
 - **Absolute line model.** Blocks and images anchor to monotone line indices
   that survive scrollback trim. `shift-pty/src/abs_term.rs` is a GENERATED
-  wrapper over all 71 vte `Handler` methods that counts lines pushed into
+  wrapper over every vte `Handler` method that counts lines pushed into
   history (`scrolled`): `abs = scrolled + screen_row`, grid
-  `Line = abs - scrolled` (negative = history). If vte's `Handler` trait
-  changes, regenerate the wrapper; do not hand-patch methods.
+  `Line = abs - scrolled` (negative = history). A method it does not forward
+  silently runs the trait's no-op default; `every_handler_method_is_forwarded`
+  fails then. Add the delegation; do not hand-patch the existing ones.
 - **Resize compensation.** Row-count changes move lines between history and
   screen; `Session::resize` folds the delta into `scrolled` and remaps block
   and image anchors across column reflow. Without it every anchor drifts when
@@ -170,8 +171,13 @@ Four crates; dependencies flow strictly downward.
 - wgpu stays on major 29: glyphon 0.11 requires `^29`. Bump only when glyphon
   releases against the new major.
 - winit stays on 0.30 (`ApplicationHandler`; 0.31 is beta).
-- alacritty_terminal 0.26: only `tty`, `Term`, re-exported `vte` and
-  `FairMutex` are used — never its `event_loop`.
+- alacritty_terminal 0.26 and vte 0.15 are vendored in `vendor/` (wired in by
+  `[patch.crates-io]`, outside the workspace) and carry the VT420 emulation,
+  the Xcms color parser (`vendor/vte/src/xcms.rs`) and wcwidth-compatible
+  cluster widths (`term/width.rs`; regenerate `width_tables.rs` with
+  `scripts/gen-width-tables.py`). The fmt, clippy and test gates run on them
+  too. Only `tty`, `Term`, re-exported `vte` and `FairMutex` are used — never
+  alacritty's `event_loop`.
 - Rust 1.98.0 (`rust-toolchain.toml`); bump together with the `FROM` line of
   `packaging/linux-verify.Dockerfile`.
 

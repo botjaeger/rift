@@ -30,6 +30,9 @@ pub enum SessionEvent {
     Clipboard(String),
     /// OSC 4/10/11/12 query: reply with palette index `usize`'s color.
     ColorRequest(usize, ColorReply),
+    /// XTWINOPS (or DECCOLM/DECSLPP) the window must carry out or answer:
+    /// parameters as sent, `None` = omitted.
+    WindowOp(Vec<Option<u16>>),
     /// The program asked for a notification (OSC 9 / 777 / 99).
     Notify {
         title: String,
@@ -244,6 +247,7 @@ impl EventListener for EventProxy {
                     SessionEvent::ColorRequest(index, ColorReply(format)),
                 );
             }
+            Event::WindowOp(params) => (self.observer)(self.pane, SessionEvent::WindowOp(params)),
             Event::TextAreaSizeRequest(format) => {
                 let size = *self.window_size.lock().unwrap();
                 self.writer.reply(format(size).as_bytes());
@@ -451,6 +455,7 @@ impl Reader {
             scrolled: &mut scrolled_cur,
             scrollback_cap: self.ctx.scrollback,
             saw_clear_saved: false,
+            on_resize: None,
         };
         parser.stop_sync(&mut abs);
         self.ctx.scrolled.store(scrolled_cur, Ordering::Release);
@@ -670,6 +675,7 @@ impl Session {
             // programs opt in with `CSI > flags u`; the app's key encoder
             // follows the resulting mode bits
             kitty_keyboard: true,
+            xtversion: format!("Shift({})", env!("CARGO_PKG_VERSION")),
             ..TermConfig::default()
         };
         let replier = Replier::new(writer.clone());
@@ -814,6 +820,7 @@ impl Session {
                 scrolled: &mut scrolled,
                 scrollback_cap: self.scrollback,
                 saw_clear_saved: false,
+                on_resize: None,
             };
             abs.clear_screen(ClearMode::All);
             abs.clear_screen(ClearMode::Saved);
@@ -1040,6 +1047,23 @@ fn feed(parser: &mut vte::ansi::Processor, scanner: &mut OscScanner, bytes: &[u8
     // between chunks
     let mut scrolled_cur = ctx.scrolled.load(Ordering::Acquire);
     let mut start = 0usize;
+    // a program's resize request (XTWINOPS 8, DECCOLM, DECSLPP) applies to
+    // the grid at once, with the anchor bookkeeping of any resize; the app
+    // resizes the window (and the PTY) to match after
+    let resize = |term: &mut Term<EventProxy>, rows: usize, cols: usize, scrolled: &mut u64| {
+        let counter = AtomicU64::new(*scrolled);
+        resize_term(
+            term,
+            GridSize { cols, rows },
+            &counter,
+            &ctx.blocks,
+            &ctx.graphics,
+        );
+        *scrolled = counter.load(Ordering::Acquire);
+        let mut ws = ctx.window_size.lock().unwrap();
+        ws.num_lines = rows as u16;
+        ws.num_cols = cols as u16;
+    };
     for seg in segments {
         let was_alt = term.mode().contains(TermMode::ALT_SCREEN);
         let cleared = {
@@ -1048,6 +1072,7 @@ fn feed(parser: &mut vte::ansi::Processor, scanner: &mut OscScanner, bytes: &[u8
                 scrolled: &mut scrolled_cur,
                 scrollback_cap: ctx.scrollback,
                 saw_clear_saved: false,
+                on_resize: Some(&resize),
             };
             parser.advance(&mut abs, &bytes[start..seg.end]);
             // a shell marker anchors to the cursor: flush a pending
@@ -1142,6 +1167,7 @@ fn end_partial_line(
         scrolled,
         scrollback_cap: scrollback,
         saw_clear_saved: false,
+        on_resize: None,
     };
     parser.advance(&mut abs, b"\r\n");
     true
@@ -1189,6 +1215,7 @@ fn place_image(
         scrolled,
         scrollback_cap: ctx.scrollback,
         saw_clear_saved: false,
+        on_resize: None,
     };
     parser.advance(&mut abs, seq.as_bytes());
 }
@@ -1356,6 +1383,23 @@ mod tests {
             reply: None,
             notify: None,
         }
+    }
+
+    #[test]
+    fn decscnm_sets_and_resets_the_reverse_screen() {
+        let c = ctx(20, 5);
+        let mut p = vte::ansi::Processor::new();
+        let mut s = OscScanner::new();
+        let on = || c.term.lock().reverse_screen();
+        feed(&mut p, &mut s, b"a\x1b[?5hb", &c);
+        assert!(on());
+        // a mode list carrying 5, as `tput flash` and vttest send it
+        feed(&mut p, &mut s, b"\x1b[?7;5l", &c);
+        assert!(!on());
+        feed(&mut p, &mut s, b"\x1b[?5h", &c);
+        // RIS resets it with the rest of the terminal
+        feed(&mut p, &mut s, b"\x1bc", &c);
+        assert!(!on());
     }
 
     #[test]

@@ -330,6 +330,13 @@ impl EditorState {
             return;
         }
 
+        // inside a quoted string the text is literal: a bracket or the other
+        // quote pairs nothing, and the closing quote ends the string (paired,
+        // `'[a'` used to leave `]'` behind)
+        if self.selection().is_none() && quote_open_at(&self.buffer[..self.cursor]) {
+            self.insert(s);
+            return;
+        }
         let close = match ch {
             '(' => ')',
             '[' => ']',
@@ -642,6 +649,13 @@ pub struct PaneState {
     /// Frame cache for mouse → grid mapping (see terminal::RowKind).
     pub rows: Vec<crate::views::terminal::RowInfo>,
     pub last_grid: Option<crate::views::terminal::GridLayout>,
+    /// The space the grid gets, in points (whole cells fit in it); window
+    /// resizes in characters size the window around it.
+    pub text_area: (f32, f32),
+    /// The window's inner size (points) when `text_area` was laid out: the
+    /// chrome around the grid is their difference, whatever the window does
+    /// before the next frame.
+    pub layout_window: (f32, f32),
     pub alt_screen: bool,
     /// Mirrors `term.selection.is_some()` to avoid locking on every key.
     pub has_selection: bool,
@@ -680,6 +694,8 @@ impl PaneState {
             last_exit: None,
             rows: Vec::new(),
             last_grid: None,
+            text_area: (0.0, 0.0),
+            layout_window: (0.0, 0.0),
             alt_screen: false,
             has_selection: false,
             url_hits: Vec::new(),
@@ -788,6 +804,28 @@ impl TabState {
     }
 }
 
+/// Whether `before` (a command line up to the cursor) ends inside a quoted
+/// string, the way the shell reads it: `'…'` literal, `"…"` with `\`
+/// escapes, and a `\` outside quotes escaping the next char.
+fn quote_open_at(before: &str) -> bool {
+    let mut quote: Option<char> = None;
+    let mut chars = before.chars();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some('\''), '\'') => quote = None,
+            (Some('\''), _) => {}
+            (Some('"'), '\\') | (None, '\\') => {
+                chars.next();
+            }
+            (Some('"'), '"') => quote = None,
+            (Some(_), _) => {}
+            (None, '\'' | '"') => quote = Some(c),
+            (None, _) => {}
+        }
+    }
+    quote.is_some()
+}
+
 /// Start of the extended grapheme cluster ending at or before byte `i`.
 fn grapheme_prev(s: &str, i: usize) -> usize {
     // GraphemeCursor panics on an offset inside a char
@@ -833,7 +871,7 @@ fn grapheme_ceil(s: &str, i: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::EditorState;
+    use super::{EditorState, quote_open_at};
 
     #[test]
     fn placeholder_replace_and_cycle() {
@@ -1002,6 +1040,23 @@ mod tests {
         e.insert_with_pairs("\"");
         assert_eq!(e.buffer, "\"\"");
         assert_eq!(e.cursor, 1);
+    }
+
+    #[test]
+    fn nothing_pairs_inside_a_quoted_string() {
+        let mut e = EditorState::default();
+        for c in "printf '\\033[?5l' \"(x\" [y]".chars() {
+            e.insert_with_pairs(&c.to_string());
+        }
+        assert_eq!(e.buffer, "printf '\\033[?5l' \"(x\" [y]");
+        assert!(
+            quote_open_at("echo \"a\\\"b"),
+            "an escaped quote keeps it open"
+        );
+        assert!(
+            !quote_open_at("echo \\'a"),
+            "an escaped quote opens nothing"
+        );
     }
 
     #[test]

@@ -47,6 +47,7 @@ pub enum UserEvent {
     PtyClipboard(String),
     /// OSC 4/10/11/12 color query to answer from the theme.
     PtyColorRequest(PaneId, usize, shift_pty::ColorReply),
+    PtyWindowOp(PaneId, Vec<Option<u16>>),
     /// The system-wide `global_hotkey` was pressed.
     GlobalHotkey,
     /// A native menu item was chosen (its id).
@@ -244,6 +245,13 @@ impl From<accesskit_winit::Event> for UserEvent {
 const SIDE_PAD: f32 = 8.0;
 const TOP_PAD: f32 = 14.0;
 const DEFAULT_FONT_SIZE: f32 = 13.0;
+/// Half-period of blinking text (SGR 5), as xterm's default.
+const TEXT_BLINK: Duration = Duration::from_millis(600);
+/// Shortest gap between frames that program output or the running-command
+/// spinner asks for (120 Hz). Each frame locks the terminal the reader thread
+/// parses into; unpaced, the spinner redrew back to back and halved output
+/// throughput.
+const OUTPUT_FRAME: Duration = Duration::from_micros(8333);
 const BLINK_INTERVAL: Duration = Duration::from_millis(550);
 const BELL_FLASH: Duration = Duration::from_millis(120);
 /// How long the boot placeholder waits for a prompt after the first output.
@@ -476,6 +484,19 @@ pub struct App {
     explorer_hits: Vec<([f32; 4], ExplorerHit)>,
     review: ReviewPanelState,
     review_hits: Vec<([f32; 4], ReviewHit)>,
+    /// XTWINOPS state: iconified by a program, the last requested position
+    /// (a hidden window reports none), the size before a one-way maximize.
+    iconified: bool,
+    /// The tab label's shell name for the configured shell: resolving it
+    /// stats the shell binaries, too slow for every frame.
+    shell_label: Option<(Option<String>, String)>,
+    /// When the last frame was drawn, and the frame output asked for that
+    /// waits out [`OUTPUT_FRAME`].
+    last_frame: Instant,
+    output_frame_due: Option<Instant>,
+    fullscreen_op: bool,
+    window_pos: Option<(f64, f64)>,
+    restore_size: Option<winit::dpi::LogicalSize<f64>>,
     /// The hit rects under the pointer (folded indices into `hits`) and how
     /// often a change of them repainted: hover styling follows the mouse.
     hover_sig: u64,
@@ -1005,6 +1026,13 @@ impl App {
             explorer_hits: Vec::new(),
             review: ReviewPanelState::default(),
             review_hits: Vec::new(),
+            iconified: false,
+            shell_label: None,
+            last_frame: Instant::now(),
+            output_frame_due: None,
+            fullscreen_op: false,
+            window_pos: None,
+            restore_size: None,
             hover_sig: 0,
             hover_repaints: 0,
             review_cwd: None,
@@ -1248,11 +1276,25 @@ impl App {
             .scrolled
             .load(std::sync::atomic::Ordering::Acquire);
         let line = ALine((abs as i64 - scrolled as i64) as i32);
-        let colf = ((mx - content_x) / grid.cell_w).max(0.0);
-        let col = (colf.floor() as usize).min(grid.cols.saturating_sub(1));
+        // DECDWL/DECDHL lines draw every cell two columns wide
+        let (wide_line, cols) = {
+            use shift_pty::alacritty_terminal::grid::Dimensions;
+            let term = pane.session.term.lock();
+            let in_grid = line.0 < term.screen_lines() as i32
+                && line.0 >= -(term.grid().history_size() as i32);
+            let wide = in_grid && term.grid()[line].attr != 0;
+            (wide, if wide { grid.cols / 2 } else { grid.cols })
+        };
+        let cell_w = if wide_line {
+            grid.cell_w * 2.0
+        } else {
+            grid.cell_w
+        };
+        let colf = ((mx - content_x) / cell_w).max(0.0);
+        let col = (colf.floor() as usize).min(cols.saturating_sub(1));
         // past the last cell the pointer is right of its text: take the
         // cell's right half so the last char is included
-        let side = if colf >= grid.cols as f32 || colf.fract() >= 0.5 {
+        let side = if colf >= cols as f32 || colf.fract() >= 0.5 {
             ASide::Right
         } else {
             ASide::Left
@@ -4193,6 +4235,9 @@ impl App {
                 SessionEvent::ColorRequest(index, reply) => {
                     proxy.send_event(UserEvent::PtyColorRequest(pane, index, reply))
                 }
+                SessionEvent::WindowOp(params) => {
+                    proxy.send_event(UserEvent::PtyWindowOp(pane, params))
+                }
                 SessionEvent::Exit => proxy.send_event(UserEvent::PtyExit(pane)),
                 SessionEvent::Bell => proxy.send_event(UserEvent::PtyBell(pane)),
                 SessionEvent::Notify { title, body } => {
@@ -4736,6 +4781,12 @@ impl App {
         }
     }
 
+    /// Blinking text's visible phase (SGR 5; its own beat, slower than the
+    /// cursor's).
+    fn text_blink_on(&self) -> bool {
+        (self.blink_epoch.elapsed().as_millis() / TEXT_BLINK.as_millis()).is_multiple_of(2)
+    }
+
     fn blink_on(&self) -> bool {
         (self.blink_epoch.elapsed().as_millis() / BLINK_INTERVAL.as_millis()).is_multiple_of(2)
     }
@@ -4850,6 +4901,194 @@ impl App {
             && self.explorer.follow(std::path::Path::new(&cwd))
         {
             self.request_review();
+        }
+    }
+
+    /// XTWINOPS from `pane`'s program (xterm's window operations; DECCOLM
+    /// and DECSLPP arrive as a character resize): move, resize, iconify,
+    /// maximize and fullscreen the window, or report its state. Sizes in
+    /// characters and pixels are the pane's text area: the window grows or
+    /// shrinks by the difference. Pixels are device pixels, the unit
+    /// `CSI 14 t` reports in.
+    fn window_op(&mut self, pane: PaneId, params: &[Option<u16>]) {
+        use winit::dpi::PhysicalSize;
+        let Some(window) = self.window.clone() else {
+            return;
+        };
+        let Some((_, tab)) = self.find_tab_of_pane(pane) else {
+            return;
+        };
+        let Some(p) = tab.pane(pane) else {
+            return;
+        };
+        // the pane as laid out (the grid the window currently gives it)
+        let Some(grid) = p.last_grid else {
+            return;
+        };
+        let text_area = p.text_area;
+        let layout_window = p.layout_window;
+        let (term_rows, term_cols) = {
+            use shift_pty::alacritty_terminal::grid::Dimensions;
+            let term = p.session.term.lock();
+            (term.screen_lines(), term.columns())
+        };
+        let scale = window.scale_factor();
+        let cell = (self.cell_w as f64 * scale, self.line_h as f64 * scale);
+        let inner = window.inner_size();
+        let outer = window.outer_size();
+        let screen = window.current_monitor().map(|m| m.size()).unwrap_or(outer);
+        let (inner_w, inner_h) = (inner.width as f64, inner.height as f64);
+        // the window's chrome around the space the pane's grid gets, as of
+        // the last layout (the window may have changed since)
+        let chrome = (
+            (layout_window.0 - text_area.0) as f64 * scale,
+            (layout_window.1 - text_area.1) as f64 * scale,
+        );
+        let max_text = (
+            screen.width as f64 - chrome.0,
+            screen.height as f64 - chrome.1,
+        );
+        let _ = (inner_w, inner_h);
+        let arg = |i: usize| params.get(i).copied().flatten();
+        let mut out: Option<String> = None;
+        // half a cell more than the exact size: the grid takes whole cells,
+        // so rounding either way still lands on the requested count
+        let resize_text = |w: f64, h: f64| {
+            let size = PhysicalSize::new(
+                (w + chrome.0 + cell.0 / 2.0).round(),
+                (h + chrome.1 + cell.1 / 2.0).round(),
+            );
+            let _ = window.request_inner_size(size);
+        };
+        match arg(0).unwrap_or(0) {
+            1 => {
+                window.set_minimized(false);
+                self.iconified = false;
+            }
+            2 => {
+                window.set_minimized(true);
+                self.iconified = true;
+            }
+            // positions are in points: they round-trip exactly on any scale
+            3 => {
+                let x = arg(1).unwrap_or(0) as f64;
+                let y = arg(2).unwrap_or(0) as f64;
+                window.set_outer_position(winit::dpi::LogicalPosition::new(x, y));
+                self.window_pos = Some((x, y));
+            }
+            // the window in pixels (what `CSI 14;2 t` reports): omitted keeps,
+            // 0 = the screen
+            4 => {
+                let h = match arg(1) {
+                    None => inner.height,
+                    Some(0) => screen.height,
+                    Some(h) => h as u32,
+                };
+                let w = match arg(2) {
+                    None => inner.width,
+                    Some(0) => screen.width,
+                    Some(w) => w as u32,
+                };
+                let _ = window.request_inner_size(PhysicalSize::new(w, h));
+            }
+            5 => window.focus_window(),
+            7 => window.request_redraw(),
+            // text area in characters: omitted keeps, 0 = the screen. The
+            // term already took the size inline; the laid-out grid can still
+            // be a resize behind, so "keep" reads the term.
+            8 => {
+                let rows = match arg(1) {
+                    None => term_rows as f64,
+                    Some(0) => (max_text.1 / cell.1).floor(),
+                    Some(r) => r as f64,
+                };
+                let cols = match arg(2) {
+                    None => term_cols as f64,
+                    Some(0) => (max_text.0 / cell.0).floor(),
+                    Some(c) => c as f64,
+                };
+                resize_text(cols * cell.0, rows * cell.1);
+            }
+            // maximize: 0 restore, 1 both ways, 2 vertically, 3 horizontally
+            9 => match arg(1).unwrap_or(0) {
+                0 => {
+                    window.set_maximized(false);
+                    if let Some(size) = self.restore_size.take() {
+                        let _ = window.request_inner_size(size);
+                    }
+                }
+                n => {
+                    self.restore_size
+                        .get_or_insert(window.inner_size().to_logical(scale));
+                    let frame = (outer.width - inner.width, outer.height - inner.height);
+                    let size = match n {
+                        2 => PhysicalSize::new(inner.width, screen.height - frame.1),
+                        3 => PhysicalSize::new(screen.width - frame.0, inner.height),
+                        _ => PhysicalSize::new(screen.width - frame.0, screen.height - frame.1),
+                    };
+                    let _ = window.request_inner_size(size);
+                }
+            },
+            // fullscreen: 0 leave, 1 enter, 2 toggle
+            10 => {
+                let on = match arg(1).unwrap_or(0) {
+                    0 => false,
+                    1 => true,
+                    _ => !self.fullscreen_op,
+                };
+                self.fullscreen_op = on;
+                if self.headless {
+                    // a hidden window has no fullscreen space: cover the screen
+                    if on {
+                        self.restore_size
+                            .get_or_insert(window.inner_size().to_logical(scale));
+                        let _ = window.request_inner_size(screen);
+                    } else if let Some(size) = self.restore_size.take() {
+                        let _ = window.request_inner_size(size);
+                    }
+                } else {
+                    window
+                        .set_fullscreen(on.then_some(winit::window::Fullscreen::Borderless(None)));
+                }
+            }
+            11 => {
+                let iconified = window.is_minimized().unwrap_or(self.iconified);
+                out = Some(format!("\x1b[{}t", if iconified { 2 } else { 1 }));
+            }
+            13 => {
+                let (x, y) = window
+                    .outer_position()
+                    .ok()
+                    .map(|p| {
+                        let p: winit::dpi::LogicalPosition<f64> = p.to_logical(scale);
+                        (p.x, p.y)
+                    })
+                    .or(self.window_pos)
+                    .unwrap_or((0.0, 0.0));
+                let (x, y) = if arg(1) == Some(2) {
+                    (x + grid.x as f64, y + grid.y as f64)
+                } else {
+                    (x, y)
+                };
+                out = Some(format!("\x1b[3;{};{}t", x.round() as i64, y.round() as i64));
+            }
+            // 14;2: the whole window
+            14 => out = Some(format!("\x1b[4;{};{}t", outer.height, outer.width)),
+            15 => out = Some(format!("\x1b[5;{};{}t", screen.height, screen.width)),
+            19 => {
+                out = Some(format!(
+                    "\x1b[9;{};{}t",
+                    (max_text.1 / cell.1).floor() as i64,
+                    (max_text.0 / cell.0).floor() as i64
+                ))
+            }
+            _ => {}
+        }
+        if let Some(text) = out
+            && let Some((_, tab)) = self.find_tab_of_pane(pane)
+            && let Some(p) = tab.pane(pane)
+        {
+            p.session.write(text.as_bytes());
         }
     }
 
@@ -5113,6 +5352,9 @@ impl App {
         self.sync_history();
         let theme = self.theme.clone();
         let blink = self.blink_on() || !self.config.cursor_blink;
+        let text_blink_on = self.text_blink_on();
+        // re-armed by this frame: blinking text keeps the repaint beat going
+        crate::views::terminal::BLINK_DRAWN.store(false, std::sync::atomic::Ordering::Relaxed);
         let cell_w = self.cell_w;
         let cell_px = self.cell_px();
         let font_size = self.font_size;
@@ -5184,7 +5426,15 @@ impl App {
             .filter(|_| viewer_label.is_some());
         let viewer_has_focus = self.viewer_focused();
 
-        let shell_label = shift_core::shell_integration::shell_name(self.config.shell.as_deref());
+        let configured = self.config.shell.clone();
+        let shell_label = match &self.shell_label {
+            Some((for_config, name)) if *for_config == configured => name.clone(),
+            _ => {
+                let name = shift_core::shell_integration::shell_name(configured.as_deref());
+                self.shell_label = Some((configured, name.clone()));
+                name
+            }
+        };
         let tab_infos: Vec<tabbar::TabInfo> = self
             .tabs
             .iter()
@@ -5455,6 +5705,7 @@ impl App {
             } else {
                 pr.rect
             };
+            let text_area: (f32, f32);
             let grid = {
                 // inline grid_for (self is destructured)
                 let rect = body;
@@ -5480,6 +5731,7 @@ impl App {
                 };
                 let usable_w = (pw - terminal::BLOCK_INDENT).max(cell_w);
                 let usable_h = (ph - editor_h).max(line_h);
+                text_area = (usable_w, usable_h);
                 // input at the top: the grid starts below the editor zone
                 let y = if editor_vis && input_top {
                     y + editor_h - (if split { PANE_PAD } else { TOP_PAD - 4.0 })
@@ -5500,6 +5752,7 @@ impl App {
                     // the boot placeholder sits in the input zone; no stray
                     // grid cursor at the top while it shows
                     editor_owns_cursor: editor_vis || booting,
+                    text_blink_on,
                 }
             };
 
@@ -5510,6 +5763,8 @@ impl App {
                 },
                 cell_px,
             );
+            pane.text_area = text_area;
+            pane.layout_window = (w, h);
 
             // pane chrome (design 02)
             if split {
@@ -5553,6 +5808,16 @@ impl App {
             // content
             let layer = scene.layer(1);
             let text_start = layer.texts.len();
+            // the program's own default colors (OSC 4/10/11/12) and reverse
+            // screen (DECSCNM: vttest, `tput flash`) apply to this pane only
+            let pane_theme = terminal::pane_theme(&theme, &pane.session).inspect(|t| {
+                layer.rect(
+                    [pr.rect[0], pr.rect[1]],
+                    [pr.rect[2], pr.rect[3]],
+                    t.bg,
+                    0.0,
+                );
+            });
             let search_ctx = if search_state.open && is_active_pane && !filter_editing {
                 search_state.matcher().map(|matcher| terminal::SearchCtx {
                     matcher,
@@ -5564,7 +5829,7 @@ impl App {
             let out = terminal::render(
                 layer,
                 engine,
-                &theme,
+                pane_theme.as_ref().unwrap_or(&theme),
                 &pane.session,
                 &grid,
                 &mut pane.view_offset,
@@ -5623,6 +5888,7 @@ impl App {
             pane.url_hits = out.url_hits;
             pane.sticky_hit = None;
             let sticky_block = out.sticky_block;
+            let sticky_open = out.sticky_open;
 
             if booting {
                 let shell = shift_core::shell_integration::shell_name(config_ref.shell.as_deref());
@@ -5839,9 +6105,14 @@ impl App {
                 }
             }
 
-            // sticky command header (active pane only; layer 2 covers row text)
+            // sticky command header (active pane only; layer 2 covers row text).
+            // Not over a running command followed live: its program owns the
+            // whole PTY height, so the header would hide its top row (vttest,
+            // progress UIs redraw there); scrolled up, it shows again.
+            // (from this frame's blocks snapshot, not a second lock of them)
+            let followed_live = pane.view_offset == 0 && sticky_open;
             if is_active_pane
-                && let Some(sticky) = sticky_block
+                && let Some(sticky) = sticky_block.filter(|_| !followed_live)
                 && let Some(rect) = terminal::render_sticky_header(
                     scene.layer(2),
                     engine,
@@ -6320,7 +6591,22 @@ impl App {
         self.editor_cols = active_ed_cols;
     }
 
+    /// A frame for new program output: at once, or [`OUTPUT_FRAME`] after
+    /// the last one.
+    fn request_output_frame(&mut self) {
+        let due = self.last_frame + OUTPUT_FRAME;
+        if Instant::now() >= due {
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        } else {
+            self.output_frame_due.get_or_insert(due);
+        }
+    }
+
     fn redraw(&mut self, window: &Window) {
+        self.last_frame = Instant::now();
+        self.output_frame_due = None;
         let scale = window.scale_factor() as f32;
         if self.gpu.is_none() {
             return;
@@ -10112,7 +10398,10 @@ impl App {
             let Some(step) = self.script.as_mut().and_then(|s| s.take_due(now)) else {
                 break;
             };
-            if step == crate::script::Step::WaitPrompt {
+            if matches!(
+                step,
+                crate::script::Step::WaitPrompt | crate::script::Step::WaitFile(..)
+            ) {
                 log::debug!("script: {step:?}");
             } else {
                 log::info!("script: {step:?}");
@@ -10249,6 +10538,13 @@ impl App {
             Step::Menu(id) => self.run_menu_command(&id, event_loop),
             #[cfg(not(target_os = "macos"))]
             Step::Menu(id) => log::warn!("script: no menu bar on this platform ({id})"),
+            Step::WaitFile(path, ms) => {
+                if !path.exists()
+                    && let Some(s) = self.script.as_mut()
+                {
+                    let _ = s.rearm_wait(Duration::from_millis(100), Duration::from_millis(ms));
+                }
+            }
             Step::WaitPrompt => {
                 // re-arm until the active pane shows its first prompt (or 15s)
                 if !self.editor_active
@@ -11290,10 +11586,12 @@ impl App {
                 );
                 let _ = writeln!(
                     out,
-                    "    editor_selection={:?} filter={:?} correction={:?}",
+                    "    editor_selection={:?} filter={:?} correction={:?} sticky={:?} reverse_screen={}",
                     p.editor.selected_text(),
                     p.filter,
-                    p.correction
+                    p.correction,
+                    p.sticky_hit.map(|(_, b)| b),
+                    p.session.term.lock().reverse_screen()
                 );
                 // screen geometry for scripted mouse steps: cell size and
                 // the y of every grid row (`abs:y`) with the x of its text
@@ -11620,7 +11918,9 @@ impl ApplicationHandler<UserEvent> for App {
                 self.update_cursor_icon(&window);
                 self.update_a11y(&window);
                 if self.any_running {
-                    window.request_redraw();
+                    // the running spinner animates; paced so back-to-back
+                    // frames never starve the reader thread of the terminal
+                    self.request_output_frame();
                 }
             }
             _ => {}
@@ -11641,9 +11941,7 @@ impl ApplicationHandler<UserEvent> for App {
                 let active_idx = self.active;
                 if let Some((idx, tab)) = self.find_tab_of_pane(pane) {
                     if idx == active_idx {
-                        if let Some(w) = &self.window {
-                            w.request_redraw();
-                        }
+                        self.request_output_frame();
                     } else {
                         tab.activity = true;
                         if let Some(p) = tab.pane(pane) {
@@ -11680,17 +11978,11 @@ impl ApplicationHandler<UserEvent> for App {
                 self.copy_to_clipboard(text);
             }
             UserEvent::PtyColorRequest(pane, index, reply) => {
-                // 0–255 palette, 256 foreground, 257 background, 258 cursor
-                let color = match index {
-                    0..=255 => Some(terminal::indexed_color(&self.theme, index as u8)),
-                    256 => Some(self.theme.fg),
-                    257 => Some(self.theme.bg.with_alpha(1.0)),
-                    258 => Some(self.theme.cursor),
-                    _ => None,
-                };
-                if let Some(c) = color
-                    && let Some((_, tab)) = self.find_tab_of_pane(pane)
+                // the program's own setting (OSC 4/10/11/12) wins over the theme
+                let theme = self.theme.clone();
+                if let Some((_, tab)) = self.find_tab_of_pane(pane)
                     && let Some(p) = tab.pane(pane)
+                    && let Some(c) = terminal::palette_color(&theme, &p.session, index)
                 {
                     let to8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
                     let rgb = shift_pty::alacritty_terminal::vte::ansi::Rgb {
@@ -11701,6 +11993,7 @@ impl ApplicationHandler<UserEvent> for App {
                     p.session.write((reply.0)(rgb).as_bytes());
                 }
             }
+            UserEvent::PtyWindowOp(pane, params) => self.window_op(pane, &params),
             UserEvent::PtyExit(pane) => {
                 self.close_pane(pane, event_loop);
                 if let Some(w) = &self.window {
@@ -11816,9 +12109,19 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.sync_focus();
+        // a paced output frame whose time has come
+        let output_frame = self.output_frame_due;
+        if output_frame.is_some_and(|due| Instant::now() >= due) {
+            self.output_frame_due = None;
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
+        let output_frame = self.output_frame_due;
         if self.script.is_some() {
             self.drive_script(event_loop);
             if let Some(due) = self.script.as_ref().and_then(|s| s.due()) {
+                let due = output_frame.map_or(due, |f| f.min(due));
                 event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(due));
                 return;
             }
@@ -11872,9 +12175,18 @@ impl ApplicationHandler<UserEvent> for App {
             deadlines.push(now + Duration::from_millis(next_flip as u64 + 5));
             repaint |= next_flip > BLINK_INTERVAL.as_millis() - 30;
         }
+        // blinking text (SGR 5) on screen flips on its own beat
+        if crate::views::terminal::BLINK_DRAWN.load(std::sync::atomic::Ordering::Relaxed) {
+            let period = TEXT_BLINK.as_millis();
+            let elapsed = self.blink_epoch.elapsed().as_millis();
+            let next_flip = period - (elapsed % period);
+            deadlines.push(now + Duration::from_millis(next_flip as u64 + 5));
+            repaint |= next_flip > period - 30;
+        }
         if repaint && let Some(w) = &self.window {
             w.request_redraw();
         }
+        deadlines.extend(output_frame);
         event_loop.set_control_flow(match deadlines.into_iter().min() {
             Some(t) => winit::event_loop::ControlFlow::WaitUntil(t),
             None => winit::event_loop::ControlFlow::Wait,
