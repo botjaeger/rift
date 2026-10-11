@@ -151,7 +151,6 @@ pub fn defaults() -> Vec<(&'static str, &'static str)> {
         ("paste_alt", "cmd+v"),
         ("search", "ctrl+shift+f"),
         ("search_alt", "cmd+f"),
-        ("workflows", "ctrl+shift+r"),
         ("bookmark_toggle", "ctrl+shift+b"),
         ("bookmark_toggle_alt", "cmd+b"),
         ("bookmark_prev", "ctrl+shift+up"),

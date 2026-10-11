@@ -194,7 +194,6 @@ pub fn install(keymap: &Keymap) -> Option<MenuBar> {
         true,
         &[
             &action(keymap, "Command Palette", "palette"),
-            &action(keymap, "Workflows", "workflows"),
             &chord(keymap, "Command History", "ctrl+r"),
             &sep(),
             &action(keymap, "File Explorer", "toggle_explorer"),

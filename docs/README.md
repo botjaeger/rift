@@ -13,7 +13,7 @@ keyboard. The [project README](../README.md) explains what Shift is and why.
 | [features.md](features.md) | Every feature and its exact behavior |
 | [ui.md](ui.md) | Every UI surface: tabs, blocks, editor, palette, settings, dialogs |
 | [keyboard-shortcuts.md](keyboard-shortcuts.md) | Full default keymap (Warp layout), fixed keys, rebinding |
-| [configuration.md](configuration.md) | `config.toml` reference, themes, workflows, launch configs, file locations |
+| [configuration.md](configuration.md) | `config.toml` reference, themes, launch configs, file locations |
 
 ## Building Shift
 

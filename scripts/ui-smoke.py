@@ -552,7 +552,7 @@ assert 'history=true scope=All' in history and 'history_selected=Some("echo hist
     history[:1200]
 assert "history=true scope=Failed" in gstate("history-scope"), gstate("history-scope")[:1200]
 assert "palette=true mode=History" in gstate("palette-prefix"), gstate("palette-prefix")[:300]
-assert "palette=true mode=Workflows" in gstate("palette-tab"), gstate("palette-tab")[:300]
+assert "palette=true mode=Sessions" in gstate("palette-tab"), gstate("palette-tab")[:300]
 assert 'settings=true' in gstate("settings-search") and \
     'settings_tab=true settings_query="curs"' in gstate("settings-search"), gstate("settings-search")[:1200]
 assert "settings=false" in gstate("settings-hidden") and \

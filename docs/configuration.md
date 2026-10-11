@@ -7,7 +7,6 @@
 | `~/.config/shift/config.toml` | User configuration (hot-reloaded < 300 ms, including external edits; a once-a-second stat check catches edits the file-system events miss) |
 | `~/.config/shift/themes/*.toml` | User themes, Shift TOML (file stem = theme name) |
 | `~/.config/shift/themes/*.yaml` · `*.yml` | User themes, Warp YAML (same directory, same naming) |
-| `~/.config/shift/workflows/*.yaml` | User workflows (Warp-compatible YAML) |
 | `~/.config/shift/launch_configs/*.yaml` · `*.yml` | Launch configurations (Warp-compatible YAML) |
 | `~/.local/share/shift/` | Materialized shell-integration files |
 | `~/.local/share/shift/session.toml` | Saved session (tabs + cwds), written atomically |
@@ -26,11 +25,12 @@ font_family   = "JetBrains Mono"  # embedded JetBrains Mono or Hack, or any inst
 font_size     = 13.0              # settings stepper clamps 8–28 (⌘= / ⌘- / ⌘0 also write this)
 line_height   = 1.2               # multiplier, clamped 1.0–2.2 when applied
 cursor_style  = "block"           # block | bar | underline
-cursor_blink  = true              # 1.1s steps blink
+cursor_blink  = true              # the cursor toggles every 550 ms
 theme         = "dark-default"    # builtin, or a stem in ~/.config/shift/themes
 theme_light   = "light-default"   # theme used while the OS is light (needs sync_os_theme)
 sync_os_theme = false             # follow the OS appearance: theme = dark, theme_light = light
-scrollback    = 10000             # lines kept per pane (stepper: 1000–1000000)
+scrollback    = 10000             # lines kept per pane, clamped 0–1000000
+                                  # (the Settings stepper offers 1000–1000000)
 window_padding = 8.0              # left/right content padding in px, clamped 0–40
                                   # (single-pane layout; splits keep their gutter)
 window_opacity = 1.0              # window ground opacity, clamped 0.01–1.0 (Warp 1–100 %; overlays stay opaque)
@@ -148,11 +148,15 @@ colors without changing `config.toml` or restarting.
 
 ### Shift TOML themes
 
-A theme TOML defines the full token set: background/surface/border colors,
-text tiers (`fg`, `text_bright`, `text_ui`, `text_muted`, `text_dim`), accent,
-success/warning/error, cursor, selection, search highlight colors, the
-16-color ANSI palette, and syntax colors for the editor (`command`, `flag`,
-`string`, `ghost`).
+A theme TOML must set every token (only `background_image` is optional):
+`bg`, `bg_chrome`, `bg_gutter`, `surface`, `border`, `pane_border_inactive`,
+`fg`, `text_bright`, `text_ui`, `text_dim`, `text_muted`, `accent`,
+`success`, `error`, `warning`, `cursor`, `selection`, `search_match`,
+`search_active`, `ansi` (16 colors), and a `[syntax]` table with `command`,
+`flag`, `string` and `ghost`. Colors are `#rgb`, `#rrggbb` or `#rrggbbaa`. A
+file with a missing token or a bad color does not load: Shift shows a toast
+naming the error, keeps `dark-default`, and the picker labels the file
+"(invalid theme file)".
 
 ### Warp YAML themes
 
@@ -290,23 +294,6 @@ syntax. Semantics: a `[keybindings]` entry for a base action *replaces* the
 default chord **and** unbinds the action's built-in alternate (e.g. overriding
 `copy` removes both ⌃⇧C and ⌘C). Invalid chords are logged and skipped —
 leaving the action unbound, so check logs if a key stops working.
-
-## Workflows
-
-Warp's YAML schema:
-
-```yaml
-name: Push branch upstream
-command: git push -u {{remote}} {{branch}}
-tags: [git]
-arguments:
-  - name: remote
-    default_value: origin
-  - name: branch
-```
-
-`{{placeholders}}` become Tab-cyclable spans in the editor. Files from Warp's
-community workflow library work unchanged.
 
 ## Shell integration details
 

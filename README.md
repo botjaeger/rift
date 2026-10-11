@@ -31,14 +31,14 @@ telemetry, no AI features: a local terminal configured with one TOML file.
 - **Full terminal underneath.** vim, tmux, htop, ssh and every TUI run
   unchanged: Shift hands the keyboard straight to the program whenever one is
   running.
-- **Warp's workflow without Warp's account.** Warp's default keys, and its
-  theme, workflow and launch-configuration files work unchanged.
+- **Warp's habits without Warp's account.** Warp's default keys, and its
+  theme and launch-configuration files work unchanged.
 - **Modern protocols.** Kitty keyboard and graphics, iTerm2 images,
   synchronized output, OSC 8 links, OSC 52 clipboard, bracketed paste,
   notifications (OSC 9/777/99).
 - **Fast and small.** One binary with embedded fonts, themes and shell hooks.
   GPU rendering with a shaped-text cache; 500,000 lines of output render in
-  0.66 s using 191 MB ([baseline](docs/performance.md)).
+  0.68 s with a 162 MiB peak ([baseline](docs/performance.md)).
 
 ## Features
 
@@ -49,7 +49,8 @@ rebound. Full list: [keyboard shortcuts](docs/keyboard-shortcuts.md).
 | Feature | How to use it |
 |---|---|
 | **Command blocks** — header with command, directory, git branch, exit badge, duration | Automatic in zsh, bash and fish. Select with ⌘↑ / ⌘↓ or a click |
-| Copy a block's command / output | ⇧⌘C / ⌥⇧⌘C, or the copy button on the header |
+| Copy a block's command / output | ⇧⌘C / ⌥⇧⌘C, or the copy button that appears when you hover the header |
+| Exact run time of a block | Hover its duration: how long it took and when it finished |
 | Block menu — copy, re-run, bookmark, collapse, filter, send output | Right-click a block, or ⌃M |
 | Bookmarks | ⌘B marks a block; ⇧⌘↑ / ⇧⌘↓ jump between marks |
 | Filter a block's output | ⌥⇧F, then type: only matching lines stay visible |
@@ -58,8 +59,8 @@ rebound. Full list: [keyboard shortcuts](docs/keyboard-shortcuts.md).
 | **Command editor** — highlighting, ghost suggestions, completion menu | Type at the prompt; Tab accepts, ⌃→ accepts one word |
 | Multi-line commands | ⇧⏎ adds a line, ⏎ runs |
 | History search | ⌃R |
-| Workflows (saved commands with `{{placeholders}}`) | ⌃⇧R; Tab moves between placeholders |
 | Vim keys in the editor | Settings → Input → *Vim keybindings* |
+| Fonts — embedded JetBrains Mono and Hack, or any installed monospace font (Menlo, Monaco, SF Mono…) | Settings → Appearance → *Font family* (each previewed in itself) |
 | **Command palette** — every action, setting, theme, launch config | ⌘P |
 | Find in scrollback (case and regex toggles) | ⌘F |
 | **Tabs and split panes** | ⌘T tab, ⌘D split right, ⇧⌘D split down, ⌥⌘arrows move, ⇧⌘⏎ zoom |
@@ -73,7 +74,9 @@ rebound. Full list: [keyboard shortcuts](docs/keyboard-shortcuts.md).
 | Session restore (tabs, splits, directories, window position) | On by default (`restore_session`) |
 | Saved block output across restarts | Settings → General → *Save block output for restore* |
 | Durable sessions (shells keep running after you quit) | Settings → General → *Keep shells running when Shift quits* |
-| Links and paths | ⌘-click URLs, OSC 8 links and file paths (`file:line:col` too) |
+| Links and paths | ⌘-click URLs, OSC 8 links and file paths (`file:line:col` too); Settings → Files picks the editor they open in |
+| Terminal behavior — mouse reporting, middle-click paste, wheel speed, OSC 52 clipboard access, Option as Meta | Settings → Terminal |
+| Coding agents — Claude Code / Codex tabs spin only while the agent works; ⌘⌫ clears its input line | Automatic |
 | Inline images (kitty graphics, iTerm2) | Automatic: `kitten icat`, `imgcat`, `timg`, `yazi`, `chafa` |
 | Paste safety | Multi-line paste into a shell asks before running |
 | SSH profiles with remote blocks | Palette → *SSH: host*; *Install Shift shell integration on host* once |
@@ -179,7 +182,7 @@ docker volume rm shift-cargo-registry  # Linux gate crate cache
 Shift keeps your settings in `~/.config/shift/` and its session, shell
 integration and saved output in `~/.local/share/shift/`. Delete those two
 directories only to reset Shift completely — this removes your settings,
-themes and workflows.
+themes and launch configurations.
 
 Packages (`.dmg`, `.deb`, AppImage, tarball) and releases:
 [development guide](docs/development.md#packaging-and-releases).
@@ -208,7 +211,7 @@ Start at the [documentation index](docs/README.md).
 | [Features](docs/features.md) | Every feature and its exact behavior |
 | [UI](docs/ui.md) | Every screen and control |
 | [Keyboard shortcuts](docs/keyboard-shortcuts.md) | Full keymap and how to rebind it |
-| [Configuration](docs/configuration.md) | `config.toml`, themes, workflows, launch configs, file locations |
+| [Configuration](docs/configuration.md) | `config.toml`, themes, launch configs, file locations |
 | [Development](docs/development.md) | Build, test, gates, dependencies, architecture, releases |
 | [Design](DESIGN.md) | Design tokens, metrics and visual rules |
 | [Performance](docs/performance.md) | Benchmark harness and baseline |

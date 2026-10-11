@@ -63,6 +63,8 @@ If commands do not become blocks, the shell is not loading the hooks (see
 | Switch to any tab, pane, window or recent block | ⇧⌘O |
 | Type into every pane of the tab at once | ⌥⌘I |
 | Reopen a closed tab | ⇧⌘T |
+| Open another window | ⌘N (its shells end with it) |
+| Rename or color a tab, close the others | Right-click the tab |
 | Tabs in a side rail | Settings → Appearance → *Tabs: Side* |
 
 Tabs, splits and directories come back on the next launch
@@ -101,13 +103,13 @@ applies the same way. Reference: [configuration](configuration.md).
 - **Font and size**: Settings → Appearance; ⌘= / ⌘- / ⌘0 change the size.
 - **Shortcuts**: Settings → Keybindings (⌃⌘K): click a row and press the new
   chord. Or add a `[keybindings]` table to config.toml.
+- **New tabs start in**: Settings → General; the previous directory, home or
+  a path.
 - **Your own prompt**: set *Prompt* to *Shell (PS1)* to keep starship, p10k or
   your PS1 visible.
 
 ## Save commands for later
 
-- **Workflows**: YAML files in `~/.config/shift/workflows/` (Warp format).
-  ⌃⇧R picks one; Tab moves between its `{{placeholders}}`.
 - **Launch configurations**: YAML files in
   `~/.config/shift/launch_configs/` (Warp format) open a set of tabs, splits,
   directories and startup commands from the palette. File → *Save Layout as
@@ -130,6 +132,8 @@ shift-terminal ctl focus --tab 2           # --tab/--pane count from 0, like `li
 shift-terminal ctl open --cwd ~/src -- make test   # needs control_api = "full"
 ```
 
+`ctl --pid PID` picks a window (the newest answers otherwise);
+`shift-terminal --version` and `--help` print the version and usage.
 `control_api` is `navigate` by default (list, status, focus). Set it to
 `full` in Settings → General → *Control socket* to allow split, open and
 send-text.
@@ -151,7 +155,7 @@ send-text.
 |---|---|
 | `~/.config/shift/config.toml` | Settings |
 | `~/.config/shift/themes/` | Your themes |
-| `~/.config/shift/workflows/`, `launch_configs/` | Workflows, launch configurations |
+| `~/.config/shift/launch_configs/` | Launch configurations |
 | `~/.local/share/shift/` | Shell hooks, session layout, saved block output, sockets |
 
 Both roots follow `XDG_CONFIG_HOME` and `XDG_DATA_HOME` when set.

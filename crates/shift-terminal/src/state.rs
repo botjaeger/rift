@@ -101,11 +101,6 @@ pub struct EditorState {
     pub history: Vec<String>,
     hist_idx: Option<usize>,
     saved: String,
-    /// Workflow placeholder spans (byte ranges), tab-cycled.
-    pub placeholders: Vec<(usize, usize)>,
-    pub active_placeholder: Option<usize>,
-    /// Active placeholder untouched — first keystroke replaces it whole.
-    placeholder_fresh: bool,
     /// (buffer, cursor) snapshots for ⌘Z / ⇧⌘Z; cleared on submit.
     undo_stack: Vec<(String, usize)>,
     redo_stack: Vec<(String, usize)>,
@@ -160,7 +155,6 @@ impl EditorState {
         self.buffer = buf;
         self.cursor = cur.min(self.buffer.len());
         self.hist_idx = None;
-        self.exit_placeholder_mode();
     }
 
     pub fn redo(&mut self) {
@@ -176,7 +170,6 @@ impl EditorState {
         self.buffer = buf;
         self.cursor = cur.min(self.buffer.len());
         self.hist_idx = None;
-        self.exit_placeholder_mode();
     }
 
     /// Selected byte range (non-empty), if any.
@@ -236,79 +229,17 @@ impl EditorState {
         }
     }
 
-    /// Single mutation point: every buffer edit goes through here so
-    /// placeholder spans stay consistent (byte offsets never go stale).
+    /// Single mutation point: every buffer edit goes through here (undo
+    /// snapshot, selection reset, cursor after the replacement).
     pub fn replace_range(&mut self, range: std::ops::Range<usize>, s: &str) {
         self.push_undo();
         self.anchor = None;
-        let removed = range.end - range.start;
-        let delta = s.len() as i64 - removed as i64;
         self.buffer.replace_range(range.clone(), s);
-        for span in &mut self.placeholders {
-            if span.0 >= range.end {
-                // entirely after: shift
-                span.0 = (span.0 as i64 + delta) as usize;
-                span.1 = (span.1 as i64 + delta) as usize;
-            } else if span.1 <= range.start {
-                // entirely before: unchanged
-            } else {
-                // overlaps the edit: span becomes the replacement
-                span.0 = range.start;
-                span.1 = range.start + s.len();
-            }
-        }
         self.cursor = range.start + s.len();
     }
 
-    /// Load a workflow command with its placeholder spans; selects the first.
-    pub fn set_with_placeholders(&mut self, text: String, spans: Vec<(usize, usize)>) {
-        self.anchor = None;
-        self.buffer = text;
-        self.placeholders = spans;
-        self.hist_idx = None;
-        if self.placeholders.is_empty() {
-            self.active_placeholder = None;
-            self.cursor = self.buffer.len();
-        } else {
-            self.active_placeholder = Some(0);
-            self.placeholder_fresh = true;
-            self.cursor = self.placeholders[0].1;
-        }
-    }
-
-    pub fn in_placeholder_mode(&self) -> bool {
-        self.active_placeholder.is_some()
-    }
-
-    /// Tab: advance to the next placeholder; exits the mode after the last.
-    pub fn cycle_placeholder(&mut self) -> bool {
-        let Some(i) = self.active_placeholder else {
-            return false;
-        };
-        if i + 1 < self.placeholders.len() {
-            self.active_placeholder = Some(i + 1);
-            self.placeholder_fresh = true;
-            self.cursor = self.placeholders[i + 1].1;
-        } else {
-            self.exit_placeholder_mode();
-        }
-        true
-    }
-
-    pub fn exit_placeholder_mode(&mut self) {
-        self.active_placeholder = None;
-        self.placeholders.clear();
-        self.placeholder_fresh = false;
-    }
-
     pub fn insert(&mut self, s: &str) {
-        if let Some(i) = self.active_placeholder
-            && self.placeholder_fresh
-        {
-            let span = self.placeholders[i];
-            self.placeholder_fresh = false;
-            self.replace_range(span.0..span.1, s);
-        } else if !self.replace_selection(s) {
+        if !self.replace_selection(s) {
             self.replace_range(self.cursor..self.cursor, s);
         }
         self.hist_idx = None;
@@ -317,10 +248,6 @@ impl EditorState {
     /// IDE-style quote/bracket insertion. Closing an existing pair steps over
     /// it, while quotes inside identifiers remain literal (for e.g. `don't`).
     pub fn insert_with_pairs(&mut self, s: &str) {
-        if self.active_placeholder.is_some() && self.placeholder_fresh {
-            self.insert(s);
-            return;
-        }
         let mut chars = s.chars();
         let Some(ch) = chars.next() else {
             return;
@@ -402,14 +329,6 @@ impl EditorState {
     }
 
     pub fn backspace(&mut self) {
-        if let Some(i) = self.active_placeholder
-            && self.placeholder_fresh
-        {
-            let span = self.placeholders[i];
-            self.placeholder_fresh = false;
-            self.replace_range(span.0..span.1, "");
-            return;
-        }
         if self.replace_selection("") {
             return;
         }
@@ -421,9 +340,7 @@ impl EditorState {
 
     /// Remove both halves when the cursor is inside an auto-inserted pair.
     pub fn backspace_with_pairs(&mut self) {
-        if (self.active_placeholder.is_some() && self.placeholder_fresh)
-            || self.selection().is_some()
-        {
+        if self.selection().is_some() {
             self.backspace();
             return;
         }
@@ -578,7 +495,6 @@ impl EditorState {
         self.buffer.clear();
         self.cursor = 0;
         self.hist_idx = None;
-        self.exit_placeholder_mode();
         // fresh line → back to typing (Warp behavior)
         if let Some(v) = &mut self.vim {
             v.reset_insert();
@@ -590,7 +506,6 @@ impl EditorState {
         self.cursor = 0;
         self.anchor = None;
         self.hist_idx = None;
-        self.exit_placeholder_mode();
         self.undo_stack.clear();
         self.redo_stack.clear();
         // users expect to type immediately after running a command
@@ -605,7 +520,6 @@ impl EditorState {
 
     pub fn history_up(&mut self) {
         self.anchor = None;
-        self.exit_placeholder_mode();
         if self.history.is_empty() {
             return;
         }
@@ -625,7 +539,6 @@ impl EditorState {
 
     pub fn history_down(&mut self) {
         self.anchor = None;
-        self.exit_placeholder_mode();
         if self.hist_idx.is_some() {
             self.push_undo();
         }
@@ -913,51 +826,6 @@ mod tests {
     use super::{EditorState, quote_open_at};
 
     #[test]
-    fn placeholder_replace_and_cycle() {
-        let mut e = EditorState::default();
-        e.set_with_placeholders("ssh host -p port".into(), vec![(4, 8), (12, 16)]);
-        assert!(e.in_placeholder_mode());
-        assert_eq!(e.cursor, 8);
-        // first keystroke replaces the whole fresh span
-        e.insert("prod.example.com");
-        assert_eq!(e.buffer, "ssh prod.example.com -p port");
-        // second span shifted correctly
-        assert_eq!(e.placeholders[1], (24, 28));
-        assert_eq!(&e.buffer[24..28], "port");
-        // tab → next placeholder, type replaces it
-        assert!(e.cycle_placeholder());
-        e.insert("2222");
-        assert_eq!(e.buffer, "ssh prod.example.com -p 2222");
-        // tab past last exits mode
-        assert!(e.cycle_placeholder());
-        assert!(!e.in_placeholder_mode());
-    }
-
-    #[test]
-    fn placeholder_backspace_clears_fresh_span() {
-        let mut e = EditorState::default();
-        e.set_with_placeholders("kill -9 pid".into(), vec![(8, 11)]);
-        e.backspace();
-        assert_eq!(e.buffer, "kill -9 ");
-        assert_eq!(e.cursor, 8);
-        // subsequent typing inserts normally at the (now empty) span
-        e.insert("42");
-        assert_eq!(e.buffer, "kill -9 42");
-    }
-
-    #[test]
-    fn replace_range_adjusts_spans() {
-        let mut e = EditorState::default();
-        e.set_with_placeholders("a BB c DD".into(), vec![(2, 4), (7, 9)]);
-        // edit before both spans
-        e.replace_range(0..1, "xyz");
-        assert_eq!(e.buffer, "xyz BB c DD");
-        assert_eq!(e.placeholders, vec![(4, 6), (9, 11)]);
-        assert_eq!(&e.buffer[4..6], "BB");
-        assert_eq!(&e.buffer[9..11], "DD");
-    }
-
-    #[test]
     fn word_motion_and_kills() {
         let mut e = EditorState::default();
         e.insert("git  commit -m msg");
@@ -1022,28 +890,6 @@ mod tests {
         e.submit();
         e.undo();
         assert_eq!(e.buffer, "");
-    }
-
-    #[test]
-    fn undo_exits_placeholder_mode() {
-        let mut e = EditorState::default();
-        e.set_with_placeholders("ssh host".into(), vec![(4, 8)]);
-        e.insert("prod");
-        assert_eq!(e.buffer, "ssh prod");
-        e.undo();
-        assert_eq!(e.buffer, "ssh host");
-        assert!(!e.in_placeholder_mode());
-        assert!(e.placeholders.is_empty());
-    }
-
-    #[test]
-    fn submit_exits_placeholder_mode() {
-        let mut e = EditorState::default();
-        e.set_with_placeholders("echo x".into(), vec![(5, 6)]);
-        let cmd = e.submit();
-        assert_eq!(cmd, "echo x");
-        assert!(!e.in_placeholder_mode());
-        assert!(e.placeholders.is_empty());
     }
 
     #[test]

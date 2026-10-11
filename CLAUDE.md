@@ -52,7 +52,7 @@ clippy). CI (`.github/workflows/ci.yml`) runs `scripts/gates.sh` on
 macos-14 and ubuntu-24.04, so a green local run predicts CI. Run the gates
 before reporting work done, and name the gates you ran.
 
-Optional pre-commit hook (fmt + clippy): `git config core.hooksPath .githooks`.
+Optional pre-commit hook (fmt + clippy + docs): `git config core.hooksPath .githooks`.
 
 ## Verifying UI changes
 
@@ -79,8 +79,9 @@ XDG_CONFIG_HOME=/tmp/shift-t/cfg XDG_DATA_HOME=/tmp/shift-t/data SHIFT_NO_NOTIFY
 
 Commands (one per line, `#` comments; full list in the `script.rs` module
 doc): `wait`, `wait_prompt`, `key`, `keyup`, `type`, `paste`, `shot`, `dump`,
-`resize`, `move`, `click`, `dblclick`, `rclick`, `mclick`, `drag`, `scroll`, `sh`,
-`focus`, `quit`. `menu` (native menu bar) works on macOS only; scripts that
+`resize`, `move`, `click`, `dblclick`, `rclick`, `mclick`, `drag`, `press`,
+`release`, `mods`, `scroll`, `sh`, `focus`, `ime`, `preedit`, `drop`, `wait_file`,
+`quit`. `menu` (native menu bar) works on macOS only; scripts that
 must also pass on Linux use key chords instead.
 
 Lasting UI regressions belong in `scripts/ui-smoke.py` (the `ui` gate): add
@@ -155,7 +156,7 @@ Four crates; dependencies flow strictly downward.
 - **Selection and row cache.** Mouse-to-grid mapping reads the per-frame
   `PaneState.rows` cache filled by `terminal::render`; it never recomputes
   layout. `EditorState::replace_range` is the single buffer-mutation point
-  (keeps workflow placeholder spans valid).
+  (undo snapshots, selection reset).
 - **Marker idempotence.** Users' own iTerm2 integration emits OSC 133 next to
   ours; `BlockStore` handlers tolerate duplicated A/B/C/D markers. Keep new
   handlers idempotent.
@@ -183,7 +184,7 @@ Four crates; dependencies flow strictly downward.
 
 ### Assets
 
-Fonts (JetBrains Mono ×4 weights, Hack ×4 faces, Inter variable, a Nerd
+Fonts (JetBrains Mono ×6 faces, Hack ×4 faces, Inter variable, a Nerd
 Font symbols subset), builtin themes and shell hooks are embedded with `include_bytes!`/`include_str!`; the binary has no
 runtime assets. Shell-integration files are materialized to
 `~/.local/share/shift/` on first spawn; zsh loads through a ZDOTDIR shim that
@@ -201,7 +202,8 @@ sources the user's real config first.
 | `docs/features.md` | Feature inventory and exact behaviors |
 | `docs/ui.md` | Every UI surface |
 | `docs/keyboard-shortcuts.md` | Full keymap (action names), fixed keys, chord syntax |
-| `docs/configuration.md` | `config.toml` reference, themes, workflows, file locations |
+| `docs/configuration.md` | `config.toml` reference, themes, launch configs, file locations |
 | `docs/development.md` | Build, test, gates, dependencies, architecture, releases |
 | `docs/performance.md` | Benchmark harness and recorded baseline |
 | `docs/warp-parity.md`, `docs/terminal-landscape-roadmap.md`, `docs/mobile-remote-plan.md` | Plans and parity status |
+| `docs/project-audit-2026-10-07.md`, `docs/audits/`, `docs/workstreams/` | Dated audit records and their evidence (historical; not updated with behavior) |

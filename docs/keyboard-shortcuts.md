@@ -20,7 +20,7 @@ listed alternates.
 | ⌘⇧↓ / ⌃⇧↓ | `bookmark_next` | Jump to next bookmarked block |
 | ⌥↑ / ⌥↓ | `bookmark_closest_prev` / `_next` | Same jumps (Warp's closest-bookmark keys) |
 | ⌘K | `clear_blocks` | Clear blocks + scrollback (destructive; `clear` is the soft variant) |
-| ⌥⇧F | `filter_block` | Show only the selected (else newest) block's output lines that contain the typed text; again clears |
+| ⌥⇧F | `filter_block` | Show only the selected (else newest) block's output lines that contain the typed text; Enter keeps the filter, Esc or ⌥⇧F again clears it |
 | — | `pipe_block_output` | Send the selected (else newest) block's output to a command's stdin |
 | Esc | — | Deselect block (in raw mode also still reaches the app in the PTY) |
 
@@ -78,7 +78,6 @@ listed alternates.
 |---|---|---|
 | ⌘P / ⌃⇧P | `palette` | Command palette |
 | ⌘F / ⌃⇧F | `search` | Scrollback search |
-| ⌃⇧R | `workflows` | Workflow picker |
 | ⌘, | `open_settings` | Settings tab (again: back to the shell tab) |
 | ⌃⌘K | `open_keybindings` | Settings → Keybindings page |
 | ⌘L | `focus_input` | Scroll to bottom, deselect, focus the editor |
@@ -102,9 +101,9 @@ Active only while the app owns the command line.
 |---|---|
 | Enter | Submit command |
 | ⇧⏎ / ⌥⏎ | Insert a newline (multi-line command; Enter still submits) |
-| Tab | Cycle workflow placeholder, else accept completion |
+| Tab | Accept completion |
 | ⇧Tab | Next completion source tab (All · Path · History …) while the panel is open |
-| Esc | Close completion / exit placeholder mode (after deselecting any block) |
+| Esc | Close completion (after deselecting any block) |
 | ↑ / ↓ | History up / down (or move completion selection while the completion panel is open) |
 | ← / → | Move cursor; → at the end of the line accepts the ghost text, ⌃→ one word of it |
 | ⌥← / ⌥→ | Word left / right |
@@ -120,7 +119,7 @@ Active only while the app owns the command line.
 | ⌥⇧← / ⌥⇧→ | Extend the selection by one word |
 | ⇧⌘← / ⇧⌘→, ⇧Home / ⇧End | Extend the selection to line start / end |
 | ⌘X | Cut the selection (⌘C copies it, ⌘A selects all) |
-| ⌃R | History pane above the command line (again: next scope); in it ↑/↓ move, ⏎ runs, ⇥ edits first, ⌘⏎ runs in a new split, Esc closes |
+| ⌃R | History pane above the command line (again: next scope); in it ↑/↓ move (PageUp/PageDown by 8), ⏎ runs, ⇥ edits first, ⌘⏎ runs in a new split, Esc closes; with no match ⏎ runs the typed line and ⇥ only closes the pane |
 | ⌃C | Interrupt (clears line, sends SIGINT) |
 | ⌃D | EOF (only when the line is empty) |
 | ⌃L | Clear screen (shell redraw; blocks survive) |
@@ -162,7 +161,7 @@ below are implemented.
 | ⇧Enter / ⇧⌘G | Previous match |
 | ⌥C | Toggle match case (`Aa`) |
 | ⌥R | Toggle regular expression (`.*`) |
-| Esc | Close search, snap back to bottom |
+| Esc, or ⌘F again | Close search, snap back to bottom |
 
 With the file viewer open, ⌘F finds in the file instead: type the query
 (case-insensitive), Enter / ⇧Enter next / previous match, Esc closes the bar.
@@ -189,10 +188,17 @@ When a program owns the terminal (vim, less, htop), keys go out as xterm
 sequences: F1–F12, modified arrows/Home/End/PgUp/PgDn/Insert/Delete
 (`\e[1;5D` for ⌃←), application cursor mode (`\eOA`), ⌃ control codes, and
 ESC-prefixed Meta for ⌥ (always on Linux; on macOS with `option_as_meta` for the left key and `right_option_as_meta` for the right one).
+⌘⌫ sends ⌃U (kill to line start, as in Warp; Claude Code, readline and zle
+honour it), in the program's kitty keyboard encoding when it asked for one;
+other ⌘ chords stay with Shift.
 
 ## Palette keys
 
-Esc close · Enter run selected · ↑/↓ move selection · type to filter · ⇥ next mode · `>` `#` `!` `@` typed into an empty query switch to Actions, History, Workflows, Sessions.
+Esc (or the palette shortcut again) close · Enter run selected · ↑/↓ move selection · type to filter · ⇥ next mode · `>` `#` `@` typed into an empty query switch to Actions, History, Sessions. The block action *Send output to command…* opens a fourth mode with no prefix, where ⇥ and the prefixes do nothing.
+
+## Settings keys
+
+Typing searches every page (Keybindings filters its own list) · ⇥ / ⇧⇥ move focus between controls · Space or Enter presses the focused control · ← / → adjust a focused slider · ↑ ↓ ← → switch pages (except ← / → on a focused slider) · Home / End go to the first / last page · PageUp / PageDown scroll · Esc drops control focus, then clears the search, then closes the tab.
 
 ## Customization
 
@@ -205,13 +211,14 @@ palette   = "cmd+shift+space"
 font_increase = "cmd+plus"   # "plus" = the '+' key (can't be written literally)
 ```
 
-Chord syntax: `ctrl|control|^`, `shift`, `alt|opt|option|meta`,
-`cmd|super|command` joined with `+` plus one key: a character, or
+Chord syntax: `ctrl|control|^`, `shift|⇧`, `alt|opt|option|meta`,
+`cmd|super|command|⌘` joined with `+` plus one key: a character, or
 `tab left right up down pageup pagedown home end enter escape space plus
 backspace delete insert f1`–`f12`. `"none"` unbinds an action. A chord with any other key name (`cmd+foo`) is
 invalid, and an unknown action name is ignored; both are logged.
 
 Or record shortcuts in Settings → Keybindings (⌃⌘K): click a row, press the
-chord. The macOS menu bar shows the resolved shortcuts. Where an action has
+chord. A recorded chord needs ⌘, ⌃ or ⌥, or a function or navigation key; a
+bare letter is refused with a toast. The macOS menu bar shows the resolved shortcuts. Where an action has
 two (a ⌃⇧ chord and a ⌘ one), the palette, Settings, menus, the welcome list
 and tooltips show the ⌘ one on macOS and the other elsewhere.

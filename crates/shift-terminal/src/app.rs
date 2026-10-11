@@ -417,7 +417,6 @@ pub struct App {
     prompt_editor_layout: crate::views::prompt_editor::Layout,
     /// Imported shell history (shared with the completion thread).
     shell_history: Arc<Vec<String>>,
-    workflows: Vec<shift_core::workflows::Workflow>,
     font_size: f32,
     line_h: f32,
     scroll_accum: f32,
@@ -1031,7 +1030,6 @@ impl App {
             prompt_editor: None,
             prompt_editor_layout: Default::default(),
             shell_history: Arc::default(),
-            workflows: Vec::new(),
             font_size: DEFAULT_FONT_SIZE,
             line_h: DEFAULT_FONT_SIZE * 1.2,
             scroll_accum: 0.0,
@@ -3011,7 +3009,6 @@ impl App {
                 all.extend(pane_history);
                 (palette::history_items(&all), Vec::new())
             }
-            PaletteMode::Workflows => (palette::workflow_items(&self.workflows), Vec::new()),
             PaletteMode::Sessions => (self.session_items(), Vec::new()),
             PaletteMode::PipeOutput => {
                 let output = self
@@ -3928,10 +3925,6 @@ impl App {
             self.launch_configs = shift_core::launch::load_all();
             self.ssh_profiles = shift_core::ssh::all_profiles(&self.config.ssh_profiles);
         }
-        if mode == crate::views::palette::PaletteMode::Workflows {
-            // workflow files added or edited while running
-            self.workflows = shift_core::workflows::load_all();
-        }
         if mode == crate::views::palette::PaletteMode::Sessions && !self.windows_loading {
             self.windows_loading = true;
             self.other_windows.clear();
@@ -4006,15 +3999,6 @@ impl App {
                     pane.editor.insert(&cmd);
                 }
                 self.update_completions();
-            }
-            PaletteAction::InsertWorkflow(i) => {
-                if let Some((cmd, spans)) = self.workflows.get(i).map(|w| w.instantiate()) {
-                    if let Some(pane) = self.tabs.get_mut(self.active).and_then(|t| t.active_mut())
-                    {
-                        pane.editor.set_with_placeholders(cmd, spans);
-                    }
-                    self.completion.close();
-                }
             }
             PaletteAction::FocusTab(i) => {
                 self.settings.open = false;
@@ -4184,11 +4168,6 @@ impl App {
             self.completion.close();
             return;
         };
-        if pane.editor.in_placeholder_mode() {
-            self.completion_pending = None;
-            self.completion.close();
-            return;
-        }
         let buffer = pane.editor.buffer.clone();
         let cursor = pane.editor.cursor;
         if buffer.trim().is_empty() {
@@ -4419,8 +4398,8 @@ impl App {
             // the whole word: a closing quote or the suffix right of a
             // mid-word cursor would otherwise survive next to `insert`
             let end = shift_core::completion::token_end(&buffer, cursor);
-            // through the single mutation point: keeps placeholder spans
-            // valid and makes the completion undoable
+            // through the single mutation point: makes the completion
+            // undoable
             pane.editor.replace_range(start..end, &insert);
         }
         self.completion.close();
@@ -7664,13 +7643,6 @@ impl App {
                     self.open_palette(crate::views::palette::PaletteMode::Commands);
                 }
             }
-            AppAction::Workflows => {
-                if self.palette.open {
-                    self.palette.open = false;
-                } else {
-                    self.open_palette(crate::views::palette::PaletteMode::Workflows);
-                }
-            }
             AppAction::OpenSettings => {
                 if self.settings.open {
                     self.settings.open = false;
@@ -8361,7 +8333,6 @@ impl App {
             && let Some(env) = self.shell_env.clone()
             && let Some(pane) = self.tabs.get_mut(self.active).and_then(|t| t.active_mut())
             && pane.editor.selection().is_none()
-            && !pane.editor.in_placeholder_mode()
             && let Some((range, expansion)) =
                 env.expand_alias_at(&pane.editor.buffer, pane.editor.cursor)
         {
@@ -8396,16 +8367,7 @@ impl App {
             }
         }
         if key == EditorKey::Complete {
-            // placeholder cycling wins over completion accept
-            let cycled = self
-                .tabs
-                .get_mut(self.active)
-                .and_then(|t| t.active_mut())
-                .map(|p| p.editor.cycle_placeholder())
-                .unwrap_or(false);
-            if !cycled {
-                self.accept_completion();
-            }
+            self.accept_completion();
             self.blink_epoch = Instant::now();
             return;
         }
@@ -8493,11 +8455,8 @@ impl App {
             }
             EditorKey::HistoryUp => pane.editor.history_up(),
             EditorKey::HistoryDown => pane.editor.history_down(),
-            EditorKey::Dismiss => {
-                pane.editor.exit_placeholder_mode();
-                edited = false;
-            }
-            EditorKey::Complete
+            EditorKey::Dismiss
+            | EditorKey::Complete
             | EditorKey::NextCompletionSource
             | EditorKey::HistorySearch
             | EditorKey::AcceptGhostWord => edited = false,
@@ -11507,7 +11466,7 @@ impl App {
             return false;
         }
         // insert mode: only Esc is vim's; everything else keeps the normal
-        // editor path (history, completions, placeholders)
+        // editor path (history, completions)
         if pane.editor.vim_mode() == Some(VimMode::Insert) && !is_escape {
             return false;
         }
@@ -13288,7 +13247,6 @@ impl ApplicationHandler<UserEvent> for App {
         self.text = Some(text);
 
         self.apply_config();
-        self.workflows = shift_core::workflows::load_all();
         self.launch_configs = shift_core::launch::load_all();
 
         let hist_proxy = self.proxy.clone();

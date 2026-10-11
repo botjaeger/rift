@@ -89,11 +89,15 @@ on macOS 14 (fmt clippy test doc docs release) and Ubuntu 24.04 (the same plus
 `shell` and `ui` under Xvfb/Mesa). Release publication requires that same
 reusable validation workflow to pass on the tagged revision.
 
-The `ui` gate checks command blocks, palette input while another window's
-socket is stalled, background file preview, theme-only hot reload, automation
-config reload (polled, not timed: file-system events can arrive late),
-pane splitting, where the next block lands after `clear`, and that the
-completion panel moves the output up out from under it. It uses scratch XDG
+The `ui` gate checks, among others: command blocks, palette input while
+another window's socket is stalled, background file preview, theme-only hot
+reload, automation config reload (polled, not timed: file-system events can
+arrive late), pane splitting, where the next block lands after `clear`, the
+completion panel moving the output out from under it, mouse and hint
+geometry, drag selection, the review diff (hunk expand and gap rows), DEC
+double-width/double-height lines, shell-syntax file names, Unicode and
+partial lines, the Settings Files/Terminal pages and keyboard reach, agent
+idle titles (Claude Code, Codex), ⌘⌫ in raw mode, and the font picker. It uses scratch XDG
 config/data directories with notifications disabled and retains captures, state dumps and logs under
 `/tmp/shift-ui-*`. Set `SHIFT_TEST_BIN` to test an already built binary;
 otherwise it builds the debug binary first.
@@ -195,17 +199,20 @@ Workspace dependencies (`Cargo.toml`):
 | `log`, `env_logger` | Logging (`RUST_LOG=info`) | |
 
 App-only: `accesskit` / `accesskit_winit` (screen readers), `global-hotkey`,
-`regex` (find), `libc`, `zeno` (rasterizes brand marks Nerd Fonts lacks,
+`regex` (find), `libc`, `unicode-segmentation` (grapheme-aware editing), `zeno` (rasterizes brand marks Nerd Fonts lacks,
 such as the Claude mark; already built for glyphon); on macOS `muda` (menu bar), `objc2`,
-`objc2-app-kit`. `shift-pty` also uses `libc` for PTY and socket calls.
+`objc2-app-kit`, `objc2-foundation`. `shift-pty` also uses `libc` for PTY and socket calls.
 
 Before adding a dependency, check whether the standard library or an existing
 crate covers it. Keep default features off where the crate allows.
 
 ## Packaging and releases
 
-Every script takes `--target <triple>`, `--target-dir <dir>` and
-`--no-build`, honors `CARGO_TARGET_DIR`, and prints the artifact path.
+`make-app.sh`, `make-deb.sh`, `make-appimage.sh` and `make-tarball.sh` take
+`--target <triple>`, `--target-dir <dir>` and `--no-build`; `make-dmg.sh`
+takes `--target-dir <dir>` and `--arch <arch>`. They honor
+`CARGO_TARGET_DIR` and print the artifact path; `gen-icon.py` takes no
+options.
 
 | Script | Platform | Produces |
 |---|---|---|

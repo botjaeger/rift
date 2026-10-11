@@ -24,6 +24,12 @@ Blocks are delimited by shell-integration OSC 133 markers
   prompt (never sent to the shell), and copying the output adds no newline
   it did not have.
 
+When a block's header scrolls off the top, a sticky header stays there; a
+click jumps back to the block. Hovering the duration shows the full time and
+when the command ended; the copy button on a header shows only on hover.
+Block element characters (U+2580–U+259F) are drawn as cell-filling quads, so
+they join without gaps.
+
 Per-block operations: select (click / ⌘↑ / ⌘↓), copy command/output/both,
 copy cwd, copy git branch, re-run (only at a prompt), reinput into the editor
 (⌘I), bookmark (⌘B), collapse (chevron), jump to top/bottom of block.
@@ -61,10 +67,21 @@ insensitive) stay visible. Running it again on the same block, or choosing
 - Editor niceties: word motion & kills (whitespace-delimited), undo/redo
   (snapshot stack, cap 100, cleared on submit), history walk (↑/↓ preserving
   the in-progress line), ⌃R history pane, multi-source completion with
-  ghost text, workflow placeholder cycling, and configurable quote/bracket
+  ghost text, and configurable quote/bracket
   auto-pairing (typing a closer steps over it; Backspace removes an empty pair;
   inside a quoted string nothing pairs, so `'[a'` stays `'[a'`).
-- Cmd-chords never insert text into the editor nor leak bytes to the PTY.
+- Cmd-chords never insert text into the editor nor leak bytes to the PTY,
+  except ⌘⌫ in raw mode, which sends ⌃U (kitty-encoded when the program
+  asked for it).
+- Editor keys: ⇧←/→ select, ⌥⇧←/→ select by word, ⇧⌘←/→ and ⇧Home/End
+  select to the line ends; ⌘Z / ⇧⌘Z undo and redo, ⌘X cuts; readline ⌃A ⌃E
+  ⌃B ⌃F move, ⌃K kills to the end, ⌃W deletes the word before, ⌃U clears the
+  line; ⌘⌫ / ⌘⌦ kill to the start / end, ⌥⌫ / ⌥⌦ delete a word.
+- **Command corrections** (`command_corrections`, on): after a failed
+  command-not-found, a "Did you mean …" suggestion shows; → / Tab / End in
+  an empty editor accepts it. `alias_expansion` (off) replaces an alias with
+  its definition on Space. `error_underline` (on) underlines unknown command
+  names in red.
 - **Multi-line editing**: ⇧⏎ / ⌥⏎ insert a newline into the command instead of
   submitting; the editor zone grows one line (20 px) per newline and extra
   rows are marked with a dim `…` in the prompt column. Enter still submits the
@@ -166,7 +183,7 @@ the whole buffer.
 
 Sources merged, deduped, capped at 50: **`$PATH` command names** (first word
 only, ≥ 2 chars, max 12 — scanned once per process from every executable on
-`$PATH`), command specs (subcommands and flags with descriptions for common tools — git, cargo, docker, npm and more; `completion_specs.rs`), filesystem paths (`~/` expanded;
+`$PATH`), command specs (subcommands and flags with descriptions for common tools — git, cargo, docker, npm and more; `completion_specs.rs`) with argument generators (git refs, branches and remotes; ssh hosts from the ssh config and `known_hosts`; Makefile targets; `package.json` scripts; up to 50 each), filesystem paths (`~/` expanded;
 hidden files only when the prefix starts with `.`), and command history.
 
 Path completions are inserted backslash-escaped as one shell word (valid in
@@ -194,8 +211,8 @@ and the first edit after 5 seconds starts a new one.
 
 History matches drive the ghost text: whole-buffer prefix matches, the pane's
 own history first (last 200) then the imported shell history (newest 3000),
-max 5. Inline ghost text shows the top suggestion; Tab accepts (placeholder
-cycling wins when active), ⌃→ accepts one word.
+max 5. Inline ghost text shows the top suggestion; Tab accepts, ⌃→
+accepts one word.
 
 The completion panel lists the word candidates, then the history lines; its
 header has a tab per source with counts (⇧⇥ or a click narrows to one), and
@@ -210,21 +227,14 @@ cycles the scope (this pane, all shells, failed), ⏎ runs, ⇥ edits first,
 `autosuggestions = false` turns the ghost text off; `completions_menu = false`
 turns the completion panel off (the ghost text and Tab still work).
 
-## Workflows
-
-Warp-compatible YAML (`name`, `command`, `tags`, `arguments`) loaded from
-embedded samples plus `~/.config/shift/workflows/`. ⌃⇧R opens the picker;
-insertion activates `{{placeholder}}` spans — Tab cycles, typing replaces.
-Warp's community workflow files drop in unchanged.
-
 ## Launch configurations
 
 Warp-compatible YAML in `~/.config/shift/launch_configs/*.yaml` — a named set
 of tabs, each with a (possibly nested) split layout, cwds and startup commands.
 ⌘P → `Launch configuration: <name>` opens one: tabs are appended, splits are
 rebuilt, and each pane's `commands[].exec` are sent **at that pane's first
-prompt**. Shift has one window, so all windows' tabs are concatenated in
-document order; `~` in a `cwd` is expanded and a non-existent directory is
+prompt**. A launch configuration opens in the current window; the tabs of
+all `windows:` entries are appended in document order; `~` in a `cwd` is expanded and a non-existent directory is
 ignored. Warp's own files drop in unchanged.
 
 ## Appearance
@@ -254,17 +264,30 @@ ignored. Warp's own files drop in unchanged.
   warning and falls back to JetBrains Mono. Settings → Appearance lists the
   families whose regular face has outline glyphs of one width (Monaco
   included, bitmap-only faces left out), each previewed in itself.
+- **Text and cursor**: `font_size` 8–28, `line_height` 1.0–2.2 (default
+  1.2), `window_padding` 0–40 px, `scrollback` 0–1,000,000 lines (default
+  10,000); out-of-range values are clamped. `ligatures` (on) turns font
+  ligatures on, `cursor_style` and `cursor_blink` set the cursor.
 - **Settings tab** (⌘,): a tab beside the shells, not an overlay; a sidebar
   search finds a setting on any page, a changed setting shows a dot and a
   reset button, selects open a list.
 
 ## Notifications & bell
 
-- **Completion notifications** (`notify_on_completion`, on): a desktop
-  notification when a command that ran at least `notify_threshold_secs`
-  (default 10) finishes while the window is unfocused — title carries the
-  status (`finished` / `failed (exit N)`), body the command and duration.
-  Uses `osascript` on macOS, `notify-send` on Linux; no extra dependencies.
+- **Command alerts**: an alert fires when the command's pane is out of view
+  (another tab, a hidden pane, or the window unfocused). While Shift is
+  focused it is a toast (`notifications.toasts`), otherwise a desktop
+  notification; `notifications.enabled` is the master switch and a sound
+  plays when `play_sound` is on. A failed command alerts when
+  `notifications.command_failed` is on, whatever its duration; a command that
+  ran at least `notify_threshold_secs` (default 10, `notify_on_completion`)
+  alerts whatever its exit. Title: `Command finished` / `Command failed`, or
+  the agent's name; body: `<command> · Completed in X.` / `Failed with exit N
+  after X.` Both are set in Settings → Notifications (*A long command
+  finishes*, *Long command threshold*). Desktop notifications use `osascript`
+  on macOS, `notify-send` on Linux; no extra dependencies.
+- **Toasts**: at most 2 show at once, for `toast_secs` (default 8, clamped
+  2–60).
 - **Bell** (`bell`): `visual` (120 ms full-window flash), `audible`
   (`afplay` / `paplay` / `canberra-gtk-play`), `both`, or `none`. A bell in a
   background tab also raises its activity dot.
@@ -275,6 +298,14 @@ ignored. Warp's own files drop in unchanged.
 - Tabs: create, close, reorder (⌃⇧←/→ or drag: the tab lifts and follows the
   pointer; Esc puts it back), select by number (⌘1–9, ⌘9 = last), reopen
   closed (⇧⌘T restores the tab's cwd, stack of 10).
+- Tab menu (right-click): *Rename tab* (inline), a tab color, duplicate,
+  sync, *Close other tabs*. ⌘N opens a secondary window; its shells end with
+  it.
+- **New tabs start in** (`working_directory`): `previous` (the active pane's
+  directory, default), `home`, or a path (`~` expands; a missing directory
+  falls back to home). `confirm_close_running` (on) asks before closing a
+  pane, tab or window with a running job; the dialog lists each running
+  process with its agent badge.
 - A fresh session shows a welcome list (split, palette, history, explorer,
   settings, with their shortcuts) until its first command.
 - Panes: split right/down, directional focus (⌥⌘arrows), keyboard resize
@@ -324,6 +355,7 @@ ignored. Warp's own files drop in unchanged.
 - **Hint mode** (⇧⌘H): every visible URL, existing file path and block
   header gets a letter label; typing it opens the link/path or selects the
   block, ⇧ + letter copies it (a block copies its output). Esc cancels.
+  Past 26 hints every label is two letters.
 - **Send output to a command** (block menu, palette): the block's output is
   previewed, then written to a private temporary file and run as
   `( command ) < file` (fish: `begin; …; end < file`) in the pane. The output
@@ -351,8 +383,9 @@ automatically:
 - **fish** — `shift.fish` auto-loaded via a `vendor_conf.d` XDG_DATA_DIRS
   append.
 
-Sets `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=shift`,
-`TERM_PROGRAM_VERSION` (Shift's own);
+Sets `TERM=xterm-256color` and `COLORTERM=truecolor` (only when not already
+set), `TERM_PROGRAM=shift`, `TERM_PROGRAM_VERSION` (Shift's own),
+`LC_TERMINAL=Shift` and `LC_TERMINAL_VERSION`;
 emits OSC 133 (blocks), OSC 7 (cwd tracking) and, when they change, OSC 1337
 SetUserVar `ShiftPython` (the prompt chips' Python environment) and, when PATH changes, `ShiftPhpBin` / `ShiftPythonBin` (the
 `php` and `python3` it resolves to); base64, bounded and control characters
@@ -383,6 +416,9 @@ dropped on read. Defines `shift-use`, which the PHP and Python chips run.
   worker; never blocks a frame.
 
 ## Startup
+
+If the `shift` config or data directory does not exist but a legacy `runway`
+one does, Shift keeps using the `runway` directory.
 
 `Starting zsh…` placeholder on the prompt chips' row until the shell's first prompt; no terminal
 cursor shows while it is up. For a shell without integration, the placeholder leaves and the
@@ -427,7 +463,8 @@ it.
   per image, 320 MiB decoded and 512 placements per pane, 256 MiB of GPU
   textures (least recently drawn evicted). Placements span at most 1,000 cells
   in each dimension; percentage height uses the terminal's screen rows.
-  Invalid or non-finite iTerm dimensions are rejected. Sixel is not implemented: the
+  Invalid or non-finite iTerm dimensions are rejected. Kitty animation frames
+  and Unicode placeholders are not implemented. Sixel is not implemented: the
   kitty and iTerm2 protocols cover the TUIs that draw images (yazi, timg,
   chafa, icat, imgcat, viu), and a Sixel decoder would add the largest parser
   surface for the least-used format.
@@ -518,8 +555,9 @@ replay.
   had already left the 8 MiB the service keeps. A lock file
   next to the socket keeps concurrent starts from replacing each other's
   socket. If the configured data
-  directory is too long for a Unix socket path, Shift uses a shorter path
-  under `/tmp` specific to that data directory.
+  directory is too long for a Unix socket path, the `sessiond/` and
+  `control/` directories both move to `/tmp/shift-<uid>-<hash>/…`, specific
+  to that data directory.
 - If the service cannot start, the shell runs locally and a toast says so.
 
 ## Control API
@@ -535,8 +573,9 @@ Each window listens on `~/.local/share/shift/control/<pid>.sock`
 - `ctl focus --tab N` / `--pane ID`: tabs count from 0, as in `ctl list`;
   a non-numeric value is rejected with exit code 2.
 
-`shift-terminal ctl list|status|focus|split|open|send-text` is the client
-(`ctl help` for flags); requests are newline-delimited JSON, answered on the
+`shift-terminal ctl [--pid PID] list|status|focus|split|open|send-text` is
+the client (`ctl help` for flags); the newest window answers unless `--pid`
+names one. `shift-terminal --version` and `--help` print the version and usage; requests are newline-delimited JSON, answered on the
 UI thread. The session switcher (⇧⌘O) uses it to list and focus tabs of
 other Shift windows. Permission changes from Settings or config reload revoke
 existing connections and queued requests before execution. Connections are
@@ -564,7 +603,10 @@ selects the block. The list keeps the newest 200.
   password prompt.
 - **Coding agents**: Claude Code, Codex, OpenCode and Gemini CLI are
   recognized from the running command; their notifications show the agent's
-  badge, and the wording sorts them into waiting (permission, approval,
+  badge (the Claude mark for Claude Code). An agent waiting at its own prompt
+  is idle and its tab does not spin: Claude Code titles itself `✳ …`, Gemini
+  CLI `◇ …`, and Codex is idle unless its title leads with a braille
+  spinner. The wording sorts notifications into waiting (permission, approval,
   input), error, or task completed. Words match whole (`incomplete` is not
   `complete`); an explicit request (`needs your permission`) wins, then
   error words (`permission denied`, `failed`) beat a bare `permission`, and
@@ -631,7 +673,7 @@ Shift draws every surface itself, so it publishes an AccessKit tree
 
 - **Tabs** as a tab list (selected state; activating one switches tabs).
 - **Panes** as groups labelled with their directory and running job, each
-  holding a list of **command blocks** (label = command, description =
+  holding a list of the newest 50 **command blocks** (label = command, description =
   succeeded/failed with exit code and duration, value = output, last 4000
   characters), the visible **terminal** text, and the owned **command
   editor** as a text field.
@@ -654,8 +696,8 @@ pushed only when it changes. The script driver's `dump` prints it.
 
 ## Global hotkey
 
-`global_hotkey = "alt+space"` registers a system-wide shortcut (macOS; X11 on
-Linux): from any app it brings Shift forward, and when Shift is already the
+`global_hotkey` is empty (off) by default; `global_hotkey = "alt+space"`
+registers a system-wide shortcut (macOS; X11 on Linux): from any app it brings Shift forward, and when Shift is already the
 focused app it hides it. Scripted runs and secondary windows never register
 one.
 

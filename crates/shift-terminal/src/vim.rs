@@ -7,8 +7,7 @@
 //! non-empty (0 when it is empty).
 //!
 //! Every mutation goes through [`EditorState::replace_range`], the single
-//! buffer-mutation point that keeps workflow placeholder spans valid and
-//! pushes undo snapshots.
+//! buffer-mutation point that pushes undo snapshots.
 
 use std::ops::Range;
 
@@ -380,8 +379,8 @@ impl EditorState {
             return VimOutcome::Consumed;
         }
 
-        // The buffer may have moved under us (history recall, undo, workflow
-        // insert), so re-establish the on-a-char invariant every keystroke.
+        // The buffer may have moved under us (history recall, undo), so
+        // re-establish the on-a-char invariant every keystroke.
         self.vim_clamp();
 
         if let Some(aw) = v.pending.awaiting.take() {
@@ -1203,18 +1202,5 @@ mod tests {
         e.clear();
         assert_eq!(e.vim_mode(), Some(VimMode::Insert));
         assert_eq!(e.buffer, "");
-    }
-
-    #[test]
-    fn placeholder_spans_survive_a_delete_before_them() {
-        let mut e = EditorState::default();
-        e.vim = Some(VimState::default());
-        e.set_with_placeholders("ssh host -p port".into(), vec![(4, 8), (12, 16)]);
-        esc(&mut e);
-        keys(&mut e, "0dw");
-        assert_eq!(e.buffer, "host -p port");
-        assert_eq!(e.placeholders, vec![(0, 4), (8, 12)]);
-        assert_eq!(&e.buffer[0..4], "host");
-        assert_eq!(&e.buffer[8..12], "port");
     }
 }

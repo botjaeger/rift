@@ -138,8 +138,8 @@ Description: GPU-accelerated terminal emulator with block-based output
  border, duration, collapse and one-click output copy.
  .
  It also provides tabs, split panes, a fuzzy command palette, an owned
- syntax-highlighted input editor with completions, Warp-compatible YAML
- workflows and a hot-reloaded TOML configuration.
+ syntax-highlighted input editor with completions, Warp-compatible launch
+ configurations and a hot-reloaded TOML configuration.
 CONTROL
 
 DEB="$TARGET_DIR/shift-terminal_${VERSION}_${ARCH}.deb"

@@ -25,7 +25,6 @@ pub mod ssh;
 pub mod theme;
 pub mod transcript;
 pub mod watch;
-pub mod workflows;
 
 pub use block::{AbsLine, Block, BlockId, BlockState, BlockStore, Restored};
 pub use config::{

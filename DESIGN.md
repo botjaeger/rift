@@ -68,10 +68,10 @@ card stop 1 px short of each side so they never cross the border.
 
 | Role | Face | Size |
 |---|---|---|
-| Terminal grid | JetBrains Mono (config `font_family`, embedded fallback) | 13 px default (`font_size`), line height 1.2 (Warp; the spec drew 1.65) |
+| Terminal grid | JetBrains Mono (default) or Hack, both embedded; any installed monospace family via `font_family` | 13 px default (`font_size`), line height 1.2 (Warp; the spec drew 1.65) |
 | Command editor | JetBrains Mono | 13 px, 20 px lines (Warp's size) |
 | UI chrome, palette, settings | Inter (variable, embedded) | per spec per surface |
-| Emphasis | JetBrains Mono Bold, Italic, Bold Italic (static weights) | — |
+| Emphasis | JetBrains Mono Medium, SemiBold, Bold, Italic, Bold Italic; Hack Bold, Italic, Bold Italic (static faces) | — |
 | Prompt chip marks | Symbols Nerd Font (embedded subset, `views/glyphs.rs`) | 12 px on chips, 13 px in menus, tabs and title bars |
 
 Fonts are embedded; the binary has no runtime assets. Text is shaped by
@@ -116,11 +116,11 @@ glyphon; shaped runs are cached by content.
 |---|---|
 | 0 | Chrome: tab bar or rail, gutters |
 | 1 | Terminal grid, blocks, images, command editor; file explorer (`bg_chrome`) and code review (opaque `bg`; cards: header `surface`, code `bg_chrome`) panels |
-| 2 | Completion panel, history pane, find bar, file viewer (over the pane area) |
-| 3 | The Settings tab's page; the maximized code review |
-| 4 | Palette and its modes (history, workflows, switcher); an open Settings select list |
+| 2 | Completion panel, history pane, find bar, file viewer (over the pane area), sticky block header, visual-bell flash |
+| 3 | The Settings tab's page; the maximized code review; the file viewer's inactive-pane dim |
+| 4 | Palette and its modes (history, switcher); an open Settings select list |
 | 5 | Block context menu, prompt chip pickers, hint labels, notification toasts and popover, pane drop zone, a lifted tab |
-| 6 | Toasts, confirm dialogs, Edit prompt, the dragged pane's chip |
+| 6 | Toasts, confirm dialogs, What's New, Edit prompt, the dragged pane's chip |
 | 7 | Tooltips and chip hover cards (alone on top: text of a shared layer would draw over their plate) |
 
 A theme's background image draws before layer 0. Inline images draw under
@@ -138,10 +138,12 @@ they follow its corners instead of squaring them off.
 |---|---|
 | 0 | Docked surfaces: panes and their title bars, tabs, the completion panel, the history pane, side panels |
 | 4 | Controls and menus: buttons, icon buttons, selects and their lists, segmented controls, steppers, chips, key caps, context menus, palette rows |
-| 8 | Floating cards: palette, confirm dialogs, notifications popover and toasts, find bar, What's New |
+| 6 | Confirm dialog buttons |
+| 8 | Floating cards: palette, notifications popover and toasts, find bar, What's New |
+| 12 | Confirm dialogs |
 | Pill | Toggles, block status badges |
 
-Nothing is rounder than 8.
+Nothing is rounder than 12, and only the confirm dialog is.
 
 ## Icons
 
@@ -153,11 +155,11 @@ and title bars, 11–12 px for × and steppers. Colors: `text_dim` at rest,
 `text_ui` on hover, `accent` when on, `error` on destructive rows. The set:
 terminal, sidebar, split right/down, plus, minus, close, more (⋮), grip,
 search, history, revert, refresh, folder, file, inbox, settings, branch,
-copy, check, open (↗), chevrons, warning, sync, maximize, keyboard,
+copy, check, open (↗), chevrons, sync, maximize, restore, keyboard,
 bookmark, filter, appearance, themes, launch. Prompt chips and their menu
 rows carry Nerd Font glyphs instead (`glyphs.rs`): folder, git branch,
 diff, user, laptop, Python, PHP, GitHub, Docker,
-calendar, clock. A glyph added there must be added to the embedded subset
+calendar, clock; notification badges use its bell and bell outline. A glyph added there must be added to the embedded subset
 too. The running spinner in tabs and title bars is drawn, not a glyph: a
 third-of-a-turn arc (radius 0.36 × size, stroke 0.13 × size) turning once
 per 0.7 s, redrawn every output frame (≤ 120 Hz) so it moves smoothly.
@@ -210,11 +212,16 @@ No other animation. Motion never delays input.
 - **Segmented controls, steppers, toggles** (Settings): 28 px bordered
   groups (radius 4), the selected segment on 11 % white in `text_bright`;
   steppers are − value + with hairline dividers; toggles 34 × 20, knob 14.
-- **Modals** (palette and its modes, confirm dialogs): `surface`
-  ground, hairline border, soft shadow, 40 % black backdrop, radius 8. Rows
-  show a fuzzy match highlight and right-aligned key caps resolved from the
-  live keymap. The confirm dialog has a `warning` disc with the warning icon,
-  the affected commands in a mono box, and Cancel `esc` / confirm `⏎`.
+- **Modals** (palette and its modes): `surface` ground, hairline border,
+  soft shadow, 40 % black backdrop, radius 8. Rows show a fuzzy match
+  highlight and right-aligned key caps resolved from the live keymap.
+- **Confirm dialogs**: 460 px `surface` card, radius 12, 45 % black
+  backdrop; title (Inter 16 semibold), description and note; the affected
+  lines in an inset list (`bg` at 60 %, radius 8) — running processes as
+  36 px rows with the program's badge (an agent's brand disc, else a
+  terminal mark) and the agent's name, other lines as mono code; a sunken
+  footer bar under a hairline with Cancel `esc` and the confirm button `⏎`
+  (30 px, radius 6; red for discarding work).
 - **Docked panels** (completion, history): opaque `bg`, pane width, square,
   a hairline on the edge toward the output. Header 32 px (source tabs or
   scope chips in small caps), rows 28 px with a 7 % selection (history adds a
@@ -312,7 +319,7 @@ tokens into `assets/icon/`. Where each file is used:
 | macOS | Dock for an unbundled `cargo run` | `shift-window.png` (embedded, `icon.rs`) |
 | Linux | Launcher, dock, taskbar (via `shift.desktop`, app id `shift`) | `hicolor/*/apps/shift.png` |
 | Linux X11, Windows | Window title bar, taskbar, Alt-Tab | `shift-window.png` (embedded window icon) |
-| Windows | Executable file | `shift.ico` (for the Windows build) |
+| Windows | Executable file | `shift.ico` (reserved: Windows is not shipped yet) |
 
 Design explorations: the Shift App Icon canvas (Claude Design artifact).
 

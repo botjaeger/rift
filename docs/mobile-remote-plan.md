@@ -91,7 +91,7 @@ Prefer structured blocks over a pixel-equivalent terminal canvas:
   context when available.
 - A pane screen presents virtualized command blocks with command, output, exit
   status, timestamps, collapse state, and bookmarks.
-- A persistent composer provides command input, history, workflows, and a compact
+- A persistent composer provides command input, history, and a compact
   row of terminal control keys.
 - A raw terminal view can be added later for full-screen TUIs and alternate-screen
   programs.
@@ -219,7 +219,7 @@ the relay being able to read terminal content.
 
 - Raw terminal mode for full-screen TUIs.
 - Better external-keyboard mappings and configurable control rows.
-- Workflow browsing and structured command actions.
+- Structured command actions.
 - Selective scrollback retrieval and richer notification policies.
 
 ## Testing strategy

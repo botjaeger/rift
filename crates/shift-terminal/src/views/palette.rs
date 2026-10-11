@@ -17,8 +17,6 @@ pub enum PaletteAction {
     RunHistory(String),
     /// ⌃R history search: Enter inserts into the editor instead of running.
     InsertCommand(String),
-    /// ⌃⇧R workflows: index into the app's loaded workflow list.
-    InsertWorkflow(usize),
     /// Index into the app's loaded launch configurations.
     Launch(usize),
     ToggleVim,
@@ -72,13 +70,12 @@ pub fn ssh_items(profiles: &[shift_core::ssh::SshProfile]) -> Vec<Item> {
     out
 }
 
-/// What the modal is searching over (Warp parity: ⌘K / ⌃R / ⌃⇧R).
+/// What the modal is searching over (Warp parity: ⌘K / ⌃R).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum PaletteMode {
     #[default]
     Commands,
     History,
-    Workflows,
     /// ⇧⌘O: tabs, panes and recent blocks of this window.
     Sessions,
     /// Block action: the query is a command; the rows preview the output
@@ -141,11 +138,6 @@ pub fn base_items(
     let mut items = vec![
         item("Search in terminal", "search", PaletteAction::Search),
         item("Command history", "history", PaletteAction::OpenHistory),
-        item(
-            "Workflows",
-            "workflows",
-            PaletteAction::App(AppAction::Workflows),
-        ),
         item(
             "Go to tab, pane or block",
             "session_switcher",
@@ -472,29 +464,6 @@ pub fn history_items(history: &[String]) -> Vec<Item> {
         .collect()
 }
 
-/// ⌃⇧R mode: loaded workflows.
-pub fn workflow_items(workflows: &[shift_core::workflows::Workflow]) -> Vec<Item> {
-    workflows
-        .iter()
-        .enumerate()
-        .map(|(i, w)| Item {
-            title: w.name.clone(),
-            id: w
-                .command
-                .lines()
-                .next()
-                .unwrap_or_default()
-                .chars()
-                .take(40)
-                .collect(),
-            shortcut: Vec::new(),
-            section: Section::Actions,
-            action: PaletteAction::InsertWorkflow(i),
-            mono_title: false,
-        })
-        .collect()
-}
-
 /// Pipe mode rows: what runs, then a preview of the stdin text.
 pub fn pipe_items(query: &str, output: &str) -> Vec<MatchedItem> {
     let lines: Vec<&str> = output.lines().collect();
@@ -597,15 +566,14 @@ const MODES_H: f32 = 40.0;
 const FOOTER_H: f32 = 34.0;
 
 /// The palette's switchable modes, their chip labels and typed prefixes.
-pub const MODES: [(PaletteMode, &str, char); 4] = [
+pub const MODES: [(PaletteMode, &str, char); 3] = [
     (PaletteMode::Commands, "Actions", '>'),
     (PaletteMode::History, "History", '#'),
-    (PaletteMode::Workflows, "Workflows", '!'),
     (PaletteMode::Sessions, "Sessions", '@'),
 ];
 
-/// The mode a typed prefix switches to (`#` history, `!` workflows, `@`
-/// sessions, `>` actions).
+/// The mode a typed prefix switches to (`#` history, `@` sessions, `>`
+/// actions).
 pub fn mode_for_prefix(c: char) -> Option<PaletteMode> {
     MODES.iter().find(|m| m.2 == c).map(|m| m.0)
 }
@@ -747,8 +715,7 @@ pub fn render(
             PaletteMode::Sessions => "Go to tab, pane or block…",
             PaletteMode::PipeOutput => "Command that reads the output on stdin…",
             PaletteMode::History => "Search command history…",
-            PaletteMode::Workflows => "Search workflows…",
-            PaletteMode::Commands => "Search actions, or type # ! @ to switch…",
+            PaletteMode::Commands => "Search actions, or type # @ to switch…",
         };
         layer.text(
             sans(engine, placeholder, 15.0, Weight::NORMAL),
@@ -847,7 +814,6 @@ pub fn render(
             let label = match m.item.section {
                 Section::Actions => match state.mode {
                     PaletteMode::History => "HISTORY",
-                    PaletteMode::Workflows => "WORKFLOWS",
                     _ => "ACTIONS",
                 },
                 Section::Settings => "SETTINGS",
@@ -1063,7 +1029,6 @@ fn item_icon(item: &Item) -> Icon {
         PaletteAction::OpenSettings => Icon::Settings,
         PaletteAction::SwitchTheme(_) => Icon::Themes,
         PaletteAction::Launch(_) => Icon::Launch,
-        PaletteAction::InsertWorkflow(_) => Icon::Bookmark,
         PaletteAction::InsertCommand(_)
         | PaletteAction::RunHistory(_)
         | PaletteAction::OpenHistory => Icon::History,
