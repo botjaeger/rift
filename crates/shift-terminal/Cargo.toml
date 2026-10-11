@@ -29,6 +29,8 @@ serde.workspace = true
 serde_json.workspace = true
 libc = "0.2"
 unicode-segmentation = "1"
+# vector brand marks with no Nerd Font glyph (already built by glyphon's swash)
+zeno = "0.3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 muda = { version = "0.20", default-features = false }

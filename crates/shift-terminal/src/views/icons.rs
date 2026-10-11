@@ -32,9 +32,9 @@ pub enum Icon {
     ChevronRight,
     ChevronDown,
     ChevronUp,
-    Warning,
     Sync,
     Maximize,
+    Restore,
     Keyboard,
     Bookmark,
     Filter,
@@ -212,11 +212,6 @@ pub fn draw(layer: &mut Layer, icon: Icon, c: [f32; 2], size: f32, color: Color)
         Icon::ChevronRight => poly(layer, &[(6.0, 4.0), (10.0, 8.0), (6.0, 12.0)]),
         Icon::ChevronDown => poly(layer, &[(4.0, 6.0), (8.0, 10.0), (12.0, 6.0)]),
         Icon::ChevronUp => poly(layer, &[(4.0, 10.0), (8.0, 6.0), (12.0, 10.0)]),
-        Icon::Warning => {
-            poly(layer, &[(8.0, 2.5), (14.0, 13.5), (2.0, 13.5), (8.0, 2.5)]);
-            poly(layer, &[(8.0, 6.5), (8.0, 10.0)]);
-            dot(layer, 8.0, 12.0, 1.6);
-        }
         Icon::Sync => {
             poly(layer, &[(3.0, 6.0), (12.0, 6.0), (10.0, 4.0)]);
             poly(layer, &[(13.0, 10.0), (4.0, 10.0), (6.0, 12.0)]);
@@ -226,6 +221,12 @@ pub fn draw(layer: &mut Layer, icon: Icon, c: [f32; 2], size: f32, color: Color)
             poly(layer, &[(13.0, 10.0), (13.0, 13.0), (10.0, 13.0)]);
             poly(layer, &[(3.0, 3.0), (7.0, 7.0)]);
             poly(layer, &[(13.0, 13.0), (9.0, 9.0)]);
+        }
+        Icon::Restore => {
+            poly(layer, &[(3.0, 7.0), (7.0, 7.0), (7.0, 3.0)]);
+            poly(layer, &[(13.0, 9.0), (9.0, 9.0), (9.0, 13.0)]);
+            poly(layer, &[(7.0, 7.0), (3.0, 3.0)]);
+            poly(layer, &[(9.0, 9.0), (13.0, 13.0)]);
         }
         Icon::Keyboard => {
             rect(layer, 1.5, 4.0, 13.0, 8.0, 1.5);

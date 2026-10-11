@@ -175,15 +175,22 @@ pub const CARD_W: f32 = 420.0;
 pub const TOAST_W: f32 = 360.0;
 /// Toasts shown at once (Warp: two).
 pub const MAX_TOASTS: usize = 2;
-const PAD_X: f32 = 20.0;
-const HEADER_H: f32 = 52.0;
-const CHIPS_H: f32 = 44.0;
-const ICON: f32 = 28.0;
-const TEXT_X: f32 = PAD_X + ICON + 14.0;
-const TITLE_SIZE: f32 = 14.0;
-const TITLE_LINE: f32 = 20.0;
+// Metrics match Warp's inbox at the same card width (13 px header and
+// details, 12 px meta line, 24 px badges).
+const PAD_X: f32 = 18.0;
+const HEADER_H: f32 = 44.0;
+const CHIPS_H: f32 = 38.0;
+const CHIP_H: f32 = 26.0;
+const ICON: f32 = 24.0;
+const TEXT_X: f32 = PAD_X + ICON + 12.0;
+const TITLE_SIZE: f32 = 13.0;
+const TITLE_LINE: f32 = 18.0;
 const TITLE_MAX_LINES: usize = 4;
-const ROW_PAD: f32 = 14.0;
+const ROW_PAD: f32 = 11.0;
+const META_SIZE: f32 = 12.0;
+const META_LINE: f32 = 18.0;
+const DETAIL_SIZE: f32 = 12.5;
+const DETAIL_LINE: f32 = 17.0;
 
 fn label(engine: &mut TextEngine, text: &str, size: f32, weight: Weight) -> Buffer {
     let mut buffer = Buffer::new(&mut engine.font_system, Metrics::new(size, size * 1.35));
@@ -270,29 +277,47 @@ fn build_layout(engine: &mut TextEngine, entries: &[Entry], width: f32) -> ListL
     for e in entries {
         let mut h = ROW_PAD;
         let source = e.agent.map(|a| {
-            let w = engine.measure(a.name(), 13.0, FONT_SANS, Weight::MEDIUM);
-            (Arc::new(label(engine, a.name(), 13.0, Weight::MEDIUM)), w)
+            let w = engine.measure(a.name(), META_SIZE, FONT_SANS, Weight::MEDIUM);
+            (
+                Arc::new(label(engine, a.name(), META_SIZE, Weight::MEDIUM)),
+                w,
+            )
         });
         let branch = e
             .branch
             .as_ref()
-            .map(|b| Arc::new(label(engine, b, 13.0, Weight::NORMAL)));
-        if source.is_some() || branch.is_some() {
-            h += 20.0;
-        }
+            .map(|b| Arc::new(label(engine, b, META_SIZE, Weight::NORMAL)));
+        // meta line (agent, branch, age); without agent or branch the age
+        // shares the title's first line, so the title wraps clear of the
+        // widest age
+        let meta = source.is_some() || branch.is_some();
+        let title_w = if meta {
+            h += META_LINE;
+            text_w
+        } else {
+            text_w - engine.measure(AGE_WIDEST, META_SIZE, FONT_SANS, Weight::NORMAL) - 10.0
+        };
         let (title_buf, title_h) = wrapped(
             engine,
             display_title(e),
             TITLE_SIZE,
             TITLE_LINE,
             Weight::SEMIBOLD,
-            text_w,
+            title_w,
             TITLE_MAX_LINES,
         );
         h += title_h;
         let detail = (!e.detail.is_empty()).then(|| {
-            let (b, dh) = wrapped(engine, &e.detail, 13.0, 18.0, Weight::NORMAL, text_w, 2);
-            h += 4.0 + dh;
+            let (b, dh) = wrapped(
+                engine,
+                &e.detail,
+                DETAIL_SIZE,
+                DETAIL_LINE,
+                Weight::NORMAL,
+                text_w,
+                2,
+            );
+            h += 2.0 + dh;
             (Arc::new(b), dh)
         });
         h += ROW_PAD;
@@ -314,6 +339,9 @@ fn build_layout(engine: &mut TextEngine, entries: &[Entry], width: f32) -> ListL
     }
 }
 
+/// The widest `relative_time` text a row reserves room for.
+const AGE_WIDEST: &str = "59 minutes ago";
+
 /// "Just now", "4 minutes ago", "2 hours ago", "3 days ago".
 pub fn relative_time(secs: u64) -> String {
     let plural = |n: u64, unit: &str| format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" });
@@ -325,18 +353,96 @@ pub fn relative_time(secs: u64) -> String {
     }
 }
 
-/// Git branch glyph: two stacked commits and a side branch.
-fn branch_icon(layer: &mut Layer, x: f32, y: f32, color: Color) {
-    let t = 1.2;
-    let ring = |layer: &mut Layer, rx: f32, ry: f32| {
-        layer.bordered([rx, ry], [5.0, 5.0], color.with_alpha(0.0), color, 2.5, t);
-    };
-    layer.rect([x + 2.4, y + 3.0], [t, 8.0], color, 0.0);
-    ring(layer, x + 0.5, y);
-    ring(layer, x + 0.5, y + 9.5);
-    ring(layer, x + 7.0, y + 2.0);
-    layer.rect([x + 8.9, y + 6.5], [t, 2.5], color, 0.0);
-    layer.rect([x + 3.0, y + 8.8], [7.1, t], color, 0.0);
+/// The Claude mark (Simple Icons `claude`, 24×24 viewBox). Nerd Fonts has
+/// no Claude glyph, so the badge rasterizes this path instead.
+const CLAUDE_PATH: &str = "m4.7144 15.9555 4.7174-2.6471.079-.2307-.079-.1275h-.2307l-.7893-.0486-2.6956-.0729-2.3375-.0971-2.2646-.1214-.5707-.1215-.5343-.7042.0546-.3522.4797-.3218.686.0608 1.5179.1032 2.2767.1578 1.6514.0972 2.4468.255h.3886l.0546-.1579-.1336-.0971-.1032-.0972L6.973 9.8356l-2.55-1.6879-1.3356-.9714-.7225-.4918-.3643-.4614-.1578-1.0078.6557-.7225.8803.0607.2246.0607.8925.686 1.9064 1.4754 2.4893 1.8336.3643.3035.1457-.1032.0182-.0728-.164-.2733-1.3539-2.4467-1.445-2.4893-.6435-1.032-.17-.6194c-.0607-.255-.1032-.4674-.1032-.7285L6.287.1335 6.6997 0l.9957.1336.419.3642.6192 1.4147 1.0018 2.2282 1.5543 3.0296.4553.8985.2429.8318.091.255h.1579v-.1457l.1275-1.706.2368-2.0947.2307-2.6957.0789-.7589.3764-.9107.7468-.4918.5828.2793.4797.686-.0668.4433-.2853 1.8517-.5586 2.9021-.3643 1.9429h.2125l.2429-.2429.9835-1.3053 1.6514-2.0643.7286-.8196.85-.9046.5464-.4311h1.0321l.759 1.1293-.34 1.1657-1.0625 1.3478-.8804 1.1414-1.2628 1.7-.7893 1.36.0729.1093.1882-.0183 2.8535-.607 1.5421-.2794 1.8396-.3157.8318.3886.091.3946-.3278.8075-1.967.4857-2.3072.4614-3.4364.8136-.0425.0304.0486.0607 1.5482.1457.6618.0364h1.621l3.0175.2247.7892.522.4736.6376-.079.4857-1.2142.6193-1.6393-.3886-3.825-.9107-1.3113-.3279h-.1822v.1093l1.0929 1.0686 2.0035 1.8092 2.5075 2.3314.1275.5768-.3218.4554-.34-.0486-2.2039-1.6575-.85-.7468-1.9246-1.621h-.1275v.17l.4432.6496 2.3436 3.5214.1214 1.0807-.17.3521-.6071.2125-.6679-.1214-1.3721-1.9246L14.38 17.959l-1.1414-1.9428-.1397.079-.674 7.2552-.3156.3703-.7286.2793-.6071-.4614-.3218-.7468.3218-1.4753.3886-1.9246.3157-1.53.2853-1.9004.17-.6314-.0121-.0425-.1397.0182-1.4328 1.9672-2.1796 2.9446-1.7243 1.8456-.4128.164-.7164-.3704.0667-.6618.4008-.5889 2.386-3.0357 1.4389-1.882.929-1.0868-.0062-.1579h-.0546l-6.3385 4.1164-1.1293.1457-.4857-.4554.0608-.7467.2307-.2429 1.9064-1.3114Z";
+
+/// Sprite key space of the Claude mark (inline images count up from 1).
+const CLAUDE_KEY: u64 = 0xC1A0_DE00_0000_0000;
+
+/// Size of the Claude mark relative to its disc.
+const CLAUDE_MARK: f32 = 0.62;
+
+/// The Claude mark in white, `px` device pixels square, premultiplied RGBA
+/// (rasterized once per size and cut). Sprites draw over the layer's
+/// quads, so the pixels under a badge's kind dot (`cut`: centre and radius,
+/// in mark px) are cleared to keep the dot on top, as in Warp.
+fn claude_rgba(px: u32, cut: Option<[f32; 3]>) -> Arc<Vec<u8>> {
+    use std::sync::Mutex;
+    type Key = (u32, Option<[u32; 3]>);
+    static CACHE: Mutex<Vec<(Key, Arc<Vec<u8>>)>> = Mutex::new(Vec::new());
+    let key = (px, cut.map(|c| c.map(f32::to_bits)));
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, rgba)) = cache.iter().find(|(k, _)| *k == key) {
+        return rgba.clone();
+    }
+    let s = px as f32 / 24.0;
+    let (alpha, _) = zeno::Mask::new(CLAUDE_PATH)
+        .size(px, px)
+        .transform(Some(zeno::Transform::scale(s, s)))
+        .render();
+    let [cx, cy, r] = cut.unwrap_or([-1e6, -1e6, 0.0]);
+    let rgba = alpha
+        .iter()
+        .enumerate()
+        .flat_map(|(i, &a)| {
+            let (x, y) = ((i as u32 % px) as f32 + 0.5, (i as u32 / px) as f32 + 0.5);
+            // one-pixel soft edge
+            let keep = ((x - cx).hypot(y - cy) - r).clamp(0.0, 1.0);
+            let a = (a as f32 * keep).round() as u8;
+            [a, a, a, a]
+        })
+        .collect();
+    let rgba = Arc::new(rgba);
+    cache.push((key, Arc::clone(&rgba)));
+    rgba
+}
+
+/// Draw the Claude mark for a `disc` px disc centred on `c`, clear of the
+/// kind dot (`dot`: centre and radius, logical px) when there is one.
+fn claude_mark(
+    layer: &mut Layer,
+    c: [f32; 2],
+    disc: f32,
+    dot: Option<([f32; 2], f32)>,
+    scale: f32,
+    clip: [f32; 4],
+) {
+    let size = disc * CLAUDE_MARK;
+    let px = (size * scale).round().max(1.0) as u32;
+    let k = px as f32 / size;
+    let origin = [c[0] - size / 2.0, c[1] - size / 2.0];
+    let cut = dot.map(|(d, r)| [(d[0] - origin[0]) * k, (d[1] - origin[1]) * k, r * k]);
+    layer.sprites.push(shift_renderer::Sprite {
+        key: CLAUDE_KEY | px as u64 | u64::from(cut.is_some()) << 16,
+        rgba: claude_rgba(px, cut),
+        size: [px, px],
+        rect: [c[0] - size / 2.0, c[1] - size / 2.0, size, size],
+        src: [0.0, 0.0, px as f32, px as f32],
+        clip,
+        under_text: true,
+    });
+}
+
+/// An agent's brand disc with its mark, `d` px across, centred on `c`
+/// (the quit dialog's process rows). `clip` bounds the Claude sprite.
+pub fn agent_disc(
+    layer: &mut Layer,
+    engine: &mut TextEngine,
+    agent: Agent,
+    c: [f32; 2],
+    d: f32,
+    scale: f32,
+    clip: [f32; 4],
+) {
+    let (disc, glyph, ink) = agent_style(agent);
+    layer.circle(c, d, disc);
+    if agent == Agent::ClaudeCode {
+        claude_mark(layer, c, d, None, scale, clip);
+    } else {
+        let size = d * if glyph.len() > 1 { 0.42 } else { 0.62 };
+        mark(layer, engine, glyph, size, c[0], c[1], ink);
+    }
 }
 
 /// Semantic color of a kind (DESIGN.md: meaning, not decoration).
@@ -354,7 +460,8 @@ pub fn kind_color(theme: &Theme, kind: Kind) -> Color {
 fn agent_style(agent: Agent) -> (Color, &'static str, Color) {
     let hex = |s: &str| Color::hex(s).unwrap_or(Color::WHITE);
     match agent {
-        Agent::ClaudeCode => (hex("#d97757"), "*", Color::WHITE),
+        // drawn as the Claude mark sprite (`claude_mark`), not a glyph
+        Agent::ClaudeCode => (hex("#d97757"), "", Color::WHITE),
         Agent::Codex => (hex("#f2f2f2"), ">_", hex("#111111")),
         Agent::OpenCode => (hex("#3b3b40"), "oc", Color::WHITE),
         Agent::Gemini => (hex("#4285f4"), "G", Color::WHITE),
@@ -377,7 +484,9 @@ fn mark(
 }
 
 /// Row badge: the agent's disc with a small kind dot, or a tinted kind disc
-/// with a check, cross, `!`, dot or bell, centered at `c`.
+/// with a check, cross, `!` or bell, centered at `c`. `clip` bounds
+/// the Claude mark sprite (the card or toast).
+#[allow(clippy::too_many_arguments)]
 fn badge(
     layer: &mut Layer,
     engine: &mut TextEngine,
@@ -385,6 +494,8 @@ fn badge(
     kind: Kind,
     agent: Option<Agent>,
     c: [f32; 2],
+    scale: f32,
+    clip: [f32; 4],
 ) {
     let [cx, cy] = c;
     let ring = theme.surface;
@@ -392,25 +503,28 @@ fn badge(
     if let Some(agent) = agent {
         let (disc, glyph, ink) = agent_style(agent);
         layer.circle([cx, cy], ICON, disc);
-        let size = if glyph.len() > 1 { 11.0 } else { 17.0 };
-        let dy = if glyph == "*" { 3.0 } else { 0.0 };
-        mark(layer, engine, glyph, size, cx, cy + dy, ink);
         // kind dot, ringed in the card color (Warp's status overlay)
-        let (dx, dy) = (cx + ICON / 2.0 - 4.0, cy + ICON / 2.0 - 4.0);
-        layer.circle([dx, dy], 13.0, ring);
-        layer.circle([dx, dy], 9.0, color);
+        let (dx, dy) = (cx + ICON / 2.0 - 3.0, cy + ICON / 2.0 - 3.0);
+        if agent == Agent::ClaudeCode {
+            claude_mark(layer, [cx, cy], ICON, Some(([dx, dy], 6.0)), scale, clip);
+        } else {
+            let size = if glyph.len() > 1 { 10.0 } else { 15.0 };
+            mark(layer, engine, glyph, size, cx, cy, ink);
+        }
+        layer.circle([dx, dy], 12.0, ring);
+        layer.circle([dx, dy], 8.0, color);
         return;
     }
     layer.circle([cx, cy], ICON, color.with_alpha(0.16));
     match kind {
-        Kind::Finished => mark(layer, engine, "✓", 14.0, cx, cy, color),
-        Kind::Failed => mark(layer, engine, "✕", 14.0, cx, cy, color),
-        Kind::Request => mark(layer, engine, "!", 15.0, cx, cy, color),
-        Kind::Notify => layer.circle([cx, cy], 8.0, color),
+        Kind::Finished => mark(layer, engine, "✓", 12.0, cx, cy, color),
+        Kind::Failed => mark(layer, engine, "✕", 12.0, cx, cy, color),
+        Kind::Request => mark(layer, engine, "!", 13.0, cx, cy, color),
+        // the default notification icon: a bell (filled for a program's
+        // notification, outlined for a terminal bell)
+        Kind::Notify => super::glyphs::draw(layer, engine, super::glyphs::BELL, c, 12.0, color),
         Kind::Bell => {
-            layer.rect([cx - 4.5, cy - 5.0], [9.0, 8.0], color, 4.0);
-            layer.rect([cx - 6.0, cy + 2.0], [12.0, 1.8], color, 0.9);
-            layer.circle([cx, cy + 5.0], 3.2, color);
+            super::glyphs::draw(layer, engine, super::glyphs::BELL_OUTLINE, c, 12.0, color)
         }
     }
 }
@@ -434,6 +548,7 @@ pub fn render(
     top: f32,
     w: f32,
     h: f32,
+    scale: f32,
 ) -> NotificationsHits {
     let card_w = CARD_W.min(w - 16.0);
     let x = (anchor_right - card_w)
@@ -488,28 +603,28 @@ pub fn render(
 
     // ── header: title, "Mark all as read", ✕ ──
     layer.text(
-        label(engine, "Notifications", 16.0, Weight::MEDIUM),
+        label(engine, "Notifications", 13.5, Weight::MEDIUM),
         x + PAD_X,
-        y + 16.0,
+        y + 14.0,
         theme.text_bright,
     );
-    let close = [x + card_w - 12.0 - 28.0, y + 12.0, 28.0, 28.0];
+    let close = [x + card_w - 10.0 - 24.0, y + 10.0, 24.0, 24.0];
     super::close_icon(
         layer,
-        [close[0] + 14.0, close[1] + 14.0],
-        4.5,
+        [close[0] + 12.0, close[1] + 12.0],
+        4.0,
         theme.text_ui,
     );
     let unread = entries.iter().filter(|e| e.unread).count();
     let mut mark_read = [0.0; 4];
     if unread > 0 {
         let text = "Mark all as read";
-        let tw = engine.measure(text, 12.5, FONT_SANS, Weight::MEDIUM);
-        mark_read = [close[0] - 8.0 - tw - 16.0, y + 14.0, tw + 16.0, 24.0];
+        let tw = engine.measure(text, META_SIZE, FONT_SANS, Weight::MEDIUM);
+        mark_read = [close[0] - 6.0 - tw - 16.0, y + 11.0, tw + 16.0, 22.0];
         layer.text(
-            label(engine, text, 12.5, Weight::MEDIUM),
+            label(engine, text, META_SIZE, Weight::MEDIUM),
             mark_read[0] + 8.0,
-            mark_read[1] + 4.0,
+            mark_read[1] + 3.0,
             theme.accent,
         );
     }
@@ -520,8 +635,8 @@ pub fn render(
     for filter in Filter::ALL {
         let n = entries.iter().filter(|e| filter.matches(e)).count();
         let text = format!("{} ({n})", filter.label());
-        let tw = engine.measure(&text, 13.0, FONT_SANS, Weight::MEDIUM);
-        let r = [cx, y + HEADER_H, tw + 22.0, 30.0];
+        let tw = engine.measure(&text, META_SIZE, FONT_SANS, Weight::MEDIUM);
+        let r = [cx, y + HEADER_H, tw + 16.0, CHIP_H];
         let on = state.filter == filter;
         if on {
             layer.rect(
@@ -532,9 +647,9 @@ pub fn render(
             );
         }
         layer.text(
-            label(engine, &text, 13.0, Weight::MEDIUM),
-            r[0] + 11.0,
-            r[1] + 6.5,
+            label(engine, &text, META_SIZE, Weight::MEDIUM),
+            r[0] + 8.0,
+            r[1] + (CHIP_H - META_SIZE * 1.35) / 2.0,
             if on {
                 theme.text_bright
             } else {
@@ -542,7 +657,7 @@ pub fn render(
             },
         );
         chips.push((r, filter));
-        cx += r[2] + 6.0;
+        cx += r[2] + 4.0;
     }
     layer.hline(x + 1.0, list_top - 1.0, card_w - 2.0, 1.0, theme.border);
 
@@ -560,9 +675,9 @@ pub fn render(
             Filter::Unread => "Nothing unread",
             Filter::Errors => "No errors",
         };
-        let mw = engine.measure(msg, 13.0, FONT_SANS, Weight::NORMAL);
+        let mw = engine.measure(msg, DETAIL_SIZE, FONT_SANS, Weight::NORMAL);
         layer.text(
-            label(engine, msg, 13.0, Weight::NORMAL),
+            label(engine, msg, DETAIL_SIZE, Weight::NORMAL),
             x + (card_w - mw) / 2.0,
             list_top + (empty_h - 18.0) / 2.0,
             theme.text_muted,
@@ -601,6 +716,8 @@ pub fn render(
                 entry.kind,
                 entry.agent,
                 [x + PAD_X + ICON / 2.0, icon_top + ICON / 2.0],
+                scale,
+                [x, list_top, card_w, card_h - (list_top - y)],
             );
             if entry.unread {
                 layer.circle([x + 9.0, icon_top + ICON / 2.0], 6.0, theme.accent);
@@ -608,18 +725,21 @@ pub fn render(
         }
         let tx = x + TEXT_X;
         let ago = relative_time(entry.age_secs);
-        let ago_w = engine.measure(&ago, 13.0, FONT_SANS, Weight::NORMAL);
+        let ago_w = engine.measure(&ago, META_SIZE, FONT_SANS, Weight::NORMAL);
         let ago_x = x + card_w - PAD_X - ago_w;
-        if fully_in(ty, 18.0) {
+        let meta = row.source.is_some() || row.branch.is_some();
+        // on the title's first line, the age sits on the title's baseline
+        let ago_y = if meta { ty } else { ty + 1.5 };
+        if fully_in(ago_y, META_LINE) {
             layer.text_clipped(
-                label(engine, &ago, 13.0, Weight::NORMAL),
+                label(engine, &ago, META_SIZE, Weight::NORMAL),
                 ago_x,
-                ty,
+                ago_y,
                 theme.text_muted,
                 clip,
             );
         }
-        if row.source.is_some() || row.branch.is_some() {
+        if meta {
             let bounds = TextBounds {
                 right: (ago_x - 10.0) as i32,
                 ..clip
@@ -630,17 +750,24 @@ pub fn render(
                 sx += bw + 10.0;
             }
             if let Some(b) = &row.branch {
-                if fully_in(ty + 2.0, 14.0) && sx + 14.0 < ago_x - 10.0 {
-                    branch_icon(layer, sx, ty + 2.0, theme.text_dim);
+                if fully_in(ty, META_LINE) && sx + 12.0 < ago_x - 10.0 {
+                    super::glyphs::draw(
+                        layer,
+                        engine,
+                        super::glyphs::BRANCH,
+                        [sx + 6.0, ty + META_SIZE * 1.35 / 2.0],
+                        META_SIZE,
+                        theme.text_dim,
+                    );
                 }
-                layer.text_clipped(b.clone(), sx + 17.0, ty, theme.text_dim, bounds);
+                layer.text_clipped(b.clone(), sx + 16.0, ty, theme.text_dim, bounds);
             }
-            ty += 20.0;
+            ty += META_LINE;
         }
         layer.text_clipped(row.title.clone(), tx, ty, theme.text_bright, clip);
         ty += row.title_h;
         if let Some((d, _)) = &row.detail {
-            layer.text_clipped(d.clone(), tx, ty + 4.0, theme.text_dim, clip);
+            layer.text_clipped(d.clone(), tx, ty + 2.0, theme.text_dim, clip);
         }
     }
 
@@ -669,11 +796,12 @@ pub fn render_toasts(
     toasts: &[Entry],
     top: f32,
     w: f32,
+    scale: f32,
 ) -> Vec<ToastHit> {
     let tw = TOAST_W.min(w - 24.0);
     let x = (w - tw - 12.0).round();
     let mut y = top.round();
-    let text_x = x + 16.0 + ICON + 12.0;
+    let text_x = x + 14.0 + ICON + 12.0;
     let text_w = tw - (text_x - x) - 36.0;
     let mut hits = Vec::new();
     for e in toasts.iter().take(MAX_TOASTS) {
@@ -686,17 +814,26 @@ pub fn render_toasts(
         let (title, title_h) = wrapped(
             engine,
             display_title(e),
-            13.5,
-            19.0,
+            TITLE_SIZE,
+            TITLE_LINE,
             Weight::SEMIBOLD,
             text_w,
             2,
         );
-        let detail = (!e.detail.is_empty())
-            .then(|| wrapped(engine, &e.detail, 12.5, 17.0, Weight::NORMAL, text_w, 1));
-        let src_h = if source.is_empty() { 0.0 } else { 18.0 };
-        let h = (14.0 + src_h + title_h + detail.as_ref().map_or(0.0, |d| d.1 + 2.0) + 14.0)
-            .max(ICON + 28.0);
+        let detail = (!e.detail.is_empty()).then(|| {
+            wrapped(
+                engine,
+                &e.detail,
+                DETAIL_SIZE,
+                DETAIL_LINE,
+                Weight::NORMAL,
+                text_w,
+                1,
+            )
+        });
+        let src_h = if source.is_empty() { 0.0 } else { META_LINE };
+        let content_h = src_h + title_h + detail.as_ref().map_or(0.0, |d| d.1 + 2.0);
+        let h = (content_h + 24.0).max(ICON + 24.0);
         layer.shadow(
             [x, y + 6.0],
             [tw, h],
@@ -712,24 +849,20 @@ pub fn render_toasts(
             8.0,
             1.0,
         );
-        // kind stripe on the left edge
-        layer.rect(
-            [x + 1.0, y + 10.0],
-            [3.0, h - 20.0],
-            kind_color(theme, e.kind),
-            1.5,
-        );
+        // badge and text block both centred on the card's height
         badge(
             layer,
             engine,
             theme,
             e.kind,
             e.agent,
-            [x + 16.0 + ICON / 2.0, y + 14.0 + ICON / 2.0],
+            [x + 14.0 + ICON / 2.0, y + h / 2.0],
+            scale,
+            [x, y, tw, h],
         );
-        let mut ty = y + 14.0;
+        let mut ty = y + (h - content_h) / 2.0;
         if !source.is_empty() {
-            let b = label(engine, &source, 12.0, Weight::MEDIUM);
+            let b = label(engine, &source, META_SIZE, Weight::MEDIUM);
             let bounds = TextBounds {
                 left: text_x as i32,
                 top: y as i32,
@@ -776,6 +909,22 @@ mod tests {
             age_secs: 0,
             unread,
         }
+    }
+
+    #[test]
+    fn claude_mark_rasterizes_clear_of_the_kind_dot() {
+        let alpha = |rgba: &[u8], px: u32, x: u32, y: u32| rgba[((y * px + x) * 4 + 3) as usize];
+        let whole = claude_rgba(32, None);
+        assert_eq!(whole.len(), 32 * 32 * 4);
+        assert!(
+            alpha(&whole, 32, 16, 16) > 200,
+            "the mark's centre is solid"
+        );
+        // premultiplied white: every channel equals alpha
+        assert!(whole.chunks(4).all(|p| p[0] == p[3] && p[1] == p[3]));
+        let cut = claude_rgba(30, Some([15.0, 15.0, 4.0]));
+        assert_eq!(alpha(&cut, 30, 15, 15), 0, "the dot's area is cleared");
+        assert!(cut.chunks(4).any(|p| p[3] > 200), "the rest stays");
     }
 
     #[test]

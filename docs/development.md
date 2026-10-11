@@ -91,8 +91,10 @@ reusable validation workflow to pass on the tagged revision.
 
 The `ui` gate checks command blocks, palette input while another window's
 socket is stalled, background file preview, theme-only hot reload, automation
-config reload, and pane splitting. It uses scratch XDG config/data directories
-with notifications disabled and retains captures, state dumps and logs under
+config reload (polled, not timed: file-system events can arrive late),
+pane splitting, where the next block lands after `clear`, and that the
+completion panel moves the output up out from under it. It uses scratch XDG
+config/data directories with notifications disabled and retains captures, state dumps and logs under
 `/tmp/shift-ui-*`. Set `SHIFT_TEST_BIN` to test an already built binary;
 otherwise it builds the debug binary first.
 
@@ -178,6 +180,7 @@ Workspace dependencies (`Cargo.toml`):
 |---|---|---|
 | `wgpu` 29 | GPU rendering | Pinned: glyphon 0.11 requires `^29` |
 | `glyphon` 0.11 | Text shaping and glyph atlas | |
+| `ttf-parser` 0.25 (renderer) | Font picker: fixed-width and outline checks | Already built for glyphon |
 | `winit` 0.30 | Windows, input, IME | 0.31 is beta |
 | `alacritty_terminal` 0.26, `vte` 0.15 | VT emulation, PTY spawn | Vendored in `vendor/` with the VT420 emulation, Xcms colors and wcwidth cluster widths; only `tty`, `Term`, `vte`, `FairMutex` are used |
 | `bytemuck`, `pollster` | GPU buffers, blocking on adapter setup | |
@@ -192,7 +195,8 @@ Workspace dependencies (`Cargo.toml`):
 | `log`, `env_logger` | Logging (`RUST_LOG=info`) | |
 
 App-only: `accesskit` / `accesskit_winit` (screen readers), `global-hotkey`,
-`regex` (find), `libc`; on macOS `muda` (menu bar), `objc2`,
+`regex` (find), `libc`, `zeno` (rasterizes brand marks Nerd Fonts lacks,
+such as the Claude mark; already built for glyphon); on macOS `muda` (menu bar), `objc2`,
 `objc2-app-kit`. `shift-pty` also uses `libc` for PTY and socket calls.
 
 Before adding a dependency, check whether the standard library or an existing

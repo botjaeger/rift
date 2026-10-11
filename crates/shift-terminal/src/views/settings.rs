@@ -1,7 +1,7 @@
 use shift_core::{
     Bell, Color, Config, CursorStyle, InputPosition, Keymap, PromptMode, TabLayout, Theme,
 };
-use shift_renderer::glyphon::{Attrs, Buffer, Family, Metrics, Shaping, Weight};
+use shift_renderer::glyphon::{Attrs, Buffer, Family, Metrics, Shaping, TextBounds, Weight};
 use shift_renderer::{FONT_SANS, Layer, TextEngine, mono_family};
 
 use crate::state::{ClickTarget, Hit};
@@ -13,16 +13,20 @@ pub enum Page {
     #[default]
     Appearance,
     Features,
+    Terminal,
+    Files,
     Notifications,
     Keybindings,
     Themes,
 }
 
 impl Page {
-    pub const ALL: [Page; 6] = [
+    pub const ALL: [Page; 8] = [
         Page::General,
         Page::Appearance,
         Page::Features,
+        Page::Terminal,
+        Page::Files,
         Page::Notifications,
         Page::Keybindings,
         Page::Themes,
@@ -33,6 +37,8 @@ impl Page {
             Page::General => "General",
             Page::Appearance => "Appearance",
             Page::Features => "Input",
+            Page::Terminal => "Terminal",
+            Page::Files => "Files",
             Page::Notifications => "Notifications",
             Page::Keybindings => "Keybindings",
             Page::Themes => "Themes",
@@ -44,6 +50,8 @@ impl Page {
             Page::General => "Shell and session behavior.",
             Page::Appearance => "Fonts, cursor, window and theme. Changes apply as you make them.",
             Page::Features => "The command line and blocks.",
+            Page::Terminal => "Mouse, clipboard and keys inside the terminal.",
+            Page::Files => "Where files open, and the file explorer.",
             Page::Notifications => {
                 "Toasts, desktop notifications and sounds; everything also lands in the inbox."
             }
@@ -57,6 +65,10 @@ impl Page {
             Page::General => Icon::Settings,
             Page::Appearance => Icon::Appearance,
             Page::Features => Icon::Terminal,
+            // Input already shows the terminal mark; this page is mostly
+            // the mouse and the clipboard
+            Page::Terminal => Icon::Copy,
+            Page::Files => Icon::File,
             Page::Notifications => Icon::Inbox,
             Page::Keybindings => Icon::Keyboard,
             Page::Themes => Icon::Themes,
@@ -86,8 +98,10 @@ pub struct SettingsState {
     pub page: Page,
     /// Vertical scroll of the page body (logical px, ≥ 0).
     pub scroll: f32,
-    /// Height of the last rendered page body (for scroll clamping).
+    /// Height of the last rendered page content (for scroll clamping).
     pub content_h: f32,
+    /// Height of the body the content scrolls in (above the footer).
+    pub view_h: f32,
     /// Sidebar search: rows of every page whose name or description match.
     pub query: String,
     /// Keybindings page: type-to-filter query over action names/shortcuts.
@@ -135,10 +149,32 @@ impl SettingsState {
     }
 
     /// Wheel scroll; `lines` > 0 scrolls up (toward the top).
-    pub fn scroll_by(&mut self, lines: f32, viewport_h: f32) {
-        let max = (self.content_h - viewport_h).max(0.0);
-        self.scroll = (self.scroll - lines * 24.0).clamp(0.0, max);
+    pub fn scroll_by(&mut self, lines: f32) {
+        self.scroll = (self.scroll - lines * 24.0).clamp(0.0, self.max_scroll());
     }
+
+    /// Furthest scroll: the content's end at the body's bottom edge.
+    pub fn max_scroll(&self) -> f32 {
+        (self.content_h - self.view_h).max(0.0)
+    }
+}
+
+/// A control Tab can focus.
+fn focusable(target: &ClickTarget) -> bool {
+    matches!(
+        target,
+        ClickTarget::SettingsToggle(_)
+            | ClickTarget::SettingsStep(..)
+            | ClickTarget::SettingsSegment(..)
+            | ClickTarget::SettingsCycle(_)
+            | ClickTarget::SettingsSlider(_)
+            | ClickTarget::SettingsTheme(_)
+            | ClickTarget::SettingsKeybind(_)
+            | ClickTarget::SettingsKeybindReset(_)
+            | ClickTarget::SettingsReset(_)
+            | ClickTarget::SettingsEditPrompt
+            | ClickTarget::SettingsOpenConfig
+    )
 }
 
 /// The page's keyboard-focusable controls in reading order (top to bottom,
@@ -146,26 +182,15 @@ impl SettingsState {
 pub fn focus_order(hits: &[Hit]) -> Vec<(ClickTarget, [f32; 4])> {
     let mut order: Vec<_> = hits
         .iter()
-        .filter(|h| {
-            matches!(
-                h.target,
-                ClickTarget::SettingsToggle(_)
-                    | ClickTarget::SettingsStep(..)
-                    | ClickTarget::SettingsSegment(..)
-                    | ClickTarget::SettingsCycle(_)
-                    | ClickTarget::SettingsSlider(_)
-                    | ClickTarget::SettingsTheme(_)
-                    | ClickTarget::SettingsKeybind(_)
-                    | ClickTarget::SettingsKeybindReset(_)
-                    | ClickTarget::SettingsReset(_)
-                    | ClickTarget::SettingsOpenConfig
-            )
-        })
+        .filter(|h| focusable(&h.target))
         .map(|h| (h.target.clone(), h.rect))
         .collect();
+    // by row (vertical centre: a row's ↺ and its control differ in height),
+    // then left to right
+    let key = |r: &[f32; 4]| ((r[1] + r[3] / 2.0).round(), r[0].round());
     order.sort_by(|a, b| {
-        (a.1[1].round(), a.1[0].round())
-            .partial_cmp(&(b.1[1].round(), b.1[0].round()))
+        key(&a.1)
+            .partial_cmp(&key(&b.1))
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     order.dedup_by(|a, b| a.0 == b.0);
@@ -304,8 +329,11 @@ pub fn render(
     blink_on: bool,
     hits: &mut Vec<Hit>,
     names: &mut Vec<([f32; 4], String)>,
+    // every focusable control, also scrolled away (page coordinates)
+    stops: &mut Vec<(ClickTarget, [f32; 4])>,
 ) -> f32 {
     names.clear();
+    stops.clear();
     let [x0, top, aw, ah] = area;
     let (right, bottom) = (x0 + aw, top + ah);
     let compact = aw < COMPACT_BELOW_W;
@@ -371,8 +399,14 @@ pub fn render(
             r[1] + 6.5,
             color,
         );
-        if searching && blink_on {
-            let tw = engine.measure(&shown, 12.5, FONT_SANS, Weight::NORMAL);
+        // typing searches from every page but Keybindings (its own filter
+        // takes it): the caret shows there, before the placeholder if empty
+        if blink_on && (searching || state.page != Page::Keybindings) {
+            let tw = if searching {
+                engine.measure(&shown, 12.5, FONT_SANS, Weight::NORMAL)
+            } else {
+                0.0
+            };
             layer.rect(
                 [r[0] + 31.0 + tw, r[1] + 7.0],
                 [1.5, 16.0],
@@ -465,9 +499,12 @@ pub fn render(
     }
 
     // ── body ──
+    // the column centres in the room right of the sidebar (Warp), keeping at
+    // least `pad` on each side
     let pad = if compact { 20.0 } else { 48.0 };
-    let cx = x0 + sidebar_w + pad;
-    let card_w = (right - pad - cx).clamp(120.0, BODY_MAX_W);
+    let room = right - (x0 + sidebar_w);
+    let card_w = (room - 2.0 * pad).clamp(120.0, BODY_MAX_W);
+    let cx = (x0 + sidebar_w + ((room - card_w) / 2.0).max(pad)).round();
     let searching = !state.query.trim().is_empty();
     let (title, subtitle) = if searching {
         (
@@ -480,6 +517,17 @@ pub fn render(
     let body_top = top + 28.0;
     // everything from the title down scrolls and clips to the body
     let text_start = layer.texts.len();
+    // quads too: a row scrolled half under the tab strip must not paint its
+    // dot, ↺ or control over it
+    layer.set_clip(Some((
+        [
+            x0 + sidebar_w,
+            top,
+            aw - sidebar_w,
+            (bottom - 34.0 - top).max(0.0),
+        ],
+        0.0,
+    )));
     let title = super::palette::elide_to(engine, &title, 22.0, FONT_SANS, card_w);
     layer.text(
         sans(engine, &title, 22.0, Weight::SEMIBOLD),
@@ -523,12 +571,17 @@ pub fn render(
         defaults: &defaults,
         mouse,
         rows: 0,
+        pushed: false,
+        stops,
+        scroll: state.scroll,
     };
     if searching {
         for page in [
             Page::General,
             Page::Appearance,
             Page::Features,
+            Page::Terminal,
+            Page::Files,
             Page::Notifications,
         ] {
             form.page = page.label();
@@ -536,6 +589,8 @@ pub fn render(
                 Page::General => general_page(&mut form, config),
                 Page::Appearance => appearance_page(&mut form, config),
                 Page::Features => features_page(&mut form, config),
+                Page::Terminal => terminal_page(&mut form, config),
+                Page::Files => files_page(&mut form, config),
                 _ => notifications_page(&mut form, config),
             }
         }
@@ -553,12 +608,16 @@ pub fn render(
             Page::Appearance => appearance_page(&mut form, config),
             Page::General => general_page(&mut form, config),
             Page::Features => features_page(&mut form, config),
+            Page::Terminal => terminal_page(&mut form, config),
+            Page::Files => files_page(&mut form, config),
             Page::Notifications => notifications_page(&mut form, config),
-            Page::Keybindings => keybindings_page(&mut form, keymap, config, state),
+            Page::Keybindings => keybindings_page(&mut form, keymap, config, state, blink_on),
             Page::Themes => themes_page(&mut form, config),
         }
     }
-    let content_h = form.y - (body_top - state.scroll) + 24.0;
+    // from the body's top edge (the title starts 28 px below it), so
+    // content_h - view_h is the furthest scroll
+    let content_h = form.y - (top - state.scroll) + 24.0;
 
     // the select whose list is open, over the page
     let mut menu_hits = Vec::new();
@@ -583,6 +642,7 @@ pub fn render(
     let layer = form.layer;
     let hits = form.hits;
     let engine = form.engine;
+    layer.set_clip(None);
     for t in &mut layer.texts[text_start..] {
         t.bounds = Some(shift_renderer::glyphon::TextBounds {
             left: (x0 + sidebar_w) as i32,
@@ -701,18 +761,38 @@ fn dropdown(
             layer.bordered([tx, cy - 7.0], [14.0, 14.0], t.bg, t.accent, 3.0, 2.0);
             tx += 22.0;
         }
-        let label =
-            super::palette::elide_to(engine, label, 13.0, FONT_SANS, r[0] + r[2] - 10.0 - tx);
-        layer.text(
-            sans(engine, &label, 13.0, Weight::NORMAL),
-            tx,
-            cy - 8.8,
-            if row == dd.highlight {
-                theme.text_bright
-            } else {
-                theme.text_ui
-            },
-        );
+        let ink = if row == dd.highlight {
+            theme.text_bright
+        } else {
+            theme.text_ui
+        };
+        if dd.id == "font_family" {
+            // each family previewed in itself (Warp's font picker)
+            let mut b = Buffer::new(&mut engine.font_system, Metrics::new(13.5, 18.0));
+            b.set_text(
+                &mut engine.font_system,
+                label,
+                &Attrs::new().family(Family::Name(value)),
+                Shaping::Advanced,
+                None,
+            );
+            let bounds = TextBounds {
+                left: tx as i32,
+                top: ry as i32,
+                right: (r[0] + r[2] - 10.0) as i32,
+                bottom: (ry + MENU_ROW_H) as i32,
+            };
+            layer.text_clipped(b, tx, cy - 9.0, ink, bounds);
+        } else {
+            let label =
+                super::palette::elide_to(engine, label, 13.0, FONT_SANS, r[0] + r[2] - 10.0 - tx);
+            layer.text(
+                sans(engine, &label, 13.0, Weight::NORMAL),
+                tx,
+                cy - 8.8,
+                ink,
+            );
+        }
         out.push(Hit {
             rect: r,
             target: ClickTarget::SettingsOption(row),
@@ -773,6 +853,11 @@ struct Form<'a> {
     mouse: Option<(f32, f32)>,
     /// Rows drawn (search: zero means no match).
     rows: usize,
+    /// The last `push_hit` added a hit (`name_last` names only that).
+    pushed: bool,
+    /// Every focusable control in page coordinates (see `push_hit`).
+    stops: &'a mut Vec<(ClickTarget, [f32; 4])>,
+    scroll: f32,
 }
 
 impl Form<'_> {
@@ -883,16 +968,27 @@ impl Form<'_> {
     }
 
     fn push_hit(&mut self, rect: [f32; 4], target: ClickTarget) {
-        if self.visible(rect[1], rect[3]) {
+        // every focusable control of the page, also scrolled away, in page
+        // coordinates: Tab walks these and scrolls the one it lands on in
+        if !self.hidden && focusable(&target) {
+            self.stops.push((
+                target.clone(),
+                [rect[0], rect[1] + self.scroll, rect[2], rect[3]],
+            ));
+        }
+        self.pushed = self.visible(rect[1], rect[3]);
+        if self.pushed {
             self.hits.push(Hit { rect, target });
             self.names.push((rect, self.row_label.clone()));
         }
     }
 
     /// Accessible name of the control `push_hit` just added (if visible).
+    /// A skipped push (search-hidden or scrolled-off row) names nothing:
+    /// renaming the previous control would mislabel it.
     fn name_last(&mut self, name: String) {
-        if let (Some(hit), Some(last)) = (self.hits.last(), self.names.last_mut())
-            && hit.rect == last.0
+        if self.pushed
+            && let Some(last) = self.names.last_mut()
         {
             last.1 = name;
         }
@@ -1051,14 +1147,74 @@ impl Form<'_> {
         );
     }
 
+    /// The Shift prompt's chips as they look (sample values), in a box
+    /// that opens "Edit prompt".
+    fn prompt_preview(&mut self, y: f32, chips: &[shift_core::PromptChip]) {
+        self.label_desc("Prompt chips", "Click to choose and order them", y);
+        if self.hidden {
+            return;
+        }
+        let r = [self.x, self.y + 4.0, self.card_w, 40.0];
+        self.y = r[1] + r[3] + 8.0;
+        if self.visible(r[1], r[3]) {
+            let hot = self.hot(r);
+            self.layer.bordered(
+                [r[0], r[1]],
+                [r[2], r[3]],
+                lift(self.theme, if hot { 0.06 } else { 0.03 }),
+                if hot {
+                    self.theme.accent
+                } else {
+                    lift(self.theme, 0.1)
+                },
+                6.0,
+                1.0,
+            );
+            let views: Vec<_> = chips
+                .iter()
+                .map(|c| super::prompt_chips::sample(*c, self.theme))
+                .collect();
+            if views.is_empty() {
+                self.layer.text(
+                    sans(self.engine, "No chips", 12.5, Weight::NORMAL),
+                    r[0] + 12.0,
+                    r[1] + 11.0,
+                    self.theme.text_muted,
+                );
+            }
+            super::editor::draw_chips(
+                self.layer,
+                self.engine,
+                self.theme,
+                [r[0] + 12.0, r[0] + r[2] - 12.0],
+                r[1] + 13.0,
+                &views,
+            );
+        }
+        self.push_hit(r, ClickTarget::SettingsEditPrompt);
+        self.name_last("Edit prompt chips".into());
+    }
+
     fn segment(&mut self, y: f32, label: &str, options: &[&str], active: usize, id: &'static str) {
+        self.segment_desc(y, label, "", options, active, id);
+    }
+
+    fn segment_desc(
+        &mut self,
+        y: f32,
+        label: &str,
+        desc: &str,
+        options: &[&str],
+        active: usize,
+        id: &'static str,
+    ) {
         let widths: Vec<f32> = options
             .iter()
             .map(|o| self.engine.measure(o, 12.5, FONT_SANS, Weight::MEDIUM) + 24.0)
             .collect();
         let total: f32 = widths.iter().sum();
         self.reserve = total + 40.0;
-        self.label(label, y);
+        self.label_desc(label, desc, y);
         let sy = y + (ROW_H - CONTROL_H) / 2.0;
         let sx = self.right() - total;
         if self.visible(sy, CONTROL_H) {
@@ -1132,7 +1288,13 @@ impl Form<'_> {
     /// A theme select: the theme's ground ringed in its accent, its name.
     fn theme_select(&mut self, y: f32, label: &str, name: &str, id: &'static str) {
         let t = shift_core::theme::load_by_name(name);
-        self.select_with(y, label, &t.name, Some((t.bg, t.accent)), id);
+        let names = shift_core::theme::available_themes();
+        let shown = names
+            .iter()
+            .position(|n| n == name)
+            .and_then(|i| shift_core::theme::picker_labels(&names).into_iter().nth(i))
+            .unwrap_or(t.name);
+        self.select_with(y, label, &shown, Some((t.bg, t.accent)), id);
     }
 
     fn select_with(
@@ -1254,6 +1416,12 @@ impl Form<'_> {
                 self.theme.text_dim,
             );
         }
+        // read-only, but named for assistive tech
+        self.push_hit(
+            [self.right() - 260.0, y, 260.0, ROW_H],
+            ClickTarget::SettingsNoop,
+        );
+        self.name_last(format!("{label}: {value}"));
     }
 }
 
@@ -1278,7 +1446,7 @@ fn appearance_page(form: &mut Form, config: &Config) {
     form.stepper(
         y,
         "Font size",
-        &format!("{:.0}", config.font_size),
+        &format!("{:.0}", config.font_size()),
         "px",
         "font_size",
     );
@@ -1286,8 +1454,8 @@ fn appearance_page(form: &mut Form, config: &Config) {
     form.slider(
         y,
         "Line height",
-        (config.line_height - 1.0) / 1.2,
-        &format!("{:.2}", config.line_height),
+        (config.line_height() - 1.0) / 1.2,
+        &format!("{:.2}", config.line_height()),
         "line_height",
     );
 
@@ -1382,11 +1550,8 @@ fn appearance_page(form: &mut Form, config: &Config) {
 
 fn general_page(form: &mut Form, config: &Config) {
     form.group("Shell");
-    let shell = config
-        .shell
-        .clone()
-        .or_else(|| std::env::var("SHELL").ok())
-        .unwrap_or_else(|| "/bin/zsh".into());
+    // what actually runs: a configured shell that is not executable falls back
+    let shell = shift_core::shell_integration::resolve_shell(config.shell.as_deref());
     let y = form.y;
     form.display(y, "Shell path", &shell);
     let y = form.y;
@@ -1457,8 +1622,10 @@ fn general_page(form: &mut Form, config: &Config) {
         },
         "control_api",
     );
+}
 
-    form.group("Terminal");
+fn terminal_page(form: &mut Form, config: &Config) {
+    form.group("Mouse");
     let y = form.y;
     form.toggle(
         y,
@@ -1467,19 +1634,62 @@ fn general_page(form: &mut Form, config: &Config) {
         "mouse_reporting",
     );
     let y = form.y;
+    form.toggle_desc(
+        y,
+        "Middle-click to paste",
+        "Pastes the clipboard into the pane under the pointer",
+        config.middle_click_paste,
+        "middle_click_paste",
+    );
+    let y = form.y;
+    form.stepper_desc(
+        y,
+        "Lines per wheel notch",
+        "How far one mouse-wheel step scrolls the terminal",
+        &config.wheel_lines().to_string(),
+        "lines",
+        "wheel_scroll_lines",
+    );
+
+    form.group("Clipboard");
+    let y = form.y;
+    form.toggle(y, "Copy on select", config.copy_on_select, "copy_on_select");
+    let y = form.y;
     form.toggle(
         y,
         "Ask before pasting lines that would run",
         config.confirm_multiline_paste,
         "confirm_multiline_paste",
     );
+    let y = form.y;
+    form.segment_desc(
+        y,
+        "Programs' clipboard access (OSC 52)",
+        "Read lets any program or ssh host see your clipboard",
+        &["Off", "Copy", "Copy and read"],
+        match config.clipboard_access.trim() {
+            "off" => 0,
+            "read_write" => 2,
+            _ => 1,
+        },
+        "clipboard_access",
+    );
+
     if cfg!(target_os = "macos") {
+        form.group("Keys");
         let y = form.y;
         form.toggle(
             y,
-            "Option key sends Meta",
+            "Left Option key is Meta",
             config.option_as_meta,
             "option_as_meta",
+        );
+        let y = form.y;
+        form.toggle(
+            y,
+            "Right Option key is Meta",
+            config.right_option_meta(),
+            "right_option_as_meta",
         );
     }
 }
@@ -1523,6 +1733,17 @@ fn features_page(form: &mut Form, config: &Config) {
     let y = form.y;
     form.segment(
         y,
+        "Blocks start",
+        &["Bottom", "Top"],
+        match config.blocks_start {
+            shift_core::BlocksStart::Bottom => 0,
+            shift_core::BlocksStart::Top => 1,
+        },
+        "blocks_start",
+    );
+    let y = form.y;
+    form.segment(
+        y,
         "Prompt",
         &["Shift", "Shell (PS1)"],
         match config.prompt {
@@ -1531,6 +1752,8 @@ fn features_page(form: &mut Form, config: &Config) {
         },
         "prompt",
     );
+    let y = form.y;
+    form.prompt_preview(y, &config.prompt_chips);
     let y = form.y;
     form.toggle(
         y,
@@ -1552,10 +1775,35 @@ fn features_page(form: &mut Form, config: &Config) {
         config.command_corrections,
         "command_corrections",
     );
+}
 
-    form.group("Blocks");
+fn files_page(form: &mut Form, config: &Config) {
+    use shift_core::editors;
+    form.group("Editor");
     let y = form.y;
-    form.toggle(y, "Copy on select", config.copy_on_select, "copy_on_select");
+    form.select(
+        y,
+        "Open file links in",
+        &editors::label(&config.link_editor),
+        "link_editor",
+    );
+    let y = form.y;
+    form.select(
+        y,
+        "Open files from the explorer and code review in",
+        &editors::label(&config.file_editor),
+        "file_editor",
+    );
+
+    form.group("File explorer");
+    let y = form.y;
+    form.toggle_desc(
+        y,
+        "Show hidden files",
+        "Dotfiles and folders starting with . (.git and ignored files stay hidden)",
+        config.explorer_hidden_files,
+        "explorer_hidden_files",
+    );
 }
 
 /// Shown value of a sound setting (`""` = follow the main sound).
@@ -1707,7 +1955,13 @@ pub fn filtered_bindings(keymap: &Keymap, filter: &str) -> Vec<(String, Vec<Stri
         .collect()
 }
 
-fn keybindings_page(form: &mut Form, keymap: &Keymap, config: &Config, state: &SettingsState) {
+fn keybindings_page(
+    form: &mut Form,
+    keymap: &Keymap,
+    config: &Config,
+    state: &SettingsState,
+    blink_on: bool,
+) {
     // filter field
     let fy = form.y;
     if form.visible_band(fy, 32.0) {
@@ -1741,6 +1995,22 @@ fn keybindings_page(form: &mut Form, keymap: &Keymap, config: &Config, state: &S
             fy + 7.0,
             color,
         );
+        // typing lands here (unless a row is recording): show the caret,
+        // before the placeholder while empty
+        if blink_on && state.recording.is_none() {
+            let tw = if state.kb_filter.is_empty() {
+                0.0
+            } else {
+                form.engine
+                    .measure(&state.kb_filter, 13.0, FONT_SANS, Weight::NORMAL)
+            };
+            form.layer.rect(
+                [form.x + 32.0 + tw, fy + 8.0],
+                [1.5, 16.0],
+                form.theme.accent,
+                0.0,
+            );
+        }
     }
     form.y += 32.0 + 8.0;
 
@@ -1889,10 +2159,16 @@ fn keybindings_page(form: &mut Form, keymap: &Keymap, config: &Config, state: &S
 fn themes_page(form: &mut Form, config: &Config) {
     form.group("Available themes");
     let names = shift_core::theme::available_themes();
+    let labels = shift_core::theme::picker_labels(&names);
     for (i, name) in names.iter().enumerate() {
         let ry = form.y;
         form.y += ROW_H;
         if !form.visible_band(ry, ROW_H) {
+            // not drawn, but Tab still reaches it (push_hit records the stop)
+            form.push_hit(
+                [form.x, ry, form.card_w, ROW_H],
+                ClickTarget::SettingsTheme(i as u8),
+            );
             continue;
         }
         let t = shift_core::theme::load_by_name(name);
@@ -1920,7 +2196,7 @@ fn themes_page(form: &mut Form, config: &Config) {
         }
         // the name stops before the "active" chip
         let name_w = (form.x + form.card_w - 100.0 - (sx + 12.0)).max(30.0);
-        let shown = super::palette::elide_to(form.engine, &t.name, 13.0, FONT_SANS, name_w);
+        let shown = super::palette::elide_to(form.engine, &labels[i], 13.0, FONT_SANS, name_w);
         form.layer.text(
             sans(form.engine, &shown, 13.0, Weight::MEDIUM),
             sx + 10.0,
@@ -1935,8 +2211,8 @@ fn themes_page(form: &mut Form, config: &Config) {
             None
         };
         form.row_label = match tag {
-            Some(tag) => format!("{}, {tag}", t.name),
-            None => t.name.clone(),
+            Some(tag) => format!("{}, {tag}", labels[i]),
+            None => labels[i].clone(),
         };
         if let Some(tag) = tag {
             let aw = form.engine.measure(tag, 11.5, FONT_SANS, Weight::MEDIUM);

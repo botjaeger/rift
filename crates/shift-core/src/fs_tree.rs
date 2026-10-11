@@ -1,6 +1,6 @@
 //! Directory listing for the file explorer: one level at a time (the tree
 //! expands lazily), directories first, case-insensitive order, `.git` and
-//! git-ignored entries left out.
+//! git-ignored entries left out (dotfiles too when asked).
 
 use std::path::{Path, PathBuf};
 
@@ -45,12 +45,13 @@ pub fn root_for(cwd: &Path) -> PathBuf {
 /// List `dir`. `repo` filters ignored entries. Unreadable directories list
 /// as empty; `listing` reports the error and the truncation.
 pub fn list(dir: &Path, repo: Option<&git2::Repository>) -> Vec<Entry> {
-    listing(dir, repo).entries
+    listing(dir, repo, true).entries
 }
 
 /// List `dir` like `list`, reporting a read error and whether the listing
-/// was cut to `MAX_ENTRIES`.
-pub fn listing(dir: &Path, repo: Option<&git2::Repository>) -> Listing {
+/// was cut to `MAX_ENTRIES`. `dotfiles` false also leaves out names that
+/// start with `.`.
+pub fn listing(dir: &Path, repo: Option<&git2::Repository>, dotfiles: bool) -> Listing {
     let read = match std::fs::read_dir(dir) {
         Ok(read) => read,
         Err(e) => {
@@ -75,7 +76,7 @@ pub fn listing(dir: &Path, repo: Option<&git2::Repository>) -> Listing {
         .filter_map(Result::ok)
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
-            if name == ".git" || name == ".DS_Store" {
+            if name == ".git" || name == ".DS_Store" || (!dotfiles && name.starts_with('.')) {
                 return None;
             }
             let path = e.path();
@@ -141,7 +142,7 @@ mod tests {
         for n in (0..=MAX_ENTRIES).rev() {
             fs::write(dir.join(format!("f{n:04}")), "").unwrap();
         }
-        let l = listing(&dir, None);
+        let l = listing(&dir, None, true);
         let names: Vec<String> = l.entries.iter().map(|e| e.name.clone()).collect();
         let want: Vec<String> = (0..MAX_ENTRIES).map(|n| format!("f{n:04}")).collect();
         assert_eq!(names, want);
@@ -162,20 +163,20 @@ mod tests {
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
         // root reads through mode 000; only assert where the mode bites
         if fs::read_dir(&locked).is_err() {
-            let l = listing(&locked, None);
+            let l = listing(&locked, None, true);
             assert!(l.error.is_some());
             assert!(l.entries.is_empty() && !l.truncated);
             assert!(list(&locked, None).is_empty());
         }
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(listing(&dir.join("missing"), None).error.is_some());
+        assert!(listing(&dir.join("missing"), None, true).error.is_some());
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn an_empty_directory_is_neither_an_error_nor_truncated() {
         let dir = temp_dir("empty");
-        assert_eq!(listing(&dir, None), Listing::default());
+        assert_eq!(listing(&dir, None, true), Listing::default());
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -201,6 +202,13 @@ mod tests {
             all,
             ["src", "target", ".gitignore", "A.md", "b.txt", "x.log"]
         );
+        // dotfiles off: .gitignore goes, ignore rules still apply
+        let shown: Vec<String> = listing(&dir, Some(&repo), false)
+            .entries
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(shown, ["src", "A.md", "b.txt"]);
         assert_eq!(root_for(&dir.join("src")), dir.canonicalize().unwrap());
         assert_eq!(
             rel_key(&dir, &dir.join("src/main.rs")).as_deref(),

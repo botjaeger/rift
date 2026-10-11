@@ -68,6 +68,12 @@ every action).
   (bell) icon opens the notifications popover; an accent dot marks unread
   entries. The vertical-tab layout's top strip has the same buttons.
 - A tab with synchronized inputs on shows the sync icon in the accent.
+- A tab where a command runs (in any of its panes) shows a spinner before
+  its title, in place of the sync icon; it turns in background tabs too. A
+  coding agent waiting at its own prompt (Claude Code's `✳` title, Gemini
+  CLI's `◇ Ready`) is not working, so it shows none (Warp).
+- A program that owns the screen (Claude Code, vim) sits on the bottom
+  padding: the part of a row left over goes above its first row.
 - The Settings tab (⌘,) sits after the shell tabs with a settings icon; see
   *Settings tab*.
 
@@ -75,7 +81,7 @@ every action).
 
 `tab_layout = "vertical"` (Settings → Appearance → *Tabs: Side*) replaces the
 tab strip with a 220 px rail on the left: one 54 px row per tab with the
-title (after a sync icon when synced), directory, git branch, pane count, activity
+title (after a spinner while a command runs, else a sync icon when synced), directory, git branch, pane count, activity
 dot and tab color; the active row sits on the pane ground with a 2 px accent
 left edge. Click selects, × closes; ⌘T adds a tab; drag a row up or down to
 reorder. When the tabs do not fit, the rail keeps the active tab visible: a
@@ -145,29 +151,36 @@ match (wrapping), Esc closes the bar (a second Esc closes the viewer).
 ## Code review (⇧⌘G)
 
 A 460 px panel right of the panes listing the repository's changes. The
-header shows the branch and total `+added −removed`, and ↻ reloads.
+header shows the branch and total `+added −removed`, ⤢ maximizes and ↻
+reloads. The panel is opaque (`bg`) even with a translucent window.
 
 - **Staged** (HEAD → index) and **Changes** (index → working tree, untracked
   files included) sections, each collapsible, with **Unstage all** / **Stage
   all**.
-- Each file is a card (radius 6, hairline border): status letter, name and
-  folder, a `+a −d` pill, then icon buttons: ↗ open in the viewer, ↺ revert
-  (unstaged only) and + stage / − unstage. Click the header to expand its
-  diff.
+- Each file is a solid card (radius 6, hairline border): a `surface` header
+  with status letter, name and folder, a `+a −d` pill, then icon buttons: ↗
+  open in the viewer, ↺ revert (unstaged only) and + stage / − unstage.
+  Click the header to expand its diff on a darker `bg_chrome` reading pane.
 - The diff reads like Warp's: one column of new-side line numbers (removed
   lines have none), syntax-colored code, added lines on a green wash and
   removed lines on a red one with a 3 px bar at the card edge. A removed line
   paired with the added line it resembles (inserted lines between them are
   skipped) highlights the changed characters on a stronger wash.
+- Long lines are not cut: a file's code scrolls sideways (trackpad, ⇧ +
+  wheel, or ← → while maximized) as far as its widest shown line, under a
+  fixed line-number gutter.
+- Hovering a line of a hunk shows the hunk's toolbar over the gutter (Warp):
+  **+ Stage** / **↺ Revert** (unstaged) or **− Unstage** (staged), and **Copy**
+  (the hunk as a unified diff; "Hunk copied"). The accessibility tree lists
+  every hunk's actions, hovered or not.
 - Each hunk opens with a band that counts the **unmodified lines** hidden
-  above it (⌃ above the first hunk, ⌃⌄ between hunks) and holds **Stage** /
-  **Revert** (unstaged) or **Unstage** (staged); a band under the last hunk
-  counts the lines below (⌄). Clicking a band opens a gap of up to 40 lines
+  above it (⌃ above the first hunk, ⌃⌄ between hunks); a band under the last
+  hunk counts the lines below (⌄). Clicking a band opens a gap of up to 40 lines
   whole, a longer one 20 lines at a time. With nothing hidden the band shows
   the `@@` header. Added, deleted, binary and over-1 MiB files have no
   bands. A binary file shows a note; a diff past 4 000 lines is cut with a
   note, and a hunk the cut runs through shows `Too long · use file actions`
-  instead of its buttons.
+  on its band and no toolbar.
 - Revert asks first ("Revert this change?" / "Revert file?") and discards
   only unstaged changes; reverting an untracked file deletes it.
 - A hunk action re-reads the diff first and checks the hunk's line ranges and
@@ -177,6 +190,14 @@ header shows the branch and total `+added −removed`, and ↻ reloads.
   a slow repository never blocks input.
 - The panel reloads (off the UI thread) when it opens, when a command
   finishes, after each action, and on ↻.
+- **Maximized** (⤢): the panel covers the panes (their layout and shells stay
+  as they are) below the tab bar; with at least 760 px a 300 px file list on
+  the right shows each file's name, `staged` mark, folder and counts, and a
+  click opens that file's card and scrolls to it. Keys go to the panel: Esc
+  restores it, ↑ ↓ Page Up/Down Space Home End scroll, ← → scroll the file
+  under the pointer sideways; app shortcuts still work and typing is
+  swallowed. ↗ (open in the viewer) restores it too; ⇧⌘G closes the panel
+  (it reopens beside the panes).
 
 Both panels hide when the window is too narrow to leave 360 px for the panes
 (review first). While the review panel is hidden this way, its toolbar button
@@ -194,14 +215,20 @@ Each command becomes a block via shell-integration OSC 133 markers:
     (dim; collapsed blocks show an italic `N lines hidden` here instead)
   - right side: status badge pill (`✓ 0` green / `✕ N` red / amber `running`
     with a spinning ring /
-    `—` unknown), duration (live elapsed while running), copy-output button
+    `—` unknown), duration (live elapsed while running), copy-output button.
+    The duration is a right-aligned column (at least six cells), so pills
+    and times line up from header to header; a pill is never taller than
+    the row. Hovering the duration shows the full time (`Took 1 min
+    18.432 s · finished 03:48:05 pm, October 11, 2026`; `Running for …`
+    while it runs). The copy button shows only while the pointer is on the
+    header or the block is selected; its place stays reserved
 - **Left border**, 2 px, colored by state: accent = running, green = exit 0,
   red = exit ≠ 0, muted = no exit info. Consecutive blocks' borders are 2 px
   apart (design 01 block spacing).
 - **Block wash**: only the selected block gets an accent tint + 3 px accent
-  border; failed blocks are not tinted (exit state lives on the border and
+  border, from its header (sticky header too) through its output; failed blocks are not tinted (exit state lives on the border and
   badge, design 01).
-- **Selected block**: selected via click on the header or ⌘↑/⌘↓; target of
+- **Selected block**: selected via a click on the header or the output, or ⌘↑/⌘↓; target of
   ⇧⌘C / ⌥⇧⌘C / ⌘I / ⌘B / ⌃M; Esc or clicking again deselects.
 - **Sticky command header**: when a block's output scrolls but its header would
   leave the viewport, the header pins to the top edge; clicking it jumps to the
@@ -226,6 +253,10 @@ Each command becomes a block via shell-integration OSC 133 markers:
   dim, inverse, hidden, strikethrough, blinking (SGR 5: hidden and shown every
   600 ms), and underline variants (single, double, curly, dotted, dashed; SGR
   58 colored).
+- **Block elements** (U+2580–U+259F: `█ ▀ ▄ ▌ ▐`, eighths, quadrants such as
+  `▛ ▜ ▘ ▝`, shades `░ ▒ ▓`) are drawn as quads filling the whole cell and
+  line height, not from the font, so block art (Claude Code's logo) has no
+  gaps, as in Warp.
 - **Line sizes**: double-width lines (DECDWL, `ESC # 6`) draw each character
   across two cells; double-height lines (DECDHL, `ESC # 3` and `ESC # 4`) draw
   the top and bottom halves of twice-size text. Double clicks and mouse reports
@@ -242,11 +273,54 @@ through to the PTY otherwise — vim, password prompts, shells without
 integration). Sits at the bottom of the pane, or at the top with
 `input_position = "top"`.
 
-- **Prompt context** (above the input, like Warp): chips with a hairline
-  border, radius 4 — a folder icon and the cwd, then (in a repository) a
-  branch icon, the branch and the ahead/behind arrows and dirty dot, muted.
-  A narrow pane keeps the cwd's tail and drops the branch chip whole. In
-  every pane of a split; hidden in shell-prompt mode.
+- **Prompt context** (above the input, like Warp): the `prompt_chips`, each
+  a hairline chip (radius 4) with its Nerd Font glyph — by default a folder
+  glyph and the cwd, then (in a repository) a git-branch glyph, the branch and
+  the ahead/behind arrows and dirty dot, muted, then (on a dirty tree) a diff glyph and
+  `files • +added −removed` in success/error colors; a click on it opens the
+  code review panel, another closes it. Resting on a chip shows its hover
+  card (300 px, `surface`): the chip's name, then what it shows and what a
+  click does, wrapped in `text_dim`. Chip menus scroll by pixels
+  (trackpad-smooth), the part-scrolled rows clipped to the list. Opt-in chips draw the same way: the PR chip (the
+  GitHub mark and `PR #42` together in `warning` while open, else the
+  state's color — `text_dim` draft, ANSI magenta merged, `error` closed — with a muted `draft` / `merged` /
+  `closed`), Python (Python logo, `warning`), PHP (php logo, accent
+  mixed half with ANSI magenta), Docker (whale, accent; project name,
+  then `running/total` in `success` or a muted `down` / `off`). The cwd,
+  branch, PHP, Python and Docker chips open a 360 px searchable menu above
+  the chip (layer 5): rows with an icon, the label, a muted detail (a
+  version's source) and a `success` check on the current one. The Docker
+  menu is a 520 px table under a muted `Container · Ports · Uptime` header
+  (11.5 px medium), each column as wide as its widest cell: service name
+  (dim when stopped), published ports (`3306→3306`, comma-separated, `/udp`
+  only for UDP, `—` when none, `text_dim`), uptime (`5 hours`, or the whole
+  status when stopped, muted) then a dot and `healthy` / `starting` /
+  `unhealthy` in `success` / `warning` / `error` for services with a health
+  check. An empty list says why (no installs found, Docker not
+  running, `docker compose up`). Chips with nothing to show are left out. A
+  narrow pane keeps the cwd's tail and drops the chips that still do not fit,
+  whole, from the end. In every pane of a split; hidden in shell-prompt mode.
+- **Edit prompt** (Warp; layer 6, 600 px card over a 40 % black backdrop,
+  `surface`, radius 8): `Shift prompt` with `Restore default`, a palette of
+  the chips not in the prompt (sample values; the Python, PHP and Docker
+  chips read `python`, `php`, `docker`), then the prompt itself in a
+  dashed box, each chip with ×. Every chip there has the same hover card
+  as in the prompt (none while one is dragged). A click on a palette chip appends it;
+  dragging a chip (from the palette or the box) shows an accent insertion
+  bar and drops it there, and a box chip dropped outside the box is
+  removed. `Cancel` (Esc) and `Save changes` (Enter; enabled once something
+  changed) close it. Screen readers get one button per chip and action.
+- **Chip pickers** (Warp): the cwd chip ("Change directory") and the branch
+  chip ("Change git branch") open a 360 px searchable list over the chip
+  (under it when there is no room above; layer 5, `surface`, radius 8). The
+  directory list holds `.. (Parent Directory)` and the sub-directories (a
+  query starting with `.` shows hidden ones); the branch list holds the local
+  branches, the checked-out one first with a ✓, and for a new name `Create
+  branch <name>`. Typing filters (case-insensitive), ↑↓ / Page Up/Down
+  select, Enter or a click runs `cd ./<dir>`, `cd ..`, `git checkout
+  <branch>` or `git checkout -b <name>` as a command in the pane (its block
+  shows the result); Esc, a right click or a click outside closes it. A pane
+  running a command gets a toast instead.
 - **Prompt glyph**: the logo's chevron, drawn (not a font glyph) — the logo's blue (`accent`)
   normally, red after a non-zero exit, muted in an unfocused split pane. In
   shell-prompt mode (`prompt = "shell"`) the shell's own PS1 stays on the grid
@@ -275,7 +349,9 @@ integration). Sits at the bottom of the pane, or at the top with
   history lines that start with what you typed (alone they stay ghost text).
   Docked to the editor across the full pane width (Warp's completion pane):
   directly above the editor when it sits at the bottom, below it with
-  `input_position = "top"`, opaque over the output. The header holds source
+  `input_position = "top"`. The output moves out from under it, as in Warp:
+  the newest lines stay in view right above it (below it with the input at
+  the top), and the program keeps its rows. The header holds source
   tabs with counts (`ALL 7 · PATH 4 · HISTORY 3`; just the source when there
   is one): ⇧⇥ or a click switches the source. Rows show an icon (folder,
   file, history, branch, terminal), the name with the typed part in the
@@ -291,8 +367,9 @@ integration). Sits at the bottom of the pane, or at the top with
 - **Workflow placeholders**: `{{placeholder}}` spans highlight and Tab-cycle;
   typing replaces the active span.
 - **Boot placeholder**: `Starting zsh…` (shell name from config) shown on the
-  input line (bottom, or top with `input_position = "top"`), under the input
-  divider already in place, until the shell's
+  chip row of the input zone (bottom, or top with `input_position = "top"`;
+  the input line in shell-prompt mode), as in Warp, under the input divider
+  already in place, until the shell's
   first prompt, with the terminal cursor hidden. A shell without integration
   never marks a prompt; the placeholder leaves and its cursor shows 1.5 s after
   its first byte.
@@ -305,7 +382,8 @@ integration). Sits at the bottom of the pane, or at the top with
 - Active pane: its title bar carries a 2 px accent top edge; inactive panes
   recede under a dim.
 - Each pane has a 28 px title bar (Warp pane header): a terminal icon, the
-  program's title (OSC 0/2), else the pane's directory, centered; while the
+  program's title (OSC 0/2), else the pane's directory, centered (after a
+  spinner while a command runs); while the
   pane is focused or hovered, split (a new pane to its right), ⋮ (the pane
   menu) and × (close) show at the right. Clicking the bar focuses the pane.
 - Pane menu (⋮, or right-click in the pane): Copy, Paste, Select all, Split
@@ -333,7 +411,8 @@ integration). Sits at the bottom of the pane, or at the top with
 ## History pane (⌃R)
 
 ⌃R in the command line opens the history pane, docked above the command line
-across the pane like the completion panel. The command line is its search
+across the pane like the completion panel; the output moves up out from
+under it, so the newest lines stay in view. The command line is its search
 field: what you type narrows the rows (any case, anywhere in the command).
 
 - Header: `HISTORY`, scope chips **This pane** · **All shells** · **Failed**
@@ -387,14 +466,18 @@ at most 620 px tall.
 - Header `Notifications`, `Mark all as read` (while anything is unread) and
   ✕; chips `All tabs (N)`, `Unread (N)` and `Errors (N)` filter the list
   (Tab / ⇧Tab cycle them).
-- Rows, newest first: a badge — the agent's (Claude Code orange `*`, Codex
-  `>_`, OpenCode `oc`, Gemini `G`) with a kind dot, or a tinted kind disc
-  (✓ finished, ✕ failed, `!` waiting on you, dot for a program
-  notification, bell) — an accent dot while unread, the agent name and
-  `⎇ branch`, the title (bold, wrapped, at most four lines, then `…`), its
+- Rows, newest first: a badge — the agent's (the Claude mark on orange for
+  Claude Code, Codex `>_`, OpenCode `oc`, Gemini `G`) with a kind dot, or a
+  tinted kind disc (✓ finished, ✕ failed, `!` waiting on you, a bell for a
+  program notification, an outlined bell for a terminal bell) — an accent
+  dot while unread, a meta line
+  with the agent name, `⎇ branch` and the age, the title (bold, wrapped, at
+  most four lines, then `…`), its
   detail (`Completed in 1.2s.`, `Failed with exit 1 after 3s.`,
-  `Waiting for your input.`, a notification body) and the age on the right
-  (`Just now`, `4 minutes ago`).
+  `Waiting for your input.`, a notification body). The age (`Just now`,
+  `4 minutes ago`) sits right-aligned on the meta line, or on the title's
+  first line when there is no agent or branch; a long title wraps clear of
+  it.
 - Click a row, or ↑/↓ then ⏎, to jump to its pane and block (marks it
   read). The wheel scrolls the list. Esc, ✕, a right-click, a click outside
   or a plain key closes it.
@@ -404,8 +487,9 @@ at most 620 px tall.
   empty.
 
 **Toasts** — while Shift is focused, an alert from a pane you are not
-looking at appears as a 360 px card under the inbox button: badge, a kind
-stripe on the left edge, `agent · branch`, the title (two lines) and detail.
+looking at appears as a 360 px card under the inbox button: the badge,
+centred on the card's height, then `agent · branch`, the title (two lines)
+and detail.
 At most two show, newest on top. Each stays `toast_secs` (default 8);
 hovering keeps it. A click jumps to the pane; ✕ dismisses. Toasts hide while
 the popover or Settings is open.
@@ -422,9 +506,13 @@ block; ⇧ + label copies it (a block copies its output). Esc cancels.
 
 ## Dialogs and toasts
 
-- **Confirm dialogs** — warning disc, title, description, the affected
-  commands in a code box (at most a few, then `and N more…`), Cancel `esc`
-  and a confirm button `⏎` (red for closing running work). Used for closing
+- **Confirm dialogs** — a 460 px card (radius 12): title, description and
+  note, the affected lines in an inset list (at most three, then `and N
+  more…`), and a footer bar with Cancel `esc` and a confirm button `⏎` (red
+  for discarding work). Running processes list one row each with the
+  program's badge (a coding agent's brand disc, such as the Claude mark,
+  else a terminal mark), the command, and the agent's name; pasted lines
+  and files are plain code lines. Used for closing
   running commands, pasting multi-line text into a shell without bracketed
   paste ("Paste and run?"), and installing shell integration on an SSH host.
   Enter confirms, Esc cancels. An Enter that is auto-repeated, or that
@@ -433,6 +521,16 @@ block; ⇧ + label copies it (a block copies its output). Esc cancels.
 - **Toasts** — short notices at the bottom (a keybinding moved from another
   action, the session service could not start, config.toml was not applied,
   a copy, paste, open or save failed, …).
+- **Tooltips** — resting the pointer on a control for 0.6 s shows what it
+  does and its shortcut from the live keymap: the tab bar's +, ✕, explorer,
+  review and inbox buttons, a block's chevron and copy button, a split
+  pane's split, ⋮ and ✕, the sticky header, the history pane's scope chips
+  and ✕, Settings' ↺ and "Open config.toml" (with its path), the explorer's
+  and review panel's buttons, the file viewer's ✕ and ⋮. A tab shows its full
+  title and directory, an explorer row its full path. Moving straight to the
+  next control shows its tooltip at once; a click, key or scroll hides it
+  until the pointer moves to another control. No tooltips while a menu,
+  dialog, palette or drag is open.
 - **What's New** — release notes from `CHANGELOG.md`, newest first: title
   with the current version and date, then each release's summary and its
   New / Improved / Fixed items (section titles in accent / success / warning).
@@ -477,9 +575,9 @@ running and the tab strip stays live. ⌘, again goes back to the shell tab;
 clicking any tab switches; the tab's ×, ⌘W or Esc closes it. Other app
 shortcuts (new tab, next tab, palette…) work from it and leave it.
 
-A 232 px sidebar: a search field, the six pages with icons (arrow keys
+A 232 px sidebar: a search field, the eight pages with icons (arrow keys
 navigate pages; PageUp/PageDown scroll the body) and *Open config.toml* at
-the foot (opens the file in the reading pane). The body (at most 720 px wide)
+the foot (opens the file in the reading pane). The body (at most 720 px wide, centred right of the sidebar like Warp's)
 has the page title and description, group labels, and flat rows: label (and
 description) left, control right. Footer: `~/.config/shift/config.toml ·
 saved`.
@@ -492,8 +590,10 @@ saved`.
   accent dot after its name and ↺ left of its control, which resets it.
 - **Selects** open a list (check on the current value, theme swatches); ↑ ↓
   ⏎ pick, Esc or a click outside closes it.
-- Keyboard: Tab / ⇧Tab move a focus ring over the page's controls, Space or
-  Enter presses the focused control, ← / → adjust a focused slider, and Esc
+- Keyboard: Tab / ⇧Tab move a focus ring over the page's controls (the
+  page scrolls to bring a control below or above the fold into view; Open
+  config.toml comes last), Space or Enter presses the focused control (a
+  pressed ↺ hands the focus to its row's control), ← / → adjust a focused slider, and Esc
   drops the focus. The arrow keys change page unless a slider is focused;
   Home / End jump to the first / last page. Every control writes that file
   live (the hot-reload watcher applies changes < 300 ms, including external
@@ -515,11 +615,9 @@ saved`.
     relaunch reattaches (new shells)*; `durable_sessions`).
   - Automation: `Control socket` segmented `Off | Navigate | Full`
     (`control_api`).
-  - Terminal: `Mouse reporting to programs (Shift selects)` toggle,
-    `Ask before pasting lines that would run` toggle, and on macOS
-    `Option key sends Meta`.
 - **Appearance** — *Fonts, cursor, window and theme*.
-  - Font: `Font family` select (the installed monospace families),
+  - Font: `Font family` select (JetBrains Mono first, then the embedded
+    Hack and the installed fixed-width families, each shown in itself),
     `Font size` stepper (px), `Line height` slider.
   - Cursor: `Cursor style` segmented `Block | Bar | Underline`,
     `Cursor blink` toggle (*Pulse the cursor when the editor is focused*).
@@ -529,14 +627,43 @@ saved`.
     slider (1–100 %, value boxed right of the track), `Window blur radius`
     slider (1–64 px, macOS only),
     `Window padding` stepper (px, ±2), `Font ligatures` toggle (*Render -> >=
-    != as combined glyphs*).
+    != as combined glyphs*), `Tabs` segmented `Top | Side` (`tab_layout`).
+    Font size and line height show the applied (clamped) value. A theme file
+    that does not load is listed as `<name> (invalid theme file)`, choosing it
+    toasts why and Dark Default is used; themes sharing a display name carry
+    their file name.
 - **Input** — *The command line and blocks*.
   - Input: `Vim keybindings` toggle, `Autosuggestions (ghost text)` toggle,
     `Completions menu` toggle, `Autocomplete quotes and brackets` toggle,
-    `Input position` segmented `Bottom | Top`, `Prompt` segmented
-    `Shift | Shell (PS1)`, `Expand aliases as you type`, `Underline unknown
+    `Input position` segmented `Bottom | Top`, `Blocks start` segmented
+    `Bottom | Top`, `Prompt` segmented
+    `Shift | Shell (PS1)`, `Prompt chips` (a preview of the chips with
+    sample values; a click opens **Edit prompt**), `Expand aliases as you type`, `Underline unknown
     commands`, `Suggest corrections for failed commands` toggles.
-  - Blocks: `Copy on select` toggle.
+- **Terminal** (clipboard icon) — *Mouse, clipboard and keys inside the
+  terminal*.
+  - Mouse: `Mouse reporting to programs (Shift selects)` toggle,
+    `Middle-click to paste` toggle (*Pastes the clipboard into the pane under
+    the pointer*; `middle_click_paste`), `Lines per wheel notch` stepper
+    (1–20, ±1; `wheel_scroll_lines`).
+  - Clipboard: `Copy on select` toggle, `Ask before pasting lines that would
+    run` toggle, `Programs' clipboard access (OSC 52)` segmented
+    `Off | Copy | Copy and read` (*Read lets any program or ssh host see your
+    clipboard*; `clipboard_access`).
+  - Keys (macOS only): `Left Option key is Meta` (`option_as_meta`) and
+    `Right Option key is Meta` (`right_option_as_meta`; shows the left one's
+    value until set) toggles. Turning the left one changes only the left key.
+- **Files** (file icon) — *Where files open, and the file explorer*.
+  - Editor: `Open file links in` select (`link_editor`: ⌘-clicked paths,
+    file links and hint-mode paths) and `Open files from the explorer and
+    code review in` select (`file_editor`). Each lists `System default`,
+    `Shift viewer`, then the editors installed here (VS Code, Cursor,
+    Windsurf, Zed, Sublime Text, IntelliJ IDEA, PhpStorm, WebStorm,
+    RustRover). A folder never opens in the viewer (it goes to the system
+    opener); an editor that is no longer installed falls back to the viewer
+    (or the system opener for a folder) with a toast.
+  - File explorer: `Show hidden files` toggle (dotfiles; `.git`, `.DS_Store`
+    and git-ignored entries stay hidden).
 - **Notifications** (bell icon) — *Toasts, desktop notifications and sounds;
   everything also lands in the inbox*.
   - Alerts: `Notifications` master toggle, `In-window toasts` toggle,
@@ -572,5 +699,6 @@ saved`.
 - PageUp/PageDown page, Home/End jump to top/bottom (at the prompt; keys pass
   through to full-screen apps).
 - `clear` performs a Warp-style soft clear: the viewport empties, old blocks
-  stay reachable by scrolling up. ⌘K is the destructive variant (blocks +
+  stay reachable by scrolling up, and the next block starts right above the
+  command line (at the top of the viewport with `blocks_start = "top"`). ⌘K is the destructive variant (blocks +
   scrollback wiped).

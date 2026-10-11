@@ -20,6 +20,127 @@ pub enum InputPosition {
     Top,
 }
 
+/// Where blocks start while they do not fill the pane, with the input at
+/// the bottom: right above the input (Warp "Pin to the bottom"), or at the
+/// top of the pane, the gap left above the input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum BlocksStart {
+    #[default]
+    Bottom,
+    Top,
+}
+
+/// One context chip of the Shift prompt (Warp "Edit prompt"). A chip with
+/// nothing to show (no repository, no virtualenv) is left out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptChip {
+    /// Working directory (click: change directory).
+    Cwd,
+    /// Branch with ahead/behind and the dirty dot (click: change branch).
+    GitBranch,
+    /// Changed files and lines: `3 • +10 −2`.
+    GitDiff,
+    User,
+    Host,
+    /// Python virtualenv, else the version `python3` runs (click: switch
+    /// this shell's version).
+    Python,
+    /// The version `php` runs (click: switch this shell's version).
+    Php,
+    /// The checked-out branch's pull request, via `gh` (click: open it).
+    GithubPr,
+    /// The Docker Compose project around the cwd and its running containers
+    /// (click: list them).
+    Docker,
+    Date,
+    /// 12-hour time (`03:48 pm`).
+    Time12,
+    /// 24-hour time (`15:48`).
+    Time24,
+}
+
+impl PromptChip {
+    pub const ALL: [PromptChip; 12] = [
+        PromptChip::User,
+        PromptChip::Host,
+        PromptChip::Cwd,
+        PromptChip::GitBranch,
+        PromptChip::GitDiff,
+        PromptChip::GithubPr,
+        PromptChip::Python,
+        PromptChip::Php,
+        PromptChip::Docker,
+        PromptChip::Date,
+        PromptChip::Time12,
+        PromptChip::Time24,
+    ];
+
+    /// The default prompt: the design's cwd and branch chips, then the diff
+    /// stats (Warp's default; hidden on a clean tree).
+    pub fn defaults() -> Vec<PromptChip> {
+        vec![PromptChip::Cwd, PromptChip::GitBranch, PromptChip::GitDiff]
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PromptChip::Cwd => "Working directory",
+            PromptChip::GitBranch => "Git branch",
+            PromptChip::GitDiff => "Git diff stats",
+            PromptChip::User => "User",
+            PromptChip::Host => "Host",
+            PromptChip::Python => "Python environment",
+            PromptChip::Php => "PHP version",
+            PromptChip::GithubPr => "GitHub pull request",
+            PromptChip::Docker => "Docker Compose",
+            PromptChip::Date => "Date",
+            PromptChip::Time12 => "Time (12-hour)",
+            PromptChip::Time24 => "Time (24-hour)",
+        }
+    }
+
+    /// What the chip shows and what a click on it does (its hover card).
+    pub fn about(self) -> &'static str {
+        match self {
+            PromptChip::Cwd => {
+                "The pane's working directory. Click to move into a subdirectory or up to a parent."
+            }
+            PromptChip::GitBranch => {
+                "The checked-out branch, commits ahead (↑) and behind (↓) its upstream, and • \
+                 when there are uncommitted changes. Click to switch to another branch or \
+                 create one."
+            }
+            PromptChip::GitDiff => {
+                "Files changed in the working tree, and the lines added and removed. Click to \
+                 open the code review panel."
+            }
+            PromptChip::User => "The user you are logged in as.",
+            PromptChip::Host => "This machine's host name.",
+            PromptChip::Python => {
+                "The active virtualenv, else the Python version python3 runs here. Click to \
+                 switch this shell's Python (pyenv versions and installed interpreters)."
+            }
+            PromptChip::Php => {
+                "The PHP version php runs here. Click to switch this shell's PHP between the \
+                 installed versions."
+            }
+            PromptChip::GithubPr => {
+                "The pull request of the checked-out branch, from the GitHub CLI (gh). Click \
+                 to open it in your browser."
+            }
+            PromptChip::Docker => {
+                "The Docker Compose project around this directory and how many of its \
+                 containers run. Click to see each container's ports, uptime and health, \
+                 and to follow a service's logs."
+            }
+            PromptChip::Date => "Today's date.",
+            PromptChip::Time12 => "The current time, 12-hour.",
+            PromptChip::Time24 => "The current time, 24-hour.",
+        }
+    }
+}
+
 /// Where the tabs sit: the top strip, or a vertical rail on the left that
 /// also shows each tab's directory and git branch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -53,13 +174,28 @@ pub enum Bell {
     None,
 }
 
+/// An f32 written as its shortest decimal (`1.6`, not the f64 widening
+/// `1.600000023841858`).
+fn short_f32<S: serde::Serializer>(v: &f32, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_f64(v.to_string().parse().unwrap_or(f64::from(*v)))
+}
+
+/// A u8 setting read from any integer, saturating at 0 / 255 (the getter
+/// clamps further): an out-of-range number must not reject the whole file.
+fn saturating_u8<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u8, D::Error> {
+    let v = i64::deserialize(d)?;
+    Ok(v.clamp(0, 255) as u8)
+}
+
 /// User configuration — `~/.config/shift/config.toml`, hot-reloaded.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub font_family: String,
+    #[serde(serialize_with = "short_f32")]
     pub font_size: f32,
-    /// Multiplier (spec: terminal output 1.65).
+    /// Multiplier (1.2, as in Warp; the design spec drew 1.65).
+    #[serde(serialize_with = "short_f32")]
     pub line_height: f32,
     pub cursor_style: CursorStyle,
     pub cursor_blink: bool,
@@ -67,6 +203,7 @@ pub struct Config {
     /// or a file stem in `~/.config/shift/themes/`.
     pub theme: String,
     pub scrollback: usize,
+    #[serde(serialize_with = "short_f32")]
     pub window_padding: f32,
     pub ligatures: bool,
     /// Reopen last session's tabs (with cwds) on launch.
@@ -86,13 +223,18 @@ pub struct Config {
     /// Follow the OS light/dark appearance (`theme` = dark, `theme_light` = light).
     pub sync_os_theme: bool,
     /// Window background opacity, 0.01–1.0 (Warp: 1–100 %).
+    #[serde(serialize_with = "short_f32")]
     pub window_opacity: f32,
     /// macOS background blur radius behind the window, 1–64 px (Warp:
     /// default 1, i.e. none). Visible only below full opacity.
+    #[serde(deserialize_with = "saturating_u8")]
     pub window_blur: u8,
     pub input_position: InputPosition,
+    pub blocks_start: BlocksStart,
     pub tab_layout: TabLayout,
     pub prompt: PromptMode,
+    /// The Shift prompt's chips, in order (`prompt = "shift"`).
+    pub prompt_chips: Vec<PromptChip>,
     /// Copy the selection to the clipboard as soon as the mouse is released.
     pub copy_on_select: bool,
     /// Inline ghost-text suggestion after the cursor.
@@ -103,8 +245,8 @@ pub struct Config {
     pub autocomplete_pairs: bool,
     /// Modal (vim) editing in the command editor.
     pub vim_mode: bool,
-    /// Desktop notification when a long command finishes while the window is
-    /// not focused.
+    /// Alert (toast, and a desktop notification while the window is not
+    /// focused) when a long command finishes.
     pub notify_on_completion: bool,
     /// Minimum command duration (seconds) for a completion notification.
     pub notify_threshold_secs: u64,
@@ -130,10 +272,34 @@ pub struct Config {
     /// word motion) instead of composing characters like `∫`. Linux Alt is
     /// always Meta.
     pub option_as_meta: bool,
-    /// Report focus changes to apps that ask for them and forward mouse
-    /// clicks, drags and the wheel to apps that enable mouse reporting
-    /// (vim, tmux, htop). Hold Shift to select text instead.
+    /// macOS: the right Option key's Meta setting; unset = same as
+    /// `option_as_meta` (which then covers only the left key).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub right_option_as_meta: Option<bool>,
+    /// Middle-click pastes the clipboard into the pane under the pointer
+    /// (unless the program there takes mouse clicks).
+    pub middle_click_paste: bool,
+    /// Lines one mouse-wheel notch scrolls the terminal (1–20; trackpads
+    /// scroll by pixels).
+    pub wheel_scroll_lines: u8,
+    /// OSC 52 clipboard access for programs: `"off"`, `"write"` (copy only)
+    /// or `"read_write"` (also read it back: any program or remote host can
+    /// then read your clipboard).
+    pub clipboard_access: String,
+    /// Forward mouse clicks, drags and the wheel to apps that enable mouse
+    /// reporting (vim, tmux, htop). Hold Shift to select text instead.
+    /// Focus in/out reports (mode 1004) do not depend on it.
     pub mouse_reporting: bool,
+    /// Where ⌘-clicked file paths and file links open: `"system"` (the
+    /// file's default app), `"shift"` (the viewer pane) or an editor id
+    /// from `editors::EDITORS` (`"vscode"`, `"zed"`, …).
+    pub link_editor: String,
+    /// Where files from the explorer and code review (↗) open: `"shift"`
+    /// (the viewer pane), `"system"` or an editor id.
+    pub file_editor: String,
+    /// The file explorer lists dotfiles (`.env`, `.github/`); `.git` and
+    /// git-ignored entries stay hidden either way.
+    pub explorer_hidden_files: bool,
     /// Toasts, desktop notifications and sounds per event (`[notifications]`;
     /// tables stay after the plain keys so the TOML writer accepts them).
     pub notifications: crate::notifications::Notifications,
@@ -149,7 +315,7 @@ impl Default for Config {
         Config {
             font_family: "JetBrains Mono".into(),
             font_size: 13.0,
-            line_height: 1.65,
+            line_height: 1.2,
             cursor_style: CursorStyle::Block,
             cursor_blink: true,
             theme: "dark-default".into(),
@@ -166,8 +332,10 @@ impl Default for Config {
             window_opacity: 1.0,
             window_blur: 1,
             input_position: InputPosition::Bottom,
+            blocks_start: BlocksStart::Bottom,
             tab_layout: TabLayout::Horizontal,
             prompt: PromptMode::Shift,
+            prompt_chips: PromptChip::defaults(),
             copy_on_select: false,
             autosuggestions: true,
             completions_menu: true,
@@ -184,7 +352,14 @@ impl Default for Config {
             command_corrections: true,
             global_hotkey: String::new(),
             option_as_meta: false,
+            right_option_as_meta: None,
+            middle_click_paste: true,
+            wheel_scroll_lines: 3,
+            clipboard_access: "write".into(),
             mouse_reporting: true,
+            link_editor: crate::editors::SYSTEM.into(),
+            file_editor: crate::editors::SHIFT.into(),
+            explorer_hidden_files: true,
             notifications: Default::default(),
             ssh_profiles: Vec::new(),
             keybindings: BTreeMap::new(),
@@ -230,7 +405,7 @@ fn expand_tilde(path: &str, home: Option<&Path>) -> PathBuf {
 
 /// Top-level `Option` settings: absent from a serialized default, so
 /// `merge_table` cannot tell them from unknown keys without this list.
-const OPTIONAL_KEYS: &[&str] = &["shell"];
+const OPTIONAL_KEYS: &[&str] = &["shell", "right_option_as_meta"];
 
 /// Make `doc` hold `new` (see `Config::edit_toml`). `default` is the same
 /// table for a default config; an empty `default` marks a map such as
@@ -458,7 +633,7 @@ impl Config {
         if self.line_height.is_finite() {
             self.line_height.clamp(1.0, 2.2)
         } else {
-            1.65
+            1.2
         }
     }
 
@@ -506,6 +681,16 @@ impl Config {
         self.scrollback.min(1_000_000)
     }
 
+    /// Terminal lines per wheel notch, clamped to 1–20.
+    pub fn wheel_lines(&self) -> f32 {
+        self.wheel_scroll_lines.clamp(1, 20) as f32
+    }
+
+    /// The right Option key sends Meta (macOS).
+    pub fn right_option_meta(&self) -> bool {
+        self.right_option_as_meta.unwrap_or(self.option_as_meta)
+    }
+
     /// Window opacity clamped to the supported range. The floor is Warp's
     /// 1 %: at 0 Metal shows the previous frame's pixels.
     pub fn opacity(&self) -> f32 {
@@ -525,6 +710,55 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unsetting_an_optional_key_edits_only_that_line() {
+        let existing =
+            "# keep\nfuture_option = 1\nright_option_as_meta = true\nshell = \"/bin/sh\"\n";
+        let out = Config::default().edit_toml(Some(existing)).unwrap();
+        assert_eq!(out, "# keep\nfuture_option = 1\n");
+    }
+
+    #[test]
+    fn floats_write_short_and_a_huge_blur_still_loads() {
+        let c = Config {
+            line_height: 1.6,
+            window_opacity: 0.51,
+            ..Default::default()
+        };
+        let text = toml::to_string(&c).unwrap();
+        assert!(text.contains("line_height = 1.6\n"), "{text}");
+        assert!(text.contains("window_opacity = 0.51\n"), "{text}");
+        let big: Config = toml::from_str("window_blur = 300\nfont_size = 15.0\n").unwrap();
+        assert_eq!(
+            (big.window_blur, big.blur(), big.font_size),
+            (255, 64, 15.0)
+        );
+        let neg: Config = toml::from_str("window_blur = -4\n").unwrap();
+        assert_eq!(neg.blur(), 1);
+    }
+
+    #[test]
+    fn wheel_lines_clamp_and_right_option_follows_left_until_set() {
+        let mut c = Config::default();
+        assert_eq!(c.wheel_lines(), 3.0);
+        c.wheel_scroll_lines = 0;
+        assert_eq!(c.wheel_lines(), 1.0);
+        c.wheel_scroll_lines = 200;
+        assert_eq!(c.wheel_lines(), 20.0);
+        c.option_as_meta = true;
+        assert!(c.right_option_meta());
+        c.right_option_as_meta = Some(false);
+        assert!(!c.right_option_meta());
+        // unset stays out of config.toml; set is written
+        let unset = toml::to_string(&Config::default()).unwrap();
+        assert!(!unset.contains("right_option_as_meta"), "{unset}");
+        assert!(
+            toml::to_string(&c)
+                .unwrap()
+                .contains("right_option_as_meta = false")
+        );
+    }
 
     #[test]
     fn roundtrip() {
@@ -555,6 +789,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(c.input_position, InputPosition::Top);
+        assert_eq!(c.blocks_start, BlocksStart::Bottom);
+        let top: Config = toml::from_str("blocks_start = \"top\"").unwrap();
+        assert_eq!(top.blocks_start, BlocksStart::Top);
+        assert_eq!(c.prompt_chips, PromptChip::defaults());
+        let chips: Config =
+            toml::from_str("prompt_chips = [\"time24\", \"cwd\", \"git_diff\"]").unwrap();
+        assert_eq!(
+            chips.prompt_chips,
+            [PromptChip::Time24, PromptChip::Cwd, PromptChip::GitDiff]
+        );
+        assert!(toml::from_str::<Config>("prompt_chips = [\"weather\"]").is_err());
         assert_eq!(c.prompt, PromptMode::Shell);
         assert_eq!(c.bell, Bell::None);
         assert!(c.vim_mode);
@@ -789,7 +1034,7 @@ mod tests {
     fn font_metrics_reject_non_finite() {
         let c: Config = toml::from_str("font_size = nan\nline_height = inf").unwrap();
         assert_eq!(c.font_size(), 13.0);
-        assert_eq!(c.line_height(), 1.65);
+        assert_eq!(c.line_height(), 1.2);
         let c = Config {
             font_size: 99.0,
             line_height: 0.1,

@@ -70,6 +70,8 @@ fn which(cmd: &str) -> bool {
 /// Audible bell.
 pub fn beep() {
     if std::env::var_os("SHIFT_NO_NOTIFY").is_some() {
+        // suppressed, but logged like notifications and sounds are
+        log::info!("bell (suppressed by SHIFT_NO_NOTIFY)");
         return;
     }
     if cfg!(target_os = "macos") {

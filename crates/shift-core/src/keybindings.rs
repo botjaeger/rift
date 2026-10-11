@@ -2,6 +2,37 @@
 /// overrides from config.toml win last.
 use std::collections::BTreeMap;
 
+/// Named keys a chord may use (what the app's key normalizer produces).
+pub const NAMED_KEYS: &[&str] = &[
+    "tab",
+    "left",
+    "right",
+    "up",
+    "down",
+    "pageup",
+    "pagedown",
+    "home",
+    "end",
+    "enter",
+    "escape",
+    "space",
+    "backspace",
+    "delete",
+    "insert",
+    "f1",
+    "f2",
+    "f3",
+    "f4",
+    "f5",
+    "f6",
+    "f7",
+    "f8",
+    "f9",
+    "f10",
+    "f11",
+    "f12",
+];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Binding {
     pub ctrl: bool,
@@ -35,7 +66,13 @@ impl Binding {
                         return None; // two non-modifier keys
                     }
                     // "plus" alias: a literal '+' key can't survive split('+')
-                    b.key = if p == "plus" { "+".into() } else { p };
+                    let key = if p == "plus" { "+".into() } else { p };
+                    // one character, or a key name input::key_string emits:
+                    // anything else could never match and only unbinds
+                    if key.chars().count() != 1 && !NAMED_KEYS.contains(&key.as_str()) {
+                        return None;
+                    }
+                    b.key = key;
                 }
             }
         }
@@ -190,7 +227,12 @@ impl Keymap {
     /// also unbind the default for the same action).
     pub fn from_overrides(overrides: &BTreeMap<String, String>) -> Keymap {
         let mut entries: Vec<(Binding, String)> = Vec::new();
+        let known = all_actions();
         for (action, binding) in overrides {
+            if !known.contains(&action.as_str()) {
+                log::warn!("unknown keybinding action {action:?} (ignored)");
+                continue;
+            }
             // `none` (or empty) unbinds the action's defaults
             if matches!(binding.trim(), "" | "none") {
                 continue;
@@ -232,18 +274,24 @@ impl Keymap {
             .collect()
     }
 
+    /// The binding of `action` to show: its first ⌘ one on macOS, its first
+    /// one without ⌘ elsewhere (the `_alt` defaults are stored under the
+    /// base name, after the Linux-style chord), else its first.
+    pub fn preferred(&self, action: &str) -> Option<&Binding> {
+        let all = self.bindings_for(action);
+        all.iter()
+            .find(|b| b.cmd == cfg!(target_os = "macos"))
+            .or(all.first())
+            .copied()
+    }
+
     /// For the settings Keybindings page: every bindable action with the
-    /// chips of its first binding (empty when unbound), sorted by name.
+    /// chips of its preferred binding (empty when unbound), sorted by name.
     pub fn display_rows(&self) -> Vec<(String, Vec<String>)> {
         let mut rows: Vec<(String, Vec<String>)> = all_actions()
             .into_iter()
             .map(|a| {
-                let chips = self
-                    .entries
-                    .iter()
-                    .find(|(_, name)| name == a)
-                    .map(|(b, _)| b.chips())
-                    .unwrap_or_default();
+                let chips = self.preferred(a).map(|b| b.chips()).unwrap_or_default();
                 (a.to_string(), chips)
             })
             .collect();
@@ -300,6 +348,21 @@ mod tests {
         let plus = Binding::parse("shift+cmd+plus").unwrap();
         assert!(plus.shift && plus.cmd);
         assert_eq!(plus.key, "+");
+        // a key name the app never produces could only unbind the action
+        assert!(Binding::parse("cmd+foo").is_none());
+        assert!(Binding::parse("cmd+f13").is_none());
+        assert_eq!(Binding::parse("alt+pagedown").unwrap().key, "pagedown");
+        for (action, chord) in defaults() {
+            assert!(Binding::parse(chord).is_some(), "{action} = {chord:?}");
+        }
+    }
+
+    #[test]
+    fn unknown_actions_are_ignored() {
+        let mut o = BTreeMap::new();
+        o.insert("not_an_action".to_string(), "cmd+y".to_string());
+        let km = Keymap::from_overrides(&o);
+        assert_eq!(km.lookup(false, false, false, true, "y"), None);
     }
 
     #[test]
@@ -351,6 +414,26 @@ mod tests {
         );
         // ctrl+w freed for editor cut-word
         assert_eq!(km.lookup(true, false, false, false, "w"), None);
+    }
+
+    #[test]
+    fn the_shown_shortcut_is_the_platform_one() {
+        let km = Keymap::from_overrides(&BTreeMap::new());
+        // new_tab is ctrl+shift+t, with cmd+t as its `_alt`
+        let shown = km.preferred("new_tab").unwrap().chord();
+        if cfg!(target_os = "macos") {
+            assert_eq!(shown, "cmd+t");
+        } else {
+            assert_eq!(shown, "ctrl+shift+t");
+        }
+        let rows = km.display_rows();
+        let row = rows.iter().find(|(a, _)| a == "new_tab").unwrap();
+        assert_eq!(row.1, km.preferred("new_tab").unwrap().chips());
+        // an override replaces both
+        let mut o = BTreeMap::new();
+        o.insert("new_tab".to_string(), "ctrl+n".to_string());
+        let km = Keymap::from_overrides(&o);
+        assert_eq!(km.preferred("new_tab").unwrap().chord(), "ctrl+n");
     }
 
     #[test]

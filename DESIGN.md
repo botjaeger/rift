@@ -68,10 +68,11 @@ card stop 1 px short of each side so they never cross the border.
 
 | Role | Face | Size |
 |---|---|---|
-| Terminal grid | JetBrains Mono (config `font_family`, embedded fallback) | 13 px default (`font_size`), line height 1.65 |
+| Terminal grid | JetBrains Mono (config `font_family`, embedded fallback) | 13 px default (`font_size`), line height 1.2 (Warp; the spec drew 1.65) |
 | Command editor | JetBrains Mono | 13 px, 20 px lines (Warp's size) |
 | UI chrome, palette, settings | Inter (variable, embedded) | per spec per surface |
 | Emphasis | JetBrains Mono Bold, Italic, Bold Italic (static weights) | — |
+| Prompt chip marks | Symbols Nerd Font (embedded subset, `views/glyphs.rs`) | 12 px on chips, 13 px in menus, tabs and title bars |
 
 Fonts are embedded; the binary has no runtime assets. Text is shaped by
 glyphon; shaped runs are cached by content.
@@ -103,6 +104,8 @@ glyphon; shaped runs are cached by content.
 | Welcome list width / row | 560 px / 36 px | `welcome::WIDTH`, `ROW_H` |
 | File explorer width / row | 260 px / 24 px | `EXPLORER_W`, `ROW_H` |
 | Code review width / diff line / file card | 460 px / 22 px / inset 10, radius 6 | `REVIEW_W`, `CARD_X` |
+| Edit prompt card / chip × / chip picker width, row | 600 px, padding 24 / 18 px / 360 px, 26 px | `prompt_editor::MODAL_W`, `X_W`, `chip_menu::MENU_W` |
+| Code review gutter / hunk toolbar button / maximized file list | ≥ 72 px / 20 px / 300 px, 26 px rows (panel ≥ 760 px) | `GUTTER_MIN`, `TOOL_W`, `SIDEBAR_W` |
 | Block cursor | 8 × 17 px; bar and underline 2 px | `CURSOR_H` |
 
 ## Layers and compositing
@@ -112,12 +115,13 @@ glyphon; shaped runs are cached by content.
 | Layer | Contents |
 |---|---|
 | 0 | Chrome: tab bar or rail, gutters |
-| 1 | Terminal grid, blocks, images, command editor; file explorer and code review panels (`bg_chrome`) |
+| 1 | Terminal grid, blocks, images, command editor; file explorer (`bg_chrome`) and code review (opaque `bg`; cards: header `surface`, code `bg_chrome`) panels |
 | 2 | Completion panel, history pane, find bar, file viewer (over the pane area) |
-| 3 | The Settings tab's page |
+| 3 | The Settings tab's page; the maximized code review |
 | 4 | Palette and its modes (history, workflows, switcher); an open Settings select list |
-| 5 | Block context menu, hint labels, notification toasts and popover, pane drop zone, a lifted tab |
-| 6 | Toasts, confirm dialogs, the dragged pane's chip |
+| 5 | Block context menu, prompt chip pickers, hint labels, notification toasts and popover, pane drop zone, a lifted tab |
+| 6 | Toasts, confirm dialogs, Edit prompt, the dragged pane's chip |
+| 7 | Tooltips and chip hover cards (alone on top: text of a shared layer would draw over their plate) |
 
 A theme's background image draws before layer 0. Inline images draw under
 or over text by their z-index. Blending happens in sRGB
@@ -150,7 +154,13 @@ and title bars, 11–12 px for × and steppers. Colors: `text_dim` at rest,
 terminal, sidebar, split right/down, plus, minus, close, more (⋮), grip,
 search, history, revert, refresh, folder, file, inbox, settings, branch,
 copy, check, open (↗), chevrons, warning, sync, maximize, keyboard,
-bookmark, filter, appearance, themes, launch.
+bookmark, filter, appearance, themes, launch. Prompt chips and their menu
+rows carry Nerd Font glyphs instead (`glyphs.rs`): folder, git branch,
+diff, user, laptop, Python, PHP, GitHub, Docker,
+calendar, clock. A glyph added there must be added to the embedded subset
+too. The running spinner in tabs and title bars is drawn, not a glyph: a
+third-of-a-turn arc (radius 0.36 × size, stroke 0.13 × size) turning once
+per 0.7 s, redrawn every output frame (≤ 120 Hz) so it moves smoothly.
 
 ## Motion
 
@@ -170,10 +180,11 @@ No other animation. Motion never delays input.
   `~/path git:(branch)` (`text_dim`), then right-aligned badge pill, duration
   and copy button. A long command is cut with `…` before the badge group; the
   context shows only when it fits.
-- **Editor**: context chips (18 px tall, 5 px padding, 10 px icon, `fg` 4 % fill,
+- **Editor**: context chips (18 px tall, 5 px padding, 12 px glyph, `fg` 4 % fill,
   `border` hairline, radius 4, 6 px apart, 12 px mono label centred):
   folder icon + cwd in `text_bright`, branch icon in `success` + branch in
-  `text_ui` + arrows and dirty dot muted. Then the logo's chevron (11 px
+  `text_ui` + arrows and dirty dot muted, file icon + `files • +a −r` in
+  `success` / `error` (opt-in chips: docs/ui.md). Then the logo's chevron (11 px
   tall, centred on the block cursor, the logo's proportions with a 2.2 px
   stroke) in `accent`, the logo's blue (`error` after a failure, muted when unfocused).
   Shell-prompt mode shows a 9 px muted chevron.
@@ -211,6 +222,11 @@ No other animation. Motion never delays input.
 - **Context menus**: 240 px `surface`, radius 4, 28 px rows: icon column,
   label, the shortcut in `text_muted` at the right; rows that close
   something are `error`; separators are hairlines.
+- **Tooltips**: 24 px `surface` card, radius 4, hairline edge and a soft
+  shadow like a context menu; 12 px Inter `text_bright`, then the shortcut
+  (or a path) in `text_muted`; 8 px side padding, at most 420 px. Centred
+  6 px under the control, above it at the window bottom, 8 px inside the
+  window edges.
 - **Chips and pills**: radius 4 (badges keep their pill), muted text, used
   for shortcuts, counts (`3`, `All tabs (N)`), and modes (`NORMAL`).
 - **Notifications popover**: `surface` card (radius 8, hairline border,
@@ -218,13 +234,17 @@ No other animation. Motion never delays input.
   carry meaning: finished `success`, failed `error`, waiting on you
   `warning`, program notification `accent`, bell `text_dim`. Kind badges are
   those colors at 16 % with the mark in full color; an agent badge is its
-  brand disc (Claude `#d97757`, Codex `#f2f2f2`, OpenCode `#3b3b40`, Gemini
-  `#4285f4`) with a 9 px kind dot ringed in `surface`. Unread is a 6 px
-  `accent` dot; titles `text_bright` semibold 14, details `text_dim` 13,
-  ages `text_muted` 13.
+  24 px brand disc (Claude `#d97757` with the white Claude mark, Codex
+  `#f2f2f2`, OpenCode `#3b3b40`, Gemini `#4285f4`) with an 8 px kind dot
+  ringed in `surface`. Sizes follow Warp's inbox: header medium 13.5, chips
+  and the meta line (agent, `⎇ branch`, age) 12, titles `text_bright`
+  semibold 13 on 18 px lines, details `text_dim` 12.5. Unread is a 6 px
+  `accent` dot.
 - **Notification toasts**: 360 px `surface` cards (radius 8) under the
-  inbox button, 8 px apart, a 3 px kind-colored stripe on the left edge,
-  title semibold 13.5 (two lines), detail 12.5. Tab markers: a 7 px kind
+  inbox button, 8 px apart, no stripe (the badge's kind dot carries the
+  kind); badge and text centred on the card's height, title semibold 13
+  (two lines), detail 12.5. A notification without an agent gets a bell
+  badge (Nerd Font `fa-bell`; a terminal bell `fa-bell_o`). Tab markers: a 7 px kind
   dot with a 12 px halo at 25 %.
 - **Split panes** (Warp style): flush, square-cornered panes divided by a
   1 px `pane_border_inactive` line; the focused pane's title bar carries a
@@ -251,7 +271,7 @@ No other animation. Motion never delays input.
   94 % `bg` backing (radius 8) so it stays readable over a background
   image or a translucent window.
 - **Settings tab**: a 232 px `bg_chrome` sidebar (search field, page rows
-  with icons, *Open config.toml* at the foot) and a body at most 720 px wide:
+  with icons, *Open config.toml* at the foot) and a body at most 720 px wide, centred in the room right of the sidebar:
   title Inter 22 semibold, subtitle `text_dim`, group labels in small caps,
   flat 52 px rows divided by 6 % hairlines, label left (description
   `text_muted` under it), control right. A setting changed from its default

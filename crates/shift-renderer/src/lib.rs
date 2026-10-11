@@ -13,4 +13,4 @@ pub use gpu::Gpu;
 pub use quad::{Quad, QuadPipeline};
 pub use scene::{Layer, Scene, TextItem, text_color};
 pub use sprite::{Sprite, SpritePipeline};
-pub use text::{FONT_MONO, FONT_SANS, TextEngine, mono_family};
+pub use text::{FONT_MONO, FONT_SANS, FONT_SYMBOLS, TextEngine, mono_family};

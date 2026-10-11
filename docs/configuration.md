@@ -4,7 +4,7 @@
 
 | Path | Purpose |
 |---|---|
-| `~/.config/shift/config.toml` | User configuration (hot-reloaded < 300 ms, including external edits) |
+| `~/.config/shift/config.toml` | User configuration (hot-reloaded < 300 ms, including external edits; a once-a-second stat check catches edits the file-system events miss) |
 | `~/.config/shift/themes/*.toml` | User themes, Shift TOML (file stem = theme name) |
 | `~/.config/shift/themes/*.yaml` · `*.yml` | User themes, Warp YAML (same directory, same naming) |
 | `~/.config/shift/workflows/*.yaml` | User workflows (Warp-compatible YAML) |
@@ -20,10 +20,11 @@
 All keys optional; omitted keys use the defaults shown.
 
 ```toml
-font_family   = "JetBrains Mono"  # any installed monospace family; unknown
-                                  # names fall back to the embedded JetBrains Mono
+font_family   = "JetBrains Mono"  # embedded JetBrains Mono or Hack, or any installed
+                                  # fixed-width outline font (Menlo, Monaco, SF Mono…);
+                                  # unknown names fall back to JetBrains Mono
 font_size     = 13.0              # settings stepper clamps 8–28 (⌘= / ⌘- / ⌘0 also write this)
-line_height   = 1.65              # multiplier, clamped 1.0–2.2 when applied
+line_height   = 1.2               # multiplier, clamped 1.0–2.2 when applied
 cursor_style  = "block"           # block | bar | underline
 cursor_blink  = true              # 1.1s steps blink
 theme         = "dark-default"    # builtin, or a stem in ~/.config/shift/themes
@@ -44,8 +45,13 @@ durable_sessions = false          # shells live in the session service: they kee
 control_api   = "navigate"        # off | navigate (list/status/focus) | full (also
                                   # split/open/send-text); `shift-terminal ctl`
 input_position = "bottom"         # bottom | top — where the command editor sits
+blocks_start = "bottom"           # bottom | top — blocks fill up from the editor (Warp), or start at the pane's top
 prompt        = "shift"          # shift = context chips + chevron
                                   # shell   = keep the shell's own PS1 on screen, editor shows ›
+prompt_chips  = ["cwd", "git_branch", "git_diff"]  # the Shift prompt's chips, in order (Settings › Input ›
+                                  # Prompt chips edits them): cwd, git_branch, git_diff,
+                                  # github_pr, user, host, python, php, docker,
+                                  # date, time12, time24
 copy_on_select = false            # copy the selection on mouse release
 autosuggestions = true            # inline ghost text after the cursor
 completions_menu = true           # completion panel (Tab still accepts the ghost text)
@@ -62,11 +68,23 @@ alias_expansion = false           # Space after an alias replaces it with its de
 error_underline = true            # red underline under unknown command names
 command_corrections = true        # "Did you mean …" after a failed command-not-found
 mouse_reporting = true            # forward clicks/drags/wheel to vim, tmux, htop…
-                                  # (hold Shift to select locally); also focus events
-option_as_meta = false            # macOS: Option sends ESC-prefixed Meta keys instead
+                                  # (hold Shift to select locally); focus events go regardless
+option_as_meta = false            # macOS: left Option sends ESC-prefixed Meta keys instead
                                   # of composing characters (Linux Alt is always Meta)
+# right_option_as_meta = false    # macOS: the right Option key; unset = follows option_as_meta
+middle_click_paste = true         # middle-click pastes the clipboard into the pane under it
+wheel_scroll_lines = 3            # terminal lines per mouse-wheel notch (1–20)
+clipboard_access = "write"        # OSC 52: off | write (programs may copy) | read_write
+                                  # (also read: any program or ssh host can see your clipboard)
 global_hotkey = ""                # system-wide show/hide chord, e.g. "alt+space";
                                   # empty = off (X11 on Linux)
+link_editor   = "system"          # ⌘-clicked file paths / file links: system (default
+                                  # app) | shift (viewer pane) | an editor id below
+file_editor   = "shift"           # explorer and code review ↗: shift | system | editor id
+                                  # editors: vscode cursor windsurf zed sublime intellij
+                                  # phpstorm webstorm rustrover (macOS: the .app in
+                                  # /Applications or ~/Applications, else the CLI on PATH)
+explorer_hidden_files = true      # file explorer lists dotfiles (.git and ignored stay hidden)
 # shell        = "/bin/zsh"       # default: $SHELL
 
 # [[ssh_profiles]]                # palette "SSH: <name>" (hosts from ~/.ssh/config
@@ -261,6 +279,9 @@ while it is not, plus its sound.
   inbox and marks the tab.
 - `SHIFT_NO_NOTIFY=1` suppresses desktop notifications and sounds (they are
   logged instead) — useful for scripted runs.
+- `SHIFT_PERSIST_SESSION=1` lets a `--script` run save and restore the
+  session file (scripted runs leave it alone by default); point
+  `XDG_DATA_HOME` at a scratch directory when using it.
 
 ## Keybinding overrides
 

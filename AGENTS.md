@@ -79,7 +79,7 @@ XDG_CONFIG_HOME=/tmp/shift-t/cfg XDG_DATA_HOME=/tmp/shift-t/data SHIFT_NO_NOTIFY
 
 Commands (one per line, `#` comments; full list in the `script.rs` module
 doc): `wait`, `wait_prompt`, `key`, `keyup`, `type`, `paste`, `shot`, `dump`,
-`resize`, `move`, `click`, `dblclick`, `rclick`, `drag`, `scroll`, `sh`,
+`resize`, `move`, `click`, `dblclick`, `rclick`, `mclick`, `drag`, `scroll`, `sh`,
 `focus`, `quit`. `menu` (native menu bar) works on macOS only; scripts that
 must also pass on Linux use key chords instead.
 
@@ -119,7 +119,7 @@ Four crates; dependencies flow strictly downward.
   `Scene` is a per-frame list of layers; within a layer quads draw first, then
   text; later layers composite over earlier ones (0 chrome, 1 terminal +
   editor, 2 completion/search, 3 settings, 4 palette, 5 context menu/hints,
-  6 toasts/dialogs).
+  6 toasts/dialogs, 7 tooltips).
 - **shift-terminal** — winit `ApplicationHandler` (`app.rs`), views, input
   routing, per-frame `Hit` rects, kitty keyboard encoder (`keyboard.rs`),
   AccessKit tree (`a11y.rs`), control socket and `ctl` client (`control.rs`), script
@@ -183,8 +183,8 @@ Four crates; dependencies flow strictly downward.
 
 ### Assets
 
-Fonts (JetBrains Mono ×4 weights, Inter variable), builtin themes and shell
-hooks are embedded with `include_bytes!`/`include_str!`; the binary has no
+Fonts (JetBrains Mono ×4 weights, Hack ×4 faces, Inter variable, a Nerd
+Font symbols subset), builtin themes and shell hooks are embedded with `include_bytes!`/`include_str!`; the binary has no
 runtime assets. Shell-integration files are materialized to
 `~/.local/share/shift/` on first spawn; zsh loads through a ZDOTDIR shim that
 sources the user's real config first.

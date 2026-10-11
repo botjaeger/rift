@@ -11,6 +11,9 @@ pub enum ClickTarget {
     Block(PaneId, shift_core::BlockId),
     BlockChevron(PaneId, shift_core::BlockId),
     BlockCopy(PaneId, shift_core::BlockId),
+    /// A header's duration: hover shows the full time; a click selects
+    /// the block like the rest of the header.
+    BlockDuration(PaneId, shift_core::BlockId),
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     TrafficLight(u8),
     #[cfg_attr(target_os = "macos", allow(dead_code))]
@@ -25,6 +28,10 @@ pub enum ClickTarget {
     ToggleNotifications,
     /// The owned command editor of a pane (click places the cursor).
     Editor(PaneId),
+    /// A clickable prompt chip (Warp): the cwd, branch, PHP, Python and
+    /// Docker chips open their menus, the diff chip the code review panel,
+    /// the PR chip the pull request in the browser.
+    Chip(PaneId, shift_core::PromptChip),
     PaneFocus(PaneId),
     /// A split pane's title bar: a press focuses the pane and arms
     /// drag-to-move (Warp pane header).
@@ -54,6 +61,8 @@ pub enum ClickTarget {
     SettingsToggle(&'static str),
     SettingsStep(&'static str, i8),
     SettingsSegment(&'static str, u8),
+    /// The prompt chips preview: opens "Edit prompt".
+    SettingsEditPrompt,
     /// A select: opens its option list.
     SettingsCycle(&'static str),
     /// Option `i` of the open select's list.
@@ -644,6 +653,13 @@ pub struct PaneState {
     pub editor: EditorState,
     pub git: Option<GitInfo>,
     pub last_git_cwd: Option<String>,
+    /// The last block when git was last asked: the next prompt after a
+    /// command (a new block) asks again.
+    pub last_git_block: shift_core::BlockId,
+    /// The checked-out branch's pull request (GitHub PR chip).
+    pub pr: Option<shift_core::github::PrInfo>,
+    /// The Docker Compose project around the cwd (Docker chip).
+    pub docker: Option<shift_core::docker::ComposeInfo>,
     /// Exit code of the last finished command (recolors the ❯).
     pub last_exit: Option<i32>,
     /// Frame cache for mouse → grid mapping (see terminal::RowKind).
@@ -691,6 +707,9 @@ impl PaneState {
             editor: EditorState::default(),
             git: None,
             last_git_cwd: None,
+            last_git_block: 0,
+            pr: None,
+            docker: None,
             last_exit: None,
             rows: Vec::new(),
             last_grid: None,
@@ -709,6 +728,26 @@ impl PaneState {
             password_block: None,
             title: String::new(),
         }
+    }
+
+    /// A command runs in this pane and is working (its tab and title bar
+    /// spin). A coding agent that sits at its own prompt waiting for you
+    /// still runs as a command, but is not working: no spinner (Warp).
+    pub fn running(&self) -> bool {
+        use shift_core::notifications::{Agent, agent_idle};
+        let agent = {
+            let blocks = self.session.blocks.lock().unwrap();
+            if !blocks.any_running() {
+                return false;
+            }
+            // the typed command names the agent (no process lookup: this
+            // runs every frame)
+            blocks
+                .last()
+                .filter(|b| matches!(b.state, shift_core::BlockState::Running { .. }))
+                .and_then(|b| Agent::from_command(&b.command))
+        };
+        !agent_idle(agent, &self.title)
     }
 
     /// Clear this pane's terminal selection (cheap no-op when none).

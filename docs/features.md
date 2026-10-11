@@ -38,8 +38,9 @@ insensitive) stay visible. Running it again on the same block, or choosing
 - **`clear` command (soft, Warp-style)** — detected via ED3 (`\e[3J`, terminfo
   E3; full-screen TUIs never send it). Scrollback and blocks are preserved;
   the viewport is padded so old content moves above the fold and stays
-  reachable by scrolling. Alacritty never sees the ED3, so its history
-  survives.
+  reachable by scrolling. The next commands start at the top of the
+  viewport and fill it downward, as in a fresh session; the padding shrinks
+  as they grow. Alacritty never sees the ED3, so its history survives.
 - **⌘K Clear Blocks (destructive)** — wipes screen, scrollback, and the block
   list app-side (no shell round-trip), re-anchoring a fresh prompt block so the
   next command's header extracts correctly.
@@ -70,6 +71,46 @@ insensitive) stay visible. Running it again on the same block, or choosing
   whole buffer.
 - **Input position** (`input_position`): the editor sits at the bottom
   (default) or the top of the pane.
+- **Blocks start** (`blocks_start`): with the editor at the bottom, blocks
+  fill up from right above it (default, Warp's "Pin to the bottom"; after
+  `clear` the next command sits there again) or start at the top of the pane.
+- **Prompt chips** (`prompt_chips`, Warp's "Edit prompt"): the context row
+  shows the chosen chips in order — working directory, git branch (↑↓ and
+  dirty dot), git diff stats (`3 • +10 −2`: changed files incl. untracked,
+  added and removed lines, untracked files' lines as added), the branch's
+  GitHub pull request (`PR #42` beside the GitHub mark, both yellow while
+  open, dim draft, magenta
+  merged, red closed; `gh pr view`, looked up in the background and reused
+  for two minutes per branch), user, host, Python (the virtualenv, else the
+  version `python3` runs: pyenv's shim resolved through `.python-version` /
+  `$(pyenv root)/version`, else the install path), PHP (the version `php`
+  runs, from its install path, else asked once), Docker
+  Compose (the nearest `compose.yaml` / `docker-compose.yml` at or above
+  the cwd, not above home: project name and running/total containers,
+  `down` when none run, `off` when Docker is not running; `docker compose
+  ps` in the background after each command), date,
+  12- and 24-hour time. Default: working directory, git branch, git diff
+  stats. A chip with nothing to show is left out. Git, PR and Docker state
+  refresh after each command, and in every pane of every tab as soon as the
+  chip list changes (Edit prompt or config.toml). Settings › Input › Prompt
+  chips previews them and opens the editor: click a chip to add it, drag
+  chips to order them (or out of the prompt to remove them), × removes,
+  Restore default, Save changes.
+- **Prompt chip pickers**: click the cwd chip to `cd` into a sub-directory or
+  the parent, the branch chip to check out or create a branch, the diff stats
+  chip to open the code review panel on that pane's repository (Warp; a
+  second click closes it), the
+  PR chip to open the pull request in the browser. The PHP and Python chips
+  list the installed versions (PHP: Homebrew `php` / `php@X.Y`, phpenv, asdf,
+  mise; Python: pyenv's and `system`, else Homebrew `python@X.Y`, asdf,
+  mise; `$HOMEBREW_PREFIX` and `$PYENV_ROOT` honoured), the active one
+  checked; picking one runs `shift-use php|python <bin dir>` (that
+  directory first on PATH, the previous pick removed) or `shift-use pyenv
+  <version>` (`PYENV_VERSION`) — this shell only. The Docker chip lists the
+  project's containers as a table — name, published ports, uptime and the
+  health check's verdict (healthy / starting / unhealthy), running ones
+  first; picking one runs `docker compose logs --follow --tail 200` for
+  its service.
 - **Shell-prompt mode** (`prompt = "shell"`): the shell's own PS1 (starship,
   p10k, …) stays visible on the grid and the editor drops the context row,
   showing a smaller muted chevron instead of the blue one.
@@ -108,13 +149,16 @@ the whole buffer.
   (1002), motion (1003) and the wheel in SGR (1006), UTF-8 (1005) or legacy
   encoding; ⇧ forces local selection. Focus in/out (1004) is reported when
   the window gains or loses focus.
-- ⌘-click opens URLs, OSC 8 hyperlinks and existing file paths (see ui.md).
+- ⌘-click opens URLs, OSC 8 hyperlinks and existing file paths (see ui.md);
+  files and folders open where `link_editor` says (default app, the viewer
+  pane or an installed editor), and the explorer / review ↗ follow
+  `file_editor` (Settings › Files).
   A relative path resolves against the directory the command that printed
   it ran in (the pane's current directory for output outside a block); hint
   mode resolves paths the same way.
 - A copy, paste or open that fails shows a toast with the reason; `Copied`
   appears only when the clipboard took the text.
-- Click a block header: select the block. Click its chevron: collapse.
+- Click a block header: select the block (again: deselect). A click without a drag on its output also selects it; a drag selects text. Click its chevron: collapse.
 - **Copy on select** (`copy_on_select`, off by default): a drag-selection is
   copied to the clipboard as soon as the mouse is released.
 
@@ -205,9 +249,11 @@ ignored. Warp's own files drop in unchanged.
   1 is effectively none.
 - **Background image**: a theme's `background_image` (path + opacity) is drawn
   under every layer; relative paths resolve against the themes directory.
-- **Font family** (`font_family`): any installed monospace family; an
-  unavailable name logs a warning and falls back to the embedded JetBrains
-  Mono. Settings → Appearance lists the installed families.
+- **Font family** (`font_family`): the embedded JetBrains Mono (default) or
+  Hack, or any installed monospace family; an unavailable name logs a
+  warning and falls back to JetBrains Mono. Settings → Appearance lists the
+  families whose regular face has outline glyphs of one width (Monaco
+  included, bitmap-only faces left out), each previewed in itself.
 - **Settings tab** (⌘,): a tab beside the shells, not an overlay; a sidebar
   search finds a setting on any page, a changed setting shows a dot and a
   reset button, selects open a list.
@@ -307,7 +353,10 @@ automatically:
 
 Sets `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=shift`,
 `TERM_PROGRAM_VERSION` (Shift's own);
-emits OSC 133 (blocks) and OSC 7 (cwd tracking).
+emits OSC 133 (blocks), OSC 7 (cwd tracking) and, when they change, OSC 1337
+SetUserVar `ShiftPython` (the prompt chips' Python environment) and, when PATH changes, `ShiftPhpBin` / `ShiftPythonBin` (the
+`php` and `python3` it resolves to); base64, bounded and control characters
+dropped on read. Defines `shift-use`, which the PHP and Python chips run.
 
 ## Rendering & performance
 
@@ -328,13 +377,14 @@ emits OSC 133 (blocks) and OSC 7 (cwd tracking).
 - Scroll input accumulates fractional trackpad deltas — no dropped events.
 - Full VT emulation via alacritty_terminal (vim/htop/alt-screen, 10k
   scrollback default; VT420 level, see [Terminal protocol
-  support](#terminal-protocol-support)), theme & config hot-reload < 300 ms.
+  support](#terminal-protocol-support)), theme & config hot-reload < 300 ms (a once-a-second stat check backs up
+  file-system events, which a backlogged fseventsd can drop).
 - Git status (branch, ahead/behind, dirty) resolved on a background git2
   worker; never blocks a frame.
 
 ## Startup
 
-`Starting zsh…` placeholder on the input line until the shell's first prompt; no terminal
+`Starting zsh…` placeholder on the prompt chips' row until the shell's first prompt; no terminal
 cursor shows while it is up. For a shell without integration, the placeholder leaves and the
 cursor shows 1.5 s after its first byte. Session restore
 respawns tabs at their saved cwds. The shell's history is imported once for
@@ -385,7 +435,15 @@ it.
   a newline asks first ("Paste and run?"), because each newline would press
   Enter (`confirm_multiline_paste`).
 - **OSC 52** copy: programs (tmux, neovim, remote shells) can set the system
-  clipboard. Reading the clipboard back is refused.
+  clipboard. Reading the clipboard back is refused unless
+  `clipboard_access = "read_write"` (Settings › Terminal › *Copy and read*);
+  `"off"` refuses copies too.
+- **Middle-click** pastes the clipboard into the pane under the pointer (which
+  takes focus) unless its program takes mouse clicks (`middle_click_paste`).
+  One wheel notch scrolls `wheel_scroll_lines` lines (default 3).
+- **Option as Meta** (macOS): the left and right Option keys are set apart
+  (`option_as_meta`, `right_option_as_meta`; the right one follows the left
+  until set).
 - **Colors** (OSC 4/5/10–12, resets OSC 104/105/110–112): set, query and
   reset the 256-color palette, the special colors and the default
   foreground, background and cursor; queries answer from the active theme, so
@@ -520,11 +578,12 @@ selects the block. The list keeps the newest 200.
 ## File explorer and code review
 
 ⇧⌘E opens the file explorer: the active pane's project (git working tree,
-else its directory) as a lazily expanded tree with ignored files hidden and
+else its directory) as a lazily expanded tree with ignored files hidden
+(dotfiles too with Settings › Files › Show hidden files off) and
 git status colors. A folder that cannot be read shows the error (e.g.
 `Permission denied`); one with more than 2,000 entries shows the first
 2,000 in display order, then `… more entries not shown` (a folder is read
-no further than 100,000 entries, ignored ones included). A file opens in a read-only viewer pane, the leftmost column of the tab
+no further than 100,000 entries, ignored ones included). A file opens in a read-only viewer pane (or the editor `file_editor` names), the leftmost column of the tab
 (line numbers, keyword/string/comment highlighting, 4 MB limit, binary
 detection, ⌘F finds in the file; Markdown opens rendered, with a Rendered |
 Raw switch); ⌥-click inserts its path into the command
@@ -535,8 +594,11 @@ the byte limit is enforced during reading, including when a file grows.
 ⇧⌘G opens code review: staged and unstaged changes (untracked included) as
 file cards of hunks: line numbers, syntax colors, the changed characters of
 an edited line highlighted, and "N unmodified lines" bands that open the
-unchanged lines between hunks. Stage, unstage or revert a whole file or one hunk;
-revert asks first and only discards unstaged work. Hunk actions re-diff,
+unchanged lines between hunks. Panel and cards are opaque; long lines scroll
+sideways per file (trackpad, ⇧ + wheel). Stage, unstage or revert a whole
+file from its header, or one hunk from the toolbar a hovered line shows (which
+also copies the hunk as a unified diff); ⤢ maximizes the panel over the panes
+with a file list on the right, Esc restores it. Revert asks first and only discards unstaged work. Hunk actions re-diff,
 match the hunk by its line ranges and content, and apply that same checked
 diff, so a stale panel never applies the wrong hunk. A hunk cut by the
 4,000-line limit offers only file actions. The model loads on a background

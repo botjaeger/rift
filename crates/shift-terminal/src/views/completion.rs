@@ -193,9 +193,15 @@ fn kind_icon(item: &Completion) -> Icon {
 /// Draw the completion list as a panel docked to the editor, full pane
 /// width (Warp's completion pane): source tabs with counts, the rows, and a
 /// key-hint footer. It sits on the editor zone's top edge (input at the
-/// bottom) or under it (input at the top), opaque over the output. `zone` =
+/// bottom) or under it (input at the top); the output moves out from under
+/// it (`terminal::beside_panel`). `zone` =
 /// the editor rect, `pane` = the active pane's body; `prefix_len` is the
 /// typed part of a token candidate, `line_len` of a history line.
+/// Height of the open panel: the terminal output moves out from under it.
+pub fn panel_height(ui: &CompletionUi) -> f32 {
+    HEADER_H + ui.items.len().min(MAX_ROWS) as f32 * ROW_H + FOOTER_H
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn render(
     layer: &mut Layer,
@@ -213,7 +219,7 @@ pub fn render(
         return;
     }
     let shown = ui.items.len().min(MAX_ROWS);
-    let panel_h = HEADER_H + shown as f32 * ROW_H + FOOTER_H;
+    let panel_h = panel_height(ui);
     let (x, w) = (pane[0], pane[2]);
     // above the editor when it sits at the pane bottom, else below it
     let at_bottom = zone[1] + zone[3] >= pane[1] + pane[3] - 2.0;
@@ -223,7 +229,7 @@ pub fn render(
         zone[1] + zone[3]
     };
 
-    layer.rect([x, y], [w, panel_h], theme.ground(theme.bg), 0.0);
+    layer.rect([x, y], [w, panel_h], theme.bg, 0.0);
     layer.hline(x, y, w, 1.0, lift(theme, 0.1));
     if !at_bottom {
         layer.hline(x, y + panel_h - 1.0, w, 1.0, lift(theme, 0.1));

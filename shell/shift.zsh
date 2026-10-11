@@ -26,6 +26,48 @@ __shift_report_cwd() {
     printf '\e]7;file://%s%s\a' "${HOST:-localhost}" "$dir"
 }
 
+# Prompt chips: the active Python environment, and the php and
+# python3 that PATH resolves to, as iTerm2 user variables (OSC 1337
+# SetUserVar, base64), sent when they change.
+typeset -g __shift_py= __shift_path=
+__shift_set_var() {
+    printf '\e]1337;SetUserVar=%s=%s\a' "$1" "$(printf %s "$2" | base64 | tr -d '\n')"
+}
+__shift_report_env() {
+    local py=${VIRTUAL_ENV:t}
+    [[ -n $py ]] || py=${PYENV_VERSION-}
+    if [[ $py != "$__shift_py" ]]; then
+        __shift_py=$py
+        __shift_set_var ShiftPython "$py"
+    fi
+    if [[ $PATH != "$__shift_path" ]]; then
+        __shift_path=$PATH
+        __shift_set_var ShiftPhpBin "${commands[php]-}"
+        __shift_set_var ShiftPythonBin "${commands[python3]-}"
+    fi
+}
+
+# The PHP and Python chips' version pickers run this: `shift-use php|python
+# <bin dir>` puts that directory first on PATH (dropping the one picked
+# before), `shift-use pyenv <version>` sets PYENV_VERSION. This shell only.
+typeset -g __shift_use_php= __shift_use_python=
+shift-use() {
+    local kind=$1 dir=$2 prev
+    case $kind in
+        pyenv) export PYENV_VERSION=$dir; return ;;
+        php) prev=$__shift_use_php ;;
+        python) prev=$__shift_use_python ;;
+        *) print -u2 'usage: shift-use php|python <bin dir> | shift-use pyenv <version>'; return 2 ;;
+    esac
+    if [[ ! -d $dir ]]; then
+        print -u2 "shift-use: no such directory: $dir"
+        return 1
+    fi
+    [[ -n $prev ]] && path=(${path:#$prev})
+    path=($dir $path)
+    typeset -g __shift_use_$kind=$dir
+}
+
 __shift_precmd() {
     local __shift_exit=$?
     # a child zsh has returned: this shell's own ZDOTDIR again
@@ -38,6 +80,7 @@ __shift_precmd() {
         unset __shift_cmd_ran
     fi
     __shift_report_cwd
+    __shift_report_env
     printf '\e]133;A\a'
 }
 

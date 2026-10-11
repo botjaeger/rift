@@ -1,11 +1,12 @@
 use shift_core::highlight::{TokenKind, tokenize};
-use shift_core::{Color, Config, CursorStyle, PromptMode, Theme};
+use shift_core::{Color, Config, CursorStyle, PromptChip, PromptMode, Theme};
 use shift_pty::alacritty_terminal::term::width::{Cluster, Placement};
 use shift_renderer::glyphon::{Attrs, Buffer, Family, Metrics, Shaping, Weight, Wrap};
 use shift_renderer::{Layer, TextEngine, mono_family};
 
 use crate::state::PaneState;
-use crate::views::icons::{self, Icon};
+use crate::views::glyphs;
+use crate::views::prompt_chips::{self, ChipView};
 use crate::vim::VimMode;
 
 /// Editor zone height for a single-line command (13px top pad + 16px
@@ -85,14 +86,31 @@ pub fn input_offset(prompt: PromptMode) -> f32 {
     if prompt == PromptMode::Shell {
         11.0
     } else {
-        13.0 + 24.0
+        CHIPS_TOP + 24.0
+    }
+}
+
+/// Offset of the prompt context (chip) row from the editor zone's top.
+pub const CHIPS_TOP: f32 = 13.0;
+
+/// Where the first line of the editor zone sits: the chip row, or the
+/// input line in shell-prompt mode (which has no chips). The shell's
+/// "Starting …" placeholder goes here, as in Warp.
+pub fn first_row_offset(prompt: PromptMode) -> f32 {
+    if prompt == PromptMode::Shell {
+        input_offset(prompt)
+    } else {
+        // centred on the chip box by eye: a line's glyphs sit below the
+        // middle of its LINE_H box
+        CHIPS_TOP + (CHIP_H - LINE_H) / 2.0 - 2.5
     }
 }
 
 /// Draw the owned input editor.
 /// `area` = [x, y, w, h] of the editor zone.
-/// Returns the (x, y) of the input line for anchoring popups, and the
-/// cursor's top-left (IME candidate window, preedit text).
+/// Returns the (x, y) of the input line for anchoring popups, the
+/// cursor's top-left (IME candidate window, preedit text), and the context
+/// chips' rects (cwd, branch) when drawn.
 #[allow(clippy::too_many_arguments)]
 pub fn render(
     layer: &mut Layer,
@@ -108,8 +126,9 @@ pub fn render(
     shell_env: Option<&shift_core::shell_env::ShellEnv>,
     hint: Option<&str>,
     cols: usize,
-) -> ((f32, f32), (f32, f32)) {
+) -> ((f32, f32), (f32, f32), DrawnChips) {
     let [x, y, w, _h] = area;
+    let mut chips = Vec::new();
     let shell_prompt = config.prompt == PromptMode::Shell;
 
     // divider (full width, design: border-top on -8px margins)
@@ -119,20 +138,20 @@ pub fn render(
         y + input_offset(config.prompt)
     } else {
         // ── prompt context (design 01): ⇕ ~/cwd on ⎇ branch ↑n ──
-        let ctx_y = y + 13.0;
+        let ctx_y = y + CHIPS_TOP;
         let cwd = pane.session.cwd.lock().unwrap().clone();
         let cwd_display = cwd
             .as_deref()
             .map(shorten_home)
             .unwrap_or_else(|| "~".into());
-        context_row(
+        let views = chip_views(config, theme, pane, &cwd_display);
+        chips = draw_chips(
             layer,
             engine,
             theme,
             [x + PAD_X, x + w - PAD_X],
             ctx_y,
-            &cwd_display,
-            pane.git.as_ref(),
+            &views,
         );
         y + input_offset(config.prompt)
     };
@@ -491,117 +510,156 @@ pub fn render(
         layer.text(b, px + 7.0, cursor_y + 2.0, color);
     }
 
-    ((text_x, input_y), (text_x + prefix_w, cursor_y))
+    ((text_x, input_y), (text_x + prefix_w, cursor_y), chips)
 }
 
-/// Prompt context line above the input (design 01/04, 12px mono, 9px gaps):
-/// up/down chevron icon + cwd in the accent, a muted "on", then a branch
-/// icon + branch in the success color and muted ahead/behind/dirty marks.
-fn context_row(
+/// Each drawn prompt chip and its rect.
+pub(crate) type DrawnChips = Vec<(PromptChip, [f32; 4])>;
+
+/// Prompt context line above the input (design 01/04, 12px mono): the
+/// `prompt_chips` that have something to show, each in a hairline chip with
+/// its icon. The cwd chip takes the room the others leave, keeping its tail
+/// (`…/project/dir`); chips that still do not fit drop off the end whole.
+/// Returns each drawn chip's rect.
+pub(crate) fn draw_chips(
     layer: &mut Layer,
     engine: &mut TextEngine,
     theme: &Theme,
     [x, right]: [f32; 2],
     y: f32,
-    cwd: &str,
-    git: Option<&shift_core::git::GitInfo>,
-) {
+    views: &[ChipView],
+) -> DrawnChips {
     let measure = |engine: &mut TextEngine, t: &str| {
         engine.measure(t, CHIP_SIZE, mono_family(), Weight::NORMAL)
     };
-    let mut marks = Vec::new();
-    if let Some(git) = git {
-        if git.ahead > 0 {
-            marks.push(format!("↑{}", git.ahead));
-        }
-        if git.behind > 0 {
-            marks.push(format!("↓{}", git.behind));
-        }
-        if git.dirty {
-            marks.push("•".into());
-        }
-    }
-    let marks = marks.join(" ");
-    // chip = pad, icon, gap, text, pad
-    let chip_w = |text_w: f32| CHIP_PAD + CHIP_ICON + 5.0 + text_w + CHIP_PAD;
-    // a narrow pane keeps the cwd's tail (`…/project/dir`) and the branch
-    // instead of cutting either mid-glyph at the pane edge
-    let git_w = git.map_or(0.0, |g| {
-        let marks_w = if marks.is_empty() {
-            0.0
-        } else {
-            6.0 + measure(engine, &marks)
-        };
-        CHIP_GAP + chip_w(measure(engine, &g.branch) + marks_w)
-    });
-    let cwd_room = (right - x - chip_w(0.0) - git_w).max(80.0);
-    let cwd = elide_head(cwd, cwd_room, |t| measure(engine, t));
+    // a narrow pane keeps the cwd's tail and the chips after it instead of
+    // cutting any mid-glyph at the pane edge
+    let others: f32 = views
+        .iter()
+        .filter(|v| v.chip != PromptChip::Cwd)
+        .map(|v| CHIP_GAP + chip_width(engine, v))
+        .sum();
+    let empty_w = CHIP_PAD + CHIP_ICON + 5.0 + CHIP_PAD;
+    let cwd_room = (right - x - empty_w - others).max(80.0);
     let top = y - 2.0;
-    let chip = |layer: &mut Layer,
-                engine: &mut TextEngine,
-                cx: f32,
-                icon: Icon,
-                icon_color: Color,
-                texts: &[(&str, Color)]|
-     -> f32 {
-        let text_w: f32 = texts.iter().map(|(t, _)| measure(engine, t)).sum::<f32>()
-            + 6.0 * texts.len().saturating_sub(1) as f32;
-        let w = chip_w(text_w);
-        layer.bordered(
-            [cx, top],
-            [w, CHIP_H],
-            theme.fg.with_alpha(0.04),
-            theme.border,
-            4.0,
-            1.0,
-        );
-        icons::draw(
-            layer,
-            icon,
-            [cx + CHIP_PAD + CHIP_ICON / 2.0, top + CHIP_H / 2.0],
-            CHIP_ICON,
-            icon_color,
-        );
-        let mut tx = cx + CHIP_PAD + CHIP_ICON + 5.0;
-        for (t, c) in texts {
-            // the line box centred in the chip
-            let ty = top + (CHIP_H - CHIP_SIZE * 1.4) / 2.0;
-            layer.text(make_mono(engine, t, CHIP_SIZE, Weight::NORMAL), tx, ty, *c);
-            tx += measure(engine, t) + 6.0;
+    let mut out = Vec::new();
+    let mut cx = x;
+    for v in views {
+        let mut shown = v.clone();
+        if v.chip == PromptChip::Cwd
+            && let Some((t, _)) = shown.texts.first_mut()
+        {
+            *t = elide_head(t, cwd_room, |s| measure(engine, s));
         }
-        cx + w
-    };
-    let cx = chip(
-        layer,
-        engine,
-        x,
-        Icon::Folder,
-        theme.text_dim,
-        &[(&cwd, theme.text_bright)],
-    );
-    // what still does not fit is dropped whole
-    let Some(git) = git.filter(|_| cx + git_w <= right) else {
-        return;
-    };
-    let mut texts = vec![(git.branch.as_str(), theme.text_ui)];
-    if !marks.is_empty() {
-        texts.push((marks.as_str(), theme.text_muted));
+        let w = chip_width(engine, &shown);
+        let at = if out.is_empty() { cx } else { cx + CHIP_GAP };
+        // what does not fit is dropped whole (the first chip always shows)
+        if !out.is_empty() && at + w > right {
+            break;
+        }
+        draw_chip(layer, engine, theme, [at, top], &shown, 0.0);
+        out.push((v.chip, [at, top, w, CHIP_H]));
+        cx = at + w;
     }
-    chip(
+    out
+}
+
+/// A chip's width: pad, icon, gap, its texts 6 apart, pad.
+pub(crate) fn chip_width(engine: &mut TextEngine, v: &ChipView) -> f32 {
+    let texts: f32 = v
+        .texts
+        .iter()
+        .map(|(t, _)| engine.measure(t, CHIP_SIZE, mono_family(), Weight::NORMAL))
+        .sum::<f32>()
+        + 6.0 * v.texts.len().saturating_sub(1) as f32;
+    CHIP_PAD + CHIP_ICON + 5.0 + texts + CHIP_PAD
+}
+
+/// One chip `CHIP_H` tall with its top-left at `at`; its border reaches
+/// `trail` px further right (room for a × after it).
+pub(crate) fn draw_chip(
+    layer: &mut Layer,
+    engine: &mut TextEngine,
+    theme: &Theme,
+    [at, top]: [f32; 2],
+    v: &ChipView,
+    trail: f32,
+) {
+    let w = chip_width(engine, v) + trail;
+    layer.bordered(
+        [at, top],
+        [w, CHIP_H],
+        theme.fg.with_alpha(0.04),
+        theme.border,
+        4.0,
+        1.0,
+    );
+    glyphs::draw(
         layer,
         engine,
-        cx + CHIP_GAP,
-        Icon::Branch,
-        theme.success,
-        &texts,
+        v.glyph,
+        [at + CHIP_PAD + CHIP_ICON / 2.0, top + CHIP_H / 2.0],
+        CHIP_ICON,
+        v.icon_color,
     );
+    let mut tx = at + CHIP_PAD + CHIP_ICON + 5.0;
+    for (t, c) in &v.texts {
+        // the line box centred in the chip
+        let ty = top + (CHIP_H - CHIP_SIZE * 1.4) / 2.0;
+        layer.text(make_mono(engine, t, CHIP_SIZE, Weight::NORMAL), tx, ty, *c);
+        tx += engine.measure(t, CHIP_SIZE, mono_family(), Weight::NORMAL) + 6.0;
+    }
+}
+
+/// The configured prompt chips for `pane` (shown cwd `cwd`).
+pub(crate) fn chip_views(
+    config: &Config,
+    theme: &Theme,
+    pane: &PaneState,
+    cwd: &str,
+) -> Vec<ChipView> {
+    let vars = pane.session.user_vars.lock().unwrap().clone();
+    let (user, host) = prompt_chips::user_and_host();
+    let chips = &config.prompt_chips;
+    let bin = |name: &str| {
+        vars.get(name)
+            .filter(|v| !v.is_empty())
+            .map(std::path::PathBuf::from)
+    };
+    let python = chips
+        .contains(&PromptChip::Python)
+        .then(|| {
+            let cwd = pane.session.cwd.lock().unwrap().clone()?;
+            shift_core::runtimes::python_version(&bin("ShiftPythonBin")?, cwd.as_ref())
+        })
+        .flatten();
+    let php = chips
+        .contains(&PromptChip::Php)
+        .then(|| shift_core::runtimes::php_version(&bin("ShiftPhpBin")?))
+        .flatten();
+    prompt_chips::views(
+        &config.prompt_chips,
+        theme,
+        &prompt_chips::Inputs {
+            cwd,
+            git: pane.git.as_ref(),
+            user,
+            host,
+            vars: &vars,
+            python,
+            php,
+            pr: pane.pr.as_ref(),
+            docker: pane.docker.as_ref(),
+            now: prompt_chips::LocalTime::now(),
+        },
+    )
 }
 
 /// Context chips: text size, height, inner padding, icon size, gap.
 const CHIP_SIZE: f32 = 12.0;
-const CHIP_H: f32 = 18.0;
+pub(crate) const CHIP_H: f32 = 18.0;
 const CHIP_PAD: f32 = 5.0;
-const CHIP_ICON: f32 = 10.0;
+const CHIP_ICON: f32 = 12.0;
 const CHIP_GAP: f32 = 6.0;
 
 /// Block cursor height, and its top below the input line's top: it spans

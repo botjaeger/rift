@@ -171,6 +171,11 @@ fn lift(theme: &Theme, alpha: f32) -> Color {
     }
 }
 
+/// Height of the open pane: the terminal output moves out from under it.
+pub fn panel_height(hp: &HistoryPane) -> f32 {
+    HEADER_H + hp.results.len().clamp(1, MAX_ROWS) as f32 * ROW_H + FOOTER_H
+}
+
 /// Draw the pane docked to the editor `zone` across `pane` (above the
 /// editor at the pane bottom, else below it).
 #[allow(clippy::too_many_arguments)]
@@ -188,7 +193,7 @@ pub fn render(
         return;
     }
     let shown = hp.results.len().clamp(1, MAX_ROWS);
-    let panel_h = HEADER_H + shown as f32 * ROW_H + FOOTER_H;
+    let panel_h = panel_height(hp);
     let (x, w) = (pane[0], pane[2]);
     let at_bottom = zone[1] + zone[3] >= pane[1] + pane[3] - 2.0;
     let y = if at_bottom {
@@ -202,7 +207,7 @@ pub fn render(
         })
     };
 
-    layer.rect([x, y], [w, panel_h], theme.ground(theme.bg), 0.0);
+    layer.rect([x, y], [w, panel_h], theme.bg, 0.0);
     layer.hline(x, y, w, 1.0, lift(theme, 0.1));
     if !at_bottom {
         layer.hline(x, y + panel_h - 1.0, w, 1.0, lift(theme, 0.1));

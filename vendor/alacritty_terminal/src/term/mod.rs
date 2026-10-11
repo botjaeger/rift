@@ -544,6 +544,12 @@ impl<T> Term<T> {
         self.damage.full = true;
     }
 
+    /// Change only the OSC 52 mode (Shift: `set_options` would also resend
+    /// the title and touch the scrollback).
+    pub fn set_osc52(&mut self, osc52: Osc52) {
+        self.config.osc52 = osc52;
+    }
+
     /// Set new options for the [`Term`].
     pub fn set_options(&mut self, options: Config)
     where

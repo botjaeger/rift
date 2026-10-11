@@ -41,6 +41,8 @@ pub struct ExplorerState {
     /// changes (from the review model).
     statuses: HashMap<String, char>,
     dirty_dirs: HashSet<String>,
+    /// List dotfiles (`explorer_hidden_files`).
+    show_hidden: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -102,9 +104,26 @@ impl ExplorerState {
         }
     }
 
+    /// Show or hide dotfiles; a change re-reads the listings.
+    pub fn set_show_hidden(&mut self, show: bool) {
+        if self.show_hidden != show {
+            self.show_hidden = show;
+            self.children.clear();
+            // a hidden selection would leave the keyboard on no row
+            if !show
+                && let (Some(root), Some(sel)) = (&self.root, &self.selected)
+                && sel
+                    .strip_prefix(root)
+                    .is_ok_and(|rel| rel.iter().any(|c| c.to_string_lossy().starts_with('.')))
+            {
+                self.selected = None;
+            }
+        }
+    }
+
     fn listing(&mut self, dir: &Path) -> &Listing {
         if !self.children.contains_key(dir) {
-            let list = fs_tree::listing(dir, self.repo.as_ref());
+            let list = fs_tree::listing(dir, self.repo.as_ref(), self.show_hidden);
             self.children.insert(dir.to_path_buf(), list);
         }
         &self.children[dir]

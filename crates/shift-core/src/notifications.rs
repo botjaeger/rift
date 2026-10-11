@@ -175,6 +175,28 @@ pub fn available_sounds(dirs: &[PathBuf]) -> Vec<String> {
     out
 }
 
+/// A coding agent's terminal title says it is idle at its own prompt:
+/// Claude Code titles itself `✳ …` while waiting and leads with a spinner
+/// frame while it works; Gemini CLI uses `◇ Ready …` / `✦ …`.
+pub fn agent_title_idle(title: &str) -> bool {
+    let t = title.trim_start();
+    t.starts_with('✳') || t.starts_with("◇")
+}
+
+/// `agent`, running in a pane titled `title`, is idle at its own prompt.
+/// Beyond the markers of `agent_title_idle`: Codex titles itself with the
+/// bare project name while waiting and leads with a braille spinner frame
+/// (`⠋ project`) only while it works.
+pub fn agent_idle(agent: Option<Agent>, title: &str) -> bool {
+    if agent_title_idle(title) {
+        return true;
+    }
+    let spinning = title
+        .trim_start()
+        .starts_with(|c: char| ('\u{2800}'..='\u{28FF}').contains(&c));
+    agent == Some(Agent::Codex) && !spinning
+}
+
 /// A coding agent running in a pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Agent {
@@ -421,6 +443,27 @@ pub fn looks_like_password_prompt(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_titles_tell_idle_from_working() {
+        assert!(agent_title_idle("✳ Claude Code"));
+        assert!(agent_title_idle(" ◇  Ready (shift)"));
+        assert!(!agent_title_idle("⠐ Claude Code"));
+        assert!(!agent_title_idle("✦  Working…"));
+        assert!(!agent_title_idle("vim main.rs"));
+        assert!(!agent_title_idle(""));
+    }
+
+    #[test]
+    fn codex_is_idle_unless_its_title_spins() {
+        let codex = Some(Agent::Codex);
+        assert!(agent_idle(codex, "shift"));
+        assert!(!agent_idle(codex, "⠋ shift"));
+        // other programs keep spinning whatever their title says
+        assert!(!agent_idle(None, "shift"));
+        assert!(!agent_idle(Some(Agent::ClaudeCode), "⠐ Claude Code"));
+        assert!(agent_idle(Some(Agent::ClaudeCode), "✳ Claude Code"));
+    }
 
     #[test]
     fn defaults_and_partial_table() {

@@ -578,7 +578,19 @@ fn control_byte(c: char) -> Option<u8> {
 /// Translate a key press into the byte sequence written to the PTY.
 /// Returns None when the key is not terminal input (handled elsewhere).
 pub fn key_to_bytes(event: &KeyPress, mods: ModifiersState, enc: KeyEncoding) -> Option<Vec<u8>> {
-    // cmd chords are app territory — never leak them to the PTY as text
+    // ⌘⌫ deletes to the start of the line, as in Warp and iTerm2: the
+    // program gets ctrl+u, the line editors' kill-to-start key (readline,
+    // zle, Claude Code), encoded for its keyboard mode
+    if mods == ModifiersState::SUPER && event.logical_key == Key::Named(NamedKey::Backspace) {
+        let u = || Key::Character("u".into());
+        let ctrl_u = KeyPress {
+            repeat: event.repeat,
+            released: event.released,
+            ..KeyPress::new(u(), None, Some(u()))
+        };
+        return key_to_bytes(&ctrl_u, ModifiersState::CONTROL, enc);
+    }
+    // other cmd chords are app territory — never leak them to the PTY
     if mods.super_key() {
         return None;
     }
@@ -770,6 +782,31 @@ mod tests {
         kitty_flags: 0,
     };
     const NONE: ModifiersState = ModifiersState::empty();
+
+    #[test]
+    fn cmd_backspace_kills_to_line_start() {
+        let bs = named(NamedKey::Backspace);
+        assert_eq!(
+            key_to_bytes(&bs, ModifiersState::SUPER, PLAIN),
+            Some(vec![0x15])
+        );
+        // kitty keyboard mode: ctrl+u in CSI u form
+        let kitty = KeyEncoding {
+            kitty_flags: 1,
+            ..PLAIN
+        };
+        assert_eq!(
+            key_to_bytes(&bs, ModifiersState::SUPER, kitty),
+            Some(b"\x1b[117;5u".to_vec())
+        );
+        // other cmd chords stay with the app
+        let shifted = ModifiersState::SUPER | ModifiersState::SHIFT;
+        assert_eq!(key_to_bytes(&bs, shifted, PLAIN), None);
+        assert_eq!(
+            key_to_bytes(&ch("k", Some("k"), "k"), ModifiersState::SUPER, PLAIN),
+            None
+        );
+    }
 
     #[test]
     fn arrows_follow_app_cursor_mode() {

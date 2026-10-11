@@ -7,7 +7,8 @@ macOS defaults; on Linux ⌘ is the Super key, and most actions also have a
 ## First launch
 
 Shift starts your login shell (`$SHELL`, or `shell = "…"` in config.toml).
-On the first start it writes its shell hooks to `~/.local/share/shift/` and
+On macOS it runs as a login shell like Terminal.app, so `~/.zprofile`
+(Homebrew's `brew shellenv`) loads before `~/.zshrc`. On the first start it writes its shell hooks to `~/.local/share/shift/` and
 loads them **after** your own rc files, so your prompt, aliases and plugins
 keep working. zsh, bash and fish are supported; you edit no rc file.
 
@@ -37,7 +38,7 @@ If commands do not become blocks, the shell is not loading the hooks (see
 
 | To | Do |
 |---|---|
-| Select a block | ⌘↑ / ⌘↓, or click its header |
+| Select a block | ⌘↑ / ⌘↓, or click its header or output |
 | Copy its command / output | ⇧⌘C / ⌥⇧⌘C (the newest block when none is selected) |
 | Put its command back in the editor | ⌘I |
 | Open the block menu | Right-click, or ⌃M |
@@ -139,7 +140,7 @@ send-text.
 |---|---|
 | Commands do not become blocks | Blocks need zsh, bash or fish; other shells run as a classic terminal. `echo $TERM_PROGRAM` should print `shift`. |
 | A remote host shows no blocks | Run *Install Shift shell integration on host*, then reconnect. The server must accept `LC_*` variables (`AcceptEnv LC_*`, the default on most systems). |
-| Keys in a program behave oddly | Programs get raw keys; ⌥ sends Meta on Linux, and on macOS only with *Option key sends Meta*. |
+| Keys in a program behave oddly | Programs get raw keys; ⌥ sends Meta on Linux, and on macOS only with *Left / Right Option key is Meta* (Settings › Terminal). |
 | Shift does not start on Linux | Check the GPU driver (Vulkan, or GL through Mesa). `RUST_LOG=info shift-terminal` prints the chosen adapter. |
 | AppImage: `Cannot mount AppImage` | `sudo apt install libfuse2t64`, or run with `--appimage-extract-and-run`. |
 | No notifications | Linux needs `notify-send`. `SHIFT_NO_NOTIFY=1` turns them off on purpose. |

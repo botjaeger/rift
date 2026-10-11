@@ -86,7 +86,10 @@ fn write_files() -> std::io::Result<Vec<(String, String)>> {
 }
 
 /// Extra argv for `program` so its integration loads automatically: bash
-/// gets `--rcfile <shim>`; zsh (ZDOTDIR) and fish (vendor_conf.d) need none.
+/// gets `--rcfile <shim>` (the shim emulates a macOS login shell); zsh
+/// (ZDOTDIR) and fish (vendor_conf.d) need none for integration, but on macOS
+/// they get `-l`: terminals there run login shells, and users keep PATH setup
+/// (`brew shellenv`, pyenv) in `.zprofile` / `status is-login` blocks.
 pub fn shell_args(program: &str) -> Vec<String> {
     let name = program.rsplit('/').next().unwrap_or(program);
     if name == "bash"
@@ -97,17 +100,31 @@ pub fn shell_args(program: &str) -> Vec<String> {
             base.join("bashrc").to_string_lossy().into_owned(),
         ];
     }
+    if cfg!(target_os = "macos") && matches!(name, "zsh" | "fish") {
+        return vec!["-l".into()];
+    }
     Vec::new()
+}
+
+fn is_executable(path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    path.is_file()
 }
 
 /// The shell Shift will spawn: config override, else `$SHELL`, else zsh.
 pub fn resolve_shell(configured: Option<&str>) -> String {
-    let exists = |s: &String| !s.trim().is_empty() && std::path::Path::new(s.trim()).exists();
+    // an executable regular file: spawning anything else aborts the app
+    let exists = |s: &String| !s.trim().is_empty() && is_executable(std::path::Path::new(s.trim()));
     if let Some(c) = configured.map(str::to_string) {
         if exists(&c) {
-            return c;
+            return c.trim().to_string();
         }
-        log::warn!("shell {c:?} not found, falling back");
+        log::warn!("shell {c:?} is not an executable file, falling back");
     }
     // $SHELL, else the first installed of the usual shells: a spawn with a
     // missing binary would abort the app (e.g. minimal Linux without zsh)
@@ -162,7 +179,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bash_gets_rcfile_others_do_not() {
+    fn bash_gets_rcfile_zsh_fish_login_on_macos() {
         if data_dir().is_none() {
             return;
         }
@@ -173,8 +190,14 @@ mod tests {
             std::path::Path::new(&args[1]),
             data_dir().unwrap().join("bashrc")
         );
-        assert!(shell_args("/bin/zsh").is_empty());
-        assert!(shell_args("/opt/homebrew/bin/fish").is_empty());
+        let login: Vec<String> = if cfg!(target_os = "macos") {
+            vec!["-l".into()]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(shell_args("/bin/zsh"), login);
+        assert_eq!(shell_args("/opt/homebrew/bin/fish"), login);
+        assert!(shell_args("/bin/sh").is_empty());
     }
 
     #[test]
@@ -189,5 +212,11 @@ mod tests {
         let got = resolve_shell(Some("/definitely/not/a/shell"));
         assert_ne!(got, "/definitely/not/a/shell");
         assert!(std::path::Path::new(&got).exists());
+        // existing but not executable (a file, a directory): same fallback
+        for bad in ["/etc/hosts", "/tmp"] {
+            let got = resolve_shell(Some(bad));
+            assert_ne!(got, bad);
+            assert!(is_executable(std::path::Path::new(&got)), "{got}");
+        }
     }
 }

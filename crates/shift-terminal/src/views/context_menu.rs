@@ -158,24 +158,24 @@ fn icon(action: MenuAction) -> Option<Icon> {
     })
 }
 
-/// Keymap actions whose shortcut a row shows (macOS chord first).
+/// Keymap actions whose shortcut a row shows (`Keymap::preferred`).
 fn shortcut_actions(action: MenuAction) -> &'static [&'static str] {
     use MenuAction::*;
     match action {
         CopyCommand => &["copy_block_command"],
         CopyOutput => &["copy_block_output"],
-        ToggleBookmark => &["bookmark_toggle_alt", "bookmark_toggle"],
+        ToggleBookmark => &["bookmark_toggle"],
         FilterBlock => &["filter_block"],
-        Copy => &["copy_alt", "copy"],
-        Paste => &["paste_alt", "paste"],
+        Copy => &["copy"],
+        Paste => &["paste"],
         SelectAll => &["select_all"],
-        SplitRight => &["split_vertical_alt", "split_vertical"],
-        SplitDown => &["split_horizontal_alt", "split_horizontal"],
+        SplitRight => &["split_vertical"],
+        SplitDown => &["split_horizontal"],
         Maximize => &["maximize_pane"],
         ClearBlocks => &["clear_blocks"],
-        ClosePane | ViewerClose => &["close_pane_alt", "close_pane"],
+        ClosePane | ViewerClose => &["close_pane"],
         ToggleSync(_) => &["toggle_sync_inputs"],
-        ViewerFind => &["search_alt", "search"],
+        ViewerFind => &["search"],
         _ => &[],
     }
 }
@@ -275,7 +275,7 @@ pub fn render(
         );
         let keys = shortcut_actions(item.action)
             .iter()
-            .find_map(|a| keymap.bindings_for(a).first().map(|b| b.chips().concat()));
+            .find_map(|a| keymap.preferred(a).map(|b| b.chips().concat()));
         if let Some(keys) = keys {
             let kw = engine.measure(&keys, 11.5, FONT_SANS, Weight::NORMAL);
             layer.text(

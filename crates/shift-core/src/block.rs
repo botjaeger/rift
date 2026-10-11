@@ -83,10 +83,10 @@ impl Block {
 pub struct BlockStore {
     blocks: std::collections::VecDeque<Block>,
     next_id: BlockId,
-    /// Soft `clear` marker: (first post-clear row, viewport rows). The
-    /// display list pads here so older content sits above the fold while
+    /// Soft `clear` marker: the first post-clear row. The display list
+    /// pads the viewport below it so older content sits above the fold while
     /// staying reachable by scrolling (Warp behavior).
-    clear_pad: Option<(AbsLine, usize)>,
+    clear_pad: Option<AbsLine>,
     /// When set, markers are timestamped with this instant instead of now
     /// (output replayed from the session service keeps its original time).
     clock: Option<Instant>,
@@ -281,8 +281,8 @@ impl BlockStore {
             b.output_start = b.output_start.map(|o| f(o, 0).0);
             b.end = b.end.map(|e| f(e, 0).0);
         }
-        if let Some((line, rows)) = self.clear_pad {
-            self.clear_pad = Some((f(line, 0).0, rows));
+        if let Some(line) = self.clear_pad {
+            self.clear_pad = Some(f(line, 0).0);
         }
     }
 
@@ -291,12 +291,12 @@ impl BlockStore {
         self.clear_pad = None;
     }
 
-    /// Record a soft `clear` at `line` padding the viewport with `rows`.
-    pub fn set_clear_pad(&mut self, line: AbsLine, rows: usize) {
-        self.clear_pad = Some((line, rows));
+    /// Record a soft `clear` whose first post-clear row is `line`.
+    pub fn set_clear_pad(&mut self, line: AbsLine) {
+        self.clear_pad = Some(line);
     }
 
-    pub fn clear_pad(&self) -> Option<(AbsLine, usize)> {
+    pub fn clear_pad(&self) -> Option<AbsLine> {
         self.clear_pad
     }
 
@@ -346,12 +346,16 @@ impl BlockStore {
     /// Working directory of the command whose output holds line `abs`
     /// (`None` for prompt rows, unattributed output, or no recorded cwd).
     pub fn cwd_at(&self, abs: AbsLine) -> Option<&str> {
+        self.block_at(abs)?.cwd.as_deref()
+    }
+
+    /// The command whose output holds line `abs` (`None` for prompt rows and
+    /// unattributed output).
+    pub fn block_at(&self, abs: AbsLine) -> Option<&Block> {
         self.blocks
             .iter()
             .rev()
-            .find(|b| b.output_start.is_some_and(|o| o <= abs) && b.end.is_none_or(|e| abs < e))?
-            .cwd
-            .as_deref()
+            .find(|b| b.output_start.is_some_and(|o| o <= abs) && b.end.is_none_or(|e| abs < e))
     }
 }
 

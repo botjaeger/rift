@@ -616,7 +616,7 @@ pub fn next_mode(mode: PaletteMode) -> PaletteMode {
     MODES[(i + 1) % MODES.len()].0
 }
 
-fn sans(engine: &mut TextEngine, text: &str, size: f32, weight: Weight) -> Buffer {
+pub(crate) fn sans(engine: &mut TextEngine, text: &str, size: f32, weight: Weight) -> Buffer {
     let mut buf = Buffer::new(&mut engine.font_system, Metrics::new(size, size * 1.35));
     buf.set_text(
         &mut engine.font_system,
@@ -642,7 +642,7 @@ fn mono(engine: &mut TextEngine, text: &str, size: f32, weight: Weight) -> Buffe
     buf
 }
 
-fn lift(theme: &Theme, alpha: f32) -> Color {
+pub(crate) fn lift(theme: &Theme, alpha: f32) -> Color {
     if theme.is_light() {
         Color::BLACK.with_alpha(alpha)
     } else {

@@ -20,6 +20,7 @@
 //! click 400 300            # left click (move + press + release)
 //! dblclick 400 300         # double click (word selection)
 //! rclick 400 300           # right click (block context menu)
+//! mclick 400 300           # middle click (paste, or reported to the program)
 //! drag 100 200 400 200     # left-drag between two points
 //! press 100 200            # left button down at a point (hold: use `move`, `release`)
 //! release 400 200          # left button up at a point
@@ -64,6 +65,7 @@ pub enum Step {
     Click(f32, f32),
     DoubleClick(f32, f32),
     RightClick(f32, f32),
+    MiddleClick(f32, f32),
     Drag(f32, f32, f32, f32),
     Press(f32, f32),
     Release(f32, f32),
@@ -211,6 +213,10 @@ pub fn parse(src: &str) -> Result<Vec<Step>, String> {
             "rclick" => {
                 let v = nums(2)?;
                 Step::RightClick(v[0], v[1])
+            }
+            "mclick" => {
+                let v = nums(2)?;
+                Step::MiddleClick(v[0], v[1])
             }
             "drag" => {
                 let v = nums(4)?;
@@ -368,6 +374,13 @@ pub fn key_press(chord: &str) -> Option<(KeyPress, ModifiersState)> {
 /// A plain typed character (as delivered by the OS for `type` text).
 pub fn char_press(ch: char) -> (KeyPress, ModifiersState) {
     let s = ch.to_string();
+    // winit reports the space bar as a named key carrying " "
+    if ch == ' ' {
+        return (
+            KeyPress::new(Key::Named(NamedKey::Space), Some(s), None),
+            ModifiersState::empty(),
+        );
+    }
     let mods = if ch.is_ascii_uppercase() {
         ModifiersState::SHIFT
     } else {
@@ -402,15 +415,16 @@ mod tests {
 
     #[test]
     fn parses_every_command() {
-        let src = "# comment\nwait 10\nkey cmd+t\ntype echo hi\\n\nshot /tmp/a.png\ndump /tmp/s.txt\nresize 800 600\nmove 1 2\nclick 3 4\ndblclick 5 6\nrclick 7 8\ndrag 1 2 3 4\nscroll -3\nsh true\nfocus off\nquit\n";
+        let src = "# comment\nwait 10\nkey cmd+t\ntype echo hi\\n\nshot /tmp/a.png\ndump /tmp/s.txt\nresize 800 600\nmove 1 2\nclick 3 4\ndblclick 5 6\nrclick 7 8\nmclick 9 10\ndrag 1 2 3 4\nscroll -3\nsh true\nfocus off\nquit\n";
         let steps = parse(src).unwrap();
-        assert_eq!(steps.len(), 15);
-        assert_eq!(steps[13], Step::Focus(false));
+        assert_eq!(steps.len(), 16);
+        assert_eq!(steps[14], Step::Focus(false));
+        assert_eq!(steps[10], Step::MiddleClick(9.0, 10.0));
         assert_eq!(steps[0], Step::Wait(10));
         assert_eq!(steps[2], Step::Type("echo hi\n".into()));
-        assert_eq!(steps[10], Step::Drag(1.0, 2.0, 3.0, 4.0));
-        assert_eq!(steps[11], Step::Scroll(-3.0, 0.0));
-        assert_eq!(steps[14], Step::Quit);
+        assert_eq!(steps[11], Step::Drag(1.0, 2.0, 3.0, 4.0));
+        assert_eq!(steps[12], Step::Scroll(-3.0, 0.0));
+        assert_eq!(steps[15], Step::Quit);
     }
 
     #[test]

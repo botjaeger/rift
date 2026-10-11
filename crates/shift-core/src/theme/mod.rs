@@ -255,13 +255,23 @@ const USER_THEME_EXTS: [&str; 3] = ["toml", "yaml", "yml"];
 ///
 /// `.yaml`/`.yml` files are read as Warp themes (see [`parse_warp_yaml`]).
 pub fn load_by_name(name: &str) -> Theme {
+    try_load_by_name(name).unwrap_or_else(|e| {
+        log::warn!("theme {name:?}: {e}; using dark-default");
+        builtin::dark_default()
+    })
+}
+
+/// `load_by_name` without the fallback: why the theme could not be loaded
+/// (no such theme, or the file's parse error).
+pub fn try_load_by_name(name: &str) -> Result<Theme, String> {
     match name.to_lowercase().as_str() {
-        "dark-default" | "dark default" => return builtin::dark_default(),
-        "light-default" | "light default" => return builtin::light_default(),
-        "catppuccin-mocha" | "catppuccin mocha" => return builtin::catppuccin_mocha(),
-        "tokyo-night" | "tokyo night" => return builtin::tokyo_night(),
+        "dark-default" | "dark default" => return Ok(builtin::dark_default()),
+        "light-default" | "light default" => return Ok(builtin::light_default()),
+        "catppuccin-mocha" | "catppuccin mocha" => return Ok(builtin::catppuccin_mocha()),
+        "tokyo-night" | "tokyo night" => return Ok(builtin::tokyo_night()),
         _ => {}
     }
+    let mut error = "not found".to_string();
     if let Some(dir) = crate::config::themes_dir() {
         for ext in USER_THEME_EXTS {
             let path = dir.join(format!("{name}.{ext}"));
@@ -282,14 +292,47 @@ pub fn load_by_name(name: &str) -> Theme {
                             img.path = dir.join(p).to_string_lossy().into_owned();
                         }
                     }
-                    return t;
+                    return Ok(t);
                 }
-                Err(e) => log::warn!("theme {name}.{ext}: parse error: {e}"),
+                Err(e) => {
+                    // one line (toasts): the TOML error's location line and
+                    // its message, without the source excerpt between
+                    let lines: Vec<&str> = e.lines().filter(|l| !l.trim().is_empty()).collect();
+                    let short = match (lines.first(), lines.last()) {
+                        (Some(first), Some(last)) if lines.len() > 1 => {
+                            format!("{} ({})", last.trim(), first.trim())
+                        }
+                        _ => e.trim().to_string(),
+                    };
+                    error = format!("{name}.{ext}: {short}");
+                }
             }
         }
     }
-    log::warn!("theme {name:?} not found, using dark-default");
-    builtin::dark_default()
+    Err(error)
+}
+
+/// The picker's label for each of `names` (`available_themes`): the theme's
+/// own name; a file that does not load says so instead of showing the
+/// fallback's name, and a name several files share carries the file stem.
+pub fn picker_labels(names: &[String]) -> Vec<String> {
+    let base: Vec<String> = names
+        .iter()
+        .map(|n| match try_load_by_name(n) {
+            Ok(t) => t.name,
+            Err(_) => format!("{n} (invalid theme file)"),
+        })
+        .collect();
+    base.iter()
+        .zip(names)
+        .map(|(label, stem)| {
+            if base.iter().filter(|l| *l == label).count() > 1 {
+                format!("{label} ({stem})")
+            } else {
+                label.clone()
+            }
+        })
+        .collect()
 }
 
 /// Names available in the theme picker: builtins (in order) then user theme

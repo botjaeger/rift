@@ -1,5 +1,5 @@
 //! Title bar of a split pane (Warp pane header): a terminal icon, the
-//! pane's title centred, and split / ⋮ (pane menu) / × (close) on the right
+//! pane's title centred (a spinner before it while a command runs), and split / ⋮ (pane menu) / × (close) on the right
 //! while the pane is focused or hovered. Pressing the bar and dragging moves
 //! the pane (see `App::drop_pane`); the drop zone and the dragged chip are
 //! drawn here too.
@@ -10,6 +10,7 @@ use shift_renderer::glyphon::{Attrs, Buffer, Family, Metrics, Shaping, Weight};
 use shift_renderer::{FONT_SANS, Layer, TextEngine};
 
 use crate::state::{ClickTarget, Hit};
+use crate::views::glyphs;
 use crate::views::icons::{self, Icon};
 
 const TITLE_SIZE: f32 = 12.0;
@@ -47,6 +48,7 @@ pub fn render(
     rect: [f32; 4],
     title: &str,
     active: bool,
+    running: bool,
     mouse: Option<(f32, f32)>,
     id: PaneId,
     hits: &mut Vec<Hit>,
@@ -98,8 +100,10 @@ pub fn render(
         }
     }
 
-    // the title centres on the pane, elided clear of the buttons
-    let room = (w - 2.0 * (x + w - split[0]) - 8.0).max(0.0);
+    // the title centres on the pane, elided clear of the buttons; a running
+    // command's spinner leads it
+    let spin_w = if running { 13.0 + 6.0 } else { 0.0 };
+    let room = (w - 2.0 * (x + w - split[0]) - 8.0 - spin_w).max(0.0);
     let measure =
         |engine: &mut TextEngine, s: &str| engine.measure(s, TITLE_SIZE, FONT_SANS, Weight::NORMAL);
     let label = super::editor::elide_head(title, room, |s| measure(engine, s));
@@ -110,9 +114,13 @@ pub fn render(
         } else {
             theme.text_dim
         };
+        let lx = (x + (w - tw - spin_w) / 2.0).round();
+        if running {
+            glyphs::draw_spinner(layer, [lx + 6.5, cy], 13.0, color);
+        }
         layer.text(
             sans(engine, &label, TITLE_SIZE, Weight::NORMAL),
-            (x + (w - tw) / 2.0).round(),
+            lx + spin_w,
             (cy - TITLE_SIZE * 1.3 / 2.0).round(),
             color,
         );

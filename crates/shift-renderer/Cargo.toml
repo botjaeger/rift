@@ -12,3 +12,5 @@ bytemuck.workspace = true
 image.workspace = true
 log.workspace = true
 pollster.workspace = true
+# font checks for the terminal font picker (already built for glyphon)
+ttf-parser = "0.25"

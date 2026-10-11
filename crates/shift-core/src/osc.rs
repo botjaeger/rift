@@ -23,6 +23,10 @@ pub enum Marker {
     /// A desktop-notification request: OSC 9 (iTerm2/ConEmu), OSC 777
     /// `notify` (urxvt/VTE) or OSC 99 (kitty).
     Notify { title: String, body: String },
+    /// OSC 1337;SetUserVar=`name`=`base64 value` (iTerm2): shell state the
+    /// prompt chips show (Python environment, php/python3 paths). Bounded, control
+    /// characters dropped.
+    UserVar { name: String, value: String },
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
@@ -241,6 +245,17 @@ fn parse_osc(buf: &[u8]) -> Option<Marker> {
             }
         });
     }
+    if let Some(rest) = s.strip_prefix("1337;SetUserVar=") {
+        let (name, value) = rest.split_once('=')?;
+        if name.is_empty() || name.len() > 64 || value.len() > 1024 {
+            return None;
+        }
+        let value = String::from_utf8(base64_decode(value)?).ok()?;
+        return Some(Marker::UserVar {
+            name: clip(name),
+            value: clip(&value),
+        });
+    }
     if let Some(rest) = s.strip_prefix("7;") {
         // file://host/path — strip scheme + host, percent-decode the path
         let path = rest
@@ -249,6 +264,29 @@ fn parse_osc(buf: &[u8]) -> Option<Marker> {
         return Some(Marker::Cwd(percent_decode(path)));
     }
     None
+}
+
+/// Standard base64 (padding optional); `None` on any other byte.
+fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(s.len() * 3 / 4);
+    let (mut acc, mut bits) = (0u32, 0);
+    for b in s.bytes().filter(|&b| b != b'=') {
+        let v = match b {
+            b'A'..=b'Z' => b - b'A',
+            b'a'..=b'z' => b - b'a' + 26,
+            b'0'..=b'9' => b - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        };
+        acc = (acc << 6) | v as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
 }
 
 fn percent_decode(s: &str) -> String {
@@ -289,6 +327,37 @@ mod tests {
         assert_eq!(
             markers(&mut s, b"\x1b]133;A\x07hello"),
             vec![Marker::PromptStart]
+        );
+    }
+
+    #[test]
+    fn user_vars_decode_base64_and_drop_bad_ones() {
+        let mut s = OscScanner::new();
+        // "my-venv" and an empty value (the variable was unset)
+        assert_eq!(
+            markers(
+                &mut s,
+                b"\x1b]1337;SetUserVar=ShiftPython=bXktdmVudg==\x07\x1b]1337;SetUserVar=ShiftPhpBin=\x07"
+            ),
+            vec![
+                Marker::UserVar {
+                    name: "ShiftPython".into(),
+                    value: "my-venv".into()
+                },
+                Marker::UserVar {
+                    name: "ShiftPhpBin".into(),
+                    value: String::new()
+                },
+            ]
+        );
+        // not base64; control characters are dropped ("a\x1bb")
+        assert!(markers(&mut s, b"\x1b]1337;SetUserVar=X=!!\x07").is_empty());
+        assert_eq!(
+            markers(&mut s, b"\x1b]1337;SetUserVar=X=YRti\x07"),
+            vec![Marker::UserVar {
+                name: "X".into(),
+                value: "ab".into()
+            }]
         );
     }
 

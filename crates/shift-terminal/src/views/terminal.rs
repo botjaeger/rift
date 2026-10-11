@@ -32,6 +32,11 @@ pub struct GridLayout {
     pub editor_owns_cursor: bool,
     /// Blinking text (SGR 5) is in its visible phase.
     pub text_blink_on: bool,
+    /// Blocks start right above the input while they do not fill the pane
+    /// (`blocks_start = "bottom"` with the input at the bottom).
+    pub bottom_up: bool,
+    /// Pointer position (block headers show their copy button on hover).
+    pub mouse: Option<(f32, f32)>,
 }
 
 /// Set when a frame drew blinking text: the app keeps repainting to blink it.
@@ -76,6 +81,8 @@ pub struct RenderOutput {
     pub chevron_hits: Vec<HitRect>,
     /// Copy-button rects on block headers.
     pub copy_hits: Vec<HitRect>,
+    /// Duration rects on block headers (hover: the full time).
+    pub duration_hits: Vec<HitRect>,
     pub display_len: usize,
     pub any_running: bool,
     /// Per visible row, top-to-bottom (see `RowKind`).
@@ -258,6 +265,25 @@ pub fn path_tokens(text: &str) -> Vec<(usize, usize, String)> {
     out
 }
 
+/// The viewport left beside a panel docked over the pane (history,
+/// completion) that covers `top..bottom`: the output moves out from under it,
+/// as in Warp, so the newest lines stay in view. Render only — the program
+/// keeps its rows. At least one row stays.
+pub fn beside_panel(grid: GridLayout, top: f32, bottom: f32) -> GridLayout {
+    let end = grid.y + grid.rows as f32 * grid.line_h;
+    let (y, end) = if bottom >= end {
+        (grid.y, top.min(end)) // docked below the output
+    } else {
+        (bottom.max(grid.y), end) // docked above it (input at the top)
+    };
+    let rows = ((end - y) / grid.line_h + 1e-3).floor().max(1.0) as usize;
+    GridLayout {
+        y,
+        rows: rows.min(grid.rows),
+        ..grid
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DisplayLine {
     Grid(u64),
@@ -277,7 +303,7 @@ pub fn build_display_list(
     history: u64,
     alt_screen: bool,
     hide_prompt: bool,
-    clear_pad: Option<(u64, usize)>,
+    clear_pad: Option<u64>,
 ) -> Vec<DisplayLine> {
     build_display_list_filtered(
         blocks,
@@ -287,8 +313,24 @@ pub fn build_display_list(
         alt_screen,
         hide_prompt,
         clear_pad,
+        screen_lines,
+        None,
         &std::collections::HashSet::new(),
     )
+}
+
+/// Where the live screen's content ends: past the cursor row and the last
+/// non-blank line, before the blank screen tail.
+pub fn live_end(
+    term: &shift_pty::alacritty_terminal::term::Term<EventProxy>,
+    scrolled: u64,
+) -> u64 {
+    let cursor_abs = scrolled + term.grid().cursor.point.line.0.max(0) as u64;
+    let newest = scrolled + term.grid().screen_lines() as u64;
+    (cursor_abs + 1..newest)
+        .rev()
+        .find(|&abs| line_text(term, scrolled, abs).is_some_and(|t| !t.trim().is_empty()))
+        .map_or(cursor_abs + 1, |abs| abs + 1)
 }
 
 /// Output lines of the filtered block that do not contain the filter query
@@ -328,7 +370,13 @@ pub fn filter_hidden(
 }
 
 /// The display-line list (`build_display_list`) minus `hidden` grid lines
-/// (block filter).
+/// (block filter). `view_rows` = the rows the pane shows (fewer than
+/// `screen_lines` beside a docked panel): soft-`clear` padding fills them.
+/// `bottom_up` = `Some(live end)`: content shorter than the view sits at
+/// its bottom (pads above it), and after a `clear` the new content does
+/// too; the blank screen rows past the live end (`live_end`) are left out,
+/// so a command just submitted or running stays down there instead of
+/// riding up on them.
 #[allow(clippy::too_many_arguments)]
 pub fn build_display_list_filtered(
     blocks: &[Block],
@@ -337,7 +385,9 @@ pub fn build_display_list_filtered(
     history: u64,
     alt_screen: bool,
     hide_prompt: bool,
-    clear_pad: Option<(u64, usize)>,
+    clear_pad: Option<u64>,
+    view_rows: usize,
+    bottom_up: Option<u64>,
     hidden: &std::collections::HashSet<u64>,
 ) -> Vec<DisplayLine> {
     let mut display: Vec<DisplayLine> = Vec::new();
@@ -357,14 +407,17 @@ pub fn build_display_list_filtered(
     {
         newest = newest.min(last.prompt_start);
     }
+    if let Some(end) = bottom_up {
+        newest = newest.min(end.max(oldest));
+    }
+    let bottom_up = bottom_up.is_some();
     // soft `clear`: pad rows push pre-clear content above the fold
-    let mut pad_pending = clear_pad.filter(|(line, _)| *line >= oldest);
+    let mut pad_pending = clear_pad.filter(|line| *line >= oldest);
+    let mut pad_at = None;
     let mut abs = oldest;
     while abs < newest {
-        if let Some((line, n)) = pad_pending
-            && abs == line
-        {
-            display.extend(std::iter::repeat_n(DisplayLine::Pad, n));
+        if pad_pending == Some(abs) {
+            pad_at = Some(display.len());
             pad_pending = None;
         }
         // does a block header replace this row?
@@ -394,10 +447,27 @@ pub fn build_display_list_filtered(
         }
     }
     // clear happened at (or past) the hidden live prompt: pads go at the end
-    if let Some((line, n)) = pad_pending
+    if let Some(line) = pad_pending
         && line >= newest
     {
-        display.extend(std::iter::repeat_n(DisplayLine::Pad, n));
+        pad_at = Some(display.len());
+    }
+    // the pads fill the viewport around the post-clear content: below it,
+    // so it starts at the top of the viewport, or (bottom_up) above it, so
+    // it starts right above the input (Warp); they vanish once it fills
+    // the screen
+    if let Some(at) = pad_at {
+        let pads = view_rows.saturating_sub(display.len() - at);
+        let pad = std::iter::repeat_n(DisplayLine::Pad, pads);
+        if bottom_up {
+            display.splice(at..at, pad);
+        } else {
+            display.extend(pad);
+        }
+    }
+    if bottom_up && display.len() < view_rows {
+        let pads = view_rows - display.len();
+        display.splice(0..0, std::iter::repeat_n(DisplayLine::Pad, pads));
     }
     display
 }
@@ -526,6 +596,51 @@ pub fn resolve_color(theme: &Theme, color: ansi::Color) -> Color {
             rgb.b as f32 / 255.0,
             1.0,
         ),
+    }
+}
+
+/// The full duration for a tooltip: `412 ms`, `8.214 s`, `1 min 18.432 s`,
+/// `2 h 3 min 4 s`.
+pub fn format_duration_full(d: Duration) -> String {
+    let ms = d.as_millis();
+    let secs = d.as_secs_f64();
+    if ms < 1000 {
+        format!("{ms} ms")
+    } else if ms < 60_000 {
+        format!("{secs:.3} s")
+    } else if ms < 3_600_000 {
+        format!("{} min {:.3} s", ms / 60_000, secs % 60.0)
+    } else {
+        let s = d.as_secs();
+        format!("{} h {} min {} s", s / 3600, (s % 3600) / 60, s % 60)
+    }
+}
+
+/// A block header's duration tooltip: how long it ran, and when it ended
+/// (`Took 1 min 18.432 s · finished 03:48:05 pm, October 11, 2026`).
+pub fn duration_detail(block: &Block) -> Option<String> {
+    match block.state {
+        BlockState::Running { started } => Some(format!(
+            "Running for {}",
+            format_duration_full(started.elapsed())
+        )),
+        BlockState::Done { duration, .. } => {
+            let took = format!("Took {}", format_duration_full(duration));
+            if block.restored {
+                return Some(format!("{took} · restored from a previous session"));
+            }
+            let Some(at) = block.finished_at else {
+                return Some(took);
+            };
+            let t = super::prompt_chips::LocalTime::at(at);
+            let secs = at
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs() % 60);
+            // `03:48 pm` with the seconds spliced in
+            let clock = t.time12().replacen(' ', &format!(":{secs:02} "), 1);
+            Some(format!("{took} · finished {clock}, {}", t.date()))
+        }
+        BlockState::Prompt => None,
     }
 }
 
@@ -1039,6 +1154,8 @@ pub fn render(
         alt_screen,
         hide_prompt,
         clear_pad,
+        grid.rows,
+        (grid.bottom_up && !alt_screen).then(|| live_end(&term, scrolled)),
         &hidden,
     );
     if alt_screen {
@@ -1058,13 +1175,7 @@ pub fn render(
     let sel_range = term.selection.as_ref().and_then(|s| s.to_range(&term));
     // an open (running) block ends at its last used row, the cursor row or
     // the last non-blank line, not at the bottom of the blank screen tail
-    let live_end = {
-        let newest = scrolled + screen_lines as u64;
-        (cursor_abs + 1..newest)
-            .rev()
-            .find(|&abs| line_text(&term, scrolled, abs).is_some_and(|t| !t.trim().is_empty()))
-            .map_or(cursor_abs + 1, |abs| abs + 1)
-    };
+    let live_end = live_end(&term, scrolled);
 
     // keyboard-selected block: abs row range for the highlight treatment
     let selected_range = selected.and_then(|id| {
@@ -1130,12 +1241,7 @@ pub fn render(
                 let is_sel = !alt_screen && row_selected(*abs);
                 if !alt_screen && let Some(bg) = row_bg(*abs) {
                     // block wash under content (quads draw in push order)
-                    layer.rect(
-                        [grid.x, y],
-                        [grid.right - grid.x, grid.line_h + 0.5],
-                        bg,
-                        0.0,
-                    );
+                    wash_row(layer, grid, y, bg);
                 }
                 let content_x = if alt_screen {
                     grid.x
@@ -1202,13 +1308,7 @@ pub fn render(
             DisplayLine::Header(bi) => {
                 let block = &blocks[*bi];
                 if selected == Some(block.id) {
-                    let bg = theme.accent.with_alpha(0.08);
-                    layer.rect(
-                        [grid.x, y],
-                        [grid.right - grid.x, grid.line_h + 0.5],
-                        bg,
-                        0.0,
-                    );
+                    wash_row(layer, grid, y, theme.accent.with_alpha(0.08));
                 }
                 out.rows.push(RowInfo {
                     y,
@@ -1219,7 +1319,10 @@ pub fn render(
                     .filter(|(id, _)| *id == block.id)
                     .map(|(_, n)| n.as_str());
                 let bh = border_h(r);
-                render_header(layer, engine, theme, grid, block, y, bh, note, &mut out);
+                let sel = selected == Some(block.id);
+                render_header(
+                    layer, engine, theme, grid, block, y, bh, sel, note, &mut out,
+                );
             }
         }
     }
@@ -1266,6 +1369,7 @@ pub fn render_sticky_header(
     grid: &GridLayout,
     session: &Session,
     block_id: BlockId,
+    selected: bool,
 ) -> Option<[f32; 4]> {
     let block = session
         .blocks
@@ -1299,6 +1403,7 @@ pub fn render_sticky_header(
         &block,
         y,
         grid.line_h + 0.5,
+        selected,
         None,
         &mut sink,
     );
@@ -1357,6 +1462,7 @@ fn render_grid_line(
     // cell backgrounds (merged runs, block cursor) draw before decorations
     let mut backs: Vec<([f32; 2], [f32; 2], Color, f32)> = Vec::new();
     let mut decos: Vec<([f32; 2], [f32; 2], Color)> = Vec::new();
+    let mut blocks: Vec<([f32; 2], [f32; 2], Color)> = Vec::new();
 
     for col in 0..cols {
         let cell = &row[Column(col)];
@@ -1440,6 +1546,27 @@ fn render_grid_line(
         };
         let italic = flags.contains(Flags::ITALIC);
         let mut ch = drawn_char(cell.c, flags);
+        // block elements fill the whole cell (line height included), as
+        // in Warp: the font's glyphs stop short of the line box and left
+        // gaps in block art (Claude Code's logo)
+        if attr == LineSize::Single
+            && !flags.contains(Flags::HIDDEN)
+            && let Some((parts, alpha)) = block_element(ch)
+        {
+            let ink = fg.with_alpha(fg.a * alpha);
+            // half a pixel of overlap hides the antialiased seams between
+            // parts and neighbouring cells (opaque ink only: translucent
+            // shades would darken where they overlap)
+            let pad = if alpha >= 1.0 { 0.5 } else { 0.0 };
+            for [x0, y0, x1, y1] in parts {
+                blocks.push((
+                    [cx + x0 * cell_px, y + y0 * grid.line_h],
+                    [(x1 - x0) * cell_px + pad, (y1 - y0) * grid.line_h + pad],
+                    ink,
+                ));
+            }
+            ch = ' ';
+        }
         let presentation = presentation(cell.zerowidth());
         if flags.contains(Flags::BLINK) {
             BLINK_DRAWN.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1508,7 +1635,7 @@ fn render_grid_line(
     for (pos, size, color, radius) in backs {
         layer.rect(pos, size, color, radius);
     }
-    for (pos, size, color) in decos {
+    for (pos, size, color) in blocks.into_iter().chain(decos) {
         layer.rect(pos, size, color, 0.0);
     }
 
@@ -1616,6 +1743,42 @@ fn render_grid_line(
     }
 }
 
+/// Block element `c` (U+2580–U+259F) as filled parts of the cell, each
+/// `[x0, y0, x1, y1]` in cell fractions, and the ink's opacity (the shades
+/// ░▒▓ are the full cell at 25/50/75 %). None for any other character.
+fn block_element(c: char) -> Option<(Vec<[f32; 4]>, f32)> {
+    const UL: [f32; 4] = [0.0, 0.0, 0.5, 0.5];
+    const UR: [f32; 4] = [0.5, 0.0, 1.0, 0.5];
+    const LL: [f32; 4] = [0.0, 0.5, 0.5, 1.0];
+    const LR: [f32; 4] = [0.5, 0.5, 1.0, 1.0];
+    let eighth = |n: u32| n as f32 / 8.0;
+    let parts = match c as u32 {
+        0x2580 => vec![[0.0, 0.0, 1.0, 0.5]],
+        // lower one to seven eighths, then the full block
+        n @ 0x2581..=0x2588 => vec![[0.0, 1.0 - eighth(n - 0x2580), 1.0, 1.0]],
+        // left seven eighths down to one eighth
+        n @ 0x2589..=0x258F => vec![[0.0, 0.0, eighth(0x2590 - n), 1.0]],
+        0x2590 => vec![[0.5, 0.0, 1.0, 1.0]],
+        0x2591 => return Some((vec![[0.0, 0.0, 1.0, 1.0]], 0.25)),
+        0x2592 => return Some((vec![[0.0, 0.0, 1.0, 1.0]], 0.5)),
+        0x2593 => return Some((vec![[0.0, 0.0, 1.0, 1.0]], 0.75)),
+        0x2594 => vec![[0.0, 0.0, 1.0, eighth(1)]],
+        0x2595 => vec![[eighth(7), 0.0, 1.0, 1.0]],
+        0x2596 => vec![LL],
+        0x2597 => vec![LR],
+        0x2598 => vec![UL],
+        0x2599 => vec![UL, LL, LR],
+        0x259A => vec![UL, LR],
+        0x259B => vec![UL, UR, LL],
+        0x259C => vec![UL, UR, LR],
+        0x259D => vec![UR],
+        0x259E => vec![UR, LL],
+        0x259F => vec![UR, LL, LR],
+        _ => return None,
+    };
+    Some((parts, 1.0))
+}
+
 /// A line's DEC size (`row.attr`: ESC # 3/4/6, ESC # 5 resets).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum LineSize {
@@ -1645,6 +1808,19 @@ fn block_spin_epoch() -> std::time::Instant {
     *EPOCH.get_or_init(std::time::Instant::now)
 }
 
+/// A translucent wash over the row at `y`, snapped to whole pixels so
+/// neighbouring rows meet without overlapping (an overlap doubles the alpha
+/// into a seam line).
+fn wash_row(layer: &mut Layer, grid: &GridLayout, y: f32, color: Color) {
+    let (top, bottom) = (y.round(), (y + grid.line_h).round());
+    layer.rect(
+        [grid.x, top],
+        [grid.right - grid.x, bottom - top],
+        color,
+        0.0,
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_header(
     layer: &mut Layer,
@@ -1654,6 +1830,7 @@ fn render_header(
     block: &Block,
     y: f32,
     border_h: f32,
+    selected: bool,
     filter_note: Option<&str>,
     out: &mut RenderOutput,
 ) {
@@ -1665,8 +1842,13 @@ fn render_header(
         BlockState::Prompt => return,
     };
 
-    // left border across the header row
-    layer.rect([grid.x, y], [2.0, border_h], border, 0.0);
+    // left border across the header row: the selected block's 3 px accent
+    // runs through its header too
+    if selected {
+        layer.rect([grid.x, y], [3.0, border_h], theme.accent, 0.0);
+    } else {
+        layer.rect([grid.x, y], [2.0, border_h], border, 0.0);
+    }
 
     let content_x = grid.x + BLOCK_INDENT;
 
@@ -1695,10 +1877,14 @@ fn render_header(
         BlockState::Running { started } => format_duration(started.elapsed()),
         _ => String::new(),
     };
+    // the duration is a right-aligned column at least six cells wide
+    // (`1m18s`, `9.99s`), so badges line up from header to header
+    let dur_cell = grid.cell_w * (12.0 / grid.font_size);
+    let duration_col = duration_text.chars().count().max(6) as f32 * dur_cell;
     let duration_w = if duration_text.is_empty() {
         0.0
     } else {
-        duration_text.chars().count() as f32 * grid.cell_w * (12.0 / grid.font_size) + 11.0
+        duration_col + 11.0
     };
     let running = matches!(block.state, BlockState::Running { .. });
     // running: a 9px spinner + 6px gap lead the label (design 02)
@@ -1796,24 +1982,30 @@ fn render_header(
     let icon_w = 13.0;
     let icon_x = right - icon_w - 6.0;
 
-    // copy icon: two overlapping rounded-rect outlines
-    let ic = theme.text_muted;
-    let cy = y + (grid.line_h - 13.0) / 2.0;
-    layer.bordered(
-        [icon_x + 4.0, cy + 4.0],
-        [8.5, 8.5],
-        Color::TRANSPARENT,
-        ic,
-        2.0,
-        1.3,
-    );
-    layer.bordered([icon_x, cy], [8.5, 8.5], Color::TRANSPARENT, ic, 2.0, 1.3);
+    // copy icon, two overlapping rounded-rect outlines: only while the
+    // pointer is on the header or the block is selected (its place stays
+    // reserved, so nothing shifts)
+    let hovered = grid
+        .mouse
+        .is_some_and(|(mx, my)| mx >= grid.x && mx < right && my >= y && my < y + grid.line_h);
+    if hovered || selected {
+        let ic = theme.text_muted;
+        let cy = y + (grid.line_h - 13.0) / 2.0;
+        layer.bordered(
+            [icon_x + 4.0, cy + 4.0],
+            [8.5, 8.5],
+            Color::TRANSPARENT,
+            ic,
+            2.0,
+            1.3,
+        );
+        layer.bordered([icon_x, cy], [8.5, 8.5], Color::TRANSPARENT, ic, 2.0, 1.3);
+    }
 
-    // duration
+    // duration, right-aligned in its column
     let mut cursor_x = icon_x - 10.0;
     if !duration_text.is_empty() {
-        let w = duration_text.chars().count() as f32 * grid.cell_w * (12.0 / grid.font_size);
-        cursor_x -= w;
+        let w = duration_text.chars().count() as f32 * dur_cell;
         let dbuf = make_text(
             engine,
             &duration_text,
@@ -1822,13 +2014,18 @@ fn render_header(
             mono_family(),
             Weight::NORMAL,
         );
-        layer.text(dbuf, cursor_x, y, theme.text_muted);
-        cursor_x -= 11.0;
+        layer.text(dbuf, cursor_x - w, y, theme.text_muted);
+        out.duration_hits.push(HitRect {
+            rect: [cursor_x - w, y, w, grid.line_h],
+            block: block.id,
+        });
+        cursor_x -= duration_col + 11.0;
     }
 
-    // badge pill
+    // badge pill, right-aligned on the duration column; never taller than
+    // the row, so the pills of back-to-back headers do not overlap
     let badge_x = cursor_x - badge_w;
-    let pill_h = 17.0;
+    let pill_h = 17.0f32.min(grid.line_h - 1.0);
     layer.rect(
         [badge_x, y + (grid.line_h - pill_h) / 2.0],
         [badge_w, pill_h],
@@ -1892,6 +2089,31 @@ mod tests {
         assert_eq!(drawn_char('\t', Flags::empty()), ' ');
         assert_eq!(drawn_char('x', Flags::HIDDEN), ' ');
         assert_eq!(drawn_char('x', Flags::BOLD), 'x');
+    }
+
+    #[test]
+    fn full_durations_for_the_tooltip() {
+        let ms = Duration::from_millis;
+        assert_eq!(format_duration_full(ms(412)), "412 ms");
+        assert_eq!(format_duration_full(ms(8_214)), "8.214 s");
+        assert_eq!(format_duration_full(ms(78_432)), "1 min 18.432 s");
+        assert_eq!(format_duration_full(ms(7_384_000)), "2 h 3 min 4 s");
+    }
+
+    #[test]
+    fn block_elements_fill_their_cell_parts() {
+        let parts = block_element;
+        assert_eq!(parts('█'), Some((vec![[0.0, 0.0, 1.0, 1.0]], 1.0)));
+        assert_eq!(parts('▄'), Some((vec![[0.0, 0.5, 1.0, 1.0]], 1.0)));
+        assert_eq!(parts('▁'), Some((vec![[0.0, 0.875, 1.0, 1.0]], 1.0)));
+        assert_eq!(parts('▉'), Some((vec![[0.0, 0.0, 0.875, 1.0]], 1.0)));
+        assert_eq!(parts('▏'), Some((vec![[0.0, 0.0, 0.125, 1.0]], 1.0)));
+        assert_eq!(parts('▐'), Some((vec![[0.5, 0.0, 1.0, 1.0]], 1.0)));
+        // Claude Code's logo: ▛ is three quadrants, ▝ one
+        assert_eq!(block_element('▛').unwrap().0.len(), 3);
+        assert_eq!(parts('▝'), Some((vec![[0.5, 0.0, 1.0, 0.5]], 1.0)));
+        assert_eq!(block_element('▒').unwrap().1, 0.5);
+        assert!(block_element('a').is_none() && block_element('─').is_none());
     }
 
     #[test]
@@ -2165,21 +2387,113 @@ mod tests {
     }
 
     #[test]
+    fn a_docked_panel_takes_rows_from_the_viewport() {
+        // 20 rows of 10px from y=100 (bottom 300)
+        let grid = GridLayout {
+            x: 0.0,
+            y: 100.0,
+            right: 800.0,
+            cell_w: 8.0,
+            line_h: 10.0,
+            font_size: 13.0,
+            cols: 100,
+            rows: 20,
+            ligatures: false,
+            cursor_style: CursorStyle::Block,
+            editor_owns_cursor: true,
+            text_blink_on: true,
+            bottom_up: true,
+            mouse: None,
+        };
+        // above a bottom editor at 310: the panel covers 245..310
+        let v = beside_panel(grid, 245.0, 310.0);
+        assert_eq!((v.y, v.rows), (100.0, 14));
+        // below a top editor: the panel covers 60..175, output starts under it
+        let v = beside_panel(grid, 60.0, 175.0);
+        assert_eq!((v.y, v.rows), (175.0, 12));
+        // a panel taller than the pane keeps one row
+        assert_eq!(beside_panel(grid, 0.0, 400.0).rows, 1);
+    }
+
+    #[test]
     fn soft_clear_pads_viewport() {
         // block on 0..4 (header at 0, output 1..4); `clear` at line 4 with a
         // 6-row viewport → pads push pre-clear content above the fold
-        let blocks = vec![block(1, 0, Some(1), Some(4), done(), false)];
-        let d = build_display_list(&blocks, 4, 6, 4, false, false, Some((4, 6)));
+        // and the editor hides the live prompt at 4
+        let mut blocks = vec![
+            block(1, 0, Some(1), Some(4), done(), false),
+            block(2, 4, None, None, BlockState::Prompt, false),
+        ];
+        let d = build_display_list(&blocks, 4, 6, 4, false, true, Some(4));
         assert_eq!(d[0], DisplayLine::Header(0));
         assert_eq!(d[3], DisplayLine::Grid(3));
-        for row in &d[4..10] {
-            assert_eq!(*row, DisplayLine::Pad);
-        }
-        assert_eq!(d[10], DisplayLine::Grid(4));
-        assert_eq!(d.len(), 16); // header + 3 output + 6 pads + 6 screen
-        // pad older than kept history: ignored
-        let d = build_display_list(&blocks, 40, 6, 4, false, false, Some((2, 6)));
+        assert_eq!(d[4..], [DisplayLine::Pad; 6]);
+        // the next command (output 5..8) starts at the top of the viewport
+        // (the last 6 display lines): pads fill only the rows below it
+        blocks[1] = block(2, 4, Some(5), Some(8), done(), false);
+        blocks.push(block(3, 8, None, None, BlockState::Prompt, false));
+        let d = build_display_list(&blocks, 4, 6, 4, false, true, Some(4));
+        assert_eq!(d.len(), 10); // header + 3 output + header + 3 + 2 pads
+        assert_eq!(d[4], DisplayLine::Header(1));
+        assert_eq!(d[8..], [DisplayLine::Pad; 2]);
+        // beside a docked panel only 3 rows show: no pads push it out of view
+        let d = build_display_list_filtered(
+            &blocks,
+            4,
+            6,
+            4,
+            false,
+            true,
+            Some(4),
+            3,
+            None,
+            &std::collections::HashSet::new(),
+        );
+        assert_eq!(d.len(), 8);
+        assert_eq!(d[7], DisplayLine::Grid(7));
+        // raw prompt (no editor): the screen rows fill the viewport, no pads
+        let d = build_display_list(&blocks, 4, 6, 4, false, false, Some(4));
         assert!(!d.contains(&DisplayLine::Pad));
+        assert_eq!(d[d.len() - 6], DisplayLine::Header(1));
+        // pad older than kept history: ignored
+        let d = build_display_list(&blocks, 40, 6, 4, false, false, Some(2));
+        assert!(!d.contains(&DisplayLine::Pad));
+    }
+
+    #[test]
+    fn bottom_up_blocks_sit_above_the_input() {
+        let bottom = |blocks: &[Block], pad| {
+            build_display_list_filtered(
+                blocks,
+                4,
+                6,
+                4,
+                false,
+                true,
+                pad,
+                6,
+                Some(u64::MAX),
+                &std::collections::HashSet::new(),
+            )
+        };
+        // one block (header + 3 lines) in a 6-row view: 2 pads above it
+        let mut blocks = vec![
+            block(1, 0, Some(1), Some(4), done(), false),
+            block(2, 4, None, None, BlockState::Prompt, false),
+        ];
+        let d = bottom(&blocks, None);
+        assert_eq!(d[..2], [DisplayLine::Pad; 2]);
+        assert_eq!(d[2], DisplayLine::Header(0));
+        assert_eq!(d.len(), 6);
+        // after `clear` at 4 the next command sits right above the input
+        // too: the pads go between the old content and it
+        blocks[1] = block(2, 4, Some(5), Some(8), done(), false);
+        blocks.push(block(3, 8, None, None, BlockState::Prompt, false));
+        let d = bottom(&blocks, Some(4));
+        assert_eq!(d.len(), 10);
+        assert_eq!(d[4..6], [DisplayLine::Pad; 2]);
+        assert_eq!(d[6], DisplayLine::Header(1));
+        assert_eq!(d[9], DisplayLine::Grid(7));
     }
 
     #[test]

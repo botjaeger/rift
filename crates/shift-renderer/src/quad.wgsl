@@ -124,7 +124,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             alpha = 1.0 - smoothstep(-aa * 0.5, aa * 0.5, d);
             if (in.border_width > 0.0) {
                 let inner = 1.0 - smoothstep(-aa * 0.5, aa * 0.5, d + in.border_width);
-                col = mix(in.border_color, in.color, inner);
+                // the ring composited over the fill (CSS: the border paints
+                // over its background). Mixing the straight-alpha colors
+                // instead pulled an antialiased pixel's rgb to a translucent
+                // border's white at near-full alpha: light streaks along
+                // corner arcs and fractional edges
+                let ring = (1.0 - inner) * in.border_color.a;
+                let a = ring + in.color.a * (1.0 - ring);
+                let rgb = in.border_color.rgb * ring + in.color.rgb * in.color.a * (1.0 - ring);
+                col = vec4<f32>(rgb / max(a, 0.0001), a);
             }
         }
     }

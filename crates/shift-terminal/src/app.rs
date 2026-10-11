@@ -45,6 +45,9 @@ pub enum UserEvent {
     PtyBell(PaneId),
     /// OSC 52 copy from the program in the pane.
     PtyClipboard(String),
+    /// OSC 52 read from the program in the pane (`clipboard_access =
+    /// "read_write"` only).
+    PtyClipboardLoad(PaneId, shift_pty::ClipboardReply),
     /// OSC 4/10/11/12 color query to answer from the theme.
     PtyColorRequest(PaneId, usize, shift_pty::ColorReply),
     PtyWindowOp(PaneId, Vec<Option<u16>>),
@@ -54,6 +57,8 @@ pub enum UserEvent {
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Menu(String),
     GitStatus(PaneId, Option<GitInfo>),
+    PrStatus(PaneId, Option<shift_core::github::PrInfo>),
+    DockerStatus(PaneId, Option<shift_core::docker::ComposeInfo>),
     ConfigReloaded,
     ViewerLoaded(Box<crate::views::viewer::ViewerState>),
     WindowsLoaded(
@@ -356,6 +361,10 @@ pub struct App {
     bg_image_opacity: f32,
     text: Option<TextEngine>,
     git: Option<GitWorker>,
+    pr_worker: Option<shift_core::github::PrWorker>,
+    docker_worker: Option<shift_core::docker::DockerWorker>,
+    /// The prompt chips the panes' git and Docker state was last fetched for.
+    chips_applied: Vec<shift_core::PromptChip>,
     tabs: Vec<TabState>,
     active: usize,
     next_pane: PaneId,
@@ -363,6 +372,11 @@ pub struct App {
     theme: Theme,
     cell_w: f32,
     modifiers: ModifiersState,
+    /// Left and right Option (Alt) held, where the platform tells them
+    /// apart (macOS); both false otherwise.
+    alt_sides: (bool, bool),
+    /// Why the configured theme did not load (toasted once per change).
+    theme_error: Option<String>,
     hits: Vec<Hit>,
     mouse: (f32, f32),
     any_running: bool,
@@ -376,6 +390,8 @@ pub struct App {
     palette_row_hits: Vec<([f32; 4], usize)>,
     /// Accessible names of the settings controls drawn last frame.
     settings_names: Vec<([f32; 4], String)>,
+    /// Settings controls Tab can reach, also scrolled away (page coords).
+    settings_stops: Vec<(ClickTarget, [f32; 4])>,
     completion: CompletionUi,
     editor_anchor: (f32, f32),
     /// Soft-wrap columns of the active pane's editor (last frame).
@@ -392,6 +408,13 @@ pub struct App {
     last_click: Option<(Instant, (f32, f32), u8)>,
     context_menu: ContextMenuState,
     context_menu_rects: Vec<[f32; 4]>,
+    /// The prompt chips' directory / branch picker, its card and rows.
+    chip_menu: Option<crate::views::chip_menu::ChipMenu>,
+    chip_menu_card: [f32; 4],
+    chip_menu_rows: Vec<([f32; 4], usize)>,
+    /// "Edit prompt" (Settings › prompt chips) and its last layout.
+    prompt_editor: Option<crate::views::prompt_editor::PromptEditor>,
+    prompt_editor_layout: crate::views::prompt_editor::Layout,
     /// Imported shell history (shared with the completion thread).
     shell_history: Arc<Vec<String>>,
     workflows: Vec<shift_core::workflows::Workflow>,
@@ -501,6 +524,19 @@ pub struct App {
     /// often a change of them repainted: hover styling follows the mouse.
     hover_sig: u64,
     hover_repaints: u32,
+    /// Tooltips of this frame's controls, in click priority
+    /// (`views::tooltip`); a tip with no text blocks the ones under it.
+    tips: Vec<crate::views::tooltip::Tip>,
+    /// The control under the pointer and since when it rests there.
+    tip_hover: Option<([f32; 4], Instant)>,
+    /// The tooltip drawn in the last frame.
+    tip_shown: Option<crate::views::tooltip::Tip>,
+    /// When a shown tooltip last went away (the next one shows at once).
+    tip_hidden_at: Option<Instant>,
+    /// A press, key or wheel hid it until the pointer moves to another control.
+    tip_suppressed: bool,
+    /// The pointer is over the window.
+    pointer_in: bool,
     /// Directory the review model was last requested for.
     review_cwd: Option<String>,
     viewer: ViewerState,
@@ -607,7 +643,7 @@ fn welcome_entries(keymap: &shift_core::Keymap) -> Vec<crate::views::welcome::En
     let keys = |actions: &[&str]| {
         actions
             .iter()
-            .find_map(|a| keymap.bindings_for(a).first().map(|b| b.chips()))
+            .find_map(|a| keymap.preferred(a).map(|b| b.chips()))
             .unwrap_or_default()
     };
     vec![
@@ -615,7 +651,7 @@ fn welcome_entries(keymap: &shift_core::Keymap) -> Vec<crate::views::welcome::En
             icon: Icon::SplitRight,
             title: "Split pane",
             detail: "Run two things side by side",
-            keys: keys(&["split_vertical_alt", "split_vertical"]),
+            keys: keys(&["split_vertical"]),
         },
         Entry {
             icon: Icon::Search,
@@ -769,6 +805,15 @@ fn opens_as_program(path: &std::path::Path) -> bool {
         }
     }
     false
+}
+
+/// `App::option_meta` over explicit state: `(left, right)` held, and each
+/// key's Meta setting.
+fn option_meta((left, right): (bool, bool), left_meta: bool, right_meta: bool) -> bool {
+    if !left && !right {
+        return left_meta;
+    }
+    (left && left_meta) || (right && right_meta)
 }
 
 /// Show `path` in the file manager without running it.
@@ -942,6 +987,9 @@ impl App {
             bg_image_opacity: 1.0,
             text: None,
             git: None,
+            pr_worker: None,
+            docker_worker: None,
+            chips_applied: Vec::new(),
             tabs: Vec::new(),
             active: 0,
             next_pane: 1,
@@ -949,6 +997,8 @@ impl App {
             theme: Theme::default(),
             cell_w: DEFAULT_FONT_SIZE * 0.6,
             modifiers: ModifiersState::empty(),
+            alt_sides: (false, false),
+            theme_error: None,
             hits: Vec::new(),
             mouse: (0.0, 0.0),
             any_running: false,
@@ -960,6 +1010,7 @@ impl App {
             palette_results: Vec::new(),
             palette_row_hits: Vec::new(),
             settings_names: Vec::new(),
+            settings_stops: Vec::new(),
             completion: CompletionUi::default(),
             editor_anchor: (0.0, 0.0),
             editor_cols: 80,
@@ -974,10 +1025,15 @@ impl App {
             last_click: None,
             context_menu: ContextMenuState::default(),
             context_menu_rects: Vec::new(),
+            chip_menu: None,
+            chip_menu_card: [0.0; 4],
+            chip_menu_rows: Vec::new(),
+            prompt_editor: None,
+            prompt_editor_layout: Default::default(),
             shell_history: Arc::default(),
             workflows: Vec::new(),
             font_size: DEFAULT_FONT_SIZE,
-            line_h: DEFAULT_FONT_SIZE * 1.65,
+            line_h: DEFAULT_FONT_SIZE * 1.2,
             scroll_accum: 0.0,
             closed_tabs: Vec::new(),
             _watcher: None,
@@ -1035,6 +1091,12 @@ impl App {
             restore_size: None,
             hover_sig: 0,
             hover_repaints: 0,
+            tips: Vec::new(),
+            tip_hover: None,
+            tip_shown: None,
+            tip_hidden_at: None,
+            tip_suppressed: false,
+            pointer_in: true,
             review_cwd: None,
             viewer: ViewerState::default(),
             viewer_hits: Vec::new(),
@@ -1073,6 +1135,20 @@ impl App {
     fn apply_config(&mut self) {
         self.sync_control_server();
         self.theme = self.config.resolve_theme_for(self.os_light);
+        // a theme that does not load falls back to Dark Default: say so once
+        // per broken name instead of only logging it
+        let wanted = if self.config.sync_os_theme && self.os_light {
+            &self.config.theme_light
+        } else {
+            &self.config.theme
+        };
+        let error = shift_core::theme::try_load_by_name(wanted)
+            .err()
+            .map(|e| format!("Theme {wanted:?}: {e}; using Dark Default"));
+        if error.is_some() && error != self.theme_error {
+            self.toast(error.clone().unwrap_or_default());
+        }
+        self.theme_error = error;
         // Warp "window opacity": only the window ground goes translucent
         // (Theme::window_ground / Theme::ground); text, overlays, modals and
         // non-default cell colours stay opaque
@@ -1112,6 +1188,21 @@ impl App {
         for tab in &mut self.tabs {
             for pane in &mut tab.panes {
                 pane.editor.set_vim_enabled(vim);
+            }
+        }
+        self.refresh_chip_sources();
+        self.explorer
+            .set_show_hidden(self.config.explorer_hidden_files);
+        // save_transcripts off means gone, not just no longer updated —
+        // however it was turned off (toggle, ↺, an edit of config.toml)
+        if !self.config.save_transcripts {
+            shift_core::transcript::remove_except(&[]);
+            self.transcript_saved.clear();
+        }
+        let clipboard = shift_pty::ClipboardAccess::from_config(&self.config.clipboard_access);
+        for tab in &self.tabs {
+            for pane in &tab.panes {
+                pane.session.set_clipboard_access(clipboard);
             }
         }
         if let Some(w) = &self.window {
@@ -1195,8 +1286,9 @@ impl App {
                     path = dir.join(path);
                 }
                 self.bg_image_opacity = img.opacity.clamp(0.0, 1.0);
+                // the error already names background_image and the path
                 if let Err(e) = pipe.load(&gpu.device, &gpu.queue, &path) {
-                    log::warn!("background_image {}: {e}", path.display());
+                    log::warn!("{e}");
                 }
             }
             None => pipe.clear(),
@@ -1396,6 +1488,31 @@ impl App {
         }
     }
 
+    /// Select the block whose output holds absolute line `abs` of `pane_id`
+    /// (nothing in a full-screen program or on prompt rows).
+    fn select_block_at(&mut self, pane_id: PaneId, abs: i64) {
+        let Some(pane) = self
+            .tabs
+            .get_mut(self.active)
+            .and_then(|t| t.pane_mut(pane_id))
+        else {
+            return;
+        };
+        if pane.alt_screen || abs < 0 {
+            return;
+        }
+        let block = pane
+            .session
+            .blocks
+            .lock()
+            .unwrap()
+            .block_at(abs as u64)
+            .map(|b| b.id);
+        if let Some(block) = block {
+            pane.selected_block = Some(block);
+        }
+    }
+
     /// Extend the pending/live selection to the current mouse position.
     fn drag_selection(&mut self) {
         let Some(pending) = &mut self.pending_sel else {
@@ -1462,10 +1579,15 @@ impl App {
             .session
             .scrolled
             .load(std::sync::atomic::Ordering::Acquire);
-        let (screen_lines, history) = {
+        let (screen_lines, history, live_end) = {
             let term = pane.session.term.lock();
             let g = term.grid();
-            (g.screen_lines(), g.history_size() as u64)
+            // the list as drawn: bottom-anchored ones leave the blank tail out
+            let live_end = pane
+                .last_grid
+                .filter(|g| g.bottom_up)
+                .map(|_| crate::views::terminal::live_end(&term, scrolled));
+            (g.screen_lines(), g.history_size() as u64, live_end)
         };
         let bi = blocks.iter().position(|b| b.id == block)?;
         let hidden = filter_hidden(&pane.session, pane.filter.as_ref());
@@ -1477,6 +1599,8 @@ impl App {
             false,
             hide_prompt,
             clear_pad,
+            pane.last_grid.map_or(screen_lines, |g| g.rows),
+            live_end,
             &hidden,
         );
         let idx = display.iter().position(|d| *d == DisplayLine::Header(bi))?;
@@ -1522,10 +1646,15 @@ impl App {
             .session
             .scrolled
             .load(std::sync::atomic::Ordering::Acquire);
-        let (screen_lines, history) = {
+        let (screen_lines, history, live_end) = {
             let term = pane.session.term.lock();
             let g = term.grid();
-            (g.screen_lines(), g.history_size() as u64)
+            // the list as drawn: bottom-anchored ones leave the blank tail out
+            let live_end = pane
+                .last_grid
+                .filter(|g| g.bottom_up)
+                .map(|_| crate::views::terminal::live_end(&term, scrolled));
+            (g.screen_lines(), g.history_size() as u64, live_end)
         };
         let bi = blocks.iter().position(|b| b.id == block)?;
         let (start, end) = (blocks[bi].prompt_start, blocks[bi].end.unwrap_or(u64::MAX));
@@ -1538,6 +1667,8 @@ impl App {
             false,
             hide_prompt,
             clear_pad,
+            pane.last_grid.map_or(screen_lines, |g| g.rows),
+            live_end,
             &hidden,
         );
         let idx = display.iter().rposition(|d| match d {
@@ -2131,9 +2262,38 @@ impl App {
         true
     }
 
+    /// A pane for a new shell, with the editor settings applied (vim mode
+    /// was only set on panes that existed when the config was applied).
+    fn new_pane(&self, session: Session) -> PaneState {
+        let mut pane = PaneState::new(session);
+        pane.editor.set_vim_enabled(self.config.vim_mode);
+        pane
+    }
+
+    /// Option sends Meta for the Option key held now: the left key follows
+    /// `option_as_meta`, the right one `right_option_as_meta`. Without side
+    /// information (Linux, synthesized input) `option_as_meta` decides.
+    fn option_meta(&self) -> bool {
+        option_meta(
+            self.alt_sides,
+            self.config.option_as_meta,
+            self.config.right_option_meta(),
+        )
+    }
+
+    /// Open a link or path: an existing local file or folder where
+    /// `link_editor` says, anything else with the OS opener.
+    fn open_target(&mut self, target: &str) {
+        let choice = self.config.link_editor.trim().to_string();
+        match local_path_of(target).filter(|p| p.exists()) {
+            Some(path) => self.open_file_in(&path, &choice),
+            None => self.open_target_external(target),
+        }
+    }
+
     /// Open a link or path with the OS opener; a headless run only reports
     /// it (an opened browser or editor would take the user's focus).
-    fn open_target(&mut self, target: &str) {
+    fn open_target_external(&mut self, target: &str) {
         if self.headless {
             log::info!("headless: not opening {target}");
             self.toast(format!("Headless: not opening {target}"));
@@ -2145,6 +2305,54 @@ impl App {
             }
         } else if let Err(e) = open_external(target) {
             self.toast(format!("Could not open {target}: {e}"));
+        }
+    }
+
+    /// Open a file or folder with editor setting `choice`
+    /// (`shift_core::editors`): the viewer pane, the OS opener, or an
+    /// installed editor. A folder never goes to the viewer, and a missing
+    /// editor falls back to the viewer (files) or the OS opener (folders)
+    /// with a toast saying so.
+    fn open_file_in(&mut self, path: &std::path::Path, choice: &str) {
+        use shift_core::editors;
+        let viewer_ok = path.is_file();
+        match choice.trim() {
+            editors::SHIFT if viewer_ok => self.open_viewer(path),
+            "" | editors::SYSTEM | editors::SHIFT => {
+                self.open_target_external(&path.to_string_lossy())
+            }
+            id => match editors::by_id(id).filter(|e| e.installed()) {
+                Some(_) if self.headless => {
+                    log::info!("headless: not opening {} in {id}", path.display());
+                    self.toast(format!(
+                        "Headless: not opening {} in {}",
+                        path.display(),
+                        editors::label(id)
+                    ));
+                }
+                Some(editor) => {
+                    let (program, args) = editor.command(path);
+                    log::info!("open {} in {}", path.display(), editor.label);
+                    let spawned = std::process::Command::new(&program)
+                        .args(&args)
+                        .stdin(std::process::Stdio::null())
+                        .spawn();
+                    if let Err(e) = spawned {
+                        self.toast(format!("Could not open {}: {program}: {e}", editor.label));
+                    }
+                }
+                None => {
+                    self.toast(format!(
+                        "{} is not installed; opening here instead",
+                        editors::label(id)
+                    ));
+                    if viewer_ok {
+                        self.open_viewer(path);
+                    } else {
+                        self.open_target_external(&path.to_string_lossy());
+                    }
+                }
+            },
         }
     }
 
@@ -2368,6 +2576,19 @@ impl App {
             ))
         } else if self.note_toast_hits.iter().any(|t| inside(&t.rect)) {
             Some(CursorIcon::Pointer)
+        } else if let Some(ed) = &self.prompt_editor {
+            Some(if ed.drag.as_ref().is_some_and(|d| d.live) {
+                CursorIcon::Grabbing
+            } else {
+                hand(
+                    self.prompt_editor_layout
+                        .hits
+                        .iter()
+                        .any(|(r, _)| inside(r)),
+                )
+            })
+        } else if self.chip_menu.is_some() {
+            Some(hand(self.chip_menu_rows.iter().any(|(r, _)| inside(r))))
         } else if self.context_menu.open {
             Some(hand(
                 self.context_menu_rects
@@ -2407,6 +2628,8 @@ impl App {
                     | ClickTarget::TabSelect(_)
                     | ClickTarget::TabClose(_)
                     | ClickTarget::TabNew
+                    | ClickTarget::Chip(..)
+                    | ClickTarget::SettingsEditPrompt
                     | ClickTarget::PaneMenu(_)
                     | ClickTarget::PaneSplit(_)
                     | ClickTarget::Welcome(_)
@@ -3023,13 +3246,9 @@ impl App {
                 } else {
                     &self.config.theme_light
                 };
-                let options = shift_core::theme::available_themes()
-                    .into_iter()
-                    .map(|name| {
-                        let label = shift_core::theme::load_by_name(&name).name;
-                        (name, label)
-                    })
-                    .collect();
+                let names = shift_core::theme::available_themes();
+                let labels = shift_core::theme::picker_labels(&names);
+                let options = names.into_iter().zip(labels).collect();
                 (options, current.clone())
             }
             "font_family" => (
@@ -3042,6 +3261,25 @@ impl App {
                     .collect(),
                 self.config.font_family.clone(),
             ),
+            "link_editor" | "file_editor" => {
+                use shift_core::editors;
+                let current = if id == "link_editor" {
+                    &self.config.link_editor
+                } else {
+                    &self.config.file_editor
+                };
+                let mut options: Vec<(String, String)> = [editors::SYSTEM, editors::SHIFT]
+                    .into_iter()
+                    .chain(editors::installed().into_iter().map(|e| e.id))
+                    .map(|id| (id.to_string(), editors::label(id)))
+                    .collect();
+                // an editor set in config.toml but not installed stays listed
+                let current = current.trim().to_ascii_lowercase();
+                if !current.is_empty() && !options.iter().any(|(v, _)| *v == current) {
+                    options.push((current.clone(), editors::label(&current)));
+                }
+                (options, current)
+            }
             _ if id.starts_with("notifications.sound") => {
                 let mut names = available_sounds(&sound_dirs());
                 if id != "notifications.sound" {
@@ -3101,6 +3339,14 @@ impl App {
             }
             "font_family" => {
                 self.config.font_family = value;
+                None
+            }
+            "link_editor" => {
+                self.config.link_editor = value;
+                None
+            }
+            "file_editor" => {
+                self.config.file_editor = value;
                 None
             }
             "notifications.sound_finished" => {
@@ -3682,6 +3928,10 @@ impl App {
             self.launch_configs = shift_core::launch::load_all();
             self.ssh_profiles = shift_core::ssh::all_profiles(&self.config.ssh_profiles);
         }
+        if mode == crate::views::palette::PaletteMode::Workflows {
+            // workflow files added or edited while running
+            self.workflows = shift_core::workflows::load_all();
+        }
         if mode == crate::views::palette::PaletteMode::Sessions && !self.windows_loading {
             self.windows_loading = true;
             self.other_windows.clear();
@@ -4232,6 +4482,9 @@ impl App {
                     proxy.send_event(UserEvent::PtyTitle(pane, String::new()))
                 }
                 SessionEvent::Clipboard(text) => proxy.send_event(UserEvent::PtyClipboard(text)),
+                SessionEvent::ClipboardLoad(reply) => {
+                    proxy.send_event(UserEvent::PtyClipboardLoad(pane, reply))
+                }
                 SessionEvent::ColorRequest(index, reply) => {
                     proxy.send_event(UserEvent::PtyColorRequest(pane, index, reply))
                 }
@@ -4265,6 +4518,7 @@ impl App {
             self.config.shell.clone(),
             self.config.scrollback_lines(),
         );
+        let clipboard = shift_pty::ClipboardAccess::from_config(&self.config.clipboard_access);
         let opts = |service, replay| SpawnOptions {
             id,
             size: GridSize { cols, rows },
@@ -4276,6 +4530,7 @@ impl App {
             observer: observer.clone(),
             replay,
             service,
+            clipboard,
         };
         match Session::spawn(opts(service, replay.clone())) {
             Ok(s) => s,
@@ -4396,7 +4651,7 @@ impl App {
             .max(2.0) as usize;
         let rows = ((lh - TAB_BAR_H - TOP_PAD - EDITOR_H) / self.line_h).max(2.0) as usize;
         let session = self.spawn_session(cols, rows, cwd);
-        self.tabs.push(TabState::new(PaneState::new(session)));
+        self.tabs.push(TabState::new(self.new_pane(session)));
         self.active = self.tabs.len() - 1;
         self.save_session();
     }
@@ -4692,12 +4947,13 @@ impl App {
         }
         let dir = self.start_dir();
         let session = self.spawn_session(60, 20, dir); // resized on next layout
+        let new_id = session.id;
+        let pane = self.new_pane(session);
         let tab = &mut self.tabs[self.active];
         tab.zoomed = None;
         let target = tab.active_pane;
-        let new_id = session.id;
         if tab.root.split(target, new_id, axis) {
-            tab.panes.push(PaneState::new(session));
+            tab.panes.push(pane);
             tab.active_pane = new_id;
         }
         self.save_session();
@@ -4759,20 +5015,41 @@ impl App {
         self.save_session();
     }
 
+    /// Ask for the active tab's panes' git status (and Docker Compose
+    /// state, when that chip is on) after a `cd` or a finished command.
     fn request_git(&mut self) {
         let mut changed = false;
         let Some(tab) = self.tabs.get_mut(self.active) else {
             return;
         };
+        let docker = self
+            .config
+            .prompt_chips
+            .contains(&shift_core::PromptChip::Docker);
         for pane in &mut tab.panes {
             let cwd = pane.session.cwd.lock().unwrap().clone();
-            if let Some(cwd) = cwd
-                && pane.last_git_cwd.as_deref() != Some(cwd.as_str())
-            {
-                pane.last_git_cwd = Some(cwd.clone());
+            let blocks = pane
+                .session
+                .blocks
+                .lock()
+                .unwrap()
+                .last()
+                .map_or(0, |b| b.id);
+            let Some(cwd) = cwd else {
+                continue;
+            };
+            let moved = pane.last_git_cwd.as_deref() != Some(cwd.as_str());
+            if moved || pane.last_git_block != blocks {
+                pane.last_git_block = blocks;
                 if let Some(worker) = &self.git {
-                    worker.request(pane.session.id, cwd.into());
+                    worker.request(pane.session.id, cwd.clone().into());
                 }
+                if docker && let Some(worker) = &self.docker_worker {
+                    worker.request(pane.session.id, cwd.clone().into());
+                }
+            }
+            if moved {
+                pane.last_git_cwd = Some(cwd);
                 changed = true;
             }
         }
@@ -5095,6 +5372,10 @@ impl App {
     /// Run a review-panel write, then reload. Revert asks first.
     fn review_action(&mut self, hit: ReviewHit) {
         use shift_core::review::Op;
+        if hit == ReviewHit::Maximize {
+            self.review.maximized = !self.review.maximized;
+            return;
+        }
         let Some(model) = self.review.model().cloned() else {
             return;
         };
@@ -5124,9 +5405,35 @@ impl App {
                 return;
             }
             ReviewHit::Open(path) => {
-                self.open_viewer(&root.join(&path));
+                let choice = self.config.file_editor.clone();
+                // the viewer opens among the panes the maximized panel covers
+                if choice.trim() == shift_core::editors::SHIFT {
+                    self.review.maximized = false;
+                }
+                self.open_file_in(&root.join(&path), &choice);
                 return;
             }
+            ReviewHit::Jump(staged, path) => {
+                self.review.jump(staged, &path);
+                return;
+            }
+            ReviewHit::Copy(staged, path, id) => {
+                let files = if staged {
+                    &model.staged
+                } else {
+                    &model.unstaged
+                };
+                if let Some(patch) = files
+                    .iter()
+                    .find(|f| f.path == path)
+                    .and_then(|f| crate::views::review_panel::hunk_patch(f, &id))
+                    && self.copy_to_clipboard(patch)
+                {
+                    self.toast("Hunk copied".into());
+                }
+                return;
+            }
+            ReviewHit::Maximize => return,
             ReviewHit::Stage(path, hunk) => vec![(Op::Stage, path, hunk)],
             ReviewHit::Unstage(path, hunk) => vec![(Op::Unstage, path, hunk)],
             ReviewHit::StageAll => model
@@ -5194,10 +5501,26 @@ impl App {
     fn panel_rects(&self) -> ([f32; 4], [f32; 4]) {
         let (w, h) = self.logical_size();
         let (ex, rv) = self.panel_widths(w);
-        (
-            [self.rail_w(), TAB_BAR_H, ex, h - TAB_BAR_H],
-            [w - rv, TAB_BAR_H, rv, h - TAB_BAR_H],
-        )
+        let rail = self.rail_w();
+        let review = if self.review_maximized() {
+            [rail, TAB_BAR_H, w - rail, h - TAB_BAR_H]
+        } else {
+            [w - rv, TAB_BAR_H, rv, h - TAB_BAR_H]
+        };
+        ([rail, TAB_BAR_H, ex, h - TAB_BAR_H], review)
+    }
+
+    /// The review panel covers the panes (its ⤢ button). The pane layout
+    /// behind it does not change, so no shell is resized.
+    fn review_maximized(&self) -> bool {
+        self.review.open && self.review.maximized && !self.settings.open
+    }
+
+    /// The pointer is over the maximized review panel.
+    fn over_maximized_review(&self) -> bool {
+        let (mx, my) = self.mouse;
+        let r = self.panel_rects().1;
+        self.review_maximized() && mx >= r[0] && mx < r[0] + r[2] && my >= r[1] && my < r[1] + r[3]
     }
 
     /// Pointer over the viewer and side panels: a hand on buttons, review
@@ -5286,7 +5609,8 @@ impl App {
                         } else if row.is_dir {
                             self.explorer.toggle(&row.path);
                         } else {
-                            self.open_viewer(&row.path.clone());
+                            let choice = self.config.file_editor.clone();
+                            self.open_file_in(&row.path, &choice);
                         }
                     }
                 }
@@ -5361,6 +5685,7 @@ impl App {
         let line_h = self.line_h;
         let ligatures = self.config.ligatures;
         let cursor_style = self.config.cursor_style;
+        let mouse = self.mouse;
         let prompt_mode = self.config.prompt;
         let input_top = self.config.input_position == shift_core::InputPosition::Top;
         let autosuggest = self.config.autosuggestions && !self.history.open;
@@ -5375,7 +5700,8 @@ impl App {
         let panel_buttons = tabbar::PanelButtons {
             explorer_open: self.explorer.open,
             // lit only while the panel is actually on screen
-            review_open: self.review.open && self.panel_widths(self.logical_size().0).1 > 0.0,
+            review_open: self.review_maximized()
+                || self.review.open && self.panel_widths(self.logical_size().0).1 > 0.0,
             diff: self.review.model().map(|m| {
                 m.staged
                     .iter()
@@ -5475,6 +5801,7 @@ impl App {
                     })
                     .unwrap_or_default(),
                 settings: false,
+                running: t.panes.iter().any(PaneState::running),
             })
             .chain(self.settings.tab.then(|| tabbar::TabInfo {
                 title: "Settings".into(),
@@ -5487,6 +5814,7 @@ impl App {
                 editing_selected: false,
                 subtitle: self.settings.page.label().into(),
                 settings: true,
+                running: false,
             }))
             .collect();
         // the strip's lit tab: the Settings tab (last) while it shows
@@ -5538,6 +5866,7 @@ impl App {
             palette_results,
             palette_row_hits,
             settings_names,
+            settings_stops,
             settings: settings_state,
             config: config_ref,
             keymap: keymap_ref,
@@ -5567,6 +5896,17 @@ impl App {
         let mut editor_pane = [0.0f32; 4];
         let mut ime_spot: Option<(f32, f32)> = None;
         let completion_ghost = completion.ghost.clone();
+        // the panel docked to the active command line (drawn on layer 2
+        // below): the output moves out from under it (Warp)
+        let docked_h = if palette.open {
+            None
+        } else if self.history.open {
+            Some(crate::views::history::panel_height(&self.history))
+        } else if completion.open && !completion.items.is_empty() {
+            Some(completion_view::panel_height(completion))
+        } else {
+            None
+        };
 
         // ── layer 0: chrome ──
         let mut over = shift_renderer::Layer::default();
@@ -5733,8 +6073,16 @@ impl App {
                 let usable_h = (ph - editor_h).max(line_h);
                 text_area = (usable_w, usable_h);
                 // input at the top: the grid starts below the editor zone
+                let bottom_up =
+                    !input_top && config_ref.blocks_start == shift_core::BlocksStart::Bottom;
+                let rows = (usable_h / line_h).floor().max(2.0) as usize;
                 let y = if editor_vis && input_top {
                     y + editor_h - (if split { PANE_PAD } else { TOP_PAD - 4.0 })
+                } else if !editor_vis && bottom_up {
+                    // a program owns the screen (Claude Code, vim): its last
+                    // row sits on the bottom padding and the part of a row
+                    // left over goes above the grid, not under it (Warp)
+                    y + (usable_h - rows as f32 * line_h).max(0.0)
                 } else {
                     y
                 };
@@ -5746,13 +6094,16 @@ impl App {
                     line_h,
                     font_size,
                     cols: (usable_w / cell_w).floor().max(2.0) as usize,
-                    rows: (usable_h / line_h).floor().max(2.0) as usize,
+                    rows,
                     ligatures,
                     cursor_style,
                     // the boot placeholder sits in the input zone; no stray
                     // grid cursor at the top while it shows
                     editor_owns_cursor: editor_vis || booting,
                     text_blink_on,
+                    // with the input at the top, blocks start under it
+                    bottom_up,
+                    mouse: Some(mouse),
                 }
             };
 
@@ -5765,6 +6116,25 @@ impl App {
             );
             pane.text_area = text_area;
             pane.layout_window = (w, h);
+            let view = match docked_h.filter(|_| is_active_pane && editor_vis) {
+                Some(panel_h) => {
+                    let eh = editor::editor_height(&pane.editor.buffer, prompt_mode, ed_cols);
+                    let (top, bottom) = if input_top {
+                        let zone_top = pr.rect[1]
+                            + if split {
+                                PANE_HEADER_H + PANE_PAD - 4.0
+                            } else {
+                                4.0
+                            };
+                        (zone_top + eh, zone_top + eh + panel_h)
+                    } else {
+                        let zone_top = pr.rect[1] + pr.rect[3] - eh;
+                        (zone_top - panel_h, zone_top)
+                    };
+                    terminal::beside_panel(grid, top, bottom)
+                }
+                None => grid,
+            };
 
             // pane chrome (design 02)
             if split {
@@ -5795,6 +6165,7 @@ impl App {
                     [pr.rect[0], pr.rect[1], pr.rect[2], PANE_HEADER_H],
                     &title,
                     is_active_pane,
+                    pane.running(),
                     chrome_mouse.filter(|_| self.pane_drag.is_none()),
                     pr.id,
                     &mut hits,
@@ -5831,7 +6202,7 @@ impl App {
                 engine,
                 pane_theme.as_ref().unwrap_or(&theme),
                 &pane.session,
-                &grid,
+                &view,
                 &mut pane.view_offset,
                 // shell-prompt mode keeps the shell's PS1 rows on screen
                 editor_vis && prompt_mode != shift_core::PromptMode::Shell,
@@ -5848,12 +6219,12 @@ impl App {
             }
             pane.last_display_len = out.display_len;
             pane.rows = out.rows;
-            pane.last_grid = Some(grid);
+            pane.last_grid = Some(view);
             pane.alt_screen = out.alt_screen;
             layer.sprites.extend(terminal::image_sprites(
                 &pane.session,
                 &pane.rows,
-                &grid,
+                &view,
                 out.alt_screen,
             ));
             pane.has_selection = {
@@ -5879,6 +6250,12 @@ impl App {
                     target: ClickTarget::BlockCopy(pr.id, hb.block),
                 });
             }
+            for hb in out.duration_hits {
+                hits.push(Hit {
+                    rect: hb.rect,
+                    target: ClickTarget::BlockDuration(pr.id, hb.block),
+                });
+            }
             for (rect, id) in &out.bookmark_hits {
                 hits.push(Hit {
                     rect: *rect,
@@ -5897,7 +6274,10 @@ impl App {
                     use shift_renderer::glyphon::{
                         Attrs, Buffer, Family, Metrics, Shaping, Weight,
                     };
-                    let mut b = Buffer::new(&mut engine.font_system, Metrics::new(13.0, line_h));
+                    let mut b = Buffer::new(
+                        &mut engine.font_system,
+                        Metrics::new(editor::FONT_SIZE, editor::LINE_H),
+                    );
                     b.set_text(
                         &mut engine.font_system,
                         &label,
@@ -5925,7 +6305,8 @@ impl App {
                 // the editor's divider, already where it will be (Warp)
                 let zone_w = pr.rect[2] - 2.0 * if split { PANE_PAD } else { side_pad };
                 layer.hline(lx - 8.0, top, zone_w + 16.0, 1.0, theme.border);
-                let ly = top + editor::input_offset(prompt_mode);
+                // on the chip row, where the prompt context appears first (Warp)
+                let ly = top + editor::first_row_offset(prompt_mode);
                 layer.text(buf, lx + editor::PAD_X, ly, theme.syntax.string);
             }
 
@@ -5994,6 +6375,25 @@ impl App {
                     editor_zone = area;
                     editor_pane = body;
                     ime_spot = Some(anchor.1);
+                }
+                // the chips that do something when clicked
+                for (chip, rect) in &anchor.2 {
+                    use shift_core::PromptChip as C;
+                    if matches!(
+                        chip,
+                        C::Cwd
+                            | C::GitBranch
+                            | C::GitDiff
+                            | C::GithubPr
+                            | C::Python
+                            | C::Php
+                            | C::Docker
+                    ) {
+                        hits.push(Hit {
+                            rect: *rect,
+                            target: ClickTarget::Chip(pr.id, *chip),
+                        });
+                    }
                 }
                 hits.push(Hit {
                     rect: area,
@@ -6117,9 +6517,10 @@ impl App {
                     scene.layer(2),
                     engine,
                     &theme,
-                    &grid,
+                    &view,
                     &pane.session,
                     sticky,
+                    pane.selected_block == Some(sticky),
                 )
             {
                 pane.sticky_hit = Some((rect, sticky));
@@ -6153,7 +6554,16 @@ impl App {
         } else {
             Vec::new()
         };
-        self.review_hits = if review_w > 0.0 && !settings_open {
+        self.review_hits = if self.review.open && self.review.maximized && !settings_open {
+            // over the panes and their overlays (layer 2), under the palette
+            crate::views::review_panel::render(
+                scene.layer(3),
+                engine,
+                &theme,
+                &mut self.review,
+                [rail_w, TAB_BAR_H, w - rail_w, h - TAB_BAR_H],
+            )
+        } else if review_w > 0.0 && !settings_open {
             crate::views::review_panel::render(
                 scene.layer(1),
                 engine,
@@ -6204,6 +6614,9 @@ impl App {
 
         // ── layer 2: history pane, docked like the completion panel ──
         if editor_active && self.history.open && !palette.open {
+            // first in the hit list: the panel covers rows (the welcome
+            // list) whose hits would otherwise take its clicks
+            let mut panel_hits = Vec::new();
             crate::views::history::render(
                 scene.layer(2),
                 engine,
@@ -6212,8 +6625,9 @@ impl App {
                 editor_zone,
                 editor_pane,
                 chrome_mouse,
-                &mut hits,
+                &mut panel_hits,
             );
+            hits.splice(0..0, panel_hits);
         }
         // ── layer 2: completion popup (above editor) ──
         if editor_active && completion.open && !palette.open && !self.history.open {
@@ -6227,6 +6641,7 @@ impl App {
                     (shift_core::completion::token_end(b, c) - start, b.len())
                 })
                 .unwrap_or((0, 0));
+            let mut panel_hits = Vec::new();
             completion_view::render(
                 scene.layer(2),
                 engine,
@@ -6237,8 +6652,9 @@ impl App {
                 prefix_len,
                 line_len,
                 chrome_mouse,
-                &mut hits,
+                &mut panel_hits,
             );
+            hits.splice(0..0, panel_hits);
         }
 
         // ── layer 2: IME composition (preedit) at the cursor ──
@@ -6323,6 +6739,7 @@ impl App {
             hits.retain(|h| h.rect[1] + h.rect[3] <= TAB_BAR_H || h.rect[0] + h.rect[2] <= rail_w);
             focus_hits.clear();
             let mut list = shift_renderer::Layer::default();
+            settings_state.view_h = area[3] - 34.0;
             settings_state.content_h = settings::render(
                 scene.layer(3),
                 &mut list,
@@ -6336,6 +6753,7 @@ impl App {
                 blink,
                 &mut hits,
                 settings_names,
+                settings_stops,
             );
             let l4 = scene.layer(4);
             l4.quads.extend(list.quads);
@@ -6387,6 +6805,19 @@ impl App {
         } else {
             self.context_menu_rects.clear();
         }
+        (self.chip_menu_card, self.chip_menu_rows) = match &self.chip_menu {
+            Some(menu) => crate::views::chip_menu::render(
+                scene.layer(5),
+                engine,
+                &theme,
+                menu,
+                [w, h],
+                TAB_BAR_H + 4.0,
+                self.mouse,
+                blink,
+            ),
+            None => ([0.0; 4], Vec::new()),
+        };
         // notifications popover, dropped from the inbox button; toasts stack
         // in the same corner while it is closed
         let anchor = hits
@@ -6394,6 +6825,11 @@ impl App {
             .find(|h| matches!(h.target, ClickTarget::ToggleNotifications))
             .map(|h| h.rect)
             .unwrap_or([w - 80.0, 7.0, 28.0, 28.0]);
+        // badges rasterize brand marks at device resolution
+        let scale = self
+            .window
+            .as_ref()
+            .map_or(1.0, |w| w.scale_factor() as f32);
         self.note_toast_hits = crate::views::notifications::render_toasts(
             scene.layer(5),
             engine,
@@ -6401,6 +6837,7 @@ impl App {
             &toast_entries,
             anchor[1] + anchor[3] + 10.0,
             w,
+            scale,
         );
         if self.notifications.open {
             self.notifications_hits = crate::views::notifications::render(
@@ -6413,6 +6850,7 @@ impl App {
                 anchor[1] + anchor[3] + 6.0,
                 w,
                 h,
+                scale,
             );
         } else {
             self.notifications_hits = Default::default();
@@ -6467,6 +6905,7 @@ impl App {
                         empty_line: "<running shell process>",
                         confirm_label: label,
                         destructive: true,
+                        processes: true,
                     }
                 }
                 ConfirmAction::Paste { .. } => {
@@ -6482,6 +6921,7 @@ impl App {
                         empty_line: "<blank line>",
                         confirm_label: "Paste",
                         destructive: false,
+                        processes: false,
                     }
                 }
                 ConfirmAction::InstallRemote(p) => Dialog {
@@ -6492,6 +6932,7 @@ impl App {
                     empty_line: "",
                     confirm_label: "Install",
                     destructive: false,
+                    processes: false,
                 },
                 ConfirmAction::Revert { hunk, .. } => Dialog {
                     title: if hunk.is_some() {
@@ -6505,11 +6946,23 @@ impl App {
                     empty_line: "",
                     confirm_label: "Revert",
                     destructive: true,
+                    processes: false,
                 },
             };
             self.confirm_rects =
-                crate::views::confirm::render(scene.layer(6), engine, &theme, &dialog, w, h);
+                crate::views::confirm::render(scene.layer(6), engine, &theme, &dialog, w, h, scale);
         }
+        self.prompt_editor_layout = match &self.prompt_editor {
+            Some(ed) => crate::views::prompt_editor::render(
+                scene.layer(6),
+                engine,
+                &theme,
+                ed,
+                [w, h],
+                self.mouse,
+            ),
+            None => Default::default(),
+        };
 
         // pane drag: the drop zone under the pointer (the half of a pane, a
         // tab, or the empty strip for a new tab)
@@ -6519,7 +6972,7 @@ impl App {
                 scene.layer(5).rect(
                     [src.rect[0], src.rect[1]],
                     [src.rect[2], src.rect[3]],
-                    theme.ground(theme.bg).with_alpha(0.6),
+                    theme.bg.with_alpha(0.6),
                     0.0,
                 );
             }
@@ -6584,11 +7037,287 @@ impl App {
 
         hits.extend(focus_hits);
         self.hits = hits;
-        self.any_running = any_running;
+        // a background tab's spinner turns too
+        self.any_running = any_running
+            || self
+                .tabs
+                .iter()
+                .any(|t| t.panes.iter().any(PaneState::running));
         self.editor_active = editor_active;
         self.boot_until = boot_until;
         self.editor_anchor = editor_anchor;
         self.editor_cols = active_ed_cols;
+    }
+
+    /// The shortcut of `action`, as key caps (`⇧⌘G`).
+    fn tip_keys(&self, action: &str) -> Option<String> {
+        self.keymap.preferred(action).map(|b| b.chips().concat())
+    }
+
+    /// What a click target does, or its full label; `None` for targets that
+    /// explain themselves (rows, the editor, the grid).
+    fn tip_for(&self, target: &ClickTarget) -> Option<(String, Option<String>)> {
+        use crate::views::history::Scope;
+        let pane_of = |id: PaneId| self.tabs.iter().find_map(|t| t.pane(id));
+        let s = |t: &str| Some(t.to_string());
+        Some(match target {
+            ClickTarget::TabSelect(i) => {
+                let tab = self.tabs.get(*i)?;
+                let title = tab.display_title();
+                let cwd = tab
+                    .active()
+                    .and_then(|p| p.session.cwd.lock().unwrap().clone())
+                    .map(|c| editor::shorten_home(&c));
+                let keys = (*i < 8)
+                    .then(|| self.tip_keys(&format!("tab_select_{}", i + 1)))
+                    .flatten();
+                (title, cwd.or(keys))
+            }
+            // ⌘W closes the active pane, and the tab with its last one: the
+            // shortcut is true only for the active, unsplit tab
+            ClickTarget::TabClose(i) => (
+                "Close tab".into(),
+                self.tabs
+                    .get(*i)
+                    .filter(|t| *i == self.active && !t.root.is_split())
+                    .and_then(|_| self.tip_keys("close_pane")),
+            ),
+            ClickTarget::TabNew => ("New tab".into(), self.tip_keys("new_tab")),
+            ClickTarget::SettingsEditPrompt => ("Edit prompt".into(), None),
+            ClickTarget::ToggleExplorer => {
+                ("File explorer".into(), self.tip_keys("toggle_explorer"))
+            }
+            ClickTarget::ToggleReview => ("Review changes".into(), self.tip_keys("toggle_review")),
+            ClickTarget::ToggleNotifications => {
+                ("Notifications".into(), self.tip_keys("attention_center"))
+            }
+            ClickTarget::BlockChevron(pane, block) => {
+                let collapsed = pane_of(*pane)?
+                    .session
+                    .blocks
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|b| b.id == *block)?
+                    .collapsed;
+                let text = if collapsed {
+                    "Expand output"
+                } else {
+                    "Collapse output"
+                };
+                (text.into(), None)
+            }
+            ClickTarget::BlockCopy(..) => {
+                ("Copy output".into(), self.tip_keys("copy_block_output"))
+            }
+            ClickTarget::BlockDuration(pane, block) => {
+                let blocks = pane_of(*pane)?.session.blocks.lock().unwrap();
+                let b = blocks.iter().find(|b| b.id == *block)?;
+                (crate::views::terminal::duration_detail(b)?, None)
+            }
+            ClickTarget::PaneSplit(_) => ("Split right".into(), self.tip_keys("split_vertical")),
+            ClickTarget::PaneMenu(_) => ("More actions".into(), None),
+            ClickTarget::PaneClose(_) => ("Close pane".into(), self.tip_keys("close_pane")),
+            ClickTarget::JumpToBlock(..) => ("Scroll to this command".into(), None),
+            ClickTarget::HistoryScope(scope) => (
+                match scope {
+                    Scope::Pane => "Commands run in this pane",
+                    Scope::All => "Commands from every shell",
+                    Scope::Failed => "Commands that failed",
+                }
+                .into(),
+                s("⌃R"),
+            ),
+            ClickTarget::HistoryClose => ("Close".into(), s("esc")),
+            ClickTarget::SettingsReset(_) | ClickTarget::SettingsKeybindReset(_) => {
+                ("Reset to default".into(), None)
+            }
+            ClickTarget::SettingsOpenConfig => (
+                "Open in the default editor".into(),
+                shift_core::config::config_path()
+                    .map(|p| editor::shorten_home(&p.to_string_lossy())),
+            ),
+            ClickTarget::TrafficLight(i) => (
+                match i {
+                    0 => "Close window",
+                    1 => "Minimize",
+                    _ => "Zoom",
+                }
+                .into(),
+                None,
+            ),
+            _ => return None,
+        })
+    }
+
+    /// This frame's tooltips, in click priority: the side panels and the
+    /// viewer first (they own their regions), then `self.hits` in order. A
+    /// hit without a tooltip still blocks the ones under it.
+    fn collect_tips(&self) -> Vec<crate::views::tooltip::Tip> {
+        use crate::views::explorer::ExplorerHit;
+        use crate::views::review_panel::ReviewHit;
+        use crate::views::tooltip::Tip;
+        use crate::views::viewer::ViewerHit;
+        let mut tips = Vec::new();
+        // the prompt editor is modal: only its chips explain themselves
+        if let Some(ed) = &self.prompt_editor {
+            use crate::views::prompt_editor::Target;
+            for (rect, target) in &self.prompt_editor_layout.hits {
+                let chip = match target {
+                    Target::Palette(chip) => Some(*chip),
+                    Target::Chip(i) => ed.draft.get(*i).copied(),
+                    _ => None,
+                };
+                tips.push(match chip {
+                    Some(c) => Tip::card(*rect, c.label(), c.about()),
+                    None => Tip::new(*rect, "", None),
+                });
+            }
+            tips.push(Tip::new(self.prompt_editor_layout.card, "", None));
+            return tips;
+        }
+        for (rect, hit) in &self.viewer_hits {
+            let (text, keys) = match hit {
+                ViewerHit::Close => ("Close file", self.tip_keys("close_pane")),
+                ViewerHit::Menu => ("More actions", None),
+                _ => ("", None),
+            };
+            tips.push(Tip::new(*rect, text, keys));
+        }
+        for (rect, hit) in &self.explorer_hits {
+            tips.push(match hit {
+                ExplorerHit::Refresh => Tip::new(*rect, "Refresh", None),
+                ExplorerHit::Collapse => Tip::new(*rect, "Collapse all", None),
+                ExplorerHit::Row(i) => match self.explorer.rows.get(*i) {
+                    // the full path of a name the panel may cut short
+                    Some(row) => Tip::new(
+                        *rect,
+                        editor::shorten_home(&row.path.to_string_lossy()),
+                        None,
+                    ),
+                    None => Tip::new(*rect, "", None),
+                },
+            });
+        }
+        for (rect, hit) in &self.review_hits {
+            let text = match hit {
+                ReviewHit::Refresh => "Refresh",
+                ReviewHit::Stage(_, None) => "Stage file",
+                ReviewHit::Stage(_, Some(_)) => "Stage hunk",
+                ReviewHit::Unstage(_, None) => "Unstage file",
+                ReviewHit::Unstage(_, Some(_)) => "Unstage hunk",
+                ReviewHit::Revert(_, None) => "Discard changes to the file",
+                ReviewHit::Revert(_, Some(_)) => "Discard the hunk",
+                ReviewHit::StageAll => "Stage all",
+                ReviewHit::UnstageAll => "Unstage all",
+                ReviewHit::Open(_) => "Open file",
+                ReviewHit::Copy(..) => "Copy hunk",
+                ReviewHit::Maximize if self.review.maximized => "Restore",
+                ReviewHit::Maximize => "Maximize",
+                ReviewHit::Jump(_, path) => path,
+                _ => "",
+            };
+            tips.push(Tip::new(*rect, text, None));
+        }
+        if self.review_maximized() {
+            // the panes' controls under the panel show no tooltip
+            tips.push(Tip::new(self.panel_rects().1, "", None));
+        }
+        for hit in &self.hits {
+            // a prompt chip's card: what it shows and what a click does
+            if let ClickTarget::Chip(_, chip) = hit.target {
+                tips.push(Tip::card(hit.rect, chip.label(), chip.about()));
+                continue;
+            }
+            let (text, detail) = self.tip_for(&hit.target).unwrap_or_default();
+            tips.push(Tip::new(hit.rect, text, detail));
+        }
+        tips
+    }
+
+    /// No tooltip while a modal, a menu or a drag owns the pointer.
+    fn tooltip_blocked(&self) -> bool {
+        !self.pointer_in
+            || self.palette.open
+            || self.confirm.is_some()
+            || self.context_menu.open
+            || self.chip_menu.is_some()
+            // the prompt editor's chips have cards, until one is dragged
+            || self
+                .prompt_editor
+                .as_ref()
+                .is_some_and(|e| e.drag.as_ref().is_some_and(|d| d.live))
+            || self.whats_new.open
+            || self.rename.is_some()
+            || self.drag.is_some()
+            || self.pending_sel.is_some()
+            || self.editor_drag.is_some()
+            || self.tab_drag.is_some()
+            || self.pane_drag.is_some()
+            || self.slider_drag.is_some()
+    }
+
+    /// Track the control under the pointer and draw its tooltip once it has
+    /// rested there for `tooltip::DELAY` (at once right after another one).
+    fn tooltip_pass(&mut self, w: f32, h: f32) {
+        use crate::views::tooltip::{DELAY, WARM};
+        let tips = self.collect_tips();
+        let (mx, my) = self.mouse;
+        let hovered = if self.tooltip_blocked() {
+            None
+        } else {
+            tips.iter().find(|t| t.contains(mx, my)).cloned()
+        };
+        let now = Instant::now();
+        let rect = hovered.as_ref().map(|t| t.rect);
+        if self.tip_hover.map(|(r, _)| r) != rect {
+            if self.tip_shown.is_some() {
+                self.tip_hidden_at = Some(now);
+            }
+            let warm = self.tip_hidden_at.is_some_and(|t| now < t + WARM);
+            self.tip_hover = rect.map(|r| {
+                (
+                    r,
+                    if warm {
+                        now.checked_sub(DELAY).unwrap_or(now)
+                    } else {
+                        now
+                    },
+                )
+            });
+            self.tip_suppressed = false;
+        }
+        let shown = match (hovered, self.tip_hover) {
+            (Some(tip), Some((_, since)))
+                if !tip.text.is_empty() && !self.tip_suppressed && now >= since + DELAY =>
+            {
+                Some(tip)
+            }
+            _ => None,
+        };
+        if self.tip_shown.is_some() && shown.is_none() && rect.is_some() {
+            self.tip_hidden_at = Some(now);
+        }
+        if let (Some(tip), Some(engine)) = (&shown, self.text.as_mut()) {
+            crate::views::tooltip::render(self.scene.layer(7), engine, &self.theme, tip, w, h);
+        }
+        self.tip_shown = shown;
+        self.tips = tips;
+    }
+
+    /// When the tooltip of the control under the pointer is due (not yet drawn).
+    fn tooltip_due(&self) -> Option<Instant> {
+        let (_, since) = self.tip_hover?;
+        (self.tip_shown.is_none() && !self.tip_suppressed)
+            .then_some(since + crate::views::tooltip::DELAY)
+    }
+
+    /// A press, key or wheel: the tooltip goes until the pointer moves on.
+    fn hide_tooltip(&mut self, window: &Window) {
+        self.tip_suppressed = true;
+        if self.tip_shown.is_some() {
+            window.request_redraw();
+        }
     }
 
     /// A frame for new program output: at once, or [`OUTPUT_FRAME`] after
@@ -6620,6 +7349,7 @@ impl App {
         let (lw, lh) = (pw as f32 / scale, ph as f32 / scale);
 
         self.build_scene(lw, lh);
+        self.tooltip_pass(lw, lh);
         if let Some(spot) = self.ime_spot
             && self.ime_area_sent != Some(spot)
         {
@@ -7108,14 +7838,18 @@ impl App {
                 }
             }
             AppAction::ToggleReview => {
-                let too_narrow =
-                    |app: &Self| app.review.open && app.panel_widths(app.logical_size().0).1 == 0.0;
+                let too_narrow = |app: &Self| {
+                    app.review.open
+                        && !app.review.maximized
+                        && app.panel_widths(app.logical_size().0).1 == 0.0
+                };
                 // open but auto-hidden: closing it would change nothing
                 // visible, so say why it is not showing instead
                 if too_narrow(self) {
                     self.toast("Window too narrow for the review panel: widen it".into());
                 } else {
                     self.review.open = !self.review.open;
+                    self.review.maximized = false;
                     if self.review.open {
                         self.review.notice = None;
                         self.request_review();
@@ -7305,6 +8039,14 @@ impl App {
                 self.settings.close_tab();
                 return true;
             }
+            // the terminal's scroll keys (plain Home / End / PageUp /
+            // PageDown) move between and scroll the pages here, below
+            Some(
+                AppAction::ScrollPageUp
+                | AppAction::ScrollPageDown
+                | AppAction::ScrollTop
+                | AppAction::ScrollBottom,
+            ) => {}
             // tabs, palette and the rest act as from any tab (leaving this one)
             Some(a) => {
                 self.settings.open = false;
@@ -7365,10 +8107,7 @@ impl App {
                 } else {
                     -10.0
                 };
-                let viewport_h = window.inner_size().height as f32 / window.scale_factor() as f32
-                    - crate::views::tabbar::TAB_BAR_H
-                    - 80.0;
-                self.settings.scroll_by(direction, viewport_h);
+                self.settings.scroll_by(direction);
                 true
             }
             _ => false,
@@ -7391,20 +8130,54 @@ impl App {
             return false;
         }
         let order = settings::focus_order(&self.hits);
-        // a control scrolled away or re-laid out loses the focus
+        // every control of the page, also scrolled away (page coordinates)
+        let mut stops = settings::focus_order(
+            &self
+                .settings_stops
+                .iter()
+                .map(|(target, rect)| Hit {
+                    rect: *rect,
+                    target: target.clone(),
+                })
+                .collect::<Vec<_>>(),
+        );
+        // fixed controls outside the scrolled body (Open config.toml) last
+        let fixed: Vec<_> = order
+            .iter()
+            .filter(|(t, _)| !stops.iter().any(|(s, _)| s == t))
+            .cloned()
+            .collect();
+        let scrolled = stops.len();
+        stops.extend(fixed);
+        // a control that left the page (re-laid out) loses the focus; one
+        // merely scrolled away keeps it
+        if let Some(f) = &self.settings.focus
+            && !stops.iter().any(|(t, _)| t == f)
+        {
+            self.settings.focus = None;
+        }
+        // on screen: what Space / Enter press
         let focused = self
             .settings
             .focus
             .clone()
             .and_then(|f| order.iter().find(|(t, _)| *t == f).cloned());
-        self.settings.focus = focused.as_ref().map(|(t, _)| t.clone());
         match (&event.logical_key, focused) {
-            (Key::Named(NamedKey::Tab), current) => {
+            (Key::Named(NamedKey::Tab), _) => {
                 let delta = if mods.shift_key() { -1 } else { 1 };
-                self.settings.focus =
-                    settings::next_focus(&order, current.as_ref().map(|(t, _)| t), delta);
+                let next = settings::next_focus(&stops, self.settings.focus.as_ref(), delta);
+                if let Some(rect) = next
+                    .as_ref()
+                    .and_then(|n| stops[..scrolled].iter().find(|(t, _)| t == n))
+                    .map(|(_, r)| *r)
+                {
+                    self.scroll_settings_into_view(rect);
+                }
+                self.settings.focus = next;
             }
-            (Key::Named(NamedKey::Escape), Some(_)) => self.settings.focus = None,
+            (Key::Named(NamedKey::Escape), _) if self.settings.focus.is_some() => {
+                self.settings.focus = None
+            }
             (
                 Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowRight),
                 Some((ClickTarget::SettingsSlider(id), _)),
@@ -7432,11 +8205,42 @@ impl App {
                 self.on_left(ElementState::Pressed, event_loop, window);
                 self.on_left(ElementState::Released, event_loop, window);
                 self.mouse = saved;
+                // a pressed ↺ disappears: the focus moves on to its control
+                if matches!(target, ClickTarget::SettingsReset(_)) {
+                    self.settings.focus = settings::next_focus(&stops, Some(&target), 1);
+                }
+            }
+            // focused but scrolled away: the first key brings it back
+            (key, None) if press_key(key) && self.settings.focus.is_some() => {
+                if let Some(rect) = self
+                    .settings
+                    .focus
+                    .as_ref()
+                    .and_then(|f| stops[..scrolled].iter().find(|(t, _)| t == f))
+                    .map(|(_, r)| *r)
+                {
+                    self.scroll_settings_into_view(rect);
+                }
             }
             _ => return false,
         }
         window.request_redraw();
         true
+    }
+
+    /// Scroll the Settings page so the control at `rect` (page coordinates:
+    /// screen y at scroll 0) sits inside the body, clamped like the wheel.
+    fn scroll_settings_into_view(&mut self, rect: [f32; 4]) {
+        let (_, lh) = self.logical_size();
+        let (view_top, view_bottom) = (TAB_BAR_H + 12.0, lh - 34.0 - 12.0);
+        let s = &mut self.settings;
+        let y = rect[1] - s.scroll;
+        if y < view_top {
+            s.scroll -= view_top - y;
+        } else if y + rect[3] > view_bottom {
+            s.scroll += y + rect[3] - view_bottom;
+        }
+        s.scroll = s.scroll.clamp(0.0, s.max_scroll());
     }
 
     /// Keybindings page keys: while recording, the next chord becomes the
@@ -7916,6 +8720,271 @@ impl App {
         true
     }
 
+    /// A press in "Edit prompt": buttons act at once; a chip arms a drag
+    /// (a release without travel is a click).
+    fn prompt_editor_press(&mut self) {
+        use crate::views::prompt_editor::{Drag, Target};
+        let (mx, my) = self.mouse;
+        let hit = self
+            .prompt_editor_layout
+            .hits
+            .iter()
+            .find(|(r, _)| mx >= r[0] && mx < r[0] + r[2] && my >= r[1] && my < r[1] + r[3])
+            .map(|(_, t)| *t);
+        let Some(ed) = &mut self.prompt_editor else {
+            return;
+        };
+        match hit {
+            Some(Target::Palette(chip)) => {
+                ed.drag = Some(Drag {
+                    chip,
+                    from: None,
+                    press: self.mouse,
+                    live: false,
+                })
+            }
+            Some(Target::Chip(i)) => {
+                if let Some(&chip) = ed.draft.get(i) {
+                    ed.drag = Some(Drag {
+                        chip,
+                        from: Some(i),
+                        press: self.mouse,
+                        live: false,
+                    });
+                }
+            }
+            Some(Target::Remove(i)) => ed.remove(i),
+            Some(Target::Restore) => ed.restore_default(),
+            Some(Target::Cancel) => self.prompt_editor = None,
+            Some(Target::Save) => self.save_prompt_editor(),
+            None => {}
+        }
+    }
+
+    /// A release in "Edit prompt": a drag drops into the box (or, from the
+    /// box, out of it to remove the chip); a palette chip clicked is added.
+    fn prompt_editor_release(&mut self) {
+        let layout = &self.prompt_editor_layout;
+        let (mx, my) = self.mouse;
+        let b = layout.drop_box;
+        let in_box = mx >= b[0] && mx < b[0] + b[2] && my >= b[1] && my < b[1] + b[3];
+        let Some(ed) = &mut self.prompt_editor else {
+            return;
+        };
+        let Some(d) = ed.drag.take() else {
+            return;
+        };
+        if !d.live {
+            if d.from.is_none() {
+                ed.add(d.chip);
+            }
+        } else if in_box {
+            let at = crate::views::prompt_editor::drop_index(&layout.slots, d.from, self.mouse);
+            ed.place(d.chip, at);
+        } else if let Some(i) = d.from {
+            ed.remove(i);
+        }
+    }
+
+    /// Keep "Edit prompt"'s chips and close it.
+    fn save_prompt_editor(&mut self) {
+        let Some(ed) = self.prompt_editor.take() else {
+            return;
+        };
+        if ed.changed() {
+            self.config.prompt_chips = ed.draft;
+            self.save_config();
+            self.refresh_chip_sources();
+        }
+    }
+
+    /// After the prompt chips change (here, or config.toml from anywhere),
+    /// look up what the newly shown chips read — git (and through it the
+    /// PR), Docker — for every pane of every tab, so each shows them at
+    /// once instead of after its next command.
+    fn refresh_chip_sources(&mut self) {
+        if self.chips_applied == self.config.prompt_chips {
+            return;
+        }
+        self.chips_applied = self.config.prompt_chips.clone();
+        let docker = self
+            .config
+            .prompt_chips
+            .contains(&shift_core::PromptChip::Docker);
+        for tab in &self.tabs {
+            for pane in &tab.panes {
+                let Some(cwd) = pane.session.cwd.lock().unwrap().clone() else {
+                    continue;
+                };
+                if let Some(worker) = &self.git {
+                    worker.request(pane.session.id, cwd.clone().into());
+                }
+                if docker && let Some(worker) = &self.docker_worker {
+                    worker.request(pane.session.id, cwd.into());
+                }
+            }
+        }
+    }
+
+    /// Open a chip's menu for `pane` (focusing it).
+    fn open_chip_menu(&mut self, pane: PaneId, kind: crate::views::chip_menu::ChipKind) {
+        use crate::views::chip_menu::{ChipKind, ChipMenu};
+        use shift_core::runtimes;
+        let target = ClickTarget::Chip(pane, kind.chip());
+        let Some(anchor) = self
+            .hits
+            .iter()
+            .find(|h| h.target == target)
+            .map(|h| h.rect)
+        else {
+            return;
+        };
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return;
+        };
+        tab.active_pane = pane;
+        let Some(p) = tab.pane(pane) else {
+            return;
+        };
+        let cwd = p.session.cwd.lock().unwrap().clone();
+        let Some(cwd) = cwd.map(std::path::PathBuf::from) else {
+            return;
+        };
+        self.chip_menu = Some(match kind {
+            ChipKind::Dir => ChipMenu::dirs(pane, anchor, &cwd),
+            ChipKind::Branch => {
+                let current = p.git.as_ref().map(|g| g.branch.clone()).unwrap_or_default();
+                ChipMenu::branches(
+                    pane,
+                    anchor,
+                    shift_core::git::local_branches(&cwd),
+                    &current,
+                )
+            }
+            ChipKind::Php | ChipKind::Python => {
+                let vars = p.session.user_vars.lock().unwrap().clone();
+                let bin = |name: &str| {
+                    vars.get(name)
+                        .filter(|v| !v.is_empty())
+                        .map(std::path::PathBuf::from)
+                };
+                let home = runtimes::home();
+                let prefixes = runtimes::brew_prefixes();
+                if kind == ChipKind::Php {
+                    let active = bin("ShiftPhpBin").and_then(|b| runtimes::php_version(&b));
+                    let list = runtimes::php_installs(&home, &prefixes);
+                    ChipMenu::runtimes(kind, pane, anchor, list, active.as_deref())
+                } else {
+                    let active = vars
+                        .get("ShiftPython")
+                        .filter(|v| !v.is_empty())
+                        .cloned()
+                        .or_else(|| runtimes::python_version(&bin("ShiftPythonBin")?, &cwd));
+                    // the shell's pyenv (its shims' root), else the default one
+                    let pyenv = bin("ShiftPythonBin")
+                        .filter(|b| b.parent().is_some_and(|d| d.ends_with("shims")))
+                        .and_then(|b| Some(b.parent()?.parent()?.to_path_buf()))
+                        .or_else(runtimes::pyenv_root);
+                    let list = runtimes::python_installs(&home, &prefixes, pyenv.as_deref());
+                    ChipMenu::runtimes(kind, pane, anchor, list, active.as_deref())
+                }
+            }
+            ChipKind::Docker => {
+                // show what is known now; a fresh `ps` replaces it
+                if let Some(worker) = &self.docker_worker {
+                    worker.request(pane, cwd.clone());
+                }
+                ChipMenu::containers(pane, anchor, p.docker.as_ref())
+            }
+        });
+    }
+
+    /// Run the picker's result `i` (`cd …` / `git checkout …`) as a command
+    /// in its pane, which must be at its prompt.
+    fn apply_chip_menu(&mut self, i: usize) {
+        let Some(menu) = self.chip_menu.take() else {
+            return;
+        };
+        let Some(item) = menu.results().into_iter().nth(i) else {
+            return;
+        };
+        let at_prompt = self
+            .find_tab_of_pane(menu.pane)
+            .and_then(|(_, tab)| tab.pane(menu.pane))
+            .is_some_and(|p| {
+                matches!(
+                    p.session.blocks.lock().unwrap().last().map(|b| &b.state),
+                    Some(BlockState::Prompt)
+                )
+            });
+        if at_prompt {
+            self.submit_to(menu.pane, &crate::views::chip_menu::command(&item.action));
+        } else {
+            self.toast("The pane is running a command".into());
+        }
+    }
+
+    /// Picker keys: typing filters, ↑↓ select, Enter runs, Esc closes.
+    fn handle_chip_menu_key(&mut self, event: &input::KeyPress) {
+        use winit::keyboard::{Key, NamedKey};
+        let Some(menu) = &mut self.chip_menu else {
+            return;
+        };
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => self.chip_menu = None,
+            Key::Named(NamedKey::Enter) => {
+                let i = menu.selected;
+                self.apply_chip_menu(i);
+            }
+            Key::Named(NamedKey::ArrowUp) => menu.move_by(-1),
+            Key::Named(NamedKey::ArrowDown) => menu.move_by(1),
+            Key::Named(NamedKey::PageUp) => menu.move_by(-8),
+            Key::Named(NamedKey::PageDown) => menu.move_by(8),
+            Key::Named(NamedKey::Backspace) => {
+                let mut q = menu.query.clone();
+                q.pop();
+                menu.set_query(q);
+            }
+            Key::Named(NamedKey::Space) => {
+                let q = format!("{} ", menu.query);
+                menu.set_query(q);
+            }
+            _ => {
+                if !self.modifiers.super_key()
+                    && !self.modifiers.control_key()
+                    && let Some(text) = &event.text
+                    && !text.is_empty()
+                    && !text.chars().any(|c| c.is_control())
+                {
+                    let q = format!("{}{text}", menu.query);
+                    menu.set_query(q);
+                }
+            }
+        }
+    }
+
+    /// Maximized review keys: Esc restores the panel beside the panes;
+    /// arrows, Page Up/Down, Space, Home/End scroll (← → sideways, the file
+    /// under the pointer). False for anything else.
+    fn handle_review_key(&mut self, event: &input::KeyPress) -> bool {
+        use winit::keyboard::{Key, NamedKey};
+        let page = (self.review.view_h - 40.0).max(40.0);
+        let y = self.mouse.1;
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => self.review.maximized = false,
+            Key::Named(NamedKey::ArrowDown) => self.review.scroll_by(40.0),
+            Key::Named(NamedKey::ArrowUp) => self.review.scroll_by(-40.0),
+            Key::Named(NamedKey::ArrowRight) => self.review.scroll_x_by(40.0, y),
+            Key::Named(NamedKey::ArrowLeft) => self.review.scroll_x_by(-40.0, y),
+            Key::Named(NamedKey::PageDown | NamedKey::Space) => self.review.scroll_by(page),
+            Key::Named(NamedKey::PageUp) => self.review.scroll_by(-page),
+            Key::Named(NamedKey::Home) => self.review.scroll_by(f32::NEG_INFINITY),
+            Key::Named(NamedKey::End) => self.review.scroll_by(f32::INFINITY),
+            _ => return false,
+        }
+        true
+    }
+
     /// Tree keys while the explorer has focus: ↑↓ move, ← collapse or go
     /// to the parent, → expand, Enter opens (⌥Enter inserts the path), Esc
     /// hands focus back to the terminal. False for anything else.
@@ -7937,7 +9006,8 @@ impl App {
                 } else if row.is_dir {
                     self.explorer.toggle(&row.path);
                 } else {
-                    self.open_viewer(&row.path.clone());
+                    let choice = self.config.file_editor.clone();
+                    self.open_file_in(&row.path, &choice);
                 }
             }
             _ => return false,
@@ -8347,6 +9417,9 @@ impl App {
         event_loop: &ActiveEventLoop,
         window: &Window,
     ) {
+        if !event.released {
+            self.hide_tooltip(window);
+        }
         // Esc while dragging: a tab springs back to where it was pressed, a
         // pane stays where it is
         if matches!(
@@ -8378,6 +9451,20 @@ impl App {
             window.request_redraw();
             return;
         }
+        if self.prompt_editor.is_some() {
+            // Esc cancels, Enter saves; the dialog owns the keyboard
+            match event.logical_key {
+                winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape) => {
+                    self.prompt_editor = None;
+                }
+                winit::keyboard::Key::Named(winit::keyboard::NamedKey::Enter) => {
+                    self.save_prompt_editor();
+                }
+                _ => {}
+            }
+            window.request_redraw();
+            return;
+        }
         if self.whats_new.open {
             self.handle_whats_new_key(event);
             window.request_redraw();
@@ -8394,6 +9481,11 @@ impl App {
         }
         if self.rename.is_some() {
             self.handle_rename_key(event);
+            window.request_redraw();
+            return;
+        }
+        if self.chip_menu.is_some() {
+            self.handle_chip_menu_key(event);
             window.request_redraw();
             return;
         }
@@ -8419,6 +9511,19 @@ impl App {
             if self.handle_settings_key(event, event_loop, window) {
                 window.request_redraw();
             }
+            return;
+        }
+        if self.review_maximized() {
+            // the panel covers the command line: it takes the keys it uses,
+            // app shortcuts still work, typing is swallowed
+            if !self.handle_review_key(event)
+                && let Some(action) = input::app_action(event, self.modifiers, &self.keymap)
+                && !action.needs_editor()
+                && (!event.repeat || action.repeatable())
+            {
+                self.handle_action(action, event_loop);
+            }
+            window.request_redraw();
             return;
         }
         // (closes first if its pane no longer owns the keys: raw mode, another
@@ -8526,7 +9631,7 @@ impl App {
         };
         // each recipient gets the bytes its own program asked for (cursor
         // mode, kitty flags), never the active pane's encoding
-        let (mods, option_as_meta) = (self.modifiers, self.config.option_as_meta);
+        let (mods, option_as_meta) = (self.modifiers, self.option_meta());
         let identity = input::key_identity(event);
         for target in self.raw_targets(id) {
             let Some((_, tab)) = self.find_tab_of_pane(target) else {
@@ -8788,7 +9893,7 @@ impl App {
             .cloned()
             .collect();
         let active = self.active_pane_id();
-        let (mods, option_as_meta) = (self.modifiers, self.config.option_as_meta);
+        let (mods, option_as_meta) = (self.modifiers, self.option_meta());
         for entry in pressed {
             self.keys_down.remove(&entry);
             let target = entry.0;
@@ -8824,6 +9929,32 @@ impl App {
             self.hover_repaints += 1;
             window.request_redraw();
         }
+        self.pointer_in = true;
+        if let Some(ed) = &mut self.prompt_editor {
+            // a press that travels starts a drag; hover marks repaint
+            if let Some(d) = &mut ed.drag
+                && !d.live
+                && ((pos.0 - d.press.0).abs() > crate::views::prompt_editor::DRAG_SLOP
+                    || (pos.1 - d.press.1).abs() > crate::views::prompt_editor::DRAG_SLOP)
+            {
+                d.live = true;
+            }
+            window.request_redraw();
+        }
+        // a hovered diff line shows its hunk's toolbar; a file-list row lights
+        let lit = self.review.hover_index();
+        self.review.pointer = Some(pos);
+        if self.review.hover_index() != lit {
+            window.request_redraw();
+        }
+        let tip = self
+            .tips
+            .iter()
+            .find(|t| t.contains(pos.0, pos.1))
+            .map(|t| t.rect);
+        if tip != self.tip_hover.map(|(r, _)| r) || (tip.is_none() && self.tip_shown.is_some()) {
+            window.request_redraw();
+        }
         if self.mouse_report.is_some() {
             self.report_motion();
             return;
@@ -8831,6 +9962,8 @@ impl App {
         let idle = !self.palette.open
             && !self.settings.open
             && !self.context_menu.open
+            && self.chip_menu.is_none()
+            && self.prompt_editor.is_none()
             && self.confirm.is_none()
             && !self.whats_new.open
             && self.drag.is_none()
@@ -8852,6 +9985,17 @@ impl App {
             if let Some(tab) = self.tabs.get_mut(self.active) {
                 tab.root.set_ratio(&path, ratio);
             }
+            window.request_redraw();
+        }
+        // the chip picker's highlight follows the pointer at once (its rows
+        // are not frame hits, so nothing else repaints them)
+        if let Some(menu) = &mut self.chip_menu
+            && let Some(&(_, i)) = self.chip_menu_rows.iter().find(|(r, _)| {
+                pos.0 >= r[0] && pos.0 < r[0] + r[2] && pos.1 >= r[1] && pos.1 < r[1] + r[3]
+            })
+            && i != menu.selected
+        {
+            menu.selected = i;
             window.request_redraw();
         }
         if self.context_menu.open {
@@ -8935,6 +10079,14 @@ impl App {
     }
 
     pub(crate) fn on_right_press(&mut self, window: &Window) {
+        self.hide_tooltip(window);
+        if self.chip_menu.take().is_some() {
+            window.request_redraw();
+            return;
+        }
+        if self.prompt_editor.is_some() {
+            return;
+        }
         if self.palette.open || self.confirm.is_some() || self.whats_new.open {
             return;
         }
@@ -8948,6 +10100,9 @@ impl App {
             && self.report_button(crate::mouse::RIGHT, true)
         {
             window.request_redraw();
+            return;
+        }
+        if self.over_maximized_review() {
             return;
         }
         let (mx, my) = self.mouse;
@@ -9026,6 +10181,14 @@ impl App {
         event_loop: &ActiveEventLoop,
         window: &Window,
     ) {
+        if state == ElementState::Pressed {
+            self.hide_tooltip(window);
+        }
+        if state == ElementState::Released && self.prompt_editor.is_some() {
+            self.prompt_editor_release();
+            window.request_redraw();
+            return;
+        }
         if state == ElementState::Released {
             if self.report_button(crate::mouse::LEFT, false) {
                 window.request_redraw();
@@ -9051,7 +10214,13 @@ impl App {
             if self.editor_drag.take().is_some() {
                 return;
             }
-            let selecting = self.pending_sel.take().is_some_and(|p| p.started);
+            let pending = self.pending_sel.take();
+            let selecting = pending.as_ref().is_some_and(|p| p.started);
+            // Warp: a click (no drag) on a command's output selects its block
+            if let Some(p) = pending.filter(|p| !p.started) {
+                self.select_block_at(p.pane, p.abs);
+                window.request_redraw();
+            }
             if selecting
                 && self.config.copy_on_select
                 && let Some(text) = self.selection_text()
@@ -9074,6 +10243,11 @@ impl App {
             } else if inside(&self.confirm_rects[0]) {
                 self.confirm = None;
             }
+            window.request_redraw();
+            return;
+        }
+        if self.prompt_editor.is_some() {
+            self.prompt_editor_press();
             window.request_redraw();
             return;
         }
@@ -9123,6 +10297,15 @@ impl App {
             let i = *i;
             self.commit_rename(i);
         }
+        if self.chip_menu.is_some() {
+            match self.chip_menu_rows.iter().find(|(r, _)| inside(r)) {
+                Some(&(_, i)) => self.apply_chip_menu(i),
+                None if inside(&self.chip_menu_card) => {}
+                None => self.chip_menu = None,
+            }
+            window.request_redraw();
+            return;
+        }
         if self.context_menu.open {
             let row = self
                 .context_menu_rects
@@ -9171,6 +10354,7 @@ impl App {
         // find-bar toggles
         if self.search.open
             && !self.filter_editing
+            && !self.over_maximized_review()
             && let Some(i) = self.search_chips.iter().position(inside)
         {
             if i == 0 {
@@ -9243,7 +10427,7 @@ impl App {
             self.settings.open = false;
         }
         match &target {
-            Some(ClickTarget::Block(pane, id)) => {
+            Some(ClickTarget::Block(pane, id) | ClickTarget::BlockDuration(pane, id)) => {
                 // Warp: clicking a block selects it (again deselects)
                 let (pane, id) = (*pane, *id);
                 if let Some(tab) = self.tabs.get_mut(self.active) {
@@ -9310,6 +10494,30 @@ impl App {
             }
             Some(ClickTarget::ToggleNotifications) => {
                 self.handle_action(AppAction::AttentionCenter, event_loop)
+            }
+            Some(ClickTarget::Chip(pane, shift_core::PromptChip::GitDiff)) => {
+                // opens the review of that pane's repository (focused first);
+                // a second click closes it, like the tab bar's button
+                if let Some(tab) = self.tabs.get_mut(self.active) {
+                    tab.active_pane = *pane;
+                }
+                self.handle_action(AppAction::ToggleReview, event_loop)
+            }
+            Some(ClickTarget::Chip(pane, shift_core::PromptChip::GithubPr)) => {
+                let url = self
+                    .tabs
+                    .get(self.active)
+                    .and_then(|t| t.pane(*pane))
+                    .and_then(|p| p.pr.as_ref())
+                    .map(|pr| pr.url.clone());
+                if let Some(url) = url {
+                    self.open_target(&url);
+                }
+            }
+            Some(ClickTarget::Chip(pane, chip)) => {
+                if let Some(kind) = crate::views::chip_menu::ChipKind::of(*chip) {
+                    self.open_chip_menu(*pane, kind);
+                }
             }
             Some(ClickTarget::Editor(pane)) => {
                 let pane = *pane;
@@ -9496,16 +10704,18 @@ impl App {
                         c.confirm_multiline_paste = !c.confirm_multiline_paste
                     }
                     "durable_sessions" => c.durable_sessions = !c.durable_sessions,
-                    "save_transcripts" => {
-                        c.save_transcripts = !c.save_transcripts;
-                        if !c.save_transcripts {
-                            // off means gone, not just no longer updated
-                            shift_core::transcript::remove_except(&[]);
-                            self.transcript_saved.clear();
-                        }
-                    }
+                    // off deletes the saved output (apply_config)
+                    "save_transcripts" => c.save_transcripts = !c.save_transcripts,
                     "mouse_reporting" => c.mouse_reporting = !c.mouse_reporting,
-                    "option_as_meta" => c.option_as_meta = !c.option_as_meta,
+                    "option_as_meta" => {
+                        // the right key keeps what it did: it followed this
+                        // setting while unset
+                        c.right_option_as_meta = Some(c.right_option_meta());
+                        c.option_as_meta = !c.option_as_meta;
+                    }
+                    "right_option_as_meta" => c.right_option_as_meta = Some(!c.right_option_meta()),
+                    "middle_click_paste" => c.middle_click_paste = !c.middle_click_paste,
+                    "explorer_hidden_files" => c.explorer_hidden_files = !c.explorer_hidden_files,
                     "notifications.enabled" => c.notifications.enabled = !c.notifications.enabled,
                     "notifications.toasts" => c.notifications.toasts = !c.notifications.toasts,
                     "notifications.command_failed" => {
@@ -9533,7 +10743,8 @@ impl App {
                 let d = *dir as i64;
                 match *id {
                     "font_size" => {
-                        c.font_size = (c.font_size + d as f32).clamp(8.0, 28.0);
+                        // from the applied size: a NaN or out-of-range value still steps
+                        c.font_size = (c.font_size() + d as f32).clamp(8.0, 28.0);
                     }
                     "scrollback" => {
                         c.scrollback =
@@ -9546,6 +10757,9 @@ impl App {
                     "window_padding" => {
                         c.window_padding = (c.padding() + d as f32 * 2.0).clamp(0.0, 40.0);
                     }
+                    "wheel_scroll_lines" => {
+                        c.wheel_scroll_lines = (c.wheel_lines() as i64 + d).clamp(1, 20) as u8;
+                    }
                     "notifications.toast_secs" => {
                         let secs = c.notifications.toast_duration().as_secs() as i64;
                         c.notifications.toast_secs = (secs + d).clamp(2, 60) as u64;
@@ -9554,6 +10768,11 @@ impl App {
                 }
                 self.save_config();
                 self.apply_config();
+            }
+            Some(ClickTarget::SettingsEditPrompt) => {
+                self.prompt_editor = Some(crate::views::prompt_editor::PromptEditor::new(
+                    &self.config.prompt_chips,
+                ));
             }
             Some(ClickTarget::SettingsSegment(id, v)) => {
                 use shift_core::{Bell, CursorStyle, InputPosition, PromptMode};
@@ -9573,10 +10792,23 @@ impl App {
                             InputPosition::Bottom
                         }
                     }
+                    "blocks_start" => {
+                        c.blocks_start = if *v == 1 {
+                            shift_core::BlocksStart::Top
+                        } else {
+                            shift_core::BlocksStart::Bottom
+                        }
+                    }
                     "control_api" => {
                         c.control_api = ["off", "navigate", "full"]
                             .get(*v as usize)
                             .unwrap_or(&"navigate")
+                            .to_string();
+                    }
+                    "clipboard_access" => {
+                        c.clipboard_access = ["off", "write", "read_write"]
+                            .get(*v as usize)
+                            .unwrap_or(&"write")
                             .to_string();
                     }
                     "tab_layout" => {
@@ -9669,6 +10901,11 @@ impl App {
     }
 
     pub(crate) fn on_wheel(&mut self, delta: MouseScrollDelta, window: &Window) {
+        self.hide_tooltip(window);
+        // the modal holds still; nothing scrolls under it
+        if self.prompt_editor.is_some() {
+            return;
+        }
         use shift_pty::alacritty_terminal::term::TermMode;
         // the What's New body scrolls by pixels: trackpad deltas stay smooth
         // instead of snapping to whole lines
@@ -9680,6 +10917,20 @@ impl App {
             // positive delta = wheel up = toward the top
             self.whats_new.scroll_by(-px);
             window.request_redraw();
+            return;
+        }
+        if let Some(menu) = &mut self.chip_menu {
+            // by pixels: a trackpad's many small deltas move it smoothly
+            // (rounding each to whole rows dropped most of them)
+            let px = match delta {
+                MouseScrollDelta::LineDelta(_, y) => y * crate::views::chip_menu::ChipMenu::NOTCH,
+                MouseScrollDelta::PixelDelta(p) => p.y as f32,
+            };
+            let before = menu.scroll;
+            menu.scroll_px(-px);
+            if menu.scroll != before {
+                window.request_redraw();
+            }
             return;
         }
         if self.notifications.open && self.confirm.is_none() {
@@ -9725,8 +10976,24 @@ impl App {
             } else if inside(&ex_rect) {
                 self.explorer.scroll_by(px);
                 true
+            } else if inside(&self.review.side_rect) {
+                self.review.side_scroll_by(px);
+                true
             } else if inside(&rv_rect) {
+                // sideways: a trackpad's x, or ⇧ + a mouse wheel
+                let dx = -match delta {
+                    MouseScrollDelta::LineDelta(x, _) => x * 3.0 * 20.0,
+                    MouseScrollDelta::PixelDelta(p) => p.x as f32,
+                };
+                let (px, dx) = if self.modifiers.shift_key() && dx == 0.0 {
+                    (0.0, px)
+                } else {
+                    (px, dx)
+                };
                 self.review.scroll_by(px);
+                if dx != 0.0 {
+                    self.review.scroll_x_by(dx, my);
+                }
                 true
             } else {
                 false
@@ -9739,7 +11006,7 @@ impl App {
         // accumulate fractional deltas: trackpads emit many sub-line
         // pixel events that would each truncate to zero lines
         self.scroll_accum += match delta {
-            MouseScrollDelta::LineDelta(_, y) => y * 3.0,
+            MouseScrollDelta::LineDelta(_, y) => y * self.config.wheel_lines(),
             MouseScrollDelta::PixelDelta(p) => p.y as f32 / self.line_h,
         };
         let lines = self.scroll_accum as i32;
@@ -9748,9 +11015,7 @@ impl App {
             return;
         }
         if self.settings.open {
-            let (_, lh) = self.logical_size();
-            self.settings
-                .scroll_by(lines as f32, lh - TAB_BAR_H - 100.0);
+            self.settings.scroll_by(lines as f32);
             window.request_redraw();
             return;
         }
@@ -9814,6 +11079,9 @@ impl App {
 
     /// Pane whose rect (in the active tab) contains the pointer.
     fn pane_under_mouse(&self) -> Option<PaneId> {
+        if self.over_maximized_review() {
+            return None;
+        }
         let (lw, lh) = self.logical_size();
         let (rects, _) = self.pane_rects(lw, lh);
         let (mx, my) = self.mouse;
@@ -9981,6 +11249,26 @@ impl App {
         }
         if self.report_button(button, pressed) {
             window.request_redraw();
+            return;
+        }
+        // middle-click pastes into the shell pane under the pointer, which
+        // takes focus first (Warp)
+        if button == crate::mouse::MIDDLE
+            && pressed
+            && self.config.middle_click_paste
+            && let Some(id) = self.pane_under_mouse().filter(|id| *id != VIEWER_PANE)
+        {
+            if let Some(tab) = self.tabs.get_mut(self.active) {
+                if tab.active_pane != id
+                    && let Some(prev) = tab.active_mut()
+                {
+                    prev.selected_block = None;
+                }
+                tab.active_pane = id;
+            }
+            self.viewer_focus = false;
+            self.paste_from_clipboard();
+            window.request_redraw();
         }
     }
 
@@ -10147,10 +11435,11 @@ impl App {
     ) -> PaneId {
         let session = self.spawn_session(60, 20, cwd); // resized on next layout
         let new_id = session.id;
+        let pane = self.new_pane(session);
         let tab = &mut self.tabs[self.active];
         tab.zoomed = None;
         if tab.root.split(target, new_id, axis) {
-            tab.panes.push(PaneState::new(session));
+            tab.panes.push(pane);
             tab.active_pane = new_id;
         }
         new_id
@@ -10188,7 +11477,7 @@ impl App {
     /// Settings slider value (0..1) → config field.
     fn set_slider(&mut self, id: &str, t: f32) {
         match id {
-            "line_height" => self.config.line_height = 1.0 + 1.2 * t,
+            "line_height" => self.config.line_height = ((1.0 + 1.2 * t) * 100.0).round() / 100.0,
             // whole percents and pixels, as Warp's sliders
             "window_opacity" => self.config.window_opacity = (1.0 + 99.0 * t).round() / 100.0,
             "window_blur" => self.config.window_blur = (1.0 + 63.0 * t).round() as u8,
@@ -10488,6 +11777,11 @@ impl App {
                 self.on_right_press(window);
                 self.on_other_button(crate::mouse::RIGHT, false, window);
             }
+            Step::MiddleClick(x, y) => {
+                self.on_cursor_moved((x, y), window);
+                self.on_other_button(crate::mouse::MIDDLE, true, window);
+                self.on_other_button(crate::mouse::MIDDLE, false, window);
+            }
             Step::Drag(x1, y1, x2, y2) => {
                 self.on_cursor_moved((x1, y1), window);
                 self.on_left(ElementState::Pressed, event_loop, window);
@@ -10504,7 +11798,13 @@ impl App {
                 self.on_left(ElementState::Released, event_loop, window);
             }
             Step::Scroll(lines, cols) => {
-                self.on_wheel(MouseScrollDelta::LineDelta(cols / 3.0, lines / 3.0), window);
+                // `scroll N` moves the terminal N lines whatever
+                // wheel_scroll_lines is; sideways notches stay 3 columns
+                let notch = self.config.wheel_lines();
+                self.on_wheel(
+                    MouseScrollDelta::LineDelta(cols / 3.0, lines / notch),
+                    window,
+                );
             }
             Step::Sh(cmd) => {
                 let status = std::process::Command::new("sh")
@@ -10666,7 +11966,11 @@ impl App {
                 let Some(pane) = self.tabs.get(self.active).map(|t| t.active_pane) else {
                     return Response::error("no tab");
                 };
-                let cwd = cwd.map(std::path::PathBuf::from).filter(|p| p.is_dir());
+                // a missing or nonexistent --cwd starts where a new pane would
+                let cwd = cwd
+                    .map(std::path::PathBuf::from)
+                    .filter(|p| p.is_dir())
+                    .or_else(|| self.start_dir());
                 let id = self.split_pane(pane, axis, cwd);
                 if let Some(tab) = self.tabs.get_mut(self.active) {
                     tab.active_pane = id;
@@ -10675,7 +11979,11 @@ impl App {
                 ok(Some(id))
             }
             Request::Open { cwd, command } => {
-                let cwd = cwd.map(std::path::PathBuf::from).filter(|p| p.is_dir());
+                // a missing or nonexistent --cwd starts where a new pane would
+                let cwd = cwd
+                    .map(std::path::PathBuf::from)
+                    .filter(|p| p.is_dir())
+                    .or_else(|| self.start_dir());
                 self.spawn_tab_at(cwd);
                 let id = self.tabs[self.active].active_pane;
                 if let Some(c) = command {
@@ -10870,6 +12178,67 @@ impl App {
                     button(label, self.confirm_rects[1]),
                 ],
             })
+        } else if let Some(ed) = &self.prompt_editor {
+            use crate::views::prompt_editor::Target;
+            let controls = self
+                .prompt_editor_layout
+                .hits
+                .iter()
+                .map(|(r, t)| {
+                    let name = |i: &usize| ed.draft.get(*i).map_or("", |c| c.label());
+                    let label = match t {
+                        Target::Palette(c) => format!("Add {}", c.label()),
+                        Target::Chip(i) => format!("{}, in the prompt", name(i)),
+                        Target::Remove(i) => format!("Remove {}", name(i)),
+                        Target::Restore => "Restore default".into(),
+                        Target::Cancel => "Cancel".into(),
+                        Target::Save => "Save changes".into(),
+                    };
+                    Control {
+                        label,
+                        role: Role::Button,
+                        toggled: None,
+                        selected: false,
+                        rect: Some(*r),
+                    }
+                })
+                .collect();
+            Some(Overlay::Dialog {
+                label: "Edit prompt".into(),
+                input: None,
+                status: Some(format!(
+                    "Prompt: {}",
+                    ed.draft
+                        .iter()
+                        .map(|c| c.label())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )),
+                controls,
+                rect: Some(self.prompt_editor_layout.card),
+            })
+        } else if let Some(menu) = &self.chip_menu {
+            let results = menu.results();
+            let controls = self
+                .chip_menu_rows
+                .iter()
+                .filter_map(|(r, i)| {
+                    Some(Control {
+                        label: results.get(*i)?.label.clone(),
+                        role: Role::ListItem,
+                        toggled: None,
+                        selected: *i == menu.selected,
+                        rect: Some(*r),
+                    })
+                })
+                .collect();
+            Some(Overlay::Dialog {
+                label: menu.kind.title().into(),
+                input: Some(("Search".into(), menu.query.clone())),
+                status: Some(format!("{} results", results.len())),
+                controls,
+                rect: Some(self.chip_menu_card),
+            })
         } else if self.whats_new.open {
             // the notes as one readable status string; the body is not focusable
             let mut notes = Vec::new();
@@ -11018,7 +12387,11 @@ impl App {
                 rect: None,
             })
         } else if self.settings.open {
-            let values = toml::Value::try_from(&self.config).ok();
+            // switches read their state from the config; an unset right
+            // Option key shows the value it follows
+            let mut shown = self.config.clone();
+            shown.right_option_as_meta = Some(shown.right_option_meta());
+            let values = toml::Value::try_from(&shown).ok();
             let current = crate::views::settings::Page::ALL
                 .iter()
                 .position(|p| *p == self.settings.page);
@@ -11042,6 +12415,9 @@ impl App {
                         ClickTarget::SettingsSegment(..) | ClickTarget::SettingsTheme(_) => {
                             (Role::RadioButton, None, false)
                         }
+                        // read-only rows (Shell path); unnamed Noop hits
+                        // (the page body) find no name below and drop out
+                        ClickTarget::SettingsNoop => (Role::Label, None, false),
                         ClickTarget::SettingsOption(i) => (
                             Role::ListBoxOption,
                             None,
@@ -11056,6 +12432,7 @@ impl App {
                         | ClickTarget::SettingsSlider(_)
                         | ClickTarget::SettingsReset(_)
                         | ClickTarget::SettingsOpenConfig
+                        | ClickTarget::SettingsEditPrompt
                         | ClickTarget::SettingsKeybind(_)
                         | ClickTarget::SettingsKeybindReset(_) => (Role::Button, None, false),
                         _ => return None,
@@ -11236,9 +12613,16 @@ impl App {
                 })
                 .unwrap_or_default()
             };
+            // hunk actions show on a hovered line; the tree lists them all
+            let latent = self
+                .review
+                .latent
+                .iter()
+                .filter(|(_, l)| !self.review_hits.iter().any(|(_, h)| h == l));
             let controls = self
                 .review_hits
                 .iter()
+                .chain(latent)
                 .map(|(r, hit)| {
                     let label = match hit {
                         ReviewHit::Refresh => "Refresh".to_string(),
@@ -11260,6 +12644,10 @@ impl App {
                         ReviewHit::Revert(p, h) => format!("Revert {p}{}", hunk_label(h)),
                         ReviewHit::StageAll => "Stage all".into(),
                         ReviewHit::UnstageAll => "Unstage all".into(),
+                        ReviewHit::Maximize if self.review.maximized => "Restore".into(),
+                        ReviewHit::Maximize => "Maximize".into(),
+                        ReviewHit::Copy(_, p, h) => format!("Copy {p}{}", hunk_label(&Some(*h))),
+                        ReviewHit::Jump(_, p) => format!("Show {p}"),
                     };
                     control(label, Role::Button, false, *r)
                 })
@@ -11407,7 +12795,7 @@ impl App {
         );
         let _ = writeln!(
             out,
-            "settings={} page={:?} search={} query={:?} matches={} total={} current={} menu={} completion={} ghost={:?} items={}",
+            "settings={} page={:?} search={} query={:?} matches={} total={} current={} menu={} completion={} ghost={:?} items={} tooltip={:?}",
             self.settings.open,
             self.settings.page,
             self.search.open,
@@ -11418,8 +12806,32 @@ impl App {
             self.context_menu.open,
             self.completion.open,
             self.completion.ghost,
-            self.completion.items.len()
+            self.completion.items.len(),
+            self.tip_shown.as_ref().map(|t| format!(
+                "{} {} {}",
+                t.text,
+                t.detail.as_deref().unwrap_or(""),
+                t.body
+                    .as_deref()
+                    .map(|b| format!("| {b}"))
+                    .unwrap_or_default()
+            )
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" "))
         );
+        // every control with a tooltip: `text@x,y,w,h` (a script hovers one
+        // by these, whatever the platform's layout)
+        let tips: Vec<String> = self
+            .tips
+            .iter()
+            .filter(|t| !t.text.is_empty())
+            .map(|t| {
+                let [x, y, w, h] = t.rect;
+                format!("{}@{x:.0},{y:.0},{w:.0},{h:.0}", t.text)
+            })
+            .collect();
+        let _ = writeln!(out, "tips={tips:?}");
         let _ = writeln!(
             out,
             "settings_tab={} settings_query={:?} settings_select={:?} completion_source={:?} history={} scope={:?} history_rows={} history_selected={:?}",
@@ -11489,6 +12901,91 @@ impl App {
             self.panel_widths(self.logical_size().0).1 > 0.0,
             self.hover_repaints
         );
+        // maximized, sideways scroll per file, the hunk toolbar's buttons
+        // and the file list's rows (kind@x,y,w,h)
+        let mut scroll_x: Vec<_> = self
+            .review
+            .scroll_x
+            .iter()
+            .filter(|(_, s)| **s > 0.0)
+            .map(|((_, p), s)| format!("{p}:{s:.0}"))
+            .collect();
+        scroll_x.sort();
+        let review_hits: Vec<String> = self
+            .review_hits
+            .iter()
+            .filter_map(|(r, hit)| {
+                let kind = match hit {
+                    ReviewHit::Stage(_, Some(_)) => "stage-hunk",
+                    ReviewHit::Unstage(_, Some(_)) => "unstage-hunk",
+                    ReviewHit::Revert(_, Some(_)) => "revert-hunk",
+                    ReviewHit::Copy(..) => "copy-hunk",
+                    ReviewHit::Jump(..) => "jump",
+                    ReviewHit::Maximize => "maximize",
+                    _ => return None,
+                };
+                Some(format!(
+                    "{kind}@{:.0},{:.0},{:.0},{:.0}",
+                    r[0], r[1], r[2], r[3]
+                ))
+            })
+            .collect();
+        let _ = writeln!(
+            out,
+            "prompt_chips={:?} prompt_editor={:?} prompt_editor_hits={:?}",
+            self.config.prompt_chips,
+            self.prompt_editor
+                .as_ref()
+                .map(|e| (&e.draft, e.drag.as_ref().map(|d| (d.chip, d.live)))),
+            self.prompt_editor_layout
+                .hits
+                .iter()
+                .map(|(r, t)| format!("{t:?}@{:.0},{:.0},{:.0},{:.0}", r[0], r[1], r[2], r[3]))
+                .collect::<Vec<_>>(),
+        );
+        // the active pane's prompt chips as drawn (their texts)
+        if let Some(pane) = self.tabs.get(self.active).and_then(|t| t.active()) {
+            let cwd = pane
+                .session
+                .cwd
+                .lock()
+                .unwrap()
+                .as_deref()
+                .map(editor::shorten_home)
+                .unwrap_or_else(|| "~".into());
+            let chips: Vec<String> = editor::chip_views(&self.config, &self.theme, pane, &cwd)
+                .iter()
+                .map(|v| {
+                    let t: Vec<&str> = v.texts.iter().map(|(t, _)| t.as_str()).collect();
+                    format!("{:?}:{}", v.chip, t.join(" "))
+                })
+                .collect();
+            let _ = writeln!(out, "prompt_chips_shown={chips:?}");
+        }
+        // the prompt chips' picker: kind, query, results, selection
+        let _ = writeln!(
+            out,
+            "chip_menu={:?} chip_menu_rows={:?}",
+            self.chip_menu.as_ref().map(|m| (
+                m.kind,
+                m.query.clone(),
+                m.results().into_iter().map(|i| i.label).collect::<Vec<_>>(),
+                m.selected
+            )),
+            self.chip_menu_rows
+                .iter()
+                .map(|(r, i)| format!("{i}@{:.0},{:.0},{:.0},{:.0}", r[0], r[1], r[2], r[3]))
+                .collect::<Vec<_>>()
+        );
+        if let Some(m) = &self.chip_menu {
+            let _ = writeln!(out, "chip_menu_scroll={:.1}", m.scroll);
+        }
+        let _ = writeln!(
+            out,
+            "review_maximized={} scroll_x={scroll_x:?} latent={} review_hits={review_hits:?}",
+            self.review_maximized(),
+            self.review.latent.len(),
+        );
         let _ = writeln!(
             out,
             "viewer={:?} lines={} error={:?} scroll={:.0} find={:?}",
@@ -11556,7 +13053,7 @@ impl App {
         for (i, tab) in self.tabs.iter().enumerate() {
             let _ = writeln!(
                 out,
-                "tab {i} title={:?} panes={} active_pane={} zoomed={:?} activity={} color={:?} sync={} custom_title={:?}",
+                "tab {i} title={:?} panes={} active_pane={} zoomed={:?} activity={} color={:?} sync={} custom_title={:?} running={}",
                 tab.display_title(),
                 tab.panes.len(),
                 tab.active_pane,
@@ -11564,7 +13061,8 @@ impl App {
                 tab.activity,
                 tab.color,
                 tab.sync_inputs,
-                tab.custom_title
+                tab.custom_title,
+                tab.panes.iter().any(PaneState::running)
             );
             let _ = writeln!(out, "  layout={:?}", tab.root);
             for p in &tab.panes {
@@ -11756,6 +13254,18 @@ impl ApplicationHandler<UserEvent> for App {
         self.git = Some(GitWorker::new(Arc::new(move |pane, info| {
             let _ = git_proxy.send_event(UserEvent::GitStatus(pane, info));
         })));
+        let pr_proxy = self.proxy.clone();
+        self.pr_worker = Some(shift_core::github::PrWorker::new(Arc::new(
+            move |pane, info| {
+                let _ = pr_proxy.send_event(UserEvent::PrStatus(pane, info));
+            },
+        )));
+        let docker_proxy = self.proxy.clone();
+        self.docker_worker = Some(shift_core::docker::DockerWorker::new(Arc::new(
+            move |pane, info| {
+                let _ = docker_proxy.send_event(UserEvent::DockerStatus(pane, info));
+            },
+        )));
 
         let watch_proxy = self.proxy.clone();
         self._watcher = shift_core::watch::watch(Arc::new(move || {
@@ -11866,6 +13376,8 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::ModifiersChanged(m) => {
                 self.modifiers = m.state();
+                use winit::keyboard::ModifiersKeyState::Pressed;
+                self.alt_sides = (m.lalt_state() == Pressed, m.ralt_state() == Pressed);
                 self.update_cursor_icon(&window);
                 window.request_redraw();
             }
@@ -11880,6 +13392,15 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
                 self.on_key(&press, event_loop, &window);
+            }
+            WindowEvent::CursorLeft { .. } => {
+                self.pointer_in = false;
+                if self.review.pointer.take().is_some() && !self.review.hover_rows.is_empty() {
+                    window.request_redraw();
+                }
+                if self.tip_shown.is_some() {
+                    window.request_redraw();
+                }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 let scale = window.scale_factor() as f32;
@@ -11975,7 +13496,27 @@ impl ApplicationHandler<UserEvent> for App {
             #[cfg(not(target_os = "macos"))]
             UserEvent::Menu(_) => {}
             UserEvent::PtyClipboard(text) => {
-                self.copy_to_clipboard(text);
+                // a copy queued before clipboard_access turned off is dropped
+                if self.config.clipboard_access.trim() != "off" {
+                    self.copy_to_clipboard(text);
+                }
+            }
+            UserEvent::PtyClipboardLoad(pane, reply) => {
+                // re-checked here: the policy may have changed since the
+                // request was parsed
+                if self.config.clipboard_access.trim() == "read_write" {
+                    let text = if self.headless {
+                        Some(self.headless_clipboard.clone())
+                    } else {
+                        self.clipboard().and_then(|cb| cb.get_text().ok())
+                    };
+                    if let Some((_, tab)) = self.find_tab_of_pane(pane)
+                        && let Some(p) = tab.pane(pane)
+                    {
+                        p.session
+                            .write((reply.0)(&text.unwrap_or_default()).as_bytes());
+                    }
+                }
             }
             UserEvent::PtyColorRequest(pane, index, reply) => {
                 // the program's own setting (OSC 4/10/11/12) wins over the theme
@@ -12095,10 +13636,60 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             UserEvent::GitStatus(pane, info) => {
+                let pr_chip = self
+                    .config
+                    .prompt_chips
+                    .contains(&shift_core::PromptChip::GithubPr);
+                let mut lookup = None;
                 if let Some((_, tab)) = self.find_tab_of_pane(pane)
                     && let Some(p) = tab.pane_mut(pane)
                 {
+                    let branch = info.as_ref().map(|g| g.branch.clone());
+                    // another branch's PR is not this one's
+                    if p.git.as_ref().map(|g| &g.branch) != branch.as_ref() {
+                        p.pr = None;
+                    }
                     p.git = info;
+                    let cwd = p.session.cwd.lock().unwrap().clone();
+                    if pr_chip && let (Some(cwd), Some(branch)) = (cwd, branch) {
+                        lookup = Some((cwd, branch));
+                    }
+                }
+                if let (Some((cwd, branch)), Some(worker)) = (lookup, &self.pr_worker) {
+                    worker.request(pane, cwd.into(), branch);
+                }
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+            UserEvent::PrStatus(pane, info) => {
+                if let Some((_, tab)) = self.find_tab_of_pane(pane)
+                    && let Some(p) = tab.pane_mut(pane)
+                {
+                    p.pr = info;
+                }
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+            UserEvent::DockerStatus(pane, info) => {
+                if let Some((_, tab)) = self.find_tab_of_pane(pane)
+                    && let Some(p) = tab.pane_mut(pane)
+                {
+                    p.docker = info;
+                }
+                // an open container list follows the new state
+                if let Some(menu) = self.chip_menu.as_mut()
+                    && menu.pane == pane
+                    && menu.kind == crate::views::chip_menu::ChipKind::Docker
+                {
+                    let docker = self
+                        .find_tab_of_pane(pane)
+                        .and_then(|(_, t)| t.pane(pane))
+                        .and_then(|p| p.docker.clone());
+                    if let Some(menu) = self.chip_menu.as_mut() {
+                        menu.set_containers(docker.as_ref());
+                    }
                 }
                 if let Some(w) = &self.window {
                     w.request_redraw();
@@ -12117,11 +13708,20 @@ impl ApplicationHandler<UserEvent> for App {
                 w.request_redraw();
             }
         }
+        // a tooltip whose rest time is up
+        let tip_due = self.tooltip_due();
+        if tip_due.is_some_and(|due| Instant::now() >= due)
+            && let Some(w) = &self.window
+        {
+            w.request_redraw();
+        }
+        let tip_due = tip_due.filter(|due| Instant::now() < *due);
         let output_frame = self.output_frame_due;
         if self.script.is_some() {
             self.drive_script(event_loop);
             if let Some(due) = self.script.as_ref().and_then(|s| s.due()) {
                 let due = output_frame.map_or(due, |f| f.min(due));
+                let due = tip_due.map_or(due, |t| t.min(due));
                 event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(due));
                 return;
             }
@@ -12187,6 +13787,7 @@ impl ApplicationHandler<UserEvent> for App {
             w.request_redraw();
         }
         deadlines.extend(output_frame);
+        deadlines.extend(tip_due);
         event_loop.set_control_flow(match deadlines.into_iter().min() {
             Some(t) => winit::event_loop::ControlFlow::WaitUntil(t),
             None => winit::event_loop::ControlFlow::Wait,
@@ -12197,6 +13798,19 @@ impl ApplicationHandler<UserEvent> for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_option_key_follows_its_own_meta_setting() {
+        // (left held, right held), left Meta, right Meta
+        assert!(option_meta((true, false), true, false));
+        assert!(!option_meta((false, true), true, false));
+        assert!(option_meta((false, true), false, true));
+        assert!(!option_meta((true, false), false, true));
+        assert!(option_meta((true, true), false, true));
+        // no side information: the left (main) setting decides
+        assert!(option_meta((false, false), true, false));
+        assert!(!option_meta((false, false), false, true));
+    }
 
     #[test]
     fn programs_are_revealed_not_opened() {

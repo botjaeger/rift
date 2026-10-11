@@ -38,6 +38,56 @@ __shift_report_cwd() {
     printf '\e]7;file://%s%s\a' "${HOSTNAME:-localhost}" "$dir"
 }
 
+# Prompt chips: the active Python environment, and the php and
+# python3 that PATH resolves to, as iTerm2 user variables (OSC 1337
+# SetUserVar, base64), sent when they change.
+__shift_py=
+__shift_path=
+__shift_set_var() {
+    printf '\e]1337;SetUserVar=%s=%s\a' "$1" "$(printf %s "$2" | base64 | tr -d '\n')"
+}
+__shift_report_env() {
+    local py=${VIRTUAL_ENV##*/}
+    [[ -n $py ]] || py=${PYENV_VERSION-}
+    if [[ $py != "$__shift_py" ]]; then
+        __shift_py=$py
+        __shift_set_var ShiftPython "$py"
+    fi
+    if [[ $PATH != "$__shift_path" ]]; then
+        __shift_path=$PATH
+        __shift_set_var ShiftPhpBin "$(type -P php)"
+        __shift_set_var ShiftPythonBin "$(type -P python3)"
+    fi
+}
+
+# The PHP and Python chips' version pickers run this: `shift-use php|python
+# <bin dir>` puts that directory first on PATH (dropping the one picked
+# before), `shift-use pyenv <version>` sets PYENV_VERSION. This shell only.
+__shift_use_php=
+__shift_use_python=
+shift-use() {
+    local kind=$1 dir=$2 prev
+    case $kind in
+        pyenv) export PYENV_VERSION=$dir; return ;;
+        php) prev=$__shift_use_php ;;
+        python) prev=$__shift_use_python ;;
+        *) echo 'usage: shift-use php|python <bin dir> | shift-use pyenv <version>' >&2; return 2 ;;
+    esac
+    if [[ ! -d $dir ]]; then
+        echo "shift-use: no such directory: $dir" >&2
+        return 1
+    fi
+    if [[ -n $prev ]]; then
+        local p=":$PATH:"
+        p=${p//":$prev:"/:}
+        p=${p#:}
+        PATH=${p%:}
+    fi
+    export PATH="$dir:$PATH"
+    hash -r
+    printf -v "__shift_use_$kind" '%s' "$dir"
+}
+
 # Fallback for bash < 4.4 (no PS0): the DEBUG trap fires for every simple
 # command, including the ones inside PROMPT_COMMAND, so it only counts once
 # the last PROMPT_COMMAND entry (__shift_prompt_end) has armed it.
@@ -63,6 +113,7 @@ __shift_prompt_command() {
     fi
     __shift_at_prompt=
     __shift_report_cwd
+    __shift_report_env
     printf '\e]133;A\a'
     __shift_late_entries
     __shift_keep_last

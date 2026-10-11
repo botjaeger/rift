@@ -28,6 +28,9 @@ pub enum SessionEvent {
     ResetTitle,
     /// OSC 52: the program copied text to the system clipboard.
     Clipboard(String),
+    /// OSC 52 read (`ClipboardAccess::ReadWrite` only): reply with the
+    /// clipboard text.
+    ClipboardLoad(ClipboardReply),
     /// OSC 4/10/11/12 query: reply with palette index `usize`'s color.
     ColorRequest(usize, ColorReply),
     /// XTWINOPS (or DECCOLM/DECSLPP) the window must carry out or answer:
@@ -48,6 +51,16 @@ pub enum SessionEvent {
 /// Formats a color into the reply escape sequence the program asked for.
 #[derive(Clone)]
 pub struct ColorReply(pub Arc<dyn Fn(Rgb) -> String + Send + Sync>);
+
+/// Formats the OSC 52 read reply for the clipboard text.
+#[derive(Clone)]
+pub struct ClipboardReply(pub Arc<dyn Fn(&str) -> String + Send + Sync>);
+
+impl std::fmt::Debug for ClipboardReply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ClipboardReply")
+    }
+}
 
 impl std::fmt::Debug for ColorReply {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -236,10 +249,17 @@ impl EventListener for EventProxy {
             Event::Bell => (self.observer)(self.pane, SessionEvent::Bell),
             Event::Exit | Event::ChildExit(_) => (self.observer)(self.pane, SessionEvent::Exit),
             Event::PtyWrite(s) => self.writer.reply(s.as_bytes()),
-            // copy-only OSC 52: reading the clipboard back would let any
-            // program (or remote host) exfiltrate it
+            // the Term's osc52 mode (`ClipboardAccess`) decides which of these
+            // arrive; reading is opt-in, since any program (or remote host)
+            // could exfiltrate the clipboard with it
             Event::ClipboardStore(_, text) => {
                 (self.observer)(self.pane, SessionEvent::Clipboard(text));
+            }
+            Event::ClipboardLoad(_, format) => {
+                (self.observer)(
+                    self.pane,
+                    SessionEvent::ClipboardLoad(ClipboardReply(format)),
+                );
             }
             Event::ColorRequest(index, format) => {
                 (self.observer)(
@@ -270,6 +290,8 @@ pub struct Session {
     pub scrolled: Arc<AtomicU64>,
     /// Last OSC 7 working directory.
     pub cwd: Arc<Mutex<Option<String>>>,
+    /// Shell state reported by OSC 1337 SetUserVar (prompt chips).
+    pub user_vars: UserVars,
     /// Set by the reader thread when new output arrived; cleared by the app
     /// when it consumes a snapshot. Coalesces wakeup events.
     pub dirty: Arc<AtomicBool>,
@@ -393,6 +415,38 @@ pub struct SpawnOptions {
     pub replay: Option<Replay>,
     /// Run the shell in the session service (durable sessions).
     pub service: Option<ServiceTarget>,
+    /// What OSC 52 may do with the system clipboard.
+    pub clipboard: ClipboardAccess,
+}
+
+/// OSC 52 policy: programs (and remote hosts) may copy to the clipboard,
+/// also read it back, or neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ClipboardAccess {
+    Off,
+    #[default]
+    Write,
+    ReadWrite,
+}
+
+impl ClipboardAccess {
+    /// `clipboard_access` config value; unknown values keep the default.
+    pub fn from_config(value: &str) -> Self {
+        match value.trim() {
+            "off" => Self::Off,
+            "read_write" => Self::ReadWrite,
+            _ => Self::Write,
+        }
+    }
+
+    fn osc52(self) -> alacritty_terminal::term::Osc52 {
+        use alacritty_terminal::term::Osc52;
+        match self {
+            Self::Off => Osc52::Disabled,
+            Self::Write => Osc52::OnlyCopy,
+            Self::ReadWrite => Osc52::CopyPaste,
+        }
+    }
 }
 
 /// Where the reader thread gets output from.
@@ -620,6 +674,7 @@ impl Session {
             observer,
             replay,
             service,
+            clipboard,
         } = opts;
 
         let window_size = WindowSize {
@@ -676,6 +731,7 @@ impl Session {
             // follows the resulting mode bits
             kitty_keyboard: true,
             xtversion: format!("Shift({})", env!("CARGO_PKG_VERSION")),
+            osc52: clipboard.osc52(),
             ..TermConfig::default()
         };
         let replier = Replier::new(writer.clone());
@@ -695,6 +751,7 @@ impl Session {
         let blocks = Arc::new(Mutex::new(BlockStore::default()));
         let scrolled = Arc::new(AtomicU64::new(0));
         let cwd = Arc::new(Mutex::new(None));
+        let user_vars = UserVars::default();
         let graphics = Arc::new(Mutex::new(Graphics::default()));
         let ctx = FeedCtx {
             term: term.clone(),
@@ -702,6 +759,7 @@ impl Session {
             scrollback,
             blocks: blocks.clone(),
             cwd: cwd.clone(),
+            user_vars: user_vars.clone(),
             graphics: graphics.clone(),
             window_size: window_size_shared.clone(),
             reply: Some(replier),
@@ -736,6 +794,7 @@ impl Session {
             graphics,
             scrolled,
             cwd,
+            user_vars,
             dirty,
             saw_output,
             service_id,
@@ -852,6 +911,11 @@ impl Session {
             blocks.on_prompt_start(abs_line);
             blocks.on_command_start(abs_line, cursor.column.0);
         }
+    }
+
+    /// Change the OSC 52 policy of the running shell.
+    pub fn set_clipboard_access(&self, access: ClipboardAccess) {
+        self.term.lock().set_osc52(access.osc52());
     }
 
     pub fn resize(&mut self, size: GridSize, cell_size: (u16, u16)) {
@@ -1021,6 +1085,12 @@ impl RowLayout {
 /// Parse one chunk of terminal output: split it at shell markers, feed each
 /// piece to the VT parser, apply the markers to the block model, then prune
 /// blocks that left the scrollback.
+/// Shell variables from OSC 1337 SetUserVar, by name.
+pub type UserVars = Arc<Mutex<std::collections::HashMap<String, String>>>;
+
+/// Distinct user variables a session keeps.
+const MAX_USER_VARS: usize = 32;
+
 /// Everything the output parser writes to (shared with the app).
 struct FeedCtx {
     term: Arc<FairMutex<Term<EventProxy>>>,
@@ -1028,6 +1098,7 @@ struct FeedCtx {
     scrollback: usize,
     blocks: Arc<Mutex<BlockStore>>,
     cwd: Arc<Mutex<Option<String>>>,
+    user_vars: UserVars,
     graphics: Arc<Mutex<Graphics>>,
     window_size: Arc<Mutex<WindowSize>>,
     /// PTY write-back for graphics protocol replies.
@@ -1090,8 +1161,7 @@ fn feed(parser: &mut vte::ansi::Processor, scanner: &mut OscScanner, bytes: &[u8
             // clear — blocks and scrollback stay; pad the viewport at the
             // first post-clear screen row so older content moves above the
             // fold but stays scrollable.
-            let rows = term.grid().screen_lines();
-            ctx.blocks.lock().unwrap().set_clear_pad(scrolled_cur, rows);
+            ctx.blocks.lock().unwrap().set_clear_pad(scrolled_cur);
             term.selection = None;
         }
         start = seg.end;
@@ -1113,6 +1183,13 @@ fn feed(parser: &mut vte::ansi::Processor, scanner: &mut OscScanner, bytes: &[u8
                 let out = ctx.graphics.lock().unwrap().iterm(&body, cell, cols, rows);
                 if let Some(req) = out.place {
                     place_image(parser, &mut term, &mut scrolled_cur, ctx, &req);
+                }
+            }
+            Some(Marker::UserVar { name, value }) => {
+                let mut vars = ctx.user_vars.lock().unwrap();
+                // bounded: a program cannot grow the map without limit
+                if vars.len() < MAX_USER_VARS || vars.contains_key(&name) {
+                    vars.insert(name, value);
                 }
             }
             Some(Marker::Notify { title, body }) => {
@@ -1271,7 +1348,10 @@ fn apply_marker(
             *cwd.lock().unwrap() = Some(path);
         }
         // handled by `feed` (they need the parser to move the cursor)
-        Marker::Graphics(_) | Marker::InlineImage(_) | Marker::Notify { .. } => {}
+        Marker::Graphics(_)
+        | Marker::InlineImage(_)
+        | Marker::Notify { .. }
+        | Marker::UserVar { .. } => {}
     }
 }
 
@@ -1346,6 +1426,63 @@ mod tests {
         Term::new(TermConfig::default(), &GridSize { cols, rows }, proxy)
     }
 
+    /// OSC 52 copy and read requests that reach the observer under each
+    /// `ClipboardAccess`, the policy switched on the live Term.
+    #[test]
+    fn clipboard_access_gates_osc52() {
+        let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+        let log = seen.clone();
+        let proxy = EventProxy {
+            pane: 0,
+            observer: Arc::new(move |_, e| {
+                let what = match e {
+                    SessionEvent::Clipboard(text) => format!("store {text}"),
+                    SessionEvent::ClipboardLoad(reply) => format!("load {}", (reply.0)("hi")),
+                    _ => return,
+                };
+                log.lock().unwrap().push(what);
+            }),
+            writer: Replier::new(PtyWriter::File(Arc::new(
+                File::create("/dev/null").unwrap(),
+            ))),
+            window_size: Arc::new(Mutex::new(WindowSize {
+                num_lines: 4,
+                num_cols: 20,
+                cell_width: 8,
+                cell_height: 16,
+            })),
+        };
+        let mut t = Term::new(
+            TermConfig::default(),
+            &GridSize { cols: 20, rows: 4 },
+            proxy,
+        );
+        let mut parser: vte::ansi::Processor = vte::ansi::Processor::new();
+        // "eA==" is base64 for "x"
+        let osc = b"\x1b]52;c;eA==\x07\x1b]52;c;?\x07";
+        let mut run = |t: &mut Term<EventProxy>, access: ClipboardAccess| {
+            t.set_osc52(access.osc52());
+            seen.lock().unwrap().clear();
+            parser.advance(t, osc);
+            seen.lock().unwrap().clone()
+        };
+        assert!(run(&mut t, ClipboardAccess::Off).is_empty());
+        assert_eq!(run(&mut t, ClipboardAccess::Write), ["store x"]);
+        let rw = run(&mut t, ClipboardAccess::ReadWrite);
+        assert_eq!(rw[0], "store x");
+        // the reply carries the clipboard text, base64 ("aGk=" = "hi")
+        assert!(rw[1].starts_with("load \x1b]52;c;aGk="), "{rw:?}");
+        assert_eq!(ClipboardAccess::from_config("off"), ClipboardAccess::Off);
+        assert_eq!(
+            ClipboardAccess::from_config("read_write"),
+            ClipboardAccess::ReadWrite
+        );
+        assert_eq!(
+            ClipboardAccess::from_config("bogus"),
+            ClipboardAccess::Write
+        );
+    }
+
     #[test]
     fn anchors_follow_reflow() {
         let mut t = term(20, 6);
@@ -1373,6 +1510,7 @@ mod tests {
             scrollback: 10_000,
             blocks: Arc::new(Mutex::new(BlockStore::default())),
             cwd: Arc::new(Mutex::new(None)),
+            user_vars: UserVars::default(),
             graphics: Arc::new(Mutex::new(Graphics::default())),
             window_size: Arc::new(Mutex::new(WindowSize {
                 num_lines: rows as u16,
@@ -1780,6 +1918,7 @@ mod tests {
             graphics: c.graphics.clone(),
             scrolled: c.scrolled.clone(),
             cwd: c.cwd.clone(),
+            user_vars: c.user_vars.clone(),
             dirty: Arc::new(AtomicBool::new(false)),
             saw_output: Arc::new(AtomicBool::new(false)),
             service_id: None,

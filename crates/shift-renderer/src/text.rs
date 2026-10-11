@@ -7,6 +7,9 @@ use std::sync::{Arc, Mutex, RwLock};
 
 pub const FONT_MONO: &str = "JetBrains Mono";
 pub const FONT_SANS: &str = "Inter";
+/// Nerd Font symbols (brand and tool marks on the prompt chips, the running
+/// spinner): an embedded subset of the glyphs Shift draws.
+pub const FONT_SYMBOLS: &str = "Symbols Nerd Font";
 
 /// Terminal font family currently in use (config `font_family`, falling
 /// back to the embedded JetBrains Mono). Read by every mono text site.
@@ -34,7 +37,30 @@ const JBM_SEMIBOLD: &[u8] = include_bytes!("../../../assets/fonts/JetBrainsMono-
 const JBM_BOLD: &[u8] = include_bytes!("../../../assets/fonts/JetBrainsMono-Bold.ttf");
 const JBM_ITALIC: &[u8] = include_bytes!("../../../assets/fonts/JetBrainsMono-Italic.ttf");
 const JBM_BOLD_ITALIC: &[u8] = include_bytes!("../../../assets/fonts/JetBrainsMono-BoldItalic.ttf");
+/// Hack, offered in the terminal font picker (Warp's default font).
+const HACK: [&[u8]; 4] = [
+    include_bytes!("../../../assets/fonts/Hack-Regular.ttf"),
+    include_bytes!("../../../assets/fonts/Hack-Bold.ttf"),
+    include_bytes!("../../../assets/fonts/Hack-Italic.ttf"),
+    include_bytes!("../../../assets/fonts/Hack-BoldItalic.ttf"),
+];
 const INTER: &[u8] = include_bytes!("../../../assets/fonts/Inter-Variable.ttf");
+const SYMBOLS: &[u8] = include_bytes!("../../../assets/fonts/SymbolsNerdFont-subset.ttf");
+
+/// A face fit for the terminal grid: outline glyphs (not bitmap-only) and
+/// one advance width across narrow, wide and punctuation glyphs.
+fn is_terminal_font(data: &[u8], index: u32) -> bool {
+    let Ok(face) = ttf_parser::Face::parse(data, index) else {
+        return false;
+    };
+    let t = face.tables();
+    if t.glyf.is_none() && t.cff.is_none() && t.cff2.is_none() {
+        return false;
+    }
+    let advance = |c: char| face.glyph_index(c).and_then(|g| face.glyph_hor_advance(g));
+    let m = advance('M');
+    m.is_some_and(|m| m > 0) && ['i', 'W', 'l', '.', '0'].iter().all(|&c| advance(c) == m)
+}
 
 /// Fonts, glyph atlas and per-layer text renderers.
 pub struct TextEngine {
@@ -63,7 +89,11 @@ impl TextEngine {
             db.load_font_data(JBM_BOLD.to_vec());
             db.load_font_data(JBM_ITALIC.to_vec());
             db.load_font_data(JBM_BOLD_ITALIC.to_vec());
+            for face in HACK {
+                db.load_font_data(face.to_vec());
+            }
             db.load_font_data(INTER.to_vec());
+            db.load_font_data(SYMBOLS.to_vec());
             // The embedded file's family is "Inter Variable" with a single
             // weight-400 face, so `Family::Name("Inter")` never matched: normal
             // text only reached it through fallback, and MEDIUM/SEMIBOLD/BOLD
@@ -155,20 +185,37 @@ impl TextEngine {
         resolved
     }
 
-    /// Installed monospace families (deduped, sorted), embedded first.
+    /// Installed monospace families (deduped, sorted), the default first.
+    /// A family counts when its regular face draws outlines at one advance
+    /// width: the fixed-pitch flag alone misses Monaco (it does not set
+    /// it) and admits bitmap-only faces such as "GB18030 Bitmap".
     pub fn monospace_families(&self) -> Vec<String> {
-        let mut out: Vec<String> = vec![FONT_MONO.to_string()];
-        for face in self.font_system.db().faces() {
-            if !face.monospaced {
+        let db = self.font_system.db();
+        let mut seen: Vec<&str> = Vec::new();
+        let mut out: Vec<String> = Vec::new();
+        for face in db.faces() {
+            let Some((name, _)) = face.families.first() else {
+                continue;
+            };
+            // dot-prefixed families (".SF NS Mono") are macOS-private;
+            // judge each family once, by its first upright face
+            if name.starts_with('.')
+                || name == FONT_MONO
+                || face.style != glyphon::fontdb::Style::Normal
+                || seen.contains(&name.as_str())
+            {
                 continue;
             }
-            if let Some((name, _)) = face.families.first()
-                && !out.iter().any(|n| n == name)
+            seen.push(name);
+            if db
+                .with_face_data(face.id, is_terminal_font)
+                .unwrap_or(false)
             {
                 out.push(name.clone());
             }
         }
-        out[1..].sort();
+        out.sort();
+        out.insert(0, FONT_MONO.to_string());
         out
     }
 
@@ -198,7 +245,7 @@ impl TextEngine {
     pub fn mono_cell_width(&mut self, font_size: f32) -> f32 {
         let mut buf = Buffer::new(
             &mut self.font_system,
-            Metrics::new(font_size, font_size * 1.65),
+            Metrics::new(font_size, font_size * 1.2),
         );
         buf.set_text(
             &mut self.font_system,
@@ -277,5 +324,20 @@ impl TextEngine {
             let cutoff = self.frame.saturating_sub(300);
             self.shape_cache.retain(|_, e| e.last_used >= cutoff);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_fonts_are_outline_and_fixed_width() {
+        assert!(is_terminal_font(JBM_REGULAR, 0));
+        assert!(HACK.iter().all(|f| is_terminal_font(f, 0)));
+        // proportional, symbol-only and malformed faces are not
+        assert!(!is_terminal_font(INTER, 0));
+        assert!(!is_terminal_font(SYMBOLS, 0));
+        assert!(!is_terminal_font(b"not a font", 0));
     }
 }

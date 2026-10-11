@@ -3,6 +3,7 @@ use shift_renderer::glyphon::Weight;
 use shift_renderer::{FONT_SANS, Layer, TextEngine, mono_family};
 
 use crate::state::{ClickTarget, Hit};
+use crate::views::glyphs;
 use crate::views::icons::{self, Icon};
 
 pub const TAB_BAR_H: f32 = 42.0;
@@ -37,6 +38,9 @@ pub struct TabInfo {
     pub subtitle: String,
     /// The Settings tab (a page, not a shell): settings icon, × closes it.
     pub settings: bool,
+    /// A command runs in one of its panes: a spinner leads the title (in
+    /// place of the sync icon).
+    pub running: bool,
 }
 
 fn make_text(
@@ -452,14 +456,7 @@ fn draw_tab(
     let mid = y + th / 2.0;
     if floating {
         layer.shadow([x, y], [tw, th], Color::BLACK.with_alpha(0.55), 0.0, 10.0);
-        layer.bordered(
-            [x, y],
-            [tw, th],
-            theme.ground(theme.bg),
-            lift(theme, 0.12),
-            0.0,
-            1.0,
-        );
+        layer.bordered([x, y], [tw, th], theme.bg, lift(theme, 0.12), 0.0, 1.0);
     } else if is_active {
         // joins the pane below: covers the strip's bottom hairline
         layer.rect([x, y], [tw, th], theme.ground(theme.bg), 0.0);
@@ -485,9 +482,14 @@ fn draw_tab(
         theme.text_dim
     };
     let mut cx = x + TAB_PAD_L;
-    // shell tabs carry no icon; Settings and synced tabs say what they are
+    // shell tabs carry no icon; Settings and synced tabs say what they are,
+    // and one running a command spins
     let icon = if tab.settings {
         Some((Icon::Settings, text_color))
+    } else if tab.running {
+        glyphs::draw_spinner(layer, [cx + 7.0, mid], 13.0, text_color);
+        cx += 14.0 + 8.0;
+        None
     } else if tab.sync {
         Some((Icon::Sync, theme.accent))
     } else {
@@ -680,6 +682,16 @@ pub fn render_rail(
                     theme.text_dim
                 },
             ))
+        } else if tab.running {
+            let color = if is_active {
+                theme.text_ui
+            } else {
+                theme.text_dim
+            };
+            let c = [cx + 7.0, line1 + 8.5];
+            glyphs::draw_spinner(layer, c, 13.0, color);
+            cx += 14.0 + 8.0;
+            None
         } else if tab.sync {
             Some((Icon::Sync, theme.accent))
         } else {
@@ -898,6 +910,7 @@ mod tests {
             editing_selected: false,
             subtitle: String::new(),
             settings: false,
+            running: false,
         }
     }
 

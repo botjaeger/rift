@@ -188,7 +188,7 @@ edits, Esc clears, a second Esc closes the tab); ⌘W or ⌘, leave it.
 When a program owns the terminal (vim, less, htop), keys go out as xterm
 sequences: F1–F12, modified arrows/Home/End/PgUp/PgDn/Insert/Delete
 (`\e[1;5D` for ⌃←), application cursor mode (`\eOA`), ⌃ control codes, and
-ESC-prefixed Meta for ⌥ (always on Linux; on macOS with `option_as_meta`).
+ESC-prefixed Meta for ⌥ (always on Linux; on macOS with `option_as_meta` for the left key and `right_option_as_meta` for the right one).
 
 ## Palette keys
 
@@ -208,7 +208,10 @@ font_increase = "cmd+plus"   # "plus" = the '+' key (can't be written literally)
 Chord syntax: `ctrl|control|^`, `shift`, `alt|opt|option|meta`,
 `cmd|super|command` joined with `+` plus one key: a character, or
 `tab left right up down pageup pagedown home end enter escape space plus
-backspace delete insert f1`–`f12`. `"none"` unbinds an action.
+backspace delete insert f1`–`f12`. `"none"` unbinds an action. A chord with any other key name (`cmd+foo`) is
+invalid, and an unknown action name is ignored; both are logged.
 
 Or record shortcuts in Settings → Keybindings (⌃⌘K): click a row, press the
-chord. The macOS menu bar shows the resolved shortcuts.
+chord. The macOS menu bar shows the resolved shortcuts. Where an action has
+two (a ⌃⇧ chord and a ⌘ one), the palette, Settings, menus, the welcome list
+and tooltips show the ⌘ one on macOS and the other elsewhere.
