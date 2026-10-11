@@ -43,6 +43,13 @@ vendored() {
     local sub=$1 crate rc=0
     shift
     for crate in "${VENDORED[@]}"; do
+        # CI checks out only tracked files: an untracked lockfile passes
+        # `--locked` here and fails there
+        if ! git ls-files --error-unmatch "$crate/Cargo.lock" >/dev/null 2>&1; then
+            echo "$crate/Cargo.lock is not tracked by git (CI's --locked needs it)" >&2
+            rc=1
+            continue
+        fi
         CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target}/vendor" \
             cargo "$sub" --manifest-path "$crate/Cargo.toml" "$@" || rc=1
     done
