@@ -24,6 +24,7 @@ pub mod shell_integration;
 pub mod ssh;
 pub mod theme;
 pub mod transcript;
+pub mod update;
 pub mod watch;
 
 pub use block::{AbsLine, Block, BlockId, BlockState, BlockStore, Restored};

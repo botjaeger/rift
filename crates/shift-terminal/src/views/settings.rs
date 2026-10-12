@@ -18,10 +18,11 @@ pub enum Page {
     Notifications,
     Keybindings,
     Themes,
+    About,
 }
 
 impl Page {
-    pub const ALL: [Page; 8] = [
+    pub const ALL: [Page; 9] = [
         Page::General,
         Page::Appearance,
         Page::Features,
@@ -30,6 +31,7 @@ impl Page {
         Page::Notifications,
         Page::Keybindings,
         Page::Themes,
+        Page::About,
     ];
 
     pub fn label(self) -> &'static str {
@@ -42,6 +44,7 @@ impl Page {
             Page::Notifications => "Notifications",
             Page::Keybindings => "Keybindings",
             Page::Themes => "Themes",
+            Page::About => "About",
         }
     }
 
@@ -57,6 +60,7 @@ impl Page {
             }
             Page::Keybindings => "Click a shortcut to record a new one · type to filter.",
             Page::Themes => "Built-in themes plus ~/.config/shift/themes (TOML or Warp YAML).",
+            Page::About => "",
         }
     }
 
@@ -72,6 +76,7 @@ impl Page {
             Page::Notifications => Icon::Inbox,
             Page::Keybindings => Icon::Keyboard,
             Page::Themes => Icon::Themes,
+            Page::About => Icon::Info,
         }
     }
 }
@@ -87,6 +92,19 @@ pub struct Dropdown {
     pub highlight: usize,
     /// The current value's option.
     pub current: Option<usize>,
+}
+
+/// Settings › About's update line.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum UpdateLine {
+    /// Not checked (checks off, scripted run).
+    #[default]
+    None,
+    Checking,
+    UpToDate,
+    /// That version is available: an "Update…" button follows.
+    Available(String),
+    Failed,
 }
 
 #[derive(Default)]
@@ -113,6 +131,8 @@ pub struct SettingsState {
     pub focus: Option<ClickTarget>,
     /// The select whose list is open.
     pub dropdown: Option<Dropdown>,
+    /// About's update line (set by the app from the update check).
+    pub update: UpdateLine,
 }
 
 impl SettingsState {
@@ -174,6 +194,8 @@ fn focusable(target: &ClickTarget) -> bool {
             | ClickTarget::SettingsReset(_)
             | ClickTarget::SettingsEditPrompt
             | ClickTarget::SettingsOpenConfig
+            | ClickTarget::SettingsCopyVersion
+            | ClickTarget::SettingsUpdate
     )
 }
 
@@ -528,20 +550,24 @@ pub fn render(
         ],
         0.0,
     )));
-    let title = super::palette::elide_to(engine, &title, 22.0, FONT_SANS, card_w);
-    layer.text(
-        sans(engine, &title, 22.0, Weight::SEMIBOLD),
-        cx,
-        body_top - state.scroll,
-        theme.text_bright,
-    );
-    let subtitle = super::palette::elide_to(engine, subtitle, 13.0, FONT_SANS, card_w);
-    layer.text(
-        sans(engine, &subtitle, 13.0, Weight::NORMAL),
-        cx,
-        body_top + 34.0 - state.scroll,
-        theme.text_dim,
-    );
+    // About is the logo alone, centred (Warp): no page title
+    let about = !searching && state.page == Page::About;
+    if !about {
+        let title = super::palette::elide_to(engine, &title, 22.0, FONT_SANS, card_w);
+        layer.text(
+            sans(engine, &title, 22.0, Weight::SEMIBOLD),
+            cx,
+            body_top - state.scroll,
+            theme.text_bright,
+        );
+        let subtitle = super::palette::elide_to(engine, subtitle, 13.0, FONT_SANS, card_w);
+        layer.text(
+            sans(engine, &subtitle, 13.0, Weight::NORMAL),
+            cx,
+            body_top + 34.0 - state.scroll,
+            theme.text_dim,
+        );
+    }
 
     let body_y = body_top + 70.0;
     let hit_start = hits.len();
@@ -613,6 +639,7 @@ pub fn render(
             Page::Notifications => notifications_page(&mut form, config),
             Page::Keybindings => keybindings_page(&mut form, keymap, config, state, blink_on),
             Page::Themes => themes_page(&mut form, config),
+            Page::About => about_page(&mut form, top, bottom - 34.0, &state.update),
         }
     }
     // from the body's top edge (the title starts 28 px below it), so
@@ -1426,6 +1453,136 @@ impl Form<'_> {
 }
 
 /// `10000` → `10,000` (design 05 scrollback field).
+/// Settings › About: the app icon and wordmark, the version (with a copy
+/// button) and the copyright, centred in the body.
+fn about_page(form: &mut Form, top: f32, bottom: f32, update: &UpdateLine) {
+    const LOGO: f32 = 64.0;
+    const WORD: f32 = 52.0;
+    const GAP: f32 = 18.0;
+    let version = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let word_w = form
+        .engine
+        .measure("Shift", WORD, FONT_SANS, Weight::SEMIBOLD);
+    let version_w = form
+        .engine
+        .measure(&version, 13.0, FONT_SANS, Weight::NORMAL);
+    // the update line takes a row under the version when there is one
+    let update_h = if *update == UpdateLine::None {
+        0.0
+    } else {
+        34.0
+    };
+    let height = LOGO + 32.0 + 26.0 + update_h + 20.0;
+    let mid = form.x + form.card_w / 2.0;
+    // a little above the middle, as Warp sits it; scrolls when too short
+    let y = (top + (bottom - top - height) * 0.45).max(form.y + 28.0);
+    let theme = form.theme;
+
+    let lx = (mid - (LOGO + GAP + word_w) / 2.0).round();
+    super::welcome::logo(form.layer, theme, [lx, y], LOGO);
+    form.layer.text(
+        sans(form.engine, "Shift", WORD, Weight::SEMIBOLD),
+        lx + LOGO + GAP,
+        y + LOGO / 2.0 - WORD * 1.3 / 2.0,
+        theme.text_bright,
+    );
+
+    // version, then a copy button beside it; the pair centres together
+    let vy = y + LOGO + 32.0;
+    let vx = (mid - (version_w + 6.0 + 24.0) / 2.0).round();
+    form.layer.text(
+        sans(form.engine, &version, 13.0, Weight::NORMAL),
+        vx,
+        vy,
+        theme.text_ui,
+    );
+    let copy = [vx + version_w + 6.0, vy - 3.0, 24.0, 24.0];
+    if form.hot(copy) {
+        form.layer.rect(
+            [copy[0], copy[1]],
+            [copy[2], copy[3]],
+            lift(theme, 0.07),
+            4.0,
+        );
+    }
+    icons::draw(
+        form.layer,
+        Icon::Copy,
+        [copy[0] + 12.0, copy[1] + 12.0],
+        14.0,
+        theme.text_muted,
+    );
+    form.push_hit(copy, ClickTarget::SettingsCopyVersion);
+    form.name_last(format!("Copy version {version}"));
+
+    // update status: "Up to date", "vX available" + Update…, or why not
+    let uy = vy + 28.0;
+    let (status, color) = match update {
+        UpdateLine::None => ("".to_string(), theme.text_muted),
+        UpdateLine::Checking => ("Checking for updates…".into(), theme.text_muted),
+        UpdateLine::UpToDate => ("Up to date".into(), theme.text_muted),
+        UpdateLine::Available(v) => (format!("v{v} available"), theme.warning),
+        UpdateLine::Failed => ("Couldn't check for updates".into(), theme.text_muted),
+    };
+    if !status.is_empty() {
+        let sw = form
+            .engine
+            .measure(&status, 13.0, FONT_SANS, Weight::NORMAL);
+        let button = matches!(update, UpdateLine::Available(_));
+        let label = "Update…";
+        let bw = if button {
+            form.engine.measure(label, 12.5, FONT_SANS, Weight::MEDIUM) + 24.0
+        } else {
+            0.0
+        };
+        let total = sw + if button { 10.0 + bw } else { 0.0 };
+        let sx = (mid - total / 2.0).round();
+        form.layer.text(
+            sans(form.engine, &status, 13.0, Weight::NORMAL),
+            sx,
+            uy + 4.0,
+            color,
+        );
+        if button {
+            // a secondary button (DESIGN.md): 6 % fill, 12 % hairline
+            let r = [sx + sw + 10.0, uy - 1.0, bw.round(), CONTROL_H];
+            let hot = form.hot(r);
+            form.layer.bordered(
+                [r[0], r[1]],
+                [r[2], r[3]],
+                lift(theme, if hot { 0.10 } else { 0.06 }),
+                lift(theme, 0.12),
+                4.0,
+                1.0,
+            );
+            form.layer.text(
+                sans(form.engine, label, 12.5, Weight::MEDIUM),
+                r[0] + 12.0,
+                r[1] + (CONTROL_H - 12.5 * 1.35) / 2.0,
+                theme.text_ui,
+            );
+            form.push_hit(r, ClickTarget::SettingsUpdate);
+            form.name_last(format!("Update to {status}"));
+        } else {
+            // read-only, but named for assistive tech
+            form.push_hit([sx, uy, sw, 26.0], ClickTarget::SettingsNoop);
+            form.name_last(status.clone());
+        }
+    }
+
+    let copyright = "Copyright 2026 botjaeger · MIT License";
+    let cw = form
+        .engine
+        .measure(copyright, 13.0, FONT_SANS, Weight::NORMAL);
+    form.layer.text(
+        sans(form.engine, copyright, 13.0, Weight::NORMAL),
+        (mid - cw / 2.0).round(),
+        vy + 26.0 + update_h,
+        theme.text_dim,
+    );
+    form.y = y + height;
+}
+
 fn thousands(n: usize) -> String {
     let digits = n.to_string();
     let mut out = String::new();
@@ -1607,6 +1764,16 @@ fn general_page(form: &mut Form, config: &Config) {
         "Session service; relaunch reattaches (new shells)",
         config.durable_sessions,
         "durable_sessions",
+    );
+
+    form.group("Updates");
+    let y = form.y;
+    form.toggle_desc(
+        y,
+        "Check for updates",
+        "At launch and every 6 hours; Update Shift appears in the tab bar",
+        config.check_for_updates,
+        "check_for_updates",
     );
 
     form.group("Automation");
@@ -2335,7 +2502,7 @@ mod tests {
         assert_eq!(state.scroll, 0.0);
 
         state.move_page(99);
-        assert_eq!(state.page, Page::Themes);
+        assert_eq!(state.page, Page::About);
         state.move_page(-99);
         assert_eq!(state.page, Page::General);
     }

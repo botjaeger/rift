@@ -11,6 +11,10 @@
 | `~/.local/share/shift/` | Materialized shell-integration files |
 | `~/.local/share/shift/session.toml` | Saved session (tabs + cwds), written atomically |
 | `~/.local/share/shift/last-seen-version` | Version whose What's New was last shown (opens it once after an update) |
+| `~/.local/share/shift/update.json` | Last update check: when, the newest release's manifest, the version *Later* dismissed |
+| `~/.local/share/shift/updates/` | Update downloads (deleted after installing; an interrupted install's leftovers go at the next one), `install.lock` (one window installs at a time) and `relaunch.log` (the restarted app's output until it is confirmed; emptied past 1 MB) |
+| `~/.local/share/shift/update-pending.json` | An update in progress (readable by you only; holds the token other windows' `prepare-restart` needs); the new version removes it 10 s after its first frame, and if it dies before that the old app is put back (`update-failed.json`) |
+| `~/.local/share/shift/restart/` | Each window's layout while an update restarts them (consumed on relaunch; left by a crash, reopened at the next plain launch) |
 
 `XDG_CONFIG_HOME` and `XDG_DATA_HOME` are honored. Existing `runway` config and data directories remain active when the corresponding `shift` directory does not exist; move them to `shift` when you want the new paths.
 
@@ -40,9 +44,13 @@ restore_session = true            # reopen last session's tabs + cwds on launch
 save_transcripts = false          # also save finished blocks' output and replay it
                                   # (marked "restored") on relaunch; off = deleted
 tab_layout    = "horizontal"      # horizontal (tabs on top) | vertical (side rail)
-durable_sessions = false          # shells live in the session service: they keep
+durable_sessions = true           # shells live in the session service: they keep
                                   # running after quit and reattach on launch
-control_api   = "navigate"        # off | navigate (list/status/focus) | full (also
+                                  # (false keeps them in the window process)
+check_for_updates = true          # look for a new release at launch and every 6 h
+                                  # ("Update Shift" chip in the tab bar)
+control_api   = "navigate"        # off | navigate (list/status/focus, and an
+                                  # update's prepare-restart) | full (also
                                   # split/open/send-text); `shift-terminal ctl`
 input_position = "bottom"         # bottom | top — where the command editor sits
 blocks_start = "bottom"           # bottom | top — blocks fill up from the editor (Warp), or start at the pane's top
@@ -284,8 +292,25 @@ while it is not, plus its sound.
 - `SHIFT_NO_NOTIFY=1` suppresses desktop notifications and sounds (they are
   logged instead) — useful for scripted runs.
 - `SHIFT_PERSIST_SESSION=1` lets a `--script` run save and restore the
-  session file (scripted runs leave it alone by default); point
+  session file and use the session service (scripted runs leave both alone
+  by default: their shells are local, so no service outlives a test); point
   `XDG_DATA_HOME` at a scratch directory when using it.
+- `SHIFT_UPDATE_URL` replaces the update manifest's URL (tests: a
+  `file://` manifest, whose assets may then be `file://` too). Scripted runs
+  check for updates only when it is set. The manifest still needs a valid
+  `latest.json.sig` beside it.
+- `SHIFT_UPDATE_TEST_KEY` (tests): an extra Ed25519 public key (base64 of
+  the raw 32 bytes) trusted for the update manifest's signature, so a test
+  can sign with a throwaway key. Honoured only while `SHIFT_UPDATE_URL` is a
+  `file://` URL; an https manifest is verified with the release keys alone.
+- `SHIFT_RELAUNCH_SCRIPT` / `SHIFT_RELAUNCH_WINDOW_SCRIPT` (tests): the app
+  an update restarts runs that `--script` (reopened windows: the second one,
+  headless) instead of starting plainly. A scripted run with
+  `SHIFT_PERSIST_SESSION` counts as a plain main-window launch: it also
+  reopens windows an interrupted update left in `restart/`.
+- `SHIFT_TEST_NO_FIRST_FRAME` (tests): a headless run does not count its
+  start as a presented frame, so it confirms through the fallback timer (the
+  planned wait + 20 s) like a window that never draws.
 
 ## Keybinding overrides
 

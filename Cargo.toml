@@ -48,6 +48,8 @@ env_logger = "0.11"
 png = "0.18"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 flate2 = "1"
+# release-manifest signatures (verify only: no RNG, no PEM)
+ed25519-compact = { version = "2.6.0", default-features = false }
 
 # The VT parser and grid are vendored (vendor/README.md) and extended for
 # VT420/xterm parity: rectangle editing, left/right margins, selective

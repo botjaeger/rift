@@ -325,6 +325,9 @@ pub fn all_actions() -> Vec<&'static str> {
         "toggle_tab_layout",
         "clear_transcripts",
         "whats_new",
+        "open_about",
+        "check_for_updates",
+        "update_shift",
     ] {
         if !out.contains(&extra) {
             out.push(extra);

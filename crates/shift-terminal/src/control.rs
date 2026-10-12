@@ -7,8 +7,15 @@
 //! | level | commands |
 //! |---|---|
 //! | `"off"` | no socket |
-//! | `"navigate"` (default) | `list`, `status`, `focus` |
+//! | `"navigate"` (default) | `list`, `status`, `focus`, `prepare-restart` |
 //! | `"full"` | also `split`, `open`, `send-text` (types into a shell) |
+//!
+//! `prepare-restart` is sent by a window that installs an update: the
+//! receiver saves its layout to `<data dir>/restart/<pid>.toml`, leaves its
+//! durable shells running and quits (the updated app reopens it). It must
+//! carry the token from that update's marker (`update-pending.json`,
+//! readable by the user only, under 60 s old); without it the request is
+//! refused.
 //!
 //! `shift-terminal ctl …` is the client. Requests are answered on the UI
 //! thread, so a response reflects exactly what the window shows.
@@ -73,13 +80,25 @@ pub enum Request {
         pane: u64,
         text: String,
     },
+    /// Save this window's layout for the restart after an update, keep its
+    /// durable shells running, and quit (see `updater.rs`). Only honored
+    /// with the token of an update in flight: the updating window writes it
+    /// into its 0600 update marker, so a program in a pane cannot make
+    /// windows quit.
+    PrepareRestart {
+        #[serde(default)]
+        token: String,
+    },
 }
 
 impl Request {
     /// Least level that may run this request.
     pub fn level(&self) -> Level {
         match self {
-            Request::List | Request::Status | Request::Focus { .. } => Level::Navigate,
+            Request::List
+            | Request::Status
+            | Request::Focus { .. }
+            | Request::PrepareRestart { .. } => Level::Navigate,
             _ => Level::Full,
         }
     }
@@ -632,6 +651,14 @@ mod tests {
             serde_json::from_str(r#"{"cmd":"send-text","pane":1,"text":"ls\n"}"#).unwrap();
         assert_eq!(r.level(), Level::Full);
         assert!(serde_json::from_str::<Request>(r#"{"cmd":"rm-rf"}"#).is_err());
+        let r: Request = serde_json::from_str(r#"{"cmd":"prepare-restart"}"#).unwrap();
+        assert_eq!(
+            r,
+            Request::PrepareRestart {
+                token: String::new()
+            }
+        );
+        assert_eq!(r.level(), Level::Navigate);
         assert_eq!(Level::parse("full"), Level::Full);
         assert_eq!(Level::parse("navigate"), Level::Navigate);
         assert_eq!(Level::parse("Full"), Level::Full);

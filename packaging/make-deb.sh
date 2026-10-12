@@ -27,7 +27,7 @@ VERSION="$(shift_version)"
 ARCH="$(dpkg --print-architecture)"
 
 if [ "$BUILD" -eq 1 ]; then
-    if [ -n "$TRIPLE" ]; then cargo build --release --target "$TRIPLE"; else cargo build --release; fi
+    if [ -n "$TRIPLE" ]; then cargo build --release --target-dir "$TARGET_DIR" --target "$TRIPLE"; else cargo build --release --target-dir "$TARGET_DIR"; fi
 fi
 
 if [ -n "$TRIPLE" ]; then

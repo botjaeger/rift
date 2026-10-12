@@ -68,9 +68,14 @@ If commands do not become blocks, the shell is not loading the hooks (see
 | Tabs in a side rail | Settings → Appearance → *Tabs: Side* |
 
 Tabs, splits and directories come back on the next launch
-(`restore_session`). Turn on *Save block output for restore* to also bring
-back the finished blocks, and *Keep shells running when Shift quits* to keep
-the shells themselves alive (see [durable sessions](features.md#durable-sessions)).
+(`restore_session`), and the shells themselves keep running while Shift is
+closed and reattach (*Keep shells running when Shift quits*, on by default;
+see [durable sessions](features.md#durable-sessions)). Turn on *Save block
+output for restore* to also bring back the finished blocks.
+
+When a new release is out, **Update Shift** appears in the tab bar: it
+installs the update and restarts Shift with your tabs and running shells (see
+[updates](features.md#updates)).
 
 ## Find anything: the palette
 

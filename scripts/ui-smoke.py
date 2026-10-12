@@ -1,4 +1,6 @@
 """Regression checks through Shift's real input routing, in scratch directories."""
+import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -185,6 +187,16 @@ steps = [
     "key space",
     "wait 300",
     cp(cfg / "config.toml", scratch / "settings-after.toml"),
+    # About Shift opens Settings › About; its copy button copies the version
+    "key cmd+p",
+    "type About Shift",
+    "wait 200",
+    "key enter",
+    "wait 200",
+    "key tab",
+    "key space",
+    "wait 200",
+    f"dump {scratch}/about.txt",
     "key escape",
     "key escape",
     f"type sh {scratch}/plain.sh\\n",
@@ -284,6 +296,12 @@ assert "confirm=Some" in state("confirm") and "tabs=1" in state("confirm"), stat
 assert 'settings_focus=Some(SettingsStep("font_size"' in state("settings-focus"), state("settings-focus")
 assert (scratch / "settings-before.toml").read_text() != (scratch / "settings-after.toml").read_text(), \
     "Space did not press the focused Settings control"
+about = state("about")
+assert "settings=true page=About" in about, about
+assert "settings_focus=Some(SettingsCopyVersion)" in about, about
+assert 'toast=Some("Copied version")' in about, about
+assert re.fullmatch(r"v\d+\.\d+\.\d+.*", json.loads(next(
+    l for l in about.splitlines() if l.startswith("clipboard="))[len("clipboard="):])), about
 settings_after = (scratch / "settings-after.toml").read_text()
 assert settings_after.startswith("# keep this comment\n"), settings_after
 assert "future_option = 1" in settings_after, settings_after
@@ -1400,6 +1418,199 @@ assert 'settings_query="font family"' in fonts, fonts[:2000]
 font_opts = re.findall(r'ListBoxOption "([^"]+)"', fonts)
 assert font_opts[:1] == ["JetBrains Mono"] and "Hack" in font_opts, font_opts
 assert not any("Bitmap" in f for f in font_opts), font_opts
+
+# Updates: a file:// manifest (SHIFT_UPDATE_URL) advertising a newer
+# version shows the tab bar's chip; a click opens the update dialog (a
+# development build cannot update itself: "Open download page"); Later
+# dismisses that version, also after a relaunch. The running version or a
+# malformed manifest shows no chip; About says why. Every manifest needs
+# latest.json.sig, an Ed25519 signature: these are signed with a throwaway
+# test key (SHIFT_UPDATE_TEST_KEY, honoured for file:// manifests only); an
+# unsigned or tampered manifest shows no chip either.
+def ed25519_sign(seed, msg):
+    """RFC 8032 Ed25519 (pure Python: macOS's LibreSSL has no Ed25519):
+    (public key, signature) of `msg` with a 32-byte seed."""
+    p =2**255 - 19
+    order = 2**252 + 27742317777372353535851937790883648493
+    d = -121665 * pow(121666, p - 2, p) % p
+
+    def add(P, Q):
+        x1, y1, z1, t1 = P
+        x2, y2, z2, t2 = Q
+        a, b = (y1 - x1) * (y2 - x2) % p, (y1 + x1) * (y2 + x2) % p
+        c, dd = 2 * t1 * t2 * d % p, 2 * z1 * z2 % p
+        e, f, g, h = b - a, dd - c, dd + c, b + a
+        return (e * f % p, g * h % p, f * g % p, e * h % p)
+
+    def mul(s, P):
+        Q = (0, 1, 1, 0)
+        while s:
+            if s & 1:
+                Q = add(Q, P)
+            P, s = add(P, P), s >> 1
+        return Q
+
+    def enc(P):
+        zi = pow(P[2], p - 2, p)
+        x, y = P[0] * zi % p, P[1] * zi % p
+        return (y | (x & 1) << 255).to_bytes(32, "little")
+
+    gy = 4 * pow(5, p - 2, p) % p
+    w = (gy * gy - 1) * pow(d * gy * gy + 1, p - 2, p) % p
+    gx = pow(w, (p + 3) // 8, p)
+    if (gx * gx - w) % p:
+        gx = gx * pow(2, (p - 1) // 4, p) % p
+    if gx & 1:
+        gx = p - gx
+    G = (gx, gy, 1, gx * gy % p)
+    h = hashlib.sha512(seed).digest()
+    a = int.from_bytes(h[:32], "little") & ((1 << 254) - 8) | (1 << 254)
+    A = enc(mul(a, G))
+    r = int.from_bytes(hashlib.sha512(h[32:] + msg).digest(), "little") % order
+    R = enc(mul(r, G))
+    k = int.from_bytes(hashlib.sha512(R + A + msg).digest(), "little") % order
+    return A, R + ((r + k * a) % order).to_bytes(32, "little")
+
+up_seed = os.urandom(32)
+up_key = base64.b64encode(ed25519_sign(up_seed, b"")[0]).decode()
+
+def write_signed(path, body, signed_body=None):
+    """Write a manifest and its signature (of `signed_body`, default `body`)."""
+    path.write_bytes(body)
+    sig = ed25519_sign(up_seed, body if signed_body is None else signed_body)[1]
+    path.with_name(path.name + ".sig").write_text(base64.b64encode(sig).decode() + "\n")
+
+up = scratch / "update"
+current = subprocess.run([str(binary), "--version"], capture_output=True,
+                         text=True, check=True).stdout.split()[-1]
+(up / "cfg/shift").mkdir(parents=True, exist_ok=True)
+(up / "cfg/shift/config.toml").write_text(
+    'shell = "/bin/bash"\nrestore_session = false\nsync_os_theme = false\n'
+    + f'working_directory = {json.dumps(str(work))}\n')
+manifest = {"version": "99.0.0", "date": "2026-10-12", "protocol": 1, "notes": "Newer.",
+            "url": "https://github.com/botjaeger/shift-releases/releases/tag/v99.0.0",
+            "assets": {}}
+newer = json.dumps(manifest).encode()
+write_signed(up / "newer.json", newer)
+write_signed(up / "same.json", json.dumps(dict(manifest, version=current)).encode())
+write_signed(up / "bad.json", b"{not json")
+(up / "unsigned.json").write_bytes(newer)
+# signed, then changed (98 -> 99): the signature no longer matches
+write_signed(up / "forged.json", newer, newer.replace(b"99.0.0", b"98.0.0"))
+about_steps = ["key cmd+p", "type About Shift", "wait 200", "key enter", "wait 400"]
+
+def up_run(name, data, url, steps):
+    (up / f"{name}.shift").write_text(
+        "\n".join(["resize 1000 700", "wait_prompt", "wait 800", *steps, "quit"]) + "\n")
+    with (up / f"{name}.log").open("w") as log:
+        rc = subprocess.run([str(binary), "--script", str(up / f"{name}.shift"), "--headless"],
+                            env=dict(env, XDG_CONFIG_HOME=str(up / "cfg"),
+                                     XDG_DATA_HOME=str(up / data),
+                                     SHIFT_UPDATE_URL=f"file://{up / url}",
+                                     SHIFT_UPDATE_TEST_KEY=up_key,
+                                     BASH_SILENCE_DEPRECATION_WARNING="1"),
+                            stdout=log, stderr=log, timeout=60).returncode
+    assert rc == 0, died(f"update {name} run failed", up / f"{name}.log")
+
+def up_state(name):
+    return (up / f"{name}.txt").read_text()
+
+up_run("probe", "data-new", "newer.json", [f"dump {up}/probe.txt"])
+probe = up_state("probe")
+assert 'update=available:99.0.0 chip=Some("99.0.0")' in probe, probe[:3000]
+assert 'Button "Update Shift, v99.0.0 available"' in probe, probe[-3000:]
+tips = re.search(r"^tips=(\[.*\])$", probe, re.M)[1]
+x, y, w, h = map(float, re.search(r"v99\.0\.0 available@([\d.,-]+)", tips)[1].split(","))
+up_run("click", "data-new", "newer.json", [
+    f"move {x + w / 2:.0f} {y + h / 2:.0f}", "wait 900", f"dump {up}/hover.txt",
+    f"click {x + w / 2:.0f} {y + h / 2:.0f}", "wait 2500", f"dump {up}/dialog.txt",
+    "key escape", "wait 200", f"dump {up}/later.txt",
+    *about_steps, f"dump {up}/about-new.txt"])
+assert 'tooltip=Some("v99.0.0 available")' in up_state("hover"), up_state("hover")[:2000]
+dialog = up_state("dialog")
+assert "confirm=Some((Update(UpdatePlan" in dialog and "open_page: true" in dialog, dialog[:3000]
+assert 'AlertDialog "Update to Shift v99.0.0?"' in dialog, dialog[-3000:]
+assert 'Button "Later"' in dialog and 'Button "Open download page"' in dialog, dialog[-3000:]
+later = up_state("later")
+assert 'confirm=None' in later and 'chip=None dismissed=Some("99.0.0")' in later, later[:3000]
+about_new = up_state("about-new")
+assert 'Button "Update to v99.0.0 available"' in about_new, about_new[-3000:]
+# dismissed stays dismissed across a relaunch (update.json)
+up_run("relaunch", "data-new", "newer.json", [f"dump {up}/relaunch.txt"])
+assert 'update=available:99.0.0 chip=None dismissed=Some("99.0.0")' in up_state("relaunch")
+up_run("same", "data-same", "same.json", [*about_steps, f"dump {up}/same.txt"])
+same = up_state("same")
+assert "update=up-to-date chip=None" in same and 'Label "Up to date"' in same, same[:3000]
+up_run("bad", "data-bad", "bad.json", [*about_steps, f"dump {up}/bad.txt"])
+bad = up_state("bad")
+assert "update=failed:" in bad and "chip=None" in bad, bad[:3000]
+assert 'Label "Couldn\'t check for updates"' in bad, bad[-3000:]
+for name, why in [("unsigned", "release signature is missing"),
+                  ("forged", "release signature is invalid")]:
+    up_run(name, f"data-{name}", f"{name}.json", [*about_steps, f"dump {up}/{name}.txt"])
+    text = up_state(name)
+    assert f'update=failed:"{why}" chip=None' in text, text[:3000]
+    assert 'Label "Couldn\'t check for updates"' in text, text[-3000:]
+
+# prepare-restart (an update asking the other windows to quit) needs the
+# token of an update in flight: a program in a pane sending it at the
+# default "navigate" level, without a token or with a made-up one, is
+# refused and the window stays. The request runs in the background: the
+# window answers on its UI thread, which runs the script.
+(up / "rawctl.py").write_text(
+    "import pathlib, socket, sys\n"
+    "out = pathlib.Path(sys.argv[3])\n"
+    "out.write_text('no control socket in ' + sys.argv[1])\n"
+    "for sock in sorted(pathlib.Path(sys.argv[1]).glob('*.sock')):\n"
+    "    s = socket.socket(socket.AF_UNIX)\n"
+    "    s.settimeout(10)\n"
+    "    s.connect(str(sock))\n"
+    "    s.sendall(sys.argv[2].encode() + b'\\n')\n"
+    "    out.write_text(s.makefile().readline())\n"
+    "pathlib.Path(str(out) + '.done').touch()\n")
+restart_steps = []
+for i, request in enumerate(['{"cmd":"prepare-restart"}',
+                             '{"cmd":"prepare-restart","token":"0123456789abcdef"}']):
+    out = up / f"restart-{i}.json"
+    restart_steps += [
+        "sh python3 " + " ".join(shlex.quote(str(a)) for a in
+                                 (up / "rawctl.py", up / "data-rr/shift/control", request, out))
+        + " >/dev/null 2>&1 &",
+        f"wait_file {out}.done 15000", "wait 500"]
+up_run("restart", "data-rr", "same.json", [*restart_steps, f"dump {up}/restart.txt"])
+for i in range(2):
+    answer = (up / f"restart-{i}.json").read_text()
+    assert answer.startswith("{"), answer
+    refused = json.loads(answer)
+    assert refused.get("ok") is False and "no update in progress" in refused.get("error", ""), refused
+assert "update=" in up_state("restart"), "the window quit on a refused prepare-restart"
+assert not list((up / "data-rr/shift").glob("restart/*.toml")), "a refused request saved a layout"
+
+# a window an interrupted update saved (restart/<pid>.toml) and never
+# reopened comes back on the next plain launch, and its file is deleted
+left = up / "data-left/shift/restart"
+left.mkdir(parents=True)
+(left / "99999.toml").write_text('[[tabs]]\ncwd = "/tmp"\ntitle = "LEFTOVER"\n')
+(up / "cfg-left").mkdir()
+(up / "cfg-left/shift").mkdir()
+(up / "cfg-left/shift/config.toml").write_text("durable_sessions = false\n")
+(up / "left-window.shift").write_text(f"wait_prompt\nwait 300\ndump {up}/left-window.txt\nquit\n")
+(up / "left-main.shift").write_text("wait_prompt\nwait 800\nquit\n")
+with (up / "left-main.log").open("w") as log:
+    rc = subprocess.run([str(binary), "--script", str(up / "left-main.shift"), "--headless"],
+                        env=dict(env, XDG_CONFIG_HOME=str(up / "cfg-left"),
+                                 XDG_DATA_HOME=str(up / "data-left"),
+                                 SHIFT_PERSIST_SESSION="1",
+                                 SHIFT_RELAUNCH_WINDOW_SCRIPT=str(up / "left-window.shift")),
+                        stdout=log, stderr=log, timeout=60).returncode
+assert rc == 0, died("leftover-window run failed", up / "left-main.log")
+deadline = time.monotonic() + 30
+while not (up / "left-window.txt").exists():
+    assert time.monotonic() < deadline, died("a leftover restart file was not reopened",
+                                             up / "left-main.log")
+    time.sleep(0.1)
+assert 'title="LEFTOVER"' in (up / "left-window.txt").read_text()
+assert not list(left.glob("*.toml")), "the reopened window kept its restart file"
 
 for client in clients:
     client.close()

@@ -21,10 +21,10 @@ and Linux.
   highlighting, completions, ghost suggestions, history search and vim mode.
 - **Tabs and split panes** — horizontal or vertical tabs, splits you can drag,
   maximize and navigate with ⌥⌘ arrows, and synchronized input across panes.
-- **Command palette** — ⌘P finds every action, setting, workflow and history
-  entry; ⇧⌘O switches between tabs, panes and recent blocks.
-- **Durable sessions** — with `durable_sessions` on, shells keep running when
-  the window closes and reattach on the next launch.
+- **Command palette** — ⌘P finds every action, setting and history entry;
+  ⇧⌘O switches between tabs, panes and recent blocks.
+- **Durable sessions** — with `durable_sessions` on, the main window's
+  shells keep running when it closes and reattach on the next launch.
 - **Inline images** — kitty graphics and iTerm2 inline images, with size and
   memory limits.
 - **SSH profiles** — saved hosts, and a confirmed installer that brings shell

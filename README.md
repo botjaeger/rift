@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="https://github.com/botjaeger/shift">github.com/botjaeger/shift</a> ·
-  <a href="https://github.com/botjaeger/shift/releases">Releases</a> ·
+  <a href="https://github.com/botjaeger/shift-releases/releases">Releases</a> ·
   <a href="docs/README.md">Documentation</a>
 </p>
 
@@ -73,7 +73,8 @@ rebound. Full list: [keyboard shortcuts](docs/keyboard-shortcuts.md).
 | **Code review** — staged and unstaged diffs; stage, unstage or revert a file or hunk | ⇧⌘G or the `± +N −M` button at the top right |
 | Session restore (tabs, splits, directories, window position) | On by default (`restore_session`) |
 | Saved block output across restarts | Settings → General → *Save block output for restore* |
-| Durable sessions (shells keep running after you quit) | Settings → General → *Keep shells running when Shift quits* |
+| Durable sessions (the main window's shells keep running after you quit; a ⌘N window's end with it) | On by default with *Restore tabs on launch*; Settings → General → *Keep shells running when Shift quits* |
+| Updates — checked at launch and every 6 hours; tabs and running shells survive the restart | *Update Shift* in the tab bar; Settings → About; Settings → General → *Check for updates* |
 | Links and paths | ⌘-click URLs, OSC 8 links and file paths (`file:line:col` too); Settings → Files picks the editor they open in |
 | Terminal behavior — mouse reporting, middle-click paste, wheel speed, OSC 52 clipboard access, Option as Meta | Settings → Terminal |
 | Coding agents — Claude Code / Codex tabs spin only while the agent works; ⌘⌫ clears its input line | Automatic |
@@ -93,7 +94,10 @@ Behavior details: [features](docs/features.md) · every screen:
 ## Install
 
 Prebuilt packages are attached to each
-[release](https://github.com/botjaeger/shift/releases).
+[release](https://github.com/botjaeger/shift-releases/releases). The app
+from the DMG (in a writable folder such as Applications) and the AppImage
+update themselves: *Update Shift* appears in the tab bar when a new release
+is out, and updating keeps your tabs and running shells.
 
 **macOS** — download `Shift-<version>-<arch>.dmg` (`arm64` for Apple silicon,
 `x86_64` for Intel), open it and drag Shift to Applications. The bundle is
@@ -118,7 +122,8 @@ AppImages need FUSE 2, which Ubuntu 24.04 no longer installs. If you see
 `sudo apt install libfuse2t64`, or start it with
 `--appimage-extract-and-run`.
 
-**Tarball** — `shift-terminal-<version>-<os>-<arch>.tar.gz` holds the binary,
+**Tarball** — `shift-terminal-<version>-<os>-<arch>.tar.gz` (`macos-arm64`,
+`macos-x86_64`, `linux-x86_64`) holds the binary,
 the `.desktop` file, the icon and `docs/`; put `shift-terminal` on your
 `PATH`. The binary is not called `shift` because `shift` is a shell builtin.
 
@@ -150,8 +155,9 @@ To build from source, additionally:
 - macOS: Xcode Command Line Tools (`xcode-select --install`).
 - Linux (Debian/Ubuntu names): `libxkbcommon-dev libwayland-dev libxcb1-dev
   libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev pkg-config`.
-- Optional, for the quality gates: `shellcheck`, `zsh`, `fish`, `python3`
-  (scripted UI checks) and Docker (Linux gate).
+- For the quality gates: `python3` (the test gate's release-manifest
+  self-test and the scripted UI checks), `shellcheck`, `zsh`, `fish`, and
+  Docker (Linux gate).
 
 ## Start, stop, clean
 
@@ -167,9 +173,11 @@ packaging/make-app.sh                  # macOS app bundle: target/Shift.app
 
 **Stop** — quit with ⌘Q (Linux: Super+Q) or close the last window; ⌃C in the
 terminal that ran `cargo run` also stops it. With durable sessions on
-(Settings → General), your shells keep running in the background session
-service, which exits by itself 10 s after its last shell is closed. Close the
-panes (⌘W) to end those shells.
+(the default; Settings → General) and *Restore tabs on launch* on (also the
+default), the main window's shells keep running in the background session
+service, which exits by itself 10 s after its last shell is closed; a window
+opened with ⌘N ends its shells when it closes. Close the panes (⌘W) to end
+those shells.
 
 **Clean** — build output lives only in `target/`:
 

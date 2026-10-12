@@ -18,6 +18,34 @@ shift_default_target_dir() {
     printf '%s' "${CARGO_TARGET_DIR:-target}"
 }
 
+# The OS and architecture a build is FOR, from its --target triple (the host
+# when empty): CI cross-builds the Intel Mac app on an Apple-silicon runner, so
+# `uname -m` would name both macOS packages arm64. Architectures follow the
+# DMG names: arm64/x86_64 on macOS, aarch64/x86_64 on Linux.
+shift_target_os() {
+    case "${1:-}" in
+        *-apple-darwin) echo macos ;;
+        *-linux-*)      echo linux ;;
+        "") case "$(uname -s)" in
+                Darwin) echo macos ;;
+                Linux)  echo linux ;;
+                *)      uname -s | tr '[:upper:]' '[:lower:]' ;;
+            esac ;;
+        *) shift_die "unsupported target triple: $1" ;;
+    esac
+}
+
+shift_target_arch() {
+    local triple="${1:-}" os arch
+    os="$(shift_target_os "$triple")"
+    if [ -n "$triple" ]; then arch="${triple%%-*}"; else arch="$(uname -m)"; fi
+    case "$os:$arch" in
+        macos:aarch64 | macos:arm64) echo arm64 ;;
+        linux:arm64)                 echo aarch64 ;;
+        *)                           echo "$arch" ;;
+    esac
+}
+
 shift_die() {
     echo "error: $*" >&2
     exit 1

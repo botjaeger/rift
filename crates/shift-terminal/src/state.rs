@@ -26,6 +26,8 @@ pub enum ClickTarget {
     ToggleReview,
     /// Top-bar inbox: the notifications popover.
     ToggleNotifications,
+    /// Top-bar "Update Shift" chip: the update dialog.
+    UpdateChip,
     /// The owned command editor of a pane (click places the cursor).
     Editor(PaneId),
     /// A clickable prompt chip (Warp): the cwd, branch, PHP, Python and
@@ -71,6 +73,10 @@ pub enum ClickTarget {
     SettingsReset(&'static str),
     /// The sidebar's "Open config.toml".
     SettingsOpenConfig,
+    /// Settings › About: copy the version.
+    SettingsCopyVersion,
+    /// Settings › About: "Update…" (the update dialog).
+    SettingsUpdate,
     SettingsSlider(&'static str),
     SettingsTheme(u8),
     /// Keybindings page row: record a new shortcut for the action.

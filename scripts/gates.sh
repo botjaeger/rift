@@ -23,7 +23,7 @@ describe() {
     cat <<'EOF'
 fmt      cargo fmt --all --check, and on each vendored crate
 clippy   cargo clippy --workspace --all-targets --locked -- -D warnings, and on each vendored crate (all features)
-test     cargo test --workspace --locked, and each vendored crate (all features)
+test     cargo test --workspace --locked, and each vendored crate (all features); release-manifest.py --self-test
 doc      cargo doc --workspace --no-deps --locked, rustdoc warnings denied
 shell    shellcheck on packaging/*.sh, scripts/*.sh, .githooks/*, bash hooks; zsh -n and fish --no-execute on their hooks
 docs     CLAUDE.md and AGENTS.md identical; every relative link in *.md resolves (vendored crates' upstream docs excepted)
@@ -61,7 +61,10 @@ gate_clippy() {
     cargo clippy --workspace --all-targets --locked -- -D warnings &&
         vendored clippy --all-targets --all-features --locked -- -D warnings
 }
-gate_test() { cargo test --workspace --locked && vendored test --all-features --locked; }
+gate_test() {
+    cargo test --workspace --locked && vendored test --all-features --locked &&
+        python3 scripts/release-manifest.py --self-test
+}
 gate_doc() { RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked; }
 gate_release() { cargo build --release --locked; }
 gate_ui() { scripts/ui-smoke.sh; }
@@ -72,6 +75,15 @@ gate_shell() {
     # zsh and fish hooks: syntax only (shellcheck has no zsh/fish mode).
     # A missing shell is a failure: the hook would ship unchecked.
     local rc=0
+    # packages are named for their target, not the build host (the Intel
+    # Mac app is cross-built on Apple silicon)
+    local t want got
+    for t in aarch64-apple-darwin=macos-arm64 x86_64-apple-darwin=macos-x86_64 \
+        x86_64-unknown-linux-gnu=linux-x86_64 aarch64-unknown-linux-gnu=linux-aarch64; do
+        want="${t#*=}"
+        got="$(. packaging/lib.sh && echo "$(shift_target_os "${t%%=*}")-$(shift_target_arch "${t%%=*}")")"
+        [ "$got" = "$want" ] || { echo "packaging/lib.sh: ${t%%=*} is named $got, not $want"; rc=1; }
+    done
     if have zsh; then zsh -n shell/shift.zsh || rc=1; else echo "zsh not installed: shell/shift.zsh unchecked"; rc=1; fi
     if have fish; then fish --no-execute shell/shift.fish || rc=1; else echo "fish not installed: shell/shift.fish unchecked"; rc=1; fi
     return "$rc"

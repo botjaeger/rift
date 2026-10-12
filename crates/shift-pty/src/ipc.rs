@@ -312,6 +312,146 @@ mod tests {
         );
     }
 
+    /// The JSON every message serializes to. Changing a field, a name or
+    /// the tag changes this string: a session service from the previous
+    /// release could no longer talk to the new windows (and an update could
+    /// not reattach running shells).
+    const GOLDEN: &str = r#"{"type":"hello","version":1,"pid":7}
+{"type":"spawn","shell":"/bin/zsh","cwd":"/tmp","env":[["K","V"]],"cols":80,"rows":24,"cell_w":8,"cell_h":16}
+{"type":"attach","session":3,"from_seq":99}
+{"type":"resize","session":3,"cols":100,"rows":30,"cell_w":9,"cell_h":18}
+{"type":"clear_history","session":3}
+{"type":"kill","session":3}
+{"type":"list"}
+{"type":"hello","version":1,"pid":8}
+{"type":"spawned","session":3}
+{"type":"attached","session":3,"from_seq":10,"truncated":true}
+{"type":"replay_done","session":3}
+{"type":"status","session":3,"job":"vim"}
+{"type":"exited","session":3}
+{"type":"sessions","sessions":[{"id":3,"pid":42,"cwd":"/tmp","job":null,"started":1700000000,"clients":[7],"retained_bytes":512}]}
+{"type":"error","message":"no such session"}
+"#;
+
+    #[test]
+    fn protocol_matches_the_golden_wire_format() {
+        let requests = [
+            Request::Hello { version: 1, pid: 7 },
+            Request::Spawn {
+                shell: Some("/bin/zsh".into()),
+                cwd: Some("/tmp".into()),
+                env: vec![("K".into(), "V".into())],
+                cols: 80,
+                rows: 24,
+                cell_w: 8,
+                cell_h: 16,
+            },
+            Request::Attach {
+                session: 3,
+                from_seq: 99,
+            },
+            Request::Resize {
+                session: 3,
+                cols: 100,
+                rows: 30,
+                cell_w: 9,
+                cell_h: 18,
+            },
+            Request::ClearHistory { session: 3 },
+            Request::Kill { session: 3 },
+            Request::List,
+        ];
+        let events = [
+            Event::Hello { version: 1, pid: 8 },
+            Event::Spawned { session: 3 },
+            Event::Attached {
+                session: 3,
+                from_seq: 10,
+                truncated: true,
+            },
+            Event::ReplayDone { session: 3 },
+            Event::Status {
+                session: 3,
+                job: Some("vim".into()),
+            },
+            Event::Exited { session: 3 },
+            Event::Sessions {
+                sessions: vec![SessionInfo {
+                    id: 3,
+                    pid: 42,
+                    cwd: Some("/tmp".into()),
+                    job: None,
+                    started: 1_700_000_000,
+                    clients: vec![7],
+                    retained_bytes: 512,
+                }],
+            },
+            Event::Error {
+                message: "no such session".into(),
+            },
+        ];
+        let mut wire = String::new();
+        for r in &requests {
+            wire += &serde_json::to_string(r).unwrap();
+            wire.push('\n');
+        }
+        for e in &events {
+            wire += &serde_json::to_string(e).unwrap();
+            wire.push('\n');
+        }
+        assert_eq!(
+            wire, GOLDEN,
+            "the session-service wire format changed: bump PROTOCOL_VERSION \
+             (running shells of the previous release then stay detached after \
+             an update, which the update dialog warns about) and update GOLDEN"
+        );
+        assert_eq!(
+            PROTOCOL_VERSION, 1,
+            "PROTOCOL_VERSION changed: update the version in GOLDEN's hello lines"
+        );
+        // the framing around the JSON is part of the format too: length
+        // prefix, kind bytes, binary layouts and the size limits
+        let mut frames = Vec::new();
+        send_json(&mut frames, &Request::List).unwrap();
+        send_output(&mut frames, 3, 100, 42, b"hi").unwrap();
+        send_input(&mut frames, 3, b"ls").unwrap();
+        let hex: String = frames.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex,
+            concat!(
+                "00000010007b2274797065223a226c697374227d",
+                "0000001b0100000000000000030000000000000064000000000000002a6869",
+                "0000000b0200000000000000036c73",
+            ),
+            "the session-service framing changed: bump PROTOCOL_VERSION"
+        );
+        assert_eq!(
+            (
+                FRAME_JSON,
+                FRAME_OUTPUT,
+                FRAME_INPUT,
+                MAX_FRAME,
+                MAX_INPUT_CHUNK
+            ),
+            (0, 1, 2, 4 << 20, 2 << 20),
+            "a frame kind or size limit changed: bump PROTOCOL_VERSION"
+        );
+        // every golden line still parses back to the same message
+        let mut lines = GOLDEN.lines();
+        for r in &requests {
+            assert_eq!(
+                &serde_json::from_str::<Request>(lines.next().unwrap()).unwrap(),
+                r
+            );
+        }
+        for e in &events {
+            assert_eq!(
+                &serde_json::from_str::<Event>(lines.next().unwrap()).unwrap(),
+                e
+            );
+        }
+    }
+
     #[test]
     fn frames_roundtrip() {
         let mut buf = Vec::new();

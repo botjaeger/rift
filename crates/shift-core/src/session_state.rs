@@ -230,25 +230,36 @@ pub fn session_path() -> Option<PathBuf> {
 }
 
 pub fn load() -> Option<SavedSession> {
-    let path = session_path()?;
+    load_from(&session_path()?)
+}
+
+pub fn load_from(path: &std::path::Path) -> Option<SavedSession> {
     let body = std::fs::read_to_string(path).ok()?;
     toml::from_str(&body).ok()
 }
 
 /// Atomic write (tmp + rename) — this file is written frequently.
 pub fn save(session: &SavedSession) {
-    let Some(path) = session_path() else { return };
-    let Some(dir) = path.parent() else { return };
-    if std::fs::create_dir_all(dir).is_err() {
-        return;
+    if let Some(path) = session_path() {
+        let _ = save_to(&path, session);
     }
-    let Ok(body) = toml::to_string(session) else {
-        return;
-    };
+}
+
+/// Atomic write of `session` to `path`: complete before it is visible.
+pub fn save_to(path: &std::path::Path, session: &SavedSession) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let body = toml::to_string(session).map_err(std::io::Error::other)?;
     let tmp = path.with_extension("toml.tmp");
-    if std::fs::write(&tmp, body).is_ok() {
-        let _ = std::fs::rename(&tmp, &path);
-    }
+    std::fs::write(&tmp, body)?;
+    std::fs::rename(&tmp, path)
+}
+
+/// Where windows leave their layouts for a restart (an update): one file
+/// per window, `main-<pid>.toml` for a window that owns `session.toml`.
+pub fn restart_dir() -> Option<PathBuf> {
+    crate::shell_integration::data_dir().map(|d| d.join("restart"))
 }
 
 #[cfg(test)]

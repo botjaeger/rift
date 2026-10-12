@@ -88,6 +88,57 @@ pub struct PanelButtons {
     pub notifications_open: bool,
     /// Unread notifications (dot on the inbox button).
     pub unread: usize,
+    /// A new release is available: the "Update Shift" chip.
+    pub update: bool,
+}
+
+/// Height of the "Update Shift" chip.
+const UPDATE_CHIP_H: f32 = 22.0;
+
+/// Warp's "Update Warp" pill: `warning` outline and text on no fill, a
+/// hover lift, ending at `right`. Returns its rect; `None` (nothing drawn)
+/// when it would start left of `min_x` (a narrow window keeps its tabs).
+fn update_chip(
+    layer: &mut Layer,
+    engine: &mut TextEngine,
+    theme: &Theme,
+    right: f32,
+    min_x: f32,
+    mouse: Option<(f32, f32)>,
+) -> Option<[f32; 4]> {
+    let label = "Update Shift";
+    let tw = engine.measure(label, 12.0, FONT_SANS, Weight::MEDIUM);
+    let w = (tw + 20.0).round();
+    if right - w < min_x {
+        return None;
+    }
+    let r = [
+        right - w,
+        ((TAB_BAR_H - UPDATE_CHIP_H) / 2.0).round(),
+        w,
+        UPDATE_CHIP_H,
+    ];
+    let fill = if inside(r, mouse) {
+        lift(theme, 0.08)
+    } else {
+        Color::TRANSPARENT
+    };
+    layer.bordered(
+        [r[0], r[1]],
+        [r[2], r[3]],
+        fill,
+        theme.warning,
+        UPDATE_CHIP_H / 2.0,
+        1.0,
+    );
+    let b = make_text(engine, label, 12.0, FONT_SANS, Weight::MEDIUM);
+    layer.text(
+        b,
+        r[0] + 10.0,
+        r[1] + (UPDATE_CHIP_H - 15.6) / 2.0,
+        theme.warning,
+    );
+    Some(r)
 }
 
 /// A 26 px chrome icon button: hover lift, accent tint while `on`.
@@ -265,8 +316,21 @@ pub fn render(
         rect: inbox,
         target: ClickTarget::ToggleNotifications,
     });
+    // a new release: the chip left of the inbox
+    let mut w = inbox[0] - 6.0;
+    // room for one tab and + stays
+    let min_x = tabs_x + MIN_TAB_W + 40.0 + 6.0;
+    if panels.update
+        && let Some(chip) = update_chip(layer, engine, theme, inbox[0] - 8.0, min_x, mouse)
+    {
+        hits.push(Hit {
+            rect: chip,
+            target: ClickTarget::UpdateChip,
+        });
+        w = chip[0] - 6.0;
+    }
     // everything else on the right lays out left of these buttons
-    let w = inbox[0] - 6.0;
+    let w = w;
 
     // traffic lights: native on macOS, drawn (and clickable) on Linux
     #[cfg(not(target_os = "macos"))]

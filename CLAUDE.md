@@ -26,6 +26,10 @@ blocks, ⌘P = palette).
   `XDG_DATA_HOME` to scratch directories and `SHIFT_NO_NOTIFY=1`. Without
   them the scripted instance reads the user's config, writes their session
   file, and can attach to the user's live session service and control sockets.
+- Scripted runs keep shells local (no session service) unless
+  `SHIFT_PERSIST_SESSION` is set, and never check for updates unless
+  `SHIFT_UPDATE_URL` is set; a test that sets either must kill the
+  `--session-daemon` it started (confirm its `XDG_DATA_HOME` with `ps eww`).
 - `--script` synthesizes input inside the app (no OS input), but it still opens
   a real window that takes focus, and the user's typing then lands in it. Add
   `--headless` to every agent run: the window is never shown or focused, the
@@ -45,6 +49,7 @@ cargo test -p shift-core osc   # one module's tests
 cargo fmt --all                # format
 packaging/make-app.sh          # macOS Shift.app (release)
 packaging/bench.sh             # performance baseline (docs/performance.md)
+scripts/publish-release.sh vX.Y.Z  # publish a tag's release artifacts (docs/development.md)
 ```
 
 The compiler is pinned in `rust-toolchain.toml` (1.98.0 with rustfmt and
@@ -107,7 +112,7 @@ Four crates; dependencies flow strictly downward.
   overrides win and unbind the default), OSC/APC byte scanner (`osc.rs`),
   block model (`block.rs`), shell tokenizer, completion providers, git2
   worker, shell-integration materializer, transcripts (`transcript.rs`), SSH
-  profiles (`ssh.rs`), session state.
+  profiles (`ssh.rs`), session state, update check and install (`update.rs`).
 - **shift-pty** — one `Session` per pane. Spawns through
   `alacritty_terminal::tty`, or, with `durable_sessions`, through the per-user
   session service (`daemon.rs`, `service.rs`, `ipc.rs`). A reader thread
@@ -124,7 +129,7 @@ Four crates; dependencies flow strictly downward.
 - **shift-terminal** — winit `ApplicationHandler` (`app.rs`), views, input
   routing, per-frame `Hit` rects, kitty keyboard encoder (`keyboard.rs`),
   AccessKit tree (`a11y.rs`), control socket and `ctl` client (`control.rs`), script
-  driver, offscreen capture.
+  driver, offscreen capture, update restarts across windows (`updater.rs`).
 
 ### Load-bearing invariants
 

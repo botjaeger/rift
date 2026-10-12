@@ -26,7 +26,7 @@ VERSION="$(shift_version)"
 ARCH="$(uname -m)"
 
 if [ "$BUILD" -eq 1 ]; then
-    if [ -n "$TRIPLE" ]; then cargo build --release --target "$TRIPLE"; else cargo build --release; fi
+    if [ -n "$TRIPLE" ]; then cargo build --release --target-dir "$TARGET_DIR" --target "$TRIPLE"; else cargo build --release --target-dir "$TARGET_DIR"; fi
 fi
 
 if [ -n "$TRIPLE" ]; then
@@ -84,7 +84,9 @@ fi
 printf '%s  %s\n' "$TOOL_SHA256" "$TOOL" | sha256sum -c - || shift_die "cached appimagetool checksum mismatch"
 chmod +x "$TOOL"
 
-OUT="$TARGET_DIR/Shift-$VERSION-$ARCH.AppImage"
+# named for the build's target (the manifest's asset names); ARCH above is
+# the host's, for appimagetool
+OUT="$TARGET_DIR/Shift-$VERSION-$(shift_target_arch "$TRIPLE").AppImage"
 rm -f "$OUT"
 
 # --appimage-extract-and-run: docker and GitHub runners have no FUSE, so the

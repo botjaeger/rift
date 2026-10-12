@@ -212,10 +212,14 @@ pub struct Config {
     /// again on relaunch. Output may contain secrets, so this is opt-in.
     pub save_transcripts: bool,
     /// Shells run in the per-user session service, so closing or quitting
-    /// Shift leaves them running and relaunching reattaches them.
+    /// Shift leaves them running and relaunching reattaches them (on by
+    /// default; `durable_sessions = false` keeps shells in the window).
     pub durable_sessions: bool,
-    /// Local control socket: "off", "navigate" (list/status/focus) or
-    /// "full" (also split/open/send-text). See control.rs.
+    /// Look for a new release at launch and every 6 hours (`update.rs`).
+    pub check_for_updates: bool,
+    /// Local control socket: "off", "navigate" (list/status/focus, and
+    /// prepare-restart, honored only with the token of an update in flight)
+    /// or "full" (also split/open/send-text). See control.rs.
     pub control_api: String,
     pub shell: Option<String>,
     /// Theme used while the OS is in light mode when `sync_os_theme` is on.
@@ -324,7 +328,8 @@ impl Default for Config {
             ligatures: true,
             restore_session: true,
             save_transcripts: false,
-            durable_sessions: false,
+            durable_sessions: true,
+            check_for_updates: true,
             control_api: "navigate".into(),
             shell: None,
             theme_light: "light-default".into(),

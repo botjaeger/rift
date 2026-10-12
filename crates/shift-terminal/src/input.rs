@@ -96,6 +96,12 @@ pub enum AppAction {
     ScrollTop,
     ScrollBottom,
     OpenKeybindings,
+    /// Settings › About.
+    OpenAbout,
+    /// Look for a new release now (the answer toasts).
+    CheckForUpdates,
+    /// The update dialog (an available release), else a check.
+    UpdateShift,
     /// What's New modal (release notes).
     WhatsNew,
     /// File explorer panel (left).
@@ -268,6 +274,9 @@ pub fn action_from_name(name: &str) -> Option<AppAction> {
         "scroll_top" => AppAction::ScrollTop,
         "scroll_bottom" => AppAction::ScrollBottom,
         "open_keybindings" => AppAction::OpenKeybindings,
+        "open_about" => AppAction::OpenAbout,
+        "check_for_updates" => AppAction::CheckForUpdates,
+        "update_shift" => AppAction::UpdateShift,
         "whats_new" => AppAction::WhatsNew,
         "toggle_explorer" => AppAction::ToggleExplorer,
         "toggle_review" => AppAction::ToggleReview,

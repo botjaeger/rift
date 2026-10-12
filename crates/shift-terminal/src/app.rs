@@ -82,6 +82,21 @@ pub enum UserEvent {
     ReviewWritten(Option<String>),
     /// Completions for completion request `.0`.
     Completions(u64, Vec<shift_core::completion::Completion>),
+    /// An update check finished (`true`: asked for, so its answer toasts).
+    UpdateChecked(Result<shift_core::update::Manifest, String>, bool),
+    /// The other windows an update would restart.
+    UpdateSurvey(crate::updater::Survey),
+    /// The update is downloaded and installed (or why not); the windows
+    /// to restart with this one.
+    UpdateInstalled(
+        Result<shift_core::update::Pending, String>,
+        Vec<(u32, std::path::PathBuf)>,
+    ),
+    /// The other windows saved their layouts and quit: relaunch (this
+    /// window's restart file).
+    UpdateReady(std::path::PathBuf),
+    /// This process has been up long enough (`App::confirm_start`).
+    StartConfirmed,
 }
 
 /// What the completion thread completes: one editor state and the
@@ -555,6 +570,14 @@ pub struct App {
     shell_env: Option<Arc<shift_core::shell_env::ShellEnv>>,
     /// Session file is read/written (off for secondary windows and scripts).
     persist_session: bool,
+    /// New shells may run in the session service (`durable_sessions`, and
+    /// a scripted run only with `SHIFT_PERSIST_SESSION`: tests leave no
+    /// service behind).
+    durable_allowed: bool,
+    update: UpdateUi,
+    /// A `prepare-restart` request was answered: quit, keeping durable
+    /// shells.
+    restart_requested: bool,
     /// Tab being dragged in the tab bar.
     tab_drag: Option<TabDrag>,
     /// ⌃R command history pane above the command line.
@@ -955,7 +978,46 @@ enum ConfirmAction {
         path: String,
         hunk: Option<shift_core::review::HunkId>,
     },
+    /// Install a release and restart (Update / Later).
+    Update(Box<UpdatePlan>),
 }
+
+/// What the update dialog offers (computed when it opens).
+#[derive(Debug, Clone, PartialEq)]
+struct UpdatePlan {
+    manifest: shift_core::update::Manifest,
+    target: shift_core::update::InstallTarget,
+    /// Other windows that restart with this one (pid, control socket).
+    windows: Vec<(u32, std::path::PathBuf)>,
+    description: String,
+    note: String,
+    /// This install cannot update itself: the button opens the release page.
+    open_page: bool,
+}
+
+/// This window's view of updates (`shift_core::update`, `updater.rs`).
+#[derive(Default)]
+struct UpdateUi {
+    status: shift_core::update::Status,
+    /// "Later" was chosen for this version: no chip.
+    dismissed: Option<String>,
+    /// Downloading, installing or restarting.
+    busy: bool,
+    /// The periodic check runs while this is set.
+    auto: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Held from the download until this process exits or the install
+    /// stops: one window installs at a time.
+    lock: Option<shift_core::update::InstallLock>,
+    /// The window was closed while busy: quit once the update is done.
+    quit_after: bool,
+    /// Set at start: `confirm_start` runs this long after the first frame.
+    confirm_after: Option<Duration>,
+    /// `confirm_start` ran (it runs once).
+    start_confirmed: bool,
+}
+
+/// The release page when a manifest names none.
+const RELEASES_PAGE: &str = "https://github.com/botjaeger/shift-releases/releases";
 
 struct ConfirmClose {
     /// When the dialog appeared: Enter typed ahead of it does not accept.
@@ -975,7 +1037,9 @@ impl App {
         // file (a script run used to overwrite it)
         let persist_session = (script.is_none()
             || std::env::var_os("SHIFT_PERSIST_SESSION").is_some())
-            && std::env::var_os("SHIFT_SECONDARY_WINDOW").is_none();
+            && !crate::updater::launch().secondary;
+        let durable_allowed =
+            script.is_none() || std::env::var_os("SHIFT_PERSIST_SESSION").is_some();
         App {
             proxy,
             window: None,
@@ -1105,6 +1169,9 @@ impl App {
             filter_editing: false,
             shell_env: None,
             persist_session,
+            durable_allowed,
+            update: UpdateUi::default(),
+            restart_requested: false,
             tab_drag: None,
             history: Default::default(),
             pane_drag: None,
@@ -1132,6 +1199,9 @@ impl App {
     /// Re-apply everything derived from Config (theme, metrics, keymap).
     fn apply_config(&mut self) {
         self.sync_control_server();
+        if self.window.is_some() {
+            self.sync_update_checks();
+        }
         self.theme = self.config.resolve_theme_for(self.os_light);
         // a theme that does not load falls back to Dark Default: say so once
         // per broken name instead of only logging it
@@ -2639,6 +2709,9 @@ impl App {
                     | ClickTarget::SettingsOption(_)
                     | ClickTarget::SettingsReset(_)
                     | ClickTarget::SettingsOpenConfig
+                    | ClickTarget::SettingsCopyVersion
+                    | ClickTarget::SettingsUpdate
+                    | ClickTarget::UpdateChip
                     | ClickTarget::PaneClose(_)
                     | ClickTarget::ToggleExplorer
                     | ClickTarget::ToggleReview
@@ -4481,7 +4554,8 @@ impl App {
         // durable sessions: reattach a restored shell, else start one in
         // the session service; fall back to a local shell if it fails
         let attach = self.next_attach.take();
-        let service = self.config.durable_sessions.then_some(match attach {
+        let durable = self.config.durable_sessions && self.durable_allowed;
+        let service = durable.then_some(match attach {
             Some(id) => shift_pty::ServiceTarget::Attach(id),
             None => shift_pty::ServiceTarget::Spawn,
         });
@@ -4638,10 +4712,25 @@ impl App {
     /// Persist tabs: split layouts, cwds, custom titles, colors (atomic;
     /// called on every structural change).
     fn save_session(&self) {
-        use shift_core::session_state::{SavedAxis, SavedLayout, SavedSession, SavedTab, save};
         if !self.persist_session {
             return;
         }
+        shift_core::session_state::save(&self.saved_session());
+        if self.config.save_transcripts {
+            let mut keep = Vec::new();
+            for p in self.tabs.iter().flat_map(|t| &t.panes) {
+                shift_core::transcript::save(&p.transcript_id, &Self::pane_transcript(p));
+                keep.push(p.transcript_id.clone());
+            }
+            // closed panes' transcripts go with them
+            shift_core::transcript::remove_except(&keep);
+        }
+    }
+
+    /// This window's tabs, layouts and frame, as the session file stores
+    /// them.
+    fn saved_session(&self) -> shift_core::session_state::SavedSession {
+        use shift_core::session_state::{SavedAxis, SavedLayout, SavedSession, SavedTab};
         fn pane_cwd(p: &PaneState) -> Option<String> {
             p.session
                 .cwd
@@ -4701,20 +4790,11 @@ impl App {
                     .flatten(),
             })
             .collect();
-        save(&SavedSession {
+        SavedSession {
             tabs,
             active: self.active,
             window: self.window_frame(),
             ..Default::default()
-        });
-        if transcripts {
-            let mut keep = Vec::new();
-            for p in self.tabs.iter().flat_map(|t| &t.panes) {
-                shift_core::transcript::save(&p.transcript_id, &Self::pane_transcript(p));
-                keep.push(p.transcript_id.clone());
-            }
-            // closed panes' transcripts go with them
-            shift_core::transcript::remove_except(&keep);
         }
     }
 
@@ -5689,6 +5769,7 @@ impl App {
             }),
             notifications_open: self.notifications.open,
             unread: self.unread_attention(),
+            update: self.update_chip().is_some(),
         };
         let notification_entries = if self.notifications.open {
             self.notification_entries()
@@ -6864,6 +6945,7 @@ impl App {
         if let Some((action, commands)) = &confirm {
             hits.clear();
             use crate::views::confirm::Dialog;
+            let update_title;
             let dialog = match action {
                 ConfirmAction::Close(scope) => {
                     let (title, label) = match scope {
@@ -6883,6 +6965,7 @@ impl App {
                         lines: commands,
                         empty_line: "<running shell process>",
                         confirm_label: label,
+                        cancel_label: "Cancel",
                         destructive: true,
                         processes: true,
                     }
@@ -6899,6 +6982,7 @@ impl App {
                         lines: commands,
                         empty_line: "<blank line>",
                         confirm_label: "Paste",
+                        cancel_label: "Cancel",
                         destructive: false,
                         processes: false,
                     }
@@ -6910,6 +6994,7 @@ impl App {
                     lines: commands,
                     empty_line: "",
                     confirm_label: "Install",
+                    cancel_label: "Cancel",
                     destructive: false,
                     processes: false,
                 },
@@ -6924,9 +7009,28 @@ impl App {
                     lines: commands,
                     empty_line: "",
                     confirm_label: "Revert",
+                    cancel_label: "Cancel",
                     destructive: true,
                     processes: false,
                 },
+                ConfirmAction::Update(plan) => {
+                    update_title = format!("Update to Shift v{}?", plan.manifest.version);
+                    Dialog {
+                        title: &update_title,
+                        description: plan.description.clone(),
+                        note: &plan.note,
+                        lines: commands,
+                        empty_line: "",
+                        confirm_label: if plan.open_page {
+                            "Open download page"
+                        } else {
+                            "Update"
+                        },
+                        cancel_label: "Later",
+                        destructive: false,
+                        processes: false,
+                    }
+                }
             };
             self.confirm_rects =
                 crate::views::confirm::render(scene.layer(6), engine, &theme, &dialog, w, h, scale);
@@ -7111,6 +7215,8 @@ impl App {
             ClickTarget::SettingsReset(_) | ClickTarget::SettingsKeybindReset(_) => {
                 ("Reset to default".into(), None)
             }
+            ClickTarget::SettingsCopyVersion => ("Copy version".into(), None),
+            ClickTarget::UpdateChip => (format!("v{} available", self.update_chip()?), None),
             ClickTarget::SettingsOpenConfig => (
                 "Open in the default editor".into(),
                 shift_core::config::config_path()
@@ -7469,6 +7575,9 @@ impl App {
         window.pre_present_notify();
         frame.present();
         text.trim();
+        if self.update.confirm_after.is_some() {
+            self.on_first_frame();
+        }
         // SHIFT_LATENCY_LOG: key → program output → presented frame
         if let Some((t, true)) = self.latency_probe {
             log::info!(
@@ -7800,6 +7909,20 @@ impl App {
             AppAction::OpenKeybindings => {
                 self.settings
                     .open_page(crate::views::settings::Page::Keybindings);
+            }
+            AppAction::OpenAbout => {
+                self.palette.open = false;
+                self.context_menu.close();
+                self.settings.open_page(crate::views::settings::Page::About);
+            }
+            AppAction::CheckForUpdates => {
+                self.palette.open = false;
+                self.check_for_updates_now();
+            }
+            AppAction::UpdateShift => {
+                self.palette.open = false;
+                self.context_menu.close();
+                self.update_shift();
             }
             AppAction::ToggleExplorer => {
                 self.explorer.open = !self.explorer.open;
@@ -8574,6 +8697,12 @@ impl App {
 
     /// Close/quit entry point: warns first when something is still running.
     fn request_close(&mut self, scope: CloseScope, event_loop: &ActiveEventLoop) {
+        if matches!(scope, CloseScope::Window) && self.update.busy {
+            // quitting mid-install could leave a half-finished update
+            self.update.quit_after = true;
+            self.toast("Shift is updating… it quits when the update is done".into());
+            return;
+        }
         if self.config.confirm_close_running {
             let commands = self.running_in(scope);
             if !commands.is_empty() {
@@ -8640,7 +8769,7 @@ impl App {
     fn handle_confirm_key(&mut self, event: &input::KeyPress, event_loop: &ActiveEventLoop) {
         use winit::keyboard::{Key, NamedKey};
         match event.logical_key {
-            Key::Named(NamedKey::Escape) => self.confirm = None,
+            Key::Named(NamedKey::Escape) => self.cancel_confirm(),
             Key::Named(NamedKey::Enter) => {
                 // a held or typed-ahead Enter (e.g. right after ⌘W or a
                 // paste) must not accept a dialog the user has not seen
@@ -9062,6 +9191,7 @@ impl App {
             ConfirmAction::Revert { root, path, hunk } => {
                 self.queue_review_write(root, vec![(shift_core::review::Op::Revert, path, hunk)]);
             }
+            ConfirmAction::Update(plan) => self.install_update(*plan),
         }
     }
 
@@ -9090,7 +9220,7 @@ impl App {
         match std::env::current_exe() {
             Ok(exe) => {
                 let mut cmd = std::process::Command::new(exe);
-                cmd.env("SHIFT_SECONDARY_WINDOW", "1")
+                cmd.env(crate::updater::SECONDARY_ENV, "1")
                     .stdin(std::process::Stdio::null());
                 if let Some(dir) = cwd {
                     cmd.current_dir(dir);
@@ -10200,7 +10330,7 @@ impl App {
                     self.perform_confirmed(c.action, event_loop);
                 }
             } else if inside(&self.confirm_rects[0]) {
-                self.confirm = None;
+                self.cancel_confirm();
             }
             window.request_redraw();
             return;
@@ -10454,6 +10584,7 @@ impl App {
             Some(ClickTarget::ToggleNotifications) => {
                 self.handle_action(AppAction::AttentionCenter, event_loop)
             }
+            Some(ClickTarget::UpdateChip) => self.handle_action(AppAction::UpdateShift, event_loop),
             Some(ClickTarget::Chip(pane, shift_core::PromptChip::GitDiff)) => {
                 // opens the review of that pane's repository (focused first);
                 // a second click closes it, like the tab bar's button
@@ -10636,6 +10767,12 @@ impl App {
                     self.apply_config();
                 }
             }
+            Some(ClickTarget::SettingsUpdate) => self.update_shift(),
+            Some(ClickTarget::SettingsCopyVersion) => {
+                if self.copy_to_clipboard(format!("v{}", env!("CARGO_PKG_VERSION"))) {
+                    self.toast("Copied version".into());
+                }
+            }
             Some(ClickTarget::SettingsOpenConfig) => {
                 if let Some(path) = shift_core::config::config_path() {
                     self.settings.open = false;
@@ -10663,6 +10800,7 @@ impl App {
                         c.confirm_multiline_paste = !c.confirm_multiline_paste
                     }
                     "durable_sessions" => c.durable_sessions = !c.durable_sessions,
+                    "check_for_updates" => c.check_for_updates = !c.check_for_updates,
                     // off deletes the saved output (apply_config)
                     "save_transcripts" => c.save_transcripts = !c.save_transcripts,
                     "mouse_reporting" => c.mouse_reporting = !c.mouse_reporting,
@@ -11959,6 +12097,36 @@ impl App {
                     None => Response::error("no such pane"),
                 }
             }
+            Request::PrepareRestart { token } => {
+                // only for an update in flight from this install: its marker
+                // (readable by the user only) holds the token
+                use shift_core::update;
+                if self.update.busy {
+                    return Response::error("this window is updating Shift");
+                }
+                let valid = update::pending_path().is_some_and(|m| {
+                    let written = std::fs::metadata(&m).and_then(|md| md.modified());
+                    match (update::read_pending(&m), written) {
+                        (Some(p), Ok(at)) => {
+                            update::token_valid(&p, &token, at, std::time::SystemTime::now())
+                        }
+                        _ => false,
+                    }
+                });
+                if !valid {
+                    log::warn!("prepare-restart refused: no update in progress with that token");
+                    return Response::error("not allowed: no update in progress");
+                }
+                let Some(file) = crate::updater::own_restart_file(self.persist_session) else {
+                    return Response::error("no data directory");
+                };
+                if let Err(e) = shift_core::session_state::save_to(&file, &self.saved_session()) {
+                    return Response::error(format!("{}: {e}", file.display()));
+                }
+                self.save_session();
+                self.restart_requested = true;
+                ok(None)
+            }
         }
     }
 
@@ -12115,12 +12283,24 @@ impl App {
                     "Revert changes?".to_string(),
                     format!("Discards unstaged changes: {}", c.commands.join("; ")),
                 ),
+                ConfirmAction::Update(plan) => (
+                    format!("Update to Shift v{}?", plan.manifest.version),
+                    format!("{} {}", plan.description, plan.note)
+                        .trim()
+                        .to_string(),
+                ),
             };
             let label = match &c.action {
                 ConfirmAction::Close(_) => "Close",
                 ConfirmAction::Paste { .. } => "Paste",
                 ConfirmAction::InstallRemote(_) => "Install",
                 ConfirmAction::Revert { .. } => "Revert",
+                ConfirmAction::Update(plan) if plan.open_page => "Open download page",
+                ConfirmAction::Update(_) => "Update",
+            };
+            let cancel = match &c.action {
+                ConfirmAction::Update(_) => "Later",
+                _ => "Cancel",
             };
             let button = |l: &str, r: [f32; 4]| Control {
                 label: l.into(),
@@ -12133,7 +12313,7 @@ impl App {
                 title,
                 description,
                 buttons: vec![
-                    button("Cancel", self.confirm_rects[0]),
+                    button(cancel, self.confirm_rects[0]),
                     button(label, self.confirm_rects[1]),
                 ],
             })
@@ -12391,6 +12571,8 @@ impl App {
                         | ClickTarget::SettingsSlider(_)
                         | ClickTarget::SettingsReset(_)
                         | ClickTarget::SettingsOpenConfig
+                        | ClickTarget::SettingsCopyVersion
+                        | ClickTarget::SettingsUpdate
                         | ClickTarget::SettingsEditPrompt
                         | ClickTarget::SettingsKeybind(_)
                         | ClickTarget::SettingsKeybindReset(_) => (Role::Button, None, false),
@@ -12654,6 +12836,26 @@ impl App {
                 controls,
                 // it takes the keys while open
                 focused: true,
+            });
+        }
+        // the tab bar's "Update Shift" chip
+        if let Some(version) = self.update_chip()
+            && let Some(h) = self
+                .hits
+                .iter()
+                .find(|h| h.target == ClickTarget::UpdateChip)
+        {
+            out.push(PanelNode {
+                label: "Update available".into(),
+                rect: Some(h.rect),
+                text: None,
+                controls: vec![control(
+                    format!("Update Shift, v{version} available"),
+                    Role::Button,
+                    false,
+                    h.rect,
+                )],
+                focused: false,
             });
         }
         out
@@ -12978,6 +13180,21 @@ impl App {
         );
         let _ = writeln!(
             out,
+            "update={} chip={:?} dismissed={:?} busy={} version={}",
+            match &self.update.status {
+                shift_core::update::Status::Idle => "idle".to_string(),
+                shift_core::update::Status::Checking => "checking".into(),
+                shift_core::update::Status::UpToDate => "up-to-date".into(),
+                shift_core::update::Status::Available(m) => format!("available:{}", m.version),
+                shift_core::update::Status::Failed(e) => format!("failed:{e:?}"),
+            },
+            self.update_chip(),
+            self.update.dismissed,
+            self.update.busy,
+            env!("CARGO_PKG_VERSION"),
+        );
+        let _ = writeln!(
+            out,
             "confirm={:?} rename={:?} filter_editing={} toast={:?} shell_env={}",
             self.confirm
                 .as_ref()
@@ -13121,6 +13338,753 @@ impl App {
     }
 }
 
+/// Updates: the check, the chip and dialog, the install and the restart.
+impl App {
+    /// Checks run outside scripted runs, and in one only under
+    /// `SHIFT_UPDATE_URL` (tests never reach the network).
+    fn update_checks_allowed(&self) -> bool {
+        self.script.is_none() || shift_core::update::url_overridden()
+    }
+
+    /// The version the tab-bar chip offers: an available update that was
+    /// not dismissed, while nothing is being installed.
+    fn update_chip(&self) -> Option<String> {
+        match &self.update.status {
+            shift_core::update::Status::Available(m)
+                if !self.update.busy && self.update.dismissed.as_deref() != Some(&m.version) =>
+            {
+                Some(m.version.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// Settings › About's line follows the status.
+    fn sync_update_view(&mut self) {
+        use crate::views::settings::UpdateLine;
+        use shift_core::update::Status;
+        self.settings.update = match &self.update.status {
+            Status::Idle => UpdateLine::None,
+            Status::Checking => UpdateLine::Checking,
+            Status::UpToDate => UpdateLine::UpToDate,
+            Status::Available(m) => UpdateLine::Available(m.version.clone()),
+            Status::Failed(_) => UpdateLine::Failed,
+        };
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    /// Start the periodic check when `check_for_updates` is on (and stop it
+    /// when it is turned off). The cached answer shows at once.
+    fn sync_update_checks(&mut self) {
+        use shift_core::update;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let want = self.config.check_for_updates && self.update_checks_allowed();
+        if !want {
+            if let Some(flag) = self.update.auto.take() {
+                // turned off: the chip and About's line go too
+                flag.store(false, Ordering::Release);
+                if !self.update.busy {
+                    self.update.status = update::Status::Idle;
+                    self.sync_update_view();
+                }
+            }
+            return;
+        }
+        if self.update.auto.is_some() {
+            return;
+        }
+        let overridden = update::url_overridden();
+        let cache = update::load_cache();
+        self.update.dismissed = cache.dismissed.clone();
+        // a test manifest is always fetched fresh
+        if !overridden
+            && let Some(m) = cache.latest
+            && matches!(self.update.status, update::Status::Idle)
+        {
+            self.update.status = update::evaluate(m, shift_core::changelog::VERSION);
+        }
+        let flag = Arc::new(AtomicBool::new(true));
+        self.update.auto = Some(flag.clone());
+        let proxy = self.proxy.clone();
+        let started = std::thread::Builder::new()
+            .name("update-check".into())
+            .spawn(move || {
+                // sleep in short steps so turning checks off ends the thread
+                let nap = |secs: u64| {
+                    let end = Instant::now() + Duration::from_secs(secs);
+                    while flag.load(Ordering::Acquire) && Instant::now() < end {
+                        std::thread::sleep(Duration::from_secs(1));
+                    }
+                };
+                let mut first = true;
+                let mut seen = 0;
+                while flag.load(Ordering::Acquire) {
+                    let cache = update::load_cache();
+                    let wait = if first && overridden {
+                        0
+                    } else {
+                        cache.due_in(update::now())
+                    };
+                    first = false;
+                    if wait > 0 {
+                        // another window checked: take its answer
+                        if cache.checked_at != seen
+                            && let Some(m) = cache.latest.clone()
+                        {
+                            seen = cache.checked_at;
+                            if proxy
+                                .send_event(UserEvent::UpdateChecked(Ok(m), false))
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                        nap(wait);
+                        continue;
+                    }
+                    let result = update::fetch(&update::manifest_url());
+                    if let Ok(f) = &result {
+                        update::update_cache(|c| {
+                            c.checked_at = update::now();
+                            c.store(f);
+                        });
+                        seen = update::load_cache().checked_at;
+                    }
+                    let result = result.map(|f| f.manifest);
+                    let failed = result.is_err();
+                    if proxy
+                        .send_event(UserEvent::UpdateChecked(result, false))
+                        .is_err()
+                    {
+                        return;
+                    }
+                    // a failure retries within the hour; a success waits
+                    // for the cache to fall due
+                    nap(if failed { 3600 } else { 60 });
+                }
+            });
+        if started.is_err() {
+            self.update.auto = None;
+        }
+    }
+
+    /// "Check for updates" (palette, About): one check now; its answer
+    /// toasts.
+    fn check_for_updates_now(&mut self) {
+        use shift_core::update;
+        if !self.update_checks_allowed() {
+            self.toast("Update checks are off in scripted runs".into());
+            return;
+        }
+        if matches!(self.update.status, update::Status::Checking) {
+            return;
+        }
+        self.update.status = update::Status::Checking;
+        self.sync_update_view();
+        let proxy = self.proxy.clone();
+        std::thread::Builder::new()
+            .name("update-check".into())
+            .spawn(move || {
+                let result = update::fetch(&update::manifest_url());
+                if let Ok(f) = &result {
+                    update::update_cache(|c| {
+                        c.checked_at = update::now();
+                        c.store(f);
+                    });
+                }
+                let result = result.map(|f| f.manifest);
+                let _ = proxy.send_event(UserEvent::UpdateChecked(result, true));
+            })
+            .ok();
+    }
+
+    fn on_update_checked(
+        &mut self,
+        result: Result<shift_core::update::Manifest, String>,
+        manual: bool,
+    ) {
+        use shift_core::update::{self, Status};
+        let current = shift_core::changelog::VERSION;
+        match result {
+            Ok(m) => {
+                let status = update::evaluate(m, current);
+                if manual {
+                    match &status {
+                        Status::Available(m) => {
+                            // asked for: the chip comes back even if dismissed
+                            self.update.dismissed = None;
+                            update::update_cache(|c| c.dismissed = None);
+                            self.toast(format!("Shift v{} is available", m.version));
+                        }
+                        _ => self.toast(format!("Shift v{current} is up to date")),
+                    }
+                }
+                self.update.status = status;
+            }
+            Err(e) => {
+                log::info!("update check: {e}");
+                if manual {
+                    // curl's own wording stays in the log
+                    self.toast(
+                        if e.starts_with("malformed manifest")
+                            || e == update::SIG_MISSING
+                            || e == update::SIG_INVALID
+                        {
+                            "Couldn't check for updates: the release information is invalid".into()
+                        } else if e == "curl is not installed" {
+                            "Couldn't check for updates: curl is not installed".into()
+                        } else {
+                            "Couldn't check for updates. Check your connection and try again."
+                                .into()
+                        },
+                    );
+                }
+                // a known update stays offered through a failed recheck
+                if !matches!(self.update.status, Status::Available(_)) {
+                    self.update.status = Status::Failed(e);
+                }
+            }
+        }
+        self.sync_update_view();
+    }
+
+    /// Chip, About's button, `update_shift`: the dialog for an available
+    /// update (after finding the other windows), else a check.
+    fn update_shift(&mut self) {
+        if self.update.busy {
+            self.toast("Shift is already updating".into());
+            return;
+        }
+        if !matches!(self.update.status, shift_core::update::Status::Available(_)) {
+            self.check_for_updates_now();
+            return;
+        }
+        let proxy = self.proxy.clone();
+        std::thread::Builder::new()
+            .name("update-survey".into())
+            .spawn(move || {
+                let survey = crate::updater::survey(Duration::from_millis(1500));
+                let _ = proxy.send_event(UserEvent::UpdateSurvey(survey));
+            })
+            .ok();
+    }
+
+    /// What updating means here: which shells come back, which windows.
+    fn update_plan(
+        &self,
+        manifest: shift_core::update::Manifest,
+        survey: crate::updater::Survey,
+    ) -> UpdatePlan {
+        use shift_core::update::{self, InstallTarget};
+        let mut target = update::install_target();
+        let key = update::platform_key();
+        if !matches!(target, InstallTarget::Unsupported(_))
+            && update::asset_for(&manifest, &key).is_none()
+        {
+            target = InstallTarget::Unsupported(format!("this release has no download for {key}"));
+        }
+        let plural = |n: usize, word: &str| format!("{n} {word}{}", if n == 1 { "" } else { "s" });
+        let panes: Vec<&PaneState> = self.tabs.iter().flat_map(|t| &t.panes).collect();
+        let tabs = self.tabs.len() + survey.tabs();
+        let shells = panes.len() + survey.shells();
+        let durable = panes
+            .iter()
+            .filter(|p| p.session.service_id.is_some())
+            .count()
+            + survey.durable_shells();
+        let compatible = update::protocol_compatible(&manifest, shift_pty::ipc::PROTOCOL_VERSION);
+        let tabs_text = plural(tabs, "tab");
+        let (description, mut note, open_page) = match &target {
+            InstallTarget::Unsupported(why) if why == update::MOVE_TO_APPLICATIONS => (
+                format!("{why}."),
+                "It runs from the disk image or a temporary copy macOS made. Drag Shift into Applications, open it from there, then update.".to_string(),
+                true,
+            ),
+            InstallTarget::Unsupported(why) => (
+                format!("This copy of Shift can't update itself: {why}."),
+                "Download the new version from the release page.".to_string(),
+                true,
+            ),
+            _ if durable > 0 && !compatible => (
+                format!("Shift restarts and reopens your {tabs_text}."),
+                "This update can't reattach running shells; they keep running in the background but won't reopen.".to_string(),
+                false,
+            ),
+            _ if durable > 0 && durable == shells => (
+                format!(
+                    "Shift restarts. Your {tabs_text} and {} keep running and come back where they were.",
+                    plural(shells, "shell")
+                ),
+                String::new(),
+                false,
+            ),
+            _ if durable > 0 => (
+                format!(
+                    "Shift restarts and reopens your {tabs_text}. {durable} of {} keep running; the others end.",
+                    plural(shells, "shell")
+                ),
+                String::new(),
+                false,
+            ),
+            _ => (
+                format!("Shift restarts and reopens your {tabs_text}."),
+                "Open shells will end when Shift restarts. Turn on “Keep shells running when Shift quits” in Settings › General to keep them.".to_string(),
+                false,
+            ),
+        };
+        if survey.unreachable > 0 && !open_page {
+            let n = survey.unreachable;
+            let more = if n == 1 {
+                "1 window can't be reopened (its control socket is off); it stays open on the current version.".to_string()
+            } else {
+                format!(
+                    "{n} windows can't be reopened (their control socket is off); they stay open on the current version."
+                )
+            };
+            note = if note.is_empty() {
+                more
+            } else {
+                format!("{note} {more}")
+            };
+        }
+        UpdatePlan {
+            manifest,
+            target,
+            windows: survey
+                .windows
+                .into_iter()
+                .map(|(pid, path, _)| (pid, path))
+                .collect(),
+            description,
+            note,
+            open_page,
+        }
+    }
+
+    fn open_update_dialog(&mut self, survey: crate::updater::Survey) {
+        let shift_core::update::Status::Available(m) = self.update.status.clone() else {
+            return;
+        };
+        if self.update.busy || self.confirm.is_some() {
+            return;
+        }
+        let plan = self.update_plan(m, survey);
+        self.palette.open = false;
+        self.context_menu.close();
+        self.confirm = Some(ConfirmClose {
+            opened: Instant::now(),
+            action: ConfirmAction::Update(Box::new(plan)),
+            commands: Vec::new(),
+        });
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    /// Cancel / Esc on the confirm modal; "Later" on the update dialog
+    /// dismisses that version (no chip until a newer one).
+    fn cancel_confirm(&mut self) {
+        if let Some(ConfirmClose {
+            action: ConfirmAction::Update(plan),
+            ..
+        }) = self.confirm.take()
+        {
+            let version = plan.manifest.version.clone();
+            self.update.dismissed = Some(version.clone());
+            if self.update_checks_allowed() {
+                shift_core::update::update_cache(|c| c.dismissed = Some(version));
+            }
+        }
+    }
+
+    /// Update: take the install lock (one window at a time), then download,
+    /// verify and install off the UI thread; Open download page: the
+    /// release page in the browser.
+    fn install_update(&mut self, plan: UpdatePlan) {
+        use shift_core::update;
+        if plan.open_page {
+            let url = if plan.manifest.url.starts_with("https://") {
+                plan.manifest.url.clone()
+            } else {
+                RELEASES_PAGE.to_string()
+            };
+            self.open_target_external(&url);
+            return;
+        }
+        let Some(dir) = update::updates_dir() else {
+            self.toast("Update failed: no data directory".into());
+            return;
+        };
+        match update::try_lock(&dir) {
+            Ok(lock) => self.update.lock = Some(lock),
+            Err(update::LockError::Held(pid)) => {
+                log::info!("update: install lock held by {pid}");
+                self.toast("Another window is updating Shift".into());
+                return;
+            }
+            Err(update::LockError::Io(e)) => {
+                self.toast(format!("Update failed: {e}"));
+                return;
+            }
+        }
+        self.update.busy = true;
+        self.update.quit_after = false;
+        let version = plan.manifest.version.clone();
+        self.toast(format!("Downloading Shift v{version}…"));
+        let proxy = self.proxy.clone();
+        let spawned = std::thread::Builder::new()
+            .name("update-install".into())
+            .spawn(move || {
+                let result = (|| {
+                    let asset = update::asset_for(&plan.manifest, &update::platform_key())
+                        .ok_or("this release has no download for this computer")?;
+                    // what an interrupted install left (the lock is held)
+                    update::sweep(&dir, &plan.target);
+                    // a fixed name: nothing from the manifest reaches a path
+                    let file = update::download_path(&dir, asset);
+                    update::download(asset, &file)?;
+                    let installed = update::install(
+                        &plan.target,
+                        &file,
+                        &version,
+                        shift_core::changelog::VERSION,
+                    );
+                    let _ = std::fs::remove_file(&file);
+                    installed
+                })();
+                let _ = proxy.send_event(UserEvent::UpdateInstalled(result, plan.windows));
+            });
+        if spawned.is_err() {
+            self.update.busy = false;
+            self.update.lock = None;
+            self.toast("Could not start the update".into());
+        }
+    }
+
+    /// The update stopped (failed, or undone before the restart): release
+    /// the lock, say why, and quit now if a quit waited for it.
+    fn abort_update(&mut self, message: String, event_loop: &ActiveEventLoop) {
+        self.update.busy = false;
+        self.update.lock = None;
+        self.toast(message);
+        self.sync_update_view();
+        if std::mem::take(&mut self.update.quit_after) {
+            self.perform_close(CloseScope::Window, event_loop);
+        }
+    }
+
+    /// Installed: commit to the restart in an order where any failure
+    /// leaves the old app in place and every window open — 1. the rollback
+    /// marker with a fresh token, 2. this window's restart file, 3. the
+    /// helper that starts the new version once this process is gone — and
+    /// only then 4. ask the other windows (with the token) to save their
+    /// layouts and quit.
+    fn on_update_installed(
+        &mut self,
+        result: Result<shift_core::update::Pending, String>,
+        windows: Vec<(u32, std::path::PathBuf)>,
+        event_loop: &ActiveEventLoop,
+    ) {
+        use shift_core::update;
+        let mut pending = match result {
+            Ok(p) => p,
+            Err(e) => return self.abort_update(format!("Update failed: {e}"), event_loop),
+        };
+        let to = pending.to.clone();
+        // nothing will start the new version: the old one goes back
+        let undo = |pending: &update::Pending, why: String| match update::restore_old(pending) {
+            Ok(()) => format!("Couldn't restart into Shift v{to} ({why}); nothing was changed"),
+            Err(e) => {
+                log::warn!("update: restoring the previous version: {e}");
+                format!("Couldn't restart into Shift v{to} ({why})")
+            }
+        };
+        // 1. the marker (the helper's rollback signal, the others' token)
+        let marker = update::pending_path();
+        let written = update::new_token()
+            .map_err(|e| format!("random token: {e}"))
+            .and_then(|token| {
+                pending.token = token;
+                let m = marker.as_deref().ok_or("no data directory")?;
+                update::write_pending(m, &pending).map_err(|e| format!("{}: {e}", m.display()))
+            });
+        if let Err(e) = written {
+            let message = undo(&pending, e);
+            return self.abort_update(message, event_loop);
+        }
+        let marker = marker.unwrap_or_default();
+        if self.update.quit_after {
+            // quit was asked for during the install: no restart. The new
+            // version finishes the update (the marker) on its next launch.
+            self.update.busy = false;
+            self.update.quit_after = false;
+            self.perform_close(CloseScope::Window, event_loop);
+            return;
+        }
+        // 2. this window's layout
+        let own = crate::updater::own_restart_file(self.persist_session)
+            .ok_or_else(|| "no data directory".to_string())
+            .and_then(|f| {
+                shift_core::session_state::save_to(&f, &self.saved_session())
+                    .map(|()| f.clone())
+                    .map_err(|e| format!("{}: {e}", f.display()))
+            });
+        let own = match own {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = std::fs::remove_file(&marker);
+                let message = undo(&pending, e);
+                return self.abort_update(message, event_loop);
+            }
+        };
+        // 3. the helper
+        if let Err(e) = self.spawn_update_helper(&pending, &own) {
+            let _ = std::fs::remove_file(&own);
+            let _ = std::fs::remove_file(&marker);
+            let message = undo(&pending, e);
+            return self.abort_update(message, event_loop);
+        }
+        // 4. the other windows; then this one quits (UpdateReady)
+        self.toast(format!("Restarting into Shift v{to}…"));
+        let proxy = self.proxy.clone();
+        let token = pending.token.clone();
+        let asked = std::thread::Builder::new()
+            .name("update-restart".into())
+            .spawn(move || {
+                let n = crate::updater::restart_others(&windows, &token, Duration::from_secs(5));
+                log::info!("update: {n} other window(s) saved their layouts");
+                let _ = proxy.send_event(UserEvent::UpdateReady(own));
+            });
+        if asked.is_err() {
+            // the helper is waiting for this process: quit; the other
+            // windows stay open on the current version
+            log::warn!("update: could not ask the other windows to restart");
+            event_loop.exit();
+        }
+    }
+
+    /// Start the detached helper that launches the new version (restoring
+    /// this window from `own`, reopening the others) once this process is
+    /// gone, and rolls back if it dies before confirming.
+    fn spawn_update_helper(
+        &self,
+        pending: &shift_core::update::Pending,
+        own: &std::path::Path,
+    ) -> Result<(), String> {
+        use shift_core::update;
+        let exe = if pending.new_path.extension().is_some_and(|e| e == "app") {
+            pending.new_path.join("Contents/MacOS/shift-terminal")
+        } else {
+            pending.new_path.clone()
+        };
+        let script = std::env::var(crate::updater::RELAUNCH_SCRIPT_ENV).ok();
+        let args = update::relaunch_args(&crate::updater::launch().args, script.as_deref());
+        let env = vec![
+            (crate::updater::OTHERS_ENV.to_string(), "1".to_string()),
+            (crate::updater::RELAUNCH_ENV.to_string(), "1".to_string()),
+            (
+                crate::updater::RESTORE_ENV.to_string(),
+                own.to_string_lossy().into_owned(),
+            ),
+        ];
+        let (Some(marker), Some(failed), Some(dir)) = (
+            update::pending_path(),
+            update::failed_path(),
+            update::updates_dir(),
+        ) else {
+            return Err("no data directory".into());
+        };
+        let _ = std::fs::create_dir_all(&dir);
+        // the helper keeps it under 1 MB; it holds every relaunch's output
+        let log = dir.join("relaunch.log");
+        update::spawn_helper(pending, &exe, &marker, &failed, &log, &args, &env, &[])
+            .map_err(|e| format!("helper: {e}"))?;
+        log::info!("update: relaunching {} after exit", exe.display());
+        Ok(())
+    }
+
+    /// The other windows saved their layouts and quit: save this window's
+    /// layout once more (the shells may have moved meanwhile; the earlier
+    /// file stays if this fails) and quit with durable shells running.
+    fn relaunch_for_update(&mut self, own: std::path::PathBuf, event_loop: &ActiveEventLoop) {
+        if let Err(e) = shift_core::session_state::save_to(&own, &self.saved_session()) {
+            log::warn!("restart file {}: {e}", own.display());
+        }
+        self.save_session();
+        event_loop.exit();
+    }
+
+    /// At start: what waits for the first frame (`confirm_start`), and how
+    /// long after it — [`shift_core::update::CONFIRM_AFTER`] when this is the
+    /// version an update just installed, so a crash early on still rolls
+    /// back (the other windows reopen only then: a rollback reopens them on
+    /// the old version instead).
+    fn plan_start_confirmation(&mut self) {
+        use shift_core::update;
+        let fresh_install = self.handles_update_marker()
+            && update::pending_path()
+                .and_then(|m| update::read_pending(&m))
+                .is_some_and(|p| update::same_version(&p.to, shift_core::changelog::VERSION));
+        let wait = if fresh_install {
+            update::CONFIRM_AFTER
+        } else {
+            Duration::ZERO
+        };
+        self.update.confirm_after = Some(wait);
+        // a window that never presents a frame (hidden on another Space;
+        // headless runs present none at all) still confirms, later
+        let proxy = self.proxy.clone();
+        let _ = std::thread::Builder::new()
+            .name("update-confirm-fallback".into())
+            .spawn(move || {
+                std::thread::sleep(wait + Duration::from_secs(20));
+                let _ = proxy.send_event(UserEvent::StartConfirmed);
+            });
+        // SHIFT_TEST_NO_FIRST_FRAME (tests): a headless run that waits for
+        // the fallback like a window that never draws
+        if self.headless && std::env::var_os("SHIFT_TEST_NO_FIRST_FRAME").is_none() {
+            self.on_first_frame();
+        }
+    }
+
+    /// The update marker is this process's business: it was started by the
+    /// helper, or it is a plain launch of the main window (which finishes
+    /// an update that quit instead of restarting).
+    fn handles_update_marker(&self) -> bool {
+        let launch = crate::updater::launch();
+        launch.relaunched || self.plain_main_launch()
+    }
+
+    fn plain_main_launch(&self) -> bool {
+        let launch = crate::updater::launch();
+        // a scripted run persists (owns session.toml) only under
+        // SHIFT_PERSIST_SESSION, so it counts as a plain launch then
+        self.persist_session && !launch.secondary && !launch.relaunched && launch.restore.is_none()
+    }
+
+    /// The first frame is on screen: confirm the start after the planned
+    /// wait.
+    fn on_first_frame(&mut self) {
+        let Some(wait) = self.update.confirm_after.take() else {
+            return;
+        };
+        let proxy = self.proxy.clone();
+        let spawned = std::thread::Builder::new()
+            .name("update-confirm".into())
+            .spawn(move || {
+                std::thread::sleep(wait);
+                let _ = proxy.send_event(UserEvent::StartConfirmed);
+            });
+        if spawned.is_err() {
+            self.confirm_start();
+        }
+    }
+
+    /// This process is up: finish an update that started it (delete the
+    /// old copy and the marker, or report a rollback), drop the restart file
+    /// it came from, and reopen the other windows — after an update, or,
+    /// on a plain launch of the main window, any a crashed update left.
+    fn confirm_start(&mut self) {
+        use shift_core::update;
+        if std::mem::replace(&mut self.update.start_confirmed, true) {
+            return;
+        }
+        self.update.confirm_after = None;
+        let launch = crate::updater::launch();
+        let current = shift_core::changelog::VERSION;
+        let mut marker_left = false;
+        if self.handles_update_marker()
+            && let Some(marker) = update::pending_path()
+            && let Some(p) = update::read_pending(&marker)
+        {
+            let age = std::fs::metadata(&marker)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .unwrap_or_default();
+            if update::same_version(&p.to, current) {
+                let target = update::install_target();
+                if update::pending_matches_target(&p, &target) {
+                    if p.old_path.is_dir() {
+                        let _ = std::fs::remove_dir_all(&p.old_path);
+                    } else {
+                        let _ = std::fs::remove_file(&p.old_path);
+                    }
+                } else {
+                    log::warn!(
+                        "update marker names {} / {}, not this install: left alone",
+                        p.new_path.display(),
+                        p.old_path.display()
+                    );
+                }
+                let _ = std::fs::remove_file(&marker);
+                self.toast(format!("Updated to Shift v{current}"));
+                // started by a background helper: come to the front
+                if let Some(w) = self.shown_window() {
+                    w.focus_window();
+                }
+            } else if launch.relaunched || age > Duration::from_secs(600) {
+                // not the version it names (the helper put the old one back,
+                // or a stale marker): clear it — never a reason to roll back
+                log::warn!("update marker for v{} on v{current}: cleared", p.to);
+                let _ = std::fs::remove_file(&marker);
+                if launch.relaunched {
+                    self.toast(format!(
+                        "Couldn't update to Shift v{}; still on v{current}",
+                        p.to
+                    ));
+                }
+            } else {
+                // another window's update is in flight
+                marker_left = true;
+            }
+        }
+        if self.handles_update_marker()
+            && let Some(failed) = update::failed_path()
+            && let Some(p) = update::read_pending(&failed)
+        {
+            let _ = std::fs::remove_file(&failed);
+            self.toast(format!(
+                "Couldn't update to Shift v{}; still on v{current}",
+                p.to
+            ));
+        }
+        if let Some(file) = &launch.restore {
+            // validated in take_env: a restart file
+            let _ = std::fs::remove_file(file);
+        }
+        if launch.restart_others {
+            let n = crate::updater::reopen_windows(launch.restore.as_deref(), false, self.headless);
+            log::info!("update: reopened {n} window(s)");
+        } else if self.plain_main_launch() && !marker_left {
+            // windows a crashed update saved and never reopened
+            let n = crate::updater::reopen_windows(None, true, self.headless);
+            if n > 0 {
+                log::info!("reopened {n} window(s) left by an interrupted update");
+            }
+        }
+        if launch.relaunched {
+            quiet_relaunch_output();
+        }
+    }
+}
+
+/// A process the update helper started writes to `updates/relaunch.log`;
+/// once it is confirmed, its later output goes nowhere instead of growing
+/// that file for the rest of the session.
+fn quiet_relaunch_output() {
+    let Ok(null) = std::fs::OpenOptions::new().write(true).open("/dev/null") else {
+        return;
+    };
+    use std::os::fd::AsRawFd;
+    unsafe {
+        libc::dup2(null.as_raw_fd(), 1);
+        libc::dup2(null.as_raw_fd(), 2);
+    }
+}
+
 impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
@@ -13128,7 +14092,11 @@ impl ApplicationHandler<UserEvent> for App {
         }
 
         self.load_config(true);
-        let restored = if self.config.restore_session && self.persist_session {
+        // an update's restart restores from its own file, whatever
+        // restore_session says (the dialog promised the tabs come back)
+        let restored = if let Some(file) = &crate::updater::launch().restore {
+            shift_core::session_state::load_from(file)
+        } else if self.config.restore_session && self.persist_session {
             shift_core::session_state::load()
         } else {
             None
@@ -13262,17 +14230,19 @@ impl ApplicationHandler<UserEvent> for App {
         match restored {
             Some(saved) if !saved.tabs.is_empty() => {
                 // restoring must not rewrite the file tab by tab
-                self.persist_session = false;
+                let persist = std::mem::replace(&mut self.persist_session, false);
                 for tab in &saved.tabs {
                     self.restore_tab(tab);
                 }
-                self.persist_session = true;
+                self.persist_session = persist;
                 self.active = saved.active.min(self.tabs.len() - 1);
                 self.save_session();
             }
             _ => self.spawn_tab(),
         }
         self.load_shell_env();
+        self.plan_start_confirmation();
+        self.sync_update_checks();
     }
 
     fn window_event(
@@ -13553,10 +14523,24 @@ impl ApplicationHandler<UserEvent> for App {
                     crate::control::Response::error("not allowed: control permissions changed")
                 };
                 let _ = p.reply.send(response);
+                if self.restart_requested {
+                    // an updating window restarts this one: its layout is
+                    // saved; durable shells keep running for the new version
+                    log::info!("restarting for an update");
+                    event_loop.exit();
+                    return;
+                }
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
             }
+            UserEvent::UpdateChecked(result, manual) => self.on_update_checked(result, manual),
+            UserEvent::UpdateSurvey(survey) => self.open_update_dialog(survey),
+            UserEvent::UpdateInstalled(result, windows) => {
+                self.on_update_installed(result, windows, event_loop)
+            }
+            UserEvent::UpdateReady(own) => self.relaunch_for_update(own, event_loop),
+            UserEvent::StartConfirmed => self.confirm_start(),
             UserEvent::HistoryLoaded(mut history) => {
                 log::info!("shell history imported: {} entries", history.len());
                 Arc::make_mut(&mut self.shell_history).append(&mut history);

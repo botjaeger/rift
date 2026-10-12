@@ -30,9 +30,9 @@ VERSION="$(shift_version)"
 
 if [ "$BUILD" -eq 1 ]; then
     if [ -n "$TRIPLE" ]; then
-        cargo build --release --target "$TRIPLE"
+        cargo build --release --target-dir "$TARGET_DIR" --target "$TRIPLE"
     else
-        cargo build --release
+        cargo build --release --target-dir "$TARGET_DIR"
     fi
 fi
 

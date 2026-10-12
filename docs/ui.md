@@ -31,7 +31,7 @@ pane, history, autocomplete, palette, settings, controls, menus, panels).
 
 ## Menu bar (macOS)
 
-Native menus: **Shift** (About, Settings…, Keyboard Shortcuts, Services,
+Native menus: **Shift** (About Shift — Settings › About, Check for Updates…, Settings…, Keyboard Shortcuts, Services,
 Hide/Hide Others/Show All, Quit) · **File** (New Tab, New Window, Split Pane
 Right/Down, Reopen Closed Tab, Save Layout as Launch Configuration, Close
 Pane/Other Tabs/Window) · **Edit** (Undo, Redo, Cut, Copy, Paste, Select All,
@@ -70,6 +70,10 @@ every action).
   bare `±` outside a repository or with no changes. Left of it, an inbox
   (bell) icon opens the notifications popover; an accent dot marks unread
   entries. The vertical-tab layout's top strip has the same buttons.
+- **Update Shift** — while a newer release is available (and not dismissed
+  with *Later*), a 22 px pill left of the inbox: 1 px `warning` outline,
+  `warning` text (12 px medium), no fill, a hover lift. Tooltip `vX.Y.Z
+  available`; a click opens the update dialog (see *Dialogs and toasts*).
 - A tab with synchronized inputs on shows the sync icon in the accent.
 - A tab where a command runs (in any of its panes) shows a spinner before
   its title, in place of the sync icon; it turns in background tabs too. A
@@ -553,7 +557,11 @@ block; ⇧ + label copies it (a block copies its output). Esc cancels.
   else a terminal mark), the command, and the agent's name; pasted lines
   and files are plain code lines. Used for closing
   running commands, pasting multi-line text into a shell without bracketed
-  paste ("Paste and run?"), and installing shell integration on an SSH host.
+  paste ("Paste and run?"), installing shell integration on an SSH host, and
+  updating ("Update to Shift vX.Y.Z?": what the restart keeps — tabs,
+  running shells, windows that cannot be reopened — with *Later* `esc` and
+  *Update* `⏎`, or *Open download page* for an install that cannot update
+  itself; Later hides the chip for that version).
   Enter confirms, Esc cancels. An Enter that is auto-repeated, or that
   arrives within 300 ms of the dialog opening (a held or typed-ahead key),
   is ignored.
@@ -629,7 +637,7 @@ running and the tab strip stays live. ⌘, again goes back to the shell tab;
 clicking any tab switches; the tab's ×, ⌘W or Esc closes it. Other app
 shortcuts (new tab, next tab, palette…) work from it and leave it.
 
-A 232 px sidebar: a search field, the eight pages with icons (arrow keys
+A 232 px sidebar: a search field, the nine pages with icons (arrow keys
 navigate pages; PageUp/PageDown scroll the body) and *Open config.toml* at
 the foot (opens the file in the reading pane). When the settings area is
 under 700 px wide the sidebar shrinks to 56 px of icons, with no search
@@ -672,6 +680,8 @@ saved`.
     turning this off deletes it*; `save_transcripts`),
     `Keep shells running when Shift quits` toggle (*Session service;
     relaunch reattaches (new shells)*; `durable_sessions`).
+  - Updates: `Check for updates` toggle (*At launch and every 6 hours;
+    Update Shift appears in the tab bar*; `check_for_updates`).
   - Automation: `Control socket` segmented `Off | Navigate | Full`
     (`control_api`).
 - **Appearance** — *Fonts, cursor, window and theme*.
@@ -752,6 +762,15 @@ saved`.
   success, error), its display name and an `active` tag on the current theme;
   the `light` tag marks the `theme_light` theme, and only while
   `sync_os_theme` is on. Clicking a row sets `theme`.
+- **About** — no title: the app icon (64 px) beside the `Shift` wordmark,
+  centred a little above the middle of the body; under it the version
+  (`v0.1.0`) with a copy button (tooltip *Copy version*; copies the version
+  and toasts `Copied version`), the update status — `Up to date`,
+  `Checking for updates…` or `Couldn't check for updates` (muted), or
+  `vX.Y.Z available` (`warning`) with an `Update…` button that opens the
+  update dialog — and `Copyright 2026 botjaeger · MIT License`. The status
+  row is absent while no check has run (`check_for_updates` off).
+  Opens from Shift → About Shift and the palette (`open_about`).
 
 ## Scrollback
 

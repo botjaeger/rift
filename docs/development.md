@@ -11,7 +11,7 @@ How to build, test, verify and release Shift. Agent-specific rules are in
 | Rust | 1.98.0, pinned in `rust-toolchain.toml` (rustup installs it and rustfmt + clippy on first use) |
 | macOS | 11 or newer, Xcode Command Line Tools (`xcode-select --install`) |
 | Linux build packages | `libxkbcommon-dev libwayland-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev pkg-config` |
-| Gate tools | `shellcheck`, `zsh`, `fish` (shell gate); `docker` (linux gate) |
+| Gate tools | `python3` (test gate: `release-manifest.py --self-test`; ui gate); `shellcheck`, `zsh`, `fish` (shell gate); `docker` (linux gate) |
 | Packaging (optional) | `python3` + Pillow (`gen-icon.py`), `dpkg-dev`, `file`, `libfuse2` (AppImage) |
 
 ```sh
@@ -67,7 +67,7 @@ display-line building). Rendering is verified with the script driver below.
 |---|---|
 | `fmt` | `cargo fmt --all --check`, and on each vendored crate |
 | `clippy` | `cargo clippy --workspace --all-targets --locked -- -D warnings`, and on each vendored crate (all features) |
-| `test` | `cargo test --workspace --locked`, and each vendored crate (all features; built into `target/vendor`) |
+| `test` | `cargo test --workspace --locked`, and each vendored crate (all features; built into `target/vendor`); `scripts/release-manifest.py --self-test` |
 | `doc` | `cargo doc --workspace --no-deps --locked` with rustdoc warnings denied |
 | `shell` | `shellcheck` on packaging, scripts, git hooks and the bash hooks; `zsh -n` and `fish --no-execute` on the zsh and fish hooks |
 | `docs` | `CLAUDE.md` and `AGENTS.md` are identical; every relative link in every Markdown file resolves (the vendored crates' upstream docs excepted) |
@@ -86,8 +86,9 @@ Every requested gate runs even after one fails; the summary lists each result
 with its time and the commit. A gate whose tool is missing fails instead of
 passing silently. CI (`.github/workflows/ci.yml`) runs `scripts/gates.sh`
 on macOS 14 (fmt clippy test doc docs release) and Ubuntu 24.04 (the same plus
-`shell` and `ui` under Xvfb/Mesa). Release publication requires that same
-reusable validation workflow to pass on the tagged revision.
+`shell` and `ui` under Xvfb/Mesa). The Release workflow runs that same
+reusable validation workflow on the tagged revision before it writes
+`latest.json`.
 
 The `ui` gate checks, among others: command blocks, palette input while
 another window's socket is stalled, background file preview, theme-only hot
@@ -97,7 +98,10 @@ completion panel moving the output out from under it, mouse and hint
 geometry, drag selection, the review diff (hunk expand and gap rows), DEC
 double-width/double-height lines, shell-syntax file names, Unicode and
 partial lines, the Settings Files/Terminal pages and keyboard reach, agent
-idle titles (Claude Code, Codex), ⌘⌫ in raw mode, and the font picker. It uses scratch XDG
+idle titles (Claude Code, Codex), ⌘⌫ in raw mode, the font picker, and
+updates (the tab bar's chip from a `file://` manifest, the dialog, *Later*
+across a relaunch, Settings › About for an up-to-date and a malformed
+manifest). It uses scratch XDG
 config/data directories with notifications disabled and retains captures, state dumps and logs under
 `/tmp/shift-ui-*`. Set `SHIFT_TEST_BIN` to test an already built binary;
 otherwise it builds the debug binary first.
@@ -151,10 +155,10 @@ memory, key-to-frame latency and TUI round trips; compare against
 ## Architecture
 
 ```
-shift-terminal     winit app, views, input routing, a11y, control socket, script driver
+shift-terminal     winit app, views, input routing, a11y, control socket, script driver, update restarts
   ├── shift-renderer   wgpu quad + sprite pipelines, glyphon text, Scene layers
   ├── shift-pty        PTY sessions, reader threads, vte, images, session service
-  └── shift-core       config, themes, keymap, OSC scanner, blocks, completions, git
+  └── shift-core       config, themes, keymap, OSC scanner, blocks, completions, git, update check/install
 ```
 
 Dependencies flow downward only; `shift-core` has no graphics dependencies.
@@ -196,6 +200,7 @@ Workspace dependencies (`Cargo.toml`):
 | `arboard` | Clipboard (Wayland data-control) | |
 | `git2` (no default features) | Branch, ahead/behind, dirty | Background thread |
 | `dirs` | Home and standard directories | |
+| `ed25519-compact` (no default features) | Verifies the release manifest's signature | No dependencies; verify only |
 | `log`, `env_logger` | Logging (`RUST_LOG=info`) | |
 
 App-only: `accesskit` / `accesskit_winit` (screen readers), `global-hotkey`,
@@ -221,15 +226,90 @@ options.
 | `packaging/make-dmg.sh` | macOS | `target/Shift-<version>-<arch>.dmg` (run `make-app.sh` first) |
 | `packaging/make-deb.sh` | Linux | `target/shift-terminal_<version>_<arch>.deb` |
 | `packaging/make-appimage.sh` | Linux | `target/Shift-<version>-<arch>.AppImage` (pins appimagetool 1.9.1 and verifies SHA-256 before every execution, including cached copies) |
-| `packaging/make-tarball.sh` | both | `target/shift-terminal-<version>-<os>-<arch>.tar.gz` |
+| `packaging/make-tarball.sh` | both | `target/shift-terminal-<version>-<os>-<arch>.tar.gz`, named for the `--target` triple (`macos-arm64`, `macos-x86_64`, `linux-x86_64`), not the build host |
 
 The version lives only in `[workspace.package]` of `Cargo.toml`. Every bump
 needs a matching `## <version> — <date>` entry at the top of `CHANGELOG.md`:
 the app embeds that file as its What's New page, and
 `changelog::tests::embedded_changelog_lists_the_running_version_first` fails
-without it. Pushing a
-`v*` tag runs `.github/workflows/release.yml`, which builds every package and
-publishes a GitHub Release.
+without it.
+
+Releases are published to the **public** repository
+[botjaeger/shift-releases](https://github.com/botjaeger/shift-releases)
+(this source repository is private, so nothing attached to it can be
+downloaded). The app's updater reads
+`https://github.com/botjaeger/shift-releases/releases/latest/download/latest.json`.
+
+1. Bump `[workspace.package] version`, add the `CHANGELOG.md` section, run
+   `scripts/gates.sh all`, commit, and push a tag `vX.Y.Z` (the tag must
+   equal the Cargo.toml version).
+2. The tag runs `.github/workflows/release.yml`: the validation workflow,
+   then Shift.app/DMG/tarball for Apple silicon and Intel (both on
+   `macos-14`; Intel is cross-compiled), the `.deb`, AppImage and tarball
+   for Linux, and finally `latest.json`, written by
+   `scripts/release-manifest.py` from the downloaded artifacts (version,
+   date and summary from `CHANGELOG.md`, `protocol` =
+   `ipc::PROTOCOL_VERSION`, each asset's URL in the public release and its
+   SHA-256) and checked with `--verify`. Everything is uploaded as workflow
+   artifacts; the workflow publishes nothing and signs nothing.
+3. On your machine, logged in with `gh` (access to both repositories):
+   `scripts/publish-release.sh vX.Y.Z` downloads that run's artifacts,
+   refuses unless `latest.json` names the tag's version and every asset
+   matches its SHA-256, signs `latest.json` (below), and creates the release
+   `vX.Y.Z` in `botjaeger/shift-releases` with every package, `latest.json`,
+   `latest.json.sig`, and the CHANGELOG section as notes (`--draft` to
+   review first; `--run ID` to pick a workflow run).
+4. Running copies see the release within 6 hours (or at once via *Check for
+   updates*).
+
+### Release signing
+
+The asset digests in `latest.json` come from the same public repository as
+the assets, so anyone who can write to `botjaeger/shift-releases` could
+otherwise ship code to every install. The updater therefore fetches
+`latest.json.sig` next to the manifest — base64 of an Ed25519 signature over
+`latest.json`'s exact bytes — and refuses the manifest (*Couldn't check for
+updates*; the log says `release signature is missing` or `is invalid`)
+unless it verifies against one of `RELEASE_KEYS` in
+`crates/shift-core/src/update.rs`. The cached copy in `update.json` is
+re-verified every time it is read.
+
+- **The private key** lives only at
+  `~/.config/shift-release/signing-key.pem` on the maintainer's machine
+  (directory `0700`, file `0600`; `SHIFT_SIGNING_KEY` points elsewhere). It
+  is never committed and never given to CI. **Back it up** offline (a
+  password manager or an encrypted drive): losing it means installed copies
+  cannot verify any new release until they are updated by hand.
+- `scripts/sign-manifest.sh latest.json` writes `latest.json.sig` with
+  `openssl pkeyutl -sign -rawin` (OpenSSL 3 or newer; macOS's LibreSSL has no
+  Ed25519 — `brew install openssl@3`), refuses a key readable by group or
+  others, and checks the signature against `RELEASE_KEYS` before it
+  finishes; `--verify latest.json` only checks an existing signature.
+  `publish-release.sh` runs both.
+- **A new key pair**: `openssl genpkey -algorithm ed25519 -out
+  signing-key.pem`; the public key for `RELEASE_KEYS` is the last 32 bytes
+  of `openssl pkey -in signing-key.pem -pubout -outform DER`, base64.
+- **Rotation**: add the new public key to `RELEASE_KEYS` and ship a release
+  signed with the old key; sign later releases with the new key; drop the
+  old public key once installs have moved past that release. A compromised
+  key is removed the same way, but copies that never installed the rotating
+  release keep trusting it.
+
+When a change alters the session service's wire format,
+`ipc::tests::protocol_matches_the_golden_wire_format` fails: bump
+`PROTOCOL_VERSION` and update the golden. The manifest then carries the new
+protocol, and the update dialog warns that running shells cannot be
+reattached across that update.
+
+`scripts/release-manifest.py VERSION DIR --base-url file://DIR
+--allow-missing` writes a manifest for local files; sign it with
+`scripts/sign-manifest.sh`, or with a throwaway test key whose public half
+goes in `SHIFT_UPDATE_TEST_KEY` (trusted for `file://` manifests only;
+`scripts/ui-smoke.py` signs its manifests that way). With
+`SHIFT_UPDATE_URL=file://…/latest.json` a scratch copy of Shift.app (built
+twice with `make-app.sh`, the newer one packed by `make-dmg.sh`) can run a
+whole update headless (`SHIFT_RELAUNCH_SCRIPT` names the script the
+restarted app runs).
 
 ## Updating the toolchain
 

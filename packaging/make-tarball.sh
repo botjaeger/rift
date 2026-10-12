@@ -23,15 +23,12 @@ done
 
 VERSION="$(shift_version)"
 
-case "$(uname -s)" in
-    Darwin) OS=macos ;;
-    Linux)  OS=linux ;;
-    *)      OS="$(uname -s | tr '[:upper:]' '[:lower:]')" ;;
-esac
-ARCH="$(uname -m)"
+# named for the build's target, not the host (see shift_target_arch)
+OS="$(shift_target_os "$TRIPLE")"
+ARCH="$(shift_target_arch "$TRIPLE")"
 
 if [ "$BUILD" -eq 1 ]; then
-    if [ -n "$TRIPLE" ]; then cargo build --release --target "$TRIPLE"; else cargo build --release; fi
+    if [ -n "$TRIPLE" ]; then cargo build --release --target-dir "$TARGET_DIR" --target "$TRIPLE"; else cargo build --release --target-dir "$TARGET_DIR"; fi
 fi
 
 if [ -n "$TRIPLE" ]; then

@@ -32,6 +32,8 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
       libx11-6 libx11-xcb1 libxcursor1 libxi6 libxrandr2 \
       # shells whose integration is exercised
       zsh \
+      # the test gate's release-manifest.py --self-test
+      python3 \
     && rm -rf /var/lib/apt/lists/*
 
 ENV WINIT_UNIX_BACKEND=x11 \

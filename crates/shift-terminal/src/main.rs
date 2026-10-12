@@ -17,6 +17,7 @@ mod state;
 mod traffic_lights;
 #[cfg(target_os = "macos")]
 mod translucency;
+mod updater;
 mod views;
 mod vim;
 
@@ -25,6 +26,8 @@ use winit::event_loop::EventLoop;
 const USAGE: &str = "usage: shift-terminal [--script <file> [--headless]] [--version] [--help]\n       shift-terminal ctl <command>   (see `shift-terminal ctl help`)";
 
 fn main() {
+    // restart variables are read once and not passed on to shells
+    updater::take_env();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let mut script = None;
@@ -69,6 +72,9 @@ fn main() {
                 println!("{USAGE}");
                 return;
             }
+            // LaunchServices' process serial number (older macOS, some
+            // launchers): not ours to parse
+            psn if psn.starts_with("-psn_") => {}
             other => {
                 eprintln!("shift-terminal: unknown argument {other:?}\n{USAGE}");
                 std::process::exit(2);

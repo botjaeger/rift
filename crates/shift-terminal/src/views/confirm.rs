@@ -113,6 +113,8 @@ pub struct Dialog<'a> {
     /// Shown for a blank entry in `lines`.
     pub empty_line: &'a str,
     pub confirm_label: &'a str,
+    /// The dismiss button (Esc): "Cancel", or "Later" for an update.
+    pub cancel_label: &'a str,
     /// Red confirm button (close/quit) instead of the accent one.
     pub destructive: bool,
     /// `lines` are running processes: each row gets the program's badge
@@ -127,7 +129,7 @@ const FOOTER_H: f32 = 56.0;
 const BUTTON_H: f32 = 30.0;
 
 /// Confirmation modal (close with running processes, multiline paste,
-/// revert, remote install): title and description, the affected lines in
+/// revert, remote install, update): title and description, the affected lines in
 /// an inset list, then a footer bar with Cancel (esc) and the confirm
 /// button (⏎). Returns [cancel, confirm] hit rects.
 pub fn render(
@@ -322,7 +324,7 @@ pub fn render(
         |engine: &mut TextEngine, k: &str| engine.measure(k, 11.5, FONT_SANS, Weight::NORMAL);
     let label_w = engine.measure(dialog.confirm_label, 13.0, FONT_SANS, Weight::MEDIUM);
     let confirm_w = 14.0 + label_w + 8.0 + hint_w(engine, "⏎") + 14.0;
-    let cancel_lw = engine.measure("Cancel", 13.0, FONT_SANS, Weight::MEDIUM);
+    let cancel_lw = engine.measure(dialog.cancel_label, 13.0, FONT_SANS, Weight::MEDIUM);
     let cancel_w = 14.0 + cancel_lw + 8.0 + hint_w(engine, "esc") + 14.0;
     let confirm = [x + modal_w - pad - confirm_w, by, confirm_w, BUTTON_H];
     let cancel = [confirm[0] - 8.0 - cancel_w, by, cancel_w, BUTTON_H];
@@ -336,7 +338,7 @@ pub fn render(
         1.0,
     );
     layer.text(
-        text(engine, "Cancel", 13.0, FONT_SANS, Weight::MEDIUM),
+        text(engine, dialog.cancel_label, 13.0, FONT_SANS, Weight::MEDIUM),
         cancel[0] + 14.0,
         label_y,
         theme.text_ui,

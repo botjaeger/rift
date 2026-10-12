@@ -528,7 +528,8 @@ it.
 
 ## Durable sessions
 
-With `durable_sessions = true` (Settings → General), new shells run in a
+With `durable_sessions = true` (the default; Settings → General → *Keep
+shells running when Shift quits*), new shells run in a
 per-user **session service** (`shift-terminal --session-daemon`, started on
 demand) instead of the window process. Quitting Shift or closing the window
 leaves them running; the next launch restores the layout and **reattaches**
@@ -559,13 +560,82 @@ replay.
   `control/` directories both move to `/tmp/shift-<uid>-<hash>/…`, specific
   to that data directory.
 - If the service cannot start, the shell runs locally and a toast says so.
+- Scripted runs (`--script`) keep their shells local unless
+  `SHIFT_PERSIST_SESSION` is set.
+
+## Updates
+
+Shift looks for a new release at launch and every 6 hours
+(`check_for_updates`, Settings → General → *Updates*): it fetches
+`latest.json` from the public
+[shift-releases](https://github.com/botjaeger/shift-releases) repository with
+the system `curl` (https only, 15 s, at most 64 KiB) and remembers the answer
+in `update.json`, so several windows check once.
+
+The manifest must be signed: Shift also fetches `latest.json.sig` and
+verifies its Ed25519 signature over the manifest's exact bytes against the
+release keys built into the app (the private key stays with the maintainer,
+never in CI or the releases repository) before reading anything in it. A
+missing or invalid signature offers no update and Settings → About shows
+*Couldn't check for updates* (the log says why). The cached answer in
+`update.json` is re-verified whenever it is read, so editing that file
+cannot inject a release either. The asset's SHA-256 then comes from the
+signed manifest.
+
+- A newer version shows **Update Shift** in the tab bar (left of the inbox;
+  tooltip `vX.Y.Z available`). Settings → About shows *Up to date*, *vX.Y.Z
+  available* with an **Update…** button, or *Couldn't check for updates*.
+  The palette has *Check for updates* (`check_for_updates`; the answer
+  toasts) and *Update Shift* (`update_shift`).
+- The chip, **Update…** and `update_shift` open a dialog that says what the
+  restart keeps: with durable sessions, *Your N tabs and M shells keep running
+  and come back where they were*; without them, open shells end (turn on
+  *Keep shells running when Shift quits* to keep them). When the new
+  version's session service speaks another protocol, running shells keep
+  running but cannot be reattached; the dialog says so. **Later** (Esc)
+  hides the chip until a newer version.
+- **Update** downloads this computer's asset (macOS: the DMG for its
+  architecture; Linux: the AppImage) from the public releases only (any
+  other URL in the manifest is rejected), checks its size (512 MiB at most)
+  and its SHA-256 against the manifest (a mismatch changes nothing), checks
+  that the new binary reports the expected version, and swaps it in
+  atomically (the app path is never missing): macOS keeps the old bundle
+  as `.Shift-old.app` beside `Shift.app`, Linux as `<AppImage>.old`. Only
+  one window installs at a time (*Another window is updating Shift*);
+  closing or quitting the window meanwhile waits for the update (*Shift is
+  updating… it quits when the update is done*). Leftovers of an
+  interrupted install are cleared at the next one.
+- Every window restarts: the updating window writes the rollback marker,
+  saves its own layout and starts the relaunch helper (any failure there
+  puts the old version back and changes nothing else), then asks each
+  other window over its control socket to save its layout and quit, and
+  quits with durable shells still running; the new version reopens every
+  window, tabs, splits and directories included, and reattaches the
+  shells. Windows whose control socket is off cannot be asked; the dialog
+  counts them and they stay open on the old version.
+- The new version counts as started 10 s after its first frame: it then
+  deletes the old copy, toasts *Updated to Shift vX.Y.Z* and reopens the
+  other windows. If it exits or crashes before that, the helper puts the
+  old version back and starts it (*Couldn't update to Shift vX.Y.Z*), and
+  that one reopens the windows. A crash mid-update leaves the windows'
+  layouts in `restart/`; the next plain launch reopens them.
+- Updating in place needs Shift.app in a writable folder (macOS) or an
+  AppImage in a writable folder (Linux). A copy running from the disk
+  image or from macOS's temporary translocated copy says *Move Shift to
+  Applications to update it*. Development builds, the `.deb` and the
+  tarball get **Open download page** instead.
 
 ## Control API
 
 Each window listens on `~/.local/share/shift/control/<pid>.sock`
 (`control_api`, Settings → General → Automation):
 
-- `"navigate"` (default): `list`, `status`, `focus`.
+- `"navigate"` (default): `list`, `status`, `focus`, and
+  `prepare-restart`, which an updating window sends to the others (save
+  the layout, keep durable shells, quit). It must carry the token from that
+  update's marker (`update-pending.json`, readable by you only, under 60 s
+  old); without it, or while the receiving window is updating itself, it
+  is refused and the window stays.
 - `"full"`: also `split`, `open` (optionally running a command) and
   `send-text` (types into a shell).
 - `"off"`: no socket. Any unrecognised value (`"false"`, a typo) is

@@ -41,6 +41,7 @@ pub enum Icon {
     Appearance,
     Themes,
     Launch,
+    Info,
 }
 
 /// Draws `icon` centred on `c` at `size` px (the 16-unit box scaled).
@@ -269,6 +270,11 @@ pub fn draw(layer: &mut Layer, icon: Icon, c: [f32; 2], size: f32, color: Color)
             rect(layer, 2.0, 2.5, 5.0, 11.0, 1.0);
             rect(layer, 9.0, 2.5, 5.0, 5.0, 1.0);
             rect(layer, 9.0, 9.5, 5.0, 4.0, 1.0);
+        }
+        Icon::Info => {
+            ring(layer, 8.0, 8.0, 6.0);
+            dot(layer, 8.0, 5.2, 1.6);
+            poly(layer, &[(8.0, 7.5), (8.0, 11.5)]);
         }
     }
 }

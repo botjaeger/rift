@@ -86,6 +86,9 @@ listed alternates.
 | ⇧⌘G | `toggle_review` | Code review panel (right) |
 | ⇧⌘H | `hint_mode` | Letter hints over visible links, paths and blocks: type one to open/select, ⇧ + letter copies |
 | — | `clear_transcripts` | Delete saved block transcripts |
+| — | `check_for_updates` | Look for a new release now; the answer toasts (also Shift → Check for Updates…) |
+| — | `update_shift` | The update dialog for an available release (else a check) |
+| — | `open_about` | Settings → About page: version, copy button, copyright (also Shift → About Shift) |
 | — | `whats_new` | What's New: release notes (also Help → What's New) |
 | ⌘= / ⇧⌘+ | `font_increase` | Font size +1 (persisted to config.toml) |
 | ⌘- | `font_decrease` | Font size −1 |

@@ -401,6 +401,21 @@ pub fn base_items(
             PaletteAction::App(AppAction::OpenKeybindings),
         ),
         item(
+            "About Shift",
+            "open_about",
+            PaletteAction::App(AppAction::OpenAbout),
+        ),
+        item(
+            "Check for updates",
+            "check_for_updates",
+            PaletteAction::App(AppAction::CheckForUpdates),
+        ),
+        item(
+            "Update Shift",
+            "update_shift",
+            PaletteAction::App(AppAction::UpdateShift),
+        ),
+        item(
             "What's new",
             "whats_new",
             PaletteAction::App(AppAction::WhatsNew),

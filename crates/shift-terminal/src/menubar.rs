@@ -122,16 +122,12 @@ fn chord(keymap: &Keymap, label: &str, chord: &str) -> MenuItem {
 /// Build and install the app menu for the current keymap.
 pub fn install(keymap: &Keymap) -> Option<MenuBar> {
     let sep = PredefinedMenuItem::separator;
-    let about = muda::AboutMetadata {
-        name: Some("Shift".into()),
-        version: Some(env!("CARGO_PKG_VERSION").into()),
-        ..Default::default()
-    };
     let app = Submenu::with_items(
         "Shift",
         true,
         &[
-            &PredefinedMenuItem::about(Some("About Shift"), Some(about)),
+            &action(keymap, "About Shift", "open_about"),
+            &action(keymap, "Check for Updates…", "check_for_updates"),
             &sep(),
             &action(keymap, "Settings…", "open_settings"),
             &action(keymap, "Keyboard Shortcuts", "open_keybindings"),

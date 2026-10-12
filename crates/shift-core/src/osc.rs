@@ -267,7 +267,7 @@ fn parse_osc(buf: &[u8]) -> Option<Marker> {
 }
 
 /// Standard base64 (padding optional); `None` on any other byte.
-fn base64_decode(s: &str) -> Option<Vec<u8>> {
+pub(crate) fn base64_decode(s: &str) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(s.len() * 3 / 4);
     let (mut acc, mut bits) = (0u32, 0);
     for b in s.bytes().filter(|&b| b != b'=') {

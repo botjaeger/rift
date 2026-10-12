@@ -199,6 +199,9 @@ No other animation. Motion never delays input.
   hovered tab, else the alert badge or a 6 px `accent` activity dot sits in
   its place. A dragged tab lifts onto the pane ground with a shadow and
   follows the pointer; its slot shows a 2 px `accent` caret.
+- **Update chip** (Warp's "Update Warp"): a 22 px pill (radius 11) left of
+  the inbox, 1 px `warning` outline and `warning` text (Inter 12 medium, 10
+  px padding), no fill; hover lifts 8 %.
 - **Buttons**: 28 px, radius 4, Inter 12.5 medium. Primary `accent` fill
   with `bg` text; secondary 6 % white with a 12 % hairline; ghost text only;
   destructive `error` darkened 18 % with white text. Icon buttons are 24–26
