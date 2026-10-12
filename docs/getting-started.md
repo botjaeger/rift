@@ -6,9 +6,9 @@ macOS defaults; on Linux ⌘ is the Super key, and most actions also have a
 
 ## First launch
 
-Shift starts your login shell (`$SHELL`, or `shell = "…"` in config.toml).
+Rift starts your login shell (`$SHELL`, or `shell = "…"` in config.toml).
 On macOS it runs as a login shell like Terminal.app, so `~/.zprofile`
-(Homebrew's `brew shellenv`) loads before `~/.zshrc`. On the first start it writes its shell hooks to `~/.local/share/shift/` and
+(Homebrew's `brew shellenv`) loads before `~/.zshrc`. On the first start it writes its shell hooks to `~/.local/share/rift/` and
 loads them **after** your own rc files, so your prompt, aliases and plugins
 keep working. zsh, bash and fish are supported; you edit no rc file.
 
@@ -19,7 +19,7 @@ You see two areas:
   current directory and git branch above it.
 
 If commands do not become blocks, the shell is not loading the hooks (see
-[Troubleshooting](#troubleshooting)). Shift then works as a classic terminal.
+[Troubleshooting](#troubleshooting)). Rift then works as a classic terminal.
 
 ## Run commands
 
@@ -68,13 +68,13 @@ If commands do not become blocks, the shell is not loading the hooks (see
 | Tabs in a side rail | Settings → Appearance → *Tabs: Side* |
 
 Tabs, splits and directories come back on the next launch
-(`restore_session`), and the shells themselves keep running while Shift is
-closed and reattach (*Keep shells running when Shift quits*, on by default;
+(`restore_session`), and the shells themselves keep running while Rift is
+closed and reattach (*Keep shells running when Rift quits*, on by default;
 see [durable sessions](features.md#durable-sessions)). Turn on *Save block
 output for restore* to also bring back the finished blocks.
 
-When a new release is out, **Update Shift** appears in the tab bar: it
-installs the update and restarts Shift with your tabs and running shells (see
+When a new release is out, **Update Rift** appears in the tab bar: it
+installs the update and restarts Rift with your tabs and running shells (see
 [updates](features.md#updates)).
 
 ## Find anything: the palette
@@ -99,11 +99,11 @@ Other keyboard-first tools:
 ## Settings and themes
 
 ⌘, opens Settings. Every change is written to
-`~/.config/shift/config.toml` and applies at once; editing the file by hand
+`~/.config/rift/config.toml` and applies at once; editing the file by hand
 applies the same way. Reference: [configuration](configuration.md).
 
 - **Themes**: Settings → Themes. Put your own TOML or Warp YAML theme in
-  `~/.config/shift/themes/`. *Sync with OS appearance* follows light and dark
+  `~/.config/rift/themes/`. *Sync with OS appearance* follows light and dark
   mode.
 - **Font and size**: Settings → Appearance; ⌘= / ⌘- / ⌘0 change the size.
 - **Shortcuts**: Settings → Keybindings (⌃⌘K): click a row and press the new
@@ -116,7 +116,7 @@ applies the same way. Reference: [configuration](configuration.md).
 ## Save commands for later
 
 - **Launch configurations**: YAML files in
-  `~/.config/shift/launch_configs/` (Warp format) open a set of tabs, splits,
+  `~/.config/rift/launch_configs/` (Warp format) open a set of tabs, splits,
   directories and startup commands from the palette. File → *Save Layout as
   Launch Configuration* writes the current layout.
 
@@ -124,21 +124,21 @@ applies the same way. Reference: [configuration](configuration.md).
 
 Palette → *SSH: host* opens a tab running your system `ssh` for any `Host`
 in `~/.ssh/config` or any `[[ssh_profiles]]` entry. Once per host, palette →
-*Install Shift shell integration on host* (asks first) makes remote commands
+*Install Rift shell integration on host* (asks first) makes remote commands
 blocks too. Details: [SSH profiles](features.md#ssh-profiles).
 
 ## Automation
 
-`shift-terminal ctl` controls a running window over a local socket:
+`rift-terminal ctl` controls a running window over a local socket:
 
 ```sh
-shift-terminal ctl list                    # tabs and panes of every window (JSON)
-shift-terminal ctl focus --tab 2           # --tab/--pane count from 0, like `list`
-shift-terminal ctl open --cwd ~/src -- make test   # needs control_api = "full"
+rift-terminal ctl list                    # tabs and panes of every window (JSON)
+rift-terminal ctl focus --tab 2           # --tab/--pane count from 0, like `list`
+rift-terminal ctl open --cwd ~/src -- make test   # needs control_api = "full"
 ```
 
 `ctl --pid PID` picks a window (the newest answers otherwise);
-`shift-terminal --version` and `--help` print the version and usage.
+`rift-terminal --version` and `--help` print the version and usage.
 `control_api` is `navigate` by default (list, status, focus). Set it to
 `full` in Settings → General → *Control socket* to allow split, open and
 send-text.
@@ -147,20 +147,20 @@ send-text.
 
 | Symptom | Fix |
 |---|---|
-| Commands do not become blocks | Blocks need zsh, bash or fish; other shells run as a classic terminal. `echo $TERM_PROGRAM` should print `shift`. |
-| A remote host shows no blocks | Run *Install Shift shell integration on host*, then reconnect. The server must accept `LC_*` variables (`AcceptEnv LC_*`, the default on most systems). |
+| Commands do not become blocks | Blocks need zsh, bash or fish; other shells run as a classic terminal. `echo $TERM_PROGRAM` should print `rift`. |
+| A remote host shows no blocks | Run *Install Rift shell integration on host*, then reconnect. The server must accept `LC_*` variables (`AcceptEnv LC_*`, the default on most systems). |
 | Keys in a program behave oddly | Programs get raw keys; ⌥ sends Meta on Linux, and on macOS only with *Left / Right Option key is Meta* (Settings › Terminal). |
-| Shift does not start on Linux | Check the GPU driver (Vulkan, or GL through Mesa). `RUST_LOG=info shift-terminal` prints the chosen adapter. |
+| Rift does not start on Linux | Check the GPU driver (Vulkan, or GL through Mesa). `RUST_LOG=info rift-terminal` prints the chosen adapter. |
 | AppImage: `Cannot mount AppImage` | `sudo apt install libfuse2t64`, or run with `--appimage-extract-and-run`. |
-| No notifications | Linux needs `notify-send`. `SHIFT_NO_NOTIFY=1` turns them off on purpose. |
+| No notifications | Linux needs `notify-send`. `RIFT_NO_NOTIFY=1` turns them off on purpose. |
 
-## Files Shift uses
+## Files Rift uses
 
 | Path | Holds |
 |---|---|
-| `~/.config/shift/config.toml` | Settings |
-| `~/.config/shift/themes/` | Your themes |
-| `~/.config/shift/launch_configs/` | Launch configurations |
-| `~/.local/share/shift/` | Shell hooks, session layout, saved block output, sockets |
+| `~/.config/rift/config.toml` | Settings |
+| `~/.config/rift/themes/` | Your themes |
+| `~/.config/rift/launch_configs/` | Launch configurations |
+| `~/.local/share/rift/` | Shell hooks, session layout, saved block output, sockets |
 
 Both roots follow `XDG_CONFIG_HOME` and `XDG_DATA_HOME` when set.

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2317,SC2329  # gate_* functions are called as "gate_$g" (SC2317 on shellcheck <0.10)
-# Shift quality gates: one runner for local checks and CI.
+# Rift quality gates: one runner for local checks and CI.
 #
 #   scripts/gates.sh                 # default set: fmt clippy test doc shell docs
 #   scripts/gates.sh all             # default set + release + ui + linux
@@ -71,7 +71,7 @@ gate_ui() { scripts/ui-smoke.sh; }
 
 gate_shell() {
     have shellcheck || { echo "shellcheck not installed (brew install shellcheck / apt install shellcheck)"; return 1; }
-    shellcheck packaging/*.sh scripts/*.sh .githooks/* shell/shift.bash shell/shift-bashrc shell/shift-bashrc-child || return 1
+    shellcheck packaging/*.sh scripts/*.sh .githooks/* shell/rift.bash shell/rift-bashrc shell/rift-bashrc-child || return 1
     # zsh and fish hooks: syntax only (shellcheck has no zsh/fish mode).
     # A missing shell is a failure: the hook would ship unchecked.
     local rc=0
@@ -81,11 +81,11 @@ gate_shell() {
     for t in aarch64-apple-darwin=macos-arm64 x86_64-apple-darwin=macos-x86_64 \
         x86_64-unknown-linux-gnu=linux-x86_64 aarch64-unknown-linux-gnu=linux-aarch64; do
         want="${t#*=}"
-        got="$(. packaging/lib.sh && echo "$(shift_target_os "${t%%=*}")-$(shift_target_arch "${t%%=*}")")"
+        got="$(. packaging/lib.sh && echo "$(rift_target_os "${t%%=*}")-$(rift_target_arch "${t%%=*}")")"
         [ "$got" = "$want" ] || { echo "packaging/lib.sh: ${t%%=*} is named $got, not $want"; rc=1; }
     done
-    if have zsh; then zsh -n shell/shift.zsh || rc=1; else echo "zsh not installed: shell/shift.zsh unchecked"; rc=1; fi
-    if have fish; then fish --no-execute shell/shift.fish || rc=1; else echo "fish not installed: shell/shift.fish unchecked"; rc=1; fi
+    if have zsh; then zsh -n shell/rift.zsh || rc=1; else echo "zsh not installed: shell/rift.zsh unchecked"; rc=1; fi
+    if have fish; then fish --no-execute shell/rift.fish || rc=1; else echo "fish not installed: shell/rift.fish unchecked"; rc=1; fi
     return "$rc"
 }
 
@@ -115,21 +115,21 @@ gate_docs() {
 
 gate_linux() {
     have docker || { echo "docker not installed"; return 1; }
-    docker build -q -t shift-linux-verify -f packaging/linux-verify.Dockerfile packaging >/dev/null || return 1
+    docker build -q -t rift-linux-verify -f packaging/linux-verify.Dockerfile packaging >/dev/null || return 1
     docker run --rm --init -v "$PWD:/src" -w /src \
-        -v shift-cargo-registry:/usr/local/cargo/registry \
+        -v rift-cargo-registry:/usr/local/cargo/registry \
         -e CARGO_TARGET_DIR=/src/target/linux-docker \
-        shift-linux-verify bash -c '
+        rift-linux-verify bash -c '
             scripts/gates.sh clippy test &&
             cargo build --release --locked' || return 1
     # The shell and UI gates run on the CI runner's packages, with the
     # environment of ci.yml's UI step: a library, font or shellcheck version
     # the runner differs on fails here first.
-    docker build -q -t shift-ci-ubuntu -f packaging/ci-ubuntu.Dockerfile packaging >/dev/null || return 1
+    docker build -q -t rift-ci-ubuntu -f packaging/ci-ubuntu.Dockerfile packaging >/dev/null || return 1
     docker run --rm --init -v "$PWD:/src:ro" -w /src \
-        -e SHIFT_TEST_BIN=/src/target/linux-docker/release/shift-terminal \
+        -e RIFT_TEST_BIN=/src/target/linux-docker/release/rift-terminal \
         -e LIBGL_ALWAYS_SOFTWARE=1 -e WGPU_BACKEND=vulkan \
-        shift-ci-ubuntu bash -c 'scripts/gates.sh shell && xvfb-run -a scripts/gates.sh ui'
+        rift-ci-ubuntu bash -c 'scripts/gates.sh shell && xvfb-run -a scripts/gates.sh ui'
 }
 
 case "${1:-}" in

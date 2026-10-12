@@ -1,0 +1,41 @@
+# Rift builtin theme — light counterpart of dark-default.
+# Same token roles, inverted surface ramp: chrome sits slightly darker than the
+# terminal ground, the modal surface is pure white. Every text/semantic color is
+# checked against `bg`: fg >= 7:1, text_muted >= 3:1, accent >= 4.5:1.
+name = "Light Default"
+
+bg = "#fafafa"
+bg_chrome = "#f0f0f2"
+bg_gutter = "#e6e6ea"
+surface = "#ffffff"
+border = "#00000014"            # rgba(0,0,0,.08)
+pane_border_inactive = "#d4d4d9"
+
+fg = "#1f2328"                  # 15.1:1 on bg
+text_bright = "#0b0d10"         # 18.6:1
+text_ui = "#2b3138"             # 12.6:1
+text_dim = "#5a6069"            #  6.1:1
+text_muted = "#767c86"          #  4.0:1
+
+accent = "#1f6fb2"              #  5.1:1 — dark-default's #569cd6 darkened for white
+success = "#1a7f37"             #  4.9:1
+error = "#cf222e"               #  5.1:1
+warning = "#9a6700"             #  4.7:1
+cursor = "#1f2328"
+selection = "#1f6fb240"         # accent @ 25%
+search_match = "#e3b341"
+search_active = "#bc4c00"
+
+# One Light ANSI palette — readable on a near-white ground
+ansi = [
+    "#383a42", "#e45649", "#50a14f", "#c18401",
+    "#4078f2", "#a626a4", "#0184bc", "#a0a1a7",
+    "#4f525e", "#e06c75", "#98c379", "#e5c07b",
+    "#61afef", "#c678dd", "#56b6c2", "#ffffff",
+]
+
+[syntax]
+command = "#1f6fb2"
+flag = "#0550ae"
+string = "#a04100"
+ghost = "#a0a4ad"

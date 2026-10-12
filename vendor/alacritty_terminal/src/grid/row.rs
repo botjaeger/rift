@@ -23,7 +23,7 @@ pub struct Row<T> {
     /// since the last reset. All cells after this point are guaranteed to be equal.
     pub(crate) occ: usize,
 
-    /// DEC line size attribute (Shift): 0 single, 3 double-height top half,
+    /// DEC line size attribute (Rift): 0 single, 3 double-height top half,
     /// 4 bottom half, 6 double-width (the `ESC #` final byte).
     #[cfg_attr(feature = "serde", serde(default))]
     pub attr: u8,

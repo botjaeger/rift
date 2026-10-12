@@ -1,6 +1,6 @@
-# Shift design reference
+# Rift design reference
 
-The rules for anything Shift draws. The source of truth is the Claude Design
+The rules for anything Rift draws. The source of truth is the Claude Design
 project `b819116d-9d1b-4daa-a29d-edc798d62544` (`Runway.dc.html`, the screens,
 and `Runway Design Spec.dc.html`, the tokens and metrics). Fetch it with the
 DesignSync tool when a value is not listed here. Never invent a color, size,
@@ -19,12 +19,12 @@ constant.
 - **One look across themes.** Views read colors from the active `Theme`, so a
   user theme (TOML or Warp YAML) restyles every surface.
 - **Accessible by construction.** Every interactive surface has an AccessKit
-  node with a name, role and state (`crates/shift-terminal/src/a11y.rs`).
+  node with a name, role and state (`crates/rift-terminal/src/a11y.rs`).
 
 ## Color tokens
 
-Every rendered color resolves from a theme token (`shift_core::Theme`,
-`crates/shift-core/src/theme/`). Values below are `dark-default`.
+Every rendered color resolves from a theme token (`rift_core::Theme`,
+`crates/rift-core/src/theme/`). Values below are `dark-default`.
 
 | Token | Dark default | Use |
 |---|---|---|
@@ -318,13 +318,13 @@ tokens into `assets/icon/`. Where each file is used:
 
 | Platform | Surface | File |
 |---|---|---|
-| macOS | Finder, Dock, app switcher (`Shift.app`) | `shift.icns` |
-| macOS | Dock for an unbundled `cargo run` | `shift-window.png` (embedded, `icon.rs`) |
-| Linux | Launcher, dock, taskbar (via `shift.desktop`, app id `shift`) | `hicolor/*/apps/shift.png` |
-| Linux X11, Windows | Window title bar, taskbar, Alt-Tab | `shift-window.png` (embedded window icon) |
-| Windows | Executable file | `shift.ico` (reserved: Windows is not shipped yet) |
+| macOS | Finder, Dock, app switcher (`Rift.app`) | `rift.icns` |
+| macOS | Dock for an unbundled `cargo run` | `rift-window.png` (embedded, `icon.rs`) |
+| Linux | Launcher, dock, taskbar (via `rift.desktop`, app id `rift`) | `hicolor/*/apps/rift.png` |
+| Linux X11, Windows | Window title bar, taskbar, Alt-Tab | `rift-window.png` (embedded window icon) |
+| Windows | Executable file | `rift.ico` (reserved: Windows is not shipped yet) |
 
-Design explorations: the Shift App Icon canvas (Claude Design artifact).
+Design explorations: the Rift App Icon canvas (Claude Design artifact).
 
 ## Verifying visual work
 

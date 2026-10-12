@@ -1,6 +1,6 @@
 # Development
 
-How to build, test, verify and release Shift. Agent-specific rules are in
+How to build, test, verify and release Rift. Agent-specific rules are in
 [CLAUDE.md](../CLAUDE.md) (identical to `AGENTS.md`); visual rules are in
 [DESIGN.md](../DESIGN.md).
 
@@ -15,7 +15,7 @@ How to build, test, verify and release Shift. Agent-specific rules are in
 | Packaging (optional) | `python3` + Pillow (`gen-icon.py`), `dpkg-dev`, `file`, `libfuse2` (AppImage) |
 
 ```sh
-git clone <repo> && cd shift
+git clone <repo> && cd rift
 cargo run                             # builds and opens a window
 git config core.hooksPath .githooks   # optional: fmt + clippy + docs before each commit
 ```
@@ -23,33 +23,33 @@ git config core.hooksPath .githooks   # optional: fmt + clippy + docs before eac
 ## Build
 
 ```sh
-cargo build                      # debug: target/debug/shift-terminal
-cargo build --release            # release (thin LTO): target/release/shift-terminal
-packaging/make-app.sh            # macOS: target/Shift.app
+cargo build                      # debug: target/debug/rift-terminal
+cargo build --release            # release (thin LTO): target/release/rift-terminal
+packaging/make-app.sh            # macOS: target/Rift.app
 ```
 
 Dev builds optimize dependencies (`[profile.dev.package."*"] opt-level = 2`
 in `Cargo.toml`): text shaping and the GPU path dominate a debug frame, and a
 fully unoptimized build scrolls a large diff at ~11 ms per frame instead of
-~2 ms. Shift's own crates stay unoptimized, so incremental rebuilds stay
+~2 ms. Rift's own crates stay unoptimized, so incremental rebuilds stay
 around 1–2 s; the first build after a clean takes longer.
 
 The binary has no runtime assets: fonts, themes and shell hooks are embedded.
-`shift-terminal --help` prints the usage; `--version` the version. On macOS,
-`crates/shift-terminal/build.rs` embeds a minimal Info.plist in the binary so an
-unbundled run shows "Shift" in the menu bar instead of `shift-terminal`. The
+`rift-terminal --help` prints the usage; `--version` the version. On macOS,
+`crates/rift-terminal/build.rs` embeds a minimal Info.plist in the binary so an
+unbundled run shows "Rift" in the menu bar instead of `rift-terminal`. The
 Dock and ⌘Tab name a process after its bundle, so `cargo run` goes through
 `scripts/cargo-runner.sh` (`.cargo/config.toml`): it launches the binary from a
-dev bundle, `target/<profile>/Shift.app`, hard-linked to the fresh build.
-Running `target/debug/shift-terminal` directly still shows `shift-terminal`
+dev bundle, `target/<profile>/Rift.app`, hard-linked to the fresh build.
+Running `target/debug/rift-terminal` directly still shows `rift-terminal`
 in the Dock.
 
 ## Test
 
 ```sh
 cargo test --workspace           # every unit test (headless)
-cargo test -p shift-core osc     # one module
-cargo test -p shift-pty daemon   # the session service
+cargo test -p rift-core osc     # one module
+cargo test -p rift-pty daemon   # the session service
 ```
 
 Unit tests cover the core model (blocks, OSC scanner, keymap, config,
@@ -103,35 +103,35 @@ updates (the tab bar's chip from a `file://` manifest, the dialog, *Later*
 across a relaunch, Settings › About for an up-to-date and a malformed
 manifest). It uses scratch XDG
 config/data directories with notifications disabled and retains captures, state dumps and logs under
-`/tmp/shift-ui-*`. Set `SHIFT_TEST_BIN` to test an already built binary;
+`/tmp/rift-ui-*`. Set `RIFT_TEST_BIN` to test an already built binary;
 otherwise it builds the debug binary first.
 
 ## Verifying UI changes
 
-`shift-terminal --script <file>` drives the real app. Each step goes through
+`rift-terminal --script <file>` drives the real app. Each step goes through
 the same key and mouse routing as a user's input; `shot` renders the next
 frame offscreen and writes a PNG; `dump` writes the app state, including the
 accessibility tree and the attention center.
 
 ```sh
-mkdir -p /tmp/shift-t/cfg /tmp/shift-t/data
-cat > /tmp/shift-t/t.shift <<'EOF'
+mkdir -p /tmp/rift-t/cfg /tmp/rift-t/data
+cat > /tmp/rift-t/t.rift <<'EOF'
 resize 1200 700
 wait_prompt              # wait for the shell's first prompt
 type echo hi\n           # \n presses Enter
 wait 500
 key cmd+p                # open the palette
-shot /tmp/shift-t/a.png
-dump /tmp/shift-t/a.txt
+shot /tmp/rift-t/a.png
+dump /tmp/rift-t/a.txt
 quit
 EOF
-XDG_CONFIG_HOME=/tmp/shift-t/cfg XDG_DATA_HOME=/tmp/shift-t/data SHIFT_NO_NOTIFY=1 \
-  ./target/debug/shift-terminal --script /tmp/shift-t/t.shift --headless
+XDG_CONFIG_HOME=/tmp/rift-t/cfg XDG_DATA_HOME=/tmp/rift-t/data RIFT_NO_NOTIFY=1 \
+  ./target/debug/rift-terminal --script /tmp/rift-t/t.rift --headless
 ```
 
 Always isolate config and data directories: otherwise the scripted instance
 uses your real config, session file, session service and control sockets.
-The command list is the module comment of `crates/shift-terminal/src/script.rs`.
+The command list is the module comment of `crates/rift-terminal/src/script.rs`.
 
 **`--headless`** (debugging and testing only; needs `--script`). The window
 is created but never shown or focused, so you can keep working while a script
@@ -155,21 +155,21 @@ memory, key-to-frame latency and TUI round trips; compare against
 ## Architecture
 
 ```
-shift-terminal     winit app, views, input routing, a11y, control socket, script driver, update restarts
-  ├── shift-renderer   wgpu quad + sprite pipelines, glyphon text, Scene layers
-  ├── shift-pty        PTY sessions, reader threads, vte, images, session service
-  └── shift-core       config, themes, keymap, OSC scanner, blocks, completions, git, update check/install
+rift-terminal     winit app, views, input routing, a11y, control socket, script driver, update restarts
+  ├── rift-renderer   wgpu quad + sprite pipelines, glyphon text, Scene layers
+  ├── rift-pty        PTY sessions, reader threads, vte, images, session service
+  └── rift-core       config, themes, keymap, OSC scanner, blocks, completions, git, update check/install
 ```
 
-Dependencies flow downward only; `shift-core` has no graphics dependencies.
+Dependencies flow downward only; `rift-core` has no graphics dependencies.
 The load-bearing invariants (absolute line model, resize compensation, PTY
 fd blocking, viewport ownership, editor vs raw mode, sRGB blending, marker
 idempotence) are listed in [CLAUDE.md](../CLAUDE.md#load-bearing-invariants).
-Read them before changing `shift-pty` or the terminal view.
+Read them before changing `rift-pty` or the terminal view.
 
 ### Data flow
 
-1. The shell writes to the PTY. A reader thread in `shift-pty` reads it,
+1. The shell writes to the PTY. A reader thread in `rift-pty` reads it,
    splits it at OSC 133 / OSC 7 / APC markers (`feed`), and passes each part
    to alacritty's vte parser through `abs_term.rs`, which counts lines moved
    into scrollback.
@@ -206,7 +206,7 @@ Workspace dependencies (`Cargo.toml`):
 App-only: `accesskit` / `accesskit_winit` (screen readers), `global-hotkey`,
 `regex` (find), `libc`, `unicode-segmentation` (grapheme-aware editing), `zeno` (rasterizes brand marks Nerd Fonts lacks,
 such as the Claude mark; already built for glyphon); on macOS `muda` (menu bar), `objc2`,
-`objc2-app-kit`, `objc2-foundation`. `shift-pty` also uses `libc` for PTY and socket calls.
+`objc2-app-kit`, `objc2-foundation`. `rift-pty` also uses `libc` for PTY and socket calls.
 
 Before adding a dependency, check whether the standard library or an existing
 crate covers it. Keep default features off where the crate allows.
@@ -221,12 +221,12 @@ options.
 
 | Script | Platform | Produces |
 |---|---|---|
-| `packaging/gen-icon.py` | any | `assets/icon/`: 1024 PNG, `.iconset`, `.icns` (macOS), hicolor PNGs (Linux), `.ico` (Windows), `shift-window.png` (embedded window icon) |
-| `packaging/make-app.sh` | macOS | `target/Shift.app` (ad-hoc signed) |
-| `packaging/make-dmg.sh` | macOS | `target/Shift-<version>-<arch>.dmg` (run `make-app.sh` first) |
-| `packaging/make-deb.sh` | Linux | `target/shift-terminal_<version>_<arch>.deb` |
-| `packaging/make-appimage.sh` | Linux | `target/Shift-<version>-<arch>.AppImage` (pins appimagetool 1.9.1 and verifies SHA-256 before every execution, including cached copies) |
-| `packaging/make-tarball.sh` | both | `target/shift-terminal-<version>-<os>-<arch>.tar.gz`, named for the `--target` triple (`macos-arm64`, `macos-x86_64`, `linux-x86_64`), not the build host |
+| `packaging/gen-icon.py` | any | `assets/icon/`: 1024 PNG, `.iconset`, `.icns` (macOS), hicolor PNGs (Linux), `.ico` (Windows), `rift-window.png` (embedded window icon) |
+| `packaging/make-app.sh` | macOS | `target/Rift.app` (ad-hoc signed) |
+| `packaging/make-dmg.sh` | macOS | `target/Rift-<version>-<arch>.dmg` (run `make-app.sh` first) |
+| `packaging/make-deb.sh` | Linux | `target/rift-terminal_<version>_<arch>.deb` |
+| `packaging/make-appimage.sh` | Linux | `target/Rift-<version>-<arch>.AppImage` (pins appimagetool 1.9.1 and verifies SHA-256 before every execution, including cached copies) |
+| `packaging/make-tarball.sh` | both | `target/rift-terminal-<version>-<os>-<arch>.tar.gz`, named for the `--target` triple (`macos-arm64`, `macos-x86_64`, `linux-x86_64`), not the build host |
 
 The version lives only in `[workspace.package]` of `Cargo.toml`. Every bump
 needs a matching `## <version> — <date>` entry at the top of `CHANGELOG.md`:
@@ -235,16 +235,16 @@ the app embeds that file as its What's New page, and
 without it.
 
 Releases are published to the **public** repository
-[botjaeger/shift-releases](https://github.com/botjaeger/shift-releases)
+[botjaeger/rift-releases](https://github.com/botjaeger/rift-releases)
 (this source repository is private, so nothing attached to it can be
 downloaded). The app's updater reads
-`https://github.com/botjaeger/shift-releases/releases/latest/download/latest.json`.
+`https://github.com/botjaeger/rift-releases/releases/latest/download/latest.json`.
 
 1. Bump `[workspace.package] version`, add the `CHANGELOG.md` section, run
    `scripts/gates.sh all`, commit, and push a tag `vX.Y.Z` (the tag must
    equal the Cargo.toml version).
 2. The tag runs `.github/workflows/release.yml`: the validation workflow,
-   then Shift.app/DMG/tarball for Apple silicon and Intel (both on
+   then Rift.app/DMG/tarball for Apple silicon and Intel (both on
    `macos-14`; Intel is cross-compiled), the `.deb`, AppImage and tarball
    for Linux, and finally `latest.json`, written by
    `scripts/release-manifest.py` from the downloaded artifacts (version,
@@ -256,7 +256,7 @@ downloaded). The app's updater reads
    `scripts/publish-release.sh vX.Y.Z` downloads that run's artifacts,
    refuses unless `latest.json` names the tag's version and every asset
    matches its SHA-256, signs `latest.json` (below), and creates the release
-   `vX.Y.Z` in `botjaeger/shift-releases` with every package, `latest.json`,
+   `vX.Y.Z` in `botjaeger/rift-releases` with every package, `latest.json`,
    `latest.json.sig`, and the CHANGELOG section as notes (`--draft` to
    review first; `--run ID` to pick a workflow run).
 4. Running copies see the release within 6 hours (or at once via *Check for
@@ -265,18 +265,18 @@ downloaded). The app's updater reads
 ### Release signing
 
 The asset digests in `latest.json` come from the same public repository as
-the assets, so anyone who can write to `botjaeger/shift-releases` could
+the assets, so anyone who can write to `botjaeger/rift-releases` could
 otherwise ship code to every install. The updater therefore fetches
 `latest.json.sig` next to the manifest — base64 of an Ed25519 signature over
 `latest.json`'s exact bytes — and refuses the manifest (*Couldn't check for
 updates*; the log says `release signature is missing` or `is invalid`)
 unless it verifies against one of `RELEASE_KEYS` in
-`crates/shift-core/src/update.rs`. The cached copy in `update.json` is
+`crates/rift-core/src/update.rs`. The cached copy in `update.json` is
 re-verified every time it is read.
 
 - **The private key** lives only at
-  `~/.config/shift-release/signing-key.pem` on the maintainer's machine
-  (directory `0700`, file `0600`; `SHIFT_SIGNING_KEY` points elsewhere). It
+  `~/.config/rift-release/signing-key.pem` on the maintainer's machine
+  (directory `0700`, file `0600`; `RIFT_SIGNING_KEY` points elsewhere). It
   is never committed and never given to CI. **Back it up** offline (a
   password manager or an encrypted drive): losing it means installed copies
   cannot verify any new release until they are updated by hand.
@@ -304,11 +304,11 @@ reattached across that update.
 `scripts/release-manifest.py VERSION DIR --base-url file://DIR
 --allow-missing` writes a manifest for local files; sign it with
 `scripts/sign-manifest.sh`, or with a throwaway test key whose public half
-goes in `SHIFT_UPDATE_TEST_KEY` (trusted for `file://` manifests only;
+goes in `RIFT_UPDATE_TEST_KEY` (trusted for `file://` manifests only;
 `scripts/ui-smoke.py` signs its manifests that way). With
-`SHIFT_UPDATE_URL=file://…/latest.json` a scratch copy of Shift.app (built
+`RIFT_UPDATE_URL=file://…/latest.json` a scratch copy of Rift.app (built
 twice with `make-app.sh`, the newer one packed by `make-dmg.sh`) can run a
-whole update headless (`SHIFT_RELAUNCH_SCRIPT` names the script the
+whole update headless (`RIFT_RELAUNCH_SCRIPT` names the script the
 restarted app runs).
 
 ## Updating the toolchain

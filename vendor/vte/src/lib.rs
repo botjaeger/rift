@@ -60,7 +60,7 @@ pub struct Parser<const OSC_RAW_BUF_SIZE: usize = MAX_OSC_RAW> {
     intermediate_idx: usize,
     params: Params,
     param: u16,
-    /// The current parameter had digits (Shift).
+    /// The current parameter had digits (Rift).
     param_seen: bool,
     #[cfg(not(feature = "std"))]
     osc_raw: ArrayVec<u8, OSC_RAW_BUF_SIZE>,

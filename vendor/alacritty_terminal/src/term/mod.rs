@@ -347,7 +347,7 @@ pub struct Term<T> {
     /// Config directly for the terminal.
     config: Config,
 
-    /// VT420 / xterm state upstream does not keep (Shift).
+    /// VT420 / xterm state upstream does not keep (Rift).
     vt: vt420::Vt420,
 }
 
@@ -374,7 +374,7 @@ pub struct Config {
     /// OSC52 support mode.
     pub osc52: Osc52,
 
-    /// Name and version XTVERSION reports (Shift).
+    /// Name and version XTVERSION reports (Rift).
     pub xtversion: String,
 }
 
@@ -544,7 +544,7 @@ impl<T> Term<T> {
         self.damage.full = true;
     }
 
-    /// Change only the OSC 52 mode (Shift: `set_options` would also resend
+    /// Change only the OSC 52 mode (Rift: `set_options` would also resend
     /// the title and touch the scrollback).
     pub fn set_osc52(&mut self, osc52: Osc52) {
         self.config.osc52 = osc52;
@@ -2117,7 +2117,7 @@ impl<T: EventListener> Handler for Term<T> {
             ansi::ClearMode::Above => {
                 let cursor = self.grid.cursor.point;
 
-                // Fully clear the lines above the current one (Shift: upstream
+                // Fully clear the lines above the current one (Rift: upstream
                 // tested `> 1` and kept line 0 when the cursor was on line 1).
                 if cursor.line > 0 {
                     // Fully clear all lines before the current line.
@@ -2655,7 +2655,7 @@ impl<T: EventListener> Handler for Term<T> {
         self.reply(text);
     }
 
-    // ── VT420 / xterm extensions (Shift); see `vt420.rs` ──
+    // ── VT420 / xterm extensions (Rift); see `vt420.rs` ──
 
     #[inline]
     fn request_checksum(&mut self, id: u16, rect: ansi::Rect) {
@@ -4066,7 +4066,7 @@ mod tests {
         assert!(term.damage.full);
         term.reset_damage();
 
-        // DECCOLM acts only with 80/132 switching allowed (?40, Shift)
+        // DECCOLM acts only with 80/132 switching allowed (?40, Rift)
         term.set_private_mode(PrivateMode::Unknown(40));
         term.deccolm(true);
         assert!(term.damage.full);

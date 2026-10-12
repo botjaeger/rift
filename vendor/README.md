@@ -12,7 +12,7 @@ Both started as the crates.io packages and are wired in by
 
 ## Why
 
-Shift emulates a VT420 (DA1 level 4) and passes esctest2 with xterm's
+Rift emulates a VT420 (DA1 level 4) and passes esctest2 with xterm's
 expectations, which the upstream crates do not attempt. The additions:
 
 - **vte**: parsing and `Handler` methods for rectangle editing, left/right
@@ -35,7 +35,7 @@ expectations, which the upstream crates do not attempt. The additions:
 
 - Keep each change covered by the crate's own tests; `scripts/gates.sh` runs
   fmt, clippy and the tests of both crates.
-- `crates/shift-pty/src/abs_term.rs` must forward every `Handler` method;
+- `crates/rift-pty/src/abs_term.rs` must forward every `Handler` method;
   `every_handler_method_is_forwarded` fails when one is missing.
 - Three upstream ref tests are excluded in `alacritty_terminal/tests/ref.rs`
-  where Shift deliberately follows xterm instead (see the comment there).
+  where Rift deliberately follows xterm instead (see the comment there).

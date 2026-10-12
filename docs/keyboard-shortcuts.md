@@ -67,7 +67,7 @@ listed alternates.
 | ⌘N | `new_window` | New window |
 | ⇧⌘W | `close_window` | Close the window (warns about running commands) |
 | ⌘M | `minimize` | Minimize |
-| ⌘H | `hide_app` | Hide Shift |
+| ⌘H | `hide_app` | Hide Rift |
 | ⌃⌘F | `toggle_fullscreen` | Full screen |
 | ⌘Q | `quit` | Quit (warns about running commands) |
 | ⌘A | `select_all` | Select the editor text, else all scrollback |
@@ -86,9 +86,9 @@ listed alternates.
 | ⇧⌘G | `toggle_review` | Code review panel (right) |
 | ⇧⌘H | `hint_mode` | Letter hints over visible links, paths and blocks: type one to open/select, ⇧ + letter copies |
 | — | `clear_transcripts` | Delete saved block transcripts |
-| — | `check_for_updates` | Look for a new release now; the answer toasts (also Shift → Check for Updates…) |
-| — | `update_shift` | The update dialog for an available release (else a check) |
-| — | `open_about` | Settings → About page: version, copy button, copyright (also Shift → About Shift) |
+| — | `check_for_updates` | Look for a new release now; the answer toasts (also Rift → Check for Updates…) |
+| — | `update_rift` | The update dialog for an available release (else a check) |
+| — | `open_about` | Settings → About page: version, copy button, copyright (also Rift → About Rift) |
 | — | `whats_new` | What's New: release notes (also Help → What's New) |
 | ⌘= / ⇧⌘+ | `font_increase` | Font size +1 (persisted to config.toml) |
 | ⌘- | `font_decrease` | Font size −1 |
@@ -193,7 +193,7 @@ sequences: F1–F12, modified arrows/Home/End/PgUp/PgDn/Insert/Delete
 ESC-prefixed Meta for ⌥ (always on Linux; on macOS with `option_as_meta` for the left key and `right_option_as_meta` for the right one).
 ⌘⌫ sends ⌃U (kill to line start, as in Warp; Claude Code, readline and zle
 honour it), in the program's kitty keyboard encoding when it asked for one;
-other ⌘ chords stay with Shift.
+other ⌘ chords stay with Rift.
 
 ## Palette keys
 
@@ -205,7 +205,7 @@ Typing searches every page (Keybindings filters its own list) · ⇥ / ⇧⇥ mo
 
 ## Customization
 
-`~/.config/shift/config.toml`:
+`~/.config/rift/config.toml`:
 
 ```toml
 [keybindings]

@@ -9,7 +9,7 @@ cd "$(dirname "$0")/.."
 . packaging/lib.sh
 
 TRIPLE=""
-TARGET_DIR="$(shift_default_target_dir)"
+TARGET_DIR="$(rift_default_target_dir)"
 BUILD=1
 
 while [ $# -gt 0 ]; do
@@ -18,11 +18,11 @@ while [ $# -gt 0 ]; do
         --target-dir) TARGET_DIR="${2:?--target-dir needs a path}"; shift 2 ;;
         --no-build)   BUILD=0; shift ;;
         -h|--help)    sed -n '2,6p' "$0"; exit 0 ;;
-        *)            shift_die "unknown option: $1" ;;
+        *)            rift_die "unknown option: $1" ;;
     esac
 done
 
-VERSION="$(shift_version)"
+VERSION="$(rift_version)"
 ARCH="$(uname -m)"
 
 if [ "$BUILD" -eq 1 ]; then
@@ -30,33 +30,33 @@ if [ "$BUILD" -eq 1 ]; then
 fi
 
 if [ -n "$TRIPLE" ]; then
-    BIN="$TARGET_DIR/$TRIPLE/release/shift-terminal"
+    BIN="$TARGET_DIR/$TRIPLE/release/rift-terminal"
 else
-    BIN="$TARGET_DIR/release/shift-terminal"
+    BIN="$TARGET_DIR/release/rift-terminal"
 fi
-[ -x "$BIN" ] || shift_die "no shift-terminal binary at $BIN"
+[ -x "$BIN" ] || rift_die "no rift-terminal binary at $BIN"
 
 # --- AppDir ---------------------------------------------------------------
-APPDIR="$TARGET_DIR/Shift.AppDir"
+APPDIR="$TARGET_DIR/Rift.AppDir"
 rm -rf "$APPDIR"
 mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/applications"
 
-install -m 0755 "$BIN" "$APPDIR/usr/bin/shift-terminal"
-if command -v strip >/dev/null; then strip "$APPDIR/usr/bin/shift-terminal"; fi
+install -m 0755 "$BIN" "$APPDIR/usr/bin/rift-terminal"
+if command -v strip >/dev/null; then strip "$APPDIR/usr/bin/rift-terminal"; fi
 
-install -m 0644 packaging/shift.desktop "$APPDIR/usr/share/applications/shift.desktop"
+install -m 0644 packaging/rift.desktop "$APPDIR/usr/share/applications/rift.desktop"
 
 for dir in assets/icon/hicolor/*/; do
     size="$(basename "$dir")"
-    install -D -m 0644 "$dir/apps/shift.png" \
-        "$APPDIR/usr/share/icons/hicolor/$size/apps/shift.png"
+    install -D -m 0644 "$dir/apps/rift.png" \
+        "$APPDIR/usr/share/icons/hicolor/$size/apps/rift.png"
 done
 
 # appimagetool reads the .desktop and the icon from the AppDir ROOT, and runs
 # AppRun as the entry point.
-cp packaging/shift.desktop "$APPDIR/shift.desktop"
-cp assets/icon/hicolor/256x256/apps/shift.png "$APPDIR/shift.png"
-ln -sf usr/bin/shift-terminal "$APPDIR/AppRun"
+cp packaging/rift.desktop "$APPDIR/rift.desktop"
+cp assets/icon/hicolor/256x256/apps/rift.png "$APPDIR/rift.png"
+ln -sf usr/bin/rift-terminal "$APPDIR/AppRun"
 
 # --- appimagetool ---------------------------------------------------------
 # Cached in its own subdirectory, never next to the artifacts: the release
@@ -70,7 +70,7 @@ case "$ARCH" in
     aarch64) TOOL_SHA256=f0837e7448a0c1e4e650a93bb3e85802546e60654ef287576f46c71c126a9158 ;;
     armhf) TOOL_SHA256=42b61cba5495d8aaf418a5c9a015a49b85ad92efabcbd3c341f1540440e4e23d ;;
     i686) TOOL_SHA256=7ad9ff47c203aae0149b18f6df9e3018b2e2f470ea644a0413e3ded39e9e3bdb ;;
-    *) shift_die "unsupported appimagetool architecture: $ARCH" ;;
+    *) rift_die "unsupported appimagetool architecture: $ARCH" ;;
 esac
 TOOL="$TARGET_DIR/appimagetool/$TOOL_VERSION/appimagetool-$ARCH.AppImage"
 if [ ! -f "$TOOL" ]; then
@@ -78,15 +78,15 @@ if [ ! -f "$TOOL" ]; then
     url="https://github.com/AppImage/appimagetool/releases/download/$TOOL_VERSION/appimagetool-$ARCH.AppImage"
     trap 'rm -f "$TOOL.part"' EXIT
     curl -fsSL --retry 3 -o "$TOOL.part" "$url"
-    printf '%s  %s\n' "$TOOL_SHA256" "$TOOL.part" | sha256sum -c - || shift_die "appimagetool checksum mismatch"
+    printf '%s  %s\n' "$TOOL_SHA256" "$TOOL.part" | sha256sum -c - || rift_die "appimagetool checksum mismatch"
     mv "$TOOL.part" "$TOOL"
 fi
-printf '%s  %s\n' "$TOOL_SHA256" "$TOOL" | sha256sum -c - || shift_die "cached appimagetool checksum mismatch"
+printf '%s  %s\n' "$TOOL_SHA256" "$TOOL" | sha256sum -c - || rift_die "cached appimagetool checksum mismatch"
 chmod +x "$TOOL"
 
 # named for the build's target (the manifest's asset names); ARCH above is
 # the host's, for appimagetool
-OUT="$TARGET_DIR/Shift-$VERSION-$(shift_target_arch "$TRIPLE").AppImage"
+OUT="$TARGET_DIR/Rift-$VERSION-$(rift_target_arch "$TRIPLE").AppImage"
 rm -f "$OUT"
 
 # --appimage-extract-and-run: docker and GitHub runners have no FUSE, so the

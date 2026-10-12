@@ -551,7 +551,7 @@ pub trait Handler {
     /// OSC to set window title.
     fn set_title(&mut self, _: Option<String>) {}
 
-    // ── VT420 / xterm extensions (Shift). Every default is a no-op except
+    // ── VT420 / xterm extensions (Rift). Every default is a no-op except
     // where noted, so a handler that ignores them behaves as before. ──
 
     /// DECRQCRA `CSI Pid ; Pp ; Pt ; Pl ; Pb ; Pr * y`: report the checksum

@@ -1,4 +1,4 @@
-# Agent guide — Shift
+# Agent guide — Rift
 
 Guidance for coding agents (Claude Code, Codex, others) working in this
 repository. `CLAUDE.md` and `AGENTS.md` are identical copies — edit both
@@ -7,7 +7,7 @@ repository. `CLAUDE.md` and `AGENTS.md` are identical copies — edit both
 
 ## What this is
 
-Shift is a GPU-accelerated, block-based terminal emulator for macOS and Linux,
+Rift is a GPU-accelerated, block-based terminal emulator for macOS and Linux,
 written in Rust (winit, wgpu, glyphon, alacritty_terminal). It implements the
 Claude Design project `b819116d-9d1b-4daa-a29d-edc798d62544` 1:1 (files
 `Runway.dc.html` and `Runway Design Spec.dc.html`; fetch them with the
@@ -18,17 +18,17 @@ blocks, ⌘P = palette).
 
 ## Safety when an agent runs here
 
-- The user may be running an agent **inside a Shift window**. Never send
+- The user may be running an agent **inside a Rift window**. Never send
   OS-wide keystrokes, close terminal windows or tabs, or signal (`kill`,
-  `pkill`, `killall`) the user's Shift, shell or agent processes. Do not use
+  `pkill`, `killall`) the user's Rift, shell or agent processes. Do not use
   job control (`fg`, `bg`) on the parent shell; report suspended jobs instead.
 - Every `--script` run must be isolated: set `XDG_CONFIG_HOME` and
-  `XDG_DATA_HOME` to scratch directories and `SHIFT_NO_NOTIFY=1`. Without
+  `XDG_DATA_HOME` to scratch directories and `RIFT_NO_NOTIFY=1`. Without
   them the scripted instance reads the user's config, writes their session
   file, and can attach to the user's live session service and control sockets.
 - Scripted runs keep shells local (no session service) unless
-  `SHIFT_PERSIST_SESSION` is set, and never check for updates unless
-  `SHIFT_UPDATE_URL` is set; a test that sets either must kill the
+  `RIFT_PERSIST_SESSION` is set, and never check for updates unless
+  `RIFT_UPDATE_URL` is set; a test that sets either must kill the
   `--session-daemon` it started (confirm its `XDG_DATA_HOME` with `ps eww`).
 - `--script` synthesizes input inside the app (no OS input), but it still opens
   a real window that takes focus, and the user's typing then lands in it. Add
@@ -44,10 +44,10 @@ scripts/gates.sh               # quality gates: fmt clippy test doc shell docs
 scripts/gates.sh ui            # scripted UI regressions (scripts/ui-smoke.py)
 scripts/gates.sh all           # + release build + scripted UI + Linux gates in docker
 scripts/gates.sh --list        # what each gate runs
-cargo run                      # dev build + launch (binary: shift-terminal)
-cargo test -p shift-core osc   # one module's tests
+cargo run                      # dev build + launch (binary: rift-terminal)
+cargo test -p rift-core osc   # one module's tests
 cargo fmt --all                # format
-packaging/make-app.sh          # macOS Shift.app (release)
+packaging/make-app.sh          # macOS Rift.app (release)
 packaging/bench.sh             # performance baseline (docs/performance.md)
 scripts/publish-release.sh vX.Y.Z  # publish a tag's release artifacts (docs/development.md)
 ```
@@ -62,24 +62,24 @@ Optional pre-commit hook (fmt + clippy + docs): `git config core.hooksPath .gith
 ## Verifying UI changes
 
 Rendering has no unit tests. Use the script driver
-(`crates/shift-terminal/src/script.rs`): it synthesizes keys and mouse events
+(`crates/rift-terminal/src/script.rs`): it synthesizes keys and mouse events
 through the app's real routing (`App::on_key`, `App::on_left`, …); `shot`
 writes a PNG by offscreen readback (works with the display asleep, needs no
 Screen Recording permission); `dump` writes a state snapshot (tabs, panes,
 editor, overlays, accessibility tree, attention center).
 
 ```sh
-mkdir -p /tmp/shift-t/cfg /tmp/shift-t/data
-cat > /tmp/shift-t/t.shift <<'EOF'
+mkdir -p /tmp/rift-t/cfg /tmp/rift-t/data
+cat > /tmp/rift-t/t.rift <<'EOF'
 wait_prompt
 type echo hi\n
 wait 500
-shot /tmp/shift-t/a.png
-dump /tmp/shift-t/a.txt
+shot /tmp/rift-t/a.png
+dump /tmp/rift-t/a.txt
 quit
 EOF
-XDG_CONFIG_HOME=/tmp/shift-t/cfg XDG_DATA_HOME=/tmp/shift-t/data SHIFT_NO_NOTIFY=1 \
-  ./target/debug/shift-terminal --script /tmp/shift-t/t.shift --headless
+XDG_CONFIG_HOME=/tmp/rift-t/cfg XDG_DATA_HOME=/tmp/rift-t/data RIFT_NO_NOTIFY=1 \
+  ./target/debug/rift-terminal --script /tmp/rift-t/t.rift --headless
 ```
 
 Commands (one per line, `#` comments; full list in the `script.rs` module
@@ -107,26 +107,26 @@ the shell gate and the scripted UI regressions (under Xvfb) in
 
 Four crates; dependencies flow strictly downward.
 
-- **shift-core** — no graphics deps, unit-tested: theme tokens and TOML/Warp
+- **rift-core** — no graphics deps, unit-tested: theme tokens and TOML/Warp
   themes (`theme/`), config + hot-reload watcher, keymap (`[keybindings]`
   overrides win and unbind the default), OSC/APC byte scanner (`osc.rs`),
   block model (`block.rs`), shell tokenizer, completion providers, git2
   worker, shell-integration materializer, transcripts (`transcript.rs`), SSH
   profiles (`ssh.rs`), session state, update check and install (`update.rs`).
-- **shift-pty** — one `Session` per pane. Spawns through
+- **rift-pty** — one `Session` per pane. Spawns through
   `alacritty_terminal::tty`, or, with `durable_sessions`, through the per-user
   session service (`daemon.rs`, `service.rs`, `ipc.rs`). A reader thread
   splits output at marker boundaries (`feed`), feeds segments to the vte
   parser, and applies markers to the `BlockStore` and the inline-image model
   (`graphics.rs`).
-- **shift-renderer** — wgpu SDF quad pipeline (`quad.wgsl`: rounded rects,
+- **rift-renderer** — wgpu SDF quad pipeline (`quad.wgsl`: rounded rects,
   borders, circles, line strokes, soft shadows, rounded clips), image sprites
   (`sprite.rs`), glyphon text.
   `Scene` is a per-frame list of layers; within a layer quads draw first, then
   text; later layers composite over earlier ones (0 chrome, 1 terminal +
   editor, 2 completion/search, 3 settings, 4 palette, 5 context menu/hints,
   6 toasts/dialogs, 7 tooltips).
-- **shift-terminal** — winit `ApplicationHandler` (`app.rs`), views, input
+- **rift-terminal** — winit `ApplicationHandler` (`app.rs`), views, input
   routing, per-frame `Hit` rects, kitty keyboard encoder (`keyboard.rs`),
   AccessKit tree (`a11y.rs`), control socket and `ctl` client (`control.rs`), script
   driver, offscreen capture, update restarts across windows (`updater.rs`).
@@ -134,7 +134,7 @@ Four crates; dependencies flow strictly downward.
 ### Load-bearing invariants
 
 - **Absolute line model.** Blocks and images anchor to monotone line indices
-  that survive scrollback trim. `shift-pty/src/abs_term.rs` is a GENERATED
+  that survive scrollback trim. `rift-pty/src/abs_term.rs` is a GENERATED
   wrapper over every vte `Handler` method that counts lines pushed into
   history (`scrolled`): `abs = scrolled + screen_row`, grid
   `Line = abs - scrolled` (negative = history). A method it does not forward
@@ -192,7 +192,7 @@ Four crates; dependencies flow strictly downward.
 Fonts (JetBrains Mono ×6 faces, Hack ×4 faces, Inter variable, a Nerd
 Font symbols subset), builtin themes and shell hooks are embedded with `include_bytes!`/`include_str!`; the binary has no
 runtime assets. Shell-integration files are materialized to
-`~/.local/share/shift/` on first spawn; zsh loads through a ZDOTDIR shim that
+`~/.local/share/rift/` on first spawn; zsh loads through a ZDOTDIR shim that
 sources the user's real config first.
 
 ## Documentation map
@@ -201,7 +201,7 @@ sources the user's real config first.
 
 | File | Holds |
 |---|---|
-| `README.md` | What Shift is, why, feature summary, install, quick start |
+| `README.md` | What Rift is, why, feature summary, install, quick start |
 | `DESIGN.md` | Design tokens, metrics, typography, layering, visual rules |
 | `docs/getting-started.md` | First run, everyday use, how each feature is used |
 | `docs/features.md` | Feature inventory and exact behaviors |

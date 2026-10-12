@@ -141,7 +141,7 @@ impl<T> Storage<T> {
         self.len
     }
 
-    /// Swap two rows. (Shift: rows carry a line attribute, so the
+    /// Swap two rows. (Rift: rows carry a line attribute, so the
     /// fixed-size qword copy upstream used no longer covers a whole row.)
     pub fn swap(&mut self, a: Line, b: Line) {
         let a = self.compute_index(a);

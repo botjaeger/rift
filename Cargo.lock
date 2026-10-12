@@ -2747,6 +2747,82 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
 
 [[package]]
+name = "rift-core"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "dirs",
+ "ed25519-compact",
+ "git2",
+ "log",
+ "notify",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "toml",
+ "toml_edit",
+]
+
+[[package]]
+name = "rift-pty"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "flate2",
+ "image",
+ "libc",
+ "log",
+ "rift-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "rift-renderer"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "glyphon",
+ "image",
+ "log",
+ "pollster",
+ "rift-core",
+ "ttf-parser",
+ "wgpu",
+]
+
+[[package]]
+name = "rift-terminal"
+version = "0.1.0"
+dependencies = [
+ "accesskit",
+ "accesskit_winit",
+ "arboard",
+ "env_logger",
+ "git2",
+ "global-hotkey",
+ "libc",
+ "log",
+ "muda",
+ "nucleo-matcher",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "png",
+ "regex",
+ "rift-core",
+ "rift-pty",
+ "rift-renderer",
+ "serde",
+ "serde_json",
+ "toml",
+ "unicode-segmentation",
+ "wgpu",
+ "winit",
+ "zeno",
+]
+
+[[package]]
 name = "roxmltree"
 version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2942,82 +3018,6 @@ dependencies = [
  "ryu",
  "serde",
  "unsafe-libyaml",
-]
-
-[[package]]
-name = "shift-core"
-version = "0.1.0"
-dependencies = [
- "arc-swap",
- "dirs",
- "ed25519-compact",
- "git2",
- "log",
- "notify",
- "serde",
- "serde_json",
- "serde_yaml_ng",
- "toml",
- "toml_edit",
-]
-
-[[package]]
-name = "shift-pty"
-version = "0.1.0"
-dependencies = [
- "alacritty_terminal",
- "flate2",
- "image",
- "libc",
- "log",
- "serde",
- "serde_json",
- "shift-core",
-]
-
-[[package]]
-name = "shift-renderer"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "glyphon",
- "image",
- "log",
- "pollster",
- "shift-core",
- "ttf-parser",
- "wgpu",
-]
-
-[[package]]
-name = "shift-terminal"
-version = "0.1.0"
-dependencies = [
- "accesskit",
- "accesskit_winit",
- "arboard",
- "env_logger",
- "git2",
- "global-hotkey",
- "libc",
- "log",
- "muda",
- "nucleo-matcher",
- "objc2 0.6.4",
- "objc2-app-kit 0.3.2",
- "objc2-foundation 0.3.2",
- "png",
- "regex",
- "serde",
- "serde_json",
- "shift-core",
- "shift-pty",
- "shift-renderer",
- "toml",
- "unicode-segmentation",
- "wgpu",
- "winit",
- "zeno",
 ]
 
 [[package]]

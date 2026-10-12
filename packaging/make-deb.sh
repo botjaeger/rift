@@ -8,7 +8,7 @@ cd "$(dirname "$0")/.."
 . packaging/lib.sh
 
 TRIPLE=""
-TARGET_DIR="$(shift_default_target_dir)"
+TARGET_DIR="$(rift_default_target_dir)"
 BUILD=1
 
 while [ $# -gt 0 ]; do
@@ -17,13 +17,13 @@ while [ $# -gt 0 ]; do
         --target-dir) TARGET_DIR="${2:?--target-dir needs a path}"; shift 2 ;;
         --no-build)   BUILD=0; shift ;;
         -h|--help)    sed -n '2,5p' "$0"; exit 0 ;;
-        *)            shift_die "unknown option: $1" ;;
+        *)            rift_die "unknown option: $1" ;;
     esac
 done
 
-command -v dpkg-deb >/dev/null || shift_die "dpkg-deb not found (apt-get install dpkg-dev)"
+command -v dpkg-deb >/dev/null || rift_die "dpkg-deb not found (apt-get install dpkg-dev)"
 
-VERSION="$(shift_version)"
+VERSION="$(rift_version)"
 ARCH="$(dpkg --print-architecture)"
 
 if [ "$BUILD" -eq 1 ]; then
@@ -31,21 +31,21 @@ if [ "$BUILD" -eq 1 ]; then
 fi
 
 if [ -n "$TRIPLE" ]; then
-    BIN="$TARGET_DIR/$TRIPLE/release/shift-terminal"
+    BIN="$TARGET_DIR/$TRIPLE/release/rift-terminal"
 else
-    BIN="$TARGET_DIR/release/shift-terminal"
+    BIN="$TARGET_DIR/release/rift-terminal"
 fi
-[ -x "$BIN" ] || shift_die "no shift-terminal binary at $BIN"
+[ -x "$BIN" ] || rift_die "no rift-terminal binary at $BIN"
 
 # Runtime dependencies, derived from the release binary itself. Note that
 # `ldd` alone is NOT enough here: winit and wgpu dlopen() their windowing and
 # GPU libraries by SONAME, so almost nothing shows up as a load-time link.
 #
-#   readelf -d target/release/shift-terminal | grep NEEDED
+#   readelf -d target/release/rift-terminal | grep NEEDED
 #     libz.so.1  libgcc_s.so.1  libm.so.6  libc.so.6
 #         -> zlib1g, libgcc-s1, libc6      (libm is part of libc6)
 #
-#   strings -a target/release/shift-terminal | grep -oE 'lib[A-Za-z0-9_+-]+\.so(\.[0-9]+)*'
+#   strings -a target/release/rift-terminal | grep -oE 'lib[A-Za-z0-9_+-]+\.so(\.[0-9]+)*'
 #     libxkbcommon.so.0      -> libxkbcommon0       (keymap handling)
 #     libxkbcommon-x11.so.0  -> libxkbcommon-x11-0  (X11 keymap bridge)
 #     libwayland-client.so.0 -> libwayland-client0
@@ -71,32 +71,32 @@ DEPENDS="libc6, libgcc-s1, zlib1g, libxkbcommon0, libxkbcommon-x11-0, libwayland
 # actually render.
 RECOMMENDS="libvulkan1 | libegl1"
 
-PKGROOT="$TARGET_DIR/deb/shift-terminal_${VERSION}_${ARCH}"
+PKGROOT="$TARGET_DIR/deb/rift-terminal_${VERSION}_${ARCH}"
 rm -rf "$PKGROOT"
 mkdir -p \
     "$PKGROOT/DEBIAN" \
     "$PKGROOT/usr/bin" \
     "$PKGROOT/usr/share/applications" \
-    "$PKGROOT/usr/share/doc/shift-terminal"
+    "$PKGROOT/usr/share/doc/rift-terminal"
 
-install -m 0755 "$BIN" "$PKGROOT/usr/bin/shift-terminal"
-if command -v strip >/dev/null; then strip "$PKGROOT/usr/bin/shift-terminal"; fi
+install -m 0755 "$BIN" "$PKGROOT/usr/bin/rift-terminal"
+if command -v strip >/dev/null; then strip "$PKGROOT/usr/bin/rift-terminal"; fi
 
-install -m 0644 packaging/shift.desktop "$PKGROOT/usr/share/applications/shift.desktop"
+install -m 0644 packaging/rift.desktop "$PKGROOT/usr/share/applications/rift.desktop"
 
 for dir in assets/icon/hicolor/*/; do
     size="$(basename "$dir")"
-    install -D -m 0644 "$dir/apps/shift.png" \
-        "$PKGROOT/usr/share/icons/hicolor/$size/apps/shift.png"
+    install -D -m 0644 "$dir/apps/rift.png" \
+        "$PKGROOT/usr/share/icons/hicolor/$size/apps/rift.png"
 done
 
-cat > "$PKGROOT/usr/share/doc/shift-terminal/copyright" <<'COPYRIGHT'
+cat > "$PKGROOT/usr/share/doc/rift-terminal/copyright" <<'COPYRIGHT'
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
-Upstream-Name: shift-terminal
-Source: https://github.com/botjaeger/runway
+Upstream-Name: rift-terminal
+Source: https://github.com/botjaeger/rift
 
 Files: *
-Copyright: Shift contributors
+Copyright: Rift contributors
 License: MIT
 
 License: MIT
@@ -122,18 +122,18 @@ COPYRIGHT
 INSTALLED_SIZE="$(du -ks "$PKGROOT" | cut -f1)"
 
 cat > "$PKGROOT/DEBIAN/control" <<CONTROL
-Package: shift-terminal
+Package: rift-terminal
 Version: ${VERSION}
 Section: utils
 Priority: optional
 Architecture: ${ARCH}
-Maintainer: Shift contributors <noreply@github.com>
+Maintainer: Rift contributors <noreply@github.com>
 Installed-Size: ${INSTALLED_SIZE}
 Depends: ${DEPENDS}
 Recommends: ${RECOMMENDS}
-Homepage: https://github.com/botjaeger/runway
+Homepage: https://github.com/botjaeger/rift
 Description: GPU-accelerated terminal emulator with block-based output
- Shift is a terminal emulator built on wgpu and winit. Every command is a
+ Rift is a terminal emulator built on wgpu and winit. Every command is a
  bounded block (via OSC 133 shell integration) with an exit-code coloured
  border, duration, collapse and one-click output copy.
  .
@@ -142,7 +142,7 @@ Description: GPU-accelerated terminal emulator with block-based output
  configurations and a hot-reloaded TOML configuration.
 CONTROL
 
-DEB="$TARGET_DIR/shift-terminal_${VERSION}_${ARCH}.deb"
+DEB="$TARGET_DIR/rift-terminal_${VERSION}_${ARCH}.deb"
 rm -f "$DEB"
 dpkg-deb --root-owner-group --build "$PKGROOT" "$DEB"
 

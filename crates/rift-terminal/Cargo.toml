@@ -1,0 +1,39 @@
+[package]
+name = "rift-terminal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "rift-terminal"
+path = "src/main.rs"
+
+[dependencies]
+rift-core.workspace = true
+rift-pty.workspace = true
+rift-renderer.workspace = true
+winit.workspace = true
+wgpu.workspace = true
+log.workspace = true
+env_logger.workspace = true
+nucleo-matcher.workspace = true
+arboard.workspace = true
+png.workspace = true
+global-hotkey = "0.8"
+regex = { version = "1", default-features = false, features = ["std", "unicode-case", "unicode-perl"] }
+accesskit_winit = "0.34"
+accesskit = "0.25"
+toml.workspace = true
+git2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+libc = "0.2"
+unicode-segmentation = "1"
+# vector brand marks with no Nerd Font glyph (already built by glyphon's swash)
+zeno = "0.3"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+muda = { version = "0.20", default-features = false }
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "NSApplication", "NSButton", "NSColor", "NSControl", "NSImage", "NSResponder", "NSRunningApplication", "NSView", "NSWindow"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "NSData", "NSGeometry"] }

@@ -121,8 +121,8 @@ insensitive) stay visible. Running it again on the same block, or choosing
   list the installed versions (PHP: Homebrew `php` / `php@X.Y`, phpenv, asdf,
   mise; Python: pyenv's and `system`, else Homebrew `python@X.Y`, asdf,
   mise; `$HOMEBREW_PREFIX` and `$PYENV_ROOT` honoured), the active one
-  checked; picking one runs `shift-use php|python <bin dir>` (that
-  directory first on PATH, the previous pick removed) or `shift-use pyenv
+  checked; picking one runs `rift-use php|python <bin dir>` (that
+  directory first on PATH, the previous pick removed) or `rift-use pyenv
   <version>` (`PYENV_VERSION`) — this shell only. The Docker chip lists the
   project's containers as a table — name, published ports, uptime and the
   health check's verdict (healthy / starting / unhealthy), running ones
@@ -229,7 +229,7 @@ turns the completion panel off (the ghost text and Tab still work).
 
 ## Launch configurations
 
-Warp-compatible YAML in `~/.config/shift/launch_configs/*.yaml` — a named set
+Warp-compatible YAML in `~/.config/rift/launch_configs/*.yaml` — a named set
 of tabs, each with a (possibly nested) split layout, cwds and startup commands.
 ⌘P → `Launch configuration: <name>` opens one: tabs are appended, splits are
 rebuilt, and each pane's `commands[].exec` are sent **at that pane's first
@@ -241,8 +241,8 @@ ignored. Warp's own files drop in unchanged.
 
 - **Themes**: four builtins (`dark-default`, `light-default`,
   `catppuccin-mocha`, `tokyo-night`) plus user themes in
-  `~/.config/shift/themes/` as Shift TOML **or Warp YAML** — a Warp theme
-  file works unchanged; Shift derives its full token set from Warp's base
+  `~/.config/rift/themes/` as Rift TOML **or Warp YAML** — a Warp theme
+  file works unchanged; Rift derives its full token set from Warp's base
   colors.
 - **OS theme sync** (`sync_os_theme`): follow the system appearance —
   `theme` while dark, `theme_light` while light — switching live when the OS
@@ -275,7 +275,7 @@ ignored. Warp's own files drop in unchanged.
 ## Notifications & bell
 
 - **Command alerts**: an alert fires when the command's pane is out of view
-  (another tab, a hidden pane, or the window unfocused). While Shift is
+  (another tab, a hidden pane, or the window unfocused). While Rift is
   focused it is a toast (`notifications.toasts`), otherwise a desktop
   notification; `notifications.enabled` is the master switch and a sound
   plays when `play_sound` is on. A failed command alerts when
@@ -291,7 +291,7 @@ ignored. Warp's own files drop in unchanged.
 - **Bell** (`bell`): `visual` (120 ms full-window flash), `audible`
   (`afplay` / `paplay` / `canberra-gtk-play`), `both`, or `none`. A bell in a
   background tab also raises its activity dot.
-- `SHIFT_NO_NOTIFY=1` suppresses both.
+- `RIFT_NO_NOTIFY=1` suppresses both.
 
 ## Tabs, panes, session
 
@@ -326,7 +326,7 @@ ignored. Warp's own files drop in unchanged.
   prompt, and a toast counts the panes it skipped. A multi-line paste asks
   first if any recipient lacks bracketed paste.
 - **Session restore**: tab layout + cwds persisted atomically to
-  `~/.local/share/shift/session.toml` on every structural change; reopened on
+  `~/.local/share/rift/session.toml` on every structural change; reopened on
   launch when `restore_session = true`.
 - **Saved block output** (`save_transcripts`, off by default): each pane's
   finished blocks (command, exit code, duration, directory, output — newest
@@ -347,7 +347,7 @@ ignored. Warp's own files drop in unchanged.
   `+N more` lines stand in for the rest, marked with the most urgent alert
   among them.
 - **Session switcher** (⇧⌘O): one fuzzy list of tabs, panes of split tabs
-  (directory and running job), tabs of other Shift windows (focusing one
+  (directory and running job), tabs of other Rift windows (focusing one
   raises that window), detached session-service shells, and the 40 newest
   finished blocks; Enter jumps there (a block is selected and scrolled into
   view). Other windows and detached shells load in the background; the list
@@ -363,33 +363,33 @@ ignored. Warp's own files drop in unchanged.
 
 ## Shell integration
 
-Materialized to `~/.local/share/shift/` on first spawn, injected
+Materialized to `~/.local/share/rift/` on first spawn, injected
 automatically:
 
 - **zsh** — ZDOTDIR shim that sources the user's real config first (a
   `ZDOTDIR` set in the user's `~/.zshenv` is honoured for their other files).
-  An interactive `zsh` or `exec zsh` typed at a Shift prompt gets the shim
+  An interactive `zsh` or `exec zsh` typed at a Rift prompt gets the shim
   too (for that command only; the shell keeps the user's `ZDOTDIR`).
 - **bash** — spawned with `--rcfile <data dir>/bashrc`, a shim that replays
   bash's own startup files (profile files on macOS, `~/.bashrc` on Linux),
-  then sources `shift.bash`. The command-start marker uses `PS0` on bash
+  then sources `rift.bash`. The command-start marker uses `PS0` on bash
   4.4+ and a `DEBUG` trap before that; `PROMPT_COMMAND` may be a string or an
-  array (5.1+), and entries a user rc appends after sourcing `shift.bash`
-  itself are moved before Shift's last entry before the first prompt.
-  `bash` and `exec bash` typed at a Shift prompt start the child with
-  `--rcfile <data dir>/bashrc-child` (`~/.bashrc`, then `shift.bash`) through
+  array (5.1+), and entries a user rc appends after sourcing `rift.bash`
+  itself are moved before Rift's last entry before the first prompt.
+  `bash` and `exec bash` typed at a Rift prompt start the child with
+  `--rcfile <data dir>/bashrc-child` (`~/.bashrc`, then `rift.bash`) through
   the aliases `bash` and `exec ` — not added when the user already has
   aliases of those names. `command bash`, `/bin/bash` and scripts bypass it.
-- **fish** — `shift.fish` auto-loaded via a `vendor_conf.d` XDG_DATA_DIRS
+- **fish** — `rift.fish` auto-loaded via a `vendor_conf.d` XDG_DATA_DIRS
   append.
 
 Sets `TERM=xterm-256color` and `COLORTERM=truecolor` (only when not already
-set), `TERM_PROGRAM=shift`, `TERM_PROGRAM_VERSION` (Shift's own),
-`LC_TERMINAL=Shift` and `LC_TERMINAL_VERSION`;
+set), `TERM_PROGRAM=rift`, `TERM_PROGRAM_VERSION` (Rift's own),
+`LC_TERMINAL=Rift` and `LC_TERMINAL_VERSION`;
 emits OSC 133 (blocks), OSC 7 (cwd tracking) and, when they change, OSC 1337
-SetUserVar `ShiftPython` (the prompt chips' Python environment) and, when PATH changes, `ShiftPhpBin` / `ShiftPythonBin` (the
+SetUserVar `RiftPython` (the prompt chips' Python environment) and, when PATH changes, `RiftPhpBin` / `RiftPythonBin` (the
 `php` and `python3` it resolves to); base64, bounded and control characters
-dropped on read. Defines `shift-use`, which the PHP and Python chips run.
+dropped on read. Defines `rift-use`, which the PHP and Python chips run.
 
 ## Rendering & performance
 
@@ -417,8 +417,8 @@ dropped on read. Defines `shift-use`, which the PHP and Python chips run.
 
 ## Startup
 
-If the `shift` config or data directory does not exist but a legacy `runway`
-one does, Shift keeps using the `runway` directory.
+If the `rift` config or data directory does not exist but one from an earlier
+name of the app does (`shift`, then `runway`), Rift keeps using that directory.
 
 `Starting zsh…` placeholder on the prompt chips' row until the shell's first prompt; no terminal
 cursor shows while it is up. For a shell without integration, the placeholder leaves and the
@@ -431,7 +431,7 @@ timestamp lines skipped) or fish (`$XDG_DATA_HOME/fish/fish_history`, else
 `~/.local/share/fish/fish_history`). Only the last 4 MiB of the file is
 read. The first launch after an update opens What's New (release notes
 from `CHANGELOG.md`); the last seen version lives in
-`~/.local/share/shift/last-seen-version`, and a first install only records
+`~/.local/share/rift/last-seen-version`, and a first install only records
 it.
 
 ## Terminal protocol support
@@ -529,9 +529,9 @@ it.
 ## Durable sessions
 
 With `durable_sessions = true` (the default; Settings → General → *Keep
-shells running when Shift quits*), new shells run in a
-per-user **session service** (`shift-terminal --session-daemon`, started on
-demand) instead of the window process. Quitting Shift or closing the window
+shells running when Rift quits*), new shells run in a
+per-user **session service** (`rift-terminal --session-daemon`, started on
+demand) instead of the window process. Quitting Rift or closing the window
 leaves them running; the next launch restores the layout and **reattaches**
 each pane: the service replays the output it kept (the newest 8 MiB per
 shell) into a fresh terminal, with the original timing so block durations
@@ -546,7 +546,7 @@ replay.
   them.
 - Palette → "Attach detached session: …" opens a tab on any shell the
   service keeps that no window shows.
-- The service listens on `~/.local/share/shift/sessiond/sock` (a 0700
+- The service listens on `~/.local/share/rift/sessiond/sock` (a 0700
   directory; other users' connections are refused) and exits 10 s after its
   last shell and window are gone. A slow window is disconnected rather than
   buffering without bound; the pane reattaches on its own and replays only
@@ -557,22 +557,22 @@ replay.
   next to the socket keeps concurrent starts from replacing each other's
   socket. If the configured data
   directory is too long for a Unix socket path, the `sessiond/` and
-  `control/` directories both move to `/tmp/shift-<uid>-<hash>/…`, specific
+  `control/` directories both move to `/tmp/rift-<uid>-<hash>/…`, specific
   to that data directory.
 - If the service cannot start, the shell runs locally and a toast says so.
 - Scripted runs (`--script`) keep their shells local unless
-  `SHIFT_PERSIST_SESSION` is set.
+  `RIFT_PERSIST_SESSION` is set.
 
 ## Updates
 
-Shift looks for a new release at launch and every 6 hours
+Rift looks for a new release at launch and every 6 hours
 (`check_for_updates`, Settings → General → *Updates*): it fetches
 `latest.json` from the public
-[shift-releases](https://github.com/botjaeger/shift-releases) repository with
+[rift-releases](https://github.com/botjaeger/rift-releases) repository with
 the system `curl` (https only, 15 s, at most 64 KiB) and remembers the answer
 in `update.json`, so several windows check once.
 
-The manifest must be signed: Shift also fetches `latest.json.sig` and
+The manifest must be signed: Rift also fetches `latest.json.sig` and
 verifies its Ed25519 signature over the manifest's exact bytes against the
 release keys built into the app (the private key stays with the maintainer,
 never in CI or the releases repository) before reading anything in it. A
@@ -582,15 +582,15 @@ missing or invalid signature offers no update and Settings → About shows
 cannot inject a release either. The asset's SHA-256 then comes from the
 signed manifest.
 
-- A newer version shows **Update Shift** in the tab bar (left of the inbox;
+- A newer version shows **Update Rift** in the tab bar (left of the inbox;
   tooltip `vX.Y.Z available`). Settings → About shows *Up to date*, *vX.Y.Z
   available* with an **Update…** button, or *Couldn't check for updates*.
   The palette has *Check for updates* (`check_for_updates`; the answer
-  toasts) and *Update Shift* (`update_shift`).
-- The chip, **Update…** and `update_shift` open a dialog that says what the
+  toasts) and *Update Rift* (`update_rift`).
+- The chip, **Update…** and `update_rift` open a dialog that says what the
   restart keeps: with durable sessions, *Your N tabs and M shells keep running
   and come back where they were*; without them, open shells end (turn on
-  *Keep shells running when Shift quits* to keep them). When the new
+  *Keep shells running when Rift quits* to keep them). When the new
   version's session service speaks another protocol, running shells keep
   running but cannot be reattached; the dialog says so. **Later** (Esc)
   hides the chip until a newer version.
@@ -600,9 +600,9 @@ signed manifest.
   and its SHA-256 against the manifest (a mismatch changes nothing), checks
   that the new binary reports the expected version, and swaps it in
   atomically (the app path is never missing): macOS keeps the old bundle
-  as `.Shift-old.app` beside `Shift.app`, Linux as `<AppImage>.old`. Only
-  one window installs at a time (*Another window is updating Shift*);
-  closing or quitting the window meanwhile waits for the update (*Shift is
+  as `.Rift-old.app` beside `Rift.app`, Linux as `<AppImage>.old`. Only
+  one window installs at a time (*Another window is updating Rift*);
+  closing or quitting the window meanwhile waits for the update (*Rift is
   updating… it quits when the update is done*). Leftovers of an
   interrupted install are cleared at the next one.
 - Every window restarts: the updating window writes the rollback marker,
@@ -614,20 +614,20 @@ signed manifest.
   shells. Windows whose control socket is off cannot be asked; the dialog
   counts them and they stay open on the old version.
 - The new version counts as started 10 s after its first frame: it then
-  deletes the old copy, toasts *Updated to Shift vX.Y.Z* and reopens the
+  deletes the old copy, toasts *Updated to Rift vX.Y.Z* and reopens the
   other windows. If it exits or crashes before that, the helper puts the
-  old version back and starts it (*Couldn't update to Shift vX.Y.Z*), and
+  old version back and starts it (*Couldn't update to Rift vX.Y.Z*), and
   that one reopens the windows. A crash mid-update leaves the windows'
   layouts in `restart/`; the next plain launch reopens them.
-- Updating in place needs Shift.app in a writable folder (macOS) or an
+- Updating in place needs Rift.app in a writable folder (macOS) or an
   AppImage in a writable folder (Linux). A copy running from the disk
-  image or from macOS's temporary translocated copy says *Move Shift to
+  image or from macOS's temporary translocated copy says *Move Rift to
   Applications to update it*. Development builds, the `.deb` and the
   tarball get **Open download page** instead.
 
 ## Control API
 
-Each window listens on `~/.local/share/shift/control/<pid>.sock`
+Each window listens on `~/.local/share/rift/control/<pid>.sock`
 (`control_api`, Settings → General → Automation):
 
 - `"navigate"` (default): `list`, `status`, `focus`, and
@@ -643,11 +643,11 @@ Each window listens on `~/.local/share/shift/control/<pid>.sock`
 - `ctl focus --tab N` / `--pane ID`: tabs count from 0, as in `ctl list`;
   a non-numeric value is rejected with exit code 2.
 
-`shift-terminal ctl [--pid PID] list|status|focus|split|open|send-text` is
+`rift-terminal ctl [--pid PID] list|status|focus|split|open|send-text` is
 the client (`ctl help` for flags); the newest window answers unless `--pid`
-names one. `shift-terminal --version` and `--help` print the version and usage; requests are newline-delimited JSON, answered on the
+names one. `rift-terminal --version` and `--help` print the version and usage; requests are newline-delimited JSON, answered on the
 UI thread. The session switcher (⇧⌘O) uses it to list and focus tabs of
-other Shift windows. Permission changes from Settings or config reload revoke
+other Rift windows. Permission changes from Settings or config reload revoke
 existing connections and queued requests before execution. Connections are
 limited to 32, with five-second read/write inactivity timeouts; request lines
 are bounded to 1 MiB while reading.
@@ -667,8 +667,8 @@ selects the block. The list keeps the newest 200.
   press `Mark all as read`. Unread entries put an accent dot on the inbox
   button and a kind-colored dot on their tab.
 - **Alerts** (Settings → Notifications, `[notifications]`): for a pane out
-  of view, an enabled event also raises a toast (Shift focused) or a desktop
-  notification (Shift in the background), and plays its sound. Events: long
+  of view, an enabled event also raises a toast (Rift focused) or a desktop
+  notification (Rift in the background), and plays its sound. Events: long
   command finished, command failed, agent task completed, needs attention,
   password prompt.
 - **Coding agents**: Claude Code, Codex, OpenCode and Gemini CLI are
@@ -725,11 +725,11 @@ all apply). Profiles are `[[ssh_profiles]]` in config.toml plus every concrete
 `Host` of `~/.ssh/config` (and its `Include`s); trailing comments are ignored
 and aliases containing `=` are preserved.
 
-"Install Shift shell integration on <name>" asks first, then runs an
-installer over ssh in a new tab: it writes `~/.local/share/shift/shift.{bash,
-zsh,fish}` on the host and adds one line ending `# shift-shell-integration`
-to `~/.bashrc` and `~/.zshrc` (plus `~/.config/fish/conf.d/shift.fish`). The
-hooks load only when `LC_TERMINAL=Shift` arrives with the session: Shift sets
+"Install Rift shell integration on <name>" asks first, then runs an
+installer over ssh in a new tab: it writes `~/.local/share/rift/rift.{bash,
+zsh,fish}` on the host and adds one line ending `# rift-shell-integration`
+to `~/.bashrc` and `~/.zshrc` (plus `~/.config/fish/conf.d/rift.fish`). The
+hooks load only when `LC_TERMINAL=Rift` arrives with the session: Rift sets
 it and passes `-o SendEnv=LC_TERMINAL`, and most servers `AcceptEnv LC_*`.
 After reconnecting, remote commands become blocks with the owned editor,
 exit codes and the remote directory; images and tmux work over ssh as
@@ -738,8 +738,8 @@ The block of the `ssh` command itself ends when the remote prompt starts.
 
 ## Accessibility
 
-Shift draws every surface itself, so it publishes an AccessKit tree
-(`crates/shift-terminal/src/a11y.rs`) to VoiceOver, Orca and other screen readers:
+Rift draws every surface itself, so it publishes an AccessKit tree
+(`crates/rift-terminal/src/a11y.rs`) to VoiceOver, Orca and other screen readers:
 
 - **Tabs** as a tab list (selected state; activating one switches tabs).
 - **Panes** as groups labelled with their directory and running job, each
@@ -767,11 +767,11 @@ pushed only when it changes. The script driver's `dump` prints it.
 ## Global hotkey
 
 `global_hotkey` is empty (off) by default; `global_hotkey = "alt+space"`
-registers a system-wide shortcut (macOS; X11 on Linux): from any app it brings Shift forward, and when Shift is already the
+registers a system-wide shortcut (macOS; X11 on Linux): from any app it brings Rift forward, and when Rift is already the
 focused app it hides it. Scripted runs and secondary windows never register
 one.
 
 ## Deferred (by decision, not gaps)
 
-Multi-cursor editing, `shift://` URI scheme, Warp Drive / cloud / teams.
+Multi-cursor editing, `rift://` URI scheme, Warp Drive / cloud / teams.
 Everything else on the [roadmap](terminal-landscape-roadmap.md) is planned.

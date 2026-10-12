@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write latest.json, the manifest Shift's updater reads (crates/shift-core/src/update.rs).
+"""Write latest.json, the manifest Rift's updater reads (crates/rift-core/src/update.rs).
 
 usage: scripts/release-manifest.py VERSION ARTIFACT_DIR [-o latest.json]
                                    [--base-url URL] [--allow-missing]
@@ -8,13 +8,13 @@ usage: scripts/release-manifest.py VERSION ARTIFACT_DIR [-o latest.json]
 
 ARTIFACT_DIR is searched recursively for this version's assets:
 
-  Shift-VERSION-arm64.dmg         -> macos-aarch64
-  Shift-VERSION-x86_64.dmg        -> macos-x86_64
-  Shift-VERSION-x86_64.AppImage   -> linux-x86_64
+  Rift-VERSION-arm64.dmg         -> macos-aarch64
+  Rift-VERSION-x86_64.dmg        -> macos-x86_64
+  Rift-VERSION-x86_64.AppImage   -> linux-x86_64
 
 Each asset's URL is BASE_URL/<file name>; BASE_URL defaults to the public
 release's download folder,
-https://github.com/botjaeger/shift-releases/releases/download/vVERSION.
+https://github.com/botjaeger/rift-releases/releases/download/vVERSION.
 Fails when CHANGELOG.md has no section for VERSION, or (without
 --allow-missing) when an asset is missing. --verify checks an existing
 manifest against the files: every asset present under ARTIFACT_DIR with the
@@ -30,11 +30,11 @@ import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-RELEASES = "https://github.com/botjaeger/shift-releases/releases"
+RELEASES = "https://github.com/botjaeger/rift-releases/releases"
 ASSETS = {
-    "macos-aarch64": ("Shift-{v}-arm64.dmg", "dmg"),
-    "macos-x86_64": ("Shift-{v}-x86_64.dmg", "dmg"),
-    "linux-x86_64": ("Shift-{v}-x86_64.AppImage", "appimage"),
+    "macos-aarch64": ("Rift-{v}-arm64.dmg", "dmg"),
+    "macos-x86_64": ("Rift-{v}-x86_64.dmg", "dmg"),
+    "linux-x86_64": ("Rift-{v}-x86_64.AppImage", "appimage"),
 }
 
 
@@ -95,7 +95,7 @@ def manifest(version, artifacts: Path, base_url=None, allow_missing=False,
     return {
         "version": version,
         "date": date or datetime.date.today().isoformat(),
-        "protocol": protocol(ipc_rs or REPO / "crates/shift-pty/src/ipc.rs"),
+        "protocol": protocol(ipc_rs or REPO / "crates/rift-pty/src/ipc.rs"),
         "notes": notes,
         "url": f"{RELEASES}/tag/v{version}",
         "assets": assets,
@@ -133,22 +133,22 @@ def self_test():
         ipc = d / "ipc.rs"
         ipc.write_text("pub const PROTOCOL_VERSION: u32 = 7;\n")
         (d / "mac").mkdir()
-        (d / "mac/Shift-1.2.0-arm64.dmg").write_bytes(b"abc")
-        (d / "Shift-1.2.0-x86_64.dmg").write_bytes(b"")
-        (d / "Shift-1.2.0-x86_64.AppImage").write_bytes(b"x")
-        (d / "Shift-1.1.0-arm64.dmg").write_bytes(b"old")
+        (d / "mac/Rift-1.2.0-arm64.dmg").write_bytes(b"abc")
+        (d / "Rift-1.2.0-x86_64.dmg").write_bytes(b"")
+        (d / "Rift-1.2.0-x86_64.AppImage").write_bytes(b"x")
+        (d / "Rift-1.1.0-arm64.dmg").write_bytes(b"old")
         m = manifest("v1.2.0", d, changelog=log, ipc_rs=ipc)
         assert m["version"] == "1.2.0" and m["protocol"] == 7, m
         assert m["date"] == "2026-11-01" and m["notes"] == "Faster blocks.", m
         assert m["url"] == f"{RELEASES}/tag/v1.2.0", m
         a = m["assets"]["macos-aarch64"]
-        assert a == {"url": f"{RELEASES}/download/v1.2.0/Shift-1.2.0-arm64.dmg",
+        assert a == {"url": f"{RELEASES}/download/v1.2.0/Rift-1.2.0-arm64.dmg",
                      "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
                      "kind": "dmg"}, a
         assert m["assets"]["linux-x86_64"]["kind"] == "appimage", m
         # a version without a changelog section (even with its asset), or a
         # missing asset, fails
-        (d / "Shift-1.3.0-arm64.dmg").write_bytes(b"new")
+        (d / "Rift-1.3.0-arm64.dmg").write_bytes(b"new")
         for version, allow, why in [("1.3.0", True, "CHANGELOG"), ("1.1.0", False, "not found")]:
             try:
                 manifest(version, d, allow_missing=allow, changelog=log, ipc_rs=ipc)
@@ -158,12 +158,12 @@ def self_test():
                 raise AssertionError(f"{version} should fail")
         m = manifest("1.1.0", d, allow_missing=True, base_url="file:///x/", changelog=log, ipc_rs=ipc)
         assert list(m["assets"]) == ["macos-aarch64"], m
-        assert m["assets"]["macos-aarch64"]["url"] == "file:///x/Shift-1.1.0-arm64.dmg", m
+        assert m["assets"]["macos-aarch64"]["url"] == "file:///x/Rift-1.1.0-arm64.dmg", m
         # --verify: the written manifest matches; a changed file does not
         out = d / "latest.json"
         out.write_text(json.dumps(manifest("1.2.0", d, changelog=log, ipc_rs=ipc)))
         assert verify(out, d)["version"] == "1.2.0"
-        (d / "Shift-1.2.0-x86_64.AppImage").write_bytes(b"tampered")
+        (d / "Rift-1.2.0-x86_64.AppImage").write_bytes(b"tampered")
         try:
             verify(out, d)
         except SystemExit as e:
@@ -171,7 +171,7 @@ def self_test():
         else:
             raise AssertionError("a tampered asset should fail --verify")
     # the repository's own files parse
-    assert protocol(REPO / "crates/shift-pty/src/ipc.rs") >= 1
+    assert protocol(REPO / "crates/rift-pty/src/ipc.rs") >= 1
     print("release-manifest self-test passed")
 
 

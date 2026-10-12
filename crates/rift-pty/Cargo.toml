@@ -1,0 +1,15 @@
+[package]
+name = "rift-pty"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rift-core.workspace = true
+alacritty_terminal.workspace = true
+log.workspace = true
+libc = "0.2"
+image.workspace = true
+flate2.workspace = true
+serde.workspace = true
+serde_json.workspace = true

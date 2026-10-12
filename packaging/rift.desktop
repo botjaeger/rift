@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Rift
+GenericName=Terminal
+Comment=GPU-accelerated terminal with block-based output
+Exec=rift-terminal
+Icon=rift
+StartupWMClass=rift
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=shell;terminal;console;

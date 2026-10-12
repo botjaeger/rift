@@ -6,7 +6,7 @@ the same machine only; the numbers are wall clock.
 
 ```sh
 packaging/bench.sh                          # release build, then every scenario
-SHIFT_BIN=path/to/shift-terminal packaging/bench.sh
+RIFT_BIN=path/to/rift-terminal packaging/bench.sh
 BENCH_KEEP=1 packaging/bench.sh             # keep the work dir (logs, dumps)
 BENCH_VISIBLE=1 packaging/bench.sh          # also measure key-to-frame latency
 ```
@@ -21,7 +21,7 @@ takes focus: do not type while it runs).
 | Startup to first prompt | Process start to the first shell prompt, best of 3, minus the driver's fixed 1.5 s start delay. |
 | `seq 1 500000` / `cat` 20 MiB | The finished block's duration (OSC 133 C→D) from the state dump. |
 | Scrollback memory | Peak RSS after 300k lines into a 100k-line scrollback. |
-| Key-to-frame latency | `SHIFT_LATENCY_LOG=1`: from a raw key write to the first presented frame after the program's echo arrives (40 keys into `cat`). |
+| Key-to-frame latency | `RIFT_LATENCY_LOG=1`: from a raw key write to the first presented frame after the program's echo arrives (40 keys into `cat`). |
 | TUIs | vim, less and top enter the alternate screen and return to the prompt after their quit key. |
 
 ## Recorded baseline
@@ -44,7 +44,7 @@ blank cell of each row: the same `seq 1 500000` took 4161 ms and peaked at
 
 ## Standard terminal suites (2026-10-10)
 
-Run inside Shift (release build, headless, macOS 27, Apple M3 Max, 80×24 for
+Run inside Rift (release build, headless, macOS 27, Apple M3 Max, 80×24 for
 vttest, 124×29 for ucs-detect) through the script driver, which waits on a
 file the suite writes when it ends (`wait_file`). The machine also ran
 virtual machines (load average 15–60), so throughput is compared A/B: the

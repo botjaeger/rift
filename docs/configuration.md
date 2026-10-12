@@ -4,19 +4,19 @@
 
 | Path | Purpose |
 |---|---|
-| `~/.config/shift/config.toml` | User configuration (hot-reloaded < 300 ms, including external edits; a once-a-second stat check catches edits the file-system events miss) |
-| `~/.config/shift/themes/*.toml` | User themes, Shift TOML (file stem = theme name) |
-| `~/.config/shift/themes/*.yaml` · `*.yml` | User themes, Warp YAML (same directory, same naming) |
-| `~/.config/shift/launch_configs/*.yaml` · `*.yml` | Launch configurations (Warp-compatible YAML) |
-| `~/.local/share/shift/` | Materialized shell-integration files |
-| `~/.local/share/shift/session.toml` | Saved session (tabs + cwds), written atomically |
-| `~/.local/share/shift/last-seen-version` | Version whose What's New was last shown (opens it once after an update) |
-| `~/.local/share/shift/update.json` | Last update check: when, the newest release's manifest, the version *Later* dismissed |
-| `~/.local/share/shift/updates/` | Update downloads (deleted after installing; an interrupted install's leftovers go at the next one), `install.lock` (one window installs at a time) and `relaunch.log` (the restarted app's output until it is confirmed; emptied past 1 MB) |
-| `~/.local/share/shift/update-pending.json` | An update in progress (readable by you only; holds the token other windows' `prepare-restart` needs); the new version removes it 10 s after its first frame, and if it dies before that the old app is put back (`update-failed.json`) |
-| `~/.local/share/shift/restart/` | Each window's layout while an update restarts them (consumed on relaunch; left by a crash, reopened at the next plain launch) |
+| `~/.config/rift/config.toml` | User configuration (hot-reloaded < 300 ms, including external edits; a once-a-second stat check catches edits the file-system events miss) |
+| `~/.config/rift/themes/*.toml` | User themes, Rift TOML (file stem = theme name) |
+| `~/.config/rift/themes/*.yaml` · `*.yml` | User themes, Warp YAML (same directory, same naming) |
+| `~/.config/rift/launch_configs/*.yaml` · `*.yml` | Launch configurations (Warp-compatible YAML) |
+| `~/.local/share/rift/` | Materialized shell-integration files |
+| `~/.local/share/rift/session.toml` | Saved session (tabs + cwds), written atomically |
+| `~/.local/share/rift/last-seen-version` | Version whose What's New was last shown (opens it once after an update) |
+| `~/.local/share/rift/update.json` | Last update check: when, the newest release's manifest, the version *Later* dismissed |
+| `~/.local/share/rift/updates/` | Update downloads (deleted after installing; an interrupted install's leftovers go at the next one), `install.lock` (one window installs at a time) and `relaunch.log` (the restarted app's output until it is confirmed; emptied past 1 MB) |
+| `~/.local/share/rift/update-pending.json` | An update in progress (readable by you only; holds the token other windows' `prepare-restart` needs); the new version removes it 10 s after its first frame, and if it dies before that the old app is put back (`update-failed.json`) |
+| `~/.local/share/rift/restart/` | Each window's layout while an update restarts them (consumed on relaunch; left by a crash, reopened at the next plain launch) |
 
-`XDG_CONFIG_HOME` and `XDG_DATA_HOME` are honored. Existing `runway` config and data directories remain active when the corresponding `shift` directory does not exist; move them to `shift` when you want the new paths.
+`XDG_CONFIG_HOME` and `XDG_DATA_HOME` are honored. When the `rift` config or data directory does not exist, an existing one from an earlier name of the app (`shift`, then `runway`) stays active; move it to `rift` when you want the new paths.
 
 ## config.toml reference
 
@@ -30,7 +30,7 @@ font_size     = 13.0              # settings stepper clamps 8–28 (⌘= / ⌘- 
 line_height   = 1.2               # multiplier, clamped 1.0–2.2 when applied
 cursor_style  = "block"           # block | bar | underline
 cursor_blink  = true              # the cursor toggles every 550 ms
-theme         = "dark-default"    # builtin, or a stem in ~/.config/shift/themes
+theme         = "dark-default"    # builtin, or a stem in ~/.config/rift/themes
 theme_light   = "light-default"   # theme used while the OS is light (needs sync_os_theme)
 sync_os_theme = false             # follow the OS appearance: theme = dark, theme_light = light
 scrollback    = 10000             # lines kept per pane, clamped 0–1000000
@@ -48,15 +48,15 @@ durable_sessions = true           # shells live in the session service: they kee
                                   # running after quit and reattach on launch
                                   # (false keeps them in the window process)
 check_for_updates = true          # look for a new release at launch and every 6 h
-                                  # ("Update Shift" chip in the tab bar)
+                                  # ("Update Rift" chip in the tab bar)
 control_api   = "navigate"        # off | navigate (list/status/focus, and an
                                   # update's prepare-restart) | full (also
-                                  # split/open/send-text); `shift-terminal ctl`
+                                  # split/open/send-text); `rift-terminal ctl`
 input_position = "bottom"         # bottom | top — where the command editor sits
 blocks_start = "bottom"           # bottom | top — blocks fill up from the editor (Warp), or start at the pane's top
-prompt        = "shift"          # shift = context chips + chevron
+prompt        = "rift"           # rift = context chips + chevron
                                   # shell   = keep the shell's own PS1 on screen, editor shows ›
-prompt_chips  = ["cwd", "git_branch", "git_diff"]  # the Shift prompt's chips, in order (Settings › Input ›
+prompt_chips  = ["cwd", "git_branch", "git_diff"]  # the Rift prompt's chips, in order (Settings › Input ›
                                   # Prompt chips edits them): cwd, git_branch, git_diff,
                                   # github_pr, user, host, python, php, docker,
                                   # date, time12, time24
@@ -87,8 +87,8 @@ clipboard_access = "write"        # OSC 52: off | write (programs may copy) | re
 global_hotkey = ""                # system-wide show/hide chord, e.g. "alt+space";
                                   # empty = off (X11 on Linux)
 link_editor   = "system"          # ⌘-clicked file paths / file links: system (default
-                                  # app) | shift (viewer pane) | an editor id below
-file_editor   = "shift"           # explorer and code review ↗: shift | system | editor id
+                                  # app) | rift (viewer pane) | an editor id below
+file_editor   = "rift"            # explorer and code review ↗: rift | system | editor id
                                   # editors: vscode cursor windsurf zed sublime intellij
                                   # phpstorm webstorm rustrover (macOS: the .app in
                                   # /Applications or ~/Applications, else the CLI on PATH)
@@ -106,7 +106,7 @@ command_failed = true             # a command failed out of view
 agent_task_completed = true       # Claude Code / Codex / OpenCode / Gemini CLI finished
 needs_attention = true            # OSC 9/777/99, an agent asking for input or approval
 password_prompt = true            # a running command shows a password prompt
-toasts = true                     # in-window cards while Shift is focused
+toasts = true                     # in-window cards while Rift is focused
 toast_secs = 8                    # 2–60; hovering keeps a toast
 play_sound = true
 sound = "default"                 # default | none | a name (Glass, Hero, a file stem
@@ -134,7 +134,7 @@ applies external edits without restarting.
   stays live (at startup, the defaults with `control_api = "off"`), a toast
   names the error, and Settings refuses to save over the broken file until it
   is fixed. A missing file means defaults.
-- **Saves are atomic**: Shift writes a temporary file next to `config.toml`,
+- **Saves are atomic**: Rift writes a temporary file next to `config.toml`,
   keeps the old file's permissions and renames it over, so a failed write
   never truncates the config.
 - **Saves edit the file in place**: Settings changes only the lines whose
@@ -149,12 +149,12 @@ applies external edits without restarting.
 Built-ins, in picker order: `dark-default`, `light-default`,
 `catppuccin-mocha`, `tokyo-night`.
 
-A user theme is `~/.config/shift/themes/<name>.{toml,yaml,yml}`, referenced by
+A user theme is `~/.config/rift/themes/<name>.{toml,yaml,yml}`, referenced by
 file stem (`toml` wins if several exist). It appears in Settings → Themes and
 the palette's theme switcher. Editing the selected theme file reloads its
 colors without changing `config.toml` or restarting.
 
-### Shift TOML themes
+### Rift TOML themes
 
 A theme TOML must set every token (only `background_image` is optional):
 `bg`, `bg_chrome`, `bg_gutter`, `surface`, `border`, `pane_border_inactive`,
@@ -162,14 +162,14 @@ A theme TOML must set every token (only `background_image` is optional):
 `success`, `error`, `warning`, `cursor`, `selection`, `search_match`,
 `search_active`, `ansi` (16 colors), and a `[syntax]` table with `command`,
 `flag`, `string` and `ghost`. Colors are `#rgb`, `#rrggbb` or `#rrggbbaa`. A
-file with a missing token or a bad color does not load: Shift shows a toast
+file with a missing token or a bad color does not load: Rift shows a toast
 naming the error, keeps `dark-default`, and the picker labels the file
 "(invalid theme file)".
 
 ### Warp YAML themes
 
 `.yaml` / `.yml` files use Warp's schema unchanged — drop a Warp theme in and
-it works. Warp carries only the base colors; every other Shift token is
+it works. Warp carries only the base colors; every other Rift token is
 derived from them (chrome/gutter sink away from the text, surfaces lift toward
 it, the hairline border is a low-alpha overlay).
 
@@ -199,7 +199,7 @@ Either theme format can name a wallpaper, drawn under every layer:
 
 ```toml
 [background_image]
-path = "wall.png"   # relative → resolved against ~/.config/shift/themes
+path = "wall.png"   # relative → resolved against ~/.config/rift/themes
 opacity = 0.5       # TOML: 0–1 (default 1.0). Warp YAML: 0–100.
 ```
 
@@ -208,7 +208,7 @@ Pair it with `window_opacity` for a translucent window over the desktop.
 ## Launch configurations
 
 Warp's launch-configuration YAML, read from
-`~/.config/shift/launch_configs/*.yaml` (`.yml` too) — Warp's own files from
+`~/.config/rift/launch_configs/*.yaml` (`.yml` too) — Warp's own files from
 `~/.warp/launch_configurations/` drop in unchanged.
 
 ```yaml
@@ -239,7 +239,7 @@ configurations are re-scanned when the palette opens.
 
 Semantics:
 
-- Shift has a single window, so **every window's tabs are concatenated** in
+- Rift has a single window, so **every window's tabs are concatenated** in
   document order into one flat tab list rather than taking `windows[0]`.
   `active_tab_index` is resolved against that flat list and clamped.
 - `cwd` gets `~` / `~/…` expanded via `$HOME`; a YAML-null `cwd: ~` means the
@@ -254,7 +254,7 @@ Semantics:
 ## Notifications & bell
 
 Every event lands in the notifications inbox. For a pane you are not looking
-at, an enabled event also alerts: a toast while Shift is focused, a desktop
+at, an enabled event also alerts: a toast while Rift is focused, a desktop
 notification (macOS `osascript display notification`, Linux `notify-send`)
 while it is not, plus its sound.
 
@@ -289,26 +289,26 @@ while it is not, plus its sound.
   `audible` = a sound (`afplay` on macOS, `paplay` / `canberra-gtk-play` on
   Linux), `both`, or `none`. A bell in a background tab also lands in the
   inbox and marks the tab.
-- `SHIFT_NO_NOTIFY=1` suppresses desktop notifications and sounds (they are
+- `RIFT_NO_NOTIFY=1` suppresses desktop notifications and sounds (they are
   logged instead) — useful for scripted runs.
-- `SHIFT_PERSIST_SESSION=1` lets a `--script` run save and restore the
+- `RIFT_PERSIST_SESSION=1` lets a `--script` run save and restore the
   session file and use the session service (scripted runs leave both alone
   by default: their shells are local, so no service outlives a test); point
   `XDG_DATA_HOME` at a scratch directory when using it.
-- `SHIFT_UPDATE_URL` replaces the update manifest's URL (tests: a
+- `RIFT_UPDATE_URL` replaces the update manifest's URL (tests: a
   `file://` manifest, whose assets may then be `file://` too). Scripted runs
   check for updates only when it is set. The manifest still needs a valid
   `latest.json.sig` beside it.
-- `SHIFT_UPDATE_TEST_KEY` (tests): an extra Ed25519 public key (base64 of
+- `RIFT_UPDATE_TEST_KEY` (tests): an extra Ed25519 public key (base64 of
   the raw 32 bytes) trusted for the update manifest's signature, so a test
-  can sign with a throwaway key. Honoured only while `SHIFT_UPDATE_URL` is a
+  can sign with a throwaway key. Honoured only while `RIFT_UPDATE_URL` is a
   `file://` URL; an https manifest is verified with the release keys alone.
-- `SHIFT_RELAUNCH_SCRIPT` / `SHIFT_RELAUNCH_WINDOW_SCRIPT` (tests): the app
+- `RIFT_RELAUNCH_SCRIPT` / `RIFT_RELAUNCH_WINDOW_SCRIPT` (tests): the app
   an update restarts runs that `--script` (reopened windows: the second one,
   headless) instead of starting plainly. A scripted run with
-  `SHIFT_PERSIST_SESSION` counts as a plain main-window launch: it also
+  `RIFT_PERSIST_SESSION` counts as a plain main-window launch: it also
   reopens windows an interrupted update left in `restart/`.
-- `SHIFT_TEST_NO_FIRST_FRAME` (tests): a headless run does not count its
+- `RIFT_TEST_NO_FIRST_FRAME` (tests): a headless run does not count its
   start as a presented frame, so it confirms through the fallback timer (the
   planned wait + 20 s) like a window that never draws.
 
@@ -326,9 +326,9 @@ Injected automatically at spawn; users' own rc files are always sourced.
 
 - Emits OSC 133 A/B/C/D (block boundaries + exit codes) and OSC 7 (cwd).
 - Environment: `TERM=xterm-256color`, `COLORTERM=truecolor`,
-  `TERM_PROGRAM=shift`, `TERM_PROGRAM_VERSION` (Shift's version, not the
+  `TERM_PROGRAM=rift`, `TERM_PROGRAM_VERSION` (Rift's version, not the
   launching terminal's).
 - Coexists with iTerm2/other integrations that emit their own OSC 133 —
   duplicate markers are tolerated.
 - To opt out, unset the injection (zsh: launch with a custom `shell` pointing
-  at a wrapper) — Shift then behaves as a plain terminal without blocks.
+  at a wrapper) — Rift then behaves as a plain terminal without blocks.

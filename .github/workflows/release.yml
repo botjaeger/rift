@@ -3,7 +3,7 @@ name: Release
 # Builds every package and latest.json (the updater's manifest) as workflow
 # artifacts. Nothing is published here: this repository is private, so a
 # release attached to it could not be downloaded. The maintainer publishes
-# the artifacts to the public botjaeger/shift-releases repository with
+# the artifacts to the public botjaeger/rift-releases repository with
 # scripts/publish-release.sh (docs/development.md, "Packaging and releases").
 # latest.json is NOT signed here: the Ed25519 signing key never reaches CI.
 # publish-release.sh signs it on the maintainer's machine and uploads
@@ -49,7 +49,7 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Build Shift.app
+      - name: Build Rift.app
         run: packaging/make-app.sh --target ${{ matrix.target }}
 
       - name: Build DMG
@@ -126,7 +126,7 @@ jobs:
       - name: Write latest.json
         run: |
           . packaging/lib.sh
-          version="$(shift_version)"
+          version="$(rift_version)"
           if [ "${GITHUB_REF_TYPE}" = tag ] && [ "${GITHUB_REF_NAME}" != "v$version" ]; then
             echo "tag ${GITHUB_REF_NAME} does not match Cargo.toml version $version" >&2
             exit 1

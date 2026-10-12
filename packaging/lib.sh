@@ -3,7 +3,7 @@
 # shellcheck shell=bash
 
 # The version lives in exactly one place: [workspace.package] version.
-shift_version() {
+rift_version() {
     awk -F'"' '
         /^\[workspace\.package\]/                     { sec = 1; next }
         /^\[/                                         { sec = 0 }
@@ -14,7 +14,7 @@ shift_version() {
 # Cargo writes into CARGO_TARGET_DIR when it is set (the docker verification
 # points it at target/linux-docker so it cannot clobber the macOS target dir),
 # so every artifact path has to be derived from the same value.
-shift_default_target_dir() {
+rift_default_target_dir() {
     printf '%s' "${CARGO_TARGET_DIR:-target}"
 }
 
@@ -22,7 +22,7 @@ shift_default_target_dir() {
 # when empty): CI cross-builds the Intel Mac app on an Apple-silicon runner, so
 # `uname -m` would name both macOS packages arm64. Architectures follow the
 # DMG names: arm64/x86_64 on macOS, aarch64/x86_64 on Linux.
-shift_target_os() {
+rift_target_os() {
     case "${1:-}" in
         *-apple-darwin) echo macos ;;
         *-linux-*)      echo linux ;;
@@ -31,13 +31,13 @@ shift_target_os() {
                 Linux)  echo linux ;;
                 *)      uname -s | tr '[:upper:]' '[:lower:]' ;;
             esac ;;
-        *) shift_die "unsupported target triple: $1" ;;
+        *) rift_die "unsupported target triple: $1" ;;
     esac
 }
 
-shift_target_arch() {
+rift_target_arch() {
     local triple="${1:-}" os arch
-    os="$(shift_target_os "$triple")"
+    os="$(rift_target_os "$triple")"
     if [ -n "$triple" ]; then arch="${triple%%-*}"; else arch="$(uname -m)"; fi
     case "$os:$arch" in
         macos:aarch64 | macos:arm64) echo arm64 ;;
@@ -46,7 +46,7 @@ shift_target_arch() {
     esac
 }
 
-shift_die() {
+rift_die() {
     echo "error: $*" >&2
     exit 1
 }

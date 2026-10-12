@@ -1,9 +1,0 @@
-# shellcheck shell=bash disable=SC1090,SC1091  # sources user/system rc files by design
-# Shift bash shim for a child bash typed at a Shift prompt (`bash`,
-# `exec bash`; passed as `--rcfile` by the alias in shift.bash): replay the
-# interactive non-login startup bash would do, then the Shift integration.
-if [[ "$(uname -s)" != "Darwin" ]]; then
-    [[ -f /etc/bash.bashrc ]] && source /etc/bash.bashrc
-fi
-[[ -f "$HOME/.bashrc" ]] && source "$HOME/.bashrc"
-[[ -f "$SHIFT_INTEGRATION_BASH" ]] && source "$SHIFT_INTEGRATION_BASH"

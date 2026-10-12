@@ -1,3 +1,3 @@
-# Shift ZDOTDIR shim — forwards to the user's real zsh config.
-_shift_orig="${SHIFT_ORIG_ZDOTDIR:-$HOME}"
-[[ -f "$_shift_orig/.zlogin" ]] && source "$_shift_orig/.zlogin"
+# Rift ZDOTDIR shim — forwards to the user's real zsh config.
+_rift_orig="${RIFT_ORIG_ZDOTDIR:-$HOME}"
+[[ -f "$_rift_orig/.zlogin" ]] && source "$_rift_orig/.zlogin"

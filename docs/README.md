@@ -1,21 +1,21 @@
-# Shift documentation
+# Rift documentation
 
-Shift is a GPU-accelerated, block-based terminal for macOS and Linux, written
+Rift is a GPU-accelerated, block-based terminal for macOS and Linux, written
 in Rust on wgpu and alacritty_terminal. Every command becomes a block, the
 command line is an app-owned editor, and every action is reachable from the
-keyboard. The [project README](../README.md) explains what Shift is and why.
+keyboard. The [project README](../README.md) explains what Rift is and why.
 
-## Using Shift
+## Using Rift
 
 | Document | Contents |
 |---|---|
-| [getting-started.md](getting-started.md) | First launch, everyday tasks, troubleshooting, files Shift uses |
+| [getting-started.md](getting-started.md) | First launch, everyday tasks, troubleshooting, files Rift uses |
 | [features.md](features.md) | Every feature and its exact behavior |
 | [ui.md](ui.md) | Every UI surface: tabs, blocks, editor, palette, settings, dialogs |
 | [keyboard-shortcuts.md](keyboard-shortcuts.md) | Full default keymap (Warp layout), fixed keys, rebinding |
 | [configuration.md](configuration.md) | `config.toml` reference, themes, launch configs, file locations |
 
-## Building Shift
+## Building Rift
 
 | Document | Contents |
 |---|---|

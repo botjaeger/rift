@@ -1,12 +1,12 @@
 # UI Surfaces
 
-Every visual element in Shift, top to bottom. Layer order for compositing:
+Every visual element in Rift, top to bottom. Layer order for compositing:
 0 chrome → 1 terminal + editor → 2 completion, history, search, file viewer →
 3 settings page, maximized review → 4 palette, settings select lists →
 5 context and chip menus, hints, notifications popover → 6 toasts, confirm
 dialogs, What's New, Edit prompt → 7 tooltips. Visual
 tokens, metrics, radii and the icon set: [DESIGN.md](../DESIGN.md). The
-design source for the current look is the *Shift Terminal Redesign* canvas
+design source for the current look is the *Rift Terminal Redesign* canvas
 (Claude Design artifact: start session, tabs, panes, moving panes, reading
 pane, history, autocomplete, palette, settings, controls, menus, panels).
 
@@ -31,7 +31,7 @@ pane, history, autocomplete, palette, settings, controls, menus, panels).
 
 ## Menu bar (macOS)
 
-Native menus: **Shift** (About Shift — Settings › About, Check for Updates…, Settings…, Keyboard Shortcuts, Services,
+Native menus: **Rift** (About Rift — Settings › About, Check for Updates…, Settings…, Keyboard Shortcuts, Services,
 Hide/Hide Others/Show All, Quit) · **File** (New Tab, New Window, Split Pane
 Right/Down, Reopen Closed Tab, Save Layout as Launch Configuration, Close
 Pane/Other Tabs/Window) · **Edit** (Undo, Redo, Cut, Copy, Paste, Select All,
@@ -70,7 +70,7 @@ every action).
   bare `±` outside a repository or with no changes. Left of it, an inbox
   (bell) icon opens the notifications popover; an accent dot marks unread
   entries. The vertical-tab layout's top strip has the same buttons.
-- **Update Shift** — while a newer release is available (and not dismissed
+- **Update Rift** — while a newer release is available (and not dismissed
   with *Later*), a 22 px pill left of the inbox: 1 px `warning` outline,
   `warning` text (12 px medium), no fill, a hover lift. Tooltip `vX.Y.Z
   available`; a click opens the update dialog (see *Dialogs and toasts*).
@@ -319,13 +319,13 @@ integration). Sits at the bottom of the pane, or at the top with
   check. An empty list says why (no installs found, Docker not
   running, `docker compose up`). The search field reads `Search directories…`,
   `Search branches…`, `Search versions…` (PHP, Python) or `Search
-  containers…`. A PHP or Python row runs its `shift-use …` command in the
+  containers…`. A PHP or Python row runs its `rift-use …` command in the
   pane; a Docker row (no check mark) runs `docker compose --project-directory
   <dir> logs --follow --tail 200 <service>`. Chips with nothing to show are left out. A
   narrow pane keeps the cwd's tail and drops the chips that still do not fit,
   whole, from the end. In every pane of a split; hidden in shell-prompt mode.
 - **Edit prompt** (Warp; layer 6, 600 px card over a 40 % black backdrop,
-  `surface`, radius 8): `Shift prompt` with `Restore default`, a palette of
+  `surface`, radius 8): `Rift prompt` with `Restore default`, a palette of
   the chips not in the prompt (sample values; the Python, PHP and Docker
   chips read `python`, `php`, `docker`), then the prompt itself in a
   dashed box, each chip with ×. Every chip there has the same hover card
@@ -478,13 +478,13 @@ click on a chip switches mode. Modes:
   keyboard selection scrolls through long result sets. Also includes `Toggle
   vim keybindings`, one
   `Launch configuration: <name>` row per file in
-  `~/.config/shift/launch_configs/` (re-scanned each time the palette opens),
+  `~/.config/rift/launch_configs/` (re-scanned each time the palette opens),
   `Theme: <name>` rows, plus recent commands.
 - **History** — imported shell history (zsh, bash or fish, from the
   configured shell's history file) + per-pane local history; Enter runs, or
   insert into the editor. (⌃R in the command line opens the history pane.)
 - **Session switcher** (⇧⌘O) — tabs, panes of split tabs (directory and
-  running job), tabs of other Shift windows, detached session-service shells,
+  running job), tabs of other Rift windows, detached session-service shells,
   and the 40 newest finished blocks. Enter jumps there.
 
 - **Send output to command…** — a fourth mode, opened from the block menu or
@@ -493,7 +493,7 @@ click on a chip switches mode. Modes:
   `OUTPUT (STDIN)` preview lists the selected block's lines under the row that
   says what will run, and the footer reads `⏎ run with output on stdin`.
 
-Other Actions rows: `SSH: <name>` and `Install Shift shell integration on
+Other Actions rows: `SSH: <name>` and `Install Rift shell integration on
 <name>` per SSH profile, `Toggle vertical tabs`, `Clear saved block
 transcripts` and `Notifications: finished commands and alerts`. A query with
 no match shows a `No matches` band.
@@ -529,7 +529,7 @@ at most 620 px tall.
 - `No notifications`, `Nothing unread` or `No errors` when the list is
   empty.
 
-**Toasts** — while Shift is focused, an alert from a pane you are not
+**Toasts** — while Rift is focused, an alert from a pane you are not
 looking at appears as a 360 px card under the inbox button: the badge,
 centred on the card's height, then `agent · branch`, the title (two lines)
 and detail.
@@ -558,7 +558,7 @@ block; ⇧ + label copies it (a block copies its output). Esc cancels.
   and files are plain code lines. Used for closing
   running commands, pasting multi-line text into a shell without bracketed
   paste ("Paste and run?"), installing shell integration on an SSH host, and
-  updating ("Update to Shift vX.Y.Z?": what the restart keeps — tabs,
+  updating ("Update to Rift vX.Y.Z?": what the restart keeps — tabs,
   running shells, windows that cannot be reopened — with *Later* `esc` and
   *Update* `⏎`, or *Open download page* for an install that cannot update
   itself; Later hides the chip for that version).
@@ -643,7 +643,7 @@ the foot (opens the file in the reading pane). When the settings area is
 under 700 px wide the sidebar shrinks to 56 px of icons, with no search
 field or labels. The body (at most 720 px wide, centred right of the sidebar like Warp's)
 has the page title and description, group labels, and flat rows: label (and
-description) left, control right. Footer: `~/.config/shift/config.toml ·
+description) left, control right. Footer: `~/.config/rift/config.toml ·
 saved`.
 
 - **Search**: typing anywhere outside Keybindings fills the search field and
@@ -678,10 +678,10 @@ saved`.
     `Warn before closing running commands` toggle,
     `Save block output for restore` toggle (*Output can contain secrets;
     turning this off deletes it*; `save_transcripts`),
-    `Keep shells running when Shift quits` toggle (*Session service;
+    `Keep shells running when Rift quits` toggle (*Session service;
     relaunch reattaches (new shells)*; `durable_sessions`).
   - Updates: `Check for updates` toggle (*At launch and every 6 hours;
-    Update Shift appears in the tab bar*; `check_for_updates`).
+    Update Rift appears in the tab bar*; `check_for_updates`).
   - Automation: `Control socket` segmented `Off | Navigate | Full`
     (`control_api`).
 - **Appearance** — *Fonts, cursor, window and theme*.
@@ -707,7 +707,7 @@ saved`.
     `Completions menu` toggle, `Autocomplete quotes and brackets` toggle,
     `Input position` segmented `Bottom | Top`, `Blocks start` segmented
     `Bottom | Top`, `Prompt` segmented
-    `Shift | Shell (PS1)`, `Prompt chips` (a preview of the chips with
+    `Rift | Shell (PS1)`, `Prompt chips` (a preview of the chips with
     sample values; a click opens **Edit prompt**), `Expand aliases as you type`, `Underline unknown
     commands`, `Suggest corrections for failed commands` toggles.
 - **Terminal** (clipboard icon) — *Mouse, clipboard and keys inside the
@@ -727,7 +727,7 @@ saved`.
   - Editor: `Open file links in` select (`link_editor`: ⌘-clicked paths,
     file links and hint-mode paths) and `Open files from the explorer and
     code review in` select (`file_editor`). Each lists `System default`,
-    `Shift viewer`, then the editors installed here (VS Code, Cursor,
+    `Rift viewer`, then the editors installed here (VS Code, Cursor,
     Windsurf, Zed, Sublime Text, IntelliJ IDEA, PhpStorm, WebStorm,
     RustRover). A folder never opens in the viewer (it goes to the system
     opener); an editor that is no longer installed falls back to the viewer
@@ -757,12 +757,12 @@ saved`.
   ⌫ unbinds; a chord taken by another action moves over with a toast naming
   it. While recording, the row reads `Press a shortcut · Esc cancels · ⌫
   unbinds`. ⌃⌘K jumps straight here.
-- **Themes** — *Built-in themes plus `~/.config/shift/themes` (TOML or Warp
+- **Themes** — *Built-in themes plus `~/.config/rift/themes` (TOML or Warp
   YAML)*: a row per available theme with four swatches (background, accent,
   success, error), its display name and an `active` tag on the current theme;
   the `light` tag marks the `theme_light` theme, and only while
   `sync_os_theme` is on. Clicking a row sets `theme`.
-- **About** — no title: the app icon (64 px) beside the `Shift` wordmark,
+- **About** — no title: the app icon (64 px) beside the `Rift` wordmark,
   centred a little above the middle of the body; under it the version
   (`v0.1.0`) with a copy button (tooltip *Copy version*; copies the version
   and toasts `Copied version`), the update status — `Up to date`,
@@ -770,7 +770,7 @@ saved`.
   `vX.Y.Z available` (`warning`) with an `Update…` button that opens the
   update dialog — and `Copyright 2026 botjaeger · MIT License`. The status
   row is absent while no check has run (`check_for_updates` off).
-  Opens from Shift → About Shift and the palette (`open_about`).
+  Opens from Rift → About Rift and the palette (`open_about`).
 
 ## Scrollback
 

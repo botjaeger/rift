@@ -51,7 +51,7 @@ pub struct Cursor<T> {
     /// without sanitization.
     pub input_needs_wrap: bool,
 
-    /// DECOM as saved by DECSC (Shift).
+    /// DECOM as saved by DECSC (Rift).
     pub origin: bool,
 }
 

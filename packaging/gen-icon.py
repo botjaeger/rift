@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-"""Generate the Shift app icon for macOS, Linux and Windows.
+"""Generate the Rift app icon for macOS, Linux and Windows.
 
 The design ("Prompt"): a dark rounded tile holding the prompt chevron in the
 accent color and a block cursor. Colors are read from the default theme
-(crates/shift-core/src/theme/dark-default.toml): `surface` for the tile,
+(crates/rift-core/src/theme/dark-default.toml): `surface` for the tile,
 `accent` for the chevron, `cursor` for the cursor.
 
 Usage:  python3 packaging/gen-icon.py      (needs Pillow)
 Outputs (all under assets/icon/):
-  shift-1024.png                   master
-  shift.iconset/icon_{16,32,128,256,512}x{..}.png (+ @2x)
-  shift.icns                       macOS bundle icon (macOS only, via iconutil)
-  hicolor/<size>x<size>/apps/shift.png   Linux icon theme (.deb, AppImage, tarball)
-  shift.ico                        Windows (16–256 px)
-  shift-window.png                 256 px window icon embedded in the binary
+  rift-1024.png                   master
+  rift.iconset/icon_{16,32,128,256,512}x{..}.png (+ @2x)
+  rift.icns                       macOS bundle icon (macOS only, via iconutil)
+  hicolor/<size>x<size>/apps/rift.png   Linux icon theme (.deb, AppImage, tarball)
+  rift.ico                        Windows (16–256 px)
+  rift-window.png                 256 px window icon embedded in the binary
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 ROOT = Path(__file__).resolve().parent.parent
-THEME = ROOT / "crates" / "shift-core" / "src" / "theme" / "dark-default.toml"
+THEME = ROOT / "crates" / "rift-core" / "src" / "theme" / "dark-default.toml"
 OUT = ROOT / "assets" / "icon"
 
 SIZE = 1024
@@ -120,41 +120,41 @@ def main() -> int:
             cache[px] = render(px, colors)
         return cache[px]
 
-    at(SIZE).save(OUT / "shift-1024.png")
-    at(256).save(OUT / "shift-window.png")
-    print("wrote shift-1024.png, shift-window.png")
+    at(SIZE).save(OUT / "rift-1024.png")
+    at(256).save(OUT / "rift-window.png")
+    print("wrote rift-1024.png, rift-window.png")
 
-    iconset = OUT / "shift.iconset"
+    iconset = OUT / "rift.iconset"
     if iconset.exists():
         shutil.rmtree(iconset)
     iconset.mkdir(parents=True)
     for px in ICONSET_SIZES:
         at(px).save(iconset / f"icon_{px}x{px}.png")
         at(px * 2).save(iconset / f"icon_{px}x{px}@2x.png")
-    print(f"wrote shift.iconset ({len(ICONSET_SIZES) * 2} files)")
+    print(f"wrote rift.iconset ({len(ICONSET_SIZES) * 2} files)")
 
     for px in HICOLOR_SIZES:
         d = OUT / "hicolor" / f"{px}x{px}" / "apps"
         d.mkdir(parents=True, exist_ok=True)
-        at(px).save(d / "shift.png")
+        at(px).save(d / "rift.png")
     print(f"wrote hicolor ({len(HICOLOR_SIZES)} sizes)")
 
     # every ICO frame is its own render (append_images), not a downscale
     largest = at(ICO_SIZES[-1])
     largest.save(
-        OUT / "shift.ico",
+        OUT / "rift.ico",
         format="ICO",
         sizes=[(px, px) for px in ICO_SIZES],
         append_images=[at(px) for px in ICO_SIZES[:-1]],
     )
-    print(f"wrote shift.ico ({len(ICO_SIZES)} sizes)")
+    print(f"wrote rift.ico ({len(ICO_SIZES)} sizes)")
 
-    icns = OUT / "shift.icns"
+    icns = OUT / "rift.icns"
     if sys.platform == "darwin" and shutil.which("iconutil"):
         subprocess.run(["iconutil", "-c", "icns", str(iconset), "-o", str(icns)], check=True)
-        print("wrote shift.icns")
+        print("wrote rift.icns")
     else:
-        print("skipped shift.icns (iconutil is macOS-only)")
+        print("skipped rift.icns (iconutil is macOS-only)")
     return 0
 
 

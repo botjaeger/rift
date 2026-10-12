@@ -1,12 +1,12 @@
 <p align="center">
-  <img src="assets/icon/shift-1024.png" alt="Shift logo" width="128">
+  <img src="assets/icon/rift-1024.png" alt="Rift logo" width="128">
 </p>
 
-<h1 align="center">Shift</h1>
+<h1 align="center">Rift</h1>
 
 <p align="center">
-  <a href="https://github.com/botjaeger/shift">github.com/botjaeger/shift</a> ·
-  <a href="https://github.com/botjaeger/shift-releases/releases">Releases</a> ·
+  <a href="https://github.com/botjaeger/rift">github.com/botjaeger/rift</a> ·
+  <a href="https://github.com/botjaeger/rift-releases/releases">Releases</a> ·
   <a href="docs/README.md">Documentation</a>
 </p>
 
@@ -17,11 +17,11 @@ select, copy, search, bookmark, re-run or send to another command.
 Rust · wgpu · glyphon · winit · alacritty_terminal. No account, no cloud, no
 telemetry, no AI features: a local terminal configured with one TOML file.
 
-![Shift: command blocks with exit badges, durations and the owned command editor](assets/screenshot.png)
+![Rift: command blocks with exit badges, durations and the owned command editor](assets/screenshot.png)
 
-## Why Shift
+## Why Rift
 
-- **Output has structure.** A classic terminal is one long scroll. Shift
+- **Output has structure.** A classic terminal is one long scroll. Rift
   knows where each command starts and ends (shell integration, OSC 133), so
   "copy the output of that failed build" or "jump to the last error" is one
   keystroke.
@@ -29,7 +29,7 @@ telemetry, no AI features: a local terminal configured with one TOML file.
   descriptions, multi-line editing, undo, and optional vim keys — before the
   shell sees anything.
 - **Full terminal underneath.** vim, tmux, htop, ssh and every TUI run
-  unchanged: Shift hands the keyboard straight to the program whenever one is
+  unchanged: Rift hands the keyboard straight to the program whenever one is
   running.
 - **Warp's habits without Warp's account.** Warp's default keys, and its
   theme and launch-configuration files work unchanged.
@@ -73,20 +73,20 @@ rebound. Full list: [keyboard shortcuts](docs/keyboard-shortcuts.md).
 | **Code review** — staged and unstaged diffs; stage, unstage or revert a file or hunk | ⇧⌘G or the `± +N −M` button at the top right |
 | Session restore (tabs, splits, directories, window position) | On by default (`restore_session`) |
 | Saved block output across restarts | Settings → General → *Save block output for restore* |
-| Durable sessions (the main window's shells keep running after you quit; a ⌘N window's end with it) | On by default with *Restore tabs on launch*; Settings → General → *Keep shells running when Shift quits* |
-| Updates — checked at launch and every 6 hours; tabs and running shells survive the restart | *Update Shift* in the tab bar; Settings → About; Settings → General → *Check for updates* |
+| Durable sessions (the main window's shells keep running after you quit; a ⌘N window's end with it) | On by default with *Restore tabs on launch*; Settings → General → *Keep shells running when Rift quits* |
+| Updates — checked at launch and every 6 hours; tabs and running shells survive the restart | *Update Rift* in the tab bar; Settings → About; Settings → General → *Check for updates* |
 | Links and paths | ⌘-click URLs, OSC 8 links and file paths (`file:line:col` too); Settings → Files picks the editor they open in |
 | Terminal behavior — mouse reporting, middle-click paste, wheel speed, OSC 52 clipboard access, Option as Meta | Settings → Terminal |
 | Coding agents — Claude Code / Codex tabs spin only while the agent works; ⌘⌫ clears its input line | Automatic |
 | Inline images (kitty graphics, iTerm2) | Automatic: `kitten icat`, `imgcat`, `timg`, `yazi`, `chafa` |
 | Paste safety | Multi-line paste into a shell asks before running |
-| SSH profiles with remote blocks | Palette → *SSH: host*; *Install Shift shell integration on host* once |
-| Automation socket | `shift-terminal ctl list`, `focus`, `split`, `open`, `send-text` |
-| Themes — 4 built in, your TOML or Warp YAML, OS light/dark sync | Settings → Themes, or `~/.config/shift/themes/` |
+| SSH profiles with remote blocks | Palette → *SSH: host*; *Install Rift shell integration on host* once |
+| Automation socket | `rift-terminal ctl list`, `focus`, `split`, `open`, `send-text` |
+| Themes — 4 built in, your TOML or Warp YAML, OS light/dark sync | Settings → Themes, or `~/.config/rift/themes/` |
 | Launch configurations (Warp YAML) | Palette → *Launch configuration: name* |
 | Alert when a long command finishes out of view (toast, or desktop notification in the background) | On by default, after 10 s |
 | Screen readers (VoiceOver, Orca) | Automatic (AccessKit) |
-| Global hotkey to show or hide Shift | `global_hotkey = "alt+space"` in config.toml |
+| Global hotkey to show or hide Rift | `global_hotkey = "alt+space"` in config.toml |
 
 Behavior details: [features](docs/features.md) · every screen:
 [UI](docs/ui.md) · first steps: [getting started](docs/getting-started.md).
@@ -94,27 +94,27 @@ Behavior details: [features](docs/features.md) · every screen:
 ## Install
 
 Prebuilt packages are attached to each
-[release](https://github.com/botjaeger/shift-releases/releases). The app
+[release](https://github.com/botjaeger/rift-releases/releases). The app
 from the DMG (in a writable folder such as Applications) and the AppImage
-update themselves: *Update Shift* appears in the tab bar when a new release
+update themselves: *Update Rift* appears in the tab bar when a new release
 is out, and updating keeps your tabs and running shells.
 
-**macOS** — download `Shift-<version>-<arch>.dmg` (`arm64` for Apple silicon,
-`x86_64` for Intel), open it and drag Shift to Applications. The bundle is
+**macOS** — download `Rift-<version>-<arch>.dmg` (`arm64` for Apple silicon,
+`x86_64` for Intel), open it and drag Rift to Applications. The bundle is
 ad-hoc signed, so the first launch needs *right-click → Open* once.
 
-**Debian / Ubuntu** — download `shift-terminal_<version>_amd64.deb`:
+**Debian / Ubuntu** — download `rift-terminal_<version>_amd64.deb`:
 
 ```sh
-sudo dpkg -i shift-terminal_<version>_amd64.deb
+sudo dpkg -i rift-terminal_<version>_amd64.deb
 sudo apt-get install -f        # only if dpkg reports missing dependencies
 ```
 
 **AppImage** (any distribution):
 
 ```sh
-chmod +x Shift-<version>-x86_64.AppImage
-./Shift-<version>-x86_64.AppImage
+chmod +x Rift-<version>-x86_64.AppImage
+./Rift-<version>-x86_64.AppImage
 ```
 
 AppImages need FUSE 2, which Ubuntu 24.04 no longer installs. If you see
@@ -122,18 +122,18 @@ AppImages need FUSE 2, which Ubuntu 24.04 no longer installs. If you see
 `sudo apt install libfuse2t64`, or start it with
 `--appimage-extract-and-run`.
 
-**Tarball** — `shift-terminal-<version>-<os>-<arch>.tar.gz` (`macos-arm64`,
+**Tarball** — `rift-terminal-<version>-<os>-<arch>.tar.gz` (`macos-arm64`,
 `macos-x86_64`, `linux-x86_64`) holds the binary,
-the `.desktop` file, the icon and `docs/`; put `shift-terminal` on your
-`PATH`. The binary is not called `shift` because `shift` is a shell builtin.
+the `.desktop` file, the icon and `docs/`; put `rift-terminal` on your
+`PATH`.
 
 ## Quick start
 
-1. Open Shift. Your login shell (`$SHELL`) starts with Shift's integration
+1. Open Rift. Your login shell (`$SHELL`) starts with Rift's integration
    loaded — nothing to add to your rc files.
 2. Type a command and press ⏎. It becomes a block.
 3. Press ⌘↑ to select it, ⌥⇧⌘C to copy its output, ⌘P to see every action.
-4. Change settings with ⌘, — they are saved to `~/.config/shift/config.toml`
+4. Change settings with ⌘, — they are saved to `~/.config/rift/config.toml`
    and apply instantly. Editing the file by hand works too.
 
 More in [getting started](docs/getting-started.md).
@@ -162,13 +162,13 @@ To build from source, additionally:
 ## Start, stop, clean
 
 ```sh
-git clone https://github.com/botjaeger/shift.git
-cd shift
+git clone https://github.com/botjaeger/rift.git
+cd rift
 
 cargo run                              # start: debug build, then launch
 cargo run --release                    # start: optimized build
-cargo build --release                  # binary only: target/release/shift-terminal
-packaging/make-app.sh                  # macOS app bundle: target/Shift.app
+cargo build --release                  # binary only: target/release/rift-terminal
+packaging/make-app.sh                  # macOS app bundle: target/Rift.app
 ```
 
 **Stop** — quit with ⌘Q (Linux: Super+Q) or close the last window; ⌃C in the
@@ -183,13 +183,13 @@ those shells.
 
 ```sh
 cargo clean                            # delete target/ (all builds, packages, test artifacts)
-docker rmi shift-linux-verify          # Linux gate image, if you ran it
-docker volume rm shift-cargo-registry  # Linux gate crate cache
+docker rmi rift-linux-verify          # Linux gate image, if you ran it
+docker volume rm rift-cargo-registry  # Linux gate crate cache
 ```
 
-Shift keeps your settings in `~/.config/shift/` and its session, shell
-integration and saved output in `~/.local/share/shift/`. Delete those two
-directories only to reset Shift completely — this removes your settings,
+Rift keeps your settings in `~/.config/rift/` and its session, shell
+integration and saved output in `~/.local/share/rift/`. Delete those two
+directories only to reset Rift completely — this removes your settings,
 themes and launch configurations.
 
 Packages (`.dmg`, `.deb`, AppImage, tarball) and releases:
@@ -205,7 +205,7 @@ cargo test --workspace    # unit tests only
 ```
 
 CI runs the same script. Rendering is verified with the scripted UI driver
-(`shift-terminal --script`, with `--headless` for a run that never shows a
+(`rift-terminal --script`, with `--headless` for a run that never shows a
 window or takes focus), described in the
 [development guide](docs/development.md#verifying-ui-changes).
 

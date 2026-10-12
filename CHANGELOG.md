@@ -2,7 +2,7 @@
 
 User-facing changes per release, newest first. The in-app What's New page
 (Help → What's New, or `whats_new` in the palette) renders this file, so every
-entry is written for someone using Shift, not for someone building it.
+entry is written for someone using Rift, not for someone building it.
 
 Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
@@ -10,7 +10,7 @@ items.
 
 ## 0.1.0 — 2026-09-24
 
-The first release of Shift: a GPU-accelerated, block-based terminal for macOS
+The first release of Rift: a GPU-accelerated, block-based terminal for macOS
 and Linux.
 
 ### New
@@ -41,7 +41,7 @@ and Linux.
   tab; Settings → Notifications chooses which events alert and which sound
   each plays. Claude Code, Codex, OpenCode and Gemini CLI get their own
   badges.
-- **Scripting** — the control socket and `shift-terminal ctl` drive Shift from
+- **Scripting** — the control socket and `rift-terminal ctl` drive Rift from
   other programs.
 - **Settings** — every option in a settings window that writes
   `config.toml`, plus a keybinding recorder and four built-in themes.
@@ -55,7 +55,7 @@ and Linux.
 - **Speed** — large outputs render several times faster with far less memory.
 - **Pointer shapes** — a hand over everything clickable and resize arrows over
   split handles.
-- **App name** — the menu bar and Dock say Shift.
+- **App name** — the menu bar and Dock say Rift.
 
 ### Fixed
 

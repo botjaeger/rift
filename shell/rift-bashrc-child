@@ -1,0 +1,9 @@
+# shellcheck shell=bash disable=SC1090,SC1091  # sources user/system rc files by design
+# Rift bash shim for a child bash typed at a Rift prompt (`bash`,
+# `exec bash`; passed as `--rcfile` by the alias in rift.bash): replay the
+# interactive non-login startup bash would do, then the Rift integration.
+if [[ "$(uname -s)" != "Darwin" ]]; then
+    [[ -f /etc/bash.bashrc ]] && source /etc/bash.bashrc
+fi
+[[ -f "$HOME/.bashrc" ]] && source "$HOME/.bashrc"
+[[ -f "$RIFT_INTEGRATION_BASH" ]] && source "$RIFT_INTEGRATION_BASH"

@@ -1,4 +1,4 @@
-"""Regression checks through Shift's real input routing, in scratch directories."""
+"""Regression checks through Rift's real input routing, in scratch directories."""
 import base64
 import hashlib
 import json
@@ -15,15 +15,15 @@ import time
 
 repo = Path(__file__).resolve().parents[1]
 binary = Path(sys.argv[1]).resolve()
-scratch = Path(tempfile.mkdtemp(prefix="shift-ui-", dir="/tmp"))
+scratch = Path(tempfile.mkdtemp(prefix="rift-ui-", dir="/tmp"))
 print(f"UI artifacts: {scratch}", flush=True)
-cfg = scratch / "cfg" / "shift"
-data = scratch / "data" / "shift"
+cfg = scratch / "cfg" / "rift"
+data = scratch / "data" / "rift"
 work = scratch / "work"
 for directory in (cfg / "themes", data / "control", work):
     directory.mkdir(parents=True, exist_ok=True)
 (work / "hello.rs").write_text("fn main() {}\n")
-theme = (repo / "crates/shift-core/src/theme/dark-default.toml").read_text()
+theme = (repo / "crates/rift-core/src/theme/dark-default.toml").read_text()
 (cfg / "themes/audit.toml").write_text(theme)
 (scratch / "theme-next.toml").write_text(theme.replace('bg = "#1e1e1e"', 'bg = "#232326"'))
 config = (
@@ -72,7 +72,7 @@ def died(what, log):
 steps = [
     "wait_prompt",
     "key escape",
-    "type echo shift-audit-ok\\n",
+    "type echo rift-audit-ok\\n",
     "wait 500",
     f"dump {scratch}/prompt.txt",
     "key shift+cmd+o",
@@ -187,9 +187,9 @@ steps = [
     "key space",
     "wait 300",
     cp(cfg / "config.toml", scratch / "settings-after.toml"),
-    # About Shift opens Settings › About; its copy button copies the version
+    # About Rift opens Settings › About; its copy button copies the version
     "key cmd+p",
-    "type About Shift",
+    "type About Rift",
     "wait 200",
     "key enter",
     "wait 200",
@@ -233,10 +233,10 @@ steps = [
     "key escape",
     "quit",
 ]
-script = scratch / "smoke.shift"
+script = scratch / "smoke.rift"
 script.write_text("\n".join(steps) + "\n")
 env = dict(os.environ, XDG_CONFIG_HOME=str(scratch / "cfg"),
-           XDG_DATA_HOME=str(scratch / "data"), SHIFT_NO_NOTIFY="1")
+           XDG_DATA_HOME=str(scratch / "data"), RIFT_NO_NOTIFY="1")
 started = time.monotonic()
 with (scratch / "app.log").open("w") as log:
     # headless: never shown or focused, so typing elsewhere cannot leak in
@@ -267,7 +267,7 @@ def state(name):
 assert "editor_active=true" in state("prompt"), state("prompt")
 assert "headless=true" in state("prompt") and "window_visible=Some(true)" not in state("prompt"), \
     state("prompt")
-assert "shift-audit-ok" in state("prompt"), state("prompt")
+assert "rift-audit-ok" in state("prompt"), state("prompt")
 assert 'palette=true mode=Sessions query="audit"' in state("palette"), state("palette")
 assert 'lines=1 error=None' in state("viewer"), state("viewer")
 assert (scratch / "viewer.png").read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
@@ -315,9 +315,9 @@ assert wide and int(wide[2]) >= 1, state("find-wide")
 assert "wait_prompt timed out" not in (scratch / "app.log").read_text()
 # --- second run: fresh state, fixed 1000x700 window, mouse and hint geometry ---
 geo = scratch / "geo"
-(geo / "cfg/shift").mkdir(parents=True)
-(geo / "data/shift").mkdir(parents=True)
-(geo / "cfg/shift/config.toml").write_text(
+(geo / "cfg/rift").mkdir(parents=True)
+(geo / "data/rift").mkdir(parents=True)
+(geo / "cfg/rift/config.toml").write_text(
     'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
     'sync_os_theme = false\n' + f'working_directory = {json.dumps(str(work))}\n')
 (geo / "stream.sh").write_text(
@@ -469,10 +469,10 @@ geo_steps = [
     f"dump {geo}/review-wide.txt",
     "quit",
 ]
-(geo / "geo.shift").write_text("\n".join(geo_steps) + "\n")
+(geo / "geo.rift").write_text("\n".join(geo_steps) + "\n")
 geo_env = dict(env, XDG_CONFIG_HOME=str(geo / "cfg"), XDG_DATA_HOME=str(geo / "data"))
 with (geo / "app.log").open("w") as log:
-    rc = subprocess.run([str(binary), "--script", str(geo / "geo.shift"), "--headless"],
+    rc = subprocess.run([str(binary), "--script", str(geo / "geo.rift"), "--headless"],
                         env=geo_env, stdout=log, stderr=log, timeout=120).returncode
 assert rc == 0, died("geometry run failed", geo / "app.log")
 
@@ -523,9 +523,9 @@ edge_steps = [
     f"dump {geo}/tab-done.txt",
     "quit",
 ]
-(geo / "edge.shift").write_text("\n".join(edge_steps) + "\n")
+(geo / "edge.rift").write_text("\n".join(edge_steps) + "\n")
 with (geo / "edge.log").open("w") as log:
-    rc = subprocess.run([str(binary), "--script", str(geo / "edge.shift"), "--headless"],
+    rc = subprocess.run([str(binary), "--script", str(geo / "edge.rift"), "--headless"],
                         env=geo_env, stdout=log, stderr=log, timeout=120).returncode
 assert rc == 0, f"right-edge run failed; see {geo}/edge.log"
 assert clipboard("right-edge").rstrip("\n") == full, clipboard("right-edge")
@@ -586,9 +586,9 @@ assert "review=true" in wide and "shown=true" in wide, wide
 
 # --- third run: shell-syntax filenames, Unicode text, partial lines, child shells ---
 edge = scratch / "edge"
-for directory in ("cfg/shift", "data/shift", "bin", "home"):
+for directory in ("cfg/rift", "data/rift", "bin", "home"):
     (edge / directory).mkdir(parents=True)
-(edge / "cfg/shift/config.toml").write_text(
+(edge / "cfg/rift/config.toml").write_text(
     'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
     'sync_os_theme = false\n' + f'working_directory = {json.dumps(str(work))}\n')
 (edge / "home/.bashrc").write_text("PS1='edge$ '\n")
@@ -632,12 +632,12 @@ edge_steps = [
     f"dump {edge}/child.txt",
     "quit",
 ]
-(edge / "edge.shift").write_text("\n".join(edge_steps) + "\n")
+(edge / "edge.rift").write_text("\n".join(edge_steps) + "\n")
 edge_env = dict(env, XDG_CONFIG_HOME=str(edge / "cfg"), XDG_DATA_HOME=str(edge / "data"),
                 HOME=str(edge / "home"), BASH_SILENCE_DEPRECATION_WARNING="1",
                 PATH=f"{edge / 'bin'}:{os.environ['PATH']}")
 with (edge / "app.log").open("w") as log:
-    rc = subprocess.run([str(binary), "--script", str(edge / "edge.shift"), "--headless"],
+    rc = subprocess.run([str(binary), "--script", str(edge / "edge.rift"), "--headless"],
                         env=edge_env, stdout=log, stderr=log, timeout=120).returncode
 assert rc == 0, died("edge-case run failed", edge / "app.log")
 
@@ -730,9 +730,9 @@ rv_steps = [
     f"dump {rv}/reverse-off.txt",
     "quit",
 ]
-(rv / "rv.shift").write_text("\n".join(rv_steps) + "\n")
+(rv / "rv.rift").write_text("\n".join(rv_steps) + "\n")
 with (rv / "app.log").open("w") as log:
-    rc = subprocess.run([str(binary), "--script", str(rv / "rv.shift"), "--headless"],
+    rc = subprocess.run([str(binary), "--script", str(rv / "rv.rift"), "--headless"],
                         env=dict(env, XDG_CONFIG_HOME=str(rv / "cfg"),
                                  XDG_DATA_HOME=str(rv / "data")),
                         stdout=log, stderr=log, timeout=120).returncode
@@ -768,10 +768,10 @@ assert "cmd=\"printf '\\\\033[?5h'; sleep 2; printf '\\\\033[?5l'\" exit" in off
 # cell two columns wide: a double click maps the pointer to the word drawn
 # under it, not to the single-width column there
 dec = scratch / "dec"
-for sub in ("cfg/shift", "data"):
+for sub in ("cfg/rift", "data"):
     (dec / sub).mkdir(parents=True, exist_ok=True)
 # the pointer positions below assume blocks from the top of the pane
-(dec / "cfg/shift/config.toml").write_text('blocks_start = "top"\n')
+(dec / "cfg/rift/config.toml").write_text('blocks_start = "top"\n')
 (dec / "lines.txt").write_text(
     "normal line\n\x1b#3Double height\n\x1b#4Double height\n\x1b#6Double width\nnormal again\n")
 dec_steps = [
@@ -794,9 +794,9 @@ dec_steps = [
     f"dump {dec}/tall.txt",
     "quit",
 ]
-(dec / "dec.shift").write_text("\n".join(dec_steps) + "\n")
+(dec / "dec.rift").write_text("\n".join(dec_steps) + "\n")
 with (dec / "app.log").open("w") as log:
-    rc = subprocess.run([str(binary), "--script", str(dec / "dec.shift"), "--headless"],
+    rc = subprocess.run([str(binary), "--script", str(dec / "dec.rift"), "--headless"],
                         env=dict(env, XDG_CONFIG_HOME=str(dec / "cfg"),
                                  XDG_DATA_HOME=str(dec / "data")),
                         stdout=log, stderr=log, timeout=60).returncode
@@ -812,13 +812,13 @@ assert 'editor="Double"' in tall, tall
 # above the command line moves the output up out from under it (Warp): the
 # newest line stays in view
 clr = scratch / "clear"
-for sub in ("cfg/shift", "data", "top/cfg/shift", "top/data"):
+for sub in ("cfg/rift", "data", "top/cfg/rift", "top/data"):
     (clr / sub).mkdir(parents=True, exist_ok=True)
 clr_config = ('shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
               'sync_os_theme = false\nwindow_opacity = 0.8\n'
               + f'working_directory = {json.dumps(str(work))}\n')
-(clr / "cfg/shift/config.toml").write_text(clr_config)
-(clr / "top/cfg/shift/config.toml").write_text(clr_config + 'blocks_start = "top"\n')
+(clr / "cfg/rift/config.toml").write_text(clr_config)
+(clr / "top/cfg/rift/config.toml").write_text(clr_config + 'blocks_start = "top"\n')
 clear_steps = lambda out: [
     "resize 1000 700",
     "wait_prompt",
@@ -830,9 +830,9 @@ clear_steps = lambda out: [
     "wait 600",
     f"dump {out}/after.txt",
 ]
-(clr / "top/clear.shift").write_text("\n".join([*clear_steps(clr / "top"), "quit"]) + "\n")
+(clr / "top/clear.rift").write_text("\n".join([*clear_steps(clr / "top"), "quit"]) + "\n")
 with (clr / "top/app.log").open("w") as log:
-    rc = subprocess.run([str(binary), "--script", str(clr / "top/clear.shift"), "--headless"],
+    rc = subprocess.run([str(binary), "--script", str(clr / "top/clear.rift"), "--headless"],
                         env=dict(env, XDG_CONFIG_HOME=str(clr / "top/cfg"),
                                  XDG_DATA_HOME=str(clr / "top/data")),
                         stdout=log, stderr=log, timeout=60).returncode
@@ -854,9 +854,9 @@ clr_steps = [
     f"dump {clr}/panel.txt",
     "quit",
 ]
-(clr / "clear.shift").write_text("\n".join(clr_steps) + "\n")
+(clr / "clear.rift").write_text("\n".join(clr_steps) + "\n")
 with (clr / "app.log").open("w") as log:
-    rc = subprocess.run([str(binary), "--script", str(clr / "clear.shift"), "--headless"],
+    rc = subprocess.run([str(binary), "--script", str(clr / "clear.rift"), "--headless"],
                         env=dict(env, XDG_CONFIG_HOME=str(clr / "cfg"),
                                  XDG_DATA_HOME=str(clr / "data")),
                         stdout=log, stderr=log, timeout=60).returncode
@@ -909,14 +909,14 @@ subprocess.run([*cgit, "commit", "-qm", "init"], check=True)
 subprocess.run([*cgit, "branch", "feature/x"], check=True)
 
 def run_chips(name, steps):
-    (chips / f"{name}.shift").write_text("\n".join([
+    (chips / f"{name}.rift").write_text("\n".join([
         # a loaded runner is slow to run the cd: wait for it, then for git
         "resize 1200 800", "wait_prompt",
         f"type cd {chips / 'repo'} && touch {chips / name}.ready\\n",
         f"wait_file {chips / name}.ready 30000", "wait 800",
         *steps, "quit"]) + "\n")
     with (chips / f"{name}.log").open("w") as log:
-        rc = subprocess.run([str(binary), "--script", str(chips / f"{name}.shift"), "--headless"],
+        rc = subprocess.run([str(binary), "--script", str(chips / f"{name}.rift"), "--headless"],
                             env=dict(env, XDG_CONFIG_HOME=str(chips / "cfg"),
                                      XDG_DATA_HOME=str(chips / "data")),
                             stdout=log, stderr=log, timeout=60).returncode
@@ -979,13 +979,13 @@ offset = float(re.search(r"chip_menu_scroll=([\d.]+)", scrolled).group(1))
 assert 20.0 < offset < 30.0, scrolled
 
 # tool chips: PHP and Python show the versions the shell's PATH runs and
-# switch this shell to another (`shift-use`); the PR chip shows the branch's
+# switch this shell to another (`rift-use`); the PR chip shows the branch's
 # pull request (`gh`) and opens it; the Docker chip counts the compose
 # project's running containers and lists them. Fake gh, docker, Homebrew
 # and pyenv trees keep it hermetic; HOME is scratch so no rc file or version
 # manager of the runner's leaks in.
 tl = scratch / "tools"
-for sub in ("cfg/shift", "data", "home", "bin", "repo"):
+for sub in ("cfg/rift", "data", "home", "bin", "repo"):
     (tl / sub).mkdir(parents=True, exist_ok=True)
 def fake(path, body):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1021,7 +1021,7 @@ subprocess.run(["git", "init", "-q", "-b", "feature", str(tl / "repo")], check=T
 (tl / "repo/compose.yaml").write_text("services: {}\n")
 subprocess.run([*tgit, "add", "-A"], check=True)
 subprocess.run([*tgit, "commit", "-qm", "init"], check=True)
-(tl / "cfg/shift/config.toml").write_text(
+(tl / "cfg/rift/config.toml").write_text(
     'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
     'prompt_chips = ["github_pr", "python", "php", "docker"]\n'
     + f'working_directory = {json.dumps(str(tl / "repo"))}\n')
@@ -1034,10 +1034,10 @@ tool_env.update(
                           "/usr/bin", "/bin"]))
 
 def run_tools(name, steps):
-    (tl / f"{name}.shift").write_text("\n".join(["resize 1200 800", "wait_prompt", "wait 1500",
+    (tl / f"{name}.rift").write_text("\n".join(["resize 1200 800", "wait_prompt", "wait 1500",
                                                  *steps, "quit"]) + "\n")
     with (tl / f"{name}.log").open("w") as log:
-        rc = subprocess.run([str(binary), "--script", str(tl / f"{name}.shift"), "--headless"],
+        rc = subprocess.run([str(binary), "--script", str(tl / f"{name}.rift"), "--headless"],
                             env=tool_env, stdout=log, stderr=log, timeout=60).returncode
     assert rc == 0, died(f"tools {name} run failed", tl / f"{name}.log")
 
@@ -1067,12 +1067,12 @@ assert 'tooltip=Some("Docker Compose | The Docker Compose project around this di
 php_menu = (tl / "php-menu.txt").read_text()
 assert 'chip_menu=Some((Php, "", ["8.4.1", "8.2.9"], 0))' in php_menu, php_menu
 php_used = (tl / "php-used.txt").read_text()
-assert f'cmd="shift-use php \'{brew}/opt/php@8.2/bin\'" exit=Some(0)' in php_used, php_used
+assert f'cmd="rift-use php \'{brew}/opt/php@8.2/bin\'" exit=Some(0)' in php_used, php_used
 assert '"Php:8.2.9"' in php_used, php_used
 py_menu = (tl / "py-menu.txt").read_text()
 assert 'chip_menu=Some((Python, "", ["3.12.2", "3.11.1", "system"], 0))' in py_menu, py_menu
 py_used = (tl / "py-used.txt").read_text()
-assert 'cmd="shift-use pyenv \'3.11.1\'" exit=Some(0)' in py_used, py_used
+assert 'cmd="rift-use pyenv \'3.11.1\'" exit=Some(0)' in py_used, py_used
 assert '"Python:3.11.1"' in py_used, py_used
 docker_menu = (tl / "docker-menu.txt").read_text()
 assert 'chip_menu=Some((Docker, "", ["web", "db"], 0))' in docker_menu, docker_menu
@@ -1082,17 +1082,17 @@ assert 'toast=Some("Headless: not opening https://github.com/o/r/pull/42")' \
 # a chip turned on while tabs are open shows in each at once (no command,
 # no new tab): config.toml rewritten under the running app, as Settings or
 # another window would
-config_with = (tl / "cfg/shift/config.toml").read_text()
-(tl / "cfg/shift/config.toml").write_text(
+config_with = (tl / "cfg/rift/config.toml").read_text()
+(tl / "cfg/rift/config.toml").write_text(
     config_with.replace('["github_pr", "python", "php", "docker"]', '["cwd"]'))
 (tl / "docker.toml").write_text(config_with.replace(
     '["github_pr", "python", "php", "docker"]', '["cwd", "docker"]'))
 run_tools("reload", [
     "key cmd+t", "wait_prompt", "wait 1000", f"dump {tl}/reload-before.txt",
-    f"sh cp {tl}/docker.toml {tl}/cfg/shift/config.toml", "wait 1500",
+    f"sh cp {tl}/docker.toml {tl}/cfg/rift/config.toml", "wait 1500",
     f"dump {tl}/reload-tab2.txt", "key cmd+1", "wait 300", f"dump {tl}/reload-tab1.txt",
 ])
-(tl / "cfg/shift/config.toml").write_text(config_with)
+(tl / "cfg/rift/config.toml").write_text(config_with)
 assert 'prompt_chips_shown=["Cwd:' in (tl / "reload-before.txt").read_text()
 for tab in ("tab2", "tab1"):
     shown = (tl / f"reload-{tab}.txt").read_text()
@@ -1104,21 +1104,21 @@ for tab in ("tab2", "tab1"):
 # chip clicked joins the prompt, a prompt chip dragged moves, Enter saves.
 # Probe runs read the rects the next run clicks.
 pc = scratch / "prompt"
-for sub in ("cfg/shift", "data"):
+for sub in ("cfg/rift", "data"):
     (pc / sub).mkdir(parents=True, exist_ok=True)
-(pc / "cfg/shift/config.toml").write_text(
+(pc / "cfg/rift/config.toml").write_text(
     'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
     'sync_os_theme = false\nprompt_chips = ["python", "cwd", "git_branch", "time24"]\n'
     + f'working_directory = {json.dumps(str(work))}\n')
 
 def run_prompt(name, steps):
-    (pc / f"{name}.shift").write_text("\n".join(["resize 1200 800", "wait_prompt", *steps,
+    (pc / f"{name}.rift").write_text("\n".join(["resize 1200 800", "wait_prompt", *steps,
                                                   "quit"]) + "\n")
     # the runner's own Python environment stays out of the shell
     clean = {k: v for k, v in env.items()
              if k not in ("VIRTUAL_ENV", "PYENV_VERSION")}
     with (pc / f"{name}.log").open("w") as log:
-        rc = subprocess.run([str(binary), "--script", str(pc / f"{name}.shift"), "--headless"],
+        rc = subprocess.run([str(binary), "--script", str(pc / f"{name}.rift"), "--headless"],
                             env=dict(clean, XDG_CONFIG_HOME=str(pc / "cfg"),
                                      XDG_DATA_HOME=str(pc / "data")),
                             stdout=log, stderr=log, timeout=60).returncode
@@ -1161,7 +1161,7 @@ edited = (pc / "edited.txt").read_text()
 assert "prompt_editor=Some(([Cwd, GitBranch, Time24, Python, Host], None))" in edited, edited
 assert "prompt_chips=[Cwd, GitBranch, Time24, Python, Host] prompt_editor=None" in \
     (pc / "saved.txt").read_text()
-saved = (pc / "cfg/shift/config.toml").read_text()
+saved = (pc / "cfg/rift/config.toml").read_text()
 assert re.search(r'prompt_chips = \[\s*"cwd",\s*"git_branch",\s*"time24",\s*"python",\s*"host",?\s*\]',
                  saved), saved
 
@@ -1171,9 +1171,9 @@ assert re.search(r'prompt_chips = \[\s*"cwd",\s*"git_branch",\s*"time24",\s*"pyt
 # tooltip and the click. A fixed history (10 commands) lays the pane out the
 # same everywhere; a first run reads the controls' rects from the dump.
 tip = scratch / "tip"
-for sub in ("cfg/shift", "data", "home"):
+for sub in ("cfg/rift", "data", "home"):
     (tip / sub).mkdir(parents=True, exist_ok=True)
-(tip / "cfg/shift/config.toml").write_text(
+(tip / "cfg/rift/config.toml").write_text(
     'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
     'sync_os_theme = false\n' + f'working_directory = {json.dumps(str(work))}\n')
 (tip / "home/.bash_history").write_text("".join(f"echo past{i}\n" for i in range(10)))
@@ -1182,9 +1182,9 @@ tip_env = dict(env, XDG_CONFIG_HOME=str(tip / "cfg"), XDG_DATA_HOME=str(tip / "d
                BASH_SILENCE_DEPRECATION_WARNING="1")
 
 def tip_run(name, steps):
-    (tip / f"{name}.shift").write_text("\n".join(["resize 1000 700", "wait_prompt", *steps, "quit"]) + "\n")
+    (tip / f"{name}.rift").write_text("\n".join(["resize 1000 700", "wait_prompt", *steps, "quit"]) + "\n")
     with (tip / f"{name}.log").open("w") as log:
-        rc = subprocess.run([str(binary), "--script", str(tip / f"{name}.shift"), "--headless"],
+        rc = subprocess.run([str(binary), "--script", str(tip / f"{name}.rift"), "--headless"],
                             env=tip_env, stdout=log, stderr=log, timeout=60).returncode
     assert rc == 0, died(f"tooltip {name} run failed", tip / f"{name}.log")
 
@@ -1226,20 +1226,20 @@ assert "history=true scope=Failed" in chip_click, chip_click[:1500]
 assert tooltip("close-one").startswith('Some("Close tab '), tooltip("close-one")
 assert tooltip("close-split") == 'Some("Close tab")', tooltip("close-split")
 
-# Settings › Files: link_editor = "shift" opens a hinted path in the viewer;
+# Settings › Files: link_editor = "rift" opens a hinted path in the viewer;
 # an editor that is not installed falls back to the viewer with a toast;
 # dotfiles stay out of the explorer until Show hidden files is pressed
 fl = scratch / "files"
-for sub in ("cfg/shift", "data", "work"):
+for sub in ("cfg/rift", "data", "work"):
     (fl / sub).mkdir(parents=True, exist_ok=True)
 (fl / "work/.env").write_text("SECRET=1\n")
 (fl / "work/visible.txt").write_text("hi\n")
 (fl / "work/other.txt").write_text("x\n")
-(fl / "cfg/shift/config.toml").write_text(
+(fl / "cfg/rift/config.toml").write_text(
     'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
     'sync_os_theme = false\nexplorer_hidden_files = false\nfile_editor = "nope"\n'
-    'link_editor = "shift"\n' + f'working_directory = {json.dumps(str(fl / "work"))}\n')
-(fl / "files.shift").write_text("\n".join([
+    'link_editor = "rift"\n' + f'working_directory = {json.dumps(str(fl / "work"))}\n')
+(fl / "files.rift").write_text("\n".join([
     "resize 1000 700", "wait_prompt",
     f"type echo {fl}/work/other.txt\\n", "wait 500",
     "key shift+cmd+h", "wait 200", "type a", "wait 600", f"dump {fl}/link.txt",
@@ -1252,7 +1252,7 @@ for sub in ("cfg/shift", "data", "work"):
     "key cmd+,", "wait 600", f"dump {fl}/shown.txt",
     "quit"]) + "\n")
 with (fl / "files.log").open("w") as log:
-    rc = subprocess.run([str(binary), "--script", str(fl / "files.shift"), "--headless"],
+    rc = subprocess.run([str(binary), "--script", str(fl / "files.rift"), "--headless"],
                         # bash's zsh notice would put a URL first in the hints
                         env=dict(env, XDG_CONFIG_HOME=str(fl / "cfg"),
                                  XDG_DATA_HOME=str(fl / "data"),
@@ -1270,23 +1270,23 @@ page = (fl / "page.txt").read_text()
 assert 'Switch "Show hidden files" toggled=False' in page, page
 assert "Bell" not in page.split("Dialog", 1)[1], page  # a hidden row never renames a shown one
 assert 'TreeItem ".env, file"' in (fl / "shown.txt").read_text(), (fl / "shown.txt").read_text()
-assert "explorer_hidden_files = true" in (fl / "cfg/shift/config.toml").read_text()
+assert "explorer_hidden_files = true" in (fl / "cfg/rift/config.toml").read_text()
 
 # Settings › Terminal: an OSC 52 read is answered only with "read_write";
 # middle-click pastes the clipboard (an OSC 52 copy) into the pane
 tm = scratch / "termpage"
-for sub in ("cfg/shift", "data", "work"):
+for sub in ("cfg/rift", "data", "work"):
     (tm / sub).mkdir(parents=True, exist_ok=True)
 
 def term_run(name, access, steps):
-    (tm / "cfg/shift/config.toml").write_text(
+    (tm / "cfg/rift/config.toml").write_text(
         'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
         f'sync_os_theme = false\nclipboard_access = "{access}"\n'
         + f'working_directory = {json.dumps(str(tm / "work"))}\n')
-    (tm / f"{name}.shift").write_text("\n".join(["resize 1000 700", "wait_prompt", *steps,
+    (tm / f"{name}.rift").write_text("\n".join(["resize 1000 700", "wait_prompt", *steps,
                                                   "quit"]) + "\n")
     with (tm / f"{name}.log").open("w") as log:
-        rc = subprocess.run([str(binary), "--script", str(tm / f"{name}.shift"), "--headless"],
+        rc = subprocess.run([str(binary), "--script", str(tm / f"{name}.rift"), "--headless"],
                             env=dict(env, XDG_CONFIG_HOME=str(tm / "cfg"),
                                      XDG_DATA_HOME=str(tm / "data"),
                                      BASH_SILENCE_DEPRECATION_WARNING="1"),
@@ -1320,14 +1320,14 @@ assert "Programs' clipboard access (OSC 52): Copy, selected" in page, page
 # steal it); a theme file that does not load is labelled and toasted; Tab
 # scrolls to a row below the fold
 sw = scratch / "sweep"
-for sub in ("cfg/shift/themes", "data"):
+for sub in ("cfg/rift/themes", "data"):
     (sw / sub).mkdir(parents=True, exist_ok=True)
-(sw / "cfg/shift/themes/broken.toml").write_text('bg = "not a color"\n')
-(sw / "cfg/shift/config.toml").write_text(
+(sw / "cfg/rift/themes/broken.toml").write_text('bg = "not a color"\n')
+(sw / "cfg/rift/config.toml").write_text(
     'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
     'sync_os_theme = false\nvim_mode = true\ntheme = "broken"\n'
     + f'working_directory = {json.dumps(str(work))}\n')
-(sw / "sweep.shift").write_text("\n".join([
+(sw / "sweep.rift").write_text("\n".join([
     "resize 1180 760", "wait_prompt", f"dump {sw}/first.txt",
     "key cmd+t", "wait_prompt", f"dump {sw}/second.txt",
     "key cmd+,", "wait 300", "key end", "wait 300", f"dump {sw}/themes.txt",
@@ -1335,7 +1335,7 @@ for sub in ("cfg/shift/themes", "data"):
     *["key tab"] * 15, "wait 300", f"dump {sw}/tabbed.txt",
     "quit"]) + "\n")
 with (sw / "sweep.log").open("w") as log:
-    rc = subprocess.run([str(binary), "--script", str(sw / "sweep.shift"), "--headless"],
+    rc = subprocess.run([str(binary), "--script", str(sw / "sweep.rift"), "--headless"],
                         env=dict(env, XDG_CONFIG_HOME=str(sw / "cfg"),
                                  XDG_DATA_HOME=str(sw / "data"),
                                  BASH_SILENCE_DEPRECATION_WARNING="1"),
@@ -1356,12 +1356,12 @@ assert 'Switch "Suggest corrections for failed commands"' in tabbed, tabbed
 # one working (a spinner frame in its title) does
 def agent_run(name, title_octal, command=None):
     typed = command or f"printf '\\\\033]0;{title_octal} Claude Code\\\\007'; sleep 3"
-    (sw / f"{name}.shift").write_text("\n".join([
+    (sw / f"{name}.rift").write_text("\n".join([
         "resize 1000 500", "wait_prompt",
         f"type {typed}\\n", "wait 800",
         f"dump {sw}/{name}.txt", "quit"]) + "\n")
     with (sw / f"{name}.log").open("w") as log:
-        rc = subprocess.run([str(binary), "--script", str(sw / f"{name}.shift"), "--headless"],
+        rc = subprocess.run([str(binary), "--script", str(sw / f"{name}.rift"), "--headless"],
                             env=dict(env, XDG_CONFIG_HOME=str(sw / "cfg"),
                                      XDG_DATA_HOME=str(sw / "data"),
                                      BASH_SILENCE_DEPRECATION_WARNING="1"),
@@ -1389,11 +1389,11 @@ assert 'title="⠋ shift"' in codex_busy and "running=true" in codex_busy, codex
 (sw / "cmdbs.sh").write_text(
     "stty raw -echo\nb=$(dd bs=1 count=1 2>/dev/null | od -An -tx1)\n"
     "stty sane\necho \"KEY[$(echo $b)]\"\n")
-(sw / "cmdbs.shift").write_text("\n".join([
+(sw / "cmdbs.rift").write_text("\n".join([
     "wait_prompt", f"type sh {sw}/cmdbs.sh\\n", "wait 800", "key cmd+backspace",
     "wait 800", f"dump {sw}/cmdbs.txt", "quit"]) + "\n")
 with (sw / "cmdbs.log").open("w") as log:
-    rc = subprocess.run([str(binary), "--script", str(sw / "cmdbs.shift"), "--headless"],
+    rc = subprocess.run([str(binary), "--script", str(sw / "cmdbs.rift"), "--headless"],
                         env=dict(env, XDG_CONFIG_HOME=str(sw / "cfg"),
                                  XDG_DATA_HOME=str(sw / "data"),
                                  BASH_SILENCE_DEPRECATION_WARNING="1"),
@@ -1404,11 +1404,11 @@ assert "KEY[15]" in cmdbs, cmdbs[:2000]
 
 # the font picker lists the embedded Hack after the default and no
 # bitmap-only faces; a typed space reaches the settings search
-(sw / "fonts.shift").write_text("\n".join([
+(sw / "fonts.rift").write_text("\n".join([
     "wait_prompt", "key cmd+,", "wait 300", "type font family", "wait 200",
     "key tab", "wait 100", "key enter", "wait 300", f"dump {sw}/fonts.txt", "quit"]) + "\n")
 with (sw / "fonts.log").open("w") as log:
-    rc = subprocess.run([str(binary), "--script", str(sw / "fonts.shift"), "--headless"],
+    rc = subprocess.run([str(binary), "--script", str(sw / "fonts.rift"), "--headless"],
                         env=dict(env, XDG_CONFIG_HOME=str(sw / "cfg"),
                                  XDG_DATA_HOME=str(sw / "data")),
                         stdout=log, stderr=log, timeout=60).returncode
@@ -1419,13 +1419,13 @@ font_opts = re.findall(r'ListBoxOption "([^"]+)"', fonts)
 assert font_opts[:1] == ["JetBrains Mono"] and "Hack" in font_opts, font_opts
 assert not any("Bitmap" in f for f in font_opts), font_opts
 
-# Updates: a file:// manifest (SHIFT_UPDATE_URL) advertising a newer
+# Updates: a file:// manifest (RIFT_UPDATE_URL) advertising a newer
 # version shows the tab bar's chip; a click opens the update dialog (a
 # development build cannot update itself: "Open download page"); Later
 # dismisses that version, also after a relaunch. The running version or a
 # malformed manifest shows no chip; About says why. Every manifest needs
 # latest.json.sig, an Ed25519 signature: these are signed with a throwaway
-# test key (SHIFT_UPDATE_TEST_KEY, honoured for file:// manifests only); an
+# test key (RIFT_UPDATE_TEST_KEY, honoured for file:// manifests only); an
 # unsigned or tampered manifest shows no chip either.
 def ed25519_sign(seed, msg):
     """RFC 8032 Ed25519 (pure Python: macOS's LibreSSL has no Ed25519):
@@ -1483,12 +1483,12 @@ def write_signed(path, body, signed_body=None):
 up = scratch / "update"
 current = subprocess.run([str(binary), "--version"], capture_output=True,
                          text=True, check=True).stdout.split()[-1]
-(up / "cfg/shift").mkdir(parents=True, exist_ok=True)
-(up / "cfg/shift/config.toml").write_text(
+(up / "cfg/rift").mkdir(parents=True, exist_ok=True)
+(up / "cfg/rift/config.toml").write_text(
     'shell = "/bin/bash"\nrestore_session = false\nsync_os_theme = false\n'
     + f'working_directory = {json.dumps(str(work))}\n')
 manifest = {"version": "99.0.0", "date": "2026-10-12", "protocol": 1, "notes": "Newer.",
-            "url": "https://github.com/botjaeger/shift-releases/releases/tag/v99.0.0",
+            "url": "https://github.com/botjaeger/rift-releases/releases/tag/v99.0.0",
             "assets": {}}
 newer = json.dumps(manifest).encode()
 write_signed(up / "newer.json", newer)
@@ -1497,17 +1497,17 @@ write_signed(up / "bad.json", b"{not json")
 (up / "unsigned.json").write_bytes(newer)
 # signed, then changed (98 -> 99): the signature no longer matches
 write_signed(up / "forged.json", newer, newer.replace(b"99.0.0", b"98.0.0"))
-about_steps = ["key cmd+p", "type About Shift", "wait 200", "key enter", "wait 400"]
+about_steps = ["key cmd+p", "type About Rift", "wait 200", "key enter", "wait 400"]
 
 def up_run(name, data, url, steps):
-    (up / f"{name}.shift").write_text(
+    (up / f"{name}.rift").write_text(
         "\n".join(["resize 1000 700", "wait_prompt", "wait 800", *steps, "quit"]) + "\n")
     with (up / f"{name}.log").open("w") as log:
-        rc = subprocess.run([str(binary), "--script", str(up / f"{name}.shift"), "--headless"],
+        rc = subprocess.run([str(binary), "--script", str(up / f"{name}.rift"), "--headless"],
                             env=dict(env, XDG_CONFIG_HOME=str(up / "cfg"),
                                      XDG_DATA_HOME=str(up / data),
-                                     SHIFT_UPDATE_URL=f"file://{up / url}",
-                                     SHIFT_UPDATE_TEST_KEY=up_key,
+                                     RIFT_UPDATE_URL=f"file://{up / url}",
+                                     RIFT_UPDATE_TEST_KEY=up_key,
                                      BASH_SILENCE_DEPRECATION_WARNING="1"),
                             stdout=log, stderr=log, timeout=60).returncode
     assert rc == 0, died(f"update {name} run failed", up / f"{name}.log")
@@ -1518,7 +1518,7 @@ def up_state(name):
 up_run("probe", "data-new", "newer.json", [f"dump {up}/probe.txt"])
 probe = up_state("probe")
 assert 'update=available:99.0.0 chip=Some("99.0.0")' in probe, probe[:3000]
-assert 'Button "Update Shift, v99.0.0 available"' in probe, probe[-3000:]
+assert 'Button "Update Rift, v99.0.0 available"' in probe, probe[-3000:]
 tips = re.search(r"^tips=(\[.*\])$", probe, re.M)[1]
 x, y, w, h = map(float, re.search(r"v99\.0\.0 available@([\d.,-]+)", tips)[1].split(","))
 up_run("click", "data-new", "newer.json", [
@@ -1529,7 +1529,7 @@ up_run("click", "data-new", "newer.json", [
 assert 'tooltip=Some("v99.0.0 available")' in up_state("hover"), up_state("hover")[:2000]
 dialog = up_state("dialog")
 assert "confirm=Some((Update(UpdatePlan" in dialog and "open_page: true" in dialog, dialog[:3000]
-assert 'AlertDialog "Update to Shift v99.0.0?"' in dialog, dialog[-3000:]
+assert 'AlertDialog "Update to Rift v99.0.0?"' in dialog, dialog[-3000:]
 assert 'Button "Later"' in dialog and 'Button "Open download page"' in dialog, dialog[-3000:]
 later = up_state("later")
 assert 'confirm=None' in later and 'chip=None dismissed=Some("99.0.0")' in later, later[:3000]
@@ -1574,7 +1574,7 @@ for i, request in enumerate(['{"cmd":"prepare-restart"}',
     out = up / f"restart-{i}.json"
     restart_steps += [
         "sh python3 " + " ".join(shlex.quote(str(a)) for a in
-                                 (up / "rawctl.py", up / "data-rr/shift/control", request, out))
+                                 (up / "rawctl.py", up / "data-rr/rift/control", request, out))
         + " >/dev/null 2>&1 &",
         f"wait_file {out}.done 15000", "wait 500"]
 up_run("restart", "data-rr", "same.json", [*restart_steps, f"dump {up}/restart.txt"])
@@ -1584,24 +1584,24 @@ for i in range(2):
     refused = json.loads(answer)
     assert refused.get("ok") is False and "no update in progress" in refused.get("error", ""), refused
 assert "update=" in up_state("restart"), "the window quit on a refused prepare-restart"
-assert not list((up / "data-rr/shift").glob("restart/*.toml")), "a refused request saved a layout"
+assert not list((up / "data-rr/rift").glob("restart/*.toml")), "a refused request saved a layout"
 
 # a window an interrupted update saved (restart/<pid>.toml) and never
 # reopened comes back on the next plain launch, and its file is deleted
-left = up / "data-left/shift/restart"
+left = up / "data-left/rift/restart"
 left.mkdir(parents=True)
 (left / "99999.toml").write_text('[[tabs]]\ncwd = "/tmp"\ntitle = "LEFTOVER"\n')
 (up / "cfg-left").mkdir()
-(up / "cfg-left/shift").mkdir()
-(up / "cfg-left/shift/config.toml").write_text("durable_sessions = false\n")
-(up / "left-window.shift").write_text(f"wait_prompt\nwait 300\ndump {up}/left-window.txt\nquit\n")
-(up / "left-main.shift").write_text("wait_prompt\nwait 800\nquit\n")
+(up / "cfg-left/rift").mkdir()
+(up / "cfg-left/rift/config.toml").write_text("durable_sessions = false\n")
+(up / "left-window.rift").write_text(f"wait_prompt\nwait 300\ndump {up}/left-window.txt\nquit\n")
+(up / "left-main.rift").write_text("wait_prompt\nwait 800\nquit\n")
 with (up / "left-main.log").open("w") as log:
-    rc = subprocess.run([str(binary), "--script", str(up / "left-main.shift"), "--headless"],
+    rc = subprocess.run([str(binary), "--script", str(up / "left-main.rift"), "--headless"],
                         env=dict(env, XDG_CONFIG_HOME=str(up / "cfg-left"),
                                  XDG_DATA_HOME=str(up / "data-left"),
-                                 SHIFT_PERSIST_SESSION="1",
-                                 SHIFT_RELAUNCH_WINDOW_SCRIPT=str(up / "left-window.shift")),
+                                 RIFT_PERSIST_SESSION="1",
+                                 RIFT_RELAUNCH_WINDOW_SCRIPT=str(up / "left-window.rift")),
                         stdout=log, stderr=log, timeout=60).returncode
 assert rc == 0, died("leftover-window run failed", up / "left-main.log")
 deadline = time.monotonic() + 30

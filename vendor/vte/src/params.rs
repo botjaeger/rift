@@ -24,7 +24,7 @@ pub struct Params {
     /// Total number of parameters and subparameters.
     len: usize,
 
-    /// Bit `i` set: entry `i` had digits (Shift). An empty parameter reads
+    /// Bit `i` set: entry `i` had digits (Rift). An empty parameter reads
     /// as 0 like an explicit `0`; XTWINOPS tells them apart.
     explicit: u32,
 }

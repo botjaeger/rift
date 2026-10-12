@@ -1,16 +1,16 @@
-# Shift Mobile Remote Companion
+# Rift Mobile Remote Companion
 
 ## Summary
 
 Build an Expo-based companion app for iOS and Android that lets users securely
-access terminal sessions already running in Shift on their desktop.
+access terminal sessions already running in Rift on their desktop.
 
-The mobile app is a remote client, not a second terminal emulator. Shift on the
+The mobile app is a remote client, not a second terminal emulator. Rift on the
 desktop continues to own the shell process, PTY, terminal parser, command blocks,
 scrollback, and session state. Mobile receives a synchronized, touch-friendly
 view and sends narrowly scoped user actions back to the desktop.
 
-This positioning is important: Shift Mobile should be “your Shift sessions in
+This positioning is important: Rift Mobile should be “your Rift sessions in
 your pocket,” not another generic SSH client.
 
 ## Why Expo
@@ -18,7 +18,7 @@ your pocket,” not another generic SSH client.
 Expo with React Native and TypeScript is the preferred starting point because
 the intended client is primarily a structured application UI: session lists,
 command blocks, command input, pairing, settings, and notifications. It does not
-need to reproduce Shift's native GPU terminal renderer.
+need to reproduce Rift's native GPU terminal renderer.
 
 Expo provides:
 
@@ -26,7 +26,7 @@ Expo provides:
 - Fast product iteration and over-the-air JavaScript updates.
 - Good building blocks for QR pairing, deep links, secure storage, biometrics,
   notifications, and WebSocket communication.
-- A natural fit for Shift's block-oriented interface.
+- A natural fit for Rift's block-oriented interface.
 - Development builds when a capability is unavailable in Expo Go.
 
 Start with Expo development builds rather than treating Expo Go compatibility as
@@ -47,7 +47,7 @@ discovery, keyboard handling, and background behavior.
                │ encrypted, authenticated protocol
                │ WebSocket initially
 ┌──────────────▼───────────────┐
-│ Shift desktop remote gateway│
+│ Rift desktop remote gateway│
 │                              │
 │ Pairing and authorization    │
 │ Protocol and event adapter   │
@@ -55,7 +55,7 @@ discovery, keyboard handling, and background behavior.
 └──────────────┬───────────────┘
                │ internal typed events
 ┌──────────────▼───────────────┐
-│ Existing Shift application  │
+│ Existing Rift application  │
 │ tabs → panes → PTYs → shells │
 └──────────────────────────────┘
 ```
@@ -68,9 +68,9 @@ desktop API access.
 
 The first useful release should allow a user to:
 
-1. Enable remote access explicitly in Shift desktop.
+1. Enable remote access explicitly in Rift desktop.
 2. Pair one phone by scanning a short-lived QR code.
-3. See connected Shift hosts and their tabs and panes.
+3. See connected Rift hosts and their tabs and panes.
 4. Open a pane and view recent command blocks and live output.
 5. Compose and run a command after clear confirmation.
 6. Send common terminal controls such as Ctrl-C, Escape, Tab, and arrow keys.
@@ -178,8 +178,8 @@ The desktop implementation will need:
 - Notification event production without depending on the mobile connection.
 
 Keep networking and protocol logic outside the main application coordinator. A
-dedicated crate, tentatively `shift-remote`, can own protocol types, framing,
-authentication, synchronization, and transport adapters while `shift-terminal`
+dedicated crate, tentatively `rift-remote`, can own protocol types, framing,
+authentication, synchronization, and transport adapters while `rift-terminal`
 bridges those messages to application actions.
 
 ## Delivery phases
@@ -240,7 +240,7 @@ the relay being able to read terminal content.
 - Reconnection on the same network normally restores state within a few seconds.
 - Large command output remains responsive and does not cause unbounded memory use.
 - Users can identify the active host, pane, and command target before submitting.
-- Revocation prevents subsequent access without requiring a Shift restart.
+- Revocation prevents subsequent access without requiring a Rift restart.
 - The desktop remains fully usable when mobile networking is disabled or fails.
 
 ## Open decisions
@@ -252,7 +252,7 @@ the relay being able to read terminal content.
 - Whether command submission and arbitrary key input use separate permission levels.
 - How mobile notifications are delivered without exposing terminal content to a
   push provider.
-- Whether remote internet access uses a Shift-operated opaque relay or integrates
+- Whether remote internet access uses a Rift-operated opaque relay or integrates
   with an existing private-network product.
 - Which raw-terminal renderer is appropriate if full-screen TUI support becomes a
   priority.

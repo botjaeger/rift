@@ -46,6 +46,6 @@ jobs:
         if: runner.os == 'Linux'
         run: xvfb-run -a scripts/gates.sh ui
         env:
-          SHIFT_TEST_BIN: target/release/shift-terminal
+          RIFT_TEST_BIN: target/release/rift-terminal
           LIBGL_ALWAYS_SOFTWARE: '1'
           WGPU_BACKEND: vulkan

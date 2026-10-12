@@ -58,7 +58,7 @@ pub enum Event {
     ChildExit(ExitStatus),
 
     /// XTWINOPS window manipulation or report the terminal cannot answer
-    /// itself (Shift): parameters as sent.
+    /// itself (Rift): parameters as sent.
     WindowOp(Vec<Option<u16>>),
 }
 

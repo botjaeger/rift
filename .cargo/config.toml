@@ -1,4 +1,4 @@
-# `cargo run` on macOS starts shift-terminal from a dev Shift.app so the Dock
-# names it "Shift" (see scripts/cargo-runner.sh). Other platforms: no runner.
+# `cargo run` on macOS starts rift-terminal from a dev Rift.app so the Dock
+# names it "Rift" (see scripts/cargo-runner.sh). Other platforms: no runner.
 [target.'cfg(target_os = "macos")']
 runner = "scripts/cargo-runner.sh"

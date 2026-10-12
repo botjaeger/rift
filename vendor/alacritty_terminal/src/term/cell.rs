@@ -30,11 +30,11 @@ bitflags! {
         const UNDERCURL                 = 0b0001_0000_0000_0000;
         const DOTTED_UNDERLINE          = 0b0010_0000_0000_0000;
         const DASHED_UNDERLINE          = 0b0100_0000_0000_0000;
-        /// SGR 5/6: blinking text (Shift).
+        /// SGR 5/6: blinking text (Rift).
         const BLINK                     = 0b1000_0000_0000_0000;
-        /// DECSCA: protected from selective erase (Shift).
+        /// DECSCA: protected from selective erase (Rift).
         const PROTECTED                 = 1 << 16;
-        /// SPA/EPA: ISO protected from ED, EL, ECH and selective erase (Shift).
+        /// SPA/EPA: ISO protected from ED, EL, ECH and selective erase (Rift).
         const ISO_PROTECTED             = 1 << 17;
         const ALL_UNDERLINES            = Self::UNDERLINE.bits() | Self::DOUBLE_UNDERLINE.bits()
                                         | Self::UNDERCURL.bits() | Self::DOTTED_UNDERLINE.bits()

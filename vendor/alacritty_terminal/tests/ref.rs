@@ -14,8 +14,8 @@ use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi;
 
-// Shift: decaln_reset, deccolm_reset and selective_erasure are left out. They
-// recorded upstream behavior that Shift replaced with xterm's (DECALN homes the
+// Rift: decaln_reset, deccolm_reset and selective_erasure are left out. They
+// recorded upstream behavior that Rift replaced with xterm's (DECALN homes the
 // cursor, DECCOLM needs ?40, DECSCA/DECSED are honored); vt420 tests cover them.
 macro_rules! ref_tests {
     ($($name:ident)*) => {

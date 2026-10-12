@@ -1,6 +1,6 @@
-//! VT420 / xterm extensions to [`Term`] (Shift).
+//! VT420 / xterm extensions to [`Term`] (Rift).
 //!
-//! Upstream alacritty implements a VT220-ish subset. Shift extends it toward
+//! Upstream alacritty implements a VT220-ish subset. Rift extends it toward
 //! xterm's VT420 emulation, measured with esctest: left/right margins
 //! (DECLRMM, DECSLRM), rectangle editing (DECCRA, DECERA, DECSERA, DECFRA,
 //! DECCARA, DECRARA, DECSACE), selective erase (DECSCA, DECSED, DECSEL),
@@ -21,7 +21,7 @@ use crate::term::cell::{Cell, Flags};
 use crate::term::{TITLE_STACK_MAX_DEPTH, Term, TermMode};
 use crate::vte::ansi::{Color, NamedColor, Rect};
 
-/// State Shift tracks beyond upstream's [`TermMode`].
+/// State Rift tracks beyond upstream's [`TermMode`].
 #[derive(Debug, Clone)]
 pub(crate) struct Vt420 {
     /// DECLRMM (`CSI ? 69 h`): left/right margins may be set.
@@ -417,7 +417,7 @@ impl<T: EventListener> Term<T> {
                 "Co" | "colors" => Some(String::from("256")),
                 "RGB" => Some(String::from("8/8/8")),
                 // styled (curly, dotted, dashed) and colored underlines, in
-                // kitty's terminfo spelling: Shift draws both
+                // kitty's terminfo spelling: Rift draws both
                 "Smulx" => Some(String::from("\x1b[4:%p1%dm")),
                 "Setulc" => Some(String::from(
                     "\x1b[58:2::%p1%{65536}%/%d:%p1%{256}%/%{255}%&%d:%p1%{255}%&%dm",
@@ -444,7 +444,7 @@ impl<T: EventListener> Term<T> {
     }
 }
 
-/// DEC private modes Shift tracks without upstream behavior, with their
+/// DEC private modes Rift tracks without upstream behavior, with their
 /// power-on value: reported by DECRQM, toggled by DECSET/DECRST.
 const TRACKED_PRIVATE: &[(u16, bool)] = &[
     (2, true),     // DECANM: ANSI (VT52 mode is not offered)
@@ -485,7 +485,7 @@ const TRACKED_PRIVATE: &[(u16, bool)] = &[
     (2006, false), // readline newline pasting
 ];
 
-/// ANSI modes Shift tracks: KAM (2) and SRM (12, set = no local echo).
+/// ANSI modes Rift tracks: KAM (2) and SRM (12, set = no local echo).
 const TRACKED_ANSI: &[(u16, bool)] = &[(2, false), (12, true)];
 
 impl<T: EventListener> Term<T> {
