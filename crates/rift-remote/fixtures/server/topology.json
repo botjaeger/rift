@@ -1,0 +1,1 @@
+{"t":"topology","windows":[{"pid":4242,"tabs":[{"index":0,"title":"rift","active":true,"panes":[{"id":12,"active":true,"cwd":"/Users/me/rift","job":"cargo","last_command":"cargo test --workspace","last_exit":null},{"id":13,"active":false,"cwd":null,"job":null,"last_command":null,"last_exit":null}]}]}]}

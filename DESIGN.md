@@ -55,7 +55,9 @@ Builtin themes: `dark-default`, `light-default`, `catppuccin-mocha`,
 readable on `bg` when adding a theme.
 
 The only literal colors in views are the spec's overlay values: black scrims
-and shadows, and white hairlines and hover tints at fixed alpha. New code uses
+and shadows, and white hairlines and hover tints at fixed alpha; and the
+pairing QR code (Settings › Remote access), black modules on a white plate in
+every theme so phone cameras can read it. New code uses
 tokens; mix or alpha them (`Color::with_alpha`, `Color::mix`) instead of
 adding hex values.
 
@@ -201,10 +203,12 @@ No other animation. Motion never delays input.
   follows the pointer; its slot shows a 2 px `accent` caret.
 - **Update chip** (Warp's "Update Warp"): a 22 px pill (radius 11) left of
   the inbox, 1 px `warning` outline and `warning` text (Inter 12 medium, 10
-  px padding), no fill; hover lifts 8 %.
+  px padding), no fill; hover lifts 8 %. The **remote chip** (a phone is
+  connected) is the same pill in `accent`.
 - **Buttons**: 28 px, radius 4, Inter 12.5 medium. Primary `accent` fill
   with `bg` text; secondary 6 % white with a 12 % hairline; ghost text only;
-  destructive `error` darkened 18 % with white text. Icon buttons are 24–26
+  destructive `error` darkened 18 % with white text; disabled 3 % white with
+  an 8 % hairline and a `text_muted` label. Icon buttons are 24–26
   px with a 8 % hover lift. Key caps (`⏎`, `esc`) sit inside buttons that
   have a key.
 - **Selects** (Settings): 220 × 28 px field, value and a chevron; a click
@@ -323,6 +327,8 @@ tokens into `assets/icon/`. Where each file is used:
 | Linux | Launcher, dock, taskbar (via `rift.desktop`, app id `rift`) | `hicolor/*/apps/rift.png` |
 | Linux X11, Windows | Window title bar, taskbar, Alt-Tab | `rift-window.png` (embedded window icon) |
 | Windows | Executable file | `rift.ico` (reserved: Windows is not shipped yet) |
+| iOS | Home screen (companion app) | `mobile/assets/icon.png`: opaque `surface` square, the tile's area of the grid filling it (iOS masks the corners) |
+| Android | Launcher (companion app) | `mobile/assets/adaptive-icon.png` foreground (the tile's area in the central 62 %) on a `surface` background |
 
 Design explorations: the Rift App Icon canvas (Claude Design artifact).
 

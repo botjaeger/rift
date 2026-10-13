@@ -1,0 +1,32 @@
+[package]
+name = "rift-remote"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# the relay alone (std + tungstenite; no GUI): `packaging/relay.Dockerfile`
+# builds it with `--no-default-features`
+[[bin]]
+name = "rift-relay"
+path = "src/bin/rift-relay.rs"
+
+[features]
+default = ["tls"]
+# wss:// relay URLs for the gateway's relay connection (rustls + webpki
+# roots). The relay itself serves plain ws:// and does not need it.
+tls = ["tungstenite/rustls-tls-webpki-roots", "dep:rustls"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+# sync WebSocket over std TcpStream (thread per connection); encryption is
+# Noise inside binary frames; TLS only for wss:// relay URLs (`tls`)
+tungstenite.workspace = true
+rustls = { workspace = true, optional = true }
+snow.workspace = true
+sha2.workspace = true
+qrcode.workspace = true
+base64.workspace = true
+# flock (gateway.lock, registry writes), getifaddrs, kill(pid, 0), poll (relay)
+libc = "0.2"

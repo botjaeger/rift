@@ -13,6 +13,24 @@ view and sends narrowly scoped user actions back to the desktop.
 This positioning is important: Rift Mobile should be “your Rift sessions in
 your pocket,” not another generic SSH client.
 
+## Status
+
+Phases 0–2 are built: the gateway (crate `rift-remote`, started from
+Settings › Remote access), the relay (`rift-terminal relay`, `rift-relay`,
+`packaging/relay.Dockerfile`), the companion in
+[`mobile/`](../mobile/README.md), the wire format in
+[remote-protocol.md](remote-protocol.md) and the
+[threat model](mobile-threat-model.md). Decisions taken: Noise XX
+(`Noise_XX_25519_ChaChaPoly_BLAKE2s`) over WebSocket; the desktop key pinned
+through a one-time QR pairing link (no mDNS yet); per-device `operate` /
+`view` permissions, changeable on the desktop; finish alerts through Expo push
+while the app is closed (never output; the command line only when the user
+asks); a
+self-hostable opaque relay (rendezvous and splice, routing ids claimed by
+proof of the gateway key) for outside the local network, with private networks such as
+Tailscale working through the address list. Phase 3 (raw terminal mode,
+keyboard mappings) is next.
+
 ## Why Expo
 
 Expo with React Native and TypeScript is the preferred starting point because
@@ -250,8 +268,6 @@ the relay being able to read terminal content.
 - Whether discovery uses mDNS, a QR-encoded address, or both.
 - How much structured terminal state is stable enough to expose as public protocol.
 - Whether command submission and arbitrary key input use separate permission levels.
-- How mobile notifications are delivered without exposing terminal content to a
-  push provider.
 - Whether remote internet access uses a Rift-operated opaque relay or integrates
   with an existing private-network product.
 - Which raw-terminal renderer is appropriate if full-screen TUI support becomes a

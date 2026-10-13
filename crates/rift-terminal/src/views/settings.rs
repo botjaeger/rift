@@ -18,11 +18,12 @@ pub enum Page {
     Notifications,
     Keybindings,
     Themes,
+    Remote,
     About,
 }
 
 impl Page {
-    pub const ALL: [Page; 9] = [
+    pub const ALL: [Page; 10] = [
         Page::General,
         Page::Appearance,
         Page::Features,
@@ -31,6 +32,7 @@ impl Page {
         Page::Notifications,
         Page::Keybindings,
         Page::Themes,
+        Page::Remote,
         Page::About,
     ];
 
@@ -44,6 +46,7 @@ impl Page {
             Page::Notifications => "Notifications",
             Page::Keybindings => "Keybindings",
             Page::Themes => "Themes",
+            Page::Remote => "Remote access",
             Page::About => "About",
         }
     }
@@ -66,6 +69,7 @@ impl Page {
                     format!("Built-in themes plus {dir} (TOML or Warp YAML).")
                 })
             }
+            Page::Remote => "Watch and run commands from a paired phone, at home or away.",
             Page::About => "",
         }
     }
@@ -82,6 +86,8 @@ impl Page {
             Page::Notifications => Icon::Inbox,
             Page::Keybindings => Icon::Keyboard,
             Page::Themes => Icon::Themes,
+            // reaching in from outside (no phone mark in the set)
+            Page::Remote => Icon::Open,
             Page::About => Icon::Info,
         }
     }
@@ -113,6 +119,134 @@ pub enum UpdateLine {
     Failed,
 }
 
+/// Settings › Remote access's gateway line.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum GatewayLine {
+    /// `remote_access` is off.
+    #[default]
+    Off,
+    /// On, and no gateway answers yet.
+    Starting,
+    /// Running, reachable on these addresses (none: no network).
+    Listening(Vec<String>),
+    /// Running, with this many phones connected.
+    Connected(usize),
+}
+
+impl GatewayLine {
+    pub fn text(&self) -> String {
+        match self {
+            GatewayLine::Off => "Off".into(),
+            GatewayLine::Starting => "Starting…".into(),
+            GatewayLine::Listening(a) if a.is_empty() => "Listening, but on no network".into(),
+            GatewayLine::Listening(a) => format!("Listening on {}", a.join(", ")),
+            GatewayLine::Connected(1) => "1 device connected".into(),
+            GatewayLine::Connected(n) => format!("{n} devices connected"),
+        }
+    }
+}
+
+/// Settings › Remote access's relay line (from `status.json`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum RelayLine {
+    /// No relay set (or remote access is off).
+    #[default]
+    Off,
+    Connecting,
+    /// Registered at this host.
+    Connected(String),
+    /// The last try failed: why (it is tried again).
+    Error(String),
+}
+
+impl RelayLine {
+    pub fn text(&self) -> String {
+        match self {
+            RelayLine::Off => "Off".into(),
+            RelayLine::Connecting => "Connecting…".into(),
+            RelayLine::Connected(host) => format!("Connected via {host}"),
+            RelayLine::Error(e) => e.clone(),
+        }
+    }
+}
+
+/// A device's reported platform as people write it (`ios` is "iOS");
+/// anything unknown is shown as reported.
+pub fn platform_name(platform: &str) -> &str {
+    match platform {
+        "ios" => "iOS",
+        "android" => "Android",
+        "web" => "Web",
+        "macos" => "macOS",
+        other => other,
+    }
+}
+
+/// A paired device as Settings › Remote access lists it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeviceRow {
+    pub id: String,
+    pub name: String,
+    /// `iOS · paired October 12, 2026 · connected via relay`
+    pub detail: String,
+    /// It may only watch (else operate).
+    pub view_only: bool,
+}
+
+/// One line of Settings › Remote access › Recent connections.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HistoryRow {
+    /// The device's name, or "Unknown device" (a failed handshake).
+    pub name: String,
+    /// `Relay · 10.0.0.5:51234 · Oct 12 14:03 · 5m 12s` (or `connected`,
+    /// or the failure).
+    pub detail: String,
+}
+
+/// A live pairing link and its QR code.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PairingView {
+    pub url: String,
+    /// Modules, `true` = dark, without the quiet zone.
+    pub qr: Vec<Vec<bool>>,
+    pub expires_at: std::time::SystemTime,
+}
+
+/// What Settings › Remote access shows (the app re-reads it at most once
+/// per second while the page is open).
+#[derive(Debug, Clone, Default)]
+pub struct RemoteView {
+    pub gateway: GatewayLine,
+    pub devices: Vec<DeviceRow>,
+    /// `devices.json` could not be read.
+    pub devices_error: Option<String>,
+    /// The next pairing link grants `view` only.
+    pub view_only: bool,
+    /// "Pair a phone" was pressed and waits for the gateway's addresses.
+    pub pairing_wait: bool,
+    pub pairing: Option<PairingView>,
+    pub relay: RelayLine,
+    /// The relay field is being edited: its text (⏎ saves, Esc cancels).
+    pub relay_edit: Option<String>,
+    /// Newest first, at most [`HISTORY_ROWS`]: connected devices, then
+    /// `history.jsonl`.
+    pub history: Vec<HistoryRow>,
+}
+
+/// Rows Recent connections shows.
+pub const HISTORY_ROWS: usize = 20;
+
+/// Modules of light quiet zone around the drawn QR code.
+pub const QR_QUIET: usize = 4;
+/// Logical px per QR module (at least 4, so phone cameras resolve it).
+pub const QR_MODULE: f32 = 4.0;
+
+/// `m:ss` left of `left`, rounded up (2:00 right after pairing starts).
+pub fn countdown(left: std::time::Duration) -> String {
+    let secs = left.as_secs() + u64::from(left.subsec_nanos() > 0);
+    format!("{}:{:02}", secs / 60, secs % 60)
+}
+
 #[derive(Default)]
 pub struct SettingsState {
     /// The Settings tab is shown (it stays in the tab strip while `tab`).
@@ -139,6 +273,8 @@ pub struct SettingsState {
     pub dropdown: Option<Dropdown>,
     /// About's update line (set by the app from the update check).
     pub update: UpdateLine,
+    /// Remote access's gateway, devices and pairing (set by the app).
+    pub remote: RemoteView,
 }
 
 impl SettingsState {
@@ -162,6 +298,7 @@ impl SettingsState {
         self.focus = None;
         self.dropdown = None;
         self.recording = None;
+        self.remote.relay_edit = None;
     }
 
     /// Keyboard sidebar navigation, clamped at the first/last page.
@@ -202,6 +339,12 @@ fn focusable(target: &ClickTarget) -> bool {
             | ClickTarget::SettingsOpenConfig
             | ClickTarget::SettingsCopyVersion
             | ClickTarget::SettingsUpdate
+            | ClickTarget::RemotePair
+            | ClickTarget::RemoteViewOnly
+            | ClickTarget::RemoteCopyLink
+            | ClickTarget::RemoteRevoke(_)
+            | ClickTarget::RemoteRelay
+            | ClickTarget::RemotePermission(..)
     )
 }
 
@@ -624,6 +767,7 @@ pub fn render(
             Page::Terminal,
             Page::Files,
             Page::Notifications,
+            Page::Remote,
         ] {
             form.page = page.label();
             match page {
@@ -632,6 +776,8 @@ pub fn render(
                 Page::Features => features_page(&mut form, config),
                 Page::Terminal => terminal_page(&mut form, config),
                 Page::Files => files_page(&mut form, config),
+                // its switch only: pairing and devices need the page
+                Page::Remote => remote_switch(&mut form, config),
                 _ => notifications_page(&mut form, config),
             }
         }
@@ -654,6 +800,7 @@ pub fn render(
             Page::Notifications => notifications_page(&mut form, config),
             Page::Keybindings => keybindings_page(&mut form, keymap, config, state, blink_on),
             Page::Themes => themes_page(&mut form, config),
+            Page::Remote => remote_page(&mut form, config, &state.remote, blink_on),
             Page::About => about_page(&mut form, top, bottom - 34.0, &state.update),
         }
     }
@@ -1073,6 +1220,27 @@ impl Form<'_> {
     }
 
     fn toggle_desc(&mut self, y: f32, label: &str, desc: &str, on: bool, id: &'static str) {
+        self.switch(
+            y,
+            label,
+            desc,
+            on,
+            ClickTarget::SettingsToggle(id),
+            Some(id),
+        );
+    }
+
+    /// A toggle row: `target` is what a click presses; `id` (a config key)
+    /// adds the changed dot and ↺.
+    fn switch(
+        &mut self,
+        y: f32,
+        label: &str,
+        desc: &str,
+        on: bool,
+        target: ClickTarget,
+        id: Option<&'static str>,
+    ) {
         self.reserve = 34.0 + 40.0;
         self.label_desc(label, desc, y);
         let ty = y + (ROW_H - 20.0) / 2.0;
@@ -1093,11 +1261,59 @@ impl Form<'_> {
             };
             self.layer.circle([knob_x + 7.0, ty + 10.0], 14.0, knob);
         }
-        self.changed(id, y, x);
-        self.push_hit(
-            [x - 4.0, ty - 4.0, 42.0, 28.0],
-            ClickTarget::SettingsToggle(id),
-        );
+        if let Some(id) = id {
+            self.changed(id, y, x);
+        }
+        self.push_hit([x - 4.0, ty - 4.0, 42.0, 28.0], target);
+    }
+
+    /// A 28 px button (DESIGN.md › Buttons) at `[x, y]`: its width.
+    fn button(
+        &mut self,
+        x: f32,
+        y: f32,
+        label: &str,
+        kind: ButtonKind,
+        target: ClickTarget,
+        name: String,
+    ) -> f32 {
+        let w = (self.engine.measure(label, 12.5, FONT_SANS, Weight::MEDIUM) + 24.0).round();
+        let r = [x, y, w, CONTROL_H];
+        if self.visible(y, CONTROL_H) {
+            let hot = self.hot(r) && kind != ButtonKind::Disabled;
+            let theme = self.theme;
+            let (fill, edge, ink) = match kind {
+                ButtonKind::Primary => (theme.accent, Color::TRANSPARENT, theme.bg),
+                ButtonKind::Secondary => (
+                    lift(theme, if hot { 0.10 } else { 0.06 }),
+                    lift(theme, 0.12),
+                    theme.text_ui,
+                ),
+                ButtonKind::Destructive => (
+                    theme.error.mix(Color::BLACK, 0.18),
+                    Color::TRANSPARENT,
+                    Color::WHITE,
+                ),
+                ButtonKind::Disabled => (lift(theme, 0.03), lift(theme, 0.08), theme.text_muted),
+            };
+            self.layer
+                .bordered([r[0], r[1]], [r[2], r[3]], fill, edge, 4.0, 1.0);
+            self.layer.text(
+                sans(self.engine, label, 12.5, Weight::MEDIUM),
+                r[0] + 12.0,
+                r[1] + (CONTROL_H - 12.5 * 1.35) / 2.0,
+                ink,
+            );
+        }
+        // a disabled button is named but presses nothing
+        let target = if kind == ButtonKind::Disabled {
+            ClickTarget::SettingsNoop
+        } else {
+            target
+        };
+        self.push_hit(r, target);
+        self.name_last(name);
+        w
     }
 
     fn stepper(&mut self, y: f32, label: &str, value: &str, unit: &str, id: &'static str) {
@@ -1250,15 +1466,41 @@ impl Form<'_> {
         active: usize,
         id: &'static str,
     ) {
+        let total = self.segmented_width(options);
+        self.reserve = total + 40.0;
+        self.label_desc(label, desc, y);
+        let sy = y + (ROW_H - CONTROL_H) / 2.0;
+        let sx = self.right() - total;
+        let targets: Vec<ClickTarget> = (0..options.len())
+            .map(|i| ClickTarget::SettingsSegment(id, i as u8))
+            .collect();
+        self.segmented(sx, sy, label, options, active, &targets);
+        self.changed(id, y, sx);
+    }
+
+    /// Width of a segmented control of `options`.
+    fn segmented_width(&mut self, options: &[&str]) -> f32 {
+        options
+            .iter()
+            .map(|o| self.engine.measure(o, 12.5, FONT_SANS, Weight::MEDIUM) + 24.0)
+            .sum()
+    }
+
+    /// A segmented control at `[sx, sy]`: option `i` presses `targets[i]`.
+    fn segmented(
+        &mut self,
+        sx: f32,
+        sy: f32,
+        label: &str,
+        options: &[&str],
+        active: usize,
+        targets: &[ClickTarget],
+    ) {
         let widths: Vec<f32> = options
             .iter()
             .map(|o| self.engine.measure(o, 12.5, FONT_SANS, Weight::MEDIUM) + 24.0)
             .collect();
         let total: f32 = widths.iter().sum();
-        self.reserve = total + 40.0;
-        self.label_desc(label, desc, y);
-        let sy = y + (ROW_H - CONTROL_H) / 2.0;
-        let sx = self.right() - total;
         if self.visible(sy, CONTROL_H) {
             self.layer.bordered(
                 [sx, sy],
@@ -1309,17 +1551,90 @@ impl Form<'_> {
                     color,
                 );
             }
-            self.push_hit(
-                [bx, sy, bw, CONTROL_H],
-                ClickTarget::SettingsSegment(id, i as u8),
-            );
+            self.push_hit([bx, sy, bw, CONTROL_H], targets[i].clone());
             self.name_last(format!(
                 "{label}: {opt}{}",
                 if i == active { ", selected" } else { "" }
             ));
             bx += bw;
         }
-        self.changed(id, y, sx);
+    }
+
+    /// A one-line text field `[x, y, w]` showing `value` (or `placeholder`,
+    /// muted, when empty); `editing` shows its text with a caret and an
+    /// accent border. A click presses `target`.
+    #[allow(clippy::too_many_arguments)]
+    fn text_field(
+        &mut self,
+        r: [f32; 4],
+        value: &str,
+        placeholder: &str,
+        editing: Option<&str>,
+        blink_on: bool,
+        target: ClickTarget,
+        name: String,
+    ) {
+        if self.visible(r[1], r[3]) {
+            let theme = self.theme;
+            let hot = self.hot(r) || editing.is_some();
+            self.layer.bordered(
+                [r[0], r[1]],
+                [r[2], r[3]],
+                lift(theme, if hot { 0.07 } else { 0.04 }),
+                if editing.is_some() {
+                    theme.accent
+                } else {
+                    lift(theme, 0.12)
+                },
+                4.0,
+                1.0,
+            );
+            let room = r[2] - 20.0;
+            let tx = r[0] + 10.0;
+            let ty = r[1] + 5.2;
+            match editing {
+                Some(text) => {
+                    // the tail stays in view (the caret is at the end)
+                    let mut shown = text;
+                    while !shown.is_empty()
+                        && self.engine.measure(shown, 13.0, FONT_SANS, Weight::NORMAL) > room
+                    {
+                        let mut it = shown.chars();
+                        it.next();
+                        shown = it.as_str();
+                    }
+                    if !shown.is_empty() {
+                        self.layer.text(
+                            sans(self.engine, shown, 13.0, Weight::NORMAL),
+                            tx,
+                            ty,
+                            theme.text_bright,
+                        );
+                    }
+                    if blink_on {
+                        let tw = self.engine.measure(shown, 13.0, FONT_SANS, Weight::NORMAL);
+                        self.layer
+                            .rect([tx + tw, r[1] + 6.0], [1.5, 16.0], theme.accent, 0.0);
+                    }
+                }
+                None => {
+                    let (text, color) = if value.is_empty() {
+                        (placeholder, theme.text_muted)
+                    } else {
+                        (value, theme.text_bright)
+                    };
+                    let shown = super::palette::elide_to(self.engine, text, 13.0, FONT_SANS, room);
+                    self.layer.text(
+                        sans(self.engine, &shown, 13.0, Weight::NORMAL),
+                        tx,
+                        ty,
+                        color,
+                    );
+                }
+            }
+        }
+        self.push_hit(r, target);
+        self.name_last(name);
     }
 
     /// A select: the value and a chevron; a click opens its option list.
@@ -1465,6 +1780,325 @@ impl Form<'_> {
         );
         self.name_last(format!("{label}: {value}"));
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ButtonKind {
+    Primary,
+    Secondary,
+    Destructive,
+    Disabled,
+}
+
+/// Settings › Remote access's switch (also what the search finds).
+fn remote_switch(form: &mut Form, config: &Config) {
+    form.group("Remote access");
+    let y = form.y;
+    form.toggle_desc(
+        y,
+        "Allow remote access",
+        "Paired phones can see your tabs and run commands in them",
+        config.remote_access,
+        "remote_access",
+    );
+}
+
+/// Settings › Remote access: the switch and the gateway's state, the relay,
+/// pairing (QR code, link, expiry), the paired devices (Operate / View
+/// only, Revoke) and the recent connections.
+fn remote_page(form: &mut Form, config: &Config, view: &RemoteView, blink_on: bool) {
+    remote_switch(form, config);
+    let on = config.remote_access;
+    let y = form.y;
+    let line = if on {
+        view.gateway.clone()
+    } else {
+        GatewayLine::Off
+    };
+    form.display(y, "Status", &line.text());
+    relay_row(form, config, view, blink_on);
+
+    form.group("Pair a phone");
+    let label = "Pair a phone";
+    let bw = form.engine.measure(label, 12.5, FONT_SANS, Weight::MEDIUM) + 24.0;
+    form.reserve = bw + 40.0;
+    let y = form.y;
+    form.label_desc(
+        "Pairing code",
+        if on {
+            "Scan the code with the Rift app · one use, valid 2 minutes"
+        } else {
+            "Allow remote access first"
+        },
+        y,
+    );
+    if !form.hidden {
+        let (kind, name) = if on {
+            (ButtonKind::Primary, label.to_string())
+        } else {
+            (
+                ButtonKind::Disabled,
+                format!("{label}, unavailable while remote access is off"),
+            )
+        };
+        let by = y + (ROW_H - CONTROL_H) / 2.0;
+        let bx = form.right() - bw.round();
+        form.button(bx, by, label, kind, ClickTarget::RemotePair, name);
+    }
+    let y = form.y;
+    form.switch(
+        y,
+        "View only",
+        "The phone can watch, but not run commands or send keys",
+        view.view_only,
+        ClickTarget::RemoteViewOnly,
+        None,
+    );
+    if on && view.pairing_wait && view.pairing.is_none() {
+        let y = form.y;
+        let text = match &view.gateway {
+            GatewayLine::Listening(a) if a.is_empty() => "No network address to pair over",
+            _ => "Waiting for the gateway to start…",
+        };
+        form.display(y, "Pairing", text);
+    }
+    if let Some(p) = view.pairing.as_ref().filter(|_| on) {
+        pairing_block(form, p);
+    }
+
+    form.group("Paired devices");
+    if let Some(e) = &view.devices_error {
+        let y = form.y;
+        form.display(y, "Paired devices", e);
+    } else if view.devices.is_empty() {
+        let y = form.y;
+        form.label_desc(
+            "No paired devices",
+            "Pair a phone above; it shows here until you revoke it",
+            y,
+        );
+    }
+    const ACCESS: [&str; 2] = ["Operate", "View only"];
+    for d in &view.devices {
+        let y = form.y;
+        let bw = form
+            .engine
+            .measure("Revoke", 12.5, FONT_SANS, Weight::MEDIUM)
+            + 24.0;
+        let sw = form.segmented_width(&ACCESS);
+        form.reserve = bw + 8.0 + sw + 40.0;
+        form.label_desc(&d.name, &d.detail, y);
+        if !form.hidden {
+            let by = y + (ROW_H - CONTROL_H) / 2.0;
+            let bx = form.right() - bw.round();
+            let targets = [
+                ClickTarget::RemotePermission(d.id.clone(), false),
+                ClickTarget::RemotePermission(d.id.clone(), true),
+            ];
+            let label = format!("{} access", d.name);
+            form.segmented(
+                (bx - 8.0 - sw).round(),
+                by,
+                &label,
+                &ACCESS,
+                usize::from(d.view_only),
+                &targets,
+            );
+            form.button(
+                bx,
+                by,
+                "Revoke",
+                ButtonKind::Destructive,
+                ClickTarget::RemoteRevoke(d.id.clone()),
+                format!("Revoke {}", d.name),
+            );
+        }
+    }
+
+    form.group("Recent connections");
+    if view.history.is_empty() {
+        let y = form.y;
+        form.label_desc(
+            "No connections yet",
+            "Phones that connect, and refused attempts, show here",
+            y,
+        );
+    }
+    for h in &view.history {
+        let y = form.y;
+        form.reserve = 0.0;
+        form.label_desc(&h.name, &h.detail, y);
+        // read-only, but named for assistive tech
+        form.push_hit([form.x, y, form.card_w, ROW_H], ClickTarget::SettingsNoop);
+        form.name_last(format!("{}, {}", h.name, h.detail));
+    }
+}
+
+/// Placeholder of the empty relay field.
+pub const RELAY_PLACEHOLDER: &str = "wss://relay.example.com";
+
+/// The Relay row: its state under the label, the URL field on the right.
+fn relay_row(form: &mut Form, config: &Config, view: &RemoteView, blink_on: bool) {
+    let fw = (form.card_w * 0.45).clamp(160.0, 280.0);
+    form.reserve = fw + 40.0;
+    let y = form.y;
+    let state = if config.remote_access {
+        view.relay.text()
+    } else if config.remote_relay.trim().is_empty() {
+        "Off".to_string()
+    } else {
+        "Off while remote access is off".to_string()
+    };
+    form.label_desc("Relay", &state, y);
+    if form.hidden {
+        return;
+    }
+    let fx = form.right() - fw;
+    let r = [fx, y + (ROW_H - CONTROL_H) / 2.0, fw, CONTROL_H];
+    form.changed("remote_relay", y, fx);
+    let value = config.remote_relay.trim();
+    let name = match &view.relay_edit {
+        Some(t) => format!("Relay URL, editing: {t}"),
+        None if value.is_empty() => "Relay URL: none".to_string(),
+        None => format!("Relay URL: {value}"),
+    };
+    form.text_field(
+        r,
+        value,
+        RELAY_PLACEHOLDER,
+        view.relay_edit.as_deref(),
+        blink_on,
+        ClickTarget::RemoteRelay,
+        format!("{name}. {state}"),
+    );
+}
+
+/// The live pairing: the QR code (black modules on a white plate with its
+/// quiet zone, so it scans in dark themes too), the expiry countdown and
+/// the link with a Copy button; once expired, "Expired — Pair again".
+fn pairing_block(form: &mut Form, p: &PairingView) {
+    let left = p
+        .expires_at
+        .duration_since(std::time::SystemTime::now())
+        .unwrap_or_default();
+    let theme = form.theme;
+    let top = form.y + 12.0;
+    if left.is_zero() {
+        let r = [form.x, top, form.card_w, ROW_H];
+        if form.visible(r[1], r[3]) {
+            form.layer.text(
+                sans(form.engine, "Expired — Pair again", 13.0, Weight::NORMAL),
+                r[0],
+                r[1] + 6.0,
+                theme.warning,
+            );
+        }
+        let w = form
+            .engine
+            .measure("Expired — Pair again", 13.0, FONT_SANS, Weight::NORMAL);
+        form.button(
+            (r[0] + w + 12.0).round(),
+            r[1],
+            "Pair again",
+            ButtonKind::Secondary,
+            ClickTarget::RemotePair,
+            "Expired, pair again".into(),
+        );
+        form.y = top + CONTROL_H + 12.0;
+        return;
+    }
+    let n = p.qr.len();
+    let plate = ((n + 2 * QR_QUIET) as f32 * QR_MODULE).round();
+    let (px, py) = (form.x.round(), top.round());
+    if form.visible(py, plate) && n > 0 {
+        form.layer.rect([px, py], [plate, plate], Color::WHITE, 4.0);
+        let o = QR_QUIET as f32 * QR_MODULE;
+        for (r, row) in p.qr.iter().enumerate() {
+            // one quad per run of dark modules
+            let mut c = 0;
+            while c < row.len() {
+                if !row[c] {
+                    c += 1;
+                    continue;
+                }
+                let start = c;
+                while c < row.len() && row[c] {
+                    c += 1;
+                }
+                form.layer.rect(
+                    [
+                        px + o + start as f32 * QR_MODULE,
+                        py + o + r as f32 * QR_MODULE,
+                    ],
+                    [(c - start) as f32 * QR_MODULE, QR_MODULE],
+                    Color::BLACK,
+                    0.0,
+                );
+            }
+        }
+    }
+    // read-only, but named for assistive tech
+    form.push_hit([px, py, plate, plate], ClickTarget::SettingsNoop);
+    form.name_last("Pairing QR code".into());
+    // beside the code when there is room, else under it
+    let side = form.card_w - plate - 24.0 >= 240.0;
+    let (tx, mut ty, tw) = if side {
+        (px + plate + 24.0, py, form.card_w - plate - 24.0)
+    } else {
+        (form.x, py + plate + 16.0, form.card_w)
+    };
+    let expires = format!("Expires in {}", countdown(left));
+    if form.visible(ty, 20.0) {
+        form.layer.text(
+            sans(form.engine, "Scan with the Rift app", 13.0, Weight::NORMAL),
+            tx,
+            ty,
+            theme.text_ui,
+        );
+        form.layer.text(
+            sans(form.engine, &expires, 12.5, Weight::NORMAL),
+            tx,
+            ty + 22.0,
+            theme.text_dim,
+        );
+    }
+    form.push_hit([tx, ty, tw, 40.0], ClickTarget::SettingsNoop);
+    form.name_last(expires);
+    ty += 52.0;
+    // the link, wrapped by characters (it has no spaces)
+    let cw = form
+        .engine
+        .measure("0000000000", 11.5, mono_family(), Weight::NORMAL)
+        / 10.0;
+    let per = ((tw / cw).floor() as usize).max(8);
+    let chars: Vec<char> = p.url.chars().collect();
+    let lines: Vec<String> = chars.chunks(per).map(|c| c.iter().collect()).collect();
+    let lh = 11.5 * 1.35;
+    for (i, l) in lines.iter().enumerate() {
+        let ly = ty + i as f32 * lh;
+        if form.visible(ly, lh) {
+            form.layer.text(
+                mono(form.engine, l, 11.5, Weight::NORMAL),
+                tx,
+                ly,
+                theme.text_dim,
+            );
+        }
+    }
+    let link_h = lines.len() as f32 * lh;
+    form.push_hit([tx, ty, tw, link_h], ClickTarget::SettingsNoop);
+    form.name_last(format!("Pairing link: {}", p.url));
+    ty += link_h + 12.0;
+    form.button(
+        tx,
+        ty,
+        "Copy link",
+        ButtonKind::Secondary,
+        ClickTarget::RemoteCopyLink,
+        "Copy pairing link".into(),
+    );
+    ty += CONTROL_H;
+    form.y = (py + plate).max(ty) + 12.0;
 }
 
 /// `10000` → `10,000` (design 05 scrollback field).
@@ -2435,8 +3069,8 @@ pub fn blur_slider(blur: u8) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        Page, SettingsState, config_table, focus_order, is_changed, next_focus, reset_setting,
-        thousands,
+        GatewayLine, Page, SettingsState, config_table, countdown, focus_order, is_changed,
+        next_focus, platform_name, reset_setting, thousands,
     };
     use crate::state::{ClickTarget, Hit};
 
@@ -2498,6 +3132,35 @@ mod tests {
     }
 
     #[test]
+    fn platforms_are_named_as_people_write_them() {
+        assert_eq!(platform_name("ios"), "iOS");
+        assert_eq!(platform_name("android"), "Android");
+        assert_eq!(platform_name("tizen"), "tizen");
+    }
+
+    #[test]
+    fn remote_lines_and_countdown() {
+        use std::time::Duration;
+        assert_eq!(GatewayLine::Off.text(), "Off");
+        assert_eq!(GatewayLine::Starting.text(), "Starting…");
+        assert_eq!(
+            GatewayLine::Listening(vec!["192.168.1.29:7878".into()]).text(),
+            "Listening on 192.168.1.29:7878"
+        );
+        assert_eq!(
+            GatewayLine::Listening(vec![]).text(),
+            "Listening, but on no network"
+        );
+        assert_eq!(GatewayLine::Connected(1).text(), "1 device connected");
+        assert_eq!(GatewayLine::Connected(3).text(), "3 devices connected");
+        assert_eq!(countdown(Duration::from_secs(120)), "2:00");
+        assert_eq!(countdown(Duration::from_millis(119_400)), "2:00");
+        assert_eq!(countdown(Duration::from_secs(61)), "1:01");
+        assert_eq!(countdown(Duration::from_millis(300)), "0:01");
+        assert_eq!(countdown(Duration::ZERO), "0:00");
+    }
+
+    #[test]
     fn thousands_groups_digits() {
         assert_eq!(thousands(0), "0");
         assert_eq!(thousands(999), "999");
@@ -2518,6 +3181,8 @@ mod tests {
 
         state.move_page(99);
         assert_eq!(state.page, Page::About);
+        state.move_page(-1);
+        assert_eq!(state.page, Page::Remote);
         state.move_page(-99);
         assert_eq!(state.page, Page::General);
     }

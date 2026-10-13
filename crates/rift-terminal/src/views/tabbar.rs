@@ -79,7 +79,7 @@ fn elide(engine: &mut TextEngine, text: &str, size: f32, max_w: f32) -> String {
 }
 
 /// State of the top-bar panel buttons.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct PanelButtons {
     pub explorer_open: bool,
     pub review_open: bool,
@@ -90,23 +90,30 @@ pub struct PanelButtons {
     pub unread: usize,
     /// A new release is available: the "Update Rift" chip.
     pub update: bool,
+    /// A phone is connected: the remote chip's label ("Remote · Sam's
+    /// iPhone", "Remote · 2 devices").
+    pub remote: Option<String>,
 }
 
 /// Height of the "Update Rift" chip.
 const UPDATE_CHIP_H: f32 = 22.0;
+/// Widest the remote chip's label grows (a long device name is cut).
+const REMOTE_LABEL_MAX_W: f32 = 200.0;
 
-/// Warp's "Update Warp" pill: `warning` outline and text on no fill, a
+/// Warp's "Update Warp" pill: an outline and text in `color` on no fill, a
 /// hover lift, ending at `right`. Returns its rect; `None` (nothing drawn)
 /// when it would start left of `min_x` (a narrow window keeps its tabs).
-fn update_chip(
+#[allow(clippy::too_many_arguments)]
+fn chrome_chip(
     layer: &mut Layer,
     engine: &mut TextEngine,
     theme: &Theme,
+    label: &str,
+    color: Color,
     right: f32,
     min_x: f32,
     mouse: Option<(f32, f32)>,
 ) -> Option<[f32; 4]> {
-    let label = "Update Rift";
     let tw = engine.measure(label, 12.0, FONT_SANS, Weight::MEDIUM);
     let w = (tw + 20.0).round();
     if right - w < min_x {
@@ -127,17 +134,12 @@ fn update_chip(
         [r[0], r[1]],
         [r[2], r[3]],
         fill,
-        theme.warning,
+        color,
         UPDATE_CHIP_H / 2.0,
         1.0,
     );
     let b = make_text(engine, label, 12.0, FONT_SANS, Weight::MEDIUM);
-    layer.text(
-        b,
-        r[0] + 10.0,
-        r[1] + (UPDATE_CHIP_H - 15.6) / 2.0,
-        theme.warning,
-    );
+    layer.text(b, r[0] + 10.0, r[1] + (UPDATE_CHIP_H - 15.6) / 2.0, color);
     Some(r)
 }
 
@@ -318,16 +320,48 @@ pub fn render(
     });
     // a new release: the chip left of the inbox
     let mut w = inbox[0] - 6.0;
+    let mut chip_right = inbox[0] - 8.0;
     // room for one tab and + stays
     let min_x = tabs_x + MIN_TAB_W + 40.0 + 6.0;
     if panels.update
-        && let Some(chip) = update_chip(layer, engine, theme, inbox[0] - 8.0, min_x, mouse)
+        && let Some(chip) = chrome_chip(
+            layer,
+            engine,
+            theme,
+            "Update Rift",
+            theme.warning,
+            chip_right,
+            min_x,
+            mouse,
+        )
     {
         hits.push(Hit {
             rect: chip,
             target: ClickTarget::UpdateChip,
         });
         w = chip[0] - 6.0;
+        chip_right = chip[0] - 6.0;
+    }
+    // a connected phone: its chip left of those (accent: something is
+    // attached to this session right now)
+    if let Some(label) = &panels.remote {
+        let label = super::palette::elide_to(engine, label, 12.0, FONT_SANS, REMOTE_LABEL_MAX_W);
+        if let Some(chip) = chrome_chip(
+            layer,
+            engine,
+            theme,
+            &label,
+            theme.accent,
+            chip_right,
+            min_x,
+            mouse,
+        ) {
+            hits.push(Hit {
+                rect: chip,
+                target: ClickTarget::RemoteChip,
+            });
+            w = chip[0] - 6.0;
+        }
     }
     // everything else on the right lays out left of these buttons
     let w = w;

@@ -1,0 +1,1 @@
+{"t":"older","pane":12,"has_older":false,"blocks":[{"id":3,"command":"ls -la","state":"done","exit":null,"duration_ms":12,"cwd":null,"branch":null,"output":"total 0\n","dropped":0,"restored":true}]}

@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/rift-core",
     "crates/rift-pty",
+    "crates/rift-remote",
     "crates/rift-renderer",
     "crates/rift-terminal",
 ]
@@ -19,6 +20,7 @@ license = "MIT"
 rift-core = { path = "crates/rift-core" }
 rift-pty = { path = "crates/rift-pty" }
 rift-renderer = { path = "crates/rift-renderer" }
+rift-remote = { path = "crates/rift-remote" }
 
 # gfx — wgpu pinned to the major glyphon supports
 wgpu = "29"
@@ -48,6 +50,23 @@ env_logger = "0.11"
 png = "0.18"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 flate2 = "1"
+# remote gateway (`rift-terminal remote`) and relay: sync WebSocket; TLS only
+# through rift-remote's `tls` feature (wss:// relay URLs)
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+# wss:// relays (rift-remote `tls`): rustls with the ring provider and the
+# webpki root set compiled in — no OpenSSL, no platform verifier, same roots
+# on macOS and Linux
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12", "logging"] }
+# remote gateway v2 (docs/remote-protocol.md): Noise_XX_25519_ChaChaPoly_BLAKE2s
+# through snow's pure-Rust default resolver with only the primitives v2 uses
+# (no ring, no AES-GCM, no SHA-2 inside snow)
+snow = { version = "0.10", default-features = false, features = ["use-curve25519", "use-chacha20poly1305", "use-blake2", "use-getrandom"] }
+# pairing secrets are stored as SHA-256 hashes
+sha2 = { version = "0.10", default-features = false }
+# pairing QR codes: the module matrix only (no image/svg renderers)
+qrcode = { version = "0.14", default-features = false }
+# base64url keys and secrets (already in the tree through alacritty_terminal)
+base64 = "0.22"
 # release-manifest signatures (verify only: no RNG, no PEM)
 ed25519-compact = { version = "2.6.0", default-features = false }
 

@@ -81,7 +81,8 @@ rebound. Full list: [keyboard shortcuts](docs/keyboard-shortcuts.md).
 | Inline images (kitty graphics, iTerm2) | Automatic: `kitten icat`, `imgcat`, `timg`, `yazi`, `chafa` |
 | Paste safety | Multi-line paste into a shell asks before running |
 | SSH profiles with remote blocks | Palette → *SSH: host*; *Install Rift shell integration on host* once |
-| Automation socket | `rift-terminal ctl list`, `focus`, `split`, `open`, `send-text` |
+| Automation socket | `rift-terminal ctl list`, `focus`, `blocks`, `split`, `open`, `send-text` |
+| Phone companion | Settings → *Remote access*: pair an iPhone or Android phone by QR code, follow panes live, run commands and send Ctrl-C from it; end-to-end encrypted, directly on your network or through a self-hostable relay that only sees ciphertext (app in `mobile/`) |
 | Themes — 4 built in, your TOML or Warp YAML, OS light/dark sync | Settings → Themes, or `~/.config/rift/themes/` |
 | Launch configurations (Warp YAML) | Palette → *Launch configuration: name* |
 | Alert when a long command finishes out of view (toast, or desktop notification in the background) | On by default, after 10 s |

@@ -32,3 +32,5 @@ keyboard. The [project README](../README.md) explains what Rift is and why.
 | [terminal-landscape-roadmap.md](terminal-landscape-roadmap.md) | Terminal survey, prioritized plan and status |
 | [warp-parity.md](warp-parity.md) | Non-AI Warp parity matrix and gaps |
 | [mobile-remote-plan.md](mobile-remote-plan.md) | Mobile companion plan and open decisions |
+| [remote-protocol.md](remote-protocol.md) | Wire format and limits between the remote gateway and the companion |
+| [mobile-threat-model.md](mobile-threat-model.md) | Trust model and threat model of the remote gateway |

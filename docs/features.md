@@ -630,7 +630,9 @@ signed manifest.
 Each window listens on `~/.local/share/rift/control/<pid>.sock`
 (`control_api`, Settings → General → Automation):
 
-- `"navigate"` (default): `list`, `status`, `focus`, and
+- `"navigate"` (default): `list`, `status`, `focus`, `blocks` (a pane's
+  last command blocks, read-only: up to 30 per request, each output cut to
+  its last 500 lines and 64 KiB; `--before ID` pages back), and
   `prepare-restart`, which an updating window sends to the others (save
   the layout, keep durable shells, quit). It must carry the token from that
   update's marker (`update-pending.json`, readable by you only, under 60 s
@@ -639,11 +641,17 @@ Each window listens on `~/.local/share/rift/control/<pid>.sock`
 - `"full"`: also `split`, `open` (optionally running a command) and
   `send-text` (types into a shell).
 - `"off"`: no socket. Any unrecognised value (`"false"`, a typo) is
-  treated as `"off"` and logs a warning.
+  treated as `"off"` and logs a warning. While `remote_access` is on, the
+  socket stays open for the remote gateway's requests only: `status`,
+  `blocks`, `remote-input` and `remote-status` (the gateway's notice that a
+  phone connected or left).
+- `remote-input` (types a command at a pane's prompt, or sends keys) is
+  accepted only while `remote_access` is on, whatever `control_api` says.
+- `blocks` with `"meta": true` leaves the output out.
 - `ctl focus --tab N` / `--pane ID`: tabs count from 0, as in `ctl list`;
   a non-numeric value is rejected with exit code 2.
 
-`rift-terminal ctl [--pid PID] list|status|focus|split|open|send-text` is
+`rift-terminal ctl [--pid PID] list|status|focus|blocks|split|open|send-text|request JSON` is
 the client (`ctl help` for flags); the newest window answers unless `--pid`
 names one. `rift-terminal --version` and `--help` print the version and usage; requests are newline-delimited JSON, answered on the
 UI thread. The session switcher (⇧⌘O) uses it to list and focus tabs of
@@ -651,6 +659,69 @@ other Rift windows. Permission changes from Settings or config reload revoke
 existing connections and queued requests before execution. Connections are
 limited to 32, with five-second read/write inactivity timeouts; request lines
 are bounded to 1 MiB while reading.
+
+## Remote access (phone companion)
+
+Off by default. **Settings › Remote access › Allow remote access**
+(`remote_access`) starts the gateway (`rift-terminal remote --managed`, one
+per user, log in `<data dir>/remote/gateway.log`); turning it off stops it
+within about two seconds, and it also exits 30 seconds after the last Rift
+window closes. It listens on `remote_listen` (`0.0.0.0:7878`); the status
+line shows the addresses, or how many devices are connected.
+
+- **Pairing.** *Pair a phone* shows a QR code, the `rift-remote://pair?…`
+  link with a *Copy link* button, and a 2-minute countdown (then *Expired —
+  Pair again*). The link works once. *View only* makes the next link pair a
+  device that can watch but not run commands or send keys.
+- **Paired devices** lists each phone with its platform, pairing date and
+  *connected* (or *connected via relay*) / last seen, an *Operate* / *View
+  only* choice (raising a phone to *Operate* asks first; its connections close
+  and reconnect with the new permission within a second, and a lowered
+  permission applies at once), and *Revoke*, which asks first ("Revoke
+  <name>? It disconnects now and cannot reconnect without pairing again."),
+  then closes its connections within a second.
+- **Recent connections** lists the newest 20 connections and failed
+  attempts: device (or *Unknown device*), via LAN or Relay, address, start,
+  duration or *connected*, and why it ended (`remote history` shows the
+  newest 500).
+- **Relay** (outside your network): a `wss://` relay URL (`remote_relay`)
+  makes the gateway also reachable through it, and pairing links carry it.
+  The status shows *Off*, *Connecting…*, *Connected via <host>* or the error.
+  The relay only forwards encrypted traffic; host one with `rift-terminal
+  relay` or `packaging/relay.Dockerfile` (behind a TLS proxy such as Caddy).
+  A Tailscale or other private-network address of the computer works
+  without a relay: it is listed in the pairing link like any other address.
+- **Indicator.** While a phone is connected, every window shows a
+  *Remote · <device>* chip (*Remote · N devices*) in the tab bar; its
+  tooltip names the devices and a click opens the Remote access page.
+- **What a phone can do.** See windows, tabs and panes; follow a pane's
+  blocks live, page back through older ones, and resume after a dropped
+  connection without a gap; get notified when commands finish. An
+  `operate` device also runs a command at a pane's prompt (it becomes a
+  normal block and history entry; a pane that is running something answers
+  *busy*) and sends keys (Ctrl-C, Esc, Tab, arrows, …), which reach the
+  program when one is running. Each one shows a toast: "<device> ran <cmd>"
+  or "<device> sent ctrl+c". Page Up and Page Down at a prompt do nothing
+  (the phone scrolls itself), and keys from a phone skip vim mode.
+- **Security.** Traffic is end-to-end encrypted (Noise XX) and the phone pins
+  the desktop's key; see [mobile-threat-model.md](mobile-threat-model.md)
+  and the wire format in [remote-protocol.md](remote-protocol.md).
+- **CLI.** `rift-terminal remote pair [--view]` prints the QR code and link
+  in the terminal, `remote devices` lists devices, `remote revoke ID`
+  revokes one, `remote permission ID operate|view` changes one,
+  `remote history [--limit N]` lists connections, `remote [--listen ADDR]`
+  runs a gateway in the foreground, and `rift-terminal relay [--listen
+  ADDR]` (or the standalone `rift-relay` binary) runs a relay
+  (`0.0.0.0:8790`; `--trust-forwarded` behind a proxy).
+- **The app** (`mobile/`): tries the computer's own addresses first and the
+  relay second, reconnects at once when the phone changes networks (moving
+  home upgrades to the direct path), shows *Offline* without retrying while
+  there is no network, closes its connections 30 seconds after going to the
+  background (3 minutes while a "notify me" command runs; Android 15+ and iOS
+  may cut them sooner, and it reconnects on return), and can require
+  Face ID / fingerprint on launch, after 5 minutes away, and before running
+  commands. With a push token it hands the computers, they alert through the
+  Expo push service while the app is closed (`mobile/README.md` › Push).
 
 ## Notifications (attention center)
 

@@ -21,7 +21,7 @@ jobs:
           - os: macos-14
             gates: fmt clippy test doc docs release
           - os: ubuntu-24.04
-            gates: fmt clippy test doc shell docs release
+            gates: fmt clippy test doc shell docs mobile release
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -38,6 +38,18 @@ jobs:
         run: rustup toolchain install
 
       - uses: Swatinem/rust-cache@v2
+
+      # The mobile gate (Expo companion): Node 22 and the pnpm version
+      # pinned in mobile/package.json's packageManager
+      - name: Install Node and pnpm
+        if: runner.os == 'Linux'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Enable pnpm (corepack)
+        if: runner.os == 'Linux'
+        working-directory: mobile
+        run: corepack enable && pnpm --version
 
       - name: Gates
         run: scripts/gates.sh ${{ matrix.gates }}

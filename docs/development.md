@@ -71,12 +71,13 @@ display-line building). Rendering is verified with the script driver below.
 | `doc` | `cargo doc --workspace --no-deps --locked` with rustdoc warnings denied |
 | `shell` | `shellcheck` on packaging, scripts, git hooks and the bash hooks; `zsh -n` and `fish --no-execute` on the zsh and fish hooks |
 | `docs` | `CLAUDE.md` and `AGENTS.md` are identical; every relative link in every Markdown file resolves (the vendored crates' upstream docs excepted) |
+| `mobile` | In `mobile/`: `pnpm install --frozen-lockfile`, `pnpm typecheck`, `pnpm test` (vitest; decodes `crates/rift-remote/fixtures/`, the files the Rust protocol tests decode too) |
 | `release` | `cargo build --release --locked` |
 | `ui` | `scripts/ui-smoke.sh`: isolated scripted input, state assertions and PNG capture; requires Python 3 and a display (or `xvfb-run`) |
 | `linux` | `clippy`, `test` and `release` inside the Linux docker image, then `shell` and the scripted UI regressions (Xvfb, software Vulkan) in `packaging/ci-ubuntu.Dockerfile`, which installs the CI runner's packages from `packaging/ci-apt.txt` |
 
 ```sh
-scripts/gates.sh                 # fmt clippy test doc shell docs
+scripts/gates.sh                 # fmt clippy test doc shell docs mobile
 scripts/gates.sh all             # + release + ui + linux
 scripts/gates.sh clippy test     # a subset
 scripts/gates.sh --list
@@ -86,7 +87,7 @@ Every requested gate runs even after one fails; the summary lists each result
 with its time and the commit. A gate whose tool is missing fails instead of
 passing silently. CI (`.github/workflows/ci.yml`) runs `scripts/gates.sh`
 on macOS 14 (fmt clippy test doc docs release) and Ubuntu 24.04 (the same plus
-`shell` and `ui` under Xvfb/Mesa). The Release workflow runs that same
+`shell`, `mobile` and `ui` under Xvfb/Mesa). The Release workflow runs that same
 reusable validation workflow on the tagged revision before it writes
 `latest.json`.
 
@@ -101,7 +102,12 @@ partial lines, the Settings Files/Terminal pages and keyboard reach, agent
 idle titles (Claude Code, Codex), ⌘⌫ in raw mode, the font picker, and
 updates (the tab bar's chip from a `file://` manifest, the dialog, *Later*
 across a relaunch, Settings › About for an up-to-date and a malformed
-manifest). It uses scratch XDG
+manifest), and remote access (`remote-input` refused while off; a command
+and Ctrl-C from a device with `control_api = "off"`; *busy* while a command
+runs; the managed gateway starting and stopping with the setting; the
+tab-bar chip appearing on an idle window within 2 s of a phone connecting,
+driven by `examples/phone`, which `scripts/ui-smoke.sh` builds unless
+`RIFT_PHONE_BIN` names one). It uses scratch XDG
 config/data directories with notifications disabled and retains captures, state dumps and logs under
 `/tmp/rift-ui-*`. Set `RIFT_TEST_BIN` to test an already built binary;
 otherwise it builds the debug binary first.
@@ -155,11 +161,49 @@ memory, key-to-frame latency and TUI round trips; compare against
 ## Architecture
 
 ```
-rift-terminal     winit app, views, input routing, a11y, control socket, script driver, update restarts
+rift-terminal     winit app, views, input routing, a11y, control socket, script driver, update restarts, `remote` command
   ├── rift-renderer   wgpu quad + sprite pipelines, glyphon text, Scene layers
   ├── rift-pty        PTY sessions, reader threads, vte, images, session service
-  └── rift-core       config, themes, keymap, OSC scanner, blocks, completions, git, update check/install
+  ├── rift-core       config, themes, keymap, OSC scanner, blocks, completions, git, update check/install
+  └── rift-remote     mobile wire protocol, Noise XX transport, device registry, WebSocket gateway (over a Source trait)
+
+mobile/           Expo companion (iOS, Android): pnpm, outside the Cargo workspace
 ```
+
+The remote gateway (`rift-terminal remote`) is a separate process, started
+by the windows while `remote_access` is on: it reads and drives every window
+through its control socket (`status`, `blocks`, `remote-input`), so
+networking never runs inside a window. Its format is
+[remote-protocol.md](remote-protocol.md); the app and the crate decode the
+same fixtures, and the TypeScript Noise implementation replays the
+transcript `snow` writes to `crates/rift-remote/fixtures/noise/xx.json`
+(regenerate with `RIFT_UPDATE_FIXTURES=1 cargo test -p rift-remote
+--test noise_fixture`). `crates/rift-remote/examples/phone.rs` is a scripted
+phone for live checks (`--relay-only` forces the relay path).
+`rift-terminal ctl request '<json>'` sends any raw control request.
+
+The relay (`rift_remote::relay`) builds as the standalone `rift-relay`
+binary with `cargo build -p rift-remote --no-default-features --bin
+rift-relay`: without the default `tls` feature (rustls with `ring` and
+webpki roots, which only the gateway needs to dial `wss://` relays) it has
+no TLS or GUI dependencies. `packaging/relay.Dockerfile` builds it into a
+slim non-root image; its header has a compose snippet with Caddy in front
+for TLS. The `ui` gate uses `RIFT_RELAY_BIN` (built by
+`scripts/ui-smoke.sh` when unset).
+
+Checking the companion against a real `wss://` relay without a domain: run
+`rift-relay --listen 127.0.0.1:PORT --trust-forwarded` and
+`cloudflared tunnel --url http://127.0.0.1:PORT` (a temporary
+`*.trycloudflare.com` address with a real certificate), and set
+`remote_relay` to its `wss://` form. The app's hidden `rift://diagnostics`
+screen times a Noise handshake and 1 MiB sealed and opened in gateway-sized
+chunks on the device's JavaScript engine (Hermes on an arm64 emulator and
+the iOS 27 simulator: about 90 ms per handshake and 220–280 ms per MiB each
+way, so about 15–18 ms per 65 000-byte frame); run it on a real phone before
+deciding a native cipher is needed. Android emulators need `-dns-server
+1.1.1.1` when headless for a working network; a phone image
+(`system-images;android-35;google_apis`) has the cellular radio that
+`svc wifi disable` hands over to.
 
 Dependencies flow downward only; `rift-core` has no graphics dependencies.
 The load-bearing invariants (absolute line model, resize compensation, PTY
@@ -202,6 +246,10 @@ Workspace dependencies (`Cargo.toml`):
 | `dirs` | Home and standard directories | |
 | `ed25519-compact` (no default features) | Verifies the release manifest's signature | No dependencies; verify only |
 | `log`, `env_logger` | Logging (`RUST_LOG=info`) | |
+| `tungstenite` 0.30 (`handshake` only) | The remote gateway's WebSocket server (`rift-remote`) | Synchronous, thread per client like the control socket; no TLS features |
+| `snow` 0.10 (pure-Rust resolver: curve25519, chacha20poly1305, blake2, getrandom) | Noise XX for the remote gateway | No `std` feature, so no `ring` |
+| `qrcode` 0.14 (no default features), `sha2` 0.10, `base64` 0.22 | Pairing QR matrix, hashed pairing secrets, key encoding | |
+| `rustls` 0.23 (`std`, `ring`, `tls12`; via `tungstenite/rustls-tls-webpki-roots`) | The gateway dialing a `wss://` relay | `rift-remote`'s default `tls` feature; no OpenSSL or cmake; the relay binary builds without it |
 
 App-only: `accesskit` / `accesskit_winit` (screen readers), `global-hotkey`,
 `regex` (find), `libc`, `unicode-segmentation` (grapheme-aware editing), `zeno` (rasterizes brand marks Nerd Fonts lacks,

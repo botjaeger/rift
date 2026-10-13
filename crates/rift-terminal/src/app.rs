@@ -575,6 +575,8 @@ pub struct App {
     /// service behind).
     durable_allowed: bool,
     update: UpdateUi,
+    /// Remote access: the gateway's status, its start, pairing.
+    remote: RemoteUi,
     /// A `prepare-restart` request was answered: quit, keeping durable
     /// shells.
     restart_requested: bool,
@@ -980,7 +982,21 @@ enum ConfirmAction {
     },
     /// Install a release and restart (Update / Later).
     Update(Box<UpdatePlan>),
+    /// Unpair a phone (Settings › Remote access).
+    RevokeDevice {
+        id: String,
+        name: String,
+    },
+    /// Let a view-only phone run commands and send keys again.
+    AllowOperate {
+        id: String,
+        name: String,
+    },
 }
+
+/// The Operate confirmation's description.
+const ALLOW_OPERATE: &str =
+    "It can run commands and send keys in your tabs. Its open connections reconnect.";
 
 /// What the update dialog offers (computed when it opens).
 #[derive(Debug, Clone, PartialEq)]
@@ -1015,6 +1031,33 @@ struct UpdateUi {
     /// `confirm_start` ran (it runs once).
     start_confirmed: bool,
 }
+
+/// This window's view of the remote gateway (`remote.rs`,
+/// `rift_remote::registry`): read from `<data dir>/remote/` at most once a
+/// second, never per frame.
+#[derive(Default)]
+struct RemoteUi {
+    /// The running gateway's `status.json` (`None`: no gateway holds the
+    /// lock).
+    status: Option<rift_remote::registry::Status>,
+    /// `status.json`'s mtime when `status` was read (re-read on change).
+    status_mtime: Option<std::time::SystemTime>,
+    /// Last poll; the next is due a second later.
+    polled: Option<Instant>,
+    /// Last time this window started a gateway (at most every 5 s).
+    spawned: Option<Instant>,
+    /// `remote-status` notices received from the gateway.
+    notices: u64,
+    /// When the tab-bar chip last appeared, changed or went away.
+    chip_changed: Option<Instant>,
+}
+
+/// How often the remote gateway's files are read.
+const REMOTE_POLL: Duration = Duration::from_secs(1);
+/// A window starts a gateway at most this often.
+const REMOTE_SPAWN_EVERY: Duration = Duration::from_secs(5);
+/// Longest relay URL the Settings field takes, in bytes.
+const MAX_RELAY_URL: usize = 512;
 
 /// The release page when a manifest names none.
 const RELEASES_PAGE: &str = "https://github.com/botjaeger/rift-releases/releases";
@@ -1171,6 +1214,7 @@ impl App {
             persist_session,
             durable_allowed,
             update: UpdateUi::default(),
+            remote: RemoteUi::default(),
             restart_requested: false,
             tab_drag: None,
             history: Default::default(),
@@ -1199,6 +1243,8 @@ impl App {
     /// Re-apply everything derived from Config (theme, metrics, keymap).
     fn apply_config(&mut self) {
         self.sync_control_server();
+        // remote access turned on starts a gateway now; off clears pairing
+        self.poll_remote(true);
         if self.window.is_some() {
             self.sync_update_checks();
         }
@@ -2712,6 +2758,12 @@ impl App {
                     | ClickTarget::SettingsCopyVersion
                     | ClickTarget::SettingsUpdate
                     | ClickTarget::UpdateChip
+                    | ClickTarget::RemoteChip
+                    | ClickTarget::RemotePair
+                    | ClickTarget::RemoteViewOnly
+                    | ClickTarget::RemoteCopyLink
+                    | ClickTarget::RemoteRevoke(_)
+                    | ClickTarget::RemotePermission(..)
                     | ClickTarget::PaneClose(_)
                     | ClickTarget::ToggleExplorer
                     | ClickTarget::ToggleReview
@@ -2728,6 +2780,7 @@ impl App {
                     | ClickTarget::SettingsKeybind(_)
                     | ClickTarget::SettingsKeybindReset(_),
                 ) => Some(CursorIcon::Pointer),
+                Some(ClickTarget::RemoteRelay) => Some(CursorIcon::Text),
                 _ => None,
             }
         };
@@ -2837,6 +2890,19 @@ impl App {
     /// synchronized panes).
     fn paste_text(&mut self, text: &str) {
         if text.is_empty() {
+            return;
+        }
+        // the relay field while it is edited (one line, no controls)
+        if self.settings.open
+            && let Some(draft) = self.settings.remote.relay_edit.as_mut()
+        {
+            let clean: String = text.trim().chars().filter(|c| !c.is_control()).collect();
+            if draft.len() + clean.len() <= MAX_RELAY_URL {
+                draft.push_str(&clean);
+            }
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
             return;
         }
         let editor_active = self.editor_active;
@@ -5770,6 +5836,7 @@ impl App {
             notifications_open: self.notifications.open,
             unread: self.unread_attention(),
             update: self.update_chip().is_some(),
+            remote: self.remote_chip(),
         };
         let notification_entries = if self.notifications.open {
             self.notification_entries()
@@ -7011,6 +7078,35 @@ impl App {
                     destructive: true,
                     processes: false,
                 },
+                ConfirmAction::RevokeDevice { name, .. } => {
+                    update_title = format!("Revoke {name}?");
+                    Dialog {
+                        title: &update_title,
+                        description:
+                            "It disconnects now and cannot reconnect without pairing again.".into(),
+                        note: "",
+                        lines: commands,
+                        empty_line: "",
+                        confirm_label: "Revoke",
+                        cancel_label: "Cancel",
+                        destructive: true,
+                        processes: false,
+                    }
+                }
+                ConfirmAction::AllowOperate { name, .. } => {
+                    update_title = format!("Let {name} run commands?");
+                    Dialog {
+                        title: &update_title,
+                        description: ALLOW_OPERATE.into(),
+                        note: "",
+                        lines: commands,
+                        empty_line: "",
+                        confirm_label: "Allow",
+                        cancel_label: "Cancel",
+                        destructive: false,
+                        processes: false,
+                    }
+                }
                 ConfirmAction::Update(plan) => {
                     update_title = format!("Update to Rift v{}?", plan.manifest.version);
                     Dialog {
@@ -7215,6 +7311,10 @@ impl App {
             }
             ClickTarget::SettingsCopyVersion => ("Copy version".into(), None),
             ClickTarget::UpdateChip => (format!("v{} available", self.update_chip()?), None),
+            ClickTarget::RemoteChip => {
+                self.remote.status.as_ref()?;
+                (format!("Connected: {}", self.remote_clients_text()), None)
+            }
             ClickTarget::SettingsOpenConfig => (
                 "Open in the default editor".into(),
                 rift_core::config::config_path()
@@ -8102,6 +8202,10 @@ impl App {
             }
             return true;
         }
+        // the relay field takes the keys while it is edited
+        if self.relay_edit_key(event) {
+            return true;
+        }
         let recording = self.settings.recording.is_some();
         if !recording && self.handle_settings_focus_key(event, event_loop, window) {
             return true;
@@ -8529,11 +8633,28 @@ impl App {
             return;
         }
 
+        let Some(id) = self
+            .tabs
+            .get(self.active)
+            .and_then(|t| t.active())
+            .map(|p| p.session.id)
+        else {
+            return;
+        };
+        self.editor_key_on(id, key, true);
+    }
+
+    /// Apply `key` to pane `id`'s command editor (what is the pane's own:
+    /// editing, history, submit, ^C, ^D, ^L), then to its synchronized
+    /// siblings. `active`: the pane the desktop types into, whose completion
+    /// menu and cursor blink follow (the remote input of another pane
+    /// leaves them alone).
+    fn editor_key_on(&mut self, id: PaneId, key: EditorKey, active: bool) {
         let autocomplete_pairs = self.config.autocomplete_pairs;
         let mut submitted: Option<(PaneId, String)> = None;
         let mut signal: Option<(PaneId, &'static [u8])> = None;
         let mut cut: Option<String> = None;
-        let Some(pane) = self.tabs.get_mut(self.active).and_then(|t| t.active_mut()) else {
+        let Some(pane) = self.find_tab_of_pane(id).and_then(|(_, t)| t.pane_mut(id)) else {
             return;
         };
         let mut edited = true;
@@ -8597,14 +8718,12 @@ impl App {
                 pane.session.write(cmd.as_bytes());
                 pane.session.write(b"\n");
                 submitted = Some((pane.session.id, cmd));
-                self.completion.close();
                 edited = false;
             }
             EditorKey::Interrupt => {
                 pane.editor.clear();
                 pane.session.write(b"\x03");
                 signal = Some((pane.session.id, b"\x03"));
-                self.completion.close();
                 edited = false;
             }
             EditorKey::Eof => {
@@ -8615,37 +8734,48 @@ impl App {
                 edited = false;
             }
         }
+        if active && (submitted.is_some() || signal.is_some()) {
+            self.completion.close();
+        }
         if let Some(text) = cut {
             self.copy_to_clipboard(text);
         }
         if let Some((id, bytes)) = signal {
             self.write_synced(id, bytes, true);
         }
-        // synchronized inputs: the same command runs in every pane of the tab
-        // only to siblings at a prompt: a pane running vim or another
-        // program would receive the command as keystrokes
         if let Some((id, cmd)) = submitted {
-            let ready = self.synced_siblings(id, true);
-            let busy = self.input_targets(id).len() - 1 - ready.len();
-            for other in ready {
-                self.submit_to(other, &cmd);
-            }
-            if busy > 0 {
-                self.toast(format!(
-                    "Not sent to {busy} synchronized pane{} running a program",
-                    if busy == 1 { "" } else { "s" }
-                ));
-            }
+            self.submit_synced(id, &cmd);
         }
         if edited {
-            if let Some(pane) = self.tabs.get_mut(self.active).and_then(|t| t.active_mut()) {
+            if let Some(pane) = self.find_tab_of_pane(id).and_then(|(_, t)| t.pane_mut(id)) {
                 pane.clear_selection();
                 pane.selected_block = None; // typing returns focus to the input
                 pane.correction = None;
             }
-            self.update_completions();
+            if active {
+                self.update_completions();
+            }
         }
-        self.blink_epoch = Instant::now(); // cursor solid while editing
+        if active {
+            self.blink_epoch = Instant::now(); // cursor solid while editing
+        }
+    }
+
+    /// Synchronized inputs: a command submitted in `id` runs in every pane
+    /// of its tab, but only in siblings at a prompt (a pane running vim or
+    /// another program would receive the command as keystrokes).
+    fn submit_synced(&mut self, id: PaneId, cmd: &str) {
+        let ready = self.synced_siblings(id, true);
+        let busy = self.input_targets(id).len() - 1 - ready.len();
+        for other in ready {
+            self.submit_to(other, cmd);
+        }
+        if busy > 0 {
+            self.toast(format!(
+                "Not sent to {busy} synchronized pane{} running a program",
+                if busy == 1 { "" } else { "s" }
+            ));
+        }
     }
 
     fn find_tab_of_pane(&mut self, pane: PaneId) -> Option<(usize, &mut TabState)> {
@@ -9185,6 +9315,10 @@ impl App {
                 self.queue_review_write(root, vec![(rift_core::review::Op::Revert, path, hunk)]);
             }
             ConfirmAction::Update(plan) => self.install_update(*plan),
+            ConfirmAction::RevokeDevice { id, name } => self.revoke_device(&id, &name),
+            ConfirmAction::AllowOperate { id, name } => {
+                self.set_device_permission(&id, &name, false)
+            }
         }
     }
 
@@ -10474,6 +10608,12 @@ impl App {
         if !matches!(target, Some(ClickTarget::SettingsKeybind(_))) {
             self.settings.recording = None;
         }
+        // a click outside the relay field ends its edit (saved when valid)
+        if self.settings.remote.relay_edit.is_some()
+            && !matches!(target, Some(ClickTarget::RemoteRelay))
+        {
+            self.commit_relay_edit();
+        }
         // a click outside the history pane (and its command line) closes it
         if self.history.open
             && !matches!(
@@ -10578,6 +10718,11 @@ impl App {
                 self.handle_action(AppAction::AttentionCenter, event_loop)
             }
             Some(ClickTarget::UpdateChip) => self.handle_action(AppAction::UpdateRift, event_loop),
+            Some(ClickTarget::RemoteChip) => {
+                self.settings
+                    .open_page(crate::views::settings::Page::Remote);
+                self.poll_remote(true);
+            }
             Some(ClickTarget::Chip(pane, rift_core::PromptChip::GitDiff)) => {
                 // opens the review of that pane's repository (focused first);
                 // a second click closes it, like the tab bar's button
@@ -10761,6 +10906,78 @@ impl App {
                 }
             }
             Some(ClickTarget::SettingsUpdate) => self.update_rift(),
+            Some(ClickTarget::RemotePair) => {
+                self.settings.remote.pairing = None;
+                self.poll_remote(true);
+                self.start_pairing();
+            }
+            Some(ClickTarget::RemoteViewOnly) => {
+                let v = &mut self.settings.remote;
+                v.view_only = !v.view_only;
+                // a shown link keeps the permission it was made with
+                v.pairing = None;
+                v.pairing_wait = false;
+            }
+            Some(ClickTarget::RemoteCopyLink) => {
+                if let Some(url) = self.settings.remote.pairing.as_ref().map(|p| p.url.clone())
+                    && self.copy_to_clipboard(url)
+                {
+                    self.toast("Copied pairing link".into());
+                }
+            }
+            Some(ClickTarget::RemoteRelay) => {
+                if self.settings.remote.relay_edit.is_none() {
+                    self.settings.remote.relay_edit = Some(self.config.remote_relay.clone());
+                }
+                self.settings.focus = Some(ClickTarget::RemoteRelay);
+            }
+            Some(ClickTarget::RemotePermission(id, view)) => {
+                let name = self
+                    .settings
+                    .remote
+                    .devices
+                    .iter()
+                    .find(|d| d.id == *id)
+                    .map_or_else(|| id.clone(), |d| d.name.clone());
+                let already = self
+                    .settings
+                    .remote
+                    .devices
+                    .iter()
+                    .any(|d| d.id == *id && d.view_only == *view);
+                if already {
+                    // pressing the selected option changes nothing
+                } else if *view {
+                    // lowering needs no confirmation
+                    self.set_device_permission(id, &name, true);
+                } else {
+                    self.confirm = Some(ConfirmClose {
+                        opened: Instant::now(),
+                        action: ConfirmAction::AllowOperate {
+                            id: id.clone(),
+                            name: name.clone(),
+                        },
+                        commands: vec![name],
+                    });
+                }
+            }
+            Some(ClickTarget::RemoteRevoke(id)) => {
+                let name = self
+                    .settings
+                    .remote
+                    .devices
+                    .iter()
+                    .find(|d| d.id == *id)
+                    .map_or_else(|| id.clone(), |d| d.name.clone());
+                self.confirm = Some(ConfirmClose {
+                    opened: Instant::now(),
+                    action: ConfirmAction::RevokeDevice {
+                        id: id.clone(),
+                        name: name.clone(),
+                    },
+                    commands: vec![name],
+                });
+            }
             Some(ClickTarget::SettingsCopyVersion) => {
                 if self.copy_to_clipboard(format!("v{}", env!("CARGO_PKG_VERSION"))) {
                     self.toast("Copied version".into());
@@ -10794,6 +11011,8 @@ impl App {
                     }
                     "durable_sessions" => c.durable_sessions = !c.durable_sessions,
                     "check_for_updates" => c.check_for_updates = !c.check_for_updates,
+                    // on: the windows start a gateway; off: it exits by itself
+                    "remote_access" => c.remote_access = !c.remote_access,
                     // off deletes the saved output (apply_config)
                     "save_transcripts" => c.save_transcripts = !c.save_transcripts,
                     "mouse_reporting" => c.mouse_reporting = !c.mouse_reporting,
@@ -11987,7 +12206,7 @@ impl App {
 
     /// Revoke the old listener and queued requests whenever the level changes.
     fn sync_control_server(&mut self) {
-        let level = crate::control::Level::parse(&self.config.control_api);
+        let level = self.control_level();
         if self
             .control_server
             .as_ref()
@@ -12006,7 +12225,7 @@ impl App {
 
     fn handle_control(&mut self, req: crate::control::Request) -> crate::control::Response {
         use crate::control::{Request, Response};
-        if req.level() > crate::control::Level::parse(&self.config.control_api) {
+        if req.level() > self.control_level() {
             return Response::error("not allowed: control permissions changed");
         }
         let ok = |pane: Option<u64>| Response {
@@ -12021,6 +12240,25 @@ impl App {
                 version: Some(env!("CARGO_PKG_VERSION").into()),
                 tabs: self.tabs_info(),
                 ..Default::default()
+            },
+            Request::Blocks {
+                pane,
+                before,
+                limit,
+                meta,
+            } => match self.find_tab_of_pane(pane).and_then(|(_, t)| t.pane(pane)) {
+                Some(p) => {
+                    let page = terminal::remote_blocks(&p.session, before, limit, meta);
+                    Response {
+                        ok: true,
+                        pane: Some(pane),
+                        blocks: page.blocks,
+                        has_older: Some(page.has_older),
+                        oldest: page.oldest,
+                        ..Default::default()
+                    }
+                }
+                None => Response::error("no such pane"),
             },
             Request::Focus { tab, pane } => {
                 self.settings.open = false;
@@ -12086,6 +12324,18 @@ impl App {
                     }
                     None => Response::error("no such pane"),
                 }
+            }
+            Request::RemoteInput {
+                pane,
+                device,
+                command,
+                keys,
+            } => self.remote_input(pane, &device, command, keys),
+            Request::RemoteStatus => {
+                // the gateway's status changed: the chip follows at once
+                self.remote.notices += 1;
+                self.poll_remote(true);
+                ok(None)
             }
             Request::PrepareRestart { token } => {
                 // only for an update in flight from this install: its marker
@@ -12279,6 +12529,13 @@ impl App {
                         .trim()
                         .to_string(),
                 ),
+                ConfirmAction::RevokeDevice { name, .. } => (
+                    format!("Revoke {name}?"),
+                    "It disconnects now and cannot reconnect without pairing again.".into(),
+                ),
+                ConfirmAction::AllowOperate { name, .. } => {
+                    (format!("Let {name} run commands?"), ALLOW_OPERATE.into())
+                }
             };
             let label = match &c.action {
                 ConfirmAction::Close(_) => "Close",
@@ -12287,6 +12544,8 @@ impl App {
                 ConfirmAction::Revert { .. } => "Revert",
                 ConfirmAction::Update(plan) if plan.open_page => "Open download page",
                 ConfirmAction::Update(_) => "Update",
+                ConfirmAction::RevokeDevice { .. } => "Revoke",
+                ConfirmAction::AllowOperate { .. } => "Allow",
             };
             let cancel = match &c.action {
                 ConfirmAction::Update(_) => "Later",
@@ -12565,7 +12824,24 @@ impl App {
                         | ClickTarget::SettingsUpdate
                         | ClickTarget::SettingsEditPrompt
                         | ClickTarget::SettingsKeybind(_)
-                        | ClickTarget::SettingsKeybindReset(_) => (Role::Button, None, false),
+                        | ClickTarget::SettingsKeybindReset(_)
+                        | ClickTarget::RemotePair
+                        | ClickTarget::RemoteCopyLink
+                        | ClickTarget::RemoteRevoke(_) => (Role::Button, None, false),
+                        ClickTarget::RemoteViewOnly => {
+                            (Role::Switch, Some(self.settings.remote.view_only), false)
+                        }
+                        // the name carries the URL (or "editing: …")
+                        ClickTarget::RemoteRelay => (Role::TextInput, None, false),
+                        ClickTarget::RemotePermission(id, view) => (
+                            Role::RadioButton,
+                            None,
+                            self.settings
+                                .remote
+                                .devices
+                                .iter()
+                                .any(|d| d.id == *id && d.view_only == *view),
+                        ),
                         _ => return None,
                     };
                     let label = self
@@ -12828,6 +13104,26 @@ impl App {
                 focused: true,
             });
         }
+        // the tab bar's remote chip (a phone is connected)
+        if let Some(label) = self.remote_chip()
+            && let Some(h) = self
+                .hits
+                .iter()
+                .find(|h| h.target == ClickTarget::RemoteChip)
+        {
+            out.push(PanelNode {
+                label: "Remote access".into(),
+                rect: Some(h.rect),
+                text: None,
+                controls: vec![control(
+                    format!("{label}, connected: {}", self.remote_clients_text()),
+                    Role::Button,
+                    false,
+                    h.rect,
+                )],
+                focused: false,
+            });
+        }
         // the tab bar's "Update Rift" chip
         if let Some(version) = self.update_chip()
             && let Some(h) = self
@@ -12918,6 +13214,66 @@ impl App {
             out,
             "theme_bg={:?} control_api={}",
             self.theme.bg, self.config.control_api
+        );
+        let _ = writeln!(
+            out,
+            "remote_access={} control_level={:?} gateway={:?} gateway_pid={:?} clients={:?} remote_chip={:?} chip_age_ms={:?} remote_notices={} pairing={:?} pairing_wait={} view_only={} devices={:?}",
+            self.config.remote_access,
+            self.control_level(),
+            self.settings.remote.gateway.text(),
+            self.remote.status.as_ref().map(|s| s.pid),
+            self.remote
+                .status
+                .iter()
+                .flat_map(|s| s.clients.iter().map(|c| c.name.clone()))
+                .collect::<Vec<_>>(),
+            self.remote_chip(),
+            self.remote.chip_changed.map(|t| t.elapsed().as_millis()),
+            self.remote.notices,
+            self.settings.remote.pairing.as_ref().map(|p| &p.url),
+            self.settings.remote.pairing_wait,
+            self.settings.remote.view_only,
+            self.settings
+                .remote
+                .devices
+                .iter()
+                .map(|d| format!("{} ({})", d.name, d.detail))
+                .collect::<Vec<_>>(),
+        );
+        let _ = writeln!(
+            out,
+            "remote_relay={:?} relay_line={:?} relay_edit={:?} clients_via={:?} chip_tip={:?} device_access={:?} history={:?}",
+            self.config.remote_relay,
+            self.settings.remote.relay.text(),
+            self.settings.remote.relay_edit,
+            self.remote
+                .status
+                .iter()
+                .flat_map(|s| s
+                    .clients
+                    .iter()
+                    .map(|c| format!("{}:{}", c.name, c.via.as_str())))
+                .collect::<Vec<_>>(),
+            self.remote_chip()
+                .map(|_| format!("Connected: {}", self.remote_clients_text())),
+            self.settings
+                .remote
+                .devices
+                .iter()
+                .map(|d| {
+                    format!(
+                        "{}={}",
+                        d.name,
+                        if d.view_only { "view" } else { "operate" }
+                    )
+                })
+                .collect::<Vec<_>>(),
+            self.settings
+                .remote
+                .history
+                .iter()
+                .map(|h| format!("{} ({})", h.name, h.detail))
+                .collect::<Vec<_>>(),
         );
         let _ = writeln!(
             out,
@@ -13325,6 +13681,588 @@ impl App {
         let visible = self.window.as_ref().and_then(|w| w.is_visible());
         let _ = writeln!(out, "headless={} window_visible={visible:?}", self.headless);
         out
+    }
+}
+
+/// Remote access, the window side of the mobile companion
+/// (docs/remote-protocol.md › Desktop side): the control level, phones'
+/// input, the gateway's start and status, pairing and devices.
+impl App {
+    /// The control socket's level: `control_api`, raised so the gateway's
+    /// requests are served while `remote_access` is on.
+    fn control_level(&self) -> crate::control::Level {
+        crate::control::Level::effective(&self.config.control_api, self.config.remote_access)
+    }
+
+    /// Where a phone's input to `pane` goes right now.
+    fn remote_route(pane: &PaneState) -> crate::remote::Route {
+        use rift_pty::alacritty_terminal::term::TermMode;
+        let alt = pane
+            .session
+            .term
+            .lock()
+            .mode()
+            .contains(TermMode::ALT_SCREEN);
+        let blocks = pane.session.blocks.lock().unwrap();
+        crate::remote::route(
+            alt,
+            blocks.last().map(|b| &b.state),
+            blocks.submit_pending(),
+        )
+    }
+
+    /// `remote-input` (from the gateway): a phone's command or keys for
+    /// `pane`, accepted only while `remote_access` is on. A command needs
+    /// the pane at its prompt in the editor (else `busy`) and is submitted
+    /// as if typed there and Enter pressed; keys act as if pressed on the
+    /// desktop. The desktop shows a toast naming the device.
+    fn remote_input(
+        &mut self,
+        pane: u64,
+        device: &str,
+        command: Option<String>,
+        keys: Option<Vec<String>>,
+    ) -> crate::control::Response {
+        use crate::control::Response;
+        use crate::remote::Route;
+        if !self.config.remote_access {
+            return Response::error("remote access is off");
+        }
+        let route = match self.find_tab_of_pane(pane).and_then(|(_, t)| t.pane(pane)) {
+            Some(p) => Self::remote_route(p),
+            None => return Response::error("no such pane"),
+        };
+        match (command, keys) {
+            (Some(cmd), None) => {
+                // the gateway checked it too: never a line it would not type
+                if cmd.trim().is_empty()
+                    || cmd.len() > rift_remote::MAX_COMMAND
+                    || cmd.chars().any(char::is_control)
+                {
+                    return Response::error(
+                        "bad request: a command is one line of text without control characters",
+                    );
+                }
+                if route != Route::Editor {
+                    return Response::error("busy");
+                }
+                self.remote_submit(pane, &cmd);
+                self.toast(crate::remote::ran_toast(device, &cmd));
+            }
+            (None, Some(names)) => {
+                if names.is_empty() || names.len() > rift_remote::MAX_KEYS {
+                    return Response::error("bad request: 1 to 20 keys");
+                }
+                let Some(keys) = names
+                    .iter()
+                    .map(|n| rift_remote::Key::parse(n))
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    return Response::error("bad request: unknown key");
+                };
+                for key in &keys {
+                    self.remote_key(pane, *key);
+                }
+                self.toast(crate::remote::sent_toast(device, &keys));
+            }
+            _ => return Response::error("bad request: send a command or keys"),
+        }
+        Response {
+            ok: true,
+            pane: Some(pane),
+            ..Default::default()
+        }
+    }
+
+    /// A phone's command for pane `id` at its prompt: the editor's Enter
+    /// path without taking the editor's draft (history, prompt-time
+    /// context, the exact text for the block, synchronized siblings).
+    fn remote_submit(&mut self, id: PaneId, cmd: &str) {
+        if let Some(p) = self.find_tab_of_pane(id).and_then(|(_, t)| t.pane_mut(id)) {
+            p.correction = None;
+        }
+        self.submit_to(id, cmd);
+        if self.active_pane_id() == Some(id) {
+            self.completion.close();
+        }
+        self.submit_synced(id, cmd);
+    }
+
+    /// A phone's key for pane `id`, as if pressed on the desktop: an editor
+    /// key at a prompt (the desktop's own editor handling for the active
+    /// pane; menus and history search stay closed for another pane), else
+    /// the bytes the pane's program asked for (cursor mode, kitty flags),
+    /// to it and its raw synchronized siblings.
+    fn remote_key(&mut self, id: PaneId, key: rift_remote::Key) {
+        use crate::remote::Route;
+        let (press, mods) = input::remote_key_press(key);
+        let Some(route) = self
+            .find_tab_of_pane(id)
+            .and_then(|(_, t)| t.pane(id))
+            .map(Self::remote_route)
+        else {
+            return;
+        };
+        match route {
+            Route::Editor => {
+                let Some(ek) = input::editor_key(&press, mods) else {
+                    return;
+                };
+                if self.active_pane_id() == Some(id) {
+                    self.handle_editor_key(ek);
+                } else if !matches!(
+                    ek,
+                    EditorKey::Complete
+                        | EditorKey::NextCompletionSource
+                        | EditorKey::HistorySearch
+                        | EditorKey::Dismiss
+                        | EditorKey::AcceptGhostWord
+                ) {
+                    self.editor_key_on(id, ek, false);
+                }
+            }
+            Route::Raw => {
+                let option_as_meta = self.option_meta();
+                for target in self.raw_targets(id) {
+                    let Some(p) = self
+                        .find_tab_of_pane(target)
+                        .and_then(|(_, t)| t.pane_mut(target))
+                    else {
+                        continue;
+                    };
+                    let enc = key_encoding(p, option_as_meta);
+                    let Some(bytes) = input::key_to_bytes(&press, mods, enc) else {
+                        continue;
+                    };
+                    p.view_offset = 0;
+                    if target == id {
+                        p.clear_selection();
+                    }
+                    p.session.write(&bytes);
+                    // a phone's key has no release of its own: programs that
+                    // asked for key events get one right after the press
+                    if enc.kitty_flags & crate::keyboard::EVENT_TYPES != 0 {
+                        let up = input::KeyPress {
+                            released: true,
+                            ..press.clone()
+                        };
+                        if let Some(b) = input::key_to_bytes(&up, mods, enc) {
+                            p.session.write(&b);
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    /// The tab-bar chip's label while phones are connected.
+    fn remote_chip(&self) -> Option<String> {
+        let clients = &self.remote.status.as_ref()?.clients;
+        match clients.as_slice() {
+            [] => None,
+            [one] => Some(format!("Remote · {}", one.name)),
+            all => Some(format!("Remote · {} devices", all.len())),
+        }
+    }
+
+    /// The connected devices for the chip's tooltip: `Sam's iPhone via
+    /// relay, Pixel` (direct ones plain).
+    fn remote_clients_text(&self) -> String {
+        self.remote
+            .status
+            .iter()
+            .flat_map(|s| s.clients.iter())
+            .map(|c| match c.via {
+                rift_remote::registry::Via::Relay => format!("{} via relay", c.name),
+                rift_remote::registry::Via::Lan => c.name.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// Settings › Remote access is on screen.
+    fn remote_page_open(&self) -> bool {
+        self.settings.open && self.settings.page == crate::views::settings::Page::Remote
+    }
+
+    /// The gateway's files need reading every second: remote access is on,
+    /// a gateway runs (its chip), or the page is open.
+    fn remote_polling(&self) -> bool {
+        self.config.remote_access || self.remote.status.is_some() || self.remote_page_open()
+    }
+
+    /// Read the gateway's state (at most once a second unless `force`):
+    /// whether one holds the lock and, when `status.json` changed, its
+    /// status; start one while remote access is on and none runs (at most
+    /// every 5 s; a duplicate exits on the lock); refresh Settings › Remote
+    /// access (a pairing that waited for the gateway's addresses, the
+    /// devices while the page is open).
+    fn poll_remote(&mut self, force: bool) {
+        use rift_remote::registry;
+        let now = Instant::now();
+        if !force
+            && self
+                .remote
+                .polled
+                .is_some_and(|t| now.duration_since(t) < REMOTE_POLL)
+        {
+            return;
+        }
+        self.remote.polled = Some(now);
+        let Some(dir) = crate::remote::registry_dir() else {
+            return;
+        };
+        let chip = self.remote_chip();
+        if registry::gateway_running(&dir) {
+            let mtime = registry::status_modified(&dir);
+            if self.remote.status.is_none() || mtime != self.remote.status_mtime {
+                self.remote.status = registry::read_status(&dir);
+                self.remote.status_mtime = mtime;
+            }
+        } else {
+            self.remote.status = None;
+            self.remote.status_mtime = None;
+            if self.config.remote_access
+                && self
+                    .remote
+                    .spawned
+                    .is_none_or(|t| now.duration_since(t) >= REMOTE_SPAWN_EVERY)
+            {
+                self.remote.spawned = Some(now);
+                match crate::remote::spawn_managed(&dir) {
+                    Ok(pid) => log::info!("remote: started the gateway (pid {pid})"),
+                    Err(e) => log::warn!("remote: cannot start the gateway: {e}"),
+                }
+            }
+        }
+        self.sync_remote_view(&dir);
+        if chip != self.remote_chip() {
+            self.remote.chip_changed = Some(now);
+        }
+        if (chip != self.remote_chip() || self.remote_page_open())
+            && let Some(w) = &self.window
+        {
+            w.request_redraw();
+        }
+    }
+
+    /// Settings › Remote access's view of the last poll.
+    fn sync_remote_view(&mut self, dir: &std::path::Path) {
+        use crate::views::settings::{DeviceRow, GatewayLine};
+        let on = self.config.remote_access;
+        let gateway = match (&self.remote.status, on) {
+            (_, false) => GatewayLine::Off,
+            (None, true) => GatewayLine::Starting,
+            (Some(s), true) if !s.clients.is_empty() => GatewayLine::Connected(s.clients.len()),
+            (Some(s), true) => {
+                GatewayLine::Listening(s.addresses.iter().map(|a| a.to_string()).collect())
+            }
+        };
+        self.settings.remote.gateway = gateway;
+        self.settings.remote.relay = self.relay_line();
+        if !on {
+            self.settings.remote.pairing = None;
+            self.settings.remote.pairing_wait = false;
+        }
+        if self.settings.remote.pairing_wait
+            && self
+                .remote
+                .status
+                .as_ref()
+                .is_some_and(|s| !s.addresses.is_empty())
+        {
+            self.start_pairing();
+        }
+        if !self.remote_page_open() {
+            return;
+        }
+        use rift_remote::registry::Via;
+        let connected: Vec<(String, Via)> = self
+            .remote
+            .status
+            .iter()
+            .flat_map(|s| s.clients.iter().map(|c| (c.device.clone(), c.via)))
+            .collect();
+        self.settings.remote.history = self.history_rows(dir);
+        match rift_remote::registry::devices(dir) {
+            Ok(all) => {
+                self.settings.remote.devices_error = None;
+                self.settings.remote.devices = all
+                    .into_iter()
+                    .map(|d| {
+                        use crate::views::prompt_chips::LocalTime;
+                        let paired = LocalTime::at(d.paired_at).date();
+                        let seen = match connected.iter().find(|(id, _)| *id == d.id) {
+                            Some((_, Via::Relay)) => "connected via relay".to_string(),
+                            Some((_, Via::Lan)) => "connected".to_string(),
+                            None => {
+                                let t = LocalTime::at(d.last_seen);
+                                format!("last seen {} {}", t.date(), t.time24())
+                            }
+                        };
+                        DeviceRow {
+                            id: d.id,
+                            name: d.name,
+                            detail: format!(
+                                "{} · paired {paired} · {seen}",
+                                settings::platform_name(&d.platform)
+                            ),
+                            view_only: d.permission == rift_remote::registry::Permission::View,
+                        }
+                    })
+                    .collect();
+            }
+            Err(e) => {
+                self.settings.remote.devices.clear();
+                self.settings.remote.devices_error = Some(format!("Could not read devices: {e}"));
+            }
+        }
+    }
+
+    /// "Pair a phone": a one-time link for the gateway's addresses (waits
+    /// for them when the gateway is still starting).
+    fn start_pairing(&mut self) {
+        use rift_remote::registry::{self, Permission};
+        if !self.config.remote_access {
+            return;
+        }
+        let Some(dir) = crate::remote::registry_dir() else {
+            return;
+        };
+        let addresses = self
+            .remote
+            .status
+            .as_ref()
+            .map(|s| s.addresses.clone())
+            .unwrap_or_default();
+        let view = &mut self.settings.remote;
+        if addresses.is_empty() {
+            view.pairing = None;
+            view.pairing_wait = true;
+            return;
+        }
+        view.pairing_wait = false;
+        let permission = if view.view_only {
+            Permission::View
+        } else {
+            Permission::Operate
+        };
+        match registry::start_pairing(&dir, &addresses, &crate::remote::hostname(), permission) {
+            Ok(link) => {
+                view.pairing = Some(crate::views::settings::PairingView {
+                    qr: registry::qr_matrix(&link.url),
+                    url: link.url,
+                    expires_at: link.expires_at,
+                });
+            }
+            Err(e) => {
+                view.pairing = None;
+                self.toast(format!("Could not start pairing: {e}"));
+            }
+        }
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    /// Revoke (after the confirm dialog): the device's connections close
+    /// within a second and its key is refused from then on.
+    fn revoke_device(&mut self, id: &str, name: &str) {
+        let Some(dir) = crate::remote::registry_dir() else {
+            return;
+        };
+        match rift_remote::registry::revoke(&dir, id) {
+            Ok(true) => self.toast(format!("Revoked {name}")),
+            Ok(false) => self.toast(format!("{name} was already removed")),
+            Err(e) => self.toast(format!("Could not revoke {name}: {e}")),
+        }
+        self.poll_remote(true);
+    }
+
+    /// Operate / View only (Operate after the confirm dialog): the device's
+    /// connections close within a second and reconnect with it.
+    fn set_device_permission(&mut self, id: &str, name: &str, view: bool) {
+        use rift_remote::registry::{self, Permission};
+        let Some(dir) = crate::remote::registry_dir() else {
+            return;
+        };
+        let p = if view {
+            Permission::View
+        } else {
+            Permission::Operate
+        };
+        match registry::set_permission(&dir, id, p) {
+            Ok(true) if view => self.toast(format!("{name} can now only watch")),
+            Ok(true) => self.toast(format!("{name} can now run commands")),
+            Ok(false) => self.toast(format!("{name} was removed")),
+            Err(e) => self.toast(format!("Could not change {name}: {e}")),
+        }
+        self.poll_remote(true);
+    }
+
+    /// End editing the relay field: save it when it is empty (no relay) or
+    /// a ws:// / wss:// URL; anything else is dropped with a toast. Returns
+    /// whether it was saved.
+    fn commit_relay_edit(&mut self) -> bool {
+        let Some(text) = self.settings.remote.relay_edit.take() else {
+            return false;
+        };
+        let text = text.trim().to_string();
+        if !text.is_empty()
+            && let Err(e) = rift_remote::relay::RelayUrl::parse(&text)
+        {
+            self.toast(format!("Relay not saved: {e}"));
+            return false;
+        }
+        if text != self.config.remote_relay {
+            self.config.remote_relay = text;
+            self.save_config();
+            self.apply_config();
+        }
+        self.poll_remote(true);
+        true
+    }
+
+    /// Keys while the relay field is edited: text, ⌫, ⏎ (save; an invalid
+    /// URL stays in the field), Esc (cancel). Other keys end the edit
+    /// (saved when valid) and act as usual.
+    fn relay_edit_key(&mut self, event: &input::KeyPress) -> bool {
+        use winit::keyboard::{Key, NamedKey};
+        let Some(draft) = self.settings.remote.relay_edit.as_mut() else {
+            return false;
+        };
+        let mods = self.modifiers;
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => self.settings.remote.relay_edit = None,
+            Key::Named(NamedKey::Enter) => {
+                let text = draft.trim().to_string();
+                match rift_remote::relay::RelayUrl::parse(&text) {
+                    Err(e) if !text.is_empty() => {
+                        self.toast(format!("Relay: {e}"));
+                    }
+                    _ => {
+                        self.commit_relay_edit();
+                    }
+                }
+            }
+            Key::Named(NamedKey::Backspace) => {
+                if mods.super_key() || mods.alt_key() {
+                    draft.clear();
+                } else {
+                    draft.pop();
+                }
+            }
+            _ if mods.super_key() || mods.control_key() => {
+                // ⌘V pastes into the field; other chords end the edit
+                let action = input::app_action(event, mods, &self.keymap);
+                if action == Some(AppAction::Paste) {
+                    self.paste_from_clipboard();
+                    return true;
+                }
+                self.commit_relay_edit();
+                return false;
+            }
+            Key::Named(NamedKey::Tab) => {
+                self.commit_relay_edit();
+                return false;
+            }
+            _ => match &event.text {
+                Some(t)
+                    if !t.is_empty()
+                        && !t.chars().any(char::is_control)
+                        && draft.len() + t.len() <= MAX_RELAY_URL =>
+                {
+                    draft.push_str(t);
+                }
+                _ => {}
+            },
+        }
+        true
+    }
+
+    /// Settings › Remote access's relay line from the gateway's status.
+    fn relay_line(&self) -> crate::views::settings::RelayLine {
+        use crate::views::settings::RelayLine;
+        use rift_remote::registry::RelayState;
+        if !self.config.remote_access || self.config.remote_relay.trim().is_empty() {
+            return RelayLine::Off;
+        }
+        match self.remote.status.as_ref().and_then(|s| s.relay.as_ref()) {
+            None => RelayLine::Connecting,
+            Some(r) => match r.state {
+                RelayState::Connected => RelayLine::Connected(
+                    rift_remote::relay::RelayUrl::parse(&r.url)
+                        .map(|u| u.host)
+                        .unwrap_or_else(|_| r.url.clone()),
+                ),
+                RelayState::Connecting => RelayLine::Connecting,
+                RelayState::Error => {
+                    RelayLine::Error(r.error.clone().unwrap_or_else(|| "Relay error".into()))
+                }
+            },
+        }
+    }
+
+    /// Recent connections: the connected devices, then `history.jsonl`,
+    /// newest first, at most [`HISTORY_ROWS`].
+    ///
+    /// [`HISTORY_ROWS`]: crate::views::settings::HISTORY_ROWS
+    fn history_rows(&self, dir: &std::path::Path) -> Vec<crate::views::settings::HistoryRow> {
+        use crate::views::prompt_chips::LocalTime;
+        use crate::views::settings::{HISTORY_ROWS, HistoryRow};
+        use rift_remote::registry::{self, Via};
+        let via = |v: Via| match v {
+            Via::Lan => "LAN",
+            Via::Relay => "Relay",
+        };
+        let when = |t: std::time::SystemTime| {
+            let l = LocalTime::at(t);
+            format!("{} {}", l.date(), l.time24())
+        };
+        let mut rows: Vec<HistoryRow> = Vec::new();
+        if let Some(st) = &self.remote.status {
+            let mut live: Vec<_> = st.clients.iter().collect();
+            live.sort_by_key(|c| std::cmp::Reverse(c.since));
+            rows.extend(live.into_iter().map(|c| HistoryRow {
+                name: c.name.clone(),
+                detail: format!("{} · {} · connected", via(c.via), when(c.since)),
+            }));
+        }
+        let all = registry::history(dir);
+        for e in all.iter().rev() {
+            if rows.len() >= HISTORY_ROWS {
+                break;
+            }
+            let lasted =
+                crate::remote::duration_text(e.end.duration_since(e.start).unwrap_or_default());
+            let outcome = match e.reason.as_str() {
+                "closed" | "stopped" | "forgotten" => lasted,
+                "auth" => "refused: not paired".into(),
+                "version" => "refused: other protocol version".into(),
+                "handshake" => "handshake failed".into(),
+                "busy" => "refused: too many connections".into(),
+                "revoked" => format!("{lasted} · revoked"),
+                "permission" => format!("{lasted} · permission changed"),
+                "idle" => format!("{lasted} · timed out"),
+                "too_slow" => format!("{lasted} · too slow"),
+                "too_large" | "bad_request" => format!("{lasted} · protocol error"),
+                _ => format!("{lasted} · connection lost"),
+            };
+            rows.push(HistoryRow {
+                name: e.name.clone().unwrap_or_else(|| "Unknown device".into()),
+                detail: format!(
+                    "{} · {} · {} · {outcome}",
+                    via(e.via),
+                    e.address,
+                    when(e.start)
+                ),
+            });
+        }
+        rows.truncate(HISTORY_ROWS);
+        rows
     }
 }
 
@@ -14506,8 +15444,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             UserEvent::Control(p) => {
-                let response = if p.allowed(crate::control::Level::parse(&self.config.control_api))
-                {
+                let response = if p.allowed(self.control_level()) {
                     self.handle_control(p.request)
                 } else {
                     crate::control::Response::error("not allowed: control permissions changed")
@@ -14649,6 +15586,8 @@ impl ApplicationHandler<UserEvent> for App {
         }
         let tip_due = tip_due.filter(|due| Instant::now() < *due);
         let output_frame = self.output_frame_due;
+        // the remote gateway's files: at most once a second, on any wake
+        self.poll_remote(false);
         if self.script.is_some() {
             self.drive_script(event_loop);
             if let Some(due) = self.script.as_ref().and_then(|s| s.due()) {
@@ -14671,6 +15610,11 @@ impl ApplicationHandler<UserEvent> for App {
             } else {
                 deadlines.push(until);
             }
+        }
+        // remote access: the next read of the gateway's files (chip, the
+        // Settings page and its countdown, the gateway's start)
+        if self.remote_polling() {
+            deadlines.push(self.remote.polled.map_or(now, |t| t + REMOTE_POLL));
         }
         // status toast
         if let Some((_, at)) = &self.toast {

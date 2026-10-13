@@ -14,6 +14,7 @@
 | `~/.local/share/rift/update.json` | Last update check: when, the newest release's manifest, the version *Later* dismissed |
 | `~/.local/share/rift/updates/` | Update downloads (deleted after installing; an interrupted install's leftovers go at the next one), `install.lock` (one window installs at a time) and `relaunch.log` (the restarted app's output until it is confirmed; emptied past 1 MB) |
 | `~/.local/share/rift/update-pending.json` | An update in progress (readable by you only; holds the token other windows' `prepare-restart` needs); the new version removes it 10 s after its first frame, and if it dies before that the old app is put back (`update-failed.json`) |
+| `~/.local/share/rift/remote/` | Remote access (directory 0700, files 0600): `gateway.key` (the desktop's key phones pin), `devices.json` (paired phones), `pairing.json` (live pairing secrets, hashed), `status.json` and `gateway.lock` (the running gateway), `gateway.log`, `relay.json` (the gateway's secret at the relay), `history.jsonl` (the newest 500 connections) |
 | `~/.local/share/rift/restart/` | Each window's layout while an update restarts them (consumed on relaunch; left by a crash, reopened at the next plain launch) |
 
 `XDG_CONFIG_HOME` and `XDG_DATA_HOME` are honored. When the `rift` config or data directory does not exist, an existing one from an earlier name of the app (`shift`, then `runway`) stays active; move it to `rift` when you want the new paths.
@@ -49,9 +50,18 @@ durable_sessions = true           # shells live in the session service: they kee
                                   # (false keeps them in the window process)
 check_for_updates = true          # look for a new release at launch and every 6 h
                                   # ("Update Rift" chip in the tab bar)
-control_api   = "navigate"        # off | navigate (list/status/focus, and an
+control_api   = "navigate"        # off | navigate (list/status/focus/blocks, and an
                                   # update's prepare-restart) | full (also
                                   # split/open/send-text); `rift-terminal ctl`
+remote_access = false             # phone companion: windows start the gateway
+                                  # (`rift-terminal remote --managed`; log in
+                                  # <data dir>/remote/gateway.log); with
+                                  # control_api = "off" the socket then answers
+                                  # only status/blocks/remote-input/remote-status
+remote_listen = "0.0.0.0:7878"    # where the gateway listens
+remote_relay  = ""                # wss://… relay for phones outside your network
+                                  # (empty: none); `rift-terminal relay` or
+                                  # packaging/relay.Dockerfile hosts one
 input_position = "bottom"         # bottom | top — where the command editor sits
 blocks_start = "bottom"           # bottom | top — blocks fill up from the editor (Warp), or start at the pane's top
 prompt        = "rift"           # rift = context chips + chevron

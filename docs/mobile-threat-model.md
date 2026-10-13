@@ -1,0 +1,64 @@
+# Mobile remote: trust model and threat model (Phases 1–2)
+
+Scope: the remote gateway (crate `rift-remote`, run by `rift-terminal
+remote`), the Rift windows that answer it, and the companion app
+(`mobile/`), as specified in [remote-protocol.md](remote-protocol.md),
+including the Phase 2 relay that carries connections from outside the local
+network.
+
+## Trust model
+
+- **The desktop user** owns the shells. The gateway runs as that user and
+  reads and drives Rift windows only through their control sockets, which
+  refuse other uids.
+- **Remote access is off by default.** `remote_access = true` (Settings ›
+  Remote access) starts the gateway; turning it off stops it within 2
+  seconds. A chip in every window's tab bar shows while a device is
+  connected.
+- **A device is trusted after pairing.** Pairing needs the QR code or link
+  shown on the desktop: physical access, or the user passing it on. The
+  secret in it works once, for 2 minutes. The device then has its own key;
+  the desktop lists every paired device and revokes any of them.
+- **The gateway is authenticated by its key,** which the device learned from
+  the pairing link and pins. A machine that answers on the gateway's address
+  without that key cannot complete the handshake.
+- **The network is not trusted.** Every byte after the handshake is
+  encrypted and authenticated (Noise XX, X25519, ChaCha20-Poly1305,
+  BLAKE2s), in both directions.
+- **The relay is not trusted.** It splices sockets and forwards Noise
+  ciphertext; it holds no key and cannot complete a handshake as either side.
+  Whoever runs it learns metadata only (below).
+
+## Assets
+
+| Asset | Why it matters |
+|---|---|
+| Terminal output | May contain secrets, tokens, customer data printed by programs |
+| Commands and working directories | Reveal projects, hosts and habits |
+| The ability to type into a shell | Equivalent to running code as the user |
+| Device private keys (phone) and the gateway key (desktop) | Impersonation of either side |
+| Pairing secrets | Admit a new device for 2 minutes |
+
+## Threats and answers
+
+| Threat | Answer | Left for later |
+|---|---|---|
+| Someone on the network connects | Only paired device keys or a live pairing secret complete a session; failed handshakes are limited per address | — |
+| Someone on the network reads or changes traffic | Noise XX: encrypted and authenticated; a changed byte ends the connection | — |
+| A fake gateway on the network (or a replaced address) | The device pins the gateway key from pairing; the handshake aborts on any other key before the device sends its hello. A LAN address that answers with another key (an impostor, or another network reusing the address) is skipped and the next path tried, the relay last; the host shows "key mismatch" and stops only when the relay, or every path of a round, answered with another key. A network change tries such a host again; an impostor can deny service, never read or impersonate | — |
+| A pairing link is seen by someone else | One use, 2 minutes; the desktop lists the device it created, which can be revoked | Showing the pairing device on the desktop for approval |
+| A device runs something unexpected | `operate` devices only; `view` devices cannot run or send keys. A command runs only at a prompt, as one line without control characters, and becomes a visible block; the desktop shows a toast naming the device. The app asks for confirmation ("Confirm every command", on by default). Face ID / fingerprint before Run needs both the app lock and "Confirm every command" on (plus "Ask before running commands", on by default); then the keys that submit a line at a prompt (`enter`, `ctrl+m`, `ctrl+j`) ask too. Other keys (`ctrl+c`, arrows, `esc`, `tab`, other `ctrl+` letters) are sent without asking: they cannot submit a new command line by themselves | — |
+| A lost or stolen phone | Revoke it on the desktop: its connections close within a second and its key is refused; with the app lock on, nothing shows without Face ID / fingerprint or the device passcode | — |
+| A device floods the desktop | Message size, `run` and `keys` rates, connection count, handshake deadline and idle limits | — |
+| A program in a pane injects protocol data | Output travels as JSON string content; nothing in it is interpreted | — |
+| Another local user drives the gateway | Files under `remote/` are 0600 in a 0700 directory; control sockets check the peer uid | — |
+| Notification content leaks to a push provider | Alerts while the app is closed go through Expo and Apple's / Google's push service only for a device that sent a push token. They carry the computer's name, the exit status, the gateway key and pane number, and the command line only when the user turned on "Show command in notification"; never output. A token the service no longer knows is dropped | — |
+| The gateway key file is copied | Same-user access already reads everything the gateway can | Hardware-backed key storage |
+| The relay operator (or someone who took over the relay) reads traffic | Only Noise ciphertext crosses it; the phone pins the gateway key, so a relay that answers itself fails the handshake, and the host stops with "key mismatch" (the relay routes by the pinned key, so it is not retried past) | — |
+| The relay learns who talks when | Routing ids (a hash of the gateway key), connection times, addresses and byte counts are visible to it | Self-host the relay (`packaging/relay.Dockerfile`) |
+| Someone takes over a gateway's routing id at the relay | A registration must name the gateway's public key and prove it holds the private key (a Noise NK handshake from the relay); without the key nobody can claim the id, before or after a relay restart | — |
+| The relay is flooded | Per-id pair limit, per-address connect rate and socket count (IPv6 per /64), a 10 s total deadline for each upgrade and registration, frame size, idle and accept deadlines; the id cap forgets the longest-offline id first | — |
+| Someone who knows a routing id floods the gateway through the relay | Relay sockets have their own budget at the gateway, so LAN phones are never refused; relay phones can be slowed within the relay's per-address limits (a per-id cap would let the same person lock them out entirely) | — |
+| A phone is picked up unlocked | Optional Face ID / fingerprint lock on launch and after 5 minutes in the background, and before running commands (conditions above); the app switcher shows a privacy cover, and on Android the window is marked secure (FLAG_SECURE) while the lock is on, so the Recents thumbnail, taken before the cover can draw, is blank and screenshots are blocked. A device with no passcode or secure lock screen cannot check anything, so the lock lets the owner in there | — |
+| A device should keep watching but stop typing | Its permission can be lowered to `view` on the desktop; its connections close within a second and reconnect with the new permission | — |
+| Unnoticed access | Every connection and failed handshake is recorded in the connection history the desktop shows; failed handshakes are dropped first when it is full, so a flood of them never hides a paired device's connections | — |

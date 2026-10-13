@@ -210,6 +210,12 @@ impl BlockStore {
         }
     }
 
+    /// A command was submitted at the prompt and the shell has not started
+    /// it yet (no 133;C): the prompt block is no longer free for another.
+    pub fn submit_pending(&self) -> bool {
+        self.submitted.is_some()
+    }
+
     pub fn on_command_start(&mut self, abs: AbsLine, col: usize) {
         if let Some(last) = self.blocks.back_mut()
             && last.state == BlockState::Prompt
@@ -402,9 +408,13 @@ mod tests {
     fn submitted_text_wins_over_screen_text() {
         let mut s = BlockStore::default();
         s.on_prompt_start(0);
+        assert!(!s.submit_pending());
         let exact = "printf 'first\nsecond\n' caf\u{65}\u{301}";
         s.stamp_submit(None, None, exact);
+        // submitted, not started: the prompt is taken
+        assert!(s.submit_pending());
         s.on_output_start(2, "printf 'first cont> second' cafe".into());
+        assert!(!s.submit_pending());
         assert_eq!(s.last().unwrap().command, exact);
         s.on_done(3, Some(0));
         // raw passthrough (no submission): the screen text is all there is
@@ -415,7 +425,9 @@ mod tests {
         // a submission that ran nothing does not label the next command
         s.on_prompt_start(5);
         s.stamp_submit(None, None, "# comment");
+        assert!(s.submit_pending());
         s.on_prompt_start(6);
+        assert!(!s.submit_pending(), "a new prompt frees it");
         s.on_output_start(7, "pwd".into());
         assert_eq!(s.last().unwrap().command, "pwd");
         // nor does one made while a command is running

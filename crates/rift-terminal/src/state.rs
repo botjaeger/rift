@@ -28,6 +28,9 @@ pub enum ClickTarget {
     ToggleNotifications,
     /// Top-bar "Update Rift" chip: the update dialog.
     UpdateChip,
+    /// Top-bar "Remote · …" chip (a phone is connected): Settings › Remote
+    /// access.
+    RemoteChip,
     /// The owned command editor of a pane (click places the cursor).
     Editor(PaneId),
     /// A clickable prompt chip (Warp): the cwd, branch, PHP, Python and
@@ -83,6 +86,19 @@ pub enum ClickTarget {
     SettingsKeybind(String),
     /// Keybindings page ↺: drop the override (back to the default).
     SettingsKeybindReset(String),
+    /// Settings › Remote access: "Pair a phone" / "Pair again".
+    RemotePair,
+    /// Settings › Remote access: pair the next phone view-only.
+    RemoteViewOnly,
+    /// Settings › Remote access: copy the pairing link.
+    RemoteCopyLink,
+    /// Settings › Remote access: revoke the paired device with this id.
+    RemoteRevoke(String),
+    /// Settings › Remote access: the relay URL field (edit `remote_relay`).
+    RemoteRelay,
+    /// Settings › Remote access: set the device with this id to Operate
+    /// (`false`, confirmed first) or View only (`true`).
+    RemotePermission(String, bool),
 }
 
 pub struct Hit {

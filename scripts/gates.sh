@@ -2,7 +2,7 @@
 # shellcheck disable=SC2317,SC2329  # gate_* functions are called as "gate_$g" (SC2317 on shellcheck <0.10)
 # Rift quality gates: one runner for local checks and CI.
 #
-#   scripts/gates.sh                 # default set: fmt clippy test doc shell docs
+#   scripts/gates.sh                 # default set: fmt clippy test doc shell docs mobile
 #   scripts/gates.sh all             # default set + release + ui + linux
 #   scripts/gates.sh fmt clippy      # only the named gates
 #   scripts/gates.sh --list          # describe every gate
@@ -16,8 +16,8 @@
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
-DEFAULT=(fmt clippy test doc shell docs)
-ALL=(fmt clippy test doc shell docs release ui linux)
+DEFAULT=(fmt clippy test doc shell docs mobile)
+ALL=(fmt clippy test doc shell docs mobile release ui linux)
 
 describe() {
     cat <<'EOF'
@@ -27,6 +27,7 @@ test     cargo test --workspace --locked, and each vendored crate (all features)
 doc      cargo doc --workspace --no-deps --locked, rustdoc warnings denied
 shell    shellcheck on packaging/*.sh, scripts/*.sh, .githooks/*, bash hooks; zsh -n and fish --no-execute on their hooks
 docs     CLAUDE.md and AGENTS.md identical; every relative link in *.md resolves (vendored crates' upstream docs excepted)
+mobile   the Expo companion in mobile/: pnpm install --frozen-lockfile, typecheck, vitest (incl. the shared protocol fixtures)
 release  cargo build --release --locked
 ui       isolated scripted UI regressions (display or xvfb-run required)
 linux    clippy + test + release build in packaging/linux-verify.Dockerfile, then shell + scripted UI (xvfb) on the CI runner's packages in packaging/ci-ubuntu.Dockerfile (docker)
@@ -113,6 +114,11 @@ gate_docs() {
     return "$rc"
 }
 
+gate_mobile() {
+    have pnpm || { echo "pnpm not installed (corepack enable)"; return 1; }
+    (cd mobile && pnpm install --frozen-lockfile && pnpm typecheck && pnpm test)
+}
+
 gate_linux() {
     have docker || { echo "docker not installed"; return 1; }
     docker build -q -t rift-linux-verify -f packaging/linux-verify.Dockerfile packaging >/dev/null || return 1
@@ -121,13 +127,16 @@ gate_linux() {
         -e CARGO_TARGET_DIR=/src/target/linux-docker \
         rift-linux-verify bash -c '
             scripts/gates.sh clippy test &&
-            cargo build --release --locked' || return 1
+            cargo build --release --locked &&
+            cargo build --release --locked -p rift-remote --example phone --bin rift-relay' || return 1
     # The shell and UI gates run on the CI runner's packages, with the
     # environment of ci.yml's UI step: a library, font or shellcheck version
     # the runner differs on fails here first.
     docker build -q -t rift-ci-ubuntu -f packaging/ci-ubuntu.Dockerfile packaging >/dev/null || return 1
     docker run --rm --init -v "$PWD:/src:ro" -w /src \
         -e RIFT_TEST_BIN=/src/target/linux-docker/release/rift-terminal \
+        -e RIFT_PHONE_BIN=/src/target/linux-docker/release/examples/phone \
+        -e RIFT_RELAY_BIN=/src/target/linux-docker/release/rift-relay \
         -e LIBGL_ALWAYS_SOFTWARE=1 -e WGPU_BACKEND=vulkan \
         rift-ci-ubuntu bash -c 'scripts/gates.sh shell && xvfb-run -a scripts/gates.sh ui'
 }

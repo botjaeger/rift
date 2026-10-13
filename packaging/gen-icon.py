@@ -14,6 +14,7 @@ Outputs (all under assets/icon/):
   hicolor/<size>x<size>/apps/rift.png   Linux icon theme (.deb, AppImage, tarball)
   rift.ico                        Windows (16–256 px)
   rift-window.png                 256 px window icon embedded in the binary
+and mobile/assets/icon.png (iOS, opaque) and adaptive-icon.png (Android foreground).
 """
 
 from __future__ import annotations
@@ -91,6 +92,15 @@ def render(size: int, colors: dict[str, tuple[int, int, int]]) -> Image.Image:
             outline=HAIRLINE,
             width=max(1, round(4 * scale)),
         )
+    marks(d, p, scale, colors)
+    return img.resize((size, size), Image.Resampling.LANCZOS)
+
+
+def marks(d: ImageDraw.ImageDraw, p, scale: float, colors: dict[str, tuple[int, int, int]]) -> None:
+    """The chevron and the cursor, through the design-grid mapping `p`."""
+
+    def box(b: tuple[int, int, int, int]) -> list[float]:
+        return [p(b[0]), p(b[1]), p(b[2]), p(b[3])]
 
     # chevron: a round-capped, round-joined polyline
     width = CHEVRON_WIDTH * scale
@@ -101,7 +111,26 @@ def render(size: int, colors: dict[str, tuple[int, int, int]]) -> Image.Image:
         d.ellipse([x - r, y - r, x + r, y + r], fill=(*colors["accent"], 255))
 
     d.rounded_rectangle(box(CURSOR), radius=CURSOR_RADIUS * scale, fill=(*colors["cursor"], 255))
-    return img.resize((size, size), Image.Resampling.LANCZOS)
+
+
+def render_mobile(colors: dict[str, tuple[int, int, int]], tile_fraction: float, opaque: bool) -> Image.Image:
+    """A 1024 px phone icon: the tile's area of the design grid mapped onto the central
+    `tile_fraction` of the canvas, with no tile shape (the OS masks the corners). `opaque`
+    fills the canvas with `surface` (iOS needs an icon without alpha); otherwise the
+    background stays transparent (an Android adaptive-icon foreground)."""
+    s = SIZE * SS
+    tile = TILE[2] - TILE[0]
+    scale = s * tile_fraction / tile
+    off = (s - tile * scale) / 2 - TILE[0] * scale
+
+    def p(v: float) -> float:
+        return off + v * scale
+
+    bg = (*colors["surface"], 255) if opaque else (0, 0, 0, 0)
+    img = Image.new("RGBA", (s, s), bg)
+    marks(ImageDraw.Draw(img), p, scale, colors)
+    img = img.resize((SIZE, SIZE), Image.Resampling.LANCZOS)
+    return img.convert("RGB") if opaque else img
 
 
 def main() -> int:
@@ -148,6 +177,14 @@ def main() -> int:
         append_images=[at(px) for px in ICO_SIZES[:-1]],
     )
     print(f"wrote rift.ico ({len(ICO_SIZES)} sizes)")
+
+    # the phone companion: iOS draws the whole square under its own mask; Android keeps
+    # adaptive-icon foregrounds inside the central 2/3 (the safe zone)
+    mobile = ROOT / "mobile" / "assets"
+    mobile.mkdir(parents=True, exist_ok=True)
+    render_mobile(colors, 1.0, opaque=True).save(mobile / "icon.png")
+    render_mobile(colors, 0.62, opaque=False).save(mobile / "adaptive-icon.png")
+    print("wrote mobile/assets/icon.png, adaptive-icon.png")
 
     icns = OUT / "rift.icns"
     if sys.platform == "darwin" and shutil.which("iconutil"):

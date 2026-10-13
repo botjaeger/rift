@@ -11,6 +11,7 @@ mod menubar;
 mod mouse;
 mod notify;
 mod pane;
+mod remote;
 mod script;
 mod state;
 #[cfg(target_os = "macos")]
@@ -23,7 +24,7 @@ mod vim;
 
 use winit::event_loop::EventLoop;
 
-const USAGE: &str = "usage: rift-terminal [--script <file> [--headless]] [--version] [--help]\n       rift-terminal ctl <command>   (see `rift-terminal ctl help`)";
+const USAGE: &str = "usage: rift-terminal [--script <file> [--headless]] [--version] [--help]\n       rift-terminal ctl <command>   (see `rift-terminal ctl help`)\n       rift-terminal remote [--listen ADDR] [--managed] | pair [--view] | devices | revoke ID | history [--limit N] | permission ID operate|view\n                                     gateway for the mobile companion (see `rift-terminal remote help`)\n       rift-terminal relay [--listen ADDR] [--trust-forwarded]\n                                     relay for phones outside the local network (see `rift-terminal relay help`)";
 
 fn main() {
     // restart variables are read once and not passed on to shells
@@ -63,6 +64,15 @@ fn main() {
             "ctl" => {
                 let rest: Vec<String> = args.collect();
                 std::process::exit(control::cli(&rest));
+            }
+            "remote" => {
+                let rest: Vec<String> = args.collect();
+                std::process::exit(remote::cli(&rest));
+            }
+            // the relay (same code as the slim `rift-relay` binary)
+            "relay" => {
+                let rest: Vec<String> = args.collect();
+                std::process::exit(rift_remote::relay::cli(&rest));
             }
             "--version" | "-V" => {
                 println!("rift-terminal {}", env!("CARGO_PKG_VERSION"));

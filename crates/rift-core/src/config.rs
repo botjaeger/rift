@@ -221,6 +221,17 @@ pub struct Config {
     /// prepare-restart, honored only with the token of an update in flight)
     /// or "full" (also split/open/send-text). See control.rs.
     pub control_api: String,
+    /// Paired phones may reach this user's windows through the remote
+    /// gateway (`rift-terminal remote --managed`, which the windows start
+    /// while this is on; docs/remote-protocol.md). Off by default.
+    pub remote_access: bool,
+    /// Address the remote gateway listens on (`IP:PORT`; `0.0.0.0` = every
+    /// network interface).
+    pub remote_listen: String,
+    /// Relay the remote gateway also registers at, for phones outside the
+    /// local network (`wss://…`; `ws://` only for local relays). Empty: no
+    /// relay. The relay only ever sees encrypted traffic.
+    pub remote_relay: String,
     pub shell: Option<String>,
     /// Theme used while the OS is in light mode when `sync_os_theme` is on.
     pub theme_light: String,
@@ -331,6 +342,9 @@ impl Default for Config {
             durable_sessions: true,
             check_for_updates: true,
             control_api: "navigate".into(),
+            remote_access: false,
+            remote_listen: "0.0.0.0:7878".into(),
+            remote_relay: String::new(),
             shell: None,
             theme_light: "light-default".into(),
             sync_os_theme: false,
@@ -804,6 +818,69 @@ mod tests {
         let s = toml::to_string_pretty(&c).unwrap();
         let back: Config = toml::from_str(&s).unwrap();
         assert_eq!(back, c);
+    }
+
+    #[test]
+    fn remote_access_is_off_unless_a_real_boolean_turns_it_on() {
+        let c = Config::default();
+        assert!(!c.remote_access);
+        assert_eq!(c.remote_listen, "0.0.0.0:7878");
+        let c: Config =
+            toml::from_str("remote_access = true\nremote_listen = \"127.0.0.1:9\"\n").unwrap();
+        assert!(c.remote_access);
+        assert_eq!(c.remote_listen, "127.0.0.1:9");
+        // under another table it is not the setting
+        let c: Config = toml::from_str("[x]\nremote_access = true\n").unwrap();
+        assert!(!c.remote_access);
+        for bad in ["remote_access = \"true\"", "remote_access = 1"] {
+            assert!(toml::from_str::<Config>(bad).is_err(), "{bad}");
+        }
+        // the invalid-file fallback keeps it off too
+        assert!(!Config::fallback().remote_access);
+        // Settings writes only the changed key, in place
+        let on = Config {
+            remote_access: true,
+            ..Default::default()
+        };
+        let out = on.edit_toml(Some("# mine\nfont_size = 13.0\n")).unwrap();
+        assert_eq!(out, "# mine\nfont_size = 13.0\nremote_access = true\n");
+        let off = Config {
+            remote_access: false,
+            ..toml::from_str(&out).unwrap()
+        };
+        let out = off.edit_toml(Some(&out)).unwrap();
+        assert_eq!(out, "# mine\nfont_size = 13.0\nremote_access = false\n");
+    }
+
+    #[test]
+    fn remote_relay_is_off_by_default_and_saved_in_place() {
+        let c = Config::default();
+        assert_eq!(c.remote_relay, "");
+        let c: Config = toml::from_str("remote_relay = \"wss://relay.example.com\"\n").unwrap();
+        assert_eq!(c.remote_relay, "wss://relay.example.com");
+        assert!(toml::from_str::<Config>("remote_relay = true").is_err());
+        // the default (off) is not written; a set one is, in place
+        let out = Config::default()
+            .edit_toml(Some("# mine\nfont_size = 13.0\n"))
+            .unwrap();
+        assert_eq!(out, "# mine\nfont_size = 13.0\n");
+        let set = Config {
+            remote_relay: "ws://127.0.0.1:18790".into(),
+            ..Default::default()
+        };
+        let out = set.edit_toml(Some(&out)).unwrap();
+        assert_eq!(
+            out,
+            "# mine\nfont_size = 13.0\nremote_relay = \"ws://127.0.0.1:18790\"\n"
+        );
+        // clearing it writes the empty value back over the old one
+        let cleared = Config {
+            remote_relay: String::new(),
+            ..toml::from_str(&out).unwrap()
+        };
+        let out = cleared.edit_toml(Some(&out)).unwrap();
+        assert_eq!(out, "# mine\nfont_size = 13.0\nremote_relay = \"\"\n");
+        assert_eq!(toml::from_str::<Config>(&out).unwrap().remote_relay, "");
     }
 
     #[test]

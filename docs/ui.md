@@ -74,6 +74,11 @@ every action).
   with *Later*), a 22 px pill left of the inbox: 1 px `warning` outline,
   `warning` text (12 px medium), no fill, a hover lift. Tooltip `vX.Y.Z
   available`; a click opens the update dialog (see *Dialogs and toasts*).
+- **Remote · <device>** — while a phone is connected through remote access,
+  the same pill in `accent`, left of *Update Rift* (or of the inbox):
+  `Remote · <device name>` or `Remote · N devices` (label cut at 200 px).
+  Tooltip `Connected: <names>` (`<name> via relay` for a relayed phone); a
+  click opens Settings › Remote access.
 - A tab with synchronized inputs on shows the sync icon in the accent.
 - A tab where a command runs (in any of its panes) shows a spinner before
   its title, in place of the sync icon; it turns in background tabs too. A
@@ -762,6 +767,29 @@ saved`.
   success, error), its display name and an `active` tag on the current theme;
   the `light` tag marks the `theme_light` theme, and only while
   `sync_os_theme` is on. Clicking a row sets `theme`.
+- **Remote access** (open icon) — *Watch and run commands from a paired phone, at home or away.*:
+  - `Allow remote access` switch (`remote_access`) and a status line: `Off`,
+    `Starting…`, `Listening on <addresses>`, or `N device(s) connected`.
+  - `Pair a phone` (primary button; disabled while off) and a `View only`
+    switch (changing it clears a shown link). Pairing shows the QR code
+    (black 4 px modules on a white plate with a 4-module quiet zone, so phone
+    cameras read it in any theme), `Expires in m:ss`, the wrapped link and a
+    `Copy link` button; at zero, `Expired — Pair again`. While the gateway
+    has no address yet, a `Pairing` row waits for it.
+  - `Relay`: a text field for `remote_relay` (click or Enter edits; typing
+    and ⌘V fill it; Enter saves a valid `ws://`/`wss://` URL, an invalid one
+    stays with a toast; Esc cancels; Tab or a click elsewhere saves) and its
+    state: `Off`, `Connecting…`, `Connected via <host>` or the error.
+  - `Paired devices`: per device its name and `platform (iOS, Android) · paired <date> ·
+    connected|connected via relay|last seen …`, an `Operate` / `View only`
+    segmented control (raising to Operate asks first), and a destructive
+    `Revoke` button, which opens the confirm dialog `Revoke <name>? It
+    disconnects now and cannot reconnect without pairing again.`; an empty
+    state when none.
+  - `Recent connections`: the newest 20, each with the device (or `Unknown
+    device`), `LAN` or `Relay`, the address, the start time, the duration or
+    `connected`, and why it ended.
+  - The page refreshes its data at most once a second.
 - **About** — no title: the app icon (64 px) beside the `Rift` wordmark,
   centred a little above the middle of the body; under it the version
   (`v0.1.0`) with a copy button (tooltip *Copy version*; copies the version

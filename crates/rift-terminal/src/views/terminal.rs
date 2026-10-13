@@ -1095,6 +1095,149 @@ pub fn block_output_text(session: &Session, block_id: BlockId) -> Option<String>
     Some(out)
 }
 
+/// [`block_output_text`] bounded for the remote gateway
+/// ([`rift_remote::bound_output`]: the last 500 lines, at most 64 KiB), also
+/// for a running block (output start through the cursor row). Only the
+/// rows of the kept tail are read as text; lines before it, and rows gone
+/// from scrollback, count as dropped. Returns (text, dropped lines).
+pub fn block_output_tail(session: &Session, block_id: BlockId) -> Option<(String, u64)> {
+    let (start, end, unterminated) = {
+        let blocks = session.blocks.lock().unwrap();
+        let block = blocks.iter().find(|b| b.id == block_id)?;
+        match block.state {
+            BlockState::Running { .. } => (block.output_start?, None, true),
+            _ => {
+                let (start, end) = block.output_range()?;
+                (start, Some(end), block.unterminated)
+            }
+        }
+    };
+    let scrolled = session.scrolled.load(std::sync::atomic::Ordering::Acquire);
+    let term = session.term.lock();
+    // running: the cursor row is the last, and its line break is not output yet
+    let end = end.unwrap_or_else(|| scrolled + term.grid().cursor.point.line.0.max(0) as u64 + 1);
+    let wrapped = |abs: u64| -> Option<bool> {
+        let g = term.grid();
+        let rel = abs as i64 - scrolled as i64;
+        if rel < -(g.history_size() as i64) || rel >= g.screen_lines() as i64 || g.columns() == 0 {
+            return None;
+        }
+        Some(
+            g[Line(rel as i32)][Column(g.columns() - 1)]
+                .flags
+                .contains(Flags::WRAPLINE),
+        )
+    };
+    // read rows backwards up to the start of the line that makes the tail
+    // longer than the bound (in lines or bytes); the bound cuts the rest
+    let mut rows = Vec::new();
+    let mut first = end;
+    let (mut lines, mut bytes) = (0usize, 0usize);
+    while first > start {
+        let abs = first - 1;
+        let Some(row) = copy_line(&term, scrolled, abs) else {
+            break; // gone from scrollback
+        };
+        bytes += row.0.len() + 1;
+        rows.push(row);
+        first = abs;
+        if abs == start || wrapped(abs - 1) != Some(true) {
+            lines += 1;
+            if lines > rift_remote::MAX_OUTPUT_LINES || bytes > rift_remote::MAX_OUTPUT_BYTES {
+                break;
+            }
+        }
+    }
+    // lines before the tail (a row gone from scrollback counts as one; its
+    // soft wraps are unknown, so for a block trimmed at the head this is an
+    // estimate)
+    let skipped = (start..first)
+        .filter(|&abs| wrapped(abs) != Some(true))
+        .count() as u64;
+    drop(term);
+    let mut out = String::with_capacity(bytes);
+    for (text, wrapped) in rows.into_iter().rev() {
+        out.push_str(&text);
+        // a soft-wrapped row continues on the next one: no line break
+        if !wrapped {
+            out.push('\n');
+        }
+    }
+    if unterminated && out.ends_with('\n') {
+        out.pop();
+    }
+    let (out, dropped) = rift_remote::bound_output(&out);
+    Some((out, skipped + dropped))
+}
+
+/// Blocks of `session` for the remote gateway: commands that ran or run (a
+/// prompt being typed is skipped), older than `before` when given, at most
+/// `limit` (capped at 30), newest last; whether older ones exist; and the
+/// pane's oldest such block (ids below it are gone). `meta`: without
+/// output (empty, 0 dropped), no grid read at all.
+pub fn remote_blocks(
+    session: &Session,
+    before: Option<BlockId>,
+    limit: usize,
+    meta: bool,
+) -> rift_remote::Page {
+    use rift_remote::protocol::{Block as Remote, BlockState as State};
+    let limit = limit.min(rift_remote::MAX_BLOCKS);
+    let sent = |b: &&Block| match b.state {
+        BlockState::Prompt => false,
+        BlockState::Running { .. } => true,
+        BlockState::Done { .. } => !b.command.is_empty(),
+    };
+    // snapshot first: block_output_tail takes the blocks lock itself
+    let (mut picked, oldest) = {
+        let store = session.blocks.lock().unwrap();
+        let picked: Vec<Block> = store
+            .iter()
+            .rev()
+            .filter(|b| before.is_none_or(|x| b.id < x))
+            .filter(sent)
+            .take(limit + 1)
+            .cloned()
+            .collect();
+        (picked, store.iter().find(sent).map(|b| b.id))
+    };
+    let has_older = picked.len() > limit;
+    picked.truncate(limit);
+    picked.reverse();
+    let blocks = picked
+        .into_iter()
+        .map(|b| {
+            let (output, dropped) = if meta {
+                Default::default()
+            } else {
+                block_output_tail(session, b.id).unwrap_or_default()
+            };
+            let (state, exit, duration) = match b.state {
+                BlockState::Running { started } => (State::Running, None, started.elapsed()),
+                BlockState::Done { exit, duration } => (State::Done, exit, duration),
+                BlockState::Prompt => (State::Running, None, Duration::ZERO),
+            };
+            Remote {
+                id: b.id,
+                command: b.command,
+                state,
+                exit,
+                duration_ms: duration.as_millis() as u64,
+                cwd: b.cwd,
+                branch: b.branch,
+                output,
+                dropped,
+                restored: b.restored,
+            }
+        })
+        .collect();
+    rift_remote::Page {
+        blocks,
+        has_older,
+        oldest,
+    }
+}
+
 /// Render the pane. Owns the viewport: `view_offset` counts display lines
 /// scrolled up from the bottom.
 #[allow(clippy::too_many_arguments)]

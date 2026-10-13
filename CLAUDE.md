@@ -40,7 +40,7 @@ blocks, ⌘P = palette).
 ## Commands
 
 ```sh
-scripts/gates.sh               # quality gates: fmt clippy test doc shell docs
+scripts/gates.sh               # quality gates: fmt clippy test doc shell docs mobile
 scripts/gates.sh ui            # scripted UI regressions (scripts/ui-smoke.py)
 scripts/gates.sh all           # + release build + scripted UI + Linux gates in docker
 scripts/gates.sh --list        # what each gate runs
@@ -105,7 +105,8 @@ the shell gate and the scripted UI regressions (under Xvfb) in
 
 ## Architecture
 
-Four crates; dependencies flow strictly downward.
+Five crates; dependencies flow strictly downward. The Expo companion app
+lives outside the workspace in `mobile/` (pnpm; the `mobile` gate).
 
 - **rift-core** — no graphics deps, unit-tested: theme tokens and TOML/Warp
   themes (`theme/`), config + hot-reload watcher, keymap (`[keybindings]`
@@ -129,7 +130,15 @@ Four crates; dependencies flow strictly downward.
 - **rift-terminal** — winit `ApplicationHandler` (`app.rs`), views, input
   routing, per-frame `Hit` rects, kitty keyboard encoder (`keyboard.rs`),
   AccessKit tree (`a11y.rs`), control socket and `ctl` client (`control.rs`), script
-  driver, offscreen capture, update restarts across windows (`updater.rs`).
+  driver, offscreen capture, update restarts across windows (`updater.rs`),
+  the remote gateway's control-socket source (`remote.rs`).
+- **rift-remote** — no app or graphics deps: the mobile wire protocol
+  (`protocol.rs`, fixtures shared with `mobile/` in `fixtures/`), the Noise
+  transport (`transport.rs`), the device registry (`registry.rs`), the
+  WebSocket gateway (`server.rs`: auth, limits, diff, replay ring) over a
+  `Source` trait, its relay client (`uplink.rs`) and the relay itself
+  (`relay.rs`, also the standalone `rift-relay` binary). Spec:
+  `docs/remote-protocol.md`; a protocol change edits the fixtures first.
 
 ### Load-bearing invariants
 
@@ -211,4 +220,5 @@ sources the user's real config first.
 | `docs/development.md` | Build, test, gates, dependencies, architecture, releases |
 | `docs/performance.md` | Benchmark harness and recorded baseline |
 | `docs/warp-parity.md`, `docs/terminal-landscape-roadmap.md`, `docs/mobile-remote-plan.md` | Plans and parity status |
+| `docs/remote-protocol.md`, `docs/mobile-threat-model.md` | Mobile gateway wire format, limits, trust and threat model |
 | `docs/project-audit-2026-10-07.md`, `docs/audits/`, `docs/workstreams/` | Dated audit records and their evidence (historical; not updated with behavior) |

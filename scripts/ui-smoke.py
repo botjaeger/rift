@@ -1612,6 +1612,364 @@ while not (up / "left-window.txt").exists():
 assert 'title="LEFTOVER"' in (up / "left-window.txt").read_text()
 assert not list(left.glob("*.toml")), "the reopened window kept its restart file"
 
+# --- remote access (mobile companion, window side) ---
+# The gateway's `remote-input` request reaches the window only while
+# remote_access is on (independent of control_api); a command runs only at a
+# prompt; keys go to the running program; the managed gateway follows the
+# setting; a connected phone shows a tab-bar chip. Each run has its own
+# scratch XDG dirs, and the gateway listens on 127.0.0.1 only.
+rm = scratch / "remote"
+rm.mkdir()
+(rm / "rin.sh").write_text(
+    "#!/bin/sh\n"
+    "# rin.sh BIN OUT JSON: send JSON (PANE = the first pane's id) to the window\n"
+    "pane=$(\"$1\" ctl request '{\"cmd\":\"status\"}' | python3 -I -c "
+    "'import json,sys; print(json.load(sys.stdin)[\"tabs\"][0][\"panes\"][0][\"id\"])')\n"
+    "\"$1\" ctl request \"$(printf '%s' \"$3\" | sed \"s/PANE/$pane/\")\" > \"$2\" 2>&1\n"
+    "touch \"$2.done\"\n")
+remote_base = ('shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
+               'remote_listen = "127.0.0.1:0"\n')
+
+def rin(run, out, request):
+    path = rm / run / out
+    return [f"sh sh {shlex.quote(str(rm / 'rin.sh'))} {shlex.quote(str(binary))} "
+            f"{shlex.quote(str(path))} {shlex.quote(request)} >/dev/null 2>&1 &",
+            f"wait_file {path}.done 15000"]
+
+def remote_run(name, config_text, steps, timeout=90):
+    run = rm / name
+    (run / "cfg/rift").mkdir(parents=True)
+    (run / "data/rift").mkdir(parents=True, exist_ok=True)
+    (run / "cfg/rift/config.toml").write_text(config_text)
+    (run / "t.rift").write_text(
+        "\n".join(["resize 1100 800", "wait_prompt", *steps, "quit"]) + "\n")
+    with (run / "log.txt").open("w") as log:
+        rc = subprocess.run([str(binary), "--script", str(run / "t.rift"), "--headless"],
+                            env=dict(env, XDG_CONFIG_HOME=str(run / "cfg"),
+                                     XDG_DATA_HOME=str(run / "data"),
+                                     BASH_SILENCE_DEPRECATION_WARNING="1"),
+                            stdout=log, stderr=log, timeout=timeout).returncode
+    assert rc == 0, died(f"remote {name} run failed", run / "log.txt")
+    return run
+
+def answer(run, name):
+    return json.loads((run / name).read_text())
+
+def remote_line(text):
+    return next(l for l in text.splitlines() if l.startswith("remote_access="))
+
+input_cmd = '{"cmd":"remote-input","pane":PANE,"device":"Test Phone","command":"echo remote-ok"}'
+settings_remote = ["key cmd+,", "wait 300", *["key down"] * 7, "wait 600"]
+
+# (a) remote_access off: refused, though the socket serves navigate requests
+off = remote_run("off", remote_base, [
+    "wait 500", *rin("off", "cmd.json", input_cmd), "wait 300",
+    *rin("off", "meta.json", '{"cmd":"blocks","pane":PANE,"meta":true}'),
+    f"dump {rm}/off/off.txt"])
+refused = answer(off, "cmd.json")
+assert refused == {"ok": False, "error": "remote access is off"}, refused
+assert "remote-ok" not in (off / "off.txt").read_text()
+assert answer(off, "meta.json")["ok"] is True
+assert "remote_access=false control_level=Navigate" in (off / "off.txt").read_text()
+assert not (off / "data/rift/remote").exists(), "a gateway started with remote access off"
+
+# (b)-(d) remote access on with control_api off: the socket serves the
+# gateway's requests only; a command at the prompt runs as a block with a
+# toast; one while a command runs is busy; ctrl+c interrupts; turning
+# remote access off stops the managed gateway within 2 s
+on_config = remote_base + 'control_api = "off"\nremote_access = true\n'
+(rm / "off-config.toml").write_text(remote_base + 'control_api = "off"\n')
+on = rm / "on"
+status_file = on / "data/rift/remote/status.json"
+on_run = remote_run("on", on_config, [
+    f"wait_file {status_file} 20000", "wait 1500",
+    *rin("on", "cmd.json", input_cmd), "wait 800", f"dump {on}/cmd.txt",
+    *rin("on", "send.json", '{"cmd":"send-text","pane":PANE,"text":"echo no\\n"}'),
+    *rin("on", "focus.json", '{"cmd":"focus","pane":PANE}'),
+    "type sleep 5\\n", "wait 600",
+    *rin("on", "busy.json", input_cmd.replace("echo remote-ok", "echo too-early")),
+    "wait 5000",
+    "type sleep 30\\n", "wait 800",
+    *rin("on", "keys.json",
+         '{"cmd":"remote-input","pane":PANE,"device":"Test Phone","keys":["ctrl+c"]}'),
+    "wait 1200", f"dump {on}/keys.txt",
+    *rin("on", "meta.json", '{"cmd":"blocks","pane":PANE,"meta":true}'),
+    *rin("on", "full.json", '{"cmd":"blocks","pane":PANE}'),
+    *settings_remote, f"shot {on}/settings.png", f"dump {on}/settings.txt",
+    cp(rm / "off-config.toml", on / "cfg/rift/config.toml"), "wait 3500",
+    f"dump {on}/stopped.txt"], timeout=120)
+gateway_line = remote_line((on / "settings.txt").read_text())
+assert "remote_access=true control_level=Remote" in gateway_line, gateway_line
+assert re.search(r'gateway="Listening on 127\.0\.0\.1:\d+" gateway_pid=Some\(\d+\)', gateway_line), \
+    gateway_line
+assert "settings=true page=Remote" in (on / "settings.txt").read_text()
+assert 'Switch "Allow remote access"' in (on / "settings.txt").read_text()
+assert (on / "settings.png").read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+assert answer(on, "cmd.json") == {"ok": True, "pane": 1}, answer(on, "cmd.json")
+cmd_dump = (on / "cmd.txt").read_text()
+assert re.search(r'block \d+ state=done .*cmd="echo remote-ok" exit=Some\(0\)', cmd_dump), cmd_dump
+assert 'toast=Some("Test Phone ran echo remote-ok")' in cmd_dump, cmd_dump
+assert "not allowed" in answer(on, "send.json")["error"], answer(on, "send.json")
+assert "not allowed" in answer(on, "focus.json")["error"], answer(on, "focus.json")
+assert answer(on, "busy.json") == {"ok": False, "error": "busy"}, answer(on, "busy.json")
+keys_dump = (on / "keys.txt").read_text()
+assert "too-early" not in keys_dump, "a busy command reached the shell"
+assert re.search(r'cmd="sleep 30" exit=Some\([1-9]\d*\)', keys_dump), keys_dump
+assert 'toast=Some("Test Phone sent ctrl+c")' in keys_dump, keys_dump
+meta = answer(on, "meta.json")["blocks"]
+full = answer(on, "full.json")["blocks"]
+assert [b["id"] for b in meta] == [b["id"] for b in full] and len(meta) >= 3, (meta, full)
+assert all(b["output"] == "" and b["dropped"] == 0 for b in meta), meta
+assert any(b["output"] == "remote-ok\n" for b in full), full
+stopped = remote_line((on / "stopped.txt").read_text())
+assert 'remote_access=false control_level=Off gateway="Off" gateway_pid=None' in stopped, stopped
+assert not status_file.exists(), "the managed gateway outlived remote_access = false"
+# only this test's gateway, found through its scratch status, is ever stopped
+left = re.search(r"gateway_pid=Some\((\d+)\)", gateway_line)
+if left and subprocess.run(["ps", "-p", left[1]], capture_output=True).returncode == 0:
+    own = subprocess.run(["ps", "eww", "-p", left[1]], capture_output=True, text=True).stdout
+    if str(on / "data") in own:
+        os.kill(int(left[1]), 15)
+    raise AssertionError("the managed gateway did not exit after remote_access = false")
+
+# (e) an idle window with remote_access off; a gateway started by hand and
+# a real phone (examples/phone) pairing through it: the gateway's
+# `remote-status` notices make the chip appear within 2 s of the phone
+# connecting and go within 2 s of it leaving, while the window sleeps in
+# one long wait (chip_age_ms dates the change; no wake of its own)
+phone_bin = os.environ.get("RIFT_PHONE_BIN")
+assert phone_bin, "RIFT_PHONE_BIN is unset (scripts/ui-smoke.sh builds examples/phone)"
+idle = rm / "idle"
+for sub in ("cfg/rift", "data/rift"):
+    (idle / sub).mkdir(parents=True)
+(idle / "cfg/rift/config.toml").write_text(remote_base)
+(idle / "t.rift").write_text("\n".join([
+    "resize 1100 800", "wait_prompt", "wait 500", f"dump {idle}/ready.txt",
+    "wait 9000", f"dump {idle}/connected.txt", f"shot {idle}/chip.png",
+    "wait 9000", f"dump {idle}/left.txt", "quit"]) + "\n")
+idle_env = dict(env, XDG_CONFIG_HOME=str(idle / "cfg"), XDG_DATA_HOME=str(idle / "data"),
+                BASH_SILENCE_DEPRECATION_WARNING="1")
+gateway = None
+with (idle / "log.txt").open("w") as log, (idle / "gateway.txt").open("w") as glog, \
+        (idle / "phone.txt").open("w") as plog:
+    window = subprocess.Popen([str(binary), "--script", str(idle / "t.rift"), "--headless"],
+                              env=idle_env, stdout=log, stderr=log)
+    try:
+        deadline = time.monotonic() + 40
+        while not (idle / "ready.txt").exists():
+            assert window.poll() is None, died("idle window exited", idle / "log.txt")
+            assert time.monotonic() < deadline, "idle window never got ready"
+            time.sleep(0.05)
+        gateway = subprocess.Popen([str(binary), "remote", "--listen", "127.0.0.1:0"],
+                                   env=idle_env, stdout=glog, stderr=glog)
+        status = idle / "data/rift/remote/status.json"
+        while not status.exists():
+            assert gateway.poll() is None, died("hand-started gateway exited", idle / "gateway.txt")
+            time.sleep(0.05)
+        link = next(l for l in subprocess.run(
+            [str(binary), "remote", "pair"], env=idle_env, capture_output=True, text=True,
+            timeout=20).stdout.splitlines() if l.startswith("rift-remote://"))
+        acked = idle / "phone-acked"
+        phone_start = time.time()
+        phone = subprocess.Popen([phone_bin, str(idle / "phone.key"), link, "true", "12",
+                                  str(acked)], stdout=plog, stderr=plog)
+        while not acked.exists():
+            assert phone.poll() is None, died("the phone gave up", idle / "phone.txt")
+            time.sleep(0.02)
+        phone_acked = time.time()
+        phone.wait(timeout=30)
+        phone_left = time.time()
+        assert window.wait(timeout=60) == 0, died("idle window failed", idle / "log.txt")
+    finally:
+        # only the gateway this test started
+        if gateway is not None and gateway.poll() is None:
+            gateway.terminate()
+            gateway.wait(timeout=10)
+        if window.poll() is None:
+            window.kill()
+
+def changed_at(name):
+    path = idle / f"{name}.txt"
+    line = remote_line(path.read_text())
+    age = int(re.search(r"chip_age_ms=Some\((\d+)\)", line)[1])
+    return line, path.stat().st_mtime - age / 1000
+
+line, appeared = changed_at("connected")
+assert 'remote_access=false' in line and 'remote_chip=Some("Remote · Live Check Phone")' in line, line
+notices = int(re.search(r"remote_notices=(\d+)", line)[1])
+assert notices >= 2, f"no remote-status notices reached the window: {line}"
+assert phone_start <= appeared <= phone_acked + 2, (phone_start, appeared, phone_acked)
+line, went = changed_at("left")
+assert "clients=[] remote_chip=None" in line, line
+assert phone_acked <= went <= phone_left + 2, (phone_acked, went, phone_left)
+
+# (f) the chip on every window comes from status.json of a gateway holding
+# gateway.lock; a stale status (lock not held) shows none
+import fcntl
+chip = rm / "chip"
+chip_remote = chip / "data/rift/remote"
+chip_remote.mkdir(parents=True)
+(chip_remote / "status.json").write_text(json.dumps({
+    "pid": os.getpid(), "addresses": ["127.0.0.1:9"],
+    "clients": [{"device": "d3f1", "name": "Test Phone", "since": "2026-10-12T10:00:00Z"}]}))
+lock = open(chip_remote / "gateway.lock", "w")
+fcntl.flock(lock, fcntl.LOCK_EX)
+(rm / "release.sh").write_text(f"rm -f {shlex.quote(str(chip / 'held'))}\n")
+release = threading.Event()
+def unlock_when_asked():
+    while (chip / "held").exists():
+        time.sleep(0.05)
+    fcntl.flock(lock, fcntl.LOCK_UN)
+    lock.close()
+    release.set()
+(chip / "held").parent.mkdir(parents=True, exist_ok=True)
+(chip / "held").touch()
+threading.Thread(target=unlock_when_asked, daemon=True).start()
+chip_run = remote_run("chip", remote_base, [
+    "wait 1500", f"dump {chip}/shown.txt", f"shot {chip}/chip.png",
+    f"sh sh {shlex.quote(str(rm / 'release.sh'))}", "wait 2500", f"dump {chip}/gone.txt"])
+shown = (chip / "shown.txt").read_text()
+assert 'remote_chip=Some("Remote · Test Phone")' in remote_line(shown), remote_line(shown)
+assert 'Button "Remote · Test Phone, connected: Test Phone"' in shown, shown[-3000:]
+assert "Connected: Test Phone@" in shown, "the chip has no tooltip"
+gone = remote_line((chip / "gone.txt").read_text())
+assert release.is_set()
+assert "gateway_pid=None clients=[] remote_chip=None" in gone, gone
+
+# (g) a relay (Phase 2): the managed gateway registers at a local relay
+# (rift-relay) and Settings shows it connected; a phone forced through the
+# relay shows "via relay"; Operate -> View only on the page closes it within
+# a second and its next handshake gets view (run refused); Recent
+# connections lists it via Relay. Dark and light screenshots of the page.
+relay_bin = os.environ.get("RIFT_RELAY_BIN")
+assert relay_bin, "RIFT_RELAY_BIN is unset (scripts/ui-smoke.sh builds rift-relay)"
+rl = rm / "relay"
+for sub in ("cfg/rift", "data/rift"):
+    (rl / sub).mkdir(parents=True)
+with socket.socket() as s:
+    s.bind(("127.0.0.1", 0))
+    relay_port = s.getsockname()[1]
+relay_config = (remote_base + "remote_access = true\n"
+                f'remote_relay = "ws://127.0.0.1:{relay_port}"\n')
+(rl / "cfg/rift/config.toml").write_text(relay_config)
+(rl / "light.toml").write_text(relay_config + 'theme = "light-default"\n')
+(rl / "off.toml").write_text(remote_base)
+(rl / "t.rift").write_text("\n".join([
+    "resize 1100 800", "wait_prompt",
+    f"wait_file {rl}/go-settings 60000", *settings_remote, "wait 1200",
+    f"dump {rl}/connected.txt", f"shot {rl}/relay-dark.png",
+    # reading order: ↺ and switch, ↺ and the relay field, Pair a phone,
+    # View only, then the device's Operate / View only
+    *["key tab"] * 8, "wait 200", f"dump {rl}/focus.txt",
+    "key space", "wait 2500", f"dump {rl}/changed.txt",
+    f"wait_file {rl}/go-light 60000", cp(rl / "light.toml", rl / "cfg/rift/config.toml"),
+    "wait 2000", f"dump {rl}/history.txt", f"shot {rl}/relay-light.png",
+    f"wait_file {rl}/go-quit 60000", "quit"]) + "\n")
+rl_env = dict(env, XDG_CONFIG_HOME=str(rl / "cfg"), XDG_DATA_HOME=str(rl / "data"),
+              BASH_SILENCE_DEPRECATION_WARNING="1")
+rl_status = rl / "data/rift/remote/status.json"
+
+def relay_status():
+    try:
+        return json.loads(rl_status.read_text())
+    except (OSError, ValueError):
+        return {}
+
+def wait_path(path, what, proc, log, seconds=40):
+    deadline = time.monotonic() + seconds
+    while not path.exists():
+        assert proc.poll() is None, died(f"{what}: window exited", log)
+        assert time.monotonic() < deadline, f"timed out waiting for {what}"
+        time.sleep(0.05)
+
+relay = window = None
+with (rl / "relay.txt").open("w") as relay_log, (rl / "log.txt").open("w") as log, \
+        (rl / "phone-1.txt").open("w") as p1log, (rl / "phone-2.txt").open("w") as p2log:
+    relay = subprocess.Popen([relay_bin, "--listen", f"127.0.0.1:{relay_port}"],
+                             stdout=relay_log, stderr=relay_log)
+    window = subprocess.Popen([str(binary), "--script", str(rl / "t.rift"), "--headless"],
+                              env=rl_env, stdout=log, stderr=log)
+    try:
+        deadline = time.monotonic() + 40
+        while (relay_status().get("relay") or {}).get("state") != "connected":
+            assert window.poll() is None, died("relay window exited", rl / "log.txt")
+            assert relay.poll() is None, died("the relay exited", rl / "relay.txt")
+            assert time.monotonic() < deadline, f"never registered at the relay: {relay_status()}"
+            time.sleep(0.05)
+        link = next(l for l in subprocess.run(
+            [str(binary), "remote", "pair"], env=rl_env, capture_output=True, text=True,
+            timeout=20).stdout.splitlines() if l.startswith("rift-remote://"))
+        assert link.endswith(f"&r=ws%3A%2F%2F127.0.0.1%3A{relay_port}"), link
+        acked = rl / "phone-acked"
+        phone1 = subprocess.Popen([phone_bin, "--relay-only", str(rl / "phone.key"), link,
+                                   "true", "30", str(acked)], stdout=p1log, stderr=p1log)
+        while not acked.exists():
+            assert phone1.poll() is None, died("the relay phone gave up", rl / "phone-1.txt")
+            time.sleep(0.02)
+        assert [c["via"] for c in relay_status()["clients"]] == ["relay"], relay_status()
+        (rl / "go-settings").touch()
+        wait_path(rl / "changed.txt", "the permission change", window, rl / "log.txt")
+        changed_at = time.time()
+        # closed by the gateway (not by its own 30 s timer)
+        assert phone1.wait(timeout=10) == 1, died("phone 1 was not closed", rl / "phone-1.txt")
+        closed_at = time.time()
+        phone2 = subprocess.run([phone_bin, "--relay-only", str(rl / "phone.key"), link,
+                                 "echo must-not-run", "1"], stdout=p2log, stderr=p2log,
+                                timeout=30)
+        assert phone2.returncode == 3, died("phone 2 was not refused", rl / "phone-2.txt")
+        (rl / "go-light").touch()
+        wait_path(rl / "history.txt", "the light dump", window, rl / "log.txt")
+        (rl / "go-quit").touch()
+        assert window.wait(timeout=60) == 0, died("relay window failed", rl / "log.txt")
+    finally:
+        if window.poll() is None:
+            window.kill()
+        if relay.poll() is None:
+            relay.terminate()
+            relay.wait(timeout=10)
+# the managed gateway follows remote_access = false
+gw_pid = relay_status().get("pid")
+(rl / "cfg/rift/config.toml").write_text(remote_base)
+deadline = time.monotonic() + 10
+while rl_status.exists():
+    if time.monotonic() > deadline:
+        own = subprocess.run(["ps", "eww", "-p", str(gw_pid)], capture_output=True, text=True).stdout
+        if gw_pid and str(rl / "data") in own:
+            os.kill(int(gw_pid), 15)
+        raise AssertionError("the relay test's managed gateway did not exit")
+    time.sleep(0.1)
+
+def relay_line(name):
+    text = (rl / name).read_text()
+    return next(l for l in text.splitlines() if l.startswith("remote_relay=")), text
+
+line, text = relay_line("connected.txt")
+assert f'relay_line="Connected via 127.0.0.1"' in line, line
+assert 'clients_via=["Live Check Phone:relay"]' in line, line
+assert 'chip_tip=Some("Connected: Live Check Phone via relay")' in line, line
+assert 'device_access=["Live Check Phone=operate"]' in line, line
+assert "connected via relay" in remote_line(text), remote_line(text)
+assert f'TextInput "Relay URL: ws://127.0.0.1:{relay_port}. Connected via 127.0.0.1"' in text, \
+    text[-4000:]
+assert 'RadioButton "Live Check Phone access: Operate, selected"' in text, text[-4000:]
+focus = (rl / "focus.txt").read_text()
+assert 'settings_focus=Some(RemotePermission(' in focus and ', true))' in focus, \
+    re.search(r"settings_focus=.*", focus)[0]
+line, text = relay_line("changed.txt")
+assert 'device_access=["Live Check Phone=view"]' in line, line
+assert 'toast=Some("Live Check Phone can now only watch")' in text, text[-3000:]
+assert closed_at - changed_at < 2.5, (changed_at, closed_at)
+p2 = (rl / "phone-2.txt").read_text()
+assert '"permission":"view"' in p2 and '"code":"forbidden"' in p2, p2
+line, text = relay_line("history.txt")
+assert re.search(r'history=\["Live Check Phone \(Relay · 127\.0\.0\.1:%d · [^)]* · \d+s\)'
+                 % relay_port, line), line
+assert "Live Check Phone (Relay" in line and line.count("Relay · 127.0.0.1") >= 2, line
+for shot in ("relay-dark.png", "relay-light.png"):
+    assert (rl / shot).read_bytes().startswith(b"\x89PNG\r\n\x1a\n"), shot
+assert not re.search(r'cmd="echo must-not-run"', (rl / "history.txt").read_text()), \
+    "a view-only phone ran a command"
+
 for client in clients:
     client.close()
 stalled.close()

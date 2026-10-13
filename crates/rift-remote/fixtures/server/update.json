@@ -1,0 +1,1 @@
+{"t":"update","pane":12,"seq":42,"blocks":[{"id":87,"command":"cargo test --workspace","state":"done","exit":0,"duration_ms":260500,"cwd":"/Users/me/rift","branch":"main","output":"test result: ok. 412 passed\n","dropped":120,"restored":false}],"removed":[80]}

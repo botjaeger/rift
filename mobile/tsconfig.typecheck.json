@@ -1,0 +1,13 @@
+{
+  // Type checking only. Libraries find React's types by walking up from their own folder;
+  // pinning them here keeps every package on the same copy. Not in tsconfig.json: Metro
+  // follows its `paths` too, and would then load the types package as React.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "paths": {
+      "@/*": ["./src/*"],
+      "react": ["./node_modules/@types/react"],
+      "react/*": ["./node_modules/@types/react/*"]
+    }
+  }
+}

@@ -1,0 +1,63 @@
+{
+  "expo": {
+    "name": "Rift",
+    "slug": "rift-mobile",
+    "scheme": [
+      "rift",
+      "rift-remote"
+    ],
+    "version": "0.1.0",
+    "orientation": "default",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#1e1e1e",
+    "icon": "./assets/icon.png",
+    "ios": {
+      "bundleIdentifier": "dev.botjaeger.rift",
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        },
+        "NSLocalNetworkUsageDescription": "Rift connects to the Rift gateway on your computer over the local network to show your terminal sessions."
+      }
+    },
+    "android": {
+      "package": "dev.botjaeger.rift",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#232326"
+      }
+    },
+    "web": {
+      "output": "single"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Rift uses the camera to scan the pairing code on your computer's screen.",
+          "microphonePermission": false,
+          "recordAudioAndroid": false
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ],
+      "expo-font",
+      [
+        "expo-local-authentication",
+        {
+          "faceIDPermission": "Rift uses Face ID to unlock the app and to confirm commands before they run on your computer."
+        }
+      ],
+      "./plugins/withSceneLifecycle"
+    ]
+  }
+}

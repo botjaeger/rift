@@ -6,9 +6,12 @@
 //!
 //! | level | commands |
 //! |---|---|
-//! | `"off"` | no socket |
-//! | `"navigate"` (default) | `list`, `status`, `focus`, `prepare-restart` |
+//! | `"off"` | no socket, unless `remote_access` is on: then only `status`, `blocks`, `remote-status` and `remote-input` (the remote gateway's requests) |
+//! | `"navigate"` (default) | `list`, `status`, `blocks`, `remote-status`, `focus`, `prepare-restart`, `remote-input` |
 //! | `"full"` | also `split`, `open`, `send-text` (types into a shell) |
+//!
+//! `remote-input` is accepted only while `remote_access` is on, whatever
+//! the level.
 //!
 //! `prepare-restart` is sent by a window that installs an update: the
 //! receiver saves its layout to `<data dir>/restart/<pid>.toml`, leaves its
@@ -33,6 +36,9 @@ use std::time::Duration;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Level {
     Off,
+    /// No `control_api`, but `remote_access` is on: only what the remote
+    /// gateway asks (`status`, `blocks`, `remote-input`).
+    Remote,
     Navigate,
     Full,
 }
@@ -51,6 +57,27 @@ impl Level {
             }
         }
     }
+
+    /// The socket's level: `control_api`, raised to [`Level::Remote`] while
+    /// `remote_access` is on (the gateway needs a socket even with
+    /// `control_api = "off"`).
+    pub fn effective(control_api: &str, remote_access: bool) -> Level {
+        let level = Level::parse(control_api);
+        if remote_access {
+            level.max(Level::Remote)
+        } else {
+            level
+        }
+    }
+
+    /// The `control_api` value that grants this level.
+    pub fn name(self) -> &'static str {
+        match self {
+            Level::Off => "off",
+            Level::Remote | Level::Navigate => "navigate",
+            Level::Full => "full",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -58,6 +85,20 @@ impl Level {
 pub enum Request {
     List,
     Status,
+    /// Read one pane's command blocks (output bounded like the remote
+    /// gateway's): older than block id `before` when given, at most `limit`
+    /// (capped at 30), newest last.
+    Blocks {
+        pane: u64,
+        #[serde(default)]
+        before: Option<u64>,
+        #[serde(default = "blocks_limit")]
+        limit: usize,
+        /// Leave the output out (`output` empty, `dropped` 0): the remote
+        /// gateway's `done` probe needs only ids, states and exits.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        meta: bool,
+    },
     Focus {
         #[serde(default)]
         tab: Option<usize>,
@@ -80,6 +121,24 @@ pub enum Request {
         pane: u64,
         text: String,
     },
+    /// Input from a paired phone, sent by the remote gateway: `command` (a
+    /// command line for a pane at its prompt, as if typed and Enter
+    /// pressed) or `keys` (protocol key names, as if pressed). `device` is
+    /// the phone's name for the desktop's toast. The window accepts it only
+    /// while `remote_access` is on (answering `remote access is off`), and
+    /// answers `busy` for a command to a pane that is running something.
+    RemoteInput {
+        pane: u64,
+        device: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        keys: Option<Vec<String>>,
+    },
+    /// Sent by the remote gateway whenever its `status.json` changed (it
+    /// started, a phone connected or left): the window re-reads it at once
+    /// (the tab-bar chip), even when idle. Read-only.
+    RemoteStatus,
     /// Save this window's layout for the restart after an update, keep its
     /// durable shells running, and quit (see `updater.rs`). Only honored
     /// with the token of an update in flight: the updating window writes it
@@ -95,13 +154,22 @@ impl Request {
     /// Least level that may run this request.
     pub fn level(&self) -> Level {
         match self {
-            Request::List
-            | Request::Status
-            | Request::Focus { .. }
-            | Request::PrepareRestart { .. } => Level::Navigate,
+            // what the remote gateway asks; `remote-input` is also gated by
+            // `remote_access` in the window
+            Request::Status
+            | Request::Blocks { .. }
+            | Request::RemoteStatus
+            | Request::RemoteInput { .. } => Level::Remote,
+            Request::List | Request::Focus { .. } | Request::PrepareRestart { .. } => {
+                Level::Navigate
+            }
             _ => Level::Full,
         }
     }
+}
+
+fn blocks_limit() -> usize {
+    rift_remote::MAX_BLOCKS
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -137,6 +205,15 @@ pub struct Response {
     pub tabs: Vec<TabInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane: Option<u64>,
+    /// `blocks`: the pane's blocks, newest last.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocks: Vec<rift_remote::protocol::Block>,
+    /// `blocks`: older blocks exist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub has_older: Option<bool>,
+    /// `blocks`: the pane's oldest block id (any page); lower ids are gone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oldest: Option<u64>,
 }
 
 impl Response {
@@ -349,7 +426,8 @@ fn handle_conn(
         let response = match serde_json::from_str::<Request>(&line) {
             Err(e) => Response::error(format!("bad request: {e}")),
             Ok(req) if req.level() > level => Response::error(format!(
-                "not allowed: set control_api = \"full\" in config.toml to use {:?}",
+                "not allowed: set control_api = \"{}\" in config.toml to use {:?}",
+                req.level().name(),
                 req
             )),
             Ok(request) => {
@@ -393,9 +471,18 @@ pub fn sockets() -> Vec<PathBuf> {
 
 /// One request to one window's socket.
 pub fn request(path: &std::path::Path, req: &Request) -> std::io::Result<Response> {
+    request_within(path, req, Duration::from_secs(6))
+}
+
+/// [`request`] that gives up after `timeout` per read or write.
+pub fn request_within(
+    path: &std::path::Path,
+    req: &Request,
+    timeout: Duration,
+) -> std::io::Result<Response> {
     let mut s = UnixStream::connect(path)?;
-    s.set_read_timeout(Some(Duration::from_secs(6)))?;
-    s.set_write_timeout(Some(Duration::from_secs(6)))?;
+    s.set_read_timeout(Some(timeout))?;
+    s.set_write_timeout(Some(timeout))?;
     let mut body = serde_json::to_string(req).map_err(std::io::Error::other)?;
     body.push('\n');
     s.write_all(body.as_bytes())?;
@@ -423,11 +510,16 @@ const CLI_HELP: &str = "usage: rift-terminal ctl [--pid PID] <command>
 
   list                          tabs and panes of every window (JSON)
   status                        this window's pid, version, tabs
+  blocks --pane ID [--before ID] [--limit N]
+                                a pane's command blocks, newest last (at most
+                                30; output: last 500 lines, 64 KiB)
   focus [--tab N] [--pane ID]   raise the window, select a tab (N counts from 0,
                                 as in `list`) or a pane
   split right|down [--cwd DIR]  split the active pane        (control_api = \"full\")
   open [--cwd DIR] [-- CMD…]    new tab, optionally running CMD (\"full\")
   send-text --pane ID TEXT      type TEXT into a pane         (\"full\")
+  request JSON                  send one raw request line, e.g.
+                                '{\"cmd\":\"blocks\",\"pane\":3,\"meta\":true}'
 
 The newest window answers unless --pid names one.";
 
@@ -467,6 +559,26 @@ pub fn cli(args: &[String]) -> i32 {
             return 0;
         }
         "status" => Request::Status,
+        "blocks" => {
+            let mut number = |name: &str| flag(&mut rest, name).and_then(|v| v.parse::<u64>().ok());
+            let Some(pane) = number("--pane") else {
+                eprintln!("blocks needs --pane ID");
+                return 2;
+            };
+            Request::Blocks {
+                pane,
+                before: number("--before"),
+                limit: number("--limit").map_or(rift_remote::MAX_BLOCKS, |n| n as usize),
+                meta: false,
+            }
+        }
+        "request" => match serde_json::from_str::<Request>(&rest.join(" ")) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("request: not a control request: {e}");
+                return 2;
+            }
+        },
         "focus" => {
             // a given but unusable value is an error, never "focus the
             // current tab"
@@ -659,12 +771,173 @@ mod tests {
             }
         );
         assert_eq!(r.level(), Level::Navigate);
+        // the remote gateway's read: navigate, limit defaults to 30
+        let r: Request =
+            serde_json::from_str(r#"{"cmd":"blocks","pane":12,"before":null,"limit":5}"#).unwrap();
+        assert_eq!(
+            r,
+            Request::Blocks {
+                pane: 12,
+                before: None,
+                limit: 5,
+                meta: false
+            }
+        );
+        assert_eq!(r.level(), Level::Remote);
+        // the `done` probe's metadata-only read
+        let line = r#"{"cmd":"blocks","pane":3,"limit":4,"meta":true}"#;
+        let r: Request = serde_json::from_str(line).unwrap();
+        assert_eq!(
+            r,
+            Request::Blocks {
+                pane: 3,
+                before: None,
+                limit: 4,
+                meta: true
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&r).unwrap(),
+            r#"{"cmd":"blocks","pane":3,"before":null,"limit":4,"meta":true}"#
+        );
+        // false is the default and is not written
+        let r = Request::Blocks {
+            pane: 3,
+            before: None,
+            limit: 4,
+            meta: false,
+        };
+        assert!(!serde_json::to_string(&r).unwrap().contains("meta"));
+        let r: Request = serde_json::from_str(r#"{"cmd":"blocks","pane":3,"before":87}"#).unwrap();
+        assert_eq!(
+            r,
+            Request::Blocks {
+                pane: 3,
+                before: Some(87),
+                limit: 30,
+                meta: false
+            }
+        );
+        assert!(serde_json::from_str::<Request>(r#"{"cmd":"blocks"}"#).is_err());
+        // the remote gateway's input, exactly as docs/remote-protocol.md shows it
+        let line =
+            r#"{"cmd":"remote-input","pane":12,"device":"Sam's iPhone","command":"cargo test"}"#;
+        let r: Request = serde_json::from_str(line).unwrap();
+        assert_eq!(
+            r,
+            Request::RemoteInput {
+                pane: 12,
+                device: "Sam's iPhone".into(),
+                command: Some("cargo test".into()),
+                keys: None
+            }
+        );
+        assert_eq!(r.level(), Level::Remote);
+        assert_eq!(serde_json::to_string(&r).unwrap(), line);
+        let line = r#"{"cmd":"remote-input","pane":12,"device":"d","keys":["ctrl+c","enter"]}"#;
+        let r: Request = serde_json::from_str(line).unwrap();
+        assert_eq!(serde_json::to_string(&r).unwrap(), line);
+        assert!(serde_json::from_str::<Request>(r#"{"cmd":"remote-input","pane":1}"#).is_err());
+        // blocks travel in the response, omitted when empty
+        let resp = Response {
+            ok: true,
+            blocks: vec![rift_remote::protocol::Block {
+                id: 1,
+                command: "ls".into(),
+                state: rift_remote::protocol::BlockState::Done,
+                exit: Some(0),
+                duration_ms: 3,
+                cwd: None,
+                branch: None,
+                output: "a\n".into(),
+                dropped: 0,
+                restored: false,
+            }],
+            has_older: Some(false),
+            oldest: Some(1),
+            ..Default::default()
+        };
+        let line = serde_json::to_string(&resp).unwrap();
+        assert_eq!(serde_json::from_str::<Response>(&line).unwrap(), resp);
+        let empty = serde_json::to_string(&Response {
+            ok: true,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(empty, r#"{"ok":true}"#);
         assert_eq!(Level::parse("full"), Level::Full);
         assert_eq!(Level::parse("navigate"), Level::Navigate);
         assert_eq!(Level::parse("Full"), Level::Full);
         for bad in ["nonsense", "false", "", "OFF "] {
             assert_eq!(Level::parse(bad), Level::Off, "{bad:?}");
         }
+        // "remote" is no control_api value
+        assert_eq!(Level::parse("remote"), Level::Off);
+    }
+
+    #[test]
+    fn remote_access_opens_only_the_gateways_requests() {
+        assert_eq!(Level::effective("off", false), Level::Off);
+        assert_eq!(Level::effective("off", true), Level::Remote);
+        assert_eq!(Level::effective("navigate", true), Level::Navigate);
+        assert_eq!(Level::effective("full", true), Level::Full);
+        assert_eq!(Level::effective("navigate", false), Level::Navigate);
+        assert_eq!(Level::effective("bogus", true), Level::Remote);
+        let parse = |s: &str| serde_json::from_str::<Request>(s).unwrap();
+        let r = parse(r#"{"cmd":"remote-status"}"#);
+        assert_eq!(r, Request::RemoteStatus);
+        assert_eq!(r.level(), Level::Remote);
+        assert_eq!(
+            serde_json::to_string(&r).unwrap(),
+            r#"{"cmd":"remote-status"}"#
+        );
+        for ok in [
+            r#"{"cmd":"status"}"#,
+            r#"{"cmd":"blocks","pane":1}"#,
+            r#"{"cmd":"remote-input","pane":1,"device":"d","keys":["ctrl+c"]}"#,
+        ] {
+            assert!(parse(ok).level() <= Level::Remote, "{ok}");
+        }
+        for denied in [
+            r#"{"cmd":"list"}"#,
+            r#"{"cmd":"focus","pane":1}"#,
+            r#"{"cmd":"prepare-restart"}"#,
+            r#"{"cmd":"send-text","pane":1,"text":"x"}"#,
+            r#"{"cmd":"split","direction":"right"}"#,
+            r#"{"cmd":"open"}"#,
+        ] {
+            assert!(parse(denied).level() > Level::Remote, "{denied}");
+        }
+        // over a socket served at Remote: the denial names the level to set
+        let path =
+            std::env::temp_dir().join(format!("rift-remote-lvl-{}.sock", std::process::id()));
+        let server = start(path.clone(), Level::Remote, |p| {
+            let _ = p.reply.send(Response {
+                ok: true,
+                ..Default::default()
+            });
+        })
+        .unwrap();
+        assert!(request(&path, &Request::Status).unwrap().ok);
+        let r = request(
+            &path,
+            &Request::Focus {
+                tab: None,
+                pane: None,
+            },
+        )
+        .unwrap();
+        assert!(r.error.unwrap().contains(r#"control_api = "navigate""#));
+        let r = request(
+            &path,
+            &Request::SendText {
+                pane: 1,
+                text: "x".into(),
+            },
+        )
+        .unwrap();
+        assert!(r.error.unwrap().contains(r#"control_api = "full""#));
+        drop(server);
     }
 
     #[test]

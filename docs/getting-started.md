@@ -139,9 +139,28 @@ rift-terminal ctl open --cwd ~/src -- make test   # needs control_api = "full"
 
 `ctl --pid PID` picks a window (the newest answers otherwise);
 `rift-terminal --version` and `--help` print the version and usage.
-`control_api` is `navigate` by default (list, status, focus). Set it to
+`control_api` is `navigate` by default (list, status, focus, blocks). Set it to
 `full` in Settings → General → *Control socket* to allow split, open and
 send-text.
+
+### Phone companion
+
+1. Settings → *Remote access* → turn on *Allow remote access*.
+2. *Pair a phone*, then scan the QR code with the Rift app (or the phone's
+   camera). The code works once, for 2 minutes.
+3. On the phone, pick a host, a tab and a pane: its blocks follow live. Type a
+   command and confirm to run it at the prompt, or use the key row (^C, esc,
+   tab, arrows) to talk to a running program.
+
+On the same network the phone connects directly. Away from it, set a relay
+under *Relay* (`wss://…`; host one with `rift-terminal relay` or
+`packaging/relay.Dockerfile`) and pair again so the link includes it, or use
+a private network such as Tailscale. The relay never sees your terminal: it
+only forwards encrypted traffic. While a phone is connected, the tab bar
+shows a *Remote* chip. Set a phone to *View only*, check *Recent
+connections*, or revoke a phone under *Paired devices*; turning remote
+access off disconnects every phone. In the app, Settings › Security can
+require Face ID or a fingerprint.
 
 ## Troubleshooting
 
