@@ -1,9 +1,11 @@
-# Remote protocol (version 2, Phase 1)
+# Remote protocol (version 2)
 
 The wire format between the Rift remote gateway (crate `rift-remote`, run by
 `rift-terminal remote`) and the mobile companion (`mobile/`). Phase 1 of the
 [mobile plan](mobile-remote-plan.md): paired devices, end-to-end encryption,
-command entry and control keys on the local network. The
+command entry and control keys on the local network; Phase 2 adds the relay
+and push, Phase 3 the terminal screen for full-screen programs, typed text,
+more keys and output paging (§ Phase 3). The
 [threat model](mobile-threat-model.md) says what it protects.
 
 The Rust types in `crates/rift-remote/src/protocol.rs` and the TypeScript
@@ -86,8 +88,8 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
 
 ## Devices and permissions
 
-- `operate`: everything below. `view`: no `run`, no `keys` (they get
-  `error` `forbidden`).
+- `operate`: everything below. `view`: no `run`, `keys` or `text` (they
+  get `ack` with `error` `forbidden`).
 - The desktop lists, renames nothing, and revokes devices (Settings ›
   Remote access, or `rift-terminal remote devices` / `revoke ID`). A revoked
   device's open connections close within 1 second, and its key is refused
@@ -105,11 +107,14 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
 | Failed handshakes | 10 per minute per remote address; then refused for a minute |
 | Idle | the gateway pings every 15 s and drops a client silent for 45 s |
 | Blocks per `snapshot` / `older` | 30, newest last |
-| Output per block | the last 500 lines and at most 64 KiB; `dropped` counts the lines cut from the head that are still in the window's scrollback (lines the scrollback limit already discarded are not counted) |
+| Output per block | the last 500 lines and at most 64 KiB; `dropped` counts the lines before them (a row the scrollback limit already discarded counts as one line) |
 | Replay ring | the last 256 `update`s per pane |
 | Poll interval | 100 ms for subscribed panes, 1 s for the topology |
 | `run` | 4 per second per connection; the command at most 2 KiB, one line |
 | `keys` | 20 keys per message, 20 messages per second per connection |
+| `text` | 1 KiB per message, one line without control characters; counts against the `keys` rate |
+| `output` | 1 to 500 lines and at most 64 KiB per answer, 10 requests per second per connection |
+| `screen` | at most 300 columns and 120 rows (the top-left part of a larger screen), one per 100 ms |
 
 ## Client → gateway
 
@@ -122,9 +127,14 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
 {"t":"keys","id":"k1","pane":12,"keys":["ctrl+c"]}
 {"t":"forget"}
 {"t":"ping","n":3}
-{"t":"push","token":"ExponentPushToken[…]","long_ms":30000,"show_command":false}
-{"t":"push","token":null,"long_ms":null,"show_command":false}
+{"t":"push","token":"ExponentPushToken[…]","ntfy":null,"long_ms":30000,"show_command":false,"failures_only":true}
+{"t":"push","token":null,"ntfy":"https://ntfy.sh/rift-x7Kq2mP9vT4wL8nR3sY6hZ","long_ms":30000,"show_command":false,"failures_only":false}
+{"t":"push","token":null,"ntfy":null,"long_ms":null,"show_command":false,"failures_only":false}
 {"t":"notify","pane":12}
+{"t":"visible","on":false}
+{"t":"text","id":"x1","pane":12,"text":":wq"}
+{"t":"screen","pane":12,"mode":"auto"}
+{"t":"output","id":"o1","pane":12,"block":86,"from":0,"limit":500}
 ```
 
 - `subscribe` follows one pane (a new `subscribe` replaces the old one).
@@ -138,20 +148,52 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
   that is running something answers `ack` with `error` `busy`; use `keys`
   there. The command may not contain a newline or a control character.
 - `keys` sends keys to the pane as if pressed on the desktop (raw to the
-  program when one is running, to the editor at a prompt). Names:
-  `ctrl+a` … `ctrl+z`, `esc`, `tab`, `shift+tab`, `enter`, `backspace`,
-  `up`, `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown`.
-- `id` is chosen by the client (at most 64 characters) and returned in `ack`.
+  program when one is running, to the editor at a prompt). At a prompt no
+  key puts text on the command line: `shift+enter`, `alt+enter`,
+  `alt+space`, `up`/`down` (history), `ctrl+r` (history search), `tab`
+  (completion) and `ctrl+right` (the ghost suggestion) do nothing, and
+  `enter` while the command line has text (the desktop user's draft)
+  answers `ack` with `error` `busy`, message `the command line has text;
+  send the command with run` (an empty line's `enter` passes). A command
+  line only arrives through `run`. A name is
+  optional modifiers, in this order and each at most once, `ctrl+`,
+  `alt+`, `shift+`, then a base key: `esc`, `tab`, `enter`, `backspace`,
+  `delete`, `insert`, `up`, `down`, `left`, `right`, `home`, `end`,
+  `pageup`, `pagedown`, `f1` … `f12` (with any modifiers or none); `a` …
+  `z` and `space` only with `ctrl+` and/or `alt+` and without `shift+`
+  (plain letters are `text`). So `ctrl+c`, `shift+tab`, `alt+b`,
+  `ctrl+alt+delete`, `shift+f5`, `ctrl+space`; not `ctrl+A`, `shift+ctrl+c`,
+  `shift+a`, `a`, `space`.
+- `text` types printable text into the program running in the pane, as if
+  typed on the desktop's keyboard (the program's keyboard mode applies;
+  under the kitty keyboard protocol's "report all keys" each character is
+  one key press). It is one line without control characters (`enter`,
+  `tab`, `backspace` are `keys`), at most 1 KiB. A pane at its prompt, or
+  one whose submitted command the shell has not started yet, answers `ack`
+  with `error` `busy`: a command line goes through `run`, so it is always
+  confirmed as one. Two exceptions, where the gateway cannot tell a
+  prompt from a program, take text: a shell without Rift's shell
+  integration, and a prompt drawn on the alternate screen (tmux, screen,
+  an ssh session running one). The desktop's toast names the device, never
+  the text (it may be a password).
+- `screen` sets what the gateway sends of the subscribed pane's terminal
+  screen (§ Phase 3): `off` (the default after every `subscribe`), `auto`
+  (while the pane shows the alternate screen: vim, less, htop) or `on`
+  (always). `pane` must be the subscribed pane, else `error` `bad_request`.
+- `output` asks for lines `from` … `from + limit - 1` of a block's output
+  (§ Phase 3).
+- `id` is chosen by the client (at most 64 characters) and returned in `ack`
+  (or, for `output`, in the `output` answer).
 - `forget` removes this device from the desktop's paired devices and closes
   the connection.
 - `ping` is answered with `pong` carrying the same `n`.
-- `push` and `notify`: alerts while the app is closed (see § Push). No
+- `push`, `notify` and `visible`: alerts while the app is closed (see § Push). No
   reply; a malformed one gets `error` `bad_request`.
 
 ## Gateway → client
 
 ```json
-{"t":"welcome","v":2,"host":"studio-mac","os":"macos","version":"0.1.0","device":"d3f1","permission":"operate"}
+{"t":"welcome","v":2,"host":"studio-mac","os":"macos","version":"0.1.0","device":"d3f1","permission":"operate","features":["screen","text","output","push_failures","push_ntfy"]}
 {"t":"topology","windows":[{"pid":4242,"tabs":[{"index":0,"title":"rift","active":true,"panes":[{"id":12,"active":true,"cwd":"/Users/me/rift","job":null,"last_command":"cargo test","last_exit":0}]}]}]}
 {"t":"snapshot","pane":12,"seq":41,"blocks":[Block],"has_older":true}
 {"t":"update","pane":12,"seq":42,"blocks":[Block],"removed":[80]}
@@ -161,10 +203,19 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
 {"t":"done","pane":12,"block":87,"command":"cargo test","exit":0,"duration_ms":260500}
 {"t":"pong","n":3}
 {"t":"error","code":"auth","message":"this device is not paired"}
+{"t":"screen","pane":12,"cols":80,"rows":24,"alt":true,"cursor":[23,1],"full":false,"lines":[[0,[["top - 10:02:11 up 3 days",null,null,1]]],[7,[]]]}
+{"t":"screen_end","pane":12}
+{"t":"output","id":"o1","pane":12,"block":86,"from":0,"text":"   Compiling rift-pty v0.1.0\n","total":40}
 ```
 
 - `welcome` follows the handshake, then `topology`, which is sent again
-  whenever it changes.
+  whenever it changes. A pane's `id` is the gateway's: the window's pid
+  times 2^24 plus the window's own pane id (every window numbers its panes
+  from 1), so it names one pane among all windows. `features` lists what this gateway serves beyond
+  Phase 2: `screen`, `text`, `output` (§ Phase 3), `push_failures`
+  (`push.failures_only`, § Push) and `push_ntfy` (`push.ntfy` and `visible`, § Push). A
+  gateway that leaves
+  the field out serves none of them; the app then hides what needs them.
 - `seq` is per pane and per gateway run: `update` N+1 follows `update` (or
   `snapshot`) N. A client that sees a gap re-subscribes with its last `seq`.
 - `update.blocks` are whole blocks that are new or changed since the
@@ -180,7 +231,8 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
 - A pane that closes is reported by `topology` and by `error` `no_pane` for
   its subscription.
 - Error codes: `auth`, `version`, `bad_request`, `busy`, `forbidden`,
-  `no_pane`, `too_large`, `rate`. `ack.error` uses the same codes.
+  `no_pane`, `no_block`, `too_large`, `rate`. `ack.error` uses the same
+  codes.
 
 ### Block
 
@@ -204,6 +256,9 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
   not report one).
 - `duration_ms`: elapsed time while `running`, final duration when `done`.
 - `output`: plain text, no escape sequences; soft-wrapped rows are joined.
+- `dropped`: the number of output lines before `output`, which is also the
+  line number of its first line (`output` request, § Phase 3). A row
+  already gone from the window's scrollback counts as one line.
 - `restored`: replayed from a saved transcript of an earlier session.
 
 ## Relay (Phase 2)
@@ -281,27 +336,159 @@ gateways and phones its `wss://` URL.
 The app can only post notifications while it runs, and Android 15+ and iOS
 stop a backgrounded app's network within seconds. So a device can hand the
 gateway an Expo push token, and the gateway alerts through the Expo push
-service (which hands on to Apple's APNs or Google's FCM) by itself.
+service (which hands on to Apple's APNs or Google's FCM) by itself. A device
+can also (or instead) hand it an ntfy topic URL: the gateway then posts each
+alert to that ntfy topic (ntfy.sh or a self-hosted server), and the free
+ntfy app subscribed to it shows the alert. This needs no push setup in the
+Rift app, so it works in builds without an Apple Developer Program account.
 
-- `push` stores (or with `token: null` removes) this device's registration
-  in `devices.json` (`"push":{"token","long_ms","show_command"}`). The token
+- `push` stores (or with `token: null` and `ntfy: null` removes) this
+  device's registration in `devices.json`: the Expo half as
+  `"push":{"token","long_ms","show_command","failures_only"}` (only with a
+  token: the shape Rift builds before ntfy read, so a downgrade keeps
+  working) and the ntfy half as
+  `"ntfy":{"url","long_ms","show_command","failures_only"}` (a field older
+  builds ignore). A file without `ntfy` has none.
+  `failures_only` (default `false`) limits the `long_ms` alerts to commands
+  that failed (an exit status other than 0); `notify` alerts either way.
+  A gateway without the `push_failures` feature ignores the field, so the
+  app then registers no `long_ms` with it rather than get alerts for
+  successes. The token
   must look like `ExponentPushToken[…]` / `ExpoPushToken[…]` (URL-safe
   inside, at most 200 characters); `long_ms` is at most a day.
+- `ntfy` (default `null`; send it only to a gateway with the `push_ntfy`
+  feature) is `https://<host>[:port]/<topic>`: https only, a host name or
+  IPv4 address, a topic of `[A-Za-z0-9_-]{1,64}`, no user, query or
+  fragment, at most 200 characters. Never `localhost` / `*.localhost`, nor
+  an IPv4 address that is loopback (127/8), 0/8, link-local (169.254/16),
+  broadcast or multicast (224/4); a numeric last label must be a plain
+  dotted quad (`127.1`, `2130706433`, `0x7f.0.0.1` are refused). Private
+  LAN and 100.64/10 addresses are allowed. The app makes the topic
+  `rift-<22 random base64url characters>`; the topic name is the secret
+  (anyone who knows it can read the alerts). A bad token or URL refuses the
+  whole message (`bad_request`) and keeps the previous registration.
 - `notify` asks for one alert when the next command in `pane` finishes,
   whatever its length ("Notify me"); at most 32 panes per device, each
   forgotten after 24 h.
-- For every `done` the gateway alerts each device with a token that asked
-  about that pane (the wait is used up) or whose `long_ms` the command
-  reached, at most 12 per device per minute. While a device has a token the
+- For every `done` the gateway alerts each device with a token or an ntfy
+  URL that asked about that pane (the wait is used up) or whose `long_ms`
+  the command reached, at most 12 per device per minute (one alert counts
+  once, through Expo, ntfy or both). While a device has a registration the
   gateway watches every pane even with nobody connected.
 - The request is a POST of JSON to `https://exp.host/--/api/v2/push/send`
   (with `curl`, https only): `title` `A command finished on <host>` or
   `A command failed on <host> (exit N)`, `body` the command line only when
   `show_command`, `data` `{"host":"<gateway key>","pane":N}` (a tap opens
   the pane), `priority` `high`, `sound` `default`. Output never goes out.
-- A token the service answers with `DeviceNotRegistered` is removed.
+- A token the service answers with `DeviceNotRegistered` is removed (an
+  ntfy URL next to it stays).
+- An ntfy alert is a POST to the device's topic URL (with `curl`, https
+  only, 5 s to connect and 15 s in all, the reply not read or logged), on a
+  thread per device: a slow or dead ntfy server holds up no other device
+  and no Expo post. While a device's post is under way its next alerts are
+  dropped (logged), so one dead server costs at most one thread. The body is the command
+  line only when `show_command`, else `Exit N` for a failed command or
+  `Finished`; at most 4096 bytes (ntfy turns longer ones into attachments).
+  Headers: `Title` the same words as the Expo title (as an RFC 2047
+  `=?UTF-8?B?…?=` word when it is not printable ASCII, e.g. a host named
+  `Jo’s Mac`), `Priority` `high` for a failed command else `default`, `Tags`
+  `x` or `white_check_mark`, and `Click`
+  `rift://host/<gateway key, percent-encoded>/pane/<pane id>`, the app's
+  link to that pane. Output never goes out.
+- No ntfy alert goes out about a pane the device follows right now (a live
+  connection subscribed to it whose app is on screen and that was heard
+  from within 20 s: the app pings every 15 s, and a dropped connection
+  stays open until the 45 s idle timeout) unless the device asked for it
+  (`notify`): the user is looking at it, and Rift cannot drop the ntfy
+  app's banner. An Expo token still gets that alert (the app drops it in
+  the foreground). With ntfy on, the app sends no token to a `push_ntfy`
+  gateway: ntfy replaces Expo there (one alert per command).
+- `visible` `{"on":bool}` says whether the app is on screen; a connection
+  starts visible. The app sends `on: false` when it goes to the
+  `background` (it keeps its socket for a while, but iOS suspends it, so it
+  cannot notify; `inactive`, e.g. a Face ID prompt, is still on screen),
+  `on: true` when it is `active` again, and after a `welcome` only when it
+  is in the background. While not visible, the pane it
+  follows gets ntfy alerts again. Sent only to a gateway whose `welcome`
+  lists `push_ntfy` (the feature covers `push.ntfy` and `visible`); an
+  older gateway never gets it.
 - The app then posts no notification of its own for that computer (one alert
-  per command), and drops an alert about the pane on screen.
+  per command), and drops an Expo alert about the pane on screen. With ntfy
+  and no token, it notifies by itself about the pane it follows while it is
+  on screen (the gateway sent nothing), by its own rules: not while that
+  pane is shown.
+
+## Phase 3: terminal screen, typed text, output paging
+
+### Terminal screen
+
+Full-screen programs (vim, less, htop, an ssh session's prompt) are not
+command blocks. With `screen` `auto` or `on` the gateway sends the
+subscribed pane's visible screen as text runs:
+
+```json
+{"t":"screen","pane":12,"cols":80,"rows":24,"alt":true,"cursor":[23,1],"full":true,"lines":[[0,[["top",null,null,1],[" - 10:02",null,"1e1e1e",0]]],[1,[]]]}
+```
+
+- `cols`, `rows`: the screen's size as sent (at most 300 × 120: a larger
+  screen is cut to its top-left part). The phone never resizes the pane;
+  it fits or scrolls the desktop's screen.
+- `alt`: the pane shows the alternate screen.
+- `cursor`: `[row, column]` while the program shows its cursor, else
+  `null`.
+- `lines`: `[row, runs]`, row 0 at the top. With `full: true` every row
+  `0 … rows-1` is present (the first `screen` after `screen` `auto`/`on`
+  or a re-`subscribe`, and whenever `cols` or `rows` change); otherwise only
+  the rows that changed since the previous `screen`.
+- A run is `[text, fg, bg, flags]`: `fg`/`bg` are the resolved colours
+  (`"rrggbb"`, lowercase; the pane's theme and the program's palette
+  changes applied, reverse video already swapped) or `null` for the
+  default foreground / background; `flags` adds 1 bold, 2 italic, 4
+  underline, 8 dim, 16 strikethrough. A wide character is one character of
+  `text` that takes two columns. Blank cells in the default style at the
+  end of a row are left out; an empty row is `[]`.
+- A cell carries at most 16 combining marks (the rest are left out). A
+  wide character in the last column sent (its second half cut off by the
+  300-column limit) is sent as a space: a row never takes more than
+  `cols` columns.
+- A screen (or a diff) that would exceed 1 MiB is sent full without styles
+  (every run `null`, `null`, `0`), each row's text cut so the message
+  fits. Later diffs are against that unstyled screen: rows that differ
+  from it come again with their styles.
+- Screens come at most every 100 ms, only when something changed (a
+  cursor move is a change). Each diff is against the screen the phone was
+  last sent; a phone that reads slower than the screen changes gets fewer
+  screens (the newest, diffed against what it has), never a backlog.
+- `screen_end` says screens stopped: mode `auto` and the pane left the
+  alternate screen (also when the mode changes from `on` to `auto` while
+  the pane is on the primary screen), or mode `off` was set. A new
+  `subscribe` or `unsubscribe` stops them silently (and resets the mode
+  to `off`).
+
+### Output paging
+
+`Block.output` is the tail of a block's output. Earlier lines are fetched
+on request:
+
+```json
+{"t":"output","id":"o1","pane":12,"block":86,"from":0,"limit":500}
+{"t":"output","id":"o1","pane":12,"block":86,"from":0,"text":"…","total":40}
+```
+
+- Lines are numbered from 0, the block's first output line, the way
+  `dropped` counts them (soft-wrapped rows joined; a row gone from
+  scrollback is one line).
+- The answer holds lines from `from` on, at most `limit` (1 … 500) lines
+  and 64 KiB, cut at the end of a line (a single line longer than 64 KiB
+  keeps its first 64 KiB). Its `from` is the first line it holds: when the
+  requested lines are already gone from scrollback it is the first line
+  still held (and `text` may be empty). `text` ends with a line break
+  unless it reaches the block's unfinished last line.
+- `total`: the block's output lines so far (a running block grows).
+- `from` at or past `total` gives an empty `text`.
+- An unknown block (or one being typed at the prompt) answers `ack` with
+  `error` `no_block`; an unknown pane `no_pane`; past the rate `rate`.
+  `view` devices may page.
 
 ## Connection history and permissions (Phase 2)
 
@@ -332,7 +519,7 @@ service (which hands on to Apple's APNs or Google's FCM) by itself.
 | Path (under `<data dir>/remote/`, directory 0700, files 0600) | Holds |
 |---|---|
 | `gateway.key` | The gateway's static X25519 private key (32 bytes), created once |
-| `devices.json` | `[{"id","name","platform","key","permission","paired_at","last_seen","push"?}]` (`key` base64url, times RFC 3339, `push` see § Push) |
+| `devices.json` | `[{"id","name","platform","key","permission","paired_at","last_seen","push"?,"ntfy"?}]` (`key` base64url, times RFC 3339, `push` and `ntfy` see § Push) |
 | `pairing.json` | Live pairing secrets: `[{"hash","permission","expires_at"}]` (SHA-256 of the secret, never the secret) |
 | `status.json` | Written by the running gateway: `{"pid","addresses":[...],"clients":[{"device","name","since","via"}],"relay"?:{"url","state","error"?}}` (`relay` only while one is configured); removed when it stops |
 | `relay.json` | `{"secret":"<32 bytes, base64url>"}`: the gateway's `/accept` secret at the relay |
@@ -346,14 +533,26 @@ service (which hands on to Apple's APNs or Google's FCM) by itself.
   last Rift window is gone.
 - A gateway counts as running only while `gateway.lock` is held; a stale
   `status.json` is ignored. A window starts one at most every 5 seconds.
-- The gateway reads windows through their control sockets: `status` and
+- The gateway reads windows through their control sockets: `status`,
   `blocks` (read-only; `"meta": true` leaves the output out, which the
-  `done` probe uses), and `remote-input`
-  (`{"cmd":"remote-input","pane":12,"device":"Sam's iPhone","command":"…"}`
-  or `{…,"keys":["ctrl+c"]}`), which a window accepts only while
+  `done` probe uses), `screen` (`{"cmd":"screen","pane":12,"force":false}`:
+  the pane's screen, or none when it is not on the alternate screen and
+  `force` is false, with the pane's output `generation`, which every
+  parsed chunk of output, resize, clear and theme change moves; with
+  `"since":N` and the generation still `N` the answer is
+  `{"ok":true,"generation":N,"unchanged":true}` and no screen is built, so
+  the gateway's 100 ms reads of an idle pane cost the window nothing) and
+  `output`
+  (`{"cmd":"output","pane":12,"block":86,"from":0,"limit":500}`), and
+  `remote-input`
+  (`{"cmd":"remote-input","pane":12,"device":"Sam's iPhone","command":"…"}`,
+  `{…,"keys":["ctrl+c"]}` or `{…,"text":":wq"}`), which a window accepts only while
   `remote_access` is `true`, independent of `control_api`. Its errors:
   `remote access is off`, `no such pane`, `busy` (the pane is running
-  something, or a command was submitted and has not started yet),
+  something, or a command was submitted and has not started yet; for
+  `text`: the pane is at its prompt, or a command was submitted and has
+  not started yet), `the command line has text; send the command with run`
+  (`keys` with `enter` at a prompt with a draft; the gateway's `busy`),
   `bad request: …`.
 - Every window shows a tab-bar chip while at least one device is connected
   (from `status.json`); clicking it opens Settings › Remote access. After

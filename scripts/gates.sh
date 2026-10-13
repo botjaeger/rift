@@ -27,7 +27,7 @@ test     cargo test --workspace --locked, and each vendored crate (all features)
 doc      cargo doc --workspace --no-deps --locked, rustdoc warnings denied
 shell    shellcheck on packaging/*.sh, scripts/*.sh, .githooks/*, bash hooks; zsh -n and fish --no-execute on their hooks
 docs     CLAUDE.md and AGENTS.md identical; every relative link in *.md resolves (vendored crates' upstream docs excepted)
-mobile   the Expo companion in mobile/: pnpm install --frozen-lockfile, typecheck, vitest (incl. the shared protocol fixtures)
+mobile   the Expo companion in mobile/: pnpm install --frozen-lockfile, typecheck, eslint, vitest (incl. the shared protocol fixtures)
 release  cargo build --release --locked
 ui       isolated scripted UI regressions (display or xvfb-run required)
 linux    clippy + test + release build in packaging/linux-verify.Dockerfile, then shell + scripted UI (xvfb) on the CI runner's packages in packaging/ci-ubuntu.Dockerfile (docker)
@@ -116,7 +116,7 @@ gate_docs() {
 
 gate_mobile() {
     have pnpm || { echo "pnpm not installed (corepack enable)"; return 1; }
-    (cd mobile && pnpm install --frozen-lockfile && pnpm typecheck && pnpm test)
+    (cd mobile && pnpm install --frozen-lockfile && pnpm typecheck && pnpm lint && pnpm test)
 }
 
 gate_linux() {

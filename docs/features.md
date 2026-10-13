@@ -643,9 +643,10 @@ Each window listens on `~/.local/share/rift/control/<pid>.sock`
 - `"off"`: no socket. Any unrecognised value (`"false"`, a typo) is
   treated as `"off"` and logs a warning. While `remote_access` is on, the
   socket stays open for the remote gateway's requests only: `status`,
-  `blocks`, `remote-input` and `remote-status` (the gateway's notice that a
-  phone connected or left).
-- `remote-input` (types a command at a pane's prompt, or sends keys) is
+  `blocks`, `screen`, `output`, `remote-input` and `remote-status` (the
+  gateway's notice that a phone connected or left).
+- `remote-input` (types a command at a pane's prompt, sends keys, or types
+  text into a running program) is
   accepted only while `remote_access` is on, whatever `control_api` says.
 - `blocks` with `"meta": true` leaves the output out.
 - `ctl focus --tab N` / `--pane ID`: tabs count from 0, as in `ctl list`;
@@ -703,6 +704,27 @@ line shows the addresses, or how many devices are connected.
   program when one is running. Each one shows a toast: "<device> ran <cmd>"
   or "<device> sent ctrl+c". Page Up and Page Down at a prompt do nothing
   (the phone scrolls itself), and keys from a phone skip vim mode.
+- **Full-screen programs and typing (Phase 3).** While a pane shows the
+  alternate screen (vim, less, htop) the phone switches to a *Terminal*
+  view of the pane's screen with its colours, and switches back when the
+  program ends; it can also be picked by hand. There an `operate` device
+  types into the running program (the soft keyboard or a hardware one:
+  ctrl/alt combinations, Esc, Tab, arrows, F1–F12, Delete), shown on the
+  desktop as "<device> typed into a program", never with the text. Typed
+  text never reaches a pane at its prompt (nor one whose command was just
+  submitted), and keys at a prompt never recall history, complete or submit
+  a line that has text: commands still go through *Run* and its
+  confirmation. A shell without Rift's integration, and a prompt drawn on
+  the alternate screen (tmux), look like programs and take typed text. The phone never resizes the pane. With a hardware
+  keyboard, ctrl/alt combinations, Esc, Tab and F-keys pressed in the
+  command field go to the pane too.
+- **Block actions, earlier output, control keys (Phase 3).** Each block's
+  *⋯* copies or shares the command or its output, puts the command in the
+  command field, runs it again (through the confirmation), stops a running
+  one (ctrl+c) or asks to be notified when it ends. A block cut to its last
+  500 lines loads earlier output 500 lines at a time (up to 5,000 more;
+  lines gone from the desktop's scrollback say so). The row of control keys
+  is chosen and ordered in Settings › Control keys.
 - **Security.** Traffic is end-to-end encrypted (Noise XX) and the phone pins
   the desktop's key; see [mobile-threat-model.md](mobile-threat-model.md)
   and the wire format in [remote-protocol.md](remote-protocol.md).
@@ -722,6 +744,12 @@ line shows the addresses, or how many devices are connected.
   Face ID / fingerprint on launch, after 5 minutes away, and before running
   commands. With a push token it hands the computers, they alert through the
   Expo push service while the app is closed (`mobile/README.md` › Push).
+  *Alerts through ntfy* also posts them to a random ntfy topic (ntfy.sh
+  or self-hosted), which the free ntfy app shows: no push setup needed.
+  Settings › Notifications chooses *Off*, *Failed commands* or *Finished
+  or failed commands* and how long a command must run (10 s – 5 min); each
+  computer's page can turn its notifications off. "Notify me" always
+  notifies.
 
 ## Notifications (attention center)
 

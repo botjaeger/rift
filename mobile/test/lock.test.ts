@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { AppLock, LOCK_AFTER_BACKGROUND_MS, authOutcome, biometricLabel, keysNeedAuth, needsAuthBeforeRun } from "../src/lock";
+import {
+  AppLock,
+  LOCK_AFTER_BACKGROUND_MS,
+  SubmitAuthHold,
+  authOutcome,
+  biometricLabel,
+  isSubmitKey,
+  keysNeedAuth,
+  needsAuthBeforeRun,
+} from "../src/lock";
 import { DEFAULT_SETTINGS, MemoryStore, loadSettings, saveSettings } from "../src/stores";
 
 function clock() {
@@ -161,8 +170,48 @@ describe("keysNeedAuth", () => {
   });
 
   it("never for other keys, nor when Run would not ask", () => {
-    for (const k of ["ctrl+c", "esc", "tab", "up", "ctrl+d"]) expect(keysNeedAuth([k], on)).toBe(false);
+    for (const k of ["ctrl+c", "esc", "tab", "up", "ctrl+d", "alt+m", "f5", "ctrl+space"])
+      expect(keysNeedAuth([k], on)).toBe(false);
     expect(keysNeedAuth(["enter"], DEFAULT_SETTINGS)).toBe(false);
     expect(keysNeedAuth(["enter"], { ...on, confirmEveryCommand: false })).toBe(false);
+  });
+
+  it("Return with any modifiers submits too (the Phase 3 key names)", () => {
+    for (const k of ["shift+enter", "ctrl+enter", "alt+enter", "ctrl+alt+shift+enter", "ctrl+alt+m", "ctrl+alt+j"])
+      expect(isSubmitKey(k)).toBe(true);
+  });
+});
+
+describe("SubmitAuthHold (the terminal view)", () => {
+  const on = { ...DEFAULT_SETTINGS, biometricLock: true, authBeforeRun: true, confirmEveryCommand: true };
+
+  it("while a program runs: asks for the first submit key, then holds until the view closes or the app leaves", () => {
+    const hold = new SubmitAuthHold();
+    expect(hold.needs(["up"], on, true)).toBe(false);
+    expect(hold.needs(["enter"], on, true)).toBe(true);
+    hold.grant(true);
+    expect(hold.needs(["enter"], on, true)).toBe(false);
+    expect(hold.needs(["ctrl+m"], on, true)).toBe(false);
+    hold.end();
+    expect(hold.needs(["enter"], on, true)).toBe(true);
+  });
+
+  it("at the pane's prompt a submit key runs a command: it always asks", () => {
+    const hold = new SubmitAuthHold();
+    hold.grant(true); // authenticated in vim
+    expect(hold.needs(["enter"], on, false)).toBe(true); // vim quit: the shell's prompt
+    expect(hold.needs(["up"], on, false)).toBe(false);
+    expect(hold.needs(["enter"], on, true)).toBe(false); // a program again: still held
+    const prompt = new SubmitAuthHold();
+    prompt.grant(false); // authenticated at the prompt: no hold
+    expect(prompt.needs(["enter"], on, false)).toBe(true);
+    expect(prompt.needs(["enter"], on, true)).toBe(true);
+  });
+
+  it("never asks when Run would not, and each view has its own", () => {
+    expect(new SubmitAuthHold().needs(["enter"], DEFAULT_SETTINGS, false)).toBe(false);
+    const a = new SubmitAuthHold();
+    a.grant(true);
+    expect(new SubmitAuthHold().needs(["enter"], on, true)).toBe(true);
   });
 });

@@ -28,8 +28,11 @@ while the app is closed (never output; the command line only when the user
 asks); a
 self-hostable opaque relay (rendezvous and splice, routing ids claimed by
 proof of the gateway key) for outside the local network, with private networks such as
-Tailscale working through the address list. Phase 3 (raw terminal mode,
-keyboard mappings) is next.
+Tailscale working through the address list. Phase 3 is built too: the
+terminal screen of full-screen programs with typed text and hardware-keyboard
+mappings, a configurable control-key row, block actions, paging of earlier
+output, and notification policies (failed only, a minimum duration, per
+computer); see [remote-protocol.md](remote-protocol.md) § Phase 3.
 
 ## Why Expo
 

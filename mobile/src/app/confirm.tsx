@@ -17,7 +17,11 @@ import { colors, mono, radius } from "@/ui/theme";
 export default function ConfirmScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { key, pane: paneParam } = useLocalSearchParams<{ key: string; pane: string }>();
+  const {
+    key,
+    pane: paneParam,
+    block: blockParam,
+  } = useLocalSearchParams<{ key: string; pane: string; block?: string }>();
   const paneId = Number(paneParam);
   const s = useApp();
   const lock = useLock();
@@ -31,9 +35,13 @@ export default function ConfirmScreen() {
   }, [lock.locked, router]);
 
   const host = s.hosts.find((h) => h.record.key === key);
-  const command = s.drafts[draftKey(key, paneId)] ?? "";
   const loc = host ? findPane(host.windows, paneId) : null;
   const state = s.pane?.host === key && s.pane.paneId === paneId ? s.pane.state : null;
+  // Run again names a block of the followed pane (never a command: a link could carry one);
+  // otherwise the pane's draft runs
+  const again =
+    blockParam === undefined ? undefined : (state?.blocks.find((b) => b.id === Number(blockParam))?.command ?? "");
+  const command = again ?? s.drafts[draftKey(key, paneId)] ?? "";
   const running = runningCommand(loc?.pane ?? null, state);
   const branch = paneBranch(state);
   const connected = host?.conn.status === "open";
@@ -55,7 +63,7 @@ export default function ConfirmScreen() {
       }
     }
     setSending(true);
-    const r = await fleet.run(key, paneId, command, { notify });
+    const r = await fleet.run(key, paneId, command, { notify, fromDraft: again === undefined });
     setSending(false);
     if (r.ok) {
       AccessibilityInfo.announceForAccessibility(`Command sent to ${hostName}`);

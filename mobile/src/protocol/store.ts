@@ -2,7 +2,7 @@
 // a fixed memory ceiling: at most MAX_BLOCKS blocks and MAX_OUTPUT_CHARS characters of output
 // per pane, oldest blocks dropped first.
 
-import type { Block, OlderMsg, SnapshotMsg, UpdateMsg } from "./types";
+import type { Block, OlderMsg, ScreenEndMsg, ScreenMsg, ScreenRun, SnapshotMsg, UpdateMsg } from "./types";
 
 export const MAX_BLOCKS = 200;
 /** 256 Ki characters (UTF-16 code units) of block output per pane. */
@@ -112,4 +112,40 @@ export function atCapacity(state: PaneState): boolean {
 /** Whether "Load earlier blocks" may fetch: the gateway has older blocks and they would be kept. */
 export function canLoadOlder(state: PaneState | null): boolean {
   return state !== null && state.hasOlder && !state.olderBlocked && !atCapacity(state);
+}
+
+// --- terminal screen ---------------------------------------------------------------------------
+
+/** The subscribed pane's screen as last sent: every row present (empty rows are []). */
+export interface ScreenState {
+  cols: number;
+  rows: number;
+  alt: boolean;
+  cursor: [number, number] | null;
+  /** `rows` entries; a row the last message did not change keeps its array (memoized rows). */
+  lines: ScreenRun[][];
+  /** Shown from before a re-subscribe or reconnect: out of date until the next full screen. */
+  stale: boolean;
+}
+
+const EMPTY_ROW: ScreenRun[] = [];
+
+/**
+ * Applies one `screen` or `screen_end`: a full screen replaces, a diff patches its rows (a size
+ * change without `full`, which the gateway never sends, resizes and keeps what fits), and
+ * `screen_end` clears.
+ */
+export function reduceScreen(prev: ScreenState | null, msg: ScreenMsg | ScreenEndMsg): ScreenState | null {
+  if (msg.t === "screen_end") return null;
+  const base = msg.full || !prev ? [] : prev.lines;
+  const lines: ScreenRun[][] = [];
+  for (let r = 0; r < msg.rows; r++) lines.push(base[r] ?? EMPTY_ROW);
+  for (const [row, runs] of msg.lines) if (row < msg.rows) lines[row] = runs;
+  const stale = !msg.full && (prev?.stale ?? false);
+  return { cols: msg.cols, rows: msg.rows, alt: msg.alt, cursor: msg.cursor, lines, stale };
+}
+
+/** The screen kept, out of date, across a re-subscribe or reconnect (the client's `onScreenStale`). */
+export function staleScreen(prev: ScreenState | null): ScreenState | null {
+  return prev && !prev.stale ? { ...prev, stale: true } : prev;
 }

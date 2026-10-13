@@ -1012,12 +1012,13 @@ fn a_permission_change_closes_relay_clients_and_the_next_welcome_carries_it() {
     assert_eq!(welcome["permission"], "view");
     let _ = recv(&mut ch);
     assert!(ch.send(&json!({"t":"run","id":"r","pane":7,"command":"true"}).to_string()));
-    assert_eq!(recv_t(&mut ch, "error")["code"], "forbidden");
-    let reasons: Vec<String> = registry::history(&env.dir)
-        .into_iter()
-        .map(|e| e.reason)
-        .collect();
-    assert!(reasons.contains(&"permission".to_string()), "{reasons:?}");
+    assert_eq!(recv_t(&mut ch, "ack")["error"], "forbidden");
+    // the closed session's entry is written after its connection ended
+    wait_until("permission close recorded", Duration::from_secs(3), || {
+        registry::history(&env.dir)
+            .iter()
+            .any(|e| e.reason == "permission")
+    });
 }
 
 #[test]

@@ -3,6 +3,8 @@ node_modules/
 /ios
 /android
 .expo/
+# Gradle output of the local native modules
+/modules/*/android/build
 dist/
 web-build/
 expo-env.d.ts

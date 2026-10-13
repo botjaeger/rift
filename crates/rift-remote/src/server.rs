@@ -13,7 +13,9 @@
 //! sends the topology when it changes, and detects finished commands for
 //! `done` ([`DoneTracker`]) and for the devices' alerts while their app is
 //! closed ([`crate::push`]; panes are watched then even with nobody
-//! connected).
+//! connected). For connections that set a `screen` mode it also reads the
+//! subscribed pane's screen and queues each its own diff
+//! ([`refresh_screen`]).
 //!
 //! A connection is the same whether its socket was accepted on the
 //! listening address or dialed at a relay ([`crate::uplink`]): both go
@@ -26,16 +28,17 @@
 //! `busy`.
 
 use crate::protocol::{
-    Block, BlockState, ClientHello, ClientMsg, ErrorCode, GatewayHello, Permission, ServerMsg,
-    VERSION,
+    Block, BlockState, ClientHello, ClientMsg, ErrorCode, GatewayHello, Permission, Run,
+    ScreenMode, ServerMsg, VERSION,
 };
 use crate::registry::{self, Device, RelayState, RelayStatus, Via};
 use crate::transport::{self, Channel, KEY_LEN, Recv, Socket};
 use crate::{
     FAILURE_WINDOW, HANDSHAKE_DEADLINE, IDLE_TIMEOUT, Input, InputError, KEYS_RATE, Key,
     MAX_BLOCKS, MAX_CLIENT_MESSAGE, MAX_COMMAND, MAX_CONNECTIONS, MAX_FAILURES,
-    MAX_GATEWAY_MESSAGE, MAX_KEYS, MAX_REQUEST_ID, MAX_TRACKED, PANE_POLL, PING_INTERVAL, Page,
-    REFUSAL, REPLAY_RING, RUN_RATE, Source, SourceError, TOPOLOGY_POLL,
+    MAX_GATEWAY_MESSAGE, MAX_KEYS, MAX_OUTPUT_PAGE_LINES, MAX_REQUEST_ID, MAX_SCREEN_COLS,
+    MAX_SCREEN_ROWS, MAX_TEXT, MAX_TRACKED, OUTPUT_RATE, OutputError, PANE_POLL, PING_INTERVAL,
+    Page, REFUSAL, REPLAY_RING, RUN_RATE, Screen, Source, SourceError, TOPOLOGY_POLL,
 };
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::io::ErrorKind;
@@ -65,6 +68,14 @@ pub(crate) const MAX_SOCKETS: usize = 2 * MAX_CONNECTIONS;
 const DONE_PROBE: usize = 4;
 /// Running block ids remembered per pane by the `done` tracker.
 const DONE_RUNNING: usize = 64;
+/// A client counts as following its pane only when heard from this
+/// recently: the app pings every 15 s (`PING_INTERVAL_MS` in
+/// `mobile/src/protocol/client.ts`), so a live one is never older than that
+/// plus a round trip; a dropped connection stops counting after this, not
+/// after the 45 s idle timeout.
+pub const FOLLOW_FRESH: Duration = Duration::from_secs(20);
+/// What this gateway serves beyond Phase 2 (`welcome.features`).
+const FEATURES: [&str; 5] = ["screen", "text", "output", "push_failures", "push_ntfy"];
 
 /// Gateway settings. [`Config::new`] takes the limits from the protocol;
 /// tests shorten the timers.
@@ -97,6 +108,14 @@ pub struct Config {
     /// Where alerts are posted ([`crate::push::EXPO_PUSH_URL`]; tests use a
     /// loopback `http://` server).
     pub push_url: String,
+    /// Where ntfy alerts are posted instead of each device's topic URL
+    /// (tests: a URL starting with `.0` goes to `.1` and the rest); empty in
+    /// the app.
+    pub ntfy_redirect: Vec<(String, String)>,
+    /// A client counts as following its pane (no ntfy banner about it)
+    /// only when heard from this recently (20 s by default): a dropped
+    /// connection stays open until `idle_timeout`.
+    pub follow_fresh: Duration,
 }
 
 impl Config {
@@ -118,6 +137,8 @@ impl Config {
             relay: None,
             relay_backoff: (crate::RELAY_BACKOFF_MIN, crate::RELAY_BACKOFF_MAX),
             push_url: crate::push::EXPO_PUSH_URL.to_string(),
+            ntfy_redirect: Vec::new(),
+            follow_fresh: FOLLOW_FRESH,
         }
     }
 }
@@ -243,6 +264,7 @@ pub fn serve<S: Source>(
     let relay = config.relay.take();
     let pusher = crate::push::Pusher::start(
         config.push_url.clone(),
+        config.ntfy_redirect.clone(),
         registry::encode_key(&transport::public_key(&key)),
         config.dir.clone(),
     )?;
@@ -338,10 +360,45 @@ const REVOKED: u8 = 2;
 /// Its device's permission changed: it reconnects with the new one.
 const PERMISSION: u8 = 3;
 
+/// When a client was last heard from, readable from other threads.
+struct Heard {
+    opened: Instant,
+    /// Milliseconds after `opened`.
+    at_ms: AtomicU64,
+}
+
+impl Heard {
+    fn new() -> Heard {
+        Heard {
+            opened: Instant::now(),
+            at_ms: AtomicU64::new(0),
+        }
+    }
+
+    fn mark(&self) {
+        let ms = u64::try_from(self.opened.elapsed().as_millis()).unwrap_or(u64::MAX);
+        self.at_ms.store(ms, Ordering::Release);
+    }
+
+    /// Heard from within `fresh`.
+    fn within(&self, fresh: Duration) -> bool {
+        let at = self.opened + Duration::from_millis(self.at_ms.load(Ordering::Acquire));
+        at.elapsed() < fresh
+    }
+}
+
 struct Slot {
     tx: SyncSender<Arc<str>>,
     pane: Option<u64>,
+    /// The app is on screen (`visible`; true until it says otherwise).
+    visible: bool,
+    /// What it wants of `pane`'s screen (`off` after every (un)subscribe).
+    screen: ScreenMode,
+    /// Its screen frames, written by its own loop ([`flush_screen`]).
+    out: ScreenOut,
     end: Arc<AtomicU8>,
+    /// When its app was last heard from (any Noise message).
+    seen: Arc<Heard>,
     /// The device's static key and registry entry.
     key: [u8; KEY_LEN],
     device: String,
@@ -353,12 +410,77 @@ struct Slot {
 }
 
 impl Slot {
+    /// Follow `pane` (or nothing): screens stop silently, mode `off`.
+    fn follow(&mut self, pane: Option<u64>) {
+        self.pane = pane;
+        self.screen = ScreenMode::Off;
+        self.out.restart(false);
+    }
+
     fn push(&self, frame: Arc<str>) {
         if let Err(TrySendError::Full(_)) = self.tx.try_send(frame) {
             // too slow: drop it; it resumes from its last seq
             let _ = self
                 .end
                 .compare_exchange(LIVE, TOO_SLOW, Ordering::AcqRel, Ordering::Acquire);
+        }
+    }
+}
+
+/// A connection's screen frames. The poll loop leaves the newest screen in
+/// `pending` ([`ScreenOut::offer`]); the connection's own loop diffs it
+/// against what it actually wrote when it writes it ([`flush_screen`]). A
+/// client slower than the screen changes gets fewer, later frames, never a
+/// queue of them: at most one screen waits per connection.
+#[derive(Default)]
+struct ScreenOut {
+    /// The screen the client has: what was written (unstyled when it went
+    /// out so). The next frame is a diff against it; `None`: none since the
+    /// mode was set, screens stopped, or a frame was dropped (the next is
+    /// full).
+    shown: Option<Screen>,
+    /// The source's screen `shown` was made from.
+    basis: Option<Screen>,
+    /// The newest screen not written yet (a newer one replaces it).
+    pending: Option<Screen>,
+    /// The client shows a screen, or one is on its way: screens stopping
+    /// owe it a `screen_end`.
+    showing: bool,
+    /// A `screen_end` is due.
+    end: bool,
+    /// Bumped whenever it starts over: a write begun before does not set
+    /// `shown`.
+    epoch: u64,
+}
+
+impl ScreenOut {
+    /// Start over: the next screen goes out full. `showing`: the client
+    /// still shows the last one (the mode changed, the screen did not end).
+    fn restart(&mut self, showing: bool) {
+        *self = ScreenOut {
+            showing,
+            epoch: self.epoch + 1,
+            ..ScreenOut::default()
+        };
+    }
+
+    /// The source's screen for this connection now (`None`: none to show
+    /// in its mode).
+    fn offer(&mut self, s: Option<&Screen>) {
+        match s {
+            Some(s) => {
+                self.end = false;
+                self.showing = true;
+                if self.pending.is_some() || self.basis.as_ref() != Some(s) {
+                    self.pending = Some(s.clone());
+                }
+            }
+            None if self.showing => {
+                self.showing = false;
+                self.pending = None;
+                self.end = true;
+            }
+            None => {}
         }
     }
 }
@@ -791,10 +913,17 @@ fn poll_loop<S: Source>(shared: &Shared<S>) {
             last_devices = Instant::now();
             reload_devices(shared);
         }
-        let (panes, connected) = {
+        let (panes, screens, connected) = {
             let hub = shared.hub.lock().unwrap();
             let panes: HashSet<u64> = hub.clients.values().filter_map(|c| c.pane).collect();
-            (panes, !hub.clients.is_empty())
+            // panes whose screen someone wants: forced when one wants `on`
+            let mut screens: HashMap<u64, bool> = HashMap::new();
+            for c in hub.clients.values().filter(|c| c.screen != ScreenMode::Off) {
+                if let Some(p) = c.pane {
+                    *screens.entry(p).or_default() |= c.screen == ScreenMode::On;
+                }
+            }
+            (panes, screens, !hub.clients.is_empty())
         };
         // a device with a push token is told even while its app is closed
         let anyone = connected
@@ -803,9 +932,13 @@ fn poll_loop<S: Source>(shared: &Shared<S>) {
                 .lock()
                 .unwrap()
                 .iter()
-                .any(|d| d.push.is_some());
+                .any(|d| d.alerts().is_some());
         for &pane in &panes {
-            let _ = refresh(shared, pane);
+            if refresh(shared, pane).is_ok()
+                && let Some(&force) = screens.get(&pane)
+            {
+                refresh_screen(shared, pane, force);
+            }
         }
         if !anyone {
             // nobody to tell: the next client starts from where panes stand
@@ -873,6 +1006,25 @@ fn alert<S>(shared: &Shared<S>, msgs: &[ServerMsg]) {
             ));
         }
     }
+    if out.is_empty() {
+        return;
+    }
+    // the panes a device is looking at now (a live, on-screen app following
+    // it): no ntfy banner for those
+    let followed: HashSet<(String, u64)> = shared
+        .hub
+        .lock()
+        .unwrap()
+        .clients
+        .values()
+        .filter(|c| {
+            c.end.load(Ordering::Acquire) == LIVE
+                && c.visible
+                && c.seen.within(shared.config.follow_fresh)
+        })
+        .filter_map(|c| c.pane.map(|p| (c.device.clone(), p)))
+        .collect();
+    crate::push::skip_followed(&mut out, &followed);
     shared.pusher.send(out);
 }
 
@@ -947,7 +1099,7 @@ fn refresh<S: Source>(shared: &Shared<S>, pane: u64) -> Result<(), SourceError> 
             hub.feeds.remove(&pane);
             let f = frame(&ServerMsg::error(ErrorCode::NoPane, "pane closed"));
             for c in hub.clients.values_mut().filter(|c| c.pane == Some(pane)) {
-                c.pane = None;
+                c.follow(None);
                 c.push(f.clone());
             }
             Err(SourceError::NoPane)
@@ -957,6 +1109,176 @@ fn refresh<S: Source>(shared: &Shared<S>, pane: u64) -> Result<(), SourceError> 
             Err(e)
         }
     }
+}
+
+/// Read `pane`'s screen (`force`: also off the alternate screen) and offer
+/// it to each connection that wants it ([`ScreenOut::offer`]); its loop
+/// writes what changed since the client's last one: everything after a
+/// mode change or a resize, else the changed rows; nothing when nothing
+/// changed. `screen_end` when screens stop for it.
+fn refresh_screen<S: Source>(shared: &Shared<S>, pane: u64, force: bool) {
+    let screen = match shared.source.screen(pane, force) {
+        Ok(s) => s.map(clamp_screen),
+        Err(e) => {
+            // a closed pane ends the subscription through `refresh`
+            log::debug!("remote: screen of pane {pane}: {e:?}");
+            return;
+        }
+    };
+    let mut hub = shared.hub.lock().unwrap();
+    for c in hub.clients.values_mut().filter(|c| c.pane == Some(pane)) {
+        let wanted = match c.screen {
+            ScreenMode::Off => continue,
+            ScreenMode::Auto => screen.as_ref().filter(|s| s.alt),
+            ScreenMode::On => screen.as_ref(),
+        };
+        c.out.offer(wanted);
+    }
+}
+
+/// Write connection `id`'s due screen frame, if any: a `screen_end`, or
+/// its pending screen diffed against the one it was last written. What
+/// went out becomes `shown` (unless the mode changed meanwhile); a frame
+/// over [`MAX_GATEWAY_MESSAGE`] is dropped and the next one is full. False
+/// when the socket failed.
+fn flush_screen<S, T: Socket>(shared: &Shared<S>, id: u64, ch: &mut Conn<T>) -> bool {
+    let (pane, prev, s, epoch) = {
+        let mut hub = shared.hub.lock().unwrap();
+        let Some(c) = hub.clients.get_mut(&id) else {
+            return true;
+        };
+        let Some(pane) = c.pane else {
+            return true;
+        };
+        if std::mem::take(&mut c.out.end) {
+            c.out.shown = None;
+            c.out.basis = None;
+            drop(hub);
+            return send_msg(ch, &ServerMsg::ScreenEnd { pane });
+        }
+        let Some(s) = c.out.pending.take() else {
+            return true;
+        };
+        (pane, c.out.shown.take(), s, c.out.epoch)
+    };
+    let (shown, basis) = match screen_frame(pane, prev.as_ref(), &s) {
+        // nothing changed
+        None => (prev, Some(s)),
+        Some((f, plain)) if f.len() <= MAX_GATEWAY_MESSAGE => {
+            if !ch.send(&f) {
+                return false;
+            }
+            (Some(plain.unwrap_or_else(|| s.clone())), Some(s))
+        }
+        Some((f, _)) => {
+            log::error!("remote: dropped a {} byte screen", f.len());
+            (None, None)
+        }
+    };
+    let mut hub = shared.hub.lock().unwrap();
+    if let Some(c) = hub.clients.get_mut(&id)
+        && c.out.epoch == epoch
+    {
+        c.out.shown = shown;
+        c.out.basis = basis;
+    }
+    true
+}
+
+/// A source's screen within the protocol's bounds: at most
+/// [`MAX_SCREEN_COLS`] × [`MAX_SCREEN_ROWS`], one entry per row, the
+/// cursor inside it.
+fn clamp_screen(mut s: Screen) -> Screen {
+    s.cols = s.cols.min(MAX_SCREEN_COLS);
+    s.rows = s.rows.min(MAX_SCREEN_ROWS);
+    s.lines.resize(s.rows as usize, Vec::new());
+    s.cursor = s.cursor.filter(|[r, c]| *r < s.rows && *c < s.cols);
+    s
+}
+
+/// The `screen` frame that takes a client from `prev` to `s`, or none when
+/// nothing changed. A full screen over [`MAX_GATEWAY_MESSAGE`] (or a diff
+/// that big) goes out whole without styles, each row's text cut to its
+/// share of the limit; that unstyled screen comes back with the frame (it
+/// is what the client then has).
+fn screen_frame(
+    pane: u64,
+    prev: Option<&Screen>,
+    s: &Screen,
+) -> Option<(Arc<str>, Option<Screen>)> {
+    let full = prev.is_none_or(|p| (p.cols, p.rows) != (s.cols, s.rows));
+    let lines: Vec<(u16, Vec<Run>)> = s
+        .lines
+        .iter()
+        .enumerate()
+        .filter(|&(i, l)| full || prev.is_some_and(|p| p.lines.get(i) != Some(l)))
+        .map(|(i, l)| (i as u16, l.clone()))
+        .collect();
+    if !full && lines.is_empty() && prev.is_some_and(|p| (p.alt, p.cursor) == (s.alt, s.cursor)) {
+        return None;
+    }
+    let msg = |full: bool, lines: Vec<(u16, Vec<Run>)>| {
+        frame(&ServerMsg::Screen {
+            pane,
+            cols: s.cols,
+            rows: s.rows,
+            alt: s.alt,
+            cursor: s.cursor,
+            full,
+            lines,
+        })
+    };
+    let f = msg(full, lines);
+    if f.len() <= MAX_GATEWAY_MESSAGE {
+        return Some((f, None));
+    }
+    // each row's share of the frame, its JSON envelope (`[i,[[…,null,null,0]]],`) aside
+    let share = (MAX_GATEWAY_MESSAGE - 1024) / s.lines.len().max(1) - 32;
+    let plain = Screen {
+        lines: s
+            .lines
+            .iter()
+            .map(|runs| {
+                let text: String = runs.iter().map(|r| r.text.as_str()).collect();
+                match fit_json(&text, share) {
+                    "" => Vec::new(),
+                    t => vec![Run::plain(t)],
+                }
+            })
+            .collect(),
+        cols: s.cols,
+        rows: s.rows,
+        alt: s.alt,
+        cursor: s.cursor,
+    };
+    // the client has it already (an unstyled screen went out before)
+    if prev == Some(&plain) {
+        return None;
+    }
+    let lines = plain
+        .lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| (i as u16, l.clone()))
+        .collect();
+    Some((msg(true, lines), Some(plain)))
+}
+
+/// The longest prefix of `text` whose JSON string escape takes at most
+/// `budget` bytes.
+fn fit_json(text: &str, budget: usize) -> &str {
+    let mut used = 0;
+    for (i, c) in text.char_indices() {
+        used += match c {
+            '"' | '\\' | '\n' | '\r' | '\t' | '\u{8}' | '\u{c}' => 2,
+            c if (c as u32) < 0x20 => 6,
+            c => c.len_utf8(),
+        };
+        if used > budget {
+            return &text[..i];
+        }
+    }
+    text
 }
 
 type Conn<T> = Channel<T>;
@@ -1247,6 +1569,7 @@ fn serve_device<S: Source, T: Socket>(
             version: cfg.version.clone(),
             device: device.id.clone(),
             permission: device.permission,
+            features: FEATURES.map(String::from).to_vec(),
         },
     ) {
         shared.record(Some((&device.id, &device.name)), &peer, now, "error");
@@ -1258,6 +1581,7 @@ fn serve_device<S: Source, T: Socket>(
     let id = shared.next_client.fetch_add(1, Ordering::Relaxed);
     let (tx, rx) = sync_channel(CLIENT_QUEUE);
     let end = Arc::new(AtomicU8::new(LIVE));
+    let seen = Arc::new(Heard::new());
     {
         let mut hub = shared.hub.lock().unwrap();
         hub.clients.insert(
@@ -1265,7 +1589,11 @@ fn serve_device<S: Source, T: Socket>(
             Slot {
                 tx,
                 pane: None,
+                visible: true,
+                screen: ScreenMode::Off,
+                out: ScreenOut::default(),
                 end: end.clone(),
+                seen: seen.clone(),
                 key: ch.remote_static(),
                 device: device.id.clone(),
                 name: device.name.clone(),
@@ -1317,12 +1645,23 @@ fn session<S: Source, T: Socket>(
     via: Via,
 ) -> &'static str {
     let cfg = &shared.config;
+    // when this client was last heard from, for [`alert`]
+    let seen = shared
+        .hub
+        .lock()
+        .unwrap()
+        .clients
+        .get(&id)
+        .map(|c| c.seen.clone())
+        .unwrap_or_else(|| Arc::new(Heard::new()));
     // the phone's last sign of life: through a relay WebSocket pongs come
     // from the relay, so only Noise messages count (the app pings in them)
     let mut heard = Instant::now();
     let mut pinged = Instant::now();
     let mut runs = Rate::new(RUN_RATE);
+    // `keys` and `text`
     let mut keys = Rate::new(KEYS_RATE);
+    let mut outputs = Rate::new(OUTPUT_RATE);
     loop {
         match end.load(Ordering::Acquire) {
             LIVE => {}
@@ -1358,6 +1697,9 @@ fn session<S: Source, T: Socket>(
                 return "error";
             }
         }
+        if !flush_screen(shared, id, &mut ch) {
+            return "error";
+        }
         if heard.elapsed() >= cfg.idle_timeout {
             log::info!("remote: client {id} silent, dropped");
             ch.close();
@@ -1374,11 +1716,13 @@ fn session<S: Source, T: Socket>(
             Recv::Alive => {
                 if via == Via::Lan {
                     heard = Instant::now();
+                    seen.mark();
                 }
                 continue;
             }
             Recv::Partial => {
                 heard = Instant::now();
+                seen.mark();
                 continue;
             }
             Recv::Closed => return "closed",
@@ -1396,21 +1740,48 @@ fn session<S: Source, T: Socket>(
             Recv::Msg(m) => m,
         };
         heard = Instant::now();
+        seen.mark();
         let reply = match serde_json::from_slice::<ClientMsg>(&text) {
             Err(e) => Some(ServerMsg::error(ErrorCode::BadRequest, e.to_string())),
             Ok(ClientMsg::Ping { n }) => Some(ServerMsg::Pong { n }),
+            Ok(ClientMsg::Visible { on }) => {
+                if let Some(c) = shared.hub.lock().unwrap().clients.get_mut(&id) {
+                    c.visible = on;
+                }
+                None
+            }
             Ok(ClientMsg::Unsubscribe) => {
                 if let Some(c) = shared.hub.lock().unwrap().clients.get_mut(&id) {
-                    c.pane = None;
+                    c.follow(None);
                 }
                 None
             }
             Ok(ClientMsg::Subscribe { pane, after }) => subscribe(shared, id, pane, after),
+            Ok(ClientMsg::Screen { pane, mode }) => set_screen(shared, id, pane, mode),
+            Ok(ClientMsg::Output {
+                id: rid,
+                pane,
+                block,
+                from,
+                limit,
+            }) => Some(output(shared, &mut outputs, rid, pane, block, from, limit)),
             Ok(ClientMsg::Push {
                 token,
+                ntfy,
                 long_ms,
                 show_command,
-            }) => set_push(shared, device, token, long_ms, show_command),
+                failures_only,
+            }) => set_push(
+                shared,
+                device,
+                registry::PushReg {
+                    token,
+                    ntfy,
+                    long_ms,
+                    show_command,
+                    failures_only,
+                },
+            ),
             Ok(ClientMsg::Notify { pane }) => {
                 if shared
                     .watches
@@ -1450,6 +1821,13 @@ fn session<S: Source, T: Socket>(
             }) => Some(input(shared, device, &mut keys, rid, pane, || {
                 parse_keys(&names).map(Input::Keys)
             })),
+            Ok(ClientMsg::Text {
+                id: rid,
+                pane,
+                text,
+            }) => Some(input(shared, device, &mut keys, rid, pane, || {
+                check_text(&text).map(|()| Input::Text(text.clone()))
+            })),
         };
         if let Some(r) = reply
             && !send_msg(&mut ch, &r)
@@ -1459,36 +1837,39 @@ fn session<S: Source, T: Socket>(
     }
 }
 
-/// `push`: store (or clear) the device's alert registration.
-fn set_push<S>(
-    shared: &Shared<S>,
-    device: &Device,
-    token: Option<String>,
-    long_ms: Option<u64>,
-    show_command: bool,
-) -> Option<ServerMsg> {
-    let reg = match token {
-        None => {
-            shared.watches.lock().unwrap().forget(&device.id);
-            None
-        }
-        Some(t) if !crate::push::valid_token(&t) => {
-            return Some(ServerMsg::error(
-                ErrorCode::BadRequest,
-                "not an Expo push token",
-            ));
-        }
-        Some(_) if long_ms.is_some_and(|ms| ms > crate::push::MAX_LONG_MS) => {
-            return Some(ServerMsg::error(
-                ErrorCode::BadRequest,
-                "long_ms is over a day",
-            ));
-        }
-        Some(token) => Some(registry::PushReg {
-            token,
-            long_ms,
-            show_command,
-        }),
+/// `push`: store (or, with neither a token nor an ntfy URL, clear) the
+/// device's alert registration.
+fn set_push<S>(shared: &Shared<S>, device: &Device, reg: registry::PushReg) -> Option<ServerMsg> {
+    if reg
+        .token
+        .as_deref()
+        .is_some_and(|t| !crate::push::valid_token(t))
+    {
+        return Some(ServerMsg::error(
+            ErrorCode::BadRequest,
+            "not an Expo push token",
+        ));
+    }
+    if reg
+        .ntfy
+        .as_deref()
+        .is_some_and(|u| !crate::push::valid_ntfy(u))
+    {
+        return Some(ServerMsg::error(
+            ErrorCode::BadRequest,
+            "not an ntfy topic URL",
+        ));
+    }
+    let reg = if reg.token.is_none() && reg.ntfy.is_none() {
+        shared.watches.lock().unwrap().forget(&device.id);
+        None
+    } else if reg.long_ms.is_some_and(|ms| ms > crate::push::MAX_LONG_MS) {
+        return Some(ServerMsg::error(
+            ErrorCode::BadRequest,
+            "long_ms is over a day",
+        ));
+    } else {
+        Some(reg)
     };
     match registry::set_push(&shared.config.dir, &device.id, reg) {
         Ok(_) => {
@@ -1505,7 +1886,7 @@ fn set_push<S>(
     }
 }
 
-/// `run` / `keys`: permission, rate, validation, then the source.
+/// `run` / `keys` / `text`: permission, rate, validation, then the source.
 fn input<S: Source>(
     shared: &Shared<S>,
     device: &Device,
@@ -1527,7 +1908,7 @@ fn input<S: Source>(
         .and_then(|all| all.into_iter().find(|d| d.id == device.id))
         .map(|d| d.permission);
     if device.permission != Permission::Operate || now != Some(Permission::Operate) {
-        return ServerMsg::error(ErrorCode::Forbidden, "this device may only view");
+        return ServerMsg::ack_err(rid, ErrorCode::Forbidden, "this device may only view");
     }
     if !rate.allow(Instant::now()) {
         return ServerMsg::ack_err(rid, ErrorCode::Rate, "too many requests; slow down");
@@ -1536,13 +1917,13 @@ fn input<S: Source>(
         Ok(i) => i,
         Err((code, msg)) => return ServerMsg::ack_err(rid, code, msg),
     };
+    let busy = match input {
+        Input::Text(_) => format!("pane {pane} is at its prompt; send the command with run"),
+        _ => format!("pane {pane} is running a command"),
+    };
     match shared.source.input(pane, &device.name, input) {
         Ok(()) => ServerMsg::ack_ok(rid),
-        Err(InputError::Busy) => ServerMsg::ack_err(
-            rid,
-            ErrorCode::Busy,
-            format!("pane {pane} is running a command"),
-        ),
+        Err(InputError::Busy) => ServerMsg::ack_err(rid, ErrorCode::Busy, busy),
         Err(InputError::NoPane) => {
             ServerMsg::ack_err(rid, ErrorCode::NoPane, format!("no pane {pane}"))
         }
@@ -1574,6 +1955,101 @@ fn check_command(command: &str) -> Result<(), (ErrorCode, String)> {
         return Err((ErrorCode::BadRequest, "the command is empty".into()));
     }
     Ok(())
+}
+
+/// A `text`: one line without control characters (C0, DEL, C1), 1 to
+/// [`MAX_TEXT`] bytes.
+fn check_text(text: &str) -> Result<(), (ErrorCode, String)> {
+    if text.len() > MAX_TEXT {
+        return Err((
+            ErrorCode::TooLarge,
+            format!("the text is longer than {MAX_TEXT} bytes"),
+        ));
+    }
+    if text.chars().any(char::is_control) {
+        return Err((
+            ErrorCode::BadRequest,
+            "the text may not contain a control character (send enter, tab, … as keys)".into(),
+        ));
+    }
+    if text.is_empty() {
+        return Err((ErrorCode::BadRequest, "the text is empty".into()));
+    }
+    Ok(())
+}
+
+/// `screen`: set the mode of this connection's subscription. `off` sends
+/// `screen_end` (after any screen already written); `auto` / `on` start
+/// over with a full screen, and a screen the client shows ends when the
+/// new mode has none (`on` to `auto` on the primary screen).
+fn set_screen<S>(shared: &Shared<S>, id: u64, pane: u64, mode: ScreenMode) -> Option<ServerMsg> {
+    let mut hub = shared.hub.lock().unwrap();
+    let c = hub.clients.get_mut(&id)?;
+    if c.pane != Some(pane) {
+        return Some(ServerMsg::error(
+            ErrorCode::BadRequest,
+            format!("pane {pane} is not the subscribed pane"),
+        ));
+    }
+    let was = std::mem::replace(&mut c.screen, mode);
+    let showing = c.out.showing;
+    c.out.restart(mode != ScreenMode::Off && showing);
+    if mode == ScreenMode::Off && was != ScreenMode::Off {
+        c.push(frame(&ServerMsg::ScreenEnd { pane }));
+    }
+    None
+}
+
+/// `output`: rate, validation, then the source; the page bounded again
+/// here ([`crate::bound_page`]). Any device may page.
+fn output<S: Source>(
+    shared: &Shared<S>,
+    rate: &mut Rate,
+    rid: String,
+    pane: u64,
+    block: u64,
+    from: u64,
+    limit: usize,
+) -> ServerMsg {
+    if rid.chars().count() > MAX_REQUEST_ID {
+        return ServerMsg::error(
+            ErrorCode::BadRequest,
+            format!("id is longer than {MAX_REQUEST_ID} characters"),
+        );
+    }
+    if !rate.allow(Instant::now()) {
+        return ServerMsg::ack_err(rid, ErrorCode::Rate, "too many requests; slow down");
+    }
+    if !(1..=MAX_OUTPUT_PAGE_LINES).contains(&limit) {
+        return ServerMsg::ack_err(
+            rid,
+            ErrorCode::BadRequest,
+            format!("limit is 1 to {MAX_OUTPUT_PAGE_LINES} lines"),
+        );
+    }
+    match shared.source.output(pane, block, from, limit) {
+        Ok(page) => ServerMsg::Output {
+            id: rid,
+            pane,
+            block,
+            from: page.from,
+            text: crate::bound_page(&page.text, limit).to_string(),
+            total: page.total,
+        },
+        Err(OutputError::NoBlock) => ServerMsg::ack_err(
+            rid,
+            ErrorCode::NoBlock,
+            format!("block {block} is not in pane {pane}"),
+        ),
+        Err(OutputError::NoPane) => {
+            ServerMsg::ack_err(rid, ErrorCode::NoPane, format!("no pane {pane}"))
+        }
+        Err(OutputError::Unavailable(e)) => ServerMsg::ack_err(
+            rid,
+            ErrorCode::NoPane,
+            format!("pane {pane} unavailable: {e}"),
+        ),
+    }
 }
 
 /// `keys` names: 1 to [`MAX_KEYS`], each one of [`Key`]'s.
@@ -1614,7 +2090,7 @@ fn subscribe<S: Source>(
         .filter(|_| fresh != Err(SourceError::NoPane))
     else {
         if let Some(c) = hub.clients.get_mut(&id) {
-            c.pane = None;
+            c.follow(None);
         }
         let why = match fresh {
             Err(SourceError::Unavailable(e)) => format!("pane {pane} unavailable: {e}"),
@@ -1626,7 +2102,7 @@ fn subscribe<S: Source>(
         .and_then(|a| feed.replay(a))
         .unwrap_or_else(|| vec![feed.snapshot(pane)]);
     let c = hub.clients.get_mut(&id)?;
-    c.pane = Some(pane);
+    c.follow(Some(pane));
     for f in frames {
         c.push(f);
     }
@@ -1882,5 +2358,34 @@ mod tests {
             f.fail(ip, t0 + Duration::from_secs(i * 7), w, refuse);
             assert!(!f.refused(ip, t0 + Duration::from_secs(i * 7)), "{i}");
         }
+    }
+
+    #[test]
+    fn an_unstyled_screen_fits_the_limit_and_is_what_the_client_has() {
+        // two cells each carrying 300k combining marks (a source that does
+        // not cap them): the rows are cut to fit
+        let mut big = String::from("a");
+        big.extend(std::iter::repeat_n('\u{0301}', 300_000));
+        let s = Screen {
+            cols: 80,
+            rows: 2,
+            alt: true,
+            cursor: None,
+            lines: vec![vec![Run::plain(big.clone())], vec![Run::plain(big)]],
+        };
+        let (f, plain) = screen_frame(1, None, &s).unwrap();
+        assert!(f.len() <= MAX_GATEWAY_MESSAGE, "{} bytes", f.len());
+        let plain = plain.expect("sent unstyled");
+        assert!(plain.lines[1][0].text.starts_with("a\u{301}\u{301}"));
+        // the client has that: the same screen again is no frame
+        assert_eq!(screen_frame(1, Some(&plain), &s), None);
+        // every character JSON escapes longer still fits
+        let quotes = Screen {
+            lines: vec![vec![Run::plain("\"\u{1}".repeat(400_000))]; 2],
+            ..s.clone()
+        };
+        let (f, _) = screen_frame(1, None, &quotes).unwrap();
+        assert!(f.len() <= MAX_GATEWAY_MESSAGE, "{} bytes", f.len());
+        assert!(serde_json::from_str::<serde_json::Value>(&f).is_ok());
     }
 }

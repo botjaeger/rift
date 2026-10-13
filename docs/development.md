@@ -71,7 +71,7 @@ display-line building). Rendering is verified with the script driver below.
 | `doc` | `cargo doc --workspace --no-deps --locked` with rustdoc warnings denied |
 | `shell` | `shellcheck` on packaging, scripts, git hooks and the bash hooks; `zsh -n` and `fish --no-execute` on the zsh and fish hooks |
 | `docs` | `CLAUDE.md` and `AGENTS.md` are identical; every relative link in every Markdown file resolves (the vendored crates' upstream docs excepted) |
-| `mobile` | In `mobile/`: `pnpm install --frozen-lockfile`, `pnpm typecheck`, `pnpm test` (vitest; decodes `crates/rift-remote/fixtures/`, the files the Rust protocol tests decode too) |
+| `mobile` | In `mobile/`: `pnpm install --frozen-lockfile`, `pnpm typecheck`, `pnpm lint`, `pnpm test` (vitest; decodes `crates/rift-remote/fixtures/`, the files the Rust protocol tests decode too) |
 | `release` | `cargo build --release --locked` |
 | `ui` | `scripts/ui-smoke.sh`: isolated scripted input, state assertions and PNG capture; requires Python 3 and a display (or `xvfb-run`) |
 | `linux` | `clippy`, `test` and `release` inside the Linux docker image, then `shell` and the scripted UI regressions (Xvfb, software Vulkan) in `packaging/ci-ubuntu.Dockerfile`, which installs the CI runner's packages from `packaging/ci-apt.txt` |
@@ -172,7 +172,8 @@ mobile/           Expo companion (iOS, Android): pnpm, outside the Cargo workspa
 
 The remote gateway (`rift-terminal remote`) is a separate process, started
 by the windows while `remote_access` is on: it reads and drives every window
-through its control socket (`status`, `blocks`, `remote-input`), so
+through its control socket (`status`, `blocks`, `screen`, `output`,
+`remote-input`), so
 networking never runs inside a window. Its format is
 [remote-protocol.md](remote-protocol.md); the app and the crate decode the
 same fixtures, and the TypeScript Noise implementation replays the
@@ -234,7 +235,7 @@ Workspace dependencies (`Cargo.toml`):
 | `glyphon` 0.11 | Text shaping and glyph atlas | |
 | `ttf-parser` 0.25 (renderer) | Font picker: fixed-width and outline checks | Already built for glyphon |
 | `winit` 0.30 | Windows, input, IME | 0.31 is beta |
-| `alacritty_terminal` 0.26, `vte` 0.15 | VT emulation, PTY spawn | Vendored in `vendor/` with the VT420 emulation, Xcms colors and wcwidth cluster widths; only `tty`, `Term`, `vte`, `FairMutex` are used |
+| `alacritty_terminal` 0.26, `vte` 0.15 | VT emulation, PTY spawn | Vendored in `vendor/` with the VT420 emulation, Xcms colors, wcwidth cluster widths and `Term::primary_grid`; only `tty`, `Term`, `vte`, `FairMutex` are used |
 | `bytemuck`, `pollster` | GPU buffers, blocking on adapter setup | |
 | `image`, `png`, `flate2` | Inline images, screenshots, kitty zlib payloads | |
 | `serde`, `toml`, `serde_yaml_ng`, `serde_json` | Config, themes, Warp YAML, IPC | |

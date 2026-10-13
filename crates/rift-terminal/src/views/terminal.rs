@@ -507,7 +507,14 @@ pub fn palette_color(theme: &Theme, session: &Session, index: usize) -> Option<C
 /// DECSCNM (`CSI ? 5 h`) swapping foreground and background. `None` while
 /// the theme applies unchanged.
 pub fn pane_theme(theme: &Theme, session: &Session) -> Option<Theme> {
-    let term = session.term.lock();
+    term_theme(theme, &session.term.lock())
+}
+
+/// [`pane_theme`] of a locked term.
+fn term_theme<T>(
+    theme: &Theme,
+    term: &rift_pty::alacritty_terminal::term::Term<T>,
+) -> Option<Theme> {
     let reversed = term.reverse_screen();
     let colors = term.colors();
     let overridden = (0..16).chain(256..=258).any(|i| colors[i].is_some());
@@ -935,15 +942,15 @@ fn drawn_char(c: char, flags: Flags) -> char {
     }
 }
 
+/// A terminal grid (the shown one, or the primary one under the alternate
+/// screen).
+type CellGrid =
+    rift_pty::alacritty_terminal::grid::Grid<rift_pty::alacritty_terminal::term::cell::Cell>;
+
 /// Text of one grid line for copying: no wide-glyph spacers, combining marks
 /// kept. The flag is true when the row soft-wraps into the next one (its
 /// trailing spaces are content then and are kept).
-fn copy_line<T>(
-    term: &rift_pty::alacritty_terminal::term::Term<T>,
-    scrolled: u64,
-    abs: u64,
-) -> Option<(String, bool)> {
-    let g = term.grid();
+fn copy_line(g: &CellGrid, scrolled: u64, abs: u64) -> Option<(String, bool)> {
     let rel = abs as i64 - scrolled as i64;
     if rel < -(g.history_size() as i64) || rel >= g.screen_lines() as i64 {
         return None;
@@ -982,7 +989,7 @@ pub fn session_line_text(session: &Session, abs: u64) -> Option<String> {
 pub fn session_read_text(session: &Session, abs: u64) -> Option<String> {
     let scrolled = session.scrolled.load(std::sync::atomic::Ordering::Acquire);
     let term = session.term.lock();
-    copy_line(&term, scrolled, abs).map(|(text, _)| text.trim_end_matches(' ').to_string())
+    copy_line(term.grid(), scrolled, abs).map(|(text, _)| text.trim_end_matches(' ').to_string())
 }
 
 /// OSC 8 hyperlink runs on one absolute line: (col, len, uri).
@@ -1078,9 +1085,13 @@ pub fn block_output_text(session: &Session, block_id: BlockId) -> Option<String>
     };
     let scrolled = session.scrolled.load(std::sync::atomic::Ordering::Acquire);
     let term = session.term.lock();
+    // the output's rows are on the primary grid, also under a full-screen
+    // program
+    let g = term.primary_grid();
     let mut out = String::new();
-    for abs in start..end {
-        if let Some((text, wrapped)) = copy_line(&term, scrolled, abs) {
+    // rows gone from scrollback have no text
+    for abs in start.max(oldest_row(g, scrolled))..end {
+        if let Some((text, wrapped)) = copy_line(g, scrolled, abs) {
             out.push_str(&text);
             // a soft-wrapped row continues on the next one: no line break
             if !wrapped {
@@ -1101,33 +1112,66 @@ pub fn block_output_text(session: &Session, block_id: BlockId) -> Option<String>
 /// rows of the kept tail are read as text; lines before it, and rows gone
 /// from scrollback, count as dropped. Returns (text, dropped lines).
 pub fn block_output_tail(session: &Session, block_id: BlockId) -> Option<(String, u64)> {
-    let (start, end, unterminated) = {
+    let rows = {
         let blocks = session.blocks.lock().unwrap();
-        let block = blocks.iter().find(|b| b.id == block_id)?;
-        match block.state {
-            BlockState::Running { .. } => (block.output_start?, None, true),
-            _ => {
-                let (start, end) = block.output_range()?;
-                (start, Some(end), block.unterminated)
-            }
-        }
+        output_rows(blocks.iter().find(|b| b.id == block_id)?)?
     };
     let scrolled = session.scrolled.load(std::sync::atomic::Ordering::Acquire);
     let term = session.term.lock();
-    // running: the cursor row is the last, and its line break is not output yet
-    let end = end.unwrap_or_else(|| scrolled + term.grid().cursor.point.line.0.max(0) as u64 + 1);
-    let wrapped = |abs: u64| -> Option<bool> {
-        let g = term.grid();
-        let rel = abs as i64 - scrolled as i64;
-        if rel < -(g.history_size() as i64) || rel >= g.screen_lines() as i64 || g.columns() == 0 {
-            return None;
+    Some(output_tail(&term, scrolled, rows))
+}
+
+/// Where a block's output lies: its first absolute row, the row after its
+/// last (`None` while it runs: through the cursor row) and whether its last
+/// line is unfinished. `None` before it has output.
+fn output_rows(block: &Block) -> Option<(u64, Option<u64>, bool)> {
+    match block.state {
+        BlockState::Running { .. } => Some((block.output_start?, None, true)),
+        _ => {
+            let (start, end) = block.output_range()?;
+            Some((start, Some(end), block.unterminated))
         }
-        Some(
-            g[Line(rel as i32)][Column(g.columns() - 1)]
-                .flags
-                .contains(Flags::WRAPLINE),
-        )
-    };
+    }
+}
+
+/// The row after a block's last (`end`, or for a running block the one
+/// after the cursor row).
+fn output_end(g: &CellGrid, scrolled: u64, end: Option<u64>) -> u64 {
+    // running: the cursor row is the last, and its line break is not output yet
+    end.unwrap_or_else(|| scrolled + g.cursor.point.line.0.max(0) as u64 + 1)
+}
+
+/// The oldest absolute row `g` still holds (rows before it are gone from
+/// scrollback).
+fn oldest_row(g: &CellGrid, scrolled: u64) -> u64 {
+    scrolled.saturating_sub(g.history_size() as u64)
+}
+
+/// Whether absolute row `abs` soft-wraps into the next one; `None` when it
+/// is gone from scrollback (or not on the grid).
+fn row_wraps(g: &CellGrid, scrolled: u64, abs: u64) -> Option<bool> {
+    let rel = abs as i64 - scrolled as i64;
+    if rel < -(g.history_size() as i64) || rel >= g.screen_lines() as i64 || g.columns() == 0 {
+        return None;
+    }
+    Some(
+        g[Line(rel as i32)][Column(g.columns() - 1)]
+            .flags
+            .contains(Flags::WRAPLINE),
+    )
+}
+
+/// [`block_output_tail`] of a locked term: (text, lines before it). Read
+/// from the primary grid, where the output is also while a full-screen
+/// program shows the alternate one.
+fn output_tail<T>(
+    term: &rift_pty::alacritty_terminal::term::Term<T>,
+    scrolled: u64,
+    (start, end, unterminated): (u64, Option<u64>, bool),
+) -> (String, u64) {
+    let g = term.primary_grid();
+    let end = output_end(g, scrolled, end);
+    let wrapped = |abs: u64| row_wraps(g, scrolled, abs);
     // read rows backwards up to the start of the line that makes the tail
     // longer than the bound (in lines or bytes); the bound cuts the rest
     let mut rows = Vec::new();
@@ -1135,7 +1179,7 @@ pub fn block_output_tail(session: &Session, block_id: BlockId) -> Option<(String
     let (mut lines, mut bytes) = (0usize, 0usize);
     while first > start {
         let abs = first - 1;
-        let Some(row) = copy_line(&term, scrolled, abs) else {
+        let Some(row) = copy_line(g, scrolled, abs) else {
             break; // gone from scrollback
         };
         bytes += row.0.len() + 1;
@@ -1148,13 +1192,15 @@ pub fn block_output_tail(session: &Session, block_id: BlockId) -> Option<(String
             }
         }
     }
-    // lines before the tail (a row gone from scrollback counts as one; its
-    // soft wraps are unknown, so for a block trimmed at the head this is an
-    // estimate)
-    let skipped = (start..first)
-        .filter(|&abs| wrapped(abs) != Some(true))
-        .count() as u64;
-    drop(term);
+    // lines before the tail: each row gone from scrollback counts as one
+    // (its soft wraps are unknown, so for a block trimmed at the head this
+    // is an estimate), counted without visiting them; held rows by their
+    // line ends
+    let held = start.max(oldest_row(g, scrolled)).min(first);
+    let skipped = (held - start)
+        + (held..first)
+            .filter(|&abs| wrapped(abs) != Some(true))
+            .count() as u64;
     let mut out = String::with_capacity(bytes);
     for (text, wrapped) in rows.into_iter().rev() {
         out.push_str(&text);
@@ -1167,7 +1213,235 @@ pub fn block_output_tail(session: &Session, block_id: BlockId) -> Option<(String
         out.pop();
     }
     let (out, dropped) = rift_remote::bound_output(&out);
-    Some((out, skipped + dropped))
+    (out, skipped + dropped)
+}
+
+/// Output lines `from` … of a block for the remote gateway's `output`: at
+/// most `limit` lines (capped at 500) and 64 KiB ([`rift_remote::bound_page`]),
+/// numbered from the block's first output line the way
+/// [`block_output_tail`]'s dropped count is (soft-wrapped rows joined, a row
+/// gone from scrollback one line). `None` for a block the gateway never
+/// sends (unknown, or being typed at the prompt).
+pub fn block_output_range(
+    session: &Session,
+    block_id: BlockId,
+    from: u64,
+    limit: usize,
+) -> Option<rift_remote::OutputPage> {
+    let rows = {
+        let blocks = session.blocks.lock().unwrap();
+        let block = blocks.iter().find(|b| b.id == block_id)?;
+        if !remote_sent(block) {
+            return None;
+        }
+        output_rows(block)
+    };
+    let Some(rows) = rows else {
+        return Some(rift_remote::OutputPage {
+            from,
+            ..Default::default()
+        });
+    };
+    let scrolled = session.scrolled.load(std::sync::atomic::Ordering::Acquire);
+    let term = session.term.lock();
+    Some(output_range(&term, scrolled, rows, from, limit))
+}
+
+/// [`block_output_range`] of a locked term, read from the primary grid
+/// (see [`output_tail`]).
+fn output_range<T>(
+    term: &rift_pty::alacritty_terminal::term::Term<T>,
+    scrolled: u64,
+    (start, end, unterminated): (u64, Option<u64>, bool),
+    from: u64,
+    limit: usize,
+) -> rift_remote::OutputPage {
+    let g = term.primary_grid();
+    let limit = limit.min(rift_remote::MAX_OUTPUT_PAGE_LINES) as u64;
+    let end = output_end(g, scrolled, end);
+    // each row gone from scrollback is one line: counted, never visited
+    let held = start.max(oldest_row(g, scrolled)).min(end.max(start));
+    let mut total = held - start;
+    // the first line held at or after `from`, the text from there
+    let mut first: Option<u64> = None;
+    let mut text = String::new();
+    let mut reached_end = false;
+    for abs in held..end {
+        if abs == start || row_wraps(g, scrolled, abs - 1) != Some(true) {
+            total += 1;
+        }
+        let line = total - 1;
+        // flags only from here: the text is read for the page's rows alone
+        if line < from
+            || first.is_some_and(|f| line >= f + limit)
+            || text.len() > rift_remote::MAX_OUTPUT_BYTES
+        {
+            continue;
+        }
+        let Some((row, wraps)) = copy_line(g, scrolled, abs) else {
+            continue; // not on the grid
+        };
+        first.get_or_insert(line);
+        text.push_str(&row);
+        if !wraps {
+            text.push('\n');
+        }
+        reached_end = abs + 1 == end;
+    }
+    if unterminated && reached_end && text.ends_with('\n') {
+        text.pop();
+    }
+    rift_remote::OutputPage {
+        from: first.unwrap_or(from.max(total)),
+        text: rift_remote::bound_page(&text, limit as usize).to_string(),
+        total,
+    }
+}
+
+/// A block the remote gateway sends: one that ran or runs (not a prompt
+/// being typed, not an empty command line).
+fn remote_sent(b: &Block) -> bool {
+    match b.state {
+        BlockState::Prompt => false,
+        BlockState::Running { .. } => true,
+        BlockState::Done { .. } => !b.command.is_empty(),
+    }
+}
+
+/// The pane's visible screen for the remote gateway: none unless it shows
+/// the alternate screen or `force`. Colours resolve like the renderer's
+/// (the pane's theme with the program's palette changes, reverse video
+/// swapped); the theme's default foreground and background are `None`.
+/// Returns the session's output generation with it, read under the same
+/// term lock; while that is still `since`, no screen is built (`None`: the
+/// caller's is current).
+pub fn remote_screen(
+    session: &Session,
+    theme: &Theme,
+    force: bool,
+    since: Option<u64>,
+) -> (u64, Option<Option<rift_remote::Screen>>) {
+    let term = session.term.lock();
+    let generation = session
+        .generation
+        .load(std::sync::atomic::Ordering::Acquire);
+    if since == Some(generation) {
+        return (generation, None);
+    }
+    (generation, Some(screen_of(&term, theme, force)))
+}
+
+/// [`remote_screen`] of a locked term.
+fn screen_of<T>(
+    term: &rift_pty::alacritty_terminal::term::Term<T>,
+    theme: &Theme,
+    force: bool,
+) -> Option<rift_remote::Screen> {
+    use rift_remote::protocol::Run;
+    let alt = term.mode().contains(TermMode::ALT_SCREEN);
+    if !alt && !force {
+        return None;
+    }
+    let pane = term_theme(theme, term);
+    let theme = pane.as_ref().unwrap_or(theme);
+    // 256-color slots the program redefined (OSC 4); the 16 ANSI ones and
+    // the defaults are in `theme` already (as in `render_row`)
+    let palette = |c: ansi::Color| match c {
+        ansi::Color::Indexed(i) if i >= 16 => term.colors()[i as usize]
+            .map(rgb_color)
+            .unwrap_or_else(|| resolve_color(theme, c)),
+        c => resolve_color(theme, c),
+    };
+    let g = term.grid();
+    let cols = g.columns().min(rift_remote::MAX_SCREEN_COLS as usize);
+    let rows = g.screen_lines().min(rift_remote::MAX_SCREEN_ROWS as usize);
+    // cells compare by their 8-bit colours (what the hex says); the hex
+    // text is made once per run
+    let rgb8 = |c: Color| {
+        let b = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+        [b(c.r), b(c.g), b(c.b)]
+    };
+    let hex = |[r, g, b]: [u8; 3]| format!("{r:02x}{g:02x}{b:02x}");
+    let (default_fg, default_bg) = (rgb8(theme.fg), rgb8(theme.bg));
+    // a run's style: (fg, bg, flags), `None` for a default colour
+    type Style = (Option<[u8; 3]>, Option<[u8; 3]>, u8);
+    let mut lines = Vec::with_capacity(rows);
+    for r in 0..rows {
+        let row = &g[Line(r as i32)];
+        let mut runs: Vec<Run> = Vec::new();
+        // the last run's style
+        let mut style: Option<Style> = None;
+        for col in 0..cols {
+            let cell = &row[Column(col)];
+            let flags = cell.flags;
+            if flags.intersects(WIDE_SPACERS) {
+                continue;
+            }
+            let (mut fg, mut bg) = (palette(cell.fg), palette(cell.bg));
+            if flags.contains(Flags::INVERSE) {
+                std::mem::swap(&mut fg, &mut bg);
+            }
+            let (fg, bg) = (rgb8(fg), rgb8(bg));
+            let cell_style = (
+                (fg != default_fg).then_some(fg),
+                (bg != default_bg).then_some(bg),
+                [
+                    (Flags::BOLD, Run::BOLD),
+                    (Flags::ITALIC, Run::ITALIC),
+                    (Flags::ALL_UNDERLINES, Run::UNDERLINE),
+                    (Flags::DIM, Run::DIM),
+                    (Flags::STRIKEOUT, Run::STRIKE),
+                ]
+                .iter()
+                .filter(|(f, _)| flags.intersects(*f))
+                .fold(0, |acc, (_, bit)| acc | bit),
+            );
+            if style != Some(cell_style) {
+                style = Some(cell_style);
+                runs.push(Run {
+                    text: String::new(),
+                    fg: cell_style.0.map(hex),
+                    bg: cell_style.1.map(hex),
+                    flags: cell_style.2,
+                });
+            }
+            let run = runs.last_mut().expect("a run per style");
+            // a wide glyph whose second half is cut off would make the row
+            // one column too wide: a space stands in for it
+            if flags.contains(Flags::WIDE_CHAR) && col + 1 == cols {
+                run.text.push(' ');
+                continue;
+            }
+            run.text.push(drawn_char(cell.c, flags));
+            if !flags.contains(Flags::HIDDEN)
+                && let Some(zw) = cell.zerowidth()
+            {
+                run.text.extend(zw.iter().take(rift_remote::MAX_CELL_MARKS));
+            }
+        }
+        // blank cells in the default style at the end of the row
+        if let Some(last) = runs.last_mut()
+            && (&last.fg, &last.bg, last.flags) == (&None, &None, 0)
+        {
+            let kept = last.text.trim_end_matches(' ').len();
+            last.text.truncate(kept);
+            if last.text.is_empty() {
+                runs.pop();
+            }
+        }
+        lines.push(runs);
+    }
+    let cursor = term.grid().cursor.point;
+    let shown = term.mode().contains(TermMode::SHOW_CURSOR)
+        && (cursor.line.0 as usize) < rows
+        && cursor.column.0 < cols;
+    Some(rift_remote::Screen {
+        cols: cols as u16,
+        rows: rows as u16,
+        alt,
+        cursor: shown.then_some([cursor.line.0 as u16, cursor.column.0 as u16]),
+        lines,
+    })
 }
 
 /// Blocks of `session` for the remote gateway: commands that ran or run (a
@@ -1183,11 +1457,7 @@ pub fn remote_blocks(
 ) -> rift_remote::Page {
     use rift_remote::protocol::{Block as Remote, BlockState as State};
     let limit = limit.min(rift_remote::MAX_BLOCKS);
-    let sent = |b: &&Block| match b.state {
-        BlockState::Prompt => false,
-        BlockState::Running { .. } => true,
-        BlockState::Done { .. } => !b.command.is_empty(),
-    };
+    let sent = |b: &&Block| remote_sent(b);
     // snapshot first: block_output_tail takes the blocks lock itself
     let (mut picked, oldest) = {
         let store = session.blocks.lock().unwrap();
@@ -2298,8 +2568,8 @@ mod tests {
     fn copy_text_skips_spacers_keeps_marks_and_joins_wraps() {
         let t = sample_term();
         // row 0 soft-wraps: no spacers, trailing blanks kept as content
-        assert_eq!(copy_line(&t, 0, 0), Some(("日本x   ".into(), true)));
-        assert_eq!(copy_line(&t, 0, 1), Some(("e\u{301}y".into(), false)));
+        assert_eq!(copy_line(t.grid(), 0, 0), Some(("日本x   ".into(), true)));
+        assert_eq!(copy_line(t.grid(), 0, 1), Some(("e\u{301}y".into(), false)));
         // search text: no spacers; a wide match spans both columns
         assert_eq!(search_text(&t, 0, 0).unwrap().text, "日本x");
         let m = Matcher::new("日本", true, false).unwrap().unwrap();
@@ -2313,6 +2583,299 @@ mod tests {
         assert_eq!(m.find_line(&row1), vec![(0, 2)]);
         let m = Matcher::new("e\u{301}y", true, true).unwrap().unwrap();
         assert_eq!(m.find_line(&row1), vec![(0, 2)]);
+    }
+
+    /// A `cols` × `rows` term with `history` lines of scrollback fed `bytes`
+    /// through the app's own wrapper (so `scrolled` counts like a pane's).
+    fn fed(
+        cols: usize,
+        rows: usize,
+        history: usize,
+        bytes: &[u8],
+    ) -> (rift_pty::alacritty_terminal::term::Term<Noop>, u64) {
+        use rift_pty::alacritty_terminal::term::{Config, test::TermSize};
+        let config = Config {
+            scrolling_history: history,
+            ..Config::default()
+        };
+        let mut t =
+            rift_pty::alacritty_terminal::term::Term::new(config, &TermSize::new(cols, rows), Noop);
+        let mut scrolled = 0;
+        let mut parser: ansi::Processor = ansi::Processor::new();
+        parser.advance(
+            &mut rift_pty::abs_term::AbsTerm {
+                term: &mut t,
+                scrolled: &mut scrolled,
+                scrollback_cap: history,
+                saw_clear_saved: false,
+                on_resize: None,
+            },
+            bytes,
+        );
+        (t, scrolled)
+    }
+
+    fn hex(c: Color) -> String {
+        c.with_alpha(1.0).to_hex()[1..].to_string()
+    }
+
+    fn run(
+        text: &str,
+        fg: Option<String>,
+        bg: Option<String>,
+        flags: u8,
+    ) -> rift_remote::protocol::Run {
+        rift_remote::protocol::Run {
+            text: text.into(),
+            fg,
+            bg,
+            flags,
+        }
+    }
+
+    #[test]
+    fn remote_screen_is_text_runs_with_resolved_colours() {
+        let theme = Theme::default();
+        let bytes = concat!(
+            "\x1b]4;200;rgb:12/34/56\x07",
+            "\x1b[?1049h\x1b[H",
+            "\x1b[1;31mred\x1b[0m ok   ",
+            "\x1b[2;1H\x1b[7minv\x1b[0m",
+            "\x1b[3;1H日x\x1b[48;5;200m \x1b[0m",
+            "\x1b[4;1H\x1b[2;3;4;9mz\x1b[0m",
+            "\x1b[3;5H",
+        );
+        let (t, _) = fed(12, 4, 100, bytes.as_bytes());
+        let s = screen_of(&t, &theme, false).unwrap();
+        assert_eq!(
+            (s.cols, s.rows, s.alt, s.cursor),
+            (12, 4, true, Some([2, 4]))
+        );
+        assert_eq!(
+            s.lines[0],
+            [
+                run("red", Some(hex(theme.ansi[1])), None, 1),
+                run(" ok", None, None, 0)
+            ],
+            "trailing default blanks are left out"
+        );
+        // reverse video: the default colours swapped, so both are set
+        assert_eq!(
+            s.lines[1],
+            [run("inv", Some(hex(theme.bg)), Some(hex(theme.fg)), 0)]
+        );
+        // a wide glyph is one character (its spacer skipped); OSC 4 applies
+        // to a 256-colour slot; a styled blank at the end stays
+        assert_eq!(
+            s.lines[2],
+            [
+                run("日x", None, None, 0),
+                run(" ", None, Some("123456".into()), 0)
+            ]
+        );
+        assert_eq!(s.lines[3].len(), 1);
+        assert_eq!(s.lines[3][0].flags, 2 | 4 | 8 | 16);
+        // a hidden cursor is none; the primary screen only when forced
+        let (t, _) = fed(12, 4, 100, b"\x1b[?1049hvim\x1b[?25l");
+        assert_eq!(screen_of(&t, &theme, false).unwrap().cursor, None);
+        let (t, _) = fed(12, 4, 100, b"$ ls\r\n\x1b[2m");
+        assert_eq!(screen_of(&t, &theme, false), None);
+        let s = screen_of(&t, &theme, true).unwrap();
+        assert_eq!((s.alt, s.cursor), (false, Some([1, 0])));
+        assert_eq!(s.lines[0], [run("$ ls", None, None, 0)]);
+        assert!(s.lines[1..].iter().all(Vec::is_empty));
+    }
+
+    #[test]
+    fn remote_screen_uses_the_panes_theme_and_crops_big_screens() {
+        let theme = Theme::default();
+        // the program's own ANSI red (OSC 4) and reverse screen (DECSCNM):
+        // default-coloured text stays default (null) on the swapped ground
+        let (t, _) = fed(
+            12,
+            2,
+            100,
+            b"\x1b]4;1;rgb:aa/bb/cc\x07\x1b[?5h\x1b[?1049h\x1b[31mr\x1b[0m d",
+        );
+        let s = screen_of(&t, &theme, false).unwrap();
+        assert_eq!(
+            s.lines[0],
+            [
+                run("r", Some("aabbcc".into()), None, 0),
+                run(" d", None, None, 0)
+            ]
+        );
+        // larger than 300 × 120: the top-left part; a cursor outside it is none
+        let (t, _) = fed(310, 130, 100, b"\x1b[?1049h\x1b[126;1Hx");
+        let s = screen_of(&t, &theme, false).unwrap();
+        assert_eq!((s.cols, s.rows, s.cursor), (300, 120, None));
+        assert_eq!(s.lines.len(), 120);
+    }
+
+    /// The rows of a done block holding everything fed: from absolute row 0
+    /// up to the cursor's (empty) row.
+    fn block_rows(
+        t: &rift_pty::alacritty_terminal::term::Term<Noop>,
+        scrolled: u64,
+    ) -> (u64, Option<u64>, bool) {
+        // the cursor sits on the empty row after the last line
+        (
+            0,
+            Some(scrolled + t.grid().cursor.point.line.0 as u64),
+            false,
+        )
+    }
+
+    #[test]
+    fn output_pages_number_lines_like_the_tails_dropped_count() {
+        // short lines; then lines that soft-wrap over two rows each
+        for (cols, line) in [
+            (
+                20,
+                Box::new(|i: u64| format!("line {i}")) as Box<dyn Fn(u64) -> String>,
+            ),
+            (20, Box::new(|i: u64| format!("w{i:04}-{}", "x".repeat(25)))),
+        ] {
+            let text: String = (0..600).map(|i| format!("{}\r\n", line(i))).collect();
+            let (t, scrolled) = fed(cols, 5, 10_000, text.as_bytes());
+            let rows = block_rows(&t, scrolled);
+            let (tail, dropped) = output_tail(&t, scrolled, rows);
+            assert_eq!(dropped, 100);
+            assert!(
+                tail.starts_with(&format!("{}\n", line(100))),
+                "{}",
+                &tail[..40]
+            );
+            // the page at `dropped` starts with the tail's first line
+            let page = output_range(&t, scrolled, rows, dropped, 2);
+            assert_eq!(page.from, dropped);
+            assert_eq!(page.text, format!("{}\n{}\n", line(100), line(101)));
+            assert!(tail.starts_with(&page.text));
+            assert_eq!(page.total, 600);
+            // the first lines, the last, and past the end
+            let page = output_range(&t, scrolled, rows, 0, 3);
+            assert_eq!(
+                page.text,
+                format!("{}\n{}\n{}\n", line(0), line(1), line(2))
+            );
+            let page = output_range(&t, scrolled, rows, 599, 500);
+            assert_eq!((page.from, page.text), (599, format!("{}\n", line(599))));
+            let page = output_range(&t, scrolled, rows, 600, 10);
+            assert_eq!((page.from, page.text.as_str(), page.total), (600, "", 600));
+            // at most 500 lines whatever the limit
+            let page = output_range(&t, scrolled, rows, 0, 10_000);
+            assert_eq!(page.text.lines().count(), 500);
+        }
+    }
+
+    #[test]
+    fn output_pages_skip_rows_gone_from_scrollback() {
+        // 50 lines of history: rows before them are gone, one line each
+        let text: String = (0..200).map(|i| format!("line {i}\r\n")).collect();
+        let (t, scrolled) = fed(20, 5, 50, text.as_bytes());
+        let rows = block_rows(&t, scrolled);
+        let (tail, dropped) = output_tail(&t, scrolled, rows);
+        let first_held = scrolled - 50;
+        assert_eq!(dropped, first_held);
+        let page = output_range(&t, scrolled, rows, 0, 3);
+        assert_eq!(page.from, first_held, "the first line still held");
+        assert_eq!(page.total, 200);
+        let want: String = (first_held..first_held + 3)
+            .map(|i| format!("line {i}\n"))
+            .collect();
+        assert_eq!(page.text, want);
+        assert!(tail.starts_with(&want));
+        assert_eq!(output_range(&t, scrolled, rows, dropped, 3).text, want);
+    }
+
+    #[test]
+    fn output_is_read_from_the_primary_grid_under_the_alternate_screen() {
+        // a done block of 40 lines, and a running one through the cursor row
+        let text: String = (0..40).map(|i| format!("line {i}\r\n")).collect();
+        let (t, scrolled) = fed(20, 5, 1000, text.as_bytes());
+        let done = block_rows(&t, scrolled);
+        let running = (0, None, true);
+        let pages = |t: &rift_pty::alacritty_terminal::term::Term<Noop>| {
+            (
+                output_range(t, scrolled, done, 0, 50),
+                output_tail(t, scrolled, done),
+                output_range(t, scrolled, running, 30, 50),
+                output_tail(t, scrolled, running),
+            )
+        };
+        let before = pages(&t);
+        assert_eq!(before.0.text.lines().count(), 40);
+        assert!(before.0.text.starts_with("line 0\nline 1\n"));
+        // a full-screen program draws on the alternate screen: the pages
+        // and tails are the same primary lines
+        let drawn = format!("{text}\x1b[?1049h\x1b[HSECRET-IN-VIM\r\nrow2");
+        let (t, alt_scrolled) = fed(20, 5, 1000, drawn.as_bytes());
+        assert_eq!(alt_scrolled, scrolled);
+        assert!(t.mode().contains(TermMode::ALT_SCREEN));
+        let after = pages(&t);
+        assert_eq!(after, before);
+        assert!(!format!("{after:?}").contains("SECRET"));
+    }
+
+    #[test]
+    fn rows_gone_from_scrollback_are_counted_not_visited() {
+        // a block whose first 500M rows left the scrollback long ago
+        let (t, scrolled) = fed(80, 24, 1000, b"a\r\nb\r\n");
+        let gone = 500_000_000;
+        let start = std::time::Instant::now();
+        let page = output_range(&t, scrolled + gone, (0, None, true), 0, 500);
+        let (tail, dropped) = output_tail(&t, scrolled + gone, (0, None, true));
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            start.elapsed()
+        );
+        // numbered as before: each gone row one line, then the held ones
+        // ("a", "b", the empty cursor row)
+        assert_eq!((page.from, page.total), (gone, gone + 3));
+        assert_eq!((page.text.as_str(), tail.as_str()), ("a\nb\n", "a\nb\n"));
+        assert_eq!(dropped, gone);
+    }
+
+    #[test]
+    fn remote_screen_cells_are_bounded() {
+        let theme = Theme::default();
+        // one cell carrying 300k combining marks: 16 of them go out
+        let mut z = String::from("\x1b[?1049h\x1b[Ha");
+        z.extend(std::iter::repeat_n('\u{0301}', 300_000));
+        let (t, _) = fed(80, 24, 100, z.as_bytes());
+        let s = screen_of(&t, &theme, false).unwrap();
+        let want: String = std::iter::once('a')
+            .chain(std::iter::repeat_n('\u{0301}', rift_remote::MAX_CELL_MARKS))
+            .collect();
+        assert_eq!(s.lines[0], [run(&want, None, None, 0)]);
+        // a wide glyph in the last column sent (its second half cut off by
+        // the 300-column crop) is a space: no row is wider than `cols`
+        let (t, _) = fed(310, 4, 100, "\x1b[?1049h\x1b[1;299Hx日\x1b[31m".as_bytes());
+        let s = screen_of(&t, &theme, false).unwrap();
+        assert_eq!(s.cols, 300);
+        assert_eq!(
+            s.lines[0],
+            [run(&format!("{}x", " ".repeat(298)), None, None, 0)]
+        );
+    }
+
+    #[test]
+    fn output_pages_are_cut_at_64_kib_and_keep_an_unfinished_last_line_open() {
+        // 100 lines of 999 characters: 65 fit in 64 KiB
+        let text: String = (0..100)
+            .map(|_| format!("{}\r\n", "y".repeat(999)))
+            .collect();
+        let (t, scrolled) = fed(1000, 5, 10_000, text.as_bytes());
+        let page = output_range(&t, scrolled, block_rows(&t, scrolled), 0, 500);
+        assert_eq!(page.text.len(), 65 * 1000);
+        assert_eq!(page.total, 100);
+        // a running block: the cursor row is its unfinished last line
+        let (t, scrolled) = fed(20, 5, 100, b"one\r\ntwo\r\npart");
+        let page = output_range(&t, scrolled, (0, None, true), 0, 500);
+        assert_eq!((page.text.as_str(), page.total), ("one\ntwo\npart", 3));
+        let page = output_range(&t, scrolled, (0, None, true), 0, 1);
+        assert_eq!(page.text, "one\n", "a line before the last keeps its break");
     }
 
     #[test]

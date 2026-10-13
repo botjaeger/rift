@@ -55,6 +55,7 @@ pub fn remote_dir(data_dir: &Path) -> PathBuf {
 
 /// A paired device (`devices.json`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "DeviceFile")]
 pub struct Device {
     /// Short random id (hex), shown in `devices` and used by `revoke`.
     pub id: String,
@@ -69,26 +70,155 @@ pub struct Device {
     pub paired_at: SystemTime,
     #[serde(with = "rfc3339")]
     pub last_seen: SystemTime,
-    /// Where finish alerts go while the app is closed (`push`), if the
-    /// device asked for them.
+    /// Where finish alerts go through Expo while the app is closed (`push`
+    /// with a token), if the device asked for them. The same shape as before
+    /// ntfy, so an older Rift still reads the file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub push: Option<PushReg>,
+    pub push: Option<ExpoReg>,
+    /// Where they go through ntfy (`push` with `ntfy`). A field older Rift
+    /// builds ignore.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ntfy: Option<NtfyReg>,
 }
 
-/// A device's push registration (`docs/remote-protocol.md` § Push).
+/// [`Device`] as read: `push` may also be the interim shape with a null
+/// `token` and an `ntfy` URL, written by development builds before
+/// [`NtfyReg`] existed; it is read as the two halves so one such entry never
+/// makes the whole file unreadable.
+#[derive(Deserialize)]
+struct DeviceFile {
+    id: String,
+    name: String,
+    platform: String,
+    key: String,
+    permission: Permission,
+    #[serde(with = "rfc3339")]
+    paired_at: SystemTime,
+    #[serde(with = "rfc3339")]
+    last_seen: SystemTime,
+    #[serde(default)]
+    push: Option<PushFile>,
+    #[serde(default)]
+    ntfy: Option<NtfyReg>,
+}
+
+#[derive(Deserialize)]
+struct PushFile {
+    #[serde(default)]
+    token: Option<String>,
+    #[serde(default)]
+    ntfy: Option<String>,
+    long_ms: Option<u64>,
+    show_command: bool,
+    #[serde(default)]
+    failures_only: bool,
+}
+
+impl From<DeviceFile> for Device {
+    fn from(f: DeviceFile) -> Device {
+        let (push, interim_ntfy) = match f.push {
+            Some(p) => PushReg {
+                token: p.token,
+                ntfy: p.ntfy,
+                long_ms: p.long_ms,
+                show_command: p.show_command,
+                failures_only: p.failures_only,
+            }
+            .split(),
+            None => (None, None),
+        };
+        Device {
+            id: f.id,
+            name: f.name,
+            platform: f.platform,
+            key: f.key,
+            permission: f.permission,
+            paired_at: f.paired_at,
+            last_seen: f.last_seen,
+            push,
+            ntfy: f.ntfy.or(interim_ntfy),
+        }
+    }
+}
+
+/// A device's Expo registration as `devices.json` stores it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PushReg {
+pub struct ExpoReg {
     /// The Expo push token (`ExponentPushToken[…]`).
     pub token: String,
+    pub long_ms: Option<u64>,
+    pub show_command: bool,
+    /// Absent in files written before Phase 3.
+    #[serde(default)]
+    pub failures_only: bool,
+}
+
+/// A device's ntfy registration as `devices.json` stores it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NtfyReg {
+    /// The topic URL (`https://<host>/<topic>`).
+    pub url: String,
+    pub long_ms: Option<u64>,
+    pub show_command: bool,
+    pub failures_only: bool,
+}
+
+/// A device's alert registration, as the last `push` set it
+/// (`docs/remote-protocol.md` § Push): stored as [`ExpoReg`] and
+/// [`NtfyReg`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushReg {
+    /// The Expo push token (`ExponentPushToken[…]`), if any.
+    pub token: Option<String>,
+    /// The ntfy topic URL (`https://<host>/<topic>`), if any.
+    pub ntfy: Option<String>,
     /// Alert for every command that ran at least this long; `None`: only
     /// for the panes the device asked about (`notify`).
     pub long_ms: Option<u64>,
     /// Put the command line in the alert (it then passes through the push
     /// services).
     pub show_command: bool,
+    /// The `long_ms` alerts only for commands that failed (`notify` alerts
+    /// either way).
+    pub failures_only: bool,
+}
+
+impl PushReg {
+    /// The stored halves (`None`, `None` for a registration with neither).
+    pub(crate) fn split(self) -> (Option<ExpoReg>, Option<NtfyReg>) {
+        let expo = self.token.map(|token| ExpoReg {
+            token,
+            long_ms: self.long_ms,
+            show_command: self.show_command,
+            failures_only: self.failures_only,
+        });
+        let ntfy = self.ntfy.map(|url| NtfyReg {
+            url,
+            long_ms: self.long_ms,
+            show_command: self.show_command,
+            failures_only: self.failures_only,
+        });
+        (expo, ntfy)
+    }
 }
 
 impl Device {
+    /// The device's alert registration, if it has one (Expo, ntfy or both).
+    pub fn alerts(&self) -> Option<PushReg> {
+        let (long_ms, show_command, failures_only) = match (&self.push, &self.ntfy) {
+            (Some(e), _) => (e.long_ms, e.show_command, e.failures_only),
+            (None, Some(n)) => (n.long_ms, n.show_command, n.failures_only),
+            (None, None) => return None,
+        };
+        Some(PushReg {
+            token: self.push.as_ref().map(|e| e.token.clone()),
+            ntfy: self.ntfy.as_ref().map(|n| n.url.clone()),
+            long_ms,
+            show_command,
+            failures_only,
+        })
+    }
+
     /// The decoded static key (`None` when the stored text is not one).
     pub fn key_bytes(&self) -> Option<[u8; KEY_LEN]> {
         decode_key(&self.key)
@@ -402,15 +532,35 @@ pub fn set_permission(dir: &Path, id: &str, permission: Permission) -> io::Resul
 /// Set (or with `None` clear) device `id`'s push registration. `Ok(false)`
 /// when no such device is paired.
 pub fn set_push(dir: &Path, id: &str, push: Option<PushReg>) -> io::Result<bool> {
+    let (expo, ntfy) = push.map(PushReg::split).unwrap_or_default();
     locked(dir, || {
         let mut all = devices(dir)?;
         let Some(d) = all.iter_mut().find(|d| d.id == id) else {
             return Ok(false);
         };
-        if d.push != push {
-            d.push = push;
+        if d.push != expo || d.ntfy != ntfy {
+            d.push = expo;
+            d.ntfy = ntfy;
             write_json(dir, DEVICES_FILE, &all)?;
         }
+        Ok(true)
+    })
+}
+
+/// Remove device `id`'s Expo token if it is still `token` (the push service
+/// no longer knows it); its ntfy registration stays. `Ok(false)`: nothing
+/// removed.
+pub fn clear_token(dir: &Path, id: &str, token: &str) -> io::Result<bool> {
+    locked(dir, || {
+        let mut all = devices(dir)?;
+        let Some(d) = all
+            .iter_mut()
+            .find(|d| d.id == id && d.push.as_ref().is_some_and(|e| e.token == token))
+        else {
+            return Ok(false);
+        };
+        d.push = None;
+        write_json(dir, DEVICES_FILE, &all)?;
         Ok(true)
     })
 }
@@ -652,6 +802,7 @@ pub(crate) fn pair_device(
             paired_at: now,
             last_seen: now,
             push: None,
+            ntfy: None,
         };
         all.push(device.clone());
         write_json(dir, DEVICES_FILE, &all)?;
@@ -1317,6 +1468,183 @@ mod tests {
         // everything else about the device stays
         let after = devices(&dir).unwrap()[0].clone();
         assert_eq!((after.id, after.key, after.name), (d.id, d.key, d.name));
+        std::fs::remove_dir_all(dir.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn push_registrations_keep_failures_only_and_older_files_default_it() {
+        let dir = scratch("push");
+        let link = start_pairing(&dir, &[], "h", Permission::View).unwrap();
+        let s = query(&link.url)[2].1.clone();
+        let d = pair_device(&dir, &s, "a", "ios", &[4; 32], SystemTime::now())
+            .unwrap()
+            .unwrap();
+        let reg = PushReg {
+            token: Some("ExponentPushToken[x]".into()),
+            ntfy: None,
+            long_ms: Some(30_000),
+            show_command: false,
+            failures_only: true,
+        };
+        assert!(set_push(&dir, &d.id, Some(reg.clone())).unwrap());
+        assert_eq!(devices(&dir).unwrap()[0].alerts().as_ref(), Some(&reg));
+        let mut file: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join(DEVICES_FILE)).unwrap()).unwrap();
+        assert_eq!(file[0]["push"]["failures_only"], true, "{file}");
+        // a Phase 2 file has no `failures_only`: every long command alerts
+        file[0]["push"]
+            .as_object_mut()
+            .unwrap()
+            .remove("failures_only");
+        std::fs::write(dir.join(DEVICES_FILE), file.to_string()).unwrap();
+        let read = devices(&dir).unwrap()[0].push.clone().unwrap();
+        assert!(!read.failures_only);
+        assert_eq!(read.long_ms, Some(30_000));
+        std::fs::remove_dir_all(dir.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn push_registrations_keep_an_ntfy_topic_and_older_files_have_none() {
+        let dir = scratch("ntfy");
+        let link = start_pairing(&dir, &[], "h", Permission::View).unwrap();
+        let s = query(&link.url)[2].1.clone();
+        let d = pair_device(&dir, &s, "a", "ios", &[5; 32], SystemTime::now())
+            .unwrap()
+            .unwrap();
+        // ntfy alone, no Expo token
+        let reg = PushReg {
+            token: None,
+            ntfy: Some("https://ntfy.sh/rift-abc".into()),
+            long_ms: None,
+            show_command: true,
+            failures_only: false,
+        };
+        assert!(set_push(&dir, &d.id, Some(reg.clone())).unwrap());
+        assert_eq!(devices(&dir).unwrap()[0].alerts().as_ref(), Some(&reg));
+        let mut file: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join(DEVICES_FILE)).unwrap()).unwrap();
+        assert_eq!(file[0]["ntfy"]["url"], "https://ntfy.sh/rift-abc", "{file}");
+        assert!(file[0].get("push").is_none(), "no Expo half: {file}");
+        // a file written before ntfy: a token string and no `ntfy`
+        file[0]["push"] = serde_json::json!({
+            "token": "ExponentPushToken[x]",
+            "long_ms": 1000,
+            "show_command": false,
+        });
+        file[0].as_object_mut().unwrap().remove("ntfy");
+        std::fs::write(dir.join(DEVICES_FILE), file.to_string()).unwrap();
+        let read = devices(&dir).unwrap()[0].alerts().unwrap();
+        assert_eq!(read.token.as_deref(), Some("ExponentPushToken[x]"));
+        assert_eq!(read.ntfy, None);
+        assert_eq!(read.long_ms, Some(1000));
+        std::fs::remove_dir_all(dir.parent().unwrap()).ok();
+    }
+
+    /// `devices.json` as Rift 373fa25 (before ntfy) reads it: `push.token`
+    /// is a required string.
+    mod at_373fa25 {
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        pub struct PushReg {
+            pub token: String,
+            pub long_ms: Option<u64>,
+            pub show_command: bool,
+        }
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        pub struct Device {
+            pub id: String,
+            pub name: String,
+            pub platform: String,
+            pub key: String,
+            pub permission: crate::protocol::Permission,
+            pub paired_at: String,
+            pub last_seen: String,
+            #[serde(default)]
+            pub push: Option<PushReg>,
+        }
+    }
+
+    #[test]
+    fn an_older_rift_reads_the_devices_file_with_any_registration() {
+        let dir = scratch("downgrade");
+        let mut ids = Vec::new();
+        for (i, key) in [[6; 32], [7; 32], [8; 32]].iter().enumerate() {
+            let link = start_pairing(&dir, &[], "h", Permission::View).unwrap();
+            let s = query(&link.url)[2].1.clone();
+            let d = pair_device(&dir, &s, &format!("d{i}"), "ios", key, SystemTime::now())
+                .unwrap()
+                .unwrap();
+            ids.push(d.id);
+        }
+        let reg = |token: Option<&str>, ntfy: Option<&str>| PushReg {
+            token: token.map(Into::into),
+            ntfy: ntfy.map(Into::into),
+            long_ms: Some(1000),
+            show_command: false,
+            failures_only: true,
+        };
+        set_push(&dir, &ids[0], Some(reg(None, Some("https://ntfy.sh/a")))).unwrap();
+        set_push(
+            &dir,
+            &ids[1],
+            Some(reg(Some("ExponentPushToken[x]"), Some("https://ntfy.sh/b"))),
+        )
+        .unwrap();
+        set_push(&dir, &ids[2], Some(reg(Some("ExponentPushToken[y]"), None))).unwrap();
+        let bytes = std::fs::read(dir.join(DEVICES_FILE)).unwrap();
+        let old: Vec<at_373fa25::Device> = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|e| panic!("373fa25 cannot read it: {e}"));
+        assert_eq!(old.len(), 3);
+        assert!(
+            old[0].push.is_none(),
+            "ntfy only: no Expo half for an old build"
+        );
+        assert_eq!(old[1].push.as_ref().unwrap().token, "ExponentPushToken[x]");
+        assert_eq!(old[2].push.as_ref().unwrap().token, "ExponentPushToken[y]");
+        // and the new code reads all of it back
+        let now = devices(&dir).unwrap();
+        assert_eq!(
+            now[1].alerts(),
+            Some(reg(Some("ExponentPushToken[x]"), Some("https://ntfy.sh/b")))
+        );
+        // an unregistered token goes; the ntfy half stays
+        assert!(clear_token(&dir, &ids[1], "ExponentPushToken[x]").unwrap());
+        assert!(!clear_token(&dir, &ids[1], "ExponentPushToken[x]").unwrap());
+        assert!(!clear_token(&dir, &ids[2], "ExponentPushToken[other]").unwrap());
+        let now = devices(&dir).unwrap();
+        assert_eq!(now[1].alerts(), Some(reg(None, Some("https://ntfy.sh/b"))));
+        assert!(now[2].push.is_some());
+        std::fs::remove_dir_all(dir.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn the_interim_push_shape_with_a_null_token_still_loads() {
+        let dir = scratch("interim");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = r#"[
+          {"id":"a1","name":"p","platform":"ios","key":"k","permission":"operate",
+           "paired_at":"2026-10-13T05:59:30Z","last_seen":"2026-10-13T10:08:24Z",
+           "push":{"token":null,"ntfy":"https://ntfy.sh/t","long_ms":10000,
+                   "show_command":false,"failures_only":true}},
+          {"id":"b2","name":"q","platform":"android","key":"k2","permission":"view",
+           "paired_at":"2026-10-13T05:59:30Z","last_seen":"2026-10-13T10:08:24Z"}
+        ]"#;
+        std::fs::write(dir.join(DEVICES_FILE), file).unwrap();
+        let list = devices(&dir).unwrap_or_else(|e| panic!("interim file refused: {e}"));
+        assert_eq!(list.len(), 2);
+        assert!(list[0].push.is_none());
+        assert_eq!(
+            list[0].alerts(),
+            Some(PushReg {
+                token: None,
+                ntfy: Some("https://ntfy.sh/t".into()),
+                long_ms: Some(10000),
+                show_command: false,
+                failures_only: true,
+            })
+        );
+        assert_eq!(list[1].alerts(), None);
         std::fs::remove_dir_all(dir.parent().unwrap()).ok();
     }
 

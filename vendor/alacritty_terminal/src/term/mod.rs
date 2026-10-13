@@ -701,6 +701,12 @@ impl<T> Term<T> {
         &self.grid
     }
 
+    /// The primary screen's grid, also while the alternate screen shows
+    /// (Rift: block and image anchors live on it).
+    pub fn primary_grid(&self) -> &Grid<Cell> {
+        if self.mode.contains(TermMode::ALT_SCREEN) { &self.inactive_grid } else { &self.grid }
+    }
+
     /// Mutable access to the raw grid data structure.
     pub fn grid_mut(&mut self) -> &mut Grid<Cell> {
         &mut self.grid

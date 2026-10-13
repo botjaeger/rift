@@ -60,6 +60,18 @@ export default function RootLayout() {
           <Stack.Screen name="pair" options={{ title: "Pair" }} />
           <Stack.Screen name="host/[key]/index" options={{ title: "Host" }} />
           <Stack.Screen name="host/[key]/pane/[id]" options={{ title: "Pane" }} />
+          <Stack.Screen name="control-keys" options={{ title: "Control keys" }} />
+          <Stack.Screen
+            name="block"
+            options={{
+              title: "Command",
+              presentation: "formSheet",
+              sheetAllowedDetents: [0.6, 1],
+              sheetGrabberVisible: true,
+              headerShown: false,
+              contentStyle: { backgroundColor: colors.surface },
+            }}
+          />
           <Stack.Screen
             name="confirm"
             options={{

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatDuration, insertedLetter, osName, tailLines } from "../src/ui/format";
+import { formatDuration, insertedChar, osName, tailLines } from "../src/ui/format";
 
 describe("format", () => {
   it("osName", () => {
@@ -26,17 +26,18 @@ describe("format", () => {
   });
 });
 
-describe("insertedLetter (sticky ctrl)", () => {
-  it("returns the one letter typed, lowercased, wherever the caret was", () => {
-    expect(insertedLetter("", "c")).toBe("c");
-    expect(insertedLetter("ls", "lsC")).toBe("c");
-    expect(insertedLetter("ls", "lxs")).toBe("x");
+describe("insertedChar (sticky ctrl)", () => {
+  it("returns the one character typed, wherever the caret was", () => {
+    expect(insertedChar("", "c")).toBe("c");
+    expect(insertedChar("ls", "lsC")).toBe("C");
+    expect(insertedChar("ls", "lxs")).toBe("x");
+    expect(insertedChar("ls", "ls1")).toBe("1");
+    expect(insertedChar("ls", "ls ")).toBe(" ");
+    expect(insertedChar("ls", "ls[")).toBe("[");
   });
   it("is null for anything else", () => {
-    expect(insertedLetter("ls", "ls1")).toBeNull();
-    expect(insertedLetter("ls", "ls ")).toBeNull();
-    expect(insertedLetter("ls", "lsab")).toBeNull(); // paste
-    expect(insertedLetter("ls", "l")).toBeNull(); // delete
-    expect(insertedLetter("ls", "xyz")).toBeNull();
+    expect(insertedChar("ls", "lsab")).toBeNull(); // paste
+    expect(insertedChar("ls", "l")).toBeNull(); // delete
+    expect(insertedChar("ls", "xyz")).toBeNull();
   });
 });

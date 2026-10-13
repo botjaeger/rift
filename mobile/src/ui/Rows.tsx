@@ -49,6 +49,40 @@ export function SwitchRow({
   );
 }
 
+/** One choice of a group (a radio button): the whole row is the target, a check marks the chosen one. */
+export function ChoiceRow({
+  label,
+  detail,
+  selected,
+  onSelect,
+  first,
+}: {
+  label: string;
+  detail?: string;
+  selected: boolean;
+  onSelect: () => void;
+  first?: boolean;
+}) {
+  return (
+    <Pressable
+      style={({ pressed }) => [styles.row, !first && styles.divider, pressed && styles.pressed]}
+      accessibilityRole="radio"
+      accessibilityLabel={label}
+      accessibilityHint={detail}
+      accessibilityState={{ checked: selected }}
+      onPress={onSelect}
+    >
+      <View style={styles.text}>
+        <Text style={styles.label}>{label}</Text>
+        {detail ? <Text style={styles.detail}>{detail}</Text> : null}
+      </View>
+      <Text style={styles.check} importantForAccessibility="no">
+        {selected ? "✓" : " "}
+      </Text>
+    </Pressable>
+  );
+}
+
 /** A label/value row (Confirm sheet, pairing): read as one; the value wraps under the label when space runs out. */
 export function InfoRow({ label, children, first }: { label: string; children: ReactNode; first?: boolean }) {
   return (
@@ -69,6 +103,8 @@ const styles = StyleSheet.create({
   wrap: { flexWrap: "wrap" },
   divider: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.hairline },
   disabled: { opacity: 0.6 },
+  pressed: { opacity: 0.6 },
+  check: { color: colors.accent, fontSize: 17, fontWeight: "600", minWidth: 20, textAlign: "center" },
   text: { flex: 1, gap: 2 },
   label: { color: colors.text, fontSize: 15 },
   detail: { color: colors.textMuted, fontSize: 12, lineHeight: 16 },

@@ -1,19 +1,22 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { toBase64Url } from "../src/noise/bytes";
-import { ACK_TIMEOUT_MS, ASKED_TTL_MS, Fleet, MAX_ACTIVITY, canOperate, type Notifier } from "../src/fleet";
+import { ACK_TIMEOUT_MS, ASKED_TTL_MS, Fleet, MAX_ACTIVITY, canOperate, hasFeature, ntfyUnsupported, type Notifier } from "../src/fleet";
 import { routingId } from "../src/protocol/relay";
 import { LONG_COMMAND_MS } from "../src/notify";
 import { parsePairLink, type PairLink } from "../src/pairing";
 import { PUBLISH_INTERVAL_MS } from "../src/protocol/batch";
 import type { Block } from "../src/protocol/types";
 import { HostsStore, MemoryStore, type HostRecord } from "../src/stores";
+import { terminalInput, textToActions } from "../src/keyboard";
+import { keptPick, showsTerminal } from "../src/terminal";
+import { SCREEN_RESUME_MS } from "../src/protocol/client";
 import { FakeGatewaySocket, gatewayKey } from "./helpers/gateway";
 import { rng } from "./helpers/gateway";
 
 const GW = gatewayKey();
 const GW_KEY = toBase64Url(GW.publicKey);
-const welcome = (permission: "operate" | "view" = "operate") =>
-  ({ t: "welcome", v: 2, host: "studio-mac", os: "macos", version: "0.1.0", device: "d1", permission }) as const;
+const welcome = (permission: "operate" | "view" = "operate", features: string[] = []) =>
+  ({ t: "welcome", v: 2, host: "studio-mac", os: "macos", version: "0.1.0", device: "d1", permission, features }) as const;
 const block = (id: number, extra: Partial<Block> = {}): Block => ({
   id,
   command: "true",
@@ -369,7 +372,7 @@ describe("Fleet done → activity and notifications", () => {
     await Promise.resolve();
     expect(t.notified).toHaveLength(0); // notifications are off by default
 
-    await t.fleet.updateSettings({ notifyDone: true });
+    await t.fleet.updateSettings({ notifyPolicy: "all" });
     expect(t.permissionAsks).toBe(1);
     t.fleet.setViewing({ host: GW_KEY, pane: 12 });
     t.last().recv(done());
@@ -409,13 +412,13 @@ describe("Fleet done → activity and notifications", () => {
     const TOKEN = "ExponentPushToken[abc-123]";
     const t = await withHost();
     const pushes = () => t.last().sent.filter((m) => (m as { t: string }).t === "push");
-    expect(pushes()).toEqual([{ t: "push", token: null, long_ms: null, show_command: false }]);
+    expect(pushes()).toEqual([{ t: "push", token: null, long_ms: null, show_command: false, failures_only: false }]);
 
     t.fleet.setPushToken(TOKEN);
     expect(t.fleet.state.push).toEqual({ state: "on" });
-    expect(pushes().at(-1)).toEqual({ t: "push", token: TOKEN, long_ms: null, show_command: false });
-    await t.fleet.updateSettings({ notifyDone: true, showCommandInNotification: true });
-    expect(pushes().at(-1)).toEqual({ t: "push", token: TOKEN, long_ms: LONG_COMMAND_MS, show_command: true });
+    expect(pushes().at(-1)).toEqual({ t: "push", token: TOKEN, long_ms: null, show_command: false, failures_only: false });
+    await t.fleet.updateSettings({ notifyPolicy: "all", showCommandInNotification: true });
+    expect(pushes().at(-1)).toEqual({ t: "push", token: TOKEN, long_ms: LONG_COMMAND_MS, show_command: true, failures_only: false });
 
     // the computer alerts: the app posts nothing, but the activity still lists it
     t.fleet.setAppActive(false);
@@ -437,12 +440,12 @@ describe("Fleet done → activity and notifications", () => {
     expect(t.sockets.length).toBe(before + 1);
     t.last().connect();
     t.last().recv(welcome());
-    expect(pushes().at(-1)).toEqual({ t: "push", token: TOKEN, long_ms: LONG_COMMAND_MS, show_command: true });
+    expect(pushes().at(-1)).toEqual({ t: "push", token: TOKEN, long_ms: LONG_COMMAND_MS, show_command: true, failures_only: false });
 
     // no token any more: the computers stop, the app notifies again
     t.fleet.setPushToken(null, "no push here");
     expect(t.fleet.state.push).toEqual({ state: "unavailable", reason: "no push here" });
-    expect(pushes().at(-1)).toEqual({ t: "push", token: null, long_ms: LONG_COMMAND_MS, show_command: true });
+    expect(pushes().at(-1)).toEqual({ t: "push", token: null, long_ms: LONG_COMMAND_MS, show_command: true, failures_only: false });
     t.last().recv(done());
     await Promise.resolve();
     expect(t.notified).toHaveLength(1);
@@ -472,8 +475,8 @@ describe("Fleet done → activity and notifications", () => {
   it("enabling notifications stays off when the OS refuses", async () => {
     const t = await withHost();
     t.setGrant(false);
-    await t.fleet.updateSettings({ notifyDone: true });
-    expect(t.fleet.state.settings.notifyDone).toBe(false);
+    await t.fleet.updateSettings({ notifyPolicy: "all" });
+    expect(t.fleet.state.settings.notifyPolicy).toBe("off");
   });
 });
 
@@ -823,3 +826,516 @@ const t0 = {
   address: null,
   path: null,
 } as const;
+
+describe("Fleet Phase 3", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  const ALL = ["screen", "text", "output", "push_failures"];
+  /** A connected host following pane 12, its gateway serving `features`. */
+  async function phase3(features: string[] = ALL, blocks: Block[] = [block(86, { dropped: 1234, output: "tail\n" })]) {
+    const t = setup();
+    await new HostsStore(t.kv).save(record());
+    await t.fleet.init();
+    t.last().connect();
+    t.last().recv(welcome("operate", features));
+    t.last().recv(topology());
+    t.fleet.openPane(GW_KEY, 12);
+    t.last().recv({ t: "snapshot", pane: 12, seq: 41, blocks, has_older: false });
+    t.fleet.store.flush();
+    return t;
+  }
+  const screen = (patch: Record<string, unknown> = {}) => ({
+    t: "screen",
+    pane: 12,
+    cols: 80,
+    rows: 2,
+    alt: true,
+    cursor: [1, 0],
+    full: true,
+    lines: [
+      [0, [["vim", null, null, 0]]],
+      [1, []],
+    ],
+    ...patch,
+  });
+  const sent = (t: Awaited<ReturnType<typeof phase3>>, type: string) => t.last().sent.filter((m) => m.t === type);
+
+  it("hasFeature reads the welcome; an older gateway (no features) serves none", async () => {
+    const t = await phase3();
+    expect(hasFeature(t.fleet.state.hosts[0], "screen")).toBe(true);
+    const old = await phase3([]);
+    expect(hasFeature(old.fleet.state.hosts[0], "screen")).toBe(false);
+    expect(hasFeature(undefined, "text")).toBe(false);
+  });
+
+  it("asks for the screen only from a gateway that serves it", async () => {
+    const old = await phase3([]);
+    old.fleet.setScreenMode(GW_KEY, 12, "auto");
+    expect(sent(old, "screen")).toEqual([]);
+    const t = await phase3();
+    t.fleet.setScreenMode(GW_KEY, 13, "auto"); // not the followed pane
+    t.fleet.setScreenMode(GW_KEY, 12, "auto");
+    expect(sent(t, "screen")).toEqual([{ t: "screen", pane: 12, mode: "auto" }]);
+  });
+
+  it("keeps the followed pane's screen next to its blocks: full, diff, end", async () => {
+    const t = await phase3();
+    t.fleet.setScreenMode(GW_KEY, 12, "auto");
+    t.last().recv(screen());
+    t.last().recv(screen({ full: false, cursor: null, lines: [[1, [[":q", null, null, 0]]]] }));
+    t.fleet.store.flush();
+    expect(t.fleet.state.pane?.screen).toMatchObject({ cols: 80, alt: true, cursor: null });
+    expect(t.fleet.state.pane?.screen?.lines).toEqual([[["vim", null, null, 0]], [[":q", null, null, 0]]]);
+    expect(t.fleet.state.pane?.state?.blocks).toHaveLength(1);
+    t.last().recv({ t: "screen_end", pane: 12 });
+    t.fleet.store.flush();
+    expect(t.fleet.state.pane?.screen).toBeNull();
+  });
+
+  it("a screen for another pane is ignored; opening another pane drops the screen", async () => {
+    const t = await phase3();
+    t.fleet.setScreenMode(GW_KEY, 12, "auto");
+    t.last().recv(screen({ pane: 13 }));
+    t.fleet.store.flush();
+    expect(t.fleet.state.pane?.screen).toBeNull();
+    t.last().recv(screen());
+    t.fleet.openPane(GW_KEY, 13);
+    t.fleet.store.flush();
+    expect(t.fleet.state.pane).toMatchObject({ paneId: 13, screen: null, earlier: {} });
+  });
+
+  it("text goes out and resolves on ack; at a prompt the gateway answers busy", async () => {
+    const t = await phase3();
+    const p = t.fleet.sendText(GW_KEY, 12, ":wq");
+    expect(t.last().sent.at(-1)).toEqual({ t: "text", id: "x1", pane: 12, text: ":wq" });
+    t.last().recv({ t: "ack", id: "x1", ok: false, error: "busy", message: "pane 12 is at its prompt" });
+    expect(await p).toMatchObject({ ok: false, code: "busy" });
+  });
+
+  it("loads earlier output 500 lines at a time, before the tail", async () => {
+    const t = await phase3();
+    const p = t.fleet.loadEarlier(86);
+    t.fleet.store.flush();
+    expect(t.fleet.state.pane?.earlier[86]).toMatchObject({ loading: true });
+    expect(t.last().sent.at(-1)).toEqual({ t: "output", id: "o1", pane: 12, block: 86, from: 734, limit: 500 });
+    const text = Array.from({ length: 500 }, (_, i) => `line ${734 + i}\n`).join("");
+    t.last().recv({ t: "output", id: "o1", pane: 12, block: 86, from: 734, text, total: 1235 });
+    await p;
+    expect(t.fleet.state.pane?.earlier[86]).toMatchObject({ from: 734, end: 1234, gone: false, loading: false, text });
+    void t.fleet.loadEarlier(86);
+    expect(t.last().sent.at(-1)).toMatchObject({ t: "output", from: 234, limit: 500 });
+  });
+
+  it("says when the earlier lines are gone, and when the block is", async () => {
+    const t = await phase3();
+    const p = t.fleet.loadEarlier(86);
+    t.last().recv({ t: "output", id: "o1", pane: 12, block: 86, from: 1000, text: "a\n".repeat(234), total: 1235 });
+    await p;
+    expect(t.fleet.state.pane?.earlier[86]).toMatchObject({ from: 1000, end: 1234, gone: true });
+    const t2 = await phase3();
+    const p2 = t2.fleet.loadEarlier(86);
+    t2.last().recv({ t: "ack", id: "o1", ok: false, error: "no_block", message: "block 86 is not in pane 12" });
+    await p2;
+    expect(t2.fleet.state.pane?.earlier[86]?.error).toBe("This block is gone from the computer.");
+  });
+
+  it("drops the loaded lines with their block, and an answer for a block that went", async () => {
+    const t = await phase3(ALL, [block(86, { dropped: 600 }), block(87, { dropped: 10 })]);
+    const p = t.fleet.loadEarlier(86);
+    t.last().recv({ t: "output", id: "o1", pane: 12, block: 86, from: 100, text: "x\n".repeat(500), total: 700 });
+    await p;
+    expect(Object.keys(t.fleet.state.pane!.earlier)).toEqual(["86"]);
+    t.last().recv({ t: "update", pane: 12, seq: 42, blocks: [], removed: [86] });
+    t.fleet.store.flush();
+    expect(t.fleet.state.pane?.earlier).toEqual({});
+    const p2 = t.fleet.loadEarlier(87);
+    t.last().recv({ t: "update", pane: 12, seq: 43, blocks: [], removed: [87] });
+    t.last().recv({ t: "output", id: "o2", pane: 12, block: 87, from: 0, text: "y\n".repeat(10), total: 20 });
+    await p2;
+    expect(t.fleet.state.pane?.earlier).toEqual({});
+  });
+
+  it("an older gateway: no earlier output requests", async () => {
+    const t = await phase3([]);
+    await t.fleet.loadEarlier(86);
+    expect(sent(t, "output")).toEqual([]);
+  });
+
+  it("push follows the policy, Notify after and the computer's switch", async () => {
+    const TOKEN = "ExponentPushToken[abc-123]";
+    const t = await phase3();
+    t.fleet.setPushToken(TOKEN);
+    const last = () => sent(t, "push").at(-1);
+    expect(last()).toMatchObject({ long_ms: null, failures_only: false });
+    await t.fleet.updateSettings({ notifyPolicy: "failures", notifyAfterMs: 10_000 });
+    expect(last()).toEqual({ t: "push", token: TOKEN, long_ms: 10_000, show_command: false, failures_only: true });
+    await t.fleet.setHostNotifications(GW_KEY, false);
+    expect(last()).toMatchObject({ long_ms: null, failures_only: true });
+    expect((await new HostsStore(t.kv).load())[0]?.notifications).toBe(false);
+    await t.fleet.setHostNotifications(GW_KEY, true);
+    expect(last()).toMatchObject({ long_ms: 10_000 });
+    expect((await new HostsStore(t.kv).load())[0]?.notifications).toBeUndefined();
+  });
+
+  it("the app's own notifications follow the same rules", async () => {
+    const t = await phase3();
+    await t.fleet.updateSettings({ notifyPolicy: "failures", notifyAfterMs: 60_000 });
+    const done = (exit: number | null, duration_ms: number, command = "make") => ({
+      t: "done",
+      pane: 12,
+      block: 90,
+      command,
+      exit,
+      duration_ms,
+    });
+    t.last().recv(done(0, 120_000)); // succeeded
+    t.last().recv(done(2, 30_000)); // failed, but shorter than a minute
+    t.last().recv(done(2, 60_000)); // failed and long: notifies
+    await Promise.resolve();
+    expect(t.notified.map((n) => n.title)).toEqual(["A command failed on studio-mac (exit 2)"]);
+    await t.fleet.setHostNotifications(GW_KEY, false);
+    t.last().recv(done(3, 600_000));
+    await Promise.resolve();
+    expect(t.notified).toHaveLength(1);
+    // "Notify me" always notifies, muted or not
+    t.fleet.notifyWhenDone(GW_KEY, 12, "short");
+    t.last().recv(done(0, 10, "short"));
+    await Promise.resolve();
+    expect(t.notified).toHaveLength(2);
+  });
+
+  it("a view device's refusal: an ack forbidden, or an older gateway's top-level error, fails at once", async () => {
+    const t = await phase3(ALL);
+    const p1 = t.fleet.sendText(GW_KEY, 12, "x");
+    t.last().recv({ t: "ack", id: "x1", ok: false, error: "forbidden", message: "this device may only view" });
+    expect(await p1).toMatchObject({ ok: false, code: "forbidden" });
+    const p2 = t.fleet.sendKeys(GW_KEY, 12, ["esc"]);
+    t.last().recv({ t: "error", code: "forbidden", message: "this device may only view" });
+    expect(await p2).toMatchObject({ ok: false, code: "forbidden" });
+  });
+
+  it("Run again keeps the draft the user is typing", async () => {
+    const t = await phase3();
+    t.fleet.setDraft(GW_KEY, 12, "half typed");
+    const p = t.fleet.run(GW_KEY, 12, "cargo build", { fromDraft: false });
+    t.last().recv({ t: "ack", id: "r1", ok: true });
+    expect(await p).toEqual({ ok: true });
+    expect(t.fleet.state.drafts[`${GW_KEY}:12`]).toBe("half typed");
+  });
+});
+
+describe("Fleet: push coverage, pending Notify me, stale screens, input pacing", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  const TOKEN = "ExponentPushToken[abc-123]";
+  const ALL = ["screen", "text", "output", "push_failures"];
+  async function host(features: string[] = ALL) {
+    const t = setup();
+    await new HostsStore(t.kv).save(record());
+    await t.fleet.init();
+    t.last().connect();
+    t.last().recv(welcome("operate", features));
+    t.last().recv(topology());
+    t.fleet.openPane(GW_KEY, 12);
+    t.last().recv({ t: "snapshot", pane: 12, seq: 41, blocks: [block(5, { command: "vim", state: "running" })], has_older: false });
+    t.fleet.store.flush();
+    return t;
+  }
+  const done = (patch: Record<string, unknown> = {}) => ({
+    t: "done",
+    pane: 12,
+    block: 9,
+    command: "make",
+    exit: 2,
+    duration_ms: 600_000,
+    ...patch,
+  });
+
+  describe("ntfy", () => {
+    const NTFY_ALL = [...ALL, "push_ntfy"];
+    const pushes = (t: Awaited<ReturnType<typeof host>>) => t.last().sent.filter((m) => m.t === "push");
+
+    it("on: a random topic on ntfy.sh, sent in every push to a push_ntfy host; the done is left to it", async () => {
+      const t = await host(NTFY_ALL);
+      await t.fleet.updateSettings({ notifyPolicy: "failures", notifyAfterMs: 10_000 });
+      await t.fleet.setNtfy(true);
+      const topic = t.fleet.state.settings.ntfyTopic!;
+      expect(topic).toMatch(/^rift-[A-Za-z0-9_-]{22}$/);
+      expect(pushes(t).at(-1)).toEqual({
+        t: "push",
+        token: null,
+        ntfy: `https://ntfy.sh/${topic}`,
+        long_ms: 10_000,
+        show_command: false,
+        failures_only: true,
+      });
+      // no Expo token: the ntfy registration covers a pane this device does not follow, so the
+      // app posts no duplicate
+      t.fleet.setAppActive(false);
+      t.fleet.setVisible(false);
+      const visible = () => t.last().sent.filter((m) => m.t === "visible");
+      expect(visible()).toEqual([{ t: "visible", on: false }]);
+      t.last().recv(done({ pane: 13 }));
+      await Promise.resolve();
+      expect(t.notified).toEqual([]);
+      // in the background the computer posts about the followed pane too (the app is not visible)
+      t.last().recv(done());
+      await Promise.resolve();
+      expect(t.notified).toEqual([]);
+      // on screen, following the pane from another screen: the computer sends no ntfy alert
+      // about it, so the app notifies itself
+      t.fleet.setAppActive(true);
+      t.fleet.setVisible(true);
+      expect(visible().at(-1)).toEqual({ t: "visible", on: true });
+      t.fleet.setViewing(null);
+      t.last().recv(done());
+      await Promise.resolve();
+      expect(t.notified.map((n) => n.data)).toEqual([{ host: GW_KEY, pane: 12 }]);
+      // ... and stays quiet while the pane is on screen
+      t.fleet.setViewing({ host: GW_KEY, pane: 12 });
+      t.last().recv(done());
+      await Promise.resolve();
+      expect(t.notified).toHaveLength(1);
+      t.fleet.setAppActive(false);
+      // a Notify me goes to the computer too
+      t.fleet.notifyWhenDone(GW_KEY, 12, "make");
+      expect(t.last().sent.filter((m) => m.t === "notify")).toEqual([{ t: "notify", pane: 12 }]);
+      // with a token: ntfy replaces Expo push here (one alert per command, not two)
+      t.fleet.setPushToken(TOKEN);
+      expect(pushes(t).at(-1)).toMatchObject({ token: null, ntfy: `https://ntfy.sh/${topic}` });
+    });
+
+    it("inactive (a Face ID prompt) is still on screen: no visible false until background", async () => {
+      const t = await host(NTFY_ALL);
+      t.fleet.setAppActive(false);
+      expect(t.last().sent.filter((m) => m.t === "visible")).toEqual([]);
+    });
+
+    it("New topic: a new one goes to every computer at once", async () => {
+      const t = await host(NTFY_ALL);
+      await t.fleet.setNtfy(true);
+      const before = t.fleet.state.settings.ntfyTopic!;
+      await t.fleet.rotateNtfyTopic();
+      const after = t.fleet.state.settings.ntfyTopic!;
+      expect(after).toMatch(/^rift-[A-Za-z0-9_-]{22}$/);
+      expect(after).not.toBe(before);
+      expect(pushes(t).at(-1)).toMatchObject({ ntfy: `https://ntfy.sh/${after}` });
+    });
+
+    it("lists the computers too old for ntfy by their last welcome", async () => {
+      const t = await host(ALL);
+      expect(ntfyUnsupported(t.fleet.state.hosts).map((h) => h.record.name)).toEqual([t.fleet.state.hosts[0]!.record.name]);
+      const n = await host(NTFY_ALL);
+      expect(ntfyUnsupported(n.fleet.state.hosts)).toEqual([]);
+      // not reached yet: unknown, not listed
+      expect(ntfyUnsupported([{ ...t.fleet.state.hosts[0]!, welcome: null }])).toEqual([]);
+    });
+
+    it("visible: sent on every change and after a welcome while not on screen; never to an older gateway", async () => {
+      const t = await host(NTFY_ALL);
+      const visible = () => t.last().sent.filter((m) => m.t === "visible");
+      expect(visible()).toEqual([]); // on screen: the default, nothing to say
+      t.fleet.setVisible(false);
+      t.fleet.setVisible(false);
+      expect(visible()).toEqual([{ t: "visible", on: false }]);
+      reconnect(t, welcome("operate", NTFY_ALL));
+      expect(visible()).toEqual([{ t: "visible", on: false }]);
+      t.fleet.setVisible(true);
+      expect(visible()).toEqual([
+        { t: "visible", on: false },
+        { t: "visible", on: true },
+      ]);
+      reconnect(t, welcome("operate", NTFY_ALL));
+      expect(visible()).toEqual([]);
+      // a gateway without push_ntfy never gets it
+      const old = await host(ALL);
+      old.fleet.setVisible(false);
+      reconnect(old, welcome("operate", ALL));
+      old.fleet.setVisible(true);
+      expect(old.last().sent.filter((m) => m.t === "visible")).toEqual([]);
+    });
+
+    it("a self-hosted server changes the URL; a bad one is refused and kept", async () => {
+      const t = await host(NTFY_ALL);
+      await t.fleet.setNtfy(true);
+      const topic = t.fleet.state.settings.ntfyTopic!;
+      expect(await t.fleet.setNtfyServer("ntfy.example.com:8443/")).toBe(true);
+      expect(pushes(t).at(-1)).toMatchObject({ ntfy: `https://ntfy.example.com:8443/${topic}` });
+      const n = pushes(t).length;
+      expect(await t.fleet.setNtfyServer("http://ntfy.example.com")).toBe(false);
+      expect(t.fleet.state.settings.ntfyServer).toBe("https://ntfy.example.com:8443");
+      expect(pushes(t)).toHaveLength(n);
+    });
+
+    it("off: the computer is told to stop, and the app notifies by itself again; on again reuses the topic", async () => {
+      const t = await host(NTFY_ALL);
+      await t.fleet.updateSettings({ notifyPolicy: "all", notifyAfterMs: 10_000 });
+      await t.fleet.setNtfy(true);
+      const topic = t.fleet.state.settings.ntfyTopic!;
+      await t.fleet.setNtfy(false);
+      expect(t.fleet.state.settings.ntfyEnabled).toBe(false);
+      expect(t.fleet.state.settings.ntfyTopic).toBe(topic);
+      expect(pushes(t).at(-1)).toMatchObject({ token: null, ntfy: null });
+      t.fleet.setAppActive(false);
+      t.last().recv(done({ pane: 13 }));
+      await Promise.resolve();
+      expect(t.notified.map((n) => n.title)).toEqual(["A command failed on studio-mac (exit 2)"]);
+      // on again: the same topic, so the ntfy app needs no new subscription
+      await t.fleet.setNtfy(true);
+      expect(t.fleet.state.settings.ntfyTopic).toBe(topic);
+      expect(pushes(t).at(-1)).toMatchObject({ ntfy: `https://ntfy.sh/${topic}` });
+    });
+
+    it("a computer without push_ntfy keeps the Expo token while ntfy is on", async () => {
+      const t = await host(ALL);
+      await t.fleet.setNtfy(true);
+      t.fleet.setPushToken(TOKEN);
+      expect(pushes(t).at(-1)).toMatchObject({ token: TOKEN });
+      expect(pushes(t).at(-1)).not.toHaveProperty("ntfy");
+    });
+
+    it("a gateway without push_ntfy gets push as before (no ntfy field) and does not cover the done", async () => {
+      const t = await host(ALL);
+      await t.fleet.updateSettings({ notifyPolicy: "all", notifyAfterMs: 10_000 });
+      await t.fleet.setNtfy(true);
+      for (const m of pushes(t)) expect(m).not.toHaveProperty("ntfy");
+      t.fleet.setAppActive(false);
+      t.last().recv(done());
+      await Promise.resolve();
+      expect(t.notified.map((n) => n.title)).toEqual(["A command failed on studio-mac (exit 2)"]);
+    });
+  });
+
+  it("a push host that will not alert for this done (no long_ms: no push_failures) leaves it to the app", async () => {
+    const t = await host(["screen", "text", "output"]);
+    t.fleet.setPushToken(TOKEN);
+    await t.fleet.updateSettings({ notifyPolicy: "failures", notifyAfterMs: 10_000 });
+    t.fleet.setAppActive(false);
+    expect(t.last().sent.filter((m) => m.t === "push").at(-1)).toMatchObject({ token: TOKEN, long_ms: null });
+    t.last().recv(done());
+    await Promise.resolve();
+    expect(t.notified.map((n) => n.title)).toEqual(["A command failed on studio-mac (exit 2)"]);
+  });
+
+  it("a push host whose registration covers the done alerts alone; one it does not cover leaves it to the app", async () => {
+    const t = await host();
+    t.fleet.setPushToken(TOKEN);
+    await t.fleet.updateSettings({ notifyPolicy: "failures", notifyAfterMs: 10_000 });
+    t.fleet.setAppActive(false);
+    t.last().recv(done()); // failed and long: the computer alerts
+    await Promise.resolve();
+    expect(t.notified).toEqual([]);
+    await t.fleet.updateSettings({ notifyPolicy: "all" });
+    t.last().recv(done({ exit: 0, duration_ms: 9_000 })); // short: nobody alerts
+    t.last().recv(done({ exit: 0, duration_ms: 20_000 })); // long success, policy all: the computer
+    await Promise.resolve();
+    expect(t.notified).toEqual([]);
+  });
+
+  it("Notify me while disconnected: sent after the next welcome; until then the app notifies itself", async () => {
+    const t = await host();
+    t.fleet.setPushToken(TOKEN);
+    t.fleet.setAppActive(false);
+    t.last().drop();
+    t.fleet.notifyWhenDone(GW_KEY, 12, "make");
+    // not sent: the app keeps it and alerts on the done itself
+    t.fleet.notifyWhenDone(GW_KEY, 12, "short");
+    await vi.advanceTimersByTimeAsync(1000);
+    t.last().connect();
+    t.last().recv(welcome("operate", ALL));
+    expect(t.last().sent.filter((m) => m.t === "notify")).toEqual([
+      { t: "notify", pane: 12 },
+      { t: "notify", pane: 12 },
+    ]);
+    // sent now: the computer alerts for it
+    t.last().recv(done({ exit: 0, duration_ms: 1_000 }));
+    await Promise.resolve();
+    expect(t.notified).toEqual([]);
+  });
+
+  it("a Notify me the gateway never received is notified by the app", async () => {
+    const t = await host();
+    t.fleet.setPushToken(TOKEN);
+    t.fleet.setAppActive(false);
+    t.last().drop();
+    t.fleet.notifyWhenDone(GW_KEY, 12, "make");
+    // the done arrives on a connection that has not had its welcome resend yet: not covered
+    t.fleet["onDone"](GW_KEY, done({ exit: 0, duration_ms: 1_000 }) as never);
+    await Promise.resolve();
+    expect(t.notified.map((n) => n.title)).toEqual(["A command finished on studio-mac"]);
+  });
+
+  it("a reconnect while a full-screen program shows keeps the Terminal view and a picked Blocks", async () => {
+    const t = await host();
+    t.fleet.setScreenMode(GW_KEY, 12, "auto");
+    t.last().recv({ t: "screen", pane: 12, cols: 80, rows: 1, alt: true, cursor: null, full: true, lines: [[0, [["vim", null, null, 0]]]] });
+    t.fleet.store.flush();
+    reconnect(t, welcome("operate", ALL));
+    t.fleet.store.flush();
+    const screen = t.fleet.state.pane!.screen;
+    expect(screen).toMatchObject({ alt: true, stale: true });
+    expect(screen!.lines).toEqual([[["vim", null, null, 0]]]);
+    expect(showsTerminal(null, screen, true)).toBe(true); // auto: the Terminal view stays mounted
+    expect(keptPick("blocks", screen)).toBe("blocks"); // picked Blocks stays Blocks
+    // the next full screen is current again
+    t.last().recv({ t: "screen", pane: 12, cols: 80, rows: 1, alt: true, cursor: null, full: true, lines: [[0, [["vim", null, null, 0]]]] });
+    t.fleet.store.flush();
+    expect(t.fleet.state.pane!.screen).toMatchObject({ stale: false });
+  });
+
+  it("a screen that does not come back after a reconnect ends without resetting a picked Blocks; a real end does", async () => {
+    const t = await host();
+    t.fleet.setScreenMode(GW_KEY, 12, "auto");
+    t.last().recv({ t: "screen", pane: 12, cols: 80, rows: 1, alt: true, cursor: null, full: true, lines: [] });
+    reconnect(t, welcome("operate", ALL));
+    vi.advanceTimersByTime(SCREEN_RESUME_MS);
+    t.fleet.store.flush();
+    const p = t.fleet.state.pane!;
+    expect(p.screen).toBeNull();
+    expect(p.screenExpired).toBe(true);
+    expect(keptPick("blocks", p.screen, p.screenExpired)).toBe("blocks");
+    expect(showsTerminal(null, p.screen, true)).toBe(false); // auto: back to Blocks
+    // the gateway's own screen_end resets it
+    t.last().recv({ t: "screen", pane: 12, cols: 80, rows: 1, alt: true, cursor: null, full: true, lines: [] });
+    t.last().recv({ t: "screen_end", pane: 12 });
+    t.fleet.store.flush();
+    const q = t.fleet.state.pane!;
+    expect(q.screenExpired).toBe(false);
+    expect(keptPick("blocks", q.screen, q.screenExpired)).toBeNull();
+  });
+
+  it("a 15-line paste in the Terminal view never exceeds 20 sends in any second, loses nothing, keeps the order", async () => {
+    const t = await host();
+    const b = terminalInput({
+      sendKeys: (keys) => t.fleet.sendKeys(GW_KEY, 12, keys),
+      sendText: (text) => t.fleet.sendText(GW_KEY, 12, text),
+      online: () => true,
+      delay: () => t.fleet.inputDelay(GW_KEY),
+      authorize: () => null,
+      report: () => undefined,
+      schedule: (fn, d) => setTimeout(fn, d > 0 ? d : 16),
+      now: () => Date.now(),
+    });
+    // the wire: when each keys/text message reached the (0 ms) gateway
+    const at: number[] = [];
+    const socket = t.last();
+    const send = socket.send.bind(socket);
+    socket.send = (data: ArrayBuffer) => {
+      const n = socket.sent.length;
+      send(data);
+      for (let i = n; i < socket.sent.length; i++) if (["keys", "text"].includes(socket.sent[i]!.t)) at.push(Date.now());
+    };
+    const lines = Array.from({ length: 15 }, (_, i) => `line${i}`);
+    b.push(...textToActions(lines.join("\n") + "\n"));
+    // a Stop from the block sheet meanwhile shares the same budget
+    void t.fleet.sendKeys(GW_KEY, 12, ["ctrl+c"]);
+    await vi.advanceTimersByTimeAsync(5_000);
+    const input = socket.sent.filter((m) => m.t === "keys" || m.t === "text");
+    for (let i = 0; i < at.length; i++) expect(at.filter((x) => x >= at[i]! && x < at[i]! + 1000).length).toBeLessThanOrEqual(20);
+    const typed = input.flatMap((m) => (m.t === "text" ? [m.text] : m.t === "keys" ? m.keys.map((k) => `<${k}>`) : []));
+    expect(typed.filter((x) => x !== "<ctrl+c>")).toEqual(lines.flatMap((l) => [l, "<enter>"]));
+    expect(typed.filter((x) => x === "<ctrl+c>")).toHaveLength(1);
+  });
+});

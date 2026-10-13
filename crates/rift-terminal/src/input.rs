@@ -742,64 +742,179 @@ pub fn shell_quote(s: &str) -> String {
 /// stands for: what the desktop keyboard would deliver for it, so it goes
 /// through the same editor keys ([`editor_key`]) or terminal encoding
 /// ([`key_to_bytes`], kitty keyboard mode included) as a real key.
+///
+/// `alt` is the terminal's Meta (an ESC prefix, or the kitty encoder's alt
+/// bit): the caller encodes with `option_as_meta` for it, since a phone's
+/// alt never composes characters the way macOS Option does.
 pub fn remote_key_press(key: rift_remote::Key) -> (KeyPress, ModifiersState) {
-    use rift_remote::Key as R;
+    use rift_remote::KeyBase as B;
     let named = |n: NamedKey, text: Option<&str>| {
         KeyPress::new(Key::Named(n), text.map(String::from), Some(Key::Named(n)))
     };
-    let none = ModifiersState::empty();
-    match key {
-        R::Ctrl(c) => {
+    let press = match key.base {
+        B::Letter(c) => {
             let k = Key::Character(c.to_string().into());
-            (
-                KeyPress::new(k.clone(), None, Some(k)),
-                ModifiersState::CONTROL,
-            )
+            KeyPress::new(k.clone(), None, Some(k))
         }
-        R::Esc => (named(NamedKey::Escape, None), none),
-        R::Tab => (named(NamedKey::Tab, Some("\t")), none),
-        R::ShiftTab => (named(NamedKey::Tab, Some("\t")), ModifiersState::SHIFT),
-        R::Enter => (named(NamedKey::Enter, Some("\r")), none),
-        R::Backspace => (named(NamedKey::Backspace, None), none),
-        R::Up => (named(NamedKey::ArrowUp, None), none),
-        R::Down => (named(NamedKey::ArrowDown, None), none),
-        R::Left => (named(NamedKey::ArrowLeft, None), none),
-        R::Right => (named(NamedKey::ArrowRight, None), none),
-        R::Home => (named(NamedKey::Home, None), none),
-        R::End => (named(NamedKey::End, None), none),
-        R::PageUp => (named(NamedKey::PageUp, None), none),
-        R::PageDown => (named(NamedKey::PageDown, None), none),
+        B::Space => named(NamedKey::Space, Some(" ")),
+        B::Esc => named(NamedKey::Escape, None),
+        B::Tab => named(NamedKey::Tab, Some("\t")),
+        B::Enter => named(NamedKey::Enter, Some("\r")),
+        B::Backspace => named(NamedKey::Backspace, None),
+        B::Delete => named(NamedKey::Delete, None),
+        B::Insert => named(NamedKey::Insert, None),
+        B::Up => named(NamedKey::ArrowUp, None),
+        B::Down => named(NamedKey::ArrowDown, None),
+        B::Left => named(NamedKey::ArrowLeft, None),
+        B::Right => named(NamedKey::ArrowRight, None),
+        B::Home => named(NamedKey::Home, None),
+        B::End => named(NamedKey::End, None),
+        B::PageUp => named(NamedKey::PageUp, None),
+        B::PageDown => named(NamedKey::PageDown, None),
+        B::F(n) => named(
+            [
+                NamedKey::F1,
+                NamedKey::F2,
+                NamedKey::F3,
+                NamedKey::F4,
+                NamedKey::F5,
+                NamedKey::F6,
+                NamedKey::F7,
+                NamedKey::F8,
+                NamedKey::F9,
+                NamedKey::F10,
+                NamedKey::F11,
+                NamedKey::F12,
+            ][usize::from(n.clamp(1, 12)) - 1],
+            None,
+        ),
+    };
+    let mut mods = ModifiersState::empty();
+    mods.set(ModifiersState::CONTROL, key.ctrl);
+    mods.set(ModifiersState::ALT, key.alt);
+    mods.set(ModifiersState::SHIFT, key.shift);
+    (press, mods)
+}
+
+/// A phone's `text` as presses for a program in keyboard mode `enc`: the
+/// whole text as one press (committed text), except under the kitty flag
+/// "report all keys" (8), where text keys are escape codes too: one press
+/// per character then, never dropped, with shift for uppercase letters and
+/// the US layout's shifted symbols (the encoder attaches the text when the
+/// program asked for it, flag 16).
+pub fn remote_text_presses(text: &str, enc: KeyEncoding) -> Vec<(KeyPress, ModifiersState)> {
+    if enc.kitty_flags & crate::keyboard::ALL_KEYS == 0 {
+        let press = KeyPress::new(Key::Character(text.into()), Some(text.into()), None);
+        return vec![(press, ModifiersState::empty())];
     }
+    const SHIFTED: &str = "~!@#$%^&*()_+{}|:\"<>?";
+    const BASE: &str = "`1234567890-=[]\\;',./";
+    text.chars()
+        .map(|c| {
+            let lower = c.to_lowercase().next().filter(|l| *l != c);
+            let base = lower.or_else(|| SHIFTED.find(c).and_then(|i| BASE[i..].chars().next()));
+            let s = c.to_string();
+            let press = KeyPress::new(
+                Key::Character(s.as_str().into()),
+                Some(s.clone()),
+                Some(Key::Character(base.map_or(s, String::from).into())),
+            );
+            let mut mods = ModifiersState::empty();
+            mods.set(ModifiersState::SHIFT, base.is_some());
+            (press, mods)
+        })
+        .collect()
+}
+
+/// The bytes of a phone's `presses` for a program in keyboard mode `enc`:
+/// each press, and right after it its release when the program asked for
+/// key events (a phone's press has no release of its own).
+pub fn remote_bytes(presses: &[(KeyPress, ModifiersState)], enc: KeyEncoding) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (press, mods) in presses {
+        let Some(bytes) = key_to_bytes(press, *mods, enc) else {
+            continue;
+        };
+        out.extend(bytes);
+        if enc.kitty_flags & crate::keyboard::EVENT_TYPES != 0 {
+            let up = KeyPress {
+                released: true,
+                ..press.clone()
+            };
+            out.extend(key_to_bytes(&up, *mods, enc).unwrap_or_default());
+        }
+    }
+    out
+}
+
+/// What a phone's key does in the command editor at a prompt: the
+/// desktop's editor key for the same press, except that no key puts text
+/// there (typed, recalled from history, completed, the ghost suggestion,
+/// undone): a command line comes only through `run`.
+pub fn remote_editor_key(key: rift_remote::Key) -> Option<EditorKey> {
+    let (press, mods) = remote_key_press(key);
+    editor_key(&press, mods).filter(|k| {
+        !matches!(
+            k,
+            EditorKey::Insert(_)
+                | EditorKey::HistoryUp
+                | EditorKey::HistoryDown
+                | EditorKey::HistorySearch
+                | EditorKey::Complete
+                | EditorKey::AcceptGhostWord
+                | EditorKey::Undo
+                | EditorKey::Redo
+        )
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Every key of the protocol's grammar (each one's name parses back to
+    /// it).
     fn every_remote_key() -> Vec<rift_remote::Key> {
-        let mut names: Vec<String> = ('a'..='z').map(|c| format!("ctrl+{c}")).collect();
-        names.extend(
-            [
-                "esc",
-                "tab",
-                "shift+tab",
-                "enter",
-                "backspace",
-                "up",
-                "down",
-                "left",
-                "right",
-                "home",
-                "end",
-                "pageup",
-                "pagedown",
-            ]
-            .map(String::from),
-        );
-        names
-            .iter()
-            .map(|n| rift_remote::Key::parse(n).unwrap())
-            .collect()
+        use rift_remote::{Key as R, KeyBase as B};
+        let mut named = vec![
+            B::Esc,
+            B::Tab,
+            B::Enter,
+            B::Backspace,
+            B::Delete,
+            B::Insert,
+            B::Up,
+            B::Down,
+            B::Left,
+            B::Right,
+            B::Home,
+            B::End,
+            B::PageUp,
+            B::PageDown,
+        ];
+        named.extend((1..=12).map(B::F));
+        let key = |m: u8, base| R {
+            ctrl: m & 1 != 0,
+            alt: m & 2 != 0,
+            shift: m & 4 != 0,
+            base,
+        };
+        let mut all: Vec<R> = (0..8)
+            .flat_map(|m| named.iter().map(move |&b| key(m, b)))
+            .collect();
+        for m in 1..4 {
+            all.extend(
+                ('a'..='z')
+                    .map(B::Letter)
+                    .chain([B::Space])
+                    .map(|b| key(m, b)),
+            );
+        }
+        for k in &all {
+            assert_eq!(R::parse(&k.name()), Some(*k), "{k:?}");
+        }
+        assert_eq!(all.len(), 289);
+        all
     }
 
     fn remote(name: &str) -> (KeyPress, ModifiersState) {
@@ -808,10 +923,7 @@ mod tests {
 
     #[test]
     fn remote_keys_at_a_prompt_are_the_editors_keys() {
-        let editor = |name: &str| {
-            let (press, mods) = remote(name);
-            editor_key(&press, mods)
-        };
+        let editor = |name: &str| remote_editor_key(rift_remote::Key::parse(name).unwrap());
         for (name, want) in [
             ("ctrl+c", Some(EditorKey::Interrupt)),
             ("ctrl+d", Some(EditorKey::Eof)),
@@ -821,42 +933,144 @@ mod tests {
             ("ctrl+k", Some(EditorKey::KillToEnd)),
             ("ctrl+w", Some(EditorKey::DeleteWordBack)),
             ("ctrl+l", Some(EditorKey::ClearScreen)),
-            ("ctrl+r", Some(EditorKey::HistorySearch)),
             ("enter", Some(EditorKey::Submit)),
-            ("tab", Some(EditorKey::Complete)),
             ("shift+tab", Some(EditorKey::NextCompletionSource)),
             ("esc", Some(EditorKey::Dismiss)),
             ("backspace", Some(EditorKey::Backspace)),
-            ("up", Some(EditorKey::HistoryUp)),
-            ("down", Some(EditorKey::HistoryDown)),
             ("left", Some(EditorKey::Left)),
             ("right", Some(EditorKey::Right)),
             ("home", Some(EditorKey::Home)),
             ("end", Some(EditorKey::End)),
+            ("delete", Some(EditorKey::Delete)),
+            ("alt+backspace", Some(EditorKey::DeleteWordBack)),
+            ("alt+delete", Some(EditorKey::DeleteWordForward)),
+            ("alt+left", Some(EditorKey::WordLeft)),
+            ("alt+right", Some(EditorKey::WordRight)),
+            ("shift+left", Some(EditorKey::SelectLeft)),
+            ("shift+home", Some(EditorKey::SelectHome)),
+            // these would put text on the line (history, history search,
+            // completion, the ghost suggestion): nothing happens
+            ("up", None),
+            ("down", None),
+            ("ctrl+r", None),
+            ("tab", None),
+            ("ctrl+right", None),
             // no editor meaning: nothing happens (never typed as text)
             ("ctrl+z", None),
             ("pageup", None),
             ("pagedown", None),
+            ("insert", None),
+            ("f1", None),
+            ("ctrl+space", None),
+            ("alt+b", None),
+            // the desktop inserts a newline or a space for these; a phone's
+            // command line comes only through `run`
+            ("shift+enter", None),
+            ("alt+enter", None),
+            ("alt+space", None),
         ] {
             assert_eq!(editor(name), want, "{name}");
         }
-        // no key inserts text into the command line
+        // no key puts text on the command line
         for key in every_remote_key() {
-            let (press, mods) = remote_key_press(key);
             assert!(
-                !matches!(editor_key(&press, mods), Some(EditorKey::Insert(_))),
+                !matches!(
+                    remote_editor_key(key),
+                    Some(
+                        EditorKey::Insert(_)
+                            | EditorKey::HistoryUp
+                            | EditorKey::HistoryDown
+                            | EditorKey::HistorySearch
+                            | EditorKey::Complete
+                            | EditorKey::AcceptGhostWord
+                            | EditorKey::Undo
+                            | EditorKey::Redo
+                    )
+                ),
                 "{key:?}"
             );
         }
+        // the keys that submit the line (the window refuses them while it
+        // has text)
+        let submits: Vec<String> = every_remote_key()
+            .into_iter()
+            .filter(|k| remote_editor_key(*k) == Some(EditorKey::Submit))
+            .map(|k| k.name())
+            .collect();
+        assert!(submits.contains(&"enter".to_string()), "{submits:?}");
+    }
+
+    #[test]
+    fn remote_text_in_kitty_all_keys_mode_is_one_press_per_character() {
+        let text = |t: &str, flags: u8| {
+            let enc = KeyEncoding {
+                kitty_flags: flags,
+                option_as_meta: true,
+                ..KeyEncoding::default()
+            };
+            String::from_utf8(remote_bytes(&remote_text_presses(t, enc), enc)).unwrap()
+        };
+        // committed text without "report all keys"
+        assert_eq!(text("hello", 0), "hello");
+        assert_eq!(text("hello", 1), "hello");
+        // 9 (+ all keys): each character a key, uppercase shifted
+        assert_eq!(
+            text("hello", 9),
+            "\x1b[104u\x1b[101u\x1b[108u\x1b[108u\x1b[111u"
+        );
+        assert_eq!(text("A", 9), "\x1b[97;2u");
+        // 11 (+ event types): each press followed by its release
+        assert_eq!(
+            text("hello", 11),
+            "\x1b[104u\x1b[104;1:3u\x1b[101u\x1b[101;1:3u\x1b[108u\x1b[108;1:3u\
+             \x1b[108u\x1b[108;1:3u\x1b[111u\x1b[111;1:3u"
+        );
+        assert_eq!(text("A", 11), "\x1b[97;2u\x1b[97;2:3u");
+        // 25 (+ associated text): the text rides along
+        assert_eq!(
+            text("hello", 25),
+            "\x1b[104;1;104u\x1b[101;1;101u\x1b[108;1;108u\x1b[108;1;108u\x1b[111;1;111u"
+        );
+        assert_eq!(text("A", 25), "\x1b[97;2;65u");
+        // shifted symbols on their US keys (13: + alternate keys); other
+        // characters are their own key
+        assert_eq!(text("!", 13), "\x1b[49:33;2u");
+        assert_eq!(text("é", 9), "\x1b[233u");
+        assert_eq!(text("a b", 9), "\x1b[97u\x1b[32u\x1b[98u");
     }
 
     #[test]
     fn remote_keys_in_a_program_are_the_terminals_bytes() {
-        let legacy = KeyEncoding::default();
+        // a phone's alt is always Meta (the app encodes with option_as_meta)
+        let legacy = KeyEncoding {
+            option_as_meta: true,
+            ..KeyEncoding::default()
+        };
         let bytes = |name: &str, enc: KeyEncoding| {
             let (press, mods) = remote(name);
             key_to_bytes(&press, mods, enc)
         };
+        for (name, want) in [
+            ("alt+b", &b"\x1bb"[..]),
+            ("alt+f", b"\x1bf"),
+            ("ctrl+alt+c", b"\x1b\x03"),
+            ("ctrl+space", b"\0"),
+            ("alt+space", b"\x1b "),
+            ("ctrl+alt+space", b"\x1b\0"),
+            ("alt+backspace", b"\x1b\x7f"),
+            ("alt+enter", b"\x1b\r"),
+            ("delete", b"\x1b[3~"),
+            ("insert", b"\x1b[2~"),
+            ("ctrl+alt+delete", b"\x1b[3;7~"),
+            ("f1", b"\x1bOP"),
+            ("f12", b"\x1b[24~"),
+            ("shift+f5", b"\x1b[15;2~"),
+            ("ctrl+alt+shift+f2", b"\x1b[1;8Q"),
+            ("alt+up", b"\x1b[1;3A"),
+            ("shift+tab", b"\x1b[Z"),
+        ] {
+            assert_eq!(bytes(name, legacy).as_deref(), Some(want), "{name}");
+        }
         for (name, want) in [
             ("ctrl+c", &b"\x03"[..]),
             ("ctrl+z", b"\x1a"),
@@ -888,6 +1102,11 @@ mod tests {
         };
         assert_eq!(bytes("ctrl+c", kitty).as_deref(), Some(&b"\x1b[99;5u"[..]));
         assert_eq!(bytes("esc", kitty).as_deref(), Some(&b"\x1b[27u"[..]));
+        assert_eq!(bytes("alt+b", kitty).as_deref(), Some(&b"\x1b[98;3u"[..]));
+        assert_eq!(
+            bytes("ctrl+space", kitty).as_deref(),
+            Some(&b"\x1b[32;5u"[..])
+        );
         // every protocol key reaches a program, in both encodings
         for key in every_remote_key() {
             let (press, mods) = remote_key_press(key);

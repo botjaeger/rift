@@ -41,18 +41,22 @@ export interface Window {
   tabs: Tab[];
 }
 
-export type ErrorCode = "auth" | "version" | "bad_request" | "busy" | "forbidden" | "no_pane" | "too_large" | "rate";
+export type ErrorCode =
+  "auth" | "version" | "bad_request" | "busy" | "forbidden" | "no_pane" | "no_block" | "too_large" | "rate";
 
 export type Permission = "operate" | "view";
 
-/** Keys `keys` may carry (docs/remote-protocol.md). */
-export const KEY_NAMES: readonly string[] = [
-  ..."abcdefghijklmnopqrstuvwxyz".split("").map((c) => `ctrl+${c}`),
+/** What a gateway serves beyond Phase 2 (`welcome.features`; absent: none). */
+export type Feature = "screen" | "text" | "output" | "push_failures" | "push_ntfy";
+
+/** Base keys that take any modifiers or none (docs/remote-protocol.md, `keys`). */
+const NAMED_KEYS: ReadonlySet<string> = new Set([
   "esc",
   "tab",
-  "shift+tab",
   "enter",
   "backspace",
+  "delete",
+  "insert",
   "up",
   "down",
   "left",
@@ -61,11 +65,33 @@ export const KEY_NAMES: readonly string[] = [
   "end",
   "pageup",
   "pagedown",
-];
-const KEY_SET = new Set(KEY_NAMES);
+  ...Array.from({ length: 12 }, (_, i) => `f${i + 1}`),
+]);
+
+/**
+ * Whether `name` is a key `keys` may carry: optional `ctrl+`, `alt+`, `shift+` (in this order,
+ * each at most once), then a named key (esc, tab, enter, backspace, delete, insert, arrows,
+ * home, end, pageup, pagedown, f1 … f12), or `a` … `z` / `space` with ctrl and/or alt and
+ * without shift (plain letters are `text`).
+ */
+export function isKeyName(name: string): boolean {
+  const m = /^(ctrl\+)?(alt\+)?(shift\+)?([a-z0-9]+)$/.exec(name);
+  if (!m) return false;
+  const [, ctrl, alt, shift, base] = m;
+  if (NAMED_KEYS.has(base!)) return true;
+  return (base === "space" || /^[a-z]$/.test(base!)) && (!!ctrl || !!alt) && !shift;
+}
+
 export const MAX_KEYS_PER_MESSAGE = 20;
 /** UTF-8 bytes of a `run` command (one line, no control characters). */
 export const MAX_COMMAND_BYTES = 2048;
+/** UTF-8 bytes of a `text` message (one line, no control characters). */
+export const MAX_TEXT_BYTES = 1024;
+/** Lines one `output` request may ask for. */
+export const MAX_OUTPUT_LINES = 500;
+/** The largest screen a gateway sends (a larger one is cut to its top-left part). */
+export const MAX_SCREEN_COLS = 300;
+export const MAX_SCREEN_ROWS = 120;
 /** Client messages larger than this close the connection. */
 export const MAX_CLIENT_MESSAGE_BYTES = 4096;
 export const MAX_ID_CHARS = 64;
@@ -114,25 +140,72 @@ export interface KeysMsg {
 export interface ForgetMsg {
   t: "forget";
 }
+/**
+ * Whether the app is on screen; only to a gateway with `push_ntfy` (a connection starts visible).
+ * While not, the computer posts ntfy alerts about the pane this device follows again.
+ */
+export interface VisibleMsg {
+  t: "visible";
+  on: boolean;
+}
 export interface PingMsg {
   t: "ping";
   n: number;
 }
-/** Alerts while the app is closed: an Expo push token, or null to stop. */
+/** Alerts while the app is closed: an Expo push token, an ntfy topic URL, both, or neither (stop). */
 export interface PushMsg {
   t: "push";
   token: string | null;
+  /** `https://<host>[:port]/<topic>`; only to a gateway with `push_ntfy` (others: left out). */
+  ntfy?: string | null;
   /** Alert for every command at least this long; null: only for `notify`. */
   long_ms: number | null;
   show_command: boolean;
+  /** The `long_ms` alerts only for commands that failed (an exit status other than 0). */
+  failures_only: boolean;
 }
 /** Alert when the next command in `pane` finishes ("Notify me"). */
 export interface NotifyMsg {
   t: "notify";
   pane: number;
 }
+/** Printable text typed into the program running in the pane (one line, no control characters). */
+export interface TextMsg {
+  t: "text";
+  id: string;
+  pane: number;
+  text: string;
+}
+export type ScreenMode = "off" | "auto" | "on";
+/** What the gateway sends of the subscribed pane's screen. */
+export interface ScreenModeMsg {
+  t: "screen";
+  pane: number;
+  mode: ScreenMode;
+}
+/** Lines `from` … `from + limit - 1` of a block's output. */
+export interface OutputRequestMsg {
+  t: "output";
+  id: string;
+  pane: number;
+  block: number;
+  from: number;
+  limit: number;
+}
 export type ClientMsg =
-  SubscribeMsg | OlderRequestMsg | UnsubscribeMsg | RunMsg | KeysMsg | ForgetMsg | PingMsg | PushMsg | NotifyMsg;
+  | SubscribeMsg
+  | OlderRequestMsg
+  | UnsubscribeMsg
+  | RunMsg
+  | KeysMsg
+  | ForgetMsg
+  | PingMsg
+  | VisibleMsg
+  | PushMsg
+  | NotifyMsg
+  | TextMsg
+  | ScreenModeMsg
+  | OutputRequestMsg;
 
 // Gateway → client.
 export interface WelcomeMsg {
@@ -143,6 +216,8 @@ export interface WelcomeMsg {
   version: string;
   device: string;
   permission: Permission;
+  /** What this gateway serves beyond Phase 2; [] when it leaves the field out. Unknown names are kept. */
+  features: string[];
 }
 export interface TopologyMsg {
   t: "topology";
@@ -192,8 +267,54 @@ export interface ErrorMsg {
   code: ErrorCode | (string & {});
   message: string;
 }
+/** `[text, fg, bg, flags]`: colours `rrggbb` or null (the default), flags 1 bold, 2 italic, 4 underline, 8 dim, 16 strikethrough. */
+export type ScreenRun = [text: string, fg: string | null, bg: string | null, flags: number];
+export const RUN_BOLD = 1;
+export const RUN_ITALIC = 2;
+export const RUN_UNDERLINE = 4;
+export const RUN_DIM = 8;
+export const RUN_STRIKE = 16;
+/** The subscribed pane's visible screen: every row when `full`, else the rows that changed. */
+export interface ScreenMsg {
+  t: "screen";
+  pane: number;
+  cols: number;
+  rows: number;
+  alt: boolean;
+  /** `[row, column]` while the program shows its cursor. */
+  cursor: [number, number] | null;
+  full: boolean;
+  lines: [number, ScreenRun[]][];
+}
+/** Screens stopped (mode `auto` and the pane left the alternate screen, or mode `off`). */
+export interface ScreenEndMsg {
+  t: "screen_end";
+  pane: number;
+}
+/** The answer to an `output` request: lines from `from` on (`from` is the first one it holds). */
+export interface OutputMsg {
+  t: "output";
+  id: string;
+  pane: number;
+  block: number;
+  from: number;
+  text: string;
+  /** The block's output lines so far. */
+  total: number;
+}
 export type ServerMsg =
-  WelcomeMsg | TopologyMsg | SnapshotMsg | UpdateMsg | OlderMsg | AckMsg | DoneMsg | PongMsg | ErrorMsg;
+  | WelcomeMsg
+  | TopologyMsg
+  | SnapshotMsg
+  | UpdateMsg
+  | OlderMsg
+  | AckMsg
+  | DoneMsg
+  | PongMsg
+  | ErrorMsg
+  | ScreenMsg
+  | ScreenEndMsg
+  | OutputMsg;
 
 type Obj = Record<string, unknown>;
 
@@ -253,6 +374,48 @@ function isWindow(v: unknown): v is Window {
 
 const isBlocks = arrayOf(isBlock);
 
+const isColor = (v: unknown) => v === null || (isStr(v) && /^[0-9a-f]{6}$/.test(v));
+
+function isRun(v: unknown): v is ScreenRun {
+  return Array.isArray(v) && v.length === 4 && isStr(v[0]) && isColor(v[1]) && isColor(v[2]) && isUint(v[3]);
+}
+
+/** Characters (code points) in a row's runs, stopping once past `max`. */
+function rowChars(runs: ScreenRun[], max: number): number {
+  let n = 0;
+  for (const run of runs) {
+    for (const _ of run[0]) if (++n > max) return n;
+  }
+  return n;
+}
+
+/**
+ * A screen inside its own bounds: the cursor on the screen, and no row with more than two
+ * characters per column (a wide character is one character in two columns; combining marks
+ * add some), so a hostile gateway cannot make one row arbitrarily long.
+ */
+function isScreen(m: Obj): boolean {
+  if (!(isUint(m.pane) && isUint(m.cols) && isUint(m.rows) && isBool(m.alt) && isBool(m.full))) return false;
+  const rows = m.rows as number;
+  const cols = m.cols as number;
+  if (cols > MAX_SCREEN_COLS || rows > MAX_SCREEN_ROWS) return false;
+  const c = m.cursor;
+  if (c !== null && !(Array.isArray(c) && c.length === 2 && isUint(c[0]) && isUint(c[1]) && c[0] < rows && c[1] < cols))
+    return false;
+  return (
+    Array.isArray(m.lines) &&
+    m.lines.every(
+      (l) =>
+        Array.isArray(l) &&
+        l.length === 2 &&
+        isUint(l[0]) &&
+        (l[0] as number) < rows &&
+        arrayOf(isRun)(l[1]) &&
+        rowChars(l[1] as ScreenRun[], cols * 2) <= cols * 2,
+    )
+  );
+}
+
 /**
  * Validates one gateway message (already JSON-parsed). Returns null for a malformed object and
  * for an unknown `t` (the client ignores types it does not know, for forward compatibility).
@@ -267,8 +430,9 @@ export function decodeServer(json: unknown): ServerMsg | null {
         isStr(m.os) &&
         isStr(m.version) &&
         isStr(m.device) &&
-        (m.permission === "operate" || m.permission === "view")
-        ? (m as unknown as WelcomeMsg)
+        (m.permission === "operate" || m.permission === "view") &&
+        (m.features === undefined || arrayOf(isStr)(m.features))
+        ? ({ ...m, features: m.features ?? [] } as unknown as WelcomeMsg)
         : null;
     case "topology":
       return arrayOf(isWindow)(m.windows) ? (m as unknown as TopologyMsg) : null;
@@ -294,6 +458,14 @@ export function decodeServer(json: unknown): ServerMsg | null {
       return isUint(m.n) ? (m as unknown as PongMsg) : null;
     case "error":
       return isStr(m.code) && isStr(m.message) ? (m as unknown as ErrorMsg) : null;
+    case "screen":
+      return isScreen(m) ? (m as unknown as ScreenMsg) : null;
+    case "screen_end":
+      return isUint(m.pane) ? (m as unknown as ScreenEndMsg) : null;
+    case "output":
+      return isStr(m.id) && isUint(m.pane) && isUint(m.block) && isUint(m.from) && isStr(m.text) && isUint(m.total)
+        ? (m as unknown as OutputMsg)
+        : null;
     default:
       return null;
   }
@@ -329,20 +501,38 @@ export function isClientMsg(v: unknown): v is ClientMsg {
         Array.isArray(v.keys) &&
         v.keys.length > 0 &&
         v.keys.length <= MAX_KEYS_PER_MESSAGE &&
-        v.keys.every((k) => isStr(k) && KEY_SET.has(k))
+        v.keys.every((k) => isStr(k) && isKeyName(k))
       );
     case "forget":
       return true;
+    case "visible":
+      return typeof v.on === "boolean";
     case "ping":
       return isUint(v.n);
     case "push":
       return (
         (v.token === null || (isStr(v.token) && isPushToken(v.token))) &&
+        (v.ntfy === undefined || v.ntfy === null || (isStr(v.ntfy) && isNtfyUrl(v.ntfy))) &&
         (v.long_ms === null || (isUint(v.long_ms) && v.long_ms <= MAX_LONG_MS)) &&
-        typeof v.show_command === "boolean"
+        typeof v.show_command === "boolean" &&
+        typeof v.failures_only === "boolean"
       );
     case "notify":
       return isUint(v.pane);
+    case "text":
+      return isId(v.id) && isUint(v.pane) && isStr(v.text) && textProblem(v.text) === null;
+    case "screen":
+      return isUint(v.pane) && (v.mode === "off" || v.mode === "auto" || v.mode === "on");
+    case "output":
+      return (
+        isId(v.id) &&
+        isUint(v.pane) &&
+        isUint(v.block) &&
+        isUint(v.from) &&
+        isUint(v.limit) &&
+        v.limit >= 1 &&
+        v.limit <= MAX_OUTPUT_LINES
+      );
     default:
       return false;
   }
@@ -356,16 +546,62 @@ export function isPushToken(t: string): boolean {
   return t.length <= 200 && /^(ExponentPushToken|ExpoPushToken)\[[A-Za-z0-9_-]+\]$/.test(t);
 }
 
+/**
+ * An ntfy topic URL as the gateway accepts it (`valid_ntfy` in crates/rift-remote/src/push.rs):
+ * `https://<host>[:port]/<topic>`, topic `[A-Za-z0-9_-]{1,64}`, at most 200 characters, no
+ * user, query or fragment.
+ */
+export function isNtfyUrl(u: string): boolean {
+  if (u.length > 200) return false;
+  const m = /^https:\/\/([A-Za-z0-9.-]+)(?::([0-9]{1,5}))?\/([A-Za-z0-9_-]{1,64})$/.exec(u);
+  if (!m) return false;
+  const host = m[1]!;
+  if (/^[-.]|[-.]$|\.\./.test(host)) return false;
+  if (m[2] !== undefined) {
+    const port = Number(m[2]);
+    if (port < 1 || port > 65535) return false;
+  }
+  return publicEnough(host.toLowerCase());
+}
+
+/**
+ * Whether the gateway may post to `host` (`public_enough` in push.rs): never `localhost` /
+ * `*.localhost`, nor an IPv4 address that is loopback, 0/8, link-local, broadcast or multicast;
+ * a numeric last label (`127.1`, `2130706433`, `0x7f.1`) must be a plain dotted quad. Private LAN
+ * and 100.64/10 (Tailscale) addresses stay allowed.
+ */
+function publicEnough(host: string): boolean {
+  if (host === "localhost" || host.endsWith(".localhost")) return false;
+  const last = host.slice(host.lastIndexOf(".") + 1);
+  if (!/^[0-9]*$/.test(last) && !last.startsWith("0x")) return true;
+  const quad = /^(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})$/.exec(host);
+  if (!quad) return false;
+  const [a, b, c, d] = quad.slice(1).map(Number) as [number, number, number, number];
+  if ([a, b, c, d].some((o) => o > 255)) return false;
+  return !(a === 127 || a === 0 || (a === 169 && b === 254) || (a >= 224 && a <= 239) || (a === 255 && b === 255 && c === 255 && d === 255));
+}
+
+/** C0 and C1 control characters and DEL: the gateway refuses them in `run` and `text` (Rust's `char::is_control`). */
+// eslint-disable-next-line no-control-regex
+export const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/;
+
 /** Why `command` cannot be sent with `run`, or null when it can. */
 export function commandProblem(command: string): "empty" | "too_long" | "control" | null {
   if (command.trim() === "") return "empty";
-  // eslint-disable-next-line no-control-regex
-  if (/[\u0000-\u001f\u007f]/.test(command)) return "control";
+  if (CONTROL_CHARS.test(command)) return "control";
   if (utf8Length(command) > MAX_COMMAND_BYTES) return "too_long";
   return null;
 }
 
-function utf8Length(s: string): number {
+/** Why `text` cannot be sent with `text`, or null when it can. */
+export function textProblem(text: string): "empty" | "too_long" | "control" | null {
+  if (text === "") return "empty";
+  if (CONTROL_CHARS.test(text)) return "control";
+  if (utf8Length(text) > MAX_TEXT_BYTES) return "too_long";
+  return null;
+}
+
+export function utf8Length(s: string): number {
   let n = 0;
   for (const ch of s) {
     const cp = ch.codePointAt(0)!;

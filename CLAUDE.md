@@ -190,7 +190,9 @@ lives outside the workspace in `mobile/` (pnpm; the `mobile` gate).
   `[patch.crates-io]`, outside the workspace) and carry the VT420 emulation,
   the Xcms color parser (`vendor/vte/src/xcms.rs`) and wcwidth-compatible
   cluster widths (`term/width.rs`; regenerate `width_tables.rs` with
-  `scripts/gen-width-tables.py`). The fmt, clippy and test gates run on them
+  `scripts/gen-width-tables.py`), and `Term::primary_grid` (the remote
+  gateway reads block output from the primary grid under the alternate
+  screen). The fmt, clippy and test gates run on them
   too. Only `tty`, `Term`, re-exported `vte` and `FairMutex` are used — never
   alacritty's `event_loop`.
 - Rust 1.98.0 (`rust-toolchain.toml`); bump together with the `FROM` line of

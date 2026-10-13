@@ -1,10 +1,13 @@
 //! The gateway over real localhost sockets, fed by a fake source; the test
 //! acts as the phone with `snow` through `rift_remote::transport::connect`.
 
-use rift_remote::protocol::{Block, BlockState, ClientHello, Pane, Permission, Tab, Window};
+use rift_remote::protocol::{Block, BlockState, ClientHello, Pane, Permission, Run, Tab, Window};
 use rift_remote::registry::{self, PairingLink};
 use rift_remote::transport::{self, Channel, HandshakeError, Recv};
-use rift_remote::{Config, Gateway, Input, InputError, Key, Page, Source, SourceError, serve};
+use rift_remote::{
+    Config, Gateway, Input, InputError, Key, KeyBase, OutputError, OutputPage, Page, Screen,
+    Source, SourceError, serve,
+};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -28,6 +31,13 @@ struct State {
     status_changes: Vec<usize>,
     /// Where `status.json` lives (set by `start`).
     dir: Option<PathBuf>,
+    /// Each pane's screen (`screen` answers it when `alt`, or forced).
+    screens: BTreeMap<u64, Screen>,
+    /// Panes read through `screen`, with `force`.
+    screen_reads: Vec<(u64, bool)>,
+    /// Output of (pane, block): lines already gone, then the held lines
+    /// (each ending with `\n`).
+    outputs: BTreeMap<(u64, u64), (u64, Vec<String>)>,
 }
 
 #[derive(Clone, Default)]
@@ -111,6 +121,39 @@ impl Source for Fake {
         }
         st.inputs.push((pane, device.to_string(), input));
         Ok(())
+    }
+
+    fn screen(&self, pane: u64, force: bool) -> Result<Option<Screen>, SourceError> {
+        let mut st = self.0.lock().unwrap();
+        if !st.panes.contains_key(&pane) {
+            return Err(SourceError::NoPane);
+        }
+        st.screen_reads.push((pane, force));
+        Ok(st.screens.get(&pane).filter(|s| s.alt || force).cloned())
+    }
+
+    /// Every held line from `from` on, whatever `limit`: the gateway bounds
+    /// the page.
+    fn output(
+        &self,
+        pane: u64,
+        block: u64,
+        from: u64,
+        _limit: usize,
+    ) -> Result<OutputPage, OutputError> {
+        let st = self.0.lock().unwrap();
+        if !st.panes.contains_key(&pane) {
+            return Err(OutputError::NoPane);
+        }
+        let (gone, lines) = st.outputs.get(&(pane, block)).ok_or(OutputError::NoBlock)?;
+        let total = gone + lines.len() as u64;
+        let from = from.max(*gone);
+        let held = lines.get((from - gone) as usize..).unwrap_or_default();
+        Ok(OutputPage {
+            from,
+            text: held.concat(),
+            total,
+        })
     }
 }
 
@@ -385,7 +428,7 @@ fn pairing_then_reconnecting_gets_welcome_and_topology() {
     assert_eq!(
         welcome,
         json!({"t":"welcome","v":2,"host":"test-host","os":"linux","version":"9.9.9",
-               "device":d.id,"permission":"operate"})
+               "device":d.id,"permission":"operate","features":["screen","text","output","push_failures","push_ntfy"]})
     );
     assert_eq!(
         (d.name.as_str(), d.platform.as_str()),
@@ -679,7 +722,7 @@ fn a_permission_change_applies_at_once_not_at_the_next_devices_poll() {
         &mut ch,
         json!({"t":"run","id":"r1","pane":12,"command":"echo late"}),
     );
-    assert_eq!(code(&recv_t(&mut ch, "error")), ("error", "forbidden"));
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (false, "forbidden"));
     assert!(
         env.fake.inputs().is_empty(),
         "a command ran after the change"
@@ -874,11 +917,14 @@ fn run_and_keys_reach_the_source() {
                 12,
                 "Test Phone".to_string(),
                 Input::Keys(vec![
-                    Key::Ctrl('c'),
-                    Key::Esc,
-                    Key::Up,
-                    Key::Enter,
-                    Key::ShiftTab
+                    Key::ctrl('c'),
+                    Key::plain(KeyBase::Esc),
+                    Key::plain(KeyBase::Up),
+                    Key::plain(KeyBase::Enter),
+                    Key {
+                        shift: true,
+                        ..Key::plain(KeyBase::Tab)
+                    }
                 ])
             ),
         ]
@@ -926,20 +972,25 @@ fn source_errors_become_acks() {
 }
 
 #[test]
-fn view_devices_are_forbidden_to_run_or_send_keys() {
+fn view_devices_are_forbidden_to_run_send_keys_or_type() {
     let env = start(|_| {});
     let (_k, mut ch, welcome) = env.pair(Permission::View);
     assert_eq!(welcome["permission"], "view");
-    put(
-        &mut ch,
-        json!({"t":"run","id":"r1","pane":12,"command":"ls"}),
-    );
-    assert_eq!(code(&recv_t(&mut ch, "error")), ("error", "forbidden"));
-    put(
-        &mut ch,
-        json!({"t":"keys","id":"k1","pane":12,"keys":["ctrl+c"]}),
-    );
-    assert_eq!(code(&recv_t(&mut ch, "error")), ("error", "forbidden"));
+    for (rid, msg) in [
+        ("r1", json!({"t":"run","id":"r1","pane":12,"command":"ls"})),
+        (
+            "k1",
+            json!({"t":"keys","id":"k1","pane":12,"keys":["ctrl+c"]}),
+        ),
+        ("x1", json!({"t":"text","id":"x1","pane":12,"text":"y"})),
+    ] {
+        put(&mut ch, msg);
+        let v = recv_t(&mut ch, "ack");
+        assert_eq!(
+            (ack(&v), v["id"].as_str()),
+            ((false, "forbidden"), Some(rid))
+        );
+    }
     // reading still works
     put(&mut ch, json!({"t":"subscribe","pane":12,"after":null}));
     recv_t(&mut ch, "snapshot");
@@ -975,7 +1026,8 @@ fn malformed_input_is_rejected_before_the_source() {
     );
     for keys in [
         json!(["ctrl+C"]),
-        json!(["f1"]),
+        json!(["f13"]),
+        json!(["shift+a"]),
         json!(["enter", "nope"]),
         json!([]),
     ] {
@@ -1343,11 +1395,30 @@ fn ping_gets_pong_and_silent_clients_are_dropped() {
 
 // --- push alerts --------------------------------------------------------------
 
-/// A loopback push service: every request body, each answered with
-/// `reply(body)`.
+/// One request a [`PushSink`] received.
+#[derive(Clone)]
+struct Seen {
+    /// `POST /path HTTP/1.1`
+    line: String,
+    /// `name: value`, as sent.
+    headers: Vec<String>,
+    body: String,
+}
+
+impl Seen {
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers.iter().find_map(|h| {
+            let (n, v) = h.split_once(':')?;
+            n.eq_ignore_ascii_case(name).then(|| v.trim())
+        })
+    }
+}
+
+/// A loopback push service: every request, each answered with
+/// `reply(body)` (the body as JSON; `null` when it is not JSON).
 struct PushSink {
     url: String,
-    bodies: Arc<Mutex<Vec<Value>>>,
+    seen: Arc<Mutex<Vec<Seen>>>,
 }
 
 impl PushSink {
@@ -1358,13 +1429,16 @@ impl PushSink {
             "http://{}/--/api/v2/push/send",
             listener.local_addr().unwrap()
         );
-        let bodies: Arc<Mutex<Vec<Value>>> = Arc::default();
-        let seen = bodies.clone();
+        let all: Arc<Mutex<Vec<Seen>>> = Arc::default();
+        let seen = all.clone();
         std::thread::spawn(move || {
             for s in listener.incoming() {
                 let Ok(mut s) = s else { continue };
                 let mut r = BufReader::new(s.try_clone().unwrap());
                 let mut len = 0usize;
+                let mut request_line = String::new();
+                r.read_line(&mut request_line).unwrap_or(0);
+                let mut headers = Vec::new();
                 loop {
                     let mut line = String::new();
                     if r.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
@@ -1373,12 +1447,17 @@ impl PushSink {
                     if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
                         len = v.trim().parse().unwrap_or(0);
                     }
+                    headers.push(line.trim_end().to_string());
                 }
                 let mut body = vec![0u8; len];
                 r.read_exact(&mut body).unwrap();
-                let v: Value = serde_json::from_slice(&body).unwrap();
+                let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
                 let answer = reply(&v);
-                seen.lock().unwrap().push(v);
+                seen.lock().unwrap().push(Seen {
+                    line: request_line.trim_end().to_string(),
+                    headers,
+                    body: String::from_utf8(body).unwrap(),
+                });
                 let _ = write!(
                     s,
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
@@ -1386,14 +1465,14 @@ impl PushSink {
                 );
             }
         });
-        PushSink { url, bodies }
+        PushSink { url, seen: all }
     }
 
     /// The `n`th request (waits up to 3 s).
-    fn request(&self, n: usize) -> Value {
+    fn raw(&self, n: usize) -> Seen {
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
-            if let Some(v) = self.bodies.lock().unwrap().get(n) {
+            if let Some(v) = self.seen.lock().unwrap().get(n) {
                 return v.clone();
             }
             assert!(Instant::now() < deadline, "no push request {n} within 3 s");
@@ -1401,8 +1480,13 @@ impl PushSink {
         }
     }
 
+    /// The `n`th request's JSON body (waits up to 3 s).
+    fn request(&self, n: usize) -> Value {
+        serde_json::from_str(&self.raw(n).body).unwrap()
+    }
+
     fn count(&self) -> usize {
-        self.bodies.lock().unwrap().len()
+        self.seen.lock().unwrap().len()
     }
 }
 
@@ -1422,7 +1506,12 @@ fn push_of(env: &Env, device: &str) -> Option<registry::PushReg> {
         .unwrap()
         .into_iter()
         .find(|d| d.id == device)
-        .and_then(|d| d.push)
+        .and_then(|d| d.alerts())
+}
+
+/// Post ntfy alerts for topics on ntfy.sh to `sink` instead.
+fn to_sink(sink: &str) -> Vec<(String, String)> {
+    vec![("https://ntfy.sh/".to_string(), format!("{sink}/"))]
 }
 
 #[test]
@@ -1531,4 +1620,1020 @@ fn push_tokens_are_validated_cleared_and_dropped_when_unregistered() {
         assert!(Instant::now() < deadline, "the unregistered token stayed");
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+#[test]
+fn failures_only_alerts_long_failures_but_not_long_successes() {
+    let ok = r#"{"data":[{"status":"ok","id":"r"}]}"#;
+    let sink = PushSink::start(move |_| ok.to_string());
+    let url = sink.url.clone();
+    let env = start(move |c| c.push_url = url);
+    let (_key, mut ch, welcome) = env.pair(Permission::View);
+    let device = welcome["device"].as_str().unwrap().to_string();
+    put(
+        &mut ch,
+        json!({"t":"push","token":TOKEN,"long_ms":1000,"show_command":false,"failures_only":true}),
+    );
+    put(&mut ch, json!({"t":"ping","n":1}));
+    recv_t(&mut ch, "pong");
+    assert!(push_of(&env, &device).is_some_and(|p| p.failures_only));
+    std::thread::sleep(Duration::from_millis(300));
+    ch.close();
+    std::thread::sleep(Duration::from_millis(300));
+    // long and successful: no alert
+    env.fake.edit(12, |b| b.push(finished(3, "make", 0, 5_000)));
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(sink.count(), 0);
+    // long and failed: an alert
+    env.fake.edit(12, |b| b.push(finished(4, "make", 1, 5_000)));
+    assert_eq!(
+        sink.request(0)[0]["title"],
+        "A command failed on test-host (exit 1)"
+    );
+}
+
+const NTFY: &str = "https://ntfy.sh/rift-x7Kq2mP9vT4wL8nR3sY6hZ";
+
+/// Pair a device, register `push`, wait until it is stored, close the app.
+fn register_then_close(env: &Env, push: Value) -> String {
+    let (_key, mut ch, welcome) = env.pair(Permission::View);
+    let device = welcome["device"].as_str().unwrap().to_string();
+    put(&mut ch, push);
+    put(&mut ch, json!({"t":"ping","n":1}));
+    recv_t(&mut ch, "pong");
+    assert!(
+        push_of(env, &device).is_some(),
+        "the registration was not stored"
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    ch.close();
+    std::thread::sleep(Duration::from_millis(300));
+    device
+}
+
+#[test]
+fn a_device_with_an_ntfy_url_is_alerted_through_ntfy_while_its_app_is_closed() {
+    let ntfy = PushSink::start(|_| "{}".to_string());
+    let to = ntfy.url.clone();
+    let env = start(move |c| c.ntfy_redirect = to_sink(&to));
+    let device = register_then_close(
+        &env,
+        json!({"t":"push","token":null,"ntfy":NTFY,"long_ms":30000,"show_command":false,"failures_only":false}),
+    );
+    assert_eq!(push_of(&env, &device).unwrap().ntfy.as_deref(), Some(NTFY));
+    // a short command: no alert
+    env.fake.edit(12, |b| b.push(finished(3, "ls", 0, 20)));
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(ntfy.count(), 0);
+    // a long failed one: an alert without the command line
+    env.fake
+        .edit(12, |b| b.push(finished(4, "make secret-thing", 2, 31_000)));
+    let host = registry::encode_key(&env.pinned);
+    let r = ntfy.raw(0);
+    assert!(r.line.starts_with("POST "), "{}", r.line);
+    assert_eq!(r.body, "Exit 2");
+    assert_eq!(
+        r.header("Title"),
+        Some("A command failed on test-host (exit 2)")
+    );
+    assert_eq!(r.header("Priority"), Some("high"));
+    assert_eq!(r.header("Tags"), Some("x"));
+    let link = format!("rift://host/{host}/pane/12");
+    assert_eq!(r.header("Click"), Some(link.as_str()));
+    assert!(!r.body.contains("secret") && !r.headers.iter().any(|h| h.contains("secret")));
+    // a long success (once that post ended: one at a time per device)
+    std::thread::sleep(Duration::from_millis(200));
+    env.fake
+        .edit(12, |b| b.push(finished(5, "make", 0, 31_000)));
+    let r = ntfy.raw(1);
+    assert_eq!(r.body, "Finished");
+    assert_eq!(r.header("Title"), Some("A command finished on test-host"));
+    assert_eq!(r.header("Priority"), Some("default"));
+    assert_eq!(r.header("Tags"), Some("white_check_mark"));
+}
+
+#[test]
+fn a_device_with_a_token_and_an_ntfy_url_gets_both_with_the_command_when_asked() {
+    let ok = r#"{"data":[{"status":"ok","id":"r"}]}"#;
+    let expo = PushSink::start(move |_| ok.to_string());
+    let ntfy = PushSink::start(|_| "{}".to_string());
+    let (url, to) = (expo.url.clone(), ntfy.url.clone());
+    let env = start(move |c| {
+        c.push_url = url;
+        c.ntfy_redirect = to_sink(&to);
+    });
+    register_then_close(
+        &env,
+        json!({"t":"push","token":TOKEN,"ntfy":NTFY,"long_ms":1000,"show_command":true,"failures_only":true}),
+    );
+    // failures_only: a long success alerts neither
+    env.fake.edit(12, |b| b.push(finished(3, "make", 0, 5_000)));
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!((expo.count(), ntfy.count()), (0, 0));
+    env.fake
+        .edit(12, |b| b.push(finished(4, "cargo test", 101, 5_000)));
+    assert_eq!(expo.request(0)[0]["body"], "cargo test");
+    let r = ntfy.raw(0);
+    assert_eq!(r.body, "cargo test");
+    assert_eq!(
+        r.header("Title"),
+        Some("A command failed on test-host (exit 101)")
+    );
+}
+
+#[test]
+fn an_unregistered_token_is_dropped_but_the_ntfy_url_next_to_it_stays() {
+    let gone =
+        r#"{"data":[{"status":"error","message":"m","details":{"error":"DeviceNotRegistered"}}]}"#;
+    let expo = PushSink::start(move |_| gone.to_string());
+    let ntfy = PushSink::start(|_| "{}".to_string());
+    let (url, to) = (expo.url.clone(), ntfy.url.clone());
+    let env = start(move |c| {
+        c.push_url = url;
+        c.ntfy_redirect = to_sink(&to);
+    });
+    let device = register_then_close(
+        &env,
+        json!({"t":"push","token":TOKEN,"ntfy":NTFY,"long_ms":1,"show_command":false}),
+    );
+    env.fake.edit(12, |b| b.push(finished(3, "true", 0, 5)));
+    expo.request(0);
+    ntfy.raw(0);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while push_of(&env, &device).is_some_and(|p| p.token.is_some()) {
+        assert!(Instant::now() < deadline, "the unregistered token stayed");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let reg = push_of(&env, &device).expect("the ntfy registration was removed too");
+    assert_eq!(reg.ntfy.as_deref(), Some(NTFY));
+    // still alerted through ntfy (once the gateway re-read devices.json: 100 ms here)
+    std::thread::sleep(Duration::from_millis(400));
+    env.fake.edit(12, |b| b.push(finished(4, "true", 0, 5)));
+    ntfy.raw(1);
+    assert_eq!(expo.count(), 1, "no Expo post without a token");
+}
+
+#[test]
+fn ntfy_urls_are_validated_and_cleared() {
+    let env = start(|_| {});
+    let (_key, mut ch, welcome) = env.pair(Permission::Operate);
+    let device = welcome["device"].as_str().unwrap().to_string();
+    for bad in [
+        "http://ntfy.sh/topic",
+        "https://ntfy.sh/topic?x=1",
+        "https://u:p@ntfy.sh/topic",
+        "https://ntfy.sh/a/b",
+        "https://localhost/topic",
+        "https://127.0.0.1:8080/topic",
+        "https://169.254.169.254/topic",
+    ] {
+        put(
+            &mut ch,
+            json!({"t":"push","token":null,"ntfy":bad,"long_ms":null,"show_command":false}),
+        );
+        assert_eq!(recv_t(&mut ch, "error")["code"], "bad_request", "{bad}");
+    }
+    // a valid URL with a bad token is refused whole
+    put(
+        &mut ch,
+        json!({"t":"push","token":"fcm:x","ntfy":NTFY,"long_ms":null,"show_command":false}),
+    );
+    assert_eq!(recv_t(&mut ch, "error")["code"], "bad_request");
+    assert!(push_of(&env, &device).is_none());
+    put(
+        &mut ch,
+        json!({"t":"push","token":null,"ntfy":NTFY,"long_ms":null,"show_command":false}),
+    );
+    put(&mut ch, json!({"t":"ping","n":1}));
+    recv_t(&mut ch, "pong");
+    let reg = push_of(&env, &device).unwrap();
+    assert_eq!((reg.token, reg.ntfy.as_deref()), (None, Some(NTFY)));
+    // "Notify me" works with ntfy alone (no error)
+    put(&mut ch, json!({"t":"notify","pane":12}));
+    put(&mut ch, json!({"t":"ping","n":2}));
+    assert_eq!(recv(&mut ch)["t"], "pong");
+    // both null: off
+    put(
+        &mut ch,
+        json!({"t":"push","token":null,"ntfy":null,"long_ms":null,"show_command":false}),
+    );
+    put(&mut ch, json!({"t":"ping","n":3}));
+    recv_t(&mut ch, "pong");
+    assert!(push_of(&env, &device).is_none());
+}
+
+#[test]
+fn ntfy_alerts_are_rate_limited_per_device() {
+    let ntfy = PushSink::start(|_| "{}".to_string());
+    let to = ntfy.url.clone();
+    let env = start(move |c| c.ntfy_redirect = to_sink(&to));
+    register_then_close(
+        &env,
+        json!({"t":"push","token":null,"ntfy":NTFY,"long_ms":1,"show_command":false,"failures_only":false}),
+    );
+    for id in 3..3 + 13 {
+        env.fake.edit(12, |b| b.push(finished(id, "true", 0, 5)));
+        let want = (id as usize - 2).min(12);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while ntfy.count() < want {
+            assert!(Instant::now() < deadline, "alert {want} did not come");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // let that post's curl end: one post per device is under way at a time
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    std::thread::sleep(Duration::from_millis(800));
+    assert_eq!(ntfy.count(), 12, "at most 12 a minute");
+}
+
+#[test]
+fn the_pane_a_device_follows_gets_no_ntfy_banner_unless_asked() {
+    let ok = r#"{"data":[{"status":"ok","id":"r"}]}"#;
+    let expo = PushSink::start(move |_| ok.to_string());
+    let ntfy = PushSink::start(|_| "{}".to_string());
+    let (url, to) = (expo.url.clone(), ntfy.url.clone());
+    let env = start(move |c| {
+        c.push_url = url;
+        c.ntfy_redirect = to_sink(&to);
+        c.topology_poll = Duration::from_millis(100);
+    });
+    env.fake.set(13, vec![block(1, "")]);
+    // an ntfy-only device that stays connected, following pane 12
+    let (_key, mut ch, _) = env.pair(Permission::View);
+    put(
+        &mut ch,
+        json!({"t":"push","token":null,"ntfy":NTFY,"long_ms":1,"show_command":false}),
+    );
+    put(&mut ch, json!({"t":"subscribe","pane":12,"after":null}));
+    recv_t(&mut ch, "snapshot");
+    // a device with both, following pane 12 too
+    let (_key2, mut ch2, _) = env.pair(Permission::View);
+    put(
+        &mut ch2,
+        json!({"t":"push","token":TOKEN,"ntfy":NTFY,"long_ms":1,"show_command":false}),
+    );
+    put(&mut ch2, json!({"t":"subscribe","pane":12,"after":null}));
+    recv_t(&mut ch2, "snapshot");
+    std::thread::sleep(Duration::from_millis(300));
+    // the followed pane: no ntfy post for either; the token still gets Expo
+    env.fake.edit(12, |b| b.push(finished(3, "make", 1, 5_000)));
+    expo.request(0);
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(ntfy.count(), 0, "an ntfy banner about the pane on screen");
+    assert_eq!(expo.count(), 1);
+    // another pane: both devices get their ntfy post
+    env.fake.edit(13, |b| b.push(finished(9, "make", 1, 5_000)));
+    ntfy.raw(1);
+    assert!(
+        (0..2).all(|i| ntfy
+            .raw(i)
+            .header("Click")
+            .is_some_and(|c| c.ends_with("/pane/13"))),
+        "only pane 13 went to ntfy"
+    );
+    // asked ("Notify me") about the followed pane: posted all the same
+    put(&mut ch, json!({"t":"notify","pane":12}));
+    put(&mut ch, json!({"t":"ping","n":1}));
+    while recv(&mut ch)["t"] != "pong" {}
+    std::thread::sleep(Duration::from_millis(200));
+    env.fake.edit(12, |b| b.push(finished(4, "make", 0, 5)));
+    let r = ntfy.raw(2);
+    assert!(r.header("Click").is_some_and(|c| c.ends_with("/pane/12")));
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(ntfy.count(), 3, "only the asking device's ntfy post");
+}
+
+#[test]
+fn a_followed_pane_gets_ntfy_alerts_while_the_app_is_not_on_screen() {
+    let ntfy = PushSink::start(|_| "{}".to_string());
+    let to = ntfy.url.clone();
+    let env = start(move |c| c.ntfy_redirect = to_sink(&to));
+    let (_key, mut ch, _) = env.pair(Permission::View);
+    put(
+        &mut ch,
+        json!({"t":"push","token":null,"ntfy":NTFY,"long_ms":1,"show_command":false}),
+    );
+    put(&mut ch, json!({"t":"subscribe","pane":12,"after":null}));
+    recv_t(&mut ch, "snapshot");
+    // backgrounded with the socket still up (iOS suspends the app): alerted
+    put(&mut ch, json!({"t":"visible","on":false}));
+    put(&mut ch, json!({"t":"ping","n":1}));
+    recv_t(&mut ch, "pong");
+    env.fake.edit(12, |b| b.push(finished(3, "make", 1, 5_000)));
+    let r = ntfy.raw(0);
+    assert!(r.header("Click").is_some_and(|c| c.ends_with("/pane/12")));
+    // on screen again: the pane it follows gets no banner
+    put(&mut ch, json!({"t":"visible","on":true}));
+    put(&mut ch, json!({"t":"ping","n":2}));
+    while recv(&mut ch)["t"] != "pong" {}
+    env.fake.edit(12, |b| b.push(finished(4, "make", 1, 5_000)));
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(ntfy.count(), 1, "a banner about the pane on screen");
+}
+
+#[test]
+fn a_hanging_ntfy_server_delays_no_other_device_and_takes_one_post_at_a_time() {
+    use std::io::Read;
+    // a server that accepts and never answers
+    let hang = TcpListener::bind("127.0.0.1:0").unwrap();
+    let hang_url = format!("http://{}", hang.local_addr().unwrap());
+    let held: Arc<Mutex<Vec<std::net::TcpStream>>> = Arc::default();
+    let keep = held.clone();
+    std::thread::spawn(move || {
+        for mut s in hang.incoming().flatten() {
+            let mut buf = [0u8; 4096];
+            let _ = s.set_read_timeout(Some(Duration::from_millis(200)));
+            let _ = s.read(&mut buf);
+            keep.lock().unwrap().push(s);
+        }
+    });
+    let ok = r#"{"data":[{"status":"ok","id":"r"}]}"#;
+    let expo = PushSink::start(move |_| ok.to_string());
+    let ntfy = PushSink::start(|_| "{}".to_string());
+    let (url, to) = (expo.url.clone(), ntfy.url.clone());
+    let env = start(move |c| {
+        c.push_url = url;
+        c.ntfy_redirect = vec![
+            ("https://hang.example/".into(), format!("{hang_url}/")),
+            ("https://ntfy.sh/".into(), format!("{to}/")),
+        ];
+    });
+    register_then_close(
+        &env,
+        json!({"t":"push","token":null,"ntfy":"https://hang.example/rift-a","long_ms":1,"show_command":false}),
+    );
+    register_then_close(
+        &env,
+        json!({"t":"push","token":null,"ntfy":NTFY,"long_ms":1,"show_command":false}),
+    );
+    register_then_close(
+        &env,
+        json!({"t":"push","token":TOKEN,"ntfy":null,"long_ms":1,"show_command":false}),
+    );
+    let t0 = Instant::now();
+    env.fake.edit(12, |b| b.push(finished(3, "true", 0, 5)));
+    // the others arrive while the first device's server hangs (curl waits 15 s)
+    ntfy.raw(0);
+    expo.request(0);
+    assert!(t0.elapsed() < Duration::from_secs(3), "{:?}", t0.elapsed());
+    // the hanging device's next alert is dropped, not queued behind the first
+    env.fake.edit(12, |b| b.push(finished(4, "true", 0, 5)));
+    ntfy.raw(1);
+    expo.request(1);
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        held.lock().unwrap().len(),
+        1,
+        "one post at a time per device"
+    );
+}
+
+#[test]
+fn a_silent_connection_stops_counting_as_following_its_pane() {
+    let ntfy = PushSink::start(|_| "{}".to_string());
+    let to = ntfy.url.clone();
+    let env = start(move |c| {
+        c.ntfy_redirect = to_sink(&to);
+        c.follow_fresh = Duration::from_millis(500);
+    });
+    let (_key, mut ch, _) = env.pair(Permission::View);
+    put(
+        &mut ch,
+        json!({"t":"push","token":null,"ntfy":NTFY,"long_ms":1,"show_command":false}),
+    );
+    put(&mut ch, json!({"t":"subscribe","pane":12,"after":null}));
+    recv_t(&mut ch, "snapshot");
+    // longer than follow_fresh after connecting, then just heard from:
+    // following, no banner
+    std::thread::sleep(Duration::from_millis(700));
+    put(&mut ch, json!({"t":"ping","n":1}));
+    recv_t(&mut ch, "pong");
+    env.fake.edit(12, |b| b.push(finished(3, "make", 1, 5_000)));
+    std::thread::sleep(Duration::from_millis(250));
+    assert_eq!(ntfy.count(), 0);
+    // silent for longer than follow_fresh (a dropped network): alerted again
+    std::thread::sleep(Duration::from_millis(500));
+    env.fake.edit(12, |b| b.push(finished(4, "make", 1, 5_000)));
+    let r = ntfy.raw(0);
+    assert!(r.header("Click").is_some_and(|c| c.ends_with("/pane/12")));
+}
+
+// --- Phase 3: text ------------------------------------------------------------
+
+#[test]
+fn text_reaches_the_source_or_is_busy_at_a_prompt() {
+    let env = start(|_| {});
+    let (_k, mut ch, _) = env.pair(Permission::Operate);
+    put(
+        &mut ch,
+        json!({"t":"text","id":"x1","pane":12,"text":":wq ünïcode"}),
+    );
+    assert_eq!(
+        recv_t(&mut ch, "ack"),
+        json!({"t":"ack","id":"x1","ok":true})
+    );
+    assert_eq!(
+        env.fake.inputs(),
+        [(
+            12,
+            "Test Phone".to_string(),
+            Input::Text(":wq ünïcode".into())
+        )]
+    );
+    // the window answers busy for a pane at its prompt: the message says so
+    env.fake.fail_input(Some(InputError::Busy));
+    put(&mut ch, json!({"t":"text","id":"x2","pane":12,"text":"ls"}));
+    let v = recv_t(&mut ch, "ack");
+    assert_eq!(ack(&v), (false, "busy"));
+    assert!(
+        v["message"].as_str().unwrap().contains("at its prompt"),
+        "{v}"
+    );
+    env.fake.fail_input(None);
+    put(&mut ch, json!({"t":"text","id":"x3","pane":99,"text":"ls"}));
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (false, "no_pane"));
+}
+
+#[test]
+fn text_with_control_characters_or_over_a_kib_is_rejected() {
+    let env = start(|_| {});
+    let (_k, mut ch, _) = env.pair(Permission::Operate);
+    for (text, want) in [
+        ("a\nb".to_string(), "bad_request"),
+        ("a\rb".into(), "bad_request"),
+        ("tab\there".into(), "bad_request"),
+        ("\u{1b}[2J".into(), "bad_request"),
+        ("del\u{7f}".into(), "bad_request"),
+        ("c1\u{85}".into(), "bad_request"),
+        ("csi\u{9b}2J".into(), "bad_request"),
+        ("nul\0".into(), "bad_request"),
+        (String::new(), "bad_request"),
+        ("x".repeat(1025), "too_large"),
+    ] {
+        put(&mut ch, json!({"t":"text","id":"x","pane":12,"text":text}));
+        assert_eq!(ack(&recv_t(&mut ch, "ack")), (false, want), "{text:?}");
+    }
+    assert!(env.fake.inputs().is_empty());
+    // 1 KiB exactly, and spaces only, are text
+    put(
+        &mut ch,
+        json!({"t":"text","id":"ok","pane":12,"text":"é".repeat(512)}),
+    );
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (true, ""));
+    put(&mut ch, json!({"t":"text","id":"sp","pane":12,"text":"  "}));
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (true, ""));
+    assert_eq!(env.fake.inputs().len(), 2);
+}
+
+#[test]
+fn text_counts_against_the_keys_rate() {
+    let env = start(|_| {});
+    let (_k, mut ch, _) = env.pair(Permission::Operate);
+    let mut got = Vec::new();
+    for i in 0..21 {
+        let msg = if i % 2 == 0 {
+            json!({"t":"keys","id":format!("{i}"),"pane":12,"keys":["up"]})
+        } else {
+            json!({"t":"text","id":format!("{i}"),"pane":12,"text":"j"})
+        };
+        put(&mut ch, msg);
+        got.push(ack(&recv_t(&mut ch, "ack")).1.to_string());
+    }
+    assert_eq!(got[..20], vec![String::new(); 20]);
+    assert_eq!(got[20], "rate");
+}
+
+// --- Phase 3: screen ------------------------------------------------------------
+
+/// A 20-column screen of plain rows.
+fn screen(rows: &[&str], alt: bool, cursor: Option<[u16; 2]>) -> Screen {
+    Screen {
+        cols: 20,
+        rows: rows.len() as u16,
+        alt,
+        cursor,
+        lines: rows
+            .iter()
+            .map(|r| {
+                if r.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![Run::plain(*r)]
+                }
+            })
+            .collect(),
+    }
+}
+
+impl Fake {
+    fn set_screen(&self, pane: u64, s: Screen) {
+        self.0.lock().unwrap().screens.insert(pane, s);
+    }
+    fn edit_screen(&self, pane: u64, f: impl FnOnce(&mut Screen)) {
+        f(self.0.lock().unwrap().screens.get_mut(&pane).unwrap());
+    }
+    fn screen_reads(&self) -> Vec<(u64, bool)> {
+        self.0.lock().unwrap().screen_reads.clone()
+    }
+}
+
+/// Every message within `ms`.
+fn drain(ch: &mut Ch, ms: u64) -> Vec<Value> {
+    let until = Instant::now() + Duration::from_millis(ms);
+    let mut out = Vec::new();
+    while Instant::now() < until {
+        if let Recv::Msg(m) = ch.recv() {
+            out.push(serde_json::from_slice(&m).unwrap());
+        }
+    }
+    out
+}
+
+fn screens_in(msgs: &[Value]) -> Vec<&Value> {
+    msgs.iter()
+        .filter(|v| v["t"] == "screen" || v["t"] == "screen_end")
+        .collect()
+}
+
+/// The next `screen` or `screen_end` (updates, topology, done skipped).
+fn recv_screen(ch: &mut Ch) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        assert!(Instant::now() < deadline, "no screen within 3 s");
+        let v = recv(ch);
+        if v["t"] == "screen" || v["t"] == "screen_end" {
+            return v;
+        }
+    }
+}
+
+#[test]
+fn screens_are_off_until_asked_for() {
+    let env = start(|_| {});
+    env.fake
+        .set_screen(12, screen(&["vim", "~"], true, Some([0, 1])));
+    let (_k, mut ch, _) = env.pair(Permission::View);
+    put(&mut ch, json!({"t":"subscribe","pane":12,"after":null}));
+    recv_t(&mut ch, "snapshot");
+    env.fake.edit_screen(12, |s| s.cursor = Some([1, 0]));
+    assert!(screens_in(&drain(&mut ch, 300)).is_empty());
+    assert!(env.fake.screen_reads().is_empty(), "read without a mode");
+    // only the subscribed pane
+    put(&mut ch, json!({"t":"screen","pane":13,"mode":"auto"}));
+    assert_eq!(code(&recv_t(&mut ch, "error")), ("error", "bad_request"));
+    put(&mut ch, json!({"t":"unsubscribe"}));
+    put(&mut ch, json!({"t":"screen","pane":12,"mode":"on"}));
+    assert_eq!(code(&recv_t(&mut ch, "error")), ("error", "bad_request"));
+    assert!(screens_in(&drain(&mut ch, 200)).is_empty());
+}
+
+#[test]
+fn auto_sends_a_full_screen_then_only_what_changed_and_ends_off_alt() {
+    let env = start(|_| {});
+    env.fake
+        .set_screen(12, screen(&["top", "  PID", "", ":"], false, Some([3, 1])));
+    let (_k, mut ch, _) = env.pair(Permission::View);
+    put(&mut ch, json!({"t":"subscribe","pane":12,"after":null}));
+    recv_t(&mut ch, "snapshot");
+    put(&mut ch, json!({"t":"screen","pane":12,"mode":"auto"}));
+    // not on the alternate screen: nothing, and the read is not forced
+    assert!(screens_in(&drain(&mut ch, 300)).is_empty());
+    assert!(env.fake.screen_reads().iter().all(|&(p, f)| p == 12 && !f));
+    env.fake.edit_screen(12, |s| s.alt = true);
+    assert_eq!(
+        recv_screen(&mut ch),
+        json!({"t":"screen","pane":12,"cols":20,"rows":4,"alt":true,"cursor":[3,1],"full":true,
+               "lines":[[0,[["top",null,null,0]]],[1,[["  PID",null,null,0]]],[2,[]],[3,[[":",null,null,0]]]]})
+    );
+    // unchanged: nothing more
+    assert!(screens_in(&drain(&mut ch, 300)).is_empty());
+    // one row changes (styled): only that row
+    env.fake.edit_screen(12, |s| {
+        s.lines[1] = vec![
+            Run::plain("  PID"),
+            Run {
+                text: " CPU%".into(),
+                fg: Some("1e1e1e".into()),
+                bg: Some("e5c07b".into()),
+                flags: 1,
+            },
+        ]
+    });
+    assert_eq!(
+        recv_screen(&mut ch),
+        json!({"t":"screen","pane":12,"cols":20,"rows":4,"alt":true,"cursor":[3,1],"full":false,
+               "lines":[[1,[["  PID",null,null,0],[" CPU%","1e1e1e","e5c07b",1]]]]})
+    );
+    // the cursor alone moves: a screen without lines; hidden: null
+    env.fake.edit_screen(12, |s| s.cursor = Some([0, 2]));
+    let v = recv_screen(&mut ch);
+    assert_eq!(
+        (&v["full"], &v["cursor"], &v["lines"]),
+        (&json!(false), &json!([0, 2]), &json!([]))
+    );
+    env.fake.edit_screen(12, |s| s.cursor = None);
+    assert_eq!(recv_screen(&mut ch)["cursor"], Value::Null);
+    // a resize: full again
+    env.fake.edit_screen(12, |s| {
+        s.rows = 2;
+        s.lines.truncate(2);
+    });
+    let v = recv_screen(&mut ch);
+    assert_eq!(
+        (&v["full"], v["lines"].as_array().unwrap().len()),
+        (&json!(true), 2)
+    );
+    // leaving the alternate screen ends them
+    env.fake.edit_screen(12, |s| s.alt = false);
+    assert_eq!(recv_screen(&mut ch), json!({"t":"screen_end","pane":12}));
+    assert!(screens_in(&drain(&mut ch, 300)).is_empty());
+    // and coming back starts over with a full screen
+    env.fake.edit_screen(12, |s| s.alt = true);
+    assert_eq!(recv_screen(&mut ch)["full"], true);
+}
+
+#[test]
+fn on_sends_the_primary_screen_and_off_ends_it() {
+    let env = start(|_| {});
+    env.fake
+        .set_screen(12, screen(&["$ ssh box", "box$ "], false, Some([1, 5])));
+    let (_k, mut ch, _) = env.pair(Permission::View);
+    put(&mut ch, json!({"t":"subscribe","pane":12,"after":null}));
+    recv_t(&mut ch, "snapshot");
+    put(&mut ch, json!({"t":"screen","pane":12,"mode":"on"}));
+    let v = recv_screen(&mut ch);
+    assert_eq!((&v["alt"], &v["full"]), (&json!(false), &json!(true)));
+    assert!(env.fake.screen_reads().contains(&(12, true)), "forced");
+    put(&mut ch, json!({"t":"screen","pane":12,"mode":"off"}));
+    assert_eq!(recv_screen(&mut ch), json!({"t":"screen_end","pane":12}));
+    env.fake
+        .edit_screen(12, |s| s.lines[1] = vec![Run::plain("box$ ls")]);
+    assert!(screens_in(&drain(&mut ch, 300)).is_empty());
+    // `auto`/`on` again: a full screen, even when nothing changed since
+    put(&mut ch, json!({"t":"screen","pane":12,"mode":"on"}));
+    assert_eq!(recv_screen(&mut ch)["full"], true);
+    // another connection in `auto` on the same pane: the forced read of the
+    // primary screen is not for it
+    let (_k2, mut other, _) = env.pair(Permission::View);
+    put(&mut other, json!({"t":"subscribe","pane":12,"after":null}));
+    recv_t(&mut other, "snapshot");
+    put(&mut other, json!({"t":"screen","pane":12,"mode":"auto"}));
+    env.fake
+        .edit_screen(12, |s| s.lines[1] = vec![Run::plain("box$ ls -l")]);
+    assert_eq!(recv_screen(&mut ch)["lines"][0][0], 1);
+    assert!(screens_in(&drain(&mut other, 300)).is_empty());
+}
+
+#[test]
+fn a_new_subscription_resets_the_screen_mode_silently() {
+    let env = start(|_| {});
+    env.fake.set(13, vec![block(1, "x\n")]);
+    env.fake.set_screen(12, screen(&["htop"], true, None));
+    env.fake.set_screen(13, screen(&["less"], true, None));
+    let (_k, mut ch, _) = env.pair(Permission::View);
+    put(&mut ch, json!({"t":"subscribe","pane":12,"after":null}));
+    recv_t(&mut ch, "snapshot");
+    put(&mut ch, json!({"t":"screen","pane":12,"mode":"auto"}));
+    assert_eq!(recv_screen(&mut ch)["full"], true);
+    // re-subscribing (the same pane or another) stops them without screen_end
+    for pane in [12, 13] {
+        put(&mut ch, json!({"t":"subscribe","pane":pane,"after":null}));
+        let msgs = drain(&mut ch, 400);
+        assert!(screens_in(&msgs).is_empty(), "pane {pane}: {msgs:?}");
+        assert!(msgs.iter().any(|v| v["t"] == "snapshot"));
+    }
+    env.fake
+        .edit_screen(13, |s| s.lines[0] = vec![Run::plain("less 2")]);
+    assert!(screens_in(&drain(&mut ch, 300)).is_empty());
+    // the connections are independent: another client's mode is its own
+    let (_k2, mut other, _) = env.pair(Permission::View);
+    put(&mut other, json!({"t":"subscribe","pane":13,"after":null}));
+    recv_t(&mut other, "snapshot");
+    put(&mut other, json!({"t":"screen","pane":13,"mode":"auto"}));
+    assert_eq!(recv_screen(&mut other)["full"], true);
+    assert!(screens_in(&drain(&mut ch, 300)).is_empty());
+}
+
+#[test]
+fn a_full_screen_over_a_mib_goes_out_without_styles() {
+    let env = start(|_| {});
+    // 300 × 120 runs, each styled on its own: over 1 MiB of JSON
+    let row: Vec<Run> = (0..300)
+        .map(|i| Run {
+            text: "€€€".into(),
+            fg: Some(format!("{:06x}", i)),
+            bg: Some("000000".into()),
+            flags: 31,
+        })
+        .collect();
+    env.fake.set_screen(
+        12,
+        Screen {
+            cols: 300,
+            rows: 120,
+            alt: true,
+            cursor: Some([0, 0]),
+            lines: vec![row; 120],
+        },
+    );
+    let (_k, mut ch, _) = env.pair(Permission::View);
+    put(&mut ch, json!({"t":"subscribe","pane":12,"after":null}));
+    recv_t(&mut ch, "snapshot");
+    put(&mut ch, json!({"t":"screen","pane":12,"mode":"auto"}));
+    let v = recv_screen(&mut ch);
+    assert_eq!(v["full"], true);
+    let lines = v["lines"].as_array().unwrap();
+    assert_eq!(lines.len(), 120);
+    assert_eq!(lines[7], json!([7, [["€€€".repeat(300), null, null, 0]]]));
+    assert!(v.to_string().len() <= rift_remote::MAX_GATEWAY_MESSAGE);
+    // a screen larger than the protocol's is cut to its top-left 300 × 120
+    env.fake.set_screen(
+        12,
+        Screen {
+            cols: 400,
+            rows: 200,
+            alt: true,
+            cursor: Some([150, 2]),
+            lines: vec![vec![Run::plain("x")]; 200],
+        },
+    );
+    let v = recv_screen(&mut ch);
+    assert_eq!(
+        (&v["cols"], &v["rows"], &v["cursor"]),
+        (&json!(300), &json!(120), &Value::Null)
+    );
+    assert_eq!(v["lines"].as_array().unwrap().len(), 120);
+}
+
+#[test]
+fn after_an_unstyled_screen_diffs_restyle_only_the_rows_that_differ() {
+    let env = start(|_| {});
+    let styled = |c: &str| Run {
+        text: "€€".into(),
+        fg: Some(c.into()),
+        bg: Some("000000".into()),
+        flags: 1,
+    };
+    // over 1 MiB styled: it goes out unstyled
+    let row: Vec<Run> = (0..300).map(|i| styled(&format!("{i:06x}"))).collect();
+    env.fake.set_screen(
+        12,
+        Screen {
+            cols: 300,
+            rows: 120,
+            alt: true,
+            cursor: None,
+            lines: vec![row; 120],
+        },
+    );
+    let (_k, mut ch, _) = env.pair(Permission::View);
+    put(&mut ch, json!({"t":"subscribe","pane":12,"after":null}));
+    recv_t(&mut ch, "snapshot");
+    put(&mut ch, json!({"t":"screen","pane":12,"mode":"auto"}));
+    let v = recv_screen(&mut ch);
+    assert_eq!(v["full"], true);
+    assert_eq!(
+        v["lines"][3],
+        json!([3, [["€€".repeat(300), null, null, 0]]])
+    );
+    assert!(screens_in(&drain(&mut ch, 300)).is_empty());
+    // the program redraws: one row styled, the others as the client has
+    // them (unstyled): only that row goes out, with its style
+    env.fake.edit_screen(12, |s| {
+        for l in &mut s.lines {
+            *l = vec![Run::plain("€€".repeat(300))];
+        }
+        s.lines[5] = vec![styled("e5c07b")];
+    });
+    let v = recv_screen(&mut ch);
+    assert_eq!(v["full"], false);
+    assert_eq!(v["lines"], json!([[5, [["€€", "e5c07b", "000000", 1]]]]));
+}
+
+#[test]
+fn on_to_auto_on_the_primary_screen_ends_it() {
+    let env = start(|_| {});
+    env.fake.set_screen(12, screen(&["$ ls"], false, None));
+    let (_k, mut ch, _) = env.pair(Permission::View);
+    put(&mut ch, json!({"t":"subscribe","pane":12,"after":null}));
+    recv_t(&mut ch, "snapshot");
+    put(&mut ch, json!({"t":"screen","pane":12,"mode":"on"}));
+    assert_eq!(recv_screen(&mut ch)["alt"], false);
+    // `auto` has no screen off the alternate one: the shown one ends
+    put(&mut ch, json!({"t":"screen","pane":12,"mode":"auto"}));
+    assert_eq!(recv_screen(&mut ch), json!({"t":"screen_end","pane":12}));
+    assert!(screens_in(&drain(&mut ch, 300)).is_empty());
+}
+
+#[test]
+fn a_slow_client_gets_the_newest_screen_not_a_queue_of_them() {
+    let env = start(|_| {});
+    // about 0.8 MiB of styled runs, every one recoloured by each change
+    let screen_n = |n: usize| Screen {
+        cols: 300,
+        rows: 120,
+        alt: true,
+        cursor: Some([0, 0]),
+        lines: (0..120)
+            .map(|r| {
+                (0..300)
+                    .map(|c| Run {
+                        text: "a".into(),
+                        fg: Some(format!("{:06x}", (n * 7919 + r * 300 + c) % 0xff_ffff)),
+                        bg: None,
+                        flags: 0,
+                    })
+                    .collect()
+            })
+            .collect(),
+    };
+    env.fake.set_screen(12, screen_n(0));
+    let (_k, mut ch, _) = env.pair(Permission::View);
+    put(&mut ch, json!({"t":"subscribe","pane":12,"after":null}));
+    recv_t(&mut ch, "snapshot");
+    put(&mut ch, json!({"t":"screen","pane":12,"mode":"auto"}));
+    let first = recv_screen(&mut ch);
+    assert_eq!(first["full"], true);
+    let mut rows: Vec<Value> = first["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l[1].clone())
+        .collect();
+    // 60 changes over 3 s while the client reads nothing
+    const CHANGES: usize = 60;
+    let fake = env.fake.clone();
+    let writer = std::thread::spawn(move || {
+        for n in 1..=CHANGES {
+            fake.set_screen(12, screen_n(n));
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    });
+    std::thread::sleep(Duration::from_secs(3));
+    writer.join().unwrap();
+    // then it catches up: a few frames, each a diff against what it has,
+    // ending at the newest screen
+    let want: Vec<Value> = screen_n(CHANGES)
+        .lines
+        .iter()
+        .map(|l| serde_json::to_value(l).unwrap())
+        .collect();
+    let mut frames = 0;
+    while rows != want {
+        let v = recv_screen(&mut ch);
+        assert_eq!(v["t"], "screen", "{v}");
+        frames += 1;
+        for l in v["lines"].as_array().unwrap() {
+            rows[l[0].as_u64().unwrap() as usize] = l[1].clone();
+        }
+    }
+    assert!(
+        frames < CHANGES / 2,
+        "{frames} frames for {CHANGES} changes"
+    );
+    // still connected
+    put(&mut ch, json!({"t":"ping","n":1}));
+    assert_eq!(recv_t(&mut ch, "pong")["n"], 1);
+}
+
+// --- Phase 3: output paging -------------------------------------------------------
+
+impl Fake {
+    fn set_output(&self, pane: u64, block: u64, gone: u64, lines: Vec<String>) {
+        self.0
+            .lock()
+            .unwrap()
+            .outputs
+            .insert((pane, block), (gone, lines));
+    }
+}
+
+#[test]
+fn output_pages_by_lines_and_reports_gone_ones() {
+    let env = start(|_| {});
+    env.fake
+        .set_output(12, 2, 0, (0..40).map(|i| format!("line {i}\n")).collect());
+    let (_k, mut ch, _) = env.pair(Permission::View);
+    put(
+        &mut ch,
+        json!({"t":"output","id":"o1","pane":12,"block":2,"from":0,"limit":3}),
+    );
+    assert_eq!(
+        recv_t(&mut ch, "output"),
+        json!({"t":"output","id":"o1","pane":12,"block":2,"from":0,
+               "text":"line 0\nline 1\nline 2\n","total":40})
+    );
+    put(
+        &mut ch,
+        json!({"t":"output","id":"o2","pane":12,"block":2,"from":38,"limit":500}),
+    );
+    let v = recv_t(&mut ch, "output");
+    assert_eq!(
+        (&v["from"], &v["text"]),
+        (&json!(38), &json!("line 38\nline 39\n"))
+    );
+    // at or past the end: empty
+    put(
+        &mut ch,
+        json!({"t":"output","id":"o3","pane":12,"block":2,"from":40,"limit":10}),
+    );
+    let v = recv_t(&mut ch, "output");
+    assert_eq!((&v["text"], &v["total"]), (&json!(""), &json!(40)));
+    // lines gone from scrollback: the answer starts at the first held one
+    env.fake
+        .set_output(12, 2, 25, (25..40).map(|i| format!("line {i}\n")).collect());
+    put(
+        &mut ch,
+        json!({"t":"output","id":"o4","pane":12,"block":2,"from":0,"limit":2}),
+    );
+    let v = recv_t(&mut ch, "output");
+    assert_eq!(
+        (&v["from"], &v["text"], &v["total"]),
+        (&json!(25), &json!("line 25\nline 26\n"), &json!(40))
+    );
+    // unknown block, unknown pane, a limit out of 1 … 500
+    for (msg, want) in [
+        (
+            json!({"t":"output","id":"b","pane":12,"block":99,"from":0,"limit":5}),
+            "no_block",
+        ),
+        (
+            json!({"t":"output","id":"p","pane":77,"block":2,"from":0,"limit":5}),
+            "no_pane",
+        ),
+        (
+            json!({"t":"output","id":"z","pane":12,"block":2,"from":0,"limit":0}),
+            "bad_request",
+        ),
+        (
+            json!({"t":"output","id":"l","pane":12,"block":2,"from":0,"limit":501}),
+            "bad_request",
+        ),
+    ] {
+        put(&mut ch, msg.clone());
+        let v = recv_t(&mut ch, "ack");
+        assert_eq!((ack(&v), &v["id"]), ((false, want), &msg["id"]), "{msg}");
+    }
+}
+
+#[test]
+fn output_pages_are_bounded_to_64_kib_at_a_line_end() {
+    let env = start(|_| {});
+    let line = format!("{}\n", "x".repeat(999));
+    env.fake.set_output(12, 2, 0, vec![line.clone(); 200]);
+    env.fake
+        .set_output(12, 3, 0, vec!["é".repeat(40_000), "tail\n".into()]);
+    let (_k, mut ch, _) = env.pair(Permission::View);
+    put(
+        &mut ch,
+        json!({"t":"output","id":"o","pane":12,"block":2,"from":0,"limit":500}),
+    );
+    let v = recv_t(&mut ch, "output");
+    let text = v["text"].as_str().unwrap();
+    assert_eq!(text.len(), 65 * 1000);
+    assert!(text.ends_with('\n'));
+    assert_eq!(v["total"], 200);
+    // one line longer than 64 KiB: its first 64 KiB
+    put(
+        &mut ch,
+        json!({"t":"output","id":"o","pane":12,"block":3,"from":0,"limit":500}),
+    );
+    let text = recv_t(&mut ch, "output")["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        text.len() <= rift_remote::MAX_OUTPUT_BYTES
+            && text.len() > rift_remote::MAX_OUTPUT_BYTES - 2
+    );
+    assert!(text.chars().all(|c| c == 'é'));
+}
+
+#[test]
+fn output_is_rate_limited_per_connection() {
+    let env = start(|_| {});
+    env.fake.set_output(12, 2, 0, vec!["a\n".into()]);
+    let (_k, mut ch, _) = env.pair(Permission::View);
+    let t = Instant::now();
+    let mut got = Vec::new();
+    for i in 0..11 {
+        put(
+            &mut ch,
+            json!({"t":"output","id":format!("o{i}"),"pane":12,"block":2,"from":0,"limit":1}),
+        );
+        let v = loop {
+            let v = recv(&mut ch);
+            if v["t"] != "topology" {
+                break v;
+            }
+        };
+        got.push(v["t"].as_str().unwrap().to_string() + v["error"].as_str().unwrap_or(""));
+    }
+    assert!(
+        t.elapsed() < Duration::from_millis(900),
+        "{:?}",
+        t.elapsed()
+    );
+    assert_eq!(got[..10], vec!["output".to_string(); 10]);
+    assert_eq!(got[10], "ackrate");
 }

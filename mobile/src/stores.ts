@@ -10,6 +10,8 @@
 
 import { fromBase64Url, toBase64Url } from "./noise/bytes";
 import { keyPairFromPrivate, type KeyPair, type RandomBytes } from "./noise/noise";
+import { DEFAULT_CONTROL_KEYS, validControlKeys } from "./controlKeys";
+import { isNtfyTopic, normalizeNtfyServer, NTFY_SERVER } from "./notify";
 import { isAddress, normalizeRelayUrl } from "./pairing";
 import type { Permission } from "./protocol/types";
 
@@ -74,6 +76,8 @@ export interface HostRecord {
   relay?: string;
   /** The path that last reached `welcome`; the next connection starts there. Absent: LAN. */
   via?: "lan" | "relay";
+  /** false: no finish notifications from this computer except "Notify me". Absent: on. */
+  notifications?: boolean;
 }
 
 const HOSTS_INDEX = "rift.hosts";
@@ -92,7 +96,8 @@ export function isHostRecord(v: unknown): v is HostRecord {
     (h.permission === "operate" || h.permission === "view") &&
     typeof h.pairedAt === "string" &&
     (h.relay === undefined || (typeof h.relay === "string" && normalizeRelayUrl(h.relay) === h.relay)) &&
-    (h.via === undefined || h.via === "lan" || (h.via === "relay" && h.relay !== undefined))
+    (h.via === undefined || h.via === "lan" || (h.via === "relay" && h.relay !== undefined)) &&
+    (h.notifications === undefined || typeof h.notifications === "boolean")
   );
 }
 
@@ -147,23 +152,46 @@ export interface Settings {
   /** null: the system device name. */
   deviceName: string | null;
   confirmEveryCommand: boolean;
-  /** Notify when a command finishes or fails. */
-  notifyDone: boolean;
+  /** Which finished commands notify (besides "Notify me"): none, failed ones, or all. */
+  notifyPolicy: NotifyPolicy;
+  /** Only commands that ran at least this long notify (one of NOTIFY_AFTER_CHOICES). */
+  notifyAfterMs: number;
   showCommandInNotification: boolean;
   /** Face ID / fingerprint (or the device passcode) on launch and after 5 minutes away. */
   biometricLock: boolean;
   /** With the lock and "Confirm every command" on: authenticate before Run. */
   authBeforeRun: boolean;
+  /** The control-key row, in order (ids from CONTROL_KEYS). */
+  controlKeys: string[];
+  /** The ntfy server alerts go through (`https://<host>[:port]`; NTFY_SERVER unless self-hosted). */
+  ntfyServer: string;
+  /** "Alerts through ntfy". */
+  ntfyEnabled: boolean;
+  /**
+   * The ntfy topic alerts go to (null: none made yet). Kept while ntfy is off, so turning it on
+   * again reuses the topic the ntfy app is already subscribed to.
+   */
+  ntfyTopic: string | null;
 }
+
+export type NotifyPolicy = "off" | "failures" | "all";
+
+/** The "Notify after" choices: 10 s, 30 s, 1 min, 5 min. */
+export const NOTIFY_AFTER_CHOICES: readonly number[] = [10_000, 30_000, 60_000, 300_000];
 
 export const DEFAULT_SETTINGS: Settings = {
   deviceName: null,
   confirmEveryCommand: true,
-  notifyDone: false,
+  notifyPolicy: "off",
+  notifyAfterMs: 30_000,
   showCommandInNotification: false,
   biometricLock: false,
   // Takes effect only with the lock on, so turning the lock on also asks before running.
   authBeforeRun: true,
+  controlKeys: [...DEFAULT_CONTROL_KEYS],
+  ntfyServer: NTFY_SERVER,
+  ntfyEnabled: false,
+  ntfyTopic: null,
 };
 
 const SETTINGS_KEY = "rift.settings";
@@ -178,10 +206,30 @@ export async function loadSettings(kv: KeyValueStore): Promise<Settings> {
     return {
       deviceName: typeof v.deviceName === "string" && v.deviceName.trim() !== "" ? v.deviceName.slice(0, MAX_DEVICE_NAME) : null,
       confirmEveryCommand: bool("confirmEveryCommand"),
-      notifyDone: bool("notifyDone"),
+      // Before Phase 3 a boolean `notifyDone` (long commands, failed or not).
+      notifyPolicy:
+        v.notifyPolicy === "off" || v.notifyPolicy === "failures" || v.notifyPolicy === "all"
+          ? v.notifyPolicy
+          : typeof v.notifyDone === "boolean"
+            ? v.notifyDone
+              ? "all"
+              : "off"
+            : DEFAULT_SETTINGS.notifyPolicy,
+      notifyAfterMs:
+        typeof v.notifyAfterMs === "number" && NOTIFY_AFTER_CHOICES.includes(v.notifyAfterMs)
+          ? v.notifyAfterMs
+          : DEFAULT_SETTINGS.notifyAfterMs,
       showCommandInNotification: bool("showCommandInNotification"),
       biometricLock: bool("biometricLock"),
       authBeforeRun: bool("authBeforeRun"),
+      controlKeys: validControlKeys(v.controlKeys),
+      // Absent before ntfy: off, on ntfy.sh.
+      ntfyServer:
+        (typeof v.ntfyServer === "string" && normalizeNtfyServer(v.ntfyServer) === v.ntfyServer && v.ntfyServer) ||
+        DEFAULT_SETTINGS.ntfyServer,
+      // on only with a usable topic (else the switch would show on with nothing under it)
+      ntfyEnabled: bool("ntfyEnabled") && typeof v.ntfyTopic === "string" && isNtfyTopic(v.ntfyTopic),
+      ntfyTopic: typeof v.ntfyTopic === "string" && isNtfyTopic(v.ntfyTopic) ? v.ntfyTopic : null,
     };
   } catch {
     return DEFAULT_SETTINGS;

@@ -27,7 +27,7 @@ export default defineConfig(
     files: ["plugins/**/*.js"],
     languageOptions: {
       sourceType: "commonjs",
-      globals: { require: "readonly", module: "writable" },
+      globals: { require: "readonly", module: "writable", process: "readonly" },
     },
     rules: { "@typescript-eslint/no-require-imports": "off" },
   },

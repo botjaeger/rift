@@ -2,15 +2,16 @@
 //! (`rift_remote`, protocol v2), fed by the windows' control sockets
 //! (`control.rs`), and its pairing / device commands.
 //!
-//! Topology is each window's `status`; blocks are the owning window's
-//! `blocks` request; `run` / `keys` from operate devices become the owning
-//! window's `remote-input` request, which the window accepts only while
+//! Topology is each window's `status`; blocks, screens and output pages are
+//! the owning window's `blocks`, `screen` and `output` requests; `run` /
+//! `keys` / `text` from operate devices become the owning window's
+//! `remote-input` request, which the window accepts only while
 //! `remote_access` is on.
 
 use crate::control::{self, Request, Response};
 use rift_remote::protocol::{Pane, Tab, Window};
 use rift_remote::registry::{self, Permission};
-use rift_remote::{Input, InputError, Page, Source, SourceError};
+use rift_remote::{Input, InputError, OutputError, OutputPage, Page, Screen, Source, SourceError};
 use std::collections::HashMap;
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
@@ -55,10 +56,39 @@ pub struct ControlSource {
     owner: Mutex<HashMap<u64, PathBuf>>,
     /// `remote-status` notices: (one is being sent, another is due after it).
     notifying: std::sync::Arc<Mutex<(bool, bool)>>,
+    /// The last screen read of each pane, asked for again with its
+    /// generation: an unchanged pane's window builds none.
+    screens: Mutex<HashMap<u64, Held>>,
+}
+
+/// A pane's last screen read ([`ControlSource::screens`]).
+struct Held {
+    /// The window's socket that answered.
+    owner: PathBuf,
+    force: bool,
+    generation: u64,
+    screen: Option<Screen>,
 }
 
 /// How long one window may take to answer `remote-status`.
 const NOTICE_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Bits of a phone-visible pane id that hold the window's own pane id; the
+/// window's pid is above them. Every window numbers its panes from 1, so
+/// the window's id alone would name a pane of each window at once. Pids
+/// fit 22 bits (Linux `pid_max`), so ids stay below 2^46, exact in the
+/// app's JavaScript numbers.
+const LOCAL_BITS: u32 = 24;
+
+/// The pane id phones see for pane `local` of the window `pid`.
+fn remote_pane(pid: u32, local: u64) -> u64 {
+    (u64::from(pid) << LOCAL_BITS) | (local & ((1 << LOCAL_BITS) - 1))
+}
+
+/// The window's own id of the phone-visible pane `pane`.
+fn local_pane(pane: u64) -> u64 {
+    pane & ((1 << LOCAL_BITS) - 1)
+}
 
 impl ControlSource {
     fn owner_of(&self, pane: u64) -> Option<PathBuf> {
@@ -120,10 +150,12 @@ impl Source for ControlSource {
                     panes: t
                         .panes
                         .into_iter()
+                        .filter(|p| p.id < 1 << LOCAL_BITS)
                         .map(|p| {
-                            owner.insert(p.id, path.clone());
+                            let id = remote_pane(pid, p.id);
+                            owner.insert(id, path.clone());
                             Pane {
-                                id: p.id,
+                                id,
                                 active: p.active,
                                 cwd: p.cwd,
                                 job: p.job,
@@ -136,21 +168,29 @@ impl Source for ControlSource {
                 .collect();
             windows.push(Window { pid, tabs });
         }
+        // screens of panes that are gone are dropped
+        self.screens
+            .lock()
+            .unwrap()
+            .retain(|pane, _| owner.contains_key(pane));
         *self.owner.lock().unwrap() = owner;
         windows
     }
 
     fn blocks(&self, pane: u64, before: Option<u64>, limit: usize) -> Result<Page, SourceError> {
-        self.read(Request::Blocks {
+        self.read(
             pane,
-            before,
-            limit,
-            meta: false,
-        })
+            Request::Blocks {
+                pane: local_pane(pane),
+                before,
+                limit,
+                meta: false,
+            },
+        )
     }
 
     fn blocks_meta(&self, pane: u64, limit: usize) -> Result<Page, SourceError> {
-        self.read(meta_request(pane, limit))
+        self.read(pane, meta_request(local_pane(pane), limit))
     }
 
     /// Tell every window to re-read `status.json` (its chip), on a thread of
@@ -194,15 +234,18 @@ impl Source for ControlSource {
     }
 
     fn input(&self, pane: u64, device: &str, input: Input) -> Result<(), InputError> {
-        let (command, keys) = match input {
-            Input::Command(c) => (Some(c), None),
-            Input::Keys(k) => (None, Some(k.into_iter().map(|k| k.name()).collect())),
-        };
+        let (mut command, mut keys, mut text) = (None, None, None);
+        match input {
+            Input::Command(c) => command = Some(c),
+            Input::Keys(k) => keys = Some(k.into_iter().map(|k| k.name()).collect()),
+            Input::Text(t) => text = Some(t),
+        }
         let req = Request::RemoteInput {
-            pane,
+            pane: local_pane(pane),
             device: device.to_string(),
             command,
             keys,
+            text,
         };
         match self.ask(pane, &req) {
             Ok(Some(r)) if r.ok => Ok(()),
@@ -211,14 +254,93 @@ impl Source for ControlSource {
             Err(e) => Err(InputError::Unavailable(e.to_string())),
         }
     }
+
+    /// The pane's screen; the window is told the generation of the one held
+    /// from it (same window, same `force`), and answers `unchanged` instead
+    /// of building it again while its output did not move.
+    fn screen(&self, pane: u64, force: bool) -> Result<Option<Screen>, SourceError> {
+        let owner = self.owner_of(pane);
+        let since = self
+            .screens
+            .lock()
+            .unwrap()
+            .get(&pane)
+            .filter(|h| Some(&h.owner) == owner.as_ref() && h.force == force)
+            .map(|h| h.generation);
+        let req = Request::Screen {
+            pane: local_pane(pane),
+            force,
+            since,
+        };
+        let r = match self.ask(pane, &req) {
+            Ok(Some(r)) if r.ok => r,
+            Ok(Some(r)) => return Err(SourceError::Unavailable(r.error.unwrap_or_default())),
+            Ok(None) => return Err(SourceError::NoPane),
+            Err(e) => return Err(SourceError::Unavailable(e.to_string())),
+        };
+        let mut screens = self.screens.lock().unwrap();
+        // `ask` may have found the pane in another window: its `unchanged`
+        // is about a generation of the other one's
+        let now = self.owner_of(pane);
+        if r.unchanged {
+            return match screens.get(&pane) {
+                Some(h) if now == owner && since.is_some() => Ok(h.screen.clone()),
+                _ => {
+                    screens.remove(&pane);
+                    Err(SourceError::Unavailable(
+                        "the screen moved; read again".into(),
+                    ))
+                }
+            };
+        }
+        match (now, r.generation) {
+            (Some(owner), Some(generation)) => {
+                screens.insert(
+                    pane,
+                    Held {
+                        owner,
+                        force,
+                        generation,
+                        screen: r.screen.clone(),
+                    },
+                );
+            }
+            _ => {
+                screens.remove(&pane);
+            }
+        }
+        Ok(r.screen)
+    }
+
+    fn output(
+        &self,
+        pane: u64,
+        block: u64,
+        from: u64,
+        limit: usize,
+    ) -> Result<OutputPage, OutputError> {
+        let req = Request::Output {
+            pane: local_pane(pane),
+            block,
+            from,
+            limit,
+        };
+        match self.ask(pane, &req) {
+            Ok(Some(r)) if r.ok => Ok(r.output.unwrap_or_default()),
+            Ok(Some(r)) if r.error.as_deref() == Some(NO_BLOCK) => Err(OutputError::NoBlock),
+            Ok(Some(r)) => Err(OutputError::Unavailable(r.error.unwrap_or_default())),
+            Ok(None) => Err(OutputError::NoPane),
+            Err(e) => Err(OutputError::Unavailable(e.to_string())),
+        }
+    }
 }
 
+/// A window's `output` error for a block the pane does not have.
+pub const NO_BLOCK: &str = "no such block";
+
 impl ControlSource {
-    /// A `blocks` request to the window owning its pane.
-    fn read(&self, req: Request) -> Result<Page, SourceError> {
-        let Request::Blocks { pane, .. } = req else {
-            return Err(SourceError::Unavailable("not a blocks request".into()));
-        };
+    /// A `blocks` request to the window owning `pane` (the phone's id).
+    fn read(&self, pane: u64, req: Request) -> Result<Page, SourceError> {
         match self.ask(pane, &req) {
             Ok(Some(r)) if r.ok => Ok(Page {
                 blocks: r.blocks,
@@ -241,6 +363,10 @@ fn meta_request(pane: u64, limit: usize) -> Request {
         meta: true,
     }
 }
+
+/// A window's `remote-input` error for Enter at a prompt with text on the
+/// command line (the gateway's `busy` with this message).
+pub const LINE_HAS_TEXT: &str = "the command line has text; send the command with run";
 
 /// A window's `remote-input` error as the gateway's.
 fn input_error(msg: &str) -> InputError {
@@ -695,9 +821,22 @@ pub enum Route {
     /// prompt, no full-screen program): a command is accepted and keys are
     /// editor keys.
     Editor,
-    /// A program has the pane, or the shell has not started the command
-    /// submitted last: a command is `busy`; keys go to the program.
+    /// The shell has not started the command submitted last (no 133;C
+    /// yet): a command and text are `busy` (text would be typed into the
+    /// shell's line, not a program); keys go to the shell.
+    Pending,
+    /// A program has the pane, or there is no shell integration, or a
+    /// prompt is drawn on the alternate screen (tmux, ssh: the gateway
+    /// cannot tell them from a program): a command is `busy`; keys and
+    /// text go to it.
     Raw,
+}
+
+impl Route {
+    /// Whether a phone's `text` is typed into the pane.
+    pub fn takes_text(self) -> bool {
+        self == Route::Raw
+    }
 }
 
 /// [`Route`] of a pane: `alt_screen` (a full-screen program), the state of
@@ -709,7 +848,8 @@ pub fn route(
     submit_pending: bool,
 ) -> Route {
     match last {
-        Some(rift_core::BlockState::Prompt) if !alt_screen && !submit_pending => Route::Editor,
+        Some(rift_core::BlockState::Prompt) if !alt_screen && submit_pending => Route::Pending,
+        Some(rift_core::BlockState::Prompt) if !alt_screen => Route::Editor,
         _ => Route::Raw,
     }
 }
@@ -748,6 +888,12 @@ pub fn sent_toast(device: &str, keys: &[rift_remote::Key]) -> String {
         shown(device, TOAST_DEVICE),
         shown(&names.join(" "), TOAST_COMMAND)
     )
+}
+
+/// The desktop's toast for a phone's text: `<device> typed into a program`.
+/// Never the text itself: it may be a password.
+pub fn typed_toast(device: &str) -> String {
+    format!("{} typed into a program", shown(device, TOAST_DEVICE))
 }
 
 /// Start a managed gateway for this user (`<this exe> remote --managed`,
@@ -820,9 +966,18 @@ mod tests {
         // not started yet, no shell integration: busy for commands
         assert_eq!(route(true, Some(&B::Prompt), false), Route::Raw);
         assert_eq!(route(false, Some(&running), false), Route::Raw);
-        assert_eq!(route(false, Some(&B::Prompt), true), Route::Raw);
+        assert_eq!(route(false, Some(&B::Prompt), true), Route::Pending);
         assert_eq!(route(false, Some(&done), false), Route::Raw);
         assert_eq!(route(false, None, false), Route::Raw);
+        // text: only into a program; never into the shell's line while the
+        // command submitted last waits for it, nor into the editor; the
+        // alternate screen and a shell without integration take it (the
+        // gateway cannot tell their prompts from programs)
+        assert!(!route(false, Some(&B::Prompt), true).takes_text());
+        assert!(!route(false, Some(&B::Prompt), false).takes_text());
+        assert!(route(false, Some(&running), false).takes_text());
+        assert!(route(true, Some(&B::Prompt), true).takes_text());
+        assert!(route(false, None, false).takes_text());
     }
 
     #[test]
@@ -836,13 +991,42 @@ mod tests {
         assert_eq!(t.chars().count(), "p ran ".len() + TOAST_COMMAND);
         assert!(t.ends_with('…'));
         assert_eq!(ran_toast("a\u{1b}[31mb\n", "ls"), "a[31mb ran ls");
-        let keys = [rift_remote::Key::Ctrl('c'), rift_remote::Key::Enter];
+        let keys = [
+            rift_remote::Key::ctrl('c'),
+            rift_remote::Key::plain(rift_remote::KeyBase::Enter),
+        ];
         assert_eq!(sent_toast("phone", &keys), "phone sent ctrl+c enter");
+        // typed text never shows: it may be a password
+        assert_eq!(
+            typed_toast("Sam's iPhone"),
+            "Sam's iPhone typed into a program"
+        );
+        assert_eq!(
+            typed_toast(&"p".repeat(100)).chars().count(),
+            TOAST_DEVICE + 21
+        );
+    }
+
+    #[test]
+    fn pane_ids_name_one_window_each() {
+        // every window numbers its panes from 1: two windows' pane 1 differ
+        let (a, b) = (remote_pane(4242, 1), remote_pane(4243, 1));
+        assert_ne!(a, b);
+        assert_eq!((local_pane(a), local_pane(b)), (1, 1));
+        // the largest Linux pid keeps ids exact as JavaScript numbers
+        let big = remote_pane(4_194_304, (1 << LOCAL_BITS) - 1);
+        assert!(big < 1 << 53);
+        assert_eq!(local_pane(big), (1 << LOCAL_BITS) - 1);
     }
 
     #[test]
     fn window_errors_map_to_input_errors() {
         assert_eq!(input_error("busy"), InputError::Busy);
+        // Enter with a draft at the prompt: `busy` with its own message
+        assert_eq!(
+            input_error(LINE_HAS_TEXT),
+            InputError::Unavailable(LINE_HAS_TEXT.into())
+        );
         assert_eq!(input_error("no such pane"), InputError::NoPane);
         assert_eq!(input_error("remote access is off"), InputError::Denied);
         assert_eq!(

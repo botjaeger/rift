@@ -1249,6 +1249,12 @@ impl App {
             self.sync_update_checks();
         }
         self.theme = self.config.resolve_theme_for(self.os_light);
+        // the remote screens' colours come from the theme: each is new
+        for p in self.tabs.iter().flat_map(|t| &t.panes) {
+            p.session
+                .generation
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }
         // a theme that does not load falls back to Dark Default: say so once
         // per broken name instead of only logging it
         let wanted = if self.config.sync_os_theme && self.os_light {
@@ -12260,6 +12266,41 @@ impl App {
                 }
                 None => Response::error("no such pane"),
             },
+            Request::Screen { pane, force, since } => {
+                let theme = self.theme.clone();
+                match self.find_tab_of_pane(pane).and_then(|(_, t)| t.pane(pane)) {
+                    Some(p) => {
+                        let (generation, screen) =
+                            terminal::remote_screen(&p.session, &theme, force, since);
+                        Response {
+                            ok: true,
+                            pane: Some(pane),
+                            unchanged: screen.is_none(),
+                            screen: screen.flatten(),
+                            generation: Some(generation),
+                            ..Default::default()
+                        }
+                    }
+                    None => Response::error("no such pane"),
+                }
+            }
+            Request::Output {
+                pane,
+                block,
+                from,
+                limit,
+            } => match self.find_tab_of_pane(pane).and_then(|(_, t)| t.pane(pane)) {
+                Some(p) => match terminal::block_output_range(&p.session, block, from, limit) {
+                    Some(page) => Response {
+                        ok: true,
+                        pane: Some(pane),
+                        output: Some(page),
+                        ..Default::default()
+                    },
+                    None => Response::error(crate::remote::NO_BLOCK),
+                },
+                None => Response::error("no such pane"),
+            },
             Request::Focus { tab, pane } => {
                 self.settings.open = false;
                 let target = match (tab, pane) {
@@ -12330,7 +12371,8 @@ impl App {
                 device,
                 command,
                 keys,
-            } => self.remote_input(pane, &device, command, keys),
+                text,
+            } => self.remote_input(pane, &device, command, keys, text),
             Request::RemoteStatus => {
                 // the gateway's status changed: the chip follows at once
                 self.remote.notices += 1;
@@ -13711,17 +13753,22 @@ impl App {
         )
     }
 
-    /// `remote-input` (from the gateway): a phone's command or keys for
-    /// `pane`, accepted only while `remote_access` is on. A command needs
-    /// the pane at its prompt in the editor (else `busy`) and is submitted
-    /// as if typed there and Enter pressed; keys act as if pressed on the
-    /// desktop. The desktop shows a toast naming the device.
+    /// `remote-input` (from the gateway): a phone's command, keys or text
+    /// for `pane`, accepted only while `remote_access` is on. A command
+    /// needs the pane at its prompt in the editor (else `busy`) and is
+    /// submitted as if typed there and Enter pressed; keys act as if
+    /// pressed on the desktop, except that none builds a command line at
+    /// the prompt and Enter there needs the line empty; text needs a
+    /// program (else `busy`, also while a submitted command waits for the
+    /// shell) and is typed into it. The desktop shows a toast naming the
+    /// device (never the text).
     fn remote_input(
         &mut self,
         pane: u64,
         device: &str,
         command: Option<String>,
         keys: Option<Vec<String>>,
+        text: Option<String>,
     ) -> crate::control::Response {
         use crate::control::Response;
         use crate::remote::Route;
@@ -13732,8 +13779,8 @@ impl App {
             Some(p) => Self::remote_route(p),
             None => return Response::error("no such pane"),
         };
-        match (command, keys) {
-            (Some(cmd), None) => {
+        match (command, keys, text) {
+            (Some(cmd), None, None) => {
                 // the gateway checked it too: never a line it would not type
                 if cmd.trim().is_empty()
                     || cmd.len() > rift_remote::MAX_COMMAND
@@ -13749,7 +13796,7 @@ impl App {
                 self.remote_submit(pane, &cmd);
                 self.toast(crate::remote::ran_toast(device, &cmd));
             }
-            (None, Some(names)) => {
+            (None, Some(names), None) => {
                 if names.is_empty() || names.len() > rift_remote::MAX_KEYS {
                     return Response::error("bad request: 1 to 20 keys");
                 }
@@ -13760,12 +13807,44 @@ impl App {
                 else {
                     return Response::error("bad request: unknown key");
                 };
+                // Enter at the prompt submits only an empty line: a command
+                // with text goes through `run` (whole, checked, toasted)
+                if route == Route::Editor
+                    && keys
+                        .iter()
+                        .any(|k| input::remote_editor_key(*k) == Some(EditorKey::Submit))
+                    && self
+                        .find_tab_of_pane(pane)
+                        .and_then(|(_, t)| t.pane(pane))
+                        .is_some_and(|p| !p.editor.buffer.is_empty())
+                {
+                    return Response::error(crate::remote::LINE_HAS_TEXT);
+                }
                 for key in &keys {
                     self.remote_key(pane, *key);
                 }
                 self.toast(crate::remote::sent_toast(device, &keys));
             }
-            _ => return Response::error("bad request: send a command or keys"),
+            (None, None, Some(text)) => {
+                // the gateway checked it too: printable, one line, ≤ 1 KiB
+                if text.is_empty()
+                    || text.len() > rift_remote::MAX_TEXT
+                    || text.chars().any(char::is_control)
+                {
+                    return Response::error(
+                        "bad request: text is one line without control characters",
+                    );
+                }
+                // at a prompt a command line goes through `run`; while a
+                // submitted command waits for the shell, text would land in
+                // the shell's line
+                if !route.takes_text() {
+                    return Response::error("busy");
+                }
+                self.remote_text(pane, &text);
+                self.toast(crate::remote::typed_toast(device));
+            }
+            _ => return Response::error("bad request: send one of a command, keys or text"),
         }
         Response {
             ok: true,
@@ -13789,13 +13868,13 @@ impl App {
     }
 
     /// A phone's key for pane `id`, as if pressed on the desktop: an editor
-    /// key at a prompt (the desktop's own editor handling for the active
-    /// pane; menus and history search stay closed for another pane), else
-    /// the bytes the pane's program asked for (cursor mode, kitty flags),
-    /// to it and its raw synchronized siblings.
+    /// key at a prompt (never one that inserts text: not the desktop's
+    /// correction, ghost or completion paths; esc and shift+tab still act
+    /// on the active pane's menu), else the bytes the pane's program asked
+    /// for (cursor mode, kitty flags), to it and its raw synchronized
+    /// siblings.
     fn remote_key(&mut self, id: PaneId, key: rift_remote::Key) {
         use crate::remote::Route;
-        let (press, mods) = input::remote_key_press(key);
         let Some(route) = self
             .find_tab_of_pane(id)
             .and_then(|(_, t)| t.pane(id))
@@ -13805,56 +13884,63 @@ impl App {
         };
         match route {
             Route::Editor => {
-                let Some(ek) = input::editor_key(&press, mods) else {
+                let Some(ek) = input::remote_editor_key(key) else {
                     return;
                 };
-                if self.active_pane_id() == Some(id) {
+                let active = self.active_pane_id() == Some(id);
+                if active && matches!(ek, EditorKey::Dismiss | EditorKey::NextCompletionSource) {
                     self.handle_editor_key(ek);
-                } else if !matches!(
-                    ek,
-                    EditorKey::Complete
-                        | EditorKey::NextCompletionSource
-                        | EditorKey::HistorySearch
-                        | EditorKey::Dismiss
-                        | EditorKey::AcceptGhostWord
-                ) {
-                    self.editor_key_on(id, ek, false);
+                } else {
+                    self.editor_key_on(id, ek, active);
                 }
             }
-            Route::Raw => {
-                let option_as_meta = self.option_meta();
-                for target in self.raw_targets(id) {
-                    let Some(p) = self
-                        .find_tab_of_pane(target)
-                        .and_then(|(_, t)| t.pane_mut(target))
-                    else {
-                        continue;
-                    };
-                    let enc = key_encoding(p, option_as_meta);
-                    let Some(bytes) = input::key_to_bytes(&press, mods, enc) else {
-                        continue;
-                    };
-                    p.view_offset = 0;
-                    if target == id {
-                        p.clear_selection();
-                    }
-                    p.session.write(&bytes);
-                    // a phone's key has no release of its own: programs that
-                    // asked for key events get one right after the press
-                    if enc.kitty_flags & crate::keyboard::EVENT_TYPES != 0 {
-                        let up = input::KeyPress {
-                            released: true,
-                            ..press.clone()
-                        };
-                        if let Some(b) = input::key_to_bytes(&up, mods, enc) {
-                            p.session.write(&b);
-                        }
-                    }
-                }
+            Route::Pending | Route::Raw => {
+                let press = input::remote_key_press(key);
+                self.remote_press(id, |_| vec![press.clone()]);
             }
         }
         if let Some(w) = &self.window {
             w.request_redraw();
+        }
+    }
+
+    /// A phone's text for pane `id` running a program: typed like committed
+    /// (non-IME) desktop text, to it and its raw synchronized siblings, each
+    /// in its program's keyboard mode ([`input::remote_text_presses`]).
+    fn remote_text(&mut self, id: PaneId, text: &str) {
+        self.remote_press(id, |enc| input::remote_text_presses(text, enc));
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    /// Write a phone's presses (made for each program's keyboard mode) to
+    /// pane `id` and its raw synchronized siblings, each encoded for its own
+    /// program (cursor mode, kitty flags; [`input::remote_bytes`]). A
+    /// phone's alt is always Meta: it never composes characters like macOS
+    /// Option.
+    fn remote_press(
+        &mut self,
+        id: PaneId,
+        presses: impl Fn(input::KeyEncoding) -> Vec<(input::KeyPress, ModifiersState)>,
+    ) {
+        for target in self.raw_targets(id) {
+            let Some(p) = self
+                .find_tab_of_pane(target)
+                .and_then(|(_, t)| t.pane_mut(target))
+            else {
+                continue;
+            };
+            let enc = key_encoding(p, true);
+            let bytes = input::remote_bytes(&presses(enc), enc);
+            if bytes.is_empty() {
+                continue;
+            }
+            p.view_offset = 0;
+            if target == id {
+                p.clear_selection();
+            }
+            p.session.write(&bytes);
         }
     }
 

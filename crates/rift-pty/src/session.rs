@@ -297,6 +297,10 @@ pub struct Session {
     pub dirty: Arc<AtomicBool>,
     /// True once the shell produced its first byte ("Starting zsh…" gate).
     pub saw_output: Arc<AtomicBool>,
+    /// Bumped by everything that can change the screen or its cursor: each
+    /// chunk of output parsed, a resize, a clear. Equal values: the same
+    /// screen (the remote gateway's `screen` reads skip rebuilding it).
+    pub generation: Arc<AtomicU64>,
     /// Id of the shell in the session service (durable sessions).
     pub service_id: Option<u64>,
     writer: PtyWriter,
@@ -513,6 +517,7 @@ impl Reader {
         };
         parser.stop_sync(&mut abs);
         self.ctx.scrolled.store(scrolled_cur, Ordering::Release);
+        self.ctx.generation.fetch_add(1, Ordering::AcqRel);
         drop(term);
         self.wake();
         true
@@ -750,12 +755,14 @@ impl Session {
         let saw_output = Arc::new(AtomicBool::new(false));
         let blocks = Arc::new(Mutex::new(BlockStore::default()));
         let scrolled = Arc::new(AtomicU64::new(0));
+        let generation = Arc::new(AtomicU64::new(0));
         let cwd = Arc::new(Mutex::new(None));
         let user_vars = UserVars::default();
         let graphics = Arc::new(Mutex::new(Graphics::default()));
         let ctx = FeedCtx {
             term: term.clone(),
             scrolled: scrolled.clone(),
+            generation: generation.clone(),
             scrollback,
             blocks: blocks.clone(),
             cwd: cwd.clone(),
@@ -797,6 +804,7 @@ impl Session {
             user_vars,
             dirty,
             saw_output,
+            generation,
             service_id,
             writer,
             backend,
@@ -885,6 +893,7 @@ impl Session {
             abs.clear_screen(ClearMode::Saved);
         }
         self.scrolled.store(scrolled, Ordering::Release);
+        self.generation.fetch_add(1, Ordering::AcqRel);
         term.selection = None;
 
         // Re-anchor a fresh Prompt block at the post-clear cursor: the shell
@@ -956,6 +965,7 @@ impl Session {
                 );
             }
         }
+        self.generation.fetch_add(1, Ordering::AcqRel);
         drop(term);
     }
 }
@@ -994,7 +1004,8 @@ fn resize_term(
     let cur = scrolled.load(Ordering::Acquire);
     // the grid's top row keeps its abs index: base = scrolled - history
     let base = cur.saturating_sub(old.history as u64);
-    scrolled.store(base + new.history as u64, Ordering::Release);
+    let new_base = base + old.trimmed_by(&new);
+    scrolled.store(new_base + new.history as u64, Ordering::Release);
     // reflow (column change) re-wraps lines and moves every row after
     // them; carry the block anchors along (same lock order as the reader)
     // a prompt redrawn after this keeps its pre-resize anchor
@@ -1003,11 +1014,11 @@ fn resize_term(
         blocks
             .lock()
             .unwrap()
-            .remap(|abs, col| old.map(&new, base, abs, col));
+            .remap(|abs, col| old.map(&new, base, new_base, abs, col));
         graphics
             .lock()
             .unwrap()
-            .remap(|abs, col| old.map(&new, base, abs, col));
+            .remap(|abs, col| old.map(&new, base, new_base, abs, col));
     }
 }
 
@@ -1022,6 +1033,8 @@ struct RowLayout {
     /// Logical line holding the cursor (the fixed point between layouts:
     /// reflow may trim history at the top and blank rows at the bottom).
     cursor_line: usize,
+    /// The cursor's row, counted from the oldest history row.
+    cursor_row: usize,
 }
 
 impl RowLayout {
@@ -1050,11 +1063,28 @@ impl RowLayout {
             cols,
             history,
             cursor_line,
+            cursor_row,
         }
     }
 
-    /// Where (`abs`, `col`) in this layout lands in `new`.
-    fn map(&self, new: &RowLayout, base: u64, abs: u64, col: usize) -> (u64, usize) {
+    /// Rows dropped from the top of the history by the resize to `new`: a
+    /// row-only shrink with a full history pushes screen rows into it and
+    /// drops as many of its oldest, so the new grid's top row is a later
+    /// line. Without a reflow every row stays itself, so the rows above the
+    /// cursor's tell (not the start of its logical line: a long wrapped
+    /// line may lose its first rows with the history); a reflow (column
+    /// change) re-wraps them, and counts as none (the top row keeps its abs
+    /// index).
+    fn trimmed_by(&self, new: &RowLayout) -> u64 {
+        if self.cols != new.cols {
+            return 0;
+        }
+        self.cursor_row.saturating_sub(new.cursor_row) as u64
+    }
+
+    /// Where (`abs`, `col`) in this layout (top row at `base`) lands in
+    /// `new` (top row at `new_base`).
+    fn map(&self, new: &RowLayout, base: u64, new_base: u64, abs: u64, col: usize) -> (u64, usize) {
         let Some(row) = abs.checked_sub(base).map(|r| r as usize) else {
             return (abs, col); // already trimmed out of history
         };
@@ -1062,23 +1092,26 @@ impl RowLayout {
             // past the grid (an end anchor on the last row): keep its
             // distance from the bottom
             let shifted = row as i64 + new.rows as i64 - self.rows as i64;
-            return (base + shifted.max(0) as u64, col);
+            return (new_base + shifted.max(0) as u64, col);
         }
         let line = self.starts.partition_point(|&s| s <= row) - 1;
         let offset = (row - self.starts[line]) * self.cols + col.min(self.cols);
         let target = line as i64 - self.cursor_line as i64 + new.cursor_line as i64;
         if target < 0 {
-            return (base.saturating_sub(1), 0); // reflow pushed it out of history
+            return (new_base.saturating_sub(1), 0); // reflow pushed it out of history
         }
         let target = target as usize;
         if target >= new.starts.len() {
-            return (base + new.rows as u64, 0);
+            return (new_base + new.rows as u64, 0);
         }
         let start = new.starts[target];
         let next = new.starts.get(target + 1).copied().unwrap_or(new.rows);
         let cols = new.cols.max(1);
         let sub = (offset / cols).min(next - start - 1);
-        (base + (start + sub) as u64, (offset - sub * cols).min(cols))
+        (
+            new_base + (start + sub) as u64,
+            (offset - sub * cols).min(cols),
+        )
     }
 }
 
@@ -1095,6 +1128,8 @@ const MAX_USER_VARS: usize = 32;
 struct FeedCtx {
     term: Arc<FairMutex<Term<EventProxy>>>,
     scrolled: Arc<AtomicU64>,
+    /// [`Session::generation`].
+    generation: Arc<AtomicU64>,
     scrollback: usize,
     blocks: Arc<Mutex<BlockStore>>,
     cwd: Arc<Mutex<Option<String>>>,
@@ -1219,6 +1254,8 @@ fn feed(parser: &mut vte::ansi::Processor, scanner: &mut OscScanner, bytes: &[u8
         ctx.graphics.lock().unwrap().prune(oldest);
     }
     ctx.scrolled.store(scrolled_cur, Ordering::Release);
+    // under the term lock: a reader of the screen sees the new value with it
+    ctx.generation.fetch_add(1, Ordering::AcqRel);
 }
 
 /// Output that ended without a newline leaves the cursor mid-row when the
@@ -1410,6 +1447,10 @@ mod tests {
     use super::*;
 
     fn term(cols: usize, rows: usize) -> Term<EventProxy> {
+        term_with(cols, rows, TermConfig::default())
+    }
+
+    fn term_with(cols: usize, rows: usize, config: TermConfig) -> Term<EventProxy> {
         let proxy = EventProxy {
             pane: 0,
             observer: Arc::new(|_, _| {}),
@@ -1423,7 +1464,7 @@ mod tests {
                 cell_height: 16,
             })),
         };
-        Term::new(TermConfig::default(), &GridSize { cols, rows }, proxy)
+        Term::new(config, &GridSize { cols, rows }, proxy)
     }
 
     /// OSC 52 copy and read requests that reach the observer under each
@@ -1494,18 +1535,19 @@ mod tests {
         t.resize(GridSize { cols: 10, rows: 6 });
         let new = RowLayout::of(&t);
         // "a…" now takes 3 rows, so "b" and "c" move down one row each
-        assert_eq!(old.map(&new, 0, 2, 0), (3, 0));
-        assert_eq!(old.map(&new, 0, 3, 0), (4, 0));
+        assert_eq!(old.map(&new, 0, 0, 2, 0), (3, 0));
+        assert_eq!(old.map(&new, 0, 0, 3, 0), (4, 0));
         // a point inside the wrapped line keeps its character offset
-        assert_eq!(old.map(&new, 0, 1, 5), (2, 5));
+        assert_eq!(old.map(&new, 0, 0, 1, 5), (2, 5));
         // below the tracked base: untouched
-        assert_eq!(old.map(&new, 10, 3, 0), (3, 0));
+        assert_eq!(old.map(&new, 10, 10, 3, 0), (3, 0));
     }
 
     fn ctx(cols: usize, rows: usize) -> FeedCtx {
         FeedCtx {
             term: Arc::new(FairMutex::new(term(cols, rows))),
             scrolled: Arc::new(AtomicU64::new(0)),
+            generation: Arc::new(AtomicU64::new(0)),
             // the grid's own cap (TermConfig::default)
             scrollback: 10_000,
             blocks: Arc::new(Mutex::new(BlockStore::default())),
@@ -1656,6 +1698,88 @@ mod tests {
             assert_eq!(abs_text(&c, b.prompt_start), "$ ls", "{case}");
             assert_eq!(abs_text(&c, b.output_start.unwrap()), "out", "{case}");
         }
+    }
+
+    #[test]
+    fn a_shrink_with_a_full_history_keeps_abs_lines() {
+        // the editor showing shrinks the pane; with the history at its cap the
+        // shrink drops its oldest rows, and every line keeps its abs index
+        let mut c = ctx(20, 8);
+        c.scrollback = 10;
+        let config = TermConfig {
+            scrolling_history: 10,
+            ..TermConfig::default()
+        };
+        *c.term.lock() = term_with(20, 8, config);
+        let mut p = vte::ansi::Processor::new();
+        let mut s = OscScanner::new();
+        let text: String = (1..=30).map(|i| format!("l{i}\r\n")).collect();
+        feed(&mut p, &mut s, text.as_bytes(), &c);
+        let block = "\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07out\r\n\x1b]133;D;0\x07";
+        feed(&mut p, &mut s, block.as_bytes(), &c);
+        assert_eq!(abs_text(&c, 24), "l25");
+        for rows in [5, 8, 3] {
+            resize_term(
+                &mut c.term.lock(),
+                GridSize { cols: 20, rows },
+                &c.scrolled,
+                &c.blocks,
+                &c.graphics,
+            );
+            assert_eq!(abs_text(&c, 24), "l25", "{rows} rows");
+            assert_eq!(abs_text(&c, 29), "l30", "{rows} rows");
+            let b = c.blocks.lock().unwrap().snapshot()[0].clone();
+            assert_eq!(abs_text(&c, b.prompt_start), "$ ls", "{rows} rows");
+            assert_eq!(abs_text(&c, b.output_start.unwrap()), "out", "{rows} rows");
+        }
+    }
+
+    #[test]
+    fn a_shrink_keeps_abs_lines_of_a_long_wrapped_cursor_line() {
+        // the cursor's line wraps over 20 rows and starts in the history: the
+        // shrink trims rows of that same line, so only the cursor row's
+        // position tells how many went
+        let mut c = ctx(20, 8);
+        c.scrollback = 10;
+        let config = TermConfig {
+            scrolling_history: 10,
+            ..TermConfig::default()
+        };
+        *c.term.lock() = term_with(20, 8, config);
+        let mut p = vte::ansi::Processor::new();
+        let mut s = OscScanner::new();
+        let text: String = (1..=30).map(|i| format!("l{i}\r\n")).collect();
+        feed(&mut p, &mut s, text.as_bytes(), &c);
+        // 20 rows of 20: "aaa…", "bbb…", … "ttt…"
+        let long: String = (0..400)
+            .map(|i| char::from(b'a' + (i / 20) as u8))
+            .collect();
+        feed(&mut p, &mut s, long.as_bytes(), &c);
+        let held = |c: &FeedCtx| {
+            let sc = c.scrolled.load(Ordering::Acquire);
+            let (history, rows) = {
+                let t = c.term.lock();
+                (
+                    t.grid().history_size() as u64,
+                    t.grid().screen_lines() as u64,
+                )
+            };
+            (sc - history..sc + rows)
+                .map(|abs| (abs, abs_text(c, abs)))
+                .collect::<Vec<_>>()
+        };
+        let before = held(&c);
+        resize_term(
+            &mut c.term.lock(),
+            GridSize { cols: 20, rows: 5 },
+            &c.scrolled,
+            &c.blocks,
+            &c.graphics,
+        );
+        let after = held(&c);
+        // 3 rows went: the rest keep their abs index and text
+        assert_eq!(after.len(), 15);
+        assert_eq!(after[..], before[3..]);
     }
 
     /// A pane's reader over a fake service connection; the returned receiver
@@ -1921,6 +2045,7 @@ mod tests {
             user_vars: c.user_vars.clone(),
             dirty: Arc::new(AtomicBool::new(false)),
             saw_output: Arc::new(AtomicBool::new(false)),
+            generation: c.generation.clone(),
             service_id: None,
             writer,
             backend: Backend::Local(pty),
@@ -1952,6 +2077,8 @@ mod tests {
         let session = resizing.join().unwrap();
         assert_eq!(rows(), 30);
         assert_eq!(term.lock().grid().screen_lines(), 30);
+        // a resize is a new screen for the remote gateway
+        assert_eq!(c.generation.load(Ordering::Acquire), 1);
         drop(session);
     }
 
@@ -1963,6 +2090,8 @@ mod tests {
         // fill the screen, then a 25-char line on the bottom row wraps twice
         feed(&mut p, &mut s, b"a\r\nb\r\n", &c);
         feed(&mut p, &mut s, "x".repeat(25).as_bytes(), &c);
+        // each parsed chunk is a new screen for the remote gateway
+        assert_eq!(c.generation.load(Ordering::Acquire), 2);
         let history = c.term.lock().grid().history_size() as u64;
         assert_eq!(history, 2);
         assert_eq!(c.scrolled.load(Ordering::Acquire), history);

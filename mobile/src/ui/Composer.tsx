@@ -1,68 +1,23 @@
 import { useRouter } from "expo-router";
 import { useState } from "react";
-import { AccessibilityInfo, Keyboard, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { AccessibilityInfo, Keyboard, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { KeyCaptureView, type KeyEvent } from "../../modules/rift-keys";
 import { commandProblem } from "@/protocol/types";
 import { draftKey } from "@/fleet";
+import { applySticky, keyEventToAction, stickyKey } from "@/keyboard";
 import { keysNeedAuth } from "@/lock";
 import { authenticate, fleet, useApp } from "@/runtime";
-import { insertedLetter } from "./format";
+import { ControlRow, NO_STICKY, type Sticky } from "./ControlRow";
+import { insertedChar } from "./format";
 import { ErrorText } from "./Notice";
 import { colors, mono, radius, TOUCH } from "./theme";
 
-interface KeyDef {
-  label: string;
-  key: string;
-  spoken: string;
-  danger?: boolean;
-}
-
-const KEYS_BEFORE: KeyDef[] = [
-  { label: "^C", key: "ctrl+c", spoken: "Control C, interrupt", danger: true },
-  { label: "esc", key: "esc", spoken: "Escape" },
-  { label: "tab", key: "tab", spoken: "Tab" },
-];
-const KEYS_AFTER: KeyDef[] = [
-  { label: "↑", key: "up", spoken: "Up arrow" },
-  { label: "↓", key: "down", spoken: "Down arrow" },
-  { label: "←", key: "left", spoken: "Left arrow" },
-  { label: "→", key: "right", spoken: "Right arrow" },
-];
-
-function Key({
-  def,
-  onPress,
-  active,
-  disabled,
-}: {
-  def: KeyDef;
-  onPress: () => void;
-  active?: boolean;
-  disabled: boolean;
-}) {
-  return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityLabel={def.spoken}
-      accessibilityState={{ disabled, ...(active === undefined ? {} : { selected: active }) }}
-      disabled={disabled}
-      onPress={onPress}
-      style={({ pressed }) => [
-        styles.key,
-        def.danger && styles.keyDanger,
-        active && styles.keyActive,
-        disabled && styles.disabled,
-        pressed && styles.pressed,
-      ]}
-    >
-      <Text style={[styles.keyLabel, active && { color: colors.bg }]}>{def.label}</Text>
-    </Pressable>
-  );
-}
-
 /**
- * The pane's command composer (operate permission only): a row of control keys sent with
- * `keys`, and a command line run with `run` (through the Confirm sheet unless that is off).
- * While the host is not connected (`online` false) nothing can be sent; the draft stays editable.
+ * The pane's command composer (operate permission only): the control-key row (Settings ›
+ * Control keys) sent with `keys`, and a command line run with `run` (through the Confirm sheet
+ * unless that is off). A hardware keyboard's ctrl/alt combinations, Escape, Tab and F-keys in
+ * the command line go to the pane as keys too. While the host is not connected (`online`
+ * false) nothing can be sent; the draft stays editable.
  */
 export function Composer({
   hostKey,
@@ -78,7 +33,7 @@ export function Composer({
   const router = useRouter();
   const s = useApp();
   const draft = s.drafts[draftKey(hostKey, paneId)] ?? "";
-  const [ctrl, setCtrl] = useState(false);
+  const [sticky, setSticky] = useState<Sticky>(NO_STICKY);
   const [error, setError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
 
@@ -97,16 +52,30 @@ export function Composer({
   };
 
   const onChange = (text: string) => {
-    if (ctrl) {
-      setCtrl(false);
-      const letter = insertedLetter(draft, text);
-      if (letter) {
-        void sendKeys([`ctrl+${letter}`]);
-        return; // the letter is a key, not text
+    if (sticky.ctrl || sticky.alt) {
+      setSticky(NO_STICKY);
+      const ch = insertedChar(draft, text);
+      const key = ch ? stickyKey(ch, sticky) : null;
+      if (key) {
+        void sendKeys([key]);
+        return; // the character is a key, not text
       }
     }
     setError(null);
     fleet.setDraft(hostKey, paneId, text);
+  };
+
+  const onRowKey = (id: string) => {
+    const key = applySticky(id, sticky);
+    setSticky(NO_STICKY);
+    void sendKeys([key]);
+  };
+
+  // hardware shortcuts taken from the command line (modules/rift-keys, shortcuts mode)
+  const onShortcut = (e: KeyEvent) => {
+    if (!online) return;
+    const action = keyEventToAction(e);
+    if (action && "keys" in action) onRowKey(action.keys[0]!);
   };
 
   const problem = commandProblem(draft);
@@ -133,39 +102,35 @@ export function Composer({
     else AccessibilityInfo.announceForAccessibility("Command sent");
   };
 
+  const stickyName = [sticky.ctrl ? "ctrl" : null, sticky.alt ? "alt" : null].filter(Boolean).join("+");
+
   return (
-    <View style={styles.wrap}>
+    <KeyCaptureView
+      mode="shortcuts"
+      // Tab completes for a program or the shell's line; with nothing to complete it moves focus
+      captureTab={running !== null || draft !== ""}
+      onKey={onShortcut}
+      style={styles.wrap}
+    >
       {running ? (
         <Text style={styles.running}>
           Running <Text style={styles.mono}>{running}</Text> · keys go to the program
         </Text>
       ) : null}
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        contentContainerStyle={styles.keys}
-        keyboardShouldPersistTaps="always"
-      >
-        {KEYS_BEFORE.map((k) => (
-          <Key key={k.key} def={k} disabled={!online} onPress={() => void sendKeys([k.key])} />
-        ))}
-        <Key
-          disabled={!online}
-          def={{ label: "ctrl", key: "ctrl", spoken: "Control, applies to the next letter you type" }}
-          active={ctrl}
-          onPress={() => setCtrl((c) => !c)}
-        />
-        {KEYS_AFTER.map((k) => (
-          <Key key={k.key} def={k} disabled={!online} onPress={() => void sendKeys([k.key])} />
-        ))}
-      </ScrollView>
+      <ControlRow
+        ids={s.settings.controlKeys}
+        sticky={sticky}
+        disabled={!online}
+        onSticky={setSticky}
+        onKey={onRowKey}
+      />
       {error ? <ErrorText style={styles.error}>{error}</ErrorText> : null}
       <View style={styles.inputRow}>
         <TextInput
           value={draft}
           onChangeText={onChange}
           onSubmitEditing={() => void run()}
-          placeholder={ctrl ? "Type a letter for ctrl+letter" : "Command"}
+          placeholder={stickyName ? `Type a letter for ${stickyName}+letter` : "Command"}
           placeholderTextColor={colors.textMuted}
           autoCapitalize="none"
           autoCorrect={false}
@@ -186,7 +151,7 @@ export function Composer({
           <Text style={styles.runLabel}>{sending ? "…" : "Run"}</Text>
         </Pressable>
       </View>
-    </View>
+    </KeyCaptureView>
   );
 }
 
@@ -202,25 +167,6 @@ const styles = StyleSheet.create({
   },
   running: { color: colors.textMuted, fontSize: 12, paddingHorizontal: 4 },
   mono: { fontFamily: mono, color: colors.accent },
-  // The eight keys share the row (≥ 44 pt each) and fit a 390 pt phone;
-  // narrower screens scroll the row.
-  keys: { gap: 3, flexGrow: 1 },
-  key: {
-    flexGrow: 1,
-    minWidth: TOUCH,
-    minHeight: TOUCH,
-    paddingHorizontal: 4,
-    alignItems: "center",
-    justifyContent: "center",
-    borderRadius: radius.control,
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.hairline,
-  },
-  // Interrupt is marked by a red border: red text on a surface is below 4.5:1 (palette.ts).
-  keyDanger: { borderColor: colors.error },
-  keyActive: { backgroundColor: colors.accent, borderColor: colors.accent },
-  keyLabel: { color: colors.text, fontFamily: mono, fontSize: 14 },
   pressed: { opacity: 0.7 },
   error: { paddingHorizontal: 4 },
   inputRow: { flexDirection: "row", gap: 6, alignItems: "center" },

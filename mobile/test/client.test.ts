@@ -4,7 +4,10 @@ import {
   BACKOFF_CAP_MS,
   HANDSHAKE_TIMEOUT_MS,
   IDLE_TIMEOUT_MS,
+  INPUT_RATE,
+  SCREEN_RESUME_MS,
   PING_INTERVAL_MS,
+  OUTPUT_TIMEOUT_MS,
   RiftClient,
   backoffDelay,
   type ConnState,
@@ -47,6 +50,8 @@ function setup(
   const applied: string[] = [];
   const acks: unknown[] = [];
   const done: unknown[] = [];
+  const screens: { t: string }[] = [];
+  const stale: number[] = [];
   const client = new RiftClient({
     addresses: opts.addresses ?? ["127.0.0.1:7878"],
     relay: opts.relay ?? null,
@@ -66,10 +71,12 @@ function setup(
       onPane: (m) => applied.push(m.t === "older" ? "older" : `${m.t}:${m.seq}`),
       onAck: (m) => acks.push(m),
       onDone: (m) => done.push(m),
+      onScreen: (m) => screens.push(m),
+      onScreenStale: (pane) => stale.push(pane),
     },
   });
   const last = () => sockets[sockets.length - 1]!;
-  return { client, sockets, states, applied, acks, done, last };
+  return { client, sockets, states, applied, acks, done, screens, stale, last };
 }
 
 /** Connects, authenticates and subscribes pane 12 with a snapshot at `seq`. */
@@ -460,5 +467,197 @@ describe("RiftClient key mismatch across paths", () => {
     b.client.restart({ lanFirst: true });
     expect(b.sockets).toHaveLength(1);
     expect(b.states.at(-1)).toMatchObject({ status: "failed", failure: "auth" });
+  });
+});
+
+describe("RiftClient Phase 3", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  const screenMsg = (full: boolean, pane = 12) => ({
+    t: "screen",
+    pane,
+    cols: 80,
+    rows: 2,
+    alt: true,
+    cursor: null,
+    full,
+    lines: full ? [[0, [["top", null, null, 0]]], [1, []]] : [[1, [["x", null, null, 0]]]],
+  });
+  const sentOf = (t: ReturnType<typeof setup>, type: string) => t.last().sent.filter((m) => m.t === type);
+
+  it("sends the screen mode for the subscribed pane, once per change", () => {
+    const t = connected();
+    expect(t.client.setScreen(12, "auto")).toBe(true);
+    expect(t.client.setScreen(12, "auto")).toBe(true);
+    expect(sentOf(t, "screen")).toEqual([{ t: "screen", pane: 12, mode: "auto" }]);
+    expect(t.client.setScreen(13, "on")).toBe(false); // not the subscribed pane
+    expect(sentOf(t, "screen")).toHaveLength(1);
+  });
+
+  it("asks again after a reconnect and after a gap re-subscribe, which reset it on the gateway", () => {
+    const t = connected();
+    t.client.setScreen(12, "on");
+    t.last().drop();
+    vi.advanceTimersByTime(BACKOFF_CAP_MS);
+    t.last().connect();
+    t.last().recv(welcome);
+    expect(t.last().sent.slice(0, 2)).toEqual([
+      { t: "subscribe", pane: 12, after: 41 },
+      { t: "screen", pane: 12, mode: "on" },
+    ]);
+    t.last().recv(snapshot(50));
+    t.last().recv(update(52)); // gap: re-subscribe
+    expect(t.last().sent.slice(-2)).toEqual([
+      { t: "subscribe", pane: 12, after: 50 },
+      { t: "screen", pane: 12, mode: "on" },
+    ]);
+  });
+
+  it("a new pane, or unsubscribe, starts with screens off", () => {
+    const t = connected();
+    t.client.setScreen(12, "auto");
+    t.client.subscribe(13);
+    expect(t.last().sent.at(-1)).toEqual({ t: "subscribe", pane: 13, after: null });
+    t.client.unsubscribe();
+    t.client.subscribe(13);
+    expect(sentOf(t, "screen")).toHaveLength(1);
+  });
+
+  it("reports screens of the subscribed pane only; a re-subscribe keeps the one on display, stale", () => {
+    const t = connected();
+    t.client.setScreen(12, "auto");
+    t.last().recv(screenMsg(true, 13));
+    expect(t.screens).toEqual([]);
+    t.last().recv(screenMsg(true));
+    t.last().recv(screenMsg(false));
+    expect(t.screens.map((m) => m.t)).toEqual(["screen", "screen"]);
+    t.last().recv({ t: "screen_end", pane: 13 });
+    expect(t.screens).toHaveLength(2);
+    // a gap re-subscribe stops the screens silently: the one on display is out of date, not gone
+    t.last().recv(update(43));
+    expect(t.stale).toEqual([12]);
+    expect(t.screens).toHaveLength(2);
+    // the full screen that follows replaces it; nothing ends
+    vi.advanceTimersByTime(SCREEN_RESUME_MS / 2);
+    t.last().recv(screenMsg(true));
+    vi.advanceTimersByTime(SCREEN_RESUME_MS);
+    expect(t.screens.map((m) => m.t)).toEqual(["screen", "screen", "screen"]);
+  });
+
+  it("a stale screen ends when no screen comes back (the program left meanwhile), or with a real screen_end", () => {
+    const t = connected();
+    t.client.setScreen(12, "auto");
+    t.last().recv(screenMsg(true));
+    t.last().recv(update(43)); // gap re-subscribe
+    vi.advanceTimersByTime(SCREEN_RESUME_MS - 1);
+    expect(t.screens).toHaveLength(1);
+    vi.advanceTimersByTime(1);
+    expect(t.screens.at(-1)).toEqual({ t: "screen_end", pane: 12 });
+    // nothing to end the next time
+    t.last().recv(update(45));
+    vi.advanceTimersByTime(SCREEN_RESUME_MS);
+    expect(t.screens).toHaveLength(2);
+    // a real screen_end of a stale screen
+    t.last().recv(screenMsg(true));
+    t.last().recv(update(47));
+    t.last().recv({ t: "screen_end", pane: 12 });
+    vi.advanceTimersByTime(SCREEN_RESUME_MS);
+    expect(t.screens.map((m) => m.t)).toEqual(["screen", "screen_end", "screen", "screen_end"]);
+  });
+
+  it("a reconnect keeps the screen on display (stale) until the next one", () => {
+    const t = connected();
+    t.client.setScreen(12, "auto");
+    t.last().recv(screenMsg(true));
+    t.last().drop();
+    vi.advanceTimersByTime(BACKOFF_CAP_MS);
+    t.last().connect();
+    t.last().recv(welcome);
+    expect(t.stale).toEqual([12]);
+    expect(t.screens.map((m) => m.t)).toEqual(["screen"]);
+    t.last().recv(screenMsg(true));
+    vi.advanceTimersByTime(SCREEN_RESUME_MS * 2);
+    expect(t.screens.map((m) => m.t)).toEqual(["screen", "screen"]);
+  });
+
+  it("keys and text share the gateway's rate: past 20 a second they wait, in order, never dropped", () => {
+    const t = connected();
+    const input = () => t.last().sent.filter((m) => m.t === "keys" || m.t === "text");
+    const ids: (string | null)[] = [];
+    for (let i = 0; i < 30; i++) ids.push(i % 2 ? t.client.keys(12, ["up"]) : t.client.text(12, `t${i}`));
+    expect(ids.every((id) => id !== null)).toBe(true);
+    expect(input()).toHaveLength(INPUT_RATE);
+    expect(t.client.inputDelayMs).toBeGreaterThan(0);
+    vi.advanceTimersByTime(999);
+    expect(input()).toHaveLength(INPUT_RATE); // still inside the second
+    vi.advanceTimersByTime(200);
+    expect(input()).toHaveLength(30);
+    expect(input().map((m) => ("id" in m ? m.id : ""))).toEqual(ids);
+    expect(t.client.inputDelayMs).toBe(0); // 10 in this second: room for more
+  });
+
+  it("input waiting for the rate is dropped with its connection", () => {
+    const t = connected();
+    for (let i = 0; i < 25; i++) t.client.keys(12, ["up"]);
+    t.last().drop();
+    vi.advanceTimersByTime(BACKOFF_CAP_MS);
+    t.last().connect();
+    t.last().recv(welcome);
+    expect(t.client.inputDelayMs).toBe(0);
+    expect(t.last().sent.filter((m) => m.t === "keys")).toEqual([]);
+  });
+
+  it("text goes out with its own id and resolves through ack", () => {
+    const t = connected();
+    expect(t.client.text(12, ":wq")).toBe("x1");
+    expect(t.last().sent.at(-1)).toEqual({ t: "text", id: "x1", pane: 12, text: ":wq" });
+    t.client.stop();
+    expect(t.client.text(12, "a")).toBeNull();
+  });
+
+  it("output resolves with the answer of the same id", async () => {
+    const t = connected();
+    const p = t.client.output(12, 86, 0, 500);
+    expect(t.last().sent.at(-1)).toEqual({ t: "output", id: "o1", pane: 12, block: 86, from: 0, limit: 500 });
+    t.last().recv({ t: "output", id: "o9", pane: 12, block: 86, from: 0, text: "other\n", total: 1 });
+    t.last().recv({ t: "output", id: "o1", pane: 12, block: 86, from: 0, text: "a\n", total: 40 });
+    expect(await p).toEqual({ ok: true, msg: { t: "output", id: "o1", pane: 12, block: 86, from: 0, text: "a\n", total: 40 } });
+  });
+
+  it("output answers must match the request's pane and block and start within its range", async () => {
+    const t = connected();
+    const wrongBlock = t.client.output(12, 86, 0, 500);
+    t.last().recv({ t: "output", id: "o1", pane: 12, block: 87, from: 0, text: "a\n", total: 40 });
+    expect(await wrongBlock).toMatchObject({ ok: false, code: "bad_data" });
+    const wrongPane = t.client.output(12, 86, 0, 500);
+    t.last().recv({ t: "output", id: "o2", pane: 13, block: 86, from: 0, text: "a\n", total: 40 });
+    expect(await wrongPane).toMatchObject({ ok: false, code: "bad_data" });
+    const pastRange = t.client.output(12, 86, 100, 500);
+    t.last().recv({ t: "output", id: "o3", pane: 12, block: 86, from: 601, text: "a\n", total: 700 });
+    expect(await pastRange).toMatchObject({ ok: false, code: "bad_data" });
+    // later (lines gone) but inside the range is an answer
+    const later = t.client.output(12, 86, 100, 500);
+    t.last().recv({ t: "output", id: "o4", pane: 12, block: 86, from: 600, text: "", total: 700 });
+    expect(await later).toMatchObject({ ok: true, msg: { from: 600 } });
+  });
+
+  it("output fails with the gateway's ack error, not passed on as an ack", async () => {
+    const t = connected();
+    const p = t.client.output(12, 99, 0, 10);
+    t.last().recv({ t: "ack", id: "o1", ok: false, error: "no_block", message: "block 99 is not in pane 12" });
+    expect(await p).toEqual({ ok: false, code: "no_block", message: "block 99 is not in pane 12" });
+    expect(t.acks).toEqual([]);
+  });
+
+  it("output times out, fails at once on a dropped connection, and when not connected", async () => {
+    const t = connected();
+    const p1 = t.client.output(12, 86, 0, 10);
+    vi.advanceTimersByTime(OUTPUT_TIMEOUT_MS);
+    expect(await p1).toMatchObject({ ok: false, code: "timeout" });
+    const p2 = t.client.output(12, 86, 0, 10);
+    t.last().drop();
+    expect(await p2).toMatchObject({ ok: false, code: "disconnected" });
+    expect(await t.client.output(12, 86, 0, 10)).toMatchObject({ ok: false, code: "disconnected" });
   });
 });

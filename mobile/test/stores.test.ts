@@ -5,6 +5,8 @@ import {
   HostsStore,
   IdentityError,
   MemoryStore,
+  NOTIFY_AFTER_CHOICES,
+  isHostRecord,
   loadOrCreateIdentity,
   loadSettings,
   saveSettings,
@@ -101,9 +103,85 @@ describe("settings", () => {
     expect(await loadSettings(kv)).toEqual(DEFAULT_SETTINGS);
     expect(DEFAULT_SETTINGS.confirmEveryCommand).toBe(true);
     expect(DEFAULT_SETTINGS.showCommandInNotification).toBe(false);
-    await saveSettings(kv, { ...DEFAULT_SETTINGS, deviceName: "Pixel", notifyDone: true });
-    expect(await loadSettings(kv)).toEqual({ ...DEFAULT_SETTINGS, deviceName: "Pixel", notifyDone: true });
+    await saveSettings(kv, { ...DEFAULT_SETTINGS, deviceName: "Pixel", notifyPolicy: "failures" });
+    expect(await loadSettings(kv)).toEqual({ ...DEFAULT_SETTINGS, deviceName: "Pixel", notifyPolicy: "failures" });
     kv.data.set("rift.settings", JSON.stringify({ confirmEveryCommand: "no", deviceName: "  " }));
     expect(await loadSettings(kv)).toEqual(DEFAULT_SETTINGS);
+  });
+
+  it("migrates the Phase 2 notifyDone switch: on is every long command, off is none", async () => {
+    const kv = new MemoryStore();
+    kv.data.set("rift.settings", JSON.stringify({ notifyDone: true }));
+    expect((await loadSettings(kv)).notifyPolicy).toBe("all");
+    kv.data.set("rift.settings", JSON.stringify({ notifyDone: false }));
+    expect((await loadSettings(kv)).notifyPolicy).toBe("off");
+    // a saved policy wins over a leftover boolean
+    kv.data.set("rift.settings", JSON.stringify({ notifyDone: true, notifyPolicy: "failures" }));
+    expect((await loadSettings(kv)).notifyPolicy).toBe("failures");
+    kv.data.set("rift.settings", JSON.stringify({ notifyPolicy: "loud" }));
+    expect((await loadSettings(kv)).notifyPolicy).toBe("off");
+  });
+
+  it("keeps a Notify after choice, anything else is 30 s", async () => {
+    const kv = new MemoryStore();
+    expect(DEFAULT_SETTINGS.notifyAfterMs).toBe(30_000);
+    for (const ms of NOTIFY_AFTER_CHOICES) {
+      kv.data.set("rift.settings", JSON.stringify({ notifyAfterMs: ms }));
+      expect((await loadSettings(kv)).notifyAfterMs).toBe(ms);
+    }
+    for (const bad of [0, 12_345, "30000", -1]) {
+      kv.data.set("rift.settings", JSON.stringify({ notifyAfterMs: bad }));
+      expect((await loadSettings(kv)).notifyAfterMs).toBe(30_000);
+    }
+  });
+
+  it("control keys: the old row by default; unknown and repeated ids dropped, order kept", async () => {
+    const kv = new MemoryStore();
+    expect(DEFAULT_SETTINGS.controlKeys).toEqual(["ctrl+c", "esc", "tab", "ctrl", "up", "down", "left", "right"]);
+    kv.data.set("rift.settings", JSON.stringify({ controlKeys: ["f5", "alt", "rm -rf", "f5", 7, "ctrl+z"] }));
+    expect((await loadSettings(kv)).controlKeys).toEqual(["f5", "alt", "ctrl+z"]);
+    kv.data.set("rift.settings", JSON.stringify({ controlKeys: [] }));
+    expect((await loadSettings(kv)).controlKeys).toEqual([]);
+    kv.data.set("rift.settings", JSON.stringify({ controlKeys: "esc" }));
+    expect((await loadSettings(kv)).controlKeys).toEqual(DEFAULT_SETTINGS.controlKeys);
+  });
+
+  it("ntfy: off on ntfy.sh before it existed; a saved topic and server kept, bad ones dropped", async () => {
+    const kv = new MemoryStore();
+    kv.data.set("rift.settings", JSON.stringify({ notifyPolicy: "all" }));
+    const old = await loadSettings(kv);
+    expect([old.ntfyServer, old.ntfyEnabled, old.ntfyTopic]).toEqual(["https://ntfy.sh", false, null]);
+    const on = {
+      ...DEFAULT_SETTINGS,
+      ntfyServer: "https://ntfy.example.com:8443",
+      ntfyEnabled: true,
+      ntfyTopic: "rift-x7Kq2mP9vT4wL8nR3sY6hZ",
+    };
+    await saveSettings(kv, on);
+    expect(await loadSettings(kv)).toEqual(on);
+    // on with a damaged topic loads off (the switch never shows on with nothing under it)
+    kv.data.set("rift.settings", JSON.stringify({ ...on, ntfyTopic: "a b" }));
+    const damaged = await loadSettings(kv);
+    expect([damaged.ntfyEnabled, damaged.ntfyTopic]).toEqual([false, null]);
+    // off keeps the topic for the next time it is turned on
+    await saveSettings(kv, { ...on, ntfyEnabled: false });
+    expect(await loadSettings(kv)).toEqual({ ...on, ntfyEnabled: false });
+    for (const [ntfyServer, ntfyTopic] of [
+      ["http://ntfy.example.com", "a b"],
+      ["https://ntfy.example.com/path", "x".repeat(65)],
+      ["ntfy.example.com", 7],
+      ["https://u@ntfy.example.com", ""],
+    ]) {
+      kv.data.set("rift.settings", JSON.stringify({ ntfyServer, ntfyTopic }));
+      const s = await loadSettings(kv);
+      expect([s.ntfyServer, s.ntfyTopic], String(ntfyServer)).toEqual(["https://ntfy.sh", null]);
+    }
+  });
+
+  it("a host's Notifications switch is stored with it; another value is a damaged record", () => {
+    const h = host(1);
+    expect(isHostRecord(h)).toBe(true);
+    expect(isHostRecord({ ...h, notifications: false })).toBe(true);
+    expect(isHostRecord({ ...h, notifications: "off" })).toBe(false);
   });
 });

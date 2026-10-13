@@ -29,14 +29,42 @@ export function needsAuthBeforeRun(settings: Settings): boolean {
 }
 
 /**
- * Keys that submit the line at a prompt (Return as `enter`, `ctrl+m` or `ctrl+j`), so they run a
- * command like Run does: they ask for the same authentication. Other keys do not.
+ * Whether a key can submit the line at a prompt, so it runs a command like Run does and asks
+ * for the same authentication: Return as `enter` with any modifiers, `ctrl+m` or `ctrl+j`
+ * (alt too: that is Escape then Return). Other keys do not.
  */
-export const SUBMIT_KEYS: ReadonlySet<string> = new Set(["enter", "ctrl+m", "ctrl+j"]);
+export function isSubmitKey(key: string): boolean {
+  return /^(ctrl\+)?(alt\+)?(shift\+)?enter$/.test(key) || /^ctrl\+(alt\+)?[mj]$/.test(key);
+}
 
 /** Authenticate before sending `keys`: one of them submits, and Run would ask too. */
 export function keysNeedAuth(keys: readonly string[], settings: Settings): boolean {
-  return needsAuthBeforeRun(settings) && keys.some((k) => SUBMIT_KEYS.has(k));
+  return needsAuthBeforeRun(settings) && keys.some(isSubmitKey);
+}
+
+/**
+ * The terminal view's authentication for submit keys: asked like `keysNeedAuth` says, but once
+ * the user authenticated while the pane runs a program it holds until the view closes or the
+ * app leaves the foreground (`end`), so Enter in vim does not ask every time. At the pane's
+ * prompt a submit key runs a command, so it always asks. One per terminal view.
+ */
+export class SubmitAuthHold {
+  private held = false;
+
+  /** Whether sending `keys` must authenticate first; `running`: the pane runs a program. */
+  needs(keys: readonly string[], settings: Settings, running: boolean): boolean {
+    return !(this.held && running) && keysNeedAuth(keys, settings);
+  }
+
+  /** The user authenticated; it holds only while the pane runs a program. */
+  grant(running: boolean): void {
+    this.held = running;
+  }
+
+  /** The view closed or the app left the foreground. */
+  end(): void {
+    this.held = false;
+  }
 }
 
 export type AuthResult = { ok: true } | { ok: false; message: string };

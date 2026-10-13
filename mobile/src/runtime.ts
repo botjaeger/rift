@@ -72,13 +72,13 @@ async function refreshPushToken(): Promise<void> {
     return;
   }
   if (!pushProjectId) {
-    fleet.setPushToken(null, "This build has no push project; notifications come only while the app is open.");
+    fleet.setPushToken(null, "this build has no push project.");
     return;
   }
   try {
     fleet.setPushToken((await Notifications.getExpoPushTokenAsync({ projectId: pushProjectId })).data);
   } catch (e) {
-    fleet.setPushToken(null, `The system gave no push token (${e instanceof Error ? e.message : String(e)}).`);
+    fleet.setPushToken(null, `the system gave no push token (${e instanceof Error ? e.message : String(e)}).`);
   }
 }
 
@@ -158,6 +158,9 @@ export function startPlatformWatchers(): () => void {
 
   const onAppState = (s: string) => {
     fleet.setAppActive(s === "active");
+    // `inactive` (Face ID prompt, Control Center, the first step to the background on iOS) is
+    // still on screen; only `background` tells the computers to post about the followed pane.
+    if (s === "active" || s === "background") fleet.setVisible(s === "active");
     if (s === "active") {
       appLock.enter();
       connectivity.appState("active");

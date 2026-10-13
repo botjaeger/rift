@@ -8,7 +8,10 @@ import {
   isClientHello,
   isClientMsg,
   isGatewayHello,
+  isKeyName,
+  isNtfyUrl,
   parseServerFrame,
+  textProblem,
   type ClientMsg,
 } from "../src/protocol/types";
 
@@ -33,12 +36,16 @@ describe("server fixtures", () => {
       "done",
       "error",
       "older",
+      "output",
       "pong",
+      "screen",
+      "screen_end",
       "snapshot",
       "topology",
       "update",
       "welcome",
     ]);
+    expect(server).toHaveLength(15);
   });
 
   it.each(server.map((f) => [f.name, f.json] as const))("decodes %s", (_name, json) => {
@@ -56,12 +63,17 @@ describe("client fixtures", () => {
       "keys",
       "notify",
       "older",
+      "output",
       "ping",
       "push",
       "run",
+      "screen",
       "subscribe",
+      "text",
       "unsubscribe",
+      "visible",
     ]);
+    expect(client).toHaveLength(17);
   });
 
   it.each(client.map((f) => [f.name, f.json] as const))("%s is a ClientMsg", (_name, json) => {
@@ -107,7 +119,7 @@ describe("client message checks", () => {
     ["keys with no keys", { t: "keys", id: "k1", pane: 1, keys: [] }],
     ["keys with 21 keys", { t: "keys", id: "k1", pane: 1, keys: Array(21).fill("up") }],
     ["the v1 hello", { t: "hello", v: 1, token: "x" }],
-    ["push with an FCM token", { t: "push", token: "fcm:abc", long_ms: null, show_command: false }],
+    ["push with an FCM token", { t: "push", token: "fcm:abc", long_ms: null, show_command: false, failures_only: false }],
     [
       "push with an empty token",
       {
@@ -115,6 +127,7 @@ describe("client message checks", () => {
         token: "ExponentPushToken[]",
         long_ms: null,
         show_command: false,
+        failures_only: false,
       },
     ],
     [
@@ -124,12 +137,110 @@ describe("client message checks", () => {
         token: "ExpoPushToken[a]",
         long_ms: 86_400_001,
         show_command: false,
+        failures_only: false,
       },
     ],
-    ["push without show_command", { t: "push", token: null, long_ms: null }],
+    ["push without show_command", { t: "push", token: null, long_ms: null, failures_only: false }],
+    ["push without failures_only", { t: "push", token: null, long_ms: null, show_command: false }],
     ["notify without a pane", { t: "notify" }],
+    ["visible without on", { t: "visible" }],
+    ["visible with a string", { t: "visible", on: "false" }],
   ])("rejects %s", (_name, msg) => {
     expect(isClientMsg(msg)).toBe(false);
+  });
+
+  it.each([
+    "http://ntfy.sh/topic",
+    "https://ntfy.sh/",
+    "https://u:p@ntfy.sh/topic",
+    "https://ntfy.sh/topic?x=1",
+    "https://ntfy.sh/topic#x",
+    "https://ntfy.sh/a/b",
+    "https://ntfy.sh:0/topic",
+    "https://ntfy.sh:65536/topic",
+    "https://-ntfy.sh/topic",
+    "https://ntfy..sh/topic",
+    `https://ntfy.sh/${"a".repeat(65)}`,
+    `https://${"h".repeat(200)}.com/t`,
+    // request forgery: local names and special IPv4 addresses (as push.rs refuses them)
+    "https://localhost/t",
+    "https://LocalHost:8080/t",
+    "https://ntfy.localhost/t",
+    "https://127.0.0.1/t",
+    "https://127.9.9.9:443/t",
+    "https://0.0.0.0/t",
+    "https://0.1.2.3/t",
+    "https://169.254.169.254/t",
+    "https://255.255.255.255/t",
+    "https://224.0.0.1/t",
+    "https://239.255.255.250/t",
+    "https://127.1/t",
+    "https://2130706433/t",
+    "https://0x7f.0.0.1/t",
+    "https://0177.0.0.1/t",
+    "https://ntfy.256/t",
+  ])("rejects push with the ntfy URL %s", (ntfy) => {
+    expect(isNtfyUrl(ntfy)).toBe(false);
+    expect(isClientMsg({ t: "push", token: null, ntfy, long_ms: null, show_command: false, failures_only: false })).toBe(false);
+  });
+
+  it.each([
+    ["text with a line break", { t: "text", id: "x1", pane: 1, text: ":wq\n" }],
+    ["text with an escape", { t: "text", id: "x1", pane: 1, text: "\u001b:q" }],
+    ["empty text", { t: "text", id: "x1", pane: 1, text: "" }],
+    ["text over 1 KiB", { t: "text", id: "x1", pane: 1, text: "é".repeat(513) }],
+    ["text without an id", { t: "text", pane: 1, text: "a" }],
+    ["screen with an unknown mode", { t: "screen", pane: 1, mode: "always" }],
+    ["screen without a pane", { t: "screen", mode: "on" }],
+    ["output asking for no lines", { t: "output", id: "o1", pane: 1, block: 2, from: 0, limit: 0 }],
+    ["output asking for 501 lines", { t: "output", id: "o1", pane: 1, block: 2, from: 0, limit: 501 }],
+    ["output from a negative line", { t: "output", id: "o1", pane: 1, block: 2, from: -1, limit: 10 }],
+  ])("rejects %s", (_name, msg) => {
+    expect(isClientMsg(msg)).toBe(false);
+  });
+
+  it("text: one line without control characters, at most 1 KiB of UTF-8", () => {
+    expect(isClientMsg({ t: "text", id: "x1", pane: 1, text: "é".repeat(512) })).toBe(true);
+    expect(textProblem("ü:wq")).toBeNull();
+    expect(textProblem("a\tb")).toBe("control");
+    expect(textProblem("\u007f")).toBe("control");
+    // C1 controls too: the gateway refuses them (char::is_control)
+    expect(textProblem("a\u009bb")).toBe("control");
+    expect(textProblem("\u0080")).toBe("control");
+    expect(textProblem("\u00a0é")).toBeNull();
+    expect(textProblem("x".repeat(1025))).toBe("too_long");
+    expect(textProblem("")).toBe("empty");
+    expect(isClientMsg({ t: "output", id: "o1", pane: 1, block: 2, from: 40, limit: 500 })).toBe(true);
+    expect(isClientMsg({ t: "screen", pane: 1, mode: "off" })).toBe(true);
+  });
+
+  it("push: an ntfy URL like the gateway's valid_ntfy, or none (left out for older gateways)", () => {
+    const push = (ntfy?: string | null) => ({
+      t: "push",
+      token: null,
+      ...(ntfy !== undefined ? { ntfy } : {}),
+      long_ms: null,
+      show_command: false,
+      failures_only: false,
+    });
+    for (const ok of [
+      "https://ntfy.sh/rift-x7Kq2mP9vT4wL8nR3sY6hZ",
+      "https://ntfy.example.com:8443/a_b-C",
+      "https://10.0.0.2/t",
+      "https://192.168.1.20:8080/t",
+      "https://172.16.0.5/t",
+      "https://100.101.102.103/t",
+      "https://localhost.example.com/t",
+      "https://ntfy.my-tailnet.ts.net/t",
+      "https://8.8.8.8/t",
+      `https://ntfy.sh/${"a".repeat(64)}`,
+    ]) {
+      expect(isNtfyUrl(ok), ok).toBe(true);
+      expect(isClientMsg(push(ok)), ok).toBe(true);
+    }
+    expect(isClientMsg(push(null))).toBe(true);
+    expect(isClientMsg(push())).toBe(true);
+    expect(isClientMsg(push(5 as never))).toBe(false);
   });
 
   it("commandProblem names the problem", () => {
@@ -137,7 +248,118 @@ describe("client message checks", () => {
     expect(commandProblem("x".repeat(2048))).toBeNull();
     expect(commandProblem("é".repeat(1025))).toBe("too_long"); // 2050 UTF-8 bytes
     expect(commandProblem("a\tb")).toBe("control");
+    expect(commandProblem("ls\u0085x")).toBe("control");
+    expect(commandProblem("ls\u009f")).toBe("control");
     expect(commandProblem("")).toBe("empty");
+  });
+});
+
+describe("isKeyName (the key grammar)", () => {
+  it.each([
+    "esc",
+    "tab",
+    "enter",
+    "backspace",
+    "delete",
+    "insert",
+    "up",
+    "down",
+    "left",
+    "right",
+    "home",
+    "end",
+    "pageup",
+    "pagedown",
+    "f1",
+    "f12",
+    "shift+tab",
+    "ctrl+c",
+    "ctrl+z",
+    "alt+b",
+    "ctrl+alt+x",
+    "ctrl+space",
+    "alt+space",
+    "ctrl+alt+delete",
+    "shift+f5",
+    "ctrl+alt+shift+up",
+    "ctrl+shift+enter",
+    "alt+shift+f12",
+  ])("accepts %s", (name) => {
+    expect(isKeyName(name)).toBe(true);
+  });
+
+  it.each([
+    ["a plain letter (text)", "a"],
+    ["plain space (text)", "space"],
+    ["an upper-case letter", "ctrl+A"],
+    ["modifiers out of order", "shift+ctrl+c"],
+    ["alt before ctrl", "alt+ctrl+c"],
+    ["a repeated modifier", "ctrl+ctrl+c"],
+    ["shift with a letter", "shift+a"],
+    ["ctrl+shift with a letter", "ctrl+shift+a"],
+    ["a digit", "ctrl+1"],
+    ["f13", "f13"],
+    ["f0", "f0"],
+    ["a bare modifier", "ctrl"],
+    ["a dangling plus", "ctrl+"],
+    ["an unknown name", "escape"],
+    ["a capitalised name", "Esc"],
+    ["meta", "meta+c"],
+    ["empty", ""],
+    ["a symbol", "ctrl+["],
+  ])("rejects %s", (_why, name) => {
+    expect(isKeyName(name)).toBe(false);
+  });
+
+  it("the keys fixture is all valid names, and keys reject one bad name among good ones", () => {
+    expect(isClientMsg({ t: "keys", id: "k1", pane: 1, keys: ["ctrl+c", "shift+a"] })).toBe(false);
+  });
+});
+
+describe("decodeServer Phase 3", () => {
+  const screen = server.find((f) => f.name === "screen.json")!.json as Record<string, unknown>;
+
+  it("a welcome without features decodes with none", () => {
+    const w = { t: "welcome", v: 2, host: "h", os: "macos", version: "0", device: "d", permission: "operate" };
+    expect(decodeServer(w)).toEqual({ ...w, features: [] });
+    expect(decodeServer({ ...w, features: ["screen", "future"] })).toMatchObject({ features: ["screen", "future"] });
+  });
+
+  it.each([
+    ["welcome with features not a list", { t: "welcome", v: 2, host: "h", os: "m", version: "0", device: "d", permission: "view", features: "screen" }],
+    ["welcome with a non-string feature", { t: "welcome", v: 2, host: "h", os: "m", version: "0", device: "d", permission: "view", features: [1] }],
+    ["screen wider than 300 columns", { ...screen, cols: 301 }],
+    ["screen taller than 120 rows", { ...screen, rows: 121 }],
+    ["screen row past its rows", { ...screen, lines: [[24, []]] }],
+    ["screen run with an upper-case colour", { ...screen, lines: [[0, [["x", "1E1E1E", null, 0]]]] }],
+    ["screen run with a short colour", { ...screen, lines: [[0, [["x", "fff", null, 0]]]] }],
+    ["screen run with three fields", { ...screen, lines: [[0, [["x", null, null]]]] }],
+    ["screen run with negative flags", { ...screen, lines: [[0, [["x", null, null, -1]]]] }],
+    ["screen with a cursor of one number", { ...screen, cursor: [3] }],
+    ["screen with the cursor below its rows", { ...screen, cursor: [24, 0] }],
+    ["screen with the cursor past its columns", { ...screen, cursor: [0, 80] }],
+    ["screen with a huge cursor column", { ...screen, cursor: [0, 1e12] }],
+    ["screen row with more than two characters per column", { ...screen, lines: [[0, [["x".repeat(100), null, null, 0], ["y".repeat(61), null, null, 0]]]] }],
+    ["screen without full", { ...screen, full: undefined }],
+    ["screen_end without a pane", { t: "screen_end" }],
+    ["output without total", { t: "output", id: "o1", pane: 1, block: 2, from: 0, text: "" }],
+    ["output with a text that is not a string", { t: "output", id: "o1", pane: 1, block: 2, from: 0, text: 3, total: 1 }],
+  ])("rejects %s", (_name, json) => {
+    expect(decodeServer(json)).toBeNull();
+  });
+
+  it("accepts a hidden cursor and an unstyled full screen", () => {
+    expect(decodeServer({ ...screen, cursor: null, full: true, lines: [[0, [["top", null, null, 0]]]] })).not.toBeNull();
+  });
+
+  it("accepts the cursor in the last cell and a row of exactly two characters per column", () => {
+    expect(decodeServer({ ...screen, cursor: [23, 79] })).not.toBeNull();
+    expect(decodeServer({ ...screen, lines: [[0, [["x".repeat(100), null, null, 0], ["😀".repeat(60), null, null, 0]]]] })).not.toBeNull();
+  });
+
+  it("a no_block refusal is an ack error", () => {
+    const ack = server.find((f) => f.name === "ack-no-block.json")!.json;
+    expect(decodeServer(ack)).toMatchObject({ ok: false, error: "no_block" });
   });
 });
 

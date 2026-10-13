@@ -1,11 +1,14 @@
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { ScrollView, StyleSheet, Text, View } from "react-native";
+import { ntfyUnsupported } from "@/fleet";
 import { pathLabel } from "@/protocol/relay";
 import { fleet, useApp } from "@/runtime";
 import { Button } from "@/ui/Button";
 import { HostTree } from "@/ui/HostTree";
 import { osName } from "@/ui/format";
 import { ErrorText } from "@/ui/Notice";
+import { SwitchRow } from "@/ui/Rows";
+import { Section } from "@/ui/Screen";
 import { StatusLine } from "@/ui/StatusLine";
 import { colors, mono, radius } from "@/ui/theme";
 
@@ -63,6 +66,23 @@ export default function HostScreen() {
           })
         }
       />
+      <Section
+        footer={
+          (s.settings.notifyPolicy === "off"
+            ? "Notifications are off in Settings › Notifications; only “Notify me” notifies."
+            : "Finished commands on this computer, as Settings › Notifications says. Off: only “Notify me”.") +
+          (s.settings.ntfyEnabled && ntfyUnsupported([host]).length > 0
+            ? " Update Rift on this computer to get its alerts through ntfy."
+            : "")
+        }
+      >
+        <SwitchRow
+          first
+          label="Notifications"
+          value={host.record.notifications !== false}
+          onChange={(v) => void fleet.setHostNotifications(host.record.key, v)}
+        />
+      </Section>
     </ScrollView>
   );
 }

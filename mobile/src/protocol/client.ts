@@ -26,6 +26,10 @@ import {
   type ErrorMsg,
   type GatewayHello,
   type OlderMsg,
+  type OutputMsg,
+  type ScreenEndMsg,
+  type ScreenMode,
+  type ScreenMsg,
   type ServerMsg,
   type SnapshotMsg,
   type TopologyMsg,
@@ -50,6 +54,18 @@ export const LAN_HANDSHAKE_TIMEOUT_MS = 1_500;
 export const RELAY_HANDSHAKE_TIMEOUT_MS = 12_000;
 export const BACKOFF_BASE_MS = 500;
 export const BACKOFF_CAP_MS = 10_000;
+/**
+ * `keys` and `text` messages per second per connection: the gateway's KEYS_RATE (20 within any
+ * second; `text` counts against it). Sends past it wait in order, never dropped.
+ */
+export const INPUT_RATE = 20;
+/** The window the client counts INPUT_RATE in: a second plus a margin for network jitter. */
+export const INPUT_WINDOW_MS = 1_100;
+/**
+ * After a re-subscribe a screen that was showing is kept (marked stale) until the gateway sends
+ * the next one; when none comes by then, the program has left the screen meanwhile.
+ */
+export const SCREEN_RESUME_MS = 5_000;
 
 /** The subset of the WebSocket API the client uses (the React Native global, or a fake). */
 export interface SocketLike {
@@ -103,7 +119,20 @@ export interface ClientEvents {
   onAck?(msg: AckMsg): void;
   onDone?(msg: DoneMsg): void;
   onError?(msg: ErrorMsg): void;
+  /**
+   * The subscribed pane's screen, or its end. A `screen_end` is also reported (with nothing
+   * received) when a re-subscribe stopped the screens it was showing and none came back within
+   * SCREEN_RESUME_MS (`synthetic` true).
+   */
+  onScreen?(msg: ScreenMsg | ScreenEndMsg, synthetic?: boolean): void;
+  /** A re-subscribe or reconnect: the screen on display is out of date until the next one. */
+  onScreenStale?(pane: number): void;
 }
+
+/** An `output` request that has not been answered by then fails with `timeout`. */
+export const OUTPUT_TIMEOUT_MS = 10_000;
+
+export type OutputResult = { ok: true; msg: OutputMsg } | { ok: false; code: string; message: string };
 
 export interface ClientOptions {
   /** `host:port` addresses, tried in order. */
@@ -201,6 +230,29 @@ export class RiftClient {
   private lastSeq: number | null = null;
   /** A re-subscribe for a gap is in flight; further gaps wait for it. */
   private resyncing = false;
+  /** The screen mode wanted for the current subscription; sent again after every (re)subscribe. */
+  private screenMode: ScreenMode = "off";
+  /** A screen of the current subscription is showing (no `screen_end` since). */
+  private screenLive = false;
+  /** Waits for a screen after a re-subscribe ([SCREEN_RESUME_MS]). */
+  private screenResumeTimer: ReturnType<typeof setTimeout> | null = null;
+  /** When the last INPUT_RATE `keys` / `text` messages went out (epoch ms). */
+  private inputTimes: number[] = [];
+  /** `keys` / `text` messages waiting for the rate, in order. */
+  private inputQueue: ClientMsg[] = [];
+  private inputTimer: ReturnType<typeof setTimeout> | null = null;
+  /** `output` requests waiting for their answer, by id, with what was asked. */
+  private readonly outputs = new Map<
+    string,
+    {
+      resolve: (r: OutputResult) => void;
+      timer: ReturnType<typeof setTimeout>;
+      pane: number;
+      block: number;
+      from: number;
+      limit: number;
+    }
+  >();
 
   constructor(opts: ClientOptions) {
     if (opts.addresses.length === 0) throw new Error("no gateway address");
@@ -292,6 +344,8 @@ export class RiftClient {
     if (this.pane !== pane) {
       this.pane = pane;
       this.lastSeq = null;
+      this.screenMode = "off";
+      this.screenLive = false;
     }
     this.resyncing = false;
     this.sendSubscribe();
@@ -301,7 +355,99 @@ export class RiftClient {
     this.pane = null;
     this.lastSeq = null;
     this.resyncing = false;
+    this.screenMode = "off";
+    this.screenLive = false;
+    this.stopScreenResume();
     if (this.authed) this.send({ t: "unsubscribe" });
+  }
+
+  /**
+   * Sets what the gateway sends of the subscribed pane's screen; remembered for this
+   * subscription and sent again after every re-subscribe and reconnect (which reset it to
+   * `off` on the gateway). False when `pane` is not the subscribed pane.
+   */
+  setScreen(pane: number, mode: ScreenMode): boolean {
+    if (pane !== this.pane) return false;
+    if (mode === this.screenMode) return true;
+    this.screenMode = mode;
+    if (this.authed) this.send({ t: "screen", pane, mode });
+    return true;
+  }
+
+  /**
+   * Types printable text into the pane's program; returns the `ack` id, or null when not sent.
+   * Paced with `keys` (INPUT_RATE): it may go out a moment later.
+   */
+  text(pane: number, text: string): string | null {
+    if (!this.authed) return null;
+    const id = `x${++this.idN}`;
+    return this.sendInput({ t: "text", id, pane, text }) ? id : null;
+  }
+
+  /**
+   * Milliseconds until a `keys` / `text` message would go out (0: at once). Input that can wait
+   * (the terminal view's) waits for this, merging what is typed meanwhile.
+   */
+  get inputDelayMs(): number {
+    const wait = this.inputWait();
+    return this.inputQueue.length > 0 ? Math.max(1, wait) : wait;
+  }
+
+  private inputWait(): number {
+    const now = Date.now();
+    while (this.inputTimes.length > 0 && now - this.inputTimes[0]! >= INPUT_WINDOW_MS) this.inputTimes.shift();
+    return this.inputTimes.length < INPUT_RATE ? 0 : this.inputTimes[0]! + INPUT_WINDOW_MS - now;
+  }
+
+  /** Queues a `keys` / `text` message and sends what the rate allows; false when it cannot be sent. */
+  private sendInput(msg: ClientMsg): boolean {
+    if (!this.sendCipher || utf8Encode(JSON.stringify(msg)).length > MAX_CLIENT_MESSAGE_BYTES) return false;
+    this.inputQueue.push(msg);
+    this.drainInput();
+    return true;
+  }
+
+  private drainInput(): void {
+    while (this.inputQueue.length > 0) {
+      const wait = this.inputWait();
+      if (wait > 0) {
+        this.inputTimer ??= setTimeout(() => {
+          this.inputTimer = null;
+          this.drainInput();
+        }, wait);
+        return;
+      }
+      this.inputTimes.push(Date.now());
+      this.send(this.inputQueue.shift()!);
+    }
+  }
+
+  /**
+   * Asks for `limit` lines of a block's output from line `from` on. Resolves with the answer,
+   * or with `no_block` / `no_pane` / `rate` (the gateway's `ack`), `timeout`, or
+   * `disconnected` (not connected, or the connection dropped before the answer).
+   */
+  output(pane: number, block: number, from: number, limit: number): Promise<OutputResult> {
+    const id = this.authed ? `o${++this.idN}` : null;
+    if (id === null || !this.send({ t: "output", id, pane, block, from, limit })) {
+      return Promise.resolve({ ok: false, code: "disconnected", message: "not connected" });
+    }
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.outputs.delete(id);
+        resolve({ ok: false, code: "timeout", message: "no answer" });
+      }, OUTPUT_TIMEOUT_MS);
+      this.outputs.set(id, { resolve, timer, pane, block, from, limit });
+    });
+  }
+
+  private settleOutput(id: string, r: OutputResult): boolean {
+    const p = this.outputs.get(id);
+    if (!p) return false;
+    this.outputs.delete(id);
+    clearTimeout(p.timer);
+    p.resolve(r);
+    return true;
   }
 
   /** Asks for up to 30 blocks older than block id `before` in the subscribed pane. */
@@ -316,24 +462,43 @@ export class RiftClient {
     return this.send({ t: "run", id, pane, command }) ? id : null;
   }
 
-  /** Sends keys to a pane; returns the `ack` id, or null when not connected or not sendable. */
+  /**
+   * Sends keys to a pane; returns the `ack` id, or null when not connected or not sendable.
+   * Paced (INPUT_RATE): it may go out a moment later.
+   */
   keys(pane: number, keys: string[]): string | null {
     if (!this.authed) return null;
     const id = `k${++this.idN}`;
-    return this.send({ t: "keys", id, pane, keys }) ? id : null;
+    return this.sendInput({ t: "keys", id, pane, keys }) ? id : null;
   }
 
-  /** Registers (or with a null token stops) alerts while the app is closed; false when not connected. */
-  setPush(reg: { token: string | null; longMs: number | null; showCommand: boolean }): boolean {
+  /**
+   * Registers (or with neither a token nor an ntfy URL stops) alerts while the app is closed; false
+   * when not connected. `ntfy` undefined leaves the field out (a gateway without `push_ntfy`).
+   */
+  setPush(reg: {
+    token: string | null;
+    ntfy?: string | null;
+    longMs: number | null;
+    showCommand: boolean;
+    failuresOnly: boolean;
+  }): boolean {
     return (
       this.authed &&
       this.send({
         t: "push",
         token: reg.token,
+        ...(reg.ntfy !== undefined ? { ntfy: reg.ntfy } : {}),
         long_ms: reg.longMs,
         show_command: reg.showCommand,
+        failures_only: reg.failuresOnly,
       })
     );
+  }
+
+  /** Tells the gateway whether the app is on screen (`push_ntfy` gateways only); false when not connected. */
+  setVisible(on: boolean): boolean {
+    return this.authed && this.send({ t: "visible", on });
   }
 
   /** Asks for an alert when the next command in `pane` finishes; false when not connected. */
@@ -513,7 +678,33 @@ export class RiftClient {
         if (msg.pane === this.pane) this.events.onPane?.(msg);
         return;
       case "ack":
+        // an `output` request is refused with an `ack` carrying its id
+        if (!msg.ok && this.settleOutput(msg.id, { ok: false, code: msg.error ?? "error", message: msg.message ?? "" }))
+          return;
         this.events.onAck?.(msg);
+        return;
+      case "output": {
+        // an answer for another pane or block, or starting past the range asked for, is bad data
+        const p = this.outputs.get(msg.id);
+        if (!p) return;
+        const fits = msg.pane === p.pane && msg.block === p.block && msg.from <= p.from + p.limit;
+        this.settleOutput(
+          msg.id,
+          fits ? { ok: true, msg } : { ok: false, code: "bad_data", message: "The computer's answer did not fit the request." },
+        );
+        return;
+      }
+      case "screen":
+        if (msg.pane !== this.pane) return;
+        this.screenLive = true;
+        this.stopScreenResume();
+        this.events.onScreen?.(msg);
+        return;
+      case "screen_end":
+        if (msg.pane !== this.pane) return;
+        this.screenLive = false;
+        this.stopScreenResume();
+        this.events.onScreen?.(msg);
         return;
       case "done":
         this.events.onDone?.(msg);
@@ -548,7 +739,30 @@ export class RiftClient {
 
   private sendSubscribe(): void {
     if (this.pane === null || !this.authed) return;
-    this.send({ t: "subscribe", pane: this.pane, after: this.lastSeq });
+    const pane = this.pane;
+    this.send({ t: "subscribe", pane, after: this.lastSeq });
+    // A subscribe stops the screens silently and resets the mode to `off`: ask again. The
+    // screen on display stays, out of date, until the next one (a full one follows while the
+    // program is still up); when none comes, it has ended meanwhile.
+    if (this.screenLive) {
+      this.events.onScreenStale?.(pane);
+      this.stopScreenResume();
+      if (this.screenMode === "off") this.endScreen(pane);
+      else this.screenResumeTimer = setTimeout(() => this.endScreen(pane), SCREEN_RESUME_MS);
+    }
+    if (this.screenMode !== "off") this.send({ t: "screen", pane, mode: this.screenMode });
+  }
+
+  private endScreen(pane: number): void {
+    this.screenResumeTimer = null;
+    if (!this.screenLive || pane !== this.pane) return;
+    this.screenLive = false;
+    this.events.onScreen?.({ t: "screen_end", pane }, true);
+  }
+
+  private stopScreenResume(): void {
+    if (this.screenResumeTimer) clearTimeout(this.screenResumeTimer);
+    this.screenResumeTimer = null;
   }
 
   /** Encrypts and sends one protocol message. False when there is no channel or it is too large. */
@@ -652,7 +866,15 @@ export class RiftClient {
     if (this.idleTimer) clearTimeout(this.idleTimer);
     if (this.retryTimer) clearTimeout(this.retryTimer);
     if (this.handshakeTimer) clearTimeout(this.handshakeTimer);
-    this.pingTimer = this.idleTimer = this.retryTimer = this.handshakeTimer = null;
+    if (this.inputTimer) clearTimeout(this.inputTimer);
+    this.pingTimer = this.idleTimer = this.retryTimer = this.handshakeTimer = this.inputTimer = null;
+    // input waiting for the rate belonged to this connection: its requests fail as disconnected
+    this.inputQueue = [];
+    this.inputTimes = [];
+    this.stopScreenResume();
+    // answers to requests on this socket never come
+    for (const id of [...this.outputs.keys()])
+      this.settleOutput(id, { ok: false, code: "disconnected", message: "the connection dropped" });
     if (ws) {
       ws.onopen = ws.onmessage = ws.onerror = ws.onclose = null;
       try {

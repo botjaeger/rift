@@ -30,7 +30,8 @@ pub struct ClientHello {
     pub pair: Option<String>,
 }
 
-/// What a paired device may do: `view` gets `forbidden` for `run`/`keys`.
+/// What a paired device may do: `view` gets `forbidden` for `run` / `keys`
+/// / `text`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Permission {
@@ -89,20 +90,116 @@ pub enum ClientMsg {
     Ping {
         n: u64,
     },
-    /// Where to alert while the app is closed: an Expo push token, or
-    /// `null` to stop. `long_ms`: alert for every command at least this
-    /// long (`null`: only for `notify`). No reply.
+    /// Whether the app is on screen (`push_ntfy` gateways; a new connection
+    /// starts visible). While it is not, the pane it follows gets ntfy
+    /// alerts again: a backgrounded app keeps its socket for a while but
+    /// cannot notify. No reply.
+    Visible {
+        on: bool,
+    },
+    /// Where to alert while the app is closed: an Expo push token, an ntfy
+    /// topic URL, both, or neither (`null` both: stop). `long_ms`: alert
+    /// for every command at least this long (`null`: only for `notify`).
+    /// No reply.
     Push {
         token: Option<String>,
+        /// `https://<host>[:port]/<topic>` (`push_ntfy` feature; older
+        /// clients leave it out).
+        #[serde(default)]
+        ntfy: Option<String>,
         long_ms: Option<u64>,
         #[serde(default)]
         show_command: bool,
+        /// The `long_ms` alerts only for commands that failed.
+        #[serde(default)]
+        failures_only: bool,
     },
     /// Alert when the next command in `pane` finishes, whatever its length
-    /// ("Notify me"). Needs a `push` token. No reply.
+    /// ("Notify me"). Needs a `push` registration. No reply.
     Notify {
         pane: u64,
     },
+    /// Type printable text (one line, no control characters) into the
+    /// program running in `pane`.
+    Text {
+        id: String,
+        pane: u64,
+        text: String,
+    },
+    /// What to send of the subscribed pane's terminal screen.
+    Screen {
+        pane: u64,
+        mode: ScreenMode,
+    },
+    /// Lines `from` … `from + limit - 1` of a block's output.
+    Output {
+        id: String,
+        pane: u64,
+        block: u64,
+        from: u64,
+        limit: usize,
+    },
+}
+
+/// `screen` modes: never, while the pane shows the alternate screen, or
+/// always.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScreenMode {
+    #[default]
+    Off,
+    Auto,
+    On,
+}
+
+/// A run of equally styled cells of a `screen` row; on the wire the array
+/// `[text, fg, bg, flags]`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "RunArray", into = "RunArray")]
+pub struct Run {
+    pub text: String,
+    /// `"rrggbb"`, or `None` for the default foreground / background.
+    pub fg: Option<String>,
+    pub bg: Option<String>,
+    /// [`Run::BOLD`] | [`Run::ITALIC`] | …
+    pub flags: u8,
+}
+
+type RunArray = (String, Option<String>, Option<String>, u8);
+
+impl Run {
+    pub const BOLD: u8 = 1;
+    pub const ITALIC: u8 = 2;
+    pub const UNDERLINE: u8 = 4;
+    pub const DIM: u8 = 8;
+    pub const STRIKE: u8 = 16;
+
+    /// Text in the default style.
+    pub fn plain(text: impl Into<String>) -> Run {
+        Run {
+            text: text.into(),
+            fg: None,
+            bg: None,
+            flags: 0,
+        }
+    }
+}
+
+impl From<RunArray> for Run {
+    fn from((text, fg, bg, flags): RunArray) -> Run {
+        Run {
+            text,
+            fg,
+            bg,
+            flags,
+        }
+    }
+}
+
+impl From<Run> for RunArray {
+    fn from(r: Run) -> RunArray {
+        (r.text, r.fg, r.bg, r.flags)
+    }
 }
 
 /// Gateway → client.
@@ -117,6 +214,10 @@ pub enum ServerMsg {
         /// This device's id in the desktop's paired devices.
         device: String,
         permission: Permission,
+        /// What the gateway serves beyond Phase 2 (`screen`, `text`,
+        /// `output`); none when absent.
+        #[serde(default)]
+        features: Vec<String>,
     },
     Topology {
         windows: Vec<Window>,
@@ -138,7 +239,8 @@ pub enum ServerMsg {
         blocks: Vec<Block>,
         has_older: bool,
     },
-    /// The answer to `run` / `keys` with the client's `id`.
+    /// The answer to `run` / `keys` / `text` (and a refused `output`) with
+    /// the client's `id`.
     Ack {
         id: String,
         ok: bool,
@@ -161,6 +263,33 @@ pub enum ServerMsg {
     Error {
         code: ErrorCode,
         message: String,
+    },
+    /// The subscribed pane's screen: every row when `full`, else the rows
+    /// that changed since the previous one (`[row, runs]`).
+    Screen {
+        pane: u64,
+        cols: u16,
+        rows: u16,
+        alt: bool,
+        /// `[row, column]` while the program shows its cursor.
+        cursor: Option<[u16; 2]>,
+        full: bool,
+        lines: Vec<(u16, Vec<Run>)>,
+    },
+    /// Screens of `pane` stopped (left the alternate screen in `auto`, or
+    /// `off`).
+    ScreenEnd {
+        pane: u64,
+    },
+    /// The answer to `output`: lines from `from` on.
+    Output {
+        id: String,
+        pane: u64,
+        block: u64,
+        from: u64,
+        text: String,
+        /// The block's output lines so far.
+        total: u64,
     },
 }
 
@@ -238,6 +367,7 @@ pub enum ErrorCode {
     Busy,
     Forbidden,
     NoPane,
+    NoBlock,
     TooLarge,
     Rate,
 }
@@ -323,7 +453,7 @@ mod tests {
     #[test]
     fn every_client_fixture_round_trips() {
         let all = fixtures("client");
-        assert_eq!(all.len(), 11, "client fixtures");
+        assert_eq!(all.len(), 17, "client fixtures");
         for (name, value) in all {
             let msg: ClientMsg =
                 serde_json::from_value(value.clone()).unwrap_or_else(|e| panic!("{name}: {e}"));
@@ -334,7 +464,7 @@ mod tests {
     #[test]
     fn every_server_fixture_round_trips() {
         let all = fixtures("server");
-        assert_eq!(all.len(), 11, "server fixtures");
+        assert_eq!(all.len(), 15, "server fixtures");
         for (name, value) in all {
             let msg: ServerMsg =
                 serde_json::from_value(value.clone()).unwrap_or_else(|e| panic!("{name}: {e}"));
@@ -389,10 +519,30 @@ mod tests {
             r#"{"t":"hello","v":1,"token":"x"}"#,
             r#"{"t":"run","pane":1,"command":"ls"}"#,
             r#"{"t":"keys","id":"k","pane":1}"#,
+            r#"{"t":"text","pane":1,"text":"x"}"#,
+            r#"{"t":"screen","pane":1,"mode":"always"}"#,
+            r#"{"t":"screen","pane":1}"#,
+            r#"{"t":"output","id":"o","pane":1,"block":2,"from":0}"#,
+            r#"{"t":"output","id":"o","pane":1,"block":2,"from":-1,"limit":5}"#,
             "not json",
         ] {
             assert!(serde_json::from_str::<ClientMsg>(bad).is_err(), "{bad}");
         }
+        // Phase 2 clients leave `failures_only` (and `ntfy`) out: every long
+        // command alerts, through Expo only
+        assert_eq!(
+            serde_json::from_str::<ClientMsg>(
+                r#"{"t":"push","token":null,"long_ms":null,"show_command":false}"#
+            )
+            .unwrap(),
+            ClientMsg::Push {
+                token: None,
+                ntfy: None,
+                long_ms: None,
+                show_command: false,
+                failures_only: false
+            }
+        );
         // `after` may be omitted: a fresh subscription
         assert_eq!(
             serde_json::from_str::<ClientMsg>(r#"{"t":"subscribe","pane":3}"#).unwrap(),
@@ -401,5 +551,27 @@ mod tests {
                 after: None
             }
         );
+    }
+
+    #[test]
+    fn phase_two_gateways_have_no_features_and_runs_are_arrays() {
+        // a welcome without `features` (an older gateway) serves none of them
+        let w: ServerMsg = serde_json::from_str(
+            r#"{"t":"welcome","v":2,"host":"h","os":"linux","version":"0","device":"d","permission":"view"}"#,
+        )
+        .unwrap();
+        assert!(matches!(w, ServerMsg::Welcome { features, .. } if features.is_empty()));
+        let run = Run {
+            text: "ok".into(),
+            fg: Some("e5c07b".into()),
+            bg: None,
+            flags: Run::BOLD | Run::UNDERLINE,
+        };
+        assert_eq!(
+            serde_json::to_string(&run).unwrap(),
+            r#"["ok","e5c07b",null,5]"#
+        );
+        assert!(serde_json::from_str::<Run>(r#"["ok",null,null]"#).is_err());
+        assert!(serde_json::from_str::<Run>(r#"{"text":"ok"}"#).is_err());
     }
 }

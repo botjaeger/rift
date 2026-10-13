@@ -5,17 +5,30 @@
 
 import { fromBase64Url } from "./noise/bytes";
 import type { KeyPair, RandomBytes } from "./noise/noise";
-import { LONG_COMMAND_MS, notificationText, shouldNotify } from "./notify";
+import { emptyEarlier, fetchRange, mergeRange, nextRequest, type EarlierOutput } from "./earlier";
+import {
+  newNtfyTopic,
+  normalizeNtfyServer,
+  notificationText,
+  ntfyUrl,
+  pushCovers,
+  pushRegistration,
+  shouldNotify,
+  type PushRegistration,
+} from "./notify";
 import type { PairLink } from "./pairing";
 import { BatchedStore } from "./protocol/batch";
+import { MAX_OUTPUT_LINES } from "./protocol/types";
 import { RiftClient, type ConnState, type Failure, type SocketFactory } from "./protocol/client";
-import { canLoadOlder, reducePane, type PaneState } from "./protocol/store";
+import { canLoadOlder, reducePane, reduceScreen, staleScreen, type PaneState, type ScreenState } from "./protocol/store";
 import { findPane } from "./topology";
 import {
   isPushToken,
   type AckMsg,
   type DoneMsg,
+  type Feature,
   type GatewayHello,
+  type ScreenMode,
   type WelcomeMsg,
   type Window,
 } from "./protocol/types";
@@ -50,6 +63,8 @@ interface Asked {
   pid: number | null;
   /** Epoch milliseconds. */
   at: number;
+  /** The `notify` reached the computer (a push host): it alerts by itself. */
+  sent: boolean;
 }
 
 export interface Notifier {
@@ -86,6 +101,15 @@ export interface PaneView {
   /** Blocks once the snapshot arrives. */
   state: PaneState | null;
   loadingOlder: boolean;
+  /** The pane's terminal screen while the gateway sends one (`screen` feature). */
+  screen: ScreenState | null;
+  /**
+   * The screen went because none came back after a reconnect (the client's guess that the
+   * program ended), not with the gateway's `screen_end`: a picked view is kept.
+   */
+  screenExpired: boolean;
+  /** Earlier output lines loaded per block id (`output` feature); dropped with the block. */
+  earlier: Record<number, EarlierOutput>;
 }
 
 export interface ActivityItem {
@@ -176,6 +200,32 @@ export function canOperate(host: HostView): boolean {
   return (host.welcome?.permission ?? host.record.permission) === "operate";
 }
 
+/**
+ * The paired computers whose last welcome (this app run) lacks `push_ntfy`: their Rift is too old
+ * to send ntfy alerts. Computers not reached yet are left out (their version is unknown).
+ */
+export function ntfyUnsupported(hosts: HostView[]): HostView[] {
+  return hosts.filter((h) => h.welcome !== null && !hasFeature(h, "push_ntfy"));
+}
+
+/** Whether the gateway's last welcome lists `feature` (an older gateway, or no welcome yet: no). */
+export function hasFeature(host: HostView | undefined, feature: Feature): boolean {
+  return host?.welcome?.features.includes(feature) ?? false;
+}
+
+/** The earlier lines held for each block still in `state`; the others are dropped. */
+function keepEarlier(
+  earlier: Record<number, EarlierOutput>,
+  state: PaneState | null,
+): Record<number, EarlierOutput> {
+  const ids = Object.keys(earlier);
+  if (ids.length === 0) return earlier;
+  const live = new Set(state?.blocks.map((b) => b.id));
+  return ids.every((id) => live.has(Number(id)))
+    ? earlier
+    : Object.fromEntries(Object.entries(earlier).filter(([id]) => live.has(Number(id))));
+}
+
 export function describePairFailure(failure: PairFailure, name: string, viaRelay = false): string {
   switch (failure) {
     case "auth":
@@ -213,6 +263,8 @@ export class Fleet {
   /** When each host's last welcome came, until the topology that follows it. */
   private readonly welcomedAt = new Map<string, number>();
   private appActive = true;
+  /** The app is not in the background (`setVisible`); the computers know it (`visible`). */
+  private visible = true;
   private viewing: { host: string; pane: number } | null = null;
   private activityN = 0;
   private initStarted = false;
@@ -224,10 +276,11 @@ export class Fleet {
   /** This device's Expo push token (null: none). */
   private pushToken: string | null = null;
   /**
-   * Hosts that hold this device's push token: they alert through push even while the app runs, so
-   * the app posts no notification of its own for them (one alert per command).
+   * Hosts that hold this device's push token or ntfy topic, with what they were told to alert about: they alert
+   * through push even while the app runs, so for a `done` they cover the app posts no
+   * notification of its own (one alert per command).
    */
-  private readonly pushHosts = new Set<string>();
+  private readonly pushHosts = new Map<string, PushRegistration>();
   /** Hosts told "no token" in this app run (once, in case one still holds a token of an earlier run). */
   private readonly pushCleared = new Set<string>();
 
@@ -328,6 +381,7 @@ export class Fleet {
         onWelcome: (welcome) => {
           this.patchHost(key, { welcome, notice: null });
           this.welcomedAt.set(key, this.now());
+          this.sendVisible(key, client, true);
           this.sendPush(key, client);
           void this.refreshRecord(key, welcome, client);
         },
@@ -339,22 +393,38 @@ export class Fleet {
           this.dropUnreachableAsks(key, msg.windows, since);
         },
         onPane: (msg) =>
+          this.store.update((s) => {
+            if (s.pane?.host !== key || s.pane.paneId !== msg.pane) return s;
+            const state = reducePane(s.pane.state, msg);
+            return {
+              ...s,
+              pane: {
+                ...s.pane,
+                state,
+                loadingOlder: msg.t === "older" ? false : s.pane.loadingOlder,
+                earlier: keepEarlier(s.pane.earlier, state),
+              },
+            };
+          }),
+        onScreen: (msg, synthetic) =>
           this.store.update((s) =>
             s.pane?.host === key && s.pane.paneId === msg.pane
-              ? {
-                  ...s,
-                  pane: {
-                    ...s.pane,
-                    state: reducePane(s.pane.state, msg),
-                    loadingOlder: msg.t === "older" ? false : s.pane.loadingOlder,
-                  },
-                }
+              ? { ...s, pane: { ...s.pane, screen: reduceScreen(s.pane.screen, msg), screenExpired: !!synthetic } }
+              : s,
+          ),
+        onScreenStale: (pane) =>
+          this.store.update((s) =>
+            s.pane?.host === key && s.pane.paneId === pane
+              ? { ...s, pane: { ...s.pane, screen: staleScreen(s.pane.screen) } }
               : s,
           ),
         onAck: (msg) => this.onAck(key, msg),
         onDone: (msg) => this.onDone(key, msg),
         onError: (msg) => {
           if (msg.code === "auth" || msg.code === "version") return;
+          // An older gateway refuses a view device's run/keys with a top-level error instead of
+          // an ack: fail what waits rather than letting it time out.
+          if (msg.code === "forbidden") this.failPending(key, "forbidden");
           this.patchHost(key, { notice: msg.message });
           this.store.update((s) => (s.pane?.host === key ? { ...s, pane: { ...s.pane, loadingOlder: false } } : s));
         },
@@ -415,6 +485,27 @@ export class Fleet {
   /** The app came to the foreground (true) or left it (false); notifications depend on it. */
   setAppActive(active: boolean): void {
     this.appActive = active;
+  }
+
+  /**
+   * The app went to the background (false) or came back (true). Only `background` counts: an
+   * `inactive` app (Face ID prompt, Control Center) is still on screen. A backgrounded app keeps
+   * its sockets for a while but cannot notify (iOS suspends it): the computers then post ntfy
+   * alerts about the pane it follows again (`visible`).
+   */
+  setVisible(visible: boolean): void {
+    if (this.visible === visible) return;
+    this.visible = visible;
+    for (const [key, c] of this.clients) this.sendVisible(key, c, false);
+  }
+
+  /**
+   * Tells `host` whether the app is on screen, when it understands it (`push_ntfy`). `onWelcome`:
+   * a new connection starts visible, so only "not on screen" needs saying then.
+   */
+  private sendVisible(host: string, client: RiftClient, onWelcome: boolean): void {
+    if (!hasFeature(this.host(host), "push_ntfy") || (onWelcome && this.visible)) return;
+    client.setVisible(this.visible);
   }
 
   /**
@@ -650,6 +741,9 @@ export class Fleet {
         paneId,
         state: s.pane?.host === host && s.pane.paneId === paneId ? s.pane.state : null,
         loadingOlder: false,
+        screen: s.pane?.host === host && s.pane.paneId === paneId ? s.pane.screen : null,
+        screenExpired: s.pane?.host === host && s.pane.paneId === paneId ? s.pane.screenExpired : false,
+        earlier: s.pane?.host === host && s.pane.paneId === paneId ? s.pane.earlier : {},
       },
     }));
     this.patchHost(host, { notice: null });
@@ -679,6 +773,66 @@ export class Fleet {
     client.requestOlder(first.id);
   }
 
+  /**
+   * What the followed pane's gateway sends of its screen (only a gateway with `screen`); the
+   * client sends it again after every re-subscribe and reconnect.
+   */
+  setScreenMode(host: string, pane: number, mode: ScreenMode): void {
+    const p = this.store.peek().pane;
+    if (p?.host !== host || p.paneId !== pane || !hasFeature(this.host(host), "screen")) return;
+    this.clients.get(host)?.setScreen(pane, mode);
+  }
+
+  /**
+   * "Load earlier output" for block `blockId` of the followed pane (only a gateway with
+   * `output`): fetches the next up to 500 lines before the held ones (earlier.ts) and keeps
+   * them with the block. The answer is dropped when the pane or the block went meanwhile.
+   */
+  async loadEarlier(blockId: number): Promise<void> {
+    const p = this.store.peek().pane;
+    const block = p?.state?.blocks.find((b) => b.id === blockId);
+    const client = p ? this.clients.get(p.host) : undefined;
+    if (!p || !block || !client || !hasFeature(this.host(p.host), "output")) return;
+    const cur = p.earlier[blockId];
+    const req = cur?.loading ? null : nextRequest(block, cur);
+    if (!req) return;
+    const { host, paneId } = p;
+    const patch = (f: (e: EarlierOutput) => EarlierOutput) =>
+      this.store.update((s) => {
+        const b = s.pane?.state?.blocks.find((x) => x.id === blockId);
+        if (s.pane?.host !== host || s.pane.paneId !== paneId || !b) return s;
+        return {
+          ...s,
+          pane: { ...s.pane, earlier: { ...s.pane.earlier, [blockId]: f(s.pane.earlier[blockId] ?? emptyEarlier(b)) } },
+        };
+      });
+    patch((e) => ({ ...e, loading: true, error: null }));
+    const name = this.host(host)?.record.name ?? "the computer";
+    const r = await fetchRange(
+      async (from, limit) => {
+        const a = await client.output(paneId, blockId, from, Math.min(limit, MAX_OUTPUT_LINES));
+        return a.ok ? { ok: true, from: a.msg.from, text: a.msg.text } : a;
+      },
+      req.from,
+      req.from + req.limit,
+    );
+    patch((e) =>
+      r.ok
+        ? mergeRange(block, e, req, r)
+        : {
+            ...e,
+            loading: false,
+            error:
+              r.code === "no_block"
+                ? "This block is gone from the computer."
+                : r.code === "incomplete"
+                  ? "The computer sent fewer lines than asked. Try again."
+                  : describeCode(r.code, name, r.message),
+          },
+    );
+    this.store.flush();
+  }
+
   setDraft(host: string, pane: number, text: string): void {
     const k = draftKey(host, pane);
     this.store.update((s) => (s.drafts[k] === text ? s : { ...s, drafts: { ...s.drafts, [k]: text } }));
@@ -689,26 +843,61 @@ export class Fleet {
 
   // --- operate ---------------------------------------------------------------------------------
 
-  /** Runs `command` at the pane's prompt; resolves with the gateway's `ack`. */
-  run(host: string, pane: number, command: string, opts: { notify?: boolean } = {}): Promise<ActionResult> {
+  /**
+   * Runs `command` at the pane's prompt; resolves with the gateway's `ack`. On success the
+   * pane's draft is cleared, unless `fromDraft` is false (Run again of a block's command).
+   */
+  run(
+    host: string,
+    pane: number,
+    command: string,
+    opts: { notify?: boolean; fromDraft?: boolean } = {},
+  ): Promise<ActionResult> {
     const result = this.request(host, (c) => c.run(pane, command));
-    if (opts.notify) {
-      const pid = findPane(this.host(host)?.windows ?? [], pane)?.window.pid ?? null;
-      this.setAsked([...this.asked, { host, pane, command, pid, at: this.now() }].slice(-MAX_ASKED));
-      void this.deps.notifier.requestPermission();
-      // The computer alerts through push when the app is closed by then.
-      if (this.pushHosts.has(host)) this.clients.get(host)?.notify(pane);
-    }
+    if (opts.notify) this.notifyWhenDone(host, pane, command);
     return result.then((r) => {
-      if (r.ok) this.setDraft(host, pane, "");
-      else if (opts.notify)
+      if (r.ok && opts.fromDraft !== false) this.setDraft(host, pane, "");
+      else if (!r.ok && opts.notify)
         this.setAsked(this.asked.filter((a) => !(a.host === host && a.pane === pane && a.command === command)));
       return r;
     });
   }
 
+  /**
+   * "Notify me when it finishes": one notification when `command` in `pane` finishes, whatever
+   * the settings say (also from the computer through push when the app is closed by then).
+   */
+  notifyWhenDone(host: string, pane: number, command: string): void {
+    const pid = findPane(this.host(host)?.windows ?? [], pane)?.window.pid ?? null;
+    const sent = this.pushHosts.has(host) && (this.clients.get(host)?.notify(pane) ?? false);
+    this.setAsked([...this.asked, { host, pane, command, pid, at: this.now(), sent }].slice(-MAX_ASKED));
+    void this.deps.notifier.requestPermission();
+  }
+
+  /** Sends the "Notify me" requests a push host has not received yet (asked while disconnected). */
+  private sendAsked(host: string, client: RiftClient): void {
+    if (!this.pushHosts.has(host)) return;
+    let changed = false;
+    const list = this.asked.map((a) => {
+      if (a.host !== host || a.sent || !this.askLive(a) || !client.notify(a.pane)) return a;
+      changed = true;
+      return { ...a, sent: true };
+    });
+    if (changed) this.setAsked(list);
+  }
+
+  /** Milliseconds until keys or text to `host` would go out (the gateway's input rate; 0: now). */
+  inputDelay(host: string): number {
+    return this.clients.get(host)?.inputDelayMs ?? 0;
+  }
+
   sendKeys(host: string, pane: number, keys: string[]): Promise<ActionResult> {
     return this.request(host, (c) => c.keys(pane, keys));
+  }
+
+  /** Types text into the program running in the pane (only a gateway with `text`). */
+  sendText(host: string, pane: number, text: string): Promise<ActionResult> {
+    return this.request(host, (c) => c.text(pane, text));
   }
 
   private request(host: string, send: (c: RiftClient) => string | null): Promise<ActionResult> {
@@ -792,6 +981,7 @@ export class Fleet {
       (a) => a.host === host && a.pane === msg.pane && a.command === msg.command && this.askLive(a),
     );
     const asked = i !== -1;
+    const askSent = asked && this.asked[i]!.sent;
     if (asked) this.setAsked(this.asked.filter((_, j) => j !== i));
     const settings = this.store.peek().settings;
     const notify = shouldNotify({
@@ -800,11 +990,18 @@ export class Fleet {
       host,
       pane: msg.pane,
       durationMs: msg.duration_ms,
+      exit: msg.exit,
       asked,
-      enabled: settings.notifyDone,
+      policy: settings.notifyPolicy,
+      afterMs: settings.notifyAfterMs,
+      muted: view?.record.notifications === false,
     });
-    // A computer with this device's push token alerts by itself (also while the app runs).
-    if (!notify || this.pushHosts.has(host)) return;
+    // A computer with this device's push token alerts by itself (also while the app runs) for
+    // what it was told: a "Notify me" it received, or a long command its registration covers.
+    const reg = this.pushHosts.get(host);
+    // the gateway skips ntfy only for the pane followed by an app on screen (`visible`)
+    const followed = this.visible && this.clients.get(host)?.subscribedPane === msg.pane;
+    if (!notify || (reg && pushCovers(reg, { askSent, durationMs: msg.duration_ms, exit: msg.exit, followed }))) return;
     const text = notificationText(hostName, msg.exit, msg.command, settings.showCommandInNotification);
     void this.deps.notifier.notify({ ...text, data: { host, pane: msg.pane } }).catch(() => undefined);
   }
@@ -818,10 +1015,10 @@ export class Fleet {
       const name = next.deviceName.trim().slice(0, MAX_DEVICE_NAME);
       next.deviceName = name === "" ? null : name;
     }
-    if (patch.notifyDone && !cur.notifyDone) {
+    if (patch.notifyPolicy && patch.notifyPolicy !== "off" && cur.notifyPolicy === "off") {
       // Asked lazily, on first enable; the setting stays off when the OS refuses.
       const granted = await this.deps.notifier.requestPermission();
-      if (!granted) next.notifyDone = false;
+      if (!granted) next.notifyPolicy = "off";
     }
     this.store.update((s) => ({
       ...s,
@@ -829,13 +1026,67 @@ export class Fleet {
       deviceName: next.deviceName ?? this.deps.systemDeviceName,
     }));
     this.store.flush();
-    if (next.notifyDone !== cur.notifyDone || next.showCommandInNotification !== cur.showCommandInNotification) {
+    if (
+      next.notifyPolicy !== cur.notifyPolicy ||
+      next.notifyAfterMs !== cur.notifyAfterMs ||
+      next.showCommandInNotification !== cur.showCommandInNotification ||
+      next.ntfyServer !== cur.ntfyServer ||
+      next.ntfyEnabled !== cur.ntfyEnabled ||
+      next.ntfyTopic !== cur.ntfyTopic
+    ) {
       for (const [key, c] of this.clients) this.sendPush(key, c);
     }
     await saveSettings(this.deps.kv, next);
   }
 
+  /**
+   * A paired computer's Notifications switch: off, it alerts only for "Notify me" (here and
+   * through push). Saved with the host.
+   */
+  async setHostNotifications(key: string, on: boolean): Promise<void> {
+    const view = this.host(key);
+    if (!view || (view.record.notifications !== false) === on) return;
+    const { notifications: _, ...rest } = view.record;
+    const record: HostRecord = on ? rest : { ...rest, notifications: false };
+    this.patchHost(key, { record });
+    this.store.flush();
+    const c = this.clients.get(key);
+    if (c) this.sendPush(key, c);
+    await this.hostsStore.save(record);
+    if (this.unpaired.has(key)) await this.hostsStore.remove(key);
+  }
+
   // --- push --------------------------------------------------------------------------------------
+
+  /**
+   * Settings › "Alerts through ntfy": on uses the stored topic (the secret that lets the ntfy app
+   * read the alerts), making a random one the first time; off tells the computers to stop posting
+   * there and keeps the topic, so on again needs no new subscription in the ntfy app.
+   */
+  async setNtfy(on: boolean): Promise<void> {
+    const cur = this.store.peek().settings;
+    if (cur.ntfyEnabled === on && (!on || cur.ntfyTopic !== null)) return;
+    await this.updateSettings(
+      on ? { ntfyEnabled: true, ntfyTopic: cur.ntfyTopic ?? newNtfyTopic(this.deps.randomBytes) } : { ntfyEnabled: false },
+    );
+  }
+
+  /**
+   * "New topic": a new random topic, sent to every computer at once. Computers that get it stop
+   * posting to the old one; one that is offline may post there until it reconnects, one unpaired
+   * while offline may keep posting there. The ntfy app needs a new subscription.
+   */
+  async rotateNtfyTopic(): Promise<void> {
+    await this.updateSettings({ ntfyTopic: newNtfyTopic(this.deps.randomBytes) });
+  }
+
+  /** The ntfy server (self-hosted, or ntfy.sh); false when it is not an https server address. */
+  async setNtfyServer(input: string): Promise<boolean> {
+    const server = normalizeNtfyServer(input);
+    if (server === null) return false;
+    await this.updateSettings({ ntfyServer: server });
+    return true;
+  }
 
   /** This device's push token (null: none) and, without one, why (shown in Settings). */
   setPushToken(token: string | null, reason: string | null = null): void {
@@ -851,19 +1102,34 @@ export class Fleet {
     return this.appActive && this.viewing?.host === host && this.viewing.pane === pane;
   }
 
-  /** Tells `host` where to alert while the app is closed (or to stop: no token). */
+  /**
+   * Tells `host` where to alert while the app is closed (or to stop: no token and no ntfy topic).
+   * The ntfy topic goes only to a computer with `push_ntfy`; an older one gets the message as before.
+   * With ntfy on, ntfy replaces Expo push there (no token): one alert per command, not two.
+   */
   private sendPush(host: string, client: RiftClient): void {
     const settings = this.store.peek().settings;
-    const token = this.pushToken;
-    if (!token && !this.pushHosts.has(host) && this.pushCleared.has(host)) return;
+    const ntfySupported = hasFeature(this.host(host), "push_ntfy");
+    const ntfy = ntfySupported ? ntfyUrl(settings) : null;
+    const token = ntfy ? null : this.pushToken;
+    if (!token && !ntfy && !this.pushHosts.has(host) && this.pushCleared.has(host)) return;
+    const muted = this.host(host)?.record.notifications === false;
+    const reg = pushRegistration(
+      settings.notifyPolicy,
+      settings.notifyAfterMs,
+      muted,
+      hasFeature(this.host(host), "push_failures"),
+    );
     const sent = client.setPush({
       token,
-      longMs: settings.notifyDone ? LONG_COMMAND_MS : null,
+      ...(ntfySupported ? { ntfy } : {}),
+      ...reg,
       showCommand: settings.showCommandInNotification,
     });
     if (!sent) return;
-    if (token) {
-      this.pushHosts.add(host);
+    if (token || ntfy) {
+      this.pushHosts.set(host, token ? reg : { ...reg, ntfyOnly: true });
+      this.sendAsked(host, client);
     } else {
       this.pushHosts.delete(host);
       this.pushCleared.add(host);

@@ -1627,6 +1627,16 @@ rm.mkdir()
     "'import json,sys; print(json.load(sys.stdin)[\"tabs\"][0][\"panes\"][0][\"id\"])')\n"
     "\"$1\" ctl request \"$(printf '%s' \"$3\" | sed \"s/PANE/$pane/\")\" > \"$2\" 2>&1\n"
     "touch \"$2.done\"\n")
+(rm / "since.sh").write_text(
+    "#!/bin/sh\n"
+    "# since.sh BIN OUT SCREEN_JSON: ask for the screen again with the generation\n"
+    "# SCREEN_JSON answered (the window builds none while it is current)\n"
+    "pane=$(\"$1\" ctl request '{\"cmd\":\"status\"}' | python3 -I -c "
+    "'import json,sys; print(json.load(sys.stdin)[\"tabs\"][0][\"panes\"][0][\"id\"])')\n"
+    "gen=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))[\"generation\"])' \"$3\")\n"
+    "\"$1\" ctl request \"{\\\"cmd\\\":\\\"screen\\\",\\\"pane\\\":$pane,\\\"force\\\":true,"
+    "\\\"since\\\":$gen}\" > \"$2\" 2>&1\n"
+    "touch \"$2.done\"\n")
 remote_base = ('shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
                'remote_listen = "127.0.0.1:0"\n')
 
@@ -1659,6 +1669,11 @@ def remote_line(text):
     return next(l for l in text.splitlines() if l.startswith("remote_access="))
 
 input_cmd = '{"cmd":"remote-input","pane":PANE,"device":"Test Phone","command":"echo remote-ok"}'
+text_cmd = '{"cmd":"remote-input","pane":PANE,"device":"Test Phone","text":"typed-secret"}'
+
+def keys_cmd(*keys):
+    return json.dumps({"cmd": "remote-input", "pane": 0, "device": "Test Phone",
+                       "keys": list(keys)}).replace('"pane": 0', '"pane":PANE')
 settings_remote = ["key cmd+,", "wait 300", *["key down"] * 7, "wait 600"]
 
 # (a) remote_access off: refused, though the socket serves navigate requests
@@ -1686,10 +1701,30 @@ on_run = remote_run("on", on_config, [
     *rin("on", "cmd.json", input_cmd), "wait 800", f"dump {on}/cmd.txt",
     *rin("on", "send.json", '{"cmd":"send-text","pane":PANE,"text":"echo no\\n"}'),
     *rin("on", "focus.json", '{"cmd":"focus","pane":PANE}'),
+    *rin("on", "text-busy.json", text_cmd),
+    # keys at the prompt never build or submit a command line: Enter with
+    # text on the line is refused; history, completion and the ghost
+    # suggestion do nothing; an empty line's Enter passes
+    "type echo draft", "wait 300",
+    *rin("on", "enter-draft.json", keys_cmd("enter")),
+    *rin("on", "recall.json", keys_cmd("up", "tab", "ctrl+right", "ctrl+r")),
+    "wait 300", f"dump {on}/draft.txt",
+    *rin("on", "clear.json", keys_cmd("ctrl+u")),
+    *rin("on", "empty-enter.json", keys_cmd("enter")), "wait 600",
     "type sleep 5\\n", "wait 600",
     *rin("on", "busy.json", input_cmd.replace("echo remote-ok", "echo too-early")),
     "wait 5000",
     "type sleep 30\\n", "wait 800",
+    *rin("on", "text.json", text_cmd), "wait 600", f"dump {on}/text.txt",
+    *rin("on", "alt.json",
+         '{"cmd":"remote-input","pane":PANE,"device":"Test Phone","keys":["alt+b"]}'),
+    "wait 600",
+    *rin("on", "screen.json", '{"cmd":"screen","pane":PANE,"force":true}'),
+    f"sh sh {shlex.quote(str(rm / 'since.sh'))} {shlex.quote(str(binary))} "
+    f"{shlex.quote(str(on / 'since.json'))} {shlex.quote(str(on / 'screen.json'))} >/dev/null 2>&1 &",
+    f"wait_file {on / 'since.json'}.done 15000",
+    *rin("on", "noscreen.json", '{"cmd":"screen","pane":PANE}'),
+    *rin("on", "noblock.json", '{"cmd":"output","pane":PANE,"block":999999,"from":0,"limit":5}'),
     *rin("on", "keys.json",
          '{"cmd":"remote-input","pane":PANE,"device":"Test Phone","keys":["ctrl+c"]}'),
     "wait 1200", f"dump {on}/keys.txt",
@@ -1712,8 +1747,37 @@ assert 'toast=Some("Test Phone ran echo remote-ok")' in cmd_dump, cmd_dump
 assert "not allowed" in answer(on, "send.json")["error"], answer(on, "send.json")
 assert "not allowed" in answer(on, "focus.json")["error"], answer(on, "focus.json")
 assert answer(on, "busy.json") == {"ok": False, "error": "busy"}, answer(on, "busy.json")
+# text: busy at the prompt (a command line goes through `run`); typed into a
+# running program with a toast that never shows it; alt is Meta (ESC b, which
+# the tty echoes as ^[b); the gateway's screen and output reads
+assert answer(on, "text-busy.json") == {"ok": False, "error": "busy"}, answer(on, "text-busy.json")
+assert answer(on, "enter-draft.json") == \
+    {"ok": False, "error": "the command line has text; send the command with run"}, \
+    answer(on, "enter-draft.json")
+assert answer(on, "recall.json") == {"ok": True, "pane": 1}, answer(on, "recall.json")
+draft_dump = (on / "draft.txt").read_text()
+assert 'editor="echo draft"' in draft_dump, draft_dump
+assert answer(on, "clear.json") == {"ok": True, "pane": 1}, answer(on, "clear.json")
+assert answer(on, "empty-enter.json") == {"ok": True, "pane": 1}, answer(on, "empty-enter.json")
+assert answer(on, "text.json") == {"ok": True, "pane": 1}, answer(on, "text.json")
+text_dump = (on / "text.txt").read_text()
+assert 'toast=Some("Test Phone typed into a program")' in text_dump, text_dump
+assert answer(on, "alt.json") == {"ok": True, "pane": 1}, answer(on, "alt.json")
+shown = answer(on, "screen.json")
+assert shown["ok"] and shown["screen"]["alt"] is False, shown
+# asked again with its generation: the screen did not change, none is built
+assert answer(on, "since.json") == {"ok": True, "pane": 1, "generation": shown["generation"],
+                                    "unchanged": True}, answer(on, "since.json")
+screen_text = "\n".join("".join(r[0] for r in row) for row in shown["screen"]["lines"])
+assert "typed-secret^[b" in screen_text, screen_text
+noscreen = answer(on, "noscreen.json")
+assert noscreen == {"ok": True, "pane": 1, "generation": noscreen.get("generation")} \
+    and "screen" not in noscreen, noscreen
+assert answer(on, "noblock.json") == {"ok": False, "error": "no such block"}, \
+    answer(on, "noblock.json")
 keys_dump = (on / "keys.txt").read_text()
 assert "too-early" not in keys_dump, "a busy command reached the shell"
+assert 'cmd="echo draft"' not in keys_dump, "a phone's Enter submitted the desktop's draft"
 assert re.search(r'cmd="sleep 30" exit=Some\([1-9]\d*\)', keys_dump), keys_dump
 assert 'toast=Some("Test Phone sent ctrl+c")' in keys_dump, keys_dump
 meta = answer(on, "meta.json")["blocks"]
@@ -1960,7 +2024,7 @@ assert 'device_access=["Live Check Phone=view"]' in line, line
 assert 'toast=Some("Live Check Phone can now only watch")' in text, text[-3000:]
 assert closed_at - changed_at < 2.5, (changed_at, closed_at)
 p2 = (rl / "phone-2.txt").read_text()
-assert '"permission":"view"' in p2 and '"code":"forbidden"' in p2, p2
+assert '"permission":"view"' in p2 and '"error":"forbidden","id":"live1"' in p2, p2
 line, text = relay_line("history.txt")
 assert re.search(r'history=\["Live Check Phone \(Relay · 127\.0\.0\.1:%d · [^)]* · \d+s\)'
                  % relay_port, line), line

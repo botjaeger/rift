@@ -121,12 +121,35 @@ pub enum Request {
         pane: u64,
         text: String,
     },
-    /// Input from a paired phone, sent by the remote gateway: `command` (a
-    /// command line for a pane at its prompt, as if typed and Enter
-    /// pressed) or `keys` (protocol key names, as if pressed). `device` is
-    /// the phone's name for the desktop's toast. The window accepts it only
-    /// while `remote_access` is on (answering `remote access is off`), and
-    /// answers `busy` for a command to a pane that is running something.
+    /// One pane's visible terminal screen for the remote gateway (text runs
+    /// with resolved colours, at most 300 × 120): none unless the pane
+    /// shows the alternate screen or `force`. Read-only. `since`: the
+    /// `generation` of the screen the gateway holds; while the pane's is
+    /// still that, the answer is `unchanged` (no screen built).
+    Screen {
+        pane: u64,
+        #[serde(default)]
+        force: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        since: Option<u64>,
+    },
+    /// Up to `limit` (1 to 500) output lines of block `block` of `pane`
+    /// from line `from` on, numbered like the gateway's `dropped`.
+    /// Read-only.
+    Output {
+        pane: u64,
+        block: u64,
+        from: u64,
+        limit: usize,
+    },
+    /// Input from a paired phone, sent by the remote gateway: exactly one
+    /// of `command` (a command line for a pane at its prompt, as if typed
+    /// and Enter pressed), `keys` (protocol key names, as if pressed) or
+    /// `text` (typed into the running program). `device` is the phone's
+    /// name for the desktop's toast. The window accepts it only while
+    /// `remote_access` is on (answering `remote access is off`), and
+    /// answers `busy` for a command to a pane that is running something and
+    /// for text to a pane at its prompt.
     RemoteInput {
         pane: u64,
         device: String,
@@ -134,6 +157,8 @@ pub enum Request {
         command: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         keys: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
     },
     /// Sent by the remote gateway whenever its `status.json` changed (it
     /// started, a phone connected or left): the window re-reads it at once
@@ -158,6 +183,8 @@ impl Request {
             // `remote_access` in the window
             Request::Status
             | Request::Blocks { .. }
+            | Request::Screen { .. }
+            | Request::Output { .. }
             | Request::RemoteStatus
             | Request::RemoteInput { .. } => Level::Remote,
             Request::List | Request::Focus { .. } | Request::PrepareRestart { .. } => {
@@ -214,6 +241,19 @@ pub struct Response {
     /// `blocks`: the pane's oldest block id (any page); lower ids are gone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oldest: Option<u64>,
+    /// `screen`: the pane's screen, when it has one to show.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen: Option<rift_remote::Screen>,
+    /// `screen`: the pane's output generation the answer is of.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u64>,
+    /// `screen`: the generation is still `since`; the screen is the one the
+    /// gateway holds (not sent again).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unchanged: bool,
+    /// `output`: the requested lines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<rift_remote::OutputPage>,
 }
 
 impl Response {
@@ -829,15 +869,33 @@ mod tests {
                 pane: 12,
                 device: "Sam's iPhone".into(),
                 command: Some("cargo test".into()),
-                keys: None
+                keys: None,
+                text: None
             }
         );
         assert_eq!(r.level(), Level::Remote);
         assert_eq!(serde_json::to_string(&r).unwrap(), line);
-        let line = r#"{"cmd":"remote-input","pane":12,"device":"d","keys":["ctrl+c","enter"]}"#;
-        let r: Request = serde_json::from_str(line).unwrap();
-        assert_eq!(serde_json::to_string(&r).unwrap(), line);
+        for line in [
+            r#"{"cmd":"remote-input","pane":12,"device":"d","keys":["ctrl+c","enter"]}"#,
+            r#"{"cmd":"remote-input","pane":12,"device":"Sam's iPhone","text":":wq"}"#,
+            r#"{"cmd":"screen","pane":12,"force":false}"#,
+            r#"{"cmd":"screen","pane":12,"force":true,"since":41}"#,
+            r#"{"cmd":"output","pane":12,"block":86,"from":0,"limit":500}"#,
+        ] {
+            let r: Request = serde_json::from_str(line).unwrap();
+            assert_eq!(serde_json::to_string(&r).unwrap(), line);
+            assert_eq!(r.level(), Level::Remote, "{line}");
+        }
+        assert_eq!(
+            serde_json::from_str::<Request>(r#"{"cmd":"screen","pane":3}"#).unwrap(),
+            Request::Screen {
+                pane: 3,
+                force: false,
+                since: None
+            }
+        );
         assert!(serde_json::from_str::<Request>(r#"{"cmd":"remote-input","pane":1}"#).is_err());
+        assert!(serde_json::from_str::<Request>(r#"{"cmd":"output","pane":1,"block":2}"#).is_err());
         // blocks travel in the response, omitted when empty
         let resp = Response {
             ok: true,
@@ -859,12 +917,37 @@ mod tests {
         };
         let line = serde_json::to_string(&resp).unwrap();
         assert_eq!(serde_json::from_str::<Response>(&line).unwrap(), resp);
+        // a screen and an output page travel the same way
+        let resp = Response {
+            ok: true,
+            screen: Some(rift_remote::Screen {
+                cols: 80,
+                rows: 1,
+                alt: true,
+                cursor: Some([0, 3]),
+                lines: vec![vec![rift_remote::protocol::Run::plain("vim")]],
+            }),
+            generation: Some(7),
+            output: Some(rift_remote::OutputPage {
+                from: 2,
+                text: "a\n".into(),
+                total: 9,
+            }),
+            ..Default::default()
+        };
+        let line = serde_json::to_string(&resp).unwrap();
+        assert_eq!(serde_json::from_str::<Response>(&line).unwrap(), resp);
         let empty = serde_json::to_string(&Response {
             ok: true,
             ..Default::default()
         })
         .unwrap();
         assert_eq!(empty, r#"{"ok":true}"#);
+        // the screen the gateway holds is not sent again
+        let same = r#"{"ok":true,"generation":7,"unchanged":true}"#;
+        let resp = serde_json::from_str::<Response>(same).unwrap();
+        assert!(resp.unchanged && resp.screen.is_none());
+        assert_eq!(serde_json::to_string(&resp).unwrap(), same);
         assert_eq!(Level::parse("full"), Level::Full);
         assert_eq!(Level::parse("navigate"), Level::Navigate);
         assert_eq!(Level::parse("Full"), Level::Full);
