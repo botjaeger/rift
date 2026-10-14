@@ -6,6 +6,15 @@ build (`## <version> — <YYYY-MM-DD>`) or an over-the-air update to one
 message its download carries. Items use `### New`, `### Improved` or
 `### Fixed` sections of `- **Title** — text`.
 
+## 0.1.0 · update 1 — 2026-10-14
+
+Smoother screen transitions on iPhone.
+
+### Fixed
+
+- **Screen transitions** — going back no longer flashes a white edge
+  around the screen.
+
 ## 0.1.0 — 2026-10-14
 
 The first release of the Rift companion: follow and drive the terminals on

@@ -8,6 +8,33 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.2.0 — 2026-10-14
+
+Your phone now reaches this computer from anywhere, with nothing to set up.
+
+### New
+
+- **Rift's relay** — away from your network, the phone connects through
+  Rift's own relay, which only ever forwards encrypted traffic. Point
+  Settings → Remote access → *Relay* at your own relay, or clear it to keep
+  phones on your network only.
+- **Check now** — Settings → General and About check for an update on the
+  spot.
+
+### Improved
+
+- **Remote access settings** — the Cloudflare option is now *Use a
+  Cloudflare tunnel instead*, below the relay, and an empty relay says that
+  phones connect only on this network.
+- **Control socket** — the setting explains what it lets scripts do.
+
+### Fixed
+
+- **Empty Enter** — pressing Enter on an empty command line no longer adds
+  empty blocks or bare prompt lines.
+- **Gaps between blocks** — Enter pressed while a command ran no longer
+  leaves a blank line between blocks.
+
 ## 0.1.0 — 2026-10-14
 
 The first release of Rift: a GPU-accelerated, block-based terminal for macOS
