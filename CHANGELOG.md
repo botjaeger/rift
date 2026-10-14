@@ -8,7 +8,7 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
-## 0.1.0 — 2026-09-24
+## 0.1.0 — 2026-10-14
 
 The first release of Rift: a GPU-accelerated, block-based terminal for macOS
 and Linux.
@@ -47,6 +47,12 @@ and Linux.
   Settings → Remote access to follow panes live, run commands and send ⌃C,
   end to end encrypted, on your network or through a relay that only sees
   ciphertext.
+- **Reach from anywhere** — one switch under Settings → Remote access lets
+  your phone reach this computer from any network through a free Cloudflare
+  tunnel, with no server of your own; Settings offers to install
+  `cloudflared` when it is missing.
+- **Elapsed time** — the prompt can show how long the tab has been working
+  since its first command.
 - **Updates** — Rift checks for a new release at launch and every 6 hours;
   *Update Rift* in the tab bar installs it and keeps your tabs and running
   shells.
@@ -61,7 +67,16 @@ and Linux.
 ### Improved
 
 - **Terminal compatibility** — kitty keyboard protocol, mouse reporting,
-  synchronized output, OSC 8 links, OSC 52 copy and bracketed paste.
+  synchronized output, OSC 8 links, OSC 52 copy and bracketed paste, VT420
+  emulation, and wide characters and emoji measured the way your shell
+  measures them.
+- **Vim mode** — text objects after an operator: `ciw`, `da"`, `yi(` and the
+  rest of the word, quote and bracket objects.
+- **Search** — an accented letter finds the text however it was typed, in
+  find and in the block filter.
+- **Failed commands** — a selected failed block is outlined in red; clicking
+  a selected block again deselects it.
+- **Shortcut labels** — ⏎, Esc, ⌫, ⌦, Home and End show as keys.
 - **Speed** — large outputs render several times faster with far less memory.
 - **Pointer shapes** — a hand over everything clickable and resize arrows over
   split handles.
@@ -69,6 +84,9 @@ and Linux.
 
 ### Fixed
 
+- **Links** — a link to a file that would run as a program (an app, a
+  `.webloc`, a configuration profile, or a shortcut to one) is shown in
+  Finder instead of opened.
 - **Running blocks** — the block border now stops at the last line of output
   instead of running to the bottom of the window.
 - **Startup** — the “Starting zsh…” placeholder sits on the input line
