@@ -1216,6 +1216,8 @@ mod tests {
         // expiry is in whole seconds, from the second pairing started in
         let before = whole_secs(SystemTime::now());
         let link = start_pairing(&dir, &addrs, "studio-mac", Permission::Operate).unwrap();
+        // a loaded machine can take seconds over the call: allow what it took
+        let took = SystemTime::now().duration_since(before).unwrap();
         let fixture = std::fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/pairing-link.txt"),
         )
@@ -1240,7 +1242,7 @@ mod tests {
         );
         assert_eq!(B64.decode(&got[2].1).unwrap().len(), SECRET_LEN);
         let ttl = link.expires_at.duration_since(before).unwrap();
-        assert!(ttl >= PAIRING_TTL && ttl <= PAIRING_TTL + Duration::from_secs(2));
+        assert!(ttl >= PAIRING_TTL && ttl <= PAIRING_TTL + took + Duration::from_secs(1));
         // the stored hash, never the secret
         let stored = std::fs::read_to_string(dir.join(PAIRING_FILE)).unwrap();
         assert!(!stored.contains(&got[2].1));
