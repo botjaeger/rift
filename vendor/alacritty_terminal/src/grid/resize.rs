@@ -25,10 +25,19 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
             Ordering::Equal => (),
         }
 
+        let reflowed = self.columns != columns;
         match self.columns.cmp(&columns) {
             Ordering::Less => self.grow_columns(reflow, columns),
             Ordering::Greater => self.shrink_columns(reflow, columns),
             Ordering::Equal => (),
+        }
+
+        // Rift: a column change rebuilds every row at full width; store the
+        // history compactly again (the reflow already walked all of it).
+        if reflowed {
+            for i in 1..=self.history_size() as i32 {
+                self.raw[Line(-i)].compact();
+            }
         }
 
         // Restore template cell.

@@ -190,11 +190,16 @@ lives outside the workspace in `mobile/` (pnpm; the `mobile` gate).
   `[patch.crates-io]`, outside the workspace) and carry the VT420 emulation,
   the Xcms color parser (`vendor/vte/src/xcms.rs`) and wcwidth-compatible
   cluster widths (`term/width.rs`; regenerate `width_tables.rs` with
-  `scripts/gen-width-tables.py`), and `Term::primary_grid` (the remote
+  `scripts/gen-width-tables.py`), `Term::primary_grid` (the remote
   gateway reads block output from the primary grid under the alternate
-  screen). The fmt, clippy and test gates run on them
-  too. Only `tty`, `Term`, re-exported `vte` and `FairMutex` are used — never
-  alacritty's `event_loop`.
+  screen), and compacted scrollback rows (`grid/row.rs`: a row entering the
+  history drops its run of equal trailing cells; reads clamp to the last
+  stored cell, writes restore the row, and row slices exist only through
+  `cells_mut`. The trailing-cell scan trusts `Row::occ` — every cell from
+  it on equals the last — so a new row mutation must keep that true). The
+  fmt, clippy and test gates run on them too. Only `tty`, `Term`,
+  re-exported `vte` and `FairMutex` are used — never alacritty's
+  `event_loop`.
 - Rust 1.98.0 (`rust-toolchain.toml`); bump together with the `FROM` line of
   `packaging/linux-verify.Dockerfile`.
 

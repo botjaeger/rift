@@ -388,3 +388,99 @@ fn wrap_cell(c: char) -> Cell {
     cell.flags.insert(Flags::WRAPLINE);
     cell
 }
+
+// Rift: rows entering the history are stored compactly ...
+fn write_lines(grid: &mut Grid<Cell>, lines: &[&str]) {
+    let bottom = Line(grid.screen_lines() as i32 - 1);
+    for text in lines {
+        for (i, c) in text.chars().enumerate() {
+            grid[bottom][Column(i)] = cell(c);
+        }
+        grid.scroll_up(&(Line(0)..bottom + 1), 1);
+    }
+}
+
+fn history_text(grid: &Grid<Cell>) -> Vec<String> {
+    (-(grid.history_size() as i32)..0)
+        .map(|l| grid[Line(l)].into_iter().map(|c| c.c).collect::<String>().trim_end().into())
+        .filter(|s: &String| !s.is_empty())
+        .collect()
+}
+
+// ... every history row that ends in blanks stores fewer cells than it has.
+fn history_compacted(grid: &Grid<Cell>) -> bool {
+    (1..=grid.history_size() as i32)
+        .map(|i| &grid[Line(-i)])
+        .all(|row| row.last() != Some(&Cell::default()) || row.stored_cells() < row.len())
+}
+
+// ... read back unchanged, and are compacted again after a reflowing resize.
+#[test]
+fn compacted_history_survives_reflow() {
+    let lines = ["one", "two", &"x".repeat(22), "three"];
+    let mut grid = Grid::<Cell>::new(2, 40, 10);
+    write_lines(&mut grid, &lines);
+
+    assert_eq!(history_text(&grid), lines[..3]);
+    assert!(history_compacted(&grid));
+    assert_eq!(grid[Line(-3)].stored_cells(), 4);
+    assert_eq!(grid[Line(-3)].len(), 40);
+
+    grid.resize(true, 2, 20);
+    assert_eq!(grid[Line(-1)].len(), 20);
+    assert!(history_compacted(&grid));
+
+    grid.resize(true, 2, 60);
+    assert_eq!(history_text(&grid), lines[..3]);
+    assert_eq!(grid[Line(-1)].len(), 60);
+    assert!(history_compacted(&grid));
+}
+
+// Rift: under a full history the recycled rows hand their small buffers to
+// the rows entering it, and come back as clean full-width screen rows. Rows
+// leaving the history pass the storage's 1000-row cache before they return.
+#[test]
+fn full_history_recycles_compacted_rows() {
+    let lines: Vec<String> = (0..3000).map(|i| format!("line {i}")).collect();
+    let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+    let mut grid = Grid::<Cell>::new(3, 40, 5);
+    write_lines(&mut grid, &lines);
+
+    assert_eq!(grid.history_size(), 5);
+    assert_eq!(history_text(&grid), lines[2993..2998]);
+    assert!(history_compacted(&grid));
+    assert_eq!(grid[Line(-5)].stored_cells(), 10);
+    // the screen rows a scroll reset are blank and whole
+    for line in 0..3 {
+        let row = &grid[Line(line)];
+        assert_eq!(row.len(), 40);
+        assert!(!row.is_compact());
+    }
+    assert_eq!(grid[Line(1)][Column(8)], cell('9'));
+    assert!(grid[Line(2)].is_clear());
+}
+
+// Rift: a recycled row that took a full-width rule's buffer shows none of it,
+// and a buffer sized for long lines is not kept for short ones.
+#[test]
+fn recycled_rows_drop_trailing_text_and_oversized_buffers() {
+    let rule = format!("ab{}", "-".repeat(38));
+    let long = format!("{}z", "y".repeat(20));
+    let mut lines = vec![rule.as_str(); 1500];
+    lines.extend([long.as_str(); 1500]);
+    lines.extend(["s"; 1500]);
+    let mut grid = Grid::<Cell>::new(3, 40, 5);
+    write_lines(&mut grid, &lines[..1500]);
+    write_lines(&mut grid, &["short"; 3]);
+    for line in 0..3 {
+        let text: String = grid[Line(line)].into_iter().map(|c| c.c).collect();
+        assert!(!text.contains('-'), "{text:?}");
+    }
+
+    write_lines(&mut grid, &lines[1500..]);
+    for i in 1..=5 {
+        let row = &grid[Line(-i)];
+        assert_eq!(row.stored_cells(), 2);
+        assert!(row.stored_capacity() <= 2 * 2 + 16, "{}", row.stored_capacity());
+    }
+}

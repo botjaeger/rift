@@ -1,6 +1,7 @@
 //! A specialized 2D grid implementation optimized for use in a terminal.
 
 use std::cmp::{max, min};
+use std::mem;
 use std::ops::{Bound, Deref, Index, IndexMut, Range, RangeBounds};
 
 #[cfg(feature = "serde")]
@@ -19,7 +20,7 @@ mod tests;
 pub use self::row::Row;
 use self::storage::Storage;
 
-pub trait GridCell: Sized {
+pub trait GridCell: Sized + Clone {
     /// Check if the cell contains any content.
     fn is_empty(&self) -> bool;
 
@@ -296,6 +297,17 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
             for i in (region.end.0..screen_lines).rev().map(Line::from) {
                 self.raw.swap(i, i - positions);
             }
+
+            // Rift: store the lines that just entered the history compactly.
+            // Each takes the buffer of a line about to be reset below; under
+            // a full history that is a recycled, compacted history row.
+            let entered = min(positions, min(self.history_size(), region.end.0 as usize));
+            for k in 0..entered as i32 {
+                let spare_line = Line(region.end.0 - 1 - k);
+                let mut spare = mem::take(&mut self.raw[spare_line]);
+                self.raw[Line(-1 - k)].compact_with(Some(&mut spare));
+                self.raw[spare_line] = spare;
+            }
         } else {
             // Rotate lines without moving anything into history.
             for i in (region.start.0..region.end.0 - positions as i32).map(Line::from) {
@@ -355,7 +367,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
     }
 }
 
-impl<T> Grid<T> {
+impl<T: Clone> Grid<T> {
     /// Reset a visible region within the grid.
     pub fn reset_region<D, R: RangeBounds<Line>>(&mut self, bounds: R)
     where
@@ -478,7 +490,7 @@ impl<T> Index<Point> for Grid<T> {
     }
 }
 
-impl<T> IndexMut<Point> for Grid<T> {
+impl<T: Clone> IndexMut<Point> for Grid<T> {
     #[inline]
     fn index_mut(&mut self, point: Point) -> &mut T {
         &mut self[point.line][point.column]

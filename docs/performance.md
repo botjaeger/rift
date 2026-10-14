@@ -26,21 +26,30 @@ takes focus: do not type while it runs).
 
 ## Recorded baseline
 
-macOS 27, Apple M3 Max, release build, 2026-10-10 (key-to-frame latency
+macOS 27, Apple M3 Max, release build, 2026-10-14 (key-to-frame latency
 from 2026-09-23: it needs a visible window):
 
 | Scenario | Result | Peak RSS |
 |---|---|---|
-| Startup to first prompt (best of 3) | 692 ms | 104 MiB |
-| `seq 1 500000` | 683 ms | 162 MiB |
-| `cat` 20 MiB file | 332 ms | (same run) |
-| 300k lines into 100k scrollback | done | 514 MiB |
+| Startup to first prompt (best of 3) | 322 ms | 107 MiB |
+| `seq 1 500000` | 544 ms | 138 MiB |
+| `cat` 20 MiB file | 286 ms | (same run) |
+| 300k lines into 100k scrollback | done | 169 MiB |
 | Key-to-frame latency (41 keys) | p50 4.34 ms, p95 8.40 ms | |
 | TUI: vim / less / top | enter + quit ok | |
 
 The first run of this harness found the shape cache holding every trailing
 blank cell of each row: the same `seq 1 500000` took 4161 ms and peaked at
 2883 MiB. Rows are now shaped only up to their last visible character.
+
+Scrollback rows used to keep every cell of the window's width (24 bytes
+each): 100k history lines of a 147-column window held 442 MB (physical
+footprint, 514 MiB peak RSS). A row entering the history now drops its run
+of equal trailing cells and keeps one; under a full history the row that
+enters takes the small buffer of the one recycled (unless that buffer is
+over twice the size needed), so steady scrolling allocates nothing. The same
+run settles at 76 MB, and `cat` of 20 MiB went from 320 ms to 290 ms (A/B on
+the same machine, three runs each).
 
 ## Standard terminal suites (2026-10-10)
 

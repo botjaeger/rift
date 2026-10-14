@@ -1253,7 +1253,7 @@ impl<T> Term<T> {
         if self.mode.contains(TermMode::INSERT) && self.grid.cursor.point.column + width < columns {
             let line = self.grid.cursor.point.line;
             let col = self.grid.cursor.point.column;
-            let row = &mut self.grid[line][..];
+            let row = self.grid[line].cells_mut();
 
             for col in (col.0..(columns - width)).rev() {
                 row.swap(col + width, col);
@@ -1443,7 +1443,7 @@ impl<T: EventListener> Handler for Term<T> {
         let line = cursor.point.line;
         self.damage.damage_line(line.0 as usize, 0, self.columns() - 1);
 
-        let row = &mut self.grid[line][..];
+        let row = self.grid[line].cells_mut();
 
         for offset in (0..num_cells).rev() {
             row.swap(destination + offset, source.0 + offset);
@@ -1842,7 +1842,7 @@ impl<T: EventListener> Handler for Term<T> {
         // protection never does)
         let keep = if self.vt.iso_mode { Flags::ISO_PROTECTED } else { Flags::empty() };
         let row = &mut self.grid[line];
-        for cell in &mut row[start..end] {
+        for cell in row.cells_mut_range(start, end) {
             if !cell.flags.intersects(keep) {
                 *cell = bg.into();
             }
@@ -1870,7 +1870,7 @@ impl<T: EventListener> Handler for Term<T> {
 
         let line = cursor.point.line;
         self.damage.damage_line(line.0 as usize, 0, self.columns() - 1);
-        let row = &mut self.grid[line][..];
+        let row = self.grid[line].cells_mut();
 
         for offset in 0..num_cells {
             row.swap(start + offset, end + offset);
@@ -1980,7 +1980,7 @@ impl<T: EventListener> Handler for Term<T> {
 
         let keep = if self.vt.iso_mode { Flags::ISO_PROTECTED } else { Flags::empty() };
         let row = &mut self.grid[point.line];
-        for cell in &mut row[left..right] {
+        for cell in row.cells_mut_range(left, right) {
             if !cell.flags.intersects(keep) {
                 *cell = bg.into();
             }
@@ -2132,7 +2132,7 @@ impl<T: EventListener> Handler for Term<T> {
 
                 // Clear up to the current column in the current line.
                 let end = cmp::min(cursor.column + 1, Column(self.columns()));
-                for cell in &mut self.grid[cursor.line][..end] {
+                for cell in self.grid[cursor.line].cells_mut_range(Column(0), end) {
                     *cell = bg.into();
                 }
 
@@ -2141,7 +2141,7 @@ impl<T: EventListener> Handler for Term<T> {
             },
             ansi::ClearMode::Below => {
                 let cursor = self.grid.cursor.point;
-                for cell in &mut self.grid[cursor.line][cursor.column..] {
+                for cell in &mut self.grid[cursor.line].cells_mut()[cursor.column.0..] {
                     *cell = bg.into();
                 }
 

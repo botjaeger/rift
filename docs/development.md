@@ -235,7 +235,7 @@ Workspace dependencies (`Cargo.toml`):
 | `glyphon` 0.11 | Text shaping and glyph atlas | |
 | `ttf-parser` 0.25 (renderer) | Font picker: fixed-width and outline checks | Already built for glyphon |
 | `winit` 0.30 | Windows, input, IME | 0.31 is beta |
-| `alacritty_terminal` 0.26, `vte` 0.15 | VT emulation, PTY spawn | Vendored in `vendor/` with the VT420 emulation, Xcms colors, wcwidth cluster widths and `Term::primary_grid`; only `tty`, `Term`, `vte`, `FairMutex` are used |
+| `alacritty_terminal` 0.26, `vte` 0.15 | VT emulation, PTY spawn | Vendored in `vendor/` with the VT420 emulation, Xcms colors, wcwidth cluster widths, `Term::primary_grid` and compacted scrollback rows; only `tty`, `Term`, `vte`, `FairMutex` are used |
 | `bytemuck`, `pollster` | GPU buffers, blocking on adapter setup | |
 | `image`, `png`, `flate2` | Inline images, screenshots, kitty zlib payloads | |
 | `serde`, `toml`, `serde_yaml_ng`, `serde_json` | Config, themes, Warp YAML, IPC | |
