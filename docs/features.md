@@ -693,13 +693,20 @@ line shows the addresses, or how many devices are connected.
   newest 500).
 - **Relay** (outside your network): a `wss://` relay URL (`remote_relay`)
   makes the gateway also reachable through it, and pairing links carry it.
-  The status shows *Off*, *Connecting…*, *Connected via <host>* or the error.
+  It defaults to Rift's public relay, `wss://rift-relay.playhaws.com`, so a
+  phone reaches the computer from any network with nothing to set up; an
+  empty value turns relaying off (phones then connect only on the local
+  network). The gateway contacts the relay only while remote access is on,
+  and scripted runs (`--script`) skip the default relay
+  (`RIFT_NO_DEFAULT_RELAY`, inherited by the gateway they start).
+  The status shows *Off · phones connect only on this network*,
+  *Connecting…*, *Connected via <host>* or the error.
   The relay only forwards encrypted traffic; host one with `rift-terminal
   relay` or `packaging/relay.Dockerfile` (behind a TLS proxy such as Caddy).
   A Tailscale or other private-network address of the computer works
   without a relay: it is listed in the pairing link like any other address.
   Pairing links made in Settings carry the running gateway's relay too.
-- **Reach from anywhere** (`remote_tunnel`, no server needed): the gateway
+- **Cloudflare tunnel** (`remote_tunnel`, *Use a Cloudflare tunnel instead*; no server needed): the gateway
   runs a relay on a loopback port of this computer and gives it a public
   address with a Cloudflare quick tunnel (`cloudflared tunnel --url`,
   free, no account), then registers there instead of at `remote_relay`.

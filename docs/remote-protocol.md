@@ -338,7 +338,7 @@ which anyone can host. The relay only splices WebSocket connections; it
 never holds a key and only ever sees Noise ciphertext (and the routing id).
 It listens on plain `ws://`; put it behind a TLS reverse proxy and give
 gateways and phones its `wss://` URL. Without a server, `remote_tunnel`
-("Reach from anywhere") makes the gateway run the relay itself on a
+("Use a Cloudflare tunnel instead") makes the gateway run the relay itself on a
 loopback port behind a Cloudflare quick tunnel and register at the
 tunnel's `wss://` address (`scripts/relay-local.sh` does the same with the
 Docker image); the address changes on every start, so phones pair again

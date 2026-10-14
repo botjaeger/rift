@@ -46,7 +46,14 @@ fn main() {
                     std::process::exit(2);
                 };
                 match script::Script::load(std::path::Path::new(&path)) {
-                    Ok(s) => script = Some(s),
+                    Ok(s) => {
+                        script = Some(s);
+                        // tests never register at the public relay; the
+                        // gateway this run starts inherits it
+                        // SAFETY: still single-threaded (no window, no
+                        // worker started yet)
+                        unsafe { std::env::set_var(rift_core::config::NO_DEFAULT_RELAY_ENV, "1") };
+                    }
                     Err(e) => {
                         eprintln!("rift-terminal: --script: {e}");
                         std::process::exit(2);

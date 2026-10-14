@@ -1,5 +1,5 @@
 import * as Notifications from "expo-notifications";
-import { Stack, useRouter } from "expo-router";
+import { DarkTheme, Stack, ThemeProvider, useRouter } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { useEffect } from "react";
 import { LogBox, Platform } from "react-native";
@@ -17,6 +17,20 @@ LogBox.ignoreLogs(["Linking found multiple possible URI schemes"]);
 // A link straight to a screen (a notification tap, rift://host/…/pane/…) keeps the tabs below
 // it, so Back leads to Now instead of out of the app.
 export const unstable_settings = { initialRouteName: "(tabs)" };
+
+/** The navigators' own grounds (containers, cards, the tab bar's), dark like every page: the
+ *  default theme is light, and its white showed around a page while it slid in or out. */
+const navTheme = {
+  ...DarkTheme,
+  colors: {
+    ...DarkTheme.colors,
+    background: colors.bg,
+    card: colors.chrome,
+    border: colors.chrome,
+    text: colors.textBright,
+    primary: colors.accent,
+  },
+};
 
 /** Notifications already opened in this app run (kept across root remounts). */
 const openedTaps = new Set<string>();
@@ -79,90 +93,92 @@ export default function RootLayout() {
   return (
     <SafeAreaProvider>
       <StatusBar style="light" />
-      <LockGate>
-        <Stack
-          screenOptions={{
-            headerStyle: { backgroundColor: colors.chrome },
-            headerTintColor: colors.textBright,
-            headerTitleStyle: { color: colors.textBright },
-            headerShadowVisible: false,
-            contentStyle: { backgroundColor: colors.bg },
-          }}
-        >
-          {/* Every page draws its own header, as the boards do (src/ui/Screen.tsx PageHeader). */}
-          <Stack.Screen name="(tabs)" options={{ headerShown: false, title: "Now" }} />
-          <Stack.Screen name="add" options={{ headerShown: false, title: "Paste a pairing link" }} />
-          <Stack.Screen name="scan" options={{ headerShown: false, title: "Pair a computer", contentStyle: { backgroundColor: colors.camera } }} />
-          <Stack.Screen name="pair" options={{ headerShown: false, title: "Pair" }} />
-          <Stack.Screen name="host/[key]/index" options={{ headerShown: false, title: "Host" }} />
-          {/* Back by the edge swipe only: iOS 26 takes a swipe anywhere as Back, which the pane's
-              swipe between panes and its sideways-scrolling blocks need. */}
-          <Stack.Screen name="host/[key]/pane/[id]" options={{ headerShown: false, title: "Pane", fullScreenGestureEnabled: false }} />
-          <Stack.Screen name="control-keys" options={{ headerShown: false, title: "Keys" }} />
-          <Stack.Screen name="answer" options={{ headerShown: false, title: "Answer" }} />
-          <Stack.Screen
-            name="run"
-            options={{
-              title: "Run a command",
-              presentation: "formSheet",
-              sheetAllowedDetents: [1],
-              sheetGrabberVisible: true,
-              sheetCornerRadius: 16,
-              headerShown: false,
-              contentStyle: { backgroundColor: colors.surface },
+      <ThemeProvider value={navTheme}>
+        <LockGate>
+          <Stack
+            screenOptions={{
+              headerStyle: { backgroundColor: colors.chrome },
+              headerTintColor: colors.textBright,
+              headerTitleStyle: { color: colors.textBright },
+              headerShadowVisible: false,
+              contentStyle: { backgroundColor: colors.bg },
             }}
-          />
-          <Stack.Screen name="diagnostics" options={{ title: "Diagnostics" }} />
-          <Stack.Screen
-            name="block"
-            options={{
-              title: "Command",
-              presentation: "formSheet",
-              sheetAllowedDetents: "fitToContents",
-              sheetGrabberVisible: true,
-              sheetCornerRadius: 16,
-              headerShown: false,
-              contentStyle: { backgroundColor: colors.surface },
-            }}
-          />
-          <Stack.Screen
-            name="chips"
-            options={{
-              title: "Prompt chip",
-              presentation: "formSheet",
-              sheetAllowedDetents: [0.75, 1],
-              sheetGrabberVisible: true,
-              sheetCornerRadius: 16,
-              headerShown: false,
-              contentStyle: { backgroundColor: colors.surface },
-            }}
-          />
-          <Stack.Screen
-            name="diff"
-            options={{
-              title: "Diff",
-              presentation: "formSheet",
-              sheetAllowedDetents: [1],
-              sheetGrabberVisible: true,
-              sheetCornerRadius: 16,
-              headerShown: false,
-              contentStyle: { backgroundColor: colors.surface },
-            }}
-          />
-          <Stack.Screen
-            name="confirm"
-            options={{
-              title: "Run command",
-              presentation: "formSheet",
-              sheetAllowedDetents: "fitToContents",
-              sheetGrabberVisible: true,
-              sheetCornerRadius: 16,
-              headerShown: false,
-              contentStyle: { backgroundColor: colors.surface },
-            }}
-          />
-        </Stack>
-      </LockGate>
+          >
+            {/* Every page draws its own header, as the boards do (src/ui/Screen.tsx PageHeader). */}
+            <Stack.Screen name="(tabs)" options={{ headerShown: false, title: "Now" }} />
+            <Stack.Screen name="add" options={{ headerShown: false, title: "Paste a pairing link" }} />
+            <Stack.Screen name="scan" options={{ headerShown: false, title: "Pair a computer", contentStyle: { backgroundColor: colors.camera } }} />
+            <Stack.Screen name="pair" options={{ headerShown: false, title: "Pair" }} />
+            <Stack.Screen name="host/[key]/index" options={{ headerShown: false, title: "Host" }} />
+            {/* Back by the edge swipe only: iOS 26 takes a swipe anywhere as Back, which the pane's
+                swipe between panes and its sideways-scrolling blocks need. */}
+            <Stack.Screen name="host/[key]/pane/[id]" options={{ headerShown: false, title: "Pane", fullScreenGestureEnabled: false }} />
+            <Stack.Screen name="control-keys" options={{ headerShown: false, title: "Keys" }} />
+            <Stack.Screen name="answer" options={{ headerShown: false, title: "Answer" }} />
+            <Stack.Screen
+              name="run"
+              options={{
+                title: "Run a command",
+                presentation: "formSheet",
+                sheetAllowedDetents: [1],
+                sheetGrabberVisible: true,
+                sheetCornerRadius: 16,
+                headerShown: false,
+                contentStyle: { backgroundColor: colors.surface },
+              }}
+            />
+            <Stack.Screen name="diagnostics" options={{ title: "Diagnostics" }} />
+            <Stack.Screen
+              name="block"
+              options={{
+                title: "Command",
+                presentation: "formSheet",
+                sheetAllowedDetents: "fitToContents",
+                sheetGrabberVisible: true,
+                sheetCornerRadius: 16,
+                headerShown: false,
+                contentStyle: { backgroundColor: colors.surface },
+              }}
+            />
+            <Stack.Screen
+              name="chips"
+              options={{
+                title: "Prompt chip",
+                presentation: "formSheet",
+                sheetAllowedDetents: [0.75, 1],
+                sheetGrabberVisible: true,
+                sheetCornerRadius: 16,
+                headerShown: false,
+                contentStyle: { backgroundColor: colors.surface },
+              }}
+            />
+            <Stack.Screen
+              name="diff"
+              options={{
+                title: "Diff",
+                presentation: "formSheet",
+                sheetAllowedDetents: [1],
+                sheetGrabberVisible: true,
+                sheetCornerRadius: 16,
+                headerShown: false,
+                contentStyle: { backgroundColor: colors.surface },
+              }}
+            />
+            <Stack.Screen
+              name="confirm"
+              options={{
+                title: "Run command",
+                presentation: "formSheet",
+                sheetAllowedDetents: "fitToContents",
+                sheetGrabberVisible: true,
+                sheetCornerRadius: 16,
+                headerShown: false,
+                contentStyle: { backgroundColor: colors.surface },
+              }}
+            />
+          </Stack>
+        </LockGate>
+      </ThemeProvider>
     </SafeAreaProvider>
   );
 }

@@ -82,7 +82,7 @@ rebound. Full list: [keyboard shortcuts](docs/keyboard-shortcuts.md).
 | Paste safety | A multi-line paste into a program without bracketed paste asks before running it |
 | SSH profiles with remote blocks | Palette → *SSH: host*; *Install Rift shell integration on host* once |
 | Automation socket | `rift-terminal ctl list`, `focus`, `blocks`, `split`, `open`, `send-text` |
-| Phone companion | Settings → *Remote access*: pair an iPhone or Android phone by QR code, follow panes live, run commands and send Ctrl-C from it; end-to-end encrypted, directly on your network or through a self-hostable relay that only sees ciphertext (app in `mobile/`) |
+| Phone companion | Settings → *Remote access*: pair an iPhone or Android phone by QR code, follow panes live, run commands and send Ctrl-C from it; end-to-end encrypted, directly on your network, or from anywhere through Rift's relay (or your own) that only sees ciphertext (app in `mobile/`) |
 | Themes — 4 built in, your TOML or Warp YAML, OS light/dark sync | Settings → Themes, or `~/.config/rift/themes/` |
 | Launch configurations (Warp YAML) | Palette → *Launch configuration: name* |
 | Alert when a long command finishes out of view (toast, or desktop notification in the background) | On by default, after 10 s |
@@ -102,7 +102,11 @@ is out, and updating keeps your tabs and running shells.
 
 **macOS** — download `Rift-<version>-<arch>.dmg` (`arm64` for Apple silicon,
 `x86_64` for Intel), open it and drag Rift to Applications. The bundle is
-ad-hoc signed, so the first launch needs *right-click → Open* once.
+ad-hoc signed, not notarized, so macOS refuses the first launch ("Apple could
+not verify “Rift”"). Allow it once: click *Done*, then System Settings →
+Privacy & Security → *Open Anyway*, or run
+`xattr -dr com.apple.quarantine /Applications/Rift.app`. Updates installed
+from inside Rift need neither.
 
 **Debian / Ubuntu** — download `rift-terminal_<version>_amd64.deb`:
 

@@ -2805,6 +2805,7 @@ impl App {
                     | ClickTarget::SettingsOpenConfig
                     | ClickTarget::SettingsCopyVersion
                     | ClickTarget::SettingsUpdate
+                    | ClickTarget::SettingsCheckUpdates
                     | ClickTarget::UpdateChip
                     | ClickTarget::RemoteChip
                     | ClickTarget::RemotePair
@@ -8788,6 +8789,12 @@ impl App {
             | EditorKey::NextCompletionSource
             | EditorKey::HistorySearch
             | EditorKey::AcceptGhostWord => edited = false,
+            // nothing to run (Warp): no empty block, and no bare shell
+            // prompt line from shells that skip their hooks for it
+            EditorKey::Submit if pane.editor.buffer.trim().is_empty() => {
+                pane.view_offset = 0;
+                edited = false;
+            }
             EditorKey::Submit => {
                 pane.correction = None;
                 let cmd = pane.editor.submit();
@@ -10998,6 +11005,7 @@ impl App {
                 }
             }
             Some(ClickTarget::SettingsUpdate) => self.update_rift(),
+            Some(ClickTarget::SettingsCheckUpdates) => self.check_for_updates_now(),
             Some(ClickTarget::RemotePair) => {
                 self.settings.remote.pairing = None;
                 self.poll_remote(true);
@@ -13191,6 +13199,7 @@ impl App {
                         | ClickTarget::SettingsOpenConfig
                         | ClickTarget::SettingsCopyVersion
                         | ClickTarget::SettingsUpdate
+                        | ClickTarget::SettingsCheckUpdates
                         | ClickTarget::SettingsEditPrompt
                         | ClickTarget::SettingsKeybind(_)
                         | ClickTarget::SettingsKeybindReset(_)
@@ -14541,10 +14550,7 @@ impl App {
             .as_ref()
             .and_then(|s| s.relay.as_ref())
             .map(|r| r.url.clone())
-            .or_else(|| {
-                Some(self.config.remote_relay.trim().to_string())
-                    .filter(|r| !r.is_empty() && !tunnel)
-            });
+            .or_else(|| self.config.relay().filter(|_| !tunnel).map(str::to_string));
         let view = &mut self.settings.remote;
         // a link without the tunnel's address would only work on this network
         if addresses.is_empty() || (tunnel && relay.is_none()) {
@@ -14702,8 +14708,12 @@ impl App {
         use crate::views::settings::RelayLine;
         use rift_remote::registry::RelayState;
         if !self.config.remote_access
-            || (self.config.remote_relay.trim().is_empty() && !self.config.remote_tunnel)
+            || (self.config.relay().is_none() && !self.config.remote_tunnel)
         {
+            if self.config.remote_access && !self.config.remote_relay.trim().is_empty() {
+                // only the default relay under RIFT_NO_DEFAULT_RELAY
+                return RelayLine::Error("Not used in scripted runs".into());
+            }
             return RelayLine::Off;
         }
         match self.remote.status.as_ref().and_then(|s| s.relay.as_ref()) {

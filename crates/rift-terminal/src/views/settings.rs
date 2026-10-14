@@ -133,6 +133,19 @@ pub enum GatewayLine {
     Connected(usize),
 }
 
+impl UpdateLine {
+    /// The state as words (`None`: never checked).
+    pub fn text(&self) -> Option<String> {
+        match self {
+            UpdateLine::None => None,
+            UpdateLine::Checking => Some("Checking for updates…".into()),
+            UpdateLine::UpToDate => Some("Up to date".into()),
+            UpdateLine::Available(v) => Some(format!("v{v} available")),
+            UpdateLine::Failed => Some("Couldn't check for updates".into()),
+        }
+    }
+}
+
 impl GatewayLine {
     pub fn text(&self) -> String {
         match self {
@@ -162,7 +175,7 @@ pub enum RelayLine {
 impl RelayLine {
     pub fn text(&self) -> String {
         match self {
-            RelayLine::Off => "Off".into(),
+            RelayLine::Off => "Off · phones connect only on this network".into(),
             RelayLine::Connecting => "Connecting…".into(),
             RelayLine::Connected(host) => format!("Connected via {host}"),
             RelayLine::Error(e) => e.clone(),
@@ -358,6 +371,7 @@ fn focusable(target: &ClickTarget) -> bool {
             | ClickTarget::SettingsOpenConfig
             | ClickTarget::SettingsCopyVersion
             | ClickTarget::SettingsUpdate
+            | ClickTarget::SettingsCheckUpdates
             | ClickTarget::RemotePair
             | ClickTarget::RemoteViewOnly
             | ClickTarget::RemoteCopyLink
@@ -804,7 +818,7 @@ pub fn render(
         ] {
             form.page = page.label();
             match page {
-                Page::General => general_page(&mut form, config),
+                Page::General => general_page(&mut form, config, &state.update),
                 Page::Appearance => appearance_page(&mut form, config),
                 Page::Features => features_page(&mut form, config),
                 Page::Terminal => terminal_page(&mut form, config),
@@ -826,7 +840,7 @@ pub fn render(
     } else {
         match state.page {
             Page::Appearance => appearance_page(&mut form, config),
-            Page::General => general_page(&mut form, config),
+            Page::General => general_page(&mut form, config, &state.update),
             Page::Features => features_page(&mut form, config),
             Page::Terminal => terminal_page(&mut form, config),
             Page::Files => files_page(&mut form, config),
@@ -1822,10 +1836,10 @@ fn remote_page(form: &mut Form, config: &Config, view: &RemoteView, blink_on: bo
         GatewayLine::Off
     };
     form.display(y, "Status", &line.text());
+    relay_row(form, config, view, blink_on);
     if on {
         tunnel_rows(form, config, view);
     }
-    relay_row(form, config, view, blink_on);
 
     form.group("Pair a phone");
     let label = "Pair a phone";
@@ -1951,15 +1965,15 @@ fn remote_page(form: &mut Form, config: &Config, view: &RemoteView, blink_on: bo
     }
 }
 
-/// "Reach from anywhere" (`remote_tunnel`) and, while it is on, its
+/// "Use a Cloudflare tunnel instead" (`remote_tunnel`) and, while it is on, its
 /// checklist: cloudflared (installed, else Install / Download) and the
 /// tunnel's state.
 fn tunnel_rows(form: &mut Form, config: &Config, view: &RemoteView) {
     let y = form.y;
     form.toggle_desc(
         y,
-        "Reach from anywhere",
-        "Phones connect from any network through a free Cloudflare tunnel from this computer",
+        "Use a Cloudflare tunnel instead",
+        "Replaces the relay with a free tunnel from this computer; its address changes on every restart",
         config.remote_tunnel,
         "remote_tunnel",
     );
@@ -2048,7 +2062,7 @@ fn relay_row(form: &mut Form, config: &Config, view: &RemoteView, blink_on: bool
     form.reserve = fw + 40.0;
     let state = if config.remote_access {
         view.relay.text()
-    } else if config.remote_relay.trim().is_empty() {
+    } else if config.relay().is_none() {
         "Off".to_string()
     } else {
         "Off while remote access is off".to_string()
@@ -2219,13 +2233,8 @@ fn about_page(form: &mut Form, top: f32, bottom: f32, update: &UpdateLine) {
     let version_w = form
         .engine
         .measure(&version, 13.0, FONT_SANS, Weight::NORMAL);
-    // the update line takes a row under the version when there is one
-    let update_h = if *update == UpdateLine::None {
-        0.0
-    } else {
-        34.0
-    };
-    let height = LOGO + 32.0 + 26.0 + update_h + 20.0;
+    // the update line (status and its button) takes a row under the version
+    let height = LOGO + 32.0 + 26.0 + 34.0 + 20.0;
     let mid = form.x + form.card_w / 2.0;
     // a little above the middle, as Warp sits it; scrolls when too short
     let y = (top + (bottom - top - height) * 0.45).max(form.y + 28.0);
@@ -2268,58 +2277,68 @@ fn about_page(form: &mut Form, top: f32, bottom: f32, update: &UpdateLine) {
     form.push_hit(copy, ClickTarget::SettingsCopyVersion);
     form.name_last(format!("Copy version {version}"));
 
-    // update status: "Up to date", "vX available" + Update…, or why not
+    // update status ("Up to date", "vX available", why not), then "Update…"
+    // for an available version or "Check now" (no button while checking)
     let uy = vy + 28.0;
-    let (status, color) = match update {
-        UpdateLine::None => ("".to_string(), theme.text_muted),
-        UpdateLine::Checking => ("Checking for updates…".into(), theme.text_muted),
-        UpdateLine::UpToDate => ("Up to date".into(), theme.text_muted),
-        UpdateLine::Available(v) => (format!("v{v} available"), theme.warning),
-        UpdateLine::Failed => ("Couldn't check for updates".into(), theme.text_muted),
+    let status = update.text().unwrap_or_default();
+    let available = matches!(update, UpdateLine::Available(_));
+    let color = if available {
+        theme.warning
+    } else {
+        theme.text_muted
     };
+    let sw = if status.is_empty() {
+        0.0
+    } else {
+        form.engine
+            .measure(&status, 13.0, FONT_SANS, Weight::NORMAL)
+    };
+    let button = *update != UpdateLine::Checking;
+    let label = if available { "Update…" } else { "Check now" };
+    let bw = if button {
+        form.engine.measure(label, 12.5, FONT_SANS, Weight::MEDIUM) + 24.0
+    } else {
+        0.0
+    };
+    let gap = if sw > 0.0 && button { 10.0 } else { 0.0 };
+    let sx = (mid - (sw + gap + bw) / 2.0).round();
     if !status.is_empty() {
-        let sw = form
-            .engine
-            .measure(&status, 13.0, FONT_SANS, Weight::NORMAL);
-        let button = matches!(update, UpdateLine::Available(_));
-        let label = "Update…";
-        let bw = if button {
-            form.engine.measure(label, 12.5, FONT_SANS, Weight::MEDIUM) + 24.0
-        } else {
-            0.0
-        };
-        let total = sw + if button { 10.0 + bw } else { 0.0 };
-        let sx = (mid - total / 2.0).round();
         form.layer.text(
             sans(form.engine, &status, 13.0, Weight::NORMAL),
             sx,
             uy + 4.0,
             color,
         );
-        if button {
-            // a secondary button (DESIGN.md): 6 % fill, 12 % hairline
-            let r = [sx + sw + 10.0, uy - 1.0, bw.round(), CONTROL_H];
-            let hot = form.hot(r);
-            form.layer.bordered(
-                [r[0], r[1]],
-                [r[2], r[3]],
-                lift(theme, if hot { 0.10 } else { 0.06 }),
-                lift(theme, 0.12),
-                4.0,
-                1.0,
-            );
-            form.layer.text(
-                sans(form.engine, label, 12.5, Weight::MEDIUM),
-                r[0] + 12.0,
-                r[1] + (CONTROL_H - 12.5 * 1.35) / 2.0,
-                theme.text_ui,
-            );
-            form.push_hit(r, ClickTarget::SettingsUpdate);
-            form.name_last(format!("Update to {status}"));
-        } else {
+        if !available {
             // read-only, but named for assistive tech
             form.push_hit([sx, uy, sw, 26.0], ClickTarget::SettingsNoop);
             form.name_last(status.clone());
+        }
+    }
+    if button {
+        // a secondary button (DESIGN.md): 6 % fill, 12 % hairline
+        let r = [sx + sw + gap, uy - 1.0, bw.round(), CONTROL_H];
+        let hot = form.hot(r);
+        form.layer.bordered(
+            [r[0], r[1]],
+            [r[2], r[3]],
+            lift(theme, if hot { 0.10 } else { 0.06 }),
+            lift(theme, 0.12),
+            4.0,
+            1.0,
+        );
+        form.layer.text(
+            sans(form.engine, label, 12.5, Weight::MEDIUM),
+            r[0] + 12.0,
+            r[1] + (CONTROL_H - 12.5 * 1.35) / 2.0,
+            theme.text_ui,
+        );
+        if available {
+            form.push_hit(r, ClickTarget::SettingsUpdate);
+            form.name_last(format!("Update to {status}"));
+        } else {
+            form.push_hit(r, ClickTarget::SettingsCheckUpdates);
+            form.name_last("Check for updates now".to_string());
         }
     }
 
@@ -2330,7 +2349,7 @@ fn about_page(form: &mut Form, top: f32, bottom: f32, update: &UpdateLine) {
     form.layer.text(
         sans(form.engine, copyright, 13.0, Weight::NORMAL),
         (mid - cw / 2.0).round(),
-        vy + 26.0 + update_h,
+        vy + 26.0 + 34.0,
         theme.text_dim,
     );
     form.y = y + height;
@@ -2458,7 +2477,7 @@ fn appearance_page(form: &mut Form, config: &Config) {
     );
 }
 
-fn general_page(form: &mut Form, config: &Config) {
+fn general_page(form: &mut Form, config: &Config, update: &UpdateLine) {
     form.group("Shell");
     // what actually runs: a configured shell that is not executable falls back
     let shell = rift_core::shell_integration::resolve_shell(config.shell.as_deref());
@@ -2528,12 +2547,37 @@ fn general_page(form: &mut Form, config: &Config) {
         config.check_for_updates,
         "check_for_updates",
     );
+    let y = form.y;
+    let label = "Check now";
+    let bw = form.engine.measure(label, 12.5, FONT_SANS, Weight::MEDIUM) + 24.0;
+    form.reserve = bw + 40.0;
+    let current = format!("Rift {}", env!("CARGO_PKG_VERSION"));
+    let state = update.text().unwrap_or_else(|| "Not checked yet".into());
+    form.label_desc(&current, &state, y);
+    if !form.hidden {
+        let by = y + (ROW_H - CONTROL_H) / 2.0;
+        let bx = form.right() - bw.round();
+        let checking = *update == UpdateLine::Checking;
+        form.button(
+            bx,
+            by,
+            label,
+            if checking {
+                ButtonKind::Disabled
+            } else {
+                ButtonKind::Secondary
+            },
+            ClickTarget::SettingsCheckUpdates,
+            "Check for updates now".into(),
+        );
+    }
 
     form.group("Automation");
     let y = form.y;
-    form.segment(
+    form.segment_desc(
         y,
         "Control socket",
+        "Lets scripts control Rift (rift-terminal ctl); Full also lets them type",
         &["Off", "Navigate", "Full"],
         match config.control_api.as_str() {
             "off" => 0,

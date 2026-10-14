@@ -80,6 +80,8 @@ pub enum ClickTarget {
     SettingsCopyVersion,
     /// Settings › About: "Update…" (the update dialog).
     SettingsUpdate,
+    /// Settings › General and About: "Check now" (one update check).
+    SettingsCheckUpdates,
     SettingsSlider(&'static str),
     SettingsTheme(u8),
     /// Keybindings page row: record a new shortcut for the action.

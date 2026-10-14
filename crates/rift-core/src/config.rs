@@ -237,8 +237,9 @@ pub struct Config {
     /// network interface).
     pub remote_listen: String,
     /// Relay the remote gateway also registers at, for phones outside the
-    /// local network (`wss://…`; `ws://` only for local relays). Empty: no
-    /// relay. The relay only ever sees encrypted traffic.
+    /// local network (`wss://…`; `ws://` only for local relays). Defaults to
+    /// the public `DEFAULT_RELAY`; empty: no relay. The relay only ever sees
+    /// encrypted traffic.
     pub remote_relay: String,
     /// Reach the gateway from any network without a server: it runs a relay
     /// on this computer behind a Cloudflare quick tunnel (`cloudflared`)
@@ -357,7 +358,7 @@ impl Default for Config {
             control_api: "navigate".into(),
             remote_access: false,
             remote_listen: "0.0.0.0:7878".into(),
-            remote_relay: String::new(),
+            remote_relay: DEFAULT_RELAY.into(),
             remote_tunnel: false,
             shell: None,
             theme_light: "light-default".into(),
@@ -441,6 +442,20 @@ fn expand_tilde(path: &str, home: Option<&Path>) -> PathBuf {
         Some(h) if path.starts_with("~/") => h.join(path[2..].trim_start_matches('/')),
         _ => PathBuf::from(path),
     }
+}
+
+/// The public relay `remote_relay` defaults to: phones reach a computer from
+/// any network with nothing to set up. It forwards only Noise ciphertext.
+pub const DEFAULT_RELAY: &str = "wss://rift-relay.playhaws.com";
+
+/// Set in a scripted run (and inherited by the gateway it starts): the
+/// default relay is not used, so tests never reach the public relay. A relay
+/// the config names explicitly still is.
+pub const NO_DEFAULT_RELAY_ENV: &str = "RIFT_NO_DEFAULT_RELAY";
+
+fn relay_of(setting: &str, no_default: bool) -> Option<&str> {
+    let relay = setting.trim();
+    (!relay.is_empty() && !(no_default && relay == DEFAULT_RELAY)).then_some(relay)
 }
 
 /// Top-level `Option` settings: absent from a serialized default, so
@@ -542,6 +557,16 @@ pub fn themes_dir() -> Option<PathBuf> {
 }
 
 impl Config {
+    /// The relay the gateway registers at: `remote_relay` trimmed, `None`
+    /// when empty, and `None` for the default relay under
+    /// `RIFT_NO_DEFAULT_RELAY`.
+    pub fn relay(&self) -> Option<&str> {
+        relay_of(
+            &self.remote_relay,
+            std::env::var_os(NO_DEFAULT_RELAY_ENV).is_some(),
+        )
+    }
+
     /// Read `config.toml`. `Ok(None)`: no file yet (first run, defaults
     /// apply). `Err`: the file exists but cannot be read or parsed — the
     /// caller keeps its last good config rather than resetting to defaults,
@@ -867,13 +892,19 @@ mod tests {
     }
 
     #[test]
-    fn remote_relay_is_off_by_default_and_saved_in_place() {
+    fn remote_relay_defaults_to_the_public_relay_and_is_saved_in_place() {
         let c = Config::default();
+        assert_eq!(c.remote_relay, DEFAULT_RELAY);
+        assert!(DEFAULT_RELAY.starts_with("wss://"));
+        // a file without the key gets the default; an empty value opts out
+        let c: Config = toml::from_str("font_size = 13.0\n").unwrap();
+        assert_eq!(c.remote_relay, DEFAULT_RELAY);
+        let c: Config = toml::from_str("remote_relay = \"\"\n").unwrap();
         assert_eq!(c.remote_relay, "");
         let c: Config = toml::from_str("remote_relay = \"wss://relay.example.com\"\n").unwrap();
         assert_eq!(c.remote_relay, "wss://relay.example.com");
         assert!(toml::from_str::<Config>("remote_relay = true").is_err());
-        // the default (off) is not written; a set one is, in place
+        // the default is not written; another one is, in place
         let out = Config::default()
             .edit_toml(Some("# mine\nfont_size = 13.0\n"))
             .unwrap();
@@ -895,6 +926,18 @@ mod tests {
         let out = cleared.edit_toml(Some(&out)).unwrap();
         assert_eq!(out, "# mine\nfont_size = 13.0\nremote_relay = \"\"\n");
         assert_eq!(toml::from_str::<Config>(&out).unwrap().remote_relay, "");
+    }
+
+    #[test]
+    fn scripted_runs_skip_only_the_default_relay() {
+        assert_eq!(relay_of(DEFAULT_RELAY, false), Some(DEFAULT_RELAY));
+        assert_eq!(relay_of(DEFAULT_RELAY, true), None);
+        assert_eq!(relay_of(&format!(" {DEFAULT_RELAY} "), true), None);
+        assert_eq!(
+            relay_of(" ws://127.0.0.1:9 ", true),
+            Some("ws://127.0.0.1:9")
+        );
+        assert_eq!(relay_of("  ", false), None);
     }
 
     #[test]

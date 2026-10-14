@@ -547,8 +547,8 @@ fn remote_config_from(loaded: Result<Option<rift_core::Config>, String>) -> Remo
     match loaded {
         Ok(Some(c)) => RemoteConfig {
             access: c.remote_access,
+            relay: c.relay().map(str::to_string),
             listen: Some(c.remote_listen),
-            relay: Some(c.remote_relay.trim().to_string()).filter(|r| !r.is_empty()),
             tunnel: c.remote_tunnel,
         },
         _ => RemoteConfig::default(),
@@ -1330,10 +1330,11 @@ mod tests {
             RemoteConfig {
                 access: false,
                 listen: Some("0.0.0.0:7878".into()),
-                relay: None,
+                relay: Some(rift_core::config::DEFAULT_RELAY.into()),
                 tunnel: false,
             }
         );
+        assert_eq!(from_text("remote_relay = \"\"\n").relay, None);
         assert_eq!(
             from_text(
                 "remote_access = true\nremote_listen = \"127.0.0.1:9\"\n\

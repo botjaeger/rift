@@ -102,7 +102,7 @@ Active only while the app owns the command line.
 
 | Key | Effect |
 |---|---|
-| Enter | Submit command |
+| Enter | Submit command (an empty or blank line does nothing) |
 | ⇧⏎ / ⌥⏎ | Insert a newline (multi-line command; Enter still submits) |
 | Tab | Accept completion |
 | ⇧Tab | Next completion source tab (All · Path · History …) while the panel is open |

@@ -14,7 +14,7 @@
 | `~/.local/share/rift/update.json` | Last update check: when, the newest release's manifest, the version *Later* dismissed |
 | `~/.local/share/rift/updates/` | Update downloads (deleted after installing; an interrupted install's leftovers go at the next one), `install.lock` (one window installs at a time) and `relaunch.log` (the restarted app's output until it is confirmed; emptied past 1 MB) |
 | `~/.local/share/rift/update-pending.json` | An update in progress (readable by you only; holds the token other windows' `prepare-restart` needs); the new version removes it 10 s after its first frame, and if it dies before that the old app is put back (`update-failed.json`) |
-| `~/.local/share/rift/remote/` | Remote access (directory 0700, files 0600): `gateway.key` (the desktop's key phones pin), `devices.json` (paired phones), `pairing.json` (live pairing secrets, hashed), `status.json` and `gateway.lock` (the running gateway), `gateway.log`, `relay.json` (the gateway's secret at the relay), `tunnel.json` (Reach from anywhere: the tunnel's state), `history.jsonl` (the newest 500 connections) |
+| `~/.local/share/rift/remote/` | Remote access (directory 0700, files 0600): `gateway.key` (the desktop's key phones pin), `devices.json` (paired phones), `pairing.json` (live pairing secrets, hashed), `status.json` and `gateway.lock` (the running gateway), `gateway.log`, `relay.json` (the gateway's secret at the relay), `tunnel.json` (the Cloudflare tunnel's state), `history.jsonl` (the newest 500 connections) |
 | `~/.local/share/rift/restart/` | Each window's layout while an update restarts them (consumed on relaunch; left by a crash, reopened at the next plain launch) |
 
 `XDG_CONFIG_HOME` and `XDG_DATA_HOME` are honored. When the `rift` config or data directory does not exist, an existing one from an earlier name of the app (`shift`, then `runway`) stays active; move it to `rift` when you want the new paths.
@@ -62,12 +62,15 @@ remote_access = false             # phone companion: windows start the gateway
                                   # complete, remote-input, remote-open,
                                   # remote-status)
 remote_listen = "0.0.0.0:7878"    # where the gateway listens
-remote_relay  = ""                # wss://… relay for phones outside your network
-                                  # (empty: none); `rift-terminal relay` or
+remote_relay  = "wss://rift-relay.playhaws.com"
+                                  # relay for phones outside your network:
+                                  # Rift's public relay by default ("": none,
+                                  # phones connect only on your network;
+                                  # scripted runs skip it); `rift-terminal relay` or
                                   # packaging/relay.Dockerfile hosts one;
                                   # scripts/relay-local.sh runs a temporary one
                                   # on this machine and sets this key
-remote_tunnel = false             # Reach from anywhere: a relay on this computer
+remote_tunnel = false             # Cloudflare tunnel: a relay on this computer
                                   # behind a Cloudflare quick tunnel (needs
                                   # cloudflared); replaces remote_relay while on.
                                   # New address each start: phones pair again

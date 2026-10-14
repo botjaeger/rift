@@ -84,7 +84,7 @@ pub const CONTROL_IDLE: Duration = Duration::from_secs(60);
 /// Open sockets past which new ones are dropped unread.
 pub const MAX_SOCKETS: usize = 4096;
 /// The same for a relay that serves one gateway (`only_ids` of one id, the
-/// "Reach from anywhere" tunnel in the gateway's own process): its pairs
+/// Cloudflare tunnel in the gateway's own process): its pairs
 /// (two sockets each), the control connection and upgrades under way. Its
 /// sockets come through one proxy, so no per-address limit applies; this
 /// bound keeps a flood from the internet from spending the process's
@@ -127,7 +127,7 @@ pub struct RelayConfig {
     /// address for the `/connect` rate limit).
     pub trust_forwarded: bool,
     /// Only these routing ids may register (None: any). A relay that serves
-    /// one gateway (Rift's own "Reach from anywhere" tunnel) is no open
+    /// one gateway (Rift's own Cloudflare tunnel) is no open
     /// relay for strangers' gateways.
     pub only_ids: Option<Vec<String>>,
     pub tap: Option<Tap>,

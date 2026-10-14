@@ -300,6 +300,8 @@ about = state("about")
 assert "settings=true page=About" in about, about
 assert "settings_focus=Some(SettingsCopyVersion)" in about, about
 assert 'toast=Some("Copied version")' in about, about
+# a manual check is offered even before any check ran
+assert 'Button "Check for updates now"' in about, about
 assert re.fullmatch(r"v\d+\.\d+\.\d+.*", json.loads(next(
     l for l in about.splitlines() if l.startswith("clipboard="))[len("clipboard="):])), about
 settings_after = (scratch / "settings-after.toml").read_text()
@@ -1817,7 +1819,7 @@ on_run = remote_run("on", on_config, [
     cp(rm / "off-config.toml", on / "cfg/rift/config.toml"), "wait 3500",
     f"dump {on}/stopped.txt"], timeout=120)
 
-# Reach from anywhere (remote_tunnel) without cloudflared: the checklist
+# The Cloudflare tunnel (remote_tunnel) without cloudflared: the checklist
 # offers the install, the tunnel and relay wait, and the gateway says so in
 # tunnel.json; turning remote access off removes it
 tun = rm / "tunnel"
@@ -1829,7 +1831,7 @@ remote_run("tunnel", remote_base + 'control_api = "off"\nremote_access = true\n'
     cp(rm / "off-config.toml", tun / "cfg/rift/config.toml"), "wait 3500"],
     extra_env={"RIFT_CLOUDFLARED": ""})
 tunnel_page = (tun / "settings.txt").read_text()
-for row in ['Switch "Reach from anywhere" toggled=True', 'cloudflared"',
+for row in ['Switch "Use a Cloudflare tunnel instead" toggled=True', 'cloudflared"',
             'Label "Tunnel: Waiting for cloudflared"', 'Label "Relay: Waiting for the tunnel"']:
     assert row in tunnel_page, (row, tunnel_page)
 assert re.search(r'Button "(Install|Download) cloudflared"', tunnel_page), tunnel_page
@@ -2024,8 +2026,8 @@ relay_config = (remote_base + "remote_access = true\n"
     "resize 1100 800", "wait_prompt",
     f"wait_file {rl}/go-settings 60000", *settings_remote, "wait 1200",
     f"dump {rl}/connected.txt", f"shot {rl}/relay-dark.png",
-    # reading order: ↺ and switch, Reach from anywhere, ↺ and the relay
-    # field, Pair a phone, View only, then the device's Operate / View only
+    # reading order: ↺ and switch, ↺ and the relay field, the Cloudflare
+    # tunnel switch, Pair a phone, View only, then the device's Operate / View only
     *["key tab"] * 9, "wait 200", f"dump {rl}/focus.txt",
     "key space", "wait 2500", f"dump {rl}/changed.txt",
     f"wait_file {rl}/go-light 60000", cp(rl / "light.toml", rl / "cfg/rift/config.toml"),

@@ -689,9 +689,14 @@ description) left, control right; it runs to the bottom edge.
     `Keep shells running when Rift quits` toggle (*Session service;
     relaunch reattaches (new shells)*; `durable_sessions`).
   - Updates: `Check for updates` toggle (*At launch and every 6 hours;
-    Update Rift appears in the tab bar*; `check_for_updates`).
+    Update Rift appears in the tab bar*; `check_for_updates`), then a
+    `Rift <version>` row whose description is the update status (`Not
+    checked yet`, `Checking for updates…`, `Up to date`, `vX.Y.Z available`
+    or `Couldn't check for updates`) and a `Check now` button (one check at
+    once, disabled while one runs; it works with the toggle off too).
   - Automation: `Control socket` segmented `Off | Navigate | Full`
-    (`control_api`).
+    (*Lets scripts control Rift (rift-terminal ctl); Full also lets them
+    type*; `control_api`).
 - **Appearance** — *Fonts, cursor, window and theme*.
   - Font: `Font family` select (JetBrains Mono first, then the embedded
     Hack and the installed fixed-width families, each shown in itself),
@@ -779,7 +784,7 @@ description) left, control right; it runs to the bottom edge.
     cameras read it in any theme), `Expires in m:ss`, the wrapped link and a
     `Copy link` button; at zero, `Expired — Pair again`. While the gateway
     has no address yet, a `Pairing` row waits for it.
-  - `Reach from anywhere` (with remote access on): the `remote_tunnel`
+  - `Use a Cloudflare tunnel instead` (with remote access on, below `Relay`): the `remote_tunnel`
     switch; on, a checklist follows: `cloudflared` (`Installed · <path>` with
     a green check, or `Not installed` with an `Install` button when
     Homebrew is present, else `Download`) and `Tunnel` (`Starting…`,
@@ -791,7 +796,9 @@ description) left, control right; it runs to the bottom edge.
   - `Relay`: a text field for `remote_relay` (click or Enter edits; typing
     and ⌘V fill it; Enter saves a valid `ws://`/`wss://` URL, an invalid one
     stays with a toast; Esc cancels; Tab or a click elsewhere saves) and its
-    state: `Off`, `Connecting…`, `Connected via <host>` or the error.
+    state: `Off · phones connect only on this network`, `Connecting…`,
+    `Connected via <host>` or the error. It holds Rift's public relay by
+    default.
   - `Paired devices`: per device its name and `platform (iOS, Android) · paired <date> ·
     connected|connected via relay|last seen …`, an `Operate` / `View only`
     segmented control (raising to Operate asks first), and a destructive
@@ -808,8 +815,9 @@ description) left, control right; it runs to the bottom edge.
   and toasts `Copied version`), the update status — `Up to date`,
   `Checking for updates…` or `Couldn't check for updates` (muted), or
   `vX.Y.Z available` (`warning`) with an `Update…` button that opens the
-  update dialog — and `Copyright 2026 botjaeger · MIT License`. The status
-  row is absent while no check has run (`check_for_updates` off).
+  update dialog, or else a `Check now` button (none while a check runs) —
+  and `Copyright 2026 botjaeger · MIT License`. Before any check, only
+  `Check now` shows.
   Opens from Rift → About Rift and the palette (`open_about`).
 
 ## Scrollback

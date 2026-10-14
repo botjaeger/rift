@@ -330,13 +330,50 @@ pub fn live_end(term: &rift_pty::alacritty_terminal::term::Term<EventProxy>, scr
         .map_or(cursor_abs + 1, |abs| abs + 1)
 }
 
-/// Output lines of the filtered block that do not contain the filter query
-/// (case-insensitive) — skipped by the display list (Warp block filter).
+/// Blank lines between a finished block's end and the next block's prompt.
+fn stray_blank_lines(session: &Session) -> std::collections::HashSet<u64> {
+    // the blocks lock is released before the term lock is taken
+    let anchors: Vec<(Option<u64>, u64)> = session
+        .blocks
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|b| (b.end, b.prompt_start))
+        .collect();
+    let gaps = gaps_between(&anchors);
+    if gaps.is_empty() {
+        return std::collections::HashSet::new();
+    }
+    let scrolled = session.scrolled.load(std::sync::atomic::Ordering::Acquire);
+    let term = session.term.lock();
+    gaps.into_iter()
+        .flat_map(|(from, to)| from..to)
+        .filter(|&abs| line_text(&term, scrolled, abs).is_some_and(|t| t.trim().is_empty()))
+        .collect()
+}
+
+/// `(end, next prompt start)` of each finished block followed by a gap, from
+/// each block's `(end, prompt_start)`.
+fn gaps_between(anchors: &[(Option<u64>, u64)]) -> Vec<(u64, u64)> {
+    anchors
+        .windows(2)
+        .filter_map(|w| {
+            let end = w[0].0?;
+            (end < w[1].1).then_some((end, w[1].1))
+        })
+        .collect()
+}
+
+/// Lines the display list skips: blank lines that belong to no block (between
+/// a finished block's end and the next prompt — the shell's empty prompts
+/// for Enter pressed while a command ran), and the output lines of the
+/// filtered block that do not contain the filter query (case-insensitive;
+/// Warp block filter).
 pub fn filter_hidden(
     session: &Session,
     filter: Option<&(BlockId, String)>,
 ) -> std::collections::HashSet<u64> {
-    let mut hidden = std::collections::HashSet::new();
+    let mut hidden = stray_blank_lines(session);
     let Some((id, query)) = filter else {
         return hidden;
     };
@@ -2546,6 +2583,22 @@ fn render_header(
 mod tests {
     use super::*;
     use std::time::Duration as StdDuration;
+
+    #[test]
+    fn gaps_are_the_lines_between_a_finished_block_and_the_next_prompt() {
+        // contiguous blocks have no gap; Enter pressed during `sleep` left
+        // lines 14 and 15 to no block; a running block has no end yet
+        let anchors = [
+            (Some(1), 0),
+            (Some(14), 1),
+            (Some(17), 16),
+            (None, 17),
+            (None, 30),
+        ];
+        assert_eq!(gaps_between(&anchors), vec![(14, 16)]);
+        assert!(gaps_between(&[]).is_empty());
+        assert!(gaps_between(&[(Some(3), 0)]).is_empty());
+    }
 
     #[test]
     fn tab_and_hidden_cells_draw_blank() {
