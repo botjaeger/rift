@@ -152,10 +152,12 @@ send-text.
    command and confirm to run it at the prompt, or use the key row (^C, esc,
    tab, arrows) to talk to a running program.
 
-On the same network the phone connects directly. Away from it, set a relay
-under *Relay* (`wss://…`; host one with `rift-terminal relay` or
-`packaging/relay.Dockerfile`) and pair again so the link includes it, or use
-a private network such as Tailscale. The relay never sees your terminal: it
+On the same network the phone connects directly. Away from it, turn on
+*Reach from anywhere* (a free Cloudflare tunnel from this computer; Settings
+offers to install `cloudflared`, and phones pair again after each restart),
+or set a relay under *Relay* (`wss://…`; host one with `rift-terminal relay`
+or `packaging/relay.Dockerfile`) and pair again so the link includes it, or
+use a private network such as Tailscale. The relay never sees your terminal: it
 only forwards encrypted traffic. While a phone is connected, the tab bar
 shows a *Remote* chip. Set a phone to *View only*, check *Recent
 connections*, or revoke a phone under *Paired devices*; turning remote

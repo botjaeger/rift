@@ -240,6 +240,11 @@ pub struct Config {
     /// local network (`wss://…`; `ws://` only for local relays). Empty: no
     /// relay. The relay only ever sees encrypted traffic.
     pub remote_relay: String,
+    /// Reach the gateway from any network without a server: it runs a relay
+    /// on this computer behind a Cloudflare quick tunnel (`cloudflared`)
+    /// and registers there instead of at `remote_relay`. The tunnel's
+    /// address changes on every start, so phones pair again after one.
+    pub remote_tunnel: bool,
     pub shell: Option<String>,
     /// Theme used while the OS is in light mode when `sync_os_theme` is on.
     pub theme_light: String,
@@ -353,6 +358,7 @@ impl Default for Config {
             remote_access: false,
             remote_listen: "0.0.0.0:7878".into(),
             remote_relay: String::new(),
+            remote_tunnel: false,
             shell: None,
             theme_light: "light-default".into(),
             sync_os_theme: false,

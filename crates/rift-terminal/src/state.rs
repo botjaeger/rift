@@ -92,6 +92,9 @@ pub enum ClickTarget {
     RemoteViewOnly,
     /// Settings › Remote access: copy the pairing link.
     RemoteCopyLink,
+    /// Settings › Remote access: install cloudflared (Homebrew in a new
+    /// tab, else Cloudflare's download page).
+    RemoteInstallTunnel,
     /// Settings › Remote access: revoke the paired device with this id.
     RemoteRevoke(String),
     /// Settings › Remote access: the relay URL field (edit `remote_relay`).

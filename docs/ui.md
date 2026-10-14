@@ -778,6 +778,15 @@ description) left, control right; it runs to the bottom edge.
     cameras read it in any theme), `Expires in m:ss`, the wrapped link and a
     `Copy link` button; at zero, `Expired — Pair again`. While the gateway
     has no address yet, a `Pairing` row waits for it.
+  - `Reach from anywhere` (with remote access on): the `remote_tunnel`
+    switch; on, a checklist follows: `cloudflared` (`Installed · <path>` with
+    a green check, or `Not installed` with an `Install` button when
+    Homebrew is present, else `Download`) and `Tunnel` (`Starting…`,
+    `Waiting for cloudflared`, `Ready · <host> · pair phones again after a
+    restart` or `Failed, retrying: <reason>`). The `Relay` row then shows
+    the tunnel relay's state (`Waiting for the tunnel` until it is ready)
+    without the URL field, and `Pairing` waits with `Waiting for the
+    tunnel…`.
   - `Relay`: a text field for `remote_relay` (click or Enter edits; typing
     and ⌘V fill it; Enter saves a valid `ws://`/`wss://` URL, an invalid one
     stays with a toast; Esc cancels; Tab or a click elsewhere saves) and its

@@ -18,6 +18,7 @@ mod state;
 mod traffic_lights;
 #[cfg(target_os = "macos")]
 mod translucency;
+mod tunnel;
 mod updater;
 mod views;
 mod vim;

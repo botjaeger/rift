@@ -38,7 +38,9 @@ const HELP: &str = "usage: rift-terminal remote [--listen ADDR] [--managed]
 Serve this user's Rift windows to paired phones (Noise-encrypted WebSocket,
 protocol v2). ADDR defaults to `remote_listen` in config.toml, else
 0.0.0.0:7878. With `remote_relay` set, the gateway also registers at that
-relay (followed while it runs). One gateway runs per user.
+relay; with `remote_tunnel` on, at a relay it runs behind a Cloudflare
+quick tunnel instead (needs cloudflared). Both are followed while it runs.
+One gateway runs per user.
 
   --managed      started by a Rift window: exits within 2 s after
                  `remote_access` becomes false, and 30 s after the last
@@ -528,6 +530,9 @@ struct RemoteConfig {
     listen: Option<String>,
     /// `remote_relay` when set.
     relay: Option<String>,
+    /// `remote_tunnel`: run a relay here behind a Cloudflare tunnel
+    /// (`tunnel.rs`) and register there instead.
+    tunnel: bool,
 }
 
 /// `remote_access` and `remote_listen` from config.toml, read with the
@@ -544,6 +549,7 @@ fn remote_config_from(loaded: Result<Option<rift_core::Config>, String>) -> Remo
             access: c.remote_access,
             listen: Some(c.remote_listen),
             relay: Some(c.remote_relay.trim().to_string()).filter(|r| !r.is_empty()),
+            tunnel: c.remote_tunnel,
         },
         _ => RemoteConfig::default(),
     }
@@ -596,7 +602,7 @@ pub fn cli(args: &[String]) -> i32 {
         return 0;
     }
     let listen = listen
-        .or(config.listen)
+        .or(config.listen.clone())
         .unwrap_or_else(|| DEFAULT_LISTEN.into());
     let addr: SocketAddr = match listen.parse() {
         Ok(a) => a,
@@ -638,7 +644,9 @@ pub fn cli(args: &[String]) -> i32 {
         os().into(),
         env!("CARGO_PKG_VERSION").into(),
     );
-    gw_config.relay = config.relay.clone();
+    // with the tunnel, the relay is set once its address is known; it starts
+    // only after this gateway holds the lock
+    gw_config.relay = config.relay.clone().filter(|_| !config.tunnel);
     let gateway = match rift_remote::serve(listener, ControlSource::default(), gw_config) {
         Ok(g) => g,
         // another gateway holds the lock
@@ -650,22 +658,26 @@ pub fn cli(args: &[String]) -> i32 {
     };
     let bound = gateway.local_addr();
     log::info!("remote: gateway on {bound} (pid {})", std::process::id());
+    let mut tunnel = crate::tunnel::Tunnel::new(&dir);
+    gateway.set_relay(relay_for(&mut tunnel, &config));
     if !managed {
         println!("Rift remote gateway on {bound} (protocol v2, Noise-encrypted)");
         for a in registry::addresses(bound) {
             println!("  reachable at {a}");
         }
-        if let Some(r) = &config.relay {
+        if config.tunnel {
+            println!("  through a relay behind a Cloudflare tunnel (starting)");
+        } else if let Some(r) = &config.relay {
             println!("  through the relay {r}");
         }
         println!("Pair a phone: rift-terminal remote pair");
         if control::sockets().is_empty() {
             eprintln!("note: no Rift window is listening yet (control_api = \"off\"?)");
         }
-        // follow `remote_relay` until killed
+        // follow `remote_relay` and `remote_tunnel` until killed
         loop {
             std::thread::sleep(MANAGED_CHECK);
-            gateway.set_relay(remote_config().relay);
+            gateway.set_relay(relay_for(&mut tunnel, &remote_config()));
         }
     }
     // managed: follow the config and the windows
@@ -680,7 +692,7 @@ pub fn cli(args: &[String]) -> i32 {
             log::info!("remote: remote_access is off; stopping");
             break;
         }
-        gateway.set_relay(now.relay);
+        gateway.set_relay(relay_for(&mut tunnel, &now));
         if checked_windows.is_none_or(|t| t.elapsed() >= Duration::from_secs(2)) {
             checked_windows = Some(Instant::now());
             if any_window() {
@@ -692,7 +704,19 @@ pub fn cli(args: &[String]) -> i32 {
         }
     }
     drop(gateway);
+    drop(tunnel);
     0
+}
+
+/// The relay the gateway registers at: the tunnel's once it is ready while
+/// `remote_tunnel` is on, else `remote_relay`. Starts and stops the tunnel.
+fn relay_for(tunnel: &mut crate::tunnel::Tunnel, config: &RemoteConfig) -> Option<String> {
+    let url = tunnel.poll(config.tunnel);
+    if config.tunnel {
+        url
+    } else {
+        config.relay.clone()
+    }
 }
 
 /// A window's control socket answers.
@@ -712,11 +736,19 @@ fn pair(dir: &Path, args: &[String]) -> i32 {
         }
     };
     let running = registry::read_status(dir);
-    // the running gateway's relay, else the configured one
+    // the running gateway's relay, else the configured one (never while the
+    // tunnel replaces it: its address is known only once it runs)
+    let config = remote_config();
     let relay = running
         .as_ref()
         .and_then(|st| st.relay.as_ref().map(|r| r.url.clone()))
-        .or_else(|| remote_config().relay);
+        .or_else(|| config.relay.filter(|_| !config.tunnel));
+    if config.tunnel && relay.is_none() {
+        eprintln!(
+            "note: the tunnel is not ready yet (Settings › Remote access shows why); \
+             this link works only on this network"
+        );
+    }
     let addresses = match &running {
         Some(st) => st.addresses.clone(),
         None => {
@@ -1293,20 +1325,31 @@ mod tests {
                 access: false,
                 listen: Some("0.0.0.0:7878".into()),
                 relay: None,
+                tunnel: false,
             }
         );
         assert_eq!(
             from_text(
                 "remote_access = true\nremote_listen = \"127.0.0.1:9\"\n\
-                 remote_relay = \" wss://relay.example.com \"\n"
+                 remote_relay = \" wss://relay.example.com \"\nremote_tunnel = true\n"
             ),
             RemoteConfig {
                 access: true,
                 listen: Some("127.0.0.1:9".into()),
                 relay: Some("wss://relay.example.com".into()),
+                tunnel: true,
             }
         );
         assert_eq!(from_text("remote_relay = \"  \"\n").relay, None);
+        // the tunnel replaces the configured relay; off, the relay is used
+        let mut t = crate::tunnel::Tunnel::new(
+            &std::env::temp_dir().join(format!("rift-relay-for-{}", std::process::id())),
+        );
+        let relayed = from_text("remote_relay = \"wss://relay.example.com\"\n");
+        assert_eq!(
+            relay_for(&mut t, &relayed).as_deref(),
+            Some("wss://relay.example.com")
+        );
         // only a real boolean turns it on, and a file the app cannot load
         // keeps it off (the windows fall back the same way)
         for text in [

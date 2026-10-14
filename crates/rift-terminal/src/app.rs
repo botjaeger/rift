@@ -2779,6 +2779,7 @@ impl App {
                     | ClickTarget::RemotePair
                     | ClickTarget::RemoteViewOnly
                     | ClickTarget::RemoteCopyLink
+                    | ClickTarget::RemoteInstallTunnel
                     | ClickTarget::RemoteRevoke(_)
                     | ClickTarget::RemotePermission(..)
                     | ClickTarget::PaneClose(_)
@@ -10950,6 +10951,7 @@ impl App {
                 v.pairing = None;
                 v.pairing_wait = false;
             }
+            Some(ClickTarget::RemoteInstallTunnel) => self.install_cloudflared(),
             Some(ClickTarget::RemoteCopyLink) => {
                 if let Some(url) = self.settings.remote.pairing.as_ref().map(|p| p.url.clone())
                     && self.copy_to_clipboard(url)
@@ -11045,6 +11047,8 @@ impl App {
                     "check_for_updates" => c.check_for_updates = !c.check_for_updates,
                     // on: the windows start a gateway; off: it exits by itself
                     "remote_access" => c.remote_access = !c.remote_access,
+                    // the running gateway starts or stops the tunnel itself
+                    "remote_tunnel" => c.remote_tunnel = !c.remote_tunnel,
                     // off deletes the saved output (apply_config)
                     "save_transcripts" => c.save_transcripts = !c.save_transcripts,
                     "mouse_reporting" => c.mouse_reporting = !c.mouse_reporting,
@@ -13133,6 +13137,7 @@ impl App {
                         | ClickTarget::SettingsKeybindReset(_)
                         | ClickTarget::RemotePair
                         | ClickTarget::RemoteCopyLink
+                        | ClickTarget::RemoteInstallTunnel
                         | ClickTarget::RemoteRevoke(_) => (Role::Button, None, false),
                         ClickTarget::RemoteViewOnly => {
                             (Role::Switch, Some(self.settings.remote.view_only), false)
@@ -14361,6 +14366,15 @@ impl App {
         };
         self.settings.remote.gateway = gateway;
         self.settings.remote.relay = self.relay_line();
+        // a gateway that is not running leaves no tunnel to show
+        self.settings.remote.tunnel = (on && self.config.remote_tunnel)
+            .then(|| {
+                self.remote
+                    .status
+                    .as_ref()
+                    .and(crate::tunnel::read_state(dir))
+            })
+            .flatten();
         if !on {
             self.settings.remote.pairing = None;
             self.settings.remote.pairing_wait = false;
@@ -14376,6 +14390,10 @@ impl App {
         }
         if !self.remote_page_open() {
             return;
+        }
+        if on && self.config.remote_tunnel {
+            self.settings.remote.cloudflared = crate::tunnel::find_cloudflared();
+            self.settings.remote.brew = crate::tunnel::has_brew();
         }
         use rift_remote::registry::Via;
         let connected: Vec<(String, Via)> = self
@@ -14420,6 +14438,25 @@ impl App {
         }
     }
 
+    /// Settings › Remote access › "Install" beside cloudflared: Homebrew's
+    /// `brew install cloudflared` in a new tab (the gateway picks it up
+    /// within seconds), else Cloudflare's download page.
+    fn install_cloudflared(&mut self) {
+        let brew = crate::tunnel::BREW
+            .into_iter()
+            .find(|p| std::path::Path::new(p).is_file());
+        let Some(brew) = brew else {
+            self.open_target(crate::tunnel::DOWNLOAD_URL);
+            return;
+        };
+        self.settings.open = false;
+        self.spawn_tab_at(None);
+        if let Some(pane) = self.tabs.get(self.active).map(|t| t.active_pane) {
+            self.pending_commands
+                .insert(pane, vec![format!("{brew} install cloudflared")]);
+        }
+    }
+
     /// "Pair a phone": a one-time link for the gateway's addresses (waits
     /// for them when the gateway is still starting).
     fn start_pairing(&mut self) {
@@ -14436,8 +14473,22 @@ impl App {
             .as_ref()
             .map(|s| s.addresses.clone())
             .unwrap_or_default();
+        // the running gateway's relay (the tunnel's while it is on), else
+        // the configured one, as `rift-terminal remote pair` has it
+        let tunnel = self.config.remote_tunnel;
+        let relay = self
+            .remote
+            .status
+            .as_ref()
+            .and_then(|s| s.relay.as_ref())
+            .map(|r| r.url.clone())
+            .or_else(|| {
+                Some(self.config.remote_relay.trim().to_string())
+                    .filter(|r| !r.is_empty() && !tunnel)
+            });
         let view = &mut self.settings.remote;
-        if addresses.is_empty() {
+        // a link without the tunnel's address would only work on this network
+        if addresses.is_empty() || (tunnel && relay.is_none()) {
             view.pairing = None;
             view.pairing_wait = true;
             return;
@@ -14448,7 +14499,13 @@ impl App {
         } else {
             Permission::Operate
         };
-        match registry::start_pairing(&dir, &addresses, &crate::remote::hostname(), permission) {
+        match registry::start_pairing_via(
+            &dir,
+            &addresses,
+            relay.as_deref(),
+            &crate::remote::hostname(),
+            permission,
+        ) {
             Ok(link) => {
                 view.pairing = Some(crate::views::settings::PairingView {
                     qr: registry::qr_matrix(&link.url),
@@ -14585,7 +14642,9 @@ impl App {
     fn relay_line(&self) -> crate::views::settings::RelayLine {
         use crate::views::settings::RelayLine;
         use rift_remote::registry::RelayState;
-        if !self.config.remote_access || self.config.remote_relay.trim().is_empty() {
+        if !self.config.remote_access
+            || (self.config.remote_relay.trim().is_empty() && !self.config.remote_tunnel)
+        {
             return RelayLine::Off;
         }
         match self.remote.status.as_ref().and_then(|s| s.relay.as_ref()) {

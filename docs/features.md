@@ -696,6 +696,22 @@ line shows the addresses, or how many devices are connected.
   relay` or `packaging/relay.Dockerfile` (behind a TLS proxy such as Caddy).
   A Tailscale or other private-network address of the computer works
   without a relay: it is listed in the pairing link like any other address.
+  Pairing links made in Settings carry the running gateway's relay too.
+- **Reach from anywhere** (`remote_tunnel`, no server needed): the gateway
+  runs a relay on a loopback port of this computer and gives it a public
+  address with a Cloudflare quick tunnel (`cloudflared tunnel --url`,
+  free, no account), then registers there instead of at `remote_relay`.
+  Cloudflare and the relay see only Noise ciphertext, and only this
+  computer's gateway may register at that relay. Settings checks for
+  `cloudflared` (PATH, `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`;
+  `RIFT_CLOUDFLARED` names another) and offers *Install* (`brew install
+  cloudflared` in a new tab) or *Download* (Cloudflare's page); the gateway
+  starts the tunnel by itself within 5 s of the install. The address is
+  used 20 s after cloudflared prints it (so the new name resolves), and
+  "Pair a phone" waits for it. It is new on every start: phones pair again
+  after a restart. A tunnel whose cloudflared exits is restarted after
+  30 s; cloudflared ends with the gateway, even a killed one. State:
+  `<data dir>/remote/tunnel.json`.
 - **Indicator.** While a phone is connected, every window shows a
   *Remote · <device>* chip (*Remote · N devices*) in the tab bar; its
   tooltip names the devices and a click opens the Remote access page.

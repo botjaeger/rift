@@ -49,20 +49,26 @@ fn open_with(
 ) -> Result<Ws, tungstenite::Error> {
     use tungstenite::client::IntoClientRequest;
     let stream = TcpStream::connect(addr).unwrap();
+    // the upgrade blocks (a short timeout here breaks it as Interrupted on a
+    // loaded CI runner); reads after it poll every 50 ms
     stream
-        .set_read_timeout(Some(Duration::from_millis(50)))
+        .set_read_timeout(Some(Duration::from_secs(15)))
         .unwrap();
     let mut req = format!("ws://{addr}{path}").into_client_request().unwrap();
     for (k, v) in headers {
         let name = tungstenite::http::HeaderName::from_bytes(k.as_bytes()).unwrap();
         req.headers_mut().insert(name, v.parse().unwrap());
     }
-    tungstenite::client(req, stream)
+    let ws = tungstenite::client(req, stream)
         .map(|(ws, _)| ws)
         .map_err(|e| match e {
             tungstenite::HandshakeError::Failure(e) => e,
             tungstenite::HandshakeError::Interrupted(_) => panic!("interrupted"),
-        })
+        })?;
+    ws.get_ref()
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .unwrap();
+    Ok(ws)
 }
 
 /// The HTTP status a refused upgrade got.
@@ -269,6 +275,32 @@ fn malformed_or_oversized_registrations_are_closed() {
     assert!(closed_within(&mut ws, Duration::from_secs(2)));
     // an unknown route
     assert_eq!(status(open(addr, "/admin")), 404);
+}
+
+#[test]
+fn a_relay_for_one_gateway_refuses_every_other_id() {
+    let relay = start_relay(|c| c.only_ids = Some(vec![ID.to_string()]));
+    let addr = relay.local_addr();
+    // another key's holder proves its key and is still closed
+    let mut ws = open(addr, "/gateway").unwrap();
+    ws.send(Message::text(
+        json!({"t":"register","id":ID8,"key":key_text(&K8),"secret":SECRET}).to_string(),
+    ))
+    .unwrap();
+    let RelayMsg::Prove { m } = next_relay(&mut ws) else {
+        panic!("expected a key challenge")
+    };
+    let proof = rift_remote::relay::prove(&K8, &B64.decode(m).unwrap()).unwrap();
+    ws.send(Message::text(
+        json!({"t":"proof","m":B64.encode(proof)}).to_string(),
+    ))
+    .unwrap();
+    assert!(closed_within(&mut ws, Duration::from_secs(3)));
+    assert!(!relay.online(ID8));
+    // the allowed one registers
+    let (_a, r) = register(addr, &K7, SECRET);
+    assert_eq!(r, RelayMsg::Registered);
+    assert!(relay.online(ID));
 }
 
 #[test]

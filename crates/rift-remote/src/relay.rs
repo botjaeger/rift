@@ -116,6 +116,10 @@ pub struct RelayConfig {
     /// behind a reverse proxy you run: otherwise anyone picks their own
     /// address for the `/connect` rate limit).
     pub trust_forwarded: bool,
+    /// Only these routing ids may register (None: any). A relay that serves
+    /// one gateway (Rift's own "Reach from anywhere" tunnel) is no open
+    /// relay for strangers' gateways.
+    pub only_ids: Option<Vec<String>>,
     pub tap: Option<Tap>,
 }
 
@@ -134,6 +138,7 @@ impl Default for RelayConfig {
             control_ping: CONTROL_PING,
             control_idle: CONTROL_IDLE,
             trust_forwarded: false,
+            only_ids: None,
             tap: None,
         }
     }
@@ -840,8 +845,9 @@ fn control(shared: &Arc<Shared>, mut ws: Ws, peer: SocketAddr, deadline: Instant
         c.max_frame_size = Some(MAX_CONTROL);
         c.max_message_size = Some(MAX_CONTROL);
     });
-    let Some((id, secret)) = register(&mut ws, deadline) else {
-        log::debug!("relay: {peer}: registration refused (no valid key proof)");
+    let allowed = |id: &String| cfg.only_ids.as_ref().is_none_or(|ids| ids.contains(id));
+    let Some((id, secret)) = register(&mut ws, deadline).filter(|(id, _)| allowed(id)) else {
+        log::debug!("relay: {peer}: registration refused (no valid key proof, or not allowed)");
         let _ = ws.close(None);
         let _ = ws.flush();
         return;

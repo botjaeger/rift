@@ -333,10 +333,14 @@ relay: `rift-terminal relay` (or the `packaging/relay.Dockerfile` image),
 which anyone can host. The relay only splices WebSocket connections; it
 never holds a key and only ever sees Noise ciphertext (and the routing id).
 It listens on plain `ws://`; put it behind a TLS reverse proxy and give
-gateways and phones its `wss://` URL. Without a server,
-`scripts/relay-local.sh` runs the image on the desktop itself behind a
-Cloudflare quick tunnel and points `remote_relay` at it while it runs; the
-tunnel's URL changes on every start, so phones pair again each time.
+gateways and phones its `wss://` URL. Without a server, `remote_tunnel`
+("Reach from anywhere") makes the gateway run the relay itself on a
+loopback port behind a Cloudflare quick tunnel and register at the
+tunnel's `wss://` address (`scripts/relay-local.sh` does the same with the
+Docker image); the address changes on every start, so phones pair again
+each time. Nothing on the wire changes: it is an ordinary relay, except
+that it lets only this computer's gateway register (any other routing id is
+closed after its key proof, as an unproven one is).
 
 - **Routing id**: base64url of the first 16 bytes of SHA-256 over the
   gateway's static public key. It names the gateway at the relay and is no

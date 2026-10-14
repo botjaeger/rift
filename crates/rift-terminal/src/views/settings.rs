@@ -228,6 +228,12 @@ pub struct RemoteView {
     pub relay: RelayLine,
     /// The relay field is being edited: its text (⏎ saves, Esc cancels).
     pub relay_edit: Option<String>,
+    /// `remote_tunnel`: the gateway's `tunnel.json` (None: not running yet).
+    pub tunnel: Option<crate::tunnel::TunnelState>,
+    /// Where cloudflared is installed (checked while the page shows).
+    pub cloudflared: Option<std::path::PathBuf>,
+    /// Homebrew can install it ("Install"; else "Download").
+    pub brew: bool,
     /// Newest first, at most [`HISTORY_ROWS`]: connected devices, then
     /// `history.jsonl`.
     pub history: Vec<HistoryRow>,
@@ -1816,6 +1822,9 @@ fn remote_page(form: &mut Form, config: &Config, view: &RemoteView, blink_on: bo
         GatewayLine::Off
     };
     form.display(y, "Status", &line.text());
+    if on {
+        tunnel_rows(form, config, view);
+    }
     relay_row(form, config, view, blink_on);
 
     form.group("Pair a phone");
@@ -1858,6 +1867,14 @@ fn remote_page(form: &mut Form, config: &Config, view: &RemoteView, blink_on: bo
         let y = form.y;
         let text = match &view.gateway {
             GatewayLine::Listening(a) if a.is_empty() => "No network address to pair over",
+            GatewayLine::Listening(_) | GatewayLine::Connected(_)
+                if config.remote_tunnel && view.cloudflared.is_none() =>
+            {
+                "Install cloudflared first"
+            }
+            GatewayLine::Listening(_) | GatewayLine::Connected(_) if config.remote_tunnel => {
+                "Waiting for the tunnel…"
+            }
             _ => "Waiting for the gateway to start…",
         };
         form.display(y, "Pairing", text);
@@ -1934,14 +1951,101 @@ fn remote_page(form: &mut Form, config: &Config, view: &RemoteView, blink_on: bo
     }
 }
 
+/// "Reach from anywhere" (`remote_tunnel`) and, while it is on, its
+/// checklist: cloudflared (installed, else Install / Download) and the
+/// tunnel's state.
+fn tunnel_rows(form: &mut Form, config: &Config, view: &RemoteView) {
+    let y = form.y;
+    form.toggle_desc(
+        y,
+        "Reach from anywhere",
+        "Phones connect from any network through a free Cloudflare tunnel from this computer",
+        config.remote_tunnel,
+        "remote_tunnel",
+    );
+    if !config.remote_tunnel {
+        return;
+    }
+    let y = form.y;
+    match &view.cloudflared {
+        Some(path) => {
+            form.reserve = 40.0;
+            form.label_desc("cloudflared", &format!("Installed · {}", path.display()), y);
+            if form.visible(y, ROW_H) {
+                let c = [form.right() - 8.0, y + ROW_H / 2.0];
+                icons::draw(form.layer, Icon::Check, c, 16.0, form.theme.success);
+            }
+            form.push_hit([form.x, y, form.card_w, ROW_H], ClickTarget::SettingsNoop);
+            form.name_last(format!("cloudflared: installed at {}", path.display()));
+        }
+        None => {
+            let label = if view.brew { "Install" } else { "Download" };
+            let bw = form.engine.measure(label, 12.5, FONT_SANS, Weight::MEDIUM) + 24.0;
+            form.reserve = bw + 40.0;
+            form.label_desc(
+                "cloudflared",
+                "Not installed · the tunnel needs it (free, by Cloudflare)",
+                y,
+            );
+            if !form.hidden {
+                let by = y + (ROW_H - CONTROL_H) / 2.0;
+                let bx = form.right() - bw.round();
+                form.button(
+                    bx,
+                    by,
+                    label,
+                    ButtonKind::Primary,
+                    ClickTarget::RemoteInstallTunnel,
+                    format!("{label} cloudflared"),
+                );
+            }
+        }
+    }
+    let y = form.y;
+    let state = tunnel_text(view);
+    form.reserve = 0.0;
+    form.label_desc("Tunnel", &state, y);
+    form.push_hit([form.x, y, form.card_w, ROW_H], ClickTarget::SettingsNoop);
+    form.name_last(format!("Tunnel: {state}"));
+}
+
+/// The Tunnel row's state.
+pub fn tunnel_text(view: &RemoteView) -> String {
+    use crate::tunnel::TunnelState;
+    match &view.tunnel {
+        _ if view.cloudflared.is_none() => "Waiting for cloudflared".into(),
+        None | Some(TunnelState::Starting) => "Starting…".into(),
+        Some(TunnelState::Missing) => "Waiting for cloudflared".into(),
+        Some(TunnelState::Ready { url }) => format!(
+            "Ready · {} · pair phones again after a restart",
+            url.trim_start_matches("wss://")
+        ),
+        Some(TunnelState::Failed { detail }) => format!("Failed, retrying: {detail}"),
+    }
+}
+
 /// Placeholder of the empty relay field.
 pub const RELAY_PLACEHOLDER: &str = "wss://relay.example.com";
 
-/// The Relay row: its state under the label, the URL field on the right.
+/// The Relay row: its state under the label, the URL field on the right
+/// (none while the tunnel provides the relay).
 fn relay_row(form: &mut Form, config: &Config, view: &RemoteView, blink_on: bool) {
+    let y = form.y;
+    if config.remote_access && config.remote_tunnel {
+        let ready = matches!(view.tunnel, Some(crate::tunnel::TunnelState::Ready { .. }));
+        let state = if ready {
+            format!("{} · the tunnel's relay", view.relay.text())
+        } else {
+            "Waiting for the tunnel".to_string()
+        };
+        form.reserve = 0.0;
+        form.label_desc("Relay", &state, y);
+        form.push_hit([form.x, y, form.card_w, ROW_H], ClickTarget::SettingsNoop);
+        form.name_last(format!("Relay: {state}"));
+        return;
+    }
     let fw = (form.card_w * 0.45).clamp(160.0, 280.0);
     form.reserve = fw + 40.0;
-    let y = form.y;
     let state = if config.remote_access {
         view.relay.text()
     } else if config.remote_relay.trim().is_empty() {
@@ -3073,6 +3177,33 @@ mod tests {
         next_focus, platform_name, reset_setting, thousands,
     };
     use crate::state::{ClickTarget, Hit};
+
+    #[test]
+    fn the_tunnel_row_says_what_it_waits_for() {
+        use super::{RemoteView, tunnel_text};
+        use crate::tunnel::TunnelState;
+        // without cloudflared nothing else matters
+        let mut v = RemoteView {
+            tunnel: Some(TunnelState::Starting),
+            ..Default::default()
+        };
+        assert_eq!(tunnel_text(&v), "Waiting for cloudflared");
+        v.cloudflared = Some("/opt/homebrew/bin/cloudflared".into());
+        assert_eq!(tunnel_text(&v), "Starting…");
+        v.tunnel = None;
+        assert_eq!(tunnel_text(&v), "Starting…");
+        v.tunnel = Some(TunnelState::Ready {
+            url: "wss://a-b-c.trycloudflare.com".into(),
+        });
+        assert_eq!(
+            tunnel_text(&v),
+            "Ready · a-b-c.trycloudflare.com · pair phones again after a restart"
+        );
+        v.tunnel = Some(TunnelState::Failed {
+            detail: "boom".into(),
+        });
+        assert_eq!(tunnel_text(&v), "Failed, retrying: boom");
+    }
 
     #[test]
     fn tab_walks_controls_in_reading_order() {
