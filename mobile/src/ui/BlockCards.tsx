@@ -5,6 +5,7 @@ import type { Block } from "@/protocol/types";
 import { Elapsed } from "./BlockView";
 import { tailLines } from "./format";
 import { colors, mono, radius, tints, ui } from "./theme";
+import { toggleA11y } from "./toggle";
 
 /** Lines of output a failed or running card shows until "All N lines". */
 export const CARD_LINES = 4;
@@ -30,9 +31,8 @@ function SmallButton({
 }) {
   return (
     <Pressable
-      accessibilityRole={on === undefined ? "button" : "togglebutton"}
+      {...(on === undefined ? { accessibilityRole: "button" as const } : toggleA11y(on))}
       accessibilityLabel={spoken ?? label}
-      accessibilityState={on === undefined ? undefined : { checked: on }}
       onPress={onPress}
       hitSlop={{ top: 6, bottom: 6 }}
       style={({ pressed }) => [styles.small, on ? styles.smallOn : styles.smallOutline, pressed && styles.pressed]}
@@ -49,6 +49,7 @@ export function FoldRow({ count, onShow }: { count: number; onShow: () => void }
       accessibilityRole="button"
       accessibilityLabel={`${count} earlier commands succeeded`}
       accessibilityHint="Shows them"
+      hitSlop={{ top: 2, bottom: 2 }}
       onPress={onShow}
       style={({ pressed }) => [styles.fold, pressed && styles.pressed]}
     >
@@ -97,13 +98,19 @@ export const FailedCard = memo(function FailedCard({ block, onActions, onRunAgai
       <CardOutput block={block} all={all} />
       <View style={styles.actions}>
         {onRunAgain ? <SmallButton label="Run again" onPress={() => onRunAgain(block)} /> : null}
-        <SmallButton
-          label="Copy error"
-          spoken="Copy error: copies the output"
-          onPress={() =>
-            void Clipboard.setStringAsync(block.output).then(() => AccessibilityInfo.announceForAccessibility("Output copied"))
-          }
-        />
+        {/* nothing to copy from a command that printed nothing (`false`) */}
+        {block.output !== "" ? (
+          <SmallButton
+            label="Copy error"
+            spoken="Copy error: copies the output"
+            onPress={() =>
+              void Clipboard.setStringAsync(block.output).then(
+                () => AccessibilityInfo.announceForAccessibility("Output copied"),
+                () => AccessibilityInfo.announceForAccessibility("Could not copy the output"),
+              )
+            }
+          />
+        ) : null}
         {n > CARD_LINES ? (
           <SmallButton label={all ? "Fewer lines" : `All ${n.toLocaleString("en-US")} lines`} onPress={() => setAll((a) => !a)} />
         ) : null}

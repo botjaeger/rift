@@ -72,15 +72,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Same list as ci.yml, plus the packaging tools: dpkg-dev for dpkg-deb,
-      # file for appimagetool's ELF probing, libfuse2 for the AppImage runtime.
-      - name: Install Linux build deps (winit / wayland / x11) + packaging tools
+      # Same list as ci.yml (packaging/ci-apt.txt), plus the packaging tools:
+      # dpkg-dev for dpkg-deb, file for appimagetool's ELF probing, libfuse2
+      # for the AppImage runtime.
+      - name: Install Linux build deps (packaging/ci-apt.txt) + packaging tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            libxkbcommon-dev libwayland-dev libxcb1-dev libxcb-render0-dev \
-            libxcb-shape0-dev libxcb-xfixes0-dev libssl-dev pkg-config \
-            dpkg-dev file libfuse2
+          xargs -a packaging/ci-apt.txt sudo apt-get install -y dpkg-dev file libfuse2
 
       - name: Install Rust (rust-toolchain.toml)
         run: rustup toolchain install
@@ -88,7 +86,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Release build
-        run: cargo build --release
+        run: cargo build --release --locked
 
       - name: Build .deb
         run: packaging/make-deb.sh --no-build

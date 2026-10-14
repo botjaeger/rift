@@ -827,12 +827,24 @@ pub(crate) fn touch(dir: &Path, id: &str, now: SystemTime) -> io::Result<()> {
     })
 }
 
-/// Device-supplied text for display: control characters dropped, at most
-/// [`MAX_NAME`] characters.
+/// Whether `c` may be shown from text a device sent (its name, a command it
+/// ran): no control character and no bidirectional formatting character,
+/// which would reorder what the desktop shows around it (a toast saying
+/// `ls` about a command that is not `ls`).
+pub fn shown_char(c: char) -> bool {
+    !c.is_control()
+        && !matches!(
+            c,
+            '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+        )
+}
+
+/// Device-supplied text for display: control and bidirectional formatting
+/// characters dropped ([`shown_char`]), at most [`MAX_NAME`] characters.
 pub(crate) fn clean_text(s: &str) -> String {
     let out: String = s
         .chars()
-        .filter(|c| !c.is_control())
+        .filter(|&c| shown_char(c))
         .take(MAX_NAME)
         .collect();
     let out = out.trim().to_string();
@@ -1769,5 +1781,14 @@ mod tests {
             .trim_end_matches("\x1b[0m");
         assert_eq!(first.chars().count(), n + 2 * QR_QUIET);
         assert!(first.chars().all(|c| c == '█'), "quiet zone is light");
+    }
+
+    #[test]
+    fn device_names_lose_controls_and_bidi_overrides() {
+        assert_eq!(clean_text("Jo\u{202E}enohP\u{202C}\n"), "JoenohP");
+        assert_eq!(clean_text("a\u{2066}b\u{2069}\u{200F}c\u{61C}"), "abc");
+        assert_eq!(clean_text("\u{202E}\u{1b}"), "unnamed");
+        // other format characters (a joiner in an emoji) stay
+        assert_eq!(clean_text("👩\u{200D}💻 Jo’s"), "👩\u{200D}💻 Jo’s");
     }
 }

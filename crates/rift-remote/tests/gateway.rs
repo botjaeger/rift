@@ -1408,6 +1408,32 @@ fn subscribe_gets_a_snapshot() {
 }
 
 #[test]
+fn a_megabyte_command_is_cut_and_never_hides_its_pane() {
+    let env = start(|_| {});
+    let huge = "é".repeat(1024 * 1024);
+    env.fake.edit(12, |b| b[1].command = huge.clone());
+    let (_k, mut ws, _) = env.pair(Permission::View);
+    put(&mut ws, json!({"t":"subscribe","pane":12,"after":null}));
+    let s = recv_t(&mut ws, "snapshot");
+    assert_eq!(ids(&s), [1, 2]);
+    assert_eq!(s["has_older"], false);
+    let cut = s["blocks"][1]["command"].as_str().unwrap();
+    assert_eq!(cut.len(), rift_remote::MAX_BLOCK_COMMAND);
+    assert!(huge.starts_with(cut));
+    // its update fits too
+    env.fake.edit(12, |b| {
+        b[1].output = "two, more\n".into();
+        b.push(block(3, "three\n"));
+    });
+    let u = recv_t(&mut ws, "update");
+    assert_eq!(ids(&u), [2, 3]);
+    // and an `older` page with it
+    put(&mut ws, json!({"t":"older","pane":12,"before":3}));
+    let o = recv_t(&mut ws, "older");
+    assert_eq!(ids(&o), [1, 2]);
+}
+
+#[test]
 fn source_changes_arrive_as_updates() {
     let env = start(|_| {});
     let fake = &env.fake;

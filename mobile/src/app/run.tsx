@@ -1,6 +1,6 @@
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AccessibilityInfo, Keyboard, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { AccessibilityInfo, Keyboard, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { canOperate, draftKey, hasFeature, type HostView } from "@/fleet";
 import { agoShort } from "@/now";
 import type { Completion, HistoryEntry } from "@/protocol/types";
@@ -9,6 +9,7 @@ import { fleet, useApp } from "@/runtime";
 import { tabTitle } from "@/topology";
 import { confirmDestructive } from "@/ui/confirm";
 import { ErrorText } from "@/ui/Notice";
+import { SheetClose } from "@/ui/SheetClose";
 import { useNow } from "@/ui/useNow";
 import { plainPunctuation } from "@/ui/format";
 import { colors, mono, tints, ui } from "@/ui/theme";
@@ -19,6 +20,8 @@ interface Target {
   pane: number;
   /** "studio-mac › rift › pane 1" */
   label: string;
+  /** What the pane runs or last ran: tabs often share a title (the same folder), this tells them apart. */
+  detail: string | null;
 }
 
 function targets(hosts: readonly HostView[]): Target[] {
@@ -28,7 +31,12 @@ function targets(hosts: readonly HostView[]): Target[] {
     for (const w of h.windows)
       for (const t of w.tabs)
         for (const [i, p] of t.panes.entries())
-          out.push({ host: h.record.key, pane: p.id, label: `${h.record.name} › ${tabTitle(t)} › pane ${i + 1}` });
+          out.push({
+            host: h.record.key,
+            pane: p.id,
+            label: `${h.record.name} › ${tabTitle(t)} › pane ${i + 1}`,
+            detail: p.job ? `running ${p.job}` : p.last_command,
+          });
   }
   return out;
 }
@@ -133,6 +141,7 @@ export default function RunSheet() {
 
   return (
     <View style={styles.sheet} accessibilityViewIsModal accessibilityLabel="Run a command">
+      <SheetClose />
       <View style={styles.top}>
         <Pressable
           accessibilityRole="button"
@@ -145,7 +154,8 @@ export default function RunSheet() {
           style={({ pressed }) => [styles.picker, pressed && styles.pressed]}
         >
           <Text style={styles.pickerText} numberOfLines={1} ellipsizeMode="middle">
-            {target ? `${target.label} ▾` : "No computer you can run commands on"}
+            {/* the ▾ only where it opens something: one pane leaves nothing to pick */}
+            {target ? `${target.label}${all.length > 1 ? " ▾" : ""}` : "No computer you can run commands on"}
           </Text>
         </Pressable>
         <View style={styles.field}>
@@ -169,7 +179,8 @@ export default function RunSheet() {
             placeholder="Command"
             placeholderTextColor={colors.textMuted}
             accessibilityLabel="Command"
-            style={styles.input}
+            // the field's accent border is its focus; the browser's own ring drew a second box inside it
+            style={[styles.input, Platform.OS === "web" && styles.noRing]}
           />
         </View>
         {error ? <ErrorText>{error}</ErrorText> : null}
@@ -181,7 +192,7 @@ export default function RunSheet() {
               key={`${t.host}:${t.pane}`}
               accessibilityRole="radio"
               accessibilityState={{ checked: t.host === target?.host && t.pane === target?.pane }}
-              accessibilityLabel={t.label.replace(/ › /g, ", ")}
+              accessibilityLabel={[t.label.replace(/ › /g, ", "), t.detail].filter(Boolean).join(", ")}
               onPress={() => {
                 // the last pane's completions and history are not this one's
                 if (t.host !== target?.host || t.pane !== target?.pane) {
@@ -193,9 +204,17 @@ export default function RunSheet() {
               }}
               style={({ pressed }) => [styles.item, t.host === target?.host && t.pane === target?.pane && styles.itemOn, pressed && styles.pressed]}
             >
-              <Text style={styles.itemText} numberOfLines={1}>
-                {t.label}
-              </Text>
+              <View style={styles.flex}>
+                {/* cut in the middle, as the picker above: at 320 pt the end cut every row to the same "…" */}
+                <Text style={styles.itemText} numberOfLines={1} ellipsizeMode="middle">
+                  {t.label}
+                </Text>
+                {t.detail ? (
+                  <Text style={styles.itemDetail} numberOfLines={1}>
+                    {t.detail}
+                  </Text>
+                ) : null}
+              </View>
             </Pressable>
           ))
         ) : (
@@ -284,13 +303,16 @@ const styles = StyleSheet.create({
   },
   mark: { fontFamily: mono, color: colors.success, fontSize: 14 },
   input: { flex: 1, minWidth: 0, height: 46, padding: 0, color: colors.textBright, fontFamily: mono, fontSize: 14 },
+  // web only: Chrome draws `outline-style: auto` whatever its width ("none" is not in the native types)
+  noRing: { outlineStyle: "none" as "solid" },
   lists: { flex: 1 },
   listsContent: { paddingHorizontal: 8, paddingBottom: 24 },
   heading: { fontFamily: ui(500), color: colors.textMuted, fontSize: 12, marginTop: 6, marginBottom: 6, marginHorizontal: 8 },
   headingGap: { marginTop: 10 },
-  item: { minHeight: 44, flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 10, borderRadius: 8 },
+  item: { minHeight: 44, flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8 },
   itemOn: { backgroundColor: tints.accentBadge },
   itemText: { fontFamily: mono, color: colors.textBright, fontSize: 13 },
   itemMeta: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12 },
+  itemDetail: { fontFamily: mono, color: colors.textMuted, fontSize: 11, marginTop: 2 },
   note: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13, padding: 8 },
 });

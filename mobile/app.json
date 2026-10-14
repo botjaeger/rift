@@ -7,6 +7,17 @@
       "rift-remote"
     ],
     "version": "0.1.0",
+    "runtimeVersion": {
+      "policy": "fingerprint"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/00000000-0000-0000-0000-000000000000",
+      "checkAutomatically": "ON_LOAD",
+      "fallbackToCacheTimeout": 0,
+      "requestHeaders": {
+        "expo-channel-name": "production"
+      }
+    },
     "orientation": "default",
     "userInterfaceStyle": "dark",
     "backgroundColor": "#1e1e1e",
@@ -76,7 +87,8 @@
       ],
       "./plugins/withSceneLifecycle",
       "./plugins/withoutApns",
-      "./plugins/withLiveActivity"
+      "./plugins/withLiveActivity",
+      "./plugins/withGradleMemory"
     ],
     "extra": {
       "router": {},

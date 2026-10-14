@@ -67,7 +67,9 @@ and when pairing (first connection with a pairing secret):
 - The gateway accepts the connection when the client's static key is a
   paired device, or when `pair` is a live pairing secret: it then records the
   device (name, platform, static key, the secret's permission) and spends the
-  secret. Anything else gets `error` `auth` and the socket closes.
+  secret. Name and platform are kept to 64 characters without control or
+  bidirectional formatting characters (the desktop's toasts drop those from
+  a command too). Anything else gets `error` `auth` and the socket closes.
 - `v` other than 2 gets `error` `version` and the socket closes.
 - The first message after the handshake is the gateway's `welcome`.
 
@@ -111,6 +113,7 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
 | Failed handshakes | 10 per minute per remote address; then refused for a minute |
 | Idle | the gateway pings every 15 s and drops a client silent for 45 s |
 | Blocks per `snapshot` / `older` | 30, newest last |
+| A block's `command` | at most 16 KiB (cut on a character boundary) |
 | Output per block | the last 500 lines and at most 64 KiB; `dropped` counts the lines before them (a row the scrollback limit already discarded counts as one line) |
 | Replay ring | the last 256 `update`s per pane |
 | Poll interval | 100 ms for subscribed panes, 1 s for the topology |
@@ -122,6 +125,7 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
 | `screen` | at most 300 columns and 120 rows (the top-left part of a larger screen), one per 100 ms |
 | `complete` | the line at most 1 KiB; at most 50 `items` and 50 `history` entries of 1 KiB each; shares `output`'s rate |
 | A pane's `waiting` / `running` | prompt 300 characters, 9 choices of 200, 12 context lines of 200; `running.line` 200 characters |
+| `topology` text | a tab's `title`, a pane's `job` and `last_command` at most 1024 characters each (cut) |
 
 ## Client → gateway
 
@@ -340,7 +344,9 @@ tunnel's `wss://` address (`scripts/relay-local.sh` does the same with the
 Docker image); the address changes on every start, so phones pair again
 each time. Nothing on the wire changes: it is an ordinary relay, except
 that it lets only this computer's gateway register (any other routing id is
-closed after its key proof, as an unproven one is).
+closed after its key proof, as an unproven one is) and holds at most 192
+open sockets (every one arrives through the tunnel, so none is limited per
+address; the bound keeps a flood from spending the gateway's threads).
 
 - **Routing id**: base64url of the first 16 bytes of SHA-256 over the
   gateway's static public key. It names the gateway at the relay and is no

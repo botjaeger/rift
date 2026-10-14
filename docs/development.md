@@ -11,7 +11,7 @@ How to build, test, verify and release Rift. Agent-specific rules are in
 | Rust | 1.98.0, pinned in `rust-toolchain.toml` (rustup installs it and rustfmt + clippy on first use) |
 | macOS | 11 or newer, Xcode Command Line Tools (`xcode-select --install`) |
 | Linux build packages | `libxkbcommon-dev libwayland-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev pkg-config` |
-| Gate tools | `python3` (test gate: `release-manifest.py --self-test`; ui gate); `shellcheck`, `zsh`, `fish` (shell gate); `docker` (linux gate) |
+| Gate tools | `python3` (test gate: `release-manifest.py --self-test`; ui gate); `shellcheck`, `zsh`, `fish` (shell gate); Node 22 + pnpm via `corepack enable` (mobile gate); `docker` (linux gate) |
 | Packaging (optional) | `python3` + Pillow (`gen-icon.py`), `dpkg-dev`, `file`, `libfuse2` (AppImage) |
 
 ```sh
@@ -66,7 +66,7 @@ display-line building). Rendering is verified with the script driver below.
 | Gate | Runs |
 |---|---|
 | `fmt` | `cargo fmt --all --check`, and on each vendored crate |
-| `clippy` | `cargo clippy --workspace --all-targets --locked -- -D warnings`, and on each vendored crate (all features) |
+| `clippy` | `cargo clippy --workspace --all-targets --locked -- -D warnings`, on each vendored crate (all features), and on `rift-remote --no-default-features` (the relay image's build, no TLS) |
 | `test` | `cargo test --workspace --locked`, and each vendored crate (all features; built into `target/vendor`); `scripts/release-manifest.py --self-test`. Locally on macOS the workspace tests then run again throttled (`taskpolicy -c background`, 32 threads), which reproduces the timing of CI's few slow cores; CI skips that pass |
 | `doc` | `cargo doc --workspace --no-deps --locked` with rustdoc warnings denied |
 | `shell` | `shellcheck` on packaging, scripts, git hooks and the bash hooks; `zsh -n` and `fish --no-execute` on the zsh and fish hooks |
@@ -74,7 +74,7 @@ display-line building). Rendering is verified with the script driver below.
 | `mobile` | In `mobile/`: `pnpm install --frozen-lockfile`, `pnpm typecheck`, `pnpm lint`, `pnpm test` (vitest; decodes `crates/rift-remote/fixtures/`, the files the Rust protocol tests decode too) |
 | `release` | `cargo build --release --locked` |
 | `ui` | `scripts/ui-smoke.sh`: isolated scripted input, state assertions and PNG capture; requires Python 3 and a display (or `xvfb-run`) |
-| `linux` | `clippy`, `test` and `release` inside the Linux docker image, then `shell` and the scripted UI regressions (Xvfb, software Vulkan) in `packaging/ci-ubuntu.Dockerfile`, which installs the CI runner's packages from `packaging/ci-apt.txt` |
+| `linux` | `clippy`, `test`, `doc` and a release build (with `examples/phone` and `rift-relay`) inside the Linux docker image, then `shell` and the scripted UI regressions (Xvfb, software Vulkan) in `packaging/ci-ubuntu.Dockerfile`, which installs the CI runner's packages from `packaging/ci-apt.txt` |
 
 ```sh
 scripts/gates.sh                 # fmt clippy test doc shell docs mobile
@@ -255,7 +255,7 @@ Workspace dependencies (`Cargo.toml`):
 | `rustls` 0.23 (`std`, `ring`, `tls12`; via `tungstenite/rustls-tls-webpki-roots`) | The gateway dialing a `wss://` relay | `rift-remote`'s default `tls` feature; no OpenSSL or cmake; the relay binary builds without it |
 
 App-only: `accesskit` / `accesskit_winit` (screen readers), `global-hotkey`,
-`regex` (find), `libc`, `unicode-segmentation` (grapheme-aware editing), `zeno` (rasterizes brand marks Nerd Fonts lacks,
+`regex` (find), `libc`, `unicode-segmentation` (grapheme-aware editing), `unicode-normalization` (find matches canonically equivalent text), `zeno` (rasterizes brand marks Nerd Fonts lacks,
 such as the Claude mark; already built for glyphon); on macOS `muda` (menu bar), `objc2`,
 `objc2-app-kit`, `objc2-foundation`. `rift-pty` also uses `libc` for PTY and socket calls.
 

@@ -234,6 +234,16 @@ export function tapTarget(
   return out;
 }
 
+/**
+ * Why there is no push token, in Settings' words. The system's own error (an Android build
+ * without its Firebase setup throws a Java message naming FirebaseApp and a docs URL) stays in
+ * the log.
+ */
+export function pushTokenProblem(detail: string): string {
+  if (/firebase|fcm/i.test(detail)) return "this build is not set up for Android push.";
+  return "the system gave no push token.";
+}
+
 /** Settings › Notifications' footer: where notifications come from, and what push carries. */
 export function pushFooter(
   push: { state: "on" } | { state: "off" } | { state: "unavailable"; reason: string },

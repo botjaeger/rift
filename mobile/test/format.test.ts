@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatClock, formatDuration, insertedChar, plainPunctuation, osName, tailLines } from "../src/ui/format";
+import { appVersionText, formatClock, formatDuration, insertedChar, plainPunctuation, osName, tailLines } from "../src/ui/format";
 
 describe("plainPunctuation", () => {
   it("undoes the keyboard's smart dashes and quotes", () => {
@@ -55,5 +55,16 @@ describe("insertedChar (sticky ctrl)", () => {
     expect(insertedChar("ls", "lsab")).toBeNull(); // paste
     expect(insertedChar("ls", "l")).toBeNull(); // delete
     expect(insertedChar("ls", "xyz")).toBeNull();
+  });
+});
+
+describe("appVersionText", () => {
+  it("names what the build runs", () => {
+    const off = { enabled: false, embedded: true, createdAt: null };
+    expect(appVersionText("0.1.0", off)).toBe("0.1.0 · updates off");
+    const shipped = { enabled: true, embedded: true, createdAt: new Date(0) };
+    expect(appVersionText("0.1.0", shipped)).toBe("0.1.0 · as installed");
+    const ota = { enabled: true, embedded: false, createdAt: new Date(2026, 9, 14, 16, 40) };
+    expect(appVersionText("0.1.0", ota)).toMatch(/^0\.1\.0 · update of (?=.*14)(?=.*Oct)/);
   });
 });

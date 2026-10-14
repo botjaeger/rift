@@ -367,6 +367,19 @@ struct Hub {
     topology: Option<Arc<str>>,
 }
 
+impl Hub {
+    /// Drop the feeds (and their replay rings) of panes that are gone:
+    /// neither in the topology (`all`) nor followed by a client (`followed`).
+    /// Only a followed pane is refreshed, and only that read notices a pane
+    /// closing, so without this every pane a phone ever opened kept its
+    /// feed for the gateway's life. A followed pane stays even when a window
+    /// missed one topology read: its feed's `seq` goes on.
+    fn forget_feeds(&mut self, all: &HashSet<u64>, followed: &HashSet<u64>) {
+        self.feeds
+            .retain(|p, _| all.contains(p) || followed.contains(p));
+    }
+}
+
 /// Why a client's connection must end ([`Slot::end`]).
 const LIVE: u8 = 0;
 const TOO_SLOW: u8 = 1;
@@ -900,14 +913,17 @@ fn accept_loop<S: Source>(listener: TcpListener, shared: Arc<Shared<S>>) {
         };
         // the client thread counts it from here
         std::mem::forget(guard);
-        let shared = shared.clone();
+        let thread_shared = shared.clone();
         let spawned = std::thread::Builder::new()
             .name("remote-client".into())
             .spawn(move || {
+                let shared = thread_shared;
                 let _guard = ConnGuard(&shared.connections);
                 client(&shared, stream, peer, opened, busy);
             });
         if let Err(e) = spawned {
+            // the thread that would uncount it never ran
+            shared.connections.fetch_sub(1, Ordering::AcqRel);
             log::warn!("remote: cannot start a client thread: {e}");
         }
     }
@@ -975,7 +991,8 @@ fn poll_loop<S: Source>(shared: &Shared<S>) {
                 .collect();
             // `done` for the panes nobody follows
             for &pane in all.difference(&panes) {
-                if let Ok(page) = shared.source.blocks_meta(pane, DONE_PROBE) {
+                if let Ok(mut page) = shared.source.blocks_meta(pane, DONE_PROBE) {
+                    crate::bound_blocks(&mut page.blocks);
                     let done = shared.done.lock().unwrap().observe(pane, &page.blocks);
                     broadcast(shared, &done);
                     alert(shared, &done);
@@ -984,6 +1001,7 @@ fn poll_loop<S: Source>(shared: &Shared<S>) {
             shared.done.lock().unwrap().retain(&all);
             let f = frame(&ServerMsg::Topology { windows });
             let mut hub = shared.hub.lock().unwrap();
+            hub.forget_feeds(&all, &panes);
             if hub.topology.as_ref() != Some(&f) {
                 for c in hub.clients.values() {
                     c.push(f.clone());
@@ -1090,7 +1108,13 @@ fn reload_devices<S>(shared: &Shared<S>) {
 /// ends its subscriptions with `no_pane`.
 fn refresh<S: Source>(shared: &Shared<S>, pane: u64) -> Result<(), SourceError> {
     let _one = shared.poll_lock.lock().unwrap();
-    let result = shared.source.blocks(pane, None, MAX_BLOCKS);
+    let result = shared
+        .source
+        .blocks(pane, None, MAX_BLOCKS)
+        .map(|mut page| {
+            crate::bound_blocks(&mut page.blocks);
+            page
+        });
     if let Ok(page) = &result {
         let done = shared.done.lock().unwrap().observe(pane, &page.blocks);
         broadcast(shared, &done);
@@ -2449,8 +2473,11 @@ fn subscribe<S: Source>(
 fn older<S: Source>(shared: &Shared<S>, pane: u64, before: u64) -> ServerMsg {
     match shared.source.blocks(pane, Some(before), MAX_BLOCKS) {
         Ok(Page {
-            blocks, has_older, ..
+            mut blocks,
+            has_older,
+            ..
         }) => {
+            crate::bound_blocks(&mut blocks);
             let (blocks, trimmed) = fit_newest(&blocks, |blocks| ServerMsg::Older {
                 pane,
                 blocks,
@@ -2695,6 +2722,21 @@ mod tests {
             f.fail(ip, t0 + Duration::from_secs(i * 7), w, refuse);
             assert!(!f.refused(ip, t0 + Duration::from_secs(i * 7)), "{i}");
         }
+    }
+
+    #[test]
+    fn feeds_of_gone_panes_are_forgotten_unless_followed() {
+        let mut hub = Hub::default();
+        for pane in [1, 2, 3] {
+            hub.feeds
+                .insert(pane, Feed::new(page(vec![block(1, "a")], false)));
+        }
+        // pane 2 closed while nobody followed it; pane 3 is missing from
+        // this topology read but a client follows it
+        hub.forget_feeds(&HashSet::from([1]), &HashSet::from([3]));
+        let mut kept: Vec<u64> = hub.feeds.keys().copied().collect();
+        kept.sort_unstable();
+        assert_eq!(kept, vec![1, 3]);
     }
 
     #[test]

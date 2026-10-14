@@ -24,6 +24,22 @@ Pair from Now (first run) or Computers (**+**): scan the QR code that Rift shows
 phone, or `rift-terminal remote pair`), paste the `rift-remote://pair?…` link, or open the link
 on the device. The app asks before pairing.
 
+## Over-the-air updates
+
+Release builds carry `expo-updates` on the `production` channel (`app.json` › `updates`). On
+launch the app checks EAS Update in the background and applies a downloaded update at the next
+start; Settings › About shows the version, which update it runs, and **Restart now** once one is
+waiting. Development builds and the web never update.
+
+```sh
+eas login           # once
+pnpm ota --message "what changed"   # eas update --channel production
+```
+
+An update reaches only builds with the same native fingerprint (`runtimeVersion` policy
+`fingerprint`): a change to native code, a config plugin or a native dependency needs a new build,
+not an update.
+
 ## Screens
 
 The screens follow the Claude Design boards of the mobile redesign: the phone-first proposal
@@ -344,7 +360,9 @@ one-day minimum release age by exact version only.
   `rift-remote://pair` links), Host (a computer's tabs and bell), Pane with its command line and
   full-screen view, Answer (`answer`), Run sheet (`run`), Confirm sheet, block actions sheet
   (`block`), chip menus (`chips`, `diff`), Keys (`control-keys`); `src/ui/LockGate.tsx` — the
-  lock screen and privacy cover.
+  lock screen and privacy cover. On the web a sheet is a plain page: it gets a Close button and
+  Escape (`src/ui/SheetClose.tsx`), and the folder button's choice of menus is a strip above
+  the command line (react-native-web's `Alert` shows nothing).
 - `src/ui/palette.ts` — the DESIGN.md tokens and the text/background pairs the app uses, each
   held to 4.5:1 by `test/contrast.test.ts`.
 - The device key, paired desktops and settings live in the iOS keychain / Android keystore

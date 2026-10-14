@@ -2,6 +2,7 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { controlKey, type ControlKey } from "@/controlKeys";
 import type { OpenKind } from "@/protocol/types";
 import { colors, mono, radius } from "./theme";
+import { toggleA11y } from "./toggle";
 
 /** Sticky modifiers from the row, applied to the next key or letter. */
 export interface Sticky {
@@ -32,10 +33,10 @@ function Key({
 }) {
   return (
     <Pressable
-      accessibilityRole="button"
+      // ctrl and alt stay on for the next key: toggle buttons, announced as on or off
+      {...(active === undefined ? { accessibilityRole: "button" as const, accessibilityState: { disabled } } : toggleA11y(active, disabled))}
       accessibilityLabel={spoken}
       accessibilityHint={hint}
-      accessibilityState={{ disabled, ...(active === undefined ? {} : { selected: active }) }}
       disabled={disabled}
       onPress={onPress}
       // 36 / 40 pt keys (the boards) reach 44 pt with the slop

@@ -551,12 +551,14 @@ fn post(url: &str, headers: &[&str], body: &str) -> Result<String, String> {
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("cannot run curl: {e}"))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(body.as_bytes())
-            .map_err(|e| format!("curl: {e}"))?;
-    }
+    // a failed write still waits for curl: returning early would leave it a
+    // zombie for the gateway's life
+    let written = match child.stdin.take() {
+        Some(mut stdin) => stdin.write_all(body.as_bytes()),
+        None => Ok(()),
+    };
     let out = child.wait_with_output().map_err(|e| format!("curl: {e}"))?;
+    written.map_err(|e| format!("curl: {e}"))?;
     if !out.status.success() {
         return Err(format!(
             "curl failed: {}",

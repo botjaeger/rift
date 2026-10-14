@@ -224,11 +224,29 @@ pub fn socket_path() -> Option<std::path::PathBuf> {
 
 /// `<data dir>/<name>` for Unix sockets, or a short, data-dir-specific path
 /// under `/tmp` when the original would exceed the Unix socket path limit.
-/// Created 0700 by the caller.
+/// Created 0700 by the caller. `None` when the `/tmp` directory exists but
+/// is not this user's private directory: another user who created it first
+/// could swap the socket directory inside it for one of their own.
 pub fn socket_dir(name: &str) -> Option<std::path::PathBuf> {
     let data_dir = rift_core::shell_integration::data_dir()?;
     let uid = unsafe { libc::getuid() };
-    Some(socket_dir_for(&data_dir, name, uid))
+    let dir = socket_dir_for(&data_dir, name, uid);
+    if !dir.starts_with(&data_dir) && !private_dir(dir.parent()?, uid) {
+        log::warn!("refusing socket directory {}: not private", dir.display());
+        return None;
+    }
+    Some(dir)
+}
+
+/// Make `dir` (0700) or accept it when it is a real directory owned by `uid`
+/// that no one else can write to (earlier versions made it 0755).
+fn private_dir(dir: &std::path::Path, uid: u32) -> bool {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    let _ = std::fs::DirBuilder::new().mode(0o700).create(dir);
+    match std::fs::symlink_metadata(dir) {
+        Ok(m) => m.is_dir() && m.uid() == uid && m.mode() & 0o022 == 0,
+        Err(_) => false,
+    }
 }
 
 fn socket_dir_for(data_dir: &std::path::Path, name: &str, uid: u32) -> std::path::PathBuf {
@@ -297,6 +315,37 @@ pub fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn socket_fallback_parent_must_be_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let uid = unsafe { libc::getuid() };
+        let base = std::env::temp_dir().join(format!("rift-private-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        // missing: created 0700
+        let fresh = base.join("fresh");
+        assert!(private_dir(&fresh, uid));
+        assert_eq!(
+            std::fs::metadata(&fresh).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        // someone else could enter or write it
+        let open = base.join("open");
+        std::fs::create_dir(&open).unwrap();
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(!private_dir(&open, uid));
+        // readable but not writable by others (made by earlier versions)
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(private_dir(&open, uid));
+        // not owned by us
+        assert!(!private_dir(&fresh, uid + 1));
+        // a symlink to a private directory
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&fresh, &link).unwrap();
+        assert!(!private_dir(&link, uid));
+        std::fs::remove_dir_all(&base).unwrap();
+    }
 
     #[test]
     fn socket_fallback_is_scoped_to_data_dir() {

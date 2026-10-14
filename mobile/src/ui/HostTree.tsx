@@ -45,7 +45,8 @@ function PaneRow({ pane, onOpen }: { pane: Pane; onOpen: (id: number) => void })
         {pane.cwd || pane.git ? (
           <View style={styles.where}>
             {pane.cwd ? (
-              <Text style={styles.cwd} numberOfLines={1}>
+              // cut at the start: the folder's own name is at the end of a long path
+              <Text style={styles.cwd} numberOfLines={1} ellipsizeMode="head">
                 {tildePath(pane.cwd)}
               </Text>
             ) : null}
@@ -140,7 +141,8 @@ const styles = StyleSheet.create({
   command: { color: colors.textBright, fontFamily: mono, fontSize: 13 },
   where: { flexDirection: "row", gap: 8, overflow: "hidden" },
   cwd: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12, flexShrink: 1 },
-  branch: { fontFamily: ui(400), color: colors.success, fontSize: 12, flexShrink: 1 },
+  // the path gives way first: a long path cut the branch down to its first letter
+  branch: { fontFamily: ui(400), color: colors.success, fontSize: 12, flexShrink: 0, maxWidth: "45%" },
   badge: {
     fontFamily: mono,
     fontSize: 11,

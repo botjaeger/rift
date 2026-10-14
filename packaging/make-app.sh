@@ -20,7 +20,7 @@ while [ $# -gt 0 ]; do
         --target-dir) TARGET_DIR="${2:?--target-dir needs a path}"; shift 2 ;;
         --no-build)   BUILD=0; shift ;;
         --release)    shift ;;  # accepted for compatibility; release is the only profile
-        -h|--help)    sed -n '2,9p' "$0"; exit 0 ;;
+        -h|--help)    rift_usage; exit 0 ;;
         *)            rift_die "unknown option: $1" ;;
     esac
 done
@@ -30,9 +30,9 @@ VERSION="$(rift_version)"
 
 if [ "$BUILD" -eq 1 ]; then
     if [ -n "$TRIPLE" ]; then
-        cargo build --release --target-dir "$TARGET_DIR" --target "$TRIPLE"
+        cargo build --release --locked --target-dir "$TARGET_DIR" --target "$TRIPLE"
     else
-        cargo build --release --target-dir "$TARGET_DIR"
+        cargo build --release --locked --target-dir "$TARGET_DIR"
     fi
 fi
 

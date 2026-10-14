@@ -12,8 +12,14 @@ cd "$(dirname "$0")/.."
 # shellcheck source=packaging/lib.sh
 source packaging/lib.sh
 
+case "${1:-}" in
+    "") ;;
+    -h | --help) rift_usage; exit 0 ;;
+    *) rift_die "unknown argument: $1 (packaging/bench.sh --help)" ;;
+esac
+
 if [[ -z "${RIFT_BIN:-}" ]]; then
-    cargo build --release -p rift-terminal >&2
+    cargo build --release --locked -p rift-terminal >&2
     RIFT_BIN="$(rift_default_target_dir)/release/rift-terminal"
 fi
 [[ -x "$RIFT_BIN" ]] || rift_die "no binary at $RIFT_BIN"

@@ -1,9 +1,8 @@
 import { useRouter } from "expo-router";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AccessibilityInfo,
   ActionSheetIOS,
-  Alert,
   Keyboard,
   Platform,
   Pressable,
@@ -26,6 +25,7 @@ import { insertedChar, plainPunctuation } from "./format";
 import { ErrorText } from "./Notice";
 import { useOpenShell } from "./useOpenShell";
 import { colors, mono, radius, TOUCH } from "./theme";
+import { toggleA11y } from "./toggle";
 
 /** Suggestions shown above the command line (the P3 Pane board). */
 const MAX_SUGGESTIONS = 6;
@@ -79,7 +79,12 @@ export function Composer({
   const draft = s.drafts[draftKey(hostKey, paneId)] ?? "";
   const [sticky, setSticky] = useState<Sticky>(NO_STICKY);
   const [error, setError] = useState<string | null>(null);
-  const [sending, setSending] = useState(false);
+  // Return was pressed while not connected
+  const [offlineTried, setOfflineTried] = useState(false);
+  const shownError =
+    error ?? (offlineTried && !online ? "Not connected. The command stays here; Return runs it once the computer is back." : null);
+  // a command on its way: a ref, not state, so a second Return before the re-render sends nothing
+  const sending = useRef(false);
   // ⌃: the key row in place of the suggestions; Settings › Show keys opens it to start with
   const [keys, setKeys] = useState(() => showsKeyRow(s.settings.showKeys, false));
   const [completed, setCompleted] = useState<{ draft: string; list: string[] } | null>(null);
@@ -154,7 +159,13 @@ export function Composer({
 
   const problem = commandProblem(draft);
   const run = async () => {
-    if (!online || sending) return;
+    if (sending.current) return;
+    if (!online) {
+      // Return did nothing at all before: say why, and that the line is kept (shown while offline)
+      setOfflineTried(true);
+      return;
+    }
+    setOfflineTried(false);
     if (problem) {
       if (problem !== "empty")
         setError(problem === "too_long" ? "The command is too long (2 KiB at most)." : "The command must be one line.");
@@ -166,10 +177,10 @@ export function Composer({
       router.push({ pathname: "/confirm", params: { key: hostKey, pane: String(paneId) } });
       return;
     }
-    setSending(true);
+    sending.current = true;
     setError(null);
     const r = await fleet.run(hostKey, paneId, draft);
-    setSending(false);
+    sending.current = false;
     if (!r.ok) setError(r.message);
     else AccessibilityInfo.announceForAccessibility("Command sent");
   };
@@ -180,17 +191,21 @@ export function Composer({
     router.push({ pathname: "/chips", params: { key: hostKey, pane: String(paneId), menu } });
   };
   // the folder button: the folder's menu, or a choice of the chips' menus in a repository
+  const menus: { label: string; menu: ChipMenuKind }[] = [{ label: "Change folder", menu: "dirs" }];
+  if (chips.branch) menus.push({ label: "Switch branch", menu: "branches" });
+  if (chips.diff) menus.push({ label: `Changed files (${chips.diff.files})`, menu: "changes" });
+  // iOS: the system action sheet. Elsewhere a strip above the field: react-native-web's Alert
+  // shows nothing, and Android's put the three menus in reverse order (its positive / negative /
+  // neutral buttons) on a light dialog under the cut-off folder path.
+  const [choosing, setChoosing] = useState(false);
   const pickMenu = () => {
-    const menus: { label: string; menu: ChipMenuKind }[] = [{ label: "Change folder", menu: "dirs" }];
-    if (chips.branch) menus.push({ label: "Switch branch", menu: "branches" });
-    if (chips.diff) menus.push({ label: `Changed files (${chips.diff.files})`, menu: "changes" });
     if (menus.length === 1) return openMenu("dirs");
     if (Platform.OS === "ios")
       ActionSheetIOS.showActionSheetWithOptions(
         { options: [...menus.map((m) => m.label), "Cancel"], cancelButtonIndex: menus.length, userInterfaceStyle: "dark" },
         (i) => i < menus.length && openMenu(menus[i]!.menu),
       );
-    else Alert.alert(chipsSpoken(chips), undefined, menus.map((m) => ({ text: m.label, onPress: () => openMenu(m.menu) })), { cancelable: true });
+    else setChoosing((c) => !c);
   };
 
   const folder = folderLines(chips);
@@ -207,7 +222,31 @@ export function Composer({
       onKey={onShortcut}
       style={styles.wrap}
     >
-      {keys ? (
+      {choosing && menus.length > 1 ? (
+        // keyed, as the suggestions below: without keys React reused one native strip for both,
+        // and the suggestions opened at the menu strip's sideways scroll, their first one cut off
+        <View key="menus" accessibilityRole="menu" accessibilityLabel={chipsSpoken(chips)}>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.suggestionStrip} contentContainerStyle={styles.suggestions}>
+            {menus.map((m) => (
+              <Pressable
+                key={m.menu}
+                accessibilityRole="menuitem"
+                accessibilityLabel={m.label}
+                onPress={() => {
+                  setChoosing(false);
+                  openMenu(m.menu);
+                }}
+                hitSlop={{ top: 6, bottom: 6 }}
+                style={({ pressed }) => [styles.suggestion, pressed && styles.pressed]}
+              >
+                <Text style={styles.suggestionText} numberOfLines={1}>
+                  {m.label}
+                </Text>
+              </Pressable>
+            ))}
+          </ScrollView>
+        </View>
+      ) : keys ? (
         <ControlRow
           ids={s.settings.controlKeys}
           sticky={sticky}
@@ -218,7 +257,8 @@ export function Composer({
           onEdit={() => router.push("/control-keys")}
         />
       ) : shown.length > 0 ? (
-        <View accessibilityRole="toolbar" accessibilityLabel="Suggestions">
+        // a new first suggestion (a command just ran, a letter typed) starts the strip at its left end
+        <View key={`suggestions:${shown[0]}`} accessibilityRole="toolbar" accessibilityLabel="Suggestions">
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator={false}
@@ -244,13 +284,14 @@ export function Composer({
           </ScrollView>
         </View>
       ) : null}
-      {error ? <ErrorText>{error}</ErrorText> : null}
+      {shownError ? <ErrorText>{shownError}</ErrorText> : null}
       <View style={styles.inputRow}>
         {folder ? (
           <Pressable
             accessibilityRole="button"
             accessibilityLabel={`Folder ${chips.cwd}${chips.branch ? ` on ${chips.branch.name}` : ""}${chipMenus ? ", change" : ""}`}
             accessibilityHint={chipMenus ? (chips.branch ? "Folder, branch or changed files" : "Opens the folder's sub-folders") : undefined}
+            accessibilityState={{ disabled: !chipMenus, ...(Platform.OS !== "ios" && menus.length > 1 ? { expanded: choosing } : {}) }}
             disabled={!chipMenus}
             onPress={pickMenu}
             style={({ pressed }) => [styles.folder, pressed && styles.pressed]}
@@ -281,10 +322,9 @@ export function Composer({
           style={styles.input}
         />
         <Pressable
-          accessibilityRole="togglebutton"
+          {...toggleA11y(keys)}
           accessibilityLabel="Keys"
           accessibilityHint="Shows the control keys above the command line"
-          accessibilityState={{ checked: keys }}
           onPress={() => setKeys((k) => !k)}
           style={({ pressed }) => [styles.keysButton, keys && styles.keysOn, pressed && styles.pressed]}
         >

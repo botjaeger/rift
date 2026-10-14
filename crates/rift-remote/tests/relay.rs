@@ -410,6 +410,31 @@ fn sockets_per_address_are_limited() {
     assert_eq!(status(open(proxied.local_addr(), "/admin")), 404);
 }
 
+#[test]
+fn open_sockets_are_limited_in_total() {
+    use std::io::Read;
+    // behind a trusted proxy (the tunnel) the total is the only bound
+    let relay = start_relay(|c| {
+        c.max_sockets = 2;
+        c.trust_forwarded = true;
+    });
+    let addr = relay.local_addr();
+    let held: Vec<TcpStream> = (0..2).map(|_| TcpStream::connect(addr).unwrap()).collect();
+    std::thread::sleep(Duration::from_millis(100));
+    // the third is dropped unread
+    let mut extra = TcpStream::connect(addr).unwrap();
+    extra
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let t0 = Instant::now();
+    assert!(matches!(extra.read(&mut [0u8; 8]), Ok(0) | Err(_)));
+    assert!(t0.elapsed() < Duration::from_secs(1), "{:?}", t0.elapsed());
+    drop(held);
+    wait_until("a socket freed", Duration::from_secs(3), || {
+        open(addr, "/admin").is_err_and(|e| matches!(e, tungstenite::Error::Http(_)))
+    });
+}
+
 // --- connect, accept, splice ----------------------------------------------
 
 #[test]

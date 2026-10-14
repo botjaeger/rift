@@ -14,6 +14,7 @@ import { Icon } from "./Icon";
 import { ErrorText } from "./Notice";
 import { over } from "./palette";
 import { colors, mono, radius, tints, ui } from "./theme";
+import { toggleA11y } from "./toggle";
 
 /** Output longer than this shows only its last lines until "Show N more lines". */
 export const COLLAPSED_LINES = 40;
@@ -250,9 +251,8 @@ export const BlockView = memo(function BlockView({
         </Pressable>
         {running ? (
           <Pressable
-            accessibilityRole="togglebutton"
+            {...toggleA11y(notify)}
             accessibilityLabel="Notify me when it finishes"
-            accessibilityState={{ checked: notify }}
             hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}
             onPress={() => onBell(block, !notify)}
             style={({ pressed }) => [styles.bell, notify && styles.bellOn, pressed && styles.pressed]}

@@ -89,6 +89,8 @@ enum Motion {
 enum Awaiting {
     Replace,
     Find(FindKind),
+    /// `i` / `a` after an operator: the text object's char (`true` = inner).
+    Object(bool),
 }
 
 /// Operator / count state accumulated across keystrokes.
@@ -342,6 +344,120 @@ fn resolve(l: &Line, ci: usize, m: Motion, count: usize) -> Option<(usize, bool)
     })
 }
 
+/// Char range `[start, end)` of text object `obj` around char `ci`: `w` `W`
+/// words, `"` `'` `` ` `` quotes, `(` `b` `[` `{` `B` `<` brackets (either
+/// bracket names the pair). `inner` = the `i` form, else the `a` form (a
+/// word with its trailing blanks — leading when none follow — or the
+/// quotes/brackets themselves). `None` when there is no such object.
+fn text_object(l: &Line, ci: usize, obj: char, inner: bool) -> Option<(usize, usize)> {
+    let n = l.n();
+    if n == 0 {
+        return None;
+    }
+    let ci = ci.min(n - 1);
+    let run = |from: usize, cls: Class, big: bool| {
+        let mut e = from;
+        while e < n && class(l.chars[e], big) == cls {
+            e += 1;
+        }
+        e
+    };
+    match obj {
+        'w' | 'W' => {
+            let big = obj == 'W';
+            let cls = class(l.chars[ci], big);
+            let mut s = ci;
+            while s > 0 && class(l.chars[s - 1], big) == cls {
+                s -= 1;
+            }
+            let e = run(ci, cls, big);
+            if inner {
+                return Some((s, e));
+            }
+            if cls == Class::Blank {
+                // on blanks: the blanks and the word after them
+                return Some((
+                    s,
+                    if e < n {
+                        run(e, class(l.chars[e], big), big)
+                    } else {
+                        e
+                    },
+                ));
+            }
+            let trailing = run(e, Class::Blank, big);
+            if trailing > e {
+                return Some((s, trailing));
+            }
+            let mut lead = s;
+            while lead > 0 && l.chars[lead - 1].is_whitespace() {
+                lead -= 1;
+            }
+            Some((lead, e))
+        }
+        '"' | '\'' | '`' => {
+            // quotes pair up from the line start; a backslash escapes one
+            let quotes: Vec<usize> = (0..n)
+                .filter(|&i| l.chars[i] == obj && (i == 0 || l.chars[i - 1] != '\\'))
+                .collect();
+            let pairs = || quotes.as_chunks::<2>().0.iter().map(|&[o, c]| (o, c));
+            // the pair around the cursor, else the next one after it
+            let (open, close) = pairs()
+                .find(|&(o, c)| o <= ci && ci <= c)
+                .or_else(|| pairs().find(|&(o, _)| o > ci))?;
+            Some(if inner {
+                (open + 1, close)
+            } else {
+                (open, close + 1)
+            })
+        }
+        _ => {
+            let (open_ch, close_ch) = match obj {
+                '(' | ')' | 'b' => ('(', ')'),
+                '[' | ']' => ('[', ']'),
+                '{' | '}' | 'B' => ('{', '}'),
+                '<' | '>' => ('<', '>'),
+                _ => return None,
+            };
+            // innermost unmatched opening bracket at or left of the cursor
+            // (a closing one under the cursor names its own pair)
+            let mut depth = 0usize;
+            let mut open = None;
+            for i in (0..=ci).rev() {
+                let ch = l.chars[i];
+                if ch == close_ch && i != ci {
+                    depth += 1;
+                } else if ch == open_ch {
+                    if depth == 0 {
+                        open = Some(i);
+                        break;
+                    }
+                    depth -= 1;
+                }
+            }
+            let open = open?;
+            let mut depth = 0usize;
+            let close = (open + 1..n).find(|&j| {
+                let ch = l.chars[j];
+                if ch == open_ch {
+                    depth += 1;
+                } else if ch == close_ch {
+                    if depth == 0 {
+                        return true;
+                    }
+                    depth -= 1;
+                }
+                false
+            })?;
+            Some(if inner {
+                (open + 1, close)
+            } else {
+                (open, close + 1)
+            })
+        }
+    }
+}
+
 fn toggle_case(c: char) -> String {
     if c.is_lowercase() {
         c.to_uppercase().collect()
@@ -507,6 +623,17 @@ impl EditorState {
     /// The char argument of `r` / `f` / `F` / `t` / `T`.
     fn char_arg(&mut self, v: &mut VimState, aw: Awaiting, c: char) -> VimOutcome {
         match aw {
+            Awaiting::Object(inner) => {
+                let op = v.pending.op;
+                v.pending.reset();
+                let l = Line::new(&self.buffer);
+                if let (Some(op), Some((s, e))) =
+                    (op, text_object(&l, l.index(self.cursor), c, inner))
+                {
+                    self.apply_op(v, op, l.byte(s)..l.byte(e), false);
+                }
+                VimOutcome::Consumed
+            }
             Awaiting::Find(kind) => {
                 v.last_find = Some((kind, c));
                 self.motion(v, Motion::Find(kind, c))
@@ -613,6 +740,12 @@ impl EditorState {
                     VimOutcome::Consumed
                 }
             };
+        }
+
+        // a text object (`ciw`, `da"`, `yi(`)
+        if v.pending.op.is_some() && matches!(c, 'i' | 'a') {
+            v.pending.awaiting = Some(Awaiting::Object(c == 'i'));
+            return VimOutcome::Consumed;
         }
 
         // anything else while an operator is pending cancels it
@@ -744,6 +877,45 @@ mod tests {
     }
 
     const GIT: &str = "git  commit -m \"msg\" --amend";
+
+    /// `s` in Normal mode with the cursor on char `at`, then `cmd` typed.
+    fn after(s: &str, at: usize, cmd: &str) -> (String, Option<VimMode>, String) {
+        let mut e = ed(s);
+        esc(&mut e);
+        keys(&mut e, "0");
+        for _ in 0..at {
+            keys(&mut e, "l");
+        }
+        keys(&mut e, cmd);
+        let reg = e.vim.as_ref().unwrap().register.clone();
+        (e.buffer.clone(), e.vim_mode(), reg)
+    }
+
+    #[test]
+    fn text_objects() {
+        // words: inner, around (trailing blanks, else leading), WORDs
+        assert_eq!(after("echo one two", 6, "diw").0, "echo  two");
+        assert_eq!(after("echo one two", 6, "daw").0, "echo two");
+        assert_eq!(after("echo one two", 10, "daw").0, "echo one");
+        assert_eq!(
+            after("cd a/b-c x", 4, "ciW"),
+            ("cd  x".into(), Some(VimMode::Insert), "a/b-c".into())
+        );
+        assert_eq!(after("thre!", 4, "ciw").0, "thre");
+        // quotes: around the cursor, else the next pair; escaped ones skipped
+        assert_eq!(after(GIT, 17, "ci\"").0, "git  commit -m \"\" --amend");
+        assert_eq!(after(GIT, 0, "da\"").0, "git  commit -m  --amend");
+        assert_eq!(after(r#"echo "a \" b" c"#, 6, "di\"").0, r#"echo "" c"#);
+        assert_eq!(after("echo 'x'", 1, "yi'").2, "x");
+        // brackets: innermost pair, from either bracket
+        assert_eq!(after("f(a, (b), c)", 3, "di(").0, "f()");
+        assert_eq!(after("f(a, (b), c)", 6, "dib").0, "f(a, (), c)");
+        assert_eq!(after("f(a, (b), c)", 11, "da)").0, "f");
+        assert_eq!(after("x[1] {y}", 6, "ci{").0, "x[1] {}");
+        // nothing to act on: the buffer stays, the operator is dropped
+        assert_eq!(after("no brackets", 3, "di(").0, "no brackets");
+        assert_eq!(after("no quotes", 3, "ci\"").1, Some(VimMode::Normal));
+    }
 
     #[test]
     fn disabled_passes_everything_through() {

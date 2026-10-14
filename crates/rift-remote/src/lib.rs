@@ -104,6 +104,28 @@ pub const MAX_WAITING_CHOICE: usize = 200;
 pub const MAX_WAITING_CONTEXT: usize = 12;
 /// Characters of a pane's `running.line`.
 pub const MAX_RUNNING_LINE: usize = 200;
+/// Characters of a tab's `title` and a pane's `job` and `last_command`
+/// (a pasted megabyte run as one command would otherwise push the whole
+/// `topology` past [`MAX_GATEWAY_MESSAGE`], and it would never be sent).
+pub const MAX_PANE_TEXT: usize = 1024;
+/// Bytes of a block's `command` sent (cut on a character boundary): a block
+/// over [`MAX_GATEWAY_MESSAGE`] could go out in no `snapshot`, `update` or
+/// `older`, and the blocks older than it would not either.
+pub const MAX_BLOCK_COMMAND: usize = 16 * 1024;
+
+/// `blocks` within the wire bounds: each `command` cut to
+/// [`MAX_BLOCK_COMMAND`] bytes (the output is bounded where it is read).
+pub fn bound_blocks(blocks: &mut [Block]) {
+    for b in blocks {
+        if b.command.len() > MAX_BLOCK_COMMAND {
+            let mut end = MAX_BLOCK_COMMAND;
+            while !b.command.is_char_boundary(end) {
+                end -= 1;
+            }
+            b.command.truncate(end);
+        }
+    }
+}
 /// Largest screen sent (`screen`): a larger one is cut to its top-left.
 pub const MAX_SCREEN_COLS: u16 = 300;
 pub const MAX_SCREEN_ROWS: u16 = 120;
@@ -300,19 +322,29 @@ pub fn bound_complete(page: CompletePage) -> (CompletePage, bool) {
 }
 
 /// Every pane's `waiting` within the wire bounds (see the `MAX_WAITING_`
-/// constants; a `password` never carries choices or context) and its
-/// `running.line` within [`MAX_RUNNING_LINE`].
+/// constants; a `password` never carries choices or context), its
+/// `running.line` within [`MAX_RUNNING_LINE`], and tab titles, jobs and last
+/// commands within [`MAX_PANE_TEXT`].
 pub fn bound_topology(mut windows: Vec<Window>) -> Vec<Window> {
     let cut = |s: &mut String, max: usize| {
         if let Some((i, _)) = s.char_indices().nth(max) {
             s.truncate(i);
         }
     };
+    for tab in windows.iter_mut().flat_map(|w| &mut w.tabs) {
+        cut(&mut tab.title, MAX_PANE_TEXT);
+    }
     for pane in windows
         .iter_mut()
         .flat_map(|w| &mut w.tabs)
         .flat_map(|t| &mut t.panes)
     {
+        for text in [pane.job.as_mut(), pane.last_command.as_mut()]
+            .into_iter()
+            .flatten()
+        {
+            cut(text, MAX_PANE_TEXT);
+        }
         if let Some(r) = pane.running.as_mut() {
             cut(&mut r.line, MAX_RUNNING_LINE);
         }
@@ -379,6 +411,42 @@ mod chip_bounds {
             .collect();
         assert_eq!(lines[0].chars().count(), MAX_RUNNING_LINE);
         assert_eq!(lines[1], "short");
+    }
+
+    #[test]
+    fn a_pasted_megabyte_command_still_lets_the_topology_out() {
+        let big = "é".repeat(1024 * 1024);
+        let pane = protocol::Pane {
+            id: 1,
+            active: true,
+            cwd: None,
+            job: Some(big.clone()),
+            last_command: Some(big.clone()),
+            last_exit: None,
+            git: None,
+            waiting: None,
+            running: None,
+        };
+        let windows = vec![Window {
+            pid: 1,
+            tabs: vec![protocol::Tab {
+                index: 0,
+                title: big,
+                active: true,
+                panes: vec![pane],
+            }],
+        }];
+        let out = bound_topology(windows);
+        let tab = &out[0].tabs[0];
+        assert_eq!(tab.title.chars().count(), MAX_PANE_TEXT);
+        let pane = &tab.panes[0];
+        assert_eq!(pane.job.as_ref().unwrap().chars().count(), MAX_PANE_TEXT);
+        assert_eq!(
+            pane.last_command.as_ref().unwrap().chars().count(),
+            MAX_PANE_TEXT
+        );
+        let frame = serde_json::to_string(&protocol::ServerMsg::Topology { windows: out }).unwrap();
+        assert!(frame.len() <= MAX_GATEWAY_MESSAGE, "{} bytes", frame.len());
     }
 
     #[test]

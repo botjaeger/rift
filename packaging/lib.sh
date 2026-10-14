@@ -46,6 +46,12 @@ rift_target_arch() {
     esac
 }
 
+# The calling script's header comment (everything after the shebang up to
+# the first code line), without the comment markers: its --help text.
+rift_usage() {
+    awk 'NR == 1 { next } !/^#/ { exit } { sub(/^# ?/, ""); print }' "$0"
+}
+
 rift_die() {
     echo "error: $*" >&2
     exit 1

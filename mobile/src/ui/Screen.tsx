@@ -1,8 +1,22 @@
-import type { ReactNode } from "react";
-import { Platform, Pressable, ScrollView, StyleSheet, Text, View, type StyleProp, type ViewStyle } from "react-native";
+import { useIsFocused } from "expo-router";
+import { useCallback, useEffect, useRef, type ReactNode } from "react";
+import {
+  Keyboard,
+  KeyboardAvoidingView,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+  type StyleProp,
+  type ViewStyle,
+} from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Icon, type IconName } from "./Icon";
 import { colors, radius, TOUCH, ui } from "./theme";
+import { toggleA11y } from "./toggle";
 
 /** The mockups' top inset for a page title: 62 pt on a 47 pt status bar, never under the island. */
 export const titleTop = (inset: number) => Math.max(inset, 47) + 15;
@@ -17,6 +31,8 @@ export const tabTitleTop = (inset: number) => (Platform.OS === "ios" ? titleTop(
 export const headerTop = (inset: number) => Math.max(inset, 47) + 7;
 /** Room left under a tab page for the floating tab bar (62 pt, 26 pt above the edge). */
 export const TAB_BAR_ROOM = 120;
+
+const android = Platform.OS === "android";
 
 /**
  * A tab's page (Now, Computers, Settings): a large title on the chrome ground, then the
@@ -38,13 +54,60 @@ export function TabScreen({
   children: ReactNode;
 }) {
   const insets = useSafeAreaInsets();
-  return (
+  const scroll = useRef<ScrollView>(null);
+  const offset = useRef(0);
+  // the keyboard's top edge (window coordinates) while it is up
+  const keyboardTop = useRef<number | null>(null);
+  const focused = useIsFocused();
+  // Android 15 draws edge to edge: the window keeps its size for the keyboard and nothing
+  // scrolls a focused field low on the page (Settings › This phone's name) out from under it
+  const revealFocusedField = useCallback(() => {
+    const input = TextInput.State.currentlyFocusedInput();
+    const top = keyboardTop.current;
+    if (!focused || !input || top === null) return;
+    input.measureInWindow((_x, y, _w, h) => {
+      const under = y + h + 12 - top;
+      if (under > 0) scroll.current?.scrollTo({ y: offset.current + under, animated: true });
+    });
+  }, [focused]);
+  useEffect(() => {
+    if (!android) return;
+    let settle: ReturnType<typeof setTimeout> | undefined;
+    const show = Keyboard.addListener("keyboardDidShow", (e) => {
+      keyboardTop.current = e.endCoordinates.screenY;
+      revealFocusedField();
+      // and once the padding's layout has landed: a scroll started before it can stop at the old
+      // end of the page, leaving the field flush under the keyboard (seen 2 of 6 runs)
+      clearTimeout(settle);
+      settle = setTimeout(revealFocusedField, 300);
+    });
+    const hide = Keyboard.addListener("keyboardDidHide", () => {
+      keyboardTop.current = null;
+      clearTimeout(settle);
+    });
+    return () => {
+      show.remove();
+      hide.remove();
+      clearTimeout(settle);
+    };
+  }, [revealFocusedField]);
+  const page = (
     <ScrollView
+      ref={scroll}
+      onScroll={(e) => {
+        offset.current = e.nativeEvent.contentOffset.y;
+      }}
+      scrollEventThrottle={32}
+      // again once the padding has shrunk the view: before that the scroll stops short at the
+      // old end of the page
+      onLayout={revealFocusedField}
       style={styles.fill}
       // the large header's row is its 40 pt button, 58 pt down on the boards
       contentContainerStyle={{ paddingTop: tabTitleTop(insets.top) - (large ? 4 : 0), paddingBottom: insets.bottom + TAB_BAR_ROOM }}
       contentInsetAdjustmentBehavior="never"
       automaticallyAdjustContentInsets={false}
+      // iOS: the keyboard insets the page and scrolls a focused field above it
+      automaticallyAdjustKeyboardInsets
       keyboardShouldPersistTaps="handled"
     >
       <View style={styles.page}>
@@ -64,6 +127,17 @@ export function TabScreen({
         <View style={[styles.content, { gap }]}>{children}</View>
       </View>
     </ScrollView>
+  );
+  // iOS keeps the bare scroll view: the system tab bar insets (and edge-blurs) only a scroll view
+  // that is the page's own; wrapped, the title slid up under the status bar
+  if (!android) return page;
+  return (
+    // the padding leaves room to scroll the last field above the keyboard
+    <KeyboardAvoidingView style={styles.fill} behavior="padding">
+      {page}
+      {/* the status bar is see-through (edge to edge): content scrolled up under it hid behind the clock */}
+      <View pointerEvents="none" style={[styles.statusScrim, { height: insets.top }]} />
+    </KeyboardAvoidingView>
   );
 }
 
@@ -118,10 +192,11 @@ export function IconButton({
 }) {
   return (
     <Pressable
-      accessibilityRole={pressedState === undefined ? "button" : "togglebutton"}
+      {...(pressedState === undefined
+        ? { accessibilityRole: "button" as const, accessibilityState: { disabled: !!disabled } }
+        : toggleA11y(pressedState, !!disabled))}
       accessibilityLabel={label}
       accessibilityHint={hint}
-      accessibilityState={pressedState === undefined ? { disabled: !!disabled } : { checked: pressedState, disabled: !!disabled }}
       disabled={disabled}
       onPress={onPress}
       style={({ pressed }) => [styles.iconButton, active && styles.iconButtonActive, pressed && styles.pressed, disabled && styles.disabled]}
@@ -195,6 +270,7 @@ export function PageHeader({
 
 const styles = StyleSheet.create({
   fill: { flex: 1, backgroundColor: colors.chrome },
+  statusScrim: { position: "absolute", top: 0, left: 0, right: 0, backgroundColor: colors.chrome },
   page: { maxWidth: 720, width: "100%", alignSelf: "center" },
   header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12, paddingLeft: 20, paddingRight: 20 },
   headerWithAccessory: { paddingRight: 16, paddingBottom: 4 },

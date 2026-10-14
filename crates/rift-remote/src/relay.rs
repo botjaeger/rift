@@ -83,6 +83,13 @@ pub const CONTROL_PING: Duration = Duration::from_secs(20);
 pub const CONTROL_IDLE: Duration = Duration::from_secs(60);
 /// Open sockets past which new ones are dropped unread.
 pub const MAX_SOCKETS: usize = 4096;
+/// The same for a relay that serves one gateway (`only_ids` of one id, the
+/// "Reach from anywhere" tunnel in the gateway's own process): its pairs
+/// (two sockets each), the control connection and upgrades under way. Its
+/// sockets come through one proxy, so no per-address limit applies; this
+/// bound keeps a flood from the internet from spending the process's
+/// threads, which the gateway's LAN connections need too.
+pub const ONE_GATEWAY_SOCKETS: usize = 4 * MAX_PAIRS + 64;
 /// Random bytes of a `conn` id.
 pub const CONN_ID_LEN: usize = 16;
 
@@ -110,6 +117,9 @@ pub struct RelayConfig {
     pub max_per_address: usize,
     pub accept_deadline: Duration,
     pub request_deadline: Duration,
+    /// Open sockets past which new ones are dropped unread ([`MAX_SOCKETS`];
+    /// a relay serving one gateway needs far fewer).
+    pub max_sockets: usize,
     pub control_ping: Duration,
     pub control_idle: Duration,
     /// Take the client address from the last `X-Forwarded-For` hop (only
@@ -135,6 +145,7 @@ impl Default for RelayConfig {
             max_per_address: MAX_SOCKETS_PER_ADDRESS,
             accept_deadline: ACCEPT_DEADLINE,
             request_deadline: REQUEST_DEADLINE,
+            max_sockets: MAX_SOCKETS,
             control_ping: CONTROL_PING,
             control_idle: CONTROL_IDLE,
             trust_forwarded: false,
@@ -532,7 +543,7 @@ fn accept_loop(listener: TcpListener, shared: Arc<Shared>) {
                 continue;
             }
         };
-        if shared.sockets.fetch_add(1, Ordering::AcqRel) >= MAX_SOCKETS {
+        if shared.sockets.fetch_add(1, Ordering::AcqRel) >= shared.config.max_sockets {
             shared.sockets.fetch_sub(1, Ordering::AcqRel);
             continue;
         }
@@ -547,6 +558,9 @@ fn accept_loop(listener: TcpListener, shared: Arc<Shared>) {
                 slot.shared.sockets.fetch_sub(1, Ordering::AcqRel);
             });
         if let Err(e) = spawned {
+            // the thread that would uncount it never ran (its address slot
+            // was dropped with the closure)
+            shared.sockets.fetch_sub(1, Ordering::AcqRel);
             log::warn!("relay: cannot start a thread: {e}");
         }
     }

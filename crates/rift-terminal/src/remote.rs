@@ -1032,9 +1032,10 @@ const TOAST_COMMAND: usize = 60;
 /// Longest device name shown in the toast, in characters.
 const TOAST_DEVICE: usize = 40;
 
-/// `text` without control characters, cut to `max` characters with `…`.
+/// `text` without control or bidirectional formatting characters
+/// ([`registry::shown_char`]), cut to `max` characters with `…`.
 fn shown(text: &str, max: usize) -> String {
-    let clean: String = text.chars().filter(|c| !c.is_control()).collect();
+    let clean: String = text.chars().filter(|&c| registry::shown_char(c)).collect();
     let clean = clean.trim();
     if clean.chars().count() <= max {
         return clean.to_string();
@@ -1250,6 +1251,11 @@ mod tests {
         assert_eq!(t.chars().count(), "p ran ".len() + TOAST_COMMAND);
         assert!(t.ends_with('…'));
         assert_eq!(ran_toast("a\u{1b}[31mb\n", "ls"), "a[31mb ran ls");
+        // bidirectional overrides cannot make the toast show another command
+        assert_eq!(
+            ran_toast("ph\u{202E}one", "rm -rf x \u{2067}#\u{202E}sl\u{2069}"),
+            "phone ran rm -rf x #sl"
+        );
         let keys = [
             rift_remote::Key::ctrl('c'),
             rift_remote::Key::plain(rift_remote::KeyBase::Enter),

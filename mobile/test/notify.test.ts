@@ -15,6 +15,7 @@ import {
   ntfyUrl,
   pushCovers,
   pushFooter,
+  pushTokenProblem,
   pushRegistration,
   shouldNotify,
   tapTarget,
@@ -223,6 +224,21 @@ describe("ntfy", () => {
     expect(ntfyServerChanged("https://n.example.com")).toBe(
       "Subscribe again in ntfy: the topic is the same, but it is now on n.example.com.",
     );
+  });
+});
+
+describe("pushTokenProblem", () => {
+  it("never shows the system's raw error", () => {
+    // captured from an Android 15 emulator build without google-services.json
+    const firebase =
+      "Unable to get Firebase Messaging instance. Did you configure `googleServicesFile` path in app config? Make sure to complete the guide at https://docs.expo.dev/push-notifications/fcm-credentials/ : Default FirebaseApp is not initialized in this process dev.botjaeger.rift. Make sure to call FirebaseApp.initializeApp(Context) first.";
+    expect(pushTokenProblem(firebase)).toBe("this build is not set up for Android push.");
+    expect(pushTokenProblem("SERVICE_NOT_AVAILABLE")).toBe("the system gave no push token.");
+    for (const d of [firebase, "SERVICE_NOT_AVAILABLE"]) {
+      expect(pushTokenProblem(d)).not.toMatch(/https?:|java|Firebase|SERVICE/);
+      // reads on in the footer's sentence
+      expect(pushFooter({ state: "unavailable", reason: pushTokenProblem(d) })).toMatch(/^Notifications come only while this app is open: [a-z].*\. Turn on/);
+    }
   });
 });
 

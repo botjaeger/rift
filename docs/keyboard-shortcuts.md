@@ -145,6 +145,7 @@ below are implemented.
 | `f` `F` `t` `T` + char | Find forward/back, on/before the char |
 | `;` | Repeat the last `f` / `F` / `t` / `T` |
 | `d` `c` `y` + motion | Delete / change / yank over the motion (`cw` acts like `ce`) |
+| `d` `c` `y` + `i`/`a` + object | Text objects: `w` `W` words, `"` `'` `` ` `` quotes, `(` `b` `[` `{` `B` `<` brackets (`ciw`, `da"`, `yi(`) |
 | `dd` / `cc` / `yy` / `S` | Same operators over the whole buffer |
 | `D` / `C` | Delete / change to end of line |
 | `x` / `X` / `s` | Delete under / before cursor / substitute |

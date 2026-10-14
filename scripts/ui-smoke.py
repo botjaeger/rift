@@ -624,6 +624,31 @@ edge_steps = [
     "type printf NO_NEWLINE\\n",
     "wait 500",
     f"dump {edge}/partial.txt",
+    # a line submitted before the shell started the previous one keeps
+    # its own label, and does not relabel that one
+    "type echo 'a  b'\\necho TYPED_AHEAD\\n",
+    "wait 600",
+    f"dump {edge}/typed-ahead.txt",
+    # find counts only drawn rows (a prompt echo is drawn as the block
+    # header) and scrolls by drawn rows: a collapsed block between the
+    # match and the bottom used to scroll the match off screen
+    "type seq 1 200\\n",
+    "wait 400",
+    "type echo JUMP_NEEDLE\\n",
+    "wait 400",
+    "type seq 1 400\\n",
+    "wait 600",
+    "key cmd+up",
+    "key ctrl+m",
+    "wait 200",
+    *["key down"] * 9,
+    "key enter",
+    "wait 300",
+    "key cmd+f",
+    "type JUMP_NEEDLE",
+    "wait 400",
+    f"dump {edge}/find-jump.txt",
+    "key escape",
     # a child shell keeps the block integration
     "type exec bash\\n",
     "wait 800",
@@ -651,6 +676,14 @@ marks = re.search(r"matches=(\d+) total=(\d+)", estate("find-mark"))
 assert marks and int(marks[2]) >= 1, estate("find-mark")
 assert 'ListItem "printf NO_NEWLINE" desc="succeeded' in estate("partial") and \
     'value="NO_NEWLINE"' in estate("partial"), estate("partial")
+ahead = estate("typed-ahead")
+assert "cmd=\"echo 'a  b'\" exit=Some(0)" in ahead and 'cmd="echo TYPED_AHEAD" exit=Some(0)' in ahead, ahead
+jump = estate("find-jump")
+assert re.search(r'cmd="seq 1 400" exit=Some\(0\) collapsed=true', jump), jump
+assert re.search(r"matches=1 total=1 ", jump), jump
+needle_row = re.search(r'cmd="echo JUMP_NEEDLE" .*? output_start=Some\((\d+)\)', jump)
+drawn = re.search(r"geometry .*? rows=\[([^\]]*)\]", jump)
+assert needle_row and drawn and any(r.startswith(f"{needle_row[1]}:") for r in drawn[1].split(" ")), jump
 child = estate("child")
 assert 'cmd="echo INNER_OK" exit=Some(0)' in child and "editor_active=true" in child, child
 

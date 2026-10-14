@@ -17,7 +17,7 @@ while [ $# -gt 0 ]; do
         --target)     TRIPLE="${2:?--target needs a triple}"; shift 2 ;;
         --target-dir) TARGET_DIR="${2:?--target-dir needs a path}"; shift 2 ;;
         --no-build)   BUILD=0; shift ;;
-        -h|--help)    sed -n '2,6p' "$0"; exit 0 ;;
+        -h|--help)    rift_usage; exit 0 ;;
         *)            rift_die "unknown option: $1" ;;
     esac
 done
@@ -26,7 +26,7 @@ VERSION="$(rift_version)"
 ARCH="$(uname -m)"
 
 if [ "$BUILD" -eq 1 ]; then
-    if [ -n "$TRIPLE" ]; then cargo build --release --target-dir "$TARGET_DIR" --target "$TRIPLE"; else cargo build --release --target-dir "$TARGET_DIR"; fi
+    if [ -n "$TRIPLE" ]; then cargo build --release --locked --target-dir "$TARGET_DIR" --target "$TRIPLE"; else cargo build --release --locked --target-dir "$TARGET_DIR"; fi
 fi
 
 if [ -n "$TRIPLE" ]; then

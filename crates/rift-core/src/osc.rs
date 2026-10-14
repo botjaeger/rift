@@ -68,6 +68,9 @@ pub struct Segment {
 pub struct OscScanner {
     state: State,
     buf: Vec<u8>,
+    /// The OSC string outgrew its bound: its text is cut, so it is not
+    /// reported (a truncated OSC 7 path would name another directory).
+    clipped: bool,
 }
 
 impl OscScanner {
@@ -78,6 +81,7 @@ impl OscScanner {
     /// The byte after an ESC: starts an OSC or APC string, or is not ours.
     fn after_esc(&mut self, b: u8) {
         self.buf.clear();
+        self.clipped = false;
         self.state = match b {
             b']' => State::Osc,
             b'_' => State::ApcStart,
@@ -150,7 +154,9 @@ impl OscScanner {
                         self.buf.clear();
                     } else if b == 0x07 {
                         self.state = State::Ground;
-                        if let Some(marker) = parse_osc(&self.buf) {
+                        if !std::mem::take(&mut self.clipped)
+                            && let Some(marker) = parse_osc(&self.buf)
+                        {
                             segments.push(Segment {
                                 end: i + 1,
                                 marker: Some(marker),
@@ -163,12 +169,16 @@ impl OscScanner {
                         || (self.buf.starts_with(ITERM_FILE) && self.buf.len() < MAX_IMAGE)
                     {
                         self.buf.push(b);
+                    } else {
+                        self.clipped = true;
                     }
                 }
                 State::OscEsc => {
                     if b == b'\\' {
                         self.state = State::Ground;
-                        if let Some(marker) = parse_osc(&self.buf) {
+                        if !std::mem::take(&mut self.clipped)
+                            && let Some(marker) = parse_osc(&self.buf)
+                        {
                             segments.push(Segment {
                                 end: i + 1,
                                 marker: Some(marker),
@@ -294,8 +304,10 @@ fn percent_decode(s: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
+        // two hex digits only (`from_str_radix` would also take a sign)
         if bytes[i] == b'%'
             && i + 2 < bytes.len()
+            && bytes[i + 1..i + 3].iter().all(u8::is_ascii_hexdigit)
             && let Ok(v) =
                 u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
         {
@@ -482,6 +494,29 @@ mod tests {
         input.push(0x18);
         input.extend_from_slice(b"AAAA\x1b\\");
         assert!(markers(&mut s, &input).is_empty());
+    }
+
+    #[test]
+    fn an_oversized_osc_is_dropped_not_cut() {
+        let mut s = OscScanner::new();
+        let mut input = b"\x1b]7;file://h/".to_vec();
+        input.extend(std::iter::repeat_n(b'a', MAX_OSC));
+        input.push(0x07);
+        assert!(markers(&mut s, &input).is_empty());
+        // the next sequence is reported again
+        assert_eq!(
+            markers(&mut s, b"\x1b]7;file://h/ok\x1b\\"),
+            vec![Marker::Cwd("/ok".into())]
+        );
+    }
+
+    #[test]
+    fn percent_escapes_need_two_hex_digits() {
+        let mut s = OscScanner::new();
+        assert_eq!(
+            markers(&mut s, b"\x1b]7;file://h/a%+1b%2x%41\x07"),
+            vec![Marker::Cwd("/a%+1b%2xA".into())]
+        );
     }
 
     #[test]

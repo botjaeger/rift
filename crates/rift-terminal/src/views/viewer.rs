@@ -441,6 +441,8 @@ pub fn render(
             theme.text_dim
         },
     );
+    // the path and the controls stay clear of the icon (x + 8 … x + 22)
+    let title_left = x + 30.0;
     let close = [x + w - 28.0, cy - 12.0, 24.0, 24.0];
     let menu = [close[0] - 2.0 - 24.0, close[1], 24.0, 24.0];
     icons::draw(
@@ -469,7 +471,7 @@ pub fn render(
             .collect();
         let total = seg_w.iter().sum::<f32>() + 4.0;
         let bx = controls_left - total;
-        if bx > x + 16.0 {
+        if bx > title_left {
             layer.bordered(
                 [bx, cy - 11.0],
                 [total, 22.0],
@@ -509,9 +511,9 @@ pub fn render(
     // the path centres on the pane; when that would cut it, it starts at
     // the left edge instead, elided (tail kept) clear of the controls
     let mid = x + w / 2.0;
-    let centred = (2.0 * (mid - (x + 16.0)).min(controls_left - mid)).max(0.0);
+    let centred = (2.0 * (mid - title_left).min(controls_left - mid)).max(0.0);
     let full = engine.measure(rel, 12.0, FONT_SANS, Weight::NORMAL);
-    let left_room = (controls_left - (x + 16.0)).max(0.0);
+    let left_room = (controls_left - title_left).max(0.0);
     let room = if full <= centred { centred } else { left_room };
     let rel = super::editor::elide_head(rel, room, |t| {
         engine.measure(t, 12.0, FONT_SANS, Weight::NORMAL)
@@ -523,7 +525,7 @@ pub fn render(
             if full <= centred {
                 (mid - tw / 2.0).round()
             } else {
-                x + 16.0
+                title_left
             },
             (cy - 8.0).round(),
             if focused { theme.fg } else { theme.text_dim },

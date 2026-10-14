@@ -34,6 +34,7 @@ import { Button } from "@/ui/Button";
 import { ErrorText } from "@/ui/Notice";
 import { headerTop, IconButton } from "@/ui/Screen";
 import { TerminalView } from "@/ui/TerminalView";
+import { useSingleFlight } from "@/ui/useSingleFlight";
 import { colors, mono, radius, TOUCH, ui } from "@/ui/theme";
 
 /** Within this many points of the end counts as "at the bottom" (stick to new output). */
@@ -148,6 +149,8 @@ export default function PaneScreen() {
       else setError(r.message);
     });
   }, [key, paneId]);
+  // a Run again on its way: a second tap (a double tap) must not run the command twice
+  const once = useSingleFlight();
   const onRunAgain = useCallback(
     (b: Block) => {
       if (!operate) return setError("View only: this device cannot run commands here.");
@@ -157,12 +160,13 @@ export default function PaneScreen() {
         router.push({ pathname: "/confirm", params: { key, pane: String(paneId), block: String(b.id) } });
         return;
       }
-      void fleet.run(key, paneId, b.command, { fromDraft: false }).then((r) => {
+      void once(async () => {
+        const r = await fleet.run(key, paneId, b.command, { fromDraft: false });
         if (r.ok) AccessibilityInfo.announceForAccessibility("Command sent");
         else setError(r.message);
       });
     },
-    [router, key, paneId, operate],
+    [router, key, paneId, operate, once],
   );
   const onLoadEarlier = useCallback((blockId: number) => void fleet.loadEarlier(blockId), []);
   const canLoadEarlier = hasFeature(host, "output");

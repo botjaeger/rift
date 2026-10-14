@@ -110,6 +110,7 @@ impl Running {
         let config = rift_remote::relay::RelayConfig {
             trust_forwarded: true,
             only_ids: Some(vec![gateway_id]),
+            max_sockets: rift_remote::relay::ONE_GATEWAY_SOCKETS,
             ..Default::default()
         };
         let relay = rift_remote::relay::serve_relay(listener, config)?;
@@ -330,6 +331,56 @@ mod tests {
         // off removes the file
         assert_eq!(t.poll(false), None);
         assert_eq!(read_state(&dir), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A fake cloudflared: logs a tunnel address, writes its pid, then
+    /// stays up until it is killed.
+    fn fake_cloudflared(dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = dir.join("cloudflared");
+        let script = format!(
+            "#!/bin/sh\necho $$ > '{}'\n\
+             echo 'INF |  https://fake-quick-tunnel.trycloudflare.com  |' >&2\n\
+             exec sleep 600\n",
+            dir.join("pid").display()
+        );
+        std::fs::write(&bin, script).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        bin
+    }
+
+    fn alive(pid: i32) -> bool {
+        // SAFETY: signal 0 only checks that the process exists
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    #[test]
+    fn the_tunnel_finds_its_address_and_never_outlives_its_owner() {
+        let dir = std::env::temp_dir().join(format!("rift-tunnel-run-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = fake_cloudflared(&dir);
+        let running = Running::start(&bin, "id".into()).unwrap();
+        let until = Instant::now() + Duration::from_secs(10);
+        while running.url.lock().unwrap().is_none() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(
+            running.url.lock().unwrap().as_ref().map(|u| u.0.clone()),
+            Some("wss://fake-quick-tunnel.trycloudflare.com".into())
+        );
+        let pid: i32 = std::fs::read_to_string(dir.join("pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(alive(pid));
+        drop(running);
+        let until = Instant::now() + Duration::from_secs(5);
+        while alive(pid) && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!alive(pid), "cloudflared outlived the tunnel");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

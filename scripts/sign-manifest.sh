@@ -24,7 +24,7 @@ MANIFEST=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --verify)  VERIFY_ONLY=1; shift ;;
-        -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+        -h|--help) rift_usage; exit 0 ;;
         -*)        rift_die "unknown option: $1" ;;
         *)         MANIFEST="$1"; shift ;;
     esac

@@ -1,4 +1,6 @@
+import Constants from "expo-constants";
 import * as Clipboard from "expo-clipboard";
+import * as Updates from "expo-updates";
 import { useRouter } from "expo-router";
 import { useEffect, useState } from "react";
 import { AccessibilityInfo, Linking, Platform, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
@@ -9,10 +11,10 @@ import { authenticate, biometricSupport, fleet, useApp, type BiometricSupport } 
 import { MAX_DEVICE_NAME, NOTIFY_AFTER_CHOICES, type NotifyPolicy } from "@/stores";
 import { Button } from "@/ui/Button";
 import { confirmDestructive } from "@/ui/confirm";
-import { formatAfter, osName } from "@/ui/format";
+import { appVersionText, formatAfter, osName } from "@/ui/format";
 import { Icon } from "@/ui/Icon";
 import { ErrorText } from "@/ui/Notice";
-import { ChoiceRow, Row, SwitchRow } from "@/ui/Rows";
+import { ChoiceRow, InfoRow, Row, SwitchRow } from "@/ui/Rows";
 import { Section, TabScreen } from "@/ui/Screen";
 import { colors, mono, radius, TOUCH, ui } from "@/ui/theme";
 
@@ -39,6 +41,8 @@ function NotifyFor({ value, onChange }: { value: NotifyPolicy; onChange: (v: Not
               accessibilityRole="radio"
               accessibilityLabel={p.label}
               accessibilityState={{ checked: on }}
+              // 36 pt segments, 44 pt to the touch (the group's padding and border)
+              hitSlop={{ top: 4, bottom: 4 }}
               onPress={() => onChange(p.value)}
               style={({ pressed }) => [styles.segment, on && styles.segmentOn, pressed && styles.pressed]}
             >
@@ -98,7 +102,8 @@ function DeviceName({ name, first }: { name: string; first: boolean }) {
     setDraft(null);
   };
   return (
-    <Row first={first}>
+    // wraps: on a 320 pt phone the field beside the label was too narrow and cut the name's first letter
+    <Row first={first} wrap>
       <Text style={styles.rowLabel}>This phone&apos;s name</Text>
       <TextInput
         value={draft ?? name}
@@ -337,7 +342,7 @@ function Security({ deviceName }: { deviceName: string }) {
 
   const lockAvailable = support?.label != null;
   // "Require Face ID" → "Face ID"
-  const bio = support?.label?.replace(/^Require /, "") ?? "Face ID or fingerprint";
+  const bio = support?.label?.replace(/^Require /, "") ?? (Platform.OS === "ios" ? "Face ID or Touch ID" : "face unlock or fingerprint");
   return (
     <Section title="Security">
       {/* A lock that is on stays switchable when the biometrics went away, so it can be turned off. */}
@@ -468,7 +473,31 @@ export default function SettingsScreen() {
           <PairedHost key={h.record.key} host={h} first={i === 0} />
         ))}
       </Section>
+
+      <About />
     </TabScreen>
+  );
+}
+
+/** The build's version and the over-the-air update it runs; a downloaded update applies on restart. */
+function About() {
+  const { currentlyRunning, isUpdatePending } = Updates.useUpdates();
+  const text = appVersionText(Constants.expoConfig?.version ?? "?", {
+    enabled: Updates.isEnabled,
+    embedded: currentlyRunning.isEmbeddedLaunch,
+    createdAt: currentlyRunning.createdAt ?? null,
+  });
+  return (
+    <Section title="About" footer={isUpdatePending ? "An update is downloaded and applies when the app restarts." : undefined}>
+      <InfoRow label="Version" first>
+        <Text style={styles.version}>{text}</Text>
+      </InfoRow>
+      {isUpdatePending ? (
+        <Row>
+          <Button label="Restart now" size="small" accessibilityHint="Restarts the app on the downloaded update" onPress={() => void Updates.reloadAsync()} />
+        </Row>
+      ) : null}
+    </Section>
   );
 }
 
@@ -481,6 +510,7 @@ const styles = StyleSheet.create({
   rowLabel: { fontFamily: ui(400), color: colors.textBright, fontSize: 15 },
   rowDetail: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12, lineHeight: 17 },
   reason: { fontFamily: ui(400), flex: 1, color: colors.textMuted, fontSize: 13, lineHeight: 19 },
+  version: { fontFamily: mono, color: colors.textBright, fontSize: 13 },
   // Notify for
   notifyFor: { paddingVertical: 12, paddingHorizontal: 14, gap: 10 },
   segments: {
@@ -527,9 +557,11 @@ const styles = StyleSheet.create({
   // Security
   nameInput: {
     fontFamily: ui(400),
-    flex: 1,
-    minWidth: 0,
+    flexGrow: 1,
+    flexBasis: 160,
+    minWidth: 160,
     height: 36,
+    paddingVertical: 0,
     paddingHorizontal: 10,
     borderRadius: radius.small,
     borderWidth: 1,

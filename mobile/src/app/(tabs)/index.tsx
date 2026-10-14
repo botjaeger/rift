@@ -1,6 +1,6 @@
 import { usePathname, useRouter } from "expo-router";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AccessibilityInfo, Pressable, StyleSheet, Text, View } from "react-native";
+import { AccessibilityInfo, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { ActivityItem } from "@/fleet";
 import { primaryChoice } from "@/answer";
@@ -19,7 +19,6 @@ import { colors, mono, tints, ui } from "@/ui/theme";
 
 /** The last pane is reopened once per app run, on the first launch of Now. */
 let restored = false;
-
 
 /** First run (the Empty board): how to connect, then Scan the code. */
 function FirstRun() {
@@ -42,7 +41,8 @@ function FirstRun() {
       <Text style={styles.firstTitle} accessibilityRole="header">
         Now
       </Text>
-      <View style={styles.firstBody}>
+      {/* scrolls on a short phone (320 × 568), where the steps would run under the buttons */}
+      <ScrollView style={styles.flex} contentContainerStyle={styles.firstBody}>
         <View style={styles.intro}>
           <Text style={styles.h2} accessibilityRole="header">
             Connect to Rift on your computer
@@ -59,7 +59,7 @@ function FirstRun() {
             </View>
           ))}
         </View>
-      </View>
+      </ScrollView>
       <View style={[styles.firstActions, { paddingBottom: Math.max(40, insets.bottom + 6) }]}>
         <Button
           label="Scan the code"
@@ -138,7 +138,13 @@ function AgentCard({ n, since }: { n: NeedsItem; since: string }) {
               onPress={() => (q.opens ? openAnswer(router, n, true) : void pick(q.index))}
               style={({ pressed }) => [styles.quickButton, q.index === primary ? styles.quickPrimary : styles.quickOutline, pressed && styles.pressed]}
             >
-              <Text style={q.index === primary ? styles.quickPrimaryText : styles.quickText} numberOfLines={1}>
+              {/* a third of a 320 pt phone cut "Yes, always" to "Yes, alw…": shrink to fit first */}
+              <Text
+                style={q.index === primary ? styles.quickPrimaryText : styles.quickText}
+                numberOfLines={1}
+                adjustsFontSizeToFit
+                minimumFontScale={0.75}
+              >
                 {q.label}
               </Text>
             </Pressable>
@@ -289,7 +295,8 @@ export default function NowScreen() {
         <Text style={styles.empty}>
           {anyOpen
             ? "Nothing needs you. Commands that run or finish on your computers show up here."
-            : "Not connected to your computers yet. Computers shows how each one is doing."}
+            : // not "yet": a computer that dropped or unpaired this phone was connected before
+              "Not connected to your computers. Computers shows how each one is doing."}
         </Text>
       ) : null}
       {needs.length > 0 ? (
@@ -419,7 +426,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     paddingBottom: 8,
   },
-  firstBody: { flex: 1, paddingTop: 24, paddingHorizontal: 20, gap: 22 },
+  firstBody: { paddingTop: 24, paddingBottom: 8, paddingHorizontal: 20, gap: 22 },
   intro: { gap: 8 },
   h2: { fontFamily: ui(600), color: colors.textBright, fontSize: 22, lineHeight: 27.5 },
   lead: { fontFamily: ui(400), color: colors.textMuted, fontSize: 15, lineHeight: 22.5 },

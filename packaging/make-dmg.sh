@@ -15,7 +15,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --target-dir) TARGET_DIR="${2:?--target-dir needs a path}"; shift 2 ;;
         --arch)       ARCH="${2:?--arch needs a value}"; shift 2 ;;
-        -h|--help)    sed -n '2,6p' "$0"; exit 0 ;;
+        -h|--help)    rift_usage; exit 0 ;;
         *)            rift_die "unknown option: $1" ;;
     esac
 done

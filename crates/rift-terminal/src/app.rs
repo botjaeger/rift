@@ -774,15 +774,34 @@ fn bracketed_paste_on(pane: &PaneState) -> bool {
         .contains(TermMode::BRACKETED_PASTE)
 }
 
-/// The local path a link target names (`/abs/path` or `file://` URL).
+/// A link target's URL scheme (RFC 3986: a letter, then letters, digits,
+/// `+`, `-` or `.`, before the first `:`), lowercased. `None` for a path.
+fn scheme_of(target: &str) -> Option<String> {
+    let (scheme, _) = target.split_once(':')?;
+    let mut chars = scheme.chars();
+    let first = chars.next()?;
+    (first.is_ascii_alphabetic()
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')))
+    .then(|| scheme.to_ascii_lowercase())
+}
+
+/// The local path a link target names: `/abs/path`, or a `file:` URL of
+/// this machine (`file:/p`, `file:///p`, `file://localhost/p`).
 fn local_path_of(target: &str) -> Option<std::path::PathBuf> {
-    let rest = match target.get(..7) {
-        Some(p) if p.eq_ignore_ascii_case("file://") => {
-            let r = &target[7..];
-            r.strip_prefix("localhost").unwrap_or(r)
+    let rest = match scheme_of(target).as_deref() {
+        Some("file") => {
+            let r = &target["file:".len()..];
+            match r.strip_prefix("//") {
+                // an authority: only this machine's
+                Some(auth) => auth
+                    .get(..9)
+                    .filter(|h| h.eq_ignore_ascii_case("localhost"))
+                    .map_or(auth, |_| &auth[9..]),
+                None => r,
+            }
         }
-        _ if target.contains("://") => return None,
-        _ => target,
+        Some(_) => return None,
+        None => target,
     };
     if !rest.starts_with('/') {
         return None;
@@ -811,18 +830,45 @@ fn local_path_of(target: &str) -> Option<std::path::PathBuf> {
 }
 
 /// Whether opening `path` would run code (app bundles, scripts, workflows,
-/// Terminal `.command` files, anything executable) instead of showing a
-/// document.
+/// Terminal `.command` files, link files that open another target, system
+/// add-ons, anything executable) instead of showing a document. A symlink is
+/// judged by what it points at too: the opener follows it.
 fn opens_as_program(path: &std::path::Path) -> bool {
     const PROGRAM_EXTS: &[&str] = &[
-        "app", "command", "terminal", "workflow", "action", "scpt", "scptd", "tool", "sh", "pkg",
-        "mpkg", "dmg", "jar", "desktop", "appimage",
+        "app",
+        "command",
+        "terminal",
+        "workflow",
+        "action",
+        "scpt",
+        "scptd",
+        "tool",
+        "sh",
+        "pkg",
+        "mpkg",
+        "dmg",
+        "jar",
+        "desktop",
+        "appimage",
+        "fileloc",
+        "webloc",
+        "inetloc",
+        "url",
+        "prefpane",
+        "saver",
+        "mobileconfig",
+        "bundle",
+        "plugin",
+        "kext",
+        "osax",
+        "service",
     ];
-    if path
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| PROGRAM_EXTS.contains(&e.to_ascii_lowercase().as_str()))
-    {
+    let program_ext = |p: &std::path::Path| {
+        p.extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| PROGRAM_EXTS.contains(&e.to_ascii_lowercase().as_str()))
+    };
+    if program_ext(path) || std::fs::canonicalize(path).is_ok_and(|real| program_ext(&real)) {
         return true;
     }
     #[cfg(unix)]
@@ -871,18 +917,17 @@ fn reveal_external(path: &std::path::Path) -> Result<(), String> {
 /// Hand a URL or path to the OS opener (documents only, never script
 /// handlers; programs are revealed, not run). `Err` says why nothing opened.
 fn open_external(target: &str) -> Result<(), String> {
-    if let Some(path) = local_path_of(target)
-        && opens_as_program(&path)
-    {
-        return reveal_external(&path);
-    }
-    if let Some((scheme, _)) = target.split_once("://")
-        && !matches!(
-            scheme.to_ascii_lowercase().as_str(),
-            "http" | "https" | "file" | "ftp"
-        )
-    {
-        return Err(format!("{scheme}: links are not opened"));
+    match local_path_of(target) {
+        Some(path) if opens_as_program(&path) => return reveal_external(&path),
+        Some(_) => {}
+        // the opener takes anything with a scheme (`file:/x.app` with one
+        // slash, `x-apple-…:` handlers) and reads a leading `-` as an
+        // option: only web and mail links get past here
+        None => match scheme_of(target) {
+            Some(s) if matches!(s.as_str(), "http" | "https" | "ftp" | "mailto") => {}
+            Some(s) => return Err(format!("{s}: links are not opened")),
+            None => return Err("not a link or an absolute path".into()),
+        },
     }
     #[cfg(target_os = "macos")]
     let opener = "open";
@@ -1694,14 +1739,19 @@ impl App {
         }
     }
 
-    /// Display-list index of a block's header (current collapse state).
-    fn header_display_index(
+    /// The pane's display-line list as drawn (`build_display_list_filtered`
+    /// with its block filter, soft-clear padding and bottom anchoring), and
+    /// the blocks snapshot its headers index into.
+    fn display_list(
         pane: &PaneState,
-        block: rift_core::BlockId,
         hide_prompt: bool,
-    ) -> Option<(usize, usize)> {
-        use crate::views::terminal::{DisplayLine, build_display_list_filtered, filter_hidden};
+    ) -> (
+        Vec<crate::views::terminal::DisplayLine>,
+        Vec<rift_core::Block>,
+    ) {
+        use crate::views::terminal::{build_display_list_filtered, filter_hidden};
         use rift_pty::alacritty_terminal::grid::Dimensions;
+        use rift_pty::alacritty_terminal::term::TermMode;
         let (blocks, clear_pad) = {
             let store = pane.session.blocks.lock().unwrap();
             (store.snapshot(), store.clear_pad())
@@ -1710,7 +1760,7 @@ impl App {
             .session
             .scrolled
             .load(std::sync::atomic::Ordering::Acquire);
-        let (screen_lines, history, live_end) = {
+        let (screen_lines, history, live_end, alt) = {
             let term = pane.session.term.lock();
             let g = term.grid();
             // the list as drawn: bottom-anchored ones leave the blank tail out
@@ -1718,22 +1768,34 @@ impl App {
                 .last_grid
                 .filter(|g| g.bottom_up)
                 .map(|_| crate::views::terminal::live_end(&term, scrolled));
-            (g.screen_lines(), g.history_size() as u64, live_end)
+            let alt = term.mode().contains(TermMode::ALT_SCREEN);
+            (g.screen_lines(), g.history_size() as u64, live_end, alt)
         };
-        let bi = blocks.iter().position(|b| b.id == block)?;
         let hidden = filter_hidden(&pane.session, pane.filter.as_ref());
         let display = build_display_list_filtered(
             &blocks,
             scrolled,
             screen_lines,
             history,
-            false,
+            alt,
             hide_prompt,
             clear_pad,
             pane.last_grid.map_or(screen_lines, |g| g.rows),
             live_end,
             &hidden,
         );
+        (display, blocks)
+    }
+
+    /// Display-list index of a block's header (current collapse state).
+    fn header_display_index(
+        pane: &PaneState,
+        block: rift_core::BlockId,
+        hide_prompt: bool,
+    ) -> Option<(usize, usize)> {
+        use crate::views::terminal::DisplayLine;
+        let (display, blocks) = Self::display_list(pane, hide_prompt);
+        let bi = blocks.iter().position(|b| b.id == block)?;
         let idx = display.iter().position(|d| *d == DisplayLine::Header(bi))?;
         Some((idx, display.len()))
     }
@@ -1767,41 +1829,10 @@ impl App {
         block: rift_core::BlockId,
         hide_prompt: bool,
     ) -> Option<(usize, usize)> {
-        use crate::views::terminal::{DisplayLine, build_display_list_filtered, filter_hidden};
-        use rift_pty::alacritty_terminal::grid::Dimensions;
-        let (blocks, clear_pad) = {
-            let store = pane.session.blocks.lock().unwrap();
-            (store.snapshot(), store.clear_pad())
-        };
-        let scrolled = pane
-            .session
-            .scrolled
-            .load(std::sync::atomic::Ordering::Acquire);
-        let (screen_lines, history, live_end) = {
-            let term = pane.session.term.lock();
-            let g = term.grid();
-            // the list as drawn: bottom-anchored ones leave the blank tail out
-            let live_end = pane
-                .last_grid
-                .filter(|g| g.bottom_up)
-                .map(|_| crate::views::terminal::live_end(&term, scrolled));
-            (g.screen_lines(), g.history_size() as u64, live_end)
-        };
+        use crate::views::terminal::DisplayLine;
+        let (display, blocks) = Self::display_list(pane, hide_prompt);
         let bi = blocks.iter().position(|b| b.id == block)?;
         let (start, end) = (blocks[bi].prompt_start, blocks[bi].end.unwrap_or(u64::MAX));
-        let hidden = filter_hidden(&pane.session, pane.filter.as_ref());
-        let display = build_display_list_filtered(
-            &blocks,
-            scrolled,
-            screen_lines,
-            history,
-            false,
-            hide_prompt,
-            clear_pad,
-            pane.last_grid.map_or(screen_lines, |g| g.rows),
-            live_end,
-            &hidden,
-        );
         let idx = display.iter().rposition(|d| match d {
             DisplayLine::Header(i) => *i == bi,
             DisplayLine::Grid(abs) => *abs >= start && *abs < end,
@@ -2988,8 +3019,14 @@ impl App {
             self.search.set_matches(terminal::Found::default());
             return;
         };
+        // only the rows the pane draws: a prompt echo (shown as the block
+        // header), collapsed output and filtered-out lines would count
+        // matches nobody can see
         let found = match self.search.matcher() {
-            Some(m) => terminal::collect_matches(&pane.session, &m, search::MATCH_CAP),
+            Some(m) => {
+                let shown = Self::shown_rows(pane, self.editor_active);
+                terminal::collect_matches(&pane.session, &shown, &m, search::MATCH_CAP)
+            }
             None => terminal::Found::default(),
         };
         self.search.set_matches(found);
@@ -3002,14 +3039,34 @@ impl App {
         let Some((abs, _)) = self.search.current_anchor() else {
             return;
         };
+        let editor_visible = self.editor_active;
         if let Some(pane) = self.tabs.get_mut(self.active).and_then(|t| t.active_mut()) {
-            use rift_pty::alacritty_terminal::grid::Dimensions;
-            use std::sync::atomic::Ordering;
-            let scrolled = pane.session.scrolled.load(Ordering::Acquire);
-            let screen_lines = pane.session.term.lock().grid().screen_lines() as u64;
-            let newest = scrolled + screen_lines;
-            pane.view_offset = (newest.saturating_sub(abs) as usize).saturating_sub(12);
+            use crate::views::terminal::DisplayLine;
+            // view_offset counts display lines, not grid rows: headers,
+            // collapsed output and the block filter make them differ
+            let (display, _) = Self::display_list(pane, editor_visible);
+            let Some(idx) = display.iter().position(|d| *d == DisplayLine::Grid(abs)) else {
+                return;
+            };
+            let rows = pane.last_grid.map_or(24, |g| g.rows);
+            let max_off = display.len().saturating_sub(rows);
+            // the match a dozen rows above the bottom (or as low as it goes)
+            let below = display.len() - 1 - idx;
+            pane.view_offset = below.saturating_sub(12).min(max_off);
         }
+    }
+
+    /// Grid rows the pane draws, oldest first (see [`Self::display_list`]).
+    fn shown_rows(pane: &PaneState, hide_prompt: bool) -> Vec<u64> {
+        use crate::views::terminal::DisplayLine;
+        Self::display_list(pane, hide_prompt)
+            .0
+            .into_iter()
+            .filter_map(|d| match d {
+                DisplayLine::Grid(abs) => Some(abs),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Search-mode keyboard handling.
@@ -8739,11 +8796,7 @@ impl App {
                 // stamp prompt-time context onto the block for its header
                 let cwd = pane.session.cwd.lock().unwrap().clone();
                 let branch = pane.git.as_ref().map(|g| g.branch.clone());
-                pane.session
-                    .blocks
-                    .lock()
-                    .unwrap()
-                    .stamp_submit(cwd, branch, &cmd);
+                stamp_submit(&pane.session, cwd, branch, &cmd);
                 pane.session.write(cmd.as_bytes());
                 pane.session.write(b"\n");
                 submitted = Some((pane.session.id, cmd));
@@ -9647,13 +9700,19 @@ impl App {
         pane.selected_block = None;
         let cwd = pane.session.cwd.lock().unwrap().clone();
         let branch = pane.git.as_ref().map(|g| g.branch.clone());
-        pane.session
-            .blocks
-            .lock()
-            .unwrap()
-            .stamp_submit(cwd, branch, cmd);
+        stamp_submit(&pane.session, cwd, branch, cmd);
         pane.session.write(cmd.as_bytes());
         pane.session.write(b"\n");
+    }
+}
+
+/// Stamp a submission from the app onto the prompt block — unless one is
+/// already waiting for the shell to start it: a line typed ahead of that
+/// must not relabel it, and is read back from the screen when it starts.
+fn stamp_submit(session: &Session, cwd: Option<String>, branch: Option<String>, cmd: &str) {
+    let mut blocks = session.blocks.lock().unwrap();
+    if !blocks.submit_pending() {
+        blocks.stamp_submit(cwd, branch, cmd);
     }
 }
 
@@ -16178,6 +16237,30 @@ mod tests {
         );
         assert_eq!(local_path_of("/tmp/100%25"), Some("/tmp/100%25".into()));
         assert_eq!(local_path_of("https://example.com/x.app"), None);
+        // every spelling of a local file URL is a path, so a program behind
+        // one is revealed (`file:/` with one slash used to reach the opener)
+        for url in [
+            "file:/x/Foo.app",
+            "FILE:///x/Foo.app",
+            "file://localhost/x/Foo.app",
+            "File://LOCALHOST/x/Foo.app",
+        ] {
+            assert_eq!(local_path_of(url), Some("/x/Foo.app".into()), "{url}");
+        }
+        assert_eq!(local_path_of("file://server/x/Foo.app"), None);
+        assert_eq!(local_path_of("file:x/Foo.app"), None);
+        // what never reaches the OS opener
+        for target in [
+            "file://server/x/Foo.app",
+            "x-apple.systempreferences:com.apple.preference",
+            "ssh://host",
+            "-a",
+            "relative/doc.txt",
+        ] {
+            assert!(open_external(target).is_err(), "{target}");
+        }
+        assert_eq!(scheme_of("HTTPS://example.com").as_deref(), Some("https"));
+        assert_eq!(scheme_of("/tmp/a:b"), None);
         for p in [
             "/x/Foo.app",
             "/x/run.COMMAND",
@@ -16198,6 +16281,21 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
             assert!(opens_as_program(&exe));
+            // a harmless name linking to a bundle is the bundle
+            let bundle = dir.join("Foo.app");
+            std::fs::create_dir_all(&bundle).unwrap();
+            let link = dir.join("readme.txt");
+            std::os::unix::fs::symlink(&bundle, &link).unwrap();
+            assert!(opens_as_program(&link));
+        }
+        // link files open whatever they point at
+        for p in [
+            "/x/a.fileloc",
+            "/x/a.webloc",
+            "/x/a.inetloc",
+            "/x/A.prefPane",
+        ] {
+            assert!(opens_as_program(Path::new(p)), "{p}");
         }
         assert!(!opens_as_program(&dir));
         let _ = std::fs::remove_dir_all(&dir);

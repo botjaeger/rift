@@ -1,6 +1,6 @@
 import { useRouter } from "expo-router";
 import { useState } from "react";
-import { KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { KeyboardAvoidingView, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { parsePairLink } from "@/pairing";
 import { Button } from "@/ui/Button";
@@ -27,7 +27,9 @@ export default function AddScreen() {
   };
 
   return (
-    <KeyboardAvoidingView style={styles.fill} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+    // padding on Android too: edge to edge (Android 15) the window no longer shrinks for the
+    // keyboard, so Continue sat under it
+    <KeyboardAvoidingView style={styles.fill} behavior="padding">
       <PageHeader title="Paste a pairing link" back={() => (router.canGoBack() ? router.back() : router.replace("/"))} />
       <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
         <Text style={styles.text}>
@@ -55,9 +57,11 @@ export default function AddScreen() {
             style={styles.input}
           />
         </View>
-        {error ? <ErrorText>{error}</ErrorText> : null}
       </ScrollView>
       <View style={[styles.actions, { paddingBottom: Math.max(40, insets.bottom + 6) }]}>
+        {/* over Continue, not under the field: with the keyboard up the scroll view ended at the
+            field and the error drew below its visible part */}
+        {error ? <ErrorText>{error}</ErrorText> : null}
         <Button label="Continue" variant="primary" size="large" onPress={next} disabled={text.trim() === ""} />
         <Button
           label="Scan the code instead"

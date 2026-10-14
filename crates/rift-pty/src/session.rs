@@ -632,6 +632,11 @@ impl Reader {
                 // first byte not yet fed to the parser, and resumes since
                 // the last output
                 let (mut next_seq, mut resumes) = (0u64, 0u32);
+                // Replaying what the service kept after a resume: timed like the
+                // original output, but never seen here, so the terminal still
+                // answers its queries and its notifications still fire (only the
+                // first attach's replay is `muted`).
+                let mut resumed = false;
                 loop {
                     if self.sync_timeout(&mut parser, &stream) {
                         continue;
@@ -648,7 +653,7 @@ impl Reader {
                             if resumes > MAX_RESUMES {
                                 break;
                             }
-                            muted.store(true, Ordering::Release);
+                            resumed = true;
                             // typing goes on while we reconnect: hold it
                             conn.lock().unwrap().down();
                             std::thread::sleep(std::time::Duration::from_millis(
@@ -703,7 +708,7 @@ impl Reader {
                             self.saw_output.store(true, Ordering::Release);
                             // replayed output keeps its original timing,
                             // so block durations survive a reattach
-                            let replaying = muted.load(Ordering::Acquire);
+                            let replaying = resumed || muted.load(Ordering::Acquire);
                             if replaying {
                                 let age = crate::ipc::now_ms().saturating_sub(at_ms);
                                 let at = std::time::Instant::now()
@@ -717,6 +722,7 @@ impl Reader {
                         }
                         Frame::Json(body) => match serde_json::from_slice::<Ev>(&body) {
                             Ok(Ev::ReplayDone { .. }) => {
+                                resumed = false;
                                 self.ctx.blocks.lock().unwrap().set_clock(None);
                                 muted.store(false, Ordering::Release);
                                 self.wake();
@@ -1878,6 +1884,42 @@ mod tests {
     }
 
     #[test]
+    fn a_transcript_longer_than_the_scrollback_restores_matching_commands() {
+        // the oldest replayed blocks scroll out of a small history: each
+        // block that remains must keep its own command (reinput runs it)
+        let mut c = ctx(20, 5);
+        c.scrollback = 20;
+        let config = TermConfig {
+            scrolling_history: 20,
+            ..TermConfig::default()
+        };
+        *c.term.lock() = term_with(20, 5, config);
+        let block = |cmd: &str| rift_core::transcript::SavedBlock {
+            command: cmd.into(),
+            exit: Some(0),
+            duration_ms: 1,
+            cwd: None,
+            output: (0..15).map(|i| format!("{cmd}{i}\n")).collect(),
+        };
+        let t = rift_core::transcript::Transcript::bounded(
+            vec![block("first"), block("second"), block("third")],
+            0,
+        );
+        let mut p = vte::ansi::Processor::new();
+        let mut s = OscScanner::new();
+        feed(&mut p, &mut s, &t.replay_bytes(), &c);
+        let mut blocks = c.blocks.lock().unwrap();
+        blocks.mark_restored(&t.meta());
+        let commands: Vec<String> = blocks.iter().map(|b| b.command.clone()).collect();
+        assert!(
+            commands.len() < 3,
+            "the history dropped a block: {commands:?}"
+        );
+        assert_eq!(commands.last().map(String::as_str), Some("third"));
+        assert!(commands.iter().all(|c| c != "first"), "{commands:?}");
+    }
+
+    #[test]
     fn a_shrink_with_a_full_history_keeps_abs_lines() {
         // the editor showing shrinks the pane; with the history at its cap the
         // shrink drops its oldest rows, and every line keeps its abs index
@@ -2146,6 +2188,97 @@ mod tests {
         let notices = notices.lock().unwrap();
         assert_eq!(notices.len(), 1);
         assert!(notices[0].contains("missing"));
+    }
+
+    /// Output replayed after a resume was never parsed by this pane: a query
+    /// in it is answered and a notification in it fires (only the first
+    /// attach's replay was seen, and answered, by an earlier window).
+    #[test]
+    fn resumed_output_is_answered_and_notifies() {
+        use crate::ipc::{Event as Ev, Frame, read_frame, send_json, send_output};
+        use std::os::unix::net::UnixStream;
+        let (conn_stream, _conn_peer) = UnixStream::pair().unwrap();
+        let conn = Arc::new(Mutex::new(ServiceConn::new(conn_stream)));
+        let muted = Arc::new(AtomicBool::new(false));
+        let replier = Replier::new(PtyWriter::Service {
+            conn: conn.clone(),
+            session: 9,
+            muted: muted.clone(),
+        });
+        let mut c = ctx(20, 5);
+        let notified = Arc::new(AtomicU64::new(0));
+        let n = notified.clone();
+        c.notify = Some((
+            1,
+            Arc::new(move |_, ev| {
+                if matches!(ev, SessionEvent::Notify { .. }) {
+                    n.fetch_add(1, Ordering::AcqRel);
+                }
+            }),
+        ));
+        c.term = Arc::new(FairMutex::new(Term::new(
+            TermConfig::default(),
+            &GridSize { cols: 20, rows: 5 },
+            EventProxy {
+                pane: 1,
+                observer: Arc::new(|_, _| {}),
+                writer: replier.clone(),
+                window_size: c.window_size.clone(),
+            },
+        )));
+        c.reply = Some(replier);
+        let (first, mut first_peer) = UnixStream::pair().unwrap();
+        let (second, mut second_peer) = UnixStream::pair().unwrap();
+        send_output(&mut first_peer, 9, 0, 1, b"a").unwrap();
+        drop(first_peer);
+        // sent while this pane was disconnected: a DA1 query, a notification
+        send_output(&mut second_peer, 9, 1, 1, b"\x1b[c\x1b]9;done\x07").unwrap();
+        send_json(&mut second_peer, &Ev::ReplayDone { session: 9 }).unwrap();
+        send_json(&mut second_peer, &Ev::Exited { session: 9 }).unwrap();
+        second_peer
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let mut second = Some(second);
+        let (done_tx, done) = std::sync::mpsc::channel();
+        let done_tx = Mutex::new(done_tx);
+        let reader = Reader {
+            id: 1,
+            ctx: c,
+            dirty: Arc::new(AtomicBool::new(false)),
+            saw_output: Arc::new(AtomicBool::new(false)),
+            observer: Arc::new(move |_, ev| {
+                if matches!(ev, SessionEvent::Exit) {
+                    let _ = done_tx.lock().unwrap().send(());
+                }
+            }),
+        };
+        let source = Source::Service {
+            stream: first,
+            muted,
+            job: Arc::new(Mutex::new(None)),
+            hidden: Arc::new(AtomicBool::new(false)),
+            conn,
+            session: 9,
+            resume: Box::new(move |_| {
+                let s = second.take().ok_or(std::io::ErrorKind::NotFound)?;
+                Ok((s, false))
+            }),
+        };
+        let handle = std::thread::spawn(move || reader.run(source));
+        done.recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+        handle.join().unwrap();
+        // the reply reaches the service on the resumed connection
+        let mut input = Vec::new();
+        while !input.starts_with(b"\x1b[?") {
+            match read_frame(&mut second_peer) {
+                Ok(Some(Frame::Input { bytes, .. })) => input.extend(bytes),
+                Ok(Some(_)) => {}
+                _ => break,
+            }
+        }
+        assert!(input.starts_with(b"\x1b[?"), "DA1 answered: {input:?}");
+        assert_eq!(notified.load(Ordering::Acquire), 1);
     }
 
     #[test]

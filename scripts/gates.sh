@@ -22,7 +22,7 @@ ALL=(fmt clippy test doc shell docs mobile release ui linux)
 describe() {
     cat <<'EOF'
 fmt      cargo fmt --all --check, and on each vendored crate
-clippy   cargo clippy --workspace --all-targets --locked -- -D warnings, and on each vendored crate (all features)
+clippy   cargo clippy --workspace --all-targets --locked -- -D warnings, on each vendored crate (all features), and on rift-remote without default features (the relay image)
 test     cargo test --workspace --locked, and each vendored crate (all features); release-manifest.py --self-test;
          locally on macOS the workspace tests run again throttled (background QoS, 32 threads) like a loaded CI runner
 doc      cargo doc --workspace --no-deps --locked, rustdoc warnings denied
@@ -31,7 +31,7 @@ docs     CLAUDE.md and AGENTS.md identical; every relative link in *.md resolves
 mobile   the Expo companion in mobile/: pnpm install --frozen-lockfile, typecheck, eslint, vitest (incl. the shared protocol fixtures)
 release  cargo build --release --locked
 ui       isolated scripted UI regressions (display or xvfb-run required)
-linux    clippy + test + release build in packaging/linux-verify.Dockerfile, then shell + scripted UI (xvfb) on the CI runner's packages in packaging/ci-ubuntu.Dockerfile (docker)
+linux    clippy + test + doc + release build in packaging/linux-verify.Dockerfile, then shell + scripted UI (xvfb) on the CI runner's packages in packaging/ci-ubuntu.Dockerfile (docker)
 EOF
 }
 
@@ -61,7 +61,9 @@ vendored() {
 gate_fmt() { cargo fmt --all --check && vendored fmt --check; }
 gate_clippy() {
     cargo clippy --workspace --all-targets --locked -- -D warnings &&
-        vendored clippy --all-targets --all-features --locked -- -D warnings
+        vendored clippy --all-targets --all-features --locked -- -D warnings &&
+        # the relay image's build (packaging/relay.Dockerfile): no TLS
+        cargo clippy -p rift-remote --no-default-features --all-targets --locked -- -D warnings
 }
 gate_test() {
     cargo test --workspace --locked && vendored test --all-features --locked &&
@@ -137,7 +139,7 @@ gate_linux() {
         -v rift-cargo-registry:/usr/local/cargo/registry \
         -e CARGO_TARGET_DIR=/src/target/linux-docker \
         rift-linux-verify bash -c '
-            scripts/gates.sh clippy test &&
+            scripts/gates.sh clippy test doc &&
             cargo build --release --locked &&
             cargo build --release --locked -p rift-remote --example phone --bin rift-relay' || return 1
     # The shell and UI gates run on the CI runner's packages, with the

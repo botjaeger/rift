@@ -12,6 +12,8 @@ import { findPane, runningCommand } from "@/topology";
 import { confirmDestructive } from "@/ui/confirm";
 import { formatDuration } from "@/ui/format";
 import { ErrorText } from "@/ui/Notice";
+import { SheetClose } from "@/ui/SheetClose";
+import { useSingleFlight } from "@/ui/useSingleFlight";
 import { colors, mono, monoMedium, radius, ui } from "@/ui/theme";
 
 /** One row of the actions card: a mono glyph, then the label. */
@@ -128,16 +130,19 @@ export default function BlockActionsScreen() {
     done("Command put in the command line");
   };
 
-  const runAgain = async () => {
-    if (s.settings.askBeforeRun) {
-      // the same path as Run: the Confirm sheet, with this block's command instead of the draft
-      router.replace({ pathname: "/confirm", params: { key, pane: String(paneId), block: String(blockId) } });
-      return;
-    }
-    const r = await fleet.run(key, paneId, command, { fromDraft: false });
-    if (r.ok) done("Command sent");
-    else setError(r.message);
-  };
+  // a command on its way: a second tap before the sheet closes must not run it twice
+  const once = useSingleFlight();
+  const runAgain = () =>
+    once(async () => {
+      if (s.settings.askBeforeRun) {
+        // the same path as Run: the Confirm sheet, with this block's command instead of the draft
+        router.replace({ pathname: "/confirm", params: { key, pane: String(paneId), block: String(blockId) } });
+        return;
+      }
+      const r = await fleet.run(key, paneId, command, { fromDraft: false });
+      if (r.ok) done("Command sent");
+      else setError(r.message);
+    });
 
   const stop = async () => {
     const r = await fleet.sendKeys(key, paneId, ["ctrl+c"]);
@@ -189,6 +194,7 @@ export default function BlockActionsScreen() {
       accessibilityElementsHidden={hidden}
       importantForAccessibility={hidden ? "no-hide-descendants" : "auto"}
     >
+      <SheetClose />
       <View style={styles.head} accessible accessibilityRole="header" accessibilityLabel={`Command: ${command || "none"}. ${meta}`}>
         <Text style={styles.command} numberOfLines={3}>
           {block ? command || "(no command)" : "This block is gone."}

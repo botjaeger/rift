@@ -120,6 +120,12 @@ impl Binding {
             "tab" => "Tab".into(),
             "pageup" => "PgUp".into(),
             "pagedown" => "PgDn".into(),
+            "enter" => "⏎".into(),
+            "escape" => "Esc".into(),
+            "home" => "Home".into(),
+            "end" => "End".into(),
+            "backspace" => "⌫".into(),
+            "delete" => "⌦".into(),
             k => k.to_uppercase(),
         });
         out
@@ -416,6 +422,18 @@ mod tests {
         );
         // ctrl+w freed for editor cut-word
         assert_eq!(km.lookup(true, false, false, false, "w"), None);
+    }
+
+    #[test]
+    fn named_keys_show_as_their_caps() {
+        let chips = |s: &str| Binding::parse(s).unwrap().chips();
+        assert_eq!(chips("cmd+enter"), ["⌘", "⏎"]);
+        assert_eq!(chips("escape"), ["Esc"]);
+        assert_eq!(chips("alt+backspace"), ["⌥", "⌫"]);
+        assert_eq!(chips("delete"), ["⌦"]);
+        assert_eq!(chips("home"), ["Home"]);
+        assert_eq!(chips("end"), ["End"]);
+        assert_eq!(chips("ctrl+k"), ["⌃", "K"]);
     }
 
     #[test]

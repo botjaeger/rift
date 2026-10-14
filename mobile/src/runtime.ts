@@ -18,7 +18,7 @@ import { Fleet, type AppState, type Notifier } from "./fleet";
 import { AppLock, authOutcome, biometricLabel, type AuthResult, type BiometricKind, type LockSnapshot } from "./lock";
 import { liveActivities } from "../modules/rift-live";
 import { livePlan, type LiveShown } from "./live";
-import { ASK_CATEGORY, ASK_OPEN_CATEGORY } from "./notify";
+import { ASK_CATEGORY, ASK_OPEN_CATEGORY, pushTokenProblem } from "./notify";
 import { MemoryStore, type KeyValueStore } from "./stores";
 
 /** Cryptographic randomness: expo-crypto (the OS generator), or Web Crypto. Never Math.random. */
@@ -81,7 +81,11 @@ async function refreshPushToken(): Promise<void> {
   try {
     fleet.setPushToken((await Notifications.getExpoPushTokenAsync({ projectId: pushProjectId })).data);
   } catch (e) {
-    fleet.setPushToken(null, `the system gave no push token (${e instanceof Error ? e.message : String(e)}).`);
+    // the raw error (a Java stack line naming FirebaseApp and a docs URL) filled Settings: say
+    // it plainly there and keep the detail in the log
+    const detail = e instanceof Error ? e.message : String(e);
+    console.warn(`push token: ${detail}`);
+    fleet.setPushToken(null, pushTokenProblem(detail));
   }
 }
 
@@ -313,17 +317,19 @@ export async function biometricSupport(): Promise<BiometricSupport> {
       reason: "The app lock needs Face ID or a fingerprint, which the web version cannot use.",
     };
   }
+  // each platform's own names, as biometricLabel uses
+  const ios = Platform.OS === "ios";
   try {
     if (!(await LocalAuthentication.hasHardwareAsync())) {
       return {
         label: null,
-        reason: "This device has no Face ID or fingerprint sensor, so the app lock is not available.",
+        reason: `This device has no ${ios ? "Face ID or Touch ID" : "face unlock or fingerprint sensor"}, so the app lock is not available.`,
       };
     }
     if (!(await LocalAuthentication.isEnrolledAsync())) {
       return {
         label: null,
-        reason: "Set up Face ID or a fingerprint in the device's settings to use the app lock.",
+        reason: `Set up ${ios ? "Face ID or Touch ID" : "face unlock or a fingerprint"} in the device's settings to use the app lock.`,
       };
     }
     const kinds = (await LocalAuthentication.supportedAuthenticationTypesAsync())

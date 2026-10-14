@@ -30,6 +30,8 @@ serde.workspace = true
 serde_json.workspace = true
 libc = "0.2"
 unicode-segmentation = "1"
+# find matches canonically equivalent text (typed "é" against output "e\u{301}")
+unicode-normalization = "0.1"
 # vector brand marks with no Nerd Font glyph (already built by glyphon's swash)
 zeno = "0.3"
 

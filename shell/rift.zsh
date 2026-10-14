@@ -34,7 +34,8 @@ __rift_set_var() {
     printf '\e]1337;SetUserVar=%s=%s\a' "$1" "$(printf %s "$2" | base64 | tr -d '\n')"
 }
 __rift_report_env() {
-    local py=${VIRTUAL_ENV:t}
+    local py=${VIRTUAL_ENV-}
+    py=${py:t}
     [[ -n $py ]] || py=${PYENV_VERSION-}
     if [[ $py != "$__rift_py" ]]; then
         __rift_py=$py
@@ -52,7 +53,7 @@ __rift_report_env() {
 # before), `rift-use pyenv <version>` sets PYENV_VERSION. This shell only.
 typeset -g __rift_use_php= __rift_use_python=
 rift-use() {
-    local kind=$1 dir=$2 prev
+    local kind=${1-} dir=${2-} prev
     case $kind in
         pyenv) export PYENV_VERSION=$dir; return ;;
         php) prev=$__rift_use_php ;;
@@ -75,7 +76,7 @@ __rift_precmd() {
         ZDOTDIR=$__rift_user_zdotdir
         unset __rift_user_zdotdir
     fi
-    if [[ -n "$__rift_cmd_ran" ]]; then
+    if [[ -n "${__rift_cmd_ran-}" ]]; then
         printf '\e]133;D;%s\a' "$__rift_exit"
         unset __rift_cmd_ran
     fi
@@ -103,7 +104,7 @@ __rift_preexec() {
 # then loads this file. Only that command sees the shim; this shell and every
 # other command keep your ZDOTDIR. `zsh -c`, scripts and `command zsh` are
 # left alone.
-typeset -g __rift_shim=${RIFT_INTEGRATION_ZSH:h}/zdotdir
+typeset -g __rift_shim=${${RIFT_INTEGRATION_ZSH:-${(%):-%x}}:h}/zdotdir
 typeset -g __rift_child_re='^[[:space:]]*(exec[[:space:]]+)?([^[:space:]]*/)?zsh([[:space:]]+-[a-bd-zA-Z]+)*[[:space:]]*$'
 __rift_child_zdotdir() {
     [[ -f $__rift_shim/.zshrc && $1 =~ $__rift_child_re ]] || return 0

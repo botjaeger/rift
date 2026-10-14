@@ -99,7 +99,10 @@ tunnel_pid=$!
 
 url=""
 for _ in $(seq 1 60); do
-    url="$(grep -Eo 'https://[a-z0-9-]+\.trycloudflare\.com' "$log" | head -n 1 || true)"
+    # cloudflared's errors name its API host (api.trycloudflare.com): never
+    # the tunnel
+    url="$(grep -Eo 'https://[a-z0-9-]+\.trycloudflare\.com' "$log" |
+        grep -v '^https://api\.' | head -n 1 || true)"
     [[ -n "$url" ]] && break
     if ! kill -0 "$tunnel_pid" 2>/dev/null; then
         echo "relay-local: cloudflared exited:" >&2

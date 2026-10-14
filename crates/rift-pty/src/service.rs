@@ -39,6 +39,13 @@ pub fn connect() -> std::io::Result<UnixStream> {
 }
 
 fn handshake(mut s: UnixStream) -> std::io::Result<UnixStream> {
+    // keystrokes go to this socket: only to a service run by this user
+    if ipc::peer_uid(&s) != Some(unsafe { libc::getuid() }) {
+        return Err(std::io::Error::new(
+            ErrorKind::PermissionDenied,
+            "session service socket belongs to another user",
+        ));
+    }
     ipc::send_json(
         &mut s,
         &Request::Hello {

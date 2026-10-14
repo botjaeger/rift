@@ -9,6 +9,7 @@ import { fleet, useApp, useLock } from "@/runtime";
 import { findPane, paneTitle } from "@/topology";
 import { Icon } from "@/ui/Icon";
 import { ErrorText } from "@/ui/Notice";
+import { SheetClose } from "@/ui/SheetClose";
 import { colors, mono, monoMedium, radius, ui } from "@/ui/theme";
 
 type Menu = "dirs" | "branches" | "changes";
@@ -272,6 +273,7 @@ export default function ChipsScreen() {
       accessibilityElementsHidden={hidden}
       importantForAccessibility={hidden ? "no-hide-descendants" : "auto"}
     >
+      <SheetClose />
       <View style={styles.head}>
         <Text style={menu === "changes" ? styles.title : styles.monoTitle} accessibilityRole="header" numberOfLines={1} ellipsizeMode={menu === "dirs" ? "head" : "tail"}>
           {title}

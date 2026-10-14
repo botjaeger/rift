@@ -606,8 +606,9 @@ counter. The counter shows the current match's position among all matches
 matches); only the newest 500 matches are kept for navigation (older
 ones are counted, not visited), so with 600 matches it runs 101/600 …
 600/600. Text is matched as printed: wide glyphs (日本) and combining marks
-(a decomposed `é`, e + U+0301) are found, and a match highlights whole
-cells; hidden (SGR 8) text is not searchable. A query longer
+(a decomposed `é`, e + U+0301) are found, a typed `é` finds both spellings
+(text and query are compared canonically decomposed; so does the block
+filter), and a match highlights whole cells; hidden (SGR 8) text is not searchable. A query longer
 than the field scrolls so its end stays visible. With the file viewer open,
 ⌘F finds in the file instead (see File viewer).
 

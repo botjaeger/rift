@@ -1,7 +1,7 @@
 import { CameraView, useCameraPermissions, type BarcodeScanningResult } from "expo-camera";
 import { useRouter } from "expo-router";
 import { useRef, useState } from "react";
-import { Linking, StyleSheet, Text, View } from "react-native";
+import { Linking, ScrollView, StyleSheet, Text, useWindowDimensions, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { parsePairLink } from "@/pairing";
 import { Button } from "@/ui/Button";
@@ -24,6 +24,10 @@ function Corners() {
 export default function ScanScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const window = useWindowDimensions();
+  // the board's 300 pt frame, smaller on a narrow or short phone (320 × 568) so the copy and
+  // its button stay above the paste button; the page scrolls if they still do not fit
+  const frame = Math.max(200, Math.min(300, window.width - 48, window.height - 420));
   const [permission, requestPermission] = useCameraPermissions();
   const [wrongCode, setWrongCode] = useState(false);
   const handled = useRef(false);
@@ -45,8 +49,8 @@ export default function ScanScreen() {
   return (
     <View style={styles.fill}>
       <PageHeader title="Pair a computer" back={close} backIcon="close" />
-      <View style={styles.body}>
-        <View style={styles.viewfinder} accessible={!granted} accessibilityLabel="Camera view with a frame for the code">
+      <ScrollView style={styles.flex} contentContainerStyle={styles.body}>
+        <View style={[styles.viewfinder, { width: frame, height: frame }]} accessible={!granted} accessibilityLabel="Camera view with a frame for the code">
           {granted ? (
             <CameraView
               style={StyleSheet.absoluteFill}
@@ -79,7 +83,7 @@ export default function ScanScreen() {
             )
           ) : null}
         </View>
-      </View>
+      </ScrollView>
       <View style={[styles.actions, { paddingBottom: Math.max(40, insets.bottom + 6) }]}>
         <Button label="Paste a pairing link" style={styles.paste} onPress={() => router.replace("/add")} />
       </View>
@@ -90,8 +94,9 @@ export default function ScanScreen() {
 const C = 44;
 const styles = StyleSheet.create({
   fill: { flex: 1, backgroundColor: colors.camera },
-  body: { flex: 1, alignItems: "center", paddingTop: 28, paddingHorizontal: 24, gap: 28 },
-  viewfinder: { width: 300, height: 300, borderRadius: 16, backgroundColor: colors.viewfinder, overflow: "hidden" },
+  flex: { flex: 1 },
+  body: { alignItems: "center", paddingTop: 28, paddingBottom: 8, paddingHorizontal: 24, gap: 28 },
+  viewfinder: { borderRadius: 16, backgroundColor: colors.viewfinder, overflow: "hidden" },
   corner: { position: "absolute", width: C, height: C, borderColor: colors.accent },
   tl: { left: 22, top: 22, borderLeftWidth: 3, borderTopWidth: 3, borderTopLeftRadius: 10 },
   tr: { right: 22, top: 22, borderRightWidth: 3, borderTopWidth: 3, borderTopRightRadius: 10 },

@@ -38,7 +38,7 @@ telemetry, no AI features: a local terminal configured with one TOML file.
   notifications (OSC 9/777/99).
 - **Fast and small.** One binary with embedded fonts, themes and shell hooks.
   GPU rendering with a shaped-text cache; 500,000 lines of output render in
-  0.68 s with a 162 MiB peak ([baseline](docs/performance.md)).
+  0.54 s with a 138 MiB peak ([baseline](docs/performance.md)).
 
 ## Features
 
@@ -79,7 +79,7 @@ rebound. Full list: [keyboard shortcuts](docs/keyboard-shortcuts.md).
 | Terminal behavior — mouse reporting, middle-click paste, wheel speed, OSC 52 clipboard access, Option as Meta | Settings → Terminal |
 | Coding agents — Claude Code / Codex tabs spin only while the agent works; ⌘⌫ clears its input line | Automatic |
 | Inline images (kitty graphics, iTerm2) | Automatic: `kitten icat`, `imgcat`, `timg`, `yazi`, `chafa` |
-| Paste safety | Multi-line paste into a shell asks before running |
+| Paste safety | A multi-line paste into a program without bracketed paste asks before running it |
 | SSH profiles with remote blocks | Palette → *SSH: host*; *Install Rift shell integration on host* once |
 | Automation socket | `rift-terminal ctl list`, `focus`, `blocks`, `split`, `open`, `send-text` |
 | Phone companion | Settings → *Remote access*: pair an iPhone or Android phone by QR code, follow panes live, run commands and send Ctrl-C from it; end-to-end encrypted, directly on your network or through a self-hostable relay that only sees ciphertext (app in `mobile/`) |
@@ -157,8 +157,9 @@ To build from source, additionally:
 - Linux (Debian/Ubuntu names): `libxkbcommon-dev libwayland-dev libxcb1-dev
   libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev pkg-config`.
 - For the quality gates: `python3` (the test gate's release-manifest
-  self-test and the scripted UI checks), `shellcheck`, `zsh`, `fish`, and
-  Docker (Linux gate).
+  self-test and the scripted UI checks), `shellcheck`, `zsh`, `fish`,
+  Node 22 with pnpm (`corepack enable`; the mobile gate), and Docker (Linux
+  gate).
 
 ## Start, stop, clean
 
@@ -184,7 +185,7 @@ those shells.
 
 ```sh
 cargo clean                            # delete target/ (all builds, packages, test artifacts)
-docker rmi rift-linux-verify          # Linux gate image, if you ran it
+docker rmi rift-linux-verify rift-ci-ubuntu  # Linux gate images, if you ran it
 docker volume rm rift-cargo-registry  # Linux gate crate cache
 ```
 
@@ -199,7 +200,7 @@ Packages (`.dmg`, `.deb`, AppImage, tarball) and releases:
 ## Test
 
 ```sh
-scripts/gates.sh          # fmt, clippy, tests, rustdoc, shell hooks, docs
+scripts/gates.sh          # fmt, clippy, tests, rustdoc, shell hooks, docs, mobile app
 scripts/gates.sh ui       # scripted UI regressions in an isolated instance
 scripts/gates.sh all      # also a release build, the UI checks and the Linux gate in docker
 cargo test --workspace    # unit tests only

@@ -30,7 +30,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --run)     RUN="${2:?--run needs a run id}"; shift 2 ;;
         --draft)   DRAFT=(--draft); shift ;;
-        -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
+        -h|--help) rift_usage; exit 0 ;;
         v*)        TAG="$1"; shift ;;
         *)         rift_die "unknown argument: $1 (usage: scripts/publish-release.sh vX.Y.Z)" ;;
     esac

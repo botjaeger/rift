@@ -353,7 +353,9 @@ pub fn filter_hidden(
     else {
         return hidden;
     };
-    let query = query.to_lowercase();
+    // decomposed like the searched text (`SearchLine::push`)
+    use unicode_normalization::UnicodeNormalization as _;
+    let query = query.nfd().collect::<String>().to_lowercase();
     let scrolled = session.scrolled.load(std::sync::atomic::Ordering::Acquire);
     let term = session.term.lock();
     for abs in start..end {
@@ -723,6 +725,10 @@ impl Matcher {
         if query.is_empty() {
             return Ok(None);
         }
+        // lines are searched decomposed (`SearchLine::push`)
+        use unicode_normalization::UnicodeNormalization as _;
+        let query: String = query.nfd().collect();
+        let query = query.as_str();
         if is_regex {
             return regex::RegexBuilder::new(query)
                 .case_insensitive(!case)
@@ -831,10 +837,15 @@ pub struct SearchLine {
 }
 
 impl SearchLine {
+    /// One char of the cell at `col..end`, stored canonically decomposed
+    /// (NFD) so "é" and "e\u{301}" match each other; every char of the
+    /// decomposition maps to the same cell.
     fn push(&mut self, c: char, col: usize, end: usize) {
-        self.text.push(c);
-        self.cols.push(col);
-        self.ends.push(end);
+        unicode_normalization::char::decompose_canonical(c, |d| {
+            self.text.push(d);
+            self.cols.push(col);
+            self.ends.push(end);
+        });
     }
 
     /// Trailing blank cells dropped.
@@ -1049,14 +1060,14 @@ where
     found
 }
 
-/// Match anchors across kept history + screen (see [`newest_matches`]).
-pub fn collect_matches(session: &Session, matcher: &Matcher, cap: usize) -> Found {
+/// Match anchors over the absolute lines `shown` (oldest first: the rows
+/// the pane draws) — see [`newest_matches`].
+pub fn collect_matches(session: &Session, shown: &[u64], matcher: &Matcher, cap: usize) -> Found {
     let scrolled = session.scrolled.load(std::sync::atomic::Ordering::Acquire);
     let term = session.term.lock();
-    let g = term.grid();
-    let oldest = scrolled.saturating_sub(g.history_size() as u64);
-    let newest = scrolled + g.screen_lines() as u64;
-    let lines = (oldest..newest).filter_map(|abs| Some((abs, search_text(&term, scrolled, abs)?)));
+    let lines = shown
+        .iter()
+        .filter_map(|&abs| Some((abs, search_text(&term, scrolled, abs)?)));
     newest_matches(lines, matcher, cap)
 }
 
@@ -2327,7 +2338,15 @@ fn render_header(
     } else {
         block.command.replace('\n', " ⏎ ")
     };
-    let fit = ((left_limit - cmd_x) / grid.cell_w).floor().max(1.0) as usize;
+    // a filter note keeps its room after the command (the command gives
+    // way down to eight cells, then the note is cut too)
+    let note_room = filter_note.map_or(0.0, |n| {
+        engine.measure(n, 11.5, FONT_SANS, Weight::NORMAL) + 14.0 + 11.0
+    });
+    let cmd_limit = (left_limit - note_room).max(cmd_x + 8.0 * grid.cell_w);
+    let fit = ((cmd_limit.min(left_limit) - cmd_x) / grid.cell_w)
+        .floor()
+        .max(1.0) as usize;
     let cmd = if cmd.chars().count() > fit {
         let mut s: String = cmd.chars().take(fit.saturating_sub(1)).collect();
         s.push('…');
@@ -2348,7 +2367,23 @@ fn render_header(
     // collapsed note, else Warp-style prompt context: ~/path git:(branch)
     let after_cmd_x = cmd_x + cmd.chars().count() as f32 * grid.cell_w + 11.0;
     if let Some(note) = filter_note {
-        let tw = engine.measure(note, 11.5, FONT_SANS, Weight::NORMAL);
+        // never under the badge and duration on the right
+        let room = left_limit - after_cmd_x - 14.0;
+        let full: Vec<char> = note.chars().collect();
+        let mut note = note.to_string();
+        let mut tw = engine.measure(&note, 11.5, FONT_SANS, Weight::NORMAL);
+        let mut keep = full.len();
+        while tw > room && keep > 0 {
+            keep -= 1;
+            note = full[..keep]
+                .iter()
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+                + "…";
+            tw = engine.measure(&note, 11.5, FONT_SANS, Weight::NORMAL);
+        }
+        let note = note.as_str();
         layer.rect(
             [after_cmd_x - 2.0, y + (grid.line_h - 17.0) / 2.0],
             [tw + 14.0, 17.0],
@@ -2894,6 +2929,19 @@ mod tests {
         assert_eq!((page.text.as_str(), page.total), ("one\ntwo\npart", 3));
         let page = output_range(&t, scrolled, (0, None, true), 0, 1);
         assert_eq!(page.text, "one\n", "a line before the last keeps its break");
+    }
+
+    #[test]
+    fn composed_and_decomposed_text_find_each_other() {
+        // "café" written precomposed (U+00E9) at col 0, decomposed at col 5
+        let (t, scrolled) = fed(20, 3, 10, "caf\u{e9} cafe\u{301}".as_bytes());
+        let row = search_text(&t, scrolled, scrolled).unwrap();
+        for q in ["caf\u{e9}", "cafe\u{301}", "CAF\u{c9}"] {
+            for re in [false, true] {
+                let m = Matcher::new(q, false, re).unwrap().unwrap();
+                assert_eq!(m.find_line(&row), vec![(0, 4), (5, 4)], "{q:?} re={re}");
+            }
+        }
     }
 
     #[test]

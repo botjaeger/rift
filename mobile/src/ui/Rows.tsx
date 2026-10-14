@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Pressable, StyleSheet, Switch, Text, View } from "react-native";
+import { Platform, Pressable, StyleSheet, Switch, Text, View } from "react-native";
 import { colors, TOUCH, ui } from "./theme";
 
 /**
@@ -43,11 +43,16 @@ export function SwitchRow({
           disabled={disabled}
           trackColor={{ true: colors.accent, false: colors.hairline }}
           thumbColor={colors.textBright}
+          {...webSwitch}
         />
       </View>
     </Pressable>
   );
 }
+
+// react-native-web draws an on switch's thumb in its own teal (`activeThumbColor`, a prop the
+// native types do not have) instead of `thumbColor`.
+const webSwitch: object = Platform.OS === "web" ? { activeThumbColor: colors.textBright } : {};
 
 /** One choice of a group (a radio button): the whole row is the target, a check marks the chosen one. */
 export function ChoiceRow({

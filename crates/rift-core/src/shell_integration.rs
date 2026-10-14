@@ -202,6 +202,57 @@ mod tests {
         assert!(shell_args("/bin/sh").is_empty());
     }
 
+    /// Runs `script` in `shell` with the hook at `$1`; (stdout, stderr), or
+    /// `None` when that shell is not installed.
+    fn run_hook(shell: &str, args: &[&str], hook: &str, script: &str) -> Option<(String, String)> {
+        let dir =
+            std::env::temp_dir().join(format!("rift-hook-{}-{}", std::process::id(), hook.len()));
+        std::fs::create_dir_all(&dir).ok()?;
+        let file = dir.join("hook");
+        std::fs::write(&file, hook).ok()?;
+        let out = std::process::Command::new(shell)
+            .args(args)
+            .arg(script)
+            .arg(shell)
+            .arg(&file)
+            .env_remove("RIFT_INTEGRATION_BASH")
+            .env_remove("RIFT_INTEGRATION_ZSH")
+            .env_remove("VIRTUAL_ENV")
+            .output();
+        let _ = std::fs::remove_dir_all(&dir);
+        let out = out.ok()?;
+        Some((
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        ))
+    }
+
+    /// A user config with `set -u` / `setopt nounset` must not break the
+    /// hooks: an unset variable aborts the prompt hook, and with it the A
+    /// and D markers (the editor never takes over).
+    #[test]
+    fn hooks_survive_nounset() {
+        let bash = "set -u; PS1='x'; source \"$1\"; __rift_prompt_command; __rift_prompt_end; \
+                    __rift_cmd_ran=1; false; __rift_prompt_command; __rift_prompt_end; echo END";
+        for shell in ["/bin/bash", "bash"] {
+            let Some((out, err)) =
+                run_hook(shell, &["--noprofile", "--norc", "-c"], RIFT_BASH, bash)
+            else {
+                continue;
+            };
+            assert!(err.is_empty(), "{shell}: {err}");
+            assert!(out.contains("\x1b]133;D;1\x07"), "{shell}: {out:?}");
+            assert!(out.ends_with("END\n"), "{shell}: {out:?}");
+        }
+        let zsh = "setopt nounset; PS1='x'; source \"$1\"; __rift_precmd; __rift_precmd_end; \
+                   __rift_preexec x; false; __rift_precmd; echo END";
+        if let Some((out, err)) = run_hook("zsh", &["-f", "-c"], RIFT_ZSH, zsh) {
+            assert!(err.is_empty(), "zsh: {err}");
+            assert!(out.contains("\x1b]133;D;1\x07"), "zsh: {out:?}");
+            assert!(out.ends_with("END\n"), "zsh: {out:?}");
+        }
+    }
+
     #[test]
     fn shell_name_prefers_config() {
         assert_eq!(shell_name(Some("/bin/sh")), "sh");

@@ -47,7 +47,8 @@ __rift_set_var() {
     printf '\e]1337;SetUserVar=%s=%s\a' "$1" "$(printf %s "$2" | base64 | tr -d '\n')"
 }
 __rift_report_env() {
-    local py=${VIRTUAL_ENV##*/}
+    local py=${VIRTUAL_ENV-}
+    py=${py##*/}
     [[ -n $py ]] || py=${PYENV_VERSION-}
     if [[ $py != "$__rift_py" ]]; then
         __rift_py=$py
@@ -66,7 +67,7 @@ __rift_report_env() {
 __rift_use_php=
 __rift_use_python=
 rift-use() {
-    local kind=$1 dir=$2 prev
+    local kind=${1-} dir=${2-} prev
     case $kind in
         pyenv) export PYENV_VERSION=$dir; return ;;
         php) prev=$__rift_use_php ;;
@@ -94,11 +95,11 @@ rift-use() {
 __rift_preexec() {
     # an empty Enter armed the trap too: the next prompt cycle starts with
     # our own entry, which is not a user command
-    if [[ -n "$__rift_at_prompt" && "$BASH_COMMAND" != __rift_prompt_command ]]; then
+    if [[ -n "${__rift_at_prompt-}" && "$BASH_COMMAND" != __rift_prompt_command ]]; then
         # PROMPT_COMMAND entries appended after ours still run after
         # __rift_prompt_end in this cycle (the order is restored from the
         # next one): not user commands
-        [[ -n "$__rift_late" && "$__rift_late" == *"$BASH_COMMAND"* ]] && return
+        [[ -n "${__rift_late-}" && "$__rift_late" == *"$BASH_COMMAND"* ]] && return
         __rift_at_prompt=
         __rift_cmd_ran=1
         printf '\e]133;C\a'
@@ -107,7 +108,7 @@ __rift_preexec() {
 
 __rift_prompt_command() {
     local exit=$?
-    if [[ -n "$__rift_cmd_ran" ]]; then
+    if [[ -n "${__rift_cmd_ran-}" ]]; then
         printf '\e]133;D;%s\a' "$exit"
         unset __rift_cmd_ran
     fi
@@ -129,7 +130,7 @@ __rift_late_entries() {
             [[ -n $seen ]] && __rift_late+=$e$'\n'
             [[ $e == __rift_prompt_end ]] && seen=1
         done
-    elif [[ $PROMPT_COMMAND == *__rift_prompt_end* ]]; then
+    elif [[ ${PROMPT_COMMAND-} == *__rift_prompt_end* ]]; then
         __rift_late=${PROMPT_COMMAND##*__rift_prompt_end}
     fi
 }
@@ -139,8 +140,8 @@ __rift_prompt_end() {
     # B marker: end of prompt / start of user input. Re-added whenever a
     # prompt framework (or a PROMPT_COMMAND entry) rebuilt PS1 without it.
     [[ $PS1 == *"$__rift_b"* ]] || PS1+="\\[$__rift_b\\]"
-    if [[ -n "$__rift_use_ps0" ]]; then
-        [[ $PS0 == *"$__rift_c"* ]] || PS0+=$__rift_c
+    if [[ -n "${__rift_use_ps0-}" ]]; then
+        [[ ${PS0-} == *"$__rift_c"* ]] || PS0+=$__rift_c
     else
         __rift_at_prompt=1
     fi
@@ -158,7 +159,8 @@ __rift_keep_last() {
             done
             PROMPT_COMMAND=("${keep[@]}" __rift_prompt_end)
         fi
-    elif [[ "$PROMPT_COMMAND" != *$'\n'__rift_prompt_end ]]; then
+    elif [[ "${PROMPT_COMMAND-}" != *$'\n'__rift_prompt_end ]]; then
+        PROMPT_COMMAND=${PROMPT_COMMAND-}
         PROMPT_COMMAND=${PROMPT_COMMAND//$'\n'__rift_prompt_end/}
         PROMPT_COMMAND+=$'\n'__rift_prompt_end
     fi
@@ -174,13 +176,14 @@ fi
 # and `exec bash` typed at this prompt get it through an alias (the trailing
 # space of `exec ` lets the alias expand after it). Non-interactive uses
 # (`bash -c`, scripts) ignore --rcfile. Your own aliases of these names win.
-if [[ -f "${RIFT_INTEGRATION_BASH%/*}/bashrc-child" ]]; then
-    printf -v __rift_child_rc '%q' "${RIFT_INTEGRATION_BASH%/*}/bashrc-child"
+__rift_child_rc=${RIFT_INTEGRATION_BASH-}
+if [[ -n $__rift_child_rc && -f "${__rift_child_rc%/*}/bashrc-child" ]]; then
+    printf -v __rift_child_rc '%q' "${__rift_child_rc%/*}/bashrc-child"
     # shellcheck disable=SC2139  # the path is meant to expand now
     alias bash >/dev/null 2>&1 || alias bash="bash --rcfile $__rift_child_rc"
     alias exec >/dev/null 2>&1 || alias exec='exec '
-    unset __rift_child_rc
 fi
+unset __rift_child_rc
 
 # C marker. bash >= 4.4 expands PS0 right after a command is read and before
 # it runs (blank lines do not expand it), so it fires exactly once per

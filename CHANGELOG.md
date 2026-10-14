@@ -43,6 +43,16 @@ and Linux.
   badges.
 - **Scripting** — the control socket and `rift-terminal ctl` drive Rift from
   other programs.
+- **Phone companion** — pair an iPhone or Android phone by QR code under
+  Settings → Remote access to follow panes live, run commands and send ⌃C,
+  end to end encrypted, on your network or through a relay that only sees
+  ciphertext.
+- **Updates** — Rift checks for a new release at launch and every 6 hours;
+  *Update Rift* in the tab bar installs it and keeps your tabs and running
+  shells.
+- **Session restore** — tabs, splits, directories and the window position
+  come back on launch, and optionally each block's output.
+- **Warp files** — Warp themes and launch configurations work unchanged.
 - **Settings** — every option in a settings window that writes
   `config.toml`, plus a keybinding recorder and four built-in themes.
 - **Accessibility** — tabs, panes, blocks and the editor are exposed to screen

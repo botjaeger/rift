@@ -150,6 +150,8 @@ the whole buffer.
   `f` `F` `t` `T` + char, `;` repeats the last find. Arrows/Backspace move too.
 - Operators: `d` `c` `y` with a motion; doubled (`dd` `cc` `yy`) is the
   linewise form over the whole buffer. `cw` behaves like `ce`.
+- Text objects after an operator: `i`/`a` + `w` `W` (words), `"` `'` `` ` ``
+  (quotes), `(` `b` `[` `{` `B` `<` (brackets) — `ciw`, `da"`, `yi(`.
 - Edits: `x` `X` `s` `S` `C` `D` `r`<char> `~` `p` `P` (unnamed register).
 - Insert entry: `i` `a` `I` `A`.
 - Counts: digits before and/or after the operator, multiplied (`2d3w`).

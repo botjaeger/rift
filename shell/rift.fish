@@ -14,7 +14,7 @@ set -g __rift_loaded 1
 # OSC 7 wants a percent-encoded path: `%`, spaces and control characters
 # (BEL/ESC would end or inject sequences) must not travel raw.
 function __rift_report_cwd --on-variable PWD
-    printf '\e]7;file://%s%s\a' (hostname) (string escape --style=url -- $PWD)
+    printf '\e]7;file://%s%s\a' $hostname (string escape --style=url -- $PWD)
 end
 
 # Prompt chips: the active Python environment, and the php and

@@ -120,7 +120,8 @@ export default function ControlKeysScreen() {
       <PageHeader
         title="Keys"
         back={() => (router.canGoBack() ? router.back() : router.replace("/settings"))}
-        backLabel="Back to settings"
+        // reached from Settings and from the pane's ⌨ key alike
+        backLabel="Back"
         right={
           <Pressable
             accessibilityRole="button"

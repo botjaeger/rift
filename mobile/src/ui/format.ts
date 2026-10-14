@@ -66,3 +66,22 @@ export function osName(os: string): string {
   };
   return names[os] ?? os;
 }
+
+/**
+ * The Settings › About line for this build: its version, then which JavaScript it runs —
+ * the bundle it shipped with, or an over-the-air update and when that update was published.
+ */
+export function appVersionText(
+  version: string,
+  updates: { enabled: boolean; embedded: boolean; createdAt: Date | null },
+): string {
+  if (!updates.enabled) return `${version} · updates off`;
+  if (updates.embedded || !updates.createdAt) return `${version} · as installed`;
+  const when = updates.createdAt.toLocaleString(undefined, {
+    day: "numeric",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  return `${version} · update of ${when}`;
+}

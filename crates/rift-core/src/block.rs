@@ -166,14 +166,17 @@ impl BlockStore {
     }
 
     /// Mark every finished block as replayed from a transcript, giving each
-    /// its saved duration, directory and exact command (in order, oldest
-    /// first) — the replayed screen text flattens newlines.
+    /// its saved duration, directory and exact command (`meta` oldest
+    /// first) — the replayed screen text flattens newlines. Matched from the
+    /// newest: the oldest replayed blocks may already have scrolled out of
+    /// the history.
     pub fn mark_restored(&mut self, meta: &[Restored]) {
         let done = self
             .blocks
             .iter_mut()
+            .rev()
             .filter(|b| matches!(b.state, BlockState::Done { .. }));
-        for (b, (d, cwd, command)) in done.zip(meta) {
+        for (b, (d, cwd, command)) in done.zip(meta.iter().rev()) {
             if let BlockState::Done { duration, .. } = &mut b.state {
                 *duration = *d;
             }

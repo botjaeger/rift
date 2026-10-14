@@ -23,7 +23,9 @@ keyboard. The [project README](../README.md) explains what Rift is and why.
 | [../DESIGN.md](../DESIGN.md) | Design tokens, metrics, typography, layers, visual rules |
 | [../CLAUDE.md](../CLAUDE.md) | Guide for coding agents (same as `AGENTS.md`): invariants, pins, safety |
 | [performance.md](performance.md) | Benchmark harness and recorded baseline |
+| [../mobile/README.md](../mobile/README.md) | The Expo phone companion: build, run, test |
 | [project-audit-2026-10-07.md](project-audit-2026-10-07.md) | Feature coverage, confirmed defects, UX findings, and Claude review handoff |
+| [workstreams/](workstreams/) | Dated audit trackers (`AUD-NNN` items) and their evidence; [audits/](audits/) holds earlier probe captures |
 
 ## Plans
 
