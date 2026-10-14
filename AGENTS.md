@@ -61,6 +61,23 @@ gates you ran.
 
 Optional pre-commit hook (fmt + clippy + docs): `git config core.hooksPath .githooks`.
 
+## Releases
+
+Rift is in use as an installed app: users get changes only through a release.
+The terminal updates through *Check for updates* (tags `vX.Y.Z`, published to
+`botjaeger/rift-releases`). The phone app gets an over-the-air update, or a
+native rebuild when its native code changed (tags `app-vX.Y.Z[-uN]`).
+`/release` (the local skill in `.claude/skills/release/`) decides which of the
+two ship, sets the versions, writes `CHANGELOG.md` / `mobile/CHANGELOG.md`, then
+tags, builds and publishes.
+
+- After pushing work to `main`, run `.claude/skills/release/plan.sh`. When it
+  shows user-facing changes that have not been released, end the report with one
+  line naming what would ship, e.g. "Release terminal (2 fixes) and an app update?".
+  Docs, tests, CI and scripts alone never prompt a release.
+- Never tag, publish or run `pnpm ota` without the user's yes or `/release`.
+- Never edit a released `CHANGELOG.md` section or move a pushed tag.
+
 ## Verifying UI changes
 
 Rendering has no unit tests. Use the script driver
