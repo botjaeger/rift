@@ -462,11 +462,13 @@ fn put(ch: &mut Ch, v: Value) {
     assert!(ch.send(&v.to_string()));
 }
 
-/// Next JSON message within 3 s.
+/// Next JSON message within 10 s: a hang detector, not a speed check. The
+/// slowest wait measured here is 0.2 s, but a loaded CI runner took over 3 s
+/// for the ~1 MiB frames of `a_slow_client_gets_the_newest_screen_…`.
 fn recv(ch: &mut Ch) -> Value {
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        assert!(Instant::now() < deadline, "no message within 3 s");
+        assert!(Instant::now() < deadline, "no message within 10 s");
         match ch.recv() {
             Recv::Msg(m) => return serde_json::from_slice(&m).unwrap(),
             Recv::Idle | Recv::Alive | Recv::Partial => {}
