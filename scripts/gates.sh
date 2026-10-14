@@ -23,7 +23,8 @@ describe() {
     cat <<'EOF'
 fmt      cargo fmt --all --check, and on each vendored crate
 clippy   cargo clippy --workspace --all-targets --locked -- -D warnings, and on each vendored crate (all features)
-test     cargo test --workspace --locked, and each vendored crate (all features); release-manifest.py --self-test
+test     cargo test --workspace --locked, and each vendored crate (all features); release-manifest.py --self-test;
+         locally on macOS the workspace tests run again throttled (background QoS, 32 threads) like a loaded CI runner
 doc      cargo doc --workspace --no-deps --locked, rustdoc warnings denied
 shell    shellcheck on packaging/*.sh, scripts/*.sh, .githooks/*, bash hooks; zsh -n and fish --no-execute on their hooks
 docs     CLAUDE.md and AGENTS.md identical; every relative link in *.md resolves (vendored crates' upstream docs excepted)
@@ -64,7 +65,17 @@ gate_clippy() {
 }
 gate_test() {
     cargo test --workspace --locked && vendored test --all-features --locked &&
-        python3 scripts/release-manifest.py --self-test
+        python3 scripts/release-manifest.py --self-test && throttled_test
+}
+
+# CI's runners are a few slow cores: timing a fast Mac never misses (a 50 ms
+# read timeout over a WebSocket upgrade) fails there. Locally on macOS, run
+# the workspace tests again on the efficiency cores at background priority
+# with many threads, which reproduces it. CI itself skips this pass.
+throttled_test() {
+    [[ -z "${CI:-}" && "$(uname)" == Darwin ]] || return 0
+    echo "-- workspace tests again, throttled (taskpolicy -c background, 32 threads)"
+    taskpolicy -c background cargo test --workspace --locked -q -- --test-threads=32
 }
 gate_doc() { RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked; }
 gate_release() { cargo build --release --locked; }

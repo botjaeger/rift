@@ -2238,18 +2238,26 @@ mod tests {
         let exe = dir.join("9.9.9");
         std::fs::copy("/bin/sleep", &exe).unwrap();
         std::os::unix::fs::symlink(&exe, dir.join("claude")).unwrap();
-        let name_of = |program: &std::path::Path| {
+        // until the child's exec lands it still carries this test thread's
+        // name (Linux reads /proc right after fork): poll for the expected
+        // one, then report whatever it settled on
+        let name_of = |program: &std::path::Path, want: &str| {
             let mut child = std::process::Command::new(program)
                 .arg("30")
                 .spawn()
                 .unwrap();
-            let name = process_name(child.id() as i32);
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let mut name = process_name(child.id() as i32);
+            while name != want && std::time::Instant::now() < until {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                name = process_name(child.id() as i32);
+            }
             let _ = child.kill();
             let _ = child.wait();
             name
         };
-        let linked = name_of(&dir.join("claude"));
-        let plain = name_of(&exe);
+        let linked = name_of(&dir.join("claude"), "claude");
+        let plain = name_of(&exe, "9.9.9");
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(linked, "claude");
         // run by its own name, it is what it says

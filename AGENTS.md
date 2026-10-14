@@ -54,8 +54,10 @@ scripts/publish-release.sh vX.Y.Z  # publish a tag's release artifacts (docs/dev
 
 The compiler is pinned in `rust-toolchain.toml` (1.98.0 with rustfmt and
 clippy). CI (`.github/workflows/ci.yml`) runs `scripts/gates.sh` on
-macos-14 and ubuntu-24.04, so a green local run predicts CI. Run the gates
-before reporting work done, and name the gates you ran.
+macos-14 and ubuntu-24.04. Only `scripts/gates.sh all` covers both jobs (the
+`linux` gate is the Ubuntu one): run it before every push, so a green local
+run means a green CI. Run the gates before reporting work done, and name the
+gates you ran.
 
 Optional pre-commit hook (fmt + clippy + docs): `git config core.hooksPath .githooks`.
 

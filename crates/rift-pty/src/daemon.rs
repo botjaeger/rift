@@ -666,16 +666,20 @@ mod tests {
         // the socket, so it times out instead of unlinking/binding)
         assert!(acquire_lock(&lock, &sock, Duration::from_millis(100)).is_err());
         // with a live service on the socket it backs off quietly
-        let _listener = UnixListener::bind(&sock).unwrap();
+        let listener = UnixListener::bind(&sock).unwrap();
         assert!(
             acquire_lock(&lock, &sock, Duration::from_millis(100))
                 .unwrap()
                 .is_none()
         );
-        // and once the holder is gone the lock is free again
+        // and once the holder (and its service) is gone the lock is free
+        // again. A child another test forks shares the lock's open file
+        // until its exec closes it, so the lock may stay busy a moment: wait
         drop(first);
+        drop(listener);
+        let _ = std::fs::remove_file(&sock);
         assert!(
-            acquire_lock(&lock, &sock, Duration::from_millis(100))
+            acquire_lock(&lock, &sock, Duration::from_secs(10))
                 .unwrap()
                 .is_some()
         );

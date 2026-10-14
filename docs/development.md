@@ -67,7 +67,7 @@ display-line building). Rendering is verified with the script driver below.
 |---|---|
 | `fmt` | `cargo fmt --all --check`, and on each vendored crate |
 | `clippy` | `cargo clippy --workspace --all-targets --locked -- -D warnings`, and on each vendored crate (all features) |
-| `test` | `cargo test --workspace --locked`, and each vendored crate (all features; built into `target/vendor`); `scripts/release-manifest.py --self-test` |
+| `test` | `cargo test --workspace --locked`, and each vendored crate (all features; built into `target/vendor`); `scripts/release-manifest.py --self-test`. Locally on macOS the workspace tests then run again throttled (`taskpolicy -c background`, 32 threads), which reproduces the timing of CI's few slow cores; CI skips that pass |
 | `doc` | `cargo doc --workspace --no-deps --locked` with rustdoc warnings denied |
 | `shell` | `shellcheck` on packaging, scripts, git hooks and the bash hooks; `zsh -n` and `fish --no-execute` on the zsh and fish hooks |
 | `docs` | `CLAUDE.md` and `AGENTS.md` are identical; every relative link in every Markdown file resolves (the vendored crates' upstream docs excepted) |
@@ -87,7 +87,9 @@ Every requested gate runs even after one fails; the summary lists each result
 with its time and the commit. A gate whose tool is missing fails instead of
 passing silently. CI (`.github/workflows/ci.yml`) runs `scripts/gates.sh`
 on macOS 14 (fmt clippy test doc docs release) and Ubuntu 24.04 (the same plus
-`shell`, `mobile` and `ui` under Xvfb/Mesa). The Release workflow runs that same
+`shell`, `mobile` and `ui` under Xvfb/Mesa). Only `scripts/gates.sh all`
+covers both (the `linux` gate is the Ubuntu job): run it before every push,
+so CI is a formality. The Release workflow runs that same
 reusable validation workflow on the tagged revision before it writes
 `latest.json`.
 

@@ -392,12 +392,18 @@ fn hello(pair: Option<&str>) -> ClientHello {
 
 fn ws(addr: SocketAddr) -> tungstenite::WebSocket<TcpStream> {
     let stream = TcpStream::connect(addr).unwrap();
+    // the upgrade blocks (a short timeout here breaks it as Interrupted on a
+    // loaded CI runner); reads after it poll every 50 ms
     stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let ws = tungstenite::client(format!("ws://{addr}/"), stream)
+        .unwrap()
+        .0;
+    ws.get_ref()
         .set_read_timeout(Some(Duration::from_millis(50)))
         .unwrap();
-    tungstenite::client(format!("ws://{addr}/"), stream)
-        .unwrap()
-        .0
+    ws
 }
 
 fn link_secret(link: &PairingLink) -> String {
