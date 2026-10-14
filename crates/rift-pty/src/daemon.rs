@@ -140,6 +140,8 @@ struct Shell {
     clients: Mutex<Vec<Client>>,
     cwd: Mutex<Option<String>>,
     job: Mutex<Option<String>>,
+    /// The terminal reads a line without echo (polled with `job`).
+    hidden: AtomicBool,
 }
 
 impl Shell {
@@ -264,19 +266,26 @@ pub fn run() -> std::io::Result<()> {
                 let shells: Vec<Arc<Shell>> =
                     state.shells.lock().unwrap().values().cloned().collect();
                 for sh in &shells {
-                    let job = crate::session::foreground_job_name(&sh.pty.lock().unwrap());
+                    let (job, hidden) = {
+                        let pty = sh.pty.lock().unwrap();
+                        (
+                            crate::session::foreground_job_name(&pty),
+                            crate::session::input_hidden(&pty),
+                        )
+                    };
                     let changed = {
                         let mut cur = sh.job.lock().unwrap();
                         let changed = *cur != job;
                         *cur = job.clone();
                         changed
-                    };
+                    } | (sh.hidden.swap(hidden, Ordering::AcqRel) != hidden);
                     if changed {
                         let id = sh.id;
                         sh.broadcast(|| {
                             Out::Event(Event::Status {
                                 session: id,
                                 job: job.clone(),
+                                hidden,
                             })
                         });
                     }
@@ -441,7 +450,12 @@ fn handle(
             }
             reply(Event::ReplayDone { session });
             let job = sh.job.lock().unwrap().clone();
-            reply(Event::Status { session, job });
+            let hidden = sh.hidden.load(Ordering::Acquire);
+            reply(Event::Status {
+                session,
+                job,
+                hidden,
+            });
             sh.clients.lock().unwrap().push(Client {
                 pid: *peer_pid,
                 tx: tx.clone(),
@@ -527,6 +541,7 @@ fn spawn(
         clients: Mutex::new(Vec::new()),
         cwd: Mutex::new(None),
         job: Mutex::new(None),
+        hidden: AtomicBool::new(false),
     });
     state.shells.lock().unwrap().insert(id, shell.clone());
     let state = state.clone();
@@ -597,6 +612,7 @@ mod tests {
             clients: Mutex::new(Vec::new()),
             cwd: Mutex::new(None),
             job: Mutex::new(None),
+            hidden: AtomicBool::new(false),
         }
     }
 

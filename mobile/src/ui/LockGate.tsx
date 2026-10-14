@@ -4,7 +4,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { appLock, authenticate, useLock } from "@/runtime";
 import { Button } from "./Button";
 import { ErrorText } from "./Notice";
-import { colors } from "./theme";
+import { colors, ui } from "./theme";
 
 /**
  * The app lock over everything (Settings › Security). While locked, the screens stay mounted
@@ -78,6 +78,6 @@ const styles = StyleSheet.create({
   cover: { ...StyleSheet.absoluteFill, backgroundColor: colors.bg },
   lock: { ...StyleSheet.absoluteFill, backgroundColor: colors.bg },
   lockContent: { flexGrow: 1, justifyContent: "center", padding: 24, gap: 16, maxWidth: 480, width: "100%", alignSelf: "center" },
-  title: { color: colors.textBright, fontSize: 22, fontWeight: "600" },
-  text: { color: colors.textMuted, fontSize: 15, lineHeight: 21 },
+  title: { fontFamily: ui(600), color: colors.textBright, fontSize: 22 },
+  text: { fontFamily: ui(400), color: colors.textMuted, fontSize: 15, lineHeight: 21 },
 });

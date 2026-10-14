@@ -1,14 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { questionKey } from "../src/answer";
 import { toBase64Url } from "../src/noise/bytes";
-import { ACK_TIMEOUT_MS, ASKED_TTL_MS, Fleet, MAX_ACTIVITY, canOperate, hasFeature, ntfyUnsupported, type Notifier } from "../src/fleet";
+import { ACK_TIMEOUT_MS, ASKED_TTL_MS, Fleet, MAX_ACTIVITY, canOperate, hasFeature, isAsked, ntfyUnsupported, wrapsLines, type Notifier } from "../src/fleet";
 import { routingId } from "../src/protocol/relay";
 import { LONG_COMMAND_MS } from "../src/notify";
 import { parsePairLink, type PairLink } from "../src/pairing";
 import { PUBLISH_INTERVAL_MS } from "../src/protocol/batch";
-import type { Block } from "../src/protocol/types";
-import { HostsStore, MemoryStore, type HostRecord } from "../src/stores";
+import { MAX_TEXT_BYTES, type Block, type Waiting } from "../src/protocol/types";
+import { HostsStore, MemoryStore, loadLastView, restoreTarget, type HostRecord } from "../src/stores";
 import { terminalInput, textToActions } from "../src/keyboard";
-import { keptPick, showsTerminal } from "../src/terminal";
+import { showsTerminal } from "../src/terminal";
 import { SCREEN_RESUME_MS } from "../src/protocol/client";
 import { FakeGatewaySocket, gatewayKey } from "./helpers/gateway";
 import { rng } from "./helpers/gateway";
@@ -55,6 +56,7 @@ function setup(opts: { gateway?: typeof GW; gatewayFor?: (url: string) => typeof
   let now = 1_000_000;
   const sockets: FakeGatewaySocket[] = [];
   const notified: { title: string; body: string; data: unknown }[] = [];
+  const dismissed: { host: string; pane: number; ask: string }[] = [];
   let permissionAsks = 0;
   let grant = true;
   const notifier: Notifier = {
@@ -64,6 +66,9 @@ function setup(opts: { gateway?: typeof GW; gatewayFor?: (url: string) => typeof
     },
     notify: async (n) => {
       notified.push(n);
+    },
+    dismissAsk: async (host, pane, ask) => {
+      dismissed.push({ host, pane, ask });
     },
   };
   const fleet = new Fleet({
@@ -87,6 +92,7 @@ function setup(opts: { gateway?: typeof GW; gatewayFor?: (url: string) => typeof
     sockets,
     last,
     notified,
+    dismissed,
     get permissionAsks() {
       return permissionAsks;
     },
@@ -273,12 +279,54 @@ describe("Fleet operate", () => {
     expect(t.fleet.state.drafts[`${GW_KEY}:12`]).toBe("ls");
   });
 
-  it("keys go out and resolve on ack; a view device gets forbidden", async () => {
-    const t = await withHost("view");
+  it("keys go out and resolve on ack; a view device gets forbidden without sending", async () => {
+    const t = await withHost();
     const p = t.fleet.sendKeys(GW_KEY, 12, ["ctrl+c"]);
     expect(t.last().sent.at(-1)).toEqual({ t: "keys", id: "k1", pane: 12, keys: ["ctrl+c"] });
     t.last().recv({ t: "ack", id: "k1", ok: false, error: "forbidden", message: "this device may only view" });
     expect(await p).toMatchObject({ ok: false, code: "forbidden" });
+    const v = await withHost("view");
+    const before = v.last().sent.length;
+    expect(await v.fleet.sendKeys(GW_KEY, 12, ["ctrl+c"])).toMatchObject({ ok: false, code: "forbidden" });
+    expect(v.last().sent.length).toBe(before);
+  });
+
+  it("open asks for a tab or pane and resolves with the new pane; an older Rift is told to update", async () => {
+    const t = await withHost();
+    // the welcome of withHost lists no features: nothing goes out
+    const before = t.last().sent.length;
+    const old = await t.fleet.openShell(GW_KEY, 12, "tab");
+    expect(old).toMatchObject({ ok: false, code: "unsupported" });
+    expect(old.ok ? "" : old.message).toContain("Update it");
+    expect(t.last().sent.length).toBe(before);
+    t.last().recv(welcome("operate", ["open"]));
+    const p = t.fleet.openShell(GW_KEY, 12, "pane");
+    const sent = t.last().sent.at(-1) as { id: string };
+    expect(sent).toEqual({ t: "open", id: sent.id, pane: 12, kind: "pane" });
+    t.last().recv({ t: "ack", id: sent.id, ok: true, pane: 14 });
+    expect(await p).toEqual({ ok: true, pane: 14 });
+    // the desktop's own refusal is not "running a command"
+    const q = t.fleet.openShell(GW_KEY, 12, "tab");
+    const id = (t.last().sent.at(-1) as { id: string }).id;
+    t.last().recv({ t: "ack", id, ok: false, error: "busy", message: "cannot split this pane" });
+    const r = await q;
+    expect(r.ok ? "" : r.message).toBe("studio-mac could not open it. Try again.");
+  });
+
+  it("a closed pane's no_pane error is not shown as a notice; other errors are", async () => {
+    const t = await withHost();
+    t.last().recv({ t: "error", code: "no_pane", message: "no pane 999999" });
+    expect(t.fleet.state.hosts[0]!.notice).toBeNull();
+    t.last().recv({ t: "error", code: "bad_request", message: "pane 12 is not the subscribed pane" });
+    expect(t.fleet.state.hosts[0]!.notice).toBe("pane 12 is not the subscribed pane");
+  });
+
+  it("forbidden for remote access turned off says so, not view only", async () => {
+    const t = await withHost();
+    const p = t.fleet.run(GW_KEY, 12, "ls");
+    t.last().recv({ t: "ack", id: "r1", ok: false, error: "forbidden", message: "remote access is off on the desktop" });
+    const r = await p;
+    expect(r.ok ? "" : r.message).toBe("Remote access is off on studio-mac.");
   });
 
   it("an unanswered request times out; a dropped connection fails it at once", async () => {
@@ -363,7 +411,7 @@ describe("Fleet done → activity and notifications", () => {
     for (let i = 0; i < MAX_ACTIVITY + 5; i++) t.last().recv(done({ block: i }));
     t.fleet.store.flush();
     expect(t.fleet.state.activity).toHaveLength(MAX_ACTIVITY);
-    expect(t.fleet.state.activity[0]).toMatchObject({ block: MAX_ACTIVITY + 4, hostName: "studio-mac", pane: 12 });
+    expect(t.fleet.state.activity[0]).toMatchObject({ block: MAX_ACTIVITY + 4, hostName: "studio-mac", pane: 12, tab: "rift" });
   });
 
   it("notifies only when enabled, long, and not watched; the command only with the setting", async () => {
@@ -637,7 +685,7 @@ describe("Fleet permission changes", () => {
   });
 
   it("canOperate prefers the live welcome over the stored record", () => {
-    const base = { conn: t0, gateway: null, windows: [], notice: null };
+    const base = { conn: t0, gateway: null, windows: [], notice: null, lastSeen: null };
     expect(canOperate({ ...base, record: record({ permission: "operate" }), welcome: null })).toBe(true);
     expect(canOperate({ ...base, record: record({ permission: "operate" }), welcome: welcome("view") })).toBe(false);
     expect(canOperate({ ...base, record: record({ permission: "view" }), welcome: welcome("operate") })).toBe(true);
@@ -1267,7 +1315,7 @@ describe("Fleet: push coverage, pending Notify me, stale screens, input pacing",
     expect(t.notified.map((n) => n.title)).toEqual(["A command finished on studio-mac"]);
   });
 
-  it("a reconnect while a full-screen program shows keeps the Terminal view and a picked Blocks", async () => {
+  it("a reconnect while a full-screen program shows keeps its screen on", async () => {
     const t = await host();
     t.fleet.setScreenMode(GW_KEY, 12, "auto");
     t.last().recv({ t: "screen", pane: 12, cols: 80, rows: 1, alt: true, cursor: null, full: true, lines: [[0, [["vim", null, null, 0]]]] });
@@ -1277,15 +1325,14 @@ describe("Fleet: push coverage, pending Notify me, stale screens, input pacing",
     const screen = t.fleet.state.pane!.screen;
     expect(screen).toMatchObject({ alt: true, stale: true });
     expect(screen!.lines).toEqual([[["vim", null, null, 0]]]);
-    expect(showsTerminal(null, screen, true)).toBe(true); // auto: the Terminal view stays mounted
-    expect(keptPick("blocks", screen)).toBe("blocks"); // picked Blocks stays Blocks
+    expect(showsTerminal(screen, true)).toBe(true); // the screen view stays mounted
     // the next full screen is current again
     t.last().recv({ t: "screen", pane: 12, cols: 80, rows: 1, alt: true, cursor: null, full: true, lines: [[0, [["vim", null, null, 0]]]] });
     t.fleet.store.flush();
     expect(t.fleet.state.pane!.screen).toMatchObject({ stale: false });
   });
 
-  it("a screen that does not come back after a reconnect ends without resetting a picked Blocks; a real end does", async () => {
+  it("a screen that does not come back after a reconnect ends, and so does a real end: blocks again", async () => {
     const t = await host();
     t.fleet.setScreenMode(GW_KEY, 12, "auto");
     t.last().recv({ t: "screen", pane: 12, cols: 80, rows: 1, alt: true, cursor: null, full: true, lines: [] });
@@ -1295,15 +1342,14 @@ describe("Fleet: push coverage, pending Notify me, stale screens, input pacing",
     const p = t.fleet.state.pane!;
     expect(p.screen).toBeNull();
     expect(p.screenExpired).toBe(true);
-    expect(keptPick("blocks", p.screen, p.screenExpired)).toBe("blocks");
-    expect(showsTerminal(null, p.screen, true)).toBe(false); // auto: back to Blocks
+    expect(showsTerminal(p.screen, true)).toBe(false); // back to blocks
     // the gateway's own screen_end resets it
     t.last().recv({ t: "screen", pane: 12, cols: 80, rows: 1, alt: true, cursor: null, full: true, lines: [] });
     t.last().recv({ t: "screen_end", pane: 12 });
     t.fleet.store.flush();
     const q = t.fleet.state.pane!;
     expect(q.screenExpired).toBe(false);
-    expect(keptPick("blocks", q.screen, q.screenExpired)).toBeNull();
+    expect(showsTerminal(q.screen, true)).toBe(false);
   });
 
   it("a 15-line paste in the Terminal view never exceeds 20 sends in any second, loses nothing, keeps the order", async () => {
@@ -1337,5 +1383,406 @@ describe("Fleet: push coverage, pending Notify me, stale screens, input pacing",
     const typed = input.flatMap((m) => (m.t === "text" ? [m.text] : m.t === "keys" ? m.keys.map((k) => `<${k}>`) : []));
     expect(typed.filter((x) => x !== "<ctrl+c>")).toEqual(lines.flatMap((l) => [l, "<enter>"]));
     expect(typed.filter((x) => x === "<ctrl+c>")).toHaveLength(1);
+  });
+});
+
+describe("Fleet: the redesign's run, bell, wrap and last view", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  const doneMsg = (command: string, extra: Record<string, unknown> = {}) => ({
+    t: "done",
+    pane: 12,
+    block: 87,
+    command,
+    exit: 0,
+    duration_ms: 1_000,
+    ...extra,
+  });
+
+  it("every command run from this phone asks to be told by default, however short", async () => {
+    const t = await withHost();
+    expect(t.fleet.state.settings).toMatchObject({ notifyMyCommands: true, notifyPolicy: "off" });
+    const p = t.fleet.run(GW_KEY, 12, "make");
+    expect(isAsked(t.fleet.state, GW_KEY, 12, "make")).toBe(true);
+    t.last().recv({ t: "ack", id: "r1", ok: true });
+    await p;
+    t.last().recv(doneMsg("make"));
+    await Promise.resolve();
+    expect(t.notified.map((n) => n.title)).toEqual(["A command finished on studio-mac"]);
+    expect(isAsked(t.fleet.state, GW_KEY, 12, "make")).toBe(false);
+  });
+
+  it("with Notify me when my commands finish off, a run asks nothing", async () => {
+    const t = await withHost();
+    await t.fleet.updateSettings({ notifyMyCommands: false });
+    const p = t.fleet.run(GW_KEY, 12, "make");
+    expect(t.fleet.state.asked).toEqual([]);
+    t.last().recv({ t: "ack", id: "r1", ok: true });
+    await p;
+    t.last().recv(doneMsg("make"));
+    await Promise.resolve();
+    expect(t.notified).toEqual([]);
+  });
+
+  it("the bell turns one command off and on again", async () => {
+    const t = await withHost();
+    void t.fleet.run(GW_KEY, 12, "make");
+    t.fleet.setNotify(GW_KEY, 12, "make", false);
+    expect(isAsked(t.fleet.state, GW_KEY, 12, "make")).toBe(false);
+    t.last().recv(doneMsg("make"));
+    await Promise.resolve();
+    expect(t.notified).toEqual([]);
+    // on again for the next one (a block not run from here, too)
+    t.fleet.setNotify(GW_KEY, 12, "sleep 9", true);
+    t.fleet.setNotify(GW_KEY, 12, "sleep 9", true);
+    expect(t.fleet.state.asked).toEqual([{ host: GW_KEY, pane: 12, command: "sleep 9", at: 1_000_000 }]);
+    t.last().recv(doneMsg("sleep 9"));
+    await Promise.resolve();
+    expect(t.notified).toHaveLength(1);
+  });
+
+  it("switched off, a computer with notify_off forgets the wait; an older one is not told", async () => {
+    for (const features of [["push_ntfy", "notify_off"], ["push_ntfy"]]) {
+      const t = setup();
+      await new HostsStore(t.kv).save(record());
+      await t.fleet.init();
+      await t.fleet.setNtfy(true);
+      t.last().connect();
+      t.last().recv(welcome("operate", features));
+      t.last().recv(topology());
+      t.fleet.notifyWhenDone(GW_KEY, 12, "make");
+      expect(t.last().sent.filter((m) => m.t === "notify")).toEqual([{ t: "notify", pane: 12 }]);
+      t.fleet.setNotify(GW_KEY, 12, "make", false);
+      expect(t.last().sent.filter((m) => m.t === "notify")).toEqual(
+        features.includes("notify_off") ? [{ t: "notify", pane: 12 }, { t: "notify", pane: 12, off: true }] : [{ t: "notify", pane: 12 }],
+      );
+      t.fleet.shutdown();
+    }
+  });
+
+  it("a pane's wrap switch overrides Settings › Wrap long lines for that pane only", async () => {
+    const t = await withHost();
+    expect(wrapsLines(t.fleet.state, GW_KEY, 12)).toBe(true);
+    t.fleet.setPaneWrap(GW_KEY, 12, false);
+    expect(wrapsLines(t.fleet.state, GW_KEY, 12)).toBe(false);
+    expect(wrapsLines(t.fleet.state, GW_KEY, 13)).toBe(true);
+    await t.fleet.updateSettings({ wrapLines: false });
+    expect(wrapsLines(t.fleet.state, GW_KEY, 13)).toBe(false);
+    t.fleet.setPaneWrap(GW_KEY, 13, true);
+    expect(wrapsLines(t.fleet.state, GW_KEY, 13)).toBe(true);
+  });
+
+  it("keeps the last host and pane for the next cold start, and drops it with the host", async () => {
+    const t = await withHost();
+    await t.fleet.setLastView({ host: GW_KEY, pane: 12 });
+    // a cold start: a new fleet over the same storage
+    const again = new Fleet({ kv: t.kv, randomBytes: rng, platform: "ios", systemDeviceName: "x", notifier: { requestPermission: async () => true, notify: async () => undefined }, socket: () => new FakeGatewaySocket("ws://x", { key: GW }) });
+    await again.init();
+    expect(again.state.lastView).toEqual({ host: GW_KEY, pane: 12 });
+    expect(restoreTarget(again.state.lastView, again.state.hosts.map((h) => h.record))).toEqual({ host: GW_KEY, pane: 12 });
+    again.shutdown();
+    await t.fleet.unpair(GW_KEY);
+    expect(t.fleet.state.lastView).toBeNull();
+    expect(await loadLastView(t.kv)).toBeNull();
+  });
+
+  it("remembers the computer's OS, version and when it was last seen", async () => {
+    const t = await withHost();
+    await vi.waitFor(async () => expect((await new HostsStore(t.kv).load())[0]).toMatchObject({ os: "macos", version: "0.1.0", seenAt: 1_000_000 }));
+    t.fleet.store.flush();
+    expect(t.fleet.state.hosts[0]!.lastSeen).toBe(1_000_000);
+    t.advanceNow(5_000);
+    t.last().drop();
+    t.fleet.store.flush();
+    expect(t.fleet.state.hosts[0]!.lastSeen).toBe(1_005_000);
+  });
+});
+
+describe("Fleet: prompt chip menus and diffs (feature chips)", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("asks for a menu and settles with the matching answer only", async () => {
+    const t = await withHost();
+    const p = t.fleet.chipMenu(GW_KEY, 12, "dirs");
+    const req = t.last().sent.at(-1) as { t: string; id: string; pane: number };
+    expect(req).toMatchObject({ t: "dirs", pane: 12 });
+    // an answer of another kind, or for another pane, with the same id is bad data
+    t.last().recv({ t: "branches", id: req.id, pane: 12, current: "main", branches: ["main"], more: false });
+    expect(await p).toEqual({ ok: false, message: "The computer's answer did not fit the request." });
+    const q = t.fleet.chipMenu(GW_KEY, 12, "dirs");
+    const id = (t.last().sent.at(-1) as { id: string }).id;
+    const answer = { t: "dirs", id, pane: 12, cwd: "/r", parent: true, dirs: ["src"], more: false };
+    t.last().recv(answer);
+    expect(await q).toEqual({ ok: true, msg: answer });
+  });
+
+  it("a refused diff, a lost connection and silence each say why", async () => {
+    const t = await withHost();
+    const p = t.fleet.fileDiff(GW_KEY, 12, "a.rs", false);
+    const req = t.last().sent.at(-1) as { t: string; id: string };
+    expect(req).toMatchObject({ t: "diff", pane: 12, path: "a.rs", staged: false });
+    t.last().recv({ t: "ack", id: req.id, ok: false, error: "no_block", message: "x" });
+    expect(await p).toEqual({ ok: false, message: "This file is no longer changed." });
+    const q = t.fleet.chipMenu(GW_KEY, 12, "changes");
+    t.last().drop();
+    expect(await q).toEqual({ ok: false, message: "Not connected to studio-mac." });
+    vi.advanceTimersByTime(1_000);
+    t.last().connect();
+    t.last().recv(welcome());
+    const r = t.fleet.chipMenu(GW_KEY, 12, "branches");
+    vi.advanceTimersByTime(10_000);
+    expect(await r).toEqual({ ok: false, message: "No answer from studio-mac." });
+  });
+
+  it("a diff answer for another file does not settle it", async () => {
+    const t = await withHost();
+    const p = t.fleet.fileDiff(GW_KEY, 12, "a.rs", true);
+    const id = (t.last().sent.at(-1) as { id: string }).id;
+    t.last().recv({ t: "diff", id, pane: 12, path: "b.rs", staged: true, binary: false, truncated: false, lines: [] });
+    expect(await p).toEqual({ ok: false, message: "The computer's answer did not fit the request." });
+  });
+});
+
+describe("Fleet answering a pane that waits (phone-first)", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  const menu: Waiting = {
+    kind: "choice",
+    prompt: "Do you want to make this edit to app.txt?",
+    choices: ["Yes", "Yes, and switch to accept edits (shift+tab)", "No"],
+    selected: 0,
+    numbered: true,
+    context: ["Edit file", " 1 -one", " 1 +ONE"],
+  };
+  /** The topology with pane 13 waiting for `waiting`. */
+  const asking = (waiting: unknown) => {
+    const t = topology();
+    (t.windows[0]!.tabs[0]!.panes[1] as Record<string, unknown>).waiting = waiting;
+    (t.windows[0]!.tabs[0]!.panes[1] as Record<string, unknown>).job = "claude";
+    return t;
+  };
+  async function connected(permission: "operate" | "view" = "operate", features = ["text", "waiting", "complete"]) {
+    const t = setup();
+    await new HostsStore(t.kv).save(record({ permission }));
+    await t.fleet.init();
+    t.last().connect();
+    t.last().recv(welcome(permission, features));
+    t.last().recv(topology());
+    t.fleet.store.flush();
+    return t;
+  }
+
+  it("answers a numbered menu with the digit, then a reply after a pause and Enter", async () => {
+    const t = await connected();
+    t.last().recv(asking(menu));
+    const p = t.fleet.answer(GW_KEY, 13, menu, { choice: 2, reply: "use lowercase" });
+    expect(t.last().sent.at(-1)).toEqual({ t: "text", id: "x1", pane: 13, text: "3" });
+    t.last().recv({ t: "ack", id: "x1", ok: true });
+    await vi.advanceTimersByTimeAsync(600);
+    expect(t.last().sent.at(-1)).toEqual({ t: "text", id: "x2", pane: 13, text: "use lowercase" });
+    t.last().recv({ t: "ack", id: "x2", ok: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(t.last().sent.at(-1)).toEqual({ t: "keys", id: "k3", pane: 13, keys: ["enter"] });
+    t.last().recv({ t: "ack", id: "k3", ok: true });
+    expect(await p).toEqual({ ok: true });
+  });
+
+  it("answers an unnumbered menu with arrows from the selected entry, then Enter", async () => {
+    const t = await connected();
+    const trust = { ...menu, prompt: "Is this a project you trust?", choices: ["No, exit", "Yes, I trust this folder"], numbered: false, context: [] };
+    t.last().recv(asking(trust));
+    const p = t.fleet.answer(GW_KEY, 13, trust, { choice: 1 });
+    expect(t.last().sent.at(-1)).toEqual({ t: "keys", id: "k1", pane: 13, keys: ["down", "enter"] });
+    t.last().recv({ t: "ack", id: "k1", ok: true });
+    expect(await p).toEqual({ ok: true });
+  });
+
+  it("sends nothing to a question that changed, to a view-only device, or without text", async () => {
+    const t = await connected();
+    t.last().recv(asking({ ...menu, prompt: "Do you want to run rm -rf?" }));
+    const before = t.last().sent.length;
+    expect(await t.fleet.answer(GW_KEY, 13, menu, { choice: 0 })).toMatchObject({ ok: false, code: "answered" });
+    expect(t.last().sent.length).toBe(before);
+
+    const v = await connected("view");
+    v.last().recv(asking(menu));
+    expect(await v.fleet.answer(GW_KEY, 13, menu, { choice: 0 })).toMatchObject({ ok: false, code: "forbidden" });
+
+    const old = await connected("operate", ["waiting"]);
+    old.last().recv(asking(menu));
+    expect(await old.fleet.answer(GW_KEY, 13, menu, { choice: 0 })).toMatchObject({ ok: false, code: "unsupported" });
+  });
+
+  it("asks for completions only from a device that may operate; too large reads as too large to show", async () => {
+    const v = await connected("view");
+    const before = v.last().sent.length;
+    expect(await v.fleet.complete(GW_KEY, 13, "ls ")).toEqual({ ok: false, message: "This device may only view this computer." });
+    expect(v.last().sent.length).toBe(before);
+
+    const t = await connected();
+    const p = t.fleet.complete(GW_KEY, 13, "ls ");
+    const sent = t.last().sent.at(-1) as { t: string; id: string };
+    expect(sent.t).toBe("complete");
+    t.last().recv({ t: "ack", id: sent.id, ok: false, error: "too_large", message: "" });
+    expect(await p).toEqual({ ok: false, message: "Too large to show on the phone." });
+  });
+
+  it("types a password as text, then Enter, and keeps no copy", async () => {
+    const t = await connected();
+    const pw: Waiting = { kind: "password", prompt: "[sudo] password for me:", choices: [], selected: 0, numbered: false, context: [] };
+    t.last().recv(asking(pw));
+    const p = t.fleet.answer(GW_KEY, 13, pw, { text: "hunter2" });
+    expect(t.last().sent.at(-1)).toEqual({ t: "text", id: "x1", pane: 13, text: "hunter2" });
+    t.last().recv({ t: "ack", id: "x1", ok: true });
+    await vi.advanceTimersByTimeAsync(0);
+    t.last().recv({ t: "ack", id: "k2", ok: true });
+    expect(await p).toEqual({ ok: true });
+    t.fleet.store.flush();
+    expect(JSON.stringify(t.fleet.state)).not.toContain("hunter2");
+    expect(JSON.stringify([...t.kv.data.values()])).not.toContain("hunter2");
+  });
+
+  it("alerts once for a new question, with Yes / No / Open, never for one already there when it connected", async () => {
+    const t = setup();
+    await new HostsStore(t.kv).save(record());
+    await t.fleet.init();
+    t.last().connect();
+    t.last().recv(welcome("operate", ["waiting"]));
+    // waiting when it connected: on Now, not an alert
+    t.last().recv(asking({ ...menu, prompt: "Old question?" }));
+    expect(t.notified).toHaveLength(0);
+    t.last().recv(asking(menu));
+    t.last().recv(asking(menu));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(t.notified).toEqual([
+      {
+        title: "claude is asking on studio-mac",
+        body: menu.prompt,
+        data: { host: GW_KEY, pane: 13, ask: questionKey(menu) },
+        category: "rift-ask",
+      },
+    ]);
+    // a password has no Yes and No: Open only
+    t.last().recv(asking({ kind: "password", prompt: "Password:", choices: [], selected: 0, numbered: false, context: [] }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(t.notified.at(-1)).toMatchObject({ title: "claude needs a password on studio-mac", category: "rift-ask-open" });
+    // the pane on screen: no alert
+    t.fleet.setViewing({ host: GW_KEY, pane: 13 });
+    t.last().recv(asking({ ...menu, prompt: "On screen?" }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(t.notified).toHaveLength(2);
+  });
+
+  it("an alert's No picks the menu's No once the pane still asks it", async () => {
+    const t = await connected();
+    t.last().recv(asking(menu));
+    const p = t.fleet.answerFromAlert(GW_KEY, 13, questionKey(menu), "no");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(t.last().sent.at(-1)).toEqual({ t: "text", id: "x1", pane: 13, text: "3" });
+    t.last().recv({ t: "ack", id: "x1", ok: true });
+    expect(await p).toEqual({ ok: true });
+    // moved on meanwhile: nothing sent, after the wait
+    const sent = t.last().sent.length;
+    const q = t.fleet.answerFromAlert(GW_KEY, 13, "Another question?", "yes", 1000);
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(await q).toMatchObject({ ok: false, code: "answered" });
+    expect(t.last().sent.length).toBe(sent);
+  });
+
+  it("an alert's Yes answers only the question it showed: the same wording about other lines is another", async () => {
+    const t = await connected();
+    t.last().recv(asking({ ...menu, context: ["Edit file", " 1 -two", " 1 +TWO"] }));
+    const sent = t.last().sent.length;
+    const p = t.fleet.answerFromAlert(GW_KEY, 13, questionKey(menu), "yes", 1000);
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(await p).toMatchObject({ ok: false, code: "answered" });
+    expect(t.last().sent.length).toBe(sent);
+  });
+
+  it("removes a delivered alert once its question went, and gives a view-only device Open only", async () => {
+    const t = await connected();
+    t.last().recv(asking(menu));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(t.notified).toHaveLength(1);
+    t.last().recv(topology());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(t.dismissed).toEqual([{ host: GW_KEY, pane: 13, ask: questionKey(menu) }]);
+
+    const v = await connected("view");
+    v.last().recv(asking(menu));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(v.notified.at(-1)).toMatchObject({ category: "rift-ask-open" });
+  });
+
+  it("plans from the menu as it is now: an unnumbered menu whose selection moved", async () => {
+    const t = await connected();
+    const trust = { ...menu, prompt: "Is this a project you trust?", choices: ["No, exit", "Yes, I trust this folder"], numbered: false, context: [] };
+    // asked with "No, exit" selected; the user moved to "Yes" on the computer since
+    t.last().recv(asking({ ...trust, selected: 1 }));
+    const p = t.fleet.answer(GW_KEY, 13, trust, { choice: 1 });
+    expect(t.last().sent.at(-1)).toEqual({ t: "keys", id: "k1", pane: 13, keys: ["enter"] });
+    t.last().recv({ t: "ack", id: "k1", ok: true });
+    expect(await p).toEqual({ ok: true });
+  });
+
+  it("checks every text before the first step goes out", async () => {
+    const t = await connected();
+    t.last().recv(asking(menu));
+    const before = t.last().sent.length;
+    expect(await t.fleet.answer(GW_KEY, 13, menu, { choice: 2, reply: "x".repeat(MAX_TEXT_BYTES + 1) })).toMatchObject({
+      ok: false,
+      code: "too_large",
+    });
+    expect(await t.fleet.answer(GW_KEY, 13, menu, { choice: 2, reply: "a\u001bb" })).toMatchObject({ ok: false, code: "bad_request" });
+    // the digit "3" would have gone out first
+    expect(t.last().sent.length).toBe(before);
+  });
+
+  it("sends one answer per pane at a time: a second tap sends nothing", async () => {
+    const t = await connected();
+    t.last().recv(asking(menu));
+    const p = t.fleet.answer(GW_KEY, 13, menu, { choice: 0 });
+    const sent = t.last().sent.length;
+    expect(await t.fleet.answer(GW_KEY, 13, menu, { choice: 0 })).toMatchObject({ ok: false, code: "busy" });
+    expect(t.last().sent.length).toBe(sent);
+    t.last().recv({ t: "ack", id: "x1", ok: true });
+    expect(await p).toEqual({ ok: true });
+    // done: the pane takes an answer again
+    const q = t.fleet.answer(GW_KEY, 13, menu, { choice: 0 });
+    expect(t.last().sent.at(-1)).toMatchObject({ t: "text", text: "1" });
+    t.last().recv({ t: "ack", id: "x2", ok: true });
+    expect(await q).toEqual({ ok: true });
+  });
+
+  it("a view-only device sends no command, keys or text", async () => {
+    const v = await connected("view");
+    const before = v.last().sent.length;
+    for (const r of [v.fleet.run(GW_KEY, 12, "ls"), v.fleet.sendKeys(GW_KEY, 12, ["ctrl+c"]), v.fleet.sendText(GW_KEY, 12, "y")])
+      expect(await r).toMatchObject({ ok: false, code: "forbidden" });
+    expect(v.last().sent.length).toBe(before);
+  });
+
+  it("a pane screen that goes clears the pane on screen only while it is still the one", async () => {
+    const t = await connected();
+    t.fleet.setViewing({ host: GW_KEY, pane: 13 });
+    // the pager put pane 12 on screen before pane 13's screen went
+    t.fleet.setViewing({ host: GW_KEY, pane: 12 });
+    t.fleet.leaveViewing(GW_KEY, 13);
+    expect(t.fleet.isViewing(GW_KEY, 12)).toBe(true);
+    t.fleet.leaveViewing(GW_KEY, 12);
+    expect(t.fleet.isViewing(GW_KEY, 12)).toBe(false);
+  });
+
+  it("asks the computer for completions with a UTF-8 cursor", async () => {
+    const t = await connected();
+    const p = t.fleet.complete(GW_KEY, 12, "ls é");
+    expect(t.last().sent.at(-1)).toEqual({ t: "complete", id: "c1", pane: 12, line: "ls é", cursor: 5 });
+    t.last().recv({ t: "complete", id: "c1", pane: 12, items: [{ text: "ls éa", kind: "path" }], history: [], more: false });
+    expect(await p).toMatchObject({ ok: true, msg: { items: [{ text: "ls éa" }] } });
+    const old = await connected("operate", ["text"]);
+    expect(await old.fleet.complete(GW_KEY, 12, "ls")).toMatchObject({ ok: false });
   });
 });

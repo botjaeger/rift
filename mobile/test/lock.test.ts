@@ -110,12 +110,14 @@ describe("AppLock timing", () => {
 });
 
 describe("authentication before Run", () => {
-  it("needs the lock, 'Ask before running commands' and 'Confirm every command'", () => {
-    const s = { ...DEFAULT_SETTINGS, biometricLock: true };
+  it("needs the lock, 'Run with Face ID' and 'Ask before running'", () => {
+    const s = { ...DEFAULT_SETTINGS, biometricLock: true, askBeforeRun: true };
     expect(needsAuthBeforeRun(s)).toBe(true);
     expect(needsAuthBeforeRun(DEFAULT_SETTINGS)).toBe(false); // lock off by default
     expect(needsAuthBeforeRun({ ...s, authBeforeRun: false })).toBe(false);
-    expect(needsAuthBeforeRun({ ...s, confirmEveryCommand: false })).toBe(false);
+    // Ask before running is off by default: nothing is shown before Run, so nothing asks
+    expect(needsAuthBeforeRun({ ...s, askBeforeRun: false })).toBe(false);
+    expect(needsAuthBeforeRun({ ...DEFAULT_SETTINGS, biometricLock: true })).toBe(false);
   });
 
   it("settings: the lock defaults off, asking before Run defaults on, both persist", async () => {
@@ -126,7 +128,7 @@ describe("authentication before Run", () => {
     expect(await loadSettings(kv)).toMatchObject({ biometricLock: true, authBeforeRun: false });
     // Settings saved before Phase 2 get the defaults.
     await kv.set("rift.settings", JSON.stringify({ confirmEveryCommand: false }));
-    expect(await loadSettings(kv)).toMatchObject({ confirmEveryCommand: false, biometricLock: false, authBeforeRun: true });
+    expect(await loadSettings(kv)).toMatchObject({ askBeforeRun: false, biometricLock: false, authBeforeRun: true });
   });
 });
 
@@ -162,7 +164,7 @@ describe("authOutcome", () => {
 });
 
 describe("keysNeedAuth", () => {
-  const on = { ...DEFAULT_SETTINGS, biometricLock: true, authBeforeRun: true, confirmEveryCommand: true };
+  const on = { ...DEFAULT_SETTINGS, biometricLock: true, authBeforeRun: true, askBeforeRun: true };
 
   it("asks before keys that submit a line, when Run would ask", () => {
     for (const k of ["enter", "ctrl+m", "ctrl+j"]) expect(keysNeedAuth([k], on)).toBe(true);
@@ -173,7 +175,7 @@ describe("keysNeedAuth", () => {
     for (const k of ["ctrl+c", "esc", "tab", "up", "ctrl+d", "alt+m", "f5", "ctrl+space"])
       expect(keysNeedAuth([k], on)).toBe(false);
     expect(keysNeedAuth(["enter"], DEFAULT_SETTINGS)).toBe(false);
-    expect(keysNeedAuth(["enter"], { ...on, confirmEveryCommand: false })).toBe(false);
+    expect(keysNeedAuth(["enter"], { ...on, askBeforeRun: false })).toBe(false);
   });
 
   it("Return with any modifiers submits too (the Phase 3 key names)", () => {
@@ -183,7 +185,7 @@ describe("keysNeedAuth", () => {
 });
 
 describe("SubmitAuthHold (the terminal view)", () => {
-  const on = { ...DEFAULT_SETTINGS, biometricLock: true, authBeforeRun: true, confirmEveryCommand: true };
+  const on = { ...DEFAULT_SETTINGS, biometricLock: true, authBeforeRun: true, askBeforeRun: true };
 
   it("while a program runs: asks for the first submit key, then holds until the view closes or the app leaves", () => {
     const hold = new SubmitAuthHold();

@@ -1,19 +1,30 @@
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useEffect, useState } from "react";
-import { AccessibilityInfo, ScrollView, StyleSheet, Text, View } from "react-native";
+import { AccessibilityInfo, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { tildePath } from "@/chips";
 import { canOperate, draftKey } from "@/fleet";
 import { needsAuthBeforeRun } from "@/lock";
-import { commandProblem } from "@/protocol/types";
+import { chipCommand, type ChipAction } from "@/chips";
+import { commandProblem, MAX_MENU_NAME } from "@/protocol/types";
 import { authenticate, fleet, useApp, useLock } from "@/runtime";
 import { findPane, paneBranch, paneTitle, runningCommand } from "@/topology";
 import { Button } from "@/ui/Button";
 import { ErrorText, WarningText } from "@/ui/Notice";
-import { InfoRow, SwitchRow } from "@/ui/Rows";
-import { Section } from "@/ui/Screen";
-import { colors, mono, radius } from "@/ui/theme";
+import { colors, mono, radius, ui } from "@/ui/theme";
 
-/** "Run on <host>?": the explicit target and command, shown before anything is sent. */
+/** A chip pick from the sheet's params: `cd` a folder, `checkout` or `create` a branch. */
+function chipAction(kind: string | undefined, arg: string | undefined): ChipAction | null {
+  if (typeof arg !== "string" || arg === "" || arg.length > MAX_MENU_NAME || /[\n\r]/.test(arg)) return null;
+  if (kind === "cd") return { kind: "cd", name: arg };
+  if (kind === "checkout" || kind === "create") return { kind, branch: arg };
+  return null;
+}
+
+/**
+ * "Run on <host>?" (the Confirm board): the target and the command, shown before anything is
+ * sent, only with Settings › Ask before running on.
+ */
 export default function ConfirmScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -21,11 +32,12 @@ export default function ConfirmScreen() {
     key,
     pane: paneParam,
     block: blockParam,
-  } = useLocalSearchParams<{ key: string; pane: string; block?: string }>();
+    chip: chipParam,
+    arg: argParam,
+  } = useLocalSearchParams<{ key: string; pane: string; block?: string; chip?: string; arg?: string }>();
   const paneId = Number(paneParam);
   const s = useApp();
   const lock = useLock();
-  const [notify, setNotify] = useState(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -41,9 +53,12 @@ export default function ConfirmScreen() {
   // otherwise the pane's draft runs
   const again =
     blockParam === undefined ? undefined : (state?.blocks.find((b) => b.id === Number(blockParam))?.command ?? "");
-  const command = again ?? s.drafts[draftKey(key, paneId)] ?? "";
+  // a prompt chip's pick: the command is built here from the folder or branch name (quoted),
+  // never taken whole from the link
+  const chip = chipAction(chipParam, argParam);
+  const command = chip ? chipCommand(chip) : (again ?? s.drafts[draftKey(key, paneId)] ?? "");
   const running = runningCommand(loc?.pane ?? null, state);
-  const branch = paneBranch(state);
+  const branch = loc?.pane.git?.branch ?? paneBranch(state);
   const connected = host?.conn.status === "open";
   const problem = commandProblem(command);
   // The permission can drop while the sheet is open, and a deep link can open it for a view-only host.
@@ -51,6 +66,9 @@ export default function ConfirmScreen() {
   const canRun = !!host && operate && !!loc && connected && running === null && problem === null && !sending;
   const askFirst = needsAuthBeforeRun(s.settings);
   const hostName = host?.record.name ?? "this computer";
+  const where = [loc ? paneTitle(loc) : "Pane closed", loc?.pane.cwd ? tildePath(loc.pane.cwd) : null, branch]
+    .filter(Boolean)
+    .join(" · ");
 
   const run = async () => {
     if (!canRun) return;
@@ -63,7 +81,7 @@ export default function ConfirmScreen() {
       }
     }
     setSending(true);
-    const r = await fleet.run(key, paneId, command, { notify, fromDraft: again === undefined });
+    const r = await fleet.run(key, paneId, command, chip ? { fromDraft: false, notify: false } : { fromDraft: again === undefined });
     setSending(false);
     if (r.ok) {
       AccessibilityInfo.announceForAccessibility(`Command sent to ${hostName}`);
@@ -73,32 +91,31 @@ export default function ConfirmScreen() {
     }
   };
 
-  // Hidden while the app is in the app switcher or locked (the sheet sits above the lock cover).
-  if (lock.covered || lock.locked) return <View style={styles.fill} />;
+  // Hidden while the app is in the app switcher, locked, or under a Face ID prompt (the sheet
+  // sits above the lock cover). Kept laid out: a sheet sized to its content must not collapse.
+  const hidden = lock.covered || lock.locked;
 
   return (
-    <ScrollView style={styles.fill} contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + 16 }]}>
-      <Text style={styles.title} accessibilityRole="header">
-        Run on {hostName}?
-      </Text>
-      <Section>
-        <InfoRow label="Host" first>
-          <Text style={styles.value}>{hostName}</Text>
-        </InfoRow>
-        <InfoRow label="Pane">
-          <Text style={styles.value}>{loc ? paneTitle(loc) : "Pane closed"}</Text>
-        </InfoRow>
-        <InfoRow label="Directory">
-          <Text style={[styles.value, styles.mono]}>{loc?.pane.cwd ?? "unknown"}</Text>
-          {branch ? <Text style={[styles.value, styles.branch]}>{branch}</Text> : null}
-        </InfoRow>
-      </Section>
+    <View
+      style={[styles.fill, styles.content, { paddingBottom: Math.max(36, insets.bottom + 2) }, hidden && styles.hidden]}
+      accessibilityElementsHidden={hidden}
+      importantForAccessibility={hidden ? "no-hide-descendants" : "auto"}
+    >
+      <View style={styles.head}>
+        <Text style={styles.title} accessibilityRole="header">
+          Run on {hostName}?
+        </Text>
+        <Text style={styles.where}>{where}</Text>
+      </View>
 
       <View style={styles.command} accessible accessibilityLabel={`Command: ${command}`}>
         <Text style={styles.commandText} selectable>
+          <Text style={{ color: colors.success }}>❯ </Text>
           {command}
         </Text>
       </View>
+
+      <Text style={styles.why}>Shown because Settings › Ask before running is on.</Text>
 
       {running ? (
         <WarningText>
@@ -109,17 +126,14 @@ export default function ConfirmScreen() {
       {!connected && host ? <WarningText>Not connected to {hostName}.</WarningText> : null}
       {problem === "too_long" ? <WarningText>The command is too long (2 KiB at most).</WarningText> : null}
       {problem === "control" ? <WarningText>The command must be one line.</WarningText> : null}
-
-      <Section>
-        <SwitchRow first label="Notify me when it finishes" value={notify} onChange={setNotify} />
-      </Section>
-
       {error ? <ErrorText>{error}</ErrorText> : null}
+
       <View style={styles.buttons}>
-        <Button label="Cancel" onPress={() => router.back()} style={styles.button} />
+        <Button label="Cancel" size="large" onPress={() => router.back()} style={styles.cancel} />
         <Button
           label={sending ? "Running…" : "Run"}
           variant="primary"
+          size="large"
           disabled={!canRun}
           accessibilityHint={
             host && !operate
@@ -131,31 +145,31 @@ export default function ConfirmScreen() {
                   : undefined
           }
           onPress={() => void run()}
-          style={styles.button}
+          style={styles.run}
         />
       </View>
-    </ScrollView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  fill: { flex: 1, backgroundColor: colors.surface },
-  content: { padding: 20, gap: 14, maxWidth: 560, width: "100%", alignSelf: "center" },
-  title: { color: colors.textBright, fontSize: 20, fontWeight: "600" },
-  value: { color: colors.text, fontSize: 14, textAlign: "right" },
-  mono: { fontFamily: mono, fontSize: 13 },
-  branch: { color: colors.success, fontSize: 12 },
+  fill: { backgroundColor: colors.surface },
+  hidden: { opacity: 0 },
+  content: { paddingTop: 24, paddingHorizontal: 20, gap: 16, maxWidth: 560, width: "100%", alignSelf: "center" },
+  head: { gap: 4 },
+  title: { fontFamily: ui(600), color: colors.textBright, fontSize: 20 },
+  where: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13 },
   command: {
     backgroundColor: colors.bg,
-    borderRadius: radius.control,
+    borderRadius: radius.button,
     borderWidth: 1,
     borderColor: colors.hairline,
-    borderLeftWidth: 2,
-    borderLeftColor: colors.accent,
-    padding: 12,
+    padding: 14,
   },
   commandText: { color: colors.textBright, fontFamily: mono, fontSize: 14, lineHeight: 20 },
-  // Side by side; stacked when large text makes them too wide.
+  why: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13, lineHeight: 19 },
+  // Side by side, Run twice as wide; stacked when large text makes them too wide.
   buttons: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
-  button: { flexGrow: 1, flexBasis: 140 },
+  cancel: { flexGrow: 1, flexBasis: 100 },
+  run: { flexGrow: 2, flexBasis: 200 },
 });

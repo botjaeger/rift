@@ -7,7 +7,7 @@ import { Button } from "@/ui/Button";
 import { ErrorText } from "@/ui/Notice";
 import { InfoRow } from "@/ui/Rows";
 import { Section } from "@/ui/Screen";
-import { colors, mono } from "@/ui/theme";
+import { colors, mono, ui } from "@/ui/theme";
 
 /**
  * Hidden diagnostics (rift://diagnostics): how fast this device's JavaScript engine runs the
@@ -66,6 +66,6 @@ export default function DiagnosticsScreen() {
 const styles = StyleSheet.create({
   fill: { flex: 1, backgroundColor: colors.bg },
   content: { padding: 16, gap: 14 },
-  lead: { color: colors.textMuted, fontSize: 14, lineHeight: 20 },
+  lead: { fontFamily: ui(400), color: colors.textMuted, fontSize: 14, lineHeight: 20 },
   value: { color: colors.textBright, fontFamily: mono, fontSize: 14 },
 });

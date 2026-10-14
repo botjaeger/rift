@@ -652,6 +652,9 @@ impl Source for Fake {
                     job: None,
                     last_command: None,
                     last_exit: None,
+                    git: None,
+                    waiting: None,
+                    running: None,
                 }],
             }],
         }]

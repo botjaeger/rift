@@ -116,21 +116,113 @@ pub struct ChipMenu {
     empty: String,
 }
 
+/// `cwd`'s sub-directories by name, case-insensitively (at most
+/// [`MAX_DIRS`] entries read): the folder menu's rows.
+pub fn dir_names(cwd: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(cwd)
+        .map(|rd| {
+            rd.filter_map(Result::ok)
+                .take(MAX_DIRS)
+                // symlinks to folders count (`metadata` follows them)
+                .filter(|e| e.path().metadata().is_ok_and(|m| m.is_dir()))
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort_by_key(|n| n.to_lowercase());
+    names
+}
+
+/// A paired phone's chip menu for a pane in `cwd` (`menu` control request):
+/// the folder menu's directories (hidden ones left out, as the menu shows
+/// them without a query), the branch menu's branches (the checked-out one
+/// first, as [`rift_core::git::local_branches`] lists them), or the code
+/// review panel's files (staged first).
+pub fn remote_menu(kind: rift_remote::MenuKind, cwd: Option<&str>) -> rift_remote::Menu {
+    use rift_remote::{Menu, MenuKind};
+    let dir = cwd.map(Path::new);
+    match kind {
+        MenuKind::Dirs => Menu::Dirs {
+            cwd: cwd.map(str::to_string),
+            parent: dir.is_some_and(|d| d.parent().is_some()),
+            dirs: dir
+                .map(dir_names)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|n| !n.starts_with('.'))
+                .collect(),
+        },
+        MenuKind::Branches => {
+            let branches = dir.map(rift_core::git::local_branches).unwrap_or_default();
+            Menu::Branches {
+                current: branches.first().cloned(),
+                branches: branches.into_iter().filter(|b| checkout_ok(b)).collect(),
+            }
+        }
+        // the list only: no file's new side is read for it, and one file
+        // past what the wire keeps (so `more` is set) is enough
+        MenuKind::Changes => match dir
+            .and_then(|d| rift_core::review::load_list(d, rift_remote::MAX_MENU_ITEMS + 1))
+        {
+            Some(Ok(review)) => {
+                let file = |f: &rift_core::review::FileDiff, staged: bool| {
+                    rift_remote::protocol::ChangedFile {
+                        path: f.path.clone(),
+                        status: f.status.to_string(),
+                        added: f.added as u64,
+                        removed: f.removed as u64,
+                        staged,
+                    }
+                };
+                let mut files: Vec<_> = review.staged.iter().map(|f| file(f, true)).collect();
+                files.extend(review.unstaged.iter().map(|f| file(f, false)));
+                Menu::Changes {
+                    branch: Some(review.branch),
+                    files,
+                }
+            }
+            // outside a repository, or one git could not read
+            _ => Menu::Changes {
+                branch: None,
+                files: Vec::new(),
+            },
+        },
+    }
+}
+
+/// One changed file's diff for a paired phone (`diff` control request): the
+/// review panel's hunks as `@` headers and ` ` / `+` / `-` lines (that path
+/// alone is diffed). `None` when `path` is not among the repository's
+/// (`staged` or not) changes.
+pub fn remote_diff(cwd: &str, path: &str, staged: bool) -> Option<rift_remote::DiffPage> {
+    use rift_core::review::LineKind;
+    use rift_remote::protocol::DiffLine;
+    let file = rift_core::review::load_file(Path::new(cwd), path, staged)?.ok()??;
+    let mut lines = Vec::new();
+    for h in &file.hunks {
+        lines.push(DiffLine("@".into(), h.header.clone()));
+        for l in &h.lines {
+            let kind = match l.kind {
+                LineKind::Context => " ",
+                LineKind::Added => "+",
+                LineKind::Removed => "-",
+            };
+            lines.push(DiffLine(kind.into(), l.text.clone()));
+        }
+    }
+    Some(rift_remote::DiffPage {
+        binary: file.binary,
+        truncated: file.truncated,
+        untracked: file.status == '?',
+        lines,
+    })
+}
+
 impl ChipMenu {
     /// The parent, then `cwd`'s sub-directories by name (hidden ones only
     /// for a query starting with `.`).
     pub fn dirs(pane: PaneId, anchor: [f32; 4], cwd: &Path) -> Self {
-        let mut names: Vec<String> = std::fs::read_dir(cwd)
-            .map(|rd| {
-                rd.filter_map(Result::ok)
-                    .take(MAX_DIRS)
-                    // symlinks to folders count (`metadata` follows them)
-                    .filter(|e| e.path().metadata().is_ok_and(|m| m.is_dir()))
-                    .map(|e| e.file_name().to_string_lossy().into_owned())
-                    .collect()
-            })
-            .unwrap_or_default();
-        names.sort_by_key(|n| n.to_lowercase());
+        let names = dir_names(cwd);
         let mut items = Vec::new();
         if cwd.parent().is_some() {
             items.push(Item {
@@ -151,10 +243,11 @@ impl ChipMenu {
         Self::new(ChipKind::Dir, pane, anchor, items)
     }
 
-    /// Local branches, the checked-out one first.
+    /// Local branches, the checked-out one first (see [`checkout_ok`]).
     pub fn branches(pane: PaneId, anchor: [f32; 4], names: Vec<String>, current: &str) -> Self {
         let items = names
             .into_iter()
+            .filter(|n| checkout_ok(n))
             .map(|n| Item {
                 current: n == current,
                 label: n.clone(),
@@ -294,8 +387,7 @@ impl ChipMenu {
     fn offers_create(&self) -> bool {
         let name = self.query.trim();
         self.kind == ChipKind::Branch
-            && !name.is_empty()
-            && !name.contains(char::is_whitespace)
+            && checkout_ok(name)
             && !self.items.iter().any(|it| it.label == name)
     }
 
@@ -342,6 +434,18 @@ fn ports_cell(item: &Item) -> String {
         Some(c) if !c.ports.is_empty() => c.ports.join(", "),
         _ => "—".into(),
     }
+}
+
+/// A branch name the branch menus (desktop and phone) offer to check out or
+/// create: not empty, none of the characters git refuses in a name, and not
+/// starting with `-` — `git checkout -x` would read it as an option, and
+/// `--` would make it a path. git refuses such a name
+/// (`git check-ref-format --branch`), but plumbing can still make one. The
+/// phone's `branchRows` (mobile/src/chips.ts) applies the same rule.
+fn checkout_ok(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('-')
+        && !name.contains(|c: char| c.is_whitespace() || "~^:?*[\\".contains(c))
 }
 
 /// The shell command a picked row runs.
@@ -663,6 +767,113 @@ mod tests {
     }
 
     #[test]
+    fn a_phone_gets_the_menus_and_the_review_diff() {
+        use rift_remote::{Menu, MenuKind};
+        let dir = std::env::temp_dir().join(format!("rift-chip-remote-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for d in ["src", ".hidden", "Docs"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        let cwd = dir.to_str().unwrap();
+        // not a repository yet: directories only
+        assert_eq!(
+            remote_menu(MenuKind::Dirs, Some(cwd)),
+            Menu::Dirs {
+                cwd: Some(cwd.into()),
+                parent: true,
+                dirs: vec!["Docs".into(), "src".into()],
+            }
+        );
+        assert_eq!(
+            remote_menu(MenuKind::Changes, Some(cwd)),
+            Menu::Changes {
+                branch: None,
+                files: vec![],
+            }
+        );
+        assert_eq!(
+            remote_menu(MenuKind::Dirs, None),
+            Menu::Dirs {
+                cwd: None,
+                parent: false,
+                dirs: vec![],
+            }
+        );
+        // a repository with a commit, a second branch, a staged and an unstaged change
+        let mut opts = git2::RepositoryInitOptions::new();
+        opts.initial_head("main");
+        let repo = git2::Repository::init_opts(&dir, &opts).unwrap();
+        std::fs::write(dir.join("src/a.txt"), "one\ntwo\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("src/a.txt")).unwrap();
+        index.write().unwrap();
+        let sig = git2::Signature::now("t", "t@e.x").unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let c = repo
+            .commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
+        repo.branch("feat", &repo.find_commit(c).unwrap(), false)
+            .unwrap();
+        std::fs::write(dir.join("src/b.txt"), "new\n").unwrap();
+        index.add_path(Path::new("src/b.txt")).unwrap();
+        index.write().unwrap();
+        std::fs::write(dir.join("src/a.txt"), "one\nTWO\nthree\n").unwrap();
+        assert_eq!(
+            remote_menu(MenuKind::Branches, Some(cwd)),
+            Menu::Branches {
+                current: Some("main".into()),
+                branches: vec!["main".into(), "feat".into()],
+            }
+        );
+        let Menu::Changes { branch, files } = remote_menu(MenuKind::Changes, Some(cwd)) else {
+            panic!("changes");
+        };
+        assert_eq!(branch.as_deref(), Some("main"));
+        let summary: Vec<_> = files
+            .iter()
+            .map(|f| {
+                (
+                    f.path.as_str(),
+                    f.status.as_str(),
+                    f.added,
+                    f.removed,
+                    f.staged,
+                )
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                ("src/b.txt", "A", 1, 0, true),
+                ("src/a.txt", "M", 2, 1, false)
+            ]
+        );
+        let d = remote_diff(cwd, "src/a.txt", false).unwrap();
+        let kinds: String = d.lines.iter().map(|l| l.0.as_str()).collect();
+        assert_eq!(kinds, "@ -++");
+        assert_eq!(d.lines[2].1, "two");
+        assert_eq!(d.lines[3].1, "TWO");
+        assert!(!d.binary);
+        // listed as staged, not unstaged; and a path that is no change
+        assert!(remote_diff(cwd, "src/b.txt", false).is_none());
+        assert!(remote_diff(cwd, "src/b.txt", true).is_some());
+        assert!(remote_diff(cwd, "nope.txt", false).is_none());
+        assert!(!d.untracked && !remote_diff(cwd, "src/b.txt", true).unwrap().untracked);
+        // untracked files, also in an untracked folder, say so
+        std::fs::write(dir.join(".env"), "TOKEN=x\n").unwrap();
+        std::fs::create_dir_all(dir.join("new")).unwrap();
+        std::fs::write(dir.join("new/k.txt"), "k\n").unwrap();
+        let env = remote_diff(cwd, ".env", false).unwrap();
+        assert!(env.untracked);
+        assert_eq!(env.lines[1].1, "TOKEN=x");
+        assert!(remote_diff(cwd, "new/k.txt", false).unwrap().untracked);
+        // a path is literal, never a pattern
+        assert!(remote_diff(cwd, "src/*.txt", false).is_none());
+        assert!(remote_diff(cwd, "*", false).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn branches_offer_to_create_a_missing_one() {
         let names = vec!["main".to_string(), "feature/x".to_string()];
         let mut m = ChipMenu::branches(1, [0.0; 4], names, "main");
@@ -677,6 +888,13 @@ mod tests {
         assert_eq!(m.results().len(), 1);
         m.set_query("a b".into());
         assert!(m.results().is_empty());
+        // a name git would read as an option, or refuses, is never offered
+        for q in ["-f", "--orphan", "a~1", "x:y", "w*"] {
+            m.set_query(q.into());
+            assert!(m.results().is_empty(), "{q}");
+        }
+        let m = ChipMenu::branches(1, [0.0; 4], vec!["main".into(), "-evil".into()], "main");
+        assert_eq!(m.count(), 1);
         // the selection moves within the results and scrolls with them
         let many = (0..20).map(|i| format!("b{i:02}")).collect();
         let mut m = ChipMenu::branches(1, [0.0; 4], many, "b00");

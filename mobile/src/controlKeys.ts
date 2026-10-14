@@ -1,17 +1,26 @@
 // The control-key row above the command line and under the terminal screen: which keys it
 // holds and in what order (Settings › Control keys). Pure; the ids are stored in settings.
 
-/** A key of the row: a protocol key name sent with `keys`, or a sticky modifier for the next key. */
+import type { OpenKind } from "./protocol/types";
+
+/**
+ * A key of the row: a protocol key name sent with `keys`, a sticky modifier for the next key, or
+ * an action on the computer (`open`: a new tab or pane, feature `open`).
+ */
 export interface ControlKey {
-  /** Stored id: the protocol key name, or `ctrl` / `alt` for the sticky modifiers. */
+  /** Stored id: the protocol key name, `ctrl` / `alt` for the sticky modifiers, `new_tab` / `new_pane`. */
   id: string;
   label: string;
   /** What screen readers say. */
   spoken: string;
+  /** What Settings › Keys calls it, when shorter than `spoken` ("Interrupt"). */
+  name?: string;
   /** Applies to the next letter typed or key pressed instead of being sent. */
   sticky?: boolean;
   /** Interrupts the program: marked in the row. */
   danger?: boolean;
+  /** Opens a new tab or pane on the computer instead of sending a key. */
+  open?: OpenKind;
 }
 
 const fkeys: ControlKey[] = Array.from({ length: 12 }, (_, i) => ({
@@ -22,12 +31,12 @@ const fkeys: ControlKey[] = Array.from({ length: 12 }, (_, i) => ({
 
 /** Every key the row can hold, in the order Settings lists them. */
 export const CONTROL_KEYS: readonly ControlKey[] = [
-  { id: "ctrl+c", label: "^C", spoken: "Control C, interrupt", danger: true },
+  { id: "ctrl+c", label: "^C", spoken: "Control C, interrupt", name: "Interrupt", danger: true },
   { id: "esc", label: "esc", spoken: "Escape" },
   { id: "tab", label: "tab", spoken: "Tab" },
   { id: "shift+tab", label: "⇧tab", spoken: "Shift Tab" },
-  { id: "ctrl", label: "ctrl", spoken: "Control, applies to the next key", sticky: true },
-  { id: "alt", label: "alt", spoken: "Alt, applies to the next key", sticky: true },
+  { id: "ctrl", label: "ctrl", spoken: "Control, applies to the next key", name: "Control the next key", sticky: true },
+  { id: "alt", label: "alt", spoken: "Alt, applies to the next key", name: "Alt the next key", sticky: true },
   { id: "up", label: "↑", spoken: "Up arrow" },
   { id: "down", label: "↓", spoken: "Down arrow" },
   { id: "left", label: "←", spoken: "Left arrow" },
@@ -47,6 +56,8 @@ export const CONTROL_KEYS: readonly ControlKey[] = [
   { id: "ctrl+e", label: "^E", spoken: "Control E" },
   { id: "ctrl+u", label: "^U", spoken: "Control U" },
   { id: "ctrl+w", label: "^W", spoken: "Control W" },
+  { id: "new_tab", label: "+tab", spoken: "New tab", name: "New tab on the computer", open: "tab" },
+  { id: "new_pane", label: "+pane", spoken: "New pane", name: "New pane beside this one", open: "pane" },
   ...fkeys,
 ];
 
@@ -56,8 +67,8 @@ export function controlKey(id: string): ControlKey | undefined {
   return BY_ID.get(id);
 }
 
-/** The row before Phase 3: ^C esc tab ctrl ↑ ↓ ← →. */
-export const DEFAULT_CONTROL_KEYS: readonly string[] = ["ctrl+c", "esc", "tab", "ctrl", "up", "down", "left", "right"];
+/** The default row: ^C esc tab ctrl ↑ ↓ (Settings › Keys). */
+export const DEFAULT_CONTROL_KEYS: readonly string[] = ["ctrl+c", "esc", "tab", "ctrl", "up", "down"];
 
 /** A stored row: known ids, each once, in order; anything else (not an array) is the default. */
 export function validControlKeys(v: unknown): string[] {
@@ -79,6 +90,32 @@ export function moveKey(ids: readonly string[], index: number, by: -1 | 1): stri
   const next = [...ids];
   [next[index], next[to]] = [next[to]!, next[index]!];
   return next;
+}
+
+/** `ids` with the key at `from` moved to `to` (drag to reorder); clamped to the row. */
+export function moveKeyTo(ids: readonly string[], from: number, to: number): string[] {
+  if (from < 0 || from >= ids.length) return [...ids];
+  const target = Math.max(0, Math.min(ids.length - 1, to));
+  const next = [...ids];
+  const [id] = next.splice(from, 1);
+  next.splice(target, 0, id!);
+  return next;
+}
+
+/** The Add chips of Settings › Keys: unused keys, the F-keys as one "F1–F12" while none is in the row. */
+export function addChoices(ids: readonly string[]): { label: string; ids: string[] }[] {
+  const unused = CONTROL_KEYS.filter((k) => !ids.includes(k.id));
+  const f = unused.filter((k) => /^f\d+$/.test(k.id));
+  const allF = f.length === 12;
+  const out: { label: string; ids: string[] }[] = [];
+  for (const k of unused) {
+    if (allF && /^f\d+$/.test(k.id)) {
+      if (k.id === "f1") out.push({ label: "F1–F12", ids: f.map((x) => x.id) });
+      continue;
+    }
+    out.push({ label: k.label, ids: [k.id] });
+  }
+  return out;
 }
 
 /** `ids` with `id` added at the end (on) or removed (off). */

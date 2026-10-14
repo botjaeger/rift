@@ -643,11 +643,13 @@ Each window listens on `~/.local/share/rift/control/<pid>.sock`
 - `"off"`: no socket. Any unrecognised value (`"false"`, a typo) is
   treated as `"off"` and logs a warning. While `remote_access` is on, the
   socket stays open for the remote gateway's requests only: `status`,
-  `blocks`, `screen`, `output`, `remote-input` and `remote-status` (the
-  gateway's notice that a phone connected or left).
+  `blocks`, `screen`, `output`, `menu`, `diff`, `complete`, `remote-input`,
+  `remote-open` and `remote-status` (the gateway's notice that a phone
+  connected or left).
 - `remote-input` (types a command at a pane's prompt, sends keys, or types
-  text into a running program) is
-  accepted only while `remote_access` is on, whatever `control_api` says.
+  text into a running program) and `remote-open` (a new tab or split next
+  to a pane) are accepted only while `remote_access` is on, whatever
+  `control_api` says.
 - `blocks` with `"meta": true` leaves the output out.
 - `ctl focus --tab N` / `--pane ID`: tabs count from 0, as in `ctl list`;
   a non-numeric value is rejected with exit code 2.
@@ -704,27 +706,74 @@ line shows the addresses, or how many devices are connected.
   program when one is running. Each one shows a toast: "<device> ran <cmd>"
   or "<device> sent ctrl+c". Page Up and Page Down at a prompt do nothing
   (the phone scrolls itself), and keys from a phone skip vim mode.
-- **Full-screen programs and typing (Phase 3).** While a pane shows the
-  alternate screen (vim, less, htop) the phone switches to a *Terminal*
-  view of the pane's screen with its colours, and switches back when the
-  program ends; it can also be picked by hand. There an `operate` device
+- **Full-screen programs and typing (Phase 3).** A pane on the phone shows
+  blocks only; while it shows the alternate screen (vim, less, htop) the
+  phone shows the pane's screen with its colours instead ("htop is full
+  screen · showing its screen"), and the blocks again when the program
+  ends. There an `operate` device
   types into the running program (the soft keyboard or a hardware one:
   ctrl/alt combinations, Esc, Tab, arrows, F1–F12, Delete), shown on the
   desktop as "<device> typed into a program", never with the text. Typed
   text never reaches a pane at its prompt (nor one whose command was just
   submitted), and keys at a prompt never recall history, complete or submit
-  a line that has text: commands still go through *Run* and its
-  confirmation. A shell without Rift's integration, and a prompt drawn on
+  a line that has text: commands still go through *Run*. A shell without Rift's integration, and a prompt drawn on
   the alternate screen (tmux), look like programs and take typed text. The phone never resizes the pane. With a hardware
   keyboard, ctrl/alt combinations, Esc, Tab and F-keys pressed in the
   command field go to the pane too.
-- **Block actions, earlier output, control keys (Phase 3).** Each block's
-  *⋯* copies or shares the command or its output, puts the command in the
-  command field, runs it again (through the confirmation), stops a running
-  one (ctrl+c) or asks to be notified when it ends. A block cut to its last
-  500 lines loads earlier output 500 lines at a time (up to 5,000 more;
-  lines gone from the desktop's scrollback say so). The row of control keys
-  is chosen and ordered in Settings › Control keys.
+- **Block actions, earlier output, control keys (Phase 3).** A finished
+  block's *···* runs it again, puts it in the command field (*Edit, then
+  run*), copies the command or its output, or shares the output; a running
+  one shows a bell instead (notify me when it finishes, on by default for
+  commands run from the phone) and a long press offers *Stop* (ctrl+c). A
+  block cut to its last 500 lines loads earlier output 500 lines at a time
+  (up to 5,000 more; lines gone from the desktop's scrollback say so). The
+  row of control keys is chosen, ordered (drag) and added to in Settings ›
+  Output › Keys; its *+tab* and *+pane* keys open a new tab in the pane's
+  window or split the pane on the desktop (starting in the pane's folder,
+  with a toast naming the phone), and the phone goes to the new pane.
+- **Phone-first app.** Tabs *Now*, *Computers*, *Settings*. *Now* lists
+  what needs you, what runs (command, elapsed, latest line) and what
+  finished (failures first) on every connected computer; *Computers* lists
+  each computer with its tabs inline; a cold start reopens the pane shown
+  last. A pane shows the window's tabs as a strip and swipes between the
+  tab's panes; successes before the newest failure fold away, and the
+  failed and running commands are cards (Run again, Copy error, All N
+  lines; Notify when done, Stop). Above its command line: suggestions, a
+  folder button opening the chip menus, and ⌃ for the key row. *Run* sends
+  at once; Settings › *Ask before running* (off by default) shows the
+  confirmation first. *Wrap long lines* (Settings › Output, and the pane's
+  header button for one pane) off lets each block's output scroll sideways.
+  The header's search filters the blocks. The folder button opens what the
+  desktop's chips do (feature `chips`): folders (`cd`), local branches
+  (`git checkout`) and the code review panel's changed files, each with its
+  diff; the names are shell-quoted; it shows the folder and branch the
+  desktop computes for its own chips (feature `git`).
+- **Needs you (answering from the phone).** The desktop tells the phone
+  when a pane's running command waits for the user (feature `waiting`): a
+  line read without echo (`sudo`, `ssh`, `read -s`: the terminal's echo
+  off in line mode, read from the PTY, or the session service for durable
+  sessions; or a cursor line that reads like a password prompt), a coding
+  agent's menu on the screen's last rows (Claude Code and Codex: the
+  question, the entries under the `❯` / `›` selector, numbered or not, and
+  up to 12 lines above the question), or an unread "needs your input" for
+  the pane in the attention center (until anything is typed into the pane).
+  An `operate` phone answers: a numbered entry is typed as its digit, an
+  unnumbered one as arrow keys and Enter, "No" can carry what to do
+  instead, and a password is typed (never shown, logged or kept on either
+  side). Each answer is ordinary input: the desktop shows its toast and the
+  pane goes on. The phone alerts when a question starts (Yes / No / Open on
+  the lock screen) and shows "claude is asking" in the pane.
+- **Completion and history from the phone.** The phone's Run sheet and a
+  pane's suggestions ask the desktop (feature `complete`) for what its
+  command line would complete for the typed line (the same completion
+  providers, each result the whole line with its kind) and for the
+  commands that ran in the pane before (its blocks newest first with when
+  they finished, then its command-line history and the imported shell
+  history), bounded to 50 each.
+- **Running list.** With feature `running` each pane running a command
+  carries when it started and the screen's latest line, so the phone's
+  *Now* and its lock-screen Live Activity show the elapsed time and the
+  last line without following every pane.
 - **Security.** Traffic is end-to-end encrypted (Noise XX) and the phone pins
   the desktop's key; see [mobile-threat-model.md](mobile-threat-model.md)
   and the wire format in [remote-protocol.md](remote-protocol.md).
@@ -741,15 +790,16 @@ line shows the addresses, or how many devices are connected.
   there is no network, closes its connections 30 seconds after going to the
   background (3 minutes while a "notify me" command runs; Android 15+ and iOS
   may cut them sooner, and it reconnects on return), and can require
-  Face ID / fingerprint on launch, after 5 minutes away, and before running
-  commands. With a push token it hands the computers, they alert through the
+  Face ID / fingerprint on launch, after 5 minutes away, and (with *Ask
+  before running* on) before running commands. With a push token it hands the computers, they alert through the
   Expo push service while the app is closed (`mobile/README.md` › Push).
   *Alerts through ntfy* also posts them to a random ntfy topic (ntfy.sh
   or self-hosted), which the free ntfy app shows: no push setup needed.
-  Settings › Notifications chooses *Off*, *Failed commands* or *Finished
-  or failed commands* and how long a command must run (10 s – 5 min); each
-  computer's page can turn its notifications off. "Notify me" always
-  notifies.
+  Settings › *Notify me when my commands finish* (on by default) asks to be
+  told about every command run from the phone; for other commands, *Notify
+  for* chooses *Nothing*, *Failures* or *Everything* and how long a command
+  must run (10 s – 5 min); each computer's page (its bell) can turn its
+  notifications off. "Notify me" always notifies.
 
 ## Notifications (attention center)
 

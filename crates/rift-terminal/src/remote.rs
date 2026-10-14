@@ -3,15 +3,19 @@
 //! (`control.rs`), and its pairing / device commands.
 //!
 //! Topology is each window's `status`; blocks, screens and output pages are
-//! the owning window's `blocks`, `screen` and `output` requests; `run` /
+//! the owning window's `blocks`, `screen` and `output` requests; chip menus,
+//! diffs and completions its `menu`, `diff` and `complete`; `run` /
 //! `keys` / `text` from operate devices become the owning window's
 //! `remote-input` request, which the window accepts only while
 //! `remote_access` is on.
 
 use crate::control::{self, Request, Response};
-use rift_remote::protocol::{Pane, Tab, Window};
+use rift_remote::protocol::{OpenKind, Pane, Tab, Window};
 use rift_remote::registry::{self, Permission};
-use rift_remote::{Input, InputError, OutputError, OutputPage, Page, Screen, Source, SourceError};
+use rift_remote::{
+    CompletePage, DiffPage, Input, InputError, Menu, MenuKind, OutputError, OutputPage, Page,
+    Screen, Source, SourceError,
+};
 use std::collections::HashMap;
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
@@ -161,6 +165,9 @@ impl Source for ControlSource {
                                 job: p.job,
                                 last_command: p.last_command,
                                 last_exit: p.last_exit,
+                                git: p.git,
+                                waiting: p.waiting,
+                                running: p.running,
                             }
                         })
                         .collect(),
@@ -255,6 +262,26 @@ impl Source for ControlSource {
         }
     }
 
+    fn open(&self, pane: u64, device: &str, kind: OpenKind) -> Result<u64, InputError> {
+        let req = Request::RemoteOpen {
+            pane: local_pane(pane),
+            device: device.to_string(),
+            kind,
+        };
+        match self.ask(pane, &req) {
+            // the new pane is in the same window as `pane`
+            Ok(Some(r)) if r.ok => match (r.pane, u32::try_from(pane >> LOCAL_BITS)) {
+                (Some(local), Ok(pid)) if local < 1 << LOCAL_BITS => Ok(remote_pane(pid, local)),
+                _ => Err(InputError::Unavailable(
+                    "the window did not name the new pane".into(),
+                )),
+            },
+            Ok(Some(r)) => Err(input_error(r.error.as_deref().unwrap_or_default())),
+            Ok(None) => Err(InputError::NoPane),
+            Err(e) => Err(InputError::Unavailable(e.to_string())),
+        }
+    }
+
     /// The pane's screen; the window is told the generation of the one held
     /// from it (same window, same `force`), and answers `unchanged` instead
     /// of building it again while its output did not move.
@@ -333,7 +360,121 @@ impl Source for ControlSource {
             Err(e) => Err(OutputError::Unavailable(e.to_string())),
         }
     }
+
+    fn menu(&self, pane: u64, kind: MenuKind) -> Result<Menu, OutputError> {
+        let req = Request::Menu {
+            pane: local_pane(pane),
+            kind,
+        };
+        match self.ask(pane, &req) {
+            Ok(Some(r)) if r.ok => r
+                .menu
+                .ok_or_else(|| OutputError::Unavailable("no menu in the answer".into())),
+            Ok(Some(r)) => Err(OutputError::Unavailable(r.error.unwrap_or_default())),
+            Ok(None) => Err(OutputError::NoPane),
+            Err(e) => Err(OutputError::Unavailable(e.to_string())),
+        }
+    }
+
+    fn complete(&self, pane: u64, line: &str, cursor: usize) -> Result<CompletePage, OutputError> {
+        let req = Request::Complete {
+            pane: local_pane(pane),
+            line: line.to_string(),
+            cursor,
+        };
+        match self.ask(pane, &req) {
+            Ok(Some(r)) if r.ok => Ok(r.complete.unwrap_or_default()),
+            Ok(Some(r)) => Err(OutputError::Unavailable(r.error.unwrap_or_default())),
+            Ok(None) => Err(OutputError::NoPane),
+            Err(e) => Err(OutputError::Unavailable(e.to_string())),
+        }
+    }
+
+    fn diff(&self, pane: u64, path: &str, staged: bool) -> Result<DiffPage, OutputError> {
+        let req = Request::Diff {
+            pane: local_pane(pane),
+            path: path.to_string(),
+            staged,
+        };
+        match self.ask(pane, &req) {
+            Ok(Some(r)) if r.ok => Ok(r.diff.unwrap_or_default()),
+            Ok(Some(r)) if r.error.as_deref() == Some(NO_CHANGE) => Err(OutputError::NoBlock),
+            Ok(Some(r)) => Err(OutputError::Unavailable(r.error.unwrap_or_default())),
+            Ok(None) => Err(OutputError::NoPane),
+            Err(e) => Err(OutputError::Unavailable(e.to_string())),
+        }
+    }
 }
+
+/// `complete` for the phone (a window's `Request::Complete`): `line`'s
+/// completions, each as the whole resulting line (the word at `cursor`
+/// replaced, as the desktop's Tab does), then the commands starting with
+/// `line` that ran before, newest first and each once: the pane's blocks
+/// (`(command, finished at)`, oldest first), its editor history, the
+/// imported shell history (both oldest first, without times).
+pub fn complete_page(
+    line: &str,
+    cursor: usize,
+    blocks: &[(String, Option<u64>)],
+    editor_history: &[String],
+    shell_history: &[String],
+    cwd: Option<&str>,
+) -> CompletePage {
+    use rift_core::completion::{complete, current_token, token_end};
+    use rift_remote::protocol::{Completion, CompletionKind, HistoryEntry};
+    // a few more than the wire keeps, so `more` is set when some are cut
+    const KEEP: usize = rift_remote::MAX_COMPLETE_ITEMS + 1;
+    let mut items = Vec::new();
+    if !line.trim().is_empty() && line.is_char_boundary(cursor) {
+        let (start, _) = current_token(line, cursor);
+        let end = token_end(line, cursor);
+        // the whole word around the cursor, as the desktop's Tab completes it
+        for c in complete(line, end, editor_history, shell_history, cwd) {
+            let kind = match c.source {
+                "history" => continue,
+                "command" => CompletionKind::Command,
+                "shell" => CompletionKind::Subcommand,
+                "option" => CompletionKind::Option,
+                "path" => CompletionKind::Path,
+                _ => CompletionKind::Value,
+            };
+            let text = format!("{}{}{}", &line[..start], c.insert, &line[end..]);
+            if !items.iter().any(|i: &Completion| i.text == text) {
+                items.push(Completion { text, kind });
+            }
+            if items.len() >= KEEP {
+                break;
+            }
+        }
+    }
+    let mut history: Vec<HistoryEntry> = Vec::new();
+    let ran = blocks
+        .iter()
+        .rev()
+        .map(|(c, at)| (c.as_str(), *at))
+        .chain(editor_history.iter().rev().map(|c| (c.as_str(), None)))
+        .chain(shell_history.iter().rev().map(|c| (c.as_str(), None)));
+    for (text, at) in ran {
+        let text = text.trim();
+        if text.is_empty() || !text.starts_with(line) || text.contains('\n') {
+            continue;
+        }
+        if history.iter().any(|h| h.text == text) {
+            continue;
+        }
+        history.push(HistoryEntry {
+            text: text.to_string(),
+            at,
+        });
+        if history.len() >= KEEP {
+            break;
+        }
+    }
+    CompletePage { items, history }
+}
+
+/// A window's `diff` error for a path that is not among the changes.
+pub const NO_CHANGE: &str = "no such change";
 
 /// A window's `output` error for a block the pane does not have.
 pub const NO_BLOCK: &str = "no such block";
@@ -890,6 +1031,15 @@ pub fn sent_toast(device: &str, keys: &[rift_remote::Key]) -> String {
     )
 }
 
+/// The desktop's toast for a phone's `open`: `<device> opened a tab`.
+pub fn opened_toast(device: &str, kind: OpenKind) -> String {
+    let what = match kind {
+        OpenKind::Tab => "a tab",
+        OpenKind::Pane => "a pane",
+    };
+    format!("{} opened {what}", shown(device, TOAST_DEVICE))
+}
+
 /// The desktop's toast for a phone's text: `<device> typed into a program`.
 /// Never the text itself: it may be a password.
 pub fn typed_toast(device: &str) -> String {
@@ -937,6 +1087,83 @@ pub fn spawn_managed(dir: &Path) -> std::io::Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completions_are_whole_lines_and_history_is_newest_first_once() {
+        let dir = std::env::temp_dir().join(format!("rift-complete-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        let cwd = dir.to_str();
+        let blocks = [
+            ("cargo test -p a".to_string(), Some(100)),
+            ("ls".to_string(), Some(150)),
+            ("cargo test --workspace".to_string(), Some(200)),
+        ];
+        let editor = ["cargo test --workspace".to_string()];
+        let shell = ["cargo test -p a".to_string(), "cargo tree".to_string()];
+        let page = complete_page("cargo t", 7, &blocks, &editor, &shell, cwd);
+        let texts: Vec<&str> = page.items.iter().map(|i| i.text.as_str()).collect();
+        assert!(texts.contains(&"cargo test"), "{texts:?}");
+        assert!(texts.contains(&"cargo tree"), "{texts:?}");
+        assert!(
+            page.items
+                .iter()
+                .all(|i| i.kind == rift_remote::protocol::CompletionKind::Subcommand)
+        );
+        let history: Vec<(&str, Option<u64>)> = page
+            .history
+            .iter()
+            .map(|h| (h.text.as_str(), h.at))
+            .collect();
+        assert_eq!(
+            history,
+            [
+                ("cargo test --workspace", Some(200)),
+                ("cargo test -p a", Some(100)),
+                ("cargo tree", None)
+            ]
+        );
+        // the word under a mid-line cursor is replaced, the rest kept
+        let page = complete_page("ls sr | wc", 5, &[], &[], &[], cwd);
+        assert!(
+            page.items.iter().any(|i| i.text == "ls src/ | wc"),
+            "{:?}",
+            page.items
+        );
+        // a cursor inside the word completes the whole word (`sr`, not `s`)
+        let page = complete_page("ls sr | wc", 4, &[], &[], &[], cwd);
+        let texts: Vec<&str> = page.items.iter().map(|i| i.text.as_str()).collect();
+        assert_eq!(texts, ["ls src/ | wc"]);
+        // an empty line: no completions, every command ran before
+        let page = complete_page("", 0, &blocks, &[], &[], cwd);
+        assert!(page.items.is_empty());
+        assert_eq!(page.history.len(), 3);
+        // a cursor inside a character completes nothing (and does not panic)
+        assert!(complete_page("é", 1, &[], &[], &[], cwd).items.is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// rift-remote has no rift-core dependency (the relay builds without
+    /// it), so the window's menu bounds and the wire's are two constants
+    /// each: they must agree.
+    #[test]
+    fn waiting_bounds_match_the_wire() {
+        use rift_core::prompts as p;
+        assert_eq!(
+            (
+                p::MAX_PROMPT_CHARS,
+                p::MAX_CHOICES,
+                p::MAX_CHOICE_CHARS,
+                p::MAX_CONTEXT_LINES
+            ),
+            (
+                rift_remote::MAX_WAITING_PROMPT,
+                rift_remote::MAX_WAITING_CHOICES,
+                rift_remote::MAX_WAITING_CHOICE,
+                rift_remote::MAX_WAITING_CONTEXT
+            )
+        );
+    }
 
     #[test]
     fn pretty_hostname_comes_from_machine_info() {
@@ -1005,6 +1232,8 @@ mod tests {
             typed_toast(&"p".repeat(100)).chars().count(),
             TOAST_DEVICE + 21
         );
+        assert_eq!(opened_toast("phone", OpenKind::Tab), "phone opened a tab");
+        assert_eq!(opened_toast("phone", OpenKind::Pane), "phone opened a pane");
     }
 
     #[test]

@@ -5,6 +5,7 @@
 //   rift.hosts        JSON array of paired gateway keys, in display order
 //   rift.host.<key>   one paired desktop (HostRecord)
 //   rift.settings     Settings
+//   rift.last         LastView: the host (and pane) on screen when the app last showed one
 //
 // Hosts live one per entry so no single keychain item grows with the number of desktops.
 
@@ -78,6 +79,11 @@ export interface HostRecord {
   via?: "lan" | "relay";
   /** false: no finish notifications from this computer except "Notify me". Absent: on. */
   notifications?: boolean;
+  /** The computer's OS and Rift version from its last `welcome` (Computers shows them while offline). */
+  os?: string;
+  version?: string;
+  /** Epoch milliseconds of the last `welcome` ("last seen"). */
+  seenAt?: number;
 }
 
 const HOSTS_INDEX = "rift.hosts";
@@ -97,7 +103,10 @@ export function isHostRecord(v: unknown): v is HostRecord {
     typeof h.pairedAt === "string" &&
     (h.relay === undefined || (typeof h.relay === "string" && normalizeRelayUrl(h.relay) === h.relay)) &&
     (h.via === undefined || h.via === "lan" || (h.via === "relay" && h.relay !== undefined)) &&
-    (h.notifications === undefined || typeof h.notifications === "boolean")
+    (h.notifications === undefined || typeof h.notifications === "boolean") &&
+    (h.os === undefined || (typeof h.os === "string" && h.os.length <= 64)) &&
+    (h.version === undefined || (typeof h.version === "string" && h.version.length <= 64)) &&
+    (h.seenAt === undefined || (typeof h.seenAt === "number" && Number.isSafeInteger(h.seenAt) && h.seenAt >= 0))
   );
 }
 
@@ -151,7 +160,14 @@ export class HostsStore {
 export interface Settings {
   /** null: the system device name. */
   deviceName: string | null;
-  confirmEveryCommand: boolean;
+  /** "Ask before running": the Confirm sheet before every Run (off: Run sends at once). */
+  askBeforeRun: boolean;
+  /** "Notify me when my commands finish": every command run from this phone asks to be told. */
+  notifyMyCommands: boolean;
+  /** "Wrap long lines" in block output (off: each block scrolls sideways). */
+  wrapLines: boolean;
+  /** "Show keys above the command line" (off: the row shows only under a full-screen program). */
+  showKeys: boolean;
   /** Which finished commands notify (besides "Notify me"): none, failed ones, or all. */
   notifyPolicy: NotifyPolicy;
   /** Only commands that ran at least this long notify (one of NOTIFY_AFTER_CHOICES). */
@@ -159,7 +175,7 @@ export interface Settings {
   showCommandInNotification: boolean;
   /** Face ID / fingerprint (or the device passcode) on launch and after 5 minutes away. */
   biometricLock: boolean;
-  /** With the lock and "Confirm every command" on: authenticate before Run. */
+  /** With the lock and "Ask before running" on: authenticate before Run ("Run with Face ID"). */
   authBeforeRun: boolean;
   /** The control-key row, in order (ids from CONTROL_KEYS). */
   controlKeys: string[];
@@ -181,7 +197,10 @@ export const NOTIFY_AFTER_CHOICES: readonly number[] = [10_000, 30_000, 60_000, 
 
 export const DEFAULT_SETTINGS: Settings = {
   deviceName: null,
-  confirmEveryCommand: true,
+  askBeforeRun: false,
+  notifyMyCommands: true,
+  wrapLines: true,
+  showKeys: false,
   notifyPolicy: "off",
   notifyAfterMs: 30_000,
   showCommandInNotification: false,
@@ -205,7 +224,15 @@ export async function loadSettings(kv: KeyValueStore): Promise<Settings> {
     const bool = (k: keyof Settings) => (typeof v[k] === "boolean" ? (v[k] as boolean) : (DEFAULT_SETTINGS[k] as boolean));
     return {
       deviceName: typeof v.deviceName === "string" && v.deviceName.trim() !== "" ? v.deviceName.slice(0, MAX_DEVICE_NAME) : null,
-      confirmEveryCommand: bool("confirmEveryCommand"),
+      // Before the redesign "Confirm every command" (`confirmEveryCommand`, on by default). Every
+      // save stored the whole object, so a stored value cannot tell a choice from the default:
+      // as the user asked, it is not carried over and the new setting starts off.
+      askBeforeRun: bool("askBeforeRun"),
+      notifyMyCommands: bool("notifyMyCommands"),
+      wrapLines: bool("wrapLines"),
+      // absent before the switch: off (the default), as the P3 Pane board draws the command line
+      // without the key row
+      showKeys: bool("showKeys"),
       // Before Phase 3 a boolean `notifyDone` (long commands, failed or not).
       notifyPolicy:
         v.notifyPolicy === "off" || v.notifyPolicy === "failures" || v.notifyPolicy === "all"
@@ -238,4 +265,50 @@ export async function loadSettings(kv: KeyValueStore): Promise<Settings> {
 
 export async function saveSettings(kv: KeyValueStore, settings: Settings): Promise<void> {
   await kv.set(SETTINGS_KEY, JSON.stringify(settings));
+}
+
+// --- last view -------------------------------------------------------------------------------
+
+/** The host (and pane) on screen when the app last showed one; reopened on a cold start. */
+export interface LastView {
+  host: string;
+  /** null: the host's tabs page. */
+  pane: number | null;
+}
+
+const LAST_KEY = "rift.last";
+
+export function isLastView(v: unknown): v is LastView {
+  if (typeof v !== "object" || v === null) return false;
+  const l = v as Record<string, unknown>;
+  return (
+    typeof l.host === "string" &&
+    fromBase64Url(l.host)?.length === 32 &&
+    (l.pane === null || (typeof l.pane === "number" && Number.isSafeInteger(l.pane) && l.pane >= 0))
+  );
+}
+
+/** null when none is stored or it cannot be read (the app then opens Now). */
+export async function loadLastView(kv: KeyValueStore): Promise<LastView | null> {
+  try {
+    const raw = await kv.get(LAST_KEY);
+    if (raw === null) return null;
+    const v: unknown = JSON.parse(raw);
+    return isLastView(v) ? { host: v.host, pane: v.pane } : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function saveLastView(kv: KeyValueStore, view: LastView | null): Promise<void> {
+  if (view === null) await kv.delete(LAST_KEY);
+  else await kv.set(LAST_KEY, JSON.stringify({ host: view.host, pane: view.pane }));
+}
+
+/**
+ * Where a cold start opens: the last host (and pane) while that host is still paired; null
+ * (Now) when it was unpaired, or nothing was open.
+ */
+export function restoreTarget(last: LastView | null, hosts: readonly { key: string }[]): LastView | null {
+  return last && hosts.some((h) => h.key === last.host) ? last : null;
 }

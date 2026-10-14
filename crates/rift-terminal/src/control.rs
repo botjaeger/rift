@@ -6,12 +6,12 @@
 //!
 //! | level | commands |
 //! |---|---|
-//! | `"off"` | no socket, unless `remote_access` is on: then only `status`, `blocks`, `remote-status` and `remote-input` (the remote gateway's requests) |
-//! | `"navigate"` (default) | `list`, `status`, `blocks`, `remote-status`, `focus`, `prepare-restart`, `remote-input` |
+//! | `"off"` | no socket, unless `remote_access` is on: then only the remote gateway's requests: `status`, `blocks`, `screen`, `output`, `menu`, `diff`, `complete`, `remote-status`, `remote-input` and `remote-open` |
+//! | `"navigate"` (default) | the gateway's requests, `list`, `focus`, `prepare-restart` |
 //! | `"full"` | also `split`, `open`, `send-text` (types into a shell) |
 //!
-//! `remote-input` is accepted only while `remote_access` is on, whatever
-//! the level.
+//! `remote-input` and `remote-open` are accepted only while `remote_access`
+//! is on, whatever the level.
 //!
 //! `prepare-restart` is sent by a window that installs an update: the
 //! receiver saves its layout to `<data dir>/restart/<pid>.toml`, leaves its
@@ -21,7 +21,10 @@
 //! refused.
 //!
 //! `rift-terminal ctl …` is the client. Requests are answered on the UI
-//! thread, so a response reflects exactly what the window shows.
+//! thread, so a response reflects exactly what the window shows — except
+//! `menu`, `diff` and `complete`, which read the filesystem and Git: the
+//! UI thread reads the pane's folder (and history), a thread of their own
+//! answers.
 
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -142,6 +145,30 @@ pub enum Request {
         from: u64,
         limit: usize,
     },
+    /// A prompt chip's menu for `pane` (a paired phone's chips): what the
+    /// folder and branch chip menus and the code review panel list.
+    /// Read-only.
+    Menu {
+        pane: u64,
+        kind: rift_remote::MenuKind,
+    },
+    /// The diff of one changed file of `pane`'s repository (`path` and
+    /// `staged` as `menu` `changes` lists it). Read-only.
+    Diff {
+        pane: u64,
+        path: String,
+        #[serde(default)]
+        staged: bool,
+    },
+    /// Completions and history for a command line in `pane` (a paired
+    /// phone's Run sheet): what the editor would complete for `line` with
+    /// the cursor at byte `cursor`, and the commands that ran before.
+    /// Read-only.
+    Complete {
+        pane: u64,
+        line: String,
+        cursor: usize,
+    },
     /// Input from a paired phone, sent by the remote gateway: exactly one
     /// of `command` (a command line for a pane at its prompt, as if typed
     /// and Enter pressed), `keys` (protocol key names, as if pressed) or
@@ -159,6 +186,15 @@ pub enum Request {
         keys: Option<Vec<String>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         text: Option<String>,
+    },
+    /// A paired phone's `open`, sent by the remote gateway: a new tab in
+    /// this window, or a new pane split right from `pane`, starting in
+    /// `pane`'s folder; answers the new pane. Accepted only while
+    /// `remote_access` is on, like `remote-input`.
+    RemoteOpen {
+        pane: u64,
+        device: String,
+        kind: rift_remote::protocol::OpenKind,
     },
     /// Sent by the remote gateway whenever its `status.json` changed (it
     /// started, a phone connected or left): the window re-reads it at once
@@ -179,14 +215,18 @@ impl Request {
     /// Least level that may run this request.
     pub fn level(&self) -> Level {
         match self {
-            // what the remote gateway asks; `remote-input` is also gated by
-            // `remote_access` in the window
+            // what the remote gateway asks; `remote-input` and `remote-open`
+            // are also gated by `remote_access` in the window
             Request::Status
             | Request::Blocks { .. }
             | Request::Screen { .. }
             | Request::Output { .. }
+            | Request::Menu { .. }
+            | Request::Diff { .. }
+            | Request::Complete { .. }
             | Request::RemoteStatus
-            | Request::RemoteInput { .. } => Level::Remote,
+            | Request::RemoteInput { .. }
+            | Request::RemoteOpen { .. } => Level::Remote,
             Request::List | Request::Focus { .. } | Request::PrepareRestart { .. } => {
                 Level::Navigate
             }
@@ -209,6 +249,17 @@ pub struct PaneInfo {
     pub last_command: Option<String>,
     pub last_exit: Option<i32>,
     pub durable: bool,
+    /// The pane's prompt-chip git status (absent from older windows, outside
+    /// a repository, and before the window looked).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git: Option<rift_remote::protocol::PaneGit>,
+    /// What the pane's running command waits for (a password, an agent's
+    /// menu, an unread "needs your input"); absent when nothing waits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<rift_remote::protocol::Waiting>,
+    /// The running command's start and last line; absent at the prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub running: Option<rift_remote::protocol::PaneRunning>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -254,6 +305,15 @@ pub struct Response {
     /// `output`: the requested lines.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<rift_remote::OutputPage>,
+    /// `menu`: the chip menu.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub menu: Option<rift_remote::Menu>,
+    /// `diff`: the file's lines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<rift_remote::DiffPage>,
+    /// `complete`: completions and history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub complete: Option<rift_remote::CompletePage>,
 }
 
 impl Response {
@@ -978,6 +1038,13 @@ mod tests {
             r#"{"cmd":"status"}"#,
             r#"{"cmd":"blocks","pane":1}"#,
             r#"{"cmd":"remote-input","pane":1,"device":"d","keys":["ctrl+c"]}"#,
+            r#"{"cmd":"screen","pane":1}"#,
+            r#"{"cmd":"output","pane":1,"block":2,"from":0,"limit":10}"#,
+            r#"{"cmd":"menu","pane":1,"kind":"changes"}"#,
+            r#"{"cmd":"diff","pane":1,"path":"a.rs"}"#,
+            r#"{"cmd":"complete","pane":1,"line":"ls","cursor":2}"#,
+            r#"{"cmd":"remote-open","pane":1,"device":"d","kind":"tab"}"#,
+            r#"{"cmd":"remote-open","pane":1,"device":"d","kind":"pane"}"#,
         ] {
             assert!(parse(ok).level() <= Level::Remote, "{ok}");
         }

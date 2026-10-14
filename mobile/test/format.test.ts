@@ -1,5 +1,21 @@
 import { describe, expect, it } from "vitest";
-import { formatDuration, insertedChar, osName, tailLines } from "../src/ui/format";
+import { formatClock, formatDuration, insertedChar, plainPunctuation, osName, tailLines } from "../src/ui/format";
+
+describe("plainPunctuation", () => {
+  it("undoes the keyboard's smart dashes and quotes", () => {
+    expect(plainPunctuation("cargo fmt \u2014all")).toBe("cargo fmt --all");
+    expect(plainPunctuation("git commit -m \u201cfix it\u201d && echo \u2018ok\u2019")).toBe("git commit -m \"fix it\" && echo 'ok'");
+    expect(plainPunctuation("ls -la")).toBe("ls -la");
+  });
+});
+
+describe("formatClock", () => {
+  it("is m:ss, h:mm:ss past an hour", () => {
+    expect(formatClock(0)).toBe("0:00");
+    expect(formatClock(252_000)).toBe("4:12");
+    expect(formatClock(3_723_000)).toBe("1:02:03");
+  });
+});
 
 describe("format", () => {
   it("osName", () => {

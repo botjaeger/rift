@@ -1,10 +1,10 @@
 import { StyleSheet, Text, View } from "react-native";
 import type { ConnState } from "@/protocol/client";
 import { describeConn } from "./connLabel";
-import { colors } from "./theme";
+import { colors, ui } from "./theme";
 
 /**
- * The live connection status with its path ("Connected · LAN · 192.168.1.29"). As the pane's
+ * The live connection status with its path ("Connected · LAN 192.168.1.29"). As the pane's
  * `banner` it is a full-width strip; screen readers hear changes politely.
  */
 export function StatusLine({ conn, banner = false }: { conn: ConnState; banner?: boolean }) {
@@ -32,6 +32,6 @@ const styles = StyleSheet.create({
     borderBottomColor: colors.hairline,
   },
   dot: { width: 8, height: 8, borderRadius: 4 },
-  text: { color: colors.textMuted, fontSize: 13, flexShrink: 1 },
-  bannerText: { fontSize: 12 },
+  text: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13, flexShrink: 1 },
+  bannerText: { fontFamily: ui(400), fontSize: 12 },
 });

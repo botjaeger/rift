@@ -84,15 +84,15 @@ export const NTFY_ROTATED =
   "New topic made. Subscribe to it in ntfy; computers that get it stop posting to the old topic. " +
   "One that is offline may post there until it reconnects, and one unpaired while offline may keep posting there.";
 
-/** Settings › "Alerts through ntfy" footer: what the ntfy server sees, and that the topic is the secret. */
-export function ntfyFooter(server: string): string {
+/**
+ * Settings › While the app is closed footer (the Settings board): what the ntfy server sees.
+ * With "Show the command" on, the command line too.
+ */
+export function ntfyFooter(server: string, showCommand = false): string {
   const who = server === NTFY_SERVER ? "ntfy.sh" : server.replace(/^https:\/\//, "");
-  return (
-    `Free, with the ntfy app; replaces push for the computers that support it. ${who} sees, per ` +
-    "alert, the computer's name and IP address, the exit status, a link to the pane (the " +
-    "computer's public key and pane number) and, only with “Show command in notification”, the " +
-    "command line. Never output. The topic name is the secret: anyone who knows it can read these alerts."
-  );
+  return showCommand
+    ? `${who} sees each alert's computer name, exit status, a link to the pane and, with “Show the command”, the command line. Never output.`
+    : `${who} sees each alert's computer name, exit status and a link to the pane. Never output.`;
 }
 
 /** The default "Notify after": commands at least this long notify without being asked to. */
@@ -197,10 +197,16 @@ export function notificationText(
 
 /** The parts of a notification response (expo-notifications) that `tapTarget` reads. */
 export interface TapResponse {
+  /** The alert's action button pressed ("yes", "no", "open"), or the system's default tap. */
+  actionIdentifier?: string;
   notification: {
     request: { identifier: string; content: { data?: unknown } };
   };
 }
+
+/** The alert categories (the P6 Lock board): a question with Yes / No / Open, or Open only. */
+export const ASK_CATEGORY = "rift-ask";
+export const ASK_OPEN_CATEGORY = "rift-ask-open";
 
 /**
  * The pane a tapped notification opens, once per notification: the launch response and the
@@ -208,14 +214,24 @@ export interface TapResponse {
  * launch response again. `handled` holds the identifiers already opened. Null when the tap was
  * handled already or carries no pane.
  */
-export function tapTarget(r: TapResponse | null, handled: Set<string>): { host: string; pane: number } | null {
+export function tapTarget(
+  r: TapResponse | null,
+  handled: Set<string>,
+): { host: string; pane: number; ask?: string; action?: "yes" | "no" | "open" } | null {
   if (!r) return null;
   const id = r.notification.request.identifier;
   if (handled.has(id)) return null;
-  const data = r.notification.request.content.data as { host?: unknown; pane?: unknown } | undefined;
+  const data = r.notification.request.content.data as { host?: unknown; pane?: unknown; ask?: unknown } | undefined;
   if (typeof data?.host !== "string" || typeof data.pane !== "number") return null;
   handled.add(id);
-  return { host: data.host, pane: data.pane };
+  const out: { host: string; pane: number; ask?: string; action?: "yes" | "no" | "open" } = { host: data.host, pane: data.pane };
+  // a "Needs you" alert carries its question: Yes and No answer it, a tap opens it
+  if (typeof data.ask === "string") {
+    out.ask = data.ask;
+    const a = r.actionIdentifier;
+    out.action = a === "yes" || a === "no" ? a : "open";
+  }
+  return out;
 }
 
 /** Settings › Notifications' footer: where notifications come from, and what push carries. */
@@ -224,10 +240,10 @@ export function pushFooter(
   ntfyOn = false,
 ): string {
   // ntfy replaces Expo push for the computers that support it (fleet `sendPush`)
-  if (ntfyOn) return "While the app is closed, your computers send these through the ntfy app (below).";
+  if (ntfyOn) return "While the app is closed, your computers send these through the ntfy app.";
   switch (push.state) {
     case "on":
-      return "While the app is closed, your computers send these through Expo and Apple's or Google's push service: the computer's name, the exit status and, only with the switch above, the command line. Never output.";
+      return "While the app is closed, your computers send these through Expo and Apple's or Google's push service: the computer's name, the exit status and, only with “Show the command”, the command line. Never output.";
     case "off":
       return "Notifications come from this app while it is open. Allow notifications to get them while it is closed too.";
     case "unavailable":

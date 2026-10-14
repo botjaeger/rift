@@ -211,6 +211,9 @@ struct Attention {
     /// Status, duration or notification body.
     detail: String,
     read: bool,
+    /// The pane's input count when it was raised (`Session::inputs`): a
+    /// request is still open while nothing was typed since.
+    inputs: u64,
 }
 
 impl Attention {
@@ -227,6 +230,7 @@ impl Attention {
             title,
             detail,
             read: false,
+            inputs: 0,
         }
     }
 
@@ -3320,6 +3324,7 @@ impl App {
         if a.agent.is_none() {
             a.agent = pane.and_then(Self::pane_agent);
         }
+        a.inputs = pane.map_or(0, |p| p.session.inputs());
         self.next_attention_id += 1;
         a.id = self.next_attention_id;
         let id = a.id;
@@ -5496,7 +5501,7 @@ impl App {
             && let Some((_, tab)) = self.find_tab_of_pane(pane)
             && let Some(p) = tab.pane(pane)
         {
-            p.session.write(text.as_bytes());
+            p.session.write_report(text.as_bytes());
         }
     }
 
@@ -11455,7 +11460,7 @@ impl App {
             crate::mouse::report(button, pressed, motion, self.modifiers, cell.0, cell.1, enc)
             && let Some(p) = self.tabs.get(self.active).and_then(|t| t.pane(pane))
         {
-            p.session.write(&bytes);
+            p.session.write_report(&bytes);
         }
     }
 
@@ -11658,7 +11663,7 @@ impl App {
                     .mode()
                     .contains(TermMode::FOCUS_IN_OUT)
             {
-                p.session.write(seq);
+                p.session.write_report(seq);
             }
         };
         if let Some(old) = self.focus_pane {
@@ -12203,11 +12208,244 @@ impl App {
                             last_command: last.as_ref().map(|l| l.0.clone()),
                             last_exit: last.and_then(|l| l.1),
                             durable: p.session.service_id.is_some(),
+                            git: p.git.as_ref().map(|g| rift_remote::protocol::PaneGit {
+                                branch: g.branch.clone(),
+                                ahead: g.ahead as u64,
+                                behind: g.behind as u64,
+                                dirty: g.dirty,
+                                files: g.files as u64,
+                                added: g.added as u64,
+                                removed: g.removed as u64,
+                            }),
+                            waiting: self.pane_waiting(p),
+                            running: Self::pane_running(p),
                         }
                     })
                     .collect(),
             })
             .collect()
+    }
+
+    /// `p`'s running command for a paired phone's Running list: when it
+    /// started and its latest line; none at the prompt.
+    fn pane_running(p: &PaneState) -> Option<rift_remote::protocol::PaneRunning> {
+        let last = p
+            .session
+            .blocks
+            .lock()
+            .unwrap()
+            .last()
+            .map(|b| (b.state.clone(), b.output_start));
+        let (started, from) = match last {
+            Some((BlockState::Running { started }, from)) => (Some(started), from),
+            _ if p.session.has_foreground_job() => (None, None),
+            _ => return None,
+        };
+        // a block that printed nothing yet has no line (never its prompt or
+        // command); without shell integration the screen's last line
+        let line = if from.is_some() || started.is_none() {
+            p.session.last_line(from)
+        } else {
+            String::new()
+        };
+        let started = started.and_then(|s| {
+            std::time::SystemTime::now()
+                .checked_sub(s.elapsed())?
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|d| d.as_secs())
+        });
+        Some(rift_remote::protocol::PaneRunning { started, line })
+    }
+
+    /// What `p`'s running command waits for (a paired phone's "Needs you"):
+    /// a password, an agent's menu on the screen, else an unread "needs your
+    /// input" for the pane in the attention center (its text is the
+    /// program's, bounded on the wire; the phone answers with text its user
+    /// types, as in the composer).
+    fn pane_waiting(&self, p: &PaneState) -> Option<rift_remote::protocol::Waiting> {
+        use rift_core::prompts::Waiting as W;
+        use rift_remote::protocol::{Waiting, WaitingKind};
+        let running = p.session.has_foreground_job()
+            || p.session
+                .blocks
+                .lock()
+                .unwrap()
+                .last()
+                .is_some_and(|b| matches!(b.state, BlockState::Running { .. }));
+        if running {
+            let hidden = p.session.input_hidden();
+            let line = p.session.cursor_line_text();
+            // menus only from a coding agent's screen: a phone's answer
+            // types into the program, and any other program can print a
+            // menu-shaped screen
+            let rows = if Self::pane_agent(p).is_some() {
+                p.session.screen_rows()
+            } else {
+                Vec::new()
+            };
+            match rift_core::prompts::waiting(hidden, &line, &rows) {
+                Some(W::Password { prompt }) => {
+                    return Some(Waiting {
+                        kind: WaitingKind::Password,
+                        prompt,
+                        choices: Vec::new(),
+                        selected: 0,
+                        numbered: false,
+                        context: Vec::new(),
+                    });
+                }
+                Some(W::Choice(c)) => {
+                    return Some(Waiting {
+                        kind: WaitingKind::Choice,
+                        prompt: c.prompt,
+                        choices: c.choices,
+                        selected: c.selected,
+                        numbered: c.numbered,
+                        context: c.context,
+                    });
+                }
+                None => {}
+            }
+        }
+        // a request the user answered since (typed anything into the pane)
+        // or that outlived its command is not waiting any more
+        if !running {
+            return None;
+        }
+        let inputs = p.session.inputs();
+        self.attention
+            .iter()
+            .rev()
+            .find(|a| {
+                a.pane == p.session.id
+                    && !a.read
+                    && a.kind == AttentionKind::Request
+                    && a.inputs == inputs
+            })
+            .map(|a| Waiting {
+                kind: WaitingKind::Input,
+                prompt: if a.detail.is_empty() || a.title.is_empty() {
+                    format!("{}{}", a.title, a.detail)
+                } else {
+                    format!("{} · {}", a.title, a.detail)
+                },
+                choices: Vec::new(),
+                selected: 0,
+                numbered: false,
+                context: Vec::new(),
+            })
+    }
+
+    /// `complete` from the remote gateway: the providers read the
+    /// filesystem and Git, so they run on a thread of their own, which
+    /// answers the request.
+    fn complete_remote(&mut self, p: crate::control::Pending) {
+        use crate::control::{Request, Response};
+        let Request::Complete { pane, line, cursor } = p.request else {
+            return;
+        };
+        let shell = self.shell_history.clone();
+        let Some(pn) = self.find_tab_of_pane(pane).and_then(|(_, t)| t.pane(pane)) else {
+            let _ = p.reply.send(Response::error("no such pane"));
+            return;
+        };
+        if !line.is_char_boundary(cursor) {
+            let _ = p.reply.send(Response::error("cursor inside a character"));
+            return;
+        }
+        let unix = |t: std::time::SystemTime| {
+            t.duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|d| d.as_secs())
+        };
+        let blocks: Vec<(String, Option<u64>)> = pn
+            .session
+            .blocks
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|b| !b.command.trim().is_empty())
+            .map(|b| (b.command.clone(), b.finished_at.and_then(unix)))
+            .collect();
+        let editor: Vec<String> = pn
+            .editor
+            .history
+            .iter()
+            .rev()
+            .take(200)
+            .rev()
+            .cloned()
+            .collect();
+        let cwd = pn.session.cwd.lock().unwrap().clone();
+        let reply = p.reply;
+        let spawned = std::thread::Builder::new()
+            .name("remote-complete".into())
+            .spawn(move || {
+                let page = crate::remote::complete_page(
+                    &line,
+                    cursor,
+                    &blocks,
+                    &editor,
+                    &shell,
+                    cwd.as_deref(),
+                );
+                let _ = reply.send(Response {
+                    ok: true,
+                    pane: Some(pane),
+                    complete: Some(page),
+                    ..Default::default()
+                });
+            });
+        if let Err(e) = spawned {
+            log::warn!("remote completion thread: {e}");
+        }
+    }
+
+    /// `menu` / `diff` from the remote gateway: they read the filesystem
+    /// and diff the repository (a large one takes seconds), so only the
+    /// pane's folder is read here; a thread of their own answers.
+    fn chip_remote(&mut self, p: crate::control::Pending) {
+        use crate::control::{Request, Response};
+        use crate::views::chip_menu::{remote_diff, remote_menu};
+        let pane = match &p.request {
+            Request::Menu { pane, .. } | Request::Diff { pane, .. } => *pane,
+            _ => return,
+        };
+        let Some(pn) = self.find_tab_of_pane(pane).and_then(|(_, t)| t.pane(pane)) else {
+            let _ = p.reply.send(Response::error("no such pane"));
+            return;
+        };
+        let cwd = pn.session.cwd.lock().unwrap().clone();
+        let (request, reply) = (p.request, p.reply);
+        let spawned = std::thread::Builder::new()
+            .name("remote-chip".into())
+            .spawn(move || {
+                let answer = match request {
+                    Request::Menu { kind, .. } => Response {
+                        ok: true,
+                        pane: Some(pane),
+                        menu: Some(remote_menu(kind, cwd.as_deref())),
+                        ..Default::default()
+                    },
+                    Request::Diff { path, staged, .. } => {
+                        match cwd.and_then(|c| remote_diff(&c, &path, staged)) {
+                            Some(diff) => Response {
+                                ok: true,
+                                pane: Some(pane),
+                                diff: Some(diff),
+                                ..Default::default()
+                            },
+                            None => Response::error(crate::remote::NO_CHANGE),
+                        }
+                    }
+                    _ => return,
+                };
+                let _ = reply.send(answer);
+            });
+        if let Err(e) = spawned {
+            log::warn!("remote chip thread: {e}");
+        }
     }
 
     /// Revoke the old listener and queued requests whenever the level changes.
@@ -12301,6 +12539,10 @@ impl App {
                 },
                 None => Response::error("no such pane"),
             },
+            // answered off this thread (`complete_remote`, `chip_remote`)
+            Request::Complete { .. } | Request::Menu { .. } | Request::Diff { .. } => {
+                Response::error("answered by its own thread")
+            }
             Request::Focus { tab, pane } => {
                 self.settings.open = false;
                 let target = match (tab, pane) {
@@ -12373,6 +12615,7 @@ impl App {
                 keys,
                 text,
             } => self.remote_input(pane, &device, command, keys, text),
+            Request::RemoteOpen { pane, device, kind } => self.remote_open(pane, &device, kind),
             Request::RemoteStatus => {
                 // the gateway's status changed: the chip follows at once
                 self.remote.notices += 1;
@@ -13849,6 +14092,51 @@ impl App {
         Response {
             ok: true,
             pane: Some(pane),
+            ..Default::default()
+        }
+    }
+
+    /// A phone's `open` next to `pane`: a new tab, or a split to its right,
+    /// starting where a new pane from `pane` would. The desktop shows it, as
+    /// for `rift-terminal ctl open` / `split`.
+    fn remote_open(
+        &mut self,
+        pane: u64,
+        device: &str,
+        kind: rift_remote::protocol::OpenKind,
+    ) -> crate::control::Response {
+        use crate::control::Response;
+        use rift_remote::protocol::OpenKind;
+        if !self.config.remote_access {
+            return Response::error("remote access is off");
+        }
+        let Some((ti, tab)) = self.find_tab_of_pane(pane) else {
+            return Response::error("no such pane");
+        };
+        let previous = tab
+            .pane(pane)
+            .and_then(|p| p.session.cwd.lock().unwrap().clone());
+        let cwd = self.config.start_dir(previous.as_deref());
+        let id = match kind {
+            OpenKind::Tab => {
+                self.spawn_tab_at(cwd);
+                self.tabs[self.active].active_pane
+            }
+            OpenKind::Pane => {
+                self.settings.open = false;
+                self.active = ti;
+                let id = self.split_pane(pane, Axis::Horizontal, cwd);
+                if self.tabs[ti].pane(id).is_none() {
+                    return Response::error("cannot split this pane");
+                }
+                self.save_session();
+                id
+            }
+        };
+        self.toast(crate::remote::opened_toast(device, kind));
+        Response {
+            ok: true,
+            pane: Some(id),
             ..Default::default()
         }
     }
@@ -15456,7 +15744,7 @@ impl ApplicationHandler<UserEvent> for App {
                         && let Some(p) = tab.pane(pane)
                     {
                         p.session
-                            .write((reply.0)(&text.unwrap_or_default()).as_bytes());
+                            .write_report((reply.0)(&text.unwrap_or_default()).as_bytes());
                     }
                 }
             }
@@ -15473,7 +15761,7 @@ impl ApplicationHandler<UserEvent> for App {
                         g: to8(c.g),
                         b: to8(c.b),
                     };
-                    p.session.write((reply.0)(rgb).as_bytes());
+                    p.session.write_report((reply.0)(rgb).as_bytes());
                 }
             }
             UserEvent::PtyWindowOp(pane, params) => self.window_op(pane, &params),
@@ -15528,6 +15816,20 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
+            }
+            UserEvent::Control(p)
+                if matches!(p.request, crate::control::Request::Complete { .. })
+                    && p.allowed(self.control_level()) =>
+            {
+                self.complete_remote(p);
+            }
+            UserEvent::Control(p)
+                if matches!(
+                    p.request,
+                    crate::control::Request::Menu { .. } | crate::control::Request::Diff { .. }
+                ) && p.allowed(self.control_level()) =>
+            {
+                self.chip_remote(p);
             }
             UserEvent::Control(p) => {
                 let response = if p.allowed(self.control_level()) {

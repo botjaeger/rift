@@ -28,17 +28,18 @@
 //! `busy`.
 
 use crate::protocol::{
-    Block, BlockState, ClientHello, ClientMsg, ErrorCode, GatewayHello, Permission, Run,
+    Block, BlockState, ClientHello, ClientMsg, ErrorCode, GatewayHello, OpenKind, Permission, Run,
     ScreenMode, ServerMsg, VERSION,
 };
 use crate::registry::{self, Device, RelayState, RelayStatus, Via};
 use crate::transport::{self, Channel, KEY_LEN, Recv, Socket};
 use crate::{
     FAILURE_WINDOW, HANDSHAKE_DEADLINE, IDLE_TIMEOUT, Input, InputError, KEYS_RATE, Key,
-    MAX_BLOCKS, MAX_CLIENT_MESSAGE, MAX_COMMAND, MAX_CONNECTIONS, MAX_FAILURES,
+    MAX_BLOCKS, MAX_CLIENT_MESSAGE, MAX_COMMAND, MAX_CONNECTIONS, MAX_DIFF_PATH, MAX_FAILURES,
     MAX_GATEWAY_MESSAGE, MAX_KEYS, MAX_OUTPUT_PAGE_LINES, MAX_REQUEST_ID, MAX_SCREEN_COLS,
-    MAX_SCREEN_ROWS, MAX_TEXT, MAX_TRACKED, OUTPUT_RATE, OutputError, PANE_POLL, PING_INTERVAL,
-    Page, REFUSAL, REPLAY_RING, RUN_RATE, Screen, Source, SourceError, TOPOLOGY_POLL,
+    MAX_SCREEN_ROWS, MAX_TEXT, MAX_TRACKED, Menu, MenuKind, OPEN_RATE, OUTPUT_RATE, OutputError,
+    PANE_POLL, PING_INTERVAL, Page, REFUSAL, REPLAY_RING, RUN_RATE, Screen, Source, SourceError,
+    TOPOLOGY_POLL,
 };
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::io::ErrorKind;
@@ -75,7 +76,20 @@ const DONE_RUNNING: usize = 64;
 /// after the 45 s idle timeout.
 pub const FOLLOW_FRESH: Duration = Duration::from_secs(20);
 /// What this gateway serves beyond Phase 2 (`welcome.features`).
-const FEATURES: [&str; 5] = ["screen", "text", "output", "push_failures", "push_ntfy"];
+const FEATURES: [&str; 12] = [
+    "screen",
+    "text",
+    "output",
+    "push_failures",
+    "push_ntfy",
+    "git",
+    "notify_off",
+    "chips",
+    "waiting",
+    "complete",
+    "running",
+    "open",
+];
 
 /// Gateway settings. [`Config::new`] takes the limits from the protocol;
 /// tests shorten the timers.
@@ -390,6 +404,9 @@ impl Heard {
 struct Slot {
     tx: SyncSender<Arc<str>>,
     pane: Option<u64>,
+    /// The pane its last `subscribe` was refused (`no_pane`): the `screen`
+    /// the app sends right after it is dropped, not refused again.
+    refused: Option<u64>,
     /// The app is on screen (`visible`; true until it says otherwise).
     visible: bool,
     /// What it wants of `pane`'s screen (`off` after every (un)subscribe).
@@ -413,6 +430,7 @@ impl Slot {
     /// Follow `pane` (or nothing): screens stop silently, mode `off`.
     fn follow(&mut self, pane: Option<u64>) {
         self.pane = pane;
+        self.refused = None;
         self.screen = ScreenMode::Off;
         self.out.restart(false);
     }
@@ -948,7 +966,7 @@ fn poll_loop<S: Source>(shared: &Shared<S>) {
         }
         if last_topology.is_none_or(|t| t.elapsed() >= cfg.topology_poll) {
             last_topology = Some(Instant::now());
-            let windows = shared.source.topology();
+            let windows = crate::bound_topology(shared.source.topology());
             let all: HashSet<u64> = windows
                 .iter()
                 .flat_map(|w| &w.tabs)
@@ -1576,7 +1594,7 @@ fn serve_device<S: Source, T: Socket>(
         return;
     }
     let topology = frame(&ServerMsg::Topology {
-        windows: shared.source.topology(),
+        windows: crate::bound_topology(shared.source.topology()),
     });
     let id = shared.next_client.fetch_add(1, Ordering::Relaxed);
     let (tx, rx) = sync_channel(CLIENT_QUEUE);
@@ -1589,6 +1607,7 @@ fn serve_device<S: Source, T: Socket>(
             Slot {
                 tx,
                 pane: None,
+                refused: None,
                 visible: true,
                 screen: ScreenMode::Off,
                 out: ScreenOut::default(),
@@ -1661,6 +1680,7 @@ fn session<S: Source, T: Socket>(
     let mut runs = Rate::new(RUN_RATE);
     // `keys` and `text`
     let mut keys = Rate::new(KEYS_RATE);
+    let mut opens = Rate::new(OPEN_RATE);
     let mut outputs = Rate::new(OUTPUT_RATE);
     loop {
         match end.load(Ordering::Acquire) {
@@ -1765,6 +1785,35 @@ fn session<S: Source, T: Socket>(
                 from,
                 limit,
             }) => Some(output(shared, &mut outputs, rid, pane, block, from, limit)),
+            Ok(ClientMsg::Dirs { id: rid, pane }) => {
+                Some(menu(shared, &mut outputs, rid, pane, MenuKind::Dirs))
+            }
+            Ok(ClientMsg::Branches { id: rid, pane }) => {
+                Some(menu(shared, &mut outputs, rid, pane, MenuKind::Branches))
+            }
+            Ok(ClientMsg::Changes { id: rid, pane }) => {
+                Some(menu(shared, &mut outputs, rid, pane, MenuKind::Changes))
+            }
+            Ok(ClientMsg::Diff {
+                id: rid,
+                pane,
+                path,
+                staged,
+            }) => Some(diff(shared, device, &mut outputs, rid, pane, path, staged)),
+            Ok(ClientMsg::Complete {
+                id: rid,
+                pane,
+                line,
+                cursor,
+            }) => Some(complete(
+                shared,
+                device,
+                &mut outputs,
+                rid,
+                pane,
+                line,
+                cursor,
+            )),
             Ok(ClientMsg::Push {
                 token,
                 ntfy,
@@ -1782,7 +1831,15 @@ fn session<S: Source, T: Socket>(
                     failures_only,
                 },
             ),
-            Ok(ClientMsg::Notify { pane }) => {
+            Ok(ClientMsg::Notify { pane, off: true }) => {
+                shared
+                    .watches
+                    .lock()
+                    .unwrap()
+                    .take(&device.id, pane, Instant::now());
+                None
+            }
+            Ok(ClientMsg::Notify { pane, off: false }) => {
                 if shared
                     .watches
                     .lock()
@@ -1828,13 +1885,51 @@ fn session<S: Source, T: Socket>(
             }) => Some(input(shared, device, &mut keys, rid, pane, || {
                 check_text(&text).map(|()| Input::Text(text.clone()))
             })),
+            Ok(ClientMsg::Open {
+                id: rid,
+                pane,
+                kind,
+            }) => Some(open(shared, device, &mut opens, rid, pane, kind)),
         };
+        // what was queued meanwhile goes first (`open` queues the topology
+        // with its new pane before its ack)
+        while let Ok(f) = rx.try_recv() {
+            if !send(&mut ch, &f) {
+                return "error";
+            }
+        }
         if let Some(r) = reply
-            && !send_msg(&mut ch, &r)
+            && !send(&mut ch, &fit_reply(&r))
         {
             return "error";
         }
     }
+}
+
+/// `reply` as a frame; an answer over [`MAX_GATEWAY_MESSAGE`] (JSON escapes
+/// can grow a bounded page several times) is refused with a `too_large` ack
+/// instead, so the request does not wait for an answer that never comes.
+fn fit_reply(reply: &ServerMsg) -> Arc<str> {
+    let f = frame(reply);
+    if f.len() <= MAX_GATEWAY_MESSAGE {
+        return f;
+    }
+    let id = match reply {
+        ServerMsg::Output { id, .. }
+        | ServerMsg::Dirs { id, .. }
+        | ServerMsg::Branches { id, .. }
+        | ServerMsg::Changes { id, .. }
+        | ServerMsg::Diff { id, .. }
+        | ServerMsg::Complete { id, .. } => id,
+        // the rest are small; `send` drops one with a log line
+        _ => return f,
+    };
+    log::warn!("remote: a {} byte answer refused as too large", f.len());
+    frame(&ServerMsg::ack_err(
+        id.clone(),
+        ErrorCode::TooLarge,
+        "the answer is too large to send",
+    ))
 }
 
 /// `push`: store (or, with neither a token nor an ntfy URL, clear) the
@@ -1901,14 +1996,8 @@ fn input<S: Source>(
             format!("id is longer than {MAX_REQUEST_ID} characters"),
         );
     }
-    // the permission as of now (the connection closes within a second of a
-    // change, but nothing runs in between on the old one)
-    let now = registry::devices(&shared.config.dir)
-        .ok()
-        .and_then(|all| all.into_iter().find(|d| d.id == device.id))
-        .map(|d| d.permission);
-    if device.permission != Permission::Operate || now != Some(Permission::Operate) {
-        return ServerMsg::ack_err(rid, ErrorCode::Forbidden, "this device may only view");
+    if !operates(shared, device) {
+        return ServerMsg::ack_err(rid, ErrorCode::Forbidden, VIEW_ONLY);
     }
     if !rate.allow(Instant::now()) {
         return ServerMsg::ack_err(rid, ErrorCode::Rate, "too many requests; slow down");
@@ -1934,6 +2023,75 @@ fn input<S: Source>(
         ),
         Err(InputError::Unavailable(why)) => ServerMsg::ack_err(rid, ErrorCode::Busy, why),
     }
+}
+
+/// `open`: permission and rate like `run`, then the source. On success
+/// every connection gets the new topology before the ack, so the client
+/// already knows the new pane when it goes there.
+fn open<S: Source>(
+    shared: &Shared<S>,
+    device: &Device,
+    rate: &mut Rate,
+    rid: String,
+    pane: u64,
+    kind: OpenKind,
+) -> ServerMsg {
+    if rid.chars().count() > MAX_REQUEST_ID {
+        return ServerMsg::error(
+            ErrorCode::BadRequest,
+            format!("id is longer than {MAX_REQUEST_ID} characters"),
+        );
+    }
+    if !operates(shared, device) {
+        return ServerMsg::ack_err(rid, ErrorCode::Forbidden, VIEW_ONLY);
+    }
+    if !rate.allow(Instant::now()) {
+        return ServerMsg::ack_err(rid, ErrorCode::Rate, "too many requests; slow down");
+    }
+    match shared.source.open(pane, &device.name, kind) {
+        Ok(new) => {
+            push_topology(shared);
+            ServerMsg::ack_opened(rid, new)
+        }
+        Err(InputError::NoPane) => {
+            ServerMsg::ack_err(rid, ErrorCode::NoPane, format!("no pane {pane}"))
+        }
+        Err(InputError::Denied) => ServerMsg::ack_err(
+            rid,
+            ErrorCode::Forbidden,
+            "remote access is off on the desktop",
+        ),
+        Err(InputError::Busy) => ServerMsg::ack_err(rid, ErrorCode::Busy, "the desktop is busy"),
+        Err(InputError::Unavailable(why)) => ServerMsg::ack_err(rid, ErrorCode::Busy, why),
+    }
+}
+
+/// Send the source's topology to every connection now when it changed
+/// (the poll loop's, without waiting for the next poll).
+fn push_topology<S: Source>(shared: &Shared<S>) {
+    let windows = crate::bound_topology(shared.source.topology());
+    let f = frame(&ServerMsg::Topology { windows });
+    let mut hub = shared.hub.lock().unwrap();
+    if hub.topology.as_ref() != Some(&f) {
+        for c in hub.clients.values() {
+            c.push(f.clone());
+        }
+        hub.topology = Some(f);
+    }
+}
+
+/// The `forbidden` ack's message for a view device.
+const VIEW_ONLY: &str = "this device may only view";
+
+/// `device` may operate, by the permission it connected with and the one
+/// as of now (the connection closes within a second of a change, but
+/// nothing runs in between on the old one).
+fn operates<S>(shared: &Shared<S>, device: &Device) -> bool {
+    let now = registry::devices(&shared.config.dir)
+        .ok()
+        .and_then(|all| all.into_iter().find(|d| d.id == device.id))
+        .map(|d| d.permission);
+    device.permission == Permission::Operate && now == Some(Permission::Operate)
 }
 
 /// A `run` command: one line, no control characters, at most
@@ -1985,6 +2143,11 @@ fn check_text(text: &str) -> Result<(), (ErrorCode, String)> {
 fn set_screen<S>(shared: &Shared<S>, id: u64, pane: u64, mode: ScreenMode) -> Option<ServerMsg> {
     let mut hub = shared.hub.lock().unwrap();
     let c = hub.clients.get_mut(&id)?;
+    // the `subscribe` just before it failed (a pane that closed while the
+    // app was away) and already said `no_pane`
+    if c.pane.is_none() && c.refused == Some(pane) {
+        return None;
+    }
     if c.pane != Some(pane) {
         return Some(ServerMsg::error(
             ErrorCode::BadRequest,
@@ -2052,6 +2215,179 @@ fn output<S: Source>(
     }
 }
 
+/// The `ack` for a chip request the window could not answer.
+fn chip_error(rid: String, pane: u64, e: OutputError) -> ServerMsg {
+    match e {
+        OutputError::NoBlock => {
+            ServerMsg::ack_err(rid, ErrorCode::NoBlock, "no such change in the repository")
+        }
+        OutputError::NoPane => {
+            ServerMsg::ack_err(rid, ErrorCode::NoPane, format!("no pane {pane}"))
+        }
+        OutputError::Unavailable(e) => ServerMsg::ack_err(
+            rid,
+            ErrorCode::NoPane,
+            format!("pane {pane} unavailable: {e}"),
+        ),
+    }
+}
+
+/// The id check and the rate (`output`'s) every chip request goes through.
+fn chip_admit(rid: &str, rate: &mut Rate) -> Option<ServerMsg> {
+    if rid.chars().count() > MAX_REQUEST_ID {
+        return Some(ServerMsg::error(
+            ErrorCode::BadRequest,
+            format!("id is longer than {MAX_REQUEST_ID} characters"),
+        ));
+    }
+    if !rate.allow(Instant::now()) {
+        return Some(ServerMsg::ack_err(
+            rid,
+            ErrorCode::Rate,
+            "too many requests; slow down",
+        ));
+    }
+    None
+}
+
+/// `dirs` / `branches` / `changes`: a prompt chip's menu, bounded.
+fn menu<S: Source>(
+    shared: &Shared<S>,
+    rate: &mut Rate,
+    rid: String,
+    pane: u64,
+    kind: MenuKind,
+) -> ServerMsg {
+    if let Some(refused) = chip_admit(&rid, rate) {
+        return refused;
+    }
+    match shared.source.menu(pane, kind) {
+        Ok(m) => match (kind, crate::bound_menu(m)) {
+            (MenuKind::Dirs, (Menu::Dirs { cwd, parent, dirs }, more)) => ServerMsg::Dirs {
+                id: rid,
+                pane,
+                cwd,
+                parent,
+                dirs,
+                more,
+            },
+            (MenuKind::Branches, (Menu::Branches { current, branches }, more)) => {
+                ServerMsg::Branches {
+                    id: rid,
+                    pane,
+                    current,
+                    branches,
+                    more,
+                }
+            }
+            (MenuKind::Changes, (Menu::Changes { branch, files }, more)) => ServerMsg::Changes {
+                id: rid,
+                pane,
+                branch,
+                files,
+                more,
+            },
+            _ => ServerMsg::ack_err(
+                rid,
+                ErrorCode::NoPane,
+                format!("pane {pane} answered another menu"),
+            ),
+        },
+        Err(e) => chip_error(rid, pane, e),
+    }
+}
+
+/// `complete`: the desktop's completions and history for a command line,
+/// bounded. Operate devices only: history can hold secrets typed on a
+/// command line, and path completion lists any folder.
+fn complete<S: Source>(
+    shared: &Shared<S>,
+    device: &Device,
+    rate: &mut Rate,
+    rid: String,
+    pane: u64,
+    line: String,
+    cursor: usize,
+) -> ServerMsg {
+    if let Some(refused) = chip_admit(&rid, rate) {
+        return refused;
+    }
+    if !operates(shared, device) {
+        return ServerMsg::ack_err(rid, ErrorCode::Forbidden, VIEW_ONLY);
+    }
+    if line.len() > crate::MAX_COMPLETE_LINE {
+        return ServerMsg::ack_err(
+            rid,
+            ErrorCode::BadRequest,
+            format!("line is longer than {} bytes", crate::MAX_COMPLETE_LINE),
+        );
+    }
+    if !line.is_char_boundary(cursor) {
+        return ServerMsg::ack_err(
+            rid,
+            ErrorCode::BadRequest,
+            "cursor is outside the line or inside a character",
+        );
+    }
+    match shared.source.complete(pane, &line, cursor) {
+        Ok(page) => {
+            let (page, more) = crate::bound_complete(page);
+            ServerMsg::Complete {
+                id: rid,
+                pane,
+                items: page.items,
+                history: page.history,
+                more,
+            }
+        }
+        Err(e) => chip_error(rid, pane, e),
+    }
+}
+
+/// `diff`: one changed file's lines, bounded. An untracked file's lines
+/// (its whole content: a `.env`, a key) go to operate devices only.
+fn diff<S: Source>(
+    shared: &Shared<S>,
+    device: &Device,
+    rate: &mut Rate,
+    rid: String,
+    pane: u64,
+    path: String,
+    staged: bool,
+) -> ServerMsg {
+    if let Some(refused) = chip_admit(&rid, rate) {
+        return refused;
+    }
+    if path.is_empty() || path.len() > MAX_DIFF_PATH {
+        return ServerMsg::ack_err(
+            rid,
+            ErrorCode::BadRequest,
+            format!("path is 1 to {MAX_DIFF_PATH} bytes"),
+        );
+    }
+    match shared.source.diff(pane, &path, staged) {
+        Ok(page) if page.untracked && !operates(shared, device) => ServerMsg::ack_err(
+            rid,
+            ErrorCode::Forbidden,
+            "an untracked file's content needs a device that may operate",
+        ),
+        Ok(page) => {
+            let binary = page.binary;
+            let (lines, truncated) = crate::bound_diff(page);
+            ServerMsg::Diff {
+                id: rid,
+                pane,
+                path,
+                staged,
+                binary,
+                truncated,
+                lines,
+            }
+        }
+        Err(e) => chip_error(rid, pane, e),
+    }
+}
+
 /// `keys` names: 1 to [`MAX_KEYS`], each one of [`Key`]'s.
 fn parse_keys(names: &[String]) -> Result<Vec<Key>, (ErrorCode, String)> {
     if names.len() > MAX_KEYS {
@@ -2091,6 +2427,7 @@ fn subscribe<S: Source>(
     else {
         if let Some(c) = hub.clients.get_mut(&id) {
             c.follow(None);
+            c.refused = Some(pane);
         }
         let why = match fresh {
             Err(SourceError::Unavailable(e)) => format!("pane {pane} unavailable: {e}"),

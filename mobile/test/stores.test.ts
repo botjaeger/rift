@@ -7,8 +7,11 @@ import {
   MemoryStore,
   NOTIFY_AFTER_CHOICES,
   isHostRecord,
+  loadLastView,
   loadOrCreateIdentity,
   loadSettings,
+  restoreTarget,
+  saveLastView,
   saveSettings,
   type HostRecord,
 } from "../src/stores";
@@ -101,12 +104,31 @@ describe("settings", () => {
   it("defaults, saves and loads; ignores bad fields", async () => {
     const kv = new MemoryStore();
     expect(await loadSettings(kv)).toEqual(DEFAULT_SETTINGS);
-    expect(DEFAULT_SETTINGS.confirmEveryCommand).toBe(true);
+    expect(DEFAULT_SETTINGS).toMatchObject({ askBeforeRun: false, notifyMyCommands: true, wrapLines: true, showKeys: false });
     expect(DEFAULT_SETTINGS.showCommandInNotification).toBe(false);
     await saveSettings(kv, { ...DEFAULT_SETTINGS, deviceName: "Pixel", notifyPolicy: "failures" });
     expect(await loadSettings(kv)).toEqual({ ...DEFAULT_SETTINGS, deviceName: "Pixel", notifyPolicy: "failures" });
-    kv.data.set("rift.settings", JSON.stringify({ confirmEveryCommand: "no", deviceName: "  " }));
+    kv.data.set("rift.settings", JSON.stringify({ askBeforeRun: "no", wrapLines: 0, deviceName: "  " }));
     expect(await loadSettings(kv)).toEqual(DEFAULT_SETTINGS);
+  });
+
+  it("migrates Confirm every command to Ask before running, off: a stored value cannot tell a choice from the default", async () => {
+    const kv = new MemoryStore();
+    // the old default (every save stored the whole object), and an explicit choice either way
+    for (const old of [true, false]) {
+      kv.data.set("rift.settings", JSON.stringify({ ...DEFAULT_SETTINGS, askBeforeRun: undefined, confirmEveryCommand: old }));
+      const s = await loadSettings(kv);
+      expect(s.askBeforeRun).toBe(false);
+      expect(s).not.toHaveProperty("confirmEveryCommand");
+      // the switches that did not exist before take their defaults
+      expect(s).toMatchObject({ notifyMyCommands: true, wrapLines: true, showKeys: false });
+    }
+    // once saved under the new name, the choice is kept
+    await saveSettings(kv, { ...DEFAULT_SETTINGS, askBeforeRun: true, notifyMyCommands: false, wrapLines: false, showKeys: true });
+    expect(await loadSettings(kv)).toMatchObject({ askBeforeRun: true, notifyMyCommands: false, wrapLines: false, showKeys: true });
+    // a stored value of the wrong type is the default
+    kv.data.set("rift.settings", JSON.stringify({ showKeys: "yes" }));
+    expect((await loadSettings(kv)).showKeys).toBe(false);
   });
 
   it("migrates the Phase 2 notifyDone switch: on is every long command, off is none", async () => {
@@ -135,9 +157,9 @@ describe("settings", () => {
     }
   });
 
-  it("control keys: the old row by default; unknown and repeated ids dropped, order kept", async () => {
+  it("control keys: the board's row by default; unknown and repeated ids dropped, order kept", async () => {
     const kv = new MemoryStore();
-    expect(DEFAULT_SETTINGS.controlKeys).toEqual(["ctrl+c", "esc", "tab", "ctrl", "up", "down", "left", "right"]);
+    expect(DEFAULT_SETTINGS.controlKeys).toEqual(["ctrl+c", "esc", "tab", "ctrl", "up", "down"]);
     kv.data.set("rift.settings", JSON.stringify({ controlKeys: ["f5", "alt", "rm -rf", "f5", 7, "ctrl+z"] }));
     expect((await loadSettings(kv)).controlKeys).toEqual(["f5", "alt", "ctrl+z"]);
     kv.data.set("rift.settings", JSON.stringify({ controlKeys: [] }));
@@ -183,5 +205,30 @@ describe("settings", () => {
     expect(isHostRecord(h)).toBe(true);
     expect(isHostRecord({ ...h, notifications: false })).toBe(true);
     expect(isHostRecord({ ...h, notifications: "off" })).toBe(false);
+  });
+});
+
+describe("last view", () => {
+  const key = toBase64Url(new Uint8Array(32).fill(7));
+  it("saves, loads and clears the host (and pane) to reopen; damaged entries read as none", async () => {
+    const kv = new MemoryStore();
+    expect(await loadLastView(kv)).toBeNull();
+    await saveLastView(kv, { host: key, pane: 12 });
+    expect(await loadLastView(kv)).toEqual({ host: key, pane: 12 });
+    await saveLastView(kv, { host: key, pane: null });
+    expect(await loadLastView(kv)).toEqual({ host: key, pane: null });
+    for (const bad of ["{", JSON.stringify({ host: "x", pane: 1 }), JSON.stringify({ host: key, pane: -1 }), JSON.stringify({ host: key })]) {
+      kv.data.set("rift.last", bad);
+      expect(await loadLastView(kv)).toBeNull();
+    }
+    await saveLastView(kv, null);
+    expect(kv.data.has("rift.last")).toBe(false);
+  });
+
+  it("reopens only a host that is still paired", () => {
+    const last = { host: key, pane: 3 };
+    expect(restoreTarget(last, [{ key }])).toEqual(last);
+    expect(restoreTarget(last, [])).toBeNull();
+    expect(restoreTarget(null, [{ key }])).toBeNull();
   });
 });

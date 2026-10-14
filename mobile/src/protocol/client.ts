@@ -19,6 +19,7 @@ import {
   PROTOCOL_VERSION,
   isGatewayHello,
   parseServerFrame,
+  utf8Length,
   type AckMsg,
   type ClientHello,
   type ClientMsg,
@@ -26,7 +27,14 @@ import {
   type ErrorMsg,
   type GatewayHello,
   type OlderMsg,
+  type OpenKind,
   type OutputMsg,
+  type ChipAnswerMsg,
+  type ChipRequestMsg,
+  type CompleteMsg,
+  type CompleteRequestMsg,
+  type DiffMsg,
+  type DiffRequestMsg,
   type ScreenEndMsg,
   type ScreenMode,
   type ScreenMsg,
@@ -133,6 +141,9 @@ export interface ClientEvents {
 export const OUTPUT_TIMEOUT_MS = 10_000;
 
 export type OutputResult = { ok: true; msg: OutputMsg } | { ok: false; code: string; message: string };
+
+/** The answer to a chip request (`dirs` / `branches` / `changes` / `diff`), or why there is none. */
+export type ChipResult<M> = { ok: true; msg: M } | { ok: false; code: string; message: string };
 
 export interface ClientOptions {
   /** `host:port` addresses, tried in order. */
@@ -241,6 +252,11 @@ export class RiftClient {
   /** `keys` / `text` messages waiting for the rate, in order. */
   private inputQueue: ClientMsg[] = [];
   private inputTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Chip requests waiting for their answer, by id: what fits the request, and who waits. */
+  private readonly chipAsks = new Map<
+    string,
+    { fits: (m: ChipAnswerMsg) => boolean; resolve: (r: ChipResult<ChipAnswerMsg>) => void; timer: ReturnType<typeof setTimeout> }
+  >();
   /** `output` requests waiting for their answer, by id, with what was asked. */
   private readonly outputs = new Map<
     string,
@@ -441,6 +457,68 @@ export class RiftClient {
     });
   }
 
+  /**
+   * A prompt chip's menu of `pane` (feature `chips`): resolves with the answer, or with the
+   * gateway's refusal (`no_pane`, `rate`), `timeout`, `disconnected` or `bad_data` (an answer
+   * of another kind or pane).
+   */
+  chipMenu<T extends "dirs" | "branches" | "changes">(
+    pane: number,
+    t: T,
+  ): Promise<ChipResult<Extract<ChipAnswerMsg, { t: T }>>> {
+    return this.askChip({ t, id: "", pane }, (m) => m.t === t && m.pane === pane) as Promise<
+      ChipResult<Extract<ChipAnswerMsg, { t: T }>>
+    >;
+  }
+
+  /** One changed file's diff (`no_block` when it is no longer a change). */
+  diff(pane: number, path: string, staged: boolean): Promise<ChipResult<DiffMsg>> {
+    return this.askChip(
+      { t: "diff", id: "", pane, path, staged },
+      (m) => m.t === "diff" && m.pane === pane && m.path === path && m.staged === staged,
+    ) as Promise<ChipResult<DiffMsg>>;
+  }
+
+  /**
+   * Completions and history for `line` with the cursor at JS index `cursor` (feature
+   * `complete`); the wire cursor is the UTF-8 byte offset of that index.
+   */
+  complete(pane: number, line: string, cursor: number = line.length): Promise<ChipResult<CompleteMsg>> {
+    const at = utf8Length(line.slice(0, Math.max(0, Math.min(cursor, line.length))));
+    return this.askChip(
+      { t: "complete", id: "", pane, line, cursor: at },
+      (m) => m.t === "complete" && m.pane === pane,
+    ) as Promise<ChipResult<CompleteMsg>>;
+  }
+
+  private askChip(
+    req: ChipRequestMsg | DiffRequestMsg | CompleteRequestMsg,
+    fits: (m: ChipAnswerMsg) => boolean,
+  ): Promise<ChipResult<ChipAnswerMsg>> {
+    const id = this.authed ? `c${++this.idN}` : null;
+    if (id === null || !this.send({ ...req, id })) {
+      return Promise.resolve({ ok: false, code: "disconnected", message: "not connected" });
+    }
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.chipAsks.delete(id);
+        resolve({ ok: false, code: "timeout", message: "no answer" });
+      }, OUTPUT_TIMEOUT_MS);
+      this.chipAsks.set(id, { fits, resolve, timer });
+    });
+  }
+
+  private settleChip(id: string, r: ChipResult<ChipAnswerMsg> | ChipAnswerMsg): boolean {
+    const p = this.chipAsks.get(id);
+    if (!p) return false;
+    this.chipAsks.delete(id);
+    clearTimeout(p.timer);
+    if ("t" in r)
+      p.resolve(p.fits(r) ? { ok: true, msg: r } : { ok: false, code: "bad_data", message: "The computer's answer did not fit the request." });
+    else p.resolve(r);
+    return true;
+  }
+
   private settleOutput(id: string, r: OutputResult): boolean {
     const p = this.outputs.get(id);
     if (!p) return false;
@@ -470,6 +548,13 @@ export class RiftClient {
     if (!this.authed) return null;
     const id = `k${++this.idN}`;
     return this.sendInput({ t: "keys", id, pane, keys }) ? id : null;
+  }
+
+  /** Opens a new tab or split next to a pane (feature `open`); returns the `ack` id, or null when not connected. */
+  openShell(pane: number, kind: OpenKind): string | null {
+    if (!this.authed) return null;
+    const id = `n${++this.idN}`;
+    return this.send({ t: "open", id, pane, kind }) ? id : null;
   }
 
   /**
@@ -502,8 +587,8 @@ export class RiftClient {
   }
 
   /** Asks for an alert when the next command in `pane` finishes; false when not connected. */
-  notify(pane: number): boolean {
-    return this.authed && this.send({ t: "notify", pane });
+  notify(pane: number, off = false): boolean {
+    return this.authed && this.send(off ? { t: "notify", pane, off: true } : { t: "notify", pane });
   }
 
   /** Asks the gateway to remove this device; it then closes the connection. */
@@ -681,6 +766,8 @@ export class RiftClient {
         // an `output` request is refused with an `ack` carrying its id
         if (!msg.ok && this.settleOutput(msg.id, { ok: false, code: msg.error ?? "error", message: msg.message ?? "" }))
           return;
+        // and so is a chip request
+        if (!msg.ok && this.settleChip(msg.id, { ok: false, code: msg.error ?? "error", message: msg.message ?? "" })) return;
         this.events.onAck?.(msg);
         return;
       case "output": {
@@ -694,6 +781,13 @@ export class RiftClient {
         );
         return;
       }
+      case "dirs":
+      case "branches":
+      case "changes":
+      case "diff":
+      case "complete":
+        this.settleChip(msg.id, msg);
+        return;
       case "screen":
         if (msg.pane !== this.pane) return;
         this.screenLive = true;
@@ -875,6 +969,8 @@ export class RiftClient {
     // answers to requests on this socket never come
     for (const id of [...this.outputs.keys()])
       this.settleOutput(id, { ok: false, code: "disconnected", message: "the connection dropped" });
+    for (const id of [...this.chipAsks.keys()])
+      this.settleChip(id, { ok: false, code: "disconnected", message: "the connection dropped" });
     if (ws) {
       ws.onopen = ws.onmessage = ws.onerror = ws.onclose = null;
       try {

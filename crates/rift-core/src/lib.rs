@@ -16,6 +16,7 @@ pub mod launch;
 pub mod markdown;
 pub mod notifications;
 pub mod osc;
+pub mod prompts;
 pub mod review;
 pub mod runtimes;
 pub mod session_state;

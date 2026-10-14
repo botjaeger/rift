@@ -33,9 +33,9 @@ const block = (id: number, extra: Partial<Block> = {}): Block => ({
 const state = (blocks: Block[]) => reducePane(null, { t: "snapshot", pane: 12, seq: 1, blocks, has_older: false });
 
 describe("topology helpers", () => {
-  it("finds panes and titles them as tab › pane", () => {
-    expect(paneTitle(findPane(windows, 13)!)).toBe("rift › pane 2");
-    expect(paneTitle(findPane(windows, 20)!)).toBe("Tab 4");
+  it("finds panes and titles them as tab · pane", () => {
+    expect(paneTitle(findPane(windows, 13)!)).toBe("rift · pane 2");
+    expect(paneTitle(findPane(windows, 20)!)).toBe("Tab 4 · pane 1");
     expect(findPane(windows, 99)).toBeNull();
   });
 

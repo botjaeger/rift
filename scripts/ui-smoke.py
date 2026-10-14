@@ -1688,6 +1688,33 @@ assert answer(off, "meta.json")["ok"] is True
 assert "remote_access=false control_level=Navigate" in (off / "off.txt").read_text()
 assert not (off / "data/rift/remote").exists(), "a gateway started with remote access off"
 
+# `remote-open` (the phone's new tab / new pane keys): refused while remote
+# access is off; with it on a tab opens in the window and a split right of
+# the pane, each answering the new pane with a toast naming the device
+open_tab = '{"cmd":"remote-open","pane":PANE,"device":"Test Phone","kind":"tab"}'
+open_pane = '{"cmd":"remote-open","pane":PANE,"device":"Test Phone","kind":"pane"}'
+open_off = remote_run("open-off", remote_base, [
+    "wait 500", *rin("open-off", "tab.json", open_tab), "wait 300",
+    f"dump {rm}/open-off/after.txt"])
+assert answer(open_off, "tab.json") == {"ok": False, "error": "remote access is off"}, \
+    answer(open_off, "tab.json")
+assert "tabs=1 " in (open_off / "after.txt").read_text()
+opened = remote_run("open", remote_base + 'control_api = "off"\nremote_access = true\n', [
+    "wait 500", *rin("open", "tab.json", open_tab), "wait 600", f"dump {rm}/open/tab.txt",
+    *rin("open", "pane.json", open_pane), "wait 600", f"dump {rm}/open/pane.txt",
+    *rin("open", "gone.json", open_tab.replace("PANE", "PANE999")), "wait 300"])
+assert answer(opened, "tab.json") == {"ok": True, "pane": 2}, answer(opened, "tab.json")
+tab_dump = (opened / "tab.txt").read_text()
+assert "tabs=2 active=1" in tab_dump, tab_dump[:400]
+assert 'toast=Some("Test Phone opened a tab")' in tab_dump, tab_dump
+assert answer(opened, "pane.json") == {"ok": True, "pane": 3}, answer(opened, "pane.json")
+pane_dump = (opened / "pane.txt").read_text()
+assert "tabs=2 active=0" in pane_dump, pane_dump[:400]
+assert re.search(r"tab 0 title=.* panes=2 active_pane=3 ", pane_dump), pane_dump
+assert 'toast=Some("Test Phone opened a pane")' in pane_dump, pane_dump
+assert answer(opened, "gone.json") == {"ok": False, "error": "no such pane"}, \
+    answer(opened, "gone.json")
+
 # (b)-(d) remote access on with control_api off: the socket serves the
 # gateway's requests only; a command at the prompt runs as a block with a
 # toast; one while a command runs is busy; ctrl+c interrupts; turning

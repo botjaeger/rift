@@ -164,10 +164,53 @@ fn unstaged_options() -> DiffOptions {
 pub fn load(dir: &Path) -> Option<Result<Review, String>> {
     let repo = Repository::discover(dir).ok()?;
     let root = repo.workdir()?.to_path_buf();
-    Some(load_repo(&repo, root))
+    Some(load_repo(&repo, root, true, usize::MAX))
 }
 
-fn load_repo(repo: &Repository, root: PathBuf) -> Result<Review, String> {
+/// [`load`] without the files' new sides (`source` is `None`; no file is
+/// read for it) and of at most `max_files` files, staged ones first (the
+/// rest are never diffed: thousands of untracked files stay cheap): a
+/// paired phone's list of changes.
+pub fn load_list(dir: &Path, max_files: usize) -> Option<Result<Review, String>> {
+    let repo = Repository::discover(dir).ok()?;
+    let root = repo.workdir()?.to_path_buf();
+    Some(load_repo(&repo, root, false, max_files))
+}
+
+/// The change of `path` (repository-relative, as [`FileDiff::path`]; matched
+/// literally, never as a pattern) among the staged or the unstaged ones,
+/// diffing that path alone; `Ok(None)` when it has none. `None` outside a
+/// repository. No `source`.
+pub fn load_file(dir: &Path, path: &str, staged: bool) -> Option<Result<Option<FileDiff>, String>> {
+    let repo = Repository::discover(dir).ok()?;
+    repo.workdir()?;
+    let file = || {
+        let index = repo.index().map_err(err)?;
+        let mut opts = if staged {
+            DiffOptions::new()
+        } else {
+            unstaged_options()
+        };
+        opts.pathspec(path).disable_pathspec_match(true);
+        let diff = if staged {
+            repo.diff_tree_to_index(head_tree(&repo).as_ref(), Some(&index), Some(&mut opts))
+        } else {
+            repo.diff_index_to_workdir(Some(&index), Some(&mut opts))
+        }
+        .map_err(err)?;
+        Ok(collect_as(&diff, false, None, usize::MAX)?
+            .into_iter()
+            .find(|f| f.path == path))
+    };
+    Some(file())
+}
+
+fn load_repo(
+    repo: &Repository,
+    root: PathBuf,
+    sources: bool,
+    max_files: usize,
+) -> Result<Review, String> {
     let index = repo.index().map_err(err)?;
     let tree = head_tree(repo);
     let staged = repo
@@ -176,11 +219,18 @@ fn load_repo(repo: &Repository, root: PathBuf) -> Result<Review, String> {
     let unstaged = repo
         .diff_index_to_workdir(Some(&index), Some(&mut unstaged_options()))
         .map_err(err)?;
+    let staged = collect_as(&staged, false, sources.then_some((repo, false)), max_files)?;
+    let unstaged = collect_as(
+        &unstaged,
+        false,
+        sources.then_some((repo, true)),
+        max_files.saturating_sub(staged.len()),
+    )?;
     Ok(Review {
         root,
         branch: branch_name(repo),
-        staged: collect_as(&staged, false, Some((repo, false)))?,
-        unstaged: collect_as(&unstaged, false, Some((repo, true)))?,
+        staged,
+        unstaged,
     })
 }
 
@@ -214,14 +264,15 @@ fn path_str(p: Option<&Path>) -> Option<String> {
 /// `reverse(true)`: hunk content hashes are computed as the forward diff's,
 /// so `HunkId::swapped` of a forward id matches the reversed diff's hunk.
 /// `source` (repository, new side is the working tree) loads each modified
-/// file's new side for the panel.
+/// file's new side for the panel. The first `max` files only.
 fn collect_as(
     diff: &Diff<'_>,
     reversed: bool,
     source: Option<(&Repository, bool)>,
+    max: usize,
 ) -> Result<Vec<FileDiff>, String> {
     let mut files = Vec::new();
-    for idx in 0..diff.deltas().len() {
+    for idx in 0..diff.deltas().len().min(max) {
         let Some(delta) = diff.get_delta(idx) else {
             continue;
         };
@@ -637,7 +688,7 @@ fn apply_hunk(repo: &Repository, op: Op, path: &str, id: HunkId) -> Result<(), S
         ),
     };
     let diff = diff.map_err(err)?;
-    let files = collect_as(&diff, op != Op::Stage, None)?;
+    let files = collect_as(&diff, op != Op::Stage, None, usize::MAX)?;
     let Some((file, hunk)) = files
         .iter()
         .filter(|file| file.path == path || file.old_path.as_deref() == Some(path))
@@ -784,6 +835,34 @@ mod tests {
         assert_eq!(new.hunks[0].lines[0].text, "fn main() {}");
         assert_eq!(r.statuses().get("src/new.rs"), Some(&'?'));
         assert!(r.dirty_dirs().contains("src"));
+    }
+
+    #[test]
+    fn a_phones_list_is_capped_staged_first_and_has_no_new_sides() {
+        let t = temp_repo("list");
+        fs::write(t.dir.join("a.txt"), lines(&[])).unwrap();
+        commit_all(&t, "init");
+        fs::write(t.dir.join("a.txt"), lines(&[(2, "two")])).unwrap();
+        let mut index = t.repo.index().unwrap();
+        index.add_path(Path::new("a.txt")).unwrap();
+        index.write().unwrap();
+        for i in 0..5 {
+            fs::write(t.dir.join(format!("u{i}.txt")), "u\n").unwrap();
+        }
+        let r = load_list(&t.dir, 3).unwrap().unwrap();
+        let paths: Vec<&str> = r
+            .staged
+            .iter()
+            .chain(&r.unstaged)
+            .map(|f| f.path.as_str())
+            .collect();
+        assert_eq!(paths, ["a.txt", "u0.txt", "u1.txt"]);
+        assert_eq!((r.staged[0].added, r.staged[0].removed), (1, 1));
+        assert!(r.staged.iter().all(|f| f.source.is_none()));
+        let all = load_list(&t.dir, usize::MAX).unwrap().unwrap();
+        assert_eq!(all.staged.len() + all.unstaged.len(), 6);
+        // the full review keeps the panel's new side
+        assert!(review(&t).staged[0].source.is_some());
     }
 
     #[test]

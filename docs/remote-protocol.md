@@ -88,8 +88,12 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
 
 ## Devices and permissions
 
-- `operate`: everything below. `view`: no `run`, `keys` or `text` (they
-  get `ack` with `error` `forbidden`).
+- `operate`: everything below. `view`: no `run`, `keys`, `text`, `open` or
+  `complete` (its history can hold secrets typed on a command line, and
+  path completion lists any folder), and no `diff` of an untracked file
+  (its whole content: a `.env`, a key); they get `ack` with `error`
+  `forbidden`. `changes` still lists untracked files to `view` devices
+  (path, status and line counts, no content).
 - The desktop lists, renames nothing, and revokes devices (Settings ›
   Remote access, or `rift-terminal remote devices` / `revoke ID`). A revoked
   device's open connections close within 1 second, and its key is refused
@@ -101,7 +105,7 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
 | Limit | Value |
 |---|---|
 | Client message | 4 KiB of JSON; larger closes the connection |
-| Gateway message | 1 MiB of JSON (in ≤ 65 000-byte chunks) |
+| Gateway message | 1 MiB of JSON (in ≤ 65 000-byte chunks); an answer to a request with an `id` that would be larger (JSON escapes can grow a bounded page several times) is an `ack` `too_large` instead |
 | Concurrent connections | 8; the ninth is refused with `error` `busy` after the handshake |
 | Handshake deadline | 5 s after the socket opens |
 | Failed handshakes | 10 per minute per remote address; then refused for a minute |
@@ -113,8 +117,11 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
 | `run` | 4 per second per connection; the command at most 2 KiB, one line |
 | `keys` | 20 keys per message, 20 messages per second per connection |
 | `text` | 1 KiB per message, one line without control characters; counts against the `keys` rate |
+| `open` | 2 per second per connection |
 | `output` | 1 to 500 lines and at most 64 KiB per answer, 10 requests per second per connection |
 | `screen` | at most 300 columns and 120 rows (the top-left part of a larger screen), one per 100 ms |
+| `complete` | the line at most 1 KiB; at most 50 `items` and 50 `history` entries of 1 KiB each; shares `output`'s rate |
+| A pane's `waiting` / `running` | prompt 300 characters, 9 choices of 200, 12 context lines of 200; `running.line` 200 characters |
 
 ## Client → gateway
 
@@ -131,10 +138,12 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
 {"t":"push","token":null,"ntfy":"https://ntfy.sh/rift-x7Kq2mP9vT4wL8nR3sY6hZ","long_ms":30000,"show_command":false,"failures_only":false}
 {"t":"push","token":null,"ntfy":null,"long_ms":null,"show_command":false,"failures_only":false}
 {"t":"notify","pane":12}
+{"t":"notify","pane":12,"off":true}
 {"t":"visible","on":false}
 {"t":"text","id":"x1","pane":12,"text":":wq"}
 {"t":"screen","pane":12,"mode":"auto"}
 {"t":"output","id":"o1","pane":12,"block":86,"from":0,"limit":500}
+{"t":"open","id":"n1","pane":12,"kind":"tab"}
 ```
 
 - `subscribe` follows one pane (a new `subscribe` replaces the old one).
@@ -179,9 +188,18 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
 - `screen` sets what the gateway sends of the subscribed pane's terminal
   screen (§ Phase 3): `off` (the default after every `subscribe`), `auto`
   (while the pane shows the alternate screen: vim, less, htop) or `on`
-  (always). `pane` must be the subscribed pane, else `error` `bad_request`.
+  (always). `pane` must be the subscribed pane, else `error` `bad_request`;
+  a `screen` for the pane whose `subscribe` was just refused (`no_pane`: it
+  closed while the app was away) is dropped without a second error.
 - `output` asks for lines `from` … `from + limit - 1` of a block's output
   (§ Phase 3).
+- `open` (feature `open`) opens a shell next to `pane`: `kind` `tab` is a
+  new tab in the pane's window, `pane` a new pane split to its right; both
+  start where a new pane from that pane would (its folder, or the
+  desktop's `start_dir`). The desktop shows it and a toast naming the
+  device. Every connection gets the `topology` holding the new pane before
+  the `ack`, which names it in `pane`. A window that cannot split the pane
+  answers `ack` with `error` `busy`.
 - `id` is chosen by the client (at most 64 characters) and returned in `ack`
   (or, for `output`, in the `output` answer).
 - `forget` removes this device from the desktop's paired devices and closes
@@ -193,13 +211,14 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
 ## Gateway → client
 
 ```json
-{"t":"welcome","v":2,"host":"studio-mac","os":"macos","version":"0.1.0","device":"d3f1","permission":"operate","features":["screen","text","output","push_failures","push_ntfy"]}
-{"t":"topology","windows":[{"pid":4242,"tabs":[{"index":0,"title":"rift","active":true,"panes":[{"id":12,"active":true,"cwd":"/Users/me/rift","job":null,"last_command":"cargo test","last_exit":0}]}]}]}
+{"t":"welcome","v":2,"host":"studio-mac","os":"macos","version":"0.1.0","device":"d3f1","permission":"operate","features":["screen","text","output","push_failures","push_ntfy","git","notify_off","chips","waiting","complete","running","open"]}
+{"t":"topology","windows":[{"pid":4242,"tabs":[{"index":0,"title":"rift","active":true,"panes":[{"id":12,"active":true,"cwd":"/Users/me/rift","job":null,"last_command":"cargo test","last_exit":0,"git":{"branch":"main","ahead":1,"behind":0,"dirty":true,"files":3,"added":42,"removed":7}}]}]}]}
 {"t":"snapshot","pane":12,"seq":41,"blocks":[Block],"has_older":true}
 {"t":"update","pane":12,"seq":42,"blocks":[Block],"removed":[80]}
 {"t":"older","pane":12,"blocks":[Block],"has_older":false}
 {"t":"ack","id":"r1","ok":true}
 {"t":"ack","id":"r2","ok":false,"error":"busy","message":"pane 12 is running a command"}
+{"t":"ack","id":"n1","ok":true,"pane":14}
 {"t":"done","pane":12,"block":87,"command":"cargo test","exit":0,"duration_ms":260500}
 {"t":"pong","n":3}
 {"t":"error","code":"auth","message":"this device is not paired"}
@@ -213,9 +232,55 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
   times 2^24 plus the window's own pane id (every window numbers its panes
   from 1), so it names one pane among all windows. `features` lists what this gateway serves beyond
   Phase 2: `screen`, `text`, `output` (§ Phase 3), `push_failures`
-  (`push.failures_only`, § Push) and `push_ntfy` (`push.ntfy` and `visible`, § Push). A
+  (`push.failures_only`, § Push), `push_ntfy` (`push.ntfy` and `visible`, § Push), `git`
+  (a pane's `git` in `topology`, below), `notify_off` (`notify` with
+  `off`, § Push), `chips` (`dirs`, `branches`, `changes`, `diff`, §
+  Phase 3), `waiting` (a pane's `waiting` in `topology`, below),
+  `complete` (§ Phase 3), `running` (a pane's `running` in
+  `topology`, below) and `open`. A
   gateway that leaves
   the field out serves none of them; the app then hides what needs them.
+- A pane's `git` (gateways with the `git` feature) is the git status the
+  desktop shows in its own prompt chips for that pane: `branch` (a short
+  commit id when detached), `ahead` and `behind` its upstream, `dirty`
+  (any change, untracked files included), and the uncommitted diff against
+  HEAD as `files` changed, lines `added` and `removed`. It is absent when
+  the pane is not in a repository or the desktop has not looked yet. The
+  desktop refreshes it for the panes of each window's active tab (after a
+  `cd` or a finished command); a pane in another tab keeps the value from
+  when its tab was last active. Without the feature the field never appears
+  and the app shows no git chips.
+- A pane's `waiting` (gateways with the `waiting` feature) says the pane's
+  running command waits for the user, and how to answer it:
+  `{"kind":"choice","prompt":"Do you want to make this edit to session.rs?","choices":["Yes","Yes, allow all edits during this session (shift+tab)","No, and tell Claude what to do differently (esc)"],"selected":0,"numbered":true,"context":["Edit file","…"]}`.
+  `kind` is `password` (the terminal reads a line without echo in line
+  mode — `sudo`, `ssh`, `read -s` — or the cursor line reads like a
+  password prompt; any program), `choice` (a coding agent's menu with its
+  `❯` / `›` selector on the screen's last rows, Claude Code and Codex
+  style; only while the pane runs a coding agent, so another program's
+  menu-shaped output never takes a phone's answer) or `input` (an unread
+  "needs your input" for the pane in the desktop's attention center, e.g.
+  an agent's OSC 9 / 777 notification, while its command runs and until
+  anything is typed into the pane — focus and mouse reports the terminal
+  sends do not count; the phone answers with text its user types).
+  `prompt` is the
+  question (at most 300 characters), `choices` the menu's entries without
+  their numbers (at most 9, each at most 200 characters), `selected` the
+  entry under the selector, `numbered` whether the entries are numbered,
+  `context` up to 12 screen lines above the question (each at most 200
+  characters). `password` and `input` carry no choices and no context.
+  Absent when nothing waits. A `numbered` choice *n* is answered by
+  typing the digit *n* (`text`); an unnumbered one with `up` / `down`
+  from `selected`, then `enter` (`keys`). A password is answered with
+  `text` and `enter`, never echoed or kept.
+- A pane's `running` (gateways with the `running` feature) describes its
+  running command for a list of everything running without following each
+  pane: `{"started":1760364000,"line":"test session::resize ... ok"}`.
+  `started` is when the command started (Unix seconds, the desktop's
+  clock; null without shell integration), `line` the screen's last
+  non-empty line at or above the cursor (at most 200 characters; empty
+  while a full-screen program runs). Absent at the prompt. The topology is
+  sent again when `line` changes, at most once per topology poll.
 - `seq` is per pane and per gateway run: `update` N+1 follows `update` (or
   `snapshot`) N. A client that sees a gap re-subscribes with its last `seq`.
 - `update.blocks` are whole blocks that are new or changed since the
@@ -369,7 +434,9 @@ Rift app, so it works in builds without an Apple Developer Program account.
   whole message (`bad_request`) and keeps the previous registration.
 - `notify` asks for one alert when the next command in `pane` finishes,
   whatever its length ("Notify me"); at most 32 panes per device, each
-  forgotten after 24 h.
+  forgotten after 24 h. `"off": true` (only to a gateway with
+  `notify_off`; an older one would read it as a new wait) drops this
+  device's wait on the pane: the bell switched off on a running block.
 - For every `done` the gateway alerts each device with a token or an ntfy
   URL that asked about that pane (the wait is used up) or whose `long_ms`
   the command reached, at most 12 per device per minute (one alert counts
@@ -490,6 +557,82 @@ on request:
   `error` `no_block`; an unknown pane `no_pane`; past the rate `rate`.
   `view` devices may page.
 
+### Prompt chip menus (feature `chips`)
+
+What the desktop's prompt chips open, for the pane's chips on the phone:
+the folder chip's directories, the branch chip's local branches, and the
+code review panel's changed files with each file's diff.
+
+```json
+{"t":"dirs","id":"m1","pane":12}
+{"t":"dirs","id":"m1","pane":12,"cwd":"/Users/me/rift","parent":true,"dirs":["crates","docs","mobile"],"more":false}
+{"t":"branches","id":"m2","pane":12}
+{"t":"branches","id":"m2","pane":12,"current":"main","branches":["feat/chips","main"],"more":false}
+{"t":"changes","id":"m3","pane":12}
+{"t":"changes","id":"m3","pane":12,"branch":"main","files":[{"path":"docs/ui.md","status":"A","added":12,"removed":0,"staged":true}],"more":false}
+{"t":"diff","id":"m4","pane":12,"path":"docs/ui.md","staged":true}
+{"t":"diff","id":"m4","pane":12,"path":"docs/ui.md","staged":true,"binary":false,"truncated":false,"lines":[["@","@@ -0,0 +1,12 @@"],["+","# UI"]]}
+```
+
+- `dirs`: the pane's directory (`cwd`, null when unknown), whether it has a
+  parent, and its sub-directories by name, sorted case-insensitively,
+  hidden ones (a leading `.`) left out: what the desktop's folder menu
+  lists. Picking one runs `cd ..` or `cd ./<name>` (shell-quoted) as an
+  ordinary `run`.
+- `branches`: the repository's local branches, the checked-out one
+  (`current`; a short commit id when detached) first, then by name; empty
+  and null outside a repository; a branch whose name starts with `-` is
+  left out (`git checkout -x` would read it as an option). Picking one
+  runs `git checkout <name>`, a new name `git checkout -b <name>`
+  (shell-quoted), as the desktop's branch menu does; both offer a new name
+  only when it does not start with `-` and has none of whitespace,
+  `~ ^ : ? * [ \`.
+- `changes`: the code review panel's files: `staged` ones (HEAD → index)
+  first, then the working tree's (untracked included), each with its
+  repository-relative `path`, `status` (`M`, `A`, `D`, `R`, `C`, `T`, `?`
+  untracked, `U` conflicted), `added` and `removed` lines. `branch` is null
+  outside a repository (then `files` is empty).
+- `diff`: one file of `changes` (`path` and `staged` as listed): its lines
+  in order as `[kind, text]`, kind `@` a hunk header, `" "` context, `+`
+  added, `-` removed. `binary` files have no lines. A path that is not
+  among the changes answers `ack` `no_block`; `path` is matched
+  literally, never as a pattern. An untracked file's diff (its whole
+  content) answers `view` devices `ack` `forbidden`.
+- Bounds: at most 500 `dirs`, `branches` or `files` (`more`: some were
+  left out), names and paths of at most 1024 bytes (longer ones are left
+  out), and a `diff` of at most 2,000 lines and 256 KiB, each line cut at
+  1,000 characters (`truncated`: something was cut). A request's `path`
+  is at most 1,024 bytes (the longest path `changes` lists). The four requests share `output`'s rate.
+- An unknown pane answers `ack` with `error` `no_pane`. `view` devices
+  may read the lists and tracked files' diffs; only `operate` devices can
+  run the commands they lead to. The names come from the computer's file system and repository:
+  the app shell-quotes them and never runs one unquoted.
+
+### Completion and history (feature `complete`)
+
+What the desktop's command line would complete, and what ran in the pane
+before, for the phone's Run sheet and the pane's suggestions:
+
+```json
+{"t":"complete","id":"k1","pane":12,"line":"cargo t","cursor":7}
+{"t":"complete","id":"k1","pane":12,"items":[{"text":"cargo test","kind":"subcommand"},{"text":"cargo tree","kind":"subcommand"}],"history":[{"text":"cargo test --workspace","at":1760364000},{"text":"cargo test -p rift-remote","at":null}],"more":false}
+```
+
+- `items`: the desktop editor's completions for the word at `cursor` (a
+  byte offset into `line`, at a character boundary), each as the whole
+  resulting command line (`text`) and its `kind`: `command`,
+  `subcommand`, `option`, `path`, `history` or `value`.
+- `history`: commands starting with `line`, newest first and each once:
+  the pane's blocks (`at`: when it finished, Unix seconds; null while it
+  runs), then the pane's command-line history and the shell history the
+  desktop imported (`at` null).
+- Bounds: `line` at most 1,024 bytes; at most 50 `items` and 50
+  `history` entries (`more`: some were left out), each `text` at most
+  1,024 bytes. It shares `output`'s rate. An unknown pane answers `ack`
+  `no_pane`; a `cursor` outside `line` or inside a character
+  `bad_request`; a `view` device `forbidden` (history can hold secrets
+  typed on a command line, and path completion lists any folder).
+
 ## Connection history and permissions (Phase 2)
 
 - `<data dir>/remote/history.jsonl` (0600): one line per closed
@@ -543,7 +686,16 @@ on request:
   `{"ok":true,"generation":N,"unchanged":true}` and no screen is built, so
   the gateway's 100 ms reads of an idle pane cost the window nothing) and
   `output`
-  (`{"cmd":"output","pane":12,"block":86,"from":0,"limit":500}`), and
+  (`{"cmd":"output","pane":12,"block":86,"from":0,"limit":500}`), `menu`
+  (`{"cmd":"menu","pane":12,"kind":"dirs"}`, `kind` also `branches` or
+  `changes`: `{"ok":true,"pane":12,"menu":{…}}`), `diff`
+  (`{"cmd":"diff","pane":12,"path":"docs/ui.md","staged":true}`:
+  `{"ok":true,"pane":12,"diff":{"binary","truncated","untracked","lines"}}`,
+  or the error `no such change`), `complete`
+  (`{"cmd":"complete","pane":12,"line":"cargo t","cursor":7}`; these three
+  read the file system and Git, so a thread of the window's answers them,
+  never its UI thread; the pane's `waiting` and `running` come with
+  `status`), and
   `remote-input`
   (`{"cmd":"remote-input","pane":12,"device":"Sam's iPhone","command":"…"}`,
   `{…,"keys":["ctrl+c"]}` or `{…,"text":":wq"}`), which a window accepts only while
@@ -553,7 +705,10 @@ on request:
   `text`: the pane is at its prompt, or a command was submitted and has
   not started yet), `the command line has text; send the command with run`
   (`keys` with `enter` at a prompt with a draft; the gateway's `busy`),
-  `bad request: …`.
+  `bad request: …`. `remote-open`
+  (`{"cmd":"remote-open","pane":12,"device":"Sam's iPhone","kind":"tab"}`,
+  answering the new pane as `pane`) has the same gate and the errors
+  `remote access is off`, `no such pane` and `cannot split this pane`.
 - Every window shows a tab-bar chip while at least one device is connected
   (from `status.json`); clicking it opens Settings › Remote access. After
   every `status.json` change the gateway sends `{"cmd":"remote-status"}`

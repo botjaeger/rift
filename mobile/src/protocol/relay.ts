@@ -29,9 +29,9 @@ export function addressHost(address: string): string {
   return host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
 }
 
-/** "LAN · 192.168.1.29" or "Relay · relay.example.com". */
+/** "LAN 192.168.1.29" or "Relay relay.example.com" (the Host board). */
 export function pathLabel(path: Endpoint): string {
-  return path.kind === "lan" ? `LAN · ${addressHost(path.address)}` : `Relay · ${relayHost(path.url)}`;
+  return path.kind === "lan" ? `LAN ${addressHost(path.address)}` : `Relay ${relayHost(path.url)}`;
 }
 
 /** Every path in trying order: the LAN addresses, then the relay. */

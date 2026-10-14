@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { Pressable, StyleSheet, Switch, Text, View } from "react-native";
-import { colors, TOUCH } from "./theme";
+import { colors, TOUCH, ui } from "./theme";
 
 /**
  * A settings row with a switch; the whole row is one accessible switch (label, detail as the
@@ -98,16 +98,17 @@ export function Row({ children, first, wrap }: { children: ReactNode; first?: bo
   return <View style={[styles.row, wrap && styles.wrap, !first && styles.divider]}>{children}</View>;
 }
 
+// The mockups' rows: 12 / 14 pt padding, 60 pt tall with a detail line, 1 pt hairlines.
 const styles = StyleSheet.create({
-  row: { minHeight: TOUCH + 8, flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 14, paddingVertical: 8 },
+  row: { minHeight: TOUCH + 4, flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 14, paddingVertical: 12 },
   wrap: { flexWrap: "wrap" },
-  divider: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.hairline },
+  divider: { borderTopWidth: 1, borderTopColor: colors.hairline },
   disabled: { opacity: 0.6 },
   pressed: { opacity: 0.6 },
-  check: { color: colors.accent, fontSize: 17, fontWeight: "600", minWidth: 20, textAlign: "center" },
-  text: { flex: 1, gap: 2 },
-  label: { color: colors.text, fontSize: 15 },
-  detail: { color: colors.textMuted, fontSize: 12, lineHeight: 16 },
-  infoLabel: { color: colors.textMuted, fontSize: 14, minWidth: 84 },
+  check: { fontFamily: ui(600), color: colors.accent, fontSize: 17, minWidth: 20, textAlign: "center" },
+  text: { flex: 1, gap: 3 },
+  label: { fontFamily: ui(400), color: colors.textBright, fontSize: 15 },
+  detail: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12, lineHeight: 17 },
+  infoLabel: { fontFamily: ui(400), color: colors.textMuted, fontSize: 14, minWidth: 84 },
   infoValue: { flexGrow: 1, flexShrink: 1, flexBasis: 160, alignItems: "flex-end" },
 });

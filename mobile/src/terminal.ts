@@ -117,19 +117,26 @@ export function segmentColors(
   return { color: fg, backgroundColor: s.bg ? bg : undefined };
 }
 
-/** The pane's view the user picked with the Blocks | Terminal switch; null: follow the screen. */
-export type ViewPick = "terminal" | "blocks" | null;
-
 /**
- * The pick still in force: Blocks picked while a program shows lasts until that screen ends
- * (`screen` null). A screen kept, stale, across a reconnect has not ended, and one the client
- * dropped by itself (`expired`: none came back) does not reset the pick.
+ * Whether the pane shows its terminal screen instead of blocks: only while a full-screen
+ * program (vim, htop, less: the alternate screen) runs, on a gateway with `screen`. A screen
+ * kept, stale, across a reconnect still shows; when the program quits the blocks come back.
  */
-export function keptPick(picked: ViewPick, screen: { alt: boolean } | null, expired = false): ViewPick {
-  return picked === "blocks" && !screen && !expired ? null : picked;
+export function showsTerminal(screen: { alt: boolean } | null, screenFeature: boolean): boolean {
+  return screenFeature && !!screen?.alt;
 }
 
-/** Whether the pane shows the Terminal view: picked, or unpicked while a full-screen program shows. */
-export function showsTerminal(picked: ViewPick, screen: { alt: boolean } | null, screenFeature: boolean): boolean {
-  return screenFeature && (picked === "terminal" || (picked === null && !!screen?.alt));
+/**
+ * Whether the control-key row shows: always under a full-screen program (it needs the keys),
+ * else as Settings › Output › Show keys above the command line says.
+ */
+export function showsKeyRow(showKeys: boolean, fullScreen: boolean): boolean {
+  return fullScreen || showKeys;
+}
+
+/** The full-screen program's name for the banner: the running command's first word, or the pane's job. */
+export function screenProgram(running: string | null, job: string | null): string {
+  const word = running?.trim().split(/\s+/)[0];
+  const name = word ? (word.split("/").at(-1) ?? word) : null;
+  return name || job || "A program";
 }

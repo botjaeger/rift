@@ -431,13 +431,31 @@ fn negated(prefix: &str) -> bool {
 
 /// A password prompt at the end of the cursor line (`Password:`,
 /// `[sudo] password for me:`, `Enter passphrase for key '…':`).
+/// The line ends with a colon (`:` or `：`, spaces after it allowed) and the
+/// word comes near that end: at most three words after it, a quoted part
+/// (`'…'`) counting as none. A question that mentions a password ("how do I
+/// reset the password?") is not one.
 pub fn looks_like_password_prompt(line: &str) -> bool {
     let t = line.trim_end().to_lowercase();
-    (t.ends_with(':') || t.ends_with(": ") || t.ends_with('?'))
-        && ["password", "passphrase", "passcode", "pin for"]
-            .iter()
-            .any(|w| t.contains(w))
-        && t.chars().count() < 200
+    let Some(body) = t.strip_suffix(':').or_else(|| t.strip_suffix('：')) else {
+        return false;
+    };
+    if t.chars().count() >= 200 {
+        return false;
+    }
+    ["password", "passphrase", "passcode", "pin for"]
+        .iter()
+        .filter_map(|w| body.rfind(w).map(|i| &body[i + w.len()..]))
+        .any(|after| {
+            // a quoted part (a key's path, a user@host) is one name
+            let mut words = 0;
+            for (i, part) in after.split('\'').enumerate() {
+                if i % 2 == 0 {
+                    words += part.split_whitespace().count();
+                }
+            }
+            words <= 3
+        })
 }
 
 #[cfg(test)]
@@ -631,5 +649,19 @@ mod tests {
         ));
         assert!(!looks_like_password_prompt("password reset done"));
         assert!(!looks_like_password_prompt("$ echo password"));
+        assert!(looks_like_password_prompt("[sudo] password for x:"));
+        assert!(looks_like_password_prompt("Enter passphrase for key '/k':"));
+        assert!(looks_like_password_prompt("me@host's password: "));
+        assert!(looks_like_password_prompt("パスワード password："));
+        assert!(looks_like_password_prompt("Enter PIN for 'YubiKey':"));
+        // text typed into an agent's input box, a question, a sentence
+        assert!(!looks_like_password_prompt("how do I reset the password?"));
+        assert!(!looks_like_password_prompt(
+            "> what should the password policy say about rotation and reuse:"
+        ));
+        assert!(!looks_like_password_prompt(
+            "the password is stored in the keychain:"
+        ));
+        assert!(!looks_like_password_prompt("Password? "));
     }
 }

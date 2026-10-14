@@ -154,8 +154,9 @@ impl Watches {
         true
     }
 
-    /// Whether `device` waited on `pane` (and no longer does).
-    fn take(&mut self, device: &str, pane: u64, now: Instant) -> bool {
+    /// Whether `device` waited on `pane` (and no longer does); also
+    /// `notify` with `off`.
+    pub(crate) fn take(&mut self, device: &str, pane: u64, now: Instant) -> bool {
         let Some(panes) = self.by_device.get_mut(device) else {
             return false;
         };

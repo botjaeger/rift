@@ -1,12 +1,17 @@
 //! The gateway over real localhost sockets, fed by a fake source; the test
 //! acts as the phone with `snow` through `rift_remote::transport::connect`.
 
-use rift_remote::protocol::{Block, BlockState, ClientHello, Pane, Permission, Run, Tab, Window};
+use rift_remote::protocol::{
+    Block, BlockState, ClientHello, OpenKind, Pane, Permission, Run, Tab, Window,
+};
+use rift_remote::protocol::{
+    ChangedFile, Completion, CompletionKind, DiffLine, HistoryEntry, Waiting, WaitingKind,
+};
 use rift_remote::registry::{self, PairingLink};
 use rift_remote::transport::{self, Channel, HandshakeError, Recv};
 use rift_remote::{
-    Config, Gateway, Input, InputError, Key, KeyBase, OutputError, OutputPage, Page, Screen,
-    Source, SourceError, serve,
+    CompletePage, Config, DiffPage, Gateway, Input, InputError, Key, KeyBase, Menu, MenuKind,
+    OutputError, OutputPage, Page, Screen, Source, SourceError, serve,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -38,6 +43,12 @@ struct State {
     /// Output of (pane, block): lines already gone, then the held lines
     /// (each ending with `\n`).
     outputs: BTreeMap<(u64, u64), (u64, Vec<String>)>,
+    /// What each pane waits for (topology `waiting`).
+    waiting: BTreeMap<u64, Waiting>,
+    /// What `complete` was asked: (pane, line, cursor).
+    completes: Vec<(u64, String, usize)>,
+    /// What `open` was asked: (pane, device name, kind).
+    opens: Vec<(u64, String, OpenKind)>,
 }
 
 #[derive(Clone, Default)]
@@ -80,6 +91,9 @@ impl Source for Fake {
                         job: None,
                         last_command: None,
                         last_exit: None,
+                        git: None,
+                        waiting: st.waiting.get(&id).cloned(),
+                        running: None,
                     })
                     .collect(),
             }],
@@ -123,6 +137,18 @@ impl Source for Fake {
         Ok(())
     }
 
+    /// A new empty pane, numbered after the highest.
+    fn open(&self, pane: u64, device: &str, kind: OpenKind) -> Result<u64, InputError> {
+        let mut st = self.0.lock().unwrap();
+        if !st.panes.contains_key(&pane) {
+            return Err(InputError::NoPane);
+        }
+        let new = st.panes.keys().max().unwrap() + 1;
+        st.panes.insert(new, Vec::new());
+        st.opens.push((pane, device.to_string(), kind));
+        Ok(new)
+    }
+
     fn screen(&self, pane: u64, force: bool) -> Result<Option<Screen>, SourceError> {
         let mut st = self.0.lock().unwrap();
         if !st.panes.contains_key(&pane) {
@@ -130,6 +156,105 @@ impl Source for Fake {
         }
         st.screen_reads.push((pane, force));
         Ok(st.screens.get(&pane).filter(|s| s.alt || force).cloned())
+    }
+
+    /// Pane 12's chip menus, larger than the wire allows: the gateway
+    /// bounds them.
+    fn menu(&self, pane: u64, kind: MenuKind) -> Result<Menu, OutputError> {
+        if !self.0.lock().unwrap().panes.contains_key(&pane) {
+            return Err(OutputError::NoPane);
+        }
+        let mut names: Vec<String> = (0..600).map(|i| format!("d{i:03}")).collect();
+        names.insert(1, "x".repeat(2000));
+        Ok(match kind {
+            MenuKind::Dirs => Menu::Dirs {
+                cwd: Some("/w/rift".into()),
+                parent: true,
+                dirs: names,
+            },
+            MenuKind::Branches => Menu::Branches {
+                current: Some("main".into()),
+                branches: vec!["main".into(), "feat".into()],
+            },
+            MenuKind::Changes => Menu::Changes {
+                branch: Some("main".into()),
+                files: vec![ChangedFile {
+                    path: "a.rs".into(),
+                    status: "M".into(),
+                    added: 3,
+                    removed: 1,
+                    staged: false,
+                }],
+            },
+        })
+    }
+
+    /// More completions than the wire allows, one of them over-long.
+    fn complete(&self, pane: u64, line: &str, cursor: usize) -> Result<CompletePage, OutputError> {
+        let mut st = self.0.lock().unwrap();
+        if !st.panes.contains_key(&pane) {
+            return Err(OutputError::NoPane);
+        }
+        st.completes.push((pane, line.to_string(), cursor));
+        let mut items: Vec<Completion> = (0..80)
+            .map(|i| Completion {
+                text: format!("{line}{i}"),
+                kind: CompletionKind::Subcommand,
+            })
+            .collect();
+        items.insert(
+            1,
+            Completion {
+                text: "x".repeat(2000),
+                kind: CompletionKind::Path,
+            },
+        );
+        Ok(CompletePage {
+            items,
+            history: vec![HistoryEntry {
+                text: format!("{line} --all"),
+                at: Some(1_760_000_000),
+            }],
+        })
+    }
+
+    /// `a.rs` (unstaged) has a diff longer than the wire allows.
+    fn diff(&self, pane: u64, path: &str, staged: bool) -> Result<DiffPage, OutputError> {
+        if !self.0.lock().unwrap().panes.contains_key(&pane) {
+            return Err(OutputError::NoPane);
+        }
+        match (path, staged) {
+            ("a.rs", false) => {}
+            // untracked: its whole content
+            (".env", false) => {
+                return Ok(DiffPage {
+                    untracked: true,
+                    lines: vec![
+                        DiffLine("@".into(), "@@ -0,0 +1 @@".into()),
+                        DiffLine("+".into(), "TOKEN=secret".into()),
+                    ],
+                    ..Default::default()
+                });
+            }
+            // within the bounds, but each control character is six bytes
+            // of JSON: the frame is over the gateway's message limit
+            ("ctl.txt", false) => {
+                return Ok(DiffPage {
+                    lines: (0..250)
+                        .map(|_| DiffLine("+".into(), "\u{1}".repeat(1000)))
+                        .collect(),
+                    ..Default::default()
+                });
+            }
+            _ => return Err(OutputError::NoBlock),
+        }
+        let mut lines = vec![DiffLine("@".into(), "@@ -1 +1 @@".into())];
+        lines.push(DiffLine("+".into(), "y".repeat(1500)));
+        lines.extend((0..3000).map(|i| DiffLine(" ".into(), format!("line {i}"))));
+        Ok(DiffPage {
+            lines,
+            ..Default::default()
+        })
     }
 
     /// Every held line from `from` on, whatever `limit`: the gateway bounds
@@ -428,7 +553,7 @@ fn pairing_then_reconnecting_gets_welcome_and_topology() {
     assert_eq!(
         welcome,
         json!({"t":"welcome","v":2,"host":"test-host","os":"linux","version":"9.9.9",
-               "device":d.id,"permission":"operate","features":["screen","text","output","push_failures","push_ntfy"]})
+               "device":d.id,"permission":"operate","features":["screen","text","output","push_failures","push_ntfy","git","notify_off","chips","waiting","complete","running","open"]})
     );
     assert_eq!(
         (d.name.as_str(), d.platform.as_str()),
@@ -929,6 +1054,83 @@ fn run_and_keys_reach_the_source() {
             ),
         ]
     );
+}
+
+/// Panes of a `topology` message.
+fn topology_panes(v: &Value) -> Vec<u64> {
+    v["windows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|w| w["tabs"].as_array().unwrap())
+        .flat_map(|t| t["panes"].as_array().unwrap())
+        .map(|p| p["id"].as_u64().unwrap())
+        .collect()
+}
+
+#[test]
+fn open_answers_the_new_pane_after_a_topology_with_it() {
+    // no topology poll during the test: only `open` can tell the new pane
+    let env = start(|c| c.topology_poll = Duration::from_secs(60));
+    let (_k, mut ch, _) = env.pair(Permission::Operate);
+    for (rid, kind, want) in [("n1", "tab", 13), ("n2", "pane", 14)] {
+        put(&mut ch, json!({"t":"open","id":rid,"pane":12,"kind":kind}));
+        let mut told = false;
+        let v = loop {
+            let v = recv(&mut ch);
+            match v["t"].as_str() {
+                Some("topology") => told |= topology_panes(&v).contains(&want),
+                Some("ack") => break v,
+                _ => {}
+            }
+        };
+        assert_eq!(v, json!({"t":"ack","id":rid,"ok":true,"pane":want}));
+        assert!(
+            told,
+            "{kind}: the topology with pane {want} comes before the ack"
+        );
+    }
+    assert_eq!(
+        env.fake.0.lock().unwrap().opens,
+        [
+            (12, "Test Phone".to_string(), OpenKind::Tab),
+            (12, "Test Phone".to_string(), OpenKind::Pane),
+        ]
+    );
+    // a third within the second is too many
+    put(
+        &mut ch,
+        json!({"t":"open","id":"n3","pane":12,"kind":"tab"}),
+    );
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (false, "rate"));
+    std::thread::sleep(Duration::from_millis(1050));
+    put(
+        &mut ch,
+        json!({"t":"open","id":"n4","pane":99,"kind":"tab"}),
+    );
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (false, "no_pane"));
+    put(
+        &mut ch,
+        json!({"t":"open","id":"n5","pane":12,"kind":"window"}),
+    );
+    assert_eq!(code(&recv_t(&mut ch, "error")), ("error", "bad_request"));
+    assert_eq!(env.fake.0.lock().unwrap().opens.len(), 2);
+}
+
+#[test]
+fn view_devices_are_forbidden_to_open() {
+    let env = start(|_| {});
+    let (_k, mut ch, _) = env.pair(Permission::View);
+    put(
+        &mut ch,
+        json!({"t":"open","id":"n1","pane":12,"kind":"pane"}),
+    );
+    let v = recv_t(&mut ch, "ack");
+    assert_eq!(
+        (ack(&v), v["id"].as_str()),
+        ((false, "forbidden"), Some("n1"))
+    );
+    assert!(env.fake.0.lock().unwrap().opens.is_empty());
 }
 
 #[test]
@@ -1571,6 +1773,15 @@ fn a_device_with_a_push_token_is_alerted_while_its_app_is_closed() {
     env.fake.edit(12, |b| b.push(finished(6, "ls", 0, 40)));
     std::thread::sleep(Duration::from_millis(500));
     assert_eq!(sink.count(), 2);
+    // asked, then switched off (the bell on a running block): no alert
+    let mut ch = env.login(&key);
+    put(&mut ch, json!({"t":"notify","pane":12}));
+    put(&mut ch, json!({"t":"notify","pane":12,"off":true}));
+    std::thread::sleep(Duration::from_millis(300));
+    ch.close();
+    env.fake.edit(12, |b| b.push(finished(7, "make", 0, 40)));
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(sink.count(), 2, "a wait switched off does not alert");
 }
 
 #[test]
@@ -2185,6 +2396,20 @@ fn screens_are_off_until_asked_for() {
     put(&mut ch, json!({"t":"screen","pane":12,"mode":"on"}));
     assert_eq!(code(&recv_t(&mut ch, "error")), ("error", "bad_request"));
     assert!(screens_in(&drain(&mut ch, 200)).is_empty());
+    // a reconnecting app re-subscribes a pane that closed meanwhile and asks
+    // for its screen at once: one `no_pane`, the screen request dropped
+    put(&mut ch, json!({"t":"subscribe","pane":99,"after":7}));
+    put(&mut ch, json!({"t":"screen","pane":99,"mode":"auto"}));
+    put(&mut ch, json!({"t":"ping","n":5}));
+    let after: Vec<Value> = std::iter::repeat_with(|| recv(&mut ch))
+        .take_while(|v| v["t"] != "pong")
+        .filter(|v| v["t"] != "topology")
+        .collect();
+    assert_eq!(after.len(), 1, "{after:?}");
+    assert_eq!(code(&after[0]), ("error", "no_pane"));
+    // another pane is still refused
+    put(&mut ch, json!({"t":"screen","pane":12,"mode":"auto"}));
+    assert_eq!(code(&recv_t(&mut ch, "error")), ("error", "bad_request"));
 }
 
 #[test]
@@ -2607,6 +2832,240 @@ fn output_pages_are_bounded_to_64_kib_at_a_line_end() {
             && text.len() > rift_remote::MAX_OUTPUT_BYTES - 2
     );
     assert!(text.chars().all(|c| c == 'é'));
+}
+
+#[test]
+fn chip_menus_and_diffs_are_answered_within_bounds() {
+    let env = start(|_| {});
+    let (_k, mut ch, _) = env.pair(Permission::View);
+    put(&mut ch, json!({"t":"dirs","id":"m1","pane":12}));
+    let v = recv_t(&mut ch, "dirs");
+    let dirs = v["dirs"].as_array().unwrap();
+    assert_eq!(dirs.len(), rift_remote::MAX_MENU_ITEMS);
+    assert_eq!(
+        (&dirs[0], &dirs[1]),
+        (&json!("d000"), &json!("d001")),
+        "the over-long name is left out"
+    );
+    assert_eq!(
+        (&v["id"], &v["cwd"], &v["parent"], &v["more"]),
+        (&json!("m1"), &json!("/w/rift"), &json!(true), &json!(true))
+    );
+    put(&mut ch, json!({"t":"branches","id":"m2","pane":12}));
+    assert_eq!(
+        recv_t(&mut ch, "branches"),
+        json!({"t":"branches","id":"m2","pane":12,"current":"main","branches":["main","feat"],"more":false})
+    );
+    put(&mut ch, json!({"t":"changes","id":"m3","pane":12}));
+    assert_eq!(
+        recv_t(&mut ch, "changes"),
+        json!({"t":"changes","id":"m3","pane":12,"branch":"main","more":false,
+               "files":[{"path":"a.rs","status":"M","added":3,"removed":1,"staged":false}]})
+    );
+    put(
+        &mut ch,
+        json!({"t":"diff","id":"m4","pane":12,"path":"a.rs","staged":false}),
+    );
+    let v = recv_t(&mut ch, "diff");
+    let lines = v["lines"].as_array().unwrap();
+    assert_eq!(lines.len(), rift_remote::MAX_DIFF_LINES);
+    assert_eq!(
+        lines[1][1].as_str().unwrap().len(),
+        rift_remote::MAX_DIFF_LINE_CHARS,
+        "a long line is cut"
+    );
+    assert_eq!(
+        (&v["truncated"], &v["binary"]),
+        (&json!(true), &json!(false))
+    );
+    // not a change, an unknown pane, a path too long
+    for (msg, want) in [
+        (
+            json!({"t":"diff","id":"a","pane":12,"path":"b.rs","staged":false}),
+            "no_block",
+        ),
+        (
+            json!({"t":"diff","id":"b","pane":12,"path":"a.rs","staged":true}),
+            "no_block",
+        ),
+        (json!({"t":"dirs","id":"c","pane":77}), "no_pane"),
+        (
+            json!({"t":"diff","id":"d","pane":77,"path":"a.rs","staged":false}),
+            "no_pane",
+        ),
+        (
+            json!({"t":"diff","id":"e","pane":12,"path":"p".repeat(1025),"staged":false}),
+            "bad_request",
+        ),
+        (
+            json!({"t":"diff","id":"f","pane":12,"path":"","staged":false}),
+            "bad_request",
+        ),
+    ] {
+        put(&mut ch, msg.clone());
+        let v = recv_t(&mut ch, "ack");
+        assert_eq!((ack(&v), &v["id"]), ((false, want), &msg["id"]), "{msg}");
+    }
+}
+
+#[test]
+fn an_untracked_files_content_needs_operate() {
+    let env = start(|_| {});
+    let untracked = json!({"t":"diff","id":"u","pane":12,"path":".env","staged":false});
+    let (_k, mut view, _) = env.pair(Permission::View);
+    put(&mut view, untracked.clone());
+    let v = recv_t(&mut view, "ack");
+    assert_eq!((ack(&v), &v["id"]), ((false, "forbidden"), &json!("u")));
+    // a tracked file's diff is still the view device's
+    put(
+        &mut view,
+        json!({"t":"diff","id":"t","pane":12,"path":"a.rs","staged":false}),
+    );
+    assert_eq!(recv_t(&mut view, "diff")["id"], "t");
+    let (_k, mut operate, _) = env.pair(Permission::Operate);
+    put(&mut operate, untracked);
+    let v = recv_t(&mut operate, "diff");
+    assert_eq!(v["lines"][1], json!(["+", "TOKEN=secret"]));
+}
+
+#[test]
+fn an_answer_over_the_message_limit_is_a_too_large_ack() {
+    let env = start(|_| {});
+    let (_k, mut ch, _) = env.pair(Permission::View);
+    put(
+        &mut ch,
+        json!({"t":"diff","id":"big","pane":12,"path":"ctl.txt","staged":false}),
+    );
+    let v = recv_t(&mut ch, "ack");
+    assert_eq!((ack(&v), &v["id"]), ((false, "too_large"), &json!("big")));
+    // the connection goes on
+    put(&mut ch, json!({"t":"ping","n":5}));
+    assert_eq!(recv_t(&mut ch, "pong")["n"], 5);
+}
+
+#[test]
+fn view_devices_get_no_completions() {
+    let env = start(|_| {});
+    let (_k, mut ch, _) = env.pair(Permission::View);
+    put(
+        &mut ch,
+        json!({"t":"complete","id":"k","pane":12,"line":"","cursor":0}),
+    );
+    let v = recv_t(&mut ch, "ack");
+    assert_eq!((ack(&v), &v["id"]), ((false, "forbidden"), &json!("k")));
+    assert!(env.fake.0.lock().unwrap().completes.is_empty());
+}
+
+#[test]
+fn completions_are_answered_within_bounds() {
+    let env = start(|_| {});
+    let (_k, mut ch, _) = env.pair(Permission::Operate);
+    put(
+        &mut ch,
+        json!({"t":"complete","id":"k1","pane":12,"line":"cargo t","cursor":7}),
+    );
+    let v = recv_t(&mut ch, "complete");
+    let items = v["items"].as_array().unwrap();
+    assert_eq!(items.len(), rift_remote::MAX_COMPLETE_ITEMS);
+    assert_eq!(
+        (&items[0], &items[1]),
+        (
+            &json!({"text":"cargo t0","kind":"subcommand"}),
+            &json!({"text":"cargo t1","kind":"subcommand"})
+        ),
+        "the over-long completion is left out"
+    );
+    assert_eq!(
+        (&v["id"], &v["more"], &v["history"]),
+        (
+            &json!("k1"),
+            &json!(true),
+            &json!([{"text":"cargo t --all","at":1_760_000_000}])
+        )
+    );
+    // a cursor inside `é`, past the end, a line too long, an unknown pane
+    for (msg, want) in [
+        (
+            json!({"t":"complete","id":"a","pane":12,"line":"é","cursor":1}),
+            "bad_request",
+        ),
+        (
+            json!({"t":"complete","id":"b","pane":12,"line":"ls","cursor":3}),
+            "bad_request",
+        ),
+        (
+            json!({"t":"complete","id":"c","pane":12,"line":"x".repeat(1025),"cursor":0}),
+            "bad_request",
+        ),
+        (
+            json!({"t":"complete","id":"d","pane":77,"line":"ls","cursor":2}),
+            "no_pane",
+        ),
+    ] {
+        put(&mut ch, msg.clone());
+        let v = recv_t(&mut ch, "ack");
+        assert_eq!((ack(&v), &v["id"]), ((false, want), &msg["id"]), "{msg}");
+    }
+    assert_eq!(
+        env.fake.0.lock().unwrap().completes,
+        [(12, "cargo t".to_string(), 7)],
+        "refused requests never reach the desktop"
+    );
+}
+
+#[test]
+fn a_panes_waiting_reaches_the_phone_bounded() {
+    let env = start(|_| {});
+    env.fake.set(13, vec![block(1, "")]);
+    let (_k, mut ch, _) = env.pair(Permission::View);
+    // the next topology poll sends the change
+    {
+        let mut st = env.fake.0.lock().unwrap();
+        st.waiting.insert(
+            12,
+            Waiting {
+                kind: WaitingKind::Choice,
+                prompt: "q".repeat(400) + "?",
+                choices: (1..=12).map(|i| format!("c{i}")).collect(),
+                selected: 11,
+                numbered: true,
+                context: (0..20).map(|i| format!("l{i}")).collect(),
+            },
+        );
+        // a password never carries what the screen showed around it
+        st.waiting.insert(
+            13,
+            Waiting {
+                kind: WaitingKind::Password,
+                prompt: "Password:".into(),
+                choices: vec!["secret".into()],
+                selected: 1,
+                numbered: true,
+                context: vec!["secret".into()],
+            },
+        );
+    }
+    let v = recv_t(&mut ch, "topology");
+    let panes = &v["windows"][0]["tabs"][0]["panes"];
+    let pane = |id: u64| {
+        panes
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == id)
+            .unwrap()["waiting"]
+            .clone()
+    };
+    let w = pane(12);
+    assert_eq!(w["prompt"].as_str().unwrap().chars().count(), 300);
+    assert_eq!(w["choices"].as_array().unwrap().len(), 9);
+    assert_eq!(w["selected"], 8);
+    let context = w["context"].as_array().unwrap();
+    assert_eq!((context.len(), &context[11]), (12, &json!("l19")));
+    assert_eq!(
+        pane(13),
+        json!({"kind":"password","prompt":"Password:","choices":[],"selected":0,"numbered":false,"context":[]})
+    );
 }
 
 #[test]

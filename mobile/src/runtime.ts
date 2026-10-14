@@ -16,6 +16,9 @@ import { AppState as RNAppState, Platform } from "react-native";
 import { Connectivity, type NetworkSnapshot } from "./connectivity";
 import { Fleet, type AppState, type Notifier } from "./fleet";
 import { AppLock, authOutcome, biometricLabel, type AuthResult, type BiometricKind, type LockSnapshot } from "./lock";
+import { liveActivities } from "../modules/rift-live";
+import { livePlan, type LiveShown } from "./live";
+import { ASK_CATEGORY, ASK_OPEN_CATEGORY } from "./notify";
 import { MemoryStore, type KeyValueStore } from "./stores";
 
 /** Cryptographic randomness: expo-crypto (the OS generator), or Web Crypto. Never Math.random. */
@@ -82,6 +85,20 @@ async function refreshPushToken(): Promise<void> {
   }
 }
 
+if (notificationsSupported) {
+  // "Needs you" alerts (the P6 Lock board): Yes and No answer from the lock screen once the
+  // phone is unlocked (Face ID), and open the app, which sends the answer (and asks for Face ID
+  // itself first with Ask before running on); Open shows the question.
+  const open = { identifier: "open", buttonTitle: "Open", options: { opensAppToForeground: true } };
+  const answer = (identifier: string, buttonTitle: string) => ({
+    identifier,
+    buttonTitle,
+    options: { opensAppToForeground: true, isAuthenticationRequired: true },
+  });
+  void Notifications.setNotificationCategoryAsync(ASK_CATEGORY, [answer("yes", "Yes"), answer("no", "No"), open]).catch(() => undefined);
+  void Notifications.setNotificationCategoryAsync(ASK_OPEN_CATEGORY, [open]).catch(() => undefined);
+}
+
 const notifier: Notifier = {
   async requestPermission() {
     if (!notificationsSupported) return false;
@@ -92,14 +109,21 @@ const notifier: Notifier = {
     if (granted) void refreshPushToken();
     return granted;
   },
-  async notify({ title, body, data }) {
+  async notify({ title, body, data, category }) {
     if (!notificationsSupported) return;
     if (!(await Notifications.getPermissionsAsync()).granted) return;
     // Posted on this device (alerts while the app is closed come through push instead).
     await Notifications.scheduleNotificationAsync({
-      content: { title, body: body || undefined, data },
+      content: { title, body: body || undefined, data, ...(category ? { categoryIdentifier: category } : {}) },
       trigger: null,
     });
+  },
+  async dismissAsk(host, pane, ask) {
+    if (!notificationsSupported) return;
+    for (const n of await Notifications.getPresentedNotificationsAsync()) {
+      const data = n.request.content.data as { host?: unknown; pane?: unknown; ask?: unknown } | undefined;
+      if (data?.host === host && data.pane === pane && data.ask === ask) await Notifications.dismissNotificationAsync(n.request.identifier);
+    }
   },
 };
 
@@ -201,15 +225,67 @@ export function startPlatformWatchers(): () => void {
   };
   const unsubStore = fleet.store.subscribe(syncLock);
   syncLock();
+  endLeftoverLive();
+  const unsubLive = fleet.store.subscribe(syncLive);
+  syncLive();
 
   return () => {
     netSub.remove();
     appSub.remove();
     tokenSub?.remove();
     unsubStore();
+    unsubLive();
     watching = false;
   };
 }
+
+/** The Live Activities shown, by `liveKey` (live.ts). */
+const liveShown = new Map<string, LiveShown>();
+
+/** Starts, updates and ends the lock screen's Live Activities as the "Notify me" waits change (live.ts). */
+function syncLive(): void {
+  if (Platform.OS !== "ios" || !liveActivities.supported() || !liveListed) return;
+  const s = fleet.store.getSnapshot();
+  const plan = livePlan(liveShown, s.asked, s.hosts, s.activity);
+  for (const st of plan.start) {
+    const shown: LiveShown = { wait: st.wait, id: null, line: st.line };
+    liveShown.set(st.key, shown);
+    void liveActivities.start(st.command, st.place, st.startedAt, st.line).then((id) => {
+      shown.id = id;
+      // the wait ended while it started: end it now, with how it ended
+      if (id && shown.ended) void liveActivities.end(id, shown.ended.exit, shown.line);
+    });
+  }
+  for (const u of plan.update) {
+    liveShown.get(u.key)!.line = u.line;
+    void liveActivities.update(u.id, u.line);
+  }
+  for (const e of plan.end) {
+    liveShown.get(e.key)!.ended = { exit: e.exit };
+    liveShown.delete(e.key);
+    if (e.id) void liveActivities.end(e.id, e.exit, e.line);
+  }
+}
+
+/**
+ * Ends the activities a previous run of the app left on the lock screen (it was closed or
+ * killed before their command finished): nothing would ever update or end them.
+ */
+function endLeftoverLive(): void {
+  // once per run of the JavaScript (the watchers restart with a remounted root)
+  if (liveListing || Platform.OS !== "ios" || !liveActivities.supported()) return;
+  liveListing = true;
+  // this run starts none until they are listed, so every one listed is left over
+  void liveActivities.ids().then((ids) => {
+    for (const id of ids) void liveActivities.end(id, null, "");
+    liveListed = true;
+    syncLive();
+  });
+}
+
+/** The leftover activities were ended (`endLeftoverLive`): this run's may start. */
+let liveListed = false;
+let liveListing = false;
 
 export function useLock(): LockSnapshot {
   return useSyncExternalStore(appLock.subscribe, appLock.getSnapshot, appLock.getSnapshot);

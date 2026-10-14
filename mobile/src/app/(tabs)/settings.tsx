@@ -5,24 +5,92 @@ import { AccessibilityInfo, Linking, Platform, Pressable, StyleSheet, Text, Text
 import { controlKey } from "@/controlKeys";
 import { ntfyUnsupported, type HostView } from "@/fleet";
 import { NTFY_ROTATED, ntfyFooter, ntfyServerChanged, ntfySubscribeFallback, ntfySubscribeLink, pushFooter } from "@/notify";
-import { pathLabel } from "@/protocol/relay";
 import { authenticate, biometricSupport, fleet, useApp, type BiometricSupport } from "@/runtime";
 import { MAX_DEVICE_NAME, NOTIFY_AFTER_CHOICES, type NotifyPolicy } from "@/stores";
 import { Button } from "@/ui/Button";
 import { confirmDestructive } from "@/ui/confirm";
-import { formatAfter } from "@/ui/format";
+import { formatAfter, osName } from "@/ui/format";
+import { Icon } from "@/ui/Icon";
 import { ErrorText } from "@/ui/Notice";
 import { ChoiceRow, Row, SwitchRow } from "@/ui/Rows";
 import { Section, TabScreen } from "@/ui/Screen";
-import { colors, mono, TOUCH } from "@/ui/theme";
+import { colors, mono, radius, TOUCH, ui } from "@/ui/theme";
 
 const POLICIES: { value: NotifyPolicy; label: string }[] = [
-  { value: "off", label: "Off" },
-  { value: "failures", label: "Failed commands" },
-  { value: "all", label: "Finished or failed commands" },
+  { value: "off", label: "Nothing" },
+  { value: "failures", label: "Failures" },
+  { value: "all", label: "Everything" },
 ];
 
-function DeviceName({ name }: { name: string }) {
+/** "30 s", "1 min", "5 min" (the Settings board's picker). */
+const shortAfter = (ms: number) => (ms < 60_000 ? `${Math.round(ms / 1000)} s` : `${Math.round(ms / 60_000)} min`);
+
+/** Nothing | Failures | Everything: one radio group, the choice on the accent. */
+function NotifyFor({ value, onChange }: { value: NotifyPolicy; onChange: (v: NotifyPolicy) => void }) {
+  return (
+    <View style={styles.notifyFor}>
+      <Text style={styles.rowLabel}>Notify for</Text>
+      <View style={styles.segments} accessibilityRole="radiogroup" accessibilityLabel="Notify for">
+        {POLICIES.map((p) => {
+          const on = p.value === value;
+          return (
+            <Pressable
+              key={p.value}
+              accessibilityRole="radio"
+              accessibilityLabel={p.label}
+              accessibilityState={{ checked: on }}
+              onPress={() => onChange(p.value)}
+              style={({ pressed }) => [styles.segment, on && styles.segmentOn, pressed && styles.pressed]}
+            >
+              <Text style={[styles.segmentText, on && styles.segmentTextOn]}>{p.label}</Text>
+            </Pressable>
+          );
+        })}
+      </View>
+    </View>
+  );
+}
+
+/** "Only if it ran longer than [30 s ▾]": the choices open under it. */
+function LongerThan({ value, onChange }: { value: number; onChange: (ms: number) => void }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <Row>
+        <View style={styles.rowText}>
+          <Text style={styles.rowLabel}>Only if it ran longer than</Text>
+          <Text style={styles.rowDetail}>Short ones never notify</Text>
+        </View>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={`Only if it ran longer than ${formatAfter(value)}`}
+          accessibilityHint="Shows the choices"
+          accessibilityState={{ expanded: open }}
+          onPress={() => setOpen((o) => !o)}
+          hitSlop={{ top: 4, bottom: 4 }}
+          style={({ pressed }) => [styles.picker, pressed && styles.pressed]}
+        >
+          <Text style={styles.pickerText}>{shortAfter(value)} ▾</Text>
+        </Pressable>
+      </Row>
+      {open
+        ? NOTIFY_AFTER_CHOICES.map((ms) => (
+            <ChoiceRow
+              key={ms}
+              label={formatAfter(ms)}
+              selected={value === ms}
+              onSelect={() => {
+                onChange(ms);
+                setOpen(false);
+              }}
+            />
+          ))
+        : null}
+    </>
+  );
+}
+
+function DeviceName({ name, first }: { name: string; first: boolean }) {
   // The text being edited; null shows the saved name (which a load or another rename may change).
   const [draft, setDraft] = useState<string | null>(null);
   const save = () => {
@@ -30,7 +98,8 @@ function DeviceName({ name }: { name: string }) {
     setDraft(null);
   };
   return (
-    <Row first>
+    <Row first={first}>
+      <Text style={styles.rowLabel}>This phone&apos;s name</Text>
       <TextInput
         value={draft ?? name}
         onChangeText={setDraft}
@@ -39,17 +108,18 @@ function DeviceName({ name }: { name: string }) {
         onSubmitEditing={save}
         maxLength={MAX_DEVICE_NAME}
         returnKeyType="done"
-        placeholder="Device name"
+        placeholder="Phone name"
         placeholderTextColor={colors.textMuted}
-        accessibilityLabel="Device name"
-        accessibilityHint="Shown on your computers when this device connects or runs a command"
-        style={styles.input}
+        accessibilityLabel="This phone's name"
+        accessibilityHint="Shown on your computers when this phone connects or runs a command"
+        style={styles.nameInput}
       />
     </Row>
   );
 }
 
 function PairedHost({ host, first }: { host: HostView; first: boolean }) {
+  const router = useRouter();
   const [busy, setBusy] = useState(false);
   const unpair = async () => {
     const connected = host.conn.status === "open";
@@ -64,15 +134,22 @@ function PairedHost({ host, first }: { host: HostView; first: boolean }) {
     setBusy(true);
     await fleet.unpair(host.record.key);
   };
-  const paths = [...host.record.addresses, ...(host.record.relay ? [pathLabel({ kind: "relay", url: host.record.relay })] : [])];
+  const os = host.welcome?.os ?? host.record.os;
+  const meta = [os ? osName(os) : null, host.record.permission === "view" ? "view only" : "can run commands"]
+    .filter(Boolean)
+    .join(" · ");
   return (
-    <Row first={first} wrap>
-      <View style={styles.hostText} accessible>
-        <Text style={styles.hostName}>{host.record.name}</Text>
-        <Text style={styles.hostMeta}>
-          {host.record.permission === "view" ? "View only" : "Can run commands"} · {paths.join(", ")}
-        </Text>
-      </View>
+    <View style={[styles.host, !first && styles.divider]}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={`${host.record.name}, ${meta}`}
+        accessibilityHint="Opens its tabs and alerts"
+        onPress={() => router.push({ pathname: "/host/[key]", params: { key: host.record.key } })}
+        style={({ pressed }) => [styles.rowText, pressed && styles.pressed]}
+      >
+        <Text style={styles.rowLabel}>{host.record.name}</Text>
+        <Text style={styles.rowDetail}>{meta}</Text>
+      </Pressable>
       <Pressable
         accessibilityRole="button"
         accessibilityLabel={`Unpair ${host.record.name}`}
@@ -82,17 +159,30 @@ function PairedHost({ host, first }: { host: HostView; first: boolean }) {
         onPress={() => void unpair()}
         style={({ pressed }) => [styles.unpair, pressed && styles.pressed]}
       >
+        {/* Destructive, but red text is below 4.5:1 on a surface (palette.ts): the caution token. */}
         <Text style={styles.unpairText}>{busy ? "Unpairing…" : "Unpair"}</Text>
       </Pressable>
-    </Row>
+    </View>
   );
 }
 
 /**
- * Settings › Notifications › "Alerts through ntfy": a random topic on ntfy.sh (or a self-hosted
- * server) that the computers post alerts to; the ntfy app subscribed to it shows them.
+ * Settings › While the app is closed › "Alerts through ntfy": a random topic on ntfy.sh (or a
+ * self-hosted server) that the computers post alerts to; the ntfy app subscribed to it shows them.
  */
-function Ntfy({ server, on, topic, hosts }: { server: string; on: boolean; topic: string | null; hosts: HostView[] }) {
+function Ntfy({
+  server,
+  on,
+  topic,
+  hosts,
+  footer,
+}: {
+  server: string;
+  on: boolean;
+  topic: string | null;
+  hosts: HostView[];
+  footer: string;
+}) {
   // The server being edited; null shows the saved one.
   const [draft, setDraft] = useState<string | null>(null);
   // A server that is not usable (kept until a usable one is saved), and other failures.
@@ -149,11 +239,11 @@ function Ntfy({ server, on, topic, hosts }: { server: string; on: boolean; topic
   };
   const old = ntfyUnsupported(hosts);
   return (
-    <Section footer={ntfyFooter(server)}>
+    <Section title="While the app is closed" footer={footer}>
       <SwitchRow
         first
         label="Alerts through ntfy"
-        detail="While this app is closed, through the free ntfy app (no Apple or Google push setup needed)"
+        detail="Free, with the ntfy app"
         value={on}
         onChange={(v) => {
           setNote(null);
@@ -161,8 +251,9 @@ function Ntfy({ server, on, topic, hosts }: { server: string; on: boolean; topic
         }}
       />
       {on && topic !== null ? (
-        <>
-          <Row>
+        <View style={[styles.ntfy, styles.divider]}>
+          <View style={styles.field}>
+            <Text style={styles.fieldLabel}>Server</Text>
             <TextInput
               value={draft ?? server}
               onChangeText={setDraft}
@@ -178,53 +269,47 @@ function Ntfy({ server, on, topic, hosts }: { server: string; on: boolean; topic
               placeholderTextColor={colors.textMuted}
               accessibilityLabel="ntfy server"
               accessibilityHint="ntfy.sh, or the address of your own ntfy server"
-              style={styles.input}
+              style={styles.serverInput}
             />
-          </Row>
-          <Row wrap>
-            <View style={styles.hostText} accessible>
-              <Text style={styles.hostMeta}>Topic</Text>
-              <Text style={styles.topic} selectable>
-                {topic}
-              </Text>
-            </View>
-          </Row>
-          <Row wrap>
+          </View>
+          <View style={styles.field} accessible>
+            <Text style={styles.fieldLabel}>Topic (keep it secret)</Text>
+            <Text style={styles.topic} selectable>
+              {topic}
+            </Text>
+          </View>
+          <View style={styles.ntfyButtons}>
             <Button
               label="Subscribe in ntfy"
               variant="primary"
+              size="small"
               accessibilityHint="Opens the ntfy app on this topic"
               onPress={() => void subscribe()}
+              style={styles.flex2}
             />
-            <Button label="Copy" accessibilityHint="Copies the topic" onPress={() => void copy("Topic copied")} />
+            <Button label="Copy" size="small" accessibilityHint="Copies the topic" onPress={() => void copy("Topic copied")} style={styles.flex1} />
             <Button
-              label="New topic"
+              label="New"
+              size="small"
               accessibilityHint="Makes a new topic; the ntfy app must subscribe again. Asks first"
               onPress={() => void rotate()}
+              style={styles.flex1}
             />
-          </Row>
+          </View>
           {old.map((h) => (
-            <Row key={h.record.key}>
-              <Text style={styles.reason}>Update Rift on {h.record.name} to get alerts there through ntfy.</Text>
-            </Row>
+            <Text key={h.record.key} style={styles.reason}>
+              Update Rift on {h.record.name} to get alerts there through ntfy.
+            </Text>
           ))}
-          {serverError || error || note ? (
-            <Row>
-              {serverError || error ? (
-                <ErrorText style={styles.flex}>{serverError ?? error}</ErrorText>
-              ) : (
-                <Text style={styles.reason}>{note}</Text>
-              )}
-            </Row>
-          ) : null}
-        </>
+          {serverError || error ? <ErrorText>{serverError ?? error}</ErrorText> : note ? <Text style={styles.reason}>{note}</Text> : null}
+        </View>
       ) : null}
     </Section>
   );
 }
 
-/** Settings › Security: the app lock (hidden without biometrics while off, with the reason) and confirmation. */
-function Security() {
+/** Settings › Security: the app lock (hidden without biometrics while off, with the reason) and "Run with Face ID". */
+function Security({ deviceName }: { deviceName: string }) {
   const s = useApp();
   const st = s.settings;
   const [support, setSupport] = useState<BiometricSupport | null>(null);
@@ -251,167 +336,211 @@ function Security() {
   };
 
   const lockAvailable = support?.label != null;
-  const footer = [
-    "Show the host, pane and command before every run.",
-    lockAvailable
-      ? "The lock asks on launch and after 5 minutes away, and hides the app's content in the app switcher. The device passcode works too."
-      : null,
-  ]
-    .filter(Boolean)
-    .join(" ");
+  // "Require Face ID" → "Face ID"
+  const bio = support?.label?.replace(/^Require /, "") ?? "Face ID or fingerprint";
   return (
-    <Section title="Security" footer={footer}>
-      <SwitchRow
-        first
-        label="Confirm every command"
-        value={st.confirmEveryCommand}
-        onChange={(v) => void fleet.updateSettings({ confirmEveryCommand: v })}
-      />
+    <Section title="Security">
       {/* A lock that is on stays switchable when the biometrics went away, so it can be turned off. */}
       {lockAvailable || st.biometricLock ? (
-        <>
-          <SwitchRow
-            label={support?.label ?? "Require Face ID or fingerprint"}
-            detail="On launch and after 5 minutes in the background"
-            value={st.biometricLock}
-            onChange={(v) => void setLock(v)}
-          />
-          {st.biometricLock ? (
-            <SwitchRow
-              label="Ask before running commands"
-              detail={
-                st.confirmEveryCommand
-                  ? "Authenticate on the confirmation before Run"
-                  : "Needs “Confirm every command”, which is off"
-              }
-              value={st.authBeforeRun}
-              disabled={!st.confirmEveryCommand}
-              onChange={(v) => void fleet.updateSettings({ authBeforeRun: v })}
-            />
-          ) : null}
-        </>
+        <SwitchRow
+          first
+          label={`Lock with ${bio}`}
+          detail="On opening, and after 5 minutes away"
+          value={st.biometricLock}
+          onChange={(v) => void setLock(v)}
+        />
+      ) : null}
+      {/* Only where a command is shown before it runs: with the lock and Ask before running on. */}
+      {st.biometricLock && st.askBeforeRun ? (
+        <SwitchRow
+          label={`Run with ${bio}`}
+          detail="Before a command you confirm runs, and before keys that submit a line"
+          value={st.authBeforeRun}
+          onChange={(v) => void fleet.updateSettings({ authBeforeRun: v })}
+        />
       ) : null}
       {support && !lockAvailable ? (
-        <Row>
+        <Row first={!st.biometricLock}>
           <Text style={styles.reason}>{support.reason}</Text>
         </Row>
       ) : null}
       {error ? (
         <Row>
-          <ErrorText style={styles.flex}>{error}</ErrorText>
+          <ErrorText style={styles.flex1}>{error}</ErrorText>
         </Row>
       ) : null}
+      <DeviceName
+        name={deviceName}
+        first={!(lockAvailable || st.biometricLock) && !(support && !lockAvailable) && !error}
+      />
     </Section>
   );
 }
 
+/** Settings (the Settings board). */
 export default function SettingsScreen() {
   const router = useRouter();
   const s = useApp();
   const st = s.settings;
+  const example = s.hosts[0]?.record.name ?? "studio-mac";
   return (
     <TabScreen title="Settings">
-      <Section title="This device" footer="Shown on your computers when this device connects or runs a command.">
-        <DeviceName name={s.deviceName} />
-      </Section>
-
-      <Security />
-
-      <Section
-        title="Notifications"
-        footer={
-          st.notifyPolicy === "off"
-            ? "Only commands you asked about with “Notify me” notify."
-            : `Commands that ran ${formatAfter(st.notifyAfterMs)} or longer, when you are not looking at ` +
-              "that pane. A computer's own Notifications switch (on its page) turns them off for it. " +
-              "“Notify me” always notifies."
-        }
-      >
-        {POLICIES.map((p, i) => (
-          <ChoiceRow
-            key={p.value}
-            first={i === 0}
-            label={p.label}
-            selected={st.notifyPolicy === p.value}
-            onSelect={() => void fleet.updateSettings({ notifyPolicy: p.value })}
-          />
-        ))}
-      </Section>
-
-      {st.notifyPolicy !== "off" ? (
-        <Section title="Notify after">
-          {NOTIFY_AFTER_CHOICES.map((ms, i) => (
-            <ChoiceRow
-              key={ms}
-              first={i === 0}
-              label={formatAfter(ms)}
-              selected={st.notifyAfterMs === ms}
-              onSelect={() => void fleet.updateSettings({ notifyAfterMs: ms })}
-            />
-          ))}
-        </Section>
-      ) : null}
-
-      <Section footer={pushFooter(s.push, st.ntfyEnabled)}>
+      <Section title="Running commands">
         <SwitchRow
           first
-          label="Show command in notification"
-          detail="Command lines can contain secrets; off keeps them off the lock screen and out of push"
+          label="Ask before running"
+          detail="Off: a command runs as soon as you tap Run. Keys like ^C always send at once."
+          value={st.askBeforeRun}
+          onChange={(v) => void fleet.updateSettings({ askBeforeRun: v })}
+        />
+        <SwitchRow
+          label="Notify me when my commands finish"
+          detail="Every command you run from this phone, however long it takes. Tap the bell on a running block to change one."
+          value={st.notifyMyCommands}
+          onChange={(v) => void fleet.updateSettings({ notifyMyCommands: v })}
+        />
+      </Section>
+
+      <Section
+        title="Other commands on your computers"
+        footer="Nothing notifies for the pane you are looking at. “Needs you” alerts show the question a program asks, whatever “Show the command” says."
+      >
+        <NotifyFor value={st.notifyPolicy} onChange={(v) => void fleet.updateSettings({ notifyPolicy: v })} />
+        {st.notifyPolicy !== "off" ? (
+          <LongerThan value={st.notifyAfterMs} onChange={(ms) => void fleet.updateSettings({ notifyAfterMs: ms })} />
+        ) : null}
+        <SwitchRow
+          label="Show the command"
+          detail={`Off: “A command failed on ${example} (exit 1)”`}
           value={st.showCommandInNotification}
           onChange={(v) => void fleet.updateSettings({ showCommandInNotification: v })}
         />
       </Section>
 
-      <Ntfy server={st.ntfyServer} on={st.ntfyEnabled} topic={st.ntfyTopic} hosts={s.hosts} />
+      <Ntfy
+        server={st.ntfyServer}
+        on={st.ntfyEnabled}
+        topic={st.ntfyTopic}
+        hosts={s.hosts}
+        footer={st.ntfyEnabled ? ntfyFooter(st.ntfyServer, st.showCommandInNotification) : pushFooter(s.push, false)}
+      />
 
-      <Section title="Keys" footer="The keys above the command line and under the terminal screen.">
+      <Section title="Output">
+        <SwitchRow
+          first
+          label="Wrap long lines"
+          detail="Off: each block scrolls sideways, lines stay as the computer prints them"
+          value={st.wrapLines}
+          onChange={(v) => void fleet.updateSettings({ wrapLines: v })}
+        />
+        <SwitchRow
+          label="Show keys above the command line"
+          detail="Off: the row shows only while a program has the full screen."
+          value={st.showKeys}
+          onChange={(v) => void fleet.updateSettings({ showKeys: v })}
+        />
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Control keys"
-          accessibilityHint="Choose and order the keys of the control row"
+          accessibilityLabel="Keys"
+          accessibilityHint="Choose and order the keys above the command line"
           onPress={() => router.push("/control-keys")}
-          style={({ pressed }) => [styles.addRow, pressed && styles.pressed]}
+          style={({ pressed }) => [styles.link, styles.divider, pressed && styles.pressed]}
         >
-          <Text style={styles.linkText}>Control keys</Text>
-          <Text style={styles.linkDetail}>
-            {st.controlKeys.map((id) => controlKey(id)?.label ?? id).join(" ") || "None"}
-          </Text>
+          <View style={styles.rowText}>
+            <Text style={styles.rowLabel}>Keys</Text>
+            <Text style={styles.keysPreview}>
+              {st.controlKeys.map((id) => controlKey(id)?.label ?? id).join(" ") || "None"}
+            </Text>
+          </View>
+          <Icon name="forward" size={14} color={colors.textMuted} />
         </Pressable>
       </Section>
 
-      <Section title="Paired desktops">
+      <Security deviceName={s.deviceName} />
+
+      <Section title="Paired computers" footer="To add one: in Rift on that computer, Settings › Remote access › Pair a phone.">
+        {s.hosts.length === 0 ? (
+          <Row first>
+            <Text style={styles.reason}>None yet.</Text>
+          </Row>
+        ) : null}
         {s.hosts.map((h, i) => (
           <PairedHost key={h.record.key} host={h} first={i === 0} />
         ))}
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Pair a desktop"
-          accessibilityHint="Scan or paste the pairing code from Rift on your computer"
-          onPress={() => router.push("/add")}
-          style={({ pressed }) => [styles.addRow, s.hosts.length > 0 && styles.divider, pressed && styles.pressed]}
-        >
-          <Text style={styles.addText}>Pair a desktop…</Text>
-        </Pressable>
       </Section>
     </TabScreen>
   );
 }
 
 const styles = StyleSheet.create({
-  flex: { flex: 1 },
-  input: { flex: 1, minHeight: TOUCH, color: colors.textBright, fontSize: 15 },
-  hostText: { flexGrow: 1, flexShrink: 1, flexBasis: 200, gap: 2 },
-  hostName: { color: colors.text, fontSize: 15 },
-  hostMeta: { color: colors.textMuted, fontSize: 12, fontFamily: mono },
-  topic: { color: colors.textBright, fontSize: 14, fontFamily: mono },
-  // Destructive, but `error` is too dark for text on a surface (palette.ts): the caution token.
-  unpair: { minHeight: TOUCH, minWidth: TOUCH, paddingHorizontal: 8, justifyContent: "center" },
-  unpairText: { color: colors.warning, fontSize: 15, fontWeight: "500" },
+  flex1: { flex: 1 },
+  flex2: { flex: 2 },
   pressed: { opacity: 0.6 },
-  addRow: { minHeight: TOUCH + 8, justifyContent: "center", paddingHorizontal: 14, paddingVertical: 8 },
-  divider: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.hairline },
-  addText: { color: colors.accent, fontSize: 15 },
-  linkText: { color: colors.text, fontSize: 15 },
-  linkDetail: { color: colors.textMuted, fontSize: 12, fontFamily: mono, marginTop: 2 },
-  reason: { flex: 1, color: colors.textMuted, fontSize: 14, lineHeight: 20 },
+  divider: { borderTopWidth: 1, borderTopColor: colors.hairline },
+  rowText: { flex: 1, gap: 3 },
+  rowLabel: { fontFamily: ui(400), color: colors.textBright, fontSize: 15 },
+  rowDetail: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12, lineHeight: 17 },
+  reason: { fontFamily: ui(400), flex: 1, color: colors.textMuted, fontSize: 13, lineHeight: 19 },
+  // Notify for
+  notifyFor: { paddingVertical: 12, paddingHorizontal: 14, gap: 10 },
+  segments: {
+    flexDirection: "row",
+    padding: 3,
+    borderRadius: radius.button,
+    backgroundColor: colors.bg,
+    borderWidth: 1,
+    borderColor: colors.hairline,
+  },
+  segment: { flex: 1, minHeight: 36, borderRadius: radius.small, alignItems: "center", justifyContent: "center" },
+  segmentOn: { backgroundColor: colors.accent },
+  segmentText: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13 },
+  segmentTextOn: { fontFamily: ui(600), color: colors.bg },
+  picker: {
+    minHeight: 36,
+    paddingHorizontal: 12,
+    borderRadius: radius.small,
+    borderWidth: 1,
+    borderColor: colors.borderStrong,
+    justifyContent: "center",
+  },
+  pickerText: { fontFamily: ui(400), color: colors.text, fontSize: 14 },
+  // ntfy
+  ntfy: { paddingTop: 10, paddingBottom: 12, paddingHorizontal: 14, gap: 10 },
+  field: { gap: 4 },
+  fieldLabel: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12 },
+  serverInput: {
+    fontFamily: ui(400),
+    height: 40,
+    paddingHorizontal: 10,
+    borderRadius: radius.small,
+    borderWidth: 1,
+    borderColor: colors.borderStrong,
+    backgroundColor: colors.bg,
+    color: colors.textBright,
+    fontSize: 14,
+  },
+  topic: { color: colors.textBright, fontSize: 13, fontFamily: mono },
+  ntfyButtons: { flexDirection: "row", gap: 8 },
+  // Output
+  link: { minHeight: 60, flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 14, paddingVertical: 12 },
+  keysPreview: { color: colors.textMuted, fontSize: 12, fontFamily: mono },
+  // Security
+  nameInput: {
+    fontFamily: ui(400),
+    flex: 1,
+    minWidth: 0,
+    height: 36,
+    paddingHorizontal: 10,
+    borderRadius: radius.small,
+    borderWidth: 1,
+    borderColor: colors.borderStrong,
+    backgroundColor: colors.bg,
+    color: colors.textBright,
+    fontSize: 14,
+    textAlign: "right",
+  },
+  // Paired computers
+  host: { minHeight: 56, flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 8, paddingLeft: 14, paddingRight: 6 },
+  unpair: { minHeight: TOUCH, paddingHorizontal: 12, justifyContent: "center" },
+  unpairText: { fontFamily: ui(400), color: colors.warning, fontSize: 14 },
 });

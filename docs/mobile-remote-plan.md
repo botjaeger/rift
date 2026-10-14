@@ -32,7 +32,24 @@ Tailscale working through the address list. Phase 3 is built too: the
 terminal screen of full-screen programs with typed text and hardware-keyboard
 mappings, a configurable control-key row, block actions, paging of earlier
 output, and notification policies (failed only, a minimum duration, per
-computer); see [remote-protocol.md](remote-protocol.md) § Phase 3.
+computer); see [remote-protocol.md](remote-protocol.md) § Phase 3. The
+redesign that followed (the Claude Design boards; `mobile/README.md` ›
+Screens): Hosts lists computers as cards and a host its tabs, a cold start
+reopens the last host and pane, a pane shows blocks only and switches to the
+screen by itself while a full-screen program runs, Run sends at once (the
+confirmation is the opt-in "Ask before running"), commands run from the phone
+notify when they finish (a bell per running block; `notify` with `off`,
+feature `notify_off`), long lines can stay unwrapped, and the desktop's git
+prompt chips come with the topology (feature `git`). The phone-first
+proposal (boards P1–P6) is built on top: tabs Now / Computers / Settings;
+*Now* lists what needs the user (a pane's `waiting`: a password read
+without echo, a coding agent's menu, an unread request for input), what runs
+(`running`: start time and last line) and what finished; an answer page
+answers a menu or a password from the phone; panes swipe within a tab and
+fold successes; a Run sheet uses the desktop's completion and the pane's
+history (`complete`); "Needs you" alerts with Yes / No / Open and a Live
+Activity per "Notify me" on the lock screen (`mobile/README.md` › Needs you
+alerts; without APNs both work only while the app runs).
 
 ## Why Expo
 
@@ -107,15 +124,19 @@ security and synchronization model is proven.
 
 Prefer structured blocks over a pixel-equivalent terminal canvas:
 
-- A host screen shows reachable and previously paired desktops.
+- Home is *Now*: what needs the user (a prompt the phone can answer), what
+  runs, what finished; *Computers* shows the paired desktops with their tabs;
+  a cold start returns to the pane open last.
 - A session screen shows tabs, panes, current directory, shell status, and Git
-  context when available.
+  context (branch, ahead/behind, dirty, changed files, from the desktop's
+  prompt chips).
 - A pane screen presents virtualized command blocks with command, output, exit
   status, timestamps, collapse state, and bookmarks.
-- A persistent composer provides command input, history, and a compact
-  row of terminal control keys.
-- A raw terminal view can be added later for full-screen TUIs and alternate-screen
-  programs.
+- A persistent composer provides command input, the desktop's completions
+  and the pane's history as suggestions, and a compact row of terminal
+  control keys behind ⌃.
+- The pane shows the raw terminal screen by itself while a full-screen TUI
+  (alternate screen) runs, and blocks otherwise; there is no manual switch.
 
 Use a strongly virtualized list and batch high-frequency output updates. The
 desktop should parse terminal output once and send structured changes where

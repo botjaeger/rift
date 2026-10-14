@@ -1,0 +1,1 @@
+{"t":"diff","id":"m4","pane":12,"path":"crates/rift-pty/src/session.rs","staged":false,"binary":false,"truncated":false,"lines":[["@","@@ -210,4 +210,6 @@ impl Session"],[" ","    fn resize(&mut self, rows: u16) {"],["-","        let delta = rows as i64 - self.rows as i64;"],["+","        let _delta = rows as i64 - self.rows as i64;"],["+","        self.remap();"]]}

@@ -23,7 +23,7 @@ mod uplink;
 
 pub use server::{Config, Gateway, serve};
 
-use protocol::{Block, Window};
+use protocol::{Block, OpenKind, Window};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -64,12 +64,14 @@ pub const TOPOLOGY_POLL: Duration = Duration::from_secs(1);
 pub const DEVICES_POLL: Duration = Duration::from_millis(500);
 /// `run` requests per second per connection.
 pub const RUN_RATE: usize = 4;
+/// `open` requests per second per connection.
+pub const OPEN_RATE: usize = 2;
 /// Longest `run` command, in bytes.
 pub const MAX_COMMAND: usize = 2 * 1024;
 /// Keys per `keys` message, and `keys` messages per second per connection.
 pub const MAX_KEYS: usize = 20;
 pub const KEYS_RATE: usize = 20;
-/// Longest `id` of `run` / `keys` / `text` / `output`.
+/// Longest `id` of `run` / `keys` / `text` / `open` / `output`.
 pub const MAX_REQUEST_ID: usize = 64;
 /// Longest `text`, in bytes (it counts against [`KEYS_RATE`]).
 pub const MAX_TEXT: usize = 1024;
@@ -77,6 +79,31 @@ pub const MAX_TEXT: usize = 1024;
 pub const OUTPUT_RATE: usize = 10;
 /// Most lines per `output` answer (also bounded by [`MAX_OUTPUT_BYTES`]).
 pub const MAX_OUTPUT_PAGE_LINES: usize = 500;
+/// Most `dirs`, `branches` or `files` in one chip menu answer.
+pub const MAX_MENU_ITEMS: usize = 500;
+/// Longest name or path in a chip menu answer, in bytes (longer ones are left out).
+pub const MAX_MENU_NAME: usize = 1024;
+/// Most lines of a `diff` answer, its bytes, and the characters kept per line.
+pub const MAX_DIFF_LINES: usize = 2000;
+pub const MAX_DIFF_BYTES: usize = 256 * 1024;
+pub const MAX_DIFF_LINE_CHARS: usize = 1000;
+/// Longest `path` of a `diff` request, in bytes.
+pub const MAX_DIFF_PATH: usize = MAX_MENU_NAME;
+/// Longest `complete` line, and longest completion or history `text` kept,
+/// in bytes; most `items` and `history` entries in one answer.
+pub const MAX_COMPLETE_LINE: usize = 1024;
+pub const MAX_COMPLETE_TEXT: usize = 1024;
+pub const MAX_COMPLETE_ITEMS: usize = 50;
+/// A pane's `waiting`: characters of its prompt, choices kept and
+/// characters per choice, context lines kept and characters per line (the
+/// window's `rift_core::prompts` bounds; a rift-terminal test keeps both
+/// equal).
+pub const MAX_WAITING_PROMPT: usize = 300;
+pub const MAX_WAITING_CHOICES: usize = 9;
+pub const MAX_WAITING_CHOICE: usize = 200;
+pub const MAX_WAITING_CONTEXT: usize = 12;
+/// Characters of a pane's `running.line`.
+pub const MAX_RUNNING_LINE: usize = 200;
 /// Largest screen sent (`screen`): a larger one is cut to its top-left.
 pub const MAX_SCREEN_COLS: u16 = 300;
 pub const MAX_SCREEN_ROWS: u16 = 120;
@@ -123,6 +150,296 @@ pub struct OutputPage {
     pub text: String,
     /// The block's output lines so far.
     pub total: u64,
+}
+
+/// A prompt chip's menu (feature `chips`), as the window answers it
+/// ([`Source::menu`]); the gateway bounds it ([`bound_menu`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "menu", rename_all = "snake_case")]
+pub enum Menu {
+    Dirs {
+        cwd: Option<String>,
+        parent: bool,
+        dirs: Vec<String>,
+    },
+    Branches {
+        current: Option<String>,
+        branches: Vec<String>,
+    },
+    Changes {
+        branch: Option<String>,
+        files: Vec<protocol::ChangedFile>,
+    },
+}
+
+/// Which chip menu [`Source::menu`] reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MenuKind {
+    Dirs,
+    Branches,
+    Changes,
+}
+
+/// A changed file's diff ([`Source::diff`]), unbounded ([`bound_diff`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiffPage {
+    pub binary: bool,
+    /// The window already cut it (the review's own line limit).
+    #[serde(default)]
+    pub truncated: bool,
+    /// A file git does not track yet (status `?`): its whole content, which
+    /// only operate devices are sent.
+    #[serde(default)]
+    pub untracked: bool,
+    pub lines: Vec<protocol::DiffLine>,
+}
+
+/// `menu` within the wire bounds: names over [`MAX_MENU_NAME`] bytes left
+/// out, at most [`MAX_MENU_ITEMS`] entries; `true` when anything was left out.
+pub fn bound_menu(menu: Menu) -> (Menu, bool) {
+    fn keep<T>(items: Vec<T>, name: impl Fn(&T) -> &str) -> (Vec<T>, bool) {
+        let n = items.len();
+        let kept: Vec<T> = items
+            .into_iter()
+            .filter(|i| name(i).len() <= MAX_MENU_NAME)
+            .take(MAX_MENU_ITEMS)
+            .collect();
+        let more = kept.len() < n;
+        (kept, more)
+    }
+    let short = |s: Option<String>| s.filter(|s| s.len() <= MAX_MENU_NAME);
+    match menu {
+        Menu::Dirs { cwd, parent, dirs } => {
+            let (dirs, more) = keep(dirs, |d| d);
+            (
+                Menu::Dirs {
+                    cwd: short(cwd),
+                    parent,
+                    dirs,
+                },
+                more,
+            )
+        }
+        Menu::Branches { current, branches } => {
+            let (branches, more) = keep(branches, |b| b);
+            (
+                Menu::Branches {
+                    current: short(current),
+                    branches,
+                },
+                more,
+            )
+        }
+        Menu::Changes { branch, files } => {
+            let (files, more) = keep(files, |f| &f.path);
+            (
+                Menu::Changes {
+                    branch: short(branch),
+                    files,
+                },
+                more,
+            )
+        }
+    }
+}
+
+/// `page`'s lines within the wire bounds: each cut at
+/// [`MAX_DIFF_LINE_CHARS`] characters, at most [`MAX_DIFF_LINES`] lines and
+/// [`MAX_DIFF_BYTES`] bytes; `true` when anything was cut (or the window had
+/// cut it already).
+pub fn bound_diff(page: DiffPage) -> (Vec<protocol::DiffLine>, bool) {
+    let mut cut = page.truncated;
+    let mut bytes = 0usize;
+    let mut out = Vec::new();
+    for protocol::DiffLine(kind, text) in page.lines {
+        if out.len() >= MAX_DIFF_LINES {
+            cut = true;
+            break;
+        }
+        let text: String = if text.chars().count() > MAX_DIFF_LINE_CHARS {
+            cut = true;
+            text.chars().take(MAX_DIFF_LINE_CHARS).collect()
+        } else {
+            text
+        };
+        if bytes + kind.len() + text.len() > MAX_DIFF_BYTES {
+            cut = true;
+            break;
+        }
+        bytes += kind.len() + text.len();
+        out.push(protocol::DiffLine(kind, text));
+    }
+    (out, cut)
+}
+
+/// `complete`'s answer ([`Source::complete`]), unbounded ([`bound_complete`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompletePage {
+    pub items: Vec<protocol::Completion>,
+    pub history: Vec<protocol::HistoryEntry>,
+}
+
+/// `page` within the wire bounds: entries over [`MAX_COMPLETE_TEXT`] bytes
+/// left out, at most [`MAX_COMPLETE_ITEMS`] of each list; `true` when
+/// anything was left out.
+pub fn bound_complete(page: CompletePage) -> (CompletePage, bool) {
+    fn keep<T>(items: Vec<T>, text: impl Fn(&T) -> &str) -> (Vec<T>, bool) {
+        let n = items.len();
+        let kept: Vec<T> = items
+            .into_iter()
+            .filter(|i| text(i).len() <= MAX_COMPLETE_TEXT)
+            .take(MAX_COMPLETE_ITEMS)
+            .collect();
+        let more = kept.len() < n;
+        (kept, more)
+    }
+    let (items, a) = keep(page.items, |c| &c.text);
+    let (history, b) = keep(page.history, |h| &h.text);
+    (CompletePage { items, history }, a || b)
+}
+
+/// Every pane's `waiting` within the wire bounds (see the `MAX_WAITING_`
+/// constants; a `password` never carries choices or context) and its
+/// `running.line` within [`MAX_RUNNING_LINE`].
+pub fn bound_topology(mut windows: Vec<Window>) -> Vec<Window> {
+    let cut = |s: &mut String, max: usize| {
+        if let Some((i, _)) = s.char_indices().nth(max) {
+            s.truncate(i);
+        }
+    };
+    for pane in windows
+        .iter_mut()
+        .flat_map(|w| &mut w.tabs)
+        .flat_map(|t| &mut t.panes)
+    {
+        if let Some(r) = pane.running.as_mut() {
+            cut(&mut r.line, MAX_RUNNING_LINE);
+        }
+        let Some(w) = pane.waiting.as_mut() else {
+            continue;
+        };
+        cut(&mut w.prompt, MAX_WAITING_PROMPT);
+        if w.kind == protocol::WaitingKind::Choice {
+            w.choices.truncate(MAX_WAITING_CHOICES);
+            w.choices
+                .iter_mut()
+                .for_each(|c| cut(c, MAX_WAITING_CHOICE));
+            let skip = w.context.len().saturating_sub(MAX_WAITING_CONTEXT);
+            w.context.drain(..skip);
+            w.context
+                .iter_mut()
+                .for_each(|c| cut(c, MAX_WAITING_CHOICE));
+            w.selected = w.selected.min(w.choices.len().saturating_sub(1));
+        } else {
+            w.choices.clear();
+            w.context.clear();
+            w.selected = 0;
+            w.numbered = false;
+        }
+    }
+    windows
+}
+
+#[cfg(test)]
+mod chip_bounds {
+    use super::*;
+    use protocol::DiffLine;
+
+    #[test]
+    fn a_running_line_is_cut_to_its_bound() {
+        let pane = |line: String| protocol::Pane {
+            id: 1,
+            active: true,
+            cwd: None,
+            job: Some("cargo".into()),
+            last_command: None,
+            last_exit: None,
+            git: None,
+            waiting: None,
+            running: Some(protocol::PaneRunning {
+                started: Some(1),
+                line,
+            }),
+        };
+        let windows = vec![Window {
+            pid: 1,
+            tabs: vec![protocol::Tab {
+                index: 0,
+                title: "t".into(),
+                active: true,
+                panes: vec![pane("é".repeat(500)), pane("short".into())],
+            }],
+        }];
+        let out = bound_topology(windows);
+        let lines: Vec<&str> = out[0].tabs[0]
+            .panes
+            .iter()
+            .map(|p| p.running.as_ref().unwrap().line.as_str())
+            .collect();
+        assert_eq!(lines[0].chars().count(), MAX_RUNNING_LINE);
+        assert_eq!(lines[1], "short");
+    }
+
+    #[test]
+    fn menus_leave_out_long_names_and_cap_entries() {
+        let mut dirs: Vec<String> = (0..MAX_MENU_ITEMS + 3).map(|i| i.to_string()).collect();
+        dirs.insert(0, "n".repeat(MAX_MENU_NAME + 1));
+        let (m, more) = bound_menu(Menu::Dirs {
+            cwd: Some("c".repeat(MAX_MENU_NAME + 1)),
+            parent: false,
+            dirs,
+        });
+        let Menu::Dirs { cwd, dirs, .. } = m else {
+            unreachable!()
+        };
+        assert!(more);
+        assert_eq!(cwd, None);
+        assert_eq!(dirs.len(), MAX_MENU_ITEMS);
+        assert_eq!(dirs[0], "0");
+        let (_, more) = bound_menu(Menu::Branches {
+            current: Some("main".into()),
+            branches: vec!["main".into()],
+        });
+        assert!(!more);
+    }
+
+    #[test]
+    fn diffs_are_cut_by_lines_bytes_and_line_length() {
+        let line = |t: String| DiffLine(" ".into(), t);
+        let (l, cut) = bound_diff(DiffPage {
+            lines: vec![line("a".into()), line("b".into())],
+            ..Default::default()
+        });
+        assert_eq!((l.len(), cut), (2, false));
+        let (l, cut) = bound_diff(DiffPage {
+            lines: (0..MAX_DIFF_LINES + 1)
+                .map(|i| line(i.to_string()))
+                .collect(),
+            ..Default::default()
+        });
+        assert_eq!((l.len(), cut), (MAX_DIFF_LINES, true));
+        let (l, cut) = bound_diff(DiffPage {
+            lines: vec![line("é".repeat(MAX_DIFF_LINE_CHARS + 5))],
+            ..Default::default()
+        });
+        assert_eq!((l[0].1.chars().count(), cut), (MAX_DIFF_LINE_CHARS, true));
+        // 300 lines of 1,000 bytes stop under 256 KiB
+        let (l, cut) = bound_diff(DiffPage {
+            lines: (0..300).map(|_| line("z".repeat(1000))).collect(),
+            ..Default::default()
+        });
+        assert!(
+            cut && l.len() < 300
+                && l.iter().map(|d| d.0.len() + d.1.len()).sum::<usize>() <= MAX_DIFF_BYTES
+        );
+        // the window's own cut is kept
+        let (_, cut) = bound_diff(DiffPage {
+            truncated: true,
+            ..Default::default()
+        });
+        assert!(cut);
+    }
 }
 
 /// Why [`Source::output`] has no answer.
@@ -357,6 +674,33 @@ pub trait Source: Send + Sync + 'static {
     ) -> Result<OutputPage, OutputError> {
         let _ = (pane, block, from, limit);
         Err(OutputError::NoPane)
+    }
+    /// A prompt chip's menu for `pane` (feature `chips`): what the
+    /// desktop's chip menus and code review panel list. Defaults to `NoPane`.
+    fn menu(&self, pane: u64, kind: MenuKind) -> Result<Menu, OutputError> {
+        let _ = (pane, kind);
+        Err(OutputError::NoPane)
+    }
+    /// The diff of one changed file of `pane`'s repository; `NoBlock` when
+    /// `path` is not among the changes. Defaults to `NoPane`.
+    fn diff(&self, pane: u64, path: &str, staged: bool) -> Result<DiffPage, OutputError> {
+        let _ = (pane, path, staged);
+        Err(OutputError::NoPane)
+    }
+    /// Completions and history for `line` in `pane` (feature `complete`;
+    /// `cursor` is a byte offset at a character boundary). Defaults to
+    /// `NoPane`.
+    fn complete(&self, pane: u64, line: &str, cursor: usize) -> Result<CompletePage, OutputError> {
+        let _ = (pane, line, cursor);
+        Err(OutputError::NoPane)
+    }
+    /// Open a new tab or split next to `pane` for the device named `device`
+    /// (feature `open`); the new pane's id. Defaults to `Unavailable`.
+    fn open(&self, pane: u64, device: &str, kind: OpenKind) -> Result<u64, InputError> {
+        let _ = (pane, device, kind);
+        Err(InputError::Unavailable(
+            "this computer cannot open shells".into(),
+        ))
     }
     /// `status.json` was just rewritten (the gateway started, a client
     /// connected or left): tell whoever shows it. Called on the gateway's

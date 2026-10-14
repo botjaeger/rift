@@ -60,9 +60,9 @@ describe("routing id and relay URL", () => {
   });
 
   it("labels the path for status lines", () => {
-    expect(pathLabel({ kind: "lan", address: "192.168.1.29:7878" })).toBe("LAN · 192.168.1.29");
-    expect(pathLabel({ kind: "lan", address: "[fe80::1]:7878" })).toBe("LAN · fe80::1");
-    expect(pathLabel({ kind: "relay", url: "wss://relay.example.com:8443/rift" })).toBe("Relay · relay.example.com");
+    expect(pathLabel({ kind: "lan", address: "192.168.1.29:7878" })).toBe("LAN 192.168.1.29");
+    expect(pathLabel({ kind: "lan", address: "[fe80::1]:7878" })).toBe("LAN fe80::1");
+    expect(pathLabel({ kind: "relay", url: "wss://relay.example.com:8443/rift" })).toBe("Relay relay.example.com");
     expect(relayHost("ws://[2001:db8::1]:80")).toBe("[2001:db8::1]");
     expect(addressHost("studio.local:9000")).toBe("studio.local");
   });

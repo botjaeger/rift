@@ -115,9 +115,12 @@ pub enum ClientMsg {
         failures_only: bool,
     },
     /// Alert when the next command in `pane` finishes, whatever its length
-    /// ("Notify me"). Needs a `push` registration. No reply.
+    /// ("Notify me"); with `off` (feature `notify_off`), stop waiting on it.
+    /// Needs a `push` registration. No reply.
     Notify {
         pane: u64,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        off: bool,
     },
     /// Type printable text (one line, no control characters) into the
     /// program running in `pane`.
@@ -139,7 +142,99 @@ pub enum ClientMsg {
         from: u64,
         limit: usize,
     },
+    /// The pane's folder chip menu: its directory's sub-directories
+    /// (feature `chips`).
+    Dirs {
+        id: String,
+        pane: u64,
+    },
+    /// The pane's branch chip menu: the repository's local branches.
+    Branches {
+        id: String,
+        pane: u64,
+    },
+    /// The pane's changed-files chip: the code review panel's files.
+    Changes {
+        id: String,
+        pane: u64,
+    },
+    /// One changed file's diff (`path` and `staged` as `changes` lists it).
+    Diff {
+        id: String,
+        pane: u64,
+        path: String,
+        staged: bool,
+    },
+    /// What the desktop's command line completes for `line` with the
+    /// cursor at byte `cursor`, and what ran before (feature `complete`).
+    Complete {
+        id: String,
+        pane: u64,
+        line: String,
+        cursor: usize,
+    },
+    /// Open a shell next to `pane` (feature `open`): a new tab in its
+    /// window, or a new pane split from it. The ack carries the new pane.
+    Open {
+        id: String,
+        pane: u64,
+        kind: OpenKind,
+    },
 }
+
+/// What `open` makes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenKind {
+    /// A new tab in the pane's window, starting in the pane's folder.
+    Tab,
+    /// A new pane split from the pane, starting in its folder.
+    Pane,
+}
+
+/// One completion of `complete`: the whole resulting command line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Completion {
+    pub text: String,
+    pub kind: CompletionKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletionKind {
+    Command,
+    Subcommand,
+    Option,
+    Path,
+    History,
+    Value,
+}
+
+/// A command that ran before (`complete`'s `history`); `at` is when it
+/// started (Unix seconds), unknown for imported shell history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryEntry {
+    pub text: String,
+    pub at: Option<u64>,
+}
+
+/// A file of `changes` (the code review panel's list).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChangedFile {
+    /// Repository-relative, `/`-separated.
+    pub path: String,
+    /// `M` `A` `D` `R` `C` `T`, `?` untracked, `U` conflicted.
+    pub status: String,
+    pub added: u64,
+    pub removed: u64,
+    /// HEAD → index (else index → working tree).
+    pub staged: bool,
+}
+
+/// One line of a `diff`: `[kind, text]`, kind `@` hunk header, `" "`
+/// context, `+` added, `-` removed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiffLine(pub String, pub String);
 
 /// `screen` modes: never, while the pane shows the alternate screen, or
 /// always.
@@ -239,8 +334,8 @@ pub enum ServerMsg {
         blocks: Vec<Block>,
         has_older: bool,
     },
-    /// The answer to `run` / `keys` / `text` (and a refused `output`) with
-    /// the client's `id`.
+    /// The answer to `run` / `keys` / `text` / `open` (and a refused
+    /// `output`) with the client's `id`.
     Ack {
         id: String,
         ok: bool,
@@ -248,6 +343,9 @@ pub enum ServerMsg {
         error: Option<ErrorCode>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
+        /// `open`: the new tab's or split's pane.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pane: Option<u64>,
     },
     /// A pane's command finished (sent to every connection).
     Done {
@@ -291,6 +389,50 @@ pub enum ServerMsg {
         /// The block's output lines so far.
         total: u64,
     },
+    /// The answer to `dirs`.
+    Dirs {
+        id: String,
+        pane: u64,
+        cwd: Option<String>,
+        parent: bool,
+        dirs: Vec<String>,
+        /// Some were left out (bounds).
+        more: bool,
+    },
+    /// The answer to `branches`; `current` is the checked-out one.
+    Branches {
+        id: String,
+        pane: u64,
+        current: Option<String>,
+        branches: Vec<String>,
+        more: bool,
+    },
+    /// The answer to `changes`; `branch` is null outside a repository.
+    Changes {
+        id: String,
+        pane: u64,
+        branch: Option<String>,
+        files: Vec<ChangedFile>,
+        more: bool,
+    },
+    /// The answer to `diff`.
+    Diff {
+        id: String,
+        pane: u64,
+        path: String,
+        staged: bool,
+        binary: bool,
+        truncated: bool,
+        lines: Vec<DiffLine>,
+    },
+    /// The answer to `complete`.
+    Complete {
+        id: String,
+        pane: u64,
+        items: Vec<Completion>,
+        history: Vec<HistoryEntry>,
+        more: bool,
+    },
 }
 
 impl ServerMsg {
@@ -307,6 +449,18 @@ impl ServerMsg {
             ok: true,
             error: None,
             message: None,
+            pane: None,
+        }
+    }
+
+    /// `open`'s ack: the new pane.
+    pub fn ack_opened(id: impl Into<String>, pane: u64) -> ServerMsg {
+        ServerMsg::Ack {
+            id: id.into(),
+            ok: true,
+            error: None,
+            message: None,
+            pane: Some(pane),
         }
     }
 
@@ -320,6 +474,7 @@ impl ServerMsg {
             ok: false,
             error: Some(code),
             message: Some(message.into()),
+            pane: None,
         }
     }
 }
@@ -395,6 +550,76 @@ pub struct Pane {
     pub job: Option<String>,
     pub last_command: Option<String>,
     pub last_exit: Option<i32>,
+    /// The git status the desktop's prompt chips show for the pane (feature
+    /// `git`); absent outside a repository or before the desktop looked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git: Option<PaneGit>,
+    /// The running command waits for the user (feature `waiting`); absent
+    /// when nothing waits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<Waiting>,
+    /// The running command's start and last line (feature `running`);
+    /// absent at the prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub running: Option<PaneRunning>,
+}
+
+/// A pane's running command, for lists of everything running.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneRunning {
+    /// When it started (Unix seconds, the desktop's clock); null without
+    /// shell integration.
+    pub started: Option<u64>,
+    /// The screen's last non-empty line at or above the cursor.
+    pub line: String,
+}
+
+/// What a pane's running command waits for, and how it is answered.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Waiting {
+    pub kind: WaitingKind,
+    /// The question (or the password prompt).
+    pub prompt: String,
+    /// A `choice`'s entries, without their numbers.
+    #[serde(default)]
+    pub choices: Vec<String>,
+    /// The entry under the menu's selector.
+    #[serde(default)]
+    pub selected: usize,
+    /// Entries are numbered: the digit *n* picks entry *n*; otherwise the
+    /// arrow keys move the selector from `selected` and Enter picks.
+    #[serde(default)]
+    pub numbered: bool,
+    /// Screen lines above the question; never for `password`.
+    #[serde(default)]
+    pub context: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitingKind {
+    /// A line read without echo: answered with `text` and `enter`.
+    Password,
+    /// A coding agent's menu.
+    Choice,
+    /// An unread "needs your input" in the desktop's attention center.
+    Input,
+}
+
+/// A pane's git status, as the desktop computes it for its prompt chips
+/// (`rift_core::git::GitInfo`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneGit {
+    /// The branch, or a short commit id when detached.
+    pub branch: String,
+    pub ahead: u64,
+    pub behind: u64,
+    /// Any change against HEAD, untracked files included.
+    pub dirty: bool,
+    /// Uncommitted diff against HEAD: files changed, lines added and removed.
+    pub files: u64,
+    pub added: u64,
+    pub removed: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -453,7 +678,7 @@ mod tests {
     #[test]
     fn every_client_fixture_round_trips() {
         let all = fixtures("client");
-        assert_eq!(all.len(), 17, "client fixtures");
+        assert_eq!(all.len(), 25, "client fixtures");
         for (name, value) in all {
             let msg: ClientMsg =
                 serde_json::from_value(value.clone()).unwrap_or_else(|e| panic!("{name}: {e}"));
@@ -464,7 +689,7 @@ mod tests {
     #[test]
     fn every_server_fixture_round_trips() {
         let all = fixtures("server");
-        assert_eq!(all.len(), 15, "server fixtures");
+        assert_eq!(all.len(), 21, "server fixtures");
         for (name, value) in all {
             let msg: ServerMsg =
                 serde_json::from_value(value.clone()).unwrap_or_else(|e| panic!("{name}: {e}"));
@@ -561,6 +786,14 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(w, ServerMsg::Welcome { features, .. } if features.is_empty()));
+        // a pane from a gateway (or window) without `git` has none, and
+        // none is left out on the wire
+        let p: Pane = serde_json::from_str(
+            r#"{"id":1,"active":true,"cwd":null,"job":null,"last_command":null,"last_exit":null}"#,
+        )
+        .unwrap();
+        assert_eq!(p.git, None);
+        assert!(!serde_json::to_string(&p).unwrap().contains("git"));
         let run = Run {
             text: "ok".into(),
             fg: Some("e5c07b".into()),

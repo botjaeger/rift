@@ -3,10 +3,14 @@
 // the platform pieces (storage, randomness, notifications) come in as dependencies
 // (src/runtime.ts in the app, fakes in the tests).
 
+import { alertAnswers, answerPlan, askingTitle, questionKey, sameQuestion, type Pick as AnswerPick } from "./answer";
+import { programName } from "./now";
 import { fromBase64Url } from "./noise/bytes";
 import type { KeyPair, RandomBytes } from "./noise/noise";
 import { emptyEarlier, fetchRange, mergeRange, nextRequest, type EarlierOutput } from "./earlier";
 import {
+  ASK_CATEGORY,
+  ASK_OPEN_CATEGORY,
   newNtfyTopic,
   normalizeNtfyServer,
   notificationText,
@@ -18,17 +22,22 @@ import {
 } from "./notify";
 import type { PairLink } from "./pairing";
 import { BatchedStore } from "./protocol/batch";
-import { MAX_OUTPUT_LINES } from "./protocol/types";
+import { MAX_OUTPUT_LINES, MAX_TEXT_BYTES, textProblem } from "./protocol/types";
 import { RiftClient, type ConnState, type Failure, type SocketFactory } from "./protocol/client";
 import { canLoadOlder, reducePane, reduceScreen, staleScreen, type PaneState, type ScreenState } from "./protocol/store";
-import { findPane } from "./topology";
+import { findPane, tabTitle } from "./topology";
 import {
   isPushToken,
   type AckMsg,
+  type ChipAnswerMsg,
+  type CompleteMsg,
+  type DiffMsg,
   type DoneMsg,
   type Feature,
   type GatewayHello,
+  type OpenKind,
   type ScreenMode,
+  type Waiting,
   type WelcomeMsg,
   type Window,
 } from "./protocol/types";
@@ -36,11 +45,14 @@ import {
   DEFAULT_SETTINGS,
   HostsStore,
   MAX_DEVICE_NAME,
+  loadLastView,
   loadOrCreateIdentity,
   loadSettings,
+  saveLastView,
   saveSettings,
   type HostRecord,
   type KeyValueStore,
+  type LastView,
   type Settings,
 } from "./stores";
 
@@ -70,7 +82,10 @@ interface Asked {
 export interface Notifier {
   /** Asks the OS for permission (once); true when granted. */
   requestPermission(): Promise<boolean>;
-  notify(n: { title: string; body: string; data: { host: string; pane: number } }): Promise<void>;
+  /** `category`: the alert's buttons (notify.ts `ASK_CATEGORY`); `data.ask`: the question it is about (answer.ts `questionKey`). */
+  notify(n: { title: string; body: string; data: { host: string; pane: number; ask?: string }; category?: string }): Promise<void>;
+  /** Removes the delivered "Needs you" alerts about `ask` (its `data.ask`) in `host`'s `pane`: the question went. */
+  dismissAsk?(host: string, pane: number, ask: string): Promise<void>;
 }
 
 export interface FleetDeps {
@@ -93,6 +108,17 @@ export interface HostView {
   windows: Window[];
   /** Last gateway error other than auth (busy, no_pane, …). */
   notice: string | null;
+  /** Epoch milliseconds the connection was last open, this app run (null: not yet). */
+  lastSeen: number | null;
+}
+
+/** A "Notify me" waiting for its command (the bell on a running block). */
+export interface AskedView {
+  host: string;
+  pane: number;
+  command: string;
+  /** Epoch milliseconds it was asked (about when the command started, when run from here). */
+  at: number;
 }
 
 export interface PaneView {
@@ -119,6 +145,8 @@ export interface ActivityItem {
   hostName: string;
   pane: number;
   block: number;
+  /** The pane's tab title when it finished (null: not in the topology). */
+  tab: string | null;
   command: string;
   exit: number | null;
   durationMs: number;
@@ -141,6 +169,22 @@ export interface AppState {
   drafts: Record<string, string>;
   /** Alerts while the app is closed (push): on, or why not. */
   push: PushStatus;
+  /** "Notify me" requests waiting for their command to finish. */
+  asked: readonly AskedView[];
+  /** "Wrap long lines" switched for one pane from its header, per `host:pane` (else the setting). */
+  wrap: Record<string, boolean>;
+  /** The host (and pane) open when the app last showed one (stored; a cold start reopens it). */
+  lastView: LastView | null;
+}
+
+/** Whether a "Notify me" waits for `command` in the pane (the bell is on). */
+export function isAsked(s: Pick<AppState, "asked">, host: string, pane: number, command: string): boolean {
+  return s.asked.some((a) => a.host === host && a.pane === pane && a.command === command);
+}
+
+/** Whether block output in the pane wraps: the pane's own switch, else Settings › Wrap long lines. */
+export function wrapsLines(s: Pick<AppState, "wrap" | "settings">, host: string, pane: number): boolean {
+  return s.wrap[draftKey(host, pane)] ?? s.settings.wrapLines;
 }
 
 /**
@@ -150,7 +194,8 @@ export interface AppState {
  */
 export type PushStatus = { state: "on" } | { state: "off" } | { state: "unavailable"; reason: string };
 
-export type ActionResult = { ok: true } | { ok: false; code: string; message: string };
+/** `pane`: the new pane of an `open`. */
+export type ActionResult = { ok: true; pane?: number } | { ok: false; code: string; message: string };
 
 /** `storage`: paired, but this device could not save the host (keychain / keystore refused). */
 export type PairFailure = Failure | "invalid" | "storage";
@@ -158,6 +203,9 @@ export type PairFailure = Failure | "invalid" | "storage";
 export type PairResult = { ok: true; host: HostRecord } | { ok: false; failure: PairFailure; message: string };
 
 export const draftKey = (host: string, pane: number) => `${host}:${pane}`;
+
+/** One question of one pane (the same wording asked again about other lines is another). */
+const askKey = (pane: number, w: Waiting) => `${pane}\n${questionKey(w)}`;
 
 const initialConn: ConnState = {
   status: "idle",
@@ -170,12 +218,20 @@ const initialConn: ConnState = {
 };
 
 /** Short, human error text for an `ack` or `error` code. */
+/** describeCode for a request that fetches something to show: too_large is the answer, not a command. */
+function describeShowCode(code: string, hostName: string, fallback: string): string {
+  return code === "too_large" ? "Too large to show on the phone." : describeCode(code, hostName, fallback);
+}
+
 export function describeCode(code: string, hostName: string, fallback: string): string {
   switch (code) {
     case "busy":
       return "This pane is running a command. Use the keys row to talk to the program.";
     case "forbidden":
-      return "This device may only view this computer.";
+      // the gateway's words when the desktop turned remote access off (server.rs)
+      return fallback === "remote access is off on the desktop"
+        ? `Remote access is off on ${hostName}.`
+        : "This device may only view this computer.";
     case "rate":
       return "Too many at once. Wait a moment and try again.";
     case "no_pane":
@@ -281,6 +337,8 @@ export class Fleet {
    * notification of its own (one alert per command).
    */
   private readonly pushHosts = new Map<string, PushRegistration>();
+  /** The questions each host's panes asked in its last topology (pane id, then the question), with when each was first seen: new ones alert. */
+  private readonly asks = new Map<string, Map<string, number>>();
   /** Hosts told "no token" in this app run (once, in case one still holds a token of an earlier run). */
   private readonly pushCleared = new Set<string>();
 
@@ -298,6 +356,9 @@ export class Fleet {
       activity: [],
       drafts: {},
       push: { state: "off" },
+      asked: [],
+      wrap: {},
+      lastView: null,
     });
   }
 
@@ -309,8 +370,10 @@ export class Fleet {
       const settings = await loadSettings(this.deps.kv);
       this.identity = await loadOrCreateIdentity(this.deps.kv, this.deps.randomBytes);
       const records = await this.hostsStore.load();
+      const lastView = await loadLastView(this.deps.kv);
       this.store.update((s) => ({
         ...s,
+        lastView,
         settings,
         deviceName: settings.deviceName ?? this.deps.systemDeviceName,
         hosts: records.map((record) => ({
@@ -320,6 +383,7 @@ export class Fleet {
           welcome: null,
           windows: [],
           notice: null,
+          lastSeen: null,
         })),
       }));
       for (const r of records) this.connect(r);
@@ -374,7 +438,8 @@ export class Fleet {
       random: this.deps.random,
       events: {
         onState: (conn) => {
-          this.patchHost(key, { conn });
+          const was = this.host(key)?.conn.status;
+          this.patchHost(key, conn.status === "open" || was === "open" ? { conn, lastSeen: this.now() } : { conn });
           if (conn.status !== "open") this.failPending(key, "disconnected");
         },
         onGatewayHello: (gateway) => this.patchHost(key, { gateway }),
@@ -388,6 +453,8 @@ export class Fleet {
         onTopology: (msg) => {
           this.patchHost(key, { windows: msg.windows });
           const since = this.welcomedAt.get(key);
+          // the questions already waiting when it connected are on Now, not news
+          this.alertAsks(key, msg.windows, since !== undefined);
           if (since === undefined) return;
           this.welcomedAt.delete(key);
           this.dropUnreachableAsks(key, msg.windows, since);
@@ -425,7 +492,8 @@ export class Fleet {
           // An older gateway refuses a view device's run/keys with a top-level error instead of
           // an ack: fail what waits rather than letting it time out.
           if (msg.code === "forbidden") this.failPending(key, "forbidden");
-          this.patchHost(key, { notice: msg.message });
+          // a pane that closed: its page says so in words ("This pane has closed.")
+          if (msg.code !== "no_pane") this.patchHost(key, { notice: msg.message });
           this.store.update((s) => (s.pane?.host === key ? { ...s, pane: { ...s.pane, loadingOlder: false } } : s));
         },
       },
@@ -447,11 +515,19 @@ export class Fleet {
     const address = client.preferredAddress;
     const addresses = [address, ...r.addresses.filter((a) => a !== address)];
     const via = client.preferredPath.kind;
+    const os = welcome.os.slice(0, 64);
+    const version = welcome.version.slice(0, 64);
+    // "last seen" while offline: saved at most once an hour, not on every reconnect
+    const seenAt = this.now();
+    const seenStale = r.seenAt === undefined || seenAt - r.seenAt >= 60 * 60_000;
     if (
       r.name === welcome.host &&
       r.permission === welcome.permission &&
       addresses[0] === r.addresses[0] &&
-      (r.via ?? "lan") === via
+      (r.via ?? "lan") === via &&
+      r.os === os &&
+      r.version === version &&
+      !seenStale
     ) {
       return;
     }
@@ -461,6 +537,9 @@ export class Fleet {
       permission: welcome.permission,
       addresses,
       via,
+      os,
+      version,
+      seenAt: seenStale ? seenAt : r.seenAt!,
     };
     this.patchHost(key, { record });
     try {
@@ -561,6 +640,9 @@ export class Fleet {
 
   private setAsked(list: Asked[]): void {
     this.asked = list.filter(this.askLive);
+    const asked = this.asked.map(({ host, pane, command, at }) => ({ host, pane, command, at }));
+    this.store.update((s) => ({ ...s, asked }));
+    this.store.flush();
     this.askedListener?.();
   }
 
@@ -683,6 +765,7 @@ export class Fleet {
         welcome: null,
         windows: [],
         notice: null,
+        lastSeen: null,
       };
       const i = s.hosts.findIndex((h) => h.record.key === record.key);
       const hosts = i === -1 ? [...s.hosts, view] : s.hosts.map((h, j) => (j === i ? view : h));
@@ -713,6 +796,29 @@ export class Fleet {
       drafts: Object.fromEntries(Object.entries(s.drafts).filter(([k]) => !k.startsWith(`${key}:`))),
     }));
     if (this.viewing?.host === key) this.viewing = null;
+    if (this.store.peek().lastView?.host === key) await this.setLastView(null);
+    this.store.flush();
+  }
+
+  /**
+   * The host (and pane) on screen, kept for the next cold start; null when Hosts (or another
+   * tab) shows. Saved only when it changes.
+   */
+  async setLastView(view: LastView | null): Promise<void> {
+    const cur = this.store.peek().lastView;
+    if (cur?.host === view?.host && cur?.pane === view?.pane) return;
+    this.store.update((s) => ({ ...s, lastView: view }));
+    try {
+      await saveLastView(this.deps.kv, view);
+    } catch {
+      // kept in memory; the app opens Hosts next time
+    }
+  }
+
+  /** The pane header's "Wrap long lines" switch: for this pane only, until the app closes. */
+  setPaneWrap(host: string, pane: number, on: boolean): void {
+    const k = draftKey(host, pane);
+    this.store.update((s) => ({ ...s, wrap: { ...s.wrap, [k]: on } }));
     this.store.flush();
   }
 
@@ -762,6 +868,11 @@ export class Fleet {
   /** The pane on screen, for notifications (null when none is). */
   setViewing(view: { host: string; pane: number } | null): void {
     this.viewing = view;
+  }
+
+  /** The screen of `host`'s `pane` went: no pane is on screen, unless another screen took over meanwhile. */
+  leaveViewing(host: string, pane: number): void {
+    if (this.viewing?.host === host && this.viewing.pane === pane) this.viewing = null;
   }
 
   loadOlder(): void {
@@ -853,14 +964,38 @@ export class Fleet {
     command: string,
     opts: { notify?: boolean; fromDraft?: boolean } = {},
   ): Promise<ActionResult> {
+    const refused = this.operating(host);
+    if (refused) return refused;
+    // "Notify me when my commands finish": every command run from this phone asks by default
+    const notify = opts.notify ?? this.store.peek().settings.notifyMyCommands;
     const result = this.request(host, (c) => c.run(pane, command));
-    if (opts.notify) this.notifyWhenDone(host, pane, command);
+    if (notify) this.notifyWhenDone(host, pane, command);
     return result.then((r) => {
       if (r.ok && opts.fromDraft !== false) this.setDraft(host, pane, "");
-      else if (!r.ok && opts.notify)
+      else if (!r.ok && notify)
         this.setAsked(this.asked.filter((a) => !(a.host === host && a.pane === pane && a.command === command)));
       return r;
     });
+  }
+
+  /**
+   * The bell on a running block: on asks to be told when `command` finishes ("Notify me"), off
+   * drops that request, here and on a computer that already has it (`notify` `off`, feature
+   * `notify_off`; an older one keeps its wait and still alerts through push).
+   */
+  setNotify(host: string, pane: number, command: string, on: boolean): void {
+    const same = (a: Asked) => a.host === host && a.pane === pane && a.command === command;
+    if (on) {
+      if (!this.asked.some((a) => same(a) && this.askLive(a))) this.notifyWhenDone(host, pane, command);
+      return;
+    }
+    const gone = this.asked.filter(same);
+    if (gone.length === 0) return;
+    this.setAsked(this.asked.filter((a) => !same(a)));
+    // the computer waits per pane: release it only when no other ask on the pane is left
+    const otherOnPane = this.asked.some((a) => a.host === host && a.pane === pane);
+    if (gone.some((a) => a.sent) && !otherOnPane && hasFeature(this.host(host), "notify_off"))
+      this.clients.get(host)?.notify(pane, true);
   }
 
   /**
@@ -892,12 +1027,134 @@ export class Fleet {
   }
 
   sendKeys(host: string, pane: number, keys: string[]): Promise<ActionResult> {
-    return this.request(host, (c) => c.keys(pane, keys));
+    return this.operating(host) ?? this.request(host, (c) => c.keys(pane, keys));
   }
+
+  /**
+   * A prompt chip's menu for the pane (feature `chips`), or a sentence saying why there is none.
+   */
+  async chipMenu<T extends "dirs" | "branches" | "changes">(
+    host: string,
+    pane: number,
+    t: T,
+  ): Promise<{ ok: true; msg: Extract<ChipAnswerMsg, { t: T }> } | { ok: false; message: string }> {
+    const name = this.host(host)?.record.name ?? "the computer";
+    const client = this.clients.get(host);
+    if (!client) return { ok: false, message: describeCode("disconnected", name, "") };
+    const r = await client.chipMenu(pane, t);
+    return r.ok ? r : { ok: false, message: describeShowCode(r.code, name, r.message) };
+  }
+
+  /** One changed file's diff, or a sentence saying why there is none. */
+  async fileDiff(
+    host: string,
+    pane: number,
+    path: string,
+    staged: boolean,
+  ): Promise<{ ok: true; msg: DiffMsg } | { ok: false; message: string }> {
+    const name = this.host(host)?.record.name ?? "the computer";
+    const client = this.clients.get(host);
+    if (!client) return { ok: false, message: describeCode("disconnected", name, "") };
+    const r = await client.diff(pane, path, staged);
+    if (r.ok) return r;
+    if (r.code === "no_block") return { ok: false, message: "This file is no longer changed." };
+    // the gateway shows a new (untracked) file's content only to a device that may operate
+    if (r.code === "forbidden") return { ok: false, message: "A new file's content needs a device that may operate this computer." };
+    return { ok: false, message: describeShowCode(r.code, name, r.message) };
+  }
+
+  /**
+   * Completions and history for a command line in the pane (feature `complete`), or a sentence
+   * saying why there are none. `cursor` is a JS index into `line` (default: its end).
+   */
+  async complete(
+    host: string,
+    pane: number,
+    line: string,
+    cursor?: number,
+  ): Promise<{ ok: true; msg: CompleteMsg } | { ok: false; message: string }> {
+    const name = this.host(host)?.record.name ?? "the computer";
+    const client = this.clients.get(host);
+    const h = this.host(host);
+    if (!client || !hasFeature(h, "complete")) return { ok: false, message: describeCode("disconnected", name, "") };
+    // completion reads history and the file system: the gateway answers it for operating devices only
+    if (h && !canOperate(h)) return { ok: false, message: describeCode("forbidden", name, "") };
+    const r = await client.complete(pane, line, cursor);
+    return r.ok ? r : { ok: false, message: describeShowCode(r.code, name, r.message) };
+  }
+
+  /**
+   * Answers the pane's `waiting` question `asked` with `pick` (answer.ts `answerPlan`): only
+   * while the pane still asks the same question, step by step, each step's `ack` before the
+   * next. Planned from the question as the pane asks it now (an unnumbered menu's selected entry
+   * may have moved), and every text checked before the first step goes out. One answer per pane
+   * at a time. A password goes out as `text` and is kept nowhere.
+   */
+  async answer(host: string, pane: number, asked: Waiting, pick: AnswerPick): Promise<ActionResult> {
+    const h = this.host(host);
+    const name = h?.record.name ?? "the computer";
+    if (!h || h.conn.status !== "open") return { ok: false, code: "disconnected", message: describeCode("disconnected", name, "") };
+    if (!canOperate(h)) return { ok: false, code: "forbidden", message: describeCode("forbidden", name, "") };
+    const now = findPane(h.windows, pane)?.pane.waiting;
+    if (!now || !sameQuestion(now, asked))
+      return { ok: false, code: "answered", message: "This question was already answered, or the program moved on." };
+    const plan = answerPlan(now, pick);
+    if (!plan) return { ok: false, code: "bad_request", message: "That answer does not fit the question." };
+    if (plan.some((s) => "text" in s) && !hasFeature(h, "text"))
+      return { ok: false, code: "unsupported", message: `Update Rift on ${name} to type answers from this phone.` };
+    for (const step of plan) {
+      const problem = "text" in step ? textProblem(step.text) : null;
+      if (problem === "too_long")
+        return { ok: false, code: "too_large", message: `The answer is too long (${MAX_TEXT_BYTES} bytes at most).` };
+      if (problem) return { ok: false, code: "bad_request", message: "The answer must be one line of text." };
+    }
+    const k = draftKey(host, pane);
+    if (this.answering.has(k)) return { ok: false, code: "busy", message: "An answer to this pane is still on its way." };
+    this.answering.add(k);
+    try {
+      for (const step of plan) {
+        const r =
+          "pauseMs" in step
+            ? await new Promise<ActionResult>((resolve) => setTimeout(() => resolve({ ok: true }), step.pauseMs))
+            : "text" in step
+              ? await this.sendText(host, pane, step.text)
+              : await this.sendKeys(host, pane, step.keys);
+        if (!r.ok) return r;
+      }
+      return { ok: true };
+    } finally {
+      this.answering.delete(k);
+    }
+  }
+
+  /** The panes an answer is going out to (`draftKey`): a second tap must not send it twice. */
+  private readonly answering = new Set<string>();
 
   /** Types text into the program running in the pane (only a gateway with `text`). */
   sendText(host: string, pane: number, text: string): Promise<ActionResult> {
-    return this.request(host, (c) => c.text(pane, text));
+    return this.operating(host) ?? this.request(host, (c) => c.text(pane, text));
+  }
+
+  /**
+   * Opens a new tab in the pane's window, or a split of the pane (feature `open`); the result's
+   * `pane` is the new pane, already in the host's topology (the gateway sends it before the ack).
+   */
+  async openShell(host: string, pane: number, kind: OpenKind): Promise<ActionResult> {
+    const h = this.host(host);
+    const name = h?.record.name ?? "the computer";
+    if (h?.welcome && !hasFeature(h, "open"))
+      return { ok: false, code: "unsupported", message: `Rift on ${name} cannot open tabs from the phone. Update it.` };
+    const r = await (this.operating(host) ?? this.request(host, (c) => c.openShell(pane, kind)));
+    // busy is the desktop's own reason here, not a running command
+    if (!r.ok && r.code === "busy") return { ...r, message: `${name} could not open it. Try again.` };
+    return r;
+  }
+
+  /** A view-only device's refusal, before anything goes out (the gateway refuses it too); null when it may operate. */
+  private operating(host: string): Promise<ActionResult> | null {
+    const h = this.host(host);
+    if (!h || canOperate(h)) return null;
+    return Promise.resolve({ ok: false, code: "forbidden", message: describeCode("forbidden", h.record.name, "") });
   }
 
   private request(host: string, send: (c: RiftClient) => string | null): Promise<ActionResult> {
@@ -937,7 +1194,9 @@ export class Fleet {
     const code = msg.error ?? "error";
     p.resolve(
       msg.ok
-        ? { ok: true }
+        ? msg.pane !== undefined
+          ? { ok: true, pane: msg.pane }
+          : { ok: true }
         : {
             ok: false,
             code,
@@ -967,6 +1226,10 @@ export class Fleet {
       hostName,
       pane: msg.pane,
       block: msg.block,
+      tab: (() => {
+        const loc = findPane(view?.windows ?? [], msg.pane);
+        return loc ? tabTitle(loc.tab) : null;
+      })(),
       command: msg.command,
       exit: msg.exit,
       durationMs: msg.duration_ms,
@@ -1095,6 +1358,72 @@ export class Fleet {
     const push: PushStatus = valid ? { state: "on" } : reason ? { state: "unavailable", reason } : { state: "off" };
     this.store.update((s) => ({ ...s, push }));
     for (const [key, c] of this.clients) this.sendPush(key, c);
+  }
+
+  /**
+   * "Needs you" alerts (the P6 Lock board): one for each question a pane starts asking, unless
+   * it is on screen or the computer's notifications are off; `quiet` only records them. A menu
+   * with a Yes and a No gets those buttons (Yes / No / Open), anything else Open only.
+   */
+  private alertAsks(host: string, windows: Window[], quiet: boolean): void {
+    const prev = this.asks.get(host) ?? new Map<string, number>();
+    const seen = new Map<string, number>();
+    const view = this.host(host);
+    for (const w of windows)
+      for (const t of w.tabs)
+        for (const p of t.panes) {
+          const ask = p.waiting;
+          if (!ask) continue;
+          const k = askKey(p.id, ask);
+          seen.set(k, prev.get(k) ?? this.now());
+          if (quiet || prev.has(k) || this.isViewing(host, p.id) || view?.record.notifications === false) continue;
+          const title = `${askingTitle(ask, programName(p))} on ${view?.record.name ?? "your computer"}`;
+          void this.deps.notifier
+            .notify({
+              title,
+              body: ask.prompt,
+              data: { host, pane: p.id, ask: questionKey(ask) },
+              // a view-only device cannot answer: Open only
+              category: alertAnswers(ask) && view && canOperate(view) ? ASK_CATEGORY : ASK_OPEN_CATEGORY,
+            })
+            .catch(() => undefined);
+        }
+    // answered, or the program moved on: its alert no longer offers anything
+    for (const k of prev.keys()) {
+      if (seen.has(k)) continue;
+      const nl = k.indexOf("\n");
+      void this.deps.notifier.dismissAsk?.(host, Number(k.slice(0, nl)), k.slice(nl + 1)).catch(() => undefined);
+    }
+    this.asks.set(host, seen);
+  }
+
+  /** Epoch milliseconds the pane's question `ask` was first seen (Now's "1 min"), or null. */
+  waitingSince(host: string, pane: number, ask: Waiting): number | null {
+    return this.asks.get(host)?.get(askKey(pane, ask)) ?? null;
+  }
+
+  /**
+   * An alert's Yes or No: once `host` is connected again (the app was just opened by it) and the
+   * pane still asks `ask` (answer.ts `questionKey`: the same wording, choices and lines),
+   * answers with the menu's first "Yes…" or "No…" (answer.ts `alertAnswers`). Waits at most
+   * `waitMs`.
+   */
+  async answerFromAlert(host: string, pane: number, ask: string, action: "yes" | "no", waitMs = 15_000): Promise<ActionResult> {
+    const asking = () => {
+      const h = this.host(host);
+      const w = h?.conn.status === "open" ? findPane(h.windows, pane)?.pane.waiting : undefined;
+      return w && questionKey(w) === ask ? w : undefined;
+    };
+    let w = asking();
+    for (let waited = 0; !w && waited < waitMs; waited += 250) {
+      await new Promise((r) => setTimeout(r, 250));
+      w = asking();
+    }
+    const name = this.host(host)?.record.name ?? "the computer";
+    if (!w) return { ok: false, code: "answered", message: `${name} no longer asks that.` };
+    const pick = alertAnswers(w);
+    if (!pick) return { ok: false, code: "bad_request", message: "That question has no Yes and No." };
+    return this.answer(host, pane, w, { choice: pick[action] });
   }
 
   /** Whether an alert about `host`'s `pane` would show what is already on screen. */

@@ -27,6 +27,56 @@ export interface Pane {
   job: string | null;
   last_command: string | null;
   last_exit: number | null;
+  /** The desktop's prompt-chip git status (feature `git`); absent outside a repository. */
+  git?: PaneGit;
+  /** What the pane's running command waits for (feature `waiting`); absent when nothing waits. */
+  waiting?: Waiting;
+  /** The running command's start and last line (feature `running`); absent at the prompt. */
+  running?: PaneRunning;
+}
+
+/** A pane's running command: when it started (Unix seconds, the desktop's clock) and its last line. */
+export interface PaneRunning {
+  started: number | null;
+  line: string;
+}
+/** Characters of `running.line`. */
+export const MAX_RUNNING_LINE = 200;
+
+/**
+ * A pane waiting for the user (docs/remote-protocol.md, `topology`): a password read without
+ * echo, a coding agent's menu (`choice`), or an unread "needs your input" (`input`).
+ */
+export interface Waiting {
+  kind: "password" | "choice" | "input";
+  prompt: string;
+  /** A `choice`'s entries without their numbers. */
+  choices: string[];
+  /** The entry under the menu's selector. */
+  selected: number;
+  /** Entries are numbered: digit n picks entry n; otherwise arrows from `selected`, then Enter. */
+  numbered: boolean;
+  /** Screen lines above the question (never for a password). */
+  context: string[];
+}
+
+/** `waiting` bounds: prompt characters, choices and characters per choice, context lines. */
+export const MAX_WAITING_PROMPT = 300;
+export const MAX_WAITING_CHOICES = 9;
+export const MAX_WAITING_CHOICE = 200;
+export const MAX_WAITING_CONTEXT = 12;
+
+/** A pane's git status (docs/remote-protocol.md, `topology`). */
+export interface PaneGit {
+  /** The branch, or a short commit id when detached. */
+  branch: string;
+  ahead: number;
+  behind: number;
+  dirty: boolean;
+  /** Uncommitted diff against HEAD: files changed, lines added and removed. */
+  files: number;
+  added: number;
+  removed: number;
 }
 
 export interface Tab {
@@ -47,7 +97,30 @@ export type ErrorCode =
 export type Permission = "operate" | "view";
 
 /** What a gateway serves beyond Phase 2 (`welcome.features`; absent: none). */
-export type Feature = "screen" | "text" | "output" | "push_failures" | "push_ntfy";
+export type Feature =
+  | "screen"
+  | "text"
+  | "output"
+  | "push_failures"
+  | "push_ntfy"
+  | "git"
+  | "notify_off"
+  | "chips"
+  | "waiting"
+  | "complete"
+  | "running"
+  | "open";
+
+/** `complete` bounds: line bytes, entries per list, bytes per entry. */
+export const MAX_COMPLETE_LINE = 1024;
+export const MAX_COMPLETE_ITEMS = 50;
+export const MAX_COMPLETE_TEXT = 1024;
+
+/** Chip menu bounds (docs/remote-protocol.md, Prompt chip menus): entries, name length, diff size. */
+export const MAX_MENU_ITEMS = 500;
+export const MAX_MENU_NAME = 1024;
+export const MAX_DIFF_LINES = 2000;
+export const MAX_DIFF_LINE_CHARS = 1000;
 
 /** Base keys that take any modifiers or none (docs/remote-protocol.md, `keys`). */
 const NAMED_KEYS: ReadonlySet<string> = new Set([
@@ -140,6 +213,14 @@ export interface KeysMsg {
 export interface ForgetMsg {
   t: "forget";
 }
+/** What `open` makes (feature `open`): a new tab in the pane's window, or a split of the pane. */
+export type OpenKind = "tab" | "pane";
+export interface OpenMsg {
+  t: "open";
+  id: string;
+  pane: number;
+  kind: OpenKind;
+}
 /**
  * Whether the app is on screen; only to a gateway with `push_ntfy` (a connection starts visible).
  * While not, the computer posts ntfy alerts about the pane this device follows again.
@@ -164,10 +245,11 @@ export interface PushMsg {
   /** The `long_ms` alerts only for commands that failed (an exit status other than 0). */
   failures_only: boolean;
 }
-/** Alert when the next command in `pane` finishes ("Notify me"). */
+/** Alert when the next command in `pane` finishes ("Notify me"); `off`: stop waiting (feature `notify_off`). */
 export interface NotifyMsg {
   t: "notify";
   pane: number;
+  off?: true;
 }
 /** Printable text typed into the program running in the pane (one line, no control characters). */
 export interface TextMsg {
@@ -192,12 +274,38 @@ export interface OutputRequestMsg {
   from: number;
   limit: number;
 }
+/** A prompt chip's menu (feature `chips`): the folder's directories, the branches, the changed files. */
+export interface ChipRequestMsg {
+  t: "dirs" | "branches" | "changes";
+  id: string;
+  pane: number;
+}
+/** One changed file's diff (`path` and `staged` as `changes` listed it). */
+export interface DiffRequestMsg {
+  t: "diff";
+  id: string;
+  pane: number;
+  path: string;
+  staged: boolean;
+}
+/** Completions and history for `line` (feature `complete`); `cursor` is a UTF-8 byte offset. */
+export interface CompleteRequestMsg {
+  t: "complete";
+  id: string;
+  pane: number;
+  line: string;
+  cursor: number;
+}
 export type ClientMsg =
+  | CompleteRequestMsg
+  | ChipRequestMsg
+  | DiffRequestMsg
   | SubscribeMsg
   | OlderRequestMsg
   | UnsubscribeMsg
   | RunMsg
   | KeysMsg
+  | OpenMsg
   | ForgetMsg
   | PingMsg
   | VisibleMsg
@@ -249,6 +357,8 @@ export interface AckMsg {
   ok: boolean;
   error?: ErrorCode | (string & {});
   message?: string;
+  /** `open`: the new tab's or split's pane. */
+  pane?: number;
 }
 export interface DoneMsg {
   t: "done";
@@ -302,7 +412,78 @@ export interface OutputMsg {
   /** The block's output lines so far. */
   total: number;
 }
+/** The answer to `dirs`. */
+export interface DirsMsg {
+  t: "dirs";
+  id: string;
+  pane: number;
+  cwd: string | null;
+  parent: boolean;
+  dirs: string[];
+  more: boolean;
+}
+/** The answer to `branches`: `current` is the checked-out one (listed first). */
+export interface BranchesMsg {
+  t: "branches";
+  id: string;
+  pane: number;
+  current: string | null;
+  branches: string[];
+  more: boolean;
+}
+export interface ChangedFile {
+  path: string;
+  /** `M` `A` `D` `R` `C` `T`, `?` untracked, `U` conflicted. */
+  status: string;
+  added: number;
+  removed: number;
+  staged: boolean;
+}
+/** The answer to `changes`; `branch` is null outside a repository. */
+export interface ChangesMsg {
+  t: "changes";
+  id: string;
+  pane: number;
+  branch: string | null;
+  files: ChangedFile[];
+  more: boolean;
+}
+/** `[kind, text]`: `@` hunk header, `" "` context, `+` added, `-` removed. */
+export type DiffLine = [kind: "@" | " " | "+" | "-", text: string];
+/** The answer to `diff`. */
+export interface DiffMsg {
+  t: "diff";
+  id: string;
+  pane: number;
+  path: string;
+  staged: boolean;
+  binary: boolean;
+  truncated: boolean;
+  lines: DiffLine[];
+}
+export type CompletionKind = "command" | "subcommand" | "option" | "path" | "history" | "value";
+/** One completion: the whole resulting command line. */
+export interface Completion {
+  text: string;
+  kind: CompletionKind;
+}
+/** A command that ran before; `at` when it finished (Unix seconds), null when unknown. */
+export interface HistoryEntry {
+  text: string;
+  at: number | null;
+}
+/** The answer to `complete`. */
+export interface CompleteMsg {
+  t: "complete";
+  id: string;
+  pane: number;
+  items: Completion[];
+  history: HistoryEntry[];
+  more: boolean;
+}
+export type ChipAnswerMsg = DirsMsg | BranchesMsg | ChangesMsg | DiffMsg | CompleteMsg;
 export type ServerMsg =
+  | ChipAnswerMsg
   | WelcomeMsg
   | TopologyMsg
   | SnapshotMsg
@@ -352,6 +533,19 @@ export function isBlock(v: unknown): v is Block {
   );
 }
 
+export function isPaneGit(v: unknown): v is PaneGit {
+  return (
+    isObj(v) &&
+    isStr(v.branch) &&
+    isUint(v.ahead) &&
+    isUint(v.behind) &&
+    isBool(v.dirty) &&
+    isUint(v.files) &&
+    isUint(v.added) &&
+    isUint(v.removed)
+  );
+}
+
 function isPane(v: unknown): v is Pane {
   return (
     isObj(v) &&
@@ -360,9 +554,39 @@ function isPane(v: unknown): v is Pane {
     isStrOrNull(v.cwd) &&
     isStrOrNull(v.job) &&
     isStrOrNull(v.last_command) &&
-    isIntOrNull(v.last_exit)
+    isIntOrNull(v.last_exit) &&
+    (v.git === undefined || isPaneGit(v.git)) &&
+    (v.waiting === undefined || isWaiting(v.waiting)) &&
+    (v.running === undefined ||
+      (isObj(v.running) && (v.running.started === null || isUint(v.running.started)) && lineWithin(MAX_RUNNING_LINE)(v.running.line)))
   );
 }
+
+const lineWithin = (max: number) => (v: unknown): v is string => isStr(v) && [...v].length <= max && !/[\n\r]/.test(v);
+
+/** A pane's `waiting` within the wire bounds; a password never carries choices or context. */
+export function isWaiting(v: unknown): v is Waiting {
+  if (!isObj(v)) return false;
+  if (v.kind !== "password" && v.kind !== "choice" && v.kind !== "input") return false;
+  if (!lineWithin(MAX_WAITING_PROMPT)(v.prompt)) return false;
+  if (!(Array.isArray(v.choices) && v.choices.length <= MAX_WAITING_CHOICES && v.choices.every(lineWithin(MAX_WAITING_CHOICE))))
+    return false;
+  if (!(Array.isArray(v.context) && v.context.length <= MAX_WAITING_CONTEXT && v.context.every(lineWithin(MAX_WAITING_CHOICE))))
+    return false;
+  if (!isUint(v.selected) || !isBool(v.numbered)) return false;
+  if (v.kind === "choice") return v.choices.length >= 1 && v.selected < v.choices.length;
+  return v.choices.length === 0 && v.context.length === 0;
+}
+
+const isCompletion = (v: unknown): v is Completion =>
+  isObj(v) &&
+  isStr(v.text) &&
+  utf8Length(v.text) <= MAX_COMPLETE_TEXT &&
+  !/[\n\r]/.test(v.text) &&
+  (v.kind === "command" || v.kind === "subcommand" || v.kind === "option" || v.kind === "path" || v.kind === "history" || v.kind === "value");
+
+const isHistoryEntry = (v: unknown): v is HistoryEntry =>
+  isObj(v) && isStr(v.text) && utf8Length(v.text) <= MAX_COMPLETE_TEXT && !/[\n\r]/.test(v.text) && (v.at === null || isUint(v.at));
 
 function isTab(v: unknown): v is Tab {
   return isObj(v) && isUint(v.index) && isStr(v.title) && isBool(v.active) && arrayOf(isPane)(v.panes);
@@ -447,7 +671,7 @@ export function decodeServer(json: unknown): ServerMsg | null {
     case "older":
       return isUint(m.pane) && isBlocks(m.blocks) && isBool(m.has_older) ? (m as unknown as OlderMsg) : null;
     case "ack":
-      return isStr(m.id) && isBool(m.ok) && isOptStr(m.error) && isOptStr(m.message) && (m.ok || isStr(m.error))
+      return isStr(m.id) && isBool(m.ok) && isOptStr(m.error) && isOptStr(m.message) && (m.pane === undefined || isUint(m.pane)) && (m.ok || isStr(m.error))
         ? (m as unknown as AckMsg)
         : null;
     case "done":
@@ -466,9 +690,86 @@ export function decodeServer(json: unknown): ServerMsg | null {
       return isStr(m.id) && isUint(m.pane) && isUint(m.block) && isUint(m.from) && isStr(m.text) && isUint(m.total)
         ? (m as unknown as OutputMsg)
         : null;
+    case "dirs":
+      return isStr(m.id) &&
+        isUint(m.pane) &&
+        (m.cwd === null || isName(m.cwd)) &&
+        isBool(m.parent) &&
+        isNames(m.dirs) &&
+        isBool(m.more)
+        ? (m as unknown as DirsMsg)
+        : null;
+    case "branches":
+      return isStr(m.id) &&
+        isUint(m.pane) &&
+        (m.current === null || isName(m.current)) &&
+        isNames(m.branches) &&
+        isBool(m.more)
+        ? (m as unknown as BranchesMsg)
+        : null;
+    case "changes":
+      return isStr(m.id) &&
+        isUint(m.pane) &&
+        (m.branch === null || isName(m.branch)) &&
+        Array.isArray(m.files) &&
+        m.files.length <= MAX_MENU_ITEMS &&
+        m.files.every(isChangedFile) &&
+        isBool(m.more)
+        ? (m as unknown as ChangesMsg)
+        : null;
+    case "complete":
+      return isStr(m.id) &&
+        isUint(m.pane) &&
+        Array.isArray(m.items) &&
+        m.items.length <= MAX_COMPLETE_ITEMS &&
+        m.items.every(isCompletion) &&
+        Array.isArray(m.history) &&
+        m.history.length <= MAX_COMPLETE_ITEMS &&
+        m.history.every(isHistoryEntry) &&
+        isBool(m.more)
+        ? (m as unknown as CompleteMsg)
+        : null;
+    case "diff":
+      return isStr(m.id) &&
+        isUint(m.pane) &&
+        isName(m.path) &&
+        isBool(m.staged) &&
+        isBool(m.binary) &&
+        isBool(m.truncated) &&
+        Array.isArray(m.lines) &&
+        m.lines.length <= MAX_DIFF_LINES &&
+        m.lines.every(isDiffLine)
+        ? (m as unknown as DiffMsg)
+        : null;
     default:
       return null;
   }
+}
+
+/** A name or path from a chip menu: within the wire bound, one line. */
+const isName = (v: unknown): v is string => isStr(v) && v.length > 0 && v.length <= MAX_MENU_NAME && !/[\n\r]/.test(v);
+const isNames = (v: unknown): v is string[] => Array.isArray(v) && v.length <= MAX_MENU_ITEMS && v.every(isName);
+
+function isChangedFile(v: unknown): v is ChangedFile {
+  return (
+    isObj(v) &&
+    isName(v.path) &&
+    isStr(v.status) &&
+    /^[MADRCTU?]$/.test(v.status) &&
+    isUint(v.added) &&
+    isUint(v.removed) &&
+    isBool(v.staged)
+  );
+}
+
+function isDiffLine(v: unknown): v is DiffLine {
+  return (
+    Array.isArray(v) &&
+    v.length === 2 &&
+    (v[0] === "@" || v[0] === " " || v[0] === "+" || v[0] === "-") &&
+    isStr(v[1]) &&
+    v[1].length <= MAX_DIFF_LINE_CHARS
+  );
 }
 
 /** Parses one decoded JSON message; null when it is not JSON or not a known, well-formed message. */
@@ -503,6 +804,8 @@ export function isClientMsg(v: unknown): v is ClientMsg {
         v.keys.length <= MAX_KEYS_PER_MESSAGE &&
         v.keys.every((k) => isStr(k) && isKeyName(k))
       );
+    case "open":
+      return isId(v.id) && isUint(v.pane) && (v.kind === "tab" || v.kind === "pane");
     case "forget":
       return true;
     case "visible":
@@ -518,7 +821,7 @@ export function isClientMsg(v: unknown): v is ClientMsg {
         typeof v.failures_only === "boolean"
       );
     case "notify":
-      return isUint(v.pane);
+      return isUint(v.pane) && (v.off === undefined || v.off === true);
     case "text":
       return isId(v.id) && isUint(v.pane) && isStr(v.text) && textProblem(v.text) === null;
     case "screen":
@@ -533,6 +836,21 @@ export function isClientMsg(v: unknown): v is ClientMsg {
         v.limit >= 1 &&
         v.limit <= MAX_OUTPUT_LINES
       );
+    case "dirs":
+    case "branches":
+    case "changes":
+      return isId(v.id) && isUint(v.pane);
+    case "complete":
+      return (
+        isId(v.id) &&
+        isUint(v.pane) &&
+        isStr(v.line) &&
+        utf8Length(v.line) <= MAX_COMPLETE_LINE &&
+        isUint(v.cursor) &&
+        v.cursor <= utf8Length(v.line)
+      );
+    case "diff":
+      return isId(v.id) && isUint(v.pane) && isStr(v.path) && v.path.length > 0 && v.path.length <= MAX_MENU_NAME && typeof v.staged === "boolean";
     default:
       return false;
   }

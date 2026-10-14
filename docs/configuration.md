@@ -57,8 +57,10 @@ remote_access = false             # phone companion: windows start the gateway
                                   # (`rift-terminal remote --managed`; log in
                                   # <data dir>/remote/gateway.log); with
                                   # control_api = "off" the socket then answers
-                                  # only status/blocks/screen/output/
-                                  # remote-input/remote-status
+                                  # only the gateway's requests (status,
+                                  # blocks, screen, output, menu, diff,
+                                  # complete, remote-input, remote-open,
+                                  # remote-status)
 remote_listen = "0.0.0.0:7878"    # where the gateway listens
 remote_relay  = ""                # wss://… relay for phones outside your network
                                   # (empty: none); `rift-terminal relay` or

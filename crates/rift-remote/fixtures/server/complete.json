@@ -1,0 +1,1 @@
+{"t":"complete","id":"k1","pane":12,"items":[{"text":"cargo test","kind":"subcommand"},{"text":"cargo tree","kind":"subcommand"}],"history":[{"text":"cargo test --workspace","at":1760364000},{"text":"cargo test -p rift-remote","at":null}],"more":false}

@@ -21,9 +21,9 @@ export function findPane(windows: Window[], paneId: number): PaneLocation | null
 
 export const tabTitle = (tab: Tab) => tab.title || `Tab ${tab.index + 1}`;
 
-/** "rift › pane 2" (the pane number only when the tab is split). */
+/** "rift · pane 2" (the pane boards: the pane number always). */
 export function paneTitle(loc: PaneLocation): string {
-  return loc.tab.panes.length > 1 ? `${tabTitle(loc.tab)} › pane ${loc.paneIndex + 1}` : tabTitle(loc.tab);
+  return `${tabTitle(loc.tab)} · pane ${loc.paneIndex + 1}`;
 }
 
 /** What the pane is running, or null when it is at a prompt. */

@@ -9,6 +9,15 @@ export function formatDuration(ms: number): string {
   return h > 0 ? `${h}h ${m}m` : `${m}m ${sec}s`;
 }
 
+/** A running block's clock: `252000` → `4:12`, `3723000` → `1:02:03`. */
+export function formatClock(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = String(s % 60).padStart(2, "0");
+  return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${sec}` : `${m}:${sec}`;
+}
+
 /** A "Notify after" choice as people say it: `30000` → `30 seconds`, `300000` → `5 minutes`. */
 export function formatAfter(ms: number): string {
   if (ms < 60_000) return `${Math.round(ms / 1000)} seconds`;
@@ -28,6 +37,15 @@ export function tailLines(text: string, max: number): { shown: string; hidden: n
   let hidden = 0;
   for (let i = 0; i < idx + 1; i++) if (body.charCodeAt(i) === 10) hidden++;
   return { shown: body.slice(idx + 1), hidden };
+}
+
+/**
+ * A command line as typed, with the keyboard's smart punctuation undone: iOS (Smart
+ * Punctuation, on by default and not switched off by autoCorrect) turns `--` into an em dash and
+ * quotes into curly ones, which no shell reads as flags or quotes.
+ */
+export function plainPunctuation(text: string): string {
+  return text.replace(/\u2014/g, "--").replace(/[\u201c\u201d]/g, '"').replace(/[\u2018\u2019]/g, "'");
 }
 
 /** The one character (UTF-16 unit) typed into `next` compared with `prev`, or null for any other edit. */

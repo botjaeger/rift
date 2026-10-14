@@ -314,6 +314,9 @@ mod tests {
             last_command: None,
             last_exit: None,
             durable,
+            git: None,
+            waiting: None,
+            running: None,
         }
     }
 

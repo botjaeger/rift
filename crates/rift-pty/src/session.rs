@@ -303,6 +303,9 @@ pub struct Session {
     pub generation: Arc<AtomicU64>,
     /// Id of the shell in the session service (durable sessions).
     pub service_id: Option<u64>,
+    /// Writes of user input so far (`write`; never the terminal's own
+    /// replies): a request for input raised before the last one was answered.
+    inputs: AtomicU64,
     writer: PtyWriter,
     backend: Backend,
     size: GridSize,
@@ -324,6 +327,8 @@ enum Backend {
         session: u64,
         /// Foreground job reported by the service.
         job: Arc<Mutex<Option<String>>>,
+        /// Input hidden, reported by the service.
+        hidden: Arc<AtomicBool>,
     },
 }
 
@@ -384,24 +389,88 @@ pub(crate) fn foreground_job_name(pty: &tty::Pty) -> Option<String> {
     if pgrp <= 0 || pgrp == shell {
         return None;
     }
+    Some(process_name(pgrp))
+}
+
+/// A process's executable name, or the name it was run by when the
+/// executable is named after a version: Claude Code's native install runs
+/// `~/.local/share/claude/versions/2.1.296` through a `claude` link, and
+/// the job must still read as the agent. Empty when the OS does not say.
+fn process_name(pid: i32) -> String {
     #[cfg(target_os = "macos")]
-    {
+    let name = {
         let mut buf = [0u8; 256];
-        let n = unsafe { libc::proc_name(pgrp, buf.as_mut_ptr().cast(), buf.len() as u32) };
-        Some(if n > 0 {
+        let n = unsafe { libc::proc_name(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
+        if n > 0 {
             String::from_utf8_lossy(&buf[..n as usize]).into_owned()
         } else {
             String::new()
-        })
-    }
+        }
+    };
     #[cfg(not(target_os = "macos"))]
-    {
-        Some(
-            std::fs::read_to_string(format!("/proc/{pgrp}/comm"))
-                .map(|s| s.trim().to_string())
-                .unwrap_or_default(),
-        )
+    let name = std::fs::read_to_string(format!("/proc/{pid}/comm"))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let versioned = name.starts_with(|c: char| c.is_ascii_digit())
+        && name.chars().all(|c| c.is_ascii_digit() || c == '.');
+    if !versioned {
+        return name;
     }
+    argv0(pid)
+        .and_then(|a| a.rsplit('/').next().map(str::to_string))
+        .filter(|a| !a.is_empty())
+        .unwrap_or(name)
+}
+
+/// A process's `argv[0]` (only the user's own processes are readable).
+#[cfg(target_os = "macos")]
+fn argv0(pid: i32) -> Option<String> {
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+    let mut size: libc::size_t = 0;
+    let none = std::ptr::null_mut();
+    if unsafe { libc::sysctl(mib.as_mut_ptr(), 3, none, &mut size, none, 0) } != 0 {
+        return None;
+    }
+    let mut buf = vec![0u8; size];
+    if unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            buf.as_mut_ptr().cast(),
+            &mut size,
+            none,
+            0,
+        )
+    } != 0
+    {
+        return None;
+    }
+    buf.truncate(size);
+    // argc (an int), the executable's path, NUL padding, then argv[0]
+    let rest = buf.get(std::mem::size_of::<libc::c_int>()..)?;
+    let rest = &rest[rest.iter().position(|&b| b == 0)?..];
+    let rest = &rest[rest.iter().position(|&b| b != 0)?..];
+    let end = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
+    Some(String::from_utf8_lossy(&rest[..end]).into_owned())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn argv0(pid: i32) -> Option<String> {
+    let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let first = cmdline.split(|&b| b == 0).next()?;
+    Some(String::from_utf8_lossy(first).into_owned())
+}
+
+/// The terminal reads a line without echo: ECHO off in canonical mode, as
+/// `sudo`, `ssh` and `read -s` set it (full-screen programs turn ICANON
+/// off too). The master shares the line discipline's settings.
+pub(crate) fn input_hidden(pty: &tty::Pty) -> bool {
+    use std::os::fd::AsRawFd;
+    let mut t: libc::termios = unsafe { std::mem::zeroed() };
+    if unsafe { libc::tcgetattr(pty.file().as_raw_fd(), &mut t) } != 0 {
+        return false;
+    }
+    t.c_lflag & libc::ECHO == 0 && t.c_lflag & libc::ICANON != 0
 }
 
 pub struct SpawnOptions {
@@ -460,6 +529,7 @@ enum Source {
         stream: std::os::unix::net::UnixStream,
         muted: Arc<AtomicBool>,
         job: Arc<Mutex<Option<String>>>,
+        hidden: Arc<AtomicBool>,
         /// The connection `PtyWriter` sends input on (replaced on resume).
         conn: Arc<Mutex<ServiceConn>>,
         session: u64,
@@ -553,6 +623,7 @@ impl Reader {
                 mut stream,
                 muted,
                 job,
+                hidden,
                 conn,
                 session,
                 mut resume,
@@ -650,8 +721,11 @@ impl Reader {
                                 muted.store(false, Ordering::Release);
                                 self.wake();
                             }
-                            Ok(Ev::Status { job: j, .. }) => {
+                            Ok(Ev::Status {
+                                job: j, hidden: h, ..
+                            }) => {
                                 *job.lock().unwrap() = j;
+                                hidden.store(h, Ordering::Release);
                                 self.wake();
                             }
                             Ok(Ev::Exited { .. }) => break,
@@ -709,6 +783,7 @@ impl Session {
                 let conn = Arc::new(Mutex::new(ServiceConn::new(stream.try_clone()?)));
                 let muted = Arc::new(AtomicBool::new(true));
                 let job = Arc::new(Mutex::new(None));
+                let hidden = Arc::new(AtomicBool::new(false));
                 let writer = PtyWriter::Service {
                     conn: conn.clone(),
                     session,
@@ -718,11 +793,21 @@ impl Session {
                     stream,
                     muted,
                     job: job.clone(),
+                    hidden: hidden.clone(),
                     conn: conn.clone(),
                     session,
                     resume: Box::new(move |from| crate::service::resume(session, from)),
                 };
-                (Backend::Service { conn, session, job }, writer, source)
+                (
+                    Backend::Service {
+                        conn,
+                        session,
+                        job,
+                        hidden,
+                    },
+                    writer,
+                    source,
+                )
             }
         };
         let service_id = match &backend {
@@ -806,6 +891,7 @@ impl Session {
             saw_output,
             generation,
             service_id,
+            inputs: AtomicU64::new(0),
             writer,
             backend,
             size,
@@ -820,7 +906,20 @@ impl Session {
 
     /// Write user input to the shell.
     pub fn write(&self, bytes: &[u8]) {
+        self.inputs.fetch_add(1, Ordering::AcqRel);
         self.writer.write(bytes);
+    }
+
+    /// Write a report the terminal sends on its own (focus in/out, mouse
+    /// reports, window and colour replies): not the user answering the
+    /// program, so `inputs` stays as it is.
+    pub fn write_report(&self, bytes: &[u8]) {
+        self.writer.write(bytes);
+    }
+
+    /// How many times user input was written (see `inputs`).
+    pub fn inputs(&self) -> u64 {
+        self.inputs.load(Ordering::Acquire)
     }
 
     /// Foreground job other than the shell (name may be empty when the OS
@@ -841,6 +940,84 @@ impl Session {
     /// Executable name of the foreground job, if any.
     pub fn foreground_job_name(&self) -> Option<String> {
         self.foreground_job().filter(|n| !n.is_empty())
+    }
+
+    /// The running program reads a line without echo (a password prompt):
+    /// ECHO off in canonical mode on the PTY's line discipline; a durable
+    /// session reports it from the service.
+    pub fn input_hidden(&self) -> bool {
+        match &self.backend {
+            Backend::Local(pty) => input_hidden(pty),
+            Backend::Service { hidden, .. } => hidden.load(Ordering::Acquire),
+        }
+    }
+
+    /// The visible screen's rows as text, top to bottom, without trailing
+    /// blanks (what an agent's menu is read from).
+    pub fn screen_rows(&self) -> Vec<String> {
+        use alacritty_terminal::grid::Dimensions;
+        use alacritty_terminal::index::{Column, Line};
+        use alacritty_terminal::term::cell::Flags;
+        let term = self.term.lock();
+        let grid = term.grid();
+        (0..grid.screen_lines() as i32)
+            .map(|l| {
+                let row = &grid[Line(l)];
+                let mut s = String::new();
+                for c in 0..grid.columns() {
+                    let cell = &row[Column(c)];
+                    if cell
+                        .flags
+                        .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                    {
+                        continue;
+                    }
+                    s.push(cell.c);
+                    s.extend(cell.zerowidth().unwrap_or_default());
+                }
+                s.truncate(s.trim_end().len());
+                s
+            })
+            .collect()
+    }
+
+    /// The screen's last non-empty line at or above the cursor and at or
+    /// below absolute line `from` (a running command's latest output: `from`
+    /// is its first output line, so the prompt and the command are never
+    /// taken), without trailing blanks; empty while a full-screen program
+    /// (the alternate screen) runs.
+    pub fn last_line(&self, from: Option<rift_core::block::AbsLine>) -> String {
+        use alacritty_terminal::index::{Column, Line};
+        use alacritty_terminal::term::TermMode;
+        use alacritty_terminal::term::cell::Flags;
+        let term = self.term.lock();
+        if term.mode().contains(TermMode::ALT_SCREEN) {
+            return String::new();
+        }
+        let grid = term.grid();
+        let scrolled = self.scrolled.load(Ordering::Acquire) as i64;
+        // the first screen row that may hold output
+        let top = from.map_or(0, |f| (f as i64 - scrolled).max(0));
+        let mut line = grid.cursor.point.line.0;
+        while line >= 0 && i64::from(line) >= top {
+            let row = &grid[Line(line)];
+            let mut s = String::new();
+            for c in 0..grid.columns() {
+                let cell = &row[Column(c)];
+                if !cell
+                    .flags
+                    .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                {
+                    s.push(cell.c);
+                }
+            }
+            let t = s.trim();
+            if !t.is_empty() {
+                return t.to_string();
+            }
+            line -= 1;
+        }
+        String::new()
     }
 
     /// Text of the cursor's row up to the cursor (password prompt check).
@@ -1808,6 +1985,7 @@ mod tests {
             stream,
             muted: Arc::new(AtomicBool::new(false)),
             job: Arc::new(Mutex::new(None)),
+            hidden: Arc::new(AtomicBool::new(false)),
             conn: Arc::new(Mutex::new(ServiceConn::new(conn))),
             session: 9,
             resume,
@@ -1947,6 +2125,7 @@ mod tests {
             stream: first,
             muted: Arc::new(AtomicBool::new(false)),
             job: Arc::new(Mutex::new(None)),
+            hidden: Arc::new(AtomicBool::new(false)),
             conn: Arc::new(Mutex::new(ServiceConn::new(conn))),
             session: 9,
             resume: Box::new(move |_| {
@@ -2010,6 +2189,74 @@ mod tests {
     }
 
     #[test]
+    fn input_hidden_reads_the_line_discipline() {
+        let spawn = |cmd: &str| {
+            let opts = tty::Options {
+                shell: Some(tty::Shell::new(
+                    "/bin/sh".into(),
+                    vec!["-c".into(), cmd.into()],
+                )),
+                working_directory: None,
+                drain_on_exit: false,
+                env: std::collections::HashMap::new(),
+            };
+            let ws = WindowSize {
+                num_lines: 24,
+                num_cols: 80,
+                cell_width: 8,
+                cell_height: 16,
+            };
+            tty::new(&opts, ws, 0).unwrap()
+        };
+        let until = |pty: &tty::Pty, want: bool| {
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while input_hidden(pty) != want && std::time::Instant::now() < end {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            input_hidden(pty)
+        };
+        // `exec sleep`: dies on the SIGHUP that dropping the Pty sends
+        let password = spawn("stty -echo; exec sleep 600");
+        assert!(until(&password, true), "echo off in line mode");
+        let raw = spawn("stty -echo -icanon; exec sleep 600");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(
+            !until(&raw, false),
+            "a full-screen program is not a password"
+        );
+        let plain = spawn("exec sleep 600");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!input_hidden(&plain));
+    }
+
+    #[test]
+    fn a_job_named_after_a_version_reads_as_the_name_it_ran_by() {
+        // Claude Code's native install: `claude` links to `versions/2.1.296`
+        let dir = std::env::temp_dir().join(format!("rift-job-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("9.9.9");
+        std::fs::copy("/bin/sleep", &exe).unwrap();
+        std::os::unix::fs::symlink(&exe, dir.join("claude")).unwrap();
+        let name_of = |program: &std::path::Path| {
+            let mut child = std::process::Command::new(program)
+                .arg("30")
+                .spawn()
+                .unwrap();
+            let name = process_name(child.id() as i32);
+            let _ = child.kill();
+            let _ = child.wait();
+            name
+        };
+        let linked = name_of(&dir.join("claude"));
+        let plain = name_of(&exe);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(linked, "claude");
+        // run by its own name, it is what it says
+        assert_eq!(plain, "9.9.9");
+    }
+
+    #[test]
     fn resize_signals_the_pty_only_after_the_term_is_resized() {
         use std::os::fd::AsRawFd;
         let ws = WindowSize {
@@ -2047,6 +2294,7 @@ mod tests {
             saw_output: Arc::new(AtomicBool::new(false)),
             generation: c.generation.clone(),
             service_id: None,
+            inputs: AtomicU64::new(0),
             writer,
             backend: Backend::Local(pty),
             size: GridSize { cols: 80, rows: 24 },
@@ -2079,6 +2327,11 @@ mod tests {
         assert_eq!(term.lock().grid().screen_lines(), 30);
         // a resize is a new screen for the remote gateway
         assert_eq!(c.generation.load(Ordering::Acquire), 1);
+        // the terminal's own reports are not the user answering the program
+        session.write_report(b"\x1b[I");
+        assert_eq!(session.inputs(), 0);
+        session.write(b"y");
+        assert_eq!(session.inputs(), 1);
         drop(session);
     }
 

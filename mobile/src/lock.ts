@@ -23,9 +23,23 @@ export function biometricLabel(kinds: readonly BiometricKind[], platform: string
   return `Require ${names.join(" or ")}`;
 }
 
-/** Authenticate before Run: the lock is on, "Ask before running commands" is on, and so is "Confirm every command". */
+/**
+ * Authenticate before Run ("Run with Face ID"): the lock is on, and so are "Ask before running"
+ * and the switch under it. Without "Ask before running" nothing is shown before a command goes,
+ * so nothing asks.
+ */
 export function needsAuthBeforeRun(settings: Settings): boolean {
-  return settings.biometricLock && settings.authBeforeRun && settings.confirmEveryCommand;
+  return settings.biometricLock && settings.authBeforeRun && settings.askBeforeRun;
+}
+
+/**
+ * What an alert's Yes or No needs before it answers: the app lock's own unlock while the app is
+ * locked, Face ID (or the passcode) whenever the lock is on, else nothing. Answering is the app's
+ * work, so it never passes the lock, whatever Ask before running says.
+ */
+export function alertAuth(settings: Settings, locked: boolean): "unlock" | "authenticate" | "none" {
+  if (locked) return "unlock";
+  return settings.biometricLock || needsAuthBeforeRun(settings) ? "authenticate" : "none";
 }
 
 /**

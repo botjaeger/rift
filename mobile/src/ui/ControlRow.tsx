@@ -1,6 +1,7 @@
-import { Pressable, ScrollView, StyleSheet, Text } from "react-native";
+import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { controlKey, type ControlKey } from "@/controlKeys";
-import { colors, mono, radius, TOUCH } from "./theme";
+import type { OpenKind } from "@/protocol/types";
+import { colors, mono, radius } from "./theme";
 
 /** Sticky modifiers from the row, applied to the next key or letter. */
 export interface Sticky {
@@ -11,39 +12,53 @@ export interface Sticky {
 export const NO_STICKY: Sticky = { ctrl: false, alt: false };
 
 function Key({
-  def,
+  label,
+  spoken,
   onPress,
   active,
   disabled,
+  color = colors.text,
+  tall,
+  hint,
 }: {
-  def: ControlKey;
+  label: string;
+  spoken: string;
   onPress: () => void;
   active?: boolean;
   disabled: boolean;
+  color?: string;
+  tall: boolean;
+  hint?: string;
 }) {
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={def.spoken}
+      accessibilityLabel={spoken}
+      accessibilityHint={hint}
       accessibilityState={{ disabled, ...(active === undefined ? {} : { selected: active }) }}
       disabled={disabled}
       onPress={onPress}
+      // 36 / 40 pt keys (the boards) reach 44 pt with the slop
+      hitSlop={{ top: tall ? 2 : 4, bottom: tall ? 2 : 4 }}
       style={({ pressed }) => [
         styles.key,
-        def.danger && styles.keyDanger,
+        tall && styles.keyTall,
         active && styles.keyActive,
         disabled && styles.disabled,
         pressed && styles.pressed,
       ]}
     >
-      <Text style={[styles.keyLabel, active && { color: colors.bg }]}>{def.label}</Text>
+      <Text style={[styles.keyLabel, { color: active ? colors.bg : color }]}>{label}</Text>
     </Pressable>
   );
 }
 
 /**
- * The control-key row (Settings › Control keys): `onKey` gets a key's protocol name, the
- * sticky ctrl / alt toggle `sticky`. Nothing when the row is empty.
+ * The control-key row (Settings › Keys): `onKey` gets a key's protocol name, the sticky ctrl /
+ * alt toggle `sticky`, the new tab / new pane keys `onOpen` (disabled without it: the computer's
+ * Rift cannot open them). Above the command line it is one line that scrolls, ending in "⌨"
+ * (`onEdit`, Settings › Keys); under a full-screen program it wraps (`wrap`) with taller keys.
+ * Nothing when the row is empty and there is no edit key.
  */
 export function ControlRow({
   ids,
@@ -51,51 +66,101 @@ export function ControlRow({
   disabled,
   onSticky,
   onKey,
+  onOpen,
+  onEdit,
+  wrap,
 }: {
   ids: readonly string[];
   sticky: Sticky;
   disabled: boolean;
   onSticky: (next: Sticky) => void;
   onKey: (key: string) => void;
+  onOpen?: (kind: OpenKind) => void;
+  onEdit?: () => void;
+  wrap?: boolean;
 }) {
-  if (ids.length === 0) return null;
+  if (ids.length === 0 && !onEdit) return null;
+  const keys = ids.map((id) => {
+    const def: ControlKey | undefined = controlKey(id);
+    if (!def) return null;
+    // Interrupt in the caution colour (red text is below 4.5:1 on a surface, palette.ts)
+    const color = def.danger ? colors.warning : colors.text;
+    if (def.sticky) {
+      const mod = id === "alt" ? "alt" : "ctrl";
+      return (
+        <Key
+          key={id}
+          label={def.label}
+          spoken={def.spoken}
+          color={color}
+          tall={!!wrap}
+          disabled={disabled}
+          active={sticky[mod]}
+          onPress={() => onSticky({ ...sticky, [mod]: !sticky[mod] })}
+        />
+      );
+    }
+    if (def.open) {
+      const kind = def.open;
+      return (
+        <Key
+          key={id}
+          label={def.label}
+          spoken={def.spoken}
+          hint={onOpen ? undefined : "Update Rift on the computer to open tabs and panes from here"}
+          color={color}
+          tall={!!wrap}
+          disabled={disabled || !onOpen}
+          onPress={() => onOpen?.(kind)}
+        />
+      );
+    }
+    return (
+      <Key key={id} label={def.label} spoken={def.spoken} color={color} tall={!!wrap} disabled={disabled} onPress={() => onKey(id)} />
+    );
+  });
+  const edit = onEdit ? (
+    <Key
+      key="edit"
+      label="⌨"
+      spoken="Edit keys"
+      hint="Settings › Keys: choose and order these keys"
+      color={colors.textMuted}
+      tall={!!wrap}
+      disabled={false}
+      onPress={onEdit}
+    />
+  ) : null;
+  if (wrap) {
+    return (
+      <View style={[styles.keys, styles.wrap]} accessibilityRole="toolbar" accessibilityLabel="Keys">
+        {keys}
+        {edit}
+      </View>
+    );
+  }
   return (
     <ScrollView
       horizontal
       showsHorizontalScrollIndicator={false}
       contentContainerStyle={styles.keys}
       keyboardShouldPersistTaps="always"
+      accessibilityRole="toolbar"
+      accessibilityLabel="Keys"
     >
-      {ids.map((id) => {
-        const def = controlKey(id);
-        if (!def) return null;
-        if (def.sticky) {
-          const mod = id === "alt" ? "alt" : "ctrl";
-          return (
-            <Key
-              key={id}
-              def={def}
-              disabled={disabled}
-              active={sticky[mod]}
-              onPress={() => onSticky({ ...sticky, [mod]: !sticky[mod] })}
-            />
-          );
-        }
-        return <Key key={id} def={def} disabled={disabled} onPress={() => onKey(id)} />;
-      })}
+      {keys}
+      {edit}
     </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  // Eight keys share the row (≥ 44 pt each) and fit a 390 pt phone; more keys, or narrower
-  // screens, scroll the row.
-  keys: { gap: 3, flexGrow: 1 },
+  keys: { gap: 6 },
+  wrap: { flexDirection: "row", flexWrap: "wrap" },
   key: {
-    flexGrow: 1,
-    minWidth: TOUCH,
-    minHeight: TOUCH,
-    paddingHorizontal: 4,
+    minWidth: 44,
+    height: 36,
+    paddingHorizontal: 10,
     alignItems: "center",
     justifyContent: "center",
     borderRadius: radius.control,
@@ -103,10 +168,9 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.hairline,
   },
-  // Interrupt is marked by a red border: red text on a surface is below 4.5:1 (palette.ts).
-  keyDanger: { borderColor: colors.error },
+  keyTall: { height: 40 },
   keyActive: { backgroundColor: colors.accent, borderColor: colors.accent },
-  keyLabel: { color: colors.text, fontFamily: mono, fontSize: 14 },
+  keyLabel: { fontFamily: mono, fontSize: 12 },
   disabled: { opacity: 0.45 },
   pressed: { opacity: 0.7 },
 });

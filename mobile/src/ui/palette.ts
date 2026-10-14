@@ -1,7 +1,8 @@
 // Rift's dark tokens (DESIGN.md), free of React Native imports so the contrast test runs in
 // node. Mapping: bg = bg, chrome = bg_chrome, surface = surface, hairline = border,
 // textBright = text_bright, text = text_ui, textMuted = text_dim (#a1a4ad), textDim =
-// text_muted (#868993), accent, success, error, warning.
+// text_muted (#868993), accent, success, error, warning, fg = fg (terminal text, block output),
+// borderStrong = the mockups' input and outlined-button border (white 14 %).
 
 export const colors = {
   bg: "#1e1e1e",
@@ -16,6 +17,11 @@ export const colors = {
   success: "#22c55e",
   error: "#ef4444",
   warning: "#d7ba7d",
+  fg: "#d4d4d4",
+  borderStrong: "#ffffff24",
+  /** The Pair board's ground behind the camera, and the viewfinder before it starts. */
+  camera: "#0f0f10",
+  viewfinder: "#1a1a1a",
 } as const;
 
 export type ColorName = keyof typeof colors;
@@ -27,12 +33,64 @@ export type ColorName = keyof typeof colors;
  * badges there are `text` beside the red edge, and destructive actions use `warning`; and
  * `textDim` on surface (4.49), where `textMuted` is used instead.
  */
-export const TEXT_ON: Readonly<Record<"bg" | "chrome" | "surface" | "accent", readonly ColorName[]>> = {
-  bg: ["textBright", "text", "textMuted", "textDim", "accent", "success", "warning"],
+export const TEXT_ON: Readonly<Record<"bg" | "chrome" | "surface" | "accent" | "camera", readonly ColorName[]>> = {
+  bg: ["textBright", "text", "fg", "textMuted", "textDim", "accent", "success", "warning"],
   chrome: ["textBright", "text", "textMuted", "textDim", "accent", "success", "warning", "error"],
+  camera: ["textBright", "text", "textMuted", "warning"],
   surface: ["textBright", "text", "textMuted", "accent", "success", "warning"],
   accent: ["bg"],
 };
+
+/**
+ * The mockups' tinted grounds (a token at low alpha over a card or page): the accent pills
+ * ("On screen", a running pane's time, step numbers) and the badges of the Host board. The
+ * mockups' `#569cd622` puts accent text at 4.34:1 on a surface, so the accent tint is `1a`
+ * (4.58:1). TINTED_TEXT lists each text drawn on one; test/contrast.test.ts checks them.
+ */
+export const tints = {
+  accentBadge: "#569cd61a",
+  successBadge: "#22c55e1f",
+  warningBadge: "#d7ba7d1f",
+  errorBadge: "#ef444433",
+  /** The running block's ground (on bg). */
+  running: "#569cd614",
+  /** The bell that is on (on the running block's ground). */
+  bellOn: "#569cd633",
+  /** A diff's added and removed lines (on the chrome reading pane), as the desktop review panel. */
+  diffAdded: "#22c55e1f",
+  diffRemoved: "#ef444426",
+  /** The answer page's context diff (the P2 Reply board), on the chrome box. */
+  answerAdded: "#22c55e1f",
+  answerRemoved: "#ef44441f",
+} as const;
+
+export const TINTED_TEXT: readonly { fg: ColorName; tint: keyof typeof tints; ground: "bg" | "chrome" | "surface" }[] = [
+  { fg: "accent", tint: "accentBadge", ground: "surface" },
+  { fg: "accent", tint: "accentBadge", ground: "chrome" },
+  // the Run sheet's first completion (surface) and its kind
+  { fg: "textBright", tint: "accentBadge", ground: "surface" },
+  { fg: "textMuted", tint: "accentBadge", ground: "surface" },
+  { fg: "success", tint: "successBadge", ground: "surface" },
+  { fg: "warning", tint: "warningBadge", ground: "surface" },
+  { fg: "textBright", tint: "errorBadge", ground: "surface" },
+  { fg: "textBright", tint: "running", ground: "bg" },
+  { fg: "fg", tint: "running", ground: "bg" },
+  { fg: "accent", tint: "running", ground: "bg" },
+  { fg: "success", tint: "running", ground: "bg" },
+  { fg: "fg", tint: "diffAdded", ground: "chrome" },
+  { fg: "success", tint: "diffAdded", ground: "chrome" },
+  { fg: "fg", tint: "diffRemoved", ground: "chrome" },
+  { fg: "textBright", tint: "diffRemoved", ground: "chrome" },
+  { fg: "textBright", tint: "answerAdded", ground: "chrome" },
+  { fg: "textBright", tint: "answerRemoved", ground: "chrome" },
+];
+
+/** `#rrggbbaa` over the opaque `ground`, as one opaque `#rrggbb`. */
+export function over(rgba: string, ground: string): string {
+  const a = parseInt(rgba.slice(7, 9), 16) / 255;
+  const ch = (hex: string, i: number) => parseInt(hex.slice(1 + i * 2, 3 + i * 2), 16);
+  return `#${[0, 1, 2].map((i) => Math.round(ch(rgba, i) * a + ch(ground, i) * (1 - a)).toString(16).padStart(2, "0")).join("")}`;
+}
 
 /** WCAG 2 relative luminance of an `#rrggbb` color. */
 export function luminance(hex: string): number {

@@ -1,0 +1,1 @@
+{"t":"changes","id":"m3","pane":12,"branch":"main","files":[{"path":"crates/rift-pty/src/session.rs","status":"M","added":3,"removed":1,"staged":false},{"path":"docs/ui.md","status":"A","added":12,"removed":0,"staged":true}],"more":false}

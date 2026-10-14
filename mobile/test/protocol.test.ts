@@ -33,6 +33,11 @@ describe("server fixtures", () => {
     const types = new Set(server.map((f) => (f.json as { t: string }).t));
     expect([...types].sort()).toEqual([
       "ack",
+      "branches",
+      "changes",
+      "complete",
+      "diff",
+      "dirs",
       "done",
       "error",
       "older",
@@ -45,7 +50,7 @@ describe("server fixtures", () => {
       "update",
       "welcome",
     ]);
-    expect(server).toHaveLength(15);
+    expect(server).toHaveLength(21);
   });
 
   it.each(server.map((f) => [f.name, f.json] as const))("decodes %s", (_name, json) => {
@@ -59,10 +64,16 @@ describe("client fixtures", () => {
   it("covers every client message type", () => {
     const types = new Set(client.map((f) => (f.json as { t: string }).t));
     expect([...types].sort()).toEqual([
+      "branches",
+      "changes",
+      "complete",
+      "diff",
+      "dirs",
       "forget",
       "keys",
       "notify",
       "older",
+      "open",
       "output",
       "ping",
       "push",
@@ -73,7 +84,7 @@ describe("client fixtures", () => {
       "unsubscribe",
       "visible",
     ]);
-    expect(client).toHaveLength(17);
+    expect(client).toHaveLength(25);
   });
 
   it.each(client.map((f) => [f.name, f.json] as const))("%s is a ClientMsg", (_name, json) => {
@@ -424,5 +435,45 @@ describe("decodeServer rejects", () => {
   it("isClientMsg rejects a malformed subscribe", () => {
     expect(isClientMsg({ t: "subscribe", pane: "12", after: null })).toBe(false);
     expect(isClientMsg({ t: "subscribe", pane: 12 })).toBe(false);
+  });
+});
+
+describe("waiting, running and complete (phone-first)", () => {
+  const topo = (pane: Record<string, unknown>) => ({
+    t: "topology",
+    windows: [{ pid: 1, tabs: [{ index: 0, title: "t", active: true, panes: [{ id: 1, active: true, cwd: null, job: null, last_command: null, last_exit: null, ...pane }] }] }],
+  });
+  const menu = { kind: "choice", prompt: "Q?", choices: ["Yes", "No"], selected: 0, numbered: true, context: ["x"] };
+
+  it("takes a pane's waiting and running within their bounds", () => {
+    expect(decodeServer(topo({ waiting: menu, running: { started: 1, line: "ok" } }))).not.toBeNull();
+    expect(decodeServer(topo({ running: { started: null, line: "" } }))).not.toBeNull();
+    const bad = [
+      { waiting: { ...menu, kind: "maybe" } },
+      { waiting: { ...menu, prompt: "q".repeat(301) } },
+      { waiting: { ...menu, choices: Array(10).fill("c") } },
+      { waiting: { ...menu, choices: ["Yes", "c".repeat(201)] } },
+      { waiting: { ...menu, context: Array(13).fill("l") } },
+      { waiting: { ...menu, prompt: "two\nlines" } },
+      { waiting: { ...menu, selected: 2 } },
+      { waiting: { ...menu, choices: [] } },
+      // a password never carries what the screen showed around it
+      { waiting: { ...menu, kind: "password", choices: [], context: ["secret"] } },
+      { running: { started: -1, line: "" } },
+      { running: { started: 1, line: "l".repeat(201) } },
+    ];
+    for (const b of bad) expect(decodeServer(topo(b)), JSON.stringify(b)).toBeNull();
+  });
+
+  it("takes a complete answer within its bounds; a request's cursor is inside its line", () => {
+    const ok = { t: "complete", id: "k", pane: 1, items: [{ text: "ls", kind: "command" }], history: [{ text: "ls -l", at: null }], more: false };
+    expect(decodeServer(ok)).toEqual(ok);
+    expect(decodeServer({ ...ok, items: [{ text: "ls", kind: "alias" }] })).toBeNull();
+    expect(decodeServer({ ...ok, items: Array(51).fill({ text: "ls", kind: "command" }) })).toBeNull();
+    expect(decodeServer({ ...ok, history: [{ text: "x".repeat(1025), at: 1 }] })).toBeNull();
+    expect(decodeServer({ ...ok, history: [{ text: "a\nb", at: 1 }] })).toBeNull();
+    expect(isClientMsg({ t: "complete", id: "k", pane: 1, line: "é", cursor: 2 })).toBe(true);
+    expect(isClientMsg({ t: "complete", id: "k", pane: 1, line: "é", cursor: 3 })).toBe(false);
+    expect(isClientMsg({ t: "complete", id: "k", pane: 1, line: "x".repeat(1025), cursor: 0 })).toBe(false);
   });
 });

@@ -1,19 +1,59 @@
 import * as Clipboard from "expo-clipboard";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useEffect, useState } from "react";
-import { AccessibilityInfo, ScrollView, Share, StyleSheet, Text, View } from "react-native";
+import { AccessibilityInfo, Pressable, Share, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { tildePath } from "@/chips";
 import { gapLines, heldLines } from "@/earlier";
 import { canOperate, draftKey } from "@/fleet";
 import { commandProblem } from "@/protocol/types";
 import { fleet, useApp, useLock } from "@/runtime";
 import { findPane, runningCommand } from "@/topology";
-import { Button } from "@/ui/Button";
-import { ErrorText } from "@/ui/Notice";
 import { confirmDestructive } from "@/ui/confirm";
-import { colors, mono, radius } from "@/ui/theme";
+import { formatDuration } from "@/ui/format";
+import { ErrorText } from "@/ui/Notice";
+import { colors, mono, monoMedium, radius, ui } from "@/ui/theme";
 
-/** A block's actions (the "⋯" on each block): copy, share, edit, run again, stop, notify. */
+/** One row of the actions card: a mono glyph, then the label. */
+function Action({
+  icon,
+  label,
+  onPress,
+  first,
+  accent,
+  disabled,
+  hint,
+}: {
+  icon: string;
+  label: string;
+  onPress: () => void;
+  first?: boolean;
+  accent?: boolean;
+  disabled?: boolean;
+  hint?: string;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      accessibilityHint={hint}
+      accessibilityState={{ disabled: !!disabled }}
+      disabled={disabled}
+      onPress={onPress}
+      style={({ pressed }) => [styles.action, !first && styles.divider, pressed && styles.pressed, disabled && styles.disabled]}
+    >
+      <Text style={styles.icon} importantForAccessibility="no" accessibilityElementsHidden>
+        {icon}
+      </Text>
+      <Text style={[styles.label, accent && { color: colors.accent }]}>{label}</Text>
+    </Pressable>
+  );
+}
+
+/**
+ * A block's actions (the BlockSheet board; "···" on a block, or a long press): Run again,
+ * Edit, then run, Copy command, Copy output, Share output, and Stop while it runs.
+ */
 export default function BlockActionsScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -50,7 +90,9 @@ export default function BlockActionsScreen() {
     (heldLines(earlier) > 0 ? earlier!.text + (gap > 0 ? `[${gap} lines not loaded]\n` : "") : "") +
     (block?.output ?? "");
 
-  if (lock.covered || lock.locked) return <View style={styles.fill} />;
+  // Hidden while the app is in the app switcher, locked, or under a Face ID prompt (the sheet
+  // sits above the lock cover). Kept laid out: a sheet sized to its content must not collapse.
+  const hidden = lock.covered || lock.locked;
 
   const done = (message: string) => {
     AccessibilityInfo.announceForAccessibility(message);
@@ -79,11 +121,7 @@ export default function BlockActionsScreen() {
     // the command line holds other text: replacing it loses that, so ask
     const draft = s.drafts[draftKey(key, paneId)] ?? "";
     if (draft !== "" && draft !== command) {
-      const ok = await confirmDestructive(
-        "Replace the text in the command line?",
-        `It holds: ${draft}`,
-        "Replace",
-      );
+      const ok = await confirmDestructive("Replace the text in the command line?", `It holds: ${draft}`, "Replace");
       if (!ok) return;
     }
     fleet.setDraft(key, paneId, command);
@@ -91,7 +129,7 @@ export default function BlockActionsScreen() {
   };
 
   const runAgain = async () => {
-    if (s.settings.confirmEveryCommand) {
+    if (s.settings.askBeforeRun) {
       // the same path as Run: the Confirm sheet, with this block's command instead of the draft
       router.replace({ pathname: "/confirm", params: { key, pane: String(paneId), block: String(blockId) } });
       return;
@@ -107,65 +145,86 @@ export default function BlockActionsScreen() {
     else setError(r.message);
   };
 
-  const notify = () => {
-    fleet.notifyWhenDone(key, paneId, command);
-    done("You will be notified when it finishes");
-  };
+  // "Failed · exit 101 · 8.4s · ~/zzz/rift · main"
+  const meta = block
+    ? [
+        running
+          ? "Running"
+          : block.exit === null
+            ? "Finished"
+            : block.exit === 0
+              ? "Succeeded"
+              : `Failed · exit ${block.exit}`,
+        running ? null : formatDuration(block.duration_ms),
+        block.cwd ? tildePath(block.cwd) : null,
+        block.branch,
+        block.restored ? "restored" : null,
+      ]
+        .filter(Boolean)
+        .join(" · ")
+    : "";
+
+  const actions: { icon: string; label: string; onPress: () => void; disabled?: boolean; hint?: string; accent?: boolean }[] = [];
+  if (block && operate) {
+    actions.push({
+      icon: "↻",
+      label: "Run again",
+      accent: true,
+      disabled: !runnable || !connected || !atPrompt,
+      hint: !atPrompt ? "Unavailable while the pane is running a program" : !connected ? "Not connected" : undefined,
+      onPress: () => void runAgain(),
+    });
+    actions.push({ icon: "✎", label: "Edit, then run", disabled: command === "", hint: "Puts it in the command line", onPress: () => void edit() });
+  }
+  if (block) {
+    actions.push({ icon: "⧉", label: "Copy command", disabled: command === "", onPress: () => void copy(command, "Command") });
+    actions.push({ icon: "≡", label: "Copy output", disabled: output === "", onPress: () => void copy(output, "Output") });
+    actions.push({ icon: "↗", label: "Share output", disabled: output === "", onPress: () => void share() });
+  }
+  if (block && operate && running) actions.push({ icon: "^C", label: "Stop", hint: "Sends Control C", disabled: !connected, onPress: () => void stop() });
 
   return (
-    <ScrollView style={styles.fill} contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + 16 }]}>
-      <View
-        style={styles.command}
-        accessible
-        accessibilityRole="header"
-        accessibilityLabel={`Command: ${command || "none"}`}
-      >
-        <Text style={styles.commandText} numberOfLines={3}>
+    <View
+      style={[styles.fill, styles.content, { paddingBottom: Math.max(36, insets.bottom + 2) }, hidden && styles.hidden]}
+      accessibilityElementsHidden={hidden}
+      importantForAccessibility={hidden ? "no-hide-descendants" : "auto"}
+    >
+      <View style={styles.head} accessible accessibilityRole="header" accessibilityLabel={`Command: ${command || "none"}. ${meta}`}>
+        <Text style={styles.command} numberOfLines={3}>
           {block ? command || "(no command)" : "This block is gone."}
         </Text>
+        {meta ? <Text style={styles.meta}>{meta}</Text> : null}
       </View>
-      {block ? (
-        <View style={styles.actions}>
-          <Button label="Copy command" disabled={command === ""} onPress={() => void copy(command, "Command")} />
-          <Button label="Copy output" disabled={output === ""} onPress={() => void copy(output, "Output")} />
-          <Button label="Share output" disabled={output === ""} onPress={() => void share()} />
-          {operate ? (
-            <>
-              <Button label="Edit command" disabled={command === ""} onPress={() => void edit()} />
-              <Button
-                label="Run again"
-                disabled={!runnable || !connected || !atPrompt}
-                accessibilityHint={
-                  !atPrompt ? "Unavailable while the pane is running a program" : !connected ? "Not connected" : undefined
-                }
-                onPress={() => void runAgain()}
-              />
-              {running ? (
-                <Button label="Stop (ctrl+c)" disabled={!connected} onPress={() => void stop()} />
-              ) : null}
-            </>
-          ) : null}
-          {running ? <Button label="Notify me when it finishes" onPress={notify} /> : null}
+      {actions.length > 0 ? (
+        <View style={styles.card}>
+          {actions.map((a, i) => (
+            <Action key={a.label} first={i === 0} {...a} />
+          ))}
         </View>
       ) : null}
       {error ? <ErrorText>{error}</ErrorText> : null}
-      <Button label="Cancel" onPress={() => router.back()} />
-    </ScrollView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  fill: { flex: 1, backgroundColor: colors.surface },
-  content: { padding: 20, gap: 14, maxWidth: 560, width: "100%", alignSelf: "center" },
-  command: {
+  fill: { backgroundColor: colors.surface },
+  hidden: { opacity: 0 },
+  content: { paddingTop: 24, paddingHorizontal: 12, gap: 14, maxWidth: 560, width: "100%", alignSelf: "center" },
+  head: { paddingHorizontal: 6, gap: 4 },
+  command: { color: colors.textBright, fontFamily: monoMedium, fontSize: 15 },
+  meta: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12 },
+  card: {
     backgroundColor: colors.bg,
-    borderRadius: radius.control,
+    borderRadius: radius.card,
     borderWidth: 1,
     borderColor: colors.hairline,
-    borderLeftWidth: 2,
-    borderLeftColor: colors.accent,
-    padding: 12,
+    overflow: "hidden",
   },
-  commandText: { color: colors.textBright, fontFamily: mono, fontSize: 14, lineHeight: 20 },
-  actions: { gap: 8 },
+  action: { minHeight: 52, flexDirection: "row", alignItems: "center", gap: 14, paddingHorizontal: 14 },
+  divider: { borderTopWidth: 1, borderTopColor: colors.hairline },
+  pressed: { opacity: 0.6 },
+  disabled: { opacity: 0.45 },
+  icon: { width: 20, textAlign: "center", fontFamily: mono, color: colors.textMuted },
+  label: { fontFamily: ui(400), color: colors.text, fontSize: 15 },
 });

@@ -195,13 +195,11 @@ describe("ntfy", () => {
     );
   });
 
-  it("the footer says who sees what and that the topic is the secret", () => {
-    const f = ntfyFooter(NTFY_SERVER);
-    expect(f).toContain("ntfy.sh sees, per alert, the computer's name and IP address, the exit status");
-    expect(f).toContain("a link to the pane (the computer's public key and pane number)");
-    expect(f).toContain("only with “Show command in notification”, the command line. Never output.");
-    expect(f).toContain("anyone who knows it can read these alerts");
-    expect(f).toContain("replaces push");
+  it("the footer says who sees what (the Settings board's words), the command line only when shown", () => {
+    expect(ntfyFooter(NTFY_SERVER)).toBe("ntfy.sh sees each alert's computer name, exit status and a link to the pane. Never output.");
+    expect(ntfyFooter(NTFY_SERVER, true)).toBe(
+      "ntfy.sh sees each alert's computer name, exit status, a link to the pane and, with “Show the command”, the command line. Never output.",
+    );
     expect(ntfyFooter("https://n.example.com")).toContain("n.example.com sees");
   });
 
@@ -231,11 +229,11 @@ describe("ntfy", () => {
 describe("pushFooter", () => {
   it("with ntfy on: ntfy delivery, no push error and no 'while it is open'", () => {
     const f = pushFooter({ state: "unavailable", reason: "The system gave no push token (x)." }, true);
-    expect(f).toBe("While the app is closed, your computers send these through the ntfy app (below).");
+    expect(f).toBe("While the app is closed, your computers send these through the ntfy app.");
   });
 
   it("says where notifications come from and what push carries", () => {
-    expect(pushFooter({ state: "on" })).toContain("only with the switch above, the command line. Never output.");
+    expect(pushFooter({ state: "on" })).toContain("only with “Show the command”, the command line. Never output.");
     expect(pushFooter({ state: "off" })).toContain("while it is open");
     const unavailable = pushFooter({ state: "unavailable", reason: "this build has no push project." });
     expect(unavailable).toBe(

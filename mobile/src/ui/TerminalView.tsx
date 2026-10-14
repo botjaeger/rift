@@ -23,15 +23,17 @@ import { SubmitAuthHold } from "@/lock";
 import type { ScreenState } from "@/protocol/store";
 import { RUN_BOLD, RUN_ITALIC, RUN_STRIKE, RUN_UNDERLINE, type ScreenRun } from "@/protocol/types";
 import { authenticate, fleet, useApp } from "@/runtime";
-import { CELL_RATIO, fitFont, LINE_RATIO, rowSegments, segmentColors } from "@/terminal";
-import { Button } from "./Button";
+import { CELL_RATIO, fitFont, LINE_RATIO, rowSegments, segmentColors, showsKeyRow } from "@/terminal";
 import { ControlRow, NO_STICKY, type Sticky } from "./ControlRow";
+import { useOpenShell } from "./useOpenShell";
+import { Icon } from "./Icon";
 import { ErrorText, WarningText } from "./Notice";
-import { colors, mono, radius, TOUCH } from "./theme";
+import { colors, mono, monoBold, radius, TOUCH, ui } from "./theme";
 
-/** The terminal's default colours (a run's null fg / bg): the app's text on its background. */
-const DEFAULTS = { fg: colors.text, bg: colors.bg };
+/** The terminal's default colours (a run's null fg / bg): terminal text on the pane's ground. */
+const DEFAULTS = { fg: colors.fg, bg: colors.bg };
 const PADDING = 8;
+const PADDING_X = 6;
 
 function decoration(flags: number): TextStyle["textDecorationLine"] {
   const u = (flags & RUN_UNDERLINE) !== 0;
@@ -70,7 +72,8 @@ const Row = memo(function Row({
               key={i}
               style={{
                 ...segmentColors(s, DEFAULTS),
-                fontWeight: s.flags & RUN_BOLD ? "700" : undefined,
+                // bold is a face of its own (Android takes no weight from a custom family)
+                fontFamily: s.flags & RUN_BOLD ? monoBold : mono,
                 fontStyle: s.flags & RUN_ITALIC ? "italic" : undefined,
                 textDecorationLine: decoration(s.flags),
               }}
@@ -86,7 +89,7 @@ const Row = memo(function Row({
 function Grid({ screen }: { screen: ScreenState }) {
   const [width, setWidth] = useState(0);
   const onLayout = (e: LayoutChangeEvent) => setWidth(e.nativeEvent.layout.width);
-  const { fontSize, scroll } = fitFont(width - PADDING * 2, screen.cols);
+  const { fontSize, scroll } = fitFont(width - PADDING_X * 2, screen.cols);
   const rowWidth = Math.ceil(screen.cols * fontSize * CELL_RATIO) + 2;
   const [cursorRow, cursorCol] = screen.cursor ?? [-1, -1];
   const rows = (
@@ -110,8 +113,8 @@ function Grid({ screen }: { screen: ScreenState }) {
 }
 
 /**
- * The pane's Terminal view: the gateway's screen (vim, less, htop) and, on an operate device,
- * the keyboard for it. Typed text goes out as `text` (batched per frame, `keyboard.ts`), keys as
+ * The pane while a full-screen program runs (the FullScreen board): the gateway's screen (vim,
+ * less, htop), a note, and on an operate device the keys and the keyboard for it. Typed text goes out as `text` (batched per frame, `keyboard.ts`), keys as
  * `keys`; the control-key row works as in the composer. A key that submits a line asks for
  * authentication like Run (lock.ts): at the pane's prompt every time, while a program runs once
  * per view while the app stays in the foreground.
@@ -124,7 +127,7 @@ export function TerminalView({
   canType,
   online,
   running,
-  onShowBlocks,
+  program,
 }: {
   hostKey: string;
   paneId: number;
@@ -135,8 +138,8 @@ export function TerminalView({
   online: boolean;
   /** The pane runs a program (not at its prompt). */
   running: boolean;
-  /** Back to the Blocks view (its command line). */
-  onShowBlocks: () => void;
+  /** The full-screen program's name ("htop"), for the note. */
+  program: string;
 }) {
   const s = useApp();
   const capture = useRef<KeyCaptureHandle>(null);
@@ -233,6 +236,7 @@ export function TerminalView({
   };
 
   const onRowKey = (id: string) => push({ keys: [applySticky(id, takeSticky())] });
+  const onOpen = useOpenShell(hostKey, paneId, setError);
 
   const typing = operate && canType;
   const label = screen
@@ -249,11 +253,6 @@ export function TerminalView({
 
   return (
     <View style={styles.fill}>
-      <Text style={styles.caption} accessibilityRole="header">
-        {screen
-          ? `${screen.cols} × ${screen.rows}${screen.alt ? " · full-screen program" : ""}${screen.stale ? " · not up to date" : ""}`
-          : "Terminal"}
-      </Text>
       {typing ? (
         // the label stays on the ScrollView: on the capture view TalkBack would read the
         // screen as one element instead of its rows
@@ -277,48 +276,45 @@ export function TerminalView({
           {grid}
         </ScrollView>
       )}
+      <Text style={styles.note}>
+        {operate
+          ? `Keys go straight to ${program}. When it quits, the pane shows blocks again.`
+          : `${program} is full screen. When it quits, the pane shows blocks again.`}
+      </Text>
       {operate ? (
-        <View style={styles.bar}>
+        <View style={styles.bar} accessibilityLabel="Keys">
           {atPrompt ? (
-            <View style={styles.prompt}>
-              <WarningText style={styles.flex}>
-                This pane is at its prompt: typed text goes to programs only. Type commands in the command line.
-              </WarningText>
-              <Button label="Command line" onPress={onShowBlocks} />
-            </View>
+            <WarningText>This pane is at its prompt: typed text goes to programs only.</WarningText>
           ) : null}
           {error ? <ErrorText>{error}</ErrorText> : null}
           {!canType ? (
-            <Text style={styles.note}>This computer's Rift takes keys from the row only; update it to type here.</Text>
+            <Text style={styles.oldRift}>This computer's Rift takes keys from the row only; update it to type here.</Text>
           ) : null}
-          <View style={styles.keysRow}>
-            {typing ? (
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel={focused ? "Hide keyboard" : "Show keyboard"}
-                accessibilityState={{ disabled: !online, expanded: focused }}
-                disabled={!online}
-                onPress={() => (focused ? capture.current?.blur() : capture.current?.focus())}
-                style={({ pressed }) => [
-                  styles.kbd,
-                  focused && styles.kbdOn,
-                  !online && styles.disabled,
-                  pressed && styles.pressed,
-                ]}
-              >
-                <Text style={[styles.kbdLabel, focused && { color: colors.bg }]}>⌨</Text>
-              </Pressable>
-            ) : null}
-            <View style={styles.flex}>
-              <ControlRow
-                ids={s.settings.controlKeys}
-                sticky={sticky}
-                disabled={!online}
-                onSticky={setSticky}
-                onKey={onRowKey}
-              />
-            </View>
-          </View>
+          {/* a full-screen program needs its keys: the row shows here whatever Settings says */}
+          {showsKeyRow(s.settings.showKeys, true) ? (
+            <ControlRow
+              ids={s.settings.controlKeys}
+              sticky={sticky}
+              disabled={!online}
+              onSticky={setSticky}
+              onKey={onRowKey}
+              onOpen={onOpen}
+              wrap
+            />
+          ) : null}
+          {typing ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={focused ? "Hide keyboard" : "Show keyboard"}
+              accessibilityState={{ disabled: !online, expanded: focused }}
+              disabled={!online}
+              onPress={() => (focused ? capture.current?.blur() : capture.current?.focus())}
+              style={({ pressed }) => [styles.kbd, !online && styles.disabled, pressed && styles.pressed]}
+            >
+              <Icon name="keyboard" color={colors.text} />
+              <Text style={styles.kbdLabel}>{focused ? "Hide keyboard" : "Show keyboard"}</Text>
+            </Pressable>
+          ) : null}
         </View>
       ) : (
         <Text style={styles.viewOnly}>View only: this device cannot type here.</Text>
@@ -329,14 +325,13 @@ export function TerminalView({
 
 const styles = StyleSheet.create({
   fill: { flex: 1, backgroundColor: colors.bg },
-  flex: { flex: 1 },
-  caption: { color: colors.textDim, fontSize: 12, paddingHorizontal: 12, paddingTop: 6 },
   gridWrap: { flex: 1 },
-  gridPad: { padding: PADDING },
+  gridPad: { paddingVertical: PADDING, paddingHorizontal: PADDING_X },
   row: { fontFamily: mono, color: DEFAULTS.fg },
-  empty: { color: colors.textMuted, fontSize: 14, padding: 16 },
+  empty: { fontFamily: ui(400), color: colors.textMuted, fontSize: 14, padding: 16 },
   // as the blocks view's view-only line
   viewOnly: {
+    fontFamily: ui(400),
     color: colors.textDim,
     fontSize: 13,
     textAlign: "center",
@@ -345,30 +340,39 @@ const styles = StyleSheet.create({
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: colors.hairline,
   },
+  // the FullScreen board: a note on a surface strip, then the keys on the chrome ground
+  note: {
+    fontFamily: ui(400),
+    color: colors.textMuted,
+    fontSize: 12,
+    lineHeight: 17.4,
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    backgroundColor: colors.surface,
+    borderTopWidth: 1,
+    borderTopColor: colors.hairline,
+  },
   bar: {
     backgroundColor: colors.chrome,
-    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopWidth: 1,
     borderTopColor: colors.hairline,
-    paddingHorizontal: 6,
-    paddingTop: 6,
+    paddingHorizontal: 12,
+    paddingTop: 8,
     paddingBottom: 8,
-    gap: 6,
+    gap: 8,
   },
-  prompt: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 8 },
-  note: { color: colors.textMuted, fontSize: 12, paddingHorizontal: 4 },
-  keysRow: { flexDirection: "row", gap: 3, alignItems: "center" },
+  oldRift: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12 },
   kbd: {
-    minWidth: TOUCH,
-    minHeight: TOUCH,
+    height: TOUCH,
+    flexDirection: "row",
+    gap: 8,
     alignItems: "center",
     justifyContent: "center",
-    borderRadius: radius.control,
-    backgroundColor: colors.surface,
+    borderRadius: radius.small,
     borderWidth: 1,
-    borderColor: colors.hairline,
+    borderColor: colors.borderStrong,
   },
-  kbdOn: { backgroundColor: colors.accent, borderColor: colors.accent },
-  kbdLabel: { color: colors.text, fontSize: 18 },
+  kbdLabel: { fontFamily: ui(400), color: colors.text, fontSize: 14 },
   disabled: { opacity: 0.45 },
   pressed: { opacity: 0.7 },
 });

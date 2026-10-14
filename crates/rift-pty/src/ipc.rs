@@ -101,6 +101,10 @@ pub enum Event {
     Status {
         session: u64,
         job: Option<String>,
+        /// The terminal reads a line without echo (a password prompt).
+        /// Absent from services older than this field: false.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        hidden: bool,
     },
     Exited {
         session: u64,
@@ -328,6 +332,7 @@ mod tests {
 {"type":"attached","session":3,"from_seq":10,"truncated":true}
 {"type":"replay_done","session":3}
 {"type":"status","session":3,"job":"vim"}
+{"type":"status","session":3,"job":"sudo","hidden":true}
 {"type":"exited","session":3}
 {"type":"sessions","sessions":[{"id":3,"pid":42,"cwd":"/tmp","job":null,"started":1700000000,"clients":[7],"retained_bytes":512}]}
 {"type":"error","message":"no such session"}
@@ -373,6 +378,12 @@ mod tests {
             Event::Status {
                 session: 3,
                 job: Some("vim".into()),
+                hidden: false,
+            },
+            Event::Status {
+                session: 3,
+                job: Some("sudo".into()),
+                hidden: true,
             },
             Event::Exited { session: 3 },
             Event::Sessions {

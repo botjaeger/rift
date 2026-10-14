@@ -1,23 +1,40 @@
-import { Stack, useLocalSearchParams, useRouter } from "expo-router";
+import { useLocalSearchParams, useRouter } from "expo-router";
 import { useEffect, useRef, useState } from "react";
 import { ActivityIndicator, ScrollView, StyleSheet, Text, View } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { parsePairLink } from "@/pairing";
-import { relayHost } from "@/protocol/relay";
+import { addressHost, relayHost } from "@/protocol/relay";
 import { fleet, useApp } from "@/runtime";
 import { Button } from "@/ui/Button";
+import { Icon } from "@/ui/Icon";
 import { ErrorText, WarningText } from "@/ui/Notice";
-import { InfoRow } from "@/ui/Rows";
-import { Section } from "@/ui/Screen";
-import { colors, mono } from "@/ui/theme";
+import { PageHeader } from "@/ui/Screen";
+import { colors, mono, radius, ui } from "@/ui/theme";
 
 type Phase = { t: "ready" } | { t: "pairing" } | { t: "failed"; message: string };
 
+/** The computer's key as people compare it: its first 16 characters in fours ("R45t cRB3 9vYh rDdE"). */
+function keyGroups(key: string): string {
+  return (key.slice(0, 16).match(/.{1,4}/g) ?? []).join(" ");
+}
+
+/** One label / value line of the details card. */
+function Detail({ label, children, first, monoValue }: { label: string; children: string; first?: boolean; monoValue?: boolean }) {
+  return (
+    <View style={[styles.detail, !first && styles.divider]} accessible accessibilityLabel={`${label}: ${children}`}>
+      <Text style={styles.dt}>{label}</Text>
+      <Text style={[styles.dd, monoValue && styles.mono]}>{children}</Text>
+    </View>
+  );
+}
+
 /**
- * Confirms a pairing link (from the scanner, a paste or a deep link) before anything is sent:
- * the device pairs only on the Pair tap.
+ * "Pair with <computer>?" (the PairConfirm board), for a link from the scanner, a paste or a
+ * deep link: nothing is sent until Pair.
  */
 export default function PairScreen() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
   const params = useLocalSearchParams<{ link?: string }>();
   const s = useApp();
   const link = typeof params.link === "string" ? parsePairLink(params.link) : null;
@@ -46,14 +63,25 @@ export default function PairScreen() {
     router.push({ pathname: "/host/[key]", params: { key: link.key } });
   }, [spent, link?.key, router]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const cancel = () => {
+    cancelRef.current?.();
+    if (router.canGoBack()) router.back();
+    else router.replace("/");
+  };
+
   if (!link) {
     return (
-      <View style={[styles.fill, styles.content]}>
-        <Text style={styles.title} accessibilityRole="header">
-          Not a pairing code
-        </Text>
-        <Text style={styles.text}>This link is not a valid Rift pairing link. Create a new code on your computer and try again.</Text>
-        <Button label="Scan again" variant="primary" onPress={() => router.replace("/scan")} />
+      <View style={styles.fill}>
+        <PageHeader back={cancel} />
+        <View style={styles.body}>
+          <Text style={styles.title} accessibilityRole="header">
+            Not a pairing code
+          </Text>
+          <Text style={styles.text}>This link is not a valid Rift pairing link. Create a new code on your computer and try again.</Text>
+        </View>
+        <View style={[styles.actions, { paddingBottom: Math.max(40, insets.bottom + 6) }]}>
+          <Button label="Scan again" variant="primary" size="large" style={styles.flex} onPress={() => router.replace("/scan")} />
+        </View>
       </View>
     );
   }
@@ -76,76 +104,95 @@ export default function PairScreen() {
     }
   };
 
+  const addresses = link.addresses.map((a) => `${addressHost(a)} · LAN`);
   return (
-    <ScrollView style={styles.fill} contentContainerStyle={styles.content}>
-      <Stack.Screen options={{ title: `Pair with ${link.name}` }} />
-      <Text style={styles.title} accessibilityRole="header">
-        Pair with {link.name}?
-      </Text>
-      <Text style={styles.text}>
-        {link.permission === "operate"
-          ? "This device will see this computer's terminal sessions and can run commands and send keys in them."
-          : "This device will see this computer's terminal sessions. It cannot run commands or send keys."}
-      </Text>
-      <Section>
-        <InfoRow label="Computer" first>
-          <Text style={styles.value}>{link.name}</Text>
-        </InfoRow>
-        <InfoRow label="Access">
-          <Text style={[styles.value, link.permission === "view" && { color: colors.warning }]}>
-            {link.permission === "operate" ? "Operate" : "View only"}
-          </Text>
-        </InfoRow>
-        <InfoRow label="Addresses">
-          {link.addresses.map((a) => (
-            <Text key={a} style={[styles.value, styles.mono]}>
-              {a}
-            </Text>
-          ))}
-        </InfoRow>
-        {link.relay ? (
-          <InfoRow label="Relay">
-            <Text style={[styles.value, styles.mono]}>{relayHost(link.relay)}</Text>
-          </InfoRow>
-        ) : null}
-      </Section>
-      {link.relay ? (
-        <Text style={styles.text}>
-          Away from this network the device connects through the relay, which forwards only encrypted traffic.
-        </Text>
-      ) : null}
-      {already ? <WarningText>This computer is already paired. Pairing again replaces it.</WarningText> : null}
-      {phase.t === "failed" ? <ErrorText>{phase.message}</ErrorText> : null}
-      {phase.t === "pairing" ? (
-        <View style={styles.progress} accessible accessibilityLiveRegion="polite" accessibilityLabel={`Connecting to ${link.name}`}>
-          <ActivityIndicator color={colors.accent} />
-          <Text style={styles.text}>Connecting to {link.name}…</Text>
+    <View style={styles.fill}>
+      <PageHeader back={cancel} />
+      <ScrollView contentContainerStyle={styles.body}>
+        <View style={styles.tile}>
+          <Icon name="computer" size={26} color={colors.textMuted} />
         </View>
-      ) : null}
-      <Button
-        label={phase.t === "failed" ? "Try again" : "Pair"}
-        variant="primary"
-        disabled={phase.t === "pairing" || !s.ready || s.loadError !== null}
-        onPress={() => void pair()}
-      />
-      <Button
-        label="Cancel"
-        onPress={() => {
-          cancelRef.current?.();
-          if (router.canGoBack()) router.back();
-          else router.replace("/");
-        }}
-      />
-    </ScrollView>
+        <View style={styles.intro}>
+          <Text style={styles.title} accessibilityRole="header">
+            Pair with {link.name}?
+          </Text>
+          <Text style={styles.text}>
+            {link.permission === "operate"
+              ? "This phone will see its tabs and panes and can run commands there."
+              : "This phone will see its tabs and panes. It cannot run commands or send keys."}
+          </Text>
+        </View>
+        <View style={styles.card}>
+          {addresses.map((a, i) => (
+            <Detail key={a} label={i === 0 ? "Address" : ""} first={i === 0}>
+              {a}
+            </Detail>
+          ))}
+          {link.relay ? <Detail label="Relay">{relayHost(link.relay)}</Detail> : null}
+          <Detail label="Access">{link.permission === "operate" ? "Can run commands" : "View only"}</Detail>
+          <Detail label="Key" monoValue>
+            {keyGroups(link.key)}
+          </Detail>
+        </View>
+        {link.relay ? (
+          <Text style={styles.note}>Away from this network the phone connects through the relay, which forwards only encrypted traffic.</Text>
+        ) : null}
+        {already ? <WarningText>This computer is already paired. Pairing again replaces it.</WarningText> : null}
+        {phase.t === "failed" ? <ErrorText>{phase.message}</ErrorText> : null}
+        {phase.t === "pairing" ? (
+          <View style={styles.progress} accessible accessibilityLiveRegion="polite" accessibilityLabel={`Connecting to ${link.name}`}>
+            <ActivityIndicator color={colors.accent} />
+            <Text style={styles.text}>Connecting to {link.name}…</Text>
+          </View>
+        ) : null}
+      </ScrollView>
+      <View style={[styles.actions, { paddingBottom: Math.max(40, insets.bottom + 6) }]}>
+        <Button label="Cancel" size="large" style={styles.cancel} onPress={cancel} />
+        <Button
+          label={phase.t === "failed" ? "Try again" : "Pair"}
+          variant="primary"
+          size="large"
+          style={styles.pair}
+          disabled={phase.t === "pairing" || !s.ready || s.loadError !== null}
+          onPress={() => void pair()}
+        />
+      </View>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  fill: { flex: 1, backgroundColor: colors.bg },
-  content: { padding: 16, gap: 14, maxWidth: 560, width: "100%", alignSelf: "center" },
-  title: { color: colors.textBright, fontSize: 22, fontWeight: "600" },
-  text: { color: colors.textMuted, fontSize: 14, lineHeight: 20 },
-  value: { color: colors.text, fontSize: 14, textAlign: "right" },
-  mono: { fontFamily: mono, fontSize: 13 },
+  fill: { flex: 1, backgroundColor: colors.chrome },
+  flex: { flex: 1 },
+  body: { paddingTop: 20, paddingHorizontal: 20, gap: 22, maxWidth: 560, width: "100%", alignSelf: "center" },
+  tile: {
+    width: 56,
+    height: 56,
+    borderRadius: 14,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.hairline,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  intro: { gap: 8 },
+  title: { fontFamily: ui(600), color: colors.textBright, fontSize: 24 },
+  text: { fontFamily: ui(400), color: colors.textMuted, fontSize: 15, lineHeight: 22.5 },
+  note: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13, lineHeight: 19 },
+  card: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.card,
+    borderWidth: 1,
+    borderColor: colors.hairline,
+    overflow: "hidden",
+  },
+  detail: { flexDirection: "row" },
+  divider: { borderTopWidth: 1, borderTopColor: colors.hairline },
+  dt: { fontFamily: ui(400), width: 96, paddingVertical: 12, paddingHorizontal: 14, color: colors.textMuted, fontSize: 14 },
+  dd: { fontFamily: ui(400), flex: 1, paddingVertical: 12, paddingHorizontal: 14, color: colors.text, fontSize: 14 },
+  mono: { fontFamily: mono, fontSize: 12 },
   progress: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 10 },
+  actions: { flexDirection: "row", gap: 10, paddingTop: 16, paddingHorizontal: 20 },
+  cancel: { flex: 1 },
+  pair: { flex: 2 },
 });
