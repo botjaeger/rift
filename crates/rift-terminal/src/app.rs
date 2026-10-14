@@ -1425,9 +1425,12 @@ impl App {
             self.toast(msg);
             return;
         }
-        if let Err(e) = self.config.save() {
-            log::warn!("config save failed: {e}");
-            self.toast(format!("Could not save settings: {e}"));
+        match self.config.save() {
+            Ok(()) => self.settings.saved_at = Some(Instant::now()),
+            Err(e) => {
+                log::warn!("config save failed: {e}");
+                self.toast(format!("Could not save settings: {e}"));
+            }
         }
     }
 
@@ -1439,6 +1442,9 @@ impl App {
             Ok(c) => {
                 self.config = c.unwrap_or_default();
                 self.config_error = None;
+                if !startup {
+                    self.settings.saved_at = Some(Instant::now());
+                }
             }
             Err(e) => {
                 log::warn!("config.toml rejected: {e}");
@@ -1613,7 +1619,8 @@ impl App {
     }
 
     /// Select the block whose output holds absolute line `abs` of `pane_id`
-    /// (nothing in a full-screen program or on prompt rows).
+    /// (nothing in a full-screen program or on prompt rows); clicking the
+    /// selected block again clears the selection.
     fn select_block_at(&mut self, pane_id: PaneId, abs: i64) {
         let Some(pane) = self
             .tabs
@@ -1633,7 +1640,7 @@ impl App {
             .block_at(abs as u64)
             .map(|b| b.id);
         if let Some(block) = block {
-            pane.selected_block = Some(block);
+            pane.selected_block = (pane.selected_block != Some(block)).then_some(block);
         }
     }
 
@@ -4865,6 +4872,11 @@ impl App {
                 service: (!t.is_split())
                     .then(|| t.active().and_then(|p| p.session.service_id))
                     .flatten(),
+                started: t.started.and_then(|s| {
+                    s.duration_since(std::time::UNIX_EPOCH)
+                        .ok()
+                        .map(|d| d.as_secs())
+                }),
             })
             .collect();
         SavedSession {
@@ -4934,6 +4946,9 @@ impl App {
         }
         let tab = &mut self.tabs[self.active];
         tab.custom_title = saved.title.clone().filter(|t| !t.is_empty());
+        tab.started = saved
+            .started
+            .map(|s| std::time::UNIX_EPOCH + Duration::from_secs(s));
         tab.color = saved
             .color
             .as_deref()
@@ -6099,6 +6114,7 @@ impl App {
             return;
         };
         let split = tab.effective_split();
+        let elapsed = tab.elapsed();
 
         if split {
             // gutter fill
@@ -6489,6 +6505,7 @@ impl App {
                     &theme,
                     config_ref,
                     pane,
+                    elapsed,
                     area,
                     cell_w,
                     blink && is_active_pane,
@@ -6875,7 +6892,7 @@ impl App {
             hits.retain(|h| h.rect[1] + h.rect[3] <= TAB_BAR_H || h.rect[0] + h.rect[2] <= rail_w);
             focus_hits.clear();
             let mut list = rift_renderer::Layer::default();
-            settings_state.view_h = area[3] - 34.0;
+            settings_state.view_h = area[3];
             settings_state.content_h = settings::render(
                 scene.layer(3),
                 &mut list,
@@ -8776,6 +8793,9 @@ impl App {
     /// of its tab, but only in siblings at a prompt (a pane running vim or
     /// another program would receive the command as keystrokes).
     fn submit_synced(&mut self, id: PaneId, cmd: &str) {
+        if let Some((_, tab)) = self.find_tab_of_pane(id) {
+            tab.start_clock(cmd);
+        }
         let ready = self.synced_siblings(id, true);
         let busy = self.input_targets(id).len() - 1 - ready.len();
         for other in ready {
@@ -9617,6 +9637,7 @@ impl App {
         let Some((_, tab)) = self.find_tab_of_pane(id) else {
             return;
         };
+        tab.start_clock(cmd);
         let Some(pane) = tab.pane_mut(id) else { return };
         if !cmd.trim().is_empty() && pane.editor.history.last().map(String::as_str) != Some(cmd) {
             pane.editor.history.push(cmd.to_string());
@@ -13736,7 +13757,9 @@ impl App {
                 .collect::<Vec<_>>(),
         );
         // the active pane's prompt chips as drawn (their texts)
-        if let Some(pane) = self.tabs.get(self.active).and_then(|t| t.active()) {
+        if let Some(tab) = self.tabs.get(self.active)
+            && let Some(pane) = tab.active()
+        {
             let cwd = pane
                 .session
                 .cwd
@@ -13745,13 +13768,14 @@ impl App {
                 .as_deref()
                 .map(editor::shorten_home)
                 .unwrap_or_else(|| "~".into());
-            let chips: Vec<String> = editor::chip_views(&self.config, &self.theme, pane, &cwd)
-                .iter()
-                .map(|v| {
-                    let t: Vec<&str> = v.texts.iter().map(|(t, _)| t.as_str()).collect();
-                    format!("{:?}:{}", v.chip, t.join(" "))
-                })
-                .collect();
+            let chips: Vec<String> =
+                editor::chip_views(&self.config, &self.theme, pane, tab.elapsed(), &cwd)
+                    .iter()
+                    .map(|v| {
+                        let t: Vec<&str> = v.texts.iter().map(|(t, _)| t.as_str()).collect();
+                        format!("{:?}:{}", v.chip, t.join(" "))
+                    })
+                    .collect();
             let _ = writeln!(out, "prompt_chips_shown={chips:?}");
         }
         // the prompt chips' picker: kind, query, results, selection
@@ -16027,6 +16051,16 @@ impl ApplicationHandler<UserEvent> for App {
                 repaint = true;
             } else {
                 deadlines.push(due);
+            }
+        }
+        // Settings: the "config.toml updated" check goes after SAVED_SHOWN
+        if let Some(at) = self.settings.saved_at.filter(|_| self.settings.open) {
+            let until = at + settings::SAVED_SHOWN;
+            if now >= until {
+                self.settings.saved_at = None;
+                repaint = true;
+            } else {
+                deadlines.push(until);
             }
         }
         // notification toasts (a hovered one stays)

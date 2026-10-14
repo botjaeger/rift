@@ -88,6 +88,9 @@ pub struct SavedTab {
     /// Session-service shell of an unsplit tab's pane (durable sessions).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service: Option<u64>,
+    /// When the tab's first command ran, in Unix seconds (the Elapsed chip).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started: Option<u64>,
 }
 
 /// A tab's pane tree: either one leaf pane or a binary split of two subtrees.
@@ -325,6 +328,7 @@ mod tests {
                 layout: Some(layout),
                 transcript: None,
                 service: None,
+                started: Some(1_791_938_924),
             }],
             window: None,
         };

@@ -710,6 +710,9 @@ pub struct TabState {
     pub color: Option<usize>,
     /// ⌥⌘I: editor submissions and raw keys go to every pane of the tab.
     pub sync_inputs: bool,
+    /// When the tab's first command was submitted (the Elapsed chip); wall
+    /// clock so it survives a restart.
+    pub started: Option<std::time::SystemTime>,
 }
 
 /// Tab color names, in menu order (Warp's palette); rendered from theme ANSI
@@ -729,7 +732,21 @@ impl TabState {
             custom_title: None,
             color: None,
             sync_inputs: false,
+            started: None,
         }
+    }
+
+    /// Start the Elapsed clock at the tab's first non-empty command.
+    pub fn start_clock(&mut self, cmd: &str) {
+        if self.started.is_none() && !cmd.trim().is_empty() {
+            self.started = Some(std::time::SystemTime::now());
+        }
+    }
+
+    /// Time since the tab's first command (None before one ran).
+    pub fn elapsed(&self) -> Option<std::time::Duration> {
+        let started = self.started?;
+        Some(started.elapsed().unwrap_or_default())
     }
 
     pub fn pane(&self, id: PaneId) -> Option<&PaneState> {

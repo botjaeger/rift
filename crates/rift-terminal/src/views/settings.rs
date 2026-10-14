@@ -258,7 +258,7 @@ pub struct SettingsState {
     pub scroll: f32,
     /// Height of the last rendered page content (for scroll clamping).
     pub content_h: f32,
-    /// Height of the body the content scrolls in (above the footer).
+    /// Height of the body the content scrolls in.
     pub view_h: f32,
     /// Sidebar search: rows of every page whose name or description match.
     pub query: String,
@@ -275,9 +275,22 @@ pub struct SettingsState {
     pub update: UpdateLine,
     /// Remote access's gateway, devices and pairing (set by the app).
     pub remote: RemoteView,
+    /// When config.toml was last written or reloaded: "Open config.toml"
+    /// shows a check for `SAVED_SHOWN` after it.
+    pub saved_at: Option<std::time::Instant>,
 }
 
+/// How long the "updated" check stays beside "Open config.toml".
+pub const SAVED_SHOWN: std::time::Duration = std::time::Duration::from_secs(3);
+
 impl SettingsState {
+    /// The "updated" check's end, while it shows.
+    pub fn saved_until(&self) -> Option<std::time::Instant> {
+        self.saved_at
+            .map(|t| t + SAVED_SHOWN)
+            .filter(|until| *until > std::time::Instant::now())
+    }
+
     /// Show the Settings tab on `page` (adding the tab when missing).
     pub fn open_page(&mut self, page: Page) {
         if self.page != page {
@@ -671,11 +684,30 @@ pub fn render(
                 theme.text_muted,
             );
         }
+        // config.toml just written or reloaded: a check at the row's end (a
+        // dot on the file icon when the sidebar is icons only)
+        let updated = state.saved_until().is_some();
+        if updated && compact {
+            layer.circle([icon_x + 6.0, foot[1] + 10.0], 6.0, theme.success);
+        } else if updated {
+            icons::draw(
+                layer,
+                Icon::Check,
+                [foot[0] + foot[2] - 14.0, foot[1] + 16.0],
+                14.0,
+                theme.success,
+            );
+        }
         hits.push(Hit {
             rect: foot,
             target: ClickTarget::SettingsOpenConfig,
         });
-        names.push((foot, "Open config.toml".into()));
+        let name = if updated {
+            "Open config.toml (updated)"
+        } else {
+            "Open config.toml"
+        };
+        names.push((foot, name.into()));
     }
 
     // ── body ──
@@ -700,12 +732,7 @@ pub fn render(
     // quads too: a row scrolled half under the tab strip must not paint its
     // dot, ↺ or control over it
     layer.set_clip(Some((
-        [
-            x0 + sidebar_w,
-            top,
-            aw - sidebar_w,
-            (bottom - 34.0 - top).max(0.0),
-        ],
+        [x0 + sidebar_w, top, aw - sidebar_w, (bottom - top).max(0.0)],
         0.0,
     )));
     // About is the logo alone, centred (Warp): no page title
@@ -739,7 +766,7 @@ pub fn render(
         y: body_y - state.scroll,
         card_w,
         clip_top: top,
-        clip_bottom: bottom - 34.0,
+        clip_bottom: bottom,
         hits,
         names,
         row_label: String::new(),
@@ -801,7 +828,7 @@ pub fn render(
             Page::Keybindings => keybindings_page(&mut form, keymap, config, state, blink_on),
             Page::Themes => themes_page(&mut form, config),
             Page::Remote => remote_page(&mut form, config, &state.remote, blink_on),
-            Page::About => about_page(&mut form, top, bottom - 34.0, &state.update),
+            Page::About => about_page(&mut form, top, bottom, &state.update),
         }
     }
     // from the body's top edge (the title starts 28 px below it), so
@@ -830,51 +857,24 @@ pub fn render(
     // scrolled content stays inside the body: clip text, drop hits above it
     let layer = form.layer;
     let hits = form.hits;
-    let engine = form.engine;
     layer.set_clip(None);
     for t in &mut layer.texts[text_start..] {
         t.bounds = Some(rift_renderer::glyphon::TextBounds {
             left: (x0 + sidebar_w) as i32,
             top: top as i32,
             right: right as i32,
-            bottom: (bottom - 34.0) as i32,
+            bottom: bottom as i32,
         });
     }
     let kept: Vec<Hit> = hits
         .drain(hit_start..)
-        .filter(|hh| hh.rect[1] + hh.rect[3] > top && hh.rect[1] < bottom - 34.0)
+        .filter(|hh| hh.rect[1] + hh.rect[3] > top && hh.rect[1] < bottom)
         .collect();
     hits.extend(kept);
     // the open list wins over everything under it
     for (i, h) in menu_hits.into_iter().enumerate() {
         hits.insert(i, h);
     }
-
-    // footer: where the settings live
-    layer.rect(
-        [x0 + sidebar_w, bottom - 34.0],
-        [aw - sidebar_w, 34.0],
-        theme.ground(theme.bg),
-        0.0,
-    );
-    layer.hline(
-        x0 + sidebar_w,
-        bottom - 34.0,
-        aw - sidebar_w,
-        1.0,
-        theme.border,
-    );
-    static FOOTER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    let footer = FOOTER.get_or_init(|| {
-        let path = shown_path(rift_core::config::config_path(), "config.toml");
-        format!("{path} · saved")
-    });
-    layer.text(
-        mono(engine, footer, 11.5, Weight::NORMAL),
-        cx,
-        bottom - 24.0,
-        theme.text_muted,
-    );
 
     // the Settings tab eats every other click in its area (pushed last)
     hits.push(Hit {

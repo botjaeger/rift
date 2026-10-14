@@ -19,6 +19,7 @@ pub const GITHUB: char = '\u{f09b}'; // fa-github
 pub const DOCKER: char = '\u{f21f}'; // fa-docker
 pub const CALENDAR: char = '\u{f073}'; // fa-calendar_days
 pub const CLOCK: char = '\u{f017}'; // fa-clock_o
+pub const HOURGLASS: char = '\u{f252}'; // fa-hourglass_half
 pub const BELL: char = '\u{f0f3}'; // fa-bell
 pub const BELL_OUTLINE: char = '\u{f0a2}'; // fa-bell_o
 

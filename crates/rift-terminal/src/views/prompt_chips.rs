@@ -135,6 +135,17 @@ pub struct Inputs<'a> {
     /// The Docker Compose project around the cwd.
     pub docker: Option<&'a ComposeInfo>,
     pub now: LocalTime,
+    /// Time since the tab's first command (None: none ran yet).
+    pub elapsed: Option<std::time::Duration>,
+}
+
+/// `2h 05m`, `12m`, `0m` (minute resolution, like the clock chips).
+pub fn elapsed_text(d: std::time::Duration) -> String {
+    let m = d.as_secs() / 60;
+    match m / 60 {
+        0 => format!("{m}m"),
+        h => format!("{h}h {:02}m", m % 60),
+    }
 }
 
 /// The chips `chips` lists that have something to show, in order.
@@ -270,6 +281,12 @@ pub fn views(chips: &[PromptChip], theme: &Theme, i: &Inputs) -> Vec<ChipView> {
                 PromptChip::Time24 => {
                     one(glyphs::CLOCK, theme.text_dim, i.now.time24(), theme.text_ui)
                 }
+                PromptChip::Elapsed => one(
+                    glyphs::HOURGLASS,
+                    theme.text_dim,
+                    elapsed_text(i.elapsed?),
+                    theme.text_ui,
+                ),
             }
         })
         .collect()
@@ -324,6 +341,7 @@ pub fn sample(chip: PromptChip, theme: &Theme) -> ChipView {
             hour: 15,
             minute: 48,
         },
+        elapsed: Some(std::time::Duration::from_secs(2 * 3600 + 5 * 60)),
     };
     let mut v = views(&[chip], theme, &inputs)
         .pop()
@@ -386,13 +404,14 @@ mod tests {
             pr: None,
             docker: None,
             now,
+            elapsed: None,
         };
         let shown: Vec<String> = views(&PromptChip::ALL, &theme, &i)
             .iter()
             .map(texts)
             .collect();
-        // no host name, clean tree, no PR, PHP or compose project: those
-        // drop out; a virtualenv wins over the version
+        // no host name, clean tree, no PR, PHP, compose project or command
+        // run yet: those drop out; a virtualenv wins over the version
         assert_eq!(
             shown,
             [
@@ -494,5 +513,16 @@ mod tests {
         );
         let noon = LocalTime { hour: 12, ..t };
         assert_eq!(noon.time12(), "12:48 pm");
+    }
+
+    #[test]
+    fn elapsed_counts_hours_and_minutes() {
+        let s = std::time::Duration::from_secs;
+        assert_eq!(elapsed_text(s(59)), "0m");
+        assert_eq!(elapsed_text(s(12 * 60 + 30)), "12m");
+        assert_eq!(elapsed_text(s(3600)), "1h 00m");
+        assert_eq!(elapsed_text(s(26 * 3600 + 5 * 60)), "26h 05m");
+        let theme = Theme::default();
+        assert_eq!(texts(&sample(PromptChip::Elapsed, &theme)), "2h 05m");
     }
 }

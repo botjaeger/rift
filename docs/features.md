@@ -106,7 +106,9 @@ insensitive) stay visible. Running it again on the same block, or choosing
   the cwd, not above home: project name and running/total containers,
   `down` when none run, `off` when Docker is not running; `docker compose
   ps` in the background after each command), date,
-  12- and 24-hour time. Default: working directory, git branch, git diff
+  12- and 24-hour time, time on this tab (`elapsed`: hourglass, `2h 05m`
+  since the tab's first submitted command, hidden before it; kept across
+  restarts in the saved session). Default: working directory, git branch, git diff
   stats. A chip with nothing to show is left out. Git, PR and Docker state
   refresh after each command, and in every pane of every tab as soon as the
   chip list changes (Edit prompt or config.toml). Settings › Input › Prompt
@@ -175,7 +177,7 @@ the whole buffer.
   mode resolves paths the same way.
 - A copy, paste or open that fails shows a toast with the reason; `Copied`
   appears only when the clipboard took the text.
-- Click a block header: select the block (again: deselect). A click without a drag on its output also selects it; a drag selects text. Click its chevron: collapse.
+- Click a block header: select the block (again: deselect). A click without a drag on its output also selects it (again: deselect); a drag selects text. Click its chevron: collapse.
 - **Copy on select** (`copy_on_select`, off by default): a drag-selection is
   copied to the clipboard as soon as the mouse is released.
 

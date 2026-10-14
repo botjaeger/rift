@@ -1165,6 +1165,28 @@ saved = (pc / "cfg/rift/config.toml").read_text()
 assert re.search(r'prompt_chips = \[\s*"cwd",\s*"git_branch",\s*"time24",\s*"python",\s*"host",?\s*\]',
                  saved), saved
 
+# the elapsed chip is hidden until the tab's first command, then counts from
+# it; a click on a block's output selects it and a second click deselects
+(pc / "cfg/rift/config.toml").write_text(
+    'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
+    'sync_os_theme = false\nprompt_chips = ["cwd", "elapsed"]\n'
+    + f'working_directory = {json.dumps(str(work))}\n')
+run_prompt("elapsed", [f"dump {pc}/elapsed-before.txt", "type ls /nonexistent-dir\\n",
+                       "wait 800", f"dump {pc}/elapsed-after.txt"])
+assert 'prompt_chips_shown=["Cwd:' in (pc / "elapsed-before.txt").read_text()
+assert '"Elapsed:' not in (pc / "elapsed-before.txt").read_text()
+after = (pc / "elapsed-after.txt").read_text()
+assert '"Elapsed:0m"]' in after, after
+line_h, shown = grid_rows(after)
+start = int(re.search(r'cmd="ls /nonexistent-dir".*?output_start=Some\((\d+)\)', after)[1])
+out_at = f"300 {next(y for a, y in shown if a == start) + line_h / 2:.0f}"
+# (the second click waits out the 400 ms double-click window)
+run_prompt("select", ["type ls /nonexistent-dir\\n", "wait 800", f"click {out_at}", "wait 600",
+                      f"dump {pc}/select-on.txt", f"click {out_at}", "wait 200",
+                      f"dump {pc}/select-off.txt"])
+assert "selected_block=Some(" in (pc / "select-on.txt").read_text()
+assert "selected_block=None" in (pc / "select-off.txt").read_text()
+
 # tooltips: none before the rest time, then the control's action and
 # shortcut; a neighbour shows at once; a key hides it. On a fresh session the
 # welcome list runs under the history pane: its scope chip still gets the

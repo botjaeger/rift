@@ -64,7 +64,9 @@ remote_access = false             # phone companion: windows start the gateway
 remote_listen = "0.0.0.0:7878"    # where the gateway listens
 remote_relay  = ""                # wss://… relay for phones outside your network
                                   # (empty: none); `rift-terminal relay` or
-                                  # packaging/relay.Dockerfile hosts one
+                                  # packaging/relay.Dockerfile hosts one;
+                                  # scripts/relay-local.sh runs a temporary one
+                                  # on this machine and sets this key
 input_position = "bottom"         # bottom | top — where the command editor sits
 blocks_start = "bottom"           # bottom | top — blocks fill up from the editor (Warp), or start at the pane's top
 prompt        = "rift"           # rift = context chips + chevron
@@ -72,7 +74,7 @@ prompt        = "rift"           # rift = context chips + chevron
 prompt_chips  = ["cwd", "git_branch", "git_diff"]  # the Rift prompt's chips, in order (Settings › Input ›
                                   # Prompt chips edits them): cwd, git_branch, git_diff,
                                   # github_pr, user, host, python, php, docker,
-                                  # date, time12, time24
+                                  # date, time12, time24, elapsed
 copy_on_select = false            # copy the selection on mouse release
 autosuggestions = true            # inline ghost text after the cursor
 completions_menu = true           # completion panel (Tab still accepts the ghost text)

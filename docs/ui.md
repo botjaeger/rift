@@ -249,8 +249,9 @@ Each command becomes a block via shell-integration OSC 133 markers:
   red = exit ≠ 0, muted = no exit info. Consecutive blocks' borders are 2 px
   apart (design 01 block spacing).
 - **Block wash**: only the selected block gets an accent tint + 3 px accent
-  border, from its header (sticky header too) through its output; failed blocks are not tinted (exit state lives on the border and
-  badge, design 01).
+  border, from its header (sticky header too) through its output; a selected
+  failed block takes the error red instead. Unselected failed blocks are not
+  tinted (exit state lives on the border and badge, design 01).
 - **Selected block**: selected via a click on the header or the output, or ⌘↑/⌘↓; target of
   ⇧⌘C / ⌥⇧⌘C / ⌘I / ⌘B / ⌃M; Esc or clicking again deselects.
 - **Sticky command header**: when a block's output scrolls but its header would
@@ -644,12 +645,13 @@ shortcuts (new tab, next tab, palette…) work from it and leave it.
 
 A 232 px sidebar: a search field, the nine pages with icons (arrow keys
 navigate pages; PageUp/PageDown scroll the body) and *Open config.toml* at
-the foot (opens the file in the reading pane). When the settings area is
+the foot (opens the file in the reading pane; for 3 s after config.toml is
+written or reloaded, a green check sits at its end, a green dot on its icon
+in the icon-only sidebar). When the settings area is
 under 700 px wide the sidebar shrinks to 56 px of icons, with no search
 field or labels. The body (at most 720 px wide, centred right of the sidebar like Warp's)
 has the page title and description, group labels, and flat rows: label (and
-description) left, control right. Footer: `~/.config/rift/config.toml ·
-saved`.
+description) left, control right; it runs to the bottom edge.
 
 - **Search**: typing anywhere outside Keybindings fills the search field and
   lists the matching settings of General, Appearance, Input, Terminal, Files

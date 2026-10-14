@@ -93,7 +93,7 @@ glyphon; shaped runs are cached by content.
 | Split pane title bar (and file viewer header) | 28 px | `PANE_HEADER_H`, `viewer::HEADER_H` |
 | Split divider / grab width | 1 px / +4 px each side | `HANDLE`, `HANDLE_GRAB` |
 | Block left border / gap between blocks | 2 px / 2 px | `BLOCK_GAP` |
-| Selected block border | 3 px accent | — |
+| Selected block border | 3 px accent (error on a failed block) | — |
 | Block indent | 16 px | `BLOCK_INDENT` |
 | Editor height / shell-prompt mode | 72 px / 42 px | `EDITOR_H`, `EDITOR_COMPACT_H` |
 | Editor extra line | +20 px per line | `LINE_H` |

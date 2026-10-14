@@ -59,10 +59,12 @@ pub enum PromptChip {
     Time12,
     /// 24-hour time (`15:48`).
     Time24,
+    /// Time since the tab's first command (`2h 05m`); hidden until then.
+    Elapsed,
 }
 
 impl PromptChip {
-    pub const ALL: [PromptChip; 12] = [
+    pub const ALL: [PromptChip; 13] = [
         PromptChip::User,
         PromptChip::Host,
         PromptChip::Cwd,
@@ -75,6 +77,7 @@ impl PromptChip {
         PromptChip::Date,
         PromptChip::Time12,
         PromptChip::Time24,
+        PromptChip::Elapsed,
     ];
 
     /// The default prompt: the design's cwd and branch chips, then the diff
@@ -97,6 +100,7 @@ impl PromptChip {
             PromptChip::Date => "Date",
             PromptChip::Time12 => "Time (12-hour)",
             PromptChip::Time24 => "Time (24-hour)",
+            PromptChip::Elapsed => "Time on this tab",
         }
     }
 
@@ -137,6 +141,10 @@ impl PromptChip {
             PromptChip::Date => "Today's date.",
             PromptChip::Time12 => "The current time, 12-hour.",
             PromptChip::Time24 => "The current time, 24-hour.",
+            PromptChip::Elapsed => {
+                "How long ago the first command ran in this tab: the time worked on it. \
+                 Shows once a command has run, and survives a restart."
+            }
         }
     }
 }

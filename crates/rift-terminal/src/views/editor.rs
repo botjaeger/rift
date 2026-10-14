@@ -118,6 +118,7 @@ pub fn render(
     theme: &Theme,
     config: &Config,
     pane: &PaneState,
+    elapsed: Option<std::time::Duration>,
     area: [f32; 4],
     cell_w: f32, // still sizes the ❯ prompt offset below
     blink_on: bool,
@@ -144,7 +145,7 @@ pub fn render(
             .as_deref()
             .map(shorten_home)
             .unwrap_or_else(|| "~".into());
-        let views = chip_views(config, theme, pane, &cwd_display);
+        let views = chip_views(config, theme, pane, elapsed, &cwd_display);
         chips = draw_chips(
             layer,
             engine,
@@ -611,11 +612,13 @@ pub(crate) fn draw_chip(
     }
 }
 
-/// The configured prompt chips for `pane` (shown cwd `cwd`).
+/// The configured prompt chips for `pane` (shown cwd `cwd`; `elapsed`: time
+/// since its tab's first command).
 pub(crate) fn chip_views(
     config: &Config,
     theme: &Theme,
     pane: &PaneState,
+    elapsed: Option<std::time::Duration>,
     cwd: &str,
 ) -> Vec<ChipView> {
     let vars = pane.session.user_vars.lock().unwrap().clone();
@@ -651,6 +654,7 @@ pub(crate) fn chip_views(
             pr: pane.pr.as_ref(),
             docker: pane.docker.as_ref(),
             now: prompt_chips::LocalTime::now(),
+            elapsed,
         },
     )
 }

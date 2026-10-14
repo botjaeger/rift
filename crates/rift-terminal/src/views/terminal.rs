@@ -1595,11 +1595,15 @@ pub fn render(
             .map(|b| (b.prompt_start, b.end.unwrap_or(live_end)))
     });
     let row_selected = |abs: u64| selected_range.is_some_and(|(s, e)| abs >= s && abs < e);
+    // a selected failed block keeps its error color; any other takes the accent
+    let sel_color = selected
+        .and_then(|id| blocks.iter().find(|b| b.id == id))
+        .map_or(theme.accent, |b| selection_color(theme, b));
 
-    // only the keyboard-selected block gets a wash; exit state lives on the
-    // left border and badge alone (design 01: failed blocks are not tinted)
+    // only the selected block gets a wash; exit state lives on the left
+    // border and badge alone (design 01: unselected failed blocks are not tinted)
     let row_bg =
-        |abs: u64| -> Option<Color> { row_selected(abs).then(|| theme.accent.with_alpha(0.08)) };
+        |abs: u64| -> Option<Color> { row_selected(abs).then(|| sel_color.with_alpha(0.08)) };
 
     // block membership for border drawing: abs line → block state color
     let border_color = |abs: u64| -> Option<Color> {
@@ -1657,7 +1661,7 @@ pub fn render(
                     grid.x
                 } else if let Some(color) = border_color(*abs) {
                     if is_sel {
-                        layer.rect([grid.x, y], [3.0, border_h(r)], theme.accent, 0.0);
+                        layer.rect([grid.x, y], [3.0, border_h(r)], sel_color, 0.0);
                     } else {
                         layer.rect([grid.x, y], [2.0, border_h(r)], color, 0.0);
                     }
@@ -1718,7 +1722,7 @@ pub fn render(
             DisplayLine::Header(bi) => {
                 let block = &blocks[*bi];
                 if selected == Some(block.id) {
-                    wash_row(layer, grid, y, theme.accent.with_alpha(0.08));
+                    wash_row(layer, grid, y, sel_color.with_alpha(0.08));
                 }
                 out.rows.push(RowInfo {
                     y,
@@ -1818,6 +1822,15 @@ pub fn render_sticky_header(
         &mut sink,
     );
     Some(rect)
+}
+
+/// Edge and wash color of a selected block: a failed command stays red,
+/// anything else takes the accent.
+fn selection_color(theme: &Theme, block: &Block) -> Color {
+    match block.state {
+        BlockState::Done { exit: Some(n), .. } if n != 0 => theme.error,
+        _ => theme.accent,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2252,10 +2265,15 @@ fn render_header(
         BlockState::Prompt => return,
     };
 
-    // left border across the header row: the selected block's 3 px accent
+    // left border across the header row: the selected block's 3 px edge
     // runs through its header too
     if selected {
-        layer.rect([grid.x, y], [3.0, border_h], theme.accent, 0.0);
+        layer.rect(
+            [grid.x, y],
+            [3.0, border_h],
+            selection_color(theme, block),
+            0.0,
+        );
     } else {
         layer.rect([grid.x, y], [2.0, border_h], border, 0.0);
     }
