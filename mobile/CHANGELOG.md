@@ -6,6 +6,29 @@ build (`## <version> — <YYYY-MM-DD>`) or an over-the-air update to one
 message its download carries. Items use `### New`, `### Improved` or
 `### Fixed` sections of `- **Title** — text`.
 
+## 0.2.0 · update 5 — 2026-10-15
+
+A new look: Computers is the home page, panes show commands as cards, and Settings is rebuilt.
+
+### New
+
+- **Computers home** — every computer as a card with its connection, its tabs and what each one
+  is doing, chips to show only what needs you, works or waits, and New tab on the card. The gear
+  opens Settings and + pairs a computer.
+- **Tabs and Panes sheets** — tap a pane's title to switch tabs or open a new one; the pane
+  picker lists every pane of the tab.
+- **Command cards** — each command shows as a card with its state, output laid out for the
+  phone, and its log lines while it runs; tap a card for its actions.
+- **Question card** — when an agent asks, the question docks above the command line with its
+  answers, and folds away until you are ready.
+- **Terminal view** — pinch to zoom the full-screen terminal, or use − and +.
+
+### Improved
+
+- **Settings** — a page of its own behind the gear, with each computer on its own page.
+- **Fewer places to look** — Now, the tab bar and the Run page are gone; what they showed now
+  lives on Computers and in the pane.
+
 ## 0.2.0 · update 4 — 2026-10-15
 
 Now for one computer: its connection at the top, chips to show one kind, and idle agents in view.
