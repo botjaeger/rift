@@ -20,13 +20,6 @@ import { toggleA11y } from "./toggle";
 
 /** The mockups' top inset for a page title: 62 pt on a 47 pt status bar, never under the island. */
 export const titleTop = (inset: number) => Math.max(inset, 47) + 15;
-/**
- * The same for a tab page's scroll view: on iOS the system tab bar insets a scroll view's
- * content by the status bar itself (measured: content at y = the top inset, even with
- * contentInsetAdjustmentBehavior "never"), so only the rest is added there. A plain view (the
- * first-run page) gets no such inset and uses titleTop.
- */
-export const tabTitleTop = (inset: number) => (Platform.OS === "ios" ? titleTop(inset) - inset : titleTop(inset));
 /** The mockups' top inset for a navigation header: 54 pt on a 47 pt status bar. */
 export const headerTop = (inset: number) => Math.max(inset, 47) + 7;
 /** Room left under a tab page for the floating tab bar (62 pt, 26 pt above the edge). */
@@ -37,11 +30,6 @@ export const TAB_BAR_ROOM = 120;
  * gap is added; Android and the web draw the floating bar over the page and leave TAB_BAR_ROOM.
  */
 export const tabBottom = (inset: number) => inset + (Platform.OS === "ios" ? 24 : TAB_BAR_ROOM);
-/**
- * The same for a tab page's scroll view: on iOS the system also insets the scroll view's content
- * by the bar (measured: the safe-area inset added on top left a 108 pt gap), so only the gap.
- */
-const tabScrollBottom = (inset: number) => (Platform.OS === "ios" ? 24 : tabBottom(inset));
 
 const android = Platform.OS === "android";
 
@@ -114,7 +102,10 @@ export function TabScreen({
       onLayout={revealFocusedField}
       style={styles.fill}
       // the large header's row is its 40 pt button, 58 pt down on the boards
-      contentContainerStyle={{ paddingTop: tabTitleTop(insets.top) - (large ? 4 : 0), paddingBottom: tabScrollBottom(insets.bottom) }}
+      // the page pads itself by the safe area: the tab layout turns off the system's automatic
+      // content inset (disableAutomaticContentInsets), which a keyboard anywhere in the app undid
+      // (React Native clamps the offset to the prop inset, the title slid under the status bar)
+      contentContainerStyle={{ paddingTop: titleTop(insets.top) - (large ? 4 : 0), paddingBottom: tabBottom(insets.bottom) }}
       contentInsetAdjustmentBehavior="never"
       automaticallyAdjustContentInsets={false}
       // iOS: the keyboard insets the page and scrolls a focused field above it

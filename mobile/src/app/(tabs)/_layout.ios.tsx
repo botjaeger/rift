@@ -13,15 +13,15 @@ export default function TabsLayout() {
       // shrinks to the current tab while a page scrolls down, back on scrolling up
       minimizeBehavior="onScrollDown"
     >
-      <NativeTabs.Trigger name="index">
+      <NativeTabs.Trigger name="index" disableAutomaticContentInsets>
         <NativeTabs.Trigger.Icon sf={{ default: "clock", selected: "clock" }} />
         <NativeTabs.Trigger.Label>Now</NativeTabs.Trigger.Label>
       </NativeTabs.Trigger>
-      <NativeTabs.Trigger name="computers">
+      <NativeTabs.Trigger name="computers" disableAutomaticContentInsets>
         <NativeTabs.Trigger.Icon sf={{ default: "desktopcomputer", selected: "desktopcomputer" }} />
         <NativeTabs.Trigger.Label>Computers</NativeTabs.Trigger.Label>
       </NativeTabs.Trigger>
-      <NativeTabs.Trigger name="settings">
+      <NativeTabs.Trigger name="settings" disableAutomaticContentInsets>
         <NativeTabs.Trigger.Icon sf={{ default: "gearshape", selected: "gearshape" }} />
         <NativeTabs.Trigger.Label>Settings</NativeTabs.Trigger.Label>
       </NativeTabs.Trigger>
