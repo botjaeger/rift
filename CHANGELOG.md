@@ -8,6 +8,32 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.6.0 — 2026-10-15
+
+Your phone can now tell a Claude Code or Codex session that is working from one that waits
+for you, and colored rows render without seams.
+
+### New
+
+- **Idle agents on your phone** — the phone sees each Claude Code and Codex session's name and
+  whether it is working or waiting at its own prompt, so Now lists the ones that wait apart
+  from the ones that work.
+
+### Improved
+
+- **Pane count on tabs** — a tab's pane count sits at its right end, beside the close button.
+- **Translucent windows** — prompt chips and the editor's suggestion text stay readable when
+  the window is see-through.
+
+### Fixed
+
+- **Old notifications after an update** — commands that finished before Rift restarted for an
+  update no longer come back as "Just now" notifications.
+- **Lines between colored rows** — colored rows, such as Claude Code's diffs, meet without a
+  thin light line between them.
+- **Spinner after a restart** — a tab running Claude Code keeps its spinner while the agent
+  works after Rift reattaches to the session, renamed tab or not.
+
 ## 0.5.0 — 2026-10-15
 
 Tabs sized like Warp's, links that work inside Claude Code and Codex, and prompt chips

@@ -6,6 +6,24 @@ build (`## <version> — <YYYY-MM-DD>`) or an over-the-air update to one
 message its download carries. Items use `### New`, `### Improved` or
 `### Fixed` sections of `- **Title** — text`.
 
+## 0.2.0 · update 3 — 2026-10-15
+
+Now handles several computers: pick one or see all, with what waits folded away.
+
+### New
+
+- **Choose computers on Now** — with two or more paired, the pill under Now shows every
+  computer or the one you pick; while it mixes them, each avatar carries the computer's
+  two-letter badge in its own color.
+
+### Improved
+
+- **A shorter Now** — Working shows three sessions, then "more working"; idle agents and
+  finished and failed commands fold into one row you open when you want them.
+- **Sessions by name** — Claude Code and Codex sessions show their own name, with the
+  folder and branch beneath (needs Rift 0.6.0 on the computer).
+- **Round buttons** — Run is a round button, and a question's answers are round pills.
+
 ## 0.2.0 · update 2 — 2026-10-15
 
 A fresh look: glass headers, project avatars, search on Computers and rounder keys.
