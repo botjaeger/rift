@@ -20,6 +20,7 @@ import { applySticky, keyEventToAction, stickyKey } from "@/keyboard";
 import { keysNeedAuth } from "@/lock";
 import { authenticate, fleet, useApp } from "@/runtime";
 import { branchText, chipsSpoken, type ChipMenuKind, type PromptChips } from "@/chips";
+import { programSend } from "@/paneView";
 import { showsKeyRow } from "@/terminal";
 import { ControlRow, NO_STICKY, type Sticky } from "./ControlRow";
 import { insertedChar, plainPunctuation } from "./format";
@@ -47,7 +48,8 @@ function folderLines(chips: PromptChips): { path: string; branch: string | null 
  * (the desktop's completions and this pane's history, feature `complete`; else its recent
  * commands); ⌃, which shows the control-key row (Settings › Keys) above the field; and the
  * round field with its run button (Return runs too; through the Confirm sheet only with Settings › Ask before
- * running on). A hardware
+ * running on). While a program runs (`running`) the field talks to it instead: Return sends the
+ * line as text, then Return as a key (feature `text`), with no Confirm sheet. A hardware
  * keyboard's ctrl/alt combinations, Escape, Tab and F-keys in the field go to the pane as keys.
  * While the host is not connected (`online` false) nothing can be sent; the draft stays editable.
  */
@@ -55,6 +57,7 @@ export function Composer({
   hostKey,
   paneId,
   running,
+  program,
   online,
   chips,
   chipMenus,
@@ -66,6 +69,8 @@ export function Composer({
   hostKey: string;
   paneId: number;
   running: string | null;
+  /** The running program's name ("claude"), for the field's placeholder. */
+  program: string;
   online: boolean;
   chips: PromptChips;
   /** The computer serves the chips' menus (feature `chips`): the folder button opens them. */
@@ -87,7 +92,7 @@ export function Composer({
   // Return was pressed while not connected
   const [offlineTried, setOfflineTried] = useState(false);
   const shownError =
-    error ?? (offlineTried && !online ? "Not connected. The command stays here; Return runs it once the computer is back." : null);
+    error ?? (offlineTried && !online ? running !== null ? "Not connected. The message stays here; Return sends it once the computer is back." : "Not connected. The command stays here; Return runs it once the computer is back." : null);
   // a command on its way: a ref, not state, so a second Return before the re-render sends nothing
   const sending = useRef(false);
   // ⌃: the key row in place of the suggestions; Settings › Show keys opens it to start with
@@ -184,6 +189,37 @@ export function Composer({
     if (action && "keys" in action) onRowKey(action.keys[0]!);
   };
 
+  // A program is running: the line goes to it as text, then Return as its own request (a program
+  // such as Claude Code reads text with a Return in the same write as a paste, not a send).
+  const sendToProgram = async () => {
+    const p = programSend(draft, canType);
+    if (!p.ok) {
+      if (p.message) setError(p.message);
+      return;
+    }
+    sending.current = true;
+    setError(null);
+    try {
+      // the Return submits the line: it asks like Run does, before any text goes out
+      if (keysNeedAuth(["enter"], s.settings)) {
+        const auth = await authenticate("Send enter");
+        if (!auth.ok) {
+          if (auth.message !== "Cancelled.") setError(auth.message);
+          return;
+        }
+      }
+      const t = await fleet.sendText(hostKey, paneId, p.text);
+      if (!t.ok) return setError(t.message);
+      // the program has the text: the line is spent even if the Return fails
+      fleet.setDraft(hostKey, paneId, "");
+      const k = await fleet.sendKeys(hostKey, paneId, ["enter"]);
+      if (!k.ok) return setError(k.message);
+      AccessibilityInfo.announceForAccessibility("Sent");
+    } finally {
+      sending.current = false;
+    }
+  };
+
   const problem = commandProblem(draft);
   const run = async () => {
     if (sending.current) return;
@@ -193,6 +229,7 @@ export function Composer({
       return;
     }
     setOfflineTried(false);
+    if (running !== null) return void sendToProgram();
     if (problem) {
       if (problem !== "empty")
         setError(problem === "too_long" ? "The command is too long (2 KiB at most)." : "The command must be one line.");
@@ -359,21 +396,23 @@ export function Composer({
             value={draft}
             onChangeText={onChange}
             onSubmitEditing={() => void run()}
-            placeholder={stickyName ? `Type a letter for ${stickyName}+letter` : "Command"}
+            placeholder={stickyName ? `Type a letter for ${stickyName}+letter` : running !== null ? `Message for ${program}` : "Command"}
             placeholderTextColor={colors.textMuted}
             autoCapitalize="none"
             autoCorrect={false}
             spellCheck={false}
             returnKeyType="send"
             submitBehavior="submit"
-            accessibilityLabel={`Command for ${label}`}
-            accessibilityHint={s.settings.askBeforeRun ? "Return shows the command first" : "Return runs it"}
+            accessibilityLabel={running !== null ? `Message for ${program} in ${label}` : `Command for ${label}`}
+            accessibilityHint={
+              running !== null ? "Return sends it to the program" : s.settings.askBeforeRun ? "Return shows the command first" : "Return runs it"
+            }
             style={styles.input}
           />
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Run"
-            accessibilityHint={s.settings.askBeforeRun ? "Shows the command first" : undefined}
+            accessibilityLabel={running !== null ? "Send" : "Run"}
+            accessibilityHint={running === null && s.settings.askBeforeRun ? "Shows the command first" : undefined}
             accessibilityState={{ disabled: !canRun }}
             disabled={!canRun}
             onPress={() => void run()}

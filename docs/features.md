@@ -770,7 +770,12 @@ line shows the addresses, or how many devices are connected.
   text never reaches a pane at its prompt (nor one whose command was just
   submitted), and keys at a prompt never recall history, complete or submit
   a line that has text: commands still go through *Run*. A shell without Rift's integration, and a prompt drawn on
-  the alternate screen (tmux), look like programs and take typed text. The phone never resizes the pane. With a hardware
+  the alternate screen (tmux), look like programs and take typed text. Its Terminal view shows the pane
+  the way Rift draws it (a header row per command, not the shell's prompt
+  echo), and the phone can size the pane to its width while it follows it:
+  the shell is the smaller of the two sizes, so programs reflow, until the
+  phone leaves the pane or disconnects, or 30 seconds pass without a
+  refresh. With a hardware
   keyboard, ctrl/alt combinations, Esc, Tab and F-keys pressed in the
   command field go to the pane too.
 - **Block actions, earlier output, control keys (Phase 3).** A tap on a

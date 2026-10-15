@@ -77,6 +77,14 @@ pub const MAX_REQUEST_ID: usize = 64;
 pub const MAX_TEXT: usize = 1024;
 /// `output` requests per second per connection.
 pub const OUTPUT_RATE: usize = 10;
+/// `fit` requests per second per connection (the app re-sends its fit every
+/// [`FIT_LEASE`] / 3).
+pub const FIT_RATE: usize = 4;
+/// How long the desktop keeps a `fit` that was not refreshed.
+pub const FIT_LEASE: Duration = Duration::from_secs(30);
+/// Bounds of a `fit` (columns, rows); a value outside is clamped.
+pub const FIT_COLS: std::ops::RangeInclusive<u16> = 20..=300;
+pub const FIT_ROWS: std::ops::RangeInclusive<u16> = 5..=120;
 /// Most lines per `output` answer (also bounded by [`MAX_OUTPUT_BYTES`]).
 pub const MAX_OUTPUT_PAGE_LINES: usize = 500;
 /// Most `dirs`, `branches` or `files` in one chip menu answer.
@@ -737,6 +745,14 @@ pub trait Source: Send + Sync + 'static {
     fn screen(&self, pane: u64, force: bool) -> Result<Option<Screen>, SourceError> {
         let _ = (pane, force);
         Ok(None)
+    }
+    /// Hold `pane` at most `size` (columns, rows) for the phones following
+    /// it (the smallest of them), or release it (`None`); called again
+    /// within [`FIT_LEASE`] / 3 while held, which keeps the lease. Defaults
+    /// to accepting and ignoring.
+    fn fit(&self, pane: u64, size: Option<(u16, u16)>) -> Result<(), InputError> {
+        let _ = (pane, size);
+        Ok(())
     }
     /// Up to `limit` output lines of `block` in `pane` from line `from` on
     /// (see [`OutputPage`]). Defaults to `NoPane`.

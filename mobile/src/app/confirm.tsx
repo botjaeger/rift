@@ -119,7 +119,7 @@ export default function ConfirmScreen() {
 
       {running ? (
         <WarningText>
-          This pane is running {running}. Commands only run at a prompt; use the keys row to talk to the program.
+          This pane is running {running}. Commands only run at a prompt; the pane's command line sends text to the program.
         </WarningText>
       ) : null}
       {host && !operate ? <WarningText>This device may only view {hostName}.</WarningText> : null}

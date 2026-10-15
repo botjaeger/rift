@@ -20,7 +20,7 @@ import { askingTitle, questionKey } from "@/answer";
 import { promptChips } from "@/chips";
 import { canOperate, hasFeature, isAsked, wrapsLines } from "@/fleet";
 import { foldBlocks, paneName, programName, swipeTarget, type PaneItem } from "@/now";
-import { CLAUDE_COLOR, paneMark, waitingOthers } from "@/paneView";
+import { CLAUDE_COLOR, paneMark, runsAgent, terminalViewOn, waitingOthers } from "@/paneView";
 import { canLoadOlder, MAX_BLOCKS } from "@/protocol/store";
 import type { Block } from "@/protocol/types";
 import { fleet, useApp } from "@/runtime";
@@ -142,8 +142,11 @@ export default function PaneScreen() {
   // The view follows the pane: its screen while a full-screen program runs, blocks otherwise.
   const screenFeature = hasFeature(host, "screen");
   const screen = pane?.screen ?? null;
-  // the header's Terminal view: the pane's screen whatever runs (gateway mode `on`)
-  const [termView, setTermView] = useState(false);
+  // the header's Terminal view: the pane's screen whatever runs (gateway mode `on`). On by default
+  // for an agent (Claude Code never uses the alternate screen), off at a shell; a tap overrides
+  // the default while this screen is open.
+  const [termChoice, setTermChoice] = useState<boolean | null>(null);
+  const termView = terminalViewOn(termChoice, !!loc && runsAgent(loc.pane));
   const pinned = termView && screenFeature;
   const fullScreen = pinned || showsTerminal(screen, screenFeature);
   const program = (loc && programName(loc.pane)) || screenProgram(running, loc?.pane.job ?? null);
@@ -304,6 +307,7 @@ export default function PaneScreen() {
           hostKey={key}
           paneId={paneId}
           running={running}
+          program={program}
           online={status === "open"}
           chips={promptChips(loc?.pane ?? null, state, hasFeature(host, "git"))}
           chipMenus={hasFeature(host, "chips")}
@@ -422,7 +426,7 @@ export default function PaneScreen() {
                 hitSlop={{ top: 4, bottom: 4 }}
                 onPress={() => {
                   say(pinned ? "Back to blocks" : "Terminal view on");
-                  setTermView((v) => !v);
+                  setTermChoice(!pinned);
                 }}
                 style={({ pressed }) => [styles.screenButton, pinned && styles.screenButtonOn, pressed && styles.pressed]}
               >
@@ -468,6 +472,7 @@ export default function PaneScreen() {
               program={program}
               pinned={pinned}
               bare={bareScreen}
+              canFit={hasFeature(host, "fit")}
             />
           </View>
           {bareScreen ? footer : null}

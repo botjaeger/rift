@@ -53,6 +53,8 @@ struct State {
     can_start: bool,
     /// Devices that started a shell.
     starts: Vec<String>,
+    /// What `fit` was told: (pane, size or release).
+    fits: Vec<(u64, Option<(u16, u16)>)>,
 }
 
 #[derive(Clone, Default)]
@@ -70,6 +72,9 @@ impl Fake {
     }
     fn inputs(&self) -> Vec<(u64, String, Input)> {
         self.0.lock().unwrap().inputs.clone()
+    }
+    fn fits(&self) -> Vec<(u64, Option<(u16, u16)>)> {
+        self.0.lock().unwrap().fits.clone()
     }
     fn fail_input(&self, e: Option<InputError>) {
         self.0.lock().unwrap().input_error = e;
@@ -144,6 +149,15 @@ impl Source for Fake {
 
     fn can_start(&self) -> bool {
         self.0.lock().unwrap().can_start
+    }
+
+    fn fit(&self, pane: u64, size: Option<(u16, u16)>) -> Result<(), InputError> {
+        let mut st = self.0.lock().unwrap();
+        if !st.panes.contains_key(&pane) {
+            return Err(InputError::NoPane);
+        }
+        st.fits.push((pane, size));
+        Ok(())
     }
 
     /// A new empty pane, numbered after the highest.
@@ -582,7 +596,7 @@ fn pairing_then_reconnecting_gets_welcome_and_topology() {
     assert_eq!(
         welcome,
         json!({"t":"welcome","v":2,"host":"test-host","os":"linux","version":"9.9.9",
-               "device":d.id,"permission":"operate","features":["screen","text","output","push_failures","push_ntfy","git","notify_off","chips","waiting","complete","running","open"]})
+               "device":d.id,"permission":"operate","features":["screen","text","output","push_failures","push_ntfy","git","notify_off","chips","waiting","complete","running","open","fit"]})
     );
     assert_eq!(
         (d.name.as_str(), d.platform.as_str()),
@@ -2325,6 +2339,163 @@ fn a_silent_connection_stops_counting_as_following_its_pane() {
     env.fake.edit(12, |b| b.push(finished(4, "make", 1, 5_000)));
     let r = ntfy.raw(0);
     assert!(r.header("Click").is_some_and(|c| c.ends_with("/pane/12")));
+}
+
+// --- fit ------------------------------------------------------------------
+
+/// Wait for `want` to be what the source was last told (or the end of 3 s).
+fn last_fit(env: &Env, want: Option<(u16, u16)>) -> bool {
+    let t = Instant::now();
+    while t.elapsed() < Duration::from_secs(3) {
+        if env.fake.fits().last().map(|f| f.1) == Some(want) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    false
+}
+
+#[test]
+fn fit_is_welcomed_acked_clamped_and_released() {
+    let env = start(|_| {});
+    let (_k, mut ch, welcome) = env.pair(Permission::Operate);
+    assert!(
+        welcome["features"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("fit"))
+    );
+    put(&mut ch, json!({"t":"subscribe","pane":12,"after":null}));
+    recv_t(&mut ch, "snapshot");
+    put(
+        &mut ch,
+        json!({"t":"fit","id":"f1","pane":12,"cols":64,"rows":40}),
+    );
+    assert_eq!(
+        recv_t(&mut ch, "ack"),
+        json!({"t":"ack","id":"f1","ok":true})
+    );
+    assert_eq!(env.fake.fits(), [(12, Some((64, 40)))]);
+    // out of range is clamped; a refresh reaches the source again (lease)
+    put(
+        &mut ch,
+        json!({"t":"fit","id":"f2","pane":12,"cols":1000,"rows":1}),
+    );
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (true, ""));
+    assert_eq!(env.fake.fits().last(), Some(&(12, Some((300, 5)))));
+    put(
+        &mut ch,
+        json!({"t":"fit","id":"f3","pane":12,"cols":64,"rows":40}),
+    );
+    recv_t(&mut ch, "ack");
+    let n = env.fake.fits().len();
+    put(
+        &mut ch,
+        json!({"t":"fit","id":"f4","pane":12,"cols":64,"rows":40}),
+    );
+    recv_t(&mut ch, "ack");
+    assert_eq!(
+        env.fake.fits().len(),
+        n + 1,
+        "an unchanged fit is refreshed"
+    );
+    // half a size, a pane it does not follow (the fit rate is per second)
+    std::thread::sleep(Duration::from_millis(1050));
+    put(
+        &mut ch,
+        json!({"t":"fit","id":"f5","pane":12,"cols":64,"rows":null}),
+    );
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (false, "bad_request"));
+    put(
+        &mut ch,
+        json!({"t":"fit","id":"f6","pane":99,"cols":64,"rows":40}),
+    );
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (false, "bad_request"));
+    // release
+    put(
+        &mut ch,
+        json!({"t":"fit","id":"f7","pane":12,"cols":null,"rows":null}),
+    );
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (true, ""));
+    assert_eq!(env.fake.fits().last(), Some(&(12, None)));
+}
+
+#[test]
+fn view_devices_are_forbidden_to_fit() {
+    let env = start(|_| {});
+    let (_k, mut ch, _) = env.pair(Permission::View);
+    put(&mut ch, json!({"t":"subscribe","pane":12,"after":null}));
+    recv_t(&mut ch, "snapshot");
+    put(
+        &mut ch,
+        json!({"t":"fit","id":"f1","pane":12,"cols":64,"rows":40}),
+    );
+    let v = recv_t(&mut ch, "ack");
+    assert_eq!(
+        (ack(&v), v["id"].as_str()),
+        ((false, "forbidden"), Some("f1"))
+    );
+    assert!(env.fake.fits().is_empty());
+}
+
+#[test]
+fn a_fit_is_released_when_the_client_unsubscribes_or_disconnects() {
+    let env = start(|_| {});
+    let (_k, mut ch, _) = env.pair(Permission::Operate);
+    put(&mut ch, json!({"t":"subscribe","pane":12,"after":null}));
+    recv_t(&mut ch, "snapshot");
+    put(
+        &mut ch,
+        json!({"t":"fit","id":"f1","pane":12,"cols":64,"rows":40}),
+    );
+    recv_t(&mut ch, "ack");
+    put(&mut ch, json!({"t":"unsubscribe"}));
+    assert!(last_fit(&env, None), "{:?}", env.fake.fits());
+    // subscribing again does not bring it back
+    put(&mut ch, json!({"t":"subscribe","pane":12,"after":null}));
+    recv_t(&mut ch, "snapshot");
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(env.fake.fits().last(), Some(&(12, None)));
+    // a fit, then the connection drops
+    put(
+        &mut ch,
+        json!({"t":"fit","id":"f2","pane":12,"cols":50,"rows":30}),
+    );
+    recv_t(&mut ch, "ack");
+    assert!(last_fit(&env, Some((50, 30))));
+    drop(ch);
+    assert!(last_fit(&env, None), "{:?}", env.fake.fits());
+}
+
+#[test]
+fn several_phones_fit_to_the_smallest() {
+    let env = start(|_| {});
+    let (_k, mut a, _) = env.pair(Permission::Operate);
+    let (_k2, mut b, _) = env.pair(Permission::Operate);
+    for ch in [&mut a, &mut b] {
+        put(ch, json!({"t":"subscribe","pane":12,"after":null}));
+        recv_t(ch, "snapshot");
+    }
+    put(
+        &mut a,
+        json!({"t":"fit","id":"a","pane":12,"cols":80,"rows":24}),
+    );
+    recv_t(&mut a, "ack");
+    put(
+        &mut b,
+        json!({"t":"fit","id":"b","pane":12,"cols":60,"rows":40}),
+    );
+    recv_t(&mut b, "ack");
+    assert_eq!(env.fake.fits().last(), Some(&(12, Some((60, 24)))));
+    // the smaller one leaves: the other's size holds
+    drop(b);
+    assert!(last_fit(&env, Some((80, 24))), "{:?}", env.fake.fits());
+    put(
+        &mut a,
+        json!({"t":"fit","id":"a2","pane":12,"cols":null,"rows":null}),
+    );
+    recv_t(&mut a, "ack");
+    assert_eq!(env.fake.fits().last(), Some(&(12, None)));
 }
 
 // --- Phase 3: text ------------------------------------------------------------

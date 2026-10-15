@@ -587,6 +587,22 @@ impl EditorState {
     }
 }
 
+/// The shell's size for the window's own grid `cols` × `rows` and a phone's
+/// `fit` (columns, rows, when it was last sent): the smaller of the two in
+/// each direction while its lease of [`rift_remote::FIT_LEASE`] lasts.
+pub fn fitted_grid(
+    fit: Option<(u16, u16, std::time::Instant)>,
+    cols: usize,
+    rows: usize,
+) -> (usize, usize) {
+    match fit {
+        Some((c, r, at)) if at.elapsed() < rift_remote::FIT_LEASE => {
+            (cols.min(c as usize), rows.min(r as usize))
+        }
+        _ => (cols, rows),
+    }
+}
+
 /// One live shell + its view state.
 pub struct PaneState {
     pub session: Session,
@@ -638,6 +654,12 @@ pub struct PaneState {
     pub password_block: Option<rift_core::BlockId>,
     /// This pane's own window title (OSC 0/2): its title bar in a split.
     pub title: String,
+    /// The size a paired phone holds this pane to (columns, rows) and when
+    /// it last said so: a lease of [`rift_remote::FIT_LEASE`].
+    pub fit: Option<(u16, u16, std::time::Instant)>,
+    /// The window's own grid at the last layout (columns, rows, cell size
+    /// in px), before any `fit`.
+    pub base_grid: Option<(usize, usize, (u16, u16))>,
 }
 
 impl PaneState {
@@ -669,7 +691,28 @@ impl PaneState {
             first_output: None,
             password_block: None,
             title: String::new(),
+            fit: None,
+            base_grid: None,
         }
+    }
+
+    /// The shell's size: the window's own grid, or the phone's where that is
+    /// smaller. The one place the two meet (layout calls it every frame).
+    pub fn fitted(&self, cols: usize, rows: usize) -> (usize, usize) {
+        fitted_grid(self.fit, cols, rows)
+    }
+
+    /// Size the shell now from the last layout's grid and the phone's fit:
+    /// for a pane that is not drawn (another tab), which layout does not
+    /// reach. Returns whether it is known how (a pane never laid out waits
+    /// for its first layout).
+    pub fn apply_fit(&mut self) -> bool {
+        let Some((cols, rows, cell)) = self.base_grid else {
+            return false;
+        };
+        let (cols, rows) = self.fitted(cols, rows);
+        self.session.resize(rift_pty::GridSize { cols, rows }, cell);
+        true
     }
 
     /// A command runs in this pane and is working (its tab and title bar
@@ -1128,5 +1171,20 @@ mod tests {
         }
         assert_eq!(super::grapheme_floor(s, 2), 1);
         assert_eq!(super::grapheme_ceil(s, 2), 4);
+    }
+
+    #[test]
+    fn a_phones_fit_shrinks_the_grid_until_its_lease_ends() {
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        // no fit, a fit in both directions, a fit larger than the window
+        assert_eq!(super::fitted_grid(None, 120, 40), (120, 40));
+        assert_eq!(super::fitted_grid(Some((64, 30, now)), 120, 40), (64, 30));
+        assert_eq!(super::fitted_grid(Some((200, 30, now)), 120, 40), (120, 30));
+        // a lease that was not refreshed for 30 s is gone (negative control:
+        // the same fit, fresh, still holds)
+        let old = now - rift_remote::FIT_LEASE - Duration::from_secs(1);
+        assert_eq!(super::fitted_grid(Some((64, 30, old)), 120, 40), (120, 40));
+        assert_eq!(super::fitted_grid(Some((64, 30, now)), 120, 40), (64, 30));
     }
 }

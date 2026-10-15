@@ -226,7 +226,7 @@ function describeShowCode(code: string, hostName: string, fallback: string): str
 export function describeCode(code: string, hostName: string, fallback: string): string {
   switch (code) {
     case "busy":
-      return "This pane is running a command. Use the keys row to talk to the program.";
+      return "This pane is running a command. Commands only run at a prompt; the command line sends text to the program.";
     case "forbidden":
       // the gateway's words when the desktop turned remote access off (server.rs)
       return fallback === "remote access is off on the desktop"
@@ -1133,6 +1133,11 @@ export class Fleet {
   /** Types text into the program running in the pane (only a gateway with `text`). */
   sendText(host: string, pane: number, text: string): Promise<ActionResult> {
     return this.operating(host) ?? this.request(host, (c) => c.text(pane, text));
+  }
+
+  /** Sizes the pane's program to the phone's view, or releases it with null (only a gateway with `fit`). */
+  sendFit(host: string, pane: number, size: { cols: number; rows: number } | null): Promise<ActionResult> {
+    return this.operating(host) ?? this.request(host, (c) => c.fit(pane, size));
   }
 
   /**

@@ -1515,66 +1515,55 @@ fn remote_sent(b: &Block) -> bool {
     }
 }
 
-/// The pane's visible screen for the remote gateway: none unless it shows
-/// the alternate screen or `force`. Colours resolve like the renderer's
-/// (the pane's theme with the program's palette changes, reverse video
-/// swapped); the theme's default foreground and background are `None`.
-/// Returns the session's output generation with it, read under the same
-/// term lock; while that is still `since`, no screen is built (`None`: the
-/// caller's is current).
-pub fn remote_screen(
-    session: &Session,
-    theme: &Theme,
-    force: bool,
-    since: Option<u64>,
-) -> (u64, Option<Option<rift_remote::Screen>>) {
-    let term = session.term.lock();
-    let generation = session
-        .generation
-        .load(std::sync::atomic::Ordering::Acquire);
-    if since == Some(generation) {
-        return (generation, None);
-    }
-    (generation, Some(screen_of(&term, theme, force)))
+/// A colour's 8-bit channels: what the wire's `rrggbb` says, and how runs
+/// compare.
+fn rgb8(c: Color) -> [u8; 3] {
+    let b = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    [b(c.r), b(c.g), b(c.b)]
 }
 
-/// [`remote_screen`] of a locked term.
-fn screen_of<T>(
-    term: &rift_pty::alacritty_terminal::term::Term<T>,
-    theme: &Theme,
-    force: bool,
-) -> Option<rift_remote::Screen> {
-    use rift_remote::protocol::Run;
-    let alt = term.mode().contains(TermMode::ALT_SCREEN);
-    if !alt && !force {
-        return None;
+fn hex8([r, g, b]: [u8; 3]) -> String {
+    format!("{r:02x}{g:02x}{b:02x}")
+}
+
+/// Rows of a term's grid as the remote gateway's text runs: colours resolve
+/// like the renderer's (`theme` is the pane's, with the program's palette
+/// changes; reverse video swapped); the theme's default foreground and
+/// background are `None`.
+struct GridRuns<'a, T> {
+    term: &'a rift_pty::alacritty_terminal::term::Term<T>,
+    theme: &'a Theme,
+    default_fg: [u8; 3],
+    default_bg: [u8; 3],
+}
+
+impl<'a, T> GridRuns<'a, T> {
+    fn new(term: &'a rift_pty::alacritty_terminal::term::Term<T>, theme: &'a Theme) -> Self {
+        GridRuns {
+            term,
+            theme,
+            default_fg: rgb8(theme.fg),
+            default_bg: rgb8(theme.bg),
+        }
     }
-    let pane = term_theme(theme, term);
-    let theme = pane.as_ref().unwrap_or(theme);
-    // 256-color slots the program redefined (OSC 4); the 16 ANSI ones and
-    // the defaults are in `theme` already (as in `render_row`)
-    let palette = |c: ansi::Color| match c {
-        ansi::Color::Indexed(i) if i >= 16 => term.colors()[i as usize]
-            .map(rgb_color)
-            .unwrap_or_else(|| resolve_color(theme, c)),
-        c => resolve_color(theme, c),
-    };
-    let g = term.grid();
-    let cols = g.columns().min(rift_remote::MAX_SCREEN_COLS as usize);
-    let rows = g.screen_lines().min(rift_remote::MAX_SCREEN_ROWS as usize);
-    // cells compare by their 8-bit colours (what the hex says); the hex
-    // text is made once per run
-    let rgb8 = |c: Color| {
-        let b = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-        [b(c.r), b(c.g), b(c.b)]
-    };
-    let hex = |[r, g, b]: [u8; 3]| format!("{r:02x}{g:02x}{b:02x}");
-    let (default_fg, default_bg) = (rgb8(theme.fg), rgb8(theme.bg));
-    // a run's style: (fg, bg, flags), `None` for a default colour
-    type Style = (Option<[u8; 3]>, Option<[u8; 3]>, u8);
-    let mut lines = Vec::with_capacity(rows);
-    for r in 0..rows {
-        let row = &g[Line(r as i32)];
+
+    /// 256-color slots the program redefined (OSC 4); the 16 ANSI ones and
+    /// the defaults are in `theme` already (as in `render_row`).
+    fn palette(&self, c: ansi::Color) -> Color {
+        match c {
+            ansi::Color::Indexed(i) if i >= 16 => self.term.colors()[i as usize]
+                .map(rgb_color)
+                .unwrap_or_else(|| resolve_color(self.theme, c)),
+            c => resolve_color(self.theme, c),
+        }
+    }
+
+    /// Grid row `line`, its first `cols` columns.
+    fn row(&self, line: Line, cols: usize) -> Vec<rift_remote::protocol::Run> {
+        use rift_remote::protocol::Run;
+        // a run's style: (fg, bg, flags), `None` for a default colour
+        type Style = (Option<[u8; 3]>, Option<[u8; 3]>, u8);
+        let row = &self.term.grid()[line];
         let mut runs: Vec<Run> = Vec::new();
         // the last run's style
         let mut style: Option<Style> = None;
@@ -1584,14 +1573,16 @@ fn screen_of<T>(
             if flags.intersects(WIDE_SPACERS) {
                 continue;
             }
-            let (mut fg, mut bg) = (palette(cell.fg), palette(cell.bg));
+            let (mut fg, mut bg) = (self.palette(cell.fg), self.palette(cell.bg));
             if flags.contains(Flags::INVERSE) {
                 std::mem::swap(&mut fg, &mut bg);
             }
+            // cells compare by their 8-bit colours (what the hex says); the
+            // hex text is made once per run
             let (fg, bg) = (rgb8(fg), rgb8(bg));
             let cell_style = (
-                (fg != default_fg).then_some(fg),
-                (bg != default_bg).then_some(bg),
+                (fg != self.default_fg).then_some(fg),
+                (bg != self.default_bg).then_some(bg),
                 [
                     (Flags::BOLD, Run::BOLD),
                     (Flags::ITALIC, Run::ITALIC),
@@ -1607,8 +1598,8 @@ fn screen_of<T>(
                 style = Some(cell_style);
                 runs.push(Run {
                     text: String::new(),
-                    fg: cell_style.0.map(hex),
-                    bg: cell_style.1.map(hex),
+                    fg: cell_style.0.map(hex8),
+                    bg: cell_style.1.map(hex8),
                     flags: cell_style.2,
                 });
             }
@@ -1636,8 +1627,97 @@ fn screen_of<T>(
                 runs.pop();
             }
         }
-        lines.push(runs);
+        runs
     }
+}
+
+/// The pane's visible screen for the remote gateway: none unless it shows
+/// the alternate screen or `force`. The alternate screen is the raw grid; a
+/// forced primary screen is Rift's own view of the pane (`styled_screen`):
+/// block headers instead of prompt echoes. Colours resolve like the
+/// renderer's (the pane's theme with the program's palette changes, reverse
+/// video swapped); the theme's default foreground and background are `None`.
+/// Returns the screen's generation with it: the session's output generation,
+/// which for the styled screen is mixed with what else changes its rows
+/// (collapsed blocks, a block's exit, cwd and branch). While that is still
+/// `since`, no screen is built (`None`: the caller's is current).
+pub fn remote_screen(
+    session: &Session,
+    theme: &Theme,
+    force: bool,
+    since: Option<u64>,
+) -> (u64, Option<Option<rift_remote::Screen>>) {
+    use std::sync::atomic::Ordering;
+    let alt = session.term.lock().mode().contains(TermMode::ALT_SCREEN);
+    if alt || !force {
+        // read under the same term lock as the grid
+        let term = session.term.lock();
+        let generation = session.generation.load(Ordering::Acquire);
+        if since == Some(generation) {
+            return (generation, None);
+        }
+        return (generation, Some(screen_of(&term, theme, force)));
+    }
+    let generation = session.generation.load(Ordering::Acquire);
+    let key = screen_key(session, generation);
+    if since == Some(key) {
+        return (key, None);
+    }
+    // the blocks lock is released before the term lock is taken
+    let hidden = filter_hidden(session, None);
+    let (blocks, clear_pad) = {
+        let store = session.blocks.lock().unwrap();
+        (store.snapshot(), store.clear_pad())
+    };
+    let scrolled = session.scrolled.load(Ordering::Acquire);
+    let term = session.term.lock();
+    (
+        key,
+        Some(styled_screen(
+            &term, theme, &blocks, clear_pad, scrolled, &hidden,
+        )),
+    )
+}
+
+/// What a styled screen depends on besides the grid: `generation` (output,
+/// resizes) mixed with the blocks' headers (collapse, exit, cwd, branch).
+fn screen_key(session: &Session, generation: u64) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    generation.hash(&mut h);
+    let store = session.blocks.lock().unwrap();
+    store.clear_pad().hash(&mut h);
+    for b in store.iter() {
+        (b.id, b.collapsed, b.restored, &b.command, &b.cwd, &b.branch).hash(&mut h);
+        match b.state {
+            BlockState::Prompt => 0u8.hash(&mut h),
+            BlockState::Running { .. } => 1u8.hash(&mut h),
+            BlockState::Done { exit, duration } => {
+                (2u8, exit, duration.as_millis()).hash(&mut h);
+            }
+        }
+    }
+    h.finish()
+}
+
+/// [`remote_screen`] of a locked term: the raw grid, only on the alternate
+/// screen or when `force`d.
+fn screen_of<T>(
+    term: &rift_pty::alacritty_terminal::term::Term<T>,
+    theme: &Theme,
+    force: bool,
+) -> Option<rift_remote::Screen> {
+    let alt = term.mode().contains(TermMode::ALT_SCREEN);
+    if !alt && !force {
+        return None;
+    }
+    let pane = term_theme(theme, term);
+    let theme = pane.as_ref().unwrap_or(theme);
+    let runs = GridRuns::new(term, theme);
+    let g = term.grid();
+    let cols = g.columns().min(rift_remote::MAX_SCREEN_COLS as usize);
+    let rows = g.screen_lines().min(rift_remote::MAX_SCREEN_ROWS as usize);
+    let lines = (0..rows).map(|r| runs.row(Line(r as i32), cols)).collect();
     let cursor = term.grid().cursor.point;
     let shown = term.mode().contains(TermMode::SHOW_CURSOR)
         && (cursor.line.0 as usize) < rows
@@ -1649,6 +1729,206 @@ fn screen_of<T>(
         cursor: shown.then_some([cursor.line.0 as u16, cursor.column.0 as u16]),
         lines,
     })
+}
+
+/// The primary screen as Rift draws it, for a phone: the display list the
+/// desktop renders (`build_display_list_filtered`: prompt echoes replaced
+/// by a header row, collapsed output skipped, stray blank lines left out,
+/// the live prompt hidden as while the editor owns the line, soft-`clear`
+/// padding), its last `rows` lines, bottom-anchored. The alternate screen
+/// stays the raw grid.
+fn styled_screen(
+    term: &rift_pty::alacritty_terminal::term::Term<EventProxy>,
+    theme: &Theme,
+    blocks: &[Block],
+    clear_pad: Option<u64>,
+    scrolled: u64,
+    hidden: &std::collections::HashSet<u64>,
+) -> Option<rift_remote::Screen> {
+    if term.mode().contains(TermMode::ALT_SCREEN) {
+        return screen_of(term, theme, true);
+    }
+    let pane = term_theme(theme, term);
+    let theme = pane.as_ref().unwrap_or(theme);
+    let g = term.grid();
+    let cols = g.columns().min(rift_remote::MAX_SCREEN_COLS as usize);
+    let rows = g.screen_lines().min(rift_remote::MAX_SCREEN_ROWS as usize);
+    let history = g.history_size() as u64;
+    let display = build_display_list_filtered(
+        blocks,
+        scrolled,
+        g.screen_lines(),
+        history,
+        false,
+        true,
+        clear_pad,
+        rows,
+        Some(live_end(term, scrolled)),
+        hidden,
+    );
+    // the editor owns the cursor at a prompt, which the phone does not show
+    let at_prompt = matches!(blocks.last().map(|b| &b.state), Some(BlockState::Prompt));
+    let cursor = term.grid().cursor.point;
+    let cursor_abs = (term.mode().contains(TermMode::SHOW_CURSOR) && !at_prompt)
+        .then(|| scrolled + cursor.line.0.max(0) as u64);
+    let runs = GridRuns::new(term, theme);
+    let (lines, cursor_row) = styled_rows(
+        &display,
+        rows,
+        blocks,
+        theme,
+        cols,
+        |abs| {
+            let rel = abs as i64 - scrolled as i64;
+            if rel < -(history as i64) || rel >= g.screen_lines() as i64 {
+                Vec::new()
+            } else {
+                runs.row(Line(rel as i32), cols)
+            }
+        },
+        cursor_abs,
+    );
+    Some(rift_remote::Screen {
+        cols: cols as u16,
+        rows: rows as u16,
+        alt: false,
+        cursor: cursor_row
+            .filter(|_| cursor.column.0 < cols)
+            .map(|r| [r as u16, cursor.column.0 as u16]),
+        lines,
+    })
+}
+
+/// The last `rows` lines of `display` as screen rows (a header for each
+/// block, `grid_row` for a grid line, blank for padding), and the row of
+/// `cursor_abs` among them. Pure: the part of [`styled_screen`] that does
+/// not read a term.
+fn styled_rows(
+    display: &[DisplayLine],
+    rows: usize,
+    blocks: &[Block],
+    theme: &Theme,
+    cols: usize,
+    mut grid_row: impl FnMut(u64) -> Vec<rift_remote::protocol::Run>,
+    cursor_abs: Option<u64>,
+) -> (Vec<Vec<rift_remote::protocol::Run>>, Option<usize>) {
+    let start = display.len().saturating_sub(rows);
+    // fewer lines than rows: blank ones above
+    let mut lines = vec![Vec::new(); rows.saturating_sub(display.len())];
+    let lead = lines.len();
+    let mut cursor = None;
+    for (i, dl) in display[start..].iter().enumerate() {
+        lines.push(match dl {
+            DisplayLine::Grid(abs) => {
+                if cursor_abs == Some(*abs) {
+                    cursor = Some(lead + i);
+                }
+                grid_row(*abs)
+            }
+            DisplayLine::Header(bi) => header_runs(&blocks[*bi], theme, cols),
+            DisplayLine::Pad => Vec::new(),
+        });
+    }
+    (lines, cursor)
+}
+
+/// A block's header as one `cols`-wide row, as the desktop draws it
+/// (`render_header`): chevron, the command (bold, bright), `cwd git:(branch)`
+/// or the hidden-lines note of a collapsed block, and at the right the state
+/// badge (`running`, `✓ 0`, `✕ n`) with the duration of a finished block. The command gives way
+/// first (cut with `…`); the context is left out when it does not fit whole.
+fn header_runs(block: &Block, theme: &Theme, cols: usize) -> Vec<rift_remote::protocol::Run> {
+    use rift_remote::protocol::Run;
+    let (badge_color, badge) = match block.state {
+        BlockState::Running { .. } => (theme.warning, "running".to_string()),
+        BlockState::Done { exit: Some(0), .. } => (theme.success, "✓ 0".to_string()),
+        BlockState::Done { exit: Some(n), .. } => (theme.error, format!("✕ {n}")),
+        BlockState::Done { exit: None, .. } => (theme.text_muted, "—".to_string()),
+        BlockState::Prompt => return Vec::new(),
+    };
+    let duration = match block.state {
+        BlockState::Done { duration, .. } if block.restored => {
+            format!("restored · {}", format_duration(duration))
+        }
+        BlockState::Done { duration, .. } => format_duration(duration),
+        // no clock: the row would change every second the command runs
+        BlockState::Running { .. } | BlockState::Prompt => String::new(),
+    };
+    let right = if duration.is_empty() {
+        badge.clone()
+    } else {
+        format!("{badge} {duration}")
+    };
+    let n = |s: &str| s.chars().count();
+    // the badge needs room beside at least a chevron and a few command
+    // characters; on a very narrow screen the command alone stays
+    let right_w = if cols >= n(&right) + 8 { n(&right) } else { 0 };
+    let left_w = cols.saturating_sub(right_w + usize::from(right_w > 0));
+    let chevron = if block.collapsed { "▸ " } else { "▾ " };
+    let mut cmd = if block.command.is_empty() {
+        "—".to_string()
+    } else {
+        block.command.replace('\n', " ⏎ ")
+    };
+    let room = left_w.saturating_sub(n(chevron)).max(1);
+    if n(&cmd) > room {
+        cmd = cmd.chars().take(room - 1).collect::<String>() + "…";
+    }
+    let context = if block.collapsed
+        && let Some((s, e)) = block.output_range()
+    {
+        let lines = e - s;
+        Some((
+            format!("{lines} line{} hidden", if lines == 1 { "" } else { "s" }),
+            theme.text_muted,
+        ))
+    } else if block.cwd.is_some() || block.branch.is_some() {
+        let mut ctx = block
+            .cwd
+            .as_deref()
+            .map(super::editor::shorten_home)
+            .unwrap_or_default();
+        if let Some(br) = &block.branch {
+            if !ctx.is_empty() {
+                ctx.push(' ');
+            }
+            ctx.push_str(&format!("git:({br})"));
+        }
+        Some((ctx, theme.text_dim))
+    } else {
+        None
+    };
+    let style = |text: String, color: Color, flags: u8| Run {
+        text,
+        fg: Some(hex8(rgb8(color))),
+        bg: None,
+        flags,
+    };
+    let mut runs = vec![
+        style(chevron.into(), theme.text_muted, 0),
+        style(cmd.clone(), theme.text_bright, Run::BOLD),
+    ];
+    let mut used = n(chevron) + n(&cmd);
+    if let Some((ctx, color)) = context
+        && used + 2 + n(&ctx) <= left_w
+    {
+        used += 2 + n(&ctx);
+        runs.push(style(format!("  {ctx}"), color, 0));
+    }
+    if right_w > 0 {
+        let pad = cols.saturating_sub(used + right_w);
+        runs.push(Run {
+            text: " ".repeat(pad),
+            fg: None,
+            bg: None,
+            flags: 0,
+        });
+        runs.push(style(badge.clone(), badge_color, 0));
+        if !duration.is_empty() {
+            runs.push(style(format!(" {duration}"), theme.text_muted, 0));
+        }
+    }
+    runs
 }
 
 /// Blocks of `session` for the remote gateway: commands that ran or run (a
@@ -3618,5 +3898,158 @@ mod tests {
         assert_eq!(d.len(), 13); // 10 history + 3 screen
         assert_eq!(d[0], DisplayLine::Grid(0));
         assert_eq!(d[12], DisplayLine::Grid(12));
+    }
+
+    /// The text of a screen row.
+    fn row_text(row: &[rift_remote::protocol::Run]) -> String {
+        row.iter().map(|r| r.text.as_str()).collect()
+    }
+
+    /// The pane `user@host % ls` ran in: the echo (0), two output lines, then
+    /// the live prompt (3) of the next block.
+    fn styled_fixture() -> (Vec<Block>, Vec<&'static str>) {
+        let mut done_block = block(1, 0, Some(1), Some(3), done(), false);
+        done_block.command = "ls".into();
+        done_block.cwd = Some("/work/rift".into());
+        done_block.branch = Some("main".into());
+        (
+            vec![
+                done_block,
+                block(2, 3, None, None, BlockState::Prompt, false),
+            ],
+            vec!["user@host % ls", "a.txt", "b.txt", "user@host % "],
+        )
+    }
+
+    fn styled(
+        blocks: &[Block],
+        lines: &[&str],
+        hide_prompt: bool,
+        cursor_abs: Option<u64>,
+    ) -> (
+        Vec<String>,
+        Option<usize>,
+        Vec<Vec<rift_remote::protocol::Run>>,
+    ) {
+        let d = build_display_list_filtered(
+            blocks,
+            0,
+            6,
+            0,
+            false,
+            hide_prompt,
+            None,
+            6,
+            Some(4),
+            &std::collections::HashSet::new(),
+        );
+        let (rows, cursor) = styled_rows(
+            &d,
+            6,
+            blocks,
+            &Theme::default(),
+            40,
+            |abs| {
+                vec![run(
+                    lines.get(abs as usize).copied().unwrap_or(""),
+                    None,
+                    None,
+                    0,
+                )]
+            },
+            cursor_abs,
+        );
+        (rows.iter().map(|r| row_text(r)).collect(), cursor, rows)
+    }
+
+    #[test]
+    fn a_styled_screen_shows_a_header_not_the_prompt_echo() {
+        let (blocks, lines) = styled_fixture();
+        let (text, _, rows) = styled(&blocks, &lines, true, None);
+        // bottom-anchored like the desktop: blank pads, header, output; the
+        // live prompt is hidden (the editor owns it)
+        assert_eq!(text.len(), 6);
+        assert!(text[..3].iter().all(String::is_empty), "{text:?}");
+        assert_eq!(&text[4..], ["a.txt", "b.txt"]);
+        let header = &text[3];
+        assert!(
+            header.starts_with("▾ ls  /work/rift git:(main)"),
+            "{header:?}"
+        );
+        assert!(header.ends_with("✓ 0 1ms"), "{header:?}");
+        assert_eq!(header.chars().count(), 40, "{header:?}");
+        assert!(!text.iter().any(|t| t.contains("user@host")), "{text:?}");
+        // the command is bold in the bright colour; the badge takes the
+        // exit colour
+        let theme = Theme::default();
+        let cmd = &rows[3][1];
+        assert_eq!(
+            (cmd.text.as_str(), cmd.flags, cmd.fg.as_deref()),
+            ("ls", 1, Some(hex8(rgb8(theme.text_bright)).as_str()))
+        );
+        let badge = rows[3].iter().find(|r| r.text == "✓ 0").unwrap();
+        assert_eq!(
+            badge.fg.as_deref(),
+            Some(hex8(rgb8(theme.success)).as_str())
+        );
+    }
+
+    #[test]
+    fn a_styled_screen_negative_controls() {
+        let (blocks, lines) = styled_fixture();
+        // the prompt is shown when the editor does not own it
+        let (text, _, _) = styled(&blocks, &lines, false, None);
+        assert_eq!(text[5], "user@host % ");
+        // and with no block anchors the echo is the raw grid line
+        let raw: Vec<Block> = Vec::new();
+        let (text, _, _) = styled(&raw, &lines, true, None);
+        assert!(text.iter().any(|t| t == "user@host % ls"), "{text:?}");
+        assert!(!text.iter().any(|t| t.starts_with("▾")), "{text:?}");
+    }
+
+    #[test]
+    fn a_styled_screen_maps_the_cursor_to_its_display_row() {
+        let (blocks, lines) = styled_fixture();
+        // a program's cursor on the second output line: grid line 2 is row 5
+        let (_, cursor, _) = styled(&blocks, &lines, true, Some(2));
+        assert_eq!(cursor, Some(5));
+        // on a line the display skips (the hidden prompt): none
+        let (_, cursor, _) = styled(&blocks, &lines, true, Some(3));
+        assert_eq!(cursor, None);
+        let (_, cursor, _) = styled(&blocks, &lines, false, Some(3));
+        assert_eq!(cursor, Some(5));
+    }
+
+    #[test]
+    fn a_styled_header_fits_its_width_and_marks_collapsed_and_failed_blocks() {
+        let theme = Theme::default();
+        let mut b = block(
+            1,
+            0,
+            Some(1),
+            Some(5),
+            BlockState::Done {
+                exit: Some(2),
+                duration: StdDuration::from_millis(1500),
+            },
+            true,
+        );
+        b.command = "cargo test --workspace -- --nocapture".into();
+        let cols = 30;
+        let h = header_runs(&b, &theme, cols);
+        let text = row_text(&h);
+        assert_eq!(text.chars().count(), cols, "{text:?}");
+        assert!(text.starts_with("▸ cargo test"), "{text:?}");
+        assert!(
+            text.contains('…') && text.ends_with("✕ 2 1.50s"),
+            "{text:?}"
+        );
+        // the hidden-lines note shows where there is room
+        b.command = "ls".into();
+        let text = row_text(&header_runs(&b, &theme, 60));
+        assert!(text.contains("  4 lines hidden"), "{text:?}");
+        // a screen too narrow for the badge keeps the command alone
+        let text = row_text(&header_runs(&b, &theme, 6));
+        assert_eq!(text, "▸ ls");
     }
 }

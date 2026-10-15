@@ -401,6 +401,16 @@ export class RiftClient {
   }
 
   /**
+   * Sizes the pane's program to `cols` x `rows` (null: release); returns the `ack` id, or null
+   * when not connected. Not paced: it is a state, re-sent while held (feature `fit`).
+   */
+  fit(pane: number, size: { cols: number; rows: number } | null): string | null {
+    if (!this.authed) return null;
+    const id = `f${++this.idN}`;
+    return this.send({ t: "fit", id, pane, cols: size?.cols ?? null, rows: size?.rows ?? null }) ? id : null;
+  }
+
+  /**
    * Milliseconds until a `keys` / `text` message would go out (0: at once). Input that can wait
    * (the terminal view's) waits for this, merging what is typed meanwhile.
    */

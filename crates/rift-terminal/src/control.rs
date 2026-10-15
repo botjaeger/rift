@@ -196,6 +196,19 @@ pub enum Request {
         device: String,
         kind: rift_remote::protocol::OpenKind,
     },
+    /// A paired phone's size for `pane` (the gateway's `fit`, already the
+    /// smallest of its phones and clamped): the pane's shell is sized to the
+    /// smaller of the window's own grid and `cols` × `rows` until released
+    /// (`null` both) or until `FIT_LEASE` passes without the gateway sending
+    /// it again. Accepted only while `remote_access` is on, like
+    /// `remote-input`.
+    RemoteFit {
+        pane: u64,
+        #[serde(default)]
+        cols: Option<u16>,
+        #[serde(default)]
+        rows: Option<u16>,
+    },
     /// Sent by the remote gateway whenever its `status.json` changed (it
     /// started, a phone connected or left): the window re-reads it at once
     /// (the tab-bar chip), even when idle. Read-only.
@@ -226,6 +239,7 @@ impl Request {
             | Request::Complete { .. }
             | Request::RemoteStatus
             | Request::RemoteInput { .. }
+            | Request::RemoteFit { .. }
             | Request::RemoteOpen { .. } => Level::Remote,
             Request::List | Request::Focus { .. } | Request::PrepareRestart { .. } => {
                 Level::Navigate
@@ -938,6 +952,8 @@ mod tests {
         for line in [
             r#"{"cmd":"remote-input","pane":12,"device":"d","keys":["ctrl+c","enter"]}"#,
             r#"{"cmd":"remote-input","pane":12,"device":"Sam's iPhone","text":":wq"}"#,
+            r#"{"cmd":"remote-fit","pane":12,"cols":64,"rows":40}"#,
+            r#"{"cmd":"remote-fit","pane":12,"cols":null,"rows":null}"#,
             r#"{"cmd":"screen","pane":12,"force":false}"#,
             r#"{"cmd":"screen","pane":12,"force":true,"since":41}"#,
             r#"{"cmd":"output","pane":12,"block":86,"from":0,"limit":500}"#,

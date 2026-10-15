@@ -69,6 +69,7 @@ describe("client fixtures", () => {
       "complete",
       "diff",
       "dirs",
+      "fit",
       "forget",
       "keys",
       "notify",
@@ -85,7 +86,7 @@ describe("client fixtures", () => {
       "unsubscribe",
       "visible",
     ]);
-    expect(client).toHaveLength(26);
+    expect(client).toHaveLength(28);
   });
 
   it.each(client.map((f) => [f.name, f.json] as const))("%s is a ClientMsg", (_name, json) => {
@@ -202,6 +203,11 @@ describe("client message checks", () => {
     ["empty text", { t: "text", id: "x1", pane: 1, text: "" }],
     ["text over 1 KiB", { t: "text", id: "x1", pane: 1, text: "é".repeat(513) }],
     ["text without an id", { t: "text", pane: 1, text: "a" }],
+    ["fit with only cols", { t: "fit", id: "f1", pane: 1, cols: 64, rows: null }],
+    ["fit with no size", { t: "fit", id: "f1", pane: 1 }],
+    ["fit of zero columns", { t: "fit", id: "f1", pane: 1, cols: 0, rows: 10 }],
+    ["fit with a fractional size", { t: "fit", id: "f1", pane: 1, cols: 64.5, rows: 10 }],
+    ["fit without an id", { t: "fit", pane: 1, cols: 64, rows: 40 }],
     ["screen with an unknown mode", { t: "screen", pane: 1, mode: "always" }],
     ["screen without a pane", { t: "screen", mode: "on" }],
     ["output asking for no lines", { t: "output", id: "o1", pane: 1, block: 2, from: 0, limit: 0 }],
@@ -209,6 +215,11 @@ describe("client message checks", () => {
     ["output from a negative line", { t: "output", id: "o1", pane: 1, block: 2, from: -1, limit: 10 }],
   ])("rejects %s", (_name, msg) => {
     expect(isClientMsg(msg)).toBe(false);
+  });
+
+  it("fit: a size, or both null to release", () => {
+    expect(isClientMsg({ t: "fit", id: "f1", pane: 12, cols: 64, rows: 40 })).toBe(true);
+    expect(isClientMsg({ t: "fit", id: "f2", pane: 12, cols: null, rows: null })).toBe(true);
   });
 
   it("text: one line without control characters, at most 1 KiB of UTF-8", () => {

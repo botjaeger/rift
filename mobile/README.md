@@ -137,14 +137,25 @@ card cannot answer (a password, other input, a view-only device), and from an al
   the header. While a full-screen program runs (the alternate screen: vim, htop, less) the pane
   shows its screen ("Keys go straight to htop. When it quits, the pane shows blocks again."),
   the keys wrapped under it and "Show keyboard"; when it quits the blocks come back. **Terminal
-  view** shows the pane's screen whatever runs, until pressed again (at a prompt the command line
-  stays under the screen). Both screens have **Pinch to zoom · double-tap to reset** with **−** and
-  **+** and the percentage (60 to 200 %, kept until the app closes).
+  view** shows the pane's screen whatever runs (at a prompt the command line stays under the
+  screen). It is on to start with for a pane that runs a coding agent (Claude Code, Codex), which
+  never uses the alternate screen, and off for a plain shell; the button turns it on or off for
+  that pane until the screen closes. Both screens have **Pinch to zoom · double-tap to reset**
+  with **−** and **+** and the percentage (60 to 200 %, kept until the app closes). With a
+  computer whose Rift has `fit` and a device that may operate, the zoom also reflows the
+  program: the view tells the computer how many columns and rows fit at 11 pt times the zoom
+  (after the zoom settles, again every 10 s, released when the screen closes), the text is drawn
+  at that size, and the program's lines wrap to the phone's width. Without `fit` the text shrinks
+  to the program's columns as before.
   Above the command line: the folder chip (path) and the branch chip (with a dot for uncommitted
   changes) then suggestions (the desktop's completions for what is typed and this pane's history,
   feature `complete`; else its recent commands); the folder chip opens the folder, branch and
   changed-files menus. Under them **⌃**, which shows the key row above the chips, and the round
-  field with its run button (Return runs too). While the keyboard is up the key row starts with
+  field with its run button (Return runs too). While a program runs (Claude Code, a build) the field
+  talks to it: "Message for claude", a **Send** button, and Return sends the line as typed text
+  and then Return as a key, a second request so the program reads it as a message (feature
+  `text`; an older Rift is told to update; authentication as for any key that submits; no
+  Confirm sheet). While the keyboard is up the key row starts with
   Hide keyboard and ends with **Edit keys**. The keyboard's smart dashes and quotes are undone in
   the command line.
 - **Block cards** (the P3 board): a thin border in the state's colour, no left edge.

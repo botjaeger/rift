@@ -319,6 +319,24 @@ impl Source for ControlSource {
         }
     }
 
+    fn fit(&self, pane: u64, size: Option<(u16, u16)>) -> Result<(), InputError> {
+        // a background shell has no window to size it for
+        if is_background(pane) {
+            return Ok(());
+        }
+        let req = Request::RemoteFit {
+            pane: local_pane(pane),
+            cols: size.map(|s| s.0),
+            rows: size.map(|s| s.1),
+        };
+        match self.ask(pane, &req) {
+            Ok(Some(r)) if r.ok => Ok(()),
+            Ok(Some(r)) => Err(input_error(r.error.as_deref().unwrap_or_default())),
+            Ok(None) => Err(InputError::NoPane),
+            Err(e) => Err(InputError::Unavailable(e.to_string())),
+        }
+    }
+
     fn open(&self, pane: u64, device: &str, kind: OpenKind) -> Result<u64, InputError> {
         if is_background(pane) {
             let id = self.background.open(pane, kind)?;

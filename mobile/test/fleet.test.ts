@@ -961,6 +961,16 @@ describe("Fleet Phase 3", () => {
     expect(await p).toMatchObject({ ok: false, code: "busy" });
   });
 
+  it("fit goes out and resolves on ack; a release sends nulls", async () => {
+    const t = await phase3();
+    const p = t.fleet.sendFit(GW_KEY, 12, { cols: 64, rows: 40 });
+    expect(t.last().sent.at(-1)).toEqual({ t: "fit", id: "f1", pane: 12, cols: 64, rows: 40 });
+    t.last().recv({ t: "ack", id: "f1", ok: true });
+    expect(await p).toMatchObject({ ok: true });
+    void t.fleet.sendFit(GW_KEY, 12, null);
+    expect(t.last().sent.at(-1)).toEqual({ t: "fit", id: "f2", pane: 12, cols: null, rows: null });
+  });
+
   it("loads earlier output 500 lines at a time, before the tail", async () => {
     const t = await phase3();
     const p = t.fleet.loadEarlier(86);

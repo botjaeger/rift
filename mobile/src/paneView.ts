@@ -4,8 +4,9 @@
 
 import { replyChoice } from "./answer";
 import { agoShort, paneName, programName } from "./now";
-import type { Block, Pane, Tab, Waiting } from "./protocol/types";
+import { textProblem, type Block, type Pane, type Tab, type Waiting } from "./protocol/types";
 import { tildePath } from "./chips";
+import { CELL_RATIO, LINE_RATIO } from "./terminal";
 import { formatClock } from "./ui/format";
 
 // --- the terminal view's zoom ---------------------------------------------------------------
@@ -38,6 +39,64 @@ export const isDoubleTap = (prev: number | null, now: number) => prev !== null &
 
 /** The zoom the app keeps for its run: every terminal view starts at it. */
 export const keptZoom = { value: 1 };
+
+// --- fitting the program to the phone's view (feature `fit`) ------------------------------------
+
+/** The font size at 100 % zoom while the program is fitted to the view; the zoom scales it. */
+export const FIT_BASE_FONT = 11;
+/** The desktop's bounds for a fit (it clamps to them too). */
+export const FIT_COLS = { min: 20, max: 300 };
+export const FIT_ROWS = { min: 5, max: 120 };
+/** The desktop drops a fit not sent again within 30 s; it is re-sent this often (milliseconds). */
+export const FIT_REFRESH_MS = 10_000;
+/** A fit waits this long (milliseconds) after the size stops changing (a pinch, a rotation). */
+export const FIT_DEBOUNCE_MS = 300;
+
+/** The font size of the fitted grid: the base size scaled by the zoom, in tenths of a point. */
+export const fitFontSize = (zoom: number) => Math.round(FIT_BASE_FONT * clampZoom(zoom) * 10) / 10;
+
+/**
+ * The columns and rows that fill `width` x `height` (points, padding already taken off) at
+ * `fontSize`, within the desktop's bounds; null before the view is measured.
+ */
+export function fitSize(width: number, height: number, fontSize: number): { cols: number; rows: number } | null {
+  if (!(width > 0) || !(height > 0) || !(fontSize > 0)) return null;
+  const cols = Math.floor(width / (fontSize * CELL_RATIO));
+  const rows = Math.floor(height / Math.round(fontSize * LINE_RATIO));
+  return {
+    cols: Math.min(FIT_COLS.max, Math.max(FIT_COLS.min, cols)),
+    rows: Math.min(FIT_ROWS.max, Math.max(FIT_ROWS.min, rows)),
+  };
+}
+
+// --- the Terminal view's default ------------------------------------------------------------
+
+/** Whether the pane runs a coding agent (Claude Code, Codex, …): a TUI that never uses the alternate screen. */
+export function runsAgent(p: Pane): boolean {
+  if (!p.running && !p.job) return false;
+  return p.running?.title !== undefined || programName(p) === "claude";
+}
+
+/**
+ * Whether the Terminal view is on: the user's choice for this pane while the screen is open
+ * (null: none), else on for a pane that runs an agent and off for a plain shell.
+ */
+export const terminalViewOn = (choice: boolean | null, agent: boolean) => choice ?? agent;
+
+// --- the command line while a program runs -------------------------------------------------------
+
+/**
+ * What Return does in the command line of a pane that runs a program: the draft goes to the
+ * program as text, then Return as its own key. `message` null: nothing to send (an empty line).
+ */
+export function programSend(draft: string, canType: boolean): { ok: true; text: string } | { ok: false; message: string | null } {
+  if (draft.trim() === "") return { ok: false, message: null };
+  if (!canType) return { ok: false, message: "Rift on this computer is too old to type into programs. Update it." };
+  const problem = textProblem(draft);
+  if (problem === "too_long") return { ok: false, message: "That is too long to send at once." };
+  if (problem) return { ok: false, message: "The message must be one line." };
+  return { ok: true, text: draft };
+}
 
 // --- the picker and the Panes sheet ---------------------------------------------------------
 

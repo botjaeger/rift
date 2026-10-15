@@ -6404,6 +6404,8 @@ impl App {
                 pr.rect
             };
             let text_area: (f32, f32);
+            // the window's own grid, before a phone's `fit`
+            let desktop_grid: (usize, usize);
             let grid = {
                 // inline grid_for (self is destructured)
                 let rect = body;
@@ -6433,7 +6435,10 @@ impl App {
                 // input at the top: the grid starts below the editor zone
                 let bottom_up =
                     !input_top && config_ref.blocks_start == rift_core::BlocksStart::Bottom;
+                let cols = (usable_w / cell_w).floor().max(2.0) as usize;
                 let rows = (usable_h / line_h).floor().max(2.0) as usize;
+                desktop_grid = (cols, rows);
+                let (cols, rows) = pane.fitted(cols, rows);
                 let y = if editor_vis && input_top {
                     y + editor_h - (if split { PANE_PAD } else { TOP_PAD - 4.0 })
                 } else if !editor_vis && bottom_up {
@@ -6451,7 +6456,7 @@ impl App {
                     cell_w,
                     line_h,
                     font_size,
-                    cols: (usable_w / cell_w).floor().max(2.0) as usize,
+                    cols,
                     rows,
                     ligatures,
                     cursor_style,
@@ -6473,6 +6478,7 @@ impl App {
                 },
                 cell_px,
             );
+            pane.base_grid = Some((desktop_grid.0, desktop_grid.1, cell_px));
             pane.text_area = text_area;
             pane.layout_window = (w, h);
             let view = match docked_h.filter(|_| is_active_pane && editor_vis) {
@@ -12941,6 +12947,7 @@ impl App {
                 text,
             } => self.remote_input(pane, &device, command, keys, text),
             Request::RemoteOpen { pane, device, kind } => self.remote_open(pane, &device, kind),
+            Request::RemoteFit { pane, cols, rows } => self.remote_fit(pane, cols, rows),
             Request::RemoteStatus => {
                 // the gateway's status changed: the chip follows at once
                 self.remote.notices += 1;
@@ -14336,6 +14343,49 @@ impl App {
     /// program (else `busy`, also while a submitted command waits for the
     /// shell) and is typed into it. The desktop shows a toast naming the
     /// device (never the text).
+    /// A paired phone's size for `pane` (`remote-fit`): held for
+    /// `FIT_LEASE` (the gateway sends it again to keep it), `None` releases.
+    fn remote_fit(
+        &mut self,
+        pane: u64,
+        cols: Option<u16>,
+        rows: Option<u16>,
+    ) -> crate::control::Response {
+        use crate::control::Response;
+        if !self.config.remote_access {
+            return Response::error("remote access is off");
+        }
+        let size = match (cols, rows) {
+            (Some(c), Some(r)) => Some((
+                c.clamp(*rift_remote::FIT_COLS.start(), *rift_remote::FIT_COLS.end()),
+                r.clamp(*rift_remote::FIT_ROWS.start(), *rift_remote::FIT_ROWS.end()),
+            )),
+            (None, None) => None,
+            _ => {
+                return Response::error("bad request: cols and rows are both numbers or both null");
+            }
+        };
+        let active = self.active;
+        let Some(i) = self.tabs.iter().position(|t| t.pane(pane).is_some()) else {
+            return Response::error("no such pane");
+        };
+        if let Some(p) = self.tabs[i].pane_mut(pane) {
+            p.fit = size.map(|(c, r)| (c, r, Instant::now()));
+            // layout sizes the panes it draws; one in another tab is sized now
+            if i != active {
+                p.apply_fit();
+            }
+        }
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        Response {
+            ok: true,
+            pane: Some(pane),
+            ..Default::default()
+        }
+    }
+
     fn remote_input(
         &mut self,
         pane: u64,
@@ -16407,6 +16457,21 @@ impl ApplicationHandler<UserEvent> for App {
         // Settings page and its countdown, the gateway's start)
         if self.remote_polling() {
             deadlines.push(self.remote.polled.map_or(now, |t| t + REMOTE_POLL));
+        }
+        // a phone's pane size whose lease ran out: the shell goes back to the
+        // window's own size
+        for tab in &mut self.tabs {
+            for p in &mut tab.panes {
+                let Some((_, _, at)) = p.fit else { continue };
+                let due = at + rift_remote::FIT_LEASE;
+                if now >= due {
+                    p.fit = None;
+                    p.apply_fit();
+                    repaint = true;
+                } else {
+                    deadlines.push(due);
+                }
+            }
         }
         // status toast
         if let Some((_, at)) = &self.toast {

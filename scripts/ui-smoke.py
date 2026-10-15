@@ -1857,11 +1857,14 @@ settings_remote = ["key cmd+,", "wait 300", *["key down"] * 7, "wait 600"]
 off = remote_run("off", remote_base, [
     "wait 500", *rin("off", "cmd.json", input_cmd), "wait 300",
     *rin("off", "meta.json", '{"cmd":"blocks","pane":PANE,"meta":true}'),
+    *rin("off", "fit.json", '{"cmd":"remote-fit","pane":PANE,"cols":40,"rows":12}'),
     f"dump {rm}/off/off.txt"])
 refused = answer(off, "cmd.json")
 assert refused == {"ok": False, "error": "remote access is off"}, refused
 assert "remote-ok" not in (off / "off.txt").read_text()
 assert answer(off, "meta.json")["ok"] is True
+assert answer(off, "fit.json") == {"ok": False, "error": "remote access is off"}, \
+    answer(off, "fit.json")
 assert "remote_access=false control_level=Navigate" in (off / "off.txt").read_text()
 assert not (off / "data/rift/remote").exists(), "a gateway started with remote access off"
 
@@ -1928,6 +1931,14 @@ on_run = remote_run("on", on_config, [
     f"{shlex.quote(str(on / 'since.json'))} {shlex.quote(str(on / 'screen.json'))} >/dev/null 2>&1 &",
     f"wait_file {on / 'since.json'}.done 15000",
     *rin("on", "noscreen.json", '{"cmd":"screen","pane":PANE}'),
+    # a phone's fit: the shell is sized to the smaller of the window's grid
+    # and the phone's; half a size is refused; the release gives it back
+    *rin("on", "fit.json", '{"cmd":"remote-fit","pane":PANE,"cols":40,"rows":12}'), "wait 700",
+    *rin("on", "fit-screen.json", '{"cmd":"screen","pane":PANE,"force":true}'),
+    *rin("on", "fit-bad.json", '{"cmd":"remote-fit","pane":PANE,"cols":40}'),
+    *rin("on", "fit-off.json", '{"cmd":"remote-fit","pane":PANE,"cols":null,"rows":null}'),
+    "wait 700",
+    *rin("on", "fit-back.json", '{"cmd":"screen","pane":PANE,"force":true}'),
     *rin("on", "noblock.json", '{"cmd":"output","pane":PANE,"block":999999,"from":0,"limit":5}'),
     *rin("on", "keys.json",
          '{"cmd":"remote-input","pane":PANE,"device":"Test Phone","keys":["ctrl+c"]}'),
@@ -1993,6 +2004,19 @@ assert answer(on, "since.json") == {"ok": True, "pane": 1, "generation": shown["
                                     "unchanged": True}, answer(on, "since.json")
 screen_text = "\n".join("".join(r[0] for r in row) for row in shown["screen"]["lines"])
 assert "typed-secret^[b" in screen_text, screen_text
+# the forced screen is Rift's own view: a header row for the running command,
+# not the shell's prompt echo
+shown_rows = ["".join(r[0] for r in row) for row in shown["screen"]["lines"]]
+header_rows = [t for t in shown_rows if t.startswith("▾ sleep 30")]
+assert len(header_rows) == 1 and header_rows[0].rstrip().endswith("running"), shown_rows
+assert sum("sleep 30" in t for t in shown_rows) == 1, shown_rows
+fit_screen = answer(on, "fit-screen.json")["screen"]
+assert (fit_screen["cols"], fit_screen["rows"]) == (40, 12), fit_screen
+assert all(len("".join(r[0] for r in row)) <= 40 for row in fit_screen["lines"]), fit_screen
+assert answer(on, "fit-bad.json")["ok"] is False, answer(on, "fit-bad.json")
+assert answer(on, "fit-off.json")["ok"] is True, answer(on, "fit-off.json")
+fit_back = answer(on, "fit-back.json")["screen"]
+assert fit_back["cols"] > 40 and fit_back["rows"] > 12, fit_back
 noscreen = answer(on, "noscreen.json")
 assert noscreen == {"ok": True, "pane": 1, "generation": noscreen.get("generation")} \
     and "screen" not in noscreen, noscreen

@@ -616,6 +616,16 @@ describe("RiftClient Phase 3", () => {
     expect(t.client.text(12, "a")).toBeNull();
   });
 
+  it("fit goes out with its own id, a size or a release, unpaced", () => {
+    const t = connected();
+    expect(t.client.fit(12, { cols: 64, rows: 40 })).toBe("f1");
+    expect(t.last().sent.at(-1)).toEqual({ t: "fit", id: "f1", pane: 12, cols: 64, rows: 40 });
+    expect(t.client.fit(12, null)).toBe("f2");
+    expect(t.last().sent.at(-1)).toEqual({ t: "fit", id: "f2", pane: 12, cols: null, rows: null });
+    t.client.stop();
+    expect(t.client.fit(12, null)).toBeNull();
+  });
+
   it("output resolves with the answer of the same id", async () => {
     const t = connected();
     const p = t.client.output(12, 86, 0, 500);

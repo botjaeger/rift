@@ -90,7 +90,7 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
 
 ## Devices and permissions
 
-- `operate`: everything below. `view`: no `run`, `keys`, `text`, `open`, `start` or
+- `operate`: everything below. `view`: no `run`, `keys`, `text`, `fit`, `open`, `start` or
   `complete` (its history can hold secrets typed on a command line, and
   path completion lists any folder), and no `diff` of an untracked file
   (its whole content: a `.env`, a key); they get `ack` with `error`
@@ -121,6 +121,7 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
 | `keys` | 20 keys per message, 20 messages per second per connection |
 | `text` | 1 KiB per message, one line without control characters; counts against the `keys` rate |
 | `open`, `start` | 2 per second per connection, together |
+| `fit` | 4 per second per connection; `cols` 20 to 300, `rows` 5 to 120 (clamped) |
 | `output` | 1 to 500 lines and at most 64 KiB per answer, 10 requests per second per connection |
 | `screen` | at most 300 columns and 120 rows (the top-left part of a larger screen), one per 100 ms |
 | `complete` | the line at most 1 KiB; at most 50 `items` and 50 `history` entries of 1 KiB each; shares `output`'s rate |
@@ -197,6 +198,12 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
   closed while the app was away) is dropped without a second error.
 - `output` asks for lines `from` … `from + limit - 1` of a block's output
   (§ Phase 3).
+- `fit` (`{"t":"fit","id":"f1","pane":12,"cols":64,"rows":40}`, feature `fit`)
+  sets the phone's size for the subscribed pane, so programs reflow to its
+  width (§ Phone-sized panes); `{"t":"fit","id":"f2","pane":12,"cols":null,"rows":null}`
+  releases it. `cols` and `rows` are both numbers or both `null`, else `ack`
+  with `error` `bad_request`; so is a `fit` for a pane the client does not
+  follow. Answered with `ack` like `keys`; `view` devices get `forbidden`.
 - `open` (feature `open`) opens a shell next to `pane`: `kind` `tab` is a
   new tab in the pane's window, `pane` a new pane split to its right; both
   start where a new pane from that pane would (its folder, or the
@@ -253,7 +260,7 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
   `off`, § Push), `chips` (`dirs`, `branches`, `changes`, `diff`, §
   Phase 3), `waiting` (a pane's `waiting` in `topology`, below),
   `complete` (§ Phase 3), `running` (a pane's `running` in
-  `topology`, below), `open` and `start` (listed only while the computer
+  `topology`, below), `fit` (§ Phase 3), `open` and `start` (listed only while the computer
   allows it, `remote_when_closed`). A
   gateway that leaves
   the field out serves none of them; the app then hides what needs them.
@@ -529,8 +536,19 @@ subscribed pane's visible screen as text runs:
 ```
 
 - `cols`, `rows`: the screen's size as sent (at most 300 × 120: a larger
-  screen is cut to its top-left part). The phone never resizes the pane;
-  it fits or scrolls the desktop's screen.
+  screen is cut to its top-left part). The phone sizes the pane only with
+  `fit` (§ Phone-sized panes); without one it fits or scrolls the desktop's
+  screen.
+- On the alternate screen the rows are the program's grid. On the primary
+  screen (`on`) they are Rift's own view of the pane, as the desktop draws
+  it, bottom-anchored with the last `rows` lines: each command's echoed
+  prompt is one header row (`▾ cargo test  ~/rift git:(main)` at the left, the
+  state badge `running`, `✓ 0` or `✕ 2` and the duration right-aligned; the
+  command bold in the bright colour, the context dim; `▸` and `N lines
+  hidden` for a collapsed block, whose output is left out), stray blank
+  lines are left out, and the live prompt, which the desktop's editor owns,
+  is not shown (nor the cursor, then). `cursor` is the row the program's
+  cursor is on, or `null` when that line is not shown.
 - `alt`: the pane shows the alternate screen.
 - `cursor`: `[row, column]` while the program shows its cursor, else
   `null`.
@@ -562,6 +580,21 @@ subscribed pane's visible screen as text runs:
   the pane is on the primary screen), or mode `off` was set. A new
   `subscribe` or `unsubscribe` stops them silently (and resets the mode
   to `off`).
+
+### Phone-sized panes (feature `fit`)
+
+A `fit` makes the pane's shell as small as the phone: while any client holds
+one for a pane, the pane's PTY has the smaller of the desktop's own columns
+and the phone's, and of its rows and the phone's, so programs such as Claude
+Code reflow to the phone's width; the desktop draws the smaller grid. With
+several phones the smallest columns and the smallest rows win. It counts
+only while the client follows that pane: an `unsubscribe`, a `subscribe` to
+another pane or a closed connection releases it, as does an explicit
+release (`cols` and `rows` `null`). The phone sends its `fit` again every 10
+seconds while it holds one: the window drops a fit it did not hear again for
+30 seconds, so a gateway that died never leaves the desktop shrunk. The
+pane's size changes like any resize of the window's pane (the screen's
+`cols` and `rows` follow, a `full` screen is sent).
 
 ### Output paging
 
@@ -736,7 +769,13 @@ before, for the phone's Run sheet and the pane's suggestions:
   `text`: the pane is at its prompt, or a command was submitted and has
   not started yet), `the command line has text; send the command with run`
   (`keys` with `enter` at a prompt with a draft; the gateway's `busy`),
-  `bad request: …`. `remote-open`
+  `bad request: …`. `remote-fit`
+  (`{"cmd":"remote-fit","pane":12,"cols":64,"rows":40}`, or both `null` to
+  release; the smallest of the clients' fits, sent again on every refresh
+  of one) has the same gate and the errors `remote access is off`, `no such
+  pane` and `bad request: …`; the window sizes the pane to the smaller of its
+  own grid and the fit until the release or 30 s without a refresh.
+  `remote-open`
   (`{"cmd":"remote-open","pane":12,"device":"Sam's iPhone","kind":"tab"}`,
   answering the new pane as `pane`) has the same gate and the errors
   `remote access is off`, `no such pane` and `cannot split this pane`.

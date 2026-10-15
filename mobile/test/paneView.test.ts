@@ -20,6 +20,11 @@ import {
   visibleRows,
   waitingOthers,
   zoomStep,
+  fitFontSize,
+  fitSize,
+  programSend,
+  runsAgent,
+  terminalViewOn,
 } from "../src/paneView";
 import type { Block, Pane, Tab, Waiting } from "../src/protocol/types";
 
@@ -221,5 +226,65 @@ describe("the agent's question card", () => {
     expect(askContext(["Update(src/x.ts)", "3 +a"]).file).toBe("src/x.ts");
     expect(askContext(["Do you want to proceed?"]).file).toBeNull();
     expect(hasMoreRows(askContext(["3 +a"]))).toBe(false);
+  });
+});
+
+describe("fitting the program to the view", () => {
+  it("the font is 11 pt at 100 % and follows the zoom within its limits", () => {
+    expect(fitFontSize(1)).toBe(11);
+    expect(fitFontSize(1.5)).toBe(16.5);
+    expect(fitFontSize(9)).toBe(22);
+    expect(fitFontSize(0.1)).toBe(6.6);
+  });
+  it("columns and rows are what fill the view at that font", () => {
+    // 11 pt: 6.6 pt a cell, a 14 pt line
+    expect(fitSize(396, 560, 11)).toEqual({ cols: 60, rows: 40 });
+    // a bigger font fits fewer
+    expect(fitSize(396, 560, 16.5)).toEqual({ cols: 40, rows: 26 });
+  });
+  it("stays within the desktop's bounds, and waits for a measured view", () => {
+    expect(fitSize(60, 30, 11)).toEqual({ cols: 20, rows: 5 });
+    expect(fitSize(5000, 5000, 6.6)).toEqual({ cols: 300, rows: 120 });
+    expect(fitSize(0, 500, 11)).toBeNull();
+    expect(fitSize(300, -4, 11)).toBeNull();
+    expect(fitSize(300, 500, 0)).toBeNull();
+  });
+});
+
+describe("the Terminal view's default", () => {
+  const running = { running: { started: null, line: "" } };
+  it("an agent pane runs: Claude Code by name, or any session an agent titled", () => {
+    expect(runsAgent(pane(1, { job: "claude" }))).toBe(true);
+    expect(runsAgent(pane(1, { last_command: "claude", ...running }))).toBe(true);
+    expect(runsAgent(pane(1, { last_command: "codex", running: { started: null, line: "", title: "Fix tests" } }))).toBe(true);
+  });
+  it("a shell, a plain program and an agent that quit are not", () => {
+    expect(runsAgent(pane(1))).toBe(false);
+    expect(runsAgent(pane(1, { job: "htop" }))).toBe(false);
+    expect(runsAgent(pane(1, { last_command: "claude" }))).toBe(false);
+  });
+  it("the user's choice wins over the default, null follows it", () => {
+    expect(terminalViewOn(null, true)).toBe(true);
+    expect(terminalViewOn(null, false)).toBe(false);
+    expect(terminalViewOn(false, true)).toBe(false);
+    expect(terminalViewOn(true, false)).toBe(true);
+  });
+});
+
+describe("the command line while a program runs", () => {
+  it("sends a line as text", () => {
+    expect(programSend("done?", true)).toEqual({ ok: true, text: "done?" });
+  });
+  it("an empty line sends nothing and says nothing", () => {
+    expect(programSend("  ", true)).toEqual({ ok: false, message: null });
+  });
+  it("a Rift without text says it is too old", () => {
+    const r = programSend("done?", false);
+    expect(r.ok).toBe(false);
+    expect(r.ok === false && r.message).toMatch(/too old/);
+  });
+  it("a line the gateway would refuse is refused here", () => {
+    expect(programSend("a\tb", true)).toMatchObject({ ok: false });
+    expect(programSend("é".repeat(513), true)).toMatchObject({ ok: false, message: expect.stringMatching(/too long/) });
   });
 });

@@ -109,6 +109,7 @@ export type Permission = "operate" | "view";
 export type Feature =
   | "screen"
   | "text"
+  | "fit"
   | "output"
   | "push_failures"
   | "push_ntfy"
@@ -273,6 +274,18 @@ export interface TextMsg {
   pane: number;
   text: string;
 }
+/**
+ * Sizes the pane's program to the phone's view (feature `fit`, operate only): `cols` x `rows`
+ * (the desktop clamps to 20..300 x 5..120), or both null to release. The desktop drops a fit that
+ * is not sent again within 30 s.
+ */
+export interface FitMsg {
+  t: "fit";
+  id: string;
+  pane: number;
+  cols: number | null;
+  rows: number | null;
+}
 export type ScreenMode = "off" | "auto" | "on";
 /** What the gateway sends of the subscribed pane's screen. */
 export interface ScreenModeMsg {
@@ -328,6 +341,7 @@ export type ClientMsg =
   | PushMsg
   | NotifyMsg
   | TextMsg
+  | FitMsg
   | ScreenModeMsg
   | OutputRequestMsg;
 
@@ -851,6 +865,12 @@ export function isClientMsg(v: unknown): v is ClientMsg {
       return isUint(v.pane) && (v.off === undefined || v.off === true);
     case "text":
       return isId(v.id) && isUint(v.pane) && isStr(v.text) && textProblem(v.text) === null;
+    case "fit":
+      return (
+        isId(v.id) &&
+        isUint(v.pane) &&
+        ((v.cols === null && v.rows === null) || (isUint(v.cols) && isUint(v.rows) && v.cols > 0 && v.rows > 0))
+      );
     case "screen":
       return isUint(v.pane) && (v.mode === "off" || v.mode === "auto" || v.mode === "on");
     case "output":

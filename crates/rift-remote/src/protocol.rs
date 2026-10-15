@@ -129,6 +129,17 @@ pub enum ClientMsg {
         pane: u64,
         text: String,
     },
+    /// The phone's size for `pane` (feature `fit`): while held, the pane's
+    /// shell is sized to the smaller of the desktop's own size and this, so
+    /// programs reflow to the phone. `cols` and `rows` both `null`: release.
+    /// Counts only while the client follows `pane`; the client re-sends it
+    /// every 10 s (a lease the desktop drops after 30 s without one).
+    Fit {
+        id: String,
+        pane: u64,
+        cols: Option<u16>,
+        rows: Option<u16>,
+    },
     /// What to send of the subscribed pane's terminal screen.
     Screen {
         pane: u64,
@@ -697,7 +708,7 @@ mod tests {
     #[test]
     fn every_client_fixture_round_trips() {
         let all = fixtures("client");
-        assert_eq!(all.len(), 26, "client fixtures");
+        assert_eq!(all.len(), 28, "client fixtures");
         for (name, value) in all {
             let msg: ClientMsg =
                 serde_json::from_value(value.clone()).unwrap_or_else(|e| panic!("{name}: {e}"));

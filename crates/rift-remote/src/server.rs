@@ -34,12 +34,12 @@ use crate::protocol::{
 use crate::registry::{self, Device, RelayState, RelayStatus, Via};
 use crate::transport::{self, Channel, KEY_LEN, Recv, Socket};
 use crate::{
-    FAILURE_WINDOW, HANDSHAKE_DEADLINE, IDLE_TIMEOUT, Input, InputError, KEYS_RATE, Key,
-    MAX_BLOCKS, MAX_CLIENT_MESSAGE, MAX_COMMAND, MAX_CONNECTIONS, MAX_DIFF_PATH, MAX_FAILURES,
-    MAX_GATEWAY_MESSAGE, MAX_KEYS, MAX_OUTPUT_PAGE_LINES, MAX_REQUEST_ID, MAX_SCREEN_COLS,
-    MAX_SCREEN_ROWS, MAX_TEXT, MAX_TRACKED, Menu, MenuKind, OPEN_RATE, OUTPUT_RATE, OutputError,
-    PANE_POLL, PING_INTERVAL, Page, REFUSAL, REPLAY_RING, RUN_RATE, Screen, Source, SourceError,
-    TOPOLOGY_POLL,
+    FAILURE_WINDOW, FIT_COLS, FIT_RATE, FIT_ROWS, HANDSHAKE_DEADLINE, IDLE_TIMEOUT, Input,
+    InputError, KEYS_RATE, Key, MAX_BLOCKS, MAX_CLIENT_MESSAGE, MAX_COMMAND, MAX_CONNECTIONS,
+    MAX_DIFF_PATH, MAX_FAILURES, MAX_GATEWAY_MESSAGE, MAX_KEYS, MAX_OUTPUT_PAGE_LINES,
+    MAX_REQUEST_ID, MAX_SCREEN_COLS, MAX_SCREEN_ROWS, MAX_TEXT, MAX_TRACKED, Menu, MenuKind,
+    OPEN_RATE, OUTPUT_RATE, OutputError, PANE_POLL, PING_INTERVAL, Page, REFUSAL, REPLAY_RING,
+    RUN_RATE, Screen, Source, SourceError, TOPOLOGY_POLL,
 };
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::io::ErrorKind;
@@ -76,7 +76,7 @@ const DONE_RUNNING: usize = 64;
 /// after the 45 s idle timeout.
 pub const FOLLOW_FRESH: Duration = Duration::from_secs(20);
 /// What this gateway serves beyond Phase 2 (`welcome.features`).
-const FEATURES: [&str; 12] = [
+const FEATURES: [&str; 13] = [
     "screen",
     "text",
     "output",
@@ -89,6 +89,7 @@ const FEATURES: [&str; 12] = [
     "complete",
     "running",
     "open",
+    "fit",
 ];
 
 /// Gateway settings. [`Config::new`] takes the limits from the protocol;
@@ -290,6 +291,7 @@ pub fn serve<S: Source>(
         relay: Mutex::new(RelayLink::default()),
         stop: AtomicBool::new(false),
         hub: Mutex::new(Hub::default()),
+        fit_lock: Mutex::new(()),
         poll_lock: Mutex::new(()),
         status_lock: Mutex::new(()),
         devices: Mutex::new(devices),
@@ -339,6 +341,8 @@ pub(crate) struct Shared<S> {
     pub(crate) relay: Mutex<RelayLink>,
     pub(crate) stop: AtomicBool,
     hub: Mutex<Hub>,
+    /// One [`sync_fits`] at a time, so the source hears them in order.
+    fit_lock: Mutex<()>,
     /// One fetch-and-diff at a time, so updates apply in fetch order.
     poll_lock: Mutex<()>,
     /// Orders `status.json` writes (and the final removal).
@@ -365,6 +369,8 @@ struct Hub {
     feeds: HashMap<u64, Feed>,
     /// Last topology frame sent.
     topology: Option<Arc<str>>,
+    /// The size last handed to the source per pane ([`Source::fit`]).
+    fits: HashMap<u64, (u16, u16)>,
 }
 
 impl Hub {
@@ -414,6 +420,14 @@ impl Heard {
     }
 }
 
+/// A client's `fit`: the pane and the size (already clamped).
+#[derive(Clone, Copy)]
+struct Fit {
+    pane: u64,
+    cols: u16,
+    rows: u16,
+}
+
 struct Slot {
     tx: SyncSender<Arc<str>>,
     pane: Option<u64>,
@@ -433,6 +447,8 @@ struct Slot {
     key: [u8; KEY_LEN],
     device: String,
     name: String,
+    /// The pane size it asked for (`fit`); counts while it follows that pane.
+    fit: Option<Fit>,
     /// The permission it connected with.
     permission: Permission,
     since: SystemTime,
@@ -974,6 +990,8 @@ fn poll_loop<S: Source>(shared: &Shared<S>) {
                 refresh_screen(shared, pane, force);
             }
         }
+        // a client that stopped following its pane lets go of its fit
+        let _ = sync_fits(shared, None);
         if !anyone {
             // nobody to tell: the next client starts from where panes stand
             shared.done.lock().unwrap().panes.clear();
@@ -1401,6 +1419,7 @@ struct SlotGuard<'a, S: Source> {
 impl<S: Source> Drop for SlotGuard<'_, S> {
     fn drop(&mut self) {
         self.shared.hub.lock().unwrap().clients.remove(&self.id);
+        let _ = sync_fits(self.shared, None);
         write_status(self.shared);
         let _ = registry::touch(&self.shared.config.dir, &self.device, SystemTime::now());
         self.shared.record(
@@ -1646,6 +1665,7 @@ fn serve_device<S: Source, T: Socket>(
                 key: ch.remote_static(),
                 device: device.id.clone(),
                 name: device.name.clone(),
+                fit: None,
                 permission: device.permission,
                 since: now,
                 via: peer.via,
@@ -1710,6 +1730,7 @@ fn session<S: Source, T: Socket>(
     let mut runs = Rate::new(RUN_RATE);
     // `keys` and `text`
     let mut keys = Rate::new(KEYS_RATE);
+    let mut fits = Rate::new(FIT_RATE);
     let mut opens = Rate::new(OPEN_RATE);
     let mut outputs = Rate::new(OUTPUT_RATE);
     loop {
@@ -1804,9 +1825,14 @@ fn session<S: Source, T: Socket>(
                 if let Some(c) = shared.hub.lock().unwrap().clients.get_mut(&id) {
                     c.follow(None);
                 }
+                let _ = sync_fits(shared, None);
                 None
             }
-            Ok(ClientMsg::Subscribe { pane, after }) => subscribe(shared, id, pane, after),
+            Ok(ClientMsg::Subscribe { pane, after }) => {
+                let reply = subscribe(shared, id, pane, after);
+                let _ = sync_fits(shared, None);
+                reply
+            }
             Ok(ClientMsg::Screen { pane, mode }) => set_screen(shared, id, pane, mode),
             Ok(ClientMsg::Output {
                 id: rid,
@@ -1915,6 +1941,12 @@ fn session<S: Source, T: Socket>(
             }) => Some(input(shared, device, &mut keys, rid, pane, || {
                 check_text(&text).map(|()| Input::Text(text.clone()))
             })),
+            Ok(ClientMsg::Fit {
+                id: rid,
+                pane,
+                cols,
+                rows,
+            }) => Some(fit(shared, device, id, &mut fits, rid, pane, cols, rows)),
             Ok(ClientMsg::Open {
                 id: rid,
                 pane,
@@ -2054,6 +2086,140 @@ fn input<S: Source>(
         ),
         Err(InputError::Unavailable(why)) => ServerMsg::ack_err(rid, ErrorCode::Busy, why),
     }
+}
+
+/// `fit`: permission and rate like `keys`, then the smallest size of the
+/// clients following the pane goes to the source ([`sync_fits`]); it is
+/// handed over on every `fit`, which is how the desktop's lease is kept.
+#[allow(clippy::too_many_arguments)]
+fn fit<S: Source>(
+    shared: &Shared<S>,
+    device: &Device,
+    client: u64,
+    rate: &mut Rate,
+    rid: String,
+    pane: u64,
+    cols: Option<u16>,
+    rows: Option<u16>,
+) -> ServerMsg {
+    if rid.chars().count() > MAX_REQUEST_ID {
+        return ServerMsg::error(
+            ErrorCode::BadRequest,
+            format!("id is longer than {MAX_REQUEST_ID} characters"),
+        );
+    }
+    if !operates(shared, device) {
+        return ServerMsg::ack_err(rid, ErrorCode::Forbidden, VIEW_ONLY);
+    }
+    if !rate.allow(Instant::now()) {
+        return ServerMsg::ack_err(rid, ErrorCode::Rate, "too many requests; slow down");
+    }
+    let size = match (cols, rows) {
+        (Some(c), Some(r)) => Some((
+            c.clamp(*FIT_COLS.start(), *FIT_COLS.end()),
+            r.clamp(*FIT_ROWS.start(), *FIT_ROWS.end()),
+        )),
+        (None, None) => None,
+        _ => {
+            return ServerMsg::ack_err(
+                rid,
+                ErrorCode::BadRequest,
+                "cols and rows are both numbers or both null",
+            );
+        }
+    };
+    {
+        let mut hub = shared.hub.lock().unwrap();
+        let Some(c) = hub.clients.get_mut(&client) else {
+            return ServerMsg::ack_err(rid, ErrorCode::NoPane, format!("no pane {pane}"));
+        };
+        if let Some((cols, rows)) = size {
+            if c.pane != Some(pane) {
+                return ServerMsg::ack_err(
+                    rid,
+                    ErrorCode::BadRequest,
+                    "subscribe to the pane first",
+                );
+            }
+            c.fit = Some(Fit { pane, cols, rows });
+        } else if c.fit.is_some_and(|f| f.pane == pane) {
+            c.fit = None;
+        }
+    }
+    match sync_fits(shared, Some(pane)) {
+        Ok(()) => ServerMsg::ack_ok(rid),
+        Err(InputError::Busy) => ServerMsg::ack_err(rid, ErrorCode::Busy, "pane is busy"),
+        Err(InputError::NoPane) => {
+            ServerMsg::ack_err(rid, ErrorCode::NoPane, format!("no pane {pane}"))
+        }
+        Err(InputError::Denied) => ServerMsg::ack_err(
+            rid,
+            ErrorCode::Forbidden,
+            "remote access is off on the desktop",
+        ),
+        Err(InputError::Unavailable(why)) => ServerMsg::ack_err(rid, ErrorCode::Busy, why),
+    }
+}
+
+/// Bring the source's pane sizes in line with the clients': per pane the
+/// smallest columns and rows among the clients that follow it with a `fit`
+/// (one that stopped following, or left, is released). The source hears
+/// every change, a release (`None`) for a pane nobody holds any more, and
+/// `force`'s pane even when unchanged (a refreshed lease). The result is of
+/// `force`'s pane; a pane the source refuses drops its clients' fits.
+fn sync_fits<S: Source>(shared: &Shared<S>, force: Option<u64>) -> Result<(), InputError> {
+    let _serial = shared.fit_lock.lock().unwrap();
+    let todo: Vec<(u64, Option<(u16, u16)>)> = {
+        let mut hub = shared.hub.lock().unwrap();
+        let mut want: HashMap<u64, (u16, u16)> = HashMap::new();
+        for c in hub.clients.values_mut() {
+            // a client that follows another pane (or none) lets go of its fit
+            if c.fit.is_some_and(|f| c.pane != Some(f.pane)) {
+                c.fit = None;
+            }
+        }
+        for f in hub.clients.values().filter_map(|c| c.fit) {
+            let w = want.entry(f.pane).or_insert((f.cols, f.rows));
+            *w = (w.0.min(f.cols), w.1.min(f.rows));
+        }
+        let mut todo: Vec<_> = want
+            .iter()
+            .filter(|(p, size)| hub.fits.get(p) != Some(size) || force == Some(**p))
+            .map(|(p, size)| (*p, Some(*size)))
+            .collect();
+        todo.extend(
+            hub.fits
+                .keys()
+                .filter(|p| !want.contains_key(p))
+                .map(|p| (*p, None)),
+        );
+        todo
+    };
+    let mut result = Ok(());
+    for (pane, size) in todo {
+        let r = shared.source.fit(pane, size);
+        let mut hub = shared.hub.lock().unwrap();
+        match (&r, size) {
+            (Ok(()), Some(size)) => {
+                hub.fits.insert(pane, size);
+            }
+            (Ok(()), None) => {
+                hub.fits.remove(&pane);
+            }
+            (Err(_), _) => {
+                hub.fits.remove(&pane);
+                for c in hub.clients.values_mut() {
+                    if c.fit.is_some_and(|f| f.pane == pane) {
+                        c.fit = None;
+                    }
+                }
+            }
+        }
+        if force == Some(pane) {
+            result = r;
+        }
+    }
+    result
 }
 
 /// `open`: permission and rate like `run`, then the source. On success

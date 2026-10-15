@@ -22,7 +22,19 @@ import {
   type InputBatcher,
 } from "@/keyboard";
 import { SubmitAuthHold } from "@/lock";
-import { clampZoom, isDoubleTap, keptZoom, pinchZoom, touchDistance, zoomPercent, zoomStep } from "@/paneView";
+import {
+  clampZoom,
+  FIT_DEBOUNCE_MS,
+  FIT_REFRESH_MS,
+  fitFontSize,
+  fitSize,
+  isDoubleTap,
+  keptZoom,
+  pinchZoom,
+  touchDistance,
+  zoomPercent,
+  zoomStep,
+} from "@/paneView";
 import type { ScreenState } from "@/protocol/store";
 import { RUN_BOLD, RUN_ITALIC, RUN_STRIKE, RUN_UNDERLINE, type ScreenRun } from "@/protocol/types";
 import { authenticate, fleet, useApp } from "@/runtime";
@@ -90,13 +102,14 @@ const Row = memo(function Row({
 
 /**
  * The screen as monospace rows, fitted to the width (7 to 14 pt) and scaled by the pinch zoom
- * (60 to 200 %), scrolling sideways when wider.
+ * (60 to 200 %), scrolling sideways when wider. `fitted`: the computer sizes the program to the
+ * view (feature `fit`), so the font is the zoomed base size, not shrunk to the program's columns.
  */
-function Grid({ screen, zoom }: { screen: ScreenState; zoom: number }) {
+function Grid({ screen, zoom, fitted }: { screen: ScreenState; zoom: number; fitted: boolean }) {
   const [width, setWidth] = useState(0);
   const onLayout = (e: LayoutChangeEvent) => setWidth(e.nativeEvent.layout.width);
-  const fit = fitFont(width - PADDING_X * 2, screen.cols);
-  const fontSize = Math.round(fit.fontSize * zoom * 10) / 10;
+  const fit = fitted ? { fontSize: fitFontSize(1), scroll: false } : fitFont(width - PADDING_X * 2, screen.cols);
+  const fontSize = fitted ? fitFontSize(zoom) : Math.round(fit.fontSize * zoom * 10) / 10;
   const rowWidth = Math.ceil(screen.cols * fontSize * CELL_RATIO) + 2;
   const scroll = fit.scroll || rowWidth > width - PADDING_X * 2;
   const [cursorRow, cursorCol] = screen.cursor ?? [-1, -1];
@@ -125,7 +138,9 @@ function Grid({ screen, zoom }: { screen: ScreenState; zoom: number }) {
  * less, htop), a note, and on an operate device the keys and the keyboard for it. Typed text goes out as `text` (batched per frame, `keyboard.ts`), keys as
  * `keys`; the control-key row works as in the composer. A key that submits a line asks for
  * authentication like Run (lock.ts): at the pane's prompt every time, while a program runs once
- * per view while the app stays in the foreground.
+ * per view while the app stays in the foreground. On a gateway with `fit` (and a device that may
+ * operate) the view asks the computer to size the program to its own width and height at the zoomed
+ * font, re-sending every 10 s and releasing when it closes.
  */
 export function TerminalView({
   hostKey,
@@ -138,6 +153,7 @@ export function TerminalView({
   program,
   pinned,
   bare,
+  canFit,
 }: {
   hostKey: string;
   paneId: number;
@@ -154,6 +170,8 @@ export function TerminalView({
   pinned?: boolean;
   /** The pane's command line is drawn under the screen (the Pane board): no note, keys or keyboard here. */
   bare?: boolean;
+  /** The gateway sizes programs to the view (feature `fit`). */
+  canFit?: boolean;
 }) {
   const s = useApp();
   const capture = useRef<KeyCaptureHandle>(null);
@@ -298,8 +316,39 @@ export function TerminalView({
     }
     if (left === 0) tap.current = null;
   };
+  // The scrolling area's size, less the zoom row, is what a fitted program may fill.
+  const [area, setArea] = useState({ width: 0, height: 0 });
+  const [zoomHeight, setZoomHeight] = useState(0);
+  const onArea = (e: LayoutChangeEvent) => {
+    const { width, height } = e.nativeEvent.layout;
+    setArea((a) => (a.width === width && a.height === height ? a : { width, height }));
+  };
+  const fitting = !!canFit && operate && online;
+  const size = fitting ? fitSize(area.width - PADDING_X * 2, area.height - zoomHeight - PADDING * 2, fitFontSize(zoom)) : null;
+  const cols = size?.cols;
+  const rows = size?.rows;
+  // sent once the size has settled, and again while held: the computer drops a fit not refreshed
+  useEffect(() => {
+    if (cols === undefined || rows === undefined) return;
+    const send = () => void fleet.sendFit(hostKey, paneId, { cols, rows });
+    let refresh: ReturnType<typeof setInterval> | undefined;
+    const settle = setTimeout(() => {
+      send();
+      refresh = setInterval(send, FIT_REFRESH_MS);
+    }, FIT_DEBOUNCE_MS);
+    return () => {
+      clearTimeout(settle);
+      clearInterval(refresh);
+    };
+  }, [cols, rows, hostKey, paneId]);
+  // released when the view closes, the pane changes or the computer goes away
+  const held = cols !== undefined;
+  useEffect(() => {
+    if (!held) return;
+    return () => void fleet.sendFit(hostKey, paneId, null);
+  }, [held, hostKey, paneId]);
   const zoomRow = (
-    <View style={styles.zoomRow}>
+    <View style={styles.zoomRow} onLayout={(e) => setZoomHeight(e.nativeEvent.layout.height)}>
       <Text style={styles.zoomHint}>Pinch to zoom · double-tap to reset</Text>
       <Pressable
         accessibilityRole="button"
@@ -331,7 +380,7 @@ export function TerminalView({
     : "Terminal screen";
 
   const grid = screen ? (
-    <Grid screen={screen} zoom={zoom} />
+    <Grid screen={screen} zoom={zoom} fitted={held} />
   ) : (
     <Text style={styles.empty} accessibilityLiveRegion="polite">
       {online ? "Waiting for the screen…" : "Waiting for the computer…"}
@@ -351,7 +400,7 @@ export function TerminalView({
           onFocusChange={setFocused}
           style={styles.fill}
         >
-          <ScrollView style={styles.fill} accessibilityLabel={label} scrollEnabled={!pinching}>
+          <ScrollView style={styles.fill} accessibilityLabel={label} scrollEnabled={!pinching} onLayout={onArea}>
             {zoomRow}
             {/* not one element for screen readers: they read the rows */}
             <Pressable onPress={() => capture.current?.focus()} accessible={false}>
@@ -360,7 +409,7 @@ export function TerminalView({
           </ScrollView>
         </KeyCaptureView>
       ) : (
-        <ScrollView style={styles.fill} accessibilityLabel={label} scrollEnabled={!pinching}>
+        <ScrollView style={styles.fill} accessibilityLabel={label} scrollEnabled={!pinching} onLayout={onArea}>
           {zoomRow}
           {grid}
         </ScrollView>
