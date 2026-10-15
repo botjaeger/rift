@@ -31,8 +31,8 @@ docs     CLAUDE.md and AGENTS.md identical; every relative link in *.md resolves
 mobile   the Expo companion in mobile/: pnpm install --frozen-lockfile, typecheck, eslint, vitest (incl. the shared protocol fixtures)
 release  cargo build --release --locked
 ui       isolated scripted UI regressions (display or xvfb-run required)
-leak     memory soak on the release build: repeated identical work (a ticking program, output past scrollback,
-         opening and closing tabs, splits and overlays) must level off (scripts/leak-soak.py; ~4 min)
+leak     memory soak on the release build: repeated identical work (a ticking program, output past scrollback, a command printing lines without end,
+         opening and closing tabs, splits and overlays) must level off (scripts/leak-soak.py; ~5 min)
 linux    clippy + test + doc + release build in packaging/linux-verify.Dockerfile, then shell + scripted UI (xvfb) on the CI runner's packages in packaging/ci-ubuntu.Dockerfile (docker)
 EOF
 }

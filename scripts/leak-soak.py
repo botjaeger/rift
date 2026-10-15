@@ -59,6 +59,12 @@ def flood(_):
     return [], ["type seq 1 120000\\n", "wait 2500", "key cmd+k", "wait 300"]
 
 
+def stream(_):
+    # one command that never ends and keeps printing lines (an agent's
+    # session, a log tail): the running block's output is far past scrollback
+    return ["type while :; do seq 1 500; sleep 0.05; done\\n"], ["wait 3000"]
+
+
 def churn(scratch):
     # open and close every transient surface: tabs, splits, palette,
     # settings, find, the file viewer, resizes, scrolling
@@ -83,6 +89,7 @@ def churn(scratch):
 SCENARIOS = {
     "ticking": (ticking, 22, 8, 8),
     "flood": (flood, 26, 6, 8),
+    "stream": (stream, 10, 20, 8),
     "churn": (churn, 3, 10, 8),
 }
 
