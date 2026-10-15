@@ -22,14 +22,8 @@ import { toggleA11y } from "./toggle";
 export const titleTop = (inset: number) => Math.max(inset, 47) + 15;
 /** The mockups' top inset for a navigation header: 54 pt on a 47 pt status bar. */
 export const headerTop = (inset: number) => Math.max(inset, 47) + 7;
-/** Room left under a tab page for the floating tab bar (62 pt, 26 pt above the edge). */
-export const TAB_BAR_ROOM = 120;
-/**
- * The bottom padding of a plain tab page (the first-run page), from its bottom safe-area inset.
- * On iOS the system tab bar is part of that inset already (83 pt on an iPhone 16 Pro), so only a
- * gap is added; Android and the web draw the floating bar over the page and leave TAB_BAR_ROOM.
- */
-export const tabBottom = (inset: number) => inset + (Platform.OS === "ios" ? 24 : TAB_BAR_ROOM);
+/** The bottom padding of a top-level page (Computers, Settings, the first-run page): the safe area and a gap. */
+export const tabBottom = (inset: number) => inset + 24;
 
 const android = Platform.OS === "android";
 /** Room under a page's content for a floating overlay (a 44 pt bar and a gap). */

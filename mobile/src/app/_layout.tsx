@@ -27,8 +27,8 @@ LogBox.ignoreLogs(["Linking found multiple possible URI schemes"]);
 void SplashScreen.preventAutoHideAsync().catch(() => undefined);
 
 // A link straight to a screen (a notification tap, rift://host/…/pane/…) keeps the tabs below
-// it, so Back leads to Now instead of out of the app.
-export const unstable_settings = { initialRouteName: "(tabs)" };
+// it, so Back leads to Computers instead of out of the app.
+export const unstable_settings = { initialRouteName: "index" };
 
 /** The navigators' own grounds (containers, cards, the tab bar's), dark like every page: the
  *  default theme is light, and its white showed around a page while it slid in or out. */
@@ -169,7 +169,34 @@ export default function RootLayout() {
             }}
           >
             {/* Every page draws its own header, as the boards do (src/ui/Screen.tsx PageHeader). */}
-            <Stack.Screen name="(tabs)" options={{ headerShown: false, title: "Now" }} />
+            <Stack.Screen name="index" options={{ headerShown: false, title: "Computers" }} />
+            <Stack.Screen name="settings" options={{ headerShown: false, title: "Settings" }} />
+            <Stack.Screen name="settings-ntfy" options={{ headerShown: false, title: "While the app is closed" }} />
+            <Stack.Screen name="computer" options={{ headerShown: false, title: "Computer" }} />
+            <Stack.Screen
+              name="tabs"
+              options={{
+                title: "Tabs",
+                presentation: "formSheet",
+                sheetAllowedDetents: [0.85],
+                sheetGrabberVisible: true,
+                sheetCornerRadius: 20,
+                headerShown: false,
+                contentStyle: { backgroundColor: colors.surface },
+              }}
+            />
+            <Stack.Screen
+              name="panes"
+              options={{
+                title: "Panes",
+                presentation: "formSheet",
+                sheetAllowedDetents: [0.75],
+                sheetGrabberVisible: true,
+                sheetCornerRadius: 20,
+                headerShown: false,
+                contentStyle: { backgroundColor: colors.surface },
+              }}
+            />
             <Stack.Screen name="add" options={{ headerShown: false, title: "Paste a pairing link" }} />
             <Stack.Screen name="scan" options={{ headerShown: false, title: "Pair a computer", contentStyle: { backgroundColor: colors.camera } }} />
             <Stack.Screen name="pair" options={{ headerShown: false, title: "Pair" }} />
@@ -179,30 +206,6 @@ export default function RootLayout() {
             <Stack.Screen name="host/[key]/pane/[id]" options={{ headerShown: false, title: "Pane", fullScreenGestureEnabled: false }} />
             <Stack.Screen name="control-keys" options={{ headerShown: false, title: "Keys" }} />
             <Stack.Screen name="answer" options={{ headerShown: false, title: "Answer" }} />
-            <Stack.Screen
-              name="run"
-              options={{
-                title: "Run a command",
-                presentation: "formSheet",
-                sheetAllowedDetents: [1],
-                sheetGrabberVisible: true,
-                sheetCornerRadius: 16,
-                headerShown: false,
-                contentStyle: { backgroundColor: colors.surface },
-              }}
-            />
-            <Stack.Screen
-              name="pick-computer"
-              options={{
-                title: "Show sessions from",
-                presentation: "formSheet",
-                sheetAllowedDetents: "fitToContents",
-                sheetGrabberVisible: true,
-                sheetCornerRadius: 16,
-                headerShown: false,
-                contentStyle: { backgroundColor: colors.surface },
-              }}
-            />
             <Stack.Screen name="diagnostics" options={{ title: "Diagnostics" }} />
             <Stack.Screen name="changelog" options={{ headerShown: false, title: "What's New" }} />
             <Stack.Screen

@@ -7,7 +7,6 @@ import type { ColorValue } from "react-native";
  */
 const ICONS = {
   computer: { ios: "desktopcomputer", android: "computer", web: "computer" },
-  clock: { ios: "clock", android: "schedule", web: "schedule" },
   add: { ios: "plus", android: "add", web: "add" },
   back: { ios: "chevron.left", android: "arrow_back_ios_new", web: "arrow_back_ios_new" },
   forward: { ios: "chevron.right", android: "chevron_right", web: "chevron_right" },
@@ -43,6 +42,15 @@ const ICONS = {
   newPane: { ios: "rectangle.split.2x1", android: "vertical_split", web: "vertical_split" },
   hideKeyboard: { ios: "keyboard.chevron.compact.down", android: "keyboard_hide", web: "keyboard_hide" },
   editKeys: { ios: "slider.horizontal.3", android: "tune", web: "tune" },
+
+  chevronDown: { ios: "chevron.down", android: "expand_more", web: "expand_more" },
+  more: { ios: "ellipsis", android: "more_horiz", web: "more_horiz" },
+  copy: { ios: "doc.on.doc", android: "content_copy", web: "content_copy" },
+  edit: { ios: "pencil", android: "edit", web: "edit" },
+  stop: { ios: "stop.fill", android: "stop", web: "stop" },
+  rerun: { ios: "arrow.clockwise", android: "refresh", web: "refresh" },
+  file: { ios: "doc", android: "description", web: "description" },
+  check: { ios: "checkmark", android: "check", web: "check" },
 } as const satisfies Record<string, SymbolViewProps["name"]>;
 
 export type IconName = keyof typeof ICONS;

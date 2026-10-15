@@ -7,14 +7,10 @@ import { fileURLToPath } from "node:url";
 import {
   agoShort,
   foldBlocks,
-  HOST_COLORS,
-  hostMarks,
-  monogram,
   nowSections,
   pagerModel,
   programName,
   quickChoices,
-  restSummary,
   swipeTarget,
   trackIdle,
   tabLast,
@@ -133,21 +129,6 @@ describe("Now", () => {
     expect([all.running.map((r) => r.pane), all.finished.map((f) => f.id)]).toEqual([[1, 3], ["b", "a"]]);
   });
 
-  it("marks each computer with its own colour and a two-letter monogram", () => {
-    expect(["MacBook Pro", "studio-mac", "ubuntu-box", "Sam’s MacBook", "MacBook", "ubuntu", "x"].map(monogram)).toEqual([
-      "MP",
-      "SM",
-      "UB",
-      "JM",
-      "MB",
-      "UB",
-      "X",
-    ]);
-    const marks = hostMarks(["a", "b", "c"].map((key) => ({ record: { key, name: `${key}-box` } })));
-    expect([...marks.values()].map((m) => m.color)).toEqual(HOST_COLORS.slice(0, 3));
-    expect(marks.get("b")).toEqual({ color: HOST_COLORS[1], short: "BB" });
-  });
-
   it("times an idle agent from when it stopped working; one never seen working has no time", () => {
     const since = new Map<string, number>();
     const seen = new Set<string>();
@@ -158,11 +139,6 @@ describe("Now", () => {
     expect([...since]).toEqual([["a", 5]]);
     trackIdle(since, seen, [{ key: "a" }], [], 12);
     expect([...since]).toEqual([]);
-  });
-
-  it("sums idle, finished and failed for the row under Working; nothing to sum: none", () => {
-    expect(restSummary(2, [{ exit: 0 }, { exit: 1 }, { exit: null }])).toEqual({ idle: 2, finished: 2, failed: 1 });
-    expect(restSummary(0, [])).toBeNull();
   });
 
   it("reads an idle agent's session from the shared topology fixture", () => {

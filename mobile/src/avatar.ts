@@ -35,6 +35,6 @@ export function avatarFor(cwd: string | null | undefined, title: string, program
   const key = folderOf(cwd) ?? title;
   return {
     color: AVATAR_COLORS[hash(key) % AVATAR_COLORS.length]!,
-    glyph: program === "claude" ? "✳" : null,
+    glyph: program === "claude" ? "\u2733\uFE0E" : null,
   };
 }

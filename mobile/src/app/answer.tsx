@@ -128,7 +128,7 @@ export default function AnswerScreen() {
         subtitle={where}
         subtitleLines={1}
         back={back}
-        backLabel={from === "pane" ? "Back to the pane" : "Back to Now"}
+        backLabel={from === "pane" ? "Back to the pane" : "Back to Computers"}
         right={
           <Pressable
             accessibilityRole="link"

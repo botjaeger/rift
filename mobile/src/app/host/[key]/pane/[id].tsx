@@ -8,7 +8,6 @@ import {
   PanResponder,
   Platform,
   Pressable,
-  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -17,25 +16,29 @@ import {
   type NativeSyntheticEvent,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { askingTitle } from "@/answer";
+import { askingTitle, questionKey } from "@/answer";
 import { promptChips } from "@/chips";
 import { canOperate, hasFeature, isAsked, wrapsLines } from "@/fleet";
-import { foldBlocks, pagerModel, programName, swipeTarget, tabPane, tabState, type PaneItem } from "@/now";
+import { foldBlocks, paneName, programName, swipeTarget, type PaneItem } from "@/now";
+import { CLAUDE_COLOR, paneMark, waitingOthers } from "@/paneView";
 import { canLoadOlder, MAX_BLOCKS } from "@/protocol/store";
 import type { Block } from "@/protocol/types";
 import { fleet, useApp } from "@/runtime";
 import { screenProgram, showsTerminal } from "@/terminal";
 import { findPane, paneTitle, runningCommand, tabTitle } from "@/topology";
+import { AskCard } from "@/ui/AskCard";
 import { FailedCard, FoldRow, RunningCard } from "@/ui/BlockCards";
 import { BlockView, sideways } from "@/ui/BlockView";
 import { Composer } from "@/ui/Composer";
 import { describeConn } from "@/ui/connLabel";
 import { Button } from "@/ui/Button";
+import { Icon } from "@/ui/Icon";
 import { ErrorText } from "@/ui/Notice";
-import { GlassGroup, headerTop, IconButton } from "@/ui/Screen";
+import { headerTop } from "@/ui/Screen";
 import { TerminalView } from "@/ui/TerminalView";
+import { toggleA11y } from "@/ui/toggle";
 import { useSingleFlight } from "@/ui/useSingleFlight";
-import { colors, mono, radius, TOUCH, ui } from "@/ui/theme";
+import { colors, mono, radius, TOUCH, tints, ui } from "@/ui/theme";
 
 /** Within this many points of the end counts as "at the bottom" (stick to new output). */
 const BOTTOM_SLOP = 48;
@@ -52,10 +55,11 @@ function matching(blocks: Block[], query: string): Block[] {
 const itemKey = (it: PaneItem) => (it.kind === "fold" ? `fold:${it.ids[0]}` : String(it.block.id));
 
 /**
- * A pane (the P3 Pane board): the window's tabs as a strip, a swipe between the tab's panes,
- * its blocks with the earlier successes folded and the failed and running commands as cards;
- * or, while a full-screen program runs (vim, htop, less: the alternate screen), that program's
- * screen (the FullScreen board) until it quits.
+ * A pane (the Pane board): the tab and its panes as two buttons that open their sheets, search and
+ * the ⋯ menu; a swipe between the tab's panes; its blocks as cards with the earlier successes
+ * folded; an agent's question docked at the bottom (the PaneAsking board); or, while a
+ * full-screen program runs (vim, htop, less: the alternate screen) or the Terminal view is on,
+ * the pane's screen (the FullScreen board).
  */
 export default function PaneScreen() {
   const { key, id, block: blockParam, restored } = useLocalSearchParams<{ key: string; id: string; block?: string; restored?: string }>();
@@ -65,7 +69,17 @@ export default function PaneScreen() {
   const insets = useSafeAreaInsets();
   const list = useRef<FlashListRef<PaneItem>>(null);
   const atBottom = useRef(true);
-  const [expanded, setExpanded] = useState<ReadonlySet<number>>(() => new Set());
+  const [menu, setMenu] = useState(false);
+  const [toast, setToast] = useState("");
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(toastTimer.current), []);
+  // a line at the top that goes after a moment (and is announced), as the board's toasts
+  const say = useCallback((text: string) => {
+    clearTimeout(toastTimer.current);
+    setToast(text);
+    AccessibilityInfo.announceForAccessibility(text);
+    toastTimer.current = setTimeout(() => setToast(""), 1600);
+  }, []);
   // opened at a block (Now › Finished): unfolded, so the block is in the list
   const [unfolded, setUnfolded] = useState(() => blockParam !== undefined);
   const [search, setSearch] = useState<string | null>(null);
@@ -91,8 +105,8 @@ export default function PaneScreen() {
   // the computer's tabs no longer hold it: nothing left to show or type into
   const closed = !!host && status === "open" && host.windows.length > 0 && !loc;
 
-  // A cold start's pane that has closed meanwhile: back to Now rather than a dead page. Only
-  // once it is on top: dismissing to Now would also close a sheet over it (What's New).
+  // A cold start's pane that has closed meanwhile: back to Computers rather than a dead page. Only
+  // once it is on top: dismissing to Computers would also close a sheet over it (What's New).
   const focused = useIsFocused();
   useEffect(() => {
     if (closed && restored === "1" && focused) router.dismissTo("/");
@@ -150,10 +164,10 @@ export default function PaneScreen() {
   const onStop = useCallback(() => {
     setError(null);
     void fleet.sendKeys(key, paneId, ["ctrl+c"]).then((r) => {
-      if (r.ok) AccessibilityInfo.announceForAccessibility("Control C sent");
+      if (r.ok) say("⌃C sent");
       else setError(r.message);
     });
-  }, [key, paneId]);
+  }, [key, paneId, say]);
   // a Run again on its way: a second tap (a double tap) must not run the command twice
   const once = useSingleFlight();
   const onRunAgain = useCallback(
@@ -167,17 +181,14 @@ export default function PaneScreen() {
       }
       void once(async () => {
         const r = await fleet.run(key, paneId, b.command, { fromDraft: false });
-        if (r.ok) AccessibilityInfo.announceForAccessibility("Command sent");
+        if (r.ok) say(`Sent to ${loc ? tabTitle(loc.tab) : "the pane"}`);
         else setError(r.message);
       });
     },
-    [router, key, paneId, operate, once],
+    [router, key, paneId, operate, once, say, loc],
   );
-  const onLoadEarlier = useCallback((blockId: number) => void fleet.loadEarlier(blockId), []);
-  const canLoadEarlier = hasFeature(host, "output");
-  const earlier = pane?.earlier;
   const asked = s.asked;
-  const extraData = useMemo(() => ({ expanded, earlier, canLoadEarlier, wrap, asked }), [expanded, earlier, canLoadEarlier, wrap, asked]);
+  const extraData = useMemo(() => ({ wrap, asked }), [wrap, asked]);
   const items = useMemo(
     () => (searching === null ? foldBlocks(blocks, unfolded) : foldBlocks(matching(blocks, searching), true)),
     [blocks, searching, unfolded],
@@ -198,16 +209,6 @@ export default function PaneScreen() {
       setTimeout(() => list.current?.scrollToIndex({ index, viewPosition: 0.2, animated: false }), ms);
   }, [target, items, state]);
 
-  const toggle = useCallback(
-    (blockId: number) =>
-      setExpanded((prev) => {
-        const next = new Set(prev);
-        if (!next.delete(blockId)) next.add(blockId);
-        return next;
-      }),
-    [],
-  );
-
   const onScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
     atBottom.current = contentOffset.y + layoutMeasurement.height >= contentSize.height - BOTTOM_SLOP;
@@ -219,7 +220,6 @@ export default function PaneScreen() {
 
   // the tab's panes, and a swipe across the blocks between them
   const tab = loc?.tab ?? null;
-  const pager = tab ? pagerModel(tab, paneId) : null;
   // another pane takes this one's place: Back still leads where it led
   const goPane = useCallback(
     (next: number | null) => next !== null && router.replace({ pathname: "/host/[key]/pane/[id]", params: { key, id: String(next) } }),
@@ -237,7 +237,7 @@ export default function PaneScreen() {
       }),
     [tab, paneId, goPane],
   );
-  // a screen reader swipes through elements, so the pager is also two actions
+  // a screen reader swipes through elements, so the swipe is also two actions on the pane button
   const pagerActions = tab
     ? [
         ...(swipeTarget(tab, paneId, 1) !== null ? [{ name: "next", label: "Next pane" }] : []),
@@ -280,133 +280,174 @@ export default function PaneScreen() {
   const hostName = host?.record.name ?? "this computer";
   const back = () => (router.canGoBack() ? router.back() : router.replace("/"));
   const lastBlock = blocks.at(-1);
-  // a line under the tabs: the pager, a full-screen program, or why the computer is not connected
-  const strip = !host ? null : status !== "open" ? (
-    <Text style={[styles.pagerText, { color: colors.warning }]} accessibilityLiveRegion="polite">
-      {conn!.label}
-    </Text>
-  ) : fullScreen && !(pinned && !screen?.alt) ? (
-    <Text style={[styles.pagerText, { color: colors.warning }]} accessibilityLiveRegion="polite">
-      {program} is full screen · showing its screen{pager ? ` · pane ${pager.index + 1} of ${pager.count}` : ""}
-    </Text>
-  ) : pager ? (
-    <View
-      style={styles.pagerRow}
-      accessible
-      accessibilityLabel={pager.text}
-      accessibilityActions={pagerActions}
-      onAccessibilityAction={(e) => goPane(tab ? swipeTarget(tab, paneId, e.nativeEvent.actionName === "next" ? 1 : -1) : null)}
-    >
-      <Text style={styles.pagerText}>{pager.text}</Text>
-      <View style={styles.dots}>
-        {Array.from({ length: pager.count }, (_, i) => (
-          <View key={i} style={[styles.pageDot, i === pager.index && styles.pageDotOn]} />
-        ))}
+  const notifOn = host?.record.notifications !== false;
+  const headerPad = headerTop(insets.top) + 2;
+  const tabNumber = loc ? loc.window.tabs.indexOf(loc.tab) + 1 : 0;
+  const tabCount = loc ? loc.window.tabs.length : 0;
+  const paneNumber = loc ? loc.paneIndex + 1 : 0;
+  const others = tab ? waitingOthers(tab, paneId) : 0;
+  const mark = loc ? paneMark(loc.pane) : null;
+  const pickName = loc ? paneName(loc.pane, loc.paneIndex) : "";
+  const waiting = loc?.pane.waiting;
+  // an agent's menu is answered on the pane, from a card at the bottom
+  const asking = !!waiting && waiting.kind === "choice" && waiting.choices.length > 0 && status === "open" && operate && !closed;
+  // the Terminal view at a prompt, or a question to answer: the screen without its own keys, the
+  // pane's command line (or the question) under it
+  const bareScreen = fullScreen && (asking || (pinned && !screen?.alt));
+  const bottomInset = keyboard ? 0 : Math.max(0, insets.bottom - 12);
+  const composer =
+    closed || !host ? null : operate ? (
+      // the board's 30 pt under the command line: the home indicator's inset, less the
+      // command line's own 8 pt
+      <View style={{ paddingBottom: bottomInset, backgroundColor: colors.chrome }}>
+        <Composer
+          hostKey={key}
+          paneId={paneId}
+          running={running}
+          online={status === "open"}
+          chips={promptChips(loc?.pane ?? null, state, hasFeature(host, "git"))}
+          chipMenus={hasFeature(host, "chips")}
+          complete={hasFeature(host, "complete") && operate}
+          recent={recent}
+          label={title}
+          canType={hasFeature(host, "text")}
+        />
       </View>
-    </View>
-  ) : null;
+    ) : (
+      <Text style={[styles.viewOnly, { paddingBottom: insets.bottom + 10 }]}>View only: this device cannot run commands here.</Text>
+    );
+  const footer =
+    asking && waiting ? (
+      <AskCard key={questionKey(waiting)} hostKey={key} paneId={paneId} waiting={waiting} program={program} bottomInset={bottomInset} onSay={say} />
+    ) : (
+      composer
+    );
 
   return (
     <KeyboardAvoidingView style={styles.fill} behavior="padding">
       <Stack.Screen options={{ headerShown: false }} />
-      <View style={[styles.header, { paddingTop: headerTop(insets.top) - 2 }, !strip && styles.headerRule]}>
+      <View style={[styles.header, { paddingTop: headerPad }]}>
         <View style={styles.headerRow}>
-          <IconButton
-            glass
-            icon="back"
-            label={`Back from ${hostName}${waitingElsewhere ? `, ${waitingElsewhere} ${waitingElsewhere === 1 ? "needs" : "need"} you` : ""}`}
-            badge={waitingElsewhere}
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={"Back from " + hostName + (waitingElsewhere ? ", " + waitingElsewhere + " " + (waitingElsewhere === 1 ? "needs" : "need") + " you" : "")}
             onPress={back}
-          />
-          <View style={styles.titlePill}>
-            <Text style={styles.hostName} numberOfLines={1} accessibilityRole="header">
-              {host ? hostName : "Pane"}
-            </Text>
-          </View>
-          <View style={styles.flex} />
+            style={({ pressed }) => [styles.glass, pressed && styles.pressed]}
+          >
+            <Icon name="back" size={20} color={colors.text} />
+            {waitingElsewhere ? (
+              <View style={styles.badge} importantForAccessibility="no">
+                <Text style={styles.badgeText}>{waitingElsewhere > 99 ? "99+" : waitingElsewhere}</Text>
+              </View>
+            ) : null}
+          </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={loc ? tabTitle(loc.tab) + ", tab " + tabNumber + " of " + tabCount + " on " + hostName + ". Switch tab" : "Pane"}
+            disabled={!loc || closed}
+            onPress={() => router.push({ pathname: "/tabs", params: { key, pane: String(paneId) } })}
+            style={({ pressed }) => [styles.titleButton, pressed && styles.pressed]}
+          >
+            <View style={styles.titleLine}>
+              <Text style={styles.title} numberOfLines={1}>
+                {loc ? tabTitle(loc.tab) : "Pane"}
+              </Text>
+              {loc && !closed ? <Icon name="chevronDown" size={16} color={colors.textMuted} /> : null}
+            </View>
+            {host ? (
+              <Text style={styles.subtitle} numberOfLines={1}>
+                {loc ? hostName + " · tab " + tabNumber + " of " + tabCount : hostName}
+              </Text>
+            ) : null}
+          </Pressable>
           {!host || closed ? null : (
-            <GlassGroup>
+            <View style={styles.actions}>
               {fullScreen ? null : (
-                <>
-                  <IconButton
-                    grouped
-                    icon={wrap ? "wrapOn" : "wrapOff"}
-                    label={`Wrap long lines: ${wrap ? "on" : "off"}`}
-                    hint="For this pane; Settings › Output sets it for all"
-                    active={!wrap}
-                    onPress={() => fleet.setPaneWrap(key, paneId, !wrap)}
-                  />
-                  <IconButton
-                    grouped
-                    icon="search"
-                    label="Search output"
-                    pressed={searching !== null}
-                    onPress={() => setSearch(searching === null ? "" : null)}
-                  />
-                </>
+                <Pressable
+                  {...toggleA11y(searching !== null)}
+                  accessibilityLabel="Search output"
+                  onPress={() => setSearch(searching === null ? "" : null)}
+                  style={({ pressed }) => [styles.action, pressed && styles.pressed]}
+                >
+                  <Icon name="search" size={19} color={searching !== null ? colors.accent : colors.text} />
+                </Pressable>
               )}
-              {screenFeature ? (
-                <IconButton
-                  grouped
-                  icon="terminal"
-                  label="Terminal view"
-                  hint="Shows the pane's screen instead of its blocks"
-                  pressed={pinned}
-                  active={pinned}
-                  onPress={() => setTermView((v) => !v)}
-                />
-              ) : null}
-            </GlassGroup>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="More"
+                accessibilityState={{ expanded: menu }}
+                onPress={() => setMenu((m) => !m)}
+                style={({ pressed }) => [styles.action, pressed && styles.pressed]}
+              >
+                <Icon name="more" size={19} color={colors.text} />
+              </Pressable>
+            </View>
           )}
         </View>
-        {loc ? (
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            style={styles.tabStrip}
-            contentContainerStyle={styles.tabs}
-            accessibilityRole="tablist"
-            accessibilityLabel="Tabs"
-          >
-            {loc.window.tabs.map((t, i) => {
-              const on = t === loc.tab;
-              const failed = tabState(t) === "failed";
-              const go = tabPane(t);
-              return (
-                <Pressable
-                  key={`${i}:${t.index}`}
-                  accessibilityRole="tab"
-                  accessibilityState={{ selected: on }}
-                  accessibilityLabel={[tabTitle(t), t.panes.length > 1 ? `${t.panes.length} panes` : null, failed ? "a command failed" : null]
-                    .filter(Boolean)
-                    .join(", ")}
-                  onPress={() => !on && goPane(go)}
-                  hitSlop={{ top: 2, bottom: 6 }}
-                  style={[styles.tab, on && styles.tabOn]}
-                >
-                  <Text style={[styles.tabText, on && styles.tabTextOn]} numberOfLines={1}>
-                    {tabTitle(t)}
-                    {on && t.panes.length > 1 ? <Text style={styles.tabCount}> {t.panes.length}</Text> : null}
-                    {failed ? <Text style={styles.tabFailed}> ●</Text> : null}
-                  </Text>
-                </Pressable>
-              );
-            })}
-          </ScrollView>
+        {loc && tab && !closed ? (
+          <View style={styles.pickRow}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={
+                "Pane " + paneNumber + " of " + tab.panes.length + ": " + pickName + (others ? ", " + others + " other" + (others === 1 ? "" : "s") + " need you" : "") + ". Switch pane"
+              }
+              accessibilityActions={pagerActions}
+              onAccessibilityAction={(e) => goPane(swipeTarget(tab, paneId, e.nativeEvent.actionName === "next" ? 1 : -1))}
+              hitSlop={{ top: 4, bottom: 4 }}
+              onPress={() => router.push({ pathname: "/panes", params: { key, pane: String(paneId) } })}
+              style={({ pressed }) => [styles.picker, pressed && styles.pressed]}
+            >
+              <Text style={[styles.pickMark, { color: mark?.claude ? CLAUDE_COLOR : colors.accent }]}>{mark?.mark}</Text>
+              <Text style={styles.pickName} numberOfLines={1}>
+                {pickName}
+              </Text>
+              {/* textMuted: the mockup's textDim is 4.3:1 on the picker's glass (palette.ts) */}
+              <Text style={styles.pickPos}>
+                · {paneNumber}/{tab.panes.length}
+              </Text>
+              <View style={styles.flex} />
+              {others > 0 ? (
+                <View style={styles.pickWait}>
+                  <View style={styles.pickDot} />
+                  <Text style={styles.pickWaitText}>{others}</Text>
+                </View>
+              ) : null}
+              <Icon name="chevronDown" size={14} color={colors.textMuted} />
+            </Pressable>
+            {screenFeature ? (
+              <Pressable
+                {...toggleA11y(pinned)}
+                accessibilityLabel="Terminal view"
+                accessibilityHint="Shows the pane's screen instead of its blocks"
+                hitSlop={{ top: 4, bottom: 4 }}
+                onPress={() => {
+                  say(pinned ? "Back to blocks" : "Terminal view on");
+                  setTermView((v) => !v);
+                }}
+                style={({ pressed }) => [styles.screenButton, pinned && styles.screenButtonOn, pressed && styles.pressed]}
+              >
+                <Icon name="terminal" size={17} color={pinned ? colors.accent : colors.textMuted} />
+              </Pressable>
+            ) : null}
+          </View>
         ) : null}
       </View>
-      {strip ? <View style={styles.pager}>{strip}</View> : null}
-      {loc?.pane.waiting && status === "open" ? (
+      {host && status !== "open" ? (
+        <Text style={styles.connLine} accessibilityLiveRegion="polite">
+          {conn!.label}
+        </Text>
+      ) : null}
+      {waiting && status === "open" && !asking ? (
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={`${askingTitle(loc.pane.waiting, program)}: ${loc.pane.waiting.prompt}`}
+          accessibilityLabel={askingTitle(waiting, program) + ": " + waiting.prompt}
           accessibilityHint="Opens the question"
           onPress={() => router.push({ pathname: "/answer", params: { key, pane: String(paneId), from: "pane" } })}
           style={({ pressed }) => [styles.asking, pressed && styles.pressed]}
         >
           <View style={styles.askingDot} />
           <Text style={styles.askingText} numberOfLines={1}>
-            {askingTitle(loc.pane.waiting, program)}: {loc.pane.waiting.prompt}
+            {askingTitle(waiting, program)}: {waiting.prompt}
           </Text>
           <Text style={styles.askingLink}>Answer</Text>
         </Pressable>
@@ -414,19 +455,23 @@ export default function PaneScreen() {
       {host?.notice ? <ErrorText style={styles.notice}>{host.notice}</ErrorText> : null}
       {error ? <ErrorText style={styles.notice}>{error}</ErrorText> : null}
       {host && fullScreen && !closed ? (
-        <View style={[styles.fill, { paddingBottom: keyboard ? 0 : Math.max(0, insets.bottom - 12) }]} {...swipe.panHandlers}>
-          <TerminalView
-            hostKey={key}
-            paneId={paneId}
-            screen={screen}
-            operate={operate}
-            canType={hasFeature(host, "text")}
-            online={status === "open"}
-            running={running !== null}
-            program={program}
-            pinned={pinned}
-          />
-        </View>
+        <>
+          <View style={[styles.fill, { paddingBottom: bareScreen ? 0 : bottomInset }]} {...swipe.panHandlers}>
+            <TerminalView
+              hostKey={key}
+              paneId={paneId}
+              screen={screen}
+              operate={operate}
+              canType={hasFeature(host, "text")}
+              online={status === "open"}
+              running={running !== null}
+              program={program}
+              pinned={pinned}
+              bare={bareScreen}
+            />
+          </View>
+          {bareScreen ? footer : null}
+        </>
       ) : (
         <>
           {searching !== null ? (
@@ -444,7 +489,7 @@ export default function PaneScreen() {
                 style={styles.searchInput}
               />
               <Text style={styles.searchCount} accessibilityLiveRegion="polite">
-                {searching.trim() === "" ? "" : `${shownBlocks} of ${blocks.length}`}
+                {searching.trim() === "" ? "" : shownBlocks + " of " + blocks.length}
               </Text>
             </View>
           ) : null}
@@ -455,7 +500,7 @@ export default function PaneScreen() {
               <Text style={styles.closedText} accessibilityLiveRegion="polite">
                 This pane has closed.
               </Text>
-              <Button label="Go to Now" onPress={() => router.dismissTo("/")} />
+              <Button label="Go to Computers" onPress={() => router.dismissTo("/")} />
             </View>
           ) : !state ? (
             <Text style={styles.empty} accessibilityLiveRegion="polite">
@@ -492,22 +537,13 @@ export default function PaneScreen() {
                   </View>
                 ) : item.block.state === "done" && item.block.exit !== null && item.block.exit !== 0 ? (
                   <View style={styles.cardGap}>
-                    {/* keyed: a recycled card must not keep another block's "All N lines" */}
+                    {/* keyed: a recycled card must not keep another block's state */}
                     <FailedCard key={item.block.id} block={item.block} onActions={onActions} onRunAgain={operate ? onRunAgain : undefined} />
                   </View>
                 ) : (
-                  <BlockView
-                    block={item.block}
-                    expanded={expanded.has(item.block.id)}
-                    onToggle={toggle}
-                    onActions={onActions}
-                    earlier={earlier?.[item.block.id]}
-                    canLoadEarlier={canLoadEarlier}
-                    onLoadEarlier={onLoadEarlier}
-                    wrap={wrap}
-                    notify={isAsked(s, key, paneId, item.block.command)}
-                    onBell={onBell}
-                  />
+                  <View style={styles.cardGap}>
+                    <BlockView key={item.block.id} block={item.block} onActions={onActions} wrap={wrap} />
+                  </View>
                 )
               }
               ListHeaderComponent={closed ? null : header}
@@ -524,75 +560,198 @@ export default function PaneScreen() {
               accessibilityLabel="Command blocks, newest at the bottom"
             />
           </View>
-          {closed ? null : host && operate ? (
-            // the board's 30 pt under the command line: the home indicator's inset, less the
-            // command line's own 8 pt
-            <View style={{ paddingBottom: keyboard ? 0 : Math.max(0, insets.bottom - 12), backgroundColor: colors.chrome }}>
-              <Composer
-                hostKey={key}
-                paneId={paneId}
-                running={running}
-                online={status === "open"}
-                chips={promptChips(loc?.pane ?? null, state, hasFeature(host, "git"))}
-                chipMenus={hasFeature(host, "chips")}
-                complete={hasFeature(host, "complete") && operate}
-                recent={recent}
-                label={title}
-                canType={hasFeature(host, "text")}
-              />
-            </View>
-          ) : host ? (
-            <Text style={[styles.viewOnly, { paddingBottom: insets.bottom + 10 }]}>View only: this device cannot run commands here.</Text>
-          ) : null}
+          {footer}
         </>
       )}
+      {menu ? (
+        <>
+          <Pressable accessibilityRole="button" accessibilityLabel="Close menu" onPress={() => setMenu(false)} style={StyleSheet.absoluteFill} />
+          <View accessibilityRole="menu" accessibilityLabel="Pane options" style={[styles.menu, { top: headerPad + 50 }]}>
+            <MenuSwitch
+              icon="wrapOn"
+              title="Wrap long lines"
+              hint="Off: wide output scrolls sideways"
+              on={wrap}
+              onPress={() => {
+                fleet.setPaneWrap(key, paneId, !wrap);
+                say(wrap ? "Long lines scroll sideways" : "Wrapping long lines");
+              }}
+            />
+            <MenuSwitch
+              icon="bell"
+              title="Notifications"
+              hint="Finished, failed and questions here"
+              on={notifOn}
+              last
+              onPress={() => {
+                void fleet.setHostNotifications(key, !notifOn);
+                say(notifOn ? "Notifications off for this computer" : "Notifications on for this computer");
+              }}
+            />
+          </View>
+        </>
+      ) : null}
+      {toast ? (
+        <View pointerEvents="none" style={[styles.toastWrap, { top: headerPad + 94 }]}>
+          <Text style={styles.toast} accessibilityLiveRegion="polite">
+            {toast}
+          </Text>
+        </View>
+      ) : null}
     </KeyboardAvoidingView>
+  );
+}
+
+/** One of the ⋯ menu's switches: an icon, the label and what it does, the 40 x 24 switch. */
+function MenuSwitch({
+  icon,
+  title,
+  hint,
+  on,
+  last,
+  onPress,
+}: {
+  icon: "wrapOn" | "bell";
+  title: string;
+  hint: string;
+  on: boolean;
+  last?: boolean;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="switch"
+      accessibilityLabel={title}
+      accessibilityHint={hint}
+      accessibilityState={{ checked: on }}
+      onPress={onPress}
+      style={({ pressed }) => [styles.menuRow, !last && styles.menuRule, pressed && styles.pressed]}
+    >
+      <Icon name={icon} size={20} color={colors.text} />
+      <View style={styles.menuText}>
+        <Text style={styles.menuTitle}>{title}</Text>
+        <Text style={styles.menuHint}>{hint}</Text>
+      </View>
+      <View style={[styles.track, { backgroundColor: on ? colors.accent : colors.borderStrong }]}>
+        <View style={[styles.knob, { left: on ? 18 : 2 }]} />
+      </View>
+    </Pressable>
   );
 }
 
 const styles = StyleSheet.create({
   fill: { flex: 1, backgroundColor: colors.bg },
-  pressed: { opacity: 0.7 },
-  // the P3 Pane board's header: back, the computer, search; the tab strip under it
   flex: { flex: 1 },
-  // the Pane board's glass header: back badge, the computer in a pill, the actions' pill
-  header: { backgroundColor: colors.chrome, paddingHorizontal: 12 },
-  headerRule: { borderBottomWidth: 1, borderBottomColor: colors.hairline },
+  pressed: { opacity: 0.7 },
+  // the Pane board's header: chrome, 12 pt gutter, 10 pt between its two rows, a hairline under
+  header: { backgroundColor: colors.chrome, paddingHorizontal: 12, paddingBottom: 10, gap: 10, borderBottomWidth: 1, borderBottomColor: colors.hairline },
   headerRow: { flexDirection: "row", alignItems: "center", gap: 8 },
-  titlePill: {
-    flexShrink: 1,
-    height: 40,
-    paddingHorizontal: 16,
-    justifyContent: "center",
-    borderRadius: 20,
+  glass: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     backgroundColor: colors.glass,
     borderWidth: 1,
     borderColor: colors.glassRim,
-  },
-  hostName: { fontFamily: ui(600), color: colors.textBright, fontSize: 15 },
-  // the strip reaches 6 pt below the 36 pt tabs (iOS takes no touch outside it): a 44 pt touch
-  tabStrip: { marginBottom: -6 },
-  tabs: { gap: 4, paddingTop: 6, paddingBottom: 6 },
-  tab: { height: 36, paddingHorizontal: 12, justifyContent: "center", borderBottomWidth: 2, borderBottomColor: "transparent" },
-  tabOn: { borderBottomColor: colors.accent },
-  tabText: { fontFamily: ui(400), color: colors.textMuted, fontSize: 14 },
-  tabTextOn: { fontFamily: ui(600), color: colors.textBright },
-  tabCount: { fontFamily: ui(400), color: colors.textMuted },
-  tabFailed: { color: colors.error },
-  pager: {
-    paddingVertical: 8,
     alignItems: "center",
+    justifyContent: "center",
+  },
+  badge: {
+    position: "absolute",
+    top: -3,
+    right: -3,
+    minWidth: 18,
+    height: 18,
+    paddingHorizontal: 4,
+    borderRadius: 9,
+    backgroundColor: colors.warning,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  badgeText: { fontFamily: ui(600), color: colors.bg, fontSize: 11 },
+  titleButton: { flex: 1, minWidth: 0, minHeight: 44, justifyContent: "center", paddingHorizontal: 6 },
+  titleLine: { flexDirection: "row", alignItems: "center", gap: 4 },
+  title: { flexShrink: 1, fontFamily: ui(600), color: colors.textBright, fontSize: 17 },
+  subtitle: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12 },
+  actions: { height: 44, flexDirection: "row", borderRadius: 22, backgroundColor: colors.glass, borderWidth: 1, borderColor: colors.glassRim },
+  action: { width: 44, height: 42, alignItems: "center", justifyContent: "center" },
+  pickRow: { flexDirection: "row", alignItems: "center", gap: 6 },
+  picker: {
+    flex: 1,
+    minWidth: 0,
+    height: 36,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingLeft: 12,
+    paddingRight: 10,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: colors.glassRim,
+    backgroundColor: "#ffffff0f",
+  },
+  pickMark: { fontFamily: mono, fontSize: 13 },
+  pickName: { flexShrink: 1, fontFamily: ui(500), color: colors.textBright, fontSize: 13 },
+  pickPos: { fontFamily: ui(500), color: colors.textMuted, fontSize: 13 },
+  pickWait: { flexDirection: "row", alignItems: "center", gap: 5 },
+  pickDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: colors.warning },
+  pickWaitText: { fontFamily: ui(400), color: colors.warning, fontSize: 12 },
+  screenButton: {
+    width: 44,
+    height: 36,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: colors.glassRim,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  screenButtonOn: { borderColor: `${colors.accent}55`, backgroundColor: tints.accentBadge },
+  connLine: {
+    fontFamily: ui(400),
+    color: colors.warning,
+    fontSize: 12,
+    textAlign: "center",
+    paddingVertical: 6,
     backgroundColor: colors.chrome,
     borderBottomWidth: 1,
     borderBottomColor: colors.hairline,
   },
-  pagerRow: { flexDirection: "row", alignItems: "center", gap: 6 },
-  pagerText: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12 },
-  dots: { flexDirection: "row", gap: 4, marginLeft: 6 },
-  pageDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: "#ffffff38" },
-  pageDotOn: { width: 14, backgroundColor: colors.accent },
-  cardGap: { paddingVertical: 2 },
-  // the pane waits for the user: its question, one tap from the answer
+  // the ⋯ menu: 280 wide under the button, 14 pt radius, #2c2c30 with a soft shadow
+  menu: {
+    position: "absolute",
+    right: 12,
+    width: 280,
+    borderRadius: 14,
+    backgroundColor: "#2c2c30",
+    borderWidth: 1,
+    borderColor: colors.glassRim,
+    overflow: "hidden",
+    shadowColor: "#000000",
+    shadowOpacity: 0.6,
+    shadowRadius: 20,
+    shadowOffset: { width: 0, height: 16 },
+    elevation: 16,
+  },
+  menuRow: { minHeight: 56, flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 14 },
+  menuRule: { borderBottomWidth: 1, borderBottomColor: colors.hairline },
+  menuText: { flex: 1, gap: 2, paddingVertical: 8 },
+  menuTitle: { fontFamily: ui(400), color: colors.textBright, fontSize: 15 },
+  menuHint: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12 },
+  track: { width: 40, height: 24, borderRadius: 12 },
+  knob: { position: "absolute", top: 2, width: 20, height: 20, borderRadius: 10, backgroundColor: colors.textBright },
+  toastWrap: { position: "absolute", left: 0, right: 0, alignItems: "center" },
+  toast: {
+    fontFamily: ui(500),
+    color: colors.bg,
+    fontSize: 14,
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderRadius: 20,
+    overflow: "hidden",
+    backgroundColor: colors.textBright,
+  },
+  cardGap: { paddingHorizontal: 12, paddingVertical: 4 },
+  // a question the card does not answer (a password, input, a view-only device): one tap to the answer page
   asking: {
     flexDirection: "row",
     alignItems: "center",
@@ -606,7 +765,7 @@ const styles = StyleSheet.create({
   askingDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.warning },
   askingText: { flex: 1, fontFamily: ui(400), color: colors.textBright, fontSize: 13 },
   askingLink: { fontFamily: ui(400), color: colors.accent, fontSize: 13 },
-  listContent: { paddingTop: 6, paddingBottom: 6 },
+  listContent: { paddingTop: 6, paddingBottom: 4 },
   older: {
     alignSelf: "center",
     minHeight: 36,

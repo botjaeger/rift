@@ -1,26 +1,20 @@
 import { StyleSheet, Text, View } from "react-native";
 import type { Avatar as AvatarModel } from "@/avatar";
-import type { HostMark } from "@/now";
-import { colors, monoBold, tint, ui } from "./theme";
+import { colors, monoBold, monoMedium, tint, tints, ui } from "./theme";
 
 /**
- * A pane's round mark (the Computers, Host and Now boards): the prompt mark `>_`, or Claude
- * Code's ✳, in the avatar's colour on an 18 % tint of it; muted, in grey (Now's idle rows).
- * With `mark` (Now, several computers), the computer's monogram sits on its lower right in the
- * computer's colour, rimmed by `ground`. Decorative: the row around it is labelled.
+ * A pane's round mark (the Computers and Host boards): the prompt mark `>_`, or Claude Code's
+ * ✳, in the avatar's colour on an 18 % tint of it; muted, in grey. Decorative: the row around it
+ * is labelled.
  */
 export function Avatar({
   avatar,
   size = 36,
-  mark,
   muted,
-  ground = colors.surface,
 }: {
   avatar: AvatarModel;
   size?: number;
-  mark?: HostMark | null;
   muted?: boolean;
-  ground?: string;
 }) {
   const color = muted ? colors.textMuted : avatar.color;
   return (
@@ -33,34 +27,46 @@ export function Avatar({
           {avatar.glyph ?? ">_"}
         </Text>
       </View>
-      {mark ? (
-        <View style={[styles.mark, { backgroundColor: mark.color, borderColor: ground }]}>
-          <Text style={styles.markText} allowFontScaling={false}>
-            {mark.short}
-          </Text>
-        </View>
-      ) : null}
     </View>
   );
 }
+
+/** The coding agents' brand colour (the Computers mockup's ✳ tile). */
+export const AGENT_COLOR = "#d97757";
 
 const styles = StyleSheet.create({
   wrap: { flexShrink: 0 },
   avatar: { alignItems: "center", justifyContent: "center" },
   glyph: { fontFamily: ui(600) },
   prompt: { fontFamily: monoBold, letterSpacing: -0.5 },
-  // the computer's monogram: 16 pt high, a 2 pt rim of the row's ground
-  mark: {
-    position: "absolute",
-    right: -4,
-    bottom: -3,
-    minWidth: 18,
-    height: 16,
-    paddingHorizontal: 3,
-    borderRadius: 8,
-    borderWidth: 2,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  markText: { fontFamily: ui(600), fontSize: 8.5, letterSpacing: 0.2, color: colors.bg },
+  tile: { alignItems: "center", justifyContent: "center", flexShrink: 0 },
+  tileGlyph: { fontFamily: ui(500), fontSize: 20, color: AGENT_COLOR },
+  tilePrompt: { fontFamily: monoMedium, fontSize: 14, color: colors.accent },
 });
+
+
+/**
+ * A tab's rounded-square tile (the Computers and Tabs boards): ✳ in the agent colour on a
+ * 12 % tint of it for a coding agent, `>_` in the accent on its tint for a shell. Decorative: the
+ * row around it is labelled.
+ */
+export function Tile({ agent, size = 40, radius = 12, promptSize = 14 }: { agent: boolean; size?: number; radius?: number; promptSize?: number }) {
+  return (
+    <View
+      style={[
+        styles.tile,
+        { width: size, height: size, borderRadius: radius, backgroundColor: agent ? `${AGENT_COLOR}1f` : tints.accentBadge },
+      ]}
+      accessibilityElementsHidden
+      importantForAccessibility="no-hide-descendants"
+    >
+      <Text
+        style={agent ? styles.tileGlyph : [styles.tilePrompt, { fontSize: promptSize }]}
+        allowFontScaling={false}
+      >
+        {agent ? "\u2733\uFE0E" : ">_"}
+      </Text>
+    </View>
+  );
+}
+

@@ -7,6 +7,7 @@ import {
   StyleSheet,
   Text,
   View,
+  type GestureResponderEvent,
   type LayoutChangeEvent,
   type TextStyle,
 } from "react-native";
@@ -21,6 +22,7 @@ import {
   type InputBatcher,
 } from "@/keyboard";
 import { SubmitAuthHold } from "@/lock";
+import { clampZoom, isDoubleTap, keptZoom, pinchZoom, touchDistance, zoomPercent, zoomStep } from "@/paneView";
 import type { ScreenState } from "@/protocol/store";
 import { RUN_BOLD, RUN_ITALIC, RUN_STRIKE, RUN_UNDERLINE, type ScreenRun } from "@/protocol/types";
 import { authenticate, fleet, useApp } from "@/runtime";
@@ -86,12 +88,17 @@ const Row = memo(function Row({
   );
 });
 
-/** The screen as monospace rows, fitted to the width (7 to 14 pt), scrolling sideways when wider. */
-function Grid({ screen }: { screen: ScreenState }) {
+/**
+ * The screen as monospace rows, fitted to the width (7 to 14 pt) and scaled by the pinch zoom
+ * (60 to 200 %), scrolling sideways when wider.
+ */
+function Grid({ screen, zoom }: { screen: ScreenState; zoom: number }) {
   const [width, setWidth] = useState(0);
   const onLayout = (e: LayoutChangeEvent) => setWidth(e.nativeEvent.layout.width);
-  const { fontSize, scroll } = fitFont(width - PADDING_X * 2, screen.cols);
+  const fit = fitFont(width - PADDING_X * 2, screen.cols);
+  const fontSize = Math.round(fit.fontSize * zoom * 10) / 10;
   const rowWidth = Math.ceil(screen.cols * fontSize * CELL_RATIO) + 2;
+  const scroll = fit.scroll || rowWidth > width - PADDING_X * 2;
   const [cursorRow, cursorCol] = screen.cursor ?? [-1, -1];
   const rows = (
     <View>
@@ -130,6 +137,7 @@ export function TerminalView({
   running,
   program,
   pinned,
+  bare,
 }: {
   hostKey: string;
   paneId: number;
@@ -144,6 +152,8 @@ export function TerminalView({
   program: string;
   /** Shown by the header's Terminal view switch, not by a full-screen program. */
   pinned?: boolean;
+  /** The pane's command line is drawn under the screen (the Pane board): no note, keys or keyboard here. */
+  bare?: boolean;
 }) {
   const s = useApp();
   const capture = useRef<KeyCaptureHandle>(null);
@@ -247,13 +257,81 @@ export function TerminalView({
     });
   const onOpen = useOpenShell(hostKey, paneId, setError);
 
-  const typing = operate && canType;
+  const typing = operate && canType && !bare;
+
+  // Pinch to zoom, double-tap to reset (the Pane board); kept for the app's run
+  const [zoom, setZoomState] = useState(keptZoom.value);
+  const setZoom = (z: number) => {
+    const c = clampZoom(z);
+    keptZoom.value = c;
+    setZoomState(c);
+  };
+  const pinch = useRef<{ distance: number; zoom: number } | null>(null);
+  const [pinching, setPinching] = useState(false);
+  const tap = useRef<{ x: number; y: number; moved: boolean } | null>(null);
+  const lastTap = useRef<number | null>(null);
+  const onTouchStart = (e: GestureResponderEvent) => {
+    const t = e.nativeEvent.touches;
+    if (t.length === 2) {
+      pinch.current = { distance: touchDistance(t[0]!, t[1]!), zoom };
+      tap.current = null;
+      setPinching(true);
+    } else if (t.length === 1) tap.current = { x: t[0]!.pageX, y: t[0]!.pageY, moved: false };
+  };
+  const onTouchMove = (e: GestureResponderEvent) => {
+    const t = e.nativeEvent.touches;
+    if (t.length === 2 && pinch.current) setZoom(pinchZoom(pinch.current, touchDistance(t[0]!, t[1]!)));
+    else if (t.length === 1 && tap.current && Math.hypot(t[0]!.pageX - tap.current.x, t[0]!.pageY - tap.current.y) > 10) tap.current.moved = true;
+  };
+  const onTouchEnd = (e: GestureResponderEvent) => {
+    const left = e.nativeEvent.touches.length;
+    if (pinch.current && left < 2) {
+      pinch.current = null;
+      lastTap.current = null;
+      setPinching(false);
+    } else if (left === 0 && tap.current && !tap.current.moved) {
+      const now = Date.now();
+      if (isDoubleTap(lastTap.current, now)) {
+        lastTap.current = null;
+        setZoom(1);
+      } else lastTap.current = now;
+    }
+    if (left === 0) tap.current = null;
+  };
+  const zoomRow = (
+    <View style={styles.zoomRow}>
+      <Text style={styles.zoomHint}>Pinch to zoom · double-tap to reset</Text>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Smaller text"
+        accessibilityState={{ disabled: zoom <= 0.6 }}
+        onPress={() => setZoom(zoomStep(zoom, -1))}
+        hitSlop={6}
+        style={({ pressed }) => [styles.zoomButton, pressed && styles.pressed]}
+      >
+        <Text style={styles.zoomGlyph}>−</Text>
+      </Pressable>
+      <Text style={styles.zoomValue} accessibilityLabel={`Zoom ${zoomPercent(zoom)}`}>
+        {zoomPercent(zoom)}
+      </Text>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Larger text"
+        accessibilityState={{ disabled: zoom >= 2 }}
+        onPress={() => setZoom(zoomStep(zoom, 1))}
+        hitSlop={6}
+        style={({ pressed }) => [styles.zoomButton, pressed && styles.pressed]}
+      >
+        <Text style={styles.zoomGlyph}>+</Text>
+      </Pressable>
+    </View>
+  );
   const label = screen
     ? `Terminal screen, ${screen.cols} columns by ${screen.rows} rows${screen.alt ? ", full-screen program" : ""}${screen.stale ? ", not up to date" : ""}`
     : "Terminal screen";
 
   const grid = screen ? (
-    <Grid screen={screen} />
+    <Grid screen={screen} zoom={zoom} />
   ) : (
     <Text style={styles.empty} accessibilityLiveRegion="polite">
       {online ? "Waiting for the screen…" : "Waiting for the computer…"}
@@ -261,7 +339,7 @@ export function TerminalView({
   );
 
   return (
-    <View style={styles.fill}>
+    <View style={styles.fill} onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd} onTouchCancel={onTouchEnd}>
       {typing ? (
         // the label stays on the ScrollView: on the capture view TalkBack would read the
         // screen as one element instead of its rows
@@ -273,7 +351,8 @@ export function TerminalView({
           onFocusChange={setFocused}
           style={styles.fill}
         >
-          <ScrollView style={styles.fill} accessibilityLabel={label}>
+          <ScrollView style={styles.fill} accessibilityLabel={label} scrollEnabled={!pinching}>
+            {zoomRow}
             {/* not one element for screen readers: they read the rows */}
             <Pressable onPress={() => capture.current?.focus()} accessible={false}>
               {grid}
@@ -281,18 +360,21 @@ export function TerminalView({
           </ScrollView>
         </KeyCaptureView>
       ) : (
-        <ScrollView style={styles.fill} accessibilityLabel={label}>
+        <ScrollView style={styles.fill} accessibilityLabel={label} scrollEnabled={!pinching}>
+          {zoomRow}
           {grid}
         </ScrollView>
       )}
-      <Text style={styles.note}>
-        {pinned
-          ? "Terminal view: the pane's screen as it is. The terminal button shows blocks again."
-          : operate
-            ? `Keys go straight to ${program}. When it quits, the pane shows blocks again.`
-            : `${program} is full screen. When it quits, the pane shows blocks again.`}
-      </Text>
-      {operate ? (
+      {bare ? null : (
+        <Text style={styles.note}>
+          {pinned
+            ? "Terminal view: the pane's screen as it is. The terminal button shows blocks again."
+            : operate
+              ? `Keys go straight to ${program}. When it quits, the pane shows blocks again.`
+              : `${program} is full screen. When it quits, the pane shows blocks again.`}
+        </Text>
+      )}
+      {bare ? null : operate ? (
         <View style={styles.bar} accessibilityLabel="Keys">
           {atPrompt ? (
             <WarningText>This pane is at its prompt: typed text goes to programs only.</WarningText>
@@ -373,6 +455,12 @@ const styles = StyleSheet.create({
     paddingBottom: 8,
     gap: 8,
   },
+  // the Pane board's zoom row: the hint, − and + 32 pt, the percentage between
+  zoomRow: { flexDirection: "row", alignItems: "center", gap: 8, paddingTop: 10, paddingHorizontal: 12, paddingBottom: 2 },
+  zoomHint: { flex: 1, fontFamily: ui(400), color: colors.textMuted, fontSize: 12 },
+  zoomButton: { width: 32, height: 32, borderRadius: 16, borderWidth: 1, borderColor: colors.borderStrong, alignItems: "center", justifyContent: "center" },
+  zoomGlyph: { fontFamily: ui(400), color: colors.text, fontSize: 16 },
+  zoomValue: { fontFamily: mono, color: colors.text, fontSize: 12, minWidth: 44, textAlign: "center" },
   oldRift: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12 },
   kbd: {
     height: TOUCH,

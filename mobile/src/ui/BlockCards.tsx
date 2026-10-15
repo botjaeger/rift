@@ -1,125 +1,210 @@
 import * as Clipboard from "expo-clipboard";
-import { memo, useState } from "react";
-import { AccessibilityInfo, Pressable, StyleSheet, Text, View } from "react-native";
+import { memo, useEffect, useState, type ReactNode } from "react";
+import { AccessibilityInfo, Animated, Easing, Pressable, StyleSheet, Text, View, type StyleProp, type ViewStyle } from "react-native";
+import { failureMessage, lastLines, parseLogLines } from "@/paneView";
 import type { Block } from "@/protocol/types";
-import { Elapsed } from "./BlockView";
-import { tailLines } from "./format";
+import { formatClock } from "./format";
+import { Icon } from "./Icon";
 import { colors, mono, radius, tints, ui } from "./theme";
 import { toggleA11y } from "./toggle";
 
-/** Lines of output a failed or running card shows until "All N lines". */
-export const CARD_LINES = 4;
-
-const lineCount = (b: Block) => {
-  const body = b.output.endsWith("\n") ? b.output.slice(0, -1) : b.output;
-  return b.dropped + (body === "" ? 0 : body.split("\n").length);
-};
-
-function SmallButton({
+/** A small action under a card (the boards' 32 pt pill): an outline, the caution colour, or (`on`) the accent tint. */
+export function Pill({
   label,
-  onPress,
-  color = colors.text,
-  pressed: on,
   spoken,
+  icon,
+  color = colors.text,
+  border = colors.borderStrong,
+  on,
+  pressed: toggle,
+  onPress,
 }: {
   label: string;
-  onPress: () => void;
-  color?: string;
-  /** A toggle's state (aria-pressed): on draws it on the accent tint without a border. */
-  pressed?: boolean;
   spoken?: string;
+  /** Drawn before the label. */
+  icon?: ReactNode;
+  color?: string;
+  border?: string;
+  /** The accent tint ground (a bell that is on). */
+  on?: boolean;
+  /** A toggle's state (aria-pressed). */
+  pressed?: boolean;
+  onPress: () => void;
 }) {
   return (
     <Pressable
-      {...(on === undefined ? { accessibilityRole: "button" as const } : toggleA11y(on))}
+      {...(toggle === undefined ? { accessibilityRole: "button" as const } : toggleA11y(toggle))}
       accessibilityLabel={spoken ?? label}
       onPress={onPress}
-      hitSlop={{ top: 6, bottom: 6 }}
-      style={({ pressed }) => [styles.small, on ? styles.smallOn : styles.smallOutline, pressed && styles.pressed]}
+      hitSlop={{ top: 6, bottom: 6, left: 2, right: 2 }}
+      style={({ pressed }) => [styles.pill, { borderColor: border }, on && styles.pillOn, pressed && styles.pressed]}
     >
-      <Text style={[styles.smallText, { color: on ? colors.accent : color }]}>{label}</Text>
+      {icon}
+      <Text style={[styles.pillText, { color }]}>{label}</Text>
     </Pressable>
   );
 }
 
-/** "✓ 6 earlier commands succeeded · Show": the folded successes (now.ts `foldBlocks`). */
+/** "✓ 3 earlier commands succeeded … Show": the folded successes (now.ts `foldBlocks`), the board's 36 pt pill. */
 export function FoldRow({ count, onShow }: { count: number; onShow: () => void }) {
   return (
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={`${count} earlier commands succeeded`}
       accessibilityHint="Shows them"
-      hitSlop={{ top: 2, bottom: 2 }}
+      hitSlop={{ top: 4, bottom: 4 }}
       onPress={onShow}
       style={({ pressed }) => [styles.fold, pressed && styles.pressed]}
     >
-      <Text style={styles.foldCheck}>✓</Text>
+      <Icon name="check" size={14} color={colors.success} />
       <Text style={[styles.foldText, styles.foldMid]}>{count} earlier commands succeeded</Text>
-      <Text style={styles.foldText}>Show</Text>
+      <Text style={styles.foldShow}>Show</Text>
     </Pressable>
+  );
+}
+
+/** The running block's arc, turning once a second (still under Reduce Motion). */
+function Spinner() {
+  const [turn] = useState(() => new Animated.Value(0));
+  const [still, setStill] = useState(false);
+  useEffect(() => {
+    let live = true;
+    void AccessibilityInfo.isReduceMotionEnabled().then((r) => live && setStill(r));
+    return () => {
+      live = false;
+    };
+  }, []);
+  useEffect(() => {
+    if (still) return;
+    const loop = Animated.loop(Animated.timing(turn, { toValue: 1, duration: 1000, easing: Easing.linear, useNativeDriver: true }));
+    loop.start();
+    return () => loop.stop();
+  }, [still, turn]);
+  return (
+    <Animated.View
+      accessibilityElementsHidden
+      importantForAccessibility="no-hide-descendants"
+      style={[styles.spinner, { transform: [{ rotate: turn.interpolate({ inputRange: [0, 1], outputRange: ["0deg", "360deg"] }) }] }]}
+    />
+  );
+}
+
+/** A running block's clock "4:12", ticking locally between gateway updates. */
+export function Elapsed({ ms }: { ms: number }) {
+  const [base, setBase] = useState(ms);
+  const [extra, setExtra] = useState(0);
+  if (base !== ms) {
+    // A fresh duration from the gateway restarts the local count.
+    setBase(ms);
+    setExtra(0);
+  }
+  useEffect(() => {
+    const t = setInterval(() => setExtra((n) => n + 1000), 1000);
+    return () => clearInterval(t);
+  }, []);
+  return <Text style={[styles.status, { color: colors.accent }]}>{formatClock(ms + extra)}</Text>;
+}
+
+/**
+ * A block's card (the Pane board): surface, a 1 pt border in the state's colour at 33 %, no
+ * left edge. The top (command, status, one or two lines) opens the block sheet; the pills under
+ * it are their own buttons.
+ */
+export function CardFrame({
+  ground,
+  border,
+  label,
+  onOpen,
+  head,
+  children,
+  pills,
+}: {
+  ground: string;
+  border: string;
+  /** What the card is, for screen readers: "git pull, succeeded". */
+  label: string;
+  onOpen: () => void;
+  head: ReactNode;
+  children?: ReactNode;
+  pills?: ReactNode;
+}) {
+  const frame: StyleProp<ViewStyle> = [styles.card, { backgroundColor: ground, borderColor: border }];
+  return (
+    <View style={frame}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={`${label}: full output and actions`}
+        onPress={onOpen}
+        style={({ pressed }) => pressed && styles.pressed}
+      >
+        <View style={styles.head}>{head}</View>
+        {children ? <View style={styles.body}>{children}</View> : <View style={styles.bodyEmpty} />}
+      </Pressable>
+      {pills ? <View style={styles.pills}>{pills}</View> : null}
+    </View>
+  );
+}
+
+/** The command, wrapping, and its status badge (the board's `cmd` and `status`). */
+export function CardHead({ command, status, badge, color }: { command: string; status: string; badge?: string; color: string }) {
+  return (
+    <>
+      <Text style={styles.command}>{command || " "}</Text>
+      {status ? (
+        <Text style={[styles.status, { color }, badge ? { backgroundColor: badge } : null]}>{status}</Text>
+      ) : null}
+    </>
   );
 }
 
 interface CardProps {
   block: Block;
-  /** Opens the block's actions (a long press, as on any block). */
+  /** Opens the block sheet. */
   onActions: (id: number) => void;
 }
 
-/** The output a card shows: its last lines, or all it holds. */
-function CardOutput({ block, all }: { block: Block; all: boolean }) {
-  const { shown } = tailLines(block.output, all ? Infinity : CARD_LINES);
-  return shown === "" ? null : (
-    <Text style={styles.output} selectable>
-      {shown}
-    </Text>
-  );
-}
-
-/** A failed command (the P3 Pane board): its last lines, Run again (not for a view-only device: no `onRunAgain`), Copy error, All N lines. */
+/** A failed command: `✕ 127`, its message and path, Run again (not for a view-only device: no `onRunAgain`), Copy error. */
 export const FailedCard = memo(function FailedCard({ block, onActions, onRunAgain }: CardProps & { onRunAgain?: (b: Block) => void }) {
-  const [all, setAll] = useState(false);
-  const n = lineCount(block);
+  const fail = failureMessage(block.output);
   return (
-    <View style={[styles.card, styles.failed]}>
-      <Pressable
-        accessibilityRole="header"
-        accessibilityLabel={`Command ${block.command || "(empty)"}, failed, exit ${block.exit}`}
-        accessibilityActions={[{ name: "longpress", label: "Actions" }]}
-        onAccessibilityAction={() => onActions(block.id)}
-        onLongPress={() => onActions(block.id)}
-        style={styles.head}
-      >
-        <Text style={styles.command} numberOfLines={2}>
-          {block.command || " "}
-        </Text>
-        <Text style={styles.exit}>✕ {block.exit}</Text>
-      </Pressable>
-      <CardOutput block={block} all={all} />
-      <View style={styles.actions}>
-        {onRunAgain ? <SmallButton label="Run again" onPress={() => onRunAgain(block)} /> : null}
-        {/* nothing to copy from a command that printed nothing (`false`) */}
-        {block.output !== "" ? (
-          <SmallButton
-            label="Copy error"
-            spoken="Copy error: copies the output"
-            onPress={() =>
-              void Clipboard.setStringAsync(block.output).then(
-                () => AccessibilityInfo.announceForAccessibility("Output copied"),
-                () => AccessibilityInfo.announceForAccessibility("Could not copy the output"),
-              )
-            }
-          />
-        ) : null}
-        {n > CARD_LINES ? (
-          <SmallButton label={all ? "Fewer lines" : `All ${n.toLocaleString("en-US")} lines`} onPress={() => setAll((a) => !a)} />
-        ) : null}
-      </View>
-    </View>
+    <CardFrame
+      ground={colors.surface}
+      border={`${colors.error}55`}
+      label={`${block.command || "Command"}, failed, exit ${block.exit}${fail ? `, ${fail.text}` : ""}`}
+      onOpen={() => onActions(block.id)}
+      head={<CardHead command={block.command} status={`✕ ${block.exit}`} badge={tints.errorBadge} color={colors.textBright} />}
+      pills={
+        <>
+          {onRunAgain ? (
+            <Pill
+              label="Run again"
+              icon={<Icon name="rerun" size={14} color={colors.text} />}
+              onPress={() => onRunAgain(block)}
+            />
+          ) : null}
+          {/* nothing to copy from a command that printed nothing (`false`) */}
+          {block.output !== "" ? (
+            <Pill
+              label="Copy error"
+              spoken="Copy error: copies the output"
+              onPress={() =>
+                void Clipboard.setStringAsync(block.output).then(
+                  () => AccessibilityInfo.announceForAccessibility("Error copied"),
+                  () => AccessibilityInfo.announceForAccessibility("Could not copy the output"),
+                )
+              }
+            />
+          ) : null}
+        </>
+      }
+    >
+      {fail ? <Text style={styles.failText}>{fail.text}</Text> : null}
+      {fail?.path ? <Text style={styles.sub}>{fail.path}</Text> : null}
+    </CardFrame>
   );
 });
 
-/** The running command (the P3 Pane board): its last lines, Notify when done, Stop (control C; not for a view-only device: no `onStop`). */
+/** The running command: a spinner, its clock, the latest two lines, Stop (control C; not for a view-only device: no `onStop`) and the bell. */
 export const RunningCard = memo(function RunningCard({
   block,
   onActions,
@@ -127,56 +212,122 @@ export const RunningCard = memo(function RunningCard({
   onBell,
   onStop,
 }: CardProps & { notify: boolean; onBell: (b: Block, on: boolean) => void; onStop?: () => void }) {
+  const latest = lastLines(block.output, 2);
+  const logs = parseLogLines(latest);
   return (
-    <View style={[styles.card, styles.running]}>
-      <Pressable
-        accessibilityRole="header"
-        accessibilityLabel={`Command ${block.command || "(empty)"}, running`}
-        accessibilityActions={[{ name: "longpress", label: "Actions" }]}
-        onAccessibilityAction={() => onActions(block.id)}
-        onLongPress={() => onActions(block.id)}
-        style={styles.head}
-      >
-        <Text style={styles.command} numberOfLines={2}>
-          {block.command || " "}
-        </Text>
-        <Elapsed ms={block.duration_ms} bare />
-      </Pressable>
-      <CardOutput block={block} all={false} />
-      <View style={styles.actions}>
-        <SmallButton label="Notify when done" pressed={notify} onPress={() => onBell(block, !notify)} />
-        {onStop ? <SmallButton label="Stop" spoken="Stop, sends control C" color={colors.warning} onPress={onStop} /> : null}
-      </View>
-    </View>
+    <CardFrame
+      ground={tints.running}
+      border={`${colors.accent}55`}
+      label={`${block.command || "Command"}, running`}
+      onOpen={() => onActions(block.id)}
+      head={
+        <>
+          <Spinner />
+          <Text style={styles.command}>{block.command || " "}</Text>
+          <Elapsed ms={block.duration_ms} />
+        </>
+      }
+      pills={
+        <>
+          {onStop ? (
+            <Pill
+              label="Stop"
+              spoken="Stop, sends control C"
+              color={colors.warning}
+              border={`${colors.warning}66`}
+              icon={<Icon name="stop" size={12} color={colors.warning} />}
+              onPress={onStop}
+            />
+          ) : null}
+          <Pill
+            label={notify ? "Notifies when done" : "Notify when done"}
+            spoken="Notify when done"
+            pressed={notify}
+            on={notify}
+            // the accent's text on the tint over the running ground is 4.3:1, so the label stays bright
+            color={colors.textBright}
+            border={notify ? `${colors.accent}33` : colors.borderStrong}
+            icon={<Icon name={notify ? "bellFill" : "bell"} size={14} color={notify ? colors.accent : colors.text} />}
+            onPress={() => onBell(block, !notify)}
+          />
+        </>
+      }
+    >
+      {logs ? (
+        <>
+          {logs.source ? <Text style={styles.logSource}>{logs.source} · latest</Text> : null}
+          {logs.rows.map((r, i) => (
+            <View key={i} style={styles.logRow}>
+              <Text style={[styles.logLevel, { color: r.level === "WARN" || r.level === "ERROR" || r.level === "FATAL" ? colors.textBright : colors.accent }]}>
+                {r.level}
+              </Text>
+              <Text style={styles.logMessage} numberOfLines={1}>
+                {r.message}
+              </Text>
+              {r.time ? <Text style={styles.logTime}>{r.time}</Text> : null}
+            </View>
+          ))}
+        </>
+      ) : (
+        latest.map((l, i) => (
+          <Text key={i} style={styles.latest} numberOfLines={1}>
+            {l}
+          </Text>
+        ))
+      )}
+    </CardFrame>
   );
 });
 
 const styles = StyleSheet.create({
   pressed: { opacity: 0.7 },
   fold: {
-    marginHorizontal: 12,
-    minHeight: 40,
+    height: 36,
     flexDirection: "row",
     alignItems: "center",
-    gap: 10,
+    gap: 8,
     paddingHorizontal: 14,
-    borderRadius: 20,
+    borderRadius: 18,
     borderWidth: 1,
     borderColor: colors.hairline,
   },
-  foldCheck: { fontFamily: ui(400), color: colors.success, fontSize: 13 },
   foldText: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13 },
   foldMid: { flex: 1 },
-  card: { marginHorizontal: 12, borderRadius: radius.card, borderWidth: 1, paddingVertical: 10, paddingHorizontal: 12, gap: 6 },
-  failed: { backgroundColor: colors.surface, borderColor: `${colors.error}66` },
-  running: { backgroundColor: tints.running, borderColor: `${colors.accent}66` },
-  head: { flexDirection: "row", alignItems: "center", gap: 8 },
-  command: { flex: 1, fontFamily: mono, color: colors.textBright, fontSize: 13 },
-  exit: { fontFamily: mono, color: colors.textBright, fontSize: 11 },
-  output: { fontFamily: mono, color: colors.fg, fontSize: 12, lineHeight: 17.4 },
-  actions: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  small: { height: 32, paddingHorizontal: 12, borderRadius: 16, justifyContent: "center" },
-  smallOutline: { borderWidth: 1, borderColor: colors.borderStrong },
-  smallOn: { backgroundColor: tints.accentBadge },
-  smallText: { fontFamily: ui(400), fontSize: 12 },
+  foldShow: { fontFamily: ui(500), color: colors.accent, fontSize: 13 },
+  card: { borderRadius: radius.card, borderWidth: 1, overflow: "hidden" },
+  head: { flexDirection: "row", alignItems: "flex-start", gap: 8, paddingTop: 10, paddingHorizontal: 12 },
+  body: { gap: 4, paddingTop: 6, paddingBottom: 10, paddingHorizontal: 12 },
+  bodyEmpty: { height: 10 },
+  pills: { flexDirection: "row", flexWrap: "wrap", gap: 6, paddingHorizontal: 12, paddingBottom: 10 },
+  spinner: {
+    width: 14,
+    height: 14,
+    marginTop: 2,
+    borderRadius: 7,
+    borderWidth: 2.5,
+    borderColor: colors.accent,
+    borderLeftColor: "transparent",
+  },
+  command: { flex: 1, minWidth: 0, fontFamily: mono, color: colors.textBright, fontSize: 13, lineHeight: 18 },
+  status: { fontFamily: mono, fontSize: 12, lineHeight: 18, paddingHorizontal: 6, borderRadius: 4, overflow: "hidden", fontVariant: ["tabular-nums"] },
+  failText: { fontFamily: ui(400), color: colors.textBright, fontSize: 14, lineHeight: 19 },
+  sub: { fontFamily: mono, color: colors.textMuted, fontSize: 12 },
+  latest: { fontFamily: mono, color: colors.fg, fontSize: 13, lineHeight: 18 },
+  // the Pane board's log lines: source, then level · message · time
+  logSource: { fontFamily: ui(400), color: colors.fg, fontSize: 11 },
+  logRow: { flexDirection: "row", alignItems: "baseline", gap: 8 },
+  logLevel: { width: 38, fontFamily: ui(600), fontSize: 11 },
+  logMessage: { flex: 1, minWidth: 0, fontFamily: mono, color: colors.textBright, fontSize: 13, lineHeight: 18 },
+  logTime: { fontFamily: mono, color: colors.fg, fontSize: 12 },
+  pill: {
+    height: 32,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 12,
+    borderRadius: 16,
+    borderWidth: 1,
+  },
+  pillOn: { backgroundColor: tints.accentBadge },
+  pillText: { fontFamily: ui(500), fontSize: 13 },
 });

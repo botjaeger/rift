@@ -19,7 +19,11 @@ export function findPane(windows: Window[], paneId: number): PaneLocation | null
   return null;
 }
 
-export const tabTitle = (tab: Tab) => tab.title || `Tab ${tab.index + 1}`;
+/** A coding agent's status mark at the start of a title (Claude Code's ✳, its ◐ and braille spinners, Codex's •). */
+const STATUS_MARK = /^(?:[\u2733\u25d0-\u25d3\u2800-\u28ff\u2022\u00b7\s]|\ufe0e|\ufe0f)+/u;
+
+/** The tab's title without an agent's status mark ("✳ review" → "review"), else "Tab N". */
+export const tabTitle = (tab: Tab) => tab.title.replace(STATUS_MARK, "") || `Tab ${tab.index + 1}`;
 
 /** "rift · pane 2" (the pane boards: the pane number always). */
 export function paneTitle(loc: PaneLocation): string {

@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { redirectSystemPath } from "../src/app/+native-intent";
 import { reducePane } from "../src/protocol/store";
-import type { Block, Pane, Window } from "../src/protocol/types";
-import { findPane, paneBranch, paneTitle, runningCommand } from "../src/topology";
+import type { Block, Pane, Tab, Window } from "../src/protocol/types";
+import { findPane, paneBranch, paneTitle, runningCommand, tabTitle } from "../src/topology";
 
 const pane = (id: number, extra: Partial<Pane> = {}): Pane => ({
   id,
@@ -57,5 +57,23 @@ describe("deep links", () => {
     const link = "rift-remote://pair?a=10.0.0.5:7878&k=K&s=S&n=mac&p=operate";
     expect(redirectSystemPath({ path: link, initial: true })).toBe(`/pair?link=${encodeURIComponent(link)}`);
     expect(redirectSystemPath({ path: "/host/abc", initial: false })).toBe("/host/abc");
+  });
+});
+
+describe("tabTitle", () => {
+  const tab = (title: string, index = 0) => ({ title, index, panes: [] }) as unknown as Tab;
+  it("drops a coding agent's status mark from the title", () => {
+    expect(["✳ review", "◐ Code changes overview", "⠂ build", "✳\uFE0F RIFT"].map((t) => tabTitle(tab(t)))).toEqual([
+      "review",
+      "Code changes overview",
+      "build",
+      "RIFT",
+    ]);
+  });
+  it("keeps other titles, and names an untitled tab by its number", () => {
+    expect(tabTitle(tab("flow"))).toBe("flow");
+    expect(tabTitle(tab("C++ build"))).toBe("C++ build");
+    expect(tabTitle(tab("", 2))).toBe("Tab 3");
+    expect(tabTitle(tab("✳", 0))).toBe("Tab 1");
   });
 });

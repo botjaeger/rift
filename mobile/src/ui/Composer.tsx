@@ -26,7 +26,7 @@ import { insertedChar, plainPunctuation } from "./format";
 import { Icon } from "./Icon";
 import { ErrorText } from "./Notice";
 import { useOpenShell } from "./useOpenShell";
-import { colors, mono, TOUCH } from "./theme";
+import { colors, mono, TOUCH, tints, ui } from "./theme";
 import { toggleA11y } from "./toggle";
 
 /** Suggestions shown above the command line (the P3 Pane board). */
@@ -34,19 +34,19 @@ const MAX_SUGGESTIONS = 6;
 /** Wait this long after typing stops before asking the computer for completions. */
 const COMPLETE_DELAY_MS = 200;
 
-/** The folder line above the keys (the Pane board): the folder's path, the branch with its dirty dot. */
+/** The chips above the field (the Pane board): the folder's path, the branch with its dirty dot. */
 function folderLines(chips: PromptChips): { path: string; branch: string | null } | null {
   if (!chips.cwd) return null;
   const b = chips.branch;
-  return { path: chips.cwd, branch: b ? `${branchText(b)}${b.dirty ? " ●" : ""}` : null };
+  return { path: chips.cwd, branch: b ? `⎇ ${branchText(b)}${b.dirty ? " ●" : ""}` : null };
 }
 
 /**
- * The pane's command line (operate permission only; the P3 Pane board): suggestions (the
- * desktop's completions and this pane's history, feature `complete`; else its recent commands),
- * the folder line (the chip menus: folder, branch, changed files), ⌃, which shows the
- * control-key row (Settings › Keys) in place of the suggestions, and the round field with its
- * run button (Return runs too; through the Confirm sheet only with Settings › Ask before
+ * The pane's command line (operate permission only; the P3 Pane board): one row of chips, the
+ * folder and the branch (the chip menus: folder, branch, changed files) then the suggestions
+ * (the desktop's completions and this pane's history, feature `complete`; else its recent
+ * commands); ⌃, which shows the control-key row (Settings › Keys) above the field; and the
+ * round field with its run button (Return runs too; through the Confirm sheet only with Settings › Ask before
  * running on). A hardware
  * keyboard's ctrl/alt combinations, Escape, Tab and F-keys in the field go to the pane as keys.
  * While the host is not connected (`online` false) nothing can be sent; the draft stays editable.
@@ -250,53 +250,7 @@ export function Composer({
       onKey={onShortcut}
       style={styles.wrap}
     >
-      {folder ? (
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={`Folder ${chips.cwd}${chips.branch ? ` on ${chips.branch.name}` : ""}${chipMenus ? ", change" : ""}`}
-          accessibilityHint={chipMenus ? (chips.branch ? "Folder, branch or changed files" : "Opens the folder's sub-folders") : undefined}
-          accessibilityState={{ disabled: !chipMenus, ...(Platform.OS !== "ios" && menus.length > 1 ? { expanded: choosing } : {}) }}
-          disabled={!chipMenus}
-          onPress={pickMenu}
-          hitSlop={{ top: 12, bottom: 6 }}
-          style={({ pressed }) => [styles.folder, pressed && styles.pressed]}
-        >
-          <Icon name="folder" size={14} color={colors.textMuted} />
-          <Text style={styles.folderPath} numberOfLines={1} ellipsizeMode="head">
-            {folder.path}
-          </Text>
-          {folder.branch ? (
-            <Text style={styles.folderBranch} numberOfLines={1}>
-              {folder.branch}
-            </Text>
-          ) : null}
-        </Pressable>
-      ) : null}
-      {choosing && menus.length > 1 ? (
-        // keyed, as the suggestions below: without keys React reused one native strip for both,
-        // and the suggestions opened at the menu strip's sideways scroll, their first one cut off
-        <View key="menus" accessibilityRole="menu" accessibilityLabel={chipsSpoken(chips)}>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.suggestionStrip} contentContainerStyle={styles.suggestions}>
-            {menus.map((m) => (
-              <Pressable
-                key={m.menu}
-                accessibilityRole="menuitem"
-                accessibilityLabel={m.label}
-                onPress={() => {
-                  setChoosing(false);
-                  openMenu(m.menu);
-                }}
-                hitSlop={{ top: 6, bottom: 6 }}
-                style={({ pressed }) => [styles.suggestion, pressed && styles.pressed]}
-              >
-                <Text style={styles.suggestionText} numberOfLines={1}>
-                  {m.label}
-                </Text>
-              </Pressable>
-            ))}
-          </ScrollView>
-        </View>
-      ) : keys ? (
+      {keys && !(choosing && menus.length > 1) ? (
         <ControlRow
           ids={s.settings.controlKeys}
           sticky={sticky}
@@ -308,42 +262,94 @@ export function Composer({
           onEdit={() => router.push("/control-keys")}
           onHideKeyboard={keyboardUp ? () => Keyboard.dismiss() : undefined}
         />
-      ) : shown.length > 0 ? (
-        // a new first suggestion (a command just ran, a letter typed) starts the strip at its left end
-        <View key={`suggestions:${shown[0]}`} accessibilityRole="toolbar" accessibilityLabel="Suggestions">
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            style={styles.suggestionStrip}
-            contentContainerStyle={styles.suggestions}
-            keyboardShouldPersistTaps="always"
-          >
-            {shown.map((c) => (
-              <Pressable
-                key={c}
-                accessibilityRole="button"
-                accessibilityLabel={c}
-                accessibilityHint="Puts it in the command line"
-                onPress={() => fleet.setDraft(hostKey, paneId, c)}
-                hitSlop={{ top: 6, bottom: 6 }}
-                style={({ pressed }) => [styles.suggestion, pressed && styles.pressed]}
-              >
-                <Text style={styles.suggestionText} numberOfLines={1}>
-                  {c}
-                </Text>
-              </Pressable>
-            ))}
-          </ScrollView>
-        </View>
+      ) : null}
+      {folder || (choosing && menus.length > 1) || shown.length > 0 ? (
+        // keyed: without keys React reused one native strip for the menus and the suggestions,
+        // and the suggestions opened at the menu strip's sideways scroll, their first one cut off
+        <ScrollView
+          key={choosing && menus.length > 1 ? "menus" : `suggestions:${shown[0]}`}
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={styles.chipStrip}
+          contentContainerStyle={styles.chips}
+          keyboardShouldPersistTaps="always"
+          accessibilityRole="toolbar"
+          accessibilityLabel={choosing && menus.length > 1 ? chipsSpoken(chips) : "Folder, branch and suggestions"}
+        >
+          {folder ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Folder ${chips.cwd}${chips.branch ? ` on ${chips.branch.name}` : ""}${chipMenus ? ", change" : ""}`}
+              accessibilityHint={chipMenus ? (chips.branch ? "Folder, branch or changed files" : "Opens the folder's sub-folders") : undefined}
+              accessibilityState={{ disabled: !chipMenus, ...(Platform.OS !== "ios" && menus.length > 1 ? { expanded: choosing } : {}) }}
+              disabled={!chipMenus}
+              onPress={pickMenu}
+              hitSlop={{ top: 6, bottom: 6 }}
+              style={({ pressed }) => [styles.chip, styles.folderChip, pressed && styles.pressed]}
+            >
+              <Icon name="folder" size={13} color={colors.accent} />
+              <Text style={[styles.chipText, { color: colors.accent }]} numberOfLines={1} ellipsizeMode="head">
+                {folder.path}
+              </Text>
+            </Pressable>
+          ) : null}
+          {folder?.branch ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Branch ${chips.branch!.name}${chips.branch!.dirty ? ", has changes" : ""}${chipMenus ? ", switch" : ""}`}
+              accessibilityState={{ disabled: !chipMenus }}
+              disabled={!chipMenus}
+              onPress={() => openMenu("branches")}
+              hitSlop={{ top: 6, bottom: 6 }}
+              style={({ pressed }) => [styles.chip, styles.branchChip, pressed && styles.pressed]}
+            >
+              <Text style={[styles.chipText, { color: colors.success }]} numberOfLines={1}>
+                {folder.branch}
+              </Text>
+            </Pressable>
+          ) : null}
+          {choosing && menus.length > 1
+            ? menus.map((m) => (
+                <Pressable
+                  key={m.menu}
+                  accessibilityRole="menuitem"
+                  accessibilityLabel={m.label}
+                  onPress={() => {
+                    setChoosing(false);
+                    openMenu(m.menu);
+                  }}
+                  hitSlop={{ top: 6, bottom: 6 }}
+                  style={({ pressed }) => [styles.chip, styles.suggestion, pressed && styles.pressed]}
+                >
+                  <Text style={styles.chipText} numberOfLines={1}>
+                    {m.label}
+                  </Text>
+                </Pressable>
+              ))
+            : shown.map((c) => (
+                <Pressable
+                  key={c}
+                  accessibilityRole="button"
+                  accessibilityLabel={c}
+                  accessibilityHint="Puts it in the command line"
+                  onPress={() => fleet.setDraft(hostKey, paneId, c)}
+                  hitSlop={{ top: 6, bottom: 6 }}
+                  style={({ pressed }) => [styles.chip, styles.suggestion, pressed && styles.pressed]}
+                >
+                  <Text style={styles.chipText} numberOfLines={1}>
+                    {c}
+                  </Text>
+                </Pressable>
+              ))}
+        </ScrollView>
       ) : null}
       {shownError ? <ErrorText>{shownError}</ErrorText> : null}
       <View style={styles.inputRow}>
         <Pressable
           {...toggleA11y(keys)}
-          accessibilityLabel="Keys"
+          accessibilityLabel="Control keys"
           accessibilityHint="Shows the control keys above the command line"
           onPress={() => setKeys((k) => !k)}
-          hitSlop={2}
           style={({ pressed }) => [styles.round, keys && styles.roundOn, pressed && styles.pressed]}
         >
           <Text style={[styles.keysLabel, keys && { color: colors.accent }]}>⌃</Text>
@@ -371,10 +377,10 @@ export function Composer({
             accessibilityState={{ disabled: !canRun }}
             disabled={!canRun}
             onPress={() => void run()}
-            hitSlop={5}
+            hitSlop={4}
             style={({ pressed }) => [styles.send, canRun && styles.sendOn, pressed && styles.pressed]}
           >
-            <Icon name="run" size={16} color={canRun ? colors.bg : colors.textMuted} />
+            <Icon name="run" size={18} color={colors.bg} />
           </Pressable>
         </View>
       </View>
@@ -382,7 +388,7 @@ export function Composer({
   );
 }
 
-// The P3 Pane board's command line: chrome ground, 8 / 12 pt padding, 8 pt between rows.
+// The Pane board's command line: chrome ground, 8 / 12 pt padding, 8 pt between rows.
 const styles = StyleSheet.create({
   wrap: {
     backgroundColor: colors.chrome,
@@ -395,44 +401,35 @@ const styles = StyleSheet.create({
   },
   pressed: { opacity: 0.7 },
   // the strip reaches 6 pt past the 32 pt chips (a scroll view takes no touch outside it): a 44 pt touch
-  suggestionStrip: { marginVertical: -6 },
-  suggestions: { gap: 6, paddingVertical: 6 },
-  suggestion: {
-    height: 32,
-    paddingHorizontal: 10,
-    borderRadius: 16,
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.hairline,
-    justifyContent: "center",
-    maxWidth: 260,
-  },
-  suggestionText: { fontFamily: mono, color: colors.text, fontSize: 12 },
+  chipStrip: { marginVertical: -6, flexGrow: 0 },
+  chips: { gap: 6, paddingVertical: 6 },
+  // 32 pt chips, 8 pt radius, mono 12: the folder on the accent tint, the branch on the success tint, suggestions outlined
+  chip: { height: 32, paddingHorizontal: 10, borderRadius: 8, flexDirection: "row", alignItems: "center", gap: 5, maxWidth: 260 },
+  folderChip: { backgroundColor: tints.accentBadge },
+  branchChip: { backgroundColor: tints.successBadge },
+  suggestion: { borderWidth: 1, borderColor: colors.glassRim },
+  chipText: { fontFamily: mono, color: colors.text, fontSize: 12 },
   inputRow: { flexDirection: "row", gap: 8, alignItems: "center" },
-  // the folder line: 12 pt, its path cut at the start (the folder's own name is at the end)
-  folder: { alignSelf: "flex-start", maxWidth: "100%", flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 4 },
-  folderPath: { fontFamily: mono, color: colors.text, fontSize: 12, flexShrink: 1 },
-  folderBranch: { fontFamily: mono, color: colors.success, fontSize: 12, flexShrink: 0, maxWidth: "45%" },
-  // the board's 44 pt round buttons and the round field with its 34 pt run button
+  // the board's 44 pt round button and the round field with its 36 pt run button
   round: {
     width: TOUCH,
     height: TOUCH,
     borderRadius: TOUCH / 2,
     borderWidth: 1,
-    borderColor: colors.hairline,
+    borderColor: colors.glassRim,
     backgroundColor: colors.surface,
     alignItems: "center",
     justifyContent: "center",
   },
   roundOn: { borderColor: colors.accent },
-  keysLabel: { fontFamily: mono, color: colors.textMuted, fontSize: 15 },
+  keysLabel: { fontFamily: ui(500), color: colors.text, fontSize: 15 },
   field: {
     flex: 1,
     minWidth: 0,
     height: TOUCH,
     flexDirection: "row",
     alignItems: "center",
-    paddingLeft: 14,
+    paddingLeft: 16,
     paddingRight: 4,
     borderRadius: TOUCH / 2,
     borderWidth: 1,
@@ -440,6 +437,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.bg,
   },
   input: { flex: 1, minWidth: 0, height: TOUCH - 2, padding: 0, color: colors.textBright, fontFamily: mono, fontSize: 14 },
-  send: { width: 34, height: 34, borderRadius: 17, backgroundColor: colors.glassRim, alignItems: "center", justifyContent: "center" },
+  // the board dims the run button to 40 % while the field is empty
+  send: { width: 36, height: 36, borderRadius: 18, backgroundColor: `${colors.accent}66`, alignItems: "center", justifyContent: "center" },
   sendOn: { backgroundColor: colors.accent },
 });

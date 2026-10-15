@@ -773,33 +773,38 @@ line shows the addresses, or how many devices are connected.
   the alternate screen (tmux), look like programs and take typed text. The phone never resizes the pane. With a hardware
   keyboard, ctrl/alt combinations, Esc, Tab and F-keys pressed in the
   command field go to the pane too.
-- **Block actions, earlier output, control keys (Phase 3).** A finished
-  block's *···* runs it again, puts it in the command field (*Edit, then
-  run*), copies the command or its output, or shares the output; a running
-  one shows a bell instead (notify me when it finishes, on by default for
-  commands run from the phone) and a long press offers *Stop* (ctrl+c). A
+- **Block actions, earlier output, control keys (Phase 3).** A tap on a
+  block opens its sheet: it runs the command again, puts it in the command
+  field (*Edit*), or copies the command or its output; a running block's
+  sheet offers *Stop* (ctrl+c), and its card the *Notify when done* bell
+  (on by default for commands run from the phone). A
   block cut to its last 500 lines loads earlier output 500 lines at a time
   (up to 5,000 more; lines gone from the desktop's scrollback say so). The
   row of control keys is chosen, ordered (drag) and added to in Settings ›
-  Output › Keys; its *+tab* and *+pane* keys open a new tab in the pane's
+  Panes › Choose keys; its *+tab* and *+pane* keys open a new tab in the pane's
   window or split the pane on the desktop (starting in the pane's folder,
   with a toast naming the phone), and the phone goes to the new pane.
-- **Phone-first app.** Tabs *Now*, *Computers*, *Settings*. *Now* lists
-  what needs you, what runs (command, elapsed, latest line) and what
-  finished (failures first) on every connected computer; *Computers* lists
-  each computer with its tabs inline, each pane with a coloured avatar,
-  and a floating search for tabs and commands; a cold start reopens the
-  pane shown last. A pane shows the window's tabs as a strip and swipes between the
-  tab's panes; successes before the newest failure fold away, and the
-  failed and running commands are cards (Run again, Copy error, All N
-  lines; Notify when done, Stop). Its header's Terminal view shows the
-  pane's screen whatever runs. Above its command line: suggestions, a
-  folder line opening the chip menus, the key row (⌃; sticky ⌃ ⌥ ⇧,
-  Paste) and a round field with a run button. *Run* sends
-  at once; Settings › *Ask before running* (off by default) shows the
-  confirmation first. *Wrap long lines* (Settings › Output, and the pane's
-  header button for one pane) off lets each block's output scroll sideways.
-  The header's search filters the blocks. The folder line opens what the
+- **Phone-first app.** *Computers* is the home page (no tab bar); its gear
+  opens *Settings* and its **+** pairs a computer. *Computers* lists each
+  computer in a card (connection line, *New tab*, *Retry* or *Pair again*)
+  with its tabs, each with its state and time (*Needs you · 2m*, *Working
+  3:56*, *Idle 12m*); chips (*needs you*, *working*, *idle*) filter the tabs. With
+  one computer paired, an agent's question answers in place on its tab. A cold
+  start reopens the pane shown last. A pane's header title opens the *Tabs*
+  sheet (every tab of the computer, filtered by state) and its pane picker
+  the *Panes* sheet; a sideways swipe also moves between the tab's panes.
+  Successes before the newest failure fold away; blocks are cards with a thin
+  border in their state's colour (a table as a list, with *Raw*), failed ones
+  with *Run again* and *Copy error*, running ones with *Stop* and *Notify when
+  done*; a tap opens the block sheet. The header's *Terminal view* shows the
+  pane's screen whatever runs, with pinch-to-zoom. Above the command line: the
+  folder and branch chips opening the chip menus, suggestions, the key row (⌃;
+  sticky ⌃ ⌥ ⇧, Paste) and a round field with a run button; commands run from
+  there, there is no separate Run page. *Run* sends at once; Settings ›
+  Running commands › *Ask before running* (off by default) shows the
+  confirmation first. *Wrap long lines* (Settings › Panes, and the pane's ⋯
+  menu for one pane) off lets each block's output scroll sideways. The
+  header's search filters the blocks. The folder chip opens what the
   desktop's chips do (feature `chips`): folders (`cd`), local branches
   (`git checkout`) and the code review panel's changed files, each with its
   diff; the names are shell-quoted; it shows the folder and branch the
@@ -818,9 +823,9 @@ line shows the addresses, or how many devices are connected.
   instead, and a password is typed (never shown, logged or kept on either
   side). Each answer is ordinary input: the desktop shows its toast and the
   pane goes on. The phone alerts when a question starts (Yes / No / Open on
-  the lock screen) and shows "claude is asking" in the pane.
-- **Completion and history from the phone.** The phone's Run sheet and a
-  pane's suggestions ask the desktop (feature `complete`) for what its
+  the lock screen) and docks the question at the bottom of the pane (Yes, the
+  other entries, *No…* with a reply field, and the keys Esc, ⇧Tab, ↑, ↓).
+- **Completion and history from the phone.** A pane's suggestions ask the desktop (feature `complete`) for what its
   command line would complete for the typed line (the same completion
   providers, each result the whole line with its kind) and for the
   commands that ran in the pane before (its blocks newest first with when
@@ -828,11 +833,11 @@ line shows the addresses, or how many devices are connected.
   history), bounded to 50 each.
 - **Running list.** With feature `running` each pane running a command
   carries when it started and the screen's latest line, so the phone's
-  *Now* and its lock-screen Live Activity show the elapsed time and the
+  lock-screen Live Activity shows the elapsed time and the
   last line without following every pane. A coding agent (Claude Code,
   Codex) also sends its name for the session (its title without the status
-  mark) and whether it waits at its own prompt, so *Now* titles the row by
-  the session and lists an agent that waits under *Idle*, not *Working*.
+  mark) and whether it waits at its own prompt, so the phone titles the
+  session by it and tells an agent that waits from one that works.
 - **Security.** Traffic is end-to-end encrypted (Noise XX) and the phone pins
   the desktop's key; see [mobile-threat-model.md](mobile-threat-model.md)
   and the wire format in [remote-protocol.md](remote-protocol.md).
@@ -852,13 +857,16 @@ line shows the addresses, or how many devices are connected.
   Face ID / fingerprint on launch, after 5 minutes away, and (with *Ask
   before running* on) before running commands. With a push token it hands the computers, they alert through the
   Expo push service while the app is closed (`mobile/README.md` › Push).
-  *Alerts through ntfy* also posts them to a random ntfy topic (ntfy.sh
+  Settings › Notifications › *While the app is closed* › *Alerts through
+  ntfy* also posts them to a random ntfy topic (ntfy.sh
   or self-hosted), which the free ntfy app shows: no push setup needed.
-  Settings › *Notify me when my commands finish* (on by default) asks to be
-  told about every command run from the phone; for other commands, *Notify
-  for* chooses *Nothing*, *Failures* or *Everything* and how long a command
-  must run (10 s – 5 min); each computer's page (its bell) can turn its
-  notifications off. "Notify me" always notifies.
+  Settings › Notifications › *My commands* (on by default) asks to be
+  told about every command run from the phone; for other commands, *Other
+  commands on your computers* chooses *Nothing*, *Failures* or *Everything*
+  and *Only if it ran longer than* how long a command must run (10 s – 5
+  min); each computer's page (Settings › Computers) and the pane's ⋯ menu
+  have a *Notifications* switch that turns its notifications off. "Notify
+  me" always notifies.
 
 ## Notifications (attention center)
 

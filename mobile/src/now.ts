@@ -4,7 +4,9 @@
 import type { ActivityItem, AskedView, HostView } from "./fleet";
 import { replyChoice } from "./answer";
 import type { Block, Pane, Tab, Waiting } from "./protocol/types";
+import { tildePath } from "./chips";
 import { tabTitle } from "./topology";
+import { formatClock } from "./ui/format";
 
 /** A pane waiting for the user (Now › Needs you). */
 export interface NeedsItem {
@@ -165,46 +167,6 @@ export function trackIdle(
   for (const key of idleKeys) if (!since.has(key) && seenWorking.has(key)) since.set(key, now);
 }
 
-/** Rows Working shows before "N more working". */
-export const WORKING_CAP = 3;
-
-/** A computer's mark on Now (several paired): its colour, and a two-letter monogram on each avatar. */
-export interface HostMark {
-  color: string;
-  short: string;
-}
-
-/** The computers' colours: the editor theme's syntax colours, the accent left to the app. */
-export const HOST_COLORS = ["#4ec9b0", "#c586c0", "#dcdcaa", "#9cdcfe", "#ce9178", "#22c55e"] as const;
-
-/**
- * "MacBook Pro" → "MP", "studio-mac" → "SM", "Sam’s MacBook" → "JM", "MacBook" → "MB",
- * "ubuntu" → "UB": the first letters of the first two words, else a one-word name's two capitals,
- * else its first two letters.
- */
-export function monogram(name: string): string {
-  const words = name
-    .replace(/['’]s\b/g, "")
-    .split(/[\s\-_.]+/)
-    .filter(Boolean);
-  if (words.length >= 2) return (words[0]![0]! + words[1]![0]!).toUpperCase();
-  const word = words[0] ?? "?";
-  const caps = word.match(/[A-Z]/g);
-  return caps && caps.length >= 2 ? caps.slice(0, 2).join("") : word.slice(0, 2).toUpperCase();
-}
-
-/** Each paired computer's mark, by key: the colours in pairing order, so two never share one (up to six). */
-export function hostMarks(hosts: readonly { record: { key: string; name: string } }[]): Map<string, HostMark> {
-  return new Map(hosts.map((h, i) => [h.record.key, { color: HOST_COLORS[i % HOST_COLORS.length]!, short: monogram(h.record.name) }]));
-}
-
-/** The summary row under Working ("2 idle · 6 finished · 1 failed"), or null when all are empty. */
-export function restSummary(idle: number, finished: readonly { exit: number | null }[]): { idle: number; finished: number; failed: number } | null {
-  const bad = finished.filter(failed).length;
-  const s = { idle, finished: finished.length - bad, failed: bad };
-  return s.idle + s.finished + s.failed === 0 ? null : s;
-}
-
 /**
  * The agent card's short buttons (Now › Needs you: "Yes", "Yes, always", "No…"): one per
  * choice, or null when the menu has more than three (the card then only opens the answer).
@@ -234,12 +196,6 @@ export function agoShort(ms: number): string {
   if (h < 24) return `${h} h`;
   const d = Math.floor(h / 24);
   return d === 1 ? "yesterday" : `${d} d`;
-}
-
-/** "14:02": a finished command's clock time. */
-export function clockOf(at: number): string {
-  const d = new Date(at);
-  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
 // --- the pane ------------------------------------------------------------------------------
@@ -331,4 +287,208 @@ export function tabMatches(tab: Tab, query: string): boolean {
 export function tabStarted(tab: Tab): number | null {
   const started = tab.panes.find((p) => p.running?.started != null)?.running?.started;
   return started != null ? started * 1000 : null;
+}
+
+// --- Computers and the Tabs sheet -----------------------------------------------------------
+// One row per tab, in a state: what needs the user, what works, what failed, what waits.
+
+/** A tab's state on Computers and the Tabs sheet. */
+export type TabKind = "needs" | "working" | "failed" | "idle";
+
+/** Idle agents' "since" (Idle 12m), kept across remounts for the app run. */
+export const idleSince = new Map<string, number>();
+export const seenWorking = new Set<string>();
+
+const isLive = (p: Pane) => !!(p.running || p.job);
+const isWorking = (p: Pane) => isLive(p) && !p.running?.idle;
+
+/** Panes whose last command failed and that run nothing now. */
+export function failedCount(tab: Tab): number {
+  return tab.panes.filter((p) => !isLive(p) && p.last_exit !== null && p.last_exit !== 0).length;
+}
+
+/** Needs you, then working, then failed; a coding agent at its own prompt (or a quiet shell) is idle. */
+export function tabKind(tab: Tab): TabKind {
+  if (tab.panes.some((p) => p.waiting)) return "needs";
+  if (tab.panes.some(isWorking)) return "working";
+  if (failedCount(tab) > 0) return "failed";
+  return "idle";
+}
+
+/** The pane that speaks for the tab: the one that asks, else works, else idles, else the active one. */
+export function focusPane(tab: Tab): Pane | undefined {
+  return (
+    tab.panes.find((p) => p.waiting) ??
+    tab.panes.find(isWorking) ??
+    tab.panes.find((p) => p.running?.idle) ??
+    tab.panes.find((p) => p.active) ??
+    tab.panes[0]
+  );
+}
+
+/** Coding agents get the ✳ tile, everything else the `>_` one. */
+export const isAgentProgram = (program: string | null) => program === "claude" || program === "codex";
+
+/** "now", "2m", "3h", "4d": a short age for the state texts. */
+export function agoCompact(ms: number): string {
+  const min = Math.floor(Math.max(0, ms) / 60_000);
+  if (min < 1) return "now";
+  if (min < 60) return `${min}m`;
+  const h = Math.floor(min / 60);
+  return h < 24 ? `${h}h` : `${Math.floor(h / 24)}d`;
+}
+
+/** "Needs you · 2m", "Working 3:56", "Idle 12m", "2 failed": a row's state text (time parts only when known). */
+export function stateText(kind: TabKind, o: { ageMs: number | null; elapsedMs: number | null; failed: number }): string {
+  switch (kind) {
+    case "needs":
+      return o.ageMs === null ? "Needs you" : `Needs you · ${agoCompact(o.ageMs)}`;
+    case "working":
+      return o.elapsedMs === null ? "Working" : `Working ${formatClock(o.elapsedMs)}`;
+    case "failed":
+      return `${o.failed} failed`;
+    case "idle":
+      return o.ageMs === null ? "Idle" : `Idle ${agoCompact(o.ageMs)}`;
+  }
+}
+
+/** Sheet order: needs you, failed, working, idle. */
+export const KIND_ORDER: Record<TabKind, number> = { needs: 0, failed: 1, working: 2, idle: 3 };
+
+/** What the Computers chips filter on: failed tabs count with the idle ones (nothing runs). */
+export type HomeFilter = "needs" | "working" | "idle";
+export const homeFilterOf = (k: TabKind): HomeFilter => (k === "failed" ? "idle" : k);
+
+/** One tab's row on Computers and in the Tabs sheet. */
+export interface TabRow {
+  /** `host:pane` of the pane that speaks for the tab, else `host:tabN`. */
+  key: string;
+  host: string;
+  hostName: string;
+  tab: Tab;
+  /** The pane it opens, or null. */
+  pane: number | null;
+  title: string;
+  kind: TabKind;
+  agent: boolean;
+  state: string;
+  line: string;
+  /** The question of the asking pane, with the pane it was asked in. */
+  ask: { pane: number; waiting: Waiting; program: string | null } | null;
+  /** Whether this device may answer it. */
+  operate: boolean;
+  panes: number;
+}
+
+export interface RowContext {
+  now: number;
+  /** Several computers on screen: the lines drop what the computer's name already says. */
+  multi: boolean;
+  /** Epoch ms a question was first seen (fleet.waitingSince). */
+  waitingSince: (host: string, pane: number, w: Waiting) => number | null;
+  asked: readonly AskedView[];
+}
+
+const firstLine = (s: string) => s.split("\n")[0]!.trim();
+
+/** The tab's row. `idle`: the since-map of idle agents (`idleSince`). */
+export function tabRow(h: HostView, tab: Tab, ctx: RowContext, idle: ReadonlyMap<string, number> = idleSince): TabRow {
+  const host = h.record.key;
+  const p = focusPane(tab);
+  const kind = tabKind(tab);
+  const pane = tabPane(tab) ?? p?.id ?? null;
+  const program = p ? programName(p) : null;
+  const agent = isAgentProgram(program) || !!p?.running?.title;
+  const key = tabKey(host, tab);
+  const cwd = p?.cwd ? tildePath(p.cwd) : null;
+  const waiting = p?.waiting;
+  let elapsedMs: number | null = null;
+  if (kind === "working" && p) {
+    const command = p.last_command ?? p.job ?? "";
+    const at =
+      p.running?.started != null
+        ? p.running.started * 1000
+        : (ctx.asked.find((a) => a.host === host && a.pane === p.id && a.command === command)?.at ?? null);
+    elapsedMs = at === null ? null : ctx.now - at;
+  }
+  const since =
+    kind === "needs" && waiting && p ? ctx.waitingSince(host, p.id, waiting) : kind === "idle" ? (idle.get(key) ?? null) : null;
+  const state = stateText(kind, { ageMs: since === null ? null : ctx.now - since, elapsedMs, failed: failedCount(tab) });
+  const last = p?.running?.line || p?.last_command || p?.job || "";
+  let line: string;
+  if (kind === "needs" && waiting) {
+    line = ctx.multi ? firstLine(waiting.prompt) : [program, cwd, p?.git?.branch].filter(Boolean).join(" · ");
+  } else if (agent) {
+    line = [ctx.multi ? null : program, p?.running?.idle && !p.running.line ? "waiting for your prompt" : last].filter(Boolean).join(" · ");
+  } else {
+    line = [ctx.multi ? null : p?.job, cwd, last].filter(Boolean).join(" · ");
+  }
+  return {
+    key,
+    host,
+    hostName: h.record.name,
+    tab,
+    pane,
+    title: p?.running?.title || tabTitle(tab),
+    kind,
+    agent,
+    state,
+    line,
+    ask: waiting && p ? { pane: p.id, waiting, program } : null,
+    operate: (h.welcome?.permission ?? h.record.permission) === "operate",
+    panes: tab.panes.length,
+  };
+}
+
+/** Rows in sheet order (stable within a state). */
+export function sortRows<T extends { kind: TabKind }>(rows: readonly T[]): T[] {
+  return rows
+    .map((r, i) => [r, i] as const)
+    .sort((a, b) => KIND_ORDER[a[0].kind] - KIND_ORDER[b[0].kind] || a[1] - b[1])
+    .map(([r]) => r);
+}
+
+/** Computers' chips: tabs per state (failed with idle). */
+export function homeCounts(rows: readonly { kind: TabKind }[]): Record<HomeFilter, number> {
+  const n = { needs: 0, working: 0, idle: 0 };
+  for (const r of rows) n[homeFilterOf(r.kind)]++;
+  return n;
+}
+
+/** Rows in the chip's state, or all of them without one. */
+export function filterHome<T extends { kind: TabKind }>(rows: readonly T[], f: HomeFilter | null): T[] {
+  return f === null ? [...rows] : rows.filter((r) => homeFilterOf(r.kind) === f);
+}
+
+/** The Tabs sheet's filter. */
+export type SheetFilter = "all" | TabKind;
+
+export function sheetCounts(rows: readonly { kind: TabKind }[]): Record<SheetFilter, number> {
+  const n = { all: rows.length, needs: 0, working: 0, failed: 0, idle: 0 };
+  for (const r of rows) n[r.kind]++;
+  return n;
+}
+
+/** The sheet's rows: filtered, then ordered. */
+export function sheetRows<T extends { kind: TabKind }>(rows: readonly T[], f: SheetFilter): T[] {
+  return sortRows(f === "all" ? rows : rows.filter((r) => r.kind === f));
+}
+
+/** "No tab is waiting for you." */
+export const EMPTY_WHAT: Record<SheetFilter, string> = {
+  all: "open",
+  needs: "waiting for you",
+  working: "working",
+  failed: "failing",
+  idle: "idle",
+};
+
+/** The mockup's answer pills: "Yes", "Always", "No" (the quick choices' own labels are longer). */
+export function homeChoiceLabel(label: string): string {
+  return label === "Yes, always" ? "Always" : label === "No…" ? "No" : label;
+}
+
+/** A tab's row key (`host:pane` of the pane that speaks for it): the keys of `trackIdle`. */
+export function tabKey(host: string, tab: Tab): string {
+  return `${host}:${focusPane(tab)?.id ?? `tab${tab.index}`}`;
 }

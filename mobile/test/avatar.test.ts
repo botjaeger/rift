@@ -19,7 +19,7 @@ describe("avatarFor", () => {
   });
 
   it("marks Claude Code with ✳", () => {
-    expect(avatarFor("~/flow", "flow", "claude").glyph).toBe("✳");
+    expect(avatarFor("~/flow", "flow", "claude").glyph).toBe("\u2733\uFE0E");
     expect(avatarFor("~/flow", "flow", "codex").glyph).toBeNull();
   });
 });

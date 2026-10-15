@@ -20,7 +20,7 @@ pnpm install
 pnpm start          # Expo dev server; development build (expo run:ios / run:android) or web
 ```
 
-Pair from Now (first run) or Computers (**+**): scan the QR code that Rift shows (Settings › Remote access › Pair a
+Pair from Computers (the first-run page, or **+**): scan the QR code that Rift shows (Settings › Remote access › Pair a
 phone, or `rift-terminal remote pair`), paste the `rift-remote://pair?…` link, or open the link
 on the device. The app asks before pairing.
 
@@ -34,7 +34,7 @@ the finished prompt shows at once.
 Release builds carry `expo-updates` on the `production` channel (`app.json` › `updates`). The
 app does its own checks (`src/ota.ts`; the native one runs only to recover from a launch that
 crashed, `checkAutomatically: ON_ERROR_RECOVERY`): at launch once the settings are read, every
-15 minutes and on each return to the foreground, while Settings › About › **Check for updates
+15 minutes and on each return to the foreground, while Settings › About › **Check
 automatically** is on (the default); **Check now** checks on demand. A check that has not
 answered in 10 s is reported as failed. Once an update has downloaded, the app asks once to **Restart**
 (after any unlock); **Later** applies it at the next start, and About offers **Restart now**
@@ -59,7 +59,7 @@ not an update.
 ## Screens
 
 The screens follow the Claude Design boards of the mobile redesign: the phone-first proposal
-(P1 Now, P2 Reply, P3 Pane, P4 Computers, P5 Run, P6 Lock) and, where it replaces none, the
+(P2 Reply, P3 Pane, P4 Computers, P6 Lock) and, where it replaces none, the
 earlier ones (Empty, Pair, PairConfirm, PaneNoWrap, FullScreen, BlockSheet, Confirm, Settings,
 ControlKeys, the chip sheets);
 colours are the tokens in `src/ui/palette.ts`, icons are system symbols (`src/ui/Icon.tsx`).
@@ -71,26 +71,9 @@ Each weight is its own family (`ui(weight)`, `mono`, `monoMedium` in `src/ui/the
 style sets `fontWeight`, which Android ignores on a custom family (`test/fonts.test.ts`).
 New fonts need a native rebuild (`npx expo run:ios` / `run:android`).
 
-Tabs: **Now**, **Computers**, **Settings** (`src/now.ts` holds their models).
+**Computers** is the home page; there is no tab bar. Its gear opens **Settings**, a pushed page;
+its **+** pairs a computer. `src/now.ts` and `src/paneView.ts` hold the models.
 
-- **Now** (home): what needs you, what works, what waits or finished, on every connected computer.
-  With two or more paired, a pill under the title ("All 3 computers ⌄", a colour dot each) opens
-  *Show sessions from*: every computer, or one (kept for the app run); while Now mixes several,
-  each avatar carries its computer's two-letter monogram in the computer's colour, and the row's
-  place line starts with the computer's name. *Needs you · N* (feature `waiting`): a coding
-  agent's menu as a card (avatar, the session's name, place, the question, its answers as
-  buttons: "Yes", "Yes, always", "No…"; "No…" and the card open the answer page); a password or
-  other question as a row with **Answer**. *Working · N* (feature `running` for the start time
-  and the last line): the session's name (a coding agent's, else the command), elapsed, its
-  latest line, folder and branch, "Notifies when done"; the first 3, then "N more working".
-  One row under it sums the rest ("2 idle · 6 finished · 1 failed") and opens *Idle* (coding
-  agents at their own prompt, `running.idle`) and *Finished* (this run's finished commands,
-  failures first, then newest; a row opens the pane at that block). The round terminal button
-  opens the Run sheet. With one computer (one paired, or one picked) the board is the
-  one-computer board: the computer's name and connection under the title (one paired), chips
-  "N needs you · N working · N idle" that show only their section, *Idle* listed with how long
-  each agent has waited (since the app saw it stop working), and "✓ N finished · N failed",
-  which opens *Finished*. With none paired it is the first-run page (no tab bar there).
 - **Answer** (the P2 Reply board): "claude is asking", where, **Open pane**; the question, the
   agent's lines above it (a diff drawn as one), then the answers: a numbered entry is sent as
   its digit, an unnumbered one as arrow keys from the selected entry and Enter
@@ -98,66 +81,126 @@ Tabs: **Now**, **Computers**, **Settings** (`src/now.ts` holds their models).
   text it sends the No, waits 0.6 s, then the text and Enter ("No, and tell claude what to do").
   A password is a secure field sent as `text` and Enter, never shown, logged or kept. An answer
   goes only to the question it was shown for (the pane must still ask it). View-only devices
-  get no answers. Ask before running asks for Face ID first; otherwise nothing confirms.
-- **Computers** (the P4 board): a card per paired computer; the connected one shows its tabs
-  (the pane's avatar, name, how long it has run, last command, running / ✕ exit / needs you, a
-  dot on what needs a look), the others say "N tabs · LAN/Relay" (tap to show their tabs),
-  offline ones are dimmed with "seen 2 h ago". **+** pairs. The floating **Search tabs and
-  commands** bar finds tabs on every connected computer by title, command, program or folder.
-  Settings › Paired computers › a computer opens its page (its tabs and its notification bell).
-- **Avatars** (Computers, a computer's page, Now's Running, Run's picker): a round `>_` (✳ while
-  Claude Code runs) in a colour taken from the pane's folder name, so a project reads the same
-  everywhere (`src/avatar.ts`).
-- **Headers**: pages lead with a round glass back (or close) badge; the pane's header holds the
-  computer in a glass pill and wrap, search and **Terminal view** in another. The back badge
-  counts the computer's other panes that need you.
+  get no answers. Ask before running asks for Face ID first; otherwise nothing confirms. The page
+opens from the **No…** answer on Computers, from the line under a pane's header for a question its
+card cannot answer (a password, other input, a view-only device), and from an alert.
+- **Computers** (home, the P4 board): the title with a gear (**Settings**) and **+** (**Pair a
+  computer**). No search bar. Chips under the title filter the tabs of every computer by state:
+  "N needs you", "N working", "N idle" (a tab whose last command failed counts as idle). A chip shows
+  only while a tab is in its state; a second tap clears it; "needs you" stands out while nothing
+  filters. Below, a card per paired computer (with a filter on, only those with a matching tab):
+  a dot (green while connected), the name, "view only" when this phone cannot run commands, and a
+  line: "LAN · 4 tabs" or "Relay · 1 tab", "Connecting…", "Offline · seen 2h ago" (or "not
+  connected yet"). On the card's right: **New tab** (the icon; a connected computer that this phone
+  may operate and that offers `open`, or `start` while Rift is closed), **Retry** while it is not
+  connected, **Pair again** when it refused this phone's key (other failures say why under the
+  name). A connected card lists its tabs: a tile (✳ in orange for a coding agent, `>_` for a
+  shell), the title, the state at the right ("Needs you · 2m", "Working 3:56", "2 failed",
+  "Idle 12m"; the idle time only for an agent the app saw working) and a line (program, folder,
+  branch, or the last command; with several computers paired a question shows its first line). A
+  tap opens the tab's pane. With one computer paired, a needs-you tab whose agent asks a menu of up to
+  three distinct entries answers in place: the question and pills (**Yes**, **Always**, **No**; the
+  first entry is filled), and **Open**. A pill sends that entry (Face ID first when Settings asks);
+  **No** opens the Answer page with its field. With none paired it is the first-run page (**Scan
+  the code**, **Paste a pairing link**). Settings › Computers › a computer opens its page.
+- **Tabs** (a sheet, from the pane's header title): every tab of that computer, needs you first,
+  then failed, working, idle. Chips filter: All, Needs you, Working, Failed, each with its count.
+  A row: tile, title (**Here** on the open tab), the last line, a state pill ("Needs you", "✕ 2
+  failed", "Working 3:56", "Idle 12m") and the pane count. A tap goes to that tab's pane in place of
+  this one (Back still leads where it led). **New tab** at the foot.
+- **Panes** (a sheet, from the pane picker): the tab's panes, each with its mark (✳ or `>_`),
+  name, last line (the question, the latest output line, the folder or the last command) and state
+  (Running, Needs you, ✕ exit, Idle); the open one is tinted. A tap opens that pane in place of this
+  one.
 - **Open a tab while Rift is closed** (gateways with `start`, which the computer offers only when
-  its user turned on *Phones can open tabs while Rift is closed*): with no Rift window open, a
-  computer's page shows **Open a tab**; Face ID (or the passcode) first, then a shell the computer
-  keeps and lists under "Rift is closed · Tabs" until Rift opens and shows it as a tab. View-only
-  devices do not get the button.
+  its user turned on *Phones can open tabs while Rift is closed*): with no Rift window open,
+  **New tab** (a computer's card, or the Tabs sheet) asks Face ID (or the passcode) first, then
+  opens a shell the computer keeps and lists under "Rift is closed · Tabs" until Rift opens and
+  shows it as a tab. View-only devices do not get the button.
 - **Reopening**: a cold start goes back to the pane that was open last (`rift.last` in the
-  keychain); otherwise Now.
-- **Pane** (the P3 board): back, the computer, wrap, search and Terminal view; the window's tabs as a strip
-  (the pane count on the current tab, a red ● on a tab whose last command failed); "Pane 1 of 2 ·
-  swipe for claude" with dots, and a sideways swipe (or the screen reader's next / previous
-  action) moves between the tab's panes. A pane that asks shows "claude is asking: … Answer".
-  Blocks only: the successes before the newest failure (or the running command) fold into
-  "✓ N earlier commands succeeded · Show"; a failed command is a card with Run again, Copy error
-  and All N lines; the running one a card with Notify when done and Stop (control C). While a
-  full-screen program runs (the alternate screen: vim, htop, less) the pane shows its screen
-  ("htop is full screen · showing its screen"), the keys wrapped under it and "Show keyboard";
-  when it quits the blocks come back. **Terminal view** (gateways with `screen`) shows the
-  pane's screen whatever runs, until pressed again. **Wrap long lines** for this pane (Settings › Output ›
-  Wrap long lines for all; off, each block's output scrolls sideways with a position bar) and
-  **Search output** (filters the blocks by command or output). Above the command line:
-  suggestions (the desktop's completions for what is typed and this pane's history, feature
-  `complete`; else its recent commands), then the folder line (path and branch with
-  ↑ahead ↓behind and a dot for uncommitted changes; it opens the folder, branch and changed-files
-  menus), then **⌃**, which shows the key row in place of the suggestions, and the round field
-  with its run button (Return runs too). While the keyboard is up the key row starts with Hide
-  keyboard. The keyboard's smart dashes and quotes are undone in the command line.
-- **Run** (the P5 sheet, from Now's round terminal button): the pane it runs in ("studio-mac › rift › pane 1
-  ▾", the last pane open by default), the field, *Complete* (the desktop editor's completions,
-  each the whole line, with its kind) and *Ran here before* (the pane's commands, newest first,
-  with how long ago, then the shell history the desktop imported). Return runs it there (the
-  Confirm sheet first with Ask before running) and opens the pane.
+  keychain); otherwise Computers.
+- **Pane** (the P3 board): commands run from its command line; there is no separate Run page.
+  The header: Back (its badge counts the computer's other panes that need you); the tab's name
+  with "studio-mac · tab 2 of 5" and a chevron, which opens the Tabs sheet; **Search output**
+  (filters the blocks by command or output, "N of M"; not under a full-screen view); and **⋯**.
+  Under it the pane picker: the pane's mark, name and "· 1/2", a dot and count for the tab's
+  other panes that need you, which opens the Panes sheet; and the **Terminal view** button
+  (gateways with `screen`). A sideways swipe across the blocks (or the picker's Next pane /
+  Previous pane screen-reader actions) also moves to the tab's next or previous pane. **⋯** holds
+  two switches: **Wrap long lines** for this pane (Settings › Panes › Wrap long lines sets the
+  default; off, each block's output scrolls sideways with a position bar) and **Notifications**
+  for this computer.
+  Blocks are cards (below); the successes before the newest failure (or the running command) fold
+  into "✓ N earlier commands succeeded · Show", and a pane with older blocks than loaded offers
+  **Earlier blocks**. A tap on a card opens the block sheet. A pane that asks shows its question
+  docked at the bottom (below); one the card cannot answer shows "claude is asking: … Answer" under
+  the header. While a full-screen program runs (the alternate screen: vim, htop, less) the pane
+  shows its screen ("Keys go straight to htop. When it quits, the pane shows blocks again."),
+  the keys wrapped under it and "Show keyboard"; when it quits the blocks come back. **Terminal
+  view** shows the pane's screen whatever runs, until pressed again (at a prompt the command line
+  stays under the screen). Both screens have **Pinch to zoom · double-tap to reset** with **−** and
+  **+** and the percentage (60 to 200 %, kept until the app closes).
+  Above the command line: the folder chip (path) and the branch chip (with a dot for uncommitted
+  changes) then suggestions (the desktop's completions for what is typed and this pane's history,
+  feature `complete`; else its recent commands); the folder chip opens the folder, branch and
+  changed-files menus. Under them **⌃**, which shows the key row above the chips, and the round
+  field with its run button (Return runs too). While the keyboard is up the key row starts with
+  Hide keyboard and ends with **Edit keys**. The keyboard's smart dashes and quotes are undone in
+  the command line.
+- **Block cards** (the P3 board): a thin border in the state's colour, no left edge.
+  Succeeded: the command, "✓ 1.2s" and the first output line; output that is a table
+  (`docker ps`, `kubectl get pods`) is a list of rows, with **Raw** / **As list** under it.
+  Failed: the command, "✕ 127", the message (the last output line) and the path it names,
+  **Run again** (not on a view-only device) and **Copy error** (not for a command that printed
+  nothing). Running: a spinner, the command, its clock and the latest two
+  lines (log lines with a level, as "api-1 | [info] GET /health 200 3ms", show as source, level,
+  message and time), **Stop** (control C; not for a view-only device) and **Notify when done**
+  (**Notifies when done** once on).
+- **Block sheet** (a tap on a card): the status ("● Running 0:12", "✓ Succeeded", "✕ Failed ·
+  exit 1") and when it ran, the folder and branch, the command with a copy button, the output
+  ("Output · 12 lines") with **Copy** and **Load earlier output** where the computer offers it
+  (500 lines a press), then **Run again** (**Stop** while it runs) and **Edit**, which puts the
+  command in the pane's command line (asking first when that holds other text). Run again is off
+  while the pane runs a program or the computer is not connected; view-only devices get no buttons.
+- **Question card** (the PaneAsking board): an agent's menu on an `operate` device docks at the
+  bottom of its pane in place of the command line: "Claude asks" with how long ago, a minimize
+  chevron (to a bar, "Claude asks: …  Answer"), the question, the file with +/− counts and its
+  changed lines (**Full diff** / **Less**), the first entry as the filled answer ("Yes"), the other
+  entries outlined ("Yes, this session", "Yes, always", "No…"), and a **Keys** row (Esc, ⇧Tab, ↑,
+  ↓). **No…** opens a field, "Tell Claude what to do instead", with a send button and **Back to
+  the answers**. Answers go as the Answer page's do.
 - **Chip menus** (a computer whose welcome lists `chips`; otherwise the folder button does
   nothing), as the desktop's: the folder opens the parent and sub-folders (searchable) and picking one
   runs `cd ..` / `cd ./<name>`; the branch chip the local branches, the current one checked,
   and picking one runs `git checkout <name>` (a new name typed in the search: `git checkout -b`);
   the changed-files chip the code review panel's files, staged first, and a file opens its diff,
   read-only. Names from the computer are untrusted: they are shell-quoted as the desktop quotes
-  them (`src/chips.ts` `shellQuote`), never run unquoted. The commands go through Run (the
-  Confirm sheet first with Ask before running), without a "Notify me".
-- **Show keys above the command line** (Settings › Output, off by default): whether the pane
+  them (`src/chips.ts` `shellQuote`), never run unquoted. The commands run as the command line's
+  Run does (the Confirm sheet first with Ask before running), without a "Notify me".
+- **Keys above the command line** (Settings › Panes, off by default): whether the pane
   opens with the key row shown (**⌃** switches it; ^C stays on the running card: Stop); under a
   full-screen program the keys always show.
 - **Running**: Run sends at once; Settings › Running commands › Ask before running (off by
-  default) shows the Confirm sheet first. With Notify me when my commands finish (on by
+  default) shows the Confirm sheet first. With Settings › Notifications › My commands (on by
   default) every command run from this phone asks to be told when it finishes; the bell on a
   running block switches that for one command (and on a computer with `notify_off` also
   drops the computer's own wait).
+- **Settings** (the gear on Computers; the Settings board), in groups:
+  - **Computers**: each paired computer (green dot while connected, with its system and
+    connection) opens its page; **Pair a computer**; under them **This phone's name** (computers
+    show it in toasts and logs). A computer's page: **Connection**, **System**, **This phone can**
+    (Run commands / View only), **Notifications** (From this computer) and **Unpair this
+    computer** (a second tap, "Tap again to unpair", does it).
+  - **Notifications**: **My commands** (a command you ran from this phone finishes), **Other
+    commands on your computers** (Nothing / Failures / Everything), **Only if it ran longer than**
+    (shown unless Nothing), **Show the command**, and **While the app is closed ›** (the ntfy
+    page, below). Nothing notifies for the pane on screen; questions always notify.
+  - **Running commands**: **Ask before running**.
+  - **Security**: **Lock with Face ID** (the device's own name for it) and **Confirm commands with
+    Face ID**.
+  - **Panes**: **Wrap long lines**, **Keys above the command line**, **Choose keys ›**.
+  - **About**: the version and update, **Check now** / **Restart now**, **Check automatically**
+    and **What's New**.
 
 ## Connecting
 
@@ -198,11 +241,11 @@ against an older Rift the app hides what needs them.
 
 - **Full-screen programs** (pane screen, `screen`): the app asks for the screen in mode `auto`,
   so a full-screen program switches the pane to its screen by itself and back to blocks when
-  it exits; there is no switch. A reconnect or re-subscribe keeps the screen on display until
+  it exits; no switch is needed (Terminal view pins the screen). A reconnect or re-subscribe keeps the screen on display until
   the next one comes (or for 5 s, after which the program is taken to have ended). The grid is
   monospace rows with the program's colours (null: terminal text on the pane's ground), bold, italic, underline, dim,
-  strikethrough and an inverse cursor; the font fits the width between 7 and 14 pt, a wider
-  screen scrolls sideways. Each row is text for screen readers; a diff re-renders only its rows.
+  strikethrough and an inverse cursor; the font fits the width between 7 and 14 pt, scaled by the
+  pinch zoom (60 to 200 %), a wider screen scrolls sideways. Each row is text for screen readers; a diff re-renders only its rows.
   Layout: `src/terminal.ts`, view: `src/ui/TerminalView.tsx`.
 - **Typing** (operate, `text`): the local Expo module `modules/rift-keys` (`KeyCaptureView`:
   Swift `UIKeyInput` + `pressesBegan`, Kotlin input connection + `dispatchKeyEvent`, DOM events on
@@ -218,7 +261,7 @@ against an older Rift the app hides what needs them.
   keyboard's ctrl/alt combinations that are keys, Escape and F-keys go to the pane as keys, and
   Tab / Shift+Tab too while a program runs or the line holds text (otherwise Tab moves the
   focus). Mapping: `src/keyboard.ts`.
-- **Keys** (Settings › Output › Keys, or Edit keys at the end of the row): a preview, the row
+- **Keys** (Settings › Panes › Choose keys, or Edit keys at the end of the row): a preview, the row
   (drag the ≡ handle to reorder; screen readers get Move up / Move down), and Add chips from a
   catalogue (`src/controlKeys.ts`), each key a round cap with its icon or label; the default row
   is Interrupt, Esc, Tab, ⌃, ↑, ↓. ⌃, ⌥ and ⇧ (Shift) are sticky for the
@@ -228,37 +271,38 @@ against an older Rift the app hides what needs them.
   program otherwise (feature `text`). Two more catalogue keys are actions, not keys: **+tab** opens a new tab in the pane's window and
   **+pane** splits the pane (feature `open`; disabled on an older Rift), both starting in the
   pane's folder; the app then shows the new pane in place of this one.
-- **Block actions** ("···" on a finished block, or a long press): Run again (through the
-  Confirm sheet when Ask before running is on), Edit, then run (into the command line, asking
-  first when that holds other text), Copy command, Copy output, Share output; Stop (ctrl+c)
-  for a running one. A running block shows the bell instead.
-- **Earlier output** (`output`): a block whose tail starts later offers "Load earlier output",
+- **Block actions** (the block sheet, a tap on a card): Run again (through the
+  Confirm sheet when Ask before running is on), Edit (into the command line, asking
+  first when that holds other text), Copy command, Copy output; Stop (ctrl+c)
+  for a running one. A running card also has the Notify when done bell.
+- **Earlier output** (`output`): a block whose tail starts later offers, in the block sheet, "Load earlier output",
   500 lines a press and at most 5,000 per block (`src/earlier.ts`); lines the computer's
   scrollback no longer holds are said to be gone. An answer for another pane or block, or
   starting past the range asked for, fails the load.
 
 ## Notifications
 
-Settings › Other commands on your computers › Notify for: Nothing, Failures (an exit status
+Settings › Notifications › Other commands on your computers: Nothing, Failures (an exit status
 other than 0) or Everything, for commands that ran longer than "Only if it ran longer than"
 (10 s, 30 s, 1 min or 5 min; 30 s by default), when you are not looking at that pane. Each
-paired computer's page has its own bell (its notifications). A "Notify me" (every command run
-from this phone, by default, and a running block's bell) always notifies. The app's own
+paired computer has its own Notifications switch (Settings › Computers › the computer, and the
+pane's ⋯ menu). A "Notify me" (every command run from this phone while My commands is on, which
+it is by default, and a running block's bell) always notifies. The app's own
 notifications and the push registration follow the same rules (`src/notify.ts`). Settings saved
-before Phase 3 move over: "Command finished or failed" on becomes Finished or failed commands.
+before Phase 3 move over (`src/stores.ts`).
 
 ## Needs you alerts and the lock screen (the P6 board)
 
 - **Alerts**: while the app runs (on screen, or the short while iOS keeps it alive after), a
   question a pane starts asking posts "claude is asking on studio-mac" with the question; not
   for the pane on screen, not for a computer whose notifications are off, not for the questions
-  already waiting when it connected (Now shows those). A menu with a Yes and a No gets the
+  already waiting when it connected (Computers and the pane show those). A menu with a Yes and a No gets the
   buttons **Yes**, **No** and **Open** (category `rift-ask`), anything else **Open** only
   (`rift-ask-open`). Yes and No need the phone unlocked (Face ID), open the app and send the
   menu's first "Yes…" or "No…" once the pane still asks that question (and, with Ask before
   running on, Face ID in the app first); otherwise the question opens.
-- **Live Activity** (iOS 16.2+): each "Notify me" wait (a command run from this phone with Notify
-  me when my commands finish, or Notify when done on the running card) shows the command, where
+- **Live Activity** (iOS 16.2+): each "Notify me" wait (a command run from this phone with Settings ›
+  Notifications › My commands on, or Notify when done on the running card) shows the command, where
   it runs, a clock the system ticks by itself (`Text(timerInterval:)`) and its latest line on the
   lock screen and in the Dynamic Island; its `done` turns it into ✓ or ✕ N, which stays 15
   minutes. The widget extension `RiftLive` (`targets/RiftLive`, added by
@@ -277,13 +321,13 @@ With notifications allowed, the app asks for an Expo push token and sends it to 
 computer (`push`, [protocol § Push](../docs/remote-protocol.md#push-alerts-while-the-app-is-closed));
 "Notify me" also tells the computer (`notify`); one asked while disconnected is sent after the
 next welcome. The registration carries the policy: no `long_ms` alerts while notifications are
-off or the computer's switch is off, `failures_only` for Failed commands. The computer then
+off or the computer's switch is off, `failures_only` for Failures. The computer then
 alerts through the Expo push service by itself, also while the app runs; for a finished command
 its registration covers (a "Notify me" it received, or a long one by `long_ms` and
 `failures_only`) the app posts nothing of its own, for any other it notifies itself, and it drops an
 alert about the pane on screen. An alert carries the computer's name, the exit status and,
-only with "Show the command", the command line; never output. Settings › While the app is
-closed says which way notifications come. Without a token (no push project in the
+only with "Show the command", the command line; never output. Settings › Notifications › While
+the app is closed says which way notifications come. Without a token (no push project in the
 build, or notifications not allowed) the app notifies only while it runs, unless ntfy is on.
 
 ### ntfy (free, no push setup)
@@ -293,7 +337,7 @@ build without Apple's developer program or a push project (`push.ntfy`, protocol
 a computer whose welcome lists `push_ntfy`):
 
 1. Install the ntfy app (App Store, or Google Play / F-Droid).
-2. In Rift: Settings › While the app is closed › turn on **Alerts through ntfy**. The app makes a random
+2. In Rift: Settings › Notifications › While the app is closed › turn on **Alerts through ntfy**. The app makes a random
    topic (`rift-` and 22 random characters) on `https://ntfy.sh` and sends it to every computer.
    To self-host, enter your server's address (https only) in the field under the switch; the
    topic stays, but subscribe again in ntfy on the new server.
@@ -302,12 +346,12 @@ a computer whose welcome lists `push_ntfy`):
    says to install it from Google Play or F-Droid first. ntfy for iPhone has no subscribe link,
    so there the button copies the topic: in ntfy tap **+**, paste it as the topic (for a
    self-hosted server also turn on "Use another server" and enter it), then **Subscribe**.
-   **Copy** copies the topic on either.
+   **Copy topic** copies the topic on either.
 
 With ntfy on, ntfy replaces Expo push for every computer that supports it (the app sends those
 no token), so each command alerts once. A computer whose Rift is too old for ntfy keeps Expo
-push; Settings and that computer's page say "Update Rift on …". **New** makes a new topic
-and sends it to every computer: subscribe to it in ntfy again; computers that get it stop posting
+push; the While the app is closed page says "Update Rift on …". **New topic…** asks, then makes a
+new topic and sends it to every computer: subscribe to it in ntfy again; computers that get it stop posting
 to the old topic; one that is offline may post there until it reconnects, and one unpaired while
 offline may keep posting there.
 Turning the switch off keeps the topic, so turning it on again needs no new subscription.
@@ -335,7 +379,7 @@ RIFT_NO_APNS=1 npx expo prebuild -p ios --clean
 npx expo run:ios --device --configuration Release
 ```
 
-Expo push is then unavailable; ntfy works (Settings › While the app is closed). `ios/` is generated
+Expo push is then unavailable; ntfy works (Settings › Notifications › While the app is closed). `ios/` is generated
 (git-ignored), so run the prebuild again with the variable after anything that regenerates it.
 `RIFT_NO_APNS=1 npx expo config --type introspect` shows the entitlements without writing files.
 
@@ -360,7 +404,8 @@ pnpm typecheck   # tsc --noEmit (strict)
 pnpm test        # vitest: Noise vectors + snow interop, framing, client, relay, adverse network,
                  # connectivity, lock, fleet, stores, pairing, notifications, text contrast,
                  # key mapping, terminal layout, earlier output, control keys, prompt chips,
-                 # Now / pane / answer / Live Activity models (phone.test.ts), embedded fonts
+                 # Computers / Tabs sheet / pane / answer / Live Activity models (phone.test.ts,
+                 # computers.test.ts, topology.test.ts, paneView.test.ts), settings text, embedded fonts
 pnpm lint        # eslint
 npx expo install --check && npx -y expo-doctor
 npx expo export -p web   # the web bundle must build
@@ -394,17 +439,19 @@ one-day minimum release age by exact version only.
   hosts and settings over a key-value store; `src/runtime.ts` wires them to expo-secure-store,
   expo-crypto, expo-notifications, expo-network, expo-local-authentication,
   expo-screen-capture and AppState.
-- `src/chips.ts` — the prompt chips and their menus; `src/now.ts` — Now's lists, the pane's
-  folds and pager, Computers' tab states; `src/answer.ts` — what an answer sends;
+- `src/chips.ts` — the prompt chips and their menus; `src/now.ts` — the tab rows and their
+  states (Computers, Tabs sheet), the pane's folds and swipe target; `src/paneView.ts` — the Panes
+  sheet's rows, block-card text, tables, log lines, the question card's context, the terminal
+  zoom; `src/ui/settingsText.ts` — Settings' texts; `src/answer.ts` — what an answer sends;
   `src/live.ts` — the Live Activity plan.
-- `src/app/` — expo-router screens: tabs Now / Computers / Settings (iOS: the system tab bar
-  via native tabs, `(tabs)/_layout.ios.tsx`, which iOS 26 draws as the floating glass bar;
-  Android and web: the same floating bar drawn by `src/ui/FloatingTabBar.tsx`), Paste a pairing
-  link (`add`), Pair a computer (`scan`), pairing confirmation (`pair`, also the target of
-  `rift-remote://pair` links), Host (a computer's tabs and bell), Pane with its command line and
-  full-screen view, Answer (`answer`), Run sheet (`run`), Confirm sheet, block actions sheet
-  (`block`), chip menus (`chips`, `diff`), Keys (`control-keys`); `src/ui/LockGate.tsx` — the
-  lock screen and privacy cover. On the web a sheet is a plain page: it gets a Close button and
+- `src/app/` — expo-router screens, in one stack (no tab bar): Computers (`index`, the home page),
+  Settings (`settings`), a computer's page (`computer`), While the app is closed
+  (`settings-ntfy`), Paste a pairing link (`add`), Pair a computer (`scan`), pairing confirmation
+  (`pair`, also the target of `rift-remote://pair` links), Host (`host/[key]`, a computer's tabs
+  and bell; opened after pairing, not from Computers), Pane with its command line and full-screen view
+  (`host/[key]/pane/[id]`), Answer (`answer`), the Tabs and Panes sheets (`tabs`, `panes`),
+  Confirm sheet, block sheet (`block`), chip menus (`chips`, `diff`), Keys (`control-keys`);
+  `src/ui/LockGate.tsx` — the lock screen and privacy cover. On the web a sheet is a plain page: it gets a Close button and
   Escape (`src/ui/SheetClose.tsx`), and the folder button's choice of menus is a strip above
   the command line (react-native-web's `Alert` shows nothing).
 - `src/ui/palette.ts` — the DESIGN.md tokens and the text/background pairs the app uses, each
