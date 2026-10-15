@@ -8,6 +8,28 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.3.0 — 2026-10-15
+
+Your phone can open a tab on this computer even while Rift is closed.
+
+### New
+
+- **Tabs from your phone while Rift is closed** — turn on Settings →
+  Remote access → *Phones can open tabs while Rift is closed* (it needs
+  *Keep shells running when Rift quits*). A paired phone that may run
+  commands can then open a shell here; you get a notification, and the tab
+  is waiting in Rift when you open it.
+- **What's New in Settings** — Settings → General → Updates opens the
+  release notes.
+
+### Fixed
+
+- **Rift stays in the Dock after quitting** — the shells kept running and
+  the phone gateway no longer leave Rift "Running in Background".
+- **Quitting could hang** — quitting, or restarting for an update, while a
+  menu was open could freeze Rift; it now always quits.
+- **Release notes** — stray asterisks no longer show in What's New.
+
 ## 0.2.0 — 2026-10-14
 
 Your phone now reaches this computer from anywhere, with nothing to set up.
