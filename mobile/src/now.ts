@@ -144,6 +144,27 @@ export function nowSections(
   return { needs, running, idle, finished };
 }
 
+/**
+ * When each idle agent stopped working (Now › Idle "12 min"), by row key: set when a row seen
+ * working turns idle, dropped when it works again or leaves; an agent idle since before the app
+ * saw it work has no time.
+ */
+export function trackIdle(
+  since: Map<string, number>,
+  seenWorking: Set<string>,
+  working: readonly { key: string }[],
+  idle: readonly { key: string }[],
+  now: number,
+): void {
+  for (const r of working) {
+    seenWorking.add(r.key);
+    since.delete(r.key);
+  }
+  const idleKeys = new Set(idle.map((r) => r.key));
+  for (const key of [...since.keys()]) if (!idleKeys.has(key)) since.delete(key);
+  for (const key of idleKeys) if (!since.has(key) && seenWorking.has(key)) since.set(key, now);
+}
+
 /** Rows Working shows before "N more working". */
 export const WORKING_CAP = 3;
 

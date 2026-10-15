@@ -13,6 +13,7 @@ import {
   nowSections,
   quickChoices,
   restSummary,
+  trackIdle,
   WORKING_CAP,
   type HostMark,
   type NeedsItem,
@@ -29,10 +30,17 @@ import { ErrorText } from "@/ui/Notice";
 import { PromptText } from "@/ui/PromptText";
 import { TabScreen, tabBottom, titleTop } from "@/ui/Screen";
 import { useNow } from "@/ui/useNow";
+import { describeConn } from "@/ui/connLabel";
 import { colors, mono, tint, tints, ui } from "@/ui/theme";
 
 /** The last pane is reopened once per app run, on the first launch of Now. */
 let restored = false;
+
+/** Idle agents' "since" (Now › Idle), kept across Now's remounts for the app run. */
+const idleSince = new Map<string, number>();
+const seenWorking = new Set<string>();
+
+type StateFilter = "needs" | "working" | "idle";
 
 /** First run (the Empty board): how to connect, then Scan the code. */
 function FirstRun() {
@@ -256,11 +264,11 @@ function WorkingLine({ r, now, first, mark }: { r: RunningRow; now: number; firs
 }
 
 /** A coding agent at its own prompt (Idle): a compact row, its avatar greyed. */
-function IdleLine({ r, first, mark }: { r: RunningRow; first: boolean; mark: HostMark | null }) {
+function IdleLine({ r, first, mark, since }: { r: RunningRow; first: boolean; mark: HostMark | null; since: string | null }) {
   const router = useRouter();
   const name = r.title ?? r.program ?? r.tab;
-  // the monogram already names the computer: the folder alone
-  const where = folderOf(r.cwd) ?? r.tab;
+  // how long it has waited (one computer), else its folder: the monogram already names the computer
+  const where = since ?? folderOf(r.cwd) ?? r.tab;
   return (
     <Pressable
       accessibilityRole="button"
@@ -333,8 +341,10 @@ export default function NowScreen() {
   );
   const [allWorking, setAllWorking] = useState(false);
   const [restOpen, setRestOpen] = useState(false);
+  const [stateFilter, setStateFilter] = useState<StateFilter | null>(null);
   // seconds for the running clocks, else minutes ("1 min" since a question came)
   const now = useNow(running.some((r) => r.started !== null) ? 1000 : 30_000);
+  trackIdle(idleSince, seenWorking, running, idle, now);
 
   // A cold start goes straight back to the pane open last, while its computer is still paired.
   // Only when Now is on screen then: a pane already on top (this restore, a tapped alert) is
@@ -387,6 +397,49 @@ export default function NowScreen() {
       </Pressable>
     ) : null;
 
+  // one computer (one paired, or one picked): the board names it, filters by state and lists Idle
+  const single = (picked ? 1 : s.hosts.length) === 1;
+  const only1 = s.hosts.length === 1 ? s.hosts[0]! : null;
+  const conn = only1 ? describeConn(only1.conn) : null;
+  const subtitle = only1 ? (
+    <View style={styles.subtitle} accessible accessibilityLabel={`${only1.record.name}, ${conn!.label}`}>
+      <View style={[styles.dot, { backgroundColor: conn!.color }]} />
+      <Text style={styles.subtitleText} numberOfLines={1}>
+        {only1.record.name} · {only1.conn.status === "open" ? (only1.conn.path?.kind === "relay" ? "Relay" : "LAN") : conn!.label}
+      </Text>
+    </View>
+  ) : null;
+  const show = (k: StateFilter) => stateFilter === null || stateFilter === k;
+  const chipDefs: { k: StateFilter; n: number; label: string; color: string }[] = [
+    { k: "needs", n: needs.length, label: `${needs.length} needs you`, color: colors.warning },
+    { k: "working", n: running.length, label: `${running.length} working`, color: colors.accent },
+    { k: "idle", n: idle.length, label: `${idle.length} idle`, color: colors.textDim },
+  ];
+  const chips =
+    single && chipDefs.filter((c) => c.n > 0).length > 0 ? (
+      <View style={styles.chips} accessibilityRole="toolbar">
+        {chipDefs
+          .filter((c) => c.n > 0)
+          .map((c) => {
+            const on = stateFilter === c.k;
+            return (
+              <Pressable
+                key={c.k}
+                accessibilityRole="button"
+                accessibilityState={{ selected: on }}
+                accessibilityHint={on ? "Shows everything again" : "Shows only these"}
+                onPress={() => setStateFilter(on ? null : c.k)}
+                style={({ pressed }) => [styles.chip, on && { backgroundColor: tint(c.color, 0x1f), borderColor: tint(c.color, 0x55) }, pressed && styles.pressed]}
+              >
+                <View style={[styles.chipDot, { backgroundColor: c.color }]} />
+                <Text style={[styles.chipText, on && { color: c.color }]}>{c.label}</Text>
+              </Pressable>
+            );
+          })}
+      </View>
+    ) : null;
+  const done = restSummary(0, finished);
+
   const working = allWorking ? running : running.slice(0, WORKING_CAP);
   const more = running.length - working.length;
   const rest = restSummary(idle.length, finished);
@@ -396,7 +449,8 @@ export default function NowScreen() {
 
   return (
     <TabScreen title="Now" accessory={runButton} gap={18} large>
-      {picker}
+      {subtitle ?? picker}
+      {chips}
       {s.loadError ? (
         <View style={styles.loadError}>
           <ErrorText>Could not read this device&apos;s keys: {s.loadError}. Unlock the device, then try again.</ErrorText>
@@ -413,10 +467,10 @@ export default function NowScreen() {
                 "Not connected to your computers. Computers shows how each one is doing."}
         </Text>
       ) : null}
-      {needs.length > 0 ? (
+      {needs.length > 0 && show("needs") ? (
         <View style={styles.section}>
           <Text style={[styles.sectionTitle, { color: colors.warning }]} accessibilityRole="header">
-            Needs you · {needs.length}
+            {single ? "Needs you" : `Needs you · ${needs.length}`}
           </Text>
           {needs.map((n) =>
             n.waiting.kind === "choice" && quickChoices(n.waiting) ? (
@@ -432,10 +486,10 @@ export default function NowScreen() {
           )}
         </View>
       ) : null}
-      {running.length > 0 ? (
+      {running.length > 0 && show("working") ? (
         <View style={styles.section}>
           <Text style={[styles.sectionTitle, { color: colors.accent }]} accessibilityRole="header">
-            Working · {running.length}
+            {single ? "Working" : `Working · ${running.length}`}
           </Text>
           <View style={styles.card}>
             {working.map((r, i) => (
@@ -464,7 +518,52 @@ export default function NowScreen() {
           </View>
         </View>
       ) : null}
-      {rest ? (
+      {single && idle.length > 0 && show("idle") ? (
+        <View style={styles.section}>
+          <Text style={[styles.sectionTitle, { color: colors.textMuted }]} accessibilityRole="header">
+            Idle
+          </Text>
+          <View style={styles.card}>
+            {idle.map((r, i) => {
+              const at = idleSince.get(r.key);
+              return <IdleLine key={r.key} r={r} first={i === 0} mark={null} since={at === undefined ? null : agoShort(now - at)} />;
+            })}
+          </View>
+        </View>
+      ) : null}
+      {single && done && stateFilter === null ? (
+        <View style={styles.section}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityState={{ expanded: restOpen }}
+            accessibilityLabel={[done.finished ? `${done.finished} finished` : null, done.failed ? `${done.failed} failed` : null].filter(Boolean).join(", ")}
+            onPress={() => setRestOpen((v) => !v)}
+            style={({ pressed }) => [styles.summary, pressed && styles.pressed]}
+          >
+            <Text style={styles.summaryCheck}>✓</Text>
+            <Text style={[styles.summaryText, styles.flex]} numberOfLines={1}>
+              {done.finished ? `${done.finished} finished` : ""}
+              {done.failed ? (
+                <Text style={styles.summaryFailed}>
+                  {done.finished ? " · " : ""}
+                  {done.failed} failed
+                </Text>
+              ) : null}
+            </Text>
+            <View style={restOpen ? styles.chevronDown : null}>
+              <Icon name="forward" size={14} color={colors.textMuted} />
+            </View>
+          </Pressable>
+          {restOpen ? (
+            <View style={styles.card}>
+              {finished.map((a, i) => (
+                <FinishedLine key={a.id} a={a} first={i === 0} />
+              ))}
+            </View>
+          ) : null}
+        </View>
+      ) : null}
+      {!single && rest ? (
         <View style={styles.section}>
           <Pressable
             accessibilityRole="button"
@@ -494,7 +593,7 @@ export default function NowScreen() {
               </Text>
               <View style={styles.card}>
                 {idle.map((r, i) => (
-                  <IdleLine key={r.key} r={r} first={i === 0} mark={markOf(r.host)} />
+                  <IdleLine key={r.key} r={r} first={i === 0} mark={markOf(r.host)} since={null} />
                 ))}
               </View>
             </View>
@@ -541,6 +640,25 @@ const styles = StyleSheet.create({
     gap: 8,
     maxWidth: "90%",
   },
+  // one computer: its name and connection under the title
+  subtitle: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: -8, paddingHorizontal: 8 },
+  subtitleText: { flexShrink: 1, fontFamily: ui(400), color: colors.textMuted, fontSize: 13 },
+  // one computer: the state chips (needs you, working, idle) that show only their section
+  chips: { flexDirection: "row", flexWrap: "wrap", gap: 6, paddingHorizontal: 4 },
+  chip: {
+    height: 32,
+    borderRadius: 16,
+    paddingHorizontal: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    borderWidth: 1,
+    borderColor: colors.glassRim,
+    backgroundColor: colors.glass,
+  },
+  chipDot: { width: 7, height: 7, borderRadius: 4 },
+  chipText: { fontFamily: ui(400), color: colors.text, fontSize: 13 },
+  summaryCheck: { fontFamily: ui(600), color: colors.success, fontSize: 13 },
   pickerText: { flexShrink: 1, fontFamily: ui(400), color: colors.text, fontSize: 13 },
   dots: { flexDirection: "row" },
   stackDot: { width: 18, height: 18, borderRadius: 9, borderWidth: 2 },

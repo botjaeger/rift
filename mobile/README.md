@@ -86,7 +86,11 @@ Tabs: **Now**, **Computers**, **Settings** (`src/now.ts` holds their models).
   One row under it sums the rest ("2 idle · 6 finished · 1 failed") and opens *Idle* (coding
   agents at their own prompt, `running.idle`) and *Finished* (this run's finished commands,
   failures first, then newest; a row opens the pane at that block). The round terminal button
-  opens the Run sheet. With none paired it is the first-run page (no tab bar there).
+  opens the Run sheet. With one computer (one paired, or one picked) the board is the
+  one-computer board: the computer's name and connection under the title (one paired), chips
+  "N needs you · N working · N idle" that show only their section, *Idle* listed with how long
+  each agent has waited (since the app saw it stop working), and "✓ N finished · N failed",
+  which opens *Finished*. With none paired it is the first-run page (no tab bar there).
 - **Answer** (the P2 Reply board): "claude is asking", where, **Open pane**; the question, the
   agent's lines above it (a diff drawn as one), then the answers: a numbered entry is sent as
   its digit, an unnumbered one as arrow keys from the selected entry and Enter

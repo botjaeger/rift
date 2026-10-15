@@ -16,6 +16,7 @@ import {
   quickChoices,
   restSummary,
   swipeTarget,
+  trackIdle,
   tabLast,
   tabMatches,
   tabStarted,
@@ -145,6 +146,18 @@ describe("Now", () => {
     const marks = hostMarks(["a", "b", "c"].map((key) => ({ record: { key, name: `${key}-box` } })));
     expect([...marks.values()].map((m) => m.color)).toEqual(HOST_COLORS.slice(0, 3));
     expect(marks.get("b")).toEqual({ color: HOST_COLORS[1], short: "BB" });
+  });
+
+  it("times an idle agent from when it stopped working; one never seen working has no time", () => {
+    const since = new Map<string, number>();
+    const seen = new Set<string>();
+    trackIdle(since, seen, [{ key: "a" }], [{ key: "b" }], 1);
+    expect([...since]).toEqual([]);
+    trackIdle(since, seen, [], [{ key: "a" }, { key: "b" }], 5);
+    trackIdle(since, seen, [], [{ key: "a" }], 9);
+    expect([...since]).toEqual([["a", 5]]);
+    trackIdle(since, seen, [{ key: "a" }], [], 12);
+    expect([...since]).toEqual([]);
   });
 
   it("sums idle, finished and failed for the row under Working; nothing to sum: none", () => {
