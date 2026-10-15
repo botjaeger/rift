@@ -551,6 +551,8 @@ pub struct App {
     tip_hover: Option<([f32; 4], Instant)>,
     /// The tooltip drawn in the last frame.
     tip_shown: Option<crate::views::tooltip::Tip>,
+    /// A plain press on a link, acted on at its release (`click_link`).
+    link_press: Option<(PaneId, String)>,
     /// When a shown tooltip last went away (the next one shows at once).
     tip_hidden_at: Option<Instant>,
     /// A press, key or wheel hid it until the pointer moves to another control.
@@ -1251,6 +1253,7 @@ impl App {
             tips: Vec::new(),
             tip_hover: None,
             tip_shown: None,
+            link_press: None,
             tip_hidden_at: None,
             tip_suppressed: false,
             pointer_in: true,
@@ -2406,14 +2409,10 @@ impl App {
         }
     }
 
-    /// cmd+click on a detected URL opens it. Returns true when handled.
-    fn try_open_url(&mut self, pane_id: PaneId) -> bool {
-        if !self.modifiers.super_key() {
-            return false;
-        }
+    /// The detected URL or hyperlink under the pointer in `pane_id`.
+    fn url_under_mouse(&self, pane_id: PaneId) -> Option<String> {
         let (mx, my) = self.mouse;
-        let url = self
-            .tabs
+        self.tabs
             .get(self.active)
             .and_then(|t| t.pane(pane_id))
             .and_then(|p| {
@@ -2421,15 +2420,53 @@ impl App {
                     .iter()
                     .find(|(r, _)| mx >= r[0] && mx < r[0] + r[2] && my >= r[1] && my < r[1] + r[3])
                     .map(|(_, u)| u.clone())
-            });
-        let target = match url {
+            })
+    }
+
+    /// Only schemes that open documents, never script handlers.
+    fn openable_url(url: &str) -> bool {
+        let scheme = url.split_once(':').map(|(s, _)| s.to_ascii_lowercase());
+        matches!(
+            scheme.as_deref(),
+            Some("http" | "https" | "file" | "mailto" | "ftp")
+        )
+    }
+
+    /// A plain click (no drag) on a link: open it (`link_click = "open"`),
+    /// else show its tooltip at once, naming ⌘-click.
+    fn click_link(&mut self, pane_id: PaneId, url: &str) {
+        if self.url_under_mouse(pane_id).as_deref() != Some(url) {
+            return;
+        }
+        if self.config.link_click.trim() == "open" {
+            if Self::openable_url(url) {
+                self.open_target(url);
+            }
+            return;
+        }
+        let now = Instant::now();
+        self.tip_suppressed = false;
+        if let Some((_, since)) = self.tip_hover.as_mut() {
+            *since = now.checked_sub(crate::views::tooltip::DELAY).unwrap_or(now);
+        }
+    }
+
+    /// A single plain press on a link: remembered until the release, which
+    /// acts on it unless the press became a drag (a selection).
+    fn press_link(&mut self, pane_id: PaneId, clicks: u8) {
+        self.link_press = (clicks == 1 && !self.modifiers.shift_key())
+            .then(|| self.url_under_mouse(pane_id).map(|u| (pane_id, u)))
+            .flatten();
+    }
+
+    /// cmd+click on a detected URL opens it. Returns true when handled.
+    fn try_open_url(&mut self, pane_id: PaneId) -> bool {
+        if !self.modifiers.super_key() {
+            return false;
+        }
+        let target = match self.url_under_mouse(pane_id) {
             Some(url) => {
-                let scheme = url.split_once(':').map(|(s, _)| s.to_ascii_lowercase());
-                // only schemes that open documents, never script handlers
-                if !matches!(
-                    scheme.as_deref(),
-                    Some("http" | "https" | "file" | "mailto" | "ftp")
-                ) {
+                if !Self::openable_url(&url) {
                     return false;
                 }
                 url
@@ -2854,7 +2891,9 @@ impl App {
                 _ => None,
             }
         };
-        let over_link = self.modifiers.super_key()
+        // links show the hand without ⌘ (a click shows or opens them);
+        // file paths only with ⌘ held
+        let over_link = overlay.is_none()
             && self.tabs.get(self.active).is_some_and(|t| {
                 t.panes.iter().any(|p| {
                     p.url_hits.iter().any(|(r, _)| {
@@ -7538,6 +7577,22 @@ impl App {
             // the panes' controls under the panel show no tooltip
             tips.push(Tip::new(self.panel_rects().1, "", None));
         }
+        // a link names its target and what opens it (as in Warp)
+        let open_with = if self.config.link_click.trim() == "open" {
+            "Click"
+        } else {
+            "⌘ Click"
+        };
+        for pane in self
+            .tabs
+            .get(self.active)
+            .into_iter()
+            .flat_map(|t| &t.panes)
+        {
+            for (rect, url) in &pane.url_hits {
+                tips.push(Tip::new(*rect, url.clone(), Some(open_with.into())));
+            }
+        }
         for hit in &self.hits {
             // a prompt chip's card: what it shows and what a click does
             if let ClickTarget::Chip(_, chip) = hit.target {
@@ -10576,8 +10631,12 @@ impl App {
             }
             let pending = self.pending_sel.take();
             let selecting = pending.as_ref().is_some_and(|p| p.started);
-            // Warp: a click (no drag) on a command's output selects its block
-            if let Some(p) = pending.filter(|p| !p.started) {
+            let link = self.link_press.take().filter(|_| !selecting);
+            if let Some((pane, url)) = link {
+                self.click_link(pane, &url);
+                window.request_redraw();
+            } else if let Some(p) = pending.filter(|p| !p.started) {
+                // Warp: a click (no drag) on a command's output selects its block
                 self.select_block_at(p.pane, p.abs);
                 window.request_redraw();
             }
@@ -10912,6 +10971,7 @@ impl App {
                     self.last_click = None;
                 } else {
                     self.press_selection(id, clicks);
+                    self.press_link(id, clicks);
                 }
             }
             Some(ClickTarget::PaneHeader(id)) => {
@@ -11267,6 +11327,9 @@ impl App {
                             .unwrap_or(&"navigate")
                             .to_string();
                     }
+                    "link_click" => {
+                        c.link_click = if *v == 1 { "open" } else { "prompt" }.into();
+                    }
                     "clipboard_access" => {
                         c.clipboard_access = ["off", "write", "read_write"]
                             .get(*v as usize)
@@ -11352,6 +11415,7 @@ impl App {
                         self.last_click = None;
                     } else {
                         self.press_selection(id, clicks);
+                        self.press_link(id, clicks);
                     }
                     window.request_redraw();
                 }

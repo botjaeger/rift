@@ -63,6 +63,10 @@ pub struct ShellEnv {
     functions: HashSet<String>,
     /// Builtins and reserved words for `shell`.
     builtins: HashSet<String>,
+    /// Executables on the interactive shell's `$PATH` (sorted), which rc
+    /// files extend (`PNPM_HOME`, nvm): Rift started from the Dock has a
+    /// shorter one. Empty when the probe did not report it.
+    path_cmds: Vec<String>,
 }
 
 /// Command prefixes that transparently precede the real command: the word after
@@ -121,6 +125,17 @@ impl ShellEnv {
             aliases: HashMap::new(),
             functions: HashSet::new(),
             builtins: builtins_for(shell).iter().map(|s| s.to_string()).collect(),
+            path_cmds: Vec::new(),
+        }
+    }
+
+    /// `$PATH` executables: the shell's when the probe reported them, else
+    /// Rift's own.
+    fn path_commands(&self) -> &[String] {
+        if self.path_cmds.is_empty() {
+            crate::completion::path_commands()
+        } else {
+            &self.path_cmds
         }
     }
 
@@ -147,20 +162,44 @@ impl ShellEnv {
         let Some(output) = run_probe(shell_program, shell, timeout) else {
             return env;
         };
+        env.add_probe_output(&output);
+        env
+    }
 
+    /// Merge the probe's output: whatever the rc files printed (an iTerm2
+    /// integration's OSC 1337 reports, a greeting), then the start sentinel,
+    /// the aliases, the functions sentinel and the function names.
+    fn add_probe_output(&mut self, output: &str) {
+        // rc output before the start sentinel is not ours: unterminated, it
+        // glued itself to the first alias and hid it
+        let output = output
+            .split_once(PROBE_START)
+            .map_or(output, |(_, rest)| rest);
+        // the shell's $PATH comes last, after its own sentinel
+        let output = match output.split_once(PROBE_PATH) {
+            Some((rest, path)) => {
+                let path = path.trim();
+                if !path.is_empty() {
+                    self.path_cmds = crate::completion::scan_path_commands(path.as_ref());
+                    // command-name completions use it too
+                    let _ = crate::completion::SHELL_PATH_COMMANDS.set(self.path_cmds.clone());
+                }
+                rest
+            }
+            None => output,
+        };
         // Aliases and functions are emitted on either side of a sentinel line.
         let (alias_text, func_text) = match output.split_once(PROBE_SENTINEL) {
             Some((a, f)) => (a, f),
-            None => (output.as_str(), ""),
+            None => (output, ""),
         };
 
-        for (name, expansion) in parse_aliases(shell, alias_text) {
-            env.aliases.insert(name, expansion);
+        for (name, expansion) in parse_aliases(self.shell, alias_text) {
+            self.aliases.insert(name, expansion);
         }
         for name in parse_function_names(func_text) {
-            env.functions.insert(name);
+            self.functions.insert(name);
         }
-        env
     }
 
     /// The shell family this environment was loaded for.
@@ -197,7 +236,9 @@ impl ShellEnv {
         if is_path_like(word) {
             return path_word_is_executable(word);
         }
-        path_commands_contains(word)
+        self.path_commands()
+            .binary_search_by(|c| c.as_str().cmp(word))
+            .is_ok()
     }
 
     /// Warp-style alias expansion for the word ending at (or just before)
@@ -270,7 +311,7 @@ impl ShellEnv {
         out.extend(self.aliases.keys().cloned());
         out.extend(self.functions.iter().cloned());
         out.extend(self.builtins.iter().cloned());
-        out.extend(crate::completion::path_commands().iter().cloned());
+        out.extend(self.path_commands().iter().cloned());
         out
     }
 }
@@ -278,21 +319,33 @@ impl ShellEnv {
 /// Sentinel line printed by the probe between the alias listing and the
 /// function-name listing so the two can be parsed with the right grammar.
 const PROBE_SENTINEL: &str = "__RIFT_ENV_PROBE_FUNCS__";
+/// Printed first: everything before it came from the rc files.
+const PROBE_START: &str = "__RIFT_ENV_PROBE_START__";
+/// Printed before the shell's `$PATH` (colon-separated), the last line.
+const PROBE_PATH: &str = "__RIFT_ENV_PROBE_PATH__";
 
 /// The shell command string that lists aliases, then the sentinel, then
-/// function names, one per line.
+/// function names, one per line, then the `$PATH` sentinel and `$PATH`.
 fn probe_script(shell: ShellKind) -> &'static str {
     match shell {
         // zsh: `alias` prints `name=value` (value single-quoted when needed);
         // `${(k)functions}` are the function names.
         ShellKind::Zsh => {
-            "alias; print -r -- __RIFT_ENV_PROBE_FUNCS__; print -rl -- ${(k)functions}"
+            "print -r -- __RIFT_ENV_PROBE_START__; alias; print -r -- __RIFT_ENV_PROBE_FUNCS__; \
+             print -rl -- ${(k)functions}; print -r -- __RIFT_ENV_PROBE_PATH__; print -r -- \"$PATH\""
         }
         // bash: `alias` prints `alias name='value'`; `compgen -A function` the
         // function names.
-        ShellKind::Bash => "alias; echo __RIFT_ENV_PROBE_FUNCS__; compgen -A function",
-        // fish: `alias` prints `alias name value`; `functions -n` the names.
-        ShellKind::Fish => "alias; echo __RIFT_ENV_PROBE_FUNCS__; functions -n",
+        ShellKind::Bash => {
+            "echo __RIFT_ENV_PROBE_START__; alias; echo __RIFT_ENV_PROBE_FUNCS__; \
+             compgen -A function; echo __RIFT_ENV_PROBE_PATH__; echo \"$PATH\""
+        }
+        // fish: `alias` prints `alias name value`; `functions -n` the names;
+        // `$PATH` is a list there
+        ShellKind::Fish => {
+            "echo __RIFT_ENV_PROBE_START__; alias; echo __RIFT_ENV_PROBE_FUNCS__; functions -n; \
+             echo __RIFT_ENV_PROBE_PATH__; string join : $PATH"
+        }
     }
 }
 
@@ -787,13 +840,6 @@ fn path_word_is_executable(word: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Binary-search the sorted, cached `$PATH` command list for `word`.
-fn path_commands_contains(word: &str) -> bool {
-    crate::completion::path_commands()
-        .binary_search_by(|c| c.as_str().cmp(word))
-        .is_ok()
-}
-
 /// Byte range of the last whitespace-delimited (quote-aware) token in `s`, or
 /// `None` when `s` has no token.
 fn last_token(s: &str) -> Option<Range<usize>> {
@@ -906,6 +952,7 @@ mod tests {
                 .collect(),
             functions: HashSet::new(),
             builtins: builtins.iter().map(|s| s.to_string()).collect(),
+            path_cmds: Vec::new(),
         }
     }
 
@@ -917,6 +964,48 @@ mod tests {
         assert_eq!(ShellKind::from_program("bash"), ShellKind::Bash);
         assert_eq!(ShellKind::from_program("sh"), ShellKind::Bash);
         assert_eq!(ShellKind::from_program("-zsh"), ShellKind::Zsh);
+    }
+
+    /// An iTerm2 shell integration in `.zshrc` prints its OSC 1337 reports
+    /// with no newline (as a real `zsh -i -c alias` showed): the first alias
+    /// must still be read. A stand-in `zsh` prints them, then runs the probe.
+    #[test]
+    fn rc_output_before_the_probe_is_skipped() {
+        if !std::path::Path::new("/bin/zsh").exists() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("rift-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let shell = dir.join("zsh");
+        // the rc file also puts a tool directory on PATH (PNPM_HOME)
+        let tools = dir.join("tools");
+        std::fs::create_dir_all(&tools).unwrap();
+        std::fs::write(tools.join("rift-probe-tool"), "#!/bin/sh\n").unwrap();
+        std::fs::write(
+            &shell,
+            format!(
+                "#!/bin/sh\n\
+                 printf '\\033]1337;CurrentDir=/tmp\\007\\033]1337;ShellIntegrationVersion=14;shell=zsh\\007'\n\
+                 export PATH=\"{}:$PATH\"\n\
+                 exec /bin/zsh -f -c \"alias build='docker compose up --build'; alias up=x; $3\"\n",
+                tools.display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(
+            tools.join("rift-probe-tool"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        let env = ShellEnv::load_with_timeout(shell.to_str().unwrap(), Duration::from_secs(10));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(env.alias("build"), Some("docker compose up --build"));
+        assert_eq!(env.alias("up"), Some("x"));
+        // a command only the shell's PATH has is known
+        assert!(env.is_known("rift-probe-tool"));
+        assert!(!env.is_known("rift-probe-missing"));
     }
 
     #[test]

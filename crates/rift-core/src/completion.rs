@@ -119,11 +119,27 @@ pub fn escape_word(s: &str) -> Option<String> {
 }
 
 /// Executable names on `$PATH`, scanned once per process (sorted, deduped).
+/// The interactive shell's `$PATH` reported by its probe
+/// ([`crate::shell_env::ShellEnv`]) wins.
 pub fn path_commands() -> &'static [String] {
     static CMDS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
-    CMDS.get_or_init(|| {
+    if let Some(shell) = SHELL_PATH_COMMANDS.get() {
+        return shell;
+    }
+    CMDS.get_or_init(|| scan_path_commands(&std::env::var_os("PATH").unwrap_or_default()))
+}
+
+/// Executables on the interactive shell's `$PATH`, set by the first probe
+/// that reported it (rc files extend it: `PNPM_HOME`, nvm).
+pub(crate) static SHELL_PATH_COMMANDS: std::sync::OnceLock<Vec<String>> =
+    std::sync::OnceLock::new();
+
+/// Executable names in the directories of `path` (a `$PATH` value), sorted
+/// and deduped.
+pub fn scan_path_commands(path: &std::ffi::OsStr) -> Vec<String> {
+    {
         let mut names: Vec<String> = Vec::new();
-        for dir in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
+        for dir in std::env::split_paths(path) {
             let Ok(entries) = std::fs::read_dir(&dir) else {
                 continue;
             };
@@ -143,7 +159,7 @@ pub fn path_commands() -> &'static [String] {
         names.sort();
         names.dedup();
         names
-    })
+    }
 }
 
 /// Gather completions for the token at `cursor`. `history` is the pane's

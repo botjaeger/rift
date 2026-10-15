@@ -171,6 +171,8 @@ the whole buffer.
   (1002), motion (1003) and the wheel in SGR (1006), UTF-8 (1005) or legacy
   encoding; ⇧ forces local selection. Focus in/out (1004) is reported when
   the window gains or loses focus.
+- Links show a hand and a tooltip with their target; a plain click shows it
+  or opens the link (`link_click`).
 - ⌘-click opens URLs, OSC 8 hyperlinks and existing file paths (see ui.md);
   files and folders open where `link_editor` says (default app, the viewer
   pane or an installed editor), and the explorer / review ↗ follow

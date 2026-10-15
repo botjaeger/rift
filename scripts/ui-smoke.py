@@ -1262,6 +1262,48 @@ assert rc == 0, died("restore-elapsed run failed", rs / "app.log")
 restored = (rs / "restored.txt").read_text()
 assert 'prompt_chips_shown=["Cwd:' in restored and '"Elapsed:' not in restored, restored
 
+# a link takes a plain click: "prompt" shows its tooltip at once (no hover
+# wait), "open" opens it; a drag across it selects and does neither
+lk = scratch / "link-click"
+for sub in ("cfg/rift", "data"):
+    (lk / sub).mkdir(parents=True, exist_ok=True)
+def run_link(mode):
+    (lk / "cfg/rift/config.toml").write_text(
+        'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
+        f'sync_os_theme = false\nlink_click = "{mode}"\n')
+    (lk / f"{mode}.rift").write_text("\n".join([
+        "resize 1000 400", "wait_prompt",
+        'type printf "see https://example.com/x ok\\\\n"\\n', "wait 800",
+        f"dump {lk}/{mode}-at.txt", "quit"]) + "\n")
+    subprocess.run([str(binary), "--script", str(lk / f"{mode}.rift"), "--headless"],
+                   env=dict(env, XDG_CONFIG_HOME=str(lk / "cfg"), XDG_DATA_HOME=str(lk / "data")),
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+    x, y, w, h = map(int, re.search(r'"https://example\.com/x@(\d+),(\d+),(\d+),(\d+)"',
+                                    (lk / f"{mode}-at.txt").read_text()).groups())
+    at = f"{x + w // 2} {y + h // 2}"
+    (lk / f"{mode}.rift").write_text("\n".join([
+        "resize 1000 400", "wait_prompt",
+        'type printf "see https://example.com/x ok\\\\n"\\n', "wait 800",
+        f"move {at}", "wait 150", f"dump {lk}/{mode}-hover.txt",
+        f"click {at}", "wait 150", f"dump {lk}/{mode}-click.txt",
+        f"drag {x - 20} {y + h // 2} {x + w - 4} {y + h // 2}", "wait 300",
+        f"dump {lk}/{mode}-drag.txt", "quit"]) + "\n")
+    with (lk / f"{mode}.log").open("w") as log:
+        rc = subprocess.run([str(binary), "--script", str(lk / f"{mode}.rift"), "--headless"],
+                            env=dict(env, XDG_CONFIG_HOME=str(lk / "cfg"),
+                                     XDG_DATA_HOME=str(lk / "data")),
+                            stdout=log, stderr=log, timeout=60).returncode
+    assert rc == 0, died(f"link-click {mode} run failed", lk / f"{mode}.log")
+    return [(lk / f"{mode}-{s}.txt").read_text() for s in ("hover", "click", "drag")], \
+        (lk / f"{mode}.log").read_text().count("headless: not opening https://example.com/x")
+(hover, click, drag), opened = run_link("prompt")
+assert "tooltip=Some(" not in hover, hover
+assert 'tooltip=Some("https://example.com/x ⌘ Click")' in click, click
+assert "selection=true" in drag and opened == 0, (drag, opened)
+(hover, click, drag), opened = run_link("open")
+assert "Headless: not opening https://example.com/x" in click and opened == 1, (click, opened)
+assert "selection=true" in drag, drag
+
 # tooltips: none before the rest time, then the control's action and
 # shortcut; a neighbour shows at once; a key hides it. On a fresh session the
 # welcome list runs under the history pane: its scope chip still gets the

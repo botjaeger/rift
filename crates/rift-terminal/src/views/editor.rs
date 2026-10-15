@@ -19,6 +19,18 @@ pub const LINE_H: f32 = 20.0;
 pub const FONT_SIZE: f32 = 13.0;
 pub const PAD_X: f32 = 16.0;
 
+/// A command line's syntax colors, in the editor and in block headers: the
+/// command, its flags, quoted strings, operators and plain arguments.
+pub fn syntax_color(theme: &Theme, kind: TokenKind) -> Color {
+    match kind {
+        TokenKind::Command => theme.syntax.command,
+        TokenKind::Flag => theme.syntax.flag,
+        TokenKind::Str => theme.syntax.string,
+        TokenKind::Op => theme.text_muted,
+        TokenKind::Plain => theme.fg,
+    }
+}
+
 /// Visual rows of the buffer: logical lines (split at `\n`) soft-wrapped
 /// every `cols` cells. Byte ranges exclude the newline.
 pub fn wrap_rows(buffer: &str, cols: usize) -> Vec<std::ops::Range<usize>> {
@@ -183,15 +195,7 @@ pub fn render(
 
     // syntax-highlighted spans
     let tokens = tokenize(buffer);
-    let color_of = |kind: TokenKind| -> Color {
-        match kind {
-            TokenKind::Command => theme.text_bright,
-            TokenKind::Flag => theme.fg,
-            TokenKind::Str => theme.syntax.string,
-            TokenKind::Op => theme.text_muted,
-            TokenKind::Plain => theme.fg,
-        }
-    };
+    let color_of = |kind: TokenKind| syntax_color(theme, kind);
 
     let mut spans: Vec<(&str, Attrs)> = Vec::new();
     let mut pos = 0;

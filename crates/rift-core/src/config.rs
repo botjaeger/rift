@@ -328,6 +328,10 @@ pub struct Config {
     /// file's default app), `"rift"` (the viewer pane) or an editor id
     /// from `editors::EDITORS` (`"vscode"`, `"zed"`, …).
     pub link_editor: String,
+    /// What a plain click on a link does: `"prompt"` shows the link and
+    /// that ⌘-click opens it, `"open"` opens it at once. ⌘-click always
+    /// opens.
+    pub link_click: String,
     /// Where files from the explorer and code review (↗) open: `"rift"`
     /// (the viewer pane), `"system"` or an editor id.
     pub file_editor: String,
@@ -398,6 +402,7 @@ impl Default for Config {
             clipboard_access: "write".into(),
             mouse_reporting: true,
             link_editor: crate::editors::SYSTEM.into(),
+            link_click: "prompt".into(),
             file_editor: crate::editors::RIFT.into(),
             explorer_hidden_files: true,
             notifications: Default::default(),

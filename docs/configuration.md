@@ -115,6 +115,8 @@ global_hotkey = ""                # system-wide show/hide chord, e.g. "alt+space
                                   # empty = off (X11 on Linux)
 link_editor   = "system"          # ⌘-clicked file paths / file links: system (default
                                   # app) | rift (viewer pane) | an editor id below
+link_click    = "prompt"          # plain click on a link: prompt (show it and ⌘ Click)
+                                  # | open (open it at once); ⌘-click always opens
 file_editor   = "rift"            # explorer and code review ↗: rift | system | editor id
                                   # editors: vscode cursor windsurf zed sublime intellij
                                   # phpstorm webstorm rustrover (macOS: the .app in

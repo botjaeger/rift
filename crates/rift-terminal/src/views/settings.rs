@@ -2636,6 +2636,15 @@ fn terminal_page(form: &mut Form, config: &Config) {
         "middle_click_paste",
     );
     let y = form.y;
+    form.segment_desc(
+        y,
+        "Clicking a link",
+        "Show where it goes first, or open it at once (⌘-click always opens)",
+        &["Show it", "Open it"],
+        usize::from(config.link_click.trim() == "open"),
+        "link_click",
+    );
+    let y = form.y;
     form.stepper_desc(
         y,
         "Lines per wheel notch",

@@ -46,7 +46,7 @@ Every rendered color resolves from a theme token (`rift_core::Theme`,
 | `cursor` | `#d4d4d4` | Cursor |
 | `selection` | `#264f78` | Text selection |
 | `search_match` / `search_active` | `#ffd700` / `#ff8000` | Find highlights |
-| `syntax.command` / `flag` / `string` / `ghost` | `#569cd6` / `#9cdcfe` / `#ce9178` / `#5a5c63` | `string` and `ghost` in the editor (its command and flags are white); `command`, `flag` color keywords and numbers in the file viewer and review diff |
+| `syntax.command` / `flag` / `string` / `ghost` | `#569cd6` / `#9cdcfe` / `#ce9178` / `#5a5c63` | the command line in the editor and block headers (command, flags, strings; `ghost` the suggestion); keywords and numbers in the file viewer and review diff |
 | `ansi[0..16]` | xterm values | Program colors |
 
 Builtin themes: `dark-default`, `light-default`, `catppuccin-mocha`,

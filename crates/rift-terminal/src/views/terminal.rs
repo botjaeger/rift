@@ -761,6 +761,56 @@ fn make_text(
     })
 }
 
+/// A command line in the terminal font with its syntax colors, as the
+/// editor shows it (`editor::syntax_color`).
+fn make_command_text(
+    engine: &mut TextEngine,
+    text: &str,
+    font_size: f32,
+    line_h: f32,
+    theme: &Theme,
+) -> std::sync::Arc<Buffer> {
+    use rift_core::highlight::tokenize;
+    use std::hash::{Hash, Hasher};
+    let mut spans: Vec<(&str, Color)> = Vec::new();
+    let mut pos = 0;
+    for (range, kind) in tokenize(text) {
+        if range.start > pos {
+            spans.push((&text[pos..range.start], theme.fg));
+        }
+        spans.push((
+            &text[range.clone()],
+            crate::views::editor::syntax_color(theme, kind),
+        ));
+        pos = range.end;
+    }
+    if pos < text.len() {
+        spans.push((&text[pos..], theme.fg));
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    3u8.hash(&mut h); // cache-key namespace: highlighted command lines
+    font_size.to_bits().hash(&mut h);
+    line_h.to_bits().hash(&mut h);
+    mono_family().hash(&mut h);
+    for (s, c) in &spans {
+        s.hash(&mut h);
+        for v in [c.r, c.g, c.b, c.a] {
+            v.to_bits().hash(&mut h);
+        }
+    }
+    engine.shaped(h.finish(), |fs| {
+        let mut buf = Buffer::new(fs, Metrics::new(font_size, line_h));
+        buf.set_size(fs, None, None);
+        let base = Attrs::new().family(Family::Name(mono_family()));
+        let rich: Vec<(&str, Attrs)> = spans
+            .iter()
+            .map(|(s, c)| (*s, base.clone().color(rift_renderer::text_color(*c))))
+            .collect();
+        buf.set_rich_text(fs, rich, &base, Shaping::Advanced, None);
+        buf
+    })
+}
+
 /// Active search: the compiled matcher + the current match anchor.
 pub struct SearchCtx {
     pub matcher: Matcher,
@@ -1982,7 +2032,12 @@ fn render_grid_line(
         italic: bool,
         presentation: Presentation,
     }
-    let mut spans: Vec<Span> = Vec::new();
+    // the line's text in runs, each placed at its first column: a glyph the
+    // terminal font lacks comes from a fallback font whose advance is not a
+    // cell (⧉ is wider), so it gets a run of its own and the text after it
+    // starts on its column again (selection and links follow the grid)
+    let mut segs: Vec<(usize, Vec<Span>)> = vec![(0, Vec::new())];
+    let mut break_next = false;
     let cols = (g.columns() / sx as usize).min(grid.cols + 8);
     // cell backgrounds (merged runs, block cursor) draw before decorations
     let mut backs: Vec<([f32; 2], [f32; 2], Color, f32)> = Vec::new();
@@ -2135,6 +2190,17 @@ fn render_grid_line(
             }
         }
 
+        let off_grid = !ch.is_ascii() && !engine.family_covers(mono_family(), ch);
+        if off_grid || break_next {
+            match segs.last_mut() {
+                Some((start, s)) if s.is_empty() => *start = col,
+                _ => segs.push((col, Vec::new())),
+            }
+        }
+        break_next = off_grid;
+        let Some((_, spans)) = segs.last_mut() else {
+            continue;
+        };
         if !spans.last().is_some_and(|l| {
             l.fg == fg && l.weight == weight && l.italic == italic && l.presentation == presentation
         }) {
@@ -2164,106 +2230,110 @@ fn render_grid_line(
         layer.rect(pos, size, color, 0.0);
     }
 
-    if spans.iter().all(|s| s.text.trim().is_empty()) {
-        return;
-    }
-    // trailing blank cells draw nothing (backgrounds are quads), but shaping
-    // them cost ~40 KB per cached row: a 500k-line flood peaked near 3 GB
-    while let Some(last) = spans.last_mut() {
-        let kept = last.text.trim_end_matches(' ').len();
-        if kept > 0 {
-            last.text.truncate(kept);
-            break;
+    let line_x = x;
+    for (start, mut spans) in segs {
+        if spans.iter().all(|s| s.text.trim().is_empty()) {
+            continue;
         }
-        spans.pop();
-    }
+        let x = line_x + start as f32 * grid.cell_w * sx;
+        // trailing blank cells draw nothing (backgrounds are quads), but shaping
+        // them cost ~40 KB per cached row: a 500k-line flood peaked near 3 GB
+        while let Some(last) = spans.last_mut() {
+            let kept = last.text.trim_end_matches(' ').len();
+            if kept > 0 {
+                last.text.truncate(kept);
+                break;
+            }
+            spans.pop();
+        }
 
-    // shape cache: identical styled content re-uses last frame's buffer, so
-    // scrolling only shapes lines entering the viewport
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    1u8.hash(&mut h); // cache-key namespace: grid lines
-    grid.font_size.to_bits().hash(&mut h);
-    grid.line_h.to_bits().hash(&mut h);
-    grid.ligatures.hash(&mut h);
-    attr.hash(&mut h);
-    grid.cell_w.to_bits().hash(&mut h);
-    for s in &spans {
-        s.text.hash(&mut h);
-        s.weight.0.hash(&mut h);
-        s.italic.hash(&mut h);
-        s.presentation.hash(&mut h);
-        s.fg.r.to_bits().hash(&mut h);
-        s.fg.g.to_bits().hash(&mut h);
-        s.fg.b.to_bits().hash(&mut h);
-        s.fg.a.to_bits().hash(&mut h);
-    }
-    // double-height lines shape at twice the size and show one half;
-    // double-width lines space each glyph across two cells
-    let tall = matches!(attr, LineSize::Top | LineSize::Bottom);
-    let (font_size, line_h) = if tall {
-        (grid.font_size * 2.0, grid.line_h * 2.0)
-    } else {
-        (grid.font_size, grid.line_h)
-    };
-    let spacing = if attr == LineSize::Wide {
-        grid.cell_w / grid.font_size
-    } else {
-        0.0
-    };
-    let buf = engine.shaped(h.finish(), |fs| {
-        let mut buf = Buffer::new(fs, Metrics::new(font_size, line_h));
-        buf.set_size(fs, None, Some(line_h));
-        let rich: Vec<(&str, Attrs)> = spans
-            .iter()
-            .map(|s| {
-                let attrs = mono_attrs(grid.ligatures)
-                    .weight(s.weight)
-                    .color(rift_renderer::text_color(s.fg));
-                // only DECDWL lines set tracking
-                let attrs = if spacing > 0.0 {
-                    attrs.letter_spacing(spacing)
+        // shape cache: identical styled content re-uses last frame's buffer, so
+        // scrolling only shapes lines entering the viewport
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        1u8.hash(&mut h); // cache-key namespace: grid lines
+        grid.font_size.to_bits().hash(&mut h);
+        grid.line_h.to_bits().hash(&mut h);
+        grid.ligatures.hash(&mut h);
+        attr.hash(&mut h);
+        grid.cell_w.to_bits().hash(&mut h);
+        for s in &spans {
+            s.text.hash(&mut h);
+            s.weight.0.hash(&mut h);
+            s.italic.hash(&mut h);
+            s.presentation.hash(&mut h);
+            s.fg.r.to_bits().hash(&mut h);
+            s.fg.g.to_bits().hash(&mut h);
+            s.fg.b.to_bits().hash(&mut h);
+            s.fg.a.to_bits().hash(&mut h);
+        }
+        // double-height lines shape at twice the size and show one half;
+        // double-width lines space each glyph across two cells
+        let tall = matches!(attr, LineSize::Top | LineSize::Bottom);
+        let (font_size, line_h) = if tall {
+            (grid.font_size * 2.0, grid.line_h * 2.0)
+        } else {
+            (grid.font_size, grid.line_h)
+        };
+        let spacing = if attr == LineSize::Wide {
+            grid.cell_w / grid.font_size
+        } else {
+            0.0
+        };
+        let buf = engine.shaped(h.finish(), |fs| {
+            let mut buf = Buffer::new(fs, Metrics::new(font_size, line_h));
+            buf.set_size(fs, None, Some(line_h));
+            let rich: Vec<(&str, Attrs)> = spans
+                .iter()
+                .map(|s| {
+                    let attrs = mono_attrs(grid.ligatures)
+                        .weight(s.weight)
+                        .color(rift_renderer::text_color(s.fg));
+                    // only DECDWL lines set tracking
+                    let attrs = if spacing > 0.0 {
+                        attrs.letter_spacing(spacing)
+                    } else {
+                        attrs
+                    };
+                    let attrs = if s.italic {
+                        attrs.style(rift_renderer::glyphon::Style::Italic)
+                    } else {
+                        attrs
+                    };
+                    let attrs = match s.presentation {
+                        Presentation::Default => attrs,
+                        Presentation::Emoji => attrs.family(Family::Name(EMOJI_FAMILY)),
+                        Presentation::Text(family) => attrs.family(Family::Name(family)),
+                    };
+                    (s.text.as_str(), attrs)
+                })
+                .collect();
+            buf.set_rich_text(
+                fs,
+                rich,
+                &mono_attrs(grid.ligatures),
+                Shaping::Advanced,
+                None,
+            );
+            buf
+        });
+        match attr {
+            LineSize::Single => layer.text(buf, x, y, theme.fg),
+            LineSize::Wide => layer.text(buf, x + grid.cell_w / 2.0, y, theme.fg),
+            LineSize::Top | LineSize::Bottom => {
+                let bounds = TextBounds {
+                    left: line_x.floor() as i32,
+                    top: y.floor() as i32,
+                    right: (line_x + cols as f32 * grid.cell_w * sx).ceil() as i32,
+                    bottom: (y + grid.line_h).ceil() as i32,
+                };
+                let top = if attr == LineSize::Top {
+                    y
                 } else {
-                    attrs
+                    y - grid.line_h
                 };
-                let attrs = if s.italic {
-                    attrs.style(rift_renderer::glyphon::Style::Italic)
-                } else {
-                    attrs
-                };
-                let attrs = match s.presentation {
-                    Presentation::Default => attrs,
-                    Presentation::Emoji => attrs.family(Family::Name(EMOJI_FAMILY)),
-                    Presentation::Text(family) => attrs.family(Family::Name(family)),
-                };
-                (s.text.as_str(), attrs)
-            })
-            .collect();
-        buf.set_rich_text(
-            fs,
-            rich,
-            &mono_attrs(grid.ligatures),
-            Shaping::Advanced,
-            None,
-        );
-        buf
-    });
-    match attr {
-        LineSize::Single => layer.text(buf, x, y, theme.fg),
-        LineSize::Wide => layer.text(buf, x + grid.cell_w / 2.0, y, theme.fg),
-        LineSize::Top | LineSize::Bottom => {
-            let bounds = TextBounds {
-                left: x.floor() as i32,
-                top: y.floor() as i32,
-                right: (x + cols as f32 * grid.cell_w * sx).ceil() as i32,
-                bottom: (y + grid.line_h).ceil() as i32,
-            };
-            let top = if attr == LineSize::Top {
-                y
-            } else {
-                y - grid.line_h
-            };
-            layer.text_clipped(buf, x, top, theme.fg, bounds);
+                layer.text_clipped(buf, x, top, theme.fg, bounds);
+            }
         }
     }
 }
@@ -2445,14 +2515,7 @@ fn render_header(
     } else {
         cmd
     };
-    let cmd_buf = make_text(
-        engine,
-        &cmd,
-        grid.font_size,
-        grid.line_h,
-        mono_family(),
-        Weight::NORMAL,
-    );
+    let cmd_buf = make_command_text(engine, &cmd, grid.font_size, grid.line_h, theme);
     layer.text(cmd_buf, cmd_x, y, theme.text_bright);
 
     // collapsed note, else Warp-style prompt context: ~/path git:(branch)

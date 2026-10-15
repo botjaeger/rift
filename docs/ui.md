@@ -268,11 +268,15 @@ Each command becomes a block via shell-integration OSC 133 markers:
   the cwd/branch context only shows when it fits. Multi-line commands show
   `⏎` between lines.
 - **Links**: http(s) URLs get a subtle underline; OSC 8 hyperlinks (`ls
-  --hyperlink`, compilers, `delta`) are underlined too. Hold ⌘ and the pointer
-  turns into a hand over a URL, a hyperlink or an existing file path
-  (absolute, `~/…`, or relative to the pane's cwd; `file:line:col` suffixes
-  are accepted) — ⌘-click opens it with the system opener. Only http, https,
-  file, mailto and ftp targets open.
+  --hyperlink`, compilers, `delta`) are underlined too. The pointer turns into
+  a hand over a URL or hyperlink, and resting on one shows a tooltip with its
+  target and `⌘ Click` (as in Warp). A plain click shows that tooltip at once
+  (`link_click = "prompt"`, Settings › Terminal › *Clicking a link: Show it*)
+  or opens the link (`"open"`, *Open it*); a drag across it selects text.
+  Hold ⌘ and the hand also shows over an existing file path (absolute, `~/…`,
+  or relative to the pane's cwd; `file:line:col` suffixes are accepted) —
+  ⌘-click opens any of them with the system opener. Only http, https, file,
+  mailto and ftp targets open.
 - **Cell styles**: bold, italic (embedded JetBrains Mono Italic/Bold Italic),
   dim, inverse, hidden, strikethrough, blinking (SGR 5: hidden and shown every
   600 ms), and underline variants (single, double, curly, dotted, dashed; SGR
@@ -359,7 +363,7 @@ integration). Sits at the bottom of the pane, or at the top with
   normally, red after a non-zero exit, muted in an unfocused split pane. In
   shell-prompt mode (`prompt = "shell"`) the shell's own PS1 stays on the grid
   above and the editor shows a smaller muted chevron instead.
-- **Live syntax highlighting**: command and flags in white (`text_bright` / `fg`), strings in `syntax.string`, operators muted.
+- **Live syntax highlighting**: the command in `syntax.command`, flags in `syntax.flag`, strings in `syntax.string`, operators muted, other arguments in `fg`; block headers color the command line the same way. A command is known when it is an alias, function or builtin of your shell or an executable on its `$PATH` (as your rc files set it).
 - **Unknown commands** (`Underline unknown commands`): a first command word the
   shell does not know gets a red zig-zag underline, except the word still being
   typed at the end of the line.
@@ -734,7 +738,9 @@ description) left, control right; it runs to the bottom edge.
   terminal*.
   - Mouse: `Mouse reporting to programs (Shift selects)` toggle,
     `Middle-click to paste` toggle (*Pastes the clipboard into the pane under
-    the pointer*; `middle_click_paste`), `Lines per wheel notch` stepper
+    the pointer*; `middle_click_paste`), `Clicking a link` segmented
+    `Show it | Open it` (*Show where it goes first, or open it at once
+    (⌘-click always opens)*; `link_click`), `Lines per wheel notch` stepper
     (1–20, ±1; `wheel_scroll_lines`).
   - Clipboard: `Copy on select` toggle, `Ask before pasting lines that would
     run` toggle, `Programs' clipboard access (OSC 52)` segmented
