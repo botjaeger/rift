@@ -74,11 +74,12 @@ display-line building). Rendering is verified with the script driver below.
 | `mobile` | In `mobile/`: `pnpm install --frozen-lockfile`, `pnpm typecheck`, `pnpm lint`, `pnpm test` (vitest; decodes `crates/rift-remote/fixtures/`, the files the Rust protocol tests decode too) |
 | `release` | `cargo build --release --locked` |
 | `ui` | `scripts/ui-smoke.sh`: isolated scripted input, state assertions and PNG capture; requires Python 3 and a display (or `xvfb-run`) |
-| `linux` | `clippy`, `test`, `doc` and a release build (with `examples/phone` and `rift-relay`) inside the Linux docker image, then `shell` and the scripted UI regressions (Xvfb, software Vulkan) in `packaging/ci-ubuntu.Dockerfile`, which installs the CI runner's packages from `packaging/ci-apt.txt` |
+| `leak` | `scripts/leak-soak.py` on the release build: a program redrawing every 20 ms, output far past the scrollback limit, and opening and closing tabs, splits, the palette, Settings, find and the explorer, each repeated in one isolated instance; after a warm-up the memory footprint (macOS `phys_footprint`, which counts GPU buffers; Linux `VmRSS`) must not grow more than 8 MB over the measured cycles. Headless on macOS (the display-asleep path); with the window shown under Xvfb (`RIFT_LEAK_SHOWN=1`) in CI and the `linux` gate. `RIFT_LEAK_CYCLES=N` soaks longer |
+| `linux` | `clippy`, `test`, `doc` and a release build (with `examples/phone` and `rift-relay`) inside the Linux docker image, then `shell`, the scripted UI regressions and the memory soak (Xvfb, software Vulkan) in `packaging/ci-ubuntu.Dockerfile`, which installs the CI runner's packages from `packaging/ci-apt.txt` |
 
 ```sh
 scripts/gates.sh                 # fmt clippy test doc shell docs mobile
-scripts/gates.sh all             # + release + ui + linux
+scripts/gates.sh all             # + release + ui + leak + linux
 scripts/gates.sh clippy test     # a subset
 scripts/gates.sh --list
 ```
@@ -87,7 +88,7 @@ Every requested gate runs even after one fails; the summary lists each result
 with its time and the commit. A gate whose tool is missing fails instead of
 passing silently. CI (`.github/workflows/ci.yml`) runs `scripts/gates.sh`
 on macOS 14 (fmt clippy test doc docs release) and Ubuntu 24.04 (the same plus
-`shell`, `mobile` and `ui` under Xvfb/Mesa). Only `scripts/gates.sh all`
+`shell`, `mobile`, `ui` and `leak` under Xvfb/Mesa). Only `scripts/gates.sh all`
 covers both (the `linux` gate is the Ubuntu job): run it before every push,
 so CI is a formality. The Release workflow runs that same
 reusable validation workflow on the tagged revision before it writes

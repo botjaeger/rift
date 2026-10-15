@@ -54,10 +54,12 @@ jobs:
       - name: Gates
         run: scripts/gates.sh ${{ matrix.gates }}
 
-      - name: Scripted UI regressions (Linux software GPU)
+      - name: Scripted UI regressions and memory soak (Linux software GPU)
         if: runner.os == 'Linux'
-        run: xvfb-run -a scripts/gates.sh ui
+        run: xvfb-run -a scripts/gates.sh ui leak
         env:
           RIFT_TEST_BIN: target/release/rift-terminal
           LIBGL_ALWAYS_SOFTWARE: '1'
           WGPU_BACKEND: vulkan
+          # Xvfb is a virtual display: the soak shows its window there
+          RIFT_LEAK_SHOWN: '1'

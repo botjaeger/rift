@@ -17,7 +17,7 @@ set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
 DEFAULT=(fmt clippy test doc shell docs mobile)
-ALL=(fmt clippy test doc shell docs mobile release ui linux)
+ALL=(fmt clippy test doc shell docs mobile release ui leak linux)
 
 describe() {
     cat <<'EOF'
@@ -31,6 +31,8 @@ docs     CLAUDE.md and AGENTS.md identical; every relative link in *.md resolves
 mobile   the Expo companion in mobile/: pnpm install --frozen-lockfile, typecheck, eslint, vitest (incl. the shared protocol fixtures)
 release  cargo build --release --locked
 ui       isolated scripted UI regressions (display or xvfb-run required)
+leak     memory soak on the release build: repeated identical work (a ticking program, output past scrollback,
+         opening and closing tabs, splits and overlays) must level off (scripts/leak-soak.py; ~4 min)
 linux    clippy + test + doc + release build in packaging/linux-verify.Dockerfile, then shell + scripted UI (xvfb) on the CI runner's packages in packaging/ci-ubuntu.Dockerfile (docker)
 EOF
 }
@@ -82,6 +84,12 @@ throttled_test() {
 gate_doc() { RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked; }
 gate_release() { cargo build --release --locked; }
 gate_ui() { scripts/ui-smoke.sh; }
+gate_leak() {
+    if [[ -z ${RIFT_TEST_BIN:-} ]]; then
+        cargo build --release -p rift-terminal --locked || return 1
+    fi
+    python3 scripts/leak-soak.py "${RIFT_TEST_BIN:-${CARGO_TARGET_DIR:-target}/release/rift-terminal}"
+}
 
 gate_shell() {
     have shellcheck || { echo "shellcheck not installed (brew install shellcheck / apt install shellcheck)"; return 1; }
@@ -150,8 +158,8 @@ gate_linux() {
         -e RIFT_TEST_BIN=/src/target/linux-docker/release/rift-terminal \
         -e RIFT_PHONE_BIN=/src/target/linux-docker/release/examples/phone \
         -e RIFT_RELAY_BIN=/src/target/linux-docker/release/rift-relay \
-        -e LIBGL_ALWAYS_SOFTWARE=1 -e WGPU_BACKEND=vulkan \
-        rift-ci-ubuntu bash -c 'scripts/gates.sh shell && xvfb-run -a scripts/gates.sh ui'
+        -e LIBGL_ALWAYS_SOFTWARE=1 -e WGPU_BACKEND=vulkan -e RIFT_LEAK_SHOWN=1 \
+        rift-ci-ubuntu bash -c 'scripts/gates.sh shell && xvfb-run -a scripts/gates.sh ui leak'
 }
 
 case "${1:-}" in

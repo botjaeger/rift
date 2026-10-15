@@ -7935,6 +7935,10 @@ impl App {
             );
         }
         let Some(frame) = gpu.acquire() else {
+            // no frame (display asleep, window occluded): the uploads queued
+            // above live in wgpu's pending writes until a submit, so flush
+            // them or every skipped frame leaks its staging memory
+            gpu.queue.submit([]);
             text.trim();
             return;
         };
