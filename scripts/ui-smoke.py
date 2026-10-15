@@ -211,6 +211,11 @@ steps = [
     "paste zz",
     "wait 400",
     f"dump {scratch}/sync.txt",
+    # an empty paste (image-only clipboard) reaches bracketed programs only:
+    # Claude Code reads the clipboard image on it
+    "paste",
+    "wait 400",
+    f"dump {scratch}/sync-empty.txt",
     # DECSET 1004: switching tabs tells the programs who lost/gained focus,
     # whatever the mouse-reporting setting (a headless window starts unfocused)
     "focus on",
@@ -311,6 +316,9 @@ assert "panes=2" in state("split"), state("split")
 sync = state("sync").split("\n  pane ")
 assert "| zz" in sync[1] and "200~zz" not in sync[1], "plain pane got a bracketed paste"
 assert "| ^[[200~zz^[[201~" in sync[2], "bracketed pane lost its paste framing"
+empty = state("sync-empty").split("\n  pane ")
+assert "| zz" in empty[1] and "^[[200~^[[201~" not in empty[1], "plain pane got an empty paste"
+assert "| ^[[200~zz^[[201~^[[200~^[[201~" in empty[2], "bracketed pane missed the empty paste"
 assert "^[[O^[[I" in state("focus-tabs"), state("focus-tabs")
 wide = re.search(r"matches=(\d+) total=(\d+)", state("find-wide"))
 assert wide and int(wide[2]) >= 1, state("find-wide")
@@ -1230,6 +1238,29 @@ run_prompt("select", ["type ls /nonexistent-dir\\n", "wait 800", f"click {out_at
                       f"dump {pc}/select-off.txt"])
 assert "selected_block=Some(" in (pc / "select-on.txt").read_text()
 assert "selected_block=None" in (pc / "select-off.txt").read_text()
+
+# a restored tab gets a new shell, so its elapsed clock starts over: the
+# saved start of a shell that is gone is not shown
+rs = scratch / "restore-elapsed"
+for sub in ("cfg/rift", "data/rift"):
+    (rs / sub).mkdir(parents=True, exist_ok=True)
+(rs / "cfg/rift/config.toml").write_text(
+    'shell = "/bin/bash"\nrestore_session = true\ndurable_sessions = false\n'
+    'sync_os_theme = false\nprompt_chips = ["cwd", "elapsed"]\n')
+(rs / "data/rift/session.toml").write_text(
+    f'version = 3\nactive = 0\n\n[[tabs]]\ncwd = {json.dumps(str(work))}\n'
+    f'started = {int(time.time()) - 2 * 86400}\n')
+(rs / "t.rift").write_text(f"wait_prompt\ndump {rs}/restored.txt\nquit\n")
+with (rs / "app.log").open("w") as log:
+    rc = subprocess.run([str(binary), "--script", str(rs / "t.rift"), "--headless"],
+                        # restores the saved tabs; durable_sessions = false
+                        # starts no session service
+                        env=dict(env, XDG_CONFIG_HOME=str(rs / "cfg"),
+                                 XDG_DATA_HOME=str(rs / "data"), RIFT_PERSIST_SESSION="1"),
+                        stdout=log, stderr=log, timeout=60).returncode
+assert rc == 0, died("restore-elapsed run failed", rs / "app.log")
+restored = (rs / "restored.txt").read_text()
+assert 'prompt_chips_shown=["Cwd:' in restored and '"Elapsed:' not in restored, restored
 
 # tooltips: none before the rest time, then the control's action and
 # shortcut; a neighbour shows at once; a key hides it. On a fresh session the

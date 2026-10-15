@@ -18,9 +18,9 @@ listed alternates.
 | ⌘B / ⌃⇧B | `bookmark_toggle` | Bookmark selected (else last finished) block |
 | ⌘⇧↑ / ⌃⇧↑ | `bookmark_prev` | Jump to previous bookmarked block |
 | ⌘⇧↓ / ⌃⇧↓ | `bookmark_next` | Jump to next bookmarked block |
-| ⌥↑ / ⌥↓ | `bookmark_closest_prev` / `_next` | Same jumps (Warp's closest-bookmark keys) |
+| ⌥↑ / ⌥↓ | `bookmark_closest_prev` / `_next` | Same jumps (Warp's closest-bookmark keys; editor active only, passes to the program otherwise — Codex reads them) |
 | ⌘K | `clear_blocks` | Clear blocks + scrollback (destructive; `clear` is the soft variant) |
-| ⌥⇧F | `filter_block` | Show only the selected (else newest) block's output lines that contain the typed text; Enter keeps the filter, Esc or ⌥⇧F again clears it |
+| ⌥⇧F | `filter_block` | Show only the selected (else newest) block's output lines that contain the typed text; Enter keeps the filter, Esc or ⌥⇧F again clears it (editor active only; passes to a running program) |
 | — | `pipe_block_output` | Send the selected (else newest) block's output to a command's stdin |
 | Esc | — | Deselect block (in raw mode also still reaches the app in the PTY) |
 

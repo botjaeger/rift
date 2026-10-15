@@ -288,7 +288,10 @@ Each command becomes a block via shell-integration OSC 133 markers:
 - **Emoji presentation**: an emoji followed by VS16 (U+FE0F) draws from the
   color emoji font (Apple Color Emoji, Noto Color Emoji) across two cells; a
   character followed by VS15 (U+FE0E) draws its monochrome text glyph (Apple
-  Symbols, DejaVu Sans) in one cell.
+  Symbols, DejaVu Sans) in one cell. Without a selector each emoji takes its
+  Unicode default: ⌚ 😀 in color, ⏱ ✔ ☀ as text glyphs (from the terminal
+  font, else Apple Symbols, STIX Two Math or Menlo; Noto Sans Symbols 2 or
+  Noto Sans Math on Linux), as in Warp and iTerm2.
 
 ## Command editor (input zone)
 

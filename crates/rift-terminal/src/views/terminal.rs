@@ -532,6 +532,11 @@ pub fn palette_color(theme: &Theme, session: &Session, index: usize) -> Option<C
     if let Some(rgb) = session.term.lock().colors()[index] {
         return Some(rgb_color(rgb));
     }
+    theme_color(theme, index)
+}
+
+/// Palette slot `index` of the theme alone.
+fn theme_color(theme: &Theme, index: usize) -> Option<Color> {
     match index {
         0..=255 => Some(indexed_color(theme, index as u8)),
         256 => Some(theme.fg),
@@ -539,6 +544,19 @@ pub fn palette_color(theme: &Theme, session: &Session, index: usize) -> Option<C
         258 => Some(theme.cursor),
         _ => None,
     }
+}
+
+/// Every theme palette slot (0–258) as the bytes a color query reports.
+pub fn theme_rgbs(theme: &Theme) -> Vec<ansi::Rgb> {
+    let to8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    (0..=258)
+        .filter_map(|i| theme_color(theme, i))
+        .map(|c| ansi::Rgb {
+            r: to8(c.r),
+            g: to8(c.g),
+            b: to8(c.b),
+        })
+        .collect()
 }
 
 /// This pane's default colors when the program changed them: OSC 4 for the
@@ -954,14 +972,44 @@ fn search_text<T>(
 enum Presentation {
     Default,
     Emoji,
-    Text,
+    /// The text glyph, from this monochrome family.
+    Text(&'static str),
 }
 
 fn presentation(zerowidth: Option<&[char]>) -> Presentation {
     match zerowidth {
         Some(zw) if zw.contains(&'\u{fe0f}') => Presentation::Emoji,
-        Some(zw) if zw.contains(&'\u{fe0e}') => Presentation::Text,
+        Some(zw) if zw.contains(&'\u{fe0e}') => Presentation::Text(SYMBOL_FAMILY),
         _ => Presentation::Default,
+    }
+}
+
+/// How `ch` draws: an emoji that defaults to text (⏱, ☀, ✔) and comes
+/// without VS16 takes the text glyph, as in Warp and iTerm2. Fallback alone
+/// would reach the color font first whenever the terminal font lacks it.
+/// The text glyph comes from the first symbol font that has it; with none,
+/// the emoji stays.
+fn resolve_presentation(engine: &mut TextEngine, ch: char, p: Presentation) -> Presentation {
+    use rift_pty::alacritty_terminal::term::width;
+    // and one that defaults to emoji (⌚, ⏰) is drawn in color
+    if p == Presentation::Default && !ch.is_ascii() && width::emoji_default(ch) {
+        return Presentation::Emoji;
+    }
+    let wants_text = match p {
+        Presentation::Text(_) => true,
+        Presentation::Default => {
+            !ch.is_ascii()
+                && width::text_default_emoji(ch)
+                && !engine.family_covers(mono_family(), ch)
+        }
+        Presentation::Emoji => false,
+    };
+    if !wants_text {
+        return p;
+    }
+    match TEXT_FAMILIES.iter().find(|f| engine.family_covers(f, ch)) {
+        Some(f) => Presentation::Text(f),
+        None => p,
     }
 }
 
@@ -975,6 +1023,12 @@ const EMOJI_FAMILY: &str = "Noto Color Emoji";
 const SYMBOL_FAMILY: &str = "Apple Symbols";
 #[cfg(not(target_os = "macos"))]
 const SYMBOL_FAMILY: &str = "DejaVu Sans";
+/// Monochrome fonts tried in order for a text glyph (STIX Two Math is the
+/// only macOS font with a text ⏱).
+#[cfg(target_os = "macos")]
+const TEXT_FAMILIES: &[&str] = &[SYMBOL_FAMILY, "STIX Two Math", "Menlo"];
+#[cfg(not(target_os = "macos"))]
+const TEXT_FAMILIES: &[&str] = &[SYMBOL_FAMILY, "Noto Sans Symbols 2", "Noto Sans Math"];
 
 const WIDE_SPACERS: Flags = Flags::WIDE_CHAR_SPACER.union(Flags::LEADING_WIDE_CHAR_SPACER);
 
@@ -2038,7 +2092,7 @@ fn render_grid_line(
             }
             ch = ' ';
         }
-        let presentation = presentation(cell.zerowidth());
+        let presentation = resolve_presentation(engine, ch, presentation(cell.zerowidth()));
         if flags.contains(Flags::BLINK) {
             BLINK_DRAWN.store(true, std::sync::atomic::Ordering::Relaxed);
             if !grid.text_blink_on {
@@ -2180,7 +2234,7 @@ fn render_grid_line(
                 let attrs = match s.presentation {
                     Presentation::Default => attrs,
                     Presentation::Emoji => attrs.family(Family::Name(EMOJI_FAMILY)),
-                    Presentation::Text => attrs.family(Family::Name(SYMBOL_FAMILY)),
+                    Presentation::Text(family) => attrs.family(Family::Name(family)),
                 };
                 (s.text.as_str(), attrs)
             })
@@ -2668,7 +2722,10 @@ mod tests {
         assert_eq!(presentation(None), Presentation::Default);
         assert_eq!(presentation(Some(&['\u{301}'])), Presentation::Default);
         assert_eq!(presentation(Some(&['\u{fe0f}'])), Presentation::Emoji);
-        assert_eq!(presentation(Some(&['\u{fe0e}'])), Presentation::Text);
+        assert_eq!(
+            presentation(Some(&['\u{fe0e}'])),
+            Presentation::Text(SYMBOL_FAMILY)
+        );
     }
 
     struct Noop;

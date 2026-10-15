@@ -9,5 +9,5 @@ pub mod session;
 pub use alacritty_terminal;
 pub use session::{
     ClipboardAccess, ClipboardReply, ColorReply, EventProxy, GridSize, Observer, PaneId,
-    ServiceTarget, Session, SessionEvent, SpawnOptions,
+    ServiceTarget, Session, SessionEvent, SpawnOptions, set_default_colors,
 };

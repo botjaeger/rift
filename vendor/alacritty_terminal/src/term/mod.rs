@@ -152,6 +152,13 @@ pub fn viewport_to_point(display_offset: usize, point: Point<usize>) -> Point {
     Point::new(line, point.column)
 }
 
+/// The color scheme a background implies, as `CSI ? 997 ; n n` reports it:
+/// 1 dark, 2 light (by relative luminance).
+pub fn color_scheme(bg: Rgb) -> u8 {
+    let l = 0.2126 * bg.r as f32 + 0.7152 * bg.g as f32 + 0.0722 * bg.b as f32;
+    if l > 127.5 { 2 } else { 1 }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LineDamageBounds {
     /// Damaged line number.
@@ -2707,6 +2714,15 @@ impl<T: EventListener> Handler for Term<T> {
             75 => String::from("\x1b[?70n"),
             // multiple sessions: not configured
             85 => String::from("\x1b[?83n"),
+            // color scheme (dark 1, light 2), judged by the default
+            // background the embedder reports, so it answers in order
+            996 => {
+                self.event_proxy.send_event(Event::ColorRequest(
+                    NamedColor::Background as usize,
+                    Arc::new(|c: Rgb| format!("\x1b[?997;{}n", color_scheme(c))),
+                ));
+                return;
+            },
             _ => return self.ignore("DECDSR"),
         };
         self.reply(text);

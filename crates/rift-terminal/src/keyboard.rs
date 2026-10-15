@@ -222,11 +222,15 @@ pub fn encode(event: &KeyPress, mods: ModifiersState, enc: KeyEncoding) -> Optio
     };
 
     // macOS Option composes characters unless it is Meta: the composed
-    // text is the key, and Option is consumed by it
+    // text is the key, and Option is consumed by it. Enter, Tab and
+    // Backspace compose nothing (their text is a control), so ⌥⏎ stays alt.
     let composing = mods.alt_key()
         && !enc.option_as_meta
         && cfg!(target_os = "macos")
-        && event.text.as_deref().is_some_and(|t| !t.is_empty());
+        && event
+            .text
+            .as_deref()
+            .is_some_and(|t| !t.is_empty() && !t.chars().any(char::is_control));
     let alt = mods.alt_key() && !composing;
     let bits = 1
         + u8::from(mods.shift_key())
@@ -516,5 +520,21 @@ mod tests {
         } else {
             assert_eq!(bytes, "\x1b[98;3u");
         }
+    }
+
+    /// ⌥⏎ composes nothing (its text is CR), so Option stays alt even when it
+    /// is not Meta: Claude Code and Codex insert a newline on it.
+    #[test]
+    fn option_enter_is_alt_enter() {
+        let e = KeyEncoding {
+            option_as_meta: false,
+            ..enc(DISAMBIGUATE)
+        };
+        let enter = KeyPress::new(
+            Key::Named(NamedKey::Enter),
+            Some("\r".into()),
+            Some(Key::Named(NamedKey::Enter)),
+        );
+        assert_eq!(s(encode(&enter, ModifiersState::ALT, e)), "\x1b[13;3u");
     }
 }

@@ -143,7 +143,7 @@ impl PromptChip {
             PromptChip::Time24 => "The current time, 24-hour.",
             PromptChip::Elapsed => {
                 "How long ago the first command ran in this tab: the time worked on it. \
-                 Shows once a command has run, and survives a restart."
+                 Shows once a command has run; restarts with each new shell."
             }
         }
     }

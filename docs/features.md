@@ -107,8 +107,9 @@ insensitive) stay visible. Running it again on the same block, or choosing
   `down` when none run, `off` when Docker is not running; `docker compose
   ps` in the background after each command), date,
   12- and 24-hour time, time on this tab (`elapsed`: hourglass, `2h 05m`
-  since the tab's first submitted command, hidden before it; kept across
-  restarts in the saved session). Default: working directory, git branch, git diff
+  since the tab's first submitted command, hidden before it; it restarts
+  with each new shell and is kept only when a restart reattaches the same
+  shell). Default: working directory, git branch, git diff
   stats. A chip with nothing to show is left out. Git, PR and Docker state
   refresh after each command, and in every pane of every tab as soon as the
   chip list changes (Edit prompt or config.toml). Settings › Input › Prompt
@@ -474,7 +475,9 @@ it.
   surface for the least-used format.
 - **Paste**: bracketed paste when the program enables it. Otherwise text with
   a newline asks first ("Paste and run?"), because each newline would press
-  Enter (`confirm_multiline_paste`).
+  Enter (`confirm_multiline_paste`). With no text on the clipboard (an image,
+  say), ⌘V sends an empty bracketed paste; Claude Code answers it by reading
+  the clipboard image.
 - **OSC 52** copy: programs (tmux, neovim, remote shells) can set the system
   clipboard. Reading the clipboard back is refused unless
   `clipboard_access = "read_write"` (Settings › Terminal › *Copy and read*);
@@ -488,7 +491,13 @@ it.
 - **Colors** (OSC 4/5/10–12, resets OSC 104/105/110–112): set, query and
   reset the 256-color palette, the special colors and the default
   foreground, background and cursor; queries answer from the active theme, so
-  programs that probe the background (vim, delta, bat) pick matching colors.
+  programs that probe the background (vim, delta, bat, Codex) pick matching
+  colors, in order with the replies around them (`OSC 11;? CSI c` reads the
+  color before the DA1 reply).
+- **Color scheme** (mode 2031, `CSI ? 996 n`): a program that sets
+  `CSI ? 2031 h` (Claude Code) gets `CSI ? 997 ; 1 n` (dark) or `; 2 n`
+  (light) when the theme switches between dark and light; `CSI ? 996 n` asks
+  for it.
   Color specs take every X11 form: names, `#rgb`…`#rrrrggggbbbb`, `rgb:`,
   `rgbi:` and the device-independent `CIEXYZ:`, `CIEuvY:`, `CIExyY:`,
   `CIELab:`, `CIELuv:` and `TekHVC:` (ported from Xlib's Xcms, with its gamut

@@ -52,6 +52,25 @@ pub enum SessionEvent {
 #[derive(Clone)]
 pub struct ColorReply(pub Arc<dyn Fn(Rgb) -> String + Send + Sync>);
 
+/// The theme's colors by OSC index (0-255 palette, 256 foreground, 257
+/// background, 258 cursor), set by the app. With them a color query (OSC
+/// 4/10/11/12) is answered on the reader thread, in order with the replies
+/// around it: Codex probes `OSC 10;? OSC 11;? DA1` and reads up to DA1.
+static DEFAULT_COLORS: Mutex<Option<Vec<Rgb>>> = Mutex::new(None);
+
+/// Set the colors queries fall back to when a program set none of its own.
+pub fn set_default_colors(colors: Vec<Rgb>) {
+    *DEFAULT_COLORS.lock().unwrap_or_else(|e| e.into_inner()) = Some(colors);
+}
+
+fn default_color(index: usize) -> Option<Rgb> {
+    DEFAULT_COLORS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(|c| c.get(index).copied())
+}
+
 /// Formats the OSC 52 read reply for the clipboard text.
 #[derive(Clone)]
 pub struct ClipboardReply(pub Arc<dyn Fn(&str) -> String + Send + Sync>);
@@ -261,12 +280,15 @@ impl EventListener for EventProxy {
                     SessionEvent::ClipboardLoad(ClipboardReply(format)),
                 );
             }
-            Event::ColorRequest(index, format) => {
-                (self.observer)(
+            // the Term answers colors the program set itself; the rest are
+            // the theme's
+            Event::ColorRequest(index, format) => match default_color(index) {
+                Some(rgb) => self.writer.reply(format(rgb).as_bytes()),
+                None => (self.observer)(
                     self.pane,
                     SessionEvent::ColorRequest(index, ColorReply(format)),
-                );
-            }
+                ),
+            },
             Event::WindowOp(params) => (self.observer)(self.pane, SessionEvent::WindowOp(params)),
             Event::TextAreaSizeRequest(format) => {
                 let size = *self.window_size.lock().unwrap();
@@ -2297,6 +2319,63 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(10))
             .unwrap();
         reader.join().unwrap();
+    }
+
+    /// Theme color queries answer on the reader thread, in order with the
+    /// replies around them (Codex reads `OSC 10;? OSC 11;? CSI c` up to the
+    /// DA1 reply), and `CSI ? 996 n` reports the scheme of the background.
+    #[test]
+    fn color_queries_answer_in_order() {
+        let mut fds = [0i32; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        use std::os::fd::FromRawFd;
+        let mut read_end = unsafe { File::from_raw_fd(fds[0]) };
+        let sink = unsafe { File::from_raw_fd(fds[1]) };
+        let mut colors = vec![Rgb { r: 0, g: 0, b: 0 }; 259];
+        colors[256] = Rgb {
+            r: 0xd4,
+            g: 0xd4,
+            b: 0xd4,
+        };
+        colors[257] = Rgb {
+            r: 0x1e,
+            g: 0x1e,
+            b: 0x1e,
+        };
+        set_default_colors(colors);
+        let proxy = EventProxy {
+            pane: 0,
+            // the app's asynchronous fallback must not be needed
+            observer: Arc::new(|_, e| {
+                assert!(!matches!(e, SessionEvent::ColorRequest(..)));
+            }),
+            writer: Replier::new(PtyWriter::File(Arc::new(sink))),
+            window_size: Arc::new(Mutex::new(WindowSize {
+                num_lines: 4,
+                num_cols: 20,
+                cell_width: 8,
+                cell_height: 16,
+            })),
+        };
+        let mut t = Term::new(
+            TermConfig::default(),
+            &GridSize { cols: 20, rows: 4 },
+            proxy,
+        );
+        let mut parser: vte::ansi::Processor = vte::ansi::Processor::new();
+        parser.advance(&mut t, b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[?996n\x1b[c");
+        // the reply thread ends (and closes the pipe) with the Term
+        drop(t);
+        let mut out = String::new();
+        read_end.read_to_string(&mut out).unwrap();
+        let da1 = out.find("\x1b[?").filter(|&i| out[i..].ends_with('c'));
+        assert!(
+            out.starts_with(
+                "\x1b]10;rgb:d4d4/d4d4/d4d4\x1b\\\x1b]11;rgb:1e1e/1e1e/1e1e\x1b\\\x1b[?997;1n"
+            ),
+            "{out:?}"
+        );
+        assert!(da1.is_some() && out.ends_with('c'), "{out:?}");
     }
 
     #[test]

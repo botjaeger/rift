@@ -483,6 +483,7 @@ const TRACKED_PRIVATE: &[(u16, bool)] = &[
     (2003, false), // readline mouse button-3
     (2005, false), // readline character quoting
     (2006, false), // readline newline pasting
+    (2031, false), // color-scheme updates (CSI ? 997 ; 1|2 n on a change)
 ];
 
 /// ANSI modes Rift tracks: KAM (2) and SRM (12, set = no local echo).
@@ -556,6 +557,11 @@ impl<T: EventListener> Term<T> {
         self.grid.cursor = cursor;
         self.selection = None;
         self.mark_fully_damaged();
+    }
+
+    /// Whether the program asked for color-scheme change reports (?2031).
+    pub fn color_scheme_updates(&self) -> bool {
+        self.extended_private_mode(2031).unwrap_or(false)
     }
 
     /// DECRQM state of a mode upstream does not name; `None` = unsupported.

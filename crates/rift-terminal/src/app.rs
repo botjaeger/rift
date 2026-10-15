@@ -389,6 +389,8 @@ pub struct App {
     next_pane: PaneId,
     scene: Scene,
     theme: Theme,
+    /// The theme's color scheme as reported to programs (1 dark, 2 light).
+    color_scheme: Option<u8>,
     cell_w: f32,
     modifiers: ModifiersState,
     /// Left and right Option (Alt) held, where the platform tells them
@@ -1150,6 +1152,7 @@ impl App {
             next_pane: 1,
             scene: Scene::default(),
             theme: Theme::default(),
+            color_scheme: None,
             cell_w: DEFAULT_FONT_SIZE * 0.6,
             modifiers: ModifiersState::empty(),
             alt_sides: (false, false),
@@ -1298,6 +1301,22 @@ impl App {
             self.sync_update_checks();
         }
         self.theme = self.config.resolve_theme_for(self.os_light);
+        let colors = terminal::theme_rgbs(&self.theme);
+        // programs that asked (?2031, Claude Code) hear a dark/light switch
+        let scheme = rift_pty::alacritty_terminal::term::color_scheme(colors[257]);
+        if self
+            .color_scheme
+            .replace(scheme)
+            .is_some_and(|was| was != scheme)
+        {
+            let report = format!("\x1b[?997;{scheme}n");
+            for p in self.tabs.iter().flat_map(|t| &t.panes) {
+                if p.session.term.lock().color_scheme_updates() {
+                    p.session.write_report(report.as_bytes());
+                }
+            }
+        }
+        rift_pty::set_default_colors(colors);
         // the remote screens' colours come from the theme: each is new
         for p in self.tabs.iter().flat_map(|t| &t.panes) {
             p.session
@@ -2925,8 +2944,9 @@ impl App {
         };
         let text = match cb.get_text() {
             Ok(text) => text,
-            // empty or non-text clipboard: nothing to paste, not an error
-            Err(arboard::Error::ContentNotAvailable) => return,
+            // empty or non-text clipboard (an image): an empty paste, which
+            // programs like Claude Code answer by reading the image
+            Err(arboard::Error::ContentNotAvailable) => String::new(),
             Err(e) => {
                 log::warn!("clipboard read failed: {e}");
                 self.toast(format!("Could not paste: {e}"));
@@ -2941,6 +2961,18 @@ impl App {
     /// synchronized panes).
     fn paste_text(&mut self, text: &str) {
         if text.is_empty() {
+            // only a program reading bracketed pastes sees an empty one
+            let relay_edit = self.settings.open && self.settings.remote.relay_edit.is_some();
+            if !relay_edit
+                && !self.editor_active
+                && let Some(id) = self
+                    .tabs
+                    .get(self.active)
+                    .and_then(|t| t.active())
+                    .map(|p| p.session.id)
+            {
+                self.paste_raw(id, text);
+            }
             return;
         }
         // the relay field while it is edited (one line, no controls)
@@ -3001,7 +3033,11 @@ impl App {
             if let Some((_, tab)) = self.find_tab_of_pane(target)
                 && let Some(p) = tab.pane_mut(target)
             {
-                let bytes = input::paste_bytes(text, bracketed_paste_on(p));
+                let bracketed = bracketed_paste_on(p);
+                if text.is_empty() && !bracketed {
+                    continue;
+                }
+                let bytes = input::paste_bytes(text, bracketed);
                 p.view_offset = 0;
                 p.session.write(&bytes);
             }
@@ -4985,12 +5021,19 @@ impl App {
             None => saved.transcript.clone(),
         };
         self.next_replay = transcript.clone();
-        self.next_attach = match &saved.layout {
+        let service = match &saved.layout {
             Some(l) => l.first_service(),
             None => saved.service,
         };
+        self.next_attach = service;
         self.spawn_tab_at(top_cwd);
         let root = self.tabs[self.active].active_pane;
+        // the Elapsed clock belongs to the shell: it survives only a
+        // reattach to the same live shell, and restarts with a new one
+        let reattached = service.is_some()
+            && self.tabs[self.active]
+                .pane(root)
+                .is_some_and(|p| p.session.service_id == service);
         if let Some(id) = transcript
             && let Some(p) = self.tabs[self.active].pane_mut(root)
         {
@@ -5008,6 +5051,7 @@ impl App {
         tab.custom_title = saved.title.clone().filter(|t| !t.is_empty());
         tab.started = saved
             .started
+            .filter(|_| reattached)
             .map(|s| std::time::UNIX_EPOCH + Duration::from_secs(s));
         tab.color = saved
             .color
@@ -7953,8 +7997,8 @@ impl App {
                     pane.session.blocks.lock().unwrap().toggle_bookmark(id);
                 }
             }
-            AppAction::BookmarkPrev => self.jump_bookmark(-1),
-            AppAction::BookmarkNext => self.jump_bookmark(1),
+            AppAction::BookmarkPrev | AppAction::BookmarkClosestPrev => self.jump_bookmark(-1),
+            AppAction::BookmarkNext | AppAction::BookmarkClosestNext => self.jump_bookmark(1),
             AppAction::Copy => {
                 let editor_sel = self
                     .tabs

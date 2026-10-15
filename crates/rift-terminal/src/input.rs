@@ -82,6 +82,9 @@ pub enum AppAction {
     BookmarkToggle,
     BookmarkPrev,
     BookmarkNext,
+    /// ⌥↑ / ⌥↓: the bookmark jumps on keys programs also read.
+    BookmarkClosestPrev,
+    BookmarkClosestNext,
     ClearBlocks,
     TabSelect(u8),
     MoveTabLeft,
@@ -176,6 +179,8 @@ impl AppAction {
                 | AppAction::SelectBlockNext
                 | AppAction::BookmarkPrev
                 | AppAction::BookmarkNext
+                | AppAction::BookmarkClosestPrev
+                | AppAction::BookmarkClosestNext
         )
     }
 
@@ -187,6 +192,11 @@ impl AppAction {
                 | AppAction::ScrollTop
                 | AppAction::ScrollBottom
                 | AppAction::BlockMenu
+                // ⌥ chords: Codex reads ⌥↑/⌥↓, and a filter opened over a
+                // running program would swallow its typing
+                | AppAction::BookmarkClosestPrev
+                | AppAction::BookmarkClosestNext
+                | AppAction::FilterBlock
         )
     }
 }
@@ -259,8 +269,10 @@ pub fn action_from_name(name: &str) -> Option<AppAction> {
         "paste" => AppAction::Paste,
         "search" => AppAction::Search,
         "bookmark_toggle" => AppAction::BookmarkToggle,
-        "bookmark_prev" | "bookmark_closest_prev" => AppAction::BookmarkPrev,
-        "bookmark_next" | "bookmark_closest_next" => AppAction::BookmarkNext,
+        "bookmark_prev" => AppAction::BookmarkPrev,
+        "bookmark_next" => AppAction::BookmarkNext,
+        "bookmark_closest_prev" => AppAction::BookmarkClosestPrev,
+        "bookmark_closest_next" => AppAction::BookmarkClosestNext,
         "clear_blocks" => AppAction::ClearBlocks,
         "move_tab_left" => AppAction::MoveTabLeft,
         "move_tab_right" => AppAction::MoveTabRight,
@@ -919,6 +931,34 @@ mod tests {
 
     fn remote(name: &str) -> (KeyPress, ModifiersState) {
         remote_key_press(rift_remote::Key::parse(name).unwrap())
+    }
+
+    /// Option chords bound to block actions reach a running program (Codex
+    /// reads ⌥↑ / ⌥↓); their ⌘ / ⌃⇧ twins stay app shortcuts.
+    #[test]
+    fn option_block_chords_pass_to_programs() {
+        let km = rift_core::Keymap::from_overrides(&Default::default());
+        let press = |key: Key, unmod: Key| KeyPress::new(key, None, Some(unmod));
+        let up = || Key::Named(NamedKey::ArrowUp);
+        let down = || Key::Named(NamedKey::ArrowDown);
+        let f = || Key::Character("f".into());
+        let alt = ModifiersState::ALT;
+        let alt_shift = ModifiersState::ALT | ModifiersState::SHIFT;
+        for (event, mods) in [
+            (press(up(), up()), alt),
+            (press(down(), down()), alt),
+            (press(Key::Character("Ï".into()), f()), alt_shift),
+        ] {
+            let action = app_action(&event, mods, &km).expect("bound");
+            assert!(action.needs_editor(), "{action:?}");
+        }
+        let twin = app_action(
+            &press(up(), up()),
+            ModifiersState::SUPER | ModifiersState::SHIFT,
+            &km,
+        );
+        assert_eq!(twin, Some(AppAction::BookmarkPrev));
+        assert!(!AppAction::BookmarkPrev.needs_editor());
     }
 
     #[test]

@@ -39,6 +39,18 @@ fn contains(table: &[(u32, u32)], c: char) -> bool {
         .is_ok()
 }
 
+/// An emoji whose default presentation is text (Emoji_Presentation=No):
+/// drawn as a text glyph unless VS16 (U+FE0F) follows it.
+pub fn text_default_emoji(c: char) -> bool {
+    contains(VS16_WIDENS, c)
+}
+
+/// An emoji whose default presentation is emoji (Emoji_Presentation=Yes,
+/// two cells): drawn in color unless VS15 (U+FE0E) follows it.
+pub fn emoji_default(c: char) -> bool {
+    contains(EXT_PICT, c) && char_width(c) == Some(2)
+}
+
 /// Cells one character takes on its own: `None` for C0/C1 controls.
 pub fn char_width(c: char) -> Option<usize> {
     match c as u32 {
@@ -288,6 +300,19 @@ mod tests {
     fn lookup_table_matches_the_ranges() {
         for c in (0xa0..WIDTH_LIMIT).filter_map(char::from_u32) {
             assert_eq!(char_width(c), Some(range_width(c)), "U+{:04X}", c as u32);
+        }
+    }
+
+    #[test]
+    fn default_presentations() {
+        // text by default: stopwatch, check mark; emoji by default: watch
+        assert!(text_default_emoji('\u{23f1}') && !emoji_default('\u{23f1}'));
+        assert!(text_default_emoji('\u{2714}') && !emoji_default('\u{2714}'));
+        assert!(emoji_default('\u{231a}') && !text_default_emoji('\u{231a}'));
+        assert!(emoji_default('\u{1f600}'));
+        // neither: CJK, box drawing, arrows without emoji status
+        for c in ['中', '─', '→', 'a'] {
+            assert!(!emoji_default(c) && !text_default_emoji(c), "{c}");
         }
     }
 

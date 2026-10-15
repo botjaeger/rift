@@ -71,6 +71,8 @@ pub struct TextEngine {
     renderers: Vec<TextRenderer>,
     shape_cache: HashMap<u64, ShapedEntry>,
     frame: u64,
+    /// [`Self::family_covers`] answers.
+    coverage: HashMap<(String, char), bool>,
 }
 
 struct ShapedEntry {
@@ -134,7 +136,28 @@ impl TextEngine {
             renderers: Vec::new(),
             shape_cache: HashMap::new(),
             frame: 0,
+            coverage: HashMap::new(),
         }
+    }
+
+    /// Whether `family` (its regular face) has a glyph for `c`. Cached: the
+    /// grid asks per cell for the few characters that can draw as emoji.
+    pub fn family_covers(&mut self, family: &str, c: char) -> bool {
+        if let Some(&has) = self.coverage.get(&(family.to_string(), c)) {
+            return has;
+        }
+        let families = [glyphon::fontdb::Family::Name(family)];
+        let query = glyphon::fontdb::Query {
+            families: &families,
+            ..Default::default()
+        };
+        let has = self.font_system.db().query(&query).is_some_and(|id| {
+            self.font_system
+                .get_font(id, glyphon::fontdb::Weight::NORMAL)
+                .is_some_and(|f| f.as_swash().charmap().map(c) != 0)
+        });
+        self.coverage.insert((family.to_string(), c), has);
+        has
     }
 
     /// Cached shaping: return the shaped buffer for `key`, building it at
