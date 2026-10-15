@@ -362,6 +362,12 @@ twice with `make-app.sh`, the newer one packed by `make-dmg.sh`) can run a
 whole update headless (`RIFT_RELAUNCH_SCRIPT` names the script the
 restarted app runs).
 
+The helper starts the new version only once the old process is gone. Every
+quit goes through `quit::exit` (`crates/rift-terminal/src/quit.rs`): on macOS
+`event_loop.exit()` cannot stop the app while a menu opened from the menu bar
+is open (the loop spins, and memory grows, until the menu closes), so after
+3 s a watchdog ends the process. Every caller has saved the session by then.
+
 ## Updating the toolchain
 
 1. Change `channel` in `rust-toolchain.toml`.

@@ -428,6 +428,14 @@ geo_steps = [
     "wait 200",
     "type curs",
     f"dump {geo}/settings-search.txt",
+    # What's New is reachable from Settings (General › Updates)
+    "key backspace",
+    "key backspace",
+    "key backspace",
+    "key backspace",
+    "type what",
+    "wait 100",
+    f"dump {geo}/settings-whatsnew.txt",
     "key escape",
     "click 180 21",
     "wait 200",
@@ -575,6 +583,7 @@ assert "palette=true mode=History" in gstate("palette-prefix"), gstate("palette-
 assert "palette=true mode=Sessions" in gstate("palette-tab"), gstate("palette-tab")[:300]
 assert 'settings=true' in gstate("settings-search") and \
     'settings_tab=true settings_query="curs"' in gstate("settings-search"), gstate("settings-search")[:1200]
+assert 'Button "Open What\'s New"' in gstate("settings-whatsnew"), gstate("settings-whatsnew")[:2000]
 assert "settings=false" in gstate("settings-hidden") and \
     "settings_tab=true" in gstate("settings-hidden"), gstate("settings-hidden")[:1200]
 assert "settings_tab=false" in gstate("settings-closed"), gstate("settings-closed")[:1200]
@@ -2027,8 +2036,9 @@ relay_config = (remote_base + "remote_access = true\n"
     f"wait_file {rl}/go-settings 60000", *settings_remote, "wait 1200",
     f"dump {rl}/connected.txt", f"shot {rl}/relay-dark.png",
     # reading order: ↺ and switch, ↺ and the relay field, the Cloudflare
-    # tunnel switch, Pair a phone, View only, then the device's Operate / View only
-    *["key tab"] * 9, "wait 200", f"dump {rl}/focus.txt",
+    # tunnel switch, the tabs-while-closed switch, Pair a phone, View only,
+    # then the device's Operate / View only
+    *["key tab"] * 10, "wait 200", f"dump {rl}/focus.txt",
     "key space", "wait 2500", f"dump {rl}/changed.txt",
     f"wait_file {rl}/go-light 60000", cp(rl / "light.toml", rl / "cfg/rift/config.toml"),
     "wait 2000", f"dump {rl}/history.txt", f"shot {rl}/relay-light.png",

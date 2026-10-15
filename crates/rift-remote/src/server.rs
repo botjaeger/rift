@@ -1611,7 +1611,13 @@ fn serve_device<S: Source, T: Socket>(
             version: cfg.version.clone(),
             device: device.id.clone(),
             permission: device.permission,
-            features: FEATURES.map(String::from).to_vec(),
+            features: FEATURES
+                .iter()
+                .copied()
+                // only where the computer allows shells while Rift is closed
+                .chain(shared.source.can_start().then_some("start"))
+                .map(String::from)
+                .collect(),
         },
     ) {
         shared.record(Some((&device.id, &device.name)), &peer, now, "error");
@@ -1914,6 +1920,7 @@ fn session<S: Source, T: Socket>(
                 pane,
                 kind,
             }) => Some(open(shared, device, &mut opens, rid, pane, kind)),
+            Ok(ClientMsg::Start { id: rid }) => Some(start(shared, device, &mut opens, rid)),
         };
         // what was queued meanwhile goes first (`open` queues the topology
         // with its new pane before its ack)
@@ -2072,14 +2079,53 @@ fn open<S: Source>(
     if !rate.allow(Instant::now()) {
         return ServerMsg::ack_err(rid, ErrorCode::Rate, "too many requests; slow down");
     }
-    match shared.source.open(pane, &device.name, kind) {
+    opened(
+        shared,
+        rid,
+        shared.source.open(pane, &device.name, kind),
+        || format!("no pane {pane}"),
+    )
+}
+
+/// `start`: permission and rate like `open`, then the source (which
+/// refuses unless the computer allows shells while Rift is closed).
+fn start<S: Source>(
+    shared: &Shared<S>,
+    device: &Device,
+    rate: &mut Rate,
+    rid: String,
+) -> ServerMsg {
+    if rid.chars().count() > MAX_REQUEST_ID {
+        return ServerMsg::error(
+            ErrorCode::BadRequest,
+            format!("id is longer than {MAX_REQUEST_ID} characters"),
+        );
+    }
+    if !operates(shared, device) {
+        return ServerMsg::ack_err(rid, ErrorCode::Forbidden, VIEW_ONLY);
+    }
+    if !rate.allow(Instant::now()) {
+        return ServerMsg::ack_err(rid, ErrorCode::Rate, "too many requests; slow down");
+    }
+    opened(shared, rid, shared.source.start(&device.name), || {
+        "no shell started".into()
+    })
+}
+
+/// The ack of `open` and `start`: on success every connection gets the new
+/// topology first.
+fn opened<S: Source>(
+    shared: &Shared<S>,
+    rid: String,
+    result: Result<u64, InputError>,
+    no_pane: impl FnOnce() -> String,
+) -> ServerMsg {
+    match result {
         Ok(new) => {
             push_topology(shared);
             ServerMsg::ack_opened(rid, new)
         }
-        Err(InputError::NoPane) => {
-            ServerMsg::ack_err(rid, ErrorCode::NoPane, format!("no pane {pane}"))
-        }
+        Err(InputError::NoPane) => ServerMsg::ack_err(rid, ErrorCode::NoPane, no_pane()),
         Err(InputError::Denied) => ServerMsg::ack_err(
             rid,
             ErrorCode::Forbidden,

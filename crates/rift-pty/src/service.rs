@@ -11,23 +11,15 @@ use crate::ipc::{self, Event, Frame, Request};
 use crate::session::ServiceTarget;
 
 /// Connect to the running service, or start it (`<this exe>
-/// --session-daemon`, its own process group so it outlives the window).
+/// --session-daemon`, detached so it outlives the window: a launchd job on
+/// macOS, see `launchd`).
 pub fn connect() -> std::io::Result<UnixStream> {
     let path = ipc::socket_path().ok_or_else(|| std::io::Error::other("no data dir"))?;
     if let Ok(s) = UnixStream::connect(&path) {
         return handshake(s);
     }
     let exe = std::env::current_exe()?;
-    {
-        use std::os::unix::process::CommandExt;
-        std::process::Command::new(exe)
-            .arg("--session-daemon")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .process_group(0)
-            .spawn()?;
-    }
+    crate::launchd::spawn_helper("session", &exe, &["--session-daemon"], None)?;
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         match UnixStream::connect(&path) {

@@ -246,6 +246,11 @@ pub struct Config {
     /// and registers there instead of at `remote_relay`. The tunnel's
     /// address changes on every start, so phones pair again after one.
     pub remote_tunnel: bool,
+    /// Paired phones that may run commands can open tabs while no Rift
+    /// window is open: the gateway keeps running and starts them in the
+    /// session service, and Rift shows them as tabs when it opens. Needs
+    /// `remote_access` and `durable_sessions`. Off by default.
+    pub remote_when_closed: bool,
     pub shell: Option<String>,
     /// Theme used while the OS is in light mode when `sync_os_theme` is on.
     pub theme_light: String,
@@ -360,6 +365,7 @@ impl Default for Config {
             remote_listen: "0.0.0.0:7878".into(),
             remote_relay: DEFAULT_RELAY.into(),
             remote_tunnel: false,
+            remote_when_closed: false,
             shell: None,
             theme_light: "light-default".into(),
             sync_os_theme: false,

@@ -49,6 +49,10 @@ struct State {
     completes: Vec<(u64, String, usize)>,
     /// What `open` was asked: (pane, device name, kind).
     opens: Vec<(u64, String, OpenKind)>,
+    /// `start` allowed (the computer's `remote_when_closed`).
+    can_start: bool,
+    /// Devices that started a shell.
+    starts: Vec<String>,
 }
 
 #[derive(Clone, Default)]
@@ -77,6 +81,7 @@ impl Source for Fake {
         let st = self.0.lock().unwrap();
         vec![Window {
             pid: 4242,
+            background: false,
             tabs: vec![Tab {
                 index: 0,
                 title: "fake".into(),
@@ -135,6 +140,22 @@ impl Source for Fake {
         }
         st.inputs.push((pane, device.to_string(), input));
         Ok(())
+    }
+
+    fn can_start(&self) -> bool {
+        self.0.lock().unwrap().can_start
+    }
+
+    /// A new empty pane, numbered after the highest.
+    fn start(&self, device: &str) -> Result<u64, InputError> {
+        let mut st = self.0.lock().unwrap();
+        if !st.can_start {
+            return Err(InputError::Denied);
+        }
+        let new = st.panes.keys().max().unwrap() + 1;
+        st.panes.insert(new, Vec::new());
+        st.starts.push(device.to_string());
+        Ok(new)
     }
 
     /// A new empty pane, numbered after the highest.
@@ -1123,6 +1144,49 @@ fn open_answers_the_new_pane_after_a_topology_with_it() {
     );
     assert_eq!(code(&recv_t(&mut ch, "error")), ("error", "bad_request"));
     assert_eq!(env.fake.0.lock().unwrap().opens.len(), 2);
+}
+
+#[test]
+fn start_is_offered_only_where_the_computer_allows_it() {
+    let env = start(|c| c.topology_poll = Duration::from_secs(60));
+    // not allowed: not in the welcome, and refused
+    let (_k, mut ch, welcome) = env.pair(Permission::Operate);
+    assert!(
+        !welcome["features"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("start")),
+        "{welcome}"
+    );
+    put(&mut ch, json!({"t":"start","id":"s1"}));
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (false, "forbidden"));
+    // allowed: in the welcome; the new pane's topology comes before the ack
+    env.fake.0.lock().unwrap().can_start = true;
+    let (_k, mut ch, welcome) = env.pair(Permission::Operate);
+    assert!(
+        welcome["features"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("start")),
+        "{welcome}"
+    );
+    put(&mut ch, json!({"t":"start","id":"s2"}));
+    let mut told = false;
+    let v = loop {
+        let v = recv(&mut ch);
+        match v["t"].as_str() {
+            Some("topology") => told |= topology_panes(&v).contains(&13),
+            Some("ack") => break v,
+            _ => {}
+        }
+    };
+    assert_eq!(v, json!({"t":"ack","id":"s2","ok":true,"pane":13}));
+    assert!(told, "the topology with the new pane comes before the ack");
+    // a view device may not
+    let (_k, mut view, _) = env.pair(Permission::View);
+    put(&mut view, json!({"t":"start","id":"s3"}));
+    assert_eq!(ack(&recv_t(&mut view, "ack")), (false, "forbidden"));
+    assert_eq!(env.fake.0.lock().unwrap().starts, ["Test Phone"]);
 }
 
 #[test]

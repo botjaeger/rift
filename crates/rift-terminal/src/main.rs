@@ -1,5 +1,6 @@
 mod a11y;
 mod app;
+mod background;
 mod capture;
 mod control;
 mod hotkey;
@@ -11,6 +12,7 @@ mod menubar;
 mod mouse;
 mod notify;
 mod pane;
+mod quit;
 mod remote;
 mod script;
 mod state;
@@ -119,4 +121,5 @@ fn main() {
 
     let mut application = app::App::new(proxy, script, headless);
     event_loop.run_app(&mut application).expect("event loop");
+    quit::LOOP_RETURNED.store(true, std::sync::atomic::Ordering::SeqCst);
 }

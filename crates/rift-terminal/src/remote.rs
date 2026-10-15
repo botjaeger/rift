@@ -65,6 +65,8 @@ pub struct ControlSource {
     /// The last screen read of each pane, asked for again with its
     /// generation: an unchanged pane's window builds none.
     screens: Mutex<HashMap<u64, Held>>,
+    /// Shells phones started while no window is open (`remote_when_closed`).
+    background: crate::background::Background,
 }
 
 /// A pane's last screen read ([`ControlSource::screens`]).
@@ -89,6 +91,30 @@ const LOCAL_BITS: u32 = 24;
 /// The pane id phones see for pane `local` of the window `pid`.
 fn remote_pane(pid: u32, local: u64) -> u64 {
     (u64::from(pid) << LOCAL_BITS) | (local & ((1 << LOCAL_BITS) - 1))
+}
+
+/// A pane of the background window (pid 0): a shell the gateway started.
+fn is_background(pane: u64) -> bool {
+    pane >> LOCAL_BITS == 0
+}
+
+/// The theme background shells' screens resolve colours with.
+fn background_theme() -> rift_core::Theme {
+    rift_core::Config::try_load()
+        .ok()
+        .flatten()
+        .unwrap_or_else(rift_core::Config::fallback)
+        .resolve_theme_for(false)
+}
+
+/// Tell the computer's user that a phone started a shell.
+fn started_notice(device: &str) {
+    let who = shown(device, TOAST_DEVICE);
+    log::info!("remote: {who} started a shell while Rift is closed");
+    crate::notify::send(
+        "Rift",
+        &format!("{who} opened a terminal tab. Open Rift to see it."),
+    );
 }
 
 /// The window's own id of the phone-visible pane `pane`.
@@ -175,18 +201,36 @@ impl Source for ControlSource {
                         .collect(),
                 })
                 .collect();
-            windows.push(Window { pid, tabs });
+            windows.push(Window {
+                pid,
+                background: false,
+                tabs,
+            });
+        }
+        if windows.is_empty() {
+            windows.extend(self.background.window());
+        } else {
+            // Rift is open: it shows the background shells as tabs
+            self.background.release();
         }
         // screens of panes that are gone are dropped
         self.screens
             .lock()
             .unwrap()
-            .retain(|pane, _| owner.contains_key(pane));
+            .retain(|pane, _| owner.contains_key(pane) || is_background(*pane));
         *self.owner.lock().unwrap() = owner;
         windows
     }
 
     fn blocks(&self, pane: u64, before: Option<u64>, limit: usize) -> Result<Page, SourceError> {
+        if is_background(pane) {
+            return self
+                .background
+                .with(pane, |s| {
+                    crate::views::terminal::remote_blocks(s, before, limit, false)
+                })
+                .ok_or(SourceError::NoPane);
+        }
         self.read(
             pane,
             Request::Blocks {
@@ -199,6 +243,14 @@ impl Source for ControlSource {
     }
 
     fn blocks_meta(&self, pane: u64, limit: usize) -> Result<Page, SourceError> {
+        if is_background(pane) {
+            return self
+                .background
+                .with(pane, |s| {
+                    crate::views::terminal::remote_blocks(s, None, limit, true)
+                })
+                .ok_or(SourceError::NoPane);
+        }
         self.read(pane, meta_request(local_pane(pane), limit))
     }
 
@@ -243,6 +295,9 @@ impl Source for ControlSource {
     }
 
     fn input(&self, pane: u64, device: &str, input: Input) -> Result<(), InputError> {
+        if is_background(pane) {
+            return self.background.input(pane, input);
+        }
         let (mut command, mut keys, mut text) = (None, None, None);
         match input {
             Input::Command(c) => command = Some(c),
@@ -265,6 +320,11 @@ impl Source for ControlSource {
     }
 
     fn open(&self, pane: u64, device: &str, kind: OpenKind) -> Result<u64, InputError> {
+        if is_background(pane) {
+            let id = self.background.open(pane, kind)?;
+            started_notice(device);
+            return Ok(id);
+        }
         let req = Request::RemoteOpen {
             pane: local_pane(pane),
             device: device.to_string(),
@@ -288,6 +348,17 @@ impl Source for ControlSource {
     /// from it (same window, same `force`), and answers `unchanged` instead
     /// of building it again while its output did not move.
     fn screen(&self, pane: u64, force: bool) -> Result<Option<Screen>, SourceError> {
+        if is_background(pane) {
+            let theme = background_theme();
+            return self
+                .background
+                .with(pane, |s| {
+                    crate::views::terminal::remote_screen(s, &theme, force, None)
+                        .1
+                        .flatten()
+                })
+                .ok_or(SourceError::NoPane);
+        }
         let owner = self.owner_of(pane);
         let since = self
             .screens
@@ -348,6 +419,15 @@ impl Source for ControlSource {
         from: u64,
         limit: usize,
     ) -> Result<OutputPage, OutputError> {
+        if is_background(pane) {
+            return match self.background.with(pane, |s| {
+                crate::views::terminal::block_output_range(s, block, from, limit)
+            }) {
+                Some(Some(page)) => Ok(page),
+                Some(None) => Err(OutputError::NoBlock),
+                None => Err(OutputError::NoPane),
+            };
+        }
         let req = Request::Output {
             pane: local_pane(pane),
             block,
@@ -390,6 +470,34 @@ impl Source for ControlSource {
             Ok(None) => Err(OutputError::NoPane),
             Err(e) => Err(OutputError::Unavailable(e.to_string())),
         }
+    }
+
+    fn can_start(&self) -> bool {
+        let c = remote_config();
+        c.access && c.when_closed
+    }
+
+    /// A shell for a phone: a tab in an open window when there is one,
+    /// else a background shell (Rift shows it when it opens). The computer
+    /// is told either way.
+    fn start(&self, device: &str) -> Result<u64, InputError> {
+        if !self.can_start() {
+            return Err(InputError::Denied);
+        }
+        let windows = self.topology();
+        let in_window = windows
+            .iter()
+            .filter(|w| !w.background)
+            .flat_map(|w| &w.tabs)
+            .find(|t| t.active)
+            .and_then(|t| t.panes.iter().find(|p| p.active).or(t.panes.first()))
+            .map(|p| p.id);
+        if let Some(pane) = in_window {
+            return self.open(pane, device, OpenKind::Tab);
+        }
+        let id = self.background.start()?;
+        started_notice(device);
+        Ok(id)
     }
 
     fn diff(&self, pane: u64, path: &str, staged: bool) -> Result<DiffPage, OutputError> {
@@ -533,6 +641,9 @@ struct RemoteConfig {
     /// `remote_tunnel`: run a relay here behind a Cloudflare tunnel
     /// (`tunnel.rs`) and register there instead.
     tunnel: bool,
+    /// `remote_when_closed` (with `durable_sessions`): phones start shells
+    /// while no window is open, and the gateway stays up for them.
+    when_closed: bool,
 }
 
 /// `remote_access` and `remote_listen` from config.toml, read with the
@@ -550,6 +661,7 @@ fn remote_config_from(loaded: Result<Option<rift_core::Config>, String>) -> Remo
             relay: c.relay().map(str::to_string),
             listen: Some(c.remote_listen),
             tunnel: c.remote_tunnel,
+            when_closed: c.remote_when_closed && c.durable_sessions,
         },
         _ => RemoteConfig::default(),
     }
@@ -695,7 +807,7 @@ pub fn cli(args: &[String]) -> i32 {
         gateway.set_relay(relay_for(&mut tunnel, &now));
         if checked_windows.is_none_or(|t| t.elapsed() >= Duration::from_secs(2)) {
             checked_windows = Some(Instant::now());
-            if any_window() {
+            if any_window() || now.when_closed {
                 windowless = None;
             } else if windowless.get_or_insert_with(Instant::now).elapsed() >= NO_WINDOWS_EXIT {
                 log::info!("remote: no Rift window for {NO_WINDOWS_EXIT:?}; stopping");
@@ -1080,41 +1192,24 @@ pub fn typed_toast(device: &str) -> String {
 }
 
 /// Start a managed gateway for this user (`<this exe> remote --managed`,
-/// the same environment): detached in its own process group, its output
-/// in `<dir>/gateway.log` (started over past 1 MiB), reaped by a thread
-/// when it exits. Returns its pid. A gateway already holding the lock
-/// makes the new one exit at once.
-pub fn spawn_managed(dir: &Path) -> std::io::Result<u32> {
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    use std::os::unix::process::CommandExt;
+/// the same environment), detached so it outlives the window (a launchd job
+/// on macOS: `rift_pty::launchd`), its output appended to
+/// `<dir>/gateway.log` (started over past 1 MiB). A gateway already holding
+/// the lock makes the new one exit at once.
+pub fn spawn_managed(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(dir)?;
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
     let path = dir.join("gateway.log");
-    let big = std::fs::metadata(&path).is_ok_and(|m| m.len() > 1 << 20);
-    let mut open = std::fs::OpenOptions::new();
-    open.create(true).mode(0o600);
-    if big {
-        open.write(true).truncate(true);
-    } else {
-        open.append(true);
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 1 << 20) {
+        std::fs::write(&path, b"")?;
     }
-    let log = open.open(&path)?;
-    let err = log.try_clone()?;
-    let mut child = std::process::Command::new(std::env::current_exe()?)
-        .args(["remote", "--managed"])
-        .stdin(std::process::Stdio::null())
-        .stdout(log)
-        .stderr(err)
-        .process_group(0)
-        .spawn()?;
-    let pid = child.id();
-    // no zombie when it exits while this window lives on
-    std::thread::Builder::new()
-        .name("remote-reap".into())
-        .spawn(move || {
-            let _ = child.wait();
-        })?;
-    Ok(pid)
+    rift_pty::launchd::spawn_helper(
+        "gateway",
+        &std::env::current_exe()?,
+        &["remote", "--managed"],
+        Some(&path),
+    )
 }
 
 #[cfg(test)]
@@ -1332,6 +1427,7 @@ mod tests {
                 listen: Some("0.0.0.0:7878".into()),
                 relay: Some(rift_core::config::DEFAULT_RELAY.into()),
                 tunnel: false,
+                when_closed: false,
             }
         );
         assert_eq!(from_text("remote_relay = \"\"\n").relay, None);
@@ -1345,9 +1441,13 @@ mod tests {
                 listen: Some("127.0.0.1:9".into()),
                 relay: Some("wss://relay.example.com".into()),
                 tunnel: true,
+                when_closed: false,
             }
         );
         assert_eq!(from_text("remote_relay = \"  \"\n").relay, None);
+        // shells while Rift is closed live in the session service
+        assert!(from_text("remote_when_closed = true\n").when_closed);
+        assert!(!from_text("remote_when_closed = true\ndurable_sessions = false\n").when_closed);
         // the tunnel replaces the configured relay; off, the relay is used
         let mut t = crate::tunnel::Tunnel::new(
             &std::env::temp_dir().join(format!("rift-relay-for-{}", std::process::id())),

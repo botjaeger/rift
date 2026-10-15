@@ -590,7 +590,9 @@ block; ⇧ + label copies it (a block copies its output). Esc cancels.
 - **What's New** — release notes from `CHANGELOG.md`, newest first: title
   with the current version and date, then each release's summary and its
   New / Improved / Fixed items (section titles in accent / success / warning).
-  Opens from Help → What's New or the palette (`whats_new`), and once on the
+  The notes' italics (`*Relay*`) show as plain text.
+  Opens from Help → What's New, the palette (`whats_new`) or Settings ›
+  General › Updates › What's New, and once on the
   first launch after an update (never on a first install). The body scrolls
   with the wheel or trackpad, arrows, Space, Page Up/Down and Home/End; Esc,
   Enter, ✕, **Got it** or a click outside the card closes it.
@@ -693,7 +695,9 @@ description) left, control right; it runs to the bottom edge.
     `Rift <version>` row whose description is the update status (`Not
     checked yet`, `Checking for updates…`, `Up to date`, `vX.Y.Z available`
     or `Couldn't check for updates`) and a `Check now` button (one check at
-    once, disabled while one runs; it works with the toggle off too).
+    once, disabled while one runs; it works with the toggle off too), then a
+    `What's New` row (*The changes in each version of Rift*) whose `Open`
+    button opens What's New.
   - Automation: `Control socket` segmented `Off | Navigate | Full`
     (*Lets scripts control Rift (rift-terminal ctl); Full also lets them
     type*; `control_api`).
@@ -784,6 +788,11 @@ description) left, control right; it runs to the bottom edge.
     cameras read it in any theme), `Expires in m:ss`, the wrapped link and a
     `Copy link` button; at zero, `Expired — Pair again`. While the gateway
     has no address yet, a `Pairing` row waits for it.
+  - `Phones can open tabs while Rift is closed` (with remote access on, last):
+    the `remote_when_closed` switch (*Only phones that may run commands; you
+    get a notification, and the tabs appear when you open Rift*, or *Needs
+    Keep shells running when Rift quits (General)* while `durable_sessions`
+    is off).
   - `Use a Cloudflare tunnel instead` (with remote access on, below `Relay`): the `remote_tunnel`
     switch; on, a checklist follows: `cloudflared` (`Installed · <path>` with
     a green check, or `Not installed` with an `Install` button when

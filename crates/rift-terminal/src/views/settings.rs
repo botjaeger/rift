@@ -372,6 +372,7 @@ fn focusable(target: &ClickTarget) -> bool {
             | ClickTarget::SettingsCopyVersion
             | ClickTarget::SettingsUpdate
             | ClickTarget::SettingsCheckUpdates
+            | ClickTarget::SettingsWhatsNew
             | ClickTarget::RemotePair
             | ClickTarget::RemoteViewOnly
             | ClickTarget::RemoteCopyLink
@@ -1839,6 +1840,18 @@ fn remote_page(form: &mut Form, config: &Config, view: &RemoteView, blink_on: bo
     relay_row(form, config, view, blink_on);
     if on {
         tunnel_rows(form, config, view);
+        let y = form.y;
+        form.toggle_desc(
+            y,
+            "Phones can open tabs while Rift is closed",
+            if config.durable_sessions {
+                "Only phones that may run commands; you get a notification, and the tabs appear when you open Rift"
+            } else {
+                "Needs Keep shells running when Rift quits (General)"
+            },
+            config.remote_when_closed,
+            "remote_when_closed",
+        );
     }
 
     form.group("Pair a phone");
@@ -2569,6 +2582,23 @@ fn general_page(form: &mut Form, config: &Config, update: &UpdateLine) {
             },
             ClickTarget::SettingsCheckUpdates,
             "Check for updates now".into(),
+        );
+    }
+    let y = form.y;
+    let label = "Open";
+    let bw = form.engine.measure(label, 12.5, FONT_SANS, Weight::MEDIUM) + 24.0;
+    form.reserve = bw + 40.0;
+    form.label_desc("What's New", "The changes in each version of Rift", y);
+    if !form.hidden {
+        let by = y + (ROW_H - CONTROL_H) / 2.0;
+        let bx = form.right() - bw.round();
+        form.button(
+            bx,
+            by,
+            label,
+            ButtonKind::Secondary,
+            ClickTarget::SettingsWhatsNew,
+            "Open What's New".into(),
         );
     }
 

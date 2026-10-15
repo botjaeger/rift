@@ -698,6 +698,7 @@ impl Source for Fake {
     fn topology(&self) -> Vec<Window> {
         vec![Window {
             pid: 1,
+            background: false,
             tabs: vec![Tab {
                 index: 0,
                 title: "needle-tab".into(),

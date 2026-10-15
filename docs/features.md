@@ -535,7 +535,10 @@ it.
 With `durable_sessions = true` (the default; Settings → General → *Keep
 shells running when Rift quits*), new shells run in a
 per-user **session service** (`rift-terminal --session-daemon`, started on
-demand) instead of the window process. Quitting Rift or closing the window
+demand) instead of the window process. On macOS it and the phone gateway
+start as launchd jobs (`<data dir>/launchd/*.plist`, run once, never kept
+alive), not as children of the window, so a quit Rift leaves the Dock
+instead of staying there as "Running in Background". Quitting Rift or closing the window
 leaves them running; the next launch restores the layout and **reattaches**
 each pane: the service replays the output it kept (the newest 8 MiB per
 shell) into a fresh terminal, with the original timing so block durations
@@ -706,6 +709,14 @@ line shows the addresses, or how many devices are connected.
   A Tailscale or other private-network address of the computer works
   without a relay: it is listed in the pairing link like any other address.
   Pairing links made in Settings carry the running gateway's relay too.
+- **Tabs while Rift is closed** (`remote_when_closed`, *Phones can open
+  tabs while Rift is closed*; off by default, needs `durable_sessions`): the
+  gateway stays up after the last window closes, and a paired phone that may
+  run commands can open a tab (after Face ID or the passcode on the phone).
+  The shell runs in the session service; the computer shows a notification
+  naming the device. The phone follows and drives it like any pane. The next
+  Rift window shows these shells as tabs (with a toast) and the gateway lets
+  go of them. At most 8 at a time.
 - **Cloudflare tunnel** (`remote_tunnel`, *Use a Cloudflare tunnel instead*; no server needed): the gateway
   runs a relay on a loopback port of this computer and gives it a public
   address with a Cloudflare quick tunnel (`cloudflared tunnel --url`,

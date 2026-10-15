@@ -92,7 +92,36 @@ pub fn parse(src: &str) -> Vec<Release> {
             target.push_str(text);
         }
     }
+    for release in &mut releases {
+        release.summary = plain(&release.summary);
+        for item in release.sections.iter_mut().flat_map(|s| &mut s.items) {
+            item.text = plain(&item.text);
+        }
+    }
     releases
+}
+
+/// `*Relay*` → `Relay`: the file's italics (the names the UI shows) read as
+/// plain text. A lone `*` (`rm *`) or one next to a space stays.
+fn plain(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find('*') {
+        let after = &rest[i + 1..];
+        match after.find('*') {
+            Some(j) if j > 0 && !after[..j].starts_with(' ') && !after[..j].ends_with(' ') => {
+                out.push_str(&rest[..i]);
+                out.push_str(&after[..j]);
+                rest = &after[j + 1..];
+            }
+            _ => {
+                out.push_str(&rest[..=i]);
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// `**Title** — text` → (Title, text); anything else is all text.
@@ -197,6 +226,32 @@ mod tests {
                 for item in &section.items {
                     assert!(!item.title.is_empty() && !item.text.is_empty());
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn italics_read_as_plain_text() {
+        assert_eq!(plain("Point *Relay* at it"), "Point Relay at it");
+        assert_eq!(
+            plain("now *Use a tunnel instead*, below"),
+            "now Use a tunnel instead, below"
+        );
+        // not emphasis: a lone star, or one next to a space
+        assert_eq!(plain("rm * here"), "rm * here");
+        assert_eq!(plain("a * b * c"), "a * b * c");
+        let r =
+            parse("## 1.0.0 — 2026-01-01\n\nSee *About*.\n\n### New\n\n- **X** — open *Relay*.\n");
+        assert_eq!(r[0].summary, "See About.");
+        assert_eq!(r[0].sections[0].items[0].text, "open Relay.");
+        // the shipped notes show no stray stars
+        for r in releases() {
+            for text in std::iter::once(&r.summary).chain(
+                r.sections
+                    .iter()
+                    .flat_map(|s| s.items.iter().map(|i| &i.text)),
+            ) {
+                assert!(!text.contains("*Relay*"), "{text}");
             }
         }
     }

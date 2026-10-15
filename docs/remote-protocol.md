@@ -90,7 +90,7 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
 
 ## Devices and permissions
 
-- `operate`: everything below. `view`: no `run`, `keys`, `text`, `open` or
+- `operate`: everything below. `view`: no `run`, `keys`, `text`, `open`, `start` or
   `complete` (its history can hold secrets typed on a command line, and
   path completion lists any folder), and no `diff` of an untracked file
   (its whole content: a `.env`, a key); they get `ack` with `error`
@@ -120,7 +120,7 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
 | `run` | 4 per second per connection; the command at most 2 KiB, one line |
 | `keys` | 20 keys per message, 20 messages per second per connection |
 | `text` | 1 KiB per message, one line without control characters; counts against the `keys` rate |
-| `open` | 2 per second per connection |
+| `open`, `start` | 2 per second per connection, together |
 | `output` | 1 to 500 lines and at most 64 KiB per answer, 10 requests per second per connection |
 | `screen` | at most 300 columns and 120 rows (the top-left part of a larger screen), one per 100 ms |
 | `complete` | the line at most 1 KiB; at most 50 `items` and 50 `history` entries of 1 KiB each; shares `output`'s rate |
@@ -204,6 +204,18 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
   device. Every connection gets the `topology` holding the new pane before
   the `ack`, which names it in `pane`. A window that cannot split the pane
   answers `ack` with `error` `busy`.
+- `start` (`{"t":"start","id":"n2"}`, feature `start`) starts a shell on a
+  computer whose user allows it while no Rift window is open
+  (`remote_when_closed`): the gateway keeps the shell in the session
+  service and lists it in a background window (`{"pid":0,"background":true,
+  "tabs":[…]}`; at most 8 shells), whose panes take `subscribe`, `run`,
+  `keys`, `text`, `screen`, `output` and `open` `tab` (another background
+  shell) like any other. With a window open it opens a tab there instead.
+  Every connection gets the `topology` with the new pane before the `ack`,
+  and the computer shows a notification naming the device. When Rift opens
+  it shows the background shells as tabs, and the background window leaves
+  the `topology`. A computer that does not allow it answers `ack` with
+  `error` `forbidden`.
 - `id` is chosen by the client (at most 64 characters) and returned in `ack`
   (or, for `output`, in the `output` answer).
 - `forget` removes this device from the desktop's paired devices and closes
@@ -241,7 +253,8 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
   `off`, § Push), `chips` (`dirs`, `branches`, `changes`, `diff`, §
   Phase 3), `waiting` (a pane's `waiting` in `topology`, below),
   `complete` (§ Phase 3), `running` (a pane's `running` in
-  `topology`, below) and `open`. A
+  `topology`, below), `open` and `start` (listed only while the computer
+  allows it, `remote_when_closed`). A
   gateway that leaves
   the field out serves none of them; the app then hides what needs them.
 - A pane's `git` (gateways with the `git` feature) is the git status the

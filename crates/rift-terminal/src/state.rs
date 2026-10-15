@@ -82,6 +82,8 @@ pub enum ClickTarget {
     SettingsUpdate,
     /// Settings › General and About: "Check now" (one update check).
     SettingsCheckUpdates,
+    /// Settings › General › What's New: open the release notes.
+    SettingsWhatsNew,
     SettingsSlider(&'static str),
     SettingsTheme(u8),
     /// Keybindings page row: record a new shortcut for the action.

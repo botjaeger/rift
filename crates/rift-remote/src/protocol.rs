@@ -180,6 +180,12 @@ pub enum ClientMsg {
         pane: u64,
         kind: OpenKind,
     },
+    /// Start a shell while no Rift window is open (feature `start`, only
+    /// where the computer allows it): a tab in the background window, which
+    /// Rift shows when it opens. The ack carries the new pane.
+    Start {
+        id: String,
+    },
 }
 
 /// What `open` makes.
@@ -530,6 +536,10 @@ pub enum ErrorCode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Window {
     pub pid: u32,
+    /// The shells the gateway itself keeps while no Rift window is open
+    /// (feature `start`; `pid` 0): Rift shows them as tabs when it opens.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub background: bool,
     pub tabs: Vec<Tab>,
 }
 
@@ -678,7 +688,7 @@ mod tests {
     #[test]
     fn every_client_fixture_round_trips() {
         let all = fixtures("client");
-        assert_eq!(all.len(), 25, "client fixtures");
+        assert_eq!(all.len(), 26, "client fixtures");
         for (name, value) in all {
             let msg: ClientMsg =
                 serde_json::from_value(value.clone()).unwrap_or_else(|e| panic!("{name}: {e}"));
@@ -689,7 +699,7 @@ mod tests {
     #[test]
     fn every_server_fixture_round_trips() {
         let all = fixtures("server");
-        assert_eq!(all.len(), 21, "server fixtures");
+        assert_eq!(all.len(), 22, "server fixtures");
         for (name, value) in all {
             let msg: ServerMsg =
                 serde_json::from_value(value.clone()).unwrap_or_else(|e| panic!("{name}: {e}"));

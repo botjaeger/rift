@@ -70,6 +70,11 @@ remote_relay  = "wss://rift-relay.playhaws.com"
                                   # packaging/relay.Dockerfile hosts one;
                                   # scripts/relay-local.sh runs a temporary one
                                   # on this machine and sets this key
+remote_when_closed = false        # paired phones that may run commands can open
+                                  # tabs while no Rift window is open: the gateway
+                                  # stays up and keeps them in the session service
+                                  # (needs durable_sessions); Rift shows them as
+                                  # tabs when it opens
 remote_tunnel = false             # Cloudflare tunnel: a relay on this computer
                                   # behind a Cloudflare quick tunnel (needs
                                   # cloudflared); replaces remote_relay while on.

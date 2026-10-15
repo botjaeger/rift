@@ -396,6 +396,7 @@ mod chip_bounds {
         };
         let windows = vec![Window {
             pid: 1,
+            background: false,
             tabs: vec![protocol::Tab {
                 index: 0,
                 title: "t".into(),
@@ -429,6 +430,7 @@ mod chip_bounds {
         };
         let windows = vec![Window {
             pid: 1,
+            background: false,
             tabs: vec![protocol::Tab {
                 index: 0,
                 title: big,
@@ -768,6 +770,22 @@ pub trait Source: Send + Sync + 'static {
         let _ = (pane, device, kind);
         Err(InputError::Unavailable(
             "this computer cannot open shells".into(),
+        ))
+    }
+    /// Whether [`start`] may be used: the welcome then lists `start`.
+    /// Defaults to false.
+    ///
+    /// [`start`]: Source::start
+    fn can_start(&self) -> bool {
+        false
+    }
+    /// Start a shell while no Rift window is open, for the device named
+    /// `device` (feature `start`); the new pane's id. Defaults to
+    /// `Unavailable`: the computer does not allow it.
+    fn start(&self, device: &str) -> Result<u64, InputError> {
+        let _ = device;
+        Err(InputError::Unavailable(
+            "this computer does not open shells while Rift is closed".into(),
         ))
     }
     /// `status.json` was just rewritten (the gateway started, a client

@@ -2579,6 +2579,37 @@ fn render_header(
     });
 }
 
+/// `session`'s running command for a paired phone's Running list: when it
+/// started and its latest line; none at the prompt.
+pub fn remote_running(session: &Session) -> Option<rift_remote::protocol::PaneRunning> {
+    let last = session
+        .blocks
+        .lock()
+        .unwrap()
+        .last()
+        .map(|b| (b.state.clone(), b.output_start));
+    let (started, from) = match last {
+        Some((BlockState::Running { started }, from)) => (Some(started), from),
+        _ if session.has_foreground_job() => (None, None),
+        _ => return None,
+    };
+    // a block that printed nothing yet has no line (never its prompt or
+    // command); without shell integration the screen's last line
+    let line = if from.is_some() || started.is_none() {
+        session.last_line(from)
+    } else {
+        String::new()
+    };
+    let started = started.and_then(|s| {
+        std::time::SystemTime::now()
+            .checked_sub(s.elapsed())?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_secs())
+    });
+    Some(rift_remote::protocol::PaneRunning { started, line })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

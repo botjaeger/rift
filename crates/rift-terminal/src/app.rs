@@ -2806,6 +2806,7 @@ impl App {
                     | ClickTarget::SettingsCopyVersion
                     | ClickTarget::SettingsUpdate
                     | ClickTarget::SettingsCheckUpdates
+                    | ClickTarget::SettingsWhatsNew
                     | ClickTarget::UpdateChip
                     | ClickTarget::RemoteChip
                     | ClickTarget::RemotePair
@@ -5199,7 +5200,7 @@ impl App {
             self.tabs.remove(tab_idx);
             if self.tabs.is_empty() {
                 self.save_session();
-                event_loop.exit();
+                crate::quit::exit(event_loop);
                 return;
             }
             if self.active > tab_idx {
@@ -8976,7 +8977,7 @@ impl App {
                         p.session.terminate();
                     }
                 }
-                event_loop.exit();
+                crate::quit::exit(event_loop);
             }
         }
         if let Some(w) = &self.window {
@@ -11006,6 +11007,9 @@ impl App {
             }
             Some(ClickTarget::SettingsUpdate) => self.update_rift(),
             Some(ClickTarget::SettingsCheckUpdates) => self.check_for_updates_now(),
+            Some(ClickTarget::SettingsWhatsNew) => {
+                self.handle_action(AppAction::WhatsNew, event_loop)
+            }
             Some(ClickTarget::RemotePair) => {
                 self.settings.remote.pairing = None;
                 self.poll_remote(true);
@@ -11116,6 +11120,8 @@ impl App {
                     "remote_access" => c.remote_access = !c.remote_access,
                     // the running gateway starts or stops the tunnel itself
                     "remote_tunnel" => c.remote_tunnel = !c.remote_tunnel,
+                    // the running gateway reads it on every check
+                    "remote_when_closed" => c.remote_when_closed = !c.remote_when_closed,
                     // off deletes the saved output (apply_config)
                     "save_transcripts" => c.save_transcripts = !c.save_transcripts,
                     "mouse_reporting" => c.mouse_reporting = !c.mouse_reporting,
@@ -12321,33 +12327,7 @@ impl App {
     /// `p`'s running command for a paired phone's Running list: when it
     /// started and its latest line; none at the prompt.
     fn pane_running(p: &PaneState) -> Option<rift_remote::protocol::PaneRunning> {
-        let last = p
-            .session
-            .blocks
-            .lock()
-            .unwrap()
-            .last()
-            .map(|b| (b.state.clone(), b.output_start));
-        let (started, from) = match last {
-            Some((BlockState::Running { started }, from)) => (Some(started), from),
-            _ if p.session.has_foreground_job() => (None, None),
-            _ => return None,
-        };
-        // a block that printed nothing yet has no line (never its prompt or
-        // command); without shell integration the screen's last line
-        let line = if from.is_some() || started.is_none() {
-            p.session.last_line(from)
-        } else {
-            String::new()
-        };
-        let started = started.and_then(|s| {
-            std::time::SystemTime::now()
-                .checked_sub(s.elapsed())?
-                .duration_since(std::time::UNIX_EPOCH)
-                .ok()
-                .map(|d| d.as_secs())
-        });
-        Some(rift_remote::protocol::PaneRunning { started, line })
+        terminal::remote_running(&p.session)
     }
 
     /// What `p`'s running command waits for (a paired phone's "Needs you"):
@@ -13200,6 +13180,7 @@ impl App {
                         | ClickTarget::SettingsCopyVersion
                         | ClickTarget::SettingsUpdate
                         | ClickTarget::SettingsCheckUpdates
+                        | ClickTarget::SettingsWhatsNew
                         | ClickTarget::SettingsEditPrompt
                         | ClickTarget::SettingsKeybind(_)
                         | ClickTarget::SettingsKeybindReset(_)
@@ -14404,7 +14385,7 @@ impl App {
             {
                 self.remote.spawned = Some(now);
                 match crate::remote::spawn_managed(&dir) {
-                    Ok(pid) => log::info!("remote: started the gateway (pid {pid})"),
+                    Ok(()) => log::info!("remote: started the gateway"),
                     Err(e) => log::warn!("remote: cannot start the gateway: {e}"),
                 }
             }
@@ -15315,7 +15296,7 @@ impl App {
             // the helper is waiting for this process: quit; the other
             // windows stay open on the current version
             log::warn!("update: could not ask the other windows to restart");
-            event_loop.exit();
+            crate::quit::exit(event_loop);
         }
     }
 
@@ -15367,7 +15348,7 @@ impl App {
             log::warn!("restart file {}: {e}", own.display());
         }
         self.save_session();
-        event_loop.exit();
+        crate::quit::exit(event_loop);
     }
 
     /// At start: what waits for the first frame (`confirm_start`), and how
@@ -15681,6 +15662,12 @@ impl ApplicationHandler<UserEvent> for App {
             })
             .ok();
 
+        // shells a phone started while Rift was closed (background.rs)
+        let adopted = if self.config.durable_sessions && self.durable_allowed {
+            crate::background::adopt()
+        } else {
+            Vec::new()
+        };
         match restored {
             Some(saved) if !saved.tabs.is_empty() => {
                 // restoring must not rewrite the file tab by tab
@@ -15692,7 +15679,19 @@ impl ApplicationHandler<UserEvent> for App {
                 self.active = saved.active.min(self.tabs.len() - 1);
                 self.save_session();
             }
+            _ if !adopted.is_empty() => {}
             _ => self.spawn_tab(),
+        }
+        if !adopted.is_empty() {
+            for &id in &adopted {
+                self.next_attach = Some(id);
+                self.spawn_tab_at(None);
+            }
+            self.toast(match adopted.len() {
+                1 => "A tab your phone opened while Rift was closed".into(),
+                n => format!("{n} tabs your phone opened while Rift was closed"),
+            });
+            self.save_session();
         }
         self.load_shell_env();
         self.plan_start_confirmation();
@@ -15994,7 +15993,7 @@ impl ApplicationHandler<UserEvent> for App {
                     // an updating window restarts this one: its layout is
                     // saved; durable shells keep running for the new version
                     log::info!("restarting for an update");
-                    event_loop.exit();
+                    crate::quit::exit(event_loop);
                     return;
                 }
                 if let Some(w) = &self.window {
