@@ -6,6 +6,15 @@ build (`## <version> — <YYYY-MM-DD>`) or an over-the-air update to one
 message its download carries. Items use `### New`, `### Improved` or
 `### Fixed` sections of `- **Title** — text`.
 
+## 0.2.0 · update 1 — 2026-10-15
+
+Page titles stay below the clock after you type.
+
+### Fixed
+
+- **Titles under the clock** — after typing in the Run sheet or any field, the Now,
+  Computers and Settings titles no longer slide up under the status bar.
+
 ## 0.2.0 — 2026-10-15
 
 Updates you can see and control: what changed, when to check, and the version you run.

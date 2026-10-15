@@ -8,6 +8,27 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.4.0 — 2026-10-15
+
+Links you can hover and click, colored command lines, and your shell's aliases and
+tools recognized.
+
+### New
+
+- **Click a link** — links show a hand, and resting on one shows where it goes. A plain
+  click shows that, or opens the link: Settings → Terminal → *Clicking a link*. ⌘-click
+  always opens.
+- **Colored command lines** — the command, its flags and quoted text are colored as you
+  type, and in the headers of finished commands.
+
+### Fixed
+
+- **Aliases and tools shown as unknown** — aliases from your shell setup, and tools your
+  shell adds to its PATH (pnpm, nvm), are no longer underlined red.
+- **Text out of line after a symbol** — after a symbol your font lacks (such as ⧉), the
+  rest of the line sits on its columns again, so selecting and copying get the text you
+  see.
+
 ## 0.3.1 — 2026-10-15
 
 Claude Code and Codex work fully inside Rift.
