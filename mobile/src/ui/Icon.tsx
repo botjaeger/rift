@@ -24,6 +24,25 @@ const ICONS = {
   keyboard: { ios: "keyboard", android: "keyboard", web: "keyboard" },
   run: { ios: "arrow.up", android: "arrow_upward", web: "arrow_upward" },
   scan: { ios: "qrcode.viewfinder", android: "qr_code_scanner", web: "qr_code_scanner" },
+  // a pane's avatar and the Terminal view switch
+  terminal: { ios: "apple.terminal", android: "terminal", web: "terminal" },
+  // the key row's keys (the Keys and Pane boards)
+  interrupt: { ios: "xmark.octagon", android: "dangerous", web: "dangerous" },
+  up: { ios: "arrow.up", android: "arrow_upward", web: "arrow_upward" },
+  down: { ios: "arrow.down", android: "arrow_downward", web: "arrow_downward" },
+  left: { ios: "arrow.left", android: "arrow_back", web: "arrow_back" },
+  right: { ios: "arrow.right", android: "arrow_forward", web: "arrow_forward" },
+  home: { ios: "arrow.left.to.line", android: "first_page", web: "first_page" },
+  end: { ios: "arrow.right.to.line", android: "last_page", web: "last_page" },
+  pageUp: { ios: "chevron.up.2", android: "keyboard_double_arrow_up", web: "keyboard_double_arrow_up" },
+  pageDown: { ios: "chevron.down.2", android: "keyboard_double_arrow_down", web: "keyboard_double_arrow_down" },
+  backspace: { ios: "delete.left", android: "backspace", web: "backspace" },
+  deleteKey: { ios: "delete.right", android: "backspace", web: "backspace" },
+  paste: { ios: "doc.on.clipboard", android: "content_paste", web: "content_paste" },
+  newTab: { ios: "plus.rectangle", android: "add_box", web: "add_box" },
+  newPane: { ios: "rectangle.split.2x1", android: "vertical_split", web: "vertical_split" },
+  hideKeyboard: { ios: "keyboard.chevron.compact.down", android: "keyboard_hide", web: "keyboard_hide" },
+  editKeys: { ios: "slider.horizontal.3", android: "tune", web: "tune" },
 } as const satisfies Record<string, SymbolViewProps["name"]>;
 
 export type IconName = keyof typeof ICONS;

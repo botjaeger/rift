@@ -2,9 +2,9 @@ import { useRouter } from "expo-router";
 import { useMemo } from "react";
 import { ScrollView, StyleSheet } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { parseChangelog, releaseKey } from "@/changelog";
+import { parseChangelog } from "@/changelog";
 import { CHANGELOG } from "@/changelog.data";
-import { ReleaseCard } from "@/ui/ReleaseNotes";
+import { ReleaseList } from "@/ui/ReleaseNotes";
 import { PageHeader } from "@/ui/Screen";
 import { colors } from "@/ui/theme";
 
@@ -21,9 +21,7 @@ export default function ChangelogScreen() {
         backLabel="Back"
       />
       <ScrollView style={styles.fill} contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + 24 }]}>
-        {releases.map((r) => (
-          <ReleaseCard key={releaseKey(r.version, r.update)} release={r} />
-        ))}
+        <ReleaseList releases={releases} named />
       </ScrollView>
     </>
   );
@@ -31,5 +29,5 @@ export default function ChangelogScreen() {
 
 const styles = StyleSheet.create({
   fill: { flex: 1, backgroundColor: colors.bg },
-  content: { paddingHorizontal: 12, paddingTop: 8, gap: 12, maxWidth: 720, width: "100%", alignSelf: "center" },
+  content: { paddingHorizontal: 20, paddingTop: 16, maxWidth: 720, width: "100%", alignSelf: "center" },
 });

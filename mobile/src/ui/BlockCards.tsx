@@ -119,7 +119,7 @@ export const FailedCard = memo(function FailedCard({ block, onActions, onRunAgai
   );
 });
 
-/** The running command (the P3 Pane board): its last lines, Notify when done, Stop (^C) (not for a view-only device: no `onStop`). */
+/** The running command (the P3 Pane board): its last lines, Notify when done, Stop (control C; not for a view-only device: no `onStop`). */
 export const RunningCard = memo(function RunningCard({
   block,
   onActions,
@@ -145,7 +145,7 @@ export const RunningCard = memo(function RunningCard({
       <CardOutput block={block} all={false} />
       <View style={styles.actions}>
         <SmallButton label="Notify when done" pressed={notify} onPress={() => onBell(block, !notify)} />
-        {onStop ? <SmallButton label="Stop (^C)" spoken="Stop (^C), sends control C" color={colors.warning} onPress={onStop} /> : null}
+        {onStop ? <SmallButton label="Stop" spoken="Stop, sends control C" color={colors.warning} onPress={onStop} /> : null}
       </View>
     </View>
   );
@@ -159,15 +159,15 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
-    paddingHorizontal: 12,
-    borderRadius: radius.button,
+    paddingHorizontal: 14,
+    borderRadius: 20,
     borderWidth: 1,
     borderColor: colors.hairline,
   },
   foldCheck: { fontFamily: ui(400), color: colors.success, fontSize: 13 },
   foldText: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13 },
   foldMid: { flex: 1 },
-  card: { marginHorizontal: 12, borderRadius: 10, borderWidth: 1, paddingVertical: 10, paddingHorizontal: 12, gap: 6 },
+  card: { marginHorizontal: 12, borderRadius: radius.card, borderWidth: 1, paddingVertical: 10, paddingHorizontal: 12, gap: 6 },
   failed: { backgroundColor: colors.surface, borderColor: `${colors.error}66` },
   running: { backgroundColor: tints.running, borderColor: `${colors.accent}66` },
   head: { flexDirection: "row", alignItems: "center", gap: 8 },
@@ -175,7 +175,7 @@ const styles = StyleSheet.create({
   exit: { fontFamily: mono, color: colors.textBright, fontSize: 11 },
   output: { fontFamily: mono, color: colors.fg, fontSize: 12, lineHeight: 17.4 },
   actions: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  small: { height: 32, paddingHorizontal: 10, borderRadius: radius.small, justifyContent: "center" },
+  small: { height: 32, paddingHorizontal: 12, borderRadius: 16, justifyContent: "center" },
   smallOutline: { borderWidth: 1, borderColor: colors.borderStrong },
   smallOn: { backgroundColor: tints.accentBadge },
   smallText: { fontFamily: ui(400), fontSize: 12 },

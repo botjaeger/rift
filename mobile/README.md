@@ -89,9 +89,17 @@ Tabs: **Now**, **Computers**, **Settings** (`src/now.ts` holds their models).
   goes only to the question it was shown for (the pane must still ask it). View-only devices
   get no answers. Ask before running asks for Face ID first; otherwise nothing confirms.
 - **Computers** (the P4 board): a card per paired computer; the connected one shows its tabs
-  (name, last command, running / failed / needs you), the others say "N tabs · LAN/Relay"
-  (tap to show their tabs), offline ones are dimmed with "seen 2 h ago". **+** pairs. Settings ›
-  Paired computers › a computer opens its page (its tabs and its notification bell).
+  (the pane's avatar, name, how long it has run, last command, running / ✕ exit / needs you, a
+  dot on what needs a look), the others say "N tabs · LAN/Relay" (tap to show their tabs),
+  offline ones are dimmed with "seen 2 h ago". **+** pairs. The floating **Search tabs and
+  commands** bar finds tabs on every connected computer by title, command, program or folder.
+  Settings › Paired computers › a computer opens its page (its tabs and its notification bell).
+- **Avatars** (Computers, a computer's page, Now's Running, Run's picker): a round `>_` (✳ while
+  Claude Code runs) in a colour taken from the pane's folder name, so a project reads the same
+  everywhere (`src/avatar.ts`).
+- **Headers**: pages lead with a round glass back (or close) badge; the pane's header holds the
+  computer in a glass pill and wrap, search and **Terminal view** in another. The back badge
+  counts the computer's other panes that need you.
 - **Open a tab while Rift is closed** (gateways with `start`, which the computer offers only when
   its user turned on *Phones can open tabs while Rift is closed*): with no Rift window open, a
   computer's page shows **Open a tab**; Face ID (or the passcode) first, then a shell the computer
@@ -99,23 +107,25 @@ Tabs: **Now**, **Computers**, **Settings** (`src/now.ts` holds their models).
   devices do not get the button.
 - **Reopening**: a cold start goes back to the pane that was open last (`rift.last` in the
   keychain); otherwise Now.
-- **Pane** (the P3 board): back, the computer, wrap and search; the window's tabs as a strip
+- **Pane** (the P3 board): back, the computer, wrap, search and Terminal view; the window's tabs as a strip
   (the pane count on the current tab, a red ● on a tab whose last command failed); "Pane 1 of 2 ·
   swipe for claude" with dots, and a sideways swipe (or the screen reader's next / previous
   action) moves between the tab's panes. A pane that asks shows "claude is asking: … Answer".
   Blocks only: the successes before the newest failure (or the running command) fold into
   "✓ N earlier commands succeeded · Show"; a failed command is a card with Run again, Copy error
-  and All N lines; the running one a card with Notify when done and Stop (^C). While a
+  and All N lines; the running one a card with Notify when done and Stop (control C). While a
   full-screen program runs (the alternate screen: vim, htop, less) the pane shows its screen
   ("htop is full screen · showing its screen"), the keys wrapped under it and "Show keyboard";
-  when it quits the blocks come back. **Wrap long lines** for this pane (Settings › Output ›
+  when it quits the blocks come back. **Terminal view** (gateways with `screen`) shows the
+  pane's screen whatever runs, until pressed again. **Wrap long lines** for this pane (Settings › Output ›
   Wrap long lines for all; off, each block's output scrolls sideways with a position bar) and
   **Search output** (filters the blocks by command or output). Above the command line:
   suggestions (the desktop's completions for what is typed and this pane's history, feature
-  `complete`; else its recent commands), then the folder button (folder and branch with
+  `complete`; else its recent commands), then the folder line (path and branch with
   ↑ahead ↓behind and a dot for uncommitted changes; it opens the folder, branch and changed-files
-  menus), the field (Return runs) and **⌃**, which shows the key row in place of the
-  suggestions. The keyboard's smart dashes and quotes are undone in the command line.
+  menus), then **⌃**, which shows the key row in place of the suggestions, and the round field
+  with its run button (Return runs too). While the keyboard is up the key row starts with Hide
+  keyboard. The keyboard's smart dashes and quotes are undone in the command line.
 - **Run** (the P5 sheet, from Now's **❯ Run**): the pane it runs in ("studio-mac › rift › pane 1
   ▾", the last pane open by default), the field, *Complete* (the desktop editor's completions,
   each the whole line, with its kind) and *Ran here before* (the pane's commands, newest first,
@@ -197,12 +207,14 @@ against an older Rift the app hides what needs them.
   keyboard's ctrl/alt combinations that are keys, Escape and F-keys go to the pane as keys, and
   Tab / Shift+Tab too while a program runs or the line holds text (otherwise Tab moves the
   focus). Mapping: `src/keyboard.ts`.
-- **Keys** (Settings › Output › Keys, or "⌨" at the end of the row): a preview, the row (drag
-  the ≡ handle to reorder; screen readers get Move up / Move down), and Add chips from a
-  catalogue (`src/controlKeys.ts`); the default row is ^C esc tab ctrl ↑ ↓. ctrl and alt are sticky for the
+- **Keys** (Settings › Output › Keys, or Edit keys at the end of the row): a preview, the row
+  (drag the ≡ handle to reorder; screen readers get Move up / Move down), and Add chips from a
+  catalogue (`src/controlKeys.ts`), each key a round cap with its icon or label; the default row
+  is Interrupt, Esc, Tab, ⌃, ↑, ↓. ⌃, ⌥ and ⇧ (Shift) are sticky for the
   next key, whatever it is (`ctrl+enter`, `alt+left`, `ctrl+[` is esc, `ctrl+@` is ctrl+space);
   on a key the protocol has no name for the modifier is dropped and the plain key sent.
-  Two catalogue keys are actions, not keys: **+tab** opens a new tab in the pane's window and
+  **Paste** types the phone's clipboard: into the command line at the prompt, into the running
+  program otherwise (feature `text`). Two more catalogue keys are actions, not keys: **+tab** opens a new tab in the pane's window and
   **+pane** splits the pane (feature `open`; disabled on an older Rift), both starting in the
   pane's folder; the app then shows the new pane in place of this one.
 - **Block actions** ("···" on a finished block, or a long press): Run again (through the

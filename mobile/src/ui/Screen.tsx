@@ -1,5 +1,5 @@
 import { useIsFocused } from "expo-router";
-import { useCallback, useEffect, useRef, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   Keyboard,
   KeyboardAvoidingView,
@@ -32,6 +32,8 @@ export const TAB_BAR_ROOM = 120;
 export const tabBottom = (inset: number) => inset + (Platform.OS === "ios" ? 24 : TAB_BAR_ROOM);
 
 const android = Platform.OS === "android";
+/** Room under a page's content for a floating overlay (a 44 pt bar and a gap). */
+const OVERLAY_ROOM = 56;
 
 /**
  * A tab's page (Now, Computers, Settings): a large title on the chrome ground, then the
@@ -42,9 +44,12 @@ export function TabScreen({
   accessory,
   gap = 24,
   large,
+  overlay,
   children,
 }: {
   title: string;
+  /** Floats over the page above the tab bar (Computers' search bar); the page leaves room for it. */
+  overlay?: ReactNode;
   accessory?: ReactNode;
   /** The phone-first boards' 30 pt title (Now, Computers) with 10 pt under the header. */
   large?: boolean;
@@ -58,6 +63,20 @@ export function TabScreen({
   // the keyboard's top edge (window coordinates) while it is up
   const keyboardTop = useRef<number | null>(null);
   const focused = useIsFocused();
+  // iOS: the overlay rides above the keyboard while it is up (Android's KeyboardAvoidingView
+  // already lifts the page's bottom edge)
+  const [keyboardH, setKeyboardH] = useState(0);
+  const hasOverlay = !!overlay;
+  useEffect(() => {
+    if (android || !hasOverlay) return;
+    const show = Keyboard.addListener("keyboardWillShow", (e) => setKeyboardH(e.endCoordinates.height));
+    const hide = Keyboard.addListener("keyboardWillHide", () => setKeyboardH(0));
+    return () => {
+      show.remove();
+      hide.remove();
+    };
+  }, [hasOverlay]);
+  const overlayBottom = keyboardH > 0 ? keyboardH + 8 : tabBottom(insets.bottom) - 12;
   // Android 15 draws edge to edge: the window keeps its size for the keyboard and nothing
   // scrolls a focused field low on the page (Settings › This phone's name) out from under it
   const revealFocusedField = useCallback(() => {
@@ -105,7 +124,10 @@ export function TabScreen({
       // the page pads itself by the safe area: the tab layout turns off the system's automatic
       // content inset (disableAutomaticContentInsets), which a keyboard anywhere in the app undid
       // (React Native clamps the offset to the prop inset, the title slid under the status bar)
-      contentContainerStyle={{ paddingTop: titleTop(insets.top) - (large ? 4 : 0), paddingBottom: tabBottom(insets.bottom) }}
+      contentContainerStyle={{
+        paddingTop: titleTop(insets.top) - (large ? 4 : 0),
+        paddingBottom: tabBottom(insets.bottom) + (overlay ? OVERLAY_ROOM : 0),
+      }}
       contentInsetAdjustmentBehavior="never"
       automaticallyAdjustContentInsets={false}
       // iOS: the keyboard insets the page and scrolls a focused field above it
@@ -130,13 +152,28 @@ export function TabScreen({
       </View>
     </ScrollView>
   );
-  // iOS keeps the bare scroll view: the system tab bar insets (and edge-blurs) only a scroll view
-  // that is the page's own; wrapped, the title slid up under the status bar
-  if (!android) return page;
+  // iOS keeps the scroll view the page's first view: the system tab bar insets (and edge-blurs)
+  // only a scroll view that is the page's own; wrapped, the title slid up under the status bar
+  if (!android)
+    return overlay ? (
+      <View style={styles.fill}>
+        {page}
+        <View pointerEvents="box-none" style={[styles.overlay, { bottom: overlayBottom }]}>
+          {overlay}
+        </View>
+      </View>
+    ) : (
+      page
+    );
   return (
     // the padding leaves room to scroll the last field above the keyboard
     <KeyboardAvoidingView style={styles.fill} behavior="padding">
       {page}
+      {overlay ? (
+        <View pointerEvents="box-none" style={[styles.overlay, { bottom: overlayBottom }]}>
+          {overlay}
+        </View>
+      ) : null}
       {/* the status bar is see-through (edge to edge): content scrolled up under it hid behind the clock */}
       <View pointerEvents="none" style={[styles.statusScrim, { height: insets.top }]} />
     </KeyboardAvoidingView>
@@ -180,6 +217,9 @@ export function IconButton({
   pressed: pressedState,
   hint,
   disabled,
+  glass,
+  grouped,
+  badge,
 }: {
   icon: IconName;
   label: string;
@@ -191,6 +231,12 @@ export function IconButton({
   pressed?: boolean;
   hint?: string;
   disabled?: boolean;
+  /** The boards' round glass badge (40 pt, reaching 44 with its slop): back, close, header actions. */
+  glass?: boolean;
+  /** One of a GlassGroup's 38 pt buttons. */
+  grouped?: boolean;
+  /** A count on the badge's corner (the panes that need you), in the caution colour. */
+  badge?: number;
 }) {
   return (
     <Pressable
@@ -201,11 +247,27 @@ export function IconButton({
       accessibilityHint={hint}
       disabled={disabled}
       onPress={onPress}
-      style={({ pressed }) => [styles.iconButton, active && styles.iconButtonActive, pressed && styles.pressed, disabled && styles.disabled]}
+      hitSlop={glass ? 2 : grouped ? 3 : undefined}
+      style={({ pressed }) => [
+        glass ? styles.glassButton : grouped ? styles.groupButton : styles.iconButton,
+        active && styles.iconButtonActive,
+        pressed && styles.pressed,
+        disabled && styles.disabled,
+      ]}
     >
       <Icon name={icon} color={active ? colors.accent : color} />
+      {badge ? (
+        <View style={styles.badge} importantForAccessibility="no">
+          <Text style={styles.badgeText}>{badge > 99 ? "99+" : badge}</Text>
+        </View>
+      ) : null}
     </Pressable>
   );
+}
+
+/** The boards' glass pill holding a page's header actions (wrap, search, terminal view). */
+export function GlassGroup({ children }: { children: ReactNode }) {
+  return <View style={styles.glassGroup}>{children}</View>;
 }
 
 /**
@@ -244,7 +306,7 @@ export function PageHeader({
   return (
     <View style={[styles.pageHeader, chrome && styles.pageHeaderChrome, { paddingTop: headerTop(insets.top) }]}>
       {back ? (
-        <IconButton icon={backIcon} label={backLabel ?? (backIcon === "close" ? "Close" : "Back")} onPress={back} />
+        <IconButton glass icon={backIcon} label={backLabel ?? (backIcon === "close" ? "Close" : "Back")} onPress={back} />
       ) : null}
       <View style={styles.headerText}>
         {title ? (
@@ -272,6 +334,7 @@ export function PageHeader({
 
 const styles = StyleSheet.create({
   fill: { flex: 1, backgroundColor: colors.chrome },
+  overlay: { position: "absolute", left: 24, right: 24 },
   statusScrim: { position: "absolute", top: 0, left: 0, right: 0, backgroundColor: colors.chrome },
   page: { maxWidth: 720, width: "100%", alignSelf: "center" },
   header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12, paddingLeft: 20, paddingRight: 20 },
@@ -300,9 +363,44 @@ const styles = StyleSheet.create({
   footer: { fontFamily: ui(400), color: colors.textDim, fontSize: 12, lineHeight: 17, marginTop: 2, marginHorizontal: 8 },
   iconButton: { width: TOUCH, height: TOUCH, borderRadius: radius.control, alignItems: "center", justifyContent: "center" },
   iconButtonActive: { backgroundColor: `${colors.accent}22` },
+  glassButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: colors.glass,
+    borderWidth: 1,
+    borderColor: colors.glassRim,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  groupButton: { width: 38, height: 38, borderRadius: 19, alignItems: "center", justifyContent: "center" },
+  glassGroup: {
+    height: 40,
+    borderRadius: 20,
+    paddingHorizontal: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: colors.glass,
+    borderWidth: 1,
+    borderColor: colors.glassRim,
+  },
+  badge: {
+    position: "absolute",
+    top: -4,
+    right: -4,
+    minWidth: 18,
+    height: 18,
+    paddingHorizontal: 4,
+    borderRadius: 9,
+    backgroundColor: colors.warning,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  badgeText: { fontFamily: ui(600), color: colors.bg, fontSize: 11 },
   pressed: { opacity: 0.6 },
   disabled: { opacity: 0.45 },
-  pageHeader: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 8, paddingBottom: 6 },
+  // the boards' header: a 40 pt glass back badge 12 pt in, 10 pt before the title
+  pageHeader: { flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 12, paddingBottom: 6 },
   pageHeaderChrome: {
     gap: 2,
     paddingLeft: 8,

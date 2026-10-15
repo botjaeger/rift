@@ -25,7 +25,7 @@ export function SheetClose() {
   if (Platform.OS !== "web") return null;
   return (
     <View style={styles.row}>
-      <IconButton icon="close" label="Close" onPress={() => (router.canGoBack() ? router.back() : router.replace("/"))} />
+      <IconButton glass icon="close" label="Close" onPress={() => (router.canGoBack() ? router.back() : router.replace("/"))} />
     </View>
   );
 }

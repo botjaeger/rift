@@ -82,23 +82,23 @@ pub fn input_cols(area_w: f32, cell_w: f32, char_w: f32, vim: bool) -> usize {
 }
 
 /// Editor zone height for the given buffer (grows with ⇧⏎ newlines and
-/// soft-wrapped rows).
-pub fn editor_height(buffer: &str, prompt: PromptMode, cols: usize) -> f32 {
+/// soft-wrapped rows) and `chip_rows` rows of prompt chips ([`chip_rows`]).
+pub fn editor_height(buffer: &str, prompt: PromptMode, cols: usize, chip_rows: usize) -> f32 {
     let base = if prompt == PromptMode::Shell {
         EDITOR_COMPACT_H
     } else {
-        EDITOR_H
+        EDITOR_H + chip_rows.saturating_sub(1) as f32 * CHIP_PITCH
     };
     base + (wrap_rows(buffer, cols).len().saturating_sub(1)) as f32 * LINE_H
 }
 
 /// Offset of the input line from the editor zone's top: below the prompt
-/// context row, or right under the divider in shell-prompt mode.
-pub fn input_offset(prompt: PromptMode) -> f32 {
+/// context rows, or right under the divider in shell-prompt mode.
+pub fn input_offset(prompt: PromptMode, chip_rows: usize) -> f32 {
     if prompt == PromptMode::Shell {
         11.0
     } else {
-        CHIPS_TOP + 24.0
+        CHIPS_TOP + 24.0 + chip_rows.saturating_sub(1) as f32 * CHIP_PITCH
     }
 }
 
@@ -110,7 +110,7 @@ pub const CHIPS_TOP: f32 = 13.0;
 /// "Starting …" placeholder goes here, as in Warp.
 pub fn first_row_offset(prompt: PromptMode) -> f32 {
     if prompt == PromptMode::Shell {
-        input_offset(prompt)
+        input_offset(prompt, 1)
     } else {
         // centred on the chip box by eye: a line's glyphs sit below the
         // middle of its LINE_H box
@@ -148,25 +148,20 @@ pub fn render(
     layer.hline(x - 8.0, y, w + 16.0, 1.0, theme.border);
 
     let input_y = if shell_prompt {
-        y + input_offset(config.prompt)
+        y + input_offset(config.prompt, 1)
     } else {
         // ── prompt context (design 01): ⇕ ~/cwd on ⎇ branch ↑n ──
-        let ctx_y = y + CHIPS_TOP;
-        let cwd = pane.session.cwd.lock().unwrap().clone();
-        let cwd_display = cwd
-            .as_deref()
-            .map(shorten_home)
-            .unwrap_or_else(|| "~".into());
-        let views = chip_views(config, theme, pane, elapsed, &cwd_display);
+        let views = pane_chip_views(config, theme, pane, elapsed);
         chips = draw_chips(
             layer,
             engine,
             theme,
             [x + PAD_X, x + w - PAD_X],
-            ctx_y,
+            y + CHIPS_TOP,
             &views,
         );
-        y + input_offset(config.prompt)
+        let rows = chip_rows(engine, &views, w);
+        y + input_offset(config.prompt, rows)
     };
     let font_size = FONT_SIZE;
     let line_h = LINE_H;
@@ -521,50 +516,80 @@ pub fn render(
 /// Each drawn prompt chip and its rect.
 pub(crate) type DrawnChips = Vec<(PromptChip, [f32; 4])>;
 
-/// Prompt context line above the input (design 01/04, 12px mono): the
-/// `prompt_chips` that have something to show, each in a hairline chip with
-/// its icon. The cwd chip takes the room the others leave, keeping its tail
-/// (`…/project/dir`); chips that still do not fit drop off the end whole.
-/// Returns each drawn chip's rect.
-pub(crate) fn draw_chips(
-    layer: &mut Layer,
+/// Where each prompt chip goes in a row `[x, right]` wide: (the chip as
+/// shown, its x, its row, its width). A chip that does not fit the row
+/// wraps to the next one, as in Warp; only a cwd wider than a whole row is
+/// cut, keeping its tail (`…/project/dir`).
+fn plan_chips(
     engine: &mut TextEngine,
-    theme: &Theme,
     [x, right]: [f32; 2],
-    y: f32,
     views: &[ChipView],
-) -> DrawnChips {
-    let measure = |engine: &mut TextEngine, t: &str| {
-        engine.measure(t, CHIP_SIZE, mono_family(), Weight::NORMAL)
-    };
-    // a narrow pane keeps the cwd's tail and the chips after it instead of
-    // cutting any mid-glyph at the pane edge
-    let others: f32 = views
-        .iter()
-        .filter(|v| v.chip != PromptChip::Cwd)
-        .map(|v| CHIP_GAP + chip_width(engine, v))
-        .sum();
+) -> Vec<(ChipView, f32, usize, f32)> {
     let empty_w = CHIP_PAD + CHIP_ICON + 5.0 + CHIP_PAD;
-    let cwd_room = (right - x - empty_w - others).max(80.0);
-    let top = y - 2.0;
-    let mut out = Vec::new();
-    let mut cx = x;
+    let cwd_room = (right - x - empty_w).max(80.0);
+    let mut out: Vec<(ChipView, f32, usize, f32)> = Vec::new();
+    let (mut cx, mut row) = (x, 0);
     for v in views {
         let mut shown = v.clone();
         if v.chip == PromptChip::Cwd
             && let Some((t, _)) = shown.texts.first_mut()
         {
-            *t = elide_head(t, cwd_room, |s| measure(engine, s));
+            *t = elide_head(t, cwd_room, |s| {
+                engine.measure(s, CHIP_SIZE, mono_family(), Weight::NORMAL)
+            });
         }
         let w = chip_width(engine, &shown);
-        let at = if out.is_empty() { cx } else { cx + CHIP_GAP };
-        // what does not fit is dropped whole (the first chip always shows)
-        if !out.is_empty() && at + w > right {
-            break;
+        let mut at = if cx == x { cx } else { cx + CHIP_GAP };
+        if cx > x && at + w > right {
+            row += 1;
+            at = x;
         }
-        draw_chip(layer, engine, theme, [at, top], &shown, 0.0);
-        out.push((v.chip, [at, top, w, CHIP_H]));
+        out.push((shown, at, row, w));
         cx = at + w;
+    }
+    out
+}
+
+/// The prompt chips `pane` shows, its cwd shortened against `$HOME`.
+pub(crate) fn pane_chip_views(
+    config: &Config,
+    theme: &Theme,
+    pane: &PaneState,
+    elapsed: Option<std::time::Duration>,
+) -> Vec<ChipView> {
+    let cwd = pane.session.cwd.lock().unwrap().clone();
+    let cwd_display = cwd
+        .as_deref()
+        .map(shorten_home)
+        .unwrap_or_else(|| "~".into());
+    chip_views(config, theme, pane, elapsed, &cwd_display)
+}
+
+/// Rows the prompt chips take in an editor zone `zone_w` wide (1 when
+/// there are none).
+pub(crate) fn chip_rows(engine: &mut TextEngine, views: &[ChipView], zone_w: f32) -> usize {
+    plan_chips(engine, [0.0, zone_w - 2.0 * PAD_X], views)
+        .last()
+        .map_or(1, |(_, _, row, _)| row + 1)
+}
+
+/// Prompt context above the input (design 01/04, 12px mono): the
+/// `prompt_chips` that have something to show, each in a hairline chip with
+/// its icon, wrapping onto more rows in a narrow pane ([`plan_chips`]).
+/// Returns each drawn chip's rect.
+pub(crate) fn draw_chips(
+    layer: &mut Layer,
+    engine: &mut TextEngine,
+    theme: &Theme,
+    span: [f32; 2],
+    y: f32,
+    views: &[ChipView],
+) -> DrawnChips {
+    let mut out = Vec::new();
+    for (shown, at, row, w) in plan_chips(engine, span, views) {
+        let top = y - 2.0 + row as f32 * CHIP_PITCH;
+        draw_chip(layer, engine, theme, [at, top], &shown, 0.0);
+        out.push((shown.chip, [at, top, w, CHIP_H]));
     }
     out
 }
@@ -669,6 +694,8 @@ pub(crate) const CHIP_H: f32 = 18.0;
 const CHIP_PAD: f32 = 5.0;
 const CHIP_ICON: f32 = 12.0;
 const CHIP_GAP: f32 = 6.0;
+/// From one chip row's top to the next one's.
+const CHIP_PITCH: f32 = CHIP_H + 6.0;
 
 /// Block cursor height, and its top below the input line's top: it spans
 /// the 13 px text's ascenders to descenders in the 20 px line. The prompt
@@ -748,17 +775,29 @@ mod tests {
 
     #[test]
     fn height_grows_per_line() {
-        assert_eq!(editor_height("ls", PromptMode::Rift, 80), EDITOR_H);
+        assert_eq!(editor_height("ls", PromptMode::Rift, 80, 1), EDITOR_H);
         assert_eq!(
-            editor_height("a\nb\nc", PromptMode::Rift, 80),
+            editor_height("a\nb\nc", PromptMode::Rift, 80, 1),
             EDITOR_H + 2.0 * LINE_H
         );
         // shell-prompt mode drops the context row
-        assert_eq!(editor_height("ls", PromptMode::Shell, 80), EDITOR_COMPACT_H);
+        assert_eq!(
+            editor_height("ls", PromptMode::Shell, 80, 1),
+            EDITOR_COMPACT_H
+        );
         // a long line soft-wraps into extra rows
         assert_eq!(
-            editor_height(&"x".repeat(25), PromptMode::Rift, 10),
+            editor_height(&"x".repeat(25), PromptMode::Rift, 10, 1),
             EDITOR_H + 2.0 * LINE_H
+        );
+        // prompt chips wrapped onto a second row push the input down a row
+        assert_eq!(
+            editor_height("ls", PromptMode::Rift, 80, 2),
+            EDITOR_H + CHIP_PITCH
+        );
+        assert_eq!(
+            input_offset(PromptMode::Rift, 2),
+            input_offset(PromptMode::Rift, 1) + CHIP_PITCH
         );
     }
 

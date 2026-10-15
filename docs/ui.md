@@ -51,7 +51,9 @@ every action).
 ## Tab bar
 
 - One tab per shell session group: the tab title (OSC 0/2 title, else cwd
-  basename) and, when split, a pane count chip (`3`).
+  basename) and, when split, a pane count chip (`3`). As in Warp, the strip
+  is 34 px tall and every tab 200 px wide (a longer title is cut short);
+  tabs that do not fit shrink evenly to 120 px, then scroll.
 - The active tab joins the pane below (same ground, no rule) with a 2 px
   accent top edge (its tab color when it has one); a hovered tab lifts. A
   colored tab shows its color as the 2 px top edge when inactive too.
@@ -267,12 +269,16 @@ Each command becomes a block via shell-integration OSC 133 markers:
 - **Header overflow**: a long command is cut with `…` before the badge group;
   the cwd/branch context only shows when it fits. Multi-line commands show
   `⏎` between lines.
-- **Links**: http(s) URLs get a subtle underline; OSC 8 hyperlinks (`ls
-  --hyperlink`, compilers, `delta`) are underlined too. The pointer turns into
-  a hand over a URL or hyperlink, and resting on one shows a tooltip with its
-  target and `⌘ Click` (as in Warp). A plain click shows that tooltip at once
+- **Links**: http(s) URLs and OSC 8 hyperlinks (`ls --hyperlink`, compilers,
+  `delta`) draw in the accent color, as in Warp; under the pointer they turn
+  lighter and underlined. A URL soft-wrapped onto the next rows is one link.
+  Links work on the alternate screen too (Claude Code, Codex, vim). The
+  pointer turns into a hand over a link, and resting on one shows a tooltip
+  with its target and `⌘ Click`. A plain click shows that tooltip at once
   (`link_click = "prompt"`, Settings › Terminal › *Clicking a link: Show it*)
-  or opens the link (`"open"`, *Open it*); a drag across it selects text.
+  or opens the link (`"open"`, *Open it*); a drag across it selects text. Over
+  a program that tracks the mouse, a left click on a link is Rift's, not the
+  program's (⇧ still selects).
   Hold ⌘ and the hand also shows over an existing file path (absolute, `~/…`,
   or relative to the pane's cwd; `file:line:col` suffixes are accepted) —
   ⌘-click opens any of them with the system opener. Only http, https, file,
@@ -335,8 +341,9 @@ integration). Sits at the bottom of the pane, or at the top with
   containers…`. A PHP or Python row runs its `rift-use …` command in the
   pane; a Docker row (no check mark) runs `docker compose --project-directory
   <dir> logs --follow --tail 200 <service>`. Chips with nothing to show are left out. A
-  narrow pane keeps the cwd's tail and drops the chips that still do not fit,
-  whole, from the end. In every pane of a split; hidden in shell-prompt mode.
+  narrow pane wraps the chips that do not fit onto more rows (Warp), and the
+  input moves down with them; only a cwd wider than a whole row is cut, keeping
+  its tail. In every pane of a split; hidden in shell-prompt mode.
 - **Edit prompt** (Warp; layer 6, 600 px card over a 40 % black backdrop,
   `surface`, radius 8): `Rift prompt` with `Restore default`, a palette of
   the chips not in the prompt (sample values; the Python, PHP and Docker
@@ -655,7 +662,7 @@ shortcuts (new tab, next tab, palette…) work from it and leave it.
 
 A 232 px sidebar: a search field, the nine pages with icons (arrow keys
 navigate pages; PageUp/PageDown scroll the body) and *Open config.toml* at
-the foot (opens the file in the reading pane; for 3 s after config.toml is
+the foot (opens the file beside the page, in the Settings tab; ✕ closes it; for 3 s after config.toml is
 written or reloaded, a green check sits at its end, a green dot on its icon
 in the icon-only sidebar). When the settings area is
 under 700 px wide the sidebar shrinks to 56 px of icons, with no search

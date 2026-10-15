@@ -795,7 +795,7 @@ assert hovers[1] == hovers[0] + 1 and hovers[2] == hovers[1] + 1, hovers
 expanded = (rv / "expanded.txt").read_text()
 assert "expanded=1 revealed=0" in expanded, expanded
 hover_line = (rv / "hover-line.txt").read_text()
-assert '"stage-hunk@957,172,20,20", "revert-hunk@977,172,20,20", "copy-hunk@997,172,20,20"' \
+assert '"stage-hunk@957,164,20,20", "revert-hunk@977,164,20,20", "copy-hunk@997,164,20,20"' \
     in hover_line, hover_line
 assert "review_hits=[\"maximize" in expanded, expanded
 assert 'toast=Some("Hunk copied")' in (rv / "copied.txt").read_text()
@@ -1303,6 +1303,43 @@ assert "selection=true" in drag and opened == 0, (drag, opened)
 (hover, click, drag), opened = run_link("open")
 assert "Headless: not opening https://example.com/x" in click and opened == 1, (click, opened)
 assert "selection=true" in drag, drag
+
+# a link on the alternate screen of a program that tracks the mouse (Claude
+# Code, Codex) is a link too: the hand, the tooltip after the rest time, and
+# the left click is Rift's ("prompt" shows, "open" opens) instead of the
+# program's; a click beside it still reaches the program
+ALT = ("type printf '\\e[?1049h\\e[?1000h\\e[?1006h\\e[2J\\e[3;1Hlink "
+       "https://example.com/alt ok'; sleep 60\\n")
+def run_alt_link(mode, steps):
+    (lk / "cfg/rift/config.toml").write_text(
+        'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
+        f'sync_os_theme = false\nlink_click = "{mode}"\n')
+    (lk / f"alt-{mode}.rift").write_text("\n".join(
+        ["resize 1000 400", "wait_prompt", ALT, "wait 1200"] + steps + ["quit"]) + "\n")
+    with (lk / f"alt-{mode}.log").open("w") as log:
+        rc = subprocess.run([str(binary), "--script", str(lk / f"alt-{mode}.rift"), "--headless"],
+                            env=dict(env, XDG_CONFIG_HOME=str(lk / "cfg"),
+                                     XDG_DATA_HOME=str(lk / "data")),
+                            stdout=log, stderr=log, timeout=60).returncode
+    assert rc == 0, died(f"alt link {mode} run failed", lk / f"alt-{mode}.log")
+    return (lk / f"alt-{mode}.log").read_text().count("headless: not opening https://example.com/alt")
+run_alt_link("prompt", [f"dump {lk}/alt-at.txt"])
+x, y, w, h = map(int, re.search(r'"https://example\.com/alt@(\d+),(\d+),(\d+),(\d+)"',
+                                (lk / "alt-at.txt").read_text()).groups())
+at = f"{x + w // 2} {y + h // 2}"
+opened = run_alt_link("prompt", [
+    f"move {at}", "wait 1200", f"dump {lk}/alt-hover.txt", "move 900 300", "wait 200",
+    f"click {at}", "wait 150", f"dump {lk}/alt-click.txt", "click 900 300", "wait 400",
+    f"dump {lk}/alt-beside.txt"])
+hover = (lk / "alt-hover.txt").read_text()
+assert "alt=true" in hover and "mouse_cursor=Pointer" in hover, hover
+assert 'tooltip=Some("https://example.com/alt ⌘ Click")' in hover, hover
+assert 'tooltip=Some("https://example.com/alt ⌘ Click")' in (lk / "alt-click.txt").read_text()
+# only the click beside the link was reported (the program echoes it)
+beside = (lk / "alt-beside.txt").read_text()
+echo = re.search(r"^ +\| link https://example\.com/alt ok(.*)$", beside, re.M)[1]
+assert echo.count("[<0;") == 2 and opened == 0, (echo, opened)
+assert run_alt_link("open", [f"click {at}", "wait 300"]) == 1
 
 # tooltips: none before the rest time, then the control's action and
 # shortcut; a neighbour shows at once; a key hides it. On a fresh session the

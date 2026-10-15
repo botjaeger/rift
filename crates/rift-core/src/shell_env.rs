@@ -354,6 +354,13 @@ fn probe_script(shell: ShellKind) -> &'static str {
 /// short drain grace period.
 fn run_probe(shell_program: &str, shell: ShellKind, timeout: Duration) -> Option<String> {
     let mut cmd = Command::new(shell_program);
+    // a login shell on macOS, as the panes run (shell_integration::shell_args):
+    // PATH setup lives in `/etc/zprofile` (path_helper: /usr/local/bin) and
+    // `.zprofile` (`brew shellenv`), and Rift started from the Dock has only
+    // launchd's PATH, so a non-login probe missed docker and brew's tools
+    if cfg!(target_os = "macos") {
+        cmd.arg("-l");
+    }
     match shell {
         // Interactive (`-i`) so rc files defining aliases/functions are sourced;
         // `-c` runs our script. fish takes no `-i` with `-c`.
@@ -985,9 +992,12 @@ mod tests {
             &shell,
             format!(
                 "#!/bin/sh\n\
+                 printf '%s' \"$1\" > '{}'\n\
+                 for a; do last=$a; done\n\
                  printf '\\033]1337;CurrentDir=/tmp\\007\\033]1337;ShellIntegrationVersion=14;shell=zsh\\007'\n\
                  export PATH=\"{}:$PATH\"\n\
-                 exec /bin/zsh -f -c \"alias build='docker compose up --build'; alias up=x; $3\"\n",
+                 exec /bin/zsh -f -c \"alias build='docker compose up --build'; alias up=x; $last\"\n",
+                dir.join("first-arg").display(),
                 tools.display()
             ),
         )
@@ -1000,7 +1010,18 @@ mod tests {
         )
         .unwrap();
         let env = ShellEnv::load_with_timeout(shell.to_str().unwrap(), Duration::from_secs(10));
+        let first = std::fs::read_to_string(dir.join("first-arg")).unwrap_or_default();
         let _ = std::fs::remove_dir_all(&dir);
+        // a login shell on macOS, as the panes run: PATH from /etc/zprofile
+        // and .zprofile (docker in /usr/local/bin, brew's tools)
+        assert_eq!(
+            first,
+            if cfg!(target_os = "macos") {
+                "-l"
+            } else {
+                "-i"
+            }
+        );
         assert_eq!(env.alias("build"), Some("docker compose up --build"));
         assert_eq!(env.alias("up"), Some("x"));
         // a command only the shell's PATH has is known

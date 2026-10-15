@@ -85,7 +85,7 @@ export default function DiffScreen() {
       importantForAccessibility={hidden ? "no-hide-descendants" : "auto"}
     >
       <View style={styles.header}>
-        <IconButton icon="back" label="Back to changes" onPress={() => router.back()} />
+        <IconButton glass icon="back" label="Back to changes" onPress={() => router.back()} />
         <View style={styles.headText}>
           <Text style={styles.title} numberOfLines={1} accessibilityRole="header">
             {name}
@@ -133,7 +133,7 @@ const styles = StyleSheet.create({
   fill: { flex: 1, backgroundColor: colors.surface },
   content: { paddingTop: 16, flexGrow: 1 },
   hidden: { opacity: 0 },
-  header: { flexDirection: "row", alignItems: "center", gap: 4, paddingLeft: 4, paddingRight: 12, paddingBottom: 12 },
+  header: { flexDirection: "row", alignItems: "center", gap: 10, paddingLeft: 12, paddingRight: 12, paddingBottom: 12 },
   headText: { flex: 1, minWidth: 0, gap: 3 },
   title: { fontFamily: monoMedium, color: colors.textBright, fontSize: 15 },
   meta: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12 },

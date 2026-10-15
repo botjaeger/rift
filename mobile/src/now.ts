@@ -38,6 +38,9 @@ export interface RunningRow {
   line: string;
   /** A "Notify me" waits for it. */
   notifies: boolean;
+  /** The pane's folder and program, for its avatar. */
+  cwd: string | null;
+  program: string | null;
 }
 
 export interface NowSections {
@@ -109,6 +112,8 @@ export function nowSections(
             started,
             line: p.running?.line ?? "",
             notifies: ask !== undefined,
+            cwd: p.cwd,
+            program: programName(p),
           });
         }
   }
@@ -228,4 +233,18 @@ export function tabLast(tab: Tab): string {
   if (!p) return "";
   if (p.waiting) return "waiting for you";
   return p.last_command ?? p.job ?? "";
+}
+
+/** Computers' search: a tab whose title, a pane's command, program or folder holds `query` (any case). */
+export function tabMatches(tab: Tab, query: string): boolean {
+  const q = query.trim().toLowerCase();
+  if (q === "") return true;
+  const hay = [tabTitle(tab), ...tab.panes.flatMap((p) => [p.last_command, p.job, p.cwd, p.waiting?.prompt])];
+  return hay.some((x) => x?.toLowerCase().includes(q));
+}
+
+/** When the tab's running command started (epoch ms, the computer's clock), or null. */
+export function tabStarted(tab: Tab): number | null {
+  const started = tab.panes.find((p) => p.running?.started != null)?.running?.started;
+  return started != null ? started * 1000 : null;
 }

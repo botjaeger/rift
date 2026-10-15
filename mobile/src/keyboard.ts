@@ -151,15 +151,16 @@ export function textToActions(text: string): InputAction[] {
 }
 
 /**
- * Sticky ctrl/alt from the control row applied to the next key: `up` with ctrl is `ctrl+up`, a
- * letter typed with alt is `alt+b`. A key that already carries the modifier keeps it; a
- * combination the protocol has no name for is sent as it was.
+ * Sticky ctrl/alt/shift from the control row applied to the next key: `up` with ctrl is
+ * `ctrl+up`, `tab` with shift is `shift+tab`, a letter typed with alt is `alt+b`. A key that
+ * already carries the modifier keeps it; a combination the protocol has no name for is sent as
+ * it was.
  */
-export function applySticky(key: string, mods: { ctrl: boolean; alt: boolean }): string {
+export function applySticky(key: string, mods: { ctrl: boolean; alt: boolean; shift?: boolean }): string {
   const m = /^(ctrl\+)?(alt\+)?(shift\+)?(.+)$/.exec(key);
   if (!m) return key;
   const [, ctrl, alt, shift, base] = m;
-  const name = withMods(base!, !!ctrl || mods.ctrl, !!alt || mods.alt, !!shift);
+  const name = withMods(base!, !!ctrl || mods.ctrl, !!alt || mods.alt, !!shift || !!mods.shift);
   return isKeyName(name) ? name : key;
 }
 

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { alertAnswers, answerPlan, askingTitle, contextLine, keepAsked, primaryChoice, replyChoice, sameQuestion } from "../src/answer";
 import type { ActivityItem, AskedView, HostView } from "../src/fleet";
 import { livePlan, liveKey } from "../src/live";
-import { agoShort, foldBlocks, nowSections, pagerModel, programName, quickChoices, swipeTarget, tabLast, tabState } from "../src/now";
+import { agoShort, foldBlocks, nowSections, pagerModel, programName, quickChoices, swipeTarget, tabLast, tabMatches, tabStarted, tabState } from "../src/now";
 import { alertAuth } from "../src/lock";
 import { tapTarget } from "../src/notify";
 import { DEFAULT_SETTINGS } from "../src/stores";
@@ -166,6 +166,17 @@ describe("the pane", () => {
     expect(tabState(tab([pane(1, { last_exit: 1 })]))).toBe("failed");
     expect(tabState(tab([pane(1, { last_exit: 0 })]))).toBe("idle");
     expect(tabLast(tab([pane(1, { last_command: "ls" }), pane(2, { waiting: menu })]))).toBe("waiting for you");
+  });
+
+  it("finds tabs by title, command, program and folder (Computers' search)", () => {
+    const t = tab([pane(1, { last_command: "cargo build --release", cwd: "/Users/me/zzz/rift" }), pane(2, { job: "claude" })], "Tab 3");
+    for (const q of ["tab 3", "CARGO", "claude", "zzz/rift", "", "  "]) expect(tabMatches(t, q)).toBe(true);
+    expect(tabMatches(t, "docker")).toBe(false);
+  });
+
+  it("knows when a tab's running command started", () => {
+    expect(tabStarted(tab([pane(1), pane(2, { running: { started: 1700000000, line: "" } })]))).toBe(1700000000000);
+    expect(tabStarted(tab([pane(1, { job: "x" })]))).toBeNull();
   });
 });
 

@@ -148,6 +148,16 @@ pub fn elapsed_text(d: std::time::Duration) -> String {
     }
 }
 
+/// The Elapsed chip's hover line: `Started 03:48 pm`, with the date once
+/// the clock has run 24 hours (`Started October 13, 2026, 03:48 pm`).
+pub fn started_text(started: LocalTime, elapsed: std::time::Duration) -> String {
+    if elapsed.as_secs() >= 24 * 3600 {
+        format!("Started {}, {}", started.date(), started.time12())
+    } else {
+        format!("Started {}", started.time12())
+    }
+}
+
 /// The chips `chips` lists that have something to show, in order.
 pub fn views(chips: &[PromptChip], theme: &Theme, i: &Inputs) -> Vec<ChipView> {
     chips
@@ -524,5 +534,23 @@ mod tests {
         assert_eq!(elapsed_text(s(26 * 3600 + 5 * 60)), "26h 05m");
         let theme = Theme::default();
         assert_eq!(texts(&sample(PromptChip::Elapsed, &theme)), "2h 05m");
+    }
+
+    #[test]
+    fn started_names_the_date_after_a_day() {
+        let s = std::time::Duration::from_secs;
+        let at = LocalTime {
+            year: 2026,
+            month: 10,
+            day: 13,
+            hour: 15,
+            minute: 48,
+        };
+        assert_eq!(started_text(at, s(16 * 3600)), "Started 03:48 pm");
+        assert_eq!(started_text(at, s(24 * 3600 - 1)), "Started 03:48 pm");
+        assert_eq!(
+            started_text(at, s(24 * 3600)),
+            "Started October 13, 2026, 03:48 pm"
+        );
     }
 }

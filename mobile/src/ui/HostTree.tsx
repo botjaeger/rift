@@ -1,19 +1,22 @@
 import { Pressable, StyleSheet, Text, View } from "react-native";
+import { avatarFor } from "@/avatar";
 import { tildePath } from "@/chips";
 import type { HostView } from "@/fleet";
 import type { Pane } from "@/protocol/types";
+import { programName } from "@/now";
 import { tabTitle } from "@/topology";
+import { Avatar } from "./Avatar";
 import { Icon } from "./Icon";
 import { canStartTab } from "./StartTab";
 import { SectionTitle } from "./Screen";
 import { colors, mono, radius, tints, ui } from "./theme";
 
-/** A pane row's edge colour and badge (the Host board). */
-function paneBadge(pane: Pane): { edge: string; text: string | null; color: string; bg: string } {
-  if (pane.job) return { edge: colors.accent, text: "running", color: colors.accent, bg: tints.accentBadge };
-  if (pane.last_exit === null) return { edge: colors.textDim, text: null, color: colors.textMuted, bg: "transparent" };
-  if (pane.last_exit === 0) return { edge: colors.success, text: "✓ 0", color: colors.success, bg: tints.successBadge };
-  return { edge: colors.error, text: `✕ ${pane.last_exit}`, color: colors.textBright, bg: tints.errorBadge };
+/** A pane row's badge (the Host board). */
+function paneBadge(pane: Pane): { text: string | null; color: string; bg: string } {
+  if (pane.job) return { text: "running", color: colors.accent, bg: tints.accentBadge };
+  if (pane.last_exit === null) return { text: null, color: colors.textMuted, bg: "transparent" };
+  if (pane.last_exit === 0) return { text: "✓ 0", color: colors.success, bg: tints.successBadge };
+  return { text: `✕ ${pane.last_exit}`, color: colors.textBright, bg: tints.errorBadge };
 }
 
 function paneSpoken(pane: Pane, title: string): string {
@@ -27,7 +30,7 @@ function paneSpoken(pane: Pane, title: string): string {
   return parts.join(", ");
 }
 
-function PaneRow({ pane, onOpen }: { pane: Pane; onOpen: (id: number) => void }) {
+function PaneRow({ pane, tab, onOpen }: { pane: Pane; tab: string; onOpen: (id: number) => void }) {
   const title = pane.last_command ?? pane.job ?? "(no command yet)";
   const b = paneBadge(pane);
   return (
@@ -38,7 +41,7 @@ function PaneRow({ pane, onOpen }: { pane: Pane; onOpen: (id: number) => void })
       onPress={() => onOpen(pane.id)}
       style={({ pressed }) => [styles.pane, pressed && styles.pressed]}
     >
-      <View style={[styles.edge, { backgroundColor: b.edge }]} />
+      <Avatar avatar={avatarFor(pane.cwd, tab, programName(pane))} />
       <View style={styles.paneText}>
         <Text style={styles.command} numberOfLines={1}>
           {title}
@@ -93,7 +96,7 @@ export function HostTree({ host, onOpenPane }: { host: HostView; onOpenPane: (id
                   </Text>
                 </View>
                 {tab.panes.map((p) => (
-                  <PaneRow key={p.id} pane={p} onOpen={onOpenPane} />
+                  <PaneRow key={p.id} pane={p} tab={tabTitle(tab)} onOpen={onOpenPane} />
                 ))}
               </View>
             ))}
@@ -131,7 +134,7 @@ const styles = StyleSheet.create({
   },
   count: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12 },
   pane: {
-    minHeight: 52,
+    minHeight: 60,
     flexDirection: "row",
     alignItems: "center",
     gap: 12,
@@ -141,7 +144,6 @@ const styles = StyleSheet.create({
     borderTopColor: colors.hairline,
   },
   pressed: { opacity: 0.7 },
-  edge: { width: 3, alignSelf: "stretch", borderRadius: 2 },
   paneText: { flex: 1, minWidth: 0, gap: 3 },
   command: { color: colors.textBright, fontFamily: mono, fontSize: 13 },
   where: { flexDirection: "row", gap: 8, overflow: "hidden" },
@@ -149,6 +151,7 @@ const styles = StyleSheet.create({
   // the path gives way first: a long path cut the branch down to its first letter
   branch: { fontFamily: ui(400), color: colors.success, fontSize: 12, flexShrink: 0, maxWidth: "45%" },
   badge: {
+    flexShrink: 0,
     fontFamily: mono,
     fontSize: 11,
     paddingHorizontal: 8,

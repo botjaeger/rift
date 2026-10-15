@@ -177,6 +177,8 @@ describe("sticky modifiers", () => {
     expect(applySticky("ctrl+c", { ctrl: false, alt: true })).toBe("ctrl+alt+c");
     expect(applySticky("ctrl+c", { ctrl: true, alt: false })).toBe("ctrl+c");
     expect(applySticky("esc", { ctrl: false, alt: false })).toBe("esc");
+    expect(applySticky("tab", { ctrl: false, alt: false, shift: true })).toBe("shift+tab");
+    expect(applySticky("up", { ctrl: true, alt: false, shift: true })).toBe("ctrl+shift+up");
   });
 
   it("and to the next character typed", () => {

@@ -5,13 +5,13 @@ import { isKeyName } from "../src/protocol/types";
 describe("control keys", () => {
   it("every key in the catalogue is a protocol key or a sticky modifier; ids are unique", () => {
     for (const k of CONTROL_KEYS)
-      expect(k.sticky ? ["ctrl", "alt"].includes(k.id) : k.open ? !isKeyName(k.id) : isKeyName(k.id)).toBe(true);
+      expect(k.sticky ? ["ctrl", "alt", "shift"].includes(k.id) : k.open || k.paste ? !isKeyName(k.id) : isKeyName(k.id)).toBe(true);
     // the new tab / new pane keys open on the computer, they are never sent as keys
     expect(CONTROL_KEYS.filter((k) => k.open).map((k) => [k.id, k.open, k.label])).toEqual([
-      ["new_tab", "tab", "+tab"],
-      ["new_pane", "pane", "+pane"],
+      ["new_tab", "tab", "+Tab"],
+      ["new_pane", "pane", "+Pane"],
     ]);
-    expect(addChoices(DEFAULT_CONTROL_KEYS).map((c) => c.label)).toEqual(expect.arrayContaining(["+tab", "+pane"]));
+    expect(addChoices(DEFAULT_CONTROL_KEYS).map((c) => c.label)).toEqual(expect.arrayContaining(["+Tab", "+Pane", "Paste"]));
     expect(validControlKeys(["new_tab", "esc", "new_pane"])).toEqual(["new_tab", "esc", "new_pane"]);
     expect(new Set(CONTROL_KEYS.map((k) => k.id)).size).toBe(CONTROL_KEYS.length);
     for (const id of ["ctrl", "alt", "ctrl+c", "esc", "tab", "shift+tab", "home", "end", "pageup", "pagedown", "delete", "ctrl+d", "ctrl+z", "ctrl+l", "ctrl+r", "f1", "f12"])
@@ -28,7 +28,7 @@ describe("control keys", () => {
 
   it("the Add chips: unused keys, the F-keys as one chip while none is used", () => {
     const add = addChoices(DEFAULT_CONTROL_KEYS);
-    expect(add.map((c) => c.label).slice(0, 4)).toEqual(["⇧tab", "alt", "←", "→"]);
+    expect(add.map((c) => c.label).slice(0, 4)).toEqual(["⇧Tab", "⌥", "⇧", "←"]);
     const f = add.find((c) => c.label === "F1–F12")!;
     expect(f.ids).toHaveLength(12);
     expect(add.some((c) => c.label === "F1")).toBe(false);
@@ -39,7 +39,7 @@ describe("control keys", () => {
   });
 
   it("the default row is the board's", () => {
-    expect(DEFAULT_CONTROL_KEYS.map((id) => controlKey(id)!.label)).toEqual(["^C", "esc", "tab", "ctrl", "↑", "↓"]);
+    expect(DEFAULT_CONTROL_KEYS.map((id) => controlKey(id)!.label)).toEqual(["⌃C", "Esc", "Tab", "⌃", "↑", "↓"]);
   });
 
   it("validates a stored row", () => {

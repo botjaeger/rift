@@ -6,7 +6,8 @@ use crate::state::{ClickTarget, Hit};
 use crate::views::glyphs;
 use crate::views::icons::{self, Icon};
 
-pub const TAB_BAR_H: f32 = 42.0;
+/// Warp's tab strip height.
+pub const TAB_BAR_H: f32 = 34.0;
 /// Where the first tab starts (room for the traffic lights).
 const TABS_X: f32 = 78.0;
 /// Centre of the first traffic light and the distance between centres
@@ -379,25 +380,8 @@ pub fn render(
         }
     }
 
-    // natural widths, then shrink evenly when the tabs overflow the strip
-    let natural: Vec<f32> = tabs
-        .iter()
-        .map(|tab| {
-            let title = tab.editing.as_deref().unwrap_or(&tab.title);
-            let title_w = engine
-                .measure(title, 12.5, FONT_SANS, Weight::NORMAL)
-                .max(if tab.editing.is_some() { 90.0 } else { 0.0 });
-            let chip_w = chip_label(tab)
-                .map(|l| engine.measure(&l, 10.5, FONT_SANS, Weight::MEDIUM) + 12.0 + 6.0)
-                .unwrap_or(0.0);
-            let icon_w = if tab.settings || tab.sync {
-                14.0 + 8.0
-            } else {
-                0.0
-            };
-            (TAB_PAD_L + icon_w + title_w + chip_w + 8.0 + CLOSE_BOX + 8.0).clamp(TAB_W, MAX_TAB_W)
-        })
-        .collect();
+    // one fixed width (Warp), shrunk evenly when the tabs overflow the strip
+    let natural = vec![TAB_W; tabs.len()];
     let avail = (w - tabs_x - 40.0).max(MIN_TAB_W);
     let total: f32 = natural.iter().sum();
     let n = tabs.len();
@@ -524,8 +508,8 @@ pub fn render(
 /// Left padding, the close button box and the tab width bounds.
 const TAB_PAD_L: f32 = 14.0;
 const CLOSE_BOX: f32 = 20.0;
-const TAB_W: f32 = 150.0;
-const MAX_TAB_W: f32 = 240.0;
+/// Every tab's width (Warp's fixed-width tabs); a longer title is cut short.
+const TAB_W: f32 = 200.0;
 
 fn close_rect(slot: [f32; 4]) -> [f32; 4] {
     [

@@ -1,5 +1,5 @@
 import { FlashList, type FlashListRef } from "@shopify/flash-list";
-import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
+import { Stack, useFocusEffect, useIsFocused, useLocalSearchParams, useRouter } from "expo-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AccessibilityInfo,
@@ -32,7 +32,7 @@ import { Composer } from "@/ui/Composer";
 import { describeConn } from "@/ui/connLabel";
 import { Button } from "@/ui/Button";
 import { ErrorText } from "@/ui/Notice";
-import { headerTop, IconButton } from "@/ui/Screen";
+import { GlassGroup, headerTop, IconButton } from "@/ui/Screen";
 import { TerminalView } from "@/ui/TerminalView";
 import { useSingleFlight } from "@/ui/useSingleFlight";
 import { colors, mono, radius, TOUCH, ui } from "@/ui/theme";
@@ -91,10 +91,12 @@ export default function PaneScreen() {
   // the computer's tabs no longer hold it: nothing left to show or type into
   const closed = !!host && status === "open" && host.windows.length > 0 && !loc;
 
-  // A cold start's pane that has closed meanwhile: back to Now rather than a dead page.
+  // A cold start's pane that has closed meanwhile: back to Now rather than a dead page. Only
+  // once it is on top: dismissing to Now would also close a sheet over it (What's New).
+  const focused = useIsFocused();
   useEffect(() => {
-    if (closed && restored === "1") router.dismissTo("/");
-  }, [closed, restored, router]);
+    if (closed && restored === "1" && focused) router.dismissTo("/");
+  }, [closed, restored, focused, router]);
 
   // Subscribe once connected and whenever this screen regains focus (a no-op when already
   // followed): a pane pushed on top (a notification tap) follows its own pane, and closes it
@@ -126,12 +128,15 @@ export default function PaneScreen() {
   // The view follows the pane: its screen while a full-screen program runs, blocks otherwise.
   const screenFeature = hasFeature(host, "screen");
   const screen = pane?.screen ?? null;
-  const fullScreen = showsTerminal(screen, screenFeature);
+  // the header's Terminal view: the pane's screen whatever runs (gateway mode `on`)
+  const [termView, setTermView] = useState(false);
+  const pinned = termView && screenFeature;
+  const fullScreen = pinned || showsTerminal(screen, screenFeature);
   const program = (loc && programName(loc.pane)) || screenProgram(running, loc?.pane.job ?? null);
   const following = pane !== null;
   useEffect(() => {
-    if (screenFeature && status === "open" && following && !closed) fleet.setScreenMode(key, paneId, "auto");
-  }, [screenFeature, status, following, closed, key, paneId]);
+    if (screenFeature && status === "open" && following && !closed) fleet.setScreenMode(key, paneId, pinned ? "on" : "auto");
+  }, [screenFeature, status, following, closed, key, paneId, pinned]);
   // the search belongs to the blocks: a full-screen program closes it
   const searching = fullScreen ? null : search;
 
@@ -269,6 +274,9 @@ export default function PaneScreen() {
     ) : null;
 
   const conn = host ? describeConn(host.conn) : null;
+  // the back badge's count: this computer's other panes waiting for an answer
+  const waitingElsewhere =
+    host?.windows.reduce((n, w) => n + w.tabs.reduce((m, t) => m + t.panes.filter((p) => p.waiting && p.id !== paneId).length, 0), 0) ?? 0;
   const hostName = host?.record.name ?? "this computer";
   const back = () => (router.canGoBack() ? router.back() : router.replace("/"));
   const lastBlock = blocks.at(-1);
@@ -277,7 +285,7 @@ export default function PaneScreen() {
     <Text style={[styles.pagerText, { color: colors.warning }]} accessibilityLiveRegion="polite">
       {conn!.label}
     </Text>
-  ) : fullScreen ? (
+  ) : fullScreen && !(pinned && !screen?.alt) ? (
     <Text style={[styles.pagerText, { color: colors.warning }]} accessibilityLiveRegion="polite">
       {program} is full screen · showing its screen{pager ? ` · pane ${pager.index + 1} of ${pager.count}` : ""}
     </Text>
@@ -303,28 +311,52 @@ export default function PaneScreen() {
       <Stack.Screen options={{ headerShown: false }} />
       <View style={[styles.header, { paddingTop: headerTop(insets.top) - 2 }, !strip && styles.headerRule]}>
         <View style={styles.headerRow}>
-          <IconButton icon="back" label={`Back from ${hostName}`} onPress={back} />
-          <Text style={styles.hostName} numberOfLines={1} accessibilityRole="header">
-            {host ? hostName : "Pane"}
-          </Text>
-          {fullScreen || !host || closed ? null : (
-            <>
-              <IconButton
-                icon={wrap ? "wrapOn" : "wrapOff"}
-                label={`Wrap long lines: ${wrap ? "on" : "off"}`}
-                hint="For this pane; Settings › Output sets it for all"
-                color={colors.textMuted}
-                active={!wrap}
-                onPress={() => fleet.setPaneWrap(key, paneId, !wrap)}
-              />
-              <IconButton
-                icon="search"
-                label="Search output"
-                color={colors.textMuted}
-                pressed={searching !== null}
-                onPress={() => setSearch(searching === null ? "" : null)}
-              />
-            </>
+          <IconButton
+            glass
+            icon="back"
+            label={`Back from ${hostName}${waitingElsewhere ? `, ${waitingElsewhere} ${waitingElsewhere === 1 ? "needs" : "need"} you` : ""}`}
+            badge={waitingElsewhere}
+            onPress={back}
+          />
+          <View style={styles.titlePill}>
+            <Text style={styles.hostName} numberOfLines={1} accessibilityRole="header">
+              {host ? hostName : "Pane"}
+            </Text>
+          </View>
+          <View style={styles.flex} />
+          {!host || closed ? null : (
+            <GlassGroup>
+              {fullScreen ? null : (
+                <>
+                  <IconButton
+                    grouped
+                    icon={wrap ? "wrapOn" : "wrapOff"}
+                    label={`Wrap long lines: ${wrap ? "on" : "off"}`}
+                    hint="For this pane; Settings › Output sets it for all"
+                    active={!wrap}
+                    onPress={() => fleet.setPaneWrap(key, paneId, !wrap)}
+                  />
+                  <IconButton
+                    grouped
+                    icon="search"
+                    label="Search output"
+                    pressed={searching !== null}
+                    onPress={() => setSearch(searching === null ? "" : null)}
+                  />
+                </>
+              )}
+              {screenFeature ? (
+                <IconButton
+                  grouped
+                  icon="terminal"
+                  label="Terminal view"
+                  hint="Shows the pane's screen instead of its blocks"
+                  pressed={pinned}
+                  active={pinned}
+                  onPress={() => setTermView((v) => !v)}
+                />
+              ) : null}
+            </GlassGroup>
           )}
         </View>
         {loc ? (
@@ -392,6 +424,7 @@ export default function PaneScreen() {
             online={status === "open"}
             running={running !== null}
             program={program}
+            pinned={pinned}
           />
         </View>
       ) : (
@@ -505,6 +538,7 @@ export default function PaneScreen() {
                 complete={hasFeature(host, "complete") && operate}
                 recent={recent}
                 label={title}
+                canType={hasFeature(host, "text")}
               />
             </View>
           ) : host ? (
@@ -520,13 +554,25 @@ const styles = StyleSheet.create({
   fill: { flex: 1, backgroundColor: colors.bg },
   pressed: { opacity: 0.7 },
   // the P3 Pane board's header: back, the computer, search; the tab strip under it
-  header: { backgroundColor: colors.chrome, paddingLeft: 8, paddingRight: 4 },
+  flex: { flex: 1 },
+  // the Pane board's glass header: back badge, the computer in a pill, the actions' pill
+  header: { backgroundColor: colors.chrome, paddingHorizontal: 12 },
   headerRule: { borderBottomWidth: 1, borderBottomColor: colors.hairline },
-  headerRow: { flexDirection: "row", alignItems: "center", gap: 2 },
-  hostName: { flex: 1, fontFamily: ui(600), color: colors.textBright, fontSize: 15 },
+  headerRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  titlePill: {
+    flexShrink: 1,
+    height: 40,
+    paddingHorizontal: 16,
+    justifyContent: "center",
+    borderRadius: 20,
+    backgroundColor: colors.glass,
+    borderWidth: 1,
+    borderColor: colors.glassRim,
+  },
+  hostName: { fontFamily: ui(600), color: colors.textBright, fontSize: 15 },
   // the strip reaches 6 pt below the 36 pt tabs (iOS takes no touch outside it): a 44 pt touch
   tabStrip: { marginBottom: -6 },
-  tabs: { gap: 4, paddingTop: 2, paddingBottom: 6, paddingHorizontal: 8 },
+  tabs: { gap: 4, paddingTop: 6, paddingBottom: 6 },
   tab: { height: 36, paddingHorizontal: 12, justifyContent: "center", borderBottomWidth: 2, borderBottomColor: "transparent" },
   tabOn: { borderBottomColor: colors.accent },
   tabText: { fontFamily: ui(400), color: colors.textMuted, fontSize: 14 },

@@ -19,6 +19,11 @@ export const colors = {
   warning: "#d7ba7d",
   fg: "#d4d4d4",
   borderStrong: "#ffffff24",
+  /** The boards' glass controls (round back badges, header pills): white 8 % over a 12 % rim. */
+  glass: "#ffffff14",
+  glassRim: "#ffffff1f",
+  /** The floating search bar's ground, as the floating tab bar's. */
+  floating: "#2c2c30f0",
   /** The Pair board's ground behind the camera, and the viewfinder before it starts. */
   camera: "#0f0f10",
   viewfinder: "#1a1a1a",
@@ -33,12 +38,14 @@ export type ColorName = keyof typeof colors;
  * badges there are `text` beside the red edge, and destructive actions use `warning`; and
  * `textDim` on surface (4.49), where `textMuted` is used instead.
  */
-export const TEXT_ON: Readonly<Record<"bg" | "chrome" | "surface" | "accent" | "camera", readonly ColorName[]>> = {
+export const TEXT_ON: Readonly<Record<"bg" | "chrome" | "surface" | "accent" | "warning" | "camera", readonly ColorName[]>> = {
   bg: ["textBright", "text", "fg", "textMuted", "textDim", "accent", "success", "warning"],
   chrome: ["textBright", "text", "textMuted", "textDim", "accent", "success", "warning", "error"],
   camera: ["textBright", "text", "textMuted", "warning"],
   surface: ["textBright", "text", "textMuted", "accent", "success", "warning"],
   accent: ["bg"],
+  // the count on a back badge (the panes that need you)
+  warning: ["bg"],
 };
 
 /**

@@ -60,8 +60,8 @@ export default function HostScreen() {
         backLabel="Back"
         right={
           <IconButton
+            glass
             icon={notifications ? "bell" : "bellOff"}
-            color={colors.textMuted}
             label={`Notifications from ${name}: ${notifications ? "on" : "off"}`}
             hint={
               s.settings.notifyPolicy === "off"

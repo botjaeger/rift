@@ -83,10 +83,10 @@ glyphon; shaped runs are cached by content.
 
 | Element | Value | Constant |
 |---|---|---|
-| Tab bar height | 42 px | `TAB_BAR_H` |
+| Tab bar height (Warp) | 34 px | `TAB_BAR_H` |
 | Traffic light centres (x; y = strip middle) | 20 / 40 / 60 px | `TRAFFIC_X`, `TRAFFIC_GAP` |
 | First tab x (after traffic lights) | 78 px | `TABS_X` |
-| Tab width (natural / squeezed minimum) | 150–240 px / 120 px | `TAB_W`, `MAX_TAB_W`, `MIN_TAB_W` |
+| Tab width (fixed, Warp / squeezed minimum) | 200 px / 120 px | `TAB_W`, `MIN_TAB_W` |
 | Chrome icon button | 26 px, icon 16 px | `tabbar::icon_button` |
 | Vertical rail width / row height | 220 px / 54 px | `RAIL_W`, `RAIL_ROW_H` |
 | Split pane padding | 8 px | `PANE_PAD` |

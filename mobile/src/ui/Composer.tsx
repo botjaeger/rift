@@ -1,3 +1,4 @@
+import * as Clipboard from "expo-clipboard";
 import { useRouter } from "expo-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -22,9 +23,10 @@ import { branchText, chipsSpoken, type ChipMenuKind, type PromptChips } from "@/
 import { showsKeyRow } from "@/terminal";
 import { ControlRow, NO_STICKY, type Sticky } from "./ControlRow";
 import { insertedChar, plainPunctuation } from "./format";
+import { Icon } from "./Icon";
 import { ErrorText } from "./Notice";
 import { useOpenShell } from "./useOpenShell";
-import { colors, mono, radius, TOUCH } from "./theme";
+import { colors, mono, TOUCH } from "./theme";
 import { toggleA11y } from "./toggle";
 
 /** Suggestions shown above the command line (the P3 Pane board). */
@@ -32,20 +34,20 @@ const MAX_SUGGESTIONS = 6;
 /** Wait this long after typing stops before asking the computer for completions. */
 const COMPLETE_DELAY_MS = 200;
 
-/** The folder button's two lines: the folder's name, the branch with its dirty dot. */
-function folderLines(chips: PromptChips): { name: string; branch: string | null } | null {
+/** The folder line above the keys (the Pane board): the folder's path, the branch with its dirty dot. */
+function folderLines(chips: PromptChips): { path: string; branch: string | null } | null {
   if (!chips.cwd) return null;
-  const name = chips.cwd === "~" ? "~" : (chips.cwd.split("/").filter(Boolean).pop() ?? chips.cwd);
   const b = chips.branch;
-  return { name, branch: b ? `${branchText(b)}${b.dirty ? " ●" : ""}` : null };
+  return { path: chips.cwd, branch: b ? `${branchText(b)}${b.dirty ? " ●" : ""}` : null };
 }
 
 /**
  * The pane's command line (operate permission only; the P3 Pane board): suggestions (the
  * desktop's completions and this pane's history, feature `complete`; else its recent commands),
- * the folder button (the chip menus: folder, branch, changed files), the field, run with the
- * return key (through the Confirm sheet only with Settings › Ask before running on), and ⌃,
- * which shows the control-key row (Settings › Keys) in place of the suggestions. A hardware
+ * the folder line (the chip menus: folder, branch, changed files), ⌃, which shows the
+ * control-key row (Settings › Keys) in place of the suggestions, and the round field with its
+ * run button (Return runs too; through the Confirm sheet only with Settings › Ask before
+ * running on). A hardware
  * keyboard's ctrl/alt combinations, Escape, Tab and F-keys in the field go to the pane as keys.
  * While the host is not connected (`online` false) nothing can be sent; the draft stays editable.
  */
@@ -59,6 +61,7 @@ export function Composer({
   complete,
   recent,
   label,
+  canType,
 }: {
   hostKey: string;
   paneId: number;
@@ -73,6 +76,8 @@ export function Composer({
   recent: string[];
   /** The pane's title, for the field's label ("Command for rift · pane 1"). */
   label: string;
+  /** The computer takes typed text (feature `text`): the row's Paste works. */
+  canType: boolean;
 }) {
   const router = useRouter();
   const s = useApp();
@@ -88,6 +93,17 @@ export function Composer({
   // ⌃: the key row in place of the suggestions; Settings › Show keys opens it to start with
   const [keys, setKeys] = useState(() => showsKeyRow(s.settings.showKeys, false));
   const [completed, setCompleted] = useState<{ draft: string; list: string[] } | null>(null);
+  // the row leads with Hide keyboard while the keyboard is up
+  const [keyboardUp, setKeyboardUp] = useState(false);
+  useEffect(() => {
+    const ios = Platform.OS === "ios";
+    const show = Keyboard.addListener(ios ? "keyboardWillShow" : "keyboardDidShow", () => setKeyboardUp(true));
+    const hide = Keyboard.addListener(ios ? "keyboardWillHide" : "keyboardDidHide", () => setKeyboardUp(false));
+    return () => {
+      show.remove();
+      hide.remove();
+    };
+  }, []);
 
   // the desktop's completions for the draft, then the pane's history; else its recent commands
   const recentKey = recent.join("\n");
@@ -129,7 +145,7 @@ export function Composer({
 
   const onChange = (typed: string) => {
     const text = plainPunctuation(typed);
-    if (sticky.ctrl || sticky.alt) {
+    if (sticky.ctrl || sticky.alt || sticky.shift) {
       setSticky(NO_STICKY);
       const ch = insertedChar(draft, text);
       const key = ch ? stickyKey(ch, sticky) : null;
@@ -148,6 +164,17 @@ export function Composer({
     const key = applySticky(id, sticky);
     setSticky(NO_STICKY);
     void sendKeys([key]);
+  };
+
+  // the row's Paste: the phone's clipboard into the command line at the prompt, else typed
+  // into the running program (the computer takes no text at its prompt)
+  const onPaste = async () => {
+    const text = await Clipboard.getStringAsync();
+    if (!text) return;
+    setError(null);
+    if (running === null) return fleet.setDraft(hostKey, paneId, plainPunctuation(draft + text));
+    const r = await fleet.sendText(hostKey, paneId, text);
+    if (!r.ok) setError(r.message);
   };
 
   // hardware shortcuts taken from the command line (modules/rift-keys, shortcuts mode)
@@ -209,7 +236,8 @@ export function Composer({
   };
 
   const folder = folderLines(chips);
-  const stickyName = [sticky.ctrl ? "ctrl" : null, sticky.alt ? "alt" : null].filter(Boolean).join("+");
+  const stickyName = [sticky.ctrl ? "ctrl" : null, sticky.alt ? "alt" : null, sticky.shift ? "shift" : null].filter(Boolean).join("+");
+  const canRun = online && draft.trim() !== "";
   // the computer's answer for this draft (or the last one, while the next is on its way)
   const suggested = complete && online ? (completed?.list ?? []) : fromRecent;
   const shown = suggested.slice(0, MAX_SUGGESTIONS);
@@ -222,6 +250,28 @@ export function Composer({
       onKey={onShortcut}
       style={styles.wrap}
     >
+      {folder ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={`Folder ${chips.cwd}${chips.branch ? ` on ${chips.branch.name}` : ""}${chipMenus ? ", change" : ""}`}
+          accessibilityHint={chipMenus ? (chips.branch ? "Folder, branch or changed files" : "Opens the folder's sub-folders") : undefined}
+          accessibilityState={{ disabled: !chipMenus, ...(Platform.OS !== "ios" && menus.length > 1 ? { expanded: choosing } : {}) }}
+          disabled={!chipMenus}
+          onPress={pickMenu}
+          hitSlop={{ top: 12, bottom: 6 }}
+          style={({ pressed }) => [styles.folder, pressed && styles.pressed]}
+        >
+          <Icon name="folder" size={14} color={colors.textMuted} />
+          <Text style={styles.folderPath} numberOfLines={1} ellipsizeMode="head">
+            {folder.path}
+          </Text>
+          {folder.branch ? (
+            <Text style={styles.folderBranch} numberOfLines={1}>
+              {folder.branch}
+            </Text>
+          ) : null}
+        </Pressable>
+      ) : null}
       {choosing && menus.length > 1 ? (
         // keyed, as the suggestions below: without keys React reused one native strip for both,
         // and the suggestions opened at the menu strip's sideways scroll, their first one cut off
@@ -254,7 +304,9 @@ export function Composer({
           onSticky={setSticky}
           onKey={onRowKey}
           onOpen={onOpen}
+          onPaste={canType || running === null ? () => void onPaste() : undefined}
           onEdit={() => router.push("/control-keys")}
+          onHideKeyboard={keyboardUp ? () => Keyboard.dismiss() : undefined}
         />
       ) : shown.length > 0 ? (
         // a new first suggestion (a command just ran, a letter typed) starts the strip at its left end
@@ -286,50 +338,45 @@ export function Composer({
       ) : null}
       {shownError ? <ErrorText>{shownError}</ErrorText> : null}
       <View style={styles.inputRow}>
-        {folder ? (
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={`Folder ${chips.cwd}${chips.branch ? ` on ${chips.branch.name}` : ""}${chipMenus ? ", change" : ""}`}
-            accessibilityHint={chipMenus ? (chips.branch ? "Folder, branch or changed files" : "Opens the folder's sub-folders") : undefined}
-            accessibilityState={{ disabled: !chipMenus, ...(Platform.OS !== "ios" && menus.length > 1 ? { expanded: choosing } : {}) }}
-            disabled={!chipMenus}
-            onPress={pickMenu}
-            style={({ pressed }) => [styles.folder, pressed && styles.pressed]}
-          >
-            <Text style={styles.folderName} numberOfLines={1}>
-              {folder.name}
-            </Text>
-            {folder.branch ? (
-              <Text style={styles.folderBranch} numberOfLines={1}>
-                {folder.branch}
-              </Text>
-            ) : null}
-          </Pressable>
-        ) : null}
-        <TextInput
-          value={draft}
-          onChangeText={onChange}
-          onSubmitEditing={() => void run()}
-          placeholder={stickyName ? `Type a letter for ${stickyName}+letter` : "Command"}
-          placeholderTextColor={colors.textMuted}
-          autoCapitalize="none"
-          autoCorrect={false}
-          spellCheck={false}
-          returnKeyType="send"
-          submitBehavior="submit"
-          accessibilityLabel={`Command for ${label}`}
-          accessibilityHint={s.settings.askBeforeRun ? "Return shows the command first" : "Return runs it"}
-          style={styles.input}
-        />
         <Pressable
           {...toggleA11y(keys)}
           accessibilityLabel="Keys"
           accessibilityHint="Shows the control keys above the command line"
           onPress={() => setKeys((k) => !k)}
-          style={({ pressed }) => [styles.keysButton, keys && styles.keysOn, pressed && styles.pressed]}
+          hitSlop={2}
+          style={({ pressed }) => [styles.round, keys && styles.roundOn, pressed && styles.pressed]}
         >
           <Text style={[styles.keysLabel, keys && { color: colors.accent }]}>⌃</Text>
         </Pressable>
+        <View style={styles.field}>
+          <TextInput
+            value={draft}
+            onChangeText={onChange}
+            onSubmitEditing={() => void run()}
+            placeholder={stickyName ? `Type a letter for ${stickyName}+letter` : "Command"}
+            placeholderTextColor={colors.textMuted}
+            autoCapitalize="none"
+            autoCorrect={false}
+            spellCheck={false}
+            returnKeyType="send"
+            submitBehavior="submit"
+            accessibilityLabel={`Command for ${label}`}
+            accessibilityHint={s.settings.askBeforeRun ? "Return shows the command first" : "Return runs it"}
+            style={styles.input}
+          />
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Run"
+            accessibilityHint={s.settings.askBeforeRun ? "Shows the command first" : undefined}
+            accessibilityState={{ disabled: !canRun }}
+            disabled={!canRun}
+            onPress={() => void run()}
+            hitSlop={5}
+            style={({ pressed }) => [styles.send, canRun && styles.sendOn, pressed && styles.pressed]}
+          >
+            <Icon name="run" size={16} color={canRun ? colors.bg : colors.textMuted} />
+          </Pressable>
+        </View>
       </View>
     </KeyCaptureView>
   );
@@ -362,41 +409,37 @@ const styles = StyleSheet.create({
   },
   suggestionText: { fontFamily: mono, color: colors.text, fontSize: 12 },
   inputRow: { flexDirection: "row", gap: 8, alignItems: "center" },
-  folder: {
-    height: TOUCH,
-    maxWidth: 120,
-    paddingHorizontal: 10,
-    borderRadius: radius.button,
-    borderWidth: 1,
-    borderColor: colors.hairline,
-    backgroundColor: colors.surface,
-    justifyContent: "center",
-  },
-  folderName: { fontFamily: mono, color: colors.text, fontSize: 12 },
-  folderBranch: { fontFamily: mono, color: colors.success, fontSize: 11 },
-  input: {
-    flex: 1,
-    minWidth: 0,
-    height: TOUCH,
-    paddingHorizontal: 12,
-    borderRadius: radius.button,
-    borderWidth: 1,
-    borderColor: colors.borderStrong,
-    backgroundColor: colors.bg,
-    color: colors.textBright,
-    fontFamily: mono,
-    fontSize: 14,
-  },
-  keysButton: {
+  // the folder line: 12 pt, its path cut at the start (the folder's own name is at the end)
+  folder: { alignSelf: "flex-start", maxWidth: "100%", flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 4 },
+  folderPath: { fontFamily: mono, color: colors.text, fontSize: 12, flexShrink: 1 },
+  folderBranch: { fontFamily: mono, color: colors.success, fontSize: 12, flexShrink: 0, maxWidth: "45%" },
+  // the board's 44 pt round buttons and the round field with its 34 pt run button
+  round: {
     width: TOUCH,
     height: TOUCH,
-    borderRadius: radius.button,
+    borderRadius: TOUCH / 2,
     borderWidth: 1,
     borderColor: colors.hairline,
     backgroundColor: colors.surface,
     alignItems: "center",
     justifyContent: "center",
   },
-  keysOn: { borderColor: colors.accent },
-  keysLabel: { fontFamily: mono, color: colors.textMuted, fontSize: 13 },
+  roundOn: { borderColor: colors.accent },
+  keysLabel: { fontFamily: mono, color: colors.textMuted, fontSize: 15 },
+  field: {
+    flex: 1,
+    minWidth: 0,
+    height: TOUCH,
+    flexDirection: "row",
+    alignItems: "center",
+    paddingLeft: 14,
+    paddingRight: 4,
+    borderRadius: TOUCH / 2,
+    borderWidth: 1,
+    borderColor: colors.borderStrong,
+    backgroundColor: colors.bg,
+  },
+  input: { flex: 1, minWidth: 0, height: TOUCH - 2, padding: 0, color: colors.textBright, fontFamily: mono, fontSize: 14 },
+  send: { width: 34, height: 34, borderRadius: 17, backgroundColor: colors.glassRim, alignItems: "center", justifyContent: "center" },
+  sendOn: { backgroundColor: colors.accent },
 });

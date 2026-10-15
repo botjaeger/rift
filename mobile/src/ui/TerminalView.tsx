@@ -1,3 +1,4 @@
+import * as Clipboard from "expo-clipboard";
 import { memo, useEffect, useRef, useState } from "react";
 import {
   AppState,
@@ -28,7 +29,7 @@ import { ControlRow, NO_STICKY, type Sticky } from "./ControlRow";
 import { useOpenShell } from "./useOpenShell";
 import { Icon } from "./Icon";
 import { ErrorText, WarningText } from "./Notice";
-import { colors, mono, monoBold, radius, TOUCH, ui } from "./theme";
+import { colors, mono, monoBold, TOUCH, ui } from "./theme";
 
 /** The terminal's default colours (a run's null fg / bg): terminal text on the pane's ground. */
 const DEFAULTS = { fg: colors.fg, bg: colors.bg };
@@ -128,6 +129,7 @@ export function TerminalView({
   online,
   running,
   program,
+  pinned,
 }: {
   hostKey: string;
   paneId: number;
@@ -140,6 +142,8 @@ export function TerminalView({
   running: boolean;
   /** The full-screen program's name ("htop"), for the note. */
   program: string;
+  /** Shown by the header's Terminal view switch, not by a full-screen program. */
+  pinned?: boolean;
 }) {
   const s = useApp();
   const capture = useRef<KeyCaptureHandle>(null);
@@ -213,7 +217,7 @@ export function TerminalView({
 
   const takeSticky = (): Sticky => {
     const cur = sticky;
-    if (cur.ctrl || cur.alt) setSticky(NO_STICKY);
+    if (cur.ctrl || cur.alt || cur.shift) setSticky(NO_STICKY);
     return cur;
   };
 
@@ -236,6 +240,11 @@ export function TerminalView({
   };
 
   const onRowKey = (id: string) => push({ keys: [applySticky(id, takeSticky())] });
+  // the row's Paste: the phone's clipboard, typed into the program as the keyboard would
+  const onPaste = () =>
+    void Clipboard.getStringAsync().then((text) => {
+      if (text) push(...textToActions(text));
+    });
   const onOpen = useOpenShell(hostKey, paneId, setError);
 
   const typing = operate && canType;
@@ -277,9 +286,11 @@ export function TerminalView({
         </ScrollView>
       )}
       <Text style={styles.note}>
-        {operate
-          ? `Keys go straight to ${program}. When it quits, the pane shows blocks again.`
-          : `${program} is full screen. When it quits, the pane shows blocks again.`}
+        {pinned
+          ? "Terminal view: the pane's screen as it is. The terminal button shows blocks again."
+          : operate
+            ? `Keys go straight to ${program}. When it quits, the pane shows blocks again.`
+            : `${program} is full screen. When it quits, the pane shows blocks again.`}
       </Text>
       {operate ? (
         <View style={styles.bar} accessibilityLabel="Keys">
@@ -299,6 +310,7 @@ export function TerminalView({
               onSticky={setSticky}
               onKey={onRowKey}
               onOpen={onOpen}
+              onPaste={canType ? onPaste : undefined}
               wrap
             />
           ) : null}
@@ -368,7 +380,7 @@ const styles = StyleSheet.create({
     gap: 8,
     alignItems: "center",
     justifyContent: "center",
-    borderRadius: radius.small,
+    borderRadius: TOUCH / 2,
     borderWidth: 1,
     borderColor: colors.borderStrong,
   },

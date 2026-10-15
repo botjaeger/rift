@@ -527,6 +527,9 @@ pub struct App {
     explorer_hits: Vec<([f32; 4], ExplorerHit)>,
     review: ReviewPanelState,
     review_hits: Vec<([f32; 4], ReviewHit)>,
+    /// This frame's prompt chips that do nothing when clicked but explain
+    /// themselves on hover (Elapsed: when its clock started).
+    info_chips: Vec<([f32; 4], PaneId, rift_core::PromptChip)>,
     /// XTWINOPS state: iconified by a program, the last requested position
     /// (a hidden window reports none), the size before a one-way maximize.
     iconified: bool,
@@ -565,6 +568,9 @@ pub struct App {
     viewer_hits: Vec<([f32; 4], ViewerHit)>,
     /// Pane area the viewer covers (last frame).
     viewer_rect: [f32; 4],
+    /// The viewer shows `config.toml` beside the Settings page, in the
+    /// Settings tab, instead of in a terminal tab's split.
+    config_viewer: bool,
     /// The viewer pane (`VIEWER_PANE` leaf) has keyboard focus rather than
     /// its tab's `active_pane` shell.
     viewer_focus: bool,
@@ -1241,6 +1247,7 @@ impl App {
             explorer_hits: Vec::new(),
             review: ReviewPanelState::default(),
             review_hits: Vec::new(),
+            info_chips: Vec::new(),
             iconified: false,
             shell_label: None,
             last_frame: Instant::now(),
@@ -1261,6 +1268,7 @@ impl App {
             viewer: ViewerState::default(),
             viewer_hits: Vec::new(),
             viewer_rect: [0.0; 4],
+            config_viewer: false,
             viewer_focus: false,
             rename: None,
             rename_fresh: false,
@@ -2823,7 +2831,7 @@ impl App {
             ))
         } else if self.search.open && self.search_chips.iter().any(inside) {
             Some(CursorIcon::Pointer)
-        } else if !self.settings.open
+        } else if (!self.settings.open || (self.config_viewer && inside(&self.viewer_rect)))
             && let Some(icon) = self.panel_cursor(&inside)
         {
             Some(icon)
@@ -3976,17 +3984,32 @@ impl App {
     fn viewer_focused(&self) -> bool {
         self.viewer_focus
             && self.viewer.is_open()
-            && self
-                .tabs
-                .get(self.active)
-                .is_some_and(|t| t.root.contains(VIEWER_PANE))
+            && if self.config_viewer {
+                self.settings.open
+            } else {
+                // a shell tab's file viewer sits under the Settings page
+                !self.settings.open
+                    && self
+                        .tabs
+                        .get(self.active)
+                        .is_some_and(|t| t.root.contains(VIEWER_PANE))
+            }
     }
 
     /// Keep the viewer state and its pane leaf in step: a closed viewer
     /// leaves the split tree, a leaf whose tab went away closes the viewer.
     fn sync_viewer_pane(&mut self) {
+        // config.toml beside Settings: open while the Settings tab is
+        if self.config_viewer {
+            if !self.settings.tab {
+                self.viewer.close();
+            }
+            if !self.viewer.is_open() {
+                self.config_viewer = false;
+            }
+        }
         if self.viewer.is_open() {
-            if !self.tabs.iter().any(|t| t.root.contains(VIEWER_PANE)) {
+            if !self.config_viewer && !self.tabs.iter().any(|t| t.root.contains(VIEWER_PANE)) {
                 self.viewer.close();
             }
         } else {
@@ -4003,7 +4026,24 @@ impl App {
 
     /// Open `path` in the viewer pane: the tab's leftmost column, next to the
     /// explorer, reused when this tab already has one.
+    /// Settings › Open config.toml: the file beside the Settings page, in
+    /// the Settings tab (no terminal tab's split changes).
+    fn open_config_viewer(&mut self, path: &std::path::Path) {
+        for tab in &mut self.tabs {
+            if tab.root.contains(VIEWER_PANE) {
+                tab.root.remove(VIEWER_PANE);
+            }
+        }
+        self.config_viewer = true;
+        self.viewer_focus = true;
+        let proxy = self.proxy.clone();
+        self.viewer.open(path, move |loaded| {
+            let _ = proxy.send_event(UserEvent::ViewerLoaded(Box::new(loaded)));
+        });
+    }
+
     fn open_viewer(&mut self, path: &std::path::Path) {
+        self.config_viewer = false;
         for (i, tab) in self.tabs.iter_mut().enumerate() {
             if i != self.active && tab.root.contains(VIEWER_PANE) {
                 tab.root.remove(VIEWER_PANE);
@@ -5873,7 +5913,8 @@ impl App {
                 self.viewer_focus = true;
                 // its header bar is the pane's title bar: drag to move
                 let [x, y, w, _] = self.viewer_rect;
-                if inside(&[x, y, w, crate::views::viewer::HEADER_H]) {
+                // (beside Settings it is no pane: nothing to move)
+                if !self.config_viewer && inside(&[x, y, w, crate::views::viewer::HEADER_H]) {
                     self.pane_drag = Some(PaneDrag {
                         pane: VIEWER_PANE,
                         from_tab: self.active,
@@ -6184,6 +6225,8 @@ impl App {
         }
         let mut hits = Vec::new();
         let mut focus_hits = Vec::new(); // lowest priority, appended last
+        // chips that only explain themselves on hover (Elapsed)
+        let mut info_chips = Vec::new();
         let mut any_running = false;
         let mut editor_active = false;
         let mut boot_until: Option<Instant> = None;
@@ -6254,6 +6297,7 @@ impl App {
 
         let Some(tab) = tabs.get_mut(active_tab_idx) else {
             self.hits = hits;
+            self.info_chips = info_chips;
             return;
         };
         let split = tab.effective_split();
@@ -6306,6 +6350,13 @@ impl App {
             };
             let ed_cols =
                 editor::input_cols(editor_area_w, cell_w, ed_char_w, pane.editor.vim_enabled());
+            // prompt chips that do not fit one row wrap onto more (Warp)
+            let chip_rows = if prompt_mode == rift_core::PromptMode::Shell {
+                1
+            } else {
+                let views = editor::pane_chip_views(config_ref, &theme, pane, elapsed);
+                editor::chip_rows(engine, &views, editor_area_w)
+            };
             if is_active_pane {
                 active_ed_cols = ed_cols;
             }
@@ -6364,7 +6415,7 @@ impl App {
                 let editor_h = if !editor_vis {
                     if split { PANE_PAD } else { SIDE_PAD }
                 } else {
-                    editor::editor_height(&pane.editor.buffer, prompt_mode, ed_cols)
+                    editor::editor_height(&pane.editor.buffer, prompt_mode, ed_cols, chip_rows)
                 };
                 let usable_w = (pw - terminal::BLOCK_INDENT).max(cell_w);
                 let usable_h = (ph - editor_h).max(line_h);
@@ -6415,7 +6466,8 @@ impl App {
             pane.layout_window = (w, h);
             let view = match docked_h.filter(|_| is_active_pane && editor_vis) {
                 Some(panel_h) => {
-                    let eh = editor::editor_height(&pane.editor.buffer, prompt_mode, ed_cols);
+                    let eh =
+                        editor::editor_height(&pane.editor.buffer, prompt_mode, ed_cols, chip_rows);
                     let (top, bottom) = if input_top {
                         let zone_top = pr.rect[1]
                             + if split {
@@ -6593,9 +6645,9 @@ impl App {
                 let top = if input_top {
                     zone_y
                 } else if split {
-                    pr.rect[1] + pr.rect[3] - editor::editor_height("", prompt_mode, 1)
+                    pr.rect[1] + pr.rect[3] - editor::editor_height("", prompt_mode, 1, 1)
                 } else {
-                    h - editor::editor_height("", prompt_mode, 1)
+                    h - editor::editor_height("", prompt_mode, 1, 1)
                 };
                 // the editor's divider, already where it will be (Warp)
                 let zone_w = pr.rect[2] - 2.0 * if split { PANE_PAD } else { side_pad };
@@ -6615,7 +6667,8 @@ impl App {
                 .find_map(|b| b.exit_code());
 
             if editor_vis {
-                let eh = editor::editor_height(&pane.editor.buffer, prompt_mode, ed_cols);
+                let eh =
+                    editor::editor_height(&pane.editor.buffer, prompt_mode, ed_cols, chip_rows);
                 let area = match (split, input_top) {
                     (true, false) => [
                         pr.rect[0] + PANE_PAD,
@@ -6689,6 +6742,8 @@ impl App {
                             rect: *rect,
                             target: ClickTarget::Chip(pr.id, *chip),
                         });
+                    } else if *chip == C::Elapsed {
+                        info_chips.push((*rect, pr.id, *chip));
                     }
                 }
                 hits.push(Hit {
@@ -7031,8 +7086,29 @@ impl App {
         if settings_open {
             // it covers the content area: only the tab strip (and rail)
             // stays clickable beside its controls
-            let area = [rail_w, TAB_BAR_H, w - rail_w, h - TAB_BAR_H];
+            let mut area = [rail_w, TAB_BAR_H, w - rail_w, h - TAB_BAR_H];
             hits.retain(|h| h.rect[1] + h.rect[3] <= TAB_BAR_H || h.rect[0] + h.rect[2] <= rail_w);
+            // config.toml opened from Settings: beside the page, in this tab
+            if self.config_viewer
+                && let Some(label) = &viewer_label
+            {
+                let vw = (area[2] * 0.45).clamp(320.0, (area[2] - 360.0).max(320.0));
+                area[2] -= vw;
+                let rect = [area[0] + area[2], area[1], vw, area[3]];
+                self.viewer_rect = rect;
+                self.viewer_hits = crate::views::viewer::render(
+                    scene.layer(3),
+                    engine,
+                    &theme,
+                    &mut self.viewer,
+                    label,
+                    rect,
+                    viewer_has_focus,
+                );
+                scene
+                    .layer(3)
+                    .rect([rect[0], rect[1]], [1.0, rect[3]], theme.border, 0.0);
+            }
             focus_hits.clear();
             let mut list = rift_renderer::Layer::default();
             settings_state.view_h = area[3];
@@ -7385,6 +7461,7 @@ impl App {
 
         hits.extend(focus_hits);
         self.hits = hits;
+        self.info_chips = info_chips;
         // a background tab's spinner turns too
         self.any_running = any_running
             || self
@@ -7592,6 +7669,27 @@ impl App {
             for (rect, url) in &pane.url_hits {
                 tips.push(Tip::new(*rect, url.clone(), Some(open_with.into())));
             }
+        }
+        // Elapsed: when its clock started, with the date after a day; over
+        // the command line's own hit, so first
+        for (rect, pane, chip) in &self.info_chips {
+            let started = self
+                .tabs
+                .iter()
+                .find(|t| t.pane(*pane).is_some())
+                .and_then(|t| Some((t.started?, t.elapsed()?)));
+            let body = match started {
+                Some((at, elapsed)) => format!(
+                    "{}\n\n{}",
+                    crate::views::prompt_chips::started_text(
+                        crate::views::prompt_chips::LocalTime::at(at),
+                        elapsed
+                    ),
+                    chip.about()
+                ),
+                None => chip.about().to_string(),
+            };
+            tips.push(Tip::card(*rect, chip.label(), body));
         }
         for hit in &self.hits {
             // a prompt chip's card: what it shows and what a click does
@@ -8240,8 +8338,9 @@ impl App {
                 }
             }
             AppAction::WhatsNew => {
+                // a modal over the tab on screen: from Settings it opens over
+                // the Settings tab, not over the terminal tab behind it
                 self.palette.open = false;
-                self.settings.open = false;
                 self.context_menu.close();
                 self.whats_new.open();
                 rift_core::changelog::mark_seen();
@@ -9922,7 +10021,8 @@ impl App {
             window.request_redraw();
             return;
         }
-        if self.settings.open {
+        // config.toml beside Settings takes the keys while it has focus
+        if self.settings.open && !self.viewer_focused() {
             if self.handle_settings_key(event, event_loop, window) {
                 window.request_redraw();
             }
@@ -10785,6 +10885,16 @@ impl App {
             window.request_redraw();
             return;
         }
+        // config.toml beside Settings: its clicks, and focus back to the
+        // page on a click beside it
+        if self.settings.open && self.config_viewer {
+            if inside(&self.viewer_rect) && self.on_panel_click(inside) {
+                self.last_click = None;
+                window.request_redraw();
+                return;
+            }
+            self.viewer_focus = false;
+        }
         if !self.settings.open && self.on_panel_click(inside) {
             self.last_click = None;
             window.request_redraw();
@@ -11194,8 +11304,7 @@ impl App {
             }
             Some(ClickTarget::SettingsOpenConfig) => {
                 if let Some(path) = rift_core::config::config_path() {
-                    self.settings.open = false;
-                    self.open_viewer(&path);
+                    self.open_config_viewer(&path);
                 }
             }
             Some(ClickTarget::SettingsToggle(id)) => {
@@ -11472,8 +11581,16 @@ impl App {
                 return;
             }
         }
-        // the viewer and side panels scroll by pixels too
-        if !self.palette.open && !self.settings.open && self.confirm.is_none() {
+        // the viewer and side panels scroll by pixels too (config.toml
+        // beside Settings as well)
+        let config_viewer_under = self.config_viewer && {
+            let ([x, y, w, h], (mx, my)) = (self.viewer_rect, self.mouse);
+            mx >= x && mx < x + w && my >= y && my < y + h
+        };
+        if !self.palette.open
+            && (!self.settings.open || config_viewer_under)
+            && self.confirm.is_none()
+        {
             let (mx, my) = self.mouse;
             let inside = |r: &[f32; 4]| {
                 r[2] > 0.0 && mx >= r[0] && mx < r[0] + r[2] && my >= r[1] && my < r[1] + r[3]
@@ -11700,6 +11817,12 @@ impl App {
         let Some(mode) = self.mouse_tracking(pane) else {
             return false;
         };
+        // a link takes the left click over a program that tracks the mouse
+        // too (Claude Code, Codex), as in Warp: it shows or opens the link
+        // (Shift still reports nothing and selects)
+        if button == crate::mouse::LEFT && self.url_under_mouse(pane).is_some() {
+            return false;
+        }
         let Some(cell) = self.mouse_cell(pane) else {
             return false;
         };

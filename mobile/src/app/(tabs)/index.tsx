@@ -4,10 +4,12 @@ import { AccessibilityInfo, Pressable, ScrollView, StyleSheet, Text, View } from
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { ActivityItem } from "@/fleet";
 import { primaryChoice } from "@/answer";
+import { avatarFor } from "@/avatar";
 import { needsAuthBeforeRun } from "@/lock";
 import { agoShort, clockOf, nowSections, quickChoices, type NeedsItem, type RunningRow } from "@/now";
 import { authenticate, fleet, useApp } from "@/runtime";
 import { restoreTarget } from "@/stores";
+import { Avatar } from "@/ui/Avatar";
 import { Button } from "@/ui/Button";
 import { formatClock } from "@/ui/format";
 import { Icon } from "@/ui/Icon";
@@ -197,22 +199,25 @@ function RunningLine({ r, now, first }: { r: RunningRow; now: number; first: boo
       onPress={() => router.push({ pathname: "/host/[key]/pane/[id]", params: { key: r.host, id: String(r.pane) } })}
       style={({ pressed }) => [styles.runRow, !first && styles.divider, pressed && styles.pressed]}
     >
-      <View style={styles.runTop}>
-        <Text style={styles.cmd} numberOfLines={1}>
-          {r.command || " "}
-        </Text>
-        <Text style={styles.elapsed}>{elapsed}</Text>
-      </View>
-      {r.line ? (
-        <Text style={styles.lastLine} numberOfLines={1}>
-          {r.line}
-        </Text>
-      ) : null}
-      <View style={styles.runMeta}>
-        <Text style={[styles.meta, styles.flex]} numberOfLines={1}>
-          {r.hostName} · {r.tab}
-        </Text>
-        {r.notifies ? <Text style={styles.notifies}>Notifies when done</Text> : null}
+      <Avatar avatar={avatarFor(r.cwd, r.tab, r.program)} />
+      <View style={styles.runBody}>
+        <View style={styles.runTop}>
+          <Text style={styles.cmd} numberOfLines={1}>
+            {r.command || " "}
+          </Text>
+          <Text style={styles.elapsed}>{elapsed}</Text>
+        </View>
+        {r.line ? (
+          <Text style={styles.lastLine} numberOfLines={1}>
+            {r.line}
+          </Text>
+        ) : null}
+        <View style={styles.runMeta}>
+          <Text style={[styles.meta, styles.flex]} numberOfLines={1}>
+            {r.hostName} · {r.tab}
+          </Text>
+          {r.notifies ? <Text style={styles.notifies}>Notifies when done</Text> : null}
+        </View>
       </View>
     </Pressable>
   );
@@ -408,7 +413,9 @@ const styles = StyleSheet.create({
     overflow: "hidden",
   },
   divider: { borderTopWidth: 1, borderTopColor: colors.hairline },
-  runRow: { gap: 6, paddingVertical: 12, paddingHorizontal: 14 },
+  // the Now board's running rows: the pane's avatar, then its command, last line and place
+  runRow: { flexDirection: "row", gap: 12, paddingVertical: 12, paddingHorizontal: 14 },
+  runBody: { flex: 1, minWidth: 0, gap: 6 },
   runTop: { flexDirection: "row", alignItems: "baseline", gap: 8 },
   cmd: { flex: 1, minWidth: 0, fontFamily: mono, color: colors.textBright, fontSize: 13 },
   elapsed: { fontFamily: mono, color: colors.accent, fontSize: 12, fontVariant: ["tabular-nums"] },

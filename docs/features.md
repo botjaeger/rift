@@ -109,7 +109,7 @@ insensitive) stay visible. Running it again on the same block, or choosing
   12- and 24-hour time, time on this tab (`elapsed`: hourglass, `2h 05m`
   since the tab's first submitted command, hidden before it; it restarts
   with each new shell and is kept only when a restart reattaches the same
-  shell). Default: working directory, git branch, git diff
+  shell; its hover card says when it started, with the date after 24 hours). Default: working directory, git branch, git diff
   stats. A chip with nothing to show is left out. Git, PR and Docker state
   refresh after each command, and in every pane of every tab as soon as the
   chip list changes (Edit prompt or config.toml). Settings › Input › Prompt
@@ -171,8 +171,11 @@ the whole buffer.
   (1002), motion (1003) and the wheel in SGR (1006), UTF-8 (1005) or legacy
   encoding; ⇧ forces local selection. Focus in/out (1004) is reported when
   the window gains or loses focus.
-- Links show a hand and a tooltip with their target; a plain click shows it
-  or opens the link (`link_click`).
+- Links draw in the accent color, lighter and underlined under the pointer,
+  and show a hand and a tooltip with their target; a plain click shows it or
+  opens the link (`link_click`), also over a program that tracks the mouse
+  (Claude Code, Codex) and on the alternate screen. A URL soft-wrapped onto
+  the next rows is one link.
 - ⌘-click opens URLs, OSC 8 hyperlinks and existing file paths (see ui.md);
   files and folders open where `link_editor` says (default app, the viewer
   pane or an installed editor), and the explorer / review ↗ follow
@@ -783,16 +786,19 @@ line shows the addresses, or how many devices are connected.
 - **Phone-first app.** Tabs *Now*, *Computers*, *Settings*. *Now* lists
   what needs you, what runs (command, elapsed, latest line) and what
   finished (failures first) on every connected computer; *Computers* lists
-  each computer with its tabs inline; a cold start reopens the pane shown
-  last. A pane shows the window's tabs as a strip and swipes between the
+  each computer with its tabs inline, each pane with a coloured avatar,
+  and a floating search for tabs and commands; a cold start reopens the
+  pane shown last. A pane shows the window's tabs as a strip and swipes between the
   tab's panes; successes before the newest failure fold away, and the
   failed and running commands are cards (Run again, Copy error, All N
-  lines; Notify when done, Stop). Above its command line: suggestions, a
-  folder button opening the chip menus, and ⌃ for the key row. *Run* sends
+  lines; Notify when done, Stop). Its header's Terminal view shows the
+  pane's screen whatever runs. Above its command line: suggestions, a
+  folder line opening the chip menus, the key row (⌃; sticky ⌃ ⌥ ⇧,
+  Paste) and a round field with a run button. *Run* sends
   at once; Settings › *Ask before running* (off by default) shows the
   confirmation first. *Wrap long lines* (Settings › Output, and the pane's
   header button for one pane) off lets each block's output scroll sideways.
-  The header's search filters the blocks. The folder button opens what the
+  The header's search filters the blocks. The folder line opens what the
   desktop's chips do (feature `chips`): folders (`cd`), local branches
   (`git checkout`) and the code review panel's changed files, each with its
   diff; the names are shell-quoted; it shows the folder and branch the

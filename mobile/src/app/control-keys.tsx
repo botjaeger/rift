@@ -2,12 +2,14 @@ import { useRouter } from "expo-router";
 import { useEffect, useState } from "react";
 import { Animated, PanResponder, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { DEFAULT_CONTROL_KEYS, addChoices, controlKey, moveKeyTo, toggleKey } from "@/controlKeys";
+import { DEFAULT_CONTROL_KEYS, addChoices, controlKey, keyName, moveKeyTo, toggleKey } from "@/controlKeys";
 import { fleet, useApp } from "@/runtime";
+import { KeyCap } from "@/ui/ControlRow";
+import { Icon } from "@/ui/Icon";
 import { PageHeader, SectionTitle } from "@/ui/Screen";
-import { colors, mono, radius, TOUCH, ui } from "@/ui/theme";
+import { colors, radius, TOUCH, ui } from "@/ui/theme";
 
-const ROW = 48;
+const ROW = 52;
 
 /**
  * One key of the row: the ≡ handle drags it to a new place (one row per 48 pt); screen readers
@@ -29,7 +31,7 @@ function KeyRow({
   onDragging: (on: boolean) => void;
 }) {
   const k = controlKey(id)!;
-  const what = k.name ?? k.spoken;
+  const what = keyName(k);
   const [dy] = useState(() => new Animated.Value(0));
   const [dragging, setDragging] = useState(false);
   // the latest index and callbacks, for the responder made once (a box, not a ref: only the
@@ -88,9 +90,10 @@ function KeyRow({
       <View style={styles.handle} {...pan.panHandlers}>
         <Text style={styles.handleText}>≡</Text>
       </View>
-      <Text style={styles.cap}>{k.label}</Text>
+      <KeyCap def={k} color={k.danger ? colors.warning : colors.text} ground={colors.bg} />
       <Text style={styles.what} numberOfLines={1}>
         {what}
+        {k.icon && k.danger ? <Text style={styles.chord}> {k.label}</Text> : null}
       </Text>
       <Pressable
         accessibilityRole="button"
@@ -126,7 +129,7 @@ export default function ControlKeysScreen() {
           <Pressable
             accessibilityRole="button"
             accessibilityLabel="Reset"
-            accessibilityHint="Back to ^C, esc, tab, ctrl and the up and down arrows"
+            accessibilityHint="Back to Interrupt, Escape, Tab, Control and the up and down arrows"
             accessibilityState={{ disabled: isDefault }}
             disabled={isDefault}
             onPress={() => set([...DEFAULT_CONTROL_KEYS])}
@@ -144,11 +147,10 @@ export default function ControlKeysScreen() {
           <SectionTitle>Preview</SectionTitle>
           <View style={styles.preview} accessible accessibilityLabel={`The row: ${known.map((id) => controlKey(id)!.spoken).join(", ") || "no keys"}`}>
             {known.length === 0 ? <Text style={styles.empty}>No keys: the row is hidden.</Text> : null}
-            {known.map((id) => (
-              <View key={id} style={styles.previewKey}>
-                <Text style={styles.previewText}>{controlKey(id)!.label}</Text>
-              </View>
-            ))}
+            {known.map((id) => {
+              const k = controlKey(id)!;
+              return <KeyCap key={id} def={k} color={k.danger ? colors.warning : colors.text} />;
+            })}
           </View>
         </View>
 
@@ -174,18 +176,28 @@ export default function ControlKeysScreen() {
         <View style={styles.section}>
           <SectionTitle>Add</SectionTitle>
           <View style={styles.add}>
-            {addChoices(known).map((c) => (
-              <Pressable
-                key={c.label}
-                accessibilityRole="button"
-                accessibilityLabel={`Add ${c.ids.length > 1 ? "F1 to F12" : (controlKey(c.ids[0]!)?.spoken ?? c.label)}`}
-                onPress={() => set(c.ids.reduce((row, id) => toggleKey(row, id, true), known))}
-                style={({ pressed }) => [styles.addChip, pressed && styles.pressed]}
-              >
-                {/* +tab / +pane already start with one */}
-                <Text style={styles.addText}>{c.label.startsWith("+") ? c.label : `+ ${c.label}`}</Text>
-              </Pressable>
-            ))}
+            {addChoices(known).map((c) => {
+              const k = c.ids.length === 1 ? controlKey(c.ids[0]!) : undefined;
+              // the key as the row shows it, then its word ("⌃D End input"); the F-keys as one chip
+              const word = c.ids.length > 1 ? "F1–F12" : k ? (k.short ?? keyName(k)) : c.label;
+              return (
+                <Pressable
+                  key={c.label}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Add ${c.ids.length > 1 ? "F1 to F12" : (k?.spoken ?? c.label)}`}
+                  onPress={() => set(c.ids.reduce((row, id) => toggleKey(row, id, true), known))}
+                  hitSlop={4}
+                  style={({ pressed }) => [styles.addChip, pressed && styles.pressed]}
+                >
+                  {k?.icon ? (
+                    <Icon name={k.icon} size={14} color={colors.text} />
+                  ) : k && k.label !== word ? (
+                    <Text style={styles.addKey}>{k.label}</Text>
+                  ) : null}
+                  <Text style={styles.addText}>{word}</Text>
+                </Pressable>
+              );
+            })}
           </View>
         </View>
       </ScrollView>
@@ -199,7 +211,8 @@ const styles = StyleSheet.create({
   section: { gap: 6 },
   pressed: { opacity: 0.6 },
   disabled: { opacity: 0.45 },
-  reset: { minHeight: TOUCH, paddingHorizontal: 12, justifyContent: "center" },
+  // the board's Reset: a glass pill
+  reset: { height: 40, paddingHorizontal: 16, borderRadius: 20, backgroundColor: colors.glass, justifyContent: "center" },
   resetText: { fontFamily: ui(400), color: colors.accent, fontSize: 15 },
   preview: {
     flexDirection: "row",
@@ -212,18 +225,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.hairline,
   },
-  previewKey: {
-    minWidth: 40,
-    height: 36,
-    paddingHorizontal: 8,
-    alignItems: "center",
-    justifyContent: "center",
-    borderRadius: radius.control,
-    borderWidth: 1,
-    borderColor: colors.hairline,
-    backgroundColor: colors.surface,
-  },
-  previewText: { color: colors.text, fontFamily: mono, fontSize: 12 },
   empty: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13, paddingVertical: 8 },
   card: {
     backgroundColor: colors.surface,
@@ -247,21 +248,25 @@ const styles = StyleSheet.create({
   dragging: { zIndex: 1, elevation: 4, shadowColor: "#000", shadowOpacity: 0.4, shadowRadius: 8, shadowOffset: { width: 0, height: 4 } },
   handle: { width: 24, height: ROW, justifyContent: "center", marginLeft: -6, paddingLeft: 6 },
   handleText: { fontFamily: ui(400), color: colors.textMuted, fontSize: 16 },
-  cap: { width: 44, color: colors.textBright, fontFamily: mono, fontSize: 13 },
-  what: { fontFamily: ui(400), flex: 1, color: colors.textMuted, fontSize: 13 },
+  what: { fontFamily: ui(400), flex: 1, color: colors.textBright, fontSize: 14 },
+  chord: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13 },
   remove: { width: TOUCH, height: TOUCH, alignItems: "center", justifyContent: "center" },
-  removeText: { fontFamily: ui(400), color: colors.warning, fontSize: 18 },
+  removeText: { fontFamily: ui(400), color: colors.warning, fontSize: 20 },
   add: { flexDirection: "row", flexWrap: "wrap", gap: 6, paddingHorizontal: 4 },
+  // the board's Add chips: dashed 36 pt pills, the key then its word
   addChip: {
-    minWidth: TOUCH,
-    height: 40,
-    paddingHorizontal: 10,
+    height: 36,
+    flexDirection: "row",
+    gap: 6,
+    paddingLeft: 10,
+    paddingRight: 12,
     alignItems: "center",
     justifyContent: "center",
-    borderRadius: radius.control,
+    borderRadius: 18,
     borderWidth: 1,
     borderStyle: "dashed",
     borderColor: colors.borderStrong,
   },
-  addText: { color: colors.text, fontFamily: mono, fontSize: 12 },
+  addKey: { color: colors.text, fontFamily: ui(400), fontSize: 13 },
+  addText: { color: colors.text, fontFamily: ui(400), fontSize: 13 },
 });

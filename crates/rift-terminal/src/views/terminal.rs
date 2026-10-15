@@ -1144,6 +1144,47 @@ pub fn session_read_text(session: &Session, abs: u64) -> Option<String> {
     copy_line(term.grid(), scrolled, abs).map(|(text, _)| text.trim_end_matches(' ').to_string())
 }
 
+/// Detected URLs on absolute row `abs`, one soft-wrapped across rows
+/// included: (col, len, url) of this row's share of each, with the whole
+/// URL. Looks at most `WRAP_SPAN` rows each way.
+fn urls_on_row(g: &CellGrid, scrolled: u64, abs: u64) -> Vec<(usize, usize, String)> {
+    const WRAP_SPAN: u64 = 8;
+    let cols = g.columns();
+    // one char per cell, so string positions are columns
+    let row_text = |r: u64| -> Option<String> {
+        let rel = r as i64 - scrolled as i64;
+        if rel < -(g.history_size() as i64) || rel >= g.screen_lines() as i64 {
+            return None;
+        }
+        let row = &g[Line(rel as i32)];
+        Some((0..cols).map(|c| row[Column(c)].c).collect())
+    };
+    let mut first = abs;
+    while first > 0 && abs - first < WRAP_SPAN && row_wraps(g, scrolled, first - 1) == Some(true) {
+        first -= 1;
+    }
+    let mut last = abs;
+    while last - abs < WRAP_SPAN && row_wraps(g, scrolled, last) == Some(true) {
+        last += 1;
+    }
+    let mut text = String::new();
+    for r in first..=last {
+        match row_text(r) {
+            Some(t) => text.push_str(&t),
+            None if r < abs => text.extend(std::iter::repeat_n(' ', cols)),
+            None => break,
+        }
+    }
+    let start = (abs - first) as usize * cols;
+    urls_in(text.trim_end_matches(' '))
+        .into_iter()
+        .filter_map(|(col, len, url)| {
+            let (s, e) = (col.max(start), (col + len).min(start + cols));
+            (s < e).then(|| (s - start, e - s, url))
+        })
+        .collect()
+}
+
 /// OSC 8 hyperlink runs on one absolute line: (col, len, uri).
 fn hyperlinks_in(
     term: &rift_pty::alacritty_terminal::term::Term<EventProxy>,
@@ -1828,26 +1869,26 @@ pub fn render(
                         content_x,
                     },
                 });
-                // clickable URLs: subtle underline + hit rect for cmd+click
-                if !alt_screen && let Some(text) = line_text(&term, scrolled, *abs) {
-                    for (col, len, url) in urls_in(&text) {
-                        let ux = content_x + col as f32 * grid.cell_w;
-                        let uw = len as f32 * grid.cell_w;
-                        layer.rect(
-                            [ux, y + grid.line_h - 3.0],
-                            [uw, 1.0],
-                            theme.text_muted.with_alpha(0.6),
-                            0.0,
-                        );
-                        out.url_hits.push(([ux, y, uw, grid.line_h], url));
-                    }
-                }
-                // OSC 8 hyperlinks (ls --hyperlink, gcc, delta): underlined by
-                // render_grid_line, cmd+click opens the target
-                for (col, len, uri) in hyperlinks_in(&term, scrolled, *abs) {
-                    let ux = content_x + col as f32 * grid.cell_w;
-                    out.url_hits
-                        .push(([ux, y, len as f32 * grid.cell_w, grid.line_h], uri));
+                // links, as in Warp: detected URLs and OSC 8 hyperlinks (ls
+                // --hyperlink, gcc, delta) draw in the link color, underlined
+                // under the pointer, on the alternate screen too (Claude Code
+                // and Codex run there)
+                let mut links: Vec<LinkSpan> = Vec::new();
+                for (col, len, uri) in urls_on_row(term.grid(), scrolled, *abs)
+                    .into_iter()
+                    .chain(hyperlinks_in(&term, scrolled, *abs))
+                {
+                    let rect = [
+                        content_x + col as f32 * grid.cell_w,
+                        y,
+                        len as f32 * grid.cell_w,
+                        grid.line_h,
+                    ];
+                    let hovered = grid.mouse.is_some_and(|(mx, my)| {
+                        mx >= rect[0] && mx < rect[0] + rect[2] && my >= y && my < y + grid.line_h
+                    });
+                    links.push(LinkSpan { col, len, hovered });
+                    out.url_hits.push((rect, uri));
                 }
                 render_grid_line(
                     layer,
@@ -1863,6 +1904,7 @@ pub fn render(
                     cursor.point.column.0,
                     search,
                     sel_range,
+                    &links,
                 );
             }
             DisplayLine::Pad => {
@@ -1985,6 +2027,23 @@ fn selection_color(theme: &Theme, block: &Block) -> Color {
     }
 }
 
+/// A link on one grid line: columns `col..col + len`, and whether the
+/// pointer rests on it.
+struct LinkSpan {
+    col: usize,
+    len: usize,
+    hovered: bool,
+}
+
+/// A link's text color: the accent, lighter under the pointer (Warp).
+fn link_color(theme: &Theme, hovered: bool) -> Color {
+    if hovered {
+        theme.accent.mix(theme.text_bright, 0.35)
+    } else {
+        theme.accent
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_grid_line(
     layer: &mut Layer,
@@ -2000,6 +2059,7 @@ fn render_grid_line(
     cursor_col: usize,
     search: Option<&SearchCtx>,
     sel_range: Option<SelectionRange>,
+    links: &[LinkSpan],
 ) {
     let g = term.grid();
     let rel = abs as i64 - scrolled as i64;
@@ -2066,6 +2126,12 @@ fn render_grid_line(
         }
         if flags.contains(Flags::DIM) {
             fg = fg.with_alpha(0.66);
+        }
+        let link = links.iter().find(|l| col >= l.col && col < l.col + l.len);
+        if let Some(l) = link
+            && !flags.contains(Flags::INVERSE)
+        {
+            fg = link_color(theme, l.hovered);
         }
 
         // selection highlight (search match wins below)
@@ -2182,7 +2248,7 @@ fn render_grid_line(
                     decos.push(([sx, base], [seg.min(cx + cell_px - sx), 1.0], deco));
                     sx += seg * 2.0;
                 }
-            } else if flags.contains(Flags::UNDERLINE) || cell.hyperlink().is_some() {
+            } else if flags.contains(Flags::UNDERLINE) || link.is_some_and(|l| l.hovered) {
                 decos.push(([cx, base], [cell_px, 1.0], deco));
             }
             if flags.contains(Flags::STRIKEOUT) {
@@ -2819,6 +2885,36 @@ mod tests {
         g[Line(1)][Column(0)].push_zerowidth('\u{301}');
         g[Line(1)][Column(1)].c = 'y';
         t
+    }
+
+    #[test]
+    fn a_url_soft_wrapped_across_rows_is_a_link_on_each() {
+        use rift_pty::alacritty_terminal::term::{Config, test::TermSize};
+        let mut t = rift_pty::alacritty_terminal::term::Term::new(
+            Config::default(),
+            &TermSize::new(12, 4),
+            Noop,
+        );
+        let g = t.grid_mut();
+        for (r, text) in ["go https://e", "xample.com/a", "bc done", "x https://b"]
+            .into_iter()
+            .enumerate()
+        {
+            for (c, ch) in text.chars().enumerate() {
+                g[Line(r as i32)][Column(c)].c = ch;
+            }
+        }
+        g[Line(0)][Column(11)].flags.insert(Flags::WRAPLINE);
+        g[Line(1)][Column(11)].flags.insert(Flags::WRAPLINE);
+        let url = "https://example.com/abc".to_string();
+        assert_eq!(urls_on_row(t.grid(), 0, 0), vec![(3, 9, url.clone())]);
+        assert_eq!(urls_on_row(t.grid(), 0, 1), vec![(0, 12, url.clone())]);
+        assert_eq!(urls_on_row(t.grid(), 0, 2), vec![(0, 2, url)]);
+        // a row that does not wrap stands alone
+        assert_eq!(
+            urls_on_row(t.grid(), 0, 3),
+            vec![(2, 9, "https://b".to_string())]
+        );
     }
 
     #[test]

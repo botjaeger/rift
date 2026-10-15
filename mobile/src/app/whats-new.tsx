@@ -7,7 +7,7 @@ import { parseChangelog, releaseKey, releasesSince } from "@/changelog";
 import { CHANGELOG } from "@/changelog.data";
 import { APP_UPDATE } from "@/release";
 import { Button } from "@/ui/Button";
-import { ReleaseCard } from "@/ui/ReleaseNotes";
+import { ReleaseList, ReleasePill } from "@/ui/ReleaseNotes";
 import { colors, ui } from "@/ui/theme";
 
 /**
@@ -28,14 +28,16 @@ export default function WhatsNewScreen() {
   return (
     <ScrollView style={styles.fill} contentContainerStyle={[styles.content, { paddingBottom: Math.max(36, insets.bottom + 2) }]}>
       <View style={styles.head}>
-        <Text style={styles.title} accessibilityRole="header">
-          What&apos;s New
-        </Text>
+        <View style={styles.titleRow}>
+          <Text style={styles.title} accessibilityRole="header">
+            What&apos;s New
+          </Text>
+          <ReleasePill release={releases[0]!} />
+        </View>
         <Text style={styles.lead}>Rift was updated. Here is what changed.</Text>
       </View>
-      {releases.map((r) => (
-        <ReleaseCard key={releaseKey(r.version, r.update)} release={r} />
-      ))}
+      <View style={styles.rule} />
+      <ReleaseList releases={releases} named={false} />
       <View style={styles.buttons}>
         <Button label="All changes" style={styles.button} onPress={() => router.replace("/changelog")} />
         <Button label="Done" variant="primary" style={styles.button} onPress={() => router.back()} />
@@ -48,7 +50,9 @@ const styles = StyleSheet.create({
   fill: { backgroundColor: colors.surface },
   content: { paddingTop: 24, paddingHorizontal: 20, gap: 16, maxWidth: 560, width: "100%", alignSelf: "center" },
   head: { gap: 4 },
+  titleRow: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", columnGap: 12, rowGap: 6 },
   title: { fontFamily: ui(600), color: colors.textBright, fontSize: 20 },
+  rule: { height: 1, backgroundColor: colors.hairline },
   lead: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13 },
   buttons: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
   button: { flexGrow: 1, flexBasis: 120 },

@@ -1,13 +1,16 @@
 import { useRouter } from "expo-router";
 import { useState } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Platform, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { avatarFor } from "@/avatar";
 import { agoText } from "@/chips";
 import { canOperate, type HostView } from "@/fleet";
-import { tabLast, tabPane, tabState } from "@/now";
+import { programName, tabLast, tabMatches, tabPane, tabStarted, tabState } from "@/now";
 import { fleet, useApp } from "@/runtime";
 import { tabTitle } from "@/topology";
 import { Button } from "@/ui/Button";
+import { Avatar } from "@/ui/Avatar";
 import { describeConn } from "@/ui/connLabel";
+import { formatClock } from "@/ui/format";
 import { Icon } from "@/ui/Icon";
 import { ErrorText } from "@/ui/Notice";
 import { TabScreen } from "@/ui/Screen";
@@ -34,13 +37,27 @@ function hostRight(host: HostView, now: number, collapsed: boolean): string {
   return seen !== null ? `seen ${agoText(now - seen)}` : "not connected yet";
 }
 
-function Computer({ host, now, open, onToggle }: { host: HostView; now: number; open: boolean; onToggle: () => void }) {
+function Computer({
+  host,
+  now,
+  open,
+  onToggle,
+  query,
+}: {
+  host: HostView;
+  now: number;
+  open: boolean;
+  onToggle: () => void;
+  /** Computers' search: only the tabs it finds, the computer open. */
+  query: string;
+}) {
   const router = useRouter();
   const online = host.conn.status === "open";
   const failed = host.conn.status === "failed";
   const why = !online && host.conn.status !== "connecting" ? describeConn(host.conn).label : null;
-  const tabs = host.windows.flatMap((w) => w.tabs);
-  const expanded = online && open;
+  const searching = query.trim() !== "";
+  const tabs = host.windows.flatMap((w) => w.tabs).filter((t) => tabMatches(t, query));
+  const expanded = online && (open || searching);
   const right = hostRight(host, now, online && !open);
   // the permission of this connection, else the one stored at pairing
   const viewOnly = !canOperate(host);
@@ -66,13 +83,21 @@ function Computer({ host, now, open, onToggle }: { host: HostView; now: number; 
       </Pressable>
       {expanded
         ? tabs.map((t, i) => {
-            const st = STATE[tabState(t)];
+            const state = tabState(t);
+            const st = STATE[state];
             const pane = tabPane(t);
+            const p = t.panes.find((x) => x.id === pane) ?? t.panes[0];
+            const started = tabStarted(t);
+            const time = state === "running" && started !== null ? formatClock(now - started) : null;
+            // a dot for what wants a look: a question, a failure
+            const attention = state === "needs" || state === "failed";
+            const failedExit = t.panes.find((x) => x.last_exit !== null && x.last_exit !== 0)?.last_exit;
+            const label = state === "failed" && failedExit != null ? `✕ ${failedExit}` : st?.label;
             return (
               <Pressable
                 key={`${i}:${t.index}`}
                 accessibilityRole="button"
-                accessibilityLabel={[tabTitle(t), tabLast(t), st?.label].filter(Boolean).join(", ")}
+                accessibilityLabel={[tabTitle(t), tabLast(t), st?.label, time ? `for ${time}` : null].filter(Boolean).join(", ")}
                 accessibilityHint="Opens the tab"
                 disabled={pane === null}
                 onPress={() =>
@@ -80,15 +105,23 @@ function Computer({ host, now, open, onToggle }: { host: HostView; now: number; 
                 }
                 style={({ pressed }) => [styles.tab, pressed && styles.pressed]}
               >
+                <View style={[styles.unread, attention && styles.unreadOn]} />
+                <Avatar avatar={avatarFor(p?.cwd, tabTitle(t), p ? programName(p) : null)} />
                 <View style={styles.tabText}>
-                  <Text style={styles.tabName} numberOfLines={1}>
-                    {tabTitle(t)}
-                  </Text>
-                  <Text style={styles.tabLast} numberOfLines={1}>
-                    {tabLast(t) || " "}
-                  </Text>
+                  <View style={styles.tabLine}>
+                    <Text style={styles.tabName} numberOfLines={1}>
+                      {tabTitle(t)}
+                    </Text>
+                    {time ? <Text style={styles.tabTime}>{time}</Text> : null}
+                  </View>
+                  <View style={styles.tabLine}>
+                    <Text style={styles.tabLast} numberOfLines={1}>
+                      {tabLast(t) || " "}
+                    </Text>
+                    {label ? <Text style={[styles.state, { color: st!.color }]}>{label}</Text> : null}
+                  </View>
                 </View>
-                {st ? <Text style={[styles.state, { color: st.color }]}>{st.label}</Text> : null}
+                <Icon name="forward" size={14} color={colors.textMuted} />
               </Pressable>
             );
           })
@@ -113,7 +146,10 @@ export default function ComputersScreen() {
   const router = useRouter();
   const s = useApp();
   // "seen 2 h ago" moves on
-  const now = useNow(60_000);
+  const [query, setQuery] = useState("");
+  // the running tabs' clocks tick each second, else "seen 2 h ago" each minute
+  const ticking = s.hosts.some((h) => h.windows.some((w) => w.tabs.some((t) => tabStarted(t) !== null)));
+  const now = useNow(ticking ? 1000 : 60_000);
   // which computers show their tabs: the first connected one until the user picks
   const [picked, setPicked] = useState<ReadonlySet<string> | null>(null);
   const first = s.hosts.find((h) => h.conn.status === "open")?.record.key;
@@ -134,11 +170,41 @@ export default function ComputersScreen() {
     </Pressable>
   );
   return (
-    <TabScreen title="Computers" accessory={pair} gap={10} large>
+    <TabScreen
+      title="Computers"
+      accessory={pair}
+      gap={10}
+      large
+      overlay={
+        s.hosts.length > 0 ? (
+          <View style={styles.search}>
+            <Icon name="search" size={17} color={colors.textMuted} />
+            <TextInput
+              value={query}
+              onChangeText={setQuery}
+              placeholder="Search tabs and commands"
+              placeholderTextColor={colors.textMuted}
+              autoCapitalize="none"
+              autoCorrect={false}
+              returnKeyType="search"
+              clearButtonMode="while-editing"
+              accessibilityLabel="Search tabs and commands"
+              style={[styles.searchInput, Platform.OS === "web" && styles.noRing]}
+            />
+          </View>
+        ) : null
+      }
+    >
       {s.hosts.length === 0 && s.ready ? <Text style={styles.empty}>No computer paired yet.</Text> : null}
       {s.hosts.map((h) => (
-        <Computer key={h.record.key} host={h} now={now} open={open.has(h.record.key)} onToggle={() => toggle(h.record.key)} />
+        <Computer key={h.record.key} host={h} now={now} open={open.has(h.record.key)} onToggle={() => toggle(h.record.key)} query={query} />
       ))}
+      {query.trim() !== "" &&
+      !s.hosts.some((h) => h.conn.status === "open" && h.windows.some((w) => w.tabs.some((t) => tabMatches(t, query)))) ? (
+        <Text style={styles.empty} accessibilityLiveRegion="polite">
+          No tab holds “{query.trim()}”.
+        </Text>
+      ) : null}
     </TabScreen>
   );
 }
@@ -163,20 +229,42 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: `${colors.warning}55`,
   },
+  // the Computers board's tab rows: a dot for what wants a look, the avatar, two lines, ›
   tab: {
     flexDirection: "row",
     alignItems: "center",
     gap: 12,
     paddingVertical: 10,
-    paddingHorizontal: 14,
-    minHeight: 52,
+    paddingLeft: 8,
+    paddingRight: 12,
+    minHeight: 60,
     borderTopWidth: 1,
     borderTopColor: colors.hairline,
   },
-  tabText: { flex: 1, minWidth: 0, gap: 2 },
-  tabName: { fontFamily: ui(400), color: colors.textBright, fontSize: 14 },
-  tabLast: { fontFamily: mono, color: colors.textMuted, fontSize: 12 },
+  unread: { width: 6, height: 6, borderRadius: 3, marginRight: -6 },
+  unreadOn: { backgroundColor: colors.accent },
+  tabText: { flex: 1, minWidth: 0, gap: 3 },
+  tabLine: { flexDirection: "row", alignItems: "baseline", gap: 8 },
+  tabName: { flex: 1, fontFamily: ui(600), color: colors.textBright, fontSize: 15 },
+  tabTime: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12, fontVariant: ["tabular-nums"] },
+  tabLast: { flex: 1, fontFamily: mono, color: colors.textMuted, fontSize: 12 },
   state: { fontFamily: ui(400), fontSize: 12 },
+  // the floating search bar over the page (the Computers board)
+  search: {
+    height: 44,
+    borderRadius: 22,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: 16,
+    backgroundColor: colors.floating,
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.14)",
+    boxShadow: "0 10px 30px rgba(0, 0, 0, 0.45)",
+  },
+  searchInput: { flex: 1, minWidth: 0, height: 42, padding: 0, color: colors.textBright, fontFamily: ui(400), fontSize: 15 },
+  // web only: Chrome draws `outline-style: auto` whatever its width
+  noRing: { outlineStyle: "none" as "solid" },
   inset: { marginHorizontal: 14, marginBottom: 12, gap: 8 },
   why: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12 },
 });

@@ -1,13 +1,16 @@
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AccessibilityInfo, Keyboard, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { avatarFor, type Avatar as AvatarModel } from "@/avatar";
 import { canOperate, draftKey, hasFeature, type HostView } from "@/fleet";
-import { agoShort } from "@/now";
+import { agoShort, programName } from "@/now";
 import type { Completion, HistoryEntry } from "@/protocol/types";
 import { commandProblem } from "@/protocol/types";
 import { fleet, useApp } from "@/runtime";
 import { tabTitle } from "@/topology";
+import { Avatar } from "@/ui/Avatar";
 import { confirmDestructive } from "@/ui/confirm";
+import { Icon } from "@/ui/Icon";
 import { ErrorText } from "@/ui/Notice";
 import { SheetClose } from "@/ui/SheetClose";
 import { useNow } from "@/ui/useNow";
@@ -22,6 +25,8 @@ interface Target {
   label: string;
   /** What the pane runs or last ran: tabs often share a title (the same folder), this tells them apart. */
   detail: string | null;
+  /** The pane's avatar (the Run board's picker). */
+  avatar: AvatarModel;
 }
 
 function targets(hosts: readonly HostView[]): Target[] {
@@ -36,6 +41,7 @@ function targets(hosts: readonly HostView[]): Target[] {
             pane: p.id,
             label: `${h.record.name} › ${tabTitle(t)} › pane ${i + 1}`,
             detail: p.job ? `running ${p.job}` : p.last_command,
+            avatar: avatarFor(p.cwd, tabTitle(t), programName(p)),
           });
   }
   return out;
@@ -153,6 +159,7 @@ export default function RunSheet() {
           hitSlop={{ top: 6, bottom: 6 }}
           style={({ pressed }) => [styles.picker, pressed && styles.pressed]}
         >
+          {target ? <Avatar avatar={target.avatar} size={22} /> : null}
           <Text style={styles.pickerText} numberOfLines={1} ellipsizeMode="middle">
             {/* the ▾ only where it opens something: one pane leaves nothing to pick */}
             {target ? `${target.label}${all.length > 1 ? " ▾" : ""}` : "No computer you can run commands on"}
@@ -182,6 +189,17 @@ export default function RunSheet() {
             // the field's accent border is its focus; the browser's own ring drew a second box inside it
             style={[styles.input, Platform.OS === "web" && styles.noRing]}
           />
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Run"
+            accessibilityState={{ disabled: !target || line.trim() === "" }}
+            disabled={!target || line.trim() === ""}
+            onPress={() => void run(line)}
+            hitSlop={6}
+            style={({ pressed }) => [styles.send, target && line.trim() !== "" && styles.sendOn, pressed && styles.pressed]}
+          >
+            <Icon name="run" size={16} color={target && line.trim() !== "" ? colors.bg : colors.textMuted} />
+          </Pressable>
         </View>
         {error ? <ErrorText>{error}</ErrorText> : null}
       </View>
@@ -283,24 +301,31 @@ const styles = StyleSheet.create({
     alignSelf: "flex-start",
     maxWidth: "100%",
     height: 32,
-    paddingHorizontal: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingLeft: 5,
+    paddingRight: 12,
     borderRadius: 16,
     borderWidth: 1,
     borderColor: colors.borderStrong,
     justifyContent: "center",
   },
-  pickerText: { fontFamily: ui(400), color: colors.text, fontSize: 13 },
+  pickerText: { flexShrink: 1, fontFamily: ui(400), color: colors.text, fontSize: 13 },
   field: {
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
     height: 46,
-    paddingHorizontal: 12,
-    borderRadius: 10,
+    paddingLeft: 14,
+    paddingRight: 5,
+    borderRadius: 23,
     backgroundColor: colors.bg,
     borderWidth: 1,
     borderColor: colors.accent,
   },
+  send: { width: 34, height: 34, borderRadius: 17, backgroundColor: colors.glassRim, alignItems: "center", justifyContent: "center" },
+  sendOn: { backgroundColor: colors.accent },
   mark: { fontFamily: mono, color: colors.success, fontSize: 14 },
   input: { flex: 1, minWidth: 0, height: 46, padding: 0, color: colors.textBright, fontFamily: mono, fontSize: 14 },
   // web only: Chrome draws `outline-style: auto` whatever its width ("none" is not in the native types)
