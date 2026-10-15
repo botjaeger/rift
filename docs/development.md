@@ -311,6 +311,14 @@ downloaded). The app's updater reads
    `vX.Y.Z` in `botjaeger/rift-releases` with every package, `latest.json`,
    `latest.json.sig`, and the CHANGELOG section as notes (`--draft` to
    review first; `--run ID` to pick a workflow run).
+
+   When GitHub Actions cannot run (billing, an outage), build the same
+   packages on a Mac instead: `scripts/release-local.sh vX.Y.Z` checks out
+   the tag in a temporary worktree, builds both macOS targets natively and
+   Linux x86_64 in docker (`linux/amd64`, emulated on Apple silicon), and
+   writes `latest.json` into `target/release-local/vX.Y.Z`; then
+   `scripts/publish-release.sh vX.Y.Z --dist target/release-local/vX.Y.Z`.
+   It builds without checking: run `scripts/gates.sh all` on the tag first.
 4. Running copies see the release within 6 hours (or at once via *Check for
    updates*).
 

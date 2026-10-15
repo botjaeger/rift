@@ -89,9 +89,17 @@ chmod +x "$TOOL"
 OUT="$TARGET_DIR/Rift-$VERSION-$(rift_target_arch "$TRIPLE").AppImage"
 rm -f "$OUT"
 
-# --appimage-extract-and-run: docker and GitHub runners have no FUSE, so the
-# tool cannot mount its own squashfs and must unpack itself instead.
-ARCH="$ARCH" "$TOOL" --appimage-extract-and-run "$APPDIR" "$OUT"
+# Docker and GitHub runners have no FUSE, so the tool cannot mount its own
+# squashfs: unpack it and run its AppRun. The unpacking runs a copy with the
+# AppImage magic (ELF header bytes 8-10) zeroed: emulators (qemu, Rosetta in
+# an amd64 container on Apple silicon, scripts/release-local.sh) refuse to
+# execute the file with it.
+UNPACK="$(mktemp -d)"
+trap 'rm -rf "$UNPACK"' EXIT
+cp "$TOOL" "$UNPACK/tool"
+printf '\0\0\0' | dd of="$UNPACK/tool" bs=1 seek=8 count=3 conv=notrunc 2>/dev/null
+(cd "$UNPACK" && ./tool --appimage-extract >/dev/null)
+ARCH="$ARCH" "$UNPACK/squashfs-root/AppRun" "$APPDIR" "$OUT"
 chmod +x "$OUT"
 
 echo "built $OUT ($(du -h "$OUT" | cut -f1))"

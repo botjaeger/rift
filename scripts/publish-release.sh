@@ -3,8 +3,10 @@
 # the artifacts of the Release workflow run for that tag (in the private
 # botjaeger/rift). Run by the maintainer with their own `gh` login.
 #
-# Usage: scripts/publish-release.sh vX.Y.Z [--run RUN_ID] [--draft]
+# Usage: scripts/publish-release.sh vX.Y.Z [--run RUN_ID | --dist DIR] [--draft]
 #   --run    use that workflow run instead of the newest successful one
+#   --dist   use artifacts built locally by scripts/release-local.sh instead
+#            of a workflow run (for when GitHub Actions cannot run)
 #   --draft  create the release as a draft (the updater ignores drafts)
 # A version with a pre-release suffix (v1.2.0-rc.1) is published as a
 # GitHub pre-release.
@@ -25,10 +27,12 @@ PUBLIC_REPO=botjaeger/rift-releases
 
 TAG=""
 RUN=""
+LOCAL=""
 DRAFT=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --run)     RUN="${2:?--run needs a run id}"; shift 2 ;;
+        --dist)    LOCAL="${2:?--dist needs a directory}"; shift 2 ;;
         --draft)   DRAFT=(--draft); shift ;;
         -h|--help) rift_usage; exit 0 ;;
         v*)        TAG="$1"; shift ;;
@@ -59,26 +63,34 @@ NOTES="$(awk -v v="$VERSION" '
 ' CHANGELOG.md)"
 [ -n "${NOTES//[[:space:]]/}" ] || rift_die "CHANGELOG.md has no section for $VERSION"
 
-if [ -z "$RUN" ]; then
-    RUN="$(gh run list -R "$SOURCE_REPO" --workflow release.yml --limit 50 \
-        --json databaseId,headBranch,conclusion \
-        --jq "[.[] | select(.headBranch == \"$TAG\" and .conclusion == \"success\")][0].databaseId // empty")"
-    [ -n "$RUN" ] || rift_die "no successful Release workflow run for $TAG in $SOURCE_REPO"
-fi
-echo "release workflow run $RUN"
-
+[ -z "$RUN" ] || [ -z "$LOCAL" ] || rift_die "--run and --dist exclude each other"
 DIST="$(mktemp -d)"
 trap 'rm -rf "$DIST"' EXIT
-gh run download "$RUN" -R "$SOURCE_REPO" -D "$DIST"
+if [ -n "$LOCAL" ]; then
+    [ -d "$LOCAL" ] || rift_die "no directory $LOCAL"
+    # a copy: signing writes latest.json.sig next to the manifest
+    cp -R "$LOCAL"/. "$DIST"/
+    SOURCE="local build $LOCAL"
+else
+    if [ -z "$RUN" ]; then
+        RUN="$(gh run list -R "$SOURCE_REPO" --workflow release.yml --limit 50 \
+            --json databaseId,headBranch,conclusion \
+            --jq "[.[] | select(.headBranch == \"$TAG\" and .conclusion == \"success\")][0].databaseId // empty")"
+        [ -n "$RUN" ] || rift_die "no successful Release workflow run for $TAG in $SOURCE_REPO"
+    fi
+    gh run download "$RUN" -R "$SOURCE_REPO" -D "$DIST"
+    SOURCE="run $RUN"
+fi
+echo "release artifacts: $SOURCE"
 
 MANIFEST="$(find "$DIST" -type f -name latest.json | head -n 1)"
-[ -n "$MANIFEST" ] || rift_die "run $RUN has no latest.json artifact"
+[ -n "$MANIFEST" ] || rift_die "$SOURCE has no latest.json artifact"
 python3 scripts/release-manifest.py --verify "$MANIFEST" "$DIST"
 GOT="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["version"])' "$MANIFEST")"
 [ "$GOT" = "$VERSION" ] || rift_die "latest.json is for $GOT, not $TAG"
 # the updater refuses a manifest without a valid signature: sign it here
 # (the key never reaches CI), check it, and publish latest.json.sig with it
-[ ! -e "$MANIFEST.sig" ] || rift_die "run $RUN already carries a latest.json.sig"
+[ ! -e "$MANIFEST.sig" ] || rift_die "$SOURCE already carries a latest.json.sig"
 scripts/sign-manifest.sh "$MANIFEST"
 scripts/sign-manifest.sh --verify "$MANIFEST"
 
