@@ -8,6 +8,30 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.3.1 — 2026-10-15
+
+Claude Code and Codex work fully inside Rift.
+
+### Improved
+
+- **Symbols like ⏱ ✔ ☀** — they draw as plain text symbols, as in Warp and
+  iTerm2, instead of color emoji (add the emoji selector to get color).
+- **Light and dark theme switches** — Claude Code follows them while it runs.
+
+### Fixed
+
+- **⌘V pastes images into Claude Code** — with an image on the clipboard,
+  ⌘V now pastes it, as ⌃V already did.
+- **Elapsed time on restored tabs** — the hourglass starts over with a new
+  shell instead of counting from yesterday's session.
+- **⌥↑ / ⌥↓ and ⌥⇧F in programs** — while a program runs (Codex, for
+  example) these keys reach it instead of jumping between bookmarks or
+  opening the block filter.
+- **⌥⏎ for a new line** — it inserts a line break in Claude Code and Codex
+  again.
+- **Codex picks up your theme colors** — it now reads the background color
+  at startup.
+
 ## 0.3.0 — 2026-10-15
 
 Your phone can open a tab on this computer even while Rift is closed.
