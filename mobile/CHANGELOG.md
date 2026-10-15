@@ -6,6 +6,31 @@ build (`## <version> — <YYYY-MM-DD>`) or an over-the-air update to one
 message its download carries. Items use `### New`, `### Improved` or
 `### Fixed` sections of `- **Title** — text`.
 
+## 0.2.0 · update 2 — 2026-10-15
+
+A fresh look: glass headers, project avatars, search on Computers and rounder keys.
+
+### New
+
+- **Search tabs and commands** — a search bar on Computers finds tabs on every computer
+  by title, command, program or folder.
+- **Terminal view** — the pane's header shows its screen as it is, whatever runs, until
+  you press it again.
+- **Paste and Shift keys** — Paste types your clipboard; Shift applies to the next key.
+  Add them in Settings › Keys.
+
+### Improved
+
+- **New look** — round glass headers whose back button counts the panes that need you,
+  colored avatars for each project, round keys with icons, and a round command line with
+  its own run button.
+- **Hide keyboard** — the key row starts with a key that puts the keyboard away.
+
+### Fixed
+
+- **What's New closing itself** — after an update, What's New stays open until you close
+  it.
+
 ## 0.2.0 · update 1 — 2026-10-15
 
 Page titles stay below the clock after you type.

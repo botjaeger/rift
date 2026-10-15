@@ -8,6 +8,34 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.5.0 — 2026-10-15
+
+Tabs sized like Warp's, links that work inside Claude Code and Codex, and prompt chips
+that fit narrow panes.
+
+### New
+
+- **Tabs like Warp's** — every tab is the same width on a slimmer tab bar; a long title
+  is cut short, and many tabs shrink evenly to fit.
+- **When this tab started** — resting on the time-on-this-tab chip shows when its clock
+  started, with the date once it has run a day.
+
+### Improved
+
+- **Chips in a narrow pane** — prompt chips that do not fit one row wrap onto the next
+  instead of being cut off.
+- **Links** — links are colored and underline when you rest on them; a link that wraps
+  onto the next line opens whole.
+- **config.toml beside Settings** — Settings → Open config.toml shows the file next to
+  the Settings page instead of leaving it, and What's New opens over Settings.
+
+### Fixed
+
+- **Links in Claude Code and Codex** — links inside full-screen programs are found and
+  open on click, instead of the click going to the program.
+- **Tools shown as unknown after opening Rift from the Dock** — Homebrew tools such as
+  docker are no longer underlined red when Rift starts from the Dock or Finder.
+
 ## 0.4.0 — 2026-10-15
 
 Links you can hover and click, colored command lines, and your shell's aliases and
