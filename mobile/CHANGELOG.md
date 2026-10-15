@@ -6,6 +6,22 @@ build (`## <version> — <YYYY-MM-DD>`) or an over-the-air update to one
 message its download carries. Items use `### New`, `### Improved` or
 `### Fixed` sections of `- **Title** — text`.
 
+## 0.2.0 · update 6 — 2026-10-15
+
+Talk to Claude Code from your phone, and its pane opens in the Terminal view.
+
+### New
+
+- **Message a running program** — while Claude Code or another program runs, the command line
+  sends what you type to it, then Return.
+- **Zoom fits the program** — with Rift 0.7.0 on your computer, zooming the Terminal view
+  resizes the pane, so the program lays itself out for your phone.
+
+### Improved
+
+- **Terminal view for agents** — a pane running Claude Code opens in the Terminal view; the
+  terminal button still switches back to the commands.
+
 ## 0.2.0 · update 5 — 2026-10-15
 
 A new look: Computers is the home page, panes show commands as cards, and Settings is rebuilt.

@@ -8,6 +8,21 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.7.0 — 2026-10-15
+
+Your phone can fit a pane to its screen, and it sees panes the way Rift draws them.
+
+### New
+
+- **Phone-sized panes** — while your phone shows a pane's Terminal view, the pane takes the
+  phone's width, so Claude Code and other programs lay themselves out for it; zooming on the
+  phone resizes it again. The pane goes back to its own size when the phone leaves it.
+
+### Improved
+
+- **Panes on your phone look like Rift** — the phone's Terminal view shows each command's
+  header as Rift draws it, instead of the shell's raw prompts.
+
 ## 0.6.0 — 2026-10-15
 
 Your phone can now tell a Claude Code or Codex session that is working from one that waits
