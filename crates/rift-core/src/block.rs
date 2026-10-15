@@ -47,6 +47,10 @@ pub struct Block {
     /// Replayed from a saved transcript: the command is not running and
     /// the output is from a previous session.
     pub restored: bool,
+    /// Finished while the session service replayed what it kept for a
+    /// window that (re)started: it finished before this window saw it, so it
+    /// raises no notification.
+    pub replayed: bool,
     /// Wall-clock time the command finished (history ages); `None` while
     /// it runs and for replayed blocks.
     pub finished_at: Option<std::time::SystemTime>,
@@ -90,6 +94,9 @@ pub struct BlockStore {
     /// When set, markers are timestamped with this instant instead of now
     /// (output replayed from the session service keeps its original time).
     clock: Option<Instant>,
+    /// The first attach's replay runs: blocks finishing now are
+    /// [`Block::replayed`].
+    replaying: bool,
     /// Exact text the app submitted from its editor, waiting for 133;C. It
     /// wins over the text read back from the screen, which loses combining
     /// marks and turns continuation prompts (PS2) into command text.
@@ -113,12 +120,29 @@ impl BlockStore {
         self.clock = at;
     }
 
+    /// The first attach's replay starts (true) or ends (false).
+    pub fn set_replaying(&mut self, on: bool) {
+        self.replaying = on;
+    }
+
     fn now(&self) -> Instant {
         self.clock.unwrap_or_else(Instant::now)
     }
 
+    /// Wall-clock time of [`Self::now`] (a replayed marker's own time).
+    fn wall_now(&self) -> std::time::SystemTime {
+        let now = std::time::SystemTime::now();
+        match self.clock {
+            Some(at) => now
+                .checked_sub(Instant::now().saturating_duration_since(at))
+                .unwrap_or(now),
+            None => now,
+        }
+    }
+
     pub fn on_prompt_start(&mut self, abs: AbsLine) {
         let now = self.now();
+        let (wall, replaying) = (self.wall_now(), self.replaying);
         // a new prompt without 133;C: the submission ran nothing
         self.submitted = None;
         let after_resize = std::mem::take(&mut self.resized_at_prompt);
@@ -141,7 +165,8 @@ impl BlockStore {
                         exit: None,
                         duration: now.saturating_duration_since(started),
                     };
-                    last.finished_at = Some(std::time::SystemTime::now());
+                    last.finished_at = Some(wall);
+                    last.replayed = replaying;
                 }
                 BlockState::Done { .. } => {}
             }
@@ -160,6 +185,7 @@ impl BlockStore {
             cwd: None,
             branch: None,
             restored: false,
+            replayed: false,
             finished_at: None,
         });
         self.next_id += 1;
@@ -243,6 +269,7 @@ impl BlockStore {
 
     pub fn on_done(&mut self, abs: AbsLine, exit: Option<i32>) {
         let now = self.now();
+        let (wall, replaying) = (self.wall_now(), self.replaying);
         if let Some(last) = self.blocks.back_mut()
             && let BlockState::Running { started } = last.state
         {
@@ -251,7 +278,8 @@ impl BlockStore {
                 exit,
                 duration: now.saturating_duration_since(started),
             };
-            last.finished_at = Some(std::time::SystemTime::now());
+            last.finished_at = Some(wall);
+            last.replayed = replaying;
         }
     }
 
@@ -385,6 +413,33 @@ mod tests {
         assert_eq!(b.exit_code(), Some(0));
         assert_eq!(b.suppressed_range(), Some((10, 12)));
         assert_eq!(b.output_range(), Some((12, 20)));
+    }
+
+    #[test]
+    fn replayed_commands_keep_their_own_finish_time() {
+        let hour = std::time::Duration::from_secs(3600);
+        let mut s = BlockStore::default();
+        // the first attach's replay: an hour-old command
+        s.set_replaying(true);
+        s.set_clock(Instant::now().checked_sub(hour));
+        s.on_prompt_start(0);
+        s.on_command_start(0, 2);
+        s.on_output_start(1, "make".into());
+        s.on_done(3, Some(0));
+        s.on_prompt_start(4);
+        s.set_clock(None);
+        s.set_replaying(false);
+        let old = s.iter().find(|b| b.command == "make").unwrap();
+        assert!(old.replayed);
+        let age = old.finished_at.unwrap().elapsed().unwrap();
+        assert!(age >= hour - std::time::Duration::from_secs(5), "{age:?}");
+        // a command after the replay is live
+        s.on_command_start(4, 2);
+        s.on_output_start(5, "ls".into());
+        s.on_done(6, Some(0));
+        let live = s.last().unwrap();
+        assert!(!live.replayed);
+        assert!(live.finished_at.unwrap().elapsed().unwrap() < hour);
     }
 
     #[test]

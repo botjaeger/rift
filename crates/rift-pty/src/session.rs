@@ -730,12 +730,17 @@ impl Reader {
                             self.saw_output.store(true, Ordering::Release);
                             // replayed output keeps its original timing,
                             // so block durations survive a reattach
-                            let replaying = resumed || muted.load(Ordering::Acquire);
+                            let first = muted.load(Ordering::Acquire);
+                            let replaying = resumed || first;
                             if replaying {
                                 let age = crate::ipc::now_ms().saturating_sub(at_ms);
                                 let at = std::time::Instant::now()
                                     .checked_sub(std::time::Duration::from_millis(age));
-                                self.ctx.blocks.lock().unwrap().set_clock(at);
+                                let mut blocks = self.ctx.blocks.lock().unwrap();
+                                blocks.set_clock(at);
+                                // the first attach's commands finished before
+                                // this window: no notifications for them
+                                blocks.set_replaying(first);
                             }
                             feed(&mut parser, &mut scanner, &bytes, &self.ctx);
                             if !replaying {
@@ -745,7 +750,11 @@ impl Reader {
                         Frame::Json(body) => match serde_json::from_slice::<Ev>(&body) {
                             Ok(Ev::ReplayDone { .. }) => {
                                 resumed = false;
-                                self.ctx.blocks.lock().unwrap().set_clock(None);
+                                {
+                                    let mut blocks = self.ctx.blocks.lock().unwrap();
+                                    blocks.set_clock(None);
+                                    blocks.set_replaying(false);
+                                }
                                 muted.store(false, Ordering::Release);
                                 self.wake();
                             }

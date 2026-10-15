@@ -582,6 +582,15 @@ pub struct PaneRunning {
     pub started: Option<u64>,
     /// The screen's last non-empty line at or above the cursor.
     pub line: String,
+    /// A coding agent's name for its session: the pane's own title without
+    /// the agent's status mark ("Code changes overview"); absent for any
+    /// other program.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// A coding agent that waits at its own prompt: it runs, but is not
+    /// working.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub idle: bool,
 }
 
 /// What a pane's running command waits for, and how it is answered.

@@ -558,7 +558,8 @@ each pane: the service replays the output it kept (the newest 8 MiB per
 shell) into a fresh terminal, with the original timing so block durations
 stay right, then continues live. Nothing is shown twice, and automatic
 terminal replies (device attributes, image OKs) are not re-sent during the
-replay.
+replay. Commands that finished before the reattach keep their own finish
+time and do not appear again in Notifications.
 
 - Closing a pane (⌘W) ends its shell, as without the service. ⌘K also drops
   the retained output, so a reattach does not bring it back.
@@ -828,7 +829,10 @@ line shows the addresses, or how many devices are connected.
 - **Running list.** With feature `running` each pane running a command
   carries when it started and the screen's latest line, so the phone's
   *Now* and its lock-screen Live Activity show the elapsed time and the
-  last line without following every pane.
+  last line without following every pane. A coding agent (Claude Code,
+  Codex) also sends its name for the session (its title without the status
+  mark) and whether it waits at its own prompt, so *Now* titles the row by
+  the session and lists an agent that waits under *Idle*, not *Working*.
 - **Security.** Traffic is end-to-end encrypted (Noise XX) and the phone pins
   the desktop's key; see [mobile-threat-model.md](mobile-threat-model.md)
   and the wire format in [remote-protocol.md](remote-protocol.md).

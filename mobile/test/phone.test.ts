@@ -2,7 +2,26 @@ import { describe, expect, it } from "vitest";
 import { alertAnswers, answerPlan, askingTitle, contextLine, keepAsked, primaryChoice, replyChoice, sameQuestion } from "../src/answer";
 import type { ActivityItem, AskedView, HostView } from "../src/fleet";
 import { livePlan, liveKey } from "../src/live";
-import { agoShort, foldBlocks, nowSections, pagerModel, programName, quickChoices, swipeTarget, tabLast, tabMatches, tabStarted, tabState } from "../src/now";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import {
+  agoShort,
+  foldBlocks,
+  HOST_COLORS,
+  hostMarks,
+  monogram,
+  nowSections,
+  pagerModel,
+  programName,
+  quickChoices,
+  restSummary,
+  swipeTarget,
+  tabLast,
+  tabMatches,
+  tabStarted,
+  tabState,
+} from "../src/now";
+import { decodeServer, type TopologyMsg } from "../src/protocol/types";
 import { alertAuth } from "../src/lock";
 import { tapTarget } from "../src/notify";
 import { DEFAULT_SETTINGS } from "../src/stores";
@@ -83,6 +102,67 @@ describe("Now", () => {
       expect.objectContaining({ pane: 2, command: "cargo test", started: 100_000, line: "test x ... ok", notifies: true }),
     ]);
     expect(s.finished.map((f) => f.id)).toEqual(["fail-new", "fail-old", "ok-new", "ok-old"]);
+  });
+
+  it("puts a coding agent at its own prompt under Idle and names a session by the agent's title", () => {
+    const hosts = [
+      host("A", [
+        pane(1, { job: "claude", last_command: "claude", cwd: "/u/rift", git: { branch: "main", ahead: 0, behind: 0, dirty: false, files: 0, added: 0, removed: 0 }, running: { started: 1, line: "> ", title: "Code changes overview", idle: true } }),
+        pane(2, { job: "claude", last_command: "claude", running: { started: 2, line: "Reading x", title: "Fix the tab spinner" } }),
+        pane(3, { job: "cargo", last_command: "cargo build", running: { started: 3, line: "Compiling" } }),
+      ]),
+    ];
+    const s = nowSections(hosts, [], []);
+    expect(s.idle).toEqual([expect.objectContaining({ pane: 1, title: "Code changes overview", branch: "main", cwd: "/u/rift" })]);
+    expect(s.running.map((r) => [r.pane, r.title])).toEqual([
+      [2, "Fix the tab spinner"],
+      [3, null],
+    ]);
+  });
+
+  it("shows one computer's sessions and finished commands when one is picked", () => {
+    const hosts = [
+      host("A", [pane(1, { job: "make", last_command: "make", running: { started: 1, line: "" } })]),
+      host("B", [pane(2, { job: "claude", waiting: menu }), pane(3, { job: "cargo", running: { started: 1, line: "" } })]),
+    ];
+    const activity = [done("a", 0, 1), done("b", 1, 2, { host: "B" })];
+    const b = nowSections(hosts, activity, [], "B");
+    expect([b.needs.map((n) => n.pane), b.running.map((r) => r.pane), b.finished.map((f) => f.id)]).toEqual([[2], [3], ["b"]]);
+    const all = nowSections(hosts, activity, []);
+    expect([all.running.map((r) => r.pane), all.finished.map((f) => f.id)]).toEqual([[1, 3], ["b", "a"]]);
+  });
+
+  it("marks each computer with its own colour and a two-letter monogram", () => {
+    expect(["MacBook Pro", "studio-mac", "ubuntu-box", "Sam’s MacBook", "MacBook", "ubuntu", "x"].map(monogram)).toEqual([
+      "MP",
+      "SM",
+      "UB",
+      "JM",
+      "MB",
+      "UB",
+      "X",
+    ]);
+    const marks = hostMarks(["a", "b", "c"].map((key) => ({ record: { key, name: `${key}-box` } })));
+    expect([...marks.values()].map((m) => m.color)).toEqual(HOST_COLORS.slice(0, 3));
+    expect(marks.get("b")).toEqual({ color: HOST_COLORS[1], short: "BB" });
+  });
+
+  it("sums idle, finished and failed for the row under Working; nothing to sum: none", () => {
+    expect(restSummary(2, [{ exit: 0 }, { exit: 1 }, { exit: null }])).toEqual({ idle: 2, finished: 2, failed: 1 });
+    expect(restSummary(0, [])).toBeNull();
+  });
+
+  it("reads an idle agent's session from the shared topology fixture", () => {
+    const t = decodeServer(
+      JSON.parse(readFileSync(fileURLToPath(new URL("../../crates/rift-remote/fixtures/server/topology.json", import.meta.url)), "utf8")),
+    ) as TopologyMsg;
+    const p16 = t.windows[0]!.tabs[0]!.panes.find((p) => p.id === 16)!;
+    expect(p16.running).toEqual({ started: 1760363000, line: "> ", title: "Code changes overview", idle: true });
+    const bad = (running: unknown) =>
+      decodeServer({ t: "topology", windows: [{ pid: 1, tabs: [{ index: 0, title: "", active: true, panes: [{ ...p16, running }] }] }] });
+    expect(bad({ started: 1, line: "", idle: "yes" })).toBeNull();
+    expect(bad({ started: 1, line: "", title: "x".repeat(201) })).toBeNull();
+    expect(bad({ started: 1, line: "", title: "x", idle: false })).not.toBeNull();
   });
 
   it("gives an agent's menu short buttons; No opens the reply; more than three: none", () => {

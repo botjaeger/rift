@@ -191,6 +191,18 @@ export default function RootLayout() {
                 contentStyle: { backgroundColor: colors.surface },
               }}
             />
+            <Stack.Screen
+              name="pick-computer"
+              options={{
+                title: "Show sessions from",
+                presentation: "formSheet",
+                sheetAllowedDetents: "fitToContents",
+                sheetGrabberVisible: true,
+                sheetCornerRadius: 16,
+                headerShown: false,
+                contentStyle: { backgroundColor: colors.surface },
+              }}
+            />
             <Stack.Screen name="diagnostics" options={{ title: "Diagnostics" }} />
             <Stack.Screen name="changelog" options={{ headerShown: false, title: "What's New" }} />
             <Stack.Screen

@@ -38,7 +38,7 @@ scrollback    = 10000             # lines kept per pane, clamped 0–1000000
                                   # (the Settings stepper offers 1000–1000000)
 window_padding = 8.0              # left/right content padding in px, clamped 0–40
                                   # (single-pane layout; splits keep their gutter)
-window_opacity = 1.0              # window ground opacity, clamped 0.01–1.0 (Warp 1–100 %; overlays stay opaque)
+window_opacity = 1.0              # window ground opacity, clamped 0.01–1.0 (Warp 1–100 %; overlays and prompt chips stay opaque)
 window_blur = 1                   # macOS: blur behind a translucent window, 1–64 px (1 = none)
 ligatures     = true              # JetBrains Mono ligatures + contextual alternates
 restore_session = true            # reopen last session's tabs + cwds on launch

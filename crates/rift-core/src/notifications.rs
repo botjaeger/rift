@@ -183,6 +183,25 @@ pub fn agent_title_idle(title: &str) -> bool {
     t.starts_with('✳') || t.starts_with("◇")
 }
 
+/// A coding agent's title while it works: Claude Code leads with a
+/// half-filled circle (◐ ◓ ◑ ◒), Codex with a braille spinner frame.
+pub fn agent_title_working(title: &str) -> bool {
+    title.trim_start().starts_with(|c: char| {
+        matches!(c, '◐' | '◓' | '◑' | '◒') || ('\u{2800}'..='\u{28FF}').contains(&c)
+    })
+}
+
+/// A coding agent's name for its session: its title without the leading
+/// status mark (`✳`, `◇`, a half-filled circle or a braille spinner frame).
+pub fn agent_session_title(title: &str) -> &str {
+    let t = title.trim_start();
+    t.strip_prefix(|c: char| {
+        matches!(c, '✳' | '◇' | '◐' | '◓' | '◑' | '◒') || ('\u{2800}'..='\u{28FF}').contains(&c)
+    })
+    .unwrap_or(t)
+    .trim()
+}
+
 /// `agent`, running in a pane titled `title`, is idle at its own prompt.
 /// Beyond the markers of `agent_title_idle`: Codex titles itself with the
 /// bare project name while waiting and leads with a braille spinner frame
@@ -470,6 +489,26 @@ mod tests {
         assert!(!agent_title_idle("✦  Working…"));
         assert!(!agent_title_idle("vim main.rs"));
         assert!(!agent_title_idle(""));
+        for working in [
+            "◐ Command+V image paste",
+            "◑ #560 sweep",
+            "◓ x",
+            "◒ x",
+            "⠋ project",
+        ] {
+            assert!(agent_title_working(working), "{working}");
+        }
+        for not in ["✳ Claude Code", "vim main.rs", "rift-owner@host", ""] {
+            assert!(!agent_title_working(not), "{not}");
+        }
+        assert_eq!(
+            agent_session_title("✳ Code changes overview"),
+            "Code changes overview"
+        );
+        assert_eq!(agent_session_title(" ◇  Ready (shift)"), "Ready (shift)");
+        assert_eq!(agent_session_title("◑ #560 sweep"), "#560 sweep");
+        assert_eq!(agent_session_title("⠋ project"), "project");
+        assert_eq!(agent_session_title("RIFT"), "RIFT");
     }
 
     #[test]

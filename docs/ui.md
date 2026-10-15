@@ -51,7 +51,7 @@ every action).
 ## Tab bar
 
 - One tab per shell session group: the tab title (OSC 0/2 title, else cwd
-  basename) and, when split, a pane count chip (`3`). As in Warp, the strip
+  basename) and, when split, a pane count chip (`3`) at its right end. As in Warp, the strip
   is 34 px tall and every tab 200 px wide (a longer title is cut short);
   tabs that do not fit shrink evenly to 120 px, then scroll.
 - The active tab joins the pane below (same ground, no rule) with a 2 px
@@ -86,6 +86,9 @@ every action).
   its title, in place of the sync icon; it turns in background tabs too. A
   coding agent waiting at its own prompt (Claude Code's `✳` title, Gemini
   CLI's `◇ Ready`) is not working, so it shows none (Warp).
+  A working agent (`◐` or a braille spinner leading its title) keeps the
+  spinner even when its start was lost (reattached after a restart), and
+  under a custom tab name.
 - A program that owns the screen (Claude Code, vim) sits on the bottom
   padding: the part of a row left over goes above its first row.
 - The Settings tab (⌘,) sits after the shell tabs with a settings icon; see

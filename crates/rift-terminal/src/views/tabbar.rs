@@ -617,20 +617,24 @@ fn draw_tab(
             .as_ref()
             .map(|l| engine.measure(l, 10.5, FONT_SANS, Weight::MEDIUM) + 12.0)
             .unwrap_or(0.0);
-        let room = close[0] - 8.0 - cx - if chip_w > 0.0 { chip_w + 6.0 } else { 0.0 };
+        // the pane count sits at the right end, before the × / dot slot
+        let chip_x = close[0] - 6.0 - chip_w;
+        let room = if chip_w > 0.0 {
+            chip_x - 6.0
+        } else {
+            close[0] - 8.0
+        } - cx;
         let title = elide(engine, &tab.title, 12.5, room);
         if !title.is_empty() {
-            let title_w = engine.measure(&title, 12.5, FONT_SANS, Weight::NORMAL);
             let b = make_text(engine, &title, 12.5, FONT_SANS, Weight::NORMAL);
             layer.text(b, cx, mid - 8.5, text_color);
-            cx += title_w + 6.0;
         }
         if let Some(label) = chip
-            && cx + chip_w <= close[0] - 4.0
+            && chip_x >= cx
         {
-            layer.rect([cx, mid - 8.0], [chip_w, 16.0], lift(theme, 0.07), 3.0);
+            layer.rect([chip_x, mid - 8.0], [chip_w, 16.0], lift(theme, 0.07), 3.0);
             let b = make_text(engine, &label, 10.5, FONT_SANS, Weight::MEDIUM);
-            layer.text(b, cx + 6.0, mid - 7.0, theme.text_dim);
+            layer.text(b, chip_x + 6.0, mid - 7.0, theme.text_dim);
         }
     }
 

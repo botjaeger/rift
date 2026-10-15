@@ -365,7 +365,7 @@ pub fn render(
             Shaping::Advanced,
             None,
         );
-        layer.text(gbuf, gx, cursor_y, theme.syntax.ghost);
+        layer.text(gbuf, gx, cursor_y, theme.ghost_text());
         let key = "→";
         let kw = engine.measure(key, 11.0, rift_renderer::FONT_SANS, Weight::NORMAL);
         let chip = [
@@ -619,7 +619,7 @@ pub(crate) fn draw_chip(
     layer.bordered(
         [at, top],
         [w, CHIP_H],
-        theme.fg.with_alpha(0.04),
+        theme.chip_fill(),
         theme.border,
         4.0,
         1.0,

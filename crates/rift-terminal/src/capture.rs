@@ -124,9 +124,9 @@ pub fn capture_frame(
         let line = &data[start..start + (w * 4) as usize];
         for px in line.as_chunks::<4>().0 {
             if bgra {
-                rgba.extend_from_slice(&[px[2], px[1], px[0], 255]);
+                rgba.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
             } else {
-                rgba.extend_from_slice(&[px[0], px[1], px[2], 255]);
+                rgba.extend_from_slice(&[px[0], px[1], px[2], px[3]]);
             }
         }
     }

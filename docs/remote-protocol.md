@@ -296,8 +296,13 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
   `started` is when the command started (Unix seconds, the desktop's
   clock; null without shell integration), `line` the screen's last
   non-empty line at or above the cursor (at most 200 characters; empty
-  while a full-screen program runs). Absent at the prompt. The topology is
-  sent again when `line` changes, at most once per topology poll.
+  while a full-screen program runs). Absent at the prompt. A coding agent
+  (Claude Code, Codex) adds `title`, its name for the session (the pane's
+  own title without the agent's status mark, at most 200 characters), and
+  `"idle":true` while it waits at its own prompt (it runs, but is not
+  working); both are absent for any other program, and an app reads a
+  missing `idle` as working. The topology is sent again when `line`
+  changes, at most once per topology poll.
 - `seq` is per pane and per gateway run: `update` N+1 follows `update` (or
   `snapshot`) N. A client that sees a gap re-subscribes with its last `seq`.
 - `update.blocks` are whole blocks that are new or changed since the

@@ -73,13 +73,20 @@ New fonts need a native rebuild (`npx expo run:ios` / `run:android`).
 
 Tabs: **Now**, **Computers**, **Settings** (`src/now.ts` holds their models).
 
-- **Now** (home): what needs you, what runs, what finished, on every connected computer.
-  *Needs you · N* (feature `waiting`): a coding agent's menu as a card with its answers as
-  buttons ("Yes", "Yes, always", "No…"; "No…" and the card open the answer page); a password or
-  other question as a row with **Answer**. *Running · N* (feature `running` for the start time
-  and the last line): command, elapsed, its latest line, "Notifies when done". *Finished*: this
-  run's finished commands, failures first, then newest; a row opens the pane at that block.
-  **❯ Run** opens the Run sheet. With none paired it is the first-run page (no tab bar there).
+- **Now** (home): what needs you, what works, what waits or finished, on every connected computer.
+  With two or more paired, a pill under the title ("All 3 computers ⌄", a colour dot each) opens
+  *Show sessions from*: every computer, or one (kept for the app run); while Now mixes several,
+  each avatar carries its computer's two-letter monogram in the computer's colour, and the row's
+  place line starts with the computer's name. *Needs you · N* (feature `waiting`): a coding
+  agent's menu as a card (avatar, the session's name, place, the question, its answers as
+  buttons: "Yes", "Yes, always", "No…"; "No…" and the card open the answer page); a password or
+  other question as a row with **Answer**. *Working · N* (feature `running` for the start time
+  and the last line): the session's name (a coding agent's, else the command), elapsed, its
+  latest line, folder and branch, "Notifies when done"; the first 3, then "N more working".
+  One row under it sums the rest ("2 idle · 6 finished · 1 failed") and opens *Idle* (coding
+  agents at their own prompt, `running.idle`) and *Finished* (this run's finished commands,
+  failures first, then newest; a row opens the pane at that block). The round terminal button
+  opens the Run sheet. With none paired it is the first-run page (no tab bar there).
 - **Answer** (the P2 Reply board): "claude is asking", where, **Open pane**; the question, the
   agent's lines above it (a diff drawn as one), then the answers: a numbered entry is sent as
   its digit, an unnumbered one as arrow keys from the selected entry and Enter
@@ -126,7 +133,7 @@ Tabs: **Now**, **Computers**, **Settings** (`src/now.ts` holds their models).
   menus), then **⌃**, which shows the key row in place of the suggestions, and the round field
   with its run button (Return runs too). While the keyboard is up the key row starts with Hide
   keyboard. The keyboard's smart dashes and quotes are undone in the command line.
-- **Run** (the P5 sheet, from Now's **❯ Run**): the pane it runs in ("studio-mac › rift › pane 1
+- **Run** (the P5 sheet, from Now's round terminal button): the pane it runs in ("studio-mac › rift › pane 1
   ▾", the last pane open by default), the field, *Complete* (the desktop editor's completions,
   each the whole line, with its kind) and *Ran here before* (the pane's commands, newest first,
   with how long ago, then the shell history the desktop imported). Return runs it there (the

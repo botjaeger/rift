@@ -323,7 +323,7 @@ pub fn bound_complete(page: CompletePage) -> (CompletePage, bool) {
 
 /// Every pane's `waiting` within the wire bounds (see the `MAX_WAITING_`
 /// constants; a `password` never carries choices or context), its
-/// `running.line` within [`MAX_RUNNING_LINE`], and tab titles, jobs and last
+/// `running.line` and `running.title` within [`MAX_RUNNING_LINE`], and tab titles, jobs and last
 /// commands within [`MAX_PANE_TEXT`].
 pub fn bound_topology(mut windows: Vec<Window>) -> Vec<Window> {
     let cut = |s: &mut String, max: usize| {
@@ -347,6 +347,9 @@ pub fn bound_topology(mut windows: Vec<Window>) -> Vec<Window> {
         }
         if let Some(r) = pane.running.as_mut() {
             cut(&mut r.line, MAX_RUNNING_LINE);
+            if let Some(t) = r.title.as_mut() {
+                cut(t, MAX_RUNNING_LINE);
+            }
         }
         let Some(w) = pane.waiting.as_mut() else {
             continue;
@@ -392,6 +395,8 @@ mod chip_bounds {
             running: Some(protocol::PaneRunning {
                 started: Some(1),
                 line,
+                title: None,
+                idle: false,
             }),
         };
         let windows = vec![Window {

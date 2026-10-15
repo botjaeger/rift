@@ -19,12 +19,17 @@ export interface NeedsItem {
   program: string | null;
   /** The command that asks ("sudo apt upgrade"), or null. */
   command: string | null;
+  /** A coding agent's name for its session ("Code changes overview"), or null. */
+  title: string | null;
+  /** The pane's folder and branch, for its avatar and place. */
+  cwd: string | null;
+  branch: string | null;
   waiting: Waiting;
   /** This device may answer (operate permission). */
   operate: boolean;
 }
 
-/** A pane running a command (Now › Running). */
+/** A pane running a command (Now › Working), or a coding agent at its own prompt (Now › Idle). */
 export interface RunningRow {
   key: string;
   host: string;
@@ -41,11 +46,17 @@ export interface RunningRow {
   /** The pane's folder and program, for its avatar. */
   cwd: string | null;
   program: string | null;
+  /** A coding agent's name for its session, or null: the row's title in place of the command. */
+  title: string | null;
+  branch: string | null;
 }
 
 export interface NowSections {
   needs: NeedsItem[];
+  /** Working: a command runs, or a coding agent works. */
   running: RunningRow[];
+  /** A coding agent waits at its own prompt (gateways that send `running.idle`). */
+  idle: RunningRow[];
   /** Failures first, then the rest; each newest first. */
   finished: ActivityItem[];
 }
@@ -66,16 +77,21 @@ export function programName(p: Pick<Pane, "job" | "last_command">): string | nul
   return p.job;
 }
 
-/** Now's three lists over the connected computers and this run's finished commands. */
+/**
+ * Now's lists over the connected computers and this run's finished commands; `only`: one
+ * computer's (its key), else every computer's.
+ */
 export function nowSections(
   hosts: readonly HostView[],
   activity: readonly ActivityItem[],
   asked: readonly AskedView[],
+  only: string | null = null,
 ): NowSections {
   const needs: NeedsItem[] = [];
   const running: RunningRow[] = [];
+  const idle: RunningRow[] = [];
   for (const h of hosts) {
-    if (h.conn.status !== "open") continue;
+    if (h.conn.status !== "open" || (only !== null && h.record.key !== only)) continue;
     const host = h.record.key;
     const hostName = h.record.name;
     const operate = (h.welcome?.permission ?? h.record.permission) === "operate";
@@ -93,6 +109,9 @@ export function nowSections(
               paneNumber: i + 1,
               program: programName(p),
               command: p.last_command,
+              title: p.running?.title || null,
+              cwd: p.cwd,
+              branch: p.git?.branch ?? null,
               waiting: p.waiting,
               operate,
             });
@@ -102,7 +121,7 @@ export function nowSections(
           const command = p.last_command ?? p.job ?? "";
           const ask = asked.find((a) => a.host === host && a.pane === p.id && a.command === command);
           const started = p.running?.started != null ? p.running.started * 1000 : (ask?.at ?? null);
-          running.push({
+          (p.running?.idle ? idle : running).push({
             key,
             host,
             hostName,
@@ -114,11 +133,55 @@ export function nowSections(
             notifies: ask !== undefined,
             cwd: p.cwd,
             program: programName(p),
+            title: p.running?.title || null,
+            branch: p.git?.branch ?? null,
           });
         }
   }
-  const finished = [...activity].sort((a, b) => Number(failed(b)) - Number(failed(a)) || b.at - a.at);
-  return { needs, running, finished };
+  const finished = activity
+    .filter((a) => only === null || a.host === only)
+    .sort((a, b) => Number(failed(b)) - Number(failed(a)) || b.at - a.at);
+  return { needs, running, idle, finished };
+}
+
+/** Rows Working shows before "N more working". */
+export const WORKING_CAP = 3;
+
+/** A computer's mark on Now (several paired): its colour, and a two-letter monogram on each avatar. */
+export interface HostMark {
+  color: string;
+  short: string;
+}
+
+/** The computers' colours: the editor theme's syntax colours, the accent left to the app. */
+export const HOST_COLORS = ["#4ec9b0", "#c586c0", "#dcdcaa", "#9cdcfe", "#ce9178", "#22c55e"] as const;
+
+/**
+ * "MacBook Pro" → "MP", "studio-mac" → "SM", "Sam’s MacBook" → "JM", "MacBook" → "MB",
+ * "ubuntu" → "UB": the first letters of the first two words, else a one-word name's two capitals,
+ * else its first two letters.
+ */
+export function monogram(name: string): string {
+  const words = name
+    .replace(/['’]s\b/g, "")
+    .split(/[\s\-_.]+/)
+    .filter(Boolean);
+  if (words.length >= 2) return (words[0]![0]! + words[1]![0]!).toUpperCase();
+  const word = words[0] ?? "?";
+  const caps = word.match(/[A-Z]/g);
+  return caps && caps.length >= 2 ? caps.slice(0, 2).join("") : word.slice(0, 2).toUpperCase();
+}
+
+/** Each paired computer's mark, by key: the colours in pairing order, so two never share one (up to six). */
+export function hostMarks(hosts: readonly { record: { key: string; name: string } }[]): Map<string, HostMark> {
+  return new Map(hosts.map((h, i) => [h.record.key, { color: HOST_COLORS[i % HOST_COLORS.length]!, short: monogram(h.record.name) }]));
+}
+
+/** The summary row under Working ("2 idle · 6 finished · 1 failed"), or null when all are empty. */
+export function restSummary(idle: number, finished: readonly { exit: number | null }[]): { idle: number; finished: number; failed: number } | null {
+  const bad = finished.filter(failed).length;
+  const s = { idle, finished: finished.length - bad, failed: bad };
+  return s.idle + s.finished + s.failed === 0 ? null : s;
 }
 
 /**

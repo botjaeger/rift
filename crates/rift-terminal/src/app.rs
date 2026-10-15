@@ -3786,9 +3786,13 @@ impl App {
             .iter()
             .filter(|b| seen.is_none_or(|s| b.id > s))
             .filter_map(|b| match b.state {
-                BlockState::Done { exit, duration } => {
-                    Some((b.id, b.command.clone(), exit, duration, b.restored))
-                }
+                BlockState::Done { exit, duration } => Some((
+                    b.id,
+                    b.command.clone(),
+                    exit,
+                    duration,
+                    b.restored || b.replayed,
+                )),
                 _ => None,
             })
             .collect();
@@ -3802,6 +3806,7 @@ impl App {
         let long = Duration::from_secs(self.config.notify_threshold_secs);
         let long_on = self.config.notify_on_completion;
         let failed_on = self.config.notifications.command_failed;
+        // restored or replayed: it finished before this window, nothing to say
         for (id, command, exit, duration, restored) in fresh {
             let failed = exit.is_some_and(|e| e != 0);
             if restored || command.trim().is_empty() || (in_view && !failed) {
@@ -6007,6 +6012,11 @@ impl App {
     }
 
     fn build_scene(&mut self, w: f32, h: f32) {
+        // device pixels per logical one: cell backgrounds snap to them
+        let scale = self
+            .window
+            .as_ref()
+            .map_or(1.0, |w| w.scale_factor() as f32);
         self.sync_viewer_pane();
         self.sync_history();
         let theme = self.theme.clone();
@@ -6452,6 +6462,7 @@ impl App {
                     // with the input at the top, blocks start under it
                     bottom_up,
                     mouse: Some(mouse),
+                    scale,
                 }
             };
 
@@ -12556,9 +12567,20 @@ impl App {
     }
 
     /// `p`'s running command for a paired phone's Running list: when it
-    /// started and its latest line; none at the prompt.
+    /// started and its latest line; none at the prompt. A coding agent also
+    /// names its session and says whether it waits at its own prompt.
     fn pane_running(p: &PaneState) -> Option<rift_remote::protocol::PaneRunning> {
-        terminal::remote_running(&p.session)
+        use rift_core::notifications::{agent_title_idle, agent_title_working};
+        let mut r = terminal::remote_running(&p.session)?;
+        // a reattached agent's job is its version ("2.1.296"): its title
+        // still carries the agent's mark
+        let marked = agent_title_idle(&p.title) || agent_title_working(&p.title);
+        if Self::pane_agent(p).is_some() || marked {
+            let title = rift_core::notifications::agent_session_title(&p.title);
+            r.title = (!title.is_empty()).then(|| title.to_string());
+            r.idle = !p.running();
+        }
+        Some(r)
     }
 
     /// What `p`'s running command waits for (a paired phone's "Needs you"):

@@ -11,7 +11,7 @@ export interface Avatar {
 }
 
 /** The folder a pane is in, as its avatar names it: the path's last part ("~" for home). */
-function folderOf(cwd: string | null | undefined): string | null {
+export function folderOf(cwd: string | null | undefined): string | null {
   if (!cwd) return null;
   const parts = cwd.split("/").filter(Boolean);
   return parts.at(-1) ?? cwd;

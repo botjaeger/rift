@@ -39,6 +39,10 @@ export interface Pane {
 export interface PaneRunning {
   started: number | null;
   line: string;
+  /** A coding agent's name for its session ("Code changes overview"); absent for other programs. */
+  title?: string;
+  /** A coding agent waits at its own prompt: it runs, but is not working. */
+  idle?: boolean;
 }
 /** Characters of `running.line`. */
 export const MAX_RUNNING_LINE = 200;
@@ -570,7 +574,11 @@ function isPane(v: unknown): v is Pane {
     (v.git === undefined || isPaneGit(v.git)) &&
     (v.waiting === undefined || isWaiting(v.waiting)) &&
     (v.running === undefined ||
-      (isObj(v.running) && (v.running.started === null || isUint(v.running.started)) && lineWithin(MAX_RUNNING_LINE)(v.running.line)))
+      (isObj(v.running) &&
+        (v.running.started === null || isUint(v.running.started)) &&
+        lineWithin(MAX_RUNNING_LINE)(v.running.line) &&
+        (v.running.title === undefined || lineWithin(MAX_RUNNING_LINE)(v.running.title)) &&
+        (v.running.idle === undefined || isBool(v.running.idle))))
   );
 }
 

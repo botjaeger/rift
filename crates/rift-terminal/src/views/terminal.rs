@@ -37,6 +37,20 @@ pub struct GridLayout {
     pub bottom_up: bool,
     /// Pointer position (block headers show their copy button on hover).
     pub mouse: Option<(f32, f32)>,
+    /// Device pixels per logical pixel (cell backgrounds snap to them).
+    pub scale: f32,
+}
+
+/// A cell background's rect with its edges on device pixels: rows are a
+/// fractional height (15.6 px), and backgrounds of adjacent rows met on a
+/// shared, antialiased edge that let the ground show through as a light
+/// line (Claude Code's diff rows).
+fn snap_rect(pos: [f32; 2], size: [f32; 2], scale: f32) -> ([f32; 2], [f32; 2]) {
+    let s = scale.max(1.0);
+    let snap = |v: f32| (v * s).round() / s;
+    let (x0, y0) = (snap(pos[0]), snap(pos[1]));
+    let (x1, y1) = (snap(pos[0] + size[0]), snap(pos[1] + size[1]));
+    ([x0, y0], [x1 - x0, y1 - y0])
 }
 
 /// Set when a frame drew blinking text: the app keeps repainting to blink it.
@@ -2290,6 +2304,12 @@ fn render_grid_line(
         }
     }
     for (pos, size, color, radius) in backs {
+        // the block cursor (rounded) keeps its exact cell
+        let (pos, size) = if radius == 0.0 {
+            snap_rect(pos, size, grid.scale)
+        } else {
+            (pos, size)
+        };
         layer.rect(pos, size, color, radius);
     }
     for (pos, size, color) in blocks.into_iter().chain(decos) {
@@ -2790,13 +2810,38 @@ pub fn remote_running(session: &Session) -> Option<rift_remote::protocol::PaneRu
             .ok()
             .map(|d| d.as_secs())
     });
-    Some(rift_remote::protocol::PaneRunning { started, line })
+    Some(rift_remote::protocol::PaneRunning {
+        started,
+        line,
+        title: None,
+        idle: false,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Duration as StdDuration;
+
+    #[test]
+    fn row_backgrounds_meet_on_whole_device_pixels() {
+        for scale in [1.0, 2.0, 1.5] {
+            let line_h = 15.6;
+            let rows: Vec<_> = (0..20)
+                .map(|i| snap_rect([8.0, 41.3 + i as f32 * line_h], [100.0, line_h], scale))
+                .collect();
+            for pair in rows.windows(2) {
+                let (above, below) = (pair[0], pair[1]);
+                // no gap and no overlap: the next row starts where this one ends
+                assert_eq!(above.0[1] + above.1[1], below.0[1], "scale {scale}");
+            }
+            for (pos, size) in rows {
+                for v in [pos[1], pos[1] + size[1]] {
+                    assert_eq!((v * scale).fract(), 0.0, "scale {scale}: {v}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn gaps_are_the_lines_between_a_finished_block_and_the_next_prompt() {
@@ -3354,6 +3399,7 @@ mod tests {
             cwd: None,
             branch: None,
             restored: false,
+            replayed: false,
             finished_at: None,
         }
     }
@@ -3473,6 +3519,7 @@ mod tests {
             text_blink_on: true,
             bottom_up: true,
             mouse: None,
+            scale: 2.0,
         };
         // above a bottom editor at 310: the panel covers 245..310
         let v = beside_panel(grid, 245.0, 310.0);

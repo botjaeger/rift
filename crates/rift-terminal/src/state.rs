@@ -680,7 +680,11 @@ impl PaneState {
         let agent = {
             let blocks = self.session.blocks.lock().unwrap();
             if !blocks.any_running() {
-                return false;
+                // an agent whose command block is gone (reattached after a
+                // restart, the replay too short to hold its start): its
+                // working title and a foreground job still say it runs
+                return rift_core::notifications::agent_title_working(&self.title)
+                    && self.session.has_foreground_job();
             }
             // the typed command names the agent (no process lookup: this
             // runs every frame)

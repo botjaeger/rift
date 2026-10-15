@@ -202,6 +202,24 @@ impl Theme {
         }
     }
 
+    /// A chip's fill (prompt chips): a 4 % lift of `bg`, opaque, so a
+    /// translucent window keeps the chips dark and their text readable over
+    /// whatever shows through (Warp's chips are solid too).
+    pub fn chip_fill(&self) -> Color {
+        self.bg.mix(self.fg, 0.04).with_alpha(1.0)
+    }
+
+    /// The autosuggestion's ghost text. On a translucent window the ground is
+    /// lighter than `bg` (a white desktop under 50 % shows mid grey), where
+    /// the ghost colour vanished: it moves toward `fg` there, as Warp's does.
+    pub fn ghost_text(&self) -> Color {
+        if self.ground_alpha < 1.0 {
+            self.syntax.ghost.mix(self.fg, 0.45)
+        } else {
+            self.syntax.ghost
+        }
+    }
+
     /// The window ground (the frame's clear colour, straight alpha). Opaque:
     /// `bg`. Translucent, as Warp draws it: `surface_2` (bg + 10 % fg) at the
     /// window opacity, then `bg` at the window opacity over it — two layers,
@@ -405,6 +423,19 @@ mod tests {
         assert!((g.r * g.a - (0.5 * t.bg.r + 0.25 * surface_2)).abs() < 1e-5);
         // ground surfaces draw nothing of their own while translucent
         assert_eq!(t.ground(t.bg_chrome).a, 0.0);
+    }
+
+    #[test]
+    fn chips_and_ghost_stay_readable_on_a_translucent_window() {
+        let mut t = Theme::default();
+        let opaque_ghost = t.ghost_text();
+        assert_eq!(opaque_ghost, t.syntax.ghost);
+        t.ground_alpha = 0.5;
+        // the chip keeps a solid ground whatever shows through
+        assert_eq!(t.chip_fill().a, 1.0);
+        assert!(t.chip_fill().luminance() < 0.05);
+        // the ghost moves toward the text colour, away from the lighter ground
+        assert!(t.ghost_text().luminance() > opaque_ghost.luminance());
     }
 
     #[test]
