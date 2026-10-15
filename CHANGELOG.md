@@ -8,6 +8,15 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.7.1 — 2026-10-16
+
+### Fixed
+
+- **Memory while the screen is off** — with the display asleep or the window hidden behind
+  others, a program that keeps redrawing (an agent's spinner, a progress bar) made Rift's
+  memory grow without end; left overnight it could use up the Mac's memory and freeze it.
+  Rift's memory now stays level.
+
 ## 0.7.0 — 2026-10-15
 
 Your phone can fit a pane to its screen, and it sees panes the way Rift draws them.
