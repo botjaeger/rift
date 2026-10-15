@@ -6,6 +6,16 @@ build (`## <version> — <YYYY-MM-DD>`) or an over-the-air update to one
 message its download carries. Items use `### New`, `### Improved` or
 `### Fixed` sections of `- **Title** — text`.
 
+## 0.2.0 · update 4 — 2026-10-15
+
+Now for one computer: its connection at the top, chips to show one kind, and idle agents in view.
+
+### Improved
+
+- **One computer on Now** — with one computer paired or picked, Now names it and its
+  connection, chips show only what needs you, works or waits, idle agents are listed with how
+  long they have waited, and finished commands fold into one row.
+
 ## 0.2.0 · update 3 — 2026-10-15
 
 Now handles several computers: pick one or see all, with what waits folded away.
