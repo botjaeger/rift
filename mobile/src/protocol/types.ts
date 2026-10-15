@@ -88,6 +88,11 @@ export interface Tab {
 
 export interface Window {
   pid: number;
+  /**
+   * The shells the gateway keeps while no Rift window is open (feature `start`; `pid` 0): Rift shows
+   * them as tabs when it opens.
+   */
+  background?: boolean;
   tabs: Tab[];
 }
 
@@ -109,7 +114,8 @@ export type Feature =
   | "waiting"
   | "complete"
   | "running"
-  | "open";
+  | "open"
+  | "start";
 
 /** `complete` bounds: line bytes, entries per list, bytes per entry. */
 export const MAX_COMPLETE_LINE = 1024;
@@ -221,6 +227,11 @@ export interface OpenMsg {
   pane: number;
   kind: OpenKind;
 }
+/** Starts a shell while no Rift window is open (feature `start`); the ack carries the new pane. */
+export interface StartMsg {
+  t: "start";
+  id: string;
+}
 /**
  * Whether the app is on screen; only to a gateway with `push_ntfy` (a connection starts visible).
  * While not, the computer posts ntfy alerts about the pane this device follows again.
@@ -306,6 +317,7 @@ export type ClientMsg =
   | RunMsg
   | KeysMsg
   | OpenMsg
+  | StartMsg
   | ForgetMsg
   | PingMsg
   | VisibleMsg
@@ -593,7 +605,12 @@ function isTab(v: unknown): v is Tab {
 }
 
 function isWindow(v: unknown): v is Window {
-  return isObj(v) && isUint(v.pid) && arrayOf(isTab)(v.tabs);
+  return (
+    isObj(v) &&
+    isUint(v.pid) &&
+    (v.background === undefined || typeof v.background === "boolean") &&
+    arrayOf(isTab)(v.tabs)
+  );
 }
 
 const isBlocks = arrayOf(isBlock);
@@ -806,6 +823,8 @@ export function isClientMsg(v: unknown): v is ClientMsg {
       );
     case "open":
       return isId(v.id) && isUint(v.pane) && (v.kind === "tab" || v.kind === "pane");
+    case "start":
+      return isId(v.id);
     case "forget":
       return true;
     case "visible":

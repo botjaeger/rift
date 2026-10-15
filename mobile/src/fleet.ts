@@ -1150,6 +1150,26 @@ export class Fleet {
     return r;
   }
 
+  /**
+   * Starts a shell on a computer where Rift is closed (feature `start`, which the computer offers
+   * only when its owner allows it); the result's `pane` is in the background window.
+   */
+  async startShell(host: string): Promise<ActionResult> {
+    const h = this.host(host);
+    const name = h?.record.name ?? "the computer";
+    if (h?.welcome && !hasFeature(h, "start"))
+      return {
+        ok: false,
+        code: "unsupported",
+        message: `${name} does not open tabs while Rift is closed. Turn it on in Rift's Settings › Remote access.`,
+      };
+    const r = await (this.operating(host) ?? this.request(host, (c) => c.startShell()));
+    if (!r.ok && r.code === "forbidden" && h && canOperate(h))
+      return { ...r, message: `${name} no longer opens tabs while Rift is closed.` };
+    if (!r.ok && r.code === "busy") return { ...r, message: `${name} could not open it. Try again.` };
+    return r;
+  }
+
   /** A view-only device's refusal, before anything goes out (the gateway refuses it too); null when it may operate. */
   private operating(host: string): Promise<ActionResult> | null {
     const h = this.host(host);

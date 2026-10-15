@@ -550,6 +550,13 @@ export class RiftClient {
     return this.sendInput({ t: "keys", id, pane, keys }) ? id : null;
   }
 
+  /** Starts a shell while no Rift window is open (feature `start`); the `ack` id, or null when not connected. */
+  startShell(): string | null {
+    if (!this.authed) return null;
+    const id = `n${++this.idN}`;
+    return this.send({ t: "start", id }) ? id : null;
+  }
+
   /** Opens a new tab or split next to a pane (feature `open`); returns the `ack` id, or null when not connected. */
   openShell(pane: number, kind: OpenKind): string | null {
     if (!this.authed) return null;

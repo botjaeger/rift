@@ -1,6 +1,6 @@
 {
   "name": "rift-mobile",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "main": "expo-router/entry",
   "packageManager": "pnpm@11.7.0",
@@ -15,7 +15,8 @@
     "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.typecheck.json --noEmit",
     "test": "vitest run",
-    "ota": "eas update --channel production"
+    "changelog": "node scripts/changelog.mjs",
+    "ota": "node scripts/changelog.mjs && eas update --channel production"
   },
   "dependencies": {
     "@noble/ciphers": "2.4.0",
@@ -37,6 +38,7 @@
     "expo-router": "57.0.26",
     "expo-screen-capture": "~57.0.4",
     "expo-secure-store": "~57.0.4",
+    "expo-splash-screen": "~57.0.10",
     "expo-status-bar": "~57.0.1",
     "expo-symbols": "~57.0.3",
     "expo-system-ui": "~57.0.4",

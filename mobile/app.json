@@ -6,13 +6,13 @@
       "rift",
       "rift-remote"
     ],
-    "version": "0.1.0",
+    "version": "0.2.0",
     "runtimeVersion": {
       "policy": "fingerprint"
     },
     "updates": {
       "url": "https://u.expo.dev/00000000-0000-0000-0000-000000000000",
-      "checkAutomatically": "ON_LOAD",
+      "checkAutomatically": "ON_ERROR_RECOVERY",
       "fallbackToCacheTimeout": 0,
       "requestHeaders": {
         "expo-channel-name": "production"
@@ -88,7 +88,15 @@
       "./plugins/withSceneLifecycle",
       "./plugins/withoutApns",
       "./plugins/withLiveActivity",
-      "./plugins/withGradleMemory"
+      "./plugins/withGradleMemory",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#181818",
+          "image": "./assets/splash-blank.png",
+          "imageWidth": 1
+        }
+      ]
     ],
     "extra": {
       "router": {},

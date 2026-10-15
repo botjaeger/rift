@@ -24,16 +24,32 @@ Pair from Now (first run) or Computers (**+**): scan the QR code that Rift shows
 phone, or `rift-terminal remote pair`), paste the `rift-remote://pair?…` link, or open the link
 on the device. The app asks before pairing.
 
+Each launch opens on the splash (`src/ui/Splash.tsx`, timeline in `src/splash.ts`): the native
+splash (`expo-splash-screen`) is the bare `#181818` ground, then the mark `>▌` blinks once and
+"rift" is typed after it, and the splash fades to the app in under a second. With Reduce Motion
+the finished prompt shows at once.
+
 ## Over-the-air updates
 
-Release builds carry `expo-updates` on the `production` channel (`app.json` › `updates`). On
-launch the app checks EAS Update in the background and applies a downloaded update at the next
-start; Settings › About shows the version, which update it runs, and **Restart now** once one is
-waiting. Development builds and the web never update.
+Release builds carry `expo-updates` on the `production` channel (`app.json` › `updates`). The
+app does its own checks (`src/ota.ts`; the native one runs only to recover from a launch that
+crashed, `checkAutomatically: ON_ERROR_RECOVERY`): at launch once the settings are read, every
+15 minutes and on each return to the foreground, while Settings › About › **Check for updates
+automatically** is on (the default); **Check now** checks on demand. A check that has not
+answered in 10 s is reported as failed. Once an update has downloaded, the app asks once to **Restart**
+(after any unlock); **Later** applies it at the next start, and About offers **Restart now**
+while one is waiting. Development builds and the web never update.
+
+About names the version and the update it runs ("0.2.0 · update 1", from `src/release.ts`,
+which `/release` writes). The release notes are `CHANGELOG.md`, embedded as
+`src/changelog.data.ts` (`pnpm changelog`; `pnpm ota` regenerates it, and a test fails while
+the two differ): after a new update or build the app shows **What's New** once (the notes since
+the release it last showed; a first install shows none), and About › **What's New** lists them
+all.
 
 ```sh
 eas login           # once
-pnpm ota --message "what changed"   # eas update --channel production
+pnpm ota --message "what changed"   # changelog, then eas update --channel production
 ```
 
 An update reaches only builds with the same native fingerprint (`runtimeVersion` policy
@@ -76,6 +92,11 @@ Tabs: **Now**, **Computers**, **Settings** (`src/now.ts` holds their models).
   (name, last command, running / failed / needs you), the others say "N tabs · LAN/Relay"
   (tap to show their tabs), offline ones are dimmed with "seen 2 h ago". **+** pairs. Settings ›
   Paired computers › a computer opens its page (its tabs and its notification bell).
+- **Open a tab while Rift is closed** (gateways with `start`, which the computer offers only when
+  its user turned on *Phones can open tabs while Rift is closed*): with no Rift window open, a
+  computer's page shows **Open a tab**; Face ID (or the passcode) first, then a shell the computer
+  keeps and lists under "Rift is closed · Tabs" until Rift opens and shows it as a tab. View-only
+  devices do not get the button.
 - **Reopening**: a cold start goes back to the pane that was open last (`rift.last` in the
   keychain); otherwise Now.
 - **Pane** (the P3 board): back, the computer, wrap and search; the window's tabs as a strip

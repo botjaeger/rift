@@ -1,18 +1,30 @@
 import * as Notifications from "expo-notifications";
+import * as SplashScreen from "expo-splash-screen";
 import { DarkTheme, Stack, ThemeProvider, useRouter } from "expo-router";
 import { StatusBar } from "expo-status-bar";
-import { useEffect } from "react";
-import { LogBox, Platform } from "react-native";
+import * as Updates from "expo-updates";
+import { useCallback, useEffect, useState } from "react";
+import { Alert, LogBox, Platform } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { alertAuth } from "@/lock";
 import { tapTarget } from "@/notify";
-import { appLock, authenticate, fleet, startPlatformWatchers } from "@/runtime";
+import Constants from "expo-constants";
+import { parseChangelog, releaseKey, releasesSince } from "@/changelog";
+import { CHANGELOG } from "@/changelog.data";
+import { shouldOfferRestart } from "@/ota";
+import { APP_UPDATE } from "@/release";
+import { appLock, authenticate, fleet, kv, startPlatformWatchers, useApp, useLock } from "@/runtime";
+import { loadSeenRelease, saveSeenRelease } from "@/stores";
 import { LockGate } from "@/ui/LockGate";
+import { Splash } from "@/ui/Splash";
 import { colors } from "@/ui/theme";
 
 // expo-router builds its links from the first scheme ("rift"); "rift-remote" is the pairing
 // link's scheme, kept on purpose, so the dev notice about several schemes is expected.
 LogBox.ignoreLogs(["Linking found multiple possible URI schemes"]);
+
+// The native splash (the ground only) stays until the animated one (ui/Splash.tsx) is on screen.
+void SplashScreen.preventAutoHideAsync().catch(() => undefined);
 
 // A link straight to a screen (a notification tap, rift://host/…/pane/…) keeps the tabs below
 // it, so Back leads to Now instead of out of the app.
@@ -83,12 +95,64 @@ function useNotificationTaps() {
   }, [router]);
 }
 
+/** Updates already offered in this app run (Later keeps Settings › About's Restart now). */
+const offeredUpdates = new Set<string>();
+
+/** Offers a restart once an over-the-air update has downloaded (ota.ts), after any unlock. */
+function useUpdatePrompt() {
+  const { isUpdatePending, downloadedUpdate } = Updates.useUpdates();
+  const { locked } = useLock();
+  useEffect(() => {
+    if (!shouldOfferRestart(isUpdatePending, downloadedUpdate?.updateId, locked, offeredUpdates)) return;
+    Alert.alert("Update ready", "Restart Rift to use the new version.", [
+      { text: "Later", style: "cancel" },
+      { text: "Restart", onPress: () => void Updates.reloadAsync() },
+    ]);
+  }, [isUpdatePending, downloadedUpdate?.updateId, locked]);
+}
+
+/**
+ * What's New once per new release (an update or a new build): after the settings are read and
+ * any unlock, the notes since the release last seen. A first launch only remembers the release.
+ */
+function useWhatsNew() {
+  const router = useRouter();
+  const { ready } = useApp();
+  const { locked } = useLock();
+  useEffect(() => {
+    if (!ready || locked || whatsNewChecked) return;
+    whatsNewChecked = true;
+    void (async () => {
+      const current = releaseKey(Constants.expoConfig?.version ?? "", APP_UPDATE);
+      const seen = await loadSeenRelease(kv);
+      if (seen === current) return;
+      await saveSeenRelease(kv, current).catch(() => undefined);
+      if (releasesSince(parseChangelog(CHANGELOG), seen, current).length > 0) {
+        router.push({ pathname: "/whats-new", params: { seen: seen ?? "" } });
+      }
+    })();
+  }, [ready, locked, router]);
+}
+
+/** Checked once per app run (kept across root remounts). */
+let whatsNewChecked = false;
+
+/** The splash plays once per app run (kept across root remounts). */
+let splashPlayed = false;
+
 export default function RootLayout() {
   useEffect(() => {
     void fleet.init();
     return startPlatformWatchers();
   }, []);
   useNotificationTaps();
+  useUpdatePrompt();
+  useWhatsNew();
+  const [splash, setSplash] = useState(!splashPlayed);
+  const splashDone = useCallback(() => {
+    splashPlayed = true;
+    setSplash(false);
+  }, []);
 
   return (
     <SafeAreaProvider>
@@ -128,6 +192,19 @@ export default function RootLayout() {
               }}
             />
             <Stack.Screen name="diagnostics" options={{ title: "Diagnostics" }} />
+            <Stack.Screen name="changelog" options={{ headerShown: false, title: "What's New" }} />
+            <Stack.Screen
+              name="whats-new"
+              options={{
+                title: "What's New",
+                presentation: "formSheet",
+                sheetAllowedDetents: [0.75, 1],
+                sheetGrabberVisible: true,
+                sheetCornerRadius: 16,
+                headerShown: false,
+                contentStyle: { backgroundColor: colors.surface },
+              }}
+            />
             <Stack.Screen
               name="block"
               options={{
@@ -179,6 +256,7 @@ export default function RootLayout() {
           </Stack>
         </LockGate>
       </ThemeProvider>
+      {splash ? <Splash onDone={splashDone} /> : null}
     </SafeAreaProvider>
   );
 }

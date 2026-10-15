@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { appVersionText, formatClock, formatDuration, insertedChar, plainPunctuation, osName, tailLines } from "../src/ui/format";
+import { appVersionText, updateStatusText, formatClock, formatDuration, insertedChar, plainPunctuation, osName, tailLines } from "../src/ui/format";
 
 describe("plainPunctuation", () => {
   it("undoes the keyboard's smart dashes and quotes", () => {
@@ -58,13 +58,27 @@ describe("insertedChar (sticky ctrl)", () => {
   });
 });
 
+describe("updateStatusText", () => {
+  it("says what the last check found", () => {
+    const at = new Date(2026, 9, 15, 6, 19).getTime();
+    expect(updateStatusText({ state: "idle", at: null }, false)).toBe("Not checked yet");
+    expect(updateStatusText({ state: "checking", at }, false)).toBe("Checking for updates…");
+    expect(updateStatusText({ state: "none", at }, false)).toMatch(/^Up to date · 6:19/);
+    expect(updateStatusText({ state: "failed", at }, false)).toMatch(/^Could not check for updates · 6:19.*Check now tries again\.$/);
+    // a downloaded update waiting for the restart wins over any check
+    expect(updateStatusText({ state: "none", at }, true)).toBe("An update is ready and applies when the app restarts.");
+  });
+});
+
 describe("appVersionText", () => {
   it("names what the build runs", () => {
-    const off = { enabled: false, embedded: true, createdAt: null };
+    const off = { enabled: false, embedded: true, createdAt: null, update: 2 };
     expect(appVersionText("0.1.0", off)).toBe("0.1.0 · updates off");
-    const shipped = { enabled: true, embedded: true, createdAt: new Date(0) };
+    const shipped = { enabled: true, embedded: true, createdAt: new Date(0), update: 2 };
     expect(appVersionText("0.1.0", shipped)).toBe("0.1.0 · as installed");
-    const ota = { enabled: true, embedded: false, createdAt: new Date(2026, 9, 14, 16, 40) };
-    expect(appVersionText("0.1.0", ota)).toMatch(/^0\.1\.0 · update of (?=.*14)(?=.*Oct)/);
+    const ota = { enabled: true, embedded: false, createdAt: new Date(2026, 9, 14, 16, 40), update: 2 };
+    expect(appVersionText("0.1.0", ota)).toBe("0.1.0 · update 2");
+    // an update published before the numbers were written names its date
+    expect(appVersionText("0.1.0", { ...ota, update: 0 })).toMatch(/^0\.1\.0 · update of (?=.*14)(?=.*Oct)/);
   });
 });

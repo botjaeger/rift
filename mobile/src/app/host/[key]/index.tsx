@@ -7,6 +7,7 @@ import { fleet, useApp } from "@/runtime";
 import { Button } from "@/ui/Button";
 import { describeConn } from "@/ui/connLabel";
 import { HostTree } from "@/ui/HostTree";
+import { StartTab, canStartTab } from "@/ui/StartTab";
 import { ErrorText } from "@/ui/Notice";
 import { IconButton, PageHeader } from "@/ui/Screen";
 import { colors, ui } from "@/ui/theme";
@@ -88,6 +89,7 @@ export default function HostScreen() {
             ) : null}
           </View>
         ) : null}
+        {canStartTab(host) ? <StartTab host={host} /> : null}
         <HostTree
           host={host}
           onOpenPane={(id) =>

@@ -13,7 +13,7 @@ import { formatClock } from "@/ui/format";
 import { Icon } from "@/ui/Icon";
 import { ErrorText } from "@/ui/Notice";
 import { PromptText } from "@/ui/PromptText";
-import { TabScreen, titleTop } from "@/ui/Screen";
+import { TabScreen, tabBottom, titleTop } from "@/ui/Screen";
 import { useNow } from "@/ui/useNow";
 import { colors, mono, tints, ui } from "@/ui/theme";
 
@@ -60,7 +60,8 @@ function FirstRun() {
           ))}
         </View>
       </ScrollView>
-      <View style={[styles.firstActions, { paddingBottom: Math.max(40, insets.bottom + 6) }]}>
+      {/* above the floating tab bar */}
+      <View style={[styles.firstActions, { paddingBottom: tabBottom(insets.bottom) }]}>
         <Button
           label="Scan the code"
           variant="primary"

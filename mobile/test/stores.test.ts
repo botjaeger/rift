@@ -9,7 +9,9 @@ import {
   isHostRecord,
   loadLastView,
   loadOrCreateIdentity,
+  loadSeenRelease,
   loadSettings,
+  saveSeenRelease,
   restoreTarget,
   saveLastView,
   saveSettings,
@@ -110,6 +112,26 @@ describe("settings", () => {
     expect(await loadSettings(kv)).toEqual({ ...DEFAULT_SETTINGS, deviceName: "Pixel", notifyPolicy: "failures" });
     kv.data.set("rift.settings", JSON.stringify({ askBeforeRun: "no", wrapLines: 0, deviceName: "  " }));
     expect(await loadSettings(kv)).toEqual(DEFAULT_SETTINGS);
+  });
+
+  it("checks for updates by default, and keeps the switch turned off", async () => {
+    const kv = new MemoryStore();
+    expect(DEFAULT_SETTINGS.autoUpdate).toBe(true);
+    // stored before the switch existed
+    const { autoUpdate: _, ...old } = DEFAULT_SETTINGS;
+    kv.data.set("rift.settings", JSON.stringify(old));
+    expect((await loadSettings(kv)).autoUpdate).toBe(true);
+    await saveSettings(kv, { ...DEFAULT_SETTINGS, autoUpdate: false });
+    expect((await loadSettings(kv)).autoUpdate).toBe(false);
+  });
+
+  it("remembers the release whose notes were shown", async () => {
+    const kv = new MemoryStore();
+    expect(await loadSeenRelease(kv)).toBeNull();
+    await saveSeenRelease(kv, "0.1.0-u2");
+    expect(await loadSeenRelease(kv)).toBe("0.1.0-u2");
+    kv.data.set("rift.seenRelease", "x".repeat(200));
+    expect(await loadSeenRelease(kv)).toBeNull();
   });
 
   it("migrates Confirm every command to Ask before running, off: a stored value cannot tell a choice from the default", async () => {

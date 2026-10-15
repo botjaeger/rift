@@ -188,6 +188,8 @@ export interface Settings {
    * again reuses the topic the ntfy app is already subscribed to.
    */
   ntfyTopic: string | null;
+  /** "Check for updates automatically": at launch, every 15 minutes and on coming back (ota.ts). */
+  autoUpdate: boolean;
 }
 
 export type NotifyPolicy = "off" | "failures" | "all";
@@ -211,6 +213,7 @@ export const DEFAULT_SETTINGS: Settings = {
   ntfyServer: NTFY_SERVER,
   ntfyEnabled: false,
   ntfyTopic: null,
+  autoUpdate: true,
 };
 
 const SETTINGS_KEY = "rift.settings";
@@ -257,6 +260,8 @@ export async function loadSettings(kv: KeyValueStore): Promise<Settings> {
       // on only with a usable topic (else the switch would show on with nothing under it)
       ntfyEnabled: bool("ntfyEnabled") && typeof v.ntfyTopic === "string" && isNtfyTopic(v.ntfyTopic),
       ntfyTopic: typeof v.ntfyTopic === "string" && isNtfyTopic(v.ntfyTopic) ? v.ntfyTopic : null,
+      // absent before the switch: on, as updates always were
+      autoUpdate: bool("autoUpdate"),
     };
   } catch {
     return DEFAULT_SETTINGS;
@@ -265,6 +270,24 @@ export async function loadSettings(kv: KeyValueStore): Promise<Settings> {
 
 export async function saveSettings(kv: KeyValueStore, settings: Settings): Promise<void> {
   await kv.set(SETTINGS_KEY, JSON.stringify(settings));
+}
+
+// --- what's new ------------------------------------------------------------------------------
+
+const SEEN_RELEASE_KEY = "rift.seenRelease";
+
+/** The release (changelog.ts releaseKey) whose notes were last shown; null on a first launch. */
+export async function loadSeenRelease(kv: KeyValueStore): Promise<string | null> {
+  try {
+    const raw = await kv.get(SEEN_RELEASE_KEY);
+    return raw !== null && /^[0-9A-Za-z.+-]{1,64}$/.test(raw) ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function saveSeenRelease(kv: KeyValueStore, key: string): Promise<void> {
+  await kv.set(SEEN_RELEASE_KEY, key);
 }
 
 // --- last view -------------------------------------------------------------------------------

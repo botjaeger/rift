@@ -69,14 +69,16 @@ export function osName(os: string): string {
 
 /**
  * The Settings › About line for this build: its version, then which JavaScript it runs —
- * the bundle it shipped with, or an over-the-air update and when that update was published.
+ * the bundle it shipped with, or an over-the-air update by its number (`update`, from
+ * release.ts), else by when it was published.
  */
 export function appVersionText(
   version: string,
-  updates: { enabled: boolean; embedded: boolean; createdAt: Date | null },
+  updates: { enabled: boolean; embedded: boolean; createdAt: Date | null; update: number },
 ): string {
   if (!updates.enabled) return `${version} · updates off`;
   if (updates.embedded || !updates.createdAt) return `${version} · as installed`;
+  if (updates.update > 0) return `${version} · update ${updates.update}`;
   const when = updates.createdAt.toLocaleString(undefined, {
     day: "numeric",
     month: "short",
@@ -84,4 +86,25 @@ export function appVersionText(
     minute: "2-digit",
   });
   return `${version} · update of ${when}`;
+}
+
+/** Settings › About's update line, from the last check (ota.ts OtaStatus). */
+export function updateStatusText(
+  check: { state: "idle" | "checking" | "downloaded" | "none" | "failed"; at: number | null },
+  pending: boolean,
+): string {
+  if (pending) return "An update is ready and applies when the app restarts.";
+  const when = check.at === null ? "" : ` · ${new Date(check.at).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}`;
+  switch (check.state) {
+    case "checking":
+      return "Checking for updates…";
+    case "none":
+      return `Up to date${when}`;
+    case "downloaded":
+      return "Downloading the update…";
+    case "failed":
+      return `Could not check for updates${when}. Check now tries again.`;
+    default:
+      return "Not checked yet";
+  }
 }

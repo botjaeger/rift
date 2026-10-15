@@ -31,6 +31,17 @@ export const tabTitleTop = (inset: number) => (Platform.OS === "ios" ? titleTop(
 export const headerTop = (inset: number) => Math.max(inset, 47) + 7;
 /** Room left under a tab page for the floating tab bar (62 pt, 26 pt above the edge). */
 export const TAB_BAR_ROOM = 120;
+/**
+ * The bottom padding of a plain tab page (the first-run page), from its bottom safe-area inset.
+ * On iOS the system tab bar is part of that inset already (83 pt on an iPhone 16 Pro), so only a
+ * gap is added; Android and the web draw the floating bar over the page and leave TAB_BAR_ROOM.
+ */
+export const tabBottom = (inset: number) => inset + (Platform.OS === "ios" ? 24 : TAB_BAR_ROOM);
+/**
+ * The same for a tab page's scroll view: on iOS the system also insets the scroll view's content
+ * by the bar (measured: the safe-area inset added on top left a 108 pt gap), so only the gap.
+ */
+const tabScrollBottom = (inset: number) => (Platform.OS === "ios" ? 24 : tabBottom(inset));
 
 const android = Platform.OS === "android";
 
@@ -103,7 +114,7 @@ export function TabScreen({
       onLayout={revealFocusedField}
       style={styles.fill}
       // the large header's row is its 40 pt button, 58 pt down on the boards
-      contentContainerStyle={{ paddingTop: tabTitleTop(insets.top) - (large ? 4 : 0), paddingBottom: insets.bottom + TAB_BAR_ROOM }}
+      contentContainerStyle={{ paddingTop: tabTitleTop(insets.top) - (large ? 4 : 0), paddingBottom: tabScrollBottom(insets.bottom) }}
       contentInsetAdjustmentBehavior="never"
       automaticallyAdjustContentInsets={false}
       // iOS: the keyboard insets the page and scrolls a focused field above it

@@ -1,7 +1,6 @@
 import type { BottomTabBarProps } from "expo-router/js-tabs";
 import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { useApp } from "@/runtime";
 import { Icon, type IconName } from "./Icon";
 import { colors, ui } from "./theme";
 
@@ -19,10 +18,6 @@ const TABS: Record<string, { label: string; icon: IconName }> = {
  */
 export function FloatingTabBar({ state, navigation }: BottomTabBarProps) {
   const insets = useSafeAreaInsets();
-  const app = useApp();
-  // first run (no computer paired yet): Now is the Empty board, without the tab bar (only
-  // there: unpairing the last computer from Settings must not strand the user)
-  if (state.routes[state.index]?.name === "index" && app.ready && !app.loadError && app.hosts.length === 0) return null;
   return (
     <View
       accessibilityRole="tablist"

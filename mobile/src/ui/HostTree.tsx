@@ -4,6 +4,7 @@ import type { HostView } from "@/fleet";
 import type { Pane } from "@/protocol/types";
 import { tabTitle } from "@/topology";
 import { Icon } from "./Icon";
+import { canStartTab } from "./StartTab";
 import { SectionTitle } from "./Screen";
 import { colors, mono, radius, tints, ui } from "./theme";
 
@@ -67,6 +68,8 @@ function PaneRow({ pane, onOpen }: { pane: Pane; onOpen: (id: number) => void })
 /** A host's tabs as cards of pane rows (the Host board), one group per window. */
 export function HostTree({ host, onOpenPane }: { host: HostView; onOpenPane: (id: number) => void }) {
   if (host.conn.status === "open" && host.windows.length === 0) {
+    // a computer that takes a shell anyway says so above (StartTab)
+    if (canStartTab(host)) return null;
     return <Text style={styles.empty}>No Rift windows are open on {host.record.name}.</Text>;
   }
   const many = host.windows.length > 1;
@@ -74,7 +77,9 @@ export function HostTree({ host, onOpenPane }: { host: HostView; onOpenPane: (id
     <View style={styles.tree}>
       {host.windows.map((w, wi) => (
         <View key={w.pid} style={styles.window}>
-          <SectionTitle style={styles.title}>{many ? `Window ${wi + 1} · Tabs` : "Tabs"}</SectionTitle>
+          <SectionTitle style={styles.title}>
+            {w.background ? "Rift is closed · Tabs" : many ? `Window ${wi + 1} · Tabs` : "Tabs"}
+          </SectionTitle>
           <View style={styles.tabs}>
             {w.tabs.map((tab) => (
               <View key={tab.index} style={styles.tab}>

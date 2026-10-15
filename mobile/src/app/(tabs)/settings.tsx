@@ -7,11 +7,12 @@ import { AccessibilityInfo, Linking, Platform, Pressable, StyleSheet, Text, Text
 import { controlKey } from "@/controlKeys";
 import { ntfyUnsupported, type HostView } from "@/fleet";
 import { NTFY_ROTATED, ntfyFooter, ntfyServerChanged, ntfySubscribeFallback, ntfySubscribeLink, pushFooter } from "@/notify";
-import { authenticate, biometricSupport, fleet, useApp, type BiometricSupport } from "@/runtime";
+import { authenticate, biometricSupport, fleet, updateChecks, useApp, useUpdateChecks, type BiometricSupport } from "@/runtime";
 import { MAX_DEVICE_NAME, NOTIFY_AFTER_CHOICES, type NotifyPolicy } from "@/stores";
 import { Button } from "@/ui/Button";
 import { confirmDestructive } from "@/ui/confirm";
-import { appVersionText, formatAfter, osName } from "@/ui/format";
+import { APP_UPDATE } from "@/release";
+import { appVersionText, formatAfter, osName, updateStatusText } from "@/ui/format";
 import { Icon } from "@/ui/Icon";
 import { ErrorText } from "@/ui/Notice";
 import { ChoiceRow, InfoRow, Row, SwitchRow } from "@/ui/Rows";
@@ -474,29 +475,67 @@ export default function SettingsScreen() {
         ))}
       </Section>
 
-      <About />
+      <About autoUpdate={s.settings.autoUpdate} />
     </TabScreen>
   );
 }
 
-/** The build's version and the over-the-air update it runs; a downloaded update applies on restart. */
-function About() {
+/**
+ * The build's version and the over-the-air update it runs, the update checks (automatic, and
+ * Check now) and the release notes; a downloaded update applies on restart.
+ */
+function About({ autoUpdate }: { autoUpdate: boolean }) {
+  const router = useRouter();
   const { currentlyRunning, isUpdatePending } = Updates.useUpdates();
+  const check = useUpdateChecks();
   const text = appVersionText(Constants.expoConfig?.version ?? "?", {
     enabled: Updates.isEnabled,
     embedded: currentlyRunning.isEmbeddedLaunch,
     createdAt: currentlyRunning.createdAt ?? null,
+    update: APP_UPDATE,
   });
+  const checking = check.state === "checking";
   return (
-    <Section title="About" footer={isUpdatePending ? "An update is downloaded and applies when the app restarts." : undefined}>
+    <Section title="About">
       <InfoRow label="Version" first>
         <Text style={styles.version}>{text}</Text>
       </InfoRow>
-      {isUpdatePending ? (
-        <Row>
-          <Button label="Restart now" size="small" accessibilityHint="Restarts the app on the downloaded update" onPress={() => void Updates.reloadAsync()} />
-        </Row>
+      {updateChecks.enabled ? (
+        <>
+          <Row wrap>
+            <Text style={styles.reason} accessibilityLiveRegion="polite">
+              {updateStatusText(check, isUpdatePending)}
+            </Text>
+            {isUpdatePending ? (
+              <Button label="Restart now" size="small" accessibilityHint="Restarts the app on the downloaded update" onPress={() => void Updates.reloadAsync()} />
+            ) : (
+              <Button
+                label="Check now"
+                size="small"
+                disabled={checking}
+                accessibilityHint="Looks for an update and downloads it"
+                onPress={() => void updateChecks.run()}
+              />
+            )}
+          </Row>
+          <SwitchRow
+            label="Check for updates automatically"
+            detail="At launch, every 15 minutes and when you come back to the app"
+            value={autoUpdate}
+            onChange={(v) => void fleet.updateSettings({ autoUpdate: v })}
+          />
+        </>
       ) : null}
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="What's New"
+        accessibilityHint="The changes in each version of the app"
+        onPress={() => router.push("/changelog")}
+        style={({ pressed }) => [styles.link, styles.divider, pressed && styles.pressed]}
+      >
+        <Text style={[styles.rowLabel, styles.flex1]}>What&apos;s New</Text>
+        <Icon name="forward" size={14} color={colors.textMuted} />
+      </Pressable>
     </Section>
   );
 }

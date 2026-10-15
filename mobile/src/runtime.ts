@@ -11,6 +11,7 @@ import * as Network from "expo-network";
 import * as Notifications from "expo-notifications";
 import * as ScreenCapture from "expo-screen-capture";
 import * as SecureStore from "expo-secure-store";
+import * as Updates from "expo-updates";
 import { useSyncExternalStore } from "react";
 import { AppState as RNAppState, Platform } from "react-native";
 import { Connectivity, type NetworkSnapshot } from "./connectivity";
@@ -19,6 +20,7 @@ import { AppLock, authOutcome, biometricLabel, type AuthResult, type BiometricKi
 import { liveActivities } from "../modules/rift-live";
 import { livePlan, type LiveShown } from "./live";
 import { ASK_CATEGORY, ASK_OPEN_CATEGORY, pushTokenProblem } from "./notify";
+import { OTA_CHECK_INTERVAL_MS, OtaChecks, otaChecker, type OtaStatus } from "./ota";
 import { MemoryStore, type KeyValueStore } from "./stores";
 
 /** Cryptographic randomness: expo-crypto (the OS generator), or Web Crypto. Never Math.random. */
@@ -131,8 +133,11 @@ const notifier: Notifier = {
   },
 };
 
+/** The app's key-value store (the keychain on a phone). */
+export const kv: KeyValueStore = Platform.OS === "web" ? new MemoryStore() : secureStore;
+
 export const fleet = new Fleet({
-  kv: Platform.OS === "web" ? new MemoryStore() : secureStore,
+  kv,
   randomBytes,
   platform: Platform.OS,
   systemDeviceName: Device.deviceName ?? Device.modelName ?? "Phone",
@@ -170,6 +175,13 @@ async function snapshotOf(state: Network.NetworkState): Promise<NetworkSnapshot>
 
 export const appLock = new AppLock();
 
+/** Over-the-air update checks (ota.ts); development builds load from Metro instead. */
+export const updateChecks = new OtaChecks(Updates.isEnabled && !__DEV__ ? otaChecker(Updates) : null);
+
+export function useUpdateChecks(): OtaStatus {
+  return useSyncExternalStore(updateChecks.subscribe, updateChecks.getSnapshot, updateChecks.getSnapshot);
+}
+
 let watching = false;
 
 /** Starts the network, app-state and lock watchers (once, from the root layout). */
@@ -197,11 +209,27 @@ export function startPlatformWatchers(): () => void {
       connectivity.appState(s);
     }
   };
+  // Automatic update checks (Settings › About › Check for updates automatically): at launch once
+  // the settings are read, then every 15 minutes and on each return to the foreground.
+  const autoCheck = () => {
+    const s = fleet.store.getSnapshot();
+    if (s.ready && s.settings.autoUpdate) void updateChecks.run();
+  };
+  const otaTimer = updateChecks.enabled ? setInterval(autoCheck, OTA_CHECK_INTERVAL_MS) : null;
   const appSub = RNAppState.addEventListener("change", (s) => {
     onAppState(s);
     // Notifications may have been allowed or blocked in the system settings meanwhile.
     if (s === "active") void refreshPushToken();
+    if (s === "active") autoCheck();
   });
+  let launchChecked = false;
+  const launchCheck = () => {
+    if (launchChecked || !fleet.store.getSnapshot().ready) return;
+    launchChecked = true;
+    autoCheck();
+  };
+  const unsubLaunch = fleet.store.subscribe(launchCheck);
+  launchCheck();
   void refreshPushToken();
   const tokenSub = notificationsSupported ? Notifications.addPushTokenListener(() => void refreshPushToken()) : null;
   // Android keeps the JavaScript running after Back closes the activity; when it is opened again
@@ -237,6 +265,8 @@ export function startPlatformWatchers(): () => void {
     netSub.remove();
     appSub.remove();
     tokenSub?.remove();
+    if (otaTimer) clearInterval(otaTimer);
+    unsubLaunch();
     unsubStore();
     unsubLive();
     watching = false;

@@ -6,6 +6,40 @@ build (`## <version> — <YYYY-MM-DD>`) or an over-the-air update to one
 message its download carries. Items use `### New`, `### Improved` or
 `### Fixed` sections of `- **Title** — text`.
 
+## 0.2.0 — 2026-10-15
+
+Updates you can see and control: what changed, when to check, and the version you run.
+
+### New
+
+- **What's New** — after an update, the app shows what changed once; Settings › About ›
+  What's New lists the changes of every version.
+- **Update checks** — Settings › About › Check now looks for an update on demand, and
+  Check for updates automatically turns the automatic checks off or on.
+- **Open a tab while Rift is closed** — when your computer allows it, a computer whose Rift
+  window is closed offers Open a tab: the shell starts on the computer, and the tab appears
+  there when you open Rift.
+- **Opening animation** — the app opens on Rift's prompt typing its name, in under a second.
+
+### Improved
+
+- **Version** — Settings › About names the update you run, such as "0.2.0 · update 1".
+
+## 0.1.0 · update 2 — 2026-10-15
+
+The tab bar is always there and steps aside while you scroll; updates arrive while the app is open.
+
+### Improved
+
+- **Tab bar** — shows from the first launch, before a computer is paired; on iPhone it
+  shrinks while you scroll down and returns when you scroll up.
+- **Updates** — the app also looks for an update while it is open and when you come back to
+  it, and offers to restart once one has downloaded.
+
+### Fixed
+
+- **Page ends** — the last item on a page no longer sits far above the tab bar.
+
 ## 0.1.0 · update 1 — 2026-10-14
 
 Smoother screen transitions on iPhone.
