@@ -115,12 +115,12 @@ const notifier: Notifier = {
     if (granted) void refreshPushToken();
     return granted;
   },
-  async notify({ title, body, data, category }) {
+  async notify({ title, subtitle, body, data, category }) {
     if (!notificationsSupported) return;
     if (!(await Notifications.getPermissionsAsync()).granted) return;
     // Posted on this device (alerts while the app is closed come through push instead).
     await Notifications.scheduleNotificationAsync({
-      content: { title, body: body || undefined, data, ...(category ? { categoryIdentifier: category } : {}) },
+      content: { title, subtitle: subtitle || undefined, body: body || undefined, data, ...(category ? { categoryIdentifier: category } : {}) },
       trigger: null,
     });
   },

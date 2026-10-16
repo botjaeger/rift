@@ -2,7 +2,7 @@
 // the same project reads the same everywhere. Pure.
 
 /** The avatars' colours: the accent, then the editor theme's syntax colours (DESIGN.md). */
-export const AVATAR_COLORS = ["#569cd6", "#22c55e", "#ce9178", "#9cdcfe", "#c586c0", "#4ec9b0", "#dcdcaa"] as const;
+export const AVATAR_COLORS = ["#19aad8", "#1ca05a", "#ff8272", "#a5d5fe", "#ff8ffd", "#d0d1fe", "#fefdc2"] as const;
 
 export interface Avatar {
   color: string;

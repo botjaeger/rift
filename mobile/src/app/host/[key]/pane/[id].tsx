@@ -18,9 +18,9 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { askingTitle, questionKey } from "@/answer";
 import { promptChips } from "@/chips";
-import { canOperate, hasFeature, isAsked, wrapsLines } from "@/fleet";
+import { canClose, canOperate, hasFeature, isAsked, wrapsLines } from "@/fleet";
 import { foldBlocks, paneName, programName, swipeTarget, type PaneItem } from "@/now";
-import { CLAUDE_COLOR, paneMark, runsAgent, terminalViewOn, waitingOthers } from "@/paneView";
+import { CLAUDE_COLOR, paneMark, runsAgent, showsViewSwitch, terminalViewOn, waitingOthers } from "@/paneView";
 import { canLoadOlder, MAX_BLOCKS } from "@/protocol/store";
 import type { Block } from "@/protocol/types";
 import { fleet, useApp } from "@/runtime";
@@ -37,6 +37,7 @@ import { ErrorText } from "@/ui/Notice";
 import { headerTop } from "@/ui/Screen";
 import { TerminalView } from "@/ui/TerminalView";
 import { toggleA11y } from "@/ui/toggle";
+import { useClose } from "@/ui/useClose";
 import { useSingleFlight } from "@/ui/useSingleFlight";
 import { colors, mono, radius, TOUCH, tints, ui } from "@/ui/theme";
 
@@ -62,7 +63,13 @@ const itemKey = (it: PaneItem) => (it.kind === "fold" ? `fold:${it.ids[0]}` : St
  * the pane's screen (the FullScreen board).
  */
 export default function PaneScreen() {
-  const { key, id, block: blockParam, restored } = useLocalSearchParams<{ key: string; id: string; block?: string; restored?: string }>();
+  const { key, id, block: blockParam, restored, toast: toastParam } = useLocalSearchParams<{
+    key: string;
+    id: string;
+    block?: string;
+    restored?: string;
+    toast?: string;
+  }>();
   const paneId = Number(id);
   const s = useApp();
   const router = useRouter();
@@ -70,9 +77,13 @@ export default function PaneScreen() {
   const list = useRef<FlashListRef<PaneItem>>(null);
   const atBottom = useRef(true);
   const [menu, setMenu] = useState(false);
-  const [toast, setToast] = useState("");
+  // a close that brought us here says so (useClose), then the toast goes as any other
+  const [toast, setToast] = useState(toastParam ?? "");
   const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  useEffect(() => () => clearTimeout(toastTimer.current), []);
+  useEffect(() => {
+    if (toastParam) toastTimer.current = setTimeout(() => setToast(""), 1600);
+    return () => clearTimeout(toastTimer.current);
+  }, [toastParam]);
   // a line at the top that goes after a moment (and is announced), as the board's toasts
   const say = useCallback((text: string) => {
     clearTimeout(toastTimer.current);
@@ -92,9 +103,15 @@ export default function PaneScreen() {
     const ios = Platform.OS === "ios";
     const show = Keyboard.addListener(ios ? "keyboardWillShow" : "keyboardDidShow", () => setKeyboard(true));
     const hide = Keyboard.addListener(ios ? "keyboardWillHide" : "keyboardDidHide", () => setKeyboard(false));
+    // the list shrinks as the keyboard comes up: keep its end in sight once it has (the screen's
+    // own ScrollView follows its end itself)
+    const settled = Keyboard.addListener("keyboardDidShow", () => {
+      if (atBottom.current) list.current?.scrollToEnd({ animated: false });
+    });
     return () => {
       show.remove();
       hide.remove();
+      settled.remove();
     };
   }, []);
 
@@ -146,7 +163,8 @@ export default function PaneScreen() {
   // for an agent (Claude Code never uses the alternate screen), off at a shell; a tap overrides
   // the default while this screen is open.
   const [termChoice, setTermChoice] = useState<boolean | null>(null);
-  const termView = terminalViewOn(termChoice, !!loc && runsAgent(loc.pane));
+  const agent = !!loc && runsAgent(loc.pane);
+  const termView = terminalViewOn(termChoice, agent);
   const pinned = termView && screenFeature;
   const fullScreen = pinned || showsTerminal(screen, screenFeature);
   const program = (loc && programName(loc.pane)) || screenProgram(running, loc?.pane.job ?? null);
@@ -159,6 +177,8 @@ export default function PaneScreen() {
 
   const wrap = wrapsLines(s, key, paneId);
   const operate = host ? canOperate(host) : false;
+  const closeable = canClose(host);
+  const onClose = useClose(key, paneId, setError, say);
   const onActions = useCallback(
     (blockId: number) => router.push({ pathname: "/block", params: { key, pane: String(paneId), block: String(blockId) } }),
     [router, key, paneId],
@@ -418,20 +438,26 @@ export default function PaneScreen() {
               ) : null}
               <Icon name="chevronDown" size={14} color={colors.textMuted} />
             </Pressable>
-            {screenFeature ? (
-              <Pressable
-                {...toggleA11y(pinned)}
-                accessibilityLabel="Terminal view"
-                accessibilityHint="Shows the pane's screen instead of its blocks"
-                hitSlop={{ top: 4, bottom: 4 }}
-                onPress={() => {
-                  say(pinned ? "Back to blocks" : "Terminal view on");
-                  setTermChoice(!pinned);
-                }}
-                style={({ pressed }) => [styles.screenButton, pinned && styles.screenButtonOn, pressed && styles.pressed]}
-              >
-                <Icon name="terminal" size={17} color={pinned ? colors.accent : colors.textMuted} />
-              </Pressable>
+            {showsViewSwitch(screenFeature, agent) ? (
+              <View style={styles.segments} accessibilityRole="tablist" accessibilityLabel="View">
+                {(["Blocks", "Terminal"] as const).map((name) => {
+                  const on = (name === "Terminal") === pinned;
+                  return (
+                    <Pressable
+                      key={name}
+                      accessibilityRole="tab"
+                      accessibilityLabel={name}
+                      accessibilityHint={name === "Blocks" ? "Shows the pane's commands as blocks" : "Shows the pane's screen as the program draws it"}
+                      accessibilityState={{ selected: on }}
+                      hitSlop={{ top: 4, bottom: 4 }}
+                      onPress={() => setTermChoice(name === "Terminal")}
+                      style={({ pressed }) => [styles.segment, on && styles.segmentOn, pressed && styles.pressed]}
+                    >
+                      <Text style={[styles.segmentText, on && styles.segmentTextOn]}>{name}</Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
             ) : null}
           </View>
         ) : null}
@@ -469,8 +495,6 @@ export default function PaneScreen() {
               canType={hasFeature(host, "text")}
               online={status === "open"}
               running={running !== null}
-              program={program}
-              pinned={pinned}
               bare={bareScreen}
               canFit={hasFeature(host, "fit")}
             />
@@ -572,27 +596,40 @@ export default function PaneScreen() {
         <>
           <Pressable accessibilityRole="button" accessibilityLabel="Close menu" onPress={() => setMenu(false)} style={StyleSheet.absoluteFill} />
           <View accessibilityRole="menu" accessibilityLabel="Pane options" style={[styles.menu, { top: headerPad + 50 }]}>
-            <MenuSwitch
-              icon="wrapOn"
-              title="Wrap long lines"
-              hint="Off: wide output scrolls sideways"
-              on={wrap}
-              onPress={() => {
-                fleet.setPaneWrap(key, paneId, !wrap);
-                say(wrap ? "Long lines scroll sideways" : "Wrapping long lines");
-              }}
-            />
+            {fullScreen ? (
+              // wrapping is the blocks'; the screen is the program's own
+              hasFeature(host, "fit") ? (
+                <Text style={[styles.menuNote, styles.menuRule]}>The pane takes this phone's width here, so programs wrap their own lines.</Text>
+              ) : null
+            ) : (
+              <MenuSwitch
+                icon="wrapOn"
+                title="Wrap long lines"
+                hint="Off: wide output scrolls sideways"
+                on={wrap}
+                onPress={() => {
+                  fleet.setPaneWrap(key, paneId, !wrap);
+                  say(wrap ? "Long lines scroll sideways" : "Wrapping long lines");
+                }}
+              />
+            )}
             <MenuSwitch
               icon="bell"
               title="Notifications"
               hint="Finished, failed and questions here"
               on={notifOn}
-              last
+              last={!closeable}
               onPress={() => {
                 void fleet.setHostNotifications(key, !notifOn);
                 say(notifOn ? "Notifications off for this computer" : "Notifications on for this computer");
               }}
             />
+            {closeable ? (
+              <>
+                <MenuAction title="Close pane" onPress={() => { setMenu(false); onClose(paneId, "pane"); }} />
+                <MenuAction title="Close tab" last onPress={() => { setMenu(false); onClose(paneId, "tab"); }} />
+              </>
+            ) : null}
           </View>
         </>
       ) : null}
@@ -604,6 +641,20 @@ export default function PaneScreen() {
         </View>
       ) : null}
     </KeyboardAvoidingView>
+  );
+}
+
+/** One of the ⋯ menu's actions: a destructive word. */
+function MenuAction({ title, last, onPress }: { title: string; last?: boolean; onPress: () => void }) {
+  return (
+    <Pressable
+      accessibilityRole="menuitem"
+      accessibilityLabel={title}
+      onPress={onPress}
+      style={({ pressed }) => [styles.menuAction, !last && styles.menuRule, pressed && styles.pressed]}
+    >
+      <Text style={styles.menuDestructive}>{title}</Text>
+    </Pressable>
   );
 }
 
@@ -701,16 +752,12 @@ const styles = StyleSheet.create({
   pickWait: { flexDirection: "row", alignItems: "center", gap: 5 },
   pickDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: colors.warning },
   pickWaitText: { fontFamily: ui(400), color: colors.warning, fontSize: 12 },
-  screenButton: {
-    width: 44,
-    height: 36,
-    borderRadius: 18,
-    borderWidth: 1,
-    borderColor: colors.glassRim,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  screenButtonOn: { borderColor: `${colors.accent}55`, backgroundColor: tints.accentBadge },
+  // the Blocks | Terminal switch: two segments in a 36 pt capsule, the chosen one on the accent tint
+  segments: { height: 36, flexDirection: "row", padding: 2, borderRadius: 18, borderWidth: 1, borderColor: colors.glassRim },
+  segment: { minWidth: 68, paddingHorizontal: 10, borderRadius: 16, alignItems: "center", justifyContent: "center" },
+  segmentOn: { backgroundColor: tints.accentBadge },
+  segmentText: { fontFamily: ui(500), color: colors.textMuted, fontSize: 13 },
+  segmentTextOn: { color: colors.accent },
   connLine: {
     fontFamily: ui(400),
     color: colors.warning,
@@ -727,7 +774,7 @@ const styles = StyleSheet.create({
     right: 12,
     width: 280,
     borderRadius: 14,
-    backgroundColor: "#2c2c30",
+    backgroundColor: "#2b2b2b",
     borderWidth: 1,
     borderColor: colors.glassRim,
     overflow: "hidden",
@@ -739,6 +786,9 @@ const styles = StyleSheet.create({
   },
   menuRow: { minHeight: 56, flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 14 },
   menuRule: { borderBottomWidth: 1, borderBottomColor: colors.hairline },
+  menuNote: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12, lineHeight: 17, paddingHorizontal: 14, paddingVertical: 12 },
+  menuAction: { minHeight: 48, justifyContent: "center", paddingHorizontal: 14 },
+  menuDestructive: { fontFamily: ui(400), color: colors.warning, fontSize: 15 },
   menuText: { flex: 1, gap: 2, paddingVertical: 8 },
   menuTitle: { fontFamily: ui(400), color: colors.textBright, fontSize: 15 },
   menuHint: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12 },

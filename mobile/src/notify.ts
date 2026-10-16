@@ -177,23 +177,6 @@ export function pushCovers(
   return reg.longMs !== null && done.durationMs >= reg.longMs && (!reg.failuresOnly || failed(done.exit));
 }
 
-export interface NotificationText {
-  title: string;
-  body: string;
-}
-
-export function notificationText(
-  hostName: string,
-  exit: number | null,
-  command: string,
-  showCommand: boolean,
-): NotificationText {
-  const title =
-    exit === null || exit === 0
-      ? `A command finished on ${hostName}`
-      : `A command failed on ${hostName} (exit ${exit})`;
-  return { title, body: showCommand ? command : "" };
-}
 
 /** The parts of a notification response (expo-notifications) that `tapTarget` reads. */
 export interface TapResponse {

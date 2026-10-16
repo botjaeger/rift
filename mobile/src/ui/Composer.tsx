@@ -3,7 +3,6 @@ import { useRouter } from "expo-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AccessibilityInfo,
-  ActionSheetIOS,
   Keyboard,
   Platform,
   Pressable,
@@ -14,12 +13,22 @@ import {
   View,
 } from "react-native";
 import { KeyCaptureView, type KeyEvent } from "../../modules/rift-keys";
-import { commandProblem } from "@/protocol/types";
+import { commandProblem, type CompleteMsg } from "@/protocol/types";
 import { draftKey } from "@/fleet";
 import { applySticky, keyEventToAction, stickyKey } from "@/keyboard";
 import { keysNeedAuth } from "@/lock";
 import { authenticate, fleet, useApp } from "@/runtime";
-import { branchText, chipsSpoken, type ChipMenuKind, type PromptChips } from "@/chips";
+import {
+  branchText,
+  chipRowMode,
+  chipsSpoken,
+  completionRows,
+  diffChipText,
+  NO_COMPLETIONS,
+  NO_COMPLETIONS_PROGRAM,
+  type ChipMenuKind,
+  type PromptChips,
+} from "@/chips";
 import { programSend } from "@/paneView";
 import { showsKeyRow } from "@/terminal";
 import { ControlRow, NO_STICKY, type Sticky } from "./ControlRow";
@@ -35,7 +44,7 @@ const MAX_SUGGESTIONS = 6;
 /** Wait this long after typing stops before asking the computer for completions. */
 const COMPLETE_DELAY_MS = 200;
 
-/** The chips above the field (the Pane board): the folder's path, the branch with its dirty dot. */
+/** The chips above the empty field (the Pane board): the folder's path, the branch with its dirty dot. */
 function folderLines(chips: PromptChips): { path: string; branch: string | null } | null {
   if (!chips.cwd) return null;
   const b = chips.branch;
@@ -43,11 +52,12 @@ function folderLines(chips: PromptChips): { path: string; branch: string | null 
 }
 
 /**
- * The pane's command line (operate permission only; the P3 Pane board): one row of chips, the
- * folder and the branch (the chip menus: folder, branch, changed files) then the suggestions
- * (the desktop's completions and this pane's history, feature `complete`; else its recent
- * commands); ⌃, which shows the control-key row (Settings › Keys) above the field; and the
- * round field with its run button (Return runs too; through the Confirm sheet only with Settings › Ask before
+ * The pane's command line (operate permission only; the P3 Pane board): one row above the field
+ * that is the prompt chips while the field is empty (folder, branch, changed files: each opens its
+ * menu) and the completions while the user types (the desktop's, feature `complete`, and this
+ * pane's history, typed part bright, the rest dim, with where each comes from); the round field
+ * with its run button; and ⌃, which shows the control-key row (Settings › Keys) under the field,
+ * so the field stays in sight above it while the keyboard is up (Return runs too; through the Confirm sheet only with Settings › Ask before
  * running on). While a program runs (`running`) the field talks to it instead: Return sends the
  * line as text, then Return as a key (feature `text`), with no Confirm sheet. A hardware
  * keyboard's ctrl/alt combinations, Escape, Tab and F-keys in the field go to the pane as keys.
@@ -97,7 +107,7 @@ export function Composer({
   const sending = useRef(false);
   // ⌃: the key row in place of the suggestions; Settings › Show keys opens it to start with
   const [keys, setKeys] = useState(() => showsKeyRow(s.settings.showKeys, false));
-  const [completed, setCompleted] = useState<{ draft: string; list: string[] } | null>(null);
+  const [completed, setCompleted] = useState<{ draft: string; msg: CompleteMsg } | null>(null);
   // the row leads with Hide keyboard while the keyboard is up
   const [keyboardUp, setKeyboardUp] = useState(false);
   useEffect(() => {
@@ -110,22 +120,15 @@ export function Composer({
     };
   }, []);
 
-  // the desktop's completions for the draft, then the pane's history; else its recent commands
+  // the desktop's completions for the draft, then the pane's history
   const recentKey = recent.join("\n");
-  const fromRecent = useMemo(
-    () => (recentKey === "" ? [] : recentKey.split("\n").filter((c) => c.startsWith(draft) && c !== draft)),
-    [recentKey, draft],
-  );
   useEffect(() => {
     if (!complete || !online) return;
     let live = true;
     const t = setTimeout(() => {
       void fleet.complete(hostKey, paneId, draft).then((r) => {
         if (!live || !r.ok) return;
-        const out: string[] = [];
-        for (const x of [...r.msg.items.map((i) => i.text), ...r.msg.history.map((h) => h.text)])
-          if (x !== draft && !out.includes(x)) out.push(x);
-        setCompleted({ draft, list: out });
+        setCompleted({ draft, msg: r.msg });
       });
     }, COMPLETE_DELAY_MS);
     return () => {
@@ -254,30 +257,19 @@ export function Composer({
     Keyboard.dismiss();
     router.push({ pathname: "/chips", params: { key: hostKey, pane: String(paneId), menu } });
   };
-  // the folder button: the folder's menu, or a choice of the chips' menus in a repository
-  const menus: { label: string; menu: ChipMenuKind }[] = [{ label: "Change folder", menu: "dirs" }];
-  if (chips.branch) menus.push({ label: "Switch branch", menu: "branches" });
-  if (chips.diff) menus.push({ label: `Changed files (${chips.diff.files})`, menu: "changes" });
-  // iOS: the system action sheet. Elsewhere a strip above the field: react-native-web's Alert
-  // shows nothing, and Android's put the three menus in reverse order (its positive / negative /
-  // neutral buttons) on a light dialog under the cut-off folder path.
-  const [choosing, setChoosing] = useState(false);
-  const pickMenu = () => {
-    if (menus.length === 1) return openMenu("dirs");
-    if (Platform.OS === "ios")
-      ActionSheetIOS.showActionSheetWithOptions(
-        { options: [...menus.map((m) => m.label), "Cancel"], cancelButtonIndex: menus.length, userInterfaceStyle: "dark" },
-        (i) => i < menus.length && openMenu(menus[i]!.menu),
-      );
-    else setChoosing((c) => !c);
-  };
-
   const folder = folderLines(chips);
   const stickyName = [sticky.ctrl ? "ctrl" : null, sticky.alt ? "alt" : null, sticky.shift ? "shift" : null].filter(Boolean).join("+");
   const canRun = online && draft.trim() !== "";
-  // the computer's answer for this draft (or the last one, while the next is on its way)
-  const suggested = complete && online ? (completed?.list ?? []) : fromRecent;
-  const shown = suggested.slice(0, MAX_SUGGESTIONS);
+  // the computer's answer for this draft (or the last one, while the next is on its way), then the pane's history
+  const typing = chipRowMode(draft) === "completions";
+  const answer = complete && online ? completed : null;
+  const rows = useMemo(
+    () => (typing ? completionRows(draft, answer?.msg.items ?? [], answer?.msg.history ?? [], recentKey === "" ? [] : recentKey.split("\n"), MAX_SUGGESTIONS) : []),
+    [typing, draft, answer, recentKey],
+  );
+  // "No completions" only once the computer has answered for this very draft
+  const settled = !(complete && online) || completed?.draft === draft;
+  const hasChips = !!folder || !!chips.diff;
 
   return (
     <KeyCaptureView
@@ -287,40 +279,62 @@ export function Composer({
       onKey={onShortcut}
       style={styles.wrap}
     >
-      {keys && !(choosing && menus.length > 1) ? (
-        <ControlRow
-          ids={s.settings.controlKeys}
-          sticky={sticky}
-          disabled={!online}
-          onSticky={setSticky}
-          onKey={onRowKey}
-          onOpen={onOpen}
-          onPaste={canType || running === null ? () => void onPaste() : undefined}
-          onEdit={() => router.push("/control-keys")}
-          onHideKeyboard={keyboardUp ? () => Keyboard.dismiss() : undefined}
-        />
-      ) : null}
-      {folder || (choosing && menus.length > 1) || shown.length > 0 ? (
-        // keyed: without keys React reused one native strip for the menus and the suggestions,
-        // and the suggestions opened at the menu strip's sideways scroll, their first one cut off
+      {typing ? (
         <ScrollView
-          key={choosing && menus.length > 1 ? "menus" : `suggestions:${shown[0]}`}
+          // keyed by the first completion: a new list opens at its start, not where the last one was scrolled
+          key={`completions:${rows[0]?.text}`}
           horizontal
           showsHorizontalScrollIndicator={false}
           style={styles.chipStrip}
           contentContainerStyle={styles.chips}
           keyboardShouldPersistTaps="always"
           accessibilityRole="toolbar"
-          accessibilityLabel={choosing && menus.length > 1 ? chipsSpoken(chips) : "Folder, branch and suggestions"}
+          accessibilityLabel="Completions"
+        >
+          {rows.length === 0 ? (
+            settled ? (
+              <Text style={styles.none} accessibilityLiveRegion="polite">
+                {running !== null ? NO_COMPLETIONS_PROGRAM : NO_COMPLETIONS}
+              </Text>
+            ) : null
+          ) : (
+            rows.map((r) => (
+              <Pressable
+                key={r.text}
+                accessibilityRole="button"
+                accessibilityLabel={`${r.text}, ${r.source}`}
+                accessibilityHint="Puts it in the command line"
+                onPress={() => fleet.setDraft(hostKey, paneId, r.text)}
+                hitSlop={{ top: 6, bottom: 6 }}
+                style={({ pressed }) => [styles.chip, styles.suggestion, pressed && styles.pressed]}
+              >
+                <Text style={styles.chipText} numberOfLines={1}>
+                  <Text style={styles.typed}>{r.typed}</Text>
+                  <Text style={styles.rest}>{r.rest}</Text>
+                </Text>
+                <Text style={styles.source}>{r.source}</Text>
+              </Pressable>
+            ))
+          )}
+        </ScrollView>
+      ) : hasChips ? (
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={styles.chipStrip}
+          contentContainerStyle={styles.chips}
+          keyboardShouldPersistTaps="always"
+          accessibilityRole="toolbar"
+          accessibilityLabel={chipsSpoken(chips) || "Folder, branch and changes"}
         >
           {folder ? (
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel={`Folder ${chips.cwd}${chips.branch ? ` on ${chips.branch.name}` : ""}${chipMenus ? ", change" : ""}`}
-              accessibilityHint={chipMenus ? (chips.branch ? "Folder, branch or changed files" : "Opens the folder's sub-folders") : undefined}
-              accessibilityState={{ disabled: !chipMenus, ...(Platform.OS !== "ios" && menus.length > 1 ? { expanded: choosing } : {}) }}
+              accessibilityLabel={`Folder ${chips.cwd}${chipMenus ? ", change" : ""}`}
+              accessibilityHint={chipMenus ? "Opens the folder's sub-folders" : undefined}
+              accessibilityState={{ disabled: !chipMenus }}
               disabled={!chipMenus}
-              onPress={pickMenu}
+              onPress={() => openMenu("dirs")}
               hitSlop={{ top: 6, bottom: 6 }}
               style={({ pressed }) => [styles.chip, styles.folderChip, pressed && styles.pressed]}
             >
@@ -345,39 +359,21 @@ export function Composer({
               </Text>
             </Pressable>
           ) : null}
-          {choosing && menus.length > 1
-            ? menus.map((m) => (
-                <Pressable
-                  key={m.menu}
-                  accessibilityRole="menuitem"
-                  accessibilityLabel={m.label}
-                  onPress={() => {
-                    setChoosing(false);
-                    openMenu(m.menu);
-                  }}
-                  hitSlop={{ top: 6, bottom: 6 }}
-                  style={({ pressed }) => [styles.chip, styles.suggestion, pressed && styles.pressed]}
-                >
-                  <Text style={styles.chipText} numberOfLines={1}>
-                    {m.label}
-                  </Text>
-                </Pressable>
-              ))
-            : shown.map((c) => (
-                <Pressable
-                  key={c}
-                  accessibilityRole="button"
-                  accessibilityLabel={c}
-                  accessibilityHint="Puts it in the command line"
-                  onPress={() => fleet.setDraft(hostKey, paneId, c)}
-                  hitSlop={{ top: 6, bottom: 6 }}
-                  style={({ pressed }) => [styles.chip, styles.suggestion, pressed && styles.pressed]}
-                >
-                  <Text style={styles.chipText} numberOfLines={1}>
-                    {c}
-                  </Text>
-                </Pressable>
-              ))}
+          {chips.diff ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`${chips.diff.files} ${chips.diff.files === 1 ? "file" : "files"} changed${chipMenus ? ", review" : ""}`}
+              accessibilityState={{ disabled: !chipMenus }}
+              disabled={!chipMenus}
+              onPress={() => openMenu("changes")}
+              hitSlop={{ top: 6, bottom: 6 }}
+              style={({ pressed }) => [styles.chip, styles.suggestion, pressed && styles.pressed]}
+            >
+              <Text style={styles.chipText} numberOfLines={1}>
+                {diffChipText(chips.diff)}
+              </Text>
+            </Pressable>
+          ) : null}
         </ScrollView>
       ) : null}
       {shownError ? <ErrorText>{shownError}</ErrorText> : null}
@@ -423,6 +419,19 @@ export function Composer({
           </Pressable>
         </View>
       </View>
+      {keys ? (
+        <ControlRow
+          ids={s.settings.controlKeys}
+          sticky={sticky}
+          disabled={!online}
+          onSticky={setSticky}
+          onKey={onRowKey}
+          onOpen={onOpen}
+          onPaste={canType || running === null ? () => void onPaste() : undefined}
+          onEdit={() => router.push("/control-keys")}
+          onHideKeyboard={keyboardUp ? () => Keyboard.dismiss() : undefined}
+        />
+      ) : null}
     </KeyCaptureView>
   );
 }
@@ -444,10 +453,15 @@ const styles = StyleSheet.create({
   chips: { gap: 6, paddingVertical: 6 },
   // 32 pt chips, 8 pt radius, mono 12: the folder on the accent tint, the branch on the success tint, suggestions outlined
   chip: { height: 32, paddingHorizontal: 10, borderRadius: 8, flexDirection: "row", alignItems: "center", gap: 5, maxWidth: 260 },
-  folderChip: { backgroundColor: tints.accentBadge },
+  folderChip: { backgroundColor: tints.accentBadge, maxWidth: 170 },
   branchChip: { backgroundColor: tints.successBadge },
   suggestion: { borderWidth: 1, borderColor: colors.glassRim },
-  chipText: { fontFamily: mono, color: colors.text, fontSize: 12 },
+  chipText: { fontFamily: mono, color: colors.text, fontSize: 12, flexShrink: 1 },
+  // a completion: what was typed bright, the rest dim, the source small after it
+  typed: { color: colors.textBright },
+  rest: { color: colors.textMuted },
+  source: { fontFamily: ui(400), color: colors.textDim, fontSize: 10 },
+  none: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12, alignSelf: "center" },
   inputRow: { flexDirection: "row", gap: 8, alignItems: "center" },
   // the board's 44 pt round button and the round field with its 36 pt run button
   round: {

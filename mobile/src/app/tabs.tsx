@@ -17,6 +17,7 @@ import {
   type SheetFilter,
   type TabRow,
 } from "@/now";
+import { canClose } from "@/fleet";
 import { fleet, useApp } from "@/runtime";
 import { Tile } from "@/ui/Avatar";
 import { Icon } from "@/ui/Icon";
@@ -24,7 +25,9 @@ import { canNewTab, openNewTab } from "@/ui/newTab";
 import { ErrorText } from "@/ui/Notice";
 import { toggleA11y } from "@/ui/toggle";
 import { colors, mono, tint, tints, ui } from "@/ui/theme";
+import { useClose } from "@/ui/useClose";
 import { useNow } from "@/ui/useNow";
+import { useToast } from "@/ui/useToast";
 
 const FILTERS: { filter: SheetFilter; text: string }[] = [
   { filter: "all", text: "All" },
@@ -89,6 +92,9 @@ export default function TabsSheet() {
     }
   };
   const canOpen = !!host && canNewTab(host);
+  const { say, toast } = useToast();
+  const closeTab = useClose(key, here, setError, say, true);
+  const closeable = canClose(host);
 
   return (
     // The sheet's own ScrollView, as its root: iOS lays out a form sheet's first scroll view as the
@@ -136,12 +142,20 @@ export default function TabsSheet() {
       </View>
 
       <View style={styles.listBody} accessibilityRole="list">
+        {toast}
         {shown.map((r) => {
           const isHere = r.tab.panes.some((p) => p.id === here);
           const look = LOOK[r.kind];
           return (
-            <Pressable
+            <View
               key={r.key}
+              style={[
+                styles.card,
+                { borderColor: isHere ? tint(colors.accent, 0x55) : r.kind === "needs" ? look.border : colors.hairline },
+                isHere && { backgroundColor: tints.running },
+              ]}
+            >
+            <Pressable
               accessibilityRole="button"
               accessibilityLabel={[r.title, isHere ? "current tab" : null, pillText(r), r.line, `${r.panes} ${r.panes === 1 ? "pane" : "panes"}`]
                 .filter(Boolean)
@@ -149,12 +163,7 @@ export default function TabsSheet() {
               accessibilityState={{ selected: isHere }}
               disabled={tabPane(r.tab) === null}
               onPress={() => go(r)}
-              style={({ pressed }) => [
-                styles.card,
-                { borderColor: isHere ? tint(colors.accent, 0x55) : r.kind === "needs" ? look.border : colors.hairline },
-                isHere && { backgroundColor: tints.running },
-                pressed && styles.pressed,
-              ]}
+              style={({ pressed }) => [styles.cardPress, pressed && styles.pressed]}
             >
               <Tile agent={r.agent} size={38} radius={11} promptSize={13} />
               <View style={styles.cardText}>
@@ -179,6 +188,17 @@ export default function TabsSheet() {
                 </Text>
               </View>
             </Pressable>
+            {closeable && r.pane !== null ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Close tab ${r.title}`}
+                onPress={() => closeTab(r.pane!, "tab")}
+                style={({ pressed }) => [styles.rowClose, pressed && styles.pressed]}
+              >
+                <Icon name="close" size={14} color={colors.textMuted} />
+              </Pressable>
+            ) : null}
+            </View>
           );
         })}
         {shown.length === 0 ? <Text style={styles.empty}>No tab is {EMPTY_WHAT[filter]}.</Text> : null}
@@ -228,14 +248,14 @@ const styles = StyleSheet.create({
   card: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 12,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
     minHeight: 64,
     borderRadius: 14,
     borderWidth: 1,
     backgroundColor: colors.bg,
   },
+  cardPress: { flex: 1, minWidth: 0, flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 10, paddingLeft: 12, paddingRight: 4 },
+  // the row's ✕: a 44 pt target
+  rowClose: { width: 44, height: 44, marginRight: 2, alignItems: "center", justifyContent: "center" },
   cardText: { flex: 1, minWidth: 0, gap: 4 },
   cardTitleLine: { flexDirection: "row", alignItems: "center", gap: 6 },
   cardTitle: { flexShrink: 1, fontFamily: ui(600), color: colors.textBright, fontSize: 15 },

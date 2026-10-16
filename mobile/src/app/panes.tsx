@@ -1,11 +1,16 @@
 import { useLocalSearchParams, useRouter } from "expo-router";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { canClose } from "@/fleet";
 import { CLAUDE_COLOR, panesText, paneRows, type StateTone } from "@/paneView";
 import { useApp, useLock } from "@/runtime";
 import { findPane, tabTitle } from "@/topology";
+import { Icon } from "@/ui/Icon";
+import { ErrorText } from "@/ui/Notice";
 import { colors, mono, monoMedium, tints, ui } from "@/ui/theme";
+import { useClose } from "@/ui/useClose";
+import { useToast } from "@/ui/useToast";
 
 /** The state's text colour on the list (the current row's accent tint included). */
 const TONE: Record<StateTone, string> = {
@@ -36,6 +41,10 @@ export default function PanesScreen() {
   const host = s.hosts.find((h) => h.record.key === key);
   const loc = host ? findPane(host.windows, paneId) : null;
   const rows = loc ? paneRows(loc.tab) : [];
+  const [error, setError] = useState<string | null>(null);
+  const { say, toast } = useToast();
+  const closePane = useClose(key, paneId, setError, say, true);
+  const closeable = canClose(host);
 
   // another pane takes this one's place: Back still leads where it led
   const pick = (id: number) => {
@@ -58,18 +67,20 @@ export default function PanesScreen() {
         </Text>
         {loc ? <Text style={styles.count}>{`${tabTitle(loc.tab)} · ${panesText(rows.length)}`}</Text> : null}
       </View>
+      {toast}
+      {error ? <ErrorText>{error}</ErrorText> : null}
       {loc ? (
         <View style={styles.list} accessibilityRole="list" accessibilityLabel={`Panes in ${tabTitle(loc.tab)}`}>
           {rows.map((r, i) => {
             const on = r.id === paneId;
             return (
+              <View key={r.id} style={[styles.row, i < rows.length - 1 && styles.rule, on && styles.rowOn]}>
               <Pressable
-                key={r.id}
                 accessibilityRole="button"
                 accessibilityState={{ selected: on }}
                 accessibilityLabel={`Pane ${r.number} of ${rows.length}: ${r.name}, ${r.state}${r.line ? `. ${r.line}` : ""}`}
                 onPress={() => pick(r.id)}
-                style={({ pressed }) => [styles.row, i < rows.length - 1 && styles.rule, on && styles.rowOn, pressed && styles.pressed]}
+                style={({ pressed }) => [styles.rowPress, pressed && styles.pressed]}
               >
                 <View style={[styles.tile, { backgroundColor: r.claude ? `${CLAUDE_COLOR}1f` : tints.accentBadge }]}>
                   <Text style={[styles.mark, { color: r.claude ? CLAUDE_COLOR : colors.accent }]}>{r.mark}</Text>
@@ -85,6 +96,17 @@ export default function PanesScreen() {
                 </View>
                 <Text style={[styles.state, { color: TONE[r.tone] }]}>{r.state}</Text>
               </Pressable>
+              {closeable ? (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={`Close pane ${r.name}`}
+                  onPress={() => closePane(r.id, "pane")}
+                  style={({ pressed }) => [styles.rowClose, pressed && styles.pressed]}
+                >
+                  <Icon name="close" size={14} color={colors.textMuted} />
+                </Pressable>
+              ) : null}
+              </View>
             );
           })}
         </View>
@@ -104,7 +126,10 @@ const styles = StyleSheet.create({
   title: { flex: 1, fontFamily: ui(600), color: colors.textBright, fontSize: 20 },
   count: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13 },
   list: { borderRadius: 12, backgroundColor: colors.bg, overflow: "hidden" },
-  row: { height: 56, flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 14 },
+  row: { height: 56, flexDirection: "row", alignItems: "center" },
+  rowPress: { flex: 1, minWidth: 0, height: 56, flexDirection: "row", alignItems: "center", gap: 12, paddingLeft: 14, paddingRight: 6 },
+  // the row's ✕: a 44 pt target
+  rowClose: { width: 44, height: 44, marginRight: 4, alignItems: "center", justifyContent: "center" },
   rule: { borderBottomWidth: 1, borderBottomColor: colors.hairline },
   rowOn: { backgroundColor: tints.running },
   tile: { width: 32, height: 32, borderRadius: 9, alignItems: "center", justifyContent: "center" },

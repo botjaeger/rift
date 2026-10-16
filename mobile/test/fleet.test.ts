@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { questionKey } from "../src/answer";
 import { toBase64Url } from "../src/noise/bytes";
-import { ACK_TIMEOUT_MS, ASKED_TTL_MS, Fleet, MAX_ACTIVITY, canOperate, hasFeature, isAsked, ntfyUnsupported, wrapsLines, type Notifier } from "../src/fleet";
+import { ACK_TIMEOUT_MS, ASKED_TTL_MS, Fleet, MAX_ACTIVITY, canClose, canOperate, hasFeature, isAsked, ntfyUnsupported, wrapsLines, type Notifier } from "../src/fleet";
 import { routingId } from "../src/protocol/relay";
 import { LONG_COMMAND_MS } from "../src/notify";
 import { parsePairLink, type PairLink } from "../src/pairing";
@@ -313,6 +313,29 @@ describe("Fleet operate", () => {
     expect(r.ok ? "" : r.message).toBe("studio-mac could not open it. Try again.");
   });
 
+  it("close ends a pane or its tab; offered and sent only by a gateway with `close` that this device may operate", async () => {
+    const t = await withHost();
+    // no `close` feature: not offered, nothing goes out
+    expect(canClose(t.fleet.state.hosts[0])).toBe(false);
+    const before = t.last().sent.length;
+    const old = await t.fleet.closeShell(GW_KEY, 12, "pane");
+    expect(old).toMatchObject({ ok: false, code: "unsupported" });
+    expect(old.ok ? "" : old.message).toContain("Update it");
+    expect(t.last().sent.length).toBe(before);
+    t.last().recv(welcome("operate", ["close"]));
+    expect(canClose(t.fleet.state.hosts[0])).toBe(true);
+    expect(canClose(undefined)).toBe(false);
+    const p = t.fleet.closeShell(GW_KEY, 12, "tab");
+    const sent = t.last().sent.at(-1) as { id: string };
+    expect(sent).toEqual({ t: "close", id: sent.id, pane: 12, kind: "tab" });
+    t.last().recv({ t: "ack", id: sent.id, ok: true });
+    expect(await p).toEqual({ ok: true });
+    // a view-only device is not offered it even when the gateway serves it
+    const v = await withHost("view");
+    v.last().recv(welcome("view", ["close"]));
+    expect(canClose(v.fleet.state.hosts[0])).toBe(false);
+  });
+
   it("a closed pane's no_pane error is not shown as a notice; other errors are", async () => {
     const t = await withHost();
     t.last().recv({ t: "error", code: "no_pane", message: "no pane 999999" });
@@ -431,7 +454,7 @@ describe("Fleet done → activity and notifications", () => {
     t.last().recv(done({ exit: 2 }));
     await Promise.resolve();
     expect(t.notified).toEqual([
-      { title: "A command failed on studio-mac (exit 2)", body: "", data: { host: GW_KEY, pane: 12 } },
+      { title: "✕ 2 · A command", subtitle: "Failed after 30s · studio-mac · rift", body: "", data: { host: GW_KEY, pane: 12 } },
     ]);
 
     await t.fleet.updateSettings({ showCommandInNotification: true });
@@ -441,7 +464,7 @@ describe("Fleet done → activity and notifications", () => {
     t.last().recv(done({ duration_ms: 5_000 })); // short: not notified
     await Promise.resolve();
     expect(t.notified.slice(1)).toEqual([
-      { title: "A command finished on studio-mac", body: "cargo test", data: { host: GW_KEY, pane: 12 } },
+      { title: "✓ 0 · cargo test", subtitle: "Finished in 30s · studio-mac · rift", body: "", data: { host: GW_KEY, pane: 12 } },
     ]);
   });
 
@@ -1051,7 +1074,7 @@ describe("Fleet Phase 3", () => {
     t.last().recv(done(2, 30_000)); // failed, but shorter than a minute
     t.last().recv(done(2, 60_000)); // failed and long: notifies
     await Promise.resolve();
-    expect(t.notified.map((n) => n.title)).toEqual(["A command failed on studio-mac (exit 2)"]);
+    expect(t.notified.map((n) => n.title)).toEqual(["✕ 2 · A command"]);
     await t.fleet.setHostNotifications(GW_KEY, false);
     t.last().recv(done(3, 600_000));
     await Promise.resolve();
@@ -1239,7 +1262,7 @@ describe("Fleet: push coverage, pending Notify me, stale screens, input pacing",
       t.fleet.setAppActive(false);
       t.last().recv(done({ pane: 13 }));
       await Promise.resolve();
-      expect(t.notified.map((n) => n.title)).toEqual(["A command failed on studio-mac (exit 2)"]);
+      expect(t.notified.map((n) => n.title)).toEqual(["✕ 2 · A command"]);
       // on again: the same topic, so the ntfy app needs no new subscription
       await t.fleet.setNtfy(true);
       expect(t.fleet.state.settings.ntfyTopic).toBe(topic);
@@ -1262,7 +1285,7 @@ describe("Fleet: push coverage, pending Notify me, stale screens, input pacing",
       t.fleet.setAppActive(false);
       t.last().recv(done());
       await Promise.resolve();
-      expect(t.notified.map((n) => n.title)).toEqual(["A command failed on studio-mac (exit 2)"]);
+      expect(t.notified.map((n) => n.title)).toEqual(["✕ 2 · A command"]);
     });
   });
 
@@ -1274,7 +1297,7 @@ describe("Fleet: push coverage, pending Notify me, stale screens, input pacing",
     expect(t.last().sent.filter((m) => m.t === "push").at(-1)).toMatchObject({ token: TOKEN, long_ms: null });
     t.last().recv(done());
     await Promise.resolve();
-    expect(t.notified.map((n) => n.title)).toEqual(["A command failed on studio-mac (exit 2)"]);
+    expect(t.notified.map((n) => n.title)).toEqual(["✕ 2 · A command"]);
   });
 
   it("a push host whose registration covers the done alerts alone; one it does not cover leaves it to the app", async () => {
@@ -1322,7 +1345,7 @@ describe("Fleet: push coverage, pending Notify me, stale screens, input pacing",
     // the done arrives on a connection that has not had its welcome resend yet: not covered
     t.fleet["onDone"](GW_KEY, done({ exit: 0, duration_ms: 1_000 }) as never);
     await Promise.resolve();
-    expect(t.notified.map((n) => n.title)).toEqual(["A command finished on studio-mac"]);
+    expect(t.notified.map((n) => n.title)).toEqual(["✓ 0 · A command"]);
   });
 
   it("a reconnect while a full-screen program shows keeps its screen on", async () => {
@@ -1419,7 +1442,7 @@ describe("Fleet: the redesign's run, bell, wrap and last view", () => {
     await p;
     t.last().recv(doneMsg("make"));
     await Promise.resolve();
-    expect(t.notified.map((n) => n.title)).toEqual(["A command finished on studio-mac"]);
+    expect(t.notified.map((n) => n.title)).toEqual(["✓ 0 · A command"]);
     expect(isAsked(t.fleet.state, GW_KEY, 12, "make")).toBe(false);
   });
 
@@ -1669,7 +1692,8 @@ describe("Fleet answering a pane that waits (phone-first)", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(t.notified).toEqual([
       {
-        title: "claude is asking on studio-mac",
+        title: "claude is asking",
+        subtitle: "studio-mac · rift · pane 2",
         body: menu.prompt,
         data: { host: GW_KEY, pane: 13, ask: questionKey(menu) },
         category: "rift-ask",
@@ -1678,7 +1702,7 @@ describe("Fleet answering a pane that waits (phone-first)", () => {
     // a password has no Yes and No: Open only
     t.last().recv(asking({ kind: "password", prompt: "Password:", choices: [], selected: 0, numbered: false, context: [] }));
     await vi.advanceTimersByTimeAsync(0);
-    expect(t.notified.at(-1)).toMatchObject({ title: "claude needs a password on studio-mac", category: "rift-ask-open" });
+    expect(t.notified.at(-1)).toMatchObject({ title: "claude needs a password", category: "rift-ask-open" });
     // the pane on screen: no alert
     t.fleet.setViewing({ host: GW_KEY, pane: 13 });
     t.last().recv(asking({ ...menu, prompt: "On screen?" }));

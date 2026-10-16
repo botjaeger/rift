@@ -27,6 +27,7 @@ import {
   type ErrorMsg,
   type GatewayHello,
   type OlderMsg,
+  type CloseKind,
   type OpenKind,
   type OutputMsg,
   type ChipAnswerMsg,
@@ -572,6 +573,13 @@ export class RiftClient {
     if (!this.authed) return null;
     const id = `n${++this.idN}`;
     return this.send({ t: "open", id, pane, kind }) ? id : null;
+  }
+
+  /** Closes a pane or its whole tab (feature `close`); returns the `ack` id, or null when not connected. */
+  closeShell(pane: number, kind: CloseKind): string | null {
+    if (!this.authed) return null;
+    const id = `n${++this.idN}`;
+    return this.send({ t: "close", id, pane, kind }) ? id : null;
   }
 
   /**

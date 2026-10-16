@@ -141,3 +141,66 @@ export function agoText(ms: number): string {
   const d = Math.floor(h / 24);
   return d === 1 ? "1 day ago" : `${d} days ago`;
 }
+
+// --- the chip row's two faces ------------------------------------------------------------------
+
+/** What the row above the command field shows: the prompt chips while it is empty, completions while typing. */
+export const chipRowMode = (draft: string): "chips" | "completions" => (draft === "" ? "chips" : "completions");
+
+/** The completions row when nothing matches. */
+export const NO_COMPLETIONS = "No completions · Return runs it as typed";
+/** The same while a program runs: the line goes to it, not to the shell. */
+export const NO_COMPLETIONS_PROGRAM = "No completions · Return sends it as typed";
+
+/** The changed-files chip's text: `3 files +42 −7` (the counts the gateway sent for the diff). */
+export function diffChipText(d: { files: number; added: number; removed: number }): string {
+  const files = `${d.files} ${d.files === 1 ? "file" : "files"}`;
+  return d.added > 0 || d.removed > 0 ? `${files} +${d.added} −${d.removed}` : files;
+}
+
+/** One completion as the row draws it: what is typed (bright), the rest (dim), and where it comes from. */
+export interface CompletionRow {
+  /** The whole resulting command line (what tapping fills in). */
+  text: string;
+  typed: string;
+  rest: string;
+  /** "history", "branch", "folder" (or the desktop's kind: "command", "subcommand", "option", "value"). */
+  source: string;
+}
+
+/** Splits `text` at what `draft` already typed: the shared start, bright; the remainder, dim. */
+export function splitTyped(draft: string, text: string): { typed: string; rest: string } {
+  let n = 0;
+  while (n < draft.length && n < text.length && draft[n] === text[n]) n++;
+  return { typed: text.slice(0, n), rest: text.slice(n) };
+}
+
+/** A completion's source label: path → folder, a value of a `git` command → branch, history, else the desktop's kind. */
+export function completionSource(c: { text: string; kind: string }): string {
+  if (c.kind === "path") return "folder";
+  if (c.kind === "value" && /^git\s/.test(c.text)) return "branch";
+  return c.kind;
+}
+
+/**
+ * The completions for `draft`: the desktop's items, then its history, then the pane's own recent
+ * commands (`recent`, newest first) that start with it; each line once, never the draft itself,
+ * at most `max`.
+ */
+export function completionRows(
+  draft: string,
+  items: readonly { text: string; kind: string }[],
+  history: readonly { text: string }[],
+  recent: readonly string[],
+  max: number,
+): CompletionRow[] {
+  const out: CompletionRow[] = [];
+  const add = (text: string, source: string) => {
+    if (text === draft || out.length >= max || out.some((r) => r.text === text)) return;
+    out.push({ text, ...splitTyped(draft, text), source });
+  };
+  for (const c of items) add(c.text, completionSource(c));
+  for (const h of history) add(h.text, "history");
+  for (const r of recent) if (r.startsWith(draft)) add(r, "history");
+  return out;
+}

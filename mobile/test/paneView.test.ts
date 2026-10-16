@@ -24,6 +24,7 @@ import {
   fitSize,
   programSend,
   runsAgent,
+  showsViewSwitch,
   terminalViewOn,
 } from "../src/paneView";
 import type { Block, Pane, Tab, Waiting } from "../src/protocol/types";
@@ -263,11 +264,17 @@ describe("the Terminal view's default", () => {
     expect(runsAgent(pane(1, { job: "htop" }))).toBe(false);
     expect(runsAgent(pane(1, { last_command: "claude" }))).toBe(false);
   });
-  it("the user's choice wins over the default, null follows it", () => {
+  it("an agent's pane is always the terminal; a shell's follows the choice (off by default)", () => {
     expect(terminalViewOn(null, true)).toBe(true);
+    expect(terminalViewOn(false, true)).toBe(true);
     expect(terminalViewOn(null, false)).toBe(false);
-    expect(terminalViewOn(false, true)).toBe(false);
     expect(terminalViewOn(true, false)).toBe(true);
+    expect(terminalViewOn(false, false)).toBe(false);
+  });
+  it("the Blocks | Terminal switch: with screens, not on an agent's pane", () => {
+    expect(showsViewSwitch(true, false)).toBe(true);
+    expect(showsViewSwitch(true, true)).toBe(false);
+    expect(showsViewSwitch(false, false)).toBe(false);
   });
 });
 

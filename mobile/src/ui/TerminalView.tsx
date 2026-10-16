@@ -9,6 +9,8 @@ import {
   View,
   type GestureResponderEvent,
   type LayoutChangeEvent,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
   type TextStyle,
 } from "react-native";
 import { KeyCaptureView, type KeyCaptureHandle, type KeyEvent } from "../../modules/rift-keys";
@@ -38,12 +40,11 @@ import {
 import type { ScreenState } from "@/protocol/store";
 import { RUN_BOLD, RUN_ITALIC, RUN_STRIKE, RUN_UNDERLINE, type ScreenRun } from "@/protocol/types";
 import { authenticate, fleet, useApp } from "@/runtime";
-import { CELL_RATIO, fitFont, LINE_RATIO, rowSegments, segmentColors, showsKeyRow } from "@/terminal";
+import { CELL_RATIO, fitFont, LINE_RATIO, rowPieces, rowSegments, screenDefaults, segmentColors, showsKeyRow, type Piece } from "@/terminal";
 import { ControlRow, NO_STICKY, type Sticky } from "./ControlRow";
 import { useOpenShell } from "./useOpenShell";
-import { Icon } from "./Icon";
 import { ErrorText, WarningText } from "./Notice";
-import { colors, mono, monoBold, TOUCH, ui } from "./theme";
+import { colors, mono, monoBold, ui } from "./theme";
 
 /** The terminal's default colours (a run's null fg / bg): terminal text on the pane's ground. */
 const DEFAULTS = { fg: colors.fg, bg: colors.bg };
@@ -56,47 +57,95 @@ function decoration(flags: number): TextStyle["textDecorationLine"] {
   return u && s ? "underline line-through" : u ? "underline" : s ? "line-through" : undefined;
 }
 
-/** One screen row; re-renders only when its runs (kept by reference across diffs) or the cursor change. */
+/** Within this many points of the end counts as "at the bottom": the screen follows its end. */
+const BOTTOM_SLOP = 24;
+
+/** One piece of a row on the cell grid: at its column, exactly its cells wide, a wide character centred in its two cells. */
+function PieceView({
+  piece,
+  cell,
+  fontSize,
+  lineHeight,
+  defaults,
+}: {
+  piece: Piece;
+  cell: number;
+  fontSize: number;
+  lineHeight: number;
+  defaults: { fg: string; bg: string };
+}) {
+  const { color, backgroundColor } = segmentColors(piece, defaults);
+  const left = piece.col * cell;
+  const width = piece.cells * cell;
+  const text: TextStyle = {
+    color,
+    fontSize,
+    lineHeight,
+    height: lineHeight,
+    // bold is a face of its own (Android takes no weight from a custom family)
+    ...(piece.flags & RUN_BOLD ? { fontFamily: monoBold } : null),
+    fontStyle: piece.flags & RUN_ITALIC ? "italic" : undefined,
+    textDecorationLine: decoration(piece.flags),
+    includeFontPadding: false,
+  };
+  return (
+    <View style={{ position: "absolute", left, top: 0, width, height: lineHeight, backgroundColor }}>
+      <Text
+        style={[styles.cell, text, piece.wide ? { width, textAlign: "center" } : { width: width + 4 }]}
+        numberOfLines={1}
+        ellipsizeMode="clip"
+        allowFontScaling={false}
+      >
+        {piece.text}
+      </Text>
+    </View>
+  );
+}
+
+/**
+ * One screen row on the cell grid (terminal.ts `rowPieces`): every piece sits at `col * cell`, so a
+ * wide character (emoji, CJK) takes exactly two cells and the columns after it stay aligned
+ * whatever the font does. Re-renders only when its runs (kept by reference across diffs), the
+ * cursor, its rule or the size change.
+ */
 const Row = memo(function Row({
   runs,
   cursorCol,
   fontSize,
   width,
+  rule,
+  fg,
+  bg,
 }: {
   runs: ScreenRun[];
   cursorCol: number | null;
   fontSize: number;
   width: number;
+  /** `rrggbb` of the 2 px rule drawn at the row's left edge (a block's rule), or null. */
+  rule: string | null;
+  fg: string;
+  bg: string;
 }) {
   const lineHeight = Math.round(fontSize * LINE_RATIO);
+  const cell = fontSize * CELL_RATIO;
   const segments = rowSegments(runs, cursorCol);
-  const blank = segments.every((s) => s.text.trim() === "");
+  const spoken = segments.map((x) => x.text).join("");
+  const blank = spoken.trim() === "";
+  const defaults = { fg, bg };
   return (
-    <Text
-      style={[styles.row, { fontSize, lineHeight, height: lineHeight, width }]}
-      numberOfLines={1}
-      ellipsizeMode="clip"
-      // blank rows are skipped by screen readers
+    <View
+      style={{ height: lineHeight, width }}
+      // one element per row for screen readers; blank rows are skipped
+      accessible={!blank}
+      accessibilityLabel={blank ? undefined : spoken}
       accessibilityElementsHidden={blank}
-      importantForAccessibility={blank ? "no-hide-descendants" : "auto"}
+      importantForAccessibility={blank ? "no-hide-descendants" : "yes"}
     >
-      {segments.length === 0
-        ? " "
-        : segments.map((s, i) => (
-            <Text
-              key={i}
-              style={{
-                ...segmentColors(s, DEFAULTS),
-                // bold is a face of its own (Android takes no weight from a custom family)
-                fontFamily: s.flags & RUN_BOLD ? monoBold : mono,
-                fontStyle: s.flags & RUN_ITALIC ? "italic" : undefined,
-                textDecorationLine: decoration(s.flags),
-              }}
-            >
-              {s.text}
-            </Text>
-          ))}
-    </Text>
+      {rule ? <View style={[styles.rule, { height: lineHeight, backgroundColor: `#${rule}` }]} /> : null}
+      {rowPieces(segments).map((piece) => (
+        <PieceView key={piece.col} piece={piece} cell={cell} fontSize={fontSize} lineHeight={lineHeight} defaults={defaults} />
+      ))}
+    </View>
   );
 });
 
@@ -111,12 +160,22 @@ function Grid({ screen, zoom, fitted }: { screen: ScreenState; zoom: number; fit
   const fit = fitted ? { fontSize: fitFontSize(1), scroll: false } : fitFont(width - PADDING_X * 2, screen.cols);
   const fontSize = fitted ? fitFontSize(zoom) : Math.round(fit.fontSize * zoom * 10) / 10;
   const rowWidth = Math.ceil(screen.cols * fontSize * CELL_RATIO) + 2;
+  const defaults = screenDefaults(screen, DEFAULTS);
   const scroll = fit.scroll || rowWidth > width - PADDING_X * 2;
   const [cursorRow, cursorCol] = screen.cursor ?? [-1, -1];
   const rows = (
     <View>
       {screen.lines.map((runs, r) => (
-        <Row key={r} runs={runs} cursorCol={r === cursorRow ? cursorCol : null} fontSize={fontSize} width={rowWidth} />
+        <Row
+          key={r}
+          runs={runs}
+          cursorCol={r === cursorRow ? cursorCol : null}
+          fontSize={fontSize}
+          width={rowWidth}
+          rule={screen.rules.get(r) ?? null}
+          fg={defaults.fg}
+          bg={defaults.bg}
+        />
       ))}
     </View>
   );
@@ -135,7 +194,7 @@ function Grid({ screen, zoom, fitted }: { screen: ScreenState; zoom: number; fit
 
 /**
  * The pane while a full-screen program runs (the FullScreen board): the gateway's screen (vim,
- * less, htop), a note, and on an operate device the keys and the keyboard for it. Typed text goes out as `text` (batched per frame, `keyboard.ts`), keys as
+ * less, htop), and on an operate device the keys and the keyboard for it. Typed text goes out as `text` (batched per frame, `keyboard.ts`), keys as
  * `keys`; the control-key row works as in the composer. A key that submits a line asks for
  * authentication like Run (lock.ts): at the pane's prompt every time, while a program runs once
  * per view while the app stays in the foreground. On a gateway with `fit` (and a device that may
@@ -150,8 +209,6 @@ export function TerminalView({
   canType,
   online,
   running,
-  program,
-  pinned,
   bare,
   canFit,
 }: {
@@ -164,11 +221,7 @@ export function TerminalView({
   online: boolean;
   /** The pane runs a program (not at its prompt). */
   running: boolean;
-  /** The full-screen program's name ("htop"), for the note. */
-  program: string;
-  /** Shown by the header's Terminal view switch, not by a full-screen program. */
-  pinned?: boolean;
-  /** The pane's command line is drawn under the screen (the Pane board): no note, keys or keyboard here. */
+  /** The pane's command line is drawn under the screen (the Pane board): no keys or keyboard here. */
   bare?: boolean;
   /** The gateway sizes programs to the view (feature `fit`). */
   canFit?: boolean;
@@ -277,6 +330,24 @@ export function TerminalView({
 
   const typing = operate && canType && !bare;
 
+  // The screen follows its end: when the view shrinks (the keyboard opens) or the screen grows,
+  // the last rows stay in sight unless the user scrolled up (judged when a drag or fling ends, not
+  // on every scroll event: the view shrinking under the keyboard also reports a scroll).
+  const scroller = useRef<ScrollView>(null);
+  const stick = useRef(true);
+  const toEnd = () => {
+    if (!stick.current) return;
+    scroller.current?.scrollToEnd({ animated: false });
+    // again once the layout (and the keyboard's animation) has settled
+    setTimeout(() => {
+      if (stick.current) scroller.current?.scrollToEnd({ animated: false });
+    }, 350);
+  };
+  const onScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
+    stick.current = contentOffset.y + layoutMeasurement.height >= contentSize.height - BOTTOM_SLOP;
+  };
+
   // Pinch to zoom, double-tap to reset (the Pane board); kept for the app's run
   const [zoom, setZoomState] = useState(keptZoom.value);
   const setZoom = (z: number) => {
@@ -322,6 +393,7 @@ export function TerminalView({
   const onArea = (e: LayoutChangeEvent) => {
     const { width, height } = e.nativeEvent.layout;
     setArea((a) => (a.width === width && a.height === height ? a : { width, height }));
+    toEnd();
   };
   const fitting = !!canFit && operate && online;
   const size = fitting ? fitSize(area.width - PADDING_X * 2, area.height - zoomHeight - PADDING * 2, fitFontSize(zoom)) : null;
@@ -388,7 +460,7 @@ export function TerminalView({
   );
 
   return (
-    <View style={styles.fill} onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd} onTouchCancel={onTouchEnd}>
+    <View style={[styles.fill, { backgroundColor: screenDefaults(screen, DEFAULTS).bg }]} onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd} onTouchCancel={onTouchEnd}>
       {typing ? (
         // the label stays on the ScrollView: on the capture view TalkBack would read the
         // screen as one element instead of its rows
@@ -400,7 +472,7 @@ export function TerminalView({
           onFocusChange={setFocused}
           style={styles.fill}
         >
-          <ScrollView style={styles.fill} accessibilityLabel={label} scrollEnabled={!pinching} onLayout={onArea}>
+          <ScrollView ref={scroller} style={styles.fill} accessibilityLabel={label} scrollEnabled={!pinching} onLayout={onArea} onScrollEndDrag={onScroll} onMomentumScrollEnd={onScroll} onContentSizeChange={toEnd}>
             {zoomRow}
             {/* not one element for screen readers: they read the rows */}
             <Pressable onPress={() => capture.current?.focus()} accessible={false}>
@@ -409,19 +481,10 @@ export function TerminalView({
           </ScrollView>
         </KeyCaptureView>
       ) : (
-        <ScrollView style={styles.fill} accessibilityLabel={label} scrollEnabled={!pinching} onLayout={onArea}>
+        <ScrollView ref={scroller} style={styles.fill} accessibilityLabel={label} scrollEnabled={!pinching} onLayout={onArea} onScrollEndDrag={onScroll} onMomentumScrollEnd={onScroll} onContentSizeChange={toEnd}>
           {zoomRow}
           {grid}
         </ScrollView>
-      )}
-      {bare ? null : (
-        <Text style={styles.note}>
-          {pinned
-            ? "Terminal view: the pane's screen as it is. The terminal button shows blocks again."
-            : operate
-              ? `Keys go straight to ${program}. When it quits, the pane shows blocks again.`
-              : `${program} is full screen. When it quits, the pane shows blocks again.`}
-        </Text>
       )}
       {bare ? null : operate ? (
         <View style={styles.bar} accessibilityLabel="Keys">
@@ -442,21 +505,11 @@ export function TerminalView({
               onKey={onRowKey}
               onOpen={onOpen}
               onPaste={canType ? onPaste : undefined}
+              // the last key: hide the keyboard, or open it (a tap on the screen opens it too)
+              onHideKeyboard={typing && focused ? () => capture.current?.blur() : undefined}
+              onShowKeyboard={typing && !focused ? () => capture.current?.focus() : undefined}
               wrap
             />
-          ) : null}
-          {typing ? (
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={focused ? "Hide keyboard" : "Show keyboard"}
-              accessibilityState={{ disabled: !online, expanded: focused }}
-              disabled={!online}
-              onPress={() => (focused ? capture.current?.blur() : capture.current?.focus())}
-              style={({ pressed }) => [styles.kbd, !online && styles.disabled, pressed && styles.pressed]}
-            >
-              <Icon name="keyboard" color={colors.text} />
-              <Text style={styles.kbdLabel}>{focused ? "Hide keyboard" : "Show keyboard"}</Text>
-            </Pressable>
           ) : null}
         </View>
       ) : (
@@ -470,7 +523,7 @@ const styles = StyleSheet.create({
   fill: { flex: 1, backgroundColor: colors.bg },
   gridWrap: { flex: 1 },
   gridPad: { paddingVertical: PADDING, paddingHorizontal: PADDING_X },
-  row: { fontFamily: mono, color: DEFAULTS.fg },
+  cell: { fontFamily: mono, color: DEFAULTS.fg },
   empty: { fontFamily: ui(400), color: colors.textMuted, fontSize: 14, padding: 16 },
   // as the blocks view's view-only line
   viewOnly: {
@@ -483,18 +536,7 @@ const styles = StyleSheet.create({
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: colors.hairline,
   },
-  // the FullScreen board: a note on a surface strip, then the keys on the chrome ground
-  note: {
-    fontFamily: ui(400),
-    color: colors.textMuted,
-    fontSize: 12,
-    lineHeight: 17.4,
-    paddingVertical: 8,
-    paddingHorizontal: 16,
-    backgroundColor: colors.surface,
-    borderTopWidth: 1,
-    borderTopColor: colors.hairline,
-  },
+  // the FullScreen board: the keys on the chrome ground
   bar: {
     backgroundColor: colors.chrome,
     borderTopWidth: 1,
@@ -511,17 +553,8 @@ const styles = StyleSheet.create({
   zoomGlyph: { fontFamily: ui(400), color: colors.text, fontSize: 16 },
   zoomValue: { fontFamily: mono, color: colors.text, fontSize: 12, minWidth: 44, textAlign: "center" },
   oldRift: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12 },
-  kbd: {
-    height: TOUCH,
-    flexDirection: "row",
-    gap: 8,
-    alignItems: "center",
-    justifyContent: "center",
-    borderRadius: TOUCH / 2,
-    borderWidth: 1,
-    borderColor: colors.borderStrong,
-  },
-  kbdLabel: { fontFamily: ui(400), color: colors.text, fontSize: 14 },
+  // a block's rule: 2 px in the 6 pt gutter left of the row
+  rule: { position: "absolute", left: -4, top: 0, width: 2 },
   disabled: { opacity: 0.45 },
   pressed: { opacity: 0.7 },
 });

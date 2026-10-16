@@ -12,8 +12,7 @@ describe("text contrast (WCAG AA, 4.5:1)", () => {
     expect(contrast(colors[fg], over(tints[tint], colors[ground]))).toBeGreaterThanOrEqual(4.5);
   });
 
-  it("the mockups' own accent tint (22) falls short on a surface, so the app uses 1a", () => {
-    expect(contrast(colors.accent, over("#569cd622", colors.surface))).toBeLessThan(4.5);
+  it("lays a tint over its ground", () => {
     expect(over("#ffffff80", "#000000")).toBe("#808080");
   });
 
@@ -22,12 +21,8 @@ describe("text contrast (WCAG AA, 4.5:1)", () => {
     expect(contrast("#569cd6", "#569cd6")).toBe(1);
   });
 
-  it("the excluded pairs really fall short (so they stay excluded)", () => {
-    expect(contrast(colors.error, colors.surface)).toBeLessThan(4.5);
-    expect(contrast(colors.error, colors.bg)).toBeLessThan(4.5);
+  it("the excluded pair really falls short (so it stays excluded)", () => {
     expect(contrast(colors.textDim, colors.surface)).toBeLessThan(4.5);
-    expect(TEXT_ON.surface).not.toContain("error");
     expect(TEXT_ON.surface).not.toContain("textDim");
-    expect(TEXT_ON.bg).not.toContain("error");
   });
 });

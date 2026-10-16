@@ -124,11 +124,17 @@ export interface ScreenState {
   cursor: [number, number] | null;
   /** `rows` entries; a row the last message did not change keeps its array (memoized rows). */
   lines: ScreenRun[][];
+  /** The desktop theme's default text and ground colours (`rrggbb`); null from an older desktop. */
+  fg: string | null;
+  bg: string | null;
+  /** Rows beside which a block's 2 px left rule is drawn, by row; empty from an older desktop. */
+  rules: ReadonlyMap<number, string>;
   /** Shown from before a re-subscribe or reconnect: out of date until the next full screen. */
   stale: boolean;
 }
 
 const EMPTY_ROW: ScreenRun[] = [];
+const NO_RULES: ReadonlyMap<number, string> = new Map();
 
 /**
  * Applies one `screen` or `screen_end`: a full screen replaces, a diff patches its rows (a size
@@ -142,7 +148,20 @@ export function reduceScreen(prev: ScreenState | null, msg: ScreenMsg | ScreenEn
   for (let r = 0; r < msg.rows; r++) lines.push(base[r] ?? EMPTY_ROW);
   for (const [row, runs] of msg.lines) if (row < msg.rows) lines[row] = runs;
   const stale = !msg.full && (prev?.stale ?? false);
-  return { cols: msg.cols, rows: msg.rows, alt: msg.alt, cursor: msg.cursor, lines, stale };
+  // colours and rules ride on every frame (diffs too): `rules` is the whole list, omitted when
+  // there are none; absent colours (an older desktop) are the phone's own
+  const rules = msg.rules && msg.rules.length > 0 ? new Map(msg.rules.filter(([row]) => row < msg.rows)) : NO_RULES;
+  return {
+    cols: msg.cols,
+    rows: msg.rows,
+    alt: msg.alt,
+    cursor: msg.cursor,
+    lines,
+    fg: msg.fg ?? null,
+    bg: msg.bg ?? null,
+    rules,
+    stale,
+  };
 }
 
 /** The screen kept, out of date, across a re-subscribe or reconnect (the client's `onScreenStale`). */

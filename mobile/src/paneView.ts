@@ -78,10 +78,14 @@ export function runsAgent(p: Pane): boolean {
 }
 
 /**
- * Whether the Terminal view is on: the user's choice for this pane while the screen is open
- * (null: none), else on for a pane that runs an agent and off for a plain shell.
+ * Whether the Terminal view is on: always for a pane that runs an agent (its blocks and its screen
+ * look the same, so it has no switch), else the user's choice for this pane while the screen is
+ * open (null: none), off at a plain shell.
  */
-export const terminalViewOn = (choice: boolean | null, agent: boolean) => choice ?? agent;
+export const terminalViewOn = (choice: boolean | null, agent: boolean) => agent || (choice ?? false);
+
+/** Whether the Blocks | Terminal switch shows: the gateway sends screens and the pane is not an agent's. */
+export const showsViewSwitch = (screenFeature: boolean, agent: boolean) => screenFeature && !agent;
 
 // --- the command line while a program runs -------------------------------------------------------
 

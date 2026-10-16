@@ -2,9 +2,9 @@ import { useRouter } from "expo-router";
 import { useEffect, useState } from "react";
 import { Animated, PanResponder, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { DEFAULT_CONTROL_KEYS, addChoices, controlKey, keyName, moveKeyTo, toggleKey } from "@/controlKeys";
+import { DEFAULT_CONTROL_KEYS, MAX_ROW_KEYS, addChoices, canAddKey, controlKey, keyName, moveKeyTo, toggleKey } from "@/controlKeys";
 import { fleet, useApp } from "@/runtime";
-import { KeyCap } from "@/ui/ControlRow";
+import { Key, KeyCap, KeyTip, tipOf, type Tip } from "@/ui/ControlRow";
 import { Icon } from "@/ui/Icon";
 import { PageHeader, SectionTitle } from "@/ui/Screen";
 import { colors, radius, TOUCH, ui } from "@/ui/theme";
@@ -114,6 +114,7 @@ export default function ControlKeysScreen() {
   const s = useApp();
   const ids = s.settings.controlKeys;
   const [dragging, setDragging] = useState(false);
+  const [tip, setTip] = useState<Tip | null>(null);
   const set = (controlKeys: string[]) => void fleet.updateSettings({ controlKeys });
   const isDefault = ids.length === DEFAULT_CONTROL_KEYS.length && ids.every((id, i) => id === DEFAULT_CONTROL_KEYS[i]);
   const known = ids.filter((id) => controlKey(id));
@@ -129,7 +130,7 @@ export default function ControlKeysScreen() {
           <Pressable
             accessibilityRole="button"
             accessibilityLabel="Reset"
-            accessibilityHint="Back to Interrupt, Escape, Tab, Control and the up and down arrows"
+            accessibilityHint="Back to Escape, Tab, Interrupt, Control and the arrows"
             accessibilityState={{ disabled: isDefault }}
             disabled={isDefault}
             onPress={() => set([...DEFAULT_CONTROL_KEYS])}
@@ -145,18 +146,45 @@ export default function ControlKeysScreen() {
       >
         <View style={styles.section}>
           <SectionTitle>Preview</SectionTitle>
-          <View style={styles.preview} accessible accessibilityLabel={`The row: ${known.map((id) => controlKey(id)!.spoken).join(", ") || "no keys"}`}>
-            {known.length === 0 ? <Text style={styles.empty}>No keys: the row is hidden.</Text> : null}
-            {known.map((id) => {
-              const k = controlKey(id)!;
-              return <KeyCap key={id} def={k} color={k.danger ? colors.warning : colors.text} />;
-            })}
+          <View style={styles.previewHost}>
+            {tip ? <KeyTip tip={tip} below /> : null}
+            <View style={styles.preview}>
+              {known.length === 0 ? <Text style={styles.empty}>No keys: the row is hidden while the keyboard is down.</Text> : null}
+              {known.map((id) => {
+                const k = controlKey(id)!;
+                return (
+                  <Key
+                    key={id}
+                    def={k}
+                    spoken={k.spoken}
+                    tip={tipOf(k)}
+                    onTip={setTip}
+                    color={k.danger ? colors.warning : colors.text}
+                    tall={false}
+                    disabled={false}
+                    onPress={() => undefined}
+                  />
+                );
+              })}
+              {/* the last key of the row, while the keyboard is up */}
+              <Key
+                def={{ icon: "hideKeyboard", label: "⌨" }}
+                spoken="Hide keyboard"
+                tip={{ title: "Hide keyboard", text: "Closes the keyboard; tap the command field to bring it back" }}
+                onTip={setTip}
+                color={colors.textMuted}
+                tall={false}
+                disabled={false}
+                onPress={() => undefined}
+              />
+            </View>
+            <Text style={styles.previewHint}>Hold a key to see what it sends.</Text>
           </View>
         </View>
 
         {known.length > 0 ? (
           <View style={styles.section}>
-            <SectionTitle>In the row · drag to reorder</SectionTitle>
+            <SectionTitle>{`In the row · ${known.length} of ${MAX_ROW_KEYS} · drag to reorder`}</SectionTitle>
             <View style={styles.card}>
               {known.map((id, i) => (
                 <KeyRow
@@ -174,20 +202,23 @@ export default function ControlKeysScreen() {
         ) : null}
 
         <View style={styles.section}>
-          <SectionTitle>Add</SectionTitle>
+          <SectionTitle>{canAddKey(known) ? "Add" : `Add · the row holds ${MAX_ROW_KEYS} keys: remove one first`}</SectionTitle>
           <View style={styles.add}>
             {addChoices(known).map((c) => {
               const k = c.ids.length === 1 ? controlKey(c.ids[0]!) : undefined;
               // the key as the row shows it, then its word ("⌃D End input"); the F-keys as one chip
-              const word = c.ids.length > 1 ? "F1–F12" : k ? (k.short ?? keyName(k)) : c.label;
+              const word = k ? (k.short ?? keyName(k)) : c.label;
+              const full = !canAddKey(known);
               return (
                 <Pressable
                   key={c.label}
                   accessibilityRole="button"
-                  accessibilityLabel={`Add ${c.ids.length > 1 ? "F1 to F12" : (k?.spoken ?? c.label)}`}
+                  accessibilityLabel={`Add ${k?.spoken ?? c.label}`}
+                  accessibilityState={{ disabled: full }}
+                  disabled={full}
                   onPress={() => set(c.ids.reduce((row, id) => toggleKey(row, id, true), known))}
                   hitSlop={4}
-                  style={({ pressed }) => [styles.addChip, pressed && styles.pressed]}
+                  style={({ pressed }) => [styles.addChip, full && styles.disabled, pressed && styles.pressed]}
                 >
                   {k?.icon ? (
                     <Icon name={k.icon} size={14} color={colors.text} />
@@ -214,6 +245,8 @@ const styles = StyleSheet.create({
   // the board's Reset: a glass pill
   reset: { height: 40, paddingHorizontal: 16, borderRadius: 20, backgroundColor: colors.glass, justifyContent: "center" },
   resetText: { fontFamily: ui(400), color: colors.accent, fontSize: 15 },
+  previewHost: { gap: 6, zIndex: 2 },
+  previewHint: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12, paddingHorizontal: 4 },
   preview: {
     flexDirection: "row",
     flexWrap: "wrap",

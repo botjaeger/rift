@@ -1,5 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { CONTROL_KEYS, DEFAULT_CONTROL_KEYS, addChoices, controlKey, moveKey, moveKeyTo, toggleKey, validControlKeys } from "../src/controlKeys";
+import {
+  CONTROL_KEYS,
+  DEFAULT_CONTROL_KEYS,
+  MAX_ROW_KEYS,
+  OLD_DEFAULT_CONTROL_KEYS,
+  PressGate,
+  addChoices,
+  canAddKey,
+  controlKey,
+  keyTipTitle,
+  moveKey,
+  moveKeyTo,
+  toggleKey,
+  validControlKeys,
+} from "../src/controlKeys";
 import { isKeyName } from "../src/protocol/types";
 
 describe("control keys", () => {
@@ -26,20 +40,69 @@ describe("control keys", () => {
     expect(moveKeyTo(["a", "b"], 5, 0)).toEqual(["a", "b"]);
   });
 
-  it("the Add chips: unused keys, the F-keys as one chip while none is used", () => {
+  it("the Add chips: every unused key (the row holds 8, so the F-keys are not a group)", () => {
     const add = addChoices(DEFAULT_CONTROL_KEYS);
-    expect(add.map((c) => c.label).slice(0, 4)).toEqual(["⇧Tab", "⌥", "⇧", "←"]);
-    const f = add.find((c) => c.label === "F1–F12")!;
-    expect(f.ids).toHaveLength(12);
-    expect(add.some((c) => c.label === "F1")).toBe(false);
-    const withF5 = addChoices([...DEFAULT_CONTROL_KEYS, "f5"]);
-    expect(withF5.some((c) => c.label === "F1–F12")).toBe(false);
-    expect(withF5.filter((c) => /^F\d+$/.test(c.label))).toHaveLength(11);
+    expect(add.map((c) => c.label).slice(0, 4)).toEqual(["⇧Tab", "⌥", "⇧", "Home"]);
+    expect(add.some((c) => c.label === "F1")).toBe(true);
+    expect(add.some((c) => c.label === "F1–F12")).toBe(false);
+    expect(addChoices([...DEFAULT_CONTROL_KEYS, "f5"]).filter((c) => /^F\d+$/.test(c.label))).toHaveLength(11);
     expect(addChoices(CONTROL_KEYS.map((k) => k.id))).toEqual([]);
   });
 
-  it("the default row is the board's", () => {
-    expect(DEFAULT_CONTROL_KEYS.map((id) => controlKey(id)!.label)).toEqual(["⌃C", "Esc", "Tab", "⌃", "↑", "↓"]);
+  it("the default row: Esc Tab ⌃C ⌃ ← ↑ ↓ →, at most 8 keys", () => {
+    expect(DEFAULT_CONTROL_KEYS).toEqual(["esc", "tab", "ctrl+c", "ctrl", "left", "up", "down", "right"]);
+    expect(DEFAULT_CONTROL_KEYS.map((id) => controlKey(id)!.label)).toEqual(["Esc", "Tab", "⌃C", "⌃", "←", "↑", "↓", "→"]);
+    expect(DEFAULT_CONTROL_KEYS).toHaveLength(MAX_ROW_KEYS);
+  });
+
+  it("a full row takes no more keys", () => {
+    expect(canAddKey(DEFAULT_CONTROL_KEYS)).toBe(false);
+    expect(toggleKey(DEFAULT_CONTROL_KEYS, "f5", true)).toEqual([...DEFAULT_CONTROL_KEYS]);
+    expect(toggleKey(DEFAULT_CONTROL_KEYS, "esc", false)).toHaveLength(7);
+    expect(canAddKey(toggleKey(DEFAULT_CONTROL_KEYS, "esc", false))).toBe(true);
+  });
+
+  it("migrates a stored row equal to the old default; a customised row is kept", () => {
+    expect(OLD_DEFAULT_CONTROL_KEYS).toEqual(["ctrl+c", "esc", "tab", "ctrl", "up", "down"]);
+    expect(validControlKeys([...OLD_DEFAULT_CONTROL_KEYS])).toEqual([...DEFAULT_CONTROL_KEYS]);
+    // junk around the old default is dropped first, so it is still the old default
+    expect(validControlKeys(["ctrl+c", "esc", "nope", "tab", "ctrl", "up", "down"])).toEqual([...DEFAULT_CONTROL_KEYS]);
+    // customised: one key more, one fewer, another order
+    expect(validControlKeys([...OLD_DEFAULT_CONTROL_KEYS, "left"])).toEqual([...OLD_DEFAULT_CONTROL_KEYS, "left"]);
+    expect(validControlKeys(["ctrl+c", "esc", "tab", "ctrl", "up"])).toEqual(["ctrl+c", "esc", "tab", "ctrl", "up"]);
+    expect(validControlKeys(["esc", "ctrl+c", "tab", "ctrl", "up", "down"])).toEqual(["esc", "ctrl+c", "tab", "ctrl", "up", "down"]);
+    expect(validControlKeys([])).toEqual([]);
+    // a longer stored row (before the maximum) is kept as it is
+    const long = ["esc", "tab", "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8"];
+    expect(validControlKeys(long)).toEqual(long);
+  });
+
+  it("every catalogue key names what it does (tip, a11y hint)", () => {
+    for (const k of CONTROL_KEYS) {
+      expect(k.tip.length, k.id).toBeGreaterThan(10);
+      expect(keyTipTitle(k), k.id).toContain(k.label);
+    }
+    expect(keyTipTitle(controlKey("ctrl+c")!)).toBe("⌃C · Interrupt");
+    expect(controlKey("ctrl+c")!.tip).toBe("Sends Ctrl+C: stops the running command");
+  });
+
+  it("a long press shows the tip and does not send; a tap sends", () => {
+    const sent: string[] = [];
+    const gate = new PressGate();
+    const press = (long: boolean) => {
+      gate.begin();
+      if (long) gate.longPress();
+      // the release fires onPress on a platform that does not cancel it after a long press
+      if (gate.release() === "send") sent.push("x");
+    };
+    press(true);
+    expect(sent).toEqual([]);
+    // the next, short touch is a tap again (the long one left nothing behind)
+    press(false);
+    expect(sent).toEqual(["x"]);
+    press(true);
+    press(true);
+    expect(sent).toEqual(["x"]);
   });
 
   it("validates a stored row", () => {

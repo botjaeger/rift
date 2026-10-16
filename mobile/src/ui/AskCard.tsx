@@ -318,7 +318,7 @@ const styles = StyleSheet.create({
     borderRadius: 26,
     borderWidth: 1,
     borderColor: `${colors.warning}55`,
-    backgroundColor: "#2a2720",
+    backgroundColor: "#201808",
   },
   barText: { flex: 1, minWidth: 0, fontFamily: ui(400), color: colors.textBright, fontSize: 14 },
   barAnswer: { fontFamily: ui(600), color: colors.warning, fontSize: 14 },

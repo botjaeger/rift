@@ -1,48 +1,46 @@
-// Rift's dark tokens (DESIGN.md), free of React Native imports so the contrast test runs in
+// Rift's dark tokens (DESIGN.md: Warp's Dark colours since 2026-10-16), free of React Native imports so the contrast test runs in
 // node. Mapping: bg = bg, chrome = bg_chrome, surface = surface, hairline = border,
 // textBright = text_bright, text = text_ui, textMuted = text_dim (#a1a4ad), textDim =
 // text_muted (#868993), accent, success, error, warning, fg = fg (terminal text, block output),
 // borderStrong = the mockups' input and outlined-button border (white 14 %).
 
 export const colors = {
-  bg: "#1e1e1e",
-  chrome: "#181818",
-  surface: "#232326",
-  hairline: "#ffffff12",
-  textBright: "#f0f1f3",
-  text: "#e6e7ea",
-  textMuted: "#a1a4ad",
-  textDim: "#868993",
-  accent: "#569cd6",
-  success: "#22c55e",
-  error: "#ef4444",
-  warning: "#d7ba7d",
-  fg: "#d4d4d4",
+  bg: "#050505",
+  chrome: "#000000",
+  surface: "#1e1e1e",
+  hairline: "#ffffff1a",
+  textBright: "#ffffff",
+  text: "#e6e6e6",
+  textMuted: "#9b9b9b",
+  textDim: "#828282",
+  accent: "#19aad8",
+  success: "#1ca05a",
+  error: "#ff8272",
+  warning: "#e5a01a",
+  fg: "#ffffff",
   borderStrong: "#ffffff24",
   /** The boards' glass controls (round back badges, header pills): white 8 % over a 12 % rim. */
   glass: "#ffffff14",
   glassRim: "#ffffff1f",
   /** The floating search bar's ground, as the floating tab bar's. */
-  floating: "#2c2c30f0",
+  floating: "#1e1e1ef0",
   /** The Pair board's ground behind the camera, and the viewfinder before it starts. */
-  camera: "#0f0f10",
-  viewfinder: "#1a1a1a",
+  camera: "#000000",
+  viewfinder: "#121212",
 } as const;
 
 export type ColorName = keyof typeof colors;
 
 /**
  * Every text color the app draws, on each background it is drawn on. test/contrast.test.ts
- * holds each pair to WCAG AA (4.5:1). Two tokens fall short and are kept off these grounds:
- * `error` on bg/surface (4.43 / 4.16), so errors there are `text` with a red bar, failed exit
- * badges there are `text` beside the red edge, and destructive actions use `warning`; and
- * `textDim` on surface (4.49), where `textMuted` is used instead.
+ * holds each pair to WCAG AA (4.5:1). One token falls short and is kept off a ground:
+ * `textDim` on surface (4.33), where `textMuted` is used instead.
  */
 export const TEXT_ON: Readonly<Record<"bg" | "chrome" | "surface" | "accent" | "warning" | "camera", readonly ColorName[]>> = {
-  bg: ["textBright", "text", "fg", "textMuted", "textDim", "accent", "success", "warning"],
+  bg: ["textBright", "text", "fg", "textMuted", "textDim", "accent", "success", "warning", "error"],
   chrome: ["textBright", "text", "textMuted", "textDim", "accent", "success", "warning", "error"],
   camera: ["textBright", "text", "textMuted", "warning"],
-  surface: ["textBright", "text", "textMuted", "accent", "success", "warning"],
+  surface: ["textBright", "text", "textMuted", "accent", "success", "warning", "error"],
   accent: ["bg"],
   // the count on a back badge (the panes that need you)
   warning: ["bg"],
@@ -51,24 +49,24 @@ export const TEXT_ON: Readonly<Record<"bg" | "chrome" | "surface" | "accent" | "
 /**
  * The mockups' tinted grounds (a token at low alpha over a card or page): the accent pills
  * ("On screen", a running pane's time, step numbers) and the badges of the Host board. The
- * mockups' `#569cd622` puts accent text at 4.34:1 on a surface, so the accent tint is `1a`
+ * mockups' `#19aad822` puts accent text at 4.34:1 on a surface, so the accent tint is `1a`
  * (4.58:1). TINTED_TEXT lists each text drawn on one; test/contrast.test.ts checks them.
  */
 export const tints = {
-  accentBadge: "#569cd61a",
-  successBadge: "#22c55e1f",
-  warningBadge: "#d7ba7d1f",
-  errorBadge: "#ef444433",
+  accentBadge: "#19aad81a",
+  successBadge: "#1ca05a14",
+  warningBadge: "#e5a01a1f",
+  errorBadge: "#ff827233",
   /** The running block's ground (on bg). */
-  running: "#569cd614",
+  running: "#19aad814",
   /** The bell that is on (on the running block's ground). */
-  bellOn: "#569cd633",
+  bellOn: "#19aad833",
   /** A diff's added and removed lines (on the chrome reading pane), as the desktop review panel. */
-  diffAdded: "#22c55e1f",
-  diffRemoved: "#ef444426",
+  diffAdded: "#1ca05a1f",
+  diffRemoved: "#ff827226",
   /** The answer page's context diff (the P2 Reply board), on the chrome box. */
-  answerAdded: "#22c55e1f",
-  answerRemoved: "#ef44441f",
+  answerAdded: "#1ca05a1f",
+  answerRemoved: "#ff82721f",
 } as const;
 
 export const TINTED_TEXT: readonly { fg: ColorName; tint: keyof typeof tints; ground: "bg" | "chrome" | "surface" }[] = [

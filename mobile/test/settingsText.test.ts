@@ -27,8 +27,8 @@ describe("Settings words (the Settings board)", () => {
   });
 
   it("notifyExample shows the alert for the current value, with the computer's name", () => {
-    expect(notifyExample("build-box", true)).toBe("“npm test failed on build-box (exit 1)”");
-    expect(notifyExample("build-box", false)).toBe("“A command failed on build-box (exit 1)”");
+    expect(notifyExample("build-box", true)).toBe("“✕ 1 · npm test” · Failed after 8.4s · build-box");
+    expect(notifyExample("build-box", false)).toBe("“✕ 1 · A command” · Failed after 8.4s · build-box");
   });
 
   it("updateLine: checking, just checked (green), older, failed, pending", () => {
@@ -63,14 +63,14 @@ describe("Settings board colours", () => {
   const segmentOn = /SEGMENT_ON = "(#[0-9a-f]{6})"/.exec(rows)?.[1];
 
   it("the chosen segment's ground keeps textBright above 4.5:1", () => {
-    expect(segmentOn).toBe("#3a3a3f");
+    expect(segmentOn).toBe("#373737");
     expect(contrast(colors.textBright, segmentOn!)).toBeGreaterThanOrEqual(4.5);
   });
 
-  it("the off track keeps the switch visible on a surface, the on track is the success green", () => {
+  it("the off track keeps the switch visible on a surface, the on track is the accent (Warp)", () => {
     const off = /SWITCH_OFF = "(#[0-9a-f]{8})"/.exec(rows)?.[1];
     expect(off).toBe("#ffffff29");
     expect(contrast(over(off!, colors.surface), colors.surface)).toBeGreaterThan(1.2);
-    expect(rows).toContain("true: colors.success");
+    expect(rows).toContain("true: colors.accent");
   });
 });

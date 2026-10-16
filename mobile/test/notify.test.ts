@@ -4,7 +4,6 @@ import {
   LONG_COMMAND_MS,
   newNtfyTopic,
   normalizeNtfyServer,
-  notificationText,
   NTFY_SERVER,
   ntfyFooter,
   ntfyManualSteps,
@@ -124,18 +123,6 @@ describe("pushCovers (when a push host alerts by itself)", () => {
     expect(pushCovers(ntfy, { ...done(60_000, 2, true), followed: true })).toBe(true);
     // with a token the computer still sends it (through Expo)
     expect(pushCovers({ longMs: 30_000, failuresOnly: false }, { ...done(60_000, 2), followed: true })).toBe(true);
-  });
-});
-
-describe("notificationText", () => {
-  it("finished, failed, unknown exit; the command only when the setting is on", () => {
-    expect(notificationText("studio-mac", 0, "cargo test", false)).toEqual({ title: "A command finished on studio-mac", body: "" });
-    expect(notificationText("studio-mac", 101, "cargo test", false)).toEqual({
-      title: "A command failed on studio-mac (exit 101)",
-      body: "",
-    });
-    expect(notificationText("studio-mac", null, "cargo test", false).title).toBe("A command finished on studio-mac");
-    expect(notificationText("studio-mac", 0, "cargo test", true).body).toBe("cargo test");
   });
 });
 

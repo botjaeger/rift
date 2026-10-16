@@ -39,10 +39,41 @@ export function isWide(cp: number): boolean {
     (cp >= 0xff00 && cp <= 0xff60) ||
     (cp >= 0xffe0 && cp <= 0xffe6) ||
     (cp >= 0x1f300 && cp <= 0x1f64f) ||
+    (cp >= 0x1f680 && cp <= 0x1f6ff) ||
+    (cp >= 0x1f7e0 && cp <= 0x1f7eb) ||
     (cp >= 0x1f900 && cp <= 0x1f9ff) ||
-    (cp >= 0x20000 && cp <= 0x3fffd)
+    (cp >= 0x1fa70 && cp <= 0x1faff) ||
+    (cp >= 0x20000 && cp <= 0x3fffd) ||
+    EMOJI_WIDE.has(cp)
   );
 }
+
+/** Emoji below U+1F000 that the East Asian Width table makes two cells wide (✅ ❌ ⭐ ⚡ ☕ …). */
+const EMOJI_WIDE = new Set([
+  0x231a, 0x231b, 0x23e9, 0x23ea, 0x23eb, 0x23ec, 0x23f0, 0x23f3, 0x25fd, 0x25fe, 0x2614, 0x2615,
+  0x2648, 0x2649, 0x264a, 0x264b, 0x264c, 0x264d, 0x264e, 0x264f, 0x2650, 0x2651, 0x2652, 0x2653,
+  0x267f, 0x2693, 0x26a1, 0x26aa, 0x26ab, 0x26bd, 0x26be, 0x26c4, 0x26c5, 0x26ce, 0x26d4, 0x26ea,
+  0x26f2, 0x26f3, 0x26f5, 0x26fa, 0x26fd, 0x2705, 0x270a, 0x270b, 0x2728, 0x274c, 0x274e, 0x2753,
+  0x2754, 0x2755, 0x2757, 0x2795, 0x2796, 0x2797, 0x27b0, 0x27bf, 0x2b1b, 0x2b1c, 0x2b50, 0x2b55,
+  0x1f004, 0x1f0cf, 0x1f18e, 0x1f191, 0x1f192, 0x1f193, 0x1f194, 0x1f195, 0x1f196, 0x1f197,
+  0x1f198, 0x1f199, 0x1f19a, 0x1f201, 0x1f21a, 0x1f22f,
+]);
+
+/** Whether `cp` takes no cell of its own: combining marks, variation selectors, zero-width joiners, skin tones. */
+export function isZeroWidth(cp: number): boolean {
+  return (
+    (cp >= 0x0300 && cp <= 0x036f) ||
+    (cp >= 0x200b && cp <= 0x200f) ||
+    (cp >= 0x20d0 && cp <= 0x20ff) ||
+    (cp >= 0xfe00 && cp <= 0xfe0f) ||
+    (cp >= 0xfe20 && cp <= 0xfe2f) ||
+    (cp >= 0x1f3fb && cp <= 0x1f3ff) ||
+    (cp >= 0xe0100 && cp <= 0xe01ef)
+  );
+}
+
+/** The cells a character takes: 0 (combining), 1, or 2 (wide). */
+export const charWidth = (cp: number): 0 | 1 | 2 => (isZeroWidth(cp) ? 0 : isWide(cp) ? 2 : 1);
 
 export interface Segment {
   text: string;
@@ -76,7 +107,7 @@ export function rowSegments(runs: readonly ScreenRun[], cursorCol: number | null
         after += ch;
         continue;
       }
-      const w = isWide(ch.codePointAt(0)!) ? 2 : 1;
+      const w = charWidth(ch.codePointAt(0)!);
       if (cursorCol >= col && cursorCol < col + w) at = ch;
       else before += ch;
       col += w;
@@ -91,6 +122,49 @@ export function rowSegments(runs: readonly ScreenRun[], cursorCol: number | null
   if (!placed) {
     if (cursorCol > col) out.push({ text: " ".repeat(cursorCol - col), fg: null, bg: null, flags: 0, cursor: false });
     out.push({ text: " ", fg: null, bg: null, flags: 0, cursor: true });
+  }
+  return out;
+}
+
+/** A stretch of a row placed on the cell grid: `col` and `cells` count cells, so every piece sits where the terminal puts it. */
+export interface Piece extends Segment {
+  col: number;
+  cells: number;
+  /** One wide character (drawn centred in its two cells), not a run of narrow ones. */
+  wide: boolean;
+}
+
+/**
+ * A row's segments laid on the cell grid. The font cannot be trusted to give an emoji or a CJK
+ * character exactly two cells, so a wide character is a piece of its own (2 cells, drawn centred
+ * in a box 2 cells wide) and runs of narrow characters are pieces at their column; a combining
+ * mark joins the character before it. A piece's pixels are `col * cell` and `cells * cell`.
+ */
+export function rowPieces(segments: readonly Segment[]): Piece[] {
+  const out: Piece[] = [];
+  let col = 0;
+  for (const seg of segments) {
+    let narrow: Piece | null = null;
+    for (const ch of seg.text) {
+      const w = charWidth(ch.codePointAt(0)!);
+      if (w === 0) {
+        // joins the previous character of this segment, else the previous piece
+        const prev = narrow ?? out.at(-1);
+        if (prev) prev.text += ch;
+        continue;
+      }
+      if (w === 2) {
+        narrow = null;
+        out.push({ ...seg, text: ch, col, cells: 2, wide: true });
+      } else if (narrow) {
+        narrow.text += ch;
+        narrow.cells += 1;
+      } else {
+        narrow = { ...seg, text: ch, col, cells: 1, wide: false };
+        out.push(narrow);
+      }
+      col += w;
+    }
   }
   return out;
 }
@@ -139,4 +213,15 @@ export function screenProgram(running: string | null, job: string | null): strin
   const word = running?.trim().split(/\s+/)[0];
   const name = word ? (word.split("/").at(-1) ?? word) : null;
   return name || job || "A program";
+}
+
+/**
+ * The screen's default text and ground colours as `#rrggbb`: the desktop theme's when the gateway
+ * sent them (`fg` / `bg`), else the phone's `fallback`.
+ */
+export function screenDefaults(
+  screen: { fg: string | null; bg: string | null } | null,
+  fallback: { fg: string; bg: string },
+): { fg: string; bg: string } {
+  return { fg: screen?.fg ? `#${screen.fg}` : fallback.fg, bg: screen?.bg ? `#${screen.bg}` : fallback.bg };
 }

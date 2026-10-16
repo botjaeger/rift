@@ -3,7 +3,8 @@
 // the platform pieces (storage, randomness, notifications) come in as dependencies
 // (src/runtime.ts in the app, fakes in the tests).
 
-import { alertAnswers, answerPlan, askingTitle, questionKey, sameQuestion, type Pick as AnswerPick } from "./answer";
+import { alertAnswers, answerPlan, questionKey, sameQuestion, type Pick as AnswerPick } from "./answer";
+import { askText, doneText } from "./notifyText";
 import { programName } from "./now";
 import { fromBase64Url } from "./noise/bytes";
 import type { KeyPair, RandomBytes } from "./noise/noise";
@@ -13,7 +14,6 @@ import {
   ASK_OPEN_CATEGORY,
   newNtfyTopic,
   normalizeNtfyServer,
-  notificationText,
   ntfyUrl,
   pushCovers,
   pushRegistration,
@@ -35,6 +35,7 @@ import {
   type DoneMsg,
   type Feature,
   type GatewayHello,
+  type CloseKind,
   type OpenKind,
   type ScreenMode,
   type Waiting,
@@ -83,7 +84,13 @@ export interface Notifier {
   /** Asks the OS for permission (once); true when granted. */
   requestPermission(): Promise<boolean>;
   /** `category`: the alert's buttons (notify.ts `ASK_CATEGORY`); `data.ask`: the question it is about (answer.ts `questionKey`). */
-  notify(n: { title: string; body: string; data: { host: string; pane: number; ask?: string }; category?: string }): Promise<void>;
+  notify(n: {
+    title: string;
+    subtitle?: string;
+    body: string;
+    data: { host: string; pane: number; ask?: string };
+    category?: string;
+  }): Promise<void>;
   /** Removes the delivered "Needs you" alerts about `ask` (its `data.ask`) in `host`'s `pane`: the question went. */
   dismissAsk?(host: string, pane: number, ask: string): Promise<void>;
 }
@@ -254,6 +261,11 @@ export function describeCode(code: string, hostName: string, fallback: string): 
  */
 export function canOperate(host: HostView): boolean {
   return (host.welcome?.permission ?? host.record.permission) === "operate";
+}
+
+/** Whether the phone offers Close pane / Close tab for this computer: it may operate and its Rift serves `close`. */
+export function canClose(host: HostView | undefined): boolean {
+  return !!host && canOperate(host) && hasFeature(host, "close");
 }
 
 /**
@@ -1155,6 +1167,17 @@ export class Fleet {
     return r;
   }
 
+  /** Closes a pane or its whole tab on the computer (feature `close`); the topology update follows the ack. */
+  async closeShell(host: string, pane: number, kind: CloseKind): Promise<ActionResult> {
+    const h = this.host(host);
+    const name = h?.record.name ?? "the computer";
+    if (!hasFeature(h, "close"))
+      return { ok: false, code: "unsupported", message: `Rift on ${name} cannot close panes from the phone. Update it.` };
+    const r = await (this.operating(host) ?? this.request(host, (c) => c.closeShell(pane, kind)));
+    if (!r.ok && r.code === "busy") return { ...r, message: `${name} could not close it. Try again.` };
+    return r;
+  }
+
   /**
    * Starts a shell on a computer where Rift is closed (feature `start`, which the computer offers
    * only when its owner allows it); the result's `pane` is in the background window.
@@ -1290,8 +1313,18 @@ export class Fleet {
     // the gateway skips ntfy only for the pane followed by an app on screen (`visible`)
     const followed = this.visible && this.clients.get(host)?.subscribedPane === msg.pane;
     if (!notify || (reg && pushCovers(reg, { askSent, durationMs: msg.duration_ms, exit: msg.exit, followed }))) return;
-    const text = notificationText(hostName, msg.exit, msg.command, settings.showCommandInNotification);
-    void this.deps.notifier.notify({ ...text, data: { host, pane: msg.pane } }).catch(() => undefined);
+    const at = view ? findPane(view.windows, msg.pane) : null;
+    const text = doneText({
+      host: hostName,
+      tab: at ? tabTitle(at.tab) : null,
+      command: msg.command,
+      exit: msg.exit,
+      durationMs: msg.duration_ms,
+      // the topology's last line of the command, while it still holds it
+      lastLine: at?.pane.running?.line ?? null,
+      showCommand: settings.showCommandInNotification,
+    });
+    void this.deps.notifier.notify({ ...text, body: text.body ?? "", data: { host, pane: msg.pane } }).catch(() => undefined);
   }
 
   // --- settings --------------------------------------------------------------------------------
@@ -1402,11 +1435,18 @@ export class Fleet {
           const k = askKey(p.id, ask);
           seen.set(k, prev.get(k) ?? this.now());
           if (quiet || prev.has(k) || this.isViewing(host, p.id) || view?.record.notifications === false) continue;
-          const title = `${askingTitle(ask, programName(p))} on ${view?.record.name ?? "your computer"}`;
+          const text = askText({
+            program: programName(p),
+            kind: ask.kind,
+            host: view?.record.name ?? "your computer",
+            tab: tabTitle(t),
+            pane: t.panes.indexOf(p) + 1,
+            prompt: ask.prompt,
+          });
           void this.deps.notifier
             .notify({
-              title,
-              body: ask.prompt,
+              ...text,
+              body: text.body ?? "",
               data: { host, pane: p.id, ask: questionKey(ask) },
               // a view-only device cannot answer: Open only
               category: alertAnswers(ask) && view && canOperate(view) ? ASK_CATEGORY : ASK_OPEN_CATEGORY,

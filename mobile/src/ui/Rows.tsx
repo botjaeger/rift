@@ -19,7 +19,7 @@ import { colors, mono, TOUCH, ui } from "./theme";
 /** The switch's off track, the board's white 16 % (on is the success green). */
 export const SWITCH_OFF = "#ffffff29";
 /** The segmented control's chosen segment (the Settings board), under `textBright`. */
-export const SEGMENT_ON = "#3a3a3f";
+export const SEGMENT_ON = "#373737";
 
 /**
  * A settings row with a switch; the whole row is one accessible switch (label, detail as the
@@ -60,7 +60,7 @@ export function SwitchRow({
         <Switch
           value={value}
           disabled={disabled}
-          trackColor={{ true: colors.success, false: SWITCH_OFF }}
+          trackColor={{ true: colors.accent, false: SWITCH_OFF }}
           ios_backgroundColor={SWITCH_OFF}
           thumbColor={colors.textBright}
           {...webSwitch}

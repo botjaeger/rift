@@ -1,7 +1,7 @@
 // The words of the Settings pages (the Settings board), free of React Native imports (tested in node).
 
 import type { ConnState } from "../protocol/client";
-import { notificationText } from "../notify";
+import { doneText } from "../notifyText";
 import { osName, updateStatusText } from "./format";
 
 /** "30 s", "1 min", "5 min": the "Only if it ran longer than" value. */
@@ -22,7 +22,8 @@ export function hostMeta(host: { os: string | null; conn: Pick<ConnState, "statu
 
 /** "Show the command"'s detail: the example alert for the current value, as the app posts it. */
 export function notifyExample(hostName: string, showCommand: boolean): string {
-  return `“${showCommand ? `npm test failed on ${hostName} (exit 1)` : notificationText(hostName, 1, "", false).title}”`;
+  const t = doneText({ host: hostName, tab: null, command: "npm test", exit: 1, durationMs: 8400, showCommand });
+  return `“${t.title}” · ${t.subtitle}`;
 }
 
 /** The "Updates" line: its text and whether it is the green "just checked" line. */

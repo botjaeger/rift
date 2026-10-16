@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { reduceScreen, type ScreenState } from "../src/protocol/store";
 import { decodeServer, type ScreenMsg, type ScreenRun } from "../src/protocol/types";
-import { fitFont, isWide, mix, rowSegments, segmentColors } from "../src/terminal";
+import { charWidth, fitFont, isWide, mix, rowPieces, rowSegments, screenDefaults, segmentColors } from "../src/terminal";
 import { colors, contrast } from "../src/ui/palette";
 
 const fixture = (name: string) =>
@@ -166,5 +166,120 @@ describe("colours", () => {
 
   it("the default text on the default background reads (4.5:1)", () => {
     expect(contrast(defaults.fg, defaults.bg)).toBeGreaterThanOrEqual(4.5);
+  });
+});
+
+describe("the cell grid: wide characters take exactly two cells", () => {
+  const pieces = (runs: ScreenRun[], cursor: number | null = null) =>
+    rowPieces(rowSegments(runs, cursor)).map((p) => [p.text, p.col, p.cells, p.wide] as const);
+
+  it("emoji and CJK are 2 cells, combining marks and joiners 0", () => {
+    for (const ch of ["🚀", "✅", "❌", "⭐", "漢", "한", "Ａ"]) expect(charWidth(ch.codePointAt(0)!), ch).toBe(2);
+    for (const ch of ["a", "é", "✓", "─", "█", "·"]) expect(charWidth(ch.codePointAt(0)!), ch).toBe(1);
+    for (const ch of ["\u0301", "\u200d", "\ufe0f", "\u{1f3fd}"]) expect(charWidth(ch.codePointAt(0)!), ch).toBe(0);
+    expect(isWide("✅".codePointAt(0)!)).toBe(true);
+  });
+
+  it("a wide character is a piece of its own at its column; the text after it keeps its column", () => {
+    // "✅ deploy done 🚀": ✅ at 0-1, " deploy done " at 2-14, 🚀 at 15-16
+    expect(pieces([["✅ deploy done 🚀", null, null, 0]])).toEqual([
+      ["✅", 0, 2, true],
+      [" deploy done ", 2, 13, false],
+      ["🚀", 15, 2, true],
+    ]);
+    // CJK: two cells each
+    expect(pieces([["日本語 ok", null, null, 0]])).toEqual([
+      ["日", 0, 2, true],
+      ["本", 2, 2, true],
+      ["語", 4, 2, true],
+      [" ok", 6, 3, false],
+    ]);
+  });
+
+  it("columns continue across runs and the cursor splits a piece without moving anything", () => {
+    const runs: ScreenRun[] = [["a🚀", "ff0000", null, 0], ["bc", null, null, 0]];
+    expect(pieces(runs)).toEqual([
+      ["a", 0, 1, false],
+      ["🚀", 1, 2, true],
+      ["bc", 3, 2, false],
+    ]);
+    // the cursor on the second cell of the emoji is the emoji; "b" stays at column 3
+    expect(pieces(runs, 2)).toEqual([
+      ["a", 0, 1, false],
+      ["🚀", 1, 2, true],
+      ["bc", 3, 2, false],
+    ]);
+    expect(rowSegments(runs, 2).find((x) => x.cursor)!.text).toBe("🚀");
+  });
+
+  it("a combining mark or a variation selector joins the character before it and takes no cell", () => {
+    expect(pieces([["e\u0301x ❤\ufe0f!", null, null, 0]])).toEqual([["e\u0301x ❤\ufe0f!", 0, 5, false]]);
+    expect(pieces([["👍\u{1f3fd}z", null, null, 0]])).toEqual([
+      ["👍\u{1f3fd}", 0, 2, true],
+      ["z", 2, 1, false],
+    ]);
+  });
+
+  it("every piece ends where the next begins or later; the row never exceeds the cells of its text", () => {
+    const text = "ab✅日c🚀";
+    const ps = rowPieces(rowSegments([[text, null, null, 0]], null));
+    let end = 0;
+    for (const p of ps) {
+      expect(p.col).toBeGreaterThanOrEqual(end);
+      end = p.col + p.cells;
+    }
+    expect(end).toBe(1 + 1 + 2 + 2 + 1 + 2);
+  });
+});
+
+describe("the screen's own colours and block rules (optional: older desktops omit them)", () => {
+  it("decodes the styled fixture: fg, bg, rules, a tinted badge background", () => {
+    const msg = decodeServer(fixture("screen-styled.json")) as ScreenMsg;
+    expect(msg.fg).toBe("d4d4d4");
+    expect(msg.bg).toBe("1e1e1e");
+    expect(msg.rules).toEqual([[0, "3fb950"], [1, "3fb950"], [2, "f85149"]]);
+    const s = reduceScreen(null, msg) as ScreenState;
+    expect(s).toMatchObject({ fg: "d4d4d4", bg: "1e1e1e" });
+    expect([...s.rules]).toEqual([[0, "3fb950"], [1, "3fb950"], [2, "f85149"]]);
+    expect(s.lines[0]![1]).toEqual(["  ✓ 0", "3fb950", "1a3a22", 1]);
+  });
+
+  it("without them: null colours, no rules, and the phone's own defaults are used", () => {
+    const msg = decodeServer(fixture("screen.json")) as ScreenMsg;
+    expect(msg.fg).toBeUndefined();
+    const s = reduceScreen(null, msg) as ScreenState;
+    expect(s).toMatchObject({ fg: null, bg: null });
+    expect(s.rules.size).toBe(0);
+    expect(screenDefaults(s, { fg: "#d4d4d4", bg: "#1e1e1e" })).toEqual({ fg: "#d4d4d4", bg: "#1e1e1e" });
+    expect(screenDefaults(null, { fg: "#111111", bg: "#222222" })).toEqual({ fg: "#111111", bg: "#222222" });
+  });
+
+  it("uses the desktop's colours when sent", () => {
+    const s = reduceScreen(null, screen({ fg: "c0caf5", bg: "1a1b26" }))!;
+    expect(screenDefaults(s, { fg: "#d4d4d4", bg: "#1e1e1e" })).toEqual({ fg: "#c0caf5", bg: "#1a1b26" });
+  });
+
+  it("rules are the whole list on every frame: a diff replaces them, one without clears them; a rules-only frame has no lines", () => {
+    const a = reduceScreen(null, screen({ fg: "c0caf5", bg: "1a1b26", rules: [[0, "3fb950"]] }))!;
+    const b = reduceScreen(a, screen({ full: false, fg: "c0caf5", bg: "1a1b26", rules: [[0, "3fb950"], [1, "3fb950"]], lines: [[1, [run("x")]]] }))!;
+    expect(b).toMatchObject({ fg: "c0caf5", bg: "1a1b26" });
+    expect([...b.rules]).toEqual([[0, "3fb950"], [1, "3fb950"]]);
+    // a rules-only change: lines [], the text stays
+    const c = reduceScreen(b, screen({ full: false, rules: [[2, "f85149"]], lines: [] }))!;
+    expect([...c.rules]).toEqual([[2, "f85149"]]);
+    expect(c.lines).toEqual(b.lines);
+    // omitted: none
+    expect(reduceScreen(c, screen({ full: false, lines: [] }))!.rules.size).toBe(0);
+    expect(reduceScreen(c, screen({}))!.fg).toBeNull();
+  });
+
+  it("rejects malformed colours and rules; a rule row must be on the screen", () => {
+    const base = fixture("screen-styled.json") as Record<string, unknown>;
+    expect(decodeServer({ ...base, fg: "red" })).toBeNull();
+    expect(decodeServer({ ...base, bg: 3 })).toBeNull();
+    expect(decodeServer({ ...base, rules: [[99, "3fb950"]] })).toBeNull();
+    expect(decodeServer({ ...base, rules: [[0, "zzzzzz"]] })).toBeNull();
+    expect(decodeServer({ ...base, rules: "x" })).toBeNull();
+    expect(decodeServer({ ...base, rules: [[0, "3fb950"]] })).not.toBeNull();
   });
 });

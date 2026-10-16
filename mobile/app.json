@@ -20,7 +20,7 @@
     },
     "orientation": "default",
     "userInterfaceStyle": "dark",
-    "backgroundColor": "#1e1e1e",
+    "backgroundColor": "#050505",
     "icon": "./assets/icon.png",
     "ios": {
       "bundleIdentifier": "dev.botjaeger.rift",
@@ -92,7 +92,7 @@
       [
         "expo-splash-screen",
         {
-          "backgroundColor": "#181818",
+          "backgroundColor": "#000000",
           "image": "./assets/splash-blank.png",
           "imageWidth": 1
         }

@@ -1,7 +1,24 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { agoText, branchRows, branchText, chipCommand, chipsSpoken, dirRows, promptChips, shellQuote, splitPath, tildePath } from "../src/chips";
+import {
+  NO_COMPLETIONS,
+  agoText,
+  branchRows,
+  branchText,
+  chipCommand,
+  chipRowMode,
+  chipsSpoken,
+  completionRows,
+  completionSource,
+  diffChipText,
+  dirRows,
+  promptChips,
+  shellQuote,
+  splitPath,
+  splitTyped,
+  tildePath,
+} from "../src/chips";
 import { decodeServer, type Block, type TopologyMsg } from "../src/protocol/types";
 import { screenProgram, showsKeyRow, showsTerminal } from "../src/terminal";
 
@@ -152,5 +169,60 @@ describe("the key row", () => {
     expect(showsKeyRow(true, true)).toBe(true);
     expect(showsKeyRow(true, false)).toBe(true);
     expect(showsKeyRow(false, false)).toBe(false);
+  });
+});
+
+describe("the chip row: prompt chips while the field is empty, completions while typing", () => {
+  it("switches on whether anything is typed", () => {
+    expect(chipRowMode("")).toBe("chips");
+    expect(chipRowMode("g")).toBe("completions");
+    expect(chipRowMode(" ")).toBe("completions");
+    // and back as the field empties
+    expect(["", "git", ""].map(chipRowMode)).toEqual(["chips", "completions", "chips"]);
+  });
+
+  it("the changed-files chip: the count with +adds −dels", () => {
+    expect(diffChipText({ files: 3, added: 42, removed: 7 })).toBe("3 files +42 −7");
+    expect(diffChipText({ files: 1, added: 1, removed: 0 })).toBe("1 file +1 −0");
+    expect(diffChipText({ files: 2, added: 0, removed: 0 })).toBe("2 files");
+  });
+
+  it("typed part bright, remainder dim; a completion that rewrites the line shares only its start", () => {
+    expect(splitTyped("git ch", "git checkout main")).toEqual({ typed: "git ch", rest: "eckout main" });
+    expect(splitTyped("gti", "git status")).toEqual({ typed: "g", rest: "it status" });
+    expect(splitTyped("x", "git status")).toEqual({ typed: "", rest: "git status" });
+  });
+
+  it("source labels: history, branch, folder", () => {
+    expect(completionSource({ text: "cd src", kind: "path" })).toBe("folder");
+    expect(completionSource({ text: "git checkout main", kind: "value" })).toBe("branch");
+    expect(completionSource({ text: "make x", kind: "value" })).toBe("value");
+    expect(completionSource({ text: "git status", kind: "history" })).toBe("history");
+    expect(completionSource({ text: "git", kind: "command" })).toBe("command");
+  });
+
+  it("the rows: the desktop's items, its history, then this pane's recent commands; each line once, never the draft", () => {
+    const rows = completionRows(
+      "git c",
+      [
+        { text: "git checkout", kind: "subcommand" },
+        { text: "git c", kind: "command" },
+      ],
+      [{ text: "git commit -m x" }, { text: "git checkout" }],
+      ["git clone y", "ls", "git commit -m x"],
+      6,
+    );
+    expect(rows.map((r) => [r.text, r.typed, r.source])).toEqual([
+      ["git checkout", "git c", "subcommand"],
+      ["git commit -m x", "git c", "history"],
+      ["git clone y", "git c", "history"],
+    ]);
+    expect(rows[0]!.rest).toBe("heckout");
+    expect(completionRows("g", [], [], ["g1", "g2", "g3"], 2)).toHaveLength(2);
+  });
+
+  it("no match: no rows, and the row says what Return does", () => {
+    expect(completionRows("zzz", [], [], ["ls", "git status"], 6)).toEqual([]);
+    expect(NO_COMPLETIONS).toBe("No completions · Return runs it as typed");
   });
 });

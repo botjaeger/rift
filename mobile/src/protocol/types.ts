@@ -120,6 +120,7 @@ export type Feature =
   | "complete"
   | "running"
   | "open"
+  | "close"
   | "start";
 
 /** `complete` bounds: line bytes, entries per list, bytes per entry. */
@@ -232,6 +233,14 @@ export interface OpenMsg {
   pane: number;
   kind: OpenKind;
 }
+/** What `close` ends (feature `close`): one pane, or the pane's whole tab. */
+export type CloseKind = "pane" | "tab";
+export interface CloseMsg {
+  t: "close";
+  id: string;
+  pane: number;
+  kind: CloseKind;
+}
 /** Starts a shell while no Rift window is open (feature `start`); the ack carries the new pane. */
 export interface StartMsg {
   t: "start";
@@ -334,6 +343,7 @@ export type ClientMsg =
   | RunMsg
   | KeysMsg
   | OpenMsg
+  | CloseMsg
   | StartMsg
   | ForgetMsg
   | PingMsg
@@ -424,6 +434,11 @@ export interface ScreenMsg {
   /** `[row, column]` while the program shows its cursor. */
   cursor: [number, number] | null;
   full: boolean;
+  /** The desktop theme's default text and ground colours (`rrggbb`); absent from older desktops. */
+  fg?: string;
+  bg?: string;
+  /** `[row, colour]`: rows beside which the desktop draws a block's 2 px left rule; absent from older desktops. */
+  rules?: [number, string][];
   lines: [number, ScreenRun[]][];
 }
 /** Screens stopped (mode `auto` and the pane left the alternate screen, or mode `off`). */
@@ -665,6 +680,18 @@ function isScreen(m: Obj): boolean {
   const c = m.cursor;
   if (c !== null && !(Array.isArray(c) && c.length === 2 && isUint(c[0]) && isUint(c[1]) && c[0] < rows && c[1] < cols))
     return false;
+  const colour = (v: unknown) => isStr(v) && /^[0-9a-f]{6}$/.test(v);
+  if (m.fg !== undefined && !colour(m.fg)) return false;
+  if (m.bg !== undefined && !colour(m.bg)) return false;
+  if (
+    m.rules !== undefined &&
+    !(
+      Array.isArray(m.rules) &&
+      m.rules.length <= rows &&
+      m.rules.every((r) => Array.isArray(r) && r.length === 2 && isUint(r[0]) && r[0] < rows && colour(r[1]))
+    )
+  )
+    return false;
   return (
     Array.isArray(m.lines) &&
     m.lines.every(
@@ -845,6 +872,8 @@ export function isClientMsg(v: unknown): v is ClientMsg {
       );
     case "open":
       return isId(v.id) && isUint(v.pane) && (v.kind === "tab" || v.kind === "pane");
+    case "close":
+      return isId(v.id) && isUint(v.pane) && (v.kind === "pane" || v.kind === "tab");
     case "start":
       return isId(v.id);
     case "forget":
