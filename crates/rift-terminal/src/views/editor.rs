@@ -130,7 +130,7 @@ pub fn render(
     theme: &Theme,
     config: &Config,
     pane: &PaneState,
-    elapsed: Option<std::time::Duration>,
+    elapsed: Option<crate::views::prompt_chips::Elapsed>,
     area: [f32; 4],
     cell_w: f32, // still sizes the ❯ prompt offset below
     blink_on: bool,
@@ -555,7 +555,7 @@ pub(crate) fn pane_chip_views(
     config: &Config,
     theme: &Theme,
     pane: &PaneState,
-    elapsed: Option<std::time::Duration>,
+    elapsed: Option<crate::views::prompt_chips::Elapsed>,
 ) -> Vec<ChipView> {
     let cwd = pane.session.cwd.lock().unwrap().clone();
     let cwd_display = cwd
@@ -647,7 +647,7 @@ pub(crate) fn chip_views(
     config: &Config,
     theme: &Theme,
     pane: &PaneState,
-    elapsed: Option<std::time::Duration>,
+    elapsed: Option<crate::views::prompt_chips::Elapsed>,
     cwd: &str,
 ) -> Vec<ChipView> {
     let vars = pane.session.user_vars.lock().unwrap().clone();

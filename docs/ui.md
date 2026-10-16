@@ -604,7 +604,10 @@ block; ⇧ + label copies it (a block copies its output). Esc cancels.
   and ✕, Settings' ↺, "Edit prompt" and "Open config.toml" (with its path),
   the explorer's and review panel's buttons, the file viewer's ✕ and ⋮, and
   on Linux the drawn traffic lights ("Close window", "Minimize", "Zoom"). A
-  prompt chip shows its hover card. A tab shows its full
+  prompt chip shows its hover card; the **Time on this tab** card is
+  interactive: it stays open while the pointer moves from the chip into it, and
+  its **Reset** button (pointer cursor; also in the accessibility tree and as
+  the palette action `reset_tab_timer`) zeroes the tab's time. A tab shows its full
   title and directory, an explorer row its full path. Moving straight to the
   next control shows its tooltip at once; a click, key or scroll hides it
   until the pointer moves to another control. No tooltips while a menu,
@@ -747,7 +750,8 @@ description) left, control right; it runs to the bottom edge.
     `Input position` segmented `Bottom | Top`, `Blocks start` segmented
     `Bottom | Top`, `Prompt` segmented
     `Rift | Shell (PS1)`, `Prompt chips` (a preview of the chips with
-    sample values; a click opens **Edit prompt**), `Expand aliases as you type`, `Underline unknown
+    sample values; a click opens **Edit prompt**), `Time on this tab counts`
+    segmented `Since first command | Only while running`, `Expand aliases as you type`, `Underline unknown
     commands`, `Suggest corrections for failed commands` toggles.
 - **Terminal** (clipboard icon) — *Mouse, clipboard and keys inside the
   terminal*.
@@ -804,20 +808,31 @@ description) left, control right; it runs to the bottom edge.
   the `light` tag marks the `theme_light` theme, and only while
   `sync_os_theme` is on. Clicking a row sets `theme`.
 - **Remote access** (open icon) — *Watch and run commands from a paired phone, at home or away.*:
-  - `Allow remote access` switch (`remote_access`) and a status line: `Off`,
-    `Starting…`, `Listening on <addresses>`, or `N device(s) connected`.
+  - `Allow remote access` switch (`remote_access`), then `Phones can open
+    tabs while Rift is closed` (below).
+  - `Connection` (with remote access on): `This network` — `Listening on
+    <addresses>` (`Starting…`, or `Listening, but on no network`); `Relay` —
+    its host and state: `Registering this computer at the relay…`, `Phones
+    away from home connect through it · N ms` (the uplink's ping round
+    trip), `No relay: phones connect only on this network`, or `Can’t reach
+    the relay, so phones away from home can’t connect. Retrying in N s.`
+    with the whole error wrapped under it (never cut off) and a `Try again`
+    button that ends the retry wait at once. A lock line follows:
+    `End-to-end encrypted: the relay passes bytes it cannot read.`
+  - `Relay settings…` / `Hide relay settings` (collapsed by default): the
+    `Relay` address field and the Cloudflare tunnel rows below.
   - `Pair a phone` (primary button; disabled while off) and a `View only`
     switch (changing it clears a shown link). Pairing shows the QR code
     (black 4 px modules on a white plate with a 4-module quiet zone, so phone
     cameras read it in any theme), `Expires in m:ss`, the wrapped link and a
     `Copy link` button; at zero, `Expired — Pair again`. While the gateway
     has no address yet, a `Pairing` row waits for it.
-  - `Phones can open tabs while Rift is closed` (with remote access on, last):
+  - `Phones can open tabs while Rift is closed` (with remote access on, under the switch):
     the `remote_when_closed` switch (*Only phones that may run commands; you
     get a notification, and the tabs appear when you open Rift*, or *Needs
     Keep shells running through updates (General)* while `durable_sessions`
     is off).
-  - `Use a Cloudflare tunnel instead` (with remote access on, below `Relay`): the `remote_tunnel`
+  - `Use a Cloudflare tunnel instead` (under `Relay settings…`, below `Relay`): the `remote_tunnel`
     switch; on, a checklist follows: `cloudflared` (`Installed · <path>` with
     a green check, or `Not installed` with an `Install` button when
     Homebrew is present, else `Download`) and `Tunnel` (`Starting…`,
@@ -826,14 +841,14 @@ description) left, control right; it runs to the bottom edge.
     the tunnel relay's state (`Waiting for the tunnel` until it is ready)
     without the URL field, and `Pairing` waits with `Waiting for the
     tunnel…`.
-  - `Relay`: a text field for `remote_relay` (click or Enter edits; typing
+  - `Relay` (under `Relay settings…`): a text field for `remote_relay` (click or Enter edits; typing
     and ⌘V fill it; Enter saves a valid `ws://`/`wss://` URL, an invalid one
-    stays with a toast; Esc cancels; Tab or a click elsewhere saves) and its
-    state: `Off · phones connect only on this network`, `Connecting…`,
-    `Connected via <host>` or the error. It holds Rift's public relay by
-    default.
-  - `Paired devices`: per device its name and `platform (iOS, Android) · paired <date> ·
-    connected|connected via relay|last seen …`, an `Operate` / `View only`
+    stays with a toast; Esc cancels; Tab or a click elsewhere saves). It
+    holds Rift's public relay by default; its state shows in `Connection`.
+  - `Paired devices`: per device its name with a dot (green while
+    connected) and `Connected on this network|Connected through the
+    relay|Not connected · last seen … · platform (iOS, Android) · paired
+    <date>`, an `Operate` / `View only`
     segmented control (raising to Operate asks first), and a destructive
     `Revoke` button, which opens the confirm dialog `Revoke <name>? It
     disconnects now and cannot reconnect without pairing again.`; an empty

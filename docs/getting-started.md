@@ -157,7 +157,7 @@ send-text.
 
 On the same network the phone connects directly. Away from it, it connects
 through Rift's relay, with nothing to set up. To use your own relay instead,
-put its `wss://` address under *Relay* (host one with `rift-terminal relay` or
+put its `wss://` address under *Relay settings…* › *Relay* (host one with `rift-terminal relay` or
 `packaging/relay.Dockerfile`) and pair again so the link includes it; to keep
 phones on your network only, clear the field. *Use a Cloudflare tunnel
 instead* replaces the relay with a free tunnel from this computer (Settings

@@ -1272,6 +1272,81 @@ assert rc == 0, died("restore-elapsed run failed", rs / "app.log")
 restored = (rs / "restored.txt").read_text()
 assert 'prompt_chips_shown=["Cwd:' in restored and '"Elapsed:' not in restored, restored
 
+# elapsed_counts = "running" (time logging): the chip counts only while a
+# command runs, keeps its total across a restart, and its hover card (which
+# stays open from the chip into it) resets it with the Reset button
+tc = scratch / "time-counted"
+for sub in ("cfg/rift", "data/rift"):
+    (tc / sub).mkdir(parents=True, exist_ok=True)
+(tc / "cfg/rift/config.toml").write_text(
+    'shell = "/bin/bash"\nrestore_session = true\ndurable_sessions = false\n'
+    'sync_os_theme = false\nelapsed_counts = "running"\nprompt_chips = ["cwd", "elapsed"]\n')
+tc_env = dict(env, XDG_CONFIG_HOME=str(tc / "cfg"), XDG_DATA_HOME=str(tc / "data"),
+              RIFT_PERSIST_SESSION="1")
+def run_counted(name, steps, counted):
+    (tc / "data/rift/session.toml").write_text(
+        f'version = 3\nactive = 0\n\n[[tabs]]\ncwd = {json.dumps(str(work))}\n'
+        + (f'counted = {counted}\n' if counted is not None else ''))
+    (tc / f"{name}.rift").write_text("\n".join(["resize 1200 800", "wait_prompt", "wait 500",
+                                                *steps, "quit"]) + "\n")
+    with (tc / f"{name}.log").open("w") as log:
+        rc = subprocess.run([str(binary), "--script", str(tc / f"{name}.rift"), "--headless"],
+                            env=tc_env, stdout=log, stderr=log, timeout=60).returncode
+    assert rc == 0, died(f"time-counted {name} run failed", tc / f"{name}.log")
+    return [(tc / f"{name}-{i}.txt").read_text() for i in range(len(re.findall("dump", "\n".join(steps))))]
+def elapsed_of(dump):
+    return re.search(r"elapsed_secs=(\S+) elapsed_counting=(\S+) elapsed_button=(\S+)", dump).groups()
+# no saved total and no command yet: nothing to show
+idle, = run_counted("idle", [f"dump {tc}/idle-0.txt"], None)
+assert elapsed_of(idle)[0] == "None" and '"Elapsed:' not in idle, idle
+# a command counts while it runs, then the clock pauses
+live = run_counted("live", ["type sleep 3\\n", "wait 1500", f"dump {tc}/live-0.txt", "wait 3500",
+                            f"dump {tc}/live-1.txt", "wait 2500", f"dump {tc}/live-2.txt"], None)
+running, paused, later = (elapsed_of(d) for d in live)
+assert running[1] == "Some(true)" and running[0] in ("Some(1)", "Some(2)"), running
+assert paused[1] == "Some(false)" and paused[0] in ("Some(3)", "Some(4)"), paused
+assert later[0] == paused[0] and later[1] == "Some(false)", (paused, later)
+# a saved total is restored (older files, without one, start at 0: idle above)
+(tc / "probe.rift").write_text("resize 1200 800\nwait_prompt\nwait 500\n"
+                               f"dump {tc}/probe.txt\nquit\n")
+(tc / "data/rift/session.toml").write_text(
+    f'version = 3\nactive = 0\n\n[[tabs]]\ncwd = {json.dumps(str(work))}\ncounted = 7200\n')
+subprocess.run([str(binary), "--script", str(tc / "probe.rift"), "--headless"], env=tc_env,
+               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+probe = (tc / "probe.txt").read_text()
+assert '"Elapsed:2h 00m"' in probe and elapsed_of(probe)[:2] == ("Some(7200)", "Some(false)"), probe
+cx, cy, cw, ch = map(int, re.search(r"Time on this tab@(\d+),(\d+),(\d+),(\d+)", probe).groups())
+chip_at = f"{cx + cw // 2} {cy + ch // 2}"
+card, = run_counted("reset", [
+    f"move {chip_at}", "wait 900", f"dump {tc}/reset-0.txt", f"shot {tc}/card.png"], 7200)
+assert 'elapsed_tip=Some("Counted 2h 00m · paused")' in card, card
+x, y, w, h = map(float, re.search(r"elapsed_button=Some\(\[([\d.]+), ([\d.]+), ([\d.]+), ([\d.]+)\]\)",
+                                  card).groups())
+button_at = f"{int(x + w / 2)} {int(y + h / 2)}"
+# away from the chip the card closes; reaching the button from the chip keeps it
+gone, kept, zeroed = run_counted("reset2", [
+    "move 1000 300", "wait 900", f"dump {tc}/reset2-0.txt",
+    f"move {chip_at}", "wait 900", f"move {button_at}", "wait 150", f"dump {tc}/reset2-1.txt",
+    f"click {button_at}", "wait 300", f"dump {tc}/reset2-2.txt",
+], 7200)
+assert elapsed_of(gone)[2] == "None", gone
+assert elapsed_of(kept)[2] != "None", kept
+assert elapsed_of(zeroed)[0] == "Some(0)" and '"Elapsed:0m"' in zeroed, zeroed
+assert 'elapsed_tip=Some("Counted 0m · paused")' in zeroed, zeroed
+# panes that run at the same time count once (6 s + 6 s, 2.5 s apart: about 8
+# s, never 12), the palette action zeroes the tab, and the session file takes
+# the total when the command ends (a crash must not lose it)
+once, after_reset = run_counted("union", [
+    "type sleep 6\\n", "wait 1500", "key cmd+d", "wait 1000", "type sleep 6\\n", "wait 8500",
+    f"sh cp {tc}/data/rift/session.toml {tc}/union-session.toml", f"dump {tc}/union-0.txt",
+    "key cmd+p", "wait 400", "type reset time on", "wait 400", "key enter", "wait 500",
+    f"dump {tc}/union-1.txt"], None)
+union = elapsed_of(once)
+assert union[1] == "Some(false)" and union[0] in ("Some(8)", "Some(9)"), union
+saved_total = int(re.search(r"^counted = (\d+)$", (tc / "union-session.toml").read_text(), re.M)[1])
+assert saved_total in (8, 9), saved_total
+assert elapsed_of(after_reset)[0] == "Some(0)", after_reset
+
 # the sticky header's buttons act on its block and do not scroll to it: copy
 # copies (toast, a check for a moment), ⋮ opens the block menu; the rest of
 # the sticky header still jumps back to the block
@@ -1304,6 +1379,20 @@ assert 'clipboard="1\\n2\\n3' in copied, "the copy button did not copy the block
 menu = (sb / "menu.txt").read_text()
 assert "menu=true" in menu and "view_offset=40" in menu, menu[:800]
 assert "view_offset=40" not in (sb / "jump.txt").read_text(), "the sticky header no longer jumps"
+
+# a selection dragged below the pane's rows scrolls it down, above them up
+(sb / "edge.rift").write_text("\n".join([
+    *sb_start, "press 400 250", "move 420 270", "move 420 495", "wait 1200",
+    f"dump {sb}/edge-down.txt", "move 420 5", "wait 1200", f"dump {sb}/edge-up.txt",
+    "release 420 5", "quit"]) + "\n")
+with (sb / "edge-log.txt").open("w") as log:
+    rc = subprocess.run([str(binary), "--script", str(sb / "edge.rift"), "--headless"], env=sb_env,
+                        stdout=log, stderr=log, timeout=60).returncode
+assert rc == 0, died("selection edge-scroll run failed", sb / "edge-log.txt")
+down = (sb / "edge-down.txt").read_text()
+assert "view_offset=0 " in down and "selection=true" in down, "a selection held below the pane did not scroll down"
+up_off = int(re.search(r"view_offset=(\d+)", (sb / "edge-up.txt").read_text())[1])
+assert up_off > 40, f"a selection held above the pane did not scroll up (view_offset={up_off})"
 
 # a link takes a plain click: "prompt" shows its tooltip at once (no hover
 # wait), "open" opens it; a drag across it selects and does neither
@@ -1551,7 +1640,7 @@ for sub in ("cfg/rift/themes", "data"):
     "key cmd+t", "wait_prompt", f"dump {sw}/second.txt",
     "key cmd+,", "wait 300", "key end", "wait 300", f"dump {sw}/themes.txt",
     "key home", "key down", "key down", "wait 300",
-    *["key tab"] * 15, "wait 300", f"dump {sw}/tabbed.txt",
+    *["key tab"] * 17, "wait 300", f"dump {sw}/tabbed.txt",
     "quit"]) + "\n")
 with (sw / "sweep.log").open("w") as log:
     rc = subprocess.run([str(binary), "--script", str(sw / "sweep.rift"), "--headless"],
@@ -2038,7 +2127,9 @@ tunnel_file = tun / "data/rift/remote/tunnel.json"
 remote_run("tunnel", remote_base + 'control_api = "off"\nremote_access = true\n'
            'remote_tunnel = true\n', [
     f"wait_file {tunnel_file} 20000", "wait 1500",
-    *settings_remote, f"dump {tun}/settings.txt",
+    *settings_remote,
+    # the tunnel lives under "Relay settings…": reset, switch, tabs switch, it
+    *["key tab"] * 4, "key space", "wait 500", f"dump {tun}/settings.txt",
     cp(rm / "off-config.toml", tun / "cfg/rift/config.toml"), "wait 3500"],
     extra_env={"RIFT_CLOUDFLARED": ""})
 tunnel_page = (tun / "settings.txt").read_text()
@@ -2334,10 +2425,9 @@ relay_config = (remote_base + "remote_access = true\n"
     "resize 1100 800", "wait_prompt",
     f"wait_file {rl}/go-settings 60000", *settings_remote, "wait 1200",
     f"dump {rl}/connected.txt", f"shot {rl}/relay-dark.png",
-    # reading order: ↺ and switch, ↺ and the relay field, the Cloudflare
-    # tunnel switch, the tabs-while-closed switch, Pair a phone, View only,
-    # then the device's Operate / View only
-    *["key tab"] * 10, "wait 200", f"dump {rl}/focus.txt",
+    # reading order: ↺ and switch, the tabs-while-closed switch, Relay
+    # settings…, Pair a phone, View only, then the device's Operate / View only
+    *["key tab"] * 8, "wait 200", f"dump {rl}/focus.txt",
     "key space", "wait 2500", f"dump {rl}/changed.txt",
     f"wait_file {rl}/go-light 60000", cp(rl / "light.toml", rl / "cfg/rift/config.toml"),
     "wait 2000", f"dump {rl}/history.txt", f"shot {rl}/relay-light.png",
@@ -2421,13 +2511,17 @@ def relay_line(name):
     return next(l for l in text.splitlines() if l.startswith("remote_relay=")), text
 
 line, text = relay_line("connected.txt")
-assert f'relay_line="Connected via 127.0.0.1"' in line, line
+assert 'relay_line="Phones away from home connect through it' in line, line
 assert 'clients_via=["Live Check Phone:relay"]' in line, line
 assert 'chip_tip=Some("Connected: Live Check Phone via relay")' in line, line
 assert 'device_access=["Live Check Phone=operate"]' in line, line
-assert "connected via relay" in remote_line(text), remote_line(text)
-assert f'TextInput "Relay URL: ws://127.0.0.1:{relay_port}. Connected via 127.0.0.1"' in text, \
-    text[-4000:]
+assert "Connected through the relay" in remote_line(text), remote_line(text)
+# Connection: the relay row (host on its right) and the relay field, which
+# sits under the collapsed "Relay settings…"
+assert 'Label "Relay (127.0.0.1): Phones away from home connect through it' in text, text[-4000:]
+assert 'Label "This network (127.0.0.1:' in text, text[-4000:]
+assert 'Button "Relay settings…, collapsed"' in text, text[-4000:]
+assert "TextInput" not in text, text[-4000:]
 assert 'RadioButton "Live Check Phone access: Operate, selected"' in text, text[-4000:]
 focus = (rl / "focus.txt").read_text()
 assert 'settings_focus=Some(RemotePermission(' in focus and ', true))' in focus, \
@@ -2446,6 +2540,31 @@ for shot in ("relay-dark.png", "relay-light.png"):
     assert (rl / shot).read_bytes().startswith(b"\x89PNG\r\n\x1a\n"), shot
 assert not re.search(r'cmd="echo must-not-run"', (rl / "history.txt").read_text()), \
     "a view-only phone ran a command"
+
+# (h) a relay that cannot be reached: Connection shows the WHOLE error,
+# wrapped, never cut, with Try again; "Relay settings…" opens the relay
+# address field
+bad = remote_run("relay-error", remote_base + "remote_access = true\n"
+                 'remote_relay = "wss://relay.invalid"\ncontrol_api = "off"\n', [
+    "wait 7000", *settings_remote, "wait 800",
+    f"shot {rm}/relay-error/error.png", f"dump {rm}/relay-error/error.txt",
+    # reset, switch, tabs switch, Try again, Relay settings…
+    *["key tab"] * 5, "key space", "wait 400",
+    f"shot {rm}/relay-error/error-open.png", f"dump {rm}/relay-error/open.txt"], timeout=120)
+error_page = (bad / "error.txt").read_text()
+reason = re.search(r'relay_reason=Some\("(.*?)"\) relay_open=', error_page)
+assert reason and len(reason[1]) > 20, error_page[:1500]
+assert f'. {reason[1]}"' in error_page, ("the error text is cut", reason[1], error_page[-3000:])
+assert 'Label "Relay (relay.invalid): Can’t reach the relay, so phones away from home can’t connect.' \
+    in error_page, error_page[-3000:]
+assert 'Button "Try again: retry the relay now"' in error_page, error_page[-3000:]
+assert 'Button "Relay settings…, collapsed"' in error_page, error_page[-3000:]
+open_page = (bad / "open.txt").read_text()
+assert "relay_open=true" in open_page and 'TextInput "Relay URL: wss://relay.invalid.' in open_page, \
+    open_page[-3000:]
+assert 'Button "Hide relay settings, expanded"' in open_page, open_page[-3000:]
+for shot in ("error.png", "error-open.png"):
+    assert (bad / shot).read_bytes().startswith(b"\x89PNG\r\n\x1a\n"), shot
 
 for client in clients:
     client.close()

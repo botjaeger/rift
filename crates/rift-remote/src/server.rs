@@ -237,6 +237,8 @@ impl<S: Source> Stop for Shared<S> {
                 url: url.clone(),
                 state: RelayState::Connecting,
                 error: None,
+                latency_ms: None,
+                retry_at_ms: None,
             });
             link.url = relay;
         }

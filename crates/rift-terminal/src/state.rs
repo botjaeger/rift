@@ -105,6 +105,12 @@ pub enum ClickTarget {
     RemoteRevoke(String),
     /// Settings › Remote access: the relay URL field (edit `remote_relay`).
     RemoteRelay,
+    /// Settings › Remote access › Connection: "Try again" (retry the relay
+    /// now).
+    RemoteRelayRetry,
+    /// Settings › Remote access: "Relay settings…" opens or closes the
+    /// relay address and the Cloudflare tunnel.
+    RemoteRelaySettings,
     /// Settings › Remote access: set the device with this id to Operate
     /// (`false`, confirmed first) or View only (`true`).
     RemotePermission(String, bool),
@@ -741,6 +747,12 @@ impl PaneState {
         !agent_idle(agent, &self.title)
     }
 
+    /// Any command runs in this pane, working or not (the tab's Elapsed
+    /// clock counts an agent at its prompt until it exits).
+    pub fn command_running(&self) -> bool {
+        self.session.blocks.lock().unwrap().any_running() || self.running()
+    }
+
     /// Clear this pane's terminal selection (cheap no-op when none).
     pub fn clear_selection(&mut self) {
         if self.has_selection {
@@ -769,6 +781,9 @@ pub struct TabState {
     /// When the tab's first command was submitted (the Elapsed chip); wall
     /// clock so it survives a restart.
     pub started: Option<std::time::SystemTime>,
+    /// Time a command ran in the tab (`elapsed_counts = "running"`); always
+    /// tracked, shown only in that mode.
+    pub clock: rift_core::tab_clock::TabClock,
 }
 
 /// Tab color names, in menu order (Warp's palette); rendered from theme ANSI
@@ -789,6 +804,7 @@ impl TabState {
             color: None,
             sync_inputs: false,
             started: None,
+            clock: Default::default(),
         }
     }
 
@@ -799,10 +815,49 @@ impl TabState {
         }
     }
 
-    /// Time since the tab's first command (None before one ran).
-    pub fn elapsed(&self) -> Option<std::time::Duration> {
-        let started = self.started?;
-        Some(started.elapsed().unwrap_or_default())
+    /// Follow the panes: the tab counts while any of them runs a command (an
+    /// agent at its own prompt included: it runs until it exits).
+    pub fn sync_clock(&mut self, now: std::time::Instant) {
+        let running: Vec<bool> = self.panes.iter().map(PaneState::command_running).collect();
+        self.clock.sync(running, now);
+    }
+
+    /// The Elapsed chip: time since the tab's first command, or the time a
+    /// command ran in it (None before there is any).
+    pub fn elapsed(
+        &self,
+        mode: rift_core::ElapsedCounts,
+        now: std::time::Instant,
+    ) -> Option<crate::views::prompt_chips::Elapsed> {
+        use crate::views::prompt_chips::Elapsed;
+        match mode {
+            rift_core::ElapsedCounts::Always => {
+                let time = self.started?.elapsed().unwrap_or_default();
+                Some(Elapsed {
+                    time,
+                    counting: true,
+                })
+            }
+            rift_core::ElapsedCounts::Running => {
+                let time = self.clock.total(now);
+                (self.started.is_some() || !time.is_zero()).then_some(Elapsed {
+                    time,
+                    counting: self.clock.counting(),
+                })
+            }
+        }
+    }
+
+    /// Reset button of the Elapsed card: both counts restart from now (so a
+    /// later switch of `elapsed_counts` shows no stale time). The chip stays,
+    /// at 0m, so its card can be used again; a tab that shows no chip yet
+    /// stays without one.
+    pub fn reset_clock(&mut self, mode: rift_core::ElapsedCounts, now: std::time::Instant) {
+        let shown = self.elapsed(mode, now).is_some();
+        self.clock.reset(now);
+        if shown {
+            self.started = Some(std::time::SystemTime::now());
+        }
     }
 
     pub fn pane(&self, id: PaneId) -> Option<&PaneState> {

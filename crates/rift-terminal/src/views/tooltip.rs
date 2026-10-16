@@ -27,6 +27,10 @@ const MAX_W: f32 = 420.0;
 const CARD_W: f32 = 300.0;
 const BODY_GAP: f32 = 4.0;
 const MARGIN: f32 = 8.0;
+/// A card's button: height, label padding, gap above it.
+const BTN_H: f32 = 24.0;
+const BTN_PAD_X: f32 = 12.0;
+const BTN_GAP: f32 = 8.0;
 
 /// One control's tooltip: `rect` is the control, `text` what it does or its
 /// full label, `detail` the shortcut or a path, drawn muted at the right.
@@ -37,6 +41,10 @@ pub struct Tip {
     pub detail: Option<String>,
     /// Wrapped muted lines under `text` (a hover card).
     pub body: Option<String>,
+    /// The label of a button at the foot of a hover card. The card is then
+    /// interactive: it stays open while the pointer moves from the control
+    /// into it.
+    pub action: Option<String>,
 }
 
 impl Tip {
@@ -46,6 +54,7 @@ impl Tip {
             text: text.into(),
             detail,
             body: None,
+            action: None,
         }
     }
 
@@ -57,10 +66,31 @@ impl Tip {
         }
     }
 
+    /// A hover card with a button.
+    pub fn with_action(mut self, label: impl Into<String>) -> Self {
+        self.action = Some(label.into());
+        self
+    }
+
     pub fn contains(&self, x: f32, y: f32) -> bool {
         let [rx, ry, rw, rh] = self.rect;
         x >= rx && x < rx + rw && y >= ry && y < ry + rh
     }
+}
+
+/// Whether the pointer at (`x`, `y`) is on the control `rect`, on the shown
+/// card `card`, or in the gap between them: an interactive card stays open
+/// while the pointer travels from the control into it.
+pub fn bridged(rect: [f32; 4], card: [f32; 4], x: f32, y: f32) -> bool {
+    let inside = |r: [f32; 4]| x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3];
+    let left = rect[0].min(card[0]);
+    let right = (rect[0] + rect[2]).max(card[0] + card[2]);
+    let (top, bottom) = if card[1] >= rect[1] {
+        (rect[1] + rect[3], card[1])
+    } else {
+        (card[1] + card[3], rect[1])
+    };
+    inside(rect) || inside(card) || inside([left, top, right - left, (bottom - top).max(0.0)])
 }
 
 /// Top-left of a `size` tooltip for the control `rect` in a `w`×`h` window:
@@ -92,17 +122,24 @@ fn sans(engine: &mut TextEngine, text: &str, weight: Weight) -> Buffer {
     b
 }
 
-/// Draw `tip` on `layer` (the topmost) in a `w`×`h` window; returns its rect.
+/// Where a tooltip was drawn: its rect, and its button's when it has one.
+pub struct Drawn {
+    pub rect: [f32; 4],
+    pub action: Option<[f32; 4]>,
+}
+
+/// Draw `tip` on `layer` (the topmost) in a `w`×`h` window; `mouse` lights
+/// the button under it.
 pub fn render(
     layer: &mut Layer,
     engine: &mut TextEngine,
     theme: &Theme,
     tip: &Tip,
-    w: f32,
-    h: f32,
-) -> [f32; 4] {
+    (w, h): (f32, f32),
+    mouse: (f32, f32),
+) -> Drawn {
     if let Some(body) = &tip.body {
-        return render_card(layer, engine, theme, tip, body, w, h);
+        return render_card(layer, engine, theme, tip, body, (w, h), mouse);
     }
     let detail = tip.detail.as_deref().unwrap_or("");
     let gap = if detail.is_empty() { 0.0 } else { 10.0 };
@@ -137,7 +174,10 @@ pub fn render(
             theme.text_muted,
         );
     }
-    [x, y, size[0], size[1]]
+    Drawn {
+        rect: [x, y, size[0], size[1]],
+        action: None,
+    }
 }
 
 /// The surface, shadow and hairline every tooltip sits on.
@@ -164,9 +204,9 @@ fn render_card(
     theme: &Theme,
     tip: &Tip,
     body: &str,
-    w: f32,
-    h: f32,
-) -> [f32; 4] {
+    (w, h): (f32, f32),
+    mouse: (f32, f32),
+) -> Drawn {
     let line_h = FONT * 1.35;
     let inner = CARD_W - 2.0 * PAD_X;
     let mut b = Buffer::new(&mut engine.font_system, Metrics::new(FONT, line_h));
@@ -182,7 +222,19 @@ fn render_card(
     b.shape_until_scroll(&mut engine.font_system, false);
     let lines = b.layout_runs().count().max(1) as f32;
     let pad_y = (H - line_h) / 2.0;
-    let size = [CARD_W, 2.0 * pad_y + line_h + BODY_GAP + lines * line_h];
+    let btn_w = tip
+        .action
+        .as_ref()
+        .map(|a| engine.measure(a, FONT, FONT_SANS, Weight::MEDIUM) + 2.0 * BTN_PAD_X);
+    let foot = if btn_w.is_some() {
+        BTN_GAP + BTN_H + 6.0 - pad_y
+    } else {
+        0.0
+    };
+    let size = [
+        CARD_W,
+        2.0 * pad_y + line_h + BODY_GAP + lines * line_h + foot,
+    ];
     let [x, y] = place(tip.rect, size, w, h);
     plate(layer, theme, [x, y], size);
     layer.text(
@@ -192,12 +244,55 @@ fn render_card(
         theme.text_bright,
     );
     layer.text(b, x + PAD_X, y + pad_y + line_h + BODY_GAP, theme.text_dim);
-    [x, y, size[0], size[1]]
+    // a secondary button (DESIGN.md): 6 % lift, 12 % hairline, medium label
+    let action = btn_w.zip(tip.action.as_deref()).map(|(bw, label)| {
+        let r = [x + PAD_X, y + size[1] - 6.0 - BTN_H, bw, BTN_H];
+        let on =
+            mouse.0 >= r[0] && mouse.0 < r[0] + r[2] && mouse.1 >= r[1] && mouse.1 < r[1] + r[3];
+        let lift = if theme.is_light() {
+            Color::BLACK.with_alpha(if on { 0.14 } else { 0.06 })
+        } else {
+            Color::WHITE.with_alpha(if on { 0.14 } else { 0.06 })
+        };
+        let edge = if theme.is_light() {
+            Color::BLACK.with_alpha(0.12)
+        } else {
+            Color::WHITE.with_alpha(0.12)
+        };
+        layer.bordered([r[0], r[1]], [r[2], r[3]], lift, edge, 4.0, 1.0);
+        layer.text(
+            sans(engine, label, Weight::MEDIUM),
+            r[0] + BTN_PAD_X,
+            r[1] + (BTN_H - FONT * 1.35) / 2.0,
+            theme.text_bright,
+        );
+        r
+    });
+    Drawn {
+        rect: [x, y, size[0], size[1]],
+        action,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_card_stays_open_from_the_control_into_it() {
+        let chip = [100.0, 10.0, 60.0, 20.0];
+        let card = [60.0, 36.0, 300.0, 90.0];
+        assert!(bridged(chip, card, 110.0, 20.0)); // on the chip
+        assert!(bridged(chip, card, 110.0, 33.0)); // in the gap
+        assert!(bridged(chip, card, 200.0, 100.0)); // on the card
+        assert!(!bridged(chip, card, 400.0, 33.0)); // beside the gap
+        assert!(!bridged(chip, card, 110.0, 200.0)); // below the card
+        // a card above the chip
+        let above = [60.0, 100.0, 300.0, 50.0];
+        let chip = [100.0, 160.0, 60.0, 20.0];
+        assert!(bridged(chip, above, 120.0, 155.0));
+        assert!(!bridged(chip, above, 120.0, 190.0));
+    }
 
     #[test]
     fn sits_under_the_control_inside_the_window() {

@@ -167,7 +167,7 @@ and title bars, 11–12 px for × and steppers. Colors: `text_dim` at rest,
 terminal, sidebar, split right/down, plus, minus, close, more (⋮), grip,
 search, history, revert, refresh, folder, file, inbox, settings, branch,
 copy, check, open (↗), chevrons, sync, maximize, restore, keyboard,
-bookmark, filter, appearance, themes, launch. Prompt chips and their menu
+bookmark, filter, appearance, themes, launch, info, lock. Prompt chips and their menu
 rows carry Nerd Font glyphs instead (`glyphs.rs`): folder, git branch,
 diff, user, laptop, Python, PHP, GitHub, Docker,
 calendar, clock; notification badges use its bell and bell outline. A glyph added there must be added to the embedded subset

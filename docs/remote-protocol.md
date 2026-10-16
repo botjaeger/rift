@@ -758,7 +758,8 @@ before, for the phone's Run sheet and the pane's suggestions:
 | `gateway.key` | The gateway's static X25519 private key (32 bytes), created once |
 | `devices.json` | `[{"id","name","platform","key","permission","paired_at","last_seen","push"?,"ntfy"?}]` (`key` base64url, times RFC 3339, `push` and `ntfy` see § Push) |
 | `pairing.json` | Live pairing secrets: `[{"hash","permission","expires_at"}]` (SHA-256 of the secret, never the secret) |
-| `status.json` | Written by the running gateway: `{"pid","addresses":[...],"clients":[{"device","name","since","via"}],"relay"?:{"url","state","error"?}}` (`relay` only while one is configured); removed when it stops |
+| `status.json` | Written by the running gateway: `{"pid","addresses":[...],"clients":[{"device","name","since","via"}],"relay"?:{"url","state","error"?,"latency_ms"?,"retry_at_ms"?}}` (`relay` only while one is configured; `latency_ms` is the last ping's round trip to the relay while connected, `retry_at_ms` the next try's Unix time while `error`); removed when it stops |
+| `relay-retry` | Empty file a window writes (Settings › Remote access › Try again); the relay connection removes it and retries at once instead of after its backoff |
 | `relay.json` | `{"secret":"<32 bytes, base64url>"}`: the gateway's `/accept` secret at the relay |
 | `history.jsonl` | Connection history (see above) |
 | `gateway.lock` | Held (flock) by the running gateway; one gateway per user |

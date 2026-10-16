@@ -365,6 +365,11 @@ pub fn base_items(
             PaletteAction::App(AppAction::CloseOtherTabs),
         ),
         item(
+            "Reset time on this tab",
+            "reset_tab_timer",
+            PaletteAction::App(AppAction::ResetTabTimer),
+        ),
+        item(
             "Toggle synchronized inputs in tab",
             "toggle_sync_inputs",
             PaletteAction::App(AppAction::ToggleSyncInputs),

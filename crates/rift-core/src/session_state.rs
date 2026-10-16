@@ -91,6 +91,10 @@ pub struct SavedTab {
     /// When the tab's first command ran, in Unix seconds (the Elapsed chip).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started: Option<u64>,
+    /// Seconds a command ran in the tab (the Elapsed chip with
+    /// `elapsed_counts = "running"`); absent in older files, which load as 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub counted: Option<u64>,
 }
 
 /// A tab's pane tree: either one leaf pane or a binary split of two subtrees.
@@ -329,6 +333,7 @@ mod tests {
                 transcript: None,
                 service: None,
                 started: Some(1_791_938_924),
+                counted: Some(7200),
             }],
             window: None,
         };
@@ -353,6 +358,13 @@ mod tests {
         assert_eq!(s.tabs[0].color, None);
         assert_eq!(s.tabs[0].layout, None);
         assert_eq!(s.tabs[1].cwd, None);
+        // no counted time in an old file: the clock starts at 0
+        assert_eq!(s.tabs[0].counted, None);
+        let t = crate::tab_clock::TabClock::from_secs(s.tabs[0].counted.unwrap_or(0));
+        assert_eq!(
+            t.total(std::time::Instant::now()),
+            std::time::Duration::ZERO
+        );
     }
 
     #[test]

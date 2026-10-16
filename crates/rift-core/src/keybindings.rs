@@ -326,6 +326,7 @@ pub fn all_actions() -> Vec<&'static str> {
     for extra in [
         "rename_tab",
         "close_other_tabs",
+        "reset_tab_timer",
         "save_launch_config",
         "pipe_block_output",
         "toggle_tab_layout",

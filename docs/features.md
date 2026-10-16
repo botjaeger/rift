@@ -112,7 +112,20 @@ insensitive) stay visible. Running it again on the same block, or choosing
   12- and 24-hour time, time on this tab (`elapsed`: hourglass, `2h 05m`
   since the tab's first submitted command, hidden before it; it restarts
   with each new shell and is kept only when a restart reattaches the same
-  shell; its hover card says when it started, with the date after 24 hours). Default: working directory, git branch, git diff
+  shell; its hover card says when it started, with the date after 24 hours).
+  With `elapsed_counts = "running"` (Settings › Input › Time on this tab
+  counts: *Only while running*) it is a time log instead: it counts only
+  while a command runs in the tab (a coding agent counts until it exits;
+  panes running at the same time count once, not per pane), the hourglass is
+  lit while counting and dimmed while paused, and the total is kept across
+  an update's restart, a crash and a reboot (it is saved when a command ends
+  and every minute while one runs; quitting starts fresh, like the tabs; time
+  while Rift is closed is not counted, and neither is time the Mac sleeps; a
+  command still running in a reattached shell counts again from the reattach). Its
+  hover card ("Counted 6h 33m · running now" or "· paused") stays open while
+  the pointer moves into it and has a **Reset** button (also the palette
+  action `reset_tab_timer`) that zeroes the tab's time in both modes (the
+  clock restarts from now). Default: working directory, git branch, git diff
   stats. A chip with nothing to show is left out. Git, PR and Docker state
   refresh after each command, and in every pane of every tab as soon as the
   chip list changes (Edit prompt or config.toml). Settings › Input › Prompt
@@ -712,15 +725,18 @@ Off by default. **Settings › Remote access › Allow remote access**
 (`remote_access`) starts the gateway (`rift-terminal remote --managed`, one
 per user, log in `<data dir>/remote/gateway.log`); turning it off stops it
 within about two seconds, and it also exits 30 seconds after the last Rift
-window closes. It listens on `remote_listen` (`0.0.0.0:7878`); the status
-line shows the addresses, or how many devices are connected.
+window closes. It listens on `remote_listen` (`0.0.0.0:7878`). The page's
+*Connection* group shows *This network* (the listening addresses) and the
+*Relay* (its round trip while connected, or the whole error, a retry
+countdown and *Try again*, which retries at once).
 
 - **Pairing.** *Pair a phone* shows a QR code, the `rift-remote://pair?…`
   link with a *Copy link* button, and a 2-minute countdown (then *Expired —
   Pair again*). The link works once. *View only* makes the next link pair a
   device that can watch but not run commands or send keys.
-- **Paired devices** lists each phone with its platform, pairing date and
-  *connected* (or *connected via relay*) / last seen, an *Operate* / *View
+- **Paired devices** lists each phone with how it is connected (*Connected
+  on this network*, *Connected through the relay*, or *Not connected* with
+  when it was last seen), its platform and pairing date, an *Operate* / *View
   only* choice (raising a phone to *Operate* asks first; its connections close
   and reconnect with the new permission within a second, and a lowered
   permission applies at once), and *Revoke*, which asks first ("Revoke
@@ -738,8 +754,8 @@ line shows the addresses, or how many devices are connected.
   network). The gateway contacts the relay only while remote access is on,
   and scripted runs (`--script`) skip the default relay
   (`RIFT_NO_DEFAULT_RELAY`, inherited by the gateway they start).
-  The status shows *Off · phones connect only on this network*,
-  *Connecting…*, *Connected via <host>* or the error.
+  Its address and the Cloudflare tunnel sit under *Relay settings…*; its
+  state shows in *Connection*.
   The relay only forwards encrypted traffic; host one with `rift-terminal
   relay` or `packaging/relay.Dockerfile` (behind a TLS proxy such as Caddy).
   A Tailscale or other private-network address of the computer works
@@ -810,8 +826,8 @@ line shows the addresses, or how many devices are connected.
   Panes › Choose keys; its *+tab* and *+pane* keys open a new tab in the pane's
   window or split the pane on the desktop (starting in the pane's folder,
   with a toast naming the phone), and the phone goes to the new pane.
-- **Phone-first app.** *Computers* is the home page (no tab bar); its gear
-  opens *Settings* and its **+** pairs a computer. *Computers* lists each
+- **Phone-first app.** *Portals* is the home page (no tab bar); its gear
+  opens *Settings* and its **+** pairs a computer. *Portals* lists each
   computer in a card (connection line, *New tab*, *Retry* or *Pair again*)
   with its tabs, each with its state and time (*Needs you · 2m*, *Working
   3:56*, *Idle 12m*); chips (*needs you*, *working*, *idle*) filter the tabs. With

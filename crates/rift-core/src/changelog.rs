@@ -35,13 +35,19 @@ pub struct Item {
 }
 
 /// Parse `## <version> — <date>` releases. Text above the first release
-/// (the file's own preamble) is ignored; markdown beyond the documented
-/// format is kept as plain text.
+/// (the file's own preamble) is ignored, and so is an `## Unreleased`
+/// section (notes for the next release, not shown yet); markdown beyond the
+/// documented format is kept as plain text.
 pub fn parse(src: &str) -> Vec<Release> {
     let mut releases: Vec<Release> = Vec::new();
+    let mut unreleased = false;
     for raw in src.lines() {
         let line = raw.trim_end();
         if let Some(head) = line.strip_prefix("## ") {
+            unreleased = head.trim().eq_ignore_ascii_case("unreleased");
+            if unreleased {
+                continue;
+            }
             let (version, date) = match head.split_once(" — ").or_else(|| head.split_once(" - "))
             {
                 Some((v, d)) => (v.trim(), d.trim()),
@@ -55,7 +61,7 @@ pub fn parse(src: &str) -> Vec<Release> {
             });
             continue;
         }
-        let Some(release) = releases.last_mut() else {
+        let Some(release) = releases.last_mut().filter(|_| !unreleased) else {
             continue;
         };
         if let Some(title) = line.strip_prefix("### ") {
@@ -210,6 +216,16 @@ mod tests {
         assert_eq!(r[1].date, "");
         assert_eq!(r[1].sections[0].title, "");
         assert_eq!(r[1].sections[0].items[0].title, "Loose");
+    }
+
+    #[test]
+    fn an_unreleased_section_is_not_a_release() {
+        let r = parse(
+            "# Changelog\n\n## Unreleased\n\n### New\n\n- **A** — b\n\n## 1.0.0 — 2026-01-01\n\n### New\n\n- **C** — d\n",
+        );
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].version, "1.0.0");
+        assert_eq!(r[0].sections[0].items.len(), 1);
     }
 
     #[test]

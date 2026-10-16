@@ -36,6 +36,8 @@ pub(crate) fn run<S: Source>(shared: Arc<Shared<S>>) {
     let (min, max) = shared.config.relay_backoff;
     let mut backoff = min;
     let mut warned: Option<String> = None;
+    // a request left by a window while no gateway ran is stale
+    registry::take_relay_retry(&shared.config.dir);
     while !shared.stop.load(Ordering::Acquire) {
         let (url, generation) = {
             let link = shared.relay.lock().unwrap();
@@ -72,7 +74,14 @@ pub(crate) fn run<S: Source>(shared: Arc<Shared<S>>) {
         let delay = jitter(backoff);
         backoff = (backoff * 2).min(max);
         let until = Instant::now() + delay;
-        while Instant::now() < until && !changed() {
+        if result.is_err() {
+            set_retry(&shared, generation, delay);
+        }
+        // "Try again" in Settings ends the wait at once
+        while Instant::now() < until
+            && !changed()
+            && !registry::take_relay_retry(&shared.config.dir)
+        {
             std::thread::sleep(Duration::from_millis(50).min(delay));
         }
     }
@@ -102,11 +111,68 @@ fn set_state<S: Source>(
         let Some(url) = link.url.clone() else {
             return;
         };
-        let next = RelayStatus { url, state, error };
+        let next = RelayStatus {
+            url,
+            state,
+            error,
+            latency_ms: None,
+            retry_at_ms: None,
+        };
         if link.status.as_ref() == Some(&next) {
             return;
         }
         link.status = Some(next);
+    }
+    write_status(shared);
+}
+
+/// Record when the next try after a failure starts (`status.json`).
+fn set_retry<S: Source>(shared: &Shared<S>, generation: u64, delay: Duration) {
+    let at = std::time::SystemTime::now() + delay;
+    let ms = at
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64);
+    update_status(shared, generation, |s| {
+        if s.state == RelayState::Error {
+            s.retry_at_ms = Some(ms);
+        }
+    });
+}
+
+/// Record the round trip of the last ping while connected (`status.json`).
+fn set_latency<S: Source>(shared: &Shared<S>, generation: u64, rtt: Duration) {
+    // whole ms, rounded up: a loopback relay is 1 ms, never "0 ms"
+    let ms = rtt
+        .as_micros()
+        .div_ceil(1000)
+        .clamp(1, u128::from(u32::MAX)) as u32;
+    update_status(shared, generation, |s| {
+        if s.state == RelayState::Connected {
+            s.latency_ms = Some(ms);
+        }
+    });
+}
+
+/// Change `generation`'s status in place and rewrite `status.json` when it
+/// differs.
+fn update_status<S: Source>(
+    shared: &Shared<S>,
+    generation: u64,
+    change: impl FnOnce(&mut RelayStatus),
+) {
+    {
+        let mut link = shared.relay.lock().unwrap();
+        if link.generation != generation {
+            return;
+        }
+        let Some(status) = link.status.as_mut() else {
+            return;
+        };
+        let before = status.clone();
+        change(status);
+        if *status == before {
+            return;
+        }
     }
     write_status(shared);
 }
@@ -203,7 +269,12 @@ fn serve_control<S: Source>(
 ) -> Result<(), String> {
     let cfg = &shared.config;
     let mut heard = Instant::now();
-    let mut pinged = Instant::now();
+    // the first ping goes out at once: Settings shows its round trip
+    let mut pinged = Instant::now()
+        .checked_sub(cfg.ping_interval)
+        .unwrap_or_else(Instant::now);
+    // when the ping still unanswered went out
+    let mut waiting: Option<Instant> = None;
     loop {
         if shared.stop.load(Ordering::Acquire)
             || shared.relay.lock().unwrap().generation != generation
@@ -217,6 +288,7 @@ fn serve_control<S: Source>(
         }
         if pinged.elapsed() >= cfg.ping_interval {
             pinged = Instant::now();
+            waiting = Some(pinged);
             ws.send(Message::Ping(Vec::new().into()))
                 .map_err(|e| lost(&e))?;
         }
@@ -228,6 +300,12 @@ fn serve_control<S: Source>(
                 }
             }
             Ok(Message::Close(_)) => return Err("the relay closed the connection".into()),
+            Ok(Message::Pong(_)) => {
+                heard = Instant::now();
+                if let Some(sent) = waiting.take() {
+                    set_latency(shared, generation, sent.elapsed());
+                }
+            }
             Ok(_) => heard = Instant::now(),
             Err(e) if would_block(&e) => {}
             Err(e) => return Err(lost(&e)),

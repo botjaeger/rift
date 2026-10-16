@@ -38,6 +38,7 @@ const DEVICES_FILE: &str = "devices.json";
 const PAIRING_FILE: &str = "pairing.json";
 const STATUS_FILE: &str = "status.json";
 const LOCK_FILE: &str = "gateway.lock";
+const RETRY_FILE: &str = "relay-retry";
 const RELAY_FILE: &str = "relay.json";
 const HISTORY_FILE: &str = "history.jsonl";
 
@@ -286,6 +287,13 @@ pub struct RelayStatus {
     pub state: RelayState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Round trip of the last WebSocket ping to the relay while connected
+    /// (ms); none until the first pong.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<u32>,
+    /// While `error`: when the next try starts (Unix ms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_at_ms: Option<u64>,
 }
 
 /// The running gateway (`status.json`).
@@ -700,6 +708,18 @@ pub fn status_modified(dir: &Path) -> Option<SystemTime> {
     std::fs::metadata(dir.join(STATUS_FILE))
         .and_then(|m| m.modified())
         .ok()
+}
+
+/// Ask the gateway's relay connection to try again now instead of after
+/// its backoff (Settings › Remote access › Try again). With no gateway
+/// running the request waits and is cleared when the next one starts.
+pub fn request_relay_retry(dir: &Path) -> std::io::Result<()> {
+    std::fs::write(dir.join(RETRY_FILE), b"")
+}
+
+/// Whether a retry was requested since the last call (clears the request).
+pub fn take_relay_retry(dir: &Path) -> bool {
+    std::fs::remove_file(dir.join(RETRY_FILE)).is_ok()
 }
 
 /// A gateway holds `gateway.lock` right now (a non-blocking `flock` probe
@@ -1311,6 +1331,17 @@ mod tests {
     }
 
     #[test]
+    fn a_relay_retry_request_is_taken_once() {
+        let dir = scratch("retry");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!take_relay_retry(&dir));
+        request_relay_retry(&dir).unwrap();
+        assert!(take_relay_retry(&dir));
+        assert!(!take_relay_retry(&dir));
+        std::fs::remove_dir_all(dir.parent().unwrap()).ok();
+    }
+
+    #[test]
     fn status_needs_the_held_lock_and_the_lock_is_exclusive() {
         let dir = scratch("status");
         assert_eq!(read_status(&dir), None);
@@ -1332,6 +1363,8 @@ mod tests {
                 url: "wss://relay.example.com".into(),
                 state: RelayState::Error,
                 error: Some("the relay is full".into()),
+                latency_ms: None,
+                retry_at_ms: None,
             }),
         };
         write_status(&dir, &st).unwrap();

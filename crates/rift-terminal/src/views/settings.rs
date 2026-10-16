@@ -165,20 +165,84 @@ pub enum RelayLine {
     /// No relay set (or remote access is off).
     #[default]
     Off,
-    Connecting,
-    /// Registered at this host.
-    Connected(String),
-    /// The last try failed: why (it is tried again).
-    Error(String),
+    /// Only the default relay is configured and the run is scripted
+    /// (`RIFT_NO_DEFAULT_RELAY`).
+    Scripted,
+    /// Dialing or registering at this host.
+    Connecting(String),
+    /// Registered at this host; the last ping's round trip, when known.
+    Connected {
+        host: String,
+        latency_ms: Option<u32>,
+    },
+    /// The last try failed: why (the whole text), and in how many seconds
+    /// it is tried again.
+    Error {
+        host: String,
+        reason: String,
+        retry_in: Option<u64>,
+    },
 }
 
 impl RelayLine {
+    /// The state in a sentence (under the label).
     pub fn text(&self) -> String {
         match self {
-            RelayLine::Off => "Off · phones connect only on this network".into(),
-            RelayLine::Connecting => "Connecting…".into(),
-            RelayLine::Connected(host) => format!("Connected via {host}"),
-            RelayLine::Error(e) => e.clone(),
+            RelayLine::Off => "No relay: phones connect only on this network".into(),
+            RelayLine::Scripted => "Not used in scripted runs".into(),
+            RelayLine::Connecting(_) => "Registering this computer at the relay…".into(),
+            RelayLine::Connected {
+                latency_ms: Some(ms),
+                ..
+            } => format!("Phones away from home connect through it\u{a0}·\u{a0}{ms}\u{a0}ms"),
+            RelayLine::Connected { .. } => "Phones away from home connect through it".into(),
+            RelayLine::Error {
+                retry_in: Some(s), ..
+            } => format!(
+                "Can’t reach the relay, so phones away from home can’t connect. Retrying in {s}\u{a0}s."
+            ),
+            RelayLine::Error { .. } => {
+                "Can’t reach the relay, so phones away from home can’t connect.".into()
+            }
+        }
+    }
+
+    /// The relay's host (right of the label).
+    pub fn host(&self) -> Option<&str> {
+        match self {
+            RelayLine::Connecting(host)
+            | RelayLine::Connected { host, .. }
+            | RelayLine::Error { host, .. } => Some(host),
+            RelayLine::Off | RelayLine::Scripted => None,
+        }
+    }
+
+    /// Why the last try failed.
+    pub fn reason(&self) -> Option<&str> {
+        match self {
+            RelayLine::Error { reason, .. } => Some(reason),
+            _ => None,
+        }
+    }
+}
+
+/// How a paired phone is connected right now.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DevicePath {
+    #[default]
+    None,
+    /// Directly, on the same network.
+    Lan,
+    /// Spliced by the relay.
+    Relay,
+}
+
+impl DevicePath {
+    pub fn text(self) -> &'static str {
+        match self {
+            DevicePath::None => "Not connected",
+            DevicePath::Lan => "Connected on this network",
+            DevicePath::Relay => "Connected through the relay",
         }
     }
 }
@@ -200,8 +264,9 @@ pub fn platform_name(platform: &str) -> &str {
 pub struct DeviceRow {
     pub id: String,
     pub name: String,
-    /// `iOS · paired October 12, 2026 · connected via relay`
+    /// `Connected through the relay · iOS · paired October 12, 2026`
     pub detail: String,
+    pub path: DevicePath,
     /// It may only watch (else operate).
     pub view_only: bool,
 }
@@ -230,9 +295,14 @@ pub struct PairingView {
 #[derive(Debug, Clone, Default)]
 pub struct RemoteView {
     pub gateway: GatewayLine,
+    /// The addresses the gateway listens on (`IP:PORT`).
+    pub addresses: Vec<String>,
     pub devices: Vec<DeviceRow>,
     /// `devices.json` could not be read.
     pub devices_error: Option<String>,
+    /// `devices.json` was read at least once (before that the list is not
+    /// known: "No paired devices" would be a guess).
+    pub devices_loaded: bool,
     /// The next pairing link grants `view` only.
     pub view_only: bool,
     /// "Pair a phone" was pressed and waits for the gateway's addresses.
@@ -241,6 +311,8 @@ pub struct RemoteView {
     pub relay: RelayLine,
     /// The relay field is being edited: its text (⏎ saves, Esc cancels).
     pub relay_edit: Option<String>,
+    /// "Relay settings…" is open (the relay address, the Cloudflare tunnel).
+    pub relay_open: bool,
     /// `remote_tunnel`: the gateway's `tunnel.json` (None: not running yet).
     pub tunnel: Option<crate::tunnel::TunnelState>,
     /// Where cloudflared is installed (checked while the page shows).
@@ -378,6 +450,8 @@ fn focusable(target: &ClickTarget) -> bool {
             | ClickTarget::RemoteCopyLink
             | ClickTarget::RemoteRevoke(_)
             | ClickTarget::RemoteRelay
+            | ClickTarget::RemoteRelayRetry
+            | ClickTarget::RemoteRelaySettings
             | ClickTarget::RemotePermission(..)
     )
 }
@@ -758,6 +832,14 @@ pub fn render(
     )));
     // About is the logo alone, centred (Warp): no page title
     let about = !searching && state.page == Page::About;
+    // the subtitle wraps (never cut) and pushes the body down
+    let sub_lh = 13.0 * 1.35;
+    let sub_lines = if about {
+        Vec::new()
+    } else {
+        wrap_lines(engine, subtitle, 13.0, FONT_SANS, card_w)
+    };
+    let sub_extra = sub_lines.len().saturating_sub(1) as f32 * sub_lh;
     if !about {
         let title = super::palette::elide_to(engine, &title, 22.0, FONT_SANS, card_w);
         layer.text(
@@ -766,16 +848,17 @@ pub fn render(
             body_top - state.scroll,
             theme.text_bright,
         );
-        let subtitle = super::palette::elide_to(engine, subtitle, 13.0, FONT_SANS, card_w);
-        layer.text(
-            sans(engine, &subtitle, 13.0, Weight::NORMAL),
-            cx,
-            body_top + 34.0 - state.scroll,
-            theme.text_dim,
-        );
+        for (i, line) in sub_lines.iter().enumerate() {
+            layer.text(
+                sans(engine, line, 13.0, Weight::NORMAL),
+                cx,
+                body_top + 34.0 + i as f32 * sub_lh - state.scroll,
+                theme.text_dim,
+            );
+        }
     }
 
-    let body_y = body_top + 70.0;
+    let body_y = body_top + 70.0 + sub_extra;
     let hit_start = hits.len();
     let current = config_table(config);
     let defaults = config_table(&Config::default());
@@ -792,6 +875,7 @@ pub fn render(
         names,
         row_label: String::new(),
         reserve: DEFAULT_RESERVE,
+        extra_h: 0.0,
         filter: state.query.trim().to_lowercase(),
         crumb: String::new(),
         page: state.page.label(),
@@ -1046,6 +1130,9 @@ struct Form<'a> {
     /// Width the next row's control claims on the right; its label stops
     /// short of it on narrow bodies (reset to the default after each label).
     reserve: f32,
+    /// Height added to the next `label_desc` row (its text is drawn by the
+    /// caller below the line).
+    extra_h: f32,
     /// Lowercased search query; empty = the page as it is.
     filter: String,
     /// `Page › Group` of the rows being drawn (shown under search results).
@@ -1132,6 +1219,7 @@ impl Form<'_> {
     fn label_desc(&mut self, text: &str, desc: &str, y: f32) {
         self.row_label = text.to_string();
         let reserve = std::mem::replace(&mut self.reserve, DEFAULT_RESERVE);
+        let extra = std::mem::take(&mut self.extra_h);
         let f = &self.filter;
         self.hidden =
             !(f.is_empty() || text.to_lowercase().contains(f) || desc.to_lowercase().contains(f));
@@ -1139,13 +1227,13 @@ impl Form<'_> {
             return;
         }
         self.rows += 1;
-        self.y = y + ROW_H;
+        self.y = y + ROW_H + extra;
         let desc = if self.filter.is_empty() {
             desc.to_string()
         } else {
             self.crumb.clone()
         };
-        if self.visible(y, ROW_H) {
+        if self.visible(y, ROW_H + extra) {
             let ly = if desc.is_empty() { y + 17.0 } else { y + 9.0 };
             // keep room for the control on the right
             let max_w = (self.card_w - reserve - 8.0).max(60.0);
@@ -1169,7 +1257,7 @@ impl Form<'_> {
             }
             self.layer.hline(
                 self.x,
-                y + ROW_H - 1.0,
+                y + ROW_H + extra - 1.0,
                 self.card_w,
                 1.0,
                 lift(self.theme, 0.06),
@@ -1830,16 +1918,7 @@ fn remote_switch(form: &mut Form, config: &Config) {
 fn remote_page(form: &mut Form, config: &Config, view: &RemoteView, blink_on: bool) {
     remote_switch(form, config);
     let on = config.remote_access;
-    let y = form.y;
-    let line = if on {
-        view.gateway.clone()
-    } else {
-        GatewayLine::Off
-    };
-    form.display(y, "Status", &line.text());
-    relay_row(form, config, view, blink_on);
     if on {
-        tunnel_rows(form, config, view);
         let y = form.y;
         form.toggle_desc(
             y,
@@ -1853,6 +1932,9 @@ fn remote_page(form: &mut Form, config: &Config, view: &RemoteView, blink_on: bo
             "remote_when_closed",
         );
     }
+
+    connection_rows(form, config, view);
+    relay_settings(form, config, view, blink_on);
 
     form.group("Pair a phone");
     let label = "Pair a phone";
@@ -1914,7 +1996,7 @@ fn remote_page(form: &mut Form, config: &Config, view: &RemoteView, blink_on: bo
     if let Some(e) = &view.devices_error {
         let y = form.y;
         form.display(y, "Paired devices", e);
-    } else if view.devices.is_empty() {
+    } else if view.devices.is_empty() && view.devices_loaded {
         let y = form.y;
         form.label_desc(
             "No paired devices",
@@ -1931,7 +2013,44 @@ fn remote_page(form: &mut Form, config: &Config, view: &RemoteView, blink_on: bo
             + 24.0;
         let sw = form.segmented_width(&ACCESS);
         form.reserve = bw + 8.0 + sw + 40.0;
-        form.label_desc(&d.name, &d.detail, y);
+        // how it is connected must never be cut: when the line does not fit
+        // beside the controls, it wraps under them
+        let beside = form.card_w - form.reserve - 8.0;
+        let fits = !form.filter.is_empty()
+            || form
+                .engine
+                .measure(&d.detail, 12.0, FONT_SANS, Weight::NORMAL)
+                <= beside;
+        let below = if fits {
+            Vec::new()
+        } else {
+            wrap_lines(form.engine, &d.detail, 12.0, FONT_SANS, form.card_w)
+        };
+        form.extra_h = if below.is_empty() {
+            0.0
+        } else {
+            below.len() as f32 * NOTE_LH + 2.0
+        };
+        form.label_desc(&d.name, if fits { &d.detail } else { "" }, y);
+        if !form.hidden && form.visible(y, ROW_H) {
+            for (i, l) in below.iter().enumerate() {
+                form.layer.text(
+                    sans(form.engine, l, 12.0, Weight::NORMAL),
+                    form.x,
+                    y + ROW_H - 4.0 + i as f32 * NOTE_LH,
+                    form.theme.text_muted,
+                );
+            }
+        }
+        if form.visible(y, ROW_H) {
+            // how it is connected: green when it is, grey when not
+            let color = match d.path {
+                DevicePath::None => form.theme.text_muted,
+                DevicePath::Lan | DevicePath::Relay => form.theme.success,
+            };
+            form.layer
+                .circle([form.label_end + 12.0, form.label_mid], 8.0, color);
+        }
         if !form.hidden {
             let by = y + (ROW_H - CONTROL_H) / 2.0;
             let bx = form.right() - bw.round();
@@ -1960,7 +2079,7 @@ fn remote_page(form: &mut Form, config: &Config, view: &RemoteView, blink_on: bo
     }
 
     form.group("Recent connections");
-    if view.history.is_empty() {
+    if view.history.is_empty() && view.devices_loaded {
         let y = form.y;
         form.label_desc(
             "No connections yet",
@@ -1986,7 +2105,7 @@ fn tunnel_rows(form: &mut Form, config: &Config, view: &RemoteView) {
     form.toggle_desc(
         y,
         "Use a Cloudflare tunnel instead",
-        "Replaces the relay with a free tunnel from this computer; its address changes on every restart",
+        "A free tunnel from this computer replaces the relay; its address changes on every restart",
         config.remote_tunnel,
         "remote_tunnel",
     );
@@ -2054,23 +2173,359 @@ pub fn tunnel_text(view: &RemoteView) -> String {
 /// Placeholder of the empty relay field.
 pub const RELAY_PLACEHOLDER: &str = "wss://relay.example.com";
 
-/// The Relay row: its state under the label, the URL field on the right
-/// (none while the tunnel provides the relay).
-fn relay_row(form: &mut Form, config: &Config, view: &RemoteView, blink_on: bool) {
-    let y = form.y;
-    if config.remote_access && config.remote_tunnel {
-        let ready = matches!(view.tunnel, Some(crate::tunnel::TunnelState::Ready { .. }));
-        let state = if ready {
-            format!("{} · the tunnel's relay", view.relay.text())
+/// What marks a Connection row: a badge left of the label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mark {
+    /// Working (check, `success`).
+    Ok,
+    /// On its way (…, `accent`).
+    Wait,
+    /// Failed (×, `error`).
+    Failed,
+    /// Off (–, muted).
+    Off,
+}
+
+/// One row of Settings › Remote access › Connection.
+struct StatusRow<'a> {
+    mark: Mark,
+    label: &'a str,
+    /// Under the label, wrapped; `error` colours it.
+    note: &'a str,
+    error: bool,
+    /// Right of the label (an address, a host), monospace.
+    right: &'a str,
+    /// The whole error text in a block under the note, wrapped.
+    detail: Option<&'a str>,
+    /// A "Try again" button under `right`.
+    retry: bool,
+}
+
+/// Badge width and its gap to the text.
+const BADGE_W: f32 = 20.0;
+const BADGE_GAP: f32 = 12.0;
+/// Line heights of the note (12 px) and the error block (11.5 px mono).
+const NOTE_LH: f32 = 12.0 * 1.35;
+const DETAIL_LH: f32 = 11.5 * 1.35;
+
+/// `text` broken into lines no wider than `max_w`: at spaces, and inside a
+/// word wider than a line (a URL, a path).
+fn wrap_lines(
+    engine: &mut TextEngine,
+    text: &str,
+    size: f32,
+    family: &'static str,
+    max_w: f32,
+) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for word in text.split_ascii_whitespace() {
+        let next = if cur.is_empty() {
+            word.to_string()
         } else {
-            "Waiting for the tunnel".to_string()
+            format!("{cur} {word}")
         };
-        form.reserve = 0.0;
-        form.label_desc("Relay", &state, y);
-        form.push_hit([form.x, y, form.card_w, ROW_H], ClickTarget::SettingsNoop);
-        form.name_last(format!("Relay: {state}"));
+        if engine.measure(&next, size, family, Weight::NORMAL) <= max_w {
+            cur = next;
+            continue;
+        }
+        if !cur.is_empty() {
+            lines.push(std::mem::take(&mut cur));
+        }
+        // the word alone is too wide: cut it by characters
+        for c in word.chars() {
+            let mut grown = cur.clone();
+            grown.push(c);
+            if !cur.is_empty() && engine.measure(&grown, size, family, Weight::NORMAL) > max_w {
+                lines.push(std::mem::replace(&mut cur, c.to_string()));
+            } else {
+                cur = grown;
+            }
+        }
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    lines
+}
+
+/// A Connection row: badge, label, wrapped note (and the whole error in a
+/// block), the address or host on the right and, after a failure, Try
+/// again. Taller than a plain row when the text needs it.
+fn status_row(form: &mut Form, s: &StatusRow) {
+    let y = form.y;
+    form.hidden = false;
+    form.rows += 1;
+    form.row_label = s.label.to_string();
+    let theme = form.theme;
+    let text_x = form.x + BADGE_W + BADGE_GAP;
+    let right = super::palette::elide_to(form.engine, s.right, 12.5, mono_family(), 240.0);
+    let right_w = form
+        .engine
+        .measure(&right, 12.5, mono_family(), Weight::NORMAL);
+    let retry = "Try again";
+    let retry_w = (form.engine.measure(retry, 12.5, FONT_SANS, Weight::MEDIUM) + 24.0).round();
+    let side = right_w.max(if s.retry { retry_w } else { 0.0 });
+    let col_w = (form.right() - text_x - side - 16.0).max(120.0);
+    let note = wrap_lines(form.engine, s.note, 12.0, FONT_SANS, col_w);
+    let note_h = note.len() as f32 * NOTE_LH;
+    let detail = s
+        .detail
+        .map(|d| wrap_lines(form.engine, d, 11.5, mono_family(), col_w - 20.0));
+    let detail_h = detail
+        .as_ref()
+        .map_or(0.0, |l| l.len() as f32 * DETAIL_LH + 16.0 + 6.0);
+    let mut h = (28.0 + note_h + detail_h + 8.0).round().max(ROW_H);
+    if s.retry {
+        // label line, the host, then the button under it
+        h = h.max(38.0 + CONTROL_H + 10.0);
+    }
+    if form.visible(y, h) {
+        let (fill, ink) = match s.mark {
+            Mark::Ok => (theme.success.with_alpha(0.15), theme.success),
+            Mark::Wait => (theme.accent.with_alpha(0.15), theme.accent),
+            Mark::Failed => (theme.error.with_alpha(0.15), theme.error),
+            Mark::Off => (lift(theme, 0.08), theme.text_dim),
+        };
+        let c = [form.x + BADGE_W / 2.0, y + 9.0 + 8.8];
+        form.layer.circle(c, BADGE_W, fill);
+        match s.mark {
+            Mark::Ok => icons::draw(form.layer, Icon::Check, c, 12.0, ink),
+            Mark::Failed => icons::draw(form.layer, Icon::Close, c, 10.0, ink),
+            Mark::Wait | Mark::Off => {
+                let glyph = if s.mark == Mark::Wait { "…" } else { "–" };
+                let gw = form.engine.measure(glyph, 12.0, FONT_SANS, Weight::NORMAL);
+                form.layer.text(
+                    sans(form.engine, glyph, 12.0, Weight::NORMAL),
+                    c[0] - gw / 2.0,
+                    c[1] - 8.0,
+                    ink,
+                );
+            }
+        }
+        form.layer.text(
+            sans(form.engine, s.label, 13.0, Weight::NORMAL),
+            text_x,
+            y + 9.0,
+            theme.text_ui,
+        );
+        let note_ink = match (s.error, s.mark) {
+            (true, _) => theme.error,
+            (_, Mark::Wait) => theme.accent,
+            _ => theme.text_muted,
+        };
+        for (i, l) in note.iter().enumerate() {
+            form.layer.text(
+                sans(form.engine, l, 12.0, Weight::NORMAL),
+                text_x,
+                y + 28.0 + i as f32 * NOTE_LH,
+                note_ink,
+            );
+        }
+        if let Some(lines) = &detail {
+            let top = y + 28.0 + note_h + 6.0;
+            let bh = lines.len() as f32 * DETAIL_LH + 16.0;
+            form.layer.rect([text_x, top], [col_w, bh], theme.bg, 4.0);
+            for (i, l) in lines.iter().enumerate() {
+                form.layer.text(
+                    mono(form.engine, l, 11.5, Weight::NORMAL),
+                    text_x + 10.0,
+                    top + 8.0 + i as f32 * DETAIL_LH,
+                    theme.error,
+                );
+            }
+        }
+        if !right.is_empty() {
+            form.layer.text(
+                mono(form.engine, &right, 12.5, Weight::NORMAL),
+                form.right() - right_w,
+                y + 9.0,
+                theme.text_ui,
+            );
+        }
+        form.layer
+            .hline(form.x, y + h - 1.0, form.card_w, 1.0, lift(theme, 0.06));
+    }
+    if s.retry {
+        form.button(
+            form.right() - retry_w,
+            y + 38.0,
+            retry,
+            ButtonKind::Secondary,
+            ClickTarget::RemoteRelayRetry,
+            "Try again: retry the relay now".into(),
+        );
+    }
+    // read-only, but named for assistive tech: the whole text
+    let mut name = s.label.to_string();
+    if !s.right.is_empty() {
+        name.push_str(&format!(" ({})", s.right));
+    }
+    name.push_str(&format!(": {}", s.note));
+    if let Some(d) = s.detail {
+        name.push_str(&format!(
+            "{} {d}",
+            if name.ends_with('.') { "" } else { "." }
+        ));
+    }
+    form.push_hit(
+        [form.x, y, form.right() - side - 8.0 - form.x, h],
+        ClickTarget::SettingsNoop,
+    );
+    form.name_last(name);
+    form.y = y + h;
+}
+
+/// Settings › Remote access › Connection: how phones reach this computer.
+/// "This network" (the listening address), "Relay" (connected, connecting,
+/// off or failing, with the whole error and Try again), and a line on
+/// encryption.
+fn connection_rows(form: &mut Form, config: &Config, view: &RemoteView) {
+    let on = config.remote_access;
+    form.group("Connection");
+    let addresses = view.addresses.join(", ");
+    let (mark, note, right) = match (&view.gateway, on) {
+        (_, false) | (GatewayLine::Off, _) => (Mark::Off, "Off".to_string(), ""),
+        (GatewayLine::Starting, _) => (Mark::Wait, "Starting…".to_string(), ""),
+        _ if view.addresses.is_empty() => {
+            (Mark::Off, "Listening, but on no network".to_string(), "")
+        }
+        _ => (
+            Mark::Ok,
+            "Phones on the same Wi-Fi connect directly".to_string(),
+            addresses.as_str(),
+        ),
+    };
+    status_row(
+        form,
+        &StatusRow {
+            mark,
+            label: "This network",
+            note: &note,
+            error: false,
+            right,
+            detail: None,
+            retry: false,
+        },
+    );
+
+    // the tunnel replaces the relay: its state is the relay's
+    let tunnel_relay = on && config.remote_tunnel;
+    let tunnel_ready = matches!(view.tunnel, Some(crate::tunnel::TunnelState::Ready { .. }));
+    let line = &view.relay;
+    let (mark, note, error) = if !on {
+        let note = if config.relay().is_none() {
+            RelayLine::Off.text()
+        } else {
+            "Off while remote access is off".to_string()
+        };
+        (Mark::Off, note, false)
+    } else if tunnel_relay && !tunnel_ready {
+        (Mark::Wait, "Waiting for the tunnel".to_string(), false)
+    } else {
+        let mark = match line {
+            RelayLine::Off | RelayLine::Scripted => Mark::Off,
+            RelayLine::Connecting(_) => Mark::Wait,
+            RelayLine::Connected { .. } => Mark::Ok,
+            RelayLine::Error { .. } => Mark::Failed,
+        };
+        let note = if tunnel_relay {
+            format!("{} · the tunnel's relay", line.text())
+        } else {
+            line.text()
+        };
+        (mark, note, matches!(line, RelayLine::Error { .. }))
+    };
+    let shown = on && !(tunnel_relay && !tunnel_ready);
+    let host = line.host().filter(|_| shown).unwrap_or("");
+    status_row(
+        form,
+        &StatusRow {
+            mark,
+            label: "Relay",
+            note: &note,
+            error,
+            right: match (host.is_empty(), mark) {
+                (false, _) => host,
+                (true, Mark::Off) => "—",
+                (true, _) => "",
+            },
+            detail: line.reason().filter(|_| shown),
+            retry: shown && error,
+        },
+    );
+
+    let y = form.y + 10.0;
+    let text = "End-to-end encrypted: the relay passes bytes it cannot read.";
+    if form.visible(y, 20.0) {
+        icons::draw(
+            form.layer,
+            Icon::Lock,
+            [form.x + 6.0, y + 8.0],
+            12.0,
+            form.theme.text_muted,
+        );
+        form.layer.text(
+            sans(form.engine, text, 12.0, Weight::NORMAL),
+            form.x + 20.0,
+            y,
+            form.theme.text_muted,
+        );
+    }
+    form.hidden = false;
+    form.row_label = "Encryption".into();
+    form.push_hit([form.x, y, form.card_w, 20.0], ClickTarget::SettingsNoop);
+    form.name_last(text.into());
+    form.y = y + 20.0;
+}
+
+/// "Relay settings…" (or "Hide relay settings") and, open, the relay
+/// address and the Cloudflare tunnel.
+fn relay_settings(form: &mut Form, config: &Config, view: &RemoteView, blink_on: bool) {
+    let y = form.y + 8.0;
+    let label = if view.relay_open {
+        "Hide relay settings"
+    } else {
+        "Relay settings…"
+    };
+    let w = form.engine.measure(label, 13.0, FONT_SANS, Weight::NORMAL);
+    // padded, so the focus ring clears the text
+    let r = [form.x - 6.0, y, w.round() + 12.0, CONTROL_H];
+    form.hidden = false;
+    form.row_label = "Relay settings".into();
+    if form.visible(y, CONTROL_H) {
+        form.layer.text(
+            sans(form.engine, label, 13.0, Weight::NORMAL),
+            form.x,
+            y + (CONTROL_H - 13.0 * 1.35) / 2.0,
+            form.theme.accent,
+        );
+    }
+    form.push_hit(r, ClickTarget::RemoteRelaySettings);
+    form.name_last(format!(
+        "{label}, {}",
+        if view.relay_open {
+            "expanded"
+        } else {
+            "collapsed"
+        }
+    ));
+    form.y = y + CONTROL_H + 4.0;
+    if !view.relay_open {
         return;
     }
+    // the tunnel's relay has no address to edit
+    if !(config.remote_access && config.remote_tunnel) {
+        relay_row(form, config, view, blink_on);
+    }
+    if config.remote_access {
+        tunnel_rows(form, config, view);
+    }
+}
+
+/// The relay address field (`remote_relay`).
+fn relay_row(form: &mut Form, config: &Config, view: &RemoteView, blink_on: bool) {
+    let y = form.y;
     let fw = (form.card_w * 0.45).clamp(160.0, 280.0);
     form.reserve = fw + 40.0;
     let state = if config.remote_access {
@@ -2080,7 +2535,11 @@ fn relay_row(form: &mut Form, config: &Config, view: &RemoteView, blink_on: bool
     } else {
         "Off while remote access is off".to_string()
     };
-    form.label_desc("Relay", &state, y);
+    form.label_desc(
+        "Relay address",
+        "Rift's relay by default; your own with packaging/relay.Dockerfile",
+        y,
+    );
     if form.hidden {
         return;
     }
@@ -2757,6 +3216,17 @@ fn features_page(form: &mut Form, config: &Config) {
     );
     let y = form.y;
     form.prompt_preview(y, &config.prompt_chips);
+    let y = form.y;
+    form.segment(
+        y,
+        "Time on this tab counts",
+        &["Since first command", "Only while running"],
+        match config.elapsed_counts {
+            rift_core::ElapsedCounts::Always => 0,
+            rift_core::ElapsedCounts::Running => 1,
+        },
+        "elapsed_counts",
+    );
     let y = form.y;
     form.toggle(
         y,

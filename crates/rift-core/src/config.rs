@@ -31,6 +31,16 @@ pub enum BlocksStart {
     Top,
 }
 
+/// What the "Time on this tab" chip counts: the time since the tab's first
+/// command, or only the time a command ran in it (time logging).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ElapsedCounts {
+    #[default]
+    Always,
+    Running,
+}
+
 /// One context chip of the Rift prompt (Warp "Edit prompt"). A chip with
 /// nothing to show (no repository, no virtualenv) is left out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -142,8 +152,10 @@ impl PromptChip {
             PromptChip::Time12 => "The current time, 12-hour.",
             PromptChip::Time24 => "The current time, 24-hour.",
             PromptChip::Elapsed => {
-                "How long ago the first command ran in this tab: the time worked on it. \
-                 Shows once a command has run; restarts with each new shell."
+                "The time worked on this tab. Shows once a command has run. By default it \
+                 counts from the first command and restarts with each new shell; with \
+                 elapsed_counts = \"running\" it counts only while a command runs in the tab \
+                 (overlapping panes once) and is kept across an update's restart."
             }
         }
     }
@@ -270,6 +282,9 @@ pub struct Config {
     pub prompt: PromptMode,
     /// The Rift prompt's chips, in order (`prompt = "rift"`).
     pub prompt_chips: Vec<PromptChip>,
+    /// What the "Time on this tab" chip counts: `always` (since the tab's
+    /// first command) or `running` (only while a command runs in the tab).
+    pub elapsed_counts: ElapsedCounts,
     /// Copy the selection to the clipboard as soon as the mouse is released.
     pub copy_on_select: bool,
     /// Inline ghost-text suggestion after the cursor.
@@ -381,6 +396,7 @@ impl Default for Config {
             tab_layout: TabLayout::Horizontal,
             prompt: PromptMode::Rift,
             prompt_chips: PromptChip::defaults(),
+            elapsed_counts: ElapsedCounts::Always,
             copy_on_select: false,
             autosuggestions: true,
             completions_menu: true,
@@ -978,6 +994,10 @@ mod tests {
             [PromptChip::Time24, PromptChip::Cwd, PromptChip::GitDiff]
         );
         assert!(toml::from_str::<Config>("prompt_chips = [\"weather\"]").is_err());
+        assert_eq!(c.elapsed_counts, ElapsedCounts::Always);
+        let logged: Config = toml::from_str("elapsed_counts = \"running\"").unwrap();
+        assert_eq!(logged.elapsed_counts, ElapsedCounts::Running);
+        assert!(toml::from_str::<Config>("elapsed_counts = \"never\"").is_err());
         assert_eq!(c.prompt, PromptMode::Shell);
         assert_eq!(c.bell, Bell::None);
         assert!(c.vim_mode);

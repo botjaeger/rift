@@ -135,8 +135,16 @@ pub struct Inputs<'a> {
     /// The Docker Compose project around the cwd.
     pub docker: Option<&'a ComposeInfo>,
     pub now: LocalTime,
-    /// Time since the tab's first command (None: none ran yet).
-    pub elapsed: Option<std::time::Duration>,
+    /// The tab's Elapsed chip (None: nothing to show yet).
+    pub elapsed: Option<Elapsed>,
+}
+
+/// What the Elapsed chip shows: the time, and whether it is counting now
+/// (the hourglass is lit) or paused (dimmed).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Elapsed {
+    pub time: std::time::Duration,
+    pub counting: bool,
 }
 
 /// `2h 05m`, `12m`, `0m` (minute resolution, like the clock chips).
@@ -291,12 +299,19 @@ pub fn views(chips: &[PromptChip], theme: &Theme, i: &Inputs) -> Vec<ChipView> {
                 PromptChip::Time24 => {
                     one(glyphs::CLOCK, theme.text_dim, i.now.time24(), theme.text_ui)
                 }
-                PromptChip::Elapsed => one(
-                    glyphs::HOURGLASS,
-                    theme.text_dim,
-                    elapsed_text(i.elapsed?),
-                    theme.text_ui,
-                ),
+                PromptChip::Elapsed => {
+                    let e = i.elapsed?;
+                    one(
+                        glyphs::HOURGLASS,
+                        if e.counting {
+                            theme.text_dim
+                        } else {
+                            theme.text_muted
+                        },
+                        elapsed_text(e.time),
+                        theme.text_ui,
+                    )
+                }
             }
         })
         .collect()
@@ -351,7 +366,10 @@ pub fn sample(chip: PromptChip, theme: &Theme) -> ChipView {
             hour: 15,
             minute: 48,
         },
-        elapsed: Some(std::time::Duration::from_secs(2 * 3600 + 5 * 60)),
+        elapsed: Some(Elapsed {
+            time: std::time::Duration::from_secs(2 * 3600 + 5 * 60),
+            counting: true,
+        }),
     };
     let mut v = views(&[chip], theme, &inputs)
         .pop()

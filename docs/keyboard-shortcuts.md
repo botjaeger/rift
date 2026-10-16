@@ -46,6 +46,7 @@ listed alternates.
 | — | `toggle_tab_layout` | Tabs on top ↔ vertical rail |
 | — | `rename_tab` | Rename the current tab |
 | — | `close_other_tabs` | Close every tab except the current one |
+| — | `reset_tab_timer` | Zero the tab's "Time on this tab" chip (the card's Reset button) |
 | — | `save_launch_config` | Save the current tabs and panes as a launch configuration |
 
 ## Panes

@@ -89,6 +89,9 @@ prompt_chips  = ["cwd", "git_branch", "git_diff"]  # the Rift prompt's chips, in
                                   # Prompt chips edits them): cwd, git_branch, git_diff,
                                   # github_pr, user, host, python, php, docker,
                                   # date, time12, time24, elapsed
+elapsed_counts = "always"         # always | running — what the elapsed chip counts: the time since the tab's
+                                  # first command, or only while a command runs in it (time logging; kept
+                                  # across an update's restart (a quit starts fresh); Settings › Input › Time on this tab counts)
 copy_on_select = false            # copy the selection on mouse release
 autosuggestions = true            # inline ghost text after the cursor
 completions_menu = true           # completion panel (Tab still accepts the ghost text)

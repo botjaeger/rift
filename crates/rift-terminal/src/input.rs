@@ -133,6 +133,8 @@ pub enum AppAction {
     Quit,
     RenameTab,
     CloseOtherTabs,
+    /// Zero the tab's "Time on this tab" chip.
+    ResetTabTimer,
     SaveLaunchConfig,
     /// Searchable switcher over tabs, panes and recent blocks.
     SessionSwitcher,
@@ -314,6 +316,7 @@ pub fn action_from_name(name: &str) -> Option<AppAction> {
         "quit" => AppAction::Quit,
         "rename_tab" => AppAction::RenameTab,
         "close_other_tabs" => AppAction::CloseOtherTabs,
+        "reset_tab_timer" => AppAction::ResetTabTimer,
         "save_launch_config" => AppAction::SaveLaunchConfig,
         "session_switcher" => AppAction::SessionSwitcher,
         "hint_mode" => AppAction::HintMode,

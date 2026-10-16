@@ -1138,6 +1138,60 @@ fn a_full_relay_and_a_bad_url_show_as_relay_errors() {
 }
 
 #[test]
+fn status_carries_the_ping_round_trip_and_the_next_try() {
+    let relay = start_relay(|_| {});
+    let env = gateway(&format!("ws://{}", relay.local_addr()));
+    // the first ping goes out at connect, not a ping interval later
+    wait_until("latency", Duration::from_secs(5), || {
+        registry::read_status(&env.dir)
+            .and_then(|s| s.relay)
+            .is_some_and(|r| r.state == RelayState::Connected && r.latency_ms.is_some())
+    });
+    let down = {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap()
+    };
+    env.gw
+        .as_ref()
+        .unwrap()
+        .set_relay(Some(format!("ws://{down}")));
+    wait_until("retry time", Duration::from_secs(5), || {
+        registry::read_status(&env.dir)
+            .and_then(|s| s.relay)
+            .is_some_and(|r| {
+                r.state == RelayState::Error && r.latency_ms.is_none() && r.retry_at_ms.is_some()
+            })
+    });
+}
+
+#[test]
+fn try_again_ends_the_backoff() {
+    let down = {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap()
+    };
+    // a backoff far longer than the test
+    let env = gateway_with(&format!("ws://{down}"), |c| {
+        c.relay_backoff = (Duration::from_secs(60), Duration::from_secs(60));
+    });
+    wait_until("error", Duration::from_secs(5), || {
+        env.relay_state() == Some(RelayState::Error)
+    });
+    let relay = serve_relay(TcpListener::bind(down).unwrap(), RelayConfig::default()).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        env.relay_state(),
+        Some(RelayState::Error),
+        "still backing off"
+    );
+    registry::request_relay_retry(&env.dir).unwrap();
+    env.wait_connected();
+    // the request is consumed
+    assert!(!registry::take_relay_retry(&env.dir));
+    drop(relay);
+}
+
+#[test]
 fn a_relay_flood_never_refuses_lan_phones() {
     let relay = start_relay(|c| c.connect_rate = 1000);
     let env = gateway_with(&format!("ws://{}", relay.local_addr()), |c| {

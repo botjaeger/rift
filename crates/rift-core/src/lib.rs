@@ -23,6 +23,7 @@ pub mod session_state;
 pub mod shell_env;
 pub mod shell_integration;
 pub mod ssh;
+pub mod tab_clock;
 pub mod theme;
 pub mod transcript;
 pub mod update;
@@ -30,7 +31,8 @@ pub mod watch;
 
 pub use block::{AbsLine, Block, BlockId, BlockState, BlockStore, Restored};
 pub use config::{
-    Bell, BlocksStart, Config, CursorStyle, InputPosition, PromptChip, PromptMode, TabLayout,
+    Bell, BlocksStart, Config, CursorStyle, ElapsedCounts, InputPosition, PromptChip, PromptMode,
+    TabLayout,
 };
 pub use keybindings::{Binding, Keymap};
 pub use osc::{Marker, OscScanner};

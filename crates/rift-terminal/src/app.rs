@@ -429,6 +429,8 @@ pub struct App {
     search: SearchState,
     clipboard: Option<arboard::Clipboard>,
     pending_sel: Option<PendingSelection>,
+    /// When a selection dragged past its pane's edge last scrolled it.
+    select_scrolled: Option<Instant>,
     last_click: Option<(Instant, (f32, f32), u8)>,
     context_menu: ContextMenuState,
     context_menu_rects: Vec<[f32; 4]>,
@@ -562,6 +564,15 @@ pub struct App {
     tip_hover: Option<([f32; 4], Instant)>,
     /// The tooltip drawn in the last frame.
     tip_shown: Option<crate::views::tooltip::Tip>,
+    /// Whole minutes the Elapsed chip showed last (a change repaints it).
+    elapsed_minutes: Option<u64>,
+    /// When the session file last took the counted time while a tab was
+    /// counting (None while none is): a crash loses at most a minute of it.
+    clock_saved: Option<Instant>,
+    /// How many tabs were counting at the last wake (a drop saves the file).
+    clock_counting: usize,
+    /// Where that tooltip's card and its button were drawn.
+    tip_drawn: Option<crate::views::tooltip::Drawn>,
     /// A plain press on a link, acted on at its release (`click_link`).
     link_press: Option<(PaneId, String)>,
     /// When a shown tooltip last went away (the next one shows at once).
@@ -1046,6 +1057,12 @@ const TOAST_TTL: Duration = Duration::from_millis(2600);
 
 /// How long a header's copy button shows its check after a copy.
 const COPIED_SHOWN: Duration = Duration::from_millis(1500);
+/// How often the session file takes the counted time while a tab counts.
+const CLOCK_SAVE_EVERY: Duration = Duration::from_secs(60);
+/// A selection dragged past its pane's edge scrolls on this beat...
+const SELECT_SCROLL_EVERY: Duration = Duration::from_millis(50);
+/// ...by up to this many lines a step (one per line height out).
+const SELECT_SCROLL_MAX: usize = 8;
 
 /// What a confirmed close/quit acts on.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1144,6 +1161,9 @@ struct RemoteUi {
     notices: u64,
     /// When the tab-bar chip last appeared, changed or went away.
     chip_changed: Option<Instant>,
+    /// "Try again" was pressed: the relay shows as connecting until then,
+    /// though a failure that is instant (DNS) already wrote its error.
+    retry_shown_until: Option<Instant>,
 }
 
 /// How often the remote gateway's files are read.
@@ -1223,6 +1243,7 @@ impl App {
             search: SearchState::default(),
             clipboard: None,
             pending_sel: None,
+            select_scrolled: None,
             last_click: None,
             context_menu: ContextMenuState::default(),
             context_menu_rects: Vec::new(),
@@ -1297,6 +1318,10 @@ impl App {
             tips: Vec::new(),
             tip_hover: None,
             tip_shown: None,
+            tip_drawn: None,
+            elapsed_minutes: None,
+            clock_saved: None,
+            clock_counting: 0,
             link_press: None,
             tip_hidden_at: None,
             tip_suppressed: false,
@@ -1804,6 +1829,69 @@ impl App {
         if let Some(w) = &self.window {
             w.request_redraw();
         }
+    }
+
+    /// A live selection dragged above or below its pane's rows scrolls the
+    /// pane toward the pointer, faster the farther out it is; the next frame's
+    /// rows then carry the selection on (`drag_selection` on each tick).
+    /// Returns whether the view moved.
+    fn selection_edge_scroll(&mut self) -> bool {
+        let Some(pending) = self.pending_sel.as_ref().filter(|p| p.started) else {
+            return false;
+        };
+        let pane_id = pending.pane;
+        let my = self.mouse.1;
+        let Some(pane) = self
+            .tabs
+            .get_mut(self.active)
+            .and_then(|t| t.pane_mut(pane_id))
+        else {
+            return false;
+        };
+        let (Some(grid), Some(first), Some(last)) =
+            (pane.last_grid, pane.rows.first(), pane.rows.last())
+        else {
+            return false;
+        };
+        if pane.alt_screen {
+            return false;
+        }
+        let (top, bottom) = (first.y, last.y + grid.line_h);
+        let lines = |d: f32| (1 + (d / grid.line_h) as usize).min(SELECT_SCROLL_MAX);
+        let max_off = pane.last_display_len.saturating_sub(grid.rows);
+        let before = pane.view_offset;
+        if my < top {
+            pane.view_offset = (pane.view_offset + lines(top - my)).min(max_off);
+        } else if my > bottom {
+            pane.view_offset = pane.view_offset.saturating_sub(lines(my - bottom));
+        }
+        pane.view_offset != before
+    }
+
+    /// A selection held past its pane's top or bottom keeps scrolling, every
+    /// `SELECT_SCROLL_EVERY` while it moves the view; returns when to wake next.
+    fn tick_select_scroll(&mut self) -> Option<Instant> {
+        if !self.pending_sel.as_ref().is_some_and(|p| p.started) {
+            self.select_scrolled = None;
+            return None;
+        }
+        let now = Instant::now();
+        let due = self
+            .select_scrolled
+            .map_or(now, |t| t + SELECT_SCROLL_EVERY);
+        if now < due {
+            return Some(due);
+        }
+        self.drag_selection();
+        if !self.selection_edge_scroll() {
+            self.select_scrolled = None;
+            return None;
+        }
+        self.select_scrolled = Some(now);
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        Some(now + SELECT_SCROLL_EVERY)
     }
 
     /// The pane's display-line list as drawn (`build_display_list_filtered`
@@ -2839,6 +2927,11 @@ impl App {
             ))
         } else if self.note_toast_hits.iter().any(|t| inside(&t.rect)) {
             Some(CursorIcon::Pointer)
+        } else if let Some(d) = self.tip_drawn.as_ref().filter(|d| {
+            inside(&d.rect) && self.tip_shown.as_ref().is_some_and(|t| t.action.is_some())
+        }) {
+            // an interactive hover card: a hand over its button
+            Some(hand(d.action.as_ref().is_some_and(inside)))
         } else if let Some(ed) = &self.prompt_editor {
             Some(if ed.drag.as_ref().is_some_and(|d| d.live) {
                 CursorIcon::Grabbing
@@ -2915,6 +3008,8 @@ impl App {
                     | ClickTarget::RemoteViewOnly
                     | ClickTarget::RemoteCopyLink
                     | ClickTarget::RemoteInstallTunnel
+                    | ClickTarget::RemoteRelayRetry
+                    | ClickTarget::RemoteRelaySettings
                     | ClickTarget::RemoteRevoke(_)
                     | ClickTarget::RemotePermission(..)
                     | ClickTarget::PaneClose(_)
@@ -5029,7 +5124,7 @@ impl App {
         if !self.persist_session {
             return;
         }
-        rift_core::session_state::save(&self.saved_session());
+        self.save_session_file();
         if self.config.save_transcripts {
             let mut keep = Vec::new();
             for p in self.tabs.iter().flat_map(|t| &t.panes) {
@@ -5038,6 +5133,13 @@ impl App {
             }
             // closed panes' transcripts go with them
             rift_core::transcript::remove_except(&keep);
+        }
+    }
+
+    /// The session file alone (layout, counted time), without transcripts.
+    fn save_session_file(&self) {
+        if self.persist_session {
+            rift_core::session_state::save(&self.saved_session());
         }
     }
 
@@ -5121,6 +5223,7 @@ impl App {
                         .ok()
                         .map(|d| d.as_secs())
                 }),
+                counted: Some(t.clock.total(Instant::now()).as_secs()).filter(|s| *s > 0),
             })
             .collect();
         SavedSession {
@@ -5201,6 +5304,9 @@ impl App {
             .started
             .filter(|_| reattached)
             .map(|s| std::time::UNIX_EPOCH + Duration::from_secs(s));
+        // counted time is kept across restarts: the closed time is not
+        // counted, and a command still running counts again from reattach
+        tab.clock = rift_core::tab_clock::TabClock::from_secs(saved.counted.unwrap_or(0));
         tab.color = saved
             .color
             .as_deref()
@@ -6376,7 +6482,9 @@ impl App {
             return;
         };
         let split = tab.effective_split();
-        let elapsed = tab.elapsed();
+        let clock_now = Instant::now();
+        tab.sync_clock(clock_now);
+        let elapsed = tab.elapsed(config_ref.elapsed_counts, clock_now);
 
         if split {
             // gutter fill
@@ -7788,24 +7896,35 @@ impl App {
         }
         // Elapsed: when its clock started, with the date after a day; over
         // the command line's own hit, so first
+        let mode = self.config.elapsed_counts;
+        let now = Instant::now();
         for (rect, pane, chip) in &self.info_chips {
-            let started = self
-                .tabs
-                .iter()
-                .find(|t| t.pane(*pane).is_some())
-                .and_then(|t| Some((t.started?, t.elapsed()?)));
-            let body = match started {
-                Some((at, elapsed)) => format!(
-                    "{}\n\n{}",
-                    crate::views::prompt_chips::started_text(
+            let tab = self.tabs.iter().find(|t| t.pane(*pane).is_some());
+            let shown = tab.and_then(|t| t.elapsed(mode, now));
+            let line = match (mode, tab.and_then(|t| t.started), shown) {
+                (rift_core::ElapsedCounts::Always, Some(at), Some(e)) => {
+                    Some(crate::views::prompt_chips::started_text(
                         crate::views::prompt_chips::LocalTime::at(at),
-                        elapsed
-                    ),
-                    chip.about()
-                ),
+                        e.time,
+                    ))
+                }
+                (rift_core::ElapsedCounts::Running, _, Some(e)) => Some(format!(
+                    "Counted {} \u{b7} {}",
+                    crate::views::prompt_chips::elapsed_text(e.time),
+                    if e.counting { "running now" } else { "paused" }
+                )),
+                _ => None,
+            };
+            let body = match line {
+                Some(line) => format!("{line}\n\n{}", chip.about()),
                 None => chip.about().to_string(),
             };
-            tips.push(Tip::card(*rect, chip.label(), body));
+            let tip = Tip::card(*rect, chip.label(), body);
+            tips.push(if shown.is_some() {
+                tip.with_action("Reset")
+            } else {
+                tip
+            });
         }
         for hit in &self.hits {
             // a prompt chip's card: what it shows and what a click does
@@ -7847,10 +7966,20 @@ impl App {
         use crate::views::tooltip::{DELAY, WARM};
         let tips = self.collect_tips();
         let (mx, my) = self.mouse;
+        // an interactive card stays while the pointer moves from its control
+        // into it
+        let sticky = self
+            .tip_shown
+            .as_ref()
+            .zip(self.tip_drawn.as_ref())
+            .filter(|(t, d)| {
+                t.action.is_some() && crate::views::tooltip::bridged(t.rect, d.rect, mx, my)
+            })
+            .and_then(|(t, _)| tips.iter().find(|n| n.rect == t.rect).cloned());
         let hovered = if self.tooltip_blocked() {
             None
         } else {
-            tips.iter().find(|t| t.contains(mx, my)).cloned()
+            sticky.or_else(|| tips.iter().find(|t| t.contains(mx, my)).cloned())
         };
         let now = Instant::now();
         let rect = hovered.as_ref().map(|t| t.rect);
@@ -7882,8 +8011,16 @@ impl App {
         if self.tip_shown.is_some() && shown.is_none() && rect.is_some() {
             self.tip_hidden_at = Some(now);
         }
+        self.tip_drawn = None;
         if let (Some(tip), Some(engine)) = (&shown, self.text.as_mut()) {
-            crate::views::tooltip::render(self.scene.layer(7), engine, &self.theme, tip, w, h);
+            self.tip_drawn = Some(crate::views::tooltip::render(
+                self.scene.layer(7),
+                engine,
+                &self.theme,
+                tip,
+                (w, h),
+                self.mouse,
+            ));
         }
         self.tip_shown = shown;
         self.tips = tips;
@@ -7894,6 +8031,42 @@ impl App {
         let (_, since) = self.tip_hover?;
         (self.tip_shown.is_none() && !self.tip_suppressed)
             .then_some(since + crate::views::tooltip::DELAY)
+    }
+
+    /// A press on the shown hover card: its button acts, and the press never
+    /// reaches what the card covers. Returns true when it landed on the card.
+    fn press_tip_card(&mut self, window: &Window) -> bool {
+        let (mx, my) = self.mouse;
+        let inside =
+            |r: &[f32; 4]| mx >= r[0] && mx < r[0] + r[2] && my >= r[1] && my < r[1] + r[3];
+        let (Some(tip), Some(drawn)) = (&self.tip_shown, &self.tip_drawn) else {
+            return false;
+        };
+        if tip.action.is_none() || !inside(&drawn.rect) {
+            return false;
+        }
+        if drawn.action.as_ref().is_some_and(inside) {
+            let chip = tip.rect;
+            let pane = self
+                .info_chips
+                .iter()
+                .find(|(r, _, _)| *r == chip)
+                .map(|(_, p, _)| *p);
+            if let Some(pane) = pane {
+                self.reset_tab_timer_of(pane);
+            }
+        }
+        window.request_redraw();
+        true
+    }
+
+    /// Zero the "Time on this tab" of the tab holding `pane`.
+    fn reset_tab_timer_of(&mut self, pane: PaneId) {
+        let mode = self.config.elapsed_counts;
+        if let Some((_, tab)) = self.find_tab_of_pane(pane) {
+            tab.reset_clock(mode, Instant::now());
+            self.save_session();
+        }
     }
 
     /// A press, key or wheel: the tooltip goes until the pointer moves on.
@@ -8140,6 +8313,13 @@ impl App {
             AppAction::ToggleSyncInputs => {
                 if let Some(t) = self.tabs.get_mut(self.active) {
                     t.sync_inputs = !t.sync_inputs;
+                }
+            }
+            AppAction::ResetTabTimer => {
+                let mode = self.config.elapsed_counts;
+                if let Some(t) = self.tabs.get_mut(self.active) {
+                    t.reset_clock(mode, Instant::now());
+                    self.save_session();
                 }
             }
             AppAction::FilterBlock => {
@@ -10822,6 +11002,9 @@ impl App {
         event_loop: &ActiveEventLoop,
         window: &Window,
     ) {
+        if state == ElementState::Pressed && self.press_tip_card(window) {
+            return;
+        }
         if state == ElementState::Pressed {
             self.hide_tooltip(window);
         }
@@ -11392,6 +11575,24 @@ impl App {
                 }
                 self.settings.focus = Some(ClickTarget::RemoteRelay);
             }
+            Some(ClickTarget::RemoteRelayRetry) => {
+                // the gateway's relay connection retries at once; its new
+                // state shows with the next poll
+                if let Some(dir) = crate::remote::registry_dir()
+                    && let Err(e) = rift_remote::registry::request_relay_retry(&dir)
+                {
+                    self.toast(format!("Could not ask the gateway to retry: {e}"));
+                } else {
+                    // under the 1 s poll, so the next poll ends it
+                    self.remote.retry_shown_until =
+                        Some(Instant::now() + Duration::from_millis(900));
+                }
+                self.poll_remote(true);
+            }
+            Some(ClickTarget::RemoteRelaySettings) => {
+                let v = &mut self.settings.remote;
+                v.relay_open = !v.relay_open;
+            }
             Some(ClickTarget::RemotePermission(id, view)) => {
                 let name = self
                     .settings
@@ -11592,6 +11793,13 @@ impl App {
                             rift_core::TabLayout::Vertical
                         } else {
                             rift_core::TabLayout::Horizontal
+                        }
+                    }
+                    "elapsed_counts" => {
+                        c.elapsed_counts = if *v == 1 {
+                            rift_core::ElapsedCounts::Running
+                        } else {
+                            rift_core::ElapsedCounts::Always
                         }
                     }
                     "prompt" => {
@@ -13201,6 +13409,42 @@ impl App {
                     value: p.editor.buffer.clone(),
                     rect: hit(&|c| *c == ClickTarget::Editor(id)),
                 });
+                // the "Time on this tab" chip, and its card's Reset button
+                // while the card is open
+                let mut chip_controls = Vec::new();
+                for (rect, _, _) in self.info_chips.iter().filter(|(_, pane, _)| *pane == id) {
+                    let text = tab
+                        .elapsed(self.config.elapsed_counts, Instant::now())
+                        .map(|e| {
+                            format!(
+                                "{}, {}",
+                                crate::views::prompt_chips::elapsed_text(e.time),
+                                if e.counting { "counting" } else { "paused" }
+                            )
+                        })
+                        .unwrap_or_default();
+                    chip_controls.push(Control {
+                        label: format!("Time on this tab, {text}"),
+                        role: Role::Label,
+                        toggled: None,
+                        selected: false,
+                        rect: Some(*rect),
+                    });
+                    if let Some(button) = self
+                        .tip_shown
+                        .as_ref()
+                        .filter(|t| t.action.is_some() && t.rect == *rect)
+                        .and_then(|_| self.tip_drawn.as_ref()?.action)
+                    {
+                        chip_controls.push(Control {
+                            label: "Reset time on this tab".into(),
+                            role: Role::Button,
+                            toggled: None,
+                            selected: false,
+                            rect: Some(button),
+                        });
+                    }
+                }
                 let mut label = format!("Pane {cwd}");
                 if let Some(job) = running.filter(|_| !self.editor_active || !active) {
                     label.push_str(&format!(", running {job}"));
@@ -13229,6 +13473,7 @@ impl App {
                             rect: Some(h.rect),
                         })
                     })
+                    .chain(chip_controls)
                     .collect();
                 panes.push(PaneNode {
                     id,
@@ -13587,6 +13832,8 @@ impl App {
                         | ClickTarget::RemotePair
                         | ClickTarget::RemoteCopyLink
                         | ClickTarget::RemoteInstallTunnel
+                        | ClickTarget::RemoteRelayRetry
+                        | ClickTarget::RemoteRelaySettings
                         | ClickTarget::RemoteRevoke(_) => (Role::Button, None, false),
                         ClickTarget::RemoteViewOnly => {
                             (Role::Switch, Some(self.settings.remote.view_only), false)
@@ -14002,9 +14249,11 @@ impl App {
         );
         let _ = writeln!(
             out,
-            "remote_relay={:?} relay_line={:?} relay_edit={:?} clients_via={:?} chip_tip={:?} device_access={:?} history={:?}",
+            "remote_relay={:?} relay_line={:?} relay_reason={:?} relay_open={} relay_edit={:?} clients_via={:?} chip_tip={:?} device_access={:?} history={:?}",
             self.config.remote_relay,
             self.settings.remote.relay.text(),
+            self.settings.remote.relay.reason(),
+            self.settings.remote.relay_open,
             self.settings.remote.relay_edit,
             self.remote
                 .status
@@ -14222,8 +14471,10 @@ impl App {
                 .as_deref()
                 .map(editor::shorten_home)
                 .unwrap_or_else(|| "~".into());
+            let now = Instant::now();
+            let elapsed = tab.elapsed(self.config.elapsed_counts, now);
             let chips: Vec<String> =
-                editor::chip_views(&self.config, &self.theme, pane, tab.elapsed(), &cwd)
+                editor::chip_views(&self.config, &self.theme, pane, elapsed, &cwd)
                     .iter()
                     .map(|v| {
                         let t: Vec<&str> = v.texts.iter().map(|(t, _)| t.as_str()).collect();
@@ -14231,6 +14482,20 @@ impl App {
                     })
                     .collect();
             let _ = writeln!(out, "prompt_chips_shown={chips:?}");
+            let _ = writeln!(
+                out,
+                "elapsed_secs={:?} elapsed_counting={:?} elapsed_button={:?} elapsed_tip={:?}",
+                elapsed.map(|e| e.time.as_secs()),
+                elapsed.map(|e| e.counting),
+                self.tip_drawn.as_ref().and_then(|d| d.action),
+                self.tips.iter().find(|t| t.action.is_some()).map(|t| t
+                    .body
+                    .as_deref()
+                    .unwrap_or("")
+                    .lines()
+                    .next()
+                    .unwrap_or(""))
+            );
         }
         // the prompt chips' picker: kind, query, results, selection
         let _ = writeln!(
@@ -14905,6 +15170,12 @@ impl App {
             }
         };
         self.settings.remote.gateway = gateway;
+        self.settings.remote.addresses = self
+            .remote
+            .status
+            .iter()
+            .flat_map(|s| s.addresses.iter().map(|a| a.to_string()))
+            .collect();
         self.settings.remote.relay = self.relay_line();
         // a gateway that is not running leaves no tunnel to show
         self.settings.remote.tunnel = (on && self.config.remote_tunnel)
@@ -14946,26 +15217,31 @@ impl App {
         match rift_remote::registry::devices(dir) {
             Ok(all) => {
                 self.settings.remote.devices_error = None;
+                self.settings.remote.devices_loaded = true;
                 self.settings.remote.devices = all
                     .into_iter()
                     .map(|d| {
                         use crate::views::prompt_chips::LocalTime;
                         let paired = LocalTime::at(d.paired_at).date();
-                        let seen = match connected.iter().find(|(id, _)| *id == d.id) {
-                            Some((_, Via::Relay)) => "connected via relay".to_string(),
-                            Some((_, Via::Lan)) => "connected".to_string(),
-                            None => {
-                                let t = LocalTime::at(d.last_seen);
-                                format!("last seen {} {}", t.date(), t.time24())
-                            }
+                        let path = match connected.iter().find(|(id, _)| *id == d.id) {
+                            Some((_, Via::Relay)) => settings::DevicePath::Relay,
+                            Some((_, Via::Lan)) => settings::DevicePath::Lan,
+                            None => settings::DevicePath::None,
+                        };
+                        let seen = if path == settings::DevicePath::None {
+                            let t = LocalTime::at(d.last_seen);
+                            format!("{} · last seen {} {}", path.text(), t.date(), t.time24())
+                        } else {
+                            path.text().to_string()
                         };
                         DeviceRow {
                             id: d.id,
                             name: d.name,
                             detail: format!(
-                                "{} · paired {paired} · {seen}",
+                                "{seen} · {} · paired {paired}",
                                 settings::platform_name(&d.platform)
                             ),
+                            path,
                             view_only: d.permission == rift_remote::registry::Permission::View,
                         }
                     })
@@ -15184,22 +15460,44 @@ impl App {
         {
             if self.config.remote_access && !self.config.remote_relay.trim().is_empty() {
                 // only the default relay under RIFT_NO_DEFAULT_RELAY
-                return RelayLine::Error("Not used in scripted runs".into());
+                return RelayLine::Scripted;
             }
             return RelayLine::Off;
         }
+        let host = |url: &str| {
+            rift_remote::relay::RelayUrl::parse(url)
+                .map(|u| u.host)
+                .unwrap_or_else(|_| url.to_string())
+        };
         match self.remote.status.as_ref().and_then(|s| s.relay.as_ref()) {
-            None => RelayLine::Connecting,
+            None => RelayLine::Connecting(self.config.relay().map(host).unwrap_or_default()),
             Some(r) => match r.state {
-                RelayState::Connected => RelayLine::Connected(
-                    rift_remote::relay::RelayUrl::parse(&r.url)
-                        .map(|u| u.host)
-                        .unwrap_or_else(|_| r.url.clone()),
-                ),
-                RelayState::Connecting => RelayLine::Connecting,
-                RelayState::Error => {
-                    RelayLine::Error(r.error.clone().unwrap_or_else(|| "Relay error".into()))
+                RelayState::Connected => RelayLine::Connected {
+                    host: host(&r.url),
+                    latency_ms: r.latency_ms,
+                },
+                RelayState::Connecting => RelayLine::Connecting(host(&r.url)),
+                RelayState::Error
+                    if self
+                        .remote
+                        .retry_shown_until
+                        .is_some_and(|t| Instant::now() < t) =>
+                {
+                    RelayLine::Connecting(host(&r.url))
                 }
+                RelayState::Error => RelayLine::Error {
+                    host: host(&r.url),
+                    reason: r.error.clone().unwrap_or_else(|| "Relay error".into()),
+                    // whole seconds left, rounded up; none once it is due
+                    retry_in: r.retry_at_ms.and_then(|at| {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |d| d.as_millis() as u64);
+                        at.checked_sub(now)
+                            .filter(|ms| *ms > 0)
+                            .map(|ms| ms.div_ceil(1000))
+                    }),
+                },
             },
         }
     }
@@ -16232,6 +16530,12 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::Focused(f) => {
                 self.focused = f;
+                // the button's release goes to whatever took focus: a drag
+                // in progress ends here, keeping what it selected, or it
+                // would follow (and edge-scroll) the bare pointer
+                if !f {
+                    self.pending_sel = None;
+                }
                 self.sync_focus();
                 // AppKit may lay the titlebar out again on key-state changes
                 #[cfg(target_os = "macos")]
@@ -16629,6 +16933,29 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.sync_focus();
+        // every tab's "Time on this tab" follows its panes' commands
+        let clock_now = Instant::now();
+        for tab in &mut self.tabs {
+            tab.sync_clock(clock_now);
+        }
+        // the counted time reaches the session file when a stretch ends and
+        // every minute while one runs (no other event saves it); a frame also
+        // syncs the clocks, so a stop is "fewer tabs counting than at the last
+        // wake", not a before/after here
+        let counting_tabs = self.tabs.iter().filter(|t| t.clock.counting()).count();
+        let stopped = counting_tabs < self.clock_counting;
+        self.clock_counting = counting_tabs;
+        let counting = counting_tabs > 0;
+        let saved = self.clock_saved.filter(|_| counting);
+        let save_due = saved.is_some_and(|at| clock_now.duration_since(at) >= CLOCK_SAVE_EVERY);
+        if stopped || save_due {
+            self.save_session_file();
+        }
+        self.clock_saved = match saved {
+            _ if !counting => None,
+            Some(at) if !save_due => Some(at),
+            _ => Some(clock_now),
+        };
         // a paced output frame whose time has come
         let output_frame = self.output_frame_due;
         if output_frame.is_some_and(|due| Instant::now() >= due) {
@@ -16646,6 +16973,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
         let tip_due = tip_due.filter(|due| Instant::now() < *due);
         let output_frame = self.output_frame_due;
+        let select_due = self.tick_select_scroll();
         // the remote gateway's files: at most once a second, on any wake
         self.poll_remote(false);
         if self.script.is_some() {
@@ -16653,6 +16981,7 @@ impl ApplicationHandler<UserEvent> for App {
             if let Some(due) = self.script.as_ref().and_then(|s| s.due()) {
                 let due = output_frame.map_or(due, |f| f.min(due));
                 let due = tip_due.map_or(due, |t| t.min(due));
+                let due = select_due.map_or(due, |t| t.min(due));
                 event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(due));
                 return;
             }
@@ -16690,6 +17019,27 @@ impl ApplicationHandler<UserEvent> for App {
                     deadlines.push(due);
                 }
             }
+        }
+        deadlines.extend(select_due);
+        // the Elapsed chip: a repaint when its minutes change
+        let minutes = self
+            .tabs
+            .get(self.active)
+            .filter(|_| {
+                self.config
+                    .prompt_chips
+                    .contains(&rift_core::PromptChip::Elapsed)
+            })
+            .and_then(|t| t.elapsed(self.config.elapsed_counts, now));
+        if self.elapsed_minutes != minutes.map(|e| e.time.as_secs() / 60) {
+            self.elapsed_minutes = minutes.map(|e| e.time.as_secs() / 60);
+            repaint = true;
+        }
+        if let Some(e) = minutes.filter(|e| e.counting) {
+            deadlines.push(now + Duration::from_secs(60 - e.time.as_secs() % 60));
+        }
+        if let Some(at) = self.clock_saved {
+            deadlines.push(at + CLOCK_SAVE_EVERY);
         }
         // a copy button's check goes back to the copy icon
         if let Some((_, _, at)) = self.copied {
