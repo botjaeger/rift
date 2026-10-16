@@ -555,6 +555,10 @@ enum Source {
         /// The connection `PtyWriter` sends input on (replaced on resume).
         conn: Arc<Mutex<ServiceConn>>,
         session: u64,
+        /// The reattached shell's directory as the service last saw it:
+        /// fills the pane's cwd once the replay is done when no OSC 7 in
+        /// the retained output did (a long-running job prints no prompt).
+        known_cwd: Option<String>,
         /// Reattach after the byte `u64` (see [`crate::service::resume`]).
         resume: Resume,
     },
@@ -648,6 +652,7 @@ impl Reader {
                 hidden,
                 conn,
                 session,
+                mut known_cwd,
                 mut resume,
             } => {
                 use crate::ipc::{Event as Ev, Frame, read_frame};
@@ -755,6 +760,11 @@ impl Reader {
                                     blocks.set_clock(None);
                                     blocks.set_replaying(false);
                                 }
+                                // after the replay, so its blocks keep the
+                                // directories they ran in
+                                if let Some(dir) = known_cwd.take() {
+                                    self.ctx.cwd.lock().unwrap().get_or_insert(dir);
+                                }
                                 muted.store(false, Ordering::Release);
                                 self.wake();
                             }
@@ -810,6 +820,16 @@ impl Session {
                 (Backend::Local(pty), writer, source)
             }
             Some(target) => {
+                // a reattached shell's last OSC 7 may have left the replay
+                // ring; the service still knows its directory, so a pane
+                // split from it starts there instead of at the fallback
+                let known_cwd = match target {
+                    crate::ServiceTarget::Attach(sid) => crate::service::list()
+                        .into_iter()
+                        .find(|s| s.id == sid)
+                        .and_then(|s| s.cwd),
+                    crate::ServiceTarget::Spawn => None,
+                };
                 let (stream, session) = crate::service::open(
                     target,
                     shell.as_deref(),
@@ -833,6 +853,7 @@ impl Session {
                     hidden: hidden.clone(),
                     conn: conn.clone(),
                     session,
+                    known_cwd,
                     resume: Box::new(move |from| crate::service::resume(session, from)),
                 };
                 (
@@ -2038,6 +2059,7 @@ mod tests {
         c: FeedCtx,
         stream: std::os::unix::net::UnixStream,
         resume: Resume,
+        known_cwd: Option<String>,
     ) -> (std::thread::JoinHandle<()>, std::sync::mpsc::Receiver<()>) {
         let (conn, _conn_peer) = std::os::unix::net::UnixStream::pair().unwrap();
         std::mem::forget(_conn_peer);
@@ -2061,6 +2083,7 @@ mod tests {
             hidden: Arc::new(AtomicBool::new(false)),
             conn: Arc::new(Mutex::new(ServiceConn::new(conn))),
             session: 9,
+            known_cwd,
             resume,
         };
         (std::thread::spawn(move || reader.run(source)), exit_rx)
@@ -2091,6 +2114,7 @@ mod tests {
                 let s = second.take().ok_or_else(|| std::io::Error::other("gone"))?;
                 Ok((s, false))
             }),
+            None,
         );
         exited
             .recv_timeout(std::time::Duration::from_secs(10))
@@ -2201,6 +2225,7 @@ mod tests {
             hidden: Arc::new(AtomicBool::new(false)),
             conn: Arc::new(Mutex::new(ServiceConn::new(conn))),
             session: 9,
+            known_cwd: None,
             resume: Box::new(move |_| {
                 let s = second.take().ok_or(std::io::ErrorKind::NotFound)?;
                 Ok((s, true))
@@ -2290,6 +2315,7 @@ mod tests {
             hidden: Arc::new(AtomicBool::new(false)),
             conn,
             session: 9,
+            known_cwd: None,
             resume: Box::new(move |_| {
                 let s = second.take().ok_or(std::io::ErrorKind::NotFound)?;
                 Ok((s, false))
@@ -2323,11 +2349,51 @@ mod tests {
             ctx(20, 5),
             first,
             Box::new(|_| Err(std::io::Error::from(std::io::ErrorKind::NotFound))),
+            None,
         );
         exited
             .recv_timeout(std::time::Duration::from_secs(10))
             .unwrap();
         reader.join().unwrap();
+    }
+
+    /// A reattached shell whose last OSC 7 left the service's ring: the
+    /// pane takes the directory the service reports once the replay is
+    /// done, and the replayed block keeps its own (unknown) one.
+    #[test]
+    fn reattached_pane_takes_the_service_cwd_after_the_replay() {
+        use crate::ipc::{Event as Ev, send_json, send_output};
+        use std::os::unix::net::UnixStream;
+        let run = |replay: &[u8]| {
+            let c = ctx(40, 5);
+            let (cwd, blocks) = (c.cwd.clone(), c.blocks.clone());
+            let (stream, mut peer) = UnixStream::pair().unwrap();
+            send_output(&mut peer, 9, 0, 1, replay).unwrap();
+            send_json(&mut peer, &Ev::ReplayDone { session: 9 }).unwrap();
+            send_json(&mut peer, &Ev::Exited { session: 9 }).unwrap();
+            let (reader, exited) = service_reader(
+                c,
+                stream,
+                Box::new(|_| Err(std::io::Error::from(std::io::ErrorKind::NotFound))),
+                Some("/srv/now".into()),
+            );
+            exited
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+            reader.join().unwrap();
+            let block_cwd = blocks.lock().unwrap().last().and_then(|b| b.cwd.clone());
+            let pane_cwd = cwd.lock().unwrap().clone();
+            (pane_cwd, block_cwd)
+        };
+        let job = b"\x1b]133;A\x07$ \x1b]133;B\x07job\r\n\x1b]133;C\x07out\r\n";
+        assert_eq!(run(job), (Some("/srv/now".into()), None));
+        // an OSC 7 in the replay is newer than nothing: it stays
+        let mut with_osc7 = b"\x1b]7;file://h/srv/then\x07".to_vec();
+        with_osc7.extend_from_slice(job);
+        assert_eq!(
+            run(&with_osc7),
+            (Some("/srv/then".into()), Some("/srv/then".into()))
+        );
     }
 
     /// Theme color queries answer on the reader thread, in order with the

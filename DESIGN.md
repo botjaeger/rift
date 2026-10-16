@@ -42,7 +42,7 @@ contrast floor is it darkened along its hue (noted in the theme files).
 | `bg_gutter` | `#000000` | Space between split panes |
 | `surface` | `#1e1e1e` | Modals, dropdowns, menus (Warp surface 2) |
 | `border` | `#ffffff1a` | Hairlines (white 10 %, Warp outline) |
-| `pane_border_inactive` | `#2b2b2b` | Split pane divider |
+| `pane_border_inactive` | `#383838` | Split pane divider |
 | `fg` | `#ffffff` | Default terminal text |
 | `text_bright` | `#ffffff` | Commands, emphasized text |
 | `text_ui` | `#e6e6e6` | Chrome labels (Warp main text, 90 %) |

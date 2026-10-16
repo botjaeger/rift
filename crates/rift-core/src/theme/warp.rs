@@ -114,7 +114,7 @@ pub fn parse_warp_yaml(name: &str, src: &str) -> Result<Theme, String> {
         bg_gutter: bg.mix(deep, 0.26),
         surface: bg.mix(lift, 0.05),
         border: lift.with_alpha(0.07),
-        pane_border_inactive: bg.mix(lift, 0.14),
+        pane_border_inactive: bg.mix(lift, 0.20),
 
         fg,
         text_bright: fg.mix(lift, 0.12),
