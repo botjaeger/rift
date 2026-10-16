@@ -8,9 +8,19 @@ message its download carries. Items use `### New`, `### Improved` or
 
 ## 0.3.0 — 2026-10-16
 
-Your computer's look on your phone, closing tabs and panes, and an easier key row.
+Your computer's look on your phone, closing tabs and panes, an easier key row, and seeing how
+your phone reaches your computer.
 
 ### New
+
+- **Connection details** — each computer on the home screen says how it is connected (this
+  network or the relay) and what it is doing; tap the line to see both routes, which one is in
+  use, its delay, and why the other is not. When it can't be reached it says why and offers
+  *Try again*.
+- **Opening a pane** — while a pane opens you see each step (reaching your computer, opening
+  the pane, loading its blocks), how long it has taken, and after 15 seconds what may be wrong.
+  The pane keeps its name instead of "Pane", and reconnecting shows its last blocks dimmed
+  instead of an empty screen.
 
 - **Close tabs and panes** — close a pane or a tab from the ⋯ menu, or with ✕ in the tab and
   pane lists. When a command is still running, the phone asks first.
@@ -20,6 +30,7 @@ Your computer's look on your phone, closing tabs and panes, and an easier key ro
 
 ### Improved
 
+- **Portals** — the home screen is now called Portals.
 - **Same look as your computer** — the terminal view uses your computer's theme colours,
   the bar beside each command and the status badges, and emoji keep the columns aligned.
 - **Warp's colours** — the app uses Warp's dark colours, like Rift on your computer.

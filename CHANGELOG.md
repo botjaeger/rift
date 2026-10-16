@@ -8,6 +8,33 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.9.0 — 2026-10-16
+
+A time log on each tab, a clearer Remote access page, and selections that scroll.
+
+### New
+
+- **Time log on the tab** — set *Time on this tab counts* to *Only while running* (Settings ›
+  Input, or `elapsed_counts = "running"`) and the tab's time chip counts only while a command
+  runs in it. Panes that run at the same time count once, a coding agent counts until it exits,
+  and the total is kept across an update's restart, a crash and a reboot (quitting starts
+  fresh, like the tabs). The hourglass dims while it is paused.
+- **Reset the time** — the chip's hover card now stays open while you move into it and has a
+  **Reset** button; the palette has *Reset time on this tab*.
+
+### Improved
+
+- **Remote access, at a glance** — Settings › Remote access opens with *Connection*: this
+  network's address and the relay's state, with its delay while connected. When the relay
+  fails you see the whole error and a *Try again* button that retries at once. The relay
+  address and the Cloudflare tunnel moved under *Relay settings…*, and each paired phone says
+  whether it is connected on this network or through the relay.
+
+### Fixed
+
+- **Selecting past the edge** — dragging a selection above or below a pane now scrolls it,
+  faster the farther you go, so you can select more than one screen of output.
+
 ## 0.8.0 — 2026-10-16
 
 Warp's colours, a fresh start after you quit, and more from your phone.
