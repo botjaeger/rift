@@ -85,7 +85,16 @@ scripts/gates.sh --list
 ```
 
 Every requested gate runs even after one fails; the summary lists each result
-with its time and the commit. A gate whose tool is missing fails instead of
+with its time, start and end clock times, the total, and the commit. Each
+gate's output also goes to `target/gates/<gate>.log`, and the summary ends
+with the last 25 lines of every failed gate's log. With other gates,
+`linux` runs beside them: it starts once `test` is done (the
+timing-sensitive unit tests run alone), on all but two cores, into
+`target/gates/linux.log`; the moment it ends it is reported with each of its
+steps timed (images, clippy/test/doc and the release builds, then
+shell/ui/leak under Xvfb) and, on a failure, the end of its log. That cuts
+`all` from about 33 to about 19 minutes. `RIFT_GATES_SERIAL=1` runs it in
+turn instead. A gate whose tool is missing fails instead of
 passing silently. CI (`.github/workflows/ci.yml`) runs `scripts/gates.sh`
 on macOS 14 (fmt clippy test doc docs release) and Ubuntu 24.04 (the same plus
 `shell`, `mobile`, `ui` and `leak` under Xvfb/Mesa). Only `scripts/gates.sh all`

@@ -142,8 +142,13 @@ gate_mobile() {
 
 gate_linux() {
     have docker || { echo "docker not installed"; return 1; }
-    docker build -q -t rift-linux-verify -f packaging/linux-verify.Dockerfile packaging >/dev/null || return 1
-    docker run --rm --init -v "$PWD:/src" -w /src \
+    # beside the local gates (see the loop): leave two cores to them
+    local cpus=()
+    [[ -n ${LINUX_CPUS:-} ]] && cpus=(--cpus "$LINUX_CPUS")
+    phase "image (linux-verify)" \
+        docker build -q -t rift-linux-verify -f packaging/linux-verify.Dockerfile packaging || return 1
+    phase "clippy test doc + release builds" \
+        docker run --rm --init ${cpus[@]+"${cpus[@]}"} -v "$PWD:/src" -w /src \
         -v rift-cargo-registry:/usr/local/cargo/registry \
         -e CARGO_TARGET_DIR=/src/target/linux-docker \
         rift-linux-verify bash -c '
@@ -153,13 +158,27 @@ gate_linux() {
     # The shell and UI gates run on the CI runner's packages, with the
     # environment of ci.yml's UI step: a library, font or shellcheck version
     # the runner differs on fails here first.
-    docker build -q -t rift-ci-ubuntu -f packaging/ci-ubuntu.Dockerfile packaging >/dev/null || return 1
-    docker run --rm --init -v "$PWD:/src:ro" -w /src \
+    phase "image (ci-ubuntu)" \
+        docker build -q -t rift-ci-ubuntu -f packaging/ci-ubuntu.Dockerfile packaging || return 1
+    phase "shell + ui + leak (xvfb)" \
+        docker run --rm --init ${cpus[@]+"${cpus[@]}"} -v "$PWD:/src:ro" -w /src \
         -e RIFT_TEST_BIN=/src/target/linux-docker/release/rift-terminal \
         -e RIFT_PHONE_BIN=/src/target/linux-docker/release/examples/phone \
         -e RIFT_RELAY_BIN=/src/target/linux-docker/release/rift-relay \
         -e LIBGL_ALWAYS_SOFTWARE=1 -e WGPU_BACKEND=vulkan -e RIFT_LEAK_SHOWN=1 \
         rift-ci-ubuntu bash -c 'scripts/gates.sh shell && xvfb-run -a scripts/gates.sh ui leak'
+}
+
+# One step of a gate, timed: `-- <name> pass 312s (14:02:11–14:07:23)`.
+phase() {
+    local name=$1 t0=$SECONDS at rc
+    at=$(date +%H:%M:%S)
+    shift
+    echo "-- $name (from $at)"
+    "$@"
+    rc=$?
+    echo "-- $name $( ((rc == 0)) && echo pass || echo FAIL) $((SECONDS - t0))s ($at–$(date +%H:%M:%S))"
+    return "$rc"
 }
 
 case "${1:-}" in
@@ -179,20 +198,102 @@ for g in "${gates[@]}"; do
     declare -F "gate_$g" >/dev/null || { echo "unknown gate: $g (scripts/gates.sh --list)" >&2; exit 2; }
 done
 
+# Each gate's output also goes to target/gates/<gate>.log; the summary
+# names each failure with the end of its log, so the fix starts there.
+LOGS="${CARGO_TARGET_DIR:-target}/gates"
+# a read-only checkout (the linux gate's UI container): a temporary folder
+if ! mkdir -p "$LOGS" 2>/dev/null || [[ ! -w $LOGS ]]; then
+    LOGS=$(mktemp -d "${TMPDIR:-/tmp}/rift-gates.XXXXXX")
+fi
+run_started=$SECONDS
 results=()
+failures=()
 failed=0
-for g in "${gates[@]}"; do
-    printf '\n\033[1m== %s\033[0m\n' "$g"
-    start=$SECONDS
-    if "gate_$g"; then
-        status=pass
-    else
+record() { # gate, exit status, seconds, started at
+    local status=pass
+    if [[ $2 -ne 0 ]]; then
         status=FAIL
         failed=1
+        failures+=("$1")
     fi
-    results+=("$(printf '%-8s %-4s %4ss' "$g" "$status" "$((SECONDS - start))")")
-done
+    results+=("$(printf '%-8s %-4s %5ss  (%s–%s)' "$1" "$status" "$3" "$4" "$(date +%H:%M:%S)")")
+}
 
-printf '\n\033[1m== summary (%s)\033[0m\n' "$(git rev-parse --short HEAD 2>/dev/null)$(git diff --quiet HEAD 2>/dev/null || echo '+dirty')"
+# The linux gate (docker, its own target dir) is mostly waiting on its own
+# VM: with other gates it runs beside them, started once the timing-
+# sensitive unit tests are done, its output in target/gates/linux.log. It
+# is reported the moment it ends (a failure with the end of its log), not
+# only at the end. RIFT_GATES_SERIAL=1 runs it in turn instead.
+bg_pid="" bg_start=0 bg_at=""
+parallel_linux=0
+if [[ -z ${RIFT_GATES_SERIAL:-} && ${#gates[@]} -gt 1 ]]; then
+    for g in "${gates[@]}"; do [[ $g == linux ]] && parallel_linux=1; done
+fi
+start_linux() {
+    bg_start=$SECONDS
+    bg_at=$(date +%H:%M:%S)
+    printf '\n\033[1m== linux\033[0m (from %s, in the background: %s)\n' "$bg_at" "$LOGS/linux.log"
+    local n
+    n=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+    LINUX_CPUS=$((n > 4 ? n - 2 : n)) gate_linux >"$LOGS/linux.log" 2>&1 &
+    bg_pid=$!
+}
+# the background run ended: record it and say so now
+reap_linux() { # block: wait for it
+    [[ -n $bg_pid ]] || return 0
+    if [[ ${1:-} != block ]] && kill -0 "$bg_pid" 2>/dev/null; then
+        return 0
+    fi
+    wait "$bg_pid"
+    local rc=$?
+    bg_pid=""
+    record linux "$rc" "$((SECONDS - bg_start))" "$bg_at"
+    printf '\n\033[1m== linux\033[0m (background) %s after %ss; its steps:\n' \
+        "$( ((rc == 0)) && echo pass || echo FAIL)" "$((SECONDS - bg_start))"
+    grep -E '^-- .* (pass|FAIL) [0-9]+s' "$LOGS/linux.log" | sed 's/^/   /'
+    ((rc == 0)) || { echo "   end of $LOGS/linux.log:"; tail -n 25 "$LOGS/linux.log" | sed 's/^/   | /'; }
+}
+# interrupted: stop the background run too (its docker client stops the
+# container: --rm, signals proxied)
+stop_linux() {
+    if [[ -n $bg_pid ]]; then
+        pkill -TERM -P "$bg_pid" 2>/dev/null
+        kill "$bg_pid" 2>/dev/null
+    fi
+    exit 130
+}
+trap stop_linux INT TERM
+# started after `test` when it runs, else first
+started_after=""
+if [[ $parallel_linux -eq 1 ]]; then
+    for g in "${gates[@]}"; do [[ $g == test ]] && started_after="test"; done
+    [[ -z $started_after ]] && start_linux
+fi
+
+for g in "${gates[@]}"; do
+    [[ $parallel_linux -eq 1 && $g == linux ]] && continue
+    at=$(date +%H:%M:%S)
+    printf '\n\033[1m== %s\033[0m (from %s)\n' "$g" "$at"
+    start=$SECONDS
+    "gate_$g" 2>&1 | tee "$LOGS/$g.log"
+    rc=${PIPESTATUS[0]}
+    printf -- '-- %s %s %ss\n' "$g" "$( ((rc == 0)) && echo pass || echo FAIL)" "$((SECONDS - start))"
+    record "$g" "$rc" "$((SECONDS - start))" "$at"
+    [[ $parallel_linux -eq 1 && $g == "$started_after" && -z $bg_pid ]] && start_linux
+    reap_linux
+done
+if [[ -n $bg_pid ]]; then
+    printf '\n\033[1m== linux\033[0m (waiting for the background run, %ss so far)\n' "$((SECONDS - bg_start))"
+    reap_linux block
+fi
+
+total=$((SECONDS - run_started))
+printf '\n\033[1m== summary (%s) %dm%02ds\033[0m\n' \
+    "$(git rev-parse --short HEAD 2>/dev/null)$(git diff --quiet HEAD 2>/dev/null || echo '+dirty')" \
+    $((total / 60)) $((total % 60))
 printf '%s\n' "${results[@]}"
+for g in ${failures[@]+"${failures[@]}"}; do
+    printf '\n\033[1mFAIL %s\033[0m — the end of %s:\n' "$g" "$LOGS/$g.log"
+    tail -n 25 "$LOGS/$g.log" | sed 's/^/  | /'
+done
 exit $failed
