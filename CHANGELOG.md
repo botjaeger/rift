@@ -8,6 +8,21 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.10.0 — 2026-10-16
+
+Every prompt chip on your phone, with its menu.
+
+### New
+
+- **Every prompt chip, on the phone** — a paired phone's command line now shows the chips Rift
+  draws above yours (folder, branch, changes, pull request, Python, PHP, Docker, time on tab,
+  user, host, date and time), in your order and with the same colours. A Docker container that is
+  down or unhealthy is marked.
+- **Chip menus on the phone** — the pull request chip opens the PR in the phone's browser, Python
+  and PHP list the installed versions and switch the shell like Rift's menu, Docker lists the
+  containers with ports, uptime and health and follows a service's logs, and the time on tab chip
+  has Reset.
+
 ## 0.9.0 — 2026-10-16
 
 A time log on each tab, a clearer Remote access page, and selections that scroll.

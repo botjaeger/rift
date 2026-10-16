@@ -6,6 +6,22 @@ build (`## <version> — <YYYY-MM-DD>`) or an over-the-air update to one
 message its download carries. Items use `### New`, `### Improved` or
 `### Fixed` sections of `- **Title** — text`.
 
+## 0.3.0 · update 1 — 2026-10-16
+
+Your computer's prompt chips in one row, with their menus.
+
+### New
+
+- **Your computer's prompt chips** — the row above the command line shows the chips Rift draws on
+  your computer (folder, branch, changes, pull request, Python, PHP, Docker, time on tab and
+  more), in your order and colours. It is one row that never scrolls: what does not fit folds into
+  +N, with a dot for each folded chip that needs attention (a Docker container that is down),
+  and +N opens This pane with every chip. Needs Rift 0.10.0 or later on the computer with
+  prompt chips; an older Rift keeps the folder, branch and changes chips.
+- **Chip menus** — a pull request opens in your browser; Python and PHP list the versions and
+  switch the shell; Docker lists containers and follows a service's logs; time on tab has
+  Reset. Commands honour Ask before running.
+
 ## 0.3.0 — 2026-10-16
 
 Your computer's look on your phone, closing tabs and panes, an easier key row, and seeing how
