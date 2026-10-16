@@ -51,6 +51,7 @@ const ICONS = {
   rerun: { ios: "arrow.clockwise", android: "refresh", web: "refresh" },
   file: { ios: "doc", android: "description", web: "description" },
   check: { ios: "checkmark", android: "check", web: "check" },
+  lock: { ios: "lock", android: "lock", web: "lock" },
 } as const satisfies Record<string, SymbolViewProps["name"]>;
 
 export type IconName = keyof typeof ICONS;

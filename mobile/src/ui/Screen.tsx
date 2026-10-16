@@ -22,7 +22,7 @@ import { toggleA11y } from "./toggle";
 export const titleTop = (inset: number) => Math.max(inset, 47) + 15;
 /** The mockups' top inset for a navigation header: 54 pt on a 47 pt status bar. */
 export const headerTop = (inset: number) => Math.max(inset, 47) + 7;
-/** The bottom padding of a top-level page (Computers, Settings, the first-run page): the safe area and a gap. */
+/** The bottom padding of a top-level page (Portals, Settings, the first-run page): the safe area and a gap. */
 export const tabBottom = (inset: number) => inset + 24;
 
 const android = Platform.OS === "android";
@@ -30,7 +30,7 @@ const android = Platform.OS === "android";
 const OVERLAY_ROOM = 56;
 
 /**
- * A tab's page (Now, Computers, Settings): a large title on the chrome ground, then the
+ * A tab's page (Now, Portals, Settings): a large title on the chrome ground, then the
  * content in a 12 pt gutter, over room for the floating tab bar.
  */
 export function TabScreen({
@@ -42,12 +42,12 @@ export function TabScreen({
   children,
 }: {
   title: string;
-  /** Floats over the page above the tab bar (Computers' search bar); the page leaves room for it. */
+  /** Floats over the page above the tab bar (Portals' search bar); the page leaves room for it. */
   overlay?: ReactNode;
   accessory?: ReactNode;
-  /** The phone-first boards' 30 pt title (Now, Computers) with 10 pt under the header. */
+  /** The phone-first boards' 30 pt title (Now, Portals) with 10 pt under the header. */
   large?: boolean;
-  /** Space between the content's children (Settings 24, Now 18, Computers' cards 10). */
+  /** Space between the content's children (Settings 24, Now 18, Portals' cards 10). */
   gap?: number;
   children: ReactNode;
 }) {

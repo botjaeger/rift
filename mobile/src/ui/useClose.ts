@@ -10,7 +10,7 @@ import { confirmDestructive } from "./confirm";
 /**
  * Close a pane or tab of a computer (feature `close`): asks first when a command runs in it,
  * closes, and says so (`onDone`, else the screen reader). When the pane on screen (`current`) is
- * among what closed, the screen moves to a pane beside it, else to Computers; `afterSheet` also
+ * among what closed, the screen moves to a pane beside it, else to Portals; `afterSheet` also
  * dismisses the sheet the close was started from. Refusals go to `onError`.
  */
 export function useClose(

@@ -7,7 +7,7 @@ import { LONG_COMMAND_MS } from "../src/notify";
 import { parsePairLink, type PairLink } from "../src/pairing";
 import { PUBLISH_INTERVAL_MS } from "../src/protocol/batch";
 import { MAX_TEXT_BYTES, type Block, type Waiting } from "../src/protocol/types";
-import { HostsStore, MemoryStore, loadLastView, restoreTarget, type HostRecord } from "../src/stores";
+import { HostsStore, MemoryStore, loadLastView, loadPaneTitles, restoreTarget, type HostRecord } from "../src/stores";
 import { terminalInput, textToActions } from "../src/keyboard";
 import { showsTerminal } from "../src/terminal";
 import { SCREEN_RESUME_MS } from "../src/protocol/client";
@@ -896,6 +896,9 @@ const t0 = {
   failure: null,
   address: null,
   path: null,
+  paths: [] as never[],
+  since: null,
+  retryAt: null,
 } as const;
 
 describe("Fleet Phase 3", () => {
@@ -1529,6 +1532,35 @@ describe("Fleet: the redesign's run, bell, wrap and last view", () => {
     t.last().drop();
     t.fleet.store.flush();
     expect(t.fleet.state.hosts[0]!.lastSeen).toBe(1_005_000);
+  });
+
+  it("keeps each pane's tab title for the next cold start, and drops them with the host", async () => {
+    const t = await withHost();
+    expect(t.fleet.state.paneTitles).toEqual({ [`${GW_KEY}:12`]: "rift", [`${GW_KEY}:13`]: "rift" });
+    await vi.waitFor(async () => expect(await loadPaneTitles(t.kv)).toEqual(t.fleet.state.paneTitles));
+    // a cold start: the title is there before any topology
+    const again = new Fleet({ kv: t.kv, randomBytes: rng, platform: "ios", systemDeviceName: "x", notifier: { requestPermission: async () => true, notify: async () => undefined }, socket: () => new FakeGatewaySocket("ws://x", { key: GW }) });
+    await again.init();
+    expect(again.state.hosts[0]!.windows).toEqual([]);
+    expect(again.state.paneTitles[`${GW_KEY}:12`]).toBe("rift");
+    again.shutdown();
+    // a renamed tab replaces it; a pane that closed leaves the cache
+    t.last().recv({ ...topology(1, [12]), windows: [{ ...topology(1, [12]).windows[0]!, tabs: [{ ...topology(1, [12]).windows[0]!.tabs[0]!, title: "orbit" }] }] });
+    t.fleet.store.flush();
+    expect(t.fleet.state.paneTitles).toEqual({ [`${GW_KEY}:12`]: "orbit" });
+    await t.fleet.unpair(GW_KEY);
+    expect(t.fleet.state.paneTitles).toEqual({});
+    expect(await loadPaneTitles(t.kv)).toEqual({});
+  });
+
+  it("refreshPane asks the followed pane again, and only that one", async () => {
+    const t = await withHost();
+    const subs = () => t.last().sent.filter((m) => m.t === "subscribe").length;
+    const before = subs();
+    t.fleet.refreshPane(GW_KEY, 13);
+    expect(subs()).toBe(before);
+    t.fleet.refreshPane(GW_KEY, 12);
+    expect(subs()).toBe(before + 1);
   });
 });
 

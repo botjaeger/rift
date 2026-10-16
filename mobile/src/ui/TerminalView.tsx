@@ -42,6 +42,7 @@ import { RUN_BOLD, RUN_ITALIC, RUN_STRIKE, RUN_UNDERLINE, type ScreenRun } from 
 import { authenticate, fleet, useApp } from "@/runtime";
 import { CELL_RATIO, fitFont, LINE_RATIO, rowPieces, rowSegments, screenDefaults, segmentColors, showsKeyRow, type Piece } from "@/terminal";
 import { ControlRow, NO_STICKY, type Sticky } from "./ControlRow";
+import { ScreenSkeleton } from "./PaneLoading";
 import { useOpenShell } from "./useOpenShell";
 import { ErrorText, WarningText } from "./Notice";
 import { colors, mono, monoBold, ui } from "./theme";
@@ -454,9 +455,8 @@ export function TerminalView({
   const grid = screen ? (
     <Grid screen={screen} zoom={zoom} fitted={held} />
   ) : (
-    <Text style={styles.empty} accessibilityLiveRegion="polite">
-      {online ? "Waiting for the screen…" : "Waiting for the computer…"}
-    </Text>
+    // the pane's steps card (PaneLoading) says what is awaited; these are the rows to come
+    <ScreenSkeleton />
   );
 
   return (
@@ -473,7 +473,7 @@ export function TerminalView({
           style={styles.fill}
         >
           <ScrollView ref={scroller} style={styles.fill} accessibilityLabel={label} scrollEnabled={!pinching} onLayout={onArea} onScrollEndDrag={onScroll} onMomentumScrollEnd={onScroll} onContentSizeChange={toEnd}>
-            {zoomRow}
+            {screen ? zoomRow : null}
             {/* not one element for screen readers: they read the rows */}
             <Pressable onPress={() => capture.current?.focus()} accessible={false}>
               {grid}
@@ -482,7 +482,7 @@ export function TerminalView({
         </KeyCaptureView>
       ) : (
         <ScrollView ref={scroller} style={styles.fill} accessibilityLabel={label} scrollEnabled={!pinching} onLayout={onArea} onScrollEndDrag={onScroll} onMomentumScrollEnd={onScroll} onContentSizeChange={toEnd}>
-          {zoomRow}
+          {screen ? zoomRow : null}
           {grid}
         </ScrollView>
       )}
@@ -524,7 +524,6 @@ const styles = StyleSheet.create({
   gridWrap: { flex: 1 },
   gridPad: { paddingVertical: PADDING, paddingHorizontal: PADDING_X },
   cell: { fontFamily: mono, color: DEFAULTS.fg },
-  empty: { fontFamily: ui(400), color: colors.textMuted, fontSize: 14, padding: 16 },
   // as the blocks view's view-only line
   viewOnly: {
     fontFamily: ui(400),

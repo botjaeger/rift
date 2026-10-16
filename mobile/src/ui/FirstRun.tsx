@@ -25,7 +25,7 @@ export function FirstRun() {
   return (
     <View style={[styles.firstRun, { paddingTop: titleTop(insets.top) }]}>
       <Text style={styles.firstTitle} accessibilityRole="header">
-        Computers
+        Portals
       </Text>
       {/* scrolls on a short phone (320 × 568), where the steps would run under the buttons */}
       <ScrollView style={styles.flex} contentContainerStyle={styles.firstBody}>

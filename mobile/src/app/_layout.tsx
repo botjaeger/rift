@@ -27,7 +27,7 @@ LogBox.ignoreLogs(["Linking found multiple possible URI schemes"]);
 void SplashScreen.preventAutoHideAsync().catch(() => undefined);
 
 // A link straight to a screen (a notification tap, rift://host/…/pane/…) keeps the tabs below
-// it, so Back leads to Computers instead of out of the app.
+// it, so Back leads to Portals instead of out of the app.
 export const unstable_settings = { initialRouteName: "index" };
 
 /** The navigators' own grounds (containers, cards, the tab bar's), dark like every page: the
@@ -169,7 +169,7 @@ export default function RootLayout() {
             }}
           >
             {/* Every page draws its own header, as the boards do (src/ui/Screen.tsx PageHeader). */}
-            <Stack.Screen name="index" options={{ headerShown: false, title: "Computers" }} />
+            <Stack.Screen name="index" options={{ headerShown: false, title: "Portals" }} />
             <Stack.Screen name="settings" options={{ headerShown: false, title: "Settings" }} />
             <Stack.Screen name="settings-ntfy" options={{ headerShown: false, title: "While the app is closed" }} />
             <Stack.Screen name="computer" options={{ headerShown: false, title: "Computer" }} />
@@ -252,6 +252,18 @@ export default function RootLayout() {
                 sheetAllowedDetents: [1],
                 sheetGrabberVisible: true,
                 sheetCornerRadius: 16,
+                headerShown: false,
+                contentStyle: { backgroundColor: colors.surface },
+              }}
+            />
+            <Stack.Screen
+              name="connection"
+              options={{
+                title: "Connection",
+                presentation: "formSheet",
+                sheetAllowedDetents: "fitToContents",
+                sheetGrabberVisible: true,
+                sheetCornerRadius: 20,
                 headerShown: false,
                 contentStyle: { backgroundColor: colors.surface },
               }}

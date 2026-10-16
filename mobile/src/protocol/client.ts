@@ -103,6 +103,26 @@ export type Failure =
   /** No address answered (only when retrying is off, i.e. pairing). */
   | "unreachable";
 
+/** `trying`: connecting now; `failed`: this path ended the last round without a welcome. */
+export type PathState = "idle" | "trying" | "ok" | "failed";
+
+/** What is known of one path (a LAN address, the relay), for the Connection sheet. */
+export interface PathStatus {
+  path: Endpoint;
+  state: PathState;
+  /** `failed`: the error that ended the attempt (a socket error, the relay's close reason). */
+  error: string | null;
+  /** `failed`: how long the attempt waited, in ms. */
+  waitedMs: number | null;
+  /** `ok`: the round trip of the last ping, in ms (null until one has been answered). */
+  latencyMs: number | null;
+  /** A socket to it opened in the last attempt (the relay answered, whatever its gateway did). */
+  reached: boolean;
+}
+
+/** The `error` of an attempt whose handshake timer ran out (the paths' "No answer" notes match on it). */
+export const NO_ANSWER = "no answer from the computer";
+
 export interface ConnState {
   status: ConnStatus;
   /** Reconnect rounds since the last successful welcome. */
@@ -116,6 +136,12 @@ export interface ConnState {
   address: string | null;
   /** The path of the current or last connection attempt: a LAN address or the relay. */
   path: Endpoint | null;
+  /** Every path in trying order, with how its last attempt went. */
+  paths: PathStatus[];
+  /** Epoch ms the current stretch of connecting (or of being cut off) began; null while open. */
+  since: number | null;
+  /** Epoch ms of the next attempt while `closed` and retrying, else null (`retryInMs` is the delay when it was scheduled). */
+  retryAt: number | null;
 }
 
 export interface ClientEvents {
@@ -219,7 +245,15 @@ export class RiftClient {
     failure: null,
     address: null,
     path: null,
+    paths: [],
+    since: null,
+    retryAt: null,
   };
+  /** When the current attempt began (epoch ms), and its error so far (a socket error, the relay's close reason). */
+  private attemptAt = 0;
+  private attemptError: string | null = null;
+  /** The last ping sent: its number and when (epoch ms), for the round trip. */
+  private pingSent: { n: number; at: number } | null = null;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -284,6 +318,34 @@ export class RiftClient {
     this.makeSocket = opts.socket ?? defaultSocket;
     this.random = opts.random ?? Math.random;
     this.retry = opts.retry ?? true;
+    this.state = { ...this.state, paths: this.freshPaths() };
+  }
+
+  private freshPaths(): PathStatus[] {
+    return this.endpoints.map((path) => ({ path, state: "idle", error: null, waitedMs: null, latencyMs: null, reached: false }));
+  }
+
+  /** `paths` with the current path's status patched (a new array, for [setState]). */
+  private patchPath(patch: Partial<PathStatus>): PathStatus[] {
+    return this.state.paths.map((p, i) => (i === this.current ? { ...p, ...patch } : p));
+  }
+
+  /** The current attempt ended without a welcome: its path failed, with `error` and how long it waited. */
+  private failPath(error: string | null): void {
+    if (this.state.paths[this.current]?.state !== "trying") return;
+    this.setState({
+      paths: this.patchPath({
+        state: "failed",
+        error: error ?? this.attemptError ?? "connection closed",
+        waitedMs: Math.max(0, Date.now() - this.attemptAt),
+      }),
+    });
+  }
+
+  /** No attempt is in flight any more: `trying` paths go back to `idle`. */
+  private idleTrying(): void {
+    if (this.state.paths.some((p) => p.state === "trying"))
+      this.setState({ paths: this.state.paths.map((p) => (p.state === "trying" ? { ...p, state: "idle" } : p)) });
   }
 
   get connState(): ConnState {
@@ -328,7 +390,8 @@ export class RiftClient {
   suspend(status: "closed" | "offline"): void {
     this.stopped = true;
     this.teardown();
-    if (this.state.status !== "failed") this.setState({ status, retryInMs: null });
+    this.idleTrying();
+    if (this.state.status !== "failed") this.setState({ status, retryInMs: null, retryAt: null, since: null });
   }
 
   /** While waiting to retry, tries again now with the backoff reset (the app came to the foreground). */
@@ -352,7 +415,7 @@ export class RiftClient {
     if (this.state.status === "failed" && this.state.failure !== "key_mismatch") return;
     this.teardown();
     this.stopped = false;
-    this.setState({ attempt: 0, error: null, failure: null, retryInMs: null });
+    this.setState({ attempt: 0, error: null, failure: null, retryInMs: null, retryAt: null, since: null });
     this.startRound(opts.lanFirst ? 0 : this.preferred);
   }
 
@@ -631,6 +694,7 @@ export class RiftClient {
     this.triedThisRound = 0;
     this.mismatchedThisRound = 0;
     this.current = from;
+    this.state = { ...this.state, paths: this.freshPaths() };
     this.open();
   }
 
@@ -638,7 +702,17 @@ export class RiftClient {
     const path = this.endpoints[this.current]!;
     const address = path.kind === "lan" ? path.address : path.url;
     this.triedThisRound++;
-    this.setState({ status: "connecting", retryInMs: null, address, path });
+    this.attemptAt = Date.now();
+    this.attemptError = null;
+    this.setState({
+      status: "connecting",
+      retryInMs: null,
+      retryAt: null,
+      address,
+      path,
+      since: this.state.since ?? this.attemptAt,
+      paths: this.patchPath({ state: "trying", error: null, waitedMs: null, latencyMs: null, reached: false }),
+    });
     const deadline =
       path.kind === "relay"
         ? RELAY_HANDSHAKE_TIMEOUT_MS
@@ -657,10 +731,11 @@ export class RiftClient {
     this.ws = ws;
     this.reassembler = new Reassembler();
     this.handshakeTimer = setTimeout(() => {
-      if (this.ws === ws && !this.sendCipher) this.dropAttempt("no answer from the computer");
+      if (this.ws === ws && !this.sendCipher) this.dropAttempt(NO_ANSWER);
     }, deadline);
     ws.onopen = () => {
       if (this.ws !== ws) return;
+      this.setState({ paths: this.patchPath({ reached: true }) });
       try {
         const hs = new XXHandshake({
           initiator: true,
@@ -687,12 +762,18 @@ export class RiftClient {
       if (!this.sendCipher) this.onHandshakeMessage(bytes);
       else this.onTransportMessage(bytes);
     };
-    ws.onerror = () => {
+    ws.onerror = (ev) => {
       if (this.ws !== ws) return;
+      const message = (ev as { message?: unknown } | null)?.message;
+      this.attemptError ??= typeof message === "string" && message !== "" ? message : "connection error";
       this.setState({ error: this.state.error ?? "connection error" });
     };
-    ws.onclose = () => {
+    ws.onclose = (ev) => {
       if (this.ws !== ws) return;
+      // the relay says why it closed a phone whose gateway did not answer
+      const reason = (ev as { reason?: unknown } | null)?.reason;
+      // a close reason says more than the error event's bare "connection error"
+      if (typeof reason === "string" && reason !== "" && (this.attemptError === null || this.attemptError === "connection error")) this.attemptError = reason;
       this.dropAttempt(null);
     };
   }
@@ -738,8 +819,15 @@ export class RiftClient {
     this.hs = null;
     if (this.handshakeTimer) clearTimeout(this.handshakeTimer);
     this.handshakeTimer = null;
-    this.pingTimer = setInterval(() => this.send({ t: "ping", n: ++this.pingN }), PING_INTERVAL_MS);
+    this.pingTimer = setInterval(() => this.ping(), PING_INTERVAL_MS);
     this.touch();
+  }
+
+  /** A keep-alive ping, timed: its pong gives the path's round trip. */
+  private ping(): void {
+    const n = ++this.pingN;
+    this.pingSent = { n, at: Date.now() };
+    this.send({ t: "ping", n });
   }
 
   private onTransportMessage(bytes: Uint8Array): void {
@@ -767,10 +855,19 @@ export class RiftClient {
           attempt: 0,
           error: null,
           failure: null,
+          since: null,
+          retryAt: null,
+          paths: this.state.paths.map((p, i) =>
+            i === this.current
+              ? { ...p, state: "ok", error: null, waitedMs: null, latencyMs: null, reached: true }
+              : { ...p, state: "idle", error: null, waitedMs: null, latencyMs: null, reached: false },
+          ),
         });
         // the pane first: what is on screen comes back before anything else is sent
         if (this.pane !== null) this.sendSubscribe();
         this.events.onWelcome?.(msg);
+        // the first round trip, so the Connection sheet has a latency before the 15 s keep-alive
+        this.ping();
         return;
       case "topology":
         this.events.onTopology?.(msg);
@@ -828,8 +925,14 @@ export class RiftClient {
       case "done":
         this.events.onDone?.(msg);
         return;
-      case "pong":
+      case "pong": {
+        const sent = this.pingSent;
+        if (sent?.n !== msg.n) return;
+        this.pingSent = null;
+        const ms = Math.max(1, Math.round(Date.now() - sent.at));
+        if (this.state.paths[this.current]?.latencyMs !== ms) this.setState({ paths: this.patchPath({ latencyMs: ms }) });
         return;
+      }
       case "error":
         this.events.onError?.(msg);
         if (msg.code === "auth" || msg.code === "version") {
@@ -915,8 +1018,15 @@ export class RiftClient {
     const wasOpen = this.authed;
     this.teardown();
     if (error) this.setState({ error });
+    if (wasOpen) {
+      this.setState({
+        since: Date.now(),
+        paths: this.patchPath({ state: "failed", error: error ?? this.attemptError ?? "connection closed", waitedMs: null, latencyMs: null }),
+      });
+    } else if (this.stopped) this.idleTrying();
+    else this.failPath(error);
     if (this.stopped) {
-      if (this.state.status !== "failed") this.setState({ status: "closed", retryInMs: null });
+      if (this.state.status !== "failed") this.setState({ status: "closed", retryInMs: null, retryAt: null });
       return;
     }
     if (wasOpen) {
@@ -959,13 +1069,14 @@ export class RiftClient {
   private fail(failure: Failure, error: string): void {
     this.stopped = true;
     this.teardown();
-    this.setState({ status: "failed", failure, error, retryInMs: null });
+    this.failPath(error);
+    this.setState({ status: "failed", failure, error, retryInMs: null, retryAt: null });
   }
 
   private scheduleReconnect(): void {
     if (this.stopped) return;
     const delay = backoffDelay(this.state.attempt, this.random);
-    this.setState({ status: "closed", retryInMs: delay });
+    this.setState({ status: "closed", retryInMs: delay, retryAt: Date.now() + delay });
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;
       this.setState({ attempt: this.state.attempt + 1 });

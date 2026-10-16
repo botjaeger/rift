@@ -75,6 +75,7 @@ export function Composer({
   recent,
   label,
   canType,
+  waiting = false,
 }: {
   hostKey: string;
   paneId: number;
@@ -93,6 +94,8 @@ export function Composer({
   label: string;
   /** The computer takes typed text (feature `text`): the row's Paste works. */
   canType: boolean;
+  /** The computer is not connected (PaneLoading board): the field is off and says it waits. */
+  waiting?: boolean;
 }) {
   const router = useRouter();
   const s = useApp();
@@ -259,7 +262,7 @@ export function Composer({
   };
   const folder = folderLines(chips);
   const stickyName = [sticky.ctrl ? "ctrl" : null, sticky.alt ? "alt" : null, sticky.shift ? "shift" : null].filter(Boolean).join("+");
-  const canRun = online && draft.trim() !== "";
+  const canRun = online && !waiting && draft.trim() !== "";
   // the computer's answer for this draft (or the last one, while the next is on its way), then the pane's history
   const typing = chipRowMode(draft) === "completions";
   const answer = complete && online ? completed : null;
@@ -377,9 +380,10 @@ export function Composer({
         </ScrollView>
       ) : null}
       {shownError ? <ErrorText>{shownError}</ErrorText> : null}
-      <View style={styles.inputRow}>
+      <View style={[styles.inputRow, waiting && styles.waiting]}>
         <Pressable
-          {...toggleA11y(keys)}
+          {...toggleA11y(keys, waiting)}
+          disabled={waiting}
           accessibilityLabel="Control keys"
           accessibilityHint="Shows the control keys above the command line"
           onPress={() => setKeys((k) => !k)}
@@ -392,7 +396,16 @@ export function Composer({
             value={draft}
             onChangeText={onChange}
             onSubmitEditing={() => void run()}
-            placeholder={stickyName ? `Type a letter for ${stickyName}+letter` : running !== null ? `Message for ${program}` : "Command"}
+            editable={!waiting}
+            placeholder={
+              waiting
+                ? "Waiting for your computer…"
+                : stickyName
+                  ? `Type a letter for ${stickyName}+letter`
+                  : running !== null
+                    ? `Message for ${program}`
+                    : "Command"
+            }
             placeholderTextColor={colors.textMuted}
             autoCapitalize="none"
             autoCorrect={false}
@@ -463,6 +476,8 @@ const styles = StyleSheet.create({
   source: { fontFamily: ui(400), color: colors.textDim, fontSize: 10 },
   none: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12, alignSelf: "center" },
   inputRow: { flexDirection: "row", gap: 8, alignItems: "center" },
+  // the pane has not opened: the board dims the whole row
+  waiting: { opacity: 0.5 },
   // the board's 44 pt round button and the round field with its 36 pt run button
   round: {
     width: TOUCH,

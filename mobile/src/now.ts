@@ -254,7 +254,7 @@ export function swipeTarget(tab: Tab, paneId: number, dir: 1 | -1): number | nul
   return i === -1 || !next ? null : next.id;
 }
 
-/** A tab in the strip and on Computers: failed (a pane's last command failed and nothing runs), running, waiting. */
+/** A tab in the strip and on Portals: failed (a pane's last command failed and nothing runs), running, waiting. */
 export function tabState(tab: Tab): "needs" | "running" | "failed" | "idle" {
   if (tab.panes.some((p) => p.waiting)) return "needs";
   if (tab.panes.some((p) => p.running || p.job)) return "running";
@@ -267,7 +267,7 @@ export function tabPane(tab: Tab): number | null {
   return (tab.panes.find((p) => p.active) ?? tab.panes[0])?.id ?? null;
 }
 
-/** A tab's last line on Computers: what waits, runs or ran last. */
+/** A tab's last line on Portals: what waits, runs or ran last. */
 export function tabLast(tab: Tab): string {
   const p = tab.panes.find((x) => x.waiting) ?? tab.panes.find((x) => x.running || x.job) ?? tab.panes.find((x) => x.active) ?? tab.panes[0];
   if (!p) return "";
@@ -275,7 +275,7 @@ export function tabLast(tab: Tab): string {
   return p.last_command ?? p.job ?? "";
 }
 
-/** Computers' search: a tab whose title, a pane's command, program or folder holds `query` (any case). */
+/** Portals' search: a tab whose title, a pane's command, program or folder holds `query` (any case). */
 export function tabMatches(tab: Tab, query: string): boolean {
   const q = query.trim().toLowerCase();
   if (q === "") return true;
@@ -289,10 +289,10 @@ export function tabStarted(tab: Tab): number | null {
   return started != null ? started * 1000 : null;
 }
 
-// --- Computers and the Tabs sheet -----------------------------------------------------------
+// --- Portals and the Tabs sheet --------------------------------------------------------------
 // One row per tab, in a state: what needs the user, what works, what failed, what waits.
 
-/** A tab's state on Computers and the Tabs sheet. */
+/** A tab's state on Portals and the Tabs sheet. */
 export type TabKind = "needs" | "working" | "failed" | "idle";
 
 /** Idle agents' "since" (Idle 12m), kept across remounts for the app run. */
@@ -355,11 +355,11 @@ export function stateText(kind: TabKind, o: { ageMs: number | null; elapsedMs: n
 /** Sheet order: needs you, failed, working, idle. */
 export const KIND_ORDER: Record<TabKind, number> = { needs: 0, failed: 1, working: 2, idle: 3 };
 
-/** What the Computers chips filter on: failed tabs count with the idle ones (nothing runs). */
+/** What the Portals chips filter on: failed tabs count with the idle ones (nothing runs). */
 export type HomeFilter = "needs" | "working" | "idle";
 export const homeFilterOf = (k: TabKind): HomeFilter => (k === "failed" ? "idle" : k);
 
-/** One tab's row on Computers and in the Tabs sheet. */
+/** One tab's row on Portals and in the Tabs sheet. */
 export interface TabRow {
   /** `host:pane` of the pane that speaks for the tab, else `host:tabN`. */
   key: string;
@@ -448,7 +448,7 @@ export function sortRows<T extends { kind: TabKind }>(rows: readonly T[]): T[] {
     .map(([r]) => r);
 }
 
-/** Computers' chips: tabs per state (failed with idle). */
+/** Portals' chips: tabs per state (failed with idle). */
 export function homeCounts(rows: readonly { kind: TabKind }[]): Record<HomeFilter, number> {
   const n = { needs: 0, working: 0, idle: 0 };
   for (const r of rows) n[homeFilterOf(r.kind)]++;

@@ -216,18 +216,34 @@ describe("RiftClient session", () => {
     expect(last().sent[0]).toEqual({ t: "subscribe", pane: 12, after: null });
   });
 
-  it("pings every 15 s while connected", () => {
+  it("pings once at welcome, then every 15 s while connected", () => {
     const { last } = connected();
+    expect(last().sent.filter((m) => (m as { t: string }).t === "ping")).toEqual([{ t: "ping", n: 1 }]);
     const before = last().sent.length;
-    for (let i = 1; i <= 3; i++) {
+    for (let i = 2; i <= 4; i++) {
       vi.advanceTimersByTime(PING_INTERVAL_MS);
       last().recv({ t: "pong", n: i });
     }
     expect(last().sent.slice(before)).toEqual([
-      { t: "ping", n: 1 },
       { t: "ping", n: 2 },
       { t: "ping", n: 3 },
+      { t: "ping", n: 4 },
     ]);
+  });
+
+  it("measures the path's round trip from the pong of its ping", () => {
+    const t = setup();
+    t.client.start();
+    t.last().connect();
+    t.last().recv(welcome);
+    expect(t.states.at(-1)!.paths[0]).toMatchObject({ state: "ok", latencyMs: null });
+    vi.advanceTimersByTime(84);
+    t.last().recv({ t: "pong", n: 1 });
+    expect(t.states.at(-1)!.paths[0]).toMatchObject({ state: "ok", latencyMs: 84 });
+    // a pong for a ping never sent changes nothing
+    vi.advanceTimersByTime(500);
+    t.last().recv({ t: "pong", n: 9 });
+    expect(t.states.at(-1)!.paths[0]!.latencyMs).toBe(84);
   });
 
   it("applies in-order updates and drops duplicates", () => {
@@ -669,5 +685,109 @@ describe("RiftClient Phase 3", () => {
     t.last().drop();
     expect(await p2).toMatchObject({ ok: false, code: "disconnected" });
     expect(await t.client.output(12, 86, 0, 10)).toMatchObject({ ok: false, code: "disconnected" });
+  });
+});
+
+describe("RiftClient path status (the Connection sheet)", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  const RELAY = "wss://relay.example.com";
+  const LAN = "192.168.1.29:7878";
+
+  it("lists every path in trying order, idle before anything is tried", () => {
+    const t = setup({ addresses: [LAN], relay: RELAY });
+    expect(t.client.connState.paths.map((p) => [p.path.kind, p.state])).toEqual([
+      ["lan", "idle"],
+      ["relay", "idle"],
+    ]);
+  });
+
+  it("a LAN address that does not answer fails with how long it waited, and the relay is tried", () => {
+    const t = setup({ addresses: [LAN], relay: RELAY });
+    t.client.start();
+    expect(t.states.at(-1)!.paths.map((p) => p.state)).toEqual(["trying", "idle"]);
+    t.last().open(); // answers the socket, never the handshake
+    vi.advanceTimersByTime(1_500);
+    const s = t.states.at(-1)!;
+    expect(s.paths[0]).toMatchObject({ state: "failed", error: "no answer from the computer", waitedMs: 1_500, reached: true });
+    expect(s.paths[1]).toMatchObject({ state: "trying", reached: false });
+    expect(s.path).toMatchObject({ kind: "relay" });
+    expect(s.since).not.toBeNull();
+  });
+
+  it("keeps the relay's close reason and a socket's error message as the path's error", () => {
+    const t = setup({ addresses: [LAN], relay: RELAY });
+    t.client.start();
+    t.last().onerror?.({ message: "connect ECONNREFUSED" });
+    t.last().drop();
+    expect(t.states.at(-1)!.paths[0]).toMatchObject({ state: "failed", error: "connect ECONNREFUSED" });
+    // the relay opens, then closes the pair with its reason
+    t.last().open();
+    t.last().onclose?.({ reason: "the gateway did not answer" });
+    expect(t.states.at(-1)!.paths[1]).toMatchObject({ state: "failed", error: "the gateway did not answer", reached: true });
+  });
+
+  it("iOS: a failed relay upgrade reports a bare error, then the close reason that names the 404 (captured from the simulator)", () => {
+    const t = setup({ addresses: [LAN], relay: RELAY });
+    t.client.start();
+    t.last().drop();
+    t.last().onerror?.({});
+    t.last().onclose?.({ code: 1006, reason: "Received bad response code from server: 404." });
+    expect(t.states.at(-1)!.paths[1]).toMatchObject({ state: "failed", error: "Received bad response code from server: 404." });
+  });
+
+  it("a round that ends schedules a retry with its time, and the next round starts every path over", () => {
+    const t = setup({ addresses: [LAN], relay: RELAY });
+    t.client.start();
+    t.last().drop();
+    t.last().drop();
+    const s = t.states.at(-1)!;
+    expect(s).toMatchObject({ status: "closed" });
+    expect(s.paths.map((p) => p.state)).toEqual(["failed", "failed"]);
+    expect(s.retryAt).toBe(Date.now() + s.retryInMs!);
+    vi.advanceTimersByTime(s.retryInMs!);
+    const next = t.states.at(-1)!;
+    expect(next).toMatchObject({ status: "connecting", retryAt: null });
+    expect(next.paths.map((p) => p.state)).toEqual(["trying", "idle"]);
+  });
+
+  it("welcome marks the working path ok and clears the others and the wait", () => {
+    const t = setup({ addresses: [LAN], relay: RELAY });
+    t.client.start();
+    t.last().drop();
+    t.last().connect();
+    t.last().recv(welcome);
+    const s = t.states.at(-1)!;
+    expect(s.paths.map((p) => p.state)).toEqual(["idle", "ok"]);
+    expect(s).toMatchObject({ status: "open", since: null, retryAt: null });
+  });
+
+  it("a connection that breaks marks its path failed with the reason, and starts the wait", () => {
+    const t = connected();
+    vi.advanceTimersByTime(IDLE_TIMEOUT_MS);
+    const s = t.states.find((x) => x.status === "closed")!;
+    expect(s.paths[0]).toMatchObject({ state: "failed", error: "gateway stopped responding" });
+    expect(s.since).not.toBeNull();
+  });
+
+  it("suspending leaves no path trying", () => {
+    const t = setup({ addresses: [LAN], relay: RELAY });
+    t.client.start();
+    t.client.suspend("offline");
+    expect(t.states.at(-1)).toMatchObject({ status: "offline", since: null, retryAt: null });
+    expect(t.states.at(-1)!.paths.map((p) => p.state)).toEqual(["idle", "idle"]);
+  });
+
+  it("a key mismatch fails the relay path with the error", () => {
+    const t = setup({ addresses: [LAN], relay: RELAY, gatewayFor: (url) => (url.startsWith("wss://") ? gatewayKey() : GATEWAY) });
+    t.client.start();
+    t.last().drop();
+    t.last().open();
+    t.last().deliver();
+    const s = t.states.at(-1)!;
+    expect(s).toMatchObject({ status: "failed", failure: "key_mismatch" });
+    expect(s.paths[1]!.state).toBe("failed");
+    expect(s.paths[1]!.error).toBeTruthy();
   });
 });

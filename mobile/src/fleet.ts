@@ -48,12 +48,15 @@ import {
   MAX_DEVICE_NAME,
   loadLastView,
   loadOrCreateIdentity,
+  loadPaneTitles,
   loadSettings,
   saveLastView,
+  savePaneTitles,
   saveSettings,
   type HostRecord,
   type KeyValueStore,
   type LastView,
+  type PaneTitles,
   type Settings,
 } from "./stores";
 
@@ -182,6 +185,8 @@ export interface AppState {
   wrap: Record<string, boolean>;
   /** The host (and pane) open when the app last showed one (stored; a cold start reopens it). */
   lastView: LastView | null;
+  /** The tab title last seen for each pane (`host:pane`), shown in a pane's header before the topology arrives. */
+  paneTitles: PaneTitles;
 }
 
 /** Whether a "Notify me" waits for `command` in the pane (the bell is on). */
@@ -222,6 +227,9 @@ const initialConn: ConnState = {
   failure: null,
   address: null,
   path: null,
+  paths: [],
+  since: null,
+  retryAt: null,
 };
 
 /** Short, human error text for an `ack` or `error` code. */
@@ -371,6 +379,7 @@ export class Fleet {
       asked: [],
       wrap: {},
       lastView: null,
+      paneTitles: {},
     });
   }
 
@@ -383,9 +392,11 @@ export class Fleet {
       this.identity = await loadOrCreateIdentity(this.deps.kv, this.deps.randomBytes);
       const records = await this.hostsStore.load();
       const lastView = await loadLastView(this.deps.kv);
+      const paneTitles = await loadPaneTitles(this.deps.kv);
       this.store.update((s) => ({
         ...s,
         lastView,
+        paneTitles,
         settings,
         deviceName: settings.deviceName ?? this.deps.systemDeviceName,
         hosts: records.map((record) => ({
@@ -464,6 +475,7 @@ export class Fleet {
         },
         onTopology: (msg) => {
           this.patchHost(key, { windows: msg.windows });
+          this.rememberTitles(key, msg.windows);
           const since = this.welcomedAt.get(key);
           // the questions already waiting when it connected are on Now, not news
           this.alertAsks(key, msg.windows, since !== undefined);
@@ -513,6 +525,23 @@ export class Fleet {
     this.clients.set(key, client);
     if (this.paused) client.suspend(this.paused);
     else client.start();
+  }
+
+  /**
+   * Keeps the tab title of every pane of `host` (replacing that host's earlier ones), so a pane
+   * opened before the topology arrives (a cold start, a reconnect) still has its name. Saved
+   * only when something changed.
+   */
+  private rememberTitles(host: string, windows: Window[]): void {
+    const prefix = `${host}:`;
+    const mine: PaneTitles = {};
+    for (const w of windows) for (const t of w.tabs) for (const p of t.panes) mine[draftKey(host, p.id)] = tabTitle(t);
+    const cur = this.store.peek().paneTitles;
+    const old = Object.keys(cur).filter((k) => k.startsWith(prefix));
+    if (old.length === Object.keys(mine).length && old.every((k) => cur[k] === mine[k])) return;
+    const next: PaneTitles = { ...Object.fromEntries(Object.entries(cur).filter(([k]) => !k.startsWith(prefix))), ...mine };
+    this.store.update((s) => ({ ...s, paneTitles: next }));
+    void savePaneTitles(this.deps.kv, next).catch(() => undefined);
   }
 
   /**
@@ -806,7 +835,9 @@ export class Fleet {
       pane: s.pane?.host === key ? null : s.pane,
       activity: s.activity.filter((a) => a.host !== key),
       drafts: Object.fromEntries(Object.entries(s.drafts).filter(([k]) => !k.startsWith(`${key}:`))),
+      paneTitles: Object.fromEntries(Object.entries(s.paneTitles).filter(([k]) => !k.startsWith(`${key}:`))),
     }));
+    void savePaneTitles(this.deps.kv, this.store.peek().paneTitles).catch(() => undefined);
     if (this.viewing?.host === key) this.viewing = null;
     if (this.store.peek().lastView?.host === key) await this.setLastView(null);
     this.store.flush();
@@ -866,6 +897,12 @@ export class Fleet {
     }));
     this.patchHost(host, { notice: null });
     client?.subscribe(paneId);
+  }
+
+  /** Asks the followed pane again (a page still waiting for it: Try again), from the start. */
+  refreshPane(host: string, paneId: number): void {
+    const cur = this.store.peek().pane;
+    if (cur?.host === host && cur.paneId === paneId) this.clients.get(host)?.subscribe(paneId);
   }
 
   closePane(host: string, paneId: number, holder: object = this): void {

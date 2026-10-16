@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ConnState } from "../src/protocol/client";
 import { describeConn } from "../src/ui/connLabel";
 
-const base: ConnState = { status: "open", attempt: 0, retryInMs: null, error: null, failure: null, address: null, path: null };
+const base: ConnState = { status: "open", attempt: 0, retryInMs: null, error: null, failure: null, address: null, path: null, paths: [], since: null, retryAt: null };
 
 describe("describeConn: the path in host status and the pane banner", () => {
   it("names the LAN address or the relay host", () => {

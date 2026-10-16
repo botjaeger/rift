@@ -1,25 +1,27 @@
-import { usePathname, useRouter } from "expo-router";
+import { useIsFocused, usePathname, useRouter } from "expo-router";
 import { useEffect, useRef, useState } from "react";
 import { AccessibilityInfo, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { primaryChoice } from "@/answer";
-import { agoCompact, filterHome, homeChoiceLabel, homeCounts, idleSince, quickChoices, seenWorking, tabKey, tabKind, tabRow, trackIdle, type HomeFilter, type RowContext, type TabRow } from "@/now";
+import { filterHome, homeChoiceLabel, homeCounts, idleSince, quickChoices, seenWorking, tabKey, tabKind, tabRow, trackIdle, type HomeFilter, type RowContext, type TabRow } from "@/now";
 import { canOperate, type HostView } from "@/fleet";
 import { needsAuthBeforeRun } from "@/lock";
 import { authenticate, fleet, useApp } from "@/runtime";
 import { restoreTarget } from "@/stores";
 import { Tile } from "@/ui/Avatar";
-import { describeConn } from "@/ui/connLabel";
+import { LINE_COLOR } from "@/ui/ConnectionSheet";
+import { hostLine } from "@/ui/connStatus";
 import { FirstRun } from "@/ui/FirstRun";
 import { Icon } from "@/ui/Icon";
 import { canNewTab, openNewTab } from "@/ui/newTab";
 import { ErrorText } from "@/ui/Notice";
+import { ProgressBar } from "@/ui/ProgressBar";
 import { tabBottom, titleTop } from "@/ui/Screen";
 import { toggleA11y } from "@/ui/toggle";
 import { colors, mono, tint, ui } from "@/ui/theme";
 import { useNow } from "@/ui/useNow";
 
-/** The last pane is reopened once per app run, on the first launch of Computers. */
+/** The last pane is reopened once per app run, on the first launch of Portals. */
 let restored = false;
 
 const STATE_COLOR: Record<TabRow["kind"], string> = {
@@ -38,17 +40,20 @@ const CHIPS: { filter: HomeFilter; text: (n: number) => string; color: string }[
 const openPane = (router: ReturnType<typeof useRouter>, host: string, pane: number) =>
   router.push({ pathname: "/host/[key]/pane/[id]", params: { key: host, id: String(pane) } });
 
-/** "LAN · 4 tabs" while connected, "Offline · seen 2h ago" while away (the mockup's header line). */
-function connLine(host: HostView, now: number): { text: string; color: string } {
-  const c = host.conn;
-  if (c.status === "open") {
-    const tabs = host.windows.reduce((n, w) => n + w.tabs.length, 0);
-    return { text: `${c.path?.kind === "relay" ? "Relay" : "LAN"} · ${tabs} ${tabs === 1 ? "tab" : "tabs"}`, color: colors.textMuted };
+/** The status dot: green while connected, the accent while trying, red when it cannot be reached. */
+function dotColor(host: HostView): string {
+  switch (host.conn.status) {
+    case "open":
+      return colors.success;
+    case "connecting":
+      return colors.accent;
+    case "closed":
+      return host.conn.retryAt !== null || host.conn.retryInMs !== null ? colors.error : colors.textDim;
+    case "failed":
+      return colors.error;
+    default:
+      return colors.textDim;
   }
-  if (c.status === "connecting") return { text: "Connecting…", color: colors.textMuted };
-  const seen = host.lastSeen ?? host.record.seenAt ?? null;
-  const when = seen === null ? "not connected yet" : `seen ${now - seen < 60_000 ? "just now" : `${agoCompact(now - seen)} ago`}`;
-  return { text: `Offline · ${when}`, color: colors.warning };
 }
 
 /** A coding agent's question answered in place (Main mockup): the pills, then "Open". */
@@ -177,8 +182,8 @@ function HostCard({ host, rows, now, answerHere }: { host: HostView; rows: TabRo
   const name = host.record.name;
   const online = host.conn.status === "open";
   const failed = host.conn.status === "failed";
-  const conn = connLine(host, now);
-  const why = failed && host.conn.failure !== "auth" ? describeConn(host.conn).label : null;
+  const tabs = host.windows.reduce((n, w) => n + w.tabs.length, 0);
+  const line = hostLine(host.conn, now, online ? tabs : null);
   // the permission of this connection, else the one stored at pairing
   const viewOnly = !canOperate(host);
   const newTab = async () => {
@@ -197,15 +202,25 @@ function HostCard({ host, rows, now, answerHere }: { host: HostView; rows: TabRo
   return (
     <View style={styles.card} accessibilityLabel={name}>
       <View style={[styles.head, rows.length > 0 && styles.headRule]}>
-        <View style={[styles.dot, { backgroundColor: online ? colors.success : colors.textDim }]} />
+        <View style={[styles.dot, { backgroundColor: dotColor(host) }]} />
         <View style={styles.headText}>
-          <Text style={styles.name} numberOfLines={1}>
-            {name}
-          </Text>
-          {viewOnly ? <Text style={styles.viewOnly}>view only</Text> : null}
-          <Text style={[styles.conn, { color: conn.color }]} numberOfLines={1}>
-            {conn.text}
-          </Text>
+          <View style={styles.nameLine}>
+            <Text style={styles.name} numberOfLines={1}>
+              {name}
+            </Text>
+            {viewOnly ? <Text style={styles.viewOnly}>view only</Text> : null}
+          </View>
+          {/* the line is a button: it opens the Connection sheet (every path, with why it is used or not) */}
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`${line.text}. Connection details`}
+            hitSlop={{ top: 13, bottom: 13, right: 16 }}
+            onPress={() => router.push({ pathname: "/connection", params: { key: host.record.key } })}
+            style={({ pressed }) => [styles.connButton, pressed && styles.pressed]}
+          >
+            <Text style={[styles.conn, { color: LINE_COLOR[line.tone] }]}>{line.text}</Text>
+            <Icon name="forward" size={12} color={LINE_COLOR[line.tone]} />
+          </Pressable>
         </View>
         {online && canNewTab(host) ? (
           <Pressable
@@ -226,18 +241,24 @@ function HostCard({ host, rows, now, answerHere }: { host: HostView; rows: TabRo
           >
             <Text style={styles.headAction}>Pair again</Text>
           </Pressable>
-        ) : !online && host.conn.status !== "connecting" ? (
+        ) : line.retry ? (
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel={`Connect to ${name} again`}
+            accessibilityLabel={`Try again to reach ${name}`}
             onPress={() => fleet.retry(host.record.key)}
-            style={({ pressed }) => [styles.headText2, pressed && styles.pressed]}
+            hitSlop={{ top: 4, bottom: 4 }}
+            style={({ pressed }) => [styles.tryAgain, pressed && styles.pressed]}
           >
-            <Text style={styles.headAction}>Retry</Text>
+            <Text style={styles.tryAgainText}>Try again</Text>
           </Pressable>
         ) : null}
       </View>
-      {why ? <Text style={styles.why}>{why}</Text> : null}
+      {line.progress ? (
+        <View style={styles.progress}>
+          <ProgressBar />
+        </View>
+      ) : null}
+      {line.hint ? <Text style={styles.why}>{line.hint}</Text> : null}
       {host.notice ? <ErrorText style={styles.inset}>{host.notice}</ErrorText> : null}
       {error ? <ErrorText style={styles.inset}>{error}</ErrorText> : null}
       {online
@@ -247,14 +268,20 @@ function HostCard({ host, rows, now, answerHere }: { host: HostView; rows: TabRo
   );
 }
 
-/** Computers (the home screen): the state chips, then each paired computer with its tabs. */
-export default function ComputersScreen() {
+/** Portals (the home screen): the state chips, then each paired computer with its tabs. */
+export default function PortalsScreen() {
   const router = useRouter();
   const s = useApp();
   const insets = useSafeAreaInsets();
   const [picked, setPicked] = useState<HomeFilter | null>(null);
   // the working clocks tick each second, else "Needs you · 2m" and "seen 2h ago" each 30 s
-  const ticking = s.hosts.some((h) => h.conn.status === "open" && h.windows.some((w) => w.tabs.some((t) => tabKind(t) === "working")));
+  // (and each second while a computer counts down to its next try)
+  // (only while the page is on top: a covered page does not wake each second)
+  const onTop = useIsFocused();
+  const ticking =
+    onTop &&
+    (s.hosts.some((h) => h.conn.status === "open" && h.windows.some((w) => w.tabs.some((t) => tabKind(t) === "working"))) ||
+      s.hosts.some((h) => h.conn.status === "closed" && h.conn.retryAt !== null));
   const now = useNow(ticking ? 1000 : 30_000);
 
   // which tab is idle since when (Idle 12m): set when a tab seen working turns idle
@@ -270,7 +297,7 @@ export default function ComputersScreen() {
   const filter = picked !== null && counts[picked] > 0 ? picked : null;
 
   // A cold start goes straight back to the pane open last, while its computer is still paired.
-  // Only when Computers is on screen then: a pane already on top (this restore, a tapped alert)
+  // Only when Portals is on screen then: a pane already on top (this restore, a tapped alert)
   // is not pushed a second time, whose Back would then only lead to the first.
   const path = usePathname();
   useEffect(() => {
@@ -294,7 +321,7 @@ export default function ComputersScreen() {
       <View style={styles.header}>
         <View style={styles.titleRow}>
           <Text style={styles.heading} accessibilityRole="header">
-            Computers
+            Portals
           </Text>
           <View style={styles.buttons}>
             <Pressable
@@ -382,12 +409,18 @@ const styles = StyleSheet.create({
   chipText: { fontFamily: ui(500), color: colors.textMuted, fontSize: 13 },
   cards: { paddingTop: 16, paddingHorizontal: 16, gap: 12 },
   card: { borderRadius: 16, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.hairline, overflow: "hidden" },
-  head: { flexDirection: "row", alignItems: "center", gap: 10, paddingLeft: 16, paddingRight: 6, height: 52 },
+  head: { flexDirection: "row", alignItems: "center", gap: 10, paddingLeft: 16, paddingRight: 6, minHeight: 60, paddingVertical: 8 },
   headRule: { borderBottomWidth: 1, borderBottomColor: colors.hairline },
-  dot: { width: 8, height: 8, borderRadius: 4 },
-  headText: { flex: 1, minWidth: 0, flexDirection: "row", alignItems: "baseline", gap: 8 },
-  name: { flexShrink: 1, fontFamily: ui(600), color: colors.textBright, fontSize: 16 },
-  conn: { flexShrink: 1, fontFamily: ui(400), fontSize: 12 },
+  dot: { width: 9, height: 9, borderRadius: 5 },
+  headText: { flex: 1, minWidth: 0, gap: 2 },
+  nameLine: { flexDirection: "row", alignItems: "center", gap: 8 },
+  name: { flexShrink: 1, fontFamily: ui(600), color: colors.textBright, fontSize: 17 },
+  // the status line wraps, never cut: its reason may be long
+  connButton: { alignSelf: "flex-start", flexDirection: "row", alignItems: "center", gap: 6, maxWidth: "100%" },
+  conn: { flexShrink: 1, fontFamily: ui(400), fontSize: 13, lineHeight: 18 },
+  tryAgain: { height: 36, paddingHorizontal: 14, borderRadius: 18, borderWidth: 1, borderColor: colors.borderStrong, alignItems: "center", justifyContent: "center", marginRight: 8 },
+  tryAgainText: { fontFamily: ui(400), color: colors.textBright, fontSize: 14 },
+  progress: { paddingHorizontal: 16, paddingBottom: 12 },
   viewOnly: {
     fontFamily: ui(500),
     color: colors.warning,
@@ -401,7 +434,7 @@ const styles = StyleSheet.create({
   headIcon: { width: 44, height: 44, alignItems: "center", justifyContent: "center" },
   headText2: { minWidth: 44, height: 44, paddingHorizontal: 10, alignItems: "center", justifyContent: "center" },
   headAction: { fontFamily: ui(500), color: colors.accent, fontSize: 14 },
-  why: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12, paddingHorizontal: 16, paddingBottom: 12 },
+  why: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13, lineHeight: 18, paddingHorizontal: 16, paddingBottom: 14 },
   inset: { marginHorizontal: 16, marginBottom: 12 },
   row: { minHeight: 64 },
   rowNeeds: { backgroundColor: `${colors.warning}0d` },

@@ -20,7 +20,7 @@ pnpm install
 pnpm start          # Expo dev server; development build (expo run:ios / run:android) or web
 ```
 
-Pair from Computers (the first-run page, or **+**): scan the QR code that Rift shows (Settings › Remote access › Pair a
+Pair from Portals (the first-run page, or **+**): scan the QR code that Rift shows (Settings › Remote access › Pair a
 phone, or `rift-terminal remote pair`), paste the `rift-remote://pair?…` link, or open the link
 on the device. The app asks before pairing.
 
@@ -71,7 +71,7 @@ Each weight is its own family (`ui(weight)`, `mono`, `monoMedium` in `src/ui/the
 style sets `fontWeight`, which Android ignores on a custom family (`test/fonts.test.ts`).
 New fonts need a native rebuild (`npx expo run:ios` / `run:android`).
 
-**Computers** is the home page; there is no tab bar. Its gear opens **Settings**, a pushed page;
+**Portals** is the home page; there is no tab bar. Its gear opens **Settings**, a pushed page;
 its **+** pairs a computer. `src/now.ts` and `src/paneView.ts` hold the models.
 
 - **Answer** (the P2 Reply board): "claude is asking", where, **Open pane**; the question, the
@@ -82,19 +82,23 @@ its **+** pairs a computer. `src/now.ts` and `src/paneView.ts` hold the models.
   A password is a secure field sent as `text` and Enter, never shown, logged or kept. An answer
   goes only to the question it was shown for (the pane must still ask it). View-only devices
   get no answers. Ask before running asks for Face ID first; otherwise nothing confirms. The page
-opens from the **No…** answer on Computers, from the line under a pane's header for a question its
+opens from the **No…** answer on Portals, from the line under a pane's header for a question its
 card cannot answer (a password, other input, a view-only device), and from an alert.
-- **Computers** (home, the P4 board): the title with a gear (**Settings**) and **+** (**Pair a
+- **Portals** (home, the P4 board): the title with a gear (**Settings**) and **+** (**Pair a
   computer**). No search bar. Chips under the title filter the tabs of every computer by state:
   "N needs you", "N working", "N idle" (a tab whose last command failed counts as idle). A chip shows
   only while a tab is in its state; a second tap clears it; "needs you" stands out while nothing
   filters. Below, a card per paired computer (with a filter on, only those with a matching tab):
-  a dot (green while connected), the name, "view only" when this phone cannot run commands, and a
-  line: "LAN · 4 tabs" or "Relay · 1 tab", "Connecting…", "Offline · seen 2h ago" (or "not
-  connected yet"). On the card's right: **New tab** (the icon; a connected computer that this phone
-  may operate and that offers `open`, or `start` while Rift is closed), **Retry** while it is not
-  connected, **Pair again** when it refused this phone's key (other failures say why under the
-  name). A connected card lists its tabs: a tile (✳ in orange for a coding agent, `>_` for a
+  a dot (green while connected, blue while trying, red when it cannot be reached), the name,
+  "view only" when this phone cannot run commands, and a status line that says how it is
+  connected: "Connected · this network · 4 tabs", "Connected · through the relay · 1 tab",
+  "Looking on this network…", "Not on this network · trying the relay…" (with a thin progress bar),
+  "Can’t reach it · retrying in 8 s" (counting down, with a paragraph saying why and what happens
+  next), "Offline · this phone has no network", "Not connected". The line is a button: it opens
+  the **Connection** sheet (below). On the card's right: **New tab** (the icon; a connected computer that this phone
+  may operate and that offers `open`, or `start` while Rift is closed), **Try again** while it
+  cannot be reached (it connects at once, backoff reset), **Pair again** when it refused this
+  phone's key (other failures say why under the name, in full). A connected card lists its tabs: a tile (✳ in orange for a coding agent, `>_` for a
   shell), the title, the state at the right ("Needs you · 2m", "Working 3:56", "2 failed",
   "Idle 12m"; the idle time only for an agent the app saw working) and a line (program, folder,
   branch, or the last command; with several computers paired a question shows its first line). A
@@ -103,6 +107,16 @@ card cannot answer (a password, other input, a view-only device), and from an al
   first entry is filled), and **Open**. A pill sends that entry (Face ID first when Settings asks);
   **No** opens the Answer page with its field. With none paired it is the first-run page (**Scan
   the code**, **Paste a pairing link**). Settings › Computers › a computer opens its page.
+- **Connection** (a sheet, from Portals' status line and from the pane's status strip, one
+  component for both: `src/ui/ConnectionSheet.tsx`): the status line again, then one row per path
+  the computer can be reached by, in trying order: **This network** (a LAN address each) and
+  **Relay** (its host), each with a badge (✓ in use, … connecting, ✕ failed, – not used) and a
+  note: "In use · 6 ms" (the round trip of the latest ping; no number until one is answered),
+  "No answer on this network (2 s)", "Relay up · your computer has not joined", "The relay
+  answered, but your computer is not registered there", or the error the socket reported;
+  then "End-to-end encrypted. The relay passes bytes it cannot read." and, when the computer cannot
+  be reached, **Try again now**. The client records each path's state in `ConnState.paths`
+  (`src/protocol/client.ts`); the wording is `src/ui/connStatus.ts` (tested in node).
 - **Tabs** (a sheet, from the pane's header title): every tab of that computer, needs you first,
   then failed, working, idle. Chips filter: All, Needs you, Working, Failed, each with its count.
   A row: tile, title (**Here** on the open tab), the last line, a state pill ("Needs you", "✕ 2
@@ -118,7 +132,7 @@ card cannot answer (a password, other input, a view-only device), and from an al
   opens a shell the computer keeps and lists under "Rift is closed · Tabs" until Rift opens and
   shows it as a tab. View-only devices do not get the button.
 - **Reopening**: a cold start goes back to the pane that was open last (`rift.last` in the
-  keychain); otherwise Computers.
+  keychain); otherwise Portals.
 - **Pane** (the P3 board): commands run from its command line; there is no separate Run page.
   The header: Back (its badge counts the computer's other panes that need you); the tab's name
   with "studio-mac · tab 2 of 5" and a chevron, which opens the Tabs sheet; **Search output**
@@ -130,6 +144,20 @@ card cannot answer (a password, other input, a view-only device), and from an al
   two switches: **Wrap long lines** for this pane (Settings › Panes › Wrap long lines sets the
   default; off, each block's output scrolls sideways with a position bar) and **Notifications**
   for this computer.
+  **While a pane opens** (the PaneLoading board; `src/ui/paneLoad.ts`, `src/ui/PaneLoading.tsx`):
+  the header keeps the tab's last known title (`rift.paneTitles`, written from every topology;
+  the computer's name when the pane was never seen). Under it a full-width status strip, its text
+  wrapping and never cut ("Connecting through the relay" with the wait "0:03", "Connected through
+  the relay · 84 ms", "Can’t reach your computer · retrying in 8 s"); a tap opens the Connection
+  sheet. Over skeleton blocks (skeleton rows on the screen view, whose zoom bar waits for a
+  screen) a card lists the steps: **Reach** the computer, **Open this pane**, **Load its blocks**
+  (**Get the screen** on the agent / Terminal view); the current one says what it waits for. After
+  15 s the card is "Taking longer than usual" with **Try again** and **Details** (the sheet); when
+  the computer cannot be reached it is "Can’t open this pane" with the reason in full and
+  Try again. A pane whose blocks are already held (a reconnect) shows them dimmed under "Reconnecting ·
+  showing blocks from 2 min ago". The command field is off, "Waiting for your computer…", until
+  the pane's blocks (or screen) have arrived once. The step "Load its blocks" shows no count: the
+  gateway does not say how many blocks a snapshot holds.
   Blocks are cards (below); the successes before the newest failure (or the running command) fold
   into "✓ N earlier commands succeeded · Show", and a pane with older blocks than loaded offers
   **Earlier blocks**. A tap on a card opens the block sheet. A pane that asks shows its question
@@ -196,7 +224,7 @@ card cannot answer (a password, other input, a view-only device), and from an al
   default) every command run from this phone asks to be told when it finishes; the bell on a
   running block switches that for one command (and on a computer with `notify_off` also
   drops the computer's own wait).
-- **Settings** (the gear on Computers; the Settings board), in groups:
+- **Settings** (the gear on Portals; the Settings board), in groups:
   - **Computers**: each paired computer (green dot while connected, with its system and
     connection) opens its page; **Pair a computer**; under them **This phone's name** (computers
     show it in toasts and logs). A computer's page: **Connection**, **System**, **This phone can**
@@ -307,7 +335,7 @@ before Phase 3 move over (`src/stores.ts`).
 - **Alerts**: while the app runs (on screen, or the short while iOS keeps it alive after), a
   question a pane starts asking posts "claude is asking on studio-mac" with the question; not
   for the pane on screen, not for a computer whose notifications are off, not for the questions
-  already waiting when it connected (Computers and the pane show those). A menu with a Yes and a No gets the
+  already waiting when it connected (Portals and the pane show those). A menu with a Yes and a No gets the
   buttons **Yes**, **No** and **Open** (category `rift-ask`), anything else **Open** only
   (`rift-ask-open`). Yes and No need the phone unlocked (Face ID), open the app and send the
   menu's first "Yes…" or "No…" once the pane still asks that question (and, with Ask before
@@ -415,7 +443,7 @@ pnpm typecheck   # tsc --noEmit (strict)
 pnpm test        # vitest: Noise vectors + snow interop, framing, client, relay, adverse network,
                  # connectivity, lock, fleet, stores, pairing, notifications, text contrast,
                  # key mapping, terminal layout, earlier output, control keys, prompt chips,
-                 # Computers / Tabs sheet / pane / answer / Live Activity models (phone.test.ts,
+                 # Portals / Tabs sheet / pane / answer / Live Activity models (phone.test.ts,
                  # computers.test.ts, topology.test.ts, paneView.test.ts), settings text, embedded fonts
 pnpm lint        # eslint
 npx expo install --check && npx -y expo-doctor
@@ -451,15 +479,15 @@ one-day minimum release age by exact version only.
   expo-crypto, expo-notifications, expo-network, expo-local-authentication,
   expo-screen-capture and AppState.
 - `src/chips.ts` — the prompt chips and their menus; `src/now.ts` — the tab rows and their
-  states (Computers, Tabs sheet), the pane's folds and swipe target; `src/paneView.ts` — the Panes
+  states (Portals, Tabs sheet), the pane's folds and swipe target; `src/paneView.ts` — the Panes
   sheet's rows, block-card text, tables, log lines, the question card's context, the terminal
   zoom; `src/ui/settingsText.ts` — Settings' texts; `src/answer.ts` — what an answer sends;
   `src/live.ts` — the Live Activity plan.
-- `src/app/` — expo-router screens, in one stack (no tab bar): Computers (`index`, the home page),
+- `src/app/` — expo-router screens, in one stack (no tab bar): Portals (`index`, the home page),
   Settings (`settings`), a computer's page (`computer`), While the app is closed
   (`settings-ntfy`), Paste a pairing link (`add`), Pair a computer (`scan`), pairing confirmation
   (`pair`, also the target of `rift-remote://pair` links), Host (`host/[key]`, a computer's tabs
-  and bell; opened after pairing, not from Computers), Pane with its command line and full-screen view
+  and bell; opened after pairing, not from Portals), Pane with its command line and full-screen view
   (`host/[key]/pane/[id]`), Answer (`answer`), the Tabs and Panes sheets (`tabs`, `panes`),
   Confirm sheet, block sheet (`block`), chip menus (`chips`, `diff`), Keys (`control-keys`);
   `src/ui/LockGate.tsx` — the lock screen and privacy cover. On the web a sheet is a plain page: it gets a Close button and

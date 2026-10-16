@@ -18,7 +18,7 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { askingTitle, questionKey } from "@/answer";
 import { promptChips } from "@/chips";
-import { canClose, canOperate, hasFeature, isAsked, wrapsLines } from "@/fleet";
+import { canClose, canOperate, draftKey, hasFeature, isAsked, wrapsLines } from "@/fleet";
 import { foldBlocks, paneName, programName, swipeTarget, type PaneItem } from "@/now";
 import { CLAUDE_COLOR, paneMark, runsAgent, showsViewSwitch, terminalViewOn, waitingOthers } from "@/paneView";
 import { canLoadOlder, MAX_BLOCKS } from "@/protocol/store";
@@ -30,19 +30,23 @@ import { AskCard } from "@/ui/AskCard";
 import { FailedCard, FoldRow, RunningCard } from "@/ui/BlockCards";
 import { BlockView, sideways } from "@/ui/BlockView";
 import { Composer } from "@/ui/Composer";
-import { describeConn } from "@/ui/connLabel";
 import { Button } from "@/ui/Button";
 import { Icon } from "@/ui/Icon";
 import { ErrorText } from "@/ui/Notice";
+import { BlockSkeleton, PaneCard, PaneStrip } from "@/ui/PaneLoading";
+import { openingTitle, paneLoad } from "@/ui/paneLoad";
 import { headerTop } from "@/ui/Screen";
 import { TerminalView } from "@/ui/TerminalView";
 import { toggleA11y } from "@/ui/toggle";
 import { useClose } from "@/ui/useClose";
+import { useNow } from "@/ui/useNow";
 import { useSingleFlight } from "@/ui/useSingleFlight";
 import { colors, mono, radius, TOUCH, tints, ui } from "@/ui/theme";
 
 /** Within this many points of the end counts as "at the bottom" (stick to new output). */
 const BOTTOM_SLOP = 48;
+/** The wall clock, for effects (reads of it in render are flagged as impure). */
+const wallClock = () => Date.now();
 /** A horizontal drag this long (and mostly sideways) switches to the next or previous pane. */
 const SWIPE_PX = 60;
 
@@ -118,12 +122,14 @@ export default function PaneScreen() {
   const host = s.hosts.find((h) => h.record.key === key);
   const status = host?.conn.status;
   const loc = useMemo(() => (host ? findPane(host.windows, paneId) : null), [host, paneId]);
-  const title = loc ? paneTitle(loc) : "Pane";
+  // the header's name: the tab's title, else the one last seen for this pane (never a placeholder)
+  const cachedTitle = s.paneTitles[draftKey(key, paneId)] ?? null;
+  const title = loc ? paneTitle(loc) : (cachedTitle ?? host?.record.name ?? "this pane");
   // the computer's tabs no longer hold it: nothing left to show or type into
   const closed = !!host && status === "open" && host.windows.length > 0 && !loc;
 
-  // A cold start's pane that has closed meanwhile: back to Computers rather than a dead page. Only
-  // once it is on top: dismissing to Computers would also close a sheet over it (What's New).
+  // A cold start's pane that has closed meanwhile: back to Portals rather than a dead page. Only
+  // once it is on top: dismissing to Portals would also close a sheet over it (What's New).
   const focused = useIsFocused();
   useEffect(() => {
     if (closed && restored === "1" && focused) router.dismissTo("/");
@@ -174,6 +180,38 @@ export default function PaneScreen() {
   }, [screenFeature, status, following, closed, key, paneId, pinned]);
   // the search belongs to the blocks: a full-screen program closes it
   const searching = fullScreen ? null : search;
+
+  // While the pane opens: the status strip, the steps card, the blocks held in memory (dimmed)
+  // the wait starts when the page opens, when Try again is pressed, and when the view switches
+  // between blocks and the screen (that one has its own thing to wait for)
+  const [waitingSince, setWaitingSince] = useState(() => Date.now());
+  const shownScreen = useRef(fullScreen);
+  useEffect(() => {
+    if (shownScreen.current === fullScreen) return;
+    shownScreen.current = fullScreen;
+    setWaitingSince(wallClock());
+  }, [fullScreen]);
+  const loaded = fullScreen ? screen !== null : state !== null;
+  const waitingForPane = !closed && !(status === "open" && loaded);
+  const now = useNow(1000, waitingForPane && focused);
+  const hostName = host?.record.name ?? "this computer";
+  const load = host && !closed ? paneLoad({
+    conn: host.conn,
+    now,
+    waitingSince,
+    hostName,
+    view: fullScreen ? "screen" : "blocks",
+    opening: openingTitle(loc ? tabTitle(loc.tab) : cachedTitle, agent && program ? program : null),
+    paneKnown: !!loc,
+    loaded,
+    heldSince: loaded ? (host.lastSeen ?? waitingSince) : null,
+  }) : null;
+  const details = () => router.push({ pathname: "/connection", params: { key } });
+  const tryAgain = () => {
+    setWaitingSince(Date.now());
+    if (status === "open") fleet.refreshPane(key, paneId);
+    else fleet.retry(key);
+  };
 
   const wrap = wrapsLines(s, key, paneId);
   const operate = host ? canOperate(host) : false;
@@ -296,11 +334,9 @@ export default function PaneScreen() {
       <Text style={styles.capped}>Showing the most recent {Math.min(state.blocks.length, MAX_BLOCKS)} blocks</Text>
     ) : null;
 
-  const conn = host ? describeConn(host.conn) : null;
   // the back badge's count: this computer's other panes waiting for an answer
   const waitingElsewhere =
     host?.windows.reduce((n, w) => n + w.tabs.reduce((m, t) => m + t.panes.filter((p) => p.waiting && p.id !== paneId).length, 0), 0) ?? 0;
-  const hostName = host?.record.name ?? "this computer";
   const back = () => (router.canGoBack() ? router.back() : router.replace("/"));
   const lastBlock = blocks.at(-1);
   const notifOn = host?.record.notifications !== false;
@@ -335,6 +371,7 @@ export default function PaneScreen() {
           recent={recent}
           label={title}
           canType={hasFeature(host, "text")}
+          waiting={status !== "open"}
         />
       </View>
     ) : (
@@ -367,18 +404,18 @@ export default function PaneScreen() {
           </Pressable>
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel={loc ? tabTitle(loc.tab) + ", tab " + tabNumber + " of " + tabCount + " on " + hostName + ". Switch tab" : "Pane"}
+            accessibilityLabel={loc ? tabTitle(loc.tab) + ", tab " + tabNumber + " of " + tabCount + " on " + hostName + ". Switch tab" : (cachedTitle ?? hostName)}
             disabled={!loc || closed}
             onPress={() => router.push({ pathname: "/tabs", params: { key, pane: String(paneId) } })}
             style={({ pressed }) => [styles.titleButton, pressed && styles.pressed]}
           >
             <View style={styles.titleLine}>
               <Text style={styles.title} numberOfLines={1}>
-                {loc ? tabTitle(loc.tab) : "Pane"}
+                {loc ? tabTitle(loc.tab) : (cachedTitle ?? hostName)}
               </Text>
               {loc && !closed ? <Icon name="chevronDown" size={16} color={colors.textMuted} /> : null}
             </View>
-            {host ? (
+            {host && (loc || cachedTitle) ? (
               <Text style={styles.subtitle} numberOfLines={1}>
                 {loc ? hostName + " · tab " + tabNumber + " of " + tabCount : hostName}
               </Text>
@@ -462,11 +499,7 @@ export default function PaneScreen() {
           </View>
         ) : null}
       </View>
-      {host && status !== "open" ? (
-        <Text style={styles.connLine} accessibilityLiveRegion="polite">
-          {conn!.label}
-        </Text>
-      ) : null}
+      {load?.strip ? <PaneStrip strip={load.strip} onPress={details} /> : null}
       {waiting && status === "open" && !asking ? (
         <Pressable
           accessibilityRole="button"
@@ -486,7 +519,7 @@ export default function PaneScreen() {
       {error ? <ErrorText style={styles.notice}>{error}</ErrorText> : null}
       {host && fullScreen && !closed ? (
         <>
-          <View style={[styles.fill, { paddingBottom: bareScreen ? 0 : bottomInset }]} {...swipe.panHandlers}>
+          <View style={[styles.fill, { paddingBottom: bareScreen ? 0 : bottomInset }, load?.held && styles.held]} {...swipe.panHandlers}>
             <TerminalView
               hostKey={key}
               paneId={paneId}
@@ -498,6 +531,7 @@ export default function PaneScreen() {
               bare={bareScreen}
               canFit={hasFeature(host, "fit")}
             />
+            {load?.card ? <PaneCard card={load.card} onRetry={tryAgain} onDetails={details} /> : null}
           </View>
           {bareScreen ? footer : null}
         </>
@@ -529,18 +563,15 @@ export default function PaneScreen() {
               <Text style={styles.closedText} accessibilityLiveRegion="polite">
                 This pane has closed.
               </Text>
-              <Button label="Go to Computers" onPress={() => router.dismissTo("/")} />
+              <Button label="Go to Portals" onPress={() => router.dismissTo("/")} />
             </View>
-          ) : !state ? (
-            <Text style={styles.empty} accessibilityLiveRegion="polite">
-              {status === "open" ? "Loading blocks…" : "Waiting for the computer…"}
-            </Text>
-          ) : blocks.length === 0 ? (
+          ) : !state ? null : blocks.length === 0 ? (
             <Text style={styles.empty}>No commands in this pane yet.</Text>
           ) : searching !== null && searching.trim() !== "" && shownBlocks === 0 ? (
             <Text style={styles.empty}>No block holds “{searching.trim()}”.</Text>
           ) : null}
-          <View style={styles.fill} {...swipe.panHandlers}>
+          <View style={[styles.fill, load?.held && styles.held]} {...swipe.panHandlers}>
+            {!state && host && !closed ? <BlockSkeleton /> : null}
             {/* Not inverted: oldest first, so the reading order (and swiping through with a
                 screen reader) ends at the newest block, which the list starts scrolled to. */}
             <FlashList
@@ -588,6 +619,7 @@ export default function PaneScreen() {
               contentContainerStyle={styles.listContent}
               accessibilityLabel="Command blocks, newest at the bottom"
             />
+            {load?.card ? <PaneCard card={load.card} onRetry={tryAgain} onDetails={details} /> : null}
           </View>
           {footer}
         </>
@@ -758,16 +790,8 @@ const styles = StyleSheet.create({
   segmentOn: { backgroundColor: tints.accentBadge },
   segmentText: { fontFamily: ui(500), color: colors.textMuted, fontSize: 13 },
   segmentTextOn: { color: colors.accent },
-  connLine: {
-    fontFamily: ui(400),
-    color: colors.warning,
-    fontSize: 12,
-    textAlign: "center",
-    paddingVertical: 6,
-    backgroundColor: colors.chrome,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.hairline,
-  },
+  // blocks held in memory while the pane reconnects (PaneLoading board)
+  held: { opacity: 0.55 },
   // the ⋯ menu: 280 wide under the button, 14 pt radius, #2c2c30 with a soft shadow
   menu: {
     position: "absolute",

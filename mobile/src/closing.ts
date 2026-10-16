@@ -36,7 +36,7 @@ export const closedText = (kind: CloseKind, title: string) => `${kind === "tab" 
 /**
  * The pane to show once `paneId` (kind pane) or its tab (kind tab) is closed: a pane beside it in
  * its tab, else the neighbouring tab's active pane, else another tab of the computer; null when
- * nothing is left (the screen goes to Computers). `windows` is the topology before the close.
+ * nothing is left (the screen goes to Portals). `windows` is the topology before the close.
  */
 export function afterClose(windows: Window[], paneId: number, kind: CloseKind): number | null {
   const loc = findPane(windows, paneId);

@@ -79,7 +79,7 @@ export interface HostRecord {
   via?: "lan" | "relay";
   /** false: no finish notifications from this computer except "Notify me". Absent: on. */
   notifications?: boolean;
-  /** The computer's OS and Rift version from its last `welcome` (Computers shows them while offline). */
+  /** The computer's OS and Rift version from its last `welcome` (Portals shows them while offline). */
   os?: string;
   version?: string;
   /** Epoch milliseconds of the last `welcome` ("last seen"). */
@@ -326,6 +326,30 @@ export async function loadLastView(kv: KeyValueStore): Promise<LastView | null> 
 export async function saveLastView(kv: KeyValueStore, view: LastView | null): Promise<void> {
   if (view === null) await kv.delete(LAST_KEY);
   else await kv.set(LAST_KEY, JSON.stringify({ host: view.host, pane: view.pane }));
+}
+
+// --- pane titles -----------------------------------------------------------------------------
+
+const PANE_TITLES_KEY = "rift.paneTitles";
+
+/** The tab title last seen for each pane, by `host:pane`: the header's title before the topology arrives. */
+export type PaneTitles = Record<string, string>;
+
+/** Empty when none is stored or it cannot be read; entries that are not short strings are dropped. */
+export async function loadPaneTitles(kv: KeyValueStore): Promise<PaneTitles> {
+  try {
+    const raw = await kv.get(PANE_TITLES_KEY);
+    if (raw === null) return {};
+    const v: unknown = JSON.parse(raw);
+    if (typeof v !== "object" || v === null || Array.isArray(v)) return {};
+    return Object.fromEntries(Object.entries(v).filter((e): e is [string, string] => typeof e[1] === "string" && e[1].length <= 256));
+  } catch {
+    return {};
+  }
+}
+
+export async function savePaneTitles(kv: KeyValueStore, titles: PaneTitles): Promise<void> {
+  await kv.set(PANE_TITLES_KEY, JSON.stringify(titles));
 }
 
 /**

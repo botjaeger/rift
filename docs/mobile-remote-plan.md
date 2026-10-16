@@ -41,7 +41,7 @@ confirmation is the opt-in "Ask before running"), commands run from the phone
 notify when they finish (a bell per running block; `notify` with `off`,
 feature `notify_off`), long lines can stay unwrapped, and the desktop's git
 prompt chips come with the topology (feature `git`). The phone-first
-proposal (boards P1–P6) is built on top: tabs Now / Computers / Settings;
+proposal (boards P1–P6) is built on top: tabs Now / Portals / Settings;
 *Now* lists what needs the user (a pane's `waiting`: a password read
 without echo, a coding agent's menu, an unread request for input), what runs
 (`running`: start time and last line) and what finished; an answer page
@@ -125,7 +125,7 @@ security and synchronization model is proven.
 Prefer structured blocks over a pixel-equivalent terminal canvas:
 
 - Home is *Now*: what needs the user (a prompt the phone can answer), what
-  runs, what finished; *Computers* shows the paired desktops with their tabs;
+  runs, what finished; *Portals* shows the paired desktops with their tabs;
   a cold start returns to the pane open last.
 - A session screen shows tabs, panes, current directory, shell status, and Git
   context (branch, ahead/behind, dirty, changed files, from the desktop's

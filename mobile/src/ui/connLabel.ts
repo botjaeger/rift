@@ -4,7 +4,8 @@ import type { ConnState } from "../protocol/client";
 import { pathLabel } from "../protocol/relay";
 import { colors } from "./palette";
 
-function failureLabel(conn: ConnState): string {
+/** Why a client stopped for good, in full (the Connection sheet, the pane's failure card). */
+export function failureLabel(conn: ConnState): string {
   switch (conn.failure) {
     case "auth":
       return "This computer no longer accepts this device. Pair it again.";
