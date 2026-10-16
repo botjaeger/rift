@@ -8,6 +8,19 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.11.1 — 2026-10-16
+
+### Improved
+
+- **Clearer pane dividers** — the line between split panes is a little brighter, as in Warp, so
+  panes stay apart at a glance.
+
+### Fixed
+
+- **New panes open in the right folder after an update** — splitting a pane, or opening a tab,
+  from a pane that was busy through an update (an agent, a server) opened in your home folder.
+  It now opens in that pane's folder.
+
 ## 0.11.0 — 2026-10-16
 
 Updates that are ready before they ask, quieter notices, and clearer panes.
