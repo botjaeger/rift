@@ -8,6 +8,34 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.11.0 — 2026-10-16
+
+Updates that are ready before they ask, quieter notices, and clearer panes.
+
+### New
+
+- **Updates download first** — Rift fetches and checks a new version in the background, then
+  tells you once it is ready to install, with a notice in the notification center. No more
+  "checking" and "downloading" pop-ups.
+- **Notices beside your prompt** — short messages now appear as small chips in the pane's chip
+  row: done, error, info and phone. Errors stay until you close them, and a config error offers
+  *Open config.toml*.
+
+### Improved
+
+- **Active pane stands out** — panes you are not typing in are slightly lighter, so the active
+  one is easy to spot.
+- **Settings opens on General** — and starts there again after you close it; switching to another
+  tab and back keeps your page.
+- **About shows the Rift icon** — the About and welcome pages use the app's own icon.
+- **Recent connections** — Remote access lists the newest first, five at a time, and scrolls with
+  the wheel or the arrow keys.
+
+### Fixed
+
+- **Update leftovers** — installing an update no longer leaves temporary files behind.
+- **Stale config errors** — a config error notice now goes away once the file is fixed.
+
 ## 0.10.0 — 2026-10-16
 
 Every prompt chip on your phone, with its menu.
