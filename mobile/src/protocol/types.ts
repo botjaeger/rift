@@ -29,11 +29,47 @@ export interface Pane {
   last_exit: number | null;
   /** The desktop's prompt-chip git status (feature `git`); absent outside a repository. */
   git?: PaneGit;
+  /**
+   * The prompt chips the desktop shows for the pane, in its order (feature `prompt_chips`); absent
+   * from a desktop without the feature.
+   */
+  chips?: PaneChip[];
   /** What the pane's running command waits for (feature `waiting`); absent when nothing waits. */
   waiting?: Waiting;
   /** The running command's start and last line (feature `running`); absent at the prompt. */
   running?: PaneRunning;
 }
+
+/**
+ * The colour role of a chip's text, named after the desktop theme's tokens (docs/ui.md, Prompt
+ * context). A name this app does not know is drawn as `ui`.
+ */
+export type ChipTone = "bright" | "ui" | "dim" | "muted" | "success" | "error" | "warning" | "accent" | "magenta" | "indigo";
+
+/** A run of a chip's text in one tone. */
+export interface ChipPart {
+  text: string;
+  tone: ChipTone | (string & {});
+}
+
+/** One prompt chip as the desktop renders it (docs/remote-protocol.md, `topology`). */
+export interface PaneChip {
+  /** `cwd`, `git_branch`, `git_diff`, `user`, `host`, `python`, `php`, `github_pr`, `docker`, `date`, `time12`, `time24`, `elapsed`; a newer desktop may add more. */
+  kind: string;
+  /** The colour of the chip's glyph. */
+  icon: ChipTone | (string & {});
+  /** What the desktop draws. */
+  full: ChipPart[];
+  /** The same, shortened for a narrow row. */
+  short: ChipPart[];
+  /** Needs a look: a Docker container down or unhealthy. */
+  attention?: boolean;
+}
+
+/** `chips` bounds (crates/rift-remote/src/lib.rs): chips per pane, parts per text, characters per part. */
+export const MAX_PANE_CHIPS = 16;
+export const MAX_CHIP_PARTS = 6;
+export const MAX_CHIP_TEXT = 200;
 
 /** A pane's running command: when it started (Unix seconds, the desktop's clock) and its last line. */
 export interface PaneRunning {
@@ -121,6 +157,7 @@ export type Feature =
   | "running"
   | "open"
   | "close"
+  | "prompt_chips"
   | "start";
 
 /** `complete` bounds: line bytes, entries per list, bytes per entry. */
@@ -317,6 +354,20 @@ export interface ChipRequestMsg {
   id: string;
   pane: number;
 }
+/** What a pull request, interpreter, Docker or Time on tab chip opens (feature `prompt_chips`). */
+export type ChipDetailKind = "pr" | "python" | "php" | "docker" | "elapsed";
+export interface ChipDetailRequestMsg {
+  t: "chip";
+  id: string;
+  pane: number;
+  kind: ChipDetailKind;
+}
+/** Restarts the clock of the pane's tab (feature `prompt_chips`, operate only); answered with an `ack`. */
+export interface ResetElapsedMsg {
+  t: "reset_elapsed";
+  id: string;
+  pane: number;
+}
 /** One changed file's diff (`path` and `staged` as `changes` listed it). */
 export interface DiffRequestMsg {
   t: "diff";
@@ -336,6 +387,8 @@ export interface CompleteRequestMsg {
 export type ClientMsg =
   | CompleteRequestMsg
   | ChipRequestMsg
+  | ChipDetailRequestMsg
+  | ResetElapsedMsg
   | DiffRequestMsg
   | SubscribeMsg
   | OlderRequestMsg
@@ -526,7 +579,42 @@ export interface CompleteMsg {
   history: HistoryEntry[];
   more: boolean;
 }
-export type ChipAnswerMsg = DirsMsg | BranchesMsg | ChangesMsg | DiffMsg | CompleteMsg;
+/** An interpreter a `python` / `php` chip menu offers. */
+export interface RuntimeVersion {
+  version: string;
+  /** Where it comes from (`pyenv`, `php@8.3`). */
+  source: string;
+  /** The one the shell runs now. */
+  current: boolean;
+  /** The desktop menu's own command to pick it (`rift-use …`). */
+  command: string;
+}
+/** A container of the `docker` chip menu. */
+export interface ComposeContainer {
+  service: string;
+  state: string;
+  running: boolean;
+  /** `8080→8080` (`/udp` for UDP). */
+  ports: string[];
+  /** `2 hours`, or the whole status when stopped. */
+  uptime: string;
+  health: "healthy" | "starting" | "unhealthy" | null;
+  /** The desktop menu's own command for the row: follow the service's logs. */
+  logs: string;
+}
+interface ChipAnswer {
+  t: "chip";
+  id: string;
+  pane: number;
+  more: boolean;
+}
+/** The answer to `chip`; `kind` as asked. */
+export type ChipMsg =
+  | (ChipAnswer & { kind: "pr"; number: number; state: "open" | "draft" | "merged" | "closed"; url: string })
+  | (ChipAnswer & { kind: "python" | "php"; current: string | null; versions: RuntimeVersion[] })
+  | (ChipAnswer & { kind: "docker"; project: string | null; error: string | null; containers: ComposeContainer[] })
+  | (ChipAnswer & { kind: "elapsed"; seconds: number; counting: boolean; line: string });
+export type ChipAnswerMsg = DirsMsg | BranchesMsg | ChangesMsg | ChipMsg | DiffMsg | CompleteMsg;
 export type ServerMsg =
   | ChipAnswerMsg
   | WelcomeMsg
@@ -591,6 +679,21 @@ export function isPaneGit(v: unknown): v is PaneGit {
   );
 }
 
+const isParts = (v: unknown): v is ChipPart[] =>
+  Array.isArray(v) && v.length <= MAX_CHIP_PARTS && v.every((p) => isObj(p) && lineWithin(MAX_CHIP_TEXT)(p.text) && isStr(p.tone));
+
+/** A pane's `chips` within the wire bounds; kinds and tones this app does not know pass (a newer desktop). */
+export function isPaneChips(v: unknown): v is PaneChip[] {
+  return (
+    Array.isArray(v) &&
+    v.length <= MAX_PANE_CHIPS &&
+    v.every(
+      (c) =>
+        isObj(c) && isStr(c.kind) && isStr(c.icon) && isParts(c.full) && isParts(c.short) && (c.attention === undefined || isBool(c.attention)),
+    )
+  );
+}
+
 function isPane(v: unknown): v is Pane {
   return (
     isObj(v) &&
@@ -601,6 +704,7 @@ function isPane(v: unknown): v is Pane {
     isStrOrNull(v.last_command) &&
     isIntOrNull(v.last_exit) &&
     (v.git === undefined || isPaneGit(v.git)) &&
+    (v.chips === undefined || isPaneChips(v.chips)) &&
     (v.waiting === undefined || isWaiting(v.waiting)) &&
     (v.running === undefined ||
       (isObj(v.running) &&
@@ -783,6 +887,8 @@ export function decodeServer(json: unknown): ServerMsg | null {
         isBool(m.more)
         ? (m as unknown as ChangesMsg)
         : null;
+    case "chip":
+      return isStr(m.id) && isUint(m.pane) && isBool(m.more) && isChipDetail(m) ? (m as unknown as ChipMsg) : null;
     case "complete":
       return isStr(m.id) &&
         isUint(m.pane) &&
@@ -809,6 +915,48 @@ export function decodeServer(json: unknown): ServerMsg | null {
         : null;
     default:
       return null;
+  }
+}
+
+const isRuntimeVersion = (v: unknown): v is RuntimeVersion =>
+  isObj(v) && isName(v.version) && isStr(v.source) && v.source.length <= MAX_MENU_NAME && isBool(v.current) && isName(v.command);
+
+const isContainer = (v: unknown): v is ComposeContainer =>
+  isObj(v) &&
+  isName(v.service) &&
+  isStr(v.state) &&
+  isBool(v.running) &&
+  arrayOf(isName)(v.ports) &&
+  isStr(v.uptime) &&
+  v.uptime.length <= MAX_MENU_NAME &&
+  (v.health === null || v.health === "healthy" || v.health === "starting" || v.health === "unhealthy") &&
+  isName(v.logs);
+
+/** The kind-specific fields of a `chip` answer. */
+function isChipDetail(m: Obj): boolean {
+  switch (m.kind) {
+    case "pr":
+      return isUint(m.number) && (m.state === "open" || m.state === "draft" || m.state === "merged" || m.state === "closed") && isName(m.url);
+    case "python":
+    case "php":
+      return (
+        (m.current === null || isName(m.current)) &&
+        Array.isArray(m.versions) &&
+        m.versions.length <= MAX_MENU_ITEMS &&
+        m.versions.every(isRuntimeVersion)
+      );
+    case "docker":
+      return (
+        (m.project === null || isName(m.project)) &&
+        (m.error === null || (isStr(m.error) && m.error.length <= MAX_MENU_NAME)) &&
+        Array.isArray(m.containers) &&
+        m.containers.length <= MAX_MENU_ITEMS &&
+        m.containers.every(isContainer)
+      );
+    case "elapsed":
+      return isUint(m.seconds) && isBool(m.counting) && isStr(m.line) && m.line.length <= MAX_MENU_NAME && !/[\n\r]/.test(m.line);
+    default:
+      return false;
   }
 }
 
@@ -925,6 +1073,10 @@ export function isClientMsg(v: unknown): v is ClientMsg {
         isUint(v.cursor) &&
         v.cursor <= utf8Length(v.line)
       );
+    case "chip":
+      return isId(v.id) && isUint(v.pane) && (v.kind === "pr" || v.kind === "python" || v.kind === "php" || v.kind === "docker" || v.kind === "elapsed");
+    case "reset_elapsed":
+      return isId(v.id) && isUint(v.pane);
     case "diff":
       return isId(v.id) && isUint(v.pane) && isStr(v.path) && v.path.length > 0 && v.path.length <= MAX_MENU_NAME && typeof v.staged === "boolean";
     default:

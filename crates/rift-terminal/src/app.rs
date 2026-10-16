@@ -7901,20 +7901,8 @@ impl App {
         for (rect, pane, chip) in &self.info_chips {
             let tab = self.tabs.iter().find(|t| t.pane(*pane).is_some());
             let shown = tab.and_then(|t| t.elapsed(mode, now));
-            let line = match (mode, tab.and_then(|t| t.started), shown) {
-                (rift_core::ElapsedCounts::Always, Some(at), Some(e)) => {
-                    Some(crate::views::prompt_chips::started_text(
-                        crate::views::prompt_chips::LocalTime::at(at),
-                        e.time,
-                    ))
-                }
-                (rift_core::ElapsedCounts::Running, _, Some(e)) => Some(format!(
-                    "Counted {} \u{b7} {}",
-                    crate::views::prompt_chips::elapsed_text(e.time),
-                    if e.counting { "running now" } else { "paused" }
-                )),
-                _ => None,
-            };
+            let line =
+                crate::views::prompt_chips::elapsed_line(mode, tab.and_then(|t| t.started), shown);
             let body = match line {
                 Some(line) => format!("{line}\n\n{}", chip.about()),
                 None => chip.about().to_string(),
@@ -9642,7 +9630,6 @@ impl App {
     /// Open a chip's menu for `pane` (focusing it).
     fn open_chip_menu(&mut self, pane: PaneId, kind: crate::views::chip_menu::ChipKind) {
         use crate::views::chip_menu::{ChipKind, ChipMenu};
-        use rift_core::runtimes;
         let target = ClickTarget::Chip(pane, kind.chip());
         let Some(anchor) = self
             .hits
@@ -9671,31 +9658,8 @@ impl App {
             }
             ChipKind::Php | ChipKind::Python => {
                 let vars = p.session.user_vars.lock().unwrap().clone();
-                let bin = |name: &str| {
-                    vars.get(name)
-                        .filter(|v| !v.is_empty())
-                        .map(std::path::PathBuf::from)
-                };
-                let home = runtimes::home();
-                let prefixes = runtimes::brew_prefixes();
-                if kind == ChipKind::Php {
-                    let active = bin("RiftPhpBin").and_then(|b| runtimes::php_version(&b));
-                    let list = runtimes::php_installs(&home, &prefixes);
-                    ChipMenu::runtimes(kind, pane, anchor, list, active.as_deref())
-                } else {
-                    let active = vars
-                        .get("RiftPython")
-                        .filter(|v| !v.is_empty())
-                        .cloned()
-                        .or_else(|| runtimes::python_version(&bin("RiftPythonBin")?, &cwd));
-                    // the shell's pyenv (its shims' root), else the default one
-                    let pyenv = bin("RiftPythonBin")
-                        .filter(|b| b.parent().is_some_and(|d| d.ends_with("shims")))
-                        .and_then(|b| Some(b.parent()?.parent()?.to_path_buf()))
-                        .or_else(runtimes::pyenv_root);
-                    let list = runtimes::python_installs(&home, &prefixes, pyenv.as_deref());
-                    ChipMenu::runtimes(kind, pane, anchor, list, active.as_deref())
-                }
+                let (list, active) = crate::views::chip_menu::runtime_choices(kind, &vars, &cwd);
+                ChipMenu::runtimes(kind, pane, anchor, list, active.as_deref())
             }
             ChipKind::Docker => {
                 // show what is known now; a fresh `ps` replaces it
@@ -12865,6 +12829,8 @@ impl App {
     /// Tabs and panes as the control API reports them.
     fn tabs_info(&self) -> Vec<crate::control::TabInfo> {
         use crate::control::{PaneInfo, TabInfo};
+        let now = Instant::now();
+        let shell_prompt = self.config.prompt == rift_core::PromptMode::Shell;
         self.tabs
             .iter()
             .enumerate()
@@ -12885,6 +12851,17 @@ impl App {
                             .rev()
                             .find(|b| !b.command.is_empty())
                             .map(|b| (b.command.clone(), b.exit_code()));
+                        // computed before the literal below: its `cwd` guard lives to
+                        // the end of the statement, and the chips lock `cwd` again
+                        let chips = if shell_prompt {
+                            Vec::new()
+                        } else {
+                            let elapsed = t.elapsed(self.config.elapsed_counts, now);
+                            editor::pane_chip_views(&self.config, &self.theme, p, elapsed)
+                                .iter()
+                                .map(|v| v.wire())
+                                .collect()
+                        };
                         PaneInfo {
                             id: p.session.id,
                             active: p.session.id == t.active_pane,
@@ -12902,6 +12879,9 @@ impl App {
                                 added: g.added as u64,
                                 removed: g.removed as u64,
                             }),
+                            // what the desktop draws above the command line (none in
+                            // shell-prompt mode), for a phone's chip row
+                            chips: Some(chips),
                             waiting: self.pane_waiting(p),
                             running: Self::pane_running(p),
                         }
@@ -13077,21 +13057,104 @@ impl App {
     /// pane's folder is read here; a thread of their own answers.
     fn chip_remote(&mut self, p: crate::control::Pending) {
         use crate::control::{Request, Response};
-        use crate::views::chip_menu::{remote_diff, remote_menu};
+        use crate::views::chip_menu::{
+            ChipKind, remote_diff, remote_docker, remote_menu, remote_pr, remote_runtimes,
+        };
+        use rift_remote::MenuKind;
         let pane = match &p.request {
             Request::Menu { pane, .. } | Request::Diff { pane, .. } => *pane,
             _ => return,
         };
-        let Some(pn) = self.find_tab_of_pane(pane).and_then(|(_, t)| t.pane(pane)) else {
+        let mode = self.config.elapsed_counts;
+        let Some((_, tab)) = self.find_tab_of_pane(pane) else {
+            let _ = p.reply.send(Response::error("no such pane"));
+            return;
+        };
+        let elapsed = tab.elapsed(mode, Instant::now());
+        let started = tab.started;
+        let Some(pn) = tab.pane(pane) else {
             let _ = p.reply.send(Response::error("no such pane"));
             return;
         };
         let cwd = pn.session.cwd.lock().unwrap().clone();
+        // the chips that read the window's own state answer at once; the
+        // interpreters' installs are looked up on the thread below
+        let detail = match &p.request {
+            Request::Menu { kind, .. } => match kind {
+                MenuKind::Pr => Some(pn.pr.as_ref().map(remote_pr).ok_or("no pull request")),
+                MenuKind::Docker => Some(
+                    pn.docker
+                        .as_ref()
+                        .map(remote_docker)
+                        .ok_or("no compose project"),
+                ),
+                MenuKind::Elapsed => Some(
+                    crate::views::prompt_chips::elapsed_line(mode, started, elapsed)
+                        .zip(elapsed)
+                        .map(|(line, e)| rift_remote::protocol::ChipDetail::Elapsed {
+                            seconds: e.time.as_secs(),
+                            counting: e.counting,
+                            line,
+                        })
+                        .ok_or("no time on this tab yet"),
+                ),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(detail) = detail {
+            let _ = p.reply.send(match detail {
+                Ok(detail) => Response {
+                    ok: true,
+                    pane: Some(pane),
+                    menu: Some(rift_remote::Menu::Chip { detail }),
+                    ..Default::default()
+                },
+                Err(why) => Response::error(why),
+            });
+            // a fresher `docker compose ps` for the next look
+            if let (Some(dir), Some(worker)) = (cwd, &self.docker_worker)
+                && matches!(
+                    &p.request,
+                    Request::Menu {
+                        kind: MenuKind::Docker,
+                        ..
+                    }
+                )
+            {
+                worker.request(pane, dir.into());
+            }
+            return;
+        }
+        let vars = pn.session.user_vars.lock().unwrap().clone();
         let (request, reply) = (p.request, p.reply);
         let spawned = std::thread::Builder::new()
             .name("remote-chip".into())
             .spawn(move || {
                 let answer = match request {
+                    Request::Menu {
+                        kind: kind @ (MenuKind::Python | MenuKind::Php),
+                        ..
+                    } => {
+                        let chip = if kind == MenuKind::Php {
+                            ChipKind::Php
+                        } else {
+                            ChipKind::Python
+                        };
+                        let dir = cwd.as_deref().map(std::path::Path::new);
+                        Response {
+                            ok: true,
+                            pane: Some(pane),
+                            menu: Some(rift_remote::Menu::Chip {
+                                detail: remote_runtimes(
+                                    chip,
+                                    &vars,
+                                    dir.unwrap_or(std::path::Path::new("/")),
+                                ),
+                            }),
+                            ..Default::default()
+                        }
+                    }
                     Request::Menu { kind, .. } => Response {
                         ok: true,
                         pane: Some(pane),
@@ -13289,6 +13352,19 @@ impl App {
             // needs the event loop (closing the last tab quits): answered in `user_event`
             Request::RemoteClose { .. } => Response::error("remote-close needs the event loop"),
             Request::RemoteFit { pane, cols, rows } => self.remote_fit(pane, cols, rows),
+            Request::RemoteResetElapsed { pane, .. } => {
+                if !self.config.remote_access {
+                    return Response::error("remote access is off");
+                }
+                if self.find_tab_of_pane(pane).is_none() {
+                    return Response::error("no such pane");
+                }
+                self.reset_tab_timer_of(pane);
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+                ok(Some(pane))
+            }
             Request::RemoteStatus => {
                 // the gateway's status changed: the chip follows at once
                 self.remote.notices += 1;

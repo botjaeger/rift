@@ -1,10 +1,11 @@
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useEffect, useState } from "react";
-import { AccessibilityInfo, ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { AccessibilityInfo, ActivityIndicator, Linking, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { branchRows, chipCommand, dirRows, splitPath, tildePath, type ChipAction } from "@/chips";
 import { canOperate } from "@/fleet";
-import type { BranchesMsg, ChangedFile, ChangesMsg, DirsMsg } from "@/protocol/types";
+import { containerRows, dockerTitle, elapsedBody, isPrUrl, versionRows, type ChipOpen } from "@/promptChips";
+import type { BranchesMsg, ChangedFile, ChangesMsg, ChipMsg, DirsMsg } from "@/protocol/types";
 import { fleet, useApp, useLock } from "@/runtime";
 import { findPane, paneTitle } from "@/topology";
 import { Icon } from "@/ui/Icon";
@@ -12,8 +13,9 @@ import { ErrorText } from "@/ui/Notice";
 import { SheetClose } from "@/ui/SheetClose";
 import { colors, mono, monoMedium, radius, ui } from "@/ui/theme";
 
-type Menu = "dirs" | "branches" | "changes";
-type Answer = DirsMsg | BranchesMsg | ChangesMsg;
+type Menu = ChipOpen;
+type Answer = DirsMsg | BranchesMsg | ChangesMsg | ChipMsg;
+const MENUS: readonly Menu[] = ["dirs", "branches", "changes", "pr", "python", "php", "docker", "elapsed"];
 
 const STATUS: Record<string, { word: string; color: string }> = {
   M: { word: "modified", color: colors.warning },
@@ -35,7 +37,11 @@ function Row({
   onPress,
   disabled,
   accent,
+  danger,
   mark,
+  detail,
+  health,
+  dimLabel,
 }: {
   icon: React.ReactNode;
   label: string;
@@ -44,8 +50,16 @@ function Row({
   onPress: () => void;
   disabled?: boolean;
   accent?: boolean;
+  /** A destructive pick (Reset): the label in the error colour. */
+  danger?: boolean;
   /** The current branch: not a choice, but drawn at full strength. */
   mark?: string;
+  /** Muted text after the label: a version's source, a container's ports and uptime. */
+  detail?: string;
+  /** A container's health check verdict, in its colour. */
+  health?: { word: string; color: string } | null;
+  /** The label is dimmed (a stopped container). */
+  dimLabel?: boolean;
 }) {
   const dim = disabled && !mark;
   return (
@@ -58,9 +72,15 @@ function Row({
       style={({ pressed }) => [styles.row, !first && styles.divider, pressed && styles.pressed, dim && styles.disabled]}
     >
       <View style={styles.icon}>{icon}</View>
-      <Text style={[styles.label, accent ? styles.accentLabel : null]} numberOfLines={1}>
+      <Text style={[styles.label, accent ? styles.accentLabel : null, danger ? styles.dangerLabel : null, dimLabel && styles.dimLabel]} numberOfLines={1}>
         {label}
       </Text>
+      {detail ? (
+        <Text style={styles.detail} numberOfLines={1}>
+          {detail}
+        </Text>
+      ) : null}
+      {health ? <Text style={[styles.detail, { color: health.color }]}>{health.word}</Text> : null}
       {mark ? <Text style={styles.mark}>{mark}</Text> : null}
     </Pressable>
   );
@@ -75,7 +95,7 @@ export default function ChipsScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { key, pane: paneParam, menu: menuParam } = useLocalSearchParams<{ key: string; pane: string; menu: string }>();
-  const menu: Menu = menuParam === "branches" || menuParam === "changes" ? menuParam : "dirs";
+  const menu: Menu = MENUS.find((m) => m === menuParam) ?? "dirs";
   const paneId = Number(paneParam);
   const s = useApp();
   const lock = useLock();
@@ -91,7 +111,9 @@ export default function ChipsScreen() {
 
   useEffect(() => {
     let live = true;
-    void fleet.chipMenu(key, paneId, menu).then((r) => {
+    const asked =
+      menu === "dirs" || menu === "branches" || menu === "changes" ? fleet.chipMenu(key, paneId, menu) : fleet.chipDetail(key, paneId, menu);
+    void asked.then((r) => {
       if (!live) return;
       if (r.ok) setAnswer(r.msg);
       else setError(r.message);
@@ -112,13 +134,18 @@ export default function ChipsScreen() {
       // the same path as Run: the Confirm sheet, which builds the command from the action
       router.replace({
         pathname: "/confirm",
-        params: { key, pane: String(paneId), chip: action.kind, arg: action.kind === "cd" ? action.name : action.branch },
+        params: {
+          key,
+          pane: String(paneId),
+          chip: action.kind,
+          arg: action.kind === "cd" ? action.name : action.kind === "run" ? action.command : action.branch,
+        },
       });
       return;
     }
     setSending(true);
     setError(null);
-    // a cd or checkout finishes at once: no "Notify me" for it
+    // a cd or checkout finishes at once (a version switch too, logs follow forever): no "Notify me" for it
     const r = await fleet.run(key, paneId, chipCommand(action), { fromDraft: false, notify: false });
     setSending(false);
     if (r.ok) {
@@ -127,6 +154,7 @@ export default function ChipsScreen() {
     } else setError(r.message);
   };
 
+  const detail = answer?.t === "chip" ? answer : null;
   const title =
     menu === "dirs"
       ? answer?.t === "dirs" && answer.cwd
@@ -136,7 +164,21 @@ export default function ChipsScreen() {
         ? answer?.t === "branches" && answer.current
           ? answer.current
           : "Branch"
-        : "Changes";
+        : menu === "changes"
+          ? "Changes"
+          : detail?.kind === "pr"
+            ? `PR #${detail.number} · ${detail.state}`
+            : detail?.kind === "docker"
+              ? dockerTitle(detail.project, detail.containers, detail.error)
+              : menu === "pr"
+                ? "Pull request"
+                : menu === "python"
+                  ? "Python"
+                  : menu === "php"
+                    ? "PHP"
+                    : menu === "docker"
+                      ? "Docker"
+                      : "Time on this tab";
   const changes = answer?.t === "changes" ? answer : null;
   const added = changes?.files.reduce((n, f) => n + f.added, 0) ?? 0;
   const removed = changes?.files.reduce((n, f) => n + f.removed, 0) ?? 0;
@@ -145,14 +187,110 @@ export default function ChipsScreen() {
       ? `Change folder · runs cd in ${where}`
       : menu === "branches"
         ? `Change branch · runs git checkout in ${where}`
-        : changes
-          ? changes.branch === null
-            ? "Not a git repository"
-            : null
-          : null;
+        : menu === "python" || menu === "php"
+          ? `Pick a version for this shell · runs rift-use in ${where}`
+          : menu === "docker"
+            ? `Tap a service to follow its logs · runs docker compose logs in ${where}`
+            : menu === "pr"
+              ? "Opens in your browser."
+              : detail?.kind === "elapsed"
+                ? elapsedBody(detail.line)
+                : changes
+                  ? changes.branch === null
+                    ? "Not a git repository"
+                    : null
+                  : null;
+
+  const reset = async () => {
+    setSending(true);
+    setError(null);
+    const r = await fleet.resetElapsed(key, paneId);
+    setSending(false);
+    if (r.ok) {
+      AccessibilityInfo.announceForAccessibility("Time on this tab reset");
+      router.back();
+    } else setError(r.message);
+  };
+
+  /** The menus of the pull request, interpreter, Docker and Time on tab chips (feature `prompt_chips`). */
+  const detailList = (a: ChipMsg) => {
+    if (a.kind === "pr") {
+      return (
+        <View style={styles.card}>
+          <Row
+            first
+            icon={<Icon name="pullRequest" size={14} color={colors.textMuted} />}
+            label="Open on GitHub"
+            spoken={`Open pull request ${a.number} in the browser`}
+            disabled={!isPrUrl(a.url)}
+            onPress={() => void Linking.openURL(a.url)}
+          />
+        </View>
+      );
+    }
+    if (a.kind === "python" || a.kind === "php") {
+      const rows = versionRows(a.versions, "");
+      if (rows.length === 0)
+        return <Text style={styles.empty}>{a.kind === "php" ? "No PHP installs found (Homebrew, phpenv, asdf, mise)" : "No Python installs found (pyenv, Homebrew, asdf, mise)"}</Text>;
+      return (
+        <View style={styles.card}>
+          {rows.map((r, i) => (
+            <Row
+              key={`${r.label}\n${r.source}`}
+              first={i === 0}
+              icon={<Icon name="code" size={14} color={colors.textMuted} />}
+              label={r.label}
+              detail={r.source}
+              mark={r.current ? "✓ current" : undefined}
+              spoken={r.current ? `${r.label}, current version` : `Switch to ${a.kind === "php" ? "PHP" : "Python"} ${r.label} from ${r.source}`}
+              disabled={!operate || sending || r.current || r.command === null}
+              onPress={() => r.command && void act({ kind: "run", command: r.command })}
+            />
+          ))}
+        </View>
+      );
+    }
+    if (a.kind === "docker") {
+      if (a.error) return <Text style={styles.empty}>{a.error}</Text>;
+      const rows = containerRows(a.containers);
+      if (rows.length === 0) return <Text style={styles.empty}>No containers: docker compose up</Text>;
+      return (
+        <View style={styles.card}>
+          {rows.map((r, i) => (
+            <Row
+              key={r.service}
+              first={i === 0}
+              icon={<Icon name="docker" size={14} color={r.running ? colors.accent : colors.textMuted} />}
+              label={r.service}
+              dimLabel={!r.running}
+              detail={r.detail}
+              health={r.health}
+              spoken={`${r.service}, ${r.running ? "running" : "stopped"}, ${r.detail}${r.health ? `, ${r.health.word}` : ""}: follow its logs`}
+              disabled={!operate || sending || r.command === null}
+              onPress={() => r.command && void act({ kind: "run", command: r.command })}
+            />
+          ))}
+        </View>
+      );
+    }
+    return (
+      <View style={styles.card}>
+        <Row
+          first
+          icon={<Icon name="rerun" size={14} color={colors.error} />}
+          label="Reset"
+          danger
+          spoken="Reset the time on this tab to zero"
+          disabled={!operate || sending}
+          onPress={() => void reset()}
+        />
+      </View>
+    );
+  };
 
   const list = () => {
     if (!answer) return null;
+    if (answer.t === "chip") return detailList(answer);
     if (answer.t === "dirs") {
       const rows = dirRows(answer.parent, answer.dirs, query);
       if (rows.length === 0) return <Text style={styles.empty}>{query ? "No matches" : "No folders here"}</Text>;
@@ -275,7 +413,12 @@ export default function ChipsScreen() {
     >
       <SheetClose />
       <View style={styles.head}>
-        <Text style={menu === "changes" ? styles.title : styles.monoTitle} accessibilityRole="header" numberOfLines={1} ellipsizeMode={menu === "dirs" ? "head" : "tail"}>
+        <Text
+          style={menu === "dirs" || menu === "branches" ? styles.monoTitle : styles.title}
+          accessibilityRole="header"
+          numberOfLines={1}
+          ellipsizeMode={menu === "dirs" ? "head" : "tail"}
+        >
           {title}
         </Text>
         {subtitle ? <Text style={styles.subtitle}>{subtitle}</Text> : null}
@@ -286,7 +429,7 @@ export default function ChipsScreen() {
           </Text>
         ) : null}
       </View>
-      {menu !== "changes" && answer ? (
+      {(menu === "dirs" || menu === "branches") && answer ? (
         <TextInput
           value={query}
           onChangeText={setQuery}
@@ -299,7 +442,7 @@ export default function ChipsScreen() {
           style={styles.search}
         />
       ) : null}
-      {!operate && host && menu !== "changes" ? <Text style={styles.note}>View only: this device cannot run commands here.</Text> : null}
+      {!operate && host && menu !== "changes" && menu !== "pr" ? <Text style={styles.note}>View only: this device cannot run commands here.</Text> : null}
       {error ? <ErrorText>{error}</ErrorText> : null}
       {!answer && !error ? (
         <View style={styles.loading} accessible accessibilityLabel="Loading">
@@ -343,6 +486,9 @@ const styles = StyleSheet.create({
   glyph: { fontFamily: mono, color: colors.textMuted, fontSize: 14 },
   label: { fontFamily: mono, flex: 1, color: colors.text, fontSize: 14 },
   accentLabel: { fontFamily: ui(400), color: colors.accent },
+  dangerLabel: { fontFamily: ui(400), color: colors.error },
+  dimLabel: { color: colors.textMuted },
+  detail: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12, flexShrink: 1 },
   mark: { fontFamily: ui(400), color: colors.success, fontSize: 12 },
   group: { gap: 6 },
   groupTitle: {

@@ -110,6 +110,11 @@ pub const MAX_WAITING_PROMPT: usize = 300;
 pub const MAX_WAITING_CHOICES: usize = 9;
 pub const MAX_WAITING_CHOICE: usize = 200;
 pub const MAX_WAITING_CONTEXT: usize = 12;
+/// A pane's `chips`: chips kept, parts kept per chip text and characters
+/// per part (a folder's path can be long).
+pub const MAX_PANE_CHIPS: usize = 16;
+pub const MAX_CHIP_PARTS: usize = 6;
+pub const MAX_CHIP_TEXT: usize = 200;
 /// Characters of a pane's `running.line`.
 pub const MAX_RUNNING_LINE: usize = 200;
 /// Characters of a tab's `title` and a pane's `job` and `last_command`
@@ -208,15 +213,24 @@ pub enum Menu {
         branch: Option<String>,
         files: Vec<protocol::ChangedFile>,
     },
+    /// The pull request, interpreter, Docker and Time on tab chips'
+    /// menus (feature `prompt_chips`).
+    Chip { detail: protocol::ChipDetail },
 }
 
-/// Which chip menu [`Source::menu`] reads.
+/// Which chip menu [`Source::menu`] reads; the last five are the `chip`
+/// request's kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MenuKind {
     Dirs,
     Branches,
     Changes,
+    Pr,
+    Python,
+    Php,
+    Docker,
+    Elapsed,
 }
 
 /// A changed file's diff ([`Source::diff`]), unbounded ([`bound_diff`]).
@@ -278,6 +292,48 @@ pub fn bound_menu(menu: Menu) -> (Menu, bool) {
                 },
                 more,
             )
+        }
+        Menu::Chip { detail } => {
+            use protocol::ChipDetail as D;
+            let (detail, more) = match detail {
+                D::Python { current, versions } => {
+                    let (versions, more) = keep(versions, |v| &v.command);
+                    (
+                        D::Python {
+                            current: short(current),
+                            versions,
+                        },
+                        more,
+                    )
+                }
+                D::Php { current, versions } => {
+                    let (versions, more) = keep(versions, |v| &v.command);
+                    (
+                        D::Php {
+                            current: short(current),
+                            versions,
+                        },
+                        more,
+                    )
+                }
+                D::Docker {
+                    project,
+                    error,
+                    containers,
+                } => {
+                    let (containers, more) = keep(containers, |c| &c.logs);
+                    (
+                        D::Docker {
+                            project: short(project),
+                            error: short(error),
+                            containers,
+                        },
+                        more,
+                    )
+                }
+                other => (other, false),
+            };
+            (Menu::Chip { detail }, more)
         }
     }
 }
@@ -361,6 +417,16 @@ pub fn bound_topology(mut windows: Vec<Window>) -> Vec<Window> {
         {
             cut(text, MAX_PANE_TEXT);
         }
+        if let Some(chips) = pane.chips.as_mut() {
+            chips.truncate(MAX_PANE_CHIPS);
+            for chip in chips.iter_mut() {
+                for list in [&mut chip.full, &mut chip.short] {
+                    list.truncate(MAX_CHIP_PARTS);
+                    list.iter_mut()
+                        .for_each(|p| cut(&mut p.text, MAX_CHIP_TEXT));
+                }
+            }
+        }
         if let Some(r) = pane.running.as_mut() {
             cut(&mut r.line, MAX_RUNNING_LINE);
             if let Some(t) = r.title.as_mut() {
@@ -407,6 +473,7 @@ mod chip_bounds {
             last_command: None,
             last_exit: None,
             git: None,
+            chips: None,
             waiting: None,
             running: Some(protocol::PaneRunning {
                 started: Some(1),
@@ -446,6 +513,7 @@ mod chip_bounds {
             last_command: Some(big.clone()),
             last_exit: None,
             git: None,
+            chips: None,
             waiting: None,
             running: None,
         };
@@ -779,6 +847,15 @@ pub trait Source: Send + Sync + 'static {
     fn menu(&self, pane: u64, kind: MenuKind) -> Result<Menu, OutputError> {
         let _ = (pane, kind);
         Err(OutputError::NoPane)
+    }
+    /// Restart the Time on tab clock of the tab holding `pane` for the
+    /// device named `device` (feature `prompt_chips`). Defaults to
+    /// `Unavailable`.
+    fn reset_elapsed(&self, pane: u64, device: &str) -> Result<(), InputError> {
+        let _ = (pane, device);
+        Err(InputError::Unavailable(
+            "this computer cannot reset the clock".into(),
+        ))
     }
     /// The diff of one changed file of `pane`'s repository; `NoBlock` when
     /// `path` is not among the changes. Defaults to `NoPane`.

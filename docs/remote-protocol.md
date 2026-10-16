@@ -151,6 +151,8 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
 {"t":"open","id":"n1","pane":12,"kind":"tab"}
 {"t":"close","id":"c1","pane":12,"kind":"pane"}
 {"t":"close","id":"c2","pane":12,"kind":"tab"}
+{"t":"chip","id":"m5","pane":12,"kind":"docker"}
+{"t":"reset_elapsed","id":"r7","pane":12}
 ```
 
 - `subscribe` follows one pane (a new `subscribe` replaces the old one).
@@ -223,6 +225,14 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
   `error` `no_pane`; `view` devices and a desktop with `remote_access` off
   answer `forbidden`. A background shell (see `start`) is a tab of one
   pane: both kinds end it.
+- `chip` (feature `prompt_chips`) asks what a pull request, interpreter, Docker
+  or Time on tab chip opens: `kind` is `pr`, `python`, `php`, `docker` or
+  `elapsed` (§ Prompt chip menus); answered with `chip`.
+- `reset_elapsed` (feature `prompt_chips`) restarts the clock of the tab
+  holding `pane`, as the Time on tab card's Reset does on the desktop. Answered
+  with `ack`; `view` devices and a desktop with `remote_access` off answer
+  `forbidden`, an unknown pane `no_pane`. Every connection gets the new
+  `topology` before the `ack`.
 - `start` (`{"t":"start","id":"n2"}`, feature `start`) starts a shell on a
   computer whose user allows it while no Rift window is open
   (`remote_when_closed`): the gateway keeps the shell in the session
@@ -246,7 +256,7 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
 ## Gateway → client
 
 ```json
-{"t":"welcome","v":2,"host":"studio-mac","os":"macos","version":"0.1.0","device":"d3f1","permission":"operate","features":["screen","text","output","push_failures","push_ntfy","git","notify_off","chips","waiting","complete","running","open","close"]}
+{"t":"welcome","v":2,"host":"studio-mac","os":"macos","version":"0.1.0","device":"d3f1","permission":"operate","features":["screen","text","output","push_failures","push_ntfy","git","notify_off","chips","waiting","complete","running","open","close","fit","prompt_chips"]}
 {"t":"topology","windows":[{"pid":4242,"tabs":[{"index":0,"title":"rift","active":true,"panes":[{"id":12,"active":true,"cwd":"/Users/me/rift","job":null,"last_command":"cargo test","last_exit":0,"git":{"branch":"main","ahead":1,"behind":0,"dirty":true,"files":3,"added":42,"removed":7}}]}]}]}
 {"t":"snapshot","pane":12,"seq":41,"blocks":[Block],"has_older":true}
 {"t":"update","pane":12,"seq":42,"blocks":[Block],"removed":[80]}
@@ -273,7 +283,9 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
   `off`, § Push), `chips` (`dirs`, `branches`, `changes`, `diff`, §
   Phase 3), `waiting` (a pane's `waiting` in `topology`, below),
   `complete` (§ Phase 3), `running` (a pane's `running` in
-  `topology`, below), `fit` (§ Phase 3), `open`, `close` and `start` (listed only while the computer
+  `topology`, below), `fit` (§ Phase 3), `prompt_chips` (a pane's `chips`
+  in `topology`, below, and the `chip` and `reset_elapsed` requests, §
+  Prompt chip menus), `open`, `close` and `start` (listed only while the computer
   allows it, `remote_when_closed`). A
   gateway that leaves
   the field out serves none of them; the app then hides what needs them.
@@ -287,6 +299,29 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
   `cd` or a finished command); a pane in another tab keeps the value from
   when its tab was last active. Without the feature the field never appears
   and the app shows no git chips.
+- A pane's `chips` (gateways with the `prompt_chips` feature) are the prompt
+  chips the desktop draws above that pane's command line, exactly as it
+  renders them: the pane's configured `prompt_chips` order, only those with
+  something to show right now (none in shell-prompt mode), computed by the
+  desktop's own chip code (`crates/rift-terminal/src/views/prompt_chips.rs`).
+  Each is `{"kind":"docker","icon":"accent","full":[{"text":"flow","tone":"bright"},
+  {"text":"3/4","tone":"success"}],"short":[{"text":"3/4","tone":"success"}],"attention":true}`.
+  `kind` is the chip (`cwd`, `git_branch`, `git_diff`, `user`, `host`,
+  `python`, `php`, `github_pr`, `docker`, `date`, `time12`, `time24`,
+  `elapsed`); `full` is what the desktop shows, `short` the same shortened
+  for a narrow row (a folder's name, the branch with its dirty dot, `102 +2.1k
+  −970`, `#42`, a version without its patch, `3/4`) and equal to `full` for
+  the chips with nothing to cut; both are runs of `{text, tone}`. `tone` names
+  the desktop theme's colour role, so the phone draws its own palette:
+  `bright`, `ui`, `dim`, `muted` (`text_bright`, `text_ui`, `text_dim`,
+  `text_muted`), `success`, `error`, `warning`, `accent`, `magenta` (ANSI
+  magenta, a merged pull request) and `indigo` (PHP's mark); `icon` is the
+  glyph's tone. `attention` (left out when false) means the chip needs a look:
+  a Docker container down or unhealthy. At most 16 chips of at most 6 runs of
+  at most 200 characters. An app ignores a `kind` or `tone` it does not know
+  (it draws the text in `ui`). The field is absent from a desktop without the
+  feature; the app then draws a folder chip and, with `git`, the branch and
+  changed files.
 - A pane's `waiting` (gateways with the `waiting` feature) says the pane's
   running command waits for the user, and how to answer it:
   `{"kind":"choice","prompt":"Do you want to make this edit to session.rs?","choices":["Yes","Yes, allow all edits during this session (shift+tab)","No, and tell Claude what to do differently (esc)"],"selected":0,"numbered":true,"context":["Edit file","…"]}`.
@@ -701,6 +736,52 @@ code review panel's changed files with each file's diff.
   may read the lists and tracked files' diffs; only `operate` devices can
   run the commands they lead to. The names come from the computer's file system and repository:
   the app shell-quotes them and never runs one unquoted.
+
+### Pull request, interpreter, Docker and Time on tab menus (feature `prompt_chips`)
+
+What the rest of the desktop's chips open. The desktop answers from the same
+code its own chip menus use (`crates/rift-terminal/src/views/chip_menu.rs`);
+the phone runs a row's command through `run`, so Settings › Ask before
+running and view-only devices apply as for any command.
+
+```json
+{"t":"chip","id":"m7","pane":12,"kind":"pr"}
+{"t":"chip","id":"m7","pane":12,"kind":"pr","number":42,"state":"open","url":"https://github.com/me/flow/pull/42","more":false}
+{"t":"chip","id":"m8","pane":12,"kind":"python"}
+{"t":"chip","id":"m8","pane":12,"kind":"python","current":"3.12.4","versions":[{"version":"3.12.4","source":"pyenv","current":true,"command":"rift-use pyenv '3.12.4'"}],"more":false}
+{"t":"chip","id":"m5","pane":12,"kind":"docker"}
+{"t":"chip","id":"m5","pane":12,"kind":"docker","project":"flow","error":null,"containers":[{"service":"api","state":"running","running":true,"ports":["8080→8080"],"uptime":"2 hours","health":null,"logs":"docker compose --project-directory '/Users/me/flow' logs --follow --tail 200 'api'"}],"more":false}
+{"t":"chip","id":"m6","pane":12,"kind":"elapsed"}
+{"t":"chip","id":"m6","pane":12,"kind":"elapsed","seconds":23580,"counting":true,"line":"Started 09:15 am","more":false}
+```
+
+- `pr`: the pull request of the checked-out branch (`state` `open`, `draft`,
+  `merged` or `closed`; the desktop's `gh` lookup). The phone opens `url` in
+  its browser, `https` only.
+- `python`, `php`: the installed interpreters as the desktop's menu lists
+  them, newest first, with the one the pane's shell runs (`current`).
+  `command` is the desktop menu's own `rift-use …` line for the row; the
+  phone runs it as a command in the pane.
+- `docker`: the compose project's containers, running ones first: `state`
+  (`running`, `exited`, …), `ports` as the desktop's table prints them
+  (`3306→3306`, `/udp` only for UDP), `uptime` (`2 hours`, or the whole
+  status when stopped), `health` (`healthy`, `starting`, `unhealthy` or
+  null). `logs` is the command the row runs, following the service's logs.
+  `error` says why there are none (Docker is not running). The window asks
+  Docker for fresh state after each answer.
+- `elapsed`: the Time on tab chip's card. `seconds` and `counting` are the
+  chip's clock, `line` its hover line (`Started 03:48 pm`, or `Counted 2h 05m
+  · running now` when it counts running commands only). `reset_elapsed`
+  restarts it.
+- The phone runs only commands of the two shapes these menus build
+  (`rift-use <php|python|pyenv> '<path or version>'` and `docker compose
+  --project-directory <dir> logs --follow --tail 200 <service>`).
+- A chip with nothing to open (no pull request, no compose project, no
+  clock yet) answers `ack` with `error` `no_pane` and a message saying so
+  (`pane 12 unavailable: no pull request`), as the other menus do when the
+  window cannot answer. Bounds,
+  rate and errors are the other chip menus' (`more` is true when entries
+  were left out); `view` devices may read these menus.
 
 ### Completion and history (feature `complete`)
 

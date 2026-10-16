@@ -42,6 +42,13 @@ export function parseChangelog(md: string): Release[] {
       item = null;
       continue;
     }
+    // any other `## ` heading (`## Unreleased`: notes for the next release) is not shown
+    if (line.startsWith("## ")) {
+      endSummary();
+      cur = null;
+      item = null;
+      continue;
+    }
     if (!cur) continue;
     if (line.startsWith("### ")) {
       endSummary();

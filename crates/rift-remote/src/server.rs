@@ -76,7 +76,7 @@ const DONE_RUNNING: usize = 64;
 /// after the 45 s idle timeout.
 pub const FOLLOW_FRESH: Duration = Duration::from_secs(20);
 /// What this gateway serves beyond Phase 2 (`welcome.features`).
-const FEATURES: [&str; 14] = [
+const FEATURES: [&str; 15] = [
     "screen",
     "text",
     "output",
@@ -91,6 +91,7 @@ const FEATURES: [&str; 14] = [
     "open",
     "close",
     "fit",
+    "prompt_chips",
 ];
 
 /// Gateway settings. [`Config::new`] takes the limits from the protocol;
@@ -1864,6 +1865,14 @@ fn session<S: Source, T: Socket>(
             Ok(ClientMsg::Changes { id: rid, pane }) => {
                 Some(menu(shared, &mut outputs, rid, pane, MenuKind::Changes))
             }
+            Ok(ClientMsg::Chip {
+                id: rid,
+                pane,
+                kind,
+            }) => Some(chip(shared, &mut outputs, rid, pane, kind)),
+            Ok(ClientMsg::ResetElapsed { id: rid, pane }) => {
+                Some(reset_elapsed(shared, device, &mut opens, rid, pane))
+            }
             Ok(ClientMsg::Diff {
                 id: rid,
                 pane,
@@ -2001,6 +2010,7 @@ fn fit_reply(reply: &ServerMsg) -> Arc<str> {
         | ServerMsg::Dirs { id, .. }
         | ServerMsg::Branches { id, .. }
         | ServerMsg::Changes { id, .. }
+        | ServerMsg::Chip { id, .. }
         | ServerMsg::Diff { id, .. }
         | ServerMsg::Complete { id, .. } => id,
         // the rest are small; `send` drops one with a log line
@@ -2573,6 +2583,14 @@ fn menu<S: Source>(
                 files,
                 more,
             },
+            (kind, (Menu::Chip { detail }, more)) if chip_kind_of(&detail) == Some(kind) => {
+                ServerMsg::Chip {
+                    id: rid,
+                    pane,
+                    detail,
+                    more,
+                }
+            }
             _ => ServerMsg::ack_err(
                 rid,
                 ErrorCode::NoPane,
@@ -2580,6 +2598,69 @@ fn menu<S: Source>(
             ),
         },
         Err(e) => chip_error(rid, pane, e),
+    }
+}
+
+/// The `chip` request's kind an answer is of.
+fn chip_kind_of(detail: &crate::protocol::ChipDetail) -> Option<MenuKind> {
+    use crate::protocol::ChipDetail as D;
+    Some(match detail {
+        D::Pr { .. } => MenuKind::Pr,
+        D::Python { .. } => MenuKind::Python,
+        D::Php { .. } => MenuKind::Php,
+        D::Docker { .. } => MenuKind::Docker,
+        D::Elapsed { .. } => MenuKind::Elapsed,
+    })
+}
+
+/// `chip`: the menu of a pull request, interpreter, Docker or Time on tab
+/// chip (the folder, branch and changes chips have their own requests).
+fn chip<S: Source>(
+    shared: &Shared<S>,
+    rate: &mut Rate,
+    rid: String,
+    pane: u64,
+    kind: MenuKind,
+) -> ServerMsg {
+    if matches!(
+        kind,
+        MenuKind::Dirs | MenuKind::Branches | MenuKind::Changes
+    ) {
+        return ServerMsg::ack_err(
+            rid,
+            ErrorCode::BadRequest,
+            "kind is pr, python, php, docker or elapsed",
+        );
+    }
+    menu(shared, rate, rid, pane, kind)
+}
+
+/// `reset_elapsed`: permission and rate like `open`, then the source.
+fn reset_elapsed<S: Source>(
+    shared: &Shared<S>,
+    device: &Device,
+    rate: &mut Rate,
+    rid: String,
+    pane: u64,
+) -> ServerMsg {
+    if rid.chars().count() > MAX_REQUEST_ID {
+        return ServerMsg::error(
+            ErrorCode::BadRequest,
+            format!("id is longer than {MAX_REQUEST_ID} characters"),
+        );
+    }
+    if !operates(shared, device) {
+        return ServerMsg::ack_err(rid, ErrorCode::Forbidden, VIEW_ONLY);
+    }
+    if !rate.allow(Instant::now()) {
+        return ServerMsg::ack_err(rid, ErrorCode::Rate, "too many requests; slow down");
+    }
+    match shared.source.reset_elapsed(pane, &device.name) {
+        Ok(()) => {
+            push_topology(shared);
+            ServerMsg::ack_ok(rid)
+        }
+        Err(e) => opened(shared, rid, Err(e), || format!("no pane {pane}")),
     }
 }
 

@@ -7,6 +7,7 @@ use rift_remote::protocol::{
 use rift_remote::protocol::{
     ChangedFile, Completion, CompletionKind, DiffLine, HistoryEntry, Waiting, WaitingKind,
 };
+use rift_remote::protocol::{ChipDetail, ChipKind, ComposeContainer, PaneChip, Part, Tone};
 use rift_remote::registry::{self, PairingLink};
 use rift_remote::transport::{self, Channel, HandshakeError, Recv};
 use rift_remote::{
@@ -57,6 +58,8 @@ struct State {
     starts: Vec<String>,
     /// What `fit` was told: (pane, size or release).
     fits: Vec<(u64, Option<(u16, u16)>)>,
+    /// Panes whose clock was reset: (pane, device name).
+    resets: Vec<(u64, String)>,
 }
 
 #[derive(Clone, Default)]
@@ -104,6 +107,28 @@ impl Source for Fake {
                         last_command: None,
                         last_exit: None,
                         git: None,
+                        chips: (id == 12).then(|| {
+                            vec![PaneChip {
+                                kind: ChipKind::Docker,
+                                icon: Tone::Accent,
+                                full: vec![
+                                    Part {
+                                        text: "flow".into(),
+                                        tone: Tone::Bright,
+                                    },
+                                    Part {
+                                        text: "3/4".into(),
+                                        tone: Tone::Success,
+                                    },
+                                ],
+                                // longer than the wire keeps
+                                short: vec![Part {
+                                    text: "é".repeat(500),
+                                    tone: Tone::Success,
+                                }],
+                                attention: true,
+                            }]
+                        }),
                         waiting: st.waiting.get(&id).cloned(),
                         running: None,
                     })
@@ -212,6 +237,15 @@ impl Source for Fake {
         Ok(st.screens.get(&pane).filter(|s| s.alt || force).cloned())
     }
 
+    fn reset_elapsed(&self, pane: u64, device: &str) -> Result<(), InputError> {
+        let mut st = self.0.lock().unwrap();
+        if !st.panes.contains_key(&pane) {
+            return Err(InputError::NoPane);
+        }
+        st.resets.push((pane, device.to_string()));
+        Ok(())
+    }
+
     /// Pane 12's chip menus, larger than the wire allows: the gateway
     /// bounds them.
     fn menu(&self, pane: u64, kind: MenuKind) -> Result<Menu, OutputError> {
@@ -239,6 +273,50 @@ impl Source for Fake {
                     removed: 1,
                     staged: false,
                 }],
+            },
+            MenuKind::Pr => Menu::Chip {
+                detail: ChipDetail::Pr {
+                    number: 42,
+                    state: "open".into(),
+                    url: "https://github.com/me/flow/pull/42".into(),
+                },
+            },
+            MenuKind::Python => Menu::Chip {
+                detail: ChipDetail::Python {
+                    current: Some("3.12.4".into()),
+                    versions: Vec::new(),
+                },
+            },
+            // the wrong kind of answer, which the gateway must not forward
+            MenuKind::Php => Menu::Chip {
+                detail: ChipDetail::Python {
+                    current: None,
+                    versions: Vec::new(),
+                },
+            },
+            MenuKind::Docker => Menu::Chip {
+                detail: ChipDetail::Docker {
+                    project: Some("flow".into()),
+                    error: None,
+                    containers: (0..600)
+                        .map(|i| ComposeContainer {
+                            service: format!("s{i:03}"),
+                            state: "running".into(),
+                            running: true,
+                            ports: Vec::new(),
+                            uptime: "2 hours".into(),
+                            health: None,
+                            logs: format!("docker compose logs s{i:03}"),
+                        })
+                        .collect(),
+                },
+            },
+            MenuKind::Elapsed => Menu::Chip {
+                detail: ChipDetail::Elapsed {
+                    seconds: 120,
+                    counting: true,
+                    line: "Counted 2m \u{b7} running now".into(),
+                },
             },
         })
     }
@@ -615,7 +693,7 @@ fn pairing_then_reconnecting_gets_welcome_and_topology() {
     assert_eq!(
         welcome,
         json!({"t":"welcome","v":2,"host":"test-host","os":"linux","version":"9.9.9",
-               "device":d.id,"permission":"operate","features":["screen","text","output","push_failures","push_ntfy","git","notify_off","chips","waiting","complete","running","open","close","fit"]})
+               "device":d.id,"permission":"operate","features":["screen","text","output","push_failures","push_ntfy","git","notify_off","chips","waiting","complete","running","open","close","fit","prompt_chips"]})
     );
     assert_eq!(
         (d.name.as_str(), d.platform.as_str()),
@@ -3271,6 +3349,89 @@ fn output_pages_are_bounded_to_64_kib_at_a_line_end() {
             && text.len() > rift_remote::MAX_OUTPUT_BYTES - 2
     );
     assert!(text.chars().all(|c| c == 'é'));
+}
+
+#[test]
+fn prompt_chips_ride_the_topology_bounded_and_open_their_menus() {
+    let env = start(|_| {});
+    // the pane's chips come with the topology, an over-long text cut
+    let key = new_key();
+    let secret = link_secret(&env.link(Permission::View));
+    let mut ch = env.handshake(&key, &hello(Some(&secret))).unwrap();
+    assert_eq!(recv(&mut ch)["t"], "welcome");
+    let topology = recv_t(&mut ch, "topology");
+    let chips = &topology["windows"][0]["tabs"][0]["panes"][0]["chips"];
+    assert_eq!(chips[0]["kind"], "docker");
+    assert_eq!(chips[0]["attention"], true);
+    assert_eq!(chips[0]["full"][1], json!({"text":"3/4","tone":"success"}));
+    assert_eq!(
+        chips[0]["short"][0]["text"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count(),
+        rift_remote::MAX_CHIP_TEXT
+    );
+    // a pane without chips has no `chips` at all
+    assert!(
+        topology["windows"][0]["tabs"][0]["panes"][1]
+            .get("chips")
+            .is_none()
+    );
+    // the menus answer view devices too
+    put(&mut ch, json!({"t":"chip","id":"c1","pane":12,"kind":"pr"}));
+    assert_eq!(
+        recv_t(&mut ch, "chip"),
+        json!({"t":"chip","id":"c1","pane":12,"kind":"pr","number":42,"state":"open",
+               "url":"https://github.com/me/flow/pull/42","more":false})
+    );
+    put(
+        &mut ch,
+        json!({"t":"chip","id":"c2","pane":12,"kind":"docker"}),
+    );
+    let v = recv_t(&mut ch, "chip");
+    assert_eq!(
+        v["containers"].as_array().unwrap().len(),
+        rift_remote::MAX_MENU_ITEMS
+    );
+    assert_eq!((&v["more"], &v["project"]), (&json!(true), &json!("flow")));
+    put(
+        &mut ch,
+        json!({"t":"chip","id":"c3","pane":12,"kind":"elapsed"}),
+    );
+    assert_eq!(recv_t(&mut ch, "chip")["seconds"], 120);
+    // the source answered another chip's menu: not forwarded
+    put(
+        &mut ch,
+        json!({"t":"chip","id":"c4","pane":12,"kind":"php"}),
+    );
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (false, "no_pane"));
+    // the folder, branch and changes chips have requests of their own
+    put(
+        &mut ch,
+        json!({"t":"chip","id":"c5","pane":12,"kind":"dirs"}),
+    );
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (false, "bad_request"));
+    put(&mut ch, json!({"t":"chip","id":"c6","pane":77,"kind":"pr"}));
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (false, "no_pane"));
+}
+
+#[test]
+fn only_operate_devices_reset_the_time_on_tab() {
+    let env = start(|_| {});
+    let (_k, mut view, _) = env.pair(Permission::View);
+    put(&mut view, json!({"t":"reset_elapsed","id":"r1","pane":12}));
+    assert_eq!(ack(&recv_t(&mut view, "ack")), (false, "forbidden"));
+    assert!(env.fake.0.lock().unwrap().resets.is_empty());
+    let (_k, mut op, _) = env.pair(Permission::Operate);
+    put(&mut op, json!({"t":"reset_elapsed","id":"r2","pane":12}));
+    assert_eq!(ack(&recv_t(&mut op, "ack")), (true, ""));
+    assert_eq!(
+        env.fake.0.lock().unwrap().resets,
+        [(12, "Test Phone".to_string())]
+    );
+    put(&mut op, json!({"t":"reset_elapsed","id":"r3","pane":77}));
+    assert_eq!(ack(&recv_t(&mut op, "ack")), (false, "no_pane"));
 }
 
 #[test]

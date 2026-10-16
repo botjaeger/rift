@@ -352,6 +352,17 @@ integration). Sits at the bottom of the pane, or at the top with
   narrow pane wraps the chips that do not fit onto more rows (Warp), and the
   input moves down with them; only a cwd wider than a whole row is cut, keeping
   its tail. In every pane of a split; hidden in shell-prompt mode.
+- **Prompt chips on the phone** (the companion app's command line; mockup
+  `PromptChips`): the pane's chips as this section draws them, sent with the
+  `prompt_chips` feature (`docs/remote-protocol.md`) as the pane's order,
+  tones (`bright`, `ui`, `dim`, `muted`, `success`, `error`, `warning`,
+  `accent`, `magenta`, `indigo`: the theme's roles, drawn in the app's
+  palette) and a short value per chip. One row of 32 pt chips (hairline, 4 %
+  fill, radius 6, glyph and parts) that never wraps or scrolls: the chips
+  that fit by their measured widths, then *+N* (white 8 %, a 6 pt `warning`
+  dot per folded chip with `attention`: a Docker container down or
+  unhealthy) opening the *This pane* sheet (glyph, name, full value, chevron
+  per chip). While typing, completions replace the row.
 - **Edit prompt** (Warp; layer 6, 600 px card over a 40 % black backdrop,
   `surface`, radius 8): `Rift prompt` with `Restore default`, a palette of
   the chips not in the prompt (sample values; the Python, PHP and Docker

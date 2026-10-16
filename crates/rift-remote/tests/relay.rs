@@ -711,6 +711,7 @@ impl Source for Fake {
                     last_command: None,
                     last_exit: None,
                     git: None,
+                    chips: None,
                     waiting: None,
                     running: None,
                 }],

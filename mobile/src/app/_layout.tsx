@@ -234,10 +234,26 @@ export default function RootLayout() {
             />
             <Stack.Screen
               name="chips"
-              options={{
+              options={({ route }) => ({
                 title: "Prompt chip",
                 presentation: "formSheet",
-                sheetAllowedDetents: [0.75, 1],
+                // the pull request, interpreter, Docker and Time on tab menus are short: the sheet fits them
+                sheetAllowedDetents:
+                  ["pr", "python", "php", "docker", "elapsed"].includes((route.params as { menu?: string } | undefined)?.menu ?? "")
+                    ? "fitToContents"
+                    : [0.75, 1],
+                sheetGrabberVisible: true,
+                sheetCornerRadius: 16,
+                headerShown: false,
+                contentStyle: { backgroundColor: colors.surface },
+              })}
+            />
+            <Stack.Screen
+              name="pane-chips"
+              options={{
+                title: "This pane",
+                presentation: "formSheet",
+                sheetAllowedDetents: "fitToContents",
                 sheetGrabberVisible: true,
                 sheetCornerRadius: 16,
                 headerShown: false,

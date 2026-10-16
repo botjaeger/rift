@@ -1,0 +1,1 @@
+{"t":"chip","id":"m8","pane":12,"kind":"python","current":"3.12.4","versions":[{"version":"3.12.4","source":"pyenv","current":true,"command":"rift-use pyenv '3.12.4'"},{"version":"3.11.9","source":"pyenv","current":false,"command":"rift-use pyenv '3.11.9'"}],"more":false}

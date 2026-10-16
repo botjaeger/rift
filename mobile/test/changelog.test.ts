@@ -38,6 +38,13 @@ Short summary.
 `;
 
 describe("parseChangelog", () => {
+  it("leaves an Unreleased section out, wherever it stands", () => {
+    const notes = "## Unreleased\n\nNext.\n\n### New\n\n- **Soon** — not yet.\n\n## 0.1.0 — 2026-10-14\n\n### New\n\n- **Pairing** — scan.\n\n## Unreleased\n\n### Fixed\n\n- **Later** — no.\n";
+    const all = parseChangelog(notes);
+    expect(all.map((r) => r.version)).toEqual(["0.1.0"]);
+    expect(all[0]!.groups.map((g) => g.items.map((i) => i.title))).toEqual([["Pairing"]]);
+  });
+
   it("reads releases, summaries, groups and wrapped items", () => {
     const all = parseChangelog(md);
     expect(all.map((r) => releaseName(r))).toEqual(["0.2.0", "0.1.0 · update 2", "0.1.0"]);

@@ -1990,11 +1990,17 @@ off = remote_run("off", remote_base, [
     "wait 500", *rin("off", "cmd.json", input_cmd), "wait 300",
     *rin("off", "meta.json", '{"cmd":"blocks","pane":PANE,"meta":true}'),
     *rin("off", "fit.json", '{"cmd":"remote-fit","pane":PANE,"cols":40,"rows":12}'),
+    # the status a phone's topology reads carries the prompt chips the window
+    # draws (it once deadlocked: the chips locked the cwd the status held)
+    *rin("off", "status.json", '{"cmd":"status"}'),
     f"dump {rm}/off/off.txt"])
 refused = answer(off, "cmd.json")
 assert refused == {"ok": False, "error": "remote access is off"}, refused
 assert "remote-ok" not in (off / "off.txt").read_text()
 assert answer(off, "meta.json")["ok"] is True
+chips = answer(off, "status.json")["tabs"][0]["panes"][0]["chips"]
+assert chips and chips[0]["kind"] == "cwd", chips
+assert chips[0]["short"][0]["tone"] == "bright" and chips[0]["full"][0]["text"], chips
 assert answer(off, "fit.json") == {"ok": False, "error": "remote access is off"}, \
     answer(off, "fit.json")
 assert "remote_access=false control_level=Navigate" in (off / "off.txt").read_text()

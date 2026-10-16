@@ -5,14 +5,17 @@
 
 use std::collections::HashMap;
 
-use rift_core::docker::ComposeInfo;
+use rift_core::docker::{ComposeInfo, Health};
 use rift_core::git::GitInfo;
 use rift_core::github::{PrInfo, PrState};
 use rift_core::{Color, PromptChip, Theme};
+use rift_remote::protocol::Tone;
 
 use crate::views::glyphs;
 
-/// One chip as drawn: icon, its color, and colored text runs.
+/// One chip as drawn: icon, its color, and colored text runs. The same
+/// values, as theme-independent tones plus a shortened text, are what a
+/// paired phone is sent ([`ChipView::wire`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChipView {
     pub chip: PromptChip,
@@ -20,6 +23,50 @@ pub struct ChipView {
     pub glyph: char,
     pub icon_color: Color,
     pub texts: Vec<(String, Color)>,
+    /// `icon_color` and `texts` as the theme's colour roles.
+    pub icon_tone: Tone,
+    pub parts: Vec<(String, Tone)>,
+    /// The phone's narrow row shows this instead of `parts`.
+    pub short: Vec<(String, Tone)>,
+    /// A container down or unhealthy: the phone marks the chip when it
+    /// folds it away.
+    pub attention: bool,
+}
+
+impl ChipView {
+    /// The chip for a paired phone's topology.
+    pub fn wire(&self) -> rift_remote::protocol::PaneChip {
+        use rift_remote::protocol::{ChipKind, Part};
+        let parts = |list: &[(String, Tone)]| {
+            list.iter()
+                .map(|(text, tone)| Part {
+                    text: text.clone(),
+                    tone: *tone,
+                })
+                .collect()
+        };
+        rift_remote::protocol::PaneChip {
+            kind: match self.chip {
+                PromptChip::Cwd => ChipKind::Cwd,
+                PromptChip::GitBranch => ChipKind::GitBranch,
+                PromptChip::GitDiff => ChipKind::GitDiff,
+                PromptChip::User => ChipKind::User,
+                PromptChip::Host => ChipKind::Host,
+                PromptChip::Python => ChipKind::Python,
+                PromptChip::Php => ChipKind::Php,
+                PromptChip::GithubPr => ChipKind::GithubPr,
+                PromptChip::Docker => ChipKind::Docker,
+                PromptChip::Date => ChipKind::Date,
+                PromptChip::Time12 => ChipKind::Time12,
+                PromptChip::Time24 => ChipKind::Time24,
+                PromptChip::Elapsed => ChipKind::Elapsed,
+            },
+            icon: self.icon_tone,
+            full: parts(&self.parts),
+            short: parts(&self.short),
+            attention: self.attention,
+        }
+    }
 }
 
 /// Local wall-clock time, minute resolution.
@@ -156,6 +203,27 @@ pub fn elapsed_text(d: std::time::Duration) -> String {
     }
 }
 
+/// The Elapsed card's line (desktop hover card and phone): when the clock
+/// started in `Always` mode, else what a command-running count says. None
+/// until there is something to show.
+pub fn elapsed_line(
+    mode: rift_core::ElapsedCounts,
+    started: Option<std::time::SystemTime>,
+    shown: Option<Elapsed>,
+) -> Option<String> {
+    match (mode, started, shown) {
+        (rift_core::ElapsedCounts::Always, Some(at), Some(e)) => {
+            Some(started_text(LocalTime::at(at), e.time))
+        }
+        (rift_core::ElapsedCounts::Running, _, Some(e)) => Some(format!(
+            "Counted {} \u{b7} {}",
+            elapsed_text(e.time),
+            if e.counting { "running now" } else { "paused" }
+        )),
+        _ => None,
+    }
+}
+
 /// The Elapsed chip's hover line: `Started 03:48 pm`, with the date once
 /// the clock has run 24 hours (`Started October 13, 2026, 03:48 pm`).
 pub fn started_text(started: LocalTime, elapsed: std::time::Duration) -> String {
@@ -166,30 +234,101 @@ pub fn started_text(started: LocalTime, elapsed: std::time::Duration) -> String 
     }
 }
 
+/// A tone's colour in `theme`.
+pub fn tone_color(theme: &Theme, tone: Tone) -> Color {
+    match tone {
+        Tone::Bright => theme.text_bright,
+        Tone::Ui => theme.text_ui,
+        Tone::Dim => theme.text_dim,
+        Tone::Muted => theme.text_muted,
+        Tone::Success => theme.success,
+        Tone::Error => theme.error,
+        Tone::Warning => theme.warning,
+        Tone::Accent => theme.accent,
+        Tone::Magenta => theme.ansi[5],
+        // PHP's indigo, from the theme's blue and magenta
+        Tone::Indigo => theme.accent.mix(theme.ansi[5], 0.5),
+    }
+}
+
+/// `n` for a short chip: `970`, `2.1k`, `12k`.
+fn compact(n: u64) -> String {
+    match n {
+        0..=999 => n.to_string(),
+        1000..=9999 => format!("{:.1}k", n as f64 / 1000.0),
+        _ => format!("{}k", n / 1000),
+    }
+}
+
+/// `3.12.4` → `3.12` for a short chip; anything else (a virtualenv's name)
+/// stays.
+fn short_version(v: &str) -> String {
+    let parts: Vec<&str> = v.split('.').collect();
+    if parts.len() > 2
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+    {
+        parts[..2].join(".")
+    } else {
+        v.to_string()
+    }
+}
+
+/// The last component of a (home-shortened) folder: `~/xxx/flow` → `flow`.
+fn folder_name(cwd: &str) -> &str {
+    cwd.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .filter(|n| !n.is_empty())
+        .unwrap_or(cwd)
+}
+
+/// A compose project that needs a look: a container down or unhealthy.
+fn docker_attention(d: &ComposeInfo) -> bool {
+    d.error.is_none()
+        && d.containers
+            .iter()
+            .any(|c| !c.running() || c.health == Some(Health::Unhealthy))
+}
+
 /// The chips `chips` lists that have something to show, in order.
 pub fn views(chips: &[PromptChip], theme: &Theme, i: &Inputs) -> Vec<ChipView> {
     chips
         .iter()
         .filter_map(|&chip| {
-            let one = |glyph, icon_color, text: String, color| {
-                (!text.is_empty()).then(|| ChipView {
-                    chip,
-                    glyph,
-                    icon_color,
-                    texts: vec![(text, color)],
-                })
+            // `parts` is what the desktop draws; `short` (the phone's narrow
+            // row) defaults to the same
+            let build = |glyph, icon: Tone, parts: Vec<(String, Tone)>| ChipView {
+                chip,
+                glyph,
+                icon_color: tone_color(theme, icon),
+                texts: parts
+                    .iter()
+                    .map(|(t, tone)| (t.clone(), tone_color(theme, *tone)))
+                    .collect(),
+                icon_tone: icon,
+                short: parts.clone(),
+                parts,
+                attention: false,
+            };
+            let one = |glyph, icon, text: String, tone| {
+                (!text.is_empty()).then(|| build(glyph, icon, vec![(text, tone)]))
             };
             let var = |name: &str| i.vars.get(name).cloned().unwrap_or_default();
             match chip {
-                PromptChip::Cwd => Some(ChipView {
-                    chip,
-                    glyph: glyphs::FOLDER,
-                    icon_color: theme.text_dim,
-                    texts: vec![(i.cwd.to_string(), theme.text_bright)],
-                }),
+                PromptChip::Cwd => {
+                    let mut v = build(
+                        glyphs::FOLDER,
+                        Tone::Dim,
+                        vec![(i.cwd.to_string(), Tone::Bright)],
+                    );
+                    v.short = vec![(folder_name(i.cwd).to_string(), Tone::Bright)];
+                    Some(v)
+                }
                 PromptChip::GitBranch => {
                     let g = i.git?;
-                    let mut texts = vec![(g.branch.clone(), theme.text_ui)];
+                    let mut parts = vec![(g.branch.clone(), Tone::Ui)];
                     let mut marks = Vec::new();
                     if g.ahead > 0 {
                         marks.push(format!("↑{}", g.ahead));
@@ -201,115 +340,103 @@ pub fn views(chips: &[PromptChip], theme: &Theme, i: &Inputs) -> Vec<ChipView> {
                         marks.push("•".into());
                     }
                     if !marks.is_empty() {
-                        texts.push((marks.join(" "), theme.text_muted));
+                        parts.push((marks.join(" "), Tone::Muted));
                     }
-                    Some(ChipView {
-                        chip,
-                        glyph: glyphs::BRANCH,
-                        icon_color: theme.success,
-                        texts,
-                    })
+                    let mut v = build(glyphs::BRANCH, Tone::Success, parts);
+                    // the arrows go; the dirty dot stays
+                    v.short = vec![(g.branch.clone(), Tone::Ui)];
+                    if g.dirty {
+                        v.short.push(("•".into(), Tone::Muted));
+                    }
+                    Some(v)
                 }
                 PromptChip::GitDiff => {
                     let g = i.git.filter(|g| g.files > 0)?;
-                    Some(ChipView {
-                        chip,
-                        glyph: glyphs::DIFF,
-                        icon_color: theme.text_dim,
-                        texts: vec![
-                            (g.files.to_string(), theme.text_ui),
-                            ("•".into(), theme.text_muted),
-                            (format!("+{}", g.added), theme.success),
-                            (format!("−{}", g.removed), theme.error),
+                    let mut v = build(
+                        glyphs::DIFF,
+                        Tone::Dim,
+                        vec![
+                            (g.files.to_string(), Tone::Ui),
+                            ("•".into(), Tone::Muted),
+                            (format!("+{}", g.added), Tone::Success),
+                            (format!("−{}", g.removed), Tone::Error),
                         ],
-                    })
+                    );
+                    v.short = vec![
+                        (g.files.to_string(), Tone::Ui),
+                        (format!("+{}", compact(g.added as u64)), Tone::Success),
+                        (format!("−{}", compact(g.removed as u64)), Tone::Error),
+                    ];
+                    Some(v)
                 }
-                PromptChip::User => one(
-                    glyphs::USER,
-                    theme.accent,
-                    i.user.to_string(),
-                    theme.text_bright,
-                ),
+                PromptChip::User => {
+                    one(glyphs::USER, Tone::Accent, i.user.to_string(), Tone::Bright)
+                }
                 PromptChip::Host => one(
                     glyphs::LAPTOP,
-                    theme.accent,
+                    Tone::Accent,
                     i.host.to_string(),
-                    theme.text_bright,
+                    Tone::Bright,
                 ),
-                PromptChip::Python => one(
-                    glyphs::PYTHON,
-                    theme.warning,
-                    Some(var("RiftPython"))
+                PromptChip::Python => {
+                    let text = Some(var("RiftPython"))
                         .filter(|v| !v.is_empty())
                         .or_else(|| i.python.clone())
-                        .unwrap_or_default(),
-                    theme.text_bright,
-                ),
-                PromptChip::Php => one(
-                    glyphs::PHP,
-                    // PHP's indigo, from the theme's blue and magenta
-                    theme.accent.mix(theme.ansi[5], 0.5),
-                    i.php.clone().unwrap_or_default(),
-                    theme.text_bright,
-                ),
+                        .unwrap_or_default();
+                    let mut v = one(glyphs::PYTHON, Tone::Warning, text.clone(), Tone::Bright)?;
+                    v.short = vec![(short_version(&text), Tone::Bright)];
+                    Some(v)
+                }
+                PromptChip::Php => {
+                    let text = i.php.clone().unwrap_or_default();
+                    let mut v = one(glyphs::PHP, Tone::Indigo, text.clone(), Tone::Bright)?;
+                    v.short = vec![(short_version(&text), Tone::Bright)];
+                    Some(v)
+                }
                 PromptChip::GithubPr => {
                     let pr = i.pr?;
                     // the GitHub mark and `PR #n` in one colour: the open
                     // PR's yellow, else its state's
-                    let (color, state) = match pr.state {
-                        PrState::Open => (theme.warning, None),
-                        PrState::Draft => (theme.text_dim, Some("draft")),
-                        PrState::Merged => (theme.ansi[5], Some("merged")),
-                        PrState::Closed => (theme.error, Some("closed")),
+                    let (tone, state) = match pr.state {
+                        PrState::Open => (Tone::Warning, None),
+                        PrState::Draft => (Tone::Dim, Some("draft")),
+                        PrState::Merged => (Tone::Magenta, Some("merged")),
+                        PrState::Closed => (Tone::Error, Some("closed")),
                     };
-                    let mut texts = vec![(format!("PR #{}", pr.number), color)];
+                    let mut parts = vec![(format!("PR #{}", pr.number), tone)];
                     if let Some(s) = state {
-                        texts.push((s.into(), theme.text_muted));
+                        parts.push((s.into(), Tone::Muted));
                     }
-                    Some(ChipView {
-                        chip,
-                        glyph: glyphs::GITHUB,
-                        icon_color: color,
-                        texts,
-                    })
+                    let mut v = build(glyphs::GITHUB, tone, parts);
+                    v.short = vec![(format!("#{}", pr.number), tone)];
+                    Some(v)
                 }
                 PromptChip::Docker => {
                     let d = i.docker?;
-                    let (count, color) = match (d.error.is_some(), d.running()) {
-                        (true, _) => ("off".to_string(), theme.text_muted),
-                        (false, 0) => ("down".to_string(), theme.text_muted),
-                        (false, n) => (format!("{n}/{}", d.containers.len()), theme.success),
+                    let (count, tone) = match (d.error.is_some(), d.running()) {
+                        (true, _) => ("off".to_string(), Tone::Muted),
+                        (false, 0) => ("down".to_string(), Tone::Muted),
+                        (false, n) => (format!("{n}/{}", d.containers.len()), Tone::Success),
                     };
-                    Some(ChipView {
-                        chip,
-                        glyph: glyphs::DOCKER,
-                        icon_color: theme.accent,
-                        texts: vec![(d.project.clone(), theme.text_bright), (count, color)],
-                    })
+                    let mut v = build(
+                        glyphs::DOCKER,
+                        Tone::Accent,
+                        vec![(d.project.clone(), Tone::Bright), (count.clone(), tone)],
+                    );
+                    v.short = vec![(count, tone)];
+                    v.attention = docker_attention(d);
+                    Some(v)
                 }
-                PromptChip::Date => one(
-                    glyphs::CALENDAR,
-                    theme.text_dim,
-                    i.now.date(),
-                    theme.text_ui,
-                ),
-                PromptChip::Time12 => {
-                    one(glyphs::CLOCK, theme.text_dim, i.now.time12(), theme.text_ui)
-                }
-                PromptChip::Time24 => {
-                    one(glyphs::CLOCK, theme.text_dim, i.now.time24(), theme.text_ui)
-                }
+                PromptChip::Date => one(glyphs::CALENDAR, Tone::Dim, i.now.date(), Tone::Ui),
+                PromptChip::Time12 => one(glyphs::CLOCK, Tone::Dim, i.now.time12(), Tone::Ui),
+                PromptChip::Time24 => one(glyphs::CLOCK, Tone::Dim, i.now.time24(), Tone::Ui),
                 PromptChip::Elapsed => {
                     let e = i.elapsed?;
                     one(
                         glyphs::HOURGLASS,
-                        if e.counting {
-                            theme.text_dim
-                        } else {
-                            theme.text_muted
-                        },
+                        if e.counting { Tone::Dim } else { Tone::Muted },
                         elapsed_text(e.time),
-                        theme.text_ui,
+                        Tone::Ui,
                     )
                 }
             }
@@ -524,6 +651,173 @@ mod tests {
             assert_eq!(sample(chip, &theme).chip, chip);
         }
         assert_eq!(texts(&sample(PromptChip::GitDiff, &theme)), "3 • +10 −2");
+    }
+
+    /// What a pane with Docker, Python, a PR, a dirty tree and a running
+    /// tab clock sends a phone: the configured order, full and short values
+    /// as tones, and the attention flag of a container that is down.
+    #[test]
+    fn a_phone_gets_the_chips_the_desktop_draws() {
+        use rift_core::docker::Container;
+        let theme = Theme::default();
+        let git = GitInfo {
+            branch: "release/3.16.0".into(),
+            ahead: 2,
+            behind: 0,
+            dirty: true,
+            files: 102,
+            added: 2086,
+            removed: 970,
+        };
+        let pr = PrInfo {
+            number: 42,
+            url: "https://github.com/me/flow/pull/42".into(),
+            state: PrState::Open,
+        };
+        let web = Container {
+            service: "api".into(),
+            name: "flow-api-1".into(),
+            state: "running".into(),
+            status: "Up 2 hours".into(),
+            image: "nginx".into(),
+            ports: Vec::new(),
+            health: None,
+        };
+        let worker = Container {
+            service: "worker".into(),
+            state: "exited".into(),
+            status: "Exited (1) 3 minutes ago".into(),
+            ..web.clone()
+        };
+        let compose = |containers: Vec<Container>| ComposeInfo {
+            project: "flow".into(),
+            dir: "/Users/me/flow".into(),
+            containers,
+            error: None,
+        };
+        let down = compose(vec![web.clone(), worker]);
+        let vars: HashMap<String, String> = HashMap::new();
+        // the pane's configured order, not the palette's
+        let order = [
+            PromptChip::Cwd,
+            PromptChip::GitBranch,
+            PromptChip::GitDiff,
+            PromptChip::GithubPr,
+            PromptChip::Python,
+            PromptChip::Docker,
+            PromptChip::Php,
+            PromptChip::Elapsed,
+        ];
+        let wire = |c: &ComposeInfo| -> Vec<rift_remote::protocol::PaneChip> {
+            let inputs = Inputs {
+                cwd: "~/xxx/flow",
+                git: Some(&git),
+                user: "me",
+                host: "mac",
+                vars: &vars,
+                python: Some("3.12.4".into()),
+                php: None,
+                pr: Some(&pr),
+                docker: Some(c),
+                now: LocalTime::default(),
+                elapsed: Some(Elapsed {
+                    time: std::time::Duration::from_secs(6 * 3600 + 33 * 60),
+                    counting: true,
+                }),
+            };
+            views(&order, &theme, &inputs)
+                .iter()
+                .map(ChipView::wire)
+                .collect()
+        };
+        let chips = wire(&down);
+        // no PHP: it is left out, the rest keep their order
+        let kinds: Vec<_> = chips
+            .iter()
+            .map(|c| serde_json::to_value(c.kind).unwrap())
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                "cwd",
+                "git_branch",
+                "git_diff",
+                "github_pr",
+                "python",
+                "docker",
+                "elapsed"
+            ]
+        );
+        let json = serde_json::to_value(&chips).unwrap();
+        // short values: the folder's name, branch with its dot, compact
+        // lines, PR number, a version without its patch, the count only
+        let short = |i: usize| -> String {
+            json[i]["short"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| p["text"].as_str().unwrap())
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let shorts: Vec<String> = (0..7).map(short).collect();
+        assert_eq!(
+            shorts,
+            [
+                "flow",
+                "release/3.16.0 •",
+                "102 +2.1k −970",
+                "#42",
+                "3.12",
+                "1/2",
+                "6h 33m"
+            ]
+        );
+        // full values are what the desktop draws
+        assert_eq!(
+            json[0]["full"][0],
+            serde_json::json!({"text":"~/xxx/flow","tone":"bright"})
+        );
+        assert_eq!(
+            json[1]["full"][1],
+            serde_json::json!({"text":"↑2 •","tone":"muted"})
+        );
+        assert_eq!(json[4]["full"][0]["text"], "3.12.4");
+        assert_eq!(
+            json[5]["full"][1],
+            serde_json::json!({"text":"1/2","tone":"success"})
+        );
+        assert_eq!(json[3]["icon"], "warning");
+        // a container down needs a look; everything running does not
+        let attention: Vec<bool> = chips.iter().map(|c| c.attention).collect();
+        assert_eq!(attention, [false, false, false, false, false, true, false]);
+        assert!(!wire(&compose(vec![web.clone()]))[5].attention);
+        // an unhealthy one needs a look too
+        let mut sick = web.clone();
+        sick.health = Some(Health::Unhealthy);
+        assert!(wire(&compose(vec![sick]))[5].attention);
+        // Docker not running: "off", muted, no attention (nothing to look at)
+        let mut off = compose(Vec::new());
+        off.error = Some("Docker is not running".into());
+        assert!(!wire(&off)[5].attention);
+        // the flag is left out of the JSON unless set
+        assert!(json[0].get("attention").is_none());
+        assert_eq!(json[5]["attention"], true);
+    }
+
+    #[test]
+    fn short_values_keep_what_is_not_a_version() {
+        assert_eq!(short_version("3.12.4"), "3.12");
+        assert_eq!(short_version("8.3"), "8.3");
+        assert_eq!(short_version("my-venv"), "my-venv");
+        assert_eq!(short_version("3.12.4rc1"), "3.12.4rc1");
+        assert_eq!(compact(970), "970");
+        assert_eq!(compact(2086), "2.1k");
+        assert_eq!(compact(12400), "12k");
+        assert_eq!(folder_name("~/xxx/flow"), "flow");
+        assert_eq!(folder_name("~"), "~");
+        assert_eq!(folder_name("/"), "/");
+        assert_eq!(folder_name("/usr/"), "usr");
     }
 
     #[test]

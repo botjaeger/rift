@@ -218,6 +218,14 @@ pub enum Request {
         #[serde(default)]
         rows: Option<u16>,
     },
+    /// A paired phone's Reset on the Time on tab card, sent by the remote
+    /// gateway: restarts the clock of the tab holding `pane`, as the
+    /// card's own Reset does. Accepted only while `remote_access` is on,
+    /// like `remote-input`.
+    RemoteResetElapsed {
+        pane: u64,
+        device: String,
+    },
     /// Sent by the remote gateway whenever its `status.json` changed (it
     /// started, a phone connected or left): the window re-reads it at once
     /// (the tab-bar chip), even when idle. Read-only.
@@ -249,6 +257,7 @@ impl Request {
             | Request::RemoteStatus
             | Request::RemoteInput { .. }
             | Request::RemoteFit { .. }
+            | Request::RemoteResetElapsed { .. }
             | Request::RemoteOpen { .. }
             | Request::RemoteClose { .. } => Level::Remote,
             Request::List | Request::Focus { .. } | Request::PrepareRestart { .. } => {
@@ -277,6 +286,10 @@ pub struct PaneInfo {
     /// a repository, and before the window looked).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git: Option<rift_remote::protocol::PaneGit>,
+    /// The prompt chips the pane shows, as the desktop renders them (a
+    /// paired phone's chip row); absent from older windows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chips: Option<Vec<rift_remote::protocol::PaneChip>>,
     /// What the pane's running command waits for (a password, an agent's
     /// menu, an unread "needs your input"); absent when nothing waits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1070,6 +1083,8 @@ mod tests {
             r#"{"cmd":"screen","pane":1}"#,
             r#"{"cmd":"output","pane":1,"block":2,"from":0,"limit":10}"#,
             r#"{"cmd":"menu","pane":1,"kind":"changes"}"#,
+            r#"{"cmd":"menu","pane":1,"kind":"docker"}"#,
+            r#"{"cmd":"remote-reset-elapsed","pane":1,"device":"d"}"#,
             r#"{"cmd":"diff","pane":1,"path":"a.rs"}"#,
             r#"{"cmd":"complete","pane":1,"line":"ls","cursor":2}"#,
             r#"{"cmd":"remote-open","pane":1,"device":"d","kind":"tab"}"#,

@@ -31,7 +31,10 @@ import {
   type OpenKind,
   type OutputMsg,
   type ChipAnswerMsg,
+  type ChipDetailKind,
+  type ChipMsg,
   type ChipRequestMsg,
+  type ChipDetailRequestMsg,
   type CompleteMsg,
   type CompleteRequestMsg,
   type DiffMsg,
@@ -545,6 +548,24 @@ export class RiftClient {
     >;
   }
 
+  /**
+   * What a pull request, interpreter, Docker or Time on tab chip opens (feature `prompt_chips`):
+   * resolves like `chipMenu`.
+   */
+  chipDetail<K extends ChipDetailKind>(pane: number, kind: K): Promise<ChipResult<Extract<ChipMsg, { kind: K }>>> {
+    return this.askChip(
+      { t: "chip", id: "", pane, kind },
+      (m) => m.t === "chip" && m.pane === pane && m.kind === kind,
+    ) as Promise<ChipResult<Extract<ChipMsg, { kind: K }>>>;
+  }
+
+  /** Restarts the pane's tab clock (feature `prompt_chips`); returns the `ack` id, or null when not connected. */
+  resetElapsed(pane: number): string | null {
+    if (!this.authed) return null;
+    const id = `e${++this.idN}`;
+    return this.send({ t: "reset_elapsed", id, pane }) ? id : null;
+  }
+
   /** One changed file's diff (`no_block` when it is no longer a change). */
   diff(pane: number, path: string, staged: boolean): Promise<ChipResult<DiffMsg>> {
     return this.askChip(
@@ -566,7 +587,7 @@ export class RiftClient {
   }
 
   private askChip(
-    req: ChipRequestMsg | DiffRequestMsg | CompleteRequestMsg,
+    req: ChipRequestMsg | ChipDetailRequestMsg | DiffRequestMsg | CompleteRequestMsg,
     fits: (m: ChipAnswerMsg) => boolean,
   ): Promise<ChipResult<ChipAnswerMsg>> {
     const id = this.authed ? `c${++this.idN}` : null;
@@ -906,6 +927,7 @@ export class RiftClient {
       case "dirs":
       case "branches":
       case "changes":
+      case "chip":
       case "diff":
       case "complete":
         this.settleChip(msg.id, msg);

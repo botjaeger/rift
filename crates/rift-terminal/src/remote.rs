@@ -194,6 +194,7 @@ impl Source for ControlSource {
                                 last_command: p.last_command,
                                 last_exit: p.last_exit,
                                 git: p.git,
+                                chips: p.chips,
                                 waiting: p.waiting,
                                 running: p.running,
                             }
@@ -328,6 +329,23 @@ impl Source for ControlSource {
             pane: local_pane(pane),
             cols: size.map(|s| s.0),
             rows: size.map(|s| s.1),
+        };
+        match self.ask(pane, &req) {
+            Ok(Some(r)) if r.ok => Ok(()),
+            Ok(Some(r)) => Err(input_error(r.error.as_deref().unwrap_or_default())),
+            Ok(None) => Err(InputError::NoPane),
+            Err(e) => Err(InputError::Unavailable(e.to_string())),
+        }
+    }
+
+    fn reset_elapsed(&self, pane: u64, device: &str) -> Result<(), InputError> {
+        // a background shell has no tab clock
+        if is_background(pane) {
+            return Err(InputError::NoPane);
+        }
+        let req = Request::RemoteResetElapsed {
+            pane: local_pane(pane),
+            device: device.to_string(),
         };
         match self.ask(pane, &req) {
             Ok(Some(r)) if r.ok => Ok(()),

@@ -18,25 +18,17 @@ import { draftKey } from "@/fleet";
 import { applySticky, keyEventToAction, stickyKey } from "@/keyboard";
 import { keysNeedAuth } from "@/lock";
 import { authenticate, fleet, useApp } from "@/runtime";
-import {
-  branchText,
-  chipRowMode,
-  chipsSpoken,
-  completionRows,
-  diffChipText,
-  NO_COMPLETIONS,
-  NO_COMPLETIONS_PROGRAM,
-  type ChipMenuKind,
-  type PromptChips,
-} from "@/chips";
+import { chipRowMode, completionRows, NO_COMPLETIONS, NO_COMPLETIONS_PROGRAM } from "@/chips";
 import { programSend } from "@/paneView";
+import type { ChipItem, ChipOpen } from "@/promptChips";
 import { showsKeyRow } from "@/terminal";
+import { ChipRow } from "./ChipRow";
 import { ControlRow, NO_STICKY, type Sticky } from "./ControlRow";
 import { insertedChar, plainPunctuation } from "./format";
 import { Icon } from "./Icon";
 import { ErrorText } from "./Notice";
 import { useOpenShell } from "./useOpenShell";
-import { colors, mono, TOUCH, tints, ui } from "./theme";
+import { colors, mono, TOUCH, ui } from "./theme";
 import { toggleA11y } from "./toggle";
 
 /** Suggestions shown above the command line (the P3 Pane board). */
@@ -44,17 +36,10 @@ const MAX_SUGGESTIONS = 6;
 /** Wait this long after typing stops before asking the computer for completions. */
 const COMPLETE_DELAY_MS = 200;
 
-/** The chips above the empty field (the Pane board): the folder's path, the branch with its dirty dot. */
-function folderLines(chips: PromptChips): { path: string; branch: string | null } | null {
-  if (!chips.cwd) return null;
-  const b = chips.branch;
-  return { path: chips.cwd, branch: b ? `⎇ ${branchText(b)}${b.dirty ? " ●" : ""}` : null };
-}
-
 /**
  * The pane's command line (operate permission only; the P3 Pane board): one row above the field
- * that is the prompt chips while the field is empty (folder, branch, changed files: each opens its
- * menu) and the completions while the user types (the desktop's, feature `complete`, and this
+ * that is the prompt chips while the field is empty (the desktop's, in its order, as many as fit and
+ * "+N" for the rest; each opens its menu) and the completions while the user types (the desktop's, feature `complete`, and this
  * pane's history, typed part bright, the rest dim, with where each comes from); the round field
  * with its run button; and ⌃, which shows the control-key row (Settings › Keys) under the field,
  * so the field stays in sight above it while the keyboard is up (Return runs too; through the Confirm sheet only with Settings › Ask before
@@ -70,7 +55,6 @@ export function Composer({
   program,
   online,
   chips,
-  chipMenus,
   complete,
   recent,
   label,
@@ -83,9 +67,8 @@ export function Composer({
   /** The running program's name ("claude"), for the field's placeholder. */
   program: string;
   online: boolean;
-  chips: PromptChips;
-  /** The computer serves the chips' menus (feature `chips`): the folder button opens them. */
-  chipMenus: boolean;
+  /** The pane's prompt chips (promptChips.ts `chipItems`). */
+  chips: ChipItem[];
   /** The computer completes command lines (feature `complete`). */
   complete: boolean;
   /** The pane's recent commands, newest first (suggestions without `complete`). */
@@ -255,12 +238,15 @@ export function Composer({
     else AccessibilityInfo.announceForAccessibility("Command sent");
   };
 
-  const openMenu = (menu: ChipMenuKind) => {
+  const openMenu = (menu: ChipOpen) => {
     // the sheet opened over the keyboard would take the full height
     Keyboard.dismiss();
     router.push({ pathname: "/chips", params: { key: hostKey, pane: String(paneId), menu } });
   };
-  const folder = folderLines(chips);
+  const openAll = () => {
+    Keyboard.dismiss();
+    router.push({ pathname: "/pane-chips", params: { key: hostKey, pane: String(paneId) } });
+  };
   const stickyName = [sticky.ctrl ? "ctrl" : null, sticky.alt ? "alt" : null, sticky.shift ? "shift" : null].filter(Boolean).join("+");
   const canRun = online && !waiting && draft.trim() !== "";
   // the computer's answer for this draft (or the last one, while the next is on its way), then the pane's history
@@ -272,7 +258,7 @@ export function Composer({
   );
   // "No completions" only once the computer has answered for this very draft
   const settled = !(complete && online) || completed?.draft === draft;
-  const hasChips = !!folder || !!chips.diff;
+  const hasChips = chips.length > 0;
 
   return (
     <KeyCaptureView
@@ -321,63 +307,7 @@ export function Composer({
           )}
         </ScrollView>
       ) : hasChips ? (
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          style={styles.chipStrip}
-          contentContainerStyle={styles.chips}
-          keyboardShouldPersistTaps="always"
-          accessibilityRole="toolbar"
-          accessibilityLabel={chipsSpoken(chips) || "Folder, branch and changes"}
-        >
-          {folder ? (
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={`Folder ${chips.cwd}${chipMenus ? ", change" : ""}`}
-              accessibilityHint={chipMenus ? "Opens the folder's sub-folders" : undefined}
-              accessibilityState={{ disabled: !chipMenus }}
-              disabled={!chipMenus}
-              onPress={() => openMenu("dirs")}
-              hitSlop={{ top: 6, bottom: 6 }}
-              style={({ pressed }) => [styles.chip, styles.folderChip, pressed && styles.pressed]}
-            >
-              <Icon name="folder" size={13} color={colors.accent} />
-              <Text style={[styles.chipText, { color: colors.accent }]} numberOfLines={1} ellipsizeMode="head">
-                {folder.path}
-              </Text>
-            </Pressable>
-          ) : null}
-          {folder?.branch ? (
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={`Branch ${chips.branch!.name}${chips.branch!.dirty ? ", has changes" : ""}${chipMenus ? ", switch" : ""}`}
-              accessibilityState={{ disabled: !chipMenus }}
-              disabled={!chipMenus}
-              onPress={() => openMenu("branches")}
-              hitSlop={{ top: 6, bottom: 6 }}
-              style={({ pressed }) => [styles.chip, styles.branchChip, pressed && styles.pressed]}
-            >
-              <Text style={[styles.chipText, { color: colors.success }]} numberOfLines={1}>
-                {folder.branch}
-              </Text>
-            </Pressable>
-          ) : null}
-          {chips.diff ? (
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={`${chips.diff.files} ${chips.diff.files === 1 ? "file" : "files"} changed${chipMenus ? ", review" : ""}`}
-              accessibilityState={{ disabled: !chipMenus }}
-              disabled={!chipMenus}
-              onPress={() => openMenu("changes")}
-              hitSlop={{ top: 6, bottom: 6 }}
-              style={({ pressed }) => [styles.chip, styles.suggestion, pressed && styles.pressed]}
-            >
-              <Text style={styles.chipText} numberOfLines={1}>
-                {diffChipText(chips.diff)}
-              </Text>
-            </Pressable>
-          ) : null}
-        </ScrollView>
+        <ChipRow items={chips} onOpen={(c) => c.opens && openMenu(c.opens)} onMore={openAll} />
       ) : null}
       {shownError ? <ErrorText>{shownError}</ErrorText> : null}
       <View style={[styles.inputRow, waiting && styles.waiting]}>
@@ -461,13 +391,11 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   pressed: { opacity: 0.7 },
-  // the strip reaches 6 pt past the 32 pt chips (a scroll view takes no touch outside it): a 44 pt touch
+  // the completions' strip reaches 6 pt past the 32 pt chips (a scroll view takes no touch outside it): a 44 pt touch
   chipStrip: { marginVertical: -6, flexGrow: 0 },
   chips: { gap: 6, paddingVertical: 6 },
-  // 32 pt chips, 8 pt radius, mono 12: the folder on the accent tint, the branch on the success tint, suggestions outlined
+  // a completion: 32 pt, 8 pt radius, mono 12, outlined
   chip: { height: 32, paddingHorizontal: 10, borderRadius: 8, flexDirection: "row", alignItems: "center", gap: 5, maxWidth: 260 },
-  folderChip: { backgroundColor: tints.accentBadge, maxWidth: 170 },
-  branchChip: { backgroundColor: tints.successBadge },
   suggestion: { borderWidth: 1, borderColor: colors.glassRim },
   chipText: { fontFamily: mono, color: colors.text, fontSize: 12, flexShrink: 1 },
   // a completion: what was typed bright, the rest dim, the source small after it

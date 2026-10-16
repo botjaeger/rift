@@ -5,7 +5,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { tildePath } from "@/chips";
 import { canOperate, draftKey } from "@/fleet";
 import { needsAuthBeforeRun } from "@/lock";
-import { chipCommand, type ChipAction } from "@/chips";
+import { chipCommand, isMenuCommand, type ChipAction } from "@/chips";
 import { commandProblem, MAX_MENU_NAME } from "@/protocol/types";
 import { authenticate, fleet, useApp, useLock } from "@/runtime";
 import { findPane, paneBranch, paneTitle, runningCommand } from "@/topology";
@@ -13,8 +13,13 @@ import { Button } from "@/ui/Button";
 import { ErrorText, WarningText } from "@/ui/Notice";
 import { colors, mono, radius, ui } from "@/ui/theme";
 
-/** A chip pick from the sheet's params: `cd` a folder, `checkout` or `create` a branch. */
+/** A `run` pick's command is at most the gateway's 2 KiB. */
+const MAX_COMMAND_CHARS = 2048;
+
+/** A chip pick from the sheet's params: `cd` a folder, `checkout` or `create` a branch, `run` a version or container pick. */
 function chipAction(kind: string | undefined, arg: string | undefined): ChipAction | null {
+  // a version or container pick is the desktop's whole command, but only in the shapes its menus build
+  if (kind === "run") return typeof arg === "string" && arg.length <= MAX_COMMAND_CHARS && isMenuCommand(arg) ? { kind, command: arg } : null;
   if (typeof arg !== "string" || arg === "" || arg.length > MAX_MENU_NAME || /[\n\r]/.test(arg)) return null;
   if (kind === "cd") return { kind: "cd", name: arg };
   if (kind === "checkout" || kind === "create") return { kind, branch: arg };

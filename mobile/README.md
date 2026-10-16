@@ -175,10 +175,14 @@ card cannot answer (a password, other input, a view-only device), and from an al
   (after the zoom settles, again every 10 s, released when the screen closes), the text is drawn
   at that size, and the program's lines wrap to the phone's width. Without `fit` the text shrinks
   to the program's columns as before.
-  Above the command line: the folder chip (path) and the branch chip (with a dot for uncommitted
-  changes) then suggestions (the desktop's completions for what is typed and this pane's history,
-  feature `complete`; else its recent commands); the folder chip opens the folder, branch and
-  changed-files menus. Under them **⌃**, which shows the key row above the chips, and the round
+  Above the command line: the prompt chips (feature `prompt_chips`: what the desktop draws for the
+  pane, in its order, each chip's short value in the desktop's colours; one row that never wraps or
+  scrolls, the chips that fit by their measured widths and the rest folded into **+N** with a dot
+  for each folded chip that needs attention; **+N** opens the *This pane* sheet, `pane-chips`,
+  listing every chip with its full value; a tap opens the chip's menu). A desktop without the
+  feature gets the folder, branch and changed-files chips from `cwd` and `git`. While typing the
+  row is the suggestions (the desktop's completions for what is typed and this pane's history,
+  feature `complete`; else its recent commands). Under them **⌃**, which shows the key row above the chips, and the round
   field with its run button (Return runs too). While a program runs (Claude Code, a build) the field
   talks to it: "Message for claude", a **Send** button, and Return sends the line as typed text
   and then Return as a key, a second request so the program reads it as a message (feature
@@ -208,8 +212,15 @@ card cannot answer (a password, other input, a view-only device), and from an al
   entries outlined ("Yes, this session", "Yes, always", "No…"), and a **Keys** row (Esc, ⇧Tab, ↑,
   ↓). **No…** opens a field, "Tell Claude what to do instead", with a send button and **Back to
   the answers**. Answers go as the Answer page's do.
-- **Chip menus** (a computer whose welcome lists `chips`; otherwise the folder button does
-  nothing), as the desktop's: the folder opens the parent and sub-folders (searchable) and picking one
+- **Pull request, Python, PHP, Docker and Time on tab menus** (feature `prompt_chips`): the pull
+  request opens its URL in the browser (`https` only); Python and PHP list the installed versions
+  and a pick runs the desktop's own `rift-use …`; Docker lists containers (ports, uptime, health)
+  and a pick follows the service's logs; Time on tab shows the desktop's line and **Reset**
+  (operate only). A pick runs as the command line's Run does (the Confirm sheet first with Ask
+  before running); only the two command shapes these menus build are accepted
+  (`src/chips.ts` `isMenuCommand`). Logic: `src/promptChips.ts`; the row: `src/ui/ChipRow.tsx`.
+- **Chip menus** (a computer whose welcome lists `chips`; otherwise the folder, branch and changes
+  chips do nothing), as the desktop's: the folder opens the parent and sub-folders (searchable) and picking one
   runs `cd ..` / `cd ./<name>`; the branch chip the local branches, the current one checked,
   and picking one runs `git checkout <name>` (a new name typed in the search: `git checkout -b`);
   the changed-files chip the code review panel's files, staged first, and a file opens its diff,
@@ -478,7 +489,8 @@ one-day minimum release age by exact version only.
   hosts and settings over a key-value store; `src/runtime.ts` wires them to expo-secure-store,
   expo-crypto, expo-notifications, expo-network, expo-local-authentication,
   expo-screen-capture and AppState.
-- `src/chips.ts` — the prompt chips and their menus; `src/now.ts` — the tab rows and their
+- `src/chips.ts` — the folder, branch and changes chips and their menus; `src/promptChips.ts` — the
+  desktop's prompt chips, the row's fit and the new menus' rows; `src/now.ts` — the tab rows and their
   states (Portals, Tabs sheet), the pane's folds and swipe target; `src/paneView.ts` — the Panes
   sheet's rows, block-card text, tables, log lines, the question card's context, the terminal
   zoom; `src/ui/settingsText.ts` — Settings' texts; `src/answer.ts` — what an answer sends;

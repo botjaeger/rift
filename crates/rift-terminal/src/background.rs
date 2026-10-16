@@ -216,6 +216,7 @@ impl Background {
                         last_command: recent.as_ref().map(|r| r.0.clone()),
                         last_exit: recent.and_then(|r| r.1),
                         git: None,
+                        chips: None,
                         waiting: None,
                         running: crate::views::terminal::remote_running(&s.session),
                     }],

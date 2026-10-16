@@ -6,6 +6,7 @@
 //! ordinary command in the pane, so the shell's own state follows and the
 //! block shows what happened.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use rift_core::docker::{ComposeInfo, Container, Health};
@@ -142,6 +143,16 @@ pub fn remote_menu(kind: rift_remote::MenuKind, cwd: Option<&str>) -> rift_remot
     use rift_remote::{Menu, MenuKind};
     let dir = cwd.map(Path::new);
     match kind {
+        // answered from the pane's own state, not its folder (`remote_pr`,
+        // `remote_runtimes`, `remote_docker`, `remote_elapsed`); a menu of
+        // the wrong kind makes the gateway refuse the request
+        MenuKind::Pr | MenuKind::Python | MenuKind::Php | MenuKind::Docker | MenuKind::Elapsed => {
+            Menu::Dirs {
+                cwd: None,
+                parent: false,
+                dirs: Vec::new(),
+            }
+        }
         MenuKind::Dirs => Menu::Dirs {
             cwd: cwd.map(str::to_string),
             parent: dir.is_some_and(|d| d.parent().is_some()),
@@ -187,6 +198,115 @@ pub fn remote_menu(kind: rift_remote::MenuKind, cwd: Option<&str>) -> rift_remot
                 files: Vec::new(),
             },
         },
+    }
+}
+
+/// The installed PHP or Python versions and the one the pane's shell runs
+/// (`vars`: its user variables), as the chip menu lists them.
+pub fn runtime_choices(
+    kind: ChipKind,
+    vars: &HashMap<String, String>,
+    cwd: &Path,
+) -> (Vec<Runtime>, Option<String>) {
+    use rift_core::runtimes;
+    let bin = |name: &str| vars.get(name).filter(|v| !v.is_empty()).map(PathBuf::from);
+    let home = runtimes::home();
+    let prefixes = runtimes::brew_prefixes();
+    if kind == ChipKind::Php {
+        let active = bin("RiftPhpBin").and_then(|b| runtimes::php_version(&b));
+        (runtimes::php_installs(&home, &prefixes), active)
+    } else {
+        let active = vars
+            .get("RiftPython")
+            .filter(|v| !v.is_empty())
+            .cloned()
+            .or_else(|| runtimes::python_version(&bin("RiftPythonBin")?, cwd));
+        // the shell's pyenv (its shims' root), else the default one
+        let pyenv = bin("RiftPythonBin")
+            .filter(|b| b.parent().is_some_and(|d| d.ends_with("shims")))
+            .and_then(|b| Some(b.parent()?.parent()?.to_path_buf()))
+            .or_else(runtimes::pyenv_root);
+        (
+            runtimes::python_installs(&home, &prefixes, pyenv.as_deref()),
+            active,
+        )
+    }
+}
+
+/// A paired phone's Python or PHP chip menu: the versions and the command
+/// that picks each (the desktop menu's own `rift-use …`).
+pub fn remote_runtimes(
+    kind: ChipKind,
+    vars: &HashMap<String, String>,
+    cwd: &Path,
+) -> rift_remote::protocol::ChipDetail {
+    use rift_remote::protocol::{ChipDetail, RuntimeVersion};
+    let (list, active) = runtime_choices(kind, vars, cwd);
+    let tool = if kind == ChipKind::Php {
+        "php"
+    } else {
+        "python"
+    };
+    let versions = list
+        .into_iter()
+        .map(|r| RuntimeVersion {
+            current: active.as_deref() == Some(r.version.as_str()),
+            command: command(&ChipAction::Use(r.command(tool))),
+            source: r.source.clone(),
+            version: r.version,
+        })
+        .collect();
+    if kind == ChipKind::Php {
+        ChipDetail::Php {
+            current: active,
+            versions,
+        }
+    } else {
+        ChipDetail::Python {
+            current: active,
+            versions,
+        }
+    }
+}
+
+/// A paired phone's pull request chip menu.
+pub fn remote_pr(pr: &rift_core::github::PrInfo) -> rift_remote::protocol::ChipDetail {
+    use rift_core::github::PrState;
+    rift_remote::protocol::ChipDetail::Pr {
+        number: pr.number,
+        state: match pr.state {
+            PrState::Open => "open",
+            PrState::Draft => "draft",
+            PrState::Merged => "merged",
+            PrState::Closed => "closed",
+        }
+        .into(),
+        url: pr.url.clone(),
+    }
+}
+
+/// A paired phone's Docker chip menu: the containers as the desktop's table
+/// lists them (running ones first), each with the command that follows its
+/// logs.
+pub fn remote_docker(info: &ComposeInfo) -> rift_remote::protocol::ChipDetail {
+    use rift_remote::protocol::{ChipDetail, ComposeContainer};
+    let mut containers: Vec<&Container> = info.containers.iter().collect();
+    containers.sort_by_key(|c| !c.running());
+    ChipDetail::Docker {
+        project: Some(info.project.clone()),
+        error: info.error.clone(),
+        containers: containers
+            .into_iter()
+            .map(|c| ComposeContainer {
+                service: c.service.clone(),
+                state: c.state.clone(),
+                running: c.running(),
+                ports: c.ports.clone(),
+                uptime: c.uptime(),
+                health: c.health.map(|h| h.label().to_string()),
+                logs: command(&ChipAction::Logs(info.dir.clone(), c.service.clone())),
+            })
+            .collect(),
     }
 }
 
@@ -743,6 +863,90 @@ pub fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A phone's Docker and PR menus carry the desktop's own commands and
+    /// columns, running containers first.
+    #[test]
+    fn a_phone_gets_the_docker_and_pr_menus_the_desktop_has() {
+        use rift_remote::protocol::ChipDetail;
+        let api = Container {
+            service: "api".into(),
+            name: "flow-api-1".into(),
+            state: "running".into(),
+            status: "Up 2 hours (healthy)".into(),
+            image: "x".into(),
+            ports: vec!["8080→8080".into()],
+            health: Some(Health::Healthy),
+        };
+        let worker = Container {
+            service: "wor'ker".into(),
+            state: "exited".into(),
+            status: "Exited (1) 3 minutes ago".into(),
+            ports: Vec::new(),
+            health: None,
+            ..api.clone()
+        };
+        let info = ComposeInfo {
+            project: "flow".into(),
+            dir: "/Users/me/my flow".into(),
+            containers: vec![worker, api],
+            error: None,
+        };
+        let ChipDetail::Docker {
+            project,
+            containers,
+            ..
+        } = remote_docker(&info)
+        else {
+            panic!("a docker menu");
+        };
+        assert_eq!(project.as_deref(), Some("flow"));
+        let rows: Vec<_> = containers
+            .iter()
+            .map(|c| {
+                (
+                    c.service.as_str(),
+                    c.running,
+                    c.uptime.as_str(),
+                    c.health.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("api", true, "2 hours", Some("healthy")),
+                ("wor'ker", false, "Exited (1) 3 minutes ago", None)
+            ]
+        );
+        assert_eq!(containers[0].ports, ["8080→8080"]);
+        // the command is the desktop menu's own, names shell-quoted
+        assert_eq!(
+            containers[1].logs,
+            command(&ChipAction::Logs(info.dir.clone(), "wor'ker".into()))
+        );
+        assert!(containers[1].logs.starts_with(
+            "docker compose --project-directory '/Users/me/my flow' logs --follow --tail 200 "
+        ));
+        assert!(
+            containers[1].logs.ends_with(r"'wor'\''ker'"),
+            "{}",
+            containers[1].logs
+        );
+        let pr = rift_core::github::PrInfo {
+            number: 7,
+            url: "https://github.com/me/flow/pull/7".into(),
+            state: rift_core::github::PrState::Merged,
+        };
+        assert_eq!(
+            remote_pr(&pr),
+            ChipDetail::Pr {
+                number: 7,
+                state: "merged".into(),
+                url: "https://github.com/me/flow/pull/7".into()
+            }
+        );
+    }
 
     #[test]
     fn dirs_list_the_parent_and_visible_subdirectories() {

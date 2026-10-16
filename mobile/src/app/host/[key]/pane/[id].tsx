@@ -17,7 +17,7 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { askingTitle, questionKey } from "@/answer";
-import { promptChips } from "@/chips";
+import { chipItems } from "@/promptChips";
 import { canClose, canOperate, draftKey, hasFeature, isAsked, wrapsLines } from "@/fleet";
 import { foldBlocks, paneName, programName, swipeTarget, type PaneItem } from "@/now";
 import { CLAUDE_COLOR, paneMark, runsAgent, showsViewSwitch, terminalViewOn, waitingOthers } from "@/paneView";
@@ -365,8 +365,11 @@ export default function PaneScreen() {
           running={running}
           program={program}
           online={status === "open"}
-          chips={promptChips(loc?.pane ?? null, state, hasFeature(host, "git"))}
-          chipMenus={hasFeature(host, "chips")}
+          chips={chipItems(loc?.pane ?? null, state, {
+            git: hasFeature(host, "git"),
+            menus: hasFeature(host, "chips"),
+            promptChips: hasFeature(host, "prompt_chips"),
+          })}
           complete={hasFeature(host, "complete") && operate}
           recent={recent}
           label={title}

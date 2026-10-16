@@ -199,6 +199,21 @@ pub enum ClientMsg {
         pane: u64,
         kind: CloseKind,
     },
+    /// What the pane's `kind` chip opens (feature `prompt_chips`): `pr`,
+    /// `python`, `php`, `docker` or `elapsed` (the other menus have their own
+    /// requests). Answered with `chip`.
+    Chip {
+        id: String,
+        pane: u64,
+        kind: crate::MenuKind,
+    },
+    /// Restart the clock of the tab holding `pane`: the Time on tab card's
+    /// Reset (feature `prompt_chips`; operate devices only). Answered with
+    /// `ack`.
+    ResetElapsed {
+        id: String,
+        pane: u64,
+    },
     /// Start a shell while no Rift window is open (feature `start`, only
     /// where the computer allows it): a tab in the background window, which
     /// Rift shows when it opens. The ack carries the new pane.
@@ -470,6 +485,15 @@ pub enum ServerMsg {
         truncated: bool,
         lines: Vec<DiffLine>,
     },
+    /// The answer to `chip`: what the chip's menu lists (`kind` and the
+    /// fields of [`ChipDetail`]); `more`: some entries were left out.
+    Chip {
+        id: String,
+        pane: u64,
+        #[serde(flatten)]
+        detail: ChipDetail,
+        more: bool,
+    },
     /// The answer to `complete`.
     Complete {
         id: String,
@@ -603,6 +627,11 @@ pub struct Pane {
     /// `git`); absent outside a repository or before the desktop looked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git: Option<PaneGit>,
+    /// The prompt chips the desktop shows for the pane, in its configured
+    /// order (feature `prompt_chips`); absent from a desktop without the
+    /// feature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chips: Option<Vec<PaneChip>>,
     /// The running command waits for the user (feature `waiting`); absent
     /// when nothing waits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -680,6 +709,129 @@ pub struct PaneGit {
     pub removed: u64,
 }
 
+/// A prompt chip's kind (`rift_core::PromptChip`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChipKind {
+    Cwd,
+    GitBranch,
+    GitDiff,
+    User,
+    Host,
+    Python,
+    Php,
+    GithubPr,
+    Docker,
+    Date,
+    Time12,
+    Time24,
+    Elapsed,
+}
+
+/// The colour role of a chip's text, named after the desktop theme's own
+/// tokens (`docs/ui.md` § Prompt context); the app maps them to its palette.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Tone {
+    Bright,
+    Ui,
+    Dim,
+    Muted,
+    Success,
+    Error,
+    Warning,
+    Accent,
+    /// ANSI magenta (a merged pull request).
+    Magenta,
+    /// The PHP mark's indigo.
+    Indigo,
+}
+
+/// A run of a chip's text in one colour.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Part {
+    pub text: String,
+    pub tone: Tone,
+}
+
+/// One prompt chip as the desktop renders it for a pane.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneChip {
+    pub kind: ChipKind,
+    /// The colour of the chip's glyph.
+    pub icon: Tone,
+    /// What the desktop draws.
+    pub full: Vec<Part>,
+    /// The same, shortened for a narrow row (a folder's name, a version
+    /// without its patch, a container count).
+    pub short: Vec<Part>,
+    /// Needs a look: a Docker container down or unhealthy.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub attention: bool,
+}
+
+/// One installed interpreter of a `python` or `php` chip menu.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeVersion {
+    pub version: String,
+    /// Where it comes from (`pyenv`, `php@8.3`, …).
+    pub source: String,
+    /// The one the shell runs now.
+    pub current: bool,
+    /// The command the desktop's menu runs to pick it (`rift-use …`).
+    pub command: String,
+}
+
+/// One container of a `docker` chip menu.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComposeContainer {
+    pub service: String,
+    /// `running`, `exited`, …
+    pub state: String,
+    pub running: bool,
+    /// Published ports as the desktop lists them (`3306→3306`).
+    pub ports: Vec<String>,
+    /// `5 hours`, or the whole status when stopped.
+    pub uptime: String,
+    /// `healthy`, `starting` or `unhealthy`; null without a health check.
+    pub health: Option<String>,
+    /// The command the desktop's menu runs for the row: follow the logs.
+    pub logs: String,
+}
+
+/// What a `chip` request answers (`kind` as asked).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ChipDetail {
+    Pr {
+        number: u64,
+        /// `open`, `draft`, `merged` or `closed`.
+        state: String,
+        url: String,
+    },
+    Python {
+        current: Option<String>,
+        versions: Vec<RuntimeVersion>,
+    },
+    Php {
+        current: Option<String>,
+        versions: Vec<RuntimeVersion>,
+    },
+    Docker {
+        project: Option<String>,
+        /// Why there are no containers (Docker is not running).
+        error: Option<String>,
+        containers: Vec<ComposeContainer>,
+    },
+    Elapsed {
+        seconds: u64,
+        counting: bool,
+        /// The hover card's line: `Started 03:48 pm`, or `Counted 2h 05m ·
+        /// running now`.
+        line: String,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BlockState {
@@ -736,7 +888,7 @@ mod tests {
     #[test]
     fn every_client_fixture_round_trips() {
         let all = fixtures("client");
-        assert_eq!(all.len(), 30, "client fixtures");
+        assert_eq!(all.len(), 33, "client fixtures");
         for (name, value) in all {
             let msg: ClientMsg =
                 serde_json::from_value(value.clone()).unwrap_or_else(|e| panic!("{name}: {e}"));
@@ -747,7 +899,7 @@ mod tests {
     #[test]
     fn every_server_fixture_round_trips() {
         let all = fixtures("server");
-        assert_eq!(all.len(), 23, "server fixtures");
+        assert_eq!(all.len(), 28, "server fixtures");
         for (name, value) in all {
             let msg: ServerMsg =
                 serde_json::from_value(value.clone()).unwrap_or_else(|e| panic!("{name}: {e}"));

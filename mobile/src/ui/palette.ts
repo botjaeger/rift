@@ -17,6 +17,10 @@ export const colors = {
   success: "#1ca05a",
   error: "#ff8272",
   warning: "#e5a01a",
+  /** ANSI magenta (Warp Dark): a merged pull request's chip. */
+  magenta: "#ff8ffd",
+  /** The PHP mark's indigo: the accent mixed half with magenta, as the desktop mixes it. */
+  indigo: "#8c9cea",
   fg: "#ffffff",
   borderStrong: "#ffffff24",
   /** The boards' glass controls (round back badges, header pills): white 8 % over a 12 % rim. */
@@ -37,8 +41,8 @@ export type ColorName = keyof typeof colors;
  * `textDim` on surface (4.33), where `textMuted` is used instead.
  */
 export const TEXT_ON: Readonly<Record<"bg" | "chrome" | "surface" | "accent" | "warning" | "camera", readonly ColorName[]>> = {
-  bg: ["textBright", "text", "fg", "textMuted", "textDim", "accent", "success", "warning", "error"],
-  chrome: ["textBright", "text", "textMuted", "textDim", "accent", "success", "warning", "error"],
+  bg: ["textBright", "text", "fg", "textMuted", "textDim", "accent", "success", "warning", "error", "magenta", "indigo"],
+  chrome: ["textBright", "text", "textMuted", "textDim", "accent", "success", "warning", "error", "magenta", "indigo"],
   camera: ["textBright", "text", "textMuted", "warning"],
   surface: ["textBright", "text", "textMuted", "accent", "success", "warning", "error"],
   accent: ["bg"],
@@ -57,6 +61,8 @@ export const tints = {
   successBadge: "#1ca05a14",
   warningBadge: "#e5a01a1f",
   errorBadge: "#ff827233",
+  /** A prompt chip's fill (white 4 %, on chrome), as the desktop's `chip_fill`. */
+  chipFill: "#ffffff0a",
   /** The running block's ground (on bg). */
   running: "#19aad814",
   /** The bell that is on (on the running block's ground). */
@@ -70,6 +76,10 @@ export const tints = {
 } as const;
 
 export const TINTED_TEXT: readonly { fg: ColorName; tint: keyof typeof tints; ground: "bg" | "chrome" | "surface" }[] = [
+  // the prompt chips' parts, on the chip fill over the command line's chrome ground
+  ...(["textBright", "text", "textMuted", "textDim", "accent", "success", "warning", "error", "magenta", "indigo"] as const).map(
+    (fg) => ({ fg, tint: "chipFill" as const, ground: "chrome" as const }),
+  ),
   { fg: "accent", tint: "accentBadge", ground: "surface" },
   { fg: "accent", tint: "accentBadge", ground: "chrome" },
   // the Run sheet's first completion (surface) and its kind

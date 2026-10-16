@@ -796,6 +796,22 @@ countdown and *Try again*, which retries at once).
   program when one is running. Each one shows a toast: "<device> ran <cmd>"
   or "<device> sent ctrl+c". Page Up and Page Down at a prompt do nothing
   (the phone scrolls itself), and keys from a phone skip vim mode.
+- **Prompt chips on the phone.** The phone's command line shows the chips
+  the desktop draws above that pane's command line (*Edit prompt*'s
+  `prompt_chips`, in that order, only those with something to show, none in
+  shell-prompt mode) in the desktop's colours, each in its short form (a
+  folder's name, the branch with its dirty dot, `102 +2.1k −970`, `#42`, a
+  version without its patch, `3/4`), on one row: what does not fit folds into
+  *+N* (a dot for each folded Docker project with a container down or
+  unhealthy), which opens *This pane*, every chip with its full value. A tap
+  opens the chip's menu: the folder, branch and changes menus; the pull
+  request in the phone's browser; Python and PHP's versions (a pick runs the
+  same `rift-use …`); Docker's containers (a pick follows that service's
+  logs, the same command as the desktop's menu); Time on tab with *Reset*
+  (`operate` devices; it resets that tab's clock as the card's button does).
+  User, Host, Date and Time just show. Picks run as the command line's Run
+  does, so a pane running a command answers *busy* and the phone's *Ask
+  before running* applies.
 - **Full-screen programs and typing (Phase 3).** A pane on the phone shows
   blocks only; while it shows the alternate screen (vim, less, htop) the
   phone shows the pane's screen with its colours instead ("htop is full

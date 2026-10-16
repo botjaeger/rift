@@ -30,6 +30,8 @@ import {
   isPushToken,
   type AckMsg,
   type ChipAnswerMsg,
+  type ChipDetailKind,
+  type ChipMsg,
   type CompleteMsg,
   type DiffMsg,
   type DoneMsg,
@@ -1092,6 +1094,36 @@ export class Fleet {
     if (!client) return { ok: false, message: describeCode("disconnected", name, "") };
     const r = await client.chipMenu(pane, t);
     return r.ok ? r : { ok: false, message: describeShowCode(r.code, name, r.message) };
+  }
+
+  /**
+   * What a pull request, interpreter, Docker or Time on tab chip opens (feature `prompt_chips`),
+   * or a sentence saying why there is nothing.
+   */
+  async chipDetail<K extends ChipDetailKind>(
+    host: string,
+    pane: number,
+    kind: K,
+  ): Promise<{ ok: true; msg: Extract<ChipMsg, { kind: K }> } | { ok: false; message: string }> {
+    const name = this.host(host)?.record.name ?? "the computer";
+    const client = this.clients.get(host);
+    if (!client) return { ok: false, message: describeCode("disconnected", name, "") };
+    const r = await client.chipDetail(pane, kind);
+    if (r.ok) return r;
+    // the window had nothing behind the chip any more (the pull request closed, Docker went down): not a closed pane
+    if (r.code === "no_pane" && r.message.includes("unavailable:")) return { ok: false, message: "This chip has nothing to show now." };
+    return { ok: false, message: describeShowCode(r.code, name, r.message) };
+  }
+
+  /** Restarts the tab clock behind the Time on tab chip (feature `prompt_chips`, operate only). */
+  async resetElapsed(host: string, pane: number): Promise<ActionResult> {
+    const h = this.host(host);
+    const name = h?.record.name ?? "the computer";
+    if (!hasFeature(h, "prompt_chips"))
+      return { ok: false, code: "unsupported", message: `Rift on ${name} cannot reset the time from the phone. Update it.` };
+    const r = await (this.operating(host) ?? this.request(host, (c) => c.resetElapsed(pane)));
+    if (!r.ok && r.code === "busy") return { ...r, message: `${name} could not reset it. Try again.` };
+    return r;
   }
 
   /** One changed file's diff, or a sentence saying why there is none. */

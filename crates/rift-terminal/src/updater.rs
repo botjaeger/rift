@@ -315,6 +315,7 @@ mod tests {
             last_exit: None,
             durable,
             git: None,
+            chips: None,
             waiting: None,
             running: None,
         }

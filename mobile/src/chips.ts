@@ -6,7 +6,7 @@ import type { PaneState } from "./protocol/store";
 import type { Pane } from "./protocol/types";
 import { paneBranch } from "./topology";
 
-/** Which menu a chip opens (feature `chips`). */
+/** Which of the folder, branch and changes menus a chip opens (feature `chips`). */
 export type ChipMenuKind = "dirs" | "branches" | "changes";
 
 export interface PromptChips {
@@ -90,8 +90,29 @@ export function shellQuote(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`;
 }
 
-/** What a chip menu row does (the desktop's `ChipAction`). */
-export type ChipAction = { kind: "cd"; name: string } | { kind: "checkout"; branch: string } | { kind: "create"; branch: string };
+const QUOTED = String.raw`'(?:[^'\n\r]|'\\'')*'`;
+const PLAIN = String.raw`[A-Za-z0-9/._\-+,:@%~=]+`;
+const USE = new RegExp(`^rift-use (?:php|python|pyenv) ${QUOTED}$`);
+const LOGS = new RegExp(`^docker compose --project-directory (?:${QUOTED}|${PLAIN}) logs --follow --tail 200 (?:${QUOTED}|${PLAIN})$`);
+
+/** `rift-use <tool> '<path or version>'`: what the desktop's Python and PHP menus run. */
+export const isUseCommand = (c: string): boolean => USE.test(c);
+/** `docker compose --project-directory <dir> logs --follow --tail 200 <service>`: what its Docker menu runs. */
+export const isLogsCommand = (c: string): boolean => LOGS.test(c);
+
+/**
+ * A command the desktop's version and container menus run. The desktop sends the whole command,
+ * so only the two shapes its menus build are accepted: anything else, from a gateway that
+ * misbehaves or a link, is no row and no command.
+ */
+export const isMenuCommand = (c: string): boolean => USE.test(c) || LOGS.test(c);
+
+/** What a chip menu row does (the desktop's `ChipAction`); `run` is a version or container pick (`isMenuCommand`). */
+export type ChipAction =
+  | { kind: "cd"; name: string }
+  | { kind: "checkout"; branch: string }
+  | { kind: "create"; branch: string }
+  | { kind: "run"; command: string };
 
 /**
  * The command a picked row runs, as the desktop's chip menus build it
@@ -107,6 +128,8 @@ export function chipCommand(a: ChipAction): string {
       return `git checkout ${shellQuote(a.branch)}`;
     case "create":
       return `git checkout -b ${shellQuote(a.branch)}`;
+    case "run":
+      return a.command;
   }
 }
 
