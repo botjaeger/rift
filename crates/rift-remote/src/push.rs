@@ -10,9 +10,9 @@
 //! token it reports as `DeviceNotRegistered`) and to each ntfy topic URL
 //! (`ntfy_request`).
 //!
-//! An alert carries the host's name, the exit status, the host key and pane
-//! (to open it on a tap) and, only when the device asked for it, the command
-//! line; never output.
+//! An alert carries the host's name, the exit status, how long it ran, the
+//! host key and pane (to open it on a tap) and, only when the device asked
+//! for it, the command line; never output.
 
 use crate::registry::{self, Device};
 use serde_json::{Value, json};
@@ -190,27 +190,82 @@ pub(crate) struct Alert {
     pub token: Option<String>,
     /// The ntfy topic URL to send it to, if any.
     pub ntfy: Option<String>,
+    /// "✓ 0 · make release" (the command is "A command" unless asked for).
     pub title: String,
-    pub body: Option<String>,
+    /// "Finished in 113ms · Mac".
+    pub subtitle: String,
     pub pane: u64,
     pub exit: Option<i32>,
     /// The device asked about this pane ("Notify me").
     pub asked: bool,
 }
 
-/// The alert's title (and body): the same words as the app's own
-/// notifications.
+/// Longest command shown in a title (characters, `…` included).
+const MAX_TITLE_COMMAND: usize = 40;
+
+/// `ms` as "113ms", "8.4s", "12s", "2m 5s" or "1h 2m". The app words it the
+/// same (`mobile/src/notifyText.ts`).
+pub fn duration_text(ms: u64) -> String {
+    if ms < 1000 {
+        return format!("{ms}ms");
+    }
+    let tenths = ms / 100;
+    if tenths < 100 {
+        return format!("{}.{}s", tenths / 10, tenths % 10);
+    }
+    let secs = ms / 1000;
+    match (secs / 3600, secs / 60 % 60, secs % 60) {
+        (0, 0, s) => format!("{s}s"),
+        (0, m, s) => format!("{m}m {s}s"),
+        (h, m, _) => format!("{h}h {m}m"),
+    }
+}
+
+/// `command` on one line, cut to [`MAX_TITLE_COMMAND`] characters.
+fn title_command(command: &str) -> String {
+    let one: String = command.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one.chars().count() <= MAX_TITLE_COMMAND {
+        return one;
+    }
+    let mut cut: String = one.chars().take(MAX_TITLE_COMMAND - 1).collect();
+    cut.truncate(cut.trim_end().len());
+    cut.push('…');
+    cut
+}
+
+/// The alert's title and subtitle, the same words as the app's own
+/// notifications (`mobile/src/notifyText.ts`): "✓ 0 · make release" /
+/// "Finished in 2m 5s · Mac", "✕ 101 · …" / "Failed after 8.4s · Mac", "✓ · …"
+/// when the shell reported no status. Without `show_command` the command is
+/// "A command". Never output.
 pub fn alert_text(
     host: &str,
     exit: Option<i32>,
     command: &str,
     show_command: bool,
-) -> (String, Option<String>) {
-    let title = match exit {
-        None | Some(0) => format!("A command finished on {host}"),
-        Some(code) => format!("A command failed on {host} (exit {code})"),
+    duration_ms: u64,
+) -> (String, String) {
+    let mark = match exit {
+        None => "✓".to_string(),
+        Some(0) => "✓ 0".to_string(),
+        Some(code) => format!("✕ {code}"),
     };
-    (title, show_command.then(|| command.to_string()))
+    let what = if show_command {
+        let c = title_command(command);
+        if c.is_empty() {
+            "A command".to_string()
+        } else {
+            c
+        }
+    } else {
+        "A command".to_string()
+    };
+    let took = duration_text(duration_ms);
+    let verb = match exit {
+        None | Some(0) => format!("Finished in {took}"),
+        Some(_) => format!("Failed after {took}"),
+    };
+    (format!("{mark} · {what}"), format!("{verb} · {host}"))
 }
 
 /// Which devices get an alert for `done`: those waiting on its pane (the
@@ -235,13 +290,19 @@ pub(crate) fn alerts(
         if !(asked || long) {
             continue;
         }
-        let (title, body) = alert_text(host, done.exit, done.command, reg.show_command);
+        let (title, subtitle) = alert_text(
+            host,
+            done.exit,
+            done.command,
+            reg.show_command,
+            done.duration_ms,
+        );
         out.push(Alert {
             device: d.id.clone(),
             token: reg.token.clone(),
             ntfy: reg.ntfy.clone(),
             title,
-            body,
+            subtitle,
             pane: done.pane,
             exit: done.exit,
             asked,
@@ -271,17 +332,14 @@ pub(crate) fn payload(alerts: &[&Alert], host_key: &str) -> String {
     let msgs: Vec<Value> = alerts
         .iter()
         .map(|a| {
-            let mut m = json!({
+            json!({
                 "to": a.token,
                 "title": a.title,
+                "subtitle": a.subtitle,
                 "data": {"host": host_key, "pane": a.pane},
                 "priority": "high",
                 "sound": "default",
-            });
-            if let Some(b) = &a.body {
-                m["body"] = Value::String(b.clone());
-            }
-            m
+            })
         })
         .collect();
     Value::Array(msgs).to_string()
@@ -311,17 +369,12 @@ fn header_value(value: &str) -> String {
 }
 
 /// The ntfy request for `alert`: its headers (`Name: value`) and its body,
-/// the command line when the device asked for it, else "Exit N" or
-/// "Finished" (`docs/remote-protocol.md` § Push).
+/// the subtitle ("Finished in 113ms · Mac"), cut at [`MAX_NTFY_BODY`]
+/// (`docs/remote-protocol.md` § Push). ntfy has a title and a message only,
+/// so the message is the subtitle.
 pub(crate) fn ntfy_request(alert: &Alert, host_key: &str) -> (Vec<String>, String) {
     let failed = !matches!(alert.exit, None | Some(0));
-    let mut body = match &alert.body {
-        Some(command) if !command.is_empty() => command.clone(),
-        _ => match alert.exit {
-            Some(code) if failed => format!("Exit {code}"),
-            _ => "Finished".to_string(),
-        },
-    };
+    let mut body = alert.subtitle.clone();
     if body.len() > MAX_NTFY_BODY {
         let mut end = MAX_NTFY_BODY;
         while !body.is_char_boundary(end) {
@@ -668,16 +721,20 @@ mod tests {
             a.iter().map(|a| a.device.as_str()).collect::<Vec<_>>(),
             ["long"]
         );
-        assert_eq!(a[0].title, "A command finished on Mac");
-        assert_eq!(a[0].body, None, "the command stays out unless asked");
+        assert_eq!(a[0].title, "✓ 0 · A command");
+        assert_eq!(a[0].subtitle, "Finished in 30s · Mac");
+        assert!(
+            !a[0].title.contains("make"),
+            "the command stays out unless asked"
+        );
         // asked: short commands too, once, with the command when wanted
         assert!(w.add("asks", 2, now));
         assert!(w.add("none", 2, now));
         let a = alerts(&done(2, 10, Some(3)), &devices, &mut w, "Mac", now);
         assert_eq!(a.len(), 1, "a device without a token gets nothing");
         assert_eq!(a[0].device, "asks");
-        assert_eq!(a[0].title, "A command failed on Mac (exit 3)");
-        assert_eq!(a[0].body.as_deref(), Some("make release"));
+        assert_eq!(a[0].title, "✕ 3 · make release");
+        assert_eq!(a[0].subtitle, "Failed after 10ms · Mac");
         assert!(alerts(&done(2, 10, Some(0)), &devices, &mut w, "Mac", now).is_empty());
         // another pane does not use up the wait
         assert!(w.add("asks", 3, now));
@@ -709,8 +766,8 @@ mod tests {
             device: "d".into(),
             token: Some("ExponentPushToken[abc]".into()),
             ntfy: None,
-            title: "A command finished on Mac".into(),
-            body: None,
+            title: "✓ 0 · make release".into(),
+            subtitle: "Finished in 113ms · Mac".into(),
             pane: 12,
             exit: Some(0),
             asked: false,
@@ -720,7 +777,8 @@ mod tests {
             v,
             json!([{
                 "to": "ExponentPushToken[abc]",
-                "title": "A command finished on Mac",
+                "title": "✓ 0 · make release",
+                "subtitle": "Finished in 113ms · Mac",
                 "data": {"host": "HOSTKEY", "pane": 12},
                 "priority": "high",
                 "sound": "default",
@@ -796,13 +854,13 @@ mod tests {
         }
     }
 
-    fn alert(exit: Option<i32>, body: Option<&str>, title: &str) -> Alert {
+    fn alert(exit: Option<i32>, subtitle: &str, title: &str) -> Alert {
         Alert {
             device: "d".into(),
             token: None,
             ntfy: Some("https://ntfy.sh/t".into()),
             title: title.into(),
-            body: body.map(Into::into),
+            subtitle: subtitle.into(),
             pane: 12,
             exit,
             asked: false,
@@ -810,39 +868,97 @@ mod tests {
     }
 
     #[test]
+    fn durations_are_worded_like_the_app() {
+        for (ms, want) in [
+            (0, "0ms"),
+            (113, "113ms"),
+            (999, "999ms"),
+            (1_000, "1.0s"),
+            (8_400, "8.4s"),
+            (9_999, "9.9s"),
+            (10_000, "10s"),
+            (59_999, "59s"),
+            (60_000, "1m 0s"),
+            (125_000, "2m 5s"),
+            (3_599_000, "59m 59s"),
+            (3_600_000, "1h 0m"),
+            (3_725_000, "1h 2m"),
+            (90_000_000, "25h 0m"),
+        ] {
+            assert_eq!(duration_text(ms), want, "{ms}");
+        }
+    }
+
+    #[test]
+    fn the_alert_words() {
+        let t = |exit, cmd: &str, show, ms| alert_text("Mac", exit, cmd, show, ms);
+        assert_eq!(
+            t(Some(0), "psa", true, 113),
+            ("✓ 0 · psa".into(), "Finished in 113ms · Mac".into())
+        );
+        assert_eq!(
+            t(Some(101), "cargo test", true, 8_400),
+            (
+                "✕ 101 · cargo test".into(),
+                "Failed after 8.4s · Mac".into()
+            )
+        );
+        // the shell reported no status: finished, no number
+        assert_eq!(
+            t(None, "make", true, 125_000),
+            ("✓ · make".into(), "Finished in 2m 5s · Mac".into())
+        );
+        // privacy: no command unless asked
+        assert_eq!(
+            t(Some(2), "secret --token x", false, 1_000).0,
+            "✕ 2 · A command"
+        );
+        assert_eq!(t(Some(0), "  \n ", true, 1).0, "✓ 0 · A command");
+        // a long command is cut to 40 characters, a multi-line one joined
+        let long = t(Some(0), &"é".repeat(60), true, 1).0;
+        assert_eq!(long, format!("✓ 0 · {}…", "é".repeat(39)));
+        assert_eq!(t(Some(0), "a\n  b\tc", true, 1).0, "✓ 0 · a b c");
+        let exact = "x".repeat(MAX_TITLE_COMMAND);
+        assert_eq!(t(Some(0), &exact, true, 1).0, format!("✓ 0 · {exact}"));
+    }
+
+    #[test]
     fn the_ntfy_request_has_the_title_priority_tags_and_pane_link() {
         let (h, body) = ntfy_request(
-            &alert(Some(2), None, "A command failed on Mac (exit 2)"),
+            &alert(Some(2), "Failed after 8.4s · Mac", "✕ 2 · make"),
             "K-_9",
         );
+        // "✕ 2 · make" is not ASCII: an RFC 2047 word
+        assert!(
+            h[0].starts_with("Title: =?UTF-8?B?") && h[0].ends_with("?="),
+            "{}",
+            h[0]
+        );
         assert_eq!(
-            h,
+            h[1..],
             [
-                "Title: A command failed on Mac (exit 2)",
                 "Priority: high",
                 "Tags: x",
-                "Click: rift://host/K-_9/pane/12",
+                "Click: rift://host/K-_9/pane/12"
             ]
         );
-        assert_eq!(body, "Exit 2", "the command stays out unless asked");
-        for exit in [Some(0), None] {
-            let (h, body) = ntfy_request(&alert(exit, None, "A command finished on Mac"), "K");
-            assert_eq!(h[1..3], ["Priority: default", "Tags: white_check_mark"]);
-            assert_eq!(body, "Finished");
-        }
-        // with show_command, the command line is the body (cut at 4 KiB)
-        let (_, body) = ntfy_request(&alert(Some(0), Some("make release"), "t"), "K");
-        assert_eq!(body, "make release");
-        let long = "é".repeat(3000);
-        let (_, body) = ntfy_request(&alert(Some(0), Some(&long), "t"), "K");
-        assert_eq!(body, "é".repeat(MAX_NTFY_BODY / 2));
-        // a title that is not printable ASCII goes as an RFC 2047 word
-        let (h, _) = ntfy_request(&alert(Some(0), None, "A command finished on Jo’s Mac"), "K");
         assert_eq!(
-            h[0],
-            "Title: =?UTF-8?B?QSBjb21tYW5kIGZpbmlzaGVkIG9uIEpv4oCZcyBNYWM=?="
+            body, "Failed after 8.4s · Mac",
+            "the subtitle is the message"
         );
-        let (h, _) = ntfy_request(&alert(Some(0), None, "evil\r\nX-Inject: 1"), "K");
+        for exit in [Some(0), None] {
+            let (h, body) = ntfy_request(&alert(exit, "Finished in 1.0s · Mac", "t"), "K");
+            assert_eq!(h[1..3], ["Priority: default", "Tags: white_check_mark"]);
+            assert_eq!(body, "Finished in 1.0s · Mac");
+        }
+        // the message is cut at 4 KiB
+        let long = "é".repeat(3000);
+        let (_, body) = ntfy_request(&alert(Some(0), &long, "t"), "K");
+        assert_eq!(body, "é".repeat(MAX_NTFY_BODY / 2));
+        // a plain ASCII title goes as is, a control character never
+        let (h, _) = ntfy_request(&alert(Some(0), "s", "plain"), "K");
+        assert_eq!(h[0], "Title: plain");
+        let (h, _) = ntfy_request(&alert(Some(0), "s", "evil\r\nX-Inject: 1"), "K");
         assert!(!h[0].contains(['\r', '\n']), "{}", h[0]);
         // the host key is percent-encoded into the link
         assert_eq!(pane_link("a/b+c", 3), "rift://host/a%2Fb%2Bc/pane/3");
@@ -892,16 +1008,16 @@ mod tests {
 
     #[test]
     fn a_followed_pane_gets_no_ntfy_banner_unless_asked() {
-        let mut both = alert(Some(1), None, "t");
+        let mut both = alert(Some(1), "s", "t");
         both.token = Some("ExponentPushToken[abc]".into());
-        let mut asked = alert(Some(1), None, "t");
+        let mut asked = alert(Some(1), "s", "t");
         asked.asked = true;
-        let mut other_pane = alert(Some(1), None, "t");
+        let mut other_pane = alert(Some(1), "s", "t");
         other_pane.pane = 13;
-        let mut other_device = alert(Some(1), None, "t");
+        let mut other_device = alert(Some(1), "s", "t");
         other_device.device = "e".into();
         let mut list = vec![
-            alert(Some(1), None, "t"),
+            alert(Some(1), "s", "t"),
             both,
             asked,
             other_pane,

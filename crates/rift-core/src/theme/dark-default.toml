@@ -1,38 +1,43 @@
-# Rift builtin theme — tokens straight from the design spec (dark-default)
+# Rift builtin theme — Warp's default "Dark" colours on Rift's visuals (user
+# decision 2026-10-16). Source: warpdotdev/warp app/src/themes/default_themes.rs
+# (background #050505, foreground #ffffff, accent #19aad8, `details: darker`)
+# and crates/warp_core/src/ui/theme/color.rs, which derives every UI colour as
+# the foreground laid over the background at a fixed opacity: neutral_1 5%,
+# neutral_2 10%, neutral_3 15%; text main 90%, sub 60%, hint 40%.
 name = "Dark Default"
 
-bg = "#1e1e1e"
-bg_chrome = "#181818"
-bg_gutter = "#1a1a1a"
-surface = "#232326"
-border = "#ffffff12"            # rgba(255,255,255,.07)
-pane_border_inactive = "#3c3c3c"
+bg = "#050505"                  # Warp background
+bg_chrome = "#000000"           # chrome sinks below the ground, as Rift draws it
+bg_gutter = "#000000"
+surface = "#1e1e1e"             # Warp surface_2 (menus, dialogs): fg @ 10%
+border = "#ffffff1a"            # Warp outline: fg @ 10%
+pane_border_inactive = "#2b2b2b" # Warp split-pane border: fg @ 15%
 
-fg = "#d4d4d4"
-text_bright = "#f0f1f3"
-text_ui = "#e6e7ea"
-text_dim = "#a1a4ad"
-text_muted = "#868993"
+fg = "#ffffff"                  # Warp foreground
+text_bright = "#ffffff"
+text_ui = "#e6e6e6"             # Warp main text: fg @ 90%
+text_dim = "#9b9b9b"            # Warp sub text: fg @ 60%
+text_muted = "#828282"          # fg @ 50% (Warp's 40% hint is 3.9:1; this keeps 5.3:1)
 
-accent = "#569cd6"
-success = "#22c55e"
-error = "#ef4444"
-warning = "#d7ba7d"
-cursor = "#d4d4d4"
-selection = "#264f78"
+accent = "#19aad8"              # Warp accent
+success = "#1ca05a"             # Warp ui_green
+error = "#ff8272"               # Warp failed-block colour (ANSI red)
+warning = "#e5a01a"             # Warp ui_yellow
+cursor = "#19aad8"              # Warp's cursor is the accent
+selection = "#76a7fa66"         # Warp text selection rgba(118,167,250,.4)
 search_match = "#ffd700"
 search_active = "#ff8000"
 
-# 16 base ANSI colors — standard xterm values (spec §1)
+# 16 base ANSI colors — Warp Dark
 ansi = [
-    "#0d0d0d", "#cd0000", "#00cd00", "#cdcd00",
-    "#0000ee", "#cd00cd", "#00cdcd", "#e5e5e5",
-    "#7f7f7f", "#ff0000", "#00ff00", "#ffff00",
-    "#5c5cff", "#ff00ff", "#00ffff", "#ffffff",
+    "#616161", "#ff8272", "#b4fa72", "#fefdc2",
+    "#a5d5fe", "#ff8ffd", "#d0d1fe", "#f1f1f1",
+    "#8e8e8e", "#ffc4bd", "#d6fcb9", "#fefdd5",
+    "#c1e3fe", "#ffb1fe", "#e5e6fe", "#feffff",
 ]
 
 [syntax]
-command = "#569cd6"
-flag = "#9cdcfe"
-string = "#ce9178"
-ghost = "#5a5c63"
+command = "#19aad8"             # accent
+flag = "#a5d5fe"                # ANSI blue
+string = "#fefdc2"              # ANSI yellow
+ghost = "#696969"               # Warp hint text: fg @ 40%

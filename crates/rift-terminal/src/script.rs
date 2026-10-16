@@ -32,6 +32,8 @@
 //! preedit 하                # IME composition in progress ("" clears)
 //! drop /tmp/my file.txt     # a file dropped on the window
 //! paste a\nb                # clipboard paste into the active pane (`\n` = newline)
+//! copyfiles /tmp/a.txt|/tmp/b c.png  # files on the (headless) clipboard, as
+//!                          # the file manager copies them; ⌘V pastes them
 //! menu action:new_tab       # choose a menu bar item by id (macOS)
 //! mods alt                  # hold modifiers for mouse steps (`mods none`)
 //! wait_prompt              # block until the shell shows its first prompt
@@ -76,6 +78,8 @@ pub enum Step {
     Preedit(String),
     Drop(PathBuf),
     Paste(String),
+    /// Files on the headless clipboard (`|`-separated paths).
+    CopyFiles(Vec<PathBuf>),
     Menu(String),
     Mods(String),
     WaitPrompt,
@@ -249,6 +253,7 @@ pub fn parse(src: &str) -> Result<Vec<Step>, String> {
             "preedit" => Step::Preedit(unescape(rest)),
             "drop" => Step::Drop(PathBuf::from(rest)),
             "paste" => Step::Paste(unescape(rest)),
+            "copyfiles" => Step::CopyFiles(rest.split('|').map(PathBuf::from).collect()),
             "menu" => Step::Menu(rest.to_string()),
             "mods" => Step::Mods(rest.to_string()),
             "wait_prompt" => Step::WaitPrompt,

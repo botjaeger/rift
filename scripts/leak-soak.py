@@ -84,13 +84,13 @@ def churn(scratch):
 # name: (steps, warm-up cycles, measured cycles, budget in MB). Warm-up lasts
 # until caches (glyph atlas, allocator arenas, scrollback) are full: measured
 # on macOS, ticking levels off after ~18 cycles and flood after ~9; on Linux
-# (Xvfb, shown) flood takes ~24. The budget covers noise only; the
+# (Xvfb, shown) flood takes ~24; churn swings for ~4. The budget covers noise only; the
 # incident's leak grew ~2 MB/s.
 SCENARIOS = {
     "ticking": (ticking, 22, 8, 8),
     "flood": (flood, 26, 6, 8),
     "stream": (stream, 10, 20, 8),
-    "churn": (churn, 3, 10, 8),
+    "churn": (churn, 6, 10, 8),
 }
 
 

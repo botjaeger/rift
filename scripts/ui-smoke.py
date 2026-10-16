@@ -25,7 +25,9 @@ for directory in (cfg / "themes", data / "control", work):
 (work / "hello.rs").write_text("fn main() {}\n")
 theme = (repo / "crates/rift-core/src/theme/dark-default.toml").read_text()
 (cfg / "themes/audit.toml").write_text(theme)
-(scratch / "theme-next.toml").write_text(theme.replace('bg = "#1e1e1e"', 'bg = "#232326"'))
+# the same theme with another ground, whatever the builtin's value is
+(scratch / "theme-next.toml").write_text(re.sub(r'(?m)^bg = "#[0-9a-f]{6}"', 'bg = "#232326"', theme, count=1))
+assert (scratch / "theme-next.toml").read_text() != theme, "the theme edit changed nothing"
 config = (
     'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
     'control_api = "full"\ntheme = "audit"\nsync_os_theme = false\n'
@@ -216,6 +218,12 @@ steps = [
     "paste",
     "wait 400",
     f"dump {scratch}/sync-empty.txt",
+    # files copied in the file manager paste as their quoted paths, images
+    # too (Claude Code and Codex attach an image from its path)
+    f"copyfiles {work}/my file.txt|{work}/hello.rs",
+    "key cmd+v",
+    "wait 400",
+    f"dump {scratch}/sync-files.txt",
     # DECSET 1004: switching tabs tells the programs who lost/gained focus,
     # whatever the mouse-reporting setting (a headless window starts unfocused)
     "focus on",
@@ -319,6 +327,8 @@ assert "| ^[[200~zz^[[201~" in sync[2], "bracketed pane lost its paste framing"
 empty = state("sync-empty").split("\n  pane ")
 assert "| zz" in empty[1] and "^[[200~^[[201~" not in empty[1], "plain pane got an empty paste"
 assert "| ^[[200~zz^[[201~^[[200~^[[201~" in empty[2], "bracketed pane missed the empty paste"
+files_line = f"^[[200~'{work}/my file.txt' {work}/hello.rs ^[[201~"
+assert files_line in state("sync-files").replace("\n    | ", ""), state("sync-files")[-2000:]
 assert "^[[O^[[I" in state("focus-tabs"), state("focus-tabs")
 wide = re.search(r"matches=(\d+) total=(\d+)", state("find-wide"))
 assert wide and int(wide[2]) >= 1, state("find-wide")
@@ -1262,6 +1272,39 @@ assert rc == 0, died("restore-elapsed run failed", rs / "app.log")
 restored = (rs / "restored.txt").read_text()
 assert 'prompt_chips_shown=["Cwd:' in restored and '"Elapsed:' not in restored, restored
 
+# the sticky header's buttons act on its block and do not scroll to it: copy
+# copies (toast, a check for a moment), ⋮ opens the block menu; the rest of
+# the sticky header still jumps back to the block
+sb = scratch / "sticky-buttons"
+for sub in ("cfg/rift", "data"):
+    (sb / sub).mkdir(parents=True, exist_ok=True)
+(sb / "cfg/rift/config.toml").write_text(
+    'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\nsync_os_theme = false\n')
+sb_env = dict(env, XDG_CONFIG_HOME=str(sb / "cfg"), XDG_DATA_HOME=str(sb / "data"))
+sb_start = ["resize 1000 500", "wait_prompt", "type seq 1 300\\n", "wait 800", "scroll 40", "wait 300"]
+(sb / "rects.rift").write_text("\n".join([*sb_start, f"dump {sb}/rects.txt", "quit"]) + "\n")
+subprocess.run([str(binary), "--script", str(sb / "rects.rift"), "--headless"], env=sb_env,
+               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+def sb_center(label):
+    x, y, w, h = map(int, re.search(rf'"{label}@(\d+),(\d+),(\d+),(\d+)"',
+                                    (sb / "rects.txt").read_text()).groups())
+    return f"{x + w // 2} {y + h // 2}"
+copy_at, menu_at = sb_center("Copy output"), sb_center("More actions")
+(sb / "click.rift").write_text("\n".join([
+    *sb_start, f"click {copy_at}", "wait 150", f"dump {sb}/copied.txt",
+    f"click {menu_at}", "wait 300", f"dump {sb}/menu.txt", "key escape", "wait 200",
+    f"click 300 {copy_at.split()[1]}", "wait 300", f"dump {sb}/jump.txt", "quit"]) + "\n")
+with (sb / "log.txt").open("w") as log:
+    rc = subprocess.run([str(binary), "--script", str(sb / "click.rift"), "--headless"], env=sb_env,
+                        stdout=log, stderr=log, timeout=60).returncode
+assert rc == 0, died("sticky-buttons run failed", sb / "log.txt")
+copied = (sb / "copied.txt").read_text()
+assert "view_offset=40" in copied and 'toast=Some("Copied output")' in copied, copied[:800]
+assert 'clipboard="1\\n2\\n3' in copied, "the copy button did not copy the block's output"
+menu = (sb / "menu.txt").read_text()
+assert "menu=true" in menu and "view_offset=40" in menu, menu[:800]
+assert "view_offset=40" not in (sb / "jump.txt").read_text(), "the sticky header no longer jumps"
+
 # a link takes a plain click: "prompt" shows its tooltip at once (no hover
 # wait), "open" opens it; a drag across it selects and does neither
 lk = scratch / "link-click"
@@ -1895,6 +1938,44 @@ assert 'toast=Some("Test Phone opened a pane")' in pane_dump, pane_dump
 assert answer(opened, "gone.json") == {"ok": False, "error": "no such pane"}, \
     answer(opened, "gone.json")
 
+# `remote-close` (the phone's close pane / close tab): refused while remote
+# access is off; with it on it ends a pane or a whole tab without the
+# running-command confirmation, naming the device in a toast
+close_off = remote_run("close-off", remote_base, [
+    "wait 500", *rin("close-off", "pane.json",
+                     '{"cmd":"remote-close","pane":PANE,"device":"Test Phone","kind":"pane"}'),
+    "wait 300", f"dump {rm}/close-off/after.txt"])
+assert answer(close_off, "pane.json") == {"ok": False, "error": "remote access is off"}, \
+    answer(close_off, "pane.json")
+assert "tabs=1 " in (close_off / "after.txt").read_text()
+close_pane = '{"cmd":"remote-close","pane":2,"device":"Test Phone","kind":"pane"}'
+close_tab = '{"cmd":"remote-close","pane":4,"device":"Test Phone","kind":"tab"}'
+closed = remote_run("close", remote_base + 'control_api = "off"\nremote_access = true\n', [
+    "wait 500", *rin("close", "o1.json", open_tab), "wait 600",
+    "type sleep 30\\n", "wait 300",
+    *rin("close", "pane.json", close_pane), "wait 600", f"dump {rm}/close/pane.txt",
+    *rin("close", "o2.json", open_tab), "wait 600",
+    *rin("close", "o3.json", open_pane.replace("PANE", "3")), "wait 600",
+    *rin("close", "tab.json", close_tab), "wait 600", f"dump {rm}/close/tab.txt",
+    *rin("close", "gone.json", close_pane), "wait 300",
+    # the window's last tab: a phone never quits the window, a fresh tab stays
+    *rin("close", "last.json", close_tab.replace('"pane":4', '"pane":1')), "wait 800",
+    f"dump {rm}/close/last.txt"])
+assert answer(closed, "o1.json") == {"ok": True, "pane": 2}, answer(closed, "o1.json")
+assert answer(closed, "pane.json") == {"ok": True}, answer(closed, "pane.json")
+pane_dump = (closed / "pane.txt").read_text()
+assert "tabs=1 " in pane_dump and 'toast=Some("Test Phone closed a pane")' in pane_dump, pane_dump[:600]
+assert answer(closed, "o2.json") == {"ok": True, "pane": 3}, answer(closed, "o2.json")
+assert answer(closed, "o3.json") == {"ok": True, "pane": 4}, answer(closed, "o3.json")
+assert answer(closed, "tab.json") == {"ok": True}, answer(closed, "tab.json")
+tab_dump = (closed / "tab.txt").read_text()
+assert "tabs=1 " in tab_dump and 'toast=Some("Test Phone closed a tab")' in tab_dump, tab_dump[:600]
+assert answer(closed, "gone.json") == {"ok": False, "error": "no such pane"}, answer(closed, "gone.json")
+assert answer(closed, "last.json") == {"ok": True}, answer(closed, "last.json")
+last_dump = (closed / "last.txt").read_text()
+assert "tabs=1 " in last_dump and not re.search(r"tab 0 title=.* panes=1 active_pane=1 ", last_dump), \
+    last_dump[:600]
+
 # (b)-(d) remote access on with control_api off: the socket serves the
 # gateway's requests only; a command at the prompt runs as a block with a
 # toast; one while a command runs is busy; ctrl+c interrupts; turning
@@ -2114,6 +2195,52 @@ line, went = changed_at("left")
 assert "clients=[] remote_chip=None" in line, line
 assert phone_acked <= went <= phone_left + 2, (phone_acked, went, phone_left)
 
+# (e2) a real phone closes a pane through the gateway: the window has two
+# tabs, the phone's `close` (PHONE_SEND, after its `run`) ends the last
+# one; its ack is ok and the window is left with one tab and a toast
+closer = rm / "closer"
+for sub in ("cfg/rift", "data/rift"):
+    (closer / sub).mkdir(parents=True)
+(closer / "cfg/rift/config.toml").write_text(remote_base + "remote_access = true\n")
+(closer / "t.rift").write_text("\n".join([
+    "resize 1100 800", "wait_prompt", "key cmd+t", "wait_prompt", "wait 800",
+    f"dump {closer}/ready.txt", f"wait_file {closer}/phone-acked 40000", "wait 800",
+    f"dump {closer}/after.txt", "quit"]) + "\n")
+closer_env = dict(env, XDG_CONFIG_HOME=str(closer / "cfg"), XDG_DATA_HOME=str(closer / "data"),
+                  BASH_SILENCE_DEPRECATION_WARNING="1")
+with (closer / "log.txt").open("w") as log, (closer / "phone.txt").open("w") as plog:
+    window = subprocess.Popen([str(binary), "--script", str(closer / "t.rift"), "--headless"],
+                              env=closer_env, stdout=log, stderr=log)
+    try:
+        deadline = time.monotonic() + 40
+        while not (closer / "ready.txt").exists():
+            assert window.poll() is None, died("closer window exited", closer / "log.txt")
+            assert time.monotonic() < deadline, "closer window never got ready"
+            time.sleep(0.05)
+        # the window's own gateway (remote_access = true)
+        while not (closer / "data/rift/remote/status.json").exists():
+            assert window.poll() is None, died("closer window exited", closer / "log.txt")
+            time.sleep(0.05)
+        link = next(l for l in subprocess.run(
+            [str(binary), "remote", "pair"], env=closer_env, capture_output=True, text=True,
+            timeout=20).stdout.splitlines() if l.startswith("rift-remote://"))
+        phone = subprocess.run(
+            [phone_bin, str(closer / "phone.key"), link, "true", "3", str(closer / "phone-acked")],
+            env=dict(os.environ, PHONE_SEND='{"t":"close","id":"c1","pane":LAST,"kind":"pane"}'),
+            stdout=plog, stderr=plog, timeout=60)
+        assert phone.returncode == 0, died("the closing phone", closer / "phone.txt")
+        assert window.wait(timeout=60) == 0, died("closer window failed", closer / "log.txt")
+    finally:
+        if window.poll() is None:
+            window.kill()
+transcript = (closer / "phone.txt").read_text()
+welcome_line = next(l for l in transcript.splitlines() if '"t":"welcome"' in l)
+assert '"close"' in welcome_line, welcome_line
+assert re.search(r'← \{"id":"c1","ok":true,"t":"ack"\}', transcript), transcript[-2000:]
+assert "tabs=2 " in (closer / "ready.txt").read_text()
+closed_dump = (closer / "after.txt").read_text()
+assert "tabs=1 " in closed_dump and 'closed a pane")' in closed_dump, closed_dump[:600]
+
 # (f) the chip on every window comes from status.json of a gateway holding
 # gateway.lock; a stale status (lock not held) shows none
 import fcntl
@@ -2146,6 +2273,44 @@ assert "Connected: Test Phone@" in shown, "the chip has no tooltip"
 gone = remote_line((chip / "gone.txt").read_text())
 assert release.is_set()
 assert "gateway_pid=None clients=[] remote_chip=None" in gone, gone
+
+# (f2) quitting is intentional: every tab ends and the session file keeps
+# only the window's frame, so the next launch starts fresh. While a phone is
+# connected, ⌘Q asks first (Esc keeps the window); without one it quits at
+# once, even with no command running.
+def quit_run(name, phone):
+    run = rm / name
+    held = None
+    if phone:
+        (run / "data/rift/remote").mkdir(parents=True)
+        (run / "data/rift/remote/status.json").write_text(json.dumps({
+            "pid": os.getpid(), "addresses": ["127.0.0.1:9"],
+            "clients": [{"device": "d3f2", "name": "Quit Phone", "since": "2026-10-16T10:00:00Z"}]}))
+        held = open(run / "data/rift/remote/gateway.lock", "w")
+        fcntl.flock(held, fcntl.LOCK_EX)
+    steps = ["key cmd+t", "wait_prompt", "wait 1500"]
+    if phone:
+        steps += ["key cmd+q", "wait 400", f"dump {run}/asked.txt", "key escape",
+                  "wait 100", f"dump {run}/kept.txt", "key cmd+q", "wait 400", "key enter"]
+    else:
+        steps += ["key cmd+q"]
+    # the script's own trailing quit is never reached: ⌘Q ends the run
+    steps += ["wait 3000", f"dump {run}/not-quit.txt"]
+    try:
+        remote_run(name, remote_base, steps, extra_env={"RIFT_PERSIST_SESSION": "1"})
+    finally:
+        if held is not None:
+            held.close()
+    assert not (run / "not-quit.txt").exists(), f"{name}: ⌘Q did not quit"
+    saved = (run / "data/rift/session.toml").read_text()
+    assert "[[tabs]]" not in saved and "[window]" in saved, f"{name}: {saved}"
+    return run
+asked_run = quit_run("quit-phone", True)
+asked = (asked_run / "asked.txt").read_text()
+assert "confirm=Some((Close(Window), []))" in asked, asked[:2000]
+assert 'Quit Rift?' in asked and "Quit Phone is connected and loses its tabs." in asked, asked[-3000:]
+assert "confirm=None" in (asked_run / "kept.txt").read_text()
+quit_run("quit-alone", False)
 
 # (g) a relay (Phase 2): the managed gateway registers at a local relay
 # (rift-relay) and Settings shows it connected; a phone forced through the

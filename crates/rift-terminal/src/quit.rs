@@ -57,6 +57,97 @@ fn watch(deadline: Duration, returned: &AtomicBool, end: impl FnOnce()) -> bool 
     true
 }
 
+/// Route AppKit's own quits (the Dock's Quit, `quit app "Rift"` from
+/// AppleScript) through the app's quit, which asks first while a phone is
+/// connected and ends every shell: `ask` delivers the request to the event
+/// loop. Without this, `terminate:` ends the process at once, like a crash,
+/// and the next launch reattaches everything. A logout, restart or shutdown
+/// (the quit event carries a reason) still ends the process at once: the
+/// system cannot wait for a dialog, and the layout comes back afterwards.
+#[cfg(target_os = "macos")]
+pub fn route_app_quit(ask: impl Fn() + Send + Sync + 'static) {
+    use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
+    use objc2::{MainThreadMarker, msg_send};
+    use std::sync::OnceLock;
+
+    static ASK: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
+    /// `NSApplicationTerminateReply`
+    const CANCEL: usize = 0;
+    const NOW: usize = 1;
+    /// `keyAEQuitReason` ('why?'): set by loginwindow on a logout, restart
+    /// or shutdown, absent on a quit the user chose in an app
+    const QUIT_REASON: u32 = u32::from_be_bytes(*b"why?");
+
+    extern "C-unwind" fn should_terminate(
+        _this: *mut AnyObject,
+        _cmd: Sel,
+        _app: *mut AnyObject,
+    ) -> usize {
+        // the app's own quit is under way, or the system is logging out
+        if ARMED.load(Ordering::SeqCst) || system_quit() {
+            return NOW;
+        }
+        match ASK.get() {
+            Some(ask) => {
+                ask();
+                CANCEL
+            }
+            None => NOW,
+        }
+    }
+
+    fn system_quit() -> bool {
+        // SAFETY: plain Foundation getters; a nil event or attribute is
+        // checked before use
+        unsafe {
+            let Some(manager) = AnyClass::get(c"NSAppleEventManager") else {
+                return false;
+            };
+            let manager: *mut AnyObject = msg_send![manager, sharedAppleEventManager];
+            if manager.is_null() {
+                return false;
+            }
+            let event: *mut AnyObject = msg_send![manager, currentAppleEvent];
+            if event.is_null() {
+                return false;
+            }
+            let reason: *mut AnyObject =
+                msg_send![event, attributeDescriptorForKeyword: QUIT_REASON];
+            !reason.is_null()
+        }
+    }
+
+    if ASK.set(Box::new(ask)).is_err() {
+        return;
+    }
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
+    // SAFETY: `delegate` is winit's application delegate, alive for the
+    // whole run; the replacement has the selector's exact signature
+    // (`- (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)`,
+    // type "Q@:@"), and this process has one delegate of that class
+    unsafe {
+        let delegate: *mut AnyObject = msg_send![&*app, delegate];
+        if delegate.is_null() {
+            log::warn!("quit: no application delegate; the Dock's Quit ends shells without asking");
+            return;
+        }
+        let cls = objc2::ffi::object_getClass(delegate) as *mut AnyClass;
+        let imp: Imp = std::mem::transmute::<
+            extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject) -> usize,
+            Imp,
+        >(should_terminate);
+        objc2::ffi::class_replaceMethod(
+            cls,
+            objc2::sel!(applicationShouldTerminate:),
+            imp,
+            c"Q@:@".as_ptr(),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

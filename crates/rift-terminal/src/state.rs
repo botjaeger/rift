@@ -11,6 +11,8 @@ pub enum ClickTarget {
     Block(PaneId, rift_core::BlockId),
     BlockChevron(PaneId, rift_core::BlockId),
     BlockCopy(PaneId, rift_core::BlockId),
+    /// A header's ⋮ button: the block's context menu.
+    BlockMenu(PaneId, rift_core::BlockId),
     /// A header's duration: hover shows the full time; a click selects
     /// the block like the rest of the header.
     BlockDuration(PaneId, rift_core::BlockId),

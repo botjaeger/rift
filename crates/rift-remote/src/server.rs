@@ -28,8 +28,8 @@
 //! `busy`.
 
 use crate::protocol::{
-    Block, BlockState, ClientHello, ClientMsg, ErrorCode, GatewayHello, OpenKind, Permission, Run,
-    ScreenMode, ServerMsg, VERSION,
+    Block, BlockState, ClientHello, ClientMsg, CloseKind, ErrorCode, GatewayHello, OpenKind,
+    Permission, Run, ScreenMode, ServerMsg, VERSION,
 };
 use crate::registry::{self, Device, RelayState, RelayStatus, Via};
 use crate::transport::{self, Channel, KEY_LEN, Recv, Socket};
@@ -76,7 +76,7 @@ const DONE_RUNNING: usize = 64;
 /// after the 45 s idle timeout.
 pub const FOLLOW_FRESH: Duration = Duration::from_secs(20);
 /// What this gateway serves beyond Phase 2 (`welcome.features`).
-const FEATURES: [&str; 13] = [
+const FEATURES: [&str; 14] = [
     "screen",
     "text",
     "output",
@@ -89,6 +89,7 @@ const FEATURES: [&str; 13] = [
     "complete",
     "running",
     "open",
+    "close",
     "fit",
 ];
 
@@ -1274,7 +1275,12 @@ fn screen_frame(
         .filter(|&(i, l)| full || prev.is_some_and(|p| p.lines.get(i) != Some(l)))
         .map(|(i, l)| (i as u16, l.clone()))
         .collect();
-    if !full && lines.is_empty() && prev.is_some_and(|p| (p.alt, p.cursor) == (s.alt, s.cursor)) {
+    if !full
+        && lines.is_empty()
+        && prev.is_some_and(|p| {
+            (p.alt, p.cursor, &p.fg, &p.bg, &p.rules) == (s.alt, s.cursor, &s.fg, &s.bg, &s.rules)
+        })
+    {
         return None;
     }
     let msg = |full: bool, lines: Vec<(u16, Vec<Run>)>| {
@@ -1285,6 +1291,9 @@ fn screen_frame(
             alt: s.alt,
             cursor: s.cursor,
             full,
+            fg: s.fg.clone(),
+            bg: s.bg.clone(),
+            rules: s.rules.clone(),
             lines,
         })
     };
@@ -1310,6 +1319,9 @@ fn screen_frame(
         rows: s.rows,
         alt: s.alt,
         cursor: s.cursor,
+        fg: s.fg.clone(),
+        bg: s.bg.clone(),
+        rules: s.rules.clone(),
     };
     // the client has it already (an unstyled screen went out before)
     if prev == Some(&plain) {
@@ -1952,6 +1964,11 @@ fn session<S: Source, T: Socket>(
                 pane,
                 kind,
             }) => Some(open(shared, device, &mut opens, rid, pane, kind)),
+            Ok(ClientMsg::Close {
+                id: rid,
+                pane,
+                kind,
+            }) => Some(close(shared, device, &mut opens, rid, pane, kind)),
             Ok(ClientMsg::Start { id: rid }) => Some(start(shared, device, &mut opens, rid)),
         };
         // what was queued meanwhile goes first (`open` queues the topology
@@ -2251,6 +2268,37 @@ fn open<S: Source>(
         shared.source.open(pane, &device.name, kind),
         || format!("no pane {pane}"),
     )
+}
+
+/// `close`: permission and rate like `open`, then the source. On success
+/// every connection gets the new topology before the ack.
+fn close<S: Source>(
+    shared: &Shared<S>,
+    device: &Device,
+    rate: &mut Rate,
+    rid: String,
+    pane: u64,
+    kind: CloseKind,
+) -> ServerMsg {
+    if rid.chars().count() > MAX_REQUEST_ID {
+        return ServerMsg::error(
+            ErrorCode::BadRequest,
+            format!("id is longer than {MAX_REQUEST_ID} characters"),
+        );
+    }
+    if !operates(shared, device) {
+        return ServerMsg::ack_err(rid, ErrorCode::Forbidden, VIEW_ONLY);
+    }
+    if !rate.allow(Instant::now()) {
+        return ServerMsg::ack_err(rid, ErrorCode::Rate, "too many requests; slow down");
+    }
+    match shared.source.close(pane, &device.name, kind) {
+        Ok(()) => {
+            push_topology(shared);
+            ServerMsg::ack_ok(rid)
+        }
+        Err(e) => opened(shared, rid, Err(e), || format!("no pane {pane}")),
+    }
 }
 
 /// `start`: permission and rate like `open`, then the source (which
@@ -2962,6 +3010,9 @@ mod tests {
             rows: 2,
             alt: true,
             cursor: None,
+            fg: None,
+            bg: None,
+            rules: Vec::new(),
             lines: vec![vec![Run::plain(big.clone())], vec![Run::plain(big)]],
         };
         let (f, plain) = screen_frame(1, None, &s).unwrap();

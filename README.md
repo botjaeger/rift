@@ -73,7 +73,7 @@ rebound. Full list: [keyboard shortcuts](docs/keyboard-shortcuts.md).
 | **Code review** — staged and unstaged diffs; stage, unstage or revert a file or hunk | ⇧⌘G or the `± +N −M` button at the top right |
 | Session restore (tabs, splits, directories, window position) | On by default (`restore_session`) |
 | Saved block output across restarts | Settings → General → *Save block output for restore* |
-| Durable sessions (the main window's shells keep running after you quit; a ⌘N window's end with it) | On by default with *Restore tabs on launch*; Settings → General → *Keep shells running when Rift quits* |
+| Durable sessions (the main window's shells keep running through an update or a crash; quitting ends them and the next launch starts fresh) | On by default with *Restore tabs after a crash*; Settings → General → *Keep shells running through updates* |
 | Updates — checked at launch and every 6 hours; tabs and running shells survive the restart | *Update Rift* in the tab bar; Settings → About; Settings → General → *Check for updates* |
 | Links and paths | ⌘-click URLs, OSC 8 links and file paths (`file:line:col` too); Settings → Files picks the editor they open in |
 | Terminal behavior — mouse reporting, middle-click paste, wheel speed, OSC 52 clipboard access, Option as Meta | Settings → Terminal |
@@ -177,13 +177,13 @@ cargo build --release                  # binary only: target/release/rift-termin
 packaging/make-app.sh                  # macOS app bundle: target/Rift.app
 ```
 
-**Stop** — quit with ⌘Q (Linux: Super+Q) or close the last window; ⌃C in the
-terminal that ran `cargo run` also stops it. With durable sessions on
-(the default; Settings → General) and *Restore tabs on launch* on (also the
+**Stop** — quit with ⌘Q (Linux: Super+Q) or close the last window: every
+shell ends and the next launch starts fresh. ⌃C in the terminal that ran
+`cargo run` (or a crash) stops only the window: with durable sessions on (the
+default; Settings → General) and *Restore tabs after a crash* on (also the
 default), the main window's shells keep running in the background session
-service, which exits by itself 10 s after its last shell is closed; a window
-opened with ⌘N ends its shells when it closes. Close the panes (⌘W) to end
-those shells.
+service, which exits by itself 10 s after its last shell is closed, and the
+next launch reattaches them.
 
 **Clean** — build output lives only in `target/`:
 

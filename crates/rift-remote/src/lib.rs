@@ -23,7 +23,7 @@ mod uplink;
 
 pub use server::{Config, Gateway, serve};
 
-use protocol::{Block, OpenKind, Window};
+use protocol::{Block, CloseKind, OpenKind, Window};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -165,6 +165,14 @@ pub struct Screen {
     pub alt: bool,
     /// `[row, column]` while the program shows its cursor.
     pub cursor: Option<[u16; 2]>,
+    /// The theme's default foreground / background, `"rrggbb"`.
+    #[serde(default)]
+    pub fg: Option<String>,
+    #[serde(default)]
+    pub bg: Option<String>,
+    /// Rows carrying a block rule and its colour.
+    #[serde(default)]
+    pub rules: Vec<(u16, String)>,
     /// Row 0 first, one entry per row (trailing default blanks left out).
     pub lines: Vec<Vec<protocol::Run>>,
 }
@@ -791,6 +799,15 @@ pub trait Source: Send + Sync + 'static {
         let _ = (pane, device, kind);
         Err(InputError::Unavailable(
             "this computer cannot open shells".into(),
+        ))
+    }
+    /// Close `pane`, or its tab, for the device named `device` (feature
+    /// `close`), without asking the desktop's user. Defaults to
+    /// `Unavailable`.
+    fn close(&self, pane: u64, device: &str, kind: CloseKind) -> Result<(), InputError> {
+        let _ = (pane, device, kind);
+        Err(InputError::Unavailable(
+            "this computer cannot close shells".into(),
         ))
     }
     /// Whether [`start`] may be used: the welcome then lists `start`.

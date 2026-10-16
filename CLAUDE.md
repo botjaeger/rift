@@ -11,8 +11,10 @@ Rift is a GPU-accelerated, block-based terminal emulator for macOS and Linux,
 written in Rust (winit, wgpu, glyphon, alacritty_terminal). It implements the
 Claude Design project `b819116d-9d1b-4daa-a29d-edc798d62544` 1:1 (files
 `Runway.dc.html` and `Runway Design Spec.dc.html`; fetch them with the
-DesignSync tool when a pixel value or design intent is in question). Colors and
-metrics come from that spec — never improvise visual values. Keybindings follow
+DesignSync tool when a pixel value or design intent is in question). Metrics
+come from that spec — never improvise visual values. Colors mirror Warp's
+default themes (user decision 2026-10-16; supersedes the spec's colors; the
+tokens are in DESIGN.md and `crates/rift-core/src/theme/`). Keybindings follow
 Warp's default macOS layout (user decision; supersedes spec §4: ⌘K = clear
 blocks, ⌘P = palette).
 

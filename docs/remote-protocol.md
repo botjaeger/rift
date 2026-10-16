@@ -90,7 +90,7 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
 
 ## Devices and permissions
 
-- `operate`: everything below. `view`: no `run`, `keys`, `text`, `fit`, `open`, `start` or
+- `operate`: everything below. `view`: no `run`, `keys`, `text`, `fit`, `open`, `close`, `start` or
   `complete` (its history can hold secrets typed on a command line, and
   path completion lists any folder), and no `diff` of an untracked file
   (its whole content: a `.env`, a key); they get `ack` with `error`
@@ -120,7 +120,7 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
 | `run` | 4 per second per connection; the command at most 2 KiB, one line |
 | `keys` | 20 keys per message, 20 messages per second per connection |
 | `text` | 1 KiB per message, one line without control characters; counts against the `keys` rate |
-| `open`, `start` | 2 per second per connection, together |
+| `open`, `close`, `start` | 2 per second per connection, together |
 | `fit` | 4 per second per connection; `cols` 20 to 300, `rows` 5 to 120 (clamped) |
 | `output` | 1 to 500 lines and at most 64 KiB per answer, 10 requests per second per connection |
 | `screen` | at most 300 columns and 120 rows (the top-left part of a larger screen), one per 100 ms |
@@ -149,6 +149,8 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
 {"t":"screen","pane":12,"mode":"auto"}
 {"t":"output","id":"o1","pane":12,"block":86,"from":0,"limit":500}
 {"t":"open","id":"n1","pane":12,"kind":"tab"}
+{"t":"close","id":"c1","pane":12,"kind":"pane"}
+{"t":"close","id":"c2","pane":12,"kind":"tab"}
 ```
 
 - `subscribe` follows one pane (a new `subscribe` replaces the old one).
@@ -211,6 +213,16 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
   device. Every connection gets the `topology` holding the new pane before
   the `ack`, which names it in `pane`. A window that cannot split the pane
   answers `ack` with `error` `busy`.
+- `close` (feature `close`) ends a shell: `kind` `pane` closes `pane` (its
+  shell ends, as ⌘W on the desktop), `tab` closes the whole tab holding
+  it. The desktop does not ask about running commands (the phone asks its
+  user first) and shows a toast naming the device; closing the window's
+  last tab closes the window, as ⌘W does. Every connection gets the
+  `topology` without the closed panes before the plain `ack` (`{"t":"ack",
+  "id":"c1","ok":true}`). A pane that does not exist answers `ack` with
+  `error` `no_pane`; `view` devices and a desktop with `remote_access` off
+  answer `forbidden`. A background shell (see `start`) is a tab of one
+  pane: both kinds end it.
 - `start` (`{"t":"start","id":"n2"}`, feature `start`) starts a shell on a
   computer whose user allows it while no Rift window is open
   (`remote_when_closed`): the gateway keeps the shell in the session
@@ -234,7 +246,7 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
 ## Gateway → client
 
 ```json
-{"t":"welcome","v":2,"host":"studio-mac","os":"macos","version":"0.1.0","device":"d3f1","permission":"operate","features":["screen","text","output","push_failures","push_ntfy","git","notify_off","chips","waiting","complete","running","open"]}
+{"t":"welcome","v":2,"host":"studio-mac","os":"macos","version":"0.1.0","device":"d3f1","permission":"operate","features":["screen","text","output","push_failures","push_ntfy","git","notify_off","chips","waiting","complete","running","open","close"]}
 {"t":"topology","windows":[{"pid":4242,"tabs":[{"index":0,"title":"rift","active":true,"panes":[{"id":12,"active":true,"cwd":"/Users/me/rift","job":null,"last_command":"cargo test","last_exit":0,"git":{"branch":"main","ahead":1,"behind":0,"dirty":true,"files":3,"added":42,"removed":7}}]}]}]}
 {"t":"snapshot","pane":12,"seq":41,"blocks":[Block],"has_older":true}
 {"t":"update","pane":12,"seq":42,"blocks":[Block],"removed":[80]}
@@ -246,6 +258,7 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
 {"t":"pong","n":3}
 {"t":"error","code":"auth","message":"this device is not paired"}
 {"t":"screen","pane":12,"cols":80,"rows":24,"alt":true,"cursor":[23,1],"full":false,"lines":[[0,[["top - 10:02:11 up 3 days",null,null,1]]],[7,[]]]}
+{"t":"screen","pane":12,"cols":80,"rows":24,"alt":false,"cursor":null,"full":true,"fg":"d4d4d4","bg":"1e1e1e","rules":[[0,"3fb950"],[1,"3fb950"]],"lines":[[0,[["▾ ls",null,null,1],["✓ 0","3fb950","1a3a22",0]]],[1,[["a.txt",null,null,0]]]]}
 {"t":"screen_end","pane":12}
 {"t":"output","id":"o1","pane":12,"block":86,"from":0,"text":"   Compiling rift-pty v0.1.0\n","total":40}
 ```
@@ -260,7 +273,7 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
   `off`, § Push), `chips` (`dirs`, `branches`, `changes`, `diff`, §
   Phase 3), `waiting` (a pane's `waiting` in `topology`, below),
   `complete` (§ Phase 3), `running` (a pane's `running` in
-  `topology`, below), `fit` (§ Phase 3), `open` and `start` (listed only while the computer
+  `topology`, below), `fit` (§ Phase 3), `open`, `close` and `start` (listed only while the computer
   allows it, `remote_when_closed`). A
   gateway that leaves
   the field out serves none of them; the app then hides what needs them.
@@ -481,9 +494,10 @@ Rift app, so it works in builds without an Apple Developer Program account.
   once, through Expo, ntfy or both). While a device has a registration the
   gateway watches every pane even with nobody connected.
 - The request is a POST of JSON to `https://exp.host/--/api/v2/push/send`
-  (with `curl`, https only): `title` `A command finished on <host>` or
-  `A command failed on <host> (exit N)`, `body` the command line only when
-  `show_command`, `data` `{"host":"<gateway key>","pane":N}` (a tap opens
+  (with `curl`, https only): `title` `✓ 0 · <command>` or
+  `✕ N · <command>` (the command cut at 40 characters with `…`; `A command`
+  unless `show_command`), `subtitle` `Finished in 113ms · <host>` or
+  `Failed after 8.4s · <host>`, `data` `{"host":"<gateway key>","pane":N}` (a tap opens
   the pane), `priority` `high`, `sound` `default`. Output never goes out.
 - A token the service answers with `DeviceNotRegistered` is removed (an
   ntfy URL next to it stays).
@@ -491,9 +505,8 @@ Rift app, so it works in builds without an Apple Developer Program account.
   only, 5 s to connect and 15 s in all, the reply not read or logged), on a
   thread per device: a slow or dead ntfy server holds up no other device
   and no Expo post. While a device's post is under way its next alerts are
-  dropped (logged), so one dead server costs at most one thread. The body is the command
-  line only when `show_command`, else `Exit N` for a failed command or
-  `Finished`; at most 4096 bytes (ntfy turns longer ones into attachments).
+  dropped (logged), so one dead server costs at most one thread. The body is the
+  Expo subtitle (`Finished in 113ms · <host>`); at most 4096 bytes (ntfy turns longer ones into attachments).
   Headers: `Title` the same words as the Expo title (as an RFC 2047
   `=?UTF-8?B?…?=` word when it is not printable ASCII, e.g. a host named
   `Jo’s Mac`), `Priority` `high` for a failed command else `default`, `Tags`
@@ -549,8 +562,25 @@ subscribed pane's visible screen as text runs:
   lines are left out, and the live prompt, which the desktop's editor owns,
   is not shown (nor the cursor, then). `cursor` is the row the program's
   cursor is on, or `null` when that line is not shown.
+- `fg`, `bg`: the pane theme's default foreground and background
+  (`"rrggbb"`), which runs with a `null` `fg` / `bg` are drawn in (the
+  program's own default colours, reverse video already applied). Present on
+  every frame, alternate screen included; absent from a gateway that does
+  not send them (draw your own).
+- `rules`: `[[row, "rrggbb"], …]`, every screen row that carries a block
+  rule, the 2px bar the desktop draws left of a command block, header and
+  output rows alike, and its colour: success green for exit 0, error red
+  for a failure, the accent while the command runs, muted when no exit is
+  known. Rows outside blocks (padding, the alternate screen) are not
+  listed; the field is absent when no row has one. It is always the
+  whole list, also in diff frames (`full: false`): a client replaces its
+  rules with it; a change of rules alone (a command finished) is a frame
+  with `lines: []`. A frame sent without styles (below) keeps `fg`, `bg`
+  and `rules`.
+- A header's state badge is a pill on the desktop: its run carries a `bg`,
+  the badge colour at 13 % over the theme background.
 - `alt`: the pane shows the alternate screen.
-- `cursor`: `[row, column]` while the program shows its cursor, else
+- `cursor`: `[row, column] while the program shows its cursor, else
   `null`.
 - `lines`: `[row, runs]`, row 0 at the top. With `full: true` every row
   `0 … rows-1` is present (the first `screen` after `screen` `auto`/`on`
@@ -779,6 +809,10 @@ before, for the phone's Run sheet and the pane's suggestions:
   (`{"cmd":"remote-open","pane":12,"device":"Sam's iPhone","kind":"tab"}`,
   answering the new pane as `pane`) has the same gate and the errors
   `remote access is off`, `no such pane` and `cannot split this pane`.
+  `remote-close`
+  (`{"cmd":"remote-close","pane":12,"device":"Sam's iPhone","kind":"pane"}`,
+  `kind` `pane` or `tab`; no confirmation, answering `ok`) has the same gate
+  and the errors `remote access is off` and `no such pane`.
 - Every window shows a tab-bar chip while at least one device is connected
   (from `status.json`); clicking it opens Settings › Remote access. After
   every `status.json` change the gateway sends `{"cmd":"remote-status"}`

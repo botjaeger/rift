@@ -26,28 +26,37 @@ constant.
 Every rendered color resolves from a theme token (`rift_core::Theme`,
 `crates/rift-core/src/theme/`). Values below are `dark-default`.
 
+The default themes mirror Warp's colors on Rift's layout (user decision
+2026-10-16; it supersedes the spec's colors, not its metrics): `dark-default`
+is Warp's "Dark" (background `#050505`, foreground `#ffffff`, accent
+`#19aad8`), `light-default` Warp's "Light". Warp derives its UI colors by
+laying the foreground over the background at fixed opacities
+(`warp_core/src/ui/theme/color.rs`: surfaces 5/10/15 %, text 90/60/40 %); the
+tokens below are those values. Only where a Warp color falls below Rift's
+contrast floor is it darkened along its hue (noted in the theme files).
+
 | Token | Dark default | Use |
 |---|---|---|
-| `bg` | `#1e1e1e` | Terminal body |
-| `bg_chrome` | `#181818` | Tab bar, vertical rail, settings sidebar |
-| `bg_gutter` | `#1a1a1a` | Space between split panes |
-| `surface` | `#232326` | Modals, dropdowns, menus |
-| `border` | `#ffffff12` | Hairlines (white 7 %) |
-| `pane_border_inactive` | `#3c3c3c` | Split pane divider |
-| `fg` | `#d4d4d4` | Default terminal text |
-| `text_bright` | `#f0f1f3` | Commands, emphasized text |
-| `text_ui` | `#e6e7ea` | Chrome labels |
-| `text_dim` | `#a1a4ad` | Secondary text |
-| `text_muted` | `#868993` | Tertiary text, metadata, hints |
-| `accent` | `#569cd6` | Focus, selection wash, running state, links |
-| `success` | `#22c55e` | Exit 0, prompt glyph, git branch |
-| `error` | `#ef4444` | Non-zero exit, invalid input |
-| `warning` | `#d7ba7d` | Vim `NORMAL`, cautions |
-| `cursor` | `#d4d4d4` | Cursor |
-| `selection` | `#264f78` | Text selection |
+| `bg` | `#050505` | Terminal body |
+| `bg_chrome` | `#000000` | Tab bar, vertical rail, settings sidebar |
+| `bg_gutter` | `#000000` | Space between split panes |
+| `surface` | `#1e1e1e` | Modals, dropdowns, menus (Warp surface 2) |
+| `border` | `#ffffff1a` | Hairlines (white 10 %, Warp outline) |
+| `pane_border_inactive` | `#2b2b2b` | Split pane divider |
+| `fg` | `#ffffff` | Default terminal text |
+| `text_bright` | `#ffffff` | Commands, emphasized text |
+| `text_ui` | `#e6e6e6` | Chrome labels (Warp main text, 90 %) |
+| `text_dim` | `#9b9b9b` | Secondary text (Warp sub text, 60 %) |
+| `text_muted` | `#828282` | Tertiary text, metadata, hints (50 %) |
+| `accent` | `#19aad8` | Focus, selection wash, running state, links |
+| `success` | `#1ca05a` | Exit 0, prompt glyph, git branch |
+| `error` | `#ff8272` | Non-zero exit, invalid input |
+| `warning` | `#e5a01a` | Vim `NORMAL`, cautions |
+| `cursor` | `#19aad8` | Cursor (Warp: the accent) |
+| `selection` | `#76a7fa66` | Text selection |
 | `search_match` / `search_active` | `#ffd700` / `#ff8000` | Find highlights |
-| `syntax.command` / `flag` / `string` / `ghost` | `#569cd6` / `#9cdcfe` / `#ce9178` / `#5a5c63` | the command line in the editor and block headers (command, flags, strings; `ghost` the suggestion); keywords and numbers in the file viewer and review diff |
-| `ansi[0..16]` | xterm values | Program colors |
+| `syntax.command` / `flag` / `string` / `ghost` | `#19aad8` / `#a5d5fe` / `#fefdc2` / `#696969` | the command line in the editor and block headers (command, flags, strings; `ghost` the suggestion); keywords and numbers in the file viewer and review diff |
+| `ansi[0..16]` | Warp Dark (`#616161` `#ff8272` `#b4fa72` `#fefdc2` `#a5d5fe` `#ff8ffd` `#d0d1fe` `#f1f1f1`, bright `#8e8e8e` `#ffc4bd` `#d6fcb9` `#fefdd5` `#c1e3fe` `#ffb1fe` `#e5e6fe` `#feffff`) | Program colors |
 
 Builtin themes: `dark-default`, `light-default`, `catppuccin-mocha`,
 `tokyo-night`. A Warp YAML theme is mapped onto the full token set
@@ -181,8 +190,9 @@ No other animation. Motion never delays input.
 ## Components
 
 - **Block header**: chevron, command (`text_bright`), prompt-time
-  `~/path git:(branch)` (`text_dim`), then right-aligned badge pill, duration
-  and copy button. A long command is cut with `…` before the badge group; the
+  `~/path git:(branch)` (`text_dim`), then right-aligned badge pill, duration,
+  copy button and ⋮ menu button (both `text_muted`, on hover; the copy
+  button a `success` check after a copy). A long command is cut with `…` before the badge group; the
   context shows only when it fits.
 - **Editor**: context chips (18 px tall, 5 px padding, 12 px glyph, `fg` 4 % fill,
   `border` hairline, radius 4, 6 px apart, 12 px mono label centred):

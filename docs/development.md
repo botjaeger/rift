@@ -176,7 +176,8 @@ mobile/           Expo companion (iOS, Android): pnpm, outside the Cargo workspa
 The remote gateway (`rift-terminal remote`) is a separate process, started
 by the windows while `remote_access` is on: it reads and drives every window
 through its control socket (`status`, `blocks`, `screen`, `output`,
-`menu`, `diff`, `complete`, `remote-input`, `remote-open`), so
+`menu`, `diff`, `complete`, `remote-input`, `remote-open`,
+`remote-close`), so
 networking never runs inside a window. Its format is
 [remote-protocol.md](remote-protocol.md); the app and the crate decode the
 same fixtures, and the TypeScript Noise implementation replays the

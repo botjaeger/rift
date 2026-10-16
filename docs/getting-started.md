@@ -67,11 +67,14 @@ If commands do not become blocks, the shell is not loading the hooks (see
 | Rename or color a tab, close the others | Right-click the tab |
 | Tabs in a side rail | Settings → Appearance → *Tabs: Side* |
 
-Tabs, splits and directories come back on the next launch
-(`restore_session`), and the shells themselves keep running while Rift is
-closed and reattach (*Keep shells running when Rift quits*, on by default;
-see [durable sessions](features.md#durable-sessions)). Turn on *Save block
-output for restore* to also bring back the finished blocks.
+Quitting Rift (⌘Q, or closing the window) ends every tab and shell: the next
+launch starts fresh with one tab where the window was. An update's restart,
+a crash or a reboot instead bring tabs, splits and directories back
+(`restore_session`), and the shells themselves keep running and reattach
+(*Keep shells running through updates*, on by default; see [durable
+sessions](features.md#durable-sessions)). Turn on *Save block output for
+restore* to also bring back the finished blocks. While a phone is connected,
+quitting asks first.
 
 When a new release is out, **Update Rift** appears in the tab bar: it
 installs the update and restarts Rift with your tabs and running shells (see

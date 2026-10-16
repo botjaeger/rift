@@ -1,41 +1,45 @@
-# Rift builtin theme — light counterpart of dark-default.
-# Same token roles, inverted surface ramp: chrome sits slightly darker than the
-# terminal ground, the modal surface is pure white. Every text/semantic color is
-# checked against `bg`: fg >= 7:1, text_muted >= 3:1, accent >= 4.5:1.
+# Rift builtin theme — Warp's default "Light" colours on Rift's visuals (user
+# decision 2026-10-16). Source: warpdotdev/warp app/src/themes/default_themes.rs
+# (background #ffffff, foreground #111111, accent #00c2ff, `details: lighter`)
+# and crates/warp_core/src/ui/theme/color.rs (UI colours are the foreground
+# laid over the background: neutral_1 5%, neutral_2 10%, neutral_3 15%; text
+# main 90%, sub 60%). Text colours keep Rift's floor against `bg`: fg >= 7:1,
+# text_muted >= 3:1, accent and semantic colours >= 4.5:1 — where Warp's own
+# colour is lighter than that it is darkened along its hue, noted below.
 name = "Light Default"
 
-bg = "#fafafa"
-bg_chrome = "#f0f0f2"
-bg_gutter = "#e6e6ea"
+bg = "#ffffff"                  # Warp background
+bg_chrome = "#f3f3f3"           # Warp neutral_1: chrome sits below the ground
+bg_gutter = "#e7e7e7"           # Warp neutral_2
 surface = "#ffffff"
-border = "#00000014"            # rgba(0,0,0,.08)
-pane_border_inactive = "#d4d4d9"
+border = "#1111111a"            # Warp outline: fg @ 10%
+pane_border_inactive = "#dbdbdb" # Warp split-pane border: fg @ 15%
 
-fg = "#1f2328"                  # 15.1:1 on bg
-text_bright = "#0b0d10"         # 18.6:1
-text_ui = "#2b3138"             # 12.6:1
-text_dim = "#5a6069"            #  6.1:1
-text_muted = "#767c86"          #  4.0:1
+fg = "#111111"                  # Warp foreground, 18.9:1
+text_bright = "#000000"
+text_ui = "#292929"             # Warp main text: fg @ 90%, 14.5:1
+text_dim = "#707070"            # Warp sub text: fg @ 60%, 4.9:1
+text_muted = "#888888"          # fg @ 50%, 3.5:1 (Warp's 40% hint is 2.6:1)
 
-accent = "#1f6fb2"              #  5.1:1 — dark-default's #569cd6 darkened for white
-success = "#1a7f37"             #  4.9:1
-error = "#cf222e"               #  5.1:1
-warning = "#9a6700"             #  4.7:1
-cursor = "#1f2328"
-selection = "#1f6fb240"         # accent @ 25%
+accent = "#007dad"              # Warp #00c2ff (2.0:1) darkened to 4.6:1
+success = "#0b7d58"             # Warp ANSI green #10a778 darkened to 4.9:1
+error = "#c30771"               # Warp ANSI red, 5.9:1
+warning = "#7d7310"             # Warp ANSI yellow #a89c14 darkened to 4.9:1
+cursor = "#00c2ff"              # Warp's cursor is the accent
+selection = "#76a7fa66"         # Warp text selection rgba(118,167,250,.4)
 search_match = "#e3b341"
 search_active = "#bc4c00"
 
-# One Light ANSI palette — readable on a near-white ground
+# 16 base ANSI colors — Warp Light
 ansi = [
-    "#383a42", "#e45649", "#50a14f", "#c18401",
-    "#4078f2", "#a626a4", "#0184bc", "#a0a1a7",
-    "#4f525e", "#e06c75", "#98c379", "#e5c07b",
-    "#61afef", "#c678dd", "#56b6c2", "#ffffff",
+    "#212121", "#c30771", "#10a778", "#a89c14",
+    "#008ec4", "#523c79", "#20a5ba", "#e0e0e0",
+    "#212121", "#fb007a", "#5fd7af", "#f3e430",
+    "#20bbfc", "#6855de", "#4fb8cc", "#f1f1f1",
 ]
 
 [syntax]
-command = "#1f6fb2"
-flag = "#0550ae"
-string = "#a04100"
-ghost = "#a0a4ad"
+command = "#007dad"             # accent
+flag = "#523c79"                # ANSI magenta
+string = "#c30771"              # ANSI red
+ghost = "#a0a0a0"               # Warp hint text: fg @ 40%

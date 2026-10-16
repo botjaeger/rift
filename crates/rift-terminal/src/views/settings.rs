@@ -1847,7 +1847,7 @@ fn remote_page(form: &mut Form, config: &Config, view: &RemoteView, blink_on: bo
             if config.durable_sessions {
                 "Only phones that may run commands; you get a notification, and the tabs appear when you open Rift"
             } else {
-                "Needs Keep shells running when Rift quits (General)"
+                "Needs Keep shells running through updates (General)"
             },
             config.remote_when_closed,
             "remote_when_closed",
@@ -2510,7 +2510,7 @@ fn general_page(form: &mut Form, config: &Config, update: &UpdateLine) {
     let y = form.y;
     form.toggle(
         y,
-        "Restore tabs on launch",
+        "Restore tabs after a crash",
         config.restore_session,
         "restore_session",
     );
@@ -2545,8 +2545,8 @@ fn general_page(form: &mut Form, config: &Config, update: &UpdateLine) {
     let y = form.y;
     form.toggle_desc(
         y,
-        "Keep shells running when Rift quits",
-        "Session service; relaunch reattaches (new shells)",
+        "Keep shells running through updates",
+        "Session service; updates and crashes reattach (new shells)",
         config.durable_sessions,
         "durable_sessions",
     );

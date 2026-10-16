@@ -219,9 +219,10 @@ pub struct Config {
     /// Also save finished blocks (command, status, output) and show them
     /// again on relaunch. Output may contain secrets, so this is opt-in.
     pub save_transcripts: bool,
-    /// Shells run in the per-user session service, so closing or quitting
-    /// Rift leaves them running and relaunching reattaches them (on by
-    /// default; `durable_sessions = false` keeps shells in the window).
+    /// Shells run in the per-user session service, so an update's restart
+    /// or a crash leaves them running and the relaunch reattaches them (on
+    /// by default; `durable_sessions = false` keeps shells in the window).
+    /// An intentional quit ends them either way.
     pub durable_sessions: bool,
     /// Look for a new release at launch and every 6 hours (`update.rs`).
     pub check_for_updates: bool,

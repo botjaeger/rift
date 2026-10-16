@@ -248,8 +248,13 @@ Each command becomes a block via shell-integration OSC 133 markers:
     as its duration. Hovering the duration shows the full time (`Took 1 min
     18.432 s · finished 03:48:05 pm, October 11, 2026`; `Running for …`
     while it runs; `Took … · restored from a previous session` for a
-    restored block). The copy button shows only while the pointer is on the
-    header or the block is selected; its place stays reserved
+    restored block). The copy button and the ⋮ menu button (three stacked
+    dots, the block's context menu dropping down from it) show only while the
+    pointer is on the header or the block is selected; their place stays
+    reserved. After a copy the copy button is a green check for 1.5 s and a
+    toast says "Copied output" ("Nothing to copy…" for a block without
+    output). On the sticky header both buttons act on the block; only the
+    rest of it scrolls back to the block
 - **Left border**, 2 px, colored by state: accent = running, green = exit 0,
   red = exit ≠ 0, muted = no exit info. Consecutive blocks' borders are 2 px
   apart (design 01 block spacing).
@@ -700,13 +705,13 @@ description) left, control right; it runs to the bottom edge.
   - Shell: `Shell path` (read-only: `shell` override, else `$SHELL`),
     `Scrollback` stepper (lines, ±1000 within 1,000–1,000,000, shown as
     `10,000`; described *Maximum lines kept in the buffer*).
-  - Session: `Restore tabs on launch` toggle, `New tabs start in` segmented
+  - Session: `Restore tabs after a crash` toggle, `New tabs start in` segmented
     `Previous | Home | Custom` (a custom path is set in config.toml),
     `Warn before closing running commands` toggle,
     `Save block output for restore` toggle (*Output can contain secrets;
     turning this off deletes it*; `save_transcripts`),
-    `Keep shells running when Rift quits` toggle (*Session service;
-    relaunch reattaches (new shells)*; `durable_sessions`).
+    `Keep shells running through updates` toggle (*Session service;
+    updates and crashes reattach (new shells)*; `durable_sessions`).
   - Updates: `Check for updates` toggle (*At launch and every 6 hours;
     Update Rift appears in the tab bar*; `check_for_updates`), then a
     `Rift <version>` row whose description is the update status (`Not
@@ -810,7 +815,7 @@ description) left, control right; it runs to the bottom edge.
   - `Phones can open tabs while Rift is closed` (with remote access on, last):
     the `remote_when_closed` switch (*Only phones that may run commands; you
     get a notification, and the tabs appear when you open Rift*, or *Needs
-    Keep shells running when Rift quits (General)* while `durable_sessions`
+    Keep shells running through updates (General)* while `durable_sessions`
     is off).
   - `Use a Cloudflare tunnel instead` (with remote access on, below `Relay`): the `remote_tunnel`
     switch; on, a checklist follows: `cloudflared` (`Installed · <path>` with

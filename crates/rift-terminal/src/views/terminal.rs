@@ -35,8 +35,11 @@ pub struct GridLayout {
     /// Blocks start right above the input while they do not fill the pane
     /// (`blocks_start = "bottom"` with the input at the bottom).
     pub bottom_up: bool,
-    /// Pointer position (block headers show their copy button on hover).
+    /// Pointer position (block headers show their copy and menu buttons on
+    /// hover).
     pub mouse: Option<(f32, f32)>,
+    /// The block whose output was just copied: its copy button shows a check.
+    pub copied: Option<BlockId>,
     /// Device pixels per logical pixel (cell backgrounds snap to them).
     pub scale: f32,
 }
@@ -95,6 +98,8 @@ pub struct RenderOutput {
     pub chevron_hits: Vec<HitRect>,
     /// Copy-button rects on block headers.
     pub copy_hits: Vec<HitRect>,
+    /// Menu-button (⋮) rects on block headers: the block's context menu.
+    pub menu_hits: Vec<HitRect>,
     /// Duration rects on block headers (hover: the full time).
     pub duration_hits: Vec<HitRect>,
     pub display_len: usize,
@@ -1515,6 +1520,29 @@ fn remote_sent(b: &Block) -> bool {
     }
 }
 
+/// The colour of the 2px rule beside a block in state `state` (none for a
+/// prompt being typed): accent while running, success / error by exit,
+/// muted without one. The desktop's border and the phone's `rules`.
+fn state_rule(state: &BlockState, theme: &Theme) -> Option<Color> {
+    match state {
+        BlockState::Running { .. } => Some(theme.accent),
+        BlockState::Done { exit: Some(0), .. } => Some(theme.success),
+        BlockState::Done { exit: Some(_), .. } => Some(theme.error),
+        BlockState::Done { exit: None, .. } => Some(theme.text_muted),
+        BlockState::Prompt => None,
+    }
+}
+
+/// The rule colour of grid line `abs` (absolute): the block holding it,
+/// `live_end` closing the open one; none outside blocks and in raw prompt
+/// rows.
+fn block_rule_at(blocks: &[Block], theme: &Theme, live_end: u64, abs: u64) -> Option<Color> {
+    blocks
+        .iter()
+        .find(|b| abs >= b.prompt_start && abs < b.end.unwrap_or(live_end))
+        .and_then(|b| state_rule(&b.state, theme))
+}
+
 /// A colour's 8-bit channels: what the wire's `rrggbb` says, and how runs
 /// compare.
 fn rgb8(c: Color) -> [u8; 3] {
@@ -1727,6 +1755,9 @@ fn screen_of<T>(
         rows: rows as u16,
         alt,
         cursor: shown.then_some([cursor.line.0 as u16, cursor.column.0 as u16]),
+        fg: Some(hex8(rgb8(theme.fg))),
+        bg: Some(hex8(rgb8(theme.bg))),
+        rules: Vec::new(),
         lines,
     })
 }
@@ -1772,12 +1803,17 @@ fn styled_screen(
     let cursor_abs = (term.mode().contains(TermMode::SHOW_CURSOR) && !at_prompt)
         .then(|| scrolled + cursor.line.0.max(0) as u64);
     let runs = GridRuns::new(term, theme);
-    let (lines, cursor_row) = styled_rows(
+    let live_end = live_end(term, scrolled);
+    let StyledRows {
+        lines,
+        cursor: cursor_row,
+        rules,
+    } = styled_rows(
         &display,
-        rows,
+        (rows, cols),
         blocks,
         theme,
-        cols,
+        |abs| block_rule_at(blocks, theme, live_end, abs),
         |abs| {
             let rel = abs as i64 - scrolled as i64;
             if rel < -(history as i64) || rel >= g.screen_lines() as i64 {
@@ -1795,6 +1831,9 @@ fn styled_screen(
         cursor: cursor_row
             .filter(|_| cursor.column.0 < cols)
             .map(|r| [r as u16, cursor.column.0 as u16]),
+        fg: Some(hex8(rgb8(theme.fg))),
+        bg: Some(hex8(rgb8(theme.bg))),
+        rules,
         lines,
     })
 }
@@ -1802,22 +1841,33 @@ fn styled_screen(
 /// The last `rows` lines of `display` as screen rows (a header for each
 /// block, `grid_row` for a grid line, blank for padding), and the row of
 /// `cursor_abs` among them. Pure: the part of [`styled_screen`] that does
-/// not read a term.
+/// not read a term. Also the rows that carry a block rule and its colour
+/// (`"rrggbb"`): a header's by its block's state, a grid line's by
+/// `grid_rule`.
 fn styled_rows(
     display: &[DisplayLine],
-    rows: usize,
+    (rows, cols): (usize, usize),
     blocks: &[Block],
     theme: &Theme,
-    cols: usize,
+    grid_rule: impl Fn(u64) -> Option<Color>,
     mut grid_row: impl FnMut(u64) -> Vec<rift_remote::protocol::Run>,
     cursor_abs: Option<u64>,
-) -> (Vec<Vec<rift_remote::protocol::Run>>, Option<usize>) {
+) -> StyledRows {
     let start = display.len().saturating_sub(rows);
     // fewer lines than rows: blank ones above
     let mut lines = vec![Vec::new(); rows.saturating_sub(display.len())];
     let lead = lines.len();
     let mut cursor = None;
+    let mut rules = Vec::new();
     for (i, dl) in display[start..].iter().enumerate() {
+        let rule = match dl {
+            DisplayLine::Grid(abs) => grid_rule(*abs),
+            DisplayLine::Header(bi) => state_rule(&blocks[*bi].state, theme),
+            DisplayLine::Pad => None,
+        };
+        if let Some(c) = rule {
+            rules.push(((lead + i) as u16, hex8(rgb8(c))));
+        }
         lines.push(match dl {
             DisplayLine::Grid(abs) => {
                 if cursor_abs == Some(*abs) {
@@ -1829,7 +1879,19 @@ fn styled_rows(
             DisplayLine::Pad => Vec::new(),
         });
     }
-    (lines, cursor)
+    StyledRows {
+        lines,
+        cursor,
+        rules,
+    }
+}
+
+/// [`styled_rows`]'s answer: the screen rows, the row the cursor is on, and
+/// the rows carrying a block rule with its colour.
+struct StyledRows {
+    lines: Vec<Vec<rift_remote::protocol::Run>>,
+    cursor: Option<usize>,
+    rules: Vec<(u16, String)>,
 }
 
 /// A block's header as one `cols`-wide row, as the desktop draws it
@@ -1904,6 +1966,8 @@ fn header_runs(block: &Block, theme: &Theme, cols: usize) -> Vec<rift_remote::pr
         bg: None,
         flags,
     };
+    // the desktop's pill: the badge colour at 13 % over the ground
+    let pill = theme.bg.mix(badge_color, 0.13);
     let mut runs = vec![
         style(chevron.into(), theme.text_muted, 0),
         style(cmd.clone(), theme.text_bright, Run::BOLD),
@@ -1923,7 +1987,10 @@ fn header_runs(block: &Block, theme: &Theme, cols: usize) -> Vec<rift_remote::pr
             bg: None,
             flags: 0,
         });
-        runs.push(style(badge.clone(), badge_color, 0));
+        runs.push(Run {
+            bg: Some(hex8(rgb8(pill))),
+            ..style(badge.clone(), badge_color, 0)
+        });
         if !duration.is_empty() {
             runs.push(style(format!(" {duration}"), theme.text_muted, 0));
         }
@@ -2093,25 +2160,7 @@ pub fn render(
         |abs: u64| -> Option<Color> { row_selected(abs).then(|| sel_color.with_alpha(0.08)) };
 
     // block membership for border drawing: abs line → block state color
-    let border_color = |abs: u64| -> Option<Color> {
-        for b in &blocks {
-            let start = b.prompt_start;
-            let end = b.end.unwrap_or(live_end);
-            if abs >= start && abs < end {
-                if matches!(b.state, BlockState::Prompt) {
-                    return None; // raw prompt rows, no border yet
-                }
-                return Some(match b.state {
-                    BlockState::Running { .. } => theme.accent,
-                    BlockState::Done { exit: Some(0), .. } => theme.success,
-                    BlockState::Done { exit: Some(_), .. } => theme.error,
-                    BlockState::Done { exit: None, .. } => theme.text_muted,
-                    BlockState::Prompt => unreachable!(),
-                });
-            }
-        }
-        None
-    };
+    let border_color = |abs: u64| block_rule_at(&blocks, theme, live_end, abs);
 
     // which block a display line belongs to: the last row before a change
     // of block shortens its border so blocks sit 2px apart (design 01:
@@ -2261,9 +2310,17 @@ pub fn render(
     out
 }
 
+/// The pinned header's click areas: its buttons, which act as on the
+/// block's own header, and the rest of it (jump to block).
+pub struct StickyHits {
+    pub rect: [f32; 4],
+    pub chevron: Vec<HitRect>,
+    pub copy: Vec<HitRect>,
+    pub menu: Vec<HitRect>,
+}
+
 /// Draw the pinned header for `block` at the viewport top (layer 2 — an
-/// opaque bg on layer 1 could not cover layer-1 row text). Returns the
-/// clickable rect (jump to block).
+/// opaque bg on layer 1 could not cover layer-1 row text).
 pub fn render_sticky_header(
     layer: &mut Layer,
     engine: &mut TextEngine,
@@ -2272,7 +2329,7 @@ pub fn render_sticky_header(
     session: &Session,
     block_id: BlockId,
     selected: bool,
-) -> Option<[f32; 4]> {
+) -> Option<StickyHits> {
     let block = session
         .blocks
         .lock()
@@ -2309,7 +2366,12 @@ pub fn render_sticky_header(
         None,
         &mut sink,
     );
-    Some(rect)
+    Some(StickyHits {
+        rect,
+        chevron: sink.chevron_hits,
+        copy: sink.copy_hits,
+        menu: sink.menu_hits,
+    })
 }
 
 /// Edge and wash color of a selected block: a failed command stays red,
@@ -2960,29 +3022,48 @@ fn render_header(
         layer.text(xbuf, after_cmd_x + 3.0, y, theme.text_dim);
     }
 
-    // right side: badge pill, duration, copy icon
+    // right side: badge pill, duration, copy icon, menu (⋮)
     let right = grid.right;
     let icon_w = 13.0;
-    let icon_x = right - icon_w - 6.0;
+    let menu_w = 9.0;
+    let menu_x = right - menu_w - 4.0;
+    let icon_x = menu_x - icon_w - 9.0;
 
-    // copy icon, two overlapping rounded-rect outlines: only while the
-    // pointer is on the header or the block is selected (its place stays
-    // reserved, so nothing shifts)
+    // the copy icon (two overlapping rounded-rect outlines, a check for a
+    // moment after a copy) and the menu's three stacked dots: only while
+    // the pointer is on the header or the block is selected (their place
+    // stays reserved, so nothing shifts)
     let hovered = grid
         .mouse
         .is_some_and(|(mx, my)| mx >= grid.x && mx < right && my >= y && my < y + grid.line_h);
-    if hovered || selected {
+    let copied = grid.copied == Some(block.id);
+    if hovered || selected || copied {
         let ic = theme.text_muted;
         let cy = y + (grid.line_h - 13.0) / 2.0;
-        layer.bordered(
-            [icon_x + 4.0, cy + 4.0],
-            [8.5, 8.5],
-            Color::TRANSPARENT,
-            ic,
-            2.0,
-            1.3,
-        );
-        layer.bordered([icon_x, cy], [8.5, 8.5], Color::TRANSPARENT, ic, 2.0, 1.3);
+        if copied {
+            let (a, b, c) = (
+                [icon_x + 1.5, cy + 7.0],
+                [icon_x + 5.0, cy + 10.5],
+                [icon_x + 12.0, cy + 3.0],
+            );
+            layer.line(a, b, 1.6, theme.success);
+            layer.line(b, c, 1.6, theme.success);
+        } else {
+            layer.bordered(
+                [icon_x + 4.0, cy + 4.0],
+                [8.5, 8.5],
+                Color::TRANSPARENT,
+                ic,
+                2.0,
+                1.3,
+            );
+            layer.bordered([icon_x, cy], [8.5, 8.5], Color::TRANSPARENT, ic, 2.0, 1.3);
+        }
+        let mx = menu_x + menu_w / 2.0;
+        let my = y + grid.line_h / 2.0;
+        for dy in [-4.0, 0.0, 4.0] {
+            layer.circle([mx, my + dy], 2.4, ic);
+        }
     }
 
     // duration, right-aligned in its column
@@ -3055,9 +3136,13 @@ fn render_header(
         ],
         block: block.id,
     });
-    // copy button
+    // copy and menu buttons
     out.copy_hits.push(HitRect {
-        rect: [icon_x - 4.0, y, icon_w + 10.0, grid.line_h],
+        rect: [icon_x - 4.0, y, icon_w + 8.0, grid.line_h],
+        block: block.id,
+    });
+    out.menu_hits.push(HitRect {
+        rect: [menu_x - 4.0, y, menu_w + 8.0, grid.line_h],
         block: block.id,
     });
 }
@@ -3799,6 +3884,7 @@ mod tests {
             text_blink_on: true,
             bottom_up: true,
             mouse: None,
+            copied: None,
             scale: 2.0,
         };
         // above a bottom editor at 310: the panel covers 245..310
@@ -3943,12 +4029,16 @@ mod tests {
             Some(4),
             &std::collections::HashSet::new(),
         );
-        let (rows, cursor) = styled_rows(
+        let StyledRows {
+            lines: rows,
+            cursor,
+            ..
+        } = styled_rows(
             &d,
-            6,
+            (6, 40),
             blocks,
             &Theme::default(),
-            40,
+            |_| None,
             |abs| {
                 vec![run(
                     lines.get(abs as usize).copied().unwrap_or(""),
@@ -4051,5 +4141,125 @@ mod tests {
         // a screen too narrow for the badge keeps the command alone
         let text = row_text(&header_runs(&b, &theme, 6));
         assert_eq!(text, "▸ ls");
+    }
+
+    #[test]
+    fn a_styled_screen_lists_the_rows_with_a_block_rule_and_its_colour() {
+        let theme = Theme::default();
+        let mut ok = block(1, 0, Some(1), Some(3), done(), false);
+        ok.command = "good".into();
+        let mut bad = block(
+            2,
+            3,
+            Some(4),
+            Some(5),
+            BlockState::Done {
+                exit: Some(2),
+                duration: StdDuration::from_millis(1),
+            },
+            false,
+        );
+        bad.command = "bad".into();
+        let mut live = block(
+            3,
+            5,
+            Some(6),
+            None,
+            BlockState::Running {
+                started: std::time::Instant::now(),
+            },
+            false,
+        );
+        live.command = "live".into();
+        // a prompt being typed carries no rule
+        let prompt = block(4, 8, None, None, BlockState::Prompt, false);
+        let blocks = vec![ok, bad, live, prompt];
+        let d = build_display_list_filtered(
+            &blocks,
+            0,
+            9,
+            0,
+            false,
+            false,
+            None,
+            9,
+            Some(8),
+            &std::collections::HashSet::new(),
+        );
+        let StyledRows {
+            lines: rows, rules, ..
+        } = styled_rows(
+            &d,
+            (12, 40),
+            &blocks,
+            &theme,
+            |abs| block_rule_at(&blocks, &theme, 8, abs),
+            |abs| vec![run(&format!("g{abs}"), None, None, 0)],
+            None,
+        );
+        let colour = |row: usize| {
+            rules
+                .iter()
+                .find(|(r, _)| *r as usize == row)
+                .map(|(_, c)| c.clone())
+        };
+        let find = |needle: &str| {
+            rows.iter()
+                .position(|r| row_text(r).contains(needle))
+                .unwrap_or_else(|| panic!("no row with {needle}"))
+        };
+        let (success, error, accent) = (hex(theme.success), hex(theme.error), hex(theme.accent));
+        // header and output rows of each block, by state
+        for (row, want) in [
+            ("good", &success),
+            ("g1", &success),
+            ("g2", &success),
+            ("bad", &error),
+            ("g4", &error),
+            ("live", &accent),
+            ("g6", &accent),
+        ] {
+            assert_eq!(colour(find(row)).as_ref(), Some(want), "{row}");
+        }
+        // padding above the first block: none
+        assert_eq!(colour(0), None);
+        // a row is listed once, in order
+        let listed: Vec<u16> = rules.iter().map(|(r, _)| *r).collect();
+        assert!(listed.windows(2).all(|w| w[0] < w[1]), "{listed:?}");
+        // the alternate screen has no rules, but the theme's ground
+        let (t, _) = fed(12, 2, 100, b"\x1b[?1049hvim");
+        let s = screen_of(&t, &theme, false).unwrap();
+        assert_eq!(
+            (s.fg, s.bg, s.rules),
+            (Some(hex(theme.fg)), Some(hex(theme.bg)), Vec::new())
+        );
+    }
+
+    #[test]
+    fn a_header_badge_is_a_pill_tinted_with_its_colour_over_the_ground() {
+        let theme = Theme::default();
+        let badge_bg = |state: BlockState| {
+            let b = block(1, 0, Some(1), Some(3), state, false);
+            let runs = header_runs(&b, &theme, 60);
+            // only the badge has a background
+            let tinted: Vec<_> = runs.iter().filter(|r| r.bg.is_some()).collect();
+            assert_eq!(tinted.len(), 1, "{runs:?}");
+            (tinted[0].text.clone(), tinted[0].bg.clone().unwrap())
+        };
+        let tint = |c: Color| hex(theme.bg.mix(c, 0.13));
+        assert_eq!(badge_bg(done()), ("✓ 0".to_string(), tint(theme.success)));
+        assert_eq!(
+            badge_bg(BlockState::Done {
+                exit: Some(3),
+                duration: StdDuration::from_millis(1),
+            }),
+            ("✕ 3".to_string(), tint(theme.error))
+        );
+        assert_eq!(
+            badge_bg(BlockState::Running {
+                started: std::time::Instant::now()
+            }),
+            ("running".to_string(), tint(theme.warning))
+        );
     }
 }

@@ -41,13 +41,15 @@ window_padding = 8.0              # left/right content padding in px, clamped 0�
 window_opacity = 1.0              # window ground opacity, clamped 0.01–1.0 (Warp 1–100 %; overlays and prompt chips stay opaque)
 window_blur = 1                   # macOS: blur behind a translucent window, 1–64 px (1 = none)
 ligatures     = true              # JetBrains Mono ligatures + contextual alternates
-restore_session = true            # reopen last session's tabs + cwds on launch
+restore_session = true            # reopen tabs + cwds after a crash or reboot
+                                  # (a quit starts fresh; an update restores anyway)
 save_transcripts = false          # also save finished blocks' output and replay it
                                   # (marked "restored") on relaunch; off = deleted
 tab_layout    = "horizontal"      # horizontal (tabs on top) | vertical (side rail)
 durable_sessions = true           # shells live in the session service: they keep
-                                  # running after quit and reattach on launch
-                                  # (false keeps them in the window process)
+                                  # running through an update's restart or a
+                                  # crash and reattach on launch (a quit ends
+                                  # them; false keeps them in the window process)
 check_for_updates = true          # look for a new release at launch and every 6 h
                                   # ("Update Rift" chip in the tab bar)
 control_api   = "navigate"        # off | navigate (list/status/focus/blocks, and an
@@ -60,7 +62,7 @@ remote_access = false             # phone companion: windows start the gateway
                                   # only the gateway's requests (status,
                                   # blocks, screen, output, menu, diff,
                                   # complete, remote-input, remote-open,
-                                  # remote-status)
+                                  # remote-close, remote-status)
 remote_listen = "0.0.0.0:7878"    # where the gateway listens
 remote_relay  = "wss://rift-relay.playhaws.com"
                                   # relay for phones outside your network:

@@ -14,6 +14,12 @@
 //! `wait_file` on it to type a command itself — and the phone reads for
 //! SECONDS (default 10). Exits 3 when the `run` was refused (`forbidden`,
 //! `busy`, …), 1 when the connection could not be made or ended.
+//!
+//! The environment variable `PHONE_SEND` holds more messages, one JSON
+//! object per line, sent (each waiting for its `ack`) after the `run` and
+//! before TOUCH_FILE; `LAST` in a line stands for the last pane of the
+//! first window's topology (`{"t":"close","id":"c1","pane":LAST,"kind":"pane"}`).
+//! A refused one exits 3 as well.
 
 use rift_remote::protocol::ClientHello;
 use rift_remote::registry;
@@ -137,6 +143,25 @@ fn main() {
         if v["t"] == "error" {
             refused = true;
             break;
+        }
+    }
+    if let Ok(extra) = std::env::var("PHONE_SEND") {
+        let last = topo["windows"][0]["tabs"]
+            .as_array()
+            .and_then(|t| t.last())
+            .and_then(|t| t["panes"].as_array()?.last()?["id"].as_u64())
+            .expect("a last pane in the topology");
+        for line in extra.lines().filter(|l| !l.trim().is_empty()) {
+            let msg: Value =
+                serde_json::from_str(&line.replace("LAST", &last.to_string())).expect("JSON");
+            send(&mut ch, msg);
+            let until = soon();
+            while let Some(v) = recv(&mut ch, until) {
+                if v["t"] == "ack" || v["t"] == "error" {
+                    refused |= v["ok"] != true;
+                    break;
+                }
+            }
         }
     }
     if refused {

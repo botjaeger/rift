@@ -750,6 +750,24 @@ pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// Files as one shell line: each path quoted, separated and followed by a
+/// space (a drop, or files copied in the file manager and pasted).
+pub fn paths_text(paths: &[std::path::PathBuf]) -> String {
+    let mut text = String::new();
+    for p in paths {
+        text.push_str(&shell_quote(&p.to_string_lossy()));
+        text.push(' ');
+    }
+    text
+}
+
+/// What pasting copied files types: their paths, images included (Claude
+/// Code and Codex attach an image from its pasted path; the clipboard's own
+/// image of a copied file is only its icon). `None`: no files.
+pub fn pasted_files_text(paths: &[std::path::PathBuf]) -> Option<String> {
+    (!paths.is_empty()).then(|| paths_text(paths))
+}
+
 /// The press a paired phone's key (`rift_remote::Key`, docs/remote-protocol.md)
 /// stands for: what the desktop keyboard would deliver for it, so it goes
 /// through the same editor keys ([`editor_key`]) or terminal encoding
@@ -1165,6 +1183,25 @@ mod tests {
         assert_eq!(shell_quote("/tmp/my file"), "'/tmp/my file'");
         assert_eq!(shell_quote("it's"), "'it'\\''s'");
         assert_eq!(shell_quote(""), "''");
+    }
+
+    #[test]
+    fn pasted_files_type_their_paths() {
+        use std::path::PathBuf;
+        let p = |s: &str| PathBuf::from(s);
+        assert_eq!(
+            pasted_files_text(&[p("/Users/me/notes.txt")]).as_deref(),
+            Some("/Users/me/notes.txt ")
+        );
+        assert_eq!(
+            pasted_files_text(&[p("/tmp/my file.pdf"), p("/tmp/shot.PNG")]).as_deref(),
+            Some("'/tmp/my file.pdf' /tmp/shot.PNG ")
+        );
+        assert_eq!(
+            pasted_files_text(&[p("/tmp/shot.png")]).as_deref(),
+            Some("/tmp/shot.png ")
+        );
+        assert_eq!(pasted_files_text(&[]), None);
     }
 
     #[test]

@@ -191,6 +191,14 @@ pub enum ClientMsg {
         pane: u64,
         kind: OpenKind,
     },
+    /// Close `pane` (its shell ends) or its whole tab (feature `close`),
+    /// without the desktop's running-command confirmation: the phone asks
+    /// its user first.
+    Close {
+        id: String,
+        pane: u64,
+        kind: CloseKind,
+    },
     /// Start a shell while no Rift window is open (feature `start`, only
     /// where the computer allows it): a tab in the background window, which
     /// Rift shows when it opens. The ack carries the new pane.
@@ -207,6 +215,16 @@ pub enum OpenKind {
     Tab,
     /// A new pane split from the pane, starting in its folder.
     Pane,
+}
+
+/// What `close` ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CloseKind {
+    /// The pane alone (as ⌘W on the desktop).
+    Pane,
+    /// The whole tab containing the pane.
+    Tab,
 }
 
 /// One completion of `complete`: the whole resulting command line.
@@ -351,7 +369,7 @@ pub enum ServerMsg {
         blocks: Vec<Block>,
         has_older: bool,
     },
-    /// The answer to `run` / `keys` / `text` / `open` (and a refused
+    /// The answer to `run` / `keys` / `text` / `open` / `close` (and a refused
     /// `output`) with the client's `id`.
     Ack {
         id: String,
@@ -389,6 +407,16 @@ pub enum ServerMsg {
         /// `[row, column]` while the program shows its cursor.
         cursor: Option<[u16; 2]>,
         full: bool,
+        /// The theme's default foreground / background (`"rrggbb"`), which
+        /// runs with a `null` fg / bg are drawn in.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fg: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bg: Option<String>,
+        /// Every screen row that carries a block rule, `[row, "rrggbb"]`
+        /// (always the whole list, also in diff frames).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        rules: Vec<(u16, String)>,
         lines: Vec<(u16, Vec<Run>)>,
     },
     /// Screens of `pane` stopped (left the alternate screen in `auto`, or
@@ -708,7 +736,7 @@ mod tests {
     #[test]
     fn every_client_fixture_round_trips() {
         let all = fixtures("client");
-        assert_eq!(all.len(), 28, "client fixtures");
+        assert_eq!(all.len(), 30, "client fixtures");
         for (name, value) in all {
             let msg: ClientMsg =
                 serde_json::from_value(value.clone()).unwrap_or_else(|e| panic!("{name}: {e}"));
@@ -719,7 +747,7 @@ mod tests {
     #[test]
     fn every_server_fixture_round_trips() {
         let all = fixtures("server");
-        assert_eq!(all.len(), 22, "server fixtures");
+        assert_eq!(all.len(), 23, "server fixtures");
         for (name, value) in all {
             let msg: ServerMsg =
                 serde_json::from_value(value.clone()).unwrap_or_else(|e| panic!("{name}: {e}"));

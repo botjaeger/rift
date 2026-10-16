@@ -10,7 +10,7 @@
 //! `remote_access` is on.
 
 use crate::control::{self, Request, Response};
-use rift_remote::protocol::{OpenKind, Pane, Tab, Window};
+use rift_remote::protocol::{CloseKind, OpenKind, Pane, Tab, Window};
 use rift_remote::registry::{self, Permission};
 use rift_remote::{
     CompletePage, DiffPage, Input, InputError, Menu, MenuKind, OutputError, OutputPage, Page,
@@ -356,6 +356,29 @@ impl Source for ControlSource {
                     "the window did not name the new pane".into(),
                 )),
             },
+            Ok(Some(r)) => Err(input_error(r.error.as_deref().unwrap_or_default())),
+            Ok(None) => Err(InputError::NoPane),
+            Err(e) => Err(InputError::Unavailable(e.to_string())),
+        }
+    }
+
+    fn close(&self, pane: u64, device: &str, kind: CloseKind) -> Result<(), InputError> {
+        if is_background(pane) {
+            // a background tab holds one shell: both kinds end it
+            self.background.close(pane)?;
+            log::info!(
+                "remote: {} closed a shell while Rift is closed",
+                shown(device, TOAST_DEVICE)
+            );
+            return Ok(());
+        }
+        let req = Request::RemoteClose {
+            pane: local_pane(pane),
+            device: device.to_string(),
+            kind,
+        };
+        match self.ask(pane, &req) {
+            Ok(Some(r)) if r.ok => Ok(()),
             Ok(Some(r)) => Err(input_error(r.error.as_deref().unwrap_or_default())),
             Ok(None) => Err(InputError::NoPane),
             Err(e) => Err(InputError::Unavailable(e.to_string())),
@@ -1203,6 +1226,15 @@ pub fn opened_toast(device: &str, kind: OpenKind) -> String {
     format!("{} opened {what}", shown(device, TOAST_DEVICE))
 }
 
+/// The desktop's toast for a phone's `close`: `<device> closed a tab`.
+pub fn closed_toast(device: &str, kind: CloseKind) -> String {
+    let what = match kind {
+        CloseKind::Tab => "a tab",
+        CloseKind::Pane => "a pane",
+    };
+    format!("{} closed {what}", shown(device, TOAST_DEVICE))
+}
+
 /// The desktop's toast for a phone's text: `<device> typed into a program`.
 /// Never the text itself: it may be a password.
 pub fn typed_toast(device: &str) -> String {
@@ -1385,6 +1417,7 @@ mod tests {
         );
         assert_eq!(opened_toast("phone", OpenKind::Tab), "phone opened a tab");
         assert_eq!(opened_toast("phone", OpenKind::Pane), "phone opened a pane");
+        assert_eq!(closed_toast("phone", CloseKind::Tab), "phone closed a tab");
     }
 
     #[test]

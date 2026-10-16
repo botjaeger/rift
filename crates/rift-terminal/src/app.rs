@@ -56,6 +56,9 @@ pub enum UserEvent {
     /// A native menu item was chosen (its id).
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Menu(String),
+    /// AppKit was asked to quit (the Dock's Quit): quit as ⌘Q does.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    QuitRequested,
     GitStatus(PaneId, Option<GitInfo>),
     PrStatus(PaneId, Option<rift_core::github::PrInfo>),
     DockerStatus(PaneId, Option<rift_core::docker::ComposeInfo>),
@@ -451,6 +454,11 @@ pub struct App {
     headless: bool,
     /// Clipboard of a headless run: the system clipboard is never touched.
     headless_clipboard: String,
+    /// Files on the headless clipboard (script `copyfiles`).
+    headless_files: Vec<std::path::PathBuf>,
+    /// A block header's copy button just copied (pane, block, when): its
+    /// icon shows a check for [`COPIED_SHOWN`].
+    copied: Option<(PaneId, rift_core::BlockId, Instant)>,
     /// Next frame is also rendered offscreen and written to this PNG.
     capture: Option<std::path::PathBuf>,
     /// OS appearance is light (drives `sync_os_theme`).
@@ -757,6 +765,30 @@ fn press_key(key: &winit::keyboard::Key) -> bool {
 /// Shortest time a confirmation dialog is on screen before Enter accepts it.
 const CONFIRM_ARM: Duration = Duration::from_millis(300);
 
+/// The close/quit warning's description: the connected phones (a quit
+/// only), then the running processes.
+fn close_description(running: usize, phones: &[String]) -> String {
+    let processes = match running {
+        0 => String::new(),
+        1 => "1 running process will be terminated.".to_string(),
+        n => format!("{n} running processes will be terminated."),
+    };
+    let phone = match phones {
+        [] => return processes,
+        [one] => format!("{one} is connected and loses its tabs."),
+        [first, rest @ ..] => format!(
+            "{first} and {} other phone{} are connected and lose their tabs.",
+            rest.len(),
+            if rest.len() == 1 { "" } else { "s" }
+        ),
+    };
+    if processes.is_empty() {
+        phone
+    } else {
+        format!("{phone} {processes}")
+    }
+}
+
 /// Whether Enter accepts a confirmation shown for `shown`: never an
 /// auto-repeat, never before the dialog could have been read.
 fn confirm_accepts(repeat: bool, shown: Duration) -> bool {
@@ -1012,6 +1044,9 @@ fn utc_stamp(secs: u64) -> String {
 /// How long a toast stays up.
 const TOAST_TTL: Duration = Duration::from_millis(2600);
 
+/// How long a header's copy button shows its check after a copy.
+const COPIED_SHOWN: Duration = Duration::from_millis(1500);
+
 /// What a confirmed close/quit acts on.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum CloseScope {
@@ -1205,6 +1240,8 @@ impl App {
             script,
             headless,
             headless_clipboard: String::new(),
+            headless_files: Vec::new(),
+            copied: None,
             capture: None,
             os_light: false,
             focused: true,
@@ -2850,6 +2887,7 @@ impl App {
                 Some(
                     ClickTarget::BlockChevron(..)
                     | ClickTarget::BlockCopy(..)
+                    | ClickTarget::BlockMenu(..)
                     | ClickTarget::TrafficLight(_)
                     | ClickTarget::TabSelect(_)
                     | ClickTarget::TabClose(_)
@@ -2965,6 +3003,7 @@ impl App {
     fn copy_to_clipboard(&mut self, text: String) -> bool {
         if self.headless {
             self.headless_clipboard = text;
+            self.headless_files.clear();
             return true;
         }
         let Some(cb) = self.clipboard() else {
@@ -2982,13 +3021,25 @@ impl App {
 
     fn paste_from_clipboard(&mut self) {
         if self.headless {
-            let text = self.headless_clipboard.clone();
+            let text = input::pasted_files_text(&self.headless_files)
+                .unwrap_or_else(|| self.headless_clipboard.clone());
             self.paste_text(&text);
             return;
         }
         let Some(cb) = self.clipboard() else {
             return;
         };
+        // files copied in the file manager: their paths (the clipboard's
+        // text is only the file name, its image only the file's icon)
+        if let Some(text) = cb
+            .get()
+            .file_list()
+            .ok()
+            .and_then(|paths| input::pasted_files_text(&paths))
+        {
+            self.paste_text(&text);
+            return;
+        }
         let text = match cb.get_text() {
             Ok(text) => text,
             // empty or non-text clipboard (an image): an empty paste, which
@@ -3093,8 +3144,7 @@ impl App {
 
     /// Files dropped on the window: their shell-quoted paths are pasted.
     fn drop_file(&mut self, path: &std::path::Path) {
-        let mut text = input::shell_quote(&path.to_string_lossy());
-        text.push(' ');
+        let text = input::paths_text(&[path.to_path_buf()]);
         self.paste_text(&text);
     }
 
@@ -4991,6 +5041,20 @@ impl App {
         }
     }
 
+    /// After a quit: the session file keeps only the window's frame, so the
+    /// next launch opens one new tab where the window was; saved transcripts
+    /// go with the tabs.
+    fn save_fresh_session(&self) {
+        if !self.persist_session {
+            return;
+        }
+        let mut fresh = self.saved_session();
+        fresh.tabs.clear();
+        fresh.active = 0;
+        rift_core::session_state::save(&fresh);
+        rift_core::transcript::remove_except(&[]);
+    }
+
     /// This window's tabs, layouts and frame, as the session file stores
     /// them.
     fn saved_session(&self) -> rift_core::session_state::SavedSession {
@@ -6186,6 +6250,7 @@ impl App {
             .confirm
             .as_ref()
             .map(|c| (c.action.clone(), c.commands.clone()));
+        let phones = self.connected_phones();
         let toast = self
             .toast
             .as_ref()
@@ -6467,6 +6532,10 @@ impl App {
                     // with the input at the top, blocks start under it
                     bottom_up,
                     mouse: Some(mouse),
+                    copied: self
+                        .copied
+                        .filter(|(p, _, at)| *p == pr.id && at.elapsed() < COPIED_SHOWN)
+                        .map(|(_, b, _)| b),
                     scale,
                 }
             };
@@ -6614,6 +6683,12 @@ impl App {
                 hits.push(Hit {
                     rect: hb.rect,
                     target: ClickTarget::BlockCopy(pr.id, hb.block),
+                });
+            }
+            for hb in out.menu_hits {
+                hits.push(Hit {
+                    rect: hb.rect,
+                    target: ClickTarget::BlockMenu(pr.id, hb.block),
                 });
             }
             for hb in out.duration_hits {
@@ -6881,7 +6956,7 @@ impl App {
             let followed_live = pane.view_offset == 0 && sticky_open;
             if is_active_pane
                 && let Some(sticky) = sticky_block.filter(|_| !followed_live)
-                && let Some(rect) = terminal::render_sticky_header(
+                && let Some(sh) = terminal::render_sticky_header(
                     scene.layer(2),
                     engine,
                     &theme,
@@ -6891,11 +6966,30 @@ impl App {
                     pane.selected_block == Some(sticky),
                 )
             {
-                pane.sticky_hit = Some((rect, sticky));
-                hits.push(Hit {
-                    rect,
-                    target: ClickTarget::JumpToBlock(pr.id, sticky),
-                });
+                pane.sticky_hit = Some((sh.rect, sticky));
+                // its buttons act on the block as on its own header; only the
+                // rest of it scrolls to the block (the first matching hit wins)
+                let id = pr.id;
+                let front = sh
+                    .chevron
+                    .iter()
+                    .map(|h| (h.rect, ClickTarget::BlockChevron(id, h.block)))
+                    .chain(
+                        sh.copy
+                            .iter()
+                            .map(|h| (h.rect, ClickTarget::BlockCopy(id, h.block))),
+                    )
+                    .chain(
+                        sh.menu
+                            .iter()
+                            .map(|h| (h.rect, ClickTarget::BlockMenu(id, h.block))),
+                    )
+                    .chain(std::iter::once((
+                        sh.rect,
+                        ClickTarget::JumpToBlock(id, sticky),
+                    )))
+                    .map(|(rect, target)| Hit { rect, target });
+                hits.extend(front);
             }
 
             // inactive panes recede under a dim; the focused one's title bar
@@ -7283,14 +7377,18 @@ impl App {
                         CloseScope::OtherTabs(_) => ("Close other tabs?", "Close tabs"),
                         CloseScope::Window => ("Quit Rift?", "Quit"),
                     };
-                    let count = commands.len();
+                    let quit = *scope == CloseScope::Window;
                     Dialog {
                         title,
-                        description: format!(
-                            "{count} running process{} will be terminated.",
-                            if count == 1 { "" } else { "es" }
+                        description: close_description(
+                            commands.len(),
+                            if quit { &phones } else { &[] },
                         ),
-                        note: "This cannot be undone. Cancel to keep the session open.",
+                        note: if quit {
+                            "Every tab and shell ends; Rift starts fresh next time. This cannot be undone."
+                        } else {
+                            "This cannot be undone. Cancel to keep the session open."
+                        },
                         lines: commands,
                         empty_line: "<running shell process>",
                         confirm_label: label,
@@ -7552,6 +7650,7 @@ impl App {
             ClickTarget::BlockCopy(..) => {
                 ("Copy output".into(), self.tip_keys("copy_block_output"))
             }
+            ClickTarget::BlockMenu(..) => ("More actions".into(), None),
             ClickTarget::BlockDuration(pane, block) => {
                 let blocks = pane_of(*pane)?.session.blocks.lock().unwrap();
                 let b = blocks.iter().find(|b| b.id == *block)?;
@@ -9135,7 +9234,8 @@ impl App {
             .collect()
     }
 
-    /// Close/quit entry point: warns first when something is still running.
+    /// Close/quit entry point: warns first when something is still running,
+    /// and before a quit while a phone is connected.
     fn request_close(&mut self, scope: CloseScope, event_loop: &ActiveEventLoop) {
         if matches!(scope, CloseScope::Window) && self.update.busy {
             // quitting mid-install could leave a half-finished update
@@ -9143,9 +9243,15 @@ impl App {
             self.toast("Rift is updating… it quits when the update is done".into());
             return;
         }
-        if self.config.confirm_close_running {
-            let commands = self.running_in(scope);
-            if !commands.is_empty() {
+        // a quit ends every shell, so the phone loses what it shows
+        let phones = matches!(scope, CloseScope::Window) && !self.connected_phones().is_empty();
+        if self.config.confirm_close_running || phones {
+            let commands = if self.config.confirm_close_running {
+                self.running_in(scope)
+            } else {
+                Vec::new()
+            };
+            if !commands.is_empty() || phones {
                 self.confirm = Some(ConfirmClose {
                     opened: Instant::now(),
                     action: ConfirmAction::Close(scope),
@@ -9188,14 +9294,13 @@ impl App {
                 self.save_session();
             }
             CloseScope::Window => {
-                self.save_session();
-                // durable shells outlive the window only when a relaunch
-                // will reattach them; otherwise they would be orphaned
-                if !self.persist_session || !self.config.restore_session {
-                    for p in self.tabs.iter().flat_map(|t| &t.panes) {
-                        p.session.terminate();
-                    }
+                // a quit is intentional: every shell ends and the next launch
+                // starts fresh (an update's restart, a crash or a reboot
+                // keep the layout and reattach durable shells instead)
+                for p in self.tabs.iter().flat_map(|t| &t.panes) {
+                    p.session.terminate();
                 }
+                self.save_fresh_session();
                 crate::quit::exit(event_loop);
             }
         }
@@ -11196,9 +11301,25 @@ impl App {
                     .find_tab_of_pane(*pane)
                     .and_then(|(_, tab)| tab.pane(*pane))
                     .and_then(|p| terminal::block_output_text(&p.session, *id));
-                if let Some(text) = text {
-                    self.copy_to_clipboard(text);
+                match text {
+                    Some(text) => {
+                        if self.copy_to_clipboard(text) {
+                            // the button turns into a check for a moment
+                            self.copied = Some((*pane, *id, Instant::now()));
+                            self.toast("Copied output".into());
+                        }
+                    }
+                    None => self.toast("Nothing to copy: this command printed no output".into()),
                 }
+            }
+            Some(ClickTarget::BlockMenu(pane, id)) => {
+                // drops down from the ⋮ button
+                let at = self
+                    .hits
+                    .iter()
+                    .find(|h| h.target == ClickTarget::BlockMenu(*pane, *id))
+                    .map_or(self.mouse, |h| (h.rect[0], h.rect[1] + h.rect[3] + 2.0));
+                self.open_context_menu(*pane, *id, at);
             }
             Some(ClickTarget::TrafficLight(i)) => match i {
                 0 => self.request_close(CloseScope::Window, event_loop),
@@ -12488,6 +12609,12 @@ impl App {
             Step::Preedit(text) => self.preedit = text,
             Step::Drop(path) => self.drop_file(&path),
             Step::Paste(text) => self.paste_text(&text),
+            // the headless clipboard only: a script never touches the system's
+            Step::CopyFiles(paths) => {
+                if self.headless {
+                    self.headless_files = paths;
+                }
+            }
             Step::Mods(spec) => {
                 let mut m = ModifiersState::empty();
                 for part in spec.split('+').map(str::trim) {
@@ -12951,6 +13078,8 @@ impl App {
                 text,
             } => self.remote_input(pane, &device, command, keys, text),
             Request::RemoteOpen { pane, device, kind } => self.remote_open(pane, &device, kind),
+            // needs the event loop (closing the last tab quits): answered in `user_event`
+            Request::RemoteClose { .. } => Response::error("remote-close needs the event loop"),
             Request::RemoteFit { pane, cols, rows } => self.remote_fit(pane, cols, rows),
             Request::RemoteStatus => {
                 // the gateway's status changed: the chip follows at once
@@ -13124,6 +13253,13 @@ impl App {
 
         let overlay = if let Some(c) = &self.confirm {
             let (title, description) = match &c.action {
+                ConfirmAction::Close(CloseScope::Window) => ("Quit Rift?".to_string(), {
+                    let mut d = close_description(c.commands.len(), &self.connected_phones());
+                    if !c.commands.is_empty() {
+                        d.push_str(&format!(" Running: {}", c.commands.join(", ")));
+                    }
+                    d
+                }),
                 ConfirmAction::Close(_) => (
                     "Close with running commands?".to_string(),
                     format!("Running: {}", c.commands.join(", ")),
@@ -14526,6 +14662,44 @@ impl App {
         }
     }
 
+    /// A phone's `close`: `pane`, or its whole tab, ends without the
+    /// running-command confirmation (the phone asked its user). Like ⌘W,
+    /// closing the window's last tab quits it.
+    fn remote_close(
+        &mut self,
+        pane: u64,
+        device: &str,
+        kind: rift_remote::protocol::CloseKind,
+        event_loop: &ActiveEventLoop,
+    ) -> crate::control::Response {
+        use crate::control::Response;
+        use rift_remote::protocol::CloseKind;
+        if !self.config.remote_access {
+            return Response::error("remote access is off");
+        }
+        let Some((ti, _)) = self.find_tab_of_pane(pane) else {
+            return Response::error("no such pane");
+        };
+        let scope = match kind {
+            CloseKind::Pane => CloseScope::Pane(pane),
+            CloseKind::Tab => CloseScope::Tab(ti),
+        };
+        // a phone never quits the window: closing its last shell leaves a
+        // fresh tab behind (⌘W on the desktop would quit, and a quit ends
+        // every shell and the saved layout)
+        let last =
+            self.tabs.len() == 1 && (kind == CloseKind::Tab || self.tabs[ti].panes.len() == 1);
+        if last {
+            self.spawn_tab();
+        }
+        self.toast(crate::remote::closed_toast(device, kind));
+        self.perform_close(scope, event_loop);
+        Response {
+            ok: true,
+            ..Default::default()
+        }
+    }
+
     /// A phone's command for pane `id` at its prompt: the editor's Enter
     /// path without taking the editor's draft (history, prompt-time
     /// context, the exact text for the block, synchronized siblings).
@@ -14625,6 +14799,16 @@ impl App {
             [one] => Some(format!("Remote · {}", one.name)),
             all => Some(format!("Remote · {} devices", all.len())),
         }
+    }
+
+    /// The phones connected right now (the quit warning names them).
+    fn connected_phones(&self) -> Vec<String> {
+        self.remote
+            .status
+            .iter()
+            .flat_map(|s| s.clients.iter())
+            .map(|c| c.name.clone())
+            .collect()
     }
 
     /// The connected devices for the chip's tooltip: `Sam's iPhone via
@@ -15372,7 +15556,7 @@ impl App {
             ),
             _ => (
                 format!("Rift restarts and reopens your {tabs_text}."),
-                "Open shells will end when Rift restarts. Turn on “Keep shells running when Rift quits” in Settings › General to keep them.".to_string(),
+                "Open shells will end when Rift restarts. Turn on “Keep shells running through updates” in Settings › General to keep them.".to_string(),
                 false,
             ),
         };
@@ -15947,6 +16131,13 @@ impl ApplicationHandler<UserEvent> for App {
             muda::MenuEvent::set_event_handler(Some(move |e: muda::MenuEvent| {
                 let _ = menu_proxy.send_event(UserEvent::Menu(e.id.0));
             }));
+            // the Dock's Quit and AppleScript's quit take the app's quit
+            let quit_proxy = std::sync::Mutex::new(self.proxy.clone());
+            crate::quit::route_app_quit(move || {
+                if let Ok(p) = quit_proxy.lock() {
+                    let _ = p.send_event(UserEvent::QuitRequested);
+                }
+            });
         }
 
         self.sync_control_server();
@@ -16183,6 +16374,16 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::Menu(id) => self.run_menu_command(&id, event_loop),
             #[cfg(not(target_os = "macos"))]
             UserEvent::Menu(_) => {}
+            UserEvent::QuitRequested => {
+                // the window may be hidden (global hotkey): the dialog must show
+                if let Some(w) = &self.window
+                    && !self.headless
+                {
+                    w.set_visible(true);
+                    w.focus_window();
+                }
+                self.request_close(CloseScope::Window, event_loop);
+            }
             UserEvent::PtyClipboard(text) => {
                 // a copy queued before clipboard_access turned off is dropped
                 if self.config.clipboard_access.trim() != "off" {
@@ -16288,6 +16489,19 @@ impl ApplicationHandler<UserEvent> for App {
                 ) && p.allowed(self.control_level()) =>
             {
                 self.chip_remote(p);
+            }
+            UserEvent::Control(p)
+                if matches!(p.request, crate::control::Request::RemoteClose { .. })
+                    && p.allowed(self.control_level()) =>
+            {
+                let crate::control::Request::RemoteClose { pane, device, kind } = p.request else {
+                    return;
+                };
+                let response = self.remote_close(pane, &device, kind, event_loop);
+                let _ = p.reply.send(response);
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
             }
             UserEvent::Control(p) => {
                 let response = if p.allowed(self.control_level()) {
@@ -16477,6 +16691,16 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
         }
+        // a copy button's check goes back to the copy icon
+        if let Some((_, _, at)) = self.copied {
+            let until = at + COPIED_SHOWN;
+            if now >= until {
+                self.copied = None;
+                repaint = true;
+            } else {
+                deadlines.push(until);
+            }
+        }
         // status toast
         if let Some((_, at)) = &self.toast {
             let until = *at + TOAST_TTL;
@@ -16545,6 +16769,27 @@ impl ApplicationHandler<UserEvent> for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_quit_warning_names_connected_phones_before_processes() {
+        let phone = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            close_description(2, &[]),
+            "2 running processes will be terminated."
+        );
+        assert_eq!(
+            close_description(0, &phone(&["iPhone"])),
+            "iPhone is connected and loses its tabs."
+        );
+        assert_eq!(
+            close_description(1, &phone(&["iPhone"])),
+            "iPhone is connected and loses its tabs. 1 running process will be terminated."
+        );
+        assert_eq!(
+            close_description(0, &phone(&["iPhone", "Pixel", "iPad"])),
+            "iPhone and 2 other phones are connected and lose their tabs."
+        );
+    }
 
     #[test]
     fn each_option_key_follows_its_own_meta_setting() {

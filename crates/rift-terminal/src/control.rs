@@ -6,11 +6,11 @@
 //!
 //! | level | commands |
 //! |---|---|
-//! | `"off"` | no socket, unless `remote_access` is on: then only the remote gateway's requests: `status`, `blocks`, `screen`, `output`, `menu`, `diff`, `complete`, `remote-status`, `remote-input` and `remote-open` |
+//! | `"off"` | no socket, unless `remote_access` is on: then only the remote gateway's requests: `status`, `blocks`, `screen`, `output`, `menu`, `diff`, `complete`, `remote-status`, `remote-input`, `remote-open` and `remote-close` |
 //! | `"navigate"` (default) | the gateway's requests, `list`, `focus`, `prepare-restart` |
 //! | `"full"` | also `split`, `open`, `send-text` (types into a shell) |
 //!
-//! `remote-input` and `remote-open` are accepted only while `remote_access`
+//! `remote-input`, `remote-open` and `remote-close` are accepted only while `remote_access`
 //! is on, whatever the level.
 //!
 //! `prepare-restart` is sent by a window that installs an update: the
@@ -196,6 +196,15 @@ pub enum Request {
         device: String,
         kind: rift_remote::protocol::OpenKind,
     },
+    /// A paired phone's `close`, sent by the remote gateway: `pane` ends
+    /// (as ⌘W), or the whole tab holding it, without the desktop's
+    /// running-command confirmation (the phone asked its user). Accepted
+    /// only while `remote_access` is on, like `remote-input`.
+    RemoteClose {
+        pane: u64,
+        device: String,
+        kind: rift_remote::protocol::CloseKind,
+    },
     /// A paired phone's size for `pane` (the gateway's `fit`, already the
     /// smallest of its phones and clamped): the pane's shell is sized to the
     /// smaller of the window's own grid and `cols` × `rows` until released
@@ -240,7 +249,8 @@ impl Request {
             | Request::RemoteStatus
             | Request::RemoteInput { .. }
             | Request::RemoteFit { .. }
-            | Request::RemoteOpen { .. } => Level::Remote,
+            | Request::RemoteOpen { .. }
+            | Request::RemoteClose { .. } => Level::Remote,
             Request::List | Request::Focus { .. } | Request::PrepareRestart { .. } => {
                 Level::Navigate
             }
@@ -1001,6 +1011,9 @@ mod tests {
                 rows: 1,
                 alt: true,
                 cursor: Some([0, 3]),
+                fg: Some("d4d4d4".into()),
+                bg: Some("1e1e1e".into()),
+                rules: vec![(0, "3fb950".into())],
                 lines: vec![vec![rift_remote::protocol::Run::plain("vim")]],
             }),
             generation: Some(7),
@@ -1061,6 +1074,8 @@ mod tests {
             r#"{"cmd":"complete","pane":1,"line":"ls","cursor":2}"#,
             r#"{"cmd":"remote-open","pane":1,"device":"d","kind":"tab"}"#,
             r#"{"cmd":"remote-open","pane":1,"device":"d","kind":"pane"}"#,
+            r#"{"cmd":"remote-close","pane":1,"device":"d","kind":"pane"}"#,
+            r#"{"cmd":"remote-close","pane":1,"device":"d","kind":"tab"}"#,
         ] {
             assert!(parse(ok).level() <= Level::Remote, "{ok}");
         }

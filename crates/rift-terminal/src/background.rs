@@ -273,6 +273,22 @@ impl Background {
         .unwrap_or(Err(InputError::NoPane))
     }
 
+    /// `close` of a background shell (its tab holds only it): the shell
+    /// ends in the service and leaves the hand-off list.
+    pub fn close(&self, id: u64) -> Result<(), InputError> {
+        let shell = {
+            let mut shells = self.shells.lock().unwrap();
+            let at = shells.iter().position(|s| s.id == id);
+            at.map(|i| shells.remove(i))
+        };
+        let Some(shell) = shell else {
+            return Err(InputError::NoPane);
+        };
+        shell.session.terminate();
+        self.save();
+        Ok(())
+    }
+
     /// `open` next to a background shell: another background tab.
     pub fn open(&self, id: u64, kind: OpenKind) -> Result<u64, InputError> {
         if self.with(id, |_| ()).is_none() {

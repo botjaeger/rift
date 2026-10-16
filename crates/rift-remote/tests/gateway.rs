@@ -2,7 +2,7 @@
 //! acts as the phone with `snow` through `rift_remote::transport::connect`.
 
 use rift_remote::protocol::{
-    Block, BlockState, ClientHello, OpenKind, Pane, Permission, Run, Tab, Window,
+    Block, BlockState, ClientHello, CloseKind, OpenKind, Pane, Permission, Run, Tab, Window,
 };
 use rift_remote::protocol::{
     ChangedFile, Completion, CompletionKind, DiffLine, HistoryEntry, Waiting, WaitingKind,
@@ -49,6 +49,8 @@ struct State {
     completes: Vec<(u64, String, usize)>,
     /// What `open` was asked: (pane, device name, kind).
     opens: Vec<(u64, String, OpenKind)>,
+    /// What `close` was asked: (pane, device name, kind).
+    closes: Vec<(u64, String, CloseKind)>,
     /// `start` allowed (the computer's `remote_when_closed`).
     can_start: bool,
     /// Devices that started a shell.
@@ -170,6 +172,23 @@ impl Source for Fake {
         st.panes.insert(new, Vec::new());
         st.starts.push(device.to_string());
         Ok(new)
+    }
+
+    /// `Pane` removes the pane; `Tab` every pane (the fake has one tab).
+    fn close(&self, pane: u64, device: &str, kind: CloseKind) -> Result<(), InputError> {
+        let mut st = self.0.lock().unwrap();
+        if !st.panes.contains_key(&pane) {
+            return Err(InputError::NoPane);
+        }
+        match kind {
+            CloseKind::Pane => st.panes.remove(&pane),
+            CloseKind::Tab => {
+                st.panes.clear();
+                None
+            }
+        };
+        st.closes.push((pane, device.to_string(), kind));
+        Ok(())
     }
 
     /// A new empty pane, numbered after the highest.
@@ -596,7 +615,7 @@ fn pairing_then_reconnecting_gets_welcome_and_topology() {
     assert_eq!(
         welcome,
         json!({"t":"welcome","v":2,"host":"test-host","os":"linux","version":"9.9.9",
-               "device":d.id,"permission":"operate","features":["screen","text","output","push_failures","push_ntfy","git","notify_off","chips","waiting","complete","running","open","fit"]})
+               "device":d.id,"permission":"operate","features":["screen","text","output","push_failures","push_ntfy","git","notify_off","chips","waiting","complete","running","open","close","fit"]})
     );
     assert_eq!(
         (d.name.as_str(), d.platform.as_str()),
@@ -1158,6 +1177,84 @@ fn open_answers_the_new_pane_after_a_topology_with_it() {
     );
     assert_eq!(code(&recv_t(&mut ch, "error")), ("error", "bad_request"));
     assert_eq!(env.fake.0.lock().unwrap().opens.len(), 2);
+}
+
+#[test]
+fn close_answers_after_a_topology_without_the_pane() {
+    let env = start(|c| c.topology_poll = Duration::from_secs(60));
+    let (_k, mut ch, welcome) = env.pair(Permission::Operate);
+    assert!(
+        welcome["features"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("close")),
+        "{welcome}"
+    );
+    // open a second pane, then close it: the topology without it comes first
+    put(
+        &mut ch,
+        json!({"t":"open","id":"n1","pane":12,"kind":"pane"}),
+    );
+    recv_t(&mut ch, "ack");
+    put(
+        &mut ch,
+        json!({"t":"close","id":"c1","pane":13,"kind":"pane"}),
+    );
+    let mut told = false;
+    let v = loop {
+        let v = recv(&mut ch);
+        match v["t"].as_str() {
+            Some("topology") => told = !topology_panes(&v).contains(&13),
+            Some("ack") => break v,
+            _ => {}
+        }
+    };
+    assert_eq!(v, json!({"t":"ack","id":"c1","ok":true}));
+    assert!(told, "the topology without pane 13 comes before the ack");
+    assert_eq!(
+        env.fake.0.lock().unwrap().closes,
+        [(13, "Test Phone".to_string(), CloseKind::Pane)]
+    );
+    // a pane that is gone
+    std::thread::sleep(Duration::from_millis(1050));
+    put(
+        &mut ch,
+        json!({"t":"close","id":"c2","pane":13,"kind":"pane"}),
+    );
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (false, "no_pane"));
+    // the whole tab
+    put(
+        &mut ch,
+        json!({"t":"close","id":"c3","pane":12,"kind":"tab"}),
+    );
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (true, ""));
+    assert_eq!(
+        env.fake.0.lock().unwrap().closes.last(),
+        Some(&(12, "Test Phone".to_string(), CloseKind::Tab))
+    );
+    // an unknown kind is a bad request
+    std::thread::sleep(Duration::from_millis(1050));
+    put(
+        &mut ch,
+        json!({"t":"close","id":"c4","pane":12,"kind":"window"}),
+    );
+    assert_eq!(code(&recv_t(&mut ch, "error")), ("error", "bad_request"));
+}
+
+#[test]
+fn view_devices_are_forbidden_to_close() {
+    let env = start(|_| {});
+    let (_k, mut ch, _) = env.pair(Permission::View);
+    put(
+        &mut ch,
+        json!({"t":"close","id":"c1","pane":12,"kind":"pane"}),
+    );
+    let v = recv_t(&mut ch, "ack");
+    assert_eq!(
+        (ack(&v), v["id"].as_str()),
+        ((false, "forbidden"), Some("c1"))
+    );
+    assert!(env.fake.0.lock().unwrap().closes.is_empty());
 }
 
 #[test]
@@ -1861,7 +1958,8 @@ fn a_device_with_a_push_token_is_alerted_while_its_app_is_closed() {
         sink.request(0),
         json!([{
             "to": TOKEN,
-            "title": "A command failed on test-host (exit 2)",
+            "title": "✕ 2 · A command",
+            "subtitle": "Failed after 31s · test-host",
             "data": {"host": host, "pane": 12},
             "priority": "high",
             "sound": "default",
@@ -1879,8 +1977,9 @@ fn a_device_with_a_push_token_is_alerted_while_its_app_is_closed() {
     env.fake
         .edit(12, |b| b.push(finished(5, "cargo fmt", 0, 40)));
     let v = sink.request(1);
-    assert_eq!(v[0]["title"], "A command finished on test-host");
-    assert_eq!(v[0]["body"], "cargo fmt");
+    assert_eq!(v[0]["title"], "✓ 0 · cargo fmt");
+    assert_eq!(v[0]["subtitle"], "Finished in 40ms · test-host");
+    assert!(v[0].get("body").is_none(), "never output");
     // used up: the next short command does not alert
     env.fake.edit(12, |b| b.push(finished(6, "ls", 0, 40)));
     std::thread::sleep(Duration::from_millis(500));
@@ -1969,13 +2068,26 @@ fn failures_only_alerts_long_failures_but_not_long_successes() {
     assert_eq!(sink.count(), 0);
     // long and failed: an alert
     env.fake.edit(12, |b| b.push(finished(4, "make", 1, 5_000)));
-    assert_eq!(
-        sink.request(0)[0]["title"],
-        "A command failed on test-host (exit 1)"
-    );
+    assert_eq!(sink.request(0)[0]["title"], "✕ 1 · A command");
 }
 
 const NTFY: &str = "https://ntfy.sh/rift-x7Kq2mP9vT4wL8nR3sY6hZ";
+
+/// An ntfy request's Title header, RFC 2047 decoded (the marks are not ASCII).
+fn ntfy_title(r: &Seen) -> String {
+    use base64::Engine;
+    let t = r.header("Title").expect("a Title header");
+    let Some(b64) = t
+        .strip_prefix("=?UTF-8?B?")
+        .and_then(|t| t.strip_suffix("?="))
+    else {
+        return t.to_string();
+    };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .unwrap();
+    String::from_utf8(bytes).unwrap()
+}
 
 /// Pair a device, register `push`, wait until it is stored, close the app.
 fn register_then_close(env: &Env, push: Value) -> String {
@@ -2014,11 +2126,8 @@ fn a_device_with_an_ntfy_url_is_alerted_through_ntfy_while_its_app_is_closed() {
     let host = registry::encode_key(&env.pinned);
     let r = ntfy.raw(0);
     assert!(r.line.starts_with("POST "), "{}", r.line);
-    assert_eq!(r.body, "Exit 2");
-    assert_eq!(
-        r.header("Title"),
-        Some("A command failed on test-host (exit 2)")
-    );
+    assert_eq!(r.body, "Failed after 31s · test-host");
+    assert_eq!(ntfy_title(&r), "✕ 2 · A command");
     assert_eq!(r.header("Priority"), Some("high"));
     assert_eq!(r.header("Tags"), Some("x"));
     let link = format!("rift://host/{host}/pane/12");
@@ -2029,8 +2138,8 @@ fn a_device_with_an_ntfy_url_is_alerted_through_ntfy_while_its_app_is_closed() {
     env.fake
         .edit(12, |b| b.push(finished(5, "make", 0, 31_000)));
     let r = ntfy.raw(1);
-    assert_eq!(r.body, "Finished");
-    assert_eq!(r.header("Title"), Some("A command finished on test-host"));
+    assert_eq!(r.body, "Finished in 31s · test-host");
+    assert_eq!(ntfy_title(&r), "✓ 0 · A command");
     assert_eq!(r.header("Priority"), Some("default"));
     assert_eq!(r.header("Tags"), Some("white_check_mark"));
 }
@@ -2055,13 +2164,14 @@ fn a_device_with_a_token_and_an_ntfy_url_gets_both_with_the_command_when_asked()
     assert_eq!((expo.count(), ntfy.count()), (0, 0));
     env.fake
         .edit(12, |b| b.push(finished(4, "cargo test", 101, 5_000)));
-    assert_eq!(expo.request(0)[0]["body"], "cargo test");
-    let r = ntfy.raw(0);
-    assert_eq!(r.body, "cargo test");
+    assert_eq!(expo.request(0)[0]["title"], "✕ 101 · cargo test");
     assert_eq!(
-        r.header("Title"),
-        Some("A command failed on test-host (exit 101)")
+        expo.request(0)[0]["subtitle"],
+        "Failed after 5.0s · test-host"
     );
+    let r = ntfy.raw(0);
+    assert_eq!(r.body, "Failed after 5.0s · test-host");
+    assert_eq!(ntfy_title(&r), "✕ 101 · cargo test");
 }
 
 #[test]
@@ -2592,6 +2702,9 @@ fn screen(rows: &[&str], alt: bool, cursor: Option<[u16; 2]>) -> Screen {
         rows: rows.len() as u16,
         alt,
         cursor,
+        fg: None,
+        bg: None,
+        rules: Vec::new(),
         lines: rows
             .iter()
             .map(|r| {
@@ -2827,6 +2940,9 @@ fn a_full_screen_over_a_mib_goes_out_without_styles() {
             rows: 120,
             alt: true,
             cursor: Some([0, 0]),
+            fg: None,
+            bg: None,
+            rules: Vec::new(),
             lines: vec![row; 120],
         },
     );
@@ -2848,6 +2964,9 @@ fn a_full_screen_over_a_mib_goes_out_without_styles() {
             rows: 200,
             alt: true,
             cursor: Some([150, 2]),
+            fg: None,
+            bg: None,
+            rules: Vec::new(),
             lines: vec![vec![Run::plain("x")]; 200],
         },
     );
@@ -2877,6 +2996,9 @@ fn after_an_unstyled_screen_diffs_restyle_only_the_rows_that_differ() {
             rows: 120,
             alt: true,
             cursor: None,
+            fg: None,
+            bg: None,
+            rules: Vec::new(),
             lines: vec![row; 120],
         },
     );
@@ -2905,6 +3027,51 @@ fn after_an_unstyled_screen_diffs_restyle_only_the_rows_that_differ() {
 }
 
 #[test]
+fn screens_carry_the_ground_and_the_block_rules_whole_in_every_frame() {
+    let env = start(|_| {});
+    let mut s = screen(&["~ ok", "hi", "~ bad"], true, None);
+    s.fg = Some("d4d4d4".into());
+    s.bg = Some("1e1e1e".into());
+    s.rules = vec![
+        (0, "3fb950".into()),
+        (1, "3fb950".into()),
+        (2, "f85149".into()),
+    ];
+    env.fake.set_screen(12, s);
+    let (_k, mut ch, _) = env.pair(Permission::View);
+    put(&mut ch, json!({"t":"subscribe","pane":12,"after":null}));
+    recv_t(&mut ch, "snapshot");
+    put(&mut ch, json!({"t":"screen","pane":12,"mode":"auto"}));
+    let v = recv_screen(&mut ch);
+    assert_eq!(v["full"], true);
+    assert_eq!((&v["fg"], &v["bg"]), (&json!("d4d4d4"), &json!("1e1e1e")));
+    let rules = json!([[0, "3fb950"], [1, "3fb950"], [2, "f85149"]]);
+    assert_eq!(v["rules"], rules);
+    // a diff frame (one row changed) still lists every rule
+    env.fake
+        .edit_screen(12, |s| s.lines[1] = vec![Run::plain("yo")]);
+    let v = recv_screen(&mut ch);
+    assert_eq!(v["full"], false);
+    assert_eq!(v["lines"], json!([[1, [["yo", null, null, 0]]]]));
+    assert_eq!(v["rules"], rules);
+    // only a rule changed (the command finished): that alone is a frame
+    env.fake.edit_screen(12, |s| s.rules[2].1 = "d29922".into());
+    let v = recv_screen(&mut ch);
+    assert_eq!(v["lines"], json!([]));
+    assert_eq!(
+        v["rules"],
+        json!([[0, "3fb950"], [1, "3fb950"], [2, "d29922"]])
+    );
+    // none of it for a source that sends none: the keys are absent
+    env.fake.set_screen(12, screen(&["x"], true, None));
+    let v = recv_screen(&mut ch);
+    assert!(
+        v.get("fg").is_none() && v.get("bg").is_none() && v.get("rules").is_none(),
+        "{v}"
+    );
+}
+
+#[test]
 fn on_to_auto_on_the_primary_screen_ends_it() {
     let env = start(|_| {});
     env.fake.set_screen(12, screen(&["$ ls"], false, None));
@@ -2928,6 +3095,9 @@ fn a_slow_client_gets_the_newest_screen_not_a_queue_of_them() {
         rows: 120,
         alt: true,
         cursor: Some([0, 0]),
+        fg: None,
+        bg: None,
+        rules: Vec::new(),
         lines: (0..120)
             .map(|r| {
                 (0..300)

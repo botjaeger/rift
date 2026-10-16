@@ -25,8 +25,11 @@ Blocks are delimited by shell-integration OSC 133 markers
   it did not have.
 
 When a block's header scrolls off the top, a sticky header stays there; a
-click jumps back to the block. Hovering the duration shows the full time and
-when the command ended; the copy button on a header shows only on hover.
+click jumps back to the block, except on its buttons, which act as on the
+block's own header. Hovering the duration shows the full time and when the
+command ended. A header's copy button and its ⋮ menu button (the block's
+context menu, as a right-click) show only on hover; a copy turns the button
+into a check for 1.5 s and toasts "Copied output".
 Block element characters (U+2580–U+259F) are drawn as cell-filling quads, so
 they join without gaps.
 
@@ -482,7 +485,12 @@ it.
   a newline asks first ("Paste and run?"), because each newline would press
   Enter (`confirm_multiline_paste`). With no text on the clipboard (an image,
   say), ⌘V sends an empty bracketed paste; Claude Code answers it by reading
-  the clipboard image.
+  the clipboard image. Files copied in Finder (or the Linux file manager)
+  paste as their full paths, shell-quoted and space-separated like a drop,
+  instead of the bare file name. Image files too: Claude Code and Codex
+  attach an image from its pasted path (the clipboard's image of a copied
+  file is only its icon); a screenshot copied as an image keeps the empty
+  paste above.
 - **OSC 52** copy: programs (tmux, neovim, remote shells) can set the system
   clipboard. Reading the clipboard back is refused unless
   `clipboard_access = "read_write"` (Settings › Terminal › *Copy and read*);
@@ -547,14 +555,25 @@ it.
 ## Durable sessions
 
 With `durable_sessions = true` (the default; Settings → General → *Keep
-shells running when Rift quits*), new shells run in a
+shells running through updates*), new shells run in a
 per-user **session service** (`rift-terminal --session-daemon`, started on
 demand) instead of the window process. On macOS it and the phone gateway
 start as launchd jobs (`<data dir>/launchd/*.plist`, run once, never kept
 alive), not as children of the window, so a quit Rift leaves the Dock
-instead of staying there as "Running in Background". Quitting Rift or closing the window
-leaves them running; the next launch restores the layout and **reattaches**
-each pane: the service replays the output it kept (the newest 8 MiB per
+instead of staying there as "Running in Background".
+
+**Quitting** Rift (⌘Q, Quit Rift in the menu or the palette, or closing the
+window) is intentional: every shell ends and the session file keeps only the
+window's frame, so the next launch starts fresh with one tab where the window
+was (saved block output goes too). While a phone is connected, the quit
+dialog names it first (*iPhone is connected and loses its tabs.*), with the
+running commands when *Warn before closing running commands* is on. Shells a
+phone opens after the quit (`remote_when_closed`) still appear as tabs at the
+next launch.
+
+An update's restart, a crash, a killed process or a reboot of the window
+only (the service survives) leave the shells running; the next launch
+restores the layout and **reattaches** each pane: the service replays the output it kept (the newest 8 MiB per
 shell) into a fresh terminal, with the original timing so block durations
 stay right, then continues live. Nothing is shown twice, and automatic
 terminal replies (device attributes, image OKs) are not re-sent during the
@@ -564,8 +583,8 @@ time and do not appear again in Notifications.
 - Closing a pane (⌘W) ends its shell, as without the service. ⌘K also drops
   the retained output, so a reattach does not bring it back.
 - Windows that do not restore sessions (secondary ⌘N windows, or
-  `restore_session = false`) end their shells on exit instead of orphaning
-  them.
+  `restore_session = false`) end their shells however they exit when they
+  can, instead of orphaning them.
 - Palette → "Attach detached session: …" opens a tab on any shell the
   service keeps that no window shows.
 - The service listens on `~/.local/share/rift/sessiond/sock` (a 0700
@@ -612,7 +631,7 @@ signed manifest.
 - The chip, **Update…** and `update_rift` open a dialog that says what the
   restart keeps: with durable sessions, *Your N tabs and M shells keep running
   and come back where they were*; without them, open shells end (turn on
-  *Keep shells running when Rift quits* to keep them). When the new
+  *Keep shells running through updates* to keep them). When the new
   version's session service speaks another protocol, running shells keep
   running but cannot be reattached; the dialog says so. **Later** (Esc)
   hides the chip until a newer version.
@@ -666,12 +685,14 @@ Each window listens on `~/.local/share/rift/control/<pid>.sock`
   treated as `"off"` and logs a warning. While `remote_access` is on, the
   socket stays open for the remote gateway's requests only: `status`,
   `blocks`, `screen`, `output`, `menu`, `diff`, `complete`, `remote-input`,
-  `remote-open` and `remote-status` (the gateway's notice that a phone
-  connected or left).
+  `remote-open`, `remote-close` and `remote-status` (the gateway's notice
+  that a phone connected or left).
 - `remote-input` (types a command at a pane's prompt, sends keys, or types
-  text into a running program) and `remote-open` (a new tab or split next
-  to a pane) are accepted only while `remote_access` is on, whatever
-  `control_api` says.
+  text into a running program), `remote-open` (a new tab or split next to a
+  pane) and `remote-close` (closes a pane or its whole tab, without the
+  running-command dialog: the phone asked its user first; the window toasts
+  "<device> closed a pane") are accepted only while `remote_access` is on,
+  whatever `control_api` says.
 - `blocks` with `"meta": true` leaves the output out.
 - `ctl focus --tab N` / `--pane ID`: tabs count from 0, as in `ctl list`;
   a non-numeric value is rejected with exit code 2.
