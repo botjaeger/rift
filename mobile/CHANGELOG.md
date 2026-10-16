@@ -6,6 +6,35 @@ build (`## <version> — <YYYY-MM-DD>`) or an over-the-air update to one
 message its download carries. Items use `### New`, `### Improved` or
 `### Fixed` sections of `- **Title** — text`.
 
+## 0.3.0 — 2026-10-16
+
+Your computer's look on your phone, closing tabs and panes, and an easier key row.
+
+### New
+
+- **Close tabs and panes** — close a pane or a tab from the ⋯ menu, or with ✕ in the tab and
+  pane lists. When a command is still running, the phone asks first.
+- **Key tips** — hold a key to see what it does; tap it to send it.
+- **Prompt chips** — the row above the command line shows your folder, branch and changed
+  files; while you type it shows completions instead.
+
+### Improved
+
+- **Same look as your computer** — the terminal view uses your computer's theme colours,
+  the bar beside each command and the status badges, and emoji keep the columns aligned.
+- **Warp's colours** — the app uses Warp's dark colours, like Rift on your computer.
+- **Blocks or Terminal** — a Blocks | Terminal switch replaces the old button and its note;
+  a Claude Code or Codex pane shows only its terminal.
+- **Keyboard** — the last line stays above the keyboard, and hiding the keyboard is a small
+  key at the end of the row.
+- **Default keys** — Esc, Tab, ⌃C, ⌃ and the four arrows, all visible without scrolling.
+- **Alerts** — notifications and the lock-screen activity show the Rift logo, the result,
+  how long it took and where it ran.
+
+### Fixed
+
+- **Wrap long lines** — the setting now shows only where it applies (Blocks).
+
 ## 0.2.0 · update 6 — 2026-10-15
 
 Talk to Claude Code from your phone, and its pane opens in the Terminal view.

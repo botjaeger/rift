@@ -8,6 +8,38 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.8.0 — 2026-10-16
+
+Warp's colours, a fresh start after you quit, and more from your phone.
+
+### New
+
+- **Warp's colours** — the default dark and light themes now use Warp's Dark and Light
+  colours: the near-black ground, white text, the cyan accent and Warp's program colours.
+- **Block menu button** — hovering a command's header shows a ⋮ button next to copy; it
+  opens the same menu as a right-click.
+- **Paste copied files** — files copied in Finder paste as their full paths. Claude Code and
+  Codex attach a pasted image path as an image.
+- **Close from your phone** — the phone can close a pane or a whole tab. Closing your last
+  tab from the phone leaves a fresh one, so the phone never quits Rift.
+
+### Improved
+
+- **Quitting starts fresh** — quitting Rift ends every shell, and the next launch opens one
+  new tab where the window was. An update, a crash or a restart of the Mac still bring your
+  tabs and running shells back. While a phone is connected, quitting asks first.
+- **Your phone sees Rift's look** — the phone's terminal view uses your theme's colours,
+  the coloured bar beside each command and the status badges.
+- **Clearer alerts** — phone alerts read like "✓ 0 · cargo test" with how long it took and
+  on which computer.
+
+### Fixed
+
+- **Copy gave no feedback** — copying a command's output turns the button into a check and
+  shows "Copied output".
+- **Buttons on the pinned header scrolled away** — copy and the menu button on the header
+  pinned at the top act on the command instead of scrolling back to it.
+
 ## 0.7.1 — 2026-10-16
 
 ### Fixed
