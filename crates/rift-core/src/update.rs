@@ -716,6 +716,70 @@ pub fn download_path(dir: &Path, asset: &Asset) -> PathBuf {
     })
 }
 
+/// Where an update downloaded ahead of time waits in `updates/` (a fixed
+/// name; `sweep` leaves it): the install takes it when its SHA-256 still
+/// matches the manifest, so a stale or partial file is never installed.
+pub fn ready_path(dir: &Path, asset: &Asset) -> PathBuf {
+    dir.join(if asset.kind == "dmg" {
+        "ready.dmg"
+    } else {
+        "ready.AppImage"
+    })
+}
+
+/// Delete the downloads waiting in `dir` (this version is the newest, so
+/// none is needed; an install that wanted one downloads it again).
+pub fn drop_ready(dir: &Path) {
+    for name in ["ready.dmg", "ready.AppImage"] {
+        let _ = std::fs::remove_file(dir.join(name));
+    }
+}
+
+/// The ready download for `asset`, when one is there and intact.
+pub fn ready_for(dir: &Path, asset: &Asset) -> Option<PathBuf> {
+    let path = ready_path(dir, asset);
+    sha256_file(&path)
+        .ok()
+        .filter(|d| d.eq_ignore_ascii_case(asset.sha256.trim()))
+        .map(|_| path)
+}
+
+/// Download `asset` ahead of the install (Rift notifies once it is here):
+/// into a file of this process, verified, then renamed to [`ready_path`],
+/// so two windows fetching at once never leave a half-written file there.
+/// Takes the ready file as it is when it already matches.
+pub fn prefetch(dir: &Path, asset: &Asset) -> Result<PathBuf, String> {
+    prefetch_with(dir, asset, url_overridden(), MAX_ASSET)
+}
+
+fn prefetch_with(dir: &Path, asset: &Asset, allow_file: bool, max: u64) -> Result<PathBuf, String> {
+    if let Some(ready) = ready_for(dir, asset) {
+        return Ok(ready);
+    }
+    // what a fetch that died left (a live one finishes well inside an hour)
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let old = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|a| a > Duration::from_secs(3600));
+            if old && e.file_name().to_string_lossy().starts_with("prefetch-") {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+    let part = dir.join(format!("prefetch-{}.{}", std::process::id(), asset.kind));
+    download_with(asset, &part, allow_file, max)?;
+    let ready = ready_path(dir, asset);
+    std::fs::rename(&part, &ready).map_err(|e| {
+        let _ = std::fs::remove_file(&part);
+        format!("{}: {e}", ready.display())
+    })?;
+    Ok(ready)
+}
+
 fn download_with(asset: &Asset, dest: &Path, allow_file: bool, max: u64) -> Result<(), String> {
     if !asset_url_allowed(&asset.url, allow_file) {
         return Err(format!("unsupported URL {}", asset.url));
@@ -2240,6 +2304,61 @@ mod tests {
             ..good
         };
         assert!(download_with(&gone, &out, true, MAX_ASSET).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prefetch_leaves_only_a_verified_ready_file() {
+        let dir = scratch("prefetch");
+        let src = dir.join("src.bin");
+        std::fs::write(&src, b"abc").unwrap();
+        let good = Asset {
+            url: format!("file://{}", src.display()),
+            sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".into(),
+            kind: "dmg".into(),
+        };
+        let updates = dir.join("updates");
+        std::fs::create_dir_all(&updates).unwrap();
+        assert_eq!(ready_for(&updates, &good), None, "nothing downloaded yet");
+        let ready = prefetch_with(&updates, &good, true, MAX_ASSET).unwrap();
+        assert_eq!(ready, updates.join("ready.dmg"));
+        assert_eq!(std::fs::read(&ready).unwrap(), b"abc");
+        assert_eq!(ready_for(&updates, &good), Some(ready.clone()));
+        // no partial file stays behind, and `sweep` (an install) keeps it
+        let names = |d: &Path| {
+            let mut v: Vec<String> = std::fs::read_dir(d)
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(names(&updates), ["ready.dmg"]);
+        sweep(&updates, &InstallTarget::Unsupported(String::new()));
+        assert!(ready.exists());
+        // an intact ready file is taken as it is: the source can be gone
+        std::fs::remove_file(&src).unwrap();
+        assert_eq!(
+            prefetch_with(&updates, &good, true, MAX_ASSET).unwrap(),
+            ready
+        );
+        // another release's digest: the old file is not it, and a failed
+        // fetch leaves no partial file
+        let next = Asset {
+            sha256: "0".repeat(64),
+            ..good.clone()
+        };
+        assert_eq!(ready_for(&updates, &next), None);
+        assert!(prefetch_with(&updates, &next, true, MAX_ASSET).is_err());
+        assert_eq!(names(&updates), ["ready.dmg"]);
+        // a corrupted ready file is never offered
+        std::fs::write(&ready, b"abd").unwrap();
+        assert_eq!(ready_for(&updates, &good), None);
+        // up to date: what waits is deleted, nothing else
+        std::fs::write(updates.join("relaunch.log"), b"").unwrap();
+        drop_ready(&updates);
+        assert_eq!(names(&updates), ["relaunch.log"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

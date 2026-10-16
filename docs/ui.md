@@ -72,8 +72,8 @@ every action).
   bare `±` outside a repository or with no changes. Left of it, an inbox
   (bell) icon opens the notifications popover; an accent dot marks unread
   entries. The vertical-tab layout's top strip has the same buttons.
-- **Update Rift** — while a newer release is available (and not dismissed
-  with *Later*), a 22 px pill left of the inbox: 1 px `warning` outline,
+- **Update Rift** — while a newer release is downloaded and ready (and not
+  dismissed with *Later*), a 22 px pill left of the inbox: 1 px `warning` outline,
   `warning` text (12 px medium), no fill, a hover lift. Tooltip `vX.Y.Z
   available`; a click opens the update dialog (see *Dialogs and toasts*).
 - **Remote · <device>** — while a phone is connected through remote access,
@@ -448,7 +448,8 @@ integration). Sits at the bottom of the pane, or at the top with
 - Panes are flush and square-cornered, separated by a 1 px divider (Warp
   style).
 - Active pane: its title bar carries a 2 px accent top edge; inactive panes
-  recede under a dim.
+  wash lighter (a 10 % white veil, as in Warp; a light 5 % shade on a light
+  theme), so the pane you are in is the dark one.
 - Each pane has a 28 px title bar (Warp pane header): a terminal icon, the
   program's title (OSC 0/2), else the pane's directory, centered (after a
   spinner while a command runs); while the
@@ -604,9 +605,23 @@ block; ⇧ + label copies it (a block copies its output). Esc cancels.
   Enter confirms, Esc cancels. An Enter that is auto-repeated, or that
   arrives within 300 ms of the dialog opening (a held or typed-ahead key),
   is ignored.
-- **Toasts** — short notices at the bottom (a keybinding moved from another
-  action, the session service could not start, config.toml was not applied,
-  a copy, paste, open or save failed, …).
+- **Toasts** — short notices about what you just did (copied, a keybinding
+  moved, config.toml was not applied, a copy, paste, open or save failed, a
+  phone's action, …), as a 30 px chip in the pane they are about: in its
+  command line's chip row, right-aligned, newest lowest, more stacking up
+  over the output. Each has a kind icon in a tinted disc — a green check
+  (it worked), a red `!` (it failed, with a red edge), an accent `i`, a
+  phone (a paired phone did it) — and, when there is one, a button
+  (*Open config.toml* for a config.toml that was not applied or a setting
+  that could not be saved). Done goes after 2.6 s, information and a
+  phone's action after 4 s, hovering keeps them; a failure stays until its
+  ✕. The same text replaces itself; at most six are kept. A pane out of
+  view hands its toasts to the pane you are in; with no pane showing (the
+  Settings tab) they sit in the window's bottom-right corner. Updates never use them: Rift's own
+  update notices are notification cards (*Notifications*, Toasts: the same
+  card, with the app icon as its badge; a click acts on it — the update
+  dialog, What's New — and ✕ dismisses). *Rift vX.Y.Z is ready* and a
+  failed update stay until dismissed; the others leave after `toast_secs`.
 - **Tooltips** — resting the pointer on a control for 0.6 s shows what it
   does and its shortcut from the live keymap: the tab bar's +, ✕, explorer,
   review and inbox buttons, a block's chevron and copy button, a split
@@ -679,7 +694,9 @@ raw / Show rendered (Markdown files only) · Close.
 
 Settings opens as a tab after the shell tabs (settings icon); the shells keep
 running and the tab strip stays live. ⌘, again goes back to the shell tab;
-clicking any tab switches; the tab's ×, ⌘W or Esc closes it. Other app
+clicking any tab switches; the tab's ×, ⌘W or Esc closes it. Going back to
+the Settings tab (its tab, ⌘, or *Open Settings* in the palette) shows the
+page it showed; once closed, it opens again on General. Other app
 shortcuts (new tab, next tab, palette…) work from it and leave it.
 
 A 232 px sidebar: a search field, the nine pages with icons (arrow keys
@@ -727,11 +744,12 @@ description) left, control right; it runs to the bottom edge.
     `Keep shells running through updates` toggle (*Session service;
     updates and crashes reattach (new shells)*; `durable_sessions`).
   - Updates: `Check for updates` toggle (*At launch and every 6 hours;
-    Update Rift appears in the tab bar*; `check_for_updates`), then a
+    the update downloads, then Update Rift appears in the tab bar*; `check_for_updates`), then a
     `Rift <version>` row whose description is the update status (`Not
-    checked yet`, `Checking for updates…`, `Up to date`, `vX.Y.Z available`
-    or `Couldn't check for updates`) and a `Check now` button (one check at
-    once, disabled while one runs; it works with the toggle off too), then a
+    checked yet`, `Checking for updates…`, `Up to date`, `Downloading
+    vX.Y.Z…`, `vX.Y.Z available`, `Installing vX.Y.Z…` or `Couldn't check
+    for updates`) and a `Check now` button (one check at once, disabled
+    while one runs, downloads or installs; it works with the toggle off too), then a
     `What's New` row (*The changes in each version of Rift*) whose `Open`
     button opens What's New.
   - Automation: `Control socket` segmented `Off | Navigate | Full`
@@ -866,7 +884,9 @@ description) left, control right; it runs to the bottom edge.
     state when none.
   - `Recent connections`: the newest 20, each with the device (or `Unknown
     device`), `LAN` or `Relay`, the address, the start time, the duration or
-    `connected`, and why it ended.
+    `connected`, and why it ended. Five rows show at once; with more, the
+    wheel over the list scrolls it a row at a time (a thumb at its right
+    edge shows where), and past either end the page scrolls on.
   - The page refreshes its data at most once a second.
 - **About** — no title: the app icon (64 px) beside the `Rift` wordmark,
   centred a little above the middle of the body; under it the version

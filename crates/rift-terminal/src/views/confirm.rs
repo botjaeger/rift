@@ -65,34 +65,127 @@ fn wrap(engine: &mut TextEngine, value: &str, size: f32, max_w: f32) -> Vec<Stri
     lines
 }
 
-/// Bottom-center status toast (saved files, copied text, …).
-pub fn toast(layer: &mut Layer, engine: &mut TextEngine, theme: &Theme, msg: &str, w: f32, h: f32) {
-    let tw = engine.measure(msg, 12.5, FONT_SANS, Weight::NORMAL);
-    let bw = (tw + 32.0).min(w - 32.0);
-    let x = (w - bw) / 2.0;
-    let y = h - 64.0;
-    layer.shadow(
-        [x, y + 6.0],
-        [bw, 34.0],
-        Color::BLACK.with_alpha(0.45),
-        8.0,
-        12.0,
-    );
-    layer.bordered(
-        [x, y],
-        [bw, 34.0],
-        theme.surface,
-        lift(theme, 0.12),
-        8.0,
-        1.0,
-    );
-    let msg = elide(engine, msg, 12.5, FONT_SANS, bw - 32.0);
-    layer.text(
-        text(engine, &msg, 12.5, FONT_SANS, Weight::NORMAL),
-        x + 16.0,
-        y + 8.5,
-        theme.text_ui,
-    );
+/// What a status toast reports (drives its icon and how long it stays).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ToastKind {
+    /// It worked (copied, saved).
+    Done,
+    /// It failed: stays until dismissed.
+    Error,
+    Info,
+    /// A paired phone did something here.
+    Phone,
+}
+
+/// One toast as drawn.
+pub struct ToastView<'a> {
+    pub id: u64,
+    pub kind: ToastKind,
+    pub text: &'a str,
+    /// Its button's label (Open config.toml, …).
+    pub action: Option<&'a str>,
+    /// Shows ✕ (an error stays until dismissed).
+    pub sticky: bool,
+}
+
+/// Click targets of one toast.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ToastHit {
+    pub id: u64,
+    pub rect: [f32; 4],
+    pub action: Option<[f32; 4]>,
+    pub close: Option<[f32; 4]>,
+}
+
+/// A toast's height; they stack 6 px apart.
+pub const TOAST_H: f32 = 30.0;
+
+/// Status toasts as chips in the pane they are about (DESIGN.md "Toasts"),
+/// right-aligned at `right` and stacked up from `bottom`, the newest
+/// lowest; none wider than `max_w`. `items` is newest first.
+pub fn toasts(
+    layer: &mut Layer,
+    engine: &mut TextEngine,
+    theme: &Theme,
+    items: &[ToastView],
+    right: f32,
+    bottom: f32,
+    max_w: f32,
+) -> Vec<ToastHit> {
+    const SIZE: f32 = 12.5;
+    const DISC: f32 = 18.0;
+    let mut hits = Vec::new();
+    let mut y = bottom - TOAST_H;
+    for t in items {
+        let (icon, color) = match t.kind {
+            ToastKind::Done => (Icon::Check, theme.success),
+            ToastKind::Error => (Icon::Alert, theme.error),
+            ToastKind::Info => (Icon::Info, theme.accent),
+            ToastKind::Phone => (Icon::Phone, theme.accent),
+        };
+        let action_w = t.action.map_or(0.0, |a| {
+            engine.measure(a, SIZE, FONT_SANS, Weight::MEDIUM) + 10.0
+        });
+        let close_w = if t.sticky { 26.0 } else { 0.0 };
+        // left pad, disc, gap … text … action, ✕ or right pad
+        let chrome = 6.0 + DISC + 8.0 + action_w + if t.sticky { close_w + 2.0 } else { 12.0 };
+        let text_w = engine.measure(t.text, SIZE, FONT_SANS, Weight::NORMAL);
+        // +2: the elision measures a hair wider than the plain text
+        let w = (chrome + text_w + 2.0).min(max_w.max(chrome + 40.0)).ceil();
+        let x = (right - w).round();
+        let r = TOAST_H / 2.0;
+        layer.shadow(
+            [x, y + 4.0],
+            [w, TOAST_H],
+            Color::BLACK.with_alpha(0.45),
+            r,
+            10.0,
+        );
+        let edge = if t.kind == ToastKind::Error {
+            theme.error.with_alpha(0.45)
+        } else {
+            lift(theme, 0.12)
+        };
+        layer.bordered([x, y], [w, TOAST_H], theme.surface, edge, r, 1.0);
+        let c = [x + 6.0 + DISC / 2.0, y + TOAST_H / 2.0];
+        layer.circle(c, DISC, color.with_alpha(0.14));
+        icons::draw(layer, icon, c, 11.0, color);
+        let tx = x + 6.0 + DISC + 8.0;
+        let room = w - chrome;
+        let shown = elide(engine, t.text, SIZE, FONT_SANS, room);
+        let ty = y + (TOAST_H - SIZE * 1.35) / 2.0;
+        layer.text(
+            text(engine, &shown, SIZE, FONT_SANS, Weight::NORMAL),
+            tx,
+            ty,
+            theme.text_ui,
+        );
+        let mut hit = ToastHit {
+            id: t.id,
+            rect: [x, y, w, TOAST_H],
+            action: None,
+            close: None,
+        };
+        let mut ax = tx + room + 4.0;
+        if let Some(a) = t.action {
+            layer.text(
+                text(engine, a, SIZE, FONT_SANS, Weight::MEDIUM),
+                ax + 2.0,
+                ty,
+                theme.accent,
+            );
+            hit.action = Some([ax - 2.0, y, action_w + 2.0, TOAST_H]);
+            ax += action_w;
+        }
+        if t.sticky {
+            let cr = [ax, y + 4.0, 22.0, 22.0];
+            super::close_icon(layer, [cr[0] + 11.0, cr[1] + 11.0], 3.5, theme.text_muted);
+            hit.close = Some(cr);
+        }
+        hits.push(hit);
+        y -= TOAST_H + 6.0;
+    }
+    hits
 }
 
 fn lift(theme: &Theme, alpha: f32) -> Color {

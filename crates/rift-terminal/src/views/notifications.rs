@@ -32,6 +32,8 @@ pub enum Kind {
     Request,
     Notify,
     Bell,
+    /// Rift's own notice (an update): the app icon.
+    App,
 }
 
 /// One row, as the app hands it over (newest first).
@@ -453,6 +455,7 @@ pub fn kind_color(theme: &Theme, kind: Kind) -> Color {
         Kind::Request => theme.warning,
         Kind::Notify => theme.accent,
         Kind::Bell => theme.text_dim,
+        Kind::App => theme.accent,
     }
 }
 
@@ -515,8 +518,13 @@ fn badge(
         layer.circle([dx, dy], 8.0, color);
         return;
     }
+    if kind == Kind::App {
+        super::welcome::logo(layer, [cx - ICON / 2.0, cy - ICON / 2.0], ICON);
+        return;
+    }
     layer.circle([cx, cy], ICON, color.with_alpha(0.16));
     match kind {
+        Kind::App => {}
         Kind::Finished => mark(layer, engine, "✓", 12.0, cx, cy, color),
         Kind::Failed => mark(layer, engine, "✕", 12.0, cx, cy, color),
         Kind::Request => mark(layer, engine, "!", 13.0, cx, cy, color),

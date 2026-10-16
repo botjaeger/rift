@@ -199,8 +199,9 @@ the whole buffer.
   A relative path resolves against the directory the command that printed
   it ran in (the pane's current directory for output outside a block); hint
   mode resolves paths the same way.
-- A copy, paste or open that fails shows a toast with the reason; `Copied`
-  appears only when the clipboard took the text.
+- A copy, paste or open that fails shows a toast with the reason (in the
+  pane, until dismissed); `Copied` appears only when the clipboard took the
+  text.
 - Click a block header: select the block (again: deselect). A click without a drag on its output also selects it (again: deselect); a drag selects text. Click its chevron: collapse.
 - **Copy on select** (`copy_on_select`, off by default): a drag-selection is
   copied to the clipboard as soon as the mouse is released.
@@ -636,11 +637,26 @@ missing or invalid signature offers no update and Settings → About shows
 cannot inject a release either. The asset's SHA-256 then comes from the
 signed manifest.
 
-- A newer version shows **Update Rift** in the tab bar (left of the inbox;
-  tooltip `vX.Y.Z available`). Settings → About shows *Up to date*, *vX.Y.Z
-  available* with an **Update…** button, or *Couldn't check for updates*.
-  The palette has *Check for updates* (`check_for_updates`; the answer
-  toasts) and *Update Rift* (`update_rift`).
+- A newer version downloads in the background first (verified like the
+  install below, into `updates/ready.dmg` or `ready.AppImage`; two windows
+  fetching at once never leave a half-written file there). Nothing shows
+  while it downloads except Settings, which reads *Downloading vX.Y.Z…*.
+  Once it is here, a notification card says *Rift vX.Y.Z is ready —
+  Downloaded · click to restart into it* (top right, with the app icon; it
+  stays until clicked or dismissed; a desktop notification instead while
+  another app is in front; with in-window notifications off,
+  `notifications.toasts`, only the chip says it and Rift's other update
+  messages become status toasts), once per version, and **Update Rift** shows in
+  the tab bar (left of the inbox; tooltip `vX.Y.Z available`). A copy that
+  cannot update itself has nothing to download and is told at once
+  (*Click to see how to update*); a download that fails is offered anyway
+  and the install downloads it. Settings → About shows *Up to date*, *vX.Y.Z
+  available* with an **Update…** button, *Installing vX.Y.Z…*, or
+  *Couldn't check for updates*. The palette has *Check for updates*
+  (`check_for_updates`; the answer is a card: *Rift is up to date*,
+  *Couldn't check for updates*, or the ready card once it downloaded) and
+  *Update Rift* (`update_rift`). Update messages are cards, never a status
+  toast.
 - The chip, **Update…** and `update_rift` open a dialog that says what the
   restart keeps: with durable sessions, *Your N tabs and M shells keep running
   and come back where they were*; without them, open shells end (turn on
@@ -648,7 +664,8 @@ signed manifest.
   version's session service speaks another protocol, running shells keep
   running but cannot be reattached; the dialog says so. **Later** (Esc)
   hides the chip until a newer version.
-- **Update** downloads this computer's asset (macOS: the DMG for its
+- **Update** installs the download made ahead (its SHA-256 checked again),
+  or downloads this computer's asset now (macOS: the DMG for its
   architecture; Linux: the AppImage) from the public releases only (any
   other URL in the manifest is rejected), checks its size (512 MiB at most)
   and its SHA-256 against the manifest (a mismatch changes nothing), checks
@@ -668,7 +685,8 @@ signed manifest.
   shells. Windows whose control socket is off cannot be asked; the dialog
   counts them and they stay open on the old version.
 - The new version counts as started 10 s after its first frame: it then
-  deletes the old copy, toasts *Updated to Rift vX.Y.Z* and reopens the
+  deletes the old copy, shows the card *Updated to Rift vX.Y.Z* (a click
+  opens What's New) and reopens the
   other windows. If it exits or crashes before that, the helper puts the
   old version back and starts it (*Couldn't update to Rift vX.Y.Z*), and
   that one reopens the windows. A crash mid-update leaves the windows'
@@ -745,7 +763,7 @@ countdown and *Try again*, which retries at once).
 - **Recent connections** lists the newest 20 connections and failed
   attempts: device (or *Unknown device*), via LAN or Relay, address, start,
   duration or *connected*, and why it ended (`remote history` shows the
-  newest 500).
+  newest 500). Five show at once; the list scrolls through the rest.
 - **Relay** (outside your network): a `wss://` relay URL (`remote_relay`)
   makes the gateway also reachable through it, and pairing links carry it.
   It defaults to Rift's public relay, `wss://rift-relay.playhaws.com`, so a

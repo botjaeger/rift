@@ -177,9 +177,12 @@ steps = [
     "key escape",
     "key ctrl+c",
     "wait 300",
-    # Settings controls work from the keyboard
+    # Settings controls work from the keyboard (it opens on General; ↓ to
+    # Appearance)
     "key cmd+,",
     "wait 200",
+    "key down",
+    "wait 100",
     # font size, not font family: a machine with one monospace font has
     # nothing to cycle to
     "key tab",
@@ -1826,6 +1829,11 @@ def up_state(name):
 up_run("probe", "data-new", "newer.json", [f"dump {up}/probe.txt"])
 probe = up_state("probe")
 assert 'update=available:99.0.0 chip=Some("99.0.0")' in probe, probe[:3000]
+# offered as a notice, never a toast (a development build has nothing to
+# download, so it is offered at once)
+assert ('update_ready=Some("99.0.0") update_fetching=None '
+        'app_notes=["Rift v99.0.0 is ready · Click to see how to update"]') in probe, probe[:3000]
+assert "toast=None" in probe, probe[:3000]
 assert 'Button "Update Rift, v99.0.0 available"' in probe, probe[-3000:]
 tips = re.search(r"^tips=(\[.*\])$", probe, re.M)[1]
 x, y, w, h = map(float, re.search(r"v99\.0\.0 available@([\d.,-]+)", tips)[1].split(","))
@@ -1846,6 +1854,7 @@ assert 'Button "Update to v99.0.0 available"' in about_new, about_new[-3000:]
 # dismissed stays dismissed across a relaunch (update.json)
 up_run("relaunch", "data-new", "newer.json", [f"dump {up}/relaunch.txt"])
 assert 'update=available:99.0.0 chip=None dismissed=Some("99.0.0")' in up_state("relaunch")
+assert "app_notes=[]" in up_state("relaunch"), "a dismissed version notified again"
 up_run("same", "data-same", "same.json", [*about_steps, f"dump {up}/same.txt"])
 same = up_state("same")
 assert "update=up-to-date chip=None" in same and 'Label "Up to date"' in same, same[:3000]
@@ -1859,6 +1868,100 @@ for name, why in [("unsigned", "release signature is missing"),
     text = up_state(name)
     assert f'update=failed:"{why}" chip=None' in text, text[:3000]
     assert 'Label "Couldn\'t check for updates"' in text, text[-3000:]
+
+# a check asked for answers with a notice (the palette's Check for updates)
+up_run("same-check", "data-same-check", "same.json", [
+    "key cmd+p", "type Check for updates", "wait 200", "key enter", "wait 1500",
+    f"dump {up}/same-check.txt"])
+same_check = up_state("same-check")
+assert 'app_notes=["Rift is up to date · v' in same_check and "toast=None" in same_check, \
+    same_check[:3000]
+
+# Settings › Remote access › Recent connections shows five rows; the wheel
+# over it scrolls a row at a time and past its end the page scrolls on.
+# leaving the Settings tab for a shell tab and coming back (⌘, twice) keeps
+# its page; closing it (⌘W) and opening it again starts on General
+rh = scratch / "recent"
+(rh / "cfg/rift").mkdir(parents=True)
+(rh / "cfg/rift/config.toml").write_text(
+    'shell = "/bin/bash"\nrestore_session = false\nsync_os_theme = false\n')
+(rh / "data/rift/remote").mkdir(parents=True, mode=0o700)
+(rh / "data/rift/remote/history.jsonl").write_text("".join(
+    json.dumps({"device": f"d{i}", "name": f"Phone {i}", "via": "lan",
+                "address": f"10.0.0.{i}:5000", "start": f"2026-10-16T10:0{i}:00Z",
+                "end": f"2026-10-16T10:0{i}:30Z", "reason": "closed"}) + "\n"
+    for i in range(1, 9)))
+(rh / "t.rift").write_text("\n".join([
+    "resize 1100 700", "wait_prompt", "key cmd+,", "wait 300", "key end", "key down",
+    "wait 1500", "move 550 300", "scroll -40", "wait 300", f"dump {rh}/top.txt",
+    "move 600 550", *["scroll -1", "wait 100"] * 2, f"dump {rh}/two.txt",
+    *["scroll -1", "wait 100"] * 2, f"dump {rh}/end.txt",
+    "key cmd+,", "wait 200", "key cmd+,", "wait 300", f"dump {rh}/back.txt",
+    "key cmd+w", "wait 200", "key cmd+,", "wait 300", f"dump {rh}/reopen.txt", "quit"]) + "\n")
+with (rh / "log.txt").open("w") as log:
+    rc = subprocess.run([str(binary), "--script", str(rh / "t.rift"), "--headless"],
+                        env=dict(env, XDG_CONFIG_HOME=str(rh / "cfg"),
+                                 XDG_DATA_HOME=str(rh / "data"),
+                                 BASH_SILENCE_DEPRECATION_WARNING="1"),
+                        stdout=log, stderr=log, timeout=60).returncode
+assert rc == 0, died("recent connections run failed", rh / "log.txt")
+
+def shown_phones(name):
+    return re.findall(r'Label "Phone (\d), ', (rh / f"{name}.txt").read_text())
+
+assert shown_phones("top") == ["8", "7", "6", "5", "4"], shown_phones("top")
+assert shown_phones("two") == ["6", "5", "4", "3", "2"], shown_phones("two")
+# three rows down is the end: the fourth notch scrolled the page instead
+assert shown_phones("end") == ["5", "4", "3", "2", "1"], shown_phones("end")
+assert "settings=true page=Remote" in (rh / "back.txt").read_text(), \
+    (rh / "back.txt").read_text()[:1500]
+assert "settings=true page=General" in (rh / "reopen.txt").read_text(), \
+    (rh / "reopen.txt").read_text()[:1500]
+
+# Status toasts are chips in the pane they are about: a config.toml that
+# was not applied shows in the focused (right) pane with "Open config.toml"
+# and stays until its ✕; the button opens the file beside Settings
+ts = scratch / "toasts"
+(ts / "cfg/rift").mkdir(parents=True)
+good_cfg = 'shell = "/bin/bash"\nrestore_session = false\nsync_os_theme = false\n'
+(ts / "good.toml").write_text(good_cfg)
+(ts / "bad.toml").write_text("font_size = [\n")
+
+def toast_run(name, steps):
+    (ts / "cfg/rift/config.toml").write_text(good_cfg)
+    (ts / f"{name}.rift").write_text("\n".join([
+        "resize 1100 700", "wait_prompt", "key cmd+d", "wait_prompt", "wait 400",
+        cp(ts / "bad.toml", ts / "cfg/rift/config.toml"), "wait 1500", *steps, "quit"]) + "\n")
+    with (ts / f"{name}.log").open("w") as log:
+        rc = subprocess.run([str(binary), "--script", str(ts / f"{name}.rift"), "--headless"],
+                            env=dict(env, XDG_CONFIG_HOME=str(ts / "cfg"),
+                                     XDG_DATA_HOME=str(ts / f"data-{name}"),
+                                     BASH_SILENCE_DEPRECATION_WARNING="1"),
+                            stdout=log, stderr=log, timeout=60).returncode
+    assert rc == 0, died(f"toast {name} run failed", ts / f"{name}.log")
+
+toast_run("probe", ["wait 3500", f"dump {ts}/probe.txt"])
+probe = (ts / "probe.txt").read_text()
+line = re.search(r"^toasts=.*$", probe, re.M)[0]
+# still there after the 2.6 s a done toast gets: a failure stays
+assert re.match(r'toasts=\[\(Error, Some\(\d+\), Some\(OpenConfig\), "config\.toml not applied', line), line
+hits = re.search(r"toast_hits=\[\(\[([\d., -]+)\], Some\(\[([\d., -]+)\]\), Some\(\[([\d., -]+)\]\)\)\]",
+                 line)
+assert hits, line
+chip, button, close = ([float(v) for v in g.split(",")] for g in hits.groups())
+# right-aligned in the right pane (the window is 1100 wide, split in two)
+assert chip[0] > 550 and abs(chip[0] + chip[2] - (1100 - 14)) < 2, chip
+centre = lambda r: f"{r[0] + r[2] / 2:.0f} {r[1] + r[3] / 2:.0f}"
+toast_run("close", [f"click {centre(close)}", "wait 300", f"dump {ts}/closed.txt"])
+assert "toasts=[] " in (ts / "closed.txt").read_text(), (ts / "closed.txt").read_text()[:2000]
+# fixing config.toml takes its error away by itself
+toast_run("fixed", [cp(ts / "good.toml", ts / "cfg/rift/config.toml"), "wait 1500",
+                    f"dump {ts}/fixed.txt"])
+assert "toasts=[] " in (ts / "fixed.txt").read_text(), (ts / "fixed.txt").read_text()[:2000]
+toast_run("action", [f"click {centre(button)}", "wait 600", f"dump {ts}/opened.txt"])
+opened = (ts / "opened.txt").read_text()
+assert "toasts=[] " in opened and "settings=true" in opened, opened[:2000]
+assert re.search(r'viewer=Some\("[^"]*toasts/cfg/rift/config\.toml"\)', opened), opened[:2000]
 
 # prepare-restart (an update asking the other windows to quit) needs the
 # token of an update in flight: a program in a pane sending it at the
@@ -1983,7 +2086,7 @@ text_cmd = '{"cmd":"remote-input","pane":PANE,"device":"Test Phone","text":"type
 def keys_cmd(*keys):
     return json.dumps({"cmd": "remote-input", "pane": 0, "device": "Test Phone",
                        "keys": list(keys)}).replace('"pane": 0', '"pane":PANE')
-settings_remote = ["key cmd+,", "wait 300", *["key down"] * 7, "wait 600"]
+settings_remote = ["key cmd+,", "wait 300", *["key down"] * 8, "wait 600"]
 
 # (a) remote_access off: refused, though the socket serves navigate requests
 off = remote_run("off", remote_base, [

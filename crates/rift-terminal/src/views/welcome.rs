@@ -39,30 +39,50 @@ fn lift(theme: &Theme, alpha: f32) -> Color {
     }
 }
 
-/// The app icon (DESIGN.md "App icon"): a `surface` tile with the `❯` in
-/// `accent` and a block cursor in `cursor`, from the 1024-unit icon grid
-/// (tile 100–924). At 48 px and below it has no hairline, as the icon does.
-pub fn logo(layer: &mut Layer, theme: &Theme, at: [f32; 2], size: f32) {
+/// The app icon (DESIGN.md "App icon"): a `#232326` tile with the `❯` in
+/// `#569cd6` and a block cursor in `#d4d4d4`, from the 1024-unit icon grid
+/// (tile 100–924). These are the icon's own colours, the same in every theme
+/// (the Dock and the bundles carry them). At 48 px and below it has no
+/// hairline, as the icon does.
+pub fn logo(layer: &mut Layer, at: [f32; 2], size: f32) {
+    const TILE: Color = Color::rgba(
+        0x23 as f32 / 255.0,
+        0x23 as f32 / 255.0,
+        0x26 as f32 / 255.0,
+        1.0,
+    );
+    const CHEVRON: Color = Color::rgba(
+        0x56 as f32 / 255.0,
+        0x9c as f32 / 255.0,
+        0xd6 as f32 / 255.0,
+        1.0,
+    );
+    const CURSOR: Color = Color::rgba(
+        0xd4 as f32 / 255.0,
+        0xd4 as f32 / 255.0,
+        0xd4 as f32 / 255.0,
+        1.0,
+    );
     let s = size / 824.0;
     let p = |gx: f32, gy: f32| [at[0] + (gx - 100.0) * s, at[1] + (gy - 100.0) * s];
     if size > 48.0 {
         layer.bordered(
             at,
             [size, size],
-            theme.surface,
-            lift(theme, 0.1),
+            TILE,
+            Color::WHITE.with_alpha(0.1),
             185.0 * s,
             1.0,
         );
     } else {
-        layer.rect(at, [size, size], theme.surface, 185.0 * s);
+        layer.rect(at, [size, size], TILE, 185.0 * s);
     }
     let stroke = 96.0 * s;
-    layer.line(p(336.0, 360.0), p(506.0, 512.0), stroke, theme.accent);
-    layer.line(p(506.0, 512.0), p(336.0, 664.0), stroke, theme.accent);
+    layer.line(p(336.0, 360.0), p(506.0, 512.0), stroke, CHEVRON);
+    layer.line(p(506.0, 512.0), p(336.0, 664.0), stroke, CHEVRON);
     let c0 = p(596.0, 372.0);
     let c1 = p(736.0, 652.0);
-    layer.rect(c0, [c1[0] - c0[0], c1[1] - c0[1]], theme.cursor, 16.0 * s);
+    layer.rect(c0, [c1[0] - c0[0], c1[1] - c0[1]], CURSOR, 16.0 * s);
 }
 
 /// The height the list needs; callers skip it when the pane is shorter.
@@ -96,7 +116,7 @@ pub fn render(
     );
 
     // header: the Rift logo, "New session", the shell and where it is
-    logo(layer, theme, [x, y], 40.0);
+    logo(layer, [x, y], 40.0);
     layer.text(
         sans(engine, "New session", 17.0, Weight::SEMIBOLD),
         x + 52.0,

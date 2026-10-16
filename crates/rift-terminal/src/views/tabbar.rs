@@ -900,7 +900,8 @@ fn alert_rank(kind: crate::views::notifications::Kind) -> u8 {
         Kind::Failed => 3,
         Kind::Bell => 2,
         Kind::Notify => 1,
-        Kind::Finished => 0,
+        // never a tab's (Rift's own notices have no pane)
+        Kind::Finished | Kind::App => 0,
     }
 }
 

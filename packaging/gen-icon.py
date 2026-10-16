@@ -2,9 +2,8 @@
 """Generate the Rift app icon for macOS, Linux and Windows.
 
 The design ("Prompt"): a dark rounded tile holding the prompt chevron in the
-accent color and a block cursor. Colors are read from the default theme
-(crates/rift-core/src/theme/dark-default.toml): `surface` for the tile,
-`accent` for the chevron, `cursor` for the cursor.
+accent color and a block cursor, in the icon's own fixed colors (`COLORS`:
+#232326 tile, #569cd6 chevron, #d4d4d4 cursor; DESIGN.md "App icon").
 
 Usage:  python3 packaging/gen-icon.py      (needs Pillow)
 Outputs (all under assets/icon/):
@@ -19,7 +18,6 @@ and mobile/assets/icon.png (iOS, opaque) and adaptive-icon.png (Android foregrou
 
 from __future__ import annotations
 
-import re
 import shutil
 import subprocess
 import sys
@@ -28,7 +26,6 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 ROOT = Path(__file__).resolve().parent.parent
-THEME = ROOT / "crates" / "rift-core" / "src" / "theme" / "dark-default.toml"
 OUT = ROOT / "assets" / "icon"
 
 SIZE = 1024
@@ -47,21 +44,19 @@ CURSOR = (596, 372, 736, 652)
 CURSOR_RADIUS = 16
 HAIRLINE = (255, 255, 255, 26)  # white at 10 %
 
+# The icon's own colours. They are not the theme's: the default theme follows
+# Warp's colours (2026-10-16), and the icon stays the same in every theme
+# (`welcome::logo` draws it with these too).
+COLORS = {
+    "surface": (0x23, 0x23, 0x26),
+    "accent": (0x56, 0x9C, 0xD6),
+    "cursor": (0xD4, 0xD4, 0xD4),
+}
+
 # Small icons (tabs, taskbars, title bars) waste the macOS margin: at or below
 # this size the tile is drawn closer to the canvas edge.
 SMALL = 48
 SMALL_MARGIN = 40
-
-
-def token(name: str, default: str) -> tuple[int, int, int]:
-    """`name = "#rrggbb"` from the default theme, else `default`."""
-    try:
-        text = THEME.read_text(encoding="utf-8")
-    except OSError:
-        text = ""
-    m = re.search(rf'^\s*{name}\s*=\s*"#([0-9a-fA-F]{{6}})', text, re.MULTILINE)
-    h = m.group(1) if m else default.lstrip("#")
-    return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
 
 
 def render(size: int, colors: dict[str, tuple[int, int, int]]) -> Image.Image:
@@ -134,11 +129,7 @@ def render_mobile(colors: dict[str, tuple[int, int, int]], tile_fraction: float,
 
 
 def main() -> int:
-    colors = {
-        "surface": token("surface", "#232326"),
-        "accent": token("accent", "#569cd6"),
-        "cursor": token("cursor", "#d4d4d4"),
-    }
+    colors = dict(COLORS)
     print("colors", {k: "#%02x%02x%02x" % v for k, v in colors.items()})
 
     OUT.mkdir(parents=True, exist_ok=True)

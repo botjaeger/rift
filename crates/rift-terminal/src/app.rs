@@ -100,6 +100,10 @@ pub enum UserEvent {
     UpdateReady(std::path::PathBuf),
     /// This process has been up long enough (`App::confirm_start`).
     StartConfirmed,
+    /// The update for version `.0` was downloaded ahead of the install
+    /// (`Ok(true)`; `Ok(false)`: this copy has nothing to download) or why
+    /// not.
+    UpdateDownloaded(String, Result<bool, String>),
 }
 
 /// What the completion thread completes: one editor state and the
@@ -501,6 +505,9 @@ pub struct App {
     /// first; hovering resets the time.
     note_toasts: Vec<(u64, Instant)>,
     note_toast_hits: Vec<crate::views::notifications::ToastHit>,
+    /// Rift's own notices (updates) among `note_toasts`: no pane, no inbox
+    /// row; they go when their toast goes.
+    app_notes: Vec<AppNote>,
     /// Newest finished block already considered per pane.
     attention_seen: std::collections::HashMap<PaneId, rift_core::BlockId>,
     /// Newest finished block written to each pane's transcript.
@@ -622,7 +629,10 @@ pub struct App {
     /// Editor mouse selection in progress (pane).
     editor_drag: Option<PaneId>,
     /// Transient status message (text, shown at).
-    toast: Option<(String, Instant)>,
+    /// Status toasts, newest first (`App::toast_as`).
+    toasts: Vec<Toast>,
+    next_toast_id: u64,
+    toast_hits: Vec<crate::views::confirm::ToastHit>,
     /// Queue of the completion thread (started on the first request).
     completion_worker: CompletionWorker<CompletionRequest>,
     /// Latest completion request not yet answered.
@@ -679,17 +689,20 @@ struct HintState {
     typed: String,
 }
 
-/// Black over unfocused split panes: the panes you are not in recede.
-const INACTIVE_DIM: f32 = 0.14;
-/// The same on a light theme (black reads much heavier on a light ground).
+/// White over unfocused split panes on a dark theme (Warp): the pane you are
+/// in stays dark and the others wash lighter, so the focused one stands out
+/// at a glance (Warp's inactive pane measures #0e0e0e → #252525: ~10 %).
+const INACTIVE_LIFT: f32 = 0.10;
+/// Black over them on a light theme (white would vanish on a light ground,
+/// and black reads much heavier there).
 const INACTIVE_DIM_LIGHT: f32 = 0.05;
 
 fn inactive_dim(theme: &rift_core::Theme) -> rift_core::Color {
-    rift_core::Color::BLACK.with_alpha(if theme.is_light() {
-        INACTIVE_DIM_LIGHT
+    if theme.is_light() {
+        rift_core::Color::BLACK.with_alpha(INACTIVE_DIM_LIGHT)
     } else {
-        INACTIVE_DIM
-    })
+        rift_core::Color::WHITE.with_alpha(INACTIVE_LIFT)
+    }
 }
 
 /// The welcome list's rows, with shortcuts from the live keymap (row `i`
@@ -1053,7 +1066,50 @@ fn utc_stamp(secs: u64) -> String {
 }
 
 /// How long a toast stays up.
+/// How long a toast that worked stays (an error stays until dismissed).
 const TOAST_TTL: Duration = Duration::from_millis(2600);
+/// How long other toasts stay (information, a phone's action).
+const TOAST_INFO_TTL: Duration = Duration::from_secs(4);
+/// Toasts kept at once (an error stays until dismissed, so they can pile).
+const TOASTS_MAX: usize = 6;
+
+/// A status toast: a chip in the pane it is about (DESIGN.md "Toasts").
+struct Toast {
+    id: u64,
+    kind: crate::views::confirm::ToastKind,
+    text: String,
+    /// The pane it is about; `None` or a pane out of view: the window's
+    /// bottom-right corner.
+    pane: Option<PaneId>,
+    action: Option<ToastAction>,
+    at: Instant,
+}
+
+impl Toast {
+    /// Gone after this; `None`: an error, until dismissed.
+    fn ttl(&self) -> Option<Duration> {
+        use crate::views::confirm::ToastKind;
+        match self.kind {
+            ToastKind::Error => None,
+            ToastKind::Done => Some(TOAST_TTL),
+            ToastKind::Info | ToastKind::Phone => Some(TOAST_INFO_TTL),
+        }
+    }
+}
+
+/// A toast's button.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ToastAction {
+    OpenConfig,
+}
+
+impl ToastAction {
+    fn label(self) -> &'static str {
+        match self {
+            ToastAction::OpenConfig => "Open config.toml",
+        }
+    }
+}
 
 /// How long a header's copy button shows its check after a copy.
 const COPIED_SHOWN: Duration = Duration::from_millis(1500);
@@ -1126,6 +1182,17 @@ struct UpdatePlan {
 #[derive(Default)]
 struct UpdateUi {
     status: rift_core::update::Status,
+    /// The version that can be offered: downloaded ahead of time, or one
+    /// this copy cannot download (it opens the release page instead), or
+    /// whose download failed (the install then downloads it).
+    ready: Option<String>,
+    /// The version being downloaded ahead of time.
+    fetching: Option<String>,
+    /// The version whose "ready" notice was shown (once per version).
+    notified: Option<String>,
+    /// The ready notice's detail for `ready` (downloaded, nothing to
+    /// download, or to be downloaded by the install).
+    ready_detail: &'static str,
     /// "Later" was chosen for this version: no chip.
     dismissed: Option<String>,
     /// Downloading, installing or restarting.
@@ -1141,6 +1208,26 @@ struct UpdateUi {
     confirm_after: Option<Duration>,
     /// `confirm_start` ran (it runs once).
     start_confirmed: bool,
+}
+
+/// One of Rift's own notices (`App::app_note`), shown as a notification
+/// toast.
+struct AppNote {
+    id: u64,
+    title: String,
+    detail: String,
+    /// What a click on it does.
+    action: AppNoteAction,
+    /// Stays until clicked or dismissed (the toast duration does not end it).
+    sticky: bool,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum AppNoteAction {
+    None,
+    /// The update dialog.
+    Update,
+    WhatsNew,
 }
 
 /// This window's view of the remote gateway (`remote.rs`,
@@ -1285,6 +1372,7 @@ impl App {
             attention: Vec::new(),
             next_attention_id: 0,
             note_toasts: Vec::new(),
+            app_notes: Vec::new(),
             note_toast_hits: Vec::new(),
             attention_seen: Default::default(),
             transcript_saved: Default::default(),
@@ -1345,7 +1433,9 @@ impl App {
             history: Default::default(),
             pane_drag: None,
             editor_drag: None,
-            toast: None,
+            toasts: Vec::new(),
+            next_toast_id: 0,
+            toast_hits: Vec::new(),
             config_error: None,
             review_writer: None,
             completion_worker: CompletionWorker::default(),
@@ -1407,7 +1497,7 @@ impl App {
             .err()
             .map(|e| format!("Theme {wanted:?}: {e}; using Dark Default"));
         if error.is_some() && error != self.theme_error {
-            self.toast(error.clone().unwrap_or_default());
+            self.toast_error(error.clone().unwrap_or_default());
         }
         self.theme_error = error;
         // Warp "window opacity": only the window ground goes translucent
@@ -1494,7 +1584,7 @@ impl App {
             }
             Err(e) => {
                 log::warn!("{e}");
-                self.toast(e);
+                self.toast_error(e);
             }
         }
     }
@@ -1559,14 +1649,19 @@ impl App {
     fn save_config(&mut self) {
         if let Some(e) = &self.config_error {
             let msg = format!("Settings not saved: fix config.toml first — {e}");
-            self.toast(msg);
+            self.toast_as(
+                crate::views::confirm::ToastKind::Error,
+                msg,
+                None,
+                Some(ToastAction::OpenConfig),
+            );
             return;
         }
         match self.config.save() {
             Ok(()) => self.settings.saved_at = Some(Instant::now()),
             Err(e) => {
                 log::warn!("config save failed: {e}");
-                self.toast(format!("Could not save settings: {e}"));
+                self.toast_error(format!("Could not save settings: {e}"));
             }
         }
     }
@@ -1579,6 +1674,9 @@ impl App {
             Ok(c) => {
                 self.config = c.unwrap_or_default();
                 self.config_error = None;
+                // fixed: its "not applied" / "not saved" errors are moot
+                self.toasts
+                    .retain(|t| t.action != Some(ToastAction::OpenConfig));
                 if !startup {
                     self.settings.saved_at = Some(Instant::now());
                 }
@@ -1588,7 +1686,12 @@ impl App {
                 if startup {
                     self.config = Config::fallback();
                 }
-                self.toast(format!("config.toml not applied: {e}"));
+                self.toast_as(
+                    crate::views::confirm::ToastKind::Error,
+                    format!("config.toml not applied: {e}"),
+                    None,
+                    Some(ToastAction::OpenConfig),
+                );
                 self.config_error = Some(e);
             }
         }
@@ -2651,11 +2754,11 @@ impl App {
         } else if let Some(path) = local_path_of(target).filter(|p| opens_as_program(p)) {
             // a program: show it in the file manager instead of running it
             match reveal_external(&path) {
-                Ok(()) => self.toast(format!("Revealed {} (not run)", path.display())),
-                Err(e) => self.toast(format!("Could not reveal {}: {e}", path.display())),
+                Ok(()) => self.toast_done(format!("Revealed {} (not run)", path.display())),
+                Err(e) => self.toast_error(format!("Could not reveal {}: {e}", path.display())),
             }
         } else if let Err(e) = open_external(target) {
-            self.toast(format!("Could not open {target}: {e}"));
+            self.toast_error(format!("Could not open {target}: {e}"));
         }
     }
 
@@ -2689,7 +2792,10 @@ impl App {
                         .stdin(std::process::Stdio::null())
                         .spawn();
                     if let Err(e) = spawned {
-                        self.toast(format!("Could not open {}: {program}: {e}", editor.label));
+                        self.toast_error(format!(
+                            "Could not open {}: {program}: {e}",
+                            editor.label
+                        ));
                     }
                 }
                 None => {
@@ -2826,7 +2932,7 @@ impl App {
             match target {
                 HintTarget::Open(t) if copy => {
                     if self.copy_to_clipboard(t) {
-                        self.toast("Copied".into());
+                        self.toast_done("Copied".into());
                     }
                 }
                 HintTarget::Open(t) => self.open_target(&t),
@@ -2863,7 +2969,7 @@ impl App {
         if let Some(text) = text
             && self.copy_to_clipboard(text)
         {
-            self.toast("Copied block output".into());
+            self.toast_done("Copied block output".into());
         }
     }
 
@@ -2927,6 +3033,11 @@ impl App {
             ))
         } else if self.note_toast_hits.iter().any(|t| inside(&t.rect)) {
             Some(CursorIcon::Pointer)
+        } else if let Some(t) = self.toast_hits.iter().find(|t| inside(&t.rect)) {
+            // a hand over its button and ✕, an arrow over the message
+            Some(hand(
+                t.action.is_some_and(|r| inside(&r)) || t.close.is_some_and(|r| inside(&r)),
+            ))
         } else if let Some(d) = self.tip_drawn.as_ref().filter(|d| {
             inside(&d.rect) && self.tip_shown.as_ref().is_some_and(|t| t.action.is_some())
         }) {
@@ -3087,7 +3198,7 @@ impl App {
                 Ok(cb) => self.clipboard = Some(cb),
                 Err(e) => {
                     log::warn!("clipboard unavailable: {e}");
-                    self.toast(format!("Clipboard unavailable: {e}"));
+                    self.toast_error(format!("Clipboard unavailable: {e}"));
                 }
             }
         }
@@ -3108,7 +3219,7 @@ impl App {
             Ok(()) => true,
             Err(e) => {
                 log::warn!("clipboard set failed: {e}");
-                self.toast(format!("Could not copy: {e}"));
+                self.toast_error(format!("Could not copy: {e}"));
                 false
             }
         }
@@ -3142,7 +3253,7 @@ impl App {
             Err(arboard::Error::ContentNotAvailable) => String::new(),
             Err(e) => {
                 log::warn!("clipboard read failed: {e}");
-                self.toast(format!("Could not paste: {e}"));
+                self.toast_error(format!("Could not paste: {e}"));
                 return;
             }
         };
@@ -3839,9 +3950,91 @@ impl App {
             }
         }
         let before = self.note_toasts.len();
-        self.note_toasts
-            .retain(|(_, since)| now.duration_since(*since) < ttl);
+        let notes = &self.app_notes;
+        self.note_toasts.retain(|(id, since)| {
+            notes.iter().any(|n| n.id == *id && n.sticky) || now.duration_since(*since) < ttl
+        });
+        let toasts = &self.note_toasts;
+        self.app_notes
+            .retain(|n| toasts.iter().any(|(id, _)| *id == n.id));
         before != self.note_toasts.len()
+    }
+
+    /// Show one of Rift's own notices as a notification toast (a desktop
+    /// notification instead while another app is in front); returns its id.
+    fn app_note(
+        &mut self,
+        title: String,
+        detail: String,
+        action: AppNoteAction,
+        sticky: bool,
+    ) -> u64 {
+        log::info!("notice: {title} — {detail}");
+        self.next_attention_id += 1;
+        let id = self.next_attention_id;
+        if !self.focused && sticky && self.config.notifications.enabled {
+            crate::notify::send(&title, &detail);
+        }
+        self.a11y_announcement = Some(if detail.is_empty() {
+            title.clone()
+        } else {
+            format!("{title}: {detail}")
+        });
+        // in-window cards off (Settings › Notifications): an update that is
+        // ready still shows in the tab bar's chip; the rest is a status toast
+        if !self.config.notifications.toasts {
+            let text = if detail.is_empty() {
+                title
+            } else {
+                format!("{title}: {detail}")
+            };
+            match (sticky, action) {
+                (true, AppNoteAction::Update) => {}
+                // a failed update stays until dismissed
+                (true, _) => self.toast_error(text),
+                _ => self.toast(text),
+            }
+            return id;
+        }
+        self.app_notes.push(AppNote {
+            id,
+            title,
+            detail,
+            action,
+            sticky,
+        });
+        self.note_toasts.insert(0, (id, Instant::now()));
+        // a sticky notice is never pushed out by the ones after it
+        let notes = &self.app_notes;
+        let max = crate::views::notifications::MAX_TOASTS;
+        while self.note_toasts.len() > max {
+            let drop = self
+                .note_toasts
+                .iter()
+                .rposition(|(id, _)| !notes.iter().any(|n| n.id == *id && n.sticky))
+                .unwrap_or(self.note_toasts.len() - 1);
+            self.note_toasts.remove(drop);
+        }
+        let toasts = &self.note_toasts;
+        self.app_notes
+            .retain(|n| toasts.iter().any(|(t, _)| *t == n.id));
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        id
+    }
+
+    /// Drop Rift's own notices that `action` names (an update that was
+    /// installed or replaced).
+    fn drop_app_notes(&mut self, action: AppNoteAction) {
+        let gone: Vec<u64> = self
+            .app_notes
+            .iter()
+            .filter(|n| n.action == action)
+            .map(|n| n.id)
+            .collect();
+        self.app_notes.retain(|n| n.action != action);
+        self.note_toasts.retain(|(id, _)| !gone.contains(id));
     }
 
     /// Entries whose pane you are looking at count as read; their toasts go.
@@ -3863,8 +4056,11 @@ impl App {
         }
         if changed || !self.note_toasts.is_empty() {
             let attention = &self.attention;
-            self.note_toasts
-                .retain(|(id, _)| attention.iter().any(|a| a.id == *id && !a.read));
+            let notes = &self.app_notes;
+            self.note_toasts.retain(|(id, _)| {
+                notes.iter().any(|n| n.id == *id)
+                    || attention.iter().any(|a| a.id == *id && !a.read)
+            });
         }
     }
 
@@ -4122,7 +4318,7 @@ impl App {
             return;
         }
         let Some(file) = write_pipe_file(&output) else {
-            self.toast("Could not write the output to a temporary file".into());
+            self.toast_error("Could not write the output to a temporary file".into());
             return;
         };
         let shell = rift_core::shell_integration::shell_name(self.config.shell.as_deref());
@@ -5008,7 +5204,7 @@ impl App {
                     Some(s) => s,
                     None => {
                         let s = Session::spawn(opts(None, replay)).expect("spawn shell");
-                        self.toast(format!(
+                        self.toast_error(format!(
                             "Session service unavailable ({e}); this shell is local"
                         ));
                         s
@@ -5081,7 +5277,7 @@ impl App {
     fn clear_transcripts(&mut self) {
         let n = rift_core::transcript::remove_except(&[]);
         self.transcript_saved.clear();
-        self.toast(format!(
+        self.toast_done(format!(
             "Deleted {n} saved transcript{}",
             if n == 1 { "" } else { "s" }
         ));
@@ -5391,16 +5587,63 @@ impl App {
             Ok(path) => {
                 self.launch_configs = rift_core::launch::load_all();
                 let shown = editor::shorten_home(&path.to_string_lossy());
-                self.toast(format!("Saved launch configuration to {shown}"));
+                self.toast_done(format!("Saved launch configuration to {shown}"));
             }
-            Err(e) => self.toast(format!("Could not save launch configuration: {e}")),
+            Err(e) => self.toast_error(format!("Could not save launch configuration: {e}")),
         }
     }
 
-    /// Transient status message at the bottom of the window.
+    /// A status toast about what just happened, in the pane you are in.
     fn toast(&mut self, msg: String) {
-        log::info!("toast: {msg}");
-        self.toast = Some((msg, Instant::now()));
+        self.toast_as(crate::views::confirm::ToastKind::Info, msg, None, None);
+    }
+
+    /// It worked (copied, saved): a check, gone after [`TOAST_TTL`].
+    fn toast_done(&mut self, msg: String) {
+        self.toast_as(crate::views::confirm::ToastKind::Done, msg, None, None);
+    }
+
+    /// It failed: stays until dismissed.
+    fn toast_error(&mut self, msg: String) {
+        self.toast_as(crate::views::confirm::ToastKind::Error, msg, None, None);
+    }
+
+    /// A paired phone acted on `pane`.
+    fn toast_phone(&mut self, pane: Option<PaneId>, msg: String) {
+        self.toast_as(crate::views::confirm::ToastKind::Phone, msg, pane, None);
+    }
+
+    /// Show a toast in `pane` (default: the pane you are in; none while the
+    /// Settings tab shows): the same text there replaces itself, at most
+    /// [`TOASTS_MAX`] stay, an error until dismissed.
+    fn toast_as(
+        &mut self,
+        kind: crate::views::confirm::ToastKind,
+        msg: String,
+        pane: Option<PaneId>,
+        action: Option<ToastAction>,
+    ) {
+        log::info!("toast ({kind:?}): {msg}");
+        let pane = pane.or_else(|| {
+            (!self.settings.open)
+                .then(|| self.tabs.get(self.active).map(|t| t.active_pane))
+                .flatten()
+        });
+        self.toasts.retain(|t| !(t.text == msg && t.pane == pane));
+        self.next_toast_id += 1;
+        self.toasts.insert(
+            0,
+            Toast {
+                id: self.next_toast_id,
+                kind,
+                text: msg.clone(),
+                pane,
+                action,
+                at: Instant::now(),
+            },
+        );
+        self.toasts.truncate(TOASTS_MAX);
+        self.a11y_announcement = Some(msg);
         if let Some(w) = &self.window {
             w.request_redraw();
         }
@@ -5938,7 +6181,7 @@ impl App {
                     .and_then(|f| crate::views::review_panel::hunk_patch(f, &id))
                     && self.copy_to_clipboard(patch)
                 {
-                    self.toast("Hunk copied".into());
+                    self.toast_done("Hunk copied".into());
                 }
                 return;
             }
@@ -6241,11 +6484,45 @@ impl App {
                 let now = std::time::SystemTime::now();
                 self.note_toasts
                     .iter()
-                    .filter_map(|(id, _)| self.attention.iter().find(|a| a.id == *id))
-                    .map(|a| Self::entry_of(a, now))
+                    .filter_map(|(id, _)| {
+                        if let Some(n) = self.app_notes.iter().find(|n| n.id == *id) {
+                            return Some(crate::views::notifications::Entry {
+                                id: n.id,
+                                kind: crate::views::notifications::Kind::App,
+                                agent: None,
+                                branch: None,
+                                title: n.title.clone(),
+                                detail: n.detail.clone(),
+                                age_secs: 0,
+                                unread: true,
+                            });
+                        }
+                        let a = self.attention.iter().find(|a| a.id == *id)?;
+                        Some(Self::entry_of(a, now))
+                    })
                     .collect()
             };
         let (pane_rects, handles) = self.pane_rects(w, h);
+        // where each pane's toasts sit (its grid's bottom, last frame)
+        let toast_active = self.tabs.get(self.active).map(|t| t.active_pane);
+        let toast_panes: Vec<(PaneId, [f32; 4], Option<f32>)> = if settings_open {
+            Vec::new()
+        } else {
+            pane_rects
+                .iter()
+                .filter_map(|pr| {
+                    let tab = self.tabs.get(self.active)?;
+                    if tab.zoomed.is_some_and(|z| z != pr.id) {
+                        return None;
+                    }
+                    let grid_bottom = tab
+                        .pane(pr.id)?
+                        .last_grid
+                        .map(|g| g.y + g.rows as f32 * g.line_h);
+                    Some((pr.id, pr.rect, grid_bottom))
+                })
+                .collect()
+        };
         let (explorer_w, review_w) = self.panel_widths(w);
         let viewer_label = self.viewer.path.as_ref().map(|p| {
             self.explorer
@@ -6357,11 +6634,6 @@ impl App {
             .as_ref()
             .map(|c| (c.action.clone(), c.commands.clone()));
         let phones = self.connected_phones();
-        let toast = self
-            .toast
-            .as_ref()
-            .filter(|(_, t)| t.elapsed() < TOAST_TTL)
-            .map(|(m, _)| m.clone());
         let filter_editing = self.filter_editing;
         let shell_env = self.shell_env.clone();
         let error_underline = self.config.error_underline;
@@ -7100,8 +7372,8 @@ impl App {
                 hits.extend(front);
             }
 
-            // inactive panes recede under a dim; the focused one's title bar
-            // carries the accent edge
+            // inactive panes wash lighter (darker on a light theme); the
+            // focused one's title bar carries the accent edge
             if split && !is_active_pane {
                 scene.layer(2).rect(
                     [pr.rect[0], pr.rect[1]],
@@ -7455,9 +7727,56 @@ impl App {
             crate::views::hints::render(scene.layer(5), engine, &theme, &items, &hs.typed);
         }
 
-        // ── layer 6: toast + close/quit warning (modal: eats every click) ──
-        if let Some(msg) = &toast {
-            crate::views::confirm::toast(scene.layer(6), engine, &theme, msg, w, h);
+        // ── layer 6: toasts + close/quit warning (modal: eats every click) ──
+        // each in its pane, right above the command line; a pane out of
+        // view (another tab, the Settings tab) sends it to the corner
+        self.toast_hits.clear();
+        {
+            use crate::views::confirm::{ToastView, toasts};
+            let shown_panes = &toast_panes;
+            let mut groups: Vec<(Option<PaneId>, Vec<&Toast>)> = Vec::new();
+            for t in &self.toasts {
+                // its pane out of view (or none): the pane you are in; the
+                // corner only while no pane shows (the Settings tab)
+                let shown = |p: &PaneId| shown_panes.iter().any(|(id, ..)| id == p);
+                let at = t.pane.filter(shown).or(toast_active.filter(shown));
+                match groups.iter_mut().find(|(a, _)| *a == at) {
+                    Some((_, list)) => list.push(t),
+                    None => groups.push((at, vec![t])),
+                }
+            }
+            for (at, list) in groups {
+                let (right, bottom, max_w) =
+                    match at.and_then(|p| shown_panes.iter().find(|(id, ..)| *id == p)) {
+                        // in the command line's chip row (right of the
+                        // folder chip), clear of the output above it; no
+                        // room under the grid (a full-screen program, raw
+                        // input): the pane's bottom corner
+                        Some((_, r, Some(g))) if !input_top && *g + 50.0 <= r[1] + r[3] => {
+                            (r[0] + r[2] - 14.0, g + 47.0, r[2] - 124.0)
+                        }
+                        Some((_, r, _)) => (r[0] + r[2] - 14.0, r[1] + r[3] - 12.0, r[2] - 28.0),
+                        None => (w - 16.0, h - 16.0, (w - 32.0).min(560.0)),
+                    };
+                // one line: a multi-line message (a parse error) runs on
+                let lines: Vec<String> = list
+                    .iter()
+                    .map(|t| t.text.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .collect();
+                let views: Vec<ToastView> = list
+                    .iter()
+                    .zip(&lines)
+                    .map(|(t, line)| ToastView {
+                        id: t.id,
+                        kind: t.kind,
+                        text: line,
+                        action: t.action.map(ToastAction::label),
+                        sticky: t.ttl().is_none(),
+                    })
+                    .collect();
+                let hits = toasts(scene.layer(6), engine, &theme, &views, right, bottom, max_w);
+                self.toast_hits.extend(hits);
+            }
         }
         // What's New sits under a confirm dialog (both modal, layer 6)
         if self.whats_new.open {
@@ -8427,6 +8746,8 @@ impl App {
                 if self.settings.open {
                     self.settings.open = false;
                 } else {
+                    // back to the Settings tab as it was; a closed one
+                    // starts again on General (`close_tab`)
                     self.settings.open_page(self.settings.page);
                 }
             }
@@ -8950,6 +9271,17 @@ impl App {
                 self.settings.focus = None
             }
             (
+                Key::Named(NamedKey::ArrowUp | NamedKey::ArrowDown),
+                Some((ClickTarget::RemoteHistoryList, _)),
+            ) => {
+                let rows = if matches!(event.logical_key, Key::Named(NamedKey::ArrowUp)) {
+                    1
+                } else {
+                    -1
+                };
+                self.settings.scroll_history(rows);
+            }
+            (
                 Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowRight),
                 Some((ClickTarget::SettingsSlider(id), _)),
             ) => {
@@ -9080,7 +9412,7 @@ impl App {
             self.save_config();
             self.apply_config();
             let shown = binding.chips().concat();
-            self.toast(format!("{action} → {shown}{note}"));
+            self.toast_done(format!("{action} → {shown}{note}"));
             return true;
         }
         // type-to-filter
@@ -9408,7 +9740,12 @@ impl App {
         if matches!(scope, CloseScope::Window) && self.update.busy {
             // quitting mid-install could leave a half-finished update
             self.update.quit_after = true;
-            self.toast("Rift is updating… it quits when the update is done".into());
+            self.app_note(
+                "Rift is updating…".into(),
+                "It quits when the update is done".into(),
+                AppNoteAction::None,
+                false,
+            );
             return;
         }
         // a quit ends every shell, so the phone loses what it shows
@@ -9869,7 +10206,7 @@ impl App {
                         let title = format!("install on {}", profile.name);
                         self.open_tab_running(&title, profile.install_command(&path));
                     }
-                    None => self.toast("Could not write the installer script".into()),
+                    None => self.toast_error("Could not write the installer script".into()),
                 }
             }
             ConfirmAction::Revert { root, path, hunk } => {
@@ -11069,6 +11406,33 @@ impl App {
             window.request_redraw();
             return;
         }
+        // status toasts: ✕ dismisses, the button acts, the chip eats the click
+        if let Some(t) = self.toast_hits.iter().find(|t| inside(&t.rect)).copied() {
+            let action = self
+                .toasts
+                .iter()
+                .find(|x| x.id == t.id)
+                .and_then(|x| x.action);
+            if t.close.is_some_and(|r| inside(&r)) {
+                self.toasts.retain(|x| x.id != t.id);
+            } else if let (Some(r), Some(action)) = (t.action, action)
+                && inside(&r)
+            {
+                self.toasts.retain(|x| x.id != t.id);
+                match action {
+                    // the file beside the Settings page, as its own
+                    // "Open config.toml" does
+                    ToastAction::OpenConfig => {
+                        if let Some(path) = rift_core::config::config_path() {
+                            self.settings.open_page(self.settings.page);
+                            self.open_config_viewer(&path);
+                        }
+                    }
+                }
+            }
+            window.request_redraw();
+            return;
+        }
         // notification toasts float over everything below the modals
         if let Some(t) = self
             .note_toast_hits
@@ -11076,10 +11440,24 @@ impl App {
             .find(|t| inside(&t.rect))
             .copied()
         {
-            if inside(&t.close) {
-                self.note_toasts.retain(|(id, _)| *id != t.id);
-            } else {
-                self.show_attention(t.id);
+            let note = self
+                .app_notes
+                .iter()
+                .find(|n| n.id == t.id)
+                .map(|n| n.action);
+            self.note_toasts.retain(|(id, _)| *id != t.id);
+            self.app_notes.retain(|n| n.id != t.id);
+            if !inside(&t.close) {
+                match note {
+                    Some(AppNoteAction::Update) => {
+                        self.handle_action(AppAction::UpdateRift, event_loop);
+                    }
+                    Some(AppNoteAction::WhatsNew) => {
+                        self.handle_action(AppAction::WhatsNew, event_loop);
+                    }
+                    Some(AppNoteAction::None) => {}
+                    None => self.show_attention(t.id),
+                }
             }
             window.request_redraw();
             return;
@@ -11453,7 +11831,7 @@ impl App {
                         if self.copy_to_clipboard(text) {
                             // the button turns into a check for a moment
                             self.copied = Some((*pane, *id, Instant::now()));
-                            self.toast("Copied output".into());
+                            self.toast_done("Copied output".into());
                         }
                     }
                     None => self.toast("Nothing to copy: this command printed no output".into()),
@@ -11487,7 +11865,7 @@ impl App {
             Some(ClickTarget::JumpToBlock(pane, id)) => {
                 self.jump_to_block(*pane, *id);
             }
-            Some(ClickTarget::SettingsNoop) => {}
+            Some(ClickTarget::SettingsNoop | ClickTarget::RemoteHistoryList) => {}
             Some(ClickTarget::SettingsNav(i)) => {
                 use crate::views::settings::Page;
                 let page = Page::ALL.get(*i as usize).copied().unwrap_or(Page::General);
@@ -11530,7 +11908,7 @@ impl App {
                 if let Some(url) = self.settings.remote.pairing.as_ref().map(|p| p.url.clone())
                     && self.copy_to_clipboard(url)
                 {
-                    self.toast("Copied pairing link".into());
+                    self.toast_done("Copied pairing link".into());
                 }
             }
             Some(ClickTarget::RemoteRelay) => {
@@ -11545,7 +11923,7 @@ impl App {
                 if let Some(dir) = crate::remote::registry_dir()
                     && let Err(e) = rift_remote::registry::request_relay_retry(&dir)
                 {
-                    self.toast(format!("Could not ask the gateway to retry: {e}"));
+                    self.toast_error(format!("Could not ask the gateway to retry: {e}"));
                 } else {
                     // under the 1 s poll, so the next poll ends it
                     self.remote.retry_shown_until =
@@ -11606,7 +11984,7 @@ impl App {
             }
             Some(ClickTarget::SettingsCopyVersion) => {
                 if self.copy_to_clipboard(format!("v{}", env!("CARGO_PKG_VERSION"))) {
-                    self.toast("Copied version".into());
+                    self.toast_done("Copied version".into());
                 }
             }
             Some(ClickTarget::SettingsOpenConfig) => {
@@ -11779,10 +12157,9 @@ impl App {
                         // a custom path is typed in config.toml; keep one already set
                         _ => {
                             if matches!(c.working_directory.trim(), "" | "previous" | "home") {
-                                self.toast = Some((
+                                self.toast(
                                     "Set working_directory = \"/path\" in config.toml".into(),
-                                    Instant::now(),
-                                ));
+                                );
                             }
                         }
                     },
@@ -11820,7 +12197,7 @@ impl App {
                 self.config.keybindings.remove(action);
                 self.save_config();
                 self.apply_config();
-                self.toast(format!("{action} restored to its default shortcut"));
+                self.toast_done(format!("{action} restored to its default shortcut"));
             }
             Some(ClickTarget::SettingsTheme(i)) => {
                 let names = rift_core::theme::available_themes();
@@ -11972,7 +12349,16 @@ impl App {
             return;
         }
         if self.settings.open {
-            self.settings.scroll_by(lines as f32);
+            // over Recent connections the list scrolls a row at a time; at
+            // its ends the page takes over
+            let (mx, my) = self.mouse;
+            let over_list = self
+                .hits
+                .iter()
+                .any(|h| h.target == ClickTarget::RemoteHistoryList && h.contains(mx, my));
+            if !(over_list && self.settings.scroll_history(lines.signum() as isize)) {
+                self.settings.scroll_by(lines as f32);
+            }
             window.request_redraw();
             return;
         }
@@ -13884,6 +14270,8 @@ impl App {
                         // read-only rows (Shell path); unnamed Noop hits
                         // (the page body) find no name below and drop out
                         ClickTarget::SettingsNoop => (Role::Label, None, false),
+                        // the name says which rows show and how to scroll
+                        ClickTarget::RemoteHistoryList => (Role::Label, None, false),
                         ClickTarget::SettingsOption(i) => (
                             Role::ListBoxOption,
                             None,
@@ -14224,6 +14612,60 @@ impl App {
                     false,
                     h.rect,
                 )],
+                focused: false,
+            });
+        }
+        // status toasts: the message, its button and ✕
+        for h in &self.toast_hits {
+            let Some(t) = self.toasts.iter().find(|t| t.id == h.id) else {
+                continue;
+            };
+            let mut controls = Vec::new();
+            if let (Some(r), Some(a)) = (h.action, t.action) {
+                controls.push(control(a.label().into(), Role::Button, false, r));
+            }
+            if let Some(r) = h.close {
+                controls.push(control(
+                    format!("Dismiss: {}", t.text),
+                    Role::Button,
+                    false,
+                    r,
+                ));
+            }
+            out.push(PanelNode {
+                label: match t.kind {
+                    crate::views::confirm::ToastKind::Error => "Error".into(),
+                    _ => "Status".into(),
+                },
+                rect: Some(h.rect),
+                text: Some(t.text.clone()),
+                controls,
+                focused: false,
+            });
+        }
+        // notification cards (inbox entries, Rift's own notices): the card
+        // acts on a click, ✕ dismisses
+        for h in &self.note_toast_hits {
+            let title = self
+                .app_notes
+                .iter()
+                .find(|n| n.id == h.id)
+                .map(|n| n.title.clone())
+                .or_else(|| {
+                    self.attention
+                        .iter()
+                        .find(|a| a.id == h.id)
+                        .map(|a| a.title.clone())
+                })
+                .unwrap_or_default();
+            out.push(PanelNode {
+                label: "Notification".into(),
+                rect: Some(h.rect),
+                text: None,
+                controls: vec![
+                    control(title.clone(), Role::Button, false, h.rect),
+                    control(format!("Dismiss: {title}"), Role::Button, false, h.close),
+                ],
                 focused: false,
             });
         }
@@ -14643,6 +15085,30 @@ impl App {
             self.update.busy,
             env!("CARGO_PKG_VERSION"),
         );
+        // status toasts, newest first: kind, pane, action, text; then where
+        // each was drawn (chip, button, ✕)
+        let _ = writeln!(
+            out,
+            "toasts={:?} toast_hits={:?}",
+            self.toasts
+                .iter()
+                .map(|t| (t.kind, t.pane, t.action, t.text.clone()))
+                .collect::<Vec<_>>(),
+            self.toast_hits
+                .iter()
+                .map(|h| (h.rect, h.action, h.close))
+                .collect::<Vec<_>>(),
+        );
+        let _ = writeln!(
+            out,
+            "update_ready={:?} update_fetching={:?} app_notes={:?}",
+            self.update.ready,
+            self.update.fetching,
+            self.app_notes
+                .iter()
+                .map(|n| format!("{} · {}", n.title, n.detail))
+                .collect::<Vec<_>>(),
+        );
         let _ = writeln!(
             out,
             "confirm={:?} rename={:?} filter_editing={} toast={:?} shell_env={}",
@@ -14651,7 +15117,7 @@ impl App {
                 .map(|c| (&c.action, c.commands.clone())),
             self.rename,
             self.filter_editing,
-            self.toast.as_ref().map(|(m, _)| m.clone()),
+            self.toasts.first().map(|t| t.text.clone()),
             self.shell_env.is_some()
         );
         for a in &self.attention {
@@ -14899,7 +15365,7 @@ impl App {
                     return Response::error("busy");
                 }
                 self.remote_submit(pane, &cmd);
-                self.toast(crate::remote::ran_toast(device, &cmd));
+                self.toast_phone(Some(pane), crate::remote::ran_toast(device, &cmd));
             }
             (None, Some(names), None) => {
                 if names.is_empty() || names.len() > rift_remote::MAX_KEYS {
@@ -14928,7 +15394,7 @@ impl App {
                 for key in &keys {
                     self.remote_key(pane, *key);
                 }
-                self.toast(crate::remote::sent_toast(device, &keys));
+                self.toast_phone(Some(pane), crate::remote::sent_toast(device, &keys));
             }
             (None, None, Some(text)) => {
                 // the gateway checked it too: printable, one line, ≤ 1 KiB
@@ -14947,7 +15413,7 @@ impl App {
                     return Response::error("busy");
                 }
                 self.remote_text(pane, &text);
-                self.toast(crate::remote::typed_toast(device));
+                self.toast_phone(Some(pane), crate::remote::typed_toast(device));
             }
             _ => return Response::error("bad request: send one of a command, keys or text"),
         }
@@ -14995,7 +15461,7 @@ impl App {
                 id
             }
         };
-        self.toast(crate::remote::opened_toast(device, kind));
+        self.toast_phone(Some(id), crate::remote::opened_toast(device, kind));
         Response {
             ok: true,
             pane: Some(id),
@@ -15033,7 +15499,7 @@ impl App {
         if last {
             self.spawn_tab();
         }
-        self.toast(crate::remote::closed_toast(device, kind));
+        self.toast_phone(None, crate::remote::closed_toast(device, kind));
         self.perform_close(scope, event_loop);
         Response {
             ok: true,
@@ -15404,7 +15870,7 @@ impl App {
             }
             Err(e) => {
                 view.pairing = None;
-                self.toast(format!("Could not start pairing: {e}"));
+                self.toast_error(format!("Could not start pairing: {e}"));
             }
         }
         if let Some(w) = &self.window {
@@ -15419,9 +15885,9 @@ impl App {
             return;
         };
         match rift_remote::registry::revoke(&dir, id) {
-            Ok(true) => self.toast(format!("Revoked {name}")),
+            Ok(true) => self.toast_done(format!("Revoked {name}")),
             Ok(false) => self.toast(format!("{name} was already removed")),
-            Err(e) => self.toast(format!("Could not revoke {name}: {e}")),
+            Err(e) => self.toast_error(format!("Could not revoke {name}: {e}")),
         }
         self.poll_remote(true);
     }
@@ -15439,10 +15905,10 @@ impl App {
             Permission::Operate
         };
         match registry::set_permission(&dir, id, p) {
-            Ok(true) if view => self.toast(format!("{name} can now only watch")),
-            Ok(true) => self.toast(format!("{name} can now run commands")),
+            Ok(true) if view => self.toast_done(format!("{name} can now only watch")),
+            Ok(true) => self.toast_done(format!("{name} can now run commands")),
             Ok(false) => self.toast(format!("{name} was removed")),
-            Err(e) => self.toast(format!("Could not change {name}: {e}")),
+            Err(e) => self.toast_error(format!("Could not change {name}: {e}")),
         }
         self.poll_remote(true);
     }
@@ -15458,7 +15924,7 @@ impl App {
         if !text.is_empty()
             && let Err(e) = rift_remote::relay::RelayUrl::parse(&text)
         {
-            self.toast(format!("Relay not saved: {e}"));
+            self.toast_error(format!("Relay not saved: {e}"));
             return false;
         }
         if text != self.config.remote_relay {
@@ -15485,7 +15951,7 @@ impl App {
                 let text = draft.trim().to_string();
                 match rift_remote::relay::RelayUrl::parse(&text) {
                     Err(e) if !text.is_empty() => {
-                        self.toast(format!("Relay: {e}"));
+                        self.toast_error(format!("Relay: {e}"));
                     }
                     _ => {
                         self.commit_relay_edit();
@@ -15651,7 +16117,9 @@ impl App {
     fn update_chip(&self) -> Option<String> {
         match &self.update.status {
             rift_core::update::Status::Available(m)
-                if !self.update.busy && self.update.dismissed.as_deref() != Some(&m.version) =>
+                if !self.update.busy
+                    && self.update.ready.as_deref() == Some(&m.version)
+                    && self.update.dismissed.as_deref() != Some(&m.version) =>
             {
                 Some(m.version.clone())
             }
@@ -15667,6 +16135,10 @@ impl App {
             Status::Idle => UpdateLine::None,
             Status::Checking => UpdateLine::Checking,
             Status::UpToDate => UpdateLine::UpToDate,
+            Status::Available(m) if self.update.busy => UpdateLine::Updating(m.version.clone()),
+            Status::Available(m) if self.update.ready.as_deref() != Some(&m.version) => {
+                UpdateLine::Downloading(m.version.clone())
+            }
             Status::Available(m) => UpdateLine::Available(m.version.clone()),
             Status::Failed(_) => UpdateLine::Failed,
         };
@@ -15770,8 +16242,8 @@ impl App {
         }
     }
 
-    /// "Check for updates" (palette, About): one check now; its answer
-    /// toasts.
+    /// "Check for updates" (palette, About): one check now; its answer is
+    /// a notice (an update once it is downloaded).
     fn check_for_updates_now(&mut self) {
         use rift_core::update;
         if !self.update_checks_allowed() {
@@ -15812,33 +16284,52 @@ impl App {
                 let status = update::evaluate(m, current);
                 if manual {
                     match &status {
-                        Status::Available(m) => {
-                            // asked for: the chip comes back even if dismissed
+                        Status::Available(_) => {
+                            // asked for: the chip and the notice come back
+                            // even if dismissed
                             self.update.dismissed = None;
+                            self.update.notified = None;
                             update::update_cache(|c| c.dismissed = None);
-                            self.toast(format!("Rift v{} is available", m.version));
                         }
-                        _ => self.toast(format!("Rift v{current} is up to date")),
+                        _ => {
+                            self.app_note(
+                                "Rift is up to date".into(),
+                                format!("v{current} is the newest version"),
+                                AppNoteAction::None,
+                                false,
+                            );
+                        }
                     }
                 }
+                // this is the newest: a download left from before (updated
+                // another way) is not needed
+                if matches!(status, Status::UpToDate)
+                    && let Some(dir) = update::updates_dir()
+                {
+                    update::drop_ready(&dir);
+                }
                 self.update.status = status;
+                self.prefetch_update();
             }
             Err(e) => {
                 log::info!("update check: {e}");
                 if manual {
                     // curl's own wording stays in the log
-                    self.toast(
-                        if e.starts_with("malformed manifest")
-                            || e == update::SIG_MISSING
-                            || e == update::SIG_INVALID
-                        {
-                            "Couldn't check for updates: the release information is invalid".into()
-                        } else if e == "curl is not installed" {
-                            "Couldn't check for updates: curl is not installed".into()
-                        } else {
-                            "Couldn't check for updates. Check your connection and try again."
-                                .into()
-                        },
+                    let why = if e.starts_with("malformed manifest")
+                        || e == update::SIG_MISSING
+                        || e == update::SIG_INVALID
+                    {
+                        "The release information is invalid"
+                    } else if e == "curl is not installed" {
+                        "curl is not installed"
+                    } else {
+                        "Check your connection and try again"
+                    };
+                    self.app_note(
+                        "Couldn't check for updates".into(),
+                        why.into(),
+                        AppNoteAction::None,
+                        false,
                     );
                 }
                 // a known update stays offered through a failed recheck
@@ -15850,11 +16341,103 @@ impl App {
         self.sync_update_view();
     }
 
+    /// An available update is downloaded before it is offered: start that
+    /// download (once per version) unless it is here already. A copy that
+    /// cannot update itself has nothing to download: offered at once.
+    fn prefetch_update(&mut self) {
+        use rift_core::update::{self, InstallTarget, Status};
+        let Status::Available(m) = &self.update.status else {
+            return;
+        };
+        let version = m.version.clone();
+        if self.update.ready.as_deref() == Some(&version) {
+            // here already: a check asked for shows its notice again
+            return self.notify_update_ready();
+        }
+        if self.update.busy || self.update.fetching.as_deref() == Some(&version) {
+            return;
+        }
+        let asset = update::asset_for(m, &update::platform_key()).cloned();
+        let target = update::install_target();
+        let (Some(asset), Some(dir), false) = (
+            asset,
+            update::updates_dir(),
+            matches!(target, InstallTarget::Unsupported(_)),
+        ) else {
+            return self.on_update_downloaded(version, Ok(false));
+        };
+        self.update.fetching = Some(version.clone());
+        let proxy = self.proxy.clone();
+        let started = std::thread::Builder::new()
+            .name("update-prefetch".into())
+            .spawn(move || {
+                let result = update::prefetch(&dir, &asset).map(|_| true);
+                let _ = proxy.send_event(UserEvent::UpdateDownloaded(version, result));
+            });
+        if started.is_err() {
+            let version = self.update.fetching.take().unwrap_or_default();
+            self.on_update_downloaded(version, Err("could not start the download".into()));
+        }
+    }
+
+    /// The update is here (or could not be fetched ahead: the install
+    /// downloads it then): offer it — the chip, About's button and, once
+    /// per version, a notice.
+    fn on_update_downloaded(&mut self, version: String, result: Result<bool, String>) {
+        if self.update.fetching.as_deref() == Some(&version) {
+            self.update.fetching = None;
+        }
+        if let Err(e) = &result {
+            log::info!("update: downloading v{version} ahead: {e}");
+        }
+        let current = matches!(
+            &self.update.status,
+            rift_core::update::Status::Available(m) if m.version == version
+        );
+        if !current {
+            return;
+        }
+        self.update.ready = Some(version);
+        self.update.ready_detail = match result {
+            Ok(true) => "Downloaded · click to restart into it",
+            // the dialog says how (the release page)
+            Ok(false) => "Click to see how to update",
+            Err(_) => "Click to update",
+        };
+        self.notify_update_ready();
+        self.sync_update_view();
+    }
+
+    /// The "ready" notice for the ready version, once per version (a check
+    /// asked for clears `notified`), unless it was dismissed or installs.
+    fn notify_update_ready(&mut self) {
+        let Some(version) = self.update.ready.clone() else {
+            return;
+        };
+        let dismissed = self.update.dismissed.as_deref() == Some(&version);
+        if self.update.busy || dismissed || self.update.notified.as_deref() == Some(&version) {
+            return;
+        }
+        self.update.notified = Some(version.clone());
+        self.drop_app_notes(AppNoteAction::Update);
+        self.app_note(
+            format!("Rift v{version} is ready"),
+            self.update.ready_detail.into(),
+            AppNoteAction::Update,
+            true,
+        );
+    }
+
     /// Chip, About's button, `update_rift`: the dialog for an available
     /// update (after finding the other windows), else a check.
     fn update_rift(&mut self) {
         if self.update.busy {
-            self.toast("Rift is already updating".into());
+            self.app_note(
+                "Rift is already updating".into(),
+                String::new(),
+                AppNoteAction::None,
+                false,
+            );
             return;
         }
         if !matches!(self.update.status, rift_core::update::Status::Available(_)) {
@@ -16013,26 +16596,43 @@ impl App {
             self.open_target_external(&url);
             return;
         }
+        let failed = |app: &mut Self, why: String| {
+            app.app_note("Update failed".into(), why, AppNoteAction::None, false);
+        };
         let Some(dir) = update::updates_dir() else {
-            self.toast("Update failed: no data directory".into());
-            return;
+            return failed(self, "no data directory".into());
         };
         match update::try_lock(&dir) {
             Ok(lock) => self.update.lock = Some(lock),
             Err(update::LockError::Held(pid)) => {
                 log::info!("update: install lock held by {pid}");
-                self.toast("Another window is updating Rift".into());
+                self.app_note(
+                    "Another window is updating Rift".into(),
+                    String::new(),
+                    AppNoteAction::None,
+                    false,
+                );
                 return;
             }
-            Err(update::LockError::Io(e)) => {
-                self.toast(format!("Update failed: {e}"));
-                return;
-            }
+            Err(update::LockError::Io(e)) => return failed(self, e),
         }
         self.update.busy = true;
         self.update.quit_after = false;
+        self.drop_app_notes(AppNoteAction::Update);
         let version = plan.manifest.version.clone();
-        self.toast(format!("Downloading Rift v{version}…"));
+        let ready = update::asset_for(&plan.manifest, &update::platform_key())
+            .and_then(|a| update::ready_for(&dir, a));
+        if ready.is_none() {
+            // not fetched ahead (it failed, or is still under way): the
+            // install downloads it now
+            self.app_note(
+                format!("Downloading Rift v{version}…"),
+                "Rift restarts when it is installed".into(),
+                AppNoteAction::None,
+                false,
+            );
+        }
+        self.sync_update_view();
         let proxy = self.proxy.clone();
         let spawned = std::thread::Builder::new()
             .name("update-install".into())
@@ -16042,9 +16642,17 @@ impl App {
                         .ok_or("this release has no download for this computer")?;
                     // what an interrupted install left (the lock is held)
                     update::sweep(&dir, &plan.target);
-                    // a fixed name: nothing from the manifest reaches a path
+                    // downloaded ahead (verified again here) and moved to
+                    // the download's own name, so what an interrupted
+                    // install leaves (its mount point) is swept like any;
+                    // else downloaded now. A fixed name: nothing from the
+                    // manifest reaches a path
                     let file = update::download_path(&dir, asset);
-                    update::download(asset, &file)?;
+                    let taken = update::ready_for(&dir, asset)
+                        .is_some_and(|ready| std::fs::rename(ready, &file).is_ok());
+                    if !taken {
+                        update::download(asset, &file)?;
+                    }
                     let installed = update::install(
                         &plan.target,
                         &file,
@@ -16059,7 +16667,8 @@ impl App {
         if spawned.is_err() {
             self.update.busy = false;
             self.update.lock = None;
-            self.toast("Could not start the update".into());
+            failed(self, "could not start the update".into());
+            self.sync_update_view();
         }
     }
 
@@ -16068,7 +16677,12 @@ impl App {
     fn abort_update(&mut self, message: String, event_loop: &ActiveEventLoop) {
         self.update.busy = false;
         self.update.lock = None;
-        self.toast(message);
+        // "Update failed: why" reads as a title and its detail
+        let (title, detail) = match message.split_once(": ") {
+            Some(("Update failed", why)) => ("Update failed".to_string(), why.to_string()),
+            _ => (message, String::new()),
+        };
+        self.app_note(title, detail, AppNoteAction::None, true);
         self.sync_update_view();
         if std::mem::take(&mut self.update.quit_after) {
             self.perform_close(CloseScope::Window, event_loop);
@@ -16147,7 +16761,6 @@ impl App {
             return self.abort_update(message, event_loop);
         }
         // 4. the other windows; then this one quits (UpdateReady)
-        self.toast(format!("Restarting into Rift v{to}…"));
         let proxy = self.proxy.clone();
         let token = pending.token.clone();
         let asked = std::thread::Builder::new()
@@ -16320,7 +16933,12 @@ impl App {
                     );
                 }
                 let _ = std::fs::remove_file(&marker);
-                self.toast(format!("Updated to Rift v{current}"));
+                self.app_note(
+                    format!("Updated to Rift v{current}"),
+                    "See what's new".into(),
+                    AppNoteAction::WhatsNew,
+                    false,
+                );
                 // started by a background helper: come to the front
                 if let Some(w) = self.shown_window() {
                     w.focus_window();
@@ -16331,10 +16949,12 @@ impl App {
                 log::warn!("update marker for v{} on v{current}: cleared", p.to);
                 let _ = std::fs::remove_file(&marker);
                 if launch.relaunched {
-                    self.toast(format!(
-                        "Couldn't update to Rift v{}; still on v{current}",
-                        p.to
-                    ));
+                    self.app_note(
+                        format!("Couldn't update to Rift v{}", p.to),
+                        format!("Still on v{current}"),
+                        AppNoteAction::None,
+                        true,
+                    );
                 }
             } else {
                 // another window's update is in flight
@@ -16346,10 +16966,12 @@ impl App {
             && let Some(p) = update::read_pending(&failed)
         {
             let _ = std::fs::remove_file(&failed);
-            self.toast(format!(
-                "Couldn't update to Rift v{}; still on v{current}",
-                p.to
-            ));
+            self.app_note(
+                format!("Couldn't update to Rift v{}", p.to),
+                format!("Still on v{current}"),
+                AppNoteAction::None,
+                true,
+            );
         }
         if let Some(file) = &launch.restore {
             // validated in take_env: a restart file
@@ -16903,6 +17525,9 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::UpdateChecked(result, manual) => self.on_update_checked(result, manual),
             UserEvent::UpdateSurvey(survey) => self.open_update_dialog(survey),
+            UserEvent::UpdateDownloaded(version, result) => {
+                self.on_update_downloaded(version, result)
+            }
             UserEvent::UpdateInstalled(result, windows) => {
                 self.on_update_installed(result, windows, event_loop)
             }
@@ -17127,14 +17752,33 @@ impl ApplicationHandler<UserEvent> for App {
                 deadlines.push(until);
             }
         }
-        // status toast
-        if let Some((_, at)) = &self.toast {
-            let until = *at + TOAST_TTL;
-            if now >= until {
-                self.toast = None;
-                repaint = true;
-            } else {
-                deadlines.push(until);
+        // status toasts; the one under the pointer stays
+        let (mx, my) = self.mouse;
+        let hovered: Vec<u64> = self
+            .toast_hits
+            .iter()
+            .filter(|h| {
+                mx >= h.rect[0]
+                    && mx < h.rect[0] + h.rect[2]
+                    && my >= h.rect[1]
+                    && my < h.rect[1] + h.rect[3]
+            })
+            .map(|h| h.id)
+            .collect();
+        let before = self.toasts.len();
+        for t in &mut self.toasts {
+            if hovered.contains(&t.id) {
+                t.at = now;
+            }
+        }
+        self.toasts
+            .retain(|t| t.ttl().is_none_or(|ttl| now < t.at + ttl));
+        if self.toasts.len() != before {
+            repaint = true;
+        }
+        for t in &self.toasts {
+            if let Some(ttl) = t.ttl() {
+                deadlines.push(t.at + ttl);
             }
         }
         // a dragged pane held still over a tab opens it after TAB_HOVER_OPEN

@@ -264,6 +264,13 @@ No other animation. Motion never delays input.
   and the meta line (agent, `⎇ branch`, age) 12, titles `text_bright`
   semibold 13 on 18 px lines, details `text_dim` 12.5. Unread is a 6 px
   `accent` dot.
+- **Toasts** (status): 30 px pills (radius 15, `surface`, 12 % hairline;
+  a failure's edge `error` at 45 %, 10 px soft shadow) right-aligned in the
+  pane's command-line chip row, 14 px from its right edge, stacking up 6 px
+  apart. An 18 px disc of the kind's color at 14 % holds its 11 px icon
+  (`success` check, `error` `!`, `accent` info or phone), then the text
+  (Inter 12.5, `text_ui`, elided), an `accent` medium button, and ✕
+  (`text_muted`) on a failure.
 - **Notification toasts**: 360 px `surface` cards (radius 8) under the
   inbox button, 8 px apart, no stripe (the badge's kind dot carries the
   kind); badge and text centred on the card's height, title semibold 13
@@ -272,8 +279,9 @@ No other animation. Motion never delays input.
   dot with a 12 px halo at 25 %.
 - **Split panes** (Warp style): flush, square-cornered panes divided by a
   1 px `pane_border_inactive` line; the focused pane's title bar carries a
-  2 px `accent` top edge, the others recede under 14 % black
-  (`INACTIVE_DIM`). Each title bar is the pane ground shaded 8 % black: a
+  2 px `accent` top edge; the others wash lighter under 10 % white
+  (`INACTIVE_LIFT`, as Warp's inactive panes; 5 % black on a light theme),
+  so the focused pane is the dark one. Each title bar is the pane ground shaded 8 % black: a
   terminal icon (`accent` when focused), the title centered in Inter 12
   (`text_bright` when focused, `text_dim` otherwise), and split, ⋮ and × at
   the right while the pane is focused or hovered. While a pane is dragged by

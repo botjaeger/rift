@@ -9,8 +9,9 @@ use crate::views::icons::{self, Icon};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Page {
-    General,
+    /// Where Settings opens (and opens again once closed).
     #[default]
+    General,
     Appearance,
     Features,
     Terminal,
@@ -114,8 +115,13 @@ pub enum UpdateLine {
     None,
     Checking,
     UpToDate,
-    /// That version is available: an "Update…" button follows.
+    /// That version is downloading ahead of the install.
+    Downloading(String),
+    /// That version is downloaded (or this copy cannot download it): an
+    /// "Update…" button follows.
     Available(String),
+    /// That version is being installed.
+    Updating(String),
     Failed,
 }
 
@@ -134,13 +140,23 @@ pub enum GatewayLine {
 }
 
 impl UpdateLine {
+    /// Checking, downloading or installing: no check to start.
+    pub fn busy(&self) -> bool {
+        matches!(
+            self,
+            UpdateLine::Checking | UpdateLine::Downloading(_) | UpdateLine::Updating(_)
+        )
+    }
+
     /// The state as words (`None`: never checked).
     pub fn text(&self) -> Option<String> {
         match self {
             UpdateLine::None => None,
             UpdateLine::Checking => Some("Checking for updates…".into()),
             UpdateLine::UpToDate => Some("Up to date".into()),
+            UpdateLine::Downloading(v) => Some(format!("Downloading v{v}…")),
             UpdateLine::Available(v) => Some(format!("v{v} available")),
+            UpdateLine::Updating(v) => Some(format!("Installing v{v}…")),
             UpdateLine::Failed => Some("Couldn't check for updates".into()),
         }
     }
@@ -324,8 +340,10 @@ pub struct RemoteView {
     pub history: Vec<HistoryRow>,
 }
 
-/// Rows Recent connections shows.
+/// Rows Recent connections keeps.
 pub const HISTORY_ROWS: usize = 20;
+/// Rows Recent connections shows at once; the wheel scrolls through the rest.
+pub const HISTORY_SHOWN: usize = 5;
 
 /// Modules of light quiet zone around the drawn QR code.
 pub const QR_QUIET: usize = 4;
@@ -366,6 +384,8 @@ pub struct SettingsState {
     pub update: UpdateLine,
     /// Remote access's gateway, devices and pairing (set by the app).
     pub remote: RemoteView,
+    /// Recent connections: the first row shown (whole rows, so none is cut).
+    pub history_top: usize,
     /// When config.toml was last written or reloaded: "Open config.toml"
     /// shows a check for `SAVED_SHOWN` after it.
     pub saved_at: Option<std::time::Instant>,
@@ -395,10 +415,15 @@ impl SettingsState {
         self.tab = true;
     }
 
-    /// Remove the Settings tab.
+    /// Remove the Settings tab. Opened again, it starts on General (only
+    /// leaving it for another tab keeps its page).
     pub fn close_tab(&mut self) {
         self.open = false;
         self.tab = false;
+        self.page = Page::General;
+        self.scroll = 0.0;
+        self.query.clear();
+        self.history_top = 0;
         self.focus = None;
         self.dropdown = None;
         self.recording = None;
@@ -418,6 +443,16 @@ impl SettingsState {
     /// Wheel scroll; `lines` > 0 scrolls up (toward the top).
     pub fn scroll_by(&mut self, lines: f32) {
         self.scroll = (self.scroll - lines * 24.0).clamp(0.0, self.max_scroll());
+    }
+
+    /// Wheel over Recent connections: `rows` > 0 scrolls up (toward the
+    /// newest). False at either end, so the page scrolls on instead.
+    pub fn scroll_history(&mut self, rows: isize) -> bool {
+        let last = self.remote.history.len().saturating_sub(HISTORY_SHOWN);
+        let top = self.history_top.min(last);
+        let next = (top as isize - rows).clamp(0, last as isize) as usize;
+        self.history_top = next;
+        next != top
     }
 
     /// Furthest scroll: the content's end at the body's bottom edge.
@@ -442,6 +477,7 @@ fn focusable(target: &ClickTarget) -> bool {
             | ClickTarget::SettingsEditPrompt
             | ClickTarget::SettingsOpenConfig
             | ClickTarget::SettingsCopyVersion
+            | ClickTarget::RemoteHistoryList
             | ClickTarget::SettingsUpdate
             | ClickTarget::SettingsCheckUpdates
             | ClickTarget::SettingsWhatsNew
@@ -932,7 +968,13 @@ pub fn render(
             Page::Notifications => notifications_page(&mut form, config),
             Page::Keybindings => keybindings_page(&mut form, keymap, config, state, blink_on),
             Page::Themes => themes_page(&mut form, config),
-            Page::Remote => remote_page(&mut form, config, &state.remote, blink_on),
+            Page::Remote => remote_page(
+                &mut form,
+                config,
+                &state.remote,
+                state.history_top,
+                blink_on,
+            ),
             Page::About => about_page(&mut form, top, bottom, &state.update),
         }
     }
@@ -1915,7 +1957,13 @@ fn remote_switch(form: &mut Form, config: &Config) {
 /// Settings › Remote access: the switch and the gateway's state, the relay,
 /// pairing (QR code, link, expiry), the paired devices (Operate / View
 /// only, Revoke) and the recent connections.
-fn remote_page(form: &mut Form, config: &Config, view: &RemoteView, blink_on: bool) {
+fn remote_page(
+    form: &mut Form,
+    config: &Config,
+    view: &RemoteView,
+    history_top: usize,
+    blink_on: bool,
+) {
     remote_switch(form, config);
     let on = config.remote_access;
     if on {
@@ -2087,13 +2135,52 @@ fn remote_page(form: &mut Form, config: &Config, view: &RemoteView, blink_on: bo
             y,
         );
     }
-    for h in &view.history {
+    // at most HISTORY_SHOWN rows at once; more scroll inside the list by
+    // whole rows, with a thumb at its right edge
+    let n = view.history.len();
+    let scrolls = n > HISTORY_SHOWN;
+    let top = history_top.min(n.saturating_sub(HISTORY_SHOWN));
+    let list_y = form.y;
+    for h in view.history.iter().skip(top).take(HISTORY_SHOWN) {
         let y = form.y;
-        form.reserve = 0.0;
+        form.reserve = if scrolls { 16.0 } else { 0.0 };
         form.label_desc(&h.name, &h.detail, y);
         // read-only, but named for assistive tech
         form.push_hit([form.x, y, form.card_w, ROW_H], ClickTarget::SettingsNoop);
         form.name_last(format!("{}, {}", h.name, h.detail));
+    }
+    if scrolls {
+        let list_h = form.y - list_y;
+        let track = [form.right() - 4.0, list_y + 4.0, 3.0, list_h - 8.0];
+        let thumb_h = (track[3] * HISTORY_SHOWN as f32 / n as f32).max(16.0);
+        let room = track[3] - thumb_h;
+        let thumb_y = track[1] + room * top as f32 / (n - HISTORY_SHOWN) as f32;
+        if form.visible(list_y, list_h) {
+            let theme = form.theme;
+            form.layer.rect(
+                [track[0], track[1]],
+                [track[2], track[3]],
+                lift(theme, 0.05),
+                1.5,
+            );
+            form.layer.rect(
+                [track[0], thumb_y],
+                [track[2], thumb_h],
+                lift(theme, 0.22),
+                1.5,
+            );
+        }
+        // after the rows: a click finds a row first, the wheel finds this;
+        // a Tab stop too, where ↑ ↓ scroll it
+        form.push_hit(
+            [form.x, list_y, form.card_w, list_h],
+            ClickTarget::RemoteHistoryList,
+        );
+        form.name_last(format!(
+            "Recent connections, {} to {} of {n}; up and down arrows scroll",
+            top + 1,
+            top + HISTORY_SHOWN
+        ));
     }
 }
 
@@ -2713,7 +2800,7 @@ fn about_page(form: &mut Form, top: f32, bottom: f32, update: &UpdateLine) {
     let theme = form.theme;
 
     let lx = (mid - (LOGO + GAP + word_w) / 2.0).round();
-    super::welcome::logo(form.layer, theme, [lx, y], LOGO);
+    super::welcome::logo(form.layer, [lx, y], LOGO);
     form.layer.text(
         sans(form.engine, "Rift", WORD, Weight::SEMIBOLD),
         lx + LOGO + GAP,
@@ -2765,7 +2852,8 @@ fn about_page(form: &mut Form, top: f32, bottom: f32, update: &UpdateLine) {
         form.engine
             .measure(&status, 13.0, FONT_SANS, Weight::NORMAL)
     };
-    let button = *update != UpdateLine::Checking;
+    // no button while something is under way
+    let button = !update.busy();
     let label = if available { "Update…" } else { "Check now" };
     let bw = if button {
         form.engine.measure(label, 12.5, FONT_SANS, Weight::MEDIUM) + 24.0
@@ -3015,7 +3103,7 @@ fn general_page(form: &mut Form, config: &Config, update: &UpdateLine) {
     form.toggle_desc(
         y,
         "Check for updates",
-        "At launch and every 6 hours; Update Rift appears in the tab bar",
+        "At launch and every 6 hours; the update downloads, then Update Rift appears in the tab bar",
         config.check_for_updates,
         "check_for_updates",
     );
@@ -3029,12 +3117,11 @@ fn general_page(form: &mut Form, config: &Config, update: &UpdateLine) {
     if !form.hidden {
         let by = y + (ROW_H - CONTROL_H) / 2.0;
         let bx = form.right() - bw.round();
-        let checking = *update == UpdateLine::Checking;
         form.button(
             bx,
             by,
             label,
-            if checking {
+            if update.busy() {
                 ButtonKind::Disabled
             } else {
                 ButtonKind::Secondary

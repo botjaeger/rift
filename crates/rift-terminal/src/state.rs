@@ -63,6 +63,9 @@ pub enum ClickTarget {
     JumpToBlock(PaneId, rift_core::BlockId),
     // settings overlay controls
     SettingsNoop,
+    /// Settings › Remote access › Recent connections while it holds more
+    /// rows than it shows: the wheel over it scrolls the list.
+    RemoteHistoryList,
     SettingsNav(u8),
     SettingsClose,
     SettingsToggle(&'static str),

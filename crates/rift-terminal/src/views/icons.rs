@@ -43,6 +43,10 @@ pub enum Icon {
     Launch,
     Info,
     Lock,
+    /// `!` (a failed action).
+    Alert,
+    /// A phone (an action from a paired phone).
+    Phone,
 }
 
 /// Draws `icon` centred on `c` at `size` px (the 16-unit box scaled).
@@ -276,6 +280,14 @@ pub fn draw(layer: &mut Layer, icon: Icon, c: [f32; 2], size: f32, color: Color)
             ring(layer, 8.0, 8.0, 6.0);
             dot(layer, 8.0, 5.2, 1.6);
             poly(layer, &[(8.0, 7.5), (8.0, 11.5)]);
+        }
+        Icon::Alert => {
+            poly(layer, &[(8.0, 3.5), (8.0, 9.0)]);
+            dot(layer, 8.0, 12.2, 1.4);
+        }
+        Icon::Phone => {
+            rect(layer, 4.5, 2.0, 7.0, 12.0, 1.5);
+            poly(layer, &[(7.0, 11.5), (9.0, 11.5)]);
         }
         Icon::Lock => {
             rect(layer, 3.0, 7.0, 10.0, 7.0, 1.5);
