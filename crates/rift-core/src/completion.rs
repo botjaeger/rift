@@ -118,6 +118,28 @@ pub fn escape_word(s: &str) -> Option<String> {
     Some(out)
 }
 
+/// [`escape_word`] for a command-position word. A name shaped like an
+/// assignment (`NAME=…`) would set a shell variable there instead of running
+/// the file, so its first `=` is escaped too (bash, zsh and fish then run
+/// it). Reserved-word names (`time`, `[[`) stay bare on purpose: the shell's
+/// keyword is what someone typing them means.
+pub fn escape_command(s: &str) -> Option<String> {
+    let word = escape_word(s)?;
+    let Some((name, _)) = s.split_once('=') else {
+        return Some(word);
+    };
+    let is_name = name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if !is_name {
+        return Some(word);
+    }
+    // the name part needs no escapes, so its `=` is at the same offset
+    Some(format!("{name}\\{}", &word[name.len()..]))
+}
+
 /// Executable names on `$PATH`, scanned once per process (sorted, deduped).
 /// The interactive shell's `$PATH` reported by its probe
 /// ([`crate::shell_env::ShellEnv`]) wins.
@@ -268,7 +290,7 @@ fn command_completions(cmds: &[String], token: &str) -> Vec<Completion> {
         .iter()
         .take_while(|c| c.starts_with(&typed))
         .filter(|c| **c != typed)
-        .filter_map(|name| escape_word(name))
+        .filter_map(|name| escape_command(name))
         .take(12)
         .map(|insert| Completion {
             insert,
@@ -501,6 +523,49 @@ mod tests {
                 assert_eq!(&unescape_word(&w), name);
             }
         }
+    }
+
+    /// A PATH file named like an assignment completed bare set a shell
+    /// variable instead of running the file.
+    #[test]
+    fn assignment_shaped_command_names_run_the_file() {
+        let cmds: Vec<String> = ["zz-opt=v", "zzplain", "zzriftassign=value"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let all: Vec<String> = command_completions(&cmds, "zz")
+            .into_iter()
+            .map(|c| c.insert)
+            .collect();
+        assert!(all.contains(&"zzriftassign\\=value".to_string()), "{all:?}");
+        // not a variable name: no assignment to fear, left as typed
+        assert!(all.contains(&"zz-opt=v".to_string()), "{all:?}");
+        assert!(all.contains(&"zzplain".to_string()));
+        assert_eq!(escape_command("_A1=x y"), Some("_A1\\=x\\ y".into()));
+        for name in &cmds {
+            assert_eq!(&unescape_word(&escape_command(name).unwrap()), name);
+        }
+
+        // and the shells agree: the insert runs the file, sets no variable
+        let dir = std::env::temp_dir().join(format!("rift-asg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("zzriftassign=value");
+        std::fs::write(&file, "#!/bin/sh\necho RAN\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!("{}:/usr/bin:/bin", dir.display());
+        let line = "zzriftassign\\=value; echo \"var:$zzriftassign\"";
+        for sh in ["bash", "zsh", "fish"] {
+            let Ok(out) = std::process::Command::new(sh)
+                .args(["-c", line])
+                .env("PATH", &path)
+                .output()
+            else {
+                continue; // shell not installed here
+            };
+            assert_eq!(String::from_utf8_lossy(&out.stdout), "RAN\nvar:\n", "{sh}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

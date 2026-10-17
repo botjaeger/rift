@@ -77,6 +77,12 @@ pub enum UserEvent {
     Control(crate::control::Pending),
     /// A program asked for a notification (OSC 9 / 777 / 99).
     PtyNotify(PaneId, String, String),
+    /// A desktop notification was clicked, or its Show / Rerun pressed.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    NotificationResponse(crate::notify::Response),
+    /// The desktop-notification permission was read or answered.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    NotifyPermission,
     /// A pane's connection notice (see `SessionEvent::Notice`).
     PtyNotice(String),
     /// Code review model for request `.0`; `None` outside a repository.
@@ -285,6 +291,8 @@ const TEXT_BLINK: Duration = Duration::from_millis(600);
 const OUTPUT_FRAME: Duration = Duration::from_micros(8333);
 const BLINK_INTERVAL: Duration = Duration::from_millis(550);
 const BELL_FLASH: Duration = Duration::from_millis(120);
+/// The audible bell plays at most once per this gap.
+const BELL_SOUND_GAP: Duration = Duration::from_millis(150);
 /// How long the boot placeholder waits for a prompt after the first output.
 const BOOT_GRACE: Duration = Duration::from_millis(1500);
 /// Padding inside a split pane (design 02).
@@ -475,6 +483,9 @@ pub struct App {
     focus_pane: Option<PaneId>,
     /// Visual bell flash start.
     bell_flash: Option<Instant>,
+    /// Last audible bell: a flood of BELs (`cat` of a binary) plays one sound
+    /// per `BELL_SOUND_GAP`, not one process each.
+    last_beep: Option<Instant>,
     /// Warp-style launch configurations (~/.config/rift/launch_configs).
     launch_configs: Vec<rift_core::launch::LaunchConfig>,
     /// Commands a launch configuration queued for a pane; sent at its first prompt.
@@ -504,6 +515,9 @@ pub struct App {
     /// In-window notification toasts: (attention id, shown since), newest
     /// first; hovering resets the time.
     note_toasts: Vec<(u64, Instant)>,
+    /// Attention entries raised by Settings › Notifications › Try it: their
+    /// sample command is never rerun.
+    test_alerts: std::collections::HashSet<u64>,
     note_toast_hits: Vec<crate::views::notifications::ToastHit>,
     /// Rift's own notices (updates) among `note_toasts`: no pane, no inbox
     /// row; they go when their toast goes.
@@ -1355,6 +1369,7 @@ impl App {
             focused: true,
             focus_pane: None,
             bell_flash: None,
+            last_beep: None,
             launch_configs: Vec::new(),
             pending_commands: std::collections::HashMap::new(),
             confirm: None,
@@ -1372,6 +1387,7 @@ impl App {
             attention: Vec::new(),
             next_attention_id: 0,
             note_toasts: Vec::new(),
+            test_alerts: Default::default(),
             app_notes: Vec::new(),
             note_toast_hits: Vec::new(),
             attention_seen: Default::default(),
@@ -3113,6 +3129,10 @@ impl App {
                     | ClickTarget::SettingsUpdate
                     | ClickTarget::SettingsCheckUpdates
                     | ClickTarget::SettingsWhatsNew
+                    | ClickTarget::SettingsPlaySound(_)
+                    | ClickTarget::SettingsTestAlert(_)
+                    | ClickTarget::SettingsRingBell
+                    | ClickTarget::SettingsNotifyPermission
                     | ClickTarget::UpdateChip
                     | ClickTarget::RemoteChip
                     | ClickTarget::RemotePair
@@ -3742,6 +3762,129 @@ impl App {
         id
     }
 
+    /// What block `block` of `pane` did, for its notification: command,
+    /// exit, duration and last output line.
+    fn command_facts(
+        &self,
+        pane: PaneId,
+        block: rift_core::BlockId,
+    ) -> Option<crate::notify::CommandFacts> {
+        let p = self.tabs.iter().find_map(|t| t.pane(pane))?;
+        let (command, exit, duration) = {
+            let blocks = p.session.blocks.lock().unwrap();
+            let b = blocks.iter().find(|b| b.id == block)?;
+            let (exit, duration) = match b.state {
+                BlockState::Done { exit, duration } => (exit, Some(duration)),
+                _ => (None, None),
+            };
+            (b.command.clone(), exit, duration)
+        };
+        // a failure's reason is usually its last line
+        let last_line = exit.filter(|e| *e != 0).and_then(|_| {
+            let (text, _) = terminal::block_output_tail(&p.session, block)?;
+            let line = text.lines().rev().map(str::trim).find(|l| !l.is_empty())?;
+            Some(line.chars().take(160).collect::<String>())
+        });
+        Some(crate::notify::CommandFacts {
+            command,
+            exit,
+            duration,
+            last_line,
+        })
+    }
+
+    /// The desktop notification for entry `a`: its wording, and the tab,
+    /// folder and branch of its pane.
+    fn desktop_alert(
+        &self,
+        a: &Attention,
+        command: Option<&crate::notify::CommandFacts>,
+    ) -> crate::notify::Alert {
+        let tab = self.tabs.iter().find(|t| t.pane(a.pane).is_some());
+        let tab_title = tab.map(|t| t.display_title()).unwrap_or_default();
+        let cwd = tab
+            .and_then(|t| t.pane(a.pane))
+            .and_then(|p| p.session.cwd.lock().unwrap().clone())
+            .map(|c| editor::shorten_home(&c));
+        let mut alert = crate::notify::compose(&crate::notify::Facts {
+            kind: a.kind,
+            agent: a.agent,
+            title: &a.title,
+            detail: &a.detail,
+            command,
+            tab: &tab_title,
+            cwd: cwd.as_deref(),
+            branch: a.branch.as_deref(),
+        });
+        alert.pane = a.pane;
+        alert.attention = a.id;
+        alert
+    }
+
+    /// Read the desktop-notification permission again (Settings shows it;
+    /// it changes in System Settings while Rift runs).
+    fn refresh_notify_permission(&self) {
+        let proxy = std::sync::Mutex::new(self.proxy.clone());
+        crate::notify::refresh_permission(move || {
+            if let Ok(p) = proxy.lock() {
+                let _ = p.send_event(UserEvent::NotifyPermission);
+            }
+        });
+    }
+
+    /// A click on a desktop notification (or its Show / Rerun): Rift comes
+    /// forward on the pane; Rerun runs the failed command again there.
+    fn on_notification_response(&mut self, r: crate::notify::Response) {
+        if let Some(w) = &self.window {
+            w.set_minimized(false);
+            w.focus_window();
+        }
+        let command = self
+            .attention
+            .iter()
+            .find(|a| a.id == r.attention)
+            .map(|a| a.title.clone());
+        if r.attention != 0 {
+            self.show_attention(r.attention);
+        }
+        if r.rerun
+            && let Some(cmd) = command.filter(|c| !c.trim().is_empty())
+        {
+            // only at the shell's prompt: typed into a running program it
+            // would be that program's input
+            let at_prompt = self
+                .find_tab_of_pane(r.pane)
+                .and_then(|(_, t)| t.pane(r.pane))
+                .is_some_and(|p| {
+                    !p.session
+                        .term
+                        .lock()
+                        .mode()
+                        .contains(rift_pty::alacritty_terminal::term::TermMode::ALT_SCREEN)
+                        && matches!(
+                            p.session.blocks.lock().unwrap().last().map(|b| &b.state),
+                            Some(BlockState::Prompt)
+                        )
+                });
+            if self.test_alerts.contains(&r.attention) {
+                // a Try it sample: its command is made up
+                log::info!("notify: rerun of a test alert (not run): {cmd}");
+                self.toast(format!(
+                    "Rerun works: a real failed command would run again here ({cmd})"
+                ));
+            } else if at_prompt {
+                log::info!("notify: rerun in pane {}: {cmd}", r.pane);
+                self.submit_to(r.pane, &cmd);
+            } else {
+                log::info!("notify: rerun skipped, pane {} is busy", r.pane);
+                self.toast("Not rerun: a command is still running in that pane".into());
+            }
+        }
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
     /// Inbox entry plus, for an `event` whose pane is out of view, the
     /// alerts `[notifications]` allows: a toast while Rift is focused, a
     /// desktop notification otherwise, and the event's sound.
@@ -3768,7 +3911,9 @@ impl App {
                     .truncate(crate::views::notifications::MAX_TOASTS);
             }
         } else {
-            crate::notify::send(&title, &body);
+            let a = a.clone();
+            let facts = a.block.and_then(|b| self.command_facts(a.pane, b));
+            crate::notify::send_alert(&self.desktop_alert(&a, facts.as_ref()));
         }
         if cfg.play_sound
             && let Some(path) = rift_core::notifications::resolve_sound(
@@ -3785,8 +3930,106 @@ impl App {
         }
     }
 
-    /// Settings → Notifications sound pickers: step to the next sound and
-    /// play it (the preview).
+    /// ▷ beside a sound select, or a pick in one: play what it now plays (a
+    /// preview: it ignores *Play notification sounds*). Says so when there is
+    /// nothing to hear.
+    fn play_sound_setting(&mut self, id: &str) {
+        use rift_core::notifications::{Event, resolve_sound, sound_dirs};
+        let n = &self.config.notifications;
+        // the main Sound previews as Finished (the alert it covers most)
+        let (event, setting) = match id {
+            "notifications.sound" => (Event::Finished, n.sound.clone()),
+            "notifications.sound_finished" => {
+                (Event::Finished, n.sound_setting(Event::Finished).into())
+            }
+            "notifications.sound_failed" => (Event::Failed, n.sound_setting(Event::Failed).into()),
+            "notifications.sound_attention" => {
+                (Event::Attention, n.sound_setting(Event::Attention).into())
+            }
+            _ => return,
+        };
+        match resolve_sound(&setting, event, &sound_dirs()) {
+            Some(path) => crate::notify::play(&path),
+            None if setting.trim().eq_ignore_ascii_case("none") => {
+                self.toast("No sound: this one is set to None".into())
+            }
+            None => self.toast_error(format!(
+                "Sound not found: {}",
+                crate::views::settings::sound_label(&setting)
+            )),
+        }
+    }
+
+    /// Settings › Notifications › Try it: a sample alert of `t`'s kind as a
+    /// real one shows (a toast, or the desktop banner), with its sound while
+    /// sounds are on. It goes in the inbox already read.
+    fn test_alert(&mut self, t: crate::state::TestAlert) {
+        use rift_core::notifications::{Event, resolve_sound, sound_dirs};
+        let pane = self.tabs.get(self.active).map_or(0, |tab| tab.active_pane);
+        let (kind, title, detail) = match t.event {
+            Event::Finished => (
+                AttentionKind::Finished,
+                "cargo build --release",
+                "Test · completed in 1m 12s",
+            ),
+            Event::Failed => (AttentionKind::Failed, "npm test", "Test · exit 1 after 8s"),
+            Event::Attention => (
+                AttentionKind::Request,
+                "Test · approve running npm test?",
+                "",
+            ),
+        };
+        let mut a = Attention::new(pane, kind, title.into(), detail.into());
+        a.read = true;
+        let id = self.push_attention(a);
+        self.test_alerts.insert(id);
+        let (title, body) = self
+            .attention
+            .iter()
+            .find(|a| a.id == id)
+            .map(Attention::desktop_text)
+            .unwrap_or_default();
+        log::info!(
+            "test alert {:?} ({}): {title} — {body}",
+            t.event,
+            if t.desktop { "desktop" } else { "toast" }
+        );
+        if t.desktop {
+            // a sample command for the command kinds, as a real one reads
+            let facts = match t.event {
+                Event::Finished => Some(crate::notify::CommandFacts {
+                    command: "cargo build --release".into(),
+                    exit: Some(0),
+                    duration: Some(Duration::from_secs(72)),
+                    last_line: None,
+                }),
+                Event::Failed => Some(crate::notify::CommandFacts {
+                    command: "npm test".into(),
+                    exit: Some(1),
+                    duration: Some(Duration::from_secs(8)),
+                    last_line: Some("Test · 1 failing: checkout › applies the coupon".into()),
+                }),
+                Event::Attention => None,
+            };
+            if let Some(a) = self.attention.iter().find(|a| a.id == id).cloned() {
+                crate::notify::send_alert(&self.desktop_alert(&a, facts.as_ref()));
+            }
+        } else {
+            self.note_toasts.insert(0, (id, Instant::now()));
+            self.note_toasts
+                .truncate(crate::views::notifications::MAX_TOASTS);
+        }
+        let n = &self.config.notifications;
+        if n.play_sound
+            && let Some(path) = resolve_sound(n.sound_setting(t.event), t.event, &sound_dirs())
+        {
+            crate::notify::play(&path);
+        }
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
     /// A Settings select's options as (config value, label), and the
     /// current value.
     fn select_options(&self, id: &str) -> (Vec<(String, String)>, String) {
@@ -3879,52 +4122,21 @@ impl App {
 
     /// Set select `id` to `value`; a sound plays so it can be heard.
     fn set_select(&mut self, id: &str, value: String) {
-        use rift_core::notifications::{Event, resolve_sound, sound_dirs};
         let n = &mut self.config.notifications;
-        let event = match id {
-            "theme" => {
-                self.config.theme = value;
-                None
-            }
-            "theme_light" => {
-                self.config.theme_light = value;
-                None
-            }
-            "font_family" => {
-                self.config.font_family = value;
-                None
-            }
-            "link_editor" => {
-                self.config.link_editor = value;
-                None
-            }
-            "file_editor" => {
-                self.config.file_editor = value;
-                None
-            }
-            "notifications.sound_finished" => {
-                n.sound_finished = value;
-                Some(Event::Finished)
-            }
-            "notifications.sound_failed" => {
-                n.sound_failed = value;
-                Some(Event::Failed)
-            }
-            "notifications.sound_attention" => {
-                n.sound_attention = value;
-                Some(Event::Attention)
-            }
-            "notifications.sound" => {
-                n.sound = value;
-                Some(Event::Finished)
-            }
+        match id {
+            "theme" => self.config.theme = value,
+            "theme_light" => self.config.theme_light = value,
+            "font_family" => self.config.font_family = value,
+            "link_editor" => self.config.link_editor = value,
+            "file_editor" => self.config.file_editor = value,
+            "notifications.sound_finished" => n.sound_finished = value,
+            "notifications.sound_failed" => n.sound_failed = value,
+            "notifications.sound_attention" => n.sound_attention = value,
+            "notifications.sound" => n.sound = value,
             _ => return,
-        };
-        if let Some(event) = event {
-            let setting = self.config.notifications.sound_setting(event).to_string();
-            if let Some(path) = resolve_sound(&setting, event, &sound_dirs()) {
-                crate::notify::play(&path);
-            }
+        }
+        if id.starts_with("notifications.sound") {
+            self.play_sound_setting(id);
         }
         self.save_config();
         self.apply_config();
@@ -4057,8 +4269,11 @@ impl App {
         if changed || !self.note_toasts.is_empty() {
             let attention = &self.attention;
             let notes = &self.app_notes;
+            // a Try it sample is read from the start, yet its toast is the point
+            let tests = &self.test_alerts;
             self.note_toasts.retain(|(id, _)| {
                 notes.iter().any(|n| n.id == *id)
+                    || tests.contains(id)
                     || attention.iter().any(|a| a.id == *id && !a.read)
             });
         }
@@ -5194,8 +5409,16 @@ impl App {
             Ok(s) => s,
             Err(e) if service.is_some() => {
                 log::warn!("session service: {e}");
+                // a service that accepts but stalls: every later pane would
+                // wait out the same deadline, so this run stays local
+                let stalled = e.kind() == std::io::ErrorKind::TimedOut;
+                if stalled {
+                    self.durable_allowed = false;
+                }
                 // a shell that ended while detached: start a fresh one there
-                let retry = if matches!(service, Some(rift_pty::ServiceTarget::Attach(_))) {
+                let retry = if !stalled
+                    && matches!(service, Some(rift_pty::ServiceTarget::Attach(_)))
+                {
                     Session::spawn(opts(Some(rift_pty::ServiceTarget::Spawn), replay.clone())).ok()
                 } else {
                     None
@@ -6478,7 +6701,9 @@ impl App {
         };
         // toasts hide under the open popover and the settings overlay
         let toast_entries: Vec<crate::views::notifications::Entry> =
-            if self.notifications.open || self.settings.open {
+            // over Settings too: an alert raised there (or Try it) would
+            // otherwise run out its time unseen
+            if self.notifications.open {
                 Vec::new()
             } else {
                 let now = std::time::SystemTime::now();
@@ -6769,9 +6994,14 @@ impl App {
         }
 
         // dividers: the 1px gap between flush panes, grabbable a few px
-        // either side (these hits precede the panes' own)
+        // either side (these hits precede the panes' own). Like Warp's, a
+        // translucent line over the panes' own wash: it stays the same step
+        // brighter whatever shows through a translucent window.
         for handle in handles.iter().filter(|_| !settings_open) {
             let [hx, hy, hw, hh] = handle.rect;
+            scene
+                .layer(0)
+                .rect([hx, hy], [hw, hh], inactive_dim(&theme), 0.0);
             scene
                 .layer(0)
                 .rect([hx, hy], [hw, hh], theme.pane_border_inactive, 0.0);
@@ -7447,10 +7677,11 @@ impl App {
             }
         }
 
-        // visual bell: brief full-window flash
+        // visual bell: brief full-window flash, over Settings and dialogs
+        // too (on layer 2 the Settings page hid all but the tab bar)
         if bell_flash {
             scene
-                .layer(2)
+                .layer(6)
                 .rect([0.0, 0.0], [w, h], theme.fg.with_alpha(0.10), 0.0);
         }
 
@@ -8051,6 +8282,7 @@ impl App {
             ),
             ClickTarget::TabNew => ("New tab".into(), self.tip_keys("new_tab")),
             ClickTarget::SettingsEditPrompt => ("Edit prompt".into(), None),
+            ClickTarget::SettingsPlaySound(_) => ("Play this sound".into(), None),
             ClickTarget::ToggleExplorer => {
                 ("File explorer".into(), self.tip_keys("toggle_explorer"))
             }
@@ -9623,8 +9855,7 @@ impl App {
                 let cwd = pane.session.cwd.lock().unwrap().clone();
                 let branch = pane.git.as_ref().map(|g| g.branch.clone());
                 stamp_submit(&pane.session, cwd, branch, &cmd);
-                pane.session.write(cmd.as_bytes());
-                pane.session.write(b"\n");
+                pane.session.write(format!("{cmd}\n").as_bytes());
                 submitted = Some((pane.session.id, cmd));
                 edited = false;
             }
@@ -10514,8 +10745,7 @@ impl App {
         let cwd = pane.session.cwd.lock().unwrap().clone();
         let branch = pane.git.as_ref().map(|g| g.branch.clone());
         stamp_submit(&pane.session, cwd, branch, cmd);
-        pane.session.write(cmd.as_bytes());
-        pane.session.write(b"\n");
+        pane.session.write(format!("{cmd}\n").as_bytes());
     }
 }
 
@@ -11891,6 +12121,24 @@ impl App {
             Some(ClickTarget::SettingsWhatsNew) => {
                 self.handle_action(AppAction::WhatsNew, event_loop)
             }
+            Some(ClickTarget::SettingsPlaySound(id)) => self.play_sound_setting(id),
+            Some(ClickTarget::SettingsTestAlert(t)) => self.test_alert(*t),
+            Some(ClickTarget::SettingsNotifyPermission) => {
+                if crate::notify::permission() == crate::notify::Permission::NotAsked {
+                    let proxy = std::sync::Mutex::new(self.proxy.clone());
+                    crate::notify::request_permission(move || {
+                        if let Ok(p) = proxy.lock() {
+                            let _ = p.send_event(UserEvent::NotifyPermission);
+                        }
+                    });
+                } else {
+                    crate::notify::open_system_settings();
+                }
+            }
+            Some(ClickTarget::SettingsRingBell) => {
+                log::info!("bell: rung from Settings ({:?})", self.config.bell);
+                self.ring_bell();
+            }
             Some(ClickTarget::RemotePair) => {
                 self.settings.remote.pairing = None;
                 self.poll_remote(true);
@@ -12901,7 +13149,6 @@ impl App {
 
     /// Terminal bell (BEL): visual flash, audible sound, tab activity.
     fn on_bell(&mut self, pane: PaneId) {
-        use rift_core::Bell;
         if !self.pane_in_view(pane) {
             // coalesce repeated bells from the same pane
             let recent = self.attention.last().is_some_and(|a| {
@@ -12926,18 +13173,28 @@ impl App {
                 );
             }
         }
-        let bell = self.config.bell;
-        if matches!(bell, Bell::Visual | Bell::Both) {
-            self.bell_flash = Some(Instant::now());
-        }
-        if matches!(bell, Bell::Audible | Bell::Both) {
-            crate::notify::beep();
-        }
+        self.ring_bell();
         let active = self.active;
         if let Some((idx, tab)) = self.find_tab_of_pane(pane)
             && idx != active
         {
             tab.activity = true;
+        }
+    }
+
+    /// The bell as `bell` sets it: the window flashes, a sound plays, both
+    /// or neither. A BEL and Settings › Notifications › Ring.
+    fn ring_bell(&mut self) {
+        use rift_core::Bell;
+        let bell = self.config.bell;
+        if matches!(bell, Bell::Visual | Bell::Both) {
+            self.bell_flash = Some(Instant::now());
+        }
+        if matches!(bell, Bell::Audible | Bell::Both)
+            && self.last_beep.is_none_or(|t| t.elapsed() >= BELL_SOUND_GAP)
+        {
+            self.last_beep = Some(Instant::now());
+            crate::notify::beep();
         }
         if let Some(w) = &self.window {
             w.request_redraw();
@@ -14290,6 +14547,10 @@ impl App {
                         | ClickTarget::SettingsUpdate
                         | ClickTarget::SettingsCheckUpdates
                         | ClickTarget::SettingsWhatsNew
+                        | ClickTarget::SettingsPlaySound(_)
+                        | ClickTarget::SettingsTestAlert(_)
+                        | ClickTarget::SettingsRingBell
+                        | ClickTarget::SettingsNotifyPermission
                         | ClickTarget::SettingsEditPrompt
                         | ClickTarget::SettingsKeybind(_)
                         | ClickTarget::SettingsKeybindReset(_)
@@ -17127,6 +17388,14 @@ impl ApplicationHandler<UserEvent> for App {
             muda::MenuEvent::set_event_handler(Some(move |e: muda::MenuEvent| {
                 let _ = menu_proxy.send_event(UserEvent::Menu(e.id.0));
             }));
+            // clicks on Rift's desktop notifications come back to the pane
+            let notify_proxy = std::sync::Mutex::new(self.proxy.clone());
+            crate::notify::set_response_handler(move |r| {
+                if let Ok(p) = notify_proxy.lock() {
+                    let _ = p.send_event(UserEvent::NotificationResponse(r));
+                }
+            });
+            self.refresh_notify_permission();
             // the Dock's Quit and AppleScript's quit take the app's quit
             let quit_proxy = std::sync::Mutex::new(self.proxy.clone());
             crate::quit::route_app_quit(move || {
@@ -17233,6 +17502,9 @@ impl ApplicationHandler<UserEvent> for App {
                 // would follow (and edge-scroll) the bare pointer
                 if !f {
                     self.pending_sel = None;
+                } else if self.settings.open {
+                    // back from System Settings: show what was chosen there
+                    self.refresh_notify_permission();
                 }
                 self.sync_focus();
                 // AppKit may lay the titlebar out again on key-state changes
@@ -17376,6 +17648,12 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::Menu(id) => self.run_menu_command(&id, event_loop),
             #[cfg(not(target_os = "macos"))]
             UserEvent::Menu(_) => {}
+            UserEvent::NotificationResponse(r) => self.on_notification_response(r),
+            UserEvent::NotifyPermission => {
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
             UserEvent::QuitRequested => {
                 // the window may be hidden (global hotkey): the dialog must show
                 if let Some(w) = &self.window

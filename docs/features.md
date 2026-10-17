@@ -216,7 +216,10 @@ hidden files only when the prefix starts with `.`), and command history.
 Path completions are inserted backslash-escaped as one shell word (valid in
 bash, zsh and fish; a leading `~/` stays unescaped so it still expands), and
 a token typed with backslashes or quotes (`My\ Dir/`, `"My Dir/`) still
-completes. Names containing control characters are not offered.
+completes. Names containing control characters are not offered. A command
+name shaped like an assignment (`name=value`) gets its `=` escaped too, so the
+shell runs the file instead of setting a variable; reserved-word names
+(`time`, `[[`) stay bare, as the shell's keyword is what they usually mean.
 
 Completion works on the whole word around the cursor, wherever the cursor
 sits in it (like zsh without `complete_in_word`): accepting replaces that
@@ -274,7 +277,8 @@ ignored. Warp's own files drop in unchanged.
 - **OS theme sync** (`sync_os_theme`): follow the system appearance —
   `theme` while dark, `theme_light` while light — switching live when the OS
   does.
-- **Window opacity** (`window_opacity`, 1–100 %), as Warp draws it: below
+- **Window opacity** (`window_opacity`, 1–100 %, default 50 % with a 20 px
+  blur), as Warp draws it: below
   100 % the tab bar, side panels, gutter and panes lose their own fills and
   share one window ground — Warp's `surface_2` (bg + 10 % fg) at the opacity
   with `bg` at the opacity over it, so 50 % covers 75 %. Overlays, modals,
@@ -286,8 +290,8 @@ ignored. Warp's own files drop in unchanged.
   1 is effectively none.
 - **Background image**: a theme's `background_image` (path + opacity) is drawn
   under every layer; relative paths resolve against the themes directory.
-- **Font family** (`font_family`): the embedded JetBrains Mono (default) or
-  Hack, or any installed monospace family; an unavailable name logs a
+- **Font family** (`font_family`): the embedded Hack (default) or
+  JetBrains Mono, or any installed monospace family; an unavailable name logs a
   warning and falls back to JetBrains Mono. Settings → Appearance lists the
   families whose regular face has outline glyphs of one width (Monaco
   included, bitmap-only faces left out), each previewed in itself.
@@ -308,11 +312,20 @@ ignored. Warp's own files drop in unchanged.
   plays when `play_sound` is on. A failed command alerts when
   `notifications.command_failed` is on, whatever its duration; a command that
   ran at least `notify_threshold_secs` (default 10, `notify_on_completion`)
-  alerts whatever its exit. Title: `Command finished` / `Command failed`, or
-  the agent's name; body: `<command> · Completed in X.` / `Failed with exit N
-  after X.` Both are set in Settings → Notifications (*A long command
-  finishes*, *Long command threshold*). Desktop notifications use `osascript`
-  on macOS, `notify-send` on Linux; no extra dependencies.
+  alerts whatever its exit. Both are set in Settings → Notifications (*A long
+  command finishes*, *Long command threshold*).
+- **Desktop notifications**: title = who and what (`✓ Finished in 1m12s`,
+  `✕ Failed · exit 101 after 2m04s`, `Claude Code · needs your approval`,
+  `Codex · task done`, `Password requested`), subtitle = `tab — ~/folder ·
+  branch`, body = the command (a failure adds its last output line) or the
+  program's message. On macOS Rift.app posts them itself (UserNotifications):
+  Rift's icon, banners from one pane stack together, a click brings Rift
+  forward on that pane, and a failed command's banner has *Rerun* (only at
+  the shell's prompt; a sample from *Try it* never runs). macOS asks for
+  permission the first time; Settings › Notifications shows it, with
+  *Allow…* or *Open System Settings*. A build that is not an app bundle
+  (`cargo run`) falls back to `osascript` (Script Editor's icon); Linux uses
+  `notify-send --icon=rift`.
 - **Toasts**: at most 2 show at once, for `toast_secs` (default 8, clamped
   2–60).
 - **Bell** (`bell`): `visual` (120 ms full-window flash), `audible`
@@ -495,6 +508,11 @@ it.
   kitty and iTerm2 protocols cover the TUIs that draw images (yazi, timg,
   chafa, icat, imgcat, viu), and a Sixel decoder would add the largest parser
   surface for the least-used format.
+- **Input never freezes the window**: keys, pastes and the terminal's reports
+  go to each pane's shell in order from its own queue, so a program that
+  stops reading (a paused TUI, a stuck agent) holds only its own input. Up to
+  16 MB waits for it; more is refused whole, never half a paste, with a
+  notice.
 - **Paste**: bracketed paste when the program enables it. Otherwise text with
   a newline asks first ("Paste and run?"), because each newline would press
   Enter (`confirm_multiline_paste`). With no text on the clipboard (an image,
@@ -574,7 +592,10 @@ per-user **session service** (`rift-terminal --session-daemon`, started on
 demand) instead of the window process. On macOS it and the phone gateway
 start as launchd jobs (`<data dir>/launchd/*.plist`, run once, never kept
 alive), not as children of the window, so a quit Rift leaves the Dock
-instead of staying there as "Running in Background".
+instead of staying there as "Running in Background". A service that does
+not answer a request within 5 s (hello, spawn, attach) counts as
+unavailable: that pane starts a local shell with a notice, and the rest of
+the window's run stays local instead of waiting on it again.
 
 **Quitting** Rift (⌘Q, Quit Rift in the menu or the palette, or closing the
 window) is intentional: every shell ends and the session file keeps only the
@@ -962,7 +983,9 @@ selects the block. The list keeps the newest 200.
   of view, an enabled event also raises a toast (Rift focused) or a desktop
   notification (Rift in the background), and plays its sound. Events: long
   command finished, command failed, agent task completed, needs attention,
-  password prompt.
+  password prompt. Toasts show over the Settings tab too (only the open
+  inbox hides them). Settings › Notifications › *Try it* raises a sample of
+  each kind as a toast or a desktop notification.
 - **Coding agents**: Claude Code, Codex, OpenCode and Gemini CLI are
   recognized from the running command; their notifications show the agent's
   badge (the Claude mark for Claude Code). An agent waiting at its own prompt

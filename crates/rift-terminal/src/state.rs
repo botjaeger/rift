@@ -5,6 +5,15 @@ use unicode_segmentation::GraphemeCursor;
 use crate::pane::{NodePath, PaneNode};
 use crate::vim::{VimMode, VimState};
 
+/// A sample alert from Settings › Notifications › Try it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TestAlert {
+    pub event: rift_core::notifications::Event,
+    /// A desktop notification (as while Rift is in the background), else
+    /// an in-window toast.
+    pub desktop: bool,
+}
+
 /// What a mouse click landed on (rebuilt every frame).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClickTarget {
@@ -89,6 +98,15 @@ pub enum ClickTarget {
     SettingsCheckUpdates,
     /// Settings › General › What's New: open the release notes.
     SettingsWhatsNew,
+    /// Settings › Notifications ▷ beside a sound select: play what it plays.
+    SettingsPlaySound(&'static str),
+    /// Settings › Notifications › Try it: a sample alert.
+    SettingsTestAlert(TestAlert),
+    /// Settings › Notifications › Terminal bell: ring it as `bell` sets it.
+    SettingsRingBell,
+    /// Settings › Notifications › Desktop notifications: Allow… (ask macOS)
+    /// or Open System Settings.
+    SettingsNotifyPermission,
     SettingsSlider(&'static str),
     SettingsTheme(u8),
     /// Keybindings page row: record a new shortcut for the action.

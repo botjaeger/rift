@@ -1,6 +1,6 @@
 use std::fs::File;
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::event::{Event, EventListener, OnResize, WindowSize};
@@ -199,6 +199,14 @@ impl PtyWriter {
         }
     }
 
+    /// A request to the session service about this shell (nothing for a
+    /// local PTY).
+    fn request(&self, req: &crate::ipc::Request) {
+        if let PtyWriter::Service { conn, .. } = self {
+            let _ = crate::ipc::send_json(&mut conn.lock().unwrap().stream, req);
+        }
+    }
+
     /// Replaying retained output after a (re)attach.
     fn muted(&self) -> bool {
         matches!(self, PtyWriter::Service { muted, .. } if muted.load(Ordering::Acquire))
@@ -328,11 +336,96 @@ pub struct Session {
     /// Writes of user input so far (`write`; never the terminal's own
     /// replies): a request for input raised before the last one was answered.
     inputs: AtomicU64,
-    writer: PtyWriter,
+    writer: InputQueue,
     backend: Backend,
     size: GridSize,
     window_size: Arc<Mutex<WindowSize>>,
     scrollback: usize,
+}
+
+/// Input bytes waiting for a program that is not reading, at most (a single
+/// larger paste still goes when nothing waits before it).
+const MAX_QUEUED_INPUT: usize = 16 << 20;
+
+/// User input and the terminal's reports, written to the shell in order on
+/// the pane's own thread. A program that stops reading its input fills the
+/// kernel's buffer (or the session service stops reading this socket), and a
+/// write that blocks there froze the whole window: every pane shares one
+/// event loop. Bounded: input that would pass [`MAX_QUEUED_INPUT`] is
+/// refused whole (never half a paste) with a notice.
+pub(crate) struct InputQueue {
+    tx: std::sync::mpsc::Sender<Queued>,
+    queued: Arc<AtomicUsize>,
+    notice: Box<dyn Fn(String) + Send + Sync>,
+}
+
+/// What the pane's writer thread sends, in order.
+enum Queued {
+    Input(Vec<u8>),
+    /// A request to the session service (resize, clear history): on the same
+    /// connection as the input, so it waits behind input the service has not
+    /// taken yet instead of blocking the window on the connection's lock.
+    Request(crate::ipc::Request),
+}
+
+impl InputQueue {
+    pub(crate) fn new(writer: PtyWriter, notice: impl Fn(String) + Send + Sync + 'static) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel::<Queued>();
+        let queued = Arc::new(AtomicUsize::new(0));
+        let left = queued.clone();
+        // ends once the session (the sender) is gone and the queue is written
+        std::thread::Builder::new()
+            .name("pty-input".into())
+            .spawn(move || {
+                for item in rx {
+                    match item {
+                        Queued::Input(bytes) => {
+                            writer.write(&bytes);
+                            left.fetch_sub(bytes.len(), Ordering::AcqRel);
+                        }
+                        Queued::Request(req) => writer.request(&req),
+                    }
+                }
+            })
+            .expect("spawn pty input writer");
+        Self {
+            tx,
+            queued,
+            notice: Box::new(notice),
+        }
+    }
+
+    /// Queue `bytes`; false (and a notice) when refused.
+    fn write(&self, bytes: &[u8]) -> bool {
+        if bytes.is_empty() {
+            return true;
+        }
+        let before = self.queued.fetch_add(bytes.len(), Ordering::AcqRel);
+        if before > 0 && before + bytes.len() > MAX_QUEUED_INPUT {
+            self.queued.fetch_sub(bytes.len(), Ordering::AcqRel);
+            (self.notice)(format!(
+                "Input not sent: the program is not reading ({} MB already waiting)",
+                before.div_ceil(1 << 20)
+            ));
+            return false;
+        }
+        if self.tx.send(Queued::Input(bytes.to_vec())).is_err() {
+            self.queued.fetch_sub(bytes.len(), Ordering::AcqRel);
+            return false;
+        }
+        true
+    }
+
+    /// Queue a request to the session service, after the input before it.
+    fn request(&self, req: crate::ipc::Request) {
+        let _ = self.tx.send(Queued::Request(req));
+    }
+
+    /// Bytes queued and not yet written.
+    #[cfg(test)]
+    fn queued(&self) -> usize {
+        self.queued.load(Ordering::Acquire)
+    }
 }
 
 /// A transcript to replay: terminal bytes, and (duration, cwd, command) per
@@ -345,7 +438,6 @@ enum Backend {
     Local(tty::Pty),
     /// The session service: the shell outlives this window.
     Service {
-        conn: Arc<Mutex<ServiceConn>>,
         session: u64,
         /// Foreground job reported by the service.
         job: Arc<Mutex<Option<String>>>,
@@ -820,16 +912,6 @@ impl Session {
                 (Backend::Local(pty), writer, source)
             }
             Some(target) => {
-                // a reattached shell's last OSC 7 may have left the replay
-                // ring; the service still knows its directory, so a pane
-                // split from it starts there instead of at the fallback
-                let known_cwd = match target {
-                    crate::ServiceTarget::Attach(sid) => crate::service::list()
-                        .into_iter()
-                        .find(|s| s.id == sid)
-                        .and_then(|s| s.cwd),
-                    crate::ServiceTarget::Spawn => None,
-                };
                 let (stream, session) = crate::service::open(
                     target,
                     shell.as_deref(),
@@ -837,6 +919,17 @@ impl Session {
                     env,
                     window_size,
                 )?;
+                // a reattached shell's last OSC 7 may have left the replay
+                // ring; the service still knows its directory, so a pane
+                // split from it starts there instead of at the fallback.
+                // Asked after `open` answered: a stalled service fails once.
+                let known_cwd = match target {
+                    crate::ServiceTarget::Attach(sid) => crate::service::list()
+                        .into_iter()
+                        .find(|s| s.id == sid)
+                        .and_then(|s| s.cwd),
+                    crate::ServiceTarget::Spawn => None,
+                };
                 let conn = Arc::new(Mutex::new(ServiceConn::new(stream.try_clone()?)));
                 let muted = Arc::new(AtomicBool::new(true));
                 let job = Arc::new(Mutex::new(None));
@@ -858,7 +951,6 @@ impl Session {
                 };
                 (
                     Backend::Service {
-                        conn,
                         session,
                         job,
                         hidden,
@@ -930,7 +1022,7 @@ impl Session {
             ctx,
             dirty: dirty.clone(),
             saw_output: saw_output.clone(),
-            observer,
+            observer: observer.clone(),
         };
         std::thread::Builder::new()
             .name(format!("pty-reader-{id}"))
@@ -950,7 +1042,7 @@ impl Session {
             generation,
             service_id,
             inputs: AtomicU64::new(0),
-            writer,
+            writer: InputQueue::new(writer, move |m| observer(id, SessionEvent::Notice(m))),
             backend,
             size,
             window_size: window_size_shared,
@@ -1093,11 +1185,13 @@ impl Session {
     /// local shell ends when the PTY drops). Quitting the app does not
     /// call this, which is what keeps durable sessions running.
     pub fn terminate(&self) {
-        if let Backend::Service { conn, session, .. } = &self.backend {
-            let _ = crate::ipc::send_json(
-                &mut conn.lock().unwrap().stream,
-                &crate::ipc::Request::Kill { session: *session },
-            );
+        if let Backend::Service { session, .. } = &self.backend {
+            // on a connection of its own, off this thread: the pane's own
+            // may be held by input the service is not taking
+            let session = *session;
+            let _ = std::thread::Builder::new()
+                .name("session-kill".into())
+                .spawn(move || crate::service::kill(session));
         }
     }
 
@@ -1145,11 +1239,9 @@ impl Session {
         blocks.clear();
         self.graphics.lock().unwrap().clear();
         // a reattach must not bring the cleared output back
-        if let Backend::Service { conn, session, .. } = &self.backend {
-            let _ = crate::ipc::send_json(
-                &mut conn.lock().unwrap().stream,
-                &crate::ipc::Request::ClearHistory { session: *session },
-            );
+        if let Backend::Service { session, .. } = &self.backend {
+            self.writer
+                .request(crate::ipc::Request::ClearHistory { session: *session });
         }
         if was_prompt {
             blocks.on_prompt_start(abs_line);
@@ -1187,17 +1279,14 @@ impl Session {
         );
         match &mut self.backend {
             Backend::Local(pty) => pty.on_resize(ws),
-            Backend::Service { conn, session, .. } => {
-                let _ = crate::ipc::send_json(
-                    &mut conn.lock().unwrap().stream,
-                    &crate::ipc::Request::Resize {
-                        session: *session,
-                        cols: ws.num_cols,
-                        rows: ws.num_lines,
-                        cell_w: ws.cell_width,
-                        cell_h: ws.cell_height,
-                    },
-                );
+            Backend::Service { session, .. } => {
+                self.writer.request(crate::ipc::Request::Resize {
+                    session: *session,
+                    cols: ws.num_cols,
+                    rows: ws.num_lines,
+                    cell_w: ws.cell_width,
+                    cell_h: ws.cell_height,
+                });
             }
         }
         self.generation.fetch_add(1, Ordering::AcqRel);
@@ -2552,6 +2641,114 @@ mod tests {
     }
 
     #[test]
+    fn input_to_a_program_that_never_reads_returns_at_once() {
+        use std::os::fd::AsRawFd;
+        let opts = tty::Options {
+            // never reads its input; dies on the drop's SIGHUP
+            shell: Some(tty::Shell::new("/bin/sleep".into(), vec!["600".into()])),
+            working_directory: None,
+            drain_on_exit: false,
+            env: std::collections::HashMap::new(),
+        };
+        let ws = WindowSize {
+            num_lines: 24,
+            num_cols: 80,
+            cell_width: 8,
+            cell_height: 16,
+        };
+        let pty = tty::new(&opts, ws, 0).unwrap();
+        // blocking, as `Session::spawn` leaves it for the reader
+        let fd = pty.file().as_raw_fd();
+        unsafe {
+            let fl = libc::fcntl(fd, libc::F_GETFL);
+            libc::fcntl(fd, libc::F_SETFL, fl & !libc::O_NONBLOCK);
+            // raw, as vim or an agent's TUI sets it: a canonical tty drops
+            // what overflows its line buffer instead of blocking the writer
+            let mut tio: libc::termios = std::mem::zeroed();
+            assert_eq!(libc::tcgetattr(fd, &mut tio), 0);
+            libc::cfmakeraw(&mut tio);
+            assert_eq!(libc::tcsetattr(fd, libc::TCSANOW, &tio), 0);
+        }
+        let notices = Arc::new(Mutex::new(Vec::new()));
+        let seen = notices.clone();
+        let q = InputQueue::new(
+            PtyWriter::File(Arc::new(pty.file().try_clone().unwrap())),
+            move |m| seen.lock().unwrap().push(m),
+        );
+        let t = std::time::Instant::now();
+        // far past the kernel's tty buffer: a direct write would block here
+        assert!(q.write(&vec![b'x'; 256 * 1024]));
+        assert!(q.write(b"\x1b[201~"));
+        assert!(
+            t.elapsed() < std::time::Duration::from_millis(500),
+            "{:?}",
+            t.elapsed()
+        );
+        assert!(q.queued() > 0, "the program never read: bytes still wait");
+        // bounded: more than the cap is refused whole, and said so
+        assert!(!q.write(&vec![b'y'; MAX_QUEUED_INPUT]));
+        assert!(t.elapsed() < std::time::Duration::from_millis(500));
+        let notices = notices.lock().unwrap();
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].contains("not reading"), "{notices:?}");
+        drop(pty);
+    }
+
+    /// A resize (or clear) on a durable pane goes out after the input before
+    /// it, and queuing it never waits on the connection: the writer thread
+    /// may be stuck sending input the service is not taking.
+    #[test]
+    fn service_requests_follow_input_and_never_block_the_caller() {
+        use crate::ipc::{Frame, Request, read_frame};
+        use std::os::unix::net::UnixStream;
+        let (ours, mut theirs) = UnixStream::pair().unwrap();
+        let conn = Arc::new(Mutex::new(ServiceConn::new(ours)));
+        let q = InputQueue::new(
+            PtyWriter::Service {
+                conn: conn.clone(),
+                session: 9,
+                muted: Arc::new(AtomicBool::new(false)),
+            },
+            |_| {},
+        );
+        // the connection is busy: queuing must still return at once
+        let held = conn.lock().unwrap();
+        let t = std::time::Instant::now();
+        assert!(q.write(b"abc"));
+        q.request(Request::ClearHistory { session: 9 });
+        assert!(t.elapsed() < std::time::Duration::from_millis(200));
+        drop(held);
+        drop(q);
+        theirs
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let first = read_frame(&mut theirs).unwrap().unwrap();
+        assert!(matches!(first, Frame::Input { session: 9, ref bytes } if bytes == b"abc"));
+        let Frame::Json(body) = read_frame(&mut theirs).unwrap().unwrap() else {
+            panic!("the request comes second");
+        };
+        assert!(String::from_utf8_lossy(&body).contains("clear_history"));
+    }
+
+    #[test]
+    fn queued_input_arrives_once_and_in_order() {
+        let (ours, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        // a File over the socket stands in for the PTY master
+        let file = File::from(std::os::fd::OwnedFd::from(ours));
+        let q = InputQueue::new(PtyWriter::File(Arc::new(file)), |_| {});
+        let mut sent = Vec::new();
+        for i in 0..200u32 {
+            let chunk = format!("<{i}>").repeat(50).into_bytes();
+            assert!(q.write(&chunk));
+            sent.extend(chunk);
+        }
+        drop(q);
+        let mut got = Vec::new();
+        std::io::Read::read_to_end(&mut &theirs, &mut got).unwrap();
+        assert_eq!(got, sent);
+    }
+
+    #[test]
     fn resize_signals_the_pty_only_after_the_term_is_resized() {
         use std::os::fd::AsRawFd;
         let ws = WindowSize {
@@ -2590,7 +2787,7 @@ mod tests {
             generation: c.generation.clone(),
             service_id: None,
             inputs: AtomicU64::new(0),
-            writer,
+            writer: InputQueue::new(writer, |_| {}),
             backend: Backend::Local(pty),
             size: GridSize { cols: 80, rows: 24 },
             window_size: c.window_size.clone(),

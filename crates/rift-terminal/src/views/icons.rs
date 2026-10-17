@@ -47,6 +47,8 @@ pub enum Icon {
     Alert,
     /// A phone (an action from a paired phone).
     Phone,
+    /// ▷ (play a sound).
+    Play,
 }
 
 /// Draws `icon` centred on `c` at `size` px (the 16-unit box scaled).
@@ -289,6 +291,7 @@ pub fn draw(layer: &mut Layer, icon: Icon, c: [f32; 2], size: f32, color: Color)
             rect(layer, 4.5, 2.0, 7.0, 12.0, 1.5);
             poly(layer, &[(7.0, 11.5), (9.0, 11.5)]);
         }
+        Icon::Play => poly(layer, &[(5.0, 3.5), (12.5, 8.0), (5.0, 12.5), (5.0, 3.5)]),
         Icon::Lock => {
             rect(layer, 3.0, 7.0, 10.0, 7.0, 1.5);
             poly(

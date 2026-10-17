@@ -481,6 +481,10 @@ fn focusable(target: &ClickTarget) -> bool {
             | ClickTarget::SettingsUpdate
             | ClickTarget::SettingsCheckUpdates
             | ClickTarget::SettingsWhatsNew
+            | ClickTarget::SettingsPlaySound(_)
+            | ClickTarget::SettingsTestAlert(_)
+            | ClickTarget::SettingsRingBell
+            | ClickTarget::SettingsNotifyPermission
             | ClickTarget::RemotePair
             | ClickTarget::RemoteViewOnly
             | ClickTarget::RemoteCopyLink
@@ -1790,7 +1794,13 @@ impl Form<'_> {
 
     /// A select: the value and a chevron; a click opens its option list.
     fn select(&mut self, y: f32, label: &str, value: &str, id: &'static str) {
-        self.select_with(y, label, value, None, id);
+        self.select_with(y, label, value, None, false, id);
+    }
+
+    /// A sound select with ▷ before it: hear the chosen sound without
+    /// opening the list.
+    fn sound_select(&mut self, y: f32, label: &str, value: &str, id: &'static str) {
+        self.select_with(y, label, value, None, true, id);
     }
 
     /// A theme select: the theme's ground ringed in its accent, its name.
@@ -1802,7 +1812,7 @@ impl Form<'_> {
             .position(|n| n == name)
             .and_then(|i| rift_core::theme::picker_labels(&names).into_iter().nth(i))
             .unwrap_or(t.name);
-        self.select_with(y, label, &shown, Some((t.bg, t.accent)), id);
+        self.select_with(y, label, &shown, Some((t.bg, t.accent)), false, id);
     }
 
     fn select_with(
@@ -1811,10 +1821,11 @@ impl Form<'_> {
         label: &str,
         value: &str,
         swatch: Option<(Color, Color)>,
+        play: bool,
         id: &'static str,
     ) {
         let sel_w = (self.card_w * 0.45).clamp(140.0, 220.0);
-        self.reserve = sel_w + 40.0;
+        self.reserve = sel_w + 40.0 + if play { 32.0 } else { 0.0 };
         self.label(label, y);
         let ry = y + (ROW_H - CONTROL_H) / 2.0;
         let sx = self.right() - sel_w;
@@ -1855,7 +1866,28 @@ impl Form<'_> {
                 self.theme.text_dim,
             );
         }
-        self.changed(id, y, sx);
+        // ▷ sits between ↺ and the select
+        let mut control_x = sx;
+        if play {
+            let pr = [sx - 32.0, y + (ROW_H - 24.0) / 2.0, 24.0, 24.0];
+            if self.visible(pr[1], pr[3]) {
+                if self.hot(pr) {
+                    self.layer
+                        .rect([pr[0], pr[1]], [24.0, 24.0], lift(self.theme, 0.08), 4.0);
+                }
+                icons::draw(
+                    self.layer,
+                    Icon::Play,
+                    [pr[0] + 12.0, pr[1] + 12.0],
+                    14.0,
+                    self.theme.text_dim,
+                );
+            }
+            self.push_hit(pr, ClickTarget::SettingsPlaySound(id));
+            self.name_last(format!("Play {label}: {value}"));
+            control_x = pr[0];
+        }
+        self.changed(id, y, control_x);
         self.push_hit(r, ClickTarget::SettingsCycle(id));
         self.name_last(format!("{label}: {value}"));
     }
@@ -3376,6 +3408,110 @@ pub fn sound_label(value: &str) -> String {
     }
 }
 
+/// Settings › Notifications › Desktop notifications: whether banners can
+/// show (macOS permission, with Allow… or System Settings), and what they say.
+fn desktop_notifications(form: &mut Form) {
+    use crate::notify::Permission;
+    form.group("Desktop notifications");
+    let p = crate::notify::permission();
+    let (label, desc) = match p {
+        Permission::NotifySend => (
+            "Desktop notifications",
+            "Sent with notify-send; your desktop's settings decide where they show",
+        ),
+        Permission::Script => (
+            "macOS permission",
+            "Not running as Rift.app: banners come from Script Editor",
+        ),
+        _ => (
+            "macOS permission",
+            "Banners come from Rift, with its icon; a click opens the pane",
+        ),
+    };
+    let (status, tone) = match p {
+        Permission::Allowed => ("Allowed", Some(true)),
+        Permission::Denied => ("Off", Some(false)),
+        Permission::NotAsked => ("Not asked yet", None),
+        Permission::Checking => ("Checking…", None),
+        Permission::Script | Permission::NotifySend => ("", None),
+    };
+    let button = match p {
+        Permission::NotAsked => Some("Allow…"),
+        Permission::Allowed | Permission::Denied => Some("Open System Settings"),
+        _ => None,
+    };
+    let bw = button.map_or(0.0, |b| {
+        (form.engine.measure(b, 12.5, FONT_SANS, Weight::MEDIUM) + 24.0).round()
+    });
+    let pill_w = if status.is_empty() {
+        0.0
+    } else {
+        (form
+            .engine
+            .measure(status, 12.0, FONT_SANS, Weight::SEMIBOLD)
+            + 18.0)
+            .round()
+    };
+    const ICON: f32 = 32.0;
+    const INDENT: f32 = ICON + 12.0;
+    let y = form.y;
+    form.reserve = bw + pill_w + 10.0 + 40.0;
+    // the label sits right of Rift's icon
+    form.x += INDENT;
+    form.card_w -= INDENT;
+    form.label_desc(label, desc, y);
+    form.x -= INDENT;
+    form.card_w += INDENT;
+    if form.hidden {
+        return;
+    }
+    if form.visible(y, ROW_H) {
+        super::welcome::logo(form.layer, [form.x, y + (ROW_H - ICON) / 2.0], ICON);
+        form.layer
+            .hline(form.x, y + ROW_H - 1.0, INDENT, 1.0, lift(form.theme, 0.06));
+    }
+    let mut x = form.right() - bw;
+    if let Some(b) = button {
+        let by = y + (ROW_H - CONTROL_H) / 2.0;
+        let name = if b == "Allow…" {
+            "Allow Rift's desktop notifications".to_string()
+        } else {
+            "Open System Settings, Notifications".to_string()
+        };
+        form.button(
+            x,
+            by,
+            b,
+            ButtonKind::Secondary,
+            ClickTarget::SettingsNotifyPermission,
+            name,
+        );
+        x -= 10.0;
+    }
+    if pill_w > 0.0 && form.visible(y, ROW_H) {
+        let px = x - pill_w;
+        let py = y + (ROW_H - 22.0) / 2.0;
+        let (fill, ink) = match tone {
+            Some(true) => (form.theme.success.with_alpha(0.16), form.theme.success),
+            Some(false) => (form.theme.error.with_alpha(0.16), form.theme.error),
+            None => (lift(form.theme, 0.08), form.theme.text_dim),
+        };
+        form.layer.rect([px, py], [pill_w, 22.0], fill, 11.0);
+        form.layer.text(
+            sans(form.engine, status, 12.0, Weight::SEMIBOLD),
+            px + 9.0,
+            py + (22.0 - 12.0 * 1.35) / 2.0,
+            ink,
+        );
+    }
+    let y = form.y;
+    form.label_desc(
+        "Banners show",
+        "Who and what · the tab, folder and branch · the command or message",
+        y,
+    );
+}
+
 fn notifications_page(form: &mut Form, config: &Config) {
     let n = &config.notifications;
     form.group("Alerts");
@@ -3403,6 +3539,8 @@ fn notifications_page(form: &mut Form, config: &Config) {
         "s",
         "notifications.toast_secs",
     );
+
+    desktop_notifications(form);
 
     form.group("Notify me when");
     let y = form.y;
@@ -3460,28 +3598,76 @@ fn notifications_page(form: &mut Form, config: &Config) {
         "notifications.play_sound",
     );
     let y = form.y;
-    form.select(y, "Sound", &sound_label(&n.sound), "notifications.sound");
+    form.sound_select(y, "Sound", &sound_label(&n.sound), "notifications.sound");
     let y = form.y;
-    form.select(
+    form.sound_select(
         y,
         "Finished",
         &sound_label(&n.sound_finished),
         "notifications.sound_finished",
     );
     let y = form.y;
-    form.select(
+    form.sound_select(
         y,
         "Failed",
         &sound_label(&n.sound_failed),
         "notifications.sound_failed",
     );
     let y = form.y;
-    form.select(
+    form.sound_select(
         y,
         "Needs attention",
         &sound_label(&n.sound_attention),
         "notifications.sound_attention",
     );
+
+    // sample alerts: the card or banner, with its sound, as the real ones
+    form.group("Try it");
+    use rift_core::notifications::Event;
+    let kinds = [
+        (Event::Finished, "Finished"),
+        (Event::Failed, "Failed"),
+        (Event::Attention, "Needs attention"),
+    ];
+    for (desktop, label, desc) in [
+        (
+            false,
+            "In-app toast",
+            "The card for a pane you are not looking at, with its sound",
+        ),
+        (
+            true,
+            "Desktop notification",
+            "A real banner from Rift, even while Rift is in front, with its sound",
+        ),
+    ] {
+        let y = form.y;
+        let widths: Vec<f32> = kinds
+            .iter()
+            .map(|(_, k)| (form.engine.measure(k, 12.5, FONT_SANS, Weight::MEDIUM) + 24.0).round())
+            .collect();
+        let total = widths.iter().sum::<f32>() + 8.0 * (kinds.len() - 1) as f32;
+        form.reserve = total + 40.0;
+        form.label_desc(label, desc, y);
+        if !form.hidden {
+            let by = y + (ROW_H - CONTROL_H) / 2.0;
+            let mut bx = form.right() - total;
+            for ((event, k), w) in kinds.iter().zip(&widths) {
+                form.button(
+                    bx,
+                    by,
+                    k,
+                    ButtonKind::Secondary,
+                    ClickTarget::SettingsTestAlert(crate::state::TestAlert {
+                        event: *event,
+                        desktop,
+                    }),
+                    format!("Try a {} {}", k.to_lowercase(), label.to_lowercase()),
+                );
+                bx += w + 8.0;
+            }
+        }
+    }
 
     form.group("Terminal bell");
     let y = form.y;
@@ -3497,6 +3683,27 @@ fn notifications_page(form: &mut Form, config: &Config) {
         },
         "bell",
     );
+    let y = form.y;
+    let label = "Ring";
+    let bw = form.engine.measure(label, 12.5, FONT_SANS, Weight::MEDIUM) + 24.0;
+    form.reserve = bw + 40.0;
+    form.label_desc(
+        "Try the bell",
+        "What a program's bell (\\a) does with this setting",
+        y,
+    );
+    if !form.hidden {
+        let by = y + (ROW_H - CONTROL_H) / 2.0;
+        let bx = form.right() - bw.round();
+        form.button(
+            bx,
+            by,
+            label,
+            ButtonKind::Secondary,
+            ClickTarget::SettingsRingBell,
+            "Ring the terminal bell".into(),
+        );
+    }
 }
 
 /// Keybindings rows that match the type-to-filter query (action name with

@@ -422,9 +422,11 @@ mod tests {
         assert_eq!(
             ed.draft,
             [
+                PromptChip::Elapsed,
                 PromptChip::Cwd,
                 PromptChip::GitBranch,
                 PromptChip::GitDiff,
+                PromptChip::Docker,
                 PromptChip::Time24
             ]
         );
@@ -434,12 +436,14 @@ mod tests {
             ed.draft,
             [
                 PromptChip::Time24,
+                PromptChip::Elapsed,
                 PromptChip::GitBranch,
                 PromptChip::GitDiff,
+                PromptChip::Docker,
                 PromptChip::Cwd
             ]
         );
-        ed.remove(1);
+        ed.remove(2);
         assert!(ed.changed() && ed.palette().contains(&PromptChip::GitBranch));
         ed.restore_default();
         assert!(!ed.changed());

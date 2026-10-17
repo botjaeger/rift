@@ -24,7 +24,14 @@ pub fn connect() -> std::io::Result<UnixStream> {
     loop {
         match UnixStream::connect(&path) {
             Ok(s) => return handshake(s),
-            Err(e) if Instant::now() > deadline => return Err(e),
+            // a service that never came up counts as stalled: the window
+            // stays local instead of waiting here for every new pane
+            Err(e) if Instant::now() > deadline => {
+                return Err(std::io::Error::new(
+                    ErrorKind::TimedOut,
+                    format!("the session service did not start ({e})"),
+                ));
+            }
             Err(_) => std::thread::sleep(Duration::from_millis(30)),
         }
     }
@@ -55,20 +62,57 @@ fn handshake(mut s: UnixStream) -> std::io::Result<UnixStream> {
     }
 }
 
-/// Read until the next JSON event (output frames are not expected here).
+/// How long the service may take to answer one setup request (hello, spawn,
+/// attach, list) in total. A service that accepts but stalls then fails with
+/// `TimedOut` and the window falls back to a local shell.
+pub const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Reads from a socket until a fixed deadline: each read waits only for
+/// what is left, so a peer dripping bytes cannot extend it.
+struct Deadline<'a> {
+    s: &'a UnixStream,
+    until: Instant,
+}
+
+impl std::io::Read for Deadline<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let left = self.until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(ErrorKind::TimedOut.into());
+        }
+        self.s.set_read_timeout(Some(left))?;
+        match std::io::Read::read(&mut &*self.s, buf) {
+            // SO_RCVTIMEO expiry reads as WouldBlock on unix
+            Err(e) if e.kind() == ErrorKind::WouldBlock => Err(ErrorKind::TimedOut.into()),
+            r => r,
+        }
+    }
+}
+
+/// Read until the next JSON event (output frames are not expected here),
+/// within [`SETUP_TIMEOUT`]. The stream is blocking again afterwards: the
+/// pane's reader owns it next.
 pub fn next_event(s: &mut UnixStream) -> std::io::Result<Event> {
-    s.set_read_timeout(Some(Duration::from_secs(10)))?;
-    let r = loop {
-        match ipc::read_frame(s)? {
-            Some(Frame::Json(body)) => {
+    next_event_within(s, SETUP_TIMEOUT)
+}
+
+fn next_event_within(s: &mut UnixStream, limit: Duration) -> std::io::Result<Event> {
+    let mut r = Deadline {
+        s,
+        until: Instant::now() + limit,
+    };
+    let event = loop {
+        match ipc::read_frame(&mut r) {
+            Ok(Some(Frame::Json(body))) => {
                 break serde_json::from_slice(&body).map_err(std::io::Error::other);
             }
-            Some(_) => continue,
-            None => break Err(std::io::Error::from(ErrorKind::UnexpectedEof)),
+            Ok(Some(_)) => continue,
+            Ok(None) => break Err(std::io::Error::from(ErrorKind::UnexpectedEof)),
+            Err(e) => break Err(e),
         }
     };
     s.set_read_timeout(None)?;
-    r
+    event
 }
 
 /// Spawn or reattach; the returned stream next delivers the replay, then
@@ -149,6 +193,18 @@ pub fn resume(session: u64, from_seq: u64) -> std::io::Result<(UnixStream, bool)
     }
 }
 
+/// End `session`'s shell (a pane closed on purpose), on a connection of its
+/// own. Never starts the service: if it is gone, so is the shell.
+pub fn kill(session: u64) {
+    let Some(path) = ipc::socket_path() else {
+        return;
+    };
+    let Ok(Ok(mut s)) = UnixStream::connect(path).map(handshake) else {
+        return;
+    };
+    let _ = ipc::send_json(&mut s, &Request::Kill { session });
+}
+
 /// Sessions the service is running (empty when it is not running; never
 /// starts it).
 pub fn list() -> Vec<ipc::SessionInfo> {
@@ -167,5 +223,65 @@ pub fn list() -> Vec<ipc::SessionInfo> {
     match next_event(&mut s) {
         Ok(Event::Sessions { sessions }) => sessions,
         _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn hello_frame() -> Vec<u8> {
+        let mut b = Vec::new();
+        ipc::send_json(
+            &mut b,
+            &Event::Hello {
+                version: ipc::PROTOCOL_VERSION,
+                pid: 1,
+            },
+        )
+        .unwrap();
+        b
+    }
+
+    #[test]
+    fn a_silent_service_times_out() {
+        let (mut ours, _theirs) = UnixStream::pair().unwrap();
+        let t = Instant::now();
+        let e = next_event_within(&mut ours, Duration::from_millis(300)).unwrap_err();
+        assert_eq!(e.kind(), ErrorKind::TimedOut);
+        assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+        // handed back blocking: the pane's reader must never time out
+        assert_eq!(ours.read_timeout().unwrap(), None);
+    }
+
+    /// One byte at a time, each sooner than the limit: the total still ends.
+    #[test]
+    fn a_dripping_service_cannot_extend_the_deadline() {
+        let (mut ours, mut theirs) = UnixStream::pair().unwrap();
+        let frame = hello_frame();
+        let drip = std::thread::spawn(move || {
+            for b in frame {
+                std::thread::sleep(Duration::from_millis(60));
+                if theirs.write_all(&[b]).is_err() {
+                    break;
+                }
+            }
+        });
+        let t = Instant::now();
+        let e = next_event_within(&mut ours, Duration::from_millis(400)).unwrap_err();
+        assert_eq!(e.kind(), ErrorKind::TimedOut);
+        assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+        drop(ours);
+        drip.join().unwrap();
+    }
+
+    #[test]
+    fn a_prompt_answer_is_read_and_the_stream_stays_blocking() {
+        let (mut ours, mut theirs) = UnixStream::pair().unwrap();
+        theirs.write_all(&hello_frame()).unwrap();
+        let ev = next_event_within(&mut ours, Duration::from_millis(300)).unwrap();
+        assert!(matches!(ev, Event::Hello { .. }));
+        assert_eq!(ours.read_timeout().unwrap(), None);
     }
 }

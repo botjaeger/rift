@@ -93,7 +93,13 @@ impl PromptChip {
     /// The default prompt: the design's cwd and branch chips, then the diff
     /// stats (Warp's default; hidden on a clean tree).
     pub fn defaults() -> Vec<PromptChip> {
-        vec![PromptChip::Cwd, PromptChip::GitBranch, PromptChip::GitDiff]
+        vec![
+            PromptChip::Elapsed,
+            PromptChip::Cwd,
+            PromptChip::GitBranch,
+            PromptChip::GitDiff,
+            PromptChip::Docker,
+        ]
     }
 
     pub fn label(self) -> &'static str {
@@ -367,7 +373,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            font_family: "JetBrains Mono".into(),
+            font_family: "Hack".into(),
             font_size: 13.0,
             line_height: 1.2,
             cursor_style: CursorStyle::Block,
@@ -389,22 +395,22 @@ impl Default for Config {
             shell: None,
             theme_light: "light-default".into(),
             sync_os_theme: false,
-            window_opacity: 1.0,
-            window_blur: 1,
+            window_opacity: 0.5,
+            window_blur: 20,
             input_position: InputPosition::Bottom,
             blocks_start: BlocksStart::Bottom,
             tab_layout: TabLayout::Horizontal,
             prompt: PromptMode::Rift,
             prompt_chips: PromptChip::defaults(),
             elapsed_counts: ElapsedCounts::Always,
-            copy_on_select: false,
+            copy_on_select: true,
             autosuggestions: true,
             completions_menu: true,
             autocomplete_pairs: true,
             vim_mode: false,
             notify_on_completion: true,
             notify_threshold_secs: 10,
-            bell: Bell::Visual,
+            bell: Bell::Both,
             confirm_close_running: true,
             confirm_multiline_paste: true,
             working_directory: "previous".into(),
@@ -418,8 +424,8 @@ impl Default for Config {
             wheel_scroll_lines: 3,
             clipboard_access: "write".into(),
             mouse_reporting: true,
-            link_editor: crate::editors::SYSTEM.into(),
-            link_click: "prompt".into(),
+            link_editor: crate::editors::RIFT.into(),
+            link_click: "open".into(),
             file_editor: crate::editors::RIFT.into(),
             explorer_hidden_files: true,
             notifications: Default::default(),
@@ -1285,7 +1291,7 @@ mod tests {
     #[test]
     fn opacity_clamps() {
         let mut c = Config::default();
-        assert_eq!(c.opacity(), 1.0);
+        assert_eq!(c.opacity(), 0.5);
         c.window_opacity = 0.1;
         assert_eq!(c.opacity(), 0.1);
         c.window_opacity = 0.0;
@@ -1294,7 +1300,7 @@ mod tests {
         assert_eq!(c.opacity(), 1.0);
         c.window_opacity = f32::NAN;
         assert_eq!(c.opacity(), 1.0);
-        assert_eq!(c.blur(), 1);
+        assert_eq!(c.blur(), 20);
         c.window_blur = 0;
         assert_eq!(c.blur(), 1);
         c.window_blur = 200;

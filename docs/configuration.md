@@ -24,7 +24,7 @@
 All keys optional; omitted keys use the defaults shown.
 
 ```toml
-font_family   = "JetBrains Mono"  # embedded JetBrains Mono or Hack, or any installed
+font_family   = "Hack"            # embedded Hack or JetBrains Mono, or any installed
                                   # fixed-width outline font (Menlo, Monaco, SF Mono…);
                                   # unknown names fall back to JetBrains Mono
 font_size     = 13.0              # settings stepper clamps 8–28 (⌘= / ⌘- / ⌘0 also write this)
@@ -38,8 +38,8 @@ scrollback    = 10000             # lines kept per pane, clamped 0–1000000
                                   # (the Settings stepper offers 1000–1000000)
 window_padding = 8.0              # left/right content padding in px, clamped 0–40
                                   # (single-pane layout; splits keep their gutter)
-window_opacity = 1.0              # window ground opacity, clamped 0.01–1.0 (Warp 1–100 %; overlays and prompt chips stay opaque)
-window_blur = 1                   # macOS: blur behind a translucent window, 1–64 px (1 = none)
+window_opacity = 0.5              # window ground opacity, clamped 0.01–1.0 (Warp 1–100 %; overlays and prompt chips stay opaque)
+window_blur = 20                  # macOS: blur behind a translucent window, 1–64 px (1 = none)
 ligatures     = true              # JetBrains Mono ligatures + contextual alternates
 restore_session = true            # reopen tabs + cwds after a crash or reboot
                                   # (a quit starts fresh; an update restores anyway)
@@ -85,21 +85,21 @@ input_position = "bottom"         # bottom | top — where the command editor si
 blocks_start = "bottom"           # bottom | top — blocks fill up from the editor (Warp), or start at the pane's top
 prompt        = "rift"           # rift = context chips + chevron
                                   # shell   = keep the shell's own PS1 on screen, editor shows ›
-prompt_chips  = ["cwd", "git_branch", "git_diff"]  # the Rift prompt's chips, in order (Settings › Input ›
+prompt_chips  = ["elapsed", "cwd", "git_branch", "git_diff", "docker"]  # the Rift prompt's chips, in order (Settings › Input ›
                                   # Prompt chips edits them): cwd, git_branch, git_diff,
                                   # github_pr, user, host, python, php, docker,
                                   # date, time12, time24, elapsed
 elapsed_counts = "always"         # always | running — what the elapsed chip counts: the time since the tab's
                                   # first command, or only while a command runs in it (time logging; kept
                                   # across an update's restart (a quit starts fresh); Settings › Input › Time on this tab counts)
-copy_on_select = false            # copy the selection on mouse release
+copy_on_select = true             # copy the selection on mouse release
 autosuggestions = true            # inline ghost text after the cursor
 completions_menu = true           # completion panel (Tab still accepts the ghost text)
 autocomplete_pairs = true         # auto-close quotes/brackets; Backspace removes empty pairs
 vim_mode      = false             # modal (vim) editing in the command editor
 notify_on_completion = true       # alert when a long command finishes out of view
 notify_threshold_secs = 10        # what counts as long (stepper: 0–3600, ±5)
-bell          = "visual"          # visual | audible | both | none
+bell          = "both"            # visual | audible | both | none
 confirm_close_running = true      # warn before closing a pane/tab/window with a running job
 confirm_multiline_paste = true    # ask before a paste with newlines reaches a program
                                   # without bracketed paste (each newline presses Enter)
@@ -118,10 +118,10 @@ clipboard_access = "write"        # OSC 52: off | write (programs may copy) | re
                                   # (also read: any program or ssh host can see your clipboard)
 global_hotkey = ""                # system-wide show/hide chord, e.g. "alt+space";
                                   # empty = off (X11 on Linux)
-link_editor   = "system"          # ⌘-clicked file paths / file links: system (default
+link_editor   = "rift"            # ⌘-clicked file paths / file links: system (default
                                   # app) | rift (viewer pane) | an editor id below
-link_click    = "prompt"          # plain click on a link: prompt (show it and ⌘ Click)
-                                  # | open (open it at once); ⌘-click always opens
+link_click    = "open"            # plain click on a link: open (open it at once)
+                                  # | prompt (show it and ⌘ Click); ⌘-click always opens
 file_editor   = "rift"            # explorer and code review ↗: rift | system | editor id
                                   # editors: vscode cursor windsurf zed sublime intellij
                                   # phpstorm webstorm rustrover (macOS: the .app in
@@ -289,8 +289,8 @@ Semantics:
 
 Every event lands in the notifications inbox. For a pane you are not looking
 at, an enabled event also alerts: a toast while Rift is focused, a desktop
-notification (macOS `osascript display notification`, Linux `notify-send`)
-while it is not, plus its sound.
+notification (posted by Rift.app with its icon on macOS, `osascript` outside
+an app bundle; `notify-send` on Linux) while it is not, plus its sound.
 
 | Event | Switch | Default sound (macOS / Linux) |
 |---|---|---|

@@ -234,9 +234,12 @@ Each command becomes a block via shell-integration OSC 133 markers:
 
 - **Header row** (synthesized, replaces the shell's prompt echo):
   - collapse chevron `▾`/`▸` — click toggles collapse
-  - command text (bright)
+  - command text (bright), cut with `…` at the cells it is drawn in (a CJK
+    char takes two) so it never reaches the note or the right side; copy and
+    re-input still use the whole command
   - context: `~/path git:(branch)` — cwd and branch *at the time the command ran*
-    (dim; collapsed blocks show an italic `N lines hidden` here instead; a
+    (dim; collapsed blocks show an italic `N lines hidden` here instead —
+    the command gives way to it, and it is cut short before the badge; a
     block with an output filter active shows a warning-tinted pill `filter "q"
     · shown/total lines` instead)
   - right side: status badge pill (`✓ 0` green / `✕ N` red / amber `running`
@@ -291,7 +294,7 @@ Each command becomes a block via shell-integration OSC 133 markers:
   or relative to the pane's cwd; `file:line:col` suffixes are accepted) —
   ⌘-click opens any of them with the system opener. Only http, https, file,
   mailto and ftp targets open.
-- **Cell styles**: bold, italic (embedded JetBrains Mono Italic/Bold Italic),
+- **Cell styles**: bold, italic (the embedded Hack and JetBrains Mono carry Italic/Bold Italic faces),
   dim, inverse, hidden, strikethrough, blinking (SGR 5: hidden and shown every
   600 ms), and underline variants (single, double, curly, dotted, dashed; SGR
   58 colored).
@@ -660,8 +663,10 @@ matches); only the newest 500 matches are kept for navigation (older
 ones are counted, not visited), so with 600 matches it runs 101/600 …
 600/600. Text is matched as printed: wide glyphs (日本) and combining marks
 (a decomposed `é`, e + U+0301) are found, a typed `é` finds both spellings
-(text and query are compared canonically decomposed; so does the block
-filter), and a match highlights whole cells; hidden (SGR 8) text is not searchable. A query longer
+(plain text and query are compared canonically decomposed; so does the block
+filter; a regex is matched, unchanged, against the text canonically
+composed, so `[é]` is one character and also finds e + U+0301), and a match
+highlights whole cells; hidden (SGR 8) text is not searchable. A query longer
 than the field scrolls so its end stays visible. With the file viewer open,
 ⌘F finds in the file instead (see File viewer).
 
@@ -812,6 +817,13 @@ description) left, control right; it runs to the bottom edge.
   everything also lands in the inbox*.
   - Alerts: `Notifications` master toggle, `In-window toasts` toggle,
     `Toast duration` stepper (s, 2–60).
+  - Desktop notifications: Rift's icon beside `macOS permission` with a
+    status pill (`Allowed`, `Off`, `Not asked yet`) and `Allow…` (not asked
+    yet: macOS asks) or `Open System Settings` (its Notifications page for
+    Rift); read again when Rift comes back to the front. Outside an app
+    bundle it says banners come from Script Editor; on Linux the row is
+    `Desktop notifications` (notify-send). `Banners show` explains the
+    title / subtitle / body.
   - Notify me when: `A long command finishes` toggle, `Long command
     threshold` stepper (s, ±5 within 0–3600), `A command fails`, `An agent finishes its
     task`, `A program or agent needs attention`, `A password prompt appears`
@@ -819,8 +831,17 @@ description) left, control right; it runs to the bottom edge.
   - Sounds: `Play notification sounds` toggle; `Sound`, `Finished`, `Failed`,
     `Needs attention` selects — the list holds `Default`, `None`, then every
     sound file found, and picking one plays it; the per-event ones start at
-    `Same as Sound`.
-  - Terminal bell: `Bell` segmented `Visual | Audible | Both | None`.
+    `Same as Sound`. ▷ before each select plays its sound without opening
+    the list (also with sounds off); `None`, or a file that is gone, says so
+    in a toast.
+  - Try it: `In-app toast` and `Desktop notification` rows, each with
+    `Finished`, `Failed` and `Needs attention` buttons: a sample alert shown
+    the real way (the desktop one also while Rift is in front), with its
+    sound while sounds are on; it lands in the inbox read, and its Rerun
+    only says it works.
+  - Terminal bell: `Bell` segmented `Visual | Audible | Both | None`
+    (Visual flashes the whole window, Audible plays the system's Tink sound,
+    whatever the sounds above say); `Try the bell` → `Ring` rings it as set.
 - **Keybindings** — *Click a shortcut to record a new one · type to filter*:
   a filter row (placeholder `Type to filter actions or shortcuts`; `No matching
   actions` when nothing matches), then every bindable action (including ones that ship unbound)

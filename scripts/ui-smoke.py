@@ -1252,6 +1252,31 @@ run_prompt("select", ["type ls /nonexistent-dir\\n", "wait 800", f"click {out_at
 assert "selected_block=Some(" in (pc / "select-on.txt").read_text()
 assert "selected_block=None" in (pc / "select-off.txt").read_text()
 
+# Settings › Notifications › Try it: a sample toast shows over the Settings
+# tab (they were hidden there, and ran out unseen); pressed by keyboard
+# focused, as a real window is (a read entry's toast was dropped then)
+run_prompt("try-toast", ["focus on", "key cmd+,", "wait 400", "type card for a pane", "wait 300",
+                         "key tab", "wait 100", "key space", "wait 300",
+                         f"dump {pc}/try-toast.txt"])
+tried = (pc / "try-toast.txt").read_text()
+assert "settings_focus=Some(SettingsTestAlert(" in tried, tried[:3000]
+assert re.search(r"note_toasts=\[\d+\]", tried), tried[:3000]
+# drawn, not only queued: the card's own dismiss button is on screen
+assert 'Button "Dismiss: cargo build --release"' in tried, tried[-3000:]
+assert "test alert Finished (toast)" in (pc / "try-toast.log").read_text()
+# ▷ plays the row's own sound without opening the list
+run_prompt("play-probe", ["key cmd+,", "wait 400", "type attention", "wait 300",
+                          f"dump {pc}/play-probe.txt"])
+play = rect_center((pc / "play-probe.txt").read_text(), "Play this sound")
+run_prompt("play", ["key cmd+,", "wait 400", "type attention", "wait 300", f"click {play}",
+                    "wait 300", f"dump {pc}/play.txt"])
+played = (pc / "play.log").read_text()
+# the platform's attention sound (Ping on macOS), or, where it is not
+# installed, a toast that says so
+assert re.search(r"sound \(suppressed\): \S*(Ping|message-new-instant)", played) or \
+    'toast=Some("Sound not found: Default")' in (pc / "play.txt").read_text(), played[-2000:]
+assert "ListBoxOption" not in (pc / "play.txt").read_text(), "▷ opened the list"
+
 # a restored tab gets a new shell, so its elapsed clock starts over: the
 # saved start of a shell that is gone is not shown
 rs = scratch / "restore-elapsed"

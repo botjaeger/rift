@@ -849,10 +849,8 @@ impl Matcher {
         if query.is_empty() {
             return Ok(None);
         }
-        // lines are searched decomposed (`SearchLine::push`)
-        use unicode_normalization::UnicodeNormalization as _;
-        let query: String = query.nfd().collect();
-        let query = query.as_str();
+        // a regex source is syntax, never normalized: it runs on the line
+        // composed (`SearchLine::composed`), so `[é]` stays one char
         if is_regex {
             return regex::RegexBuilder::new(query)
                 .case_insensitive(!case)
@@ -860,8 +858,11 @@ impl Matcher {
                 .map(|r| Some(Matcher::Regex(r)))
                 .map_err(|e| e.to_string());
         }
+        // plain text matches canonically: lines are searched decomposed
+        // (`SearchLine::push`)
+        use unicode_normalization::UnicodeNormalization as _;
         let needle = query
-            .chars()
+            .nfd()
             .map(|c| if case { c } else { fold(c) })
             .collect();
         Ok(Some(Matcher::Plain { needle, case }))
@@ -871,6 +872,14 @@ impl Matcher {
     /// covers any char of a cell covers the whole cell: a wide glyph spans
     /// two columns, and a combining mark belongs to its base cell.
     pub fn find_line(&self, line: &SearchLine) -> Vec<(usize, usize)> {
+        let composed;
+        let line = match self {
+            Matcher::Plain { .. } => line,
+            Matcher::Regex(_) => {
+                composed = line.composed();
+                &composed
+            }
+        };
         self.find_cols(&line.text)
             .into_iter()
             .map(|(s, n)| {
@@ -970,6 +979,32 @@ impl SearchLine {
             self.cols.push(col);
             self.ends.push(end);
         });
+    }
+
+    /// The same line canonically composed (NFC) cell by cell, for regex
+    /// search: a regex is matched against code points, and terminal text
+    /// is mostly composed, so `é` typed in a pattern finds `é` (also when
+    /// the program printed `e` + U+0301).
+    fn composed(&self) -> SearchLine {
+        use unicode_normalization::UnicodeNormalization as _;
+        let mut out = SearchLine::default();
+        let chars: Vec<char> = self.text.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            // one cell's chars share a column
+            let mut j = i + 1;
+            while j < chars.len() && self.cols[j] == self.cols[i] {
+                j += 1;
+            }
+            let cluster: String = chars[i..j].iter().collect();
+            for c in cluster.nfc() {
+                out.text.push(c);
+                out.cols.push(self.cols[i]);
+                out.ends.push(self.ends[i]);
+            }
+            i = j;
+        }
+        out
     }
 
     /// Trailing blank cells dropped.
@@ -2844,6 +2879,42 @@ fn wash_row(layer: &mut Layer, grid: &GridLayout, y: f32, color: Color) {
     );
 }
 
+/// `s` fitted to `max` cells as the terminal counts them (a CJK char takes
+/// two, a combining mark none, a ZWJ emoji two): whole clusters only, with
+/// `…` when cut. Returns the text and its width in cells.
+fn fit_cells(s: &str, max: usize) -> (String, usize) {
+    use rift_pty::alacritty_terminal::term::width::{Cluster, Placement};
+    let mut cluster = Cluster::default();
+    // (byte offset where a cluster starts, cells before it)
+    let mut starts = Vec::new();
+    let mut used = 0usize;
+    for (i, c) in s.char_indices() {
+        match cluster.next(c) {
+            Some(Placement::New(w)) => {
+                starts.push((i, used));
+                used += w;
+            }
+            Some(Placement::JoinWiden) => used += 1,
+            Some(Placement::JoinNarrow) => used = used.saturating_sub(1),
+            Some(Placement::Join) | None => {}
+        }
+    }
+    if used <= max {
+        return (s.to_string(), used);
+    }
+    // keep the clusters before the first one that starts at or past the
+    // room left for `…` (cells before a start = where the previous ends)
+    let room = max.saturating_sub(1);
+    let (byte, cells) = starts
+        .iter()
+        .skip(1)
+        .take_while(|&&(_, before)| before <= room)
+        .last()
+        .copied()
+        .unwrap_or((0, 0));
+    (format!("{}…", &s[..byte]), cells + 1)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_header(
     layer: &mut Layer,
@@ -2927,33 +2998,36 @@ fn render_header(
     } else {
         block.command.replace('\n', " ⏎ ")
     };
-    // a filter note keeps its room after the command (the command gives
-    // way down to eight cells, then the note is cut too)
-    let note_room = filter_note.map_or(0.0, |n| {
-        engine.measure(n, 11.5, FONT_SANS, Weight::NORMAL) + 14.0 + 11.0
-    });
+    // the collapsed-output note ("4 lines hidden"), when no filter note
+    let hidden_note = match block.output_range() {
+        Some((s, e)) if filter_note.is_none() && block.collapsed => {
+            let n = e - s;
+            Some(format!("{n} line{} hidden", if n == 1 { "" } else { "s" }))
+        }
+        _ => None,
+    };
+    // a note keeps its room after the command (the command gives way down
+    // to eight cells, then the note is cut too)
+    let note_room = match (filter_note, &hidden_note) {
+        (Some(n), _) => engine.measure(n, 11.5, FONT_SANS, Weight::NORMAL) + 14.0 + 11.0,
+        (None, Some(n)) => engine.measure(n, 11.5, mono_family(), Weight::NORMAL) + 11.0 + 10.0,
+        (None, None) => 0.0,
+    };
     let cmd_limit = (left_limit - note_room).max(cmd_x + 8.0 * grid.cell_w);
     let fit = ((cmd_limit.min(left_limit) - cmd_x) / grid.cell_w)
         .floor()
         .max(1.0) as usize;
-    let cmd = if cmd.chars().count() > fit {
-        let mut s: String = cmd.chars().take(fit.saturating_sub(1)).collect();
-        s.push('…');
-        s
-    } else {
-        cmd
-    };
+    // cells as drawn: a CJK char is two, so counting chars ran it into
+    // the badge and past the pane
+    let (cmd, cmd_cells) = fit_cells(&cmd, fit);
     let cmd_buf = make_command_text(engine, &cmd, grid.font_size, grid.line_h, theme);
     layer.text(cmd_buf, cmd_x, y, theme.text_bright);
 
-    // collapsed note, else Warp-style prompt context: ~/path git:(branch)
-    let after_cmd_x = cmd_x + cmd.chars().count() as f32 * grid.cell_w + 11.0;
-    if let Some(note) = filter_note {
-        // never under the badge and duration on the right
-        let room = left_limit - after_cmd_x - 14.0;
+    // a note cut to `room` px (`None` when not even "…" fits)
+    let fit_note = |engine: &mut TextEngine, note: &str, family, room: f32| {
         let full: Vec<char> = note.chars().collect();
         let mut note = note.to_string();
-        let mut tw = engine.measure(&note, 11.5, FONT_SANS, Weight::NORMAL);
+        let mut tw = engine.measure(&note, 11.5, family, Weight::NORMAL);
         let mut keep = full.len();
         while tw > room && keep > 0 {
             keep -= 1;
@@ -2963,37 +3037,45 @@ fn render_header(
                 .trim_end()
                 .to_string()
                 + "…";
-            tw = engine.measure(&note, 11.5, FONT_SANS, Weight::NORMAL);
+            tw = engine.measure(&note, 11.5, family, Weight::NORMAL);
         }
-        let note = note.as_str();
-        layer.rect(
-            [after_cmd_x - 2.0, y + (grid.line_h - 17.0) / 2.0],
-            [tw + 14.0, 17.0],
-            theme.warning.with_alpha(0.13),
-            5.0,
-        );
-        let nbuf = make_text(engine, note, 11.5, grid.line_h, FONT_SANS, Weight::NORMAL);
-        layer.text(nbuf, after_cmd_x + 5.0, y, theme.warning);
-    } else if block.collapsed
-        && let Some((s, e)) = block.output_range()
-    {
-        // design 01: italic mono, muted
-        let n = e - s;
-        let note = format!("{n} line{} hidden", if n == 1 { "" } else { "s" });
-        let mut nbuf = rift_renderer::glyphon::Buffer::new(
-            &mut engine.font_system,
-            rift_renderer::glyphon::Metrics::new(11.5, grid.line_h),
-        );
-        nbuf.set_text(
-            &mut engine.font_system,
-            &note,
-            &rift_renderer::glyphon::Attrs::new()
-                .family(rift_renderer::glyphon::Family::Name(mono_family()))
-                .style(rift_renderer::glyphon::Style::Italic),
-            rift_renderer::glyphon::Shaping::Advanced,
-            None,
-        );
-        layer.text(nbuf, after_cmd_x, y, theme.text_muted);
+        (tw <= room).then_some((note, tw))
+    };
+
+    // collapsed note, else Warp-style prompt context: ~/path git:(branch)
+    let after_cmd_x = cmd_x + cmd_cells as f32 * grid.cell_w + 11.0;
+    if let Some(note) = filter_note {
+        // never under the badge and duration on the right
+        let room = left_limit - after_cmd_x - 14.0;
+        if let Some((note, tw)) = fit_note(engine, note, FONT_SANS, room) {
+            layer.rect(
+                [after_cmd_x - 2.0, y + (grid.line_h - 17.0) / 2.0],
+                [tw + 14.0, 17.0],
+                theme.warning.with_alpha(0.13),
+                5.0,
+            );
+            let nbuf = make_text(engine, &note, 11.5, grid.line_h, FONT_SANS, Weight::NORMAL);
+            layer.text(nbuf, after_cmd_x + 5.0, y, theme.warning);
+        }
+    } else if let Some(note) = &hidden_note {
+        // design 01: italic mono, muted; never under the badge either
+        let room = left_limit - after_cmd_x - 10.0;
+        if let Some((note, _)) = fit_note(engine, note, mono_family(), room) {
+            let mut nbuf = rift_renderer::glyphon::Buffer::new(
+                &mut engine.font_system,
+                rift_renderer::glyphon::Metrics::new(11.5, grid.line_h),
+            );
+            nbuf.set_text(
+                &mut engine.font_system,
+                &note,
+                &rift_renderer::glyphon::Attrs::new()
+                    .family(rift_renderer::glyphon::Family::Name(mono_family()))
+                    .style(rift_renderer::glyphon::Style::Italic),
+                rift_renderer::glyphon::Shaping::Advanced,
+                None,
+            );
+            layer.text(nbuf, after_cmd_x, y, theme.text_muted);
+        }
     } else if block.cwd.is_some() || block.branch.is_some() {
         let mut ctx = block
             .cwd
@@ -3344,7 +3426,7 @@ mod tests {
         assert_eq!(m.find_line(&row1), vec![(0, 1)]);
         let m = Matcher::new("\u{301}y", true, false).unwrap().unwrap();
         assert_eq!(m.find_line(&row1), vec![(0, 2)]);
-        let m = Matcher::new("e\u{301}y", true, true).unwrap().unwrap();
+        let m = Matcher::new("\u{e9}y", true, true).unwrap().unwrap();
         assert_eq!(m.find_line(&row1), vec![(0, 2)]);
     }
 
@@ -3647,11 +3729,72 @@ mod tests {
         let (t, scrolled) = fed(20, 3, 10, "caf\u{e9} cafe\u{301}".as_bytes());
         let row = search_text(&t, scrolled, scrolled).unwrap();
         for q in ["caf\u{e9}", "cafe\u{301}", "CAF\u{c9}"] {
-            for re in [false, true] {
-                let m = Matcher::new(q, false, re).unwrap().unwrap();
-                assert_eq!(m.find_line(&row), vec![(0, 4), (5, 4)], "{q:?} re={re}");
-            }
+            let m = Matcher::new(q, false, false).unwrap().unwrap();
+            assert_eq!(m.find_line(&row), vec![(0, 4), (5, 4)], "{q:?}");
         }
+        // a regex matches code points of the composed line: a typed
+        // (composed) accent finds both spellings
+        for q in ["caf\u{e9}", "CAF\u{c9}", "caf[\u{e9}]", "caf\u{e9}+"] {
+            let m = Matcher::new(q, false, true).unwrap().unwrap();
+            assert_eq!(m.find_line(&row), vec![(0, 4), (5, 4)], "{q:?}");
+        }
+    }
+
+    /// Header commands are budgeted in drawn cells: counting chars let a
+    /// CJK command run through the badge and off the pane.
+    #[test]
+    fn fit_cells_counts_drawn_cells_and_keeps_clusters_whole() {
+        assert_eq!(fit_cells("echo hi", 7), ("echo hi".into(), 7));
+        assert_eq!(fit_cells("echo hi", 6), ("echo …".into(), 6));
+        assert_eq!(fit_cells("漢字漢字", 8), ("漢字漢字".into(), 8));
+        // 5 cells: two wide chars and the ellipsis, never half a char
+        assert_eq!(fit_cells("漢字漢字", 6), ("漢字…".into(), 5));
+        assert_eq!(fit_cells("漢字漢字", 2), ("…".into(), 1));
+        // a combining mark takes no cell and stays on its base
+        assert_eq!(fit_cells("cafe\u{301}!", 5), ("cafe\u{301}!".into(), 5));
+        assert_eq!(fit_cells("cafe\u{301}!!", 5), ("cafe\u{301}…".into(), 5));
+        // a ZWJ family is one two-cell cluster
+        let fam = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+        assert_eq!(fit_cells(&format!("a{fam}b"), 4).1, 4);
+        assert_eq!(fit_cells(&format!("a{fam}bc"), 4), (format!("a{fam}…"), 4));
+    }
+
+    /// A regex source is syntax: normalizing it turned `[é]` into a class
+    /// of `e` and U+0301, which matched plain `e` and missed `é`.
+    #[test]
+    fn regex_classes_keep_accented_chars_whole() {
+        // as a grid holds them: a combining mark rides on its base cell
+        let line = |cells: &[&str]| {
+            let mut l = SearchLine::default();
+            for (col, cell) in cells.iter().enumerate() {
+                for c in cell.chars() {
+                    l.push(c, col, col + 1);
+                }
+            }
+            l
+        };
+        let lines = [
+            line(&["e"]),
+            line(&["\u{e9}"]),
+            line(&["\u{e9}", "\u{e9}"]),
+            line(&["e\u{301}"]),
+        ];
+        let hits = |q: &str| -> Vec<usize> {
+            let m = Matcher::new(q, true, true).unwrap().unwrap();
+            lines
+                .iter()
+                .enumerate()
+                .filter(|(_, l)| !m.find_line(l).is_empty())
+                .map(|(i, _)| i)
+                .collect()
+        };
+        assert_eq!(hits("^[\u{e9}]$"), vec![1, 3]);
+        assert_eq!(hits("^\u{e9}+$"), vec![1, 2, 3]);
+        assert_eq!(hits("^(e|x)$"), vec![0]);
+        assert_eq!(hits(r"^\x{e9}$"), vec![1, 3]);
+        // the decomposed cell still highlights as one column
+        let m = Matcher::new("\u{e9}", true, true).unwrap().unwrap();
+        assert_eq!(m.find_line(&line(&["a", "e\u{301}", "b"])), vec![(1, 1)]);
     }
 
     #[test]

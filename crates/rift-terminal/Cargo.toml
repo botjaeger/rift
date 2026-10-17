@@ -39,4 +39,7 @@ zeno = "0.3"
 muda = { version = "0.20", default-features = false }
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "NSApplication", "NSButton", "NSColor", "NSControl", "NSImage", "NSResponder", "NSRunningApplication", "NSView", "NSWindow"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "NSData", "NSGeometry"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "NSArray", "NSBundle", "NSData", "NSDictionary", "NSError", "NSGeometry", "NSSet", "NSString"] }
+# desktop notifications posted by Rift.app itself (its icon; a click opens the pane)
+objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "bitflags", "UNNotification", "UNNotificationAction", "UNNotificationCategory", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSettings", "UNNotificationSound", "UNNotificationTrigger", "UNUserNotificationCenter"] }
+block2 = "0.6"
