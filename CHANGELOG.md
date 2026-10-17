@@ -8,6 +8,40 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.12.0 — 2026-10-17
+
+Richer desktop notifications, a way to test every alert, and a smoother terminal under load.
+
+### New
+
+- **Detailed desktop notifications** — on macOS a finished or failed command now notifies with
+  Rift's icon, the outcome, how long it ran, and the tab, folder and branch it ran in. Click it to
+  jump to the pane; a failed command also offers **Rerun**.
+- **Test your notifications** — Settings › Notifications shows whether macOS allows Rift's
+  notifications (with a button to allow them), a play button beside each sound, and buttons that
+  send a test toast, a test desktop notification and a test bell.
+
+### Improved
+
+- **New defaults** — settings you have not changed now use Hack, a translucent blurred window,
+  copy on select, a visual and audible bell, links that open on click (files in Rift's editor),
+  and prompt chips for elapsed time and Docker.
+- **Pane dividers** — the divider between panes is translucent, so it reads the same at any
+  window opacity.
+- **Command headers fit** — a long command or folder in a block header no longer runs into its
+  status and buttons.
+
+### Fixed
+
+- **Heavy input no longer freezes the window** — pasting or typing a lot into a busy program
+  no longer stalls Rift while the program catches up.
+- **Startup with a stuck session service** — if the background session service stops answering,
+  Rift opens normal shells within a few seconds instead of hanging.
+- **Completing commands with `=` in the name** — accepting such a completion no longer changes
+  the shell's variables.
+- **Regex find with accented text** — regex search now matches accented text as it appears.
+- **Toasts with Settings open** — in-app toasts now show while Settings is open.
+
 ## 0.11.1 — 2026-10-16
 
 ### Improved
