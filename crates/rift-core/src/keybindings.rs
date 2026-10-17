@@ -328,6 +328,7 @@ pub fn all_actions() -> Vec<&'static str> {
         "close_other_tabs",
         "reset_tab_timer",
         "save_launch_config",
+        "equalize_panes",
         "pipe_block_output",
         "toggle_tab_layout",
         "clear_transcripts",

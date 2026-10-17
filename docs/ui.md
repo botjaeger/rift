@@ -28,6 +28,16 @@ pane, history, autocomplete, palette, settings, controls, menus, panels).
 - Hover highlights (tabs, welcome rows, pane controls, settings rows) repaint
   the moment the pointer crosses into or out of a control, not on the next
   frame something else draws.
+- **Drop-down hotkey window** (`hotkey_window`): the global hotkey slides a
+  borderless window down from the top edge of the pointer's screen, full
+  width and `hotkey_window_height` percent tall, floating above other apps
+  (every Space and over full-screen apps on macOS). It keeps the tab strip,
+  with the space the window buttons would take left empty (no buttons; the
+  strip neither drags nor zooms it). It slides up when the hotkey is pressed again
+  or, with `hotkey_window_hide_on_blur`, when it loses focus. Settings ›
+  General › Hotkey window has the three settings; the hotkey itself is
+  `global_hotkey` in `config.toml`. The session switcher (⇧⌘O) lists its
+  tabs as "… — hotkey window". See [features](features.md#global-hotkey).
 
 ## Menu bar (macOS)
 
@@ -40,6 +50,11 @@ Command History, File Explorer, Code Review, Bigger/Smaller/Actual
 Size, Maximize Pane, Toggle Full Screen) · **Blocks** (select/copy/reinput/bookmark/scroll actions) ·
 **Window** (Minimize, Zoom, tab and pane navigation, Synchronize Inputs,
 Bring All to Front) · **Help** (What's New, Keyboard Shortcuts).
+
+Menu items act on the window that last had focus. New Window opens another
+window of the same process, offset from the current one; Close Window closes
+only it while others are open ("Close window?" when commands run in it) and
+quits with the last one; Quit asks "Quit Rift?" for every window at once.
 
 Shortcut labels come from the live keymap (`[keybindings]` overrides show up
 after the reload); only ⌘ chords become menu key equivalents so ctrl chords
@@ -59,7 +74,14 @@ every action).
   colored tab shows its color as the 2 px top edge when inactive too.
 - `×` shows on the active and the hovered tab and closes it (all its
   panes); on the others its place shows the tab's alert badge or an accent
-  dot for output since last viewed. `+` spawns a new tab.
+  dot for output since last viewed. `tab_close_button = "always"` shows it
+  on every tab whose slot holds no badge or dot; `"never"` shows it on none
+  (⌘W, the tab menu and the palette still close tabs). `+` spawns a new tab,
+  at the end of the strip or, with `new_tab_placement = "after_current"`,
+  right after the active tab.
+- With `tab_bar_with_one_tab = false` and a single tab open (the Settings tab
+  counts), the strip shows no tab: the traffic lights, panel buttons and `+`
+  stay; the vertical rail goes away and the panes take its width.
 - Drag a tab: past 4 px it lifts and follows the pointer, its neighbours
   reorder as it passes their midpoints, and its slot shows an accent caret.
   Esc while dragging puts it back where it was pressed.
@@ -96,11 +118,12 @@ every action).
 
 ## Vertical tab rail
 
-`tab_layout = "vertical"` (Settings → Appearance → *Tabs: Side*) replaces the
+`tab_layout = "vertical"` (Settings → Appearance → *Tab position: Side*) replaces the
 tab strip with a 220 px rail on the left: one 54 px row per tab with the
 title (after a spinner while a command runs, else a sync icon when synced), directory, git branch, pane count, activity
 dot and tab color; the active row sits on the pane ground with a 2 px accent
-left edge. Click selects, × closes; ⌘T adds a tab; drag a row up or down to
+left edge. Click selects, × closes (every row carries it unless
+`tab_close_button = "never"`); ⌘T adds a tab; drag a row up or down to
 reorder. When the tabs do not fit, the rail keeps the active tab visible: a
 `+N above` line at the top and a `+N more · palette lists all` line at the
 bottom stand in for the hidden tabs, each marked with the most urgent alert
@@ -272,6 +295,7 @@ Each command becomes a block via shell-integration OSC 133 markers:
   block. Not over a command that is still running while the view follows its
   output: the program owns the whole PTY height and redraws its top row
   (vttest, progress UIs). Scrolled up, or once the command ends, it pins again.
+  `sticky_command_header = false` turns it off.
 - **Reverse screen** (DECSCNM, `CSI ? 5 h`, used by vttest and `tput flash`):
   the pane's default foreground and background trade places until the program
   resets it (or a terminal reset).
@@ -411,9 +435,13 @@ integration). Sits at the bottom of the pane, or at the top with
   paths.
 - **Cursor**: `cursor_style` = block (8×17 px), bar (2 px) or underline
   (2 px), 1.1 s blink; exact shaped-text positioning, translucent when a glyph
-  sits under it. Vim NORMAL always draws a solid, non-blinking block.
+  sits under it. Vim NORMAL and VISUAL always draw a solid, non-blinking
+  block, REPLACE a non-blinking underline.
 - **Vim mode pill** at the right edge of the input line when `vim_mode` is on:
-  `NORMAL` (warning color) or `INSERT` (muted).
+  `NORMAL` (warning color), `INSERT` (muted), `VISUAL` / `VISUAL LINE`
+  (accent) or `REPLACE` (error color). An open `/` or `?` search prompt
+  shows there instead (`/text`, its last 10 chars), in bright text. The
+  visual selection draws with the editor's selection highlight.
 - **Ghost text**: inline dimmed completion preview continuing the line at
   the cursor (Warp), followed by a small `→` key chip; → at the end of the
   line or Tab accepts it all, ⌃→ one word at a time.
@@ -429,7 +457,13 @@ integration). Sits at the bottom of the pane, or at the top with
   is one): ⇧⇥ or a click switches the source. Rows show an icon (folder,
   file, history, branch, terminal), the name with the typed part in the
   accent, and the description at the right; a click accepts a row (a history
-  row replaces the whole line). The footer shows `↑ ↓ navigate`, `⇥ accept`,
+  row replaces the whole line). Your shell's own completions join the
+  rows (source `SHELL`) within 300 ms of Rift's, keeping the picked row
+  picked. A pane on another host that cannot complete there (an `ssh` typed
+  without a shared connection) ends the rows with a muted hint row (info
+  icon) "Remote completions need an SSH profile" (alone, it opens no
+  panel); Tab on it accepts the ghost text, or closes the panel when there
+  is none. Only rows starting with the typed word show it bold. The footer shows `↑ ↓ navigate`, `⇥ accept`,
   `→ accept ghost`, `esc dismiss`. Square corners, hairline edge, up to 8
   rows.
 - **Welcome list**: a fresh session (no command run yet, single pane with
@@ -452,7 +486,9 @@ integration). Sits at the bottom of the pane, or at the top with
   style).
 - Active pane: its title bar carries a 2 px accent top edge; inactive panes
   wash lighter (a 10 % white veil, as in Warp; a light 5 % shade on a light
-  theme), so the pane you are in is the dark one.
+  theme), so the pane you are in is the dark one. `inactive_pane_dim` sets
+  the veil (1–40 %, half of it on a light theme); `dim_inactive_panes =
+  false` drops it (the 1 px dividers keep theirs).
 - Each pane has a 28 px title bar (Warp pane header): a terminal icon, the
   program's title (OSC 0/2), else the pane's directory, centered (after a
   spinner while a command runs); while the
@@ -527,8 +563,10 @@ click on a chip switches mode. Modes:
   configured shell's history file) + per-pane local history; Enter runs, or
   insert into the editor. (⌃R in the command line opens the history pane.)
 - **Session switcher** (⇧⌘O) — tabs, panes of split tabs (directory and
-  running job), tabs of other Rift windows, detached session-service shells,
-  and the 40 newest finished blocks. Enter jumps there.
+  running job), the other windows' tabs (`<title> — window N`, N counting
+  from 1 in opening order; Enter raises that window), tabs of other Rift
+  processes, detached session-service shells, and the 40 newest finished
+  blocks of this window. Enter jumps there.
 
 - **Send output to command…** — a fourth mode, opened from the block menu or
   the action `Send block output to a command`, with no mode chips. The
@@ -599,7 +637,8 @@ block; ⇧ + label copies it (a block copies its output). Esc cancels.
   program's badge (a coding agent's brand disc, such as the Claude mark,
   else a terminal mark), the command, and the agent's name; pasted lines
   and files are plain code lines. Used for closing
-  running commands, pasting multi-line text into a shell without bracketed
+  running commands ("Close window?" for one of several windows, "Quit
+  Rift?" for the last one or ⌘Q, which lists every window's), pasting multi-line text into a shell without bracketed
   paste ("Paste and run?"), installing shell integration on an SSH host, and
   updating ("Update to Rift vX.Y.Z?": what the restart keeps — tabs,
   running shells, windows that cannot be reopened — with *Later* `esc` and
@@ -748,6 +787,12 @@ description) left, control right; it runs to the bottom edge.
     turning this off deletes it*; `save_transcripts`),
     `Keep shells running through updates` toggle (*Session service;
     updates and crashes reattach (new shells)*; `durable_sessions`).
+  - Hotkey window: `Drop-down hotkey window` toggle (*The global hotkey
+    slides a window down from the top of the screen*; `hotkey_window`),
+    `Hotkey window height` stepper (%, ±5 within 20–100; *Share of the
+    screen it covers*), `Hide it when it loses focus` toggle
+    (`hotkey_window_hide_on_blur`). The hotkey (`global_hotkey`) is set in
+    config.toml.
   - Updates: `Check for updates` toggle (*At launch and every 6 hours;
     the update downloads, then Update Rift appears in the tab bar*; `check_for_updates`), then a
     `Rift <version>` row whose description is the update status (`Not
@@ -773,16 +818,29 @@ description) left, control right; it runs to the bottom edge.
     slider (1–100 %, value boxed right of the track), `Window blur radius`
     slider (1–64 px, macOS only),
     `Window padding` stepper (px, ±2), `Font ligatures` toggle (*Render -> >=
-    != as combined glyphs*), `Tabs` segmented `Top | Side` (`tab_layout`).
+    != as combined glyphs*).
+  - Tabs: `Tab position` segmented `Top | Side` (`tab_layout`), `Close
+    buttons` segmented `On hover | Always | Never` (*Always keeps a tab's
+    alert dot until you hover it*; `tab_close_button`), `New tabs open`
+    segmented `At the end | After the current tab` (`new_tab_placement`),
+    `Show tabs with only one tab open` toggle (*Off hides the lone tab; the
+    bar's buttons stay*; `tab_bar_with_one_tab`).
+  - Panes: `Dim inactive panes` toggle (`dim_inactive_panes`), `Dimming
+    strength` slider (1–40 %, shown while dimming is on;
+    `inactive_pane_dim`), `Focus follows mouse` toggle (*The split pane under
+    the pointer takes focus*; `focus_follows_mouse`).
     Font size and line height show the applied (clamped) value. A theme file
     that does not load is listed as `<name> (invalid theme file)`, choosing it
     toasts why and Dark Default is used; themes sharing a display name carry
     their file name.
 - **Input** — *The command line and blocks*.
   - Input: `Vim keybindings` toggle, `Autosuggestions (ghost text)` toggle,
-    `Completions menu` toggle, `Autocomplete quotes and brackets` toggle,
+    `Completions menu` toggle, `Completions from your shell` toggle
+    (`shell_completions`), `Autocomplete quotes and brackets` toggle,
     `Input position` segmented `Bottom | Top`, `Blocks start` segmented
-    `Bottom | Top`, `Prompt` segmented
+    `Bottom | Top`, `Sticky command header` toggle (*Pins a long block's
+    command to the top while you scroll its output*;
+    `sticky_command_header`), `Prompt` segmented
     `Rift | Shell (PS1)`, `Prompt chips` (a preview of the chips with
     sample values; a click opens **Edit prompt**), `Time on this tab counts`
     segmented `Since first command | Only while running`, `Expand aliases as you type`, `Underline unknown

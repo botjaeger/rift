@@ -38,6 +38,7 @@ pub fn exit(event_loop: &ActiveEventLoop) {
         .spawn(|| {
             watch(DEADLINE, &LOOP_RETURNED, || {
                 log::warn!("quit: the event loop did not stop in {DEADLINE:?}; exiting");
+                rift_core::shell_complete::stop_all();
                 std::process::exit(0)
             })
         });

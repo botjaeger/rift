@@ -556,7 +556,7 @@ fn spawn(
                     Ok(n) => {
                         let bytes = buf[..n].to_vec();
                         for seg in scanner.scan(&bytes) {
-                            if let Some(rift_core::Marker::Cwd(p)) = seg.marker {
+                            if let Some(rift_core::Marker::Cwd { path: p, .. }) = seg.marker {
                                 *shell.cwd.lock().unwrap() = Some(p);
                             }
                         }

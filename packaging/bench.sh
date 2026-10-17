@@ -78,6 +78,32 @@ done
 # the script driver waits 1.5 s before its first step; subtract it
 echo "| Startup to first prompt (best of 3) | $((best - 1500)) ms | ${rss} MiB |"
 
+# 1b. a second window (⌘N opens it in the same process): the time it takes
+# the UI thread to open it with its first tab (the app's log), and the peak
+# RSS it adds over one window (best of 3 each)
+cat >"$WORK/one-window.rift" <<'EOF'
+wait_prompt
+wait 1000
+quit
+EOF
+cat >"$WORK/two-windows.rift" <<'EOF'
+wait_prompt
+new_window
+wait_prompt
+wait 1000
+quit
+EOF
+open_ms="" one_rss="" two_rss=""
+for _ in 1 2 3; do
+    rss=$(run_script one-window)
+    if [[ -z "$one_rss" || $rss -lt $one_rss ]]; then one_rss=$rss; fi
+    rss=$(run_script two-windows)
+    if [[ -z "$two_rss" || $rss -lt $two_rss ]]; then two_rss=$rss; fi
+    ms=$(grep -o 'new window in [0-9]*' "$WORK/two-windows.log" | awk '{print $4}' | head -1)
+    if [[ -n "$ms" && (-z "$open_ms" || $ms -lt $open_ms) ]]; then open_ms=$ms; fi
+done
+echo "| New window, in-process (best of 3) | ${open_ms:-?} ms | +$((two_rss - one_rss)) MiB |"
+
 # 2. high-volume output: 500k short lines, and a 20 MiB file
 { seq 1 4000000 || true; } | head -c 20971520 >"$WORK/big.txt" # seq gets SIGPIPE
 # each dump right after its command: older blocks leave the scrollback

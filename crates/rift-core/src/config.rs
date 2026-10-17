@@ -177,6 +177,28 @@ pub enum TabLayout {
     Vertical,
 }
 
+/// When a horizontal tab shows its × (Warp has only a position setting):
+/// on the active and the hovered tab, on every tab, or never (⌘W, the tab
+/// menu and the palette still close tabs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TabCloseButton {
+    #[default]
+    Hover,
+    Always,
+    Never,
+}
+
+/// Where a new tab (⌘T, the + button) lands in the strip: after every tab,
+/// or right after the active one (Warp `new_tab_placement`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum NewTabPlacement {
+    #[default]
+    End,
+    AfterCurrent,
+}
+
 /// What renders above the editor: Rift's context chips, or the shell's
 /// own prompt (PS1 / starship / p10k) left visible (Warp "Use my shell's
 /// prompt").
@@ -285,6 +307,26 @@ pub struct Config {
     pub input_position: InputPosition,
     pub blocks_start: BlocksStart,
     pub tab_layout: TabLayout,
+    /// When a tab in the top strip shows its close button.
+    pub tab_close_button: TabCloseButton,
+    /// Where ⌘T and the + button put the new tab.
+    pub new_tab_placement: NewTabPlacement,
+    /// Show the tabs (the strip's tab, the vertical rail) while only one
+    /// tab is open; off leaves the bar's buttons and + alone.
+    pub tab_bar_with_one_tab: bool,
+    /// Pin the header of a block whose start scrolled off the top of the
+    /// active pane (Warp "Show sticky command header").
+    pub sticky_command_header: bool,
+    /// Wash the unfocused split panes so the focused one stands out (Warp
+    /// "Dim inactive panes").
+    pub dim_inactive_panes: bool,
+    /// Strength of that wash in percent, 1–40 (half as strong on a light
+    /// theme). Getter: `inactive_pane_dim()`.
+    #[serde(deserialize_with = "saturating_u8")]
+    pub inactive_pane_dim: u8,
+    /// The split pane under the pointer takes focus as the pointer moves
+    /// (Warp "Focus follows mouse").
+    pub focus_follows_mouse: bool,
     pub prompt: PromptMode,
     /// The Rift prompt's chips, in order (`prompt = "rift"`).
     pub prompt_chips: Vec<PromptChip>,
@@ -297,6 +339,10 @@ pub struct Config {
     pub autosuggestions: bool,
     /// Completion dropdown (Tab still accepts the ghost suggestion).
     pub completions_menu: bool,
+    /// Ask the user's own shell (zsh, bash or fish completion functions)
+    /// for completions too, and the remote shell over an SSH profile's
+    /// shared connection.
+    pub shell_completions: bool,
     /// Automatically insert and remove matching quotes, brackets and braces.
     pub autocomplete_pairs: bool,
     /// Modal (vim) editing in the command editor.
@@ -324,6 +370,15 @@ pub struct Config {
     pub command_corrections: bool,
     /// System-wide show/hide shortcut (e.g. `"alt+space"`); empty = off.
     pub global_hotkey: String,
+    /// The global hotkey shows and hides a drop-down window at the top of
+    /// the screen (Warp's dedicated hotkey window) instead of the whole app.
+    pub hotkey_window: bool,
+    /// Height of the drop-down window in percent of the screen, 20–100.
+    /// Getter: `hotkey_window_height()`.
+    #[serde(deserialize_with = "saturating_u8")]
+    pub hotkey_window_height: u8,
+    /// The drop-down window hides when it loses keyboard focus.
+    pub hotkey_window_hide_on_blur: bool,
     /// macOS: the Option key sends Meta (ESC prefix, for emacs/readline
     /// word motion) instead of composing characters like `∫`. Linux Alt is
     /// always Meta.
@@ -400,12 +455,20 @@ impl Default for Config {
             input_position: InputPosition::Bottom,
             blocks_start: BlocksStart::Bottom,
             tab_layout: TabLayout::Horizontal,
+            tab_close_button: TabCloseButton::Hover,
+            new_tab_placement: NewTabPlacement::End,
+            tab_bar_with_one_tab: true,
+            sticky_command_header: true,
+            dim_inactive_panes: true,
+            inactive_pane_dim: 10,
+            focus_follows_mouse: false,
             prompt: PromptMode::Rift,
             prompt_chips: PromptChip::defaults(),
             elapsed_counts: ElapsedCounts::Always,
             copy_on_select: true,
             autosuggestions: true,
             completions_menu: true,
+            shell_completions: true,
             autocomplete_pairs: true,
             vim_mode: false,
             notify_on_completion: true,
@@ -418,6 +481,9 @@ impl Default for Config {
             error_underline: true,
             command_corrections: true,
             global_hotkey: String::new(),
+            hotkey_window: false,
+            hotkey_window_height: 40,
+            hotkey_window_hide_on_blur: true,
             option_as_meta: false,
             right_option_as_meta: None,
             middle_click_paste: true,
@@ -805,6 +871,11 @@ impl Config {
         self.wheel_scroll_lines.clamp(1, 20) as f32
     }
 
+    /// Drop-down window height in percent of the screen, clamped to 20–100.
+    pub fn hotkey_window_height(&self) -> u8 {
+        self.hotkey_window_height.clamp(20, 100)
+    }
+
     /// The right Option key sends Meta (macOS).
     pub fn right_option_meta(&self) -> bool {
         self.right_option_as_meta.unwrap_or(self.option_as_meta)
@@ -823,6 +894,16 @@ impl Config {
     /// Background blur radius clamped to Warp's 1–64 px.
     pub fn blur(&self) -> u8 {
         self.window_blur.clamp(1, 64)
+    }
+
+    /// `inactive_pane_dim` as a wash alpha for a dark theme (a light theme
+    /// takes half of it); 0 while `dim_inactive_panes` is off.
+    pub fn inactive_pane_dim(&self) -> f32 {
+        if self.dim_inactive_panes {
+            f32::from(self.inactive_pane_dim.clamp(1, 40)) / 100.0
+        } else {
+            0.0
+        }
     }
 }
 
@@ -855,6 +936,29 @@ mod tests {
         );
         let neg: Config = toml::from_str("window_blur = -4\n").unwrap();
         assert_eq!(neg.blur(), 1);
+    }
+
+    #[test]
+    fn hotkey_window_defaults_and_height_clamp() {
+        let c = Config::default();
+        assert_eq!(
+            (
+                c.hotkey_window,
+                c.hotkey_window_height(),
+                c.hotkey_window_hide_on_blur
+            ),
+            (false, 40, true)
+        );
+        let on: Config =
+            toml::from_str("hotkey_window = true\nhotkey_window_height = 65\n").unwrap();
+        assert!(on.hotkey_window);
+        assert_eq!(on.hotkey_window_height(), 65);
+        let low: Config = toml::from_str("hotkey_window_height = 5").unwrap();
+        assert_eq!(low.hotkey_window_height(), 20);
+        let high: Config = toml::from_str("hotkey_window_height = 900").unwrap();
+        assert_eq!(high.hotkey_window_height(), 100);
+        let neg: Config = toml::from_str("hotkey_window_height = -1").unwrap();
+        assert_eq!(neg.hotkey_window_height(), 20);
     }
 
     #[test]
@@ -972,6 +1076,54 @@ mod tests {
             Some("ws://127.0.0.1:9")
         );
         assert_eq!(relay_of("  ", false), None);
+    }
+
+    #[test]
+    fn block_and_tab_settings_default_to_the_old_behavior() {
+        // an existing config without the keys keeps what Rift did before
+        let c: Config = toml::from_str("font_size = 14").unwrap();
+        assert_eq!(c.tab_close_button, TabCloseButton::Hover);
+        assert_eq!(c.new_tab_placement, NewTabPlacement::End);
+        assert!(c.tab_bar_with_one_tab);
+        assert!(c.sticky_command_header);
+        assert!(c.dim_inactive_panes);
+        assert_eq!(c.inactive_pane_dim, 10);
+        assert_eq!(c.inactive_pane_dim(), 0.10);
+        assert!(!c.focus_follows_mouse);
+    }
+
+    #[test]
+    fn block_and_tab_settings_parse() {
+        let c: Config = toml::from_str(
+            "tab_close_button = \"always\"\n\
+             new_tab_placement = \"after_current\"\n\
+             tab_bar_with_one_tab = false\n\
+             sticky_command_header = false\n\
+             inactive_pane_dim = 25\n\
+             focus_follows_mouse = true",
+        )
+        .unwrap();
+        assert_eq!(c.tab_close_button, TabCloseButton::Always);
+        assert_eq!(c.new_tab_placement, NewTabPlacement::AfterCurrent);
+        assert!(!c.tab_bar_with_one_tab);
+        assert!(!c.sticky_command_header);
+        assert_eq!(c.inactive_pane_dim(), 0.25);
+        assert!(c.focus_follows_mouse);
+        let never: Config = toml::from_str("tab_close_button = \"never\"").unwrap();
+        assert_eq!(never.tab_close_button, TabCloseButton::Never);
+        assert!(toml::from_str::<Config>("tab_close_button = \"left\"").is_err());
+        assert!(toml::from_str::<Config>("new_tab_placement = \"first\"").is_err());
+        // off draws no wash at any strength; out-of-range strengths clamp
+        let off: Config =
+            toml::from_str("dim_inactive_panes = false\ninactive_pane_dim = 30").unwrap();
+        assert_eq!(off.inactive_pane_dim(), 0.0);
+        let huge: Config = toml::from_str("inactive_pane_dim = 9000").unwrap();
+        assert_eq!(huge.inactive_pane_dim(), 0.40);
+        let zero: Config = toml::from_str("inactive_pane_dim = -3").unwrap();
+        assert_eq!(zero.inactive_pane_dim(), 0.01);
+        // and they round-trip through the writer
+        let back: Config = toml::from_str(&toml::to_string(&c).unwrap()).unwrap();
+        assert_eq!(back, c);
     }
 
     #[test]

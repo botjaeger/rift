@@ -67,7 +67,7 @@ display-line building). Rendering is verified with the script driver below.
 |---|---|
 | `fmt` | `cargo fmt --all --check`, and on each vendored crate |
 | `clippy` | `cargo clippy --workspace --all-targets --locked -- -D warnings`, on each vendored crate (all features), and on `rift-remote --no-default-features` (the relay image's build, no TLS) |
-| `test` | `cargo test --workspace --locked`, and each vendored crate (all features; built into `target/vendor`); `scripts/release-manifest.py --self-test`. Locally on macOS the workspace tests then run again throttled (`taskpolicy -c background`, 32 threads), which reproduces the timing of CI's few slow cores; CI skips that pass |
+| `test` | `cargo test --workspace --locked`, and each vendored crate (all features; built into `target/vendor`); `scripts/release-manifest.py --self-test`. Locally on macOS the workspace tests run once, throttled (`taskpolicy -c background`, 32 threads, after a full-speed build), which reproduces the timing of CI's few slow cores; CI and Linux run them plainly |
 | `doc` | `cargo doc --workspace --no-deps --locked` with rustdoc warnings denied |
 | `shell` | `shellcheck` on packaging, scripts, git hooks and the bash hooks; `zsh -n` and `fish --no-execute` on the zsh and fish hooks |
 | `docs` | `CLAUDE.md` and `AGENTS.md` are identical; every relative link in every Markdown file resolves (the vendored crates' upstream docs excepted) |
@@ -86,8 +86,16 @@ scripts/gates.sh --list
 
 Every requested gate runs even after one fails; the summary lists each result
 with its time, start and end clock times, the total, and the commit. Each
-gate's output also goes to `target/gates/<gate>.log`, and the summary ends
-with the last 25 lines of every failed gate's log. With other gates,
+gate prints one line (`-- test pass 212s`); its output goes to
+`target/gates/<gate>.log`, and the summary ends with the last 25 lines of
+every failed gate's log. `RIFT_GATES_VERBOSE=1` (and CI) streams every
+gate's output too. Every gate has a wall-clock limit (`limit_for` in the
+script: 5 min for fmt/shell/docs, 15 for test, 20 for clippy/doc/mobile/leak,
+30 for release/ui, 90 for linux; `RIFT_GATE_TIMEOUT=<seconds>` overrides
+them): past it, the processes still running are listed in the log (naming
+the hung test binary), stopped, and the gate fails. Interrupting the run
+stops the running gate and the background `linux` run with everything
+under them. With other gates,
 `linux` runs beside them: it starts once `test` is done (the
 timing-sensitive unit tests run alone), on all but two cores, into
 `target/gates/linux.log`; the moment it ends it is reported with each of its
@@ -156,18 +164,42 @@ is created but never shown or focused, so you can keep working while a script
 runs and your typing cannot land in it. `shot` still renders offscreen and
 `dump` reports `headless=true window_visible=Some(false)`. The run uses a
 private clipboard (copy, paste and `dump`'s `clipboard=` never touch the
-system clipboard). It does not open links or new windows (a toast says
-`Headless: …` instead), never minimizes, maximizes or goes fullscreen,
-ignores the control API's `focus` raise, and registers no global hotkey. On
-macOS it has no Dock icon and launching does not activate it.
+system clipboard). It does not open links (a toast says `Headless: …`
+instead), never minimizes, maximizes or goes fullscreen, ignores the control
+API's `focus` raise, and registers no global hotkey. New windows (⌘N,
+`new_window`) open in the same process and stay hidden too. On macOS it has
+no Dock icon and launching does not activate it.
 `scripts/gates.sh ui` runs headless.
+
+**Several windows.** Steps act on the focused window, as typing does:
+`new_window` (or `key cmd+n`) opens one and focuses it, `window <n>` focuses
+window n (0 = the first, in opening order), `close_window` closes the
+focused one. `dump` starts with `windows=N window=I focused_window=Some(F)`
+and one `window i: tabs=… active=… panes=[…] titles=[…] kind=…` line per
+window; the rest of it is the targeted window's state. `hotkey` runs the
+global hotkey's toggle (no key is registered): with `hotkey_window = true` it
+creates, shows and hides the drop-down window, which `dump` lists as
+`kind=dropdown shown=… sliding=… frame=[x, y, w, h] screen=[…] size=[w, h]`
+(ordinary windows: `kind=normal`). Headless, it never slides, and `focus on`
+then `focus off` stands for a focus loss (`hotkey_window_hide_on_blur`).
 
 **Headless Linux.** `packaging/linux-verify.Dockerfile` has Xvfb and Mesa's
 software Vulkan, so the same scripts render on a machine without a GPU. The
 header of the Dockerfile has the `docker build` / `docker run` lines.
 
-**Performance.** `packaging/bench.sh` measures startup, output throughput,
-memory, key-to-frame latency and TUI round trips; compare against
+**Shell and remote completions.** `cargo test -p rift-core --test
+shell_complete` runs the completion servers against the installed zsh, bash
+(and macOS's `/bin/bash` 3.2) and fish with a scratch home (a shell that is
+not installed is reported `BLOCKED` and skipped). Remote completions need
+docker: `cargo test -p rift-core --test remote_complete -- --ignored` builds
+`packaging/sshd-fixture.Dockerfile`, starts an sshd on `127.0.0.1` with a
+throwaway key and a scratch ssh config (`-F`; `~/.ssh` is never read),
+connects the way an SSH profile does and completes over the shared
+connection in bash, zsh and fish.
+
+**Performance.** `packaging/bench.sh` measures startup, a second window,
+output throughput, memory, key-to-frame latency and TUI round trips;
+compare against
 [performance.md](performance.md) on the same machine.
 
 ## Architecture
@@ -182,9 +214,26 @@ rift-terminal     winit app, views, input routing, a11y, control socket, script 
 mobile/           Expo companion (iOS, Android): pnpm, outside the Cargo workspace
 ```
 
+**One process, many windows.** `App` (`app.rs`) holds what every window
+shares — config and its watcher, the theme and font metrics, the
+`TextEngine` (fonts, glyph atlas, shape cache), the git/PR/Docker and
+completion workers, the global hotkey, menu bar, update state, control
+socket and attention center — and `win: Box<WindowState>`, the window being
+served: its winit window, GPU surface (`Gpu::for_window` shares the first
+window's device and queue), quad/sprite/image pipelines, scene, tabs,
+overlays, panels, menus, selection, toasts and accessibility adapter. The
+other windows wait in `App::parked`. `app/windows.rs` routes: a window event
+serves its `WindowId`'s window, a PTY event or a control request naming a
+pane serves that pane's window (pane ids come from one counter), and
+everything else (menu commands, the hotkey, `split`/`open`) serves the
+window that last had focus; `each_window` runs per-window work (config
+changes, timers, repaints) over all of them. Code reads the window it
+serves as `self.win.<field>`; anything that must cover every window uses
+`all_tabs`/`all_panes`.
+
 The remote gateway (`rift-terminal remote`) is a separate process, started
-by the windows while `remote_access` is on: it reads and drives every window
-through its control socket (`status`, `blocks`, `screen`, `output`,
+by Rift while `remote_access` is on: it reads and drives every window
+through the control socket (`status`, `blocks`, `screen`, `output`,
 `menu`, `diff`, `complete`, `remote-input`, `remote-open`,
 `remote-close`, `remote-reset-elapsed`), so
 networking never runs inside a window. Its format is

@@ -11,6 +11,7 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// What a positional argument at some spec level should be completed against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1446,16 +1447,62 @@ fn common_git_dir(gitdir: PathBuf) -> PathBuf {
     }
 }
 
+/// Values a cached generator list keeps (bounded memory for huge repos or
+/// `known_hosts` files).
+const MAX_LIST: usize = 100_000;
+/// Generator lists kept (per repository, directory or home).
+const LIST_CACHE: usize = 32;
+
+/// Which generator a cached list belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum List {
+    GitRefs,
+    GitRemotes,
+    SshHosts,
+    MakeTargets,
+    PkgScripts,
+}
+
+/// Generator values: (value, description).
+pub type Values = Vec<(String, String)>;
+
+type ListCache = crate::completion_cache::Lru<(List, PathBuf), Values>;
+
+static LISTS: std::sync::LazyLock<std::sync::Mutex<ListCache>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(ListCache::new(LIST_CACHE)));
+
+/// The cached `kind` list for `key`, read by `load` (the values and every
+/// path they came from) when missing or when one of those paths changed.
+fn cached_list(
+    kind: List,
+    key: PathBuf,
+    load: impl FnOnce() -> (Values, Vec<PathBuf>),
+) -> Arc<Values> {
+    crate::completion_cache::cached(&LISTS, &(kind, key), load)
+}
+
+/// The `prefix` matches of `all`, at most `MAX_GEN`.
+fn with_prefix(all: &[(String, String)], prefix: &str) -> Values {
+    all.iter()
+        .filter(|(v, _)| v.starts_with(prefix))
+        .take(MAX_GEN)
+        .cloned()
+        .collect()
+}
+
+/// Loose refs under `root` (`a/b` names); every directory walked goes to
+/// `dirs` (a ref added or removed changes its directory's stamp).
 fn collect_refs(
     root: &Path,
-    prefix_filter: &str,
     kind: &str,
     seen: &mut HashSet<String>,
-    out: &mut Vec<(String, String)>,
+    out: &mut Values,
+    dirs: &mut Vec<PathBuf>,
 ) {
     let mut stack = vec![(root.to_path_buf(), String::new())];
     while let Some((dir, prefix)) = stack.pop() {
-        if out.len() >= MAX_GEN {
+        dirs.push(dir.clone());
+        if out.len() >= MAX_LIST {
             return;
         }
         let Ok(entries) = fs::read_dir(&dir) else {
@@ -1471,9 +1518,9 @@ fn collect_refs(
             let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
             if is_dir {
                 stack.push((e.path(), rel));
-            } else if rel.starts_with(prefix_filter) && seen.insert(rel.clone()) {
+            } else if seen.insert(rel.clone()) {
                 out.push((rel, kind.to_string()));
-                if out.len() >= MAX_GEN {
+                if out.len() >= MAX_LIST {
                     return;
                 }
             }
@@ -1481,75 +1528,79 @@ fn collect_refs(
     }
 }
 
-/// All git refs reachable from `cwd`: local branches, remote branches, tags.
-/// Value = ref name, description = "branch" / "remote" / "tag". Only names
-/// starting with `prefix` count towards the `MAX_GEN` cap.
-pub fn git_refs(cwd: Option<&str>, prefix: &str) -> Vec<(String, String)> {
-    let mut out = Vec::new();
+/// Every git ref reachable from `cwd`, cached per repository: local
+/// branches, then remote branches, then tags, each sorted by name. Value =
+/// ref name, description = "branch" / "remote" / "tag". Read again when
+/// `HEAD`, `packed-refs` or any directory under `refs/` changed.
+pub fn git_refs_all(cwd: Option<&str>) -> Arc<Values> {
     let Some(gitdir) = find_git_dir(cwd).map(common_git_dir) else {
-        return out;
+        return Arc::default();
     };
-    let mut seen = HashSet::new();
-    collect_refs(
-        &gitdir.join("refs/heads"),
-        prefix,
-        "branch",
-        &mut seen,
-        &mut out,
-    );
-    collect_refs(
-        &gitdir.join("refs/remotes"),
-        prefix,
-        "remote",
-        &mut seen,
-        &mut out,
-    );
-    collect_refs(
-        &gitdir.join("refs/tags"),
-        prefix,
-        "tag",
-        &mut seen,
-        &mut out,
-    );
-
-    if let Ok(s) = fs::read_to_string(gitdir.join("packed-refs")) {
-        for line in s.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') || line.starts_with('^') {
-                continue;
-            }
-            let Some((_sha, r)) = line.split_once(' ') else {
-                continue;
-            };
-            let (name, kind) = if let Some(b) = r.strip_prefix("refs/heads/") {
-                (b, "branch")
-            } else if let Some(t) = r.strip_prefix("refs/tags/") {
-                (t, "tag")
-            } else if let Some(rm) = r.strip_prefix("refs/remotes/") {
-                (rm, "remote")
-            } else {
-                continue;
-            };
-            if name.starts_with(prefix) && seen.insert(name.to_string()) {
-                out.push((name.to_string(), kind.to_string()));
-            }
-            if out.len() >= MAX_GEN {
-                break;
+    cached_list(List::GitRefs, gitdir.clone(), || {
+        let mut out = Vec::new();
+        let mut dirs = vec![gitdir.join("HEAD"), gitdir.join("packed-refs")];
+        let mut seen = HashSet::new();
+        for (sub, kind) in [
+            ("refs/heads", "branch"),
+            ("refs/remotes", "remote"),
+            ("refs/tags", "tag"),
+        ] {
+            collect_refs(&gitdir.join(sub), kind, &mut seen, &mut out, &mut dirs);
+        }
+        if let Ok(s) = fs::read_to_string(gitdir.join("packed-refs")) {
+            for line in s.lines() {
+                if out.len() >= MAX_LIST {
+                    break;
+                }
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') || line.starts_with('^') {
+                    continue;
+                }
+                let Some((_sha, r)) = line.split_once(' ') else {
+                    continue;
+                };
+                let (name, kind) = if let Some(b) = r.strip_prefix("refs/heads/") {
+                    (b, "branch")
+                } else if let Some(t) = r.strip_prefix("refs/tags/") {
+                    (t, "tag")
+                } else if let Some(rm) = r.strip_prefix("refs/remotes/") {
+                    (rm, "remote")
+                } else {
+                    continue;
+                };
+                if seen.insert(name.to_string()) {
+                    out.push((name.to_string(), kind.to_string()));
+                }
             }
         }
-    }
-    out
+        let order = |k: &str| match k {
+            "branch" => 0,
+            "remote" => 1,
+            _ => 2,
+        };
+        out.sort_by(|a, b| order(&a.1).cmp(&order(&b.1)).then_with(|| a.0.cmp(&b.0)));
+        (out, dirs)
+    })
 }
 
-/// Configured git remotes (parsed from `.git/config`).
+/// The git refs reachable from `cwd` that start with `prefix` (see
+/// [`git_refs_all`]), at most `MAX_GEN`.
+pub fn git_refs(cwd: Option<&str>, prefix: &str) -> Vec<(String, String)> {
+    with_prefix(&git_refs_all(cwd), prefix)
+}
+
+/// Configured git remotes (parsed from `.git/config`), cached until the
+/// config file changes.
 pub fn git_remotes(cwd: Option<&str>) -> Vec<(String, String)> {
     let Some(gitdir) = find_git_dir(cwd).map(common_git_dir) else {
         return Vec::new();
     };
-    let Ok(s) = fs::read_to_string(gitdir.join("config")) else {
-        return Vec::new();
-    };
-    parse_git_remotes(&s)
+    let config = gitdir.join("config");
+    let all = cached_list(List::GitRemotes, gitdir, || {
+        let s = fs::read_to_string(&config).unwrap_or_default();
+        (parse_git_remotes(&s), vec![config.clone()])
+    });
+    (*all).clone()
 }
 
 fn parse_git_remotes(config: &str) -> Vec<(String, String)> {
@@ -1565,41 +1616,62 @@ fn parse_git_remotes(config: &str) -> Vec<(String, String)> {
     out
 }
 
-/// Hosts from `~/.ssh/config` (`Host` entries, wildcards skipped) and plain
-/// hostnames from `~/.ssh/known_hosts`.
-pub fn ssh_hosts(prefix: &str) -> Vec<(String, String)> {
-    let mut names: Vec<String> = Vec::new();
-    let mut seen = HashSet::new();
-    if let Some(home) = std::env::var_os("HOME") {
-        let base = PathBuf::from(home);
-        for h in crate::ssh::config_hosts(&base.join(".ssh/config")) {
-            if h.starts_with(prefix) && seen.insert(h.clone()) {
+/// Hosts from `~/.ssh/config` (`Host` entries, wildcards skipped, `Include`d
+/// files followed) and plain hostnames from `~/.ssh/known_hosts`, cached
+/// until one of those files (or a directory an `Include` glob lists)
+/// changes.
+pub fn ssh_hosts_all() -> Arc<Values> {
+    match std::env::var_os("HOME") {
+        Some(home) => ssh_hosts_in(PathBuf::from(home)),
+        None => Arc::default(),
+    }
+}
+
+/// [`ssh_hosts_all`] for the home directory `base`.
+fn ssh_hosts_in(base: PathBuf) -> Arc<Values> {
+    cached_list(List::SshHosts, base.clone(), || {
+        let mut names: Vec<String> = Vec::new();
+        let mut seen = HashSet::new();
+        let (hosts, mut deps) = crate::ssh::config_hosts_and_sources(&base.join(".ssh/config"));
+        for h in hosts {
+            if seen.insert(h.clone()) {
                 names.push(h);
             }
         }
-        if let Ok(s) = fs::read_to_string(base.join(".ssh/known_hosts")) {
+        let known = base.join(".ssh/known_hosts");
+        if let Ok(s) = fs::read_to_string(&known) {
             for h in parse_known_hosts(&s) {
-                if h.starts_with(prefix) && seen.insert(h.clone()) {
-                    names.push(h);
-                }
-                if names.len() >= MAX_GEN {
+                if names.len() >= MAX_LIST {
                     break;
+                }
+                if seen.insert(h.clone()) {
+                    names.push(h);
                 }
             }
         }
-    }
-    names
-        .into_iter()
-        .map(|n| (n, "ssh host".to_string()))
-        .collect()
+        deps.push(known);
+        let values = names
+            .into_iter()
+            .map(|n| (n, "ssh host".to_string()))
+            .collect();
+        (values, deps)
+    })
+}
+
+/// The ssh hosts starting with `prefix` (see [`ssh_hosts_all`]), at most
+/// `MAX_GEN`.
+pub fn ssh_hosts(prefix: &str) -> Vec<(String, String)> {
+    with_prefix(&ssh_hosts_all(), prefix)
 }
 
 fn parse_known_hosts(content: &str) -> Vec<String> {
     let mut out = Vec::new();
     for line in content.lines() {
         let l = line.trim();
-        if l.is_empty() || l.starts_with('#') || l.starts_with('|') {
-            continue; // comment or hashed entry
+        // comment, hashed entry, or a marker line (`@cert-authority`,
+        // `@revoked`): its patterns name keys' scopes, not hosts
+        if l.is_empty() || l.starts_with('#') || l.starts_with('|') || l.starts_with('@') {
+            continue;
         }
         let Some(field) = l.split_whitespace().next() else {
             continue;
@@ -1610,7 +1682,8 @@ fn parse_known_hosts(content: &str) -> Vec<String> {
                 .strip_prefix('[')
                 .map(|h| h.split(']').next().unwrap_or(h))
                 .unwrap_or(host);
-            if host.is_empty() || host.contains('*') {
+            // patterns (`*`, `?`) and negations (`!host`) are no host
+            if host.is_empty() || host.contains(['*', '?']) || host.starts_with('!') {
                 continue;
             }
             out.push(host.to_string());
@@ -1619,18 +1692,35 @@ fn parse_known_hosts(content: &str) -> Vec<String> {
     out
 }
 
-/// Targets declared in a Makefile in `cwd`.
-pub fn make_targets(cwd: Option<&str>, prefix: &str) -> Vec<(String, String)> {
+/// The makefile names read, first found wins.
+const MAKEFILES: [&str; 3] = ["Makefile", "makefile", "GNUmakefile"];
+
+/// Every target declared in a Makefile in `cwd`, cached until one of the
+/// makefile names there changes (created, edited or removed).
+pub fn make_targets_all(cwd: Option<&str>) -> Arc<Values> {
     let base = cwd_path(cwd);
-    for name in ["Makefile", "makefile", "GNUmakefile"] {
-        if let Ok(s) = fs::read_to_string(base.join(name)) {
-            return parse_make_targets(&s, prefix);
-        }
-    }
-    Vec::new()
+    cached_list(List::MakeTargets, base.clone(), || {
+        let files: Vec<PathBuf> = MAKEFILES.iter().map(|n| base.join(n)).collect();
+        let targets = files
+            .iter()
+            .find_map(|f| fs::read_to_string(f).ok())
+            .map(|s| parse_make_targets_n(&s, "", MAX_LIST))
+            .unwrap_or_default();
+        (targets, files)
+    })
 }
 
+/// The Makefile targets in `cwd` starting with `prefix`, at most `MAX_GEN`.
+pub fn make_targets(cwd: Option<&str>, prefix: &str) -> Vec<(String, String)> {
+    with_prefix(&make_targets_all(cwd), prefix)
+}
+
+#[cfg(test)]
 fn parse_make_targets(content: &str, prefix: &str) -> Vec<(String, String)> {
+    parse_make_targets_n(content, prefix, MAX_GEN)
+}
+
+fn parse_make_targets_n(content: &str, prefix: &str, cap: usize) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
     for line in content.lines() {
@@ -1657,21 +1747,30 @@ fn parse_make_targets(content: &str, prefix: &str) -> Vec<(String, String)> {
                 out.push((t.to_string(), "target".to_string()));
             }
         }
-        if out.len() >= MAX_GEN {
+        if out.len() >= cap {
             break;
         }
     }
     out
 }
 
-/// Script names (and their commands as descriptions) from a package.json in
-/// `cwd`. Uses a minimal hand-rolled scan — no serde_json dependency.
+/// Every script name (with its command as the description) from the
+/// package.json in `cwd`, cached until that file changes. Uses a minimal
+/// hand-rolled scan — no serde_json dependency.
+pub fn package_scripts_all(cwd: Option<&str>) -> Arc<Values> {
+    let file = cwd_path(cwd).join("package.json");
+    cached_list(List::PkgScripts, file.clone(), || {
+        let scripts = fs::read_to_string(&file)
+            .map(|s| parse_package_scripts_n(&s, "", MAX_LIST))
+            .unwrap_or_default();
+        (scripts, vec![file.clone()])
+    })
+}
+
+/// The package.json scripts in `cwd` starting with `prefix`, at most
+/// `MAX_GEN`.
 pub fn package_scripts(cwd: Option<&str>, prefix: &str) -> Vec<(String, String)> {
-    let base = cwd_path(cwd);
-    let Ok(s) = fs::read_to_string(base.join("package.json")) else {
-        return Vec::new();
-    };
-    parse_package_scripts(&s, prefix)
+    with_prefix(&package_scripts_all(cwd), prefix)
 }
 
 /// Read the JSON string whose opening quote is at `b[start]`; returns the
@@ -1744,7 +1843,12 @@ fn read_json_string(b: &[u8], start: usize) -> (String, usize) {
     (String::from_utf8_lossy(&val).into_owned(), j + 1)
 }
 
+#[cfg(test)]
 fn parse_package_scripts(json: &str, prefix: &str) -> Vec<(String, String)> {
+    parse_package_scripts_n(json, prefix, MAX_GEN)
+}
+
+fn parse_package_scripts_n(json: &str, prefix: &str, cap: usize) -> Vec<(String, String)> {
     let Some(pos) = json.find("\"scripts\"") else {
         return Vec::new();
     };
@@ -1795,7 +1899,7 @@ fn parse_package_scripts(json: &str, prefix: &str) -> Vec<(String, String)> {
             }
             _ => i += 1,
         }
-        if out.len() >= MAX_GEN {
+        if out.len() >= cap {
             break;
         }
     }
@@ -1937,8 +2041,24 @@ mod tests {
     fn known_hosts_parsing() {
         let kh = "github.com,140.82.112.3 ssh-rsa AAAA...\n\
                   [example.com]:2222 ssh-ed25519 BBBB...\n\
-                  |1|hashedstuff= ssh-rsa CCCC...\n";
+                  |1|hashedstuff= ssh-rsa CCCC...\n\
+                  @cert-authority ca.example.org ssh-ed25519 DDDD...\n\
+                  @revoked revoked.example.org ssh-rsa EEEE...\n\
+                  h?.example.org,!bad.example.org ssh-rsa FFFF...\n";
         let hosts = parse_known_hosts(kh);
+        for not_host in [
+            "@cert-authority",
+            "@revoked",
+            "ca.example.org",
+            "revoked.example.org",
+            "h?.example.org",
+            "!bad.example.org",
+        ] {
+            assert!(
+                !hosts.contains(&not_host.to_string()),
+                "{not_host}: {hosts:?}"
+            );
+        }
         assert!(hosts.contains(&"github.com".to_string()));
         assert!(
             hosts.contains(&"example.com".to_string()),
@@ -2059,6 +2179,129 @@ mod tests {
         assert_eq!(git_remotes(cwd), vec![("origin".into(), "remote".into())]);
         let _ = fs::remove_dir_all(&main);
         let _ = fs::remove_dir_all(&wt);
+    }
+
+    use crate::completion_cache::tests::age;
+
+    fn names(v: &[(String, String)]) -> Vec<&str> {
+        v.iter().map(|(n, _)| n.as_str()).collect()
+    }
+
+    #[test]
+    fn git_refs_cache_follows_new_refs_and_packed_refs() {
+        let dir = unique_tmp("refcache");
+        let git = dir.join(".git");
+        let heads = git.join("refs/heads");
+        fs::create_dir_all(heads.join("team")).unwrap();
+        fs::write(git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::write(heads.join("main"), "0\n").unwrap();
+        fs::write(heads.join("team/a"), "0\n").unwrap();
+        // only the paths a change touched get a new mtime, as in real life
+        for p in [&git, &git.join("refs"), &heads, &heads.join("team")] {
+            age(p, 100);
+        }
+        age(&git.join("HEAD"), 100);
+        let cwd = dir.to_str();
+        assert_eq!(names(&git_refs_all(cwd)), ["main", "team/a"]);
+        // a ref added in a nested directory: only that directory changes
+        fs::write(heads.join("team/b"), "0\n").unwrap();
+        age(&heads.join("team"), 90);
+        assert_eq!(names(&git_refs_all(cwd)), ["main", "team/a", "team/b"]);
+        // a new nested directory
+        fs::create_dir_all(heads.join("x/y")).unwrap();
+        fs::write(heads.join("x/y/z"), "0\n").unwrap();
+        for p in [&heads, &heads.join("x"), &heads.join("x/y")] {
+            age(p, 80);
+        }
+        assert!(names(&git_refs_all(cwd)).contains(&"x/y/z"));
+        // packed-refs written (git pack-refs, fetch of many tags)
+        fs::write(
+            git.join("packed-refs"),
+            "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111 refs/tags/v9\n",
+        )
+        .unwrap();
+        age(&git.join("packed-refs"), 70);
+        assert_eq!(git_refs_all(cwd).last().unwrap().0, "v9");
+        // a ref removed
+        fs::remove_file(heads.join("team/a")).unwrap();
+        age(&heads.join("team"), 60);
+        assert!(!names(&git_refs_all(cwd)).contains(&"team/a"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn makefile_and_package_json_caches_follow_edits() {
+        let dir = unique_tmp("filecache");
+        let cwd = dir.to_str();
+        let mk = dir.join("Makefile");
+        fs::write(&mk, "build:\n").unwrap();
+        age(&mk, 100);
+        assert_eq!(names(&make_targets_all(cwd)), ["build"]);
+        fs::write(&mk, "build:\ntest:\n").unwrap();
+        age(&mk, 90);
+        assert_eq!(names(&make_targets_all(cwd)), ["build", "test"]);
+        let pkg = dir.join("package.json");
+        assert!(package_scripts_all(cwd).is_empty());
+        fs::write(&pkg, r#"{"scripts": {"dev": "vite"}}"#).unwrap();
+        age(&pkg, 100);
+        assert_eq!(names(&package_scripts_all(cwd)), ["dev"]);
+        fs::write(&pkg, r#"{"scripts": {"dev": "vite", "lint": "x"}}"#).unwrap();
+        age(&pkg, 90);
+        assert_eq!(names(&package_scripts_all(cwd)), ["dev", "lint"]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn git_remotes_cache_follows_the_config() {
+        let dir = unique_tmp("remotecache");
+        let git = dir.join(".git");
+        fs::create_dir_all(&git).unwrap();
+        let config = git.join("config");
+        fs::write(&config, "[remote \"origin\"]\n").unwrap();
+        age(&config, 100);
+        let cwd = dir.to_str();
+        assert_eq!(names(&git_remotes(cwd)), ["origin"]);
+        fs::write(&config, "[remote \"origin\"]\n[remote \"fork\"]\n").unwrap();
+        age(&config, 90);
+        assert_eq!(names(&git_remotes(cwd)), ["origin", "fork"]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ssh_hosts_cache_follows_config_includes_and_known_hosts() {
+        let home = unique_tmp("sshcache");
+        let ssh = home.join(".ssh");
+        let conf_d = home.join("conf.d");
+        fs::create_dir_all(&ssh).unwrap();
+        fs::create_dir_all(&conf_d).unwrap();
+        let config = ssh.join("config");
+        fs::write(
+            &config,
+            format!("Host alpha\nInclude {}/*.conf\n", conf_d.display()),
+        )
+        .unwrap();
+        age(&config, 100);
+        age(&conf_d, 100);
+        assert_eq!(names(&ssh_hosts_in(home.clone())), ["alpha"]);
+        // a new file matching the Include glob
+        let inc = conf_d.join("work.conf");
+        fs::write(&inc, "Host beta\n").unwrap();
+        age(&inc, 90);
+        age(&conf_d, 90);
+        assert_eq!(names(&ssh_hosts_in(home.clone())), ["alpha", "beta"]);
+        // the included file edited
+        fs::write(&inc, "Host beta gamma\n").unwrap();
+        age(&inc, 80);
+        assert_eq!(
+            names(&ssh_hosts_in(home.clone())),
+            ["alpha", "beta", "gamma"]
+        );
+        // known_hosts created
+        let known = ssh.join("known_hosts");
+        fs::write(&known, "delta.example ssh-ed25519 AAAA\n").unwrap();
+        age(&known, 70);
+        assert!(names(&ssh_hosts_in(home.clone())).contains(&"delta.example"));
+        let _ = fs::remove_dir_all(&home);
     }
 
     #[test]

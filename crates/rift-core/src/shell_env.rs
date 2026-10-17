@@ -52,8 +52,9 @@ impl ShellKind {
 
 /// A snapshot of the interactive-shell command namespace: aliases, function
 /// names, and builtins/reserved words. `$PATH` executables are *not* stored —
-/// they are read on demand from [`crate::completion::path_commands`], which
-/// scans `$PATH` once per process and caches the result.
+/// they are read on demand from [`crate::completion::commands_on`], which
+/// caches each `$PATH` scan until the value or one of its directories
+/// changes.
 #[derive(Debug, Clone)]
 pub struct ShellEnv {
     shell: ShellKind,
@@ -63,10 +64,10 @@ pub struct ShellEnv {
     functions: HashSet<String>,
     /// Builtins and reserved words for `shell`.
     builtins: HashSet<String>,
-    /// Executables on the interactive shell's `$PATH` (sorted), which rc
-    /// files extend (`PNPM_HOME`, nvm): Rift started from the Dock has a
-    /// shorter one. Empty when the probe did not report it.
-    path_cmds: Vec<String>,
+    /// The interactive shell's `$PATH`, which rc files extend (`PNPM_HOME`,
+    /// nvm): Rift started from the Dock has a shorter one. `None` when the
+    /// probe did not report it.
+    path: Option<std::ffi::OsString>,
 }
 
 /// Command prefixes that transparently precede the real command: the word after
@@ -125,17 +126,16 @@ impl ShellEnv {
             aliases: HashMap::new(),
             functions: HashSet::new(),
             builtins: builtins_for(shell).iter().map(|s| s.to_string()).collect(),
-            path_cmds: Vec::new(),
+            path: None,
         }
     }
 
-    /// `$PATH` executables: the shell's when the probe reported them, else
-    /// Rift's own.
-    fn path_commands(&self) -> &[String] {
-        if self.path_cmds.is_empty() {
-            crate::completion::path_commands()
-        } else {
-            &self.path_cmds
+    /// `$PATH` executables (sorted): the shell's when the probe reported
+    /// its `$PATH`, else Rift's own.
+    fn path_commands(&self) -> std::sync::Arc<Vec<String>> {
+        match &self.path {
+            Some(path) => crate::completion::commands_on(path),
+            None => crate::completion::path_commands(),
         }
     }
 
@@ -180,9 +180,9 @@ impl ShellEnv {
             Some((rest, path)) => {
                 let path = path.trim();
                 if !path.is_empty() {
-                    self.path_cmds = crate::completion::scan_path_commands(path.as_ref());
+                    self.path = Some(path.into());
                     // command-name completions use it too
-                    let _ = crate::completion::SHELL_PATH_COMMANDS.set(self.path_cmds.clone());
+                    crate::completion::set_shell_path(path.as_ref());
                 }
                 rest
             }
@@ -959,7 +959,7 @@ mod tests {
                 .collect(),
             functions: HashSet::new(),
             builtins: builtins.iter().map(|s| s.to_string()).collect(),
-            path_cmds: Vec::new(),
+            path: None,
         }
     }
 
@@ -1011,6 +1011,8 @@ mod tests {
         .unwrap();
         let env = ShellEnv::load_with_timeout(shell.to_str().unwrap(), Duration::from_secs(10));
         let first = std::fs::read_to_string(dir.join("first-arg")).unwrap_or_default();
+        // the shell's PATH is scanned on demand: list it before the cleanup
+        let known = env.is_known("rift-probe-tool");
         let _ = std::fs::remove_dir_all(&dir);
         // a login shell on macOS, as the panes run: PATH from /etc/zprofile
         // and .zprofile (docker in /usr/local/bin, brew's tools)
@@ -1025,7 +1027,7 @@ mod tests {
         assert_eq!(env.alias("build"), Some("docker compose up --build"));
         assert_eq!(env.alias("up"), Some("x"));
         // a command only the shell's PATH has is known
-        assert!(env.is_known("rift-probe-tool"));
+        assert!(known);
         assert!(!env.is_known("rift-probe-missing"));
     }
 

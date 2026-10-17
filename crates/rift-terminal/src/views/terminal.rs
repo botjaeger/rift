@@ -3909,6 +3909,7 @@ mod tests {
             restored: false,
             replayed: false,
             finished_at: None,
+            from_editor: false,
         }
     }
 

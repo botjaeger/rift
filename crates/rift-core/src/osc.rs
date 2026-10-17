@@ -14,8 +14,9 @@ pub enum Marker {
     OutputStart,
     /// OSC 133;D;`<exit>` — command finished.
     Done { exit: Option<i32> },
-    /// OSC 7;file://host/path — working directory changed.
-    Cwd(String),
+    /// OSC 7;file://host/path — working directory changed. `host` is empty
+    /// when the sequence names none; see [`host_is_local`].
+    Cwd { path: String, host: String },
     /// APC `G…` — kitty graphics command (the bytes after `G`).
     Graphics(Vec<u8>),
     /// OSC 1337;File=… — iTerm2 inline image (the bytes after `File=`).
@@ -24,8 +25,9 @@ pub enum Marker {
     /// `notify` (urxvt/VTE) or OSC 99 (kitty).
     Notify { title: String, body: String },
     /// OSC 1337;SetUserVar=`name`=`base64 value` (iTerm2): shell state the
-    /// prompt chips show (Python environment, php/python3 paths). Bounded, control
-    /// characters dropped.
+    /// prompt chips show (Python environment, php/python3 paths) and the
+    /// shell's `$PATH` for command completion. Bounded, control characters
+    /// dropped.
     UserVar { name: String, value: String },
 }
 
@@ -52,6 +54,8 @@ const fn is_abort(b: u8) -> bool {
 }
 
 const MAX_OSC: usize = 4096;
+/// The user variable carrying the shell's `$PATH` (see `shell/rift.*`).
+pub const USER_VAR_PATH: &str = "RiftPath";
 /// Inline images and graphics commands carry base64 payloads.
 const MAX_IMAGE: usize = 48 << 20;
 const ITERM_FILE: &[u8] = b"1337;File=";
@@ -257,21 +261,38 @@ fn parse_osc(buf: &[u8]) -> Option<Marker> {
     }
     if let Some(rest) = s.strip_prefix("1337;SetUserVar=") {
         let (name, value) = rest.split_once('=')?;
-        if name.is_empty() || name.len() > 64 || value.len() > 1024 {
+        // `RiftPath` (the shell's $PATH, for command completion) is longer
+        // than the others; still bounded by MAX_OSC, and never clipped (a
+        // cut $PATH would name a directory that is not on it)
+        let is_path = name == USER_VAR_PATH;
+        let max_b64 = if is_path { MAX_OSC } else { 1024 };
+        if name.is_empty() || name.len() > 64 || value.len() > max_b64 {
             return None;
         }
         let value = String::from_utf8(base64_decode(value)?).ok()?;
+        let value = if is_path {
+            value.chars().filter(|c| !c.is_control()).collect()
+        } else {
+            clip(&value)
+        };
         return Some(Marker::UserVar {
             name: clip(name),
-            value: clip(&value),
+            value,
         });
     }
     if let Some(rest) = s.strip_prefix("7;") {
-        // file://host/path — strip scheme + host, percent-decode the path
-        let path = rest
-            .strip_prefix("file://")
-            .map_or(rest, |r| r.find('/').map(|i| &r[i..]).unwrap_or(r));
-        return Some(Marker::Cwd(percent_decode(path)));
+        // file://host/path — split off scheme + host, percent-decode the path
+        let (host, path) = match rest.strip_prefix("file://") {
+            Some(r) => match r.find('/') {
+                Some(i) => (&r[..i], &r[i..]),
+                None => ("", r),
+            },
+            None => ("", rest),
+        };
+        return Some(Marker::Cwd {
+            path: percent_decode(path),
+            host: clip(&percent_decode(host)),
+        });
     }
     None
 }
@@ -319,6 +340,15 @@ fn percent_decode(s: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Whether an OSC 7 host names this machine (`local` is its hostname).
+/// Empty and `localhost` count as local; otherwise the first label is
+/// compared case-insensitively, since shells report `$HOST` with or without
+/// the domain (`mac` vs `mac.local`).
+pub fn host_is_local(host: &str, local: &str) -> bool {
+    let first = |h: &str| h.split('.').next().unwrap_or("").to_ascii_lowercase();
+    host.is_empty() || host.eq_ignore_ascii_case("localhost") || first(host) == first(local)
 }
 
 #[cfg(test)]
@@ -374,6 +404,41 @@ mod tests {
     }
 
     #[test]
+    fn the_path_user_var_is_kept_whole_and_still_bounded() {
+        fn b64(data: &[u8]) -> String {
+            const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            let mut out = String::new();
+            for c in data.chunks(3) {
+                let n = (c[0] as u32) << 16
+                    | (*c.get(1).unwrap_or(&0) as u32) << 8
+                    | *c.get(2).unwrap_or(&0) as u32;
+                for i in 0..=c.len() {
+                    out.push(A[(n >> (18 - 6 * i) & 63) as usize] as char);
+                }
+            }
+            out
+        }
+        let path: String = (0..150).map(|i| format!("/opt/tool{i:03}/bin:")).collect();
+        assert!(path.len() > 2000);
+        let osc =
+            |name: &str, v: &str| format!("\x1b]1337;SetUserVar={name}={}\x07", b64(v.as_bytes()));
+        let mut s = OscScanner::new();
+        let got = markers(&mut s, osc(USER_VAR_PATH, &path).as_bytes());
+        assert_eq!(
+            got,
+            vec![Marker::UserVar {
+                name: USER_VAR_PATH.into(),
+                value: path.clone()
+            }]
+        );
+        // any other variable keeps the short bound
+        assert!(markers(&mut s, osc("X", &path).as_bytes()).is_empty());
+        // over the OSC bound: dropped, not cut
+        let long = path.repeat(2);
+        assert!(markers(&mut s, osc(USER_VAR_PATH, &long).as_bytes()).is_empty());
+    }
+
+    #[test]
     fn detects_st_terminated_and_exit_code() {
         let mut s = OscScanner::new();
         assert_eq!(
@@ -401,11 +466,36 @@ mod tests {
     }
 
     #[test]
+    fn cwd_host_locality() {
+        assert!(host_is_local("", "mac"));
+        assert!(host_is_local("localhost", "mac"));
+        assert!(host_is_local("Mac.local", "mac"));
+        assert!(host_is_local("mac", "MAC.lan"));
+        assert!(!host_is_local("build-01", "mac"));
+        assert!(!host_is_local("macbox.local", "mac"));
+    }
+
+    #[test]
+    fn cwd_without_a_host() {
+        let mut s = OscScanner::new();
+        assert_eq!(
+            markers(&mut s, b"\x1b]7;/srv/app\x07"),
+            vec![Marker::Cwd {
+                path: "/srv/app".into(),
+                host: String::new()
+            }]
+        );
+    }
+
+    #[test]
     fn cwd_decoding() {
         let mut s = OscScanner::new();
         assert_eq!(
             markers(&mut s, b"\x1b]7;file://mac.local/Users/maya/my%20dir\x07"),
-            vec![Marker::Cwd("/Users/maya/my dir".into())]
+            vec![Marker::Cwd {
+                path: "/Users/maya/my dir".into(),
+                host: "mac.local".into()
+            }]
         );
     }
 
@@ -506,7 +596,10 @@ mod tests {
         // the next sequence is reported again
         assert_eq!(
             markers(&mut s, b"\x1b]7;file://h/ok\x1b\\"),
-            vec![Marker::Cwd("/ok".into())]
+            vec![Marker::Cwd {
+                path: "/ok".into(),
+                host: "h".into()
+            }]
         );
     }
 
@@ -515,7 +608,10 @@ mod tests {
         let mut s = OscScanner::new();
         assert_eq!(
             markers(&mut s, b"\x1b]7;file://h/a%+1b%2x%41\x07"),
-            vec![Marker::Cwd("/a%+1b%2xA".into())]
+            vec![Marker::Cwd {
+                path: "/a%+1b%2xA".into(),
+                host: "h".into()
+            }]
         );
     }
 

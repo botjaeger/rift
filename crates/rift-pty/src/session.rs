@@ -320,6 +320,9 @@ pub struct Session {
     pub scrolled: Arc<AtomicU64>,
     /// Last OSC 7 working directory.
     pub cwd: Arc<Mutex<Option<String>>>,
+    /// The last OSC 7 named another machine (an ssh session): `cwd` is a
+    /// path there, not on this disk. See [`Session::local_cwd`].
+    pub cwd_remote: Arc<AtomicBool>,
     /// Shell state reported by OSC 1337 SetUserVar (prompt chips).
     pub user_vars: UserVars,
     /// Set by the reader thread when new output arrived; cleared by the app
@@ -992,6 +995,7 @@ impl Session {
         let scrolled = Arc::new(AtomicU64::new(0));
         let generation = Arc::new(AtomicU64::new(0));
         let cwd = Arc::new(Mutex::new(None));
+        let cwd_remote = Arc::new(AtomicBool::new(false));
         let user_vars = UserVars::default();
         let graphics = Arc::new(Mutex::new(Graphics::default()));
         let ctx = FeedCtx {
@@ -1001,6 +1005,7 @@ impl Session {
             scrollback,
             blocks: blocks.clone(),
             cwd: cwd.clone(),
+            cwd_remote: cwd_remote.clone(),
             user_vars: user_vars.clone(),
             graphics: graphics.clone(),
             window_size: window_size_shared.clone(),
@@ -1036,6 +1041,7 @@ impl Session {
             graphics,
             scrolled,
             cwd,
+            cwd_remote,
             user_vars,
             dirty,
             saw_output,
@@ -1052,6 +1058,25 @@ impl Session {
 
     pub fn size(&self) -> GridSize {
         self.size
+    }
+
+    /// The working directory when it is on this machine: `None` while the
+    /// shell reports a directory on another host (ssh), so nothing reads the
+    /// local disk at a remote path. Display uses `cwd` itself.
+    pub fn local_cwd(&self) -> Option<String> {
+        if self.cwd_remote.load(Ordering::Relaxed) {
+            return None;
+        }
+        self.cwd.lock().unwrap().clone()
+    }
+
+    /// The working directory when it is on another host (an ssh session
+    /// with Rift's remote hooks): a path there, never read locally.
+    pub fn remote_cwd(&self) -> Option<String> {
+        if !self.cwd_remote.load(Ordering::Relaxed) {
+            return None;
+        }
+        self.cwd.lock().unwrap().clone()
     }
 
     /// Write user input to the shell.
@@ -1457,6 +1482,7 @@ struct FeedCtx {
     scrollback: usize,
     blocks: Arc<Mutex<BlockStore>>,
     cwd: Arc<Mutex<Option<String>>>,
+    cwd_remote: Arc<AtomicBool>,
     user_vars: UserVars,
     graphics: Arc<Mutex<Graphics>>,
     window_size: Arc<Mutex<WindowSize>>,
@@ -1565,7 +1591,7 @@ fn feed(parser: &mut vte::ansi::Processor, scanner: &mut OscScanner, bytes: &[u8
                 {
                     ctx.blocks.lock().unwrap().mark_unterminated();
                 }
-                apply_marker(marker, &term, scrolled_cur, &ctx.blocks, &ctx.cwd)
+                apply_marker(marker, &term, scrolled_cur, ctx)
             }
             None => {}
         }
@@ -1676,13 +1702,23 @@ fn wait_readable(file: &impl std::os::fd::AsRawFd, wait: std::time::Duration) ->
     }
 }
 
-fn apply_marker(
-    marker: Marker,
-    term: &Term<EventProxy>,
-    scrolled: u64,
-    blocks: &Arc<Mutex<BlockStore>>,
-    cwd: &Arc<Mutex<Option<String>>>,
-) {
+/// This machine's hostname, read once (empty when unavailable, which makes
+/// only empty and `localhost` OSC 7 hosts local).
+fn local_host() -> &'static str {
+    static HOST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    HOST.get_or_init(|| {
+        let mut buf = [0u8; 256];
+        // SAFETY: gethostname writes at most buf.len() bytes into buf
+        if unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } != 0 {
+            return String::new();
+        }
+        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+        String::from_utf8_lossy(&buf[..end]).into_owned()
+    })
+}
+
+fn apply_marker(marker: Marker, term: &Term<EventProxy>, scrolled: u64, ctx: &FeedCtx) {
+    let (blocks, cwd) = (&ctx.blocks, &ctx.cwd);
     let cursor = term.grid().cursor.point;
     let abs_line = scrolled + cursor.line.0.max(0) as u64;
     log::debug!(
@@ -1705,7 +1741,11 @@ fn apply_marker(
             store.stamp_context(cwd.lock().unwrap().clone(), None);
         }
         Marker::Done { exit } => store.on_done(abs_line, exit),
-        Marker::Cwd(path) => {
+        Marker::Cwd { path, host } => {
+            ctx.cwd_remote.store(
+                !rift_core::host_is_local(&host, local_host()),
+                Ordering::Relaxed,
+            );
             *cwd.lock().unwrap() = Some(path);
         }
         // handled by `feed` (they need the parser to move the cursor)
@@ -1876,6 +1916,7 @@ mod tests {
             scrollback: 10_000,
             blocks: Arc::new(Mutex::new(BlockStore::default())),
             cwd: Arc::new(Mutex::new(None)),
+            cwd_remote: Arc::new(AtomicBool::new(false)),
             user_vars: UserVars::default(),
             graphics: Arc::new(Mutex::new(Graphics::default())),
             window_size: Arc::new(Mutex::new(WindowSize {
@@ -1887,6 +1928,29 @@ mod tests {
             reply: None,
             notify: None,
         }
+    }
+
+    /// An OSC 7 from an ssh session names another host: its path is never
+    /// treated as a local directory; the next local report clears that.
+    #[test]
+    fn a_cwd_on_another_host_is_remote() {
+        let c = ctx(20, 5);
+        let mut p = vte::ansi::Processor::new();
+        let mut s = OscScanner::new();
+        let remote = || c.cwd_remote.load(Ordering::Relaxed);
+        feed(
+            &mut p,
+            &mut s,
+            b"\x1b]7;file://build-01.example/srv/app\x07",
+            &c,
+        );
+        assert!(remote());
+        assert_eq!(c.cwd.lock().unwrap().as_deref(), Some("/srv/app"));
+        let here = format!("\x1b]7;file://{}/tmp\x07", local_host());
+        feed(&mut p, &mut s, here.as_bytes(), &c);
+        assert!(!remote());
+        feed(&mut p, &mut s, b"\x1b]7;file://localhost/tmp\x07", &c);
+        assert!(!remote());
     }
 
     #[test]
@@ -2781,6 +2845,7 @@ mod tests {
             graphics: c.graphics.clone(),
             scrolled: c.scrolled.clone(),
             cwd: c.cwd.clone(),
+            cwd_remote: c.cwd_remote.clone(),
             user_vars: c.user_vars.clone(),
             dirty: Arc::new(AtomicBool::new(false)),
             saw_output: Arc::new(AtomicBool::new(false)),

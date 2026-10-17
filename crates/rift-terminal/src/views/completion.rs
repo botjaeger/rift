@@ -19,6 +19,9 @@ pub struct CompletionUi {
     pub open: bool,
     /// Remainder previewed inline after the cursor.
     pub ghost: String,
+    /// The word the candidates replace, as typed: a row starting with it
+    /// shows that part bold.
+    pub token: String,
 }
 
 impl CompletionUi {
@@ -186,6 +189,7 @@ fn kind_icon(item: &Completion) -> Icon {
         "path" => Icon::File,
         "history" => Icon::History,
         "git" => Icon::Branch,
+        "hint" => Icon::Info,
         _ => Icon::Terminal,
     }
 }
@@ -200,6 +204,18 @@ fn kind_icon(item: &Completion) -> Icon {
 /// Height of the open panel: the terminal output moves out from under it.
 pub fn panel_height(ui: &CompletionUi) -> f32 {
     HEADER_H + ui.items.len().min(MAX_ROWS) as f32 * ROW_H + FOOTER_H
+}
+
+/// Bytes of `item`'s text shown bold as typed: a history line's typed
+/// line, a candidate's typed word when it starts with it (a word-start or
+/// subsequence match does not), a hint's none.
+fn bold_len(item: &Completion, token: &str, prefix_len: usize, line_len: usize) -> usize {
+    match item.source {
+        "history" => line_len,
+        "hint" => 0,
+        _ if item.insert.starts_with(token) => prefix_len,
+        _ => 0,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -347,8 +363,10 @@ pub fn render(
             theme.text_dim,
         );
 
-        // description on the right (muted), the name left of it
-        let desc_w = if item.description.is_empty() {
+        // description on the right (muted), the name left of it; a hint
+        // row is its text alone
+        let hint = item.source == "hint";
+        let desc_w = if item.description.is_empty() || hint {
             0.0
         } else {
             engine.measure(&item.description, 12.0, FONT_SANS, Weight::NORMAL)
@@ -357,13 +375,13 @@ pub fn render(
         let desc_x = x + w - PAD_X - desc_w;
         let name_room = (desc_x - 16.0 - name_x).max(cell * 4.0);
         let fits = (name_room / cell).floor().max(1.0) as usize;
-        let name = &item.insert;
-        let chars = name.chars().count();
-        let typed = if item.source == "history" {
-            line_len
+        let name = if hint {
+            &item.description
         } else {
-            prefix_len
+            &item.insert
         };
+        let chars = name.chars().count();
+        let typed = bold_len(item, &ui.token, prefix_len, line_len);
         // too long (a deep path): keep the tail, which tells candidates apart
         let (matched, rest): (String, String) = if chars > fits {
             let tail: String = name.chars().skip(chars - fits.saturating_sub(1)).collect();
@@ -389,7 +407,9 @@ pub fn render(
                 rest.as_str(),
                 Attrs::new()
                     .family(Family::Name(mono_family()))
-                    .color(text_color(if selected {
+                    .color(text_color(if hint {
+                        theme.text_muted
+                    } else if selected {
                         theme.text_bright
                     } else {
                         theme.text_ui
@@ -460,6 +480,15 @@ mod tests {
             description: String::new(),
             source,
         }
+    }
+
+    #[test]
+    fn only_a_prefix_match_shows_the_typed_part_bold() {
+        assert_eq!(bold_len(&c("checkout", "shell"), "che", 3, 7), 3);
+        assert_eq!(bold_len(&c("cherry-pick", "shell"), "pick", 4, 8), 0);
+        assert_eq!(bold_len(&c("git-checkout", "command"), "gco", 3, 3), 0);
+        assert_eq!(bold_len(&c("git che", "history"), "che", 3, 7), 7);
+        assert_eq!(bold_len(&c("", "hint"), "", 0, 3), 0);
     }
 
     #[test]

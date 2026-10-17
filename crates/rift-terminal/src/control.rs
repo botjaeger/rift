@@ -1,6 +1,10 @@
-//! Local control API: each Rift window listens on
+//! Local control API: each Rift process listens on
 //! `<data dir>/control/<pid>.sock` (a 0700 directory; other uids are
 //! refused) for newline-delimited JSON requests, one response line each.
+//! One process holds all its windows: `list`/`status` answer every
+//! window's tabs (numbered across windows, `window` says whose), a request
+//! naming a pane acts in that pane's window, and `focus --tab N` raises the
+//! window of tab N; the rest act in the window that last had focus.
 //!
 //! `control_api` in config.toml gates what is accepted:
 //!
@@ -13,9 +17,10 @@
 //! `remote-input`, `remote-open` and `remote-close` are accepted only while `remote_access`
 //! is on, whatever the level.
 //!
-//! `prepare-restart` is sent by a window that installs an update: the
-//! receiver saves its layout to `<data dir>/restart/<pid>.toml`, leaves its
-//! durable shells running and quits (the updated app reopens it). It must
+//! `prepare-restart` is sent by a process that installs an update: the
+//! receiver saves every window's layout to `<data dir>/restart/<pid>.toml`,
+//! leaves its durable shells running and quits (the updated app reopens
+//! its windows). It must
 //! carry the token from that update's marker (`update-pending.json`,
 //! readable by the user only, under 60 s old); without it the request is
 //! refused.
@@ -268,6 +273,10 @@ impl Request {
     }
 }
 
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
 fn blocks_limit() -> usize {
     rift_remote::MAX_BLOCKS
 }
@@ -299,9 +308,24 @@ pub struct PaneInfo {
     pub running: Option<rift_remote::protocol::PaneRunning>,
 }
 
+/// A window that is not an ordinary one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WindowInfo {
+    /// From 0 in opening order, as [`TabInfo::window`] counts.
+    pub window: usize,
+    /// `dropdown`: the drop-down hotkey window (`hotkey_window`).
+    pub kind: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TabInfo {
+    /// Counts from 0 across every window of the process, window by window
+    /// (`focus --tab` takes it).
     pub index: usize,
+    /// The window it is in, from 0 in opening order (absent: the first, and
+    /// in answers from versions with one window per process).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub window: usize,
     pub title: String,
     pub active: bool,
     pub panes: Vec<PaneInfo>,
@@ -318,6 +342,11 @@ pub struct Response {
     pub version: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tabs: Vec<TabInfo>,
+    /// `status`/`list`: the windows that are not ordinary ones (the
+    /// drop-down hotkey window, `"kind":"dropdown"`); absent when every
+    /// window is ordinary.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub windows: Vec<WindowInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane: Option<u64>,
     /// `blocks`: the pane's blocks, newest last.
@@ -645,20 +674,24 @@ pub fn visit_other_windows(mut found: impl FnMut((u32, PathBuf, Vec<TabInfo>))) 
 
 const CLI_HELP: &str = "usage: rift-terminal ctl [--pid PID] <command>
 
-  list                          tabs and panes of every window (JSON)
-  status                        this window's pid, version, tabs
+  list                          tabs and panes of every Rift process (JSON)
+  status                        this process's pid, version, tabs (of all
+                                its windows; `window` numbers them from 0)
   blocks --pane ID [--before ID] [--limit N]
                                 a pane's command blocks, newest last (at most
                                 30; output: last 500 lines, 64 KiB)
-  focus [--tab N] [--pane ID]   raise the window, select a tab (N counts from 0,
-                                as in `list`) or a pane
-  split right|down [--cwd DIR]  split the active pane        (control_api = \"full\")
-  open [--cwd DIR] [-- CMD…]    new tab, optionally running CMD (\"full\")
+  focus [--tab N] [--pane ID]   raise the pane's or tab's window, select the tab
+                                (N counts from 0 across windows, as in `list`)
+                                or the pane
+  split right|down [--cwd DIR]  split the active pane of the focused window
+                                                             (control_api = \"full\")
+  open [--cwd DIR] [-- CMD…]    new tab in the focused window, optionally
+                                running CMD                  (\"full\")
   send-text --pane ID TEXT      type TEXT into a pane         (\"full\")
   request JSON                  send one raw request line, e.g.
                                 '{\"cmd\":\"blocks\",\"pane\":3,\"meta\":true}'
 
-The newest window answers unless --pid names one.";
+The newest Rift process answers unless --pid names one.";
 
 /// `rift-terminal ctl …`. Returns the process exit code.
 pub fn cli(args: &[String]) -> i32 {

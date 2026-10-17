@@ -200,6 +200,7 @@ pub fn install(keymap: &Keymap) -> Option<MenuBar> {
             &action(keymap, "Actual Size", "font_reset"),
             &sep(),
             &action(keymap, "Maximize Pane", "maximize_pane"),
+            &action(keymap, "Equalize Panes", "equalize_panes"),
             &action(keymap, "Toggle Full Screen", "toggle_fullscreen"),
         ],
     )

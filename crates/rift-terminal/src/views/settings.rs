@@ -1,5 +1,6 @@
 use rift_core::{
-    Bell, Color, Config, CursorStyle, InputPosition, Keymap, PromptMode, TabLayout, Theme,
+    Bell, Color, Config, CursorStyle, InputPosition, Keymap, NewTabPlacement, PromptMode,
+    TabCloseButton, TabLayout, Theme,
 };
 use rift_renderer::glyphon::{Attrs, Buffer, Family, Metrics, Shaping, TextBounds, Weight};
 use rift_renderer::{FONT_SANS, Layer, TextEngine, mono_family};
@@ -3056,16 +3057,77 @@ fn appearance_page(form: &mut Form, config: &Config) {
         config.ligatures,
         "ligatures",
     );
+
+    form.group("Tabs");
     let y = form.y;
     form.segment(
         y,
-        "Tabs",
+        "Tab position",
         &["Top", "Side"],
         match config.tab_layout {
             TabLayout::Horizontal => 0,
             TabLayout::Vertical => 1,
         },
         "tab_layout",
+    );
+    let y = form.y;
+    form.segment_desc(
+        y,
+        "Close buttons",
+        "Always keeps a tab's alert dot until you hover it",
+        &["On hover", "Always", "Never"],
+        match config.tab_close_button {
+            TabCloseButton::Hover => 0,
+            TabCloseButton::Always => 1,
+            TabCloseButton::Never => 2,
+        },
+        "tab_close_button",
+    );
+    let y = form.y;
+    form.segment(
+        y,
+        "New tabs open",
+        &["At the end", "After the current tab"],
+        match config.new_tab_placement {
+            NewTabPlacement::End => 0,
+            NewTabPlacement::AfterCurrent => 1,
+        },
+        "new_tab_placement",
+    );
+    let y = form.y;
+    form.toggle_desc(
+        y,
+        "Show tabs with only one tab open",
+        "Off hides the lone tab; the bar's buttons stay",
+        config.tab_bar_with_one_tab,
+        "tab_bar_with_one_tab",
+    );
+
+    form.group("Panes");
+    let y = form.y;
+    form.toggle(
+        y,
+        "Dim inactive panes",
+        config.dim_inactive_panes,
+        "dim_inactive_panes",
+    );
+    if config.dim_inactive_panes {
+        let y = form.y;
+        form.slider(
+            y,
+            "Dimming strength",
+            dim_slider(config.inactive_pane_dim),
+            &format!("{}%", config.inactive_pane_dim.clamp(1, 40)),
+            "inactive_pane_dim",
+        );
+    }
+    let y = form.y;
+    form.toggle_desc(
+        y,
+        "Focus follows mouse",
+        "The split pane under the pointer takes focus",
+        config.focus_follows_mouse,
+        "focus_follows_mouse",
     );
 }
 
@@ -3128,6 +3190,33 @@ fn general_page(form: &mut Form, config: &Config, update: &UpdateLine) {
         "Session service; updates and crashes reattach (new shells)",
         config.durable_sessions,
         "durable_sessions",
+    );
+
+    // the hotkey itself (`global_hotkey`) is set in config.toml
+    form.group("Hotkey window");
+    let y = form.y;
+    form.toggle_desc(
+        y,
+        "Drop-down hotkey window",
+        "The global hotkey slides a window down from the top of the screen",
+        config.hotkey_window,
+        "hotkey_window",
+    );
+    let y = form.y;
+    form.stepper_desc(
+        y,
+        "Hotkey window height",
+        "Share of the screen it covers",
+        &config.hotkey_window_height().to_string(),
+        "%",
+        "hotkey_window_height",
+    );
+    let y = form.y;
+    form.toggle(
+        y,
+        "Hide it when it loses focus",
+        config.hotkey_window_hide_on_blur,
+        "hotkey_window_hide_on_blur",
     );
 
     form.group("Updates");
@@ -3296,6 +3385,13 @@ fn features_page(form: &mut Form, config: &Config) {
     let y = form.y;
     form.toggle(
         y,
+        "Completions from your shell",
+        config.shell_completions,
+        "shell_completions",
+    );
+    let y = form.y;
+    form.toggle(
+        y,
         "Autocomplete quotes and brackets",
         config.autocomplete_pairs,
         "autocomplete_pairs",
@@ -3321,6 +3417,14 @@ fn features_page(form: &mut Form, config: &Config) {
             rift_core::BlocksStart::Top => 1,
         },
         "blocks_start",
+    );
+    let y = form.y;
+    form.toggle_desc(
+        y,
+        "Sticky command header",
+        "Pins a long block's command to the top while you scroll its output",
+        config.sticky_command_header,
+        "sticky_command_header",
     );
     let y = form.y;
     form.segment(
@@ -4015,6 +4119,11 @@ pub fn opacity_slider(opacity: f32) -> f32 {
 /// `window_blur` (1–64 px) as a slider position.
 pub fn blur_slider(blur: u8) -> f32 {
     (f32::from(blur) - 1.0) / 63.0
+}
+
+/// `inactive_pane_dim` (1–40 %) as a slider position.
+pub fn dim_slider(dim: u8) -> f32 {
+    (f32::from(dim.clamp(1, 40)) - 1.0) / 39.0
 }
 
 #[cfg(test)]

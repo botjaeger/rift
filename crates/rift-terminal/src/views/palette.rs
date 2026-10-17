@@ -255,6 +255,11 @@ pub fn base_items(
             PaletteAction::App(AppAction::ResizePaneDown),
         ),
         item(
+            "Equalize pane sizes",
+            "equalize_panes",
+            PaletteAction::App(AppAction::EqualizePanes),
+        ),
+        item(
             "Focus terminal input",
             "focus_input",
             PaletteAction::App(AppAction::FocusInput),

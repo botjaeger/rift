@@ -1,0 +1,29 @@
+name = "Server Plus Logs"
+color = "magenta"
+future_key = "ignored"
+
+[[panes]]
+id = "root"
+split = "horizontal"
+children = ["server", "right"]
+
+[[panes]]
+id = "server"
+type = "terminal"
+directory = "~/code/api"
+commands = ["make serve"]
+is_focused = true
+
+[[panes]]
+id = "right"
+split = "vertical"
+children = ["logs", "shell"]
+
+[[panes]]
+id = "logs"
+type = "terminal"
+directory = "/var/log"
+
+[[panes]]
+id = "shell"
+type = "agent"

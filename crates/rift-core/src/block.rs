@@ -54,6 +54,10 @@ pub struct Block {
     /// Wall-clock time the command finished (history ages); `None` while
     /// it runs and for replayed blocks.
     pub finished_at: Option<std::time::SystemTime>,
+    /// `command` is what the app's editor submitted
+    /// ([`BlockStore::stamp_submit`]), not text read back from the screen,
+    /// which a program can forge with OSC 133.
+    pub from_editor: bool,
 }
 
 impl Block {
@@ -105,9 +109,51 @@ pub struct BlockStore {
     /// the prompt that follows (zsh on SIGWINCH) can land below a reflowed
     /// copy of the old one, which must stay hidden with it.
     resized_at_prompt: bool,
+    /// [`BlockStore::ssh_target`]'s answer and the block list it was read
+    /// from (length, newest id, newest command's length).
+    ssh_memo: Option<SshMemo>,
 }
 
+type SshMemo = (
+    (usize, BlockId, usize),
+    Option<crate::remote_complete::Target>,
+);
+
+/// Blocks searched for the pane's `ssh` command, newest first.
+const SSH_SCAN: usize = 200;
+
 impl BlockStore {
+    /// The `ssh` destination this pane runs (remote completions): the
+    /// newest `ssh` command submitted from the app's editor, else the
+    /// newest read back from the screen (a session replayed after a
+    /// restart), whose options are cut to the destination
+    /// ([`crate::remote_complete::parse_screen_ssh_command`]): screen text
+    /// is what the remote side printed. Cached until the block list
+    /// changes.
+    pub fn ssh_target(&mut self) -> Option<crate::remote_complete::Target> {
+        use crate::remote_complete::{parse_screen_ssh_command, parse_ssh_command};
+        let key = self
+            .blocks
+            .back()
+            .map(|b| (self.blocks.len(), b.id, b.command.len()));
+        if let Some((at, target)) = &self.ssh_memo
+            && Some(*at) == key
+        {
+            return target.clone();
+        }
+        let recent = || self.blocks.iter().rev().take(SSH_SCAN);
+        let target = recent()
+            .filter(|b| b.from_editor)
+            .find_map(|b| parse_ssh_command(&b.command))
+            .or_else(|| {
+                recent()
+                    .filter(|b| !b.from_editor)
+                    .find_map(|b| parse_screen_ssh_command(&b.command))
+            });
+        self.ssh_memo = key.map(|k| (k, target.clone()));
+        target
+    }
+
     /// The grid changed size; a prompt redraw may follow.
     pub fn note_resize(&mut self) {
         self.resized_at_prompt = self
@@ -187,6 +233,7 @@ impl BlockStore {
             restored: false,
             replayed: false,
             finished_at: None,
+            from_editor: false,
         });
         self.next_id += 1;
     }
@@ -261,6 +308,7 @@ impl BlockStore {
         if let Some(last) = self.blocks.back_mut()
             && last.state == BlockState::Prompt
         {
+            last.from_editor = submitted.is_some();
             last.command = submitted.unwrap_or(command);
             last.output_start = Some(abs);
             last.state = BlockState::Running { started: now };
@@ -413,6 +461,53 @@ mod tests {
         assert_eq!(b.exit_code(), Some(0));
         assert_eq!(b.suppressed_range(), Some((10, 12)));
         assert_eq!(b.output_range(), Some((12, 20)));
+    }
+
+    #[test]
+    fn the_ssh_target_comes_from_the_editor_not_from_forged_screen_text() {
+        use crate::remote_complete::Target;
+        let mut s = BlockStore::default();
+        let mut line = 0;
+        let mut run = |s: &mut BlockStore, typed: Option<&str>, screen: &str| {
+            s.on_prompt_start(line);
+            if let Some(cmd) = typed {
+                s.stamp_submit(None, None, cmd);
+            }
+            s.on_output_start(line + 1, screen.into());
+            line += 2;
+        };
+        run(&mut s, Some("ssh -p 2222 box"), "ssh -p 2222 box");
+        let typed = Some(Target {
+            args: vec!["-p".into(), "2222".into()],
+            host: "box".into(),
+        });
+        assert_eq!(s.ssh_target(), typed);
+        // the remote side prints its own 133 markers around a command
+        run(&mut s, None, "ssh -F /tmp/evil.conf -S /tmp/sock other");
+        assert!(!s.last().unwrap().from_editor);
+        assert_eq!(s.ssh_target(), typed, "the editor's command wins");
+        // with no editor command (a replayed session), the screen's is
+        // cut to its destination
+        let mut s = BlockStore::default();
+        run(
+            &mut s,
+            None,
+            "ssh -F /tmp/evil.conf -S /tmp/sock -p 22 other",
+        );
+        assert_eq!(
+            s.ssh_target(),
+            Some(Target {
+                args: vec!["-p".into(), "22".into()],
+                host: "other".into(),
+            })
+        );
+        // cached until the block list changes: the commands are not read
+        // again (this one is no ssh command any more)
+        let n = s.blocks.back().unwrap().command.len();
+        s.blocks.back_mut().unwrap().command = "x".repeat(n);
+        assert_eq!(s.ssh_target().map(|t| t.host), Some("other".into()));
+        run(&mut s, Some("ssh new"), "ssh new");
+        assert_eq!(s.ssh_target().map(|t| t.host), Some("new".into()));
     }
 
     #[test]

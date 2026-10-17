@@ -36,6 +36,9 @@ use crate::views::terminal::{self, GridLayout};
 use crate::views::viewer::{ViewerHit, ViewerState};
 use crate::views::whats_new::{WhatsNewHits, WhatsNewState};
 
+mod hotkey_window;
+mod windows;
+
 /// Cross-thread wakeups.
 #[derive(Debug)]
 pub enum UserEvent {
@@ -64,11 +67,14 @@ pub enum UserEvent {
     DockerStatus(PaneId, Option<rift_core::docker::ComposeInfo>),
     ConfigReloaded,
     ViewerLoaded(Box<crate::views::viewer::ViewerState>),
+    /// The switcher's other-process windows, for the window that asked.
     WindowsLoaded(
+        Option<WindowId>,
         Vec<(u32, std::path::PathBuf, Vec<crate::control::TabInfo>)>,
         bool,
     ),
-    DetachedLoaded(Vec<rift_pty::ipc::SessionInfo>),
+    /// Detached service shells, for the window that asked.
+    DetachedLoaded(Option<WindowId>, Vec<rift_pty::ipc::SessionInfo>),
     HistoryLoaded(Vec<String>),
     ShellEnvLoaded(Arc<rift_core::shell_env::ShellEnv>),
     /// Screen reader requests (initial tree, actions).
@@ -91,6 +97,12 @@ pub enum UserEvent {
     ReviewWritten(Option<String>),
     /// Completions for completion request `.0`.
     Completions(u64, Vec<rift_core::completion::Completion>),
+    /// Rift's own completions for request `.0` while the user's shell or
+    /// the remote machine is still asked; `Completions` follows.
+    CompletionsPartial(u64, Vec<rift_core::completion::Completion>),
+    /// The command an SSH profile's tab `.0` runs, built off the UI thread
+    /// (`ssh -G` reads the user's ssh config: up to 2 s).
+    SshCommand(PaneId, String),
     /// An update check finished (`true`: asked for, so its answer toasts).
     UpdateChecked(Result<rift_core::update::Manifest, String>, bool),
     /// The other windows an update would restart.
@@ -120,23 +132,192 @@ struct CompletionRequest {
     pane: PaneId,
     buffer: String,
     cursor: usize,
-    history: Vec<String>,
+    /// The pane's own history (shared with its editor, not copied).
+    history: Arc<Vec<String>>,
     shell_history: Arc<Vec<String>>,
     cwd: Option<String>,
+    /// The pane shell's `$PATH` as its hooks last reported it (`rift-use`
+    /// changes it); `None`: the probed shell's.
+    path: Option<String>,
+    /// The user's shell program, when its own completions are asked too
+    /// (`shell_completions`, a local pane).
+    shell: Option<String>,
+    /// A pane on another machine, when its completions are asked there
+    /// (`shell_completions`).
+    remote: Option<RemoteCompletion>,
+}
+
+/// Where a remote pane completes: its directory there, and the `ssh`
+/// command it runs (`None`: none found, so nothing is asked remotely).
+#[derive(Clone)]
+struct RemoteCompletion {
+    cwd: String,
+    target: Option<rift_core::remote_complete::Target>,
+}
+
+/// The menu row a remote pane shows when it cannot complete remotely.
+const REMOTE_HINT: &str = "Remote completions need an SSH profile";
+
+/// The slower half of a request, run on its own thread so Rift's own
+/// candidates for newer requests never wait on it: the user's shell, or the
+/// remote machine of an ssh pane.
+struct SlowCompletion {
+    req: CompletionRequest,
+    /// Rift's own candidates, to merge into.
+    gathered: rift_core::completion::Gathered,
+    end: usize,
+    source: SlowSource,
+}
+
+enum SlowSource {
+    /// The shell program and what it is asked.
+    Shell(String, rift_core::shell_complete::Query),
+    /// The pane's ssh destination and its directory there.
+    Remote(rift_core::remote_complete::Target, String),
 }
 
 impl CompletionRequest {
-    fn run(&self) -> Vec<rift_core::completion::Completion> {
+    fn finish(&self, g: rift_core::completion::Gathered) -> Vec<rift_core::completion::Completion> {
+        g.finish(&self.buffer, &self.history, &self.shell_history)
+    }
+
+    /// Rift's own candidates: the whole answer, or the first part while the
+    /// user's shell or the remote machine is asked.
+    fn run(&self) -> Answer {
         // the whole word around the cursor is completed (zsh without
         // `complete_in_word`); `accept_completion` replaces that same span
-        rift_core::completion::complete(
-            &self.buffer,
-            rift_core::completion::token_end(&self.buffer, self.cursor),
-            &self.history,
-            &self.shell_history,
-            self.cwd.as_deref(),
+        let end = rift_core::completion::token_end(&self.buffer, self.cursor);
+        // a pane on another machine: nothing from this one (its commands)
+        let g = if self.remote.is_some() {
+            rift_core::completion::gather_remote(&self.buffer, end)
+        } else {
+            rift_core::completion::gather(
+                &self.buffer,
+                end,
+                self.cwd.as_deref(),
+                self.path.as_deref().map(std::ffi::OsStr::new),
+            )
+        };
+        let source = if let Some(remote) = &self.remote {
+            match &remote.target {
+                Some(t) => SlowSource::Remote(t.clone(), remote.cwd.clone()),
+                // an ssh Rift cannot find: local-only, with the hint
+                None => return Answer::Done(with_remote_hint(self.finish(g))),
+            }
+        } else {
+            let query = self
+                .shell
+                .as_deref()
+                .zip(self.cwd.as_deref())
+                .and_then(|(sh, cwd)| {
+                    let kind = rift_core::shell_env::ShellKind::from_program(sh);
+                    rift_core::shell_complete::query(kind, &self.buffer, end, cwd)
+                        .map(|q| (sh.to_string(), q))
+                });
+            match query {
+                Some((shell, q)) => SlowSource::Shell(shell, q),
+                None => return Answer::Done(self.finish(g)),
+            }
+        };
+        Answer::Partial(
+            self.finish(g.clone()),
+            Box::new(SlowCompletion {
+                req: self.clone(),
+                gathered: g,
+                end,
+                source,
+            }),
         )
     }
+}
+
+/// What the fast half of a request answers.
+enum Answer {
+    /// Rift's own candidates are the whole answer.
+    Done(Vec<rift_core::completion::Completion>),
+    /// Rift's own candidates now; the rest comes from the slow half.
+    Partial(Vec<rift_core::completion::Completion>, Box<SlowCompletion>),
+}
+
+impl SlowCompletion {
+    /// Ask the shell or the remote machine (within its budget) and merge.
+    fn run(self) -> Vec<rift_core::completion::Completion> {
+        let SlowCompletion {
+            req,
+            mut gathered,
+            end,
+            source,
+        } = self;
+        match source {
+            SlowSource::Shell(shell, q) => {
+                let items = rift_core::shell_complete::complete(
+                    &shell,
+                    &q,
+                    rift_core::shell_complete::BUDGET,
+                );
+                gathered.add(&items, "shell");
+                req.finish(gathered)
+            }
+            SlowSource::Remote(target, cwd) => {
+                // no live shared connection: local-only, with the hint
+                let Some(socket) = rift_core::remote_complete::control_socket(&target) else {
+                    return with_remote_hint(req.finish(gathered));
+                };
+                rift_core::remote_complete::complete_into(
+                    &mut gathered,
+                    &socket,
+                    &target,
+                    &req.buffer,
+                    end,
+                    &cwd,
+                    rift_core::remote_complete::BUDGET,
+                );
+                req.finish(gathered)
+            }
+        }
+    }
+}
+
+/// Start the thread that runs the slow half of requests (newest first;
+/// older ones still queued are dropped: their answer would be discarded).
+fn spawn_slow(proxy: EventLoopProxy<UserEvent>) -> std::sync::mpsc::Sender<Box<SlowCompletion>> {
+    let (tx, rx) = std::sync::mpsc::channel::<Box<SlowCompletion>>();
+    let spawned = std::thread::Builder::new()
+        .name("completion-shell".into())
+        .spawn(move || {
+            while let Ok(mut job) = rx.recv() {
+                while let Ok(newer) = rx.try_recv() {
+                    job = newer;
+                }
+                let generation = job.req.generation;
+                let items = job.run();
+                let _ = proxy.send_event(UserEvent::Completions(generation, items));
+            }
+        });
+    if let Err(e) = spawned {
+        // `tx` then fails to send and the request is answered without it
+        log::warn!("completion-shell thread: {e}");
+    }
+    tx
+}
+
+/// `items` with the [`REMOTE_HINT`] row after the word candidates.
+fn with_remote_hint(
+    mut items: Vec<rift_core::completion::Completion>,
+) -> Vec<rift_core::completion::Completion> {
+    let at = items
+        .iter()
+        .position(|c| c.source == "history")
+        .unwrap_or(items.len());
+    items.insert(
+        at,
+        rift_core::completion::Completion {
+            insert: String::new(),
+            description: REMOTE_HINT.into(),
+            source: "hint",
+        },
+    );
+    items
 }
 
 /// Pause before starting a new completion thread after one failed.
@@ -360,6 +541,8 @@ enum PaneDrop {
 
 struct DragState {
     path: NodePath,
+    /// Divider index within the split at `path`.
+    index: usize,
     axis: Axis,
     /// Area of the split node being resized.
     area: [f32; 4],
@@ -384,14 +567,26 @@ const DOUBLE_CLICK_MS: u128 = 400;
 const DRAG_THRESHOLD: f32 = 3.0;
 
 pub struct App {
+    /// The window being served: events, drawing and commands act on it.
+    /// The others wait in `parked` (`App::enter_window` swaps one in).
+    win: Box<WindowState>,
+    /// Every other window (in-process, one per ⌘N or restored window).
+    parked: Vec<Box<WindowState>>,
+    /// Every window's id in the order they were opened (the session file
+    /// and the script driver's `window <n>` count in this order).
+    window_order: Vec<WindowId>,
+    /// The window that last had keyboard focus: menu commands, the global
+    /// hotkey and the control socket act on it.
+    focused_window: Option<WindowId>,
+    /// Windows by when they last took focus, newest last (closing one
+    /// serves the one before it).
+    focus_history: Vec<WindowId>,
+    /// Saved windows to open at the next turn of the event loop (an
+    /// update's restart files).
+    queued_windows: Vec<rift_core::session_state::SavedWindowTabs>,
+    /// Last review-panel request id, across every window.
+    review_generation: u64,
     proxy: EventLoopProxy<UserEvent>,
-    window: Option<Arc<Window>>,
-    gpu: Option<Gpu>,
-    quads: Option<QuadPipeline>,
-    /// Theme `background_image` (Warp-style), drawn under every layer.
-    bg_image: Option<rift_renderer::ImagePipeline>,
-    /// Inline images (kitty graphics / iTerm2) on the GPU.
-    sprites: Option<rift_renderer::SpritePipeline>,
     bg_image_opacity: f32,
     text: Option<TextEngine>,
     git: Option<GitWorker>,
@@ -399,25 +594,148 @@ pub struct App {
     docker_worker: Option<rift_core::docker::DockerWorker>,
     /// The prompt chips the panes' git and Docker state was last fetched for.
     chips_applied: Vec<rift_core::PromptChip>,
-    tabs: Vec<TabState>,
-    active: usize,
     next_pane: PaneId,
-    scene: Scene,
     theme: Theme,
     /// The theme's color scheme as reported to programs (1 dark, 2 light).
     color_scheme: Option<u8>,
     cell_w: f32,
+    /// Why the configured theme did not load (toasted once per change).
+    theme_error: Option<String>,
+    blink_epoch: Instant,
+    config: Config,
+    keymap: Keymap,
+    clipboard: Option<arboard::Clipboard>,
+    /// Imported shell history (shared with the completion thread).
+    shell_history: Arc<Vec<String>>,
+    font_size: f32,
+    line_h: f32,
+    _watcher: Option<rift_core::watch::ConfigWatcher>,
+    /// `--script` driver (see script.rs).
+    script: Option<crate::script::Script>,
+    /// `--headless`: the window is never shown, focused or raised, and no
+    /// global hotkey is registered (scripts only; `shot` reads offscreen).
+    headless: bool,
+    /// Clipboard of a headless run: the system clipboard is never touched.
+    headless_clipboard: String,
+    /// Files on the headless clipboard (script `copyfiles`).
+    headless_files: Vec<std::path::PathBuf>,
+    /// OS appearance is light (drives `sync_os_theme`).
+    os_light: bool,
+    /// Last audible bell: a flood of BELs (`cat` of a binary) plays one sound
+    /// per `BELL_SOUND_GAP`, not one process each.
+    last_beep: Option<Instant>,
+    /// Warp-style launch configurations (~/.config/rift/launch_configs).
+    launch_configs: Vec<rift_core::launch::LaunchConfig>,
+    /// Config files the palette last found unreadable: a toast names them
+    /// once, not again on every palette open while the set stays the same.
+    launch_skipped: Vec<rift_core::launch::Skipped>,
+    /// Commands a launch configuration queued for a pane; sent at its first prompt.
+    pending_commands: std::collections::HashMap<PaneId, Vec<String>>,
+    /// Keys whose press went to a program reporting key events (kitty
+    /// flag 2), so their release follows them there.
+    keys_down: std::collections::HashSet<(PaneId, String)>,
+    /// Transcript id to replay into the next spawned pane (session restore).
+    next_replay: Option<String>,
+    /// Session-service shell for the next spawned pane to reattach.
+    next_attach: Option<u64>,
+    /// Local control API socket (removed on drop).
+    control_server: Option<crate::control::Server>,
+    /// Attention center entries, newest last.
+    attention: Vec<Attention>,
+    next_attention_id: u64,
+    /// Attention entries raised by Settings › Notifications › Try it: their
+    /// sample command is never rerun.
+    test_alerts: std::collections::HashSet<u64>,
+    /// Newest finished block already considered per pane.
+    attention_seen: std::collections::HashMap<PaneId, rift_core::BlockId>,
+    /// Newest finished block written to each pane's transcript.
+    transcript_saved: std::collections::HashMap<PaneId, rift_core::BlockId>,
+    /// ssh profiles listed in the palette (config + ~/.ssh/config).
+    ssh_profiles: Vec<rift_core::ssh::SshProfile>,
+    /// `RIFT_LATENCY_LOG`: log key-to-frame latency of raw keystrokes.
+    latency_log: bool,
+    /// Raw key sent at .0; .1 = the program's output has arrived since.
+    latency_probe: Option<(Instant, bool)>,
+    /// The releases What's New lists.
+    releases: Vec<rift_core::changelog::Release>,
+    /// The tab label's shell name for the configured shell: resolving it
+    /// stats the shell binaries, too slow for every frame.
+    shell_label: Option<(Option<String>, String)>,
+    /// When the session file last took the counted time while a tab was
+    /// counting (None while none is): a crash loses at most a minute of it.
+    clock_saved: Option<Instant>,
+    /// How many tabs were counting at the last wake (a drop saves the file).
+    clock_counting: usize,
+    /// Every tab's focused pane at the last wake: a change saves the
+    /// session file (None until the first wake).
+    saved_focus: Option<Vec<PaneId>>,
+    /// Aliases/functions/builtins probed from the user's shell (background).
+    shell_env: Option<Arc<rift_core::shell_env::ShellEnv>>,
+    /// Session file is read/written (off for scripts).
+    persist_session: bool,
+    /// New shells may run in the session service (`durable_sessions`, and
+    /// a scripted run only with `RIFT_PERSIST_SESSION`: tests leave no
+    /// service behind).
+    durable_allowed: bool,
+    update: UpdateUi,
+    /// Remote access: the gateway's status, its start, pairing.
+    remote: RemoteUi,
+    /// A `prepare-restart` request was answered: quit, keeping durable
+    /// shells.
+    restart_requested: bool,
+    next_toast_id: u64,
+    /// Queue of the completion thread (started on the first request).
+    completion_worker: CompletionWorker<CompletionRequest>,
+    /// Latest completion request not yet answered.
+    completion_pending: Option<CompletionRequest>,
+    /// Key that read the menu or ghost while `completion_pending` was in
+    /// flight: applied once, when that request's answer arrives.
+    completion_intent: Option<CompletionIntent>,
+    /// Counter identifying completion requests.
+    completion_gen: u64,
+    /// The pending request whose partial answer (Rift's own candidates) is
+    /// shown while the shell or remote machine is asked.
+    completion_partial: Option<u64>,
+    /// The pane the shown completions belong to.
+    completion_pane: Option<PaneId>,
+    /// Queue of the review writer thread (started on the first write).
+    review_writer: Option<std::sync::mpsc::Sender<ReviewWrite>>,
+    /// Why config.toml was last rejected (unreadable or invalid). While set,
+    /// the live config is the last good one and Settings does not save, so
+    /// the user's file is never overwritten with defaults.
+    config_error: Option<String>,
+    /// Registered `global_hotkey` (re-registered when the setting changes).
+    global_hotkey: Option<crate::hotkey::GlobalHotkey>,
+    /// Native menu bar and the keybindings it was built for.
+    #[cfg(target_os = "macos")]
+    menubar: Option<(
+        crate::menubar::MenuBar,
+        std::collections::BTreeMap<String, String>,
+    )>,
+}
+
+/// Everything one window owns: its winit window and GPU surface, tabs and
+/// panes, overlays, menus, panels and per-frame hit rects. Shared state
+/// (config, fonts, workers, the control socket) stays on [`App`].
+struct WindowState {
+    window: Option<Arc<Window>>,
+    gpu: Option<Gpu>,
+    quads: Option<QuadPipeline>,
+    /// Theme `background_image` (Warp-style), drawn under every layer.
+    bg_image: Option<rift_renderer::ImagePipeline>,
+    /// Inline images (kitty graphics / iTerm2) on the GPU.
+    sprites: Option<rift_renderer::SpritePipeline>,
+    tabs: Vec<TabState>,
+    active: usize,
+    scene: Scene,
     modifiers: ModifiersState,
     /// Left and right Option (Alt) held, where the platform tells them
     /// apart (macOS); both false otherwise.
     alt_sides: (bool, bool),
-    /// Why the configured theme did not load (toasted once per change).
-    theme_error: Option<String>,
     hits: Vec<Hit>,
     mouse: (f32, f32),
     any_running: bool,
     editor_active: bool,
-    blink_epoch: Instant,
     /// Earliest end of a pane's boot-placeholder grace (repaint then).
     boot_until: Option<Instant>,
     drag: Option<DragState>,
@@ -434,12 +752,9 @@ pub struct App {
     editor_cols: usize,
     /// Find-bar toggle chips: [match case, regex] (last frame).
     search_chips: Vec<[f32; 4]>,
-    config: Config,
-    keymap: Keymap,
     settings: SettingsState,
     slider_drag: Option<(&'static str, [f32; 4])>,
     search: SearchState,
-    clipboard: Option<arboard::Clipboard>,
     pending_sel: Option<PendingSelection>,
     /// When a selection dragged past its pane's edge last scrolled it.
     select_scrolled: Option<Instant>,
@@ -453,81 +768,37 @@ pub struct App {
     /// "Edit prompt" (Settings › prompt chips) and its last layout.
     prompt_editor: Option<crate::views::prompt_editor::PromptEditor>,
     prompt_editor_layout: crate::views::prompt_editor::Layout,
-    /// Imported shell history (shared with the completion thread).
-    shell_history: Arc<Vec<String>>,
-    font_size: f32,
-    line_h: f32,
     scroll_accum: f32,
     /// cwds of recently closed tabs (⇧⌘T reopens, newest last).
     closed_tabs: Vec<Option<std::path::PathBuf>>,
-    _watcher: Option<rift_core::watch::ConfigWatcher>,
-    /// `--script` driver (see script.rs).
-    script: Option<crate::script::Script>,
-    /// `--headless`: the window is never shown, focused or raised, and no
-    /// global hotkey is registered (scripts only; `shot` reads offscreen).
-    headless: bool,
-    /// Clipboard of a headless run: the system clipboard is never touched.
-    headless_clipboard: String,
-    /// Files on the headless clipboard (script `copyfiles`).
-    headless_files: Vec<std::path::PathBuf>,
     /// A block header's copy button just copied (pane, block, when): its
     /// icon shows a check for [`COPIED_SHOWN`].
     copied: Option<(PaneId, rift_core::BlockId, Instant)>,
     /// Next frame is also rendered offscreen and written to this PNG.
     capture: Option<std::path::PathBuf>,
-    /// OS appearance is light (drives `sync_os_theme`).
-    os_light: bool,
     /// Window has keyboard focus (completion notifications fire only when it doesn't).
     focused: bool,
     /// Pane that was last told it has focus (DECSET 1004), if any.
     focus_pane: Option<PaneId>,
     /// Visual bell flash start.
     bell_flash: Option<Instant>,
-    /// Last audible bell: a flood of BELs (`cat` of a binary) plays one sound
-    /// per `BELL_SOUND_GAP`, not one process each.
-    last_beep: Option<Instant>,
-    /// Warp-style launch configurations (~/.config/rift/launch_configs).
-    launch_configs: Vec<rift_core::launch::LaunchConfig>,
-    /// Commands a launch configuration queued for a pane; sent at its first prompt.
-    pending_commands: std::collections::HashMap<PaneId, Vec<String>>,
     /// Running-process close/quit warning awaiting a decision.
     confirm: Option<ConfirmClose>,
-    /// Keys whose press went to a program reporting key events (kitty
-    /// flag 2), so their release follows them there.
-    keys_down: std::collections::HashSet<(PaneId, String)>,
     /// Hint mode labels while active (⇧⌘H).
     hints: Option<HintState>,
-    /// Transcript id to replay into the next spawned pane (session restore).
-    next_replay: Option<String>,
-    /// Session-service shell for the next spawned pane to reattach.
-    next_attach: Option<u64>,
-    /// Local control API socket (removed on drop).
-    control_server: Option<crate::control::Server>,
     /// Other windows' tabs, fetched when the session switcher opens.
     other_windows: Vec<(u32, std::path::PathBuf, Vec<crate::control::TabInfo>)>,
     /// Detached session-service shells, fetched when the palette opens.
     detached: Vec<rift_pty::ipc::SessionInfo>,
     windows_loading: bool,
     detached_loading: bool,
-    /// Attention center entries, newest last.
-    attention: Vec<Attention>,
-    next_attention_id: u64,
     /// In-window notification toasts: (attention id, shown since), newest
     /// first; hovering resets the time.
     note_toasts: Vec<(u64, Instant)>,
-    /// Attention entries raised by Settings › Notifications › Try it: their
-    /// sample command is never rerun.
-    test_alerts: std::collections::HashSet<u64>,
     note_toast_hits: Vec<crate::views::notifications::ToastHit>,
     /// Rift's own notices (updates) among `note_toasts`: no pane, no inbox
     /// row; they go when their toast goes.
     app_notes: Vec<AppNote>,
-    /// Newest finished block already considered per pane.
-    attention_seen: std::collections::HashMap<PaneId, rift_core::BlockId>,
-    /// Newest finished block written to each pane's transcript.
-    transcript_saved: std::collections::HashMap<PaneId, rift_core::BlockId>,
-    /// ssh profiles listed in the palette (config + ~/.ssh/config).
-    ssh_profiles: Vec<rift_core::ssh::SshProfile>,
     /// Pipe modal target: (pane, block, the block's output text).
     pipe_target: Option<(PaneId, rift_core::BlockId, String)>,
     /// Screen reader bridge (AccessKit); created before the window shows.
@@ -539,16 +810,11 @@ pub struct App {
     /// Newest finished block announced per pane.
     a11y_done: std::collections::HashMap<PaneId, rift_core::BlockId>,
     a11y_announcement: Option<String>,
-    /// `RIFT_LATENCY_LOG`: log key-to-frame latency of raw keystrokes.
-    latency_log: bool,
-    /// Raw key sent at .0; .1 = the program's output has arrived since.
-    latency_probe: Option<(Instant, bool)>,
     /// [cancel, destructive] button rects of the confirm modal.
     confirm_rects: [[f32; 4]; 2],
     /// What's New modal (views/whats_new.rs) and the releases it lists.
     whats_new: WhatsNewState,
     whats_new_hits: WhatsNewHits,
-    releases: Vec<rift_core::changelog::Release>,
     /// Notifications popover (views/notifications.rs) under the inbox button.
     notifications: NotificationsState,
     notifications_hits: NotificationsHits,
@@ -564,9 +830,6 @@ pub struct App {
     /// XTWINOPS state: iconified by a program, the last requested position
     /// (a hidden window reports none), the size before a one-way maximize.
     iconified: bool,
-    /// The tab label's shell name for the configured shell: resolving it
-    /// stats the shell binaries, too slow for every frame.
-    shell_label: Option<(Option<String>, String)>,
     /// When the last frame was drawn, and the frame output asked for that
     /// waits out [`OUTPUT_FRAME`].
     last_frame: Instant,
@@ -578,6 +841,8 @@ pub struct App {
     /// often a change of them repainted: hover styling follows the mouse.
     hover_sig: u64,
     hover_repaints: u32,
+    /// Unfocused panes the last frame washed (`dim_inactive_panes`; dump).
+    dimmed_panes: usize,
     /// Tooltips of this frame's controls, in click priority
     /// (`views::tooltip`); a tip with no text blocks the ones under it.
     tips: Vec<crate::views::tooltip::Tip>,
@@ -587,11 +852,6 @@ pub struct App {
     tip_shown: Option<crate::views::tooltip::Tip>,
     /// Whole minutes the Elapsed chip showed last (a change repaints it).
     elapsed_minutes: Option<u64>,
-    /// When the session file last took the counted time while a tab was
-    /// counting (None while none is): a crash loses at most a minute of it.
-    clock_saved: Option<Instant>,
-    /// How many tabs were counting at the last wake (a drop saves the file).
-    clock_counting: usize,
     /// Where that tooltip's card and its button were drawn.
     tip_drawn: Option<crate::views::tooltip::Drawn>,
     /// A plain press on a link, acted on at its release (`click_link`).
@@ -604,6 +864,14 @@ pub struct App {
     pointer_in: bool,
     /// Directory the review model was last requested for.
     review_cwd: Option<String>,
+    /// Last git status poll of the active tab's panes (changes made while a
+    /// pane is busy, by an agent or an editor, show without a command
+    /// ending), and of its Docker Compose state.
+    git_polled: Option<Instant>,
+    docker_polled: Option<Instant>,
+    /// The pane the last status request saw focused: focusing another
+    /// refreshes it at once.
+    status_pane: Option<PaneId>,
     viewer: ViewerState,
     viewer_hits: Vec<([f32; 4], ViewerHit)>,
     /// Pane area the viewer covers (last frame).
@@ -620,20 +888,6 @@ pub struct App {
     rename_fresh: bool,
     /// Search overlay edits a per-block output filter instead of find.
     filter_editing: bool,
-    /// Aliases/functions/builtins probed from the user's shell (background).
-    shell_env: Option<Arc<rift_core::shell_env::ShellEnv>>,
-    /// Session file is read/written (off for secondary windows and scripts).
-    persist_session: bool,
-    /// New shells may run in the session service (`durable_sessions`, and
-    /// a scripted run only with `RIFT_PERSIST_SESSION`: tests leave no
-    /// service behind).
-    durable_allowed: bool,
-    update: UpdateUi,
-    /// Remote access: the gateway's status, its start, pairing.
-    remote: RemoteUi,
-    /// A `prepare-restart` request was answered: quit, keeping durable
-    /// shells.
-    restart_requested: bool,
     /// Tab being dragged in the tab bar.
     tab_drag: Option<TabDrag>,
     /// ⌃R command history pane above the command line.
@@ -645,25 +899,9 @@ pub struct App {
     /// Transient status message (text, shown at).
     /// Status toasts, newest first (`App::toast_as`).
     toasts: Vec<Toast>,
-    next_toast_id: u64,
     toast_hits: Vec<crate::views::confirm::ToastHit>,
-    /// Queue of the completion thread (started on the first request).
-    completion_worker: CompletionWorker<CompletionRequest>,
-    /// Latest completion request not yet answered.
-    completion_pending: Option<CompletionRequest>,
-    /// Key that read the menu or ghost while `completion_pending` was in
-    /// flight: applied once, when that request's answer arrives.
-    completion_intent: Option<CompletionIntent>,
-    /// Counter identifying completion requests.
-    completion_gen: u64,
     /// Editor buffer the shown completions and ghost belong to.
     completion_buffer: String,
-    /// Queue of the review writer thread (started on the first write).
-    review_writer: Option<std::sync::mpsc::Sender<ReviewWrite>>,
-    /// Why config.toml was last rejected (unreadable or invalid). While set,
-    /// the live config is the last good one and Settings does not save, so
-    /// the user's file is never overwritten with defaults.
-    config_error: Option<String>,
     /// Mouse button held down while reporting to a mouse-tracking app:
     /// (pane, button code, last reported cell).
     mouse_report: Option<(PaneId, u8, (usize, usize))>,
@@ -677,14 +915,8 @@ pub struct App {
     ime_area_sent: Option<(f32, f32)>,
     /// Pointer shape currently set on the window.
     cursor_icon: winit::window::CursorIcon,
-    /// Registered `global_hotkey` (re-registered when the setting changes).
-    global_hotkey: Option<crate::hotkey::GlobalHotkey>,
-    /// Native menu bar and the keybindings it was built for.
-    #[cfg(target_os = "macos")]
-    menubar: Option<(
-        crate::menubar::MenuBar,
-        std::collections::BTreeMap<String, String>,
-    )>,
+    /// The drop-down hotkey window's state; `None` for an ordinary window.
+    dropdown: Option<hotkey_window::Dropdown>,
 }
 
 /// What a hint label acts on.
@@ -705,17 +937,19 @@ struct HintState {
 
 /// White over unfocused split panes on a dark theme (Warp): the pane you are
 /// in stays dark and the others wash lighter, so the focused one stands out
-/// at a glance (Warp's inactive pane measures #0e0e0e → #252525: ~10 %).
+/// at a glance (Warp's inactive pane measures #0e0e0e → #252525: ~10 %, the
+/// `inactive_pane_dim` default). The pane dividers keep this strength
+/// whatever the setting.
 const INACTIVE_LIFT: f32 = 0.10;
-/// Black over them on a light theme (white would vanish on a light ground,
-/// and black reads much heavier there).
-const INACTIVE_DIM_LIGHT: f32 = 0.05;
 
-fn inactive_dim(theme: &rift_core::Theme) -> rift_core::Color {
+/// The wash at `lift` (a dark theme's alpha): black at half of it on a light
+/// theme (white would vanish on a light ground, and black reads much heavier
+/// there).
+fn inactive_dim(theme: &rift_core::Theme, lift: f32) -> rift_core::Color {
     if theme.is_light() {
-        rift_core::Color::BLACK.with_alpha(INACTIVE_DIM_LIGHT)
+        rift_core::Color::BLACK.with_alpha(lift / 2.0)
     } else {
-        rift_core::Color::WHITE.with_alpha(INACTIVE_LIFT)
+        rift_core::Color::WHITE.with_alpha(lift)
     }
 }
 
@@ -1129,6 +1363,11 @@ impl ToastAction {
 const COPIED_SHOWN: Duration = Duration::from_millis(1500);
 /// How often the session file takes the counted time while a tab counts.
 const CLOCK_SAVE_EVERY: Duration = Duration::from_secs(60);
+/// How often the focused window's active tab is asked for its git status
+/// (the branch and diff chips, the review panel) between commands.
+const GIT_POLL: Duration = Duration::from_secs(3);
+/// The same for its Docker Compose state (a `docker compose` call, dearer).
+const DOCKER_POLL: Duration = Duration::from_secs(10);
 /// A selection dragged past its pane's edge scrolls on this beat...
 const SELECT_SCROLL_EVERY: Duration = Duration::from_millis(50);
 /// ...by up to this many lines a step (one per line height out).
@@ -1140,7 +1379,10 @@ enum CloseScope {
     Pane(PaneId),
     Tab(usize),
     OtherTabs(usize),
+    /// The window being served; the last one quits, as `App` does.
     Window,
+    /// Every window: quit.
+    App,
 }
 
 /// What the confirm modal is waiting to do.
@@ -1285,47 +1527,25 @@ struct ConfirmClose {
     commands: Vec<String>,
 }
 
-impl App {
-    pub fn new(
-        proxy: EventLoopProxy<UserEvent>,
-        script: Option<crate::script::Script>,
-        headless: bool,
-    ) -> Self {
-        // scripted runs and secondary windows never touch the user's session
-        // file (a script run used to overwrite it)
-        let persist_session = (script.is_none()
-            || std::env::var_os("RIFT_PERSIST_SESSION").is_some())
-            && !crate::updater::launch().secondary;
-        let durable_allowed =
-            script.is_none() || std::env::var_os("RIFT_PERSIST_SESSION").is_some();
-        App {
-            proxy,
+impl WindowState {
+    /// A window not yet created (`App::create_window` fills it in);
+    /// `first`: the launch window, which shows What's New after an update.
+    fn new(first: bool) -> Self {
+        WindowState {
             window: None,
             gpu: None,
             quads: None,
             bg_image: None,
             sprites: None,
-            bg_image_opacity: 1.0,
-            text: None,
-            git: None,
-            pr_worker: None,
-            docker_worker: None,
-            chips_applied: Vec::new(),
             tabs: Vec::new(),
             active: 0,
-            next_pane: 1,
             scene: Scene::default(),
-            theme: Theme::default(),
-            color_scheme: None,
-            cell_w: DEFAULT_FONT_SIZE * 0.6,
             modifiers: ModifiersState::empty(),
             alt_sides: (false, false),
-            theme_error: None,
             hits: Vec::new(),
             mouse: (0.0, 0.0),
             any_running: false,
             editor_active: false,
-            blink_epoch: Instant::now(),
             boot_until: None,
             drag: None,
             palette: PaletteState::default(),
@@ -1337,12 +1557,9 @@ impl App {
             editor_anchor: (0.0, 0.0),
             editor_cols: 80,
             search_chips: Vec::new(),
-            config: Config::default(),
-            keymap: Keymap::from_overrides(&Default::default()),
             settings: SettingsState::default(),
             slider_drag: None,
             search: SearchState::default(),
-            clipboard: None,
             pending_sel: None,
             select_scrolled: None,
             last_click: None,
@@ -1353,56 +1570,35 @@ impl App {
             chip_menu_rows: Vec::new(),
             prompt_editor: None,
             prompt_editor_layout: Default::default(),
-            shell_history: Arc::default(),
-            font_size: DEFAULT_FONT_SIZE,
-            line_h: DEFAULT_FONT_SIZE * 1.2,
             scroll_accum: 0.0,
             closed_tabs: Vec::new(),
-            _watcher: None,
-            script,
-            headless,
-            headless_clipboard: String::new(),
-            headless_files: Vec::new(),
             copied: None,
             capture: None,
-            os_light: false,
             focused: true,
             focus_pane: None,
             bell_flash: None,
-            last_beep: None,
-            launch_configs: Vec::new(),
-            pending_commands: std::collections::HashMap::new(),
             confirm: None,
-            keys_down: Default::default(),
             pipe_target: None,
-            ssh_profiles: Vec::new(),
             hints: None,
-            next_replay: None,
-            next_attach: None,
-            control_server: None,
             windows_loading: false,
             detached_loading: false,
             other_windows: Vec::new(),
             detached: Vec::new(),
-            attention: Vec::new(),
-            next_attention_id: 0,
             note_toasts: Vec::new(),
-            test_alerts: Default::default(),
             app_notes: Vec::new(),
             note_toast_hits: Vec::new(),
-            attention_seen: Default::default(),
-            transcript_saved: Default::default(),
             a11y: None,
             a11y_targets: Default::default(),
             a11y_fingerprint: String::new(),
             a11y_done: Default::default(),
             a11y_announcement: None,
-            latency_log: std::env::var_os("RIFT_LATENCY_LOG").is_some(),
-            latency_probe: None,
             confirm_rects: [[0.0; 4]; 2],
-            whats_new: WhatsNewState::on_launch(),
+            whats_new: if first {
+                WhatsNewState::on_launch()
+            } else {
+                WhatsNewState::default()
+            },
             whats_new_hits: WhatsNewHits::default(),
-            releases: rift_core::changelog::releases(),
             notifications: NotificationsState::default(),
             notifications_hits: NotificationsHits::default(),
             explorer: ExplorerState::default(),
@@ -1411,7 +1607,6 @@ impl App {
             review_hits: Vec::new(),
             info_chips: Vec::new(),
             iconified: false,
-            shell_label: None,
             last_frame: Instant::now(),
             output_frame_due: None,
             fullscreen_op: false,
@@ -1419,18 +1614,20 @@ impl App {
             restore_size: None,
             hover_sig: 0,
             hover_repaints: 0,
+            dimmed_panes: 0,
             tips: Vec::new(),
             tip_hover: None,
             tip_shown: None,
             tip_drawn: None,
             elapsed_minutes: None,
-            clock_saved: None,
-            clock_counting: 0,
             link_press: None,
             tip_hidden_at: None,
             tip_suppressed: false,
             pointer_in: true,
             review_cwd: None,
+            git_polled: None,
+            docker_polled: None,
+            status_pane: None,
             viewer: ViewerState::default(),
             viewer_hits: Vec::new(),
             viewer_rect: [0.0; 4],
@@ -1439,25 +1636,12 @@ impl App {
             rename: None,
             rename_fresh: false,
             filter_editing: false,
-            shell_env: None,
-            persist_session,
-            durable_allowed,
-            update: UpdateUi::default(),
-            remote: RemoteUi::default(),
-            restart_requested: false,
             tab_drag: None,
             history: Default::default(),
             pane_drag: None,
             editor_drag: None,
             toasts: Vec::new(),
-            next_toast_id: 0,
             toast_hits: Vec::new(),
-            config_error: None,
-            review_writer: None,
-            completion_worker: CompletionWorker::default(),
-            completion_pending: None,
-            completion_intent: None,
-            completion_gen: 0,
             completion_buffer: String::new(),
             mouse_report: None,
             mouse_hover_cell: None,
@@ -1465,6 +1649,92 @@ impl App {
             ime_spot: None,
             ime_area_sent: None,
             cursor_icon: winit::window::CursorIcon::Default,
+            dropdown: None,
+        }
+    }
+}
+
+impl App {
+    pub fn new(
+        proxy: EventLoopProxy<UserEvent>,
+        script: Option<crate::script::Script>,
+        headless: bool,
+    ) -> Self {
+        // scripted runs never touch the user's session file (a script run
+        // used to overwrite it)
+        let persist_session =
+            script.is_none() || std::env::var_os("RIFT_PERSIST_SESSION").is_some();
+        let durable_allowed =
+            script.is_none() || std::env::var_os("RIFT_PERSIST_SESSION").is_some();
+        App {
+            win: Box::new(WindowState::new(true)),
+            parked: Vec::new(),
+            window_order: Vec::new(),
+            focused_window: None,
+            focus_history: Vec::new(),
+            queued_windows: Vec::new(),
+            review_generation: 0,
+            proxy,
+            bg_image_opacity: 1.0,
+            text: None,
+            git: None,
+            pr_worker: None,
+            docker_worker: None,
+            chips_applied: Vec::new(),
+            next_pane: 1,
+            theme: Theme::default(),
+            color_scheme: None,
+            cell_w: DEFAULT_FONT_SIZE * 0.6,
+            theme_error: None,
+            blink_epoch: Instant::now(),
+            config: Config::default(),
+            keymap: Keymap::from_overrides(&Default::default()),
+            clipboard: None,
+            shell_history: Arc::default(),
+            font_size: DEFAULT_FONT_SIZE,
+            line_h: DEFAULT_FONT_SIZE * 1.2,
+            _watcher: None,
+            script,
+            headless,
+            headless_clipboard: String::new(),
+            headless_files: Vec::new(),
+            os_light: false,
+            last_beep: None,
+            launch_configs: Vec::new(),
+            launch_skipped: Vec::new(),
+            pending_commands: std::collections::HashMap::new(),
+            keys_down: Default::default(),
+            ssh_profiles: Vec::new(),
+            next_replay: None,
+            next_attach: None,
+            control_server: None,
+            attention: Vec::new(),
+            next_attention_id: 0,
+            test_alerts: Default::default(),
+            attention_seen: Default::default(),
+            transcript_saved: Default::default(),
+            latency_log: std::env::var_os("RIFT_LATENCY_LOG").is_some(),
+            latency_probe: None,
+            releases: rift_core::changelog::releases(),
+            shell_label: None,
+            clock_saved: None,
+            clock_counting: 0,
+            saved_focus: None,
+            shell_env: None,
+            persist_session,
+            durable_allowed,
+            update: UpdateUi::default(),
+            remote: RemoteUi::default(),
+            restart_requested: false,
+            next_toast_id: 0,
+            config_error: None,
+            review_writer: None,
+            completion_worker: CompletionWorker::default(),
+            completion_pending: None,
+            completion_intent: None,
+            completion_gen: 0,
+            completion_partial: None,
+            completion_pane: None,
             global_hotkey: None,
             #[cfg(target_os = "macos")]
             menubar: None,
@@ -1476,7 +1746,7 @@ impl App {
         self.sync_control_server();
         // remote access turned on starts a gateway now; off clears pairing
         self.poll_remote(true);
-        if self.window.is_some() {
+        if self.win.window.is_some() {
             self.sync_update_checks();
         }
         self.theme = self.config.resolve_theme_for(self.os_light);
@@ -1489,7 +1759,7 @@ impl App {
             .is_some_and(|was| was != scheme)
         {
             let report = format!("\x1b[?997;{scheme}n");
-            for p in self.tabs.iter().flat_map(|t| &t.panes) {
+            for p in self.all_panes() {
                 if p.session.term.lock().color_scheme_updates() {
                     p.session.write_report(report.as_bytes());
                 }
@@ -1497,7 +1767,7 @@ impl App {
         }
         rift_pty::set_default_colors(colors);
         // the remote screens' colours come from the theme: each is new
-        for p in self.tabs.iter().flat_map(|t| &t.panes) {
+        for p in self.all_panes() {
             p.session
                 .generation
                 .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
@@ -1520,18 +1790,13 @@ impl App {
         // (Theme::window_ground / Theme::ground); text, overlays, modals and
         // non-default cell colours stay opaque
         self.theme.ground_alpha = self.config.opacity();
-        #[cfg(target_os = "macos")]
-        if let Some(w) = &self.window {
-            crate::translucency::apply(w, self.config.blur());
-            place_traffic_lights(w);
-        }
         self.font_size = self.config.font_size();
         self.line_h = self.font_size * self.config.line_height();
         self.keymap = Keymap::from_overrides(&self.config.keybindings);
         self.apply_global_hotkey();
         // menu shortcut labels follow the keymap
         #[cfg(target_os = "macos")]
-        if self.window.is_some()
+        if self.win.window.is_some()
             && self
                 .menubar
                 .as_ref()
@@ -1550,35 +1815,50 @@ impl App {
             }
             self.cell_w = engine.mono_cell_width(self.font_size);
         }
-        self.apply_background_image();
-        let vim = self.config.vim_mode;
-        for tab in &mut self.tabs {
-            for pane in &mut tab.panes {
-                pane.editor.set_vim_enabled(vim);
-            }
-        }
         self.refresh_chip_sources();
-        self.explorer
-            .set_show_hidden(self.config.explorer_hidden_files);
         // save_transcripts off means gone, not just no longer updated —
         // however it was turned off (toggle, ↺, an edit of config.toml)
         if !self.config.save_transcripts {
             rift_core::transcript::remove_except(&[]);
             self.transcript_saved.clear();
         }
+        self.each_window(|app| app.apply_window_config());
+        self.retire_hotkey_window();
+    }
+
+    /// The part of `apply_config` each window takes on its own: its
+    /// translucency, background image, its panes' editor and clipboard
+    /// settings, the explorer; then a repaint.
+    fn apply_window_config(&mut self) {
+        #[cfg(target_os = "macos")]
+        if let Some(w) = &self.win.window {
+            crate::translucency::apply(w, self.config.blur());
+            place_traffic_lights(w);
+        }
+        self.place_hotkey_window();
+        self.apply_background_image();
+        let vim = self.config.vim_mode;
+        for tab in &mut self.win.tabs {
+            for pane in &mut tab.panes {
+                pane.editor.set_vim_enabled(vim);
+            }
+        }
+        self.win
+            .explorer
+            .set_show_hidden(self.config.explorer_hidden_files);
         let clipboard = rift_pty::ClipboardAccess::from_config(&self.config.clipboard_access);
-        for tab in &self.tabs {
+        for tab in &self.win.tabs {
             for pane in &tab.panes {
                 pane.session.set_clipboard_access(clipboard);
             }
         }
-        if let Some(w) = &self.window {
+        if let Some(w) = &self.win.window {
             w.request_redraw();
         }
     }
 
-    /// (Re)register `global_hotkey` when it changed. Scripted runs and
-    /// secondary windows never grab a system-wide key.
+    /// (Re)register `global_hotkey` when it changed. Scripted runs never
+    /// grab a system-wide key.
     fn apply_global_hotkey(&mut self) {
         let spec = self.config.global_hotkey.trim().to_string();
         if self.global_hotkey.as_ref().map(|h| h.spec()) == Some(spec.as_str())
@@ -1587,7 +1867,7 @@ impl App {
             return;
         }
         self.global_hotkey = None; // drop unregisters the old key
-        if spec.is_empty() || !self.persist_session || self.window.is_none() || self.headless {
+        if spec.is_empty() || !self.persist_session || self.win.window.is_none() || self.headless {
             return;
         }
         let proxy = self.proxy.clone();
@@ -1608,18 +1888,18 @@ impl App {
     /// The window, unless headless: minimize, maximize and fullscreen would
     /// put a hidden window on screen.
     fn shown_window(&self) -> Option<&Arc<Window>> {
-        self.window.as_ref().filter(|_| !self.headless)
+        self.win.window.as_ref().filter(|_| !self.headless)
     }
 
     /// Global hotkey: bring Rift forward, or hide it when it is already
     /// the focused app (Warp hotkey window behavior).
     fn toggle_visibility(&mut self) {
-        let Some(window) = self.window.clone().filter(|_| !self.headless) else {
+        let Some(window) = self.win.window.clone().filter(|_| !self.headless) else {
             return;
         };
         #[cfg(target_os = "macos")]
         {
-            if crate::hotkey::app_active() && self.focused {
+            if crate::hotkey::app_active() && self.win.focused {
                 crate::hotkey::set_app_shown(false);
             } else {
                 crate::hotkey::set_app_shown(true);
@@ -1629,7 +1909,7 @@ impl App {
         }
         #[cfg(not(target_os = "macos"))]
         {
-            if self.focused && window.is_visible() != Some(false) {
+            if self.win.focused && window.is_visible() != Some(false) {
                 window.set_minimized(true);
             } else {
                 window.set_minimized(false);
@@ -1641,7 +1921,7 @@ impl App {
 
     /// Load (or drop) the theme's background image into the GPU pipeline.
     fn apply_background_image(&mut self) {
-        let (Some(gpu), Some(pipe)) = (&self.gpu, &mut self.bg_image) else {
+        let (Some(gpu), Some(pipe)) = (&self.win.gpu, &mut self.win.bg_image) else {
             return;
         };
         match &self.theme.background_image {
@@ -1674,7 +1954,7 @@ impl App {
             return;
         }
         match self.config.save() {
-            Ok(()) => self.settings.saved_at = Some(Instant::now()),
+            Ok(()) => self.win.settings.saved_at = Some(Instant::now()),
             Err(e) => {
                 log::warn!("config save failed: {e}");
                 self.toast_error(format!("Could not save settings: {e}"));
@@ -1691,10 +1971,11 @@ impl App {
                 self.config = c.unwrap_or_default();
                 self.config_error = None;
                 // fixed: its "not applied" / "not saved" errors are moot
-                self.toasts
+                self.win
+                    .toasts
                     .retain(|t| t.action != Some(ToastAction::OpenConfig));
                 if !startup {
-                    self.settings.saved_at = Some(Instant::now());
+                    self.win.settings.saved_at = Some(Instant::now());
                 }
             }
             Err(e) => {
@@ -1783,8 +2064,8 @@ impl App {
     /// 1, 2, or 3 for single/double/triple click.
     fn click_count(&mut self) -> u8 {
         let now = Instant::now();
-        let (mx, my) = self.mouse;
-        let count = match self.last_click {
+        let (mx, my) = self.win.mouse;
+        let count = match self.win.last_click {
             Some((t, (px, py), c))
                 if now.duration_since(t).as_millis() <= DOUBLE_CLICK_MS
                     && (mx - px).abs() <= DRAG_THRESHOLD
@@ -1798,14 +2079,14 @@ impl App {
             }
             _ => 1,
         };
-        self.last_click = Some((now, (mx, my), count));
+        self.win.last_click = Some((now, (mx, my), count));
         count
     }
 
     /// Begin selection interaction on `pane` at the current mouse position.
     fn press_selection(&mut self, pane_id: PaneId, clicks: u8) {
-        let shift = self.modifiers.shift_key();
-        let Some(tab) = self.tabs.get_mut(self.active) else {
+        let shift = self.win.modifiers.shift_key();
+        let Some(tab) = self.win.tabs.get_mut(self.win.active) else {
             return;
         };
         // one selection at a time across panes
@@ -1830,7 +2111,7 @@ impl App {
             pane.clear_selection();
             return;
         }
-        let (mx, my) = self.mouse;
+        let (mx, my) = self.win.mouse;
         let Some((point, side)) = Self::grid_point_at(pane, mx, my) else {
             pane.clear_selection();
             return;
@@ -1848,7 +2129,7 @@ impl App {
                 };
                 pane.session.term.lock().selection = Some(Selection::new(ty, point, side));
                 pane.has_selection = true;
-                self.pending_sel = Some(PendingSelection {
+                self.win.pending_sel = Some(PendingSelection {
                     pane: pane_id,
                     abs: point.line.0 as i64 + scrolled as i64,
                     col: point.column,
@@ -1861,14 +2142,14 @@ impl App {
             _ => {
                 // click clears; drag past threshold starts a Simple selection
                 pane.clear_selection();
-                self.pending_sel = Some(PendingSelection {
+                self.win.pending_sel = Some(PendingSelection {
                     pane: pane_id,
                     abs: point.line.0 as i64 + scrolled as i64,
                     col: point.column,
                     side,
                     origin: (mx, my),
                     started: false,
-                    block: self.modifiers.alt_key(),
+                    block: self.win.modifiers.alt_key(),
                 });
             }
         }
@@ -1879,8 +2160,9 @@ impl App {
     /// selected block again clears the selection.
     fn select_block_at(&mut self, pane_id: PaneId, abs: i64) {
         let Some(pane) = self
+            .win
             .tabs
-            .get_mut(self.active)
+            .get_mut(self.win.active)
             .and_then(|t| t.pane_mut(pane_id))
         else {
             return;
@@ -1902,10 +2184,10 @@ impl App {
 
     /// Extend the pending/live selection to the current mouse position.
     fn drag_selection(&mut self) {
-        let Some(pending) = &mut self.pending_sel else {
+        let Some(pending) = &mut self.win.pending_sel else {
             return;
         };
-        let (mx, my) = self.mouse;
+        let (mx, my) = self.win.mouse;
         if !pending.started {
             let (ox, oy) = pending.origin;
             if (mx - ox).abs() < DRAG_THRESHOLD && (my - oy).abs() < DRAG_THRESHOLD {
@@ -1917,8 +2199,9 @@ impl App {
         let (anchor_abs, anchor_col, anchor_side, block) =
             (pending.abs, pending.col, pending.side, pending.block);
         let Some(pane) = self
+            .win
             .tabs
-            .get_mut(self.active)
+            .get_mut(self.win.active)
             .and_then(|t| t.pane_mut(pane_id))
         else {
             return;
@@ -1945,7 +2228,7 @@ impl App {
         }
         drop(term);
         pane.has_selection = true;
-        if let Some(w) = &self.window {
+        if let Some(w) = &self.win.window {
             w.request_redraw();
         }
     }
@@ -1955,14 +2238,15 @@ impl App {
     /// rows then carry the selection on (`drag_selection` on each tick).
     /// Returns whether the view moved.
     fn selection_edge_scroll(&mut self) -> bool {
-        let Some(pending) = self.pending_sel.as_ref().filter(|p| p.started) else {
+        let Some(pending) = self.win.pending_sel.as_ref().filter(|p| p.started) else {
             return false;
         };
         let pane_id = pending.pane;
-        let my = self.mouse.1;
+        let my = self.win.mouse.1;
         let Some(pane) = self
+            .win
             .tabs
-            .get_mut(self.active)
+            .get_mut(self.win.active)
             .and_then(|t| t.pane_mut(pane_id))
         else {
             return false;
@@ -1990,12 +2274,13 @@ impl App {
     /// A selection held past its pane's top or bottom keeps scrolling, every
     /// `SELECT_SCROLL_EVERY` while it moves the view; returns when to wake next.
     fn tick_select_scroll(&mut self) -> Option<Instant> {
-        if !self.pending_sel.as_ref().is_some_and(|p| p.started) {
-            self.select_scrolled = None;
+        if !self.win.pending_sel.as_ref().is_some_and(|p| p.started) {
+            self.win.select_scrolled = None;
             return None;
         }
         let now = Instant::now();
         let due = self
+            .win
             .select_scrolled
             .map_or(now, |t| t + SELECT_SCROLL_EVERY);
         if now < due {
@@ -2003,11 +2288,11 @@ impl App {
         }
         self.drag_selection();
         if !self.selection_edge_scroll() {
-            self.select_scrolled = None;
+            self.win.select_scrolled = None;
             return None;
         }
-        self.select_scrolled = Some(now);
-        if let Some(w) = &self.window {
+        self.win.select_scrolled = Some(now);
+        if let Some(w) = &self.win.window {
             w.request_redraw();
         }
         Some(now + SELECT_SCROLL_EVERY)
@@ -2076,10 +2361,11 @@ impl App {
 
     /// Scroll so `block`'s header sits at the top of the viewport.
     fn jump_to_block(&mut self, pane_id: PaneId, block: rift_core::BlockId) {
-        let editor_visible = self.editor_active;
+        let editor_visible = self.win.editor_active;
         let Some(pane) = self
+            .win
             .tabs
-            .get_mut(self.active)
+            .get_mut(self.win.active)
             .and_then(|t| t.pane_mut(pane_id))
         else {
             return;
@@ -2092,7 +2378,7 @@ impl App {
             pane.view_offset =
                 (len as i64 - rows as i64 - idx as i64).clamp(0, max_off as i64) as usize;
         }
-        if let Some(w) = &self.window {
+        if let Some(w) = &self.win.window {
             w.request_redraw();
         }
     }
@@ -2117,10 +2403,11 @@ impl App {
 
     /// Scroll so `block`'s last row sits at the bottom of the viewport.
     fn jump_to_block_end(&mut self, pane_id: PaneId, block: rift_core::BlockId) {
-        let editor_visible = self.editor_active;
+        let editor_visible = self.win.editor_active;
         let Some(pane) = self
+            .win
             .tabs
-            .get_mut(self.active)
+            .get_mut(self.win.active)
             .and_then(|t| t.pane_mut(pane_id))
         else {
             return;
@@ -2131,15 +2418,20 @@ impl App {
             // bottom visible row = len - 1 - view_offset  ⇒  put idx there
             pane.view_offset = (len as i64 - 1 - idx as i64).clamp(0, max_off as i64) as usize;
         }
-        if let Some(w) = &self.window {
+        if let Some(w) = &self.win.window {
             w.request_redraw();
         }
     }
 
     /// Jump to the next/prev bookmarked block relative to the viewport top.
     fn jump_bookmark(&mut self, dir: i64) {
-        let editor_visible = self.editor_active;
-        let Some(pane) = self.tabs.get_mut(self.active).and_then(|t| t.active_mut()) else {
+        let editor_visible = self.win.editor_active;
+        let Some(pane) = self
+            .win
+            .tabs
+            .get_mut(self.win.active)
+            .and_then(|t| t.active_mut())
+        else {
             return;
         };
         let marks = pane.session.blocks.lock().unwrap().bookmarks();
@@ -2172,7 +2464,12 @@ impl App {
     /// Open the block context menu at `pos` (mouse position for right-click,
     /// header anchor for ⌃M).
     fn open_context_menu(&mut self, pane_id: PaneId, block: rift_core::BlockId, pos: (f32, f32)) {
-        let Some(pane) = self.tabs.get(self.active).and_then(|t| t.pane(pane_id)) else {
+        let Some(pane) = self
+            .win
+            .tabs
+            .get(self.win.active)
+            .and_then(|t| t.pane(pane_id))
+        else {
             return;
         };
         let (collapsed, bookmarked, has_output, has_cwd, has_branch) = {
@@ -2189,8 +2486,8 @@ impl App {
             )
         };
         let filtered = pane.filter.as_ref().is_some_and(|(b, _)| *b == block);
-        let rerun_ok = self.editor_active;
-        self.context_menu = ContextMenuState {
+        let rerun_ok = self.win.editor_active;
+        self.win.context_menu = ContextMenuState {
             open: true,
             pane: pane_id,
             block,
@@ -2238,11 +2535,16 @@ impl App {
     /// Right-click outside any block: clipboard, splits, clear, close.
     fn open_terminal_menu(&mut self, pane_id: PaneId, pos: (f32, f32)) {
         let has_sel = self
+            .win
             .tabs
-            .get(self.active)
+            .get(self.win.active)
             .and_then(|t| t.pane(pane_id))
             .is_some_and(|p| p.has_selection);
-        let split = self.tabs.get(self.active).is_some_and(|t| t.is_split());
+        let split = self
+            .win
+            .tabs
+            .get(self.win.active)
+            .is_some_and(|t| t.is_split());
         let mut items = vec![
             MenuItem::new("Copy", MenuAction::Copy).enabled(has_sel),
             MenuItem::new("Paste", MenuAction::Paste),
@@ -2256,7 +2558,7 @@ impl App {
         }
         items.push(MenuItem::new("Clear blocks", MenuAction::ClearBlocks).sep());
         items.push(MenuItem::new("Close pane", MenuAction::ClosePane));
-        self.context_menu = ContextMenuState {
+        self.win.context_menu = ContextMenuState {
             open: true,
             pane: pane_id,
             block: 0,
@@ -2268,21 +2570,21 @@ impl App {
 
     /// The file viewer's ⋮ menu.
     fn open_viewer_menu(&mut self, pos: (f32, f32)) {
-        let markdown = !self.viewer.markdown.is_empty();
+        let markdown = !self.win.viewer.markdown.is_empty();
         let mut items = vec![
             MenuItem::new("Insert path", MenuAction::ViewerInsertPath),
             MenuItem::new("Copy path", MenuAction::ViewerCopyPath),
             MenuItem::new("Find in file", MenuAction::ViewerFind).sep(),
         ];
         if markdown {
-            items.push(if self.viewer.rendered {
+            items.push(if self.win.viewer.rendered {
                 MenuItem::new("Show raw", MenuAction::ViewerRendered(false))
             } else {
                 MenuItem::new("Show rendered", MenuAction::ViewerRendered(true))
             });
         }
         items.push(MenuItem::new("Close", MenuAction::ViewerClose).sep());
-        self.context_menu = ContextMenuState {
+        self.win.context_menu = ContextMenuState {
             open: true,
             pane: VIEWER_PANE,
             block: 0,
@@ -2294,8 +2596,10 @@ impl App {
 
     /// Right-click a tab: rename, duplicate, color, sync, close variants.
     fn open_tab_menu(&mut self, tab: usize, pos: (f32, f32)) {
-        let Some(t) = self.tabs.get(tab) else { return };
-        let n = self.tabs.len();
+        let Some(t) = self.win.tabs.get(tab) else {
+            return;
+        };
+        let n = self.win.tabs.len();
         let split = t.is_split();
         let sync = t.sync_inputs;
         let mut items = vec![
@@ -2330,7 +2634,7 @@ impl App {
             MenuItem::new("Close tabs to the right", MenuAction::CloseTabsRight(tab))
                 .enabled(tab + 1 < n),
         );
-        self.context_menu = ContextMenuState {
+        self.win.context_menu = ContextMenuState {
             open: true,
             pane: 0,
             block: 0,
@@ -2346,16 +2650,16 @@ impl App {
         use winit::keyboard::{Key, NamedKey};
         match event.logical_key {
             Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::Tab) => {
-                self.context_menu.step(1);
+                self.win.context_menu.step(1);
                 true
             }
             Key::Named(NamedKey::ArrowUp) => {
-                self.context_menu.step(-1);
+                self.win.context_menu.step(-1);
                 true
             }
             Key::Named(NamedKey::Enter) => {
-                if let Some(i) = self.context_menu.selected
-                    && let Some(item) = self.context_menu.items.get(i)
+                if let Some(i) = self.win.context_menu.selected
+                    && let Some(item) = self.win.context_menu.items.get(i)
                     && item.enabled
                 {
                     let action = item.action;
@@ -2369,10 +2673,10 @@ impl App {
     }
 
     fn run_menu_action(&mut self, action: MenuAction, event_loop: &ActiveEventLoop) {
-        let pane_id = self.context_menu.pane;
-        let block = self.context_menu.block;
-        self.context_menu.close();
-        let editor_active = self.editor_active;
+        let pane_id = self.win.context_menu.pane;
+        let block = self.win.context_menu.block;
+        self.win.context_menu.close();
+        let editor_active = self.win.editor_active;
 
         // actions that are not about one block
         match action {
@@ -2385,42 +2689,42 @@ impl App {
                 return self.handle_action(AppAction::ClearBlocks, event_loop);
             }
             MenuAction::Maximize => {
-                if let Some(tab) = self.tabs.get_mut(self.active) {
+                if let Some(tab) = self.win.tabs.get_mut(self.win.active) {
                     tab.active_pane = pane_id;
                 }
                 return self.handle_action(AppAction::MaximizePane, event_loop);
             }
             MenuAction::MoveToNewTab => {
-                let from = self.active;
+                let from = self.win.active;
                 return self.drop_pane(pane_id, from, PaneDrop::NewTab);
             }
             MenuAction::ClosePane => {
                 return self.request_close(CloseScope::Pane(pane_id), event_loop);
             }
             MenuAction::ViewerInsertPath => {
-                if let Some(p) = self.viewer.path.clone() {
-                    self.viewer.close();
+                if let Some(p) = self.win.viewer.path.clone() {
+                    self.win.viewer.close();
                     self.drop_file(&p);
                 }
                 return;
             }
             MenuAction::ViewerCopyPath => {
-                if let Some(p) = self.viewer.path.clone() {
+                if let Some(p) = self.win.viewer.path.clone() {
                     self.copy_to_clipboard(p.to_string_lossy().into_owned());
                 }
                 return;
             }
             MenuAction::ViewerFind => {
-                self.viewer.open_find();
-                self.viewer_focus = true;
+                self.win.viewer.open_find();
+                self.win.viewer_focus = true;
                 return;
             }
             MenuAction::ViewerRendered(on) => {
-                self.viewer.set_rendered(on);
+                self.win.viewer.set_rendered(on);
                 return;
             }
             MenuAction::ViewerClose => {
-                self.viewer.close();
+                self.win.viewer.close();
                 return;
             }
             MenuAction::RenameTab(i) => {
@@ -2429,30 +2733,31 @@ impl App {
             }
             MenuAction::DuplicateTab(i) => {
                 let cwd = self
+                    .win
                     .tabs
                     .get(i)
                     .and_then(|t| t.active())
-                    .and_then(|p| p.session.cwd.lock().unwrap().clone())
+                    .and_then(|p| p.session.local_cwd())
                     .map(std::path::PathBuf::from);
                 self.spawn_tab_at(cwd.filter(|p| p.is_dir()));
                 // keep the copy next to its source
-                let new = self.tabs.len() - 1;
+                let new = self.win.tabs.len() - 1;
                 if i + 1 < new {
-                    let tab = self.tabs.remove(new);
-                    self.tabs.insert(i + 1, tab);
-                    self.active = i + 1;
+                    let tab = self.win.tabs.remove(new);
+                    self.win.tabs.insert(i + 1, tab);
+                    self.win.active = i + 1;
                 }
                 self.save_session();
                 return;
             }
             MenuAction::ToggleSync(i) => {
-                if let Some(t) = self.tabs.get_mut(i) {
+                if let Some(t) = self.win.tabs.get_mut(i) {
                     t.sync_inputs = !t.sync_inputs;
                 }
                 return;
             }
             MenuAction::SetTabColor(i, c) => {
-                if let Some(t) = self.tabs.get_mut(i) {
+                if let Some(t) = self.win.tabs.get_mut(i) {
                     t.color = c;
                 }
                 self.save_session();
@@ -2464,9 +2769,9 @@ impl App {
             }
             MenuAction::CloseTabsRight(i) => {
                 // close from the end so indices stay valid
-                for t in (i + 1..self.tabs.len()).rev() {
+                for t in (i + 1..self.win.tabs.len()).rev() {
                     self.request_close(CloseScope::Tab(t), event_loop);
-                    if self.confirm.is_some() {
+                    if self.win.confirm.is_some() {
                         break;
                     }
                 }
@@ -2478,8 +2783,9 @@ impl App {
             }
             MenuAction::PipeOutput => {
                 if let Some(p) = self
+                    .win
                     .tabs
-                    .get_mut(self.active)
+                    .get_mut(self.win.active)
                     .and_then(|t| t.pane_mut(pane_id))
                 {
                     p.selected_block = Some(block);
@@ -2497,8 +2803,9 @@ impl App {
         let mut rerun: Option<String> = None;
         {
             let Some(pane) = self
+                .win
                 .tabs
-                .get_mut(self.active)
+                .get_mut(self.win.active)
                 .and_then(|t| t.pane_mut(pane_id))
             else {
                 return;
@@ -2558,30 +2865,31 @@ impl App {
     /// filter when that block is already filtered.
     fn toggle_block_filter(&mut self, pane_id: PaneId, block: rift_core::BlockId) {
         let Some(pane) = self
+            .win
             .tabs
-            .get_mut(self.active)
+            .get_mut(self.win.active)
             .and_then(|t| t.pane_mut(pane_id))
         else {
             return;
         };
         if pane.filter.as_ref().is_some_and(|(b, _)| *b == block) {
             pane.filter = None;
-            self.filter_editing = false;
-            self.search.close();
+            self.win.filter_editing = false;
+            self.win.search.close();
             return;
         }
         pane.filter = Some((block, String::new()));
         pane.selected_block = Some(block);
-        self.search.close();
-        self.search.open = true;
-        self.filter_editing = true;
+        self.win.search.close();
+        self.win.search.open = true;
+        self.win.filter_editing = true;
         self.blink_epoch = Instant::now();
         self.jump_to_block(pane_id, block);
     }
 
     /// Command text of `block` (None when missing or empty).
     fn block_command(&self, pane_id: PaneId, block: rift_core::BlockId) -> Option<String> {
-        let pane = self.tabs.get(self.active)?.pane(pane_id)?;
+        let pane = self.win.tabs.get(self.win.active)?.pane(pane_id)?;
         let cmd = pane
             .session
             .blocks
@@ -2596,7 +2904,7 @@ impl App {
     /// Target for block-scoped shortcuts: the keyboard-selected block when
     /// still present, else the most recent finished block of the active pane.
     fn selected_or_last_block(&self) -> Option<(PaneId, rift_core::BlockId)> {
-        let pane = self.tabs.get(self.active)?.active()?;
+        let pane = self.win.tabs.get(self.win.active)?.active()?;
         let blocks = pane.session.blocks.lock().unwrap();
         if let Some(sel) = pane.selected_block
             && blocks.iter().any(|b| b.id == sel)
@@ -2613,8 +2921,13 @@ impl App {
     /// ⌘↑ / ⌘↓: move the keyboard block selection; past the newest block the
     /// selection clears and the view snaps back to the input.
     fn select_block(&mut self, dir: i64) {
-        let editor_visible = self.editor_active;
-        let Some(pane) = self.tabs.get_mut(self.active).and_then(|t| t.active_mut()) else {
+        let editor_visible = self.win.editor_active;
+        let Some(pane) = self
+            .win
+            .tabs
+            .get_mut(self.win.active)
+            .and_then(|t| t.active_mut())
+        else {
             return;
         };
         let eligible: Vec<rift_core::BlockId> = pane
@@ -2663,9 +2976,10 @@ impl App {
 
     /// The detected URL or hyperlink under the pointer in `pane_id`.
     fn url_under_mouse(&self, pane_id: PaneId) -> Option<String> {
-        let (mx, my) = self.mouse;
-        self.tabs
-            .get(self.active)
+        let (mx, my) = self.win.mouse;
+        self.win
+            .tabs
+            .get(self.win.active)
             .and_then(|t| t.pane(pane_id))
             .and_then(|p| {
                 p.url_hits
@@ -2697,8 +3011,8 @@ impl App {
             return;
         }
         let now = Instant::now();
-        self.tip_suppressed = false;
-        if let Some((_, since)) = self.tip_hover.as_mut() {
+        self.win.tip_suppressed = false;
+        if let Some((_, since)) = self.win.tip_hover.as_mut() {
             *since = now.checked_sub(crate::views::tooltip::DELAY).unwrap_or(now);
         }
     }
@@ -2706,14 +3020,14 @@ impl App {
     /// A single plain press on a link: remembered until the release, which
     /// acts on it unless the press became a drag (a selection).
     fn press_link(&mut self, pane_id: PaneId, clicks: u8) {
-        self.link_press = (clicks == 1 && !self.modifiers.shift_key())
+        self.win.link_press = (clicks == 1 && !self.win.modifiers.shift_key())
             .then(|| self.url_under_mouse(pane_id).map(|u| (pane_id, u)))
             .flatten();
     }
 
     /// cmd+click on a detected URL opens it. Returns true when handled.
     fn try_open_url(&mut self, pane_id: PaneId) -> bool {
-        if !self.modifiers.super_key() {
+        if !self.win.modifiers.super_key() {
             return false;
         }
         let target = match self.url_under_mouse(pane_id) {
@@ -2745,7 +3059,7 @@ impl App {
     /// information (Linux, synthesized input) `option_as_meta` decides.
     fn option_meta(&self) -> bool {
         option_meta(
-            self.alt_sides,
+            self.win.alt_sides,
             self.config.option_as_meta,
             self.config.right_option_meta(),
         )
@@ -2848,7 +3162,7 @@ impl App {
                 .map(str::to_string);
             let cwd = match block_cwd {
                 Some(cwd) => cwd,
-                None => pane.session.cwd.lock().unwrap().clone()?,
+                None => pane.session.local_cwd()?,
             };
             std::path::Path::new(&cwd).join(path)
         };
@@ -2863,7 +3177,7 @@ impl App {
     fn start_hints(&mut self) {
         use crate::views::terminal::RowKind;
         let mut targets: Vec<([f32; 4], HintTarget)> = Vec::new();
-        if let Some(tab) = self.tabs.get(self.active) {
+        if let Some(tab) = self.win.tabs.get(self.win.active) {
             for pane in &tab.panes {
                 let Some(g) = pane.last_grid else { continue };
                 for (rect, url) in &pane.url_hits {
@@ -2894,7 +3208,7 @@ impl App {
                 }
             }
         }
-        for h in &self.hits {
+        for h in &self.win.hits {
             if let ClickTarget::Block(pane, block) = h.target {
                 targets.push((h.rect, HintTarget::Block(pane, block)));
             }
@@ -2904,7 +3218,7 @@ impl App {
             return;
         }
         let labels = hint_labels(targets.len());
-        self.hints = Some(HintState {
+        self.win.hints = Some(HintState {
             items: labels
                 .into_iter()
                 .zip(targets)
@@ -2917,12 +3231,12 @@ impl App {
     /// Hint-mode keys. Returns true when consumed.
     fn handle_hint_key(&mut self, event: &input::KeyPress) {
         use winit::keyboard::{Key, NamedKey};
-        let Some(state) = self.hints.as_mut() else {
+        let Some(state) = self.win.hints.as_mut() else {
             return;
         };
         match &event.logical_key {
             Key::Named(NamedKey::Escape) => {
-                self.hints = None;
+                self.win.hints = None;
                 return;
             }
             Key::Named(NamedKey::Backspace) => {
@@ -2939,12 +3253,12 @@ impl App {
         else {
             return;
         };
-        let copy = c.is_ascii_uppercase() || self.modifiers.shift_key();
+        let copy = c.is_ascii_uppercase() || self.win.modifiers.shift_key();
         state.typed.push(c.to_ascii_lowercase());
         let typed = state.typed.clone();
         if let Some((_, _, target)) = state.items.iter().find(|(l, _, _)| *l == typed) {
             let target = target.clone();
-            self.hints = None;
+            self.win.hints = None;
             match target {
                 HintTarget::Open(t) if copy => {
                     if self.copy_to_clipboard(t) {
@@ -2954,7 +3268,7 @@ impl App {
                 HintTarget::Open(t) => self.open_target(&t),
                 HintTarget::Block(pane, block) => {
                     let mut sticky = false;
-                    if let Some(tab) = self.tabs.get_mut(self.active) {
+                    if let Some(tab) = self.win.tabs.get_mut(self.win.active) {
                         tab.active_pane = pane;
                         if let Some(p) = tab.pane_mut(pane) {
                             p.selected_block = Some(block);
@@ -2971,15 +3285,16 @@ impl App {
                 }
             }
         } else if !state.items.iter().any(|(l, _, _)| l.starts_with(&typed)) {
-            self.hints = None;
+            self.win.hints = None;
         }
     }
 
     /// ⇧ + block hint: copy that block's output.
     fn handle_action_copy_block(&mut self, pane: PaneId, block: rift_core::BlockId) {
         let text = self
+            .win
             .tabs
-            .get(self.active)
+            .get(self.win.active)
             .and_then(|t| t.pane(pane))
             .and_then(|p| terminal::block_output_text(&p.session, block));
         if let Some(text) = text
@@ -2993,9 +3308,9 @@ impl App {
     /// (resolved like `resolve_path`; `file:line:col` suffixes are dropped).
     fn path_under_mouse(&self, pane_id: PaneId) -> Option<String> {
         use crate::views::terminal::RowKind;
-        let pane = self.tabs.get(self.active)?.pane(pane_id)?;
+        let pane = self.win.tabs.get(self.win.active)?.pane(pane_id)?;
         let g = pane.last_grid?;
-        let (mx, my) = self.mouse;
+        let (mx, my) = self.win.mouse;
         let row = pane
             .rows
             .iter()
@@ -3017,7 +3332,7 @@ impl App {
     /// handles, the I-beam over text. Checks surfaces in `on_left` order.
     fn update_cursor_icon(&mut self, window: &Window) {
         use winit::window::CursorIcon;
-        let (mx, my) = self.mouse;
+        let (mx, my) = self.win.mouse;
         let inside =
             |r: &[f32; 4]| mx >= r[0] && mx < r[0] + r[2] && my >= r[1] && my < r[1] + r[3];
         let hand = |on: bool| {
@@ -3027,76 +3342,84 @@ impl App {
                 CursorIcon::Default
             }
         };
-        let overlay = if self.pane_drag.as_ref().is_some_and(|d| d.live) {
+        let overlay = if self.win.pane_drag.as_ref().is_some_and(|d| d.live) {
             Some(CursorIcon::Grabbing)
-        } else if self.confirm.is_some() {
-            Some(hand(self.confirm_rects.iter().any(inside)))
-        } else if self.whats_new.open {
-            let h = &self.whats_new_hits;
+        } else if self.win.confirm.is_some() {
+            Some(hand(self.win.confirm_rects.iter().any(inside)))
+        } else if self.win.whats_new.open {
+            let h = &self.win.whats_new_hits;
             Some(hand(inside(&h.close) || inside(&h.done)))
-        } else if self.notifications.open {
-            let h = &self.notifications_hits;
+        } else if self.win.notifications.open {
+            let h = &self.win.notifications_hits;
             Some(hand(
                 inside(&h.close)
                     || inside(&h.mark_read)
                     || h.chips.iter().any(|(r, _)| inside(r))
                     || h.rows.iter().any(|(r, _)| inside(r))
                     || !inside(&h.card)
-                        && self.hits.iter().any(|x| {
+                        && self.win.hits.iter().any(|x| {
                             matches!(x.target, ClickTarget::ToggleNotifications)
                                 && x.contains(mx, my)
                         }),
             ))
-        } else if self.note_toast_hits.iter().any(|t| inside(&t.rect)) {
+        } else if self.win.note_toast_hits.iter().any(|t| inside(&t.rect)) {
             Some(CursorIcon::Pointer)
-        } else if let Some(t) = self.toast_hits.iter().find(|t| inside(&t.rect)) {
+        } else if let Some(t) = self.win.toast_hits.iter().find(|t| inside(&t.rect)) {
             // a hand over its button and ✕, an arrow over the message
             Some(hand(
                 t.action.is_some_and(|r| inside(&r)) || t.close.is_some_and(|r| inside(&r)),
             ))
-        } else if let Some(d) = self.tip_drawn.as_ref().filter(|d| {
-            inside(&d.rect) && self.tip_shown.as_ref().is_some_and(|t| t.action.is_some())
+        } else if let Some(d) = self.win.tip_drawn.as_ref().filter(|d| {
+            inside(&d.rect)
+                && self
+                    .win
+                    .tip_shown
+                    .as_ref()
+                    .is_some_and(|t| t.action.is_some())
         }) {
             // an interactive hover card: a hand over its button
             Some(hand(d.action.as_ref().is_some_and(inside)))
-        } else if let Some(ed) = &self.prompt_editor {
+        } else if let Some(ed) = &self.win.prompt_editor {
             Some(if ed.drag.as_ref().is_some_and(|d| d.live) {
                 CursorIcon::Grabbing
             } else {
                 hand(
-                    self.prompt_editor_layout
+                    self.win
+                        .prompt_editor_layout
                         .hits
                         .iter()
                         .any(|(r, _)| inside(r)),
                 )
             })
-        } else if self.chip_menu.is_some() {
-            Some(hand(self.chip_menu_rows.iter().any(|(r, _)| inside(r))))
-        } else if self.context_menu.open {
+        } else if self.win.chip_menu.is_some() {
+            Some(hand(self.win.chip_menu_rows.iter().any(|(r, _)| inside(r))))
+        } else if self.win.context_menu.open {
             Some(hand(
-                self.context_menu_rects
+                self.win
+                    .context_menu_rects
                     .iter()
-                    .zip(&self.context_menu.items)
+                    .zip(&self.win.context_menu.items)
                     .any(|(r, item)| item.enabled && inside(r)),
             ))
-        } else if self.palette.open {
+        } else if self.win.palette.open {
             Some(hand(
-                self.palette_row_hits.iter().any(|(r, _)| inside(r))
-                    || self.hits.iter().any(|h| {
+                self.win.palette_row_hits.iter().any(|(r, _)| inside(r))
+                    || self.win.hits.iter().any(|h| {
                         matches!(h.target, ClickTarget::PaletteMode(_)) && inside(&h.rect)
                     }),
             ))
-        } else if self.search.open && self.search_chips.iter().any(inside) {
+        } else if self.win.search.open && self.win.search_chips.iter().any(inside) {
             Some(CursorIcon::Pointer)
-        } else if (!self.settings.open || (self.config_viewer && inside(&self.viewer_rect)))
+        } else if (!self.win.settings.open
+            || (self.win.config_viewer && inside(&self.win.viewer_rect)))
             && let Some(icon) = self.panel_cursor(&inside)
         {
             Some(icon)
         } else {
-            let hit = self.hits.iter().find(|h| h.contains(mx, my));
+            let hit = self.win.hits.iter().find(|h| h.contains(mx, my));
             match hit.map(|h| &h.target) {
                 // a handle is the gutter between panes: tall = side by side
-                Some(ClickTarget::HandleDrag(_)) => {
+                Some(ClickTarget::HandleDrag(..)) => {
                     let r = hit.map(|h| h.rect).unwrap_or_default();
                     Some(if r[2] < r[3] {
                         CursorIcon::ColResize
@@ -3166,7 +3489,7 @@ impl App {
         // links show the hand without ⌘ (a click shows or opens them);
         // file paths only with ⌘ held
         let over_link = overlay.is_none()
-            && self.tabs.get(self.active).is_some_and(|t| {
+            && self.win.tabs.get(self.win.active).is_some_and(|t| {
                 t.panes.iter().any(|p| {
                     p.url_hits.iter().any(|(r, _)| {
                         mx >= r[0] && mx < r[0] + r[2] && my >= r[1] && my < r[1] + r[3]
@@ -3175,7 +3498,7 @@ impl App {
             });
         let over_path = overlay.is_none()
             && !over_link
-            && self.modifiers.super_key()
+            && self.win.modifiers.super_key()
             && self
                 .pane_under_mouse()
                 .is_some_and(|id| self.path_under_mouse(id).is_some());
@@ -3184,23 +3507,23 @@ impl App {
         } else if over_link || over_path {
             CursorIcon::Pointer
         } else if my > TAB_BAR_H
-            && self.mouse.0 > self.rail_w()
-            && !self.settings.open
-            && !self.palette.open
+            && self.win.mouse.0 > self.rail_w()
+            && !self.win.settings.open
+            && !self.win.palette.open
         {
             CursorIcon::Text
         } else {
             CursorIcon::Default
         };
-        if self.cursor_icon != icon {
-            self.cursor_icon = icon;
+        if self.win.cursor_icon != icon {
+            self.win.cursor_icon = icon;
             window.set_cursor(icon);
         }
     }
 
     /// Selected text of the active pane, if any.
     fn selection_text(&self) -> Option<String> {
-        let pane = self.tabs.get(self.active)?.active()?;
+        let pane = self.win.tabs.get(self.win.active)?.active()?;
         log::debug!("selection_text: has_selection={}", pane.has_selection);
         if !pane.has_selection {
             return None;
@@ -3286,12 +3609,14 @@ impl App {
     fn paste_text(&mut self, text: &str) {
         if text.is_empty() {
             // only a program reading bracketed pastes sees an empty one
-            let relay_edit = self.settings.open && self.settings.remote.relay_edit.is_some();
+            let relay_edit =
+                self.win.settings.open && self.win.settings.remote.relay_edit.is_some();
             if !relay_edit
-                && !self.editor_active
+                && !self.win.editor_active
                 && let Some(id) = self
+                    .win
                     .tabs
-                    .get(self.active)
+                    .get(self.win.active)
                     .and_then(|t| t.active())
                     .map(|p| p.session.id)
             {
@@ -3300,20 +3625,25 @@ impl App {
             return;
         }
         // the relay field while it is edited (one line, no controls)
-        if self.settings.open
-            && let Some(draft) = self.settings.remote.relay_edit.as_mut()
+        if self.win.settings.open
+            && let Some(draft) = self.win.settings.remote.relay_edit.as_mut()
         {
             let clean: String = text.trim().chars().filter(|c| !c.is_control()).collect();
             if draft.len() + clean.len() <= MAX_RELAY_URL {
                 draft.push_str(&clean);
             }
-            if let Some(w) = &self.window {
+            if let Some(w) = &self.win.window {
                 w.request_redraw();
             }
             return;
         }
-        let editor_active = self.editor_active;
-        let Some(pane) = self.tabs.get_mut(self.active).and_then(|t| t.active_mut()) else {
+        let editor_active = self.win.editor_active;
+        let Some(pane) = self
+            .win
+            .tabs
+            .get_mut(self.win.active)
+            .and_then(|t| t.active_mut())
+        else {
             return;
         };
         if editor_active {
@@ -3327,14 +3657,15 @@ impl App {
         // unbracketed: every newline presses Enter, so ask before sending
         // more than one line to any recipient without bracketed paste
         let unbracketed = self.raw_targets(id).into_iter().any(|t| {
-            self.tabs
+            self.win
+                .tabs
                 .iter()
                 .find_map(|tab| tab.pane(t))
                 .is_some_and(|p| !bracketed_paste_on(p))
         });
         if unbracketed && self.config.confirm_multiline_paste && input::paste_submits_lines(text) {
             let commands = text.lines().map(str::to_string).collect();
-            self.confirm = Some(ConfirmClose {
+            self.win.confirm = Some(ConfirmClose {
                 opened: Instant::now(),
                 action: ConfirmAction::Paste {
                     pane: id,
@@ -3342,7 +3673,7 @@ impl App {
                 },
                 commands,
             });
-            if let Some(w) = &self.window {
+            if let Some(w) = &self.win.window {
                 w.request_redraw();
             }
             return;
@@ -3376,32 +3707,37 @@ impl App {
 
     /// Re-run the search over the active pane and jump near the latest match.
     fn refresh_search(&mut self, jump: bool) {
-        let Some(pane) = self.tabs.get(self.active).and_then(|t| t.active()) else {
-            self.search.set_matches(terminal::Found::default());
+        let Some(pane) = self.win.tabs.get(self.win.active).and_then(|t| t.active()) else {
+            self.win.search.set_matches(terminal::Found::default());
             return;
         };
         // only the rows the pane draws: a prompt echo (shown as the block
         // header), collapsed output and filtered-out lines would count
         // matches nobody can see
-        let found = match self.search.matcher() {
+        let found = match self.win.search.matcher() {
             Some(m) => {
-                let shown = Self::shown_rows(pane, self.editor_active);
+                let shown = Self::shown_rows(pane, self.win.editor_active);
                 terminal::collect_matches(&pane.session, &shown, &m, search::MATCH_CAP)
             }
             None => terminal::Found::default(),
         };
-        self.search.set_matches(found);
-        if jump && !self.search.matches.is_empty() {
+        self.win.search.set_matches(found);
+        if jump && !self.win.search.matches.is_empty() {
             self.jump_to_match();
         }
     }
 
     fn jump_to_match(&mut self) {
-        let Some((abs, _)) = self.search.current_anchor() else {
+        let Some((abs, _)) = self.win.search.current_anchor() else {
             return;
         };
-        let editor_visible = self.editor_active;
-        if let Some(pane) = self.tabs.get_mut(self.active).and_then(|t| t.active_mut()) {
+        let editor_visible = self.win.editor_active;
+        if let Some(pane) = self
+            .win
+            .tabs
+            .get_mut(self.win.active)
+            .and_then(|t| t.active_mut())
+        {
             use crate::views::terminal::DisplayLine;
             // view_offset counts display lines, not grid rows: headers,
             // collapsed output and the block filter make them differ
@@ -3441,8 +3777,8 @@ impl App {
                 _ => String::new(),
             };
             match key.as_str() {
-                "c" => self.search.case_sensitive = !self.search.case_sensitive,
-                "r" => self.search.regex = !self.search.regex,
+                "c" => self.win.search.case_sensitive = !self.win.search.case_sensitive,
+                "r" => self.win.search.regex = !self.win.search.regex,
                 _ => return,
             }
             self.refresh_search(true);
@@ -3455,9 +3791,9 @@ impl App {
                 && s.to_ascii_lowercase() == "g"
             {
                 if shift {
-                    self.search.prev();
+                    self.win.search.prev();
                 } else {
-                    self.search.next();
+                    self.win.search.next();
                 }
                 self.jump_to_match();
                 self.blink_epoch = Instant::now();
@@ -3466,25 +3802,30 @@ impl App {
         }
         match &event.logical_key {
             Key::Named(NamedKey::Escape) => {
-                self.search.close();
-                if let Some(pane) = self.tabs.get_mut(self.active).and_then(|t| t.active_mut()) {
+                self.win.search.close();
+                if let Some(pane) = self
+                    .win
+                    .tabs
+                    .get_mut(self.win.active)
+                    .and_then(|t| t.active_mut())
+                {
                     pane.view_offset = 0;
                 }
             }
             Key::Named(NamedKey::Enter) => {
                 if shift {
-                    self.search.prev();
+                    self.win.search.prev();
                 } else {
-                    self.search.next();
+                    self.win.search.next();
                 }
                 self.jump_to_match();
             }
             Key::Named(NamedKey::Backspace) => {
-                self.search.query.pop();
+                self.win.search.query.pop();
                 self.refresh_search(true);
             }
             Key::Named(NamedKey::Space) => {
-                self.search.query.push(' ');
+                self.win.search.query.push(' ');
                 self.refresh_search(true);
             }
             _ => {
@@ -3492,7 +3833,7 @@ impl App {
                     && !text.is_empty()
                     && !text.chars().any(|c| c.is_control())
                 {
-                    self.search.query.push_str(text);
+                    self.win.search.query.push_str(text);
                     self.refresh_search(true);
                 }
             }
@@ -3504,43 +3845,48 @@ impl App {
     /// the filter shortcut) clears it.
     fn handle_filter_key(&mut self, event: &input::KeyPress) {
         use winit::keyboard::{Key, NamedKey};
-        let action = input::app_action(event, self.modifiers, &self.keymap);
-        let Some(pane) = self.tabs.get_mut(self.active).and_then(|t| t.active_mut()) else {
-            self.filter_editing = false;
-            self.search.close();
+        let action = input::app_action(event, self.win.modifiers, &self.keymap);
+        let Some(pane) = self
+            .win
+            .tabs
+            .get_mut(self.win.active)
+            .and_then(|t| t.active_mut())
+        else {
+            self.win.filter_editing = false;
+            self.win.search.close();
             return;
         };
         let Some((block, query)) = pane.filter.as_mut() else {
-            self.filter_editing = false;
-            self.search.close();
+            self.win.filter_editing = false;
+            self.win.search.close();
             return;
         };
         let block = *block;
         match &event.logical_key {
             _ if action == Some(AppAction::FilterBlock) => {
                 pane.filter = None;
-                self.filter_editing = false;
-                self.search.close();
+                self.win.filter_editing = false;
+                self.win.search.close();
             }
             Key::Named(NamedKey::Escape) => {
                 pane.filter = None;
-                self.filter_editing = false;
-                self.search.close();
+                self.win.filter_editing = false;
+                self.win.search.close();
             }
             Key::Named(NamedKey::Enter) => {
                 if query.is_empty() {
                     pane.filter = None;
                 }
-                self.filter_editing = false;
-                self.search.close();
+                self.win.filter_editing = false;
+                self.win.search.close();
             }
             Key::Named(NamedKey::Backspace) => {
                 query.pop();
             }
             Key::Named(NamedKey::Space) => query.push(' '),
             _ => {
-                if !self.modifiers.super_key()
-                    && !self.modifiers.control_key()
+                if !self.win.modifiers.super_key()
+                    && !self.win.modifiers.control_key()
                     && let Some(text) = &event.text
                     && !text.chars().any(|c| c.is_control())
                 {
@@ -3549,7 +3895,7 @@ impl App {
             }
         }
         let pane_id = pane.session.id;
-        if self.filter_editing {
+        if self.win.filter_editing {
             // keep the filtered block's header in view while narrowing
             self.jump_to_block(pane_id, block);
         }
@@ -3565,12 +3911,13 @@ impl App {
     fn refresh_palette(&mut self) {
         use crate::views::palette::PaletteMode;
         let pane_history = self
+            .win
             .tabs
-            .get(self.active)
+            .get(self.win.active)
             .and_then(|t| t.active())
-            .map(|p| p.editor.history.clone())
+            .map(|p| (*p.editor.history).clone())
             .unwrap_or_default();
-        let (items, recent) = match self.palette.mode {
+        let (items, recent) = match self.win.palette.mode {
             PaletteMode::Commands => {
                 let launches: Vec<String> =
                     self.launch_configs.iter().map(|l| l.name.clone()).collect();
@@ -3587,18 +3934,19 @@ impl App {
             PaletteMode::Sessions => (self.session_items(), Vec::new()),
             PaletteMode::PipeOutput => {
                 let output = self
+                    .win
                     .pipe_target
                     .as_ref()
                     .map(|t| t.2.as_str())
                     .unwrap_or_default();
-                self.palette_results = palette::pipe_items(&self.palette.query, output);
-                self.palette.selected = 0;
+                self.win.palette_results = palette::pipe_items(&self.win.palette.query, output);
+                self.win.palette.selected = 0;
                 return;
             }
         };
-        self.palette_results = palette::rank(&items, &recent, &self.palette.query);
-        if self.palette.selected >= self.palette_results.len() {
-            self.palette.selected = self.palette_results.len().saturating_sub(1);
+        self.win.palette_results = palette::rank(&items, &recent, &self.win.palette.query);
+        if self.win.palette.selected >= self.win.palette_results.len() {
+            self.win.palette.selected = self.win.palette_results.len().saturating_sub(1);
         }
     }
 
@@ -3616,11 +3964,11 @@ impl App {
             action,
             mono_title: false,
         };
-        for (ti, tab) in self.tabs.iter().enumerate() {
+        for (ti, tab) in self.win.tabs.iter().enumerate() {
             let panes = if tab.is_split() { tab.panes.len() } else { 1 };
             items.push(row(
                 format!("{} — tab {}", tab.display_title(), ti + 1),
-                if ti == self.active {
+                if ti == self.win.active {
                     "current".into()
                 } else if panes > 1 {
                     format!("{panes} panes")
@@ -3631,7 +3979,7 @@ impl App {
                 PaletteAction::FocusTab(ti),
             ));
         }
-        for (ti, tab) in self.tabs.iter().enumerate() {
+        for (ti, tab) in self.win.tabs.iter().enumerate() {
             if !tab.is_split() {
                 continue;
             }
@@ -3662,7 +4010,7 @@ impl App {
             }
         }
         let mut blocks = Vec::new();
-        for (ti, tab) in self.tabs.iter().enumerate() {
+        for (ti, tab) in self.win.tabs.iter().enumerate() {
             for p in &tab.panes {
                 for b in p.session.blocks.lock().unwrap().snapshot() {
                     if let rift_core::BlockState::Done { exit, .. } = b.state
@@ -3673,8 +4021,35 @@ impl App {
                 }
             }
         }
-        // tabs of other Rift windows (their control sockets)
-        for (pid, _, tabs) in &self.other_windows {
+        // tabs of this process's other windows (tab indices count across
+        // windows, as the control API's do)
+        let here = self.window_index();
+        let mut first = 0;
+        for (wi, w) in self.windows_in_order().into_iter().enumerate() {
+            if wi != here {
+                for (ti, t) in w.tabs.iter().enumerate() {
+                    let cwd = t
+                        .active()
+                        .and_then(|p| p.session.cwd.lock().unwrap().clone())
+                        .map(|c| editor::shorten_home(&c))
+                        .unwrap_or_default();
+                    let window = if w.dropdown.is_some() {
+                        "hotkey window".to_string()
+                    } else {
+                        format!("window {}", wi + 1)
+                    };
+                    items.push(row(
+                        format!("{} — {window}", t.display_title()),
+                        cwd,
+                        Section::Tabs,
+                        PaletteAction::FocusWindow(std::process::id(), first + ti, t.active_pane),
+                    ));
+                }
+            }
+            first += w.tabs.len();
+        }
+        // tabs of other Rift processes (their control sockets)
+        for (pid, _, tabs) in &self.win.other_windows {
             for t in tabs {
                 let pane = t.panes.iter().find(|p| p.active).or(t.panes.first());
                 let cwd = pane
@@ -3710,10 +4085,11 @@ impl App {
 
     /// The pane is on screen and the window has focus.
     fn pane_in_view(&self, pane: PaneId) -> bool {
-        self.focused
+        self.win.focused
             && self
+                .win
                 .tabs
-                .get(self.active)
+                .get(self.win.active)
                 .is_some_and(|t| t.pane(pane).is_some() && t.zoomed.is_none_or(|z| z == pane))
     }
 
@@ -3742,7 +4118,7 @@ impl App {
 
     /// Record an inbox entry (id, agent and branch filled here); returns its id.
     fn push_attention(&mut self, mut a: Attention) -> u64 {
-        let pane = self.tabs.iter().find_map(|t| t.pane(a.pane));
+        let pane = self.win.tabs.iter().find_map(|t| t.pane(a.pane));
         a.branch = pane
             .and_then(|p| p.git.as_ref())
             .map(|g| g.branch.clone())
@@ -3759,6 +4135,12 @@ impl App {
             let extra = self.attention.len() - ATTENTION_CAP;
             self.attention.drain(..extra);
         }
+        // every window's inbox button counts it
+        self.each_window(|app| {
+            if let Some(w) = &app.win.window {
+                w.request_redraw();
+            }
+        });
         id
     }
 
@@ -3769,7 +4151,7 @@ impl App {
         pane: PaneId,
         block: rift_core::BlockId,
     ) -> Option<crate::notify::CommandFacts> {
-        let p = self.tabs.iter().find_map(|t| t.pane(pane))?;
+        let p = self.win.tabs.iter().find_map(|t| t.pane(pane))?;
         let (command, exit, duration) = {
             let blocks = p.session.blocks.lock().unwrap();
             let b = blocks.iter().find(|b| b.id == block)?;
@@ -3800,7 +4182,7 @@ impl App {
         a: &Attention,
         command: Option<&crate::notify::CommandFacts>,
     ) -> crate::notify::Alert {
-        let tab = self.tabs.iter().find(|t| t.pane(a.pane).is_some());
+        let tab = self.win.tabs.iter().find(|t| t.pane(a.pane).is_some());
         let tab_title = tab.map(|t| t.display_title()).unwrap_or_default();
         let cwd = tab
             .and_then(|t| t.pane(a.pane))
@@ -3835,7 +4217,9 @@ impl App {
     /// A click on a desktop notification (or its Show / Rerun): Rift comes
     /// forward on the pane; Rerun runs the failed command again there.
     fn on_notification_response(&mut self, r: crate::notify::Response) {
-        if let Some(w) = &self.window {
+        // the pane's window: a hidden drop-down window drops down first
+        self.reveal_hotkey_window();
+        if let Some(w) = &self.win.window {
             w.set_minimized(false);
             w.focus_window();
         }
@@ -3880,14 +4264,15 @@ impl App {
                 self.toast("Not rerun: a command is still running in that pane".into());
             }
         }
-        if let Some(w) = &self.window {
+        if let Some(w) = &self.win.window {
             w.request_redraw();
         }
     }
 
     /// Inbox entry plus, for an `event` whose pane is out of view, the
-    /// alerts `[notifications]` allows: a toast while Rift is focused, a
-    /// desktop notification otherwise, and the event's sound.
+    /// alerts `[notifications]` allows: a toast in the focused window while
+    /// any Rift window is focused (the pane's own window may be in the
+    /// background), a desktop notification otherwise, and the event's sound.
     fn raise(&mut self, mut a: Attention, event: Option<rift_core::notifications::Event>) {
         let in_view = self.pane_in_view(a.pane);
         a.read = a.read || in_view;
@@ -3904,11 +4289,19 @@ impl App {
         };
         let (title, body) = a.desktop_text();
         log::info!("alert {event:?}: {title} — {body}");
-        if self.focused {
+        let focused = if self.win.focused {
+            Some(&mut *self.win)
+        } else {
+            self.parked.iter_mut().find(|w| w.focused).map(|w| &mut **w)
+        };
+        if let Some(fw) = focused {
             if cfg.toasts {
-                self.note_toasts.insert(0, (id, Instant::now()));
-                self.note_toasts
+                fw.note_toasts.insert(0, (id, Instant::now()));
+                fw.note_toasts
                     .truncate(crate::views::notifications::MAX_TOASTS);
+                if let Some(w) = &fw.window {
+                    w.request_redraw();
+                }
             }
         } else {
             let a = a.clone();
@@ -3924,8 +4317,8 @@ impl App {
         {
             crate::notify::play(&path);
         }
-        self.a11y_announcement = Some(format!("{title}: {body}"));
-        if let Some(w) = &self.window {
+        self.win.a11y_announcement = Some(format!("{title}: {body}"));
+        if let Some(w) = &self.win.window {
             w.request_redraw();
         }
     }
@@ -3965,7 +4358,11 @@ impl App {
     /// sounds are on. It goes in the inbox already read.
     fn test_alert(&mut self, t: crate::state::TestAlert) {
         use rift_core::notifications::{Event, resolve_sound, sound_dirs};
-        let pane = self.tabs.get(self.active).map_or(0, |tab| tab.active_pane);
+        let pane = self
+            .win
+            .tabs
+            .get(self.win.active)
+            .map_or(0, |tab| tab.active_pane);
         let (kind, title, detail) = match t.event {
             Event::Finished => (
                 AttentionKind::Finished,
@@ -4015,8 +4412,9 @@ impl App {
                 crate::notify::send_alert(&self.desktop_alert(&a, facts.as_ref()));
             }
         } else {
-            self.note_toasts.insert(0, (id, Instant::now()));
-            self.note_toasts
+            self.win.note_toasts.insert(0, (id, Instant::now()));
+            self.win
+                .note_toasts
                 .truncate(crate::views::notifications::MAX_TOASTS);
         }
         let n = &self.config.notifications;
@@ -4025,7 +4423,7 @@ impl App {
         {
             crate::notify::play(&path);
         }
-        if let Some(w) = &self.window {
+        if let Some(w) = &self.win.window {
             w.request_redraw();
         }
     }
@@ -4112,7 +4510,7 @@ impl App {
         let current = options
             .iter()
             .position(|(v, _)| v.eq_ignore_ascii_case(&current));
-        self.settings.dropdown = Some(crate::views::settings::Dropdown {
+        self.win.settings.dropdown = Some(crate::views::settings::Dropdown {
             id,
             options,
             highlight: current.unwrap_or(0),
@@ -4147,9 +4545,9 @@ impl App {
     fn prune_note_toasts(&mut self) -> bool {
         let ttl = self.config.notifications.toast_duration();
         let now = Instant::now();
-        let (mx, my) = self.mouse;
-        let hits = &self.note_toast_hits;
-        for (id, since) in &mut self.note_toasts {
+        let (mx, my) = self.win.mouse;
+        let hits = &self.win.note_toast_hits;
+        for (id, since) in &mut self.win.note_toasts {
             let hovered = hits.iter().any(|h| {
                 h.id == *id
                     && mx >= h.rect[0]
@@ -4161,15 +4559,16 @@ impl App {
                 *since = now;
             }
         }
-        let before = self.note_toasts.len();
-        let notes = &self.app_notes;
-        self.note_toasts.retain(|(id, since)| {
+        let before = self.win.note_toasts.len();
+        let notes = &self.win.app_notes;
+        self.win.note_toasts.retain(|(id, since)| {
             notes.iter().any(|n| n.id == *id && n.sticky) || now.duration_since(*since) < ttl
         });
-        let toasts = &self.note_toasts;
-        self.app_notes
+        let toasts = &self.win.note_toasts;
+        self.win
+            .app_notes
             .retain(|n| toasts.iter().any(|(id, _)| *id == n.id));
-        before != self.note_toasts.len()
+        before != self.win.note_toasts.len()
     }
 
     /// Show one of Rift's own notices as a notification toast (a desktop
@@ -4184,10 +4583,10 @@ impl App {
         log::info!("notice: {title} — {detail}");
         self.next_attention_id += 1;
         let id = self.next_attention_id;
-        if !self.focused && sticky && self.config.notifications.enabled {
+        if !self.win.focused && sticky && self.config.notifications.enabled {
             crate::notify::send(&title, &detail);
         }
-        self.a11y_announcement = Some(if detail.is_empty() {
+        self.win.a11y_announcement = Some(if detail.is_empty() {
             title.clone()
         } else {
             format!("{title}: {detail}")
@@ -4208,29 +4607,31 @@ impl App {
             }
             return id;
         }
-        self.app_notes.push(AppNote {
+        self.win.app_notes.push(AppNote {
             id,
             title,
             detail,
             action,
             sticky,
         });
-        self.note_toasts.insert(0, (id, Instant::now()));
+        self.win.note_toasts.insert(0, (id, Instant::now()));
         // a sticky notice is never pushed out by the ones after it
-        let notes = &self.app_notes;
+        let notes = &self.win.app_notes;
         let max = crate::views::notifications::MAX_TOASTS;
-        while self.note_toasts.len() > max {
+        while self.win.note_toasts.len() > max {
             let drop = self
+                .win
                 .note_toasts
                 .iter()
                 .rposition(|(id, _)| !notes.iter().any(|n| n.id == *id && n.sticky))
-                .unwrap_or(self.note_toasts.len() - 1);
-            self.note_toasts.remove(drop);
+                .unwrap_or(self.win.note_toasts.len() - 1);
+            self.win.note_toasts.remove(drop);
         }
-        let toasts = &self.note_toasts;
-        self.app_notes
+        let toasts = &self.win.note_toasts;
+        self.win
+            .app_notes
             .retain(|n| toasts.iter().any(|(t, _)| *t == n.id));
-        if let Some(w) = &self.window {
+        if let Some(w) = &self.win.window {
             w.request_redraw();
         }
         id
@@ -4240,21 +4641,22 @@ impl App {
     /// installed or replaced).
     fn drop_app_notes(&mut self, action: AppNoteAction) {
         let gone: Vec<u64> = self
+            .win
             .app_notes
             .iter()
             .filter(|n| n.action == action)
             .map(|n| n.id)
             .collect();
-        self.app_notes.retain(|n| n.action != action);
-        self.note_toasts.retain(|(id, _)| !gone.contains(id));
+        self.win.app_notes.retain(|n| n.action != action);
+        self.win.note_toasts.retain(|(id, _)| !gone.contains(id));
     }
 
     /// Entries whose pane you are looking at count as read; their toasts go.
     fn mark_visible_read(&mut self) {
-        if !self.focused {
+        if !self.win.focused {
             return;
         }
-        let Some(tab) = self.tabs.get(self.active) else {
+        let Some(tab) = self.win.tabs.get(self.win.active) else {
             return;
         };
         let visible =
@@ -4266,12 +4668,12 @@ impl App {
                 changed = true;
             }
         }
-        if changed || !self.note_toasts.is_empty() {
+        if changed || !self.win.note_toasts.is_empty() {
             let attention = &self.attention;
-            let notes = &self.app_notes;
+            let notes = &self.win.app_notes;
             // a Try it sample is read from the start, yet its toast is the point
             let tests = &self.test_alerts;
-            self.note_toasts.retain(|(id, _)| {
+            self.win.note_toasts.retain(|(id, _)| {
                 notes.iter().any(|n| n.id == *id)
                     || tests.contains(id)
                     || attention.iter().any(|a| a.id == *id && !a.read)
@@ -4326,6 +4728,7 @@ impl App {
     fn record_completions(&mut self, pane: PaneId) {
         let in_view = self.pane_in_view(pane);
         let Some(p) = self
+            .win
             .tabs
             .iter()
             .flat_map(|t| &t.panes)
@@ -4417,7 +4820,7 @@ impl App {
 
     /// The popover's rows under its current filter.
     fn filtered_notifications(&self) -> Vec<crate::views::notifications::Entry> {
-        let filter = self.notifications.filter;
+        let filter = self.win.notifications.filter;
         self.notification_entries()
             .into_iter()
             .filter(|e| filter.matches(e))
@@ -4425,20 +4828,20 @@ impl App {
     }
 
     fn open_notifications(&mut self) {
-        self.notifications.open();
-        self.palette.open = false;
-        self.context_menu.close();
+        self.win.notifications.open();
+        self.win.palette.open = false;
+        self.win.context_menu.close();
     }
 
     fn close_notifications(&mut self) {
-        self.notifications.open = false;
+        self.win.notifications.open = false;
     }
 
     fn mark_all_read(&mut self) {
         for a in &mut self.attention {
             a.read = true;
         }
-        self.note_toasts.clear();
+        self.win.note_toasts.clear();
     }
 
     /// Open an entry: mark it read, drop its toast, go to its pane (and block).
@@ -4447,15 +4850,22 @@ impl App {
             return;
         };
         a.read = true;
-        self.settings.open = false;
         let a = a.clone();
-        self.note_toasts.retain(|(t, _)| *t != id);
-        let Some(ti) = self.tabs.iter().position(|t| t.pane(a.pane).is_some()) else {
+        self.win.note_toasts.retain(|(t, _)| *t != id);
+        // the pane may be in another window: that one comes forward
+        if self.win.tabs.iter().all(|t| t.pane(a.pane).is_none()) && self.enter_pane_window(a.pane)
+        {
+            self.focus_pane_here(a.pane);
+        }
+        // never a pane of a hidden drop-down window: typing would land unseen
+        self.reveal_hotkey_window();
+        self.win.settings.open = false;
+        let Some(ti) = self.win.tabs.iter().position(|t| t.pane(a.pane).is_some()) else {
             self.toast("That pane is closed".into());
             return;
         };
-        self.active = ti;
-        let tab = &mut self.tabs[ti];
+        self.win.active = ti;
+        let tab = &mut self.win.tabs[ti];
         tab.activity = false;
         tab.active_pane = a.pane;
         if tab.zoomed.is_some() {
@@ -4475,7 +4885,8 @@ impl App {
 
     /// Palette rows for detached session-service shells.
     fn detached_items(&self) -> Vec<palette::Item> {
-        self.detached
+        self.win
+            .detached
             .iter()
             .map(|s| palette::Item {
                 title: format!(
@@ -4501,7 +4912,7 @@ impl App {
     /// Show the block output → command modal for the selected block (or
     /// the newest finished one).
     fn open_pipe(&mut self) {
-        let Some(pane) = self.tabs.get(self.active).and_then(|t| t.active()) else {
+        let Some(pane) = self.win.tabs.get(self.win.active).and_then(|t| t.active()) else {
             return;
         };
         let block = pane.selected_block.or_else(|| {
@@ -4519,14 +4930,14 @@ impl App {
             return;
         };
         let output = terminal::block_output_text(&pane.session, block).unwrap_or_default();
-        self.pipe_target = Some((pane.session.id, block, output));
+        self.win.pipe_target = Some((pane.session.id, block, output));
         self.open_palette(crate::views::palette::PaletteMode::PipeOutput);
     }
 
     /// Run the pipe modal's command with the block output as its stdin.
     fn run_pipe(&mut self) {
-        let command = self.palette.query.trim().to_string();
-        let Some((pane, _, output)) = self.pipe_target.take() else {
+        let command = self.win.palette.query.trim().to_string();
+        let Some((pane, _, output)) = self.win.pipe_target.take() else {
             return;
         };
         if command.is_empty() {
@@ -4543,16 +4954,17 @@ impl App {
 
     /// Keys go to the viewer: it is open in this tab and focused.
     fn viewer_focused(&self) -> bool {
-        self.viewer_focus
-            && self.viewer.is_open()
-            && if self.config_viewer {
-                self.settings.open
+        self.win.viewer_focus
+            && self.win.viewer.is_open()
+            && if self.win.config_viewer {
+                self.win.settings.open
             } else {
                 // a shell tab's file viewer sits under the Settings page
-                !self.settings.open
+                !self.win.settings.open
                     && self
+                        .win
                         .tabs
-                        .get(self.active)
+                        .get(self.win.active)
                         .is_some_and(|t| t.root.contains(VIEWER_PANE))
             }
     }
@@ -4561,27 +4973,29 @@ impl App {
     /// leaves the split tree, a leaf whose tab went away closes the viewer.
     fn sync_viewer_pane(&mut self) {
         // config.toml beside Settings: open while the Settings tab is
-        if self.config_viewer {
-            if !self.settings.tab {
-                self.viewer.close();
+        if self.win.config_viewer {
+            if !self.win.settings.tab {
+                self.win.viewer.close();
             }
-            if !self.viewer.is_open() {
-                self.config_viewer = false;
+            if !self.win.viewer.is_open() {
+                self.win.config_viewer = false;
             }
         }
-        if self.viewer.is_open() {
-            if !self.config_viewer && !self.tabs.iter().any(|t| t.root.contains(VIEWER_PANE)) {
-                self.viewer.close();
+        if self.win.viewer.is_open() {
+            if !self.win.config_viewer
+                && !self.win.tabs.iter().any(|t| t.root.contains(VIEWER_PANE))
+            {
+                self.win.viewer.close();
             }
         } else {
-            for tab in &mut self.tabs {
+            for tab in &mut self.win.tabs {
                 if tab.root.contains(VIEWER_PANE) {
                     tab.root.remove(VIEWER_PANE);
                 }
             }
         }
-        if !self.viewer.is_open() {
-            self.viewer_focus = false;
+        if !self.win.viewer.is_open() {
+            self.win.viewer_focus = false;
         }
     }
 
@@ -4590,43 +5004,42 @@ impl App {
     /// Settings › Open config.toml: the file beside the Settings page, in
     /// the Settings tab (no terminal tab's split changes).
     fn open_config_viewer(&mut self, path: &std::path::Path) {
-        for tab in &mut self.tabs {
+        for tab in &mut self.win.tabs {
             if tab.root.contains(VIEWER_PANE) {
                 tab.root.remove(VIEWER_PANE);
             }
         }
-        self.config_viewer = true;
-        self.viewer_focus = true;
+        self.win.config_viewer = true;
+        self.win.viewer_focus = true;
         let proxy = self.proxy.clone();
-        self.viewer.open(path, move |loaded| {
+        self.win.viewer.open(path, move |loaded| {
             let _ = proxy.send_event(UserEvent::ViewerLoaded(Box::new(loaded)));
         });
     }
 
     fn open_viewer(&mut self, path: &std::path::Path) {
-        self.config_viewer = false;
-        for (i, tab) in self.tabs.iter_mut().enumerate() {
-            if i != self.active && tab.root.contains(VIEWER_PANE) {
+        self.win.config_viewer = false;
+        for (i, tab) in self.win.tabs.iter_mut().enumerate() {
+            if i != self.win.active && tab.root.contains(VIEWER_PANE) {
                 tab.root.remove(VIEWER_PANE);
             }
         }
-        if let Some(tab) = self.tabs.get_mut(self.active)
+        if let Some(tab) = self.win.tabs.get_mut(self.win.active)
             && !tab.root.contains(VIEWER_PANE)
         {
             // the leftmost column, next to the explorer, taking an equal
             // share with the shell panes side by side
             tab.zoomed = None;
             let columns = tab.root.leaves().len() as f32;
-            tab.root = crate::pane::PaneNode::Split {
-                axis: Axis::Horizontal,
-                ratio: (1.0 / (columns + 1.0)).clamp(0.25, 0.5),
-                first: Box::new(crate::pane::PaneNode::Leaf(VIEWER_PANE)),
-                second: Box::new(tab.root.clone()),
-            };
+            tab.root.insert_root(
+                VIEWER_PANE,
+                crate::pane::Edge::Left,
+                (1.0 / (columns + 1.0)).clamp(0.25, 0.5),
+            );
         }
-        self.viewer_focus = true;
+        self.win.viewer_focus = true;
         let proxy = self.proxy.clone();
-        self.viewer.open(path, move |loaded| {
+        self.win.viewer.open(path, move |loaded| {
             let _ = proxy.send_event(UserEvent::ViewerLoaded(Box::new(loaded)));
         });
     }
@@ -4636,14 +5049,14 @@ impl App {
     /// directory and age), then the imported shell history.
     fn open_history(&mut self) {
         use crate::views::history::{Entry, dedupe};
-        if self.history.open {
-            let scope = self.history.scope.next();
-            self.history.set_scope(scope);
+        if self.win.history.open {
+            let scope = self.win.history.scope.next();
+            self.win.history.set_scope(scope);
             return;
         }
         let active = self.active_pane_id();
         let mut entries: Vec<Entry> = Vec::new();
-        for tab in &self.tabs {
+        for tab in &self.win.tabs {
             for p in &tab.panes {
                 let here = Some(p.session.id) == active;
                 let blocks = p.session.blocks.lock().unwrap();
@@ -4663,7 +5076,7 @@ impl App {
         // newest first: finish time, unknown (replayed) last
         entries.sort_by_key(|e| std::cmp::Reverse(e.finished));
         // the pane's own typed history, then the shell's, newest first
-        if let Some(p) = self.tabs.get(self.active).and_then(|t| t.active()) {
+        if let Some(p) = self.win.tabs.get(self.win.active).and_then(|t| t.active()) {
             entries.extend(p.editor.history.iter().rev().map(|c| Entry {
                 command: c.clone(),
                 cwd: None,
@@ -4680,34 +5093,35 @@ impl App {
             here: false,
         }));
         let query = self
+            .win
             .tabs
-            .get(self.active)
+            .get(self.win.active)
             .and_then(|t| t.active())
             .map(|p| p.editor.buffer.clone())
             .unwrap_or_default();
         // no completion answer in flight may reopen the panel under it
-        self.completion.close();
+        self.win.completion.close();
         self.completion_pending = None;
         self.completion_intent = None;
-        self.history.open(dedupe(entries), &query);
-        self.history.pane = active;
+        self.win.history.open(dedupe(entries), &query);
+        self.win.history.pane = active;
     }
 
     /// Keys for the open history pane; `false` lets the key edit the command
     /// line (the query).
     fn handle_history_key(&mut self, event: &input::KeyPress) -> bool {
         use winit::keyboard::{Key, NamedKey};
-        let mods = self.modifiers;
+        let mods = self.win.modifiers;
         // nothing matches: ⏎ runs the typed line as usual; ⇥ only closes the
         // pane, so completions show before a second ⇥ accepts one
-        if self.history.current().is_none() {
+        if self.win.history.current().is_none() {
             match event.logical_key {
                 Key::Named(NamedKey::Enter) => {
-                    self.history.close();
+                    self.win.history.close();
                     return false;
                 }
                 Key::Named(NamedKey::Tab) => {
-                    self.history.close();
+                    self.win.history.close();
                     self.update_completions();
                     return true;
                 }
@@ -4715,11 +5129,11 @@ impl App {
             }
         }
         match &event.logical_key {
-            Key::Named(NamedKey::Escape) => self.history.close(),
-            Key::Named(NamedKey::ArrowUp) => self.history.move_by(-1),
-            Key::Named(NamedKey::ArrowDown) => self.history.move_by(1),
-            Key::Named(NamedKey::PageUp) => self.history.move_by(-8),
-            Key::Named(NamedKey::PageDown) => self.history.move_by(8),
+            Key::Named(NamedKey::Escape) => self.win.history.close(),
+            Key::Named(NamedKey::ArrowUp) => self.win.history.move_by(-1),
+            Key::Named(NamedKey::ArrowDown) => self.win.history.move_by(1),
+            Key::Named(NamedKey::PageUp) => self.win.history.move_by(-8),
+            Key::Named(NamedKey::PageDown) => self.win.history.move_by(8),
             Key::Named(NamedKey::Tab) => self.take_history(HistoryUse::Edit),
             Key::Named(NamedKey::Enter)
                 if mods.super_key()
@@ -4748,36 +5162,47 @@ impl App {
     /// Use the selected history row: run it, put it on the command line, or
     /// run it in a new split beside the pane.
     fn take_history(&mut self, how: HistoryUse) {
-        let Some(command) = self.history.current().map(|e| e.command.clone()) else {
+        let Some(command) = self.win.history.current().map(|e| e.command.clone()) else {
             return;
         };
-        self.history.close();
+        self.win.history.close();
         match how {
             HistoryUse::RunInSplit => {
                 let Some(target) = self.active_pane_id() else {
                     return;
                 };
                 // the query was only a search: this pane's line empties
-                if let Some(p) = self.tabs.get_mut(self.active).and_then(|t| t.active_mut()) {
+                if let Some(p) = self
+                    .win
+                    .tabs
+                    .get_mut(self.win.active)
+                    .and_then(|t| t.active_mut())
+                {
                     let len = p.editor.buffer.len();
                     p.editor.replace_range(0..len, "");
                 }
-                self.completion.close();
+                self.win.completion.close();
                 let cwd = self
+                    .win
                     .tabs
-                    .get(self.active)
+                    .get(self.win.active)
                     .and_then(|t| t.active())
-                    .and_then(|p| p.session.cwd.lock().unwrap().clone())
+                    .and_then(|p| p.session.local_cwd())
                     .map(std::path::PathBuf::from);
                 let new = self.split_pane(target, Axis::Horizontal, cwd);
                 self.pending_commands.insert(new, vec![command]);
             }
             HistoryUse::Edit | HistoryUse::Run => {
-                if let Some(p) = self.tabs.get_mut(self.active).and_then(|t| t.active_mut()) {
+                if let Some(p) = self
+                    .win
+                    .tabs
+                    .get_mut(self.win.active)
+                    .and_then(|t| t.active_mut())
+                {
                     let len = p.editor.buffer.len();
                     p.editor.replace_range(0..len, &command);
                 }
-                self.completion.close();
+                self.win.completion.close();
                 if how == HistoryUse::Run {
                     self.handle_editor_key(EditorKey::Submit);
                 } else {
@@ -4791,75 +5216,91 @@ impl App {
     /// Follow the command line: it is the history pane's query. The pane
     /// closes when the line is no longer the app's (a program took over).
     fn sync_history(&mut self) {
-        if !self.history.open {
+        if !self.win.history.open {
             return;
         }
-        let Some(p) = self.tabs.get(self.active).and_then(|t| t.active()) else {
-            self.history.close();
+        let Some(p) = self.win.tabs.get(self.win.active).and_then(|t| t.active()) else {
+            self.win.history.close();
             return;
         };
         if !Self::editor_visible(p)
-            || self.history.pane != Some(p.session.id)
+            || self.win.history.pane != Some(p.session.id)
             || self.viewer_focused()
-            || self.settings.open
-            || self.palette.open
-            || self.search.open
+            || self.win.settings.open
+            || self.win.palette.open
+            || self.win.search.open
         {
-            self.history.close();
-        } else if p.editor.buffer != self.history.query {
+            self.win.history.close();
+        } else if p.editor.buffer != self.win.history.query {
             let q = p.editor.buffer.clone();
-            self.history.filter(&q);
+            self.win.history.filter(&q);
         }
     }
 
     fn open_palette(&mut self, mode: crate::views::palette::PaletteMode) {
         if mode == crate::views::palette::PaletteMode::Commands {
             // pick up files added while running
-            self.launch_configs = rift_core::launch::load_all();
+            let (configs, skipped) = rift_core::launch::load_all_reporting();
+            self.launch_configs = configs;
+            if !skipped.is_empty() && skipped != self.launch_skipped {
+                let list = skipped
+                    .iter()
+                    .map(|s| format!("{} ({})", s.file, s.reason))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                let what = match skipped.len() {
+                    1 => "Tab config skipped".to_string(),
+                    n => format!("{n} tab configs skipped"),
+                };
+                self.toast(format!("{what}: {list}"));
+            }
+            self.launch_skipped = skipped;
             self.ssh_profiles = rift_core::ssh::all_profiles(&self.config.ssh_profiles);
         }
-        if mode == crate::views::palette::PaletteMode::Sessions && !self.windows_loading {
-            self.windows_loading = true;
-            self.other_windows.clear();
+        if mode == crate::views::palette::PaletteMode::Sessions && !self.win.windows_loading {
+            self.win.windows_loading = true;
+            self.win.other_windows.clear();
             let proxy = self.proxy.clone();
+            let asker = self.win_id();
             std::thread::spawn(move || {
                 crate::control::visit_other_windows(|window| {
-                    let _ = proxy.send_event(UserEvent::WindowsLoaded(vec![window], false));
+                    let _ = proxy.send_event(UserEvent::WindowsLoaded(asker, vec![window], false));
                 });
-                let _ = proxy.send_event(UserEvent::WindowsLoaded(Vec::new(), true));
+                let _ = proxy.send_event(UserEvent::WindowsLoaded(asker, Vec::new(), true));
             });
         }
         if matches!(
             mode,
             crate::views::palette::PaletteMode::Sessions
                 | crate::views::palette::PaletteMode::Commands
-        ) && !self.detached_loading
+        ) && !self.win.detached_loading
         {
             // shells the service keeps that no window shows
-            self.detached_loading = true;
+            self.win.detached_loading = true;
             let proxy = self.proxy.clone();
+            let asker = self.win_id();
             std::thread::spawn(move || {
                 let detached = rift_pty::service::list()
                     .into_iter()
                     .filter(|s| s.clients.is_empty())
                     .collect();
-                let _ = proxy.send_event(UserEvent::DetachedLoaded(detached));
+                let _ = proxy.send_event(UserEvent::DetachedLoaded(asker, detached));
             });
         }
-        self.palette.open = true;
-        self.palette.mode = mode;
-        self.palette.query.clear();
-        self.palette.selected = 0;
+        self.win.palette.open = true;
+        self.win.palette.mode = mode;
+        self.win.palette.query.clear();
+        self.win.palette.selected = 0;
         self.refresh_palette();
         self.blink_epoch = Instant::now();
     }
 
     fn run_palette_action(&mut self, action: PaletteAction, event_loop: &ActiveEventLoop) {
-        self.palette.open = false;
+        self.win.palette.open = false;
         match action {
             PaletteAction::App(a) => self.handle_action(a, event_loop),
             PaletteAction::OpenSettings => {
-                self.settings.open_page(self.settings.page);
+                self.win.settings.open_page(self.win.settings.page);
             }
             PaletteAction::SwitchTheme(i) => {
                 let names = rift_core::theme::available_themes();
@@ -4870,7 +5311,7 @@ impl App {
                 }
             }
             PaletteAction::Search => {
-                self.search.open = true;
+                self.win.search.open = true;
                 self.refresh_search(true);
             }
             PaletteAction::OpenHistory => {
@@ -4887,23 +5328,28 @@ impl App {
                 }
             }
             PaletteAction::InsertCommand(cmd) => {
-                if let Some(pane) = self.tabs.get_mut(self.active).and_then(|t| t.active_mut()) {
+                if let Some(pane) = self
+                    .win
+                    .tabs
+                    .get_mut(self.win.active)
+                    .and_then(|t| t.active_mut())
+                {
                     pane.editor.clear();
                     pane.editor.insert(&cmd);
                 }
                 self.update_completions();
             }
             PaletteAction::FocusTab(i) => {
-                self.settings.open = false;
-                if i < self.tabs.len() {
-                    self.active = i;
-                    self.tabs[i].activity = false;
+                self.win.settings.open = false;
+                if i < self.win.tabs.len() {
+                    self.win.active = i;
+                    self.win.tabs[i].activity = false;
                 }
             }
             PaletteAction::FocusPane(ti, pane) => {
-                self.settings.open = false;
-                if let Some(tab) = self.tabs.get_mut(ti) {
-                    self.active = ti;
+                self.win.settings.open = false;
+                if let Some(tab) = self.win.tabs.get_mut(ti) {
+                    self.win.active = ti;
                     tab.activity = false;
                     if tab.pane(pane).is_some() {
                         tab.active_pane = pane;
@@ -4914,11 +5360,11 @@ impl App {
                 }
             }
             PaletteAction::ShowBlock(ti, pane, block) => {
-                self.settings.open = false;
-                if let Some(tab) = self.tabs.get_mut(ti)
+                self.win.settings.open = false;
+                if let Some(tab) = self.win.tabs.get_mut(ti)
                     && tab.pane(pane).is_some()
                 {
-                    self.active = ti;
+                    self.win.active = ti;
                     tab.activity = false;
                     tab.active_pane = pane;
                     if let Some(p) = tab.pane_mut(pane) {
@@ -4931,6 +5377,14 @@ impl App {
             PaletteAction::AttachService(id) => {
                 self.next_attach = Some(id);
                 self.spawn_tab_at(None);
+            }
+            // another window of this process
+            PaletteAction::FocusWindow(pid, _, pane) if pid == std::process::id() => {
+                if self.enter_pane_window(pane) {
+                    self.focus_pane_here(pane);
+                } else {
+                    self.toast("That window is closed".into());
+                }
             }
             PaletteAction::FocusWindow(pid, tab, pane) => {
                 let sock = crate::control::dir().map(|d| d.join(format!("{pid}.sock")));
@@ -4949,15 +5403,41 @@ impl App {
             }
             PaletteAction::Ssh(i) => {
                 if let Some(p) = self.ssh_profiles.get(i).cloned() {
-                    self.open_tab_running(&p.name, p.command());
+                    // the tab opens now; its command follows from a thread
+                    // (`UserEvent::SshCommand`) and runs at the first prompt
+                    self.spawn_tab_at(None);
+                    let pane = self.win.tabs.get_mut(self.win.active).map(|tab| {
+                        tab.custom_title = Some(p.name.clone());
+                        tab.active_pane
+                    });
+                    self.save_session();
+                    let proxy = self.proxy.clone();
+                    let spawned = std::thread::Builder::new()
+                        .name("ssh-profile".into())
+                        .spawn(move || {
+                            // shared connection (remote completions run over
+                            // it), unless the user's own ssh config or args
+                            // set one up
+                            let control = rift_core::ssh::control_dir()
+                                .filter(|_| !p.shares_connections_itself())
+                                .and_then(|d| rift_core::ssh::private_control_dir(&d));
+                            let command = p.command_shared(control.as_deref());
+                            if let Some(pane) = pane {
+                                let _ = proxy.send_event(UserEvent::SshCommand(pane, command));
+                            }
+                        });
+                    if let Err(e) = spawned {
+                        log::warn!("ssh profile thread: {e}");
+                    }
                 }
             }
             PaletteAction::SshInstall(i) => {
                 if let Some(p) = self.ssh_profiles.get(i).cloned() {
-                    self.confirm = Some(ConfirmClose {
+                    self.win.confirm = Some(ConfirmClose {
                         opened: Instant::now(),
                         commands: vec![
                             "~/.local/share/rift/rift.{bash,zsh,fish}".into(),
+                            "~/.local/share/rift/complete.{bash,zsh,fish}".into(),
                             format!(
                                 "~/.bashrc, ~/.zshrc: one line ending {}",
                                 rift_core::ssh::RC_MARKER
@@ -4970,7 +5450,7 @@ impl App {
             }
             PaletteAction::RunHistory(cmd) => {
                 // same path as Enter: prompt-time context, synced panes
-                if let Some(id) = self.tabs.get(self.active).map(|t| t.active_pane) {
+                if let Some(id) = self.win.tabs.get(self.win.active).map(|t| t.active_pane) {
                     for target in self.input_targets(id) {
                         self.submit_to(target, &cmd);
                     }
@@ -4989,34 +5469,34 @@ impl App {
         use winit::keyboard::{Key, NamedKey};
         match &event.logical_key {
             Key::Named(NamedKey::Escape) => {
-                self.palette.open = false;
+                self.win.palette.open = false;
             }
             Key::Named(NamedKey::Enter) => {
-                if let Some(m) = self.palette_results.get(self.palette.selected) {
+                if let Some(m) = self.win.palette_results.get(self.win.palette.selected) {
                     let action = m.item.action.clone();
                     self.run_palette_action(action, event_loop);
                 }
             }
             Key::Named(NamedKey::ArrowUp) => {
-                self.palette.selected = self.palette.selected.saturating_sub(1);
+                self.win.palette.selected = self.win.palette.selected.saturating_sub(1);
             }
             Key::Named(NamedKey::ArrowDown) => {
-                if self.palette.selected + 1 < self.palette_results.len() {
-                    self.palette.selected += 1;
+                if self.win.palette.selected + 1 < self.win.palette_results.len() {
+                    self.win.palette.selected += 1;
                 }
             }
-            Key::Named(NamedKey::Tab) if self.palette.mode != PaletteMode::PipeOutput => {
-                let next = crate::views::palette::next_mode(self.palette.mode);
+            Key::Named(NamedKey::Tab) if self.win.palette.mode != PaletteMode::PipeOutput => {
+                let next = crate::views::palette::next_mode(self.win.palette.mode);
                 self.open_palette(next);
             }
             Key::Named(NamedKey::Backspace) => {
-                self.palette.query.pop();
-                self.palette.selected = 0;
+                self.win.palette.query.pop();
+                self.win.palette.selected = 0;
                 self.refresh_palette();
             }
             Key::Named(NamedKey::Space) => {
-                self.palette.query.push(' ');
-                self.palette.selected = 0;
+                self.win.palette.query.push(' ');
+                self.win.palette.selected = 0;
                 self.refresh_palette();
             }
             _ => {
@@ -5029,17 +5509,17 @@ impl App {
                         .chars()
                         .next()
                         .filter(|_| {
-                            self.palette.query.is_empty()
+                            self.win.palette.query.is_empty()
                                 && text.chars().count() == 1
-                                && self.palette.mode != PaletteMode::PipeOutput
+                                && self.win.palette.mode != PaletteMode::PipeOutput
                         })
                         .and_then(crate::views::palette::mode_for_prefix)
-                        .filter(|m| *m != self.palette.mode);
+                        .filter(|m| *m != self.win.palette.mode);
                     if let Some(mode) = prefix {
                         self.open_palette(mode);
                     } else {
-                        self.palette.query.push_str(text);
-                        self.palette.selected = 0;
+                        self.win.palette.query.push_str(text);
+                        self.win.palette.selected = 0;
                         self.refresh_palette();
                     }
                 }
@@ -5056,38 +5536,55 @@ impl App {
     fn update_completions(&mut self) {
         // a deferred Tab / ⌃→ belonged to the editor state being replaced
         self.completion_intent = None;
-        let Some(pane) = self.tabs.get(self.active).and_then(|t| t.active()) else {
+        let Some(pane) = self.win.tabs.get(self.win.active).and_then(|t| t.active()) else {
             self.completion_pending = None;
-            self.completion.close();
+            self.win.completion.close();
             return;
         };
         let buffer = pane.editor.buffer.clone();
         let cursor = pane.editor.cursor;
         if buffer.trim().is_empty() {
             self.completion_pending = None;
-            self.completion.close();
+            self.win.completion.close();
             return;
         }
-        // the lookup uses at most the newest 200 pane entries
-        let history = pane
-            .editor
-            .history
-            .iter()
-            .rev()
-            .take(200)
-            .rev()
-            .cloned()
-            .collect();
-        let cwd = pane.session.cwd.lock().unwrap().clone();
+        let history = pane.editor.history.clone();
+        let path = pane
+            .session
+            .user_vars
+            .lock()
+            .unwrap()
+            .get(rift_core::osc::USER_VAR_PATH)
+            .filter(|p| !p.is_empty())
+            .cloned();
+        let cwd = pane.session.local_cwd();
         let pane_id = pane.session.id;
+        let asks_shell = self.config.shell_completions;
+        let shell = (asks_shell && cwd.is_some())
+            .then(|| rift_core::shell_integration::resolve_shell(self.config.shell.as_deref()));
+        // a pane on another machine completes there over the shared
+        // connection of the `ssh` it runs (the newest ssh block submitted
+        // from the editor; cached until the pane's blocks change)
+        let remote = asks_shell
+            .then(|| pane.session.remote_cwd())
+            .flatten()
+            .map(|cwd| {
+                let target = pane.session.blocks.lock().unwrap().ssh_target();
+                RemoteCompletion { cwd, target }
+            });
+        // another pane's menu never stays up while this one's is computed
+        if self.completion_pane != Some(pane_id) {
+            self.win.completion.close();
+            self.win.completion_buffer.clear();
+        }
         let typed = buffer
-            .strip_prefix(self.completion_buffer.as_str())
+            .strip_prefix(self.win.completion_buffer.as_str())
             .filter(|_| cursor == buffer.len());
         match typed {
-            Some(t) if self.completion.ghost.starts_with(t) => {
-                self.completion.ghost.drain(..t.len());
+            Some(t) if self.win.completion.ghost.starts_with(t) => {
+                self.win.completion.ghost.drain(..t.len());
             }
-            _ => self.completion.ghost.clear(),
+            _ => self.win.completion.ghost.clear(),
         }
         self.completion_gen += 1;
         let request = CompletionRequest {
@@ -5098,20 +5595,42 @@ impl App {
             history,
             shell_history: self.shell_history.clone(),
             cwd,
+            path,
+            shell,
+            remote,
         };
+        self.completion_partial = None;
         let proxy = self.proxy.clone();
         let spawn = move || {
             let (tx, rx) = std::sync::mpsc::channel::<CompletionRequest>();
             let spawned = std::thread::Builder::new()
                 .name("completion".into())
                 .spawn(move || {
+                    // the shell / remote half, started on first use
+                    let mut slow: Option<std::sync::mpsc::Sender<Box<SlowCompletion>>> = None;
                     while let Ok(mut req) = rx.recv() {
                         // only the newest request matters
                         while let Ok(newer) = rx.try_recv() {
                             req = newer;
                         }
-                        let items = req.run();
-                        let _ = proxy.send_event(UserEvent::Completions(req.generation, items));
+                        let generation = req.generation;
+                        match req.run() {
+                            Answer::Done(items) => {
+                                let _ = proxy.send_event(UserEvent::Completions(generation, items));
+                            }
+                            Answer::Partial(first, rest) => {
+                                let _ = proxy
+                                    .send_event(UserEvent::CompletionsPartial(generation, first));
+                                let tx = slow.get_or_insert_with(|| spawn_slow(proxy.clone()));
+                                if let Err(e) = tx.send(rest) {
+                                    // that thread died: answer with Rift's own
+                                    slow = None;
+                                    let items = e.0.req.finish(e.0.gathered);
+                                    let _ =
+                                        proxy.send_event(UserEvent::Completions(generation, items));
+                                }
+                            }
+                        }
                     }
                 });
             match spawned {
@@ -5130,7 +5649,7 @@ impl App {
         } else {
             // completion is paused; editing is not
             self.completion_pending = None;
-            self.completion.close();
+            self.win.completion.close();
         }
     }
 
@@ -5148,8 +5667,9 @@ impl App {
 
     /// Whether the active editor still holds exactly what `request` asked about.
     fn editing(&self, request: &CompletionRequest) -> bool {
-        self.tabs
-            .get(self.active)
+        self.win
+            .tabs
+            .get(self.win.active)
             .and_then(|t| t.active())
             .is_some_and(|p| {
                 p.session.id == request.pane
@@ -5172,16 +5692,59 @@ impl App {
             return;
         };
         let intent = self.completion_intent.take();
+        let partial_shown = self.completion_partial == Some(generation);
+        self.completion_partial = None;
         if !self.editing(&request) {
             return;
         }
+        // the row picked in Rift's own list stays picked
+        let picked = (partial_shown && self.win.completion.selected > 0)
+            .then(|| {
+                self.win
+                    .completion
+                    .items
+                    .get(self.win.completion.selected)
+                    .cloned()
+            })
+            .flatten();
+        self.completion_pane = Some(request.pane);
         self.apply_completions(&request.buffer, request.cursor, items);
+        if let Some(i) = picked.and_then(|p| self.win.completion.items.iter().position(|c| *c == p))
+        {
+            self.win.completion.selected = i;
+        }
         match intent {
             Some(CompletionIntent::Accept) => self.accept_completion(),
             Some(CompletionIntent::AcceptGhostWord) => self.accept_ghost_word(),
             None => {}
         }
-        if let Some(w) = &self.window {
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+    }
+
+    /// Rift's own answer while the shell or remote machine is still asked:
+    /// shown at once; a deferred Tab waits for the full answer.
+    fn on_partial_completions(
+        &mut self,
+        generation: u64,
+        items: Vec<rift_core::completion::Completion>,
+    ) {
+        let Some(request) = self
+            .completion_pending
+            .as_ref()
+            .filter(|r| r.generation == generation)
+            .cloned()
+        else {
+            return;
+        };
+        if !self.editing(&request) {
+            return;
+        }
+        self.completion_partial = Some(generation);
+        self.completion_pane = Some(request.pane);
+        self.apply_completions(&request.buffer, request.cursor, items);
+        if let Some(w) = &self.win.window {
             w.request_redraw();
         }
     }
@@ -5192,14 +5755,14 @@ impl App {
         cursor: usize,
         items: Vec<rift_core::completion::Completion>,
     ) {
-        self.completion_buffer = buffer.to_string();
+        self.win.completion_buffer = buffer.to_string();
         // the history pane owns the line while it is open
-        if self.history.open {
-            self.completion.close();
+        if self.win.history.open {
+            self.win.completion.close();
             return;
         }
         // ghost: best history match remainder, else the single completion
-        self.completion.ghost = items
+        self.win.completion.ghost = items
             .iter()
             .find(|c| c.source == "history")
             .and_then(|c| c.insert.strip_prefix(buffer).map(str::to_string))
@@ -5209,12 +5772,27 @@ impl App {
         // best history line also drives the ghost text)
         let (mut dropdown, history): (Vec<_>, Vec<_>) =
             items.into_iter().partition(|c| c.source != "history");
-        if self.completion.ghost.is_empty()
+        // the whole word around the cursor is what a candidate replaces
+        let (start, _) = rift_core::completion::current_token(buffer, cursor);
+        let end = rift_core::completion::token_end(buffer, cursor);
+        let word = buffer.get(start..end).unwrap_or_default();
+        self.win.completion.token = word.to_string();
+        let candidates =
+            |rows: &[rift_core::completion::Completion]| rows.iter().any(|c| c.source != "hint");
+        // the remote hint is a note that rides along real candidates: alone
+        // it never opens the menu
+        if !candidates(&dropdown) {
+            dropdown.clear();
+        }
+        let prefixed = dropdown
+            .iter()
+            .any(|c| c.source != "hint" && c.insert.starts_with(word));
+        if self.win.completion.ghost.is_empty()
             && let Some(first) = dropdown.first()
         {
             let (_, token) = rift_core::completion::current_token(buffer, cursor);
             if cursor == buffer.len() {
-                self.completion.ghost = first
+                self.win.completion.ghost = first
                     .insert
                     .strip_prefix(token)
                     .unwrap_or_default()
@@ -5222,13 +5800,17 @@ impl App {
             }
         }
         if !self.config.autosuggestions {
-            self.completion.ghost.clear();
+            self.win.completion.ghost.clear();
         }
         // history lines join a panel the word candidates open; alone they
-        // stay the ghost text (no panel on every keystroke)
-        let show = self.config.completions_menu && !dropdown.is_empty();
+        // stay the ghost text (no panel on every keystroke). Fuzzy rows
+        // alone (none starts with the word) give way to a history ghost:
+        // they neither open the panel nor take Tab from it
+        let fuzzy_only = !prefixed && !self.win.completion.ghost.is_empty();
+        let show = self.config.completions_menu && !dropdown.is_empty() && !fuzzy_only;
         dropdown.extend(history);
-        self.completion
+        self.win
+            .completion
             .set(if show { dropdown } else { Vec::new() });
     }
 
@@ -5237,10 +5819,10 @@ impl App {
         if self.defer_completion_key(CompletionIntent::AcceptGhostWord) {
             return;
         }
-        if self.completion.ghost.is_empty() {
+        if self.win.completion.ghost.is_empty() {
             return;
         }
-        let ghost = self.completion.ghost.clone();
+        let ghost = self.win.completion.ghost.clone();
         // word = leading whitespace + next non-space run
         let trimmed = ghost.trim_start();
         let lead = ghost.len() - trimmed.len();
@@ -5249,7 +5831,12 @@ impl App {
             .map(|i| lead + i)
             .unwrap_or(ghost.len());
         let word = &ghost[..word_end];
-        if let Some(pane) = self.tabs.get_mut(self.active).and_then(|t| t.active_mut()) {
+        if let Some(pane) = self
+            .win
+            .tabs
+            .get_mut(self.win.active)
+            .and_then(|t| t.active_mut())
+        {
             pane.editor.end();
             pane.editor.insert(word);
         }
@@ -5261,20 +5848,39 @@ impl App {
         if self.defer_completion_key(CompletionIntent::Accept) {
             return;
         }
-        let (replacement, ghost) = if self.completion.open {
+        let on_hint = self.win.completion.open
+            && self
+                .win
+                .completion
+                .items
+                .get(self.win.completion.selected)
+                .is_some_and(|c| c.source == "hint");
+        if on_hint && self.win.completion.ghost.is_empty() {
+            // a note, not a candidate: nothing to insert
+            self.win.completion.close();
+            return;
+        }
+        // on the hint, Tab takes the ghost text
+        let (replacement, ghost) = if self.win.completion.open && !on_hint {
             (
-                self.completion
+                self.win
+                    .completion
                     .items
-                    .get(self.completion.selected)
+                    .get(self.win.completion.selected)
                     .map(|c| (c.insert.clone(), c.source == "history")),
                 None,
             )
-        } else if !self.completion.ghost.is_empty() {
-            (None, Some(self.completion.ghost.clone()))
+        } else if !self.win.completion.ghost.is_empty() {
+            (None, Some(self.win.completion.ghost.clone()))
         } else {
             return;
         };
-        let Some(pane) = self.tabs.get_mut(self.active).and_then(|t| t.active_mut()) else {
+        let Some(pane) = self
+            .win
+            .tabs
+            .get_mut(self.win.active)
+            .and_then(|t| t.active_mut())
+        else {
             return;
         };
         if let Some(ghost) = ghost {
@@ -5295,17 +5901,18 @@ impl App {
             // undoable
             pane.editor.replace_range(start..end, &insert);
         }
-        self.completion.close();
+        self.win.completion.close();
         self.update_completions();
     }
 
     fn logical_size(&self) -> (f32, f32) {
         let scale = self
+            .win
             .window
             .as_ref()
             .map(|w| w.scale_factor() as f32)
             .unwrap_or(1.0);
-        let gpu = self.gpu.as_ref().unwrap();
+        let gpu = self.win.gpu.as_ref().unwrap();
         (
             gpu.config.width as f32 / scale,
             gpu.config.height as f32 / scale,
@@ -5344,6 +5951,12 @@ impl App {
     ) -> Session {
         let id = self.next_pane;
         self.next_pane += 1;
+        // no usable directory (a launch-config pane without one, a remote
+        // tab reopened, a restored pane without cwd, a removed folder): the
+        // configured start directory, never the app process's own cwd
+        let cwd = cwd
+            .filter(|d| d.is_dir())
+            .or_else(|| self.config.start_dir(None));
 
         let proxy = self.proxy.clone();
         let observer: rift_pty::Observer = Arc::new(move |pane, event| {
@@ -5470,6 +6083,7 @@ impl App {
             return;
         }
         let Some(pane) = self
+            .win
             .tabs
             .iter()
             .flat_map(|t| &t.panes)
@@ -5511,6 +6125,26 @@ impl App {
         self.spawn_tab_at(dir);
     }
 
+    /// ⌘T and the + button: a tab where `new_tab_placement` puts it (other
+    /// paths — restores, launch configs, ctl — always append).
+    fn spawn_new_tab(&mut self) {
+        // the tab the user is on: the Settings tab sits after every shell tab
+        let from = if self.win.settings.open && self.win.settings.tab {
+            self.win.tabs.len().saturating_sub(1)
+        } else {
+            self.win.active
+        };
+        self.spawn_tab();
+        let last = self.win.tabs.len() - 1;
+        let to = from + 1;
+        if self.config.new_tab_placement == rift_core::NewTabPlacement::AfterCurrent && to < last {
+            let tab = self.win.tabs.remove(last);
+            self.win.tabs.insert(to, tab);
+            self.win.active = to;
+            self.save_session();
+        }
+    }
+
     /// Probe the user's shell for aliases/functions off the UI thread.
     fn load_shell_env(&self) {
         let proxy = self.proxy.clone();
@@ -5525,15 +6159,15 @@ impl App {
     }
 
     fn spawn_tab_at(&mut self, cwd: Option<std::path::PathBuf>) {
-        self.settings.open = false;
+        self.win.settings.open = false;
         let (lw, lh) = self.logical_size();
         let (_, lw) = self.content_span(lw);
         let cols = ((lw - self.config.padding() * 2.0 - terminal::BLOCK_INDENT) / self.cell_w)
             .max(2.0) as usize;
         let rows = ((lh - TAB_BAR_H - TOP_PAD - EDITOR_H) / self.line_h).max(2.0) as usize;
         let session = self.spawn_session(cols, rows, cwd);
-        self.tabs.push(TabState::new(self.new_pane(session)));
-        self.active = self.tabs.len() - 1;
+        self.win.tabs.push(TabState::new(self.new_pane(session)));
+        self.win.active = self.win.tabs.len() - 1;
         self.save_session();
     }
 
@@ -5546,7 +6180,7 @@ impl App {
         self.save_session_file();
         if self.config.save_transcripts {
             let mut keep = Vec::new();
-            for p in self.tabs.iter().flat_map(|t| &t.panes) {
+            for p in self.all_panes() {
                 rift_core::transcript::save(&p.transcript_id, &Self::pane_transcript(p));
                 keep.push(p.transcript_id.clone());
             }
@@ -5562,9 +6196,9 @@ impl App {
         }
     }
 
-    /// After a quit: the session file keeps only the window's frame, so the
-    /// next launch opens one new tab where the window was; saved transcripts
-    /// go with the tabs.
+    /// After a quit: the session file keeps only the first window's frame,
+    /// so the next launch opens one window with one new tab where it was;
+    /// saved transcripts go with the tabs.
     fn save_fresh_session(&self) {
         if !self.persist_session {
             return;
@@ -5572,14 +6206,21 @@ impl App {
         let mut fresh = self.saved_session();
         fresh.tabs.clear();
         fresh.active = 0;
+        fresh.other_windows.clear();
         rift_core::session_state::save(&fresh);
         rift_core::transcript::remove_except(&[]);
     }
 
-    /// This window's tabs, layouts and frame, as the session file stores
+    /// Every window's tabs, layouts and frame, as the session file stores
     /// them.
     fn saved_session(&self) -> rift_core::session_state::SavedSession {
-        use rift_core::session_state::{SavedAxis, SavedLayout, SavedSession, SavedTab};
+        rift_core::session_state::SavedSession::of_windows(self.saved_windows())
+    }
+
+    /// One window's tabs, layouts and frame, as the session file stores
+    /// them.
+    fn saved_window(&self, win: &WindowState) -> rift_core::session_state::SavedWindowTabs {
+        use rift_core::session_state::{SavedLayout, SavedTab, SavedWindowTabs};
         fn pane_cwd(p: &PaneState) -> Option<String> {
             p.session
                 .cwd
@@ -5592,33 +6233,17 @@ impl App {
         // `save_transcripts` is on
         let transcripts = self.config.save_transcripts;
         fn layout(tab: &TabState, node: &crate::pane::PaneNode, transcripts: bool) -> SavedLayout {
-            match node {
-                crate::pane::PaneNode::Leaf(id) => SavedLayout::Pane {
-                    cwd: tab.pane(*id).and_then(pane_cwd),
-                    focused: *id == tab.active_pane,
-                    transcript: tab
-                        .pane(*id)
-                        .filter(|_| transcripts)
-                        .map(|p| p.transcript_id.clone()),
-                    service: tab.pane(*id).and_then(|p| p.session.service_id),
-                },
-                crate::pane::PaneNode::Split {
-                    axis,
-                    ratio,
-                    first,
-                    second,
-                } => SavedLayout::split(
-                    match axis {
-                        Axis::Horizontal => SavedAxis::Horizontal,
-                        Axis::Vertical => SavedAxis::Vertical,
-                    },
-                    *ratio,
-                    layout(tab, first, transcripts),
-                    layout(tab, second, transcripts),
-                ),
-            }
+            node.to_saved(&mut |id| SavedLayout::Pane {
+                cwd: tab.pane(id).and_then(pane_cwd),
+                focused: id == tab.active_pane,
+                transcript: tab
+                    .pane(id)
+                    .filter(|_| transcripts)
+                    .map(|p| p.transcript_id.clone()),
+                service: tab.pane(id).and_then(|p| p.session.service_id),
+            })
         }
-        let tabs = self
+        let tabs = win
             .tabs
             .iter()
             .map(|t| SavedTab {
@@ -5645,17 +6270,15 @@ impl App {
                 counted: Some(t.clock.total(Instant::now()).as_secs()).filter(|s| *s > 0),
             })
             .collect();
-        SavedSession {
+        SavedWindowTabs {
             tabs,
-            active: self.active,
-            window: self.window_frame(),
-            ..Default::default()
+            active: win.active,
+            window: win.window.as_deref().and_then(Self::window_frame),
         }
     }
 
-    /// Current window frame in logical px (for session restore).
-    fn window_frame(&self) -> Option<rift_core::session_state::SavedWindow> {
-        let w = self.window.as_ref()?;
+    /// A window's frame in logical px (for session restore).
+    fn window_frame(w: &Window) -> Option<rift_core::session_state::SavedWindow> {
         let scale = w.scale_factor();
         let pos = w.outer_position().ok()?.to_logical::<f64>(scale);
         let size = w.inner_size().to_logical::<f64>(scale);
@@ -5697,27 +6320,34 @@ impl App {
         };
         self.next_attach = service;
         self.spawn_tab_at(top_cwd);
-        let root = self.tabs[self.active].active_pane;
+        let root = self.win.tabs[self.win.active].active_pane;
         // the Elapsed clock belongs to the shell: it survives only a
         // reattach to the same live shell, and restarts with a new one
         let reattached = service.is_some()
-            && self.tabs[self.active]
+            && self.win.tabs[self.win.active]
                 .pane(root)
                 .is_some_and(|p| p.session.service_id == service);
         if let Some(id) = transcript
-            && let Some(p) = self.tabs[self.active].pane_mut(root)
+            && let Some(p) = self.win.tabs[self.win.active].pane_mut(root)
         {
             p.transcript_id = id;
         }
         if let Some(layout) = &saved.layout {
-            self.build_saved(layout, root);
-            let tab = &mut self.tabs[self.active];
-            apply_ratios(&mut tab.root, layout);
+            let mut focus = None;
+            self.build_saved(layout, root, &mut focus);
+            let tab = &mut self.win.tabs[self.win.active];
+            // splitting makes each new pane active: the saved focus is
+            // applied once the whole tree exists
+            if let Some(id) = focus {
+                tab.active_pane = id;
+            }
+            // the weights; layouts saved as a binary tree flatten here
+            tab.root.apply_saved(layout);
             if !tab.panes.iter().any(|p| p.session.id == tab.active_pane) {
                 tab.active_pane = root;
             }
         }
-        let tab = &mut self.tabs[self.active];
+        let tab = &mut self.win.tabs[self.win.active];
         tab.custom_title = saved.title.clone().filter(|t| !t.is_empty());
         tab.started = saved
             .started
@@ -5730,32 +6360,10 @@ impl App {
             .color
             .as_deref()
             .and_then(|c| crate::state::TAB_COLORS.iter().position(|n| *n == c));
-
-        fn apply_ratios(node: &mut crate::pane::PaneNode, saved: &SavedLayout) {
-            if let (
-                crate::pane::PaneNode::Split {
-                    ratio,
-                    first,
-                    second,
-                    ..
-                },
-                SavedLayout::Split {
-                    ratio: r,
-                    first: f,
-                    second: s,
-                    ..
-                },
-            ) = (node, saved)
-            {
-                *ratio = r.clamp(0.1, 0.9);
-                apply_ratios(first, f);
-                apply_ratios(second, s);
-            }
-        }
     }
 
     /// "Save current layout as launch configuration" (Warp Tab Configs): every
-    /// tab's split tree + pane cwds as a Warp-compatible YAML file.
+    /// tab's split tree + pane cwds as a Warp Tab Config TOML file (one per tab).
     fn save_current_layout(&mut self) {
         use rift_core::launch::{LaunchConfig, LaunchLayout, LaunchTab};
         fn layout(tab: &TabState, node: &crate::pane::PaneNode) -> LaunchLayout {
@@ -5763,21 +6371,16 @@ impl App {
                 crate::pane::PaneNode::Leaf(id) => LaunchLayout::Pane {
                     cwd: tab
                         .pane(*id)
-                        .and_then(|p| p.session.cwd.lock().unwrap().clone())
+                        .and_then(|p| p.session.local_cwd())
                         .map(std::path::PathBuf::from),
                     commands: Vec::new(),
                     focused: *id == tab.active_pane && tab.is_split(),
                 },
-                crate::pane::PaneNode::Split {
-                    axis,
-                    first,
-                    second,
-                    ..
-                } => {
+                crate::pane::PaneNode::Split { axis, children } => {
                     let vertical = *axis == Axis::Horizontal;
                     // flatten same-direction chains the way Warp nests them
                     let mut panes = Vec::new();
-                    for child in [first, second] {
+                    for (_, child) in children {
                         match layout(tab, child) {
                             LaunchLayout::Split {
                                 vertical: v,
@@ -5797,20 +6400,33 @@ impl App {
         let cfg = LaunchConfig {
             name: format!("Layout {}", utc_stamp(secs)),
             tabs: self
+                .win
                 .tabs
                 .iter()
                 .map(|t| LaunchTab {
                     title: t.custom_title.clone(),
+                    color: t
+                        .color
+                        .and_then(|i| crate::state::TAB_COLORS.get(i))
+                        .map(|c| c.to_string()),
                     layout: layout(t, &t.root.without_viewer()),
                 })
                 .collect(),
-            active_tab: self.active,
+            active_tab: self.win.active,
         };
         match rift_core::launch::save(&cfg) {
-            Ok(path) => {
+            Ok(paths) => {
                 self.launch_configs = rift_core::launch::load_all();
-                let shown = editor::shorten_home(&path.to_string_lossy());
-                self.toast_done(format!("Saved launch configuration to {shown}"));
+                let shown = paths
+                    .first()
+                    .map(|p| editor::shorten_home(&p.to_string_lossy()))
+                    .unwrap_or_default();
+                let more = if paths.len() > 1 {
+                    format!(" (+{} more)", paths.len() - 1)
+                } else {
+                    String::new()
+                };
+                self.toast_done(format!("Saved launch configuration to {shown}{more}"));
             }
             Err(e) => self.toast_error(format!("Could not save launch configuration: {e}")),
         }
@@ -5848,13 +6464,15 @@ impl App {
     ) {
         log::info!("toast ({kind:?}): {msg}");
         let pane = pane.or_else(|| {
-            (!self.settings.open)
-                .then(|| self.tabs.get(self.active).map(|t| t.active_pane))
+            (!self.win.settings.open)
+                .then(|| self.win.tabs.get(self.win.active).map(|t| t.active_pane))
                 .flatten()
         });
-        self.toasts.retain(|t| !(t.text == msg && t.pane == pane));
+        self.win
+            .toasts
+            .retain(|t| !(t.text == msg && t.pane == pane));
         self.next_toast_id += 1;
-        self.toasts.insert(
+        self.win.toasts.insert(
             0,
             Toast {
                 id: self.next_toast_id,
@@ -5865,20 +6483,25 @@ impl App {
                 at: Instant::now(),
             },
         );
-        self.toasts.truncate(TOASTS_MAX);
-        self.a11y_announcement = Some(msg);
-        if let Some(w) = &self.window {
+        self.win.toasts.truncate(TOASTS_MAX);
+        self.win.a11y_announcement = Some(msg);
+        if let Some(w) = &self.win.window {
             w.request_redraw();
         }
     }
 
     /// Realize a saved pane tree inside the region held by `pane`.
-    fn build_saved(&mut self, layout: &rift_core::session_state::SavedLayout, pane: PaneId) {
+    fn build_saved(
+        &mut self,
+        layout: &rift_core::session_state::SavedLayout,
+        pane: PaneId,
+        focus: &mut Option<PaneId>,
+    ) {
         use rift_core::session_state::{SavedAxis, SavedLayout};
         match layout {
             SavedLayout::Pane { focused, .. } => {
-                if *focused && let Some(tab) = self.tabs.get_mut(self.active) {
-                    tab.active_pane = pane;
+                if *focused && focus.is_none() {
+                    *focus = Some(pane);
                 }
             }
             SavedLayout::Split {
@@ -5904,27 +6527,28 @@ impl App {
                 let new_id = self.split_pane(pane, axis, leaf_cwd(second));
                 if let Some(id) = transcript
                     && let Some(p) = self
+                        .win
                         .tabs
-                        .get_mut(self.active)
+                        .get_mut(self.win.active)
                         .and_then(|t| t.pane_mut(new_id))
                 {
                     p.transcript_id = id;
                 }
-                self.build_saved(first, pane);
-                self.build_saved(second, new_id);
+                self.build_saved(first, pane, focus);
+                self.build_saved(second, new_id, focus);
             }
         }
     }
 
     fn split_active(&mut self, axis: Axis) {
-        if self.tabs.is_empty() {
+        if self.win.tabs.is_empty() {
             return;
         }
         let dir = self.start_dir();
         let session = self.spawn_session(60, 20, dir); // resized on next layout
         let new_id = session.id;
         let pane = self.new_pane(session);
-        let tab = &mut self.tabs[self.active];
+        let tab = &mut self.win.tabs[self.win.active];
         tab.zoomed = None;
         let target = tab.active_pane;
         if tab.root.split(target, new_id, axis) {
@@ -5936,6 +6560,7 @@ impl App {
 
     fn close_pane(&mut self, pane: PaneId, event_loop: &ActiveEventLoop) {
         let Some(tab_idx) = self
+            .win
             .tabs
             .iter()
             .position(|t| t.panes.iter().any(|p| p.session.id == pane))
@@ -5943,34 +6568,39 @@ impl App {
             return;
         };
         // closing a pane ends its shell even when the session service owns it
-        if let Some(p) = self.tabs[tab_idx].pane(pane) {
+        if let Some(p) = self.win.tabs[tab_idx].pane(pane) {
             p.session.terminate();
         }
-        let tab = &mut self.tabs[tab_idx];
+        let tab = &mut self.win.tabs[tab_idx];
         if tab.panes.len() <= 1 {
-            // remember the cwd for ⇧⌘T (same source as save_session)
-            let cwd = tab.active().and_then(|p| {
-                p.session
-                    .cwd
-                    .lock()
-                    .unwrap()
-                    .clone()
-                    .or_else(|| p.last_git_cwd.clone())
-            });
-            self.closed_tabs.push(cwd.map(std::path::PathBuf::from));
-            if self.closed_tabs.len() > 10 {
-                self.closed_tabs.remove(0);
+            // remember the cwd for ⇧⌘T: a local one only (a remote tab's
+            // path does not exist here)
+            let cwd = tab
+                .active()
+                .and_then(|p| p.session.local_cwd().or_else(|| p.last_git_cwd.clone()));
+            self.win.closed_tabs.push(cwd.map(std::path::PathBuf::from));
+            if self.win.closed_tabs.len() > 10 {
+                self.win.closed_tabs.remove(0);
             }
-            self.tabs.remove(tab_idx);
-            if self.tabs.is_empty() {
+            self.win.tabs.remove(tab_idx);
+            if self.win.tabs.is_empty() {
+                // another window stays open: only this one closes
+                if self.close_window() {
+                    return;
+                }
+                // the drop-down window's shells end with the app (it is not
+                // saved, so nothing would reattach them)
+                for p in self.all_panes() {
+                    p.session.terminate();
+                }
                 self.save_session();
                 crate::quit::exit(event_loop);
                 return;
             }
-            if self.active > tab_idx {
-                self.active -= 1;
-            } else if self.active >= self.tabs.len() {
-                self.active = self.tabs.len() - 1;
+            if self.win.active > tab_idx {
+                self.win.active -= 1;
+            } else if self.win.active >= self.win.tabs.len() {
+                self.win.active = self.win.tabs.len() - 1;
             }
             self.save_session();
             return;
@@ -5994,15 +6624,23 @@ impl App {
     /// state, when that chip is on) after a `cd` or a finished command.
     fn request_git(&mut self) {
         let mut changed = false;
-        let Some(tab) = self.tabs.get_mut(self.active) else {
+        let now = Instant::now();
+        let due = |at: Option<Instant>, every: Duration| at.is_none_or(|t| now - t >= every);
+        // while the window is in use, the active tab is asked again on a
+        // beat: an agent or an editor changes files with no command ending
+        let git_due = self.win.focused && due(self.win.git_polled, GIT_POLL);
+        let docker_due = self.win.focused && due(self.win.docker_polled, DOCKER_POLL);
+        let Some(tab) = self.win.tabs.get_mut(self.win.active) else {
             return;
         };
+        let active = tab.active_pane;
+        let refocused = self.win.status_pane != Some(active);
         let docker = self
             .config
             .prompt_chips
             .contains(&rift_core::PromptChip::Docker);
         for pane in &mut tab.panes {
-            let cwd = pane.session.cwd.lock().unwrap().clone();
+            let cwd = pane.session.local_cwd();
             let blocks = pane
                 .session
                 .blocks
@@ -6011,26 +6649,61 @@ impl App {
                 .last()
                 .map_or(0, |b| b.id);
             let Some(cwd) = cwd else {
+                // a directory on another host (ssh): the local repo's
+                // branch and compose project no longer describe it
+                if pane
+                    .session
+                    .cwd_remote
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    && (pane.last_git_cwd.is_some() || pane.git.is_some())
+                {
+                    pane.last_git_cwd = None;
+                    pane.git = None;
+                    pane.pr = None;
+                    pane.docker = None;
+                    changed = true;
+                }
                 continue;
             };
             let moved = pane.last_git_cwd.as_deref() != Some(cwd.as_str());
-            if moved || pane.last_git_block != blocks {
+            let focused_now = refocused && pane.session.id == active;
+            let event = moved || pane.last_git_block != blocks || focused_now;
+            if event || git_due {
                 pane.last_git_block = blocks;
                 if let Some(worker) = &self.git {
                     worker.request(pane.session.id, cwd.clone().into());
                 }
-                if docker && let Some(worker) = &self.docker_worker {
-                    worker.request(pane.session.id, cwd.clone().into());
-                }
+            }
+            if docker
+                && (event || docker_due)
+                && let Some(worker) = &self.docker_worker
+            {
+                worker.request(pane.session.id, cwd.clone().into());
             }
             if moved {
                 pane.last_git_cwd = Some(cwd);
                 changed = true;
             }
         }
+        self.win.status_pane = Some(active);
+        if git_due {
+            self.win.git_polled = Some(now);
+        }
+        if docker_due {
+            self.win.docker_polled = Some(now);
+        }
         if changed {
             self.save_session();
         }
+    }
+
+    /// When the focused window's next status poll is due (none while no
+    /// window of Rift is in use).
+    fn status_poll_due(&self) -> Option<Instant> {
+        let next = |at: Option<Instant>, every: Duration| at.map_or(Instant::now(), |t| t + every);
+        self.win.focused.then(|| {
+            next(self.win.git_polled, GIT_POLL).min(next(self.win.docker_polled, DOCKER_POLL))
+        })
     }
 
     /// Blinking text's visible phase (SGR 5; its own beat, slower than the
@@ -6048,6 +6721,7 @@ impl App {
     /// image sizing: programs compute image cell spans from these).
     fn cell_px(&self) -> (u16, u16) {
         let scale = self
+            .win
             .window
             .as_ref()
             .map(|w| w.scale_factor() as f32)
@@ -6060,9 +6734,16 @@ impl App {
 
     fn rail_w(&self) -> f32 {
         match self.config.tab_layout {
-            rift_core::TabLayout::Vertical => tabbar::RAIL_W,
-            rift_core::TabLayout::Horizontal => 0.0,
+            rift_core::TabLayout::Vertical if self.tabs_shown() => tabbar::RAIL_W,
+            _ => 0.0,
         }
+    }
+
+    /// The tabs show (strip tabs or the vertical rail): more than one tab,
+    /// counting the Settings tab, or `tab_bar_with_one_tab`.
+    fn tabs_shown(&self) -> bool {
+        self.config.tab_bar_with_one_tab
+            || self.win.tabs.len() + usize::from(self.win.settings.tab) > 1
     }
 
     /// Widths of the open side panels (explorer left, review right) in a
@@ -6071,12 +6752,12 @@ impl App {
     fn panel_widths(&self, w: f32) -> (f32, f32) {
         const MIN_CONTENT_W: f32 = 360.0;
         let room = w - self.rail_w();
-        let mut ex = if self.explorer.open {
+        let mut ex = if self.win.explorer.open {
             crate::views::explorer::EXPLORER_W
         } else {
             0.0
         };
-        let mut rv = if self.review.open {
+        let mut rv = if self.win.review.open {
             crate::views::review_panel::REVIEW_W
         } else {
             0.0
@@ -6103,18 +6784,28 @@ impl App {
     /// colors all read it. The newest request wins.
     fn request_review(&mut self) {
         let Some(cwd) = self
+            .win
             .tabs
-            .get(self.active)
+            .get(self.win.active)
             .and_then(|t| t.active())
-            .and_then(|p| p.session.cwd.lock().unwrap().clone())
+            .and_then(|p| p.session.local_cwd())
         else {
             return;
         };
-        self.review.generation += 1;
-        if self.review.model().is_none() {
-            self.review.load = crate::views::review_panel::Load::Loading;
+        // unique across windows: the answer finds its window by it
+        self.review_generation += 1;
+        self.win.review.generation = self.review_generation;
+        // another repository's changes are never shown for this one while
+        // its own load
+        if self
+            .win
+            .review
+            .model()
+            .is_none_or(|m| !std::path::Path::new(&cwd).starts_with(&m.root))
+        {
+            self.win.review.load = crate::views::review_panel::Load::Loading;
         }
-        let generation = self.review.generation;
+        let generation = self.win.review.generation;
         let proxy = self.proxy.clone();
         std::thread::Builder::new()
             .name("review".into())
@@ -6129,28 +6820,30 @@ impl App {
     /// (a `cd`, another tab or pane).
     fn follow_review(&mut self) {
         let cwd = self
+            .win
             .tabs
-            .get(self.active)
+            .get(self.win.active)
             .and_then(|t| t.active())
-            .and_then(|p| p.session.cwd.lock().unwrap().clone());
-        if cwd.is_some() && cwd != self.review_cwd {
-            self.review_cwd = cwd;
+            .and_then(|p| p.session.local_cwd());
+        if cwd.is_some() && cwd != self.win.review_cwd {
+            self.win.review_cwd = cwd;
             self.request_review();
         }
     }
 
     /// Point the explorer at the active pane's project (on cwd change).
     fn follow_explorer(&mut self) {
-        if !self.explorer.open {
+        if !self.win.explorer.open {
             return;
         }
         let cwd = self
+            .win
             .tabs
-            .get(self.active)
+            .get(self.win.active)
             .and_then(|t| t.active())
-            .and_then(|p| p.session.cwd.lock().unwrap().clone());
+            .and_then(|p| p.session.local_cwd());
         if let Some(cwd) = cwd
-            && self.explorer.follow(std::path::Path::new(&cwd))
+            && self.win.explorer.follow(std::path::Path::new(&cwd))
         {
             self.request_review();
         }
@@ -6164,7 +6857,7 @@ impl App {
     /// `CSI 14 t` reports in.
     fn window_op(&mut self, pane: PaneId, params: &[Option<u16>]) {
         use winit::dpi::PhysicalSize;
-        let Some(window) = self.window.clone() else {
+        let Some(window) = self.win.window.clone() else {
             return;
         };
         let Some((_, tab)) = self.find_tab_of_pane(pane) else {
@@ -6215,18 +6908,18 @@ impl App {
         match arg(0).unwrap_or(0) {
             1 => {
                 window.set_minimized(false);
-                self.iconified = false;
+                self.win.iconified = false;
             }
             2 => {
                 window.set_minimized(true);
-                self.iconified = true;
+                self.win.iconified = true;
             }
             // positions are in points: they round-trip exactly on any scale
             3 => {
                 let x = arg(1).unwrap_or(0) as f64;
                 let y = arg(2).unwrap_or(0) as f64;
                 window.set_outer_position(winit::dpi::LogicalPosition::new(x, y));
-                self.window_pos = Some((x, y));
+                self.win.window_pos = Some((x, y));
             }
             // the window in pixels (what `CSI 14;2 t` reports): omitted keeps,
             // 0 = the screen
@@ -6265,12 +6958,13 @@ impl App {
             9 => match arg(1).unwrap_or(0) {
                 0 => {
                     window.set_maximized(false);
-                    if let Some(size) = self.restore_size.take() {
+                    if let Some(size) = self.win.restore_size.take() {
                         let _ = window.request_inner_size(size);
                     }
                 }
                 n => {
-                    self.restore_size
+                    self.win
+                        .restore_size
                         .get_or_insert(window.inner_size().to_logical(scale));
                     let frame = (outer.width - inner.width, outer.height - inner.height);
                     let size = match n {
@@ -6286,16 +6980,17 @@ impl App {
                 let on = match arg(1).unwrap_or(0) {
                     0 => false,
                     1 => true,
-                    _ => !self.fullscreen_op,
+                    _ => !self.win.fullscreen_op,
                 };
-                self.fullscreen_op = on;
+                self.win.fullscreen_op = on;
                 if self.headless {
                     // a hidden window has no fullscreen space: cover the screen
                     if on {
-                        self.restore_size
+                        self.win
+                            .restore_size
                             .get_or_insert(window.inner_size().to_logical(scale));
                         let _ = window.request_inner_size(screen);
-                    } else if let Some(size) = self.restore_size.take() {
+                    } else if let Some(size) = self.win.restore_size.take() {
                         let _ = window.request_inner_size(size);
                     }
                 } else {
@@ -6304,7 +6999,7 @@ impl App {
                 }
             }
             11 => {
-                let iconified = window.is_minimized().unwrap_or(self.iconified);
+                let iconified = window.is_minimized().unwrap_or(self.win.iconified);
                 out = Some(format!("\x1b[{}t", if iconified { 2 } else { 1 }));
             }
             13 => {
@@ -6315,7 +7010,7 @@ impl App {
                         let p: winit::dpi::LogicalPosition<f64> = p.to_logical(scale);
                         (p.x, p.y)
                     })
-                    .or(self.window_pos)
+                    .or(self.win.window_pos)
                     .unwrap_or((0.0, 0.0));
                 let (x, y) = if arg(1) == Some(2) {
                     (x + grid.x as f64, y + grid.y as f64)
@@ -6348,48 +7043,48 @@ impl App {
     fn review_action(&mut self, hit: ReviewHit) {
         use rift_core::review::Op;
         if hit == ReviewHit::Maximize {
-            self.review.maximized = !self.review.maximized;
+            self.win.review.maximized = !self.win.review.maximized;
             return;
         }
-        let Some(model) = self.review.model().cloned() else {
+        let Some(model) = self.win.review.model().cloned() else {
             return;
         };
         let root = model.root.clone();
         let ops: ReviewOps = match hit {
             ReviewHit::Refresh => {
-                self.review.notice = None;
-                self.explorer.refresh();
+                self.win.review.notice = None;
+                self.win.explorer.refresh();
                 self.request_review();
                 return;
             }
             ReviewHit::ToggleSection(staged) => {
-                if !self.review.collapsed_sections.remove(&staged) {
-                    self.review.collapsed_sections.insert(staged);
+                if !self.win.review.collapsed_sections.remove(&staged) {
+                    self.win.review.collapsed_sections.insert(staged);
                 }
                 return;
             }
             ReviewHit::ToggleFile(staged, path) => {
                 let key = (staged, path);
-                if !self.review.expanded.remove(&key) {
-                    self.review.expanded.insert(key);
+                if !self.win.review.expanded.remove(&key) {
+                    self.win.review.expanded.insert(key);
                 }
                 return;
             }
             ReviewHit::Reveal(staged, path, gap) => {
-                self.review.reveal(staged, &path, gap);
+                self.win.review.reveal(staged, &path, gap);
                 return;
             }
             ReviewHit::Open(path) => {
                 let choice = self.config.file_editor.clone();
                 // the viewer opens among the panes the maximized panel covers
                 if choice.trim() == rift_core::editors::RIFT {
-                    self.review.maximized = false;
+                    self.win.review.maximized = false;
                 }
                 self.open_file_in(&root.join(&path), &choice);
                 return;
             }
             ReviewHit::Jump(staged, path) => {
-                self.review.jump(staged, &path);
+                self.win.review.jump(staged, &path);
                 return;
             }
             ReviewHit::Copy(staged, path, id) => {
@@ -6430,7 +7125,7 @@ impl App {
                     ),
                     None => path.clone(),
                 };
-                self.confirm = Some(ConfirmClose {
+                self.win.confirm = Some(ConfirmClose {
                     opened: Instant::now(),
                     action: ConfirmAction::Revert { root, path, hunk },
                     commands: vec![what],
@@ -6459,7 +7154,7 @@ impl App {
                     }
                 });
             if let Err(e) = spawned {
-                self.review.notice = Some(format!("could not start the review writer: {e}"));
+                self.win.review.notice = Some(format!("could not start the review writer: {e}"));
                 return;
             }
             self.review_writer = Some(tx);
@@ -6468,7 +7163,7 @@ impl App {
             && tx.send((root, ops)).is_err()
         {
             self.review_writer = None;
-            self.review.notice = Some("the review writer stopped; try again".into());
+            self.win.review.notice = Some("the review writer stopped; try again".into());
         }
     }
 
@@ -6488,12 +7183,12 @@ impl App {
     /// The review panel covers the panes (its ⤢ button). The pane layout
     /// behind it does not change, so no shell is resized.
     fn review_maximized(&self) -> bool {
-        self.review.open && self.review.maximized && !self.settings.open
+        self.win.review.open && self.win.review.maximized && !self.win.settings.open
     }
 
     /// The pointer is over the maximized review panel.
     fn over_maximized_review(&self) -> bool {
-        let (mx, my) = self.mouse;
+        let (mx, my) = self.win.mouse;
         let r = self.panel_rects().1;
         self.review_maximized() && mx >= r[0] && mx < r[0] + r[2] && my >= r[1] && my < r[1] + r[3]
     }
@@ -6512,54 +7207,56 @@ impl App {
                 CursorIcon::Default
             }
         };
-        if self.viewer.is_open() && inside(&self.viewer_rect) {
-            return Some(hand(self.viewer_hits.iter().any(|(r, _)| inside(r))));
+        if self.win.viewer.is_open() && inside(&self.win.viewer_rect) {
+            return Some(hand(self.win.viewer_hits.iter().any(|(r, _)| inside(r))));
         }
         let (ex_rect, rv_rect) = self.panel_rects();
         if ex_rect[2] > 0.0 && inside(&ex_rect) {
-            return Some(hand(self.explorer_hits.iter().any(|(r, _)| inside(r))));
+            return Some(hand(self.win.explorer_hits.iter().any(|(r, _)| inside(r))));
         }
         if rv_rect[2] > 0.0 && inside(&rv_rect) {
-            return Some(hand(self.review_hits.iter().any(|(r, _)| inside(r))));
+            return Some(hand(self.win.review_hits.iter().any(|(r, _)| inside(r))));
         }
         None
     }
 
     /// A left click on the viewer or a side panel; true when it was theirs.
     fn on_panel_click(&mut self, inside: impl Fn(&[f32; 4]) -> bool) -> bool {
-        if self.viewer.is_open() {
+        if self.win.viewer.is_open() {
             if let Some(hit) = self
+                .win
                 .viewer_hits
                 .iter()
                 .find(|(r, _)| inside(r))
                 .map(|(_, h)| h.clone())
             {
-                self.viewer_focus = true;
+                self.win.viewer_focus = true;
                 match hit {
-                    ViewerHit::Close => self.viewer.close(),
-                    ViewerHit::Mode(rendered) => self.viewer.set_rendered(rendered),
+                    ViewerHit::Close => self.win.viewer.close(),
+                    ViewerHit::Mode(rendered) => self.win.viewer.set_rendered(rendered),
                     ViewerHit::Menu => {
                         // drops down from the ⋮ button
                         let at = self
+                            .win
                             .viewer_hits
                             .iter()
                             .find(|(_, h)| *h == ViewerHit::Menu)
-                            .map_or(self.mouse, |(r, _)| (r[0], r[1] + r[3] + 4.0));
+                            .map_or(self.win.mouse, |(r, _)| (r[0], r[1] + r[3] + 4.0));
                         self.open_viewer_menu(at);
                     }
                 }
                 return true;
             }
-            if inside(&self.viewer_rect) {
-                self.viewer_focus = true;
+            if inside(&self.win.viewer_rect) {
+                self.win.viewer_focus = true;
                 // its header bar is the pane's title bar: drag to move
-                let [x, y, w, _] = self.viewer_rect;
+                let [x, y, w, _] = self.win.viewer_rect;
                 // (beside Settings it is no pane: nothing to move)
-                if !self.config_viewer && inside(&[x, y, w, crate::views::viewer::HEADER_H]) {
-                    self.pane_drag = Some(PaneDrag {
+                if !self.win.config_viewer && inside(&[x, y, w, crate::views::viewer::HEADER_H]) {
+                    self.win.pane_drag = Some(PaneDrag {
                         pane: VIEWER_PANE,
-                        from_tab: self.active,
-                        press: self.mouse,
+                        from_tab: self.win.active,
+                        press: self.win.mouse,
                         live: false,
                         target: None,
                         hover_tab: None,
@@ -6570,20 +7267,21 @@ impl App {
         }
         let (ex_rect, rv_rect) = self.panel_rects();
         if ex_rect[2] > 0.0 && inside(&ex_rect) {
-            self.explorer.focused = true;
+            self.win.explorer.focused = true;
             let hit = self
+                .win
                 .explorer_hits
                 .iter()
                 .find(|(r, _)| inside(r))
                 .map(|(_, h)| h.clone());
             match hit {
                 Some(ExplorerHit::Row(i)) => {
-                    if let Some(row) = self.explorer.rows.get(i).cloned() {
-                        self.explorer.selected = Some(row.path.clone());
-                        if self.modifiers.alt_key() {
+                    if let Some(row) = self.win.explorer.rows.get(i).cloned() {
+                        self.win.explorer.selected = Some(row.path.clone());
+                        if self.win.modifiers.alt_key() {
                             self.drop_file(&row.path);
                         } else if row.is_dir {
-                            self.explorer.toggle(&row.path);
+                            self.win.explorer.toggle(&row.path);
                         } else {
                             let choice = self.config.file_editor.clone();
                             self.open_file_in(&row.path, &choice);
@@ -6591,16 +7289,17 @@ impl App {
                     }
                 }
                 Some(ExplorerHit::Refresh) => {
-                    self.explorer.refresh();
+                    self.win.explorer.refresh();
                     self.request_review();
                 }
-                Some(ExplorerHit::Collapse) => self.explorer.collapse_all(),
+                Some(ExplorerHit::Collapse) => self.win.explorer.collapse_all(),
                 None => {}
             }
             return true;
         }
         if rv_rect[2] > 0.0 && inside(&rv_rect) {
             if let Some(hit) = self
+                .win
                 .review_hits
                 .iter()
                 .find(|(r, _)| inside(r))
@@ -6617,7 +7316,7 @@ impl App {
     fn pane_rects(&self, w: f32, h: f32) -> (Vec<PaneRect>, Vec<HandleRect>) {
         let mut panes = Vec::new();
         let mut handles = Vec::new();
-        let Some(tab) = self.tabs.get(self.active) else {
+        let Some(tab) = self.win.tabs.get(self.win.active) else {
             return (panes, handles);
         };
         let (x0, w) = self.content_span(w);
@@ -6650,6 +7349,7 @@ impl App {
     fn build_scene(&mut self, w: f32, h: f32) {
         // device pixels per logical one: cell backgrounds snap to them
         let scale = self
+            .win
             .window
             .as_ref()
             .map_or(1.0, |w| w.scale_factor() as f32);
@@ -6666,35 +7366,39 @@ impl App {
         let line_h = self.line_h;
         let ligatures = self.config.ligatures;
         let cursor_style = self.config.cursor_style;
-        let mouse = self.mouse;
+        let mouse = self.win.mouse;
         let prompt_mode = self.config.prompt;
         let input_top = self.config.input_position == rift_core::InputPosition::Top;
-        let autosuggest = self.config.autosuggestions && !self.history.open;
+        let autosuggest = self.config.autosuggestions && !self.win.history.open;
         let side_pad = self.config.padding();
-        let bell_flash = self.bell_flash.is_some_and(|t| t.elapsed() < BELL_FLASH);
-        let settings_open = self.settings.open;
-        let active_tab_idx = self.active;
+        let bell_flash = self
+            .win
+            .bell_flash
+            .is_some_and(|t| t.elapsed() < BELL_FLASH);
+        let settings_open = self.win.settings.open;
+        let active_tab_idx = self.win.active;
         self.follow_explorer();
         self.follow_review();
         self.mark_visible_read();
         self.prune_note_toasts();
         let panel_buttons = tabbar::PanelButtons {
-            explorer_open: self.explorer.open,
+            explorer_open: self.win.explorer.open,
             // lit only while the panel is actually on screen
             review_open: self.review_maximized()
-                || self.review.open && self.panel_widths(self.logical_size().0).1 > 0.0,
-            diff: self.review.model().map(|m| {
+                || self.win.review.open && self.panel_widths(self.logical_size().0).1 > 0.0,
+            diff: self.win.review.model().map(|m| {
                 m.staged
                     .iter()
                     .chain(&m.unstaged)
                     .fold((0, 0), |(a, d), f| (a + f.added, d + f.removed))
             }),
-            notifications_open: self.notifications.open,
+            notifications_open: self.win.notifications.open,
             unread: self.unread_attention(),
             update: self.update_chip().is_some(),
             remote: self.remote_chip(),
+            no_window_buttons: self.win.dropdown.is_some(),
         };
-        let notification_entries = if self.notifications.open {
+        let notification_entries = if self.win.notifications.open {
             self.notification_entries()
         } else {
             Vec::new()
@@ -6703,14 +7407,14 @@ impl App {
         let toast_entries: Vec<crate::views::notifications::Entry> =
             // over Settings too: an alert raised there (or Try it) would
             // otherwise run out its time unseen
-            if self.notifications.open {
+            if self.win.notifications.open {
                 Vec::new()
             } else {
                 let now = std::time::SystemTime::now();
-                self.note_toasts
+                self.win.note_toasts
                     .iter()
                     .filter_map(|(id, _)| {
-                        if let Some(n) = self.app_notes.iter().find(|n| n.id == *id) {
+                        if let Some(n) = self.win.app_notes.iter().find(|n| n.id == *id) {
                             return Some(crate::views::notifications::Entry {
                                 id: n.id,
                                 kind: crate::views::notifications::Kind::App,
@@ -6729,14 +7433,14 @@ impl App {
             };
         let (pane_rects, handles) = self.pane_rects(w, h);
         // where each pane's toasts sit (its grid's bottom, last frame)
-        let toast_active = self.tabs.get(self.active).map(|t| t.active_pane);
+        let toast_active = self.win.tabs.get(self.win.active).map(|t| t.active_pane);
         let toast_panes: Vec<(PaneId, [f32; 4], Option<f32>)> = if settings_open {
             Vec::new()
         } else {
             pane_rects
                 .iter()
                 .filter_map(|pr| {
-                    let tab = self.tabs.get(self.active)?;
+                    let tab = self.win.tabs.get(self.win.active)?;
                     if tab.zoomed.is_some_and(|z| z != pr.id) {
                         return None;
                     }
@@ -6749,13 +7453,15 @@ impl App {
                 .collect()
         };
         let (explorer_w, review_w) = self.panel_widths(w);
-        let viewer_label = self.viewer.path.as_ref().map(|p| {
-            self.explorer
+        let viewer_label = self.win.viewer.path.as_ref().map(|p| {
+            self.win
+                .explorer
                 .root
                 .as_ref()
                 .and_then(|r| p.strip_prefix(r).ok())
                 .or_else(|| {
-                    self.review
+                    self.win
+                        .review
                         .model()
                         .and_then(|m| p.strip_prefix(&m.root).ok())
                 })
@@ -6781,6 +7487,7 @@ impl App {
             }
         };
         let tab_infos: Vec<tabbar::TabInfo> = self
+            .win
             .tabs
             .iter()
             .enumerate()
@@ -6797,11 +7504,12 @@ impl App {
                 color: t.color.map(|c| context_menu::tab_color(&theme, c)),
                 sync: t.sync_inputs && t.is_split(),
                 editing: self
+                    .win
                     .rename
                     .as_ref()
                     .filter(|(ri, _)| *ri == i)
                     .map(|(_, s)| s.clone()),
-                editing_selected: self.rename_fresh,
+                editing_selected: self.win.rename_fresh,
                 subtitle: t
                     .active()
                     .map(|p| {
@@ -6822,7 +7530,7 @@ impl App {
                 settings: false,
                 running: t.panes.iter().any(PaneState::running),
             })
-            .chain(self.settings.tab.then(|| tabbar::TabInfo {
+            .chain(self.win.settings.tab.then(|| tabbar::TabInfo {
                 title: "Settings".into(),
                 panes: 0,
                 activity: false,
@@ -6831,41 +7539,55 @@ impl App {
                 sync: false,
                 editing: None,
                 editing_selected: false,
-                subtitle: self.settings.page.label().into(),
+                subtitle: self.win.settings.page.label().into(),
                 settings: true,
                 running: false,
             }))
             .collect();
         // the strip's lit tab: the Settings tab (last) while it shows
-        let strip_active = if self.settings.open && self.settings.tab {
-            self.tabs.len()
+        let strip_active = if self.win.settings.open && self.win.settings.tab {
+            self.win.tabs.len()
         } else {
-            self.active
+            self.win.active
         };
         let rail_w = self.rail_w();
+        // one tab and tab_bar_with_one_tab off: no tab in the strip (its
+        // buttons and + stay; the rail is gone, rail_w() is 0)
+        let strip_tabs: &[tabbar::TabInfo] = if self.tabs_shown() { &tab_infos } else { &[] };
+        let close_button = self.config.tab_close_button;
+        let pane_dim = self.config.inactive_pane_dim();
+        let sticky_headers = self.config.sticky_command_header;
+        self.win.dimmed_panes = 0;
         // chrome hover follows the pointer unless a modal surface covers it
-        let chrome_mouse = (!self.palette.open && self.confirm.is_none() && !self.whats_new.open)
-            .then_some(self.mouse);
+        let chrome_mouse =
+            (!self.win.palette.open && self.win.confirm.is_none() && !self.win.whats_new.open)
+                .then_some(self.win.mouse);
         // a tab dragged past the slop floats under the pointer
-        let lifted_tab =
-            self.tab_drag
-                .filter(|d| d.live && rail_w == 0.0)
-                .map(|d| tabbar::Lifted {
-                    index: d.index,
-                    x: self.mouse.0 - d.grab,
-                });
+        let lifted_tab = self
+            .win
+            .tab_drag
+            .filter(|d| d.live && rail_w == 0.0)
+            .map(|d| tabbar::Lifted {
+                index: d.index,
+                x: self.win.mouse.0 - d.grab,
+            });
         let confirm = self
+            .win
             .confirm
             .as_ref()
             .map(|c| (c.action.clone(), c.commands.clone()));
         let phones = self.connected_phones();
-        let filter_editing = self.filter_editing;
+        // the confirmation is about a quit (it empties the last ordinary window)
+        let quits = confirm
+            .as_ref()
+            .is_some_and(|(a, _)| matches!(a, ConfirmAction::Close(s) if self.quits(*s)));
+        let filter_editing = self.win.filter_editing;
         let shell_env = self.shell_env.clone();
         let error_underline = self.config.error_underline;
         // Warp with a background image and translucency: the image at the
         // window opacity, then bg at (1 − image opacity) × window opacity
         let image_veil = (theme.ground_alpha < 1.0
-            && self.bg_image.as_ref().is_some_and(|p| p.has_image()))
+            && self.win.bg_image.as_ref().is_some_and(|p| p.has_image()))
         .then(|| {
             theme
                 .bg
@@ -6873,21 +7595,21 @@ impl App {
         });
 
         let Self {
-            scene,
             text,
-            tabs,
-            completion,
-            palette,
-            palette_results,
-            palette_row_hits,
-            settings_names,
-            settings_stops,
-            settings: settings_state,
             config: config_ref,
             keymap: keymap_ref,
-            search: search_state,
             ..
         } = self;
+        let scene = &mut self.win.scene;
+        let tabs = &mut self.win.tabs;
+        let completion = &mut self.win.completion;
+        let palette = &mut self.win.palette;
+        let palette_results = &mut self.win.palette_results;
+        let palette_row_hits = &mut self.win.palette_row_hits;
+        let settings_names = &mut self.win.settings_names;
+        let settings_stops = &mut self.win.settings_stops;
+        let settings_state = &mut self.win.settings;
+        let search_state = &mut self.win.search;
         let Some(engine) = text.as_mut() else { return };
         let ed_char_w = engine.measure(
             "0",
@@ -6917,8 +7639,8 @@ impl App {
         // below): the output moves out from under it (Warp)
         let docked_h = if palette.open {
             None
-        } else if self.history.open {
-            Some(crate::views::history::panel_height(&self.history))
+        } else if self.win.history.open {
+            Some(crate::views::history::panel_height(&self.win.history))
         } else if completion.open && !completion.items.is_empty() {
             Some(completion_view::panel_height(completion))
         } else {
@@ -6940,6 +7662,7 @@ impl App {
                 panel_buttons,
                 chrome_mouse,
                 None,
+                close_button,
                 &mut hits,
             );
             tabbar::render_rail(
@@ -6950,6 +7673,7 @@ impl App {
                 strip_active,
                 h,
                 blink,
+                close_button,
                 &mut hits,
             );
         } else {
@@ -6958,13 +7682,14 @@ impl App {
                 &mut over,
                 engine,
                 &theme,
-                &tab_infos,
+                strip_tabs,
                 strip_active,
                 w,
                 blink,
                 panel_buttons,
                 chrome_mouse,
                 lifted_tab,
+                close_button,
                 &mut hits,
             );
         }
@@ -6974,8 +7699,8 @@ impl App {
         l5.texts.extend(over.texts);
 
         let Some(tab) = tabs.get_mut(active_tab_idx) else {
-            self.hits = hits;
-            self.info_chips = info_chips;
+            self.win.hits = hits;
+            self.win.info_chips = info_chips;
             return;
         };
         let split = tab.effective_split();
@@ -7001,7 +7726,7 @@ impl App {
             let [hx, hy, hw, hh] = handle.rect;
             scene
                 .layer(0)
-                .rect([hx, hy], [hw, hh], inactive_dim(&theme), 0.0);
+                .rect([hx, hy], [hw, hh], inactive_dim(&theme, INACTIVE_LIFT), 0.0);
             scene
                 .layer(0)
                 .rect([hx, hy], [hw, hh], theme.pane_border_inactive, 0.0);
@@ -7012,7 +7737,7 @@ impl App {
             };
             hits.push(Hit {
                 rect: grab,
-                target: ClickTarget::HandleDrag(handle.path.clone()),
+                target: ClickTarget::HandleDrag(handle.path.clone(), handle.index),
             });
         }
 
@@ -7143,6 +7868,7 @@ impl App {
                     bottom_up,
                     mouse: Some(mouse),
                     copied: self
+                        .win
                         .copied
                         .filter(|(p, _, at)| *p == pr.id && at.elapsed() < COPIED_SHOWN)
                         .map(|(_, b, _)| b),
@@ -7211,7 +7937,7 @@ impl App {
                     &title,
                     is_active_pane,
                     pane.running(),
-                    chrome_mouse.filter(|_| self.pane_drag.is_none()),
+                    chrome_mouse.filter(|_| self.win.pane_drag.is_none()),
                     pr.id,
                     &mut hits,
                 );
@@ -7565,6 +8291,7 @@ impl App {
             // (from this frame's blocks snapshot, not a second lock of them)
             let followed_live = pane.view_offset == 0 && sticky_open;
             if is_active_pane
+                && sticky_headers
                 && let Some(sticky) = sticky_block.filter(|_| !followed_live)
                 && let Some(sh) = terminal::render_sticky_header(
                     scene.layer(2),
@@ -7604,58 +8331,60 @@ impl App {
 
             // inactive panes wash lighter (darker on a light theme); the
             // focused one's title bar carries the accent edge
-            if split && !is_active_pane {
+            if split && !is_active_pane && pane_dim > 0.0 {
                 scene.layer(2).rect(
                     [pr.rect[0], pr.rect[1]],
                     [pr.rect[2], pr.rect[3]],
-                    inactive_dim(&theme),
+                    inactive_dim(&theme, pane_dim),
                     0.0,
                 );
+                self.win.dimmed_panes += 1;
             }
         }
 
         // ── layer 1: side panels beside the panes ──
-        self.explorer_hits = if explorer_w > 0.0 && !settings_open {
+        self.win.explorer_hits = if explorer_w > 0.0 && !settings_open {
             crate::views::explorer::render(
                 scene.layer(1),
                 engine,
                 &theme,
-                &mut self.explorer,
+                &mut self.win.explorer,
                 [rail_w, TAB_BAR_H, explorer_w, h - TAB_BAR_H],
             )
         } else {
             Vec::new()
         };
-        self.review_hits = if self.review.open && self.review.maximized && !settings_open {
-            // over the panes and their overlays (layer 2), under the palette
-            crate::views::review_panel::render(
-                scene.layer(3),
-                engine,
-                &theme,
-                &mut self.review,
-                [rail_w, TAB_BAR_H, w - rail_w, h - TAB_BAR_H],
-            )
-        } else if review_w > 0.0 && !settings_open {
-            crate::views::review_panel::render(
-                scene.layer(1),
-                engine,
-                &theme,
-                &mut self.review,
-                [w - review_w, TAB_BAR_H, review_w, h - TAB_BAR_H],
-            )
-        } else {
-            Vec::new()
-        };
+        self.win.review_hits =
+            if self.win.review.open && self.win.review.maximized && !settings_open {
+                // over the panes and their overlays (layer 2), under the palette
+                crate::views::review_panel::render(
+                    scene.layer(3),
+                    engine,
+                    &theme,
+                    &mut self.win.review,
+                    [rail_w, TAB_BAR_H, w - rail_w, h - TAB_BAR_H],
+                )
+            } else if review_w > 0.0 && !settings_open {
+                crate::views::review_panel::render(
+                    scene.layer(1),
+                    engine,
+                    &theme,
+                    &mut self.win.review,
+                    [w - review_w, TAB_BAR_H, review_w, h - TAB_BAR_H],
+                )
+            } else {
+                Vec::new()
+            };
         // ── layer 2: the file viewer in its own pane of the split ──
-        self.viewer_hits.clear();
-        self.viewer_rect = [0.0; 4];
+        self.win.viewer_hits.clear();
+        self.win.viewer_rect = [0.0; 4];
         if let (Some(label), Some(rect), false) = (&viewer_label, viewer_pane, settings_open) {
-            self.viewer_rect = rect;
-            self.viewer_hits = crate::views::viewer::render(
+            self.win.viewer_rect = rect;
+            self.win.viewer_hits = crate::views::viewer::render(
                 scene.layer(2),
                 engine,
                 &theme,
-                &mut self.viewer,
+                &mut self.win.viewer,
                 label,
                 rect,
                 viewer_has_focus,
@@ -7667,13 +8396,14 @@ impl App {
                 scene
                     .layer(2)
                     .rect([rect[0], rect[1]], [rect[2], 2.0], theme.accent, 0.0);
-            } else {
+            } else if pane_dim > 0.0 {
                 scene.layer(3).rect(
                     [rect[0], rect[1]],
                     [rect[2], rect[3]],
-                    inactive_dim(&theme),
+                    inactive_dim(&theme, pane_dim),
                     0.0,
                 );
+                self.win.dimmed_panes += 1;
             }
         }
 
@@ -7686,7 +8416,7 @@ impl App {
         }
 
         // ── layer 2: history pane, docked like the completion panel ──
-        if editor_active && self.history.open && !palette.open {
+        if editor_active && self.win.history.open && !palette.open {
             // first in the hit list: the panel covers rows (the welcome
             // list) whose hits would otherwise take its clicks
             let mut panel_hits = Vec::new();
@@ -7694,7 +8424,7 @@ impl App {
                 scene.layer(2),
                 engine,
                 &theme,
-                &self.history,
+                &self.win.history,
                 editor_zone,
                 editor_pane,
                 chrome_mouse,
@@ -7703,7 +8433,7 @@ impl App {
             hits.splice(0..0, panel_hits);
         }
         // ── layer 2: completion popup (above editor) ──
-        if editor_active && completion.open && !palette.open && !self.history.open {
+        if editor_active && completion.open && !palette.open && !self.win.history.open {
             let (prefix_len, line_len) = tabs
                 .get(active_tab_idx)
                 .and_then(|t| t.active())
@@ -7731,7 +8461,7 @@ impl App {
         }
 
         // ── layer 2: IME composition (preedit) at the cursor ──
-        if !self.preedit.is_empty()
+        if !self.win.preedit.is_empty()
             && let Some((px, py)) = ime_spot
         {
             let size = if editor_active {
@@ -7740,7 +8470,7 @@ impl App {
                 font_size
             };
             let tw = engine.measure(
-                &self.preedit,
+                &self.win.preedit,
                 size,
                 rift_renderer::mono_family(),
                 rift_renderer::glyphon::Weight::NORMAL,
@@ -7758,7 +8488,7 @@ impl App {
                 let mut b = Buffer::new(&mut engine.font_system, Metrics::new(size, size * 1.4));
                 b.set_text(
                     &mut engine.font_system,
-                    &self.preedit,
+                    &self.win.preedit,
                     &Attrs::new().family(Family::Name(rift_renderer::mono_family())),
                     Shaping::Advanced,
                     None,
@@ -7767,7 +8497,7 @@ impl App {
             };
             layer2.text(buf, px, py, theme.fg);
         }
-        self.ime_spot = ime_spot;
+        self.win.ime_spot = ime_spot;
 
         // ── layer 2: search bar ──
         if search_state.open && !settings_open {
@@ -7799,9 +8529,9 @@ impl App {
                     Some((search_state.case_sensitive, search_state.regex)),
                 ),
             };
-            self.search_chips = chips;
+            self.win.search_chips = chips;
         } else {
-            self.search_chips.clear();
+            self.win.search_chips.clear();
         }
 
         // ── layer 3: the Settings tab's page ──
@@ -7811,18 +8541,18 @@ impl App {
             let mut area = [rail_w, TAB_BAR_H, w - rail_w, h - TAB_BAR_H];
             hits.retain(|h| h.rect[1] + h.rect[3] <= TAB_BAR_H || h.rect[0] + h.rect[2] <= rail_w);
             // config.toml opened from Settings: beside the page, in this tab
-            if self.config_viewer
+            if self.win.config_viewer
                 && let Some(label) = &viewer_label
             {
                 let vw = (area[2] * 0.45).clamp(320.0, (area[2] - 360.0).max(320.0));
                 area[2] -= vw;
                 let rect = [area[0] + area[2], area[1], vw, area[3]];
-                self.viewer_rect = rect;
-                self.viewer_hits = crate::views::viewer::render(
+                self.win.viewer_rect = rect;
+                self.win.viewer_hits = crate::views::viewer::render(
                     scene.layer(3),
                     engine,
                     &theme,
-                    &mut self.viewer,
+                    &mut self.win.viewer,
                     label,
                     rect,
                     viewer_has_focus,
@@ -7886,20 +8616,20 @@ impl App {
         }
 
         // ── layer 5: context menu ──
-        if self.context_menu.open {
-            self.context_menu_rects = context_menu::render(
+        if self.win.context_menu.open {
+            self.win.context_menu_rects = context_menu::render(
                 scene.layer(5),
                 engine,
                 &theme,
-                &self.context_menu,
+                &self.win.context_menu,
                 keymap_ref,
                 w,
                 h,
             );
         } else {
-            self.context_menu_rects.clear();
+            self.win.context_menu_rects.clear();
         }
-        (self.chip_menu_card, self.chip_menu_rows) = match &self.chip_menu {
+        (self.win.chip_menu_card, self.win.chip_menu_rows) = match &self.win.chip_menu {
             Some(menu) => crate::views::chip_menu::render(
                 scene.layer(5),
                 engine,
@@ -7907,7 +8637,7 @@ impl App {
                 menu,
                 [w, h],
                 TAB_BAR_H + 4.0,
-                self.mouse,
+                self.win.mouse,
                 blink,
             ),
             None => ([0.0; 4], Vec::new()),
@@ -7921,10 +8651,11 @@ impl App {
             .unwrap_or([w - 80.0, 7.0, 28.0, 28.0]);
         // badges rasterize brand marks at device resolution
         let scale = self
+            .win
             .window
             .as_ref()
             .map_or(1.0, |w| w.scale_factor() as f32);
-        self.note_toast_hits = crate::views::notifications::render_toasts(
+        self.win.note_toast_hits = crate::views::notifications::render_toasts(
             scene.layer(5),
             engine,
             &theme,
@@ -7933,12 +8664,12 @@ impl App {
             w,
             scale,
         );
-        if self.notifications.open {
-            self.notifications_hits = crate::views::notifications::render(
+        if self.win.notifications.open {
+            self.win.notifications_hits = crate::views::notifications::render(
                 scene.layer(5),
                 engine,
                 &theme,
-                &mut self.notifications,
+                &mut self.win.notifications,
                 &notification_entries,
                 anchor[0] + anchor[2] + 4.0,
                 anchor[1] + anchor[3] + 6.0,
@@ -7947,9 +8678,9 @@ impl App {
                 scale,
             );
         } else {
-            self.notifications_hits = Default::default();
+            self.win.notifications_hits = Default::default();
         }
-        if let Some(hs) = &self.hints {
+        if let Some(hs) = &self.win.hints {
             let items: Vec<(&str, [f32; 4], bool)> = hs
                 .items
                 .iter()
@@ -7961,12 +8692,12 @@ impl App {
         // ── layer 6: toasts + close/quit warning (modal: eats every click) ──
         // each in its pane, right above the command line; a pane out of
         // view (another tab, the Settings tab) sends it to the corner
-        self.toast_hits.clear();
+        self.win.toast_hits.clear();
         {
             use crate::views::confirm::{ToastView, toasts};
             let shown_panes = &toast_panes;
             let mut groups: Vec<(Option<PaneId>, Vec<&Toast>)> = Vec::new();
-            for t in &self.toasts {
+            for t in &self.win.toasts {
                 // its pane out of view (or none): the pane you are in; the
                 // corner only while no pane shows (the Settings tab)
                 let shown = |p: &PaneId| shown_panes.iter().any(|(id, ..)| id == p);
@@ -8006,18 +8737,18 @@ impl App {
                     })
                     .collect();
                 let hits = toasts(scene.layer(6), engine, &theme, &views, right, bottom, max_w);
-                self.toast_hits.extend(hits);
+                self.win.toast_hits.extend(hits);
             }
         }
         // What's New sits under a confirm dialog (both modal, layer 6)
-        if self.whats_new.open {
+        if self.win.whats_new.open {
             hits.clear();
             focus_hits.clear();
-            self.whats_new_hits = crate::views::whats_new::render(
+            self.win.whats_new_hits = crate::views::whats_new::render(
                 scene.layer(6),
                 engine,
                 &theme,
-                &mut self.whats_new,
+                &mut self.win.whats_new,
                 &self.releases,
                 w,
                 h,
@@ -8029,13 +8760,14 @@ impl App {
             let update_title;
             let dialog = match action {
                 ConfirmAction::Close(scope) => {
+                    let quit = quits;
                     let (title, label) = match scope {
+                        _ if quit => ("Quit Rift?", "Quit"),
                         CloseScope::Pane(_) => ("Close pane?", "Close pane"),
                         CloseScope::Tab(_) => ("Close tab?", "Close tab"),
                         CloseScope::OtherTabs(_) => ("Close other tabs?", "Close tabs"),
-                        CloseScope::Window => ("Quit Rift?", "Quit"),
+                        CloseScope::Window | CloseScope::App => ("Close window?", "Close window"),
                     };
-                    let quit = *scope == CloseScope::Window;
                     Dialog {
                         title,
                         description: close_description(
@@ -8146,24 +8878,24 @@ impl App {
                     }
                 }
             };
-            self.confirm_rects =
+            self.win.confirm_rects =
                 crate::views::confirm::render(scene.layer(6), engine, &theme, &dialog, w, h, scale);
         }
-        self.prompt_editor_layout = match &self.prompt_editor {
+        self.win.prompt_editor_layout = match &self.win.prompt_editor {
             Some(ed) => crate::views::prompt_editor::render(
                 scene.layer(6),
                 engine,
                 &theme,
                 ed,
                 [w, h],
-                self.mouse,
+                self.win.mouse,
             ),
             None => Default::default(),
         };
 
         // pane drag: the drop zone under the pointer (the half of a pane, a
         // tab, or the empty strip for a new tab)
-        if let Some(d) = self.pane_drag.as_ref().filter(|d| d.live) {
+        if let Some(d) = self.win.pane_drag.as_ref().filter(|d| d.live) {
             // the pane being moved fades in place
             if let Some(src) = pane_rects.iter().find(|p| p.id == d.pane) {
                 scene.layer(5).rect(
@@ -8226,25 +8958,26 @@ impl App {
                 &theme,
                 &title,
                 d.pane == VIEWER_PANE,
-                (self.mouse.0 + 14.0, self.mouse.1 + 22.0),
+                (self.win.mouse.0 + 14.0, self.win.mouse.1 + 22.0),
                 w,
                 h,
             );
         }
 
         hits.extend(focus_hits);
-        self.hits = hits;
-        self.info_chips = info_chips;
+        self.win.hits = hits;
+        self.win.info_chips = info_chips;
         // a background tab's spinner turns too
-        self.any_running = any_running
+        self.win.any_running = any_running
             || self
+                .win
                 .tabs
                 .iter()
                 .any(|t| t.panes.iter().any(PaneState::running));
-        self.editor_active = editor_active;
-        self.boot_until = boot_until;
-        self.editor_anchor = editor_anchor;
-        self.editor_cols = active_ed_cols;
+        self.win.editor_active = editor_active;
+        self.win.boot_until = boot_until;
+        self.win.editor_anchor = editor_anchor;
+        self.win.editor_cols = active_ed_cols;
     }
 
     /// The shortcut of `action`, as key caps (`⇧⌘G`).
@@ -8256,11 +8989,11 @@ impl App {
     /// explain themselves (rows, the editor, the grid).
     fn tip_for(&self, target: &ClickTarget) -> Option<(String, Option<String>)> {
         use crate::views::history::Scope;
-        let pane_of = |id: PaneId| self.tabs.iter().find_map(|t| t.pane(id));
+        let pane_of = |id: PaneId| self.win.tabs.iter().find_map(|t| t.pane(id));
         let s = |t: &str| Some(t.to_string());
         Some(match target {
             ClickTarget::TabSelect(i) => {
-                let tab = self.tabs.get(*i)?;
+                let tab = self.win.tabs.get(*i)?;
                 let title = tab.display_title();
                 let cwd = tab
                     .active()
@@ -8275,9 +9008,10 @@ impl App {
             // shortcut is true only for the active, unsplit tab
             ClickTarget::TabClose(i) => (
                 "Close tab".into(),
-                self.tabs
+                self.win
+                    .tabs
                     .get(*i)
-                    .filter(|t| *i == self.active && !t.root.is_split())
+                    .filter(|t| *i == self.win.active && !t.root.is_split())
                     .and_then(|_| self.tip_keys("close_pane")),
             ),
             ClickTarget::TabNew => ("New tab".into(), self.tip_keys("new_tab")),
@@ -8357,7 +9091,7 @@ impl App {
     }
 
     /// This frame's tooltips, in click priority: the side panels and the
-    /// viewer first (they own their regions), then `self.hits` in order. A
+    /// viewer first (they own their regions), then `self.win.hits` in order. A
     /// hit without a tooltip still blocks the ones under it.
     fn collect_tips(&self) -> Vec<crate::views::tooltip::Tip> {
         use crate::views::explorer::ExplorerHit;
@@ -8366,9 +9100,9 @@ impl App {
         use crate::views::viewer::ViewerHit;
         let mut tips = Vec::new();
         // the prompt editor is modal: only its chips explain themselves
-        if let Some(ed) = &self.prompt_editor {
+        if let Some(ed) = &self.win.prompt_editor {
             use crate::views::prompt_editor::Target;
-            for (rect, target) in &self.prompt_editor_layout.hits {
+            for (rect, target) in &self.win.prompt_editor_layout.hits {
                 let chip = match target {
                     Target::Palette(chip) => Some(*chip),
                     Target::Chip(i) => ed.draft.get(*i).copied(),
@@ -8379,10 +9113,10 @@ impl App {
                     None => Tip::new(*rect, "", None),
                 });
             }
-            tips.push(Tip::new(self.prompt_editor_layout.card, "", None));
+            tips.push(Tip::new(self.win.prompt_editor_layout.card, "", None));
             return tips;
         }
-        for (rect, hit) in &self.viewer_hits {
+        for (rect, hit) in &self.win.viewer_hits {
             let (text, keys) = match hit {
                 ViewerHit::Close => ("Close file", self.tip_keys("close_pane")),
                 ViewerHit::Menu => ("More actions", None),
@@ -8390,11 +9124,11 @@ impl App {
             };
             tips.push(Tip::new(*rect, text, keys));
         }
-        for (rect, hit) in &self.explorer_hits {
+        for (rect, hit) in &self.win.explorer_hits {
             tips.push(match hit {
                 ExplorerHit::Refresh => Tip::new(*rect, "Refresh", None),
                 ExplorerHit::Collapse => Tip::new(*rect, "Collapse all", None),
-                ExplorerHit::Row(i) => match self.explorer.rows.get(*i) {
+                ExplorerHit::Row(i) => match self.win.explorer.rows.get(*i) {
                     // the full path of a name the panel may cut short
                     Some(row) => Tip::new(
                         *rect,
@@ -8405,7 +9139,7 @@ impl App {
                 },
             });
         }
-        for (rect, hit) in &self.review_hits {
+        for (rect, hit) in &self.win.review_hits {
             let text = match hit {
                 ReviewHit::Refresh => "Refresh",
                 ReviewHit::Stage(_, None) => "Stage file",
@@ -8418,7 +9152,7 @@ impl App {
                 ReviewHit::UnstageAll => "Unstage all",
                 ReviewHit::Open(_) => "Open file",
                 ReviewHit::Copy(..) => "Copy hunk",
-                ReviewHit::Maximize if self.review.maximized => "Restore",
+                ReviewHit::Maximize if self.win.review.maximized => "Restore",
                 ReviewHit::Maximize => "Maximize",
                 ReviewHit::Jump(_, path) => path,
                 _ => "",
@@ -8436,8 +9170,9 @@ impl App {
             "⌘ Click"
         };
         for pane in self
+            .win
             .tabs
-            .get(self.active)
+            .get(self.win.active)
             .into_iter()
             .flat_map(|t| &t.panes)
         {
@@ -8449,8 +9184,8 @@ impl App {
         // the command line's own hit, so first
         let mode = self.config.elapsed_counts;
         let now = Instant::now();
-        for (rect, pane, chip) in &self.info_chips {
-            let tab = self.tabs.iter().find(|t| t.pane(*pane).is_some());
+        for (rect, pane, chip) in &self.win.info_chips {
+            let tab = self.win.tabs.iter().find(|t| t.pane(*pane).is_some());
             let shown = tab.and_then(|t| t.elapsed(mode, now));
             let line =
                 crate::views::prompt_chips::elapsed_line(mode, tab.and_then(|t| t.started), shown);
@@ -8465,7 +9200,7 @@ impl App {
                 tip
             });
         }
-        for hit in &self.hits {
+        for hit in &self.win.hits {
             // a prompt chip's card: what it shows and what a click does
             if let ClickTarget::Chip(_, chip) = hit.target {
                 tips.push(Tip::card(hit.rect, chip.label(), chip.about()));
@@ -8479,24 +9214,24 @@ impl App {
 
     /// No tooltip while a modal, a menu or a drag owns the pointer.
     fn tooltip_blocked(&self) -> bool {
-        !self.pointer_in
-            || self.palette.open
-            || self.confirm.is_some()
-            || self.context_menu.open
-            || self.chip_menu.is_some()
+        !self.win.pointer_in
+            || self.win.palette.open
+            || self.win.confirm.is_some()
+            || self.win.context_menu.open
+            || self.win.chip_menu.is_some()
             // the prompt editor's chips have cards, until one is dragged
             || self
-                .prompt_editor
+                .win.prompt_editor
                 .as_ref()
                 .is_some_and(|e| e.drag.as_ref().is_some_and(|d| d.live))
-            || self.whats_new.open
-            || self.rename.is_some()
-            || self.drag.is_some()
-            || self.pending_sel.is_some()
-            || self.editor_drag.is_some()
-            || self.tab_drag.is_some()
-            || self.pane_drag.is_some()
-            || self.slider_drag.is_some()
+            || self.win.whats_new.open
+            || self.win.rename.is_some()
+            || self.win.drag.is_some()
+            || self.win.pending_sel.is_some()
+            || self.win.editor_drag.is_some()
+            || self.win.tab_drag.is_some()
+            || self.win.pane_drag.is_some()
+            || self.win.slider_drag.is_some()
     }
 
     /// Track the control under the pointer and draw its tooltip once it has
@@ -8504,13 +9239,14 @@ impl App {
     fn tooltip_pass(&mut self, w: f32, h: f32) {
         use crate::views::tooltip::{DELAY, WARM};
         let tips = self.collect_tips();
-        let (mx, my) = self.mouse;
+        let (mx, my) = self.win.mouse;
         // an interactive card stays while the pointer moves from its control
         // into it
         let sticky = self
+            .win
             .tip_shown
             .as_ref()
-            .zip(self.tip_drawn.as_ref())
+            .zip(self.win.tip_drawn.as_ref())
             .filter(|(t, d)| {
                 t.action.is_some() && crate::views::tooltip::bridged(t.rect, d.rect, mx, my)
             })
@@ -8522,12 +9258,12 @@ impl App {
         };
         let now = Instant::now();
         let rect = hovered.as_ref().map(|t| t.rect);
-        if self.tip_hover.map(|(r, _)| r) != rect {
-            if self.tip_shown.is_some() {
-                self.tip_hidden_at = Some(now);
+        if self.win.tip_hover.map(|(r, _)| r) != rect {
+            if self.win.tip_shown.is_some() {
+                self.win.tip_hidden_at = Some(now);
             }
-            let warm = self.tip_hidden_at.is_some_and(|t| now < t + WARM);
-            self.tip_hover = rect.map(|r| {
+            let warm = self.win.tip_hidden_at.is_some_and(|t| now < t + WARM);
+            self.win.tip_hover = rect.map(|r| {
                 (
                     r,
                     if warm {
@@ -8537,48 +9273,48 @@ impl App {
                     },
                 )
             });
-            self.tip_suppressed = false;
+            self.win.tip_suppressed = false;
         }
-        let shown = match (hovered, self.tip_hover) {
+        let shown = match (hovered, self.win.tip_hover) {
             (Some(tip), Some((_, since)))
-                if !tip.text.is_empty() && !self.tip_suppressed && now >= since + DELAY =>
+                if !tip.text.is_empty() && !self.win.tip_suppressed && now >= since + DELAY =>
             {
                 Some(tip)
             }
             _ => None,
         };
-        if self.tip_shown.is_some() && shown.is_none() && rect.is_some() {
-            self.tip_hidden_at = Some(now);
+        if self.win.tip_shown.is_some() && shown.is_none() && rect.is_some() {
+            self.win.tip_hidden_at = Some(now);
         }
-        self.tip_drawn = None;
+        self.win.tip_drawn = None;
         if let (Some(tip), Some(engine)) = (&shown, self.text.as_mut()) {
-            self.tip_drawn = Some(crate::views::tooltip::render(
-                self.scene.layer(7),
+            self.win.tip_drawn = Some(crate::views::tooltip::render(
+                self.win.scene.layer(7),
                 engine,
                 &self.theme,
                 tip,
                 (w, h),
-                self.mouse,
+                self.win.mouse,
             ));
         }
-        self.tip_shown = shown;
-        self.tips = tips;
+        self.win.tip_shown = shown;
+        self.win.tips = tips;
     }
 
     /// When the tooltip of the control under the pointer is due (not yet drawn).
     fn tooltip_due(&self) -> Option<Instant> {
-        let (_, since) = self.tip_hover?;
-        (self.tip_shown.is_none() && !self.tip_suppressed)
+        let (_, since) = self.win.tip_hover?;
+        (self.win.tip_shown.is_none() && !self.win.tip_suppressed)
             .then_some(since + crate::views::tooltip::DELAY)
     }
 
     /// A press on the shown hover card: its button acts, and the press never
     /// reaches what the card covers. Returns true when it landed on the card.
     fn press_tip_card(&mut self, window: &Window) -> bool {
-        let (mx, my) = self.mouse;
+        let (mx, my) = self.win.mouse;
         let inside =
             |r: &[f32; 4]| mx >= r[0] && mx < r[0] + r[2] && my >= r[1] && my < r[1] + r[3];
-        let (Some(tip), Some(drawn)) = (&self.tip_shown, &self.tip_drawn) else {
+        let (Some(tip), Some(drawn)) = (&self.win.tip_shown, &self.win.tip_drawn) else {
             return false;
         };
         if tip.action.is_none() || !inside(&drawn.rect) {
@@ -8587,6 +9323,7 @@ impl App {
         if drawn.action.as_ref().is_some_and(inside) {
             let chip = tip.rect;
             let pane = self
+                .win
                 .info_chips
                 .iter()
                 .find(|(r, _, _)| *r == chip)
@@ -8610,8 +9347,8 @@ impl App {
 
     /// A press, key or wheel: the tooltip goes until the pointer moves on.
     fn hide_tooltip(&mut self, window: &Window) {
-        self.tip_suppressed = true;
-        if self.tip_shown.is_some() {
+        self.win.tip_suppressed = true;
+        if self.win.tip_shown.is_some() {
             window.request_redraw();
         }
     }
@@ -8619,37 +9356,37 @@ impl App {
     /// A frame for new program output: at once, or [`OUTPUT_FRAME`] after
     /// the last one.
     fn request_output_frame(&mut self) {
-        let due = self.last_frame + OUTPUT_FRAME;
+        let due = self.win.last_frame + OUTPUT_FRAME;
         if Instant::now() >= due {
-            if let Some(w) = &self.window {
+            if let Some(w) = &self.win.window {
                 w.request_redraw();
             }
         } else {
-            self.output_frame_due.get_or_insert(due);
+            self.win.output_frame_due.get_or_insert(due);
         }
     }
 
     fn redraw(&mut self, window: &Window) {
-        self.last_frame = Instant::now();
-        self.output_frame_due = None;
+        self.win.last_frame = Instant::now();
+        self.win.output_frame_due = None;
         let scale = window.scale_factor() as f32;
-        if self.gpu.is_none() {
+        if self.win.gpu.is_none() {
             return;
         }
         self.request_git();
 
         let (pw, ph) = {
-            let gpu = self.gpu.as_ref().unwrap();
+            let gpu = self.win.gpu.as_ref().unwrap();
             (gpu.config.width, gpu.config.height)
         };
         let (lw, lh) = (pw as f32 / scale, ph as f32 / scale);
 
         self.build_scene(lw, lh);
         self.tooltip_pass(lw, lh);
-        if let Some(spot) = self.ime_spot
-            && self.ime_area_sent != Some(spot)
+        if let Some(spot) = self.win.ime_spot
+            && self.win.ime_area_sent != Some(spot)
         {
-            self.ime_area_sent = Some(spot);
+            self.win.ime_area_sent = Some(spot);
             window.set_ime_cursor_area(
                 winit::dpi::LogicalPosition::new(spot.0, spot.1),
                 LogicalSize::new(self.cell_w, self.line_h),
@@ -8658,21 +9395,22 @@ impl App {
 
         let mut all_quads = Vec::new();
         let mut ranges = Vec::new();
-        for layer in &self.scene.layers {
+        for layer in &self.win.scene.layers {
             let start = all_quads.len() as u32;
             all_quads.extend_from_slice(&layer.quads);
             ranges.push(start..all_quads.len() as u32);
         }
 
         let (Some(gpu), Some(quads), Some(text), Some(sprites)) = (
-            &mut self.gpu,
-            &mut self.quads,
+            &mut self.win.gpu,
+            &mut self.win.quads,
             &mut self.text,
-            &mut self.sprites,
+            &mut self.win.sprites,
         ) else {
             return;
         };
         let sprite_layers: Vec<&[rift_renderer::Sprite]> = self
+            .win
             .scene
             .layers
             .iter()
@@ -8680,7 +9418,7 @@ impl App {
             .collect();
         sprites.prepare(&gpu.device, &gpu.queue, [lw, lh], &sprite_layers);
         // prepared once; drawn first in every pass (main + capture)
-        if let Some(img) = self.bg_image.as_mut()
+        if let Some(img) = self.win.bg_image.as_mut()
             && img.has_image()
         {
             // translucent (Warp): the image at the window opacity, veiled by
@@ -8692,11 +9430,12 @@ impl App {
             };
             img.prepare(&gpu.queue, [pw as f32, ph as f32], alpha);
         }
-        let bg_image = self.bg_image.as_ref().filter(|p| p.has_image());
+        let bg_image = self.win.bg_image.as_ref().filter(|p| p.has_image());
 
         quads.prepare(&gpu.device, &gpu.queue, [lw, lh], &all_quads);
 
         let text_layers: Vec<Vec<TextArea<'_>>> = self
+            .win
             .scene
             .layers
             .iter()
@@ -8740,7 +9479,7 @@ impl App {
 
         // script `shot`: offscreen, so it works even when the window
         // surface is unavailable (occluded window, display asleep)
-        if let Some(path) = self.capture.take() {
+        if let Some(path) = self.win.capture.take() {
             crate::capture::capture_frame(
                 gpu, quads, text, sprites, bg_image, &ranges, ground, &path,
             );
@@ -8805,22 +9544,21 @@ impl App {
 
     fn handle_action(&mut self, action: AppAction, event_loop: &ActiveEventLoop) {
         match action {
-            AppAction::NewTab => self.spawn_tab(),
+            AppAction::NewTab => self.spawn_new_tab(),
             AppAction::ClosePane => {
                 // ⌘W on the viewer pane closes the viewer
                 if self.viewer_focused() {
-                    self.viewer.close();
-                } else if let Some(tab) = self.tabs.get(self.active) {
+                    self.win.viewer.close();
+                } else if let Some(tab) = self.win.tabs.get(self.win.active) {
                     self.request_close(CloseScope::Pane(tab.active_pane), event_loop);
                 }
             }
-            AppAction::CloseWindow | AppAction::Quit => {
-                self.request_close(CloseScope::Window, event_loop);
-            }
+            AppAction::CloseWindow => self.request_close(CloseScope::Window, event_loop),
+            AppAction::Quit => self.request_close(CloseScope::App, event_loop),
             AppAction::CloseOtherTabs => {
-                self.request_close(CloseScope::OtherTabs(self.active), event_loop);
+                self.request_close(CloseScope::OtherTabs(self.win.active), event_loop);
             }
-            AppAction::NewWindow => self.open_new_window(),
+            AppAction::NewWindow => self.open_new_window(event_loop),
             AppAction::Minimize => {
                 if let Some(w) = self.shown_window() {
                     w.set_minimized(true);
@@ -8847,16 +9585,16 @@ impl App {
                 }
             }
             AppAction::RenameTab => {
-                self.start_rename(self.active);
+                self.start_rename(self.win.active);
             }
             AppAction::ToggleSyncInputs => {
-                if let Some(t) = self.tabs.get_mut(self.active) {
+                if let Some(t) = self.win.tabs.get_mut(self.win.active) {
                     t.sync_inputs = !t.sync_inputs;
                 }
             }
             AppAction::ResetTabTimer => {
                 let mode = self.config.elapsed_counts;
-                if let Some(t) = self.tabs.get_mut(self.active) {
+                if let Some(t) = self.win.tabs.get_mut(self.win.active) {
                     t.reset_clock(mode, Instant::now());
                     self.save_session();
                 }
@@ -8867,8 +9605,13 @@ impl App {
                 }
             }
             AppAction::SelectAll => {
-                let editor_active = self.editor_active;
-                if let Some(pane) = self.tabs.get_mut(self.active).and_then(|t| t.active_mut()) {
+                let editor_active = self.win.editor_active;
+                if let Some(pane) = self
+                    .win
+                    .tabs
+                    .get_mut(self.win.active)
+                    .and_then(|t| t.active_mut())
+                {
                     if editor_active && !pane.editor.buffer.is_empty() {
                         pane.editor.select_all();
                     } else {
@@ -8905,7 +9648,7 @@ impl App {
             }
             AppAction::HintMode => self.start_hints(),
             AppAction::AttentionCenter => {
-                if self.notifications.open {
+                if self.win.notifications.open {
                     self.close_notifications();
                 } else {
                     self.open_notifications();
@@ -8913,43 +9656,45 @@ impl App {
             }
             AppAction::ClearTranscripts => self.clear_transcripts(),
             AppAction::TabNext => {
-                if !self.tabs.is_empty() {
-                    self.switch_tab((self.active + 1) % self.tabs.len());
+                if !self.win.tabs.is_empty() {
+                    self.switch_tab((self.win.active + 1) % self.win.tabs.len());
                 }
             }
             AppAction::TabPrev => {
-                if !self.tabs.is_empty() {
-                    self.switch_tab((self.active + self.tabs.len() - 1) % self.tabs.len());
+                if !self.win.tabs.is_empty() {
+                    self.switch_tab(
+                        (self.win.active + self.win.tabs.len() - 1) % self.win.tabs.len(),
+                    );
                 }
             }
             AppAction::TabSelect(n) => {
-                if !self.tabs.is_empty() {
+                if !self.win.tabs.is_empty() {
                     // Warp: ⌘9 = last tab; out-of-range numbers are no-ops
                     let idx = if n == 9 {
-                        self.tabs.len() - 1
+                        self.win.tabs.len() - 1
                     } else {
                         n as usize - 1
                     };
-                    if idx < self.tabs.len() && idx != self.active {
+                    if idx < self.win.tabs.len() && idx != self.win.active {
                         self.switch_tab(idx);
                     }
                 }
             }
             AppAction::MoveTabLeft | AppAction::MoveTabRight => {
-                let n = self.tabs.len();
+                let n = self.win.tabs.len();
                 let target = if action == AppAction::MoveTabLeft {
-                    self.active.checked_sub(1)
+                    self.win.active.checked_sub(1)
                 } else {
-                    (self.active + 1 < n).then_some(self.active + 1)
+                    (self.win.active + 1 < n).then_some(self.win.active + 1)
                 };
                 if let Some(t) = target {
-                    self.tabs.swap(self.active, t);
-                    self.active = t;
+                    self.win.tabs.swap(self.win.active, t);
+                    self.win.active = t;
                     self.save_session();
                 }
             }
             AppAction::ReopenClosedTab => {
-                if let Some(cwd) = self.closed_tabs.pop() {
+                if let Some(cwd) = self.win.closed_tabs.pop() {
                     self.spawn_tab_at(cwd);
                 }
             }
@@ -8959,7 +9704,7 @@ impl App {
                 } else {
                     -10
                 };
-                if let Some(tab) = self.tabs.get_mut(self.active)
+                if let Some(tab) = self.win.tabs.get_mut(self.win.active)
                     && let Some(pane) = tab.active_mut()
                 {
                     pane.view_offset = (pane.view_offset as i64 + delta).max(0) as usize;
@@ -8968,25 +9713,29 @@ impl App {
             AppAction::SplitRight => self.split_active(Axis::Horizontal),
             AppAction::SplitDown => self.split_active(Axis::Vertical),
             AppAction::TogglePalette => {
-                if self.palette.open {
-                    self.palette.open = false;
+                if self.win.palette.open {
+                    self.win.palette.open = false;
                 } else {
                     self.open_palette(crate::views::palette::PaletteMode::Commands);
                 }
             }
             AppAction::OpenSettings => {
-                if self.settings.open {
-                    self.settings.open = false;
+                if self.win.settings.open {
+                    self.win.settings.open = false;
                 } else {
                     // back to the Settings tab as it was; a closed one
                     // starts again on General (`close_tab`)
-                    self.settings.open_page(self.settings.page);
+                    self.win.settings.open_page(self.win.settings.page);
                 }
             }
             AppAction::BookmarkToggle => {
                 // selected block wins; else the most recent finished block
                 if let Some((pane_id, id)) = self.selected_or_last_block()
-                    && let Some(pane) = self.tabs.get(self.active).and_then(|t| t.pane(pane_id))
+                    && let Some(pane) = self
+                        .win
+                        .tabs
+                        .get(self.win.active)
+                        .and_then(|t| t.pane(pane_id))
                 {
                     pane.session.blocks.lock().unwrap().toggle_bookmark(id);
                 }
@@ -8995,10 +9744,11 @@ impl App {
             AppAction::BookmarkNext | AppAction::BookmarkClosestNext => self.jump_bookmark(1),
             AppAction::Copy => {
                 let editor_sel = self
+                    .win
                     .tabs
-                    .get(self.active)
+                    .get(self.win.active)
                     .and_then(|t| t.active())
-                    .filter(|_| self.editor_active)
+                    .filter(|_| self.win.editor_active)
                     .and_then(|p| p.editor.selected_text().map(str::to_string));
                 if let Some(text) = editor_sel {
                     self.copy_to_clipboard(text);
@@ -9006,15 +9756,16 @@ impl App {
                 }
                 if let Some(text) = self.selection_text() {
                     self.copy_to_clipboard(text);
-                    if let Some(w) = &self.window {
+                    if let Some(w) = &self.win.window {
                         w.request_redraw();
                     }
                     return;
                 }
                 // no selection: copy the last finished block's output
                 let text = self
+                    .win
                     .tabs
-                    .get(self.active)
+                    .get(self.win.active)
                     .and_then(|t| t.active())
                     .and_then(|p| {
                         let id = p
@@ -9035,18 +9786,18 @@ impl App {
             AppAction::Paste => self.paste_from_clipboard(),
             // with a file open, Find searches the file, not the terminal
             AppAction::Search if self.viewer_focused() => {
-                if self.viewer.find.is_some() {
-                    self.viewer.find = None;
+                if self.win.viewer.find.is_some() {
+                    self.win.viewer.find = None;
                 } else {
-                    self.viewer.open_find();
+                    self.win.viewer.open_find();
                 }
                 self.blink_epoch = Instant::now();
             }
             AppAction::Search => {
-                if self.search.open {
-                    self.search.close();
+                if self.win.search.open {
+                    self.win.search.close();
                 } else {
-                    self.search.open = true;
+                    self.win.search.open = true;
                     self.refresh_search(true);
                     self.blink_epoch = Instant::now();
                 }
@@ -9062,13 +9813,13 @@ impl App {
                     _ => (0.0, 1.0),
                 };
                 // navigating unzooms first, then moves within the real layout
-                if let Some(tab) = self.tabs.get_mut(self.active) {
+                if let Some(tab) = self.win.tabs.get_mut(self.win.active) {
                     tab.zoomed = None;
                 }
                 let (lw, lh) = self.logical_size();
                 let (rects, _) = self.pane_rects(lw, lh);
                 let from_viewer = self.viewer_focused();
-                if let Some(tab) = self.tabs.get_mut(self.active) {
+                if let Some(tab) = self.win.tabs.get_mut(self.win.active) {
                     let from = if from_viewer {
                         VIEWER_PANE
                     } else {
@@ -9076,27 +9827,31 @@ impl App {
                     };
                     match focus_neighbor(&rects, from, dir) {
                         // the viewer pane takes focus without being a shell
-                        Some(VIEWER_PANE) => self.viewer_focus = true,
+                        Some(VIEWER_PANE) => self.win.viewer_focus = true,
                         Some(next) => {
                             if let Some(prev) = tab.active_mut() {
                                 prev.selected_block = None;
                             }
                             tab.active_pane = next;
-                            self.viewer_focus = false;
+                            self.win.viewer_focus = false;
                         }
                         None => {}
                     }
                 }
             }
             AppAction::ClearBlocks => {
-                if let Some(pane) = self.tabs.get_mut(self.active).and_then(|t| t.active_mut())
+                if let Some(pane) = self
+                    .win
+                    .tabs
+                    .get_mut(self.win.active)
+                    .and_then(|t| t.active_mut())
                     && !pane.alt_screen
                 {
                     pane.session.clear_screen_and_blocks();
                     pane.view_offset = 0;
                     pane.last_display_len = 0;
                     pane.selected_block = None;
-                    self.search.set_matches(terminal::Found::default());
+                    self.win.search.set_matches(terminal::Found::default());
                 }
             }
             AppAction::FontIncrease | AppAction::FontDecrease | AppAction::FontReset => {
@@ -9109,7 +9864,12 @@ impl App {
                 self.apply_config();
             }
             AppAction::FocusInput => {
-                if let Some(pane) = self.tabs.get_mut(self.active).and_then(|t| t.active_mut()) {
+                if let Some(pane) = self
+                    .win
+                    .tabs
+                    .get_mut(self.win.active)
+                    .and_then(|t| t.active_mut())
+                {
                     pane.view_offset = 0;
                     pane.selected_block = None;
                 }
@@ -9119,7 +9879,12 @@ impl App {
             | AppAction::ScrollPageDown
             | AppAction::ScrollTop
             | AppAction::ScrollBottom => {
-                if let Some(pane) = self.tabs.get_mut(self.active).and_then(|t| t.active_mut()) {
+                if let Some(pane) = self
+                    .win
+                    .tabs
+                    .get_mut(self.win.active)
+                    .and_then(|t| t.active_mut())
+                {
                     let rows = pane.last_grid.map(|g| g.rows).unwrap_or(24);
                     let max_off = pane.last_display_len.saturating_sub(rows);
                     pane.view_offset = match action {
@@ -9131,35 +9896,38 @@ impl App {
                 }
             }
             AppAction::OpenKeybindings => {
-                self.settings
+                self.win
+                    .settings
                     .open_page(crate::views::settings::Page::Keybindings);
             }
             AppAction::OpenAbout => {
-                self.palette.open = false;
-                self.context_menu.close();
-                self.settings.open_page(crate::views::settings::Page::About);
+                self.win.palette.open = false;
+                self.win.context_menu.close();
+                self.win
+                    .settings
+                    .open_page(crate::views::settings::Page::About);
             }
             AppAction::CheckForUpdates => {
-                self.palette.open = false;
+                self.win.palette.open = false;
                 self.check_for_updates_now();
             }
             AppAction::UpdateRift => {
-                self.palette.open = false;
-                self.context_menu.close();
+                self.win.palette.open = false;
+                self.win.context_menu.close();
                 self.update_rift();
             }
             AppAction::ToggleExplorer => {
-                self.explorer.open = !self.explorer.open;
-                self.explorer.focused = self.explorer.open;
-                if self.explorer.open {
+                self.win.explorer.open = !self.win.explorer.open;
+                self.win.explorer.focused = self.win.explorer.open;
+                if self.win.explorer.open {
                     self.follow_explorer();
                     self.request_review();
                 }
             }
             AppAction::ToggleReview => {
                 let too_narrow = |app: &Self| {
-                    app.review.open
-                        && !app.review.maximized
+                    app.win.review.open
+                        && !app.win.review.maximized
                         && app.panel_widths(app.logical_size().0).1 == 0.0
                 };
                 // open but auto-hidden: closing it would change nothing
@@ -9167,10 +9935,10 @@ impl App {
                 if too_narrow(self) {
                     self.toast("Window too narrow for the review panel: widen it".into());
                 } else {
-                    self.review.open = !self.review.open;
-                    self.review.maximized = false;
-                    if self.review.open {
-                        self.review.notice = None;
+                    self.win.review.open = !self.win.review.open;
+                    self.win.review.maximized = false;
+                    if self.win.review.open {
+                        self.win.review.notice = None;
                         self.request_review();
                         if too_narrow(self) {
                             self.toast("Window too narrow for the review panel: widen it".into());
@@ -9181,13 +9949,13 @@ impl App {
             AppAction::WhatsNew => {
                 // a modal over the tab on screen: from Settings it opens over
                 // the Settings tab, not over the terminal tab behind it
-                self.palette.open = false;
-                self.context_menu.close();
-                self.whats_new.open();
+                self.win.palette.open = false;
+                self.win.context_menu.close();
+                self.win.whats_new.open();
                 rift_core::changelog::mark_seen();
             }
             AppAction::MaximizePane => {
-                if let Some(tab) = self.tabs.get_mut(self.active)
+                if let Some(tab) = self.win.tabs.get_mut(self.win.active)
                     && tab.is_split()
                 {
                     tab.zoomed = if tab.zoomed.is_some() {
@@ -9201,19 +9969,29 @@ impl App {
             | AppAction::ResizePaneRight
             | AppAction::ResizePaneUp
             | AppAction::ResizePaneDown => {
+                // Warp: the divider beside the pane moves 10 px that way
+                let step = crate::pane::RESIZE_STEP;
                 let (axis, delta) = match action {
-                    AppAction::ResizePaneLeft => (Axis::Horizontal, -0.05),
-                    AppAction::ResizePaneRight => (Axis::Horizontal, 0.05),
-                    AppAction::ResizePaneUp => (Axis::Vertical, -0.05),
-                    _ => (Axis::Vertical, 0.05),
+                    AppAction::ResizePaneLeft => (Axis::Horizontal, -step),
+                    AppAction::ResizePaneRight => (Axis::Horizontal, step),
+                    AppAction::ResizePaneUp => (Axis::Vertical, -step),
+                    _ => (Axis::Vertical, step),
                 };
-                if let Some(tab) = self.tabs.get_mut(self.active)
+                let (lw, lh) = self.logical_size();
+                let (x0, w) = self.content_span(lw);
+                let area = [x0, TAB_BAR_H, w, lh - TAB_BAR_H];
+                if let Some(tab) = self.win.tabs.get_mut(self.win.active)
                     && tab.zoomed.is_none()
-                    && let Some(ancestors) = tab.root.ancestors_of(tab.active_pane)
-                    && let Some((path, _, _)) =
-                        ancestors.into_iter().rev().find(|(_, a, _)| *a == axis)
+                    && tab.root.resize_pane(area, tab.active_pane, axis, delta)
                 {
-                    tab.root.adjust_ratio(&path, delta);
+                    self.save_session_file();
+                }
+            }
+            AppAction::EqualizePanes => {
+                if let Some(tab) = self.win.tabs.get_mut(self.win.active)
+                    && tab.root.equalize_all()
+                {
+                    self.save_session_file();
                 }
             }
             AppAction::SelectBlockPrev => self.select_block(-1),
@@ -9228,8 +10006,9 @@ impl App {
             AppAction::CopyBlockOutput => {
                 if let Some((pane_id, block)) = self.selected_or_last_block() {
                     let text = self
+                        .win
                         .tabs
-                        .get(self.active)
+                        .get(self.win.active)
                         .and_then(|t| t.pane(pane_id))
                         .and_then(|p| terminal::block_output_text(&p.session, block));
                     if let Some(text) = text {
@@ -9238,10 +10017,14 @@ impl App {
                 }
             }
             AppAction::Reinput => {
-                if self.editor_active
+                if self.win.editor_active
                     && let Some((pane_id, block)) = self.selected_or_last_block()
                     && let Some(cmd) = self.block_command(pane_id, block)
-                    && let Some(pane) = self.tabs.get_mut(self.active).and_then(|t| t.active_mut())
+                    && let Some(pane) = self
+                        .win
+                        .tabs
+                        .get_mut(self.win.active)
+                        .and_then(|t| t.active_mut())
                 {
                     pane.editor.clear();
                     pane.editor.insert(&cmd);
@@ -9254,8 +10037,9 @@ impl App {
             AppAction::BlockMenu => {
                 if let Some((pane_id, block)) = self.selected_or_last_block() {
                     let anchor = self
+                        .win
                         .tabs
-                        .get(self.active)
+                        .get(self.win.active)
                         .and_then(|t| t.pane(pane_id))
                         .and_then(|p| {
                             let y = p.rows.iter().find_map(|r| match r.kind {
@@ -9274,31 +10058,37 @@ impl App {
                             // the viewport top (rows cache refreshes next frame)
                             self.jump_to_block(pane_id, block);
                             let pos = self
+                                .win
                                 .tabs
-                                .get(self.active)
+                                .get(self.win.active)
                                 .and_then(|t| t.pane(pane_id))
                                 .and_then(|p| p.last_grid)
                                 .map(|g| (g.x + 24.0, g.y + g.line_h))
-                                .unwrap_or(self.mouse);
+                                .unwrap_or(self.win.mouse);
                             self.open_context_menu(pane_id, block, pos);
                         }
                     }
                 }
             }
         }
-        if let Some(w) = &self.window {
+        if let Some(w) = &self.win.window {
             w.request_redraw();
         }
     }
 
     /// Switch to tab `idx`, clearing transient state on the pane being left.
     fn switch_tab(&mut self, idx: usize) {
-        self.settings.open = false;
-        if let Some(pane) = self.tabs.get_mut(self.active).and_then(|t| t.active_mut()) {
+        self.win.settings.open = false;
+        if let Some(pane) = self
+            .win
+            .tabs
+            .get_mut(self.win.active)
+            .and_then(|t| t.active_mut())
+        {
             pane.selected_block = None;
         }
-        self.active = idx;
-        self.tabs[idx].activity = false;
+        self.win.active = idx;
+        self.win.tabs[idx].activity = false;
         self.save_session();
     }
 
@@ -9312,7 +10102,7 @@ impl App {
         use winit::keyboard::{Key, NamedKey};
 
         // an open select list: ↑ ↓ move, ⏎ picks, Esc closes
-        if let Some(dd) = self.settings.dropdown.as_mut() {
+        if let Some(dd) = self.win.settings.dropdown.as_mut() {
             let n = dd.options.len();
             match &event.logical_key {
                 Key::Named(NamedKey::ArrowUp) => dd.highlight = dd.highlight.saturating_sub(1),
@@ -9320,12 +10110,12 @@ impl App {
                     dd.highlight = (dd.highlight + 1).min(n.saturating_sub(1))
                 }
                 Key::Named(NamedKey::Enter | NamedKey::Space) => {
-                    let dd = self.settings.dropdown.take().unwrap_or_default();
+                    let dd = self.win.settings.dropdown.take().unwrap_or_default();
                     if let Some((value, _)) = dd.options.get(dd.highlight) {
                         self.set_select(dd.id, value.clone());
                     }
                 }
-                _ => self.settings.dropdown = None,
+                _ => self.win.settings.dropdown = None,
             }
             return true;
         }
@@ -9333,34 +10123,36 @@ impl App {
         if self.relay_edit_key(event) {
             return true;
         }
-        let recording = self.settings.recording.is_some();
+        let recording = self.win.settings.recording.is_some();
         if !recording && self.handle_settings_focus_key(event, event_loop, window) {
             return true;
         }
-        if self.settings.page == settings::Page::Keybindings && self.handle_keybindings_key(event) {
+        if self.win.settings.page == settings::Page::Keybindings
+            && self.handle_keybindings_key(event)
+        {
             return true;
         }
-        let mods = self.modifiers;
+        let mods = self.win.modifiers;
         let action = input::app_action(event, mods, &self.keymap);
         // Esc clears the search first, then closes the Settings tab
         if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
-            if self.settings.query.is_empty() {
-                self.settings.close_tab();
+            if self.win.settings.query.is_empty() {
+                self.win.settings.close_tab();
             } else {
-                self.settings.query.clear();
-                self.settings.scroll = 0.0;
+                self.win.settings.query.clear();
+                self.win.settings.scroll = 0.0;
             }
             return true;
         }
         match action {
             Some(AppAction::OpenSettings) => {
-                self.settings.open = false;
-                self.settings.focus = None;
+                self.win.settings.open = false;
+                self.win.settings.focus = None;
                 return true;
             }
             // ⌘W in the Settings tab closes it
             Some(AppAction::ClosePane) => {
-                self.settings.close_tab();
+                self.win.settings.close_tab();
                 return true;
             }
             // the terminal's scroll keys (plain Home / End / PageUp /
@@ -9373,8 +10165,8 @@ impl App {
             ) => {}
             // tabs, palette and the rest act as from any tab (leaving this one)
             Some(a) => {
-                self.settings.open = false;
-                self.settings.focus = None;
+                self.win.settings.open = false;
+                self.win.settings.focus = None;
                 self.handle_action(a, event_loop);
                 return true;
             }
@@ -9382,15 +10174,15 @@ impl App {
         }
         // typing searches every page (Keybindings filters its own list)
         let plain = !mods.control_key() && !mods.super_key() && !mods.alt_key();
-        if plain && self.settings.page != settings::Page::Keybindings {
+        if plain && self.win.settings.page != settings::Page::Keybindings {
             match &event.logical_key {
-                Key::Named(NamedKey::Backspace) if !self.settings.query.is_empty() => {
-                    self.settings.query.pop();
-                    self.settings.scroll = 0.0;
+                Key::Named(NamedKey::Backspace) if !self.win.settings.query.is_empty() => {
+                    self.win.settings.query.pop();
+                    self.win.settings.scroll = 0.0;
                     return true;
                 }
-                Key::Named(NamedKey::Space) if !self.settings.query.is_empty() => {
-                    self.settings.query.push(' ');
+                Key::Named(NamedKey::Space) if !self.win.settings.query.is_empty() => {
+                    self.win.settings.query.push(' ');
                     return true;
                 }
                 _ => {
@@ -9398,9 +10190,9 @@ impl App {
                         && !text.is_empty()
                         && !text.chars().any(|c| c.is_control() || c == ' ')
                     {
-                        self.settings.query.push_str(text);
-                        self.settings.scroll = 0.0;
-                        self.settings.focus = None;
+                        self.win.settings.query.push_str(text);
+                        self.win.settings.scroll = 0.0;
+                        self.win.settings.focus = None;
                         return true;
                     }
                 }
@@ -9408,20 +10200,22 @@ impl App {
         }
         match event.logical_key {
             Key::Named(NamedKey::ArrowUp | NamedKey::ArrowLeft) => {
-                self.settings.move_page(-1);
+                self.win.settings.move_page(-1);
                 true
             }
             Key::Named(NamedKey::ArrowDown | NamedKey::ArrowRight) => {
-                self.settings.move_page(1);
+                self.win.settings.move_page(1);
                 true
             }
             Key::Named(NamedKey::Home) => {
-                self.settings
+                self.win
+                    .settings
                     .open_page(crate::views::settings::Page::General);
                 true
             }
             Key::Named(NamedKey::End) => {
-                self.settings
+                self.win
+                    .settings
                     .open_page(crate::views::settings::Page::Themes);
                 true
             }
@@ -9431,7 +10225,7 @@ impl App {
                 } else {
                     -10.0
                 };
-                self.settings.scroll_by(direction);
+                self.win.settings.scroll_by(direction);
                 true
             }
             _ => false,
@@ -9449,14 +10243,15 @@ impl App {
     ) -> bool {
         use crate::views::settings;
         use winit::keyboard::{Key, NamedKey};
-        let mods = self.modifiers;
+        let mods = self.win.modifiers;
         if mods.super_key() || mods.control_key() || mods.alt_key() {
             return false;
         }
-        let order = settings::focus_order(&self.hits);
+        let order = settings::focus_order(&self.win.hits);
         // every control of the page, also scrolled away (page coordinates)
         let mut stops = settings::focus_order(
             &self
+                .win
                 .settings_stops
                 .iter()
                 .map(|(target, rect)| Hit {
@@ -9475,13 +10270,14 @@ impl App {
         stops.extend(fixed);
         // a control that left the page (re-laid out) loses the focus; one
         // merely scrolled away keeps it
-        if let Some(f) = &self.settings.focus
+        if let Some(f) = &self.win.settings.focus
             && !stops.iter().any(|(t, _)| t == f)
         {
-            self.settings.focus = None;
+            self.win.settings.focus = None;
         }
         // on screen: what Space / Enter press
         let focused = self
+            .win
             .settings
             .focus
             .clone()
@@ -9489,7 +10285,7 @@ impl App {
         match (&event.logical_key, focused) {
             (Key::Named(NamedKey::Tab), _) => {
                 let delta = if mods.shift_key() { -1 } else { 1 };
-                let next = settings::next_focus(&stops, self.settings.focus.as_ref(), delta);
+                let next = settings::next_focus(&stops, self.win.settings.focus.as_ref(), delta);
                 if let Some(rect) = next
                     .as_ref()
                     .and_then(|n| stops[..scrolled].iter().find(|(t, _)| t == n))
@@ -9497,10 +10293,10 @@ impl App {
                 {
                     self.scroll_settings_into_view(rect);
                 }
-                self.settings.focus = next;
+                self.win.settings.focus = next;
             }
-            (Key::Named(NamedKey::Escape), _) if self.settings.focus.is_some() => {
-                self.settings.focus = None
+            (Key::Named(NamedKey::Escape), _) if self.win.settings.focus.is_some() => {
+                self.win.settings.focus = None
             }
             (
                 Key::Named(NamedKey::ArrowUp | NamedKey::ArrowDown),
@@ -9511,7 +10307,7 @@ impl App {
                 } else {
                     -1
                 };
-                self.settings.scroll_history(rows);
+                self.win.settings.scroll_history(rows);
             }
             (
                 Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowRight),
@@ -9526,6 +10322,7 @@ impl App {
                     "line_height" => (self.config.line_height() - 1.0) / 1.2,
                     "window_opacity" => settings::opacity_slider(self.config.opacity()),
                     "window_blur" => settings::blur_slider(self.config.blur()),
+                    "inactive_pane_dim" => settings::dim_slider(self.config.inactive_pane_dim),
                     _ => return true,
                 };
                 self.set_slider(id, (t + step).clamp(0.0, 1.0));
@@ -9535,19 +10332,20 @@ impl App {
                 if press_key(key) && !matches!(target, ClickTarget::SettingsSlider(_)) =>
             {
                 // press it through the normal pointer routing
-                let saved = self.mouse;
-                self.mouse = (rect[0] + rect[2] / 2.0, rect[1] + rect[3] / 2.0);
+                let saved = self.win.mouse;
+                self.win.mouse = (rect[0] + rect[2] / 2.0, rect[1] + rect[3] / 2.0);
                 self.on_left(ElementState::Pressed, event_loop, window);
                 self.on_left(ElementState::Released, event_loop, window);
-                self.mouse = saved;
+                self.win.mouse = saved;
                 // a pressed ↺ disappears: the focus moves on to its control
                 if matches!(target, ClickTarget::SettingsReset(_)) {
-                    self.settings.focus = settings::next_focus(&stops, Some(&target), 1);
+                    self.win.settings.focus = settings::next_focus(&stops, Some(&target), 1);
                 }
             }
             // focused but scrolled away: the first key brings it back
-            (key, None) if press_key(key) && self.settings.focus.is_some() => {
+            (key, None) if press_key(key) && self.win.settings.focus.is_some() => {
                 if let Some(rect) = self
+                    .win
                     .settings
                     .focus
                     .as_ref()
@@ -9568,7 +10366,7 @@ impl App {
     fn scroll_settings_into_view(&mut self, rect: [f32; 4]) {
         let (_, lh) = self.logical_size();
         let (view_top, view_bottom) = (TAB_BAR_H + 12.0, lh - 34.0 - 12.0);
-        let s = &mut self.settings;
+        let s = &mut self.win.settings;
         let y = rect[1] - s.scroll;
         if y < view_top {
             s.scroll -= view_top - y;
@@ -9583,16 +10381,16 @@ impl App {
     /// Returns true when consumed.
     fn handle_keybindings_key(&mut self, event: &input::KeyPress) -> bool {
         use winit::keyboard::{Key, NamedKey};
-        let mods = self.modifiers;
-        if let Some(action) = self.settings.recording.clone() {
+        let mods = self.win.modifiers;
+        if let Some(action) = self.win.settings.recording.clone() {
             let plain = !mods.control_key() && !mods.alt_key() && !mods.super_key();
             match &event.logical_key {
                 Key::Named(NamedKey::Escape) if plain => {
-                    self.settings.recording = None;
+                    self.win.settings.recording = None;
                     return true;
                 }
                 Key::Named(NamedKey::Backspace) if plain && !mods.shift_key() => {
-                    self.settings.recording = None;
+                    self.win.settings.recording = None;
                     self.config
                         .keybindings
                         .insert(action.clone(), "none".into());
@@ -9624,7 +10422,7 @@ impl App {
                 cmd: mods.super_key(),
                 key,
             };
-            self.settings.recording = None;
+            self.win.settings.recording = None;
             let chord = binding.chord();
             // the chord moves: whoever had it keeps its other shortcuts
             let mut note = String::new();
@@ -9652,23 +10450,23 @@ impl App {
             return false;
         }
         match &event.logical_key {
-            Key::Named(NamedKey::Backspace) if !self.settings.kb_filter.is_empty() => {
-                self.settings.kb_filter.pop();
-                self.settings.scroll = 0.0;
+            Key::Named(NamedKey::Backspace) if !self.win.settings.kb_filter.is_empty() => {
+                self.win.settings.kb_filter.pop();
+                self.win.settings.scroll = 0.0;
                 true
             }
-            Key::Named(NamedKey::Escape) if !self.settings.kb_filter.is_empty() => {
-                self.settings.kb_filter.clear();
+            Key::Named(NamedKey::Escape) if !self.win.settings.kb_filter.is_empty() => {
+                self.win.settings.kb_filter.clear();
                 true
             }
             Key::Named(NamedKey::Space) => {
-                self.settings.kb_filter.push(' ');
+                self.win.settings.kb_filter.push(' ');
                 true
             }
             Key::Character(_) => match &event.text {
                 Some(t) if !t.chars().any(char::is_control) => {
-                    self.settings.kb_filter.push_str(t);
-                    self.settings.scroll = 0.0;
+                    self.win.settings.kb_filter.push_str(t);
+                    self.win.settings.scroll = 0.0;
                     true
                 }
                 _ => false,
@@ -9680,7 +10478,11 @@ impl App {
     fn handle_editor_key(&mut self, key: EditorKey) {
         // an offered correction is accepted with → / Tab / End in an empty editor
         if matches!(key, EditorKey::Right | EditorKey::Complete | EditorKey::End)
-            && let Some(pane) = self.tabs.get_mut(self.active).and_then(|t| t.active_mut())
+            && let Some(pane) = self
+                .win
+                .tabs
+                .get_mut(self.win.active)
+                .and_then(|t| t.active_mut())
             && pane.editor.buffer.is_empty()
             && let Some(fix) = pane.correction.take()
         {
@@ -9694,7 +10496,11 @@ impl App {
         if key == EditorKey::Insert(" ".into())
             && self.config.alias_expansion
             && let Some(env) = self.shell_env.clone()
-            && let Some(pane) = self.tabs.get_mut(self.active).and_then(|t| t.active_mut())
+            && let Some(pane) = self
+                .win
+                .tabs
+                .get_mut(self.win.active)
+                .and_then(|t| t.active_mut())
             && pane.editor.selection().is_none()
             && let Some((range, expansion)) =
                 env.expand_alias_at(&pane.editor.buffer, pane.editor.cursor)
@@ -9708,22 +10514,22 @@ impl App {
             self.completion_intent = None;
         }
         // completion popup intercepts navigation keys
-        if self.completion.open {
+        if self.win.completion.open {
             match key {
                 EditorKey::HistoryUp => {
-                    self.completion.selected = self.completion.selected.saturating_sub(1);
+                    self.win.completion.selected = self.win.completion.selected.saturating_sub(1);
                     self.blink_epoch = Instant::now();
                     return;
                 }
                 EditorKey::HistoryDown => {
-                    if self.completion.selected + 1 < self.completion.items.len() {
-                        self.completion.selected += 1;
+                    if self.win.completion.selected + 1 < self.win.completion.items.len() {
+                        self.win.completion.selected += 1;
                     }
                     self.blink_epoch = Instant::now();
                     return;
                 }
                 EditorKey::Dismiss => {
-                    self.completion.close();
+                    self.win.completion.close();
                     return;
                 }
                 _ => {}
@@ -9739,8 +10545,8 @@ impl App {
             return;
         }
         if key == EditorKey::NextCompletionSource {
-            if self.completion.open {
-                self.completion.cycle_source();
+            if self.win.completion.open {
+                self.win.completion.cycle_source();
             }
             return;
         }
@@ -9751,29 +10557,36 @@ impl App {
         }
         // → at the end of the line takes the whole ghost (Warp; the → chip)
         if key == EditorKey::Right
-            && !self.completion.ghost.is_empty()
+            && !self.win.completion.ghost.is_empty()
             && self.completion_pending.is_none()
             && self
+                .win
                 .tabs
-                .get(self.active)
+                .get(self.win.active)
                 .and_then(|t| t.active())
                 .is_some_and(|p| {
                     p.editor.cursor == p.editor.buffer.len() && p.editor.selection().is_none()
                 })
         {
-            let ghost = self.completion.ghost.clone();
-            if let Some(pane) = self.tabs.get_mut(self.active).and_then(|t| t.active_mut()) {
+            let ghost = self.win.completion.ghost.clone();
+            if let Some(pane) = self
+                .win
+                .tabs
+                .get_mut(self.win.active)
+                .and_then(|t| t.active_mut())
+            {
                 pane.editor.insert(&ghost);
             }
-            self.completion.close();
+            self.win.completion.close();
             self.update_completions();
             self.blink_epoch = Instant::now();
             return;
         }
 
         let Some(id) = self
+            .win
             .tabs
-            .get(self.active)
+            .get(self.win.active)
             .and_then(|t| t.active())
             .map(|p| p.session.id)
         else {
@@ -9874,7 +10687,7 @@ impl App {
             }
         }
         if active && (submitted.is_some() || signal.is_some()) {
-            self.completion.close();
+            self.win.completion.close();
         }
         if let Some(text) = cut {
             self.copy_to_clipboard(text);
@@ -9921,7 +10734,8 @@ impl App {
     }
 
     fn find_tab_of_pane(&mut self, pane: PaneId) -> Option<(usize, &mut TabState)> {
-        self.tabs
+        self.win
+            .tabs
             .iter_mut()
             .enumerate()
             .find(|(_, t)| t.panes.iter().any(|p| p.session.id == pane))
@@ -9930,20 +10744,23 @@ impl App {
     /// Commands still running inside `scope` (the close warning lists them).
     fn running_in(&self, scope: CloseScope) -> Vec<String> {
         let panes: Vec<&PaneState> = match scope {
-            CloseScope::Pane(id) => self.tabs.iter().filter_map(|t| t.pane(id)).collect(),
+            CloseScope::Pane(id) => self.win.tabs.iter().filter_map(|t| t.pane(id)).collect(),
             CloseScope::Tab(i) => self
+                .win
                 .tabs
                 .get(i)
                 .map(|t| t.panes.iter().collect())
                 .unwrap_or_default(),
             CloseScope::OtherTabs(keep) => self
+                .win
                 .tabs
                 .iter()
                 .enumerate()
                 .filter(|(i, _)| *i != keep)
                 .flat_map(|(_, t)| t.panes.iter())
                 .collect(),
-            CloseScope::Window => self.tabs.iter().flat_map(|t| t.panes.iter()).collect(),
+            CloseScope::Window => self.win.tabs.iter().flat_map(|t| t.panes.iter()).collect(),
+            CloseScope::App => self.all_panes().collect(),
         };
         panes
             .into_iter()
@@ -9965,10 +10782,28 @@ impl App {
             .collect()
     }
 
+    /// Closing `scope` quits Rift: the app, or what empties the last
+    /// ordinary window (the drop-down hotkey window does not keep the app
+    /// open, and its shells end with it).
+    fn quits(&self, scope: CloseScope) -> bool {
+        let last = self.ordinary_window_count() <= usize::from(self.win.dropdown.is_none());
+        match scope {
+            CloseScope::App => true,
+            CloseScope::Window => last,
+            CloseScope::Tab(_) => last && self.win.tabs.len() == 1,
+            CloseScope::Pane(id) => {
+                last && self.win.tabs.len() == 1
+                    && self.win.tabs[0].panes.len() == 1
+                    && self.win.tabs[0].pane(id).is_some()
+            }
+            CloseScope::OtherTabs(_) => false,
+        }
+    }
+
     /// Close/quit entry point: warns first when something is still running,
     /// and before a quit while a phone is connected.
     fn request_close(&mut self, scope: CloseScope, event_loop: &ActiveEventLoop) {
-        if matches!(scope, CloseScope::Window) && self.update.busy {
+        if self.quits(scope) && self.update.busy {
             // quitting mid-install could leave a half-finished update
             self.update.quit_after = true;
             self.app_note(
@@ -9980,20 +10815,25 @@ impl App {
             return;
         }
         // a quit ends every shell, so the phone loses what it shows
-        let phones = matches!(scope, CloseScope::Window) && !self.connected_phones().is_empty();
+        let phones = self.quits(scope) && !self.connected_phones().is_empty();
         if self.config.confirm_close_running || phones {
             let commands = if self.config.confirm_close_running {
-                self.running_in(scope)
+                // a quit ends the shells of every window
+                self.running_in(if self.quits(scope) {
+                    CloseScope::App
+                } else {
+                    scope
+                })
             } else {
                 Vec::new()
             };
             if !commands.is_empty() || phones {
-                self.confirm = Some(ConfirmClose {
+                self.win.confirm = Some(ConfirmClose {
                     opened: Instant::now(),
                     action: ConfirmAction::Close(scope),
                     commands,
                 });
-                if let Some(w) = &self.window {
+                if let Some(w) = &self.win.window {
                     w.request_redraw();
                 }
                 return;
@@ -10007,6 +10847,7 @@ impl App {
             CloseScope::Pane(id) => self.close_pane(id, event_loop),
             CloseScope::Tab(i) => {
                 let ids: Vec<PaneId> = self
+                    .win
                     .tabs
                     .get(i)
                     .map(|t| t.panes.iter().map(|p| p.session.id).collect())
@@ -10017,6 +10858,7 @@ impl App {
             }
             CloseScope::OtherTabs(keep) => {
                 let ids: Vec<PaneId> = self
+                    .win
                     .tabs
                     .iter()
                     .enumerate()
@@ -10026,21 +10868,23 @@ impl App {
                 for id in ids {
                     self.close_pane(id, event_loop);
                 }
-                self.active = 0;
+                self.win.active = 0;
                 self.save_session();
             }
-            CloseScope::Window => {
+            // one of several windows: it closes, its shells end
+            CloseScope::Window if self.close_window() => {}
+            CloseScope::Window | CloseScope::App => {
                 // a quit is intentional: every shell ends and the next launch
                 // starts fresh (an update's restart, a crash or a reboot
                 // keep the layout and reattach durable shells instead)
-                for p in self.tabs.iter().flat_map(|t| &t.panes) {
+                for p in self.all_panes() {
                     p.session.terminate();
                 }
                 self.save_fresh_session();
                 crate::quit::exit(event_loop);
             }
         }
-        if let Some(w) = &self.window {
+        if let Some(w) = &self.win.window {
             w.request_redraw();
         }
     }
@@ -10055,10 +10899,11 @@ impl App {
                 // a held or typed-ahead Enter (e.g. right after ⌘W or a
                 // paste) must not accept a dialog the user has not seen
                 if self
+                    .win
                     .confirm
                     .as_ref()
                     .is_some_and(|c| confirm_accepts(event.repeat, c.opened.elapsed()))
-                    && let Some(c) = self.confirm.take()
+                    && let Some(c) = self.win.confirm.take()
                 {
                     self.perform_confirmed(c.action, event_loop);
                 }
@@ -10071,19 +10916,19 @@ impl App {
     /// scroll. False for anything else.
     fn handle_viewer_key(&mut self, event: &input::KeyPress) -> bool {
         use winit::keyboard::{Key, NamedKey};
-        let page = self.viewer.page();
+        let page = self.win.viewer.page();
         match &event.logical_key {
-            Key::Named(NamedKey::Escape) => self.viewer.close(),
-            Key::Named(NamedKey::ArrowDown) => self.viewer.scroll_by(20.0),
-            Key::Named(NamedKey::ArrowUp) => self.viewer.scroll_by(-20.0),
+            Key::Named(NamedKey::Escape) => self.win.viewer.close(),
+            Key::Named(NamedKey::ArrowDown) => self.win.viewer.scroll_by(20.0),
+            Key::Named(NamedKey::ArrowUp) => self.win.viewer.scroll_by(-20.0),
             // ← → scroll the source view sideways (rendered: the code block
             // under the pointer)
-            Key::Named(NamedKey::ArrowRight) => self.viewer.scroll_x_by(40.0, self.mouse.1),
-            Key::Named(NamedKey::ArrowLeft) => self.viewer.scroll_x_by(-40.0, self.mouse.1),
-            Key::Named(NamedKey::PageDown | NamedKey::Space) => self.viewer.scroll_by(page),
-            Key::Named(NamedKey::PageUp) => self.viewer.scroll_by(-page),
-            Key::Named(NamedKey::Home) => self.viewer.scroll_by(f32::NEG_INFINITY),
-            Key::Named(NamedKey::End) => self.viewer.scroll_by(f32::INFINITY),
+            Key::Named(NamedKey::ArrowRight) => self.win.viewer.scroll_x_by(40.0, self.win.mouse.1),
+            Key::Named(NamedKey::ArrowLeft) => self.win.viewer.scroll_x_by(-40.0, self.win.mouse.1),
+            Key::Named(NamedKey::PageDown | NamedKey::Space) => self.win.viewer.scroll_by(page),
+            Key::Named(NamedKey::PageUp) => self.win.viewer.scroll_by(-page),
+            Key::Named(NamedKey::Home) => self.win.viewer.scroll_by(f32::NEG_INFINITY),
+            Key::Named(NamedKey::End) => self.win.viewer.scroll_by(f32::INFINITY),
             _ => return false,
         }
         true
@@ -10093,14 +10938,15 @@ impl App {
     /// (a release without travel is a click).
     fn prompt_editor_press(&mut self) {
         use crate::views::prompt_editor::{Drag, Target};
-        let (mx, my) = self.mouse;
+        let (mx, my) = self.win.mouse;
         let hit = self
+            .win
             .prompt_editor_layout
             .hits
             .iter()
             .find(|(r, _)| mx >= r[0] && mx < r[0] + r[2] && my >= r[1] && my < r[1] + r[3])
             .map(|(_, t)| *t);
-        let Some(ed) = &mut self.prompt_editor else {
+        let Some(ed) = &mut self.win.prompt_editor else {
             return;
         };
         match hit {
@@ -10108,7 +10954,7 @@ impl App {
                 ed.drag = Some(Drag {
                     chip,
                     from: None,
-                    press: self.mouse,
+                    press: self.win.mouse,
                     live: false,
                 })
             }
@@ -10117,14 +10963,14 @@ impl App {
                     ed.drag = Some(Drag {
                         chip,
                         from: Some(i),
-                        press: self.mouse,
+                        press: self.win.mouse,
                         live: false,
                     });
                 }
             }
             Some(Target::Remove(i)) => ed.remove(i),
             Some(Target::Restore) => ed.restore_default(),
-            Some(Target::Cancel) => self.prompt_editor = None,
+            Some(Target::Cancel) => self.win.prompt_editor = None,
             Some(Target::Save) => self.save_prompt_editor(),
             None => {}
         }
@@ -10133,11 +10979,11 @@ impl App {
     /// A release in "Edit prompt": a drag drops into the box (or, from the
     /// box, out of it to remove the chip); a palette chip clicked is added.
     fn prompt_editor_release(&mut self) {
-        let layout = &self.prompt_editor_layout;
-        let (mx, my) = self.mouse;
+        let layout = &self.win.prompt_editor_layout;
+        let (mx, my) = self.win.mouse;
         let b = layout.drop_box;
         let in_box = mx >= b[0] && mx < b[0] + b[2] && my >= b[1] && my < b[1] + b[3];
-        let Some(ed) = &mut self.prompt_editor else {
+        let Some(ed) = &mut self.win.prompt_editor else {
             return;
         };
         let Some(d) = ed.drag.take() else {
@@ -10148,7 +10994,7 @@ impl App {
                 ed.add(d.chip);
             }
         } else if in_box {
-            let at = crate::views::prompt_editor::drop_index(&layout.slots, d.from, self.mouse);
+            let at = crate::views::prompt_editor::drop_index(&layout.slots, d.from, self.win.mouse);
             ed.place(d.chip, at);
         } else if let Some(i) = d.from {
             ed.remove(i);
@@ -10157,7 +11003,7 @@ impl App {
 
     /// Keep "Edit prompt"'s chips and close it.
     fn save_prompt_editor(&mut self) {
-        let Some(ed) = self.prompt_editor.take() else {
+        let Some(ed) = self.win.prompt_editor.take() else {
             return;
         };
         if ed.changed() {
@@ -10180,17 +11026,15 @@ impl App {
             .config
             .prompt_chips
             .contains(&rift_core::PromptChip::Docker);
-        for tab in &self.tabs {
-            for pane in &tab.panes {
-                let Some(cwd) = pane.session.cwd.lock().unwrap().clone() else {
-                    continue;
-                };
-                if let Some(worker) = &self.git {
-                    worker.request(pane.session.id, cwd.clone().into());
-                }
-                if docker && let Some(worker) = &self.docker_worker {
-                    worker.request(pane.session.id, cwd.into());
-                }
+        for pane in self.all_panes() {
+            let Some(cwd) = pane.session.local_cwd() else {
+                continue;
+            };
+            if let Some(worker) = &self.git {
+                worker.request(pane.session.id, cwd.clone().into());
+            }
+            if docker && let Some(worker) = &self.docker_worker {
+                worker.request(pane.session.id, cwd.into());
             }
         }
     }
@@ -10200,6 +11044,7 @@ impl App {
         use crate::views::chip_menu::{ChipKind, ChipMenu};
         let target = ClickTarget::Chip(pane, kind.chip());
         let Some(anchor) = self
+            .win
             .hits
             .iter()
             .find(|h| h.target == target)
@@ -10207,18 +11052,18 @@ impl App {
         else {
             return;
         };
-        let Some(tab) = self.tabs.get_mut(self.active) else {
+        let Some(tab) = self.win.tabs.get_mut(self.win.active) else {
             return;
         };
         tab.active_pane = pane;
         let Some(p) = tab.pane(pane) else {
             return;
         };
-        let cwd = p.session.cwd.lock().unwrap().clone();
+        let cwd = p.session.local_cwd();
         let Some(cwd) = cwd.map(std::path::PathBuf::from) else {
             return;
         };
-        self.chip_menu = Some(match kind {
+        self.win.chip_menu = Some(match kind {
             ChipKind::Dir => ChipMenu::dirs(pane, anchor, &cwd),
             ChipKind::Branch => {
                 let current = p.git.as_ref().map(|g| g.branch.clone()).unwrap_or_default();
@@ -10242,7 +11087,7 @@ impl App {
     /// Run the picker's result `i` (`cd …` / `git checkout …`) as a command
     /// in its pane, which must be at its prompt.
     fn apply_chip_menu(&mut self, i: usize) {
-        let Some(menu) = self.chip_menu.take() else {
+        let Some(menu) = self.win.chip_menu.take() else {
             return;
         };
         let Some(item) = menu.results().into_iter().nth(i) else {
@@ -10267,11 +11112,11 @@ impl App {
     /// Picker keys: typing filters, ↑↓ select, Enter runs, Esc closes.
     fn handle_chip_menu_key(&mut self, event: &input::KeyPress) {
         use winit::keyboard::{Key, NamedKey};
-        let Some(menu) = &mut self.chip_menu else {
+        let Some(menu) = &mut self.win.chip_menu else {
             return;
         };
         match &event.logical_key {
-            Key::Named(NamedKey::Escape) => self.chip_menu = None,
+            Key::Named(NamedKey::Escape) => self.win.chip_menu = None,
             Key::Named(NamedKey::Enter) => {
                 let i = menu.selected;
                 self.apply_chip_menu(i);
@@ -10290,8 +11135,8 @@ impl App {
                 menu.set_query(q);
             }
             _ => {
-                if !self.modifiers.super_key()
-                    && !self.modifiers.control_key()
+                if !self.win.modifiers.super_key()
+                    && !self.win.modifiers.control_key()
                     && let Some(text) = &event.text
                     && !text.is_empty()
                     && !text.chars().any(|c| c.is_control())
@@ -10308,18 +11153,18 @@ impl App {
     /// under the pointer). False for anything else.
     fn handle_review_key(&mut self, event: &input::KeyPress) -> bool {
         use winit::keyboard::{Key, NamedKey};
-        let page = (self.review.view_h - 40.0).max(40.0);
-        let y = self.mouse.1;
+        let page = (self.win.review.view_h - 40.0).max(40.0);
+        let y = self.win.mouse.1;
         match &event.logical_key {
-            Key::Named(NamedKey::Escape) => self.review.maximized = false,
-            Key::Named(NamedKey::ArrowDown) => self.review.scroll_by(40.0),
-            Key::Named(NamedKey::ArrowUp) => self.review.scroll_by(-40.0),
-            Key::Named(NamedKey::ArrowRight) => self.review.scroll_x_by(40.0, y),
-            Key::Named(NamedKey::ArrowLeft) => self.review.scroll_x_by(-40.0, y),
-            Key::Named(NamedKey::PageDown | NamedKey::Space) => self.review.scroll_by(page),
-            Key::Named(NamedKey::PageUp) => self.review.scroll_by(-page),
-            Key::Named(NamedKey::Home) => self.review.scroll_by(f32::NEG_INFINITY),
-            Key::Named(NamedKey::End) => self.review.scroll_by(f32::INFINITY),
+            Key::Named(NamedKey::Escape) => self.win.review.maximized = false,
+            Key::Named(NamedKey::ArrowDown) => self.win.review.scroll_by(40.0),
+            Key::Named(NamedKey::ArrowUp) => self.win.review.scroll_by(-40.0),
+            Key::Named(NamedKey::ArrowRight) => self.win.review.scroll_x_by(40.0, y),
+            Key::Named(NamedKey::ArrowLeft) => self.win.review.scroll_x_by(-40.0, y),
+            Key::Named(NamedKey::PageDown | NamedKey::Space) => self.win.review.scroll_by(page),
+            Key::Named(NamedKey::PageUp) => self.win.review.scroll_by(-page),
+            Key::Named(NamedKey::Home) => self.win.review.scroll_by(f32::NEG_INFINITY),
+            Key::Named(NamedKey::End) => self.win.review.scroll_by(f32::INFINITY),
             _ => return false,
         }
         true
@@ -10331,20 +11176,20 @@ impl App {
     fn handle_explorer_key(&mut self, event: &input::KeyPress) -> bool {
         use winit::keyboard::{Key, NamedKey};
         match &event.logical_key {
-            Key::Named(NamedKey::ArrowDown) => self.explorer.move_selection(1),
-            Key::Named(NamedKey::ArrowUp) => self.explorer.move_selection(-1),
-            Key::Named(NamedKey::ArrowLeft) => self.explorer.left(),
-            Key::Named(NamedKey::ArrowRight) => self.explorer.right(),
-            Key::Named(NamedKey::Escape) => self.explorer.focused = false,
+            Key::Named(NamedKey::ArrowDown) => self.win.explorer.move_selection(1),
+            Key::Named(NamedKey::ArrowUp) => self.win.explorer.move_selection(-1),
+            Key::Named(NamedKey::ArrowLeft) => self.win.explorer.left(),
+            Key::Named(NamedKey::ArrowRight) => self.win.explorer.right(),
+            Key::Named(NamedKey::Escape) => self.win.explorer.focused = false,
             Key::Named(NamedKey::Enter) => {
-                let Some(row) = self.explorer.selected_row().cloned() else {
+                let Some(row) = self.win.explorer.selected_row().cloned() else {
                     return true;
                 };
-                if self.modifiers.alt_key() {
-                    self.explorer.focused = false;
+                if self.win.modifiers.alt_key() {
+                    self.win.explorer.focused = false;
                     self.drop_file(&row.path);
                 } else if row.is_dir {
-                    self.explorer.toggle(&row.path);
+                    self.win.explorer.toggle(&row.path);
                 } else {
                     let choice = self.config.file_editor.clone();
                     self.open_file_in(&row.path, &choice);
@@ -10360,8 +11205,9 @@ impl App {
     /// and goes on to the usual routing (returns false).
     fn handle_notifications_key(&mut self, event: &input::KeyPress) -> bool {
         use winit::keyboard::{Key, NamedKey};
-        let chord =
-            self.modifiers.super_key() || self.modifiers.control_key() || self.modifiers.alt_key();
+        let chord = self.win.modifiers.super_key()
+            || self.win.modifiers.control_key()
+            || self.win.modifiers.alt_key();
         let len = self.filtered_notifications().len();
         match &event.logical_key {
             _ if event.released => return false,
@@ -10375,15 +11221,20 @@ impl App {
                 | NamedKey::CapsLock,
             ) => {}
             Key::Named(NamedKey::Escape) => self.close_notifications(),
-            Key::Named(NamedKey::ArrowDown) => self.notifications.move_selection(1, len),
-            Key::Named(NamedKey::ArrowUp) => self.notifications.move_selection(-1, len),
+            Key::Named(NamedKey::ArrowDown) => self.win.notifications.move_selection(1, len),
+            Key::Named(NamedKey::ArrowUp) => self.win.notifications.move_selection(-1, len),
             Key::Named(NamedKey::Tab) => {
-                let delta = if self.modifiers.shift_key() { -1 } else { 1 };
-                let next = self.notifications.filter.cycle(delta);
-                self.notifications.set_filter(next);
+                let delta = if self.win.modifiers.shift_key() {
+                    -1
+                } else {
+                    1
+                };
+                let next = self.win.notifications.filter.cycle(delta);
+                self.win.notifications.set_filter(next);
             }
             Key::Named(NamedKey::Enter) => {
                 let target = self
+                    .win
                     .notifications
                     .selected
                     .and_then(|s| self.filtered_notifications().get(s).map(|e| e.id));
@@ -10406,15 +11257,15 @@ impl App {
     /// Home/End scroll; everything else is swallowed while it is up.
     fn handle_whats_new_key(&mut self, event: &input::KeyPress) {
         use winit::keyboard::{Key, NamedKey};
-        let page = self.whats_new.page();
+        let page = self.win.whats_new.page();
         match &event.logical_key {
-            Key::Named(NamedKey::Escape | NamedKey::Enter) => self.whats_new.open = false,
-            Key::Named(NamedKey::ArrowDown) => self.whats_new.scroll_by(40.0),
-            Key::Named(NamedKey::ArrowUp) => self.whats_new.scroll_by(-40.0),
-            Key::Named(NamedKey::PageDown | NamedKey::Space) => self.whats_new.scroll_by(page),
-            Key::Named(NamedKey::PageUp) => self.whats_new.scroll_by(-page),
-            Key::Named(NamedKey::Home) => self.whats_new.scroll_by(f32::NEG_INFINITY),
-            Key::Named(NamedKey::End) => self.whats_new.scroll_by(f32::INFINITY),
+            Key::Named(NamedKey::Escape | NamedKey::Enter) => self.win.whats_new.open = false,
+            Key::Named(NamedKey::ArrowDown) => self.win.whats_new.scroll_by(40.0),
+            Key::Named(NamedKey::ArrowUp) => self.win.whats_new.scroll_by(-40.0),
+            Key::Named(NamedKey::PageDown | NamedKey::Space) => self.win.whats_new.scroll_by(page),
+            Key::Named(NamedKey::PageUp) => self.win.whats_new.scroll_by(-page),
+            Key::Named(NamedKey::Home) => self.win.whats_new.scroll_by(f32::NEG_INFINITY),
+            Key::Named(NamedKey::End) => self.win.whats_new.scroll_by(f32::INFINITY),
             _ => {}
         }
     }
@@ -10424,7 +11275,7 @@ impl App {
             ConfirmAction::Close(scope) => self.perform_close(scope, event_loop),
             ConfirmAction::Paste { pane, text } => {
                 self.paste_raw(pane, &text);
-                if let Some(w) = &self.window {
+                if let Some(w) = &self.win.window {
                     w.request_redraw();
                 }
             }
@@ -10455,7 +11306,7 @@ impl App {
     /// normal block: ssh prompts and output stay visible and interactive).
     fn open_tab_running(&mut self, title: &str, command: String) {
         self.spawn_tab_at(None);
-        if let Some(tab) = self.tabs.get_mut(self.active) {
+        if let Some(tab) = self.win.tabs.get_mut(self.win.active) {
             tab.custom_title = Some(title.to_string());
             let pane = tab.active_pane;
             self.pending_commands.insert(pane, vec![command]);
@@ -10463,46 +11314,21 @@ impl App {
         self.save_session();
     }
 
-    /// Open another Rift window (a separate process that neither restores
-    /// nor overwrites this window's saved session).
-    fn open_new_window(&mut self) {
-        if self.headless {
-            // a second, ordinary window would show and take focus
-            log::info!("headless: not opening a new window");
-            self.toast("Headless: no new windows".into());
-            return;
-        }
-        let cwd = self.start_dir();
-        match std::env::current_exe() {
-            Ok(exe) => {
-                let mut cmd = std::process::Command::new(exe);
-                cmd.env(crate::updater::SECONDARY_ENV, "1")
-                    .stdin(std::process::Stdio::null());
-                if let Some(dir) = cwd {
-                    cmd.current_dir(dir);
-                }
-                if let Err(e) = cmd.spawn() {
-                    log::warn!("new window: {e}");
-                }
-            }
-            Err(e) => log::warn!("new window: {e}"),
-        }
-    }
-
     /// Directory for a new tab/pane per `working_directory`.
     fn start_dir(&self) -> Option<std::path::PathBuf> {
         let previous = self
+            .win
             .tabs
-            .get(self.active)
+            .get(self.win.active)
             .and_then(|t| t.active())
-            .and_then(|p| p.session.cwd.lock().unwrap().clone());
+            .and_then(|p| p.session.local_cwd());
         self.config.start_dir(previous.as_deref())
     }
 
     /// Panes that receive input typed into `pane` (itself, plus every other
     /// pane of its tab while synchronized inputs are on).
     fn input_targets(&self, pane: PaneId) -> Vec<PaneId> {
-        match self.tabs.iter().find(|t| t.pane(pane).is_some()) {
+        match self.win.tabs.iter().find(|t| t.pane(pane).is_some()) {
             Some(t) if t.sync_inputs => {
                 let mut ids = vec![pane];
                 ids.extend(
@@ -10522,7 +11348,7 @@ impl App {
     /// else panes running a raw program (they take raw keys and pastes).
     /// A pane never receives input meant for the other mode.
     fn synced_siblings(&self, pane: PaneId, at_prompt: bool) -> Vec<PaneId> {
-        let Some(tab) = self.tabs.iter().find(|t| t.pane(pane).is_some()) else {
+        let Some(tab) = self.win.tabs.iter().find(|t| t.pane(pane).is_some()) else {
             return Vec::new();
         };
         self.input_targets(pane)
@@ -10546,16 +11372,17 @@ impl App {
     /// Byte offset in the active editor under the mouse (mono font: the
     /// column is found by measuring the row's shaped prefix widths).
     fn editor_offset_at_mouse(&mut self, pane_id: PaneId) -> Option<usize> {
-        let (text_x, input_y) = self.editor_anchor;
-        let (mx, my) = self.mouse;
+        let (text_x, input_y) = self.win.editor_anchor;
+        let (mx, my) = self.win.mouse;
         let buffer = self
+            .win
             .tabs
-            .get(self.active)?
+            .get(self.win.active)?
             .pane(pane_id)?
             .editor
             .buffer
             .clone();
-        let rows = editor::wrap_rows(&buffer, self.editor_cols);
+        let rows = editor::wrap_rows(&buffer, self.win.editor_cols);
         let row = (((my - input_y) / editor::LINE_H).floor().max(0.0) as usize).min(rows.len() - 1);
         let row_start = rows[row].start;
         let line = &buffer[rows[row].clone()];
@@ -10587,7 +11414,7 @@ impl App {
     /// (double-click selects a word, triple-click the whole command, Shift
     /// extends the selection).
     fn click_editor(&mut self, pane_id: PaneId, clicks: u8) {
-        if let Some(tab) = self.tabs.get_mut(self.active)
+        if let Some(tab) = self.win.tabs.get_mut(self.win.active)
             && tab.active_pane != pane_id
         {
             if let Some(prev) = tab.active_mut() {
@@ -10596,13 +11423,14 @@ impl App {
             tab.active_pane = pane_id;
             return; // first click only focuses; geometry is the old pane's
         }
-        let shift = self.modifiers.shift_key();
+        let shift = self.win.modifiers.shift_key();
         let Some(offset) = self.editor_offset_at_mouse(pane_id) else {
             return;
         };
         let Some(pane) = self
+            .win
             .tabs
-            .get_mut(self.active)
+            .get_mut(self.win.active)
             .and_then(|t| t.pane_mut(pane_id))
         else {
             return;
@@ -10631,7 +11459,7 @@ impl App {
             3 => e.select_all(),
             _ => e.click_to(offset, shift),
         }
-        self.completion.close();
+        self.win.completion.close();
         self.blink_epoch = Instant::now();
     }
 
@@ -10640,8 +11468,9 @@ impl App {
             return;
         };
         if let Some(pane) = self
+            .win
             .tabs
-            .get_mut(self.active)
+            .get_mut(self.win.active)
             .and_then(|t| t.pane_mut(pane_id))
         {
             pane.editor.click_to(offset, true);
@@ -10651,20 +11480,20 @@ impl App {
     /// Begin an inline rename: the current title is pre-filled and fully
     /// selected, so the first keystroke replaces it (Backspace clears it).
     fn start_rename(&mut self, i: usize) {
-        if let Some(t) = self.tabs.get(i) {
-            self.rename = Some((i, t.display_title()));
-            self.rename_fresh = true;
+        if let Some(t) = self.win.tabs.get(i) {
+            self.win.rename = Some((i, t.display_title()));
+            self.win.rename_fresh = true;
         }
     }
 
     /// Inline tab rename keys: type to edit, Enter commits, Esc cancels.
     fn handle_rename_key(&mut self, event: &input::KeyPress) {
         use winit::keyboard::{Key, NamedKey};
-        let Some((i, buf)) = self.rename.as_mut() else {
+        let Some((i, buf)) = self.win.rename.as_mut() else {
             return;
         };
         let i = *i;
-        let fresh = std::mem::take(&mut self.rename_fresh);
+        let fresh = std::mem::take(&mut self.win.rename_fresh);
         if fresh
             && matches!(
                 &event.logical_key,
@@ -10677,10 +11506,10 @@ impl App {
             }
         }
         match &event.logical_key {
-            Key::Named(NamedKey::Escape) => self.rename = None,
+            Key::Named(NamedKey::Escape) => self.win.rename = None,
             Key::Named(NamedKey::Enter) => self.commit_rename(i),
             Key::Named(NamedKey::Backspace) => {
-                if self.modifiers.super_key() || self.modifiers.alt_key() {
+                if self.win.modifiers.super_key() || self.win.modifiers.alt_key() {
                     buf.clear();
                 } else {
                     buf.pop();
@@ -10688,8 +11517,8 @@ impl App {
             }
             Key::Named(NamedKey::Space) => buf.push(' '),
             _ => {
-                if !self.modifiers.super_key()
-                    && !self.modifiers.control_key()
+                if !self.win.modifiers.super_key()
+                    && !self.win.modifiers.control_key()
                     && let Some(text) = &event.text
                     && !text.chars().any(|c| c.is_control())
                     && buf.chars().count() < 60
@@ -10703,8 +11532,8 @@ impl App {
 
     /// Apply the inline rename; an empty name restores the automatic title.
     fn commit_rename(&mut self, i: usize) {
-        if let Some((_, name)) = self.rename.take()
-            && let Some(tab) = self.tabs.get_mut(i)
+        if let Some((_, name)) = self.win.rename.take()
+            && let Some(tab) = self.win.tabs.get_mut(i)
         {
             let name = name.trim().to_string();
             tab.custom_title = (!name.is_empty()).then_some(name);
@@ -10738,7 +11567,7 @@ impl App {
         tab.start_clock(cmd);
         let Some(pane) = tab.pane_mut(id) else { return };
         if !cmd.trim().is_empty() && pane.editor.history.last().map(String::as_str) != Some(cmd) {
-            pane.editor.history.push(cmd.to_string());
+            Arc::make_mut(&mut pane.editor.history).push(cmd.to_string());
         }
         pane.view_offset = 0;
         pane.selected_block = None;
@@ -10776,20 +11605,20 @@ impl App {
         if matches!(
             event.logical_key,
             winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape)
-        ) && (self.tab_drag.is_some_and(|d| d.live)
-            || self.pane_drag.as_ref().is_some_and(|d| d.live))
+        ) && (self.win.tab_drag.is_some_and(|d| d.live)
+            || self.win.pane_drag.as_ref().is_some_and(|d| d.live))
         {
-            if let Some(d) = self.tab_drag.take() {
-                let tab = self.tabs.remove(d.index);
-                let to = d.origin.min(self.tabs.len());
-                self.tabs.insert(to, tab);
-                self.active = to;
+            if let Some(d) = self.win.tab_drag.take() {
+                let tab = self.win.tabs.remove(d.index);
+                let to = d.origin.min(self.win.tabs.len());
+                self.win.tabs.insert(to, tab);
+                self.win.active = to;
                 self.save_session();
             }
             // a pane drag that opened another tab goes back to the pane's own
-            if let Some(d) = self.pane_drag.take()
-                && d.from_tab != self.active
-                && d.from_tab < self.tabs.len()
+            if let Some(d) = self.win.pane_drag.take()
+                && d.from_tab != self.win.active
+                && d.from_tab < self.win.tabs.len()
             {
                 self.switch_tab(d.from_tab);
             }
@@ -10797,16 +11626,16 @@ impl App {
             window.request_redraw();
             return;
         }
-        if self.confirm.is_some() {
+        if self.win.confirm.is_some() {
             self.handle_confirm_key(event, event_loop);
             window.request_redraw();
             return;
         }
-        if self.prompt_editor.is_some() {
+        if self.win.prompt_editor.is_some() {
             // Esc cancels, Enter saves; the dialog owns the keyboard
             match event.logical_key {
                 winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape) => {
-                    self.prompt_editor = None;
+                    self.win.prompt_editor = None;
                 }
                 winit::keyboard::Key::Named(winit::keyboard::NamedKey::Enter) => {
                     self.save_prompt_editor();
@@ -10816,42 +11645,42 @@ impl App {
             window.request_redraw();
             return;
         }
-        if self.whats_new.open {
+        if self.win.whats_new.open {
             self.handle_whats_new_key(event);
             window.request_redraw();
             return;
         }
-        if self.notifications.open && self.handle_notifications_key(event) {
+        if self.win.notifications.open && self.handle_notifications_key(event) {
             window.request_redraw();
             return;
         }
-        if self.hints.is_some() {
+        if self.win.hints.is_some() {
             self.handle_hint_key(event);
             window.request_redraw();
             return;
         }
-        if self.rename.is_some() {
+        if self.win.rename.is_some() {
             self.handle_rename_key(event);
             window.request_redraw();
             return;
         }
-        if self.chip_menu.is_some() {
+        if self.win.chip_menu.is_some() {
             self.handle_chip_menu_key(event);
             window.request_redraw();
             return;
         }
-        if self.context_menu.open {
+        if self.win.context_menu.open {
             if !self.handle_menu_key(event, event_loop) {
-                self.context_menu.close();
+                self.win.context_menu.close();
             }
             window.request_redraw();
             return;
         }
-        if self.palette.open {
-            if input::app_action(event, self.modifiers, &self.keymap)
+        if self.win.palette.open {
+            if input::app_action(event, self.win.modifiers, &self.keymap)
                 == Some(AppAction::TogglePalette)
             {
-                self.palette.open = false;
+                self.win.palette.open = false;
             } else {
                 self.handle_palette_key(event, event_loop);
             }
@@ -10859,7 +11688,7 @@ impl App {
             return;
         }
         // config.toml beside Settings takes the keys while it has focus
-        if self.settings.open && !self.viewer_focused() {
+        if self.win.settings.open && !self.viewer_focused() {
             if self.handle_settings_key(event, event_loop, window) {
                 window.request_redraw();
             }
@@ -10869,7 +11698,7 @@ impl App {
             // the panel covers the command line: it takes the keys it uses,
             // app shortcuts still work, typing is swallowed
             if !self.handle_review_key(event)
-                && let Some(action) = input::app_action(event, self.modifiers, &self.keymap)
+                && let Some(action) = input::app_action(event, self.win.modifiers, &self.keymap)
                 && !action.needs_editor()
                 && (!event.repeat || action.repeatable())
             {
@@ -10881,35 +11710,35 @@ impl App {
         // (closes first if its pane no longer owns the keys: raw mode, another
         // pane, the viewer, an overlay)
         self.sync_history();
-        if self.history.open && self.handle_history_key(event) {
+        if self.win.history.open && self.handle_history_key(event) {
             window.request_redraw();
             return;
         }
-        if self.search.open && self.filter_editing {
+        if self.win.search.open && self.win.filter_editing {
             self.handle_filter_key(event);
             window.request_redraw();
             return;
         }
-        if self.search.open {
-            let action = input::app_action(event, self.modifiers, &self.keymap);
+        if self.win.search.open {
+            let action = input::app_action(event, self.win.modifiers, &self.keymap);
             if action == Some(AppAction::Search) {
-                self.search.close();
+                self.win.search.close();
             } else if action == Some(AppAction::Copy) {
                 self.handle_action(AppAction::Copy, event_loop);
             } else {
-                self.handle_search_key(event, self.modifiers);
+                self.handle_search_key(event, self.win.modifiers);
             }
             window.request_redraw();
             return;
         }
         if self.viewer_focused() {
             // the file's find bar takes typing; chords stay app shortcuts
-            let mods = self.modifiers;
-            if self.viewer.find.is_some()
+            let mods = self.win.modifiers;
+            if self.win.viewer.find.is_some()
                 && !mods.super_key()
                 && !mods.control_key()
                 && input::app_action(event, mods, &self.keymap).is_none()
-                && self.viewer.handle_find_key(event, mods.shift_key())
+                && self.win.viewer.handle_find_key(event, mods.shift_key())
             {
                 window.request_redraw();
                 return;
@@ -10917,7 +11746,7 @@ impl App {
             if !self.handle_viewer_key(event) {
                 // app shortcuts still work; typing is swallowed (the command
                 // line is under the viewer)
-                if let Some(action) = input::app_action(event, self.modifiers, &self.keymap)
+                if let Some(action) = input::app_action(event, self.win.modifiers, &self.keymap)
                     && !action.needs_editor()
                     && (!event.repeat || action.repeatable())
                 {
@@ -10927,36 +11756,78 @@ impl App {
             window.request_redraw();
             return;
         }
-        if self.explorer.focused && self.explorer.open {
+        if self.win.explorer.focused && self.win.explorer.open {
             if self.handle_explorer_key(event) {
                 window.request_redraw();
                 return;
             }
-            self.explorer.focused = false;
+            self.win.explorer.focused = false;
         }
         // Escape clears the keyboard block selection before anything
         // else; in raw mode it still falls through so vim gets it.
         if matches!(
             event.logical_key,
             winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape)
-        ) && let Some(pane) = self.tabs.get_mut(self.active).and_then(|t| t.active_mut())
+        ) && let Some(pane) = self
+            .win
+            .tabs
+            .get_mut(self.win.active)
+            .and_then(|t| t.active_mut())
             && pane.selected_block.is_some()
         {
             pane.selected_block = None;
             window.request_redraw();
-            if self.editor_active {
+            if self.win.editor_active {
                 return;
             }
         }
-        if let Some(action) = input::app_action(event, self.modifiers, &self.keymap) {
+        // ⌘↑ / ⌘↓ (⇧ selects) move to the start / end of a multi-line
+        // command while there are lines that way; on its first / last line
+        // they stay the block-selection shortcuts
+        if self.win.editor_active
+            && self.win.modifiers.super_key()
+            && !self.win.modifiers.control_key()
+            && !self.win.modifiers.alt_key()
+            && let winit::keyboard::Key::Named(
+                named @ (winit::keyboard::NamedKey::ArrowUp | winit::keyboard::NamedKey::ArrowDown),
+            ) = event.logical_key
+            && let Some(pane) = self
+                .win
+                .tabs
+                .get_mut(self.win.active)
+                .and_then(|t| t.active_mut())
+            // while walking blocks (a block is selected) the keys keep
+            // stepping through them
+            && pane.selected_block.is_none()
+        {
+            let up = named == winit::keyboard::NamedKey::ArrowUp;
+            let ed = &mut pane.editor;
+            if (up && ed.below_first_line()) || (!up && ed.above_last_line()) {
+                let motion: fn(&mut crate::state::EditorState) = if up {
+                    crate::state::EditorState::mv_doc_start
+                } else {
+                    crate::state::EditorState::mv_doc_end
+                };
+                if self.win.modifiers.shift_key() {
+                    ed.extend(motion);
+                } else {
+                    ed.anchor = None;
+                    motion(ed);
+                }
+                self.blink_epoch = Instant::now();
+                window.request_redraw();
+                return;
+            }
+        }
+        if let Some(action) = input::app_action(event, self.win.modifiers, &self.keymap) {
             // plain terminal keys (PageUp, Home, ⌃M…) bound to app
             // actions still belong to vim/less when the editor isn't
             // active — fall through to raw byte passthrough
-            if !action.needs_editor() || self.editor_active {
+            if !action.needs_editor() || self.win.editor_active {
                 if event.repeat && !action.repeatable() {
                     return;
                 }
-                log::debug!("key action: {action:?} (mods {:?})", self.modifiers);
+                log::debug!("key action: {action:?} (mods {:?})", self.win.modifiers);
                 self.handle_action(action, event_loop);
                 return;
             }
@@ -10964,15 +11835,15 @@ impl App {
         log::debug!(
             "key fallthrough: {:?} mods={:?} editor={}",
             event.logical_key,
-            self.modifiers,
-            self.editor_active
+            self.win.modifiers,
+            self.win.editor_active
         );
-        if self.editor_active {
+        if self.win.editor_active {
             if self.vim_intercept(event) {
                 window.request_redraw();
                 return;
             }
-            if let Some(key) = input::editor_key(event, self.modifiers) {
+            if let Some(key) = input::editor_key(event, self.win.modifiers) {
                 self.handle_editor_key(key);
                 window.request_redraw();
             }
@@ -10983,7 +11854,7 @@ impl App {
         };
         // each recipient gets the bytes its own program asked for (cursor
         // mode, kitty flags), never the active pane's encoding
-        let (mods, option_as_meta) = (self.modifiers, self.option_meta());
+        let (mods, option_as_meta) = (self.win.modifiers, self.option_meta());
         let identity = input::key_identity(event);
         for target in self.raw_targets(id) {
             let Some((_, tab)) = self.find_tab_of_pane(target) else {
@@ -11015,17 +11886,17 @@ impl App {
     /// y for the vertical rail).
     fn tab_drag_coord(&self) -> f32 {
         if self.config.tab_layout == rift_core::TabLayout::Vertical {
-            self.mouse.1
+            self.win.mouse.1
         } else {
-            self.mouse.0
+            self.win.mouse.0
         }
     }
 
     /// Pointer moved during a pane-header press: go live past the slop and
     /// track the drop target under the pointer.
     fn track_pane_drag(&mut self) {
-        let (mx, my) = self.mouse;
-        let Some(d) = self.pane_drag.as_ref() else {
+        let (mx, my) = self.win.mouse;
+        let Some(d) = self.win.pane_drag.as_ref() else {
             return;
         };
         let (pane, from) = (d.pane, d.from_tab);
@@ -11041,17 +11912,17 @@ impl App {
             (Some(PaneDrop::Tab(j)), _) => Some((j, Instant::now())),
             _ => None,
         };
-        if let Some(d) = self.pane_drag.as_mut() {
+        if let Some(d) = self.win.pane_drag.as_mut() {
             d.live = live;
             d.target = target;
             d.hover_tab = hover_tab;
         }
         if let Some((j, since)) = hover_tab
             && since.elapsed() >= TAB_HOVER_OPEN
-            && j != self.active
+            && j != self.win.active
         {
             self.switch_tab(j);
-            if let Some(d) = self.pane_drag.as_mut() {
+            if let Some(d) = self.win.pane_drag.as_mut() {
                 d.hover_tab = None;
             }
         }
@@ -11060,6 +11931,7 @@ impl App {
     /// Where `pane` (of tab `from`) would land if released at the point.
     fn pane_drop_at(&self, pane: PaneId, from: usize, mx: f32, my: f32) -> Option<PaneDrop> {
         let hit = self
+            .win
             .hits
             .iter()
             .find(|h| h.contains(mx, my))
@@ -11069,7 +11941,7 @@ impl App {
             return None;
         }
         if let Some(ClickTarget::TabSelect(j) | ClickTarget::TabClose(j)) = hit {
-            return (j < self.tabs.len() && (j != from || j != self.active))
+            return (j < self.win.tabs.len() && (j != from || j != self.win.active))
                 .then_some(PaneDrop::Tab(j));
         }
         let rail = self.rail_w();
@@ -11081,7 +11953,7 @@ impl App {
         if in_strip {
             // a tab of its own needs a shell left behind; the viewer never
             // stands alone
-            let alone = self.tabs.get(from).is_none_or(|t| t.panes.len() <= 1);
+            let alone = self.win.tabs.get(from).is_none_or(|t| t.panes.len() <= 1);
             return (pane != VIEWER_PANE && !alone).then_some(PaneDrop::NewTab);
         }
         let (lw, lh) = self.logical_size();
@@ -11097,19 +11969,20 @@ impl App {
         }
         // the viewer leaf has one id in every tab: no landing beside another
         // tab's viewer, nor the viewer into a tab that already shows one
-        if from != self.active
+        if from != self.win.active
             && (r.id == VIEWER_PANE
                 || (pane == VIEWER_PANE
                     && self
+                        .win
                         .tabs
-                        .get(self.active)
+                        .get(self.win.active)
                         .is_some_and(|t| t.root.contains(VIEWER_PANE))))
         {
             return None;
         }
         // the middle third swaps (same tab only); elsewhere the nearest half
         Some(
-            if from == self.active && crate::pane::Edge::in_centre(r.rect, mx, my) {
+            if from == self.win.active && crate::pane::Edge::in_centre(r.rect, mx, my) {
                 PaneDrop::Swap(r.id)
             } else {
                 PaneDrop::Pane(r.id, crate::pane::Edge::nearest(r.rect, mx, my))
@@ -11120,7 +11993,12 @@ impl App {
     /// Move `pane` out of tab `from` to `target` (pane header drag and drop).
     /// A shell keeps its session; a tab left without shells goes away.
     fn drop_pane(&mut self, pane: PaneId, from: usize, target: PaneDrop) {
-        if !self.tabs.get(from).is_some_and(|t| t.root.contains(pane)) {
+        if !self
+            .win
+            .tabs
+            .get(from)
+            .is_some_and(|t| t.root.contains(pane))
+        {
             return;
         }
         let viewer = pane == VIEWER_PANE;
@@ -11129,7 +12007,7 @@ impl App {
         let mut beside = None;
         let to = match target {
             PaneDrop::Swap(onto) => {
-                let tab = &mut self.tabs[from];
+                let tab = &mut self.win.tabs[from];
                 if onto == pane || !tab.root.contains(onto) {
                     return;
                 }
@@ -11138,15 +12016,15 @@ impl App {
                 self.save_session();
                 return;
             }
-            PaneDrop::Pane(onto, edge) if !self.tabs[from].root.contains(onto) => {
-                let Some(to) = self.tabs.iter().position(|t| t.root.contains(onto)) else {
+            PaneDrop::Pane(onto, edge) if !self.win.tabs[from].root.contains(onto) => {
+                let Some(to) = self.win.tabs.iter().position(|t| t.root.contains(onto)) else {
                     return;
                 };
                 beside = Some((onto, edge));
                 Some(to)
             }
             PaneDrop::Pane(onto, edge) => {
-                let tab = &mut self.tabs[from];
+                let tab = &mut self.win.tabs[from];
                 if onto == pane {
                     return;
                 }
@@ -11154,20 +12032,20 @@ impl App {
                 tab.root.remove(pane);
                 tab.root.insert(onto, pane, edge);
                 if viewer {
-                    self.viewer_focus = true;
+                    self.win.viewer_focus = true;
                 } else {
                     tab.active_pane = pane;
-                    self.viewer_focus = false;
+                    self.win.viewer_focus = false;
                 }
                 self.save_session();
                 return;
             }
-            PaneDrop::Tab(to) if to == from || to >= self.tabs.len() => return,
+            PaneDrop::Tab(to) if to == from || to >= self.win.tabs.len() => return,
             PaneDrop::Tab(to) => Some(to),
             PaneDrop::NewTab => None,
         };
         // out of the source tab
-        let src = &mut self.tabs[from];
+        let src = &mut self.win.tabs[from];
         let empties = !viewer && src.panes.len() <= 1;
         if to.is_none() && (viewer || empties) {
             return;
@@ -11192,7 +12070,7 @@ impl App {
         // into the destination
         let dest = match to {
             Some(to) => {
-                let dst = &mut self.tabs[to];
+                let dst = &mut self.win.tabs[to];
                 dst.zoomed = None;
                 let anchor = dst.active_pane;
                 let placed = match beside {
@@ -11200,12 +12078,7 @@ impl App {
                     None => dst.root.split(anchor, pane, Axis::Horizontal),
                 };
                 if !placed {
-                    dst.root = crate::pane::PaneNode::Split {
-                        axis: Axis::Horizontal,
-                        ratio: 0.5,
-                        first: Box::new(dst.root.clone()),
-                        second: Box::new(crate::pane::PaneNode::Leaf(pane)),
-                    };
+                    dst.root.insert_root(pane, crate::pane::Edge::Right, 0.5);
                 }
                 if let Some(state) = state {
                     dst.panes.push(state);
@@ -11215,23 +12088,23 @@ impl App {
             }
             None => {
                 let Some(state) = state else { return };
-                self.tabs.insert(from + 1, TabState::new(state));
+                self.win.tabs.insert(from + 1, TabState::new(state));
                 from + 1
             }
         };
         let dest = if empties {
-            self.tabs.remove(from);
+            self.win.tabs.remove(from);
             if dest > from { dest - 1 } else { dest }
         } else {
             dest
         };
-        self.rename = None;
-        self.viewer_focus = viewer;
+        self.win.rename = None;
+        self.win.viewer_focus = viewer;
         self.switch_tab(dest);
     }
 
     fn active_pane_id(&self) -> Option<PaneId> {
-        Some(self.tabs.get(self.active)?.active()?.session.id)
+        Some(self.win.tabs.get(self.win.active)?.active()?.session.id)
     }
 
     /// A key release: reported only to programs that asked for event types
@@ -11245,11 +12118,11 @@ impl App {
             .cloned()
             .collect();
         let active = self.active_pane_id();
-        let (mods, option_as_meta) = (self.modifiers, self.option_meta());
+        let (mods, option_as_meta) = (self.win.modifiers, self.option_meta());
         for entry in pressed {
             self.keys_down.remove(&entry);
             let target = entry.0;
-            if Some(target) == active && self.editor_active {
+            if Some(target) == active && self.win.editor_active {
                 continue;
             }
             if let Some((_, tab)) = self.find_tab_of_pane(target)
@@ -11263,12 +12136,13 @@ impl App {
     }
 
     pub(crate) fn on_cursor_moved(&mut self, pos: (f32, f32), window: &Window) {
-        self.mouse = pos;
+        self.win.mouse = pos;
         self.update_cursor_icon(window);
         // tabs, welcome rows, pane controls and settings rows draw their
         // hover from the mouse at render time: repaint as soon as the pointer
         // enters or leaves one, not on the next unrelated frame
         let sig = self
+            .win
             .hits
             .iter()
             .enumerate()
@@ -11276,13 +12150,13 @@ impl App {
             .fold(0u64, |s, (i, _)| {
                 s.wrapping_mul(31).wrapping_add(i as u64 + 1)
             });
-        if sig != self.hover_sig {
-            self.hover_sig = sig;
-            self.hover_repaints += 1;
+        if sig != self.win.hover_sig {
+            self.win.hover_sig = sig;
+            self.win.hover_repaints += 1;
             window.request_redraw();
         }
-        self.pointer_in = true;
-        if let Some(ed) = &mut self.prompt_editor {
+        self.win.pointer_in = true;
+        if let Some(ed) = &mut self.win.prompt_editor {
             // a press that travels starts a drag; hover marks repaint
             if let Some(d) = &mut ed.drag
                 && !d.live
@@ -11294,55 +12168,60 @@ impl App {
             window.request_redraw();
         }
         // a hovered diff line shows its hunk's toolbar; a file-list row lights
-        let lit = self.review.hover_index();
-        self.review.pointer = Some(pos);
-        if self.review.hover_index() != lit {
+        let lit = self.win.review.hover_index();
+        self.win.review.pointer = Some(pos);
+        if self.win.review.hover_index() != lit {
             window.request_redraw();
         }
         let tip = self
+            .win
             .tips
             .iter()
             .find(|t| t.contains(pos.0, pos.1))
             .map(|t| t.rect);
-        if tip != self.tip_hover.map(|(r, _)| r) || (tip.is_none() && self.tip_shown.is_some()) {
+        if tip != self.win.tip_hover.map(|(r, _)| r)
+            || (tip.is_none() && self.win.tip_shown.is_some())
+        {
             window.request_redraw();
         }
-        if self.mouse_report.is_some() {
+        if self.win.mouse_report.is_some() {
             self.report_motion();
             return;
         }
-        let idle = !self.palette.open
-            && !self.settings.open
-            && !self.context_menu.open
-            && self.chip_menu.is_none()
-            && self.prompt_editor.is_none()
-            && self.confirm.is_none()
-            && !self.whats_new.open
-            && self.drag.is_none()
-            && self.pending_sel.is_none()
-            && self.editor_drag.is_none()
-            && self.tab_drag.is_none()
-            && self.pane_drag.is_none()
-            && self.slider_drag.is_none();
+        let idle = !self.win.palette.open
+            && !self.win.settings.open
+            && !self.win.context_menu.open
+            && self.win.chip_menu.is_none()
+            && self.win.prompt_editor.is_none()
+            && self.win.confirm.is_none()
+            && !self.win.whats_new.open
+            && self.win.drag.is_none()
+            && self.win.pending_sel.is_none()
+            && self.win.editor_drag.is_none()
+            && self.win.tab_drag.is_none()
+            && self.win.pane_drag.is_none()
+            && self.win.slider_drag.is_none();
+        if idle && self.config.focus_follows_mouse && !self.win.notifications.open {
+            self.focus_pane_under(pos, window);
+        }
         if idle && self.report_motion() {
             return;
         }
-        if let Some(drag) = &self.drag {
-            let [ax, ay, aw, ah] = drag.area;
-            let ratio = match drag.axis {
-                Axis::Horizontal => (self.mouse.0 - ax) / (aw - crate::pane::HANDLE),
-                Axis::Vertical => (self.mouse.1 - ay) / (ah - crate::pane::HANDLE),
+        if let Some(drag) = &self.win.drag {
+            let pos = match drag.axis {
+                Axis::Horizontal => self.win.mouse.0,
+                Axis::Vertical => self.win.mouse.1,
             };
-            let path = drag.path.clone();
-            if let Some(tab) = self.tabs.get_mut(self.active) {
-                tab.root.set_ratio(&path, ratio);
+            let (path, index, area) = (drag.path.clone(), drag.index, drag.area);
+            if let Some(tab) = self.win.tabs.get_mut(self.win.active) {
+                tab.root.drag_divider(&path, index, area, pos);
             }
             window.request_redraw();
         }
         // the chip picker's highlight follows the pointer at once (its rows
         // are not frame hits, so nothing else repaints them)
-        if let Some(menu) = &mut self.chip_menu
-            && let Some(&(_, i)) = self.chip_menu_rows.iter().find(|(r, _)| {
+        if let Some(menu) = &mut self.win.chip_menu
+            && let Some(&(_, i)) = self.win.chip_menu_rows.iter().find(|(r, _)| {
                 pos.0 >= r[0] && pos.0 < r[0] + r[2] && pos.1 >= r[1] && pos.1 < r[1] + r[3]
             })
             && i != menu.selected
@@ -11350,25 +12229,25 @@ impl App {
             menu.selected = i;
             window.request_redraw();
         }
-        if self.context_menu.open {
-            let (mx2, my2) = self.mouse;
-            let hover = self
-                .context_menu_rects
-                .iter()
-                .position(|r| mx2 >= r[0] && mx2 < r[0] + r[2] && my2 >= r[1] && my2 < r[1] + r[3]);
-            if hover != self.context_menu.selected {
-                self.context_menu.selected = hover;
+        if self.win.context_menu.open {
+            let (mx2, my2) = self.win.mouse;
+            let hover =
+                self.win.context_menu_rects.iter().position(|r| {
+                    mx2 >= r[0] && mx2 < r[0] + r[2] && my2 >= r[1] && my2 < r[1] + r[3]
+                });
+            if hover != self.win.context_menu.selected {
+                self.win.context_menu.selected = hover;
                 window.request_redraw();
             }
         }
-        if self.pending_sel.is_some() {
+        if self.win.pending_sel.is_some() {
             self.drag_selection();
         }
-        if let Some(pane) = self.editor_drag {
+        if let Some(pane) = self.win.editor_drag {
             self.drag_editor(pane);
             window.request_redraw();
         }
-        if self.pane_drag.is_some() {
+        if self.win.pane_drag.is_some() {
             self.track_pane_drag();
             self.update_cursor_icon(window);
             window.request_redraw();
@@ -11378,25 +12257,25 @@ impl App {
             start,
             press,
             ..
-        }) = self.tab_drag
+        }) = self.win.tab_drag
         {
             // drag a tab past a neighbour's midpoint to swap (Warp reorder);
             // the vertical rail reorders along y
             let vertical = self.config.tab_layout == rift_core::TabLayout::Vertical;
             let pos = self.tab_drag_coord();
-            if let Some(d) = self.tab_drag.as_mut()
+            if let Some(d) = self.win.tab_drag.as_mut()
                 && !d.live
                 && (pos - press).abs() > PANE_DRAG_SLOP
             {
                 d.live = true;
             }
-            if self.tab_drag.is_some_and(|d| d.live) {
+            if self.win.tab_drag.is_some_and(|d| d.live) {
                 window.request_redraw();
             }
             let delta = pos - start;
             // shell tabs only: the Settings tab after them never swaps
-            let n_tabs = self.tabs.len();
-            let neighbour = self.hits.iter().find_map(|h| match h.target {
+            let n_tabs = self.win.tabs.len();
+            let neighbour = self.win.hits.iter().find_map(|h| match h.target {
                 ClickTarget::TabSelect(j)
                     if j < n_tabs
                         && ((delta > 0.0 && j == i + 1) || (delta < 0.0 && j + 1 == i)) =>
@@ -11412,9 +12291,9 @@ impl App {
                     r[0] + r[2] / 2.0
                 };
                 if (delta > 0.0 && pos > mid) || (delta < 0.0 && pos < mid) {
-                    self.tabs.swap(i, j);
-                    self.active = j;
-                    if let Some(d) = self.tab_drag.as_mut() {
+                    self.win.tabs.swap(i, j);
+                    self.win.active = j;
+                    if let Some(d) = self.win.tab_drag.as_mut() {
                         d.index = j;
                         d.start = pos;
                     }
@@ -11423,32 +12302,66 @@ impl App {
                 }
             }
         }
-        if let Some((id, rect)) = self.slider_drag {
-            let t = ((self.mouse.0 - rect[0] - 8.0) / (rect[2] - 16.0)).clamp(0.0, 1.0);
+        if let Some((id, rect)) = self.win.slider_drag {
+            let t = ((self.win.mouse.0 - rect[0] - 8.0) / (rect[2] - 16.0)).clamp(0.0, 1.0);
             self.set_slider(id, t);
             window.request_redraw();
         }
     }
 
+    /// `focus_follows_mouse`: the split pane (or the file viewer's pane)
+    /// under `pos` takes focus, as a click on it would, without selecting.
+    fn focus_pane_under(&mut self, pos: (f32, f32), window: &Window) {
+        let [vx, vy, vw, vh] = self.win.viewer_rect;
+        if vw > 0.0 && pos.0 >= vx && pos.0 < vx + vw && pos.1 >= vy && pos.1 < vy + vh {
+            if !self.win.viewer_focus {
+                self.win.viewer_focus = true;
+                window.request_redraw();
+            }
+            return;
+        }
+        let Some(id) = self.win.hits.iter().find_map(|h| match h.target {
+            ClickTarget::PaneFocus(id) if h.contains(pos.0, pos.1) => Some(id),
+            _ => None,
+        }) else {
+            return;
+        };
+        let viewer_had_focus = self.viewer_focused();
+        let Some(tab) = self.win.tabs.get_mut(self.win.active) else {
+            return;
+        };
+        if tab.active_pane == id && !viewer_had_focus {
+            return;
+        }
+        if tab.active_pane != id
+            && let Some(prev) = tab.active_mut()
+        {
+            prev.selected_block = None;
+        }
+        tab.active_pane = id;
+        self.win.viewer_focus = false;
+        window.request_redraw();
+    }
+
     pub(crate) fn on_right_press(&mut self, window: &Window) {
         self.hide_tooltip(window);
-        if self.chip_menu.take().is_some() {
+        if self.win.chip_menu.take().is_some() {
             window.request_redraw();
             return;
         }
-        if self.prompt_editor.is_some() {
+        if self.win.prompt_editor.is_some() {
             return;
         }
-        if self.palette.open || self.confirm.is_some() || self.whats_new.open {
+        if self.win.palette.open || self.win.confirm.is_some() || self.win.whats_new.open {
             return;
         }
-        if self.notifications.open {
+        if self.win.notifications.open {
             self.close_notifications();
             window.request_redraw();
             return;
         }
-        if !self.context_menu.open
-            && !self.settings.open
+        if !self.win.context_menu.open
+            && !self.win.settings.open
             && self.report_button(crate::mouse::RIGHT, true)
         {
             window.request_redraw();
@@ -11457,9 +12370,10 @@ impl App {
         if self.over_maximized_review() {
             return;
         }
-        let (mx, my) = self.mouse;
+        let (mx, my) = self.win.mouse;
         // tab bar: tab menu
         let tab_hit = self
+            .win
             .hits
             .iter()
             .find(|h| h.contains(mx, my))
@@ -11468,16 +12382,16 @@ impl App {
                 _ => None,
             });
         if let Some(i) = tab_hit {
-            self.open_tab_menu(i, self.mouse);
+            self.open_tab_menu(i, self.win.mouse);
             window.request_redraw();
             return;
         }
         // the Settings tab's page has no context menus
-        if self.settings.open {
+        if self.win.settings.open {
             return;
         }
         // resolve the block under the cursor via the frame row cache
-        let target = self.tabs.get(self.active).and_then(|tab| {
+        let target = self.win.tabs.get(self.win.active).and_then(|tab| {
             tab.panes.iter().find_map(|p| {
                 let grid = p.last_grid?;
                 if my < grid.y || p.rows.is_empty() {
@@ -11505,7 +12419,7 @@ impl App {
             })
         });
         if let Some((pane_id, block)) = target {
-            self.open_context_menu(pane_id, block, self.mouse);
+            self.open_context_menu(pane_id, block, self.win.mouse);
             window.request_redraw();
             return;
         }
@@ -11519,10 +12433,10 @@ impl App {
                 && my < r.rect[1] + r.rect[3]
         }) {
             let id = pr.id;
-            if let Some(tab) = self.tabs.get_mut(self.active) {
+            if let Some(tab) = self.win.tabs.get_mut(self.win.active) {
                 tab.active_pane = id;
             }
-            self.open_terminal_menu(id, self.mouse);
+            self.open_terminal_menu(id, self.win.mouse);
             window.request_redraw();
         }
     }
@@ -11539,7 +12453,7 @@ impl App {
         if state == ElementState::Pressed {
             self.hide_tooltip(window);
         }
-        if state == ElementState::Released && self.prompt_editor.is_some() {
+        if state == ElementState::Released && self.win.prompt_editor.is_some() {
             self.prompt_editor_release();
             window.request_redraw();
             return;
@@ -11549,16 +12463,19 @@ impl App {
                 window.request_redraw();
                 return;
             }
-            if self.drag.take().is_some() {
+            if self.win.drag.take().is_some() {
                 self.save_session(); // divider position
             }
-            self.tab_drag = None;
-            if let Some(d) = self.pane_drag.take() {
+            self.win.tab_drag = None;
+            if let Some(d) = self.win.pane_drag.take() {
                 if d.live
                     && let Some(target) = d.target
                 {
                     self.drop_pane(d.pane, d.from_tab, target);
-                } else if d.live && d.from_tab != self.active && d.from_tab < self.tabs.len() {
+                } else if d.live
+                    && d.from_tab != self.win.active
+                    && d.from_tab < self.win.tabs.len()
+                {
                     // released nowhere after opening another tab: back home
                     self.switch_tab(d.from_tab);
                 }
@@ -11566,12 +12483,12 @@ impl App {
                 window.request_redraw();
                 return;
             }
-            if self.editor_drag.take().is_some() {
+            if self.win.editor_drag.take().is_some() {
                 return;
             }
-            let pending = self.pending_sel.take();
+            let pending = self.win.pending_sel.take();
             let selecting = pending.as_ref().is_some_and(|p| p.started);
-            let link = self.link_press.take().filter(|_| !selecting);
+            let link = self.win.link_press.take().filter(|_| !selecting);
             if let Some((pane, url)) = link {
                 self.click_link(pane, &url);
                 window.request_redraw();
@@ -11586,46 +12503,46 @@ impl App {
             {
                 self.copy_to_clipboard(text);
             }
-            if self.slider_drag.take().is_some() {
+            if self.win.slider_drag.take().is_some() {
                 self.save_config();
             }
             return;
         }
-        let (mx, my) = self.mouse;
+        let (mx, my) = self.win.mouse;
         let inside =
             |r: &[f32; 4]| mx >= r[0] && mx < r[0] + r[2] && my >= r[1] && my < r[1] + r[3];
-        if self.confirm.is_some() {
-            if inside(&self.confirm_rects[1]) {
-                if let Some(c) = self.confirm.take() {
+        if self.win.confirm.is_some() {
+            if inside(&self.win.confirm_rects[1]) {
+                if let Some(c) = self.win.confirm.take() {
                     self.perform_confirmed(c.action, event_loop);
                 }
-            } else if inside(&self.confirm_rects[0]) {
+            } else if inside(&self.win.confirm_rects[0]) {
                 self.cancel_confirm();
             }
             window.request_redraw();
             return;
         }
-        if self.prompt_editor.is_some() {
+        if self.win.prompt_editor.is_some() {
             self.prompt_editor_press();
             window.request_redraw();
             return;
         }
-        if self.whats_new.open {
-            let h = self.whats_new_hits;
+        if self.win.whats_new.open {
+            let h = self.win.whats_new_hits;
             if inside(&h.close) || inside(&h.done) || !inside(&h.card) {
-                self.whats_new.open = false;
+                self.win.whats_new.open = false;
             }
             window.request_redraw();
             return;
         }
-        if self.notifications.open {
-            let h = self.notifications_hits.clone();
+        if self.win.notifications.open {
+            let h = self.win.notifications_hits.clone();
             if inside(&h.close) {
                 self.close_notifications();
             } else if inside(&h.mark_read) {
                 self.mark_all_read();
             } else if let Some((_, f)) = h.chips.iter().find(|(r, _)| inside(r)) {
-                self.notifications.set_filter(*f);
+                self.win.notifications.set_filter(*f);
             } else if let Some((_, id)) = h.rows.iter().find(|(r, _)| inside(r)) {
                 self.close_notifications();
                 self.show_attention(*id);
@@ -11637,24 +12554,31 @@ impl App {
             return;
         }
         // status toasts: ✕ dismisses, the button acts, the chip eats the click
-        if let Some(t) = self.toast_hits.iter().find(|t| inside(&t.rect)).copied() {
+        if let Some(t) = self
+            .win
+            .toast_hits
+            .iter()
+            .find(|t| inside(&t.rect))
+            .copied()
+        {
             let action = self
+                .win
                 .toasts
                 .iter()
                 .find(|x| x.id == t.id)
                 .and_then(|x| x.action);
             if t.close.is_some_and(|r| inside(&r)) {
-                self.toasts.retain(|x| x.id != t.id);
+                self.win.toasts.retain(|x| x.id != t.id);
             } else if let (Some(r), Some(action)) = (t.action, action)
                 && inside(&r)
             {
-                self.toasts.retain(|x| x.id != t.id);
+                self.win.toasts.retain(|x| x.id != t.id);
                 match action {
                     // the file beside the Settings page, as its own
                     // "Open config.toml" does
                     ToastAction::OpenConfig => {
                         if let Some(path) = rift_core::config::config_path() {
-                            self.settings.open_page(self.settings.page);
+                            self.win.settings.open_page(self.win.settings.page);
                             self.open_config_viewer(&path);
                         }
                     }
@@ -11665,18 +12589,20 @@ impl App {
         }
         // notification toasts float over everything below the modals
         if let Some(t) = self
+            .win
             .note_toast_hits
             .iter()
             .find(|t| inside(&t.rect))
             .copied()
         {
             let note = self
+                .win
                 .app_notes
                 .iter()
                 .find(|n| n.id == t.id)
                 .map(|n| n.action);
-            self.note_toasts.retain(|(id, _)| *id != t.id);
-            self.app_notes.retain(|n| n.id != t.id);
+            self.win.note_toasts.retain(|(id, _)| *id != t.id);
+            self.win.app_notes.retain(|n| n.id != t.id);
             if !inside(&t.close) {
                 match note {
                     Some(AppNoteAction::Update) => {
@@ -11692,40 +12618,41 @@ impl App {
             window.request_redraw();
             return;
         }
-        if let Some((i, _)) = &self.rename {
+        if let Some((i, _)) = &self.win.rename {
             // clicking anywhere commits the rename
             let i = *i;
             self.commit_rename(i);
         }
-        if self.chip_menu.is_some() {
-            match self.chip_menu_rows.iter().find(|(r, _)| inside(r)) {
+        if self.win.chip_menu.is_some() {
+            match self.win.chip_menu_rows.iter().find(|(r, _)| inside(r)) {
                 Some(&(_, i)) => self.apply_chip_menu(i),
-                None if inside(&self.chip_menu_card) => {}
-                None => self.chip_menu = None,
+                None if inside(&self.win.chip_menu_card) => {}
+                None => self.win.chip_menu = None,
             }
             window.request_redraw();
             return;
         }
-        if self.context_menu.open {
+        if self.win.context_menu.open {
             let row = self
+                .win
                 .context_menu_rects
                 .iter()
                 .position(|r| mx >= r[0] && mx < r[0] + r[2] && my >= r[1] && my < r[1] + r[3]);
             match row {
                 Some(i) => {
-                    let item = &self.context_menu.items[i];
+                    let item = &self.win.context_menu.items[i];
                     if item.enabled {
                         let action = item.action;
                         self.run_menu_action(action, event_loop);
                     }
                 }
-                None => self.context_menu.close(),
+                None => self.win.context_menu.close(),
             }
             window.request_redraw();
             return;
         }
-        if self.palette.open {
-            let chip = self.hits.iter().find_map(|h| match h.target {
+        if self.win.palette.open {
+            let chip = self.win.hits.iter().find_map(|h| match h.target {
                 ClickTarget::PaletteMode(i) if h.contains(mx, my) => Some(i as usize),
                 _ => None,
             });
@@ -11735,32 +12662,33 @@ impl App {
                 return;
             }
             let row = self
+                .win
                 .palette_row_hits
                 .iter()
                 .find(|(r, _)| mx >= r[0] && mx < r[0] + r[2] && my >= r[1] && my < r[1] + r[3])
                 .map(|(_, i)| *i);
             match row {
                 Some(i) => {
-                    if let Some(m) = self.palette_results.get(i) {
+                    if let Some(m) = self.win.palette_results.get(i) {
                         let action = m.item.action.clone();
                         self.run_palette_action(action, event_loop);
                     }
                 }
-                None => self.palette.open = false,
+                None => self.win.palette.open = false,
             }
             window.request_redraw();
             return;
         }
         // find-bar toggles
-        if self.search.open
-            && !self.filter_editing
+        if self.win.search.open
+            && !self.win.filter_editing
             && !self.over_maximized_review()
-            && let Some(i) = self.search_chips.iter().position(inside)
+            && let Some(i) = self.win.search_chips.iter().position(inside)
         {
             if i == 0 {
-                self.search.case_sensitive = !self.search.case_sensitive;
+                self.win.search.case_sensitive = !self.win.search.case_sensitive;
             } else {
-                self.search.regex = !self.search.regex;
+                self.win.search.regex = !self.win.search.regex;
             }
             self.refresh_search(true);
             window.request_redraw();
@@ -11768,48 +12696,49 @@ impl App {
         }
         // config.toml beside Settings: its clicks, and focus back to the
         // page on a click beside it
-        if self.settings.open && self.config_viewer {
-            if inside(&self.viewer_rect) && self.on_panel_click(inside) {
-                self.last_click = None;
+        if self.win.settings.open && self.win.config_viewer {
+            if inside(&self.win.viewer_rect) && self.on_panel_click(inside) {
+                self.win.last_click = None;
                 window.request_redraw();
                 return;
             }
-            self.viewer_focus = false;
+            self.win.viewer_focus = false;
         }
-        if !self.settings.open && self.on_panel_click(inside) {
-            self.last_click = None;
+        if !self.win.settings.open && self.on_panel_click(inside) {
+            self.win.last_click = None;
             window.request_redraw();
             return;
         }
         // a click anywhere else leaves the tree's keyboard focus, and one in
         // a shell pane takes focus from the viewer pane
-        self.explorer.focused = false;
-        if !self.settings.open && self.mouse.1 > TAB_BAR_H {
-            self.viewer_focus = false;
+        self.win.explorer.focused = false;
+        if !self.win.settings.open && self.win.mouse.1 > TAB_BAR_H {
+            self.win.viewer_focus = false;
         }
         // a program tracking the mouse (vim, tmux, htop) gets the click
-        if !self.settings.open && self.report_button(crate::mouse::LEFT, true) {
-            self.last_click = None;
+        if !self.win.settings.open && self.report_button(crate::mouse::LEFT, true) {
+            self.win.last_click = None;
             window.request_redraw();
             return;
         }
         let target = self
+            .win
             .hits
             .iter()
             .find(|h| h.contains(mx, my))
             .map(|h| h.target.clone());
         // any click but another row ends a shortcut recording
         if !matches!(target, Some(ClickTarget::SettingsKeybind(_))) {
-            self.settings.recording = None;
+            self.win.settings.recording = None;
         }
         // a click outside the relay field ends its edit (saved when valid)
-        if self.settings.remote.relay_edit.is_some()
+        if self.win.settings.remote.relay_edit.is_some()
             && !matches!(target, Some(ClickTarget::RemoteRelay))
         {
             self.commit_relay_edit();
         }
         // a click outside the history pane (and its command line) closes it
-        if self.history.open
+        if self.win.history.open
             && !matches!(
                 target,
                 Some(
@@ -11820,33 +12749,33 @@ impl App {
                 )
             )
         {
-            self.history.close();
+            self.win.history.close();
         }
         // an open select list: a click outside its options only closes it
-        if self.settings.dropdown.is_some()
+        if self.win.settings.dropdown.is_some()
             && !matches!(target, Some(ClickTarget::SettingsOption(_)))
         {
-            self.settings.dropdown = None;
+            self.win.settings.dropdown = None;
             window.request_redraw();
             return;
         }
         // the tab strip leaves the Settings tab for a shell tab (its own
         // entry, after the shells, shows it again)
         if let Some(ClickTarget::TabSelect(i)) = target {
-            if i >= self.tabs.len() {
-                if self.settings.tab {
-                    self.settings.open = true;
+            if i >= self.win.tabs.len() {
+                if self.win.settings.tab {
+                    self.win.settings.open = true;
                 }
                 window.request_redraw();
                 return;
             }
-            self.settings.open = false;
+            self.win.settings.open = false;
         }
         match &target {
             Some(ClickTarget::Block(pane, id) | ClickTarget::BlockDuration(pane, id)) => {
                 // Warp: clicking a block selects it (again deselects)
                 let (pane, id) = (*pane, *id);
-                if let Some(tab) = self.tabs.get_mut(self.active) {
+                if let Some(tab) = self.win.tabs.get_mut(self.win.active) {
                     if tab.active_pane != pane
                         && let Some(prev) = tab.active_mut()
                     {
@@ -11871,23 +12800,24 @@ impl App {
             }
             Some(ClickTarget::TabSelect(i)) => {
                 let i = *i;
-                if i < self.tabs.len() {
+                if i < self.win.tabs.len() {
                     // double-click renames (Warp); a press arms drag-reorder
                     if self.click_count() == 2 {
                         self.start_rename(i);
                     }
-                    if i != self.active {
+                    if i != self.win.active {
                         self.switch_tab(i);
                     }
                     let pos = self.tab_drag_coord();
                     let vertical = self.config.tab_layout == rift_core::TabLayout::Vertical;
                     let grab = self
+                        .win
                         .hits
                         .iter()
                         .find(|h| h.target == ClickTarget::TabSelect(i))
                         .map(|h| pos - if vertical { h.rect[1] } else { h.rect[0] })
                         .unwrap_or(0.0);
-                    self.tab_drag = Some(TabDrag {
+                    self.win.tab_drag = Some(TabDrag {
                         index: i,
                         origin: i,
                         start: pos,
@@ -11901,7 +12831,7 @@ impl App {
                 // closing a tab closes all its panes (warns if busy)
                 self.request_close(CloseScope::Tab(*i), event_loop);
             }
-            Some(ClickTarget::TabNew) => self.spawn_tab(),
+            Some(ClickTarget::TabNew) => self.spawn_new_tab(),
             Some(ClickTarget::ToggleExplorer) => {
                 self.handle_action(AppAction::ToggleExplorer, event_loop)
             }
@@ -11913,22 +12843,24 @@ impl App {
             }
             Some(ClickTarget::UpdateChip) => self.handle_action(AppAction::UpdateRift, event_loop),
             Some(ClickTarget::RemoteChip) => {
-                self.settings
+                self.win
+                    .settings
                     .open_page(crate::views::settings::Page::Remote);
                 self.poll_remote(true);
             }
             Some(ClickTarget::Chip(pane, rift_core::PromptChip::GitDiff)) => {
                 // opens the review of that pane's repository (focused first);
                 // a second click closes it, like the tab bar's button
-                if let Some(tab) = self.tabs.get_mut(self.active) {
+                if let Some(tab) = self.win.tabs.get_mut(self.win.active) {
                     tab.active_pane = *pane;
                 }
                 self.handle_action(AppAction::ToggleReview, event_loop)
             }
             Some(ClickTarget::Chip(pane, rift_core::PromptChip::GithubPr)) => {
                 let url = self
+                    .win
                     .tabs
-                    .get(self.active)
+                    .get(self.win.active)
                     .and_then(|t| t.pane(*pane))
                     .and_then(|p| p.pr.as_ref())
                     .map(|pr| pr.url.clone());
@@ -11945,11 +12877,11 @@ impl App {
                 let pane = *pane;
                 let clicks = self.click_count();
                 self.click_editor(pane, clicks);
-                self.editor_drag = Some(pane);
+                self.win.editor_drag = Some(pane);
             }
             Some(ClickTarget::PaneFocus(id)) => {
                 let id = *id;
-                if let Some(tab) = self.tabs.get_mut(self.active) {
+                if let Some(tab) = self.win.tabs.get_mut(self.win.active) {
                     if tab.active_pane != id
                         && let Some(prev) = tab.active_mut()
                     {
@@ -11959,7 +12891,7 @@ impl App {
                 }
                 let clicks = self.click_count();
                 if self.try_open_url(id) {
-                    self.last_click = None;
+                    self.win.last_click = None;
                 } else {
                     self.press_selection(id, clicks);
                     self.press_link(id, clicks);
@@ -11968,7 +12900,7 @@ impl App {
             Some(ClickTarget::PaneHeader(id)) => {
                 // focus the pane; dragging the bar past the slop moves it
                 let id = *id;
-                if let Some(tab) = self.tabs.get_mut(self.active) {
+                if let Some(tab) = self.win.tabs.get_mut(self.win.active) {
                     if tab.active_pane != id
                         && let Some(prev) = tab.active_mut()
                     {
@@ -11976,10 +12908,10 @@ impl App {
                     }
                     tab.active_pane = id;
                 }
-                self.pane_drag = Some(PaneDrag {
+                self.win.pane_drag = Some(PaneDrag {
                     pane: id,
-                    from_tab: self.active,
-                    press: self.mouse,
+                    from_tab: self.win.active,
+                    press: self.win.mouse,
                     live: false,
                     target: None,
                     hover_tab: None,
@@ -11987,15 +12919,16 @@ impl App {
             }
             Some(ClickTarget::PaneMenu(id)) => {
                 let id = *id;
-                if let Some(tab) = self.tabs.get_mut(self.active) {
+                if let Some(tab) = self.win.tabs.get_mut(self.win.active) {
                     tab.active_pane = id;
                 }
                 // drops down from the ⋮ button
                 let at = self
+                    .win
                     .hits
                     .iter()
                     .find(|h| h.target == ClickTarget::PaneMenu(id))
-                    .map_or(self.mouse, |h| (h.rect[0], h.rect[1] + h.rect[3] + 4.0));
+                    .map_or(self.win.mouse, |h| (h.rect[0], h.rect[1] + h.rect[3] + 4.0));
                 self.open_terminal_menu(id, at);
             }
             Some(ClickTarget::PaneClose(id)) => {
@@ -12006,22 +12939,22 @@ impl App {
                     self.open_palette(m.0);
                 }
             }
-            Some(ClickTarget::HistoryScope(scope)) => self.history.set_scope(*scope),
-            Some(ClickTarget::HistoryClose) => self.history.close(),
+            Some(ClickTarget::HistoryScope(scope)) => self.win.history.set_scope(*scope),
+            Some(ClickTarget::HistoryClose) => self.win.history.close(),
             Some(ClickTarget::HistoryRow(i)) => {
                 // a click picks the row onto the command line; a second runs it
-                if self.history.selected == *i && self.click_count() >= 2 {
+                if self.win.history.selected == *i && self.click_count() >= 2 {
                     self.take_history(HistoryUse::Run);
                 } else {
-                    self.history.selected = *i;
+                    self.win.history.selected = *i;
                     self.take_history(HistoryUse::Edit);
                 }
             }
             Some(ClickTarget::CompletionSource(i)) => {
-                self.completion.pick_source(*i as usize);
+                self.win.completion.pick_source(*i as usize);
             }
             Some(ClickTarget::CompletionRow(i)) => {
-                self.completion.selected = *i;
+                self.win.completion.selected = *i;
                 self.accept_completion();
                 self.blink_epoch = Instant::now();
             }
@@ -12033,22 +12966,35 @@ impl App {
                 _ => self.handle_action(AppAction::OpenSettings, event_loop),
             },
             Some(ClickTarget::PaneSplit(id)) => {
-                if let Some(tab) = self.tabs.get_mut(self.active) {
+                if let Some(tab) = self.win.tabs.get_mut(self.win.active) {
                     tab.active_pane = *id;
                 }
-                self.viewer_focus = false;
+                self.win.viewer_focus = false;
                 self.split_active(Axis::Horizontal);
             }
-            Some(ClickTarget::HandleDrag(path)) => {
-                // find the split node's area from the current layout
-                let (lw, lh) = self.logical_size();
-                let (_, handles) = self.pane_rects(lw, lh);
-                if let Some(hr) = handles.iter().find(|h| &h.path == path) {
-                    self.drag = Some(DragState {
-                        path: path.clone(),
-                        axis: hr.axis,
-                        area: hr.area,
-                    });
+            Some(ClickTarget::HandleDrag(path, index)) => {
+                // a double-click gives the split's panes equal shares (Warp)
+                if self.click_count() == 2 {
+                    if let Some(tab) = self.win.tabs.get_mut(self.win.active)
+                        && tab.root.equalize(path)
+                    {
+                        self.save_session_file();
+                    }
+                } else {
+                    // drag: find the split node's area from the current layout
+                    let (lw, lh) = self.logical_size();
+                    let (_, handles) = self.pane_rects(lw, lh);
+                    if let Some(hr) = handles
+                        .iter()
+                        .find(|h| &h.path == path && h.index == *index)
+                    {
+                        self.win.drag = Some(DragState {
+                            path: path.clone(),
+                            index: *index,
+                            axis: hr.axis,
+                            area: hr.area,
+                        });
+                    }
                 }
             }
             Some(ClickTarget::BlockCopy(pane, id)) => {
@@ -12060,7 +13006,7 @@ impl App {
                     Some(text) => {
                         if self.copy_to_clipboard(text) {
                             // the button turns into a check for a moment
-                            self.copied = Some((*pane, *id, Instant::now()));
+                            self.win.copied = Some((*pane, *id, Instant::now()));
                             self.toast_done("Copied output".into());
                         }
                     }
@@ -12070,10 +13016,11 @@ impl App {
             Some(ClickTarget::BlockMenu(pane, id)) => {
                 // drops down from the ⋮ button
                 let at = self
+                    .win
                     .hits
                     .iter()
                     .find(|h| h.target == ClickTarget::BlockMenu(*pane, *id))
-                    .map_or(self.mouse, |h| (h.rect[0], h.rect[1] + h.rect[3] + 2.0));
+                    .map_or(self.win.mouse, |h| (h.rect[0], h.rect[1] + h.rect[3] + 2.0));
                 self.open_context_menu(*pane, *id, at);
             }
             Some(ClickTarget::TrafficLight(i)) => match i {
@@ -12084,7 +13031,8 @@ impl App {
             },
             // the empty strip: a double-click zooms the window (the titlebar's
             // own gesture), a press drags it
-            Some(ClickTarget::WindowDrag) if !self.headless => {
+            // (the drop-down hotkey window stays where it hangs)
+            Some(ClickTarget::WindowDrag) if !self.headless && self.win.dropdown.is_none() => {
                 if self.click_count() == 2 {
                     window.set_maximized(!window.is_maximized());
                 } else {
@@ -12099,11 +13047,11 @@ impl App {
             Some(ClickTarget::SettingsNav(i)) => {
                 use crate::views::settings::Page;
                 let page = Page::ALL.get(*i as usize).copied().unwrap_or(Page::General);
-                self.settings.open_page(page);
+                self.win.settings.open_page(page);
             }
-            Some(ClickTarget::SettingsClose) => self.settings.close_tab(),
+            Some(ClickTarget::SettingsClose) => self.win.settings.close_tab(),
             Some(ClickTarget::SettingsOption(i)) => {
-                if let Some(dd) = self.settings.dropdown.take()
+                if let Some(dd) = self.win.settings.dropdown.take()
                     && let Some((value, _)) = dd.options.get(*i)
                 {
                     self.set_select(dd.id, value.clone());
@@ -12140,12 +13088,12 @@ impl App {
                 self.ring_bell();
             }
             Some(ClickTarget::RemotePair) => {
-                self.settings.remote.pairing = None;
+                self.win.settings.remote.pairing = None;
                 self.poll_remote(true);
                 self.start_pairing();
             }
             Some(ClickTarget::RemoteViewOnly) => {
-                let v = &mut self.settings.remote;
+                let v = &mut self.win.settings.remote;
                 v.view_only = !v.view_only;
                 // a shown link keeps the permission it was made with
                 v.pairing = None;
@@ -12153,17 +13101,23 @@ impl App {
             }
             Some(ClickTarget::RemoteInstallTunnel) => self.install_cloudflared(),
             Some(ClickTarget::RemoteCopyLink) => {
-                if let Some(url) = self.settings.remote.pairing.as_ref().map(|p| p.url.clone())
+                if let Some(url) = self
+                    .win
+                    .settings
+                    .remote
+                    .pairing
+                    .as_ref()
+                    .map(|p| p.url.clone())
                     && self.copy_to_clipboard(url)
                 {
                     self.toast_done("Copied pairing link".into());
                 }
             }
             Some(ClickTarget::RemoteRelay) => {
-                if self.settings.remote.relay_edit.is_none() {
-                    self.settings.remote.relay_edit = Some(self.config.remote_relay.clone());
+                if self.win.settings.remote.relay_edit.is_none() {
+                    self.win.settings.remote.relay_edit = Some(self.config.remote_relay.clone());
                 }
-                self.settings.focus = Some(ClickTarget::RemoteRelay);
+                self.win.settings.focus = Some(ClickTarget::RemoteRelay);
             }
             Some(ClickTarget::RemoteRelayRetry) => {
                 // the gateway's relay connection retries at once; its new
@@ -12180,11 +13134,12 @@ impl App {
                 self.poll_remote(true);
             }
             Some(ClickTarget::RemoteRelaySettings) => {
-                let v = &mut self.settings.remote;
+                let v = &mut self.win.settings.remote;
                 v.relay_open = !v.relay_open;
             }
             Some(ClickTarget::RemotePermission(id, view)) => {
                 let name = self
+                    .win
                     .settings
                     .remote
                     .devices
@@ -12192,6 +13147,7 @@ impl App {
                     .find(|d| d.id == *id)
                     .map_or_else(|| id.clone(), |d| d.name.clone());
                 let already = self
+                    .win
                     .settings
                     .remote
                     .devices
@@ -12203,7 +13159,7 @@ impl App {
                     // lowering needs no confirmation
                     self.set_device_permission(id, &name, true);
                 } else {
-                    self.confirm = Some(ConfirmClose {
+                    self.win.confirm = Some(ConfirmClose {
                         opened: Instant::now(),
                         action: ConfirmAction::AllowOperate {
                             id: id.clone(),
@@ -12215,13 +13171,14 @@ impl App {
             }
             Some(ClickTarget::RemoteRevoke(id)) => {
                 let name = self
+                    .win
                     .settings
                     .remote
                     .devices
                     .iter()
                     .find(|d| d.id == *id)
                     .map_or_else(|| id.clone(), |d| d.name.clone());
-                self.confirm = Some(ConfirmClose {
+                self.win.confirm = Some(ConfirmClose {
                     opened: Instant::now(),
                     action: ConfirmAction::RevokeDevice {
                         id: id.clone(),
@@ -12250,6 +13207,13 @@ impl App {
                     "vim_mode" => c.vim_mode = !c.vim_mode,
                     "autosuggestions" => c.autosuggestions = !c.autosuggestions,
                     "completions_menu" => c.completions_menu = !c.completions_menu,
+                    "shell_completions" => {
+                        c.shell_completions = !c.shell_completions;
+                        if !c.shell_completions {
+                            // the warm shells are not needed any more
+                            std::thread::spawn(rift_core::shell_complete::stop_all);
+                        }
+                    }
                     "autocomplete_pairs" => c.autocomplete_pairs = !c.autocomplete_pairs,
                     "copy_on_select" => c.copy_on_select = !c.copy_on_select,
                     "notify_on_completion" => c.notify_on_completion = !c.notify_on_completion,
@@ -12261,6 +13225,10 @@ impl App {
                         c.confirm_multiline_paste = !c.confirm_multiline_paste
                     }
                     "durable_sessions" => c.durable_sessions = !c.durable_sessions,
+                    "hotkey_window" => c.hotkey_window = !c.hotkey_window,
+                    "hotkey_window_hide_on_blur" => {
+                        c.hotkey_window_hide_on_blur = !c.hotkey_window_hide_on_blur
+                    }
                     "check_for_updates" => c.check_for_updates = !c.check_for_updates,
                     // on: the windows start a gateway; off: it exits by itself
                     "remote_access" => c.remote_access = !c.remote_access,
@@ -12280,6 +13248,10 @@ impl App {
                     "right_option_as_meta" => c.right_option_as_meta = Some(!c.right_option_meta()),
                     "middle_click_paste" => c.middle_click_paste = !c.middle_click_paste,
                     "explorer_hidden_files" => c.explorer_hidden_files = !c.explorer_hidden_files,
+                    "tab_bar_with_one_tab" => c.tab_bar_with_one_tab = !c.tab_bar_with_one_tab,
+                    "sticky_command_header" => c.sticky_command_header = !c.sticky_command_header,
+                    "dim_inactive_panes" => c.dim_inactive_panes = !c.dim_inactive_panes,
+                    "focus_follows_mouse" => c.focus_follows_mouse = !c.focus_follows_mouse,
                     "notifications.enabled" => c.notifications.enabled = !c.notifications.enabled,
                     "notifications.toasts" => c.notifications.toasts = !c.notifications.toasts,
                     "notifications.command_failed" => {
@@ -12324,6 +13296,10 @@ impl App {
                     "wheel_scroll_lines" => {
                         c.wheel_scroll_lines = (c.wheel_lines() as i64 + d).clamp(1, 20) as u8;
                     }
+                    "hotkey_window_height" => {
+                        c.hotkey_window_height =
+                            (i64::from(c.hotkey_window_height()) + d * 5).clamp(20, 100) as u8;
+                    }
                     "notifications.toast_secs" => {
                         let secs = c.notifications.toast_duration().as_secs() as i64;
                         c.notifications.toast_secs = (secs + d).clamp(2, 60) as u64;
@@ -12334,7 +13310,7 @@ impl App {
                 self.apply_config();
             }
             Some(ClickTarget::SettingsEditPrompt) => {
-                self.prompt_editor = Some(crate::views::prompt_editor::PromptEditor::new(
+                self.win.prompt_editor = Some(crate::views::prompt_editor::PromptEditor::new(
                     &self.config.prompt_chips,
                 ));
             }
@@ -12385,6 +13361,20 @@ impl App {
                             rift_core::TabLayout::Horizontal
                         }
                     }
+                    "tab_close_button" => {
+                        c.tab_close_button = match v {
+                            0 => rift_core::TabCloseButton::Hover,
+                            1 => rift_core::TabCloseButton::Always,
+                            _ => rift_core::TabCloseButton::Never,
+                        }
+                    }
+                    "new_tab_placement" => {
+                        c.new_tab_placement = if *v == 1 {
+                            rift_core::NewTabPlacement::AfterCurrent
+                        } else {
+                            rift_core::NewTabPlacement::End
+                        }
+                    }
                     "elapsed_counts" => {
                         c.elapsed_counts = if *v == 1 {
                             rift_core::ElapsedCounts::Running
@@ -12427,21 +13417,22 @@ impl App {
             Some(ClickTarget::SettingsCycle(id)) => self.open_select(id),
             Some(ClickTarget::SettingsSlider(id)) => {
                 let rect = self
+                    .win
                     .hits
                     .iter()
                     .find(|h| matches!(&h.target, ClickTarget::SettingsSlider(s) if s == id))
                     .map(|h| h.rect);
                 if let Some(rect) = rect {
-                    self.slider_drag = Some((id, rect));
+                    self.win.slider_drag = Some((id, rect));
                     let t = ((mx - rect[0] - 8.0) / (rect[2] - 16.0)).clamp(0.0, 1.0);
                     self.set_slider(id, t);
                 }
             }
             Some(ClickTarget::SettingsKeybind(action)) => {
-                self.settings.recording = Some(action.clone());
+                self.win.settings.recording = Some(action.clone());
             }
             Some(ClickTarget::SettingsKeybindReset(action)) => {
-                self.settings.recording = None;
+                self.win.settings.recording = None;
                 self.config.keybindings.remove(action);
                 self.save_config();
                 self.apply_config();
@@ -12456,11 +13447,11 @@ impl App {
                 }
             }
             None => {
-                let active_pane = self.tabs.get(self.active).map(|t| t.active_pane);
+                let active_pane = self.win.tabs.get(self.win.active).map(|t| t.active_pane);
                 if let Some(id) = active_pane {
                     let clicks = self.click_count();
                     if self.try_open_url(id) {
-                        self.last_click = None;
+                        self.win.last_click = None;
                     } else {
                         self.press_selection(id, clicks);
                         self.press_link(id, clicks);
@@ -12477,23 +13468,23 @@ impl App {
     pub(crate) fn on_wheel(&mut self, delta: MouseScrollDelta, window: &Window) {
         self.hide_tooltip(window);
         // the modal holds still; nothing scrolls under it
-        if self.prompt_editor.is_some() {
+        if self.win.prompt_editor.is_some() {
             return;
         }
         use rift_pty::alacritty_terminal::term::TermMode;
         // the What's New body scrolls by pixels: trackpad deltas stay smooth
         // instead of snapping to whole lines
-        if self.whats_new.open && self.confirm.is_none() {
+        if self.win.whats_new.open && self.win.confirm.is_none() {
             let px = match delta {
                 MouseScrollDelta::LineDelta(_, y) => y * 3.0 * 24.0,
                 MouseScrollDelta::PixelDelta(p) => p.y as f32,
             };
             // positive delta = wheel up = toward the top
-            self.whats_new.scroll_by(-px);
+            self.win.whats_new.scroll_by(-px);
             window.request_redraw();
             return;
         }
-        if let Some(menu) = &mut self.chip_menu {
+        if let Some(menu) = &mut self.win.chip_menu {
             // by pixels: a trackpad's many small deltas move it smoothly
             // (rounding each to whole rows dropped most of them)
             let px = match delta {
@@ -12507,30 +13498,30 @@ impl App {
             }
             return;
         }
-        if self.notifications.open && self.confirm.is_none() {
-            let (mx, my) = self.mouse;
-            let c = self.notifications_hits.card;
+        if self.win.notifications.open && self.win.confirm.is_none() {
+            let (mx, my) = self.win.mouse;
+            let c = self.win.notifications_hits.card;
             if mx >= c[0] && mx < c[0] + c[2] && my >= c[1] && my < c[1] + c[3] {
                 let px = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y * 3.0 * 20.0,
                     MouseScrollDelta::PixelDelta(p) => p.y as f32,
                 };
-                self.notifications.scroll_by(-px);
+                self.win.notifications.scroll_by(-px);
                 window.request_redraw();
                 return;
             }
         }
         // the viewer and side panels scroll by pixels too (config.toml
         // beside Settings as well)
-        let config_viewer_under = self.config_viewer && {
-            let ([x, y, w, h], (mx, my)) = (self.viewer_rect, self.mouse);
+        let config_viewer_under = self.win.config_viewer && {
+            let ([x, y, w, h], (mx, my)) = (self.win.viewer_rect, self.win.mouse);
             mx >= x && mx < x + w && my >= y && my < y + h
         };
-        if !self.palette.open
-            && (!self.settings.open || config_viewer_under)
-            && self.confirm.is_none()
+        if !self.win.palette.open
+            && (!self.win.settings.open || config_viewer_under)
+            && self.win.confirm.is_none()
         {
-            let (mx, my) = self.mouse;
+            let (mx, my) = self.win.mouse;
             let inside = |r: &[f32; 4]| {
                 r[2] > 0.0 && mx >= r[0] && mx < r[0] + r[2] && my >= r[1] && my < r[1] + r[3]
             };
@@ -12539,27 +13530,27 @@ impl App {
                 MouseScrollDelta::PixelDelta(p) => p.y as f32,
             };
             let (ex_rect, rv_rect) = self.panel_rects();
-            let handled = if self.viewer.is_open() && inside(&self.viewer_rect) {
+            let handled = if self.win.viewer.is_open() && inside(&self.win.viewer_rect) {
                 // sideways: a trackpad's x, or ⇧ + a mouse wheel
                 let dx = -match delta {
                     MouseScrollDelta::LineDelta(x, _) => x * 3.0 * 20.0,
                     MouseScrollDelta::PixelDelta(p) => p.x as f32,
                 };
-                let (px, dx) = if self.modifiers.shift_key() && dx == 0.0 {
+                let (px, dx) = if self.win.modifiers.shift_key() && dx == 0.0 {
                     (0.0, px)
                 } else {
                     (px, dx)
                 };
-                self.viewer.scroll_by(px);
+                self.win.viewer.scroll_by(px);
                 if dx != 0.0 {
-                    self.viewer.scroll_x_by(dx, my);
+                    self.win.viewer.scroll_x_by(dx, my);
                 }
                 true
             } else if inside(&ex_rect) {
-                self.explorer.scroll_by(px);
+                self.win.explorer.scroll_by(px);
                 true
-            } else if inside(&self.review.side_rect) {
-                self.review.side_scroll_by(px);
+            } else if inside(&self.win.review.side_rect) {
+                self.win.review.side_scroll_by(px);
                 true
             } else if inside(&rv_rect) {
                 // sideways: a trackpad's x, or ⇧ + a mouse wheel
@@ -12567,14 +13558,14 @@ impl App {
                     MouseScrollDelta::LineDelta(x, _) => x * 3.0 * 20.0,
                     MouseScrollDelta::PixelDelta(p) => p.x as f32,
                 };
-                let (px, dx) = if self.modifiers.shift_key() && dx == 0.0 {
+                let (px, dx) = if self.win.modifiers.shift_key() && dx == 0.0 {
                     (0.0, px)
                 } else {
                     (px, dx)
                 };
-                self.review.scroll_by(px);
+                self.win.review.scroll_by(px);
                 if dx != 0.0 {
-                    self.review.scroll_x_by(dx, my);
+                    self.win.review.scroll_x_by(dx, my);
                 }
                 true
             } else {
@@ -12587,36 +13578,37 @@ impl App {
         }
         // accumulate fractional deltas: trackpads emit many sub-line
         // pixel events that would each truncate to zero lines
-        self.scroll_accum += match delta {
+        self.win.scroll_accum += match delta {
             MouseScrollDelta::LineDelta(_, y) => y * self.config.wheel_lines(),
             MouseScrollDelta::PixelDelta(p) => p.y as f32 / self.line_h,
         };
-        let lines = self.scroll_accum as i32;
-        self.scroll_accum -= lines as f32;
+        let lines = self.win.scroll_accum as i32;
+        self.win.scroll_accum -= lines as f32;
         if lines == 0 {
             return;
         }
-        if self.settings.open {
+        if self.win.settings.open {
             // over Recent connections the list scrolls a row at a time; at
             // its ends the page takes over
-            let (mx, my) = self.mouse;
+            let (mx, my) = self.win.mouse;
             let over_list = self
+                .win
                 .hits
                 .iter()
                 .any(|h| h.target == ClickTarget::RemoteHistoryList && h.contains(mx, my));
-            if !(over_list && self.settings.scroll_history(lines.signum() as isize)) {
-                self.settings.scroll_by(lines as f32);
+            if !(over_list && self.win.settings.scroll_history(lines.signum() as isize)) {
+                self.win.settings.scroll_by(lines as f32);
             }
             window.request_redraw();
             return;
         }
-        if self.palette.open || self.confirm.is_some() || self.context_menu.open {
+        if self.win.palette.open || self.win.confirm.is_some() || self.win.context_menu.open {
             return;
         }
         // the wheel scrolls the pane under the pointer (Warp), not the focused one
         let Some(target) = self
             .pane_under_mouse()
-            .or_else(|| self.tabs.get(self.active).map(|t| t.active_pane))
+            .or_else(|| self.win.tabs.get(self.win.active).map(|t| t.active_pane))
         else {
             return;
         };
@@ -12635,8 +13627,9 @@ impl App {
             return;
         }
         let Some(pane) = self
+            .win
             .tabs
-            .get_mut(self.active)
+            .get_mut(self.win.active)
             .and_then(|t| t.pane_mut(target))
         else {
             return;
@@ -12675,7 +13668,7 @@ impl App {
         }
         let (lw, lh) = self.logical_size();
         let (rects, _) = self.pane_rects(lw, lh);
-        let (mx, my) = self.mouse;
+        let (mx, my) = self.win.mouse;
         rects
             .iter()
             .find(|r| {
@@ -12691,10 +13684,10 @@ impl App {
     /// reporting applies (Shift forces local selection, xterm-style).
     fn mouse_tracking(&self, pane: PaneId) -> Option<rift_pty::alacritty_terminal::term::TermMode> {
         use rift_pty::alacritty_terminal::term::TermMode;
-        if !self.config.mouse_reporting || self.modifiers.shift_key() {
+        if !self.config.mouse_reporting || self.win.modifiers.shift_key() {
             return None;
         }
-        let p = self.tabs.get(self.active)?.pane(pane)?;
+        let p = self.win.tabs.get(self.win.active)?.pane(pane)?;
         let mode = *p.session.term.lock().mode();
         mode.intersects(TermMode::MOUSE_MODE).then_some(mode)
     }
@@ -12702,9 +13695,9 @@ impl App {
     /// 0-based screen cell under the pointer inside `pane`'s grid (None over
     /// history rows, block headers' gutters, or outside the grid).
     fn mouse_cell(&self, pane: PaneId) -> Option<(usize, usize)> {
-        let p = self.tabs.get(self.active)?.pane(pane)?;
+        let p = self.win.tabs.get(self.win.active)?.pane(pane)?;
         let g = p.last_grid?;
-        let (mx, my) = self.mouse;
+        let (mx, my) = self.win.mouse;
         if mx < g.x || mx > g.right || my < g.y || my >= g.y + g.rows as f32 * g.line_h {
             return None;
         }
@@ -12727,9 +13720,19 @@ impl App {
             sgr: mode.contains(TermMode::SGR_MOUSE),
             utf8: mode.contains(TermMode::UTF8_MOUSE),
         };
-        if let Some(bytes) =
-            crate::mouse::report(button, pressed, motion, self.modifiers, cell.0, cell.1, enc)
-            && let Some(p) = self.tabs.get(self.active).and_then(|t| t.pane(pane))
+        if let Some(bytes) = crate::mouse::report(
+            button,
+            pressed,
+            motion,
+            self.win.modifiers,
+            cell.0,
+            cell.1,
+            enc,
+        ) && let Some(p) = self
+            .win
+            .tabs
+            .get(self.win.active)
+            .and_then(|t| t.pane(pane))
         {
             p.session.write_report(&bytes);
         }
@@ -12740,16 +13743,17 @@ impl App {
     fn report_button(&mut self, button: u8, pressed: bool) -> bool {
         use rift_pty::alacritty_terminal::term::TermMode;
         if !pressed {
-            let Some((pane, held, cell)) = self.mouse_report else {
+            let Some((pane, held, cell)) = self.win.mouse_report else {
                 return false;
             };
             if held != button {
                 return false;
             }
-            self.mouse_report = None;
+            self.win.mouse_report = None;
             let mode = self
+                .win
                 .tabs
-                .get(self.active)
+                .get(self.win.active)
                 .and_then(|t| t.pane(pane))
                 .map(|p| *p.session.term.lock().mode())
                 .unwrap_or(TermMode::empty());
@@ -12775,7 +13779,7 @@ impl App {
             return false;
         };
         // the click still focuses the pane it lands in
-        if let Some(tab) = self.tabs.get_mut(self.active) {
+        if let Some(tab) = self.win.tabs.get_mut(self.win.active) {
             if tab.active_pane != pane
                 && let Some(prev) = tab.active_mut()
             {
@@ -12787,7 +13791,7 @@ impl App {
             }
         }
         self.send_mouse(pane, mode, button, true, false, cell);
-        self.mouse_report = Some((pane, button, cell));
+        self.win.mouse_report = Some((pane, button, cell));
         true
     }
 
@@ -12796,10 +13800,11 @@ impl App {
     /// Returns true when the motion belongs to the program.
     fn report_motion(&mut self) -> bool {
         use rift_pty::alacritty_terminal::term::TermMode;
-        if let Some((pane, button, last)) = self.mouse_report {
+        if let Some((pane, button, last)) = self.win.mouse_report {
             let mode = self
+                .win
                 .tabs
-                .get(self.active)
+                .get(self.win.active)
                 .and_then(|t| t.pane(pane))
                 .map(|p| *p.session.term.lock().mode())
                 .unwrap_or(TermMode::empty());
@@ -12808,7 +13813,7 @@ impl App {
                 && cell != last
             {
                 self.send_mouse(pane, mode, button, true, true, cell);
-                self.mouse_report = Some((pane, button, cell));
+                self.win.mouse_report = Some((pane, button, cell));
             }
             return true;
         }
@@ -12824,8 +13829,8 @@ impl App {
         let Some(cell) = self.mouse_cell(pane) else {
             return false;
         };
-        if self.mouse_hover_cell != Some((pane, cell)) {
-            self.mouse_hover_cell = Some((pane, cell));
+        if self.win.mouse_hover_cell != Some((pane, cell)) {
+            self.win.mouse_hover_cell = Some((pane, cell));
             self.send_mouse(pane, mode, crate::mouse::NONE, true, true, cell);
         }
         true
@@ -12833,11 +13838,11 @@ impl App {
 
     /// Right/middle button release (press routing lives in on_right_press).
     pub(crate) fn on_other_button(&mut self, button: u8, pressed: bool, window: &Window) {
-        let overlay = self.palette.open
-            || self.settings.open
-            || self.confirm.is_some()
-            || self.whats_new.open
-            || self.context_menu.open;
+        let overlay = self.win.palette.open
+            || self.win.settings.open
+            || self.win.confirm.is_some()
+            || self.win.whats_new.open
+            || self.win.context_menu.open;
         if pressed && overlay {
             return;
         }
@@ -12852,7 +13857,7 @@ impl App {
             && self.config.middle_click_paste
             && let Some(id) = self.pane_under_mouse().filter(|id| *id != VIEWER_PANE)
         {
-            if let Some(tab) = self.tabs.get_mut(self.active) {
+            if let Some(tab) = self.win.tabs.get_mut(self.win.active) {
                 if tab.active_pane != id
                     && let Some(prev) = tab.active_mut()
                 {
@@ -12860,7 +13865,7 @@ impl App {
                 }
                 tab.active_pane = id;
             }
-            self.viewer_focus = false;
+            self.win.viewer_focus = false;
             self.paste_from_clipboard();
             window.request_redraw();
         }
@@ -12874,7 +13879,7 @@ impl App {
         event_loop: &ActiveEventLoop,
         window: &Window,
     ) {
-        self.preedit.clear();
+        self.win.preedit.clear();
         if text.is_empty() {
             return;
         }
@@ -12883,10 +13888,10 @@ impl App {
             Some(text.to_string()),
             None,
         );
-        let saved = self.modifiers;
-        self.modifiers = ModifiersState::empty();
+        let saved = self.win.modifiers;
+        self.win.modifiers = ModifiersState::empty();
         self.on_key(&press, event_loop, window);
-        self.modifiers = saved;
+        self.win.modifiers = saved;
         window.request_redraw();
     }
 
@@ -12898,7 +13903,7 @@ impl App {
         let Some(cmd) = MenuCommand::from_id(id) else {
             return;
         };
-        let Some(window) = self.window.clone() else {
+        let Some(window) = self.win.window.clone() else {
             return;
         };
         let chord = match &cmd {
@@ -12906,10 +13911,10 @@ impl App {
             MenuCommand::Chord(c) => Some(c.clone()),
         };
         if let Some((press, mods)) = chord.as_deref().and_then(crate::script::key_press) {
-            let saved = self.modifiers;
-            self.modifiers = mods;
+            let saved = self.win.modifiers;
+            self.win.modifiers = mods;
             self.on_key(&press, event_loop, &window);
-            self.modifiers = saved;
+            self.win.modifiers = saved;
         } else if let MenuCommand::Action(a) = cmd
             && let Some(action) = input::action_from_name(&a)
         {
@@ -12924,12 +13929,12 @@ impl App {
     /// that gained it. Independent of the mouse-reporting setting.
     fn sync_focus(&mut self) {
         use rift_pty::alacritty_terminal::term::TermMode;
-        let want = if self.focused {
+        let want = if self.win.focused {
             self.active_pane_id()
         } else {
             None
         };
-        if want == self.focus_pane {
+        if want == self.win.focus_pane {
             return;
         }
         let notify = |tabs: &[TabState], id: PaneId, seq: &[u8]| {
@@ -12943,30 +13948,42 @@ impl App {
                 p.session.write_report(seq);
             }
         };
-        if let Some(old) = self.focus_pane {
-            notify(&self.tabs, old, b"\x1b[O");
+        if let Some(old) = self.win.focus_pane {
+            notify(&self.win.tabs, old, b"\x1b[O");
         }
         if let Some(new) = want {
-            notify(&self.tabs, new, b"\x1b[I");
+            notify(&self.win.tabs, new, b"\x1b[I");
         }
-        self.focus_pane = want;
+        self.win.focus_pane = want;
     }
 }
 
 impl App {
     /// Open every tab/split of a launch configuration and queue its commands.
     fn apply_launch_config(&mut self, cfg: &rift_core::launch::LaunchConfig) {
-        let first_new = self.tabs.len();
+        let first_new = self.win.tabs.len();
         for tab in &cfg.tabs {
             let (cwd, _) = Self::first_leaf(&tab.layout);
             self.spawn_tab_at(cwd.filter(|p| p.is_dir()));
-            let root_pane = self.tabs[self.active].active_pane;
+            let root_pane = self.win.tabs[self.win.active].active_pane;
             if let Some(title) = &tab.title {
-                self.tabs[self.active].custom_title = Some(title.clone());
+                self.win.tabs[self.win.active].custom_title = Some(title.clone());
             }
-            self.build_layout(&tab.layout, root_pane);
+            // Warp's black/white have no Rift tab color; those stay unset.
+            if let Some(color) = &tab.color {
+                self.win.tabs[self.win.active].color = crate::state::TAB_COLORS
+                    .iter()
+                    .position(|c| c.eq_ignore_ascii_case(color.trim()));
+            }
+            let mut focus = None;
+            self.build_layout(&tab.layout, root_pane, &mut focus);
+            // Splitting makes the new pane active, so the focused pane is
+            // applied once the whole tree exists.
+            if let Some(id) = focus {
+                self.win.tabs[self.win.active].active_pane = id;
+            }
         }
-        self.active = (first_new + cfg.active_tab).min(self.tabs.len().saturating_sub(1));
+        self.win.active = (first_new + cfg.active_tab).min(self.win.tabs.len().saturating_sub(1));
         self.save_session();
     }
 
@@ -12985,7 +14002,12 @@ impl App {
     }
 
     /// Realize `layout` inside the region currently held by `pane`.
-    fn build_layout(&mut self, layout: &rift_core::launch::LaunchLayout, pane: PaneId) {
+    fn build_layout(
+        &mut self,
+        layout: &rift_core::launch::LaunchLayout,
+        pane: PaneId,
+        focus: &mut Option<PaneId>,
+    ) {
         use rift_core::launch::LaunchLayout;
         match layout {
             LaunchLayout::Pane {
@@ -12994,8 +14016,8 @@ impl App {
                 if !commands.is_empty() {
                     self.pending_commands.insert(pane, commands.clone());
                 }
-                if *focused && let Some(tab) = self.tabs.get_mut(self.active) {
-                    tab.active_pane = pane;
+                if *focused && focus.is_none() {
+                    *focus = Some(pane);
                 }
             }
             LaunchLayout::Split { vertical, panes } => {
@@ -13014,7 +14036,7 @@ impl App {
                     prev = new_id;
                 }
                 for (child, id) in panes.iter().zip(ids) {
-                    self.build_layout(child, id);
+                    self.build_layout(child, id, focus);
                 }
             }
         }
@@ -13030,7 +14052,7 @@ impl App {
         let session = self.spawn_session(60, 20, cwd); // resized on next layout
         let new_id = session.id;
         let pane = self.new_pane(session);
-        let tab = &mut self.tabs[self.active];
+        let tab = &mut self.win.tabs[self.win.active];
         tab.zoomed = None;
         if tab.root.split(target, new_id, axis) {
             tab.panes.push(pane);
@@ -13075,6 +14097,7 @@ impl App {
             // whole percents and pixels, as Warp's sliders
             "window_opacity" => self.config.window_opacity = (1.0 + 99.0 * t).round() / 100.0,
             "window_blur" => self.config.window_blur = (1.0 + 63.0 * t).round() as u8,
+            "inactive_pane_dim" => self.config.inactive_pane_dim = (1.0 + 39.0 * t).round() as u8,
             _ => return,
         }
         self.apply_config();
@@ -13085,11 +14108,16 @@ impl App {
     fn vim_intercept(&mut self, event: &input::KeyPress) -> bool {
         use crate::vim::{VimKey, VimMode, VimOutcome};
         use winit::keyboard::{Key, NamedKey};
-        let mods = self.modifiers;
+        let mods = self.win.modifiers;
         if mods.super_key() || mods.control_key() || mods.alt_key() {
             return false;
         }
-        let Some(pane) = self.tabs.get_mut(self.active).and_then(|t| t.active_mut()) else {
+        let Some(pane) = self
+            .win
+            .tabs
+            .get_mut(self.win.active)
+            .and_then(|t| t.active_mut())
+        else {
             return false;
         };
         if !pane.editor.vim_enabled() {
@@ -13097,7 +14125,7 @@ impl App {
         }
         let is_escape = matches!(event.logical_key, Key::Named(NamedKey::Escape));
         // Esc closes the completion menu before it changes modes
-        if self.completion.open && is_escape {
+        if self.win.completion.open && is_escape {
             return false;
         }
         // insert mode: only Esc is vim's; everything else keeps the normal
@@ -13128,7 +14156,15 @@ impl App {
             VimOutcome::Consumed => {
                 pane.clear_selection();
                 pane.selected_block = None;
-                self.update_completions();
+                // completions follow typing in Insert only: a menu opened
+                // in Normal/Replace would take the Esc meant for the mode
+                if pane.editor.vim_mode() == Some(VimMode::Insert) {
+                    self.update_completions();
+                } else {
+                    self.win.completion.close();
+                    self.completion_pending = None;
+                    self.completion_intent = None;
+                }
                 self.blink_epoch = Instant::now();
                 true
             }
@@ -13174,7 +14210,7 @@ impl App {
             }
         }
         self.ring_bell();
-        let active = self.active;
+        let active = self.win.active;
         if let Some((idx, tab)) = self.find_tab_of_pane(pane)
             && idx != active
         {
@@ -13188,7 +14224,7 @@ impl App {
         use rift_core::Bell;
         let bell = self.config.bell;
         if matches!(bell, Bell::Visual | Bell::Both) {
-            self.bell_flash = Some(Instant::now());
+            self.win.bell_flash = Some(Instant::now());
         }
         if matches!(bell, Bell::Audible | Bell::Both)
             && self.last_beep.is_none_or(|t| t.elapsed() >= BELL_SOUND_GAP)
@@ -13196,7 +14232,7 @@ impl App {
             self.last_beep = Some(Instant::now());
             crate::notify::beep();
         }
-        if let Some(w) = &self.window {
+        if let Some(w) = &self.win.window {
             w.request_redraw();
         }
     }
@@ -13282,12 +14318,15 @@ impl App {
 
     /// Run every due script step (see script.rs).
     fn drive_script(&mut self, event_loop: &ActiveEventLoop) {
-        let Some(window) = self.window.clone() else {
-            return;
-        };
         loop {
             let now = Instant::now();
             let Some(step) = self.script.as_mut().and_then(|s| s.take_due(now)) else {
+                break;
+            };
+            // steps act on the focused window, as typing does (`window <n>`
+            // focuses one; a new window takes focus)
+            self.enter_focused_window();
+            let Some(window) = self.win.window.clone() else {
                 break;
             };
             if matches!(
@@ -13300,7 +14339,11 @@ impl App {
             }
             self.run_step(step, event_loop, &window);
             self.sync_focus();
-            window.request_redraw();
+            // the step may have opened or closed a window: redraw the one
+            // served now
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
         }
     }
 
@@ -13316,22 +14359,33 @@ impl App {
                 log::warn!("script: bad chord {chord:?}");
                 return;
             };
-            let saved = app.modifiers;
-            app.modifiers = mods;
+            let saved = app.win.modifiers;
+            app.win.modifiers = mods;
             app.on_key(&press, event_loop, window);
-            app.modifiers = saved;
+            app.win.modifiers = saved;
         };
         match step {
             Step::Wait(_) => {}
             Step::Key(chord) => press(self, &chord),
+            Step::KeyRepeat(n, chord) => {
+                if let Some((mut p, mods)) = key_press(&chord) {
+                    let saved = self.win.modifiers;
+                    self.win.modifiers = mods;
+                    for i in 0..n {
+                        p.repeat = i > 0;
+                        self.on_key(&p, event_loop, window);
+                    }
+                    self.win.modifiers = saved;
+                }
+            }
             Step::KeyUp(chord) => {
                 if let Some((mut p, mods)) = key_press(&chord) {
                     p.released = true;
                     p.text = None;
-                    let saved = self.modifiers;
-                    self.modifiers = mods;
+                    let saved = self.win.modifiers;
+                    self.win.modifiers = mods;
                     self.on_key_release(&p);
-                    self.modifiers = saved;
+                    self.win.modifiers = saved;
                 }
             }
             Step::Type(text) => {
@@ -13341,13 +14395,13 @@ impl App {
                         continue;
                     }
                     let (p, mods) = char_press(ch);
-                    let saved = self.modifiers;
-                    self.modifiers = mods;
+                    let saved = self.win.modifiers;
+                    self.win.modifiers = mods;
                     self.on_key(&p, event_loop, window);
-                    self.modifiers = saved;
+                    self.win.modifiers = saved;
                 }
             }
-            Step::Shot(path) => self.capture = Some(path),
+            Step::Shot(path) => self.win.capture = Some(path),
             Step::Dump(path) => {
                 let mut text = self.dump_state();
                 let snapshot = self.a11y_snapshot(window.scale_factor());
@@ -13417,11 +14471,13 @@ impl App {
                 log::info!("script: sh {cmd:?} -> {status:?}");
             }
             Step::Focus(f) => {
-                self.focused = f;
+                self.win.focused = f;
+                self.hotkey_window_focus(f);
                 self.sync_focus();
             }
+            Step::Hotkey => self.on_global_hotkey(event_loop),
             Step::Ime(text) => self.commit_text(&text, event_loop, window),
-            Step::Preedit(text) => self.preedit = text,
+            Step::Preedit(text) => self.win.preedit = text,
             Step::Drop(path) => self.drop_file(&path),
             Step::Paste(text) => self.paste_text(&text),
             // the headless clipboard only: a script never touches the system's
@@ -13441,7 +14497,7 @@ impl App {
                         _ => {}
                     }
                 }
-                self.modifiers = m;
+                self.win.modifiers = m;
             }
             #[cfg(target_os = "macos")]
             Step::Menu(id) => self.run_menu_command(&id, event_loop),
@@ -13456,31 +14512,53 @@ impl App {
             }
             Step::WaitPrompt => {
                 // re-arm until the active pane shows its first prompt (or 15s)
-                if !self.editor_active
+                if !self.win.editor_active
                     && let Some(s) = self.script.as_mut()
                 {
                     let _ = s.rearm_wait(Duration::from_millis(50), Duration::from_secs(15));
                 }
             }
+            Step::NewWindow => self.open_new_window(event_loop),
+            Step::Window(n) => {
+                if self.enter_window_index(n)
+                    && let Some(id) = self.win_id()
+                {
+                    self.note_window_focus(id);
+                } else {
+                    log::warn!("script: no window {n} ({} open)", self.window_count());
+                }
+            }
+            Step::CloseWindow => self.request_close(CloseScope::Window, event_loop),
             Step::Quit => {
-                self.perform_close(CloseScope::Window, event_loop);
+                self.perform_close(CloseScope::App, event_loop);
             }
         }
     }
 
-    /// Textual snapshot of the app state for script assertions.
-    /// Tabs and panes as the control API reports them.
+    /// Tabs and panes as the control API reports them: every window's,
+    /// window by window, numbered across all of them.
     fn tabs_info(&self) -> Vec<crate::control::TabInfo> {
         use crate::control::{PaneInfo, TabInfo};
         let now = Instant::now();
         let shell_prompt = self.config.prompt == rift_core::PromptMode::Shell;
-        self.tabs
-            .iter()
+        let tabs: Vec<(usize, bool, &TabState)> = self
+            .windows_in_order()
+            .into_iter()
             .enumerate()
-            .map(|(i, t)| TabInfo {
+            .flat_map(|(wi, w)| {
+                w.tabs
+                    .iter()
+                    .enumerate()
+                    .map(move |(i, t)| (wi, i == w.active, t))
+            })
+            .collect();
+        tabs.into_iter()
+            .enumerate()
+            .map(|(i, (window, active, t))| TabInfo {
                 index: i,
+                window,
                 title: t.display_title(),
-                active: i == self.active,
+                active,
                 panes: t
                     .panes
                     .iter()
@@ -13670,7 +14748,21 @@ impl App {
             .rev()
             .cloned()
             .collect();
-        let cwd = pn.session.cwd.lock().unwrap().clone();
+        let cwd = pn.session.local_cwd();
+        // the pane's own $PATH (`rift-use`, a venv), as the desktop menu uses;
+        // a pane on another machine gets none (an empty one): this machine's
+        // commands are not there
+        let path = if pn.session.remote_cwd().is_some() {
+            Some(String::new())
+        } else {
+            pn.session
+                .user_vars
+                .lock()
+                .unwrap()
+                .get(rift_core::osc::USER_VAR_PATH)
+                .filter(|p| !p.is_empty())
+                .cloned()
+        };
         let reply = p.reply;
         let spawned = std::thread::Builder::new()
             .name("remote-complete".into())
@@ -13682,6 +14774,7 @@ impl App {
                     &editor,
                     &shell,
                     cwd.as_deref(),
+                    path.as_deref().map(std::ffi::OsStr::new),
                 );
                 let _ = reply.send(Response {
                     ok: true,
@@ -13719,7 +14812,7 @@ impl App {
             let _ = p.reply.send(Response::error("no such pane"));
             return;
         };
-        let cwd = pn.session.cwd.lock().unwrap().clone();
+        let cwd = pn.session.local_cwd();
         // the chips that read the window's own state answer at once; the
         // interpreters' installs are looked up on the thread below
         let detail = match &p.request {
@@ -13859,6 +14952,16 @@ impl App {
                 pid: Some(std::process::id()),
                 version: Some(env!("CARGO_PKG_VERSION").into()),
                 tabs: self.tabs_info(),
+                windows: self
+                    .windows_in_order()
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(_, w)| w.dropdown.is_some())
+                    .map(|(window, _)| crate::control::WindowInfo {
+                        window,
+                        kind: "dropdown".into(),
+                    })
+                    .collect(),
                 ..Default::default()
             },
             Request::Blocks {
@@ -13920,26 +15023,32 @@ impl App {
                 Response::error("answered by its own thread")
             }
             Request::Focus { tab, pane } => {
-                self.settings.open = false;
+                self.win.settings.open = false;
                 let target = match (tab, pane) {
                     (_, Some(p)) => self.find_tab_of_pane(p).map(|(i, _)| (i, Some(p))),
-                    (Some(t), None) if t < self.tabs.len() => Some((t, None)),
-                    (None, None) => Some((self.active, None)),
+                    (Some(t), None) if t < self.win.tabs.len() => Some((t, None)),
+                    (None, None) => Some((self.win.active, None)),
                     _ => None,
                 };
                 let Some((ti, pane)) = target else {
                     return Response::error("no such tab or pane");
                 };
-                self.active = ti;
-                self.tabs[ti].activity = false;
+                self.win.active = ti;
+                self.win.tabs[ti].activity = false;
                 if let Some(p) = pane {
-                    self.tabs[ti].active_pane = p;
+                    self.win.tabs[ti].active_pane = p;
                 }
-                if let Some(w) = self.window.as_ref().filter(|_| !self.headless) {
+                // the window it is in comes forward (`route_control` serves
+                // it); a hidden drop-down window drops down
+                self.reveal_hotkey_window();
+                if let Some(id) = self.win_id() {
+                    self.note_window_focus(id);
+                }
+                if let Some(w) = self.win.window.as_ref().filter(|_| !self.headless) {
                     w.set_minimized(false);
                     w.focus_window();
                 }
-                ok(Some(self.tabs[ti].active_pane))
+                ok(Some(self.win.tabs[ti].active_pane))
             }
             Request::Split { direction, cwd } => {
                 let axis = match direction.as_str() {
@@ -13947,7 +15056,7 @@ impl App {
                     "down" => Axis::Vertical,
                     other => return Response::error(format!("direction {other:?}: right or down")),
                 };
-                let Some(pane) = self.tabs.get(self.active).map(|t| t.active_pane) else {
+                let Some(pane) = self.win.tabs.get(self.win.active).map(|t| t.active_pane) else {
                     return Response::error("no tab");
                 };
                 // a missing or nonexistent --cwd starts where a new pane would
@@ -13956,7 +15065,7 @@ impl App {
                     .filter(|p| p.is_dir())
                     .or_else(|| self.start_dir());
                 let id = self.split_pane(pane, axis, cwd);
-                if let Some(tab) = self.tabs.get_mut(self.active) {
+                if let Some(tab) = self.win.tabs.get_mut(self.win.active) {
                     tab.active_pane = id;
                 }
                 self.save_session();
@@ -13969,7 +15078,7 @@ impl App {
                     .filter(|p| p.is_dir())
                     .or_else(|| self.start_dir());
                 self.spawn_tab_at(cwd);
-                let id = self.tabs[self.active].active_pane;
+                let id = self.win.tabs[self.win.active].active_pane;
                 if let Some(c) = command {
                     self.pending_commands.insert(id, vec![c]);
                 }
@@ -14003,7 +15112,7 @@ impl App {
                     return Response::error("no such pane");
                 }
                 self.reset_tab_timer_of(pane);
-                if let Some(w) = &self.window {
+                if let Some(w) = &self.win.window {
                     w.request_redraw();
                 }
                 ok(Some(pane))
@@ -14052,20 +15161,25 @@ impl App {
         use crate::a11y::{BlockNode, Control, EditorNode, Overlay, PaneNode, Snapshot, TabNode};
         use accesskit::Role;
         let hit = |pred: &dyn Fn(&ClickTarget) -> bool| {
-            self.hits.iter().find(|h| pred(&h.target)).map(|h| h.rect)
+            self.win
+                .hits
+                .iter()
+                .find(|h| pred(&h.target))
+                .map(|h| h.rect)
         };
-        let settings_shown = self.settings.open && self.settings.tab;
-        let n = self.tabs.len();
+        let settings_shown = self.win.settings.open && self.win.settings.tab;
+        let n = self.win.tabs.len();
         let tabs = self
+            .win
             .tabs
             .iter()
             .enumerate()
             .map(|(i, t)| TabNode {
                 title: t.display_title(),
-                selected: i == self.active && !settings_shown,
+                selected: i == self.win.active && !settings_shown,
                 rect: hit(&|c| *c == ClickTarget::TabSelect(i)),
             })
-            .chain(self.settings.tab.then(|| TabNode {
+            .chain(self.win.settings.tab.then(|| TabNode {
                 title: "Settings".into(),
                 selected: settings_shown,
                 rect: hit(&|c| *c == ClickTarget::TabSelect(n)),
@@ -14075,7 +15189,12 @@ impl App {
         let mut panes = Vec::new();
         let mut finished = Vec::new();
         // the Settings tab covers the shell tab's panes
-        if let Some(tab) = self.tabs.get(self.active).filter(|_| !settings_shown) {
+        if let Some(tab) = self
+            .win
+            .tabs
+            .get(self.win.active)
+            .filter(|_| !settings_shown)
+        {
             for p in &tab.panes {
                 let id = p.session.id;
                 let visible = tab.zoomed.is_none_or(|z| z == id);
@@ -14083,7 +15202,14 @@ impl App {
                     continue;
                 }
                 let active = id == tab.active_pane;
-                let cwd = p.session.cwd.lock().unwrap().clone().unwrap_or_default();
+                // no directory reported yet: the pane's own title, else the
+                // tab's, never an empty "Pane "
+                // (the lock is released first: display_title takes it again)
+                let reported = p.session.cwd.lock().unwrap().clone();
+                let cwd = reported
+                    .filter(|c| !c.is_empty())
+                    .or_else(|| Some(p.title.clone()).filter(|t| !t.is_empty()))
+                    .unwrap_or_else(|| tab.display_title());
                 let running = p.session.foreground_job_name();
                 let snapshot = p.session.blocks.lock().unwrap().snapshot();
                 let mut blocks = Vec::new();
@@ -14124,14 +15250,19 @@ impl App {
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                let editor = (active && self.editor_active).then(|| EditorNode {
+                let editor = (active && self.win.editor_active).then(|| EditorNode {
                     value: p.editor.buffer.clone(),
                     rect: hit(&|c| *c == ClickTarget::Editor(id)),
                 });
                 // the "Time on this tab" chip, and its card's Reset button
                 // while the card is open
                 let mut chip_controls = Vec::new();
-                for (rect, _, _) in self.info_chips.iter().filter(|(_, pane, _)| *pane == id) {
+                for (rect, _, _) in self
+                    .win
+                    .info_chips
+                    .iter()
+                    .filter(|(_, pane, _)| *pane == id)
+                {
                     let text = tab
                         .elapsed(self.config.elapsed_counts, Instant::now())
                         .map(|e| {
@@ -14150,10 +15281,11 @@ impl App {
                         rect: Some(*rect),
                     });
                     if let Some(button) = self
+                        .win
                         .tip_shown
                         .as_ref()
                         .filter(|t| t.action.is_some() && t.rect == *rect)
-                        .and_then(|_| self.tip_drawn.as_ref()?.action)
+                        .and_then(|_| self.win.tip_drawn.as_ref()?.action)
                     {
                         chip_controls.push(Control {
                             label: "Reset time on this tab".into(),
@@ -14165,12 +15297,13 @@ impl App {
                     }
                 }
                 let mut label = format!("Pane {cwd}");
-                if let Some(job) = running.filter(|_| !self.editor_active || !active) {
+                if let Some(job) = running.filter(|_| !self.win.editor_active || !active) {
                     label.push_str(&format!(", running {job}"));
                 }
                 // title bar buttons, and the welcome rows of a fresh pane
                 let welcome = welcome_entries(&self.keymap);
                 let controls = self
+                    .win
                     .hits
                     .iter()
                     .filter_map(|h| {
@@ -14209,15 +15342,15 @@ impl App {
 
         // announce the newest completion per pane once
         for (pane, block, command, status) in finished {
-            let prev = self.a11y_done.insert(pane, block);
+            let prev = self.win.a11y_done.insert(pane, block);
             if prev.is_some_and(|b| b < block) {
-                self.a11y_announcement = Some(format!("{command} {status}"));
+                self.win.a11y_announcement = Some(format!("{command} {status}"));
             }
         }
 
-        let overlay = if let Some(c) = &self.confirm {
+        let overlay = if let Some(c) = &self.win.confirm {
             let (title, description) = match &c.action {
-                ConfirmAction::Close(CloseScope::Window) => ("Quit Rift?".to_string(), {
+                ConfirmAction::Close(scope) if self.quits(*scope) => ("Quit Rift?".to_string(), {
                     let mut d = close_description(c.commands.len(), &self.connected_phones());
                     if !c.commands.is_empty() {
                         d.push_str(&format!(" Running: {}", c.commands.join(", ")));
@@ -14283,13 +15416,14 @@ impl App {
                 title,
                 description,
                 buttons: vec![
-                    button(cancel, self.confirm_rects[0]),
-                    button(label, self.confirm_rects[1]),
+                    button(cancel, self.win.confirm_rects[0]),
+                    button(label, self.win.confirm_rects[1]),
                 ],
             })
-        } else if let Some(ed) = &self.prompt_editor {
+        } else if let Some(ed) = &self.win.prompt_editor {
             use crate::views::prompt_editor::Target;
             let controls = self
+                .win
                 .prompt_editor_layout
                 .hits
                 .iter()
@@ -14324,11 +15458,12 @@ impl App {
                         .join(", ")
                 )),
                 controls,
-                rect: Some(self.prompt_editor_layout.card),
+                rect: Some(self.win.prompt_editor_layout.card),
             })
-        } else if let Some(menu) = &self.chip_menu {
+        } else if let Some(menu) = &self.win.chip_menu {
             let results = menu.results();
             let controls = self
+                .win
                 .chip_menu_rows
                 .iter()
                 .filter_map(|(r, i)| {
@@ -14346,9 +15481,9 @@ impl App {
                 input: Some(("Search".into(), menu.query.clone())),
                 status: Some(format!("{} results", results.len())),
                 controls,
-                rect: Some(self.chip_menu_card),
+                rect: Some(self.win.chip_menu_card),
             })
-        } else if self.whats_new.open {
+        } else if self.win.whats_new.open {
             // the notes as one readable status string; the body is not focusable
             let mut notes = Vec::new();
             for r in &self.releases {
@@ -14375,16 +15510,17 @@ impl App {
                 input: None,
                 status: Some(notes.join(". ")),
                 controls: vec![
-                    button("Close", self.whats_new_hits.close),
-                    button("Got it", self.whats_new_hits.done),
+                    button("Close", self.win.whats_new_hits.close),
+                    button("Got it", self.win.whats_new_hits.done),
                 ],
-                rect: Some(self.whats_new_hits.card),
+                rect: Some(self.win.whats_new_hits.card),
             })
-        } else if self.notifications.open {
-            let h = &self.notifications_hits;
+        } else if self.win.notifications.open {
+            let h = &self.win.notifications_hits;
             let entries = self.notification_entries();
             let shown = self.filtered_notifications();
             let highlighted = self
+                .win
                 .notifications
                 .selected
                 .and_then(|s| shown.get(s))
@@ -14403,7 +15539,7 @@ impl App {
             for (r, f) in &h.chips {
                 let n = entries.iter().filter(|e| f.matches(e)).count();
                 controls.push(Control {
-                    toggled: Some(*f == self.notifications.filter),
+                    toggled: Some(*f == self.win.notifications.filter),
                     ..button(format!("{} ({n})", f.label()), *r, false)
                 });
             }
@@ -14437,31 +15573,33 @@ impl App {
                 controls,
                 rect: Some(h.card),
             })
-        } else if self.context_menu.open {
+        } else if self.win.context_menu.open {
             Some(Overlay::Menu {
                 items: self
+                    .win
                     .context_menu
                     .items
                     .iter()
-                    .zip(&self.context_menu_rects)
+                    .zip(&self.win.context_menu_rects)
                     .enumerate()
                     .filter(|(_, (item, _))| item.enabled)
                     .map(|(i, (item, r))| Control {
                         label: item.label.to_string(),
                         role: Role::MenuItem,
                         toggled: None,
-                        selected: self.context_menu.selected == Some(i),
+                        selected: self.win.context_menu.selected == Some(i),
                         rect: Some(*r),
                     })
                     .collect(),
             })
-        } else if self.palette.open {
+        } else if self.win.palette.open {
             Some(Overlay::Dialog {
                 label: "Command palette".into(),
-                input: Some(("Search commands".into(), self.palette.query.clone())),
-                status: Some(format!("{} results", self.palette_results.len())),
+                input: Some(("Search commands".into(), self.win.palette.query.clone())),
+                status: Some(format!("{} results", self.win.palette_results.len())),
                 // the mode chips, then the rows
                 controls: self
+                    .win
                     .hits
                     .iter()
                     .filter_map(|h| match h.target {
@@ -14472,14 +15610,14 @@ impl App {
                                 label: format!("{label} mode, prefix {prefix}"),
                                 role: Role::RadioButton,
                                 toggled: None,
-                                selected: *mode == self.palette.mode,
+                                selected: *mode == self.win.palette.mode,
                                 rect: Some(h.rect),
                             })
                         }
                         _ => None,
                     })
-                    .chain(self.palette_row_hits.iter().filter_map(|(r, i)| {
-                        let m = self.palette_results.get(*i)?;
+                    .chain(self.win.palette_row_hits.iter().filter_map(|(r, i)| {
+                        let m = self.win.palette_results.get(*i)?;
                         let mut label = m.item.title.clone();
                         if !m.item.shortcut.is_empty() {
                             label.push_str(&format!(", {}", m.item.shortcut.join(" ")));
@@ -14488,14 +15626,14 @@ impl App {
                             label,
                             role: Role::ListBoxOption,
                             toggled: None,
-                            selected: *i == self.palette.selected,
+                            selected: *i == self.win.palette.selected,
                             rect: Some(*r),
                         })
                     }))
                     .collect(),
                 rect: None,
             })
-        } else if self.settings.open {
+        } else if self.win.settings.open {
             // switches read their state from the config; an unset right
             // Option key shows the value it follows
             let mut shown = self.config.clone();
@@ -14503,8 +15641,9 @@ impl App {
             let values = toml::Value::try_from(&shown).ok();
             let current = crate::views::settings::Page::ALL
                 .iter()
-                .position(|p| *p == self.settings.page);
+                .position(|p| *p == self.win.settings.page);
             let controls = self
+                .win
                 .hits
                 .iter()
                 .filter_map(|h| {
@@ -14532,7 +15671,8 @@ impl App {
                         ClickTarget::SettingsOption(i) => (
                             Role::ListBoxOption,
                             None,
-                            self.settings
+                            self.win
+                                .settings
                                 .dropdown
                                 .as_ref()
                                 .is_some_and(|d| d.current == Some(*i)),
@@ -14560,15 +15700,18 @@ impl App {
                         | ClickTarget::RemoteRelayRetry
                         | ClickTarget::RemoteRelaySettings
                         | ClickTarget::RemoteRevoke(_) => (Role::Button, None, false),
-                        ClickTarget::RemoteViewOnly => {
-                            (Role::Switch, Some(self.settings.remote.view_only), false)
-                        }
+                        ClickTarget::RemoteViewOnly => (
+                            Role::Switch,
+                            Some(self.win.settings.remote.view_only),
+                            false,
+                        ),
                         // the name carries the URL (or "editing: …")
                         ClickTarget::RemoteRelay => (Role::TextInput, None, false),
                         ClickTarget::RemotePermission(id, view) => (
                             Role::RadioButton,
                             None,
-                            self.settings
+                            self.win
+                                .settings
                                 .remote
                                 .devices
                                 .iter()
@@ -14577,6 +15720,7 @@ impl App {
                         _ => return None,
                     };
                     let label = self
+                        .win
                         .settings_names
                         .iter()
                         .find(|(r, _)| *r == h.rect)
@@ -14591,15 +15735,16 @@ impl App {
                 })
                 .collect();
             Some(Overlay::Dialog {
-                label: format!("Settings, {}", self.settings.page.label()),
-                input: Some(("Search settings".into(), self.settings.query.clone())),
+                label: format!("Settings, {}", self.win.settings.page.label()),
+                input: Some(("Search settings".into(), self.win.settings.query.clone())),
                 status: None,
                 controls,
                 rect: None,
             })
-        } else if self.history.open {
-            let hp = &self.history;
+        } else if self.win.history.open {
+            let hp = &self.win.history;
             let controls = self
+                .win
                 .hits
                 .iter()
                 .filter_map(|h| {
@@ -14641,11 +15786,12 @@ impl App {
                 controls,
                 rect: None,
             })
-        } else if self.search.open {
-            let (label, input, status) = if self.filter_editing {
+        } else if self.win.search.open {
+            let (label, input, status) = if self.win.filter_editing {
                 let query = self
+                    .win
                     .tabs
-                    .get(self.active)
+                    .get(self.win.active)
                     .and_then(|tab| tab.active())
                     .and_then(|pane| pane.filter.as_ref())
                     .map(|(_, query)| query.clone())
@@ -14658,8 +15804,8 @@ impl App {
             } else {
                 (
                     "Find",
-                    ("Find in terminal".into(), self.search.query.clone()),
-                    match (&self.search.error, self.search.position()) {
+                    ("Find in terminal".into(), self.win.search.query.clone()),
+                    match (&self.win.search.error, self.win.search.position()) {
                         (Some(e), _) => e.clone(),
                         (None, None) => "No matches".into(),
                         (None, Some((n, total))) => format!("Match {n} of {total}"),
@@ -14685,7 +15831,7 @@ impl App {
             tabs,
             panes,
             overlay,
-            announcement: self.a11y_announcement.clone(),
+            announcement: self.win.a11y_announcement.clone(),
             panels,
         }
     }
@@ -14706,14 +15852,15 @@ impl App {
         let (ex_rect, rv_rect) = self.panel_rects();
         if ex_rect[2] > 0.0 {
             let controls = self
+                .win
                 .explorer_hits
                 .iter()
                 .map(|(r, hit)| match hit {
                     ExplorerHit::Row(i) => {
-                        let row = &self.explorer.rows[*i];
+                        let row = &self.win.explorer.rows[*i];
                         let kind = if !row.is_dir {
                             "file"
-                        } else if self.explorer.expanded.contains(&row.path) {
+                        } else if self.win.explorer.expanded.contains(&row.path) {
                             "folder, expanded"
                         } else {
                             "folder, collapsed"
@@ -14721,7 +15868,7 @@ impl App {
                         control(
                             format!("{}, {kind}", row.name),
                             Role::TreeItem,
-                            self.explorer.selected.as_ref() == Some(&row.path),
+                            self.win.explorer.selected.as_ref() == Some(&row.path),
                             *r,
                         )
                     }
@@ -14732,13 +15879,13 @@ impl App {
                 })
                 .collect();
             // unreadable or cut folders: their notices are read out too
-            let notices: Vec<&str> = self.explorer.notices().collect();
+            let notices: Vec<&str> = self.win.explorer.notices().collect();
             out.push(PanelNode {
                 label: "File explorer".into(),
                 rect: Some(ex_rect),
                 text: (!notices.is_empty()).then(|| notices.join("\n")),
                 controls,
-                focused: self.explorer.focused,
+                focused: self.win.explorer.focused,
             });
         }
         if rv_rect[2] > 0.0 {
@@ -14754,11 +15901,13 @@ impl App {
             };
             // hunk actions show on a hovered line; the tree lists them all
             let latent = self
+                .win
                 .review
                 .latent
                 .iter()
-                .filter(|(_, l)| !self.review_hits.iter().any(|(_, h)| h == l));
+                .filter(|(_, l)| !self.win.review_hits.iter().any(|(_, h)| h == l));
             let controls = self
+                .win
                 .review_hits
                 .iter()
                 .chain(latent)
@@ -14770,7 +15919,7 @@ impl App {
                         ReviewHit::ToggleFile(staged, p) => format!(
                             "{p}, {}, {}",
                             if *staged { "staged" } else { "unstaged" },
-                            if self.review.expanded.contains(&(*staged, p.clone())) {
+                            if self.win.review.expanded.contains(&(*staged, p.clone())) {
                                 "expanded"
                             } else {
                                 "collapsed"
@@ -14783,7 +15932,7 @@ impl App {
                         ReviewHit::Revert(p, h) => format!("Revert {p}{}", hunk_label(h)),
                         ReviewHit::StageAll => "Stage all".into(),
                         ReviewHit::UnstageAll => "Unstage all".into(),
-                        ReviewHit::Maximize if self.review.maximized => "Restore".into(),
+                        ReviewHit::Maximize if self.win.review.maximized => "Restore".into(),
                         ReviewHit::Maximize => "Maximize".into(),
                         ReviewHit::Copy(_, p, h) => format!("Copy {p}{}", hunk_label(&Some(*h))),
                         ReviewHit::Jump(_, p) => format!("Show {p}"),
@@ -14799,12 +15948,13 @@ impl App {
                 focused: false,
             });
         }
-        if let Some(path) = &self.viewer.path {
+        if let Some(path) = &self.win.viewer.path {
             let mut text = self
+                .win
                 .viewer
                 .error
                 .clone()
-                .unwrap_or_else(|| self.viewer.lines.join("\n"));
+                .unwrap_or_else(|| self.win.viewer.lines.join("\n"));
             if text.len() > 20_000 {
                 let cut = (0..=20_000)
                     .rev()
@@ -14814,6 +15964,7 @@ impl App {
                 text.push('…');
             }
             let controls = self
+                .win
                 .viewer_hits
                 .iter()
                 .map(|(r, hit)| match hit {
@@ -14822,14 +15973,14 @@ impl App {
                     ViewerHit::Mode(m) => control(
                         if *m { "Rendered" } else { "Raw" }.into(),
                         Role::RadioButton,
-                        self.viewer.rendered == *m,
+                        self.win.viewer.rendered == *m,
                         *r,
                     ),
                 })
                 .collect();
             out.push(PanelNode {
                 label: format!("File viewer, {}", path.display()),
-                rect: Some(self.viewer_rect),
+                rect: Some(self.win.viewer_rect),
                 text: Some(text),
                 controls,
                 // it takes the keys while open
@@ -14839,6 +15990,7 @@ impl App {
         // the tab bar's remote chip (a phone is connected)
         if let Some(label) = self.remote_chip()
             && let Some(h) = self
+                .win
                 .hits
                 .iter()
                 .find(|h| h.target == ClickTarget::RemoteChip)
@@ -14859,6 +16011,7 @@ impl App {
         // the tab bar's "Update Rift" chip
         if let Some(version) = self.update_chip()
             && let Some(h) = self
+                .win
                 .hits
                 .iter()
                 .find(|h| h.target == ClickTarget::UpdateChip)
@@ -14877,8 +16030,8 @@ impl App {
             });
         }
         // status toasts: the message, its button and ✕
-        for h in &self.toast_hits {
-            let Some(t) = self.toasts.iter().find(|t| t.id == h.id) else {
+        for h in &self.win.toast_hits {
+            let Some(t) = self.win.toasts.iter().find(|t| t.id == h.id) else {
                 continue;
             };
             let mut controls = Vec::new();
@@ -14906,8 +16059,9 @@ impl App {
         }
         // notification cards (inbox entries, Rift's own notices): the card
         // acts on a click, ✕ dismisses
-        for h in &self.note_toast_hits {
+        for h in &self.win.note_toast_hits {
             let title = self
+                .win
                 .app_notes
                 .iter()
                 .find(|n| n.id == h.id)
@@ -14936,14 +16090,14 @@ impl App {
     /// Push the accessibility tree when a screen reader is attached and
     /// something changed.
     fn update_a11y(&mut self, window: &Window) {
-        let Some(mut adapter) = self.a11y.take() else {
+        let Some(mut adapter) = self.win.a11y.take() else {
             return;
         };
         adapter.update_if_active(|| {
             let snapshot = self.a11y_snapshot(window.scale_factor());
             let built = crate::a11y::build(&snapshot);
-            self.a11y_targets = built.targets;
-            if built.fingerprint == self.a11y_fingerprint {
+            self.win.a11y_targets = built.targets;
+            if built.fingerprint == self.win.a11y_fingerprint {
                 // unchanged: keep focus, send no nodes
                 return accesskit::TreeUpdate {
                     nodes: Vec::new(),
@@ -14952,10 +16106,10 @@ impl App {
                     focus: built.update.focus,
                 };
             }
-            self.a11y_fingerprint = built.fingerprint;
+            self.win.a11y_fingerprint = built.fingerprint;
             built.update
         });
-        self.a11y = Some(adapter);
+        self.win.a11y = Some(adapter);
     }
 
     fn on_access_event(
@@ -14964,38 +16118,62 @@ impl App {
         event_loop: &ActiveEventLoop,
     ) {
         use accesskit_winit::WindowEvent as A;
-        let Some(window) = self.window.clone() else {
+        let Some(window) = self.win.window.clone() else {
             return;
         };
         match event {
             A::InitialTreeRequested => {
                 log::info!("accessibility: screen reader attached");
                 // the next update must carry the full tree
-                self.a11y_fingerprint.clear();
+                self.win.a11y_fingerprint.clear();
                 self.update_a11y(&window);
             }
             A::ActionRequested(req) => {
                 if !crate::a11y::activates(req.action) {
                     return;
                 }
-                let Some(r) = self.a11y_targets.get(&req.target_node).copied() else {
+                let Some(r) = self.win.a11y_targets.get(&req.target_node).copied() else {
                     return;
                 };
                 // act exactly like a pointer click on the node
-                let saved = self.mouse;
-                self.mouse = (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
+                let saved = self.win.mouse;
+                self.win.mouse = (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
                 self.on_left(ElementState::Pressed, event_loop, &window);
                 self.on_left(ElementState::Released, event_loop, &window);
-                self.mouse = saved;
+                self.win.mouse = saved;
                 window.request_redraw();
             }
-            A::AccessibilityDeactivated => self.a11y_fingerprint.clear(),
+            A::AccessibilityDeactivated => self.win.a11y_fingerprint.clear(),
         }
     }
 
     fn dump_state(&mut self) -> String {
         use std::fmt::Write as _;
         let mut out = String::new();
+        // every window (opening order); the rest of the dump is this one's
+        let _ = writeln!(
+            out,
+            "windows={} window={} focused_window={:?}",
+            self.window_count(),
+            self.window_index(),
+            self.focused_window
+                .and_then(|id| self.window_order.iter().position(|w| *w == id))
+        );
+        for (i, w) in self.windows_in_order().into_iter().enumerate() {
+            let titles: Vec<String> = w.tabs.iter().map(|t| t.display_title()).collect();
+            let panes: Vec<PaneId> = w
+                .tabs
+                .iter()
+                .flat_map(|t| t.panes.iter().map(|p| p.session.id))
+                .collect();
+            let _ = writeln!(
+                out,
+                "window {i}: tabs={} active={} panes={panes:?} titles={titles:?} {}",
+                w.tabs.len(),
+                w.active,
+                Self::window_kind_dump(w)
+            );
+        }
         let _ = writeln!(
             out,
             "theme_bg={:?} control_api={}",
@@ -15006,7 +16184,7 @@ impl App {
             "remote_access={} control_level={:?} gateway={:?} gateway_pid={:?} clients={:?} remote_chip={:?} chip_age_ms={:?} remote_notices={} pairing={:?} pairing_wait={} view_only={} devices={:?}",
             self.config.remote_access,
             self.control_level(),
-            self.settings.remote.gateway.text(),
+            self.win.settings.remote.gateway.text(),
             self.remote.status.as_ref().map(|s| s.pid),
             self.remote
                 .status
@@ -15016,10 +16194,11 @@ impl App {
             self.remote_chip(),
             self.remote.chip_changed.map(|t| t.elapsed().as_millis()),
             self.remote.notices,
-            self.settings.remote.pairing.as_ref().map(|p| &p.url),
-            self.settings.remote.pairing_wait,
-            self.settings.remote.view_only,
-            self.settings
+            self.win.settings.remote.pairing.as_ref().map(|p| &p.url),
+            self.win.settings.remote.pairing_wait,
+            self.win.settings.remote.view_only,
+            self.win
+                .settings
                 .remote
                 .devices
                 .iter()
@@ -15030,10 +16209,10 @@ impl App {
             out,
             "remote_relay={:?} relay_line={:?} relay_reason={:?} relay_open={} relay_edit={:?} clients_via={:?} chip_tip={:?} device_access={:?} history={:?}",
             self.config.remote_relay,
-            self.settings.remote.relay.text(),
-            self.settings.remote.relay.reason(),
-            self.settings.remote.relay_open,
-            self.settings.remote.relay_edit,
+            self.win.settings.remote.relay.text(),
+            self.win.settings.remote.relay.reason(),
+            self.win.settings.remote.relay_open,
+            self.win.settings.remote.relay_edit,
             self.remote
                 .status
                 .iter()
@@ -15044,7 +16223,8 @@ impl App {
                 .collect::<Vec<_>>(),
             self.remote_chip()
                 .map(|_| format!("Connected: {}", self.remote_clients_text())),
-            self.settings
+            self.win
+                .settings
                 .remote
                 .devices
                 .iter()
@@ -15056,7 +16236,8 @@ impl App {
                     )
                 })
                 .collect::<Vec<_>>(),
-            self.settings
+            self.win
+                .settings
                 .remote
                 .history
                 .iter()
@@ -15066,13 +16247,37 @@ impl App {
         let _ = writeln!(
             out,
             "tabs={} active={} editor_active={} any_running={} mouse=({:.0},{:.0}) mouse_cursor={:?}",
-            self.tabs.len(),
-            self.active,
-            self.editor_active,
-            self.any_running,
-            self.mouse.0,
-            self.mouse.1,
-            self.cursor_icon
+            self.win.tabs.len(),
+            self.win.active,
+            self.win.editor_active,
+            self.win.any_running,
+            self.win.mouse.0,
+            self.win.mouse.1,
+            self.win.cursor_icon
+        );
+        // the tabs drawn last frame (strip or rail), which carry a ×, the
+        // rail's width and the unfocused panes washed
+        let tab_slots = self
+            .win
+            .hits
+            .iter()
+            .filter(|h| matches!(h.target, ClickTarget::TabSelect(_)))
+            .count();
+        let tab_close: Vec<String> = self
+            .win
+            .hits
+            .iter()
+            .filter_map(|h| match h.target {
+                ClickTarget::TabClose(i) => Some(i.to_string()),
+                ClickTarget::SettingsClose => Some("settings".into()),
+                _ => None,
+            })
+            .collect();
+        let _ = writeln!(
+            out,
+            "tab_slots={tab_slots} tab_close={tab_close:?} rail_w={} dimmed_panes={}",
+            self.rail_w(),
+            self.win.dimmed_panes
         );
         let _ = writeln!(
             out,
@@ -15081,28 +16286,30 @@ impl App {
         );
         let _ = writeln!(
             out,
-            "palette={} mode={:?} query={:?} selected={} results={}",
-            self.palette.open,
-            self.palette.mode,
-            self.palette.query,
-            self.palette.selected,
-            self.palette_results.len()
+            "palette={} mode={:?} query={:?} selected={} results={} loading={}/{}",
+            self.win.palette.open,
+            self.win.palette.mode,
+            self.win.palette.query,
+            self.win.palette.selected,
+            self.win.palette_results.len(),
+            self.win.windows_loading,
+            self.win.detached_loading
         );
         let _ = writeln!(
             out,
             "settings={} page={:?} search={} query={:?} matches={} total={} current={} menu={} completion={} ghost={:?} items={} tooltip={:?}",
-            self.settings.open,
-            self.settings.page,
-            self.search.open,
-            self.search.query,
-            self.search.matches.len(),
-            self.search.total,
-            self.search.current,
-            self.context_menu.open,
-            self.completion.open,
-            self.completion.ghost,
-            self.completion.items.len(),
-            self.tip_shown.as_ref().map(|t| format!(
+            self.win.settings.open,
+            self.win.settings.page,
+            self.win.search.open,
+            self.win.search.query,
+            self.win.search.matches.len(),
+            self.win.search.total,
+            self.win.search.current,
+            self.win.context_menu.open,
+            self.win.completion.open,
+            self.win.completion.ghost,
+            self.win.completion.items.len(),
+            self.win.tip_shown.as_ref().map(|t| format!(
                 "{} {} {}",
                 t.text,
                 t.detail.as_deref().unwrap_or(""),
@@ -15115,9 +16322,27 @@ impl App {
             .collect::<Vec<_>>()
             .join(" "))
         );
+        // the menu rows: `insert(source)` (a hint shows its text)
+        let _ = writeln!(
+            out,
+            "completion_items={}",
+            self.win
+                .completion
+                .items
+                .iter()
+                .take(20)
+                .map(|c| if c.source == "hint" {
+                    format!("{:?}(hint)", c.description)
+                } else {
+                    format!("{:?}({})", c.insert, c.source)
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
         // every control with a tooltip: `text@x,y,w,h` (a script hovers one
         // by these, whatever the platform's layout)
         let tips: Vec<String> = self
+            .win
             .tips
             .iter()
             .filter(|t| !t.text.is_empty())
@@ -15130,17 +16355,18 @@ impl App {
         let _ = writeln!(
             out,
             "settings_tab={} settings_query={:?} settings_select={:?} completion_source={:?} history={} scope={:?} history_rows={} history_selected={:?}",
-            self.settings.tab,
-            self.settings.query,
-            self.settings.dropdown.as_ref().map(|d| d.id),
-            self.completion.filter,
-            self.history.open,
-            self.history.scope,
-            self.history.results.len(),
-            self.history.current().map(|e| e.command.as_str()),
+            self.win.settings.tab,
+            self.win.settings.query,
+            self.win.settings.dropdown.as_ref().map(|d| d.id),
+            self.win.completion.filter,
+            self.win.history.open,
+            self.win.history.scope,
+            self.win.history.results.len(),
+            self.win.history.current().map(|e| e.command.as_str()),
         );
         // links/paths as-is; blocks as `block <label> <block id>`
         let hint_targets: Vec<String> = self
+            .win
             .hints
             .iter()
             .flat_map(|h| &h.items)
@@ -15152,53 +16378,55 @@ impl App {
         let _ = writeln!(
             out,
             "settings_focus={:?} config_error={:?} hints={hint_targets:?}",
-            self.settings.focus, self.config_error
+            self.win.settings.focus, self.config_error
         );
         let _ = writeln!(
             out,
             "explorer={} focused={} root={:?} rows={} selected={:?} scroll={:.0}",
-            self.explorer.open,
-            self.explorer.focused,
-            self.explorer.root,
-            self.explorer.rows.len(),
-            self.explorer
+            self.win.explorer.open,
+            self.win.explorer.focused,
+            self.win.explorer.root,
+            self.win.explorer.rows.len(),
+            self.win
+                .explorer
                 .selected
                 .as_ref()
                 .and_then(|p| p.file_name())
                 .map(|n| n.to_string_lossy().into_owned()),
-            self.explorer.scroll
+            self.win.explorer.scroll
         );
         let _ = writeln!(
             out,
             "review={} load={} staged={:?} unstaged={:?} expanded={} revealed={} notice={:?} scroll={:.0} shown={} hover_repaints={}",
-            self.review.open,
-            match &self.review.load {
+            self.win.review.open,
+            match &self.win.review.load {
                 crate::views::review_panel::Load::Idle => "idle",
                 crate::views::review_panel::Load::Loading => "loading",
                 crate::views::review_panel::Load::NotARepo => "not-a-repo",
                 crate::views::review_panel::Load::Failed(_) => "failed",
                 crate::views::review_panel::Load::Ready(_) => "ready",
             },
-            self.review.model().map(|m| m
+            self.win.review.model().map(|m| m
                 .staged
                 .iter()
                 .map(|f| format!("{}{}", f.status, f.path))
                 .collect::<Vec<_>>()),
-            self.review.model().map(|m| m
+            self.win.review.model().map(|m| m
                 .unstaged
                 .iter()
                 .map(|f| format!("{}{}", f.status, f.path))
                 .collect::<Vec<_>>()),
-            self.review.expanded.len(),
-            self.review.revealed.values().sum::<u32>(),
-            self.review.notice,
-            self.review.scroll,
+            self.win.review.expanded.len(),
+            self.win.review.revealed.values().sum::<u32>(),
+            self.win.review.notice,
+            self.win.review.scroll,
             self.panel_widths(self.logical_size().0).1 > 0.0,
-            self.hover_repaints
+            self.win.hover_repaints
         );
         // maximized, sideways scroll per file, the hunk toolbar's buttons
         // and the file list's rows (kind@x,y,w,h)
         let mut scroll_x: Vec<_> = self
+            .win
             .review
             .scroll_x
             .iter()
@@ -15207,6 +16435,7 @@ impl App {
             .collect();
         scroll_x.sort();
         let review_hits: Vec<String> = self
+            .win
             .review_hits
             .iter()
             .filter_map(|(r, hit)| {
@@ -15229,17 +16458,19 @@ impl App {
             out,
             "prompt_chips={:?} prompt_editor={:?} prompt_editor_hits={:?}",
             self.config.prompt_chips,
-            self.prompt_editor
+            self.win
+                .prompt_editor
                 .as_ref()
                 .map(|e| (&e.draft, e.drag.as_ref().map(|d| (d.chip, d.live)))),
-            self.prompt_editor_layout
+            self.win
+                .prompt_editor_layout
                 .hits
                 .iter()
                 .map(|(r, t)| format!("{t:?}@{:.0},{:.0},{:.0},{:.0}", r[0], r[1], r[2], r[3]))
                 .collect::<Vec<_>>(),
         );
         // the active pane's prompt chips as drawn (their texts)
-        if let Some(tab) = self.tabs.get(self.active)
+        if let Some(tab) = self.win.tabs.get(self.win.active)
             && let Some(pane) = tab.active()
         {
             let cwd = pane
@@ -15266,8 +16497,8 @@ impl App {
                 "elapsed_secs={:?} elapsed_counting={:?} elapsed_button={:?} elapsed_tip={:?}",
                 elapsed.map(|e| e.time.as_secs()),
                 elapsed.map(|e| e.counting),
-                self.tip_drawn.as_ref().and_then(|d| d.action),
-                self.tips.iter().find(|t| t.action.is_some()).map(|t| t
+                self.win.tip_drawn.as_ref().and_then(|d| d.action),
+                self.win.tips.iter().find(|t| t.action.is_some()).map(|t| t
                     .body
                     .as_deref()
                     .unwrap_or("")
@@ -15280,56 +16511,58 @@ impl App {
         let _ = writeln!(
             out,
             "chip_menu={:?} chip_menu_rows={:?}",
-            self.chip_menu.as_ref().map(|m| (
+            self.win.chip_menu.as_ref().map(|m| (
                 m.kind,
                 m.query.clone(),
                 m.results().into_iter().map(|i| i.label).collect::<Vec<_>>(),
                 m.selected
             )),
-            self.chip_menu_rows
+            self.win
+                .chip_menu_rows
                 .iter()
                 .map(|(r, i)| format!("{i}@{:.0},{:.0},{:.0},{:.0}", r[0], r[1], r[2], r[3]))
                 .collect::<Vec<_>>()
         );
-        if let Some(m) = &self.chip_menu {
+        if let Some(m) = &self.win.chip_menu {
             let _ = writeln!(out, "chip_menu_scroll={:.1}", m.scroll);
         }
         let _ = writeln!(
             out,
             "review_maximized={} scroll_x={scroll_x:?} latent={} review_hits={review_hits:?}",
             self.review_maximized(),
-            self.review.latent.len(),
+            self.win.review.latent.len(),
         );
         let _ = writeln!(
             out,
             "viewer={:?} lines={} error={:?} scroll={:.0} find={:?}",
-            self.viewer.path,
-            self.viewer.lines.len(),
-            self.viewer.error,
-            self.viewer.scroll,
-            self.viewer.find.as_ref().map(|f| f.counter())
+            self.win.viewer.path,
+            self.win.viewer.lines.len(),
+            self.win.viewer.error,
+            self.win.viewer.scroll,
+            self.win.viewer.find.as_ref().map(|f| f.counter())
         );
         let _ = writeln!(
             out,
             "whats_new={} scroll={:.0}/{:.0}",
-            self.whats_new.open,
-            self.whats_new.scroll,
-            (self.whats_new.content_h - self.whats_new.view_h).max(0.0)
+            self.win.whats_new.open,
+            self.win.whats_new.scroll,
+            (self.win.whats_new.content_h - self.win.whats_new.view_h).max(0.0)
         );
         let _ = writeln!(
             out,
             "note_toasts={:?} notifications={} filter={:?} selected={:?} rows={} unread={} scroll={:.0}/{:.0}",
-            self.note_toasts
+            self.win
+                .note_toasts
                 .iter()
                 .map(|(id, _)| *id)
                 .collect::<Vec<_>>(),
-            self.notifications.open,
-            self.notifications.filter,
-            self.notifications.selected,
-            self.notifications_hits.rows.len(),
+            self.win.notifications.open,
+            self.win.notifications.filter,
+            self.win.notifications.selected,
+            self.win.notifications_hits.rows.len(),
             self.unread_attention(),
-            self.notifications.scroll,
-            (self.notifications.content_h - self.notifications.view_h).max(0.0)
+            self.win.notifications.scroll,
+            (self.win.notifications.content_h - self.win.notifications.view_h).max(0.0)
         );
         let _ = writeln!(
             out,
@@ -15351,11 +16584,13 @@ impl App {
         let _ = writeln!(
             out,
             "toasts={:?} toast_hits={:?}",
-            self.toasts
+            self.win
+                .toasts
                 .iter()
                 .map(|t| (t.kind, t.pane, t.action, t.text.clone()))
                 .collect::<Vec<_>>(),
-            self.toast_hits
+            self.win
+                .toast_hits
                 .iter()
                 .map(|h| (h.rect, h.action, h.close))
                 .collect::<Vec<_>>(),
@@ -15365,7 +16600,8 @@ impl App {
             "update_ready={:?} update_fetching={:?} app_notes={:?}",
             self.update.ready,
             self.update.fetching,
-            self.app_notes
+            self.win
+                .app_notes
                 .iter()
                 .map(|n| format!("{} · {}", n.title, n.detail))
                 .collect::<Vec<_>>(),
@@ -15373,12 +16609,13 @@ impl App {
         let _ = writeln!(
             out,
             "confirm={:?} rename={:?} filter_editing={} toast={:?} shell_env={}",
-            self.confirm
+            self.win
+                .confirm
                 .as_ref()
                 .map(|c| (&c.action, c.commands.clone())),
-            self.rename,
-            self.filter_editing,
-            self.toasts.first().map(|t| t.text.clone()),
+            self.win.rename,
+            self.win.filter_editing,
+            self.win.toasts.first().map(|t| t.text.clone()),
             self.shell_env.is_some()
         );
         for a in &self.attention {
@@ -15395,15 +16632,21 @@ impl App {
                 a.detail
             );
         }
-        if self.context_menu.open {
-            let labels: Vec<&str> = self.context_menu.items.iter().map(|i| i.label).collect();
+        if self.win.context_menu.open {
+            let labels: Vec<&str> = self
+                .win
+                .context_menu
+                .items
+                .iter()
+                .map(|i| i.label)
+                .collect();
             let _ = writeln!(
                 out,
                 "menu_items={labels:?} menu_selected={:?}",
-                self.context_menu.selected
+                self.win.context_menu.selected
             );
         }
-        for (i, tab) in self.tabs.iter().enumerate() {
+        for (i, tab) in self.win.tabs.iter().enumerate() {
             let _ = writeln!(
                 out,
                 "tab {i} title={:?} panes={} active_pane={} zoomed={:?} activity={} color={:?} sync={} custom_title={:?} running={}",
@@ -15418,6 +16661,23 @@ impl App {
                 tab.panes.iter().any(PaneState::running)
             );
             let _ = writeln!(out, "  layout={:?}", tab.root);
+            // the active tab's laid-out panes and dividers (logical px)
+            if i == self.win.active {
+                let (lw, lh) = self.logical_size();
+                let (rects, handles) = self.pane_rects(lw, lh);
+                for r in &rects {
+                    let [x, y, w, h] = r.rect;
+                    let _ = writeln!(out, "  pane_rect {} x={x} y={y} w={w} h={h}", r.id);
+                }
+                for d in &handles {
+                    let [x, y, w, h] = d.rect;
+                    let _ = writeln!(
+                        out,
+                        "  divider {:?}/{} x={x} y={y} w={w} h={h}",
+                        d.path, d.index
+                    );
+                }
+            }
             for p in &tab.panes {
                 let cwd = p.session.cwd.lock().unwrap().clone();
                 let _ = writeln!(
@@ -15509,7 +16769,7 @@ impl App {
                 .unwrap_or_default()
         };
         let _ = writeln!(out, "clipboard={clip:?}");
-        let visible = self.window.as_ref().and_then(|w| w.is_visible());
+        let visible = self.win.window.as_ref().and_then(|w| w.is_visible());
         let _ = writeln!(out, "headless={} window_visible={visible:?}", self.headless);
         out
     }
@@ -15573,18 +16833,18 @@ impl App {
                 return Response::error("bad request: cols and rows are both numbers or both null");
             }
         };
-        let active = self.active;
-        let Some(i) = self.tabs.iter().position(|t| t.pane(pane).is_some()) else {
+        let active = self.win.active;
+        let Some(i) = self.win.tabs.iter().position(|t| t.pane(pane).is_some()) else {
             return Response::error("no such pane");
         };
-        if let Some(p) = self.tabs[i].pane_mut(pane) {
+        if let Some(p) = self.win.tabs[i].pane_mut(pane) {
             p.fit = size.map(|(c, r)| (c, r, Instant::now()));
             // layout sizes the panes it draws; one in another tab is sized now
             if i != active {
                 p.apply_fit();
             }
         }
-        if let Some(w) = &self.window {
+        if let Some(w) = &self.win.window {
             w.request_redraw();
         }
         Response {
@@ -15702,20 +16962,18 @@ impl App {
         let Some((ti, tab)) = self.find_tab_of_pane(pane) else {
             return Response::error("no such pane");
         };
-        let previous = tab
-            .pane(pane)
-            .and_then(|p| p.session.cwd.lock().unwrap().clone());
+        let previous = tab.pane(pane).and_then(|p| p.session.local_cwd());
         let cwd = self.config.start_dir(previous.as_deref());
         let id = match kind {
             OpenKind::Tab => {
                 self.spawn_tab_at(cwd);
-                self.tabs[self.active].active_pane
+                self.win.tabs[self.win.active].active_pane
             }
             OpenKind::Pane => {
-                self.settings.open = false;
-                self.active = ti;
+                self.win.settings.open = false;
+                self.win.active = ti;
                 let id = self.split_pane(pane, Axis::Horizontal, cwd);
-                if self.tabs[ti].pane(id).is_none() {
+                if self.win.tabs[ti].pane(id).is_none() {
                     return Response::error("cannot split this pane");
                 }
                 self.save_session();
@@ -15754,10 +17012,10 @@ impl App {
         };
         // a phone never quits the window: closing its last shell leaves a
         // fresh tab behind (⌘W on the desktop would quit, and a quit ends
-        // every shell and the saved layout)
-        let last =
-            self.tabs.len() == 1 && (kind == CloseKind::Tab || self.tabs[ti].panes.len() == 1);
-        if last {
+        // every shell and the saved layout); with other ordinary windows
+        // open, the window closes instead (the drop-down hotkey window does
+        // not count: it alone does not keep the app open)
+        if self.quits(scope) {
             self.spawn_tab();
         }
         self.toast_phone(None, crate::remote::closed_toast(device, kind));
@@ -15777,7 +17035,7 @@ impl App {
         }
         self.submit_to(id, cmd);
         if self.active_pane_id() == Some(id) {
-            self.completion.close();
+            self.win.completion.close();
         }
         self.submit_synced(id, cmd);
     }
@@ -15814,7 +17072,7 @@ impl App {
                 self.remote_press(id, |_| vec![press.clone()]);
             }
         }
-        if let Some(w) = &self.window {
+        if let Some(w) = &self.win.window {
             w.request_redraw();
         }
     }
@@ -15824,7 +17082,7 @@ impl App {
     /// in its program's keyboard mode ([`input::remote_text_presses`]).
     fn remote_text(&mut self, id: PaneId, text: &str) {
         self.remote_press(id, |enc| input::remote_text_presses(text, enc));
-        if let Some(w) = &self.window {
+        if let Some(w) = &self.win.window {
             w.request_redraw();
         }
     }
@@ -15896,7 +17154,7 @@ impl App {
 
     /// Settings › Remote access is on screen.
     fn remote_page_open(&self) -> bool {
-        self.settings.open && self.settings.page == crate::views::settings::Page::Remote
+        self.win.settings.open && self.win.settings.page == crate::views::settings::Page::Remote
     }
 
     /// The gateway's files need reading every second: remote access is on,
@@ -15949,15 +17207,19 @@ impl App {
                 }
             }
         }
-        self.sync_remote_view(&dir);
-        if chip != self.remote_chip() {
+        // every window's tab-bar chip and Settings page follow
+        self.each_window(|app| app.sync_remote_view(&dir));
+        let changed = chip != self.remote_chip();
+        if changed {
             self.remote.chip_changed = Some(now);
         }
-        if (chip != self.remote_chip() || self.remote_page_open())
-            && let Some(w) = &self.window
-        {
-            w.request_redraw();
-        }
+        self.each_window(|app| {
+            if (changed || app.remote_page_open())
+                && let Some(w) = &app.win.window
+            {
+                w.request_redraw();
+            }
+        });
     }
 
     /// Settings › Remote access's view of the last poll.
@@ -15972,16 +17234,16 @@ impl App {
                 GatewayLine::Listening(s.addresses.iter().map(|a| a.to_string()).collect())
             }
         };
-        self.settings.remote.gateway = gateway;
-        self.settings.remote.addresses = self
+        self.win.settings.remote.gateway = gateway;
+        self.win.settings.remote.addresses = self
             .remote
             .status
             .iter()
             .flat_map(|s| s.addresses.iter().map(|a| a.to_string()))
             .collect();
-        self.settings.remote.relay = self.relay_line();
+        self.win.settings.remote.relay = self.relay_line();
         // a gateway that is not running leaves no tunnel to show
-        self.settings.remote.tunnel = (on && self.config.remote_tunnel)
+        self.win.settings.remote.tunnel = (on && self.config.remote_tunnel)
             .then(|| {
                 self.remote
                     .status
@@ -15990,10 +17252,10 @@ impl App {
             })
             .flatten();
         if !on {
-            self.settings.remote.pairing = None;
-            self.settings.remote.pairing_wait = false;
+            self.win.settings.remote.pairing = None;
+            self.win.settings.remote.pairing_wait = false;
         }
-        if self.settings.remote.pairing_wait
+        if self.win.settings.remote.pairing_wait
             && self
                 .remote
                 .status
@@ -16006,8 +17268,8 @@ impl App {
             return;
         }
         if on && self.config.remote_tunnel {
-            self.settings.remote.cloudflared = crate::tunnel::find_cloudflared();
-            self.settings.remote.brew = crate::tunnel::has_brew();
+            self.win.settings.remote.cloudflared = crate::tunnel::find_cloudflared();
+            self.win.settings.remote.brew = crate::tunnel::has_brew();
         }
         use rift_remote::registry::Via;
         let connected: Vec<(String, Via)> = self
@@ -16016,12 +17278,12 @@ impl App {
             .iter()
             .flat_map(|s| s.clients.iter().map(|c| (c.device.clone(), c.via)))
             .collect();
-        self.settings.remote.history = self.history_rows(dir);
+        self.win.settings.remote.history = self.history_rows(dir);
         match rift_remote::registry::devices(dir) {
             Ok(all) => {
-                self.settings.remote.devices_error = None;
-                self.settings.remote.devices_loaded = true;
-                self.settings.remote.devices = all
+                self.win.settings.remote.devices_error = None;
+                self.win.settings.remote.devices_loaded = true;
+                self.win.settings.remote.devices = all
                     .into_iter()
                     .map(|d| {
                         use crate::views::prompt_chips::LocalTime;
@@ -16051,8 +17313,9 @@ impl App {
                     .collect();
             }
             Err(e) => {
-                self.settings.remote.devices.clear();
-                self.settings.remote.devices_error = Some(format!("Could not read devices: {e}"));
+                self.win.settings.remote.devices.clear();
+                self.win.settings.remote.devices_error =
+                    Some(format!("Could not read devices: {e}"));
             }
         }
     }
@@ -16068,9 +17331,9 @@ impl App {
             self.open_target(crate::tunnel::DOWNLOAD_URL);
             return;
         };
-        self.settings.open = false;
+        self.win.settings.open = false;
         self.spawn_tab_at(None);
-        if let Some(pane) = self.tabs.get(self.active).map(|t| t.active_pane) {
+        if let Some(pane) = self.win.tabs.get(self.win.active).map(|t| t.active_pane) {
             self.pending_commands
                 .insert(pane, vec![format!("{brew} install cloudflared")]);
         }
@@ -16102,7 +17365,7 @@ impl App {
             .and_then(|s| s.relay.as_ref())
             .map(|r| r.url.clone())
             .or_else(|| self.config.relay().filter(|_| !tunnel).map(str::to_string));
-        let view = &mut self.settings.remote;
+        let view = &mut self.win.settings.remote;
         // a link without the tunnel's address would only work on this network
         if addresses.is_empty() || (tunnel && relay.is_none()) {
             view.pairing = None;
@@ -16134,7 +17397,7 @@ impl App {
                 self.toast_error(format!("Could not start pairing: {e}"));
             }
         }
-        if let Some(w) = &self.window {
+        if let Some(w) = &self.win.window {
             w.request_redraw();
         }
     }
@@ -16178,7 +17441,7 @@ impl App {
     /// a ws:// / wss:// URL; anything else is dropped with a toast. Returns
     /// whether it was saved.
     fn commit_relay_edit(&mut self) -> bool {
-        let Some(text) = self.settings.remote.relay_edit.take() else {
+        let Some(text) = self.win.settings.remote.relay_edit.take() else {
             return false;
         };
         let text = text.trim().to_string();
@@ -16202,12 +17465,12 @@ impl App {
     /// (saved when valid) and act as usual.
     fn relay_edit_key(&mut self, event: &input::KeyPress) -> bool {
         use winit::keyboard::{Key, NamedKey};
-        let Some(draft) = self.settings.remote.relay_edit.as_mut() else {
+        let Some(draft) = self.win.settings.remote.relay_edit.as_mut() else {
             return false;
         };
-        let mods = self.modifiers;
+        let mods = self.win.modifiers;
         match &event.logical_key {
-            Key::Named(NamedKey::Escape) => self.settings.remote.relay_edit = None,
+            Key::Named(NamedKey::Escape) => self.win.settings.remote.relay_edit = None,
             Key::Named(NamedKey::Enter) => {
                 let text = draft.trim().to_string();
                 match rift_remote::relay::RelayUrl::parse(&text) {
@@ -16388,11 +17651,16 @@ impl App {
         }
     }
 
-    /// Settings › About's line follows the status.
+    /// Settings › About's line and the tab-bar chip of every window follow
+    /// the status.
     fn sync_update_view(&mut self) {
+        self.each_window(|app| app.sync_window_update_view());
+    }
+
+    fn sync_window_update_view(&mut self) {
         use crate::views::settings::UpdateLine;
         use rift_core::update::Status;
-        self.settings.update = match &self.update.status {
+        self.win.settings.update = match &self.update.status {
             Status::Idle => UpdateLine::None,
             Status::Checking => UpdateLine::Checking,
             Status::UpToDate => UpdateLine::UpToDate,
@@ -16403,7 +17671,7 @@ impl App {
             Status::Available(m) => UpdateLine::Available(m.version.clone()),
             Status::Failed(_) => UpdateLine::Failed,
         };
-        if let Some(w) = &self.window {
+        if let Some(w) = &self.win.window {
             w.request_redraw();
         }
     }
@@ -16730,8 +17998,8 @@ impl App {
             target = InstallTarget::Unsupported(format!("this release has no download for {key}"));
         }
         let plural = |n: usize, word: &str| format!("{n} {word}{}", if n == 1 { "" } else { "s" });
-        let panes: Vec<&PaneState> = self.tabs.iter().flat_map(|t| &t.panes).collect();
-        let tabs = self.tabs.len() + survey.tabs();
+        let panes: Vec<&PaneState> = self.all_panes().collect();
+        let tabs = self.all_tabs().count() + survey.tabs();
         let shells = panes.len() + survey.shells();
         let durable = panes
             .iter()
@@ -16811,18 +18079,18 @@ impl App {
         let rift_core::update::Status::Available(m) = self.update.status.clone() else {
             return;
         };
-        if self.update.busy || self.confirm.is_some() {
+        if self.update.busy || self.win.confirm.is_some() {
             return;
         }
         let plan = self.update_plan(m, survey);
-        self.palette.open = false;
-        self.context_menu.close();
-        self.confirm = Some(ConfirmClose {
+        self.win.palette.open = false;
+        self.win.context_menu.close();
+        self.win.confirm = Some(ConfirmClose {
             opened: Instant::now(),
             action: ConfirmAction::Update(Box::new(plan)),
             commands: Vec::new(),
         });
-        if let Some(w) = &self.window {
+        if let Some(w) = &self.win.window {
             w.request_redraw();
         }
     }
@@ -16833,7 +18101,7 @@ impl App {
         if let Some(ConfirmClose {
             action: ConfirmAction::Update(plan),
             ..
-        }) = self.confirm.take()
+        }) = self.win.confirm.take()
         {
             let version = plan.manifest.version.clone();
             self.update.dismissed = Some(version.clone());
@@ -16946,7 +18214,7 @@ impl App {
         self.app_note(title, detail, AppNoteAction::None, true);
         self.sync_update_view();
         if std::mem::take(&mut self.update.quit_after) {
-            self.perform_close(CloseScope::Window, event_loop);
+            self.perform_close(CloseScope::App, event_loop);
         }
     }
 
@@ -16995,7 +18263,7 @@ impl App {
             // version finishes the update (the marker) on its next launch.
             self.update.busy = false;
             self.update.quit_after = false;
-            self.perform_close(CloseScope::Window, event_loop);
+            self.perform_close(CloseScope::App, event_loop);
             return;
         }
         // 2. this window's layout
@@ -17035,6 +18303,7 @@ impl App {
             // the helper is waiting for this process: quit; the other
             // windows stay open on the current version
             log::warn!("update: could not ask the other windows to restart");
+            self.end_hotkey_window_shells();
             crate::quit::exit(event_loop);
         }
     }
@@ -17087,6 +18356,7 @@ impl App {
             log::warn!("restart file {}: {e}", own.display());
         }
         self.save_session();
+        self.end_hotkey_window_shells();
         crate::quit::exit(event_loop);
     }
 
@@ -17135,7 +18405,7 @@ impl App {
         let launch = crate::updater::launch();
         // a scripted run persists (owns session.toml) only under
         // RIFT_PERSIST_SESSION, so it counts as a plain launch then
-        self.persist_session && !launch.secondary && !launch.relaunched && launch.restore.is_none()
+        self.persist_session && !launch.relaunched && launch.restore.is_none()
     }
 
     /// The first frame is on screen: confirm the start after the planned
@@ -17238,15 +18508,22 @@ impl App {
             // validated in take_env: a restart file
             let _ = std::fs::remove_file(file);
         }
+        // the other processes' windows open here, at the next turn of the
+        // event loop (`open_queued_windows`)
         if launch.restart_others {
-            let n = crate::updater::reopen_windows(launch.restore.as_deref(), false, self.headless);
-            log::info!("update: reopened {n} window(s)");
+            let windows = crate::updater::restart_windows(launch.restore.as_deref());
+            log::info!("update: reopening {} window(s)", windows.len());
+            self.queued_windows.extend(windows);
         } else if self.plain_main_launch() && !marker_left {
             // windows a crashed update saved and never reopened
-            let n = crate::updater::reopen_windows(None, true, self.headless);
-            if n > 0 {
-                log::info!("reopened {n} window(s) left by an interrupted update");
+            let windows = crate::updater::restart_windows(None);
+            if !windows.is_empty() {
+                log::info!(
+                    "reopening {} window(s) left by an interrupted update",
+                    windows.len()
+                );
             }
+            self.queued_windows.extend(windows);
         }
         if launch.relaunched {
             quiet_relaunch_output();
@@ -17268,9 +18545,188 @@ fn quiet_relaunch_output() {
     }
 }
 
+impl App {
+    /// The window's paced output frame, tooltip and selection edge scroll:
+    /// each repaints when due; returns when they are next due.
+    fn frame_deadlines(&mut self) -> (Option<Instant>, Option<Instant>, Option<Instant>) {
+        // a paced output frame whose time has come
+        let output_frame = self.win.output_frame_due;
+        if output_frame.is_some_and(|due| Instant::now() >= due) {
+            self.win.output_frame_due = None;
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
+        }
+        // a tooltip whose rest time is up
+        let tip_due = self.tooltip_due();
+        if tip_due.is_some_and(|due| Instant::now() >= due)
+            && let Some(w) = &self.win.window
+        {
+            w.request_redraw();
+        }
+        let tip_due = tip_due.filter(|due| Instant::now() < *due);
+        let output_frame = self.win.output_frame_due;
+        let select_due = self.tick_select_scroll();
+        (output_frame, tip_due, select_due)
+    }
+
+    /// The window's timed repaints (boot grace, toasts, cursor blink): a
+    /// repaint when one is due, and when the others are.
+    fn window_deadlines(&mut self, now: Instant) -> Vec<Instant> {
+        let mut repaint = false;
+        let mut deadlines: Vec<Instant> = Vec::new();
+        // boot placeholder grace ends (shell without a prompt marker)
+        if let Some(until) = self.win.boot_until {
+            if now >= until {
+                self.win.boot_until = None;
+                repaint = true;
+            } else {
+                deadlines.push(until);
+            }
+        }
+        // a phone's pane size whose lease ran out: the shell goes back to the
+        // window's own size
+        for tab in &mut self.win.tabs {
+            for p in &mut tab.panes {
+                let Some((_, _, at)) = p.fit else { continue };
+                let due = at + rift_remote::FIT_LEASE;
+                if now >= due {
+                    p.fit = None;
+                    p.apply_fit();
+                    repaint = true;
+                } else {
+                    deadlines.push(due);
+                }
+            }
+        }
+        // the Elapsed chip: a repaint when its minutes change
+        let minutes = self
+            .win
+            .tabs
+            .get(self.win.active)
+            .filter(|_| {
+                self.config
+                    .prompt_chips
+                    .contains(&rift_core::PromptChip::Elapsed)
+            })
+            .and_then(|t| t.elapsed(self.config.elapsed_counts, now));
+        if self.win.elapsed_minutes != minutes.map(|e| e.time.as_secs() / 60) {
+            self.win.elapsed_minutes = minutes.map(|e| e.time.as_secs() / 60);
+            repaint = true;
+        }
+        if let Some(e) = minutes.filter(|e| e.counting) {
+            deadlines.push(now + Duration::from_secs(60 - e.time.as_secs() % 60));
+        }
+        // a copy button's check goes back to the copy icon
+        if let Some((_, _, at)) = self.win.copied {
+            let until = at + COPIED_SHOWN;
+            if now >= until {
+                self.win.copied = None;
+                repaint = true;
+            } else {
+                deadlines.push(until);
+            }
+        }
+        // status toasts; the one under the pointer stays
+        let (mx, my) = self.win.mouse;
+        let hovered: Vec<u64> = self
+            .win
+            .toast_hits
+            .iter()
+            .filter(|h| {
+                mx >= h.rect[0]
+                    && mx < h.rect[0] + h.rect[2]
+                    && my >= h.rect[1]
+                    && my < h.rect[1] + h.rect[3]
+            })
+            .map(|h| h.id)
+            .collect();
+        let before = self.win.toasts.len();
+        for t in &mut self.win.toasts {
+            if hovered.contains(&t.id) {
+                t.at = now;
+            }
+        }
+        self.win
+            .toasts
+            .retain(|t| t.ttl().is_none_or(|ttl| now < t.at + ttl));
+        if self.win.toasts.len() != before {
+            repaint = true;
+        }
+        for t in &self.win.toasts {
+            if let Some(ttl) = t.ttl() {
+                deadlines.push(t.at + ttl);
+            }
+        }
+        // a dragged pane held still over a tab opens it after TAB_HOVER_OPEN
+        if let Some((_, since)) = self
+            .win
+            .pane_drag
+            .as_ref()
+            .and_then(|d| d.hover_tab)
+            .filter(|(j, _)| *j != self.win.active)
+        {
+            let due = since + TAB_HOVER_OPEN;
+            if now >= due {
+                self.track_pane_drag();
+                repaint = true;
+            } else {
+                deadlines.push(due);
+            }
+        }
+        // Settings: the "config.toml updated" check goes after SAVED_SHOWN
+        if let Some(at) = self
+            .win
+            .settings
+            .saved_at
+            .filter(|_| self.win.settings.open)
+        {
+            let until = at + settings::SAVED_SHOWN;
+            if now >= until {
+                self.win.settings.saved_at = None;
+                repaint = true;
+            } else {
+                deadlines.push(until);
+            }
+        }
+        // notification toasts (a hovered one stays)
+        repaint |= self.prune_note_toasts();
+        let ttl = self.config.notifications.toast_duration();
+        deadlines.extend(self.win.note_toasts.iter().map(|(_, since)| *since + ttl));
+        if (self.win.editor_active || self.win.palette.open || self.win.rename.is_some())
+            && !self.win.any_running
+        {
+            let elapsed = self.blink_epoch.elapsed().as_millis();
+            let next_flip = BLINK_INTERVAL.as_millis() - (elapsed % BLINK_INTERVAL.as_millis());
+            deadlines.push(now + Duration::from_millis(next_flip as u64 + 5));
+            repaint |= next_flip > BLINK_INTERVAL.as_millis() - 30;
+        }
+        // blinking text (SGR 5) on screen flips on its own beat
+        if crate::views::terminal::BLINK_DRAWN.load(std::sync::atomic::Ordering::Relaxed) {
+            let period = TEXT_BLINK.as_millis();
+            let elapsed = self.blink_epoch.elapsed().as_millis();
+            let next_flip = period - (elapsed % period);
+            deadlines.push(now + Duration::from_millis(next_flip as u64 + 5));
+            repaint |= next_flip > period - 30;
+        }
+        if repaint && let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+        deadlines
+    }
+}
+
+/// The earlier of two optional deadlines.
+fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
 impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_some() {
+        if self.win.window.is_some() {
             return;
         }
 
@@ -17289,76 +18745,7 @@ impl ApplicationHandler<UserEvent> for App {
             .as_ref()
             .and_then(|s| s.window)
             .filter(|f| f.width >= 320.0 && f.height >= 200.0);
-        let mut attrs = WindowAttributes::default()
-            .with_title("Rift")
-            .with_window_icon(crate::icon::window_icon())
-            // always transparent so `window_opacity` can change live
-            .with_transparent(true)
-            .with_inner_size(match frame {
-                Some(f) => LogicalSize::new(f.width, f.height),
-                None => LogicalSize::new(1180.0, 760.0),
-            });
-        if let Some(f) = frame {
-            attrs = attrs
-                .with_position(winit::dpi::LogicalPosition::new(f.x, f.y))
-                .with_maximized(f.maximized);
-            if f.fullscreen {
-                attrs = attrs.with_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
-            }
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            use winit::platform::macos::WindowAttributesExtMacOS;
-            attrs = attrs
-                .with_titlebar_transparent(true)
-                .with_fullsize_content_view(true)
-                .with_title_hidden(true);
-            if !self.headless {
-                crate::icon::set_dock_icon();
-            }
-        }
-        // X11 WM_CLASS / Wayland app_id "rift" matches rift.desktop, so
-        // docks, taskbars and switchers show its hicolor icon
-        #[cfg(all(unix, not(target_os = "macos")))]
-        {
-            use winit::platform::wayland::WindowAttributesExtWayland;
-            use winit::platform::x11::WindowAttributesExtX11;
-            attrs = WindowAttributesExtX11::with_name(attrs, "rift", "rift");
-            attrs = WindowAttributesExtWayland::with_name(attrs, "rift", "rift");
-        }
-
-        // hidden until the accessibility adapter is attached (AccessKit
-        // must see the window before it is first shown)
-        let window = Arc::new(
-            event_loop
-                .create_window(attrs.with_visible(false))
-                .expect("create window"),
-        );
-        self.a11y = Some(accesskit_winit::Adapter::with_event_loop_proxy(
-            event_loop,
-            &window,
-            self.proxy.clone(),
-        ));
-        if !self.headless {
-            window.set_visible(true);
-        }
-        // input methods (CJK composition, dead keys, emoji picker)
-        window.set_ime_allowed(true);
-        self.os_light = window.theme() == Some(winit::window::Theme::Light);
-        let size = window.inner_size();
-        let gpu = Gpu::new(window.clone(), size.width, size.height);
-        let quads = QuadPipeline::new(&gpu.device, gpu.config.format);
-        self.bg_image = Some(rift_renderer::ImagePipeline::new(
-            &gpu.device,
-            gpu.config.format,
-        ));
-        self.sprites = Some(rift_renderer::SpritePipeline::new(
-            &gpu.device,
-            gpu.config.format,
-        ));
-        let mut text = TextEngine::new(&gpu.device, &gpu.queue, gpu.config.format);
-        self.cell_w = text.mono_cell_width(self.config.font_size());
+        self.create_window(event_loop, frame);
 
         let git_proxy = self.proxy.clone();
         self.git = Some(GitWorker::new(Arc::new(move |pane, info| {
@@ -17407,11 +18794,6 @@ impl ApplicationHandler<UserEvent> for App {
 
         self.sync_control_server();
 
-        self.window = Some(window);
-        self.gpu = Some(gpu);
-        self.quads = Some(quads);
-        self.text = Some(text);
-
         self.apply_config();
         self.launch_configs = rift_core::launch::load_all();
 
@@ -17438,8 +18820,22 @@ impl ApplicationHandler<UserEvent> for App {
                 for tab in &saved.tabs {
                     self.restore_tab(tab);
                 }
+                self.win.active = saved.active.min(self.win.tabs.len() - 1);
+                // the other windows, in their order; the first is served
+                let first = self.win_id();
+                for other in &saved.other_windows {
+                    self.open_saved_window(event_loop, other);
+                }
+                if let Some(id) = first {
+                    self.enter_window(id);
+                    self.note_window_focus(id);
+                    if self.window_count() > 1
+                        && let Some(w) = self.shown_window()
+                    {
+                        w.focus_window();
+                    }
+                }
                 self.persist_session = persist;
-                self.active = saved.active.min(self.tabs.len() - 1);
                 self.save_session();
             }
             _ if !adopted.is_empty() => {}
@@ -17464,13 +18860,17 @@ impl ApplicationHandler<UserEvent> for App {
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
-        _window_id: WindowId,
+        window_id: WindowId,
         event: WindowEvent,
     ) {
-        let Some(window) = self.window.clone() else {
+        // a window closed a moment ago may still have events queued
+        if !self.enter_window(window_id) {
+            return;
+        }
+        let Some(window) = self.win.window.clone() else {
             return;
         };
-        if let Some(a11y) = &mut self.a11y {
+        if let Some(a11y) = &mut self.win.a11y {
             a11y.process_event(&window, &event);
         }
 
@@ -17479,7 +18879,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.request_close(CloseScope::Window, event_loop);
             }
             WindowEvent::Resized(size) => {
-                if let Some(gpu) = &mut self.gpu {
+                if let Some(gpu) = &mut self.win.gpu {
                     gpu.resize(size.width, size.height);
                 }
                 #[cfg(target_os = "macos")]
@@ -17496,13 +18896,17 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::Focused(f) => {
-                self.focused = f;
+                self.win.focused = f;
+                if f {
+                    self.note_window_focus(window_id);
+                }
                 // the button's release goes to whatever took focus: a drag
                 // in progress ends here, keeping what it selected, or it
                 // would follow (and edge-scroll) the bare pointer
+                self.hotkey_window_focus(f);
                 if !f {
-                    self.pending_sel = None;
-                } else if self.settings.open {
+                    self.win.pending_sel = None;
+                } else if self.win.settings.open {
                     // back from System Settings: show what was chosen there
                     self.refresh_notify_permission();
                 }
@@ -17514,12 +18918,12 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::Ime(ime) => match ime {
                 winit::event::Ime::Preedit(text, _) => {
-                    self.preedit = text;
+                    self.win.preedit = text;
                     window.request_redraw();
                 }
                 winit::event::Ime::Commit(text) => self.commit_text(&text, event_loop, &window),
                 winit::event::Ime::Enabled | winit::event::Ime::Disabled => {
-                    self.preedit.clear();
+                    self.win.preedit.clear();
                     window.request_redraw();
                 }
             },
@@ -17528,9 +18932,9 @@ impl ApplicationHandler<UserEvent> for App {
                 window.request_redraw();
             }
             WindowEvent::ModifiersChanged(m) => {
-                self.modifiers = m.state();
+                self.win.modifiers = m.state();
                 use winit::keyboard::ModifiersKeyState::Pressed;
-                self.alt_sides = (m.lalt_state() == Pressed, m.ralt_state() == Pressed);
+                self.win.alt_sides = (m.lalt_state() == Pressed, m.ralt_state() == Pressed);
                 self.update_cursor_icon(&window);
                 window.request_redraw();
             }
@@ -17541,17 +18945,19 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
                 // the input method owns keys while it is composing
-                if !self.preedit.is_empty() {
+                if !self.win.preedit.is_empty() {
                     return;
                 }
                 self.on_key(&press, event_loop, &window);
             }
             WindowEvent::CursorLeft { .. } => {
-                self.pointer_in = false;
-                if self.review.pointer.take().is_some() && !self.review.hover_rows.is_empty() {
+                self.win.pointer_in = false;
+                if self.win.review.pointer.take().is_some()
+                    && !self.win.review.hover_rows.is_empty()
+                {
                     window.request_redraw();
                 }
-                if self.tip_shown.is_some() {
+                if self.win.tip_shown.is_some() {
                     window.request_redraw();
                 }
             }
@@ -17591,7 +18997,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // opened under a still mouse gets the right shape
                 self.update_cursor_icon(&window);
                 self.update_a11y(&window);
-                if self.any_running {
+                if self.win.any_running {
                     // the running spinner animates; paced so back-to-back
                     // frames never starve the reader thread of the terminal
                     self.request_output_frame();
@@ -17601,7 +19007,8 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, mut event: UserEvent) {
+        self.route_user_event(&mut event);
         match event {
             UserEvent::PtyWakeup(pane) => {
                 if let Some((_, seen)) = &mut self.latency_probe {
@@ -17612,7 +19019,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.flush_pending_commands(pane);
                 self.check_password_prompt(pane);
                 self.check_correction(pane);
-                let active_idx = self.active;
+                let active_idx = self.win.active;
                 if let Some((idx, tab)) = self.find_tab_of_pane(pane) {
                     if idx == active_idx {
                         self.request_output_frame();
@@ -17623,7 +19030,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 .dirty
                                 .store(false, std::sync::atomic::Ordering::Release);
                         }
-                        if let Some(w) = &self.window {
+                        if let Some(w) = &self.win.window {
                             w.request_redraw(); // tab bar dot
                         }
                     }
@@ -17636,33 +19043,33 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     tab.title = title;
                 }
-                if let Some(w) = &self.window {
+                if let Some(w) = &self.win.window {
                     w.request_redraw();
                 }
             }
             UserEvent::PtyBell(pane) => {
                 self.on_bell(pane);
             }
-            UserEvent::GlobalHotkey => self.toggle_visibility(),
+            UserEvent::GlobalHotkey => self.on_global_hotkey(event_loop),
             #[cfg(target_os = "macos")]
             UserEvent::Menu(id) => self.run_menu_command(&id, event_loop),
             #[cfg(not(target_os = "macos"))]
             UserEvent::Menu(_) => {}
             UserEvent::NotificationResponse(r) => self.on_notification_response(r),
             UserEvent::NotifyPermission => {
-                if let Some(w) = &self.window {
+                if let Some(w) = &self.win.window {
                     w.request_redraw();
                 }
             }
             UserEvent::QuitRequested => {
                 // the window may be hidden (global hotkey): the dialog must show
-                if let Some(w) = &self.window
+                if let Some(w) = &self.win.window
                     && !self.headless
                 {
                     w.set_visible(true);
                     w.focus_window();
                 }
-                self.request_close(CloseScope::Window, event_loop);
+                self.request_close(CloseScope::App, event_loop);
             }
             UserEvent::PtyClipboard(text) => {
                 // a copy queued before clipboard_access turned off is dropped
@@ -17706,53 +19113,68 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::PtyWindowOp(pane, params) => self.window_op(pane, &params),
             UserEvent::PtyExit(pane) => {
                 self.close_pane(pane, event_loop);
-                if let Some(w) = &self.window {
+                if let Some(w) = &self.win.window {
                     w.request_redraw();
                 }
             }
             UserEvent::ShellEnvLoaded(env) => {
                 self.shell_env = Some(env);
-                if let Some(w) = &self.window {
-                    w.request_redraw();
-                }
+                self.each_window(|app| {
+                    if let Some(w) = &app.win.window {
+                        w.request_redraw();
+                    }
+                });
             }
             UserEvent::Access(e) => self.on_access_event(e.window_event, event_loop),
             UserEvent::PtyNotify(pane, title, body) => {
                 self.on_program_notification(pane, title, body);
-                if let Some(w) = &self.window {
+                if let Some(w) = &self.win.window {
                     w.request_redraw();
                 }
             }
             UserEvent::PtyNotice(message) => self.toast(message),
             UserEvent::Completions(generation, items) => self.on_completions(generation, items),
+            UserEvent::CompletionsPartial(generation, items) => {
+                self.on_partial_completions(generation, items)
+            }
+            UserEvent::SshCommand(pane, command) => {
+                // the tab may have been closed meanwhile
+                if self.enter_pane_window(pane) {
+                    self.pending_commands.insert(pane, vec![command]);
+                    // sent now if its prompt is already up, else at its
+                    // first prompt (`PtyWakeup`)
+                    self.flush_pending_commands(pane);
+                }
+            }
             UserEvent::ReviewWritten(error) => {
-                self.review.notice = error;
-                self.explorer.refresh();
+                self.win.review.notice = error;
+                self.win.explorer.refresh();
                 self.request_review();
-                if let Some(w) = &self.window {
+                if let Some(w) = &self.win.window {
                     w.request_redraw();
                 }
             }
             UserEvent::ReviewLoaded(generation, result) => {
                 use crate::views::review_panel::Load;
-                if generation != self.review.generation {
+                if generation != self.win.review.generation {
                     return; // a newer request is in flight
                 }
-                self.review.load = match result {
+                self.win.review.load = match result {
                     None => Load::NotARepo,
                     Some(Err(e)) => Load::Failed(e),
                     Some(Ok(r)) => {
-                        self.explorer.set_statuses(r.statuses(), r.dirty_dirs());
+                        self.win.explorer.set_statuses(r.statuses(), r.dirty_dirs());
                         Load::Ready(Arc::new(r))
                     }
                 };
-                if !matches!(self.review.load, Load::Ready(_)) {
-                    self.explorer
+                if !matches!(self.win.review.load, Load::Ready(_)) {
+                    self.win
+                        .explorer
                         .set_statuses(Default::default(), Default::default());
                 }
                 // listings may have changed with the files
-                self.explorer.refresh();
-                if let Some(w) = &self.window {
+                self.win.explorer.refresh();
+                if let Some(w) = &self.win.window {
                     w.request_redraw();
                 }
             }
@@ -17779,7 +19201,7 @@ impl ApplicationHandler<UserEvent> for App {
                 };
                 let response = self.remote_close(pane, &device, kind, event_loop);
                 let _ = p.reply.send(response);
-                if let Some(w) = &self.window {
+                if let Some(w) = &self.win.window {
                     w.request_redraw();
                 }
             }
@@ -17794,10 +19216,11 @@ impl ApplicationHandler<UserEvent> for App {
                     // an updating window restarts this one: its layout is
                     // saved; durable shells keep running for the new version
                     log::info!("restarting for an update");
+                    self.end_hotkey_window_shells();
                     crate::quit::exit(event_loop);
                     return;
                 }
-                if let Some(w) = &self.window {
+                if let Some(w) = &self.win.window {
                     w.request_redraw();
                 }
             }
@@ -17817,32 +19240,42 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::ConfigReloaded => {
                 // Theme files can change without any change to config.toml.
+                let shells = (self.config.shell_completions, self.config.shell.clone());
                 self.load_config(false);
+                // shell completions turned off, or another shell: the warm
+                // completion shells are not needed any more
+                if shells != (self.config.shell_completions, self.config.shell.clone()) {
+                    std::thread::spawn(rift_core::shell_complete::stop_all);
+                }
                 self.apply_config();
             }
             UserEvent::ViewerLoaded(loaded) => {
-                if self.viewer.accept(*loaded)
-                    && let Some(w) = &self.window
+                if self.win.viewer.accept(*loaded)
+                    && let Some(w) = &self.win.window
                 {
                     w.request_redraw();
                 }
             }
-            UserEvent::WindowsLoaded(windows, done) => {
-                self.other_windows.extend(windows);
-                self.windows_loading = !done;
-                if self.palette.open {
+            // `route_user_event` served the asking window; one closed
+            // meanwhile drops the answer
+            UserEvent::WindowsLoaded(asker, ..) | UserEvent::DetachedLoaded(asker, _)
+                if asker != self.win_id() => {}
+            UserEvent::WindowsLoaded(_, windows, done) => {
+                self.win.other_windows.extend(windows);
+                self.win.windows_loading = !done;
+                if self.win.palette.open {
                     self.refresh_palette();
-                    if let Some(w) = &self.window {
+                    if let Some(w) = &self.win.window {
                         w.request_redraw();
                     }
                 }
             }
-            UserEvent::DetachedLoaded(detached) => {
-                self.detached = detached;
-                self.detached_loading = false;
-                if self.palette.open {
+            UserEvent::DetachedLoaded(_, detached) => {
+                self.win.detached = detached;
+                self.win.detached_loading = false;
+                if self.win.palette.open {
                     self.refresh_palette();
-                    if let Some(w) = &self.window {
+                    if let Some(w) = &self.win.window {
                         w.request_redraw();
                     }
                 }
@@ -17853,6 +19286,7 @@ impl ApplicationHandler<UserEvent> for App {
                     .prompt_chips
                     .contains(&rift_core::PromptChip::GithubPr);
                 let mut lookup = None;
+                let mut reload_review = false;
                 if let Some((_, tab)) = self.find_tab_of_pane(pane)
                     && let Some(p) = tab.pane_mut(pane)
                 {
@@ -17861,8 +19295,11 @@ impl ApplicationHandler<UserEvent> for App {
                     if p.git.as_ref().map(|g| &g.branch) != branch.as_ref() {
                         p.pr = None;
                     }
+                    // the focused pane's changes moved (a poll saw an agent's
+                    // edit): the review panel and the top bar follow
+                    reload_review = p.git != info;
                     p.git = info;
-                    let cwd = p.session.cwd.lock().unwrap().clone();
+                    let cwd = p.session.local_cwd();
                     if pr_chip && let (Some(cwd), Some(branch)) = (cwd, branch) {
                         lookup = Some((cwd, branch));
                     }
@@ -17870,7 +19307,16 @@ impl ApplicationHandler<UserEvent> for App {
                 if let (Some((cwd, branch)), Some(worker)) = (lookup, &self.pr_worker) {
                     worker.request(pane, cwd.into(), branch);
                 }
-                if let Some(w) = &self.window {
+                if reload_review
+                    && self
+                        .win
+                        .tabs
+                        .get(self.win.active)
+                        .is_some_and(|t| t.active_pane == pane)
+                {
+                    self.request_review();
+                }
+                if let Some(w) = &self.win.window {
                     w.request_redraw();
                 }
             }
@@ -17880,7 +19326,7 @@ impl ApplicationHandler<UserEvent> for App {
                 {
                     p.pr = info;
                 }
-                if let Some(w) = &self.window {
+                if let Some(w) = &self.win.window {
                     w.request_redraw();
                 }
             }
@@ -17891,7 +19337,7 @@ impl ApplicationHandler<UserEvent> for App {
                     p.docker = info;
                 }
                 // an open container list follows the new state
-                if let Some(menu) = self.chip_menu.as_mut()
+                if let Some(menu) = self.win.chip_menu.as_mut()
                     && menu.pane == pane
                     && menu.kind == crate::views::chip_menu::ChipKind::Docker
                 {
@@ -17899,11 +19345,11 @@ impl ApplicationHandler<UserEvent> for App {
                         .find_tab_of_pane(pane)
                         .and_then(|(_, t)| t.pane(pane))
                         .and_then(|p| p.docker.clone());
-                    if let Some(menu) = self.chip_menu.as_mut() {
+                    if let Some(menu) = self.win.chip_menu.as_mut() {
                         menu.set_containers(docker.as_ref());
                     }
                 }
-                if let Some(w) = &self.window {
+                if let Some(w) = &self.win.window {
                     w.request_redraw();
                 }
             }
@@ -17911,17 +19357,26 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        self.sync_focus();
+        self.open_queued_windows(event_loop);
+        self.each_window(|app| app.sync_focus());
+        // git and Docker status of the windows in use, on their beat
+        self.each_window(|app| {
+            if app.win.focused {
+                app.request_git();
+            }
+        });
         // every tab's "Time on this tab" follows its panes' commands
         let clock_now = Instant::now();
-        for tab in &mut self.tabs {
-            tab.sync_clock(clock_now);
-        }
+        self.each_window(|app| {
+            for tab in &mut app.win.tabs {
+                tab.sync_clock(clock_now);
+            }
+        });
         // the counted time reaches the session file when a stretch ends and
         // every minute while one runs (no other event saves it); a frame also
         // syncs the clocks, so a stop is "fewer tabs counting than at the last
         // wake", not a before/after here
-        let counting_tabs = self.tabs.iter().filter(|t| t.clock.counting()).count();
+        let counting_tabs = self.all_tabs().filter(|t| t.clock.counting()).count();
         let stopped = counting_tabs < self.clock_counting;
         self.clock_counting = counting_tabs;
         let counting = counting_tabs > 0;
@@ -17935,24 +19390,24 @@ impl ApplicationHandler<UserEvent> for App {
             Some(at) if !save_due => Some(at),
             _ => Some(clock_now),
         };
-        // a paced output frame whose time has come
-        let output_frame = self.output_frame_due;
-        if output_frame.is_some_and(|due| Instant::now() >= due) {
-            self.output_frame_due = None;
-            if let Some(w) = &self.window {
-                w.request_redraw();
-            }
+        // a focus change (a click, ⌘[ / ⌘], ⌥⌘-arrows, focus follows mouse)
+        // reaches the session file, so a restart focuses the pane last used:
+        // one write per wake at most, and only when some tab's focus moved
+        let focus: Vec<PaneId> = self.all_tabs().map(|t| t.active_pane).collect();
+        if self.saved_focus.as_ref().is_some_and(|prev| *prev != focus) {
+            self.save_session_file();
         }
-        // a tooltip whose rest time is up
-        let tip_due = self.tooltip_due();
-        if tip_due.is_some_and(|due| Instant::now() >= due)
-            && let Some(w) = &self.window
-        {
-            w.request_redraw();
-        }
-        let tip_due = tip_due.filter(|due| Instant::now() < *due);
-        let output_frame = self.output_frame_due;
-        let select_due = self.tick_select_scroll();
+        self.saved_focus = Some(focus);
+        // each window's paced output frame, tooltip and selection scroll
+        // ...and the drop-down window's slide
+        let (mut output_frame, mut tip_due, mut select_due) = (None, None, None);
+        self.each_window(|app| {
+            let (o, t, s) = app.frame_deadlines();
+            output_frame = earliest(output_frame, o);
+            tip_due = earliest(tip_due, t);
+            select_due = earliest(select_due, s);
+            select_due = earliest(select_due, app.step_slide(Instant::now()));
+        });
         // the remote gateway's files: at most once a second, on any wake
         self.poll_remote(false);
         if self.script.is_some() {
@@ -17968,143 +19423,18 @@ impl ApplicationHandler<UserEvent> for App {
         // every timed repaint (boot grace, toasts, cursor blink) wakes at the
         // earliest of its deadlines
         let now = Instant::now();
-        let mut repaint = false;
         let mut deadlines: Vec<Instant> = Vec::new();
-        // boot placeholder grace ends (shell without a prompt marker)
-        if let Some(until) = self.boot_until {
-            if now >= until {
-                self.boot_until = None;
-                repaint = true;
-            } else {
-                deadlines.push(until);
-            }
-        }
         // remote access: the next read of the gateway's files (chip, the
         // Settings page and its countdown, the gateway's start)
         if self.remote_polling() {
             deadlines.push(self.remote.polled.map_or(now, |t| t + REMOTE_POLL));
         }
-        // a phone's pane size whose lease ran out: the shell goes back to the
-        // window's own size
-        for tab in &mut self.tabs {
-            for p in &mut tab.panes {
-                let Some((_, _, at)) = p.fit else { continue };
-                let due = at + rift_remote::FIT_LEASE;
-                if now >= due {
-                    p.fit = None;
-                    p.apply_fit();
-                    repaint = true;
-                } else {
-                    deadlines.push(due);
-                }
-            }
-        }
         deadlines.extend(select_due);
-        // the Elapsed chip: a repaint when its minutes change
-        let minutes = self
-            .tabs
-            .get(self.active)
-            .filter(|_| {
-                self.config
-                    .prompt_chips
-                    .contains(&rift_core::PromptChip::Elapsed)
-            })
-            .and_then(|t| t.elapsed(self.config.elapsed_counts, now));
-        if self.elapsed_minutes != minutes.map(|e| e.time.as_secs() / 60) {
-            self.elapsed_minutes = minutes.map(|e| e.time.as_secs() / 60);
-            repaint = true;
-        }
-        if let Some(e) = minutes.filter(|e| e.counting) {
-            deadlines.push(now + Duration::from_secs(60 - e.time.as_secs() % 60));
-        }
         if let Some(at) = self.clock_saved {
             deadlines.push(at + CLOCK_SAVE_EVERY);
         }
-        // a copy button's check goes back to the copy icon
-        if let Some((_, _, at)) = self.copied {
-            let until = at + COPIED_SHOWN;
-            if now >= until {
-                self.copied = None;
-                repaint = true;
-            } else {
-                deadlines.push(until);
-            }
-        }
-        // status toasts; the one under the pointer stays
-        let (mx, my) = self.mouse;
-        let hovered: Vec<u64> = self
-            .toast_hits
-            .iter()
-            .filter(|h| {
-                mx >= h.rect[0]
-                    && mx < h.rect[0] + h.rect[2]
-                    && my >= h.rect[1]
-                    && my < h.rect[1] + h.rect[3]
-            })
-            .map(|h| h.id)
-            .collect();
-        let before = self.toasts.len();
-        for t in &mut self.toasts {
-            if hovered.contains(&t.id) {
-                t.at = now;
-            }
-        }
-        self.toasts
-            .retain(|t| t.ttl().is_none_or(|ttl| now < t.at + ttl));
-        if self.toasts.len() != before {
-            repaint = true;
-        }
-        for t in &self.toasts {
-            if let Some(ttl) = t.ttl() {
-                deadlines.push(t.at + ttl);
-            }
-        }
-        // a dragged pane held still over a tab opens it after TAB_HOVER_OPEN
-        if let Some((_, since)) = self
-            .pane_drag
-            .as_ref()
-            .and_then(|d| d.hover_tab)
-            .filter(|(j, _)| *j != self.active)
-        {
-            let due = since + TAB_HOVER_OPEN;
-            if now >= due {
-                self.track_pane_drag();
-                repaint = true;
-            } else {
-                deadlines.push(due);
-            }
-        }
-        // Settings: the "config.toml updated" check goes after SAVED_SHOWN
-        if let Some(at) = self.settings.saved_at.filter(|_| self.settings.open) {
-            let until = at + settings::SAVED_SHOWN;
-            if now >= until {
-                self.settings.saved_at = None;
-                repaint = true;
-            } else {
-                deadlines.push(until);
-            }
-        }
-        // notification toasts (a hovered one stays)
-        repaint |= self.prune_note_toasts();
-        let ttl = self.config.notifications.toast_duration();
-        deadlines.extend(self.note_toasts.iter().map(|(_, since)| *since + ttl));
-        if (self.editor_active || self.palette.open || self.rename.is_some()) && !self.any_running {
-            let elapsed = self.blink_epoch.elapsed().as_millis();
-            let next_flip = BLINK_INTERVAL.as_millis() - (elapsed % BLINK_INTERVAL.as_millis());
-            deadlines.push(now + Duration::from_millis(next_flip as u64 + 5));
-            repaint |= next_flip > BLINK_INTERVAL.as_millis() - 30;
-        }
-        // blinking text (SGR 5) on screen flips on its own beat
-        if crate::views::terminal::BLINK_DRAWN.load(std::sync::atomic::Ordering::Relaxed) {
-            let period = TEXT_BLINK.as_millis();
-            let elapsed = self.blink_epoch.elapsed().as_millis();
-            let next_flip = period - (elapsed % period);
-            deadlines.push(now + Duration::from_millis(next_flip as u64 + 5));
-            repaint |= next_flip > period - 30;
-        }
-        if repaint && let Some(w) = &self.window {
-            w.request_redraw();
-        }
+        self.each_window(|app| deadlines.extend(app.window_deadlines(now)));
+        self.each_window(|app| deadlines.extend(app.status_poll_due()));
         deadlines.extend(output_frame);
         deadlines.extend(tip_due);
         event_loop.set_control_flow(match deadlines.into_iter().min() {

@@ -4,6 +4,9 @@
 /// colors are authored in sRGB (design tokens) and alpha compositing must
 /// happen in sRGB space to match how the design mock composites in CSS.
 pub struct Gpu {
+    /// Kept for [`Gpu::for_window`]: every window draws with one device.
+    instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
     pub surface: wgpu::Surface<'static>,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
@@ -65,7 +68,42 @@ impl Gpu {
             ..Default::default()
         }))
         .map_err(|e| format!("cannot open the GPU device: {e}"))?;
+        Gpu::with_device(instance, adapter, device, queue, surface, width, height)
+    }
 
+    /// Another window's surface on this one's device and queue: windows
+    /// share the device, so pipelines are cheap and the glyph atlas and
+    /// fonts are shared.
+    pub fn for_window(
+        &self,
+        target: impl Into<wgpu::SurfaceTarget<'static>>,
+        width: u32,
+        height: u32,
+    ) -> Result<Gpu, String> {
+        let surface = self
+            .instance
+            .create_surface(target)
+            .map_err(|e| format!("cannot create a GPU surface: {e}"))?;
+        Gpu::with_device(
+            self.instance.clone(),
+            self.adapter.clone(),
+            self.device.clone(),
+            self.queue.clone(),
+            surface,
+            width,
+            height,
+        )
+    }
+
+    fn with_device(
+        instance: wgpu::Instance,
+        adapter: wgpu::Adapter,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        surface: wgpu::Surface<'static>,
+        width: u32,
+        height: u32,
+    ) -> Result<Gpu, String> {
         let caps = surface.get_capabilities(&adapter);
         let format = pick_format(&caps.formats)
             .ok_or_else(|| "the GPU surface reports no formats".to_string())?;
@@ -96,6 +134,8 @@ impl Gpu {
         surface.configure(&device, &config);
 
         Ok(Gpu {
+            instance,
+            adapter,
             surface,
             device,
             queue,

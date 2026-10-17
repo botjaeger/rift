@@ -81,6 +81,15 @@ def churn(scratch):
     ]
 
 
+def windows(_):
+    # open a second window (in-process, ⌘N), use it, close it: its surface,
+    # pipelines, tabs and shell go with it
+    return [], [
+        "key cmd+n", "wait_prompt", "wait 300", "type echo window\\n", "wait 300",
+        "close_window", "wait 300",
+    ]
+
+
 # name: (steps, warm-up cycles, measured cycles, budget in MB). Warm-up lasts
 # until caches (glyph atlas, allocator arenas, scrollback) are full: measured
 # on macOS, ticking levels off after ~18 cycles and flood after ~9; on Linux
@@ -93,6 +102,7 @@ SCENARIOS = {
     "flood": (flood, 26, 6, 8),
     "stream": (stream, 15, 20, 8),
     "churn": (churn, 13, 10, 8),
+    "windows": (windows, 12, 10, 8),
 }
 
 

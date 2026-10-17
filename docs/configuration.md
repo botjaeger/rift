@@ -7,17 +7,66 @@
 | `~/.config/rift/config.toml` | User configuration (hot-reloaded < 300 ms, including external edits; a once-a-second stat check catches edits the file-system events miss) |
 | `~/.config/rift/themes/*.toml` | User themes, Rift TOML (file stem = theme name) |
 | `~/.config/rift/themes/*.yaml` · `*.yml` | User themes, Warp YAML (same directory, same naming) |
-| `~/.config/rift/launch_configs/*.yaml` · `*.yml` | Launch configurations (Warp-compatible YAML) |
+| `~/.config/rift/launch_configs/*.yaml` · `*.yml` · `*.toml` | Launch configurations (Warp-compatible YAML) and Tab Configs (Warp TOML) |
+| `~/.warp/tab_configs/*.toml`, `~/.warp-preview/tab_configs/*.toml` (macOS); `${XDG_DATA_HOME:-~/.local/share}/warp-terminal[-preview]/tab_configs/*.toml` (Linux) | Warp's own Tab Configs, read-only (see [Tab Configs](#tab-configs-toml)) |
 | `~/.local/share/rift/` | Materialized shell-integration files |
-| `~/.local/share/rift/session.toml` | Saved session (tabs + cwds), written atomically |
+| `~/.local/share/rift/session.toml` | Saved session (every window's tabs, cwds and frame), written atomically; see [Session file](#session-file) |
 | `~/.local/share/rift/last-seen-version` | Version whose What's New was last shown (opens it once after an update) |
 | `~/.local/share/rift/update.json` | Last update check: when, the newest release's manifest, the version *Later* dismissed |
 | `~/.local/share/rift/updates/` | Update downloads (deleted after installing; an interrupted install's leftovers go at the next one), `install.lock` (one window installs at a time) and `relaunch.log` (the restarted app's output until it is confirmed; emptied past 1 MB) |
 | `~/.local/share/rift/update-pending.json` | An update in progress (readable by you only; holds the token other windows' `prepare-restart` needs); the new version removes it 10 s after its first frame, and if it dies before that the old app is put back (`update-failed.json`) |
 | `~/.local/share/rift/remote/` | Remote access (directory 0700, files 0600): `gateway.key` (the desktop's key phones pin), `devices.json` (paired phones), `pairing.json` (live pairing secrets, hashed), `status.json` and `gateway.lock` (the running gateway), `gateway.log`, `relay.json` (the gateway's secret at the relay), `tunnel.json` (the Cloudflare tunnel's state), `history.jsonl` (the newest 500 connections) |
-| `~/.local/share/rift/restart/` | Each window's layout while an update restarts them (consumed on relaunch; left by a crash, reopened at the next plain launch) |
+| `~/.local/share/rift/ssh/` | SSH profiles' shared-connection sockets (`ControlPath=…/%C`, directory 0700) |
+| `~/.local/share/rift/restart/` | Each Rift process's windows while an update restarts them (`<pid>.toml` or `main-<pid>.toml`, the session file's format; consumed on relaunch, every window reopening in the one new process; left by a crash, reopened at the next plain launch) |
 
 `XDG_CONFIG_HOME` and `XDG_DATA_HOME` are honored. When the `rift` config or data directory does not exist, an existing one from an earlier name of the app (`shift`, then `runway`) stays active; move it to `rift` when you want the new paths.
+
+### Session file
+
+`session.toml` (and each restart file) is TOML written by Rift; you do not
+edit it. Version 4 holds every window: the first window's `active` tab,
+`[[tabs]]` and `[window]` frame (logical px, `maximized`, `fullscreen`) stay
+at the top level, where versions up to 3 read them, and each further window
+is an `[[other_windows]]` table with the same three keys:
+
+```toml
+version = 4
+active = 1
+
+[[tabs]]
+cwd = "/Users/me/code/rift"
+
+[[tabs]]
+cwd = "/Users/me"
+title = "notes"
+
+[window]
+x = 120.0
+y = 80.0
+width = 1180.0
+height = 760.0
+
+[[other_windows]]
+active = 0
+
+[[other_windows.tabs]]
+cwd = "/Users/me/code/site"
+
+[other_windows.window]
+x = 144.0
+y = 104.0
+width = 1180.0
+height = 760.0
+```
+
+Files of earlier versions (one window, no `other_windows`) load as one
+window; a version-3 build reading a version-4 file reopens the first window
+only. A tab may also carry `layout` (its split tree), `color`, `transcript`
+and `service` (a durable shell to reattach), `started` and `counted` (the
+Elapsed chip). The file is rewritten when tabs or panes change, when focus
+moves to another pane (so a restart focuses the pane last used), and every
+minute while a tab's time counts. A restored split never lays a pane out
+under 50 px while the window has room, whatever ratio was saved.
 
 ## config.toml reference
 
@@ -46,6 +95,18 @@ restore_session = true            # reopen tabs + cwds after a crash or reboot
 save_transcripts = false          # also save finished blocks' output and replay it
                                   # (marked "restored") on relaunch; off = deleted
 tab_layout    = "horizontal"      # horizontal (tabs on top) | vertical (side rail)
+tab_close_button = "hover"        # hover (× on the active and hovered tab) | always
+                                  # (every tab without an alert/activity dot) | never
+                                  # (⌘W, tab menu, palette still close); the vertical
+                                  # rail always shows it unless never
+new_tab_placement = "end"         # end | after_current — where ⌘T and + put the new tab
+                                  # (restores, launch configs and ctl always append)
+tab_bar_with_one_tab = true       # false: no tab in the strip (and no vertical rail)
+                                  # while one tab is open; the bar's buttons and + stay
+sticky_command_header = true      # pin a block's header while its output scrolls past
+dim_inactive_panes = true         # wash the unfocused split panes (Warp)
+inactive_pane_dim = 10            # that wash in %, clamped 1–40 (half on a light theme)
+focus_follows_mouse = false       # the split pane under the pointer takes focus
 durable_sessions = true           # shells live in the session service: they keep
                                   # running through an update's restart or a
                                   # crash and reattach on launch (a quit ends
@@ -95,6 +156,10 @@ elapsed_counts = "always"         # always | running — what the elapsed chip c
 copy_on_select = true             # copy the selection on mouse release
 autosuggestions = true            # inline ghost text after the cursor
 completions_menu = true           # completion panel (Tab still accepts the ghost text)
+shell_completions = true          # also ask your shell's own completion functions (zsh,
+                                  # bash, fish), and the remote machine of an SSH
+                                  # profile's pane; false (also on reload) stops the
+                                  # warm shells; they always stop when Rift quits
 autocomplete_pairs = true         # auto-close quotes/brackets; Backspace removes empty pairs
 vim_mode      = false             # modal (vim) editing in the command editor
 notify_on_completion = true       # alert when a long command finishes out of view
@@ -118,6 +183,10 @@ clipboard_access = "write"        # OSC 52: off | write (programs may copy) | re
                                   # (also read: any program or ssh host can see your clipboard)
 global_hotkey = ""                # system-wide show/hide chord, e.g. "alt+space";
                                   # empty = off (X11 on Linux)
+hotkey_window = false             # the hotkey slides a drop-down window from the top of
+                                  # the screen instead of showing/hiding the whole app
+hotkey_window_height = 40         # its height, percent of the screen (20–100)
+hotkey_window_hide_on_blur = true # it hides when it loses keyboard focus
 link_editor   = "rift"            # ⌘-clicked file paths / file links: system (default
                                   # app) | rift (viewer pane) | an editor id below
 link_click    = "open"            # plain click on a link: open (open it at once)
@@ -133,6 +202,10 @@ explorer_hidden_files = true      # file explorer lists dotfiles (.git and ignor
 # name = "prod"                   # are listed automatically)
 # host = "me@prod.example.com"    # user@host or a Host alias
 # args = ["-p", "2222"]           # extra ssh arguments
+#                                 # the profile shares its connection
+#                                 # (ControlMaster=auto, ControlPath=<data dir>/ssh/%C,
+#                                 # ControlPersist=60) unless these args or your ssh
+#                                 # config set a ControlPath; remote completions use it
 
 [notifications]                   # Settings → Notifications
 enabled = true                    # master switch for toasts, desktop notifications, sounds
@@ -241,9 +314,10 @@ Pair it with `window_opacity` for a translucent window over the desktop.
 
 ## Launch configurations
 
-Warp's launch-configuration YAML, read from
-`~/.config/rift/launch_configs/*.yaml` (`.yml` too) — Warp's own files from
-`~/.warp/launch_configurations/` drop in unchanged.
+Warp's launch-configuration YAML and its newer TOML Tab Configs, read from
+`~/.config/rift/launch_configs/` (`*.yaml`, `*.yml`, `*.toml`) — Warp's own
+files from `~/.warp/launch_configurations/` drop in unchanged. Files over
+256 KiB are skipped.
 
 ```yaml
 name: dev-server             # optional; defaults to the file stem
@@ -273,17 +347,73 @@ configurations are re-scanned when the palette opens.
 
 Semantics:
 
-- Rift has a single window, so **every window's tabs are concatenated** in
-  document order into one flat tab list rather than taking `windows[0]`.
+- A launch configuration opens in the current window, so **every window's
+  tabs are concatenated** in document order into one flat tab list rather
+  than taking `windows[0]`.
   `active_tab_index` is resolved against that flat list and clamped.
 - `cwd` gets `~` / `~/…` expanded via `$HOME`; a YAML-null `cwd: ~` means the
-  home directory. A cwd that isn't an existing directory is ignored.
+  home directory. A pane without `cwd`, or with one that isn't an existing
+  directory, opens in the `working_directory` start directory.
 - `commands[].exec` are written to the pane verbatim, in order, **at the pane's
   first prompt** (not before the shell is ready).
 - `is_focused` picks the active pane; unknown `split_direction` values and a
   missing `windows` key are errors — the file is logged and skipped, others
-  still load. A single-element `panes` list collapses to a plain pane.
-- Warp-only keys (e.g. tab `color`) are ignored.
+  still load; the palette names skipped files once, with the reason, in a
+  toast (again only when the set of broken files changes). A single-element `panes` list collapses to a plain pane.
+- Tab `color` maps to Rift's tab colors (`red`, `green`, `yellow`, `blue`,
+  `magenta`, `cyan`); `black` and `white` have no Rift equivalent: the tab
+  opens with no color. Other Warp-only keys are ignored.
+
+### Tab Configs (TOML)
+
+Source: <https://docs.warp.dev/terminal/windows/tab-configs> (Warp's docs, read
+2026-10-17). A Tab Config is one TOML file per tab layout. Warp stores them in
+`~/.warp/tab_configs/` (Preview: `~/.warp-preview/tab_configs/`) on macOS and
+`${XDG_DATA_HOME:-~/.local/share}/warp-terminal/tab_configs/` (Preview:
+`warp-terminal-preview`) on Linux. Rift loads `*.toml` from its own
+`launch_configs/` directory and, **read-only**, from those Warp directories;
+when a name exists in both, Rift's own file wins.
+
+```toml
+name = "Server Plus Logs"     # required by Warp; Rift falls back to the file stem
+title = "api {{branch}}"      # optional tab title; {{param}} allowed
+color = "blue"                # black red green yellow blue magenta cyan white
+
+[params.branch]               # optional; Rift substitutes `default`
+type = "branch"               # text (default) | branch | repo
+default = "main"
+
+[[panes]]                     # flat list; the FIRST entry is the root
+id = "root"
+split = "horizontal"          # horizontal = left to right, vertical = top to bottom
+children = ["server", "logs"] # at least two pane ids, in visual order
+
+[[panes]]
+id = "server"
+type = "terminal"             # terminal | agent | cloud
+directory = "~/code/api"      # ~ and {{param}} allowed
+commands = ["make serve"]     # run in sequence
+shell = "zsh"                 # ignored by Rift
+is_focused = true             # at most one pane
+
+[[panes]]
+id = "logs"
+type = "terminal"
+```
+
+Rift honours `name`, `title`, `color`, `directory`, `commands`, `is_focused`,
+`split`, `children` and `params.*.default`. Differences from Warp: all pane
+types open a local terminal; `shell` is ignored; a `{{param}}` with no
+`default` (including `autogenerated_branch_name`) makes the file fail to load
+(named in a toast when the palette opens), because Rift has no fill-in dialog;
+`color = "black"` or `"white"` opens the tab with no color; unknown keys are ignored; at most 64 panes
+and 16 levels of nesting. A Tab Config holds one tab. Splits are always
+equal-sized, as in Warp.
+
+**Save current layout as launch configuration** (palette) writes one Tab Config
+`.toml` per open tab to `~/.config/rift/launch_configs/` (`layout-<time>-1.toml`,
+`-2`, …), never overwriting an existing file, and never writing to Warp's
+directories.
 
 ## Notifications & bell
 
@@ -337,11 +467,11 @@ an app bundle; `notify-send` on Linux) while it is not, plus its sound.
   the raw 32 bytes) trusted for the update manifest's signature, so a test
   can sign with a throwaway key. Honoured only while `RIFT_UPDATE_URL` is a
   `file://` URL; an https manifest is verified with the release keys alone.
-- `RIFT_RELAUNCH_SCRIPT` / `RIFT_RELAUNCH_WINDOW_SCRIPT` (tests): the app
-  an update restarts runs that `--script` (reopened windows: the second one,
-  headless) instead of starting plainly. A scripted run with
-  `RIFT_PERSIST_SESSION` counts as a plain main-window launch: it also
-  reopens windows an interrupted update left in `restart/`.
+- `RIFT_RELAUNCH_SCRIPT` (tests): the app an update restarts runs that
+  `--script` instead of starting plainly (the reopened windows are its
+  own; `window <n>` reaches them). A scripted run with
+  `RIFT_PERSIST_SESSION` counts as a plain launch: it also reopens, as its
+  windows, the windows an interrupted update left in `restart/`.
 - `RIFT_TEST_NO_FIRST_FRAME` (tests): a headless run does not count its
   start as a presented frame, so it confirms through the fallback timer (the
   planned wait + 20 s) like a window that never draws.

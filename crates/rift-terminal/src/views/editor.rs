@@ -186,7 +186,13 @@ pub fn render(
 
     let text_x = x + PAD_X + cell_w * (font_size / 13.0) + 11.0;
     let buffer = &pane.editor.buffer;
-    let vim_normal = pane.editor.vim_mode() == Some(VimMode::Normal);
+    // vim: a solid block in Normal and the visual modes, an underline in
+    // Replace, the configured cursor in Insert
+    let vim_cursor = match pane.editor.vim_mode() {
+        Some(VimMode::Normal | VimMode::Visual | VimMode::VisualLine) => Some(CursorStyle::Block),
+        Some(VimMode::Replace) => Some(CursorStyle::Underline),
+        _ => None,
+    };
 
     // syntax-highlighted spans
     let tokens = tokenize(buffer);
@@ -451,15 +457,11 @@ pub fn render(
     }
 
     // cursor: config style (block 8×18 / bar / underline), 1.1s steps
-    // blink; vim NORMAL always draws a solid block. Translucent when a
-    // glyph sits on it so the glyph (drawn above quads) stays readable.
+    // blink; vim's modal cursors never blink. Translucent when a glyph
+    // sits on it so the glyph (drawn above quads) stays readable.
     let over_glyph = pane.editor.cursor < buffer.len() || ghost_on;
-    let style = if vim_normal {
-        CursorStyle::Block
-    } else {
-        config.cursor_style
-    };
-    if blink_on || vim_normal {
+    let style = vim_cursor.unwrap_or(config.cursor_style);
+    if blink_on || vim_cursor.is_some() {
         let (rect_pos, rect_size, alpha) = match style {
             CursorStyle::Block => (
                 [text_x + prefix_w, cursor_y + CURSOR_TOP],
@@ -480,11 +482,26 @@ pub fn render(
         layer.rect(rect_pos, rect_size, theme.cursor.with_alpha(alpha), 1.0);
     }
 
-    // vim mode pill at the right edge of the input line
+    // vim mode pill at the right edge of the input line; an open `/` `?`
+    // search prompt shows there instead (its last 10 chars, so it stays
+    // inside the width `input_cols` reserves)
     if let Some(mode) = pane.editor.vim_mode() {
-        let (label, color) = match mode {
-            VimMode::Normal => ("NORMAL", theme.warning),
-            VimMode::Insert => ("INSERT", theme.text_muted),
+        let prompt = pane.editor.vim_prompt().map(|p| {
+            let n = p.chars().count();
+            if n > 11 {
+                let tail: String = p.chars().skip(n - 10).collect();
+                format!("{}…{tail}", &p[..1])
+            } else {
+                p
+            }
+        });
+        let (label, color) = match (prompt.as_deref(), mode) {
+            (Some(p), _) => (p, theme.text_bright),
+            (None, VimMode::Normal) => ("NORMAL", theme.warning),
+            (None, VimMode::Insert) => ("INSERT", theme.text_muted),
+            (None, VimMode::Visual) => ("VISUAL", theme.accent),
+            (None, VimMode::VisualLine) => ("VISUAL LINE", theme.accent),
+            (None, VimMode::Replace) => ("REPLACE", theme.error),
         };
         let tw = engine.measure(label, 10.5, rift_renderer::FONT_SANS, Weight::SEMIBOLD);
         let pw = tw + 14.0;
@@ -661,7 +678,7 @@ pub(crate) fn chip_views(
     let python = chips
         .contains(&PromptChip::Python)
         .then(|| {
-            let cwd = pane.session.cwd.lock().unwrap().clone()?;
+            let cwd = pane.session.local_cwd()?;
             rift_core::runtimes::python_version(&bin("RiftPythonBin")?, cwd.as_ref())
         })
         .flatten();

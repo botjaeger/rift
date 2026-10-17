@@ -34,8 +34,8 @@ blocks, ⌘P = palette).
   `--session-daemon` it started (confirm its `XDG_DATA_HOME` with `ps eww`).
 - `--script` synthesizes input inside the app (no OS input), but it still opens
   a real window that takes focus, and the user's typing then lands in it. Add
-  `--headless` to every agent run: the window is never shown or focused, the
-  clipboard is private to the run, and links, new windows and the global
+  `--headless` to every agent run: no window (⌘N's included) is ever shown
+  or focused, the clipboard is private to the run, and links and the global
   hotkey are skipped. On a machine without a display, use the Linux docker
   image.
 
@@ -105,9 +105,10 @@ XDG_CONFIG_HOME=/tmp/rift-t/cfg XDG_DATA_HOME=/tmp/rift-t/data RIFT_NO_NOTIFY=1 
 ```
 
 Commands (one per line, `#` comments; full list in the `script.rs` module
-doc): `wait`, `wait_prompt`, `key`, `keyup`, `type`, `paste`, `shot`, `dump`,
-`resize`, `move`, `click`, `dblclick`, `rclick`, `mclick`, `drag`, `press`,
-`release`, `mods`, `scroll`, `sh`, `focus`, `ime`, `preedit`, `drop`, `wait_file`,
+doc): `wait`, `wait_prompt`, `key`, `keyup`, `keyrepeat`, `type`, `paste`,
+`copyfiles`, `shot`, `dump`, `resize`, `move`, `click`, `dblclick`, `rclick`,
+`mclick`, `drag`, `press`, `release`, `mods`, `scroll`, `sh`, `focus`, `ime`,
+`preedit`, `drop`, `wait_file`, `new_window`, `window`, `close_window`, `hotkey`,
 `quit`. `menu` (native menu bar) works on macOS only; scripts that
 must also pass on Linux use key chords instead.
 
@@ -152,8 +153,20 @@ lives outside the workspace in `mobile/` (pnpm; the `mobile` gate).
 - **rift-terminal** — winit `ApplicationHandler` (`app.rs`), views, input
   routing, per-frame `Hit` rects, kitty keyboard encoder (`keyboard.rs`),
   AccessKit tree (`a11y.rs`), control socket and `ctl` client (`control.rs`), script
-  driver, offscreen capture, update restarts across windows (`updater.rs`),
-  the remote gateway's control-socket source (`remote.rs`).
+  driver, offscreen capture, update restarts across processes (`updater.rs`),
+  the remote gateway's control-socket source (`remote.rs`). One process holds
+  every window: `App` keeps the shared state (config, fonts and glyph atlas,
+  workers, hotkey, menu bar, control socket) and `win: Box<WindowState>`, the
+  window being served (winit window, GPU surface on the shared device,
+  pipelines, tabs, overlays); the rest wait in `App::parked`, and
+  `app/windows.rs` swaps the right one in per event (window id, pane id, or
+  the last focused window). Per-window code reads `self.win.<field>`;
+  whatever must cover every window uses `each_window` / `all_panes`.
+  `app/hotkey_window.rs` is the drop-down hotkey window (`hotkey_window`), a
+  `WindowState` with `dropdown` set: show, hide, slide, focus loss; it does
+  not keep the app open (`ordinary_window_count`, `App::quits`).
+  `dropdown.rs` holds its geometry and the macOS hooks (window level,
+  Spaces, pointer screen, reduced motion, handing focus back).
 - **rift-remote** — no app or graphics deps: the mobile wire protocol
   (`protocol.rs`, fixtures shared with `mobile/` in `fixtures/`), the Noise
   transport (`transport.rs`), the device registry (`registry.rs`), the
@@ -248,6 +261,6 @@ sources the user's real config first.
 | `docs/configuration.md` | `config.toml` reference, themes, launch configs, file locations |
 | `docs/development.md` | Build, test, gates, dependencies, architecture, releases |
 | `docs/performance.md` | Benchmark harness and recorded baseline |
-| `docs/warp-parity.md`, `docs/terminal-landscape-roadmap.md`, `docs/mobile-remote-plan.md` | Plans and parity status |
+| `docs/warp-parity.md`, `docs/warp-gaps.md`, `docs/terminal-landscape-roadmap.md`, `docs/mobile-remote-plan.md` | Plans and parity status |
 | `docs/remote-protocol.md`, `docs/mobile-threat-model.md` | Mobile gateway wire format, limits, trust and threat model |
 | `docs/project-audit-2026-10-07.md`, `docs/audits/`, `docs/workstreams/` | Dated audit records and their evidence (historical; not updated with behavior) |

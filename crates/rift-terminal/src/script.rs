@@ -12,6 +12,7 @@
 //! wait 500                 # sleep before the next step (ms)
 //! key cmd+t                # one chord (same syntax as [keybindings])
 //! keyup a                  # release of a key (kitty event reporting)
+//! keyrepeat 5 cmd+left     # a held key: one press, then 4 auto-repeats
 //! type echo hello          # characters; `\n` submits (Enter)
 //! shot /tmp/frame.png      # capture the next rendered frame
 //! dump /tmp/state.txt      # write a textual state snapshot
@@ -39,12 +40,23 @@
 //! wait_prompt              # block until the shell shows its first prompt
 //! wait_file /tmp/done 600000  # until a file exists (or the ms timeout);
 //!                          # unlike `sh`, the app keeps running meanwhile
+//! new_window               # open a window (as ⌘N); it takes focus
+//! window 1                 # focus window 1 (0 = the first, in opening
+//!                          # order)
+//! close_window             # close the focused window (as its close
+//!                          # button: the last one quits)
+//! hotkey                   # what the global hotkey does: shows or hides
+//!                          # the drop-down window (`hotkey_window`); the
+//!                          # shown drop-down window takes focus
 //! quit                     # exit the app
 //! ```
 //!
-//! `--headless` (debugging/testing) keeps the window hidden and unfocused:
-//! `shot` still renders offscreen, the clipboard is private to the run, and
-//! links, new windows, window-manager actions and the global hotkey are
+//! Steps act on the focused window, as typing does: the one `window` or
+//! `new_window` (or ⌘N) focused last. `dump` lists every window.
+//!
+//! `--headless` (debugging/testing) keeps every window hidden and
+//! unfocused: `shot` still renders offscreen, the clipboard is private to
+//! the run, and links, window-manager actions and the global hotkey are
 //! skipped (see `App::headless`).
 
 use std::path::PathBuf;
@@ -58,6 +70,8 @@ use crate::input::KeyPress;
 pub enum Step {
     Wait(u64),
     Key(String),
+    /// A held chord: one press, then `n - 1` auto-repeat presses.
+    KeyRepeat(u32, String),
     KeyUp(String),
     Type(String),
     Shot(PathBuf),
@@ -85,6 +99,15 @@ pub enum Step {
     WaitPrompt,
     /// Until the path exists, or the timeout (ms) passes.
     WaitFile(PathBuf, u64),
+    /// Open a window (it takes focus).
+    NewWindow,
+    /// Focus window n (opening order, from 0).
+    Window(usize),
+    /// Close the focused window.
+    CloseWindow,
+    /// The global hotkey's action (the drop-down window with
+    /// `hotkey_window`, else the app's show/hide).
+    Hotkey,
     Quit,
 }
 
@@ -189,6 +212,16 @@ pub fn parse(src: &str) -> Result<Vec<Step>, String> {
                 }
                 Step::Key(rest.to_string())
             }
+            "keyrepeat" => {
+                let (n, chord) = rest
+                    .split_once(' ')
+                    .ok_or_else(|| bad("expected count and chord"))?;
+                let n: u32 = n.parse().map_err(|_| bad("expected count"))?;
+                if n == 0 || chord.trim().is_empty() {
+                    return Err(bad("expected count and chord"));
+                }
+                Step::KeyRepeat(n, chord.trim().to_string())
+            }
             "keyup" => {
                 if rest.is_empty() {
                     return Err(bad("expected chord"));
@@ -267,6 +300,10 @@ pub fn parse(src: &str) -> Result<Vec<Step>, String> {
                 }
                 Step::WaitFile(PathBuf::from(path), ms)
             }
+            "new_window" => Step::NewWindow,
+            "window" => Step::Window(rest.parse().map_err(|_| bad("expected a window number"))?),
+            "close_window" => Step::CloseWindow,
+            "hotkey" => Step::Hotkey,
             "quit" => Step::Quit,
             other => return Err(bad(&format!("unknown command {other:?}"))),
         };
@@ -444,6 +481,30 @@ mod tests {
         assert!(parse("bogus 1").is_err());
         assert!(parse("click 1").is_err());
         assert!(parse("wait x").is_err());
+        assert!(parse("window").is_err());
+        assert!(parse("window two").is_err());
+    }
+
+    #[test]
+    fn parses_window_steps() {
+        assert_eq!(
+            parse(
+                "new_window
+window 0
+window 2
+close_window
+hotkey
+"
+            )
+            .unwrap(),
+            [
+                Step::NewWindow,
+                Step::Window(0),
+                Step::Window(2),
+                Step::CloseWindow,
+                Step::Hotkey
+            ]
+        );
     }
 
     #[test]

@@ -3,6 +3,7 @@ mod app;
 mod background;
 mod capture;
 mod control;
+mod dropdown;
 mod hotkey;
 mod icon;
 mod input;
@@ -122,4 +123,7 @@ fn main() {
     let mut application = app::App::new(proxy, script, headless);
     event_loop.run_app(&mut application).expect("event loop");
     quit::LOOP_RETURNED.store(true, std::sync::atomic::Ordering::SeqCst);
+    // the warm completion shells (and what their functions started) end
+    // with the app: they never outlive it, a hung function included
+    rift_core::shell_complete::stop_all();
 }

@@ -33,17 +33,26 @@ pub struct SshProfile {
 /// Concrete (wildcard-free) `Host` names in an ssh config file, following
 /// `Include` (relative paths resolve against `~/.ssh`), at most 8 levels.
 pub fn config_hosts(path: &Path) -> Vec<String> {
-    let mut out = Vec::new();
-    collect(path, 0, &mut out);
-    let mut seen = std::collections::HashSet::new();
-    out.retain(|h| seen.insert(h.clone()));
-    out
+    config_hosts_and_sources(path).0
 }
 
-fn collect(path: &Path, depth: usize, out: &mut Vec<String>) {
+/// [`config_hosts`] and every path it read or listed: each config file
+/// tried (missing ones too) and each directory an `Include` glob listed, so
+/// a cache can tell when the result may have changed.
+pub fn config_hosts_and_sources(path: &Path) -> (Vec<String>, Vec<PathBuf>) {
+    let mut out = Vec::new();
+    let mut sources = Vec::new();
+    collect(path, 0, &mut out, &mut sources);
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|h| seen.insert(h.clone()));
+    (out, sources)
+}
+
+fn collect(path: &Path, depth: usize, out: &mut Vec<String>, sources: &mut Vec<PathBuf>) {
     if depth > 8 {
         return;
     }
+    sources.push(path.to_path_buf());
     let Ok(body) = std::fs::read_to_string(path) else {
         return;
     };
@@ -70,8 +79,13 @@ fn collect(path: &Path, depth: usize, out: &mut Vec<String>) {
         } else if key.eq_ignore_ascii_case("include") {
             for pattern in rest {
                 let p = expand(pattern, &ssh_dir);
+                if p.to_string_lossy().contains('*')
+                    && let Some(dir) = p.parent()
+                {
+                    sources.push(dir.to_path_buf());
+                }
                 for file in glob_simple(&p) {
-                    collect(&file, depth + 1, out);
+                    collect(&file, depth + 1, out, sources);
                 }
             }
         }
@@ -142,10 +156,80 @@ pub fn quote(s: &str) -> String {
     }
 }
 
+/// Where Rift keeps its shared-connection sockets: `<data dir>/ssh`.
+pub fn control_dir() -> Option<PathBuf> {
+    crate::shell_integration::data_dir().map(|d| d.join("ssh"))
+}
+
+/// Longest socket path a `sockaddr_un` holds on macOS (104 with the NUL);
+/// Linux allows 108.
+const MAX_SOCKET_PATH: usize = 103;
+
+/// `dir` ready for control sockets: created, mode 0700, and short enough
+/// for `<dir>/<40-hex %C>`. `None` otherwise (the profile then connects
+/// without sharing).
+pub fn private_control_dir(dir: &Path) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    if dir.as_os_str().len() + 1 + 40 > MAX_SOCKET_PATH {
+        return None;
+    }
+    std::fs::create_dir_all(dir).ok()?;
+    let meta = std::fs::symlink_metadata(dir).ok()?;
+    if !meta.is_dir() {
+        return None;
+    }
+    if meta.permissions().mode() & 0o777 != 0o700 {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).ok()?;
+    }
+    Some(dir.to_path_buf())
+}
+
 impl SshProfile {
-    /// The command line typed into a new tab to connect.
+    /// The command line typed into a new tab to connect (no connection
+    /// sharing; see [`SshProfile::command_shared`]).
     pub fn command(&self) -> String {
+        self.command_shared(None)
+    }
+
+    /// Whether the profile's own args or the user's ssh config already set
+    /// up connection sharing (`ControlPath`/`ControlMaster`, `-S`), which
+    /// Rift then leaves as it is: `ssh -G` reports a `ControlPath`.
+    /// It runs `ssh -G` (up to 2 s): call it off the UI thread.
+    pub fn shares_connections_itself(&self) -> bool {
+        self.args_share_connections()
+            || crate::remote_complete::resolve_control_path(&crate::remote_complete::Target {
+                args: self.args.clone(),
+                host: self.host.clone(),
+            })
+            .is_some()
+    }
+
+    /// Whether the profile's own args set up connection sharing: `-S`
+    /// (case matters: `-s` asks for a subsystem), or a `ControlPath` /
+    /// `ControlMaster` option.
+    pub fn args_share_connections(&self) -> bool {
+        self.args.iter().any(|a| {
+            let lower = a.to_ascii_lowercase();
+            a.starts_with("-S") || lower.contains("controlpath") || lower.contains("controlmaster")
+        })
+    }
+
+    /// The command line typed into a new tab to connect. With `control`
+    /// (from [`private_control_dir`]) ssh shares the connection through a
+    /// socket there (`ControlMaster=auto`, `ControlPath=<control>/%C`,
+    /// `ControlPersist=60`), which remote completions then run over.
+    pub fn command_shared(&self, control: Option<&Path>) -> String {
         let mut parts = vec!["ssh".to_string(), "-o".into(), "SendEnv=LC_TERMINAL".into()];
+        if let Some(dir) = control {
+            parts.extend([
+                "-o".into(),
+                "ControlMaster=auto".into(),
+                "-o".into(),
+                quote(&format!("ControlPath={}/%C", dir.display())),
+                "-o".into(),
+                "ControlPersist=60".into(),
+            ]);
+        }
         parts.extend(self.args.iter().map(|a| quote(a)));
         // `--` so a host can never be read as an option
         parts.push("--".into());
@@ -179,6 +263,13 @@ pub fn installer_script() -> String {
     s.push_str(&heredoc("$d/rift.bash", RIFT_BASH));
     s.push_str(&heredoc("$d/rift.zsh", RIFT_ZSH));
     s.push_str(&heredoc("$d/rift.fish", RIFT_FISH));
+    // the completion servers `rift-complete` runs (remote completions)
+    {
+        use crate::shell_complete::{SERVER_BASH, SERVER_FISH, SERVER_ZSH};
+        s.push_str(&heredoc("$d/complete.bash", SERVER_BASH));
+        s.push_str(&heredoc("$d/complete.zsh", SERVER_ZSH));
+        s.push_str(&heredoc("$d/complete.fish", SERVER_FISH));
+    }
     for (rc, file) in [(".bashrc", "rift.bash"), (".zshrc", "rift.zsh")] {
         s.push_str(&format!(
             "if ! grep -qs '{RC_MARKER}' \"$HOME/{rc}\"; then\n  \
@@ -217,6 +308,22 @@ mod tests {
             vec!["prod", "web-1", "staging", "db"]
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn only_a_control_socket_option_shares_connections() {
+        let p = |args: &[&str]| SshProfile {
+            name: "p".into(),
+            host: "h".into(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+        };
+        assert!(p(&["-S", "/tmp/sock"]).args_share_connections());
+        assert!(p(&["-S/tmp/sock"]).args_share_connections());
+        assert!(p(&["-o", "ControlPath=/tmp/%C"]).args_share_connections());
+        assert!(p(&["-o", "controlmaster=auto"]).args_share_connections());
+        // `-s` asks for a subsystem
+        assert!(!p(&["-s"]).args_share_connections());
+        assert!(!p(&["-p", "22"]).args_share_connections());
     }
 
     #[test]
@@ -271,6 +378,77 @@ mod tests {
     }
 
     #[test]
+    fn profiles_share_their_connection_in_a_private_dir() {
+        let p = SshProfile {
+            name: "x".into(),
+            host: "me@host".into(),
+            args: vec!["-p".into(), "2222".into()],
+        };
+        assert_eq!(
+            p.command_shared(Some(Path::new("/d/ssh"))),
+            "ssh -o SendEnv=LC_TERMINAL -o ControlMaster=auto -o ControlPath=/d/ssh/%C \
+             -o ControlPersist=60 -p 2222 -- me@host"
+        );
+        assert_eq!(
+            p.command_shared(Some(Path::new("/a b/ssh"))),
+            "ssh -o SendEnv=LC_TERMINAL -o ControlMaster=auto -o 'ControlPath=/a b/ssh/%C' \
+             -o ControlPersist=60 -p 2222 -- me@host"
+        );
+        assert_eq!(p.command(), p.command_shared(None));
+        // the profile's own sharing options are left alone
+        let own = SshProfile {
+            args: vec!["-o".into(), "ControlPath=~/.ssh/cm-%C".into()],
+            ..p.clone()
+        };
+        assert!(own.shares_connections_itself());
+        // the directory is created private, and loosened ones tightened
+        use std::os::unix::fs::PermissionsExt;
+        // short: macOS's $TMPDIR leaves no room for the socket name
+        let base = Path::new("/tmp").join(format!("rift-ctl-{}", std::process::id()));
+        let dir = base.join("ssh");
+        assert_eq!(private_control_dir(&dir), Some(dir.clone()));
+        let mode = |d: &Path| std::fs::metadata(d).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(private_control_dir(&dir), Some(dir.clone()));
+        assert_eq!(mode(&dir), 0o700);
+        // a path the socket name would not fit in is not used
+        let long = base.join("x".repeat(80));
+        assert_eq!(private_control_dir(&long), None);
+        assert!(!long.exists());
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn a_user_control_path_in_ssh_config_is_respected() {
+        let dir = std::env::temp_dir().join(format!("rift-ssh-cm-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = dir.join("config");
+        std::fs::write(
+            &cfg,
+            "Host shared\n  ControlMaster auto\n  ControlPath /tmp/cm-%C\n",
+        )
+        .unwrap();
+        let profile = |host: &str| SshProfile {
+            name: host.into(),
+            host: host.into(),
+            args: vec!["-F".into(), cfg.to_string_lossy().into_owned()],
+        };
+        if std::process::Command::new("ssh")
+            .arg("-V")
+            .output()
+            .is_err()
+        {
+            eprintln!("BLOCKED: ssh is not installed");
+            return;
+        }
+        assert!(profile("shared").shares_connections_itself());
+        // control: a host the config gives no ControlPath gets Rift's
+        assert!(!profile("other").shares_connections_itself());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn installer_is_guarded_and_idempotent() {
         let s = installer_script();
         assert!(s.starts_with("set -e\n"));
@@ -300,6 +478,15 @@ mod tests {
             "second run adds nothing"
         );
         assert!(home.join(".local/share/rift/rift.zsh").exists());
+        // the servers `rift-complete` runs, byte for byte
+        for (file, body) in [
+            ("complete.zsh", crate::shell_complete::SERVER_ZSH),
+            ("complete.bash", crate::shell_complete::SERVER_BASH),
+            ("complete.fish", crate::shell_complete::SERVER_FISH),
+        ] {
+            let got = std::fs::read_to_string(home.join(".local/share/rift").join(file)).unwrap();
+            assert_eq!(got.trim_end(), body.trim_end(), "{file}");
+        }
         // an rc file without a trailing newline keeps its last line intact
         std::fs::write(home.join(".zshrc"), "export A=1").unwrap();
         let out = std::process::Command::new("sh")

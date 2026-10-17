@@ -28,7 +28,8 @@ __rift_report_cwd() {
 
 # Prompt chips: the active Python environment, and the php and
 # python3 that PATH resolves to, as iTerm2 user variables (OSC 1337
-# SetUserVar, base64), sent when they change.
+# SetUserVar, base64), sent when they change; PATH itself too (command-name
+# completion follows `rift-use`).
 typeset -g __rift_py= __rift_path=
 __rift_set_var() {
     printf '\e]1337;SetUserVar=%s=%s\a' "$1" "$(printf %s "$2" | base64 | tr -d '\n')"
@@ -43,6 +44,7 @@ __rift_report_env() {
     fi
     if [[ $PATH != "$__rift_path" ]]; then
         __rift_path=$PATH
+        __rift_set_var RiftPath "$PATH"
         __rift_set_var RiftPhpBin "${commands[php]-}"
         __rift_set_var RiftPythonBin "${commands[python3]-}"
     fi
@@ -67,6 +69,17 @@ rift-use() {
     [[ -n $prev ]] && path=(${path:#$prev})
     path=($dir $path)
     typeset -g __rift_use_$kind=$dir
+}
+
+# Rift runs `rift-complete` over an SSH profile's shared connection: it
+# answers completion requests on stdin with this shell's completion
+# functions (complete.zsh next to this file; its header has the protocol).
+typeset -g __rift_complete_srv=${${RIFT_INTEGRATION_ZSH:-${(%):-%x}}:h}/complete.zsh
+rift-complete() {
+    [[ -r $__rift_complete_srv ]] || return 1
+    # the inner shell gets this one's fpath instead of reading the rc files again
+    TERM=${TERM:-xterm} RIFT_COMPLETE_FPATH=${(j.:.)fpath} \
+        command zsh -f -c "$(<$__rift_complete_srv)" rift-complete zsh -f
 }
 
 __rift_precmd() {

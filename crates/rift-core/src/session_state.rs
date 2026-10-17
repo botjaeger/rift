@@ -11,9 +11,10 @@ use std::path::PathBuf;
 
 /// Schema version stamped into freshly built sessions. `1` = the legacy
 /// `cwd`-only shape; `2` adds per-tab `title`, `color` and a nested `layout`;
-/// `3` adds optional per-pane `transcript` ids (saved block output).
+/// `3` adds optional per-pane `transcript` ids (saved block output); `4`
+/// adds `other_windows` (every window after the first).
 /// A file with no `version` key loads as [`LEGACY_VERSION`].
-pub const CURRENT_VERSION: u32 = 3;
+pub const CURRENT_VERSION: u32 = 4;
 
 /// The version assumed for a file that predates the `version` key.
 pub const LEGACY_VERSION: u32 = 1;
@@ -37,6 +38,51 @@ pub struct SavedSession {
     /// Window frame at save time (logical px); restored on launch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window: Option<SavedWindow>,
+    /// Every window after the first (version 4). The first window stays in
+    /// `active`, `tabs` and `window` above, so a build that predates this
+    /// key still reopens it (and ignores the rest).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub other_windows: Vec<SavedWindowTabs>,
+}
+
+/// One window of a session: its tabs, the active one and its frame.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SavedWindowTabs {
+    #[serde(default)]
+    pub active: usize,
+    #[serde(default)]
+    pub tabs: Vec<SavedTab>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<SavedWindow>,
+}
+
+impl SavedSession {
+    /// Every window, the first one first (a file before version 4 has one).
+    pub fn windows(&self) -> Vec<SavedWindowTabs> {
+        let first = SavedWindowTabs {
+            active: self.active,
+            tabs: self.tabs.clone(),
+            window: self.window,
+        };
+        std::iter::once(first)
+            .chain(self.other_windows.iter().cloned())
+            .collect()
+    }
+
+    /// The session of `windows` (the first one first, at the top level).
+    pub fn of_windows(mut windows: Vec<SavedWindowTabs>) -> SavedSession {
+        if windows.is_empty() {
+            return SavedSession::default();
+        }
+        let first = windows.remove(0);
+        SavedSession {
+            active: first.active,
+            tabs: first.tabs,
+            window: first.window,
+            other_windows: windows,
+            ..Default::default()
+        }
+    }
 }
 
 /// Window geometry (logical px) and state.
@@ -59,6 +105,7 @@ impl Default for SavedSession {
             active: 0,
             tabs: Vec::new(),
             window: None,
+            other_windows: Vec::new(),
         }
     }
 }
@@ -98,8 +145,9 @@ pub struct SavedTab {
 }
 
 /// A tab's pane tree: either one leaf pane or a binary split of two subtrees.
-/// Mirrors the app's runtime pane tree so a restored session rebuilds the exact
-/// split layout.
+/// The app's runtime splits hold any number of weighted panes; a row of n is
+/// saved as a chain of two-pane splits nested in `second`, and same-axis
+/// chains flatten back into one row with each pane's share on restore.
 ///
 /// Serialized with an internal `kind` tag, which the workspace `toml` crate
 /// round-trips cleanly (see the tests):
@@ -293,6 +341,7 @@ mod tests {
                 maximized: false,
                 fullscreen: true,
             }),
+            other_windows: Vec::new(),
         };
         let body = toml::to_string(&s).unwrap();
         let back: SavedSession = toml::from_str(&body).unwrap();
@@ -336,6 +385,7 @@ mod tests {
                 counted: Some(7200),
             }],
             window: None,
+            other_windows: Vec::new(),
         };
 
         let body = toml::to_string(&s).unwrap();
@@ -379,5 +429,86 @@ mod tests {
     #[test]
     fn default_session_is_current_version() {
         assert_eq!(SavedSession::default().version, CURRENT_VERSION);
+    }
+
+    fn frame(x: f64) -> Option<SavedWindow> {
+        Some(SavedWindow {
+            x,
+            y: 40.0,
+            width: 800.0,
+            height: 500.0,
+            maximized: false,
+            fullscreen: false,
+        })
+    }
+
+    #[test]
+    fn every_window_round_trips() {
+        let tab = |cwd: &str| SavedTab {
+            cwd: Some(cwd.into()),
+            ..Default::default()
+        };
+        let split = SavedTab {
+            layout: Some(SavedLayout::split(
+                SavedAxis::Vertical,
+                0.5,
+                SavedLayout::pane(Some("/c".into())),
+                SavedLayout::Pane {
+                    cwd: Some("/d".into()),
+                    focused: true,
+                    transcript: None,
+                    service: Some(7),
+                },
+            )),
+            ..tab("/d")
+        };
+        let windows = vec![
+            SavedWindowTabs {
+                active: 1,
+                tabs: vec![tab("/a"), tab("/b")],
+                window: frame(10.0),
+            },
+            SavedWindowTabs {
+                active: 0,
+                tabs: vec![split],
+                window: frame(200.0),
+            },
+            SavedWindowTabs {
+                active: 0,
+                tabs: vec![tab("/e")],
+                window: None,
+            },
+        ];
+        let s = SavedSession::of_windows(windows.clone());
+        assert_eq!(s.version, CURRENT_VERSION);
+        // the first window stays where a version-3 build reads it
+        assert_eq!((s.active, s.tabs.len(), s.window), (1, 2, frame(10.0)));
+        let body = toml::to_string(&s).unwrap();
+        let back: SavedSession = toml::from_str(&body).unwrap();
+        assert_eq!(back, s, "toml body was:\n{body}");
+        assert_eq!(back.windows(), windows);
+        // a build that predates `other_windows` reads the first window alone
+        #[derive(Deserialize)]
+        struct V3 {
+            active: usize,
+            tabs: Vec<SavedTab>,
+        }
+        let old: V3 = toml::from_str(&body).unwrap();
+        assert_eq!((old.active, old.tabs.len()), (1, 2));
+        assert_eq!(old.tabs[0].cwd.as_deref(), Some("/a"));
+    }
+
+    #[test]
+    fn a_version_3_file_is_one_window() {
+        let body = "version = 3\nactive = 1\n\n[[tabs]]\ncwd = \"/a\"\n\n[[tabs]]\ncwd = \"/b\"\n\n\
+                    [window]\nx = 1.0\ny = 2.0\nwidth = 900.0\nheight = 600.0\n";
+        let s: SavedSession = toml::from_str(body).unwrap();
+        assert_eq!(s.version, 3);
+        let windows = s.windows();
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].active, 1);
+        assert_eq!(windows[0].tabs.len(), 2);
+        assert_eq!(windows[0].window.map(|w| w.width), Some(900.0));
+        assert_eq!(SavedSession::of_windows(Vec::new()).tabs.len(), 0);
     }
 }

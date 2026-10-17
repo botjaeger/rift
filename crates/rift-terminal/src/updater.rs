@@ -1,15 +1,17 @@
 //! The window side of an update (rift-core's `update.rs` holds the check
-//! and the install): how this process was launched, the other windows that
-//! restart with it, and reopening them afterwards.
+//! and the install): how this process was launched, the other Rift
+//! processes that restart with it, and reopening their windows afterwards.
 //!
-//! An update restarts every window: the updating window asks each other
-//! window over its control socket to save its layout to
-//! `<data dir>/restart/<pid>.toml` (`main-<pid>.toml` for the window that
-//! owns `session.toml`) and quit (`PrepareRestart`), saves its own, and
-//! quits leaving durable
-//! shells running. A detached helper starts the new binary with
-//! `RIFT_RESTORE_SESSION` (its own file) and `RIFT_RESTART_OTHERS`; that
-//! process reopens one window per remaining file.
+//! One process holds every window it opened (⌘N), and its restart file
+//! holds all of them. An update restarts every Rift process: the updating
+//! one asks each other one (a separate launch, or a window of a version
+//! that ran one process per window) over its control socket to save its
+//! layout to `<data dir>/restart/<pid>.toml` (`main-<pid>.toml` for one
+//! that owns `session.toml`) and quit (`PrepareRestart`), saves its own,
+//! and quits leaving durable shells running. A detached helper starts the
+//! new binary with `RIFT_RESTORE_SESSION` (its own file) and
+//! `RIFT_RESTART_OTHERS`; that process reopens every window of every
+//! remaining file, in-process.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -25,11 +27,6 @@ pub const OTHERS_ENV: &str = "RIFT_RESTART_OTHERS";
 pub const RELAUNCH_ENV: &str = "RIFT_UPDATE_RELAUNCH";
 /// Test hook: the relaunched process runs this script (`--script`).
 pub const RELAUNCH_SCRIPT_ENV: &str = "RIFT_RELAUNCH_SCRIPT";
-/// Test hook: reopened windows run this script, headless.
-pub const RELAUNCH_WINDOW_SCRIPT_ENV: &str = "RIFT_RELAUNCH_WINDOW_SCRIPT";
-/// Set on windows opened by another window (⌘N, reopened windows): they do
-/// not own `session.toml`.
-pub const SECONDARY_ENV: &str = "RIFT_SECONDARY_WINDOW";
 
 /// How this process was started (read once, then removed from the
 /// environment so shells and later windows do not inherit it).
@@ -38,8 +35,6 @@ pub struct Launch {
     pub restore: Option<PathBuf>,
     pub restart_others: bool,
     pub relaunched: bool,
-    /// Opened by another window (`RIFT_SECONDARY_WINDOW`).
-    pub secondary: bool,
     /// Command-line arguments (without the program).
     pub args: Vec<String>,
 }
@@ -61,10 +56,9 @@ pub fn take_env() {
             }),
         restart_others: std::env::var_os(OTHERS_ENV).is_some(),
         relaunched: std::env::var_os(RELAUNCH_ENV).is_some(),
-        secondary: std::env::var_os(SECONDARY_ENV).is_some(),
         args: std::env::args().skip(1).collect(),
     };
-    for k in [RESTORE_ENV, OTHERS_ENV, RELAUNCH_ENV, SECONDARY_ENV] {
+    for k in [RESTORE_ENV, OTHERS_ENV, RELAUNCH_ENV] {
         // SAFETY: called at the top of main, before any other thread exists
         unsafe { std::env::remove_var(k) };
     }
@@ -226,78 +220,43 @@ pub fn is_restart_file(file: &Path, dir: &Path) -> bool {
         && pid.is_some_and(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
 }
 
-fn owns_session(file: &Path) -> bool {
-    file.file_name()
-        .and_then(|n| n.to_str())
-        .is_some_and(|n| n.starts_with("main-"))
-}
-
-/// Which files reopen as the session-owning window: the first `main-` file,
-/// unless this window already owns the session (`own_is_main`).
-fn plan_reopen(
+/// The windows the restart files in `dir` hold, other than `own` (this
+/// process's own file, restored by `RIFT_RESTORE_SESSION`): every window
+/// of each file, oldest file first. Each file is deleted once read; one
+/// that does not parse is left for a look.
+fn take_restart_files(
+    dir: &Path,
     own: Option<&Path>,
-    own_is_main: bool,
-    mut files: Vec<PathBuf>,
-) -> Vec<(PathBuf, bool)> {
-    files.retain(|f| Some(f.as_path()) != own);
-    files.sort();
-    let mut main_taken = own_is_main || own.is_some_and(owns_session);
-    files
-        .into_iter()
-        .map(|f| {
-            let main = !main_taken && owns_session(&f);
-            main_taken |= main;
-            (f, main)
-        })
-        .collect()
-}
-
-/// Reopen one window per restart file other than `own`: a `main-` file as
-/// the session-owning window (one at most, none when `own_is_main`), the
-/// rest as secondary windows. Each reopened window deletes its file once it
-/// is up. A headless run reopens them only under the test hook (as
-/// headless scripted runs). Returns how many were started.
-pub fn reopen_windows(own: Option<&Path>, own_is_main: bool, headless: bool) -> usize {
-    let Some(dir) = rift_core::session_state::restart_dir() else {
-        return 0;
+) -> Vec<rift_core::session_state::SavedWindowTabs> {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Vec::new();
     };
-    let Ok(rd) = std::fs::read_dir(&dir) else {
-        return 0;
-    };
-    let script = std::env::var(RELAUNCH_WINDOW_SCRIPT_ENV).ok();
-    if headless && script.is_none() {
-        log::info!("headless: not reopening windows from {}", dir.display());
-        return 0;
-    }
-    let Ok(exe) = std::env::current_exe() else {
-        return 0;
-    };
-    let files: Vec<PathBuf> = rd
+    let mut files: Vec<PathBuf> = rd
         .flatten()
         .map(|e| e.path())
-        .filter(|p| is_restart_file(p, &dir))
+        .filter(|p| is_restart_file(p, dir) && Some(p.as_path()) != own)
         .collect();
-    let mut started = 0;
-    for (file, main) in plan_reopen(own, own_is_main, files) {
-        let mut cmd = std::process::Command::new(&exe);
-        cmd.env(RESTORE_ENV, &file)
-            .stdin(std::process::Stdio::null());
-        if main {
-            cmd.env_remove(SECONDARY_ENV);
-        } else {
-            cmd.env(SECONDARY_ENV, "1");
-        }
-        if let Some(s) = &script {
-            cmd.args(["--script", s, "--headless"]);
-        }
-        match cmd.spawn() {
-            // reaped by `alive` when an update waits on it; otherwise a
-            // zombie until this window quits, like ⌘N's windows
-            Ok(_) => started += 1,
-            Err(e) => log::warn!("reopen window {}: {e}", file.display()),
+    files.sort();
+    let mut windows = Vec::new();
+    for file in files {
+        match rift_core::session_state::load_from(&file) {
+            Some(saved) => {
+                windows.extend(saved.windows().into_iter().filter(|w| !w.tabs.is_empty()));
+                let _ = std::fs::remove_file(&file);
+            }
+            None => log::warn!("restart file {} does not parse", file.display()),
         }
     }
-    started
+    windows
+}
+
+/// The windows to reopen in this process after a restart: what every
+/// restart file other than `own` holds (`take_restart_files`).
+pub fn restart_windows(own: Option<&Path>) -> Vec<rift_core::session_state::SavedWindowTabs> {
+    match rift_core::session_state::restart_dir() {
+        Some(dir) => take_restart_files(&dir, own),
+        None => Vec::new(),
+    }
 }
 
 #[cfg(test)]
@@ -325,6 +284,7 @@ mod tests {
     fn survey_counts_tabs_and_shells() {
         let tab = |panes| TabInfo {
             index: 0,
+            window: 0,
             title: String::new(),
             active: false,
             panes,
@@ -346,39 +306,42 @@ mod tests {
     }
 
     #[test]
-    fn one_reopened_window_owns_the_session() {
-        let p = |n: &str| PathBuf::from(format!("/r/{n}"));
+    fn restart_files_reopen_every_window_here() {
+        use rift_core::session_state::{SavedSession, SavedTab, SavedWindowTabs};
         assert_eq!(restart_file_name(true, 7), "main-7.toml");
         assert_eq!(restart_file_name(false, 7), "7.toml");
-        // a secondary window updated: the main window's file reopens as main
-        assert_eq!(
-            plan_reopen(
-                Some(&p("9.toml")),
-                false,
-                vec![p("9.toml"), p("3.toml"), p("main-5.toml")]
-            ),
-            vec![(p("3.toml"), false), (p("main-5.toml"), true)]
-        );
-        // the main window updated: everything else is secondary, even a
-        // second session owner (two plain launches)
-        assert_eq!(
-            plan_reopen(
-                Some(&p("main-1.toml")),
-                false,
-                vec![p("main-1.toml"), p("main-2.toml")]
-            ),
-            vec![(p("main-2.toml"), false)]
-        );
-        assert_eq!(
-            plan_reopen(None, false, vec![p("main-2.toml"), p("main-1.toml")]),
-            vec![(p("main-1.toml"), true), (p("main-2.toml"), false)]
-        );
-        // a plain launch of the main window reopens a crashed update's
-        // leftovers: it owns the session itself
-        assert_eq!(
-            plan_reopen(None, true, vec![p("main-2.toml"), p("4.toml")]),
-            vec![(p("4.toml"), false), (p("main-2.toml"), false)]
-        );
+        let dir = std::env::temp_dir().join(format!("rift-restart-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let window = |title: &str| SavedWindowTabs {
+            tabs: vec![SavedTab {
+                title: Some(title.into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        // a version-3 file of a process per window, and a version-4 file
+        // with two windows, both other processes'
+        std::fs::write(dir.join("12.toml"), "[[tabs]]\ntitle = \"old\"\n").unwrap();
+        let two = SavedSession::of_windows(vec![window("a"), window("b")]);
+        rift_core::session_state::save_to(&dir.join("main-5.toml"), &two).unwrap();
+        // this process's own file stays (RIFT_RESTORE_SESSION restores it)
+        let own = dir.join("9.toml");
+        rift_core::session_state::save_to(&own, &SavedSession::of_windows(vec![window("own")]))
+            .unwrap();
+        std::fs::write(dir.join("notes.txt"), "not a restart file").unwrap();
+        std::fs::write(dir.join("13.toml"), "tabs = [").unwrap();
+        let titles: Vec<String> = take_restart_files(&dir, Some(&own))
+            .iter()
+            .flat_map(|w| w.tabs.iter().filter_map(|t| t.title.clone()))
+            .collect();
+        assert_eq!(titles, ["old", "a", "b"]);
+        assert!(own.exists() && dir.join("notes.txt").exists());
+        // read files go; one that does not parse stays for a look
+        assert!(!dir.join("12.toml").exists() && !dir.join("main-5.toml").exists());
+        assert!(dir.join("13.toml").exists());
+        assert!(take_restart_files(&dir, Some(&own)).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use rift_core::{Color, Theme};
+use rift_core::{Color, TabCloseButton, Theme};
 use rift_renderer::glyphon::Weight;
 use rift_renderer::{FONT_SANS, Layer, TextEngine, mono_family};
 
@@ -94,6 +94,10 @@ pub struct PanelButtons {
     /// A phone is connected: the remote chip's label ("Remote · Sam's
     /// iPhone", "Remote · 2 devices").
     pub remote: Option<String>,
+    /// The drop-down hotkey window has no window buttons (Linux draws
+    /// them; macOS shows none on a window without a title bar).
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    pub no_window_buttons: bool,
 }
 
 /// Height of the "Update Rift" chip.
@@ -217,6 +221,7 @@ pub fn render(
     panels: PanelButtons,
     mouse: Option<(f32, f32)>,
     lifted: Option<Lifted>,
+    close_button: TabCloseButton,
     hits: &mut Vec<Hit>,
 ) {
     layer.rect(
@@ -369,7 +374,7 @@ pub fn render(
 
     // traffic lights: native on macOS, drawn (and clickable) on Linux
     #[cfg(not(target_os = "macos"))]
-    {
+    if !panels.no_window_buttons {
         for (i, c) in ["#ff5f57", "#febc2e", "#28c840"].iter().enumerate() {
             let cx = TRAFFIC_X + i as f32 * TRAFFIC_GAP;
             layer.circle([cx, TAB_BAR_H / 2.0], 12.0, Color::hex(c).unwrap());
@@ -433,6 +438,7 @@ pub fn render(
             .filter(|l| l.index == i)
             .map(|l| l.x.clamp(tabs_x, (w - tab_w).max(tabs_x)));
         let hovered = lifted.is_none() && inside(slot, mouse);
+        let shows_close = shows_close(close_button, tab, i == active, hovered);
         match lift_x {
             Some(lx) => {
                 // the slot it will land in: an empty well with a caret
@@ -447,6 +453,7 @@ pub fn render(
                     i == active,
                     true,
                     true,
+                    shows_close,
                     blink_on,
                 );
             }
@@ -459,11 +466,12 @@ pub fn render(
                 i == active,
                 hovered,
                 false,
+                shows_close,
                 blink_on,
             ),
         }
         let close = close_rect(slot);
-        if i == active || hovered || tab.editing.is_some() {
+        if shows_close {
             hits.push(Hit {
                 rect: close,
                 target: close_target(tab, i),
@@ -511,6 +519,20 @@ const CLOSE_BOX: f32 = 20.0;
 /// Every tab's width (Warp's fixed-width tabs); a longer title is cut short.
 const TAB_W: f32 = 200.0;
 
+/// A strip tab shows its × (`tab_close_button`): `hover` on the active and
+/// the hovered tab, `always` also on the others unless their alert or
+/// activity dot holds that slot, `never` on none. A tab being renamed keeps
+/// it except under `never`.
+fn shows_close(mode: TabCloseButton, tab: &TabInfo, active: bool, hovered: bool) -> bool {
+    match mode {
+        TabCloseButton::Never => false,
+        TabCloseButton::Hover => active || hovered || tab.editing.is_some(),
+        TabCloseButton::Always => {
+            active || hovered || tab.editing.is_some() || (tab.alert.is_none() && !tab.activity)
+        }
+    }
+}
+
 fn close_rect(slot: [f32; 4]) -> [f32; 4] {
     [
         slot[0] + slot[2] - 8.0 - CLOSE_BOX,
@@ -521,7 +543,7 @@ fn close_rect(slot: [f32; 4]) -> [f32; 4] {
 }
 
 /// One tab: terminal (or sync) icon, title, pane count chip, then × when
-/// active or hovered, else its alert or activity dot.
+/// `shows_close`, else its alert or activity dot.
 #[allow(clippy::too_many_arguments)]
 fn draw_tab(
     layer: &mut Layer,
@@ -532,6 +554,7 @@ fn draw_tab(
     is_active: bool,
     hovered: bool,
     floating: bool,
+    shows_close: bool,
     blink_on: bool,
 ) {
     let [x, y, tw, th] = r;
@@ -638,9 +661,10 @@ fn draw_tab(
         }
     }
 
-    // right end: × while active or hovered, else the tab's alert / activity
+    // right end: × while active or hovered (`tab_close_button`), else the
+    // tab's alert / activity
     let (ccx, ccy) = (close[0] + CLOSE_BOX / 2.0, mid);
-    if is_active || hovered || tab.editing.is_some() {
+    if shows_close {
         icons::draw(
             layer,
             Icon::Close,
@@ -688,6 +712,7 @@ pub fn render_rail(
     active: usize,
     h: f32,
     blink_on: bool,
+    close_button: TabCloseButton,
     hits: &mut Vec<Hit>,
 ) {
     layer.rect(
@@ -843,18 +868,22 @@ pub fn render_rail(
             layer.text(b, row[0] + 14.0, line1 + 20.0, theme.text_muted);
         }
 
-        super::close_icon(
-            layer,
-            [close_x + 5.0, line1 + 7.0],
-            3.5,
-            theme
-                .text_muted
-                .with_alpha(if is_active { 1.0 } else { 0.7 }),
-        );
-        hits.push(Hit {
-            rect: [close_x - 4.0, line1 - 3.0, 18.0, 20.0],
-            target: close_target(tab, i),
-        });
+        // the rail's rows always carry their × (they have room for the
+        // dots beside it); only `never` takes it away
+        if close_button != TabCloseButton::Never {
+            super::close_icon(
+                layer,
+                [close_x + 5.0, line1 + 7.0],
+                3.5,
+                theme
+                    .text_muted
+                    .with_alpha(if is_active { 1.0 } else { 0.7 }),
+            );
+            hits.push(Hit {
+                rect: [close_x - 4.0, line1 - 3.0, 18.0, 20.0],
+                target: close_target(tab, i),
+            });
+        }
         hits.push(Hit {
             rect: row,
             target: ClickTarget::TabSelect(i),
@@ -999,6 +1028,28 @@ mod tests {
             settings: false,
             running: false,
         }
+    }
+
+    #[test]
+    fn close_button_setting_picks_the_tabs_that_show_it() {
+        let plain = tab(None, false);
+        let busy = tab(Some(Kind::Failed), false);
+        let lit = tab(None, true);
+        // hover (default): the active and the hovered tab only
+        assert!(shows_close(TabCloseButton::Hover, &plain, true, false));
+        assert!(shows_close(TabCloseButton::Hover, &plain, false, true));
+        assert!(!shows_close(TabCloseButton::Hover, &plain, false, false));
+        // always: every tab, except where a dot holds the slot unhovered
+        assert!(shows_close(TabCloseButton::Always, &plain, false, false));
+        assert!(!shows_close(TabCloseButton::Always, &busy, false, false));
+        assert!(!shows_close(TabCloseButton::Always, &lit, false, false));
+        assert!(shows_close(TabCloseButton::Always, &busy, false, true));
+        // never: not even the active, hovered or renamed tab
+        let mut renaming = tab(None, false);
+        renaming.editing = Some("x".into());
+        assert!(!shows_close(TabCloseButton::Never, &plain, true, true));
+        assert!(!shows_close(TabCloseButton::Never, &renaming, true, false));
+        assert!(shows_close(TabCloseButton::Hover, &renaming, false, false));
     }
 
     #[test]

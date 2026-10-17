@@ -19,7 +19,8 @@ end
 
 # Prompt chips: the active Python environment, and the php and
 # python3 that PATH resolves to, as iTerm2 user variables (OSC 1337
-# SetUserVar, base64), sent when they change.
+# SetUserVar, base64), sent when they change; PATH itself too (command-name
+# completion follows `rift-use`).
 set -g __rift_py ''
 set -g __rift_path ''
 function __rift_set_var
@@ -34,6 +35,7 @@ function __rift_report_env --on-event fish_prompt
     end
     if test "$PATH" != "$__rift_path"
         set -g __rift_path "$PATH"
+        __rift_set_var RiftPath (string join : $PATH)
         __rift_set_var RiftPhpBin (command -s php)
         __rift_set_var RiftPythonBin (command -s python3)
     end
@@ -63,6 +65,15 @@ function rift-use
     end
     set -gx PATH $dir $PATH
     set -g $var $dir
+end
+
+# Rift runs `rift-complete` over an SSH profile's shared connection: it
+# answers completion requests on stdin with this shell's completions
+# (complete.fish next to this file; its header has the protocol).
+set -g __rift_complete_srv (string replace -r '[^/]*$' '' -- (status filename))complete.fish
+function rift-complete
+    test -r $__rift_complete_srv; or return 1
+    source $__rift_complete_srv
 end
 
 function __rift_preexec --on-event fish_preexec

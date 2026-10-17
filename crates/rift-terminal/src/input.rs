@@ -116,6 +116,8 @@ pub enum AppAction {
     ResizePaneRight,
     ResizePaneUp,
     ResizePaneDown,
+    /// Every split of the tab back to equal shares.
+    EqualizePanes,
     SelectBlockPrev,
     SelectBlockNext,
     CopyBlockCommand,
@@ -299,6 +301,7 @@ pub fn action_from_name(name: &str) -> Option<AppAction> {
         "resize_pane_right" => AppAction::ResizePaneRight,
         "resize_pane_up" => AppAction::ResizePaneUp,
         "resize_pane_down" => AppAction::ResizePaneDown,
+        "equalize_panes" => AppAction::EqualizePanes,
         "select_block_prev" => AppAction::SelectBlockPrev,
         "select_block_next" => AppAction::SelectBlockNext,
         "copy_block_command" => AppAction::CopyBlockCommand,

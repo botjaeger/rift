@@ -2,6 +2,7 @@ pub mod block;
 pub mod changelog;
 pub mod code_highlight;
 pub mod completion;
+mod completion_cache;
 pub mod completion_specs;
 pub mod config;
 pub mod docker;
@@ -17,9 +18,11 @@ pub mod markdown;
 pub mod notifications;
 pub mod osc;
 pub mod prompts;
+pub mod remote_complete;
 pub mod review;
 pub mod runtimes;
 pub mod session_state;
+pub mod shell_complete;
 pub mod shell_env;
 pub mod shell_integration;
 pub mod ssh;
@@ -31,9 +34,9 @@ pub mod watch;
 
 pub use block::{AbsLine, Block, BlockId, BlockState, BlockStore, Restored};
 pub use config::{
-    Bell, BlocksStart, Config, CursorStyle, ElapsedCounts, InputPosition, PromptChip, PromptMode,
-    TabLayout,
+    Bell, BlocksStart, Config, CursorStyle, ElapsedCounts, InputPosition, NewTabPlacement,
+    PromptChip, PromptMode, TabCloseButton, TabLayout,
 };
 pub use keybindings::{Binding, Keymap};
-pub use osc::{Marker, OscScanner};
+pub use osc::{Marker, OscScanner, host_is_local};
 pub use theme::{Color, Theme};

@@ -588,8 +588,9 @@ pub fn complete_page(
     editor_history: &[String],
     shell_history: &[String],
     cwd: Option<&str>,
+    path: Option<&std::ffi::OsStr>,
 ) -> CompletePage {
-    use rift_core::completion::{complete, current_token, token_end};
+    use rift_core::completion::{complete_on_path, current_token, token_end};
     use rift_remote::protocol::{Completion, CompletionKind, HistoryEntry};
     // a few more than the wire keeps, so `more` is set when some are cut
     const KEEP: usize = rift_remote::MAX_COMPLETE_ITEMS + 1;
@@ -598,7 +599,7 @@ pub fn complete_page(
         let (start, _) = current_token(line, cursor);
         let end = token_end(line, cursor);
         // the whole word around the cursor, as the desktop's Tab completes it
-        for c in complete(line, end, editor_history, shell_history, cwd) {
+        for c in complete_on_path(line, end, editor_history, shell_history, cwd, path) {
             let kind = match c.source {
                 "history" => continue,
                 "command" => CompletionKind::Command,
@@ -1297,7 +1298,7 @@ mod tests {
         ];
         let editor = ["cargo test --workspace".to_string()];
         let shell = ["cargo test -p a".to_string(), "cargo tree".to_string()];
-        let page = complete_page("cargo t", 7, &blocks, &editor, &shell, cwd);
+        let page = complete_page("cargo t", 7, &blocks, &editor, &shell, cwd, None);
         let texts: Vec<&str> = page.items.iter().map(|i| i.text.as_str()).collect();
         assert!(texts.contains(&"cargo test"), "{texts:?}");
         assert!(texts.contains(&"cargo tree"), "{texts:?}");
@@ -1320,22 +1321,26 @@ mod tests {
             ]
         );
         // the word under a mid-line cursor is replaced, the rest kept
-        let page = complete_page("ls sr | wc", 5, &[], &[], &[], cwd);
+        let page = complete_page("ls sr | wc", 5, &[], &[], &[], cwd, None);
         assert!(
             page.items.iter().any(|i| i.text == "ls src/ | wc"),
             "{:?}",
             page.items
         );
         // a cursor inside the word completes the whole word (`sr`, not `s`)
-        let page = complete_page("ls sr | wc", 4, &[], &[], &[], cwd);
+        let page = complete_page("ls sr | wc", 4, &[], &[], &[], cwd, None);
         let texts: Vec<&str> = page.items.iter().map(|i| i.text.as_str()).collect();
         assert_eq!(texts, ["ls src/ | wc"]);
         // an empty line: no completions, every command ran before
-        let page = complete_page("", 0, &blocks, &[], &[], cwd);
+        let page = complete_page("", 0, &blocks, &[], &[], cwd, None);
         assert!(page.items.is_empty());
         assert_eq!(page.history.len(), 3);
         // a cursor inside a character completes nothing (and does not panic)
-        assert!(complete_page("é", 1, &[], &[], &[], cwd).items.is_empty());
+        assert!(
+            complete_page("é", 1, &[], &[], &[], cwd, None)
+                .items
+                .is_empty()
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

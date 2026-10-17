@@ -5,6 +5,11 @@
 //! Rift reads the same schema from `~/.config/rift/launch_configs/*.yaml`
 //! (`.yml` too), so Warp's files drop in unchanged.
 //!
+//! Warp's newer **Tab Configs** are TOML, one tab per file (see
+//! [`LaunchConfig::parse_toml`]); Rift reads `*.toml` from the same directory
+//! and, read-only, from Warp's own `tab_configs` directories
+//! ([`warp_tab_config_dirs`]). Rift writes saved layouts as TOML.
+//!
 //! ```yaml
 //! name: dev-server
 //! windows:
@@ -27,7 +32,7 @@
 //! active_tab_index: 1
 //! ```
 //!
-//! Rift has a single window, so **every window's tabs are concatenated in
+//! A launch configuration opens in one window, so **every window's tabs are concatenated in
 //! document order** into one flat [`LaunchConfig::tabs`] list rather than
 //! taking `windows[0]` and discarding the rest. `active_tab` is resolved
 //! against that flat list: the tab offset of `active_window_index` plus that
@@ -97,6 +102,9 @@ impl LaunchLayout {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchTab {
     pub title: Option<String>,
+    /// Warp's tab `color` name (`red`, `green`, ...), verbatim; the app maps
+    /// the ones Rift has and ignores the rest.
+    pub color: Option<String>,
     pub layout: LaunchLayout,
 }
 
@@ -129,6 +137,7 @@ impl LaunchConfig {
                 };
                 tabs.push(LaunchTab {
                     title: t.title.clone(),
+                    color: t.color.clone().filter(|c| !c.trim().is_empty()),
                     layout,
                 });
             }
@@ -158,6 +167,95 @@ impl LaunchConfig {
         })
     }
 
+    /// Parse one Warp **Tab Config** (TOML, one tab per file):
+    /// <https://docs.warp.dev/terminal/windows/tab-configs>.
+    ///
+    /// `name`, `title`, `color`, a flat `[[panes]]` array whose first entry is
+    /// the root, leaves with `directory` / `commands` / `is_focused`, splits
+    /// with `split` (`horizontal` = side by side, `vertical` = stacked, the
+    /// reverse of the YAML spelling) and `children` (pane ids), and
+    /// `[params.<name>]` with a `default` substituted into `{{name}}`.
+    /// Unknown keys (`shell`, `type`, ...) are ignored. Input is bounded:
+    /// [`MAX_FILE_BYTES`], [`MAX_PANES`], [`MAX_DEPTH`].
+    pub fn parse_toml(fallback_name: &str, src: &str) -> Result<LaunchConfig, String> {
+        if src.len() > MAX_FILE_BYTES {
+            return Err(format!("larger than {MAX_FILE_BYTES} bytes"));
+        }
+        let doc: TomlDoc = toml::from_str(src).map_err(|e| e.to_string())?;
+        if doc.panes.is_empty() {
+            return Err("missing `[[panes]]`".into());
+        }
+        if doc.panes.len() > MAX_PANES {
+            return Err(format!("more than {MAX_PANES} panes"));
+        }
+        let mut by_id: std::collections::HashMap<&str, &TomlPane> =
+            std::collections::HashMap::new();
+        for p in &doc.panes {
+            if by_id.insert(p.id.as_str(), p).is_some() {
+                return Err(format!("duplicate pane id {:?}", p.id));
+            }
+        }
+        let params: std::collections::HashMap<&str, &str> = doc
+            .params
+            .iter()
+            .filter_map(|(k, v)| Some((k.as_str(), v.default.as_deref()?)))
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        let layout = toml_node(&doc.panes[0].id, &by_id, &params, &mut seen, 0)?;
+        let title = match doc.title.as_deref() {
+            Some(t) => Some(subst(t, &params)?),
+            None => None,
+        };
+        let name = doc
+            .name
+            .map(|n| n.trim().to_string())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| fallback_name.to_string());
+        Ok(LaunchConfig {
+            name,
+            tabs: vec![LaunchTab {
+                title: title.filter(|t| !t.trim().is_empty()),
+                color: doc.color.filter(|c| !c.trim().is_empty()),
+                layout,
+            }],
+            active_tab: 0,
+        })
+    }
+
+    /// Serialize as a Warp Tab Config (TOML). A tab config holds one tab, so
+    /// this errors unless `self` has exactly one; [`save_to_dir`] splits first.
+    pub fn to_toml(&self) -> Result<String, String> {
+        let [tab] = self.tabs.as_slice() else {
+            return Err("a tab config holds exactly one tab".into());
+        };
+        let mut panes = Vec::new();
+        out_toml_node(&tab.layout, &mut panes);
+        let doc = OutTomlDoc {
+            name: self.name.clone(),
+            title: tab.title.clone(),
+            color: tab.color.clone(),
+            panes,
+        };
+        toml::to_string(&doc).map_err(|e| e.to_string())
+    }
+
+    /// One single-tab config per tab (what [`save_to_dir`] writes). A one-tab
+    /// config is returned as is; otherwise tab `i` is named `<name> <i+1>`.
+    pub fn split_tabs(&self) -> Vec<LaunchConfig> {
+        if self.tabs.len() == 1 {
+            return vec![self.clone()];
+        }
+        self.tabs
+            .iter()
+            .enumerate()
+            .map(|(i, t)| LaunchConfig {
+                name: format!("{} {}", self.name, i + 1),
+                tabs: vec![t.clone()],
+                active_tab: 0,
+            })
+            .collect()
+    }
+
     /// Every pane in document order (depth-first), useful for the app to
     /// count sessions.
     pub fn pane_count(&self) -> usize {
@@ -165,8 +263,8 @@ impl LaunchConfig {
     }
 
     /// Serialize back to Warp-compatible launch-configuration YAML — the exact
-    /// schema [`LaunchConfig::parse_yaml`] reads. Rift has a single window,
-    /// so all tabs are written under one `windows` entry, and `active_tab` is
+    /// schema [`LaunchConfig::parse_yaml`] reads. A configuration opens in
+    /// one window, so all tabs are written under one `windows` entry, and `active_tab` is
     /// emitted as the document-level `active_tab_index`.
     ///
     /// `cwd` paths are written as-is (they are already `$HOME`-expanded absolute
@@ -181,6 +279,7 @@ impl LaunchConfig {
                     .iter()
                     .map(|t| OutTab {
                         title: t.title.clone(),
+                        color: t.color.clone(),
                         layout: out_layout(&t.layout),
                     })
                     .collect(),
@@ -192,10 +291,12 @@ impl LaunchConfig {
     }
 }
 
-/// `~/.config/rift/launch_configs/<slug>.yaml`, never overwriting: if the
-/// name's slug is taken, `-2`, `-3`, … is appended. Returns the path written.
-/// Errors if [`launch_dir`] is unavailable (no config directory).
-pub fn save(cfg: &LaunchConfig) -> std::io::Result<PathBuf> {
+/// `~/.config/rift/launch_configs/<slug>.toml` (Warp Tab Config format), never
+/// overwriting: if the name's slug is taken, `-2`, `-3`, … is appended. A
+/// multi-tab config is written as one file per tab ([`LaunchConfig::split_tabs`]).
+/// Returns the paths written. Errors if [`launch_dir`] is unavailable (no
+/// config directory).
+pub fn save(cfg: &LaunchConfig) -> std::io::Result<Vec<PathBuf>> {
     let dir = launch_dir().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -206,21 +307,39 @@ pub fn save(cfg: &LaunchConfig) -> std::io::Result<PathBuf> {
 }
 
 /// [`save`] against an explicit directory (also the unit-test entry point).
-/// Creates `dir` if needed, writes `<slug>.yaml` without ever overwriting an
-/// existing file (`-2`, `-3`, … suffixes), and returns the path written.
-pub fn save_to_dir(cfg: &LaunchConfig, dir: &Path) -> std::io::Result<PathBuf> {
+/// Creates `dir` if needed, writes `<slug>.toml` without ever overwriting an
+/// existing file (`-2`, `-3`, … suffixes), and returns the paths written.
+pub fn save_to_dir(cfg: &LaunchConfig, dir: &Path) -> std::io::Result<Vec<PathBuf>> {
     std::fs::create_dir_all(dir)?;
-    let slug = slugify(&cfg.name);
-    let body = cfg.to_yaml();
-
-    let mut path = dir.join(format!("{slug}.yaml"));
-    let mut n = 2u32;
-    while path.exists() {
-        path = dir.join(format!("{slug}-{n}.yaml"));
-        n += 1;
+    let mut written = Vec::new();
+    for tab_cfg in cfg.split_tabs() {
+        let body = tab_cfg
+            .to_toml()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let slug = slugify(&tab_cfg.name);
+        let mut n = 2u32;
+        let mut path = dir.join(format!("{slug}.toml"));
+        // `create_new` makes the never-overwrite check atomic.
+        loop {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut f) => {
+                    std::io::Write::write_all(&mut f, body.as_bytes())?;
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    path = dir.join(format!("{slug}-{n}.toml"));
+                    n += 1;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        written.push(path);
     }
-    std::fs::write(&path, body)?;
-    Ok(path)
+    Ok(written)
 }
 
 /// A filesystem-safe file stem: ASCII alphanumerics lowercased, every other run
@@ -329,26 +448,85 @@ pub fn launch_dir() -> Option<PathBuf> {
     crate::config::config_dir().map(|d| d.join("launch_configs"))
 }
 
-/// Every `*.yaml` / `*.yml` in [`launch_dir`], sorted by name. Files that
-/// fail to parse are logged and skipped.
-pub fn load_all() -> Vec<LaunchConfig> {
-    match launch_dir() {
-        Some(dir) => load_from_dir(&dir),
-        None => Vec::new(),
+/// Warp's own Tab Config directories that exist on this machine (stable and
+/// preview): `~/.warp/tab_configs` and `~/.warp-preview/tab_configs` on macOS,
+/// `$XDG_DATA_HOME/warp-terminal[-preview]/tab_configs` on Linux. Read-only:
+/// Rift never writes there.
+pub fn warp_tab_config_dirs() -> Vec<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let mut dirs = Vec::new();
+    if cfg!(target_os = "macos") {
+        if let Some(h) = &home {
+            dirs.push(h.join(".warp/tab_configs"));
+            dirs.push(h.join(".warp-preview/tab_configs"));
+        }
+    } else {
+        let data = std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .or_else(|| home.map(|h| h.join(".local/share")));
+        if let Some(d) = data {
+            dirs.push(d.join("warp-terminal/tab_configs"));
+            dirs.push(d.join("warp-terminal-preview/tab_configs"));
+        }
     }
+    dirs.retain(|d| d.is_dir());
+    dirs
 }
 
-/// [`load_all`] against an explicit directory (also the unit-test entry
+/// Every `*.yaml` / `*.yml` / `*.toml` in [`launch_dir`], then (read-only)
+/// the `*.toml` Tab Configs in [`warp_tab_config_dirs`], sorted by name. A
+/// Warp config whose name matches one of Rift's own is shadowed by it. Files
+/// that fail to parse are logged and skipped.
+pub fn load_all() -> Vec<LaunchConfig> {
+    load_all_reporting().0
+}
+
+/// A config file [`load_all`] skipped: its file name and why, on one line.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Skipped {
+    pub file: String,
+    pub reason: String,
+}
+
+/// [`load_all`], also naming the files it skipped (so the palette can say
+/// why a config is missing).
+pub fn load_all_reporting() -> (Vec<LaunchConfig>, Vec<Skipped>) {
+    let (mut out, mut skipped) = match launch_dir() {
+        Some(dir) => load_from_dir_reporting(&dir),
+        None => (Vec::new(), Vec::new()),
+    };
+    for dir in warp_tab_config_dirs() {
+        let (configs, bad) = load_from_dir_reporting(&dir);
+        skipped.extend(bad);
+        for c in configs {
+            if !out.iter().any(|o| o.name.eq_ignore_ascii_case(&c.name)) {
+                out.push(c);
+            }
+        }
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    (out, skipped)
+}
+
+/// [`load_all`] against one explicit directory (also the unit-test entry
 /// point, so tests never have to move `$XDG_CONFIG_HOME`).
 pub fn load_from_dir(dir: &Path) -> Vec<LaunchConfig> {
+    load_from_dir_reporting(dir).0
+}
+
+/// [`load_from_dir`], also naming the files it skipped.
+pub fn load_from_dir_reporting(dir: &Path) -> (Vec<LaunchConfig>, Vec<Skipped>) {
+    let mut skipped = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
+        return (Vec::new(), skipped);
     };
+    let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+    paths.sort();
     let mut out: Vec<LaunchConfig> = Vec::new();
-    for e in entries.flatten() {
-        let p = e.path();
+    for p in paths {
         let ext = p.extension().and_then(|s| s.to_str());
-        if !matches!(ext, Some("yaml") | Some("yml")) {
+        if !matches!(ext, Some("yaml") | Some("yml") | Some("toml")) {
             continue;
         }
         let stem = p
@@ -356,16 +534,223 @@ pub fn load_from_dir(dir: &Path) -> Vec<LaunchConfig> {
             .and_then(|s| s.to_str())
             .unwrap_or("launch")
             .to_string();
+        let file = p
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let mut skip = |reason: String| {
+            log::warn!("launch config {p:?}: {reason}");
+            // one short line: toml's errors quote the source over several
+            let line = reason.lines().next().unwrap_or_default().trim();
+            let mut reason: String = line.chars().take(80).collect();
+            if line.chars().count() > 80 {
+                reason.push('…');
+            }
+            skipped.push(Skipped {
+                file: file.clone(),
+                reason,
+            });
+        };
+        if std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0) > MAX_FILE_BYTES as u64 {
+            skip(format!("larger than {MAX_FILE_BYTES} bytes"));
+            continue;
+        }
         match std::fs::read_to_string(&p) {
-            Ok(body) => match LaunchConfig::parse_yaml(&stem, &body) {
-                Ok(c) => out.push(c),
-                Err(err) => log::warn!("launch config {p:?}: {err}"),
-            },
-            Err(err) => log::warn!("launch config {p:?}: {err}"),
+            Ok(body) => {
+                let parsed = if ext == Some("toml") {
+                    LaunchConfig::parse_toml(&stem, &body)
+                } else {
+                    LaunchConfig::parse_yaml(&stem, &body)
+                };
+                match parsed {
+                    Ok(c) => out.push(c),
+                    Err(err) => skip(err),
+                }
+            }
+            Err(err) => skip(err.to_string()),
         }
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
-    out
+    (out, skipped)
+}
+
+/// Largest config file read, in bytes.
+pub const MAX_FILE_BYTES: usize = 256 * 1024;
+/// Most panes one tab config may declare.
+pub const MAX_PANES: usize = 64;
+/// Deepest split nesting read from a tab config.
+pub const MAX_DEPTH: usize = 16;
+
+// ---- Warp Tab Config (TOML) -----------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct TomlDoc {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    color: Option<String>,
+    #[serde(default)]
+    panes: Vec<TomlPane>,
+    #[serde(default)]
+    params: std::collections::BTreeMap<String, TomlParam>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TomlParam {
+    #[serde(default)]
+    default: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TomlPane {
+    id: String,
+    #[serde(default)]
+    directory: Option<String>,
+    #[serde(default)]
+    commands: Vec<String>,
+    #[serde(default)]
+    is_focused: Option<bool>,
+    #[serde(default)]
+    split: Option<String>,
+    #[serde(default)]
+    children: Vec<String>,
+}
+
+/// Replace `{{param}}` with its default. A placeholder with no default (or a
+/// reserved one such as `autogenerated_branch_name`) is an error: Rift cannot
+/// prompt for it, and running a command with a literal `{{x}}` is worse.
+fn subst(s: &str, params: &std::collections::HashMap<&str, &str>) -> Result<String, String> {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find("{{") {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + 2..];
+        let Some(j) = after.find("}}") else {
+            out.push_str(&rest[i..]);
+            return Ok(out);
+        };
+        let key = after[..j].trim();
+        match params.get(key) {
+            Some(v) => out.push_str(v),
+            None => return Err(format!("parameter {key:?} has no default")),
+        }
+        rest = &after[j + 2..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
+fn toml_node(
+    id: &str,
+    by_id: &std::collections::HashMap<&str, &TomlPane>,
+    params: &std::collections::HashMap<&str, &str>,
+    seen: &mut std::collections::HashSet<String>,
+    depth: usize,
+) -> Result<LaunchLayout, String> {
+    if depth > MAX_DEPTH {
+        return Err(format!("splits nested deeper than {MAX_DEPTH}"));
+    }
+    let pane = by_id
+        .get(id)
+        .ok_or_else(|| format!("unknown pane id {id:?}"))?;
+    if !seen.insert(id.to_string()) {
+        return Err(format!("pane {id:?} is used twice"));
+    }
+    let Some(split) = pane.split.as_deref().map(str::trim) else {
+        let cwd = match pane.directory.as_deref().map(str::trim) {
+            Some(d) if !d.is_empty() => Some(expand_tilde(&subst(d, params)?)),
+            _ => None,
+        };
+        return Ok(LaunchLayout::Pane {
+            cwd,
+            commands: pane
+                .commands
+                .iter()
+                .map(|c| subst(c, params))
+                .collect::<Result<_, _>>()?,
+            focused: pane.is_focused.unwrap_or(false),
+        });
+    };
+    // Warp's TOML spelling: `horizontal` is left-to-right, `vertical` stacked.
+    let vertical = match split {
+        "horizontal" => true,
+        "vertical" => false,
+        other => return Err(format!("unknown split {other:?}")),
+    };
+    if pane.children.len() < 2 {
+        return Err(format!("split {id:?} needs at least two children"));
+    }
+    let panes = pane
+        .children
+        .iter()
+        .map(|c| toml_node(c, by_id, params, seen, depth + 1))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(LaunchLayout::Split { vertical, panes })
+}
+
+#[derive(Debug, Serialize)]
+struct OutTomlDoc {
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    color: Option<String>,
+    panes: Vec<OutTomlPane>,
+}
+
+#[derive(Debug, Serialize)]
+struct OutTomlPane {
+    id: String,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    kind: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    directory: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    commands: Vec<String>,
+    #[serde(skip_serializing_if = "is_false")]
+    is_focused: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    split: Option<&'static str>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    children: Vec<String>,
+}
+
+/// Append `l` (root first, then descendants, depth-first) to `out`; returns
+/// its pane id.
+fn out_toml_node(l: &LaunchLayout, out: &mut Vec<OutTomlPane>) -> String {
+    let id = format!("pane_{}", out.len() + 1);
+    let slot = out.len();
+    match l {
+        LaunchLayout::Pane {
+            cwd,
+            commands,
+            focused,
+        } => out.push(OutTomlPane {
+            id: id.clone(),
+            kind: Some("terminal"),
+            directory: cwd.as_ref().map(|p| p.to_string_lossy().into_owned()),
+            commands: commands.clone(),
+            is_focused: *focused,
+            split: None,
+            children: Vec::new(),
+        }),
+        LaunchLayout::Split { vertical, panes } => {
+            out.push(OutTomlPane {
+                id: id.clone(),
+                kind: None,
+                directory: None,
+                commands: Vec::new(),
+                is_focused: false,
+                split: Some(if *vertical { "horizontal" } else { "vertical" }),
+                children: Vec::new(),
+            });
+            let kids = panes.iter().map(|p| out_toml_node(p, out)).collect();
+            out[slot].children = kids;
+        }
+    }
+    id
 }
 
 // ---- wire format: writing ----------------------------------------------
@@ -390,6 +775,8 @@ struct OutWindow {
 struct OutTab {
     #[serde(skip_serializing_if = "Option::is_none")]
     title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    color: Option<String>,
     layout: OutLayout,
 }
 
@@ -444,7 +831,9 @@ struct RawTab {
     title: Option<String>,
     #[serde(default)]
     layout: Option<RawLayout>,
-    // `color` and any other Warp-only keys are ignored.
+    #[serde(default)]
+    color: Option<String>,
+    // Any other Warp-only keys are ignored.
 }
 
 #[derive(Debug, Deserialize)]
@@ -705,6 +1094,33 @@ active_tab_index: 1
     }
 
     #[test]
+    fn skipped_files_are_named_with_a_one_line_reason() {
+        let dir = scratch("skipped");
+        std::fs::write(
+            dir.join("ok.toml"),
+            "name = \"ok\"\n[[panes]]\nid = \"a\"\ntype = \"terminal\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("param.toml"),
+            "title = \"{{branch}}\"\n[params.branch]\n[[panes]]\nid = \"a\"\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("bad.toml"), "[[panes]\nid = \n").unwrap();
+        let (configs, skipped) = load_from_dir_reporting(&dir);
+        assert_eq!(configs.len(), 1);
+        let files: Vec<_> = skipped.iter().map(|s| s.file.as_str()).collect();
+        assert_eq!(files, ["bad.toml", "param.toml"]);
+        assert_eq!(skipped[1].reason, "parameter \"branch\" has no default");
+        assert!(
+            skipped
+                .iter()
+                .all(|s| !s.reason.contains('\n') && !s.reason.is_empty())
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn absent_cwd_is_none_but_yaml_null_cwd_is_home() {
         let c = LaunchConfig::parse_yaml(
             "stem",
@@ -761,6 +1177,7 @@ active_tab_index: 1
             tabs: vec![
                 LaunchTab {
                     title: Some("editor".into()),
+                    color: Some("red".into()),
                     layout: LaunchLayout::Pane {
                         cwd: Some(PathBuf::from("/work/app")),
                         commands: vec!["nvim".into()],
@@ -769,6 +1186,7 @@ active_tab_index: 1
                 },
                 LaunchTab {
                     title: None,
+                    color: None,
                     layout: LaunchLayout::split(
                         false,
                         vec![
@@ -793,24 +1211,204 @@ active_tab_index: 1
     }
 
     #[test]
-    fn save_to_dir_writes_and_suffixes_without_overwriting() {
+    fn save_to_dir_writes_toml_and_suffixes_without_overwriting() {
         let dir = scratch("save");
         let cfg = LaunchConfig::parse_yaml("stem", FULL).unwrap();
-
+        // FULL has two tabs: one file each, named by tab.
         let p1 = save_to_dir(&cfg, &dir).unwrap();
-        assert_eq!(p1.file_name().unwrap(), "dev-server.yaml");
+        let names: Vec<_> = p1
+            .iter()
+            .map(|p| p.file_name().unwrap().to_owned())
+            .collect();
+        assert_eq!(names, ["dev-server-1.toml", "dev-server-2.toml"]);
 
-        // Same name again → suffixed, original untouched.
+        // Same name again -> suffixed, originals untouched.
         let p2 = save_to_dir(&cfg, &dir).unwrap();
-        assert_eq!(p2.file_name().unwrap(), "dev-server-2.yaml");
-        let p3 = save_to_dir(&cfg, &dir).unwrap();
-        assert_eq!(p3.file_name().unwrap(), "dev-server-3.yaml");
+        assert_eq!(p2[0].file_name().unwrap(), "dev-server-1-2.toml");
+        let first = std::fs::read_to_string(&p1[0]).unwrap();
+        save_to_dir(&cfg, &dir).unwrap();
+        assert_eq!(std::fs::read_to_string(&p1[0]).unwrap(), first);
 
-        // The written file parses back to an equal config.
-        let body = std::fs::read_to_string(&p1).unwrap();
-        assert_eq!(LaunchConfig::parse_yaml("x", &body).unwrap(), cfg);
-
+        // The written files parse back to the split tabs.
+        let back = LaunchConfig::parse_toml("x", &first).unwrap();
+        assert_eq!(back, cfg.split_tabs()[0]);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn fixture(name: &str) -> String {
+        let p = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/tab_configs")
+            .join(name);
+        std::fs::read_to_string(p).unwrap()
+    }
+
+    #[test]
+    fn toml_single_pane_fixture_parses() {
+        let c = LaunchConfig::parse_toml("stem", &fixture("dev_server.toml")).unwrap();
+        assert_eq!(c.name, "Dev Server");
+        assert_eq!(c.tabs.len(), 1);
+        assert_eq!(c.tabs[0].title.as_deref(), Some("api"));
+        assert_eq!(c.tabs[0].color.as_deref(), Some("blue"));
+        assert_eq!(
+            c.tabs[0].layout,
+            LaunchLayout::Pane {
+                cwd: Some(home().join("code/api")),
+                commands: vec!["npm install".into(), "npm run dev".into()],
+                focused: true,
+            }
+        );
+    }
+
+    #[test]
+    fn toml_split_fixture_maps_directions_and_ignores_unknown_keys() {
+        let c = LaunchConfig::parse_toml("stem", &fixture("server_plus_logs.toml")).unwrap();
+        assert_eq!(c.pane_count(), 3);
+        // TOML `horizontal` = left-to-right = Rift `vertical: true`.
+        let LaunchLayout::Split { vertical, panes } = &c.tabs[0].layout else {
+            panic!("root should be a split");
+        };
+        assert!(vertical);
+        assert!(matches!(
+            panes[1],
+            LaunchLayout::Split {
+                vertical: false,
+                ..
+            }
+        ));
+        assert!(matches!(panes[0], LaunchLayout::Pane { focused: true, .. }));
+    }
+
+    #[test]
+    fn toml_params_use_defaults_and_missing_default_is_error() {
+        let c = LaunchConfig::parse_toml("stem", &fixture("worktree.toml")).unwrap();
+        assert_eq!(c.tabs[0].title.as_deref(), Some("main"));
+        let LaunchLayout::Pane { commands, .. } = &c.tabs[0].layout else {
+            panic!("leaf expected");
+        };
+        assert_eq!(commands, &vec!["git switch main".to_string()]);
+        let no_default = fixture("worktree.toml").replace("default = \"main\"", "");
+        let err = LaunchConfig::parse_toml("stem", &no_default).unwrap_err();
+        assert!(err.contains("branch"), "{err}");
+    }
+
+    #[test]
+    fn toml_rejects_bad_trees() {
+        let leaf = "[[panes]]\nid = \"a\"\n";
+        for (src, want) in [
+            ("name = \"x\"\n".to_string(), "panes"),
+            (format!("{leaf}{leaf}"), "duplicate"),
+            ("[[panes]]\nid = \"r\"\nsplit = \"horizontal\"\nchildren = [\"r\", \"r\"]\n".into(), "twice"),
+            ("[[panes]]\nid = \"r\"\nsplit = \"horizontal\"\nchildren = [\"a\"]\n".into(), "two children"),
+            ("[[panes]]\nid = \"r\"\nsplit = \"horizontal\"\nchildren = [\"a\", \"nope\"]\n[[panes]]\nid = \"a\"\n".into(), "nope"),
+            ("[[panes]]\nid = \"r\"\nsplit = \"diagonal\"\nchildren = [\"a\", \"b\"]\n".into(), "diagonal"),
+        ] {
+            let err = LaunchConfig::parse_toml("stem", &src).unwrap_err();
+            assert!(err.contains(want), "{want}: {err}");
+        }
+    }
+
+    #[test]
+    fn toml_bounds_depth_panes_and_size() {
+        // a chain deeper than MAX_DEPTH
+        let mut src = String::new();
+        for i in 0..=MAX_DEPTH + 1 {
+            src.push_str(&format!(
+                "[[panes]]\nid = \"s{i}\"\nsplit = \"horizontal\"\nchildren = [\"s{}\", \"leaf\"]\n",
+                i + 1
+            ));
+        }
+        src.push_str("[[panes]]\nid = \"leaf\"\n");
+        let err = LaunchConfig::parse_toml("stem", &src).unwrap_err();
+        assert!(err.contains("deeper"), "{err}");
+
+        let many: String = (0..=MAX_PANES)
+            .map(|i| format!("[[panes]]\nid = \"p{i}\"\n"))
+            .collect();
+        assert!(
+            LaunchConfig::parse_toml("stem", &many)
+                .unwrap_err()
+                .contains("more than")
+        );
+
+        let big = format!(
+            "name = \"{}\"\n{}",
+            "x".repeat(MAX_FILE_BYTES),
+            "[[panes]]\nid = \"a\"\n"
+        );
+        assert!(
+            LaunchConfig::parse_toml("stem", &big)
+                .unwrap_err()
+                .contains("larger")
+        );
+    }
+
+    #[test]
+    fn to_toml_roundtrips_nested_layout() {
+        let cfg = LaunchConfig {
+            name: "Round Trip".into(),
+            tabs: vec![LaunchTab {
+                title: Some("t".into()),
+                color: Some("cyan".into()),
+                layout: LaunchLayout::split(
+                    true,
+                    vec![
+                        LaunchLayout::Pane {
+                            cwd: Some(PathBuf::from("/work/app")),
+                            commands: vec!["nvim".into(), "echo \"hi\"".into()],
+                            focused: true,
+                        },
+                        LaunchLayout::split(
+                            false,
+                            vec![
+                                LaunchLayout::pane(Some(PathBuf::from("/var/log"))),
+                                LaunchLayout::pane(None),
+                            ],
+                        ),
+                    ],
+                ),
+            }],
+            active_tab: 0,
+        };
+        let toml = cfg.to_toml().unwrap();
+        assert_eq!(
+            LaunchConfig::parse_toml("stem", &toml).unwrap(),
+            cfg,
+            "{toml}"
+        );
+        // multi-tab configs are not a tab config
+        let mut two = cfg.clone();
+        two.tabs.push(two.tabs[0].clone());
+        assert!(two.to_toml().is_err());
+    }
+
+    #[test]
+    fn save_then_load_roundtrips_and_loads_yaml_and_toml_together() {
+        let dir = scratch("mixed");
+        let cfg = LaunchConfig::parse_toml("stem", &fixture("server_plus_logs.toml")).unwrap();
+        let written = save_to_dir(&cfg, &dir).unwrap();
+        assert_eq!(written[0].file_name().unwrap(), "server-plus-logs.toml");
+        std::fs::write(
+            dir.join("old.yaml"),
+            "name: old\nwindows:\n  - tabs:\n      - {}\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("broken.toml"), "name = [\n").unwrap();
+        std::fs::write(dir.join("empty.toml"), "name = \"no panes\"\n").unwrap();
+        let all = load_from_dir(&dir);
+        let names: Vec<_> = all.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["Server Plus Logs", "old"]);
+        assert_eq!(all[0], cfg);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn yaml_tab_color_is_read() {
+        let c = LaunchConfig::parse_yaml(
+            "stem",
+            "windows:\n  - tabs:\n      - color: green\n        layout:\n          cwd: /a\n",
+        )
+        .unwrap();
+        assert_eq!(c.tabs[0].color.as_deref(), Some("green"));
     }
 
     #[test]

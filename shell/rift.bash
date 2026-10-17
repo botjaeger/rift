@@ -40,7 +40,8 @@ __rift_report_cwd() {
 
 # Prompt chips: the active Python environment, and the php and
 # python3 that PATH resolves to, as iTerm2 user variables (OSC 1337
-# SetUserVar, base64), sent when they change.
+# SetUserVar, base64), sent when they change; PATH itself too (command-name
+# completion follows `rift-use`).
 __rift_py=
 __rift_path=
 __rift_set_var() {
@@ -56,6 +57,7 @@ __rift_report_env() {
     fi
     if [[ $PATH != "$__rift_path" ]]; then
         __rift_path=$PATH
+        __rift_set_var RiftPath "$PATH"
         __rift_set_var RiftPhpBin "$(type -P php)"
         __rift_set_var RiftPythonBin "$(type -P python3)"
     fi
@@ -177,6 +179,17 @@ fi
 # space of `exec ` lets the alias expand after it). Non-interactive uses
 # (`bash -c`, scripts) ignore --rcfile. Your own aliases of these names win.
 __rift_child_rc=${RIFT_INTEGRATION_BASH-}
+
+# Rift runs `rift-complete` over an SSH profile's shared connection: it
+# answers completion requests on stdin with this shell's completion specs
+# (complete.bash next to this file; its header has the protocol).
+__rift_complete_srv="${BASH_SOURCE[0]%/*}/complete.bash"
+rift-complete() {
+    [[ -r $__rift_complete_srv ]] || return 1
+    # shellcheck source=complete.bash disable=SC1091
+    source "$__rift_complete_srv"
+}
+
 if [[ -n $__rift_child_rc && -f "${__rift_child_rc%/*}/bashrc-child" ]]; then
     printf -v __rift_child_rc '%q' "${__rift_child_rc%/*}/bashrc-child"
     # shellcheck disable=SC2139  # the path is meant to expand now

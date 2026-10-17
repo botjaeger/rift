@@ -26,7 +26,8 @@ Blocks are delimited by shell-integration OSC 133 markers
 
 When a block's header scrolls off the top, a sticky header stays there; a
 click jumps back to the block, except on its buttons, which act as on the
-block's own header. Hovering the duration shows the full time and when the
+block's own header (`sticky_command_header = false`, or Settings › Input ›
+Sticky command header, turns it off). Hovering the duration shows the full time and when the
 command ended. A header's copy button and its ⋮ menu button (the block's
 context menu, as a right-click) show only on hover; a copy turns the button
 into a check for 1.5 s and toasts "Copied output".
@@ -78,8 +79,10 @@ insensitive) stay visible. Running it again on the same block, or choosing
   asked for it).
 - Editor keys: ⇧←/→ select, ⌥⇧←/→ select by word, ⇧⌘←/→ and ⇧Home/End
   select to the line ends; ⌘Z / ⇧⌘Z undo and redo, ⌘X cuts; readline ⌃A ⌃E
-  ⌃B ⌃F move, ⌃K kills to the end, ⌃W deletes the word before, ⌃U clears the
-  line; ⌘⌫ / ⌘⌦ kill to the start / end, ⌥⌫ / ⌥⌦ delete a word.
+  ⌃B ⌃F move, ⌃K kills to the end of the cursor's line (at its end, the
+  newline), ⌃W deletes the word before, ⌃U clears the whole command; ⌘⌫ / ⌘⌦
+  kill to the start / end of the cursor's line (at its start / end they join
+  it to the line above / below), ⌥⌫ / ⌥⌦ delete a word.
 - **Command corrections** (`command_corrections`, on): after a failed
   command-not-found, a "Did you mean …" suggestion shows; → / Tab / End in
   an empty editor accepts it. `alias_expansion` (off) replaces an alias with
@@ -127,8 +130,15 @@ insensitive) stay visible. Running it again on the same block, or choosing
   action `reset_tab_timer`) that zeroes the tab's time in both modes (the
   clock restarts from now). Default: working directory, git branch, git diff
   stats. A chip with nothing to show is left out. Git, PR and Docker state
-  refresh after each command, and in every pane of every tab as soon as the
-  chip list changes (Edit prompt or config.toml). Settings › Input › Prompt
+  refresh after each command, when a pane takes focus, and in every pane of
+  every tab as soon as the chip list changes (Edit prompt or config.toml).
+  While a Rift window is in use, its active tab's panes are also asked again
+  every 3 s for git status and every 10 s for Docker Compose state, so files
+  an agent or an editor changes while a pane is busy show without a command
+  ending. Each pane reads its own directory's repository; the review panel and
+  the top bar's `+added −removed` button follow the focused pane, reload when
+  its status changes, and never show another repository's changes while the
+  focused one's load. Settings › Input › Prompt
   chips previews them and opens the editor: click a chip to add it, drag
   chips to order them (or out of the prompt to remove them), × removes,
   Restore default, Save changes.
@@ -155,25 +165,60 @@ insensitive) stay visible. Running it again on the same block, or choosing
 
 `vim_mode = true` (Settings → Input, or the palette's *Toggle vim
 keybindings*) puts the owned editor into modal editing. The buffer is one
-command, so every motion is within-line and the "linewise" operators act on
-the whole buffer.
+command, usually one line; when it holds several (⇧Enter), `0` `$` `^` `_`
+`I` `A` `%` `J` `o` `O` `gg` `G` `>` `<` and visual-line mode work on lines,
+the other motions run across the newlines, and `dd` `cc` `yy` act on the
+whole buffer.
 
-- Modes: Insert (default) and Normal; Esc leaves Insert (stepping the cursor
-  left, vim-style), Esc in Normal cancels a half-typed operator/count. A mode
-  pill renders at the right of the input line — `NORMAL` (warning color) or
-  `INSERT` (muted) — and Normal always draws a solid block cursor.
-- Enter submits from either mode; submitting resets to Insert.
-- Motions: `h` `l` (and Space) `0` `$` `^` `w` `W` `b` `B` `e` `E`,
-  `f` `F` `t` `T` + char, `;` repeats the last find. Arrows/Backspace move too.
-- Operators: `d` `c` `y` with a motion; doubled (`dd` `cc` `yy`) is the
-  linewise form over the whole buffer. `cw` behaves like `ce`.
-- Text objects after an operator: `i`/`a` + `w` `W` (words), `"` `'` `` ` ``
-  (quotes), `(` `b` `[` `{` `B` `<` (brackets) — `ciw`, `da"`, `yi(`.
-- Edits: `x` `X` `s` `S` `C` `D` `r`<char> `~` `p` `P` (unnamed register).
-- Insert entry: `i` `a` `I` `A`.
+- Modes: Insert (default), Normal, Visual (`v`), Visual Line (`V`) and
+  Replace (`R`). Esc leaves Insert / Replace (stepping the cursor left,
+  vim-style) and the visual modes; in Normal it cancels a half-typed
+  operator/count. A mode pill renders at the right of the input line —
+  `NORMAL` (warning color), `INSERT` (muted), `VISUAL` / `VISUAL LINE`
+  (accent), `REPLACE` (error color). Normal and the visual modes draw a solid
+  block cursor, Replace an underline.
+- Enter submits from any mode; submitting resets to Insert.
+- Motions: `h` `l` (and Space) `0` `$` `^` `_` `w` `W` `b` `B` `e` `E` `ge`
+  `gE`, `f` `F` `t` `T` + char, `;` repeats the last find and `,` repeats it
+  backwards, `%` jumps to the matching bracket (the first one at or after the
+  cursor on its line), `gg` / `G` go to the first / last line (`3G`, `3gg` to
+  line 3). Arrows/Backspace move too.
+- Search: `/` or `?` opens a prompt in the mode pill (`/text`); Enter jumps
+  to the next / previous literal match (wrapping; an empty prompt reuses the
+  last pattern), Esc — or ⌫ on an empty prompt — cancels. `n` / `N` repeat
+  it in the same / opposite direction. Searches are motions too (`d/foo`).
+- Operators: `d` `c` `y`, `gu` `gU` `g~` (lower / upper / toggle case) and
+  `>` `<` (indent / outdent) with a motion or text object. Doubled, `dd` `cc`
+  `yy` act on the whole buffer; `>>` `<<` `guu` `gUU` `g~~` on the cursor's
+  line (a count takes more lines). `cw` behaves like `ce`; `gg` `G` `_` make
+  an operator linewise.
+- Indent: `>` puts two spaces in front of every non-empty line it covers;
+  `<` takes one leading tab, else up to two leading spaces, off each line.
+- Text objects after an operator or in visual mode: `i`/`a` + `w` `W`
+  (words), `"` `'` `` ` `` (quotes), `(` `b` `[` `{` `B` `<` (brackets) —
+  `ciw`, `da"`, `yi(`, `viw`.
+- Visual mode selects on the editor's own selection, inclusive of the char
+  under the cursor (whole lines in Visual Line), so ⌘C copies exactly it.
+  Motions, searches and `j` / `k` (↑ / ↓) extend it; `o` swaps its ends;
+  `v` / `V` switch or leave. Operators: `d` `x` delete, `c` `s` change, `y`
+  yank, `~` `u` `U` case, `>` `<` indent, `J` join, `gu` `gU` `g~`; `D` `X`
+  `Y` `C` `S` `R` take whole lines.
+- Edits: `x` `X` `s` `S` `C` `D` `r`<char> `~` `p` `P` (unnamed register),
+  `J` joins the next line (one space between; a count joins more), `o` / `O`
+  open a line below / above and enter Insert.
+- Replace mode (`R`): typed chars overwrite (and append past the end), ⌫
+  puts back what the last one overwrote.
+- `.` repeats the last change: an operator with its motion or text object,
+  `x` `r` `~` `p` `J` and the rest, a visual-mode operator (from the
+  cursor), a Replace session, and an Insert session with the text it typed
+  (`cw` + text, `A` + text, `o` + text). A count replaces the change's count
+  (`3.`).
+- Insert entry: `i` `a` `I` `A` `o` `O`.
 - Counts: digits before and/or after the operator, multiplied (`2d3w`).
-- Undo `u`, **redo `U`** (not `⌃R` — that stays the history pane).
-- History recall: `k` = previous entry, `j` = next (also ↑/↓).
+- Undo `u`, **redo `U`** (not `⌃R` — that stays the history pane). One `u`
+  undoes one change: a whole Insert or Replace session, a visual-mode
+  operator, a `.` repeat.
+- History recall: `k` = previous entry, `j` = next (also ↑/↓) in Normal mode.
 
 ## Selection & mouse
 
@@ -209,9 +254,95 @@ the whole buffer.
 ## Completions
 
 Sources merged, deduped, capped at 50: **`$PATH` command names** (first word
-only, ≥ 2 chars, max 12 — scanned once per process from every executable on
-`$PATH`), command specs (subcommands and flags with descriptions for common tools — git, cargo, docker, npm and more; `completion_specs.rs`) with argument generators (git refs, branches and remotes; ssh hosts from the ssh config and `known_hosts`; Makefile targets; `package.json` scripts; up to 50 each), filesystem paths (`~/` expanded;
-hidden files only when the prefix starts with `.`), and command history.
+only, ≥ 2 chars, max 12 — every executable on the pane shell's `$PATH`), command specs (subcommands and flags with descriptions for common tools — git, cargo, docker, npm and more; `completion_specs.rs`) with argument generators (git refs, branches and remotes; ssh hosts from the ssh config and `known_hosts`; Makefile targets; `package.json` scripts; up to 50 each), filesystem paths (`~/` expanded;
+hidden files only when the typed name starts with `.`; max 30), and command
+history. A pane whose shell is on another host (or never reported a
+directory) gets no path, file-based argument or command-name completions
+from this machine (its `$PATH` is not the remote one); ssh hosts and history
+still complete, and an SSH profile's pane completes on the remote machine
+(see SSH profiles).
+
+**Completions from your shell** (`shell_completions`, on by default;
+Settings › Input). For an argument (not the command name, not a
+word that looks like a path) Rift also asks your own shell, so tools Rift
+has no spec for (`terraform`, `just`, your `_mycmd`) complete as they do on
+Tab in the shell, with your plugins and completion functions. One warm
+completion shell per shell program runs in the background (`shell/complete.
+{zsh,bash,fish}`), started on the first request, reused, and started again
+when it died; each request sets its directory:
+- **zsh** runs your interactive zsh (rc files, `compinit`, plugins) in a
+  `zpty`; a widget reads the directory and the line as data (not as keys,
+  so your widgets on printable keys — autopair, magic-space, abbreviations
+  — never see them), sets the editor buffer, runs complete-word (Return is
+  unbound there) and captures what `compadd` adds, with descriptions (the
+  technique of zsh-capture-completion). `compinit` is loaded when your rc
+  does not. The `_expand` completer is disabled there: it evaluates the word
+  (glob qualifiers such as `*(e:…:)`, substitutions). The server also ends
+  on its own when Rift is gone while a completion function hangs.
+- **bash** calls the function the command's `complete -F` spec names, with
+  `COMP_WORDS` set as on Tab, after bash-completion's loader
+  (`__load_completion` / `_comp_load` / `_completion_loader`) when it is
+  loaded; word-list (`-W '…'`) and action specs (`-A …`, `-d`, `-f`…) go
+  through `compgen`.
+- **fish** runs `complete --do-complete=<line>`.
+
+Its words are merged in as source `shell` and ranked like the rest; a word
+Rift's own specs also offer keeps Rift's row. Rift's own candidates show at
+once; the shell's join within 300 ms (later answers are dropped), and the
+shell runs on its own thread, so a slow or hanging completion function never
+delays the menu, editing or the next keystroke's candidates. A request that
+misses the budget stops that shell (its process group, so the function's
+children too), and a new one starts after a second. The command line is
+data: lines holding a control character or a command substitution (`$( )`,
+backticks, `<( )`, `>( )`, `=( )`, and in zsh and fish any `( )`: zsh glob
+qualifiers and parameter flags run code) are never sent, and each server
+passes the line to the shell as a variable or as the editor buffer, never
+as code. Completion functions may run commands, as they do
+on Tab in the shell itself. Replies are bounded (400 words, 512 bytes each)
+and stripped of escape sequences and control characters. Never for a pane on
+another host. A directory bash lists without its `/` (`complete -d cd`)
+joins Rift's `dir/` row; bash's file-name specs (`-d`, `-o filenames`,
+`-o dirnames`, `-A directory`) mark directories with `/`. Off:
+`shell_completions = false` (the running shells stop, also when config.toml
+turns it off or names another `shell`). The shells, and whatever their
+completion functions started, stop when Rift quits.
+
+**Ranking.** A word candidate matches the typed word by prefix (exactly as
+typed), else by word start (a word inside it starts with what was typed,
+any case: after `-` `_` `.` `/` `:` `@` or a space, or at a lower→upper case
+change — `pick` finds `cherry-pick`), else as a subsequence (its characters
+in order, any case — `cko` finds `checkout`). Word start and subsequence need
+at least 3 typed characters. A command name matches other than by prefix
+only when it starts with the same character as the typed word (any case),
+and as a subsequence only from 4 typed characters (`tfa` never offers
+`convertformat`). Candidates sort by that match kind, then by
+source (command names, subcommands, options, generator values, paths), then
+by how recently the word appears in the history (the pane's last 200 lines,
+then the shell's newest 500), then in the provider's own order (paths and
+values by name; git refs branches, remote branches, tags). The order is
+deterministic. At most 45 word candidates are kept, so the history lines
+(at most 5) always fit in the 50. A prefix match always ranks first, so the
+ghost text and Tab on a unique prefix behave as with prefix-only matching.
+When no candidate starts with the typed word and a history line drives the
+ghost text, the word-start and subsequence candidates do not open the menu,
+and Tab accepts the ghost text. Only a candidate that starts with the typed
+word shows that part bold in the menu.
+
+**Caching.** Providers run on every keystroke, so what they read is cached
+and checked, not re-read: directory listings (16 kept; entry types from the
+directory entry, only symlinks are `stat`ed), git refs per repository
+(`HEAD`, `packed-refs` and every directory under `refs/`), git remotes
+(`.git/config`), ssh hosts (`~/.ssh/config`, every file it `Include`s and
+each directory an `Include` glob lists, `known_hosts`), Makefile targets and
+`package.json` scripts (32 lists kept). Each request compares the
+modification time, size and inode of those paths (one `stat` each) and reads
+again when any changed, so a new branch, file or target shows on the next
+keystroke. A value read within 2 seconds of one of its paths' modification
+time is never reused (a second change in the same timestamp tick could hide).
+The `$PATH` scan is cached per `$PATH` value (4 kept): a new value (the
+shell probe, or the pane's own `$PATH` its hooks report after `rift-use` or
+an `export PATH=…`) is scanned at once; otherwise its directories' stamps
+are checked at most every 2 seconds and a changed directory rescans.
 
 Path completions are inserted backslash-escaped as one shell word (valid in
 bash, zsh and fish; a leading `~/` stays unescaped so it still expands), and
@@ -241,7 +372,8 @@ and the first edit after 5 seconds starts a new one.
 
 History matches drive the ghost text: whole-buffer prefix matches, the pane's
 own history first (last 200) then the imported shell history (newest 3000),
-max 5. Inline ghost text shows the top suggestion; Tab accepts, ⌃→
+max 5. A request shares the pane's history with the editor instead of
+copying it. Inline ghost text shows the top suggestion; Tab accepts, ⌃→
 accepts one word.
 
 The completion panel lists the word candidates, then the history lines; its
@@ -259,13 +391,15 @@ turns the completion panel off (the ghost text and Tab still work).
 
 ## Launch configurations
 
-Warp-compatible YAML in `~/.config/rift/launch_configs/*.yaml` — a named set
+Warp-compatible YAML or TOML Tab Configs in `~/.config/rift/launch_configs/`
+(and, read-only, Warp's own `tab_configs` directory) — a named set
 of tabs, each with a (possibly nested) split layout, cwds and startup commands.
 ⌘P → `Launch configuration: <name>` opens one: tabs are appended, splits are
 rebuilt, and each pane's `commands[].exec` are sent **at that pane's first
 prompt**. A launch configuration opens in the current window; the tabs of
 all `windows:` entries are appended in document order; `~` in a `cwd` is expanded and a non-existent directory is
-ignored. Warp's own files drop in unchanged.
+ignored. Warp's own files drop in unchanged. "Save current layout as launch
+configuration" writes one TOML Tab Config per open tab.
 
 ## Appearance
 
@@ -307,7 +441,8 @@ ignored. Warp's own files drop in unchanged.
 
 - **Command alerts**: an alert fires when the command's pane is out of view
   (another tab, a hidden pane, or the window unfocused). While Rift is
-  focused it is a toast (`notifications.toasts`), otherwise a desktop
+  focused it is a toast (`notifications.toasts`) in the focused window, also
+  for a pane in another, background window; otherwise a desktop
   notification; `notifications.enabled` is the master switch and a sound
   plays when `play_sound` is on. A failed command alerts when
   `notifications.command_failed` is on, whatever its duration; a command that
@@ -338,9 +473,24 @@ ignored. Warp's own files drop in unchanged.
 - Tabs: create, close, reorder (⌃⇧←/→ or drag: the tab lifts and follows the
   pointer; Esc puts it back), select by number (⌘1–9, ⌘9 = last), reopen
   closed (⇧⌘T restores the tab's cwd, stack of 10).
+- Tab settings (Settings › Appearance › Tabs): ⌘T and + open the new tab at
+  the end or right after the active tab (`new_tab_placement`); the × shows
+  on hover (active and hovered tab), always, or never (`tab_close_button`);
+  `tab_bar_with_one_tab = false` hides the lone tab (and the vertical rail)
+  until a second tab opens.
 - Tab menu (right-click): *Rename tab* (inline), a tab color, duplicate,
-  sync, *Close other tabs*. ⌘N opens a secondary window; its shells end with
-  it.
+  sync, *Close other tabs*.
+- **Windows** (⌘N, File › New Window): every window runs in the one Rift
+  process (it shares the GPU device, fonts, config, workers, the control
+  socket and the session file), opens in about 12 ms, and costs about
+  9 MiB (`docs/performance.md`). Its first tab starts where a new tab of the
+  window it came from would (`working_directory`), and it opens offset from
+  that window. Each window has its own tabs, panes, overlays and focus;
+  menu commands, the global hotkey and the control API act on the window
+  that last had focus. Closing a window (its close button, ⇧⌘W, or its last
+  tab) ends its shells and leaves the others open, after the running-job
+  warning (`confirm_close_running`) names its running commands; closing the
+  last window quits, and ⌘Q quits every window ("Quit Rift?").
 - **New tabs start in** (`working_directory`): `previous` (the active pane's
   directory, default), `home`, or a path (`~` expands; a missing directory
   falls back to home). `confirm_close_running` (on) asks before closing a
@@ -351,6 +501,22 @@ ignored. Warp's own files drop in unchanged.
 - Panes: split right/down, directional focus (⌥⌘arrows), keyboard resize
   (⌃⌘arrows), drag resize, zoom toggle (⇧⌘⏎), close (⌃⇧W/⌘W or the title
   bar's × — last pane closes the tab, last tab exits).
+- Pane settings (Settings › Appearance › Panes): unfocused split panes wash
+  lighter (`dim_inactive_panes`, strength `inactive_pane_dim`, 10 % by
+  default); with `focus_follows_mouse` the pane under the pointer (the file
+  viewer's too) takes focus as the pointer moves, without a click, while no
+  menu, dialog, drag or notifications popover is open.
+- Pane sizes follow Warp's pane group: each split holds its panes in a row
+  (or column) with a weight each. Splitting along the row adds an equal-weight
+  pane to it (⌘D twice: three thirds); splitting across it halves the pane.
+  A closed pane's space goes to all its siblings in proportion. ⌃⌘arrows move
+  the divider beside the focused pane (after it; before it for the last one)
+  10 px that way; dragging a divider trades space between the two panes beside
+  it only. Neither leaves a pane under 50 px. A window resize keeps every
+  pane's share. Double-clicking a divider gives that row equal shares again;
+  `equalize_panes` (palette: *Equalize pane sizes*, View menu) does it for the
+  whole tab. Saved sessions keep the shares; sessions saved by older versions
+  (nested two-pane splits) restore with the same sizes.
 - Pane title bars (split tabs): split, ⋮ and × on the focused or hovered
   pane; drag one to move the pane beside another pane (on the side under the
   pointer), swap it with one (the middle third), into another tab (hold to
@@ -365,9 +531,12 @@ ignored. Warp's own files drop in unchanged.
   modes; a command submitted from the editor runs only in the panes at a
   prompt, and a toast counts the panes it skipped. A multi-line paste asks
   first if any recipient lacks bracketed paste.
-- **Session restore**: tab layout + cwds persisted atomically to
-  `~/.local/share/rift/session.toml` on every structural change; reopened on
-  launch when `restore_session = true`.
+- **Session restore**: every window's tab layout, cwds and frame persisted
+  atomically to `~/.local/share/rift/session.toml` on every structural
+  change; reopened on launch when `restore_session = true`, each window
+  where it was. The first window stays where older versions read it (they
+  reopen it alone); version 4 adds the others (`docs/configuration.md`).
+  With `durable_sessions`, every window's shells run in the session service.
 - **Saved block output** (`save_transcripts`, off by default): each pane's
   finished blocks (command, exit code, duration, directory, output — newest
   200 blocks / 1 MiB) are written 0600 to `transcripts/<id>.json` when a
@@ -387,11 +556,12 @@ ignored. Warp's own files drop in unchanged.
   `+N more` lines stand in for the rest, marked with the most urgent alert
   among them.
 - **Session switcher** (⇧⌘O): one fuzzy list of tabs, panes of split tabs
-  (directory and running job), tabs of other Rift windows (focusing one
-  raises that window), detached session-service shells, and the 40 newest
-  finished blocks; Enter jumps there (a block is selected and scrolled into
-  view). Other windows and detached shells load in the background; the list
-  remains usable while an unresponsive window times out.
+  (directory and running job), the other windows' tabs (`title — window N`;
+  focusing one raises that window), tabs of other Rift processes (their
+  control sockets), detached session-service shells, and the 40 newest
+  finished blocks of this window; Enter jumps there (a block is selected and
+  scrolled into view). Other processes and detached shells load in the
+  background; the list remains usable while an unresponsive one times out.
 - **Hint mode** (⇧⌘H): every visible URL, existing file path and block
   header gets a letter label; typing it opens the link/path or selects the
   block, ⇧ + letter copies it (a block copies its output). Esc cancels.
@@ -428,8 +598,10 @@ set), `TERM_PROGRAM=rift`, `TERM_PROGRAM_VERSION` (Rift's own),
 `LC_TERMINAL=Rift` and `LC_TERMINAL_VERSION`;
 emits OSC 133 (blocks), OSC 7 (cwd tracking) and, when they change, OSC 1337
 SetUserVar `RiftPython` (the prompt chips' Python environment) and, when PATH changes, `RiftPhpBin` / `RiftPythonBin` (the
-`php` and `python3` it resolves to); base64, bounded and control characters
-dropped on read. Defines `rift-use`, which the PHP and Python chips run.
+`php` and `python3` it resolves to) and `RiftPath` (PATH itself, for
+command-name completion); base64, bounded and control characters
+dropped on read (`RiftPath` up to the 4 KiB OSC bound and never cut: a
+longer one is dropped and the probed shell's PATH is used). Defines `rift-use`, which the PHP and Python chips run.
 
 ## Rendering & performance
 
@@ -617,9 +789,8 @@ time and do not appear again in Notifications.
 
 - Closing a pane (⌘W) ends its shell, as without the service. ⌘K also drops
   the retained output, so a reattach does not bring it back.
-- Windows that do not restore sessions (secondary ⌘N windows, or
-  `restore_session = false`) end their shells however they exit when they
-  can, instead of orphaning them.
+- With `restore_session = false`, Rift ends its shells however it exits
+  when it can, instead of orphaning them.
 - Palette → "Attach detached session: …" opens a tab on any shell the
   service keeps that no window shows.
 - The service listens on `~/.local/share/rift/sessiond/sock` (a 0700
@@ -697,21 +868,24 @@ signed manifest.
   closing or quitting the window meanwhile waits for the update (*Rift is
   updating… it quits when the update is done*). Leftovers of an
   interrupted install are cleared at the next one.
-- Every window restarts: the updating window writes the rollback marker,
-  saves its own layout and starts the relaunch helper (any failure there
-  puts the old version back and changes nothing else), then asks each
-  other window over its control socket to save its layout and quit, and
-  quits with durable shells still running; the new version reopens every
-  window, tabs, splits and directories included, and reattaches the
-  shells. Windows whose control socket is off cannot be asked; the dialog
-  counts them and they stay open on the old version.
+- Every window restarts: Rift writes the rollback marker, saves every
+  window's layout to its restart file and starts the relaunch helper (any
+  failure there puts the old version back and changes nothing else), then
+  asks each other Rift process (a separate launch, or a window of a version
+  that ran one process per window) over its control socket to save its
+  layout and quit, and quits with durable shells still running; the new
+  version reopens every window in its one process, tabs, splits and
+  directories included, and reattaches the shells. Processes whose control
+  socket is off cannot be asked; the dialog counts them and they stay open
+  on the old version.
 - The new version counts as started 10 s after its first frame: it then
   deletes the old copy, shows the card *Updated to Rift vX.Y.Z* (a click
-  opens What's New) and reopens the
-  other windows. If it exits or crashes before that, the helper puts the
-  old version back and starts it (*Couldn't update to Rift vX.Y.Z*), and
-  that one reopens the windows. A crash mid-update leaves the windows'
-  layouts in `restart/`; the next plain launch reopens them.
+  opens What's New) and opens the other
+  processes' windows beside its own. If it exits or crashes before that,
+  the helper puts the old version back and starts it (*Couldn't update to
+  Rift vX.Y.Z*), and that one reopens the windows. A crash mid-update
+  leaves the layouts in `restart/` (files of older versions, one per
+  window, included); the next plain launch reopens them as its windows.
 - Updating in place needs Rift.app in a writable folder (macOS) or an
   AppImage in a writable folder (Linux). A copy running from the disk
   image or from macOS's temporary translocated copy says *Move Rift to
@@ -720,8 +894,16 @@ signed manifest.
 
 ## Control API
 
-Each window listens on `~/.local/share/rift/control/<pid>.sock`
-(`control_api`, Settings → General → Automation):
+The Rift process listens on `~/.local/share/rift/control/<pid>.sock`
+(`control_api`, Settings → General → Automation). It answers for every
+window it holds: `list` and `status` return every window's tabs, window by
+window, each with `index` (counting from 0 across windows) and `window`
+(from 0, in opening order; left out for the first, so older clients read
+one window); a request naming a pane acts in that pane's window,
+`focus --tab N` raises the window of tab N, and `split`, `open` and the rest
+act in the window that last had focus. A drop-down hotkey window is listed
+in `windows` (`{"window": N, "kind": "dropdown"}`); `focus` on one of its
+panes drops it down.
 
 - `"navigate"` (default): `list`, `status`, `focus`, `blocks` (a pane's
   last command blocks, read-only: up to 30 per request, each output cut to
@@ -746,14 +928,14 @@ Each window listens on `~/.local/share/rift/control/<pid>.sock`
   "<device> closed a pane") are accepted only while `remote_access` is on,
   whatever `control_api` says.
 - `blocks` with `"meta": true` leaves the output out.
-- `ctl focus --tab N` / `--pane ID`: tabs count from 0, as in `ctl list`;
-  a non-numeric value is rejected with exit code 2.
+- `ctl focus --tab N` / `--pane ID`: tabs count from 0 across windows, as
+  in `ctl list`; a non-numeric value is rejected with exit code 2.
 
 `rift-terminal ctl [--pid PID] list|status|focus|blocks|split|open|send-text|request JSON` is
-the client (`ctl help` for flags); the newest window answers unless `--pid`
-names one. `rift-terminal --version` and `--help` print the version and usage; requests are newline-delimited JSON, answered on the
+the client (`ctl help` for flags); the newest Rift process answers unless
+`--pid` names one. `rift-terminal --version` and `--help` print the version and usage; requests are newline-delimited JSON, answered on the
 UI thread. The session switcher (⇧⌘O) uses it to list and focus tabs of
-other Rift windows. Permission changes from Settings or config reload revoke
+other Rift processes. Permission changes from Settings or config reload revoke
 existing connections and queued requests before execution. Connections are
 limited to 32, with five-second read/write inactivity timeouts; request lines
 are bounded to 1 MiB while reading.
@@ -1040,9 +1222,17 @@ all apply). Profiles are `[[ssh_profiles]]` in config.toml plus every concrete
 `Host` of `~/.ssh/config` (and its `Include`s); trailing comments are ignored
 and aliases containing `=` are preserved.
 
+The profile's `ssh` shares its connection: Rift adds `-o ControlMaster=auto
+-o ControlPath=<data dir>/ssh/%C -o ControlPersist=60` (the directory is
+created mode 0700; a path too long for a socket name connects without
+sharing). When the profile's args or your ssh config already set a
+`ControlPath` (`ssh -G` reports one) or `ControlMaster`, Rift adds nothing
+and uses yours.
+
 "Install Rift shell integration on <name>" asks first, then runs an
 installer over ssh in a new tab: it writes `~/.local/share/rift/rift.{bash,
-zsh,fish}` on the host and adds one line ending `# rift-shell-integration`
+zsh,fish}` and the completion servers `complete.{bash,zsh,fish}` on the host
+and adds one line ending `# rift-shell-integration`
 to `~/.bashrc` and `~/.zshrc` (plus `~/.config/fish/conf.d/rift.fish`). The
 hooks load only when `LC_TERMINAL=Rift` arrives with the session: Rift sets
 it and passes `-o SendEnv=LC_TERMINAL`, and most servers `AcceptEnv LC_*`.
@@ -1050,6 +1240,43 @@ After reconnecting, remote commands become blocks with the owned editor,
 exit codes and the remote directory; images and tmux work over ssh as
 locally. Without the hooks (or the env), ssh is an ordinary raw terminal.
 The block of the `ssh` command itself ends when the remote prompt starts.
+Rift tells a remote directory from a local one by the host the hooks report
+(OSC 7 `file://host/path`; empty, `localhost` and this machine's name are
+local). While a pane's directory is on another host, nothing reads this
+machine's disk for it, and the git, pull request and compose chips clear
+instead of describing a local directory with the same path.
+
+**Remote completions.** A pane on another host completes on that host over
+the shared connection of the newest `ssh` command submitted from Rift's
+editor (an SSH profile or one typed there; with
+`shell_completions` on): one `ssh -S <socket> -o BatchMode=yes` exec per
+request, no new login, about 10–35 ms. It lists the directory being completed
+(in the remote directory), the remote `$PATH` commands (once per host,
+listed again after 10 minutes), git refs where a spec wants them, and the
+remote shell's own completions through `rift-complete`, a function the
+installed hooks define (it runs the same completion server on the host).
+Answers are cached per host: a cached one shows at once while a refresh
+runs; otherwise a request waits 400 ms and a later answer fills the cache.
+The request travels on the exec's stdin and the command is a fixed script,
+so nothing typed is put into a command; remote output is read up to 1 MiB,
+5000 lines per section and 512 bytes per line, with escape sequences and
+control characters stripped (file names are listed with `ls -q`). Only the
+options that pick the destination (`-p -l -F -J -i -S -4 -6` and the `Port`,
+`User`, `HostName`, `ControlPath`, `ProxyJump`, `IdentityFile`, `SendEnv`
+`-o` keys) are reused from the `ssh` command; a request whose master is gone
+fails at once (`ProxyCommand=false`) instead of logging in again. A command
+read back from the screen (a remote program can print one with OSC 133
+markers) is used only when no editor command is there (a session replayed
+after a restart), and keeps only `-p -l -4 -6` and the `Port`, `User`,
+`HostName` keys with plain values and a plain `[user@]host`: never a config
+file, control socket, jump host or identity. The target is read again only
+when the pane's blocks change. An `ssh` typed by hand without a live shared
+connection (no `ControlPath` of its own) stays local-only (history, ssh
+hosts, spec options), with the menu row "Remote completions need an SSH
+profile" after real candidates (alone it opens no menu). Opening an SSH
+profile opens its tab at once; `ssh -G` (which can take seconds with
+`Match exec`) runs off the UI thread and the command follows at the tab's
+first prompt.
 
 ## Accessibility
 
@@ -1083,8 +1310,55 @@ pushed only when it changes. The script driver's `dump` prints it.
 
 `global_hotkey` is empty (off) by default; `global_hotkey = "alt+space"`
 registers a system-wide shortcut (macOS; X11 on Linux): from any app it brings Rift forward, and when Rift is already the
-focused app it hides it. Scripted runs and secondary windows never register
-one.
+focused app it hides it (bringing forward the window that last had focus).
+Scripted runs never register one.
+
+**Drop-down hotkey window.** With `hotkey_window = true` (Settings ›
+General › Hotkey window) the hotkey instead toggles a dedicated window,
+Warp's hotkey window:
+
+- The first press creates it with one tab (where a new tab would start).
+  It spans the full width of the screen that has the mouse pointer (Linux:
+  the screen of the focused Rift window), hangs from that screen's top edge
+  (macOS: below the menu bar) and is `hotkey_window_height` percent of the
+  screen tall (20–100, default 40). It has no title bar or window buttons;
+  the tab bar stays.
+- It floats above other apps' windows. On macOS it appears on every Space
+  and over full-screen apps (floating level; joins all Spaces, full-screen
+  auxiliary, stationary in Mission Control) and slides down and back up
+  over 150 ms, appearing at once when Reduce motion is on. On Linux (X11)
+  it is an always-on-top window that appears at once; Wayland has no
+  global hotkey.
+- The hotkey hides it again when it is shown and focused (and focuses it
+  when it is shown but another app is in front). On macOS hiding hands focus
+  back to the app that was in front before it dropped down. With
+  `hotkey_window_hide_on_blur` (default on) it also hides when it loses
+  keyboard focus. Hidden, its shells keep running; the next press shows the
+  same tabs.
+- It is not saved in the session file: a relaunch or update does not bring
+  its tabs back, and quitting ends its shells. An update's restart ends its
+  shells too (durable ones included), so none run on unreachable in the
+  session service. Closing its last tab closes it; the next press makes a
+  new one. Ordinary windows are unaffected.
+- It does not keep Rift open: closing the last ordinary window (⇧⌘W, the
+  close button, ⌘W on its last tab) quits even while it exists, so that
+  close asks first like ⌘Q does: about commands running in any window,
+  the drop-down's included, about connected phones, and during an update
+  it waits for the install. A phone closing the last ordinary window's
+  last tab leaves a fresh tab, as with one window.
+- Bringing one of its panes forward while it is hidden (`ctl focus --pane`,
+  the session switcher, a notification or its inbox entry) drops it down
+  first, so typing never lands in an invisible window. The session switcher
+  lists its tabs as "… — hotkey window", and `ctl status`/`list` add
+  `"windows": [{"window": N, "kind": "dropdown"}]` (absent while every
+  window is ordinary).
+- Turning `hotkey_window` off closes it (its shells end) when no command
+  runs in it. With a command running it stays and drops down, so the
+  command stays in view; it no longer hides on a focus loss, and closes
+  like any window (⇧⌘W, or its last tab). The hotkey shows and hides the
+  whole app again.
+- The script driver's `hotkey` step runs the same toggle; `dump` lists the
+  window as `kind=dropdown shown=… frame=[x, y, w, h] screen=[…]`.
 
 ## Deferred (by decision, not gaps)
 

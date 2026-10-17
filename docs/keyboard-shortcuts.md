@@ -29,7 +29,7 @@ listed alternates.
 | Shortcut | Action name | Effect |
 |---|---|---|
 | PageUp / PageDown | `scroll_page_up` / `_down` | Page (editor active only; passes to vim/less otherwise) |
-| Home / End | `scroll_top` / `scroll_bottom` | Jump to scrollback top / bottom (same gating) |
+| Home / End | `scroll_top` / `scroll_bottom` | Jump to scrollback top / bottom (same gating; they never move the command line's cursor, ⌘← / ⌘→ do) |
 | ⇧PageUp / ⇧PageDown | `scroll_up` / `scroll_down` | Scroll 10 lines |
 
 ## Tabs
@@ -56,7 +56,8 @@ listed alternates.
 | ⌘D / ⌃⇧D | `split_vertical` | Split right |
 | ⇧⌘D / ⌃⇧E | `split_horizontal` | Split down |
 | ⌥⌘← → ↑ ↓ | `navigate_left/right/up/down` | Directional pane focus (unzooms first) |
-| ⌃⌘← → ↑ ↓ | `resize_pane_*` | Move the split divider (±5 %) |
+| ⌃⌘← → ↑ ↓ | `resize_pane_*` | Move the divider beside the pane 10 px that way (no pane under 50 px) |
+| — | `equalize_panes` | Give every pane of the tab an equal share (double-click a divider: that row only) |
 | ⇧⌘⏎ | `maximize_pane` | Toggle pane zoom |
 | ⌘W / ⌃⇧W | `close_pane` | Close pane (last pane closes tab) |
 | ⌥⌘I | `toggle_sync_inputs` | Type and submit into every pane of the tab at once |
@@ -111,13 +112,15 @@ Active only while the app owns the command line.
 | ↑ / ↓ | History up / down (or move completion selection while the completion panel is open) |
 | ← / → | Move cursor; → at the end of the line accepts the ghost text, ⌃→ one word of it |
 | ⌥← / ⌥→ | Word left / right |
-| ⌘← / ⌘→, ⌃A / ⌃E | Line start / end |
+| ⌘← / ⌘→, ⌃A / ⌃E | Start / end of the cursor's line (of the command, when it has one line) |
+| ⌘↑ / ⌘↓ | Start / end of a multi-line command while there are lines that way; on its first / last line they select blocks (`select_block_prev/next`) |
+| ⇧⌘↑ / ⇧⌘↓ | Extend the selection to the start / end of a multi-line command; on a one-line command, or its first / last line, they are `bookmark_prev_alt` / `bookmark_next_alt` (previous / next bookmarked block) |
 | ⌫ / ⌦ (Delete) | Delete back / forward |
 | ⌥⌫ / ⌥⌦ | Delete word back / forward |
-| ⌘⌫ / ⌘⌦ | Kill to line start / end |
-| ⌃W / ⌃K | Cut word left / cut to end (emacs) |
+| ⌘⌫ / ⌘⌦ | Kill to the start / end of the cursor's line; at the line's start / end they join it to the line above / below |
+| ⌃W / ⌃K | Cut word left / cut to the end of the cursor's line, at its end the newline (emacs) |
 | ⌃B / ⌃F | Cursor left / right (emacs) |
-| ⌃U | Clear line |
+| ⌃U | Clear the whole command |
 | ⌘Z / ⇧⌘Z | Undo / redo |
 | ⇧← / ⇧→ | Extend the selection by one character |
 | ⌥⇧← / ⌥⇧→ | Extend the selection by one word |
@@ -128,34 +131,66 @@ Active only while the app owns the command line.
 | ⌃D | EOF (only when the line is empty) |
 | ⌃L | Clear screen (shell redraw; blocks survive) |
 
+A held key repeats at the system's key-repeat rate: every editing and cursor
+key above, and the stepping shortcuts (scroll, tab and pane focus, divider
+moves, block and bookmark selection, font size). One-shot actions (new tab,
+split, close, palette…) run once per press, so holding them does not open a
+row of tabs.
+
 ## Vim mode
 
 Active in the owned editor when `vim_mode = true` (Settings → Input, or the
-palette's *Toggle vim keybindings*). The buffer is one command: motions are
-within-line and "linewise" operators act on the whole buffer. Only the keys
+palette's *Toggle vim keybindings*). The buffer is one command; when it holds
+several lines (⇧Enter), the line keys below work on lines and other motions
+run across them, while `dd` `cc` `yy` act on the whole buffer. Only the keys
 below are implemented.
 
 | Key | Effect |
 |---|---|
-| Esc | Insert → Normal (cursor steps left); in Normal cancels a pending operator/count |
-| `i` / `a` / `I` / `A` | Insert here / after cursor / at first non-blank / at end |
-| Enter | Submit the command (either mode); submitting returns to Insert |
+| Esc | Insert / Replace → Normal (cursor steps left); leaves Visual; in Normal cancels a pending operator/count |
+| `i` / `a` / `I` / `A` | Insert here / after cursor / at first non-blank / at line end |
+| `o` / `O` | Open a line below / above and insert |
+| `v` / `V` | Visual (charwise) / Visual Line mode; again to leave |
+| `R` | Replace mode: typed chars overwrite, ⌫ restores |
+| Enter | Submit the command (any mode); submitting returns to Insert |
 | `h` `l` (or Space) | Left / right (also ← → and ⌫) |
-| `0` / `$` / `^` | Line start / last char / first non-blank |
-| `w` `b` `e` | Word forward / back / end (`W` `B` `E` = whitespace-delimited) |
+| `0` / `$` / `^` / `_` | Line start / last char / first non-blank / first non-blank (linewise for operators) |
+| `w` `b` `e` `ge` | Word forward / back / end / previous end (`W` `B` `E` `gE` = whitespace-delimited) |
+| `gg` / `G` | First / last line (`3G` = line 3) |
+| `%` | Matching bracket |
 | `f` `F` `t` `T` + char | Find forward/back, on/before the char |
-| `;` | Repeat the last `f` / `F` / `t` / `T` |
+| `;` / `,` | Repeat the last `f` / `F` / `t` / `T` / in reverse |
+| `/` / `?` + text, Enter | Search forward / backward (literal, wrapping); Esc cancels |
+| `n` / `N` | Next match in the same / opposite direction |
 | `d` `c` `y` + motion | Delete / change / yank over the motion (`cw` acts like `ce`) |
-| `d` `c` `y` + `i`/`a` + object | Text objects: `w` `W` words, `"` `'` `` ` `` quotes, `(` `b` `[` `{` `B` `<` brackets (`ciw`, `da"`, `yi(`) |
+| `gu` `gU` `g~` + motion | Lowercase / uppercase / toggle case |
+| `>` `<` + motion | Indent (two spaces) / outdent (a tab or two spaces) the lines |
+| operator + `i`/`a` + object | Text objects: `w` `W` words, `"` `'` `` ` `` quotes, `(` `b` `[` `{` `B` `<` brackets (`ciw`, `da"`, `yi(`) |
 | `dd` / `cc` / `yy` / `S` | Same operators over the whole buffer |
+| `>>` `<<` `guu` `gUU` `g~~` | Same operators over the cursor's line (a count takes more) |
 | `D` / `C` | Delete / change to end of line |
 | `x` / `X` / `s` | Delete under / before cursor / substitute |
 | `r` + char | Replace the character under the cursor |
 | `~` | Toggle case and advance |
+| `J` | Join the next line (a count joins more) |
 | `p` / `P` | Put the unnamed register after / before the cursor |
-| `u` / **`U`** | Undo / **redo** (⌃R stays the history pane) |
+| `.` | Repeat the last change (a count replaces its count) |
+| `u` / **`U`** | Undo / **redo** one change (⌃R stays the history pane) |
 | `k` / `j` | History previous / next (also ↑ / ↓) |
 | digits | Count, before and/or after the operator — the two multiply (`2d3w`) |
+
+In Visual / Visual Line mode motions, searches and `j` `k` (↑ ↓) extend the
+selection, `iw` `a"` … select a text object, and:
+
+| Key | Effect |
+|---|---|
+| `d` `x` / `c` `s` / `y` | Delete / change / yank the selection |
+| `D` `X` / `C` `S` `R` / `Y` | The same over whole lines |
+| `~` / `u` / `U` (or `g~` `gu` `gU`) | Toggle / lower / upper case |
+| `>` / `<` | Indent / outdent the selected lines |
+| `J` | Join the selected lines |
+| `o` | Jump to the other end of the selection |
+| `v` / `V` | Switch between charwise and linewise, or leave |
 
 ## Search-mode keys
 

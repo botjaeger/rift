@@ -1,0 +1,13 @@
+name = "Worktree"
+title = "{{branch}}"
+
+[params.branch]
+type = "branch"
+description = "Branch to open"
+default = "main"
+
+[[panes]]
+id = "p"
+type = "terminal"
+directory = "~/code/app"
+commands = ["git switch {{branch}}"]

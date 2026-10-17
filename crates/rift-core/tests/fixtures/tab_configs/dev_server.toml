@@ -1,0 +1,11 @@
+name = "Dev Server"
+title = "api"
+color = "blue"
+
+[[panes]]
+id = "main"
+type = "terminal"
+directory = "~/code/api"
+commands = ["npm install", "npm run dev"]
+shell = "zsh"
+is_focused = true

@@ -68,7 +68,8 @@ pub enum ClickTarget {
     PaneSplit(PaneId),
     PaneMenu(PaneId),
     PaneClose(PaneId),
-    HandleDrag(NodePath),
+    /// Divider `index` of the split at the path.
+    HandleDrag(NodePath, usize),
     JumpToBlock(PaneId, rift_core::BlockId),
     // settings overlay controls
     SettingsNoop,
@@ -156,12 +157,17 @@ pub struct EditorState {
     pub buffer: String,
     /// Byte offset, always on a char boundary.
     pub cursor: usize,
-    pub history: Vec<String>,
+    /// Commands submitted here, oldest first. Shared: a completion request
+    /// takes it without copying (a push while one holds it copies once).
+    pub history: std::sync::Arc<Vec<String>>,
     hist_idx: Option<usize>,
     saved: String,
     /// (buffer, cursor) snapshots for ⌘Z / ⇧⌘Z; cleared on submit.
     undo_stack: Vec<(String, usize)>,
     redo_stack: Vec<(String, usize)>,
+    /// Snapshots dropped from the front of `undo_stack` at [`UNDO_CAP`]:
+    /// keeps the depths vim marks with ([`Self::undo_len`]) valid.
+    undo_evicted: usize,
     /// Modal editing state; `None` = vim mode disabled (see `vim.rs`).
     pub vim: Option<VimState>,
     /// Selection anchor (byte offset); the selection spans anchor..cursor.
@@ -189,7 +195,38 @@ impl EditorState {
 
     /// Current vim mode, or `None` when vim mode is disabled.
     pub fn vim_mode(&self) -> Option<VimMode> {
-        self.vim.as_ref().map(|v| v.mode)
+        self.vim.as_ref().map(|v| match v.mode {
+            // the selection was cleared under visual mode (a click, a
+            // paste): the next key leaves it, so report Normal already
+            VimMode::Visual | VimMode::VisualLine if self.anchor.is_none() => VimMode::Normal,
+            m => m,
+        })
+    }
+
+    /// vim: the undo-stack depth, marking where a change begins.
+    pub(crate) fn undo_len(&self) -> usize {
+        self.undo_evicted + self.undo_stack.len()
+    }
+
+    /// vim: fold every snapshot pushed since `mark` into the first, so one
+    /// undo reverts the whole change (an Insert session, a `.` repeat), and
+    /// puts the cursor back where the change began (`cursor`), not where its
+    /// first mutation happened to sit.
+    pub(crate) fn squash_undo(&mut self, mark: usize, cursor: usize) {
+        // the mark counts snapshots evicted at the cap since; when the
+        // change's own first snapshot went too, the oldest one left stands in
+        let (at, kept) = match mark.checked_sub(self.undo_evicted) {
+            Some(at) => (at, true),
+            None => (0, false),
+        };
+        self.undo_stack.truncate(at + 1);
+        if kept
+            && self.undo_stack.len() == at + 1
+            && let Some((buf, cur)) = self.undo_stack.last_mut()
+            && buf.is_char_boundary(cursor.min(buf.len()))
+        {
+            *cur = cursor.min(buf.len());
+        }
     }
 
     /// Snapshot the current buffer before a mutation (skips no-op duplicates).
@@ -199,6 +236,7 @@ impl EditorState {
         }
         if self.undo_stack.len() >= UNDO_CAP {
             self.undo_stack.remove(0);
+            self.undo_evicted += 1;
         }
         self.undo_stack.push((self.buffer.clone(), self.cursor));
         self.redo_stack.clear();
@@ -222,6 +260,7 @@ impl EditorState {
         // bypass push_undo: it would clear redo_stack
         if self.undo_stack.len() >= UNDO_CAP {
             self.undo_stack.remove(0);
+            self.undo_evicted += 1;
         }
         self.undo_stack.push((self.buffer.clone(), self.cursor));
         self.anchor = None;
@@ -232,6 +271,12 @@ impl EditorState {
 
     /// Selected byte range (non-empty), if any.
     pub fn selection(&self) -> Option<std::ops::Range<usize>> {
+        // vim's visual modes select inclusively (whole lines in `V`)
+        if let Some(v) = &self.vim
+            && matches!(v.mode, VimMode::Visual | VimMode::VisualLine)
+        {
+            return self.vim_visual_range(v.mode);
+        }
         let a = self.anchor?.min(self.buffer.len());
         (a != self.cursor).then(|| a.min(self.cursor)..a.max(self.cursor))
     }
@@ -477,12 +522,38 @@ impl EditorState {
         self.cursor = self.next_boundary();
     }
 
+    /// Start of the cursor's line (⌘← / Home / ⌃A): the buffer start on a
+    /// one-line command.
     pub fn mv_home(&mut self) {
+        self.cursor = self.buffer[..self.cursor].rfind('\n').map_or(0, |i| i + 1);
+    }
+
+    /// End of the cursor's line (⌘→ / End / ⌃E).
+    pub fn mv_end(&mut self) {
+        self.cursor = self.buffer[self.cursor..]
+            .find('\n')
+            .map_or(self.buffer.len(), |i| self.cursor + i);
+    }
+
+    /// Start of the whole command (⌘↑ in a multi-line command).
+    pub fn mv_doc_start(&mut self) {
         self.cursor = 0;
     }
 
-    pub fn mv_end(&mut self) {
+    /// End of the whole command (⌘↓ in a multi-line command).
+    pub fn mv_doc_end(&mut self) {
         self.cursor = self.buffer.len();
+    }
+
+    /// The cursor is on a line below the first: ⌘↑ moves within the
+    /// command rather than selecting the block above.
+    pub fn below_first_line(&self) -> bool {
+        self.buffer[..self.cursor].contains('\n')
+    }
+
+    /// The cursor is on a line above the last: ⌘↓ moves within the command.
+    pub fn above_last_line(&self) -> bool {
+        self.buffer[self.cursor..].contains('\n')
     }
 
     pub fn word_left(&mut self) {
@@ -505,17 +576,35 @@ impl EditorState {
         }
     }
 
+    /// ⌃K: delete to the end of the cursor's line; at a line's end, the
+    /// newline after it (joins the next line, like readline and macOS).
     pub fn kill_to_end(&mut self) {
         self.anchor = None;
-        if self.cursor < self.buffer.len() {
-            self.replace_range(self.cursor..self.buffer.len(), "");
+        let start = self.cursor;
+        self.mv_end();
+        let mut end = self.cursor;
+        self.cursor = start;
+        if end == start && self.buffer[start..].starts_with('\n') {
+            end += 1;
+        }
+        if end > start {
+            self.replace_range(start..end, "");
         }
     }
 
+    /// ⌘⌫: delete to the start of the cursor's line; at a line's start,
+    /// the newline before it.
     pub fn kill_to_start(&mut self) {
         self.anchor = None;
-        if self.cursor > 0 {
-            self.replace_range(0..self.cursor, "");
+        let end = self.cursor;
+        self.mv_home();
+        let mut start = self.cursor;
+        self.cursor = end;
+        if start == end && self.buffer[..end].ends_with('\n') {
+            start -= 1;
+        }
+        if end > start {
+            self.replace_range(start..end, "");
         }
     }
 
@@ -571,7 +660,7 @@ impl EditorState {
             v.reset_insert();
         }
         if !cmd.trim().is_empty() && self.history.last() != Some(&cmd) {
-            self.history.push(cmd.clone());
+            std::sync::Arc::make_mut(&mut self.history).push(cmd.clone());
         }
         cmd
     }
@@ -1031,6 +1120,90 @@ mod tests {
         // delete_word_forward eats the word ahead
         e.delete_word_forward();
         assert_eq!(e.buffer, "");
+    }
+
+    /// ⌘← / ⌘→ act on the cursor's line of a multi-line command; ⌘↑ / ⌘↓
+    /// reach its start and end only while there are lines that way.
+    /// ⌘⌫ and ⌃K act on the cursor's line of a multi-line command; at the
+    /// line's edge they take the newline (readline / macOS).
+    #[test]
+    fn line_kills_stay_on_the_cursor_line() {
+        let mut e = EditorState::default();
+        e.insert("echo one\necho two\necho three");
+        // cursor after "echo t" on line 2
+        e.cursor = "echo one\necho t".len();
+        e.kill_to_start();
+        assert_eq!(e.buffer, "echo one\nwo\necho three");
+        assert_eq!(e.cursor, "echo one\n".len());
+        // at column 0: the newline before
+        e.kill_to_start();
+        assert_eq!(e.buffer, "echo onewo\necho three");
+        assert_eq!(e.cursor, "echo one".len());
+        // ⌃K to the line end, not the command end
+        e.kill_to_end();
+        assert_eq!(e.buffer, "echo one\necho three");
+        // at the line end: the newline after
+        e.kill_to_end();
+        assert_eq!(e.buffer, "echo oneecho three");
+        // last line, at its end: nothing
+        e.end();
+        e.kill_to_end();
+        assert_eq!(e.buffer, "echo oneecho three");
+    }
+
+    /// vim folds a change's snapshots by the depth it marked; at the undo
+    /// cap the front evicts, and one undo must still revert the change.
+    #[test]
+    fn squash_undo_holds_at_the_undo_cap() {
+        let mut e = EditorState::default();
+        for _ in 0..super::UNDO_CAP + 5 {
+            e.insert("a");
+        }
+        let before = e.buffer.clone();
+        let mark = e.undo_len();
+        let cursor = e.cursor;
+        for _ in 0..3 {
+            e.insert("b");
+        }
+        e.squash_undo(mark, cursor);
+        e.undo();
+        assert_eq!(e.buffer, before);
+        assert_eq!(e.cursor, cursor);
+    }
+
+    #[test]
+    fn line_and_command_bounds() {
+        let mut e = EditorState {
+            buffer: "echo one\necho two\necho three".into(),
+            cursor: 12,
+            ..Default::default()
+        };
+        e.home();
+        assert_eq!(e.cursor, 9);
+        e.end();
+        assert_eq!(e.cursor, 17);
+        assert!(e.below_first_line() && e.above_last_line());
+        e.mv_doc_start();
+        assert_eq!(e.cursor, 0);
+        assert!(!e.below_first_line() && e.above_last_line());
+        e.end();
+        assert_eq!(e.cursor, 8);
+        e.mv_doc_end();
+        assert_eq!(e.cursor, 28);
+        assert!(e.below_first_line() && !e.above_last_line());
+        e.home();
+        assert_eq!(e.cursor, 18);
+        // one line: the whole command, and no lines either way
+        let mut one = EditorState {
+            buffer: "ls -la".into(),
+            cursor: 3,
+            ..Default::default()
+        };
+        one.home();
+        assert_eq!(one.cursor, 0);
+        one.end();
+        assert_eq!(one.cursor, 6);
+        assert!(!one.below_first_line() && !one.above_last_line());
     }
 
     #[test]

@@ -177,8 +177,14 @@ impl ViewerState {
         });
     }
 
+    /// `loaded` is the file this viewer is waiting for (generations are
+    /// unique across windows).
+    pub fn awaits(&self, loaded: &ViewerState) -> bool {
+        self.path.is_some() && self.generation == loaded.generation
+    }
+
     pub fn accept(&mut self, loaded: ViewerState) -> bool {
-        if self.path.is_none() || self.generation != loaded.generation {
+        if !self.awaits(&loaded) {
             return false;
         }
         *self = loaded;

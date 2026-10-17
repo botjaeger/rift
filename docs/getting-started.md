@@ -63,13 +63,14 @@ If commands do not become blocks, the shell is not loading the hooks (see
 | Switch to any tab, pane, window or recent block | ⇧⌘O |
 | Type into every pane of the tab at once | ⌥⌘I |
 | Reopen a closed tab | ⇧⌘T |
-| Open another window | ⌘N (its shells end with it) |
+| Open another window | ⌘N (same app; closing it ends its shells only) |
 | Rename or color a tab, close the others | Right-click the tab |
 | Tabs in a side rail | Settings → Appearance → *Tabs: Side* |
 
-Quitting Rift (⌘Q, or closing the window) ends every tab and shell: the next
-launch starts fresh with one tab where the window was. An update's restart,
-a crash or a reboot instead bring tabs, splits and directories back
+Quitting Rift (⌘Q, or closing its last window) ends every tab and shell: the
+next launch starts fresh with one tab where the first window was. An
+update's restart, a crash or a reboot instead bring every window, its tabs,
+splits and directories back
 (`restore_session`), and the shells themselves keep running and reattach
 (*Keep shells running through updates*, on by default; see [durable
 sessions](features.md#durable-sessions)). Turn on *Save block output for
@@ -132,7 +133,7 @@ blocks too. Details: [SSH profiles](features.md#ssh-profiles).
 
 ## Automation
 
-`rift-terminal ctl` controls a running window over a local socket:
+`rift-terminal ctl` controls running Rift (every window) over a local socket:
 
 ```sh
 rift-terminal ctl list                    # tabs and panes of every window (JSON)

@@ -19,6 +19,7 @@ takes focus: do not type while it runs).
 | Scenario | How it is measured |
 |---|---|
 | Startup to first prompt | Process start to the first shell prompt, best of 3, minus the driver's fixed 1.5 s start delay. |
+| New window, in-process | The app's log of how long `new_window` held the UI thread (window, GPU surface, pipelines, first tab), best of 3; peak RSS of a run with two windows minus one with one. |
 | `seq 1 500000` / `cat` 20 MiB | The finished block's duration (OSC 133 C→D) from the state dump. |
 | Scrollback memory | Peak RSS after 300k lines into a 100k-line scrollback. |
 | Key-to-frame latency | `RIFT_LATENCY_LOG=1`: from a raw key write to the first presented frame after the program's echo arrives (40 keys into `cat`). |
@@ -50,6 +51,58 @@ enters takes the small buffer of the one recycled (unless that buffer is
 over twice the size needed), so steady scrolling allocates nothing. The same
 run settles at 76 MB, and `cat` of 20 MiB went from 320 ms to 290 ms (A/B on
 the same machine, three runs each).
+
+## A second window (2026-10-17)
+
+⌘N used to start another process: a window cost what startup costs (322 ms
+to its prompt, 107 MiB above). Windows now share one process, its GPU
+device, fonts, glyph atlas, config and workers; each window adds only its
+surface, its quad/sprite/image pipelines, its tabs and their shells.
+
+macOS 27, Apple M3 Max, release build, headless; the machine was loaded
+(startup measured 458 ms in the same run):
+
+| Measure | Result |
+|---|---|
+| Opening it (the UI thread: window, surface, pipelines, first tab), `bench.sh` best of 3 | 12 ms |
+| Same, 3 runs opening 3 windows each 2 s apart (the app's `new window in N ms` log) | 10–21 ms |
+| Peak RSS over one window, `bench.sh` best of 3 | +9 MiB |
+| Physical footprint per window, those runs (where macOS did not compress meanwhile) | +9.6 to +9.9 MB each |
+
+The `windows` leak scenario (`scripts/leak-soak.py`) opens a window, runs a
+command in it and closes it, 22 times: 176 MB → 176 MB over the 10 measured
+cycles.
+
+## Completion latency (2026-10-17)
+
+`crates/rift-core/tests/completion_bench.rs` times what the completion
+thread does per keystroke (`completion::complete`), 300 requests per
+scenario rotating through 4–5 buffers, after one warm-up each. The fixtures
+are written, then left alone for 2 s (a path changed more recently is
+never served from a cache). It fails when a p95 is over 5 ms.
+
+```sh
+cargo test --release -p rift-core --test completion_bench -- --ignored --nocapture
+```
+
+macOS 27, Apple M3 Max, release build; the machine was loaded (load average
+25–35), so the spread between runs is wide. Two runs each, p50 / p95:
+
+| Scenario | Before | After |
+|---|---|---|
+| Path, 10 000 files + 50 directories in one directory | 4.75 / 27.30 ms; 9.47 / 33.15 ms | 0.04 / 2.02 ms; 0.03 / 1.26 ms |
+| Git refs, 5 000 loose (50 directories) + 20 000 packed | 3.72 / 4.92 ms; 5.11 / 8.08 ms | 0.17 / 0.31 ms; 0.10 / 0.19 ms |
+| History, 50 000 shell lines + 200 pane lines | 0.01 / 0.02 ms; 0.02 / 0.03 ms | 0.03 / 0.19 ms; 0.02 / 0.12 ms |
+| Command names (`$PATH`) | 0.00 / 0.00 ms | 0.00 / 0.25 ms; 0.00 / 0.15 ms |
+
+Before, every request listed the directory and `stat`ed each entry, and
+walked `refs/` and read `packed-refs` again. Now each reads a cached listing
+after one `stat` per path it came from (one for a directory; one per `refs/`
+directory plus `HEAD` and `packed-refs` for a repository). The history and
+command rows gained the recency ranking and the fuzzy (word start,
+subsequence) passes, which stay well under the budget; the history row was
+never the cost in `complete` itself: the app copied the pane's last 200
+history lines into every request, which it now shares instead.
 
 ## Standard terminal suites (2026-10-10)
 

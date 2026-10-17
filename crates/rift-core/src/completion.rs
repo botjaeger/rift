@@ -1,8 +1,16 @@
 /// Completion providers for the input editor (design 04): PATH commands,
 /// spec-driven subcommands / flags / argument generators (see
-/// [`crate::completion_specs`]), filesystem paths, and shell history.
-/// Prefix-based; the UI layer ranks.
+/// [`crate::completion_specs`]), filesystem paths, and shell history,
+/// ranked by [`Match`] (see [`complete`]). Directory listings, `$PATH` scans
+/// and generator inputs are cached until the files they came from change
+/// ([`crate::completion_cache`]).
+use crate::completion_cache::Stamp;
 use crate::completion_specs::{self, ArgKind};
+use std::collections::HashMap;
+use std::ffi::{OsStr, OsString};
+use std::path::PathBuf;
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Completion {
@@ -66,7 +74,7 @@ pub fn token_end(buffer: &str, cursor: usize) -> usize {
 }
 
 /// The literal text of a typed shell word: quotes removed, `\x` → `x`.
-fn unescape_word(token: &str) -> String {
+pub(crate) fn unescape_word(token: &str) -> String {
     let mut out = String::with_capacity(token.len());
     let mut quote: Option<char> = None;
     let mut chars = token.chars();
@@ -140,52 +148,266 @@ pub fn escape_command(s: &str) -> Option<String> {
     Some(format!("{name}\\{}", &word[name.len()..]))
 }
 
-/// Executable names on `$PATH`, scanned once per process (sorted, deduped).
-/// The interactive shell's `$PATH` reported by its probe
-/// ([`crate::shell_env::ShellEnv`]) wins.
-pub fn path_commands() -> &'static [String] {
-    static CMDS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
-    if let Some(shell) = SHELL_PATH_COMMANDS.get() {
-        return shell;
-    }
-    CMDS.get_or_init(|| scan_path_commands(&std::env::var_os("PATH").unwrap_or_default()))
+/// How often a cached `$PATH` scan checks its directories for changes.
+const PATH_RECHECK: Duration = Duration::from_secs(2);
+/// `$PATH` values whose scans are kept.
+const PATH_SCANS: usize = 4;
+
+/// One `$PATH` value's executables and the directory stamps they came from.
+struct PathScan {
+    dirs: Vec<(PathBuf, Stamp)>,
+    /// No directory had changed within `RACY` of the scan.
+    trusted: bool,
+    checked: Instant,
+    cmds: Arc<Vec<String>>,
 }
 
-/// Executables on the interactive shell's `$PATH`, set by the first probe
-/// that reported it (rc files extend it: `PNPM_HOME`, nvm).
-pub(crate) static SHELL_PATH_COMMANDS: std::sync::OnceLock<Vec<String>> =
-    std::sync::OnceLock::new();
+static PATH_CACHE: LazyLock<Mutex<HashMap<OsString, PathScan>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The interactive shell's `$PATH` from its probe ([`crate::shell_env`]):
+/// rc files extend it (`PNPM_HOME`, nvm).
+static SHELL_PATH: Mutex<Option<OsString>> = Mutex::new(None);
+
+/// Record the interactive shell's `$PATH`, which [`path_commands`] then
+/// lists instead of Rift's own.
+pub(crate) fn set_shell_path(path: &OsStr) {
+    *SHELL_PATH.lock().unwrap_or_else(PoisonError::into_inner) = Some(path.to_os_string());
+}
+
+/// Executable names on `$PATH` (sorted, deduped): the interactive shell's
+/// `$PATH` reported by its probe ([`crate::shell_env::ShellEnv`]), else
+/// Rift's own. See [`commands_on`] for when it is scanned again.
+pub fn path_commands() -> Arc<Vec<String>> {
+    let shell = SHELL_PATH
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    commands_on(&shell.unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_default()))
+}
 
 /// Executable names in the directories of `path` (a `$PATH` value), sorted
-/// and deduped.
-pub fn scan_path_commands(path: &std::ffi::OsStr) -> Vec<String> {
+/// and deduped. Cached per value; at most every `PATH_RECHECK` a request
+/// compares the directories' stamps (one `stat` each) and scans again when
+/// one changed (a command installed or removed).
+pub fn commands_on(path: &OsStr) -> Arc<Vec<String>> {
+    commands_on_at(path, Instant::now())
+}
+
+fn commands_on_at(path: &OsStr, now: Instant) -> Arc<Vec<String>> {
+    let mut scans = PATH_CACHE.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(s) = scans.get_mut(path) {
+        if now.saturating_duration_since(s.checked) < PATH_RECHECK {
+            return s.cmds.clone();
+        }
+        s.checked = now;
+        if s.trusted && s.dirs.iter().all(|(d, st)| Stamp::of(d) == *st) {
+            return s.cmds.clone();
+        }
+    }
+    let read_at = std::time::SystemTime::now();
+    let cmds = Arc::new(scan_path_commands(path));
+    let dirs: Vec<(PathBuf, Stamp)> = std::env::split_paths(path)
+        .map(|d| {
+            let s = Stamp::of(&d);
+            (d, s)
+        })
+        .collect();
+    let trusted = !dirs.iter().any(|(_, s)| s.racy(read_at));
+    if !scans.contains_key(path)
+        && scans.len() >= PATH_SCANS
+        && let Some(old) = scans
+            .iter()
+            .min_by_key(|(_, s)| s.checked)
+            .map(|(k, _)| k.clone())
     {
-        let mut names: Vec<String> = Vec::new();
-        for dir in std::env::split_paths(path) {
-            let Ok(entries) = std::fs::read_dir(&dir) else {
-                continue;
-            };
-            for e in entries.flatten() {
-                let is_exec = e
-                    .metadata()
-                    .map(|m| {
-                        use std::os::unix::fs::PermissionsExt;
-                        !m.is_dir() && m.permissions().mode() & 0o111 != 0
-                    })
-                    .unwrap_or(false);
-                if is_exec && let Some(n) = e.file_name().to_str() {
-                    names.push(n.to_string());
-                }
+        scans.remove(&old);
+    }
+    scans.insert(
+        path.to_os_string(),
+        PathScan {
+            dirs,
+            trusted,
+            checked: now,
+            cmds: cmds.clone(),
+        },
+    );
+    cmds
+}
+
+/// Executable names in the directories of `path` (a `$PATH` value), sorted
+/// and deduped, read now (uncached; see [`commands_on`]).
+pub fn scan_path_commands(path: &std::ffi::OsStr) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for dir in std::env::split_paths(path) {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            // the mode bits need a stat; it follows symlinks (Homebrew's
+            // bin is all links), so a link to a directory is not a command
+            let is_exec = std::fs::metadata(e.path())
+                .map(|m| {
+                    use std::os::unix::fs::PermissionsExt;
+                    !m.is_dir() && m.permissions().mode() & 0o111 != 0
+                })
+                .unwrap_or(false);
+            if is_exec && let Some(n) = e.file_name().to_str() {
+                names.push(n.to_string());
             }
         }
-        names.sort();
-        names.dedup();
-        names
     }
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// How a candidate matches the typed word; lower sorts first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Match {
+    /// Starts with it, exactly as typed.
+    Prefix,
+    /// A word inside it starts with it, ignoring ASCII case: the whole
+    /// candidate, or after `-_./:@` or a space, or at a lower→upper case
+    /// change (`pick` → `cherry-pick`, `Rs` → `fooRs`).
+    WordStart,
+    /// Holds its characters in order, ignoring ASCII case (`gco` →
+    /// `git-checkout`).
+    Subsequence,
+}
+
+/// Typed characters needed before a candidate may match other than by
+/// prefix (shorter words match too much).
+const FUZZY_MIN: usize = 3;
+
+/// How `cand` matches `typed`, if at all ([`Match`]).
+pub fn match_kind(cand: &str, typed: &str) -> Option<Match> {
+    if cand.starts_with(typed) {
+        return Some(Match::Prefix);
+    }
+    if typed.chars().count() < FUZZY_MIN {
+        return None;
+    }
+    let (c, t) = (cand.as_bytes(), typed.as_bytes());
+    let mut prev: Option<char> = None;
+    for (i, ch) in cand.char_indices() {
+        let boundary = match prev {
+            None => true,
+            Some(p) => "-_./:@ ".contains(p) || (p.is_lowercase() && ch.is_uppercase()),
+        };
+        if boundary && c.len() - i >= t.len() && c[i..i + t.len()].eq_ignore_ascii_case(t) {
+            return Some(Match::WordStart);
+        }
+        prev = Some(ch);
+    }
+    let mut rest = cand.chars();
+    typed
+        .chars()
+        .all(|tc| rest.any(|cc| cc.eq_ignore_ascii_case(&tc)))
+        .then_some(Match::Subsequence)
+}
+
+/// Indices of the `items` whose name (`None`: skipped) matches `typed`,
+/// best first ([`Match`], then index), at most `cap`. The fuzzy kinds are
+/// only tried when the prefix matches leave room, so a large list costs
+/// one `starts_with` per item for a common prefix.
+fn best_matches<T>(
+    items: &[T],
+    name: impl Fn(&T) -> Option<&str>,
+    typed: &str,
+    cap: usize,
+) -> Vec<(usize, Match)> {
+    let mut found: Vec<(usize, Match)> = items
+        .iter()
+        .enumerate()
+        .filter(|(_, it)| name(it).is_some_and(|n| n.starts_with(typed)))
+        .map(|(i, _)| (i, Match::Prefix))
+        .take(cap)
+        .collect();
+    if found.len() < cap && typed.chars().count() >= FUZZY_MIN {
+        let mut fuzzy: Vec<(usize, Match)> = items
+            .iter()
+            .enumerate()
+            .filter_map(|(i, it)| {
+                let n = name(it)?;
+                match match_kind(n, typed)? {
+                    Match::Prefix => None, // already taken
+                    m => Some((i, m)),
+                }
+            })
+            .collect();
+        fuzzy.sort_by_key(|&(i, m)| (m, i));
+        fuzzy.truncate(cap - found.len());
+        found.extend(fuzzy);
+    }
+    found
+}
+
+/// Order of the sources at equal [`Match`]: command names, subcommands,
+/// options, generator values, paths.
+fn source_rank(source: &str) -> u8 {
+    match source {
+        "command" => 0,
+        "shell" => 1,
+        "option" => 2,
+        "path" => 4,
+        _ => 3,
+    }
+}
+
+/// Word candidates kept; the rest of the 50 are history lines.
+const MAX_WORDS: usize = 45;
+/// History lines kept (prefix matches of the whole buffer).
+const MAX_HISTORY: usize = 5;
+/// History entries read for recency ranking, newest first: the pane's own
+/// and the imported shell history's.
+const RECENCY_PANE: usize = 200;
+const RECENCY_SHELL: usize = 500;
+
+/// For each word of the recent history, how recently it was used (0 =
+/// the newest line). A trailing `/` is ignored, so `src` and `src/` agree.
+fn recency<'a>(history: &'a [String], shell_history: &'a [String]) -> HashMap<&'a str, usize> {
+    let mut map = HashMap::new();
+    let lines = history
+        .iter()
+        .rev()
+        .take(RECENCY_PANE)
+        .chain(shell_history.iter().rev().take(RECENCY_SHELL));
+    for (age, line) in lines.enumerate() {
+        for w in line.split_whitespace() {
+            map.entry(w.trim_end_matches('/')).or_insert(age);
+        }
+    }
+    map
+}
+
+/// Sort word candidates: match kind, source, recency, then each provider's
+/// own order (the sort is stable).
+fn rank(words: &mut [(Completion, Match)], history: &[String], shell_history: &[String]) {
+    if words.len() < 2 {
+        return;
+    }
+    let recent = recency(history, shell_history);
+    let age = |c: &Completion| {
+        recent
+            .get(c.insert.trim_end_matches('/'))
+            .copied()
+            .unwrap_or(usize::MAX)
+    };
+    words.sort_by_cached_key(|(c, m)| (*m, source_rank(c.source), age(c)));
 }
 
 /// Gather completions for the token at `cursor`. `history` is the pane's
-/// own (newest last); `shell_history` the imported shell history.
+/// own (newest last); `shell_history` the imported shell history; `cwd`
+/// the pane's local directory (`None`: none on this machine, so no path
+/// or file-based argument completions).
+///
+/// Word candidates are ranked by [`Match`] (prefix, then word start, then
+/// subsequence), then by source (command names, subcommands, options,
+/// generator values, paths), then by how recently the
+/// word appears in the history, then in each provider's own order; at most
+/// 45. History lines (whole-buffer prefix matches, newest first, at most 5)
+/// follow them.
 pub fn complete(
     buffer: &str,
     cursor: usize,
@@ -193,10 +415,64 @@ pub fn complete(
     shell_history: &[String],
     cwd: Option<&str>,
 ) -> Vec<Completion> {
+    complete_on_path(buffer, cursor, history, shell_history, cwd, None)
+}
+
+/// [`complete`] with command names from `path` (the pane shell's `$PATH`,
+/// e.g. after `rift-use`) instead of [`path_commands`] when given.
+pub fn complete_on_path(
+    buffer: &str,
+    cursor: usize,
+    history: &[String],
+    shell_history: &[String],
+    cwd: Option<&str>,
+    path: Option<&OsStr>,
+) -> Vec<Completion> {
+    gather(buffer, cursor, cwd, path).finish(buffer, history, shell_history)
+}
+
+/// The word candidates for one request before ranking: Rift's own
+/// providers ([`gather`]), then other sources merged in ([`Gathered::add`]),
+/// then [`Gathered::finish`].
+#[derive(Debug, Clone)]
+pub struct Gathered {
+    words: Vec<(Completion, Match)>,
+    /// The word being completed, unescaped.
+    typed: String,
+    /// The word being completed, as typed.
+    token: String,
+    /// It is the command name of its command.
+    first_word: bool,
+    /// What a spec says the word is (`ArgKind::None`: no spec or not an
+    /// argument).
+    arg: ArgKind,
+}
+
+/// Rift's own word candidates for the token at `cursor` (see
+/// [`complete_on_path`]).
+pub fn gather(buffer: &str, cursor: usize, cwd: Option<&str>, path: Option<&OsStr>) -> Gathered {
+    gather_with(buffer, cursor, cwd, Some(path))
+}
+
+/// [`gather`] for a pane on another machine: nothing from this one (no
+/// directory, no `$PATH` commands); the remote answer is merged in
+/// ([`crate::remote_complete::complete_into`]).
+pub fn gather_remote(buffer: &str, cursor: usize) -> Gathered {
+    gather_with(buffer, cursor, None, None)
+}
+
+/// [`gather`]; `path: None` lists no command names at all.
+fn gather_with(
+    buffer: &str,
+    cursor: usize,
+    cwd: Option<&str>,
+    path: Option<Option<&OsStr>>,
+) -> Gathered {
     let (token_start, token) = current_token(buffer, cursor);
-    let mut out = Vec::new();
+    let mut words: Vec<(Completion, Match)> = Vec::new();
     // a spec path/dir argument is completed by its generator alone
     let mut generic_paths = true;
+    let mut arg = ArgKind::None;
 
     // Which command are we completing inside? A pipe / `;` / `&&` / `||`
     // starts a fresh command, so only look at the current segment.
@@ -207,33 +483,41 @@ pub fn complete(
     // command names: first word of the segment, from $PATH (Warp-style).
     // Names are filenames: insert them escaped so `;`, quotes or `$` in a
     // basename stay one word; names with control characters are skipped.
-    if first_word {
-        out.extend(command_completions(path_commands(), token));
+    if first_word && let Some(path) = path {
+        let cmds = path.map_or_else(path_commands, commands_on);
+        words.extend(command_completions(&cmds, token));
     }
 
     // spec-driven: subcommands, options, and argument generators
     if !first_word {
-        let words = completion_specs::tokenize(seg_prefix);
-        if let Some((cmd, args)) = words.split_first()
+        let args = completion_specs::tokenize(seg_prefix);
+        if let Some((cmd, args)) = args.split_first()
             && let Some(spec) = completion_specs::lookup(cmd)
         {
             let res = completion_specs::resolve(spec, args);
             if token.starts_with('-') {
-                out.extend(option_completions(&res, token));
+                words.extend(option_completions(&res, token));
             } else {
                 if res.offer_subcommands {
                     for s in res.subcommands {
-                        if s.name.starts_with(token) && s.name != token {
-                            out.push(Completion {
-                                insert: s.name.into(),
-                                description: s.desc.into(),
-                                source: "shell",
-                            });
+                        if s.name == token {
+                            continue;
+                        }
+                        if let Some(m) = match_kind(s.name, token) {
+                            words.push((
+                                Completion {
+                                    insert: s.name.into(),
+                                    description: s.desc.into(),
+                                    source: "shell",
+                                },
+                                m,
+                            ));
                         }
                     }
                 }
                 generic_paths = !matches!(res.args, ArgKind::Path | ArgKind::Dir);
-                out.extend(generator_completions(res.args, token, cwd));
+                arg = res.args;
+                words.extend(generator_completions(res.args, token, cwd));
             }
         }
     }
@@ -241,9 +525,187 @@ pub fn complete(
     // paths: token that looks like one
     let word = unescape_word(token);
     if generic_paths && (word.contains('/') || word.starts_with('.') || word.starts_with('~')) {
-        out.extend(complete_path(&word, cwd));
+        words.extend(complete_path(&word, cwd, false));
+    }
+    Gathered {
+        words,
+        typed: word,
+        token: token.to_string(),
+        first_word,
+        arg,
+    }
+}
+
+impl Gathered {
+    /// Merge literal words from another source (`source`, e.g. "shell" for
+    /// the user's shell's own completions): each is escaped as one word; a
+    /// word Rift already offers keeps Rift's entry (a directory with or
+    /// without its trailing `/`: bash's `complete -d` lists `src`, Rift
+    /// `src/`), and one with a control character or equal to the typed word
+    /// is skipped.
+    pub fn add(&mut self, items: &[(String, String)], source: &'static str) {
+        let have: std::collections::HashSet<String> = self
+            .words
+            .iter()
+            .map(|(c, _)| c.insert.trim_end_matches('/').to_string())
+            .collect();
+        let mut added = std::collections::HashSet::new();
+        for (value, desc) in items {
+            if value.is_empty() || *value == self.typed {
+                continue;
+            }
+            let Some(insert) = escape_word(value) else {
+                continue;
+            };
+            let key = insert.trim_end_matches('/').to_string();
+            if have.contains(&key) || !added.insert(key) {
+                continue;
+            }
+            // the source matched it already; keep its match, ranked last
+            let m = match_kind(value, &self.typed).unwrap_or(Match::Subsequence);
+            self.words.push((
+                Completion {
+                    insert,
+                    description: desc.chars().filter(|c| !c.is_control()).collect(),
+                    source,
+                },
+                m,
+            ));
+        }
     }
 
+    /// Merge values listed elsewhere (a remote machine's git refs) that
+    /// match the typed word, best first, at most `cap`; `source_of` maps a
+    /// value's description to its source.
+    pub fn add_matching(
+        &mut self,
+        items: &[(String, String)],
+        source_of: impl Fn(&str) -> &'static str,
+        cap: usize,
+    ) {
+        let found = best_matches(
+            items,
+            |(v, _)| (!v.chars().any(char::is_control)).then_some(v.as_str()),
+            &self.typed,
+            cap,
+        );
+        for (i, m) in found {
+            let (v, desc) = &items[i];
+            if *v == self.typed {
+                continue;
+            }
+            if let Some(insert) = escape_word(v) {
+                self.words.push((
+                    Completion {
+                        insert,
+                        description: desc.clone(),
+                        source: source_of(desc),
+                    },
+                    m,
+                ));
+            }
+        }
+    }
+
+    /// Merge command names listed elsewhere (a remote `$PATH`), as the
+    /// first word of a command (see [`complete_on_path`]).
+    pub fn add_commands(&mut self, cmds: &[String]) {
+        if !self.first_word {
+            return;
+        }
+        let mut sorted = cmds.to_vec();
+        sorted.sort();
+        sorted.dedup();
+        self.words.extend(command_completions(&sorted, &self.token));
+    }
+
+    /// Merge the entries of a directory listed elsewhere (a remote one;
+    /// directories end in `/`): the typed word's directory part, as
+    /// [`complete_on_path`] completes local paths.
+    pub fn add_paths(&mut self, names: &[String]) {
+        let typed = self.typed.as_str();
+        let (dir, file) = match typed.rfind('/') {
+            Some(i) => typed.split_at(i + 1),
+            None => ("", typed),
+        };
+        let hidden = file.starts_with('.');
+        let found = best_matches(
+            names,
+            |n| {
+                ((hidden || !n.starts_with('.')) && !n.chars().any(char::is_control))
+                    .then_some(n.as_str())
+            },
+            file,
+            MAX_PATHS,
+        );
+        for (i, m) in found {
+            let name = &names[i];
+            if let Some(insert) = escape_word(&format!("{dir}{name}")) {
+                self.words.push((
+                    Completion {
+                        insert,
+                        description: if name.ends_with('/') {
+                            "directory".into()
+                        } else {
+                            String::new()
+                        },
+                        source: "path",
+                    },
+                    m,
+                ));
+            }
+        }
+    }
+
+    /// The word being completed, unescaped.
+    pub fn typed(&self) -> &str {
+        &self.typed
+    }
+
+    /// Whether the word being completed is a command name.
+    pub fn first_word(&self) -> bool {
+        self.first_word
+    }
+
+    /// What a spec says the word being completed is.
+    pub fn arg_kind(&self) -> ArgKind {
+        self.arg
+    }
+
+    /// Whether the word being completed looks like a path (`/`, `.`, `~`).
+    pub fn path_like(&self) -> bool {
+        let w = &self.typed;
+        w.contains('/') || w.starts_with('.') || w.starts_with('~')
+    }
+
+    /// Rank the words and append the history lines (see [`complete`]).
+    pub fn finish(
+        self,
+        buffer: &str,
+        history: &[String],
+        shell_history: &[String],
+    ) -> Vec<Completion> {
+        let mut words = self.words;
+        rank(&mut words, history, shell_history);
+        let mut seen = std::collections::HashSet::new();
+        let out: Vec<Completion> = words
+            .into_iter()
+            .map(|(c, _)| c)
+            .filter(|c| seen.insert(c.insert.clone()))
+            .take(MAX_WORDS)
+            .collect();
+        with_history(out, seen, buffer, history, shell_history)
+    }
+}
+
+/// `out` followed by the history lines for `buffer`.
+fn with_history(
+    mut out: Vec<Completion>,
+    mut seen: std::collections::HashSet<String>,
+    buffer: &str,
+    history: &[String],
+    shell_history: &[String],
+) -> Vec<Completion> {
     // history: whole-buffer prefix matches (drives ghost text); the pane's
     // own entries first, then the imported shell history (newest first)
     if !buffer.trim().is_empty() {
@@ -254,29 +716,34 @@ pub fn complete(
             .take(200)
             .chain(shell_history.iter().rev().take(3000))
         {
-            if h.starts_with(buffer) && h != buffer && !h.contains('\n') {
+            if h.starts_with(buffer) && h != buffer && !h.contains('\n') && seen.insert(h.clone()) {
                 out.push(Completion {
                     insert: h.clone(),
                     description: String::new(),
                     source: "history",
                 });
                 n += 1;
-                if n >= 5 {
+                if n >= MAX_HISTORY {
                     break;
                 }
             }
         }
     }
-
-    let mut seen = std::collections::HashSet::new();
-    out.retain(|c| seen.insert(c.insert.clone()));
-    out.truncate(50);
     out
 }
 
+/// Typed characters needed before a command name may match as a
+/// subsequence (`gco` would match too many names).
+const COMMAND_SUBSEQUENCE_MIN: usize = 4;
+
 /// Command-name completions for `token` (as typed) from the sorted `cmds`,
-/// at most 12. Inserts are [`escape_word`]-escaped.
-fn command_completions(cmds: &[String], token: &str) -> Vec<Completion> {
+/// at most 12, prefix matches first. A name that does not start with the
+/// typed word matches only when it starts with the same character (any
+/// case), by word start from 3 typed characters or as a subsequence from 4
+/// (`tfa` never finds `convertformat`). Inserts are
+/// [`escape_word`]-escaped.
+fn command_completions(cmds: &[String], token: &str) -> Vec<(Completion, Match)> {
+    const MAX: usize = 12;
     let typed = unescape_word(token);
     if typed.chars().count() < 2
         || typed.contains('/')
@@ -286,46 +753,77 @@ fn command_completions(cmds: &[String], token: &str) -> Vec<Completion> {
         return Vec::new();
     }
     let start = cmds.partition_point(|c| c.as_str() < typed.as_str());
-    cmds[start..]
+    let mut found: Vec<(&String, Match)> = cmds[start..]
         .iter()
         .take_while(|c| c.starts_with(&typed))
         .filter(|c| **c != typed)
-        .filter_map(|name| escape_command(name))
-        .take(12)
-        .map(|insert| Completion {
-            insert,
-            description: String::new(),
-            source: "command",
+        .map(|c| (c, Match::Prefix))
+        .take(MAX)
+        .collect();
+    let len = typed.chars().count();
+    if found.len() < MAX && len >= FUZZY_MIN {
+        let first = typed.chars().next();
+        let mut fuzzy: Vec<(&String, Match)> = cmds
+            .iter()
+            .filter(|c| !c.starts_with(&typed))
+            .filter(|c| {
+                c.chars()
+                    .next()
+                    .zip(first)
+                    .is_some_and(|(a, b)| a.eq_ignore_ascii_case(&b))
+            })
+            .filter_map(|c| match match_kind(c, &typed)? {
+                Match::Subsequence if len < COMMAND_SUBSEQUENCE_MIN => None,
+                m => Some((c, m)),
+            })
+            .collect();
+        fuzzy.sort_by_key(|(_, m)| *m);
+        found.extend(fuzzy.into_iter().take(MAX - found.len()));
+    }
+    found
+        .into_iter()
+        .filter_map(|(name, m)| {
+            Some((
+                Completion {
+                    insert: escape_command(name)?,
+                    description: String::new(),
+                    source: "command",
+                },
+                m,
+            ))
         })
         .collect()
 }
 
 /// Option / flag completions for a token beginning with `-`.
-fn option_completions(res: &completion_specs::Resolved, token: &str) -> Vec<Completion> {
+fn option_completions(res: &completion_specs::Resolved, token: &str) -> Vec<(Completion, Match)> {
     // `--opt=va…`: the value is not an option name, and an option insert
     // would replace the whole token and drop `=va…`
     if token.contains('=') {
         return Vec::new();
     }
-    let key = token.split('=').next().unwrap_or(token);
     let mut out = Vec::new();
     for o in &res.options {
         // Choose the form to offer: bare "-" lists every option (long form
-        // preferred); "--…" matches long forms; "-x" matches short forms.
-        let form: Option<&str> = if token == "-" {
+        // preferred); "--…" matches long forms (past the dashes, also by
+        // word start or subsequence); "-x" matches short forms by prefix.
+        let found: Option<(&str, Match)> = if token == "-" {
             if !o.long.is_empty() {
-                Some(o.long)
+                Some((o.long, Match::Prefix))
             } else if !o.short.is_empty() {
-                Some(o.short)
+                Some((o.short, Match::Prefix))
             } else {
                 None
             }
-        } else if token.starts_with("--") {
-            (!o.long.is_empty() && o.long.starts_with(key)).then_some(o.long)
+        } else if let Some(key) = token.strip_prefix("--") {
+            o.long
+                .strip_prefix("--")
+                .and_then(|long| match_kind(long, key))
+                .map(|m| (o.long, m))
         } else {
-            (!o.short.is_empty() && o.short.starts_with(key)).then_some(o.short)
+            (!o.short.is_empty() && o.short.starts_with(token)).then_some((o.short, Match::Prefix))
         };
-        let Some(form) = form else { continue };
+        let Some((form, m)) = found else { continue };
         if form == token {
             continue;
         }
@@ -338,83 +836,107 @@ fn option_completions(res: &completion_specs::Resolved, token: &str) -> Vec<Comp
         {
             continue;
         }
-        out.push(Completion {
-            insert: form.to_string(),
-            description: o.desc.to_string(),
-            source: "option",
-        });
+        out.push((
+            Completion {
+                insert: form.to_string(),
+                description: o.desc.to_string(),
+                source: "option",
+            },
+            m,
+        ));
     }
     out
 }
 
-/// Values produced by a spec argument generator, prefix-filtered by `token`.
-fn generator_completions(kind: ArgKind, token: &str, cwd: Option<&str>) -> Vec<Completion> {
+/// Values produced by a spec argument generator that match `token`, best
+/// matches first, at most 50 each. `cwd: None` (no local directory): only
+/// ssh hosts, which come from the home directory.
+fn generator_completions(
+    kind: ArgKind,
+    token: &str,
+    cwd: Option<&str>,
+) -> Vec<(Completion, Match)> {
     // generator values are literal text: match against the unescaped token
     // and insert escaped, so a ref named `x$(cmd)` cannot run on Enter
     let want = unescape_word(token);
-    let vals_to_completions =
-        |items: Vec<(String, String)>, src: &'static str| -> Vec<Completion> {
-            items
-                .into_iter()
-                .filter(|(v, _)| v.starts_with(&want))
-                .filter_map(|(v, desc)| {
-                    Some(Completion {
-                        insert: escape_word(&v)?,
-                        description: desc,
-                        source: src,
-                    })
-                })
-                .take(50)
-                .collect()
-        };
-    // git refs carry a per-ref kind ("branch"/"remote"/"tag") in the desc.
-    let refs = |items: Vec<(String, String)>| -> Vec<Completion> {
-        items
-            .into_iter()
-            .filter(|(v, _)| v.starts_with(&want))
-            .filter_map(|(v, desc)| {
-                let src = match desc.as_str() {
-                    "branch" => "branch",
-                    "tag" => "tag",
-                    _ => "remote-branch",
-                };
-                Some(Completion {
-                    insert: escape_word(&v)?,
-                    description: desc,
-                    source: src,
-                })
-            })
-            .take(50)
-            .collect()
+    // every generator but ssh hosts (the user's own ~/.ssh) reads the
+    // shell's directory: none known locally, none to read
+    if cwd.is_none() && !matches!(kind, ArgKind::SshHost) {
+        return Vec::new();
+    }
+    // git refs carry a per-ref kind ("branch"/"remote"/"tag") in the desc
+    let ref_source = |desc: &str| -> &'static str {
+        match desc {
+            "branch" => "branch",
+            "tag" => "tag",
+            _ => "remote-branch",
+        }
     };
+    let ranked = |items: &[(String, String)],
+                  keep: &dyn Fn(&str) -> bool,
+                  src: &dyn Fn(&str) -> &'static str|
+     -> Vec<(Completion, Match)> {
+        // a value with control characters cannot be inserted (escape_word):
+        // skipped before the cap
+        best_matches(
+            items,
+            |(v, d)| (keep(d) && !v.chars().any(char::is_control)).then_some(v.as_str()),
+            &want,
+            50,
+        )
+        .into_iter()
+        .filter_map(|(i, m)| {
+            let (v, desc) = &items[i];
+            Some((
+                Completion {
+                    insert: escape_word(v)?,
+                    description: desc.clone(),
+                    source: src(desc),
+                },
+                m,
+            ))
+        })
+        .take(50)
+        .collect()
+    };
+    let all = |_: &str| true;
     match kind {
         ArgKind::None => Vec::new(),
-        ArgKind::Path => complete_path(&unescape_word(token), cwd),
-        ArgKind::Dir => complete_path(&unescape_word(token), cwd)
-            .into_iter()
-            .filter(|c| c.insert.ends_with('/'))
-            .collect(),
-        ArgKind::GitRef => refs(completion_specs::git_refs(cwd, &want)),
-        ArgKind::GitBranch => refs(
-            completion_specs::git_refs(cwd, &want)
-                .into_iter()
-                .filter(|(_, d)| d == "branch")
-                .collect(),
+        ArgKind::Path => complete_path(&want, cwd, false),
+        ArgKind::Dir => complete_path(&want, cwd, true),
+        ArgKind::GitRef => ranked(&completion_specs::git_refs_all(cwd), &all, &ref_source),
+        ArgKind::GitBranch => ranked(
+            &completion_specs::git_refs_all(cwd),
+            &|d| d == "branch",
+            &ref_source,
         ),
-        ArgKind::GitRemote => vals_to_completions(completion_specs::git_remotes(cwd), "remote"),
-        ArgKind::SshHost => vals_to_completions(completion_specs::ssh_hosts(&want), "ssh-host"),
-        ArgKind::MakeTarget => {
-            vals_to_completions(completion_specs::make_targets(cwd, &want), "make-target")
-        }
-        ArgKind::PkgScript => {
-            vals_to_completions(completion_specs::package_scripts(cwd, &want), "script")
-        }
+        ArgKind::GitRemote => ranked(&completion_specs::git_remotes(cwd), &all, &|_| "remote"),
+        ArgKind::SshHost => ranked(&completion_specs::ssh_hosts_all(), &all, &|_| "ssh-host"),
+        ArgKind::MakeTarget => ranked(
+            &completion_specs::make_targets_all(cwd),
+            &all,
+            &|_| "make-target",
+        ),
+        ArgKind::PkgScript => ranked(
+            &completion_specs::package_scripts_all(cwd),
+            &all,
+            &|_| "script",
+        ),
     }
 }
 
-/// Entries matching the literal (unescaped) path `token`; each `insert` is
-/// escaped as one shell word.
-fn complete_path(token: &str, cwd: Option<&str>) -> Vec<Completion> {
+/// Path entries kept per request.
+const MAX_PATHS: usize = 30;
+
+/// Entries matching the literal (unescaped) path `token` (directories only
+/// with `dirs_only`), best matches first, then by name; each `insert` is
+/// escaped as one shell word. Listings come from the directory cache
+/// ([`crate::completion_cache::dir_items`]). `cwd: None` (no local
+/// directory): nothing, not even absolute or `~/` paths.
+fn complete_path(token: &str, cwd: Option<&str>, dirs_only: bool) -> Vec<(Completion, Match)> {
+    let Some(cwd) = cwd else {
+        return Vec::new();
+    };
     // Expand only "~/…": expansion must not change the basename, or the
     // orig_dir arithmetic below breaks (bare "~" expanding to $HOME made
     // file_part longer than the token itself → slice-index underflow panic).
@@ -433,46 +955,53 @@ fn complete_path(token: &str, cwd: Option<&str>) -> Vec<Completion> {
     };
 
     let base = if dir_part.starts_with('/') {
-        std::path::PathBuf::from(dir_part)
+        PathBuf::from(dir_part)
     } else {
-        std::path::PathBuf::from(cwd.unwrap_or(".")).join(dir_part)
+        PathBuf::from(cwd).join(dir_part)
     };
 
-    let Ok(entries) = std::fs::read_dir(&base) else {
-        return Vec::new();
-    };
-
-    let mut out: Vec<Completion> = entries
-        .filter_map(|e| e.ok())
-        .filter_map(|e| {
-            let name = e.file_name().to_string_lossy().into_owned();
-            if !name.starts_with(file_part) || (file_part.is_empty() && name.starts_with('.')) {
-                return None;
-            }
-            // follow symlinks: a link to a directory is a directory
-            let is_dir = std::fs::metadata(e.path())
-                .map(|m| m.is_dir())
-                .or_else(|_| e.file_type().map(|t| t.is_dir()))
-                .unwrap_or(false);
-            // keep the user's original dir prefix (incl. ~) in the insert
-            let orig_dir = &token[..token.len().saturating_sub(file_part.len())];
-            Some(Completion {
-                insert: escape_word(&format!(
-                    "{orig_dir}{name}{}",
-                    if is_dir { "/" } else { "" }
-                ))?,
-                description: if is_dir {
-                    "directory".into()
-                } else {
-                    String::new()
+    let items = crate::completion_cache::dir_items(&base);
+    // hidden entries only when the typed name starts with `.`
+    let hidden = file_part.starts_with('.');
+    // listings are sorted by name: index order is name order. A name
+    // with control characters cannot be inserted (escape_word): skipped
+    // before the cap.
+    let found = best_matches(
+        &items,
+        |it| {
+            ((hidden || !it.name.starts_with('.'))
+                && (!dirs_only || it.is_dir)
+                && !it.name.chars().any(char::is_control))
+            .then_some(it.name.as_str())
+        },
+        file_part,
+        MAX_PATHS,
+    );
+    // keep the user's original dir prefix (incl. ~) in the insert
+    let orig_dir = &token[..token.len().saturating_sub(file_part.len())];
+    found
+        .into_iter()
+        .filter_map(|(i, m)| {
+            let it = &items[i];
+            Some((
+                Completion {
+                    insert: escape_word(&format!(
+                        "{orig_dir}{}{}",
+                        it.name,
+                        if it.is_dir { "/" } else { "" }
+                    ))?,
+                    description: if it.is_dir {
+                        "directory".into()
+                    } else {
+                        String::new()
+                    },
+                    source: "path",
                 },
-                source: "path",
-            })
+                m,
+            ))
         })
-        .collect();
-    out.sort_by(|a, b| a.insert.cmp(&b.insert));
-    out.truncate(30);
-    out
+        .take(MAX_PATHS)
+        .collect()
 }
 
 #[cfg(test)]
@@ -487,6 +1016,177 @@ mod tests {
         assert!(names.contains(&"cherry-pick"));
         assert!(names.contains(&"check-ignore"));
         assert!(!names.contains(&"commit"));
+    }
+
+    fn pairs(items: &[(&str, &str)]) -> Vec<(String, String)> {
+        items
+            .iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn shell_words_merge_and_rift_specs_win_duplicates() {
+        let mut g = gather("git ch", 6, None, None);
+        g.add(
+            &pairs(&[
+                ("checkout", "from the shell"),
+                ("chlorine", "only the shell has it"),
+                ("my file", ""),
+                ("bad\x07", ""),
+                ("ch", "the typed word itself"),
+            ]),
+            "shell",
+        );
+        let out = g.finish("git ch", &[], &[]);
+        let checkout: Vec<&Completion> = out.iter().filter(|c| c.insert == "checkout").collect();
+        assert_eq!(checkout.len(), 1, "one row per word");
+        assert_ne!(
+            checkout[0].description, "from the shell",
+            "Rift's spec row wins"
+        );
+        let names: Vec<&str> = out.iter().map(|c| c.insert.as_str()).collect();
+        assert!(names.contains(&"chlorine"), "{names:?}");
+        assert!(names.contains(&"my\\ file"), "inserted escaped: {names:?}");
+        assert!(!names.iter().any(|n| n.contains('\x07')));
+        assert!(!names.contains(&"ch"));
+        // control: merged in first, the shell's row would be the one kept
+        let mut g = gather("git ch", 6, None, None);
+        let rift_row = g
+            .words
+            .iter()
+            .position(|(c, _)| c.insert == "checkout")
+            .unwrap();
+        g.words.remove(rift_row);
+        g.add(&pairs(&[("checkout", "from the shell")]), "shell");
+        let out = g.finish("git ch", &[], &[]);
+        assert!(out.iter().any(|c| c.description == "from the shell"));
+    }
+
+    #[test]
+    fn listed_paths_commands_and_refs_merge_like_local_ones() {
+        // a pane with no local directory: the listing comes from elsewhere
+        let mut g = gather("cat src/ma", 10, None, None);
+        assert!(g.path_like() && !g.first_word());
+        g.add_paths(&[
+            "main.rs".into(),
+            "map/".into(),
+            ".hidden".into(),
+            "lib.rs".into(),
+        ]);
+        let out = g.finish("cat src/ma", &[], &[]);
+        let names: Vec<&str> = out.iter().map(|c| c.insert.as_str()).collect();
+        assert_eq!(names, vec!["src/main.rs", "src/map/"]);
+        let mut g = gather("cat .h", 6, None, None);
+        g.add_paths(&[".hidden".into(), "x".into()]);
+        assert_eq!(g.finish("cat .h", &[], &[])[0].insert, ".hidden");
+
+        let mut g = gather("dpk", 3, None, Some(OsStr::new("")));
+        g.add_commands(&["dpkg-query".into(), "dpkg".into(), "ls".into()]);
+        let names: Vec<String> = g
+            .finish("dpk", &[], &[])
+            .into_iter()
+            .map(|c| c.insert)
+            .collect();
+        assert_eq!(names, vec!["dpkg", "dpkg-query"]);
+        // command names only in command position
+        let mut g = gather("cat dpk", 7, None, None);
+        g.add_commands(&["dpkg".into()]);
+        assert!(g.finish("cat dpk", &[], &[]).is_empty());
+
+        let mut g = gather("git checkout fea", 16, None, None);
+        assert_eq!(g.arg_kind(), ArgKind::GitRef);
+        g.add_matching(
+            &pairs(&[("feature-x", "branch"), ("main", "branch"), ("v1", "tag")]),
+            |d| if d == "tag" { "tag" } else { "branch" },
+            50,
+        );
+        let out = g.finish("git checkout fea", &[], &[]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            (out[0].insert.as_str(), out[0].source),
+            ("feature-x", "branch")
+        );
+    }
+
+    #[test]
+    fn shell_directory_words_join_rifts_directory_rows() {
+        let dir = scratch("dirdup");
+        for d in ["src", "sample"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        let line = "cd s";
+        let mut g = gather(line, 4, dir.to_str(), None);
+        // bash's `complete -d cd` lists directories without the `/`
+        g.add(
+            &pairs(&[("src", ""), ("sample", ""), ("sbin-only", "")]),
+            "shell",
+        );
+        let out = g.finish(line, &[], &[]);
+        let names: Vec<(&str, &str)> = out.iter().map(|c| (c.insert.as_str(), c.source)).collect();
+        assert_eq!(
+            names,
+            vec![
+                ("sbin-only", "shell"),
+                ("sample/", "path"),
+                ("src/", "path")
+            ],
+            "one row per directory, Rift's kept"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_remote_pane_lists_no_local_commands() {
+        let dir = scratch("remotecmds");
+        let exe = dir.join("lsfoo");
+        std::fs::write(&exe, "#!/bin/sh\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = dir.as_os_str();
+        // control: a local pane on that `$PATH` lists it
+        let local = gather("lsf", 3, None, Some(path)).finish("lsf", &[], &[]);
+        assert_eq!(inserts_of(&local, "command"), ["lsfoo"]);
+        let remote = gather_remote("lsf", 3);
+        assert!(remote.first_word());
+        assert!(remote.finish("lsf", &[], &[]).is_empty());
+        // nor this machine's own `$PATH` (control: it lists `ls…` commands)
+        let here = gather("ls", 2, None, None).finish("ls", &[], &[]);
+        assert!(!inserts_of(&here, "command").is_empty(), "{here:?}");
+        let there = gather_remote("ls", 2).finish("ls", &[], &[]);
+        assert!(inserts_of(&there, "command").is_empty(), "{there:?}");
+        // the remote machine's own commands still merge in
+        let mut g = gather_remote("lsf", 3);
+        g.add_commands(&["lsfix".into()]);
+        assert_eq!(inserts_of(&g.finish("lsf", &[], &[]), "command"), ["lsfix"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn command_names_match_fuzzily_only_from_their_first_character() {
+        let cmds: Vec<String> = ["convertformat", "terraform", "tf-apply", "tofu-apply"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let names = |typed: &str| -> Vec<String> {
+            command_completions(&cmds, typed)
+                .into_iter()
+                .map(|(c, _)| c.insert)
+                .collect()
+        };
+        // a subsequence elsewhere in the name, or from 3 characters: no
+        assert!(names("tfa").is_empty(), "{:?}", names("tfa"));
+        // from 4, anchored on the first character
+        assert_eq!(names("tfap"), ["tf-apply", "tofu-apply"]);
+        // control: matched freely, `tfa` finds `convertformat`
+        assert_eq!(match_kind("convertformat", "tfa"), Some(Match::Subsequence));
+        // word start needs the first character too
+        let cmds: Vec<String> = vec!["git-pick".into(), "pick-me".into()];
+        let got: Vec<String> = command_completions(&cmds, "Pick")
+            .into_iter()
+            .map(|(c, _)| c.insert)
+            .collect();
+        assert_eq!(got, ["pick-me"]);
     }
 
     #[test]
@@ -505,7 +1205,7 @@ mod tests {
         let inserts = |token: &str| -> Vec<String> {
             command_completions(&cmds, token)
                 .into_iter()
-                .map(|c| c.insert)
+                .map(|(c, _)| c.insert)
                 .collect()
         };
         let all = inserts("zz");
@@ -535,7 +1235,7 @@ mod tests {
             .collect();
         let all: Vec<String> = command_completions(&cmds, "zz")
             .into_iter()
-            .map(|c| c.insert)
+            .map(|(c, _)| c.insert)
             .collect();
         assert!(all.contains(&"zzriftassign\\=value".to_string()), "{all:?}");
         // not a variable name: no assignment to fear, left as typed
@@ -717,7 +1417,7 @@ mod tests {
         if std::fs::read_dir(&home).is_err() {
             return;
         }
-        let out = complete("ls ~/", 5, &[], &[], None);
+        let out = complete("ls ~/", 5, &[], &[], Some("/"));
         // every path completion must re-use the user's "~/" prefix verbatim
         assert!(
             out.iter()
@@ -958,6 +1658,220 @@ mod tests {
         assert!(out.iter().any(|c| c.insert == "--message"));
         let out = complete("git commit --message=al", 23, &[], &[], None);
         assert!(out.iter().all(|c| c.source != "option"), "{out:?}");
+    }
+
+    use crate::completion_cache::tests::age;
+
+    fn inserts_of(out: &[Completion], source: &str) -> Vec<String> {
+        out.iter()
+            .filter(|c| c.source == source)
+            .map(|c| c.insert.clone())
+            .collect()
+    }
+
+    #[test]
+    fn match_kinds() {
+        assert_eq!(match_kind("checkout", "che"), Some(Match::Prefix));
+        assert_eq!(match_kind("checkout", ""), Some(Match::Prefix));
+        assert_eq!(match_kind("cherry-pick", "pick"), Some(Match::WordStart));
+        assert_eq!(match_kind("Build.md", "bui"), Some(Match::WordStart));
+        assert_eq!(match_kind("fooBar", "bar"), Some(Match::WordStart));
+        assert_eq!(match_kind("b_u_i.md", "bui"), Some(Match::Subsequence));
+        assert_eq!(match_kind("checkout", "cko"), Some(Match::Subsequence));
+        assert_eq!(match_kind("checkout", "xyz"), None);
+        // fewer than 3 typed characters: prefix only
+        assert_eq!(match_kind("cherry-pick", "pi"), None);
+        assert_eq!(match_kind("checkout", "co"), None);
+        // a prefix match is case-sensitive; any case still matches a word
+        assert_eq!(match_kind("Makefile", "mak"), Some(Match::WordStart));
+    }
+
+    #[test]
+    fn ranking_is_prefix_then_word_start_then_subsequence() {
+        let dir = scratch("rank");
+        for f in [
+            "b_u_i_l_d.md",
+            "my-build.txt",
+            "Build.md",
+            "build.rs",
+            "other",
+        ] {
+            std::fs::write(dir.join(f), "").unwrap();
+        }
+        let out = complete("cat ./bui", 9, &[], &[], dir.to_str());
+        assert_eq!(
+            inserts_of(&out, "path"),
+            [
+                "./build.rs",
+                "./Build.md",
+                "./my-build.txt",
+                "./b_u_i_l_d.md"
+            ]
+        );
+        // the same request gives the same order
+        assert_eq!(out, complete("cat ./bui", 9, &[], &[], dir.to_str()));
+        // subcommands too: prefix before word start
+        let out = complete("git pick", 8, &[], &[], None);
+        assert_eq!(
+            inserts_of(&out, "shell").first().map(String::as_str),
+            Some("cherry-pick")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recency_orders_equal_matches_and_source_comes_first() {
+        let dir = scratch("recent");
+        for f in ["alpha.txt", "beta.txt", "gamma.txt"] {
+            std::fs::write(dir.join(f), "").unwrap();
+        }
+        let cwd = dir.to_str();
+        let history = vec!["cat ./gamma.txt".to_string(), "cat ./beta.txt".to_string()];
+        let out = complete("cat ./", 6, &history, &[], cwd);
+        // newest use first, then older, then unused in name order
+        assert_eq!(
+            inserts_of(&out, "path"),
+            ["./beta.txt", "./gamma.txt", "./alpha.txt"]
+        );
+        // at an equal match, source beats recency; match kind beats source
+        let word = |insert: &str, source: &'static str, m: Match| {
+            (
+                Completion {
+                    insert: insert.into(),
+                    description: String::new(),
+                    source,
+                },
+                m,
+            )
+        };
+        let mut words = vec![
+            word("./x", "path", Match::Prefix),
+            word("xs", "shell", Match::WordStart),
+            word("xb", "branch", Match::Prefix),
+            word("xa", "branch", Match::Prefix),
+        ];
+        rank(&mut words, &["git checkout ./x".to_string()], &[]);
+        let order: Vec<&str> = words.iter().map(|(c, _)| c.insert.as_str()).collect();
+        // xb before xa: generator order kept (stable) when neither was used
+        assert_eq!(order, ["xb", "xa", "./x", "xs"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn history_lines_survive_a_full_word_list_and_unique_prefix_stays_first() {
+        let dir = scratch("uniq");
+        let heads = dir.join(".git/refs/heads");
+        std::fs::create_dir_all(heads.join("feature")).unwrap();
+        std::fs::write(heads.join("main"), "0\n").unwrap();
+        std::fs::write(heads.join("feature/main-fix"), "0\n").unwrap();
+        for i in 0..80 {
+            std::fs::write(heads.join(format!("zz{i:02}")), "0\n").unwrap();
+        }
+        let cwd = dir.to_str();
+        // Tab takes the first candidate: the prefix match, as before
+        let out = complete("git checkout mai", 16, &[], &[], cwd);
+        assert_eq!(out[0].insert, "main");
+        assert!(out.iter().any(|c| c.insert == "feature/main-fix"));
+        // 80 refs fill the word list; the history line still comes back
+        let history = vec!["git checkout zz07 && make".to_string()];
+        let out = complete("git checkout zz", 15, &history, &[], cwd);
+        assert!(out.len() <= 50);
+        assert_eq!(inserts_of(&out, "history"), ["git checkout zz07 && make"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn path_listing_is_cached_until_the_directory_changes() {
+        let dir = scratch("pathcache");
+        std::fs::write(dir.join("one.txt"), "").unwrap();
+        age(&dir, 100);
+        let cwd = dir.to_str();
+        assert_eq!(
+            inserts_of(&complete("cat ./", 6, &[], &[], cwd), "path"),
+            ["./one.txt"]
+        );
+        std::fs::write(dir.join("two.txt"), "").unwrap();
+        age(&dir, 90);
+        assert_eq!(
+            inserts_of(&complete("cat ./", 6, &[], &[], cwd), "path"),
+            ["./one.txt", "./two.txt"]
+        );
+        // a directory over the path cap: `cd` still lists its directories
+        for i in 0..40 {
+            std::fs::write(dir.join(format!("a{i:02}.txt")), "").unwrap();
+        }
+        std::fs::create_dir(dir.join("zsub")).unwrap();
+        assert_eq!(
+            inserts_of(&complete("cd ./", 5, &[], &[], cwd), "path"),
+            ["./zsub/"]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn path_commands_rescan_on_a_new_path_or_a_changed_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("pathcmds");
+        let other = scratch("pathcmds2");
+        let exe = |d: &std::path::Path, name: &str| {
+            let f = d.join(name);
+            std::fs::write(&f, "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        exe(&dir, "zzfirst");
+        exe(&other, "zzother");
+        age(&dir, 100);
+        let path = dir.clone().into_os_string();
+        let t0 = Instant::now();
+        assert_eq!(*commands_on_at(&path, t0), ["zzfirst"]);
+        exe(&dir, "zzsecond");
+        age(&dir, 90);
+        // within the re-check interval: the cached scan, no stat at all
+        assert_eq!(
+            *commands_on_at(&path, t0 + Duration::from_secs(1)),
+            ["zzfirst"]
+        );
+        // after it: the directory's stamp changed, so it is scanned again
+        assert_eq!(
+            *commands_on_at(&path, t0 + Duration::from_secs(3)),
+            ["zzfirst", "zzsecond"]
+        );
+        // a different $PATH value (rift-use, a new shell probe): at once
+        let both = std::env::join_paths([&other, &dir]).unwrap();
+        assert_eq!(
+            *commands_on_at(&both, t0 + Duration::from_secs(3)),
+            ["zzfirst", "zzother", "zzsecond"]
+        );
+        // and completion takes the pane's $PATH when given
+        let out = complete_on_path("zzot", 4, &[], &[], None, Some(&both));
+        assert_eq!(inserts_of(&out, "command"), ["zzother"]);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&other);
+    }
+
+    #[test]
+    fn no_local_directory_reads_no_local_files() {
+        let dir = scratch("nolocal");
+        std::fs::create_dir_all(dir.join(".git/refs/heads")).unwrap();
+        std::fs::write(dir.join(".git/refs/heads/main"), "0\n").unwrap();
+        std::fs::write(dir.join("Makefile"), "build:\n").unwrap();
+        let abs = format!("cat {}/", dir.display());
+        for buf in [abs.as_str(), "cat ./", "cat ~/", "make ", "cd /"] {
+            let out = complete(buf, buf.len(), &[], &[], None);
+            assert!(
+                out.iter()
+                    .all(|c| c.source != "path" && c.source != "make-target"),
+                "{buf}: {out:?}"
+            );
+        }
+        // with the directory, the same requests complete
+        assert!(!complete(&abs, abs.len(), &[], &[], dir.to_str()).is_empty());
+        let out = complete("make ", 5, &[], &[], dir.to_str());
+        assert_eq!(inserts_of(&out, "make-target"), ["build"]);
+        // history still completes
+        let out = complete("cat ./", 6, &["cat ./x".to_string()], &[], None);
+        assert_eq!(inserts_of(&out, "history"), ["cat ./x"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
