@@ -8,6 +8,48 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.13.0 — 2026-10-17
+
+Completions from your own shell and from remote machines, several windows in one Rift, a drop-down
+terminal, a fuller vim mode, and panes that size like Warp's.
+
+### New
+
+- **Completions from your shell** — the completion menu now also offers what your own zsh, bash or
+  fish would complete (your plugins and completion functions included), for tools Rift has no
+  completions for.
+- **Completions over SSH** — in a pane opened from an SSH profile, completions list the remote
+  machine's files, commands and git branches, over the connection that is already open.
+- **Drop-down terminal** — a hotkey window that slides down from the top of the screen above other
+  apps, on every Space, and can hide when you click away.
+- **Windows in one Rift** — new windows open inside the running Rift, instantly and with less
+  memory; every window comes back after a restart or an update.
+- **Vim visual mode and more** — `v` and `V` selections, `.` to repeat, `/` `?` `n` `N` search,
+  `%`, `gg` `G`, `o` `O`, `J`, `R`, case changes and more in the command editor.
+- **Warp Tab Configs** — Warp's TOML tab configs open from the palette, and *Save layout* writes
+  that format; YAML launch configs still load.
+- **Block and tab settings** — sticky command headers, dimming of inactive panes, the tab close
+  button, where new tabs open, the tab bar with one tab, and focus follows mouse, all in Settings.
+
+### Improved
+
+- **Faster, smarter completions** — results are ranked (prefix first, then word starts, then
+  recent), and files, git branches and SSH hosts are no longer re-read on every key.
+- **Pane sizes** — splitting, closing and resizing panes divide space like Warp: a closed pane's
+  space goes to its neighbours, ⌃⌘ arrows move a divider, panes keep a minimum size, and
+  *Equalize panes* evens them out.
+- **⌘ arrows in the command editor** — ⌘← and ⌘→ go to the start and end of the line, ⌘↑ and
+  ⌘↓ to the start and end of a multi-line command; held keys repeat.
+- **Review panel and prompt chips follow the pane** — with panes in different folders, the code
+  review panel and the git and Docker chips show the focused pane's project, and they update while
+  an agent or an editor changes files, without waiting for a command to finish.
+
+### Fixed
+
+- **Remote folders** — a pane on another machine no longer completes or shows git and Docker
+  status from a folder of the same name on this Mac.
+- **Restored focus** — after a restart, the pane that had focus has it again.
+
 ## 0.12.0 — 2026-10-17
 
 Richer desktop notifications, a way to test every alert, and a smoother terminal under load.
