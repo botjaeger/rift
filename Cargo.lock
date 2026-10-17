@@ -3059,7 +3059,7 @@ checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
 
 [[package]]
 name = "rift-core"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "arc-swap",
  "dirs",
@@ -3076,7 +3076,7 @@ dependencies = [
 
 [[package]]
 name = "rift-pty"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "alacritty_terminal",
  "flate2",
@@ -3092,7 +3092,7 @@ dependencies = [
 
 [[package]]
 name = "rift-remote"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "base64",
  "libc",
@@ -3108,7 +3108,7 @@ dependencies = [
 
 [[package]]
 name = "rift-renderer"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "bytemuck",
  "glyphon",
@@ -3122,7 +3122,7 @@ dependencies = [
 
 [[package]]
 name = "rift-terminal"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "accesskit",
  "accesskit_winit",

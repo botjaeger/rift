@@ -6,6 +6,20 @@ build (`## <version> — <YYYY-MM-DD>`) or an over-the-air update to one
 message its download carries. Items use `### New`, `### Improved` or
 `### Fixed` sections of `- **Title** — text`.
 
+## 0.3.0 · update 2 — 2026-10-18
+
+Text you type while a command is sent is kept, and a few safety fixes.
+
+### Fixed
+
+- **Text typed after Run** — what you type while a command is being sent stays in the command line
+  when the computer confirms it.
+- **Settings that failed to save** — a setting your computer could not save goes back to what it
+  was and says so, instead of showing the change as made.
+- **Closing the last pane** — the pane's old output and command line go away with it.
+- **Tabs and the app lock** — the Tabs sheet is covered by the app lock and hidden when the app is
+  in the background, like the rest of the app.
+
 ## 0.3.0 · update 1 — 2026-10-16
 
 Your computer's prompt chips in one row, with their menus.

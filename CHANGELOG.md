@@ -8,6 +8,47 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.14.0 — 2026-10-18
+
+Links that open Rift, a toolbar you arrange, app icon colours, several carets, a command inspector,
+background job output in its own blocks, and Rift inside subshells.
+
+### New
+
+- **`rift://` links** — Finder, Raycast, an editor or a README can open a tab or window in a folder,
+  a launch configuration or Tab Config by name, or Settings with a search filled in. A layout that
+  would run commands asks first.
+- **Arrange the toolbar** — the file explorer, code review, notifications, command palette and
+  Settings buttons can sit left of the tabs or at the right end, in your order, or be hidden.
+  Right-click the toolbar → *Rearrange toolbar items*.
+- **App icon colours** — Default, Light, Mono, Ocean, Ember, Forest or Neon, in Settings ›
+  Appearance; the Dock shows your choice.
+- **Menu bar icon** — Rift's icon in the menu bar; turn it off in Settings › General.
+- **Multiple carets** — ⌃⇧↑ / ⌃⇧↓ add a caret above or below, ⌃G adds the next occurrence of the
+  word, ⌘-click adds a caret where you click; typing, deleting, moving and pasting act at each.
+- **Command inspector** — rest the pointer on part of the command line, or press ⇧⌘I, to see
+  whether it is a command, subcommand, option, argument or operator and what it does.
+- **Background job output** — what a background job prints while the prompt waits goes into its own
+  block between commands, instead of under the prompt.
+- **Rift in subshells** — when you start a Docker shell, an SSH session or another subshell Rift
+  knows, a bar offers to bring blocks and completions into it (⌘⏎), or to never ask again for that
+  command.
+- **More block and tab settings** — space between blocks, divider lines, a jump-to-bottom button,
+  the tab close button on the left, and a tab bar that hides until you reach the window's top edge.
+
+### Improved
+
+- **Code review from the keyboard** — ⌥⌘G puts the keys in the review panel.
+- **Completions for bash builtins** — signals, variables, aliases, jobs and options complete even
+  without bash-completion installed.
+
+### Fixed
+
+- **"Running in Background"** — Rift's session service and phone gateway no longer leave a
+  separate background entry in the Dock on macOS 27; they show in Login Items as Rift's.
+- **`bash -o pipefail -c` commands** — commands started this way are recognized for
+  notifications again.
+
 ## 0.13.0 — 2026-10-17
 
 Completions from your own shell and from remote machines, several windows in one Rift, a drop-down
