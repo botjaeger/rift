@@ -37,9 +37,33 @@ __rift_complete() {
     fi
     spec=$(complete -p -- "$cmd" 2>/dev/null)
   fi
-  [[ -n $spec ]] || return
   cur=${COMP_WORDS[COMP_CWORD]}
   prev=${COMP_WORDS[COMP_CWORD-1]}
+  if [[ -z $spec ]]; then
+    # no spec (bash-completion not installed): the names bash itself knows
+    # for its builtins, as zsh and fish complete them out of the box
+    case $cmd in
+      kill)
+        if [[ $cur == -* ]]; then
+          while IFS= read -r w; do
+            __rift_reply "-$w"
+          done < <(compgen -A signal -- "${cur#-}" 2>/dev/null)
+          return
+        fi
+        spec='complete -j'
+        ;;
+      trap) spec='complete -A signal' ;;
+      unset | export | readonly | declare | typeset | local) spec='complete -v' ;;
+      alias | unalias) spec='complete -a' ;;
+      fg | bg | jobs | disown | wait) spec='complete -j' ;;
+      help) spec='complete -A helptopic' ;;
+      shopt) spec='complete -A shopt' ;;
+      set) [[ $prev == [-+]o ]] && spec='complete -A setopt' ;;
+      type | which | hash | command) spec='complete -c' ;;
+      builtin | enable) spec='complete -b' ;;
+    esac
+  fi
+  [[ -n $spec ]] || return
   COMPREPLY=()
   if [[ $spec =~ \ -F\ ([^ ]+) ]]; then
     func=${BASH_REMATCH[1]}

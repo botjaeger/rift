@@ -9,6 +9,18 @@ Blocks are delimited by shell-integration OSC 133 markers
   prompt-time cwd/branch context, status badge, duration, copy button).
 - Blocks anchor to **absolute line indices** that survive scrollback trim; a
   block whose lines fall out of scrollback is pruned.
+- **Background blocks** (Warp): output a background job prints while the
+  prompt waits (`sleep 5 && echo done &`, zsh's `[1] + done` notice) goes
+  into a block with no command and no header, between the blocks, instead
+  of under the prompt or the next command's header. It starts where the
+  output starts (the prompt it landed after is left out) and grows until
+  the next command or prompt; it has a muted left rule and is not saved in
+  transcripts. Output that stays on the prompt's row (a right prompt, a
+  redraw) is the prompt's.
+- A submitted command the shell never marked as started (bash 3.2's DEBUG
+  trap misses `cmd &`; a syntax error) still becomes a block when the next
+  prompt arrives: its echoed command, then what it printed (`[1] 4242`),
+  with no exit status.
 - A missing `D` (e.g. `ssh` hijacking the terminal) is closed off by the next
   `A`; duplicated markers (iTerm2 integration in the user's rc alongside ours)
   are tolerated — handlers are idempotent.
@@ -251,6 +263,34 @@ whole buffer.
 - **Copy on select** (`copy_on_select`, off by default): a drag-selection is
   copied to the clipboard as soon as the mouse is released.
 
+## Multi-cursor editing
+
+As in Warp: ⌃⇧↑ / ⌃⇧↓ add a caret on the line above or below (same
+column, or the line's end), ⌃G selects the word at the cursor and then
+adds a caret selecting its next occurrence (after the last caret,
+wrapping), and ⌘-click (⌥-click on Linux) adds a caret where you click.
+Typing, Backspace, Delete, word and line deletes, ⌘X, the arrows,
+Home/End and their Shift selections act at every caret, each edit one undo
+step; carets that meet merge. A paste with as many lines as there are
+carets gives each caret its line, any other paste goes in whole at each.
+Esc, a plain click, undo, history and Enter go back to one caret (Enter
+runs the whole command). While there are several carets the completion
+menu and the inline suggestion stay away; vim mode keeps one cursor.
+
+## Command inspector
+
+Warp's Command X-Ray. Rest the pointer on a part of the command line for
+600 ms (the tooltip delay), or press ⇧⌘I (⌃⇧I) for the part at the
+cursor: a card names it — command, subcommand, option, option value,
+argument or operator — and says what it does. Options and subcommands come
+from the completion specs at their level (`git -p log` is git's `-p`, `git
+log -p` log's), an argument says what kind it is (a folder of `cd`, a git
+ref), operators say what they do (`&&`, `|`, `>`). A command Rift has no
+words for is looked up once with `whatis` off the UI thread (up to 10 s;
+"Looking it up in the manual…" until then). The card moves with the
+cursor while it is pinned; another key puts it away, and a screen reader
+hears it.
+
 ## Completions
 
 Sources merged, deduped, capped at 50: **`$PATH` command names** (first word
@@ -283,7 +323,11 @@ when it died; each request sets its directory:
   `COMP_WORDS` set as on Tab, after bash-completion's loader
   (`__load_completion` / `_comp_load` / `_completion_loader`) when it is
   loaded; word-list (`-W '…'`) and action specs (`-A …`, `-d`, `-f`…) go
-  through `compgen`.
+  through `compgen`. A builtin with no spec (bash-completion not installed)
+  still completes the names bash knows for it: signals (`kill -SIGT`,
+  `trap`), variables (`unset`, `export`, `declare`…), aliases, jobs (`fg`,
+  `kill`), help topics, `shopt` and `set -o` options, commands (`type`,
+  `which`) and builtins (`builtin`, `enable`).
 - **fish** runs `complete --do-complete=<line>`.
 
 Its words are merged in as source `shell` and ranked like the rest; a word
@@ -401,8 +445,42 @@ all `windows:` entries are appended in document order; `~` in a `cwd` is expande
 ignored. Warp's own files drop in unchanged. "Save current layout as launch
 configuration" writes one TOML Tab Config per open tab.
 
+## Links (`rift://`)
+
+Finder, Raycast, an editor or a README can open Rift through `rift://`
+links (Warp's `warp://` paths):
+
+| Link | Opens |
+|---|---|
+| `rift://action/new_tab?path=<folder>` | A tab in that folder (no `path`: where a new tab starts) |
+| `rift://action/new_window?path=<folder>` | A window, its tab in that folder |
+| `rift://launch/<name>` or `rift://tab_config/<name>` | The launch configuration or Tab Config of that name (case ignored); `?new_window=true` opens it in a window of its own |
+| `rift://settings?q=<text>` | Settings, its search filled in |
+
+`path` is percent-decoded (`+` is a space), `~` is expanded, and it must be
+an absolute path to an existing folder. A link runs no command of its own: a
+file (a script included) or an unknown action is refused with a toast saying
+why (control characters removed, cut at 120 characters). The link opens in the last focused window (never
+the drop-down window while another is open) and brings Rift to the front.
+macOS registers the scheme with `Rift.app` and delivers the link as an Apple
+Event (also to a Rift it launches); on Linux the `.desktop` file registers
+`x-scheme-handler/rift`, and `rift-terminal rift://…` hands the link to the
+running Rift over the control socket (with `control_api = "off"` it takes
+links and nothing else) or opens it itself when none answers. A layout
+whose panes run commands asks first (*Open this layout from a link?*, its
+commands listed, Cancel focused), and more than ten links in three
+seconds are dropped. A link while only the drop-down window exists opens
+an ordinary window for it.
+
 ## Appearance
 
+- **App icon** (`app_icon`, Settings › Appearance): Default, Light, Mono,
+  Ocean, Ember, Forest or Neon — the "Prompt" icon in other colours. macOS
+  shows it in the Dock at once and, through the Dock tile plugin in
+  `Rift.app`, while Rift is not running (the app's own `.icns` and Finder
+  icon stay the default: rewriting a signed bundle's icon breaks its
+  signature). On Linux it is the window icon; docks keep the installed
+  hicolor icon.
 - **Themes**: four builtins (`dark-default`, `light-default`,
   `catppuccin-mocha`, `tokyo-night`) plus user themes in
   `~/.config/rift/themes/` as Rift TOML **or Warp YAML** — a Warp theme
@@ -571,6 +649,28 @@ configuration" writes one TOML Tab Config per open tab.
   `( command ) < file` (fish: `begin; …; end < file`) in the pane. The output
   is never interpolated into the command line.
 
+## Subshells
+
+Warp's "Warpify subshells". A command that starts an interactive shell
+Rift's hooks do not reach — `docker`/`podman` `run`/`exec` ending in `bash`,
+`zsh` or `fish`, `poetry shell`, `pipenv shell`, `aws-vault exec`, `flox
+activate` (Warp's list), plus your own `subshell_commands` (regular
+expressions) — shows a bar at the bottom of its pane 0.8 s after it starts:
+*Use Rift's blocks and editor in this subshell?* with **Enable** (⌘⏎;
+⌃⇧⏎ on Linux), **Don't ask again** (adds the command to
+`subshell_denylist`) and ✕. Enable types one line into that shell: Rift's
+bash or zsh hooks (fish's when a word of the command is `fish`) as base64,
+decoded with `base64 -d` and evaluated once (a leading space keeps it out
+of a history that ignores such lines; one line, because macOS drops typed
+input queued between the lines of a multi-line one). The
+command's own block then folds (it holds the echo of that line), the
+subshell's prompt gets the editor, its commands get blocks with exit codes,
+and `exit` returns to the outer shell's prompt. Other shells (`sh`, `dash`)
+are left as they are. Plain `bash` and `zsh` typed at a Rift prompt need no
+offer: they load the hooks themselves (below), and fish 4 marks its own
+prompts. Settings › Input › *Offer Rift in subshells* (`subshell_offer`)
+turns the bar off.
+
 ## Shell integration
 
 Materialized to `~/.local/share/rift/` on first spawn, injected
@@ -635,11 +735,13 @@ name of the app does (`shift`, then `runway`), Rift keeps using that directory.
 `Starting zsh…` placeholder on the prompt chips' row until the shell's first prompt; no terminal
 cursor shows while it is up. For a shell without integration, the placeholder leaves and the
 cursor shows 1.5 s after its first byte. Session restore
-respawns tabs at their saved cwds. The shell's history is imported once for
-the history pane and the palette's History mode, from the configured shell's own file: zsh
+respawns tabs at their saved cwds. The shell's history is imported at launch
+(and again, replacing the imported history, when `shell` changes in
+`config.toml`) for the history pane and the palette's History mode, from the configured shell's own file: zsh
 (`$HISTFILE`, else `~/.zsh_history`; EXTENDED format, multiline entries,
 0x83 unmetafy), bash (`$HISTFILE`, else `~/.bash_history`; `#<epoch>`
-timestamp lines skipped) or fish (`$XDG_DATA_HOME/fish/fish_history`, else
+timestamp lines are entry boundaries, so a multiline command is one entry;
+without them each line is one) or fish (`$XDG_DATA_HOME/fish/fish_history`, else
 `~/.local/share/fish/fish_history`). Only the last 4 MiB of the file is
 read. The first launch after an update opens What's New (release notes
 from `CHANGELOG.md`); the last seen version lives in
@@ -761,10 +863,17 @@ it.
 With `durable_sessions = true` (the default; Settings → General → *Keep
 shells running through updates*), new shells run in a
 per-user **session service** (`rift-terminal --session-daemon`, started on
-demand) instead of the window process. On macOS it and the phone gateway
-start as launchd jobs (`<data dir>/launchd/*.plist`, run once, never kept
-alive), not as children of the window, so a quit Rift leaves the Dock
-instead of staying there as "Running in Background". A service that does
+demand) instead of the window process. On macOS 13+ it and the phone
+gateway are `SMAppService` agents that Rift.app carries
+(`Contents/Library/LaunchAgents/dev.rift.session.plist`,
+`dev.rift.gateway.plist`: registered once, started on demand, never kept
+alive), not children of the window, so a quit Rift leaves the Dock instead
+of staying there as "Running in Background" (macOS 27 keeps an app there
+while a launchd job it bootstrapped runs). They appear under System
+Settings › General › Login Items as Rift's background items. Runs with
+their own `XDG_DATA_HOME`/`XDG_CONFIG_HOME` (scripted and test runs), runs
+outside Rift.app and older macOS bootstrap launchd jobs instead
+(`<data dir>/launchd/*.plist`, run once). A service that does
 not answer a request within 5 s (hello, spawn, attach) counts as
 unavailable: that pane starts a local shell with a notice, and the rest of
 the window's run stays local instead of waiting on it again.
@@ -777,6 +886,19 @@ dialog names it first (*iPhone is connected and loses its tabs.*), with the
 running commands when *Warn before closing running commands* is on. Shells a
 phone opens after the quit (`remote_when_closed`) still appear as tabs at the
 next launch.
+
+**Menu bar icon** (macOS, `menu_bar_icon`, on by default; Settings › General
+› App › *Show menu bar icon*): the app icon as a line drawing in the menu bar
+(a template image, tinted by macOS). While Rift runs its menu has *New Window*, *Settings…* and
+*Quit Rift Completely*. After the window quits, the phone gateway shows it
+for as long as it runs (`remote_access`; 30 s after the last window, or
+until stopped with `remote_when_closed`), with *Open Rift* and *Quit Rift
+Completely*. *Quit Rift Completely* is the usual quit (the same warnings)
+that also stops the gateway (`<data dir>/remote/stop`, seen within 0.5 s)
+and ends the shells phones started in the session service, which then
+exits; nothing of Rift keeps running. ⌘Q leaves the gateway as before.
+*Launch at login* (`launch_at_login`, beside it) adds or removes Rift's
+login item.
 
 An update's restart, a crash, a killed process or a reboot of the window
 only (the service survives) leave the shells running; the next launch
@@ -1177,7 +1299,8 @@ selects the block. The list keeps the newest 200.
   input), error, or task completed. Words match whole (`incomplete` is not
   `complete`); an explicit request (`needs your permission`) wins, then
   error words (`permission denied`, `failed`) beat a bare `permission`, and
-  negated errors (`no errors`, `0 errors`, `without error`) do not count.
+  a negated word of any kind does not count (`no errors`, `0 errors`,
+  `This is not an error`, `Not done yet`, `No approval needed`).
   Setup per agent:
   [configuration](configuration.md#notifications--bell).
 - **Password prompts**: a running command in a background pane whose cursor
@@ -1191,8 +1314,10 @@ else its directory) as a lazily expanded tree with ignored files hidden
 (dotfiles too with Settings › Files › Show hidden files off) and
 git status colors. A folder that cannot be read shows the error (e.g.
 `Permission denied`); one with more than 2,000 entries shows the first
-2,000 in display order, then `… more entries not shown` (a folder is read
-no further than 100,000 entries, ignored ones included). A file opens in a read-only viewer pane (or the editor `file_editor` names), the leftmost column of the tab
+2,000 in display order, then a `Show 2000 more entries` row (click, or
+arrows then ⏎) that adds the next 2,000 in the same order, so every entry is
+reachable (a folder is read no further than 100,000 entries, ignored ones
+included; past that a notice says so). A file opens in a read-only viewer pane (or the editor `file_editor` names), the leftmost column of the tab
 (line numbers, keyword/string/comment highlighting, 4 MB limit, binary
 detection, ⌘F finds in the file; Markdown opens rendered, with a Rendered |
 Raw switch); ⌥-click inserts its path into the command

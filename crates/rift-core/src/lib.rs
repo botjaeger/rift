@@ -12,6 +12,7 @@ pub mod git;
 pub mod github;
 pub mod highlight;
 pub mod history;
+pub mod inspect;
 pub mod keybindings;
 pub mod launch;
 pub mod markdown;
@@ -30,12 +31,14 @@ pub mod tab_clock;
 pub mod theme;
 pub mod transcript;
 pub mod update;
+pub mod uri;
 pub mod watch;
 
 pub use block::{AbsLine, Block, BlockId, BlockState, BlockStore, Restored};
 pub use config::{
-    Bell, BlocksStart, Config, CursorStyle, ElapsedCounts, InputPosition, NewTabPlacement,
-    PromptChip, PromptMode, TabCloseButton, TabLayout,
+    AppIcon, Bell, BlockSpacing, BlocksStart, Config, CursorStyle, ElapsedCounts, InputPosition,
+    NewTabPlacement, PromptChip, PromptMode, TabBarVisibility, TabCloseButton, TabCloseSide,
+    TabLayout, ToolbarItem, ToolbarSide,
 };
 pub use keybindings::{Binding, Keymap};
 pub use osc::{Marker, OscScanner, host_is_local};

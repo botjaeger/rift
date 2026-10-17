@@ -36,6 +36,9 @@ pub struct SavedBlock {
     pub exit: Option<i32>,
     pub duration_ms: u64,
     pub cwd: Option<String>,
+    /// `cwd` is on another host (ssh). Absent in older transcripts: local.
+    #[serde(default)]
+    pub cwd_remote: bool,
     pub output: String,
 }
 
@@ -98,7 +101,7 @@ impl Transcript {
         out
     }
 
-    /// (duration, cwd, command) per block, for `BlockStore::mark_restored`.
+    /// (duration, cwd, command, cwd is remote) per block, for `BlockStore::mark_restored`.
     /// The command keeps its newlines and tabs but no other control
     /// characters: it can be reinput and run again.
     pub fn meta(&self) -> Vec<crate::Restored> {
@@ -111,7 +114,7 @@ impl Transcript {
                     .chars()
                     .filter(|&c| c == '\n' || c == '\t' || !c.is_control())
                     .collect();
-                (duration, b.cwd.clone(), command)
+                (duration, b.cwd.clone(), command, b.cwd_remote)
             })
             .collect()
     }
@@ -259,6 +262,7 @@ mod tests {
             exit: Some(0),
             duration_ms: 12,
             cwd: Some("/tmp".into()),
+            cwd_remote: false,
             output: out.into(),
         }
     }

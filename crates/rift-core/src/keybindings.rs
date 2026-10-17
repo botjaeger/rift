@@ -159,9 +159,9 @@ pub fn defaults() -> Vec<(&'static str, &'static str)> {
         ("search_alt", "cmd+f"),
         ("bookmark_toggle", "ctrl+shift+b"),
         ("bookmark_toggle_alt", "cmd+b"),
-        ("bookmark_prev", "ctrl+shift+up"),
+        ("bookmark_prev", "alt+shift+up"),
         ("bookmark_prev_alt", "cmd+shift+up"),
-        ("bookmark_next", "ctrl+shift+down"),
+        ("bookmark_next", "alt+shift+down"),
         ("bookmark_next_alt", "cmd+shift+down"),
         ("bookmark_closest_prev", "alt+up"),
         ("bookmark_closest_next", "alt+down"),
@@ -203,6 +203,12 @@ pub fn defaults() -> Vec<(&'static str, &'static str)> {
         ("copy_block_command", "shift+cmd+c"),
         ("copy_block_output", "alt+shift+cmd+c"),
         ("reinput", "cmd+i"),
+        ("inspect_command", "shift+cmd+i"),
+        // Warp's multi-cursor keys, the same on every platform
+        ("add_cursor_above", "ctrl+shift+up"),
+        ("add_cursor_below", "ctrl+shift+down"),
+        ("add_next_occurrence", "ctrl+g"),
+        ("inspect_command_alt", "ctrl+shift+i"),
         ("block_menu", "ctrl+m"),
         ("filter_block", "alt+shift+f"),
         ("toggle_sync_inputs", "alt+cmd+i"),
@@ -218,6 +224,7 @@ pub fn defaults() -> Vec<(&'static str, &'static str)> {
         ("attention_center", "shift+cmd+a"),
         ("toggle_explorer", "shift+cmd+e"),
         ("toggle_review", "shift+cmd+g"),
+        ("focus_review", "alt+cmd+g"),
     ]
 }
 

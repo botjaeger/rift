@@ -312,7 +312,7 @@ impl ViewerState {
                 return true;
             }
             Key::Named(NamedKey::Backspace) => {
-                find.query.pop();
+                crate::state::pop_grapheme(&mut find.query);
                 self.refresh_find();
                 return true;
             }

@@ -1,4 +1,4 @@
-use rift_core::{Color, TabCloseButton, Theme};
+use rift_core::{Color, TabCloseButton, Theme, ToolbarItem};
 use rift_renderer::glyphon::Weight;
 use rift_renderer::{FONT_SANS, Layer, TextEngine, mono_family};
 
@@ -44,7 +44,7 @@ pub struct TabInfo {
     pub running: bool,
 }
 
-fn make_text(
+pub(crate) fn make_text(
     engine: &mut TextEngine,
     text: &str,
     size: f32,
@@ -98,6 +98,12 @@ pub struct PanelButtons {
     /// them; macOS shows none on a window without a title bar).
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub no_window_buttons: bool,
+    /// The toolbar's buttons left of the tabs and at the right end, in
+    /// order (`Config::toolbar`).
+    pub left: Vec<ToolbarItem>,
+    pub right: Vec<ToolbarItem>,
+    pub palette_open: bool,
+    pub settings_open: bool,
 }
 
 /// Height of the "Update Rift" chip.
@@ -198,6 +204,131 @@ fn inside(r: [f32; 4], p: Option<(f32, f32)>) -> bool {
     p.is_some_and(|(x, y)| x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3])
 }
 
+/// The review button's `+added` / `−removed` labels; `None` for a clean
+/// tree (or no repository): then it is a plain ± icon button.
+fn review_counts(panels: &PanelButtons) -> Option<(String, String)> {
+    panels
+        .diff
+        .filter(|(a, d)| a + d > 0)
+        .map(|(a, d)| (format!("+{a}"), format!("−{d}")))
+}
+
+/// Width of a toolbar button: 26 px, the review button as wide as its
+/// counts.
+fn toolbar_item_width(engine: &mut TextEngine, panels: &PanelButtons, item: ToolbarItem) -> f32 {
+    match (item, review_counts(panels)) {
+        (ToolbarItem::Review, Some((a, d))) => {
+            16.0 + engine.measure(&a, 12.0, mono_family(), Weight::MEDIUM)
+                + 6.0
+                + engine.measure(&d, 12.0, mono_family(), Weight::MEDIUM)
+        }
+        _ => 26.0,
+    }
+}
+
+/// Draw one toolbar button starting at `x` and report its click target;
+/// returns its rect.
+#[allow(clippy::too_many_arguments)]
+fn toolbar_item(
+    layer: &mut Layer,
+    engine: &mut TextEngine,
+    theme: &Theme,
+    panels: &PanelButtons,
+    item: ToolbarItem,
+    x: f32,
+    by: f32,
+    mouse: Option<(f32, f32)>,
+    hits: &mut Vec<Hit>,
+) -> [f32; 4] {
+    let size = 26.0;
+    let width = toolbar_item_width(engine, panels, item);
+    let rect = [x, by, width, size];
+    let hover = inside(rect, mouse);
+    let (icon, on, target) = match item {
+        ToolbarItem::Explorer => (
+            Icon::Sidebar,
+            panels.explorer_open,
+            ClickTarget::ToggleExplorer,
+        ),
+        ToolbarItem::Notifications => (
+            Icon::Inbox,
+            panels.notifications_open,
+            ClickTarget::ToggleNotifications,
+        ),
+        ToolbarItem::Palette => (
+            Icon::Search,
+            panels.palette_open,
+            ClickTarget::TogglePalette,
+        ),
+        ToolbarItem::Settings => (
+            Icon::Settings,
+            panels.settings_open,
+            ClickTarget::ToggleSettings,
+        ),
+        ToolbarItem::Review => {
+            review_button(layer, engine, theme, panels, rect, hover);
+            hits.push(Hit {
+                rect,
+                target: ClickTarget::ToggleReview,
+            });
+            return rect;
+        }
+    };
+    icon_button(layer, theme, rect, icon, 16.0, on, hover);
+    if item == ToolbarItem::Notifications && panels.unread > 0 {
+        let c = [x + size - 7.0, by + 7.0];
+        layer.circle(c, 9.0, theme.ground(theme.bg_chrome));
+        layer.circle(c, 6.0, theme.accent);
+    }
+    hits.push(Hit { rect, target });
+    rect
+}
+
+/// The code review button: the working tree's `+added −removed`, or ± when
+/// it is clean.
+fn review_button(
+    layer: &mut Layer,
+    engine: &mut TextEngine,
+    theme: &Theme,
+    panels: &PanelButtons,
+    review: [f32; 4],
+    hover: bool,
+) {
+    let [rx, by, review_w, size] = review;
+    if panels.review_open {
+        layer.rect(
+            [rx, by],
+            [review_w, size],
+            theme.accent.with_alpha(0.14),
+            4.0,
+        );
+    } else if hover {
+        layer.rect([rx, by], [review_w, size], lift(theme, 0.08), 4.0);
+    }
+    match review_counts(panels) {
+        Some((a, d)) => {
+            let mut tx = rx + 8.0;
+            for (s, c) in [(a, theme.success), (d, theme.error)] {
+                let b = make_text(engine, &s, 12.0, mono_family(), Weight::MEDIUM);
+                layer.text(b, tx, (TAB_BAR_H - 15.6) / 2.0, c);
+                tx += engine.measure(&s, 12.0, mono_family(), Weight::MEDIUM) + 6.0;
+            }
+        }
+        None => {
+            // ± as quads (crisp at any scale) when the tree is clean
+            let color = if panels.review_open {
+                theme.accent
+            } else {
+                theme.text_dim
+            };
+            let (gx, gy) = (rx + (size - 12.0) / 2.0, by + 7.0);
+            layer.rect([gx + 5.25, gy], [1.5, 8.0], color, 0.5);
+            layer.rect([gx + 2.0, gy + 3.25], [8.0, 1.5], color, 0.5);
+            layer.rect([gx + 2.0, gy + 10.5], [8.0, 1.5], color, 0.5);
+        }
+    }
+}
+
 /// The tab being dragged: its index and the pointer-following left edge.
 #[derive(Clone, Copy, Debug)]
 pub struct Lifted {
@@ -222,6 +353,7 @@ pub fn render(
     mouse: Option<(f32, f32)>,
     lifted: Option<Lifted>,
     close_button: TabCloseButton,
+    close_left: bool,
     hits: &mut Vec<Hit>,
 ) {
     layer.rect(
@@ -232,101 +364,50 @@ pub fn render(
     );
     layer.hline(0.0, TAB_BAR_H - 1.0, w, 1.0, theme.border);
 
-    // Warp layout: the sidebar (file explorer) toggle right after the
-    // traffic lights, the code review button at the far right showing the
-    // working tree's `+added −removed`
+    // Warp layout: the toolbar's left buttons right after the traffic
+    // lights (default: the file explorer toggle), its right buttons at the
+    // far right (default: the inbox, then code review showing the working
+    // tree's `+added −removed`); `toolbar_left` / `toolbar_right` choose
     let size = 26.0;
     let by = (TAB_BAR_H - size) / 2.0;
-    let explorer = [TABS_X + 2.0, by, size, size];
-    icon_button(
-        layer,
-        theme,
-        explorer,
-        Icon::Sidebar,
-        16.0,
-        panels.explorer_open,
-        inside(explorer, mouse),
-    );
-    hits.push(Hit {
-        rect: explorer,
-        target: ClickTarget::ToggleExplorer,
-    });
-    let tabs_x = explorer[0] + size + 8.0;
-
-    let counts = panels
-        .diff
-        .filter(|(a, d)| a + d > 0)
-        .map(|(a, d)| (format!("+{a}"), format!("−{d}")));
-    let review_w = match &counts {
-        Some((a, d)) => {
-            16.0 + engine.measure(a, 12.0, mono_family(), Weight::MEDIUM)
-                + 6.0
-                + engine.measure(d, 12.0, mono_family(), Weight::MEDIUM)
+    let mut lx = TABS_X + 2.0;
+    for item in &panels.left {
+        // a narrow window keeps room for a tab and + (later buttons go)
+        if lx + toolbar_item_width(engine, &panels, *item) > w - MIN_TAB_W - 40.0 {
+            break;
         }
-        None => size,
+        let rect = toolbar_item(layer, engine, theme, &panels, *item, lx, by, mouse, hits);
+        lx = rect[0] + rect[2] + 4.0;
+    }
+    let tabs_x = if panels.left.is_empty() {
+        TABS_X + 2.0
+    } else {
+        lx + 4.0
     };
-    let review = [w - 10.0 - review_w, by, review_w, size];
-    let review_hover = inside(review, mouse);
-    if panels.review_open {
-        layer.rect(
-            [review[0], by],
-            [review_w, size],
-            theme.accent.with_alpha(0.14),
-            4.0,
+    // right to left from the strip's end
+    let mut right_x = w - 10.0;
+    for item in panels.right.iter().rev() {
+        let width = toolbar_item_width(engine, &panels, *item);
+        // never over the tabs: the leftmost ones go first in a narrow window
+        if right_x - width < tabs_x + MIN_TAB_W + 40.0 {
+            break;
+        }
+        let rect = toolbar_item(
+            layer,
+            engine,
+            theme,
+            &panels,
+            *item,
+            right_x - width,
+            by,
+            mouse,
+            hits,
         );
-    } else if review_hover {
-        layer.rect([review[0], by], [review_w, size], lift(theme, 0.08), 4.0);
+        right_x = rect[0] - 4.0;
     }
-    match &counts {
-        Some((a, d)) => {
-            let mut tx = review[0] + 8.0;
-            for (s, c) in [(a, theme.success), (d, theme.error)] {
-                let b = make_text(engine, s, 12.0, mono_family(), Weight::MEDIUM);
-                layer.text(b, tx, (TAB_BAR_H - 15.6) / 2.0, c);
-                tx += engine.measure(s, 12.0, mono_family(), Weight::MEDIUM) + 6.0;
-            }
-        }
-        None => {
-            // ± as quads (crisp at any scale) when the tree is clean
-            let color = if panels.review_open {
-                theme.accent
-            } else {
-                theme.text_dim
-            };
-            let (gx, gy) = (review[0] + (size - 12.0) / 2.0, by + 7.0);
-            layer.rect([gx + 5.25, gy], [1.5, 8.0], color, 0.5);
-            layer.rect([gx + 2.0, gy + 3.25], [8.0, 1.5], color, 0.5);
-            layer.rect([gx + 2.0, gy + 10.5], [8.0, 1.5], color, 0.5);
-        }
-    }
-    hits.push(Hit {
-        rect: review,
-        target: ClickTarget::ToggleReview,
-    });
-
-    // notifications inbox, left of the review button (Warp layout)
-    let inbox = [review[0] - 4.0 - size, by, size, size];
-    icon_button(
-        layer,
-        theme,
-        inbox,
-        Icon::Inbox,
-        16.0,
-        panels.notifications_open,
-        inside(inbox, mouse),
-    );
-    if panels.unread > 0 {
-        let c = [inbox[0] + size - 7.0, by + 7.0];
-        layer.circle(c, 9.0, theme.ground(theme.bg_chrome));
-        layer.circle(c, 6.0, theme.accent);
-    }
-    hits.push(Hit {
-        rect: inbox,
-        target: ClickTarget::ToggleNotifications,
-    });
-    // a new release: the chip left of the inbox
-    let mut w = inbox[0] - 6.0;
-    let mut chip_right = inbox[0] - 8.0;
+    // a new release: the chip left of the right buttons
+    let mut w = right_x - 2.0;
+    let mut chip_right = right_x - 4.0;
     // room for one tab and + stays
     let min_x = tabs_x + MIN_TAB_W + 40.0 + 6.0;
     if panels.update
@@ -454,6 +535,7 @@ pub fn render(
                     true,
                     true,
                     shows_close,
+                    close_left,
                     blink_on,
                 );
             }
@@ -467,10 +549,11 @@ pub fn render(
                 hovered,
                 false,
                 shows_close,
+                close_left,
                 blink_on,
             ),
         }
-        let close = close_rect(slot);
+        let close = close_rect(slot, close_left);
         if shows_close {
             hits.push(Hit {
                 rect: close,
@@ -533,9 +616,15 @@ fn shows_close(mode: TabCloseButton, tab: &TabInfo, active: bool, hovered: bool)
     }
 }
 
-fn close_rect(slot: [f32; 4]) -> [f32; 4] {
+/// The × of a tab in `slot`: at its right end, or its left one
+/// (`tab_close_side = "left"`, the macOS style).
+fn close_rect(slot: [f32; 4], left: bool) -> [f32; 4] {
     [
-        slot[0] + slot[2] - 8.0 - CLOSE_BOX,
+        if left {
+            slot[0] + 6.0
+        } else {
+            slot[0] + slot[2] - 8.0 - CLOSE_BOX
+        },
         (TAB_BAR_H - CLOSE_BOX) / 2.0,
         CLOSE_BOX,
         CLOSE_BOX,
@@ -555,6 +644,7 @@ fn draw_tab(
     hovered: bool,
     floating: bool,
     shows_close: bool,
+    close_left: bool,
     blink_on: bool,
 ) {
     let [x, y, tw, th] = r;
@@ -586,7 +676,12 @@ fn draw_tab(
     } else {
         theme.text_dim
     };
-    let mut cx = x + TAB_PAD_L;
+    // the × / dot slot at the left end pushes the content right
+    let mut cx = if close_left {
+        x + 6.0 + CLOSE_BOX + 6.0
+    } else {
+        x + TAB_PAD_L
+    };
     // shell tabs carry no icon; Settings and synced tabs say what they are,
     // and one running a command spins
     let icon = if tab.settings {
@@ -605,11 +700,13 @@ fn draw_tab(
         cx += 14.0 + 8.0;
     }
 
-    let close = close_rect(r);
+    let close = close_rect(r, close_left);
     let close = [close[0], mid - CLOSE_BOX / 2.0, CLOSE_BOX, CLOSE_BOX];
+    // where the title, the rename field and the pane count chip end
+    let end = if close_left { x + tw - 2.0 } else { close[0] };
     if let Some(edit) = &tab.editing {
         // inline rename field
-        let fw = (close[0] - 6.0 - cx).max(60.0);
+        let fw = (end - 6.0 - cx).max(60.0);
         layer.bordered(
             [cx - 5.0, mid - 12.0],
             [fw, 24.0],
@@ -641,11 +738,11 @@ fn draw_tab(
             .map(|l| engine.measure(l, 10.5, FONT_SANS, Weight::MEDIUM) + 12.0)
             .unwrap_or(0.0);
         // the pane count sits at the right end, before the × / dot slot
-        let chip_x = close[0] - 6.0 - chip_w;
+        let chip_x = end - 6.0 - chip_w;
         let room = if chip_w > 0.0 {
             chip_x - 6.0
         } else {
-            close[0] - 8.0
+            end - 8.0
         } - cx;
         let title = elide(engine, &tab.title, 12.5, room);
         if !title.is_empty() {
@@ -661,8 +758,8 @@ fn draw_tab(
         }
     }
 
-    // right end: × while active or hovered (`tab_close_button`), else the
-    // tab's alert / activity
+    // the × while active or hovered (`tab_close_button`), else the tab's
+    // alert / activity, at the end `tab_close_side` names
     let (ccx, ccy) = (close[0] + CLOSE_BOX / 2.0, mid);
     if shows_close {
         icons::draw(

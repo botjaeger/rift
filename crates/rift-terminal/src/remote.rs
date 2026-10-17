@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 const DEFAULT_LISTEN: &str = "0.0.0.0:7878";
@@ -27,6 +28,16 @@ const DEFAULT_LISTEN: &str = "0.0.0.0:7878";
 const MANAGED_CHECK: Duration = Duration::from_millis(500);
 /// `--managed`: exit this long after the last window is gone.
 const NO_WINDOWS_EXIT: Duration = Duration::from_secs(30);
+/// Set (to anything) by `--headless` runs and inherited by the gateway they
+/// start: it shows no menu bar icon.
+pub const HEADLESS_ENV: &str = "RIFT_HEADLESS";
+/// Set by the gateway's SMAppService agent (`packaging/make-app.sh`), whose
+/// fixed property list cannot name the log: the gateway appends its output
+/// to `<data dir>/remote/gateway.log` itself.
+const LOG_ENV: &str = "RIFT_GATEWAY_LOG";
+/// `<data dir>/remote/stop`: a managed gateway that sees it removes it and
+/// exits ("Quit Rift Completely").
+const STOP_FILE: &str = "stop";
 
 const HELP: &str = "usage: rift-terminal remote [--listen ADDR] [--managed]
        rift-terminal remote pair [--view]
@@ -704,6 +715,8 @@ struct RemoteConfig {
     /// `remote_when_closed` (with `durable_sessions`): phones start shells
     /// while no window is open, and the gateway stays up for them.
     when_closed: bool,
+    /// `menu_bar_icon`: the gateway shows it while no window is open.
+    menu_icon: bool,
 }
 
 /// `remote_access` and `remote_listen` from config.toml, read with the
@@ -722,6 +735,7 @@ fn remote_config_from(loaded: Result<Option<rift_core::Config>, String>) -> Remo
             listen: Some(c.remote_listen),
             tunnel: c.remote_tunnel,
             when_closed: c.remote_when_closed && c.durable_sessions,
+            menu_icon: c.menu_bar_icon,
         },
         _ => RemoteConfig::default(),
     }
@@ -772,6 +786,9 @@ pub fn cli(args: &[String]) -> i32 {
     let config = remote_config();
     if managed && !config.access {
         return 0;
+    }
+    if managed && std::env::var_os(LOG_ENV).is_some() {
+        log_to_file(&dir);
     }
     let listen = listen
         .or(config.listen.clone())
@@ -852,7 +869,53 @@ pub fn cli(args: &[String]) -> i32 {
             gateway.set_relay(relay_for(&mut tunnel, &remote_config()));
         }
     }
-    // managed: follow the config and the windows
+    // a stop left from before this gateway started is not for it
+    let _ = std::fs::remove_file(dir.join(STOP_FILE));
+    // managed, on macOS: the loop on a thread, the menu bar icon on the
+    // main thread (AppKit's)
+    #[cfg(target_os = "macos")]
+    if std::env::var_os(HEADLESS_ENV).is_none() {
+        let tray = std::sync::Arc::new(Tray::default());
+        let shared = tray.clone();
+        let spawned = std::thread::Builder::new()
+            .name("gateway".into())
+            .spawn(move || {
+                follow_managed(gateway, tunnel, &dir, Some(&shared));
+                shared.done.store(true, Ordering::Release);
+            });
+        match spawned {
+            Ok(_) => crate::status_item::run_helper(&tray),
+            Err(e) => eprintln!("rift-terminal remote: {e}"),
+        }
+        return 0;
+    }
+    follow_managed(gateway, tunnel, &dir, None);
+    0
+}
+
+/// What a managed gateway's loop and its menu bar icon (macOS:
+/// `status_item::run_helper` on the main thread) tell each other.
+#[derive(Default)]
+pub struct Tray {
+    /// Show the icon: `menu_bar_icon` is on and no window is open.
+    pub want: AtomicBool,
+    /// "Quit Rift Completely" was picked.
+    pub quit: AtomicBool,
+    /// The loop ended: the main thread returns.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub done: AtomicBool,
+}
+
+/// A managed gateway's life: follow the config and the windows until
+/// `remote_access` turns off, no window has been open for
+/// [`NO_WINDOWS_EXIT`] (unless phones may start shells meanwhile), a
+/// [`STOP_FILE`] appears, or the menu bar icon's full quit is picked.
+fn follow_managed(
+    gateway: rift_remote::Gateway,
+    mut tunnel: crate::tunnel::Tunnel,
+    dir: &Path,
+    tray: Option<&Tray>,
+) {
     // when no window was first seen (the clock starts at launch too, so a
     // gateway started with no window also ends)
     let mut windowless: Option<Instant> = Some(Instant::now());
@@ -864,7 +927,23 @@ pub fn cli(args: &[String]) -> i32 {
             log::info!("remote: remote_access is off; stopping");
             break;
         }
+        if std::fs::remove_file(dir.join(STOP_FILE)).is_ok() {
+            log::info!("remote: asked to stop");
+            break;
+        }
         gateway.set_relay(relay_for(&mut tunnel, &now));
+        if let Some(tray) = tray {
+            let window = any_window();
+            if tray.quit.swap(false, Ordering::AcqRel) {
+                log::info!("remote: Quit Rift Completely");
+                if !window {
+                    end_background_shells();
+                }
+                break;
+            }
+            // the app shows its own while it runs
+            tray.want.store(now.menu_icon && !window, Ordering::Release);
+        }
         if checked_windows.is_none_or(|t| t.elapsed() >= Duration::from_secs(2)) {
             checked_windows = Some(Instant::now());
             if any_window() || now.when_closed {
@@ -877,7 +956,51 @@ pub fn cli(args: &[String]) -> i32 {
     }
     drop(gateway);
     drop(tunnel);
-    0
+}
+
+/// "Quit Rift Completely" in the app: the gateway stops (within
+/// [`MANAGED_CHECK`]), and the shells phones started in the session service
+/// end with the window's own.
+pub fn stop_background() {
+    if let Some(dir) = registry_dir()
+        && registry::read_status(&dir).is_some()
+    {
+        let _ = std::fs::write(dir.join(STOP_FILE), b"");
+    }
+    end_background_shells();
+}
+
+/// End every shell the session service runs (never starts it).
+fn end_background_shells() {
+    for s in rift_pty::service::list() {
+        rift_pty::service::kill(s.id);
+    }
+}
+
+/// Append stdout and stderr to `<dir>/gateway.log` (started over past
+/// 1 MiB), as the bootstrapped job's `StandardOutPath` does.
+fn log_to_file(dir: &Path) {
+    use std::os::fd::AsRawFd;
+    let path = dir.join("gateway.log");
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 1 << 20) {
+        let _ = std::fs::write(&path, b"");
+    }
+    let opened = std::fs::create_dir_all(dir).and_then(|()| {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(&path)
+    });
+    match opened {
+        // SAFETY: dup2 onto this process's own stdout/stderr descriptors
+        Ok(f) => unsafe {
+            libc::dup2(f.as_raw_fd(), 1);
+            libc::dup2(f.as_raw_fd(), 2);
+        },
+        Err(e) => eprintln!("rift-terminal remote: {}: {e}", path.display()),
+    }
 }
 
 /// The relay the gateway registers at: the tunnel's once it is ready while
@@ -1502,8 +1625,10 @@ mod tests {
                 relay: Some(rift_core::config::DEFAULT_RELAY.into()),
                 tunnel: false,
                 when_closed: false,
+                menu_icon: true,
             }
         );
+        assert!(!from_text("menu_bar_icon = false\n").menu_icon);
         assert_eq!(from_text("remote_relay = \"\"\n").relay, None);
         assert_eq!(
             from_text(
@@ -1516,6 +1641,7 @@ mod tests {
                 relay: Some("wss://relay.example.com".into()),
                 tunnel: true,
                 when_closed: false,
+                menu_icon: true,
             }
         );
         assert_eq!(from_text("remote_relay = \"  \"\n").relay, None);

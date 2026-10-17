@@ -73,8 +73,18 @@ pub struct ShellEnv {
 /// Command prefixes that transparently precede the real command: the word after
 /// them (and after any `VAR=val` assignments) is what actually runs.
 const COMMAND_PREFIXES: &[&str] = &[
-    "sudo", "doas", "env", "time", "nohup", "command", "exec", "builtin", "nice", "stdbuf",
+    "sudo",
+    "doas",
+    "env",
+    "time",
+    "nohup",
+    "command",
+    "exec",
+    "builtin",
+    "nice",
+    "stdbuf",
     "setsid",
+    "caffeinate",
 ];
 
 /// A compact list of common git subcommands, duplicated here (rather than
@@ -555,7 +565,7 @@ pub fn first_command_word_ranges(buffer: &str) -> Vec<Range<usize>> {
 /// Whether `opt` (an option of the transparent prefix `prefix`) takes its
 /// value as the next word (`sudo -u bob cmd`, `env -u HOME cmd`), so that
 /// word is not mistaken for the command.
-fn prefix_option_takes_value(prefix: &str, opt: &str) -> bool {
+pub(crate) fn prefix_option_takes_value(prefix: &str, opt: &str) -> bool {
     let takes: &[&str] = match prefix {
         "sudo" => &[
             "-u", "-g", "-h", "-p", "-C", "-D", "-R", "-T", "-U", "-r", "-t",
@@ -563,6 +573,7 @@ fn prefix_option_takes_value(prefix: &str, opt: &str) -> bool {
         "doas" => &["-u", "-C"],
         "env" => &["-u", "-C", "-S", "-P"],
         "nice" => &["-n"],
+        "caffeinate" => &["-t", "-w"],
         "stdbuf" => &["-i", "-o", "-e"],
         "exec" => &["-a"],
         _ => &[],

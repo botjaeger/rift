@@ -109,7 +109,9 @@ doc): `wait`, `wait_prompt`, `key`, `keyup`, `keyrepeat`, `type`, `paste`,
 `copyfiles`, `shot`, `dump`, `resize`, `move`, `click`, `dblclick`, `rclick`,
 `mclick`, `drag`, `press`, `release`, `mods`, `scroll`, `sh`, `focus`, `ime`,
 `preedit`, `drop`, `wait_file`, `new_window`, `window`, `close_window`, `hotkey`,
-`quit`. `menu` (native menu bar) works on macOS only; scripts that
+`link` (open a `rift://` link),
+`a11y` (a screen reader's action request on a labelled node), `fault`
+(headless: an unavailable clipboard or missing opener), `quit`. `menu` (native menu bar) works on macOS only; scripts that
 must also pass on Linux use key chords instead.
 
 Lasting UI regressions belong in `scripts/ui-smoke.py` (the `ui` gate): add
@@ -148,7 +150,7 @@ lives outside the workspace in `mobile/` (pnpm; the `mobile` gate).
   (`sprite.rs`), glyphon text.
   `Scene` is a per-frame list of layers; within a layer quads draw first, then
   text; later layers composite over earlier ones (0 chrome, 1 terminal +
-  editor, 2 completion/search, 3 settings, 4 palette, 5 context menu/hints,
+  editor, 2 completion/sticky headers, 3 settings/find bar, 4 palette, 5 context menu/hints,
   6 toasts/dialogs, 7 tooltips).
 - **rift-terminal** — winit `ApplicationHandler` (`app.rs`), views, input
   routing, per-frame `Hit` rects, kitty keyboard encoder (`keyboard.rs`),

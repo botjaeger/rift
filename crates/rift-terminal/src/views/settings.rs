@@ -1,6 +1,7 @@
 use rift_core::{
-    Bell, Color, Config, CursorStyle, InputPosition, Keymap, NewTabPlacement, PromptMode,
-    TabCloseButton, TabLayout, Theme,
+    Bell, BlockSpacing, Color, Config, CursorStyle, InputPosition, Keymap, NewTabPlacement,
+    PromptMode, TabBarVisibility, TabCloseButton, TabCloseSide, TabLayout, Theme, ToolbarItem,
+    ToolbarSide,
 };
 use rift_renderer::glyphon::{Attrs, Buffer, Family, Metrics, Shaping, TextBounds, Weight};
 use rift_renderer::{FONT_SANS, Layer, TextEngine, mono_family};
@@ -1038,6 +1039,40 @@ pub fn render(
 
 /// The open select's list under (or above) its field: options with a check
 /// on the current one; returns the option targets.
+/// A small picture of app icon `icon` (its tile, chevron and cursor) in a
+/// `size` square at `pos`.
+fn icon_swatch(layer: &mut Layer, icon: rift_core::AppIcon, pos: [f32; 2], size: f32) {
+    let [tile, accent, cursor] = icon.colors().map(|c| Color::hex(c).unwrap_or(Color::BLACK));
+    let [x, y] = pos;
+    let u = size / 16.0;
+    layer.bordered(
+        [x, y],
+        [size, size],
+        tile,
+        Color::WHITE.with_alpha(0.12),
+        3.5 * u,
+        1.0,
+    );
+    layer.line(
+        [x + 4.0 * u, y + 5.0 * u],
+        [x + 7.0 * u, y + 8.0 * u],
+        1.6 * u,
+        accent,
+    );
+    layer.line(
+        [x + 7.0 * u, y + 8.0 * u],
+        [x + 4.0 * u, y + 11.0 * u],
+        1.6 * u,
+        accent,
+    );
+    layer.rect(
+        [x + 9.0 * u, y + 5.0 * u],
+        [2.6 * u, 6.0 * u],
+        cursor,
+        0.5 * u,
+    );
+}
+
 fn dropdown(
     layer: &mut Layer,
     engine: &mut TextEngine,
@@ -1096,6 +1131,12 @@ fn dropdown(
             icons::draw(layer, Icon::Check, [r[0] + 14.0, cy], 14.0, theme.accent);
         }
         let mut tx = r[0] + 28.0;
+        if dd.id == "app_icon"
+            && let Some(icon) = rift_core::AppIcon::from_name(value)
+        {
+            icon_swatch(layer, icon, [tx, cy - 8.0], 16.0);
+            tx += 24.0;
+        }
         // themes: their ground ringed in their accent
         if dd.id.starts_with("theme") {
             let t = rift_core::theme::load_by_name(value);
@@ -1814,6 +1855,16 @@ impl Form<'_> {
             .and_then(|i| rift_core::theme::picker_labels(&names).into_iter().nth(i))
             .unwrap_or(t.name);
         self.select_with(y, label, &shown, Some((t.bg, t.accent)), false, id);
+    }
+
+    /// The app icon select: a picture of the chosen icon, its name.
+    fn icon_select(&mut self, y: f32, icon: rift_core::AppIcon) {
+        self.select_with(y, "App icon", icon.label(), None, false, "app_icon");
+        if !self.hidden && self.visible(y, ROW_H) {
+            let sel_w = (self.card_w * 0.45).clamp(140.0, 220.0);
+            let x = self.right() - sel_w - 24.0;
+            icon_swatch(self.layer, icon, [x, y + (ROW_H - 16.0) / 2.0], 16.0);
+        }
     }
 
     fn select_with(
@@ -3050,6 +3101,8 @@ fn appearance_page(form: &mut Form, config: &Config) {
         "window_padding",
     );
     let y = form.y;
+    form.icon_select(y, config.app_icon);
+    let y = form.y;
     form.toggle_desc(
         y,
         "Font ligatures",
@@ -3086,6 +3139,30 @@ fn appearance_page(form: &mut Form, config: &Config) {
     let y = form.y;
     form.segment(
         y,
+        "Close button side",
+        &["Right", "Left"],
+        match config.tab_close_side {
+            TabCloseSide::Right => 0,
+            TabCloseSide::Left => 1,
+        },
+        "tab_close_side",
+    );
+    let y = form.y;
+    form.segment_desc(
+        y,
+        "Show the tab bar",
+        "Out of sight, it slides in at the window's top edge",
+        &["Always", "When windowed", "Only on hover"],
+        match config.tab_bar {
+            TabBarVisibility::Always => 0,
+            TabBarVisibility::HideFullscreen => 1,
+            TabBarVisibility::OnHover => 2,
+        },
+        "tab_bar",
+    );
+    let y = form.y;
+    form.segment(
+        y,
         "New tabs open",
         &["At the end", "After the current tab"],
         match config.new_tab_placement {
@@ -3102,6 +3179,38 @@ fn appearance_page(form: &mut Form, config: &Config) {
         config.tab_bar_with_one_tab,
         "tab_bar_with_one_tab",
     );
+
+    // Warp's configurable toolbar: each button left of the tabs, at the
+    // strip's right end, or hidden (moved to a side, it goes last there;
+    // `toolbar_left` / `toolbar_right` in config.toml set the order)
+    form.group("Toolbar");
+    for item in ToolbarItem::ALL {
+        let y = form.y;
+        form.segment_desc(
+            y,
+            item.label(),
+            "Toolbar button",
+            &["Left", "Right", "Hidden"],
+            match config.toolbar_side(item) {
+                ToolbarSide::Left => 0,
+                ToolbarSide::Right => 1,
+                ToolbarSide::Hidden => 2,
+            },
+            item.setting_id(),
+        );
+        // its place on its side (Warp drags the chips; here − and +)
+        if let Some(at) = config.toolbar_position(item) {
+            let y = form.y;
+            form.stepper_desc(
+                y,
+                &format!("{} position", item.label()),
+                "Toolbar button",
+                &at.to_string(),
+                "",
+                item.order_id(),
+            );
+        }
+    }
 
     form.group("Panes");
     let y = form.y;
@@ -3132,6 +3241,25 @@ fn appearance_page(form: &mut Form, config: &Config) {
 }
 
 fn general_page(form: &mut Form, config: &Config, update: &UpdateLine) {
+    // the login item and the menu bar icon are macOS's
+    if cfg!(target_os = "macos") {
+        form.group("App");
+        let y = form.y;
+        form.toggle(
+            y,
+            "Launch at login",
+            config.launch_at_login,
+            "launch_at_login",
+        );
+        let y = form.y;
+        form.toggle(
+            y,
+            "Show menu bar icon",
+            config.menu_bar_icon,
+            "menu_bar_icon",
+        );
+    }
+
     form.group("Shell");
     // what actually runs: a configured shell that is not executable falls back
     let shell = rift_core::shell_integration::resolve_shell(config.shell.as_deref());
@@ -3427,6 +3555,33 @@ fn features_page(form: &mut Form, config: &Config) {
         "sticky_command_header",
     );
     let y = form.y;
+    form.segment_desc(
+        y,
+        "Block spacing",
+        "Normal leaves a blank row above each block",
+        &["Compact", "Normal"],
+        match config.block_spacing {
+            BlockSpacing::Compact => 0,
+            BlockSpacing::Normal => 1,
+        },
+        "block_spacing",
+    );
+    let y = form.y;
+    form.toggle(
+        y,
+        "Show block dividers",
+        config.block_dividers,
+        "block_dividers",
+    );
+    let y = form.y;
+    form.toggle_desc(
+        y,
+        "Jump to bottom of block button",
+        "Over a block that runs past the bottom of the pane",
+        config.jump_to_bottom_button,
+        "jump_to_bottom_button",
+    );
+    let y = form.y;
     form.segment(
         y,
         "Prompt",
@@ -3470,6 +3625,14 @@ fn features_page(form: &mut Form, config: &Config) {
         "Suggest corrections for failed commands",
         config.command_corrections,
         "command_corrections",
+    );
+    let y = form.y;
+    form.toggle_desc(
+        y,
+        "Offer Rift in subshells",
+        "docker exec … bash, poetry shell; more in subshell_commands",
+        config.subshell_offer,
+        "subshell_offer",
     );
 }
 

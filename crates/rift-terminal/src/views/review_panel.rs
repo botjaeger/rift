@@ -98,9 +98,277 @@ pub struct ReviewPanelState {
     /// Per frame: each hunk's toolbar actions on its band, for the
     /// accessibility tree (on screen they show only on a hovered line).
     pub latent: Vec<([f32; 4], ReviewHit)>,
+    /// The panel has the keyboard (⌥⌘G): arrows move `focus`, s / u / r act
+    /// on it, Esc hands the keys back to the command line.
+    pub keyed: bool,
+    /// The row the keyboard stands on; follows the list when it reloads.
+    pub focus: Option<ReviewStop>,
+    /// Where `focus` last was in `stops()`, to land near it when its row
+    /// leaves the list (a staged file moves to the other section).
+    focus_index: usize,
+}
+
+/// A row the keyboard can stand on: a section, a file, or a hunk of an
+/// expanded file.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ReviewStop {
+    Section(bool),
+    File(bool, String),
+    Hunk(bool, String, HunkId),
+}
+
+/// What a key does to the focused row.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum StopAct {
+    Stage,
+    Unstage,
+    Revert,
+    Open,
+    Copy,
 }
 
 impl ReviewPanelState {
+    /// Every row the keyboard visits, top to bottom.
+    pub fn stops(&self) -> Vec<ReviewStop> {
+        let Some(review) = self.model() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for staged in [true, false] {
+            let files = if staged {
+                &review.staged
+            } else {
+                &review.unstaged
+            };
+            if files.is_empty() {
+                continue;
+            }
+            out.push(ReviewStop::Section(staged));
+            if self.collapsed_sections.contains(&staged) {
+                continue;
+            }
+            for f in files {
+                out.push(ReviewStop::File(staged, f.path.clone()));
+                if !f.binary && self.expanded.contains(&(staged, f.path.clone())) {
+                    out.extend(
+                        f.hunks
+                            .iter()
+                            .map(|h| ReviewStop::Hunk(staged, f.path.clone(), h.id)),
+                    );
+                }
+            }
+        }
+        out
+    }
+
+    /// Put the keyboard on the panel, on the first row when it has none.
+    pub fn take_keys(&mut self) {
+        self.keyed = true;
+        self.sync_focus();
+        if self.focus.is_none() {
+            self.focus = self.stops().into_iter().next();
+            self.focus_index = 0;
+            self.scroll_to_focus();
+        }
+    }
+
+    /// Hand the keys back.
+    pub fn drop_keys(&mut self) {
+        self.keyed = false;
+        self.focus = None;
+    }
+
+    /// Keep `focus` on a row that exists: after a reload the same row, else
+    /// the one now at its place in the list, else the first.
+    pub fn sync_focus(&mut self) {
+        // a reload in flight has no list to compare with: the focus waits
+        if !self.keyed || self.model().is_none() {
+            return;
+        }
+        let stops = self.stops();
+        match &self.focus {
+            Some(f) if stops.contains(f) => {}
+            _ if stops.is_empty() => self.focus = None,
+            gone => {
+                // a staged hunk leaves the list: the file's nearest other
+                // hunk, else the file; any other row: whatever is now at
+                // its place
+                let near = match gone {
+                    Some(ReviewStop::Hunk(s, p, _)) => stops
+                        .iter()
+                        .enumerate()
+                        .filter(
+                            |(_, t)| matches!(t, ReviewStop::Hunk(s2, p2, _) if s2 == s && p2 == p),
+                        )
+                        .min_by_key(|(i, _)| i.abs_diff(self.focus_index))
+                        .map(|(_, t)| t.clone())
+                        .or_else(|| {
+                            let file = ReviewStop::File(*s, p.clone());
+                            stops.contains(&file).then_some(file)
+                        }),
+                    _ => None,
+                };
+                let at = self.focus_index.min(stops.len() - 1);
+                self.focus = Some(near.unwrap_or_else(|| stops[at].clone()));
+            }
+        }
+        if let Some(at) = self
+            .focus
+            .as_ref()
+            .and_then(|f| stops.iter().position(|s| s == f))
+        {
+            self.focus_index = at;
+        }
+    }
+
+    /// Move the focus `delta` rows (clamped) and scroll it into view; a
+    /// `delta` past either end goes to that end.
+    pub fn move_focus(&mut self, delta: isize) {
+        self.sync_focus();
+        let stops = self.stops();
+        if stops.is_empty() {
+            return;
+        }
+        let at = (self.focus_index as isize + delta).clamp(0, stops.len() as isize - 1) as usize;
+        self.focus = Some(stops[at].clone());
+        self.focus_index = at;
+        self.scroll_to_focus();
+    }
+
+    /// Put the focus on `stop` (it must be in `stops()`).
+    fn set_focus(&mut self, stop: ReviewStop) {
+        if let Some(at) = self.stops().iter().position(|s| *s == stop) {
+            self.focus_index = at;
+            self.focus = Some(stop);
+            self.scroll_to_focus();
+        }
+    }
+
+    /// Scroll so the focused row is on screen (the next frame clamps).
+    pub fn scroll_to_focus(&mut self) {
+        let (Some(review), Some(focus)) = (self.model().cloned(), self.focus.clone()) else {
+            return;
+        };
+        let mut y = 0.0;
+        for row in rows(self, &review) {
+            let here = match (&row, &focus) {
+                (RowKind::Section(s, _), ReviewStop::Section(t)) => s == t,
+                (RowKind::File(s, f), ReviewStop::File(t, p)) => s == t && f.path == *p,
+                (RowKind::Hunk(s, f, hi, _), ReviewStop::Hunk(t, p, id)) => {
+                    s == t && f.path == *p && f.hunks[*hi].id == *id
+                }
+                _ => false,
+            };
+            if here {
+                let h = row.height();
+                if y < self.scroll {
+                    self.scroll = y;
+                } else if y + h > self.scroll + self.view_h - 8.0 {
+                    self.scroll = (y + h - self.view_h + 8.0).max(0.0);
+                }
+                return;
+            }
+            y += row.height();
+        }
+    }
+
+    /// ← on the focus: fold its section or file, else step out to the row
+    /// that holds it.
+    pub fn focus_left(&mut self) {
+        self.sync_focus();
+        match self.focus.clone() {
+            Some(ReviewStop::Section(s)) => {
+                self.collapsed_sections.insert(s);
+            }
+            Some(ReviewStop::File(s, p)) => {
+                if !self.expanded.remove(&(s, p)) {
+                    self.set_focus(ReviewStop::Section(s));
+                }
+            }
+            Some(ReviewStop::Hunk(s, p, _)) => self.set_focus(ReviewStop::File(s, p)),
+            None => {}
+        }
+    }
+
+    /// → on the focus: open its section or file, else step into it.
+    pub fn focus_right(&mut self) {
+        self.sync_focus();
+        match self.focus.clone() {
+            Some(ReviewStop::Section(s)) => {
+                if !self.collapsed_sections.remove(&s) {
+                    self.move_focus(1);
+                }
+            }
+            Some(ReviewStop::File(s, p)) => {
+                if self.expanded.insert((s, p)) {
+                    self.scroll_to_focus();
+                } else {
+                    self.move_focus(1);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Enter / Space on the focus: fold or unfold a section or file.
+    pub fn focus_toggle(&mut self) {
+        self.sync_focus();
+        match self.focus.clone() {
+            Some(ReviewStop::Section(s)) => {
+                if !self.collapsed_sections.remove(&s) {
+                    self.collapsed_sections.insert(s);
+                }
+            }
+            Some(ReviewStop::File(s, p)) if !self.expanded.remove(&(s, p.clone())) => {
+                self.expanded.insert((s, p));
+            }
+            _ => {}
+        }
+    }
+
+    /// The click-equivalent of `act` on the focused row; `None` when the row
+    /// has no such action (stage on a staged file, anything on a cut hunk).
+    pub fn focus_hit(&self, act: StopAct) -> Option<ReviewHit> {
+        let review = self.model()?;
+        let file = |staged: bool, path: &str| {
+            let files = if staged {
+                &review.staged
+            } else {
+                &review.unstaged
+            };
+            files.iter().find(|f| f.path == path)
+        };
+        match (self.focus.as_ref()?, act) {
+            (ReviewStop::Section(false), StopAct::Stage) => Some(ReviewHit::StageAll),
+            (ReviewStop::Section(true), StopAct::Unstage) => Some(ReviewHit::UnstageAll),
+            (ReviewStop::File(false, p), StopAct::Stage) => Some(ReviewHit::Stage(p.clone(), None)),
+            (ReviewStop::File(true, p), StopAct::Unstage) => {
+                Some(ReviewHit::Unstage(p.clone(), None))
+            }
+            (ReviewStop::File(false, p), StopAct::Revert) => {
+                Some(ReviewHit::Revert(p.clone(), None))
+            }
+            (ReviewStop::File(s, p), StopAct::Open) => {
+                file(*s, p).filter(|f| f.status != 'D')?;
+                Some(ReviewHit::Open(p.clone()))
+            }
+            (ReviewStop::Hunk(s, p, id), act) => {
+                let partial = file(*s, p)?.hunks.iter().any(|h| h.id == *id && h.partial);
+                if partial {
+                    return None;
+                }
+                match (*s, act) {
+                    (false, StopAct::Stage) => Some(ReviewHit::Stage(p.clone(), Some(*id))),
+                    (true, StopAct::Unstage) => Some(ReviewHit::Unstage(p.clone(), Some(*id))),
+                    (false, StopAct::Revert) => Some(ReviewHit::Revert(p.clone(), Some(*id))),
+                    (_, StopAct::Copy) => Some(ReviewHit::Copy(*s, p.clone(), *id)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
     pub fn model(&self) -> Option<&Arc<Review>> {
         match &self.load {
             Load::Ready(r) => Some(r),
@@ -866,6 +1134,7 @@ pub fn render(
 ) -> Vec<([f32; 4], ReviewHit)> {
     let [x, y, w, h] = rect;
     let mut hits = Vec::new();
+    state.sync_focus();
     state.cards_x.clear();
     state.hover_rows.clear();
     state.latent.clear();
@@ -1077,6 +1346,10 @@ pub fn render(
     };
     let mut hover_rows = Vec::new();
     let mut latent = Vec::new();
+    // the row the keyboard stands on gets the focus ring (DESIGN.md)
+    let focus = state.keyed.then(|| state.focus.clone()).flatten();
+    let mut focus_rect = None;
+
     // the hovered code line: its hunk's toolbar draws over the gutter
     let mut toolbar: Option<(f32, bool, &FileDiff, usize)> = None;
     for (cy, row) in &layout.rows {
@@ -1087,6 +1360,9 @@ pub fn render(
         }
         match row {
             RowKind::Section(staged, n) => {
+                if focus == Some(ReviewStop::Section(*staged)) {
+                    focus_rect = Some([x + 6.0, ry + 1.0, main_w - 12.0, rh - 2.0]);
+                }
                 let open = !state.collapsed_sections.contains(staged);
                 let title = if *staged { "STAGED" } else { "CHANGES" };
                 chevron(layer, theme, open, [x + 17.5, ry + 15.0]);
@@ -1128,6 +1404,9 @@ pub fn render(
             RowKind::File(staged, f) => {
                 let key = (*staged, f.path.clone());
                 let open = state.expanded.contains(&key);
+                if focus == Some(ReviewStop::File(*staged, f.path.clone())) {
+                    focus_rect = Some([cx, ry, cw, rh]);
+                }
                 if open {
                     layer.hline(cx + 1.0, ry + rh - 1.0, cw - 2.0, 1.0, theme.border);
                 }
@@ -1243,6 +1522,9 @@ pub fn render(
             }
             RowKind::Hunk(staged, f, hi, hidden) => {
                 let hunk = &f.hunks[*hi];
+                if focus == Some(ReviewStop::Hunk(*staged, f.path.clone(), hunk.id)) {
+                    focus_rect = Some([cx + 2.0, ry, cw - 4.0, rh]);
+                }
                 gap_band(
                     layer,
                     engine,
@@ -1367,6 +1649,16 @@ pub fn render(
                 );
             }
         }
+    }
+    if let Some(r) = focus_rect {
+        layer.bordered(
+            [r[0] - 2.0, r[1] - 2.0],
+            [r[2] + 4.0, r[3] + 4.0],
+            theme.accent.with_alpha(0.0),
+            theme.accent,
+            6.0,
+            2.0,
+        );
     }
     if let Some((ry, staged, f, hi)) = toolbar {
         let actions = hunk_actions(staged, f, hi);
@@ -1619,6 +1911,104 @@ mod tests {
             hunks,
             source: Some((1..=lines).map(|n| format!("line {n}")).collect()),
         }
+    }
+
+    fn keyed(staged: Vec<FileDiff>, unstaged: Vec<FileDiff>) -> ReviewPanelState {
+        ReviewPanelState {
+            load: Load::Ready(Arc::new(Review {
+                staged,
+                unstaged,
+                ..Review::default()
+            })),
+            ..ReviewPanelState::default()
+        }
+    }
+
+    #[test]
+    fn keyboard_walks_sections_files_and_hunks_and_acts() {
+        let mut state = keyed(vec![], vec![file(vec![hunk(5, 6), hunk(30, 6)], 50)]);
+        state.take_keys();
+        assert_eq!(state.focus, Some(ReviewStop::Section(false)));
+        // a collapsed file hides its hunks from the walk
+        state.move_focus(1);
+        assert_eq!(state.focus, Some(ReviewStop::File(false, "a.rs".into())));
+        state.move_focus(1);
+        assert_eq!(state.focus, Some(ReviewStop::File(false, "a.rs".into())));
+        state.focus_right();
+        state.move_focus(1);
+        let first = ReviewStop::Hunk(false, "a.rs".into(), hunk(5, 6).id);
+        assert_eq!(state.focus, Some(first));
+        assert_eq!(
+            state.focus_hit(StopAct::Stage),
+            Some(ReviewHit::Stage("a.rs".into(), Some(hunk(5, 6).id)))
+        );
+        assert_eq!(
+            state.focus_hit(StopAct::Revert),
+            Some(ReviewHit::Revert("a.rs".into(), Some(hunk(5, 6).id)))
+        );
+        // nothing to unstage in the unstaged section
+        assert_eq!(state.focus_hit(StopAct::Unstage), None);
+        // ← steps out to the file, then folds it
+        state.focus_left();
+        assert_eq!(state.focus, Some(ReviewStop::File(false, "a.rs".into())));
+        state.focus_left();
+        assert!(state.expanded.is_empty());
+        // End and Home reach the ends
+        state.move_focus(1_000_000);
+        assert_eq!(state.focus, Some(ReviewStop::File(false, "a.rs".into())));
+        state.move_focus(-1_000_000);
+        assert_eq!(state.focus_hit(StopAct::Stage), Some(ReviewHit::StageAll));
+        state.drop_keys();
+        assert_eq!(state.focus, None);
+    }
+
+    #[test]
+    fn focus_follows_a_staged_hunk_to_the_next_one() {
+        let two = file(vec![hunk(5, 6), hunk(30, 6)], 50);
+        let mut state = keyed(vec![], vec![two]);
+        state.expanded.insert((false, "a.rs".into()));
+        state.take_keys();
+        state.move_focus(3); // section, file, hunk 1, hunk 2
+        let second = ReviewStop::Hunk(false, "a.rs".into(), hunk(30, 6).id);
+        assert_eq!(state.focus, Some(second));
+        // hunk 2 got staged: it leaves the list, hunk 1 is the file's nearest
+        state.load = Load::Ready(Arc::new(Review {
+            staged: vec![file(vec![hunk(30, 6)], 50)],
+            unstaged: vec![file(vec![hunk(5, 6)], 50)],
+            ..Review::default()
+        }));
+        state.sync_focus();
+        assert_eq!(
+            state.focus,
+            Some(ReviewStop::Hunk(false, "a.rs".into(), hunk(5, 6).id))
+        );
+    }
+
+    #[test]
+    fn focus_waits_out_a_reload() {
+        let mut state = keyed(vec![], vec![file(vec![hunk(5, 6)], 50)]);
+        state.take_keys();
+        state.move_focus(1);
+        let at = state.focus.clone();
+        state.load = Load::Loading;
+        state.sync_focus();
+        assert_eq!(state.focus, at);
+    }
+
+    #[test]
+    fn a_cut_hunk_has_no_hunk_actions() {
+        let mut cut = hunk(5, 6);
+        cut.partial = true;
+        let mut state = keyed(vec![], vec![file(vec![cut.clone()], 50)]);
+        state.expanded.insert((false, "a.rs".into()));
+        state.take_keys();
+        state.move_focus(2);
+        assert_eq!(
+            state.focus,
+            Some(ReviewStop::Hunk(false, "a.rs".into(), cut.id))
+        );
+        assert_eq!(state.focus_hit(StopAct::Stage), None);
+        assert_eq!(state.focus_hit(StopAct::Revert), None);
     }
 
     #[test]

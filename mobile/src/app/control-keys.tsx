@@ -6,6 +6,7 @@ import { DEFAULT_CONTROL_KEYS, MAX_ROW_KEYS, addChoices, canAddKey, controlKey, 
 import { fleet, useApp } from "@/runtime";
 import { Key, KeyCap, KeyTip, tipOf, type Tip } from "@/ui/ControlRow";
 import { Icon } from "@/ui/Icon";
+import { SaveError } from "@/ui/SaveError";
 import { PageHeader, SectionTitle } from "@/ui/Screen";
 import { colors, radius, TOUCH, ui } from "@/ui/theme";
 
@@ -140,6 +141,7 @@ export default function ControlKeysScreen() {
           </Pressable>
         }
       />
+      <SaveError />
       <ScrollView
         scrollEnabled={!dragging}
         contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + 24 }]}

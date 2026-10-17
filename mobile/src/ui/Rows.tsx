@@ -311,9 +311,9 @@ export function CardBox({ children, style }: { children: ReactNode; style?: Styl
 
 /**
  * A Settings page (Settings, While the app is closed, a computer): a 44 pt glass back badge and
- * a 22 pt title over groups in a 16 pt gutter, 24 pt apart.
+ * a 22 pt title over groups in a 16 pt gutter, 24 pt apart; `notice` stays under the title.
  */
-export function SettingsPage({ title, children }: { title: string; children: ReactNode }) {
+export function SettingsPage({ title, notice, children }: { title: string; notice?: ReactNode; children: ReactNode }) {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const back = () => (router.canGoBack() ? router.back() : router.replace("/"));
@@ -333,6 +333,7 @@ export function SettingsPage({ title, children }: { title: string; children: Rea
           {title}
         </Text>
       </View>
+      {notice ? <View style={styles.page}>{notice}</View> : null}
       <ScrollView
         style={styles.fill}
         contentContainerStyle={{ paddingBottom: insets.bottom + 40 }}

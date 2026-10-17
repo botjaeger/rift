@@ -37,7 +37,13 @@ use crate::views::viewer::{ViewerHit, ViewerState};
 use crate::views::whats_new::{WhatsNewHits, WhatsNewState};
 
 mod hotkey_window;
+mod inspector;
+mod links;
+mod strip;
+mod subshell;
 mod windows;
+
+pub use subshell::SubshellOffer;
 
 /// Cross-thread wakeups.
 #[derive(Debug)]
@@ -59,6 +65,11 @@ pub enum UserEvent {
     /// A native menu item was chosen (its id).
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Menu(String),
+    /// The manual's description of a command (the inspector's lookup).
+    Manual(String, Option<String>),
+    /// A `rift://` link to open (macOS Apple Event, a second process's
+    /// control request, or the script driver).
+    OpenLink(String),
     /// AppKit was asked to quit (the Dock's Quit): quit as ⌘Q does.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     QuitRequested,
@@ -75,7 +86,8 @@ pub enum UserEvent {
     ),
     /// Detached service shells, for the window that asked.
     DetachedLoaded(Option<WindowId>, Vec<rift_pty::ipc::SessionInfo>),
-    HistoryLoaded(Vec<String>),
+    /// The shell the import was for, and its history.
+    HistoryLoaded(String, Vec<String>),
     ShellEnvLoaded(Arc<rift_core::shell_env::ShellEnv>),
     /// Screen reader requests (initial tree, actions).
     Access(accesskit_winit::Event),
@@ -470,6 +482,8 @@ const TEXT_BLINK: Duration = Duration::from_millis(600);
 /// parses into; unpaced, the spinner redrew back to back and halved output
 /// throughput.
 const OUTPUT_FRAME: Duration = Duration::from_micros(8333);
+/// Find recounts a pane's matches at most this often while it prints.
+const SEARCH_LIVE: Duration = Duration::from_millis(100);
 const BLINK_INTERVAL: Duration = Duration::from_millis(550);
 const BELL_FLASH: Duration = Duration::from_millis(120);
 /// The audible bell plays at most once per this gap.
@@ -598,6 +612,15 @@ pub struct App {
     theme: Theme,
     /// The theme's color scheme as reported to programs (1 dark, 2 light).
     color_scheme: Option<u8>,
+    /// The `app_icon` the Dock and the windows show (set on the first
+    /// config apply; a change re-applies it).
+    applied_icon: Option<rift_core::AppIcon>,
+    /// When the last `rift://` links arrived (`app/links.rs` drops a flood).
+    link_times: Vec<Instant>,
+    /// The manual's one-line description per command the inspector asked
+    /// about (`None`: it has none), and the lookups still running.
+    manual: std::collections::HashMap<String, Option<String>>,
+    manual_pending: std::collections::HashSet<String>,
     cell_w: f32,
     /// Why the configured theme did not load (toasted once per change).
     theme_error: Option<String>,
@@ -607,6 +630,8 @@ pub struct App {
     clipboard: Option<arboard::Clipboard>,
     /// Imported shell history (shared with the completion thread).
     shell_history: Arc<Vec<String>>,
+    /// The shell `shell_history` was (or is being) imported for.
+    history_shell: String,
     font_size: f32,
     line_h: f32,
     _watcher: Option<rift_core::watch::ConfigWatcher>,
@@ -619,6 +644,10 @@ pub struct App {
     headless_clipboard: String,
     /// Files on the headless clipboard (script `copyfiles`).
     headless_files: Vec<std::path::PathBuf>,
+    /// Script `fault` (headless only): the clipboard backend is unavailable,
+    /// or the OS opener is missing, so their failure paths can be verified.
+    fault_clipboard: bool,
+    fault_opener: bool,
     /// OS appearance is light (drives `sync_os_theme`).
     os_light: bool,
     /// Last audible bell: a flood of BELs (`cat` of a binary) plays one sound
@@ -712,6 +741,13 @@ pub struct App {
         crate::menubar::MenuBar,
         std::collections::BTreeMap<String, String>,
     )>,
+    /// The menu bar icon (`menu_bar_icon`) while this process runs; the
+    /// phone gateway shows its own once no window is left.
+    #[cfg(target_os = "macos")]
+    status_item: Option<crate::status_item::StatusItem>,
+    /// This quit came from "Quit Rift Completely": the phone gateway and
+    /// the session service's remaining shells end with the app.
+    quit_completely: bool,
 }
 
 /// Everything one window owns: its winit window and GPU surface, tabs and
@@ -834,6 +870,11 @@ struct WindowState {
     /// waits out [`OUTPUT_FRAME`].
     last_frame: Instant,
     output_frame_due: Option<Instant>,
+    /// The active pane printed since find counted its matches, and when
+    /// it last counted them (live output recounts at most every
+    /// [`SEARCH_LIVE`]).
+    search_stale: bool,
+    search_counted: Instant,
     fullscreen_op: bool,
     window_pos: Option<(f64, f64)>,
     restore_size: Option<winit::dpi::LogicalSize<f64>>,
@@ -862,6 +903,12 @@ struct WindowState {
     tip_suppressed: bool,
     /// The pointer is over the window.
     pointer_in: bool,
+    /// ⇧⌘I: the command inspector's card shows at the cursor (until the
+    /// next key).
+    inspect_pinned: bool,
+    /// A hidden tab strip (`tab_bar`) slid in over the panes: the pointer
+    /// reached the window's top edge and has not left the strip since.
+    bar_revealed: bool,
     /// Directory the review model was last requested for.
     review_cwd: Option<String>,
     /// Last git status poll of the active tab's panes (changes made while a
@@ -1067,6 +1114,24 @@ fn confirm_accepts(repeat: bool, shown: Duration) -> bool {
     !repeat && shown >= CONFIRM_ARM
 }
 
+/// The confirm button Enter presses.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ConfirmChoice {
+    Cancel,
+    Confirm,
+}
+
+/// What Enter does in a confirmation whose focus is on the dismiss button
+/// (`focus_cancel`) or the confirm one, shown for `shown`: dismissing is
+/// always safe, confirming obeys [`confirm_accepts`].
+fn confirm_enter(focus_cancel: bool, repeat: bool, shown: Duration) -> Option<ConfirmChoice> {
+    if focus_cancel {
+        (!repeat).then_some(ConfirmChoice::Cancel)
+    } else {
+        confirm_accepts(repeat, shown).then_some(ConfirmChoice::Confirm)
+    }
+}
+
 /// How `pane`'s program wants keys encoded.
 fn key_encoding(pane: &PaneState, option_as_meta: bool) -> input::KeyEncoding {
     use rift_pty::alacritty_terminal::term::TermMode;
@@ -1231,6 +1296,15 @@ fn reveal_external(path: &std::path::Path) -> Result<(), String> {
 /// Hand a URL or path to the OS opener (documents only, never script
 /// handlers; programs are revealed, not run). `Err` says why nothing opened.
 fn open_external(target: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let opener = "open";
+    #[cfg(not(target_os = "macos"))]
+    let opener = "xdg-open";
+    open_external_with(target, opener)
+}
+
+/// [`open_external`] through `opener`.
+fn open_external_with(target: &str, opener: &str) -> Result<(), String> {
     match local_path_of(target) {
         Some(path) if opens_as_program(&path) => return reveal_external(&path),
         Some(_) => {}
@@ -1243,10 +1317,6 @@ fn open_external(target: &str) -> Result<(), String> {
             None => return Err("not a link or an absolute path".into()),
         },
     }
-    #[cfg(target_os = "macos")]
-    let opener = "open";
-    #[cfg(not(target_os = "macos"))]
-    let opener = "xdg-open";
     log::info!("open {target}");
     std::process::Command::new(opener)
         .arg(target)
@@ -1415,6 +1485,11 @@ enum ConfirmAction {
         id: String,
         name: String,
     },
+    /// A `rift://` link opens a layout whose panes run commands.
+    LaunchLink {
+        config: Box<rift_core::launch::LaunchConfig>,
+        new_window: bool,
+    },
 }
 
 /// The Operate confirmation's description.
@@ -1522,6 +1597,9 @@ const RELEASES_PAGE: &str = "https://github.com/botjaeger/rift-releases/releases
 struct ConfirmClose {
     /// When the dialog appeared: Enter typed ahead of it does not accept.
     opened: Instant,
+    /// The keyboard stands on the dismiss button (Tab, ←): Enter cancels.
+    /// The confirm button has it when the dialog opens.
+    focus_cancel: bool,
     action: ConfirmAction,
     /// Running commands (close) or the first pasted lines (paste).
     commands: Vec<String>,
@@ -1609,6 +1687,8 @@ impl WindowState {
             iconified: false,
             last_frame: Instant::now(),
             output_frame_due: None,
+            search_stale: false,
+            search_counted: Instant::now(),
             fullscreen_op: false,
             window_pos: None,
             restore_size: None,
@@ -1624,6 +1704,8 @@ impl WindowState {
             tip_hidden_at: None,
             tip_suppressed: false,
             pointer_in: true,
+            bar_revealed: false,
+            inspect_pinned: false,
             review_cwd: None,
             git_polled: None,
             docker_polled: None,
@@ -1684,6 +1766,10 @@ impl App {
             next_pane: 1,
             theme: Theme::default(),
             color_scheme: None,
+            applied_icon: None,
+            link_times: Vec::new(),
+            manual: std::collections::HashMap::new(),
+            manual_pending: std::collections::HashSet::new(),
             cell_w: DEFAULT_FONT_SIZE * 0.6,
             theme_error: None,
             blink_epoch: Instant::now(),
@@ -1691,6 +1777,7 @@ impl App {
             keymap: Keymap::from_overrides(&Default::default()),
             clipboard: None,
             shell_history: Arc::default(),
+            history_shell: String::new(),
             font_size: DEFAULT_FONT_SIZE,
             line_h: DEFAULT_FONT_SIZE * 1.2,
             _watcher: None,
@@ -1698,6 +1785,8 @@ impl App {
             headless,
             headless_clipboard: String::new(),
             headless_files: Vec::new(),
+            fault_clipboard: false,
+            fault_opener: false,
             os_light: false,
             last_beep: None,
             launch_configs: Vec::new(),
@@ -1738,6 +1827,9 @@ impl App {
             global_hotkey: None,
             #[cfg(target_os = "macos")]
             menubar: None,
+            #[cfg(target_os = "macos")]
+            status_item: None,
+            quit_completely: false,
         }
     }
 
@@ -1766,6 +1858,22 @@ impl App {
             }
         }
         rift_pty::set_default_colors(colors);
+        let icon = self.config.app_icon;
+        if self
+            .applied_icon
+            .replace(icon)
+            .is_some_and(|was| was != icon)
+        {
+            #[cfg(target_os = "macos")]
+            if !self.headless {
+                crate::icon::set_dock_icon(icon);
+            }
+            self.each_window(|app| {
+                if let Some(w) = &app.win.window {
+                    w.set_window_icon(crate::icon::window_icon(icon));
+                }
+            });
+        }
         // the remote screens' colours come from the theme: each is new
         for p in self.all_panes() {
             p.session
@@ -1805,6 +1913,18 @@ impl App {
             self.menubar =
                 crate::menubar::install(&self.keymap).map(|m| (m, self.config.keybindings.clone()));
         }
+        #[cfg(target_os = "macos")]
+        {
+            let want = self.config.menu_bar_icon && !self.headless && self.win.window.is_some();
+            if want != self.status_item.is_some() {
+                self.status_item = want
+                    .then(objc2::MainThreadMarker::new)
+                    .flatten()
+                    .map(|mtm| {
+                        crate::status_item::StatusItem::new(mtm, crate::status_item::app_menu())
+                    });
+            }
+        }
         if let Some(engine) = &mut self.text {
             let used = engine.set_mono_family(&self.config.font_family);
             if !used.eq_ignore_ascii_case(self.config.font_family.trim()) {
@@ -1835,6 +1955,9 @@ impl App {
             crate::translucency::apply(w, self.config.blur());
             place_traffic_lights(w);
         }
+        // a strip `tab_bar` hides takes the window buttons with it
+        self.track_strip(None);
+        self.sync_window_buttons();
         self.place_hotkey_window();
         self.apply_background_image();
         let vim = self.config.vim_mode;
@@ -1962,6 +2085,26 @@ impl App {
         }
     }
 
+    /// Import the configured shell's history off the main thread, unless
+    /// that shell's history is already loaded or on its way. `shell_history`
+    /// holds nothing but the import, so a new shell replaces it
+    /// (`HistoryLoaded`); commands run in Rift live in the pane histories.
+    fn import_shell_history(&mut self) {
+        let shell = rift_core::shell_integration::resolve_shell(self.config.shell.as_deref());
+        if shell == self.history_shell {
+            return;
+        }
+        self.history_shell = shell.clone();
+        let proxy = self.proxy.clone();
+        std::thread::Builder::new()
+            .name("history-import".into())
+            .spawn(move || {
+                let h = rift_core::history::load_shell_history(&shell, 5000);
+                let _ = proxy.send_event(UserEvent::HistoryLoaded(shell, h));
+            })
+            .ok();
+    }
+
     /// Read config.toml. A file that cannot be read or parsed keeps the
     /// current config (at startup: defaults with automation off) and says
     /// why, instead of silently resetting every setting.
@@ -1992,10 +2135,32 @@ impl App {
                 self.config_error = Some(e);
             }
         }
+        self.sync_launch_at_login();
+    }
+
+    /// `launch_at_login` shows the login item as it is: System Settings ›
+    /// Login Items can remove it while Rift is closed, and config.toml may
+    /// say otherwise. Only the Settings switch changes it.
+    fn sync_launch_at_login(&mut self) {
+        if let Some(on) = rift_pty::launchd::launch_at_login() {
+            self.config.launch_at_login = on;
+        }
+    }
+
+    /// The Settings switch: add or remove the login item, then show what
+    /// the system has.
+    fn toggle_launch_at_login(&mut self) {
+        let on = !self.config.launch_at_login;
+        if let Err(e) = rift_pty::launchd::set_launch_at_login(on) {
+            log::warn!("launch at login: {e}");
+            self.toast_error(format!("Could not change Launch at login: {e}"));
+        }
+        self.sync_launch_at_login();
     }
 
     /// Map a mouse position to a grid Point + cell Side using the pane's
-    /// frame row cache. Header rows clamp to the nearest grid row.
+    /// frame row cache. Header and blank pad rows clamp to the nearest grid
+    /// row.
     fn grid_point_at(pane: &PaneState, mx: f32, my: f32) -> Option<(APoint, ASide)> {
         use crate::views::terminal::RowKind;
         let grid = pane.last_grid?;
@@ -2005,8 +2170,8 @@ impl App {
         // row under cursor, clamped to the visible slice
         let mut idx = (((my - grid.y) / grid.line_h).floor() as i64)
             .clamp(0, pane.rows.len() as i64 - 1) as usize;
-        // clamp header rows to the nearest grid row
-        if matches!(pane.rows[idx].kind, RowKind::Header(_)) {
+        // clamp header and pad rows to the nearest grid row
+        if matches!(pane.rows[idx].kind, RowKind::Header(_) | RowKind::Pad) {
             let down = pane.rows[idx..]
                 .iter()
                 .position(|r| matches!(r.kind, RowKind::Grid { .. }))
@@ -2342,6 +2507,7 @@ impl App {
             pane.last_grid.map_or(screen_lines, |g| g.rows),
             live_end,
             &hidden,
+            pane.last_grid.is_some_and(|g| g.spaced_blocks),
         );
         (display, blocks)
     }
@@ -2727,6 +2893,12 @@ impl App {
                 self.win.viewer.close();
                 return;
             }
+            MenuAction::RearrangeToolbar => {
+                self.win
+                    .settings
+                    .open_page(crate::views::settings::Page::Appearance);
+                self.win.settings.query = "toolbar".into();
+            }
             MenuAction::RenameTab(i) => {
                 self.start_rename(i);
                 return;
@@ -3078,7 +3250,12 @@ impl App {
     /// Open a link or path with the OS opener; a headless run only reports
     /// it (an opened browser or editor would take the user's focus).
     fn open_target_external(&mut self, target: &str) {
-        if self.headless {
+        if self.headless && self.fault_opener {
+            // the real failure path, with an opener that does not exist
+            if let Err(e) = open_external_with(target, "rift-script-missing-opener") {
+                self.toast_error(format!("Could not open {target}: {e}"));
+            }
+        } else if self.headless {
             log::info!("headless: not opening {target}");
             self.toast(format!("Headless: not opening {target}"));
         } else if let Some(path) = local_path_of(target).filter(|p| opens_as_program(p)) {
@@ -3147,28 +3324,20 @@ impl App {
     /// file (absolute, `~/…`, or relative to the directory the command that
     /// printed it ran in; the pane's current one for unattributed rows).
     fn resolve_path(pane: &PaneState, abs: u64, path: &str) -> Option<String> {
-        let home = std::env::var("HOME").unwrap_or_default();
-        let resolved = if let Some(rest) = path.strip_prefix("~/") {
-            std::path::Path::new(&home).join(rest)
-        } else if path.starts_with('/') {
-            std::path::PathBuf::from(path)
-        } else {
-            let block_cwd = pane
-                .session
-                .blocks
-                .lock()
-                .unwrap()
-                .cwd_at(abs)
-                .map(str::to_string);
-            let cwd = match block_cwd {
-                Some(cwd) => cwd,
-                None => pane.session.local_cwd()?,
-            };
-            std::path::Path::new(&cwd).join(path)
+        use rift_core::block::OutputDir;
+        let origin = pane.session.blocks.lock().unwrap().output_dir(abs);
+        let (dir, remote) = match origin {
+            OutputDir::Local(dir) => (Some(dir), false),
+            // ran on another host (ssh): its paths are not on this disk
+            OutputDir::Remote => (None, true),
+            OutputDir::Unattributed => (
+                pane.session.local_cwd(),
+                pane.session
+                    .cwd_remote
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
         };
-        resolved
-            .exists()
-            .then(|| resolved.to_string_lossy().into_owned())
+        resolve_output_path(dir.as_deref(), remote, path)
     }
 
     /// Hint mode: label every visible link, existing path and block header
@@ -3470,7 +3639,11 @@ impl App {
                     | ClickTarget::ToggleExplorer
                     | ClickTarget::ToggleReview
                     | ClickTarget::ToggleNotifications
+                    | ClickTarget::TogglePalette
+                    | ClickTarget::ToggleSettings
                     | ClickTarget::JumpToBlock(..)
+                    | ClickTarget::JumpToBlockEnd(..)
+                    | ClickTarget::Subshell(..)
                     | ClickTarget::SettingsNav(_)
                     | ClickTarget::SettingsClose
                     | ClickTarget::SettingsToggle(_)
@@ -3506,7 +3679,7 @@ impl App {
             icon
         } else if over_link || over_path {
             CursorIcon::Pointer
-        } else if my > TAB_BAR_H
+        } else if my > self.strip_h()
             && self.win.mouse.0 > self.rail_w()
             && !self.win.settings.open
             && !self.win.palette.open
@@ -3536,6 +3709,12 @@ impl App {
     /// The system clipboard, opened on first use; a backend that cannot be
     /// opened is reported once per attempt.
     fn clipboard(&mut self) -> Option<&mut arboard::Clipboard> {
+        if self.fault_clipboard {
+            let e = "no clipboard backend (script fault)";
+            log::warn!("clipboard unavailable: {e}");
+            self.toast_error(format!("Clipboard unavailable: {e}"));
+            return None;
+        }
         if self.clipboard.is_none() {
             match arboard::Clipboard::new() {
                 Ok(cb) => self.clipboard = Some(cb),
@@ -3550,7 +3729,7 @@ impl App {
 
     /// Copy `text`; `false` (after telling the user) when it failed.
     fn copy_to_clipboard(&mut self, text: String) -> bool {
-        if self.headless {
+        if self.headless && !self.fault_clipboard {
             self.headless_clipboard = text;
             self.headless_files.clear();
             return true;
@@ -3569,7 +3748,7 @@ impl App {
     }
 
     fn paste_from_clipboard(&mut self) {
-        if self.headless {
+        if self.headless && !self.fault_clipboard {
             let text = input::pasted_files_text(&self.headless_files)
                 .unwrap_or_else(|| self.headless_clipboard.clone());
             self.paste_text(&text);
@@ -3648,7 +3827,11 @@ impl App {
         };
         if editor_active {
             let clean = input::sanitize_editor_paste(text);
-            pane.editor.insert(&clean);
+            if pane.editor.has_extra() {
+                pane.editor.paste_at_carets(&clean);
+            } else {
+                pane.editor.insert(&clean);
+            }
             pane.selected_block = None;
             self.update_completions();
             return;
@@ -3667,6 +3850,7 @@ impl App {
             let commands = text.lines().map(str::to_string).collect();
             self.win.confirm = Some(ConfirmClose {
                 opened: Instant::now(),
+                focus_cancel: false,
                 action: ConfirmAction::Paste {
                     pane: id,
                     text: text.to_string(),
@@ -3722,8 +3906,35 @@ impl App {
             None => terminal::Found::default(),
         };
         self.win.search.set_matches(found);
+        self.win.search_stale = false;
+        self.win.search_counted = Instant::now();
         if jump && !self.win.search.matches.is_empty() {
             self.jump_to_match();
+        }
+    }
+
+    /// Recount find's matches after new output without moving the view:
+    /// the selected match stays selected; if scrollback dropped it, the
+    /// oldest match left is selected.
+    fn refresh_search_live(&mut self) {
+        let kept = self.win.search.current_anchor();
+        self.refresh_search(false);
+        let Some(kept) = kept else {
+            return;
+        };
+        let matches = &self.win.search.matches;
+        if let Some(i) = matches.iter().position(|m| *m == kept) {
+            self.win.search.current = i;
+        } else if matches.first().is_some_and(|first| kept < *first) {
+            self.win.search.current = 0;
+        }
+    }
+
+    /// Recount stale matches before find navigates, so it never jumps to a
+    /// trimmed anchor.
+    fn refresh_search_if_stale(&mut self) {
+        if self.win.search_stale {
+            self.refresh_search_live();
         }
     }
 
@@ -3784,12 +3995,17 @@ impl App {
             self.refresh_search(true);
             return;
         }
-        // cmd chords: ⌘G / ⇧⌘G cycle matches; everything else is swallowed
-        // (never appended to the query as text)
+        // cmd chords: ⌘G / ⇧⌘G cycle matches, ⌘A selects the query;
+        // everything else is swallowed (never appended to the query as text)
         if mods.super_key() {
             if let Key::Character(s) = &event.logical_key
+                && s.to_ascii_lowercase() == "a"
+            {
+                self.select_search_query();
+            } else if let Key::Character(s) = &event.logical_key
                 && s.to_ascii_lowercase() == "g"
             {
+                self.refresh_search_if_stale();
                 if shift {
                     self.win.search.prev();
                 } else {
@@ -3813,6 +4029,7 @@ impl App {
                 }
             }
             Key::Named(NamedKey::Enter) => {
+                self.refresh_search_if_stale();
                 if shift {
                     self.win.search.prev();
                 } else {
@@ -3821,24 +4038,45 @@ impl App {
                 self.jump_to_match();
             }
             Key::Named(NamedKey::Backspace) => {
-                self.win.search.query.pop();
+                if std::mem::take(&mut self.win.search.all_selected) {
+                    self.win.search.query.clear();
+                } else {
+                    crate::state::pop_grapheme(&mut self.win.search.query);
+                }
                 self.refresh_search(true);
             }
             Key::Named(NamedKey::Space) => {
-                self.win.search.query.push(' ');
-                self.refresh_search(true);
+                self.type_into_search(" ");
             }
             _ => {
                 if let Some(text) = &event.text
                     && !text.is_empty()
                     && !text.chars().any(|c| c.is_control())
                 {
-                    self.win.search.query.push_str(text);
-                    self.refresh_search(true);
+                    let text = text.to_string();
+                    self.type_into_search(&text);
                 }
             }
         }
         self.blink_epoch = Instant::now();
+    }
+
+    /// Typed text in find: it replaces a ⌘A-selected query, else appends.
+    fn type_into_search(&mut self, text: &str) {
+        if std::mem::take(&mut self.win.search.all_selected) {
+            self.win.search.query.clear();
+        }
+        self.win.search.query.push_str(text);
+        self.refresh_search(true);
+    }
+
+    /// ⌘A in find: select the whole query (nothing to select when empty).
+    fn select_search_query(&mut self) {
+        self.win.search.all_selected = !self.win.search.query.is_empty();
+        self.blink_epoch = Instant::now();
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
     }
 
     /// Block-filter input: type to narrow, Enter keeps the filter, Esc (or
@@ -3881,7 +4119,7 @@ impl App {
                 self.win.search.close();
             }
             Key::Named(NamedKey::Backspace) => {
-                query.pop();
+                crate::state::pop_grapheme(query);
             }
             Key::Named(NamedKey::Space) => query.push(' '),
             _ => {
@@ -4455,6 +4693,13 @@ impl App {
                     .collect(),
                 self.config.font_family.clone(),
             ),
+            "app_icon" => (
+                rift_core::AppIcon::ALL
+                    .iter()
+                    .map(|i| (i.name().to_string(), i.label().to_string()))
+                    .collect(),
+                self.config.app_icon.name().to_string(),
+            ),
             "link_editor" | "file_editor" => {
                 use rift_core::editors;
                 let current = if id == "link_editor" {
@@ -4525,6 +4770,10 @@ impl App {
             "theme" => self.config.theme = value,
             "theme_light" => self.config.theme_light = value,
             "font_family" => self.config.font_family = value,
+            "app_icon" => match rift_core::AppIcon::from_name(&value) {
+                Some(icon) => self.config.app_icon = icon,
+                None => return,
+            },
             "link_editor" => self.config.link_editor = value,
             "file_editor" => self.config.file_editor = value,
             "notifications.sound_finished" => n.sound_finished = value,
@@ -5435,6 +5684,7 @@ impl App {
                 if let Some(p) = self.ssh_profiles.get(i).cloned() {
                     self.win.confirm = Some(ConfirmClose {
                         opened: Instant::now(),
+                        focus_cancel: false,
                         commands: vec![
                             "~/.local/share/rift/rift.{bash,zsh,fish}".into(),
                             "~/.local/share/rift/complete.{bash,zsh,fish}".into(),
@@ -5490,7 +5740,7 @@ impl App {
                 self.open_palette(next);
             }
             Key::Named(NamedKey::Backspace) => {
-                self.win.palette.query.pop();
+                crate::state::pop_grapheme(&mut self.win.palette.query);
                 self.win.palette.selected = 0;
                 self.refresh_palette();
             }
@@ -5543,7 +5793,8 @@ impl App {
         };
         let buffer = pane.editor.buffer.clone();
         let cursor = pane.editor.cursor;
-        if buffer.trim().is_empty() {
+        // several carets: no completion menu or ghost (they act at one)
+        if buffer.trim().is_empty() || pane.editor.has_extra() {
             self.completion_pending = None;
             self.win.completion.close();
             return;
@@ -6059,6 +6310,8 @@ impl App {
         let snapshot = pane.session.blocks.lock().unwrap().snapshot();
         let blocks: Vec<SavedBlock> = snapshot
             .into_iter()
+            // a background job's output is not a command to replay
+            .filter(|b| !b.background)
             .filter_map(|b| match b.state {
                 rift_core::BlockState::Done { exit, duration } => Some(SavedBlock {
                     output: terminal::block_output_text(&pane.session, b.id).unwrap_or_default(),
@@ -6066,6 +6319,7 @@ impl App {
                     exit,
                     duration_ms: duration.as_millis() as u64,
                     cwd: b.cwd,
+                    cwd_remote: b.cwd_remote,
                 }),
                 _ => None,
             })
@@ -6164,7 +6418,7 @@ impl App {
         let (_, lw) = self.content_span(lw);
         let cols = ((lw - self.config.padding() * 2.0 - terminal::BLOCK_INDENT) / self.cell_w)
             .max(2.0) as usize;
-        let rows = ((lh - TAB_BAR_H - TOP_PAD - EDITOR_H) / self.line_h).max(2.0) as usize;
+        let rows = ((lh - self.bar_h() - TOP_PAD - EDITOR_H) / self.line_h).max(2.0) as usize;
         let session = self.spawn_session(cols, rows, cwd);
         self.win.tabs.push(TabState::new(self.new_pane(session)));
         self.win.active = self.win.tabs.len() - 1;
@@ -7127,6 +7381,7 @@ impl App {
                 };
                 self.win.confirm = Some(ConfirmClose {
                     opened: Instant::now(),
+                    focus_cancel: false,
                     action: ConfirmAction::Revert { root, path, hunk },
                     commands: vec![what],
                 });
@@ -7173,17 +7428,26 @@ impl App {
         let (ex, rv) = self.panel_widths(w);
         let rail = self.rail_w();
         let review = if self.review_maximized() {
-            [rail, TAB_BAR_H, w - rail, h - TAB_BAR_H]
+            [rail, self.bar_h(), w - rail, h - self.bar_h()]
         } else {
-            [w - rv, TAB_BAR_H, rv, h - TAB_BAR_H]
+            [w - rv, self.bar_h(), rv, h - self.bar_h()]
         };
-        ([rail, TAB_BAR_H, ex, h - TAB_BAR_H], review)
+        ([rail, self.bar_h(), ex, h - self.bar_h()], review)
     }
 
     /// The review panel covers the panes (its ⤢ button). The pane layout
     /// behind it does not change, so no shell is resized.
     fn review_maximized(&self) -> bool {
         self.win.review.open && self.win.review.maximized && !self.win.settings.open
+    }
+
+    /// The review panel is on screen: beside the panes (the window leaves it
+    /// room) or maximized.
+    fn review_visible(&self) -> bool {
+        self.review_maximized()
+            || self.win.review.open
+                && !self.win.settings.open
+                && self.panel_widths(self.logical_size().0).1 > 0.0
     }
 
     /// The pointer is over the maximized review panel.
@@ -7268,6 +7532,7 @@ impl App {
         let (ex_rect, rv_rect) = self.panel_rects();
         if ex_rect[2] > 0.0 && inside(&ex_rect) {
             self.win.explorer.focused = true;
+            self.win.review.drop_keys();
             let hit = self
                 .win
                 .explorer_hits
@@ -7278,7 +7543,9 @@ impl App {
                 Some(ExplorerHit::Row(i)) => {
                     if let Some(row) = self.win.explorer.rows.get(i).cloned() {
                         self.win.explorer.selected = Some(row.path.clone());
-                        if self.win.modifiers.alt_key() {
+                        if row.more {
+                            self.win.explorer.show_more(&row.path);
+                        } else if self.win.modifiers.alt_key() {
                             self.drop_file(&row.path);
                         } else if row.is_dir {
                             self.win.explorer.toggle(&row.path);
@@ -7328,19 +7595,19 @@ impl App {
         {
             panes.push(PaneRect {
                 id: z,
-                rect: [x0, TAB_BAR_H, w, h - TAB_BAR_H],
+                rect: [x0, self.bar_h(), w, h - self.bar_h()],
             });
             return (panes, handles);
         }
         if tab.root.is_split() {
             // flush panes (Warp): the whole content rect, 1px dividers; the
             // viewer pane is one of the leaves
-            let area = [x0, TAB_BAR_H, w, h - TAB_BAR_H];
+            let area = [x0, self.bar_h(), w, h - self.bar_h()];
             tab.root.layout(area, &mut panes, &mut handles, vec![]);
         } else {
             panes.push(PaneRect {
                 id: tab.active_pane,
-                rect: [x0, TAB_BAR_H, w, h - TAB_BAR_H],
+                rect: [x0, self.bar_h(), w, h - self.bar_h()],
             });
         }
         (panes, handles)
@@ -7381,6 +7648,7 @@ impl App {
         self.follow_review();
         self.mark_visible_read();
         self.prune_note_toasts();
+        let (toolbar_left, toolbar_right) = self.config.toolbar();
         let panel_buttons = tabbar::PanelButtons {
             explorer_open: self.win.explorer.open,
             // lit only while the panel is actually on screen
@@ -7397,6 +7665,10 @@ impl App {
             update: self.update_chip().is_some(),
             remote: self.remote_chip(),
             no_window_buttons: self.win.dropdown.is_some(),
+            left: toolbar_left,
+            right: toolbar_right,
+            palette_open: self.win.palette.open,
+            settings_open: self.win.settings.open,
         };
         let notification_entries = if self.win.notifications.open {
             self.notification_entries()
@@ -7554,9 +7826,14 @@ impl App {
         // one tab and tab_bar_with_one_tab off: no tab in the strip (its
         // buttons and + stay; the rail is gone, rail_w() is 0)
         let strip_tabs: &[tabbar::TabInfo] = if self.tabs_shown() { &tab_infos } else { &[] };
+        let (bar, strip_h, strip_overlay) = (self.bar_h(), self.strip_h(), self.strip_overlay());
         let close_button = self.config.tab_close_button;
+        let close_left = self.config.tab_close_side == rift_core::TabCloseSide::Left;
         let pane_dim = self.config.inactive_pane_dim();
         let sticky_headers = self.config.sticky_command_header;
+        let spaced_blocks = self.config.block_spacing == rift_core::BlockSpacing::Normal;
+        let block_dividers = self.config.block_dividers;
+        let jump_button = self.config.jump_to_bottom_button;
         self.win.dimmed_panes = 0;
         // chrome hover follows the pointer unless a modal surface covers it
         let chrome_mouse =
@@ -7575,12 +7852,12 @@ impl App {
             .win
             .confirm
             .as_ref()
-            .map(|c| (c.action.clone(), c.commands.clone()));
+            .map(|c| (c.action.clone(), c.commands.clone(), c.focus_cancel));
         let phones = self.connected_phones();
         // the confirmation is about a quit (it empties the last ordinary window)
         let quits = confirm
             .as_ref()
-            .is_some_and(|(a, _)| matches!(a, ConfirmAction::Close(s) if self.quits(*s)));
+            .is_some_and(|(a, _, _)| matches!(a, ConfirmAction::Close(s) if self.quits(*s)));
         let filter_editing = self.win.filter_editing;
         let shell_env = self.shell_env.clone();
         let error_underline = self.config.error_underline;
@@ -7663,6 +7940,7 @@ impl App {
                 chrome_mouse,
                 None,
                 close_button,
+                close_left,
                 &mut hits,
             );
             tabbar::render_rail(
@@ -7676,7 +7954,39 @@ impl App {
                 close_button,
                 &mut hits,
             );
-        } else {
+        } else if strip_overlay {
+            // a hidden strip slid in at the top edge (`tab_bar`): over the
+            // panes and their overlays, under the menus
+            let mut bar_layer = rift_renderer::Layer::default();
+            tabbar::render(
+                &mut bar_layer,
+                &mut over,
+                engine,
+                &theme,
+                strip_tabs,
+                strip_active,
+                w,
+                blink,
+                panel_buttons,
+                chrome_mouse,
+                lifted_tab,
+                close_button,
+                close_left,
+                &mut hits,
+            );
+            let l4 = scene.layer(4);
+            l4.shadow(
+                [0.0, 0.0],
+                [w, TAB_BAR_H],
+                rift_core::Color::BLACK.with_alpha(0.45),
+                0.0,
+                12.0,
+            );
+            // opaque under a translucent window: the panes never show through
+            l4.rect([0.0, 0.0], [w, TAB_BAR_H], theme.bg_chrome, 0.0);
+            l4.quads.extend(bar_layer.quads);
+            l4.texts.extend(bar_layer.texts);
+        } else if bar > 0.0 {
             tabbar::render(
                 scene.layer(0),
                 &mut over,
@@ -7690,6 +8000,7 @@ impl App {
                 chrome_mouse,
                 lifted_tab,
                 close_button,
+                close_left,
                 &mut hits,
             );
         }
@@ -7711,8 +8022,8 @@ impl App {
         if split {
             // gutter fill
             scene.layer(0).rect(
-                [rail_w, TAB_BAR_H],
-                [w - rail_w, h - TAB_BAR_H],
+                [rail_w, bar],
+                [w - rail_w, h - bar],
                 theme.ground(theme.bg_gutter),
                 0.0,
             );
@@ -7873,6 +8184,9 @@ impl App {
                         .filter(|(p, _, at)| *p == pr.id && at.elapsed() < COPIED_SHOWN)
                         .map(|(_, b, _)| b),
                     scale,
+                    spaced_blocks,
+                    block_dividers,
+                    jump_button,
                 }
             };
 
@@ -8037,6 +8351,13 @@ impl App {
                 hits.push(Hit {
                     rect: *rect,
                     target: ClickTarget::JumpToBlock(pr.id, *id),
+                });
+            }
+            let jump_bottom = out.jump_bottom;
+            if let Some((rect, block)) = jump_bottom {
+                hits.push(Hit {
+                    rect,
+                    target: ClickTarget::JumpToBlockEnd(pr.id, block),
                 });
             }
             pane.url_hits = out.url_hits;
@@ -8284,6 +8605,54 @@ impl App {
                 }
             }
 
+            if let Some(offer) = pane.subshell.as_ref().filter(|o| o.shown) {
+                let _ = offer;
+                let parts = crate::views::subshell::render(
+                    scene.layer(2),
+                    engine,
+                    &theme,
+                    pr.rect,
+                    subshell::enable_keys(),
+                    Some(mouse),
+                );
+                // above the rows' own targets
+                let front: Vec<Hit> = parts
+                    .into_iter()
+                    .map(|(rect, part)| Hit {
+                        rect,
+                        target: ClickTarget::Subshell(pr.id, part),
+                    })
+                    .collect();
+                hits.splice(0..0, front);
+            }
+            if let Some((rect, _)) = jump_bottom {
+                // over the rows' text (layer 2), like the sticky header
+                let l2 = scene.layer(2);
+                let hover = mouse.0 >= rect[0]
+                    && mouse.0 < rect[0] + rect[2]
+                    && mouse.1 >= rect[1]
+                    && mouse.1 < rect[1] + rect[3];
+                let c = [rect[0] + rect[2] / 2.0, rect[1] + rect[3] / 2.0];
+                // a hover rings it in the accent
+                l2.circle(
+                    c,
+                    rect[2] + 2.0,
+                    if hover { theme.accent } else { theme.border },
+                );
+                l2.circle(c, rect[2], theme.surface);
+                crate::views::icons::draw(
+                    l2,
+                    crate::views::icons::Icon::ChevronDown,
+                    c,
+                    16.0,
+                    if hover {
+                        theme.text_bright
+                    } else {
+                        theme.text_ui
+                    },
+                );
+            }
+
             // sticky command header (active pane only; layer 2 covers row text).
             // Not over a running command followed live: its program owns the
             // whole PTY height, so the header would hide its top row (vttest,
@@ -8349,7 +8718,7 @@ impl App {
                 engine,
                 &theme,
                 &mut self.win.explorer,
-                [rail_w, TAB_BAR_H, explorer_w, h - TAB_BAR_H],
+                [rail_w, bar, explorer_w, h - bar],
             )
         } else {
             Vec::new()
@@ -8362,7 +8731,7 @@ impl App {
                     engine,
                     &theme,
                     &mut self.win.review,
-                    [rail_w, TAB_BAR_H, w - rail_w, h - TAB_BAR_H],
+                    [rail_w, bar, w - rail_w, h - bar],
                 )
             } else if review_w > 0.0 && !settings_open {
                 crate::views::review_panel::render(
@@ -8370,7 +8739,7 @@ impl App {
                     engine,
                     &theme,
                     &mut self.win.review,
-                    [w - review_w, TAB_BAR_H, review_w, h - TAB_BAR_H],
+                    [w - review_w, bar, review_w, h - bar],
                 )
             } else {
                 Vec::new()
@@ -8499,34 +8868,45 @@ impl App {
         }
         self.win.ime_spot = ime_spot;
 
-        // ── layer 2: search bar ──
+        // ── layer 3: search bar, over the sticky headers' text (layer 2) and
+        // the inactive-pane dim; a maximized review panel (also layer 3,
+        // drawn first) would be covered, so then it stays under it ──
         if search_state.open && !settings_open {
+            let search_layer = if self.win.review.open && self.win.review.maximized {
+                2
+            } else {
+                3
+            };
             let filter = tabs
                 .get(active_tab_idx)
                 .and_then(|t| t.active())
                 .and_then(|p| p.filter.clone());
             let chips = match (filter_editing, filter) {
                 (true, Some((_, q))) => search::render(
-                    scene.layer(2),
+                    scene.layer(search_layer),
                     engine,
                     &theme,
                     &q,
                     "Enter keep · Esc clear",
                     Some("filter"),
                     w,
+                    bar,
                     blink,
                     None,
+                    false,
                 ),
                 _ => search::render(
-                    scene.layer(2),
+                    scene.layer(search_layer),
                     engine,
                     &theme,
                     &search_state.query,
                     &search::counter(search_state),
                     None,
                     w,
+                    bar,
                     blink,
                     Some((search_state.case_sensitive, search_state.regex)),
+                    search_state.all_selected,
                 ),
             };
             self.win.search_chips = chips;
@@ -8538,8 +8918,8 @@ impl App {
         if settings_open {
             // it covers the content area: only the tab strip (and rail)
             // stays clickable beside its controls
-            let mut area = [rail_w, TAB_BAR_H, w - rail_w, h - TAB_BAR_H];
-            hits.retain(|h| h.rect[1] + h.rect[3] <= TAB_BAR_H || h.rect[0] + h.rect[2] <= rail_w);
+            let mut area = [rail_w, bar, w - rail_w, h - bar];
+            hits.retain(|h| h.rect[1] + h.rect[3] <= strip_h || h.rect[0] + h.rect[2] <= rail_w);
             // config.toml opened from Settings: beside the page, in this tab
             if self.win.config_viewer
                 && let Some(label) = &viewer_label
@@ -8636,7 +9016,7 @@ impl App {
                 &theme,
                 menu,
                 [w, h],
-                TAB_BAR_H + 4.0,
+                bar + 4.0,
                 self.win.mouse,
                 blink,
             ),
@@ -8754,7 +9134,7 @@ impl App {
                 h,
             );
         }
-        if let Some((action, commands)) = &confirm {
+        if let Some((action, commands, focus_cancel)) = &confirm {
             hits.clear();
             use crate::views::confirm::Dialog;
             let update_title;
@@ -8785,6 +9165,7 @@ impl App {
                         cancel_label: "Cancel",
                         destructive: true,
                         processes: true,
+                        focus_cancel: *focus_cancel,
                     }
                 }
                 ConfirmAction::Paste { .. } => {
@@ -8802,8 +9183,21 @@ impl App {
                         cancel_label: "Cancel",
                         destructive: false,
                         processes: false,
+                        focus_cancel: *focus_cancel,
                     }
                 }
+                ConfirmAction::LaunchLink { .. } => Dialog {
+                    title: "Open this layout from a link?",
+                    description: "A rift:// link opens it, and its panes run:".into(),
+                    note: "Links come from web pages and other apps: open only a layout you expect.",
+                    lines: commands,
+                    empty_line: "",
+                    confirm_label: "Open and run",
+                    cancel_label: "Cancel",
+                    destructive: false,
+                    processes: false,
+                    focus_cancel: *focus_cancel,
+                },
                 ConfirmAction::InstallRemote(p) => Dialog {
                     title: "Install shell integration?",
                     description: format!("Runs an installer over ssh on {} that writes:", p.host),
@@ -8814,6 +9208,7 @@ impl App {
                     cancel_label: "Cancel",
                     destructive: false,
                     processes: false,
+                    focus_cancel: *focus_cancel,
                 },
                 ConfirmAction::Revert { hunk, .. } => Dialog {
                     title: if hunk.is_some() {
@@ -8829,6 +9224,7 @@ impl App {
                     cancel_label: "Cancel",
                     destructive: true,
                     processes: false,
+                    focus_cancel: *focus_cancel,
                 },
                 ConfirmAction::RevokeDevice { name, .. } => {
                     update_title = format!("Revoke {name}?");
@@ -8843,6 +9239,7 @@ impl App {
                         cancel_label: "Cancel",
                         destructive: true,
                         processes: false,
+                        focus_cancel: *focus_cancel,
                     }
                 }
                 ConfirmAction::AllowOperate { name, .. } => {
@@ -8857,6 +9254,7 @@ impl App {
                         cancel_label: "Cancel",
                         destructive: false,
                         processes: false,
+                        focus_cancel: *focus_cancel,
                     }
                 }
                 ConfirmAction::Update(plan) => {
@@ -8875,6 +9273,7 @@ impl App {
                         cancel_label: "Later",
                         destructive: false,
                         processes: false,
+                        focus_cancel: *focus_cancel,
                     }
                 }
             };
@@ -9024,6 +9423,8 @@ impl App {
             ClickTarget::ToggleNotifications => {
                 ("Notifications".into(), self.tip_keys("attention_center"))
             }
+            ClickTarget::TogglePalette => ("Command palette".into(), self.tip_keys("palette")),
+            ClickTarget::ToggleSettings => ("Settings".into(), self.tip_keys("open_settings")),
             ClickTarget::BlockChevron(pane, block) => {
                 let collapsed = pane_of(*pane)?
                     .session
@@ -9053,6 +9454,7 @@ impl App {
             ClickTarget::PaneMenu(_) => ("More actions".into(), None),
             ClickTarget::PaneClose(_) => ("Close pane".into(), self.tip_keys("close_pane")),
             ClickTarget::JumpToBlock(..) => ("Scroll to this command".into(), None),
+            ClickTarget::JumpToBlockEnd(..) => ("Jump to the bottom of this block".into(), None),
             ClickTarget::HistoryScope(scope) => (
                 match scope {
                     Scope::Pane => "Commands run in this pane",
@@ -9129,6 +9531,7 @@ impl App {
                 ExplorerHit::Refresh => Tip::new(*rect, "Refresh", None),
                 ExplorerHit::Collapse => Tip::new(*rect, "Collapse all", None),
                 ExplorerHit::Row(i) => match self.win.explorer.rows.get(*i) {
+                    Some(row) if row.more => Tip::new(*rect, "Show the next entries", None),
                     // the full path of a name the panel may cut short
                     Some(row) => Tip::new(
                         *rect,
@@ -9238,6 +9641,13 @@ impl App {
     /// rested there for `tooltip::DELAY` (at once right after another one).
     fn tooltip_pass(&mut self, w: f32, h: f32) {
         use crate::views::tooltip::{DELAY, WARM};
+        // a slid-in strip whose menu closed (a click, no move) goes now
+        if self.win.bar_revealed
+            && self.track_strip(self.win.pointer_in.then_some(self.win.mouse))
+            && let Some(win) = &self.win.window
+        {
+            win.request_redraw();
+        }
         let tips = self.collect_tips();
         let (mx, my) = self.win.mouse;
         // an interactive card stays while the pointer moves from its control
@@ -9251,12 +9661,32 @@ impl App {
                 t.action.is_some() && crate::views::tooltip::bridged(t.rect, d.rect, mx, my)
             })
             .and_then(|(t, _)| tips.iter().find(|n| n.rect == t.rect).cloned());
-        let hovered = if self.tooltip_blocked() {
+        let now = Instant::now();
+        // ⇧⌘I: the inspector's card at the cursor, at once
+        let pinned = if self.win.inspect_pinned {
+            self.inspector_tip(true)
+        } else {
+            None
+        };
+        if let Some(p) = &pinned
+            && self.win.tip_hover.map(|(r, _)| r) != Some(p.rect)
+        {
+            self.win.tip_hover = Some((p.rect, now.checked_sub(DELAY).unwrap_or(now)));
+            self.win.tip_suppressed = false;
+        }
+        let announce = pinned
+            .as_ref()
+            .filter(|p| self.win.tip_shown.as_ref() != Some(*p))
+            .map(|p| format!("{}: {}", p.text, p.body.clone().unwrap_or_default()));
+        let hovered = if pinned.is_some() {
+            pinned
+        } else if self.tooltip_blocked() {
             None
         } else {
-            sticky.or_else(|| tips.iter().find(|t| t.contains(mx, my)).cloned())
+            sticky
+                .or_else(|| self.inspector_tip(false))
+                .or_else(|| tips.iter().find(|t| t.contains(mx, my)).cloned())
         };
-        let now = Instant::now();
         let rect = hovered.as_ref().map(|t| t.rect);
         if self.win.tip_hover.map(|(r, _)| r) != rect {
             if self.win.tip_shown.is_some() {
@@ -9299,6 +9729,10 @@ impl App {
         }
         self.win.tip_shown = shown;
         self.win.tips = tips;
+        // ⇧⌘I: a screen reader hears the card
+        if announce.is_some() {
+            self.win.a11y_announcement = announce;
+        }
     }
 
     /// When the tooltip of the control under the pointer is due (not yet drawn).
@@ -9369,6 +9803,15 @@ impl App {
     fn redraw(&mut self, window: &Window) {
         self.win.last_frame = Instant::now();
         self.win.output_frame_due = None;
+        if self.win.search.open && self.win.search_stale {
+            let due = self.win.search_counted + SEARCH_LIVE;
+            if self.win.last_frame >= due {
+                self.refresh_search_live();
+            } else {
+                // a later frame recounts, also after the output stops
+                self.win.output_frame_due = Some(due);
+            }
+        }
         let scale = window.scale_factor() as f32;
         if self.win.gpu.is_none() {
             return;
@@ -9604,6 +10047,10 @@ impl App {
                     self.toggle_block_filter(pane_id, block);
                 }
             }
+            // the menu's Select All while find has the keys
+            AppAction::SelectAll if self.win.search.open && !self.win.filter_editing => {
+                self.select_search_query();
+            }
             AppAction::SelectAll => {
                 let editor_active = self.win.editor_active;
                 if let Some(pane) = self
@@ -9619,7 +10066,12 @@ impl App {
                         let mut term = pane.session.term.lock();
                         use rift_pty::alacritty_terminal::grid::Dimensions;
                         let top = ALine(-(term.grid().history_size() as i32));
-                        let bottom = ALine(term.grid().screen_lines() as i32 - 1);
+                        // down to the last row holding text: the screen's
+                        // empty rows below the prompt are not copied
+                        let mut bottom = ALine(term.grid().screen_lines() as i32 - 1);
+                        while bottom > top && term.grid()[bottom].is_clear() {
+                            bottom -= 1;
+                        }
                         let right = ACol(term.grid().columns().saturating_sub(1));
                         let mut sel = Selection::new(
                             SelectionType::Simple,
@@ -9719,6 +10171,10 @@ impl App {
                     self.open_palette(crate::views::palette::PaletteMode::Commands);
                 }
             }
+            AppAction::InspectCommand => self.toggle_inspector(),
+            AppAction::AddCursorAbove
+            | AppAction::AddCursorBelow
+            | AppAction::AddNextOccurrence => self.add_caret(action),
             AppAction::OpenSettings => {
                 if self.win.settings.open {
                     self.win.settings.open = false;
@@ -9919,6 +10375,9 @@ impl App {
             AppAction::ToggleExplorer => {
                 self.win.explorer.open = !self.win.explorer.open;
                 self.win.explorer.focused = self.win.explorer.open;
+                if self.win.explorer.focused {
+                    self.win.review.drop_keys();
+                }
                 if self.win.explorer.open {
                     self.follow_explorer();
                     self.request_review();
@@ -9937,6 +10396,7 @@ impl App {
                 } else {
                     self.win.review.open = !self.win.review.open;
                     self.win.review.maximized = false;
+                    self.win.review.drop_keys();
                     if self.win.review.open {
                         self.win.review.notice = None;
                         self.request_review();
@@ -9944,6 +10404,19 @@ impl App {
                             self.toast("Window too narrow for the review panel: widen it".into());
                         }
                     }
+                }
+            }
+            AppAction::FocusReview => {
+                self.win.palette.open = false;
+                if !self.win.review.open {
+                    self.handle_action(AppAction::ToggleReview, event_loop);
+                }
+                if self.review_visible() {
+                    self.win.explorer.focused = false;
+                    self.win.viewer_focus = false;
+                    self.win.review.take_keys();
+                } else if self.win.review.open {
+                    self.toast("Window too narrow for the review panel: widen it".into());
                 }
             }
             AppAction::WhatsNew => {
@@ -9979,7 +10452,7 @@ impl App {
                 };
                 let (lw, lh) = self.logical_size();
                 let (x0, w) = self.content_span(lw);
-                let area = [x0, TAB_BAR_H, w, lh - TAB_BAR_H];
+                let area = [x0, self.bar_h(), w, lh - self.bar_h()];
                 if let Some(tab) = self.win.tabs.get_mut(self.win.active)
                     && tab.zoomed.is_none()
                     && tab.root.resize_pane(area, tab.active_pane, axis, delta)
@@ -10177,7 +10650,7 @@ impl App {
         if plain && self.win.settings.page != settings::Page::Keybindings {
             match &event.logical_key {
                 Key::Named(NamedKey::Backspace) if !self.win.settings.query.is_empty() => {
-                    self.win.settings.query.pop();
+                    crate::state::pop_grapheme(&mut self.win.settings.query);
                     self.win.settings.scroll = 0.0;
                     return true;
                 }
@@ -10365,7 +10838,7 @@ impl App {
     /// screen y at scroll 0) sits inside the body, clamped like the wheel.
     fn scroll_settings_into_view(&mut self, rect: [f32; 4]) {
         let (_, lh) = self.logical_size();
-        let (view_top, view_bottom) = (TAB_BAR_H + 12.0, lh - 34.0 - 12.0);
+        let (view_top, view_bottom) = (self.bar_h() + 12.0, lh - 34.0 - 12.0);
         let s = &mut self.win.settings;
         let y = rect[1] - s.scroll;
         if y < view_top {
@@ -10451,7 +10924,7 @@ impl App {
         }
         match &event.logical_key {
             Key::Named(NamedKey::Backspace) if !self.win.settings.kb_filter.is_empty() => {
-                self.win.settings.kb_filter.pop();
+                crate::state::pop_grapheme(&mut self.win.settings.kb_filter);
                 self.win.settings.scroll = 0.0;
                 true
             }
@@ -10595,6 +11068,35 @@ impl App {
         self.editor_key_on(id, key, true);
     }
 
+    /// Add a caret (Ctrl-⇧-↑ / ↓, Ctrl-G) in the active pane's command line;
+    /// vim mode keeps one cursor.
+    fn add_caret(&mut self, how: AppAction) {
+        if !self.win.editor_active {
+            return;
+        }
+        let Some(pane) = self
+            .win
+            .tabs
+            .get_mut(self.win.active)
+            .and_then(|t| t.active_mut())
+        else {
+            return;
+        };
+        if pane.editor.vim_enabled() {
+            return;
+        }
+        match how {
+            AppAction::AddCursorAbove => pane.editor.add_caret_vertical(false),
+            AppAction::AddCursorBelow => pane.editor.add_caret_vertical(true),
+            _ => pane.editor.add_next_occurrence(),
+        }
+        self.win.completion.close();
+        self.blink_epoch = Instant::now();
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+    }
+
     /// Apply `key` to pane `id`'s command editor (what is the pane's own:
     /// editing, history, submit, ^C, ^D, ^L), then to its synchronized
     /// siblings. `active`: the pane the desktop types into, whose completion
@@ -10609,7 +11111,34 @@ impl App {
             return;
         };
         let mut edited = true;
+        // several carets (multi-cursor): edits and motions act at each, Esc
+        // goes back to one; the rest (submit, history, completion) use the
+        // primary caret
+        let multi = pane.editor.has_extra()
+            && match &key {
+                EditorKey::Dismiss => {
+                    pane.editor.collapse_carets();
+                    edited = false;
+                    false
+                }
+                EditorKey::Cut => {
+                    let mut parts = Vec::new();
+                    pane.editor
+                        .at_each_caret(|e| parts.extend(e.cut_selection()));
+                    parts.reverse();
+                    cut = (!parts.is_empty()).then(|| parts.join("\n"));
+                    true
+                }
+                k => {
+                    let per_caret = caret_key(k, autocomplete_pairs);
+                    if let Some(op) = &per_caret {
+                        pane.editor.at_each_caret(|e| op(e));
+                    }
+                    per_caret.is_some()
+                }
+            };
         match key {
+            _ if multi || !edited => {}
             EditorKey::Cut => cut = pane.editor.cut_selection(),
             EditorKey::SelectLeft => pane.editor.extend(crate::state::EditorState::mv_left),
             EditorKey::SelectRight => pane.editor.extend(crate::state::EditorState::mv_right),
@@ -10642,6 +11171,7 @@ impl App {
             EditorKey::ClearScreen => {
                 // shell-driven repaint: blocks and scrollback survive (⌘K is
                 // the full app-side clear)
+                pane.session.blocks.lock().unwrap().expect_answer();
                 pane.session.write(b"\x0c");
                 pane.view_offset = 0;
                 edited = false;
@@ -10674,12 +11204,14 @@ impl App {
             }
             EditorKey::Interrupt => {
                 pane.editor.clear();
+                pane.session.blocks.lock().unwrap().expect_answer();
                 pane.session.write(b"\x03");
                 signal = Some((pane.session.id, b"\x03"));
                 edited = false;
             }
             EditorKey::Eof => {
                 if pane.editor.buffer.is_empty() {
+                    pane.session.blocks.lock().unwrap().expect_answer();
                     pane.session.write(b"\x04");
                     signal = Some((pane.session.id, b"\x04"));
                 }
@@ -10696,6 +11228,7 @@ impl App {
             self.write_synced(id, bytes, true);
         }
         if let Some((id, cmd)) = submitted {
+            self.note_subshell(id, &cmd);
             self.submit_synced(id, &cmd);
         }
         if edited {
@@ -10830,6 +11363,7 @@ impl App {
             if !commands.is_empty() || phones {
                 self.win.confirm = Some(ConfirmClose {
                     opened: Instant::now(),
+                    focus_cancel: false,
                     action: ConfirmAction::Close(scope),
                     commands,
                 });
@@ -10881,6 +11415,11 @@ impl App {
                     p.session.terminate();
                 }
                 self.save_fresh_session();
+                if self.quit_completely {
+                    // nothing of Rift stays behind: the gateway, and the
+                    // shells phones started in the session service
+                    crate::remote::stop_background();
+                }
                 crate::quit::exit(event_loop);
             }
         }
@@ -10889,23 +11428,30 @@ impl App {
         }
     }
 
-    /// Confirm-modal keys: Esc cancels, Enter confirms; everything else is
+    /// Confirm-modal keys: Esc cancels; Tab / ⇧Tab / ← → move the focus
+    /// between the buttons; Enter presses the focused one. Everything else is
     /// swallowed while the modal is up.
     fn handle_confirm_key(&mut self, event: &input::KeyPress, event_loop: &ActiveEventLoop) {
         use winit::keyboard::{Key, NamedKey};
+        let Some(c) = self.win.confirm.as_mut() else {
+            return;
+        };
         match event.logical_key {
             Key::Named(NamedKey::Escape) => self.cancel_confirm(),
+            Key::Named(NamedKey::Tab) => c.focus_cancel = !c.focus_cancel,
+            Key::Named(NamedKey::ArrowLeft) => c.focus_cancel = true,
+            Key::Named(NamedKey::ArrowRight) => c.focus_cancel = false,
             Key::Named(NamedKey::Enter) => {
                 // a held or typed-ahead Enter (e.g. right after ⌘W or a
                 // paste) must not accept a dialog the user has not seen
-                if self
-                    .win
-                    .confirm
-                    .as_ref()
-                    .is_some_and(|c| confirm_accepts(event.repeat, c.opened.elapsed()))
-                    && let Some(c) = self.win.confirm.take()
-                {
-                    self.perform_confirmed(c.action, event_loop);
+                match confirm_enter(c.focus_cancel, event.repeat, c.opened.elapsed()) {
+                    Some(ConfirmChoice::Cancel) => self.cancel_confirm(),
+                    Some(ConfirmChoice::Confirm) => {
+                        if let Some(c) = self.win.confirm.take() {
+                            self.perform_confirmed(c.action, event_loop);
+                        }
+                    }
+                    None => {}
                 }
             }
             _ => {}
@@ -11148,11 +11694,113 @@ impl App {
         }
     }
 
+    /// Keys while the review panel has the keyboard (⌥⌘G): ↑ ↓ / j k (and
+    /// Tab / ⇧Tab) move between sections, files and the hunks of expanded
+    /// files, Home / End jump, ← → / h l fold and unfold, Enter or Space
+    /// folds, s stages, u unstages, r reverts (it asks first), o opens the
+    /// file, c copies the hunk, Esc gives the keys back. Any other plain key
+    /// leaves the panel and goes on to the command line (maximized, where
+    /// nothing is under it, the panel keeps the keys). False when the key is
+    /// not the panel's.
+    fn handle_review_nav_key(&mut self, event: &input::KeyPress) -> bool {
+        use crate::views::review_panel::StopAct;
+        use winit::keyboard::{Key, NamedKey};
+        let mods = self.win.modifiers;
+        // app shortcuts pass; the panel keeps the keys
+        if mods.super_key() || mods.control_key() || mods.alt_key() {
+            return false;
+        }
+        let maximized = self.review_maximized();
+        let r = &mut self.win.review;
+        let act = match &event.logical_key {
+            Key::Named(NamedKey::Escape) => {
+                r.drop_keys();
+                return true;
+            }
+            Key::Named(NamedKey::ArrowDown) => {
+                r.move_focus(1);
+                return true;
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                r.move_focus(-1);
+                return true;
+            }
+            Key::Named(NamedKey::Tab) => {
+                r.move_focus(if mods.shift_key() { -1 } else { 1 });
+                return true;
+            }
+            Key::Named(NamedKey::Home) => {
+                r.move_focus(-1_000_000);
+                return true;
+            }
+            Key::Named(NamedKey::End) => {
+                r.move_focus(1_000_000);
+                return true;
+            }
+            Key::Named(NamedKey::ArrowLeft) => {
+                r.focus_left();
+                return true;
+            }
+            Key::Named(NamedKey::ArrowRight) => {
+                r.focus_right();
+                return true;
+            }
+            key if press_key(key) => {
+                if !event.repeat {
+                    r.focus_toggle();
+                }
+                return true;
+            }
+            Key::Character(c) => match c.to_lowercase().as_str() {
+                "j" => {
+                    r.move_focus(1);
+                    return true;
+                }
+                "k" => {
+                    r.move_focus(-1);
+                    return true;
+                }
+                "h" => {
+                    r.focus_left();
+                    return true;
+                }
+                "l" => {
+                    r.focus_right();
+                    return true;
+                }
+                "s" => Some(StopAct::Stage),
+                "u" => Some(StopAct::Unstage),
+                "r" => Some(StopAct::Revert),
+                "o" => Some(StopAct::Open),
+                "c" => Some(StopAct::Copy),
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some(act) = act else {
+            if !maximized {
+                r.drop_keys();
+            }
+            return false;
+        };
+        // a held key must not repeat a write
+        if !event.repeat {
+            r.sync_focus();
+            if let Some(hit) = r.focus_hit(act) {
+                self.review_action(hit);
+            }
+        }
+        true
+    }
+
     /// Maximized review keys: Esc restores the panel beside the panes;
     /// arrows, Page Up/Down, Space, Home/End scroll (← → sideways, the file
     /// under the pointer). False for anything else.
     fn handle_review_key(&mut self, event: &input::KeyPress) -> bool {
         use winit::keyboard::{Key, NamedKey};
+        if self.win.review.keyed && self.handle_review_nav_key(event) {
+            return true;
+        }
         let page = (self.win.review.view_h - 40.0).max(40.0);
         let y = self.win.mouse.1;
         match &event.logical_key {
@@ -11185,7 +11833,9 @@ impl App {
                 let Some(row) = self.win.explorer.selected_row().cloned() else {
                     return true;
                 };
-                if self.win.modifiers.alt_key() {
+                if row.more {
+                    self.win.explorer.show_more(&row.path);
+                } else if self.win.modifiers.alt_key() {
                     self.win.explorer.focused = false;
                     self.drop_file(&row.path);
                 } else if row.is_dir {
@@ -11278,6 +11928,9 @@ impl App {
                 if let Some(w) = &self.win.window {
                     w.request_redraw();
                 }
+            }
+            ConfirmAction::LaunchLink { config, new_window } => {
+                self.launch_from_link(&config, new_window, event_loop);
             }
             ConfirmAction::InstallRemote(profile) => {
                 let script = rift_core::shell_integration::data_dir()
@@ -11438,6 +12091,17 @@ impl App {
         pane.clear_selection();
         pane.selected_block = None;
         let e = &mut pane.editor;
+        let add = if cfg!(target_os = "macos") {
+            self.win.modifiers.super_key()
+        } else {
+            self.win.modifiers.alt_key()
+        };
+        if add && clicks == 1 && !e.vim_enabled() {
+            e.add_caret_at(offset);
+            self.win.completion.close();
+            self.blink_epoch = Instant::now();
+            return;
+        }
         match clicks {
             2 => {
                 let is_word = |c: char| !c.is_whitespace();
@@ -11512,7 +12176,7 @@ impl App {
                 if self.win.modifiers.super_key() || self.win.modifiers.alt_key() {
                     buf.clear();
                 } else {
-                    buf.pop();
+                    crate::state::pop_grapheme(buf);
                 }
             }
             Key::Named(NamedKey::Space) => buf.push(' '),
@@ -11578,13 +12242,39 @@ impl App {
     }
 }
 
+/// `path` as printed in output that ran in `dir` (`remote`: on another host,
+/// so nothing resolves) -> the existing local file it names.
+fn resolve_output_path(dir: Option<&str>, remote: bool, path: &str) -> Option<String> {
+    if remote {
+        return None;
+    }
+    let resolved = if let Some(rest) = path.strip_prefix("~/") {
+        let home = std::env::var("HOME").unwrap_or_default();
+        std::path::Path::new(&home).join(rest)
+    } else if path.starts_with('/') {
+        std::path::PathBuf::from(path)
+    } else {
+        std::path::Path::new(dir?).join(path)
+    };
+    resolved
+        .exists()
+        .then(|| resolved.to_string_lossy().into_owned())
+}
+
 /// Stamp a submission from the app onto the prompt block — unless one is
 /// already waiting for the shell to start it: a line typed ahead of that
 /// must not relabel it, and is read back from the screen when it starts.
 fn stamp_submit(session: &Session, cwd: Option<String>, branch: Option<String>, cmd: &str) {
     let mut blocks = session.blocks.lock().unwrap();
     if !blocks.submit_pending() {
-        blocks.stamp_submit(cwd, branch, cmd);
+        blocks.stamp_submit(
+            cwd,
+            session
+                .cwd_remote
+                .load(std::sync::atomic::Ordering::Relaxed),
+            branch,
+            cmd,
+        );
     }
 }
 
@@ -11599,6 +12289,23 @@ impl App {
     ) {
         if !event.released {
             self.hide_tooltip(window);
+            // any key but ⇧⌘I itself puts the inspector's card away
+            let inspect = input::app_action(event, self.win.modifiers, &self.keymap)
+                == Some(AppAction::InspectCommand);
+            // ⇧ and ⌘ pressed on the way to ⇧⌘I arrive as keys of their own
+            let modifier = matches!(
+                event.logical_key,
+                winit::keyboard::Key::Named(
+                    winit::keyboard::NamedKey::Shift
+                        | winit::keyboard::NamedKey::Control
+                        | winit::keyboard::NamedKey::Alt
+                        | winit::keyboard::NamedKey::Super
+                        | winit::keyboard::NamedKey::Meta
+                )
+            );
+            if !inspect && !modifier {
+                self.win.inspect_pinned = false;
+            }
         }
         // Esc while dragging: a tab springs back to where it was pressed, a
         // pane stays where it is
@@ -11723,6 +12430,8 @@ impl App {
             let action = input::app_action(event, self.win.modifiers, &self.keymap);
             if action == Some(AppAction::Search) {
                 self.win.search.close();
+            } else if action == Some(AppAction::Copy) && self.win.search.all_selected {
+                self.copy_to_clipboard(self.win.search.query.clone());
             } else if action == Some(AppAction::Copy) {
                 self.handle_action(AppAction::Copy, event_loop);
             } else {
@@ -11756,6 +12465,14 @@ impl App {
             window.request_redraw();
             return;
         }
+        if self.win.review.keyed {
+            if !self.review_visible() {
+                self.win.review.drop_keys();
+            } else if self.handle_review_nav_key(event) {
+                window.request_redraw();
+                return;
+            }
+        }
         if self.win.explorer.focused && self.win.explorer.open {
             if self.handle_explorer_key(event) {
                 window.request_redraw();
@@ -11780,6 +12497,12 @@ impl App {
             if self.win.editor_active {
                 return;
             }
+        }
+        // ⌘⏎ while a subshell offer shows: Enable (the keys otherwise go to
+        // the running program)
+        if !event.released && self.subshell_key(event) {
+            window.request_redraw();
+            return;
         }
         // ⌘↑ / ⌘↓ (⇧ selects) move to the start / end of a multi-line
         // command while there are lines that way; on its first / last line
@@ -11946,9 +12669,9 @@ impl App {
         }
         let rail = self.rail_w();
         let in_strip = if rail > 0.0 {
-            mx < rail && my > TAB_BAR_H
+            mx < rail && my > self.strip_h()
         } else {
-            my < TAB_BAR_H
+            my < self.strip_h()
         };
         if in_strip {
             // a tab of its own needs a shell left behind; the viewer never
@@ -12137,6 +12860,10 @@ impl App {
 
     pub(crate) fn on_cursor_moved(&mut self, pos: (f32, f32), window: &Window) {
         self.win.mouse = pos;
+        // a hidden tab strip slides in at the top edge (`tab_bar`)
+        if self.track_strip(Some(pos)) {
+            window.request_redraw();
+        }
         self.update_cursor_icon(window);
         // tabs, welcome rows, pane controls and settings rows draw their
         // hover from the mouse at render time: repaint as soon as the pointer
@@ -12383,6 +13110,36 @@ impl App {
             });
         if let Some(i) = tab_hit {
             self.open_tab_menu(i, self.win.mouse);
+            window.request_redraw();
+            return;
+        }
+        // a toolbar button or the empty strip: Warp's "Rearrange toolbar
+        // items"
+        if my < self.strip_h()
+            && self.win.hits.iter().any(|h| {
+                h.contains(mx, my)
+                    && matches!(
+                        h.target,
+                        ClickTarget::ToggleExplorer
+                            | ClickTarget::ToggleReview
+                            | ClickTarget::ToggleNotifications
+                            | ClickTarget::TogglePalette
+                            | ClickTarget::ToggleSettings
+                            | ClickTarget::WindowDrag
+                    )
+            })
+        {
+            self.win.context_menu = ContextMenuState {
+                open: true,
+                pane: 0,
+                block: 0,
+                pos: self.win.mouse,
+                items: vec![MenuItem::new(
+                    "Rearrange toolbar items",
+                    MenuAction::RearrangeToolbar,
+                )],
+                selected: None,
+            };
             window.request_redraw();
             return;
         }
@@ -12709,10 +13466,12 @@ impl App {
             window.request_redraw();
             return;
         }
-        // a click anywhere else leaves the tree's keyboard focus, and one in
-        // a shell pane takes focus from the viewer pane
+        // a click anywhere else leaves the tree's and the review panel's
+        // keyboard focus, and one in a shell pane takes focus from the viewer
+        // pane
         self.win.explorer.focused = false;
-        if !self.win.settings.open && self.win.mouse.1 > TAB_BAR_H {
+        self.win.review.drop_keys();
+        if !self.win.settings.open && self.win.mouse.1 > self.strip_h() {
             self.win.viewer_focus = false;
         }
         // a program tracking the mouse (vim, tmux, htop) gets the click
@@ -12840,6 +13599,12 @@ impl App {
             }
             Some(ClickTarget::ToggleNotifications) => {
                 self.handle_action(AppAction::AttentionCenter, event_loop)
+            }
+            Some(ClickTarget::TogglePalette) => {
+                self.handle_action(AppAction::TogglePalette, event_loop)
+            }
+            Some(ClickTarget::ToggleSettings) => {
+                self.handle_action(AppAction::OpenSettings, event_loop)
             }
             Some(ClickTarget::UpdateChip) => self.handle_action(AppAction::UpdateRift, event_loop),
             Some(ClickTarget::RemoteChip) => {
@@ -13043,6 +13808,10 @@ impl App {
             Some(ClickTarget::JumpToBlock(pane, id)) => {
                 self.jump_to_block(*pane, *id);
             }
+            Some(ClickTarget::JumpToBlockEnd(pane, id)) => {
+                self.jump_to_block_end(*pane, *id);
+            }
+            Some(ClickTarget::Subshell(pane, part)) => self.answer_subshell(*pane, *part),
             Some(ClickTarget::SettingsNoop | ClickTarget::RemoteHistoryList) => {}
             Some(ClickTarget::SettingsNav(i)) => {
                 use crate::views::settings::Page;
@@ -13055,6 +13824,13 @@ impl App {
                     && let Some((value, _)) = dd.options.get(*i)
                 {
                     self.set_select(dd.id, value.clone());
+                }
+            }
+            // the default is off: the login item goes
+            Some(ClickTarget::SettingsReset("launch_at_login")) => {
+                if self.config.launch_at_login {
+                    self.toggle_launch_at_login();
+                    self.save_config();
                 }
             }
             Some(ClickTarget::SettingsReset(id)) => {
@@ -13161,6 +13937,7 @@ impl App {
                 } else {
                     self.win.confirm = Some(ConfirmClose {
                         opened: Instant::now(),
+                        focus_cancel: false,
                         action: ConfirmAction::AllowOperate {
                             id: id.clone(),
                             name: name.clone(),
@@ -13180,6 +13957,7 @@ impl App {
                     .map_or_else(|| id.clone(), |d| d.name.clone());
                 self.win.confirm = Some(ConfirmClose {
                     opened: Instant::now(),
+                    focus_cancel: false,
                     action: ConfirmAction::RevokeDevice {
                         id: id.clone(),
                         name: name.clone(),
@@ -13197,9 +13975,16 @@ impl App {
                     self.open_config_viewer(&path);
                 }
             }
+            Some(ClickTarget::SettingsToggle("launch_at_login")) => {
+                self.toggle_launch_at_login();
+                self.save_config();
+            }
             Some(ClickTarget::SettingsToggle(id)) => {
                 let c = &mut self.config;
                 match *id {
+                    // this process shows or hides it in apply_config; the
+                    // gateway reads it on every check
+                    "menu_bar_icon" => c.menu_bar_icon = !c.menu_bar_icon,
                     "cursor_blink" => c.cursor_blink = !c.cursor_blink,
                     "ligatures" => c.ligatures = !c.ligatures,
                     "sync_os_theme" => c.sync_os_theme = !c.sync_os_theme,
@@ -13220,6 +14005,7 @@ impl App {
                     "alias_expansion" => c.alias_expansion = !c.alias_expansion,
                     "error_underline" => c.error_underline = !c.error_underline,
                     "command_corrections" => c.command_corrections = !c.command_corrections,
+                    "subshell_offer" => c.subshell_offer = !c.subshell_offer,
                     "confirm_close_running" => c.confirm_close_running = !c.confirm_close_running,
                     "confirm_multiline_paste" => {
                         c.confirm_multiline_paste = !c.confirm_multiline_paste
@@ -13250,6 +14036,8 @@ impl App {
                     "explorer_hidden_files" => c.explorer_hidden_files = !c.explorer_hidden_files,
                     "tab_bar_with_one_tab" => c.tab_bar_with_one_tab = !c.tab_bar_with_one_tab,
                     "sticky_command_header" => c.sticky_command_header = !c.sticky_command_header,
+                    "block_dividers" => c.block_dividers = !c.block_dividers,
+                    "jump_to_bottom_button" => c.jump_to_bottom_button = !c.jump_to_bottom_button,
                     "dim_inactive_panes" => c.dim_inactive_panes = !c.dim_inactive_panes,
                     "focus_follows_mouse" => c.focus_follows_mouse = !c.focus_follows_mouse,
                     "notifications.enabled" => c.notifications.enabled = !c.notifications.enabled,
@@ -13278,6 +14066,11 @@ impl App {
                 let c = &mut self.config;
                 let d = *dir as i64;
                 match *id {
+                    id if id.starts_with("toolbar_order.") => {
+                        if let Some(item) = rift_core::ToolbarItem::from_order_id(id) {
+                            c.move_toolbar_item(item, d);
+                        }
+                    }
                     "font_size" => {
                         // from the applied size: a NaN or out-of-range value still steps
                         c.font_size = (c.font_size() + d as f32).clamp(8.0, 28.0);
@@ -13325,6 +14118,16 @@ impl App {
                             _ => CursorStyle::Underline,
                         }
                     }
+                    id if id.starts_with("toolbar.") => {
+                        if let Some(item) = rift_core::ToolbarItem::from_setting_id(id) {
+                            let side = match v {
+                                0 => rift_core::ToolbarSide::Left,
+                                1 => rift_core::ToolbarSide::Right,
+                                _ => rift_core::ToolbarSide::Hidden,
+                            };
+                            c.set_toolbar_side(item, side);
+                        }
+                    }
                     "input_position" => {
                         c.input_position = if *v == 1 {
                             InputPosition::Top
@@ -13366,6 +14169,27 @@ impl App {
                             0 => rift_core::TabCloseButton::Hover,
                             1 => rift_core::TabCloseButton::Always,
                             _ => rift_core::TabCloseButton::Never,
+                        }
+                    }
+                    "tab_close_side" => {
+                        c.tab_close_side = if *v == 1 {
+                            rift_core::TabCloseSide::Left
+                        } else {
+                            rift_core::TabCloseSide::Right
+                        }
+                    }
+                    "tab_bar" => {
+                        c.tab_bar = match v {
+                            0 => rift_core::TabBarVisibility::Always,
+                            1 => rift_core::TabBarVisibility::HideFullscreen,
+                            _ => rift_core::TabBarVisibility::OnHover,
+                        }
+                    }
+                    "block_spacing" => {
+                        c.block_spacing = if *v == 1 {
+                            rift_core::BlockSpacing::Normal
+                        } else {
+                            rift_core::BlockSpacing::Compact
                         }
                     }
                     "new_tab_placement" => {
@@ -13900,6 +14724,21 @@ impl App {
     #[cfg(target_os = "macos")]
     fn run_menu_command(&mut self, id: &str, event_loop: &ActiveEventLoop) {
         use crate::menubar::{MenuCommand, chord_for};
+        if id == crate::status_item::QUIT_COMPLETELY {
+            // the usual quit (it still warns about running commands and
+            // connected phones), the helpers included
+            self.quit_completely = true;
+            self.request_close(CloseScope::App, event_loop);
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
+            return;
+        }
+        // the menu bar icon's items act on Rift from another app
+        if id.starts_with(crate::status_item::PREFIX) {
+            crate::status_item::activate();
+        }
+        let id = id.strip_prefix(crate::status_item::PREFIX).unwrap_or(id);
         let Some(cmd) = MenuCommand::from_id(id) else {
             return;
         };
@@ -14476,6 +15315,12 @@ impl App {
                 self.sync_focus();
             }
             Step::Hotkey => self.on_global_hotkey(event_loop),
+            Step::A11y(action, label) => self.script_a11y_action(action, &label, event_loop),
+            Step::Fault(kind) if self.headless => {
+                self.fault_clipboard = kind == "clipboard";
+                self.fault_opener = kind == "opener";
+            }
+            Step::Fault(_) => log::warn!("script: fault needs --headless"),
             Step::Ime(text) => self.commit_text(&text, event_loop, window),
             Step::Preedit(text) => self.win.preedit = text,
             Step::Drop(path) => self.drop_file(&path),
@@ -14519,6 +15364,7 @@ impl App {
                 }
             }
             Step::NewWindow => self.open_new_window(event_loop),
+            Step::Link(link) => self.open_link(&link, event_loop),
             Step::Window(n) => {
                 if self.enter_window_index(n)
                     && let Some(id) = self.win_id()
@@ -15071,6 +15917,11 @@ impl App {
                 self.save_session();
                 ok(Some(id))
             }
+            // needs the event loop (a new window): opened as a user event
+            Request::OpenLink { link } => {
+                let _ = self.proxy.send_event(UserEvent::OpenLink(link));
+                ok(None)
+            }
             Request::Open { cwd, command } => {
                 // a missing or nonexistent --cwd starts where a new pane would
                 let cwd = cwd
@@ -15311,6 +16162,17 @@ impl App {
                             ClickTarget::PaneSplit(p) if p == id => "Split pane right".into(),
                             ClickTarget::PaneMenu(p) if p == id => "Pane menu".into(),
                             ClickTarget::PaneClose(p) if p == id => "Close pane".into(),
+                            ClickTarget::Subshell(p, part) if p == id => match part {
+                                crate::views::subshell::Part::Enable => {
+                                    "Use Rift's blocks and editor in this subshell".into()
+                                }
+                                crate::views::subshell::Part::Never => {
+                                    "Don't ask again for this command".into()
+                                }
+                                crate::views::subshell::Part::Dismiss => {
+                                    "Dismiss the subshell offer".into()
+                                }
+                            },
                             ClickTarget::Welcome(i) if active => {
                                 let e = welcome.get(i as usize)?;
                                 format!("{}, {}", e.title, e.keys.concat())
@@ -15369,6 +16231,10 @@ impl App {
                         c.commands.join("; ")
                     ),
                 ),
+                ConfirmAction::LaunchLink { .. } => (
+                    "Open this layout from a link?".to_string(),
+                    format!("Its panes run: {}", c.commands.join("; ")),
+                ),
                 ConfirmAction::InstallRemote(p) => (
                     "Install shell integration?".to_string(),
                     format!("On {}, writes {}", p.host, c.commands.join("; ")),
@@ -15395,6 +16261,7 @@ impl App {
                 ConfirmAction::Close(_) => "Close",
                 ConfirmAction::Paste { .. } => "Paste",
                 ConfirmAction::InstallRemote(_) => "Install",
+                ConfirmAction::LaunchLink { .. } => "Open and run",
                 ConfirmAction::Revert { .. } => "Revert",
                 ConfirmAction::Update(plan) if plan.open_page => "Open download page",
                 ConfirmAction::Update(_) => "Update",
@@ -15405,19 +16272,19 @@ impl App {
                 ConfirmAction::Update(_) => "Later",
                 _ => "Cancel",
             };
-            let button = |l: &str, r: [f32; 4]| Control {
+            let button = |l: &str, r: [f32; 4], selected: bool| Control {
                 label: l.into(),
                 role: Role::Button,
                 toggled: None,
-                selected: false,
+                selected,
                 rect: Some(r),
             };
             Some(Overlay::Alert {
                 title,
                 description,
                 buttons: vec![
-                    button(cancel, self.win.confirm_rects[0]),
-                    button(label, self.win.confirm_rects[1]),
+                    button(cancel, self.win.confirm_rects[0], c.focus_cancel),
+                    button(label, self.win.confirm_rects[1], !c.focus_cancel),
                 ],
             })
         } else if let Some(ed) = &self.win.prompt_editor {
@@ -15812,19 +16679,91 @@ impl App {
                     },
                 )
             };
-            Some(Overlay::Dialog {
+            // find's Aa and .* chips, at the rects the last frame drew
+            let toggles = if self.win.filter_editing {
+                Vec::new()
+            } else {
+                let s = &self.win.search;
+                [
+                    ("Match case", s.case_sensitive),
+                    ("Regular expression", s.regex),
+                ]
+                .into_iter()
+                .zip(&self.win.search_chips)
+                .map(|((label, on), rect)| Control {
+                    label: label.into(),
+                    role: Role::Button,
+                    toggled: Some(on),
+                    selected: false,
+                    rect: Some(*rect),
+                })
+                .collect()
+            };
+            Some(Overlay::Find {
                 label: label.into(),
-                input: Some(input),
-                status: Some(status),
-                controls: Vec::new(),
-                rect: None,
+                input,
+                status,
+                toggles,
             })
         } else {
             None
         };
 
         let (w, h) = self.logical_size();
-        let panels = self.a11y_panels();
+        let mut panels = self.a11y_panels();
+        // the tab strip's buttons (the toolbar, +, the update and phone
+        // chips), named as their tooltips name them
+        let toolbar: Vec<crate::a11y::Control> = self
+            .win
+            .hits
+            .iter()
+            .filter(|h| {
+                matches!(
+                    h.target,
+                    ClickTarget::TabNew
+                        | ClickTarget::ToggleExplorer
+                        | ClickTarget::ToggleReview
+                        | ClickTarget::ToggleNotifications
+                        | ClickTarget::TogglePalette
+                        | ClickTarget::ToggleSettings
+                        | ClickTarget::UpdateChip
+                        | ClickTarget::RemoteChip
+                )
+            })
+            .filter_map(|h| {
+                let (label, keys) = self.tip_for(&h.target)?;
+                let toggled = match h.target {
+                    ClickTarget::ToggleExplorer => Some(self.win.explorer.open),
+                    ClickTarget::ToggleReview => Some(self.win.review.open),
+                    ClickTarget::ToggleNotifications => Some(self.win.notifications.open),
+                    ClickTarget::TogglePalette => Some(self.win.palette.open),
+                    ClickTarget::ToggleSettings => Some(self.win.settings.open),
+                    _ => None,
+                };
+                Some(crate::a11y::Control {
+                    label: match keys {
+                        Some(k) => format!("{label}, {k}"),
+                        None => label,
+                    },
+                    role: Role::Button,
+                    toggled,
+                    selected: false,
+                    rect: Some(h.rect),
+                })
+            })
+            .collect();
+        if !toolbar.is_empty() {
+            panels.insert(
+                0,
+                crate::a11y::PanelNode {
+                    label: "Toolbar".into(),
+                    rect: None,
+                    text: None,
+                    controls: toolbar,
+                    focused: false,
+                },
+            );
+        }
         Snapshot {
             size: (w, h),
             scale,
@@ -15858,6 +16797,14 @@ impl App {
                 .map(|(r, hit)| match hit {
                     ExplorerHit::Row(i) => {
                         let row = &self.win.explorer.rows[*i];
+                        if row.more {
+                            return control(
+                                row.name.clone(),
+                                Role::Button,
+                                self.win.explorer.selected.as_ref() == Some(&row.path),
+                                *r,
+                            );
+                        }
                         let kind = if !row.is_dir {
                             "file"
                         } else if self.win.explorer.expanded.contains(&row.path) {
@@ -16110,6 +17057,45 @@ impl App {
             built.update
         });
         self.win.a11y = Some(adapter);
+    }
+
+    /// Script `a11y`: send `action` to the node labelled `label`, through
+    /// the same handler an assistive technology's request reaches.
+    fn script_a11y_action(
+        &mut self,
+        action: accesskit::Action,
+        label: &str,
+        event_loop: &ActiveEventLoop,
+    ) {
+        let Some(window) = self.win.window.clone() else {
+            return;
+        };
+        let snapshot = self.a11y_snapshot(window.scale_factor());
+        let built = crate::a11y::build(&snapshot);
+        let labelled = |n: &accesskit::Node| n.label() == Some(label);
+        // an actionable node first, else any node with the label
+        let Some(target) = built
+            .update
+            .nodes
+            .iter()
+            .filter(|(_, n)| labelled(n))
+            .map(|(id, _)| *id)
+            .max_by_key(|id| built.targets.contains_key(id))
+        else {
+            log::warn!("script: a11y: no node labelled {label:?}");
+            return;
+        };
+        self.win.a11y_targets = built.targets;
+        log::info!("script: a11y {action:?} on {label:?}");
+        self.on_access_event(
+            accesskit_winit::WindowEvent::ActionRequested(accesskit::ActionRequest {
+                action,
+                target_tree: accesskit::TreeId::ROOT,
+                target_node: target,
+                data: None,
+            }),
+            event_loop,
+        );
     }
 
     fn on_access_event(
@@ -16423,6 +17409,11 @@ impl App {
             self.panel_widths(self.logical_size().0).1 > 0.0,
             self.win.hover_repaints
         );
+        let _ = writeln!(
+            out,
+            "review_keys={} review_focus={:?}",
+            self.win.review.keyed, self.win.review.focus
+        );
         // maximized, sideways scroll per file, the hunk toolbar's buttons
         // and the file list's rows (kind@x,y,w,h)
         let mut scroll_x: Vec<_> = self
@@ -16608,6 +17599,15 @@ impl App {
         );
         let _ = writeln!(
             out,
+            "confirm_focus={}",
+            match self.win.confirm.as_ref().map(|c| c.focus_cancel) {
+                Some(true) => "cancel",
+                Some(false) => "confirm",
+                None => "none",
+            }
+        );
+        let _ = writeln!(
+            out,
             "confirm={:?} rename={:?} filter_editing={} toast={:?} shell_env={}",
             self.win
                 .confirm
@@ -16697,12 +17697,23 @@ impl App {
                 );
                 let _ = writeln!(
                     out,
-                    "    editor_selection={:?} filter={:?} correction={:?} sticky={:?} reverse_screen={}",
+                    "    editor_selection={:?} carets={:?} subshell={:?} filter={:?} correction={:?} sticky={:?} reverse_screen={} row_kinds={}",
                     p.editor.selected_text(),
+                    p.editor.extra,
+                    p.subshell.as_ref().map(|o| (o.command.as_str(), o.shown)),
                     p.filter,
                     p.correction,
                     p.sticky_hit.map(|(_, b)| b),
-                    p.session.term.lock().reverse_screen()
+                    p.session.term.lock().reverse_screen(),
+                    // the drawn rows: G grid, H header, _ blank pad
+                    p.rows
+                        .iter()
+                        .map(|r| match r.kind {
+                            terminal::RowKind::Grid { .. } => 'G',
+                            terminal::RowKind::Header(_) => 'H',
+                            terminal::RowKind::Pad => '_',
+                        })
+                        .collect::<String>()
                 );
                 // screen geometry for scripted mouse steps: cell size and
                 // the y of every grid row (`abs:y`) with the x of its text
@@ -16730,7 +17741,7 @@ impl App {
                 for b in blocks {
                     let _ = writeln!(
                         out,
-                        "    block {} state={} duration_ms={:?} cmd={:?} exit={:?} collapsed={} bookmarked={} prompt_start={} output_start={:?} end={:?} cwd={:?}",
+                        "    block {} state={} duration_ms={:?} cmd={:?} exit={:?} collapsed={} bookmarked={} prompt_start={} output_start={:?} end={:?} cwd={:?} cwd_remote={} background={}",
                         b.id,
                         match b.state {
                             rift_core::BlockState::Prompt => "prompt",
@@ -16750,7 +17761,9 @@ impl App {
                         b.prompt_start,
                         b.output_start,
                         b.end,
-                        b.cwd
+                        b.cwd,
+                        b.cwd_remote,
+                        b.background
                     );
                 }
                 // visible rows (what the user sees), for text assertions
@@ -16770,7 +17783,19 @@ impl App {
         };
         let _ = writeln!(out, "clipboard={clip:?}");
         let visible = self.win.window.as_ref().and_then(|w| w.is_visible());
-        let _ = writeln!(out, "headless={} window_visible={visible:?}", self.headless);
+        let _ = writeln!(
+            out,
+            "headless={} window_visible={visible:?} app_icon={:?} strip={}",
+            self.headless,
+            self.applied_icon.map(|i| i.name()),
+            if self.strip_shown() {
+                "shown"
+            } else if self.win.bar_revealed {
+                "slid_in"
+            } else {
+                "hidden"
+            }
+        );
         out
     }
 }
@@ -18087,6 +19112,7 @@ impl App {
         self.win.context_menu.close();
         self.win.confirm = Some(ConfirmClose {
             opened: Instant::now(),
+            focus_cancel: false,
             action: ConfirmAction::Update(Box::new(plan)),
             commands: Vec::new(),
         });
@@ -18098,6 +19124,8 @@ impl App {
     /// Cancel / Esc on the confirm modal; "Later" on the update dialog
     /// dismisses that version (no chip until a newer one).
     fn cancel_confirm(&mut self) {
+        // a later plain quit leaves the helpers running again
+        self.quit_completely = false;
         if let Some(ConfirmClose {
             action: ConfirmAction::Update(plan),
             ..
@@ -18567,7 +19595,12 @@ impl App {
         let tip_due = tip_due.filter(|due| Instant::now() < *due);
         let output_frame = self.win.output_frame_due;
         let select_due = self.tick_select_scroll();
-        (output_frame, tip_due, select_due)
+        // subshell offers (their command has run long enough, or is over)
+        let (offers, offer_due) = self.tick_subshell_offers(Instant::now());
+        if offers && let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+        (output_frame, tip_due, earliest(select_due, offer_due))
     }
 
     /// The window's timed repaints (boot grace, toasts, cursor blink): a
@@ -18797,15 +19830,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.apply_config();
         self.launch_configs = rift_core::launch::load_all();
 
-        let hist_proxy = self.proxy.clone();
-        let shell = rift_core::shell_integration::resolve_shell(self.config.shell.as_deref());
-        std::thread::Builder::new()
-            .name("history-import".into())
-            .spawn(move || {
-                let h = rift_core::history::load_shell_history(&shell, 5000);
-                let _ = hist_proxy.send_event(UserEvent::HistoryLoaded(h));
-            })
-            .ok();
+        self.import_shell_history();
 
         // shells a phone started while Rift was closed (background.rs)
         let adopted = if self.config.durable_sessions && self.durable_allowed {
@@ -18884,6 +19909,8 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 #[cfg(target_os = "macos")]
                 place_traffic_lights(&window);
+                // full screen entered or left (`tab_bar = "hide_fullscreen"`)
+                self.sync_window_buttons();
                 window.request_redraw();
             }
             WindowEvent::ScaleFactorChanged { .. } => {
@@ -18952,6 +19979,9 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::CursorLeft { .. } => {
                 self.win.pointer_in = false;
+                if self.track_strip(None) {
+                    window.request_redraw();
+                }
                 if self.win.review.pointer.take().is_some()
                     && !self.win.review.hover_rows.is_empty()
                 {
@@ -19022,6 +20052,9 @@ impl ApplicationHandler<UserEvent> for App {
                 let active_idx = self.win.active;
                 if let Some((idx, tab)) = self.find_tab_of_pane(pane) {
                     if idx == active_idx {
+                        if tab.active().is_some_and(|p| p.session.id == pane) {
+                            self.win.search_stale = true;
+                        }
                         self.request_output_frame();
                     } else {
                         tab.activity = true;
@@ -19051,6 +20084,19 @@ impl ApplicationHandler<UserEvent> for App {
                 self.on_bell(pane);
             }
             UserEvent::GlobalHotkey => self.on_global_hotkey(event_loop),
+            UserEvent::OpenLink(link) => self.open_link(&link, event_loop),
+            UserEvent::Manual(command, text) => {
+                self.manual_pending.remove(&command);
+                self.manual.insert(command, text);
+                // a card that shows "Looking it up" repaints with the answer
+                self.each_window(|app| {
+                    if app.win.tip_shown.is_some()
+                        && let Some(w) = &app.win.window
+                    {
+                        w.request_redraw();
+                    }
+                });
+            }
             #[cfg(target_os = "macos")]
             UserEvent::Menu(id) => self.run_menu_command(&id, event_loop),
             #[cfg(not(target_os = "macos"))]
@@ -19081,7 +20127,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // re-checked here: the policy may have changed since the
                 // request was parsed
                 if self.config.clipboard_access.trim() == "read_write" {
-                    let text = if self.headless {
+                    let text = if self.headless && !self.fault_clipboard {
                         Some(self.headless_clipboard.clone())
                     } else {
                         self.clipboard().and_then(|cb| cb.get_text().ok())
@@ -19234,9 +20280,12 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::UpdateReady(own) => self.relaunch_for_update(own, event_loop),
             UserEvent::StartConfirmed => self.confirm_start(),
-            UserEvent::HistoryLoaded(mut history) => {
-                log::info!("shell history imported: {} entries", history.len());
-                Arc::make_mut(&mut self.shell_history).append(&mut history);
+            UserEvent::HistoryLoaded(shell, history) => {
+                // a slower import for a shell no longer configured is dropped
+                if shell == self.history_shell {
+                    log::info!("shell history imported: {} entries", history.len());
+                    self.shell_history = Arc::new(history);
+                }
             }
             UserEvent::ConfigReloaded => {
                 // Theme files can change without any change to config.toml.
@@ -19248,6 +20297,7 @@ impl ApplicationHandler<UserEvent> for App {
                     std::thread::spawn(rift_core::shell_complete::stop_all);
                 }
                 self.apply_config();
+                self.import_shell_history();
             }
             UserEvent::ViewerLoaded(loaded) => {
                 if self.win.viewer.accept(*loaded)
@@ -19356,7 +20406,13 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
+    fn new_events(&mut self, _event_loop: &ActiveEventLoop, _cause: winit::event::StartCause) {
+        crate::stall::busy(crate::stall::Phase::Running);
+    }
+
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // the pass ends when this returns (the stall log)
+        let _pass = crate::stall::PassEnd;
         self.open_queued_windows(event_loop);
         self.each_window(|app| app.sync_focus());
         // git and Docker status of the windows in use, on their beat
@@ -19442,6 +20498,39 @@ impl ApplicationHandler<UserEvent> for App {
             None => winit::event_loop::ControlFlow::Wait,
         });
     }
+}
+
+/// An edit or motion run at one caret ([`caret_key`]).
+type CaretOp = Box<dyn Fn(&mut crate::state::EditorState)>;
+
+/// What an editor key does at one caret, for keys that act at every caret
+/// (multi-cursor); `None` for the rest.
+fn caret_key(key: &EditorKey, pairs: bool) -> Option<CaretOp> {
+    use crate::state::EditorState as E;
+    Some(match key.clone() {
+        EditorKey::Insert(s) if pairs => Box::new(move |e: &mut E| e.insert_with_pairs(&s)),
+        EditorKey::Insert(s) => Box::new(move |e: &mut E| e.insert(&s)),
+        EditorKey::Left => Box::new(E::left),
+        EditorKey::Right => Box::new(E::right),
+        EditorKey::Home => Box::new(E::home),
+        EditorKey::End => Box::new(E::end),
+        EditorKey::WordLeft => Box::new(E::word_left),
+        EditorKey::WordRight => Box::new(E::word_right),
+        EditorKey::Backspace if pairs => Box::new(E::backspace_with_pairs),
+        EditorKey::Backspace => Box::new(E::backspace),
+        EditorKey::Delete => Box::new(E::delete),
+        EditorKey::DeleteWordBack => Box::new(E::delete_word_back),
+        EditorKey::DeleteWordForward => Box::new(E::delete_word_forward),
+        EditorKey::KillToEnd => Box::new(E::kill_to_end),
+        EditorKey::KillToStart => Box::new(E::kill_to_start),
+        EditorKey::SelectLeft => Box::new(|e: &mut E| e.extend(E::mv_left)),
+        EditorKey::SelectRight => Box::new(|e: &mut E| e.extend(E::mv_right)),
+        EditorKey::SelectWordLeft => Box::new(|e: &mut E| e.extend(E::mv_word_left)),
+        EditorKey::SelectWordRight => Box::new(|e: &mut E| e.extend(E::mv_word_right)),
+        EditorKey::SelectHome => Box::new(|e: &mut E| e.extend(E::mv_home)),
+        EditorKey::SelectEnd => Box::new(|e: &mut E| e.extend(E::mv_end)),
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
@@ -19556,10 +20645,57 @@ mod tests {
     }
 
     #[test]
+    fn output_paths_never_resolve_against_the_local_disk_when_remote() {
+        let dir = std::env::temp_dir().join(format!("rift-resolve-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/main.rs"), "").unwrap();
+        let d = dir.to_str().unwrap();
+        let local = resolve_output_path(Some(d), false, "src/main.rs");
+        assert_eq!(
+            local,
+            Some(dir.join("src/main.rs").to_string_lossy().into_owned())
+        );
+        // same names, output from another host: no local file
+        assert_eq!(resolve_output_path(Some(d), true, "src/main.rs"), None);
+        assert_eq!(
+            resolve_output_path(Some(d), true, &format!("{d}/src/main.rs")),
+            None
+        );
+        assert_eq!(resolve_output_path(None, true, "~/src/main.rs"), None);
+        // an absolute path needs no directory when local
+        assert!(resolve_output_path(None, false, &format!("{d}/src/main.rs")).is_some());
+        assert_eq!(resolve_output_path(None, false, "src/main.rs"), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn confirm_ignores_repeat_and_typed_ahead_enter() {
         assert!(!confirm_accepts(false, Duration::from_millis(5)));
         assert!(!confirm_accepts(true, Duration::from_secs(2)));
         assert!(confirm_accepts(false, CONFIRM_ARM));
+    }
+
+    #[test]
+    fn confirm_enter_presses_the_focused_button() {
+        let seen = Duration::from_secs(2);
+        let fresh = Duration::from_millis(5);
+        // the confirm button: the typed-ahead and repeat guards still hold
+        assert_eq!(
+            confirm_enter(false, false, seen),
+            Some(ConfirmChoice::Confirm)
+        );
+        assert_eq!(confirm_enter(false, false, fresh), None);
+        assert_eq!(confirm_enter(false, true, seen), None);
+        // the dismiss button never confirms, whatever the timing
+        assert_eq!(
+            confirm_enter(true, false, seen),
+            Some(ConfirmChoice::Cancel)
+        );
+        assert_eq!(
+            confirm_enter(true, false, fresh),
+            Some(ConfirmChoice::Cancel)
+        );
+        assert_eq!(confirm_enter(true, true, seen), None);
     }
 
     #[test]

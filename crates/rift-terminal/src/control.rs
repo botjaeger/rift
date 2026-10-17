@@ -44,6 +44,10 @@ use std::time::Duration;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Level {
     Off,
+    /// No `control_api` on Linux: only `rift://` links a second
+    /// `rift-terminal rift://…` process hands over (macOS delivers them as
+    /// an Apple Event and needs no socket).
+    Links,
     /// No `control_api`, but `remote_access` is on: only what the remote
     /// gateway asks (`status`, `blocks`, `remote-input`).
     Remote,
@@ -71,6 +75,11 @@ impl Level {
     /// `control_api = "off"`).
     pub fn effective(control_api: &str, remote_access: bool) -> Level {
         let level = Level::parse(control_api);
+        let level = if cfg!(target_os = "macos") {
+            level
+        } else {
+            level.max(Level::Links)
+        };
         if remote_access {
             level.max(Level::Remote)
         } else {
@@ -81,7 +90,7 @@ impl Level {
     /// The `control_api` value that grants this level.
     pub fn name(self) -> &'static str {
         match self {
-            Level::Off => "off",
+            Level::Off | Level::Links => "off",
             Level::Remote | Level::Navigate => "navigate",
             Level::Full => "full",
         }
@@ -235,6 +244,11 @@ pub enum Request {
     /// started, a phone connected or left): the window re-reads it at once
     /// (the tab-bar chip), even when idle. Read-only.
     RemoteStatus,
+    /// Open a `rift://` link (a second `rift-terminal rift://…` process
+    /// hands it to the running one). A link runs no command of its own.
+    OpenLink {
+        link: String,
+    },
     /// Save this window's layout for the restart after an update, keep its
     /// durable shells running, and quit (see `updater.rs`). Only honored
     /// with the token of an update in flight: the updating window writes it
@@ -265,6 +279,8 @@ impl Request {
             | Request::RemoteResetElapsed { .. }
             | Request::RemoteOpen { .. }
             | Request::RemoteClose { .. } => Level::Remote,
+            // what a click on a link anywhere does
+            Request::OpenLink { .. } => Level::Links,
             Request::List | Request::Focus { .. } | Request::PrepareRestart { .. } => {
                 Level::Navigate
             }
@@ -633,6 +649,17 @@ pub fn sockets() -> Vec<PathBuf> {
         .unwrap_or_default();
     socks.sort_by_key(|a| std::cmp::Reverse(a.0));
     socks.into_iter().map(|(_, p)| p).collect()
+}
+
+/// Hand a `rift://` link to the running Rift (newest first); false when
+/// none takes it.
+pub fn forward_link(link: &str) -> bool {
+    let req = Request::OpenLink {
+        link: link.to_string(),
+    };
+    sockets()
+        .iter()
+        .any(|p| request_within(p, &req, Duration::from_secs(2)).is_ok_and(|r| r.ok))
 }
 
 /// One request to one window's socket.
@@ -1095,7 +1122,18 @@ mod tests {
 
     #[test]
     fn remote_access_opens_only_the_gateways_requests() {
-        assert_eq!(Level::effective("off", false), Level::Off);
+        // off: no socket on macOS; on Linux one for rift:// links only
+        let off = if cfg!(target_os = "macos") {
+            Level::Off
+        } else {
+            Level::Links
+        };
+        assert_eq!(Level::effective("off", false), off);
+        let link = Request::OpenLink {
+            link: "rift://settings".into(),
+        };
+        assert_eq!(link.level(), Level::Links);
+        assert!(Request::List.level() > Level::Links);
         assert_eq!(Level::effective("off", true), Level::Remote);
         assert_eq!(Level::effective("navigate", true), Level::Navigate);
         assert_eq!(Level::effective("full", true), Level::Full);

@@ -63,6 +63,33 @@ pub fn place(window: &winit::window::Window, bar_h: f64, first_center_x: f64, sp
     }
 }
 
+/// Hide or show the buttons (they go with a hidden tab strip, `tab_bar`).
+pub fn set_hidden(window: &winit::window::Window, hidden: bool) {
+    if MainThreadMarker::new().is_none() {
+        return;
+    }
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return;
+    };
+    // SAFETY: winit's AppKit handle is a live NSView owned by `window`
+    let view: &NSView = unsafe { appkit.ns_view.cast().as_ref() };
+    let Some(ns_window) = view.window() else {
+        return;
+    };
+    for b in [
+        NSWindowButton::CloseButton,
+        NSWindowButton::MiniaturizeButton,
+        NSWindowButton::ZoomButton,
+    ] {
+        if let Some(b) = ns_window.standardWindowButton(b) {
+            b.setHidden(hidden);
+        }
+    }
+}
+
 /// AppKit treats a press in the titlebar band (the top of a full-size
 /// content view) on any view whose `mouseDownCanMoveWindow` is YES as a
 /// titlebar gesture: drag moves the window, double-click zooms it. winit's

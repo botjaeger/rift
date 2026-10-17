@@ -125,8 +125,8 @@ export default function PaneScreen() {
   // the header's name: the tab's title, else the one last seen for this pane (never a placeholder)
   const cachedTitle = s.paneTitles[draftKey(key, paneId)] ?? null;
   const title = loc ? paneTitle(loc) : (cachedTitle ?? host?.record.name ?? "this pane");
-  // the computer's tabs no longer hold it: nothing left to show or type into
-  const closed = !!host && status === "open" && host.windows.length > 0 && !loc;
+  // the computer's tabs no longer hold it (none at all, too): nothing left to show or type into
+  const closed = !!host && status === "open" && host.topology && !loc;
 
   // A cold start's pane that has closed meanwhile: back to Portals rather than a dead page. Only
   // once it is on top: dismissing to Portals would also close a sheet over it (What's New).

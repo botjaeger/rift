@@ -1596,6 +1596,31 @@ fn feed(parser: &mut vte::ansi::Processor, scanner: &mut OscScanner, bytes: &[u8
             None => {}
         }
     }
+    // output the shell printed below its prompt while it waited for input:
+    // a background job's (Warp background blocks)
+    if !term.mode().contains(TermMode::ALT_SCREEN) {
+        let cursor = term.grid().cursor.point;
+        let line = scrolled_cur + cursor.line.0.max(0) as u64;
+        let mut blocks = ctx.blocks.lock().unwrap();
+        // did the output use the prompt's row after the input point?
+        let used = blocks
+            .last()
+            .and_then(|b| b.command_start)
+            .filter(|&(l, _)| l < line)
+            .is_some_and(|(l, c)| {
+                let row = l as i64 - scrolled_cur as i64;
+                let g = term.grid();
+                row >= -(g.history_size() as i64)
+                    && row < g.screen_lines() as i64
+                    && (c..g.columns()).any(|col| {
+                        let ch = g[alacritty_terminal::index::Line(row as i32)]
+                            [alacritty_terminal::index::Column(col)]
+                        .c;
+                        ch != ' ' && ch != '\0'
+                    })
+            });
+        blocks.on_background_output(line, cursor.column.0, used);
+    }
     // prune blocks and images that fell out of scrollback; the alt grid has
     // no history, so only the primary grid says what is still kept
     if !term.mode().contains(TermMode::ALT_SCREEN) {
@@ -1738,7 +1763,11 @@ fn apply_marker(marker: Marker, term: &Term<EventProxy>, scrolled: u64, ctx: &Fe
             store.on_output_start(abs_line, command);
             // header context fallback for raw-passthrough commands (the app
             // stamps cwd+branch at submit; this only fills gaps)
-            store.stamp_context(cwd.lock().unwrap().clone(), None);
+            store.stamp_context(
+                cwd.lock().unwrap().clone(),
+                ctx.cwd_remote.load(Ordering::Relaxed),
+                None,
+            );
         }
         Marker::Done { exit } => store.on_done(abs_line, exit),
         Marker::Cwd { path, host } => {
@@ -2104,6 +2133,7 @@ mod tests {
             exit: Some(0),
             duration_ms: 1,
             cwd: None,
+            cwd_remote: false,
             output: (0..15).map(|i| format!("{cmd}{i}\n")).collect(),
         };
         let t = rift_core::transcript::Transcript::bounded(

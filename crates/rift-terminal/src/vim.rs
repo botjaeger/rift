@@ -1260,7 +1260,7 @@ impl EditorState {
                 v.prompt = Some((forward, text));
             }
             VimKey::Backspace => {
-                if text.pop().is_some() {
+                if crate::state::pop_grapheme(&mut text) {
                     v.prompt = Some((forward, text));
                 } else {
                     v.pending.reset();

@@ -90,6 +90,16 @@ impl LaunchLayout {
         LaunchLayout::Split { vertical, panes }
     }
 
+    /// Every pane's `commands[].exec`, in document order.
+    pub fn commands(&self) -> Vec<String> {
+        match self {
+            LaunchLayout::Pane { commands, .. } => commands.clone(),
+            LaunchLayout::Split { panes, .. } => {
+                panes.iter().flat_map(LaunchLayout::commands).collect()
+            }
+        }
+    }
+
     /// Leaves in document order (depth-first).
     pub fn pane_count(&self) -> usize {
         match self {
@@ -430,7 +440,7 @@ fn convert_layout(raw: &RawLayout) -> Result<LaunchLayout, String> {
 }
 
 /// `~` / `~/x` via `$HOME`; anything else (including `~user`) is left alone.
-fn expand_tilde(s: &str) -> PathBuf {
+pub(crate) fn expand_tilde(s: &str) -> PathBuf {
     if s == "~" {
         if let Some(home) = std::env::var_os("HOME") {
             return PathBuf::from(home);

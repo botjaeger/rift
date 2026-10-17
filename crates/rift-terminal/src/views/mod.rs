@@ -17,6 +17,7 @@ pub mod prompt_editor;
 pub mod review_panel;
 pub mod search;
 pub mod settings;
+pub mod subshell;
 pub mod tabbar;
 pub mod terminal;
 pub mod tooltip;

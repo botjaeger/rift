@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { ScrollView, StyleSheet, Text, View } from "react-native";
+import { Keyboard, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { appLock, authenticate, useLock } from "@/runtime";
 import { Button } from "./Button";
@@ -15,6 +15,15 @@ import { colors, ui } from "./theme";
 export function LockGate({ children }: { children: ReactNode }) {
   const { locked, covered } = useLock();
   const hidden = locked || covered;
+  // A field focused when the app locked keeps the keyboard up over the lock screen, and its keys
+  // still type into the hidden screen; a sheet the lock closes hands focus back to the field under
+  // it afterwards. While locked, no keyboard stays up.
+  useEffect(() => {
+    if (!locked) return;
+    Keyboard.dismiss();
+    const sub = Keyboard.addListener("keyboardDidShow", () => Keyboard.dismiss());
+    return () => sub.remove();
+  }, [locked]);
   return (
     <View style={styles.fill}>
       <View

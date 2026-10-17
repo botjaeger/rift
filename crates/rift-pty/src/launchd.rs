@@ -3,11 +3,16 @@
 //!
 //! On macOS a process the app starts stays in the app's coalition: after
 //! the window quits, the Dock keeps Rift as "Running in Background" for as
-//! long as a helper runs. Started as a launchd job instead (a one-shot job
-//! in the user's GUI domain: no keep-alive, gone from launchd's care when it
-//! exits), the helper belongs to launchd and the app leaves the Dock when it
-//! quits. Elsewhere, or when launchd refuses, the helper is a plain detached
-//! child as before.
+//! long as a helper runs. macOS 27 does the same for a launchd job the app
+//! bootstraps itself (measured 2026-10-17), but not for an agent registered
+//! through `SMAppService`: Rift.app carries one property list per helper in
+//! `Contents/Library/LaunchAgents` (`dev.rift.<name>.plist`), registered and
+//! then started on demand. Those lists are fixed, so a run with its own data
+//! or config directory (`XDG_DATA_HOME`, `XDG_CONFIG_HOME`: scripted and
+//! test runs), a run outside the bundle and macOS before 13 bootstrap a
+//! one-shot job per data directory instead (no keep-alive, gone from
+//! launchd's care when it exits). Elsewhere, or when launchd refuses, the
+//! helper is a plain detached child as before.
 
 use std::io;
 use std::path::Path;
@@ -22,6 +27,13 @@ pub fn spawn_helper(
     args: &[&str],
     log: Option<&Path>,
 ) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    if let Some(plist) = bundled_agent(name, program) {
+        match sm::start_agent(&plist) {
+            Ok(()) => return Ok(()),
+            Err(e) => log::warn!("{name}: SMAppService refused the agent ({e}); bootstrapping it"),
+        }
+    }
     #[cfg(target_os = "macos")]
     if let Some(data) = rift_core::shell_integration::data_dir() {
         match spawn_job(&data.join("launchd"), name, program, args, log) {
@@ -58,6 +70,151 @@ fn spawn_child(program: &Path, args: &[&str], log: Option<&Path>) -> io::Result<
             let _ = child.wait();
         })?;
     Ok(())
+}
+
+/// The label of `name`'s agent in the bundle that holds `program`, when
+/// this run may use it: `program` sits in `<bundle>/Contents/MacOS`, the
+/// bundle carries `Contents/Library/LaunchAgents/dev.rift.<name>.plist`,
+/// and no data or config directory of its own is set (the agent's list
+/// is fixed and runs with launchd's environment).
+#[cfg(target_os = "macos")]
+fn bundled_agent(name: &str, program: &Path) -> Option<String> {
+    let isolated = ["XDG_DATA_HOME", "XDG_CONFIG_HOME"]
+        .iter()
+        .any(|k| std::env::var_os(k).is_some_and(|v| !v.is_empty()));
+    bundled_agent_in(name, program, isolated)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn bundled_agent_in(name: &str, program: &Path, isolated: bool) -> Option<String> {
+    if isolated {
+        return None;
+    }
+    let contents = program.parent()?.parent()?;
+    if program.parent()?.file_name()? != "MacOS" || contents.file_name()? != "Contents" {
+        return None;
+    }
+    let label = format!("dev.rift.{name}");
+    contents
+        .join("Library/LaunchAgents")
+        .join(format!("{label}.plist"))
+        .is_file()
+        .then_some(label)
+}
+
+/// Whether Rift opens at login (its login item, `SMAppService`); `None`
+/// where that cannot be known (macOS before 13, other systems).
+pub fn launch_at_login() -> Option<bool> {
+    #[cfg(target_os = "macos")]
+    {
+        sm::main_app_enabled()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+/// Add or remove Rift's login item. Fails before macOS 13, on other
+/// systems, and for a run outside Rift.app.
+pub fn set_launch_at_login(on: bool) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        sm::set_main_app(on)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = on;
+        Err(io::Error::other("launch at login is macOS only"))
+    }
+}
+
+/// `SMAppService` (ServiceManagement, macOS 13+), looked up at run time:
+/// the app still starts on macOS 11 and 12, where helpers bootstrap and
+/// there is no login item.
+#[cfg(target_os = "macos")]
+mod sm {
+    use std::io;
+
+    use objc2::msg_send;
+    use objc2::rc::Retained;
+    use objc2::runtime::{AnyClass, AnyObject};
+    use objc2_foundation::{NSError, NSString};
+
+    #[link(name = "ServiceManagement", kind = "framework")]
+    unsafe extern "C" {}
+
+    /// `SMAppServiceStatus`
+    const ENABLED: isize = 1;
+    const REQUIRES_APPROVAL: isize = 2;
+
+    fn class() -> io::Result<&'static AnyClass> {
+        AnyClass::get(c"SMAppService").ok_or_else(|| io::Error::other("needs macOS 13"))
+    }
+
+    fn agent(plist: &str) -> io::Result<Retained<AnyObject>> {
+        let name = NSString::from_str(plist);
+        // SAFETY: `+agentServiceWithPlistName:` takes an NSString and
+        // returns an autoreleased SMAppService (never nil per the header)
+        let svc: Option<Retained<AnyObject>> =
+            unsafe { msg_send![class()?, agentServiceWithPlistName: &*name] };
+        svc.ok_or_else(|| io::Error::other("no SMAppService for the agent"))
+    }
+
+    fn main_app() -> io::Result<Retained<AnyObject>> {
+        // SAFETY: `+mainAppService` takes nothing and returns the service
+        let svc: Option<Retained<AnyObject>> = unsafe { msg_send![class()?, mainAppService] };
+        svc.ok_or_else(|| io::Error::other("no SMAppService for the app"))
+    }
+
+    fn status(svc: &AnyObject) -> isize {
+        // SAFETY: `-status` returns SMAppServiceStatus (NSInteger)
+        unsafe { msg_send![svc, status] }
+    }
+
+    fn register(svc: &AnyObject) -> io::Result<()> {
+        // SAFETY: `-registerAndReturnError:` returns BOOL with NSError**
+        let r: Result<(), Retained<NSError>> = unsafe { msg_send![svc, registerAndReturnError: _] };
+        r.map_err(|e| io::Error::other(e.localizedDescription().to_string()))
+    }
+
+    fn unregister(svc: &AnyObject) -> io::Result<()> {
+        // SAFETY: `-unregisterAndReturnError:` returns BOOL with NSError**
+        let r: Result<(), Retained<NSError>> =
+            unsafe { msg_send![svc, unregisterAndReturnError: _] };
+        r.map_err(|e| io::Error::other(e.localizedDescription().to_string()))
+    }
+
+    /// Register agent `label` (once; it stays registered across launches
+    /// and updates) and start it unless it runs (`kickstart` without `-k`).
+    pub fn start_agent(label: &str) -> io::Result<()> {
+        let svc = agent(&format!("{label}.plist"))?;
+        if status(&svc) != ENABLED {
+            register(&svc)?;
+            if status(&svc) != ENABLED {
+                // turned off in System Settings › Login Items
+                return Err(io::Error::other("not allowed in Login Items"));
+            }
+        }
+        let target = format!("gui/{}/{label}", unsafe { libc::getuid() });
+        super::launchctl(&["kickstart", &target])
+    }
+
+    pub fn main_app_enabled() -> Option<bool> {
+        let svc = main_app().ok()?;
+        Some(matches!(status(&svc), ENABLED | REQUIRES_APPROVAL))
+    }
+
+    pub fn set_main_app(on: bool) -> io::Result<()> {
+        let svc = main_app()?;
+        let st = status(&svc);
+        match (on, st) {
+            (true, ENABLED) => Ok(()),
+            (true, _) => register(&svc),
+            (false, ENABLED | REQUIRES_APPROVAL) => unregister(&svc),
+            (false, _) => Ok(()),
+        }
+    }
 }
 
 fn append(path: &Path) -> io::Result<std::fs::File> {
@@ -233,6 +390,30 @@ mod tests {
             a,
             job_label("gateway", Path::new("/Users/a/.local/share/rift/launchd"))
         );
+    }
+
+    #[test]
+    fn bundled_agents_only_for_a_shared_run_inside_the_bundle() {
+        let scratch = std::env::temp_dir().join(format!("rift-agents-{}", std::process::id()));
+        let contents = scratch.join("Rift.app/Contents");
+        std::fs::create_dir_all(contents.join("MacOS")).unwrap();
+        std::fs::create_dir_all(contents.join("Library/LaunchAgents")).unwrap();
+        std::fs::write(
+            contents.join("Library/LaunchAgents/dev.rift.session.plist"),
+            "",
+        )
+        .unwrap();
+        let exe = contents.join("MacOS/rift-terminal");
+        assert_eq!(
+            bundled_agent_in("session", &exe, false).as_deref(),
+            Some("dev.rift.session")
+        );
+        // no list for it, its own data dir, or not in a bundle: bootstrap
+        assert_eq!(bundled_agent_in("gateway", &exe, false), None);
+        assert_eq!(bundled_agent_in("session", &exe, true), None);
+        let loose = scratch.join("target/release/rift-terminal");
+        assert_eq!(bundled_agent_in("session", &loose, false), None);
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 
     #[test]

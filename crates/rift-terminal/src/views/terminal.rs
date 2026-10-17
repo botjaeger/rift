@@ -42,6 +42,13 @@ pub struct GridLayout {
     pub copied: Option<BlockId>,
     /// Device pixels per logical pixel (cell backgrounds snap to them).
     pub scale: f32,
+    /// `block_spacing = "normal"`: a blank row above each block header.
+    pub spaced_blocks: bool,
+    /// `block_dividers`: a rule between blocks.
+    pub block_dividers: bool,
+    /// `jump_to_bottom_button`: offer the button over a block running past
+    /// the bottom of the pane.
+    pub jump_button: bool,
 }
 
 /// A cell background's rect with its edges on device pixels: rows are a
@@ -63,6 +70,8 @@ pub static BLINK_DRAWN: std::sync::atomic::AtomicBool = std::sync::atomic::Atomi
 pub const BLOCK_INDENT: f32 = 16.0;
 /// Vertical gap between consecutive blocks' left borders (design 01).
 const BLOCK_GAP: f32 = 2.0;
+/// The jump-to-bottom-of-block button's size.
+pub const JUMP_BUTTON: f32 = 28.0;
 
 /// Clickable header rect reported back to the app for collapse toggling.
 pub struct HitRect {
@@ -118,6 +127,9 @@ pub struct RenderOutput {
     /// this frame took: the app must not lock them again while the reader
     /// thread is busy).
     pub sticky_open: bool,
+    /// The jump-to-bottom button (`jump_to_bottom_button`): its rect and
+    /// the block under the pointer that runs past the bottom of the pane.
+    pub jump_bottom: Option<([f32; 4], BlockId)>,
 }
 
 /// Byte-scan for http(s) URLs in a line: (char col, char len, url).
@@ -335,6 +347,7 @@ pub fn build_display_list(
         screen_lines,
         None,
         &std::collections::HashSet::new(),
+        false,
     )
 }
 
@@ -431,7 +444,8 @@ pub fn filter_hidden(
 /// its bottom (pads above it), and after a `clear` the new content does
 /// too; the blank screen rows past the live end (`live_end`) are left out,
 /// so a command just submitted or running stays down there instead of
-/// riding up on them.
+/// riding up on them. `spaced` (`block_spacing = "normal"`): a blank row
+/// above every block header that follows other rows.
 #[allow(clippy::too_many_arguments)]
 pub fn build_display_list_filtered(
     blocks: &[Block],
@@ -444,6 +458,7 @@ pub fn build_display_list_filtered(
     view_rows: usize,
     bottom_up: Option<u64>,
     hidden: &std::collections::HashSet<u64>,
+    spaced: bool,
 ) -> Vec<DisplayLine> {
     let mut display: Vec<DisplayLine> = Vec::new();
     if alt_screen {
@@ -478,9 +493,22 @@ pub fn build_display_list_filtered(
         // does a block header replace this row?
         let mut replaced = false;
         for (bi, block) in blocks.iter().enumerate() {
+            // a background block: the prompt its output landed after goes,
+            // with no header in its place
+            if let Some((s, o)) = block.hidden_prompt()
+                && abs == s
+                && o > s
+            {
+                abs = o;
+                replaced = true;
+                break;
+            }
             if let Some((s, o)) = block.suppressed_range()
                 && abs == s
             {
+                if spaced && display.last().is_some_and(|d| *d != DisplayLine::Pad) {
+                    display.push(DisplayLine::Pad);
+                }
                 display.push(DisplayLine::Header(bi));
                 let next = if block.collapsed {
                     block.end.unwrap_or(o).max(o)
@@ -1324,11 +1352,12 @@ pub fn visible_text(session: &Session) -> String {
 
 /// Output text of a block (for the copy button / copy action).
 pub fn block_output_text(session: &Session, block_id: BlockId) -> Option<String> {
-    let (start, end, unterminated) = {
+    let (start, end, unterminated, skip) = {
         let blocks = session.blocks.lock().unwrap();
         let block = blocks.iter().find(|b| b.id == block_id)?;
         let (start, end) = block.output_range()?;
-        (start, end, block.unterminated)
+        // a background block's first row begins after the prompt
+        (start, end, block.unterminated, block.skip_cols)
     };
     let scrolled = session.scrolled.load(std::sync::atomic::Ordering::Acquire);
     let term = session.term.lock();
@@ -1339,7 +1368,11 @@ pub fn block_output_text(session: &Session, block_id: BlockId) -> Option<String>
     // rows gone from scrollback have no text
     for abs in start.max(oldest_row(g, scrolled))..end {
         if let Some((text, wrapped)) = copy_line(g, scrolled, abs) {
-            out.push_str(&text);
+            if abs == start && skip > 0 {
+                out.extend(text.chars().skip(skip));
+            } else {
+                out.push_str(&text);
+            }
             // a soft-wrapped row continues on the next one: no line break
             if !wrapped {
                 out.push('\n');
@@ -1831,6 +1864,7 @@ fn styled_screen(
         rows,
         Some(live_end(term, scrolled)),
         hidden,
+        false,
     );
     // the editor owns the cursor at a prompt, which the phone does not show
     let at_prompt = matches!(blocks.last().map(|b| &b.state), Some(BlockState::Prompt));
@@ -2156,6 +2190,7 @@ pub fn render(
         grid.rows,
         (grid.bottom_up && !alt_screen).then(|| live_end(&term, scrolled)),
         &hidden,
+        grid.spaced_blocks,
     );
     if alt_screen {
         *view_offset = 0;
@@ -2228,6 +2263,17 @@ pub fn render(
                     // block wash under content (quads draw in push order)
                     wash_row(layer, grid, y, bg);
                 }
+                // a background block's first row: its output follows the
+                // prompt it landed after, which stays out; the output starts
+                // at the indent like every other row
+                let skip = if alt_screen {
+                    0
+                } else {
+                    blocks
+                        .iter()
+                        .find(|b| b.background && b.output_start == Some(*abs))
+                        .map_or(0, |b| b.skip_cols)
+                };
                 let content_x = if alt_screen {
                     grid.x
                 } else if let Some(color) = border_color(*abs) {
@@ -2239,7 +2285,7 @@ pub fn render(
                     grid.x + BLOCK_INDENT
                 } else {
                     grid.x
-                };
+                } - skip as f32 * grid.cell_w;
                 out.rows.push(RowInfo {
                     y,
                     kind: RowKind::Grid {
@@ -2283,6 +2329,7 @@ pub fn render(
                     search,
                     sel_range,
                     &links,
+                    skip,
                 );
             }
             DisplayLine::Pad => {
@@ -2295,6 +2342,16 @@ pub fn render(
                 let block = &blocks[*bi];
                 if selected == Some(block.id) {
                     wash_row(layer, grid, y, sel_color.with_alpha(0.08));
+                }
+                // block dividers: a rule above every header but the top
+                // row's, centred in the blank row of `block_spacing = "normal"`
+                if grid.block_dividers && r > 0 {
+                    let ry = if visible[r - 1] == DisplayLine::Pad {
+                        y - grid.line_h / 2.0
+                    } else {
+                        y - BLOCK_GAP / 2.0
+                    };
+                    layer.hline(grid.x, ry.round(), grid.right - grid.x, 1.0, theme.border);
                 }
                 out.rows.push(RowInfo {
                     y,
@@ -2311,6 +2368,30 @@ pub fn render(
                 );
             }
         }
+    }
+
+    // jump to the bottom of a block (Warp): the pointer is over a block that
+    // runs past the bottom of the pane and shows more than 70 px of it
+    if grid.jump_button
+        && !alt_screen
+        && *view_offset > 0
+        && let Some((mx, my)) = grid.mouse
+        && mx >= grid.x
+        && mx < grid.right
+        && my >= grid.y
+        && let Some(id) = visible
+            .get(((my - grid.y) / grid.line_h) as usize)
+            .and_then(owner)
+        && visible.last().and_then(owner) == Some(id)
+        && display.get(start + rows).and_then(owner) == Some(id)
+        && visible.iter().filter(|d| owner(d) == Some(id)).count() as f32 * grid.line_h > 70.0
+    {
+        let size = JUMP_BUTTON;
+        let bottom = grid.y + rows as f32 * grid.line_h;
+        out.jump_bottom = Some((
+            [grid.right - 10.0 - size, bottom - 10.0 - size, size, size],
+            id,
+        ));
     }
 
     // sticky command header: first visible row belongs to a block whose
@@ -2451,6 +2532,7 @@ fn render_grid_line(
     search: Option<&SearchCtx>,
     sel_range: Option<SelectionRange>,
     links: &[LinkSpan],
+    from_col: usize,
 ) {
     let g = term.grid();
     let rel = abs as i64 - scrolled as i64;
@@ -2487,7 +2569,7 @@ fn render_grid_line(
     // terminal font lacks comes from a fallback font whose advance is not a
     // cell (⧉ is wider), so it gets a run of its own and the text after it
     // starts on its column again (selection and links follow the grid)
-    let mut segs: Vec<(usize, Vec<Span>)> = vec![(0, Vec::new())];
+    let mut segs: Vec<(usize, Vec<Span>)> = vec![(from_col, Vec::new())];
     let mut break_next = false;
     let cols = (g.columns() / sx as usize).min(grid.cols + 8);
     // cell backgrounds (merged runs, block cursor) draw before decorations
@@ -2495,7 +2577,7 @@ fn render_grid_line(
     let mut decos: Vec<([f32; 2], [f32; 2], Color)> = Vec::new();
     let mut blocks: Vec<([f32; 2], [f32; 2], Color)> = Vec::new();
 
-    for col in 0..cols {
+    for col in from_col.min(cols)..cols {
         let cell = &row[Column(col)];
         let flags = cell.flags;
         if flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
@@ -3905,11 +3987,14 @@ mod tests {
             collapsed,
             bookmarked: false,
             cwd: None,
+            cwd_remote: false,
             branch: None,
             restored: false,
             replayed: false,
             finished_at: None,
             from_editor: false,
+            background: false,
+            skip_cols: 0,
         }
     }
 
@@ -3950,6 +4035,75 @@ mod tests {
         assert_eq!(d[1], DisplayLine::Header(0));
         assert_eq!(d[2], DisplayLine::Grid(2));
         assert_eq!(d.len(), 6);
+    }
+
+    #[test]
+    fn normal_spacing_puts_a_blank_row_above_each_later_header() {
+        // two blocks: prompts on 1 and 4, outputs 2..4 and 5..7
+        let blocks = vec![
+            block(7, 1, Some(2), Some(4), done(), false),
+            block(8, 4, Some(5), Some(7), done(), false),
+        ];
+        let list = |spaced| {
+            build_display_list_filtered(
+                &blocks,
+                0,
+                8,
+                0,
+                false,
+                false,
+                None,
+                8,
+                None,
+                &std::collections::HashSet::new(),
+                spaced,
+            )
+        };
+        use DisplayLine::*;
+        assert_eq!(
+            list(false),
+            [
+                Grid(0),
+                Header(0),
+                Grid(2),
+                Grid(3),
+                Header(1),
+                Grid(5),
+                Grid(6),
+                Grid(7)
+            ]
+        );
+        assert_eq!(
+            list(true),
+            [
+                Grid(0),
+                Pad,
+                Header(0),
+                Grid(2),
+                Grid(3),
+                Pad,
+                Header(1),
+                Grid(5),
+                Grid(6),
+                Grid(7)
+            ]
+        );
+        // a header at the very top gets no blank row above it
+        let top = vec![block(7, 0, Some(1), Some(3), done(), false)];
+        let d = build_display_list_filtered(
+            &top,
+            0,
+            4,
+            0,
+            false,
+            false,
+            None,
+            4,
+            None,
+            &std::collections::HashSet::new(),
+            true,
+        );
+        assert_eq!(d[0], Header(0));
     }
 
     #[test]
@@ -4030,6 +4184,9 @@ mod tests {
             mouse: None,
             copied: None,
             scale: 2.0,
+            spaced_blocks: false,
+            block_dividers: false,
+            jump_button: false,
         };
         // above a bottom editor at 310: the panel covers 245..310
         let v = beside_panel(grid, 245.0, 310.0);
@@ -4074,6 +4231,7 @@ mod tests {
             3,
             None,
             &std::collections::HashSet::new(),
+            false,
         );
         assert_eq!(d.len(), 8);
         assert_eq!(d[7], DisplayLine::Grid(7));
@@ -4100,6 +4258,7 @@ mod tests {
                 6,
                 Some(u64::MAX),
                 &std::collections::HashSet::new(),
+                false,
             )
         };
         // one block (header + 3 lines) in a 6-row view: 2 pads above it
@@ -4172,6 +4331,7 @@ mod tests {
             6,
             Some(4),
             &std::collections::HashSet::new(),
+            false,
         );
         let StyledRows {
             lines: rows,
@@ -4329,6 +4489,7 @@ mod tests {
             9,
             Some(8),
             &std::collections::HashSet::new(),
+            false,
         );
         let StyledRows {
             lines: rows, rules, ..

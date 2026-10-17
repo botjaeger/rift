@@ -440,6 +440,11 @@ pub fn base_items(
             "toggle_review",
             PaletteAction::App(AppAction::ToggleReview),
         ),
+        item(
+            "Focus code review",
+            "focus_review",
+            PaletteAction::App(AppAction::FocusReview),
+        ),
     ];
     items.push(Item {
         title: "Toggle vim keybindings".into(),

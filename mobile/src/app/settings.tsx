@@ -12,6 +12,7 @@ import { appVersionText } from "@/ui/format";
 import { Icon } from "@/ui/Icon";
 import { ErrorText } from "@/ui/Notice";
 import { CardBox, ChoiceRow, Group, NavRow, Pill, Row, Segmented, SettingsPage, SwitchRow, ValueRow } from "@/ui/Rows";
+import { SaveError } from "@/ui/SaveError";
 import { hostMeta, notifyExample, ntfySummary, shortAfter, updateLine } from "@/ui/settingsText";
 import { colors, ui } from "@/ui/theme";
 import { useNow } from "@/ui/useNow";
@@ -221,7 +222,7 @@ export default function SettingsScreen() {
   const st = s.settings;
   const example = s.hosts[0]?.record.name ?? "studio-mac";
   return (
-    <SettingsPage title="Settings">
+    <SettingsPage title="Settings" notice={<SaveError />}>
       <Group title="Computers">
         <CardBox>
           {s.hosts.map((h, i) => {

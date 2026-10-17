@@ -7,6 +7,7 @@ import { fleet, useApp } from "@/runtime";
 import { confirmDestructive } from "@/ui/confirm";
 import { ErrorText } from "@/ui/Notice";
 import { CardBox, Group, Pill, Row, SettingsPage, SwitchRow } from "@/ui/Rows";
+import { SaveError } from "@/ui/SaveError";
 import { colors, mono, ui } from "@/ui/theme";
 
 /**
@@ -68,13 +69,12 @@ export default function NtfyScreen() {
       "New topic",
     );
     if (!ok) return;
-    await fleet.rotateNtfyTopic();
-    tell(NTFY_ROTATED);
+    if (await fleet.rotateNtfyTopic()) tell(NTFY_ROTATED);
   };
   const old = ntfyUnsupported(s.hosts);
   const footer = on ? ntfyFooter(server, st.showCommandInNotification) : pushFooter(s.push, false);
   return (
-    <SettingsPage title="While the app is closed">
+    <SettingsPage title="While the app is closed" notice={<SaveError />}>
       <Group footer={footer}>
         <CardBox>
           <SwitchRow

@@ -249,8 +249,9 @@ pub fn render(
         }
     }
 
-    // selection highlight (under the text), one band per covered row
-    if let Some(sel) = pane.editor.selection() {
+    // selection highlight (under the text), one band per covered row; every
+    // caret's selection (multi-cursor)
+    for sel in pane.editor.selections() {
         for (row, r) in rows.iter().enumerate() {
             let (row_start, row_end) = (r.start, r.end);
             let (a, b) = (sel.start.max(row_start), sel.end.min(row_end));
@@ -480,6 +481,23 @@ pub fn render(
             ),
         };
         layer.rect(rect_pos, rect_size, theme.cursor.with_alpha(alpha), 1.0);
+        // the other carets (multi-cursor): bars, so the text under them reads
+        for &(at, _) in &pane.editor.extra {
+            let at = at.min(buffer.len());
+            let row = row_of(&rows, at);
+            let x = engine.measure(
+                &buffer[rows[row].start..at],
+                font_size,
+                mono_family(),
+                Weight::NORMAL,
+            );
+            layer.rect(
+                [text_x + x - 1.0, input_y + row as f32 * line_h + CURSOR_TOP],
+                [2.0, CURSOR_H],
+                theme.cursor,
+                1.0,
+            );
+        }
     }
 
     // vim mode pill at the right edge of the input line; an open `/` `?`

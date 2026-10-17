@@ -37,6 +37,10 @@ pub enum ClickTarget {
     ToggleReview,
     /// Top-bar inbox: the notifications popover.
     ToggleNotifications,
+    /// Toolbar buttons (`toolbar_left` / `toolbar_right`): the command
+    /// palette and Settings.
+    TogglePalette,
+    ToggleSettings,
     /// Top-bar "Update Rift" chip: the update dialog.
     UpdateChip,
     /// Top-bar "Remote · …" chip (a phone is connected): Settings › Remote
@@ -71,6 +75,10 @@ pub enum ClickTarget {
     /// Divider `index` of the split at the path.
     HandleDrag(NodePath, usize),
     JumpToBlock(PaneId, rift_core::BlockId),
+    /// The jump-to-bottom button over a block running past the pane.
+    JumpToBlockEnd(PaneId, rift_core::BlockId),
+    /// The subshell offer's Enable, Don't ask again and ✕.
+    Subshell(PaneId, crate::views::subshell::Part),
     // settings overlay controls
     SettingsNoop,
     /// Settings › Remote access › Recent connections while it holds more
@@ -172,6 +180,38 @@ pub struct EditorState {
     pub vim: Option<VimState>,
     /// Selection anchor (byte offset); the selection spans anchor..cursor.
     pub anchor: Option<usize>,
+    /// More carets (multi-cursor, Warp): each a cursor and its selection
+    /// anchor, like `cursor` and `anchor`, which stay the primary one.
+    /// Edits and motions act at every caret ([`Self::at_each_caret`]); Esc,
+    /// a plain click, undo, history and submit go back to one.
+    pub extra: Vec<(usize, Option<usize>)>,
+}
+
+/// The span an edit changed, from `before` to `after`: (start, end in
+/// `before`, end in `after`), byte offsets on character boundaries.
+fn changed_span(before: &str, after: &str) -> (usize, usize, usize) {
+    let mut start = before
+        .bytes()
+        .zip(after.bytes())
+        .take_while(|(a, b)| a == b)
+        .count();
+    while !before.is_char_boundary(start) || !after.is_char_boundary(start) {
+        start -= 1;
+    }
+    let max_suffix = before.len().min(after.len()) - start;
+    let mut suffix = before
+        .bytes()
+        .rev()
+        .zip(after.bytes().rev())
+        .take(max_suffix)
+        .take_while(|(a, b)| a == b)
+        .count();
+    while !before.is_char_boundary(before.len() - suffix)
+        || !after.is_char_boundary(after.len() - suffix)
+    {
+        suffix -= 1;
+    }
+    (start, before.len() - suffix, after.len() - suffix)
 }
 
 const UNDO_CAP: usize = 100;
@@ -229,6 +269,253 @@ impl EditorState {
         }
     }
 
+    /// More than one caret.
+    pub fn has_extra(&self) -> bool {
+        !self.extra.is_empty()
+    }
+
+    /// Back to the primary caret alone.
+    pub fn collapse_carets(&mut self) {
+        self.extra.clear();
+    }
+
+    /// Every caret's selection (non-empty ones), primary first.
+    pub fn selections(&self) -> Vec<std::ops::Range<usize>> {
+        let mut all: Vec<_> = self.selection().into_iter().collect();
+        for &(c, a) in &self.extra {
+            if let Some(a) = a.map(|a| a.min(self.buffer.len()))
+                && a != c
+            {
+                all.push(a.min(c)..a.max(c));
+            }
+        }
+        all
+    }
+
+    /// Run `op` at every caret, as if each were the only one: the last in
+    /// the buffer first, so an edit never moves the carets still to come,
+    /// and those done move by the edit's length change. One undo step for
+    /// all of them; carets that end up on each other merge.
+    pub fn at_each_caret(&mut self, mut op: impl FnMut(&mut EditorState)) {
+        let mark = self.undo_len();
+        let start_cursor = self.cursor;
+        // (cursor, anchor, primary), from the end of the buffer back
+        let mut todo: Vec<(usize, Option<usize>, bool)> =
+            std::iter::once((self.cursor, self.anchor, true))
+                .chain(self.extra.iter().map(|&(c, a)| (c, a, false)))
+                .collect();
+        todo.sort_by_key(|&(c, a, _)| std::cmp::Reverse(a.map_or(c, |a| a.min(c))));
+        let mut done: Vec<(usize, Option<usize>, bool)> = Vec::with_capacity(todo.len());
+        let mut k = 0;
+        while k < todo.len() {
+            let (c, a, primary) = todo[k];
+            k += 1;
+            self.cursor = c.min(self.buffer.len());
+            self.anchor = a.map(|a| a.min(self.buffer.len()));
+            let before = self.buffer.clone();
+            op(self);
+            if self.buffer == before {
+                done.push((self.cursor, self.anchor, primary));
+                continue;
+            }
+            // carets past this edit move with it; one inside what it replaced
+            // (a word deleted across it) lands at its end, and one still to
+            // come that it swallowed merges there instead of acting again
+            let (start, old_end, new_end) = changed_span(&before, &self.buffer);
+            let map = |v: usize| {
+                if v >= old_end {
+                    v - old_end + new_end
+                } else if v > start {
+                    new_end
+                } else {
+                    v
+                }
+            };
+            for d in &mut done {
+                d.0 = map(d.0);
+                d.1 = d.1.map(map);
+            }
+            done.push((self.cursor, self.anchor, primary));
+            for t in &mut todo[k..] {
+                let lo = t.1.map_or(t.0, |a| a.min(t.0));
+                if lo > start && lo < old_end {
+                    done.push((new_end, None, t.2));
+                    t.2 = false;
+                    t.0 = usize::MAX;
+                }
+            }
+            todo.retain(|t| t.0 != usize::MAX);
+        }
+        self.set_carets(done);
+        self.squash_undo(mark, start_cursor);
+    }
+
+    /// Store carets (one of them the primary), sorted, without duplicates
+    /// or overlapping selections.
+    fn set_carets(&mut self, mut all: Vec<(usize, Option<usize>, bool)>) {
+        // on a character of the buffer, never inside one
+        let snap = |v: usize| {
+            let mut v = v.min(self.buffer.len());
+            while !self.buffer.is_char_boundary(v) {
+                v -= 1;
+            }
+            v
+        };
+        for c in &mut all {
+            c.0 = snap(c.0);
+            c.1 = c.1.map(snap).filter(|a| *a != c.0);
+        }
+        all.sort_by_key(|&(c, a, _)| (a.map_or(c, |a| a.min(c)), c));
+        let mut kept: Vec<(usize, Option<usize>, bool)> = Vec::with_capacity(all.len());
+        for c in all {
+            let span = |x: &(usize, Option<usize>, bool)| {
+                let a = x.1.unwrap_or(x.0);
+                (a.min(x.0), a.max(x.0))
+            };
+            if let Some(last) = kept.last_mut() {
+                let (s0, e0) = span(last);
+                let (s1, e1) = span(&c);
+                if s1 < e0 || (s1, e1) == (s0, e0) {
+                    // merged: the primary survives
+                    last.2 |= c.2;
+                    continue;
+                }
+            }
+            kept.push(c);
+        }
+        let primary = kept.iter().position(|c| c.2).unwrap_or(0);
+        let (c, a, _) = kept.remove(primary);
+        self.cursor = c;
+        self.anchor = a;
+        self.extra = kept.into_iter().map(|(c, a, _)| (c, a)).collect();
+    }
+
+    /// Ctrl-⇧-↑ / ↓: a caret on the line above the topmost caret (or below
+    /// the bottommost), at the same column or the line's end.
+    pub fn add_caret_vertical(&mut self, down: bool) {
+        let all: Vec<usize> = std::iter::once(self.cursor)
+            .chain(self.extra.iter().map(|c| c.0))
+            .collect();
+        let from = if down {
+            *all.iter().max().unwrap_or(&self.cursor)
+        } else {
+            *all.iter().min().unwrap_or(&self.cursor)
+        };
+        let line_start = self.buffer[..from].rfind('\n').map_or(0, |i| i + 1);
+        let col = self.buffer[line_start..from].chars().count();
+        let target_start = if down {
+            match self.buffer[from..].find('\n') {
+                Some(i) => from + i + 1,
+                None => return,
+            }
+        } else {
+            if line_start == 0 {
+                return;
+            }
+            self.buffer[..line_start - 1]
+                .rfind('\n')
+                .map_or(0, |i| i + 1)
+        };
+        let target_end = self.buffer[target_start..]
+            .find('\n')
+            .map_or(self.buffer.len(), |i| target_start + i);
+        let at = self.buffer[target_start..target_end]
+            .char_indices()
+            .nth(col)
+            .map_or(target_end, |(i, _)| target_start + i);
+        let mut all: Vec<_> = std::iter::once((self.cursor, self.anchor, true))
+            .chain(self.extra.iter().map(|&(c, a)| (c, a, false)))
+            .collect();
+        all.push((at, None, false));
+        self.set_carets(all);
+    }
+
+    /// Ctrl-G: select the word at the cursor, or with a selection, add a
+    /// caret selecting its next occurrence (after the last caret, wrapping).
+    pub fn add_next_occurrence(&mut self) {
+        let Some(sel) = self.selection() else {
+            let word = |c: char| c.is_alphanumeric() || c == '_' || c == '-';
+            let start = self.buffer[..self.cursor]
+                .char_indices()
+                .rev()
+                .take_while(|&(_, c)| word(c))
+                .last()
+                .map_or(self.cursor, |(i, _)| i);
+            let end = self.buffer[self.cursor..]
+                .char_indices()
+                .find(|&(_, c)| !word(c))
+                .map_or(self.buffer.len(), |(i, _)| self.cursor + i);
+            if start < end {
+                self.anchor = Some(start);
+                self.cursor = end;
+            }
+            return;
+        };
+        let needle = self.buffer[sel].to_string();
+        let taken: Vec<(usize, usize)> = self
+            .selections()
+            .into_iter()
+            .map(|r| (r.start, r.end))
+            .collect();
+        let last_end = taken.iter().map(|t| t.1).max().unwrap_or(0);
+        // the first free one after the last caret, wrapping to the start
+        let free = |s: &usize| !taken.contains(&(*s, *s + needle.len()));
+        let found = self
+            .buffer
+            .match_indices(&needle)
+            .map(|(i, _)| i)
+            .filter(|i| *i >= last_end)
+            .find(free)
+            .or_else(|| {
+                self.buffer
+                    .match_indices(&needle)
+                    .map(|(i, _)| i)
+                    .find(free)
+            });
+        if let Some(s) = found {
+            let mut all: Vec<_> = std::iter::once((self.cursor, self.anchor, true))
+                .chain(self.extra.iter().map(|&(c, a)| (c, a, false)))
+                .collect();
+            all.push((s + needle.len(), Some(s), false));
+            self.set_carets(all);
+        }
+    }
+
+    /// ⌘-click (⌥-click on Linux): one more caret at `offset`.
+    /// One on a caret takes that caret away (while another stays).
+    pub fn add_caret_at(&mut self, offset: usize) {
+        let offset = offset.min(self.buffer.len());
+        let mut all: Vec<_> = std::iter::once((self.cursor, self.anchor, true))
+            .chain(self.extra.iter().map(|&(c, a)| (c, a, false)))
+            .collect();
+        if all.len() > 1
+            && let Some(i) = all.iter().position(|c| c.0 == offset)
+        {
+            let gone = all.remove(i);
+            if gone.2 {
+                all[0].2 = true;
+            }
+        } else {
+            all.push((offset, None, false));
+        }
+        self.set_carets(all);
+    }
+
+    /// Paste at every caret: one line each when the text has as many lines
+    /// as there are carets, else all of it at each.
+    pub fn paste_at_carets(&mut self, text: &str) {
+        let lines: Vec<&str> = text.lines().collect();
+        let n = 1 + self.extra.len();
+        if lines.len() == n {
+            // carets in buffer order get the lines in order: hand them out
+            // from the end, as `at_each_caret` visits them
+            let mut from_end = lines.into_iter().rev();
+            self.at_each_caret(|e| e.insert(from_end.next().unwrap_or_default()));
+        } else {
+            self.at_each_caret(|e| e.insert(text));
+        }
+    }
+
     /// Snapshot the current buffer before a mutation (skips no-op duplicates).
     fn push_undo(&mut self) {
         if self.undo_stack.last().map(|(b, _)| b) == Some(&self.buffer) {
@@ -246,6 +533,7 @@ impl EditorState {
         let Some((buf, cur)) = self.undo_stack.pop() else {
             return;
         };
+        self.extra.clear();
         self.redo_stack.push((self.buffer.clone(), self.cursor));
         self.anchor = None;
         self.buffer = buf;
@@ -257,6 +545,7 @@ impl EditorState {
         let Some((buf, cur)) = self.redo_stack.pop() else {
             return;
         };
+        self.extra.clear();
         // bypass push_undo: it would clear redo_stack
         if self.undo_stack.len() >= UNDO_CAP {
             self.undo_stack.remove(0);
@@ -286,6 +575,7 @@ impl EditorState {
     }
 
     pub fn select_all(&mut self) {
+        self.extra.clear();
         self.anchor = Some(0);
         self.cursor = self.buffer.len();
     }
@@ -322,6 +612,7 @@ impl EditorState {
     /// Mouse: place the cursor (optionally extending the selection).
     pub fn click_to(&mut self, offset: usize, extend: bool) {
         let offset = offset.min(self.buffer.len());
+        self.extra.clear();
         if extend {
             let anchor = self.anchor.unwrap_or(self.cursor);
             self.cursor = offset;
@@ -638,6 +929,7 @@ impl EditorState {
 
     pub fn clear(&mut self) {
         self.anchor = None;
+        self.extra.clear();
         self.push_undo();
         self.buffer.clear();
         self.cursor = 0;
@@ -650,6 +942,7 @@ impl EditorState {
 
     pub fn submit(&mut self) -> String {
         let cmd = std::mem::take(&mut self.buffer);
+        self.extra.clear();
         self.cursor = 0;
         self.anchor = None;
         self.hist_idx = None;
@@ -667,6 +960,7 @@ impl EditorState {
 
     pub fn history_up(&mut self) {
         self.anchor = None;
+        self.extra.clear();
         if self.history.is_empty() {
             return;
         }
@@ -686,6 +980,7 @@ impl EditorState {
 
     pub fn history_down(&mut self) {
         self.anchor = None;
+        self.extra.clear();
         if self.hist_idx.is_some() {
             self.push_undo();
         }
@@ -762,6 +1057,8 @@ pub struct PaneState {
     pub filter: Option<(rift_core::BlockId, String)>,
     /// Local fix for the last failed command (shown in the empty editor).
     pub correction: Option<String>,
+    /// The offer to load Rift's hooks in the subshell its command started.
+    pub subshell: Option<crate::app::SubshellOffer>,
     /// Newest finished block already checked for a correction.
     pub correction_checked: Option<rift_core::BlockId>,
     /// File id of this pane's saved block transcript (`save_transcripts`).
@@ -804,6 +1101,7 @@ impl PaneState {
             selected_block: None,
             filter: None,
             correction: None,
+            subshell: None,
             correction_checked: None,
             transcript_id: rift_core::transcript::new_id(),
             first_output: None,
@@ -1047,6 +1345,17 @@ fn grapheme_prev(s: &str, i: usize) -> usize {
     c.prev_boundary(s, 0).ok().flatten().unwrap_or(0)
 }
 
+/// Backspace in a one-line field: drop the last whole grapheme cluster (an
+/// emoji with its modifiers, a letter with its combining marks). False when
+/// `s` was empty.
+pub fn pop_grapheme(s: &mut String) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    s.truncate(grapheme_prev(s, s.len()));
+    true
+}
+
 /// End of the extended grapheme cluster starting at or after byte `i`.
 fn grapheme_next(s: &str, i: usize) -> usize {
     let i = s.ceil_char_boundary(i);
@@ -1169,6 +1478,128 @@ mod tests {
         e.undo();
         assert_eq!(e.buffer, before);
         assert_eq!(e.cursor, cursor);
+    }
+
+    #[test]
+    fn every_caret_types_and_deletes_as_one_undo_step() {
+        let mut e = EditorState {
+            buffer: "a1 a2 a3".into(),
+            cursor: 2,
+            ..Default::default()
+        };
+        e.add_caret_at(5);
+        e.add_caret_at(8);
+        e.at_each_caret(|e| e.insert("x"));
+        assert_eq!(e.buffer, "a1x a2x a3x");
+        assert_eq!(
+            (e.cursor, e.extra.clone()),
+            (3, vec![(7, None), (11, None)])
+        );
+        e.at_each_caret(|e| e.backspace());
+        e.at_each_caret(|e| e.backspace());
+        assert_eq!(e.buffer, "a a a");
+        e.at_each_caret(|e| e.mv_left());
+        e.at_each_caret(|e| e.insert("b"));
+        assert_eq!(e.buffer, "ba ba ba");
+        // one undo step per multi-caret edit, back to one caret
+        e.undo();
+        assert_eq!(e.buffer, "a a a");
+        assert!(!e.has_extra());
+    }
+
+    #[test]
+    fn a_delete_across_another_caret_keeps_it_on_the_text() {
+        // ⌥⌫ at the end of "éé" deletes the word the other caret is inside
+        let mut e = EditorState {
+            buffer: "ls ééé x".into(),
+            cursor: 9,
+            ..Default::default()
+        };
+        e.add_caret_at(5);
+        e.at_each_caret(|e| e.delete_word_back());
+        assert_eq!(e.buffer, "ls  x");
+        assert!(e.buffer.is_char_boundary(e.cursor));
+        assert!(e.extra.iter().all(|c| e.buffer.is_char_boundary(c.0)));
+        e.at_each_caret(|e| e.insert("é"));
+        assert!(e.buffer.starts_with("ls é"));
+        // ⌘-click on a caret takes it away
+        let mut f = EditorState {
+            buffer: "abc".into(),
+            cursor: 0,
+            ..Default::default()
+        };
+        f.add_caret_at(2);
+        f.add_caret_at(2);
+        assert!(!f.has_extra());
+        // the next occurrence wraps past a taken one
+        let mut g = EditorState {
+            buffer: "x a a a".into(),
+            cursor: 5,
+            anchor: Some(4),
+            ..Default::default()
+        };
+        g.add_next_occurrence();
+        g.add_next_occurrence();
+        assert_eq!(g.selections().len(), 3);
+    }
+
+    #[test]
+    fn next_occurrence_renames_a_word_everywhere() {
+        let mut e = EditorState {
+            buffer: "cp foo.txt foo.bak && rm foo.txt".into(),
+            cursor: 4,
+            ..Default::default()
+        };
+        e.add_next_occurrence();
+        assert_eq!(e.selected_text(), Some("foo"));
+        e.add_next_occurrence();
+        e.add_next_occurrence();
+        assert_eq!(e.selections().len(), 3);
+        // a fourth press finds no new one
+        e.add_next_occurrence();
+        assert_eq!(e.selections().len(), 3);
+        e.at_each_caret(|e| e.insert("bar"));
+        assert_eq!(e.buffer, "cp bar.txt bar.bak && rm bar.txt");
+        assert_eq!(e.extra.len(), 2);
+    }
+
+    #[test]
+    fn carets_above_and_below_keep_the_column_and_merge() {
+        let mut e = EditorState {
+            buffer: "echo one\nls\necho three".into(),
+            cursor: 5,
+            ..Default::default()
+        };
+        e.add_caret_vertical(true);
+        e.add_caret_vertical(true);
+        // the short middle line takes its end; the next caret goes from the
+        // outermost one, at its column
+        assert_eq!(e.extra, vec![(11, None), (14, None)]);
+        e.add_caret_vertical(true);
+        assert_eq!(e.extra.len(), 2, "no line below the last");
+        e.at_each_caret(|e| e.insert(">"));
+        assert_eq!(e.buffer, "echo >one\nls>\nec>ho three");
+        // moving every caret to its line start, then two more lefts: the
+        // carets that meet merge
+        e.at_each_caret(|e| e.mv_doc_start());
+        assert!(!e.has_extra());
+    }
+
+    #[test]
+    fn paste_gives_each_caret_its_line() {
+        let mut e = EditorState {
+            buffer: "a b c".into(),
+            cursor: 1,
+            ..Default::default()
+        };
+        e.add_caret_at(3);
+        e.add_caret_at(5);
+        e.paste_at_carets("1\n2\n3");
+        assert_eq!(e.buffer, "a1 b2 c3");
+        e.paste_at_carets("-");
+        assert_eq!(e.buffer, "a1- b2- c3-");
+        e.collapse_carets();
+        assert!(!e.has_extra());
     }
 
     #[test]
@@ -1325,6 +1756,24 @@ mod tests {
         assert_eq!(e.buffer, "\u{1F1EF}\u{1F1F5}");
         e.undo();
         assert_eq!(e.buffer, "\u{1F1EF}\u{1F1F5}\u{1F44D}\u{1F3FD}");
+    }
+
+    #[test]
+    fn field_backspace_drops_whole_graphemes() {
+        use super::pop_grapheme;
+        let mut s = "a\u{65}\u{301}\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{1F44D}\u{1F3FD}"
+            .to_string();
+        assert!(pop_grapheme(&mut s));
+        assert_eq!(
+            s,
+            "a\u{65}\u{301}\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"
+        );
+        assert!(pop_grapheme(&mut s));
+        assert_eq!(s, "a\u{65}\u{301}");
+        assert!(pop_grapheme(&mut s));
+        assert_eq!(s, "a");
+        assert!(pop_grapheme(&mut s));
+        assert!(!pop_grapheme(&mut s));
     }
 
     #[test]

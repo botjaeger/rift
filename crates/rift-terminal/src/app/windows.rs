@@ -145,7 +145,7 @@ impl App {
     ) {
         let mut attrs = WindowAttributes::default()
             .with_title("Rift")
-            .with_window_icon(crate::icon::window_icon())
+            .with_window_icon(crate::icon::window_icon(self.config.app_icon))
             // always transparent so `window_opacity` can change live
             .with_transparent(true)
             .with_inner_size(match frame {
@@ -181,7 +181,7 @@ impl App {
                     .with_title_hidden(true);
             }
             if !self.headless {
-                crate::icon::set_dock_icon();
+                crate::icon::set_dock_icon(self.config.app_icon);
             }
         }
         // X11 WM_CLASS / Wayland app_id "rift" matches rift.desktop, so
@@ -263,6 +263,16 @@ impl App {
     /// window would start (`working_directory`).
     pub(super) fn open_new_window(&mut self, event_loop: &ActiveEventLoop) {
         let cwd = self.start_dir();
+        self.open_new_window_at(event_loop, cwd);
+    }
+
+    /// A window beside this one, its first tab in `cwd` (a `rift://` link's
+    /// folder, or where ⌘N starts).
+    pub(super) fn open_new_window_at(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        cwd: Option<std::path::PathBuf>,
+    ) {
         // not cascaded from the screen-wide drop-down window
         let from = self
             .win
@@ -481,7 +491,7 @@ impl App {
     }
 
     /// Serve the first window `pred` holds for (else stay).
-    fn enter_where(&mut self, pred: impl Fn(&WindowState) -> bool) {
+    pub(super) fn enter_where(&mut self, pred: impl Fn(&WindowState) -> bool) {
         if pred(&self.win) {
             return;
         }

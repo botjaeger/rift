@@ -48,6 +48,16 @@
 //! hotkey                   # what the global hotkey does: shows or hides
 //!                          # the drop-down window (`hotkey_window`); the
 //!                          # shown drop-down window takes focus
+//! link rift://action/new_tab?path=/tmp  # open a `rift://` link, as
+//!                          # macOS or a second process hands it over
+//! a11y click Match case    # an assistive-technology action request
+//!                          # (click, focus, blur, expand, collapse,
+//!                          # scroll_into_view, show_context_menu) on the
+//!                          # accessibility node with that label, as
+//!                          # VoiceOver or Orca sends it
+//! fault clipboard          # headless only: the clipboard backend is
+//!                          # unavailable (`opener`: the OS opener is
+//!                          # missing; `none` clears both)
 //! quit                     # exit the app
 //! ```
 //!
@@ -108,6 +118,12 @@ pub enum Step {
     /// The global hotkey's action (the drop-down window with
     /// `hotkey_window`, else the app's show/hide).
     Hotkey,
+    /// Open a `rift://` link.
+    Link(String),
+    /// An accessibility action request on the node with this label.
+    A11y(accesskit::Action, String),
+    /// Headless fault injection: `clipboard`, `opener` or `none`.
+    Fault(String),
     Quit,
 }
 
@@ -304,6 +320,28 @@ pub fn parse(src: &str) -> Result<Vec<Step>, String> {
             "window" => Step::Window(rest.parse().map_err(|_| bad("expected a window number"))?),
             "close_window" => Step::CloseWindow,
             "hotkey" => Step::Hotkey,
+            "link" if !rest.is_empty() => Step::Link(rest.to_string()),
+            "a11y" => {
+                use accesskit::Action as A;
+                let (action, label) = rest
+                    .split_once(char::is_whitespace)
+                    .ok_or_else(|| bad("expected an action and a label"))?;
+                let action = match action {
+                    "click" => A::Click,
+                    "focus" => A::Focus,
+                    "blur" => A::Blur,
+                    "expand" => A::Expand,
+                    "collapse" => A::Collapse,
+                    "scroll_into_view" => A::ScrollIntoView,
+                    "show_context_menu" => A::ShowContextMenu,
+                    other => return Err(bad(&format!("unknown a11y action {other:?}"))),
+                };
+                Step::A11y(action, label.trim().to_string())
+            }
+            "fault" => match rest {
+                "clipboard" | "opener" | "none" => Step::Fault(rest.to_string()),
+                _ => return Err(bad("expected clipboard, opener or none")),
+            },
             "quit" => Step::Quit,
             other => return Err(bad(&format!("unknown command {other:?}"))),
         };
@@ -494,6 +532,7 @@ window 0
 window 2
 close_window
 hotkey
+link rift://action/new_tab?path=/tmp
 "
             )
             .unwrap(),
@@ -502,7 +541,8 @@ hotkey
                 Step::Window(0),
                 Step::Window(2),
                 Step::CloseWindow,
-                Step::Hotkey
+                Step::Hotkey,
+                Step::Link("rift://action/new_tab?path=/tmp".into())
             ]
         );
     }

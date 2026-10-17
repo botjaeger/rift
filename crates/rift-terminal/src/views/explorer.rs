@@ -16,6 +16,8 @@ use crate::views::icons::{self, Icon};
 pub const EXPLORER_W: f32 = 260.0;
 pub const HEADER_H: f32 = 38.0;
 pub const ROW_H: f32 = 24.0;
+/// Space above the first row (and below the last) inside the body.
+const LIST_PAD: f32 = 4.0;
 const INDENT: f32 = 14.0;
 
 #[derive(Default)]
@@ -28,6 +30,9 @@ pub struct ExplorerState {
     repo: Option<git2::Repository>,
     pub expanded: HashSet<PathBuf>,
     children: HashMap<PathBuf, Listing>,
+    /// Pages of `fs_tree::MAX_ENTRIES` entries each folder shows (default 1);
+    /// the "Show more" row adds one.
+    pages: HashMap<PathBuf, usize>,
     pub selected: Option<PathBuf>,
     /// Vertical scroll (logical px, ≥ 0).
     pub scroll: f32,
@@ -51,7 +56,13 @@ pub struct Row {
     pub name: String,
     pub depth: usize,
     pub is_dir: bool,
+    /// The "Show more" row closing a cut listing; `path` is `MORE_NAME`
+    /// inside the folder it extends.
+    pub more: bool,
 }
+
+/// File name of a "Show more" row: a NUL cannot be in a real name.
+const MORE_NAME: &str = "\0more";
 
 /// One drawn line of the tree body.
 #[derive(Debug, Clone, PartialEq)]
@@ -86,6 +97,7 @@ impl ExplorerState {
         self.root = Some(root);
         self.expanded.clear();
         self.children.clear();
+        self.pages.clear();
         self.selected = None;
         self.scroll = 0.0;
         true
@@ -123,7 +135,8 @@ impl ExplorerState {
 
     fn listing(&mut self, dir: &Path) -> &Listing {
         if !self.children.contains_key(dir) {
-            let list = fs_tree::listing(dir, self.repo.as_ref(), self.show_hidden);
+            let limit = self.pages.get(dir).copied().unwrap_or(1) * fs_tree::MAX_ENTRIES;
+            let list = fs_tree::listing_limit(dir, self.repo.as_ref(), self.show_hidden, limit);
             self.children.insert(dir.to_path_buf(), list);
         }
         &self.children[dir]
@@ -146,6 +159,7 @@ impl ExplorerState {
             entries,
             error,
             truncated,
+            scan_capped,
         } = self.listing(dir).clone();
         if let Some(error) = error {
             // "Permission denied (os error 13)" → "Permission denied"
@@ -164,16 +178,42 @@ impl ExplorerState {
                 name: e.name,
                 depth,
                 is_dir: e.is_dir,
+                more: false,
             });
             if open {
                 self.walk(&e.path, depth + 1, rows, lines);
             }
         }
         if truncated {
+            // a real row: arrows, Enter and a click all reach it
+            lines.push(Line::Row(rows.len()));
+            rows.push(Row {
+                path: dir.join(MORE_NAME),
+                name: format!("Show {} more entries", fs_tree::MAX_ENTRIES),
+                depth,
+                is_dir: false,
+                more: true,
+            });
+        }
+        if scan_capped && !truncated {
             lines.push(Line::Notice {
                 depth,
-                text: "… more entries not shown".into(),
+                text: format!("Only the first {} entries are listed", fs_tree::MAX_SCAN),
             });
+        }
+    }
+
+    /// Show one more page of the folder a "Show more" row closes.
+    pub fn show_more(&mut self, more_row: &Path) {
+        if let Some(dir) = more_row.parent() {
+            let pages = self.pages.entry(dir.to_path_buf()).or_insert(1);
+            *pages += 1;
+            let first_new = (*pages - 1) * fs_tree::MAX_ENTRIES;
+            self.children.remove(dir);
+            // the selection moves to the first entry the page revealed
+            if let Some(e) = self.listing(dir).entries.get(first_new) {
+                self.selected = Some(e.path.clone());
+            }
         }
     }
 
@@ -205,7 +245,7 @@ impl ExplorerState {
     }
 
     pub fn scroll_by(&mut self, px: f32) {
-        let max = (self.lines.len() as f32 * ROW_H - self.view_h + 8.0).max(0.0);
+        let max = (self.lines.len() as f32 * ROW_H - self.view_h + 2.0 * LIST_PAD).max(0.0);
         self.scroll = (self.scroll + px).clamp(0.0, max);
     }
 
@@ -228,9 +268,10 @@ impl ExplorerState {
     }
 
     fn reveal(&mut self, i: usize) {
-        let top = self.line_of(i) as f32 * ROW_H;
+        // rows start 4 px below the body's top (see `render`)
+        let top = LIST_PAD + self.line_of(i) as f32 * ROW_H;
         if top < self.scroll {
-            self.scroll = top;
+            self.scroll = top - LIST_PAD;
         } else if top + ROW_H > self.scroll + self.view_h {
             self.scroll = top + ROW_H - self.view_h;
         }
@@ -350,7 +391,7 @@ pub fn render(
     // rows scrolled half under the header are cut at the body's edge
     layer.set_clip(Some(([x, body_top, w - 1.0, body_h], 0.0)));
     for (li, line) in state.lines.iter().enumerate().take(last).skip(first) {
-        let ry = body_top + 4.0 + li as f32 * ROW_H - state.scroll;
+        let ry = body_top + LIST_PAD + li as f32 * ROW_H - state.scroll;
         let i = match line {
             Line::Row(i) => *i,
             // muted, no hit: never actionable as a file
@@ -385,6 +426,24 @@ pub fn render(
         let key = fs_tree::rel_key(&root, &row.path).unwrap_or_default();
         let status = state.statuses.get(&key).copied();
         let dirty = row.is_dir && state.dirty_dirs.contains(&key);
+        if row.more {
+            // "Show more": an accent action line, no file icon
+            layer.text_clipped(
+                label(engine, &row.name, 12.5, Weight::SEMIBOLD),
+                ix + 14.0 + 20.0,
+                ry + 4.0,
+                theme.accent,
+                bounds,
+            );
+            if ry + ROW_H > body_top {
+                let top = ry.max(body_top);
+                hits.push((
+                    [row_rect[0], top, row_rect[2], ry + ROW_H - top],
+                    ExplorerHit::Row(i),
+                ));
+            }
+            continue;
+        }
         if row.is_dir {
             let dir = if state.expanded.contains(&row.path) {
                 super::Dir::Down
@@ -521,21 +580,63 @@ mod tests {
     }
 
     #[test]
-    fn a_cut_listing_ends_with_a_more_entries_line() {
+    fn a_cut_listing_ends_with_a_show_more_row_that_reaches_every_entry() {
         let root = scratch("cut");
+        let total = fs_tree::MAX_ENTRIES + 1;
+        for i in 0..total {
+            std::fs::write(root.join(format!("f{i:05}")), "").unwrap();
+        }
+        let mut s = state_at(&root);
+        s.rebuild_rows();
+        // MAX_ENTRIES files plus the action row, which is selectable
+        assert_eq!(s.rows.len(), fs_tree::MAX_ENTRIES + 1);
+        let more = s.rows.last().unwrap().clone();
+        assert!(more.more && !more.is_dir);
+        assert_eq!(s.notices().count(), 0);
+        s.show_more(&more.path);
+        s.rebuild_rows();
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(s.rows.len(), total, "no more row once every entry shows");
+        assert!(s.rows.iter().all(|r| !r.more));
+        assert_eq!(s.rows.last().unwrap().name, format!("f{:05}", total - 1));
+        assert_eq!(
+            s.selected_row().unwrap().name,
+            format!("f{:05}", fs_tree::MAX_ENTRIES),
+            "selection lands on the first revealed entry"
+        );
+    }
+
+    #[test]
+    fn arrow_keys_reach_the_show_more_row() {
+        let root = scratch("keys");
         for i in 0..=fs_tree::MAX_ENTRIES {
             std::fs::write(root.join(format!("f{i:05}")), "").unwrap();
         }
         let mut s = state_at(&root);
         s.rebuild_rows();
         let _ = std::fs::remove_dir_all(&root);
-        assert_eq!(s.rows.len(), fs_tree::MAX_ENTRIES);
-        assert_eq!(s.lines.len(), fs_tree::MAX_ENTRIES + 1);
-        assert_eq!(
-            s.notices().collect::<Vec<_>>(),
-            ["… more entries not shown"]
+        s.view_h = 400.0;
+        for _ in 0..=fs_tree::MAX_ENTRIES {
+            s.move_selection(1);
+        }
+        assert!(s.selected_row().unwrap().more);
+        // the selected row is whole on screen (rows draw LIST_PAD below the top)
+        let line = s.line_of(s.selected_index().unwrap()) as f32;
+        let bottom = LIST_PAD + line * ROW_H + ROW_H - s.scroll;
+        assert!(
+            bottom <= s.view_h,
+            "row ends at {bottom}, view is {}",
+            s.view_h
         );
-        assert!(matches!(s.lines.last(), Some(Line::Notice { .. })));
+        // and moving back up to the first row shows its top
+        for _ in 0..=fs_tree::MAX_ENTRIES {
+            s.move_selection(-1);
+        }
+        assert!(
+            LIST_PAD - s.scroll >= 0.0,
+            "first row cut: scroll {}",
+            s.scroll
+        );
     }
 
     #[test]

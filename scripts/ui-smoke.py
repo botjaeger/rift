@@ -167,6 +167,18 @@ steps = [
     "key cmd+f",
     "type findneedle",
     f"dump {scratch}/find.txt",
+    # an assistive technology's Focus never presses a control; Click does
+    "a11y focus Match case",
+    f"dump {scratch}/find-a11y-focus.txt",
+    "a11y click Match case",
+    f"dump {scratch}/find-a11y-click.txt",
+    "a11y click Match case",
+    # ⌘A ⌘C copies the query; an unavailable clipboard says so
+    "fault clipboard",
+    "key cmd+a",
+    "key cmd+c",
+    f"dump {scratch}/fault-copy.txt",
+    "fault none",
     "key escape",
     # Enter typed ahead of a confirmation does not accept it
     "type sleep 30\\n",
@@ -174,6 +186,12 @@ steps = [
     "key cmd+w",
     "key enter",
     f"dump {scratch}/confirm.txt",
+    # Focus on the destructive button keeps the dialog; Click on Cancel closes it
+    "a11y focus Close",
+    "wait 500",
+    f"dump {scratch}/confirm-a11y-focus.txt",
+    "a11y click Cancel",
+    f"dump {scratch}/confirm-a11y-cancel.txt",
     "key escape",
     "key ctrl+c",
     "wait 300",
@@ -274,7 +292,10 @@ with (scratch / "app.log").open("w") as log:
         assert app.poll() is None, died("app exited", scratch / "app.log")
         assert time.monotonic() < deadline, "config reload snapshot timed out"
         time.sleep(0.02)
-    assert not (data / f"control/{app.pid}.sock").exists(), "disabled automation kept its socket"
+    # Linux keeps a socket with automation off, for rift:// links only
+    # (control.rs Level::Links); macOS has none.
+    if sys.platform == "darwin":
+        assert not (data / f"control/{app.pid}.sock").exists(), "disabled automation kept its socket"
     assert app.wait(timeout=60) == 0, died("app failed", scratch / "app.log")
 
 def state(name):
@@ -309,6 +330,13 @@ assert f'{scratch}/a/src/only_a.rs"' in state("hints"), state("hints")
 found = re.search(r"matches=(\d+) total=(\d+)", state("find"))
 assert found and found[1] == "500" and int(found[2]) >= 600, state("find")
 assert "confirm=Some" in state("confirm") and "tabs=1" in state("confirm"), state("confirm")
+assert 'Button "Match case" toggled=False' in state("find-a11y-focus"), state("find-a11y-focus")
+assert 'Button "Match case" toggled=True' in state("find-a11y-click"), state("find-a11y-click")
+assert 'Clipboard unavailable' in state("fault-copy"), state("fault-copy")
+assert "confirm=Some" in state("confirm-a11y-focus") and "tabs=1" in state("confirm-a11y-focus"), \
+    state("confirm-a11y-focus")
+assert "confirm=None" in state("confirm-a11y-cancel") and "tabs=1" in state("confirm-a11y-cancel"), \
+    state("confirm-a11y-cancel")
 assert 'settings_focus=Some(SettingsStep("font_size"' in state("settings-focus"), state("settings-focus")
 assert (scratch / "settings-before.toml").read_text() != (scratch / "settings-after.toml").read_text(), \
     "Space did not press the focused Settings control"
@@ -534,7 +562,9 @@ edge_steps = [
     "wait 300",
     "key cmd+k",
     "wait 300",
-    f"type printf '%0{cols - 1}d9' 0; echo\\n",
+    # 40 identical full rows fill the pane, so the drag's row is output on
+    # every platform's metrics
+    f"type s=$(printf '%0{cols - 1}d9' 0); for i in $(seq 40); do echo $s; done\\n",
     "wait 600",
     f"drag {grid_x + 1:.1f} 170 {edge_x:.1f} 170",
     "key cmd+c",
@@ -1616,7 +1646,9 @@ live = run_counted("live", ["type sleep 3\\n", "wait 1500", f"dump {tc}/live-0.t
                             f"dump {tc}/live-1.txt", "wait 2500", f"dump {tc}/live-2.txt"], None)
 running, paused, later = (elapsed_of(d) for d in live)
 assert running[1] == "Some(true)" and running[0] in ("Some(1)", "Some(2)"), running
-assert paused[1] == "Some(false)" and paused[0] in ("Some(3)", "Some(4)"), paused
+# the clock follows the panes at frame edges: a slow software renderer sees a
+# 3 s command a moment late, so it can total just under 3
+assert paused[1] == "Some(false)" and paused[0] in ("Some(2)", "Some(3)", "Some(4)"), paused
 assert later[0] == paused[0] and later[1] == "Some(false)", (paused, later)
 # a saved total is restored (older files, without one, start at 0: idle above)
 (tc / "probe.rift").write_text("resize 1200 800\nwait_prompt\nwait 500\n"
@@ -1892,6 +1924,66 @@ assert "Bell" not in page.split("Dialog", 1)[1], page  # a hidden row never rena
 assert 'TreeItem ".env, file"' in (fl / "shown.txt").read_text(), (fl / "shown.txt").read_text()
 assert "explorer_hidden_files = true" in (fl / "cfg/rift/config.toml").read_text()
 
+# A 2,001-entry folder: the explorer lists 2,000, a "Show more" row closes
+# the list and ⏎ on it (keyboard) reaches entry 2,001
+big = scratch / "bigdir"
+for sub in ("cfg/rift", "data", "work"):
+    (big / sub).mkdir(parents=True, exist_ok=True)
+for n in range(2001):
+    (big / f"work/f{n:05d}").write_text("")
+(big / "cfg/rift/config.toml").write_text(
+    'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
+    + f'working_directory = {json.dumps(str(big / "work"))}\n')
+(big / "big.rift").write_text("\n".join([
+    "wait_prompt", "key shift+cmd+e", "wait 500", f"dump {big}/open.txt"]
+    + ["key down"] * 2001
+    + ["key enter", "wait 400", f"dump {big}/more.txt", "quit"]) + "\n")
+with (big / "big.log").open("w") as log:
+    rc = subprocess.run([str(binary), "--script", str(big / "big.rift"), "--headless"],
+                        env=dict(env, XDG_CONFIG_HOME=str(big / "cfg"),
+                                 XDG_DATA_HOME=str(big / "data")),
+                        stdout=log, stderr=log, timeout=120).returncode
+assert rc == 0, died("big folder run failed", big / "big.log")
+assert "rows=2001 selected=None" in (big / "open.txt").read_text()  # 2,000 + Show more
+more = (big / "more.txt").read_text()
+assert "rows=2001 selected=Some(\"f02000\")" in more, more[:1500]
+
+# Shell history follows the configured shell: a multiline bash entry
+# (HISTTIMEFORMAT) is one entry, and switching `shell` in config.toml while
+# running replaces the imported history with the new shell's
+hs = scratch / "histswap"
+for sub in ("cfg/rift", "data/fish", "home", "bin", "work"):
+    (hs / sub).mkdir(parents=True, exist_ok=True)
+(hs / "home/.bash_history").write_text(
+    "#1719400000\nbashonly_one\n#1719400001\nfor i in 1 2; do\necho $i\ndone\n")
+(hs / "data/fish/fish_history").write_text("- cmd: fishonly_one\n  when: 1\n")
+(hs / "bin/fish").write_text('#!/bin/sh\nexec /bin/bash "$@"\n')
+(hs / "bin/fish").chmod(0o755)
+hs_conf = lambda shell: (
+    f'shell = {json.dumps(shell)}\nrestore_session = false\ndurable_sessions = false\n'
+    f'working_directory = {json.dumps(str(hs / "work"))}\n')
+(hs / "cfg/rift/config.toml").write_text(hs_conf("/bin/bash"))
+(hs / "fish.toml").write_text(hs_conf(str(hs / "bin/fish")))
+(hs / "hist.rift").write_text("\n".join([
+    "wait_prompt", "wait 800",
+    "key ctrl+r", "type for i", "wait 300", f"dump {hs}/bash.txt", "key escape",
+    "key cmd+a", "key backspace",
+    cp(hs / "fish.toml", hs / "cfg/rift/config.toml"), "wait 2000",
+    "key ctrl+r", "type fishonly", "wait 300", f"dump {hs}/fish.txt", "key escape",
+    "key cmd+a", "key backspace",
+    "key ctrl+r", "type bashonly", "wait 300", f"dump {hs}/fish-bash.txt",
+    "quit"]) + "\n")
+hs_env = {k: v for k, v in env.items() if k != "HISTFILE"}
+hs_env.update(XDG_CONFIG_HOME=str(hs / "cfg"), XDG_DATA_HOME=str(hs / "data"),
+              HOME=str(hs / "home"), BASH_SILENCE_DEPRECATION_WARNING="1")
+with (hs / "hist.log").open("w") as log:
+    rc = subprocess.run([str(binary), "--script", str(hs / "hist.rift"), "--headless"],
+                        env=hs_env, stdout=log, stderr=log, timeout=120).returncode
+assert rc == 0, died("history swap run failed", hs / "hist.log")
+assert 'history_selected=Some("for i in 1 2; do\\necho $i\\ndone")' in (hs / "bash.txt").read_text()
+assert 'history_selected=Some("fishonly_one")' in (hs / "fish.txt").read_text()
+assert "history_rows=0" in (hs / "fish-bash.txt").read_text()
+
 # Settings › Terminal: an OSC 52 read is answered only with "read_write";
 # middle-click pastes the clipboard (an OSC 52 copy) into the pane
 tm = scratch / "termpage"
@@ -1952,7 +2044,7 @@ for sub in ("cfg/rift/themes", "data"):
     "key cmd+t", "wait_prompt", f"dump {sw}/second.txt",
     "key cmd+,", "wait 300", "key end", "wait 300", f"dump {sw}/themes.txt",
     "key home", "key down", "key down", "wait 300",
-    *["key tab"] * 19, "wait 300", f"dump {sw}/tabbed.txt",
+    *["key tab"] * 23, "wait 300", f"dump {sw}/tabbed.txt",
     "quit"]) + "\n")
 with (sw / "sweep.log").open("w") as log:
     rc = subprocess.run([str(binary), "--script", str(sw / "sweep.rift"), "--headless"],
@@ -2280,6 +2372,31 @@ assert "settings=true page=Remote" in (rh / "back.txt").read_text(), \
     (rh / "back.txt").read_text()[:1500]
 assert "settings=true page=General" in (rh / "reopen.txt").read_text(), \
     (rh / "reopen.txt").read_text()[:1500]
+
+# Stall log: a main thread blocked over 2 s (here the script's `sh`) leaves
+# a report in <data>/stalls/ with how long it lasted and, on macOS, the
+# stacks that name the blocking call; a run that never blocks leaves none
+assert not (rh / "data/rift/stalls").exists(), list((rh / "data/rift/stalls").iterdir())
+sl = scratch / "stall"
+(sl / "cfg/rift").mkdir(parents=True)
+(sl / "cfg/rift/config.toml").write_text(
+    'shell = "/bin/bash"\nrestore_session = false\nsync_os_theme = false\n')
+(sl / "t.rift").write_text("wait_prompt\nsh sleep 5\nwait 6000\nquit\n")
+with (sl / "log.txt").open("w") as log:
+    rc = subprocess.run([str(binary), "--script", str(sl / "t.rift"), "--headless"],
+                        env=dict(env, XDG_CONFIG_HOME=str(sl / "cfg"),
+                                 XDG_DATA_HOME=str(sl / "data"),
+                                 BASH_SILENCE_DEPRECATION_WARNING="1"),
+                        stdout=log, stderr=log, timeout=60).returncode
+assert rc == 0, died("stall run failed", sl / "log.txt")
+stalls = list((sl / "data/rift/stalls").glob("stall-*.txt"))
+assert len(stalls) == 1, stalls
+stall = stalls[0].read_text()
+assert "the main thread is blocked: one pass of the event loop" in stall, stall[:500]
+lasted = int(re.search(r"^lasted about (\d+) ms$", stall, re.M)[1])
+assert 4500 <= lasted <= 7000, lasted
+if sys.platform == "darwin":
+    assert "drive_script" in stall and "wait4" in stall, stall[:3000]
 
 # Status toasts are chips in the pane they are about: a config.toml that
 # was not applied shows in the focused (right) pane with "Open config.toml"
@@ -2674,7 +2791,9 @@ assert [b["id"] for b in meta] == [b["id"] for b in full] and len(meta) >= 3, (m
 assert all(b["output"] == "" and b["dropped"] == 0 for b in meta), meta
 assert any(b["output"] == "remote-ok\n" for b in full), full
 stopped = remote_line((on / "stopped.txt").read_text())
-assert 'remote_access=false control_level=Off gateway="Off" gateway_pid=None' in stopped, stopped
+# Linux keeps the rift:// links level with automation off (control.rs)
+off_level = "Off" if sys.platform == "darwin" else "Links"
+assert f'remote_access=false control_level={off_level} gateway="Off" gateway_pid=None' in stopped, stopped
 assert not status_file.exists(), "the managed gateway outlived remote_access = false"
 # only this test's gateway, found through its scratch status, is ever stopped
 left = re.search(r"gateway_pid=Some\((\d+)\)", gateway_line)
@@ -2873,6 +2992,30 @@ assert "confirm=Some((Close(App), []))" in asked, asked[:2000]
 assert 'Quit Rift?' in asked and "Quit Phone is connected and loses its tabs." in asked, asked[-3000:]
 assert "confirm=None" in (asked_run / "kept.txt").read_text()
 quit_run("quit-alone", False)
+
+# (f3) macOS: Settings › General opens with the App group (Launch at login,
+# Show menu bar icon), and the menu bar icon's Quit Rift Completely quits like
+# ⌘Q and leaves `remote/stop` for the running gateway; a plain ⌘Q does not
+if sys.platform == "darwin":
+    def full_quit_run(name, quit_step):
+        run = rm / name
+        (run / "data/rift/remote").mkdir(parents=True)
+        # a gateway with no phone: its lock held, its status naming a live pid
+        (run / "data/rift/remote/status.json").write_text(json.dumps({
+            "pid": os.getpid(), "addresses": ["127.0.0.1:9"], "clients": []}))
+        with open(run / "data/rift/remote/gateway.lock", "w") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            remote_run(name, remote_base, [
+                "key cmd+,", "wait 600", f"dump {run}/settings.txt", "key escape", "wait 200",
+                quit_step, "wait 3000", f"dump {run}/not-quit.txt"])
+        assert not (run / "not-quit.txt").exists(), f"{name}: did not quit"
+        return run
+    full = full_quit_run("quit-completely", "menu status:quit_completely")
+    general = (full / "settings.txt").read_text()
+    assert "Launch at login" in general and "Show menu bar icon" in general, general[-3000:]
+    assert (full / "data/rift/remote/stop").exists(), "Quit Rift Completely left the gateway running"
+    plain = full_quit_run("quit-plain", "key cmd+q")
+    assert not (plain / "data/rift/remote/stop").exists(), "⌘Q stopped the gateway"
 
 # (g) a relay (Phase 2): the managed gateway registers at a local relay
 # (rift-relay) and Settings shows it connected; a phone forced through the
@@ -3143,7 +3286,9 @@ assert bt_active_pane("ffm-back", 0) == right, "focus did not follow back"
 # Settings rows: Appearance › Tabs and Panes, Input › Sticky command header
 bt_shots = [
     "resize 1200 900", "wait_prompt", "key cmd+,", "wait 300", "key down", "wait 400",
-    "move 700 500", "scroll -40", "wait 400", f"shot {bt}/appearance.png",
+    f"dump {bt}/appearance-top.txt", "move 700 500", "scroll -12", "wait 300",
+    f"dump {bt}/appearance-mid.txt",
+    "move 700 500", "scroll -200", "wait 400", f"shot {bt}/appearance.png",
     f"dump {bt}/appearance.txt",
     "key down", "wait 400", f"shot {bt}/input.png",
     f"dump {bt}/input.txt", "quit",
@@ -3154,7 +3299,8 @@ with (bt / "shots-log.txt").open("w") as log:
     rc = subprocess.run([str(binary), "--script", str(bt / "shots.rift"), "--headless"],
                         env=bt_env, stdout=log, stderr=log, timeout=60).returncode
 assert rc == 0, died("block/tab settings shots failed", bt / "shots-log.txt")
-appearance = bt_state("appearance")
+# the page runs past the window: its top, then scrolled to its end
+appearance = bt_state("appearance-top") + bt_state("appearance-mid") + bt_state("appearance")
 for label in ("Tab position", "Close buttons", "New tabs open", "Show tabs with only one tab open",
               "Dim inactive panes", "Dimming strength", "Focus follows mouse"):
     assert label in appearance, (label, appearance[-3000:])
@@ -3511,6 +3657,324 @@ assert idle.startswith("windows=1 ") and "kind=dropdown" not in idle, idle[:400]
 busy = (run / "busy.txt").read_text()
 assert busy.startswith("windows=2 "), busy[:400]
 assert re.search(r"^window 1: .*kind=dropdown shown=true ", busy, re.M), busy[:600]
+
+# Output paths of a command that ran on another host (ssh) never resolve
+# against the local disk, while blocks that ran here still do, whichever side
+# the pane is on now; the shell fakes the remote with a prompt hook that
+# reports the directory on "otherhost"
+kp = scratch / "keys-paths"
+(kp / "proj/src").mkdir(parents=True)
+(kp / "proj/src/main.rs").write_text("fn main() {}\n")
+(kp / "fake.bash").write_text(
+    "fakeremote() { printf '\\033]7;file://otherhost%s\\007' \"$PWD\"; }\n"
+    'fakeon() { PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND;}fakeremote"; }\n'
+    'fakeoff() { PROMPT_COMMAND="${PROMPT_COMMAND//;fakeremote/}"; }\n')
+(pc / "cfg/rift/config.toml").write_text(
+    'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
+    'sync_os_theme = false\n')
+run_prompt("remote-paths", [
+    f"type cd {kp / 'proj'}\\n", "wait 600",
+    f"type source {kp / 'fake.bash'}\\n", "wait 600",
+    "type echo src/main.rs\\n", "wait 600",
+    "type fakeon\\n", "wait 600",
+    "type echo src/main.rs\\n", "wait 600",
+    "type fakeoff\\n", "wait 600",
+    "type echo src/main.rs\\n", "wait 800",
+    "key shift+cmd+h", "wait 300", f"dump {kp}/hints.txt"])
+remote_dump = (kp / "hints.txt").read_text()
+flags = re.findall(r'cmd="echo src/main.rs".*? cwd_remote=(\w+)', remote_dump)
+assert flags == ["false", "true", "false"], (flags, remote_dump)
+hint_list = re.search(r"hints=(\[[^\]]*\])", remote_dump)[1]
+# the two local outputs are hint targets, the remote one is not
+assert hint_list.count(f"{kp}/proj/src/main.rs") == 2, hint_list
+
+# code review by keyboard alone: ⌥⌘G focuses the panel, s / u stage and
+# unstage a hunk or file, r asks first (Tab moves to Cancel and Enter presses
+# it; Revert, then Enter, discards the hunk), Esc hands the keys back
+krepo = kp / "repo"
+krepo.mkdir()
+kgit = ["git", "-C", str(krepo), "-c", "user.name=t", "-c", "user.email=t@e.x"]
+ksrc = [f"    let v{n} = compute({n});" for n in range(1, 81)]
+(krepo / "main.rs").write_text("\n".join(["fn main() {", *ksrc, "}"]) + "\n")
+(krepo / "lib.rs").write_text("pub fn a() {}\n")
+subprocess.run(["git", "init", "-q", str(krepo)], check=True)
+subprocess.run([*kgit, "add", "-A"], check=True)
+subprocess.run([*kgit, "commit", "-qm", "init"], check=True)
+ksrc[4] = "    let v5 = compute_fast(5);"
+ksrc[59] = "    let v60 = compute_slow(60);"
+(krepo / "main.rs").write_text("\n".join(["fn main() {", *ksrc, "}"]) + "\n")
+(krepo / "lib.rs").write_text("pub fn a() {}\npub fn b() {}\n")
+
+run_prompt("review-keys", [
+    "resize 1400 900",
+    f"type cd {krepo}\\n", "wait 1000",
+    "key alt+cmd+g", "wait 1000", f"dump {kp}/rk-focus.txt",
+    "key down", "key down", "key right", "key down", "wait 300", f"dump {kp}/rk-hunk.txt",
+    "key s", "wait 1200", f"sh git -C {krepo} diff --cached --numstat > {kp}/rk-staged.txt",
+    f"dump {kp}/rk-next.txt",
+    "key home", "key down", "key u", "wait 1200",
+    f"sh git -C {krepo} diff --cached --numstat > {kp}/rk-unstaged.txt",
+    "key home", "key down", "key down", "key right", "key down", "key r", "wait 500",
+    f"dump {kp}/rk-confirm.txt",
+    "key tab", "wait 200", f"dump {kp}/rk-cancel.txt",
+    "key enter", "wait 800", f"dump {kp}/rk-kept.txt",
+    f"sh git -C {krepo} diff --numstat > {kp}/rk-before.txt",
+    "key r", "wait 500", "key enter", "wait 1500",
+    f"sh git -C {krepo} diff --numstat > {kp}/rk-reverted.txt",
+    "key escape", "type echo typed_in_editor\\n", "wait 700", f"dump {kp}/rk-esc.txt"])
+rk = lambda name: (kp / f"rk-{name}.txt").read_text()
+assert "review_keys=true review_focus=Some(Section(false))" in rk("focus"), rk("focus")
+assert 'review_focus=Some(Hunk(false, "main.rs"' in rk("hunk"), rk("hunk")
+# staging the first hunk leaves the focus on the file's other hunk
+assert rk("staged").split()[:2] == ["1", "1"], rk("staged")
+assert 'review_focus=Some(Hunk(false, "main.rs"' in rk("next"), rk("next")
+assert rk("unstaged") == "", rk("unstaged")
+assert "confirm_focus=confirm" in rk("confirm") and "Revert" in rk("confirm"), rk("confirm")
+assert "confirm_focus=cancel" in rk("cancel"), rk("cancel")
+assert "confirm=None" in rk("kept") and "confirm_focus=none" in rk("kept"), rk("kept")
+assert rk("before").split("\n")[1].split() == ["2", "2", "main.rs"], rk("before")
+# one hunk of main.rs went, the other and lib.rs stay
+assert rk("reverted").split("\n")[:2] == ["1\t0\tlib.rs", "1\t1\tmain.rs"], rk("reverted")
+assert "review_keys=false" in rk("esc") and 'cmd="echo typed_in_editor"' in rk("esc"), rk("esc")
+
+# rift:// links: a tab and a window in a folder, a launch configuration by
+# name, Settings with its search; a file or an unknown action is refused
+lk = scratch / "links"
+(lk / "dir a").mkdir(parents=True)
+(lk / "script.sh").write_text("#!/bin/sh\ntouch ran\n")
+(lk / "script.sh").chmod(0o755)
+(pc / "cfg/rift/launch_configs").mkdir(parents=True, exist_ok=True)
+(pc / "cfg/rift/launch_configs/links-demo.yaml").write_text(
+    f"name: Links Demo\nwindows:\n  - tabs:\n      - title: LinkTab\n"
+    f"        layout:\n          cwd: {lk}\n")
+(pc / "cfg/rift/launch_configs/links-run.yaml").write_text(
+    f"name: Links Run\nwindows:\n  - tabs:\n      - title: RunTab\n"
+    f"        layout:\n          cwd: {lk}\n          commands:\n"
+    f"            - exec: touch {lk}/ran-from-link\n")
+run_prompt("links", [
+    f"link rift://action/new_tab?path={str(lk / 'dir a').replace(' ', '%20')}",
+    "wait 1500", f"dump {lk}/tab.txt",
+    "link rift://launch/LINKS%20DEMO", "wait 300", f"dump {lk}/launch.txt",
+    f"link rift://action/new_tab?path={lk}/script.sh", "wait 300", f"dump {lk}/file.txt",
+    "link rift://action/run?cmd=touch%20ran", "wait 300", f"dump {lk}/unknown.txt",
+    f"link rift://action/new_window?path={lk}", "wait 300", f"dump {lk}/window.txt",
+    "link rift://settings?q=font+size", "wait 300", f"dump {lk}/settings.txt",
+    # a layout whose panes run commands asks first; Cancel runs nothing
+    "key escape", "link rift://launch/links%20run", "wait 300", f"dump {lk}/asks.txt",
+    "key escape", "wait 1500", f"dump {lk}/cancelled.txt"])
+lt = lambda name: (lk / f"{name}.txt").read_text()
+# (a shell's own title may carry user@host: before the folder)
+assert re.search(r'^window 0: tabs=2 active=1 .*titles=\[[^\]]*dir a"\]', lt("tab"), re.M), lt("tab")
+# (the shell may report /tmp as /private/tmp)
+assert re.search(r'pane \d+ cwd=Some\("[^"]*/links/dir a"\)', lt("tab")), lt("tab")
+assert re.search(r'^window 0: tabs=3 .*"LinkTab"\]', lt("launch"), re.M), lt("launch")
+assert "not a folder" in lt("file") and "tabs=3 " in lt("file"), lt("file")
+assert "unknown link" in lt("unknown"), lt("unknown")
+assert not (lk / "ran").exists() and not (work / "ran").exists()
+assert re.search(r"^windows=2 window=1 ", lt("window"), re.M), lt("window")
+assert 'settings_tab=true settings_query="font size"' in lt("settings"), lt("settings")
+assert re.search(r"confirm=Some\(.*LaunchLink", lt("asks")), lt("asks")
+assert "confirm=None" in lt("cancelled") and '"RunTab"' not in lt("cancelled"), lt("cancelled")
+assert not (lk / "ran-from-link").exists()
+
+# the configurable toolbar: buttons on the side and in the order the config
+# lists, right-click → "Rearrange toolbar items" opens its Settings rows,
+# and a row's Left moves a hidden button to the end of the left side
+tb = scratch / "toolbar"
+(tb / "cfg/rift").mkdir(parents=True)
+(tb / "cfg/rift/config.toml").write_text(
+    'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
+    'toolbar_left = ["palette", "review"]\ntoolbar_right = ["settings"]\n')
+(tb / "t.rift").write_text("\n".join([
+    "resize 1200 600", "wait_prompt", f"dump {tb}/a.txt",
+    "rclick 1150 17", "wait 200", "key down", "key enter", "wait 300", f"dump {tb}/b.txt",
+    # File explorer's Left (the first row of the search results)
+    "click 931 158", "wait 300", f"dump {tb}/c.txt", "quit"]) + "\n")
+with (tb / "log.txt").open("w") as log:
+    rc = subprocess.run([str(binary), "--script", str(tb / "t.rift"), "--headless"],
+                        env=dict(env, XDG_CONFIG_HOME=str(tb / "cfg"),
+                                 XDG_DATA_HOME=str(tb / "data")),
+                        stdout=log, stderr=log, timeout=60).returncode
+assert rc == 0, died("toolbar run failed", tb / "log.txt")
+tt = lambda name: (tb / f"{name}.txt").read_text()
+tips = lambda name: re.findall(r'"(Command palette|Review changes|File explorer|Notifications'
+                               r'|Settings)@(\d+),', tt(name))
+assert tips("a") == [("Command palette", "80"), ("Review changes", "110"), ("Settings", "1164")], tips("a")
+# a screen reader reaches the buttons, named as their tooltips
+assert re.search(r'Group "Toolbar"\n    Button "Command palette', tt("a")), tt("a")
+assert 'settings_tab=true settings_query="toolbar"' in tt("b"), tt("b")
+assert ("File explorer", "140") in tips("c"), tips("c")
+assert re.search(r'toolbar_left = \[\s*"palette",\s*"review",\s*"explorer",?\s*\]',
+                 (tb / "cfg/rift/config.toml").read_text())
+
+
+def run_own(name, config, steps):
+    """A headless run with its own config and data dirs (`scratch/<name>`);
+    returns that directory."""
+    d = scratch / name
+    (d / "cfg/rift").mkdir(parents=True)
+    (d / "cfg/rift/config.toml").write_text(
+        'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n' + config)
+    (d / "t.rift").write_text("\n".join(["resize 1200 600", "wait_prompt", *steps, "quit"]) + "\n")
+    with (d / "log.txt").open("w") as log:
+        rc = subprocess.run([str(binary), "--script", str(d / "t.rift"), "--headless"],
+                            env=dict(env, XDG_CONFIG_HOME=str(d / "cfg"),
+                                     XDG_DATA_HOME=str(d / "data")),
+                            stdout=log, stderr=log, timeout=60).returncode
+    assert rc == 0, died(f"{name} run failed", d / "log.txt")
+    return d
+
+
+# app icons: the picker writes `app_icon` and the app applies it; a config
+# edit applies too
+ai = scratch / "app-icon"
+run_own("app-icon", "", [
+    f"dump {ai}/a.txt", "key cmd+,", "wait 200", "type app icon", "wait 300",
+    "click 960 158", "wait 200", "key down", "key down", "key enter", "wait 300",
+    f"dump {ai}/b.txt",
+    # (the picker wrote the key: replace it, GNU and BSD sed alike)
+    f"sh sed -i.bak 's/^app_icon = .*/app_icon = \"neon\"/' {ai}/cfg/rift/config.toml",
+    "wait 1500",
+    f"dump {ai}/c.txt"])
+at = lambda name: (ai / f"{name}.txt").read_text()
+assert 'app_icon=Some("default")' in at("a"), at("a")
+assert 'app_icon=Some("mono")' in at("b"), at("b")
+assert 'app_icon=Some("neon")' in at("c"), at("c")
+
+# block and tab settings: `block_spacing = "normal"` leaves a blank row
+# above each later block header; the jump-to-bottom button shows over a
+# block running past the pane and scrolls to its end; the × sits at the
+# tab's left end; `tab_bar = "on_hover"` hides the strip until the pointer
+# reaches the top edge, and hides it again once it leaves
+g7 = scratch / "gap7"
+run_own("gap7", 'block_spacing = "normal"\nblock_dividers = true\n'
+        'tab_close_side = "left"\n', [
+    "type echo one\\n", "wait 400", "type seq 1 80\\n", "wait 600", "type false\\n", "wait 400",
+    f"dump {g7}/spaced.txt",
+    "move 450 300", "scroll 8", "wait 200", "move 450 330", "wait 200", f"dump {g7}/over.txt"])
+btt = lambda name: (g7 / f"{name}.txt").read_text()
+kinds = re.search(r"row_kinds=(\S*)", btt("spaced")).group(1)
+# the blocks below the first: a pad right above each header
+assert "_H" in kinds, kinds
+assert all(kinds[i - 1] == "_" for i, k in enumerate(kinds) if k == "H" and i > 0
+           and "G" in kinds[:i]), kinds
+jump = re.search(r'"Jump to the bottom of this block@(\d+),(\d+),(\d+),(\d+)"', btt("over"))
+assert jump, btt("over")
+jx, jy, jw, jh = map(int, jump.groups())
+assert re.search(r'"Close tab@1\d\d,', btt("over")), btt("over")
+# the same run again, pressing the button where the first one drew it
+run_own("gap7-1", 'block_spacing = "normal"\nblock_dividers = true\n'
+        'tab_close_side = "left"\n', [
+    "type echo one\\n", "wait 400", "type seq 1 80\\n", "wait 600", "type false\\n", "wait 400",
+    "move 450 300", "scroll 8", "wait 200", "move 450 330", "wait 200",
+    f"dump {scratch}/gap7-1/before.txt",
+    f"click {jx + jw // 2} {jy + jh // 2}", "wait 300", f"dump {scratch}/gap7-1/after.txt"])
+bt1 = lambda name: (scratch / "gap7-1" / f"{name}.txt").read_text()
+offset = lambda text: int(re.search(r"view_offset=(\d+)", text).group(1))
+assert offset(bt1("before")) > 0 and offset(bt1("after")) < offset(bt1("before")), \
+    (offset(bt1("before")), offset(bt1("after")))
+assert "Jump to the bottom" not in bt1("after"), bt1("after")
+run_own("gap7-2", 'tab_bar = "on_hover"\n', [
+    "type echo hi\\n", "wait 400", "move 400 200", "wait 100",
+    f"dump {scratch}/gap7-2/before.txt",
+    "move 400 2", "wait 100", f"dump {scratch}/gap7-2/edge.txt",
+    "move 400 20", "wait 50", f"dump {scratch}/gap7-2/strip.txt",
+    "move 400 200", "wait 100", f"dump {scratch}/gap7-2/left.txt"])
+bt2 = lambda name: (scratch / "gap7-2" / f"{name}.txt").read_text()
+assert "strip=hidden" in bt2("before") and '"New tab@' not in bt2("before"), bt2("before")
+assert "strip=slid_in" in bt2("edge") and '"New tab@' in bt2("edge"), bt2("edge")
+assert "strip=slid_in" in bt2("strip"), bt2("strip")
+assert "strip=hidden" in bt2("left"), bt2("left")
+
+# the command inspector: ⇧⌘I shows the card for the part at the cursor at
+# once (a subcommand, an option's value), the next key puts it away
+ci = scratch / "inspector"
+run_own("inspector", "", [
+    "type git commit -m hi", "wait 200", "key shift+cmd+i", "wait 200", f"dump {ci}/value.txt",
+    # into "commit" (Home scrolls the blocks)
+    *["key left"] * 10, "wait 100",
+    f"dump {ci}/gone.txt", "key shift+cmd+i", "wait 200", f"dump {ci}/sub.txt",
+    "key shift+cmd+i", "wait 200", f"dump {ci}/toggled.txt"])
+cit = lambda name: (ci / f"{name}.txt").read_text()
+assert 'tooltip=Some("hi | Option value · The value of -m, --message' in cit("value"), cit("value")
+assert "tooltip=None" in cit("gone"), cit("gone")
+assert 'tooltip=Some("commit | Subcommand · ' in cit("sub"), cit("sub")
+assert "tooltip=None" in cit("toggled"), cit("toggled")
+
+# multi-cursor: ⌃G selects the word, then its next occurrence; typing
+# renames both, Esc goes back to one caret, and ⌘Z undoes per keystroke;
+# ⌃⇧↓ adds a caret on the next line of a multi-line command
+mc = scratch / "multi-cursor"
+run_own("multi-cursor", "", [
+    "type cp foo.txt foo.bak", *["key left"] * 12, "key ctrl+g", "key ctrl+g", "wait 100",
+    f"dump {mc}/selected.txt", "type bar", "wait 100", f"dump {mc}/typed.txt",
+    "key escape", "wait 100", f"dump {mc}/one.txt",
+    "key cmd+a", "key backspace", "type echo a", "key shift+enter", "type echo b",
+    "key cmd+up", "key ctrl+shift+down", "type !", "wait 100", f"dump {mc}/lines.txt"])
+mct = lambda name: (mc / f"{name}.txt").read_text()
+assert 'editor_selection=Some("foo") carets=[(14, Some(11))]' in mct("selected"), mct("selected")
+assert 'editor="cp bar.txt bar.bak"' in mct("typed") and "carets=[(14, None)]" in mct("typed"), \
+    mct("typed")
+assert "carets=[]" in mct("one"), mct("one")
+assert 'editor="!echo a\\n!echo b"' in mct("lines"), mct("lines")
+
+# background blocks: `cmd &` is a block of its own (bash 3.2 never marks it
+# started), and what the job prints while the prompt waits goes into a
+# background block before the prompt, not under the next command's header
+bgb = scratch / "background"
+run_own("background", "", [
+    "type (sleep 1; echo bg-out-1; echo bg-out-2) &\\n", "wait 2500", f"dump {bgb}/at-prompt.txt",
+    "type echo next\\n", "wait 800", f"dump {bgb}/after.txt",
+    # ^C at the prompt: the shell's echo and new prompt are its own
+    "key ctrl+c", "wait 600", "key ctrl+c", "wait 600", f"dump {bgb}/interrupt.txt"])
+bgt = lambda name: (bgb / f"{name}.txt").read_text()
+blocks_of = lambda text: re.findall(r"^    block \d+ (.*)$", text, re.M)
+at_prompt = blocks_of(bgt("at-prompt"))
+assert any('cmd="(sleep 1; echo bg-out-1; echo bg-out-2) &"' in b and "state=done" in b
+           for b in at_prompt), at_prompt
+assert any(b.endswith("background=true") for b in at_prompt), at_prompt
+assert "state=prompt" in at_prompt[-1], at_prompt
+after = blocks_of(bgt("after"))
+# the job's lines stay in their block: between it and the next command
+kinds = [("bg" if b.endswith("background=true") else re.search(r'cmd="([^"]*)"', b).group(1))
+         for b in after]
+assert kinds[-3:-1] == ["bg", "echo next"], kinds
+bg_line = next(b for b in after if b.endswith("background=true"))
+start, end = re.search(r"output_start=Some\((\d+)\) end=Some\((\d+)\)", bg_line).groups()
+assert int(end) - int(start) >= 2, bg_line
+assert len([b for b in blocks_of(bgt("interrupt")) if b.endswith("background=true")]) == 1, \
+    blocks_of(bgt("interrupt"))
+
+# subshells: a command that starts a shell without Rift's hooks (here a
+# `bash --norc` added to subshell_commands) shows the offer after it has run
+# a moment; ⌘⏎ types the hooks in, the command's block folds, the subshell's
+# commands get blocks with exit codes, and `exit` returns to the outer one
+ss = scratch / "subshell"
+# Enable's chord: ⌘⏎ on macOS, Ctrl+Shift+Enter elsewhere (app/subshell.rs)
+enable_chord = "cmd+enter" if sys.platform == "darwin" else "ctrl+shift+enter"
+run_own("subshell", 'subshell_commands = ["^bash --norc$"]\n', [
+    "type echo before\\n", "wait 500",
+    "type bash --norc\\n", "wait 1500", f"dump {ss}/offer.txt",
+    # a full-screen program in the subshell hides the bar, and ⌘⏎ there
+    # types nothing into it
+    "type printf '\\\\033[?1049h'; sleep 2; printf '\\\\033[?1049l'\\n", "wait 700",
+    f"dump {ss}/alt.txt", f"key {enable_chord}", "wait 300", f"dump {ss}/alt-enter.txt", "wait 2000",
+    f"dump {ss}/back.txt",
+    f"key {enable_chord}", "wait 3000", f"dump {ss}/enabled.txt",
+    "type false\\n", "wait 800", f"dump {ss}/inner.txt",
+    "type exit\\n", "wait 1000", f"dump {ss}/outer.txt"])
+sst = lambda name: (ss / f"{name}.txt").read_text()
+assert 'subshell=Some(("bash --norc", true))' in sst("offer"), sst("offer")
+assert '"Use Rift\'s blocks and editor in this subshell' in sst("offer") or \
+    "Use Rift's blocks and editor in this subshell" in sst("offer"), sst("offer")
+assert re.search(r"alt=true .*\n.*subshell=Some\(\(\"bash --norc\", false\)\)", sst("alt")), sst("alt")
+assert 'subshell=Some(("bash --norc", false))' in sst("alt-enter"), sst("alt-enter")
+assert 'subshell=Some(("bash --norc", true))' in sst("back"), sst("back")
+assert "subshell=None" in sst("enabled"), sst("enabled")
+assert re.search(r'cmd="bash --norc" exit=None collapsed=true', sst("enabled")), sst("enabled")
+assert re.search(r"^    block \d+ state=prompt", sst("enabled"), re.M), sst("enabled")
+assert re.search(r'cmd="false" exit=Some\(1\)', sst("inner")), sst("inner")
+assert re.search(r"^    block \d+ state=prompt", sst("outer"), re.M), sst("outer")
 
 for client in clients:
     client.close()

@@ -14,10 +14,13 @@ listed alternates.
 | ⇧⌘C | `copy_block_command` | Copy selected (else last) block's command |
 | ⌥⇧⌘C | `copy_block_output` | Copy selected (else last) block's output |
 | ⌘I | `reinput` | Insert block's command into the editor (at a prompt) |
+| ⇧⌘I / ⌃⇧I | `inspect_command` | Command inspector: what the part of the command line at the cursor is and does (again, or any other key, puts it away) |
 | ⌃M | `block_menu` | Open context menu on selected/last block (passes through as CR in raw mode) |
 | ⌘B / ⌃⇧B | `bookmark_toggle` | Bookmark selected (else last finished) block |
-| ⌘⇧↑ / ⌃⇧↑ | `bookmark_prev` | Jump to previous bookmarked block |
-| ⌘⇧↓ / ⌃⇧↓ | `bookmark_next` | Jump to next bookmarked block |
+| ⌘⇧↑ / ⌥⇧↑ | `bookmark_prev` | Jump to previous bookmarked block |
+| ⌘⇧↓ / ⌥⇧↓ | `bookmark_next` | Jump to next bookmarked block |
+| ⌃⇧↑ / ⌃⇧↓ | `add_cursor_above` / `add_cursor_below` | Multi-cursor: a caret on the line above / below (Warp; the same on every platform) |
+| ⌃G | `add_next_occurrence` | Multi-cursor: select the word at the cursor, then add a caret at the selection's next occurrence |
 | ⌥↑ / ⌥↓ | `bookmark_closest_prev` / `_next` | Same jumps (Warp's closest-bookmark keys; editor active only, passes to the program otherwise — Codex reads them) |
 | ⌘K | `clear_blocks` | Clear blocks + scrollback (destructive; `clear` is the soft variant) |
 | ⌥⇧F | `filter_block` | Show only the selected (else newest) block's output lines that contain the typed text; Enter keeps the filter, Esc or ⌥⇧F again clears it (editor active only; passes to a running program) |
@@ -86,6 +89,7 @@ listed alternates.
 | ⇧⌘A | `attention_center` | Notifications popover: finished commands, failures, notifications and bells |
 | ⇧⌘E | `toggle_explorer` | File explorer panel (left) |
 | ⇧⌘G | `toggle_review` | Code review panel (right) |
+| ⌥⌘G | `focus_review` | Open the code review panel if needed and give it the keyboard (see Code review keys) |
 | ⇧⌘H | `hint_mode` | Letter hints over visible links, paths and blocks: type one to open/select, ⇧ + letter copies |
 | — | `clear_transcripts` | Delete saved block transcripts |
 | — | `check_for_updates` | Look for a new release now; the answer toasts (also Rift → Check for Updates…) |
@@ -196,7 +200,8 @@ selection, `iw` `a"` … select a text object, and:
 
 | Key | Effect |
 |---|---|
-| type / ⌫ | Edit query (live highlight) |
+| type / ⌫ | Edit query (live highlight); ⌫ removes a whole character (an emoji with its modifiers) |
+| ⌘A | Select the query: typing replaces it, ⌫ clears it, ⌘C copies it |
 | Enter / ⌘G | Next match |
 | ⇧Enter / ⇧⌘G | Previous match |
 | ⌥C | Toggle match case (`Aa`) |
@@ -228,13 +233,18 @@ When a program owns the terminal (vim, less, htop), keys go out as xterm
 sequences: F1–F12, modified arrows/Home/End/PgUp/PgDn/Insert/Delete
 (`\e[1;5D` for ⌃←), application cursor mode (`\eOA`), ⌃ control codes, and
 ESC-prefixed Meta for ⌥ (always on Linux; on macOS with `option_as_meta` for the left key and `right_option_as_meta` for the right one).
-⌘⌫ sends ⌃U (kill to line start, as in Warp; Claude Code, readline and zle
-honour it), in the program's kitty keyboard encoding when it asked for one;
-other ⌘ chords stay with Rift.
+⌘⌫ sends ⌃U (kill to line start), ⌘← ⌃A (line start) and ⌘→ ⌃E (line
+end), as in Warp, iTerm2 and Ghostty — Claude Code, Codex, readline and zle
+honour them — in the program's kitty keyboard encoding when it asked for
+one; other ⌘ chords stay with Rift.
 
 ## Palette keys
 
 Esc (or the palette shortcut again) close · Enter run selected · ↑/↓ move selection · type to filter · ⇥ next mode · `>` `#` `@` typed into an empty query switch to Actions, History, Sessions. The block action *Send output to command…* opens a fourth mode with no prefix, where ⇥ and the prefixes do nothing.
+
+## Code review keys
+
+⌥⌘G (`focus_review`) opens the review panel if needed and gives it the keyboard; a 2 px `accent` ring marks the row it stands on · ↑ ↓ / `j` `k` / ⇥ ⇧⇥ move between sections, files and the hunks of expanded files · Home / End first / last · ← / `h` folds the section or file (else steps out to the file or section) · → / `l` unfolds (else steps in) · Enter or Space folds or unfolds · `s` stages and `u` unstages the file or hunk (on a section: all) · `r` reverts an unstaged file or hunk after the confirm dialog · `o` opens the file · `c` copies the hunk · Esc gives the keys back to the command line (maximized: the first Esc, then a second restores the panel). Any other plain key leaves the panel and goes to the command line; ⌘ ⌃ ⌥ chords stay app shortcuts. Confirm dialogs: ⇥ ⇧⇥ ← → move between the buttons, Enter presses the focused one, Esc cancels.
 
 ## Settings keys
 

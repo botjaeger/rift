@@ -118,6 +118,8 @@ export interface HostView {
   gateway: GatewayHello | null;
   welcome: WelcomeMsg | null;
   windows: Window[];
+  /** A topology came on this connection: `windows` is the computer's, even when empty (else not yet known). */
+  topology: boolean;
   /** Last gateway error other than auth (busy, no_pane, …). */
   notice: string | null;
   /** Epoch milliseconds the connection was last open, this app run (null: not yet). */
@@ -189,6 +191,20 @@ export interface AppState {
   lastView: LastView | null;
   /** The tab title last seen for each pane (`host:pane`), shown in a pane's header before the topology arrives. */
   paneTitles: PaneTitles;
+  /** The last settings change could not be saved (it was put back); shown in Settings until one saves. */
+  settingsError: string | null;
+}
+
+/** Whether the computers must hear of a settings change (what they alert about, and where). */
+function pushChanged(a: Settings, b: Settings): boolean {
+  return (
+    a.notifyPolicy !== b.notifyPolicy ||
+    a.notifyAfterMs !== b.notifyAfterMs ||
+    a.showCommandInNotification !== b.showCommandInNotification ||
+    a.ntfyServer !== b.ntfyServer ||
+    a.ntfyEnabled !== b.ntfyEnabled ||
+    a.ntfyTopic !== b.ntfyTopic
+  );
 }
 
 /** Whether a "Notify me" waits for `command` in the pane (the bell is on). */
@@ -363,6 +379,13 @@ export class Fleet {
   private readonly asks = new Map<string, Map<string, number>>();
   /** Hosts told "no token" in this app run (once, in case one still holds a token of an earlier run). */
   private readonly pushCleared = new Set<string>();
+  /** The settings write in flight (each waits for the one before it). */
+  private settingsWrite: Promise<boolean> = Promise.resolve(true);
+  /** The settings as last saved (loaded at launch): what a failed write puts back. */
+  private settingsSaved: Settings | null = null;
+  /** Which settings change last set each setting (a failed write puts back only its own). */
+  private readonly settingsBy = new Map<keyof Settings, number>();
+  private settingsChanges = 0;
 
   constructor(deps: FleetDeps) {
     this.deps = deps;
@@ -382,6 +405,7 @@ export class Fleet {
       wrap: {},
       lastView: null,
       paneTitles: {},
+      settingsError: null,
     });
   }
 
@@ -391,6 +415,7 @@ export class Fleet {
     this.initStarted = true;
     try {
       const settings = await loadSettings(this.deps.kv);
+      this.settingsSaved = settings;
       this.identity = await loadOrCreateIdentity(this.deps.kv, this.deps.randomBytes);
       const records = await this.hostsStore.load();
       const lastView = await loadLastView(this.deps.kv);
@@ -407,6 +432,7 @@ export class Fleet {
           gateway: null,
           welcome: null,
           windows: [],
+          topology: false,
           notice: null,
           lastSeen: null,
         })),
@@ -469,14 +495,15 @@ export class Fleet {
         },
         onGatewayHello: (gateway) => this.patchHost(key, { gateway }),
         onWelcome: (welcome) => {
-          this.patchHost(key, { welcome, notice: null });
+          // a new connection: its topology is still to come
+          this.patchHost(key, { welcome, notice: null, topology: false });
           this.welcomedAt.set(key, this.now());
           this.sendVisible(key, client, true);
           this.sendPush(key, client);
           void this.refreshRecord(key, welcome, client);
         },
         onTopology: (msg) => {
-          this.patchHost(key, { windows: msg.windows });
+          this.patchHost(key, { windows: msg.windows, topology: true });
           this.rememberTitles(key, msg.windows);
           const since = this.welcomedAt.get(key);
           // the questions already waiting when it connected are on Now, not news
@@ -807,6 +834,7 @@ export class Fleet {
         gateway: null,
         welcome: null,
         windows: [],
+        topology: false,
         notice: null,
         lastSeen: null,
       };
@@ -1003,11 +1031,20 @@ export class Fleet {
     this.store.flush();
   }
 
+  /**
+   * Clears the pane's draft once `sent` went out, only while the draft still holds it: text typed
+   * while the request was on its way is the next command, not the spent one.
+   */
+  clearDraft(host: string, pane: number, sent: string): void {
+    if (this.store.peek().drafts[draftKey(host, pane)] === sent) this.setDraft(host, pane, "");
+  }
+
   // --- operate ---------------------------------------------------------------------------------
 
   /**
    * Runs `command` at the pane's prompt; resolves with the gateway's `ack`. On success the
-   * pane's draft is cleared, unless `fromDraft` is false (Run again of a block's command).
+   * pane's draft is cleared if it still holds `command`, unless `fromDraft` is false (Run again
+   * of a block's command).
    */
   run(
     host: string,
@@ -1022,7 +1059,7 @@ export class Fleet {
     const result = this.request(host, (c) => c.run(pane, command));
     if (notify) this.notifyWhenDone(host, pane, command);
     return result.then((r) => {
-      if (r.ok && opts.fromDraft !== false) this.setDraft(host, pane, "");
+      if (r.ok && opts.fromDraft !== false) this.clearDraft(host, pane, command);
       else if (!r.ok && notify)
         this.setAsked(this.asked.filter((a) => !(a.host === host && a.pane === pane && a.command === command)));
       return r;
@@ -1398,7 +1435,13 @@ export class Fleet {
 
   // --- settings --------------------------------------------------------------------------------
 
-  async updateSettings(patch: Partial<Settings>): Promise<void> {
+  /**
+   * Applies `patch` at once and saves the settings; resolves false when the save failed and its
+   * values were put back to the saved ones (not those a newer change set, nor those an earlier
+   * write already saved), with `settingsError` saying so: the screen never shows a setting, such
+   * as the app lock, that a restart would lose.
+   */
+  async updateSettings(patch: Partial<Settings>): Promise<boolean> {
     const cur = this.store.peek().settings;
     const next: Settings = { ...cur, ...patch };
     if (next.deviceName !== null) {
@@ -1416,17 +1459,54 @@ export class Fleet {
       deviceName: next.deviceName ?? this.deps.systemDeviceName,
     }));
     this.store.flush();
-    if (
-      next.notifyPolicy !== cur.notifyPolicy ||
-      next.notifyAfterMs !== cur.notifyAfterMs ||
-      next.showCommandInNotification !== cur.showCommandInNotification ||
-      next.ntfyServer !== cur.ntfyServer ||
-      next.ntfyEnabled !== cur.ntfyEnabled ||
-      next.ntfyTopic !== cur.ntfyTopic
-    ) {
-      for (const [key, c] of this.clients) this.sendPush(key, c);
+    if (pushChanged(cur, next)) for (const [key, c] of this.clients) this.sendPush(key, c);
+    const change = ++this.settingsChanges;
+    for (const k of Object.keys(next) as (keyof Settings)[]) if (next[k] !== cur[k]) this.settingsBy.set(k, change);
+    // One write at a time, each of the settings as they are then: a write finishing late cannot
+    // replace a newer one, and a failed one is put back before the next write reads them.
+    const write = this.settingsWrite.then(async () => {
+      const saving = this.store.peek().settings;
+      try {
+        await saveSettings(this.deps.kv, saving);
+      } catch {
+        return !this.revertSettings(change, cur);
+      }
+      this.settingsSaved = saving;
+      this.store.update((s) => (s.settingsError === null ? s : { ...s, settingsError: null }));
+      this.store.flush();
+      return true;
+    });
+    this.settingsWrite = write;
+    return write;
+  }
+
+  /**
+   * A failed save of settings change `change`: puts back the settings it was the last to set, to
+   * their saved values (else `before`, the ones it replaced). True when one was put back; none is
+   * when every one was set again since, or an earlier write already saved it.
+   */
+  private revertSettings(change: number, before: Settings): boolean {
+    const shown = this.store.peek().settings;
+    const saved = this.settingsSaved ?? before;
+    const back: Settings = { ...shown };
+    let reverted = false;
+    for (const k of Object.keys(shown) as (keyof Settings)[]) {
+      if (this.settingsBy.get(k) !== change) continue;
+      this.settingsBy.delete(k);
+      if (shown[k] === saved[k]) continue;
+      (back as Record<keyof Settings, unknown>)[k] = saved[k];
+      reverted = true;
     }
-    await saveSettings(this.deps.kv, next);
+    if (!reverted) return false;
+    this.store.update((s) => ({
+      ...s,
+      settings: back,
+      deviceName: back.deviceName ?? this.deps.systemDeviceName,
+      settingsError: "This phone could not save that setting, so it was put back. Try again.",
+    }));
+    this.store.flush();
+    if (pushChanged(shown, back)) for (const [key, c] of this.clients) this.sendPush(key, c);
+    return true;
   }
 
   /**
@@ -1466,8 +1546,8 @@ export class Fleet {
    * posting to the old one; one that is offline may post there until it reconnects, one unpaired
    * while offline may keep posting there. The ntfy app needs a new subscription.
    */
-  async rotateNtfyTopic(): Promise<void> {
-    await this.updateSettings({ ntfyTopic: newNtfyTopic(this.deps.randomBytes) });
+  rotateNtfyTopic(): Promise<boolean> {
+    return this.updateSettings({ ntfyTopic: newNtfyTopic(this.deps.randomBytes) });
   }
 
   /** The ntfy server (self-hosted, or ntfy.sh); false when it is not an https server address. */

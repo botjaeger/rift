@@ -63,6 +63,16 @@ key routing as the keyboard (overlays, editor vs raw mode). Quit goes through
 the running-command warning. Linux has no native menu bar (the palette lists
 every action).
 
+**Menu bar icon** (`menu_bar_icon`, on by default): the app icon as a line
+drawing (tile outline, chevron and cursor; a template image) in the menu
+bar's status area, tooltip and
+VoiceOver name *Rift*. Its menu while Rift runs: *New Window*, *Settings…*
+(both bring Rift to the front), separator, *Quit Rift Completely* (the quit
+dialog as for Quit; then the phone gateway and the shells phones opened stop
+too). Once no window is open, the phone gateway shows the same icon while it
+runs, with *Open Rift* and *Quit Rift Completely*. Turning the setting off
+removes both within a moment.
+
 ## Tab bar
 
 - One tab per shell session group: the tab title (OSC 0/2 title, else cwd
@@ -74,11 +84,17 @@ every action).
   colored tab shows its color as the 2 px top edge when inactive too.
 - `×` shows on the active and the hovered tab and closes it (all its
   panes); on the others its place shows the tab's alert badge or an accent
-  dot for output since last viewed. `tab_close_button = "always"` shows it
+  dot for output since last viewed (`tab_close_side = "left"` puts that slot
+  at the tab's left end, the macOS style). `tab_close_button = "always"` shows it
   on every tab whose slot holds no badge or dot; `"never"` shows it on none
   (⌘W, the tab menu and the palette still close tabs). `+` spawns a new tab,
   at the end of the strip or, with `new_tab_placement = "after_current"`,
   right after the active tab.
+- `tab_bar = "hide_fullscreen"` hides the strip while the window is full
+  screen, `"on_hover"` always; the panes take its height. The pointer at the
+  window's top edge (4 px) slides it in over the panes with a shadow, and it
+  goes again once the pointer leaves it (an open menu keeps it). On macOS the
+  window buttons hide with it. The vertical tab layout keeps its strip.
 - With `tab_bar_with_one_tab = false` and a single tab open (the Settings tab
   counts), the strip shows no tab: the traffic lights, panel buttons and `+`
   stay; the vertical rail goes away and the panes take its width.
@@ -94,8 +110,14 @@ every action).
   bare `±` outside a repository or with no changes. Left of it, an inbox
   (bell) icon opens the notifications popover; an accent dot marks unread
   entries. The vertical-tab layout's top strip has the same buttons.
+- **Configurable toolbar** (Warp): those buttons, plus *Command palette*
+  (search icon) and *Settings*, can go left of the tabs or at the strip's
+  right end, in the order `toolbar_left` / `toolbar_right` list them, or be
+  hidden. Right-click a toolbar button or the empty strip → *Rearrange
+  toolbar items* opens their Settings rows (Appearance › Toolbar). The chips
+  below sit left of the leftmost right-side button.
 - **Update Rift** — while a newer release is downloaded and ready (and not
-  dismissed with *Later*), a 22 px pill left of the inbox: 1 px `warning` outline,
+  dismissed with *Later*), a 22 px pill left of the right-side buttons: 1 px `warning` outline,
   `warning` text (12 px medium), no fill, a hover lift. Tooltip `vX.Y.Z
   available`; a click opens the update dialog (see *Dialogs and toasts*).
 - **Remote · <device>** — while a phone is connected through remote access,
@@ -142,9 +164,10 @@ pane's directory. It follows the pane when `cd` leaves the project.
 - Rows carry a folder or file icon (a changed file's icon takes its status
   color).
 - Rows: folders first, then files, case-insensitive; `.git`, `.DS_Store` and
-  git-ignored entries hidden; at most 2 000 entries per folder — a bigger
-  folder shows the first 2 000 in this order, then `… more entries not
-  shown`. A folder that cannot be read shows the error in its place (e.g.
+  git-ignored entries hidden; 2 000 entries per page — a bigger folder
+  shows the first 2 000 in this order, then a selectable `Show 2000 more
+  entries` row (pointer or ↑↓ + ⏎; a button in the accessibility tree) that
+  loads the next page. A folder that cannot be read shows the error in its place (e.g.
   `Permission denied`). Folders show
   ▸ / ▾ and a dot when they hold changes; changed files are tinted by status
   with a letter at the right (`M` modified, `A` added, `U` untracked, `D`
@@ -246,6 +269,16 @@ under the header. With nothing to list the body says `Loading changes…`,
   swallowed. ↗ (open in the viewer) restores it too; ⇧⌘G closes the panel
   (it reopens beside the panes).
 
+- **Keyboard** (⌥⌘G, `focus_review`): the panel takes the keys, with a 2 px
+  `accent` focus ring on the section, file or hunk band it stands on. ↑ ↓ (`j`
+  `k`, ⇥ ⇧⇥) move between sections, files and the hunks of expanded files,
+  ← → fold and unfold, Enter / Space toggle, `s` stage, `u` unstage, `r` revert
+  (it keeps its confirm dialog), `o` open, `c` copy the hunk; on a section `s` /
+  `u` act on every file. After a write the focus stays at its place (a staged
+  hunk moves it to the file's next hunk). Esc returns the keys to the command
+  line, as does any other plain key; a click elsewhere also leaves the panel.
+  Full list in keyboard-shortcuts.md.
+
 Both panels hide when the window is too narrow to leave 360 px for the panes
 (review first). While the review panel is hidden this way, its toolbar button
 is not lit, and ⇧⌘G / the button show a "Window too narrow" toast instead of
@@ -296,6 +329,25 @@ Each command becomes a block via shell-integration OSC 133 markers:
   output: the program owns the whole PTY height and redraws its top row
   (vttest, progress UIs). Scrolled up, or once the command ends, it pins again.
   `sticky_command_header = false` turns it off.
+- **Block spacing and dividers**: blocks sit flush by default (Warp's compact
+  mode); `block_spacing = "normal"` puts a blank row above each block header
+  that follows other rows, and `block_dividers = true` draws a 1 px `border`
+  rule between blocks (centred in that blank row).
+- **Jump to bottom of block** (Warp): while the pointer is over a block that
+  runs past the bottom of the pane and shows more than 70 px of it, a 28 px
+  round button with a ⌄ sits 10 px in from the pane's bottom-right corner
+  (accent ring on hover; tooltip *Jump to the bottom of this block*); a click
+  scrolls the block's last row to the bottom, as the block menu's *Scroll to
+  bottom of block* does. `jump_to_bottom_button = false` removes it.
+- **Background blocks**: a background job's output sits in a block with no
+  header and a muted left rule, its first row at the indent (the prompt it
+  landed after is left out).
+- **Subshell offer**: a 36 px bar (`surface`, accent hairline, shadow) at
+  the bottom of a pane whose command started a subshell without Rift's
+  hooks (see *features*): *Use Rift's blocks and editor in this subshell?*,
+  an accent **Enable ⌘⏎** button, **Don't ask again** and ✕ (each in the
+  accessibility tree); it goes when the command ends or the subshell's
+  prompt arrives.
 - **Reverse screen** (DECSCNM, `CSI ? 5 h`, used by vttest and `tput flash`):
   the pane's default foreground and background trade places until the program
   resets it (or a terminal reset).
@@ -315,8 +367,12 @@ Each command becomes a block via shell-integration OSC 133 markers:
   a program that tracks the mouse, a left click on a link is Rift's, not the
   program's (⇧ still selects).
   Hold ⌘ and the hand also shows over an existing file path (absolute, `~/…`,
-  or relative to the pane's cwd; `file:line:col` suffixes are accepted) —
-  ⌘-click opens any of them with the system opener. Only http, https, file,
+  or relative to the directory the command that printed it ran in, the
+  pane's for unattributed output; `file:line:col` suffixes are accepted) —
+  ⌘-click opens any of them with the system opener. Output of a command that
+  ran on another host (ssh, with Rift's remote hooks) names that host's
+  files: none of its paths is a link or a hint, even when a local file of the
+  same name exists. Hint mode (⇧⌘H) uses the same rule. Only http, https, file,
   mailto and ftp targets open.
 - **Cell styles**: bold, italic (the embedded Hack and JetBrains Mono carry Italic/Bold Italic faces),
   dim, inverse, hidden, strikethrough, blinking (SGR 5: hidden and shown every
@@ -644,9 +700,11 @@ block; ⇧ + label copies it (a block copies its output). Esc cancels.
   running shells, windows that cannot be reopened — with *Later* `esc` and
   *Update* `⏎`, or *Open download page* for an install that cannot update
   itself; Later hides the chip for that version).
-  Enter confirms, Esc cancels. An Enter that is auto-repeated, or that
-  arrives within 300 ms of the dialog opening (a held or typed-ahead key),
-  is ignored.
+  Esc cancels. The confirm button has the keyboard when the dialog opens;
+  ⇥ / ⇧⇥ and ← → move it between the two buttons (a 2 px `accent` focus
+  ring marks it) and Enter presses the focused one. An Enter that is
+  auto-repeated, or that arrives within 300 ms of the dialog opening (a held
+  or typed-ahead key), never confirms; pressing Cancel needs no such wait.
 - **Toasts** — short notices about what you just did (copied, a keybinding
   moved, config.toml was not applied, a copy, paste, open or save failed, a
   phone's action, …), as a 30 px chip in the pane they are about: in its
@@ -671,7 +729,10 @@ block; ⇧ + label copies it (a block copies its output). Esc cancels.
   block's duration (the full time), the history pane's scope chips
   and ✕, Settings' ↺, "Edit prompt" and "Open config.toml" (with its path),
   the explorer's and review panel's buttons, the file viewer's ✕ and ⋮, and
-  on Linux the drawn traffic lights ("Close window", "Minimize", "Zoom"). A
+  on Linux the drawn traffic lights ("Close window", "Minimize", "Zoom"), the
+  toolbar's palette and Settings buttons, and the jump-to-bottom button. A
+  part of the command line shows the **command inspector**'s card (its text
+  as the title, then *Role · what it does*; ⇧⌘I pins it at the cursor). A
   prompt chip shows its hover card; the **Time on this tab** card is
   interactive: it stays open while the pointer moves from the chip into it, and
   its **Reset** button (pointer cursor; also in the accessibility tree and as
@@ -692,15 +753,20 @@ block; ⇧ + label copies it (a block copies its output). Esc cancels.
 
 ## Search (⌃⇧F / ⌘F)
 
-Bar overlay; live yellow highlight of all matches, orange for the current one.
+Bar overlay above the pane's sticky command header; live yellow highlight of
+all matches, orange for the current one.
 Enter/⇧Enter or ⌘G/⇧⌘G cycle matches (viewport jumps to each), Esc closes.
-Two toggle chips at the right: `Aa` match case (⌥C) and `.*` regular
-expression (⌥R); an invalid regex shows `invalid regex` in red instead of the
+⌘A selects the query (a `selection` band; typing replaces it, ⌫ clears it,
+⌘C copies it); ⌫ removes a whole character. Two toggle chips at the right:
+`Aa` match case (⌥C) and `.*` regular expression (⌥R), also toggle buttons
+in the accessibility tree; an invalid regex shows `invalid regex` in red instead of the
 counter. The counter shows the current match's position among all matches
 (`n/total`; `search` while the query is empty, `0 results` when nothing
 matches); only the newest 500 matches are kept for navigation (older
 ones are counted, not visited), so with 600 matches it runs 101/600 …
-600/600. Text is matched as printed: wide glyphs (日本) and combining marks
+600/600. While the pane prints, matches are recounted (at most every
+100 ms) without moving the view: the selected match stays selected, and
+once scrollback drops it the oldest match left is selected. Text is matched as printed: wide glyphs (日本) and combining marks
 (a decomposed `é`, e + U+0301) are found, a typed `é` finds both spellings
 (plain text and query are compared canonically decomposed; so does the block
 filter; a regex is matched, unchanged, against the text canonically
@@ -777,6 +843,9 @@ description) left, control right; it runs to the bottom edge.
   the page are swallowed rather than reaching the terminal.
 
 - **General** — *Shell and session behavior*.
+  - App (macOS only): `Launch at login` toggle (`launch_at_login`: adds or
+    removes Rift's login item; shows the login item as it is), `Show menu
+    bar icon` toggle (`menu_bar_icon`; see *Menu bar icon* below).
   - Shell: `Shell path` (read-only: `shell` override, else `$SHELL`),
     `Scrollback` stepper (lines, ±1000 within 1,000–1,000,000, shown as
     `10,000`; described *Maximum lines kept in the buffer*).
@@ -817,14 +886,23 @@ description) left, control right; it runs to the bottom edge.
     `Light theme (OS sync)` select (same swatch style), `Window opacity`
     slider (1–100 %, value boxed right of the track), `Window blur radius`
     slider (1–64 px, macOS only),
-    `Window padding` stepper (px, ±2), `Font ligatures` toggle (*Render -> >=
+    `Window padding` stepper (px, ±2), `App icon` select (a picture of
+    each colourway before its name; `app_icon`), `Font ligatures` toggle (*Render -> >=
     != as combined glyphs*).
   - Tabs: `Tab position` segmented `Top | Side` (`tab_layout`), `Close
     buttons` segmented `On hover | Always | Never` (*Always keeps a tab's
-    alert dot until you hover it*; `tab_close_button`), `New tabs open`
+    alert dot until you hover it*; `tab_close_button`), `Close button side`
+    segmented `Right | Left` (`tab_close_side`), `Show the tab bar` segmented
+    `Always | When windowed | Only on hover` (*Out of sight, it slides in at the
+    window's top edge*; `tab_bar`), `New tabs open`
     segmented `At the end | After the current tab` (`new_tab_placement`),
     `Show tabs with only one tab open` toggle (*Off hides the lone tab; the
     bar's buttons stay*; `tab_bar_with_one_tab`).
+  - Toolbar: one row per button (File explorer, Code review, Notifications,
+    Command palette, Settings; *Toolbar button*) with a segmented `Left |
+    Right | Hidden`; a button moved to a side goes last there
+    (`toolbar_left` / `toolbar_right`). A shown button also has a `<name>
+    position` stepper (−/+ moves it along its side).
   - Panes: `Dim inactive panes` toggle (`dim_inactive_panes`), `Dimming
     strength` slider (1–40 %, shown while dimming is on;
     `inactive_pane_dim`), `Focus follows mouse` toggle (*The split pane under
@@ -840,11 +918,17 @@ description) left, control right; it runs to the bottom edge.
     `Input position` segmented `Bottom | Top`, `Blocks start` segmented
     `Bottom | Top`, `Sticky command header` toggle (*Pins a long block's
     command to the top while you scroll its output*;
-    `sticky_command_header`), `Prompt` segmented
+    `sticky_command_header`), `Block spacing` segmented `Compact | Normal`
+    (*Normal leaves a blank row above each block*; `block_spacing`), `Show
+    block dividers` toggle (`block_dividers`), `Jump to bottom of block
+    button` toggle (*Over a block that runs past the bottom of the pane*;
+    `jump_to_bottom_button`), `Prompt` segmented
     `Rift | Shell (PS1)`, `Prompt chips` (a preview of the chips with
     sample values; a click opens **Edit prompt**), `Time on this tab counts`
     segmented `Since first command | Only while running`, `Expand aliases as you type`, `Underline unknown
-    commands`, `Suggest corrections for failed commands` toggles.
+    commands`, `Suggest corrections for failed commands` toggles, `Offer Rift
+    in subshells` toggle (*docker exec … bash, poetry shell; more in
+    subshell_commands*; `subshell_offer`).
 - **Terminal** (clipboard icon) — *Mouse, clipboard and keys inside the
   terminal*.
   - Mouse: `Mouse reporting to programs (Shift selects)` toggle,

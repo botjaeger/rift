@@ -13,6 +13,9 @@ Outputs (all under assets/icon/):
   hicolor/<size>x<size>/apps/rift.png   Linux icon theme (.deb, AppImage, tarball)
   rift.ico                        Windows (16–256 px)
   rift-window.png                 256 px window icon embedded in the binary
+  rift-menubar.png                36 px menu bar template icon embedded in the binary (macOS)
+  variants/<name>.png             512 px app icon choices (`app_icon`), embedded in the
+                                  binary and the macOS Dock tile plugin
 and mobile/assets/icon.png (iOS, opaque) and adaptive-icon.png (Android foreground).
 """
 
@@ -53,6 +56,23 @@ COLORS = {
     "cursor": (0xD4, 0xD4, 0xD4),
 }
 
+# The app icon choices (`app_icon`, Settings › Appearance › App icon): the
+# same "Prompt" design in other colourways. Order and names match
+# `rift_core::AppIcon`; "default" is COLORS.
+VARIANTS = {
+    "default": COLORS,
+    "light": {"surface": (0xF5, 0xF5, 0xF7), "accent": (0x1F, 0x6F, 0xCC), "cursor": (0x2B, 0x2B, 0x2E),
+              "hairline": (0, 0, 0, 26)},
+    "mono": {"surface": (0x16, 0x16, 0x18), "accent": (0xF0, 0xF0, 0xF0), "cursor": (0xF0, 0xF0, 0xF0)},
+    "ocean": {"surface": (0x0F, 0x2A, 0x44), "accent": (0x5E, 0xC4, 0xFF), "cursor": (0xE6, 0xF4, 0xFF)},
+    "ember": {"surface": (0x2B, 0x16, 0x10), "accent": (0xFF, 0x8A, 0x3D), "cursor": (0xFF, 0xE2, 0xCC)},
+    "forest": {"surface": (0x12, 0x26, 0x1B), "accent": (0x4F, 0xD1, 0x8B), "cursor": (0xDF, 0xF7, 0xE9)},
+    "neon": {"surface": (0x1A, 0x0F, 0x2E), "accent": (0xFF, 0x4F, 0xD8), "cursor": (0x4F, 0xF0, 0xFF)},
+}
+# 512 px: the running app's Dock icon (embedded in the binary) and the Dock
+# tile plugin's not-running icon (`packaging/docktile/`)
+VARIANT_SIZE = 512
+
 # Small icons (tabs, taskbars, title bars) waste the macOS margin: at or below
 # this size the tile is drawn closer to the canvas edge.
 SMALL = 48
@@ -84,7 +104,7 @@ def render(size: int, colors: dict[str, tuple[int, int, int]]) -> Image.Image:
         d.rounded_rectangle(
             box(TILE),
             radius=TILE_RADIUS * scale,
-            outline=HAIRLINE,
+            outline=colors.get("hairline", HAIRLINE),
             width=max(1, round(4 * scale)),
         )
     marks(d, p, scale, colors)
@@ -128,6 +148,48 @@ def render_mobile(colors: dict[str, tuple[int, int, int]], tile_fraction: float,
     return img.convert("RGB") if opaque else img
 
 
+# The menu bar icon ("Tile outline", chosen 2026-10-17 from the design
+# canvas): the app icon as a line drawing on an 18 pt grid.
+MENUBAR_TILE = (1.5, 2.0, 16.5, 16.0)
+MENUBAR_TILE_RADIUS = 3.6
+MENUBAR_TILE_STROKE = 1.5
+MENUBAR_CHEVRON = [(5.0, 6.4), (7.8, 9.0), (5.0, 11.6)]
+MENUBAR_CHEVRON_WIDTH = 1.7
+MENUBAR_CURSOR = (9.6, 6.4, 12.4, 11.6)
+MENUBAR_CURSOR_RADIUS = 0.5
+
+
+def render_menubar(px: int) -> Image.Image:
+    """The menu bar icon in black on transparent (macOS tints a template
+    image): the tile's outline holding the chevron and the cursor, from the
+    18 pt grid above onto a `px` square."""
+    s = px * SS
+    scale = s / 18
+
+    def box(b: tuple[float, float, float, float]) -> list[float]:
+        return [v * scale for v in b]
+
+    img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    black = (0, 0, 0, 255)
+    # the outline straddles the tile's edge, as an SVG stroke does
+    half = MENUBAR_TILE_STROKE / 2
+    l, t, r, b = MENUBAR_TILE
+    d.rounded_rectangle(
+        box((l - half, t - half, r + half, b + half)),
+        radius=(MENUBAR_TILE_RADIUS + half) * scale,
+        outline=black,
+        width=round(MENUBAR_TILE_STROKE * scale),
+    )
+    width = MENUBAR_CHEVRON_WIDTH * scale
+    pts = [(x * scale, y * scale) for x, y in MENUBAR_CHEVRON]
+    d.line(pts, fill=black, width=round(width), joint="curve")
+    for x, y in pts:
+        d.ellipse([x - width / 2, y - width / 2, x + width / 2, y + width / 2], fill=black)
+    d.rounded_rectangle(box(MENUBAR_CURSOR), radius=MENUBAR_CURSOR_RADIUS * scale, fill=black)
+    return img.resize((px, px), Image.Resampling.LANCZOS)
+
+
 def main() -> int:
     colors = dict(COLORS)
     print("colors", {k: "#%02x%02x%02x" % v for k, v in colors.items()})
@@ -143,6 +205,9 @@ def main() -> int:
     at(SIZE).save(OUT / "rift-1024.png")
     at(256).save(OUT / "rift-window.png")
     print("wrote rift-1024.png, rift-window.png")
+    # 18 pt at 2x; NSImage is given the point size (status_item.rs)
+    render_menubar(36).save(OUT / "rift-menubar.png")
+    print("wrote rift-menubar.png")
 
     iconset = OUT / "rift.iconset"
     if iconset.exists():
@@ -176,6 +241,12 @@ def main() -> int:
     render_mobile(colors, 1.0, opaque=True).save(mobile / "icon.png")
     render_mobile(colors, 0.62, opaque=False).save(mobile / "adaptive-icon.png")
     print("wrote mobile/assets/icon.png, adaptive-icon.png")
+
+    variants = OUT / "variants"
+    variants.mkdir(parents=True, exist_ok=True)
+    for name, vcolors in VARIANTS.items():
+        render(VARIANT_SIZE, vcolors).save(variants / f"{name}.png", optimize=True)
+    print(f"wrote variants ({len(VARIANTS)} app icons)")
 
     icns = OUT / "rift.icns"
     if sys.platform == "darwin" and shutil.which("iconutil"):

@@ -200,7 +200,7 @@ export function Composer({
       const t = await fleet.sendText(hostKey, paneId, p.text);
       if (!t.ok) return setError(t.message);
       // the program has the text: the line is spent even if the Return fails
-      fleet.setDraft(hostKey, paneId, "");
+      fleet.clearDraft(hostKey, paneId, draft);
       const k = await fleet.sendKeys(hostKey, paneId, ["enter"]);
       if (!k.ok) return setError(k.message);
       AccessibilityInfo.announceForAccessibility("Sent");

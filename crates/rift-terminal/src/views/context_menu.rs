@@ -33,6 +33,8 @@ pub enum MenuAction {
     Maximize,
     /// The pane leaves its split for a tab of its own.
     MoveToNewTab,
+    /// The toolbar: Settings › Appearance › Toolbar.
+    RearrangeToolbar,
     // tab bar (payload: tab index)
     RenameTab(usize),
     DuplicateTab(usize),
@@ -151,6 +153,7 @@ fn icon(action: MenuAction) -> Option<Icon> {
         MoveToNewTab | DuplicateTab(_) => Icon::Plus,
         ToggleSync(_) => Icon::Sync,
         ViewerFind => Icon::Search,
+        RearrangeToolbar => Icon::Settings,
         ViewerRendered(_) => Icon::File,
         ClosePane | CloseTab(_) | CloseOtherTabs(_) | ViewerClose => Icon::Close,
         CloseTabsRight(_) => Icon::ChevronRight,

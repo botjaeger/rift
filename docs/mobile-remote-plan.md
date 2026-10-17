@@ -285,23 +285,22 @@ the relay being able to read terminal content.
 - Revocation prevents subsequent access without requiring a Rift restart.
 - The desktop remains fully usable when mobile networking is disabled or fails.
 
-## Open decisions
+## Decisions taken
 
-- Whether the first transport is direct TLS, a Noise-based channel, or another
-  established mutually authenticated protocol.
-- Whether discovery uses mDNS, a QR-encoded address, or both.
-- How much structured terminal state is stable enough to expose as public protocol.
-- Whether command submission and arbitrary key input use separate permission levels.
-- Whether remote internet access uses a Rift-operated opaque relay or integrates
-  with an existing private-network product.
-- Which raw-terminal renderer is appropriate if full-screen TUI support becomes a
-  priority.
+The questions this plan opened with are settled (see [Status](#status)):
+Noise XX over WebSocket; QR pairing that carries the addresses (no mDNS);
+the topology, blocks and screen as the versioned protocol in
+[remote-protocol.md](remote-protocol.md); per-device `operate` / `view`
+permissions; a Rift-operated opaque relay (the public one by default,
+self-hostable), with private networks such as Tailscale through the address
+list; the screen of full-screen programs rendered by the phone (Phase 3).
 
-## Immediate next steps
+## What remains
 
-1. Write the threat model and choose the pairing/authentication protocol.
-2. Define the smallest versioned protocol for host topology and read-only blocks.
-3. Create an Expo development-build spike with a virtualized block list.
-4. Add a desktop prototype service behind an experimental feature flag.
-5. Test snapshot, live streaming, disconnect, and reconnect on physical iOS and
-   Android devices before committing to the broader roadmap.
+1. Discovery on the local network (mDNS); pairing works without it.
+2. Finish alerts while the app is closed on real devices: needs the Expo,
+   APNs and FCM accounts (the open item of
+   [the Phase 2 audit](workstreams/mobile-phase2-audit-2026-10-13.md)).
+3. Snapshot, live streaming, disconnect and reconnect on physical iOS and
+   Android devices.
+4. A security review before an internet-facing release.

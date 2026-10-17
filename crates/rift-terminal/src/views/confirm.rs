@@ -214,6 +214,9 @@ pub struct Dialog<'a> {
     /// (a coding agent's brand disc, else a terminal mark) and the agent's
     /// name, instead of plain code lines.
     pub processes: bool,
+    /// The keyboard stands on the dismiss button (Tab / ←) instead of the
+    /// confirm one: it gets the focus ring.
+    pub focus_cancel: bool,
 }
 
 const ROW_PROCESS: f32 = 36.0;
@@ -472,6 +475,17 @@ pub fn render(
         confirm[0] + 14.0 + label_w + 8.0,
         label_y + 1.5,
         ink.with_alpha(0.7),
+    );
+
+    // keyboard focus (DESIGN.md): a 2 px accent ring, 2 px outside
+    let at = if dialog.focus_cancel { cancel } else { confirm };
+    layer.bordered(
+        [at[0] - 2.0, at[1] - 2.0],
+        [at[2] + 4.0, at[3] + 4.0],
+        theme.accent.with_alpha(0.0),
+        theme.accent,
+        6.0,
+        2.0,
     );
 
     [cancel, confirm]

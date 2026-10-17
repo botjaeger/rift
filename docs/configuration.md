@@ -17,6 +17,7 @@
 | `~/.local/share/rift/update-pending.json` | An update in progress (readable by you only; holds the token other windows' `prepare-restart` needs); the new version removes it 10 s after its first frame, and if it dies before that the old app is put back (`update-failed.json`) |
 | `~/.local/share/rift/remote/` | Remote access (directory 0700, files 0600): `gateway.key` (the desktop's key phones pin), `devices.json` (paired phones), `pairing.json` (live pairing secrets, hashed), `status.json` and `gateway.lock` (the running gateway), `gateway.log`, `relay.json` (the gateway's secret at the relay), `tunnel.json` (the Cloudflare tunnel's state), `history.jsonl` (the newest 500 connections) |
 | `~/.local/share/rift/ssh/` | SSH profiles' shared-connection sockets (`ControlPath=…/%C`, directory 0700) |
+| `~/.local/share/rift/stalls/` | Stall reports: the window's main thread blocked over 2 s (no repaint, a Quit that does nothing), or the process not ending after a quit; each `stall-<unix time>-<pid>.txt` says what was under way, how long it lasted and, on macOS, every thread's stack (`/usr/bin/sample`; if Rift ended before `sample` finished, in the `stall-<unix time>-<pid>.sample.txt` beside it); the newest 10 are kept |
 | `~/.local/share/rift/restart/` | Each Rift process's windows while an update restarts them (`<pid>.toml` or `main-<pid>.toml`, the session file's format; consumed on relaunch, every window reopening in the one new process; left by a crash, reopened at the next plain launch) |
 
 `XDG_CONFIG_HOME` and `XDG_DATA_HOME` are honored. When the `rift` config or data directory does not exist, an existing one from an earlier name of the app (`shift`, then `runway`) stays active; move it to `rift` when you want the new paths.
@@ -70,7 +71,9 @@ under 50 px while the window has room, whatever ratio was saved.
 
 ## config.toml reference
 
-All keys optional; omitted keys use the defaults shown.
+All keys optional; omitted keys use the defaults shown. A key written in
+your file keeps its value when a release changes that default: Rift never
+rewrites your settings to new defaults (only keys you left out follow them).
 
 ```toml
 font_family   = "Hack"            # embedded Hack or JetBrains Mono, or any installed
@@ -90,6 +93,9 @@ window_padding = 8.0              # left/right content padding in px, clamped 0�
 window_opacity = 0.5              # window ground opacity, clamped 0.01–1.0 (Warp 1–100 %; overlays and prompt chips stay opaque)
 window_blur = 20                  # macOS: blur behind a translucent window, 1–64 px (1 = none)
 ligatures     = true              # JetBrains Mono ligatures + contextual alternates
+app_icon      = "default"         # default | light | mono | ocean | ember | forest | neon:
+                                  # the Dock icon (macOS, also while Rift is not running)
+                                  # and the window icon (Linux); unknown = default
 restore_session = true            # reopen tabs + cwds after a crash or reboot
                                   # (a quit starts fresh; an update restores anyway)
 save_transcripts = false          # also save finished blocks' output and replay it
@@ -99,11 +105,26 @@ tab_close_button = "hover"        # hover (× on the active and hovered tab) | a
                                   # (every tab without an alert/activity dot) | never
                                   # (⌘W, tab menu, palette still close); the vertical
                                   # rail always shows it unless never
+tab_close_side = "right"          # right | left (macOS style): the × end of a tab on
+                                  # top (the vertical rail keeps it right)
+tab_bar       = "always"          # always | hide_fullscreen | on_hover: a hidden strip
+                                  # gives the panes its height and slides in at the
+                                  # window's top edge (tabs on top only)
 new_tab_placement = "end"         # end | after_current — where ⌘T and + put the new tab
                                   # (restores, launch configs and ctl always append)
 tab_bar_with_one_tab = true       # false: no tab in the strip (and no vertical rail)
                                   # while one tab is open; the bar's buttons and + stay
+toolbar_left  = ["explorer"]      # toolbar buttons left of the tabs, in order
+toolbar_right = ["notifications", "review"]  # and at the strip's right end; each of
+                                  # explorer | review | notifications | palette |
+                                  # settings, in neither list = hidden (listed twice:
+                                  # the first place wins; an unknown name is skipped)
 sticky_command_header = true      # pin a block's header while its output scrolls past
+block_spacing = "compact"         # compact (blocks flush) | normal (a blank row above
+                                  # each block header)
+block_dividers = false            # a rule between blocks
+jump_to_bottom_button = true      # a button over a block running past the pane's bottom
+                                  # that scrolls to its end
 dim_inactive_panes = true         # wash the unfocused split panes (Warp)
 inactive_pane_dim = 10            # that wash in %, clamped 1–40 (half on a light theme)
 focus_follows_mouse = false       # the split pane under the pointer takes focus
@@ -115,8 +136,11 @@ check_for_updates = true          # look for a new release at launch and every 6
                                   # ("Update Rift" chip in the tab bar)
 control_api   = "navigate"        # off | navigate (list/status/focus/blocks, and an
                                   # update's prepare-restart) | full (also
-                                  # split/open/send-text); `rift-terminal ctl`
-remote_access = false             # phone companion: windows start the gateway
+                                  # split/open/send-text); `rift-terminal ctl`.
+                                  # Linux, off: the socket still takes rift://
+                                  # links from a second rift-terminal process
+remote_access = false             # phone companion (off by default, never turned
+                                  # on for you): windows start the gateway
                                   # (`rift-terminal remote --managed`; log in
                                   # <data dir>/remote/gateway.log); with
                                   # control_api = "off" the socket then answers
@@ -172,6 +196,9 @@ working_directory = "previous"    # new tabs/panes: previous | home | "/abs/path
 alias_expansion = false           # Space after an alias replaces it with its definition
 error_underline = true            # red underline under unknown command names
 command_corrections = true        # "Did you mean …" after a failed command-not-found
+subshell_offer = true             # offer Rift's hooks in docker exec … bash, poetry shell…
+subshell_commands = []            # more such commands, as regular expressions
+subshell_denylist = []            # commands never to offer it for ("Don't ask again")
 mouse_reporting = true            # forward clicks/drags/wheel to vim, tmux, htop…
                                   # (hold Shift to select locally); focus events go regardless
 option_as_meta = false            # macOS: left Option sends ESC-prefixed Meta keys instead
@@ -187,6 +214,14 @@ hotkey_window = false             # the hotkey slides a drop-down window from th
                                   # the screen instead of showing/hiding the whole app
 hotkey_window_height = 40         # its height, percent of the screen (20–100)
 hotkey_window_hide_on_blur = true # it hides when it loses keyboard focus
+launch_at_login = false           # macOS: Rift opens at login (its login item); shows
+                                  # the login item as it is (System Settings › Login
+                                  # Items can remove it) and only Settings changes it
+menu_bar_icon = true              # macOS: a Rift icon in the menu bar (New Window,
+                                  # Settings…, Quit Rift Completely); after the window
+                                  # quits, the phone gateway shows it while it runs
+                                  # (Open Rift, Quit Rift Completely: stops the
+                                  # gateway and the shells phones opened)
 link_editor   = "rift"            # ⌘-clicked file paths / file links: system (default
                                   # app) | rift (viewer pane) | an editor id below
 link_click    = "open"            # plain click on a link: open (open it at once)
@@ -437,7 +472,9 @@ an app bundle; `notify-send` on Linux) while it is not, plus its sound.
   Played with `afplay` (macOS) or `paplay` / `canberra-gtk-play` (Linux).
   In Settings, a sound picker opens the list of sounds; picking one plays it.
 - **Coding agents** are recognized from the running command (`claude`,
-  `codex`, `opencode`, `gemini`, also behind `npx`, `env`, `VAR=…` or `&&`).
+  `codex`, `opencode`, `gemini`, also behind `npx`, `env`, `sudo`, `doas`,
+  `nice`, `caffeinate`, `VAR=…` or `&&`, and inside `sh -c '…'` or
+  `env -S '…'`).
   Their notifications carry the agent's badge. Turn them on in the agent:
   - Claude Code: `claude config set --global preferredNotifChannel iterm2`
     (sends OSC 9).

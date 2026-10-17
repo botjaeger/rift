@@ -341,6 +341,7 @@ tokens into `assets/icon/`. Where each file is used:
 | Platform | Surface | File |
 |---|---|---|
 | macOS | Finder, Dock, app switcher (`Rift.app`) | `rift.icns` |
+| macOS | Menu bar icon: the icon as a line drawing on the 18 pt grid — tile outline (1.5,2)–(16.5,16), radius 3.6, 1.5 stroke; chevron (5,6.4)–(7.8,9)–(5,11.6), 1.7 wide; cursor 9.6,6.4 to 12.4,11.6, radius 0.5 — black template (macOS tints it), 36 px | `rift-menubar.png` (embedded) |
 | macOS | Dock for an unbundled `cargo run` | `rift-window.png` (embedded, `icon.rs`) |
 | Linux | Launcher, dock, taskbar (via `rift.desktop`, app id `rift`) | `hicolor/*/apps/rift.png` |
 | Linux X11, Windows | Window title bar, taskbar, Alt-Tab | `rift-window.png` (embedded window icon) |

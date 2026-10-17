@@ -70,7 +70,7 @@ function PaneRow({ pane, tab, onOpen }: { pane: Pane; tab: string; onOpen: (id: 
 
 /** A host's tabs as cards of pane rows (the Host board), one group per window. */
 export function HostTree({ host, onOpenPane }: { host: HostView; onOpenPane: (id: number) => void }) {
-  if (host.conn.status === "open" && host.windows.length === 0) {
+  if (host.conn.status === "open" && host.topology && host.windows.length === 0) {
     // a computer that takes a shell anyway says so above (StartTab)
     if (canStartTab(host)) return null;
     return <Text style={styles.empty}>No Rift windows are open on {host.record.name}.</Text>;

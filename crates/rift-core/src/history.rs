@@ -99,15 +99,37 @@ fn push_entry(out: &mut Vec<String>, mut cmd: String) {
 }
 
 /// Parse bash history into commands, oldest first. `#<epoch>` lines
-/// (HISTTIMEFORMAT) are timestamps, not commands.
+/// (HISTTIMEFORMAT) are timestamps, not commands: when the file has any,
+/// an entry is every line up to the next timestamp (a multiline command is
+/// one entry). Without timestamps bash cannot tell where an entry ends, so
+/// each line is one.
 pub fn parse_bash_history(raw: &[u8]) -> Vec<String> {
-    String::from_utf8_lossy(raw)
-        .lines()
-        .filter(|l| !is_bash_timestamp(l))
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(str::to_string)
-        .collect()
+    let text = String::from_utf8_lossy(raw);
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |cmd: &str| {
+        let cmd = cmd.trim();
+        if !cmd.is_empty() {
+            out.push(cmd.to_string());
+        }
+    };
+    let mut current: Option<Vec<&str>> = None;
+    for line in text.lines() {
+        if is_bash_timestamp(line) {
+            if let Some(c) = current.take() {
+                push(&c.join("\n"));
+            }
+            current = Some(Vec::new());
+        } else if let Some(c) = &mut current {
+            c.push(line);
+        } else {
+            // before the first timestamp, or no timestamps at all
+            push(line);
+        }
+    }
+    if let Some(c) = current {
+        push(&c.join("\n"));
+    }
+    out
 }
 
 fn is_bash_timestamp(line: &str) -> bool {
@@ -199,10 +221,12 @@ fn read_tail(path: &Path, max: u64, format: Format) -> std::io::Result<Vec<u8>> 
     let starts_entry = |line: &[u8]| match format {
         Format::Fish => line.starts_with(b"- cmd: "),
         Format::Zsh => is_extended_entry_start(&String::from_utf8_lossy(line)),
-        Format::Bash => true,
+        Format::Bash => is_bash_timestamp(&String::from_utf8_lossy(line)),
     };
-    // plain-format zsh has no entry markers: every line is an entry
-    if format == Format::Zsh && !buf.split(|&b| b == b'\n').any(starts_entry) {
+    // plain-format zsh and untimestamped bash have no entry markers: every
+    // line is an entry
+    if matches!(format, Format::Zsh | Format::Bash) && !buf.split(|&b| b == b'\n').any(starts_entry)
+    {
         return Ok(buf);
     }
     let mut skip = 0;
@@ -307,11 +331,31 @@ mod tests {
 
     #[test]
     fn bash_timestamps_skipped() {
-        let raw = b"#1719400000\ngit status\n#1719400001\nls -la\n#tag\n";
+        let raw = b"#1719400000\ngit status\n#1719400001\nls -la\n#1719400002\n#tag\n";
         assert_eq!(
             parse_bash_history(raw),
             vec!["git status".to_string(), "ls -la".into(), "#tag".into()]
         );
+    }
+
+    #[test]
+    fn bash_multiline_entry_with_timestamps_is_one_entry() {
+        let raw =
+            b"#1719400000\nls\n#1719400001\nfor i in 1 2; do\necho $i\ndone\n#1719400002\npwd\n";
+        assert_eq!(
+            parse_bash_history(raw),
+            vec![
+                "ls".to_string(),
+                "for i in 1 2; do\necho $i\ndone".into(),
+                "pwd".into()
+            ]
+        );
+    }
+
+    #[test]
+    fn bash_without_timestamps_is_one_entry_per_line() {
+        let raw = b"ls\nfor i in 1 2; do\necho $i\ndone\n";
+        assert_eq!(parse_bash_history(raw).len(), 4);
     }
 
     #[test]
@@ -382,6 +426,12 @@ mod tests {
         let body = "#1\nls -la\n#2\npwd\n";
         std::fs::write(&bash, body).unwrap();
         let max = tail_from(body, "la\n");
+        assert_eq!(load_from(&bash, Format::Bash, max, 100), vec!["pwd"]);
+
+        // bash, multiline: the cut lands inside an entry; its tail is dropped
+        let body = "#1\nfor i in 1 2; do\necho $i\ndone\n#2\npwd\n";
+        std::fs::write(&bash, body).unwrap();
+        let max = tail_from(body, "ho $i");
         assert_eq!(load_from(&bash, Format::Bash, max, 100), vec!["pwd"]);
         let _ = std::fs::remove_dir_all(&dir);
     }

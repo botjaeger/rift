@@ -708,7 +708,7 @@ describe("Fleet permission changes", () => {
   });
 
   it("canOperate prefers the live welcome over the stored record", () => {
-    const base = { conn: t0, gateway: null, windows: [], notice: null, lastSeen: null };
+    const base = { conn: t0, gateway: null, windows: [], topology: false, notice: null, lastSeen: null };
     expect(canOperate({ ...base, record: record({ permission: "operate" }), welcome: null })).toBe(true);
     expect(canOperate({ ...base, record: record({ permission: "operate" }), welcome: welcome("view") })).toBe(false);
     expect(canOperate({ ...base, record: record({ permission: "view" }), welcome: welcome("operate") })).toBe(true);

@@ -237,8 +237,10 @@ impl Agent {
 
     /// Agent behind a command line: the program word of any of its
     /// `;` / `&&` / `||` / `|` parts (quotes and backslashes respected),
-    /// after `VAR=value` assignments, `sudo`/`nohup`/`env`/`exec`/…,
-    /// `npx`/`bunx`/`pnpm dlx` and their flags, and any directory prefix.
+    /// after `VAR=value` assignments, `sudo`/`doas`/`nohup`/`env`/`nice`/
+    /// `caffeinate`/`exec`/… and their options (with their values),
+    /// `npx`/`bunx`/`pnpm dlx` and their flags, and any directory prefix;
+    /// inside `sh -c '…'` (any common shell) and `env -S '…'`.
     pub fn from_command(command: &str) -> Option<Agent> {
         split_commands(command)
             .iter()
@@ -247,17 +249,49 @@ impl Agent {
 
     fn from_simple_command(words: &[String]) -> Option<Agent> {
         let mut words = words.iter().map(String::as_str).peekable();
-        // after a prefix command, its `-flags` precede the program
-        let mut skip_flags = false;
+        // the prefix command whose `-flags` precede the program
+        let mut prefix: Option<&str> = None;
         let program = loop {
             let w = words.next()?;
-            if is_assignment(w) || (skip_flags && w.starts_with('-')) {
+            if let Some(p) = prefix
+                && w.starts_with('-')
+            {
+                if w == "--" {
+                    prefix = None;
+                } else if p == "env" && matches!(w, "-S" | "--split-string") {
+                    return Self::from_command(words.next()?);
+                } else if let Some(line) = w.strip_prefix("--split-string=").filter(|_| p == "env")
+                {
+                    return Self::from_command(line);
+                } else if crate::shell_env::prefix_option_takes_value(p, w) {
+                    words.next();
+                }
+                continue;
+            }
+            if is_assignment(w) {
                 continue;
             }
             if matches!(w, "pnpm" | "yarn") && words.peek() == Some(&"dlx") {
                 words.next();
-                skip_flags = true;
+                prefix = Some("npx");
                 continue;
+            }
+            // `sh -c '…'`, `bash -lc '…'`: the agent is in the script
+            let shell = w.rsplit('/').next().unwrap_or(w);
+            if matches!(shell, "sh" | "bash" | "zsh" | "dash" | "ksh" | "fish") {
+                while let Some(flag) = words.next() {
+                    if !(flag.starts_with('-') || flag.starts_with('+')) || flag == "--" {
+                        break;
+                    }
+                    if flag.starts_with('-') && !flag.starts_with("--") && flag.contains('c') {
+                        return Self::from_command(words.next()?);
+                    }
+                    // `-o pipefail`, `+O extglob`: the option's name follows
+                    if matches!(flag, "-o" | "+o" | "-O" | "+O") {
+                        words.next();
+                    }
+                }
+                return None;
             }
             // `command -v claude` looks the program up; it does not run it
             if w == "command"
@@ -269,9 +303,22 @@ impl Agent {
             }
             if matches!(
                 w,
-                "sudo" | "nohup" | "env" | "npx" | "bunx" | "pnpx" | "exec" | "command" | "time"
+                "sudo"
+                    | "doas"
+                    | "nohup"
+                    | "env"
+                    | "nice"
+                    | "caffeinate"
+                    | "stdbuf"
+                    | "setsid"
+                    | "npx"
+                    | "bunx"
+                    | "pnpx"
+                    | "exec"
+                    | "command"
+                    | "time"
             ) {
-                skip_flags = true;
+                prefix = Some(w);
                 continue;
             }
             break w;
@@ -365,14 +412,19 @@ pub enum Meaning {
     Info,
 }
 
-/// Phrases are matched as whole words ("incomplete" is not "complete").
-/// Order: an explicit request phrase, then an error word (unless negated:
-/// "no errors", "0 errors", "without error"), then a bare request word
-/// ("Grant permission?"), then a completion word.
+/// Phrases are matched as whole words ("incomplete" is not "complete"),
+/// and a negated one does not count ("no errors", "This is not an error",
+/// "Not done yet", "No approval needed", "no input required").
+/// Order: an explicit request phrase, then an error word, then a bare
+/// request word ("Grant permission?"), then a completion word.
 pub fn classify(text: &str) -> Meaning {
-    let t = text.to_lowercase();
-    let has = |phrases: &[&str]| phrases.iter().any(|p| phrase_at(&t, p).next().is_some());
-    let has_error = [
+    let t = text.to_lowercase().replace('’', "'");
+    let has = |phrases: &[&str]| {
+        phrases
+            .iter()
+            .any(|p| phrase_at(&t, p).any(|at| !negated(&t[..at])))
+    };
+    let has_error = has(&[
         "permission denied",
         "access denied",
         "denied",
@@ -382,9 +434,7 @@ pub fn classify(text: &str) -> Meaning {
         "error",
         "errors",
         "errored",
-    ]
-    .iter()
-    .any(|p| phrase_at(&t, p).any(|at| !negated(&t[..at])));
+    ]);
     if has(&[
         "approval requested",
         "needs your permission",
@@ -430,9 +480,10 @@ fn phrase_at<'a>(text: &'a str, phrase: &'a str) -> impl Iterator<Item = usize> 
     })
 }
 
-/// `prefix` (text before an error word) carries a negation within the three
-/// words before it, in the same clause: "no", "0", "zero", "without" ("no
-/// errors", "no test failures").
+/// `prefix` (the lowercased text before a phrase) carries a negation within
+/// the three words before it, in the same clause: "no", "not", "never",
+/// "0", "zero", "without", or a "…n't" word ("no test failures", "is not
+/// an error", "isn't done").
 fn negated(prefix: &str) -> bool {
     if !prefix.ends_with(char::is_whitespace) {
         return false;
@@ -441,11 +492,12 @@ fn negated(prefix: &str) -> bool {
         .rsplit(['.', ',', ';', ':', '!', '?', '(', ')'])
         .next()
         .unwrap_or("");
-    clause
-        .split_whitespace()
-        .rev()
-        .take(3)
-        .any(|w| matches!(w, "no" | "0" | "zero" | "without"))
+    clause.split_whitespace().rev().take(3).any(|w| {
+        matches!(
+            w,
+            "no" | "not" | "never" | "0" | "zero" | "without" | "cannot"
+        ) || w.ends_with("n't")
+    })
 }
 
 /// A password prompt at the end of the cursor line (`Password:`,
@@ -628,6 +680,27 @@ mod tests {
             Agent::from_command("\"claude\" -c"),
             Some(Agent::ClaudeCode)
         );
+        // wrappers, with the options that take a value
+        for line in [
+            "nice -n 5 claude",
+            "caffeinate -i claude",
+            "caffeinate -t 3600 claude",
+            "doas -u me claude",
+            "env -S 'FOO=1 claude --resume'",
+            "env --split-string='claude'",
+            "sh -c 'claude -p hi'",
+            "/bin/bash -lc \"cd x && claude\"",
+            "sudo zsh -c claude",
+            "bash -o pipefail -c claude",
+            "zsh +o nomatch -c 'claude'",
+            "stdbuf -o L claude",
+        ] {
+            assert_eq!(Agent::from_command(line), Some(Agent::ClaudeCode), "{line}");
+        }
+        // a shell running a script file, or a value mistaken for the program
+        assert_eq!(Agent::from_command("bash claude.sh"), None);
+        assert_eq!(Agent::from_command("sh -c 'echo claude'"), None);
+        assert_eq!(Agent::from_command("nice -n claude"), None);
     }
 
     #[test]
@@ -650,6 +723,15 @@ mod tests {
             ("Deploy to prod, confirm?", Meaning::Request),
             ("Confirmation required", Meaning::Request),
             ("Requires your approval: rm -rf", Meaning::Request),
+            // negations, for every kind of word
+            ("This is not an error", Meaning::Info),
+            ("Not done yet", Meaning::Info),
+            ("No approval needed", Meaning::Info),
+            ("No input required", Meaning::Info),
+            ("The build didn't fail", Meaning::Info),
+            ("It isn’t finished", Meaning::Info),
+            ("Never failed once, done", Meaning::Complete),
+            ("Not slow, but failed", Meaning::Error),
         ];
         for (text, want) in cases {
             assert_eq!(classify(text), want, "{text}");

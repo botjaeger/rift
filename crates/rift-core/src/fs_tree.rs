@@ -27,9 +27,13 @@ pub struct Listing {
     /// The directory itself could not be read (permissions, gone, not a
     /// directory). Unreadable single entries are skipped silently.
     pub error: Option<String>,
-    /// More than `MAX_ENTRIES` entries: `entries` holds the first
-    /// `MAX_ENTRIES` in display order.
+    /// More entries than the requested limit (`MAX_ENTRIES` for `listing`):
+    /// `entries` holds the first ones in display order; a larger limit
+    /// (`listing_limit`) reaches the rest.
     pub truncated: bool,
+    /// The directory holds more than `MAX_SCAN` entries and only the first
+    /// `MAX_SCAN` read were considered: no limit reaches the others.
+    pub scan_capped: bool,
 }
 
 /// The explorer root for `cwd`: the enclosing repository's working tree, or
@@ -52,6 +56,18 @@ pub fn list(dir: &Path, repo: Option<&git2::Repository>) -> Vec<Entry> {
 /// was cut to `MAX_ENTRIES`. `dotfiles` false also leaves out names that
 /// start with `.`.
 pub fn listing(dir: &Path, repo: Option<&git2::Repository>, dotfiles: bool) -> Listing {
+    listing_limit(dir, repo, dotfiles, MAX_ENTRIES)
+}
+
+/// `listing` with the first `limit` entries of the display order: sorting
+/// covers every entry read, so growing `limit` by pages (`MAX_ENTRIES` at a
+/// time) walks one stable order and reaches every entry up to `MAX_SCAN`.
+pub fn listing_limit(
+    dir: &Path,
+    repo: Option<&git2::Repository>,
+    dotfiles: bool,
+    limit: usize,
+) -> Listing {
     let read = match std::fs::read_dir(dir) {
         Ok(read) => read,
         Err(e) => {
@@ -102,12 +118,13 @@ pub fn listing(dir: &Path, repo: Option<&git2::Repository>, dotfiles: bool) -> L
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
             .then_with(|| a.name.cmp(&b.name))
     });
-    let truncated = scanned > MAX_SCAN || out.len() > MAX_ENTRIES;
-    out.truncate(MAX_ENTRIES);
+    let truncated = out.len() > limit;
+    out.truncate(limit);
     Listing {
         entries: out,
         error: None,
         truncated,
+        scan_capped: scanned > MAX_SCAN,
     }
 }
 
@@ -149,6 +166,28 @@ mod tests {
         assert!(l.truncated);
         assert!(l.error.is_none());
         assert_eq!(list(&dir, None), l.entries);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pages_walk_one_stable_order_to_the_last_entry() {
+        let dir = temp_dir("pages");
+        let total = MAX_ENTRIES * 2 + 5;
+        for n in (0..total).rev() {
+            fs::write(dir.join(format!("f{n:05}")), "").unwrap();
+        }
+        let want: Vec<String> = (0..total).map(|n| format!("f{n:05}")).collect();
+        let mut prev = 0;
+        for pages in 1..=3 {
+            let l = listing_limit(&dir, None, true, pages * MAX_ENTRIES);
+            let names: Vec<String> = l.entries.iter().map(|e| e.name.clone()).collect();
+            assert_eq!(names[..], want[..names.len()], "page {pages} is a prefix");
+            assert!(names.len() > prev);
+            prev = names.len();
+            assert_eq!(l.truncated, pages < 3);
+            assert!(!l.scan_capped);
+        }
+        assert_eq!(prev, total, "the last entry is reachable");
         let _ = fs::remove_dir_all(&dir);
     }
 

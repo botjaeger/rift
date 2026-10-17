@@ -3,9 +3,17 @@ use std::time::{Duration, Instant};
 pub type BlockId = u64;
 /// Monotone absolute line index (never reused, survives scrollback trim).
 pub type AbsLine = u64;
-/// A transcript block's (duration, directory, exact command), for
-/// [`BlockStore::mark_restored`].
-pub type Restored = (Duration, Option<String>, String);
+/// A transcript block's (duration, directory, exact command, directory is
+/// on another host), for [`BlockStore::mark_restored`].
+pub type Restored = (Duration, Option<String>, String, bool);
+
+/// Where a block's command ran ([`BlockStore::output_dir`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum OutputDir {
+    Local(String),
+    Remote,
+    Unattributed,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum BlockState {
@@ -42,6 +50,8 @@ pub struct Block {
     pub bookmarked: bool,
     /// Working directory when the command ran (header context line).
     pub cwd: Option<String>,
+    /// `cwd` is a path on another host (ssh): never read on this disk.
+    pub cwd_remote: bool,
     /// Git branch when the command ran (header context line).
     pub branch: Option<String>,
     /// Replayed from a saved transcript: the command is not running and
@@ -58,14 +68,30 @@ pub struct Block {
     /// ([`BlockStore::stamp_submit`]), not text read back from the screen,
     /// which a program can forge with OSC 133.
     pub from_editor: bool,
+    /// A background block (Warp): output a background job printed while
+    /// the prompt waited ([`BlockStore::on_background_output`]). It has no
+    /// command and no header; its first row starts at column `skip_cols`
+    /// (the prompt the output landed after).
+    pub background: bool,
+    pub skip_cols: usize,
 }
 
 impl Block {
+    /// A background block's hidden rows: the prompt its output landed
+    /// after, [prompt_start, output_start) (it has no header).
+    pub fn hidden_prompt(&self) -> Option<(AbsLine, AbsLine)> {
+        self.output_start
+            .filter(|_| self.background)
+            .map(|o| (self.prompt_start, o))
+    }
+
     /// Rows replaced by the synthesized header: [prompt_start, output_start).
-    /// Only once the command is running — while typing, raw rows show.
+    /// Only once the command is running — while typing, raw rows show. A
+    /// background block has no header.
     pub fn suppressed_range(&self) -> Option<(AbsLine, AbsLine)> {
         match self.state {
             BlockState::Prompt => None,
+            _ if self.background => None,
             _ => self.output_start.map(|o| (self.prompt_start, o)),
         }
     }
@@ -105,6 +131,17 @@ pub struct BlockStore {
     /// wins over the text read back from the screen, which loses combining
     /// marks and turns continuation prompts (PS2) into command text.
     submitted: Option<String>,
+    /// A background block is open before the waiting prompt: more output
+    /// before the next prompt extends it.
+    background_open: bool,
+    /// The app sent the waiting shell a key it answers with output of its
+    /// own (^C echoes `^C` and a new prompt): until that prompt, output is
+    /// not a background job's.
+    answer_pending: bool,
+    /// Keys were typed into a running command: the shell reads them at its
+    /// next prompt and echoes or runs them there, so until a command starts
+    /// (133;C) output at the prompt is that, not a background job's.
+    typed_ahead: bool,
     /// The grid was resized while the prompt was up: the shell's redraw of
     /// the prompt that follows (zsh on SIGWINCH) can land below a reflowed
     /// copy of the old one, which must stay hidden with it.
@@ -189,9 +226,31 @@ impl BlockStore {
     pub fn on_prompt_start(&mut self, abs: AbsLine) {
         let now = self.now();
         let (wall, replaying) = (self.wall_now(), self.replaying);
-        // a new prompt without 133;C: the submission ran nothing
-        self.submitted = None;
+        // a new prompt without 133;C after a submission: the shell never
+        // said it started (bash 3.2's DEBUG trap misses `cmd &`; a syntax
+        // error): it is a block of what it printed, with no exit status
+        let submitted = self.submitted.take();
+        self.background_open = false;
+        self.answer_pending = false;
         let after_resize = std::mem::take(&mut self.resized_at_prompt);
+        if let Some(last) = self.blocks.back_mut()
+            && last.state == BlockState::Prompt
+            && let (Some(command), Some((line, _))) = (submitted, last.command_start)
+            && abs > line
+        {
+            // its rows: the echoed command (one per line it has), then output
+            let out = (line + 1 + command.matches('\n').count() as AbsLine).min(abs);
+            last.command = command;
+            last.from_editor = true;
+            last.output_start = Some(out);
+            last.end = Some(abs);
+            last.state = BlockState::Done {
+                exit: None,
+                duration: Duration::ZERO,
+            };
+            last.finished_at = Some(wall);
+            last.replayed = replaying;
+        }
         // an unfinished Running block means we missed D — close it here
         if let Some(last) = self.blocks.back_mut() {
             match last.state {
@@ -229,13 +288,118 @@ impl BlockStore {
             collapsed: false,
             bookmarked: false,
             cwd: None,
+            cwd_remote: false,
             branch: None,
             restored: false,
             replayed: false,
             finished_at: None,
             from_editor: false,
+            background: false,
+            skip_cols: 0,
         });
         self.next_id += 1;
+    }
+
+    /// Input reached the shell's terminal: typed into a running command, it
+    /// is type-ahead the next prompt reads ([`BlockStore::on_background_output`]).
+    pub fn note_input(&mut self) {
+        if self
+            .blocks
+            .back()
+            .is_some_and(|b| b.state != BlockState::Prompt)
+        {
+            self.typed_ahead = true;
+        }
+    }
+
+    /// The app wrote a key the waiting shell answers itself (^C, ^D, ^L):
+    /// what it prints before its next prompt is not background output.
+    pub fn expect_answer(&mut self) {
+        if self
+            .blocks
+            .back()
+            .is_some_and(|b| b.state == BlockState::Prompt)
+        {
+            self.answer_pending = true;
+        }
+    }
+
+    /// Output arrived while the prompt waited for input (nothing submitted)
+    /// and left the cursor at (`line`, `col`), on a row below where input
+    /// starts (133;B): a background job printed it (a prompt's own drawing,
+    /// a right prompt or a redraw, stays on or above that row). It goes into a background
+    /// block before the prompt's, from the input point on, and the prompt
+    /// block moves to the cursor (where the next command will echo). More
+    /// output extends the same block.
+    pub fn on_background_output(&mut self, line: AbsLine, col: usize, input_row_used: bool) {
+        let Some(prompt) = self.blocks.back() else {
+            return;
+        };
+        let Some((input_line, input_col)) = prompt.command_start else {
+            return;
+        };
+        if prompt.state != BlockState::Prompt
+            || self.submitted.is_some()
+            || self.answer_pending
+            || self.typed_ahead
+            || line <= input_line
+        {
+            return;
+        }
+        // output that began with a line break leaves the prompt's row as it
+        // was: the block starts on the next row (`input_row_used`: the job
+        // printed after the prompt on its row)
+        let (first, skip) = if input_row_used {
+            (input_line, input_col)
+        } else {
+            (input_line + 1, 0)
+        };
+        // a cursor mid-row: that row is the block's too
+        let end = line + AbsLine::from(col > 0);
+        let n = self.blocks.len();
+        let open = self.background_open && n >= 2 && self.blocks[n - 2].background;
+        if open {
+            self.blocks[n - 2].end = Some(end.max(self.blocks[n - 2].end.unwrap_or(end)));
+        } else {
+            let wall = self.wall_now();
+            let prompt = self.blocks.back_mut().expect("checked above");
+            let prompt_rows = prompt.prompt_start;
+            // the background block takes the prompt's id (nothing points at
+            // a waiting prompt); the prompt gets a new one
+            let id = prompt.id;
+            prompt.id = self.next_id;
+            self.next_id += 1;
+            let block = Block {
+                id,
+                command: String::new(),
+                state: BlockState::Done {
+                    exit: None,
+                    duration: Duration::ZERO,
+                },
+                // the prompt the output landed after is hidden with it
+                prompt_start: prompt_rows,
+                command_start: None,
+                output_start: Some(first),
+                end: Some(end.max(first)),
+                unterminated: col > 0,
+                collapsed: false,
+                bookmarked: false,
+                cwd: None,
+                cwd_remote: false,
+                branch: None,
+                restored: false,
+                replayed: self.replaying,
+                finished_at: Some(wall),
+                from_editor: false,
+                background: true,
+                skip_cols: skip,
+            };
+            self.blocks.insert(n - 1, block);
+            self.background_open = true;
+        }
+        let prompt = self.blocks.back_mut().expect("checked above");
+        prompt.prompt_start = line;
+        prompt.command_start = Some((line, col));
     }
 
     /// Mark every finished block as replayed from a transcript, giving each
@@ -249,11 +413,12 @@ impl BlockStore {
             .iter_mut()
             .rev()
             .filter(|b| matches!(b.state, BlockState::Done { .. }));
-        for (b, (d, cwd, command)) in done.zip(meta.iter().rev()) {
+        for (b, (d, cwd, command, remote)) in done.zip(meta.iter().rev()) {
             if let BlockState::Done { duration, .. } = &mut b.state {
                 *duration = *d;
             }
             b.cwd = cwd.clone();
+            b.cwd_remote = *remote;
             b.command = command.clone();
             b.restored = true;
         }
@@ -262,9 +427,10 @@ impl BlockStore {
     /// Attach prompt-time context to the newest block; existing values win
     /// (the app stamps richer info at submit, the reader thread only fills
     /// gaps for commands typed in raw passthrough).
-    pub fn stamp_context(&mut self, cwd: Option<String>, branch: Option<String>) {
+    pub fn stamp_context(&mut self, cwd: Option<String>, remote: bool, branch: Option<String>) {
         if let Some(b) = self.blocks.back_mut() {
             if b.cwd.is_none() {
+                b.cwd_remote = remote && cwd.is_some();
                 b.cwd = cwd;
             }
             if b.branch.is_none() {
@@ -275,8 +441,14 @@ impl BlockStore {
 
     /// The app submitted `command` from its editor: stamp prompt-time
     /// context and keep the exact text for the block 133;C starts.
-    pub fn stamp_submit(&mut self, cwd: Option<String>, branch: Option<String>, command: &str) {
-        self.stamp_context(cwd, branch);
+    pub fn stamp_submit(
+        &mut self,
+        cwd: Option<String>,
+        remote: bool,
+        branch: Option<String>,
+        command: &str,
+    ) {
+        self.stamp_context(cwd, remote, branch);
         if self
             .blocks
             .back()
@@ -293,6 +465,8 @@ impl BlockStore {
     }
 
     pub fn on_command_start(&mut self, abs: AbsLine, col: usize) {
+        // the shell drew its prompt again: later output starts a new block
+        self.background_open = false;
         if let Some(last) = self.blocks.back_mut()
             && last.state == BlockState::Prompt
         {
@@ -304,6 +478,7 @@ impl BlockStore {
     /// the app's editor ([`BlockStore::stamp_submit`]) replaces it.
     pub fn on_output_start(&mut self, abs: AbsLine, command: String) {
         let now = self.now();
+        self.typed_ahead = false;
         let submitted = self.submitted.take();
         if let Some(last) = self.blocks.back_mut()
             && last.state == BlockState::Prompt
@@ -402,6 +577,14 @@ impl BlockStore {
             .collect()
     }
 
+    /// Fold block `id` (also one still running: its output folds once it
+    /// ends, as the display list shows a running block's output).
+    pub fn fold(&mut self, id: BlockId) {
+        if let Some(b) = self.blocks.iter_mut().find(|b| b.id == id) {
+            b.collapsed = true;
+        }
+    }
+
     pub fn toggle_collapsed(&mut self, id: BlockId) {
         if let Some(b) = self.blocks.iter_mut().find(|b| b.id == id)
             && b.output_range().is_some()
@@ -432,6 +615,21 @@ impl BlockStore {
     /// (`None` for prompt rows, unattributed output, or no recorded cwd).
     pub fn cwd_at(&self, abs: AbsLine) -> Option<&str> {
         self.block_at(abs)?.cwd.as_deref()
+    }
+
+    /// Where the command owning line `abs` ran: a directory on this machine,
+    /// another host (ssh), or unknown (prompt rows, unattributed output, no
+    /// recorded cwd), which callers settle from the pane's current state.
+    pub fn output_dir(&self, abs: AbsLine) -> OutputDir {
+        match self.block_at(abs) {
+            Some(Block {
+                cwd: Some(_),
+                cwd_remote: true,
+                ..
+            }) => OutputDir::Remote,
+            Some(Block { cwd: Some(dir), .. }) => OutputDir::Local(dir.clone()),
+            _ => OutputDir::Unattributed,
+        }
     }
 
     /// The command whose output holds line `abs` (`None` for prompt rows and
@@ -471,7 +669,7 @@ mod tests {
         let mut run = |s: &mut BlockStore, typed: Option<&str>, screen: &str| {
             s.on_prompt_start(line);
             if let Some(cmd) = typed {
-                s.stamp_submit(None, None, cmd);
+                s.stamp_submit(None, false, None, cmd);
             }
             s.on_output_start(line + 1, screen.into());
             line += 2;
@@ -563,7 +761,7 @@ mod tests {
         s.on_prompt_start(0);
         assert!(!s.submit_pending());
         let exact = "printf 'first\nsecond\n' caf\u{65}\u{301}";
-        s.stamp_submit(None, None, exact);
+        s.stamp_submit(None, false, None, exact);
         // submitted, not started: the prompt is taken
         assert!(s.submit_pending());
         s.on_output_start(2, "printf 'first cont> second' cafe".into());
@@ -577,14 +775,14 @@ mod tests {
         s.on_done(5, Some(0));
         // a submission that ran nothing does not label the next command
         s.on_prompt_start(5);
-        s.stamp_submit(None, None, "# comment");
+        s.stamp_submit(None, false, None, "# comment");
         assert!(s.submit_pending());
         s.on_prompt_start(6);
         assert!(!s.submit_pending(), "a new prompt frees it");
         s.on_output_start(7, "pwd".into());
         assert_eq!(s.last().unwrap().command, "pwd");
         // nor does one made while a command is running
-        s.stamp_submit(None, None, "typed ahead");
+        s.stamp_submit(None, false, None, "typed ahead");
         s.on_done(8, Some(0));
         s.on_prompt_start(8);
         s.on_output_start(9, "date".into());
@@ -592,18 +790,159 @@ mod tests {
     }
 
     #[test]
+    fn a_submission_the_shell_never_started_is_still_a_block() {
+        // bash 3.2: `sleep 1 &` gets no 133;C (its DEBUG trap misses
+        // asynchronous commands), only the next prompt
+        let mut s = BlockStore::default();
+        s.on_prompt_start(4);
+        s.on_command_start(4, 20);
+        s.stamp_submit(None, false, None, "sleep 1 &");
+        s.on_prompt_start(6);
+        let b = &s.blocks[0];
+        assert_eq!(b.command, "sleep 1 &");
+        assert_eq!((b.output_start, b.end), (Some(5), Some(6)));
+        assert_eq!(b.exit_code(), None);
+        assert!(matches!(b.state, BlockState::Done { .. }));
+        assert_eq!(s.last().unwrap().state, BlockState::Prompt);
+        // a multi-line command echoes one row per line before its output
+        s.on_command_start(6, 2);
+        s.stamp_submit(None, false, None, "echo a\necho b");
+        s.on_prompt_start(10);
+        assert_eq!(s.blocks[1].output_start, Some(8));
+        // the same prompt again with nothing submitted moves it, as before
+        s.on_prompt_start(11);
+        assert_eq!(s.blocks.len(), 3);
+        assert_eq!(s.last().unwrap().prompt_start, 11);
+    }
+
+    #[test]
+    fn background_output_gets_its_own_block_before_the_prompt() {
+        let mut s = BlockStore::default();
+        s.on_prompt_start(0);
+        s.on_command_start(0, 2);
+        s.on_output_start(1, "sleep 1 &".into());
+        s.on_done(2, Some(0));
+        // the prompt on rows 2–3, input after column 4 of row 3
+        s.on_prompt_start(2);
+        s.on_command_start(3, 4);
+        // the prompt's own drawing (a right prompt) stays on its row
+        s.on_background_output(3, 70, true);
+        assert_eq!(s.blocks.len(), 2);
+        // a job prints two lines: cursor at the start of row 5
+        s.on_background_output(5, 0, true);
+        assert_eq!(s.blocks.len(), 3);
+        let bg = &s.blocks[1];
+        assert!(bg.background && bg.command.is_empty());
+        assert_eq!(bg.suppressed_range(), None, "no header");
+        assert_eq!(bg.hidden_prompt(), Some((2, 3)));
+        assert_eq!(
+            (bg.output_start, bg.end, bg.skip_cols),
+            (Some(3), Some(5), 4)
+        );
+        let prompt = s.last().unwrap();
+        assert_eq!(prompt.state, BlockState::Prompt);
+        assert_eq!(
+            (prompt.prompt_start, prompt.command_start),
+            (5, Some((5, 0)))
+        );
+        assert_ne!(prompt.id, bg.id);
+        // more output extends it; a partial row is the block's too
+        s.on_background_output(6, 3, true);
+        assert_eq!(s.blocks.len(), 3);
+        assert_eq!(s.blocks[1].end, Some(7));
+        // the next command runs after it as usual
+        s.stamp_submit(None, false, None, "ls");
+        s.on_background_output(8, 0, true);
+        assert_eq!(s.blocks.len(), 3, "not while a submission waits");
+        s.on_output_start(7, "ls".into());
+        assert_eq!(s.last().unwrap().command, "ls");
+        // a redrawn prompt ends it: later output starts another
+        s.on_done(8, Some(0));
+        s.on_prompt_start(8);
+        s.on_command_start(8, 2);
+        s.on_background_output(9, 0, true);
+        s.on_command_start(9, 2);
+        s.on_background_output(10, 0, true);
+        assert_eq!(s.blocks.iter().filter(|b| b.background).count(), 3);
+        // output that starts with a line break (zsh's `[1] + done` notice)
+        // starts the block on the row after the prompt's
+        s.on_done(11, Some(0));
+        s.on_prompt_start(11);
+        s.on_command_start(11, 2);
+        s.on_background_output(13, 0, false);
+        let bg = s.blocks.iter().rev().find(|b| b.background).unwrap();
+        assert_eq!(
+            (bg.output_start, bg.skip_cols, bg.hidden_prompt()),
+            (Some(12), 0, Some((11, 12)))
+        );
+        // ^C at the prompt: the shell's echo and new prompt are its own
+        s.on_prompt_start(13);
+        s.on_command_start(13, 2);
+        s.expect_answer();
+        s.on_background_output(14, 0, false);
+        assert_eq!(s.blocks.iter().filter(|b| b.background).count(), 4);
+        s.on_prompt_start(14);
+        s.on_command_start(14, 2);
+        s.on_background_output(15, 0, true);
+        assert_eq!(
+            s.blocks.iter().filter(|b| b.background).count(),
+            5,
+            "armed again"
+        );
+        // keys typed into a running command run at the next prompt
+        let bg = |s: &BlockStore| s.blocks.iter().filter(|b| b.background).count();
+        s.on_prompt_start(16);
+        s.on_command_start(16, 2);
+        s.on_output_start(17, "sleep 2".into());
+        s.note_input();
+        s.on_done(18, Some(0));
+        s.on_prompt_start(18);
+        s.on_command_start(18, 2);
+        s.on_background_output(19, 0, true);
+        assert_eq!(bg(&s), 5, "type-ahead");
+        s.on_output_start(19, "echo typed".into());
+        s.on_done(20, Some(0));
+        s.on_prompt_start(20);
+        s.on_command_start(20, 2);
+        s.on_background_output(21, 0, true);
+        assert_eq!(bg(&s), 6, "armed again after it ran");
+    }
+
+    #[test]
     fn cwd_at_follows_the_owning_command() {
         let mut s = BlockStore::default();
         s.on_prompt_start(0);
-        s.stamp_context(Some("/a".into()), None);
+        s.stamp_context(Some("/a".into()), false, None);
         s.on_output_start(1, "ls".into());
         s.on_done(3, Some(0));
         s.on_prompt_start(3);
-        s.stamp_context(Some("/b".into()), None);
+        s.stamp_context(Some("/b".into()), false, None);
         s.on_output_start(4, "ls".into());
         assert_eq!(s.cwd_at(2), Some("/a"));
         assert_eq!(s.cwd_at(9), Some("/b")); // still running
         assert_eq!(s.cwd_at(0), None); // prompt row
+    }
+
+    #[test]
+    fn output_dir_knows_which_host_each_block_ran_on() {
+        let mut s = BlockStore::default();
+        s.on_prompt_start(0);
+        s.stamp_context(Some("/a".into()), false, None);
+        s.on_output_start(1, "ls".into());
+        s.on_done(3, Some(0));
+        s.on_prompt_start(3);
+        s.stamp_context(Some("/srv".into()), true, None);
+        s.on_output_start(4, "ls".into());
+        // an old local block stays local after the pane went remote
+        assert_eq!(s.output_dir(2), OutputDir::Local("/a".into()));
+        assert_eq!(s.output_dir(9), OutputDir::Remote);
+        assert_eq!(s.output_dir(0), OutputDir::Unattributed);
+        // a remote flag without a cwd names nothing
+        s.on_done(10, Some(0));
+        s.on_prompt_start(10);
+        s.stamp_context(None, true, None);
+        s.on_output_start(11, "ls".into());
+        assert_eq!(s.output_dir(12), OutputDir::Unattributed);
     }
 
     #[test]

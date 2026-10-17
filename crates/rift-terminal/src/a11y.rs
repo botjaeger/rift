@@ -105,6 +105,14 @@ pub enum Overlay {
         controls: Vec<Control>,
         rect: Option<[f32; 4]>,
     },
+    /// Find / block filter bar: a field, its status, and toggle buttons
+    /// beside the field (find's match case and regex).
+    Find {
+        label: String,
+        input: (String, String),
+        status: String,
+        toggles: Vec<Control>,
+    },
     /// Blocking confirmation (close with running jobs, multiline paste).
     Alert {
         title: String,
@@ -358,6 +366,33 @@ pub fn build(s: &Snapshot) -> Built {
                 node.set_children(children);
                 t.add(OVERLAY, node, *rect, false);
             }
+            Overlay::Find {
+                label,
+                input: (name, value),
+                status,
+                toggles,
+            } => {
+                let id = id_of(("overlay-input", label));
+                let mut node = Node::new(Role::SearchInput);
+                node.set_label(name.as_str());
+                node.set_value(value.as_str());
+                t.nodes.push((id, node));
+                let mut children = vec![id];
+                focus = id;
+                let id = id_of(("overlay-status", label));
+                let mut node = Node::new(Role::Label);
+                node.set_value(status.as_str());
+                t.nodes.push((id, node));
+                children.push(id);
+                for (i, c) in toggles.iter().enumerate() {
+                    children.push(t.control(label, i, c));
+                }
+                let mut node = Node::new(Role::Dialog);
+                node.set_label(label.as_str());
+                node.set_modal();
+                node.set_children(children);
+                t.add(OVERLAY, node, None, false);
+            }
             Overlay::Alert {
                 title,
                 description,
@@ -367,7 +402,10 @@ pub fn build(s: &Snapshot) -> Built {
                 for (i, c) in buttons.iter().enumerate() {
                     ids.push(t.control("alert", i, c));
                 }
-                if let Some(last) = ids.last() {
+                // the button the keyboard stands on, else the last (confirm)
+                if let Some(at) = buttons.iter().position(|c| c.selected) {
+                    focus = ids[at];
+                } else if let Some(last) = ids.last() {
                     focus = *last;
                 }
                 let mut node = Node::new(Role::AlertDialog);

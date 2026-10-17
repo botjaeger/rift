@@ -2,8 +2,6 @@ use rift_core::{Color, Theme};
 use rift_renderer::glyphon::{Attrs, Buffer, Family, Metrics, Shaping, TextBounds, Weight};
 use rift_renderer::{FONT_SANS, Layer, TextEngine, mono_family};
 
-use crate::views::tabbar::TAB_BAR_H;
-
 /// ⌃⇧F search overlay state.
 #[derive(Default)]
 pub struct SearchState {
@@ -21,11 +19,14 @@ pub struct SearchState {
     pub regex: bool,
     /// Why the regex does not compile (shown instead of the counter).
     pub error: Option<String>,
+    /// ⌘A selected the whole query: typing replaces it, Backspace clears it.
+    pub all_selected: bool,
 }
 
 impl SearchState {
     pub fn close(&mut self) {
         self.open = false;
+        self.all_selected = false;
         self.query.clear();
         self.matches.clear();
         self.total = 0;
@@ -108,7 +109,8 @@ pub fn query_scroll(text_w: f32, avail: f32) -> f32 {
 /// Floating search bar, top-right (spec: search overlay, match colors §1).
 /// Also hosts the block-filter input (`label` = "filter", accent ring).
 /// `toggles` = (case-sensitive, regex) for find mode; returns the two
-/// toggle chip rects (empty in filter mode).
+/// toggle chip rects (empty in filter mode). `selected`: the whole query
+/// is selected (⌘A).
 #[allow(clippy::too_many_arguments)]
 pub fn render(
     layer: &mut Layer,
@@ -118,13 +120,16 @@ pub fn render(
     counter: &str,
     label: Option<&str>,
     w: f32,
+    // where the panes start (the tab strip's height, 0 while `tab_bar` hides it)
+    top: f32,
     blink_on: bool,
     toggles: Option<(bool, bool)>,
+    selected: bool,
 ) -> Vec<[f32; 4]> {
     let bar_w = if toggles.is_some() { 400.0 } else { 340.0 };
     let bar_h = 44.0;
     let x = w - bar_w - 16.0;
-    let y = TAB_BAR_H + 10.0;
+    let y = top + 10.0;
 
     layer.shadow(
         [x, y + 6.0],
@@ -238,6 +243,13 @@ pub fn render(
     let avail = (q_right - qx).max(0.0);
     let qw = engine.measure(query, 13.5, mono_family(), Weight::NORMAL);
     let scroll = query_scroll(qw + 3.0, avail);
+    if selected && !query.is_empty() {
+        let left = (qx - scroll).max(qx);
+        let width = (qx - scroll + qw).min(q_right) - left;
+        if width > 0.0 {
+            layer.rect([left, y + 12.0], [width, 18.0], theme.selection, 2.0);
+        }
+    }
     if !query.is_empty() {
         let mut buf = Buffer::new(&mut engine.font_system, Metrics::new(13.5, 18.0));
         buf.set_text(

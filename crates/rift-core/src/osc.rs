@@ -320,7 +320,7 @@ pub(crate) fn base64_decode(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-fn percent_decode(s: &str) -> String {
+pub(crate) fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;

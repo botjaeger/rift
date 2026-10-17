@@ -199,6 +199,194 @@ pub enum NewTabPlacement {
     AfterCurrent,
 }
 
+/// Space between blocks (Warp "Compact mode", inverted: Rift's blocks have
+/// always sat flush): `normal` puts a blank row above every block header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockSpacing {
+    #[default]
+    Compact,
+    Normal,
+}
+
+/// Which end of a horizontal tab its × sits at (Warp
+/// `tab_close_button_position`; left is the macOS style).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TabCloseSide {
+    #[default]
+    Right,
+    Left,
+}
+
+/// When the tab strip shows (Warp "Show the tab bar"): always, only while
+/// the window is not full screen, or only while the pointer is at the top
+/// edge. A hidden strip gives its height to the panes and slides over them
+/// when revealed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TabBarVisibility {
+    #[default]
+    Always,
+    HideFullscreen,
+    OnHover,
+}
+
+/// A button of the tab strip's toolbar (Warp's configurable toolbar):
+/// `toolbar_left` and `toolbar_right` list them in order; an item in
+/// neither is hidden.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolbarItem {
+    /// The file explorer toggle.
+    Explorer,
+    /// Code review (shows the working tree's `+added −removed`).
+    Review,
+    /// The notifications inbox.
+    Notifications,
+    /// The command palette.
+    Palette,
+    /// Settings.
+    Settings,
+}
+
+impl ToolbarItem {
+    pub const ALL: [ToolbarItem; 5] = [
+        ToolbarItem::Explorer,
+        ToolbarItem::Review,
+        ToolbarItem::Notifications,
+        ToolbarItem::Palette,
+        ToolbarItem::Settings,
+    ];
+
+    /// Its Settings control id (`toolbar.<name>`).
+    pub fn setting_id(self) -> &'static str {
+        match self {
+            ToolbarItem::Explorer => "toolbar.explorer",
+            ToolbarItem::Review => "toolbar.review",
+            ToolbarItem::Notifications => "toolbar.notifications",
+            ToolbarItem::Palette => "toolbar.palette",
+            ToolbarItem::Settings => "toolbar.settings",
+        }
+    }
+
+    /// From its config name (`explorer`, …).
+    pub fn from_name(name: &str) -> Option<ToolbarItem> {
+        Self::ALL.into_iter().find(|i| {
+            toml::Value::try_from(i)
+                .ok()
+                .is_some_and(|v| v.as_str() == Some(name.trim()))
+        })
+    }
+
+    pub fn from_setting_id(id: &str) -> Option<ToolbarItem> {
+        Self::ALL.into_iter().find(|i| i.setting_id() == id)
+    }
+
+    /// Its position stepper's Settings id (`toolbar_order.<name>`).
+    pub fn order_id(self) -> &'static str {
+        match self {
+            ToolbarItem::Explorer => "toolbar_order.explorer",
+            ToolbarItem::Review => "toolbar_order.review",
+            ToolbarItem::Notifications => "toolbar_order.notifications",
+            ToolbarItem::Palette => "toolbar_order.palette",
+            ToolbarItem::Settings => "toolbar_order.settings",
+        }
+    }
+
+    pub fn from_order_id(id: &str) -> Option<ToolbarItem> {
+        Self::ALL.into_iter().find(|i| i.order_id() == id)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ToolbarItem::Explorer => "File explorer",
+            ToolbarItem::Review => "Code review",
+            ToolbarItem::Notifications => "Notifications",
+            ToolbarItem::Palette => "Command palette",
+            ToolbarItem::Settings => "Settings",
+        }
+    }
+}
+
+/// The app's Dock and window icon (Warp `app_icon`): the "Prompt" design in
+/// one of its colourways (`packaging/gen-icon.py` `VARIANTS`, same order).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AppIcon {
+    #[default]
+    Default,
+    Light,
+    Mono,
+    Ocean,
+    Ember,
+    Forest,
+    Neon,
+}
+
+impl AppIcon {
+    pub const ALL: [AppIcon; 7] = [
+        AppIcon::Default,
+        AppIcon::Light,
+        AppIcon::Mono,
+        AppIcon::Ocean,
+        AppIcon::Ember,
+        AppIcon::Forest,
+        AppIcon::Neon,
+    ];
+
+    /// Its config value and image name (`assets/icon/variants/<name>.png`).
+    pub fn name(self) -> &'static str {
+        match self {
+            AppIcon::Default => "default",
+            AppIcon::Light => "light",
+            AppIcon::Mono => "mono",
+            AppIcon::Ocean => "ocean",
+            AppIcon::Ember => "ember",
+            AppIcon::Forest => "forest",
+            AppIcon::Neon => "neon",
+        }
+    }
+
+    /// Its tile, chevron and cursor colours (`#rrggbb`), as
+    /// `packaging/gen-icon.py` draws them: Settings' picker previews it.
+    pub fn colors(self) -> [&'static str; 3] {
+        match self {
+            AppIcon::Default => ["#232326", "#569cd6", "#d4d4d4"],
+            AppIcon::Light => ["#f5f5f7", "#1f6fcc", "#2b2b2e"],
+            AppIcon::Mono => ["#161618", "#f0f0f0", "#f0f0f0"],
+            AppIcon::Ocean => ["#0f2a44", "#5ec4ff", "#e6f4ff"],
+            AppIcon::Ember => ["#2b1610", "#ff8a3d", "#ffe2cc"],
+            AppIcon::Forest => ["#12261b", "#4fd18b", "#dff7e9"],
+            AppIcon::Neon => ["#1a0f2e", "#ff4fd8", "#4ff0ff"],
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<AppIcon> {
+        Self::ALL.into_iter().find(|i| i.name() == name)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            AppIcon::Default => "Default",
+            AppIcon::Light => "Light",
+            AppIcon::Mono => "Mono",
+            AppIcon::Ocean => "Ocean",
+            AppIcon::Ember => "Ember",
+            AppIcon::Forest => "Forest",
+            AppIcon::Neon => "Neon",
+        }
+    }
+}
+
+/// Which side of the toolbar an item is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolbarSide {
+    Left,
+    Right,
+    Hidden,
+}
+
 /// What renders above the editor: Rift's context chips, or the shell's
 /// own prompt (PS1 / starship / p10k) left visible (Warp "Use my shell's
 /// prompt").
@@ -230,6 +418,31 @@ fn short_f32<S: serde::Serializer>(v: &f32, s: S) -> Result<S::Ok, S::Error> {
 
 /// A u8 setting read from any integer, saturating at 0 / 255 (the getter
 /// clamps further): an out-of-range number must not reject the whole file.
+/// Toolbar items by name; an unknown one (a typo, or an item of a newer
+/// Rift) is skipped with a warning instead of failing the whole file.
+fn toolbar_items<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<ToolbarItem>, D::Error> {
+    let names = Vec::<String>::deserialize(d)?;
+    Ok(names
+        .into_iter()
+        .filter_map(|n| {
+            let item = ToolbarItem::from_name(&n);
+            if item.is_none() {
+                log::warn!("toolbar item {n:?} is not one Rift knows (skipped)");
+            }
+            item
+        })
+        .collect())
+}
+
+/// `app_icon` by name; an unknown one is the default, with a warning.
+fn app_icon<'de, D: serde::Deserializer<'de>>(d: D) -> Result<AppIcon, D::Error> {
+    let name = String::deserialize(d)?;
+    Ok(AppIcon::from_name(&name).unwrap_or_else(|| {
+        log::warn!("app_icon {name:?} is not one Rift has (default used)");
+        AppIcon::Default
+    }))
+}
+
 fn saturating_u8<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u8, D::Error> {
     let v = i64::deserialize(d)?;
     Ok(v.clamp(0, 255) as u8)
@@ -309,14 +522,46 @@ pub struct Config {
     pub tab_layout: TabLayout,
     /// When a tab in the top strip shows its close button.
     pub tab_close_button: TabCloseButton,
+    /// Which end of a tab the close button is at.
+    pub tab_close_side: TabCloseSide,
+    /// When the tab strip shows.
+    pub tab_bar: TabBarVisibility,
     /// Where ⌘T and the + button put the new tab.
     pub new_tab_placement: NewTabPlacement,
+    /// The Dock icon (macOS, also while Rift is not running) and the window
+    /// icon (Linux).
+    #[serde(deserialize_with = "app_icon")]
+    pub app_icon: AppIcon,
+    /// Toolbar buttons left of the tabs, in order. Getter: `toolbar()`.
+    #[serde(deserialize_with = "toolbar_items")]
+    pub toolbar_left: Vec<ToolbarItem>,
+    /// Toolbar buttons at the strip's right end, in order.
+    #[serde(deserialize_with = "toolbar_items")]
+    pub toolbar_right: Vec<ToolbarItem>,
     /// Show the tabs (the strip's tab, the vertical rail) while only one
     /// tab is open; off leaves the bar's buttons and + alone.
     pub tab_bar_with_one_tab: bool,
     /// Pin the header of a block whose start scrolled off the top of the
     /// active pane (Warp "Show sticky command header").
     pub sticky_command_header: bool,
+    /// A blank row above each block header (`normal`) or none.
+    pub block_spacing: BlockSpacing,
+    /// Offer to load Rift's hooks in a subshell Rift's own hooks do not
+    /// reach (`docker exec … bash`, `poetry shell`; Warp "Warpify
+    /// subshells").
+    pub subshell_offer: bool,
+    /// More commands (regular expressions) that start such a subshell
+    /// (Warp `added_subshell_commands`).
+    pub subshell_commands: Vec<String>,
+    /// Commands never to offer it for ("Don't ask again"; Warp
+    /// `subshell_commands_denylist`).
+    pub subshell_denylist: Vec<String>,
+    /// A rule between blocks (Warp "Show block dividers").
+    pub block_dividers: bool,
+    /// A button that scrolls to the end of a block running past the
+    /// bottom of the pane, while the pointer is over it (Warp "Show the
+    /// jump to bottom of block button").
+    pub jump_to_bottom_button: bool,
     /// Wash the unfocused split panes so the focused one stands out (Warp
     /// "Dim inactive panes").
     pub dim_inactive_panes: bool,
@@ -379,6 +624,12 @@ pub struct Config {
     pub hotkey_window_height: u8,
     /// The drop-down window hides when it loses keyboard focus.
     pub hotkey_window_hide_on_blur: bool,
+    /// macOS: Rift opens when you log in (a login item).
+    pub launch_at_login: bool,
+    /// macOS: a Rift icon in the menu bar, also while only the background
+    /// helpers run (the phone gateway after the window quit); its menu
+    /// opens Rift or quits it entirely, helpers included.
+    pub menu_bar_icon: bool,
     /// macOS: the Option key sends Meta (ESC prefix, for emacs/readline
     /// word motion) instead of composing characters like `∫`. Linux Alt is
     /// always Meta.
@@ -456,9 +707,20 @@ impl Default for Config {
             blocks_start: BlocksStart::Bottom,
             tab_layout: TabLayout::Horizontal,
             tab_close_button: TabCloseButton::Hover,
+            tab_close_side: TabCloseSide::Right,
+            tab_bar: TabBarVisibility::Always,
             new_tab_placement: NewTabPlacement::End,
+            app_icon: AppIcon::Default,
+            toolbar_left: vec![ToolbarItem::Explorer],
+            toolbar_right: vec![ToolbarItem::Notifications, ToolbarItem::Review],
             tab_bar_with_one_tab: true,
             sticky_command_header: true,
+            block_spacing: BlockSpacing::Compact,
+            subshell_offer: true,
+            subshell_commands: Vec::new(),
+            subshell_denylist: Vec::new(),
+            block_dividers: false,
+            jump_to_bottom_button: true,
             dim_inactive_panes: true,
             inactive_pane_dim: 10,
             focus_follows_mouse: false,
@@ -484,6 +746,8 @@ impl Default for Config {
             hotkey_window: false,
             hotkey_window_height: 40,
             hotkey_window_hide_on_blur: true,
+            launch_at_login: false,
+            menu_bar_icon: true,
             option_as_meta: false,
             right_option_as_meta: None,
             middle_click_paste: true,
@@ -905,6 +1169,76 @@ impl Config {
             0.0
         }
     }
+
+    /// The toolbar's (left, right) buttons: an item listed twice shows
+    /// once, where it is listed first (left before right).
+    pub fn toolbar(&self) -> (Vec<ToolbarItem>, Vec<ToolbarItem>) {
+        let mut seen = std::collections::HashSet::new();
+        let mut side = |items: &[ToolbarItem]| -> Vec<ToolbarItem> {
+            items.iter().copied().filter(|i| seen.insert(*i)).collect()
+        };
+        let left = side(&self.toolbar_left);
+        (left, side(&self.toolbar_right))
+    }
+
+    /// The side `item` shows on.
+    pub fn toolbar_side(&self, item: ToolbarItem) -> ToolbarSide {
+        let (left, right) = self.toolbar();
+        if left.contains(&item) {
+            ToolbarSide::Left
+        } else if right.contains(&item) {
+            ToolbarSide::Right
+        } else {
+            ToolbarSide::Hidden
+        }
+    }
+
+    /// `item`'s place on its side (1 = leftmost), `None` while hidden.
+    pub fn toolbar_position(&self, item: ToolbarItem) -> Option<usize> {
+        let (left, right) = self.toolbar();
+        left.iter()
+            .chain(right.iter())
+            .position(|i| *i == item)
+            .map(|p| {
+                if p < left.len() {
+                    p + 1
+                } else {
+                    p - left.len() + 1
+                }
+            })
+    }
+
+    /// Move `item` `by` places along its side (negative: left), within it.
+    pub fn move_toolbar_item(&mut self, item: ToolbarItem, by: i64) {
+        let (mut left, mut right) = self.toolbar();
+        for side in [&mut left, &mut right] {
+            if let Some(at) = side.iter().position(|i| *i == item) {
+                let to = (at as i64 + by).clamp(0, side.len() as i64 - 1) as usize;
+                let it = side.remove(at);
+                side.insert(to, it);
+            }
+        }
+        self.toolbar_left = left;
+        self.toolbar_right = right;
+    }
+
+    /// Move `item` to the end of `side` (its order on the other side is
+    /// kept for the rest).
+    pub fn set_toolbar_side(&mut self, item: ToolbarItem, side: ToolbarSide) {
+        if self.toolbar_side(item) == side {
+            return;
+        }
+        let (mut left, mut right) = self.toolbar();
+        left.retain(|i| *i != item);
+        right.retain(|i| *i != item);
+        match side {
+            ToolbarSide::Left => left.push(item),
+            ToolbarSide::Right => right.push(item),
+            ToolbarSide::Hidden => {}
+        }
+        self.toolbar_left = left;
+        self.toolbar_right = right;
+    }
 }
 
 #[cfg(test)]
@@ -1079,6 +1413,58 @@ mod tests {
     }
 
     #[test]
+    fn app_icon_defaults_and_parses() {
+        let c: Config = toml::from_str("font_size = 14").unwrap();
+        assert_eq!(c.app_icon, AppIcon::Default);
+        for icon in AppIcon::ALL {
+            let c: Config = toml::from_str(&format!("app_icon = \"{}\"", icon.name())).unwrap();
+            assert_eq!(c.app_icon, icon);
+        }
+        // an icon this Rift does not have is the default, not a dead config
+        let other: Config = toml::from_str("app_icon = \"warp\"\nfont_size = 15").unwrap();
+        assert_eq!((other.app_icon, other.font_size), (AppIcon::Default, 15.0));
+    }
+
+    #[test]
+    fn toolbar_keeps_the_old_layout_and_moves_items() {
+        use ToolbarItem::*;
+        let mut c: Config = toml::from_str("font_size = 14").unwrap();
+        assert_eq!(c.toolbar(), (vec![Explorer], vec![Notifications, Review]));
+        assert_eq!(c.toolbar_side(Palette), ToolbarSide::Hidden);
+        c.set_toolbar_side(Palette, ToolbarSide::Left);
+        c.set_toolbar_side(Review, ToolbarSide::Left);
+        c.set_toolbar_side(Explorer, ToolbarSide::Hidden);
+        assert_eq!(c.toolbar(), (vec![Palette, Review], vec![Notifications]));
+        // reordered within a side, clamped at its ends
+        assert_eq!(c.toolbar_position(Review), Some(2));
+        c.move_toolbar_item(Review, -1);
+        assert_eq!(c.toolbar(), (vec![Review, Palette], vec![Notifications]));
+        c.move_toolbar_item(Review, -1);
+        c.move_toolbar_item(Notifications, 3);
+        assert_eq!(c.toolbar(), (vec![Review, Palette], vec![Notifications]));
+        c.move_toolbar_item(Review, 1);
+        assert_eq!(c.toolbar_position(Explorer), None);
+        // a saved config reads back the same
+        let back: Config = toml::from_str(&toml::to_string(&c).unwrap()).unwrap();
+        assert_eq!(back.toolbar(), c.toolbar());
+        // listed twice: shown once, on the first side
+        let twice: Config = toml::from_str(
+            "toolbar_left = [\"review\"]\ntoolbar_right = [\"review\", \"settings\", \"settings\"]",
+        )
+        .unwrap();
+        assert_eq!(twice.toolbar(), (vec![Review], vec![Settings]));
+        // an unknown item is skipped, the rest of the file still applies
+        let typo: Config =
+            toml::from_str("toolbar_left = [\"weather\", \"palette\"]\nfont_size = 15").unwrap();
+        assert_eq!(
+            (typo.toolbar_left.clone(), typo.font_size),
+            (vec![Palette], 15.0)
+        );
+        let none: Config = toml::from_str("toolbar_left = []\ntoolbar_right = []").unwrap();
+        assert_eq!(none.toolbar(), (vec![], vec![]));
+    }
+
+    #[test]
     fn block_and_tab_settings_default_to_the_old_behavior() {
         // an existing config without the keys keeps what Rift did before
         let c: Config = toml::from_str("font_size = 14").unwrap();
@@ -1086,6 +1472,14 @@ mod tests {
         assert_eq!(c.new_tab_placement, NewTabPlacement::End);
         assert!(c.tab_bar_with_one_tab);
         assert!(c.sticky_command_header);
+        assert_eq!(c.block_spacing, BlockSpacing::Compact);
+        assert!(
+            c.subshell_offer && c.subshell_commands.is_empty() && c.subshell_denylist.is_empty()
+        );
+        assert!(!c.block_dividers);
+        assert!(c.jump_to_bottom_button);
+        assert_eq!(c.tab_close_side, TabCloseSide::Right);
+        assert_eq!(c.tab_bar, TabBarVisibility::Always);
         assert!(c.dim_inactive_panes);
         assert_eq!(c.inactive_pane_dim, 10);
         assert_eq!(c.inactive_pane_dim(), 0.10);
@@ -1109,6 +1503,23 @@ mod tests {
         assert!(!c.sticky_command_header);
         assert_eq!(c.inactive_pane_dim(), 0.25);
         assert!(c.focus_follows_mouse);
+        let more: Config = toml::from_str(
+            "block_spacing = \"normal\"\n\
+             block_dividers = true\n\
+             jump_to_bottom_button = false\n\
+             tab_close_side = \"left\"\n\
+             tab_bar = \"on_hover\"",
+        )
+        .unwrap();
+        assert_eq!(more.block_spacing, BlockSpacing::Normal);
+        assert!(more.block_dividers);
+        assert!(!more.jump_to_bottom_button);
+        assert_eq!(more.tab_close_side, TabCloseSide::Left);
+        assert_eq!(more.tab_bar, TabBarVisibility::OnHover);
+        let fs: Config = toml::from_str("tab_bar = \"hide_fullscreen\"").unwrap();
+        assert_eq!(fs.tab_bar, TabBarVisibility::HideFullscreen);
+        assert!(toml::from_str::<Config>("tab_bar = \"never\"").is_err());
+        assert!(toml::from_str::<Config>("block_spacing = \"wide\"").is_err());
         let never: Config = toml::from_str("tab_close_button = \"never\"").unwrap();
         assert_eq!(never.tab_close_button, TabCloseButton::Never);
         assert!(toml::from_str::<Config>("tab_close_button = \"left\"").is_err());

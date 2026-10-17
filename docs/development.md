@@ -171,6 +171,17 @@ API's `focus` raise, and registers no global hotkey. New windows (⌘N,
 no Dock icon and launching does not activate it.
 `scripts/gates.sh ui` runs headless.
 
+**Accessibility and failure paths.** `a11y <action> <label>` sends an
+assistive technology's action request (`click`, `focus`, `blur`, `expand`,
+`collapse`, `scroll_into_view`, `show_context_menu`) to the node with that
+label, through the handler VoiceOver's and Orca's requests reach; only
+`click` presses. Headless, `fault clipboard` makes the clipboard backend
+unavailable and `fault opener` the OS opener missing (`fault none` clears
+both), so their error toasts can be asserted.
+
+**Links.** `link rift://…` opens a `rift://` link through the same handler
+the macOS Apple Event and a second process's control request reach.
+
 **Several windows.** Steps act on the focused window, as typing does:
 `new_window` (or `key cmd+n`) opens one and focuses it, `window <n>` focuses
 window n (0 = the first, in opening order), `close_window` closes the

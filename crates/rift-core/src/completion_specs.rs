@@ -1275,6 +1275,12 @@ pub fn resolve(cmd: &CommandSpec, args: &[String]) -> Resolved {
             continue;
         }
         if let Some(s) = subs.iter().find(|s| s.name == *w) {
+            // the command's own options go before its subcommand (`git -p
+            // log`; after it, `-p` is log's `--patch`); a nested
+            // subcommand keeps its parent's
+            if std::ptr::eq(subs, cmd.subcommands) {
+                options.clear();
+            }
             options.extend_from_slice(s.options);
             subs = s.subcommands;
             arg_kind = s.args;
@@ -1929,6 +1935,15 @@ mod tests {
         let r = resolve(git, &words(&["checkout"]));
         assert!(!r.offer_subcommands, "checkout has no subcommands");
         assert_eq!(r.args, ArgKind::GitRef);
+        // git's own options belong before the subcommand
+        assert!(r.options.iter().any(|o| o.long == "--detach"));
+        assert!(!r.options.iter().any(|o| o.long == "--paginate"));
+        assert!(
+            resolve(git, &[])
+                .options
+                .iter()
+                .any(|o| o.long == "--paginate")
+        );
         // commit-level option is merged in
         let r = resolve(git, &words(&["commit"]));
         assert!(r.options.iter().any(|o| o.long == "--message"));

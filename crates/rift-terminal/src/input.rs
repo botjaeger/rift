@@ -76,6 +76,13 @@ pub enum AppAction {
     FocusDown,
     TogglePalette,
     OpenSettings,
+    /// The command inspector's card at the cursor (⇧⌘I).
+    InspectCommand,
+    /// Multi-cursor: a caret on the line above / below, a caret at the
+    /// selection's next occurrence (Ctrl-⇧-↑ / ↓, Ctrl-G).
+    AddCursorAbove,
+    AddCursorBelow,
+    AddNextOccurrence,
     Copy,
     Paste,
     Search,
@@ -111,6 +118,8 @@ pub enum AppAction {
     ToggleExplorer,
     /// Code review panel (right).
     ToggleReview,
+    /// Open the code review panel if needed and give it the keyboard.
+    FocusReview,
     MaximizePane,
     ResizePaneLeft,
     ResizePaneRight,
@@ -201,6 +210,11 @@ impl AppAction {
                 | AppAction::BookmarkClosestPrev
                 | AppAction::BookmarkClosestNext
                 | AppAction::FilterBlock
+                // ⌃G and ⌃⇧↑/↓: emacs, nano, less and fzf read them
+                | AppAction::AddCursorAbove
+                | AppAction::AddCursorBelow
+                | AppAction::AddNextOccurrence
+                | AppAction::InspectCommand
         )
     }
 }
@@ -268,6 +282,10 @@ pub fn action_from_name(name: &str) -> Option<AppAction> {
         "scroll_up" => AppAction::ScrollUp,
         "scroll_down" => AppAction::ScrollDown,
         "open_settings" => AppAction::OpenSettings,
+        "inspect_command" => AppAction::InspectCommand,
+        "add_cursor_above" => AppAction::AddCursorAbove,
+        "add_cursor_below" => AppAction::AddCursorBelow,
+        "add_next_occurrence" => AppAction::AddNextOccurrence,
         "palette" => AppAction::TogglePalette,
         "copy" => AppAction::Copy,
         "paste" => AppAction::Paste,
@@ -296,6 +314,7 @@ pub fn action_from_name(name: &str) -> Option<AppAction> {
         "whats_new" => AppAction::WhatsNew,
         "toggle_explorer" => AppAction::ToggleExplorer,
         "toggle_review" => AppAction::ToggleReview,
+        "focus_review" => AppAction::FocusReview,
         "maximize_pane" => AppAction::MaximizePane,
         "resize_pane_left" => AppAction::ResizePaneLeft,
         "resize_pane_right" => AppAction::ResizePaneRight,
@@ -603,17 +622,26 @@ fn control_byte(c: char) -> Option<u8> {
 /// Translate a key press into the byte sequence written to the PTY.
 /// Returns None when the key is not terminal input (handled elsewhere).
 pub fn key_to_bytes(event: &KeyPress, mods: ModifiersState, enc: KeyEncoding) -> Option<Vec<u8>> {
-    // ⌘⌫ deletes to the start of the line, as in Warp and iTerm2: the
-    // program gets ctrl+u, the line editors' kill-to-start key (readline,
-    // zle, Claude Code), encoded for its keyboard mode
-    if mods == ModifiersState::SUPER && event.logical_key == Key::Named(NamedKey::Backspace) {
-        let u = || Key::Character("u".into());
-        let ctrl_u = KeyPress {
+    // ⌘⌫ deletes to the start of the line, ⌘← / ⌘→ go to its start / end,
+    // as in Warp, iTerm2 and Ghostty: the program gets ctrl+u / ctrl+a /
+    // ctrl+e, the line editors' keys for them (readline, zle, Claude Code,
+    // Codex), encoded for its keyboard mode
+    let line_key = match &event.logical_key {
+        Key::Named(NamedKey::Backspace) => Some("u"),
+        Key::Named(NamedKey::ArrowLeft) => Some("a"),
+        Key::Named(NamedKey::ArrowRight) => Some("e"),
+        _ => None,
+    };
+    if mods == ModifiersState::SUPER
+        && let Some(letter) = line_key
+    {
+        let key = || Key::Character(letter.into());
+        let ctrl_key = KeyPress {
             repeat: event.repeat,
             released: event.released,
-            ..KeyPress::new(u(), None, Some(u()))
+            ..KeyPress::new(key(), None, Some(key()))
         };
-        return key_to_bytes(&ctrl_u, ModifiersState::CONTROL, enc);
+        return key_to_bytes(&ctrl_key, ModifiersState::CONTROL, enc);
     }
     // other cmd chords are app territory — never leak them to the PTY
     if mods.super_key() {
@@ -1271,6 +1299,39 @@ mod tests {
         assert_eq!(key_to_bytes(&bs, shifted, PLAIN), None);
         assert_eq!(
             key_to_bytes(&ch("k", Some("k"), "k"), ModifiersState::SUPER, PLAIN),
+            None
+        );
+    }
+
+    #[test]
+    fn cmd_arrows_go_to_line_start_and_end() {
+        let (left, right) = (named(NamedKey::ArrowLeft), named(NamedKey::ArrowRight));
+        assert_eq!(
+            key_to_bytes(&left, ModifiersState::SUPER, PLAIN),
+            Some(vec![0x01])
+        );
+        assert_eq!(
+            key_to_bytes(&right, ModifiersState::SUPER, PLAIN),
+            Some(vec![0x05])
+        );
+        // kitty keyboard mode (Codex, Claude Code): ctrl+a / ctrl+e as CSI u
+        let kitty = KeyEncoding {
+            kitty_flags: 1,
+            ..PLAIN
+        };
+        assert_eq!(
+            key_to_bytes(&left, ModifiersState::SUPER, kitty),
+            Some(b"\x1b[97;5u".to_vec())
+        );
+        assert_eq!(
+            key_to_bytes(&right, ModifiersState::SUPER, kitty),
+            Some(b"\x1b[101;5u".to_vec())
+        );
+        // ⇧⌘← (select to line start) and ⌘↑ stay with the app
+        let shifted = ModifiersState::SUPER | ModifiersState::SHIFT;
+        assert_eq!(key_to_bytes(&left, shifted, PLAIN), None);
+        assert_eq!(
+            key_to_bytes(&named(NamedKey::ArrowUp), ModifiersState::SUPER, PLAIN),
             None
         );
     }

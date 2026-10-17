@@ -1,0 +1,150 @@
+//! `rift://` links (`rift_core::uri`): from macOS (an Apple Event, see
+//! `crate::links`), a second Linux process (the control socket) or the
+//! script driver. They open tabs, windows, saved layouts and Settings. A link
+//! runs no command of its own; a saved layout whose panes run commands asks
+//! first (any web page can open a link).
+
+use super::*;
+use rift_core::uri::UriAction;
+
+/// At most this many links in [`LINK_WINDOW`]; more are dropped (a page
+/// that opens links in a loop cannot flood the screen with tabs).
+const LINK_BURST: usize = 10;
+const LINK_WINDOW: Duration = Duration::from_secs(3);
+
+impl App {
+    /// Open a `rift://` link in the last focused ordinary window (one is
+    /// opened when only the drop-down window exists); a link Rift refuses
+    /// says why in a toast.
+    pub(super) fn open_link(&mut self, link: &str, event_loop: &ActiveEventLoop) {
+        let now = Instant::now();
+        self.link_times
+            .retain(|t| now.duration_since(*t) < LINK_WINDOW);
+        if self.link_times.len() >= LINK_BURST {
+            log::warn!("link dropped: too many links at once");
+            return;
+        }
+        self.link_times.push(now);
+        self.enter_focused_window();
+        // never into the drop-down window: another ordinary one, else a new one
+        let mut fresh_window = false;
+        if self.win.dropdown.is_some() {
+            self.enter_where(|w| w.dropdown.is_none() && w.window.is_some());
+            if self.win.dropdown.is_some() {
+                self.open_window(event_loop, None);
+                fresh_window = true;
+            }
+        }
+        let action = match rift_core::uri::parse(link) {
+            Ok(a) => a,
+            Err(e) => {
+                log::warn!("link refused: {e}");
+                if fresh_window {
+                    self.spawn_tab_at(self.start_dir());
+                }
+                self.toast_error(format!("Link refused — {}", shown(&e)));
+                self.redraw_and_raise();
+                return;
+            }
+        };
+        log::info!("link: {action:?}");
+        match action {
+            UriAction::NewTab(cwd) => {
+                let cwd = cwd.or_else(|| self.start_dir());
+                self.spawn_tab_at(cwd);
+            }
+            // a window just opened for the link is that window
+            UriAction::NewWindow(cwd) if fresh_window => {
+                self.spawn_tab_at(cwd.or_else(|| self.start_dir()))
+            }
+            UriAction::NewWindow(cwd) => self.open_new_window_at(event_loop, cwd),
+            UriAction::Launch { name, new_window } => {
+                self.launch_configs = rift_core::launch::load_all();
+                let found = self
+                    .launch_configs
+                    .iter()
+                    .find(|c| c.name.eq_ignore_ascii_case(&name))
+                    .cloned();
+                let Some(cfg) = found else {
+                    if fresh_window {
+                        self.spawn_tab_at(self.start_dir());
+                    }
+                    self.toast_error(format!("No launch configuration named {}", shown(&name)));
+                    self.redraw_and_raise();
+                    return;
+                };
+                let commands: Vec<String> =
+                    cfg.tabs.iter().flat_map(|t| t.layout.commands()).collect();
+                if commands.is_empty() {
+                    self.launch_from_link(&cfg, new_window && !fresh_window, event_loop);
+                } else {
+                    if fresh_window {
+                        self.spawn_tab_at(self.start_dir());
+                    }
+                    self.win.confirm = Some(ConfirmClose {
+                        opened: Instant::now(),
+                        focus_cancel: true,
+                        action: ConfirmAction::LaunchLink {
+                            config: Box::new(cfg),
+                            new_window: new_window && !fresh_window,
+                        },
+                        commands,
+                    });
+                }
+            }
+            UriAction::Settings(query) => {
+                if fresh_window {
+                    self.spawn_tab_at(self.start_dir());
+                }
+                self.win.settings.open_page(self.win.settings.page);
+                if let Some(q) = query {
+                    self.win.settings.query =
+                        q.chars().filter(|c| !c.is_control()).take(200).collect();
+                }
+            }
+        }
+        self.save_session();
+        self.redraw_and_raise();
+    }
+
+    /// Open a launch configuration a link named (here, or in a window of
+    /// its own).
+    pub(super) fn launch_from_link(
+        &mut self,
+        cfg: &rift_core::launch::LaunchConfig,
+        new_window: bool,
+        event_loop: &ActiveEventLoop,
+    ) {
+        if new_window {
+            self.open_window(event_loop, None);
+        }
+        self.apply_launch_config(cfg);
+        self.save_session();
+        self.redraw_and_raise();
+    }
+
+    /// Repaint the served window and bring it to the front (a link is
+    /// opened from another app); a scripted run is never raised.
+    fn redraw_and_raise(&mut self) {
+        let Some(w) = self.win.window.clone() else {
+            return;
+        };
+        if !self.headless {
+            w.set_minimized(false);
+            w.focus_window();
+            #[cfg(target_os = "macos")]
+            crate::status_item::activate();
+        }
+        w.request_redraw();
+    }
+}
+
+/// Text from a link as a toast shows it: no control characters, at most
+/// 120 characters (a page writes it).
+fn shown(text: &str) -> String {
+    let clean: String = text.chars().filter(|c| !c.is_control()).collect();
+    match clean.char_indices().nth(120) {
+        Some((i, _)) => format!("{}…", &clean[..i]),
+        None => clean,
+    }
+}

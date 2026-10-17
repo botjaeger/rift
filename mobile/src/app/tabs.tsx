@@ -1,5 +1,5 @@
 import { useLocalSearchParams, useRouter } from "expo-router";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AccessibilityInfo, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import {
@@ -18,7 +18,7 @@ import {
   type TabRow,
 } from "@/now";
 import { canClose } from "@/fleet";
-import { fleet, useApp } from "@/runtime";
+import { fleet, useApp, useLock } from "@/runtime";
 import { Tile } from "@/ui/Avatar";
 import { Icon } from "@/ui/Icon";
 import { canNewTab, openNewTab } from "@/ui/newTab";
@@ -52,6 +52,13 @@ export default function TabsSheet() {
   const insets = useSafeAreaInsets();
   const s = useApp();
   const { key, pane } = useLocalSearchParams<{ key: string; pane?: string }>();
+  const lock = useLock();
+
+  // Presented natively above the app's lock screen: when the app locks, close it.
+  useEffect(() => {
+    if (lock.locked) router.back();
+  }, [lock.locked, router]);
+  const hidden = lock.covered || lock.locked;
   const host = s.hosts.find((h) => h.record.key === key);
   const [filter, setFilter] = useState<SheetFilter>("all");
   const [error, setError] = useState<string | null>(null);
@@ -99,7 +106,12 @@ export default function TabsSheet() {
   return (
     // The sheet's own ScrollView, as its root: iOS lays out a form sheet's first scroll view as the
     // sheet's content, so a list nested under the header was drawn over it.
-    <ScrollView style={styles.fill} contentContainerStyle={[styles.sheet, { paddingBottom: Math.max(insets.bottom, 30) }]}>
+    <ScrollView
+      style={[styles.fill, hidden && styles.hidden]}
+      contentContainerStyle={[styles.sheet, { paddingBottom: Math.max(insets.bottom, 30) }]}
+      accessibilityElementsHidden={hidden}
+      importantForAccessibility={hidden ? "no-hide-descendants" : "auto"}
+    >
       <View style={styles.header}>
         <View style={styles.titles}>
           <Text style={styles.title} accessibilityRole="header">
@@ -224,6 +236,7 @@ const styles = StyleSheet.create({
   pressed: { opacity: 0.75 },
   disabled: { opacity: 0.45 },
   fill: { flex: 1, backgroundColor: colors.surface },
+  hidden: { opacity: 0 },
   sheet: { paddingTop: 20, paddingHorizontal: 16, gap: 12 },
   header: { flexDirection: "row", alignItems: "center", gap: 10 },
   titles: { flex: 1, minWidth: 0, gap: 3 },
