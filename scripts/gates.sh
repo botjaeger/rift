@@ -11,6 +11,12 @@
 # problem; the exit status is non-zero when any gate failed. A gate whose
 # tool is missing FAILS (it did not run) rather than passing silently.
 #
+# Output: one line per gate and the summary; each gate's full output is in
+# target/gates/<gate>.log, and a failure prints the end of it.
+# RIFT_GATES_VERBOSE=1 (and CI) streams every gate's output as well.
+# Every gate has a wall-clock limit (see limit_for): a hung test fails its
+# gate instead of stalling the run. RIFT_GATE_TIMEOUT=<seconds> overrides it.
+#
 # The compiler comes from rust-toolchain.toml, so local runs, CI and the
 # Linux docker image all use the same clippy and rustfmt.
 set -uo pipefail
@@ -24,7 +30,7 @@ describe() {
 fmt      cargo fmt --all --check, and on each vendored crate
 clippy   cargo clippy --workspace --all-targets --locked -- -D warnings, on each vendored crate (all features), and on rift-remote without default features (the relay image)
 test     cargo test --workspace --locked, and each vendored crate (all features); release-manifest.py --self-test;
-         locally on macOS the workspace tests run again throttled (background QoS, 32 threads) like a loaded CI runner
+         locally on macOS the workspace tests run throttled (background QoS, 32 threads) like a loaded CI runner
 doc      cargo doc --workspace --no-deps --locked, rustdoc warnings denied
 shell    shellcheck on packaging/*.sh, scripts/*.sh, .githooks/*, bash hooks; zsh -n and fish --no-execute on their hooks
 docs     CLAUDE.md and AGENTS.md identical; every relative link in *.md resolves (vendored crates' upstream docs excepted)
@@ -68,17 +74,22 @@ gate_clippy() {
         cargo clippy -p rift-remote --no-default-features --all-targets --locked -- -D warnings
 }
 gate_test() {
-    cargo test --workspace --locked && vendored test --all-features --locked &&
-        python3 scripts/release-manifest.py --self-test && throttled_test
+    workspace_test && vendored test --all-features --locked &&
+        python3 scripts/release-manifest.py --self-test
 }
 
 # CI's runners are a few slow cores: timing a fast Mac never misses (a 50 ms
-# read timeout over a WebSocket upgrade) fails there. Locally on macOS, run
-# the workspace tests again on the efficiency cores at background priority
-# with many threads, which reproduces it. CI itself skips this pass.
-throttled_test() {
-    [[ -z "${CI:-}" && "$(uname)" == Darwin ]] || return 0
-    echo "-- workspace tests again, throttled (taskpolicy -c background, 32 threads)"
+# read timeout over a WebSocket upgrade) fails there. Locally on macOS the
+# workspace tests run once, on the efficiency cores at background priority
+# with many threads, which reproduces it (the build before them runs at full
+# speed). CI and Linux run them plainly.
+workspace_test() {
+    if [[ -n "${CI:-}" || "$(uname)" != Darwin ]]; then
+        cargo test --workspace --locked
+        return
+    fi
+    cargo test --workspace --locked --no-run -q || return 1
+    echo "-- workspace tests, throttled (taskpolicy -c background, 32 threads)"
     taskpolicy -c background cargo test --workspace --locked -q -- --test-threads=32
 }
 gate_doc() { RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked; }
@@ -93,7 +104,7 @@ gate_leak() {
 
 gate_shell() {
     have shellcheck || { echo "shellcheck not installed (brew install shellcheck / apt install shellcheck)"; return 1; }
-    shellcheck packaging/*.sh scripts/*.sh .githooks/* shell/rift.bash shell/rift-bashrc shell/rift-bashrc-child || return 1
+    shellcheck packaging/*.sh scripts/*.sh .githooks/* shell/rift.bash shell/rift-bashrc shell/rift-bashrc-child shell/complete.bash || return 1
     # zsh and fish hooks: syntax only (shellcheck has no zsh/fish mode).
     # A missing shell is a failure: the hook would ship unchecked.
     local rc=0
@@ -106,8 +117,14 @@ gate_shell() {
         got="$(. packaging/lib.sh && echo "$(rift_target_os "${t%%=*}")-$(rift_target_arch "${t%%=*}")")"
         [ "$got" = "$want" ] || { echo "packaging/lib.sh: ${t%%=*} is named $got, not $want"; rc=1; }
     done
-    if have zsh; then zsh -n shell/rift.zsh || rc=1; else echo "zsh not installed: shell/rift.zsh unchecked"; rc=1; fi
-    if have fish; then fish --no-execute shell/rift.fish || rc=1; else echo "fish not installed: shell/rift.fish unchecked"; rc=1; fi
+    # one file per run: further arguments are the script's, not files
+    local f
+    for f in shell/rift.zsh shell/complete.zsh; do
+        if have zsh; then zsh -n "$f" || rc=1; else echo "zsh not installed: $f unchecked"; rc=1; fi
+    done
+    for f in shell/rift.fish shell/complete.fish; do
+        if have fish; then fish --no-execute "$f" || rc=1; else echo "fish not installed: $f unchecked"; rc=1; fi
+    done
     return "$rc"
 }
 
@@ -181,6 +198,64 @@ phase() {
     return "$rc"
 }
 
+# Wall-clock limit of each gate in seconds, cold builds included, with
+# room over a normal run.
+limit_for() {
+    local s
+    case $1 in
+        fmt | shell | docs) s=300 ;;
+        test) s=900 ;;
+        clippy | doc | mobile | leak) s=1200 ;;
+        linux) s=5400 ;;
+        *) s=1800 ;;
+    esac
+    echo "${RIFT_GATE_TIMEOUT:-$s}"
+}
+
+# A process and everything under it (only this run's own children).
+descendants() {
+    local c
+    for c in $(pgrep -P "$1" 2>/dev/null); do
+        echo "$c"
+        descendants "$c"
+    done
+}
+stop_tree() { # pid
+    local p
+    for p in $(descendants "$1") "$1"; do kill -TERM "$p" 2>/dev/null; done
+    sleep 3
+    for p in $(descendants "$1") "$1"; do kill -KILL "$p" 2>/dev/null; done
+}
+
+# Run a command with a wall-clock limit. Past it, the processes still
+# running under it are listed (that names the hung test binary) and stopped,
+# and the command fails with 124.
+limited() { # seconds, command...
+    local secs=$1 t0=$SECONDS
+    shift
+    "$@" &
+    cur_pid=$!
+    while kill -0 "$cur_pid" 2>/dev/null; do
+        if ((SECONDS - t0 >= secs)); then
+            {
+                echo "TIMEOUT after ${secs}s; still running:"
+                ps -o pid=,etime=,command= -p "$( (descendants "$cur_pid"; echo "$cur_pid") | paste -sd, -)" |
+                    cut -c1-200 | sed 's/^/  /'
+            } >&2 2>/dev/null
+            stop_tree "$cur_pid"
+            wait "$cur_pid" 2>/dev/null
+            cur_pid=""
+            return 124
+        fi
+        sleep 1
+    done
+    wait "$cur_pid"
+    local rc=$?
+    cur_pid=""
+    return "$rc"
+}
+cur_pid=""
+
 case "${1:-}" in
     --list | -l) describe; exit 0 ;;
     --help | -h) sed -n '3,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -235,7 +310,7 @@ start_linux() {
     printf '\n\033[1m== linux\033[0m (from %s, in the background: %s)\n' "$bg_at" "$LOGS/linux.log"
     local n
     n=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
-    LINUX_CPUS=$((n > 4 ? n - 2 : n)) gate_linux >"$LOGS/linux.log" 2>&1 &
+    LINUX_CPUS=$((n > 4 ? n - 2 : n)) limited "$(limit_for linux)" gate_linux >"$LOGS/linux.log" 2>&1 &
     bg_pid=$!
 }
 # the background run ended: record it and say so now
@@ -253,16 +328,14 @@ reap_linux() { # block: wait for it
     grep -E '^-- .* (pass|FAIL) [0-9]+s' "$LOGS/linux.log" | sed 's/^/   /'
     ((rc == 0)) || { echo "   end of $LOGS/linux.log:"; tail -n 25 "$LOGS/linux.log" | sed 's/^/   | /'; }
 }
-# interrupted: stop the background run too (its docker client stops the
-# container: --rm, signals proxied)
-stop_linux() {
-    if [[ -n $bg_pid ]]; then
-        pkill -TERM -P "$bg_pid" 2>/dev/null
-        kill "$bg_pid" 2>/dev/null
-    fi
+# interrupted: stop the running gate and the background run with everything
+# under them (the docker client stops its container: --rm, signals proxied)
+stop_all() {
+    [[ -n $cur_pid ]] && stop_tree "$cur_pid"
+    [[ -n $bg_pid ]] && stop_tree "$bg_pid"
     exit 130
 }
-trap stop_linux INT TERM
+trap stop_all INT TERM
 # started after `test` when it runs, else first
 started_after=""
 if [[ $parallel_linux -eq 1 ]]; then
@@ -270,14 +343,25 @@ if [[ $parallel_linux -eq 1 ]]; then
     [[ -z $started_after ]] && start_linux
 fi
 
+GATE_OUT=/dev/null
+[[ -n ${CI:-} || -n ${RIFT_GATES_VERBOSE:-} ]] && GATE_OUT=/dev/stdout
+run_gate() {
+    "gate_$1" 2>&1 | tee "$LOGS/$1.log" >"$GATE_OUT"
+    return "${PIPESTATUS[0]}"
+}
+
 for g in "${gates[@]}"; do
     [[ $parallel_linux -eq 1 && $g == linux ]] && continue
     at=$(date +%H:%M:%S)
-    printf '\n\033[1m== %s\033[0m (from %s)\n' "$g" "$at"
+    [[ $GATE_OUT == /dev/stdout ]] && printf '\n\033[1m== %s\033[0m (from %s)\n' "$g" "$at"
     start=$SECONDS
-    "gate_$g" 2>&1 | tee "$LOGS/$g.log"
-    rc=${PIPESTATUS[0]}
-    printf -- '-- %s %s %ss\n' "$g" "$( ((rc == 0)) && echo pass || echo FAIL)" "$((SECONDS - start))"
+    limited "$(limit_for "$g")" run_gate "$g" 2>"$LOGS/$g.timeout"
+    rc=$?
+    # a timeout's report goes to the end of the gate's log
+    cat "$LOGS/$g.timeout" >>"$LOGS/$g.log" 2>/dev/null
+    rm -f "$LOGS/$g.timeout"
+    printf -- '-- %s %s %ss%s\n' "$g" "$( ((rc == 0)) && echo pass || echo FAIL)" "$((SECONDS - start))" \
+        "$( ((rc == 124)) && echo " (timeout)")"
     record "$g" "$rc" "$((SECONDS - start))" "$at"
     [[ $parallel_linux -eq 1 && $g == "$started_after" && -z $bg_pid ]] && start_linux
     reap_linux
