@@ -13,7 +13,7 @@ bg_chrome = "#f3f3f3"           # Warp neutral_1: chrome sits below the ground
 bg_gutter = "#e7e7e7"           # Warp neutral_2
 surface = "#ffffff"
 border = "#1111111a"            # Warp outline: fg @ 10%
-pane_border_inactive = "#cfcfcf" # Warp split-pane divider: fg @ 20%
+pane_border_inactive = "#11111121" # Warp split-pane divider: fg @ 13% over the panes
 
 fg = "#111111"                  # Warp foreground, 18.9:1
 text_bright = "#000000"

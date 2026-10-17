@@ -42,7 +42,7 @@ contrast floor is it darkened along its hue (noted in the theme files).
 | `bg_gutter` | `#000000` | Space between split panes |
 | `surface` | `#1e1e1e` | Modals, dropdowns, menus (Warp surface 2) |
 | `border` | `#ffffff1a` | Hairlines (white 10 %, Warp outline) |
-| `pane_border_inactive` | `#383838` | Split pane divider |
+| `pane_border_inactive` | `#ffffff21` | Split pane divider (white 13 % over the panes, Warp) |
 | `fg` | `#ffffff` | Default terminal text |
 | `text_bright` | `#ffffff` | Commands, emphasized text |
 | `text_ui` | `#e6e6e6` | Chrome labels (Warp main text, 90 %) |
@@ -79,7 +79,7 @@ card stop 1 px short of each side so they never cross the border.
 
 | Role | Face | Size |
 |---|---|---|
-| Terminal grid | JetBrains Mono (default) or Hack, both embedded; any installed monospace family via `font_family` | 13 px default (`font_size`), line height 1.2 (Warp; the spec drew 1.65) |
+| Terminal grid | Hack (default) or JetBrains Mono, both embedded; any installed monospace family via `font_family` | 13 px default (`font_size`), line height 1.2 (Warp; the spec drew 1.65) |
 | Command editor | JetBrains Mono | 13 px, 20 px lines (Warp's size) |
 | UI chrome, palette, settings | Inter (variable, embedded) | per spec per surface |
 | Emphasis | JetBrains Mono Medium, SemiBold, Bold, Italic, Bold Italic; Hack Bold, Italic, Bold Italic (static faces) | — |
