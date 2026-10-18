@@ -6,13 +6,16 @@
 //!
 //! ```text
 //! Window
-//! ├─ TabList ─ Tab…              (click selects)
+//! ├─ TabList ─ Tab…              (click selects; a rail search leaves
+//! │                               out the tabs it does not match)
 //! ├─ Group "pane" per visible pane
 //! │  ├─ List "Command blocks" ─ ListItem per block (label = command,
 //! │  │                          description = status, value = output)
 //! │  ├─ Terminal                 (visible screen text)
 //! │  └─ TextInput "Command"      (owned editor, when it is live; "Compose
 //! │                               for …" while the rich-input composer is)
+//! ├─ Group "Tab rail"             (vertical tabs: SearchInput "Search
+//! │                               tabs", the panes-view toggle, pane rows)
 //! ├─ Dialog / AlertDialog / Menu (palette, search, settings, confirm, menu)
 //! └─ Label (live region)         (command-finished announcements)
 //! ```
@@ -38,11 +41,26 @@ pub struct Snapshot {
     pub size: (f32, f32),
     pub scale: f64,
     pub tabs: Vec<TabNode>,
+    /// Tab groups; their tabs name them by index (`TabNode::group`).
+    pub groups: Vec<GroupNode>,
     pub panes: Vec<PaneNode>,
     pub overlay: Option<Overlay>,
     pub announcement: Option<String>,
     /// Side panels and the file viewer (non-modal regions).
     pub panels: Vec<PanelNode>,
+    /// The vertical tab rail's own controls, while it shows.
+    pub rail: Option<RailNode>,
+}
+
+/// The vertical tab rail: its search field and the controls under it
+/// (the panes-view toggle, then one row per pane of the panes view). Its
+/// tab rows are the TabList's tabs.
+pub struct RailNode {
+    pub query: String,
+    /// The search field has the keyboard.
+    pub focused: bool,
+    pub search_rect: Option<[f32; 4]>,
+    pub controls: Vec<Control>,
 }
 
 /// A non-modal region: file explorer, code review, file viewer.
@@ -59,6 +77,37 @@ pub struct PanelNode {
 pub struct TabNode {
     pub title: String,
     pub selected: bool,
+    pub rect: Option<[f32; 4]>,
+    /// Index into `Snapshot::groups`.
+    pub group: Option<usize>,
+    pub pinned: bool,
+    /// One of its panes refuses input.
+    pub read_only: bool,
+    /// The rail's search does not match it: it is left out of the list.
+    pub filtered: bool,
+}
+
+/// A tab's label: its title (else "Tab N") and its states.
+fn tab_label(i: usize, tab: &TabNode) -> String {
+    let mut label = if tab.title.is_empty() {
+        format!("Tab {}", i + 1)
+    } else {
+        // read aloud as shown: secrets masked (`mask_secrets`)
+        rift_core::secrets::mask_owned(tab.title.clone())
+    };
+    if tab.pinned {
+        label.push_str(", pinned");
+    }
+    if tab.read_only {
+        label.push_str(", read-only");
+    }
+    label
+}
+
+/// A tab group: its header (a click folds or opens it) holds its tabs.
+pub struct GroupNode {
+    pub label: String,
+    pub expanded: bool,
     pub rect: Option<[f32; 4]>,
 }
 
@@ -203,19 +252,35 @@ pub fn build(s: &Snapshot) -> Built {
     let mut root_children = vec![TAB_LIST];
     let mut focus = ROOT;
 
-    // tabs
+    // tabs; a group's sit in its node, where its first tab is
     let mut tab_ids = Vec::new();
-    for (i, tab) in s.tabs.iter().enumerate() {
+    let mut group_kids: Vec<Vec<NodeId>> = vec![Vec::new(); s.groups.len()];
+    for (i, tab) in s.tabs.iter().enumerate().filter(|(_, t)| !t.filtered) {
         let id = id_of(("tab", i));
         let mut node = Node::new(Role::Tab);
-        node.set_label(if tab.title.is_empty() {
-            format!("Tab {}", i + 1)
-        } else {
-            tab.title.clone()
-        });
+        node.set_label(tab_label(i, tab));
         node.set_selected(tab.selected);
         t.add(id, node, tab.rect, true);
-        tab_ids.push(id);
+        match tab.group.filter(|g| *g < s.groups.len()) {
+            Some(g) => {
+                if group_kids[g].is_empty() {
+                    tab_ids.push(id_of(("tab-group", g)));
+                }
+                group_kids[g].push(id);
+            }
+            None => tab_ids.push(id),
+        }
+    }
+    for (g, kids) in group_kids.into_iter().enumerate() {
+        if kids.is_empty() {
+            continue;
+        }
+        let group = &s.groups[g];
+        let mut node = Node::new(Role::Group);
+        node.set_label(group.label.as_str());
+        node.set_expanded(group.expanded);
+        node.set_children(kids);
+        t.add(id_of(("tab-group", g)), node, group.rect, true);
     }
     let mut list = Node::new(Role::TabList);
     list.set_label("Tabs");
@@ -288,6 +353,29 @@ pub fn build(s: &Snapshot) -> Built {
         group.set_children(children);
         t.add(pane_id, group, pane.rect, false);
         root_children.push(pane_id);
+    }
+
+    // the tab rail's search and rows (its field, focused, has the keys
+    // over the pane's editor)
+    if let Some(rail) = &s.rail {
+        let search = id_of("rail-search");
+        let mut node = Node::new(Role::SearchInput);
+        node.set_label("Search tabs");
+        node.set_value(rail.query.as_str());
+        t.add(search, node, rail.search_rect, true);
+        if rail.focused {
+            focus = search;
+        }
+        let mut children = vec![search];
+        for (i, c) in rail.controls.iter().enumerate() {
+            children.push(t.control("rail", i, c));
+        }
+        let id = id_of("rail");
+        let mut group = Node::new(Role::Group);
+        group.set_label("Tab rail");
+        group.set_children(children);
+        t.nodes.push((id, group));
+        root_children.push(id);
     }
 
     // side panels and the viewer
@@ -503,6 +591,9 @@ pub fn describe(update: &TreeUpdate) -> String {
         if let Some(t) = n.toggled() {
             out.push_str(&format!(" toggled={t:?}"));
         }
+        if let Some(e) = n.is_expanded() {
+            out.push_str(&format!(" expanded={e}"));
+        }
         if n.is_selected() == Some(true) {
             out.push_str(" selected");
         }
@@ -531,13 +622,22 @@ mod tests {
                     title: "zsh".into(),
                     selected: true,
                     rect: Some([10.0, 0.0, 100.0, 30.0]),
+                    group: None,
+                    pinned: false,
+                    read_only: false,
+                    filtered: false,
                 },
                 TabNode {
                     title: String::new(),
                     selected: false,
                     rect: None,
+                    group: None,
+                    pinned: false,
+                    read_only: false,
+                    filtered: false,
                 },
             ],
+            groups: Vec::new(),
             panes: vec![PaneNode {
                 id: 7,
                 label: "Pane ~/src".into(),
@@ -568,7 +668,53 @@ mod tests {
             overlay: None,
             announcement: Some("ls finished".into()),
             panels: Vec::new(),
+            rail: None,
         }
+    }
+
+    #[test]
+    fn the_rail_search_takes_focus_and_filters_the_tabs() {
+        let mut s = snapshot();
+        s.tabs[0].pinned = true;
+        s.tabs[0].read_only = true;
+        let text = describe(&build(&s).update);
+        assert!(
+            text.contains("Tab \"zsh, pinned, read-only\" selected"),
+            "{text}"
+        );
+        s.tabs[1].filtered = true;
+        s.rail = Some(RailNode {
+            query: "zs".into(),
+            focused: true,
+            search_rect: Some([0.0, 40.0, 200.0, 28.0]),
+            controls: vec![Control {
+                label: "build, pane, active, +3 -1 lines".into(),
+                role: Role::ListItem,
+                toggled: None,
+                selected: true,
+                rect: Some([0.0, 80.0, 200.0, 28.0]),
+            }],
+        });
+        let built = build(&s);
+        let text = describe(&built.update);
+        assert!(
+            text.contains("TabList \"Tabs\"\n    Tab \"zsh, pinned, read-only\" selected\n  Group"),
+            "{text}"
+        );
+        assert!(!text.contains("Tab \"Tab 2\""), "{text}");
+        assert!(
+            text.contains(
+                "Group \"Tab rail\"\n    SearchInput \"Search tabs\" value=\"zs\" [focus]"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("ListItem \"build, pane, active, +3 -1 lines\" selected"),
+            "{text}"
+        );
+        // the command line no longer claims the focus
+        assert!(!text.contains("value=\"git st\" [focus]"), "{text}");
+        assert_eq!(text.lines().count(), built.update.nodes.len());
     }
 
     #[test]

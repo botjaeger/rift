@@ -21,6 +21,12 @@ pub struct SearchState {
     pub error: Option<String>,
     /// ⌘A selected the whole query: typing replaces it, Backspace clears it.
     pub all_selected: bool,
+    /// Find limited to one block (it was selected when find opened): its
+    /// id and command. Deselecting it, or the chip's ×, widens to the pane.
+    pub scope: Option<(rift_core::BlockId, String)>,
+    /// Matches in output lines a block filter hides (not navigable): said
+    /// in the counter, so a find that "finds nothing" is not silent.
+    pub hidden: usize,
 }
 
 impl SearchState {
@@ -32,6 +38,8 @@ impl SearchState {
         self.total = 0;
         self.current = 0;
         self.error = None;
+        self.scope = None;
+        self.hidden = 0;
     }
 
     /// Store a fresh result; selects the newest match.
@@ -93,10 +101,14 @@ pub fn counter(state: &SearchState) -> String {
     if state.error.is_some() {
         return "invalid regex".to_string();
     }
-    match state.position() {
+    let shown = match state.position() {
         Some((n, total)) => format!("{n}/{total}"),
-        None if state.query.is_empty() => "search".to_string(),
+        None if state.query.is_empty() => return "search".to_string(),
         None => "0 results".to_string(),
+    };
+    match state.hidden {
+        0 => shown,
+        n => format!("{shown} · {n} hidden by the filter"),
     }
 }
 
@@ -108,9 +120,11 @@ pub fn query_scroll(text_w: f32, avail: f32) -> f32 {
 
 /// Floating search bar, top-right (spec: search overlay, match colors §1).
 /// Also hosts the block-filter input (`label` = "filter", accent ring).
-/// `toggles` = (case-sensitive, regex) for find mode; returns the two
-/// toggle chip rects (empty in filter mode). `selected`: the whole query
-/// is selected (⌘A).
+/// `toggles` = the chips at its right edge, left to right, as (text, on):
+/// find's Aa and .*, the filter's Aa .* ! ±N. `scope` = find limited to a
+/// block: an "in block: COMMAND ×" chip after the magnifier. Returns
+/// the toggle chip rects in `toggles` order, then the scope chip's.
+/// `selected`: the whole query is selected (⌘A).
 #[allow(clippy::too_many_arguments)]
 pub fn render(
     layer: &mut Layer,
@@ -123,10 +137,22 @@ pub fn render(
     // where the panes start (the tab strip's height, 0 while `tab_bar` hides it)
     top: f32,
     blink_on: bool,
-    toggles: Option<(bool, bool)>,
+    toggles: &[(&str, bool)],
     selected: bool,
+    scope: Option<&str>,
 ) -> Vec<[f32; 4]> {
-    let bar_w = if toggles.is_some() { 400.0 } else { 340.0 };
+    let scope = scope.map(|cmd| {
+        let cmd: String = if cmd.chars().count() > 22 {
+            cmd.chars().take(21).chain(['…']).collect()
+        } else {
+            cmd.to_string()
+        };
+        format!("in block: {cmd}")
+    });
+    let scope_w = scope.as_deref().map_or(0.0, |s| {
+        engine.measure(s, 11.0, FONT_SANS, Weight::MEDIUM) + 34.0
+    });
+    let bar_w = 340.0 + 30.0 * toggles.len() as f32 + scope_w;
     let bar_h = 44.0;
     let x = w - bar_w - 16.0;
     let y = top + 10.0;
@@ -178,13 +204,38 @@ pub fn render(
         );
         layer.rect([x + 23.5, y + 24.5], [5.0, 1.7], theme.text_dim, 1.0);
     }
+    // find limited to the selected block: its chip; a click widens
+    let mut scope_rect = None;
+    if let Some(text) = &scope {
+        let r = [qx - 4.0, y + 11.0, scope_w - 8.0, 22.0];
+        layer.rect(
+            [r[0], r[1]],
+            [r[2], r[3]],
+            theme.accent.with_alpha(0.15),
+            4.0,
+        );
+        let mut b = Buffer::new(&mut engine.font_system, Metrics::new(11.0, 15.0));
+        b.set_text(
+            &mut engine.font_system,
+            text,
+            &Attrs::new()
+                .family(Family::Name(FONT_SANS))
+                .weight(Weight::MEDIUM),
+            Shaping::Advanced,
+            None,
+        );
+        layer.text(b, r[0] + 8.0, y + 15.0, theme.accent);
+        super::close_icon(layer, [r[0] + r[2] - 11.0, y + 22.0], 3.0, theme.accent);
+        scope_rect = Some(r);
+        qx += scope_w;
+    }
 
-    // toggle chips: Aa (match case) and .* (regex), right edge
+    // toggle chips (Aa match case, .* regex, ! invert, ±N context), right edge
     let mut rects = Vec::new();
     let mut right = x + bar_w - 12.0;
-    if let Some((case, re)) = toggles {
-        for (text, on) in [(".*", re), ("Aa", case)] {
-            let cw = 26.0;
+    if !toggles.is_empty() {
+        for (text, on) in toggles.iter().rev().copied() {
+            let cw = if text.chars().count() > 2 { 32.0 } else { 26.0 };
             let cx = right - cw;
             let r = [cx, y + 11.0, cw, 22.0];
             if on {
@@ -213,11 +264,12 @@ pub fn render(
             rects.push(r);
             right = cx - 4.0;
         }
-        rects.reverse(); // [case, regex]
+        rects.reverse(); // left to right, as given
         right -= 6.0;
     } else {
         right -= 4.0;
     }
+    rects.extend(scope_rect);
 
     // counter
     let cw = engine.measure(counter, 11.5, FONT_SANS, Weight::NORMAL);
@@ -319,6 +371,11 @@ mod tests {
             total: 2,
         });
         assert_eq!(counter(&s), "2/2");
+        // matches a block filter hides are said, never silently missing
+        s.hidden = 3;
+        assert_eq!(counter(&s), "2/2 · 3 hidden by the filter");
+        s.set_matches(Found::default());
+        assert_eq!(counter(&s), "0 results · 3 hidden by the filter");
         s.close();
         assert_eq!(counter(&s), "search");
     }

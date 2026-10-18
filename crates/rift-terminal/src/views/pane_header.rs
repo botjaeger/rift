@@ -49,6 +49,7 @@ pub fn render(
     title: &str,
     active: bool,
     running: bool,
+    read_only: bool,
     mouse: Option<(f32, f32)>,
     id: PaneId,
     hits: &mut Vec<Hit>,
@@ -67,9 +68,14 @@ pub fn render(
     if active {
         layer.rect([x, y], [w, 2.0], theme.accent, 0.0);
     }
+    // a read-only pane shows a lock in place of the terminal mark
     icons::draw(
         layer,
-        Icon::Terminal,
+        if read_only {
+            Icon::Lock
+        } else {
+            Icon::Terminal
+        },
         [x + 8.0 + 7.0, cy],
         14.0,
         if active { theme.accent } else { theme.text_dim },

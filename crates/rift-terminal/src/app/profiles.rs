@@ -98,7 +98,7 @@ impl App {
             tab.custom_title = Some(title.clone());
         }
         if let Some(c) = &resolved.color {
-            tab.color = crate::state::TAB_COLORS.iter().position(|n| n == c);
+            tab.color = rift_core::tab_color::TabColor::parse(c);
         }
         self.save_session();
     }

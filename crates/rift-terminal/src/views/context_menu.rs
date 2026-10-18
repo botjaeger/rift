@@ -11,6 +11,9 @@ use crate::views::icons::{self, Icon};
 pub enum MenuAction {
     CopyCommand,
     CopyOutput,
+    /// The output with its secrets as printed (`mask_secrets` on: copies
+    /// are masked otherwise).
+    CopyOutputUnmasked,
     CopyBoth,
     CopyCwd,
     CopyBranch,
@@ -22,7 +25,25 @@ pub enum MenuAction {
     FilterBlock,
     /// Send the block's output to a new command's stdin.
     PipeOutput,
+    /// Forget the block's output filter (query and toggles).
+    ClearFilter,
+    /// Command and output as HTML with the theme's colors (+ plain text).
+    CopyHtml,
+    /// Command and fenced output as Markdown.
+    CopyMarkdown,
+    /// Write the block's output to a file.
+    SaveOutput,
+    /// Compare with the previous finished run of the same command, in the
+    /// same directory, in this pane.
+    ComparePrevious,
+    // a multi-block selection
+    /// Put the selected blocks' commands into the input, one per line.
+    ReinputCommands,
+    /// Compare the two selected blocks' outputs.
+    CompareSelected,
     // terminal area
+    /// Write the pane's whole buffer (scrollback and screen) to a file.
+    ExportBuffer,
     Copy,
     Paste,
     SelectAll,
@@ -35,6 +56,10 @@ pub enum MenuAction {
     MoveToNewTab,
     /// The pane leaves for a window of its own (shells keep running).
     MovePaneToNewWindow,
+    /// Refuse (or allow again) input into the pane.
+    ToggleReadOnly,
+    /// Start the pane's program again in place.
+    RestartPane,
     /// The toolbar: Settings › Appearance › Toolbar.
     RearrangeToolbar,
     // tab bar (payload: tab index)
@@ -45,6 +70,17 @@ pub enum MenuAction {
     CloseTab(usize),
     CloseOtherTabs(usize),
     CloseTabsRight(usize),
+    /// Pin or unpin the tab.
+    PinTab(usize),
+    /// Group the tab with the picked ones.
+    GroupTabs(usize),
+    /// The tab leaves its group.
+    LeaveGroup(usize),
+    // tab group header (payload: group id)
+    ToggleGroup(u64),
+    RenameGroup(u64),
+    Ungroup(u64),
+    CloseGroup(u64),
     /// The + button's menu: open profile `.0` (index into the profiles
     /// listed when the menu opened).
     NewTabProfile(usize),
@@ -66,6 +102,23 @@ pub enum MenuAction {
     /// "Send to agent…" for the code picked when the menu opened (a review
     /// hunk or file, the viewer's lines).
     SendToAgent,
+    // a link or file path right-clicked in output (`WindowState::link_menu`)
+    LinkOpen,
+    LinkCopy,
+    LinkReveal,
+    /// Ask for tab `.0`'s colour (a name or any `#rrggbb`).
+    CustomTabColor(usize),
+    /// The pane's sticky command header: minimized ↔ shown.
+    ToggleStickyHeader,
+    /// A block that printed a Markdown file (`cat README.md`): open that
+    /// file in the viewer.
+    OpenInViewer,
+    // an explorer row right-clicked (`WindowState::explorer_menu`)
+    ExplorerOpen,
+    ExplorerCopyPath,
+    ExplorerCopyRelativePath,
+    ExplorerNewFile,
+    ExplorerReveal,
 }
 
 pub struct MenuItem {
@@ -172,7 +225,26 @@ fn sans(engine: &mut TextEngine, text: &str, size: f32, weight: Weight) -> Buffe
 fn icon(action: MenuAction) -> Option<Icon> {
     use MenuAction::*;
     Some(match action {
-        CopyCommand | CopyOutput | CopyBoth | CopyCwd | Copy | ViewerCopyPath => Icon::Copy,
+        CopyCommand
+        | CopyOutput
+        | CopyOutputUnmasked
+        | CopyBoth
+        | CopyCwd
+        | Copy
+        | ViewerCopyPath
+        | LinkCopy
+        | CopyHtml
+        | CopyMarkdown
+        | ExplorerCopyPath
+        | ExplorerCopyRelativePath => Icon::Copy,
+        LinkOpen | LinkReveal | ExplorerOpen | ExplorerReveal | OpenInViewer => Icon::Open,
+        ExplorerNewFile => Icon::Plus,
+        CustomTabColor(_) => Icon::Themes,
+        ToggleStickyHeader => Icon::ChevronUp,
+        SaveOutput | ExportBuffer => Icon::File,
+        ComparePrevious | CompareSelected => Icon::Refresh,
+        ReinputCommands => Icon::Terminal,
+        ClearFilter => Icon::Close,
         CopyBranch => Icon::Branch,
         Rerun => Icon::Refresh,
         ToggleBookmark => Icon::Bookmark,
@@ -190,10 +262,16 @@ fn icon(action: MenuAction) -> Option<Icon> {
         MoveToNewTab | DuplicateTab(_) => Icon::Plus,
         MovePaneToNewWindow | MoveTabToNewWindow(_) | MoveTabToWindow(..) => Icon::Open,
         ToggleSync(_) => Icon::Sync,
+        ToggleReadOnly => Icon::Lock,
+        RestartPane => Icon::Refresh,
         ViewerFind => Icon::Search,
         RearrangeToolbar => Icon::Settings,
         ViewerRendered(_) => Icon::File,
-        ClosePane | CloseTab(_) | CloseOtherTabs(_) | ViewerClose => Icon::Close,
+        ClosePane | CloseTab(_) | CloseOtherTabs(_) | ViewerClose | CloseGroup(_) => Icon::Close,
+        PinTab(_) => Icon::Bookmark,
+        GroupTabs(_) | LeaveGroup(_) | Ungroup(_) => Icon::Folder,
+        ToggleGroup(_) => Icon::ChevronDown,
+        RenameGroup(_) => return None,
         CloseTabsRight(_) => Icon::ChevronRight,
         Paste | SelectAll | ClearBlocks | RenameTab(_) | SetTabColor(..) => return None,
     })
@@ -229,6 +307,8 @@ fn shortcut_actions(action: MenuAction) -> &'static [&'static str] {
         ClearBlocks => &["clear_blocks"],
         ClosePane | ViewerClose => &["close_pane"],
         ToggleSync(_) => &["toggle_sync_inputs"],
+        ToggleReadOnly => &["toggle_read_only"],
+        RestartPane => &["restart_pane"],
         ViewerFind => &["search"],
         NewTabProfile(i) => PROFILE_ACTIONS
             .get(i)
@@ -249,6 +329,7 @@ fn destructive(action: MenuAction) -> bool {
             | MenuAction::CloseTab(_)
             | MenuAction::CloseOtherTabs(_)
             | MenuAction::CloseTabsRight(_)
+            | MenuAction::CloseGroup(_)
     )
 }
 

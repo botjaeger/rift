@@ -67,7 +67,10 @@ and `service` (a durable shell to reattach), `started` and `counted` (the
 Elapsed chip). Version 5 adds `launch` to an unsplit tab and to each pane of a
 `layout`: the [profile](#profiles) name, own `shell` and `args` the pane was
 opened with (absent: the default launch), so a restore opens the same profile
-again. The file is rewritten when tabs or panes change, when focus
+again. Version 7 adds the window names ("Rename window"): `window_name` at
+the top level for the first window, `name` in an `[[other_windows]]` table;
+a quit clears the first one's with its tabs. The file is rewritten when tabs
+or panes change, when focus
 moves to another pane (so a restart focuses the pane last used), and every
 minute while a tab's time counts. A restored split never lays a pane out
 under 50 px while the window has room, whatever ratio was saved.
@@ -84,7 +87,9 @@ font_family   = "Hack"            # embedded Hack or JetBrains Mono, or any inst
                                   # unknown names fall back to JetBrains Mono
 font_size     = 13.0              # settings stepper clamps 8–28 (⌘= / ⌘- / ⌘0 also write this)
 line_height   = 1.2               # multiplier, clamped 1.0–2.2 when applied
-cursor_style  = "block"           # block | bar | underline
+cursor_style  = "block"           # block | bar | underline | hollow | double_underline
+cursor_hollow_unfocused = false   # outline the cursor outside the focused pane of the
+                                  # focused window (off: it keeps cursor_style there)
 cursor_blink  = true              # the cursor toggles every 550 ms
 theme         = "dark-default"    # builtin, or a stem in ~/.config/rift/themes
 theme_light   = "light-default"   # theme used while the OS is light (needs sync_os_theme)
@@ -93,9 +98,40 @@ scrollback    = 10000             # lines kept per pane, clamped 0–1000000
                                   # (the Settings stepper offers 1000–1000000)
 window_padding = 8.0              # left/right content padding in px, clamped 0–40
                                   # (single-pane layout; splits keep their gutter)
+# window_padding_left = 8.0       # one side each, clamped 0–40; unset: window_padding
+# window_padding_right = 8.0      # at the left and right, 14 at the top, 8 under a
+# window_padding_top = 14.0       # full-screen program's last row (the command
+# window_padding_bottom = 8.0     # editor sits on the bottom edge)
+alt_screen_padding = true         # false: a full-screen program (vim, htop) gets no
+                                  # padding at all, split panes too
 window_opacity = 0.5              # window ground opacity, clamped 0.01–1.0 (Warp 1–100 %; overlays and prompt chips stay opaque)
 window_blur = 20                  # macOS: blur behind a translucent window, 1–64 px (1 = none)
+window_width = 1180.0             # size of a window opened without a saved frame
+window_height = 760.0             # (logical px, at least 320 × 200; ⌘N copies its window's)
+launch_mode = "default"           # default (as saved) | maximized | fullscreen: every new window
+always_on_top = false             # new windows float above other apps' windows
+                                  # (toggle_always_on_top switches one window)
+snap_to_cells = false             # resize the window by whole cells (macOS, X11)
+resize_overlay = false            # show the grid's columns × rows while resizing
+wheel_zoom = false                # ⌘ + wheel (Ctrl + wheel on Linux) zooms the font,
+                                  # ⌘⇧ + wheel steps the opacity (both saved)
 ligatures     = true              # JetBrains Mono ligatures + contextual alternates
+font_weight   = 400               # terminal output text weight, 100–900; the font draws
+bold_font_weight = 700            # the nearest weight it has (embedded Hack: 400/700;
+                                  # JetBrains Mono: 400/500/600/700)
+font_features = []                # OpenType features of terminal output, applied after
+                                  # `ligatures`: "ss01" or "+ss01" on, "-calt" off,
+                                  # "cv05=2" a value; ["zero"] = slashed zero. An entry
+                                  # that is not a 4-letter tag is skipped with a warning
+minimum_contrast = 1.0            # 1–21: terminal text is lightened or darkened until it
+                                  # has this contrast with its cell (1 = off, 4.5 = WCAG
+                                  # AA); box drawing, blocks and Powerline keep their colours
+bold_is_bright = false            # bold text in one of the 8 ANSI colours uses its
+                                  # bright variant (it stays bold)
+ambiguous_width = "narrow"        # narrow | wide: East Asian Ambiguous characters
+                                  # (± ① α Ж ─) take 1 or 2 cells, from the next output
+                                  # on; Private Use Area symbols (Powerline, Nerd Font)
+                                  # stay one cell
 app_icon      = "default"         # default | light | mono | ocean | ember | forest | neon:
                                   # the Dock icon (macOS, also while Rift is not running)
                                   # and the window icon (Linux); unknown = default
@@ -103,6 +139,7 @@ restore_session = true            # reopen tabs + cwds after a crash or reboot
                                   # (a quit starts fresh; an update restores anyway)
 save_transcripts = false          # also save finished blocks' output and replay it
                                   # (marked "restored") on relaunch; off = deleted
+                                  # (with mask_secrets on, saved masked)
 tab_layout    = "horizontal"      # horizontal (tabs on top) | vertical (side rail)
 tab_close_button = "hover"        # hover (× on the active and hovered tab) | always
                                   # (every tab without an alert/activity dot) | never
@@ -115,6 +152,8 @@ tab_bar       = "always"          # always | hide_fullscreen | on_hover: a hidde
                                   # window's top edge (tabs on top only)
 new_tab_placement = "end"         # end | after_current — where ⌘T and + put the new tab
                                   # (restores, launch configs and ctl always append)
+tab_switch_order = "in_order"    # in_order | mru: ⌃Tab / ⌃⇧Tab step the strip, or the tabs
+                                  # last used first with a switcher while ⌃ is held
 tab_bar_with_one_tab = true       # false: no tab in the strip (and no vertical rail)
                                   # while one tab is open; the bar's buttons and + stay
 toolbar_left  = ["explorer"]      # toolbar buttons left of the tabs, in order
@@ -128,9 +167,20 @@ block_spacing = "compact"         # compact (blocks flush) | normal (a blank row
 block_dividers = false            # a rule between blocks
 jump_to_bottom_button = true      # a button over a block running past the pane's bottom
                                   # that scrolls to its end
+scrollbar = "auto"                # auto (shown while the pane scrolls and under the
+                                  # pointer at its right edge) | always (while there is
+                                  # anything to scroll) | never: the overlay scrollbar
+                                  # with ticks at prompts, failures, bookmarks and
+                                  # find matches
+mask_secrets = false              # show tokens, keys and passwords as •••• (built-in
+                                  # patterns + [[secret_patterns]]), masked in copies,
+                                  # transcripts and on the phone (see Secret masking)
 dim_inactive_panes = true         # wash the unfocused split panes (Warp)
 inactive_pane_dim = 10            # that wash in %, clamped 1–40 (half on a light theme)
 focus_follows_mouse = false       # the split pane under the pointer takes focus
+close_on_exit = "always"          # always | never | graceful: when a pane's program
+                                  # exits, close it, keep it (Restart bar), or keep
+                                  # it only after a non-zero exit
 durable_sessions = true           # shells live in the session service: they keep
                                   # running through an update's restart or a
                                   # crash and reattach on launch (a quit ends
@@ -192,18 +242,26 @@ shell_widgets = "auto"            # auto | rift — ⌃R, ⌃T, ⌥C run your sh
                                   # Rift's (the history pane for ⌃R)
 autocomplete_pairs = true         # auto-close quotes/brackets; Backspace removes empty pairs
 vim_mode      = false             # modal (vim) editing in the command editor
+vim_clipboard = "none"            # none | unnamed (vim's unnamed register is the
+                                  # system clipboard, like clipboard=unnamed)
 notify_on_completion = true       # alert when a long command finishes out of view
 notify_threshold_secs = 10        # what counts as long (stepper: 0–3600, ±5)
 show_progress = true              # programs' OSC 9;4 progress: a bar under the tab,
                                   # the Dock badge (macOS); false hides both
 bell          = "both"            # visual | audible | both | none
+request_attention = false         # a bell or alert while no Rift window has focus:
+                                  # bounce the Dock icon once (macOS) / urgency hint (Linux)
 confirm_close_running = true      # warn before closing a pane/tab/window with a running job
 confirm_multiline_paste = true    # ask before a paste with newlines reaches a program
                                   # without bracketed paste (each newline presses Enter)
+large_paste_warning = 0           # ask before a paste over this many KiB (0 = never)
+trim_paste = false                # drop trailing blanks and newlines from pasted text
+                                  # (copied files' paths keep their trailing space)
 working_directory = "previous"    # new tabs/panes: previous | home | "/abs/path" (~ expands)
 alias_expansion = false           # Space after an alias replaces it with its definition
 error_underline = true            # red underline under unknown command names
-command_corrections = true        # "Did you mean …" after a failed command-not-found
+command_corrections = true        # "Did you mean …" after a failed command: a typo,
+                                  # cd typo, git push upstream, chmod +x, sudo
 subshell_offer = true             # offer Rift's hooks in docker exec … bash, poetry shell…
 subshell_commands = []            # more such commands, as regular expressions
 subshell_denylist = []            # commands never to offer it for ("Don't ask again")
@@ -213,6 +271,11 @@ rich_input_auto = false           # open the composer by itself when a coding ag
                                   # (its own notification, or 1 s of quiet after output)
 mouse_reporting = true            # forward clicks/drags/wheel to vim, tmux, htop…
                                   # (hold Shift to select locally); focus events go regardless
+word_chars    = ""                # extra characters a double-click keeps inside a word,
+                                  # e.g. ":|" (default boundaries: blanks ,│`|:"'()[]{}<>)
+word_delimiters = ""              # characters that also end a word, e.g. "/.-": for a
+                                  # double-click (wins over word_chars) and for the
+                                  # editor's ⌥← ⌥→ ⌥⌫ (blanks only by default)
 option_as_meta = false            # macOS: left Option sends ESC-prefixed Meta keys instead
                                   # of composing characters (Linux Alt is always Meta)
 # right_option_as_meta = false    # macOS: the right Option key; unset = follows option_as_meta
@@ -224,7 +287,13 @@ global_hotkey = ""                # system-wide show/hide chord, e.g. "alt+space
                                   # empty = off (X11 on Linux)
 hotkey_window = false             # the hotkey slides a drop-down window from the top of
                                   # the screen instead of showing/hiding the whole app
-hotkey_window_height = 40         # its height, percent of the screen (20–100)
+hotkey_window_height = 40         # its depth, percent of the screen (20–100): its height
+                                  # at the top or bottom edge, its width at the sides
+hotkey_window_edge = "top"        # top | bottom | left | right: the edge it hangs from
+hotkey_window_width = 100         # its size along that edge, percent (20–100), centred
+hotkey_window_screen = "pointer"  # pointer (the screen with the mouse) | primary |
+                                  # "1", "2"… or 1, 2… (1 = primary; one not
+                                  # connected: pointer)
 hotkey_window_hide_on_blur = true # it hides when it loses keyboard focus
 launch_at_login = false           # macOS: Rift opens at login (its login item); shows
                                   # the login item as it is (System Settings › Login
@@ -256,9 +325,11 @@ discover_shells = true            # the shells in /etc/shells are profiles too (
 # args    = ["--private"]         # after Rift's own integration arguments
 # cwd     = "~/code"              # start directory (a pane's own directory wins)
 # title   = "Dev"                 # tab title of a tab it opens
-# color   = "green"               # red green yellow blue magenta cyan
+# color   = "green"               # red green yellow blue magenta cyan, or #rrggbb
 # icon    = "python"              # + menu glyph: python php docker github git folder
 #                                 # user laptop; unset: a terminal
+# theme   = "tokyo-night"         # its panes' colour scheme (any theme name); the
+#                                 # window's chrome keeps the window theme
 # [profiles.env]                  # this profile's panes only
 # NODE_ENV = "development"
 
@@ -270,6 +341,19 @@ discover_shells = true            # the shells in /etc/shells are profiles too (
 #                                 # (ControlMaster=auto, ControlPath=<data dir>/ssh/%C,
 #                                 # ControlPersist=60) unless these args or your ssh
 #                                 # config set a ControlPath; remote completions use it
+
+# [[actions]]                     # see User actions below
+# name  = "Watch"                 # palette row "Action: Watch"; required, unique
+# key   = "ctrl+alt+h"            # optional chord ([keybindings] syntax)
+# steps = [{ action = "split_vertical" }, { send = "htop\n" }]
+
+# [[tab_color_rules]]             # colour tabs by directory (see Tab colours)
+# dir   = "~/work/prod"           # the directory and everything below it
+# color = "#ff3b30"               # red green yellow blue magenta cyan, or #rrggbb
+
+# [[secret_patterns]]             # more secrets for mask_secrets (see Secret masking)
+# name  = "internal id"           # shown nowhere; names the pattern in errors
+# regex = 'corp-([0-9]{6})'       # with a group: only group 1 is masked
 
 [notifications]                   # Settings → Notifications
 enabled = true                    # master switch for toasts, desktop notifications, sounds
@@ -304,7 +388,16 @@ applies external edits without restarting.
 - **Invalid or unreadable file**: it is not applied. The last good config
   stays live (at startup, the defaults with `control_api = "off"`), a toast
   names the error, and Settings refuses to save over the broken file until it
-  is fixed. A missing file means defaults.
+  is fixed. A missing file means defaults. Exception: a value of the wrong
+  type or an unknown name in `cursor_style`, `cursor_hollow_unfocused`,
+  `window_padding*`, `alt_screen_padding`, `font_weight`,
+  `bold_font_weight`, `font_features`, `minimum_contrast`, `bold_is_bright`,
+  `ambiguous_width`, `window_width`, `window_height`, `launch_mode`,
+  `always_on_top`, `snap_to_cells`, `resize_overlay`, `wheel_zoom`,
+  `request_attention`, `large_paste_warning`, `trim_paste`,
+  `hotkey_window_edge`, `hotkey_window_screen` or `word_delimiters` falls
+  back to that setting's default with a logged warning; the rest of the file
+  applies.
 - **Saves are atomic**: Rift writes a temporary file next to `config.toml`,
   keeps the old file's permissions and renames it over, so a failed write
   never truncates the config.
@@ -318,16 +411,32 @@ applies external edits without restarting.
 ## Themes
 
 Built-ins, in picker order: `dark-default`, `light-default`,
-`catppuccin-mocha`, `tokyo-night`.
+`catppuccin-mocha`, `tokyo-night`, `catppuccin-latte`, `dracula`,
+`gruvbox-dark`, `gruvbox-light`, `monokai`, `nord`, `one-dark`,
+`solarized-dark`, `solarized-light` (each scheme's published palette; the
+Solarized themes keep accent hues in the bright ANSI row, where tab colours
+and bold text read them).
 
 A user theme is `~/.config/rift/themes/<name>.{toml,yaml,yml}`, referenced by
-file stem (`toml` wins if several exist). It appears in Settings → Themes and
-the palette's theme switcher. Editing the selected theme file reloads its
-colors without changing `config.toml` or restarting.
+file stem (`toml` wins if several exist). A file named like a built-in
+replaces that built-in (a Warp `dracula.yaml` keeps showing). It appears in
+Settings → Themes and the palette's theme switcher. Editing the selected
+theme file reloads its colors without changing `config.toml` or restarting.
+
+**Theme picker** (`theme_picker`, unbound; palette *Theme picker (live
+preview)*): the palette lists every theme; the selected one applies at once
+as ↑ ↓ or typing moves the selection, nothing is saved. ⏎ keeps it (written
+to `theme`, or to `theme_light` while `sync_os_theme` is on and the system is
+in light mode); Esc, a click outside, closing its window or any other close
+puts the previous theme back. One picker is open at a time across windows;
+a setting saved meanwhile writes the previous theme, not the preview, and
+editing `config.toml` meanwhile makes the file's theme the one Esc returns
+to.
 
 ### Rift TOML themes
 
-A theme TOML must set every token (only `background_image` is optional):
+A theme TOML must set every token (only `background_image`, `bg_gradient`
+and `accent_gradient` are optional):
 `bg`, `bg_chrome`, `bg_gutter`, `surface`, `border`, `pane_border_inactive`,
 `fg`, `text_bright`, `text_ui`, `text_dim`, `text_muted`, `accent`,
 `success`, `error`, `warning`, `cursor`, `selection`, `search_match`,
@@ -339,11 +448,20 @@ naming the error, keeps `dark-default`, and the picker labels the file
 
 ### Warp YAML themes
 
-`.yaml` / `.yml` files use Warp's schema unchanged (solid colors only: a gradient
-`accent` or `background` is not read yet) — drop a Warp theme in and
+`.yaml` / `.yml` files use Warp's schema unchanged — drop a Warp theme in and
 it works. Warp carries only the base colors; every other Rift token is
 derived from them (chrome/gutter sink away from the text, surfaces lift toward
 it, the hairline border is a low-alpha overlay).
+
+Warp's gradient themes work too: `background` or `accent` may be
+`{top, bottom}` (vertical) or `{left, right}` (horizontal). A gradient
+background is drawn behind the panes of an opaque window without a
+background image (a translucent window, `window_opacity` below 1, keeps the
+solid ground); a gradient accent runs across the active tab's top edge.
+Every derived token (chrome, text ramp, cursor, selection) uses the
+gradient's midpoint. In a TOML theme the same is
+`bg_gradient = { from = "#101040", to = "#402010", vertical = true }` (and
+`accent_gradient`).
 
 ```yaml
 name: Dracula                # optional; defaults to the file stem
@@ -426,8 +544,8 @@ Semantics:
   still load; the palette names skipped files once, with the reason, in a
   toast (again only when the set of broken files changes). A single-element `panes` list collapses to a plain pane.
 - Tab `color` maps to Rift's tab colors (`red`, `green`, `yellow`, `blue`,
-  `magenta`, `cyan`); `black` and `white` have no Rift equivalent: the tab
-  opens with no color. Other Warp-only keys are ignored.
+  `magenta`, `cyan`, or any `#rrggbb`); `black` and `white` have no Rift
+  equivalent: the tab opens with no color. Other Warp-only keys are ignored.
 
 ### Tab Configs (TOML)
 
@@ -468,9 +586,10 @@ type = "terminal"
 
 Rift honours `name`, `title`, `color`, `directory`, `commands`, `is_focused`,
 `shell`, `split`, `children` and `params.*.default`, and adds per-pane
-`profile = "<name>"` (a [profile](#profiles)) and `args = [...]` (the pane's
-own arguments). YAML launch-configuration panes take the same `shell`,
-`profile` and `args` keys. Differences from Warp: all pane
+`profile = "<name>"` (a [profile](#profiles)), `args = [...]` (the pane's
+own arguments) and `theme = "<theme>"` (the pane's own colour scheme). YAML
+launch-configuration panes take the same `shell`, `profile`, `args` and
+`theme` keys. Differences from Warp: all pane
 types open a local terminal; a `{{param}}` with no
 `default` (including `autogenerated_branch_name`) makes the file fail to load
 (named in a toast when the palette opens), because Rift has no fill-in dialog;
@@ -481,7 +600,35 @@ equal-sized, as in Warp.
 **Save current layout as launch configuration** (palette) writes one Tab Config
 `.toml` per open tab to `~/.config/rift/launch_configs/` (`layout-<time>-1.toml`,
 `-2`, …), never overwriting an existing file, and never writing to Warp's
-directories. Each pane keeps its `profile`, `shell` and `args`.
+directories. Each pane keeps its `profile`, `shell`, `args` and `theme`.
+
+## Tab colours
+
+A tab's colour is one of `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`
+(drawn from the theme's bright ANSI palette, so they follow the theme) or any
+`#rrggbb` / `#rgb` (the same in every theme). Set it from the tab's menu (the
+six names, *Custom color…*, *No color*), with `set_tab_color` (the palette's
+text input: a name or a hex), `cycle_tab_color` (none → red … cyan → none),
+a profile's or a launch configuration's `color`. Session restore keeps it.
+
+`[[tab_color_rules]]` colour a tab by its active pane's directory while the
+tab has no colour of its own (a colour set by hand wins; *No color* shows the
+rule again):
+
+```toml
+[[tab_color_rules]]
+dir = "~/work/prod"     # this directory and everything below it
+color = "#ff3b30"
+
+[[tab_color_rules]]
+dir = "~/work"
+color = "blue"
+```
+
+The deepest matching `dir` wins (`~/work/prod/api` is red above, `~/work/app`
+blue). `~` is the home directory; a directory that exists also matches by its
+real path (macOS `/tmp` is `/private/tmp`, a symlinked project). Rules apply
+to local directories only (not a remote ssh cwd). None by default.
 
 ## Profiles
 
@@ -497,6 +644,7 @@ args = ["--private"]
 cwd = "~/code/app"
 title = "Dev"
 color = "green"
+theme = "tokyo-night"            # this profile's panes' colour scheme
 
 [profiles.env]
 NODE_ENV = "development"
@@ -531,6 +679,17 @@ args = ["--noprofile"]
   (`shell_completions`).
 - **Environment** values reach that profile's panes only; the app and other
   panes never see them.
+- **Colour scheme:** `theme` (any name `theme` takes: a builtin, or a file in
+  `themes/`) colours the terminal content of the panes the profile opens:
+  ANSI palette, background, foreground, cursor, selection, block rules and
+  the command line; tabs, title bars and the other chrome keep the window
+  theme. Programs that ask for the colours (OSC 10/11/4) get the pane's.
+  The palette's **Pane theme: <name>** sets the active pane's own scheme
+  over its profile's, **Pane theme: default** puts it back on the window
+  theme; the session keeps it, so a restart restores it. A pane theme is
+  fixed: `sync_os_theme` does not switch it. On a translucent window the
+  pane is filled just enough to show its own ground. A theme name that does
+  not load leaves the pane on the window theme (palette: a toast).
 - **Identity:** a pane remembers the profile name (not its values) it was
   opened with. Duplicate tab, save layout and session restore open that
   profile again; a reattached durable shell keeps running as it was. Editing a
@@ -540,8 +699,78 @@ args = ["--noprofile"]
   launch configuration opens none of its tabs). Only a pane Rift must open
   (a window's first tab, a restored tab, a link, a durable pane whose shell
   had to be started again) runs the global `shell` instead, with that toast. An invalid `[[profiles]]` entry (no or repeated
-  `name`, an unknown `color`, an empty `command`, a NUL byte, `=` in an
+  `name`, a `color` that is neither a colour name nor `#rgb` / `#rrggbb`, an empty `command`, a NUL byte, `=` in an
   environment name) makes config.toml not apply, like any parse error.
+
+## User actions
+
+`[[actions]]` entries are named step sequences (Windows Terminal `sendInput`
+and `multipleActions`). Each is a palette row "Action: <name>" and, with
+`key`, a chord:
+
+```toml
+[[actions]]
+name = "Git status"
+key = "ctrl+alt+s"
+steps = [{ send = "git status\n" }]
+
+[[actions]]
+name = "Dev layout, then logs"
+steps = [{ open = "dev" }, { action = "split_horizontal" }, { send = "tail -f log/dev.log\n" }]
+```
+
+- **Steps** run in order. A step is one of `{ action = "<name>" }` (an action
+  name from [keyboard-shortcuts.md](keyboard-shortcuts.md), or another
+  `[[actions]]` entry's name, whose steps run in its place), `{ send = "text" }`
+  (typed into the target pane: at a prompt into Rift's editor, where `\n`
+  runs the line; in a running program its keys, `\n` being Enter) or
+  `{ open = "<launch configuration>" }`.
+- **Target:** the steps act on the pane focused when the action started. A
+  step that opens a pane (a split, a new tab, a launch configuration) makes
+  that pane the target, and a `send` to it waits for its shell's first
+  prompt (up to 10 s; a shell without integration then gets the text
+  as typed input), so the text reaches the new pane even when you focus
+  another one meanwhile.
+- **Failure:** the first step that cannot run (its pane closed, read-only
+  or kept after its program exited for a `send`, nothing opened, no launch
+  configuration of that name, a confirmation it asked for) stops the action with a toast naming the action and the step.
+  Earlier steps are not undone.
+- **Keys:** an action's `key` wins over a default chord; a `[keybindings]`
+  entry on the same chord wins over the action. Settings → Keybindings
+  binding that chord says it is over the action.
+- **Errors:** an empty or repeated `name`, a name that is a built-in action,
+  a step naming no action, a step with none or more than one of
+  `action`/`send`/`open`, an empty `steps`, more than 32 steps (also once
+  nested actions are expanded), an invalid or repeated `key`, a `send` with
+  a NUL byte or over 4096 characters, or actions that call each other in a
+  cycle make config.toml not apply, with a message naming the action.
+
+## Secret masking
+
+`mask_secrets = true` (off by default; also the palette's **Toggle secret
+masking**) shows secrets as `•` — one per character, so nothing moves — in
+the terminal, block headers and the accessibility tree, and masks them
+wherever text leaves the screen: copies (⌘C, the copy button, Copy output,
+a selection that cuts a secret in half), saved transcripts
+(`save_transcripts`), desktop notifications and what the phone gateway sends.
+The block menu's **Copy output unmasked** copies the output as printed. A
+click on a masked span shows it for 5 seconds.
+
+Built-in patterns: AWS access key ids (`AKIA…`) and secret access keys
+(after `aws_secret_access_key`), GitHub tokens (`ghp_` `gho_` `ghu_` `ghs_`
+`ghr_`, `github_pat_`), Slack tokens (`xox?-`), Stripe live keys
+(`sk_live_`, `rk_live_`), private keys (`-----BEGIN … PRIVATE KEY-----` and
+the block under it), JSON Web Tokens, and the value of `password=`,
+`token:`, `secret=`, `api_key=` and similar assignments. Hashes, UUIDs and
+git SHAs stay readable. `[[secret_patterns]]` adds more (`name`, `regex`, at
+most 64, each at most 1024 bytes; a pattern that does not compile makes
+config.toml not apply). Matching reads only the rows on screen (a token
+soft-wrapped over up to 8 rows is still found), with each line's result
+cached.
+
+Privacy note: masking is a display aid, not a guarantee. A secret no pattern
+knows, one a program printed in pieces, or one shown before masking was
+turned on is not masked, and the shell's own history and logs are untouched.
 
 ## Notifications & bell
 
@@ -631,7 +860,9 @@ Injected automatically at spawn; users' own rc files are always sourced.
   the screen.
 - Environment: `TERM=xterm-256color`, `COLORTERM=truecolor`,
   `TERM_PROGRAM=rift`, `TERM_PROGRAM_VERSION` (Rift's version, not the
-  launching terminal's).
+  launching terminal's), `RIFT_PANE_ID` and `RIFT_PANE_URL` (the pane's
+  `rift://action/focus` link; a durable shell's names its service session,
+  so it survives a restart; see features.md, Pane focus links).
 - Coexists with iTerm2/other integrations that emit their own OSC 133 —
   duplicate markers are tolerated.
 - To opt out, unset the injection (zsh: launch with a custom `shell` pointing

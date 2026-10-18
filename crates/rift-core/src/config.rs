@@ -9,6 +9,24 @@ pub enum CursorStyle {
     Block,
     Bar,
     Underline,
+    /// An outlined block: the glyph under it keeps its colour (Windows
+    /// Terminal "emptyBox").
+    #[serde(alias = "hollow_block")]
+    Hollow,
+    /// Two thin lines under the cell (Windows Terminal "doubleUnderscore").
+    #[serde(rename = "double_underline")]
+    DoubleUnderline,
+}
+
+/// Cells an East Asian Ambiguous character (Unicode EAW=A: `±`, `①`, Greek
+/// and Cyrillic letters, box drawing) takes in the terminal grid. `wide`
+/// is for CJK fonts and programs that expect them two cells wide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AmbiguousWidth {
+    #[default]
+    Narrow,
+    Wide,
 }
 
 /// Where the command editor sits (Warp "Input position").
@@ -29,6 +47,19 @@ pub enum BlocksStart {
     #[default]
     Bottom,
     Top,
+}
+
+/// The terminal's overlay scrollbar with marks (Windows Terminal
+/// `showMarksOnScrollbar`): `auto` shows it while the pane scrolls or the
+/// pointer is over its edge, `always` while there is anything to scroll,
+/// `never` not at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ScrollbarMode {
+    #[default]
+    Auto,
+    Always,
+    Never,
 }
 
 /// Who answers ⌃R, ⌃T and ⌥C in the command editor: the shell's own
@@ -222,6 +253,17 @@ pub enum NewTabPlacement {
     AfterCurrent,
 }
 
+/// What ⌃Tab / ⌃⇧Tab step through: the strip's order, or the tabs last
+/// used first (Windows Terminal `tabSwitcherMode`), with a switcher shown
+/// while ⌃ is held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TabSwitchOrder {
+    #[default]
+    InOrder,
+    Mru,
+}
+
 /// Space between blocks (Warp "Compact mode", inverted: Rift's blocks have
 /// always sat flush): `normal` puts a blank row above every block header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -230,6 +272,31 @@ pub enum BlockSpacing {
     #[default]
     Compact,
     Normal,
+}
+
+/// What a pane does when its program exits (Windows Terminal
+/// `closeOnExit`): close (`always`, Rift's behaviour before), stay with its
+/// last output and a Restart bar (`never`), or close only on exit code 0
+/// (`graceful`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CloseOnExit {
+    #[default]
+    Always,
+    Never,
+    Graceful,
+}
+
+impl CloseOnExit {
+    /// Whether a pane whose program ended with `code` (`None`: not known)
+    /// closes.
+    pub fn closes(self, code: Option<i32>) -> bool {
+        match self {
+            CloseOnExit::Always => true,
+            CloseOnExit::Never => false,
+            CloseOnExit::Graceful => code == Some(0),
+        }
+    }
 }
 
 /// Which end of a horizontal tab its × sits at (Warp
@@ -433,14 +500,58 @@ pub enum Bell {
     None,
 }
 
+/// The screen edge the drop-down hotkey window hangs from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum HotkeyEdge {
+    #[default]
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
+/// How a new window opens: as its saved frame says (`default`), maximized
+/// or full screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum LaunchMode {
+    #[default]
+    Default,
+    Maximized,
+    Fullscreen,
+}
+
+/// Window padding per side in logical px (see [`Config::paddings`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Padding {
+    pub left: f32,
+    pub right: f32,
+    pub top: f32,
+    pub bottom: f32,
+}
+
+/// The top padding of a pane alone in its tab while `window_padding_top`
+/// is unset.
+pub const DEFAULT_PADDING_TOP: f32 = 14.0;
+/// The padding under a full-screen program's last row while
+/// `window_padding_bottom` is unset.
+pub const DEFAULT_PADDING_BOTTOM: f32 = 8.0;
+
 /// An f32 written as its shortest decimal (`1.6`, not the f64 widening
 /// `1.600000023841858`).
 fn short_f32<S: serde::Serializer>(v: &f32, s: S) -> Result<S::Ok, S::Error> {
     s.serialize_f64(v.to_string().parse().unwrap_or(f64::from(*v)))
 }
 
-/// A u8 setting read from any integer, saturating at 0 / 255 (the getter
-/// clamps further): an out-of-range number must not reject the whole file.
+/// [`short_f32`] for an optional setting (skipped when unset).
+fn short_opt_f32<S: serde::Serializer>(v: &Option<f32>, s: S) -> Result<S::Ok, S::Error> {
+    match v {
+        Some(v) => short_f32(v, s),
+        None => s.serialize_none(),
+    }
+}
+
 /// Toolbar items by name; an unknown one (a typo, or an item of a newer
 /// Rift) is skipped with a warning instead of failing the whole file.
 fn toolbar_items<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<ToolbarItem>, D::Error> {
@@ -457,6 +568,44 @@ fn toolbar_items<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<ToolbarIt
         .collect())
 }
 
+/// `font_features` entries; one that is not a feature (see
+/// [`font_feature`]) is dropped with a warning instead of failing the file.
+/// One string is a list of one; any other value is no features.
+fn font_features<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    let specs = match toml::Value::deserialize(d)? {
+        toml::Value::String(s) => vec![s],
+        v => lenient_or(v, "font_features", Vec::new).unwrap_or_default(),
+    };
+    Ok(specs
+        .into_iter()
+        .filter(|f| {
+            let ok = font_feature(f).is_some();
+            if !ok {
+                log::warn!("font_features entry {f:?} is not an OpenType feature (skipped)");
+            }
+            ok
+        })
+        .collect())
+}
+
+/// One `font_features` entry as an OpenType tag and value: `"ss01"` and
+/// `"+ss01"` turn the feature on (1), `"-calt"` off (0), `"cv05=2"` picks
+/// alternate 2. A tag is four ASCII letters or digits.
+pub fn font_feature(spec: &str) -> Option<([u8; 4], u16)> {
+    let spec = spec.trim();
+    let (tag, value) = if let Some(t) = spec.strip_prefix('-') {
+        (t, 0)
+    } else if let Some((t, v)) = spec.split_once('=') {
+        (t.trim(), v.trim().parse().ok()?)
+    } else {
+        (spec.strip_prefix('+').unwrap_or(spec), 1)
+    };
+    let tag: [u8; 4] = tag.as_bytes().try_into().ok()?;
+    tag.iter()
+        .all(u8::is_ascii_alphanumeric)
+        .then_some((tag, value))
+}
+
 /// `app_icon` by name; an unknown one is the default, with a warning.
 fn app_icon<'de, D: serde::Deserializer<'de>>(d: D) -> Result<AppIcon, D::Error> {
     let name = String::deserialize(d)?;
@@ -466,9 +615,80 @@ fn app_icon<'de, D: serde::Deserializer<'de>>(d: D) -> Result<AppIcon, D::Error>
     }))
 }
 
+/// A u8 setting read from any integer, saturating at 0 / 255 (the getter
+/// clamps further): an out-of-range number must not reject the whole file.
 fn saturating_u8<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u8, D::Error> {
     let v = i64::deserialize(d)?;
     Ok(v.clamp(0, 255) as u8)
+}
+
+/// A setting whose value has the wrong type, is out of its type's range or
+/// is not one of its names falls back to its default with a warning: one
+/// bad option must not reject the whole file.
+fn lenient_or<'de, D, T>(d: D, key: &str, fallback: impl FnOnce() -> T) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let value = toml::Value::deserialize(d)?;
+    Ok(T::deserialize(value.clone()).unwrap_or_else(|e| {
+        log::warn!("{key} = {value}: {e} (default used)");
+        fallback()
+    }))
+}
+
+/// [`lenient_or`] for each such setting, named after it, with
+/// `Config::default()`'s value as the fallback.
+mod lenient {
+    use super::{Config, lenient_or};
+    macro_rules! settings {
+        ($($field:ident: $t:ty),* $(,)?) => {$(
+            pub(super) fn $field<'de, D: serde::Deserializer<'de>>(d: D) -> Result<$t, D::Error> {
+                lenient_or(d, stringify!($field), || Config::default().$field)
+            }
+        )*};
+    }
+    settings! {
+        cursor_style: super::CursorStyle,
+        cursor_hollow_unfocused: bool,
+        window_padding_left: Option<f32>,
+        window_padding_right: Option<f32>,
+        window_padding_top: Option<f32>,
+        window_padding_bottom: Option<f32>,
+        alt_screen_padding: bool,
+        font_weight: u16,
+        bold_font_weight: u16,
+        minimum_contrast: f32,
+        bold_is_bright: bool,
+        ambiguous_width: super::AmbiguousWidth,
+        window_width: f32,
+        window_height: f32,
+        launch_mode: super::LaunchMode,
+        always_on_top: bool,
+        snap_to_cells: bool,
+        resize_overlay: bool,
+        wheel_zoom: bool,
+        request_attention: bool,
+        large_paste_warning: u32,
+        trim_paste: bool,
+        hotkey_window_edge: super::HotkeyEdge,
+        word_delimiters: String,
+    }
+
+    /// `hotkey_window_screen`: a name, or a screen number written bare
+    /// (`2` as `"2"`).
+    pub(super) fn hotkey_window_screen<'de, D: serde::Deserializer<'de>>(
+        d: D,
+    ) -> Result<String, D::Error> {
+        use serde::Deserialize;
+        match toml::Value::deserialize(d)? {
+            toml::Value::Integer(n) => Ok(n.to_string()),
+            v => Ok(lenient_or(v, "hotkey_window_screen", || {
+                Config::default().hotkey_window_screen
+            })
+            .unwrap_or_else(|_| Config::default().hotkey_window_screen)),
+        }
+    }
 }
 
 /// User configuration — `~/.config/rift/config.toml`, hot-reloaded.
@@ -481,15 +701,75 @@ pub struct Config {
     /// Multiplier (1.2, as in Warp; the design spec drew 1.65).
     #[serde(serialize_with = "short_f32")]
     pub line_height: f32,
+    #[serde(deserialize_with = "lenient::cursor_style")]
     pub cursor_style: CursorStyle,
+    /// The cursor draws hollow while its window or pane does not have the
+    /// keyboard focus (off: it keeps `cursor_style`).
+    #[serde(deserialize_with = "lenient::cursor_hollow_unfocused")]
+    pub cursor_hollow_unfocused: bool,
     pub cursor_blink: bool,
     /// Theme name: builtin (`dark-default`, `catppuccin-mocha`, `tokyo-night`)
     /// or a file stem in `~/.config/rift/themes/`.
     pub theme: String,
     pub scrollback: usize,
+    /// Left and right padding (logical px). Getter: `paddings()`.
     #[serde(serialize_with = "short_f32")]
     pub window_padding: f32,
+    /// Per-side padding of a pane alone in its tab; unset: `window_padding`
+    /// at the left and right, 14 at the top, 8 under a full-screen
+    /// program's last row (the command editor sits on the bottom edge).
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "short_opt_f32"
+    )]
+    #[serde(deserialize_with = "lenient::window_padding_left")]
+    pub window_padding_left: Option<f32>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "short_opt_f32"
+    )]
+    #[serde(deserialize_with = "lenient::window_padding_right")]
+    pub window_padding_right: Option<f32>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "short_opt_f32"
+    )]
+    #[serde(deserialize_with = "lenient::window_padding_top")]
+    pub window_padding_top: Option<f32>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "short_opt_f32"
+    )]
+    #[serde(deserialize_with = "lenient::window_padding_bottom")]
+    pub window_padding_bottom: Option<f32>,
+    /// Padding around a full-screen program (alternate screen: vim, htop);
+    /// off: its grid fills the pane edge to edge.
+    #[serde(deserialize_with = "lenient::alt_screen_padding")]
+    pub alt_screen_padding: bool,
     pub ligatures: bool,
+    /// Weight of regular terminal text, 100–900 (400 normal). The font
+    /// draws the nearest weight it has.
+    #[serde(deserialize_with = "lenient::font_weight")]
+    pub font_weight: u16,
+    /// Weight of bold (SGR 1) terminal text, 100–900 (700 bold).
+    #[serde(deserialize_with = "lenient::bold_font_weight")]
+    pub bold_font_weight: u16,
+    /// OpenType features of terminal text (`["ss01", "zero", "-calt"]`;
+    /// see [`font_feature`]), applied after `ligatures`.
+    #[serde(deserialize_with = "font_features")]
+    pub font_features: Vec<String>,
+    /// Terminal text keeps at least this contrast ratio against its cell's
+    /// background, 1–21 (1 = off; WCAG AA asks 4.5).
+    #[serde(serialize_with = "short_f32")]
+    #[serde(deserialize_with = "lenient::minimum_contrast")]
+    pub minimum_contrast: f32,
+    /// Bold text in one of the eight ANSI colours draws in its bright
+    /// variant (it stays bold).
+    #[serde(deserialize_with = "lenient::bold_is_bright")]
+    pub bold_is_bright: bool,
+    /// Cells an East Asian Ambiguous character takes (`narrow` 1, `wide` 2).
+    #[serde(deserialize_with = "lenient::ambiguous_width")]
+    pub ambiguous_width: AmbiguousWidth,
     /// Reopen last session's tabs (with cwds) on launch.
     pub restore_session: bool,
     /// Also save finished blocks (command, status, output) and show them
@@ -546,6 +826,30 @@ pub struct Config {
     /// default 1, i.e. none). Visible only below full opacity.
     #[serde(deserialize_with = "saturating_u8")]
     pub window_blur: u8,
+    /// Size of a window opened without a saved frame (logical px).
+    /// Getter: `window_size()`.
+    #[serde(serialize_with = "short_f32")]
+    #[serde(deserialize_with = "lenient::window_width")]
+    pub window_width: f32,
+    #[serde(serialize_with = "short_f32")]
+    #[serde(deserialize_with = "lenient::window_height")]
+    pub window_height: f32,
+    /// How new windows open: `default` (as saved), `maximized`, `fullscreen`.
+    #[serde(deserialize_with = "lenient::launch_mode")]
+    pub launch_mode: LaunchMode,
+    /// New windows float above other apps' windows.
+    #[serde(deserialize_with = "lenient::always_on_top")]
+    pub always_on_top: bool,
+    /// Window resizes snap to whole terminal cells.
+    #[serde(deserialize_with = "lenient::snap_to_cells")]
+    pub snap_to_cells: bool,
+    /// Show the grid's columns × rows while the window is resized.
+    #[serde(deserialize_with = "lenient::resize_overlay")]
+    pub resize_overlay: bool,
+    /// ⌘ + wheel (Ctrl + wheel on Linux) zooms the font; with ⇧ it changes
+    /// the window opacity.
+    #[serde(deserialize_with = "lenient::wheel_zoom")]
+    pub wheel_zoom: bool,
     pub input_position: InputPosition,
     pub blocks_start: BlocksStart,
     pub tab_layout: TabLayout,
@@ -557,6 +861,8 @@ pub struct Config {
     pub tab_bar: TabBarVisibility,
     /// Where ⌘T and the + button put the new tab.
     pub new_tab_placement: NewTabPlacement,
+    /// ⌃Tab order: `in_order` (the strip) or `mru` (last used first).
+    pub tab_switch_order: TabSwitchOrder,
     /// The Dock icon (macOS, also while Rift is not running) and the window
     /// icon (Linux).
     #[serde(deserialize_with = "app_icon")]
@@ -591,6 +897,13 @@ pub struct Config {
     /// bottom of the pane, while the pointer is over it (Warp "Show the
     /// jump to bottom of block button").
     pub jump_to_bottom_button: bool,
+    /// The overlay scrollbar on each pane's right edge, with ticks at
+    /// prompts, failed commands, bookmarks and find matches.
+    pub scrollbar: ScrollbarMode,
+    /// Show secrets (tokens, keys, passwords; built-in patterns plus
+    /// `secret_patterns`) as `••••`, and mask them in copies, transcripts
+    /// and the phone mirror. See `secrets.rs`.
+    pub mask_secrets: bool,
     /// Wash the unfocused split panes so the focused one stands out (Warp
     /// "Dim inactive panes").
     pub dim_inactive_panes: bool,
@@ -601,6 +914,8 @@ pub struct Config {
     /// The split pane under the pointer takes focus as the pointer moves
     /// (Warp "Focus follows mouse").
     pub focus_follows_mouse: bool,
+    /// What a pane does when its program exits.
+    pub close_on_exit: CloseOnExit,
     pub prompt: PromptMode,
     /// The Rift prompt's chips, in order (`prompt = "rift"`).
     pub prompt_chips: Vec<PromptChip>,
@@ -623,6 +938,9 @@ pub struct Config {
     pub autocomplete_pairs: bool,
     /// Modal (vim) editing in the command editor.
     pub vim_mode: bool,
+    /// Vim mode's unnamed register: `"none"` keeps it inside Rift,
+    /// `"unnamed"` makes it the system clipboard (vim's `clipboard=unnamed`).
+    pub vim_clipboard: String,
     /// Alert (toast, and a desktop notification while the window is not
     /// focused) when a long command finishes.
     pub notify_on_completion: bool,
@@ -632,12 +950,23 @@ pub struct Config {
     /// Dock tile badge (macOS).
     pub show_progress: bool,
     pub bell: Bell,
+    /// A bell or an alert while no Rift window has focus bounces the Dock
+    /// icon once (macOS) or sets the window's urgency hint (Linux).
+    #[serde(deserialize_with = "lenient::request_attention")]
+    pub request_attention: bool,
     /// Warn before closing a pane, tab or window (or quitting) while a
     /// command is still running in it.
     pub confirm_close_running: bool,
     /// Ask before pasting text containing a newline into a raw program that
     /// has not enabled bracketed paste (each newline would press Enter).
     pub confirm_multiline_paste: bool,
+    /// Ask before a paste larger than this many KiB; 0: never.
+    #[serde(deserialize_with = "lenient::large_paste_warning")]
+    pub large_paste_warning: u32,
+    /// Drop trailing whitespace and newlines from pasted text (a copied
+    /// line no longer runs when pasted).
+    #[serde(deserialize_with = "lenient::trim_paste")]
+    pub trim_paste: bool,
     /// Where new tabs and panes start: `"previous"` (the active pane's
     /// directory), `"home"`, or an absolute path (`~` expands).
     pub working_directory: String,
@@ -662,6 +991,18 @@ pub struct Config {
     /// Getter: `hotkey_window_height()`.
     #[serde(deserialize_with = "saturating_u8")]
     pub hotkey_window_height: u8,
+    /// The screen edge it hangs from: `top`, `bottom`, `left`, `right`.
+    /// At the left or right edge `hotkey_window_height` is its width.
+    #[serde(deserialize_with = "lenient::hotkey_window_edge")]
+    pub hotkey_window_edge: HotkeyEdge,
+    /// Its size along that edge in percent of the screen, 20–100, centred.
+    /// Getter: `hotkey_window_width()`.
+    #[serde(deserialize_with = "saturating_u8")]
+    pub hotkey_window_width: u8,
+    /// The screen it drops onto: `pointer` (the one with the mouse
+    /// pointer), `primary`, or a screen's number (`1` is the primary).
+    #[serde(deserialize_with = "lenient::hotkey_window_screen")]
+    pub hotkey_window_screen: String,
     /// The drop-down window hides when it loses keyboard focus.
     pub hotkey_window_hide_on_blur: bool,
     /// macOS: Rift opens when you log in (a login item).
@@ -692,6 +1033,15 @@ pub struct Config {
     /// reporting (vim, tmux, htop). Hold Shift to select text instead.
     /// Focus in/out reports (mode 1004) do not depend on it.
     pub mouse_reporting: bool,
+    /// Extra characters a double-click counts as part of a word (Warp's
+    /// `word_char_allowlist`), e.g. `"-./"`. Empty: the default word
+    /// boundaries.
+    pub word_chars: String,
+    /// Characters that also end a word, e.g. `"/.-"`: for a double-click
+    /// and for the command editor's word moves and deletes (⌥← ⌥→ ⌥⌫),
+    /// which otherwise stop at blanks only.
+    #[serde(deserialize_with = "lenient::word_delimiters")]
+    pub word_delimiters: String,
     /// Where ⌘-clicked file paths and file links open: `"system"` (the
     /// file's default app), `"rift"` (the viewer pane) or an editor id
     /// from `editors::EDITORS` (`"vscode"`, `"zed"`, …).
@@ -715,6 +1065,15 @@ pub struct Config {
     /// Reusable launch settings (`[[profiles]]`): program, arguments,
     /// directory, environment, tab title and colour. See `profiles.rs`.
     pub profiles: Vec<crate::profiles::Profile>,
+    /// Named step sequences (`[[actions]]`): palette rows and chords. See
+    /// `actions.rs`.
+    pub actions: Vec<crate::actions::UserAction>,
+    /// More secret patterns for `mask_secrets` (`[[secret_patterns]]`:
+    /// `name`, `regex`).
+    pub secret_patterns: Vec<crate::secrets::SecretPattern>,
+    /// Directory rules for tab colours (`[[tab_color_rules]]`: `dir`,
+    /// `color`); a tab's own colour wins. See `tab_color.rs`.
+    pub tab_color_rules: Vec<crate::tab_color::TabColorRule>,
     /// Overrides: action name → binding (e.g. `new_tab = "ctrl+shift+t"`).
     pub keybindings: BTreeMap<String, String>,
 }
@@ -726,11 +1085,23 @@ impl Default for Config {
             font_size: 13.0,
             line_height: 1.2,
             cursor_style: CursorStyle::Block,
+            cursor_hollow_unfocused: false,
             cursor_blink: true,
             theme: "dark-default".into(),
             scrollback: 10_000,
             window_padding: 8.0,
+            window_padding_left: None,
+            window_padding_right: None,
+            window_padding_top: None,
+            window_padding_bottom: None,
+            alt_screen_padding: true,
             ligatures: true,
+            font_weight: 400,
+            bold_font_weight: 700,
+            font_features: Vec::new(),
+            minimum_contrast: 1.0,
+            bold_is_bright: false,
+            ambiguous_width: AmbiguousWidth::Narrow,
             restore_session: true,
             save_transcripts: false,
             durable_sessions: true,
@@ -748,6 +1119,13 @@ impl Default for Config {
             sync_os_theme: false,
             window_opacity: 0.5,
             window_blur: 20,
+            window_width: 1180.0,
+            window_height: 760.0,
+            launch_mode: LaunchMode::Default,
+            always_on_top: false,
+            snap_to_cells: false,
+            resize_overlay: false,
+            wheel_zoom: false,
             input_position: InputPosition::Bottom,
             blocks_start: BlocksStart::Bottom,
             tab_layout: TabLayout::Horizontal,
@@ -755,6 +1133,7 @@ impl Default for Config {
             tab_close_side: TabCloseSide::Right,
             tab_bar: TabBarVisibility::Always,
             new_tab_placement: NewTabPlacement::End,
+            tab_switch_order: TabSwitchOrder::InOrder,
             app_icon: AppIcon::Default,
             toolbar_left: vec![ToolbarItem::Explorer],
             toolbar_right: vec![ToolbarItem::Notifications, ToolbarItem::Review],
@@ -766,9 +1145,12 @@ impl Default for Config {
             subshell_denylist: Vec::new(),
             block_dividers: false,
             jump_to_bottom_button: true,
+            scrollbar: ScrollbarMode::Auto,
+            mask_secrets: false,
             dim_inactive_panes: true,
             inactive_pane_dim: 10,
             focus_follows_mouse: false,
+            close_on_exit: CloseOnExit::Always,
             prompt: PromptMode::Rift,
             prompt_chips: PromptChip::defaults(),
             elapsed_counts: ElapsedCounts::Always,
@@ -779,12 +1161,16 @@ impl Default for Config {
             shell_widgets: ShellWidgets::Auto,
             autocomplete_pairs: true,
             vim_mode: false,
+            vim_clipboard: "none".into(),
             notify_on_completion: true,
             notify_threshold_secs: 10,
             show_progress: true,
             bell: Bell::Both,
+            request_attention: false,
             confirm_close_running: true,
             confirm_multiline_paste: true,
+            large_paste_warning: 0,
+            trim_paste: false,
             working_directory: "previous".into(),
             alias_expansion: false,
             rich_input_submit: RichInputSubmit::Enter,
@@ -794,6 +1180,9 @@ impl Default for Config {
             global_hotkey: String::new(),
             hotkey_window: false,
             hotkey_window_height: 40,
+            hotkey_window_edge: HotkeyEdge::Top,
+            hotkey_window_width: 100,
+            hotkey_window_screen: "pointer".into(),
             hotkey_window_hide_on_blur: true,
             launch_at_login: false,
             menu_bar_icon: true,
@@ -803,6 +1192,8 @@ impl Default for Config {
             wheel_scroll_lines: 3,
             clipboard_access: "write".into(),
             mouse_reporting: true,
+            word_chars: String::new(),
+            word_delimiters: String::new(),
             link_editor: crate::editors::RIFT.into(),
             link_click: "open".into(),
             file_editor: crate::editors::RIFT.into(),
@@ -810,6 +1201,9 @@ impl Default for Config {
             notifications: Default::default(),
             ssh_profiles: Vec::new(),
             profiles: Vec::new(),
+            actions: Vec::new(),
+            secret_patterns: Vec::new(),
+            tab_color_rules: Vec::new(),
             keybindings: BTreeMap::new(),
         }
     }
@@ -874,7 +1268,15 @@ fn relay_of(setting: &str, no_default: bool) -> Option<&str> {
 
 /// Top-level `Option` settings: absent from a serialized default, so
 /// `merge_table` cannot tell them from unknown keys without this list.
-const OPTIONAL_KEYS: &[&str] = &["shell", "default_profile", "right_option_as_meta"];
+const OPTIONAL_KEYS: &[&str] = &[
+    "shell",
+    "default_profile",
+    "right_option_as_meta",
+    "window_padding_left",
+    "window_padding_right",
+    "window_padding_top",
+    "window_padding_bottom",
+];
 
 /// Make `doc` hold `new` (see `Config::edit_toml`). `default` is the same
 /// table for a default config; an empty `default` marks a map such as
@@ -1000,6 +1402,9 @@ impl Config {
                     // an invalid `[[profiles]]` entry rejects the file like
                     // a parse error: the last good config stays
                     crate::profiles::validate(&c.profiles)?;
+                    // so does an invalid or cyclic `[[actions]]` entry
+                    crate::actions::validate(&c.actions, &crate::keybindings::all_actions())?;
+                    crate::secrets::validate(&c.secret_patterns)?;
                     Ok(Some(c.migrated()))
                 })
                 .map_err(|e| format!("{}: {e}", path.display())),
@@ -1180,6 +1585,99 @@ impl Config {
         }
     }
 
+    /// Regular and bold text weights, each clamped to 100–900.
+    pub fn font_weights(&self) -> (u16, u16) {
+        (
+            self.font_weight.clamp(100, 900),
+            self.bold_font_weight.clamp(100, 900),
+        )
+    }
+
+    /// `font_features` as OpenType tags and values, in order (a later entry
+    /// for the same tag wins when they are applied).
+    pub fn font_feature_tags(&self) -> Vec<([u8; 4], u16)> {
+        self.font_features
+            .iter()
+            .filter_map(|f| font_feature(f))
+            .collect()
+    }
+
+    /// `minimum_contrast` clamped to 1–21 (1 when not a number).
+    pub fn min_contrast(&self) -> f32 {
+        if self.minimum_contrast.is_finite() {
+            self.minimum_contrast.clamp(1.0, 21.0)
+        } else {
+            1.0
+        }
+    }
+
+    /// Padding per side of a pane alone in its tab, each clamped to 0–40;
+    /// `alt_screen`: the pane shows a full-screen program, which gets none
+    /// with `alt_screen_padding` off.
+    pub fn paddings(&self, alt_screen: bool) -> Padding {
+        if alt_screen && !self.alt_screen_padding {
+            return Padding {
+                left: 0.0,
+                right: 0.0,
+                top: 0.0,
+                bottom: 0.0,
+            };
+        }
+        let side = |v: Option<f32>, default: f32| match v {
+            Some(v) if v.is_finite() => v.clamp(0.0, 40.0),
+            _ => default,
+        };
+        Padding {
+            left: side(self.window_padding_left, self.padding()),
+            right: side(self.window_padding_right, self.padding()),
+            top: side(self.window_padding_top, DEFAULT_PADDING_TOP),
+            bottom: side(self.window_padding_bottom, DEFAULT_PADDING_BOTTOM),
+        }
+    }
+
+    /// `window_width` × `window_height`, each at least 320 × 200 and at
+    /// most 16384 (the default for a value that is not a number).
+    pub fn window_size(&self) -> (f64, f64) {
+        let dim = |v: f32, min: f64, default: f64| {
+            if v.is_finite() {
+                f64::from(v).clamp(min, 16384.0)
+            } else {
+                default
+            }
+        };
+        (
+            dim(self.window_width, 320.0, 1180.0),
+            dim(self.window_height, 200.0, 760.0),
+        )
+    }
+
+    /// Paste size above which Rift asks first, in bytes; `None`: never.
+    pub fn large_paste_bytes(&self) -> Option<usize> {
+        (self.large_paste_warning > 0).then(|| self.large_paste_warning as usize * 1024)
+    }
+
+    /// Drop-down window size along its edge, clamped to 20–100 %.
+    pub fn hotkey_window_width(&self) -> u8 {
+        self.hotkey_window_width.clamp(20, 100)
+    }
+
+    /// The screen the drop-down window uses: `None` for the pointer's,
+    /// else a 0-based screen index (0 is the primary). An unknown value is
+    /// the pointer's screen.
+    pub fn hotkey_screen(&self) -> Option<usize> {
+        match self.hotkey_window_screen.trim() {
+            "" | "pointer" => None,
+            "primary" => Some(0),
+            n => match n.parse::<usize>() {
+                Ok(n) if n >= 1 => Some(n - 1),
+                _ => {
+                    log::warn!("hotkey_window_screen {n:?} is not a screen (pointer used)");
+                    None
+                }
+            },
+        }
+    }
+
     /// Scrollback lines clamped to 0–1,000,000 (a hand-edited file can hold
     /// any `usize`, and the terminal allocates per line).
     pub fn scrollback_lines(&self) -> usize {
@@ -1349,6 +1847,162 @@ mod tests {
         assert_eq!(high.hotkey_window_height(), 100);
         let neg: Config = toml::from_str("hotkey_window_height = -1").unwrap();
         assert_eq!(neg.hotkey_window_height(), 20);
+    }
+
+    #[test]
+    fn hotkey_window_edge_width_and_screen() {
+        let c = Config::default();
+        assert_eq!(
+            (
+                c.hotkey_window_edge,
+                c.hotkey_window_width(),
+                c.hotkey_screen()
+            ),
+            (HotkeyEdge::Top, 100, None)
+        );
+        let set: Config = toml::from_str(
+            "hotkey_window_edge = \"left\"\nhotkey_window_width = 5\nhotkey_window_screen = \"2\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                set.hotkey_window_edge,
+                set.hotkey_window_width(),
+                set.hotkey_screen()
+            ),
+            (HotkeyEdge::Left, 20, Some(1))
+        );
+        let mut c = Config::default();
+        for (v, want) in [
+            ("primary", Some(0)),
+            ("1", Some(0)),
+            ("0", None),
+            ("x", None),
+        ] {
+            c.hotkey_window_screen = v.into();
+            assert_eq!(c.hotkey_screen(), want, "{v}");
+        }
+    }
+
+    #[test]
+    fn one_bad_tier3_value_falls_back_alone() {
+        let d = Config::default();
+        // each line alone is a bad value of its setting; the file still
+        // loads, that setting is its default and the next line's is kept
+        for bad in [
+            "cursor_style = \"triangle\"",
+            "cursor_hollow_unfocused = \"yes\"",
+            "window_padding_left = \"wide\"",
+            "window_padding_top = [1]",
+            "alt_screen_padding = 1",
+            "font_weight = -1",
+            "font_weight = 70000",
+            "bold_font_weight = \"bold\"",
+            "minimum_contrast = \"high\"",
+            "bold_is_bright = 1",
+            "ambiguous_width = \"medium\"",
+            "window_width = \"big\"",
+            "window_height = true",
+            "launch_mode = \"maximised\"",
+            "always_on_top = \"on\"",
+            "snap_to_cells = 0",
+            "resize_overlay = \"on\"",
+            "wheel_zoom = 1",
+            "request_attention = \"y\"",
+            "large_paste_warning = -5",
+            "large_paste_warning = 1e3",
+            "trim_paste = \"y\"",
+            "hotkey_window_edge = \"middle\"",
+            "hotkey_window_screen = true",
+            "word_delimiters = 5",
+            "font_features = 5",
+        ] {
+            let c: Config = toml::from_str(&format!("{bad}\nfont_size = 17\n"))
+                .unwrap_or_else(|e| panic!("{bad}: {e}"));
+            assert_eq!(c.font_size, 17.0, "{bad}");
+            let key = bad.split(' ').next().unwrap();
+            // (an unset optional setting is absent)
+            let back = |c: &Config| toml::Value::try_from(c).unwrap().get(key).cloned();
+            let mut want = d.clone();
+            want.font_size = 17.0;
+            assert_eq!(back(&c), back(&want), "{bad}");
+        }
+        // a single feature string is a list of one
+        let c: Config = toml::from_str("font_features = \"zero\"").unwrap();
+        assert_eq!(c.font_features, ["zero"]);
+        // a bare screen number is its name
+        let c: Config = toml::from_str("hotkey_window_screen = 2").unwrap();
+        assert_eq!(c.hotkey_screen(), Some(1));
+        // good values still read
+        let c: Config = toml::from_str(
+            "font_weight = 300\nlaunch_mode = \"maximized\"\nwindow_padding_top = 3",
+        )
+        .unwrap();
+        assert_eq!(
+            (c.font_weight, c.launch_mode, c.window_padding_top),
+            (300, LaunchMode::Maximized, Some(3.0))
+        );
+    }
+
+    #[test]
+    fn paddings_default_to_the_old_layout_and_set_per_side() {
+        let c = Config::default();
+        let p = c.paddings(false);
+        assert_eq!((p.left, p.right, p.top, p.bottom), (8.0, 8.0, 14.0, 8.0));
+        // the alternate screen keeps them unless alt_screen_padding is off
+        assert_eq!(c.paddings(true), p);
+        let set: Config = toml::from_str(
+            "window_padding = 12\nwindow_padding_right = 2.5\nwindow_padding_top = 99\n\
+             window_padding_bottom = -3\nalt_screen_padding = false\n",
+        )
+        .unwrap();
+        let p = set.paddings(false);
+        assert_eq!((p.left, p.right, p.top, p.bottom), (12.0, 2.5, 40.0, 0.0));
+        let left = Config {
+            window_padding_left: Some(30.0),
+            ..set.clone()
+        };
+        assert_eq!(
+            (left.paddings(false).left, left.paddings(false).right),
+            (30.0, 2.5)
+        );
+        let alt = set.paddings(true);
+        assert_eq!(
+            (alt.left, alt.right, alt.top, alt.bottom),
+            (0.0, 0.0, 0.0, 0.0)
+        );
+        // unset sides stay out of config.toml; a set one is written short
+        let text = toml::to_string(&set).unwrap();
+        assert!(text.contains("window_padding_right = 2.5\n"), "{text}");
+        assert!(!text.contains("window_padding_left"), "{text}");
+        assert!(
+            !toml::to_string(&Config::default())
+                .unwrap()
+                .contains("window_padding_top")
+        );
+    }
+
+    #[test]
+    fn window_size_paste_and_launch_defaults() {
+        let c = Config::default();
+        assert_eq!(c.window_size(), (1180.0, 760.0));
+        assert_eq!(c.launch_mode, LaunchMode::Default);
+        assert_eq!(c.large_paste_bytes(), None);
+        assert!(!c.trim_paste && !c.always_on_top && !c.snap_to_cells);
+        assert!(!c.resize_overlay && !c.wheel_zoom && !c.request_attention);
+        let set: Config = toml::from_str(
+            "window_width = 100\nwindow_height = 90000\nlaunch_mode = \"maximized\"\n\
+             large_paste_warning = 5\n",
+        )
+        .unwrap();
+        assert_eq!(set.window_size(), (320.0, 16384.0));
+        assert_eq!(set.launch_mode, LaunchMode::Maximized);
+        assert_eq!(set.large_paste_bytes(), Some(5120));
+        let nan = Config {
+            window_width: f32::NAN,
+            ..Default::default()
+        };
+        assert_eq!(nan.window_size().0, 1180.0);
     }
 
     #[test]
@@ -1540,6 +2194,19 @@ mod tests {
         assert_eq!(c.inactive_pane_dim, 10);
         assert_eq!(c.inactive_pane_dim(), 0.10);
         assert!(!c.focus_follows_mouse);
+        assert_eq!(c.close_on_exit, CloseOnExit::Always);
+    }
+
+    #[test]
+    fn close_on_exit_parses_and_decides() {
+        let c: Config = toml::from_str("close_on_exit = \"graceful\"").unwrap();
+        assert_eq!(c.close_on_exit, CloseOnExit::Graceful);
+        assert!(CloseOnExit::Graceful.closes(Some(0)));
+        assert!(!CloseOnExit::Graceful.closes(Some(1)));
+        assert!(!CloseOnExit::Graceful.closes(None));
+        assert!(CloseOnExit::Always.closes(Some(2)));
+        assert!(!CloseOnExit::Never.closes(Some(0)));
+        assert!(toml::from_str::<Config>("close_on_exit = \"sometimes\"").is_err());
     }
 
     #[test]
@@ -1599,6 +2266,46 @@ mod tests {
         assert_eq!(c.font_size, 15.0);
         assert_eq!(c.theme, "dark-default");
         assert!(c.ligatures);
+    }
+
+    #[test]
+    fn text_rendering_options() {
+        // defaults keep today's rendering
+        let d = Config::default();
+        assert_eq!(d.font_weights(), (400, 700));
+        assert!(d.font_feature_tags().is_empty());
+        assert_eq!(d.min_contrast(), 1.0);
+        assert!(!d.bold_is_bright && !d.cursor_hollow_unfocused);
+        assert_eq!(d.ambiguous_width, AmbiguousWidth::Narrow);
+
+        let c: Config = toml::from_str(
+            "font_weight = 350\nbold_font_weight = 2000\nminimum_contrast = 4.5\n\
+             bold_is_bright = true\nambiguous_width = \"wide\"\n\
+             cursor_style = \"double_underline\"\ncursor_hollow_unfocused = true\n\
+             font_features = [\"ss01\", \"+zero\", \"-calt\", \"cv05=2\", \"bogus\", \"ss0\"]",
+        )
+        .unwrap();
+        assert_eq!(c.font_weights(), (350, 900), "clamped to 100–900");
+        assert_eq!(
+            c.font_feature_tags(),
+            vec![(*b"ss01", 1), (*b"zero", 1), (*b"calt", 0), (*b"cv05", 2)]
+        );
+        assert_eq!(c.font_features.len(), 4, "invalid entries are dropped");
+        assert_eq!(c.min_contrast(), 4.5);
+        assert!(c.bold_is_bright && c.cursor_hollow_unfocused);
+        assert_eq!(c.ambiguous_width, AmbiguousWidth::Wide);
+        assert_eq!(c.cursor_style, CursorStyle::DoubleUnderline);
+        let hollow: Config = toml::from_str("cursor_style = \"hollow\"").unwrap();
+        assert_eq!(hollow.cursor_style, CursorStyle::Hollow);
+        let huge: Config = toml::from_str("minimum_contrast = 99.0").unwrap();
+        assert_eq!(huge.min_contrast(), 21.0);
+        let nan: Config = toml::from_str("minimum_contrast = nan").unwrap();
+        assert_eq!(nan.min_contrast(), 1.0);
+        assert_eq!(font_feature("cv05=x"), None);
+        assert_eq!(font_feature("s s1"), None);
+        // and they round-trip through the writer
+        let back: Config = toml::from_str(&toml::to_string(&c).unwrap()).unwrap();
+        assert_eq!(back, c);
     }
 
     #[test]
@@ -1795,6 +2502,95 @@ mod tests {
         let err = Config::try_load_from(&path).unwrap_err();
         assert!(err.contains("config.toml"), "{err}");
         assert_eq!(Config::fallback().control_api, "off");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn actions_and_tab_order_load_save_back_and_reject_cycles() {
+        let c = Config::default();
+        assert!(c.actions.is_empty());
+        assert_eq!(c.tab_switch_order, TabSwitchOrder::InOrder);
+        let src = r#"tab_switch_order = "mru"
+
+[[actions]]
+name = "Watch"
+key = "ctrl+alt+h"
+steps = [{ action = "split_vertical" }, { send = "htop\n" }]
+"#;
+        let c: Config = toml::from_str(src).unwrap();
+        assert_eq!(c.tab_switch_order, TabSwitchOrder::Mru);
+        assert_eq!(c.actions[0].steps.len(), 2);
+        let out = c.edit_toml(Some(src)).unwrap();
+        assert_eq!(toml::from_str::<Config>(&out).unwrap(), c, "{out}");
+        let out = c.edit_toml(None).unwrap();
+        assert_eq!(toml::from_str::<Config>(&out).unwrap(), c, "{out}");
+        assert!(toml::from_str::<Config>("tab_switch_order = \"random\"").is_err());
+
+        let dir = scratch("actions");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, src).unwrap();
+        assert!(Config::try_load_from(&path).unwrap().is_some());
+        let cyclic = "[[actions]]\nname = \"a\"\nsteps = [{ action = \"b\" }]\n\
+                      [[actions]]\nname = \"b\"\nsteps = [{ action = \"a\" }]\n";
+        std::fs::write(&path, cyclic).unwrap();
+        let err = Config::try_load_from(&path).unwrap_err();
+        assert!(
+            err.contains("config.toml") && err.contains("cycle (a, b, a)"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn tab_color_rules_parse_and_round_trip() {
+        let dir = scratch("tab-color-rules");
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "theme = \"nord\"\n\n[[tab_color_rules]]\ndir = \"~/work/prod\"\ncolor = \"#ff3b30\"\n\n\
+             [[tab_color_rules]]\ndir = \"/srv\"\ncolor = \"green\"\n",
+        )
+        .unwrap();
+        let c = Config::try_load_from(&path).unwrap().unwrap();
+        assert_eq!(c.tab_color_rules.len(), 2);
+        assert_eq!(c.tab_color_rules[0].dir, "~/work/prod");
+        assert_eq!(c.tab_color_rules[1].color, "green");
+        let out = toml::to_string(&c).unwrap();
+        assert_eq!(toml::from_str::<Config>(&out).unwrap(), c);
+    }
+
+    #[test]
+    fn scrollbar_and_secret_masking_parse_and_bad_patterns_are_refused() {
+        // absent: masking off, the scrollbar on `auto`
+        let c = Config::default();
+        assert!(!c.mask_secrets && c.secret_patterns.is_empty());
+        assert!(
+            c.tab_color_rules.is_empty(),
+            "no directory rules by default"
+        );
+        assert_eq!(c.scrollbar, ScrollbarMode::Auto);
+        let dir = scratch("secrets");
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "scrollbar = \"never\"\nmask_secrets = true\n\n[[secret_patterns]]\n\
+             name = \"corp\"\nregex = 'corp-[0-9]{6}'\n",
+        )
+        .unwrap();
+        let c = Config::try_load_from(&path).unwrap().unwrap();
+        assert_eq!(c.scrollbar, ScrollbarMode::Never);
+        assert!(c.mask_secrets);
+        assert_eq!(c.secret_patterns[0].name, "corp");
+        // saved back, the table stays after the plain keys
+        let out = toml::to_string(&c).unwrap();
+        assert_eq!(toml::from_str::<Config>(&out).unwrap(), c);
+        // a pattern that does not compile refuses the file
+        std::fs::write(
+            &path,
+            "[[secret_patterns]]\nname = \"bad\"\nregex = '(unclosed'\n",
+        )
+        .unwrap();
+        let err = Config::try_load_from(&path).unwrap_err();
+        assert!(err.contains("secret pattern \"bad\""), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

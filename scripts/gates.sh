@@ -5,6 +5,7 @@
 #   scripts/gates.sh                 # default set: fmt clippy test doc shell docs mobile
 #   scripts/gates.sh all             # default set + release + ui + linux
 #   scripts/gates.sh fmt clippy      # only the named gates
+#   scripts/gates.sh ui --only NAME  # only these ui-smoke.py sections (scripts/ui-smoke.sh)
 #   scripts/gates.sh --list          # describe every gate
 #
 # Every requested gate runs even after a failure, so one pass shows every
@@ -36,10 +37,12 @@ shell    shellcheck on packaging/*.sh, scripts/*.sh, .githooks/*, bash hooks; zs
 docs     CLAUDE.md and AGENTS.md identical; every relative link in *.md resolves (vendored crates' upstream docs excepted)
 mobile   the Expo companion in mobile/: pnpm install --frozen-lockfile, typecheck, eslint, vitest (incl. the shared protocol fixtures)
 release  cargo build --release --locked
-ui       isolated scripted UI regressions (display or xvfb-run required)
+ui       isolated scripted UI regressions (display or xvfb-run required), RIFT_UI_SHARDS (default 2) parallel shards
+         of scripts/ui-smoke.py's independent section groups; --only NAME[,NAME] runs only those sections' groups
+         (python3 scripts/ui-smoke.py BINARY --list names them); RIFT_UI_SHARDS=1 runs the file serially
 leak     memory soak on the release build: repeated identical work (a ticking program, output past scrollback, a command printing lines without end,
          opening and closing tabs, splits and overlays) must level off (scripts/leak-soak.py; ~5 min)
-linux    clippy + test + doc + release build in packaging/linux-verify.Dockerfile, then shell + scripted UI (xvfb) on the CI runner's packages in packaging/ci-ubuntu.Dockerfile (docker)
+linux    clippy + test + doc + release build in packaging/linux-verify.Dockerfile, then shell + scripted UI (xvfb, RIFT_UI_SHARDS shards) on the CI runner's packages in packaging/ci-ubuntu.Dockerfile (docker)
 EOF
 }
 
@@ -183,6 +186,7 @@ gate_linux() {
         -e RIFT_PHONE_BIN=/src/target/linux-docker/release/examples/phone \
         -e RIFT_RELAY_BIN=/src/target/linux-docker/release/rift-relay \
         -e LIBGL_ALWAYS_SOFTWARE=1 -e WGPU_BACKEND=vulkan -e RIFT_LEAK_SHOWN=1 \
+        -e RIFT_UI_SHARDS="${RIFT_UI_SHARDS:-2}" \
         rift-ci-ubuntu bash -c 'scripts/gates.sh shell && xvfb-run -a scripts/gates.sh ui leak'
 }
 
@@ -258,8 +262,24 @@ cur_pid=""
 
 case "${1:-}" in
     --list | -l) describe; exit 0 ;;
-    --help | -h) sed -n '3,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --help | -h) sed -n '3,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 esac
+
+# `--only NAME[,NAME]` is the ui gate's: scripts/ui-smoke.sh reads RIFT_UI_ONLY
+args=()
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --only) [[ $# -ge 2 ]] || { echo "--only needs a section name" >&2; exit 2; }
+            export RIFT_UI_ONLY=$2; shift 2 ;;
+        --only=*) export RIFT_UI_ONLY=${1#--only=}; shift ;;
+        *) args+=("$1"); shift ;;
+    esac
+done
+set -- ${args[@]+"${args[@]}"}
+if [[ -n ${RIFT_UI_ONLY:-} && " $* " != *" ui "* ]]; then
+    echo "--only selects ui-smoke.py sections: name the ui gate (scripts/gates.sh ui --only NAME)" >&2
+    exit 2
+fi
 
 if [[ $# -eq 0 ]]; then
     gates=("${DEFAULT[@]}")

@@ -17,8 +17,8 @@ struct Inst {
     @location(4) radius: f32,             // corner radius
     @location(5) border_width: f32,       // inner ring width (line: stroke width), 0 = none
     @location(6) softness: f32,           // blur sigma for shadow/glow, 0 = crisp
-    @location(7) kind: f32,               // 0 = rounded box, 1 = line segment
-    @location(8) line: vec4<f32>,         // segment end points (a.xy, b.xy)
+    @location(7) kind: f32,               // 0 = rounded box, 1 = line segment, 2 = gradient box
+    @location(8) line: vec4<f32>,         // segment end points (a.xy, b.xy); gradient axis (xy)
     @location(9) clip: vec4<f32>,         // rounded clip rect, w <= 0 = none
     @location(10) clip_radius: f32,
 };
@@ -106,7 +106,14 @@ fn sd_segment(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var col = in.color;
     var alpha: f32;
-    if (in.kind > 0.5) {
+    if (in.kind > 1.5) {
+        // two-stop gradient: color at the start edge, border_color at the
+        // end edge of the axis (sRGB space, like CSS linear-gradient)
+        let span = max(in.half_size * 2.0, vec2<f32>(0.0001));
+        let t = clamp(dot(in.local / span, in.line.xy) + 0.5, 0.0, 1.0);
+        col = mix(in.color, in.border_color, t);
+    }
+    if (in.kind > 0.5 && in.kind < 1.5) {
         // round-capped stroke; coverage over one pixel for crisp edges
         let d = sd_segment(in.world, in.line.xy, in.line.zw) - in.border_width * 0.5;
         alpha = clamp(0.5 - d, 0.0, 1.0);

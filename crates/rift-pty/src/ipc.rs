@@ -120,6 +120,10 @@ pub enum Event {
     },
     Exited {
         session: u64,
+        /// The shell's exit code (128 + signal when killed). Absent from
+        /// services older than this field, or when it could not be read.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<i32>,
     },
     Sessions {
         sessions: Vec<SessionInfo>,
@@ -451,7 +455,10 @@ mod tests {
                 job: Some("sudo".into()),
                 hidden: true,
             },
-            Event::Exited { session: 3 },
+            Event::Exited {
+                session: 3,
+                code: None,
+            },
             Event::Sessions {
                 sessions: vec![SessionInfo {
                     id: 3,

@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 pub const SHELLS_FILE: &str = "/etc/shells";
 
 /// The tab colours a profile may name (the tab menu's colours).
-pub const TAB_COLOR_NAMES: [&str; 6] = ["red", "green", "yellow", "blue", "magenta", "cyan"];
+pub const TAB_COLOR_NAMES: [&str; 6] = crate::tab_color::NAMES;
 
 /// One `[[profiles]]` entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,13 +40,18 @@ pub struct Profile {
     /// Tab title of a tab this profile opens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// Tab colour of a tab this profile opens (one of [`TAB_COLOR_NAMES`]).
+    /// Tab colour of a tab this profile opens (one of [`TAB_COLOR_NAMES`]
+    /// or `#rrggbb`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
     /// The glyph its menu row shows, by name (`python`, `docker`, …; see
     /// the app's `glyphs::by_name`); unset or unknown: a terminal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
+    /// The colour scheme its panes' terminal content renders in (a theme
+    /// name, as `theme`); the window's chrome keeps the window theme.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme: Option<String>,
     /// Found in the shells file rather than written by the user.
     #[serde(skip)]
     pub discovered: bool,
@@ -63,6 +68,7 @@ impl Profile {
             title: None,
             color: None,
             icon: None,
+            theme: None,
             discovered: true,
         }
     }
@@ -90,10 +96,10 @@ pub fn validate(profiles: &[Profile]) -> Result<(), String> {
             return Err(format!("{label}: command is empty"));
         }
         if let Some(c) = &p.color
-            && !TAB_COLOR_NAMES.contains(&c.trim().to_ascii_lowercase().as_str())
+            && crate::tab_color::TabColor::parse(c).is_none()
         {
             return Err(format!(
-                "{label}: color {c:?} is not one of {}",
+                "{label}: color {c:?} is not one of {} or #rrggbb",
                 TAB_COLOR_NAMES.join(", ")
             ));
         }
@@ -192,7 +198,15 @@ pub struct PaneLaunch {
     /// The pane's own arguments (replace the profile's).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
+    /// The pane's own colour scheme (a theme name; wins over the profile's).
+    /// [`DEFAULT_PANE_THEME`] keeps the window theme even when the profile
+    /// names one ("Pane theme: default").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme: Option<String>,
 }
+
+/// A pane's `theme` that means the window theme, over the profile's.
+pub const DEFAULT_PANE_THEME: &str = "default";
 
 impl PaneLaunch {
     pub fn is_default(&self) -> bool {
@@ -220,6 +234,9 @@ pub struct Resolved {
     pub cwd: Option<PathBuf>,
     pub title: Option<String>,
     pub color: Option<String>,
+    /// The pane's colour scheme (its own `theme`, else the profile's);
+    /// `None`: the window theme.
+    pub theme: Option<String>,
 }
 
 impl Resolved {
@@ -230,6 +247,7 @@ impl Resolved {
             profile: self.profile.clone(),
             shell: launch.shell.clone(),
             args: launch.args.clone(),
+            theme: launch.theme.clone(),
         }
     }
 }
@@ -326,6 +344,13 @@ pub fn resolve(
             .and_then(|p| p.title.clone())
             .filter(|t| !t.is_empty()),
         color: profile.and_then(|p| p.color.as_deref().map(|c| c.trim().to_ascii_lowercase())),
+        theme: launch
+            .theme
+            .as_deref()
+            .or(profile.and_then(|p| p.theme.as_deref()))
+            .map(str::trim)
+            .filter(|t| !t.is_empty() && !t.eq_ignore_ascii_case(DEFAULT_PANE_THEME))
+            .map(str::to_string),
     })
 }
 
@@ -399,6 +424,7 @@ mod tests {
             title: None,
             color: None,
             icon: None,
+            theme: None,
             discovered: false,
         }
     }
@@ -516,6 +542,45 @@ mod tests {
     }
 
     #[test]
+    fn a_panes_theme_wins_over_its_profiles_and_default_keeps_the_window() {
+        let mut prod = profile("prod");
+        prod.theme = Some("light-default".into());
+        let ps = [prod, profile("plain")];
+        let theme = |l: PaneLaunch| resolve(&ps, None, &l, None, None).unwrap().theme;
+        assert_eq!(
+            theme(PaneLaunch::profile("prod")).as_deref(),
+            Some("light-default")
+        );
+        assert_eq!(theme(PaneLaunch::profile("plain")), None);
+        let own = |profile: &str, t: &str| PaneLaunch {
+            theme: Some(t.into()),
+            ..PaneLaunch::profile(profile)
+        };
+        assert_eq!(
+            theme(own("prod", "tokyo-night")).as_deref(),
+            Some("tokyo-night")
+        );
+        assert_eq!(
+            theme(own("plain", "tokyo-night")).as_deref(),
+            Some("tokyo-night")
+        );
+        // "default" (any case) and blanks: the window theme
+        assert_eq!(theme(own("prod", DEFAULT_PANE_THEME)), None);
+        assert_eq!(theme(own("prod", "Default")), None);
+        assert_eq!(theme(own("prod", " ")), None);
+        // the pane keeps its own choice, never the profile's value
+        let l = own("prod", "tokyo-night");
+        let r = resolve(&ps, None, &l, None, None).unwrap();
+        assert_eq!(r.identity(&l).theme.as_deref(), Some("tokyo-night"));
+        let r = resolve(&ps, None, &PaneLaunch::profile("prod"), None, None).unwrap();
+        assert_eq!(r.identity(&PaneLaunch::profile("prod")).theme, None);
+        // it round-trips through config.toml
+        let src = "name = \"prod\"\ntheme = \"light-default\"\n";
+        let p: Profile = toml::from_str(src).unwrap();
+        assert_eq!(p.theme.as_deref(), Some("light-default"));
+    }
+
+    #[test]
     fn unknown_profiles_and_missing_programs_are_errors_naming_both() {
         let d = scratch("errors");
         let path = std::env::join_paths([d.join("bin")]).unwrap();
@@ -562,6 +627,12 @@ mod tests {
         let mut p = profile("c");
         p.color = Some("Blue".into());
         assert!(validate(&[p]).is_ok());
+        let mut p = profile("c");
+        p.color = Some("#ff8800".into());
+        assert!(validate(&[p]).is_ok(), "any hex colour");
+        let mut p = profile("c");
+        p.color = Some("#ff88".into());
+        assert!(bad(p).contains("color"));
         let mut p = profile("e");
         p.command = Some("  ".into());
         assert!(bad(p).contains("command is empty"));

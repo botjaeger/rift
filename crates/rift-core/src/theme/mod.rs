@@ -82,6 +82,54 @@ impl Color {
         0.2126 * c(self.r) + 0.7152 * c(self.g) + 0.0722 * c(self.b)
     }
 
+    /// WCAG 2.x contrast ratio against `other`, 1.0..=21.0. Alpha is ignored.
+    pub fn contrast(self, other: Color) -> f32 {
+        let (x, y) = (self.luminance(), other.luminance());
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    /// This colour as text on `bg` with at least `ratio` contrast
+    /// (`minimum_contrast`): unchanged when it already has it, else mixed
+    /// toward white or black, whichever reaches the ratio with the smaller
+    /// change (the one with more contrast when neither does). Alpha is kept.
+    pub fn with_min_contrast(self, bg: Color, ratio: f32) -> Color {
+        if ratio <= 1.0 || self.contrast(bg) >= ratio {
+            return self;
+        }
+        // the least mix toward `end` that reaches the ratio: (mix, colour),
+        // or None when even `end` itself falls short
+        let toward = |end: Color| {
+            if end.contrast(bg) < ratio {
+                return None;
+            }
+            let (mut lo, mut hi) = (0.0f32, 1.0f32);
+            for _ in 0..16 {
+                let mid = (lo + hi) / 2.0;
+                if self.mix(end, mid).contrast(bg) >= ratio {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                }
+            }
+            Some((hi, self.mix(end, hi).with_alpha(self.a)))
+        };
+        match (toward(Color::WHITE), toward(Color::BLACK)) {
+            (Some((tw, white)), Some((tb, black))) => {
+                if tb < tw {
+                    black
+                } else {
+                    white
+                }
+            }
+            (Some((_, c)), None) | (None, Some((_, c))) => c,
+            // no colour reaches it: the extreme with more contrast
+            (None, None) if Color::BLACK.contrast(bg) > Color::WHITE.contrast(bg) => {
+                Color::BLACK.with_alpha(self.a)
+            }
+            (None, None) => Color::WHITE.with_alpha(self.a),
+        }
+    }
+
     pub fn to_hex(self) -> String {
         let b = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
         if self.a >= 1.0 {
@@ -144,6 +192,26 @@ fn one() -> f32 {
     1.0
 }
 
+/// A two-stop linear gradient (Warp's gradient `background` / `accent`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Gradient {
+    /// Top (vertical) or left (horizontal) stop.
+    pub from: Color,
+    /// Bottom or right stop.
+    pub to: Color,
+    /// Top to bottom; else left to right.
+    #[serde(default)]
+    pub vertical: bool,
+}
+
+impl Gradient {
+    /// The colour halfway: what a surface that cannot show the gradient
+    /// (and every token derived from it) uses.
+    pub fn mid(&self) -> Color {
+        self.from.mix(self.to, 0.5)
+    }
+}
+
 /// Full theme token set — every rendered color resolves from here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Theme {
@@ -181,6 +249,15 @@ pub struct Theme {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background_image: Option<BackgroundImage>,
+
+    /// A gradient terminal ground: drawn behind the panes of an opaque
+    /// window without a background image; `bg` is its midpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bg_gradient: Option<Gradient>,
+    /// A gradient accent: the active tab's top edge; `accent` is its
+    /// midpoint everywhere else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accent_gradient: Option<Gradient>,
 
     /// Window opacity (`window_opacity`), set by the app, never by a theme
     /// file. Below 1 the window ground goes translucent the way Warp's does
@@ -241,6 +318,42 @@ impl Theme {
         }
     }
 
+    /// The fill a pane in this theme (a pane's own colour scheme) draws
+    /// over the window ground of `window`. Opaque: its `bg`. Translucent:
+    /// the colour that turns `window`'s ground into this theme's ground with
+    /// the least cover, so the pane stays as see-through as the window
+    /// where the two grounds agree and only gains what its colour needs.
+    pub fn pane_ground(&self, window: &Theme) -> Color {
+        if self.ground_alpha >= 1.0 {
+            return self.bg;
+        }
+        let (t, w) = (self.window_ground(), window.window_ground());
+        // per channel, the least cover x with x·c + (1 − x)·w = t, c in 0..=1
+        let need = |t: f32, w: f32| {
+            if t > w {
+                (t - w) / (1.0 - w)
+            } else if t < w {
+                (w - t) / w
+            } else {
+                0.0
+            }
+        };
+        let x = need(t.r, w.r)
+            .max(need(t.g, w.g))
+            .max(need(t.b, w.b))
+            .clamp(0.0, 1.0);
+        if x <= 0.0 {
+            return t.with_alpha(0.0);
+        }
+        let c = |t: f32, w: f32| (w + (t - w) / x).clamp(0.0, 1.0);
+        Color {
+            r: c(t.r, w.r),
+            g: c(t.g, w.g),
+            b: c(t.b, w.b),
+            a: x,
+        }
+    }
+
     pub fn parse_toml(s: &str) -> Result<Self, toml::de::Error> {
         toml::from_str(s)
     }
@@ -258,18 +371,23 @@ impl Default for Theme {
 }
 
 /// Builtin theme names, in picker display order.
-pub const BUILTIN_NAMES: [&str; 4] = [
-    "dark-default",
-    "light-default",
-    "catppuccin-mocha",
-    "tokyo-night",
-];
+pub const BUILTIN_NAMES: [&str; builtin::SOURCES.len()] = {
+    let mut out = [""; builtin::SOURCES.len()];
+    let mut i = 0;
+    while i < out.len() {
+        out[i] = builtin::SOURCES[i].0;
+        i += 1;
+    }
+    out
+};
 
 /// Extensions probed in `~/.config/rift/themes/`, in precedence order.
 const USER_THEME_EXTS: [&str; 3] = ["toml", "yaml", "yml"];
 
-/// Resolve a theme by config name: builtin first, then
-/// `~/.config/rift/themes/<name>.{toml,yaml,yml}`, else dark-default.
+/// Resolve a theme by config name: `~/.config/rift/themes/<name>.{toml,yaml,yml}`
+/// first (a file named like a builtin replaces it, so a Warp `dracula.yaml`
+/// imported before Dracula became a builtin keeps showing), then the
+/// builtin, else dark-default.
 ///
 /// `.yaml`/`.yml` files are read as Warp themes (see [`parse_warp_yaml`]).
 pub fn load_by_name(name: &str) -> Theme {
@@ -282,15 +400,13 @@ pub fn load_by_name(name: &str) -> Theme {
 /// `load_by_name` without the fallback: why the theme could not be loaded
 /// (no such theme, or the file's parse error).
 pub fn try_load_by_name(name: &str) -> Result<Theme, String> {
-    match name.to_lowercase().as_str() {
-        "dark-default" | "dark default" => return Ok(builtin::dark_default()),
-        "light-default" | "light default" => return Ok(builtin::light_default()),
-        "catppuccin-mocha" | "catppuccin mocha" => return Ok(builtin::catppuccin_mocha()),
-        "tokyo-night" | "tokyo night" => return Ok(builtin::tokyo_night()),
-        _ => {}
-    }
-    let mut error = "not found".to_string();
-    if let Some(dir) = crate::config::themes_dir() {
+    try_load_in(crate::config::themes_dir().as_deref(), name)
+}
+
+/// [`try_load_by_name`] over the themes directory `dir`.
+fn try_load_in(dir: Option<&std::path::Path>, name: &str) -> Result<Theme, String> {
+    let mut error = None;
+    if let Some(dir) = dir {
         for ext in USER_THEME_EXTS {
             let path = dir.join(format!("{name}.{ext}"));
             let Ok(src) = std::fs::read_to_string(&path) else {
@@ -322,12 +438,16 @@ pub fn try_load_by_name(name: &str) -> Result<Theme, String> {
                         }
                         _ => e.trim().to_string(),
                     };
-                    error = format!("{name}.{ext}: {short}");
+                    error = Some(format!("{name}.{ext}: {short}"));
                 }
             }
         }
     }
-    Err(error)
+    match (error, builtin::by_name(name)) {
+        (Some(e), _) => Err(e),
+        (None, Some(t)) => Ok(t),
+        (None, None) => Err("not found".into()),
+    }
 }
 
 /// The picker's label for each of `names` (`available_themes`): the theme's
@@ -426,6 +546,29 @@ mod tests {
     }
 
     #[test]
+    fn a_pane_ground_turns_the_window_ground_into_its_own() {
+        let mut window = Theme::default();
+        let mut pane = builtin::tokyo_night();
+        // opaque: the pane's own bg
+        assert_eq!(pane.pane_ground(&window), pane.bg);
+        window.ground_alpha = 0.6;
+        pane.ground_alpha = 0.6;
+        // the same theme adds no cover: the pane stays as see-through
+        assert_eq!(window.pane_ground(&window).a, 0.0);
+        // another theme: drawn over the window ground, the colour is the
+        // pane theme's ground, with cover below full
+        let (fill, w, t) = (
+            pane.pane_ground(&window),
+            window.window_ground(),
+            pane.window_ground(),
+        );
+        assert!(fill.a > 0.0 && fill.a < 1.0, "{fill:?}");
+        for (c, w, t) in [(fill.r, w.r, t.r), (fill.g, w.g, t.g), (fill.b, w.b, t.b)] {
+            assert!((c * fill.a + w * (1.0 - fill.a) - t).abs() < 1e-4);
+        }
+    }
+
+    #[test]
     fn chips_and_ghost_stay_readable_on_a_translucent_window() {
         let mut t = Theme::default();
         let opaque_ghost = t.ghost_text();
@@ -452,9 +595,33 @@ mod tests {
 
     /// WCAG 2.x contrast ratio, 1.0..=21.0.
     fn contrast(a: Color, b: Color) -> f32 {
-        let (x, y) = (a.luminance(), b.luminance());
-        let (hi, lo) = if x > y { (x, y) } else { (y, x) };
-        (hi + 0.05) / (lo + 0.05)
+        a.contrast(b)
+    }
+
+    #[test]
+    fn min_contrast_lifts_only_unreadable_text() {
+        let bg = Color::hex("#1e1e1e").unwrap();
+        // already readable, or the option off: unchanged
+        let fg = Color::hex("#d4d4d4").unwrap();
+        assert_eq!(fg.with_min_contrast(bg, 4.5), fg);
+        let dark = Color::hex("#303030").unwrap();
+        assert_eq!(dark.with_min_contrast(bg, 1.0), dark);
+        // dark grey on a dark ground lightens just enough, keeping alpha
+        let lifted = dark.with_alpha(0.66).with_min_contrast(bg, 4.5);
+        assert!(contrast(lifted, bg) >= 4.5, "{:.2}", contrast(lifted, bg));
+        assert!(contrast(lifted, bg) < 4.7, "a minimal change");
+        assert!(lifted.luminance() > dark.luminance());
+        assert_eq!(lifted.a, 0.66);
+        // on a light ground the same grey darkens
+        let light_bg = Color::hex("#f5f5f5").unwrap();
+        let pale = Color::hex("#e0e0e0").unwrap();
+        let darker = pale.with_min_contrast(light_bg, 7.0);
+        assert!(contrast(darker, light_bg) >= 7.0);
+        assert!(darker.luminance() < pale.luminance());
+        // a mid grey ground cannot reach 21: the better extreme
+        let grey = Color::hex("#777777").unwrap();
+        let best = grey.with_min_contrast(grey, 21.0);
+        assert_eq!(best, Color::BLACK);
     }
 
     #[test]
@@ -527,6 +694,70 @@ mod tests {
         deduped.sort();
         deduped.dedup();
         assert_eq!(deduped.len(), names.len(), "no duplicate stems");
+    }
+
+    /// Every builtin: parses, reads as dark or light as its ground says,
+    /// and keeps text readable on its ground.
+    #[test]
+    fn every_builtin_is_readable() {
+        assert!(BUILTIN_NAMES.len() >= 13);
+        for name in BUILTIN_NAMES {
+            let t = builtin::by_name(name).unwrap();
+            let light = name.contains("light") || name.contains("latte");
+            assert_eq!(t.is_light(), light, "{name}");
+            // the colour ANSI slots stay visible on the ground (black and
+            // white are the ground's own shade on one side or the other);
+            // the schemes keep their upstream values, whose light yellows
+            // sit near 2.2:1. light-default mirrors Warp's own (yellow
+            // 1.3:1, user decision 2026-10-16) and is left as Warp has it.
+            if name != "light-default" {
+                for i in (1..7).chain(9..15) {
+                    let r = contrast(t.ansi[i], t.bg);
+                    assert!(r >= 2.0, "{name} ansi {i}: {r:.2}:1");
+                }
+            }
+            for (label, c, floor) in [
+                ("fg", t.fg, 4.5),
+                ("text_ui", t.text_ui, 4.5),
+                ("text_dim", t.text_dim, 3.0),
+                ("text_muted", t.text_muted, 2.5),
+                ("accent", t.accent, 3.0),
+                ("error", t.error, 3.0),
+            ] {
+                let r = contrast(c, t.bg);
+                assert!(r >= floor, "{name} {label}: {r:.2}:1");
+            }
+        }
+        // a new builtin resolves by its name, with spaces, in any case
+        assert_eq!(
+            builtin::by_name("Solarized Light").unwrap().name,
+            "Solarized Light"
+        );
+        assert!(builtin::by_name("solarized").is_none());
+    }
+
+    #[test]
+    fn a_user_file_named_like_a_builtin_replaces_it() {
+        let dir = std::env::temp_dir().join(format!("rift-theme-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mine =
+            builtin::DARK_DEFAULT.replace("name = \"Dark Default\"", "name = \"My Dracula\"");
+        std::fs::write(dir.join("dracula.toml"), mine).unwrap();
+        assert_eq!(
+            try_load_in(Some(&dir), "dracula").unwrap().name,
+            "My Dracula"
+        );
+        // no file: the builtin
+        assert_eq!(try_load_in(Some(&dir), "nord").unwrap().name, "Nord");
+        // a broken file says so instead of quietly showing the builtin
+        std::fs::write(dir.join("monokai.toml"), "name = ").unwrap();
+        assert!(
+            try_load_in(Some(&dir), "monokai")
+                .unwrap_err()
+                .contains("monokai.toml")
+        );
+        assert_eq!(try_load_in(None, "dracula").unwrap().name, "Dracula");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

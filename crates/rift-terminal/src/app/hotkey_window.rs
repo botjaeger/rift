@@ -1,8 +1,9 @@
 //! The drop-down hotkey window (`hotkey_window = true`, Warp's dedicated
 //! hotkey window): a window kind the global hotkey (or the script's
-//! `hotkey` step) creates on first use, then shows and hides. It spans the
-//! width of the screen with the pointer, hangs from its top edge, floats
-//! above other apps on every Space, and slides down and up. Hiding keeps
+//! `hotkey` step) creates on first use, then shows and hides. It hangs from
+//! an edge (`hotkey_window_edge`, the top by default) of the screen with the
+//! pointer (or `hotkey_window_screen`), spans `hotkey_window_width` of it,
+//! floats above other apps on every Space, and slides in and out. Hiding keeps
 //! its shells running. It is not saved in the session file: a relaunch
 //! does not bring back its tabs, and an update's restart ends its shells
 //! (`end_hotkey_window_shells`) rather than leave them unreachable in the
@@ -22,9 +23,11 @@ pub(super) struct Dropdown {
     /// loss hide it (a window being created or ordered in can report one
     /// first).
     pub(super) had_focus: bool,
-    /// The screen it was last placed on and its frame there (logical px).
+    /// The screen it was last placed on and its frame there (logical px),
+    /// against `edge`.
     pub(super) screen: Option<Frame>,
     pub(super) frame: Option<Frame>,
+    pub(super) edge: rift_core::HotkeyEdge,
     /// A slide in progress: when it started, and whether it shows the
     /// window (else hides it).
     pub(super) slide: Option<(Instant, bool)>,
@@ -70,9 +73,17 @@ impl App {
         }
     }
 
-    /// The screen the window drops onto: the one with the pointer (macOS),
-    /// else the served window's, else the primary one.
+    /// The screen the window drops onto: `hotkey_window_screen`'s numbered
+    /// screen when it exists, else the one with the pointer (macOS), else
+    /// the served window's, else the primary one.
     fn active_screen(&self) -> Frame {
+        if let Some(s) = self
+            .config
+            .hotkey_screen()
+            .and_then(|i| self.numbered_screen(i))
+        {
+            return s;
+        }
         #[cfg(target_os = "macos")]
         if let Some(s) = dropdown::pointer_screen() {
             return s;
@@ -89,11 +100,45 @@ impl App {
             .unwrap_or(dropdown::FALLBACK_SCREEN)
     }
 
+    /// Screen `index` (0 is the primary): on macOS its visible part (below
+    /// the menu bar, beside the Dock); elsewhere the primary monitor, then
+    /// the others in winit's order.
+    fn numbered_screen(&self, index: usize) -> Option<Frame> {
+        #[cfg(target_os = "macos")]
+        {
+            dropdown::screen_at(index)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let w = self.win.window.as_ref()?;
+            let primary = w.primary_monitor();
+            let others = w
+                .available_monitors()
+                .filter(|m| Some(m) != primary.as_ref());
+            primary
+                .clone()
+                .into_iter()
+                .chain(others)
+                .nth(index)
+                .map(|m| dropdown::monitor_frame(&m))
+        }
+    }
+
+    /// The drop-down window's frame on `screen` as the config places it.
+    fn dropdown_frame(&self, screen: Frame) -> Frame {
+        dropdown::frame(
+            screen,
+            self.config.hotkey_window_edge,
+            self.config.hotkey_window_height(),
+            self.config.hotkey_window_width(),
+        )
+    }
+
     /// Create the drop-down window (hidden, at its frame), give it a tab,
     /// then show it.
     fn open_hotkey_window(&mut self, event_loop: &ActiveEventLoop, screen: Frame) {
         let cwd = self.start_dir();
-        let f = dropdown::frame(screen, self.config.hotkey_window_height());
+        let f = self.dropdown_frame(screen);
         let old = std::mem::replace(&mut self.win, Box::new(WindowState::new(false)));
         if old.window.is_some() {
             self.parked.push(old);
@@ -101,6 +146,7 @@ impl App {
         self.win.dropdown = Some(Dropdown {
             screen: Some(screen),
             frame: Some(f),
+            edge: self.config.hotkey_window_edge,
             ..Default::default()
         });
         self.create_window(
@@ -120,27 +166,39 @@ impl App {
     }
 
     /// Show the drop-down window (the one being served) on `screen` (else
-    /// where it was), sliding down unless motion is reduced, and focus it.
+    /// where it was), sliding in unless motion is reduced, and focus it.
     pub(super) fn show_hotkey_window(&mut self, screen: Option<Frame>) {
         let headless = self.headless;
-        let height = self.config.hotkey_window_height();
+        let edge = self.config.hotkey_window_edge;
         let Some(window) = self.win.window.clone() else {
             return;
         };
+        let Some(screen) = self
+            .win
+            .dropdown
+            .as_ref()
+            .map(|d| screen.or(d.screen).unwrap_or(dropdown::FALLBACK_SCREEN))
+        else {
+            return;
+        };
+        let f = self.dropdown_frame(screen);
         let Some(d) = self.win.dropdown.as_mut() else {
             return;
         };
-        let screen = screen.or(d.screen).unwrap_or(dropdown::FALLBACK_SCREEN);
-        let f = dropdown::frame(screen, height);
         let animate = !headless && dropdown::animate();
         d.shown = true;
         d.had_focus = false;
         d.screen = Some(screen);
         d.frame = Some(f);
+        d.edge = edge;
         d.slide = animate.then(|| (Instant::now(), true));
-        let y = if animate { f.y - f.h } else { f.y };
+        let (x, y) = if animate {
+            dropdown::slide_pos(f, edge, Duration::ZERO, true).0
+        } else {
+            (f.x, f.y)
+        };
         let _ = window.request_inner_size(LogicalSize::new(f.w, f.h));
-        window.set_outer_position(winit::dpi::LogicalPosition::new(f.x, y));
+        window.set_outer_position(winit::dpi::LogicalPosition::new(x, y));
         if !headless {
             #[cfg(target_os = "macos")]
             {
@@ -269,9 +327,10 @@ impl App {
         let d = self.win.dropdown.as_mut()?;
         let (start, showing) = d.slide?;
         let f = d.frame?;
-        let (y, done) = dropdown::slide_y(f, now.saturating_duration_since(start), showing);
+        let ((x, y), done) =
+            dropdown::slide_pos(f, d.edge, now.saturating_duration_since(start), showing);
         let window = self.win.window.as_ref()?;
-        window.set_outer_position(winit::dpi::LogicalPosition::new(f.x, y));
+        window.set_outer_position(winit::dpi::LogicalPosition::new(x, y));
         if !done {
             return Some(now + dropdown::SLIDE_STEP);
         }
@@ -282,23 +341,32 @@ impl App {
         None
     }
 
-    /// A changed `hotkey_window_height` re-places a shown window.
+    /// A changed `hotkey_window_height`, `_width`, `_edge` or a numbered
+    /// `_screen` that exists re-places a shown window.
     pub(super) fn place_hotkey_window(&mut self) {
-        let shown = self
+        let edge = self.config.hotkey_window_edge;
+        let Some(shown_on) = self
             .win
             .dropdown
             .as_ref()
-            .is_some_and(|d| d.shown && d.slide.is_none());
-        let height = self.config.hotkey_window_height();
+            .filter(|d| d.shown && d.slide.is_none())
+            .and_then(|d| d.screen)
+        else {
+            return;
+        };
+        let screen = self
+            .config
+            .hotkey_screen()
+            .and_then(|i| self.numbered_screen(i))
+            .unwrap_or(shown_on);
+        let f = self.dropdown_frame(screen);
         let (Some(d), Some(window)) = (self.win.dropdown.as_mut(), self.win.window.as_ref()) else {
             return;
         };
-        let Some(screen) = d.screen.filter(|_| shown) else {
-            return;
-        };
-        let f = dropdown::frame(screen, height);
-        if d.frame != Some(f) {
+        if d.frame != Some(f) || d.edge != edge {
+            d.screen = Some(screen);
             d.frame = Some(f);
+            d.edge = edge;
             let _ = window.request_inner_size(LogicalSize::new(f.w, f.h));
             window.set_outer_position(winit::dpi::LogicalPosition::new(f.x, f.y));
         }
@@ -316,12 +384,13 @@ impl App {
             [s.width.round(), s.height.round()]
         });
         format!(
-            "kind=dropdown shown={} sliding={} frame={:?} screen={:?} size={:?}",
+            "kind=dropdown shown={} sliding={} frame={:?} screen={:?} size={:?} edge={:?}",
             d.shown,
             d.slide.is_some(),
             r(d.frame),
             r(d.screen),
-            size
+            size,
+            d.edge
         )
     }
 }

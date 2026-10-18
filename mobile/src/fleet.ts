@@ -256,6 +256,9 @@ function describeShowCode(code: string, hostName: string, fallback: string): str
   return code === "too_large" ? "Too large to show on the phone." : describeCode(code, hostName, fallback);
 }
 
+/** Said after a request that was on its way when the connection dropped or the wait ran out. */
+const CHECK_BEFORE_RESENDING = "It may have gone through: check the pane before sending it again.";
+
 export function describeCode(code: string, hostName: string, fallback: string): string {
   switch (code) {
     case "busy":
@@ -1328,7 +1331,7 @@ export class Fleet {
         resolve({
           ok: false,
           code: "timeout",
-          message: describeCode("timeout", name, ""),
+          message: `${describeCode("timeout", name, "")} ${CHECK_BEFORE_RESENDING}`,
         });
       }, ACK_TIMEOUT_MS);
       this.pending.set(this.pendingKey(host, id), { host, resolve, timer });
@@ -1365,7 +1368,10 @@ export class Fleet {
       if (p.host !== host) continue;
       this.pending.delete(k);
       clearTimeout(p.timer);
-      p.resolve({ ok: false, code, message: describeCode(code, name, "") });
+      // a request already sent may have been carried out: nothing resends it, and the user
+      // is told to look before sending it again
+      const lost = code === "disconnected" ? `Lost the connection to ${name} before it answered. ${CHECK_BEFORE_RESENDING}` : describeCode(code, name, "");
+      p.resolve({ ok: false, code, message: lost });
     }
   }
 

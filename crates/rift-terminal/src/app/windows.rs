@@ -150,7 +150,10 @@ impl App {
             .with_transparent(true)
             .with_inner_size(match frame {
                 Some(f) => LogicalSize::new(f.width, f.height),
-                None => LogicalSize::new(1180.0, 760.0),
+                None => {
+                    let (w, h) = self.config.window_size();
+                    LogicalSize::new(w, h)
+                }
             });
         if let Some(f) = frame {
             attrs = attrs
@@ -160,6 +163,9 @@ impl App {
                 attrs = attrs.with_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
             }
         }
+
+        // `launch_mode` and `always_on_top` (ordinary windows)
+        attrs = self.window_options(attrs);
 
         // the drop-down hotkey window: no title bar or window buttons, its
         // height from the config, above other windows
@@ -329,6 +335,8 @@ impl App {
         if self.parked.is_empty() {
             return false;
         }
+        // a theme picker open in it: the theme it previewed goes back
+        self.revert_theme_preview();
         for p in self.win.tabs.iter().flat_map(|t| &t.panes) {
             p.session.terminate();
         }
@@ -435,6 +443,11 @@ impl App {
             .window
             .filter(|f| f.width >= 320.0 && f.height >= 200.0);
         self.open_window(event_loop, frame);
+        self.win.name = saved
+            .name
+            .as_deref()
+            .and_then(window_opts::clean_window_name);
+        self.apply_window_title();
         if saved.tabs.is_empty() {
             self.spawn_tab();
             return;
@@ -446,6 +459,7 @@ impl App {
         }
         self.persist_session = persist;
         self.win.active = saved.active.min(self.win.tabs.len() - 1);
+        self.restore_tab_groups(&saved.groups, &saved.tabs);
     }
 
     /// Serve the window an event from another thread is about: the pane's
@@ -483,6 +497,7 @@ impl App {
             // worktree still opens its tab in the window served)
             E::WindowsLoaded(asker, ..)
             | E::DetachedLoaded(asker, _)
+            | E::ResultsFound(asker, ..)
             | E::WorktreeAdded(asker, _)
             | E::ReviewGit(asker, ..) => {
                 if let Some(id) = *asker {
@@ -497,6 +512,11 @@ impl App {
             }
             E::ViewerLoaded(loaded) => {
                 self.enter_where(|w| w.viewer.awaits(loaded));
+                return;
+            }
+            E::CompareReady(generation, _) => {
+                let generation = *generation;
+                self.enter_where(|w| w.compare.generation == generation);
                 return;
             }
             E::Control(p) => {

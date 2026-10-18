@@ -7,9 +7,10 @@
 //! shell: the output comes back, the processes do not.
 //!
 //! Bounded: the newest [`MAX_BLOCKS`] blocks and [`MAX_BYTES`] of output per
-//! pane. Terminal output can contain secrets; nothing is redacted, which is
-//! why the feature is off by default and "Clear saved block transcripts"
-//! deletes every file.
+//! pane. Terminal output can contain secrets: with `mask_secrets` on, the
+//! ones its patterns know are saved masked (`rift_core::secrets`); nothing
+//! else is redacted, which is why the feature is off by default and "Clear
+//! saved block transcripts" deletes every file.
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::path::PathBuf;
@@ -19,8 +20,10 @@ pub const VERSION: u32 = 1;
 pub const MAX_BLOCKS: usize = 200;
 pub const MAX_BYTES: usize = 1 << 20;
 pub const MAX_FIELD_BYTES: usize = 16 << 10;
-/// Worst-case JSON escaping plus per-block metadata.
-pub const MAX_FILE_BYTES: usize = MAX_BYTES * 6 + MAX_BLOCKS * 256;
+/// A branch or host name.
+pub const MAX_NAME_BYTES: usize = 256;
+/// Worst-case JSON escaping plus per-block metadata (the names escaped).
+pub const MAX_FILE_BYTES: usize = MAX_BYTES * 6 + MAX_BLOCKS * (256 + 2 * MAX_NAME_BYTES * 6);
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Transcript {
@@ -40,6 +43,16 @@ pub struct SavedBlock {
     #[serde(default)]
     pub cwd_remote: bool,
     pub output: String,
+    /// When it finished (seconds since the epoch). Absent in older
+    /// transcripts: unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished: Option<u64>,
+    /// Git branch when it ran, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// The other host `cwd` is on, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
 }
 
 impl Transcript {
@@ -55,6 +68,9 @@ impl Transcript {
             truncate_field(&mut b.command);
             if let Some(cwd) = &mut b.cwd {
                 truncate_field(cwd);
+            }
+            for name in [&mut b.branch, &mut b.host].into_iter().flatten() {
+                truncate_to(name, MAX_NAME_BYTES);
             }
             let fields = b.command.len() + b.cwd.as_ref().map_or(0, String::len);
             let room = MAX_BYTES.saturating_sub(total);
@@ -101,20 +117,26 @@ impl Transcript {
         out
     }
 
-    /// (duration, cwd, command, cwd is remote) per block, for `BlockStore::mark_restored`.
-    /// The command keeps its newlines and tabs but no other control
-    /// characters: it can be reinput and run again.
+    /// What each block kept, for `BlockStore::mark_restored`. The command
+    /// keeps its newlines and tabs but no other control characters: it can
+    /// be reinput and run again.
     pub fn meta(&self) -> Vec<crate::Restored> {
         self.blocks
             .iter()
-            .map(|b| {
-                let duration = Duration::from_millis(b.duration_ms);
-                let command = b
+            .map(|b| crate::Restored {
+                duration: Duration::from_millis(b.duration_ms),
+                cwd: b.cwd.clone(),
+                command: b
                     .command
                     .chars()
                     .filter(|&c| c == '\n' || c == '\t' || !c.is_control())
-                    .collect();
-                (duration, b.cwd.clone(), command, b.cwd_remote)
+                    .collect(),
+                remote: b.cwd_remote,
+                branch: b.branch.as_deref().map(sanitize),
+                host: b.host.as_deref().map(sanitize),
+                finished_at: b
+                    .finished
+                    .map(|s| std::time::UNIX_EPOCH + Duration::from_secs(s)),
             })
             .collect()
     }
@@ -125,6 +147,10 @@ impl Transcript {
             && self.blocks.iter().all(|b| {
                 b.command.len() <= MAX_FIELD_BYTES
                     && b.cwd.as_ref().is_none_or(|c| c.len() <= MAX_FIELD_BYTES)
+                    && [&b.branch, &b.host]
+                        .into_iter()
+                        .flatten()
+                        .all(|n| n.len() <= MAX_NAME_BYTES)
             })
             && self
                 .blocks
@@ -140,7 +166,11 @@ impl Transcript {
 }
 
 fn truncate_field(s: &mut String) {
-    let mut end = s.len().min(MAX_FIELD_BYTES);
+    truncate_to(s, MAX_FIELD_BYTES);
+}
+
+fn truncate_to(s: &mut String, max: usize) {
+    let mut end = s.len().min(max);
     while !s.is_char_boundary(end) {
         end -= 1;
     }
@@ -234,6 +264,22 @@ fn load_reader(reader: impl std::io::Read) -> Option<Transcript> {
     t.valid().then_some(t)
 }
 
+/// The ids of the saved transcripts on disk.
+pub fn ids() -> Vec<String> {
+    let Some(dir) = dir() else { return Vec::new() };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let id = name.strip_suffix(".json")?;
+            path(id).is_some().then(|| id.to_string())
+        })
+        .collect()
+}
+
 /// Delete every saved transcript except `keep` (ids still referenced by the
 /// current session). Returns how many files were removed.
 pub fn remove_except(keep: &[String]) -> usize {
@@ -264,6 +310,9 @@ mod tests {
             cwd: Some("/tmp".into()),
             cwd_remote: false,
             output: out.into(),
+            finished: None,
+            branch: None,
+            host: None,
         }
     }
 
@@ -316,10 +365,37 @@ mod tests {
         let s = serde_json::to_string(&t).unwrap();
         let back: Transcript = serde_json::from_str(&s).unwrap();
         assert_eq!(back, t);
-        assert_eq!(back.meta()[0].0, Duration::from_millis(12));
+        assert_eq!(back.meta()[0].duration, Duration::from_millis(12));
+        // older transcripts (no time, branch or host) still load: unknown
+        let old = r#"{"version":1,"saved_at":1,"blocks":[{"command":"ls","exit":0,"duration_ms":1,"cwd":null,"output":""}]}"#;
+        let old: Transcript = serde_json::from_str(old).unwrap();
+        assert_eq!(old.meta()[0].finished_at, None);
+        assert_eq!(old.meta()[0].branch, None);
+        // and what they keep comes back
+        let kept = Transcript::bounded(
+            vec![SavedBlock {
+                finished: Some(1_700_000_000),
+                branch: Some("main".into()),
+                host: Some("prod-1".into()),
+                cwd_remote: true,
+                ..block("deploy", "ok")
+            }],
+            42,
+        );
+        let back: Transcript =
+            serde_json::from_str(&serde_json::to_string(&kept).unwrap()).unwrap();
+        let m = &back.meta()[0];
+        assert_eq!(
+            m.finished_at,
+            Some(std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000))
+        );
+        assert_eq!(
+            (m.branch.as_deref(), m.host.as_deref(), m.remote),
+            (Some("main"), Some("prod-1"), true)
+        );
         // the exact command survives, minus control characters
         let t = Transcript::bounded(vec![block("printf 'a\n\tb'\x1b]0;x\x07 e\u{301}", "")], 42);
-        assert_eq!(t.meta()[0].2, "printf 'a\n\tb']0;x e\u{301}");
+        assert_eq!(t.meta()[0].command, "printf 'a\n\tb']0;x e\u{301}");
     }
 
     #[test]
@@ -334,11 +410,13 @@ mod tests {
         bad = valid.clone();
         bad.blocks = vec![block("", ""); MAX_BLOCKS + 1];
         assert!(read(&bad).is_none());
-        for field in ["command", "cwd", "output"] {
+        for field in ["command", "cwd", "branch", "host", "output"] {
             let mut bad = valid.clone();
             match field {
                 "command" => bad.blocks[0].command = "x".repeat(MAX_FIELD_BYTES + 1),
                 "cwd" => bad.blocks[0].cwd = Some("x".repeat(MAX_FIELD_BYTES + 1)),
+                "branch" => bad.blocks[0].branch = Some("x".repeat(MAX_NAME_BYTES + 1)),
+                "host" => bad.blocks[0].host = Some("x".repeat(MAX_NAME_BYTES + 1)),
                 _ => bad.blocks[0].output = "x".repeat(MAX_BYTES + 1),
             }
             assert!(read(&bad).is_none());

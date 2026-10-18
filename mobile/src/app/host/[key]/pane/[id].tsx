@@ -560,7 +560,8 @@ export default function PaneScreen() {
             </View>
           ) : null}
           {!host ? (
-            <Text style={styles.empty}>This computer is not paired.</Text>
+            // a tapped alert opens this page on a cold start before the paired computers are read
+            s.ready ? <Text style={styles.empty}>This computer is not paired.</Text> : null
           ) : closed ? (
             <View style={styles.closed}>
               <Text style={styles.closedText} accessibilityLiveRegion="polite">

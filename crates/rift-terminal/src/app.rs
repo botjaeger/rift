@@ -36,18 +36,35 @@ use crate::views::terminal::{self, GridLayout};
 use crate::views::viewer::{ViewerHit, ViewerState};
 use crate::views::whats_new::{WhatsNewHits, WhatsNewState};
 
+mod block_tools;
 mod composer;
+mod explorer_menu;
 mod hotkey_window;
 mod inspector;
 mod install_cli;
 mod links;
+mod mark_mode;
+mod md_run;
+mod pane_life;
+mod pane_theme;
 mod profiles;
 mod progress;
+mod rail;
+mod results;
 mod review_git;
+mod scroll_bar;
+mod secrets;
 mod shell_widgets;
+mod sticky;
 mod strip;
 mod subshell;
+mod tab_colors;
+mod tab_groups;
 mod tab_move;
+mod tab_mru;
+mod theme_picker;
+mod user_actions;
+mod window_opts;
 mod windows;
 
 pub use subshell::SubshellOffer;
@@ -85,6 +102,8 @@ pub enum UserEvent {
     DockerStatus(PaneId, Option<rift_core::docker::ComposeInfo>),
     ConfigReloaded,
     ViewerLoaded(Box<crate::views::viewer::ViewerState>),
+    /// A block comparison's diff (its generation, the result).
+    CompareReady(u64, Box<crate::views::compare::DiffResult>),
     /// The switcher's other-process windows, for the window that asked.
     WindowsLoaded(
         Option<WindowId>,
@@ -98,6 +117,12 @@ pub enum UserEvent {
     WorktreeAdded(Option<WindowId>, Result<std::path::PathBuf, String>),
     /// The shell the import was for, and its history.
     HistoryLoaded(String, Vec<String>),
+    /// The history pane's Results search `.1` for the window that asked.
+    ResultsFound(
+        Option<WindowId>,
+        u64,
+        Box<rift_core::result_search::Outcome>,
+    ),
     ShellEnvLoaded(Arc<rift_core::shell_env::ShellEnv>),
     /// Screen reader requests (initial tree, actions).
     Access(accesskit_winit::Event),
@@ -494,7 +519,6 @@ impl From<accesskit_winit::Event> for UserEvent {
 
 /// Spec metrics (logical px).
 const SIDE_PAD: f32 = 8.0;
-const TOP_PAD: f32 = 14.0;
 const DEFAULT_FONT_SIZE: f32 = 13.0;
 /// Half-period of blinking text (SGR 5), as xterm's default.
 const TEXT_BLINK: Duration = Duration::from_millis(600);
@@ -630,6 +654,8 @@ pub struct App {
     review_generation: u64,
     proxy: EventLoopProxy<UserEvent>,
     bg_image_opacity: f32,
+    /// `[[tab_color_rules]]` resolved at config load (`tab_colors.rs`).
+    tab_rules: Vec<rift_core::tab_color::TabColorRule>,
     text: Option<TextEngine>,
     git: Option<GitWorker>,
     pr_worker: Option<rift_core::github::PrWorker>,
@@ -673,6 +699,8 @@ pub struct App {
     headless: bool,
     /// Clipboard of a headless run: the system clipboard is never touched.
     headless_clipboard: String,
+    /// HTML on the headless clipboard ("Copy as HTML"), beside the text.
+    headless_clipboard_html: String,
     /// Files on the headless clipboard (script `copyfiles`).
     headless_files: Vec<std::path::PathBuf>,
     /// Script `fault` (headless only): the clipboard backend is unavailable,
@@ -684,6 +712,9 @@ pub struct App {
     /// Last audible bell: a flood of BELs (`cat` of a binary) plays one sound
     /// per `BELL_SOUND_GAP`, not one process each.
     last_beep: Option<Instant>,
+    /// Dock bounces / urgency hints requested (`request_attention`; the
+    /// dump counts them, a headless run only counts).
+    attention_requests: u32,
     /// Warp-style launch configurations (~/.config/rift/launch_configs).
     launch_configs: Vec<rift_core::launch::LaunchConfig>,
     /// Config files the palette last found unreadable: a toast names them
@@ -703,6 +734,8 @@ pub struct App {
     next_launch: Option<rift_core::profiles::PaneLaunch>,
     /// The last spawned pane's launch identity and program, for `new_pane`.
     spawned: Option<(PaneId, rift_core::profiles::PaneLaunch, String)>,
+    /// The history pane's Results search (`crate::results`).
+    results_worker: crate::results::Worker,
     /// Local control API socket (removed on drop).
     control_server: Option<crate::control::Server>,
     /// Attention center entries, newest last.
@@ -715,6 +748,9 @@ pub struct App {
     attention_seen: std::collections::HashMap<PaneId, rift_core::BlockId>,
     /// Newest finished block written to each pane's transcript.
     transcript_saved: std::collections::HashMap<PaneId, rift_core::BlockId>,
+    /// Panes open when saved transcripts were cleared: their restored
+    /// blocks are neither saved again nor searched (Results scope).
+    transcripts_cleared: std::collections::HashSet<PaneId>,
     /// ssh profiles listed in the palette (config + ~/.ssh/config).
     ssh_profiles: Vec<rift_core::ssh::SshProfile>,
     /// `RIFT_LATENCY_LOG`: log key-to-frame latency of raw keystrokes.
@@ -817,6 +853,14 @@ struct WindowState {
     palette: PaletteState,
     palette_results: Vec<MatchedItem>,
     palette_row_hits: Vec<([f32; 4], usize)>,
+    /// `[[actions]]` sequences still running (a step waits for its pane).
+    action_runs: Vec<user_actions::ActionRun>,
+    /// ⌃Tab's most-recently-used switcher while ⌃ is held.
+    tab_switcher: Option<tab_mru::TabSwitcher>,
+    /// The switcher's rows last frame (a11y).
+    tab_switcher_rows: Vec<(usize, [f32; 4])>,
+    /// Keyboard selection in the scrollback (mark mode).
+    mark: Option<mark_mode::MarkState>,
     /// Accessible names of the settings controls drawn last frame.
     settings_names: Vec<([f32; 4], String)>,
     /// Settings controls Tab can reach, also scrolled away (page coords).
@@ -876,6 +920,21 @@ struct WindowState {
     app_notes: Vec<AppNote>,
     /// Pipe modal target: (pane, block, the block's output text).
     pipe_target: Option<(PaneId, rift_core::BlockId, String)>,
+    /// "Save output…" / "Export buffer…": what the typed path gets (its
+    /// label and the text, read when the prompt opened).
+    save_target: Option<(String, String)>,
+    /// The theme picker is open: the theme it previews over, put back
+    /// unless one is kept (`theme_picker.rs`).
+    theme_preview: Option<theme_picker::Preview>,
+    /// The tab colour prompt: the tab it colours, by a pane of it.
+    tab_color_target: Option<PaneId>,
+    /// "New file…" from the explorer: the directory it goes in.
+    new_file_dir: Option<std::path::PathBuf>,
+    /// The explorer row a right-click opened the menu on.
+    explorer_menu: Option<crate::views::explorer::Row>,
+    /// Compare two blocks' outputs (views/compare.rs) and its click targets.
+    compare: crate::views::compare::CompareState,
+    compare_hits: crate::views::compare::CompareHits,
     /// "New worktree tab…": the active pane's directory and its
     /// repository's main checkout (`None` outside a repository).
     worktree_from: Option<(std::path::PathBuf, Option<std::path::PathBuf>)>,
@@ -955,6 +1014,10 @@ struct WindowState {
     review_cwd: Option<String>,
     /// Code "Send to agent…" holds while its target is picked.
     send_source: Option<crate::views::send_agent::SendSource>,
+    /// The link or file path a context menu was opened on: the URL or the
+    /// resolved path, the line and column printed with a path, and whether
+    /// it is a path.
+    link_menu: Option<(String, crate::file_link::At, bool)>,
     /// Last git status poll of the active tab's panes (changes made while a
     /// pane is busy, by an agent or an editor, show without a command
     /// ending), and of its Docker Compose state.
@@ -975,6 +1038,12 @@ struct WindowState {
     viewer_focus: bool,
     /// Inline tab rename in progress: (tab index, edited title).
     rename: Option<(usize, String)>,
+    /// Tab groups and the header being renamed (`tab_groups`).
+    groups: tab_groups::TabGroups,
+    /// The vertical rail's search field and panes view (`rail`).
+    rail: rail::RailUi,
+    /// The rail's rows last frame, described for `dump`.
+    rail_dump: Vec<String>,
     /// Rename text still fully selected (first keystroke replaces it).
     rename_fresh: bool,
     /// Search overlay edits a per-block output filter instead of find.
@@ -1008,6 +1077,21 @@ struct WindowState {
     cursor_icon: winit::window::CursorIcon,
     /// The drop-down hotkey window's state; `None` for an ordinary window.
     dropdown: Option<hotkey_window::Dropdown>,
+    /// Its name ("Rename window…"): its title, saved with the session.
+    name: Option<String>,
+    /// It floats above other apps' windows, and the `always_on_top` value
+    /// last applied (a toggled window keeps its state until that changes).
+    on_top: bool,
+    on_top_applied: Option<bool>,
+    /// The `launch_mode` it opened with.
+    launch: rift_core::LaunchMode,
+    /// The last window resize, the active grid's size last frame, and the
+    /// columns × rows overlay shown since (`resize_overlay`).
+    resized_at: Option<Instant>,
+    overlay_grid: Option<(usize, usize)>,
+    resize_overlay: Option<((usize, usize), Instant)>,
+    /// Trackpad pixels toward the next `wheel_zoom` step.
+    wheel_zoom_px: f32,
     /// A headless window's place on a pretend desktop (physical px): hidden
     /// windows have no real one, and a dragged tab's release is matched to
     /// the window under it (`tab_move`).
@@ -1506,6 +1590,8 @@ enum CloseScope {
     Pane(PaneId),
     Tab(usize),
     OtherTabs(usize),
+    /// Every tab of a tab group.
+    Group(u64),
     /// The window being served; the last one quits, as `App` does.
     Window,
     /// Every window: quit.
@@ -1524,6 +1610,13 @@ enum ConfirmAction {
         /// Also into `pane`'s raw synchronized siblings (a typed paste);
         /// false for "Send to agent…", which targets one pane.
         synced: bool,
+    },
+    /// A paste over `large_paste_warning`, into the pane active when it
+    /// was asked (Paste then goes on as a paste: the multiline question
+    /// can follow).
+    LargePaste {
+        pane: PaneId,
+        text: String,
     },
     /// Write Rift's shell hooks to an ssh host (runs in a new tab).
     InstallRemote(rift_core::ssh::SshProfile),
@@ -1545,11 +1638,44 @@ enum ConfirmAction {
         id: String,
         name: String,
     },
+    /// Restart a pane while a job runs in it (`restart_pane`).
+    Restart(PaneId),
+    /// Close a pinned tab (⌘W, its ×, its menu): asked first; the close
+    /// then goes on as usual (the running-jobs warning included).
+    ClosePinned(CloseScope),
     /// A `rift://` link opens a layout whose panes run commands.
     LaunchLink {
         config: Box<rift_core::launch::LaunchConfig>,
         new_window: bool,
     },
+    /// Save output / Export buffer to a path that already holds a file.
+    Overwrite {
+        path: std::path::PathBuf,
+        what: String,
+        text: String,
+    },
+    /// Run a Markdown code block (the viewer's Run) in `pane`.
+    RunCode {
+        pane: PaneId,
+        command: String,
+    },
+}
+
+/// Lines of a large paste the confirmation shows.
+const LARGE_PASTE_PREVIEW: usize = 5;
+
+/// The large-paste confirmation's description: its size and line count.
+fn large_paste_description(text: &str) -> String {
+    let lines = text.lines().count().max(1);
+    let size = if text.len() >= 1024 * 1024 {
+        format!("{:.1} MB", text.len() as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{} KB", text.len().div_ceil(1024))
+    };
+    format!(
+        "{size}, {lines} line{}, will be pasted.",
+        if lines == 1 { "" } else { "s" }
+    )
 }
 
 /// The Operate confirmation's description.
@@ -1691,6 +1817,10 @@ impl WindowState {
             palette: PaletteState::default(),
             palette_results: Vec::new(),
             palette_row_hits: Vec::new(),
+            action_runs: Vec::new(),
+            tab_switcher: None,
+            tab_switcher_rows: Vec::new(),
+            mark: None,
             settings_names: Vec::new(),
             settings_stops: Vec::new(),
             completion: CompletionUi::default(),
@@ -1719,6 +1849,13 @@ impl WindowState {
             bell_flash: None,
             confirm: None,
             pipe_target: None,
+            save_target: None,
+            theme_preview: None,
+            tab_color_target: None,
+            new_file_dir: None,
+            explorer_menu: None,
+            compare: Default::default(),
+            compare_hits: Default::default(),
             worktree_from: None,
             hints: None,
             windows_loading: false,
@@ -1771,6 +1908,7 @@ impl WindowState {
             inspect_pinned: false,
             review_cwd: None,
             send_source: None,
+            link_menu: None,
             git_polled: None,
             docker_polled: None,
             status_pane: None,
@@ -1781,6 +1919,9 @@ impl WindowState {
             viewer_focus: false,
             rename: None,
             rename_fresh: false,
+            groups: Default::default(),
+            rail: Default::default(),
+            rail_dump: Vec::new(),
             filter_editing: false,
             tab_drag: None,
             history: Default::default(),
@@ -1796,6 +1937,14 @@ impl WindowState {
             ime_area_sent: None,
             cursor_icon: winit::window::CursorIcon::Default,
             dropdown: None,
+            name: None,
+            on_top: false,
+            on_top_applied: None,
+            launch: rift_core::LaunchMode::Default,
+            resized_at: None,
+            overlay_grid: None,
+            resize_overlay: None,
+            wheel_zoom_px: 0.0,
             headless_origin: (0.0, 0.0),
         }
     }
@@ -1824,6 +1973,7 @@ impl App {
             review_generation: 0,
             proxy,
             bg_image_opacity: 1.0,
+            tab_rules: Vec::new(),
             text: None,
             git: None,
             pr_worker: None,
@@ -1851,11 +2001,13 @@ impl App {
             script,
             headless,
             headless_clipboard: String::new(),
+            headless_clipboard_html: String::new(),
             headless_files: Vec::new(),
             fault_clipboard: false,
             fault_opener: false,
             os_light: false,
             last_beep: None,
+            attention_requests: 0,
             launch_configs: Vec::new(),
             launch_skipped: Vec::new(),
             pending_commands: std::collections::HashMap::new(),
@@ -1865,12 +2017,14 @@ impl App {
             next_attach: None,
             next_launch: None,
             spawned: None,
+            results_worker: Default::default(),
             control_server: None,
             attention: Vec::new(),
             next_attention_id: 0,
             test_alerts: Default::default(),
             attention_seen: Default::default(),
             transcript_saved: Default::default(),
+            transcripts_cleared: Default::default(),
             latency_log: std::env::var_os("RIFT_LATENCY_LOG").is_some(),
             latency_probe: None,
             releases: rift_core::changelog::releases(),
@@ -1928,6 +2082,7 @@ impl App {
             }
         }
         rift_pty::set_default_colors(colors);
+        self.apply_secret_masking();
         let icon = self.config.app_icon;
         if self
             .applied_icon
@@ -1968,9 +2123,14 @@ impl App {
         // (Theme::window_ground / Theme::ground); text, overlays, modals and
         // non-default cell colours stay opaque
         self.theme.ground_alpha = self.config.opacity();
+        self.tab_rules = rift_core::tab_color::resolve_rules(
+            &self.config.tab_color_rules,
+            std::env::var("HOME").ok().as_deref(),
+        );
+        self.reload_pane_themes();
         self.font_size = self.config.font_size();
         self.line_h = self.font_size * self.config.line_height();
-        self.keymap = Keymap::from_overrides(&self.config.keybindings);
+        self.keymap = Keymap::from_config(&self.config.keybindings, &self.config.actions);
         self.apply_global_hotkey();
         // menu shortcut labels follow the keymap
         #[cfg(target_os = "macos")]
@@ -2029,21 +2189,26 @@ impl App {
         self.track_strip(None);
         self.sync_window_buttons();
         self.place_hotkey_window();
+        self.apply_window_options();
         self.apply_background_image();
         let vim = self.config.vim_mode;
         for tab in &mut self.win.tabs {
             for pane in &mut tab.panes {
                 pane.editor.set_vim_enabled(vim);
+                pane.editor
+                    .word_delimiters
+                    .clone_from(&self.config.word_delimiters);
             }
         }
         self.win
             .explorer
             .set_show_hidden(self.config.explorer_hidden_files);
         let clipboard = rift_pty::ClipboardAccess::from_config(&self.config.clipboard_access);
-        for tab in &self.win.tabs {
-            for pane in &tab.panes {
-                pane.session.set_clipboard_access(clipboard);
-            }
+        let ambiguous_wide = self.config.ambiguous_width == rift_core::AmbiguousWidth::Wide;
+        // every window's panes (the parked ones too)
+        for pane in self.all_panes() {
+            pane.session.set_clipboard_access(clipboard);
+            pane.session.set_ambiguous_wide(ambiguous_wide);
         }
         if let Some(w) = &self.win.window {
             w.request_redraw();
@@ -2146,7 +2311,8 @@ impl App {
             );
             return;
         }
-        match self.config.save() {
+        // a theme picker's preview is not saved: its original is
+        match self.config_to_save().save() {
             Ok(()) => self.win.settings.saved_at = Some(Instant::now()),
             Err(e) => {
                 log::warn!("config save failed: {e}");
@@ -2165,6 +2331,13 @@ impl App {
             return;
         }
         self.history_shell = shell.clone();
+        // a scripted run leaves the user's history out of its dumps and shots
+        if !rift_core::history::import_allowed(
+            self.script.is_some(),
+            std::env::var_os("RIFT_SCRIPT_HISTORY").as_deref(),
+        ) {
+            return;
+        }
         let proxy = self.proxy.clone();
         std::thread::Builder::new()
             .name("history-import".into())
@@ -2182,6 +2355,7 @@ impl App {
         match Config::try_load() {
             Ok(c) => {
                 self.config = c.unwrap_or_default();
+                self.rebase_theme_preview();
                 self.config_error = None;
                 // fixed: its "not applied" / "not saved" errors are moot
                 self.win
@@ -2241,7 +2415,10 @@ impl App {
         let mut idx = (((my - grid.y) / grid.line_h).floor() as i64)
             .clamp(0, pane.rows.len() as i64 - 1) as usize;
         // clamp header and pad rows to the nearest grid row
-        if matches!(pane.rows[idx].kind, RowKind::Header(_) | RowKind::Pad) {
+        if matches!(
+            pane.rows[idx].kind,
+            RowKind::Header(_) | RowKind::Pad | RowKind::Sep
+        ) {
             let down = pane.rows[idx..]
                 .iter()
                 .position(|r| matches!(r.kind, RowKind::Grid { .. }))
@@ -2362,7 +2539,32 @@ impl App {
                 } else {
                     SelectionType::Lines
                 };
-                pane.session.term.lock().selection = Some(Selection::new(ty, point, side));
+                // a double-click inside a URL, path, address, number, UUID
+                // or SHA selects it whole (`smart_select`), also one
+                // soft-wrapped over several rows
+                let abs = (point.line.0 as i64 + scrolled as i64).max(0) as u64;
+                let unit = (clicks == 2)
+                    .then(|| terminal::smart_unit_at(&pane.session, abs, point.column.0))
+                    .flatten();
+                let grid_line = |a: u64| ALine((a as i64 - scrolled as i64) as i32);
+                let mut term = pane.session.term.lock();
+                term.set_semantic_escape_chars(&crate::smart_select::word_boundaries(
+                    &self.config.word_chars,
+                    &self.config.word_delimiters,
+                ));
+                term.selection = Some(match unit {
+                    Some(((sa, sc), (ea, ec))) => {
+                        let mut sel = Selection::new(
+                            SelectionType::Simple,
+                            APoint::new(grid_line(sa), ACol(sc)),
+                            ASide::Left,
+                        );
+                        sel.update(APoint::new(grid_line(ea), ACol(ec)), ASide::Right);
+                        sel
+                    }
+                    None => Selection::new(ty, point, side),
+                });
+                drop(term);
                 pane.has_selection = true;
                 self.win.pending_sel = Some(PendingSelection {
                     pane: pane_id,
@@ -2413,6 +2615,18 @@ impl App {
             .block_at(abs as u64)
             .map(|b| b.id);
         if let Some(block) = block {
+            if self.click_block_with_mods(pane_id, block) {
+                return;
+            }
+            let Some(pane) = self
+                .win
+                .tabs
+                .get_mut(self.win.active)
+                .and_then(|t| t.pane_mut(pane_id))
+            else {
+                return;
+            };
+            pane.block_selection.clear();
             pane.selected_block = (pane.selected_block != Some(block)).then_some(block);
         }
     }
@@ -2565,7 +2779,7 @@ impl App {
             let alt = term.mode().contains(TermMode::ALT_SCREEN);
             (g.screen_lines(), g.history_size() as u64, live_end, alt)
         };
-        let hidden = filter_hidden(&pane.session, pane.filter.as_ref());
+        let hidden = filter_hidden(&pane.session, Some(&pane.filter));
         let display = build_display_list_filtered(
             &blocks,
             scrolled,
@@ -2632,7 +2846,7 @@ impl App {
         let idx = display.iter().rposition(|d| match d {
             DisplayLine::Header(i) => *i == bi,
             DisplayLine::Grid(abs) => *abs >= start && *abs < end,
-            DisplayLine::Pad => false,
+            DisplayLine::Pad | DisplayLine::Sep => false,
         })?;
         Some((idx, display.len()))
     }
@@ -2721,49 +2935,75 @@ impl App {
                 b.branch.is_some(),
             )
         };
-        let filtered = pane.filter.as_ref().is_some_and(|(b, _)| *b == block);
+        if let Some(items) = self.multi_block_menu(pane_id, block) {
+            self.win.context_menu = ContextMenuState {
+                open: true,
+                pane: pane_id,
+                block,
+                pos,
+                items,
+                selected: None,
+            };
+            return;
+        }
+        let filter = pane.filter.get(block).map(|f| f.enabled);
         let rerun_ok = self.win.editor_active;
+        // copies are masked while `mask_secrets` is on; this one is not
+        let unmasked = rift_core::secrets::active().is_some().then(|| {
+            MenuItem::new("Copy output unmasked", MenuAction::CopyOutputUnmasked)
+                .enabled(has_output)
+        });
+        let mut items = vec![
+            MenuItem::new("Copy command", MenuAction::CopyCommand),
+            MenuItem::new("Copy output", MenuAction::CopyOutput).enabled(has_output),
+        ];
+        items.extend(unmasked);
+        items.extend([
+            MenuItem::new("Copy both", MenuAction::CopyBoth).enabled(has_output),
+            MenuItem::new("Copy working directory", MenuAction::CopyCwd).enabled(has_cwd),
+            MenuItem::new("Copy git branch", MenuAction::CopyBranch).enabled(has_branch),
+            MenuItem::new("Re-run command", MenuAction::Rerun)
+                .enabled(rerun_ok)
+                .sep(),
+            MenuItem::new(
+                match filter {
+                    Some(true) => "Turn off output filter",
+                    Some(false) => "Turn on output filter",
+                    None => "Filter output…",
+                },
+                MenuAction::FilterBlock,
+            )
+            .enabled(has_output),
+            MenuItem::new("Send output to command…", MenuAction::PipeOutput)
+                .enabled(has_output && rerun_ok),
+            MenuItem::new(
+                if bookmarked {
+                    "Remove bookmark"
+                } else {
+                    "Bookmark"
+                },
+                MenuAction::ToggleBookmark,
+            ),
+            MenuItem::new(
+                if collapsed { "Expand" } else { "Collapse" },
+                MenuAction::ToggleCollapse,
+            )
+            .enabled(has_output),
+            MenuItem::new("Scroll to top of block", MenuAction::ScrollTopOfBlock).sep(),
+            MenuItem::new("Scroll to bottom of block", MenuAction::ScrollBottomOfBlock),
+        ]);
+        // later rows go below the existing ones: keyboard paths count rows
+        items.extend(self.block_menu_extras(pane_id, block, has_output, filter.is_some()));
+        // `cat README.md` and the like: the file itself, rendered
+        if self.printed_markdown(pane_id, block).is_some() {
+            items.push(MenuItem::new("Open in viewer", MenuAction::OpenInViewer).sep());
+        }
         self.win.context_menu = ContextMenuState {
             open: true,
             pane: pane_id,
             block,
             pos,
-            items: vec![
-                MenuItem::new("Copy command", MenuAction::CopyCommand),
-                MenuItem::new("Copy output", MenuAction::CopyOutput).enabled(has_output),
-                MenuItem::new("Copy both", MenuAction::CopyBoth).enabled(has_output),
-                MenuItem::new("Copy working directory", MenuAction::CopyCwd).enabled(has_cwd),
-                MenuItem::new("Copy git branch", MenuAction::CopyBranch).enabled(has_branch),
-                MenuItem::new("Re-run command", MenuAction::Rerun)
-                    .enabled(rerun_ok)
-                    .sep(),
-                MenuItem::new(
-                    if filtered {
-                        "Clear output filter"
-                    } else {
-                        "Filter output…"
-                    },
-                    MenuAction::FilterBlock,
-                )
-                .enabled(has_output),
-                MenuItem::new("Send output to command…", MenuAction::PipeOutput)
-                    .enabled(has_output && rerun_ok),
-                MenuItem::new(
-                    if bookmarked {
-                        "Remove bookmark"
-                    } else {
-                        "Bookmark"
-                    },
-                    MenuAction::ToggleBookmark,
-                ),
-                MenuItem::new(
-                    if collapsed { "Expand" } else { "Collapse" },
-                    MenuAction::ToggleCollapse,
-                )
-                .enabled(has_output),
-                MenuItem::new("Scroll to top of block", MenuAction::ScrollTopOfBlock).sep(),
-                MenuItem::new("Scroll to bottom of block", MenuAction::ScrollBottomOfBlock),
-            ],
+            items,
             selected: None,
         };
     }
@@ -2785,6 +3025,7 @@ impl App {
             MenuItem::new("Copy", MenuAction::Copy).enabled(has_sel),
             MenuItem::new("Paste", MenuAction::Paste),
             MenuItem::new("Select all", MenuAction::SelectAll),
+            MenuItem::new("Export buffer…", MenuAction::ExportBuffer),
             MenuItem::new("Split pane right", MenuAction::SplitRight).sep(),
             MenuItem::new("Split pane down", MenuAction::SplitDown),
         ];
@@ -2796,6 +3037,30 @@ impl App {
             MenuItem::new("Move to new window", MenuAction::MovePaneToNewWindow)
                 .enabled(self.can_move_pane(pane_id)),
         );
+        let read_only = self.pane_read_only(pane_id);
+        items.push(
+            MenuItem::new(
+                if read_only {
+                    "Allow input"
+                } else {
+                    "Make read-only"
+                },
+                MenuAction::ToggleReadOnly,
+            )
+            .sep(),
+        );
+        items.push(MenuItem::new("Restart pane", MenuAction::RestartPane));
+        if self.config.sticky_command_header {
+            let minimized = self.pane_ref(pane_id).is_some_and(|p| p.sticky_minimized);
+            items.push(MenuItem::new(
+                if minimized {
+                    "Show sticky command header"
+                } else {
+                    "Minimize sticky command header"
+                },
+                MenuAction::ToggleStickyHeader,
+            ));
+        }
         items.push(MenuItem::new("Clear blocks", MenuAction::ClearBlocks).sep());
         items.push(MenuItem::new("Close pane", MenuAction::ClosePane));
         self.win.context_menu = ContextMenuState {
@@ -2806,6 +3071,47 @@ impl App {
             items,
             selected: None,
         };
+    }
+
+    /// A right-click on a link or an existing file path in output: its own
+    /// rows (open, copy, reveal) above the menu that opened.
+    fn add_link_items(&mut self, pane_id: PaneId) {
+        let found = match self.url_under_mouse(pane_id) {
+            Some(url) if Self::openable_url(&url) => Some((url, None, false)),
+            Some(_) => None,
+            None => self
+                .path_under_mouse(pane_id)
+                .map(|(path, at)| (path, at, true)),
+        };
+        self.win.link_menu = found;
+        let Some((_, _, is_path)) = self.win.link_menu else {
+            return;
+        };
+        let mut items = if is_path {
+            vec![
+                MenuItem::new("Open", MenuAction::LinkOpen),
+                MenuItem::new("Copy path", MenuAction::LinkCopy),
+                MenuItem::new(
+                    if cfg!(target_os = "macos") {
+                        "Reveal in Finder"
+                    } else {
+                        "Show in file manager"
+                    },
+                    MenuAction::LinkReveal,
+                ),
+            ]
+        } else {
+            vec![
+                MenuItem::new("Open link", MenuAction::LinkOpen),
+                MenuItem::new("Copy URL", MenuAction::LinkCopy),
+            ]
+        };
+        let menu = &mut self.win.context_menu.items;
+        if let Some(first) = menu.first_mut() {
+            first.separator = true;
+        }
+        items.append(menu);
+        *menu = items;
     }
 
     /// The file viewer's ⋮ menu.
@@ -2868,10 +3174,15 @@ impl App {
             let item = MenuItem::new(name, MenuAction::SetTabColor(tab, Some(i)));
             items.push(if i == 0 { item.sep() } else { item });
         }
+        items.push(MenuItem::new(
+            "Custom color…",
+            MenuAction::CustomTabColor(tab),
+        ));
         items.push(
             MenuItem::new("No color", MenuAction::SetTabColor(tab, None))
                 .enabled(t.color.is_some()),
         );
+        items.extend(self.tab_group_items(tab));
         items.extend(self.move_tab_items(tab));
         items.push(MenuItem::new("Close tab", MenuAction::CloseTab(tab)).sep());
         items.push(
@@ -2924,9 +3235,16 @@ impl App {
         let block = self.win.context_menu.block;
         self.win.context_menu.close();
         let editor_active = self.win.editor_active;
+        // multi-block selection, copy formats, export, compare
+        if self.run_block_tool(action, pane_id, block) || self.run_explorer_menu(action) {
+            return;
+        }
 
         // actions that are not about one block
         match action {
+            MenuAction::CustomTabColor(i) => return self.open_tab_color_prompt(i),
+            MenuAction::ToggleStickyHeader => return self.toggle_sticky_header(pane_id),
+            MenuAction::OpenInViewer => return self.open_printed_markdown(pane_id, block),
             MenuAction::Copy => return self.handle_action(AppAction::Copy, event_loop),
             MenuAction::Paste => return self.handle_action(AppAction::Paste, event_loop),
             MenuAction::SelectAll => return self.handle_action(AppAction::SelectAll, event_loop),
@@ -2969,10 +3287,38 @@ impl App {
             MenuAction::ClosePane => {
                 return self.request_close(CloseScope::Pane(pane_id), event_loop);
             }
+            MenuAction::ToggleReadOnly => return self.toggle_read_only(pane_id),
+            MenuAction::RestartPane => return self.request_restart(pane_id),
             MenuAction::ViewerInsertPath => {
                 if let Some(p) = self.win.viewer.path.clone() {
                     self.win.viewer.close();
                     self.drop_file(&p);
+                }
+                return;
+            }
+            MenuAction::LinkOpen => {
+                if let Some((target, at, _)) = self.win.link_menu.take() {
+                    self.open_target_at(&target, at);
+                }
+                return;
+            }
+            MenuAction::LinkCopy => {
+                if let Some((target, _, _)) = self.win.link_menu.take()
+                    && self.copy_to_clipboard(target)
+                {
+                    self.toast_done("Copied".into());
+                }
+                return;
+            }
+            MenuAction::LinkReveal => {
+                if let Some((path, _, true)) = self.win.link_menu.take() {
+                    let path = std::path::PathBuf::from(path);
+                    if self.headless {
+                        // a file manager window would take the user's focus
+                        self.toast(format!("Headless: not revealing {}", path.display()));
+                    } else if let Err(e) = reveal_external(&path) {
+                        self.toast_error(format!("Could not reveal {}: {e}", path.display()));
+                    }
                 }
                 return;
             }
@@ -3040,8 +3386,18 @@ impl App {
                     self.win.tabs.insert(i + 1, tab);
                     self.win.active = i + 1;
                 }
+                self.join_group_of(i, self.win.active);
                 self.save_session();
                 return;
+            }
+            MenuAction::PinTab(i) => return self.toggle_pin(i),
+            MenuAction::GroupTabs(i) => return self.group_tabs(i),
+            MenuAction::LeaveGroup(i) => return self.leave_group(i),
+            MenuAction::ToggleGroup(id) => return self.toggle_group(id),
+            MenuAction::RenameGroup(id) => return self.start_group_rename(id),
+            MenuAction::Ungroup(id) => return self.ungroup(id),
+            MenuAction::CloseGroup(id) => {
+                return self.request_close(CloseScope::Group(id), event_loop);
             }
             MenuAction::ToggleSync(i) => {
                 if let Some(t) = self.win.tabs.get_mut(i) {
@@ -3051,7 +3407,7 @@ impl App {
             }
             MenuAction::SetTabColor(i, c) => {
                 if let Some(t) = self.win.tabs.get_mut(i) {
-                    t.color = c;
+                    t.color = c.map(rift_core::tab_color::TabColor::Named);
                 }
                 self.save_session();
                 return;
@@ -3116,19 +3472,24 @@ impl App {
                 .find(|b| b.id == block)
                 .map(|b| (b.command.clone(), b.cwd.clone(), b.branch.clone()))
                 .unwrap_or_default();
+            // copies are masked while `mask_secrets` is on (as shown)
+            let mask = rift_core::secrets::mask_owned;
             match action {
-                MenuAction::CopyCommand => to_copy = Some(command),
+                MenuAction::CopyCommand => to_copy = Some(mask(command)),
                 MenuAction::CopyCwd => to_copy = cwd,
                 MenuAction::CopyBranch => to_copy = branch,
                 MenuAction::ScrollTopOfBlock => jump_top = true,
                 MenuAction::ScrollBottomOfBlock => jump_bottom = true,
                 MenuAction::CopyOutput => {
+                    to_copy = terminal::block_output_text(&pane.session, block).map(mask);
+                }
+                MenuAction::CopyOutputUnmasked => {
                     to_copy = terminal::block_output_text(&pane.session, block);
                 }
                 MenuAction::CopyBoth => {
                     let output =
                         terminal::block_output_text(&pane.session, block).unwrap_or_default();
-                    to_copy = Some(format!("{command}\n{output}"));
+                    to_copy = Some(mask(format!("{command}\n{output}")));
                 }
                 MenuAction::Rerun => {
                     if !command.is_empty() && editor_active {
@@ -3158,8 +3519,9 @@ impl App {
         }
     }
 
-    /// Block filter (Warp): open the filter bar for `block`, or clear the
-    /// filter when that block is already filtered.
+    /// Block filter (Warp): open the filter bar for `block` (a filter kept
+    /// off comes back on with its query and toggles), or turn the filter
+    /// off, keeping it, when it is on.
     fn toggle_block_filter(&mut self, pane_id: PaneId, block: rift_core::BlockId) {
         let Some(pane) = self
             .win
@@ -3169,13 +3531,31 @@ impl App {
         else {
             return;
         };
-        if pane.filter.as_ref().is_some_and(|(b, _)| *b == block) {
-            pane.filter = None;
-            self.win.filter_editing = false;
-            self.win.search.close();
-            return;
+        let alive: Vec<rift_core::BlockId> = pane
+            .session
+            .blocks
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|b| b.id)
+            .collect();
+        pane.filter.retain_blocks(|b| alive.contains(&b));
+        match pane.filter.get_mut(block) {
+            Some(f) if f.enabled => {
+                f.enabled = false;
+                if pane.filter.editing.take().is_some() {
+                    self.win.filter_editing = false;
+                    self.win.search.close();
+                }
+                return;
+            }
+            Some(f) => f.enabled = true,
+            None => pane
+                .filter
+                .list
+                .push(crate::views::block_filter::BlockFilter::new(block)),
         }
-        pane.filter = Some((block, String::new()));
+        pane.filter.editing = Some(block);
         pane.selected_block = Some(block);
         self.win.search.close();
         self.win.search.open = true;
@@ -3327,19 +3707,19 @@ impl App {
         if !self.win.modifiers.super_key() {
             return false;
         }
-        let target = match self.url_under_mouse(pane_id) {
+        let (target, at) = match self.url_under_mouse(pane_id) {
             Some(url) => {
                 if !Self::openable_url(&url) {
                     return false;
                 }
-                url
+                (url, None)
             }
             None => match self.path_under_mouse(pane_id) {
-                Some(path) => path,
+                Some(found) => found,
                 None => return false,
             },
         };
-        self.open_target(&target);
+        self.open_target_at(&target, at);
         true
     }
 
@@ -3348,6 +3728,7 @@ impl App {
     fn new_pane(&self, session: Session) -> PaneState {
         let mut pane = PaneState::new(session);
         pane.editor.set_vim_enabled(self.config.vim_mode);
+        pane.editor.word_delimiters = self.config.word_delimiters.clone();
         if let Some((_, launch, program)) = self
             .spawned
             .as_ref()
@@ -3356,6 +3737,8 @@ impl App {
             pane.launch = launch.clone();
             pane.program = program.clone();
         }
+        pane.theme = self.launch_theme(&pane.launch);
+        pane_theme::sync_query_colors(&pane);
         pane
     }
 
@@ -3373,9 +3756,14 @@ impl App {
     /// Open a link or path: an existing local file or folder where
     /// `link_editor` says, anything else with the OS opener.
     fn open_target(&mut self, target: &str) {
+        self.open_target_at(target, None);
+    }
+
+    /// [`App::open_target`] at a line (and column) printed with a path.
+    fn open_target_at(&mut self, target: &str, at: Option<(u32, Option<u32>)>) {
         let choice = self.config.link_editor.trim().to_string();
         match local_path_of(target).filter(|p| p.exists()) {
-            Some(path) => self.open_file_in(&path, &choice),
+            Some(path) => self.open_file_at(&path, &choice, at),
             None => self.open_target_external(target),
         }
     }
@@ -3616,7 +4004,8 @@ impl App {
             .tabs
             .get(self.win.active)
             .and_then(|t| t.pane(pane))
-            .and_then(|p| terminal::block_output_text(&p.session, block));
+            .and_then(|p| terminal::block_output_text(&p.session, block))
+            .map(rift_core::secrets::mask_owned);
         if let Some(text) = text
             && self.copy_to_clipboard(text)
         {
@@ -3625,8 +4014,9 @@ impl App {
     }
 
     /// An existing file or directory named by the text under the pointer
-    /// (resolved like `resolve_path`; `file:line:col` suffixes are dropped).
-    fn path_under_mouse(&self, pane_id: PaneId) -> Option<String> {
+    /// (resolved like `resolve_path`), with the line and column printed
+    /// beside it (`file_link`: `x:12:3`, `x(12,3)`, `File "x", line 12`…).
+    fn path_under_mouse(&self, pane_id: PaneId) -> Option<(String, crate::file_link::At)> {
         use crate::views::terminal::RowKind;
         let pane = self.win.tabs.get(self.win.active)?.pane(pane_id)?;
         let g = pane.last_grid?;
@@ -3643,8 +4033,8 @@ impl App {
             return None;
         }
         let text = terminal::session_line_text(&pane.session, abs)?;
-        let (path, _line) = terminal::path_token_at(&text, col as usize)?;
-        Self::resolve_path(pane, abs, &path)
+        let link = crate::file_link::link_at(&text, col as usize)?;
+        Some((Self::resolve_path(pane, abs, &link.path)?, link.at()))
     }
 
     /// Pointer shape: a hand over anything clickable (buttons, tabs, menu
@@ -3669,6 +4059,8 @@ impl App {
         } else if self.win.whats_new.open {
             let h = &self.win.whats_new_hits;
             Some(hand(inside(&h.close) || inside(&h.done)))
+        } else if self.win.compare.open {
+            Some(hand(inside(&self.win.compare_hits.close)))
         } else if self.win.notifications.open {
             let h = &self.win.notifications_hits;
             Some(hand(
@@ -3796,6 +4188,7 @@ impl App {
                     | ClickTarget::JumpToBlock(..)
                     | ClickTarget::JumpToBlockEnd(..)
                     | ClickTarget::Subshell(..)
+                    | ClickTarget::Exited(..)
                     | ClickTarget::SettingsNav(_)
                     | ClickTarget::SettingsClose
                     | ClickTarget::SettingsToggle(_)
@@ -3849,13 +4242,18 @@ impl App {
     /// Selected text of the active pane, if any.
     fn selection_text(&self) -> Option<String> {
         let pane = self.win.tabs.get(self.win.active)?.active()?;
-        log::debug!("selection_text: has_selection={}", pane.has_selection);
         if !pane.has_selection {
             return None;
         }
-        let text = pane.session.term.lock().selection_to_string();
-        log::debug!("selection_text: got={:?}", text);
-        text.filter(|t| !t.is_empty())
+        let term = pane.session.term.lock();
+        let text = term.selection_to_string().filter(|t| !t.is_empty())?;
+        // never the text itself in the log: it can hold a secret
+        log::debug!("selection_text: {} chars", text.chars().count());
+        // masked while `mask_secrets` is on, also a secret cut by its ends
+        Some(match rift_core::secrets::active() {
+            Some(m) => crate::secret_mask::mask_selection(&term, &text, &m),
+            None => text,
+        })
     }
 
     /// The system clipboard, opened on first use; a backend that cannot be
@@ -3881,15 +4279,25 @@ impl App {
 
     /// Copy `text`; `false` (after telling the user) when it failed.
     fn copy_to_clipboard(&mut self, text: String) -> bool {
+        self.copy_rich_to_clipboard(text, None)
+    }
+
+    /// Copy `text`, with `html` beside it as the rich flavor when given.
+    fn copy_rich_to_clipboard(&mut self, text: String, html: Option<String>) -> bool {
         if self.headless && !self.fault_clipboard {
             self.headless_clipboard = text;
+            self.headless_clipboard_html = html.unwrap_or_default();
             self.headless_files.clear();
             return true;
         }
         let Some(cb) = self.clipboard() else {
             return false;
         };
-        match cb.set_text(text) {
+        let done = match html {
+            Some(html) => cb.set().html(html, Some(text)),
+            None => cb.set_text(text),
+        };
+        match done {
             Ok(()) => true,
             Err(e) => {
                 log::warn!("clipboard set failed: {e}");
@@ -3899,11 +4307,21 @@ impl App {
         }
     }
 
+    /// The clipboard's text (a headless run's private one); `None` when it
+    /// holds none or cannot be read.
+    fn clipboard_text(&mut self) -> Option<String> {
+        if self.headless && !self.fault_clipboard {
+            return Some(self.headless_clipboard.clone());
+        }
+        self.clipboard().and_then(|cb| cb.get_text().ok())
+    }
+
     fn paste_from_clipboard(&mut self) {
         if self.headless && !self.fault_clipboard {
-            let text = input::pasted_files_text(&self.headless_files)
-                .unwrap_or_else(|| self.headless_clipboard.clone());
-            self.paste_text(&text);
+            match input::pasted_files_text(&self.headless_files) {
+                Some(paths) => self.paste_paths(&paths),
+                None => self.paste_text(&self.headless_clipboard.clone()),
+            }
             return;
         }
         let Some(cb) = self.clipboard() else {
@@ -3917,7 +4335,7 @@ impl App {
             .ok()
             .and_then(|paths| input::pasted_files_text(&paths))
         {
-            self.paste_text(&text);
+            self.paste_paths(&text);
             return;
         }
         let text = match cb.get_text() {
@@ -3936,8 +4354,30 @@ impl App {
 
     /// Paste `text` into the active pane: the owned editor when it is live,
     /// else the PTY (bracketed when the app asked for it; mirrored to
-    /// synchronized panes).
+    /// synchronized panes). `trim_paste` drops its trailing blanks first;
+    /// one over `large_paste_warning` asks first.
     fn paste_text(&mut self, text: &str) {
+        self.paste_checked(text, false, self.config.trim_paste);
+    }
+
+    /// Shell-quoted file paths (copied or dropped files): never trimmed,
+    /// the space after the last one is meant.
+    fn paste_paths(&mut self, text: &str) {
+        self.paste_checked(text, false, false);
+    }
+
+    /// [`Self::paste_text`]; `large_ok`: the large-paste question was
+    /// answered; `trim`: drop trailing blanks.
+    fn paste_checked(&mut self, text: &str, large_ok: bool, trim: bool) {
+        let text = if trim && !text.is_empty() {
+            let trimmed = text.trim_end();
+            if trimmed.is_empty() {
+                return;
+            }
+            trimmed
+        } else {
+            text
+        };
         if text.is_empty() {
             // only a program reading bracketed pastes sees an empty one
             let relay_edit =
@@ -3979,6 +4419,38 @@ impl App {
             }
             return;
         }
+        if let Some(id) = self.active_pane_id()
+            && self.refuse_read_only(id)
+        {
+            return;
+        }
+        if !large_ok
+            && let Some(limit) = self.config.large_paste_bytes()
+            && text.len() > limit
+            && let Some(pane) = self.active_pane_id()
+        {
+            // the dialog's preview: the first lines, secrets masked over the
+            // whole text (a private key's body lines match only with its
+            // header and footer)
+            let preview = rift_core::secrets::mask(text)
+                .lines()
+                .take(LARGE_PASTE_PREVIEW)
+                .map(|l| l.chars().take(200).collect())
+                .collect();
+            self.win.confirm = Some(ConfirmClose {
+                opened: Instant::now(),
+                focus_cancel: false,
+                action: ConfirmAction::LargePaste {
+                    pane,
+                    text: text.to_string(),
+                },
+                commands: preview,
+            });
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
+            return;
+        }
         let editor_active = self.win.editor_active;
         let Some(pane) = self
             .win
@@ -4010,7 +4482,11 @@ impl App {
                 .is_some_and(|p| !bracketed_paste_on(p))
         });
         if unbracketed && self.config.confirm_multiline_paste && input::paste_submits_lines(text) {
-            let commands = text.lines().map(str::to_string).collect();
+            // shown and read aloud as the screen would: secrets masked
+            let commands = rift_core::secrets::mask(text)
+                .lines()
+                .map(str::to_string)
+                .collect();
             self.win.confirm = Some(ConfirmClose {
                 opened: Instant::now(),
                 focus_cancel: false,
@@ -4050,7 +4526,7 @@ impl App {
     /// Files dropped on the window: their shell-quoted paths are pasted.
     fn drop_file(&mut self, path: &std::path::Path) {
         let text = input::paths_text(&[path.to_path_buf()]);
-        self.paste_text(&text);
+        self.paste_paths(&text);
     }
 
     /// Re-run the search over the active pane and jump near the latest match.
@@ -4062,14 +4538,52 @@ impl App {
         // only the rows the pane draws: a prompt echo (shown as the block
         // header), collapsed output and filtered-out lines would count
         // matches nobody can see
+        let scope = self.win.search.scope.as_ref().map(|s| s.0);
+        let mut hidden = 0;
         let found = match self.win.search.matcher() {
             Some(m) => {
-                let shown = Self::shown_rows(pane, self.win.editor_active);
+                let mut shown = Self::shown_rows(pane, self.win.editor_active);
+                // limited to a block: its output rows only
+                if let Some(id) = scope {
+                    let range = pane
+                        .session
+                        .blocks
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .find(|b| b.id == id)
+                        .and_then(|b| b.output_range());
+                    shown.retain(|abs| range.is_some_and(|(s, e)| *abs >= s && *abs < e));
+                }
+                // matches in the lines a block filter hides: counted and
+                // said ("N hidden by the filter"), not navigable
+                let filtered: Vec<rift_core::BlockId> = pane
+                    .filter
+                    .enabled()
+                    .map(|f| f.block)
+                    .filter(|b| scope.is_none_or(|s| s == *b))
+                    .collect();
+                if !filtered.is_empty() {
+                    let set: std::collections::HashSet<u64> = shown.iter().copied().collect();
+                    let rows: Vec<u64> = pane
+                        .session
+                        .blocks
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|b| filtered.contains(&b.id) && !b.collapsed)
+                        .filter_map(|b| b.output_range())
+                        .flat_map(|(s, e)| s..e)
+                        .filter(|abs| !set.contains(abs))
+                        .collect();
+                    hidden = terminal::collect_matches(&pane.session, &rows, &m, 1).total;
+                }
                 terminal::collect_matches(&pane.session, &shown, &m, search::MATCH_CAP)
             }
             None => terminal::Found::default(),
         };
         self.win.search.set_matches(found);
+        self.win.search.hidden = hidden;
         self.win.search_stale = false;
         self.win.search_counted = Instant::now();
         if jump && !self.win.search.matches.is_empty() {
@@ -4243,11 +4757,13 @@ impl App {
         }
     }
 
-    /// Block-filter input: type to narrow, Enter keeps the filter, Esc (or
-    /// the filter shortcut) clears it.
+    /// Block-filter input: type to narrow, ⌥C / ⌥R / ⌥I toggle match case,
+    /// regex and invert, ⌥↑ / ⌥↓ change the context lines; Enter keeps the
+    /// filter, Esc clears it, the filter shortcut turns it off (kept).
     fn handle_filter_key(&mut self, event: &input::KeyPress) {
         use winit::keyboard::{Key, NamedKey};
         let action = input::app_action(event, self.win.modifiers, &self.keymap);
+        let mods = self.win.modifiers;
         let Some(pane) = self
             .win
             .tabs
@@ -4258,43 +4774,66 @@ impl App {
             self.win.search.close();
             return;
         };
-        let Some((block, query)) = pane.filter.as_mut() else {
+        let Some(f) = pane.filter.editing_mut() else {
             self.win.filter_editing = false;
             self.win.search.close();
             return;
         };
-        let block = *block;
-        match &event.logical_key {
-            _ if action == Some(AppAction::FilterBlock) => {
-                pane.filter = None;
-                self.win.filter_editing = false;
-                self.win.search.close();
+        let block = f.block;
+        // what ends the edit: Some(true) clears the filter, Some(false) keeps it
+        let mut done: Option<bool> = None;
+        if mods.alt_key() && !mods.super_key() && !mods.control_key() {
+            // physical key: Option composes on macOS
+            let key = match (&event.unmodified, &event.logical_key) {
+                (Some(Key::Character(s)), _) | (None, Key::Character(s)) => s.to_lowercase(),
+                (_, Key::Named(NamedKey::ArrowUp)) => "up".into(),
+                (_, Key::Named(NamedKey::ArrowDown)) => "down".into(),
+                _ => String::new(),
+            };
+            match key.as_str() {
+                "c" => f.case = !f.case,
+                "r" => f.regex = !f.regex,
+                "i" => f.invert = !f.invert,
+                "up" => f.step_context(true),
+                "down" => f.step_context(false),
+                _ => {}
             }
-            Key::Named(NamedKey::Escape) => {
-                pane.filter = None;
-                self.win.filter_editing = false;
-                self.win.search.close();
-            }
-            Key::Named(NamedKey::Enter) => {
-                if query.is_empty() {
-                    pane.filter = None;
+            f.recompile();
+        } else {
+            match &event.logical_key {
+                _ if action == Some(AppAction::FilterBlock) => {
+                    f.enabled = false;
+                    done = Some(false);
                 }
-                self.win.filter_editing = false;
-                self.win.search.close();
-            }
-            Key::Named(NamedKey::Backspace) => {
-                crate::state::pop_grapheme(query);
-            }
-            Key::Named(NamedKey::Space) => query.push(' '),
-            _ => {
-                if !self.win.modifiers.super_key()
-                    && !self.win.modifiers.control_key()
-                    && let Some(text) = &event.text
-                    && !text.chars().any(|c| c.is_control())
-                {
-                    query.push_str(text);
+                Key::Named(NamedKey::Escape) => done = Some(true),
+                Key::Named(NamedKey::Enter) => done = Some(f.query.is_empty()),
+                Key::Named(NamedKey::Backspace) => {
+                    crate::state::pop_grapheme(&mut f.query);
+                    f.recompile();
+                }
+                Key::Named(NamedKey::Space) => {
+                    f.query.push(' ');
+                    f.recompile();
+                }
+                _ => {
+                    if !mods.super_key()
+                        && !mods.control_key()
+                        && let Some(text) = &event.text
+                        && !text.chars().any(|c| c.is_control())
+                    {
+                        f.query.push_str(text);
+                        f.recompile();
+                    }
                 }
             }
+        }
+        if let Some(clear) = done {
+            if clear {
+                pane.filter.remove(block);
+            }
+            pane.filter.editing = None;
+            self.win.filter_editing = false;
+            self.win.search.close();
         }
         let pane_id = pane.session.id;
         if self.win.filter_editing {
@@ -4341,6 +4880,10 @@ impl App {
                         .unwrap_or_default();
                 }
                 items.extend(profile_rows);
+                items.extend(palette::user_action_items(
+                    &self.config.actions,
+                    &self.keymap,
+                ));
                 items.extend(self.detached_items());
                 (items, pane_history)
             }
@@ -4352,6 +4895,31 @@ impl App {
             PaletteMode::Sessions => (self.session_items(), Vec::new()),
             PaletteMode::ReviewBase => (self.review_base_items(), Vec::new()),
             PaletteMode::SendTarget => (self.send_target_items(), Vec::new()),
+            PaletteMode::SavePath => {
+                let what = self.win.save_target.as_ref().map_or("", |t| t.0.as_str());
+                self.win.palette_results = match &self.win.new_file_dir {
+                    // the explorer's "New file…"
+                    Some(dir) => palette::new_file_items(
+                        explorer_menu::new_file_path(&self.win.palette.query, dir)
+                            .as_deref()
+                            .map_err(|e| *e),
+                    ),
+                    None => palette::save_items(&self.win.palette.query, what),
+                };
+                self.win.palette.selected = 0;
+                return;
+            }
+            PaletteMode::Themes => {
+                self.win.palette_results = self.theme_picker_items();
+                let last = self.win.palette_results.len().saturating_sub(1);
+                self.win.palette.selected = self.win.palette.selected.min(last);
+                return;
+            }
+            PaletteMode::TabColor => {
+                self.win.palette_results = palette::tab_color_items(&self.win.palette.query);
+                self.win.palette.selected = 0;
+                return;
+            }
             PaletteMode::PipeOutput => {
                 let output = self
                     .win
@@ -4366,6 +4934,11 @@ impl App {
             PaletteMode::NewWorktree => {
                 let main = self.win.worktree_from.as_ref().and_then(|f| f.1.as_deref());
                 self.win.palette_results = palette::worktree_items(&self.win.palette.query, main);
+                self.win.palette.selected = 0;
+                return;
+            }
+            PaletteMode::RenameWindow => {
+                self.win.palette_results = palette::rename_window_items(&self.win.palette.query);
                 self.win.palette.selected = 0;
                 return;
             }
@@ -4576,6 +5149,10 @@ impl App {
 
     /// Record an inbox entry (id, agent and branch filled here); returns its id.
     fn push_attention(&mut self, mut a: Attention) -> u64 {
+        // the inbox, its notification and announcement show secrets masked
+        // (`mask_secrets`), as the screen does
+        a.title = rift_core::secrets::mask_owned(a.title);
+        a.detail = rift_core::secrets::mask_owned(a.detail);
         let pane = self.win.tabs.iter().find_map(|t| t.pane(a.pane));
         a.branch = pane
             .and_then(|p| p.git.as_ref())
@@ -4740,10 +5317,14 @@ impl App {
     fn raise(&mut self, mut a: Attention, event: Option<rift_core::notifications::Event>) {
         let in_view = self.pane_in_view(a.pane);
         a.read = a.read || in_view;
+        let pane = a.pane;
         let id = self.push_attention(a);
         let Some(event) = event else {
             return;
         };
+        if !in_view {
+            self.request_attention(pane);
+        }
         let cfg = self.config.notifications.clone();
         if in_view || !cfg.enabled {
             return;
@@ -5588,6 +6169,7 @@ impl App {
         if self.win.history.open {
             let scope = self.win.history.scope.next();
             self.win.history.set_scope(scope);
+            self.search_results_if_wanted();
             return;
         }
         let active = self.active_pane_id();
@@ -5641,6 +6223,7 @@ impl App {
         self.completion_intent = None;
         self.win.history.open(dedupe(entries), &query);
         self.win.history.pane = active;
+        self.search_results_if_wanted();
     }
 
     /// Keys for the open history pane; `false` lets the key edit the command
@@ -5650,7 +6233,7 @@ impl App {
         let mods = self.win.modifiers;
         // nothing matches: ⏎ runs the typed line as usual; ⇥ only closes the
         // pane, so completions show before a second ⇥ accepts one
-        if self.win.history.current().is_none() {
+        if self.win.history.current_command().is_none() {
             match event.logical_key {
                 Key::Named(NamedKey::Enter) => {
                     self.win.history.close();
@@ -5698,7 +6281,7 @@ impl App {
     /// Use the selected history row: run it, put it on the command line, or
     /// run it in a new split beside the pane.
     fn take_history(&mut self, how: HistoryUse) {
-        let Some(command) = self.win.history.current().map(|e| e.command.clone()) else {
+        let Some(command) = self.win.history.current_command().map(str::to_string) else {
             return;
         };
         self.win.history.close();
@@ -5770,6 +6353,7 @@ impl App {
         } else if p.editor.buffer != self.win.history.query {
             let q = p.editor.buffer.clone();
             self.win.history.filter(&q);
+            self.search_results_if_wanted();
         }
     }
 
@@ -5847,12 +6431,27 @@ impl App {
                     self.apply_config();
                 }
             }
+            PaletteAction::PaneTheme(i) => {
+                let name = i.and_then(|i| rift_core::theme::available_themes().into_iter().nth(i));
+                self.set_active_pane_theme(name);
+            }
             PaletteAction::Search => {
                 self.win.search.open = true;
+                self.scope_find_to_selection();
                 self.refresh_search(true);
             }
             PaletteAction::OpenHistory => {
                 self.open_palette(crate::views::palette::PaletteMode::History);
+            }
+            PaletteAction::ToggleMaskSecrets => {
+                self.config.mask_secrets = !self.config.mask_secrets;
+                self.save_config();
+                self.apply_config();
+                self.toast_done(if self.config.mask_secrets {
+                    "Secrets are masked".into()
+                } else {
+                    "Secrets are shown".into()
+                });
             }
             PaletteAction::ToggleVim => {
                 self.config.vim_mode = !self.config.vim_mode;
@@ -5913,6 +6512,10 @@ impl App {
             }
             PaletteAction::RunPipe => self.run_pipe(),
             PaletteAction::CreateWorktree => self.create_worktree(),
+            PaletteAction::SaveToPath => self.save_to_typed_path(),
+            PaletteAction::NameWindow => self.name_window_from_palette(),
+            PaletteAction::PickTheme(name) => self.keep_theme(name),
+            PaletteAction::SetTabColor(color) => self.set_prompted_tab_color(color),
             PaletteAction::ReviewBase(base) => self.choose_review_base(base),
             PaletteAction::SendToPane(pane) => self.send_to_pane(pane),
             PaletteAction::AttachService(id) => {
@@ -6471,6 +7074,10 @@ impl App {
     /// prompt) and no full-screen app is running.
     fn editor_visible(pane: &PaneState) -> bool {
         use rift_pty::alacritty_terminal::term::TermMode;
+        // a pane kept after its program exited has no command line
+        if pane.exited.is_some() {
+            return false;
+        }
         let alt = pane
             .session
             .term
@@ -6660,6 +7267,17 @@ impl App {
         let (cell_size, scrollback) = (self.cell_px(), self.config.scrollback_lines());
         let shell = Some(program.to_string());
         let clipboard = rift_pty::ClipboardAccess::from_config(&self.config.clipboard_access);
+        let ambiguous_wide = self.config.ambiguous_width == rift_core::AmbiguousWidth::Wide;
+        // RIFT_PANE_ID / RIFT_PANE_URL (the session service renames a
+        // durable shell by its session)
+        let mut env = launch.env.clone();
+        env.extend(
+            rift_core::uri::PaneRef::Local {
+                run: rift_core::uri::run_token().into(),
+                pane: id,
+            }
+            .env(),
+        );
         let opts = |service, replay| SpawnOptions {
             id,
             size,
@@ -6667,12 +7285,13 @@ impl App {
             shell: shell.clone(),
             args: launch.args.clone(),
             working_directory: cwd.clone(),
-            env: launch.env.clone(),
+            env: env.clone(),
             scrollback,
             observer: observer.clone(),
             replay,
             service,
             clipboard,
+            ambiguous_wide,
         };
         match Session::spawn(opts(service, replay.clone())) {
             Ok(s) => s,
@@ -6689,23 +7308,35 @@ impl App {
     }
 
     /// Transcript of `pane`'s finished blocks (restored ones included, so a
-    /// history survives several relaunches, within the bounds).
-    fn pane_transcript(pane: &PaneState) -> rift_core::transcript::Transcript {
+    /// history survives several relaunches, within the bounds — unless the
+    /// saved transcripts were cleared since they were restored).
+    fn pane_transcript(&self, pane: &PaneState) -> rift_core::transcript::Transcript {
         use rift_core::transcript::{SavedBlock, Transcript};
+        let cleared = self.transcripts_cleared.contains(&pane.session.id);
         // snapshot first: block_output_text takes the blocks lock itself
         let snapshot = pane.session.blocks.lock().unwrap().snapshot();
         let blocks: Vec<SavedBlock> = snapshot
             .into_iter()
+            .filter(|b| !(cleared && b.restored))
             // a background job's output is not a command to replay
             .filter(|b| !b.background)
             .filter_map(|b| match b.state {
                 rift_core::BlockState::Done { exit, duration } => Some(SavedBlock {
-                    output: terminal::block_output_text(&pane.session, b.id).unwrap_or_default(),
-                    command: b.command,
+                    // saved masked while `mask_secrets` is on
+                    output: rift_core::secrets::mask_owned(
+                        terminal::block_output_text(&pane.session, b.id).unwrap_or_default(),
+                    ),
+                    command: rift_core::secrets::mask_owned(b.command),
                     exit,
                     duration_ms: duration.as_millis() as u64,
                     cwd: b.cwd,
                     cwd_remote: b.cwd_remote,
+                    finished: b
+                        .finished_at
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs()),
+                    branch: b.branch,
+                    host: b.host,
                 }),
                 _ => None,
             })
@@ -6745,7 +7376,7 @@ impl App {
             return;
         }
         let id = pane.transcript_id.clone();
-        let t = Self::pane_transcript(pane);
+        let t = self.pane_transcript(pane);
         rift_core::transcript::save(&id, &t);
         self.transcript_saved.insert(pane_id, newest);
     }
@@ -6754,6 +7385,8 @@ impl App {
     fn clear_transcripts(&mut self) {
         let n = rift_core::transcript::remove_except(&[]);
         self.transcript_saved.clear();
+        let open: Vec<PaneId> = self.all_panes().map(|p| p.session.id).collect();
+        self.transcripts_cleared.extend(open);
         self.toast_done(format!(
             "Deleted {n} saved transcript{}",
             if n == 1 { "" } else { "s" }
@@ -6790,6 +7423,11 @@ impl App {
             self.win.active = to;
             self.save_session();
         }
+        // opened from a grouped tab: it joins that group
+        if from < self.win.tabs.len() && from != self.win.active {
+            self.join_group_of(from, self.win.active);
+            self.save_session();
+        }
     }
 
     /// Probe the user's shell for aliases/functions off the UI thread.
@@ -6809,9 +7447,10 @@ impl App {
         self.win.settings.open = false;
         let (lw, lh) = self.logical_size();
         let (_, lw) = self.content_span(lw);
-        let cols = ((lw - self.config.padding() * 2.0 - terminal::BLOCK_INDENT) / self.cell_w)
-            .max(2.0) as usize;
-        let rows = ((lh - self.bar_h() - TOP_PAD - EDITOR_H) / self.line_h).max(2.0) as usize;
+        let pad = self.config.paddings(false);
+        let cols =
+            ((lw - pad.left - pad.right - terminal::BLOCK_INDENT) / self.cell_w).max(2.0) as usize;
+        let rows = ((lh - self.bar_h() - pad.top - EDITOR_H) / self.line_h).max(2.0) as usize;
         let session = self.spawn_session(cols, rows, cwd);
         self.win.tabs.push(TabState::new(self.new_pane(session)));
         self.win.active = self.win.tabs.len() - 1;
@@ -6828,7 +7467,7 @@ impl App {
         if self.config.save_transcripts {
             let mut keep = Vec::new();
             for p in self.all_panes() {
-                rift_core::transcript::save(&p.transcript_id, &Self::pane_transcript(p));
+                rift_core::transcript::save(&p.transcript_id, &self.pane_transcript(p));
                 keep.push(p.transcript_id.clone());
             }
             // closed panes' transcripts go with them
@@ -6854,6 +7493,8 @@ impl App {
         fresh.tabs.clear();
         fresh.active = 0;
         fresh.other_windows.clear();
+        // its tabs went with the quit: so does the name they had
+        fresh.window_name = None;
         rift_core::session_state::save(&fresh);
         rift_core::transcript::remove_except(&[]);
     }
@@ -6889,18 +7530,18 @@ impl App {
                     .map(|p| p.transcript_id.clone()),
                 service: tab.pane(id).and_then(|p| p.session.service_id()),
                 launch: tab.pane(id).map(|p| p.launch.clone()).unwrap_or_default(),
+                read_only: tab.pane(id).is_some_and(|p| p.session.read_only()),
             })
         }
+        let (groups, tab_groups) = Self::saved_groups(win);
         let tabs = win
             .tabs
             .iter()
-            .map(|t| SavedTab {
+            .zip(tab_groups)
+            .map(|(t, group)| SavedTab {
                 cwd: t.active().and_then(pane_cwd),
                 title: t.custom_title.clone(),
-                color: t
-                    .color
-                    .and_then(|c| crate::state::TAB_COLORS.get(c))
-                    .map(|s| s.to_string()),
+                color: t.color.map(|c| c.to_config()),
                 layout: t
                     .is_split()
                     .then(|| layout(t, &t.root.without_viewer(), transcripts)),
@@ -6920,12 +7561,17 @@ impl App {
                     .then(|| t.active().map(|p| p.launch.clone()))
                     .flatten()
                     .unwrap_or_default(),
+                pinned: t.pinned,
+                group,
+                read_only: !t.is_split() && t.active().is_some_and(|p| p.session.read_only()),
             })
             .collect();
         SavedWindowTabs {
             tabs,
             active: win.active,
             window: win.window.as_deref().and_then(Self::window_frame),
+            groups,
+            name: win.name.clone(),
         }
     }
 
@@ -7003,6 +7649,11 @@ impl App {
                 tab.active_pane = root;
             }
         }
+        if saved.read_only
+            && let Some(p) = self.win.tabs[self.win.active].pane(root)
+        {
+            p.session.set_read_only(true);
+        }
         let tab = &mut self.win.tabs[self.win.active];
         tab.custom_title = saved.title.clone().filter(|t| !t.is_empty());
         tab.started = saved
@@ -7015,7 +7666,7 @@ impl App {
         tab.color = saved
             .color
             .as_deref()
-            .and_then(|c| crate::state::TAB_COLORS.iter().position(|n| *n == c));
+            .and_then(rift_core::tab_color::TabColor::parse);
     }
 
     /// "Save current layout as launch configuration" (Warp Tab Configs): every
@@ -7062,10 +7713,7 @@ impl App {
                 .iter()
                 .map(|t| LaunchTab {
                     title: t.custom_title.clone(),
-                    color: t
-                        .color
-                        .and_then(|i| crate::state::TAB_COLORS.get(i))
-                        .map(|c| c.to_string()),
+                    color: t.color.map(|c| c.to_config()),
                     layout: layout(t, &t.root.without_viewer()),
                 })
                 .collect(),
@@ -7171,9 +7819,20 @@ impl App {
     ) {
         use rift_core::session_state::{SavedAxis, SavedLayout};
         match layout {
-            SavedLayout::Pane { focused, .. } => {
+            SavedLayout::Pane {
+                focused, read_only, ..
+            } => {
                 if *focused && focus.is_none() {
                     *focus = Some(pane);
+                }
+                if *read_only
+                    && let Some(p) = self
+                        .win
+                        .tabs
+                        .get(self.win.active)
+                        .and_then(|t| t.pane(pane))
+                {
+                    p.session.set_read_only(true);
                 }
             }
             SavedLayout::Split {
@@ -7292,6 +7951,8 @@ impl App {
             } else if self.win.active >= self.win.tabs.len() {
                 self.win.active = self.win.tabs.len() - 1;
             }
+            // a group left without tabs goes
+            self.arrange_tabs();
             self.save_session();
             return;
         }
@@ -7979,6 +8640,7 @@ impl App {
                             .map_or(self.win.mouse, |(r, _)| (r[0], r[1] + r[3] + 4.0));
                         self.open_viewer_menu(at);
                     }
+                    ViewerHit::RunCode(block) => self.ask_run_code_block(block),
                 }
                 return true;
             }
@@ -8111,12 +8773,20 @@ impl App {
         let font_size = self.font_size;
         let line_h = self.line_h;
         let ligatures = self.config.ligatures;
+        let weights = self.config.font_weights();
+        let features = terminal::intern_features(self.config.font_feature_tags());
+        let min_contrast = self.config.min_contrast();
+        let bold_is_bright = self.config.bold_is_bright;
         let cursor_style = self.config.cursor_style;
+        // `cursor_hollow_unfocused`: hollow outside the focused pane of
+        // the focused window
+        let hollow_unfocused = self.config.cursor_hollow_unfocused;
+        let window_focused = self.win.focused;
         let mouse = self.win.mouse;
         let prompt_mode = self.config.prompt;
         let input_top = self.config.input_position == rift_core::InputPosition::Top;
         let autosuggest = self.config.autosuggestions && !self.win.history.open;
-        let side_pad = self.config.padding();
+        let pad = self.config.paddings(false);
         let bell_flash = self
             .win
             .bell_flash
@@ -8237,6 +8907,9 @@ impl App {
                 name
             }
         };
+        // the active tab is never folded away; refused input says so once
+        self.reveal_active_tab();
+        self.poll_refused_input();
         // a waiting agent's dot pulses, unless the system reduces motion; a
         // working one's badge spins
         let agent_states: Vec<_> = self
@@ -8261,7 +8934,8 @@ impl App {
             .iter()
             .enumerate()
             .map(|(i, t)| tabbar::TabInfo {
-                title: t.display_title(),
+                // the strip's and the rail's titles: secrets masked
+                title: rift_core::secrets::mask_owned(t.display_title()),
                 panes: t.root.leaves().len(),
                 activity: t.activity,
                 alert: self
@@ -8270,7 +8944,7 @@ impl App {
                     .rev()
                     .find(|a| !a.read && t.pane(a.pane).is_some())
                     .map(|a| a.kind),
-                color: t.color.map(|c| context_menu::tab_color(&theme, c)),
+                color: self.shown_tab_color(t).map(|c| c.resolve(&theme)),
                 sync: t.sync_inputs && t.is_split(),
                 editing: self
                     .win
@@ -8308,6 +8982,7 @@ impl App {
                     pulse,
                     scale,
                 }),
+                marks: self.tab_marks(i, &theme),
             })
             .chain(self.win.settings.tab.then(|| tabbar::TabInfo {
                 title: "Settings".into(),
@@ -8323,6 +8998,7 @@ impl App {
                 running: false,
                 progress: None,
                 agent: None,
+                marks: Default::default(),
             }))
             .collect();
         // the strip's lit tab: the Settings tab (last) while it shows
@@ -8332,6 +9008,20 @@ impl App {
             self.win.active
         };
         let rail_w = self.rail_w();
+        // the rail's rows (built only while it shows), and what the dump
+        // reports of them
+        let rail_rows = if rail_w > 0.0 {
+            self.rail_rows(&tab_infos)
+        } else {
+            Vec::new()
+        };
+        self.win.rail_dump = rail_rows.iter().map(rail::describe).collect();
+        self.win.rail.rows = rail_rows.clone();
+        let (rail_query, rail_focused, rail_panes) = (
+            self.win.rail.query.clone(),
+            self.win.rail.focused,
+            self.win.rail.panes,
+        );
         // one tab and tab_bar_with_one_tab off: no tab in the strip (its
         // buttons and + stay; the rail is gone, rail_w() is 0)
         let strip_tabs: &[tabbar::TabInfo] = if self.tabs_shown() { &tab_infos } else { &[] };
@@ -8343,11 +9033,16 @@ impl App {
         let spaced_blocks = self.config.block_spacing == rift_core::BlockSpacing::Normal;
         let block_dividers = self.config.block_dividers;
         let jump_button = self.config.jump_to_bottom_button;
+        let scrollbar_mode = self.config.scrollbar;
+        // `mask_secrets`: the patterns in force this frame
+        let masker = rift_core::secrets::active();
         self.win.dimmed_panes = 0;
         // chrome hover follows the pointer unless a modal surface covers it
-        let chrome_mouse =
-            (!self.win.palette.open && self.win.confirm.is_none() && !self.win.whats_new.open)
-                .then_some(self.win.mouse);
+        let chrome_mouse = (!self.win.palette.open
+            && self.win.confirm.is_none()
+            && !self.win.whats_new.open
+            && !self.win.compare.open)
+            .then_some(self.win.mouse);
         // a tab dragged past the slop floats under the pointer
         let lifted_tab = self
             .win
@@ -8379,7 +9074,17 @@ impl App {
                 .bg
                 .with_alpha((1.0 - self.bg_image_opacity) * theme.ground_alpha)
         });
+        // a gradient ground (Warp gradient themes) on an opaque window
+        // without a background image; translucent, the solid ground stays
+        let ground_gradient = theme.bg_gradient.filter(|_| {
+            theme.ground_alpha >= 1.0 && !self.win.bg_image.as_ref().is_some_and(|p| p.has_image())
+        });
 
+        // ⌃Tab's switcher rows and mark mode's cursor (drawn over the panes)
+        let switcher = self.tab_switcher_view();
+        let mark_cursor = self.win.mark.as_ref().map(|m| m.cursor());
+        // find limited to a block widens once that block is deselected
+        self.settle_find_scope();
         let Self {
             text,
             config: config_ref,
@@ -8408,6 +9113,10 @@ impl App {
         scene.clear();
         if let Some(veil) = image_veil {
             scene.layer(0).rect([0.0, 0.0], [w, h], veil, 0.0);
+        } else if let Some(g) = ground_gradient {
+            scene
+                .layer(0)
+                .gradient([0.0, 0.0], [w, h], g.from, g.to, g.vertical, 0.0);
         }
         let mut hits = Vec::new();
         let mut focus_hits = Vec::new(); // lowest priority, appended last
@@ -8452,15 +9161,22 @@ impl App {
                 close_left,
                 &mut hits,
             );
-            tabbar::render_rail(
+            crate::views::rail::render(
                 scene.layer(0),
                 engine,
                 &theme,
                 &tab_infos,
+                &rail_rows,
                 strip_active,
+                crate::views::rail::Search {
+                    query: &rail_query,
+                    focused: rail_focused,
+                    panes: rail_panes,
+                },
                 h,
                 blink,
                 close_button,
+                chrome_mouse,
                 &mut hits,
             );
         } else if strip_overlay {
@@ -8577,7 +9293,7 @@ impl App {
             let editor_area_w = if split {
                 pr.rect[2] - PANE_PAD * 2.0
             } else {
-                pr.rect[2] - side_pad * 2.0
+                pr.rect[2] - pad.left - pad.right
             };
             let ed_cols =
                 editor::input_cols(editor_area_w, cell_w, ed_char_w, pane.editor.vim_enabled());
@@ -8630,7 +9346,19 @@ impl App {
             let grid = {
                 // inline grid_for (self is destructured)
                 let rect = body;
-                let (x, y, pw, ph) = if split {
+                // a full-screen program with `alt_screen_padding` off
+                // fills the pane: no padding on any side
+                let bare = !editor_vis
+                    && !config_ref.alt_screen_padding
+                    && pane
+                        .session
+                        .term
+                        .lock()
+                        .mode()
+                        .contains(rift_pty::alacritty_terminal::term::TermMode::ALT_SCREEN);
+                let (x, y, pw, ph) = if bare {
+                    (rect[0], rect[1], rect[2], rect[3])
+                } else if split {
                     (
                         rect[0] + PANE_PAD,
                         rect[1] + PANE_PAD,
@@ -8639,14 +9367,16 @@ impl App {
                     )
                 } else {
                     (
-                        rect[0] + side_pad,
-                        rect[1] + TOP_PAD,
-                        rect[2] - side_pad * 2.0,
-                        rect[3] - TOP_PAD,
+                        rect[0] + pad.left,
+                        rect[1] + pad.top,
+                        rect[2] - pad.left - pad.right,
+                        rect[3] - pad.top,
                     )
                 };
-                let editor_h = if !editor_vis {
-                    if split { PANE_PAD } else { SIDE_PAD }
+                let editor_h = if bare {
+                    0.0
+                } else if !editor_vis {
+                    if split { PANE_PAD } else { pad.bottom }
                 } else {
                     editor::editor_height(&pane.editor.buffer, prompt_mode, ed_cols, chip_rows)
                 };
@@ -8661,7 +9391,7 @@ impl App {
                 desktop_grid = (cols, rows);
                 let (cols, rows) = pane.fitted(cols, rows);
                 let y = if editor_vis && input_top {
-                    y + editor_h - (if split { PANE_PAD } else { TOP_PAD - 4.0 })
+                    y + editor_h - (if split { PANE_PAD } else { pad.top - 4.0 })
                 } else if !editor_vis && bottom_up {
                     // a program owns the screen (Claude Code, vim): its last
                     // row sits on the bottom padding and the part of a row
@@ -8680,7 +9410,15 @@ impl App {
                     cols,
                     rows,
                     ligatures,
-                    cursor_style,
+                    weights,
+                    features,
+                    min_contrast,
+                    bold_is_bright,
+                    cursor_style: if hollow_unfocused && !(window_focused && is_active_pane) {
+                        rift_core::CursorStyle::Hollow
+                    } else {
+                        cursor_style
+                    },
                     // the boot placeholder sits in the input zone; no stray
                     // grid cursor at the top while it shows
                     // (the composer too: the program's cursor hides under it)
@@ -8698,6 +9436,7 @@ impl App {
                     spaced_blocks,
                     block_dividers,
                     jump_button,
+                    scrollbar: scrollbar_mode != rift_core::ScrollbarMode::Never,
                 }
             };
 
@@ -8770,6 +9509,7 @@ impl App {
                     &title,
                     is_active_pane,
                     pane.running(),
+                    pane.session.read_only(),
                     chrome_mouse.filter(|_| self.win.pane_drag.is_none()),
                     pr.id,
                     &mut hits,
@@ -8783,45 +9523,77 @@ impl App {
             // content
             let layer = scene.layer(1);
             let text_start = layer.texts.len();
+            // the pane's own colour scheme (`theme` of its profile or the
+            // palette) for its content; the chrome keeps the window theme
+            let content_theme: std::borrow::Cow<Theme> = match &pane.theme {
+                Some((_, t)) => {
+                    layer.rect(
+                        [body[0], body[1]],
+                        [body[2], body[3]],
+                        t.pane_ground(&theme),
+                        0.0,
+                    );
+                    std::borrow::Cow::Owned((**t).clone())
+                }
+                None => std::borrow::Cow::Borrowed(&theme),
+            };
             // the program's own default colors (OSC 4/10/11/12) and reverse
             // screen (DECSCNM: vttest, `tput flash`) apply to this pane only
-            let pane_theme = terminal::pane_theme(&theme, &pane.session).inspect(|t| {
-                layer.rect(
-                    [pr.rect[0], pr.rect[1]],
-                    [pr.rect[2], pr.rect[3]],
-                    t.bg,
-                    0.0,
-                );
+            let pane_theme = terminal::pane_theme(&content_theme, &pane.session).inspect(|t| {
+                layer.rect([body[0], body[1]], [body[2], body[3]], t.bg, 0.0);
             });
             let search_ctx = if search_state.open && is_active_pane && !filter_editing {
                 search_state.matcher().map(|matcher| terminal::SearchCtx {
                     matcher,
                     current: search_state.current_anchor(),
+                    lines: search_state.matches.iter().map(|m| m.0).collect(),
                 })
             } else {
                 None
             };
+            pane.settle_block_selection();
+            let selected = if is_active_pane {
+                pane.selected_blocks()
+            } else {
+                Vec::new()
+            };
             let out = terminal::render(
                 layer,
                 engine,
-                pane_theme.as_ref().unwrap_or(&theme),
+                pane_theme.as_ref().unwrap_or(&content_theme),
                 &pane.session,
                 &view,
                 &mut pane.view_offset,
                 // shell-prompt mode keeps the shell's PS1 rows on screen
                 editor_vis && prompt_mode != rift_core::PromptMode::Shell,
                 search_ctx.as_ref(),
-                if is_active_pane {
-                    pane.selected_block
-                } else {
-                    None
-                },
-                pane.filter.as_ref(),
+                &selected,
+                Some(&pane.filter),
+                masker.as_deref().map(|m| (m, &mut pane.secrets)),
             );
             if pane.view_offset > 0 && out.display_len > pane.last_display_len {
                 pane.view_offset += out.display_len - pane.last_display_len;
             }
+            // the overlay scrollbar in the pane's right padding
+            if let Some(hit) = crate::views::scrollbar::frame(
+                layer,
+                pane_theme.as_ref().unwrap_or(&content_theme),
+                &mut pane.scrollbar,
+                out.scroll,
+                [
+                    pr.rect[0] + pr.rect[2],
+                    view.y,
+                    view.rows as f32 * view.line_h,
+                ],
+                pane.view_offset,
+                scrollbar_mode,
+                mouse,
+            ) {
+                scroll_bar::push_hit(&mut hits, hit, pane.scrollbar.track, pr.id);
+            }
             pane.last_display_len = out.display_len;
+            pane.drawn_cursor = out.cursor;
+            pane.art_cells = out.art_cells;
             pane.rows = out.rows;
             pane.last_grid = Some(view);
             pane.alt_screen = out.alt_screen;
@@ -8908,7 +9680,7 @@ impl App {
                 let (lx, zone_y) = if split {
                     (body[0] + PANE_PAD, body[1] + PANE_PAD - 4.0)
                 } else {
-                    (pr.rect[0] + side_pad, pr.rect[1] + 4.0)
+                    (pr.rect[0] + pad.left, pr.rect[1] + 4.0)
                 };
                 let top = if input_top {
                     zone_y
@@ -8918,11 +9690,16 @@ impl App {
                     h - editor::editor_height("", prompt_mode, 1, 1)
                 };
                 // the editor's divider, already where it will be (Warp)
-                let zone_w = pr.rect[2] - 2.0 * if split { PANE_PAD } else { side_pad };
-                layer.hline(lx - 8.0, top, zone_w + 16.0, 1.0, theme.border);
+                let zone_w = pr.rect[2]
+                    - if split {
+                        PANE_PAD * 2.0
+                    } else {
+                        pad.left + pad.right
+                    };
+                layer.hline(lx - 8.0, top, zone_w + 16.0, 1.0, content_theme.border);
                 // on the chip row, where the prompt context appears first (Warp)
                 let ly = top + editor::first_row_offset(prompt_mode);
-                layer.text(buf, lx + editor::PAD_X, ly, theme.syntax.string);
+                layer.text(buf, lx + editor::PAD_X, ly, content_theme.syntax.string);
             }
 
             pane.last_exit = pane
@@ -8951,22 +9728,22 @@ impl App {
                         eh,
                     ],
                     (false, false) => [
-                        pr.rect[0] + side_pad,
+                        pr.rect[0] + pad.left,
                         h - eh,
-                        pr.rect[2] - side_pad * 2.0,
+                        pr.rect[2] - pad.left - pad.right,
                         eh,
                     ],
                     (false, true) => [
-                        pr.rect[0] + side_pad,
+                        pr.rect[0] + pad.left,
                         pr.rect[1] + 4.0,
-                        pr.rect[2] - side_pad * 2.0,
+                        pr.rect[2] - pad.left - pad.right,
                         eh,
                     ],
                 };
                 let anchor = editor::render(
                     layer,
                     engine,
-                    &theme,
+                    &content_theme,
                     config_ref,
                     pane,
                     elapsed,
@@ -8974,6 +9751,7 @@ impl App {
                     cell_w,
                     blink && is_active_pane,
                     is_active_pane,
+                    hollow_unfocused && !(window_focused && is_active_pane),
                     if is_active_pane && autosuggest {
                         &completion_ghost
                     } else {
@@ -9060,7 +9838,7 @@ impl App {
                     let rects = crate::views::welcome::render(
                         layer,
                         engine,
-                        &theme,
+                        &content_theme,
                         above,
                         &subtitle.join(" · "),
                         &entries,
@@ -9128,11 +9906,15 @@ impl App {
             if pane.composer.open {
                 let bottom = pr.rect[1] + pr.rect[3];
                 let ch = crate::views::composer::height(&pane.editor.buffer, ed_cols).min(body[3]);
-                let inset = if split { PANE_PAD } else { side_pad };
+                let (inset_l, inset_r) = if split {
+                    (PANE_PAD, PANE_PAD)
+                } else {
+                    (pad.left, pad.right)
+                };
                 let area = [
-                    pr.rect[0] + inset,
+                    pr.rect[0] + inset_l,
                     bottom - ch,
-                    pr.rect[2] - inset * 2.0,
+                    pr.rect[2] - inset_l - inset_r,
                     ch,
                 ];
                 let backdrop = [pr.rect[0], bottom - ch, pr.rect[2], ch];
@@ -9162,6 +9944,29 @@ impl App {
                         target: ClickTarget::Editor(pr.id),
                     },
                 );
+            }
+            if let Some(code) = pane.exited {
+                let close_keys = keymap_ref
+                    .preferred("close_pane")
+                    .map(|b| b.chips().concat())
+                    .unwrap_or_default();
+                let parts = crate::views::exited::render(
+                    scene.layer(2),
+                    engine,
+                    &theme,
+                    pr.rect,
+                    code,
+                    &close_keys,
+                    Some(mouse),
+                );
+                let front: Vec<Hit> = parts
+                    .into_iter()
+                    .map(|(rect, part)| Hit {
+                        rect,
+                        target: ClickTarget::Exited(pr.id, part),
+                    })
+                    .collect();
+                hits.splice(0..0, front);
             }
             if let Some(offer) = pane.subshell.as_ref().filter(|o| o.shown) {
                 let _ = offer;
@@ -9217,13 +10022,21 @@ impl App {
             // progress UIs redraw there); scrolled up, it shows again.
             // (from this frame's blocks snapshot, not a second lock of them)
             let followed_live = pane.view_offset == 0 && sticky_open;
-            if is_active_pane
-                && sticky_headers
-                && let Some(sticky) = sticky_block.filter(|_| !followed_live)
+            let sticky_shown =
+                sticky_block.filter(|_| is_active_pane && sticky_headers && !followed_live);
+            if sticky_shown.is_some() && pane.sticky_minimized {
+                // minimized (`toggle_sticky_header`): a small tab restores it
+                let rect =
+                    sticky::render_minimized(scene.layer(2), &theme, view.right, view.y, mouse);
+                hits.push(Hit {
+                    rect,
+                    target: ClickTarget::StickyRestore(pr.id),
+                });
+            } else if let Some(sticky) = sticky_shown
                 && let Some(sh) = terminal::render_sticky_header(
                     scene.layer(2),
                     engine,
-                    &theme,
+                    &content_theme,
                     &view,
                     &pane.session,
                     sticky,
@@ -9438,21 +10251,34 @@ impl App {
             let filter = tabs
                 .get(active_tab_idx)
                 .and_then(|t| t.active())
-                .and_then(|p| p.filter.clone());
+                .and_then(|p| p.filter.editing().cloned());
             let chips = match (filter_editing, filter) {
-                (true, Some((_, q))) => search::render(
-                    scene.layer(search_layer),
-                    engine,
-                    &theme,
-                    &q,
-                    "Enter keep · Esc clear",
-                    Some("filter"),
-                    w,
-                    bar,
-                    blink,
-                    None,
-                    false,
-                ),
+                (true, Some(f)) => {
+                    let context = format!("±{}", f.context);
+                    search::render(
+                        scene.layer(search_layer),
+                        engine,
+                        &theme,
+                        &f.query,
+                        if f.error.is_some() {
+                            "invalid regex"
+                        } else {
+                            "Enter keep · Esc clear"
+                        },
+                        Some("filter"),
+                        w,
+                        bar,
+                        blink,
+                        &[
+                            ("Aa", f.case),
+                            (".*", f.regex),
+                            ("!", f.invert),
+                            (&context, f.context > 0),
+                        ],
+                        false,
+                        None,
+                    )
+                }
                 _ => search::render(
                     scene.layer(search_layer),
                     engine,
@@ -9463,8 +10289,12 @@ impl App {
                     w,
                     bar,
                     blink,
-                    Some((search_state.case_sensitive, search_state.regex)),
+                    &[
+                        ("Aa", search_state.case_sensitive),
+                        (".*", search_state.regex),
+                    ],
                     search_state.all_selected,
+                    search_state.scope.as_ref().map(|(_, cmd)| cmd.as_str()),
                 ),
             };
             self.win.search_chips = chips;
@@ -9552,6 +10382,42 @@ impl App {
                 palette_row_hits,
             );
         }
+
+        // mark mode's block cursor, on its row as drawn this frame
+        if let Some((id, line, col)) = mark_cursor
+            && let Some(p) = tabs
+                .iter()
+                .flat_map(|t| t.panes.iter())
+                .find(|p| p.session.id == id)
+            && let Some(g) = p.last_grid
+            && let Some((y, content_x)) = p.rows.iter().find_map(|r| match r.kind {
+                terminal::RowKind::Grid { abs, content_x } if abs == line => Some((r.y, content_x)),
+                _ => None,
+            })
+        {
+            let x = content_x + col as f32 * g.cell_w;
+            scene.layer(2).bordered(
+                [x, y],
+                [g.cell_w, g.line_h],
+                theme.accent.with_alpha(0.35),
+                theme.accent,
+                1.0,
+                1.5,
+            );
+        }
+        // ⌃Tab's most-recently-used switcher
+        self.win.tab_switcher_rows = match &switcher {
+            Some((rows, highlight)) => crate::views::tab_switcher::render(
+                scene.layer(4),
+                engine,
+                &theme,
+                rows,
+                *highlight,
+                w,
+                h,
+            ),
+            None => Vec::new(),
+        };
 
         // ── layer 5: context menu ──
         if self.win.context_menu.open {
@@ -9692,6 +10558,19 @@ impl App {
                 h,
             );
         }
+        // the block comparison (modal, layer 6, under a confirm dialog)
+        if self.win.compare.open {
+            hits.clear();
+            focus_hits.clear();
+            self.win.compare_hits = crate::views::compare::render(
+                scene.layer(6),
+                engine,
+                &theme,
+                &mut self.win.compare,
+                w,
+                h,
+            );
+        }
         if let Some((action, commands, focus_cancel)) = &confirm {
             hits.clear();
             use crate::views::confirm::Dialog;
@@ -9704,6 +10583,7 @@ impl App {
                         CloseScope::Pane(_) => ("Close pane?", "Close pane"),
                         CloseScope::Tab(_) => ("Close tab?", "Close tab"),
                         CloseScope::OtherTabs(_) => ("Close other tabs?", "Close tabs"),
+                        CloseScope::Group(_) => ("Close group?", "Close group"),
                         CloseScope::Window | CloseScope::App => ("Close window?", "Close window"),
                     };
                     Dialog {
@@ -9744,6 +10624,18 @@ impl App {
                         focus_cancel: *focus_cancel,
                     }
                 }
+                ConfirmAction::LargePaste { text, .. } => Dialog {
+                    title: "Paste a large amount of text?",
+                    description: large_paste_description(text),
+                    note: "Its first lines are below. large_paste_warning sets the size that asks.",
+                    lines: commands,
+                    empty_line: "<blank line>",
+                    confirm_label: "Paste",
+                    cancel_label: "Cancel",
+                    destructive: false,
+                    processes: false,
+                    focus_cancel: *focus_cancel,
+                },
                 ConfirmAction::LaunchLink { .. } => Dialog {
                     title: "Open this layout from a link?",
                     description: "A rift:// link opens it, and its panes run:".into(),
@@ -9800,6 +10692,54 @@ impl App {
                         focus_cancel: *focus_cancel,
                     }
                 }
+                ConfirmAction::Restart(_) => Dialog {
+                    title: "Restart pane?",
+                    description: "What runs in it ends, and its program starts again:".into(),
+                    note: "This cannot be undone. Cancel to keep it running.",
+                    lines: commands,
+                    empty_line: "<running shell process>",
+                    confirm_label: "Restart",
+                    cancel_label: "Cancel",
+                    destructive: true,
+                    processes: true,
+                    focus_cancel: *focus_cancel,
+                },
+                ConfirmAction::ClosePinned(_) => Dialog {
+                    title: "Close pinned tab?",
+                    description: "This tab is pinned. Unpin it to close it without asking.".into(),
+                    note: "",
+                    lines: commands,
+                    empty_line: "",
+                    confirm_label: "Close tab",
+                    cancel_label: "Cancel",
+                    destructive: true,
+                    processes: false,
+                    focus_cancel: *focus_cancel,
+                },
+                ConfirmAction::RunCode { .. } => Dialog {
+                    title: "Run this code block?",
+                    description: "It runs in the terminal pane as if you typed it:".into(),
+                    note: "Check what it does first. Cancel to leave it unrun.",
+                    lines: commands,
+                    empty_line: "",
+                    confirm_label: "Run",
+                    cancel_label: "Cancel",
+                    destructive: false,
+                    processes: false,
+                    focus_cancel: *focus_cancel,
+                },
+                ConfirmAction::Overwrite { .. } => Dialog {
+                    title: "Replace the file?",
+                    description: "A file with this name already exists:".into(),
+                    note: "Replacing it overwrites its contents.",
+                    lines: commands,
+                    empty_line: "",
+                    confirm_label: "Replace",
+                    cancel_label: "Cancel",
+                    destructive: true,
+                    processes: false,
+                    focus_cancel: *focus_cancel,
+                },
                 ConfirmAction::AllowOperate { name, .. } => {
                     update_title = format!("Let {name} run commands?");
                     Dialog {
@@ -10035,6 +10975,7 @@ impl App {
                     Scope::Pane => "Commands run in this pane",
                     Scope::All => "Commands from every shell",
                     Scope::Failed => "Commands that failed",
+                    Scope::Results => "Past runs by their output, with where and when they ran",
                 }
                 .into(),
                 s("⌃R"),
@@ -10097,6 +11038,7 @@ impl App {
             let (text, keys) = match hit {
                 ViewerHit::Close => ("Close file", self.tip_keys("close_pane")),
                 ViewerHit::Menu => ("More actions", None),
+                ViewerHit::RunCode(_) => ("Run in the terminal pane (asks first)", None),
                 _ => ("", None),
             };
             tips.push(Tip::new(*rect, text, keys));
@@ -10205,6 +11147,7 @@ impl App {
                 .as_ref()
                 .is_some_and(|e| e.drag.as_ref().is_some_and(|d| d.live))
             || self.win.whats_new.open
+            || self.win.compare.open
             || self.win.rename.is_some()
             || self.win.drag.is_some()
             || self.win.pending_sel.is_some()
@@ -10378,6 +11321,8 @@ impl App {
     }
 
     fn redraw(&mut self, window: &Window) {
+        // the theme picker's live preview (or its revert once it closed)
+        self.sync_theme_preview();
         self.win.last_frame = Instant::now();
         self.win.output_frame_due = None;
         if self.win.search.open && self.win.search_stale {
@@ -10401,8 +11346,12 @@ impl App {
         };
         let (lw, lh) = (pw as f32 / scale, ph as f32 / scale);
 
+        let built = Instant::now();
         self.build_scene(lw, lh);
+        scene_timing::record(built.elapsed());
         self.tooltip_pass(lw, lh);
+        self.track_resize_overlay();
+        self.draw_resize_overlay(lw, lh);
         if let Some(spot) = self.win.ime_spot
             && self.win.ime_area_sent != Some(spot)
         {
@@ -10607,9 +11556,27 @@ impl App {
             AppAction::RenameTab => {
                 self.start_rename(self.win.active);
             }
+            AppAction::RenameWindow => self.start_rename_window(),
+            AppAction::ToggleAlwaysOnTop => self.toggle_always_on_top(),
+            AppAction::OpacityIncrease => self.step_window_opacity(1),
+            AppAction::OpacityDecrease => self.step_window_opacity(-1),
+            AppAction::OpacityReset => self.step_window_opacity(0),
             AppAction::ToggleSyncInputs => {
                 if let Some(t) = self.win.tabs.get_mut(self.win.active) {
                     t.sync_inputs = !t.sync_inputs;
+                }
+            }
+            AppAction::PinTab => self.toggle_pin(self.win.active),
+            AppAction::FocusRailSearch => self.focus_rail_search(event_loop),
+            AppAction::ToggleRailPanes => self.win.rail.panes = !self.win.rail.panes,
+            AppAction::ToggleReadOnly => {
+                if let Some(id) = self.active_pane_id() {
+                    self.toggle_read_only(id);
+                }
+            }
+            AppAction::RestartPane => {
+                if let Some(id) = self.active_pane_id() {
+                    self.request_restart(id);
                 }
             }
             AppAction::ResetTabTimer => {
@@ -10686,30 +11653,38 @@ impl App {
                 }
             }
             AppAction::ClearTranscripts => self.clear_transcripts(),
+            AppAction::TabNext | AppAction::TabPrev
+                if self.tab_switch_mru(action == AppAction::TabNext) => {}
+            AppAction::UserAction(i) => self.run_user_action(i as usize, event_loop),
+            AppAction::MarkMode => self.start_mark_mode(),
+            AppAction::InsertLastArgument | AppAction::SubwordLeft | AppAction::SubwordRight => {
+                if self.win.editor_active {
+                    self.handle_editor_key(match action {
+                        AppAction::InsertLastArgument => EditorKey::InsertLastArg,
+                        AppAction::SubwordLeft => EditorKey::SubwordLeft,
+                        _ => EditorKey::SubwordRight,
+                    });
+                }
+            }
+            // the shown tabs only: a folded group's are skipped
             AppAction::TabNext => {
-                if !self.win.tabs.is_empty() {
-                    self.switch_tab((self.win.active + 1) % self.win.tabs.len());
+                if let Some(i) = self.shown_tab_from_active(1) {
+                    self.switch_tab(i);
                 }
             }
             AppAction::TabPrev => {
-                if !self.win.tabs.is_empty() {
-                    self.switch_tab(
-                        (self.win.active + self.win.tabs.len() - 1) % self.win.tabs.len(),
-                    );
+                if let Some(i) = self.shown_tab_from_active(-1) {
+                    self.switch_tab(i);
                 }
             }
             AppAction::NewTabProfile(n) => self.open_profile_at(n as usize - 1),
             AppAction::TabSelect(n) => {
-                if !self.win.tabs.is_empty() {
-                    // Warp: ⌘9 = last tab; out-of-range numbers are no-ops
-                    let idx = if n == 9 {
-                        self.win.tabs.len() - 1
-                    } else {
-                        n as usize - 1
-                    };
-                    if idx < self.win.tabs.len() && idx != self.win.active {
-                        self.switch_tab(idx);
-                    }
+                // Warp: ⌘9 = last tab; out-of-range numbers are no-ops. The
+                // shown tabs count (pinned first, a folded group's skipped)
+                if let Some(idx) = self.nth_shown_tab(n)
+                    && idx != self.win.active
+                {
+                    self.switch_tab(idx);
                 }
             }
             AppAction::MoveTabLeft | AppAction::MoveTabRight => {
@@ -10719,7 +11694,8 @@ impl App {
                 } else {
                     (self.win.active + 1 < n).then_some(self.win.active + 1)
                 };
-                if let Some(t) = target {
+                // within its zone: pinned or not, and its group
+                if let Some(t) = target.filter(|t| self.same_zone(self.win.active, *t)) {
                     self.win.tabs.swap(self.win.active, t);
                     self.win.active = t;
                     self.save_session();
@@ -10814,7 +11790,8 @@ impl App {
                             .find(|b| b.output_range().is_some())
                             .map(|b| b.id)?;
                         terminal::block_output_text(&p.session, id)
-                    });
+                    })
+                    .map(rift_core::secrets::mask_owned);
                 if let Some(text) = text {
                     self.copy_to_clipboard(text);
                 }
@@ -10834,6 +11811,7 @@ impl App {
                     self.win.search.close();
                 } else {
                     self.win.search.open = true;
+                    self.scope_find_to_selection();
                     self.refresh_search(true);
                     self.blink_epoch = Instant::now();
                 }
@@ -10956,6 +11934,14 @@ impl App {
                 self.win.context_menu.close();
                 self.update_rift();
             }
+            AppAction::ThemePicker => self.open_theme_picker(),
+            AppAction::CycleTabColor => self.cycle_tab_color(),
+            AppAction::SetTabColor => self.open_tab_color_prompt(self.win.active),
+            AppAction::ToggleStickyHeader => {
+                if let Some(id) = self.active_pane_id() {
+                    self.toggle_sticky_header(id);
+                }
+            }
             AppAction::ToggleExplorer => {
                 self.win.explorer.open = !self.win.explorer.open;
                 self.win.explorer.focused = self.win.explorer.open;
@@ -11054,20 +12040,25 @@ impl App {
             AppAction::SelectBlockPrev => self.select_block(-1),
             AppAction::SelectBlockNext => self.select_block(1),
             AppAction::CopyBlockCommand => {
+                // a multi-block selection copies every selected command
                 if let Some((pane_id, block)) = self.selected_or_last_block()
+                    && !self.run_block_tool(MenuAction::CopyCommand, pane_id, block)
                     && let Some(cmd) = self.block_command(pane_id, block)
                 {
                     self.copy_to_clipboard(cmd);
                 }
             }
             AppAction::CopyBlockOutput => {
-                if let Some((pane_id, block)) = self.selected_or_last_block() {
+                if let Some((pane_id, block)) = self.selected_or_last_block()
+                    && !self.run_block_tool(MenuAction::CopyOutput, pane_id, block)
+                {
                     let text = self
                         .win
                         .tabs
                         .get(self.win.active)
                         .and_then(|t| t.pane(pane_id))
-                        .and_then(|p| terminal::block_output_text(&p.session, block));
+                        .and_then(|p| terminal::block_output_text(&p.session, block))
+                        .map(rift_core::secrets::mask_owned);
                     if let Some(text) = text {
                         self.copy_to_clipboard(text);
                     }
@@ -11483,7 +12474,21 @@ impl App {
             let chord = binding.chord();
             // the chord moves: whoever had it keeps its other shortcuts
             let mut note = String::new();
-            if let Some(other) = self.keymap.conflict(&binding, &action).map(str::to_string) {
+            if let Some(i) = self
+                .keymap
+                .conflict(&binding, &action)
+                .and_then(rift_core::actions::keymap_index)
+            {
+                // an `[[actions]]` key: this binding wins over it, the
+                // action keeps its key in config.toml
+                let name = self
+                    .config
+                    .actions
+                    .get(i)
+                    .map(|a| a.name.trim().to_string());
+                note = format!(" (over action {:?})", name.unwrap_or_default());
+            } else if let Some(other) = self.keymap.conflict(&binding, &action).map(str::to_string)
+            {
                 let rest = self
                     .keymap
                     .bindings_for(&other)
@@ -11533,6 +12538,14 @@ impl App {
     }
 
     fn handle_editor_key(&mut self, key: EditorKey) {
+        // a read-only pane: moves only (⌥., subword and ⌃U edits come here
+        // as app actions, past the key guard in `on_key`)
+        if pane_life::edits_command_line(&key)
+            && let Some(id) = self.active_pane_id()
+            && self.refuse_read_only(id)
+        {
+            return;
+        }
         // the rich-input composer: editing only, its submit sends
         if let Some(id) = self.composing_pane() {
             self.composer_editor_key(id, key);
@@ -11696,6 +12709,12 @@ impl App {
         let mut submitted: Option<(PaneId, String)> = None;
         let mut signal: Option<(PaneId, &'static [u8])> = None;
         let mut cut: Option<String> = None;
+        // a read-only pane's command line takes moves only (an action's
+        // `send`, a phone's input and the keys alike): a refused submit
+        // must not become the next block's command
+        if pane_life::edits_command_line(&key) && self.refuse_read_only(id) {
+            return;
+        }
         let Some(pane) = self.find_tab_of_pane(id).and_then(|(_, t)| t.pane_mut(id)) else {
             return;
         };
@@ -11726,9 +12745,55 @@ impl App {
                     per_caret.is_some()
                 }
             };
+        // Meta+. again cycles to older commands; any other key ends that
+        if key != EditorKey::InsertLastArg {
+            pane.editor.last_arg = None;
+        }
         match key {
             _ if multi || !edited => {}
             EditorKey::Cut => cut = pane.editor.cut_selection(),
+            EditorKey::InsertLastArg => {
+                let ed = &mut pane.editor;
+                // the word inserted last, still right before the cursor
+                let prev = ed
+                    .last_arg
+                    .take()
+                    .filter(|(_, r)| r.end == ed.cursor && ed.anchor.is_none());
+                let depth = prev.as_ref().map_or(0, |(d, _)| d + 1);
+                let word = ed
+                    .history
+                    .iter()
+                    .rev()
+                    .filter_map(|c| rift_core::editing::last_word(c))
+                    .nth(depth)
+                    .map(str::to_string);
+                match (word, prev) {
+                    (Some(w), Some((_, r))) => {
+                        let start = r.start;
+                        ed.replace_range(r, &w);
+                        ed.last_arg = Some((depth, start..start + w.len()));
+                    }
+                    (Some(w), None) => {
+                        ed.insert(&w);
+                        ed.last_arg = Some((0, ed.cursor - w.len()..ed.cursor));
+                    }
+                    // no older command: the word stays
+                    (None, prev) => {
+                        ed.last_arg = prev;
+                        edited = false;
+                    }
+                }
+            }
+            EditorKey::SubwordLeft => {
+                let ed = &mut pane.editor;
+                ed.anchor = None;
+                ed.cursor = rift_core::editing::subword_left(&ed.buffer, ed.cursor);
+            }
+            EditorKey::SubwordRight => {
+                let ed = &mut pane.editor;
+                ed.anchor = None;
+                ed.cursor = rift_core::editing::subword_right(&ed.buffer, ed.cursor);
+            }
             EditorKey::SelectLeft => pane.editor.extend(crate::state::EditorState::mv_left),
             EditorKey::SelectRight => pane.editor.extend(crate::state::EditorState::mv_right),
             EditorKey::SelectWordLeft => {
@@ -11756,7 +12821,13 @@ impl App {
             EditorKey::KillToStart => pane.editor.kill_to_start(),
             EditorKey::Undo => pane.editor.undo(),
             EditorKey::Redo => pane.editor.redo(),
-            EditorKey::ClearLine => pane.editor.clear(),
+            EditorKey::ClearLine => {
+                // ⌃U (Warp): the cleared text goes to the clipboard first
+                if active && !pane.editor.buffer.is_empty() {
+                    cut = Some(pane.editor.buffer.clone());
+                }
+                pane.editor.clear();
+            }
             EditorKey::ClearScreen => {
                 // shell-driven repaint: blocks and scrollback survive (⌘K is
                 // the full app-side clear)
@@ -11881,6 +12952,13 @@ impl App {
                 .filter(|(i, _)| *i != keep)
                 .flat_map(|(_, t)| t.panes.iter())
                 .collect(),
+            CloseScope::Group(id) => self
+                .win
+                .tabs
+                .iter()
+                .filter(|t| t.group == Some(id))
+                .flat_map(|t| t.panes.iter())
+                .collect(),
             CloseScope::Window => self.win.tabs.iter().flat_map(|t| t.panes.iter()).collect(),
             CloseScope::App => self.all_panes().collect(),
         };
@@ -11919,12 +12997,31 @@ impl App {
                     && self.win.tabs[0].pane(id).is_some()
             }
             CloseScope::OtherTabs(_) => false,
+            CloseScope::Group(id) => last && self.win.tabs.iter().all(|t| t.group == Some(id)),
         }
     }
 
-    /// Close/quit entry point: warns first when something is still running,
-    /// and before a quit while a phone is connected.
+    /// Close/quit entry point: asks before closing a pinned tab, warns when
+    /// something is still running, and before a quit while a phone is
+    /// connected.
     fn request_close(&mut self, scope: CloseScope, event_loop: &ActiveEventLoop) {
+        if self.closes_pinned_tab(scope) {
+            self.win.confirm = Some(ConfirmClose {
+                opened: Instant::now(),
+                focus_cancel: false,
+                action: ConfirmAction::ClosePinned(scope),
+                commands: Vec::new(),
+            });
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
+            return;
+        }
+        self.request_close_unpinned(scope, event_loop);
+    }
+
+    /// `request_close` past the pinned-tab question.
+    fn request_close_unpinned(&mut self, scope: CloseScope, event_loop: &ActiveEventLoop) {
         if self.quits(scope) && self.update.busy {
             // quitting mid-install could leave a half-finished update
             self.update.quit_after = true;
@@ -11975,6 +13072,18 @@ impl App {
                     .get(i)
                     .map(|t| t.panes.iter().map(|p| p.session.id).collect())
                     .unwrap_or_default();
+                for id in ids {
+                    self.close_pane(id, event_loop);
+                }
+            }
+            CloseScope::Group(id) => {
+                let ids: Vec<PaneId> = self
+                    .win
+                    .tabs
+                    .iter()
+                    .filter(|t| t.group == Some(id))
+                    .flat_map(|t| t.panes.iter().map(|p| p.session.id))
+                    .collect();
                 for id in ids {
                     self.close_pane(id, event_loop);
                 }
@@ -12562,9 +13671,22 @@ impl App {
                     w.request_redraw();
                 }
             }
+            ConfirmAction::LargePaste { pane, text } => {
+                // only into the pane it was meant for
+                if self.active_pane_id() == Some(pane) {
+                    self.paste_checked(&text, true, false);
+                }
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+            }
             ConfirmAction::LaunchLink { config, new_window } => {
                 self.launch_from_link(&config, new_window, event_loop);
             }
+            ConfirmAction::Restart(pane) => self.restart_pane(pane),
+            ConfirmAction::Overwrite { path, what, text } => self.write_saved(&path, &what, &text),
+            ConfirmAction::RunCode { pane, command } => self.run_code_block(pane, command),
+            ConfirmAction::ClosePinned(scope) => self.request_close_unpinned(scope, event_loop),
             ConfirmAction::InstallRemote(profile) => {
                 let script = rift_core::shell_integration::data_dir()
                     .map(|d| d.join("remote-install.sh"))
@@ -12617,9 +13739,11 @@ impl App {
         match self.win.tabs.iter().find(|t| t.pane(pane).is_some()) {
             Some(t) if t.sync_inputs => {
                 let mut ids = vec![pane];
+                // a read-only sibling is left out of the mirror
                 ids.extend(
                     t.panes
                         .iter()
+                        .filter(|p| !p.session.read_only())
                         .map(|p| p.session.id)
                         .filter(|id| *id != pane),
                 );
@@ -12861,6 +13985,13 @@ impl App {
         let Some((_, tab)) = self.find_tab_of_pane(id) else {
             return;
         };
+        let Some(pane) = tab.pane_mut(id) else { return };
+        // a read-only pane refuses the line (the session flags it for the
+        // toast); stamping it would label the next block with it
+        if pane.session.read_only() {
+            pane.session.write(cmd.as_bytes());
+            return;
+        }
         tab.start_clock(cmd);
         let Some(pane) = tab.pane_mut(id) else { return };
         if !cmd.trim().is_empty() && pane.editor.history.last().map(String::as_str) != Some(cmd) {
@@ -12971,6 +14102,11 @@ impl App {
             window.request_redraw();
             return;
         }
+        // ⌃Tab's switcher and mark mode hold the keyboard while shown
+        if self.tab_switcher_key(event) || self.mark_mode_key(event) {
+            window.request_redraw();
+            return;
+        }
         if self.win.prompt_editor.is_some() {
             // Esc cancels, Enter saves; the dialog owns the keyboard
             match event.logical_key {
@@ -12990,6 +14126,11 @@ impl App {
             window.request_redraw();
             return;
         }
+        if self.win.compare.open {
+            self.handle_compare_key(event);
+            window.request_redraw();
+            return;
+        }
         if self.win.notifications.open && self.handle_notifications_key(event) {
             window.request_redraw();
             return;
@@ -13003,6 +14144,23 @@ impl App {
             self.handle_rename_key(event);
             window.request_redraw();
             return;
+        }
+        if self.win.groups.rename.is_some() {
+            self.handle_group_rename_key(event);
+            window.request_redraw();
+            return;
+        }
+        // the rail's search field takes typing; a ⌘ / ⌃ chord lets it go
+        if self.win.rail.focused {
+            if self.rail_w() > 0.0
+                && !self.win.modifiers.super_key()
+                && !self.win.modifiers.control_key()
+            {
+                self.handle_rail_search_key(event);
+                window.request_redraw();
+                return;
+            }
+            self.win.rail.focused = false;
         }
         if self.win.chip_menu.is_some() {
             self.handle_chip_menu_key(event);
@@ -13135,10 +14293,35 @@ impl App {
             && pane.selected_block.is_some()
         {
             pane.selected_block = None;
+            pane.block_selection.clear();
             window.request_redraw();
             if self.win.editor_active {
                 return;
             }
+        }
+        // a pane kept after its program exited: Enter restarts it
+        if self.exited_key(event) {
+            window.request_redraw();
+            return;
+        }
+        // a read-only pane's command line and composer: only moves and
+        // selections (shortcuts still work below)
+        if (self.win.editor_active || self.composing_pane().is_some())
+            && let Some(id) = self.active_pane_id()
+            && self.pane_read_only(id)
+            && input::app_action(event, self.win.modifiers, &self.keymap).is_none()
+            && !input::editor_key(event, self.win.modifiers).is_some_and(|k| k.only_moves())
+        {
+            if !event.released {
+                self.refuse_read_only(id);
+            }
+            window.request_redraw();
+            return;
+        }
+        // ⇧↑ ⇧↓ grow the block selection, ⌘A selects every block
+        if self.block_selection_key(event) {
+            window.request_redraw();
+            return;
         }
         // rich input: its send key, newline key and Esc come first
         if self.composer_on_key(event) {
@@ -13189,7 +14372,14 @@ impl App {
                 return;
             }
         }
-        if let Some(action) = input::app_action(event, self.win.modifiers, &self.keymap) {
+        if let Some(action) = input::app_action(event, self.win.modifiers, &self.keymap)
+            // Meta+. is Meta only where Option is (macOS: `option_as_meta`);
+            // otherwise ⌥. types what Option composes
+            && !(action == AppAction::InsertLastArgument
+                && self.win.modifiers.alt_key()
+                && cfg!(target_os = "macos")
+                && !self.option_meta())
+        {
             // plain terminal keys (PageUp, Home, ⌃M…) bound to app
             // actions still belong to vim/less when the editor isn't
             // active — fall through to raw byte passthrough
@@ -13573,6 +14763,7 @@ impl App {
             && self.win.prompt_editor.is_none()
             && self.win.confirm.is_none()
             && !self.win.whats_new.open
+            && !self.win.compare.open
             && self.win.drag.is_none()
             && self.win.pending_sel.is_none()
             && self.win.editor_drag.is_none()
@@ -13583,6 +14774,10 @@ impl App {
             self.focus_pane_under(pos, window);
         }
         if idle && self.report_motion() {
+            return;
+        }
+        if self.drag_scrollbar(pos.1) {
+            window.request_redraw();
             return;
         }
         if let Some(drag) = &self.win.drag {
@@ -13676,7 +14871,9 @@ impl App {
                 } else {
                     r[0] + r[2] / 2.0
                 };
-                if (delta > 0.0 && pos > mid) || (delta < 0.0 && pos < mid) {
+                if ((delta > 0.0 && pos > mid) || (delta < 0.0 && pos < mid))
+                    && self.same_zone(i, j)
+                {
                     self.win.tabs.swap(i, j);
                     self.win.active = j;
                     if let Some(d) = self.win.tab_drag.as_mut() {
@@ -13738,7 +14935,11 @@ impl App {
         if self.win.prompt_editor.is_some() {
             return;
         }
-        if self.win.palette.open || self.win.confirm.is_some() || self.win.whats_new.open {
+        if self.win.palette.open
+            || self.win.confirm.is_some()
+            || self.win.whats_new.open
+            || self.win.compare.open
+        {
             return;
         }
         if self.win.notifications.open {
@@ -13762,6 +14963,21 @@ impl App {
             return;
         }
         let (mx, my) = self.win.mouse;
+        // an explorer row: open, copy path / relative path, new file, reveal
+        let explorer_row = self
+            .win
+            .explorer_hits
+            .iter()
+            .find(|(r, _)| mx >= r[0] && mx < r[0] + r[2] && my >= r[1] && my < r[1] + r[3])
+            .and_then(|(_, h)| match h {
+                ExplorerHit::Row(i) => Some(*i),
+                _ => None,
+            });
+        if let Some(i) = explorer_row.filter(|_| self.win.explorer.open) {
+            self.open_explorer_menu(i, self.win.mouse);
+            window.request_redraw();
+            return;
+        }
         // tab bar: tab menu
         let tab_hit = self
             .win
@@ -13772,6 +14988,20 @@ impl App {
                 ClickTarget::TabSelect(i) | ClickTarget::TabClose(i) => Some(i),
                 _ => None,
             });
+        let group_hit = self
+            .win
+            .hits
+            .iter()
+            .find(|h| h.contains(mx, my))
+            .and_then(|h| match h.target {
+                ClickTarget::GroupHeader(id) => Some(id),
+                _ => None,
+            });
+        if let Some(id) = group_hit {
+            self.open_group_menu(id, self.win.mouse);
+            window.request_redraw();
+            return;
+        }
         if let Some(i) = tab_hit {
             self.open_tab_menu(i, self.win.mouse);
             window.request_redraw();
@@ -13839,7 +15069,7 @@ impl App {
                 use crate::views::terminal::RowKind;
                 let blocks = p.session.blocks.lock().unwrap();
                 match p.rows[idx].kind {
-                    RowKind::Pad => None,
+                    RowKind::Pad | RowKind::Sep => None,
                     RowKind::Header(id) => Some((p.session.id, id)),
                     RowKind::Grid { abs, .. } => blocks
                         .iter()
@@ -13854,6 +15084,7 @@ impl App {
         });
         if let Some((pane_id, block)) = target {
             self.open_context_menu(pane_id, block, self.win.mouse);
+            self.add_link_items(pane_id);
             window.request_redraw();
             return;
         }
@@ -13871,6 +15102,7 @@ impl App {
                 tab.active_pane = id;
             }
             self.open_terminal_menu(id, self.win.mouse);
+            self.add_link_items(id);
             window.request_redraw();
         }
     }
@@ -13899,6 +15131,10 @@ impl App {
             }
             if self.win.drag.take().is_some() {
                 self.save_session(); // divider position
+            }
+            if self.end_scrollbar_drag() {
+                window.request_redraw();
+                return;
             }
             // a tab released outside its strip: into another window, or out
             // into a window of its own (`tab_move`)
@@ -13973,6 +15209,14 @@ impl App {
             let h = self.win.whats_new_hits;
             if inside(&h.close) || inside(&h.done) || !inside(&h.card) {
                 self.win.whats_new.open = false;
+            }
+            window.request_redraw();
+            return;
+        }
+        if self.win.compare.open {
+            let h = self.win.compare_hits;
+            if inside(&h.close) || !inside(&h.card) {
+                self.win.compare.close();
             }
             window.request_redraw();
             return;
@@ -14128,18 +15372,22 @@ impl App {
             window.request_redraw();
             return;
         }
-        // find-bar toggles
+        // find-bar toggles (the block filter's in filter mode), and the
+        // "in block" chip that widens find to the pane
         if self.win.search.open
-            && !self.win.filter_editing
             && !self.over_maximized_review()
             && let Some(i) = self.win.search_chips.iter().position(inside)
         {
-            if i == 0 {
-                self.win.search.case_sensitive = !self.win.search.case_sensitive;
+            if self.win.filter_editing {
+                self.filter_chip(i);
             } else {
-                self.win.search.regex = !self.win.search.regex;
+                match i {
+                    0 => self.win.search.case_sensitive = !self.win.search.case_sensitive,
+                    1 => self.win.search.regex = !self.win.search.regex,
+                    _ => self.win.search.scope = None,
+                }
+                self.refresh_search(true);
             }
-            self.refresh_search(true);
             window.request_redraw();
             return;
         }
@@ -14183,6 +15431,10 @@ impl App {
         if !matches!(target, Some(ClickTarget::SettingsKeybind(_))) {
             self.win.settings.recording = None;
         }
+        // a click outside the rail's search field lets it go (its query stays)
+        if !matches!(target, Some(ClickTarget::RailSearch)) {
+            self.win.rail.focused = false;
+        }
         // a click outside the relay field ends its edit (saved when valid)
         if self.win.settings.remote.relay_edit.is_some()
             && !matches!(target, Some(ClickTarget::RemoteRelay))
@@ -14225,9 +15477,17 @@ impl App {
         }
         match &target {
             Some(ClickTarget::Block(pane, id) | ClickTarget::BlockDuration(pane, id)) => {
-                // Warp: clicking a block selects it (again deselects)
+                // Warp: clicking a block selects it (again deselects);
+                // ⌘-click toggles it in the selection, ⇧-click a range
                 let (pane, id) = (*pane, *id);
-                if let Some(tab) = self.win.tabs.get_mut(self.win.active) {
+                let same_pane = self
+                    .win
+                    .tabs
+                    .get(self.win.active)
+                    .is_some_and(|t| t.active_pane == pane);
+                if !(same_pane && self.click_block_with_mods(pane, id))
+                    && let Some(tab) = self.win.tabs.get_mut(self.win.active)
+                {
                     if tab.active_pane != pane
                         && let Some(prev) = tab.active_mut()
                     {
@@ -14235,6 +15495,7 @@ impl App {
                     }
                     tab.active_pane = pane;
                     if let Some(p) = tab.pane_mut(pane) {
+                        p.block_selection.clear();
                         p.selected_block = if p.selected_block == Some(id) {
                             None
                         } else {
@@ -14250,8 +15511,28 @@ impl App {
                     p.session.blocks.lock().unwrap().toggle_collapsed(*id);
                 }
             }
+            // ⌘-click / ⇧-click pick tabs for "Group tabs"
+            Some(ClickTarget::TabSelect(i))
+                if *i < self.win.tabs.len()
+                    && (self.win.modifiers.super_key() || self.win.modifiers.shift_key()) =>
+            {
+                self.pick_tab(*i, self.win.modifiers.shift_key());
+            }
+            Some(ClickTarget::RailSearch) => self.win.rail.focused = true,
+            Some(ClickTarget::RailPanesToggle) => self.win.rail.panes = !self.win.rail.panes,
+            Some(ClickTarget::RailPane(id)) => self.focus_rail_pane(*id),
+            Some(ClickTarget::GroupHeader(id)) => {
+                if self.click_count() == 2 {
+                    // the first click of the pair folded it: undo that
+                    self.toggle_group(*id);
+                    self.start_group_rename(*id);
+                } else {
+                    self.toggle_group(*id);
+                }
+            }
             Some(ClickTarget::TabSelect(i)) => {
                 let i = *i;
+                self.drop_picks();
                 if i < self.win.tabs.len() {
                     // double-click renames (Warp); a press arms drag-reorder
                     if self.click_count() == 2 {
@@ -14402,13 +15683,33 @@ impl App {
             Some(ClickTarget::PaneClose(id)) => {
                 self.request_close(CloseScope::Pane(*id), event_loop);
             }
+            Some(ClickTarget::Exited(id, part)) => match part {
+                crate::views::exited::Part::Restart => self.restart_pane(*id),
+                crate::views::exited::Part::Close => {
+                    self.request_close(CloseScope::Pane(*id), event_loop)
+                }
+            },
             Some(ClickTarget::PaletteMode(i)) => {
                 if let Some(m) = crate::views::palette::MODES.get(*i as usize) {
                     self.open_palette(m.0);
                 }
             }
-            Some(ClickTarget::HistoryScope(scope)) => self.win.history.set_scope(*scope),
+            Some(ClickTarget::HistoryScope(scope)) => {
+                self.win.history.set_scope(*scope);
+                self.search_results_if_wanted();
+            }
             Some(ClickTarget::HistoryClose) => self.win.history.close(),
+            // a found run: a click previews it, a second puts it on the
+            // command line (it never runs from a click)
+            Some(ClickTarget::HistoryRow(i))
+                if self.win.history.scope == crate::views::history::Scope::Results =>
+            {
+                if self.win.history.selected == *i && self.click_count() >= 2 {
+                    self.take_history(HistoryUse::Edit);
+                } else {
+                    self.win.history.selected = *i;
+                }
+            }
             Some(ClickTarget::HistoryRow(i)) => {
                 // a click picks the row onto the command line; a second runs it
                 if self.win.history.selected == *i && self.click_count() >= 2 {
@@ -14469,7 +15770,8 @@ impl App {
                 let text = self
                     .find_tab_of_pane(*pane)
                     .and_then(|(_, tab)| tab.pane(*pane))
-                    .and_then(|p| terminal::block_output_text(&p.session, *id));
+                    .and_then(|p| terminal::block_output_text(&p.session, *id))
+                    .map(rift_core::secrets::mask_owned);
                 match text {
                     Some(text) => {
                         if self.copy_to_clipboard(text) {
@@ -14508,12 +15810,14 @@ impl App {
                 }
             }
             Some(ClickTarget::WindowDrag) => {}
+            Some(ClickTarget::StickyRestore(pane)) => self.toggle_sticky_header(*pane),
             Some(ClickTarget::JumpToBlock(pane, id)) => {
                 self.jump_to_block(*pane, *id);
             }
             Some(ClickTarget::JumpToBlockEnd(pane, id)) => {
                 self.jump_to_block_end(*pane, *id);
             }
+            Some(ClickTarget::Scrollbar(pane)) => self.press_scrollbar(*pane, my),
             Some(ClickTarget::Subshell(pane, part)) => self.answer_subshell(*pane, *part),
             Some(ClickTarget::SettingsNoop | ClickTarget::RemoteHistoryList) => {}
             Some(ClickTarget::SettingsNav(i)) => {
@@ -14689,6 +15993,9 @@ impl App {
                     // gateway reads it on every check
                     "menu_bar_icon" => c.menu_bar_icon = !c.menu_bar_icon,
                     "cursor_blink" => c.cursor_blink = !c.cursor_blink,
+                    "cursor_hollow_unfocused" => {
+                        c.cursor_hollow_unfocused = !c.cursor_hollow_unfocused
+                    }
                     "ligatures" => c.ligatures = !c.ligatures,
                     "sync_os_theme" => c.sync_os_theme = !c.sync_os_theme,
                     "restore_session" => c.restore_session = !c.restore_session,
@@ -14787,8 +16094,13 @@ impl App {
                         c.notify_threshold_secs =
                             (c.notify_threshold_secs as i64 + d * 5).clamp(0, 3600) as u64;
                     }
+                    // the left and right padding in effect: a per-side
+                    // value in config.toml would otherwise override the step
                     "window_padding" => {
-                        c.window_padding = (c.padding() + d as f32 * 2.0).clamp(0.0, 40.0);
+                        let now = c.paddings(false).left;
+                        c.window_padding = (now + d as f32 * 2.0).clamp(0.0, 40.0);
+                        c.window_padding_left = None;
+                        c.window_padding_right = None;
                     }
                     "wheel_scroll_lines" => {
                         c.wheel_scroll_lines = (c.wheel_lines() as i64 + d).clamp(1, 20) as u8;
@@ -14819,7 +16131,9 @@ impl App {
                         c.cursor_style = match v {
                             0 => CursorStyle::Block,
                             1 => CursorStyle::Bar,
-                            _ => CursorStyle::Underline,
+                            2 => CursorStyle::Underline,
+                            3 => CursorStyle::Hollow,
+                            _ => CursorStyle::DoubleUnderline,
                         }
                     }
                     id if id.starts_with("toolbar.") => {
@@ -14985,7 +16299,10 @@ impl App {
                 let active_pane = self.win.tabs.get(self.win.active).map(|t| t.active_pane);
                 if let Some(id) = active_pane {
                     let clicks = self.click_count();
-                    if self.try_open_url(id) {
+                    if self.reveal_secret_at(id, mx, my) {
+                        // a masked secret shows for a moment (`mask_secrets`)
+                        self.win.last_click = None;
+                    } else if self.try_open_url(id) {
                         self.win.last_click = None;
                     } else {
                         self.press_selection(id, clicks);
@@ -15006,6 +16323,11 @@ impl App {
         if self.win.prompt_editor.is_some() {
             return;
         }
+        // ⌘ + wheel zooms (`wheel_zoom`)
+        if self.wheel_zoom(delta) {
+            window.request_redraw();
+            return;
+        }
         use rift_pty::alacritty_terminal::term::TermMode;
         // the What's New body scrolls by pixels: trackpad deltas stay smooth
         // instead of snapping to whole lines
@@ -15016,6 +16338,15 @@ impl App {
             };
             // positive delta = wheel up = toward the top
             self.win.whats_new.scroll_by(-px);
+            window.request_redraw();
+            return;
+        }
+        if self.win.compare.open && self.win.confirm.is_none() {
+            let rows = match delta {
+                MouseScrollDelta::LineDelta(_, y) => (y * 3.0).round() as isize,
+                MouseScrollDelta::PixelDelta(p) => (p.y / 18.0).round() as isize,
+            };
+            self.win.compare.scroll_by(-rows);
             window.request_redraw();
             return;
         }
@@ -15181,8 +16512,9 @@ impl App {
                     (false, false) => b"\x1b[B",
                     (false, true) => b"\x1bOB",
                 };
+                // scrolling, not typing: a read-only pane still scrolls
                 for _ in 0..lines.unsigned_abs().min(20) {
-                    pane.session.write(seq);
+                    pane.session.write_scroll(seq);
                 }
             }
         } else {
@@ -15377,6 +16709,7 @@ impl App {
             || self.win.settings.open
             || self.win.confirm.is_some()
             || self.win.whats_new.open
+            || self.win.compare.open
             || self.win.context_menu.open;
         if pressed && overlay {
             return;
@@ -15527,9 +16860,7 @@ impl App {
             }
             // Warp's black/white have no Rift tab color; those stay unset.
             if let Some(color) = &tab.color {
-                self.win.tabs[self.win.active].color = crate::state::TAB_COLORS
-                    .iter()
-                    .position(|c| c.eq_ignore_ascii_case(color.trim()));
+                self.win.tabs[self.win.active].color = rift_core::tab_color::TabColor::parse(color);
             }
             let mut focus = None;
             self.build_layout(&tab.layout, root_pane, &mut focus);
@@ -15666,9 +16997,15 @@ impl App {
         use crate::vim::{VimKey, VimMode, VimOutcome};
         use winit::keyboard::{Key, NamedKey};
         let mods = self.win.modifiers;
-        if mods.super_key() || mods.control_key() || mods.alt_key() {
+        // ⌃R outside Insert is vim's redo (in Insert: history search)
+        let ctrl_r = mods.control_key()
+            && !mods.super_key()
+            && !mods.alt_key()
+            && matches!(&event.logical_key, Key::Character(s) if s.eq_ignore_ascii_case("r"));
+        if (mods.super_key() || mods.control_key() || mods.alt_key()) && !ctrl_r {
             return false;
         }
+        let clip_unnamed = self.config.vim_clipboard.trim() == "unnamed";
         let Some(pane) = self
             .win
             .tabs
@@ -15691,6 +17028,7 @@ impl App {
             return false;
         }
         let key = match &event.logical_key {
+            _ if ctrl_r => VimKey::Redo,
             Key::Named(NamedKey::Escape) => VimKey::Escape,
             Key::Named(NamedKey::Enter) if !mods.shift_key() => VimKey::Enter,
             Key::Named(NamedKey::Backspace) => VimKey::Backspace,
@@ -15708,7 +17046,32 @@ impl App {
             }
             _ => return false,
         };
-        match pane.editor.vim_key(key) {
+        // the system clipboard for "+ / "* (and `vim_clipboard`): read
+        // only for a key that may put it, written after any key that set it
+        let reads = pane.editor.vim_key_reads_clipboard(key, clip_unnamed);
+        let clip_in = if reads { self.clipboard_text() } else { None };
+        let Some(pane) = self
+            .win
+            .tabs
+            .get_mut(self.win.active)
+            .and_then(|t| t.active_mut())
+        else {
+            return false;
+        };
+        pane.editor.vim_set_clipboard(clip_unnamed, clip_in);
+        let outcome = pane.editor.vim_key(key);
+        if let Some(text) = pane.editor.vim_take_clipboard() {
+            self.copy_to_clipboard(text);
+        }
+        let Some(pane) = self
+            .win
+            .tabs
+            .get_mut(self.win.active)
+            .and_then(|t| t.active_mut())
+        else {
+            return true;
+        };
+        match outcome {
             VimOutcome::PassThrough => false,
             VimOutcome::Consumed => {
                 pane.clear_selection();
@@ -15767,6 +17130,7 @@ impl App {
             }
         }
         self.ring_bell();
+        self.request_attention(pane);
         let active = self.win.active;
         if let Some((idx, tab)) = self.find_tab_of_pane(pane)
             && idx != active
@@ -15794,9 +17158,33 @@ impl App {
         }
     }
 
-    /// Command corrections (local, no AI): after a failed command whose
-    /// command word is unknown (or a git subcommand typo), offer the closest
-    /// known command in the empty editor.
+    /// `request_attention`: while no Rift window has keyboard focus, bounce
+    /// the Dock icon once (macOS) or set the urgency hint (Linux) of the
+    /// window holding `pane`. A focused window would only be interrupted.
+    fn request_attention(&mut self, pane: PaneId) {
+        let focused = self.win.focused || self.parked.iter().any(|w| w.focused);
+        if !self.config.request_attention || focused {
+            return;
+        }
+        self.attention_requests += 1;
+        if self.headless {
+            return;
+        }
+        let holds = |w: &WindowState| w.tabs.iter().any(|t| t.pane(pane).is_some());
+        let window = std::iter::once(&*self.win)
+            .chain(self.parked.iter().map(|w| &**w))
+            .find(|w| holds(w))
+            .and_then(|w| w.window.as_ref())
+            .or(self.win.window.as_ref());
+        if let Some(w) = window {
+            w.request_user_attention(Some(winit::window::UserAttentionType::Informational));
+        }
+    }
+
+    /// Command corrections (local, no AI): after a failed command, offer in
+    /// the empty editor what its output points to (`rift_core::corrections`:
+    /// git's upstream push or suggestion, a `cd` typo, `chmod +x`, `sudo`),
+    /// else the closest known command for an unknown command word.
     fn check_correction(&mut self, pane: PaneId) {
         let enabled = self.config.command_corrections;
         let env = self.shell_env.clone();
@@ -15812,8 +17200,11 @@ impl App {
             .iter()
             .rev()
             .find(|b| matches!(b.state, BlockState::Done { .. }))
-            .map(|b| (b.id, b.command.clone(), b.exit_code()));
-        let Some((id, cmd, exit)) = newest else {
+            .map(|b| {
+                let cwd = b.cwd.clone().filter(|_| !b.cwd_remote);
+                (b.id, b.command.clone(), b.exit_code(), cwd)
+            });
+        let Some((id, cmd, exit, cwd)) = newest else {
             return;
         };
         if p.correction_checked == Some(id) {
@@ -15822,6 +17213,22 @@ impl App {
         p.correction_checked = Some(id);
         p.correction = None;
         if !enabled || exit == Some(0) || exit.is_none() || cmd.contains('\n') {
+            return;
+        }
+        // the blocks lock is released: the output read takes it again
+        let output = terminal::block_output_tail(&p.session, id)
+            .map(|(text, _)| text)
+            .unwrap_or_default();
+        let failed = rift_core::corrections::Failed {
+            command: &cmd,
+            exit: exit.unwrap_or(1),
+            output: &output,
+            cwd: cwd.as_deref().map(std::path::Path::new),
+        };
+        if let Some(fix) = rift_core::corrections::correct(&failed)
+            && fix != cmd
+        {
+            p.correction = Some(fix);
             return;
         }
         if let Some(env) = env
@@ -15946,7 +17353,11 @@ impl App {
         };
         match step {
             Step::Wait(_) => {}
-            Step::Key(chord) => press(self, &chord),
+            Step::Key(chord) => {
+                press(self, &chord);
+                // the chord's modifiers are let go after it (a ⌃Tab tap)
+                self.tab_switcher_modifiers();
+            }
             Step::KeyRepeat(n, chord) => {
                 if let Some((mut p, mods)) = key_press(&chord) {
                     let saved = self.win.modifiers;
@@ -16084,6 +17495,7 @@ impl App {
                     }
                 }
                 self.win.modifiers = m;
+                self.tab_switcher_modifiers();
             }
             #[cfg(target_os = "macos")]
             Step::Menu(id) => self.run_menu_command(&id, event_loop),
@@ -16580,8 +17992,10 @@ impl App {
                 let theme = self.theme.clone();
                 match self.find_tab_of_pane(pane).and_then(|(_, t)| t.pane(pane)) {
                     Some(p) => {
+                        // the pane's own colour scheme, as on the desktop
+                        let theme = p.theme.as_ref().map_or(&theme, |(_, t)| t);
                         let (generation, screen) =
-                            terminal::remote_screen(&p.session, &theme, force, since);
+                            terminal::remote_screen(&p.session, theme, force, since);
                         Response {
                             ok: true,
                             pane: Some(pane),
@@ -16681,6 +18095,9 @@ impl App {
             }
             Request::SendText { pane, text } => {
                 match self.find_tab_of_pane(pane).and_then(|(_, t)| t.pane(pane)) {
+                    Some(p) if p.session.read_only() => {
+                        Response::error(pane_life::READ_ONLY_TOAST.to_lowercase())
+                    }
                     Some(p) => {
                         p.session.write(text.as_bytes());
                         ok(Some(pane))
@@ -16785,12 +18202,38 @@ impl App {
                 ),
                 selected: i == self.win.active && !settings_shown,
                 rect: hit(&|c| *c == ClickTarget::TabSelect(i)),
+                group: t
+                    .group
+                    .and_then(|g| self.win.groups.list.iter().position(|x| x.id == g)),
+                pinned: t.pinned,
+                read_only: t.panes.iter().any(|p| p.session.read_only()),
+                filtered: self.rail_filters_out(i),
             })
             .chain(self.win.settings.tab.then(|| TabNode {
                 title: "Settings".into(),
                 selected: settings_shown,
                 rect: hit(&|c| *c == ClickTarget::TabSelect(n)),
+                group: None,
+                pinned: false,
+                read_only: false,
+                filtered: self.rail_filters_out(n),
             }))
+            .collect();
+        let groups = self
+            .win
+            .groups
+            .list
+            .iter()
+            .map(|g| crate::a11y::GroupNode {
+                label: format!(
+                    "{} group, {} tabs{}",
+                    g.name,
+                    self.group_tabs_of(g.id).len(),
+                    if g.collapsed { ", collapsed" } else { "" }
+                ),
+                expanded: !g.collapsed,
+                rect: hit(&|c| *c == ClickTarget::GroupHeader(g.id)),
+            })
             .collect();
 
         let mut panes = Vec::new();
@@ -16839,9 +18282,25 @@ impl App {
                     }
                     blocks.push(BlockNode {
                         id: b.id,
-                        command: b.command.clone(),
-                        output: terminal::block_output_text(&p.session, b.id).unwrap_or_default(),
-                        selected: p.selected_block == Some(b.id),
+                        command: rift_core::secrets::mask_owned(b.command.clone()),
+                        // the tail only (the tree keeps its last
+                        // `OUTPUT_LIMIT` chars): a whole 20 MB output read
+                        // per update stalled the window for seconds
+                        output: b
+                            .output_range()
+                            .and_then(|_| terminal::block_output_tail(&p.session, b.id))
+                            // lines left out before it: marked as the
+                            // tree marks its own cut
+                            .map(|(text, dropped)| {
+                                if dropped > 0 {
+                                    format!("…{text}")
+                                } else {
+                                    text
+                                }
+                            })
+                            .map(rift_core::secrets::mask_owned)
+                            .unwrap_or_default(),
+                        selected: p.selected_blocks().contains(&b.id),
                         rect: hit(&|c| *c == ClickTarget::Block(id, b.id)),
                         status,
                     });
@@ -16857,6 +18316,8 @@ impl App {
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
+                // what the screen shows: secrets masked (`mask_secrets`)
+                let screen = rift_core::secrets::mask_owned(screen);
                 let editor = (active && self.win.editor_active).then(|| EditorNode {
                     label: if p.composer.open {
                         format!("Compose for {}", p.composer.label)
@@ -16923,6 +18384,10 @@ impl App {
                             ClickTarget::PaneSplit(p) if p == id => "Split pane right".into(),
                             ClickTarget::PaneMenu(p) if p == id => "Pane menu".into(),
                             ClickTarget::PaneClose(p) if p == id => "Close pane".into(),
+                            // the minimized sticky command header's tab
+                            ClickTarget::StickyRestore(p) if p == id => {
+                                "Show sticky command header".into()
+                            }
                             ClickTarget::Subshell(p, part) if p == id => match part {
                                 crate::views::subshell::Part::Enable => {
                                     "Use Rift's blocks and editor in this subshell".into()
@@ -16933,6 +18398,10 @@ impl App {
                                 crate::views::subshell::Part::Dismiss => {
                                     "Dismiss the subshell offer".into()
                                 }
+                            },
+                            ClickTarget::Exited(p, part) if p == id => match part {
+                                crate::views::exited::Part::Restart => "Restart".into(),
+                                crate::views::exited::Part::Close => "Close pane".into(),
                             },
                             ClickTarget::Welcome(i) if active => {
                                 let e = welcome.get(i as usize)?;
@@ -16967,6 +18436,8 @@ impl App {
         for (pane, block, command, status) in finished {
             let prev = self.win.a11y_done.insert(pane, block);
             if prev.is_some_and(|b| b < block) {
+                // masked like the screen (`mask_secrets`)
+                let command = rift_core::secrets::mask(&command);
                 self.win.a11y_announcement = Some(format!("{command} {status}"));
             }
         }
@@ -16991,6 +18462,10 @@ impl App {
                         c.commands.len(),
                         c.commands.join("; ")
                     ),
+                ),
+                ConfirmAction::LargePaste { text, .. } => (
+                    "Paste a large amount of text?".to_string(),
+                    large_paste_description(text),
                 ),
                 ConfirmAction::LaunchLink { .. } => (
                     "Open this layout from a link?".to_string(),
@@ -17017,10 +18492,29 @@ impl App {
                 ConfirmAction::AllowOperate { name, .. } => {
                     (format!("Let {name} run commands?"), ALLOW_OPERATE.into())
                 }
+                ConfirmAction::Restart(_) => (
+                    "Restart pane?".to_string(),
+                    format!("Running: {}", c.commands.join(", ")),
+                ),
+                ConfirmAction::ClosePinned(_) => (
+                    "Close pinned tab?".to_string(),
+                    "This tab is pinned. Unpin it to close it without asking.".into(),
+                ),
+                ConfirmAction::RunCode { .. } => (
+                    "Run this code block?".to_string(),
+                    format!("Runs in the terminal pane: {}", c.commands.join("; ")),
+                ),
+                ConfirmAction::Overwrite { .. } => (
+                    "Replace the file?".to_string(),
+                    format!(
+                        "A file with this name already exists: {}",
+                        c.commands.join("")
+                    ),
+                ),
             };
             let label = match &c.action {
                 ConfirmAction::Close(_) => "Close",
-                ConfirmAction::Paste { .. } => "Paste",
+                ConfirmAction::Paste { .. } | ConfirmAction::LargePaste { .. } => "Paste",
                 ConfirmAction::InstallRemote(_) => "Install",
                 ConfirmAction::LaunchLink { .. } => "Open and run",
                 ConfirmAction::Revert { .. } => "Revert",
@@ -17028,6 +18522,10 @@ impl App {
                 ConfirmAction::Update(_) => "Update",
                 ConfirmAction::RevokeDevice { .. } => "Revoke",
                 ConfirmAction::AllowOperate { .. } => "Allow",
+                ConfirmAction::Restart(_) => "Restart",
+                ConfirmAction::ClosePinned(_) => "Close tab",
+                ConfirmAction::Overwrite { .. } => "Replace",
+                ConfirmAction::RunCode { .. } => "Run",
             };
             let cancel = match &c.action {
                 ConfirmAction::Update(_) => "Later",
@@ -17110,6 +18608,23 @@ impl App {
                 status: Some(format!("{} results", results.len())),
                 controls,
                 rect: Some(self.win.chip_menu_card),
+            })
+        } else if let Some(switcher) = self.tab_switcher_a11y() {
+            Some(switcher)
+        } else if self.win.compare.open {
+            // the comparison as one readable status string, the close button
+            Some(Overlay::Dialog {
+                label: "Compare outputs".into(),
+                input: None,
+                status: Some(self.win.compare.a11y_status()),
+                controls: vec![Control {
+                    label: "Close".into(),
+                    role: Role::Button,
+                    toggled: None,
+                    selected: false,
+                    rect: Some(self.win.compare_hits.close),
+                }],
+                rect: Some(self.win.compare_hits.card),
             })
         } else if self.win.whats_new.open {
             // the notes as one readable status string; the body is not focusable
@@ -17378,14 +18893,25 @@ impl App {
                 .filter_map(|h| {
                     let (label, role, selected) = match h.target {
                         ClickTarget::HistoryRow(i) => {
-                            let e = &hp.entries[*hp.results.get(i)?];
-                            let status = match e.exit {
+                            let (command, exit, context) =
+                                if hp.scope == crate::views::history::Scope::Results {
+                                    let f = hp.found.get(i)?;
+                                    (
+                                        &f.command,
+                                        f.exit,
+                                        format!(", {}", crate::views::history::found_context(f)),
+                                    )
+                                } else {
+                                    let e = &hp.entries[*hp.results.get(i)?];
+                                    (&e.command, e.exit, String::new())
+                                };
+                            let status = match exit {
                                 Some(0) => "succeeded",
                                 Some(_) => "failed",
                                 None => "status unknown",
                             };
                             (
-                                format!("{}, {status}", e.command),
+                                format!("{}, {status}{context}", rift_core::secrets::mask(command)),
                                 Role::ListBoxOption,
                                 i == hp.selected,
                             )
@@ -17415,23 +18941,30 @@ impl App {
                 rect: None,
             })
         } else if self.win.search.open {
-            let (label, input, status) = if self.win.filter_editing {
-                let query = self
-                    .win
-                    .tabs
-                    .get(self.win.active)
-                    .and_then(|tab| tab.active())
-                    .and_then(|pane| pane.filter.as_ref())
-                    .map(|(_, query)| query.clone())
-                    .unwrap_or_default();
+            let editing = self
+                .win
+                .tabs
+                .get(self.win.active)
+                .and_then(|tab| tab.active())
+                .and_then(|pane| pane.filter.editing().cloned())
+                .filter(|_| self.win.filter_editing);
+            let (label, input, status) = if let Some(f) = &editing {
                 (
-                    "Filter block output",
-                    ("Filter output lines".into(), query),
-                    "Enter keeps filter, Escape clears".into(),
+                    "Filter block output".to_string(),
+                    ("Filter output lines".into(), f.query.clone()),
+                    match &f.error {
+                        Some(e) => {
+                            format!("Invalid regular expression, the last valid filter stays: {e}")
+                        }
+                        None => "Enter keeps filter, Escape clears".into(),
+                    },
                 )
             } else {
                 (
-                    "Find",
+                    match &self.win.search.scope {
+                        Some((_, cmd)) => format!("Find in block: {cmd}"),
+                        None => "Find".to_string(),
+                    },
                     ("Find in terminal".into(), self.win.search.query.clone()),
                     match (&self.win.search.error, self.win.search.position()) {
                         (Some(e), _) => e.clone(),
@@ -17440,28 +18973,43 @@ impl App {
                     },
                 )
             };
-            // find's Aa and .* chips, at the rects the last frame drew
-            let toggles = if self.win.filter_editing {
-                Vec::new()
-            } else {
-                let s = &self.win.search;
+            // the bar's chips, at the rects the last frame drew: find's Aa
+            // and .* (and the "in block" chip), or the filter's Aa .* ! ±N
+            let chip = |(label, on): (String, Option<bool>), rect: &[f32; 4]| Control {
+                label,
+                role: Role::Button,
+                toggled: on,
+                selected: false,
+                rect: Some(*rect),
+            };
+            let toggles: Vec<Control> = if let Some(f) = &editing {
                 [
-                    ("Match case", s.case_sensitive),
-                    ("Regular expression", s.regex),
+                    ("Match case".to_string(), Some(f.case)),
+                    ("Regular expression".to_string(), Some(f.regex)),
+                    ("Invert match".to_string(), Some(f.invert)),
+                    (format!("Context lines: {}", f.context), Some(f.context > 0)),
                 ]
                 .into_iter()
                 .zip(&self.win.search_chips)
-                .map(|((label, on), rect)| Control {
-                    label: label.into(),
-                    role: Role::Button,
-                    toggled: Some(on),
-                    selected: false,
-                    rect: Some(*rect),
-                })
+                .map(|(c, r)| chip(c, r))
                 .collect()
+            } else {
+                let s = &self.win.search;
+                let mut chips = vec![
+                    ("Match case".to_string(), Some(s.case_sensitive)),
+                    ("Regular expression".to_string(), Some(s.regex)),
+                ];
+                if s.scope.is_some() {
+                    chips.push(("Search the whole pane".to_string(), None));
+                }
+                chips
+                    .into_iter()
+                    .zip(&self.win.search_chips)
+                    .map(|(c, r)| chip(c, r))
+                    .collect()
             };
             Some(Overlay::Find {
-                label: label.into(),
+                label,
                 input,
                 status,
                 toggles,
@@ -17530,10 +19078,12 @@ impl App {
             size: (w, h),
             scale,
             tabs,
+            groups,
             panes,
             overlay,
             announcement: self.win.a11y_announcement.clone(),
             panels,
+            rail: self.rail_a11y(),
         }
     }
 
@@ -17699,6 +19249,31 @@ impl App {
                         self.win.viewer.rendered == *m,
                         *r,
                     ),
+                    // "Run sh block…": the language tells the buttons apart,
+                    // and a second block of one language is "Run sh block 2…"
+                    ViewerHit::RunCode(i) => {
+                        fn lang_of(b: Option<&rift_core::markdown::Block>) -> &str {
+                            match b {
+                                Some(rift_core::markdown::Block::Code { lang, .. }) => lang,
+                                _ => "code",
+                            }
+                        }
+                        let lang = lang_of(self.win.viewer.markdown.get(*i));
+                        let nth = 1 + self.win.viewer.markdown
+                            [..(*i).min(self.win.viewer.markdown.len())]
+                            .iter()
+                            .filter(|b| {
+                                matches!(b, rift_core::markdown::Block::Code { .. })
+                                    && lang_of(Some(b)) == lang
+                            })
+                            .count();
+                        let label = if nth > 1 {
+                            format!("Run {lang} block {nth}…")
+                        } else {
+                            format!("Run {lang} block…")
+                        };
+                        control(label, Role::Button, false, *r)
+                    }
                 })
                 .collect();
             out.push(PanelNode {
@@ -17942,6 +19517,8 @@ impl App {
             "theme_bg={:?} control_api={}",
             self.theme.bg, self.config.control_api
         );
+        let _ = writeln!(out, "attention_requests={}", self.attention_requests);
+        let _ = writeln!(out, "{}", self.window_opts_dump());
         let _ = writeln!(
             out,
             "remote_access={} control_level={:?} gateway={:?} gateway_pid={:?} clients={:?} remote_chip={:?} chip_age_ms={:?} remote_notices={} pairing={:?} pairing_wait={} view_only={} devices={:?}",
@@ -18047,6 +19624,8 @@ impl App {
             "font_size={} line_height={} theme={:?} cursor={:?}",
             self.font_size, self.config.line_height, self.config.theme, self.config.cursor_style
         );
+        // how long building a frame's scene took (performance checks)
+        let _ = writeln!(out, "{}", scene_timing::dump());
         let _ = writeln!(
             out,
             "palette={} mode={:?} query={:?} selected={} results={} loading={}/{}",
@@ -18058,9 +19637,65 @@ impl App {
             self.win.windows_loading,
             self.win.detached_loading
         );
+        // Tier 3 appearance: the picker's preview, gradients, tab colours
+        // as shown (own or a directory rule), sticky headers minimized,
+        // the viewer's Run buttons
         let _ = writeln!(
             out,
-            "settings={} page={:?} search={} query={:?} matches={} total={} current={} menu={} completion={} ghost={:?} items={} tooltip={:?}",
+            "theme_preview={} theme_light={:?} bg_gradient={} accent_gradient={} tab_tints={:?} sticky_minimized={:?} sticky_tab={:?} viewer_runs={:?} explorer_rows={:?}",
+            self.win.theme_preview.is_some(),
+            self.config.theme_light,
+            self.theme.bg_gradient.is_some(),
+            self.theme.accent_gradient.is_some(),
+            self.win
+                .tabs
+                .iter()
+                .map(|t| self.shown_tab_color(t).map(|c| c.to_config()))
+                .collect::<Vec<_>>(),
+            self.win
+                .tabs
+                .iter()
+                .flat_map(|t| t.panes.iter())
+                .filter(|p| p.sticky_minimized)
+                .map(|p| p.session.id)
+                .collect::<Vec<_>>(),
+            self.win
+                .hits
+                .iter()
+                .filter(|h| matches!(h.target, ClickTarget::StickyRestore(_)))
+                .map(|h| format!(
+                    "{:.0},{:.0},{:.0},{:.0}",
+                    h.rect[0], h.rect[1], h.rect[2], h.rect[3]
+                ))
+                .collect::<Vec<_>>(),
+            self.win
+                .viewer_hits
+                .iter()
+                .filter_map(|(r, h)| match h {
+                    ViewerHit::RunCode(i) => Some(format!(
+                        "{i}@{:.0},{:.0},{:.0},{:.0}",
+                        r[0], r[1], r[2], r[3]
+                    )),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            self.win
+                .explorer_hits
+                .iter()
+                .filter_map(|(r, h)| match h {
+                    ExplorerHit::Row(i) => self.win.explorer.rows.get(*i).map(|row| {
+                        format!(
+                            "{}@{:.0},{:.0},{:.0},{:.0}",
+                            row.name, r[0], r[1], r[2], r[3]
+                        )
+                    }),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+        );
+        let _ = writeln!(
+            out,
+            "settings={} page={:?} search={} query={:?} matches={} total={} current={} hidden={} menu={} completion={} ghost={:?} items={} tooltip={:?}",
             self.win.settings.open,
             self.win.settings.page,
             self.win.search.open,
@@ -18068,6 +19703,7 @@ impl App {
             self.win.search.matches.len(),
             self.win.search.total,
             self.win.search.current,
+            self.win.search.hidden,
             self.win.context_menu.open,
             self.win.completion.open,
             self.win.completion.ghost,
@@ -18127,6 +19763,7 @@ impl App {
             self.win.history.results.len(),
             self.win.history.current().map(|e| e.command.as_str()),
         );
+        let _ = writeln!(out, "{}", self.results_dump());
         // links/paths as-is; blocks as `block <label> <block id>`
         let hint_targets: Vec<String> = self
             .win
@@ -18374,6 +20011,7 @@ impl App {
             self.win.whats_new.scroll,
             (self.win.whats_new.content_h - self.win.whats_new.view_h).max(0.0)
         );
+        let _ = writeln!(out, "{}", self.win.compare.dump());
         let _ = writeln!(
             out,
             "note_toasts={:?} notifications={} filter={:?} selected={:?} rows={} unread={} scroll={:.0}/{:.0}",
@@ -18488,6 +20126,32 @@ impl App {
                 self.win.context_menu.selected
             );
         }
+        let _ = writeln!(
+            out,
+            "groups={:?} group_rename={:?} shown_tabs={:?}",
+            self.win
+                .groups
+                .list
+                .iter()
+                .map(|g| format!(
+                    "{}:{}:{}:{}",
+                    g.name,
+                    crate::state::TAB_COLORS
+                        .get(g.color)
+                        .copied()
+                        .unwrap_or("?"),
+                    if g.collapsed { "collapsed" } else { "open" },
+                    self.group_tabs_of(g.id).len()
+                ))
+                .collect::<Vec<_>>(),
+            self.win.groups.rename.as_ref().map(|(_, s)| s),
+            self.visible_tabs(),
+        );
+        let _ = writeln!(
+            out,
+            "rail query={:?} focused={} panes={} rows={:?}",
+            self.win.rail.query, self.win.rail.focused, self.win.rail.panes, self.win.rail_dump
+        );
         for (i, tab) in self.win.tabs.iter().enumerate() {
             let _ = writeln!(
                 out,
@@ -18510,6 +20174,15 @@ impl App {
                 Self::tab_worktree(tab).map_or("-", |w| w.name.as_str()),
             );
             let _ = writeln!(out, "  layout={:?}", tab.root);
+            let _ = writeln!(
+                out,
+                "  tab_marks pinned={} group={:?} picked={}",
+                tab.pinned,
+                tab.group
+                    .and_then(|g| self.win.groups.get(g))
+                    .map(|g| g.name.as_str()),
+                tab.picked
+            );
             // the active tab's laid-out panes and dividers (logical px)
             if i == self.win.active {
                 let (lw, lh) = self.logical_size();
@@ -18560,10 +20233,45 @@ impl App {
                 );
                 let _ = writeln!(
                     out,
-                    "    composer={} draft_len={} composer_label={:?}",
+                    "    exited={:?} read_only={}",
+                    p.exited,
+                    p.session.read_only()
+                );
+                let _ = writeln!(
+                    out,
+                    "    selected_blocks={:?}\n    composer={} draft_len={} composer_label={:?}",
+                    p.selected_blocks(),
                     if p.composer.open { "open" } else { "closed" },
                     p.composer.draft(&p.editor).len(),
                     p.composer.label,
+                );
+                // the pane's own colour scheme, its scrollbar (thumb and
+                // ticks: prompt match failed bookmark), masked secrets
+                let _ = writeln!(
+                    out,
+                    "    pane_theme={:?} launch_theme={:?} scrollbar={} masked={} revealed={}",
+                    p.theme.as_ref().map(|(n, _)| n.as_str()),
+                    p.launch.theme,
+                    crate::views::scrollbar::dump(&p.scrollbar),
+                    p.secrets.hits.len(),
+                    p.secrets.revealed.len(),
+                );
+                let _ = writeln!(
+                    out,
+                    "    grid_cursor={:?} art_cells={} grid_text={:?}",
+                    p.drawn_cursor,
+                    p.art_cells,
+                    // weights, OpenType features, minimum contrast,
+                    // bold-is-bright as the last frame drew the grid
+                    p.last_grid.map(|g| (
+                        g.weights,
+                        g.features
+                            .iter()
+                            .map(|(t, v)| format!("{}={v}", String::from_utf8_lossy(t)))
+                            .collect::<Vec<_>>(),
+                        g.min_contrast,
+                        g.bold_is_bright
+                    ))
                 );
                 let _ = writeln!(
                     out,
@@ -18582,6 +20290,7 @@ impl App {
                             terminal::RowKind::Grid { .. } => 'G',
                             terminal::RowKind::Header(_) => 'H',
                             terminal::RowKind::Pad => '_',
+                            terminal::RowKind::Sep => 'S',
                         })
                         .collect::<String>()
                 );
@@ -18605,6 +20314,12 @@ impl App {
                         g.line_h,
                         g.cols,
                         rows.join(" ")
+                    );
+                    // where the grid sits (padding) and its size
+                    let _ = writeln!(
+                        out,
+                        "    grid x={:.1} y={:.1} right={:.1} cols={} rows={}",
+                        g.x, g.y, g.right, g.cols, g.rows
                     );
                 }
                 let blocks = p.session.blocks.lock().unwrap().snapshot();
@@ -18652,6 +20367,18 @@ impl App {
                 .unwrap_or_default()
         };
         let _ = writeln!(out, "clipboard={clip:?}");
+        // mark mode, and ⌃Tab's switcher (rows in its order) and MRU stamps
+        let _ = writeln!(out, "{}", self.mark_dump());
+        let switcher = self.tab_switcher_view().map(|(rows, highlight)| {
+            let titles: Vec<String> = rows.into_iter().map(|r| r.title).collect();
+            (titles, highlight)
+        });
+        let used: Vec<u64> = self.win.tabs.iter().map(|t| t.last_used).collect();
+        let _ = writeln!(out, "tab_switcher={switcher:?} tab_last_used={used:?}");
+        let _ = writeln!(out, "action_runs={}", self.win.action_runs.len());
+        if self.headless {
+            let _ = writeln!(out, "clipboard_html={:?}", self.headless_clipboard_html);
+        }
         let visible = self.win.window.as_ref().and_then(|w| w.is_visible());
         let _ = writeln!(
             out,
@@ -18763,6 +20490,9 @@ impl App {
             return Response::error("remote access is off");
         }
         let route = match self.find_tab_of_pane(pane).and_then(|(_, t)| t.pane(pane)) {
+            Some(p) if p.session.read_only() => {
+                return Response::error(pane_life::READ_ONLY_TOAST.to_lowercase());
+            }
             Some(p) => Self::remote_route(p),
             None => return Response::error("no such pane"),
         };
@@ -20457,6 +22187,31 @@ fn quiet_relaunch_output() {
     }
 }
 
+/// Time spent building frames' scenes (`build_scene`), for `dump`: scripted
+/// performance checks compare it across a change (`scene_us`).
+mod scene_timing {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static TOTAL_US: AtomicU64 = AtomicU64::new(0);
+    static FRAMES: AtomicU64 = AtomicU64::new(0);
+    static MAX_US: AtomicU64 = AtomicU64::new(0);
+
+    pub(super) fn record(took: std::time::Duration) {
+        let us = took.as_micros() as u64;
+        TOTAL_US.fetch_add(us, Ordering::Relaxed);
+        FRAMES.fetch_add(1, Ordering::Relaxed);
+        MAX_US.fetch_max(us, Ordering::Relaxed);
+    }
+
+    pub(super) fn dump() -> String {
+        let frames = FRAMES.load(Ordering::Relaxed);
+        format!(
+            "scene_us frames={frames} mean={} max={}",
+            TOTAL_US.load(Ordering::Relaxed) / frames.max(1),
+            MAX_US.load(Ordering::Relaxed)
+        )
+    }
+}
+
 impl App {
     /// The window's paced output frame, tooltip and selection edge scroll:
     /// each repaints when due; returns when they are next due.
@@ -20534,6 +22289,15 @@ impl App {
         if let Some(e) = minutes.filter(|e| e.counting) {
             deadlines.push(now + Duration::from_secs(60 - e.time.as_secs() % 60));
         }
+        // an `auto` scrollbar after a scroll, a revealed secret
+        for (due_now, next) in [self.scrollbar_deadlines(now), self.secret_deadlines(now)] {
+            repaint |= due_now;
+            deadlines.extend(next);
+        }
+        // the columns × rows overlay goes
+        let (gone, next) = self.resize_overlay_deadline(now);
+        repaint |= gone;
+        deadlines.extend(next);
         // a copy button's check goes back to the copy icon
         if let Some((_, _, at)) = self.win.copied {
             let until = at + COPIED_SHOWN;
@@ -20726,10 +22490,17 @@ impl ApplicationHandler<UserEvent> for App {
             Some(saved) if !saved.tabs.is_empty() => {
                 // restoring must not rewrite the file tab by tab
                 let persist = std::mem::replace(&mut self.persist_session, false);
+                // bounded like a typed one (the file may be hand-edited)
+                self.win.name = saved
+                    .window_name
+                    .as_deref()
+                    .and_then(window_opts::clean_window_name);
+                self.apply_window_title();
                 for tab in &saved.tabs {
                     self.restore_tab(tab);
                 }
                 self.win.active = saved.active.min(self.win.tabs.len() - 1);
+                self.restore_tab_groups(&saved.groups, &saved.tabs);
                 // the other windows, in their order; the first is served
                 let first = self.win_id();
                 for other in &saved.other_windows {
@@ -20792,6 +22563,7 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(gpu) = &mut self.win.gpu {
                     gpu.resize(size.width, size.height);
                 }
+                self.win.resized_at = Some(Instant::now());
                 #[cfg(target_os = "macos")]
                 place_traffic_lights(&window);
                 // full screen entered or left (`tab_bar = "hide_fullscreen"`)
@@ -20847,6 +22619,8 @@ impl ApplicationHandler<UserEvent> for App {
                 self.win.modifiers = m.state();
                 use winit::keyboard::ModifiersKeyState::Pressed;
                 self.win.alt_sides = (m.lalt_state() == Pressed, m.ralt_state() == Pressed);
+                // ⌃ released: ⌃Tab's switcher switches
+                self.tab_switcher_modifiers();
                 self.update_cursor_icon(&window);
                 window.request_redraw();
             }
@@ -20915,6 +22689,19 @@ impl ApplicationHandler<UserEvent> for App {
                 let pending: Vec<PaneId> = self.pending_commands.keys().copied().collect();
                 for pane in pending {
                     self.flush_pending_commands(pane);
+                }
+                // likewise a command that ended in a coalesced wakeup: offer
+                // its correction now (once per block: `correction_checked`)
+                // and save its transcript (once per block: `transcript_saved`)
+                let shown: Vec<PaneId> = self
+                    .win
+                    .tabs
+                    .get(self.win.active)
+                    .map(|t| t.panes.iter().map(|p| p.session.id).collect())
+                    .unwrap_or_default();
+                for pane in shown {
+                    self.check_correction(pane);
+                    self.save_transcript_if_changed(pane);
                 }
                 // hit rects are rebuilt per frame: a dialog or menu that just
                 // opened under a still mouse gets the right shape
@@ -21021,11 +22808,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // re-checked here: the policy may have changed since the
                 // request was parsed
                 if self.config.clipboard_access.trim() == "read_write" {
-                    let text = if self.headless && !self.fault_clipboard {
-                        Some(self.headless_clipboard.clone())
-                    } else {
-                        self.clipboard().and_then(|cb| cb.get_text().ok())
-                    };
+                    let text = self.clipboard_text();
                     if let Some((_, tab)) = self.find_tab_of_pane(pane)
                         && let Some(p) = tab.pane(pane)
                     {
@@ -21052,7 +22835,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::PtyWindowOp(pane, params) => self.window_op(pane, &params),
             UserEvent::PtyExit(pane) => {
-                self.close_pane(pane, event_loop);
+                self.on_pane_exit(pane, event_loop);
                 if let Some(w) = &self.win.window {
                     w.request_redraw();
                 }
@@ -21210,6 +22993,13 @@ impl ApplicationHandler<UserEvent> for App {
                     w.request_redraw();
                 }
             }
+            UserEvent::CompareReady(generation, result) => {
+                if self.win.compare.accept(generation, *result)
+                    && let Some(w) = &self.win.window
+                {
+                    w.request_redraw();
+                }
+            }
             // the asking window (or, closed meanwhile, the one served now:
             // the worktree exists either way)
             UserEvent::WorktreeAdded(_, result) => match result {
@@ -21226,6 +23016,8 @@ impl ApplicationHandler<UserEvent> for App {
             // meanwhile drops the answer
             UserEvent::WindowsLoaded(asker, ..) | UserEvent::DetachedLoaded(asker, _)
                 if asker != self.win_id() => {}
+            UserEvent::ResultsFound(asker, ..) if asker != self.win_id() => {}
+            UserEvent::ResultsFound(_, seq, outcome) => self.on_results_found(seq, *outcome),
             UserEvent::WindowsLoaded(_, windows, done) => {
                 self.win.other_windows.extend(windows);
                 self.win.windows_loading = !done;
@@ -21388,6 +23180,11 @@ impl ApplicationHandler<UserEvent> for App {
         self.each_window(|app| {
             composer_due = earliest(composer_due, app.tick_composers(composer_now));
         });
+        // `[[actions]]` runs waiting for a new pane's prompt; ⌃Tab's order
+        self.each_window(|app| {
+            composer_due = earliest(composer_due, app.tick_user_actions(event_loop));
+            app.touch_tab_mru();
+        });
         select_due = earliest(select_due, composer_due);
         if self.script.is_some() {
             self.drive_script(event_loop);
@@ -21459,6 +23256,22 @@ fn caret_key(key: &EditorKey, pairs: bool) -> Option<CaretOp> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_large_paste_is_described_by_size_and_lines() {
+        assert_eq!(
+            large_paste_description(&"x".repeat(6000)),
+            "6 KB, 1 line, will be pasted."
+        );
+        assert_eq!(
+            large_paste_description(&"ab\n".repeat(1_000_000)),
+            "2.9 MB, 1000000 lines, will be pasted."
+        );
+        assert_eq!(
+            large_paste_description("a\nb"),
+            "1 KB, 2 lines, will be pasted."
+        );
+    }
 
     #[test]
     fn the_quit_warning_names_connected_phones_before_processes() {

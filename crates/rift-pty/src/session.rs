@@ -1,6 +1,6 @@
 use std::fs::File;
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::event::{Event, EventListener, OnResize, WindowSize};
@@ -87,12 +87,39 @@ pub fn set_default_colors(colors: Vec<Rgb>) {
     *DEFAULT_COLORS.lock().unwrap_or_else(|e| e.into_inner()) = Some(colors);
 }
 
-fn default_color(index: usize) -> Option<Rgb> {
-    DEFAULT_COLORS
+/// Colors of the panes with a colour scheme of their own (a profile's or the
+/// palette's `theme`), by pane id: they answer that pane's queries in place
+/// of [`DEFAULT_COLORS`].
+static PANE_COLORS: Mutex<Option<std::collections::HashMap<PaneId, Vec<Rgb>>>> = Mutex::new(None);
+
+/// Set (or with `None` clear) the colors `pane`'s queries fall back to.
+pub fn set_pane_colors(pane: PaneId, colors: Option<Vec<Rgb>>) {
+    let mut map = PANE_COLORS.lock().unwrap_or_else(|e| e.into_inner());
+    match colors {
+        Some(c) => {
+            map.get_or_insert_with(Default::default).insert(pane, c);
+        }
+        None => {
+            if let Some(m) = map.as_mut() {
+                m.remove(&pane);
+            }
+        }
+    }
+}
+
+fn default_color(pane: PaneId, index: usize) -> Option<Rgb> {
+    let own = PANE_COLORS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .as_ref()
-        .and_then(|c| c.get(index).copied())
+        .and_then(|m| m.get(&pane).and_then(|c| c.get(index).copied()));
+    own.or_else(|| {
+        DEFAULT_COLORS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(|c| c.get(index).copied())
+    })
 }
 
 /// Formats the OSC 52 read reply for the clipboard text.
@@ -352,7 +379,7 @@ impl EventListener for EventProxy {
             }
             // the Term answers colors the program set itself; the rest are
             // the theme's
-            Event::ColorRequest(index, format) => match default_color(index) {
+            Event::ColorRequest(index, format) => match default_color(self.pane, index) {
                 Some(rgb) => self.writer.reply(format(rgb).as_bytes()),
                 None => (self.observer)(
                     self.pane,
@@ -404,11 +431,25 @@ pub struct Session {
     /// Writes of user input so far (`write`; never the terminal's own
     /// replies): a request for input raised before the last one was answered.
     inputs: AtomicU64,
+    /// Read-only pane: user input is refused (`write`); the terminal's own
+    /// reports still go.
+    read_only: AtomicBool,
+    /// Input was refused since the app last asked (`take_refused`).
+    refused: AtomicBool,
+    /// How the shell ended (set by the reader thread before `Exit`).
+    exit: ExitCell,
     writer: InputQueue,
     backend: Backend,
     size: GridSize,
     window_size: Arc<Mutex<WindowSize>>,
     scrollback: usize,
+}
+
+impl Drop for Session {
+    /// A closed pane's own colors go with it.
+    fn drop(&mut self) {
+        set_pane_colors(self.id, None);
+    }
 }
 
 /// Input bytes waiting for a program that is not reading, at most (a single
@@ -686,6 +727,8 @@ pub struct SpawnOptions {
     pub service: Option<ServiceTarget>,
     /// What OSC 52 may do with the system clipboard.
     pub clipboard: ClipboardAccess,
+    /// East Asian Ambiguous characters take two cells (`ambiguous_width`).
+    pub ambiguous_wide: bool,
 }
 
 /// OSC 52 policy: programs (and remote hosts) may copy to the clipboard,
@@ -720,7 +763,8 @@ impl ClipboardAccess {
 
 /// Where the reader thread gets output from.
 enum Source {
-    Pty(File),
+    /// The PTY master and the shell's pid (its exit code is read there).
+    Pty(File, u32),
     Service {
         /// Spawn or reattach (`service::open`), run first on the reader
         /// thread: a slow or stalled service never holds the window.
@@ -764,6 +808,8 @@ const MAX_RESUMES: u32 = 5;
 /// The pane's reader thread: parses output into the Term and block model.
 struct Reader {
     id: PaneId,
+    /// How the shell ended, set before `SessionEvent::Exit` is sent.
+    exit: ExitCell,
     ctx: FeedCtx,
     dirty: Arc<AtomicBool>,
     saw_output: Arc<AtomicBool>,
@@ -817,7 +863,7 @@ impl Reader {
         let mut parser: vte::ansi::Processor = vte::ansi::Processor::new();
         let mut scanner = OscScanner::new();
         match source {
-            Source::Pty(mut file) => {
+            Source::Pty(mut file, pid) => {
                 let mut buf = [0u8; 65536];
                 loop {
                     if self.sync_timeout(&mut parser, &file) {
@@ -834,6 +880,7 @@ impl Reader {
                         Err(_) => break,
                     }
                 }
+                self.exit.set(crate::exit_code_of(pid));
             }
             Source::Service {
                 open,
@@ -1046,7 +1093,10 @@ impl Reader {
                                 hidden.store(h, Ordering::Release);
                                 self.wake();
                             }
-                            Ok(Ev::Exited { .. }) => break,
+                            Ok(Ev::Exited { code, .. }) => {
+                                self.exit.set(code);
+                                break;
+                            }
                             _ => {}
                         },
                         Frame::Input { .. } => {}
@@ -1054,7 +1104,47 @@ impl Reader {
                 }
             }
         }
+        // ended without a code (the service connection lost, an older
+        // service): exited all the same
+        self.exit.set_if_unset(None);
         (self.observer)(self.id, SessionEvent::Exit);
+    }
+}
+
+/// How a pane's shell ended: not yet, with a code, or with none known.
+#[derive(Clone)]
+pub struct ExitCell(Arc<AtomicI64>);
+
+impl ExitCell {
+    const RUNNING: i64 = i64::MIN;
+    const UNKNOWN: i64 = i64::MIN + 1;
+
+    fn set(&self, code: Option<i32>) {
+        self.0
+            .store(code.map_or(Self::UNKNOWN, i64::from), Ordering::Release);
+    }
+
+    fn set_if_unset(&self, code: Option<i32>) {
+        let v = code.map_or(Self::UNKNOWN, i64::from);
+        let _ = self
+            .0
+            .compare_exchange(Self::RUNNING, v, Ordering::AcqRel, Ordering::Acquire);
+    }
+
+    /// `None` while the shell runs; `Some(None)` when it ended with no code
+    /// known.
+    pub fn get(&self) -> Option<Option<i32>> {
+        match self.0.load(Ordering::Acquire) {
+            Self::RUNNING => None,
+            Self::UNKNOWN => Some(None),
+            v => Some(Some(v as i32)),
+        }
+    }
+}
+
+impl Default for ExitCell {
+    fn default() -> Self {
+        ExitCell(Arc::new(AtomicI64::new(Self::RUNNING)))
     }
 }
 
@@ -1146,6 +1236,7 @@ impl Session {
             replay,
             service,
             clipboard,
+            ambiguous_wide,
         } = opts;
 
         let window_size = WindowSize {
@@ -1168,7 +1259,7 @@ impl Session {
                     id,
                 )?;
                 let writer = PtyWriter::File(Arc::new(pty.file().try_clone()?));
-                let source = Source::Pty(pty.file().try_clone()?);
+                let source = Source::Pty(pty.file().try_clone()?, pty.child().id());
                 (Backend::Local(pty), writer, source)
             }
             Some(target) => {
@@ -1257,6 +1348,7 @@ impl Session {
             kitty_keyboard: true,
             xtversion: format!("Rift({})", env!("CARGO_PKG_VERSION")),
             osc52: clipboard.osc52(),
+            ambiguous_wide,
             ..TermConfig::default()
         };
         let replier = Replier::new(writer.clone());
@@ -1290,6 +1382,7 @@ impl Session {
             blocks: blocks.clone(),
             cwd: cwd.clone(),
             cwd_remote: cwd_remote.clone(),
+            cwd_host: Mutex::new(None),
             user_vars: user_vars.clone(),
             widgets: widgets.clone(),
             progress: progress.clone(),
@@ -1308,8 +1401,10 @@ impl Session {
             blocks.lock().unwrap().mark_restored(&meta);
         }
 
+        let exit = ExitCell::default();
         let reader = Reader {
             id,
+            exit: exit.clone(),
             ctx,
             dirty: dirty.clone(),
             saw_output: saw_output.clone(),
@@ -1335,6 +1430,9 @@ impl Session {
             saw_output,
             generation,
             inputs: AtomicU64::new(0),
+            read_only: AtomicBool::new(false),
+            refused: AtomicBool::new(false),
+            exit,
             writer: InputQueue::new(writer, move |m| observer(id, SessionEvent::Notice(m))),
             backend,
             size,
@@ -1407,10 +1505,43 @@ impl Session {
         self.cwd.lock().unwrap().clone()
     }
 
-    /// Write user input to the shell.
+    /// Write user input to the shell (refused while the pane is
+    /// read-only: see [`Session::take_refused`]).
     pub fn write(&self, bytes: &[u8]) {
+        if self.read_only() {
+            if !bytes.is_empty() {
+                self.refused.store(true, Ordering::Release);
+            }
+            return;
+        }
+        self.write_scroll(bytes);
+    }
+
+    /// Input that only scrolls (the wheel as arrow keys on the alternate
+    /// screen): goes even to a read-only pane.
+    pub fn write_scroll(&self, bytes: &[u8]) {
         self.inputs.fetch_add(1, Ordering::AcqRel);
         self.writer.write(bytes);
+    }
+
+    /// Refuse (or accept again) user input.
+    pub fn set_read_only(&self, on: bool) {
+        self.read_only.store(on, Ordering::Release);
+    }
+
+    pub fn read_only(&self) -> bool {
+        self.read_only.load(Ordering::Acquire)
+    }
+
+    /// Whether input was refused since the last call (the app's toast).
+    pub fn take_refused(&self) -> bool {
+        self.refused.swap(false, Ordering::AcqRel)
+    }
+
+    /// `None` while the shell runs; `Some(code)` once it ended (`None`
+    /// inside: no code known).
+    pub fn exit_status(&self) -> Option<Option<i32>> {
+        self.exit.get()
     }
 
     /// Write a report the terminal sends on its own (focus in/out, mouse
@@ -1583,6 +1714,12 @@ impl Session {
     /// Change the OSC 52 policy of the running shell.
     pub fn set_clipboard_access(&self, access: ClipboardAccess) {
         self.term.lock().set_osc52(access.osc52());
+    }
+
+    /// Measure East Asian Ambiguous characters two cells wide (or one) from
+    /// the shell's next output on.
+    pub fn set_ambiguous_wide(&self, wide: bool) {
+        self.term.lock().set_ambiguous_wide(wide);
     }
 
     pub fn resize(&mut self, size: GridSize, cell_size: (u16, u16)) {
@@ -1826,6 +1963,9 @@ struct FeedCtx {
     blocks: Arc<Mutex<BlockStore>>,
     cwd: Arc<Mutex<Option<String>>>,
     cwd_remote: Arc<AtomicBool>,
+    /// The last OSC 7's host name while it is another machine (blocks
+    /// record it: two hosts' runs of one command stay apart).
+    cwd_host: Mutex<Option<String>>,
     user_vars: UserVars,
     widgets: Widgets,
     progress: ProgressSlot,
@@ -2147,13 +2287,13 @@ fn apply_marker(marker: Marker, term: &Term<EventProxy>, scrolled: u64, ctx: &Fe
                 ctx.cwd_remote.load(Ordering::Relaxed),
                 None,
             );
+            store.stamp_host(ctx.cwd_host.lock().unwrap().clone());
         }
         Marker::Done { exit } => store.on_done(abs_line, exit),
         Marker::Cwd { path, host } => {
-            ctx.cwd_remote.store(
-                !rift_core::host_is_local(&host, local_host()),
-                Ordering::Relaxed,
-            );
+            let remote = !rift_core::host_is_local(&host, local_host());
+            ctx.cwd_remote.store(remote, Ordering::Relaxed);
+            *ctx.cwd_host.lock().unwrap() = remote.then_some(host);
             *cwd.lock().unwrap() = Some(path);
         }
         // handled by `feed` (they need the parser to move the cursor)
@@ -2332,6 +2472,7 @@ mod tests {
             blocks: Arc::new(Mutex::new(BlockStore::default())),
             cwd: Arc::new(Mutex::new(None)),
             cwd_remote: Arc::new(AtomicBool::new(false)),
+            cwd_host: Mutex::new(None),
             user_vars: UserVars::default(),
             widgets: Widgets::default(),
             progress: ProgressSlot::default(),
@@ -2368,6 +2509,34 @@ mod tests {
         assert!(!remote());
         feed(&mut p, &mut s, b"\x1b]7;file://localhost/tmp\x07", &c);
         assert!(!remote());
+    }
+
+    /// A block run on another host records that host's name (two hosts'
+    /// runs of one command stay apart in search); a local one records none.
+    #[test]
+    fn blocks_record_the_remote_host() {
+        let c = ctx(40, 8);
+        let mut p = vte::ansi::Processor::new();
+        let mut s = OscScanner::new();
+        let run = |p: &mut vte::ansi::Processor, s: &mut OscScanner, osc7: &str| {
+            let bytes = format!(
+                "{osc7}\x1b]133;A\x07$ \x1b]133;B\x07deploy\r\n\x1b]133;C\x07ok\r\n\x1b]133;D;0\x07"
+            );
+            feed(p, s, bytes.as_bytes(), &c);
+            let blocks = c.blocks.lock().unwrap();
+            let b = blocks.iter().rfind(|b| b.command == "deploy").unwrap();
+            (b.cwd_remote, b.host.clone())
+        };
+        assert_eq!(
+            run(&mut p, &mut s, "\x1b]7;file://prod-1/srv\x07"),
+            (true, Some("prod-1".into()))
+        );
+        assert_eq!(
+            run(&mut p, &mut s, "\x1b]7;file://staging/srv\x07"),
+            (true, Some("staging".into()))
+        );
+        let here = format!("\x1b]7;file://{}/tmp\x07", local_host());
+        assert_eq!(run(&mut p, &mut s, &here), (false, None));
     }
 
     /// OSC 9;4 progress stands until state 0, the command's end (133;D), or
@@ -2572,6 +2741,9 @@ mod tests {
             cwd: None,
             cwd_remote: false,
             output: (0..15).map(|i| format!("{cmd}{i}\n")).collect(),
+            finished: None,
+            branch: None,
+            host: None,
         };
         let t = rift_core::transcript::Transcript::bounded(
             vec![block("first"), block("second"), block("third")],
@@ -2634,11 +2806,19 @@ mod tests {
         let (stream, mut peer) = UnixStream::pair().unwrap();
         send_output(&mut peer, 9, 0, 1, b"old output\r\n$ ").unwrap();
         send_json(&mut peer, &Ev::ReplayDone { session: 9 }).unwrap();
-        send_json(&mut peer, &Ev::Exited { session: 9 }).unwrap();
+        send_json(
+            &mut peer,
+            &Ev::Exited {
+                session: 9,
+                code: None,
+            },
+        )
+        .unwrap();
         let conn = Arc::new(Mutex::new(ServiceConn::connecting()));
         conn.lock().unwrap().clear_history = true;
         let reader = Reader {
             id: 1,
+            exit: Default::default(),
             ctx: c,
             dirty: Arc::new(AtomicBool::new(false)),
             saw_output: Arc::new(AtomicBool::new(false)),
@@ -2791,6 +2971,7 @@ mod tests {
         let exit_tx = Mutex::new(exit_tx);
         let reader = Reader {
             id: 1,
+            exit: Default::default(),
             ctx: c,
             dirty: Arc::new(AtomicBool::new(false)),
             saw_output: Arc::new(AtomicBool::new(false)),
@@ -2826,6 +3007,7 @@ mod tests {
         let seen = events.clone();
         let reader = Reader {
             id: 1,
+            exit: Default::default(),
             ctx: ctx(20, 5),
             dirty: Arc::new(AtomicBool::new(false)),
             saw_output: Arc::new(AtomicBool::new(false)),
@@ -2881,7 +3063,14 @@ mod tests {
         drop(first_peer);
         send_output(&mut second_peer, 9, 2, 1, b"cd").unwrap();
         send_json(&mut second_peer, &Ev::ReplayDone { session: 9 }).unwrap();
-        send_json(&mut second_peer, &Ev::Exited { session: 9 }).unwrap();
+        send_json(
+            &mut second_peer,
+            &Ev::Exited {
+                session: 9,
+                code: None,
+            },
+        )
+        .unwrap();
         let asked = Arc::new(AtomicU64::new(u64::MAX));
         let (asked_in, mut second) = (asked.clone(), Some(second));
         let (reader, exited) = service_reader(
@@ -2981,13 +3170,21 @@ mod tests {
         drop(first_peer);
         send_output(&mut second_peer, 9, 900, 1, b"Xy").unwrap();
         send_json(&mut second_peer, &Ev::ReplayDone { session: 9 }).unwrap();
-        send_json(&mut second_peer, &Ev::Exited { session: 9 }).unwrap();
+        send_json(
+            &mut second_peer,
+            &Ev::Exited {
+                session: 9,
+                code: None,
+            },
+        )
+        .unwrap();
         let (conn, _conn_peer) = UnixStream::pair().unwrap();
         let notices = Arc::new(Mutex::new(Vec::new()));
         let (seen, (done_tx, done)) = (notices.clone(), std::sync::mpsc::channel());
         let done_tx = Mutex::new(done_tx);
         let reader = Reader {
             id: 1,
+            exit: Default::default(),
             ctx: c,
             dirty: Arc::new(AtomicBool::new(false)),
             saw_output: Arc::new(AtomicBool::new(false)),
@@ -3074,7 +3271,14 @@ mod tests {
         // sent while this pane was disconnected: a DA1 query, a notification
         send_output(&mut second_peer, 9, 1, 1, b"\x1b[c\x1b]9;done\x07").unwrap();
         send_json(&mut second_peer, &Ev::ReplayDone { session: 9 }).unwrap();
-        send_json(&mut second_peer, &Ev::Exited { session: 9 }).unwrap();
+        send_json(
+            &mut second_peer,
+            &Ev::Exited {
+                session: 9,
+                code: None,
+            },
+        )
+        .unwrap();
         second_peer
             .set_read_timeout(Some(std::time::Duration::from_secs(5)))
             .unwrap();
@@ -3083,6 +3287,7 @@ mod tests {
         let done_tx = Mutex::new(done_tx);
         let reader = Reader {
             id: 1,
+            exit: Default::default(),
             ctx: c,
             dirty: Arc::new(AtomicBool::new(false)),
             saw_output: Arc::new(AtomicBool::new(false)),
@@ -3156,7 +3361,14 @@ mod tests {
             let (stream, mut peer) = UnixStream::pair().unwrap();
             send_output(&mut peer, 9, 0, 1, replay).unwrap();
             send_json(&mut peer, &Ev::ReplayDone { session: 9 }).unwrap();
-            send_json(&mut peer, &Ev::Exited { session: 9 }).unwrap();
+            send_json(
+                &mut peer,
+                &Ev::Exited {
+                    session: 9,
+                    code: None,
+                },
+            )
+            .unwrap();
             let (reader, exited) = service_reader(
                 c,
                 stream,
@@ -3237,6 +3449,53 @@ mod tests {
             "{out:?}"
         );
         assert!(da1.is_some() && out.ends_with('c'), "{out:?}");
+    }
+
+    /// A pane with a colour scheme of its own answers queries with it; the
+    /// other panes keep the window theme's, and closing it forgets it.
+    #[test]
+    fn a_panes_own_colors_answer_its_queries() {
+        let red = Rgb {
+            r: 0xff,
+            g: 0,
+            b: 0,
+        };
+        let mut colors = vec![Rgb { r: 1, g: 2, b: 3 }; 259];
+        colors[257] = red;
+        set_pane_colors(4242, Some(colors));
+        assert_eq!(default_color(4242, 257), Some(red));
+        assert_ne!(default_color(4243, 257), Some(red));
+        let mut fds = [0i32; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        use std::os::fd::FromRawFd;
+        let mut read_end = unsafe { File::from_raw_fd(fds[0]) };
+        let sink = unsafe { File::from_raw_fd(fds[1]) };
+        let proxy = EventProxy {
+            pane: 4242,
+            observer: Arc::new(|_, e| {
+                assert!(!matches!(e, SessionEvent::ColorRequest(..)));
+            }),
+            writer: Replier::new(PtyWriter::File(Arc::new(sink))),
+            window_size: Arc::new(Mutex::new(WindowSize {
+                num_lines: 4,
+                num_cols: 20,
+                cell_width: 8,
+                cell_height: 16,
+            })),
+        };
+        let mut t = Term::new(
+            TermConfig::default(),
+            &GridSize { cols: 20, rows: 4 },
+            proxy,
+        );
+        let mut parser: vte::ansi::Processor = vte::ansi::Processor::new();
+        parser.advance(&mut t, b"\x1b]11;?\x1b\\");
+        drop(t);
+        let mut out = String::new();
+        read_end.read_to_string(&mut out).unwrap();
+        assert_eq!(out, "\x1b]11;rgb:ffff/0000/0000\x1b\\");
+        set_pane_colors(4242, None);
+        assert_ne!(default_color(4242, 257), Some(red));
     }
 
     #[test]
@@ -3486,6 +3745,9 @@ mod tests {
             saw_output: Arc::new(AtomicBool::new(false)),
             generation: c.generation.clone(),
             inputs: AtomicU64::new(0),
+            read_only: AtomicBool::new(false),
+            refused: AtomicBool::new(false),
+            exit: Default::default(),
             writer: InputQueue::new(writer, |_| {}),
             backend: Backend::Local(pty),
             size: GridSize { cols: 80, rows: 24 },

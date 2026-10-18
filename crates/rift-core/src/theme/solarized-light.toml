@@ -1,0 +1,40 @@
+# Rift builtin theme — Solarized Light (Ethan Schoonover, MIT). base3 ground,
+# base00 text. The bright ANSI row keeps the accent hues (tab colours and
+# bold text read it) instead of Solarized's original greys.
+name = "Solarized Light"
+
+bg = "#fdf6e3"
+bg_chrome = "#eee8d5"
+bg_gutter = "#e4ddc8"
+surface = "#fdf6e3"
+border = "#0736421a"
+pane_border_inactive = "#07364221"
+
+fg = "#073642"
+text_bright = "#002b36"
+text_ui = "#073642"
+text_dim = "#586e75"
+text_muted = "#657b83"
+
+accent = "#1f6fa8"
+success = "#5f6e00"
+error = "#c0281f"
+warning = "#7f6000"
+cursor = "#586e75"
+selection = "#93a1a155"
+search_match = "#b58900"
+search_active = "#cb4b16"
+
+# Solarized ANSI palette (bright row: accent hues)
+ansi = [
+    "#073642", "#dc322f", "#859900", "#b58900",
+    "#268bd2", "#d33682", "#2aa198", "#eee8d5",
+    "#586e75", "#cb4b16", "#859900", "#b58900",
+    "#268bd2", "#6c71c4", "#2aa198", "#fdf6e3",
+]
+
+[syntax]
+command = "#1f6fa8"
+flag = "#6c71c4"
+string = "#c0281f"
+ghost = "#93a1a1"

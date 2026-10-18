@@ -1,0 +1,39 @@
+# Rift builtin theme — Catppuccin Latte (catppuccin.com, MIT). Base ground,
+# Text foreground, the official terminal palette.
+name = "Catppuccin Latte"
+
+bg = "#eff1f5"
+bg_chrome = "#e6e9ef"
+bg_gutter = "#dce0e8"
+surface = "#eff1f5"
+border = "#4c4f691a"
+pane_border_inactive = "#4c4f6921"
+
+fg = "#4c4f69"
+text_bright = "#303446"
+text_ui = "#4c4f69"
+text_dim = "#5c5f77"
+text_muted = "#6c6f85"
+
+accent = "#1e66f5"
+success = "#2f7a1f"
+error = "#d20f39"
+warning = "#8f5a00"
+cursor = "#dc8a78"
+selection = "#acb0be80"
+search_match = "#df8e1d"
+search_active = "#fe640b"
+
+# Catppuccin Latte ANSI palette
+ansi = [
+    "#5c5f77", "#d20f39", "#40a02b", "#df8e1d",
+    "#1e66f5", "#ea76cb", "#179299", "#acb0be",
+    "#6c6f85", "#d20f39", "#40a02b", "#df8e1d",
+    "#1e66f5", "#ea76cb", "#179299", "#bcc0cc",
+]
+
+[syntax]
+command = "#1e66f5"
+flag = "#8839ef"
+string = "#d20f39"
+ghost = "#9ca0b0"

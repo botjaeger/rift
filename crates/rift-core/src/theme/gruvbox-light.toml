@@ -1,0 +1,39 @@
+# Rift builtin theme — Gruvbox Light (morhetz/gruvbox, MIT). bg0 ground, fg1
+# text; the faded row is the bright ANSI row on a light ground.
+name = "Gruvbox Light"
+
+bg = "#fbf1c7"
+bg_chrome = "#f2e5bc"
+bg_gutter = "#ebdbb2"
+surface = "#fbf1c7"
+border = "#3c38361a"
+pane_border_inactive = "#3c383621"
+
+fg = "#3c3836"
+text_bright = "#282828"
+text_ui = "#3c3836"
+text_dim = "#665c54"
+text_muted = "#7c6f64"
+
+accent = "#076678"
+success = "#79740e"
+error = "#9d0006"
+warning = "#8a5a0b"
+cursor = "#3c3836"
+selection = "#d5c4a1"
+search_match = "#d79921"
+search_active = "#af3a03"
+
+# Gruvbox Light ANSI palette
+ansi = [
+    "#fbf1c7", "#cc241d", "#98971a", "#d79921",
+    "#458588", "#b16286", "#689d6a", "#7c6f64",
+    "#928374", "#9d0006", "#79740e", "#b57614",
+    "#076678", "#8f3f71", "#427b58", "#3c3836",
+]
+
+[syntax]
+command = "#076678"
+flag = "#8f3f71"
+string = "#9d0006"
+ghost = "#a89984"

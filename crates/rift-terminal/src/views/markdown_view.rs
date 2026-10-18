@@ -17,6 +17,10 @@ pub const PAD_X: f32 = 28.0;
 pub const PAD_Y: f32 = 16.0;
 const BODY: (f32, f32) = (13.5, 22.0);
 const CODE: (f32, f32) = (12.5, 19.0);
+/// A code block's label row (language, Mermaid note, Run button).
+const CODE_HEAD: f32 = 22.0;
+/// The Run button's width.
+const RUN_W: f32 = 52.0;
 /// Glyph metadata marking inline code and strikethrough runs.
 const META_CODE: usize = 1;
 const META_STRIKE: usize = 2;
@@ -42,6 +46,9 @@ struct Laid {
     draws: Vec<Draw>,
     /// Code block content past its clip (px of horizontal scroll).
     overflow: f32,
+    /// A shell code block's Run button (`[x, y, w, h]` from the page's
+    /// left edge and the block's top).
+    run: Option<[f32; 4]>,
 }
 
 /// Blocks laid out at one width and theme.
@@ -191,6 +198,7 @@ pub fn layout(
         let mut draws = Vec::new();
         // code wider than its block: how far it scrolls sideways
         let mut overflow = 0.0;
+        let mut run = None;
         // space above this block
         let gap = match block {
             Block::Heading { level, .. } if n > 0 => {
@@ -305,7 +313,63 @@ pub fn layout(
                 });
                 h
             }
-            Block::Code(lines) => {
+            Block::Code { lang, lines } => {
+                // a label row: what the block is (Mermaid: its source, as
+                // nothing renders it) and, for a shell block, Run
+                let runnable = rift_core::markdown::shell_command(lang, lines).is_some();
+                let label = if rift_core::markdown::is_mermaid(lang) {
+                    Some("Mermaid diagram · source (not rendered)".to_string())
+                } else if runnable {
+                    Some(lang.clone())
+                } else {
+                    None
+                };
+                let head = if label.is_some() { CODE_HEAD } else { 0.0 };
+                if let Some(label) = label {
+                    let mut lb = Buffer::new(&mut engine.font_system, Metrics::new(11.5, 16.0));
+                    lb.set_text(
+                        &mut engine.font_system,
+                        &label,
+                        &Attrs::new()
+                            .family(Family::Name(FONT_SANS))
+                            .color(text_color(theme.text_dim)),
+                        Shaping::Advanced,
+                        None,
+                    );
+                    draws.push(Draw::Text {
+                        buf: Arc::new(lb),
+                        x: PAD_X + 14.0,
+                        y: 8.0,
+                        clip_w: None,
+                    });
+                }
+                if runnable {
+                    let r = [PAD_X + w - 8.0 - RUN_W, 5.0, RUN_W, 20.0];
+                    draws.push(Draw::Rect {
+                        r,
+                        color: theme.accent.with_alpha(0.16),
+                        radius: 4.0,
+                    });
+                    let mut rb = Buffer::new(&mut engine.font_system, Metrics::new(12.0, 16.0));
+                    rb.set_text(
+                        &mut engine.font_system,
+                        "Run…",
+                        &Attrs::new()
+                            .family(Family::Name(FONT_SANS))
+                            .weight(Weight::SEMIBOLD)
+                            .color(text_color(theme.text_bright)),
+                        Shaping::Advanced,
+                        None,
+                    );
+                    let tw = engine.measure("Run…", 12.0, FONT_SANS, Weight::SEMIBOLD);
+                    draws.push(Draw::Text {
+                        buf: Arc::new(rb),
+                        x: r[0] + (RUN_W - tw) / 2.0,
+                        y: 7.0,
+                        clip_w: None,
+                    });
+                    run = Some(r);
+                }
                 let mut buf = Buffer::new(&mut engine.font_system, Metrics::new(CODE.0, CODE.1));
                 buf.set_wrap(&mut engine.font_system, Wrap::None);
                 buf.set_text(
@@ -317,16 +381,20 @@ pub fn layout(
                     Shaping::Advanced,
                     None,
                 );
-                let h = lines.len().max(1) as f32 * CODE.1 + 24.0;
-                draws.push(Draw::Rect {
-                    r: [PAD_X, 0.0, w, h],
-                    color: Color::WHITE.with_alpha(0.045),
-                    radius: 4.0,
-                });
+                let h = lines.len().max(1) as f32 * CODE.1 + 24.0 + head;
+                // under the label and button
+                draws.insert(
+                    0,
+                    Draw::Rect {
+                        r: [PAD_X, 0.0, w, h],
+                        color: Color::WHITE.with_alpha(0.045),
+                        radius: 4.0,
+                    },
+                );
                 draws.push(Draw::Text {
                     buf: Arc::new(buf),
                     x: PAD_X + 14.0,
-                    y: 12.0,
+                    y: 12.0 + head,
                     clip_w: Some(w - 28.0),
                 });
                 overflow = (lines
@@ -359,6 +427,7 @@ pub fn layout(
             h,
             draws,
             overflow,
+            run,
         });
         y += h;
     }
@@ -539,7 +608,7 @@ fn table(
 }
 
 /// Draw the laid-out page with its top at `top` (already scrolled), clipped
-/// to `bounds`.
+/// to `bounds`. Returns the Run buttons in view: (rect, block index).
 pub fn render(
     layer: &mut Layer,
     cache: &MdLayout,
@@ -548,12 +617,20 @@ pub fn render(
     top: f32,
     bounds: TextBounds,
     scroll: &std::collections::HashMap<usize, f32>,
-) {
+) -> Vec<([f32; 4], usize)> {
     let (bt, bb) = (bounds.top as f32, bounds.bottom as f32);
+    let mut runs = Vec::new();
     for (i, laid) in cache.blocks.iter().enumerate() {
         let (y0, y1) = (top + laid.top, top + laid.top + laid.h);
         if y1 < bt || y0 > bb {
             continue;
+        }
+        if let Some(r) = laid.run {
+            let rect = [x + r[0], y0 + r[1], r[2], r[3]];
+            // only a button wholly in view takes clicks
+            if rect[1] >= bt && rect[1] + rect[3] <= bb {
+                runs.push((rect, i));
+            }
         }
         for d in &laid.draws {
             match d {
@@ -570,8 +647,10 @@ pub fn render(
                     y: dy,
                     clip_w,
                 } => {
-                    // code blocks slide under their own clip
-                    let sx = scroll.get(&i).copied().unwrap_or(0.0).min(laid.overflow);
+                    // code slides under its own clip (its label and Run stay)
+                    let sx = clip_w
+                        .map(|_| scroll.get(&i).copied().unwrap_or(0.0).min(laid.overflow))
+                        .unwrap_or(0.0);
                     let b = match clip_w {
                         Some(cw) => TextBounds {
                             left: bounds.left.max((x + dx) as i32),
@@ -585,4 +664,5 @@ pub fn render(
             }
         }
     }
+    runs
 }

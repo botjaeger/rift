@@ -383,6 +383,9 @@ pub struct Config {
 
     /// Name and version XTVERSION reports (Rift).
     pub xtversion: String,
+
+    /// East Asian Ambiguous characters take two cells (Rift).
+    pub ambiguous_wide: bool,
 }
 
 impl Default for Config {
@@ -395,6 +398,7 @@ impl Default for Config {
             kitty_keyboard: Default::default(),
             osc52: Default::default(),
             xtversion: format!("alacritty_terminal({})", env!("CARGO_PKG_VERSION")),
+            ambiguous_wide: false,
         }
     }
 }
@@ -455,6 +459,9 @@ impl<T> Term<T> {
         // Initialize terminal damage, covering the entire terminal upon launch.
         let damage = TermDamageState::new(num_cols, num_lines);
 
+        let mut vt = vt420::Vt420::new(num_cols);
+        vt.cluster.set_ambiguous_wide(config.ambiguous_wide);
+
         Term {
             inactive_grid,
             scroll_region,
@@ -474,8 +481,16 @@ impl<T> Term<T> {
             selection: Default::default(),
             title: Default::default(),
             mode: Default::default(),
-            vt: vt420::Vt420::new(num_cols),
+            vt,
         }
+    }
+
+    /// Measure East Asian Ambiguous characters two cells wide from the next
+    /// character on (Rift: `ambiguous_width`); cells already written keep
+    /// their width.
+    pub fn set_ambiguous_wide(&mut self, wide: bool) {
+        self.config.ambiguous_wide = wide;
+        self.vt.cluster.set_ambiguous_wide(wide);
     }
 
     /// A grid size the program requested (XTWINOPS 8, DECCOLM, DECSLPP),
@@ -563,6 +578,7 @@ impl<T> Term<T> {
         T: EventListener,
     {
         let old_config = mem::replace(&mut self.config, options);
+        self.vt.cluster.set_ambiguous_wide(self.config.ambiguous_wide);
 
         let title_event = match &self.title {
             Some(title) => Event::Title(title.clone()),
@@ -1011,8 +1027,8 @@ impl<T> Term<T> {
         &self.config.semantic_escape_chars
     }
 
-    #[cfg(test)]
-    pub(crate) fn set_semantic_escape_chars(&mut self, semantic_escape_chars: &str) {
+    /// Set the word-selection boundaries (Rift: the `word_chars` config).
+    pub fn set_semantic_escape_chars(&mut self, semantic_escape_chars: &str) {
         self.config.semantic_escape_chars = semantic_escape_chars.into();
     }
 
@@ -2217,6 +2233,7 @@ impl<T: EventListener> Handler for Term<T> {
         self.scroll_region = Line(0)..Line(self.screen_lines() as i32);
         let was_132 = self.vt.columns_132;
         self.vt = vt420::Vt420::new(self.columns());
+        self.vt.cluster.set_ambiguous_wide(self.config.ambiguous_wide);
         if was_132 {
             // RIS returns a DECCOLM screen to 80 columns
             self.request_resize(self.screen_lines(), 80);
@@ -3411,6 +3428,25 @@ mod tests {
         term.goto(1, 0);
         type_str(&mut term, "\u{fe0f}");
         assert!(!term.grid[Line(0)][Column(0)].flags.contains(Flags::WIDE_CHAR));
+    }
+
+    #[test]
+    fn ambiguous_width_setting() {
+        let size = TermSize::new(8, 2);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        type_str(&mut term, "±");
+        assert!(!term.grid[Line(0)][Column(0)].flags.contains(Flags::WIDE_CHAR));
+        // from the next character on; a full reset (RIS) keeps the setting
+        term.set_ambiguous_wide(true);
+        term.reset_state();
+        type_str(&mut term, "±a");
+        assert!(term.grid[Line(0)][Column(0)].flags.contains(Flags::WIDE_CHAR));
+        assert_eq!(term.grid[Line(0)][Column(2)].c, 'a');
+        // set at creation too
+        let config = Config { ambiguous_wide: true, ..Config::default() };
+        let mut term = Term::new(config, &size, VoidListener);
+        type_str(&mut term, "①");
+        assert!(term.grid[Line(0)][Column(0)].flags.contains(Flags::WIDE_CHAR));
     }
 
     #[test]

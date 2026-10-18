@@ -13,9 +13,11 @@ use std::path::PathBuf;
 /// `cwd`-only shape; `2` adds per-tab `title`, `color` and a nested `layout`;
 /// `3` adds optional per-pane `transcript` ids (saved block output); `4`
 /// adds `other_windows` (every window after the first); `5` adds per-pane
-/// `launch` (profile name, own shell and arguments).
+/// `launch` (profile name, own shell and arguments); `6` adds pinned tabs,
+/// tab groups (`groups`, per-tab `group`) and read-only panes; `7` adds
+/// window names (`window_name`, per other window `name`).
 /// A file with no `version` key loads as [`LEGACY_VERSION`].
-pub const CURRENT_VERSION: u32 = 5;
+pub const CURRENT_VERSION: u32 = 7;
 
 /// The version assumed for a file that predates the `version` key.
 pub const LEGACY_VERSION: u32 = 1;
@@ -44,6 +46,26 @@ pub struct SavedSession {
     /// key still reopens it (and ignores the rest).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub other_windows: Vec<SavedWindowTabs>,
+    /// The first window's tab groups (version 6), named by index in
+    /// [`SavedTab::group`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<SavedGroup>,
+    /// The first window's name (version 7; "Rename window…").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_name: Option<String>,
+}
+
+/// A named, coloured tab group; its tabs name it by index.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SavedGroup {
+    #[serde(default)]
+    pub name: String,
+    /// Tab color name (as [`SavedTab::color`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// Its tabs are folded away behind its header.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub collapsed: bool,
 }
 
 /// One window of a session: its tabs, the active one and its frame.
@@ -55,6 +77,11 @@ pub struct SavedWindowTabs {
     pub tabs: Vec<SavedTab>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window: Option<SavedWindow>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<SavedGroup>,
+    /// Its name ("Rename window…"), shown as its title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 impl SavedSession {
@@ -64,6 +91,8 @@ impl SavedSession {
             active: self.active,
             tabs: self.tabs.clone(),
             window: self.window,
+            groups: self.groups.clone(),
+            name: self.window_name.clone(),
         };
         std::iter::once(first)
             .chain(self.other_windows.iter().cloned())
@@ -80,6 +109,8 @@ impl SavedSession {
             active: first.active,
             tabs: first.tabs,
             window: first.window,
+            groups: first.groups,
+            window_name: first.name,
             other_windows: windows,
             ..Default::default()
         }
@@ -107,6 +138,8 @@ impl Default for SavedSession {
             tabs: Vec::new(),
             window: None,
             other_windows: Vec::new(),
+            groups: Vec::new(),
+            window_name: None,
         }
     }
 }
@@ -150,6 +183,15 @@ pub struct SavedTab {
         skip_serializing_if = "crate::profiles::PaneLaunch::is_default"
     )]
     pub launch: crate::profiles::PaneLaunch,
+    /// Pinned: kept first in the strip, compact (version 6).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
+    /// Index of its group in the window's `groups` (version 6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<usize>,
+    /// An unsplit tab's pane refuses input (split tabs keep one per leaf).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub read_only: bool,
 }
 
 /// A tab's pane tree: either one leaf pane or a binary split of two subtrees.
@@ -198,6 +240,9 @@ pub enum SavedLayout {
             skip_serializing_if = "crate::profiles::PaneLaunch::is_default"
         )]
         launch: crate::profiles::PaneLaunch,
+        /// The pane refuses input (read-only).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        read_only: bool,
     },
     /// A split of exactly two children, divided along `axis` at `ratio`.
     Split {
@@ -222,6 +267,7 @@ impl SavedLayout {
             transcript: None,
             service: None,
             launch: Default::default(),
+            read_only: false,
         }
     }
 
@@ -367,6 +413,8 @@ mod tests {
                 fullscreen: true,
             }),
             other_windows: Vec::new(),
+            window_name: None,
+            groups: Vec::new(),
         };
         let body = toml::to_string(&s).unwrap();
         let back: SavedSession = toml::from_str(&body).unwrap();
@@ -387,7 +435,9 @@ mod tests {
                     profile: Some("dev box".into()),
                     shell: Some("/bin/b a\"sh".into()),
                     args: vec!["-c".into(), "it's \"quoted\"".into()],
+                    theme: Some("tokyo-night".into()),
                 },
+                read_only: true,
             },
             SavedLayout::split(
                 SavedAxis::Vertical,
@@ -415,9 +465,18 @@ mod tests {
                 started: Some(1_791_938_924),
                 counted: Some(7200),
                 launch: Default::default(),
+                pinned: true,
+                group: Some(0),
+                read_only: false,
             }],
             window: None,
             other_windows: Vec::new(),
+            window_name: Some("main".into()),
+            groups: vec![SavedGroup {
+                name: "Servers".into(),
+                color: Some("green".into()),
+                collapsed: true,
+            }],
         };
 
         let body = toml::to_string(&s).unwrap();
@@ -491,6 +550,7 @@ mod tests {
                     transcript: None,
                     service: Some(7),
                     launch: Default::default(),
+                    read_only: false,
                 },
             )),
             ..tab("/d")
@@ -500,22 +560,29 @@ mod tests {
                 active: 1,
                 tabs: vec![tab("/a"), tab("/b")],
                 window: frame(10.0),
+                groups: Vec::new(),
+                name: Some("first".into()),
             },
             SavedWindowTabs {
                 active: 0,
                 tabs: vec![split],
                 window: frame(200.0),
+                groups: Vec::new(),
+                name: Some("logs".into()),
             },
             SavedWindowTabs {
                 active: 0,
                 tabs: vec![tab("/e")],
                 window: None,
+                groups: Vec::new(),
+                name: None,
             },
         ];
         let s = SavedSession::of_windows(windows.clone());
         assert_eq!(s.version, CURRENT_VERSION);
         // the first window stays where a version-3 build reads it
         assert_eq!((s.active, s.tabs.len(), s.window), (1, 2, frame(10.0)));
+        assert_eq!(s.window_name.as_deref(), Some("first"));
         let body = toml::to_string(&s).unwrap();
         let back: SavedSession = toml::from_str(&body).unwrap();
         assert_eq!(back, s, "toml body was:\n{body}");

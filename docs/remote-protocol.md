@@ -360,6 +360,10 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
   changes, at most once per topology poll.
 - `seq` is per pane and per gateway run: `update` N+1 follows `update` (or
   `snapshot`) N. A client that sees a gap re-subscribes with its last `seq`.
+  A run's first `seq` is the gateway's start time in milliseconds, not 0, so
+  a `subscribe{after}` carrying a `seq` of an earlier run (a gateway that
+  restarted) never lines up with the new run's replay ring and is answered
+  with a `snapshot`; a client treats `seq` as an opaque counter.
 - `update.blocks` are whole blocks that are new or changed since the
   previous `seq` (upsert by `id`); `removed` lists ids gone from the pane
   (`clear`, scrollback trim), including ids the client received through

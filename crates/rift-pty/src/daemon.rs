@@ -531,6 +531,7 @@ fn spawn(
         cell_height: cell_h,
     };
     let dir = cwd.map(std::path::PathBuf::from).filter(|p| p.is_dir());
+    let env = service_env(env, id);
     let pty = crate::session::open_pty(shell.as_deref(), &args, dir, env, ws, id)?;
     let mut reader = pty.file().try_clone()?;
     let writer = pty.file().try_clone()?;
@@ -577,15 +578,50 @@ fn spawn(
                     Err(_) => break,
                 }
             }
-            shell.broadcast(|| Out::Event(Event::Exited { session: id }));
+            let code = crate::exit_code_of(shell.pid);
+            shell.broadcast(|| Out::Event(Event::Exited { session: id, code }));
             state.shells.lock().unwrap().remove(&id);
         })?;
     Ok(id)
 }
 
+/// `env` naming the pane by service session `id` instead of the window's
+/// per-run pane id: the shell outlives the window process, and a later run
+/// reattaching it still finds the pane by this name.
+fn service_env(mut env: Vec<(String, String)>, id: u64) -> Vec<(String, String)> {
+    use rift_core::uri::{PANE_ID_ENV, PANE_URL_ENV, PaneRef};
+    env.retain(|(k, _)| k != PANE_ID_ENV && k != PANE_URL_ENV);
+    env.extend(PaneRef::Service(id).env());
+    env
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_service_shell_is_named_by_its_session() {
+        let window = vec![
+            ("A".to_string(), "1".to_string()),
+            ("RIFT_PANE_ID".to_string(), "abc.3".to_string()),
+            (
+                "RIFT_PANE_URL".to_string(),
+                "rift://action/focus?pane=abc.3".to_string(),
+            ),
+        ];
+        let env = service_env(window, 9);
+        assert_eq!(
+            env,
+            vec![
+                ("A".to_string(), "1".to_string()),
+                ("RIFT_PANE_ID".to_string(), "service.9".to_string()),
+                (
+                    "RIFT_PANE_URL".to_string(),
+                    "rift://action/focus?pane=service.9".to_string()
+                ),
+            ]
+        );
+    }
 
     /// A real (idle) shell on a PTY, without shell integration.
     fn test_shell() -> Shell {

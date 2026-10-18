@@ -16,8 +16,15 @@
 //! Every mutation goes through [`EditorState::replace_range`], the single
 //! buffer-mutation point that pushes undo snapshots. A change made of several
 //! mutations (an Insert or Replace session, a visual operator, a `.` repeat)
-//! is folded into one undo step, so one `u` undoes one change.
+//! is folded into one undo step, so one `u` undoes one change; ⌃R redoes
+//! and `U` puts back the last changed line.
+//!
+//! Registers: the unnamed one, `"a`–`"z` (`"A`–`"Z` append), `"0` (the last
+//! yank), `"_` (black hole) and `"+` / `"*` (the system clipboard, which the
+//! app hands in and takes out around each key: [`EditorState::vim_set_clipboard`],
+//! [`EditorState::vim_take_clipboard`]).
 
+use std::collections::HashMap;
 use std::ops::Range;
 
 use crate::state::EditorState;
@@ -47,6 +54,8 @@ pub enum VimKey {
     Right,
     Up,
     Down,
+    /// ⌃R: redo.
+    Redo,
 }
 
 /// What the app should do with a key after vim looked at it.
@@ -172,6 +181,8 @@ enum Awaiting {
     Object(bool),
     /// `g`: `gg` `ge` `gE` `gu` `gU` `g~`.
     G,
+    /// `"`: the register's name.
+    Register,
 }
 
 /// Operator / count state accumulated across keystrokes.
@@ -254,6 +265,119 @@ pub struct VimState {
     /// `R`: the char each typed char overwrote (`None` = appended), so
     /// Backspace can put it back.
     replaced: Vec<Option<char>>,
+    /// Named registers `"a`–`"z` and the yank register `"0`: text, linewise.
+    regs: HashMap<char, (String, bool)>,
+    /// The register the command being typed named (`"a`), until it is used.
+    reg_sel: Option<char>,
+    /// `reg_sel` was named by this very key (it outlives the key).
+    reg_fresh: bool,
+    /// `vim_clipboard = "unnamed"`: the unnamed register is the system
+    /// clipboard (`"*`).
+    clip_unnamed: bool,
+    /// The system clipboard's text, handed in by the app before a key that
+    /// may read it ([`EditorState::vim_set_clipboard`]).
+    clip_in: Option<String>,
+    /// Text for the system clipboard, taken by the app after the key
+    /// ([`EditorState::vim_take_clipboard`]).
+    clip_out: Option<String>,
+    /// The last search came from `*` / `#`: it matches whole words.
+    search_word: bool,
+    /// `U`: the line the latest changes were on (0-based) and its text
+    /// before them.
+    uline: Option<(usize, String)>,
+}
+
+impl VimState {
+    /// Store the text an operator removed or yanked, in the register the
+    /// command named (`"a` sets, `"A` appends, `"_` drops it, `"+` / `"*`
+    /// go to the system clipboard), else the unnamed register — a yank
+    /// there also fills `"0`. The unnamed register always ends up holding
+    /// what was stored (vim's "points to the last used register").
+    fn store(&mut self, text: String, linewise: bool, yank: bool) {
+        let named = self.reg_sel.take().filter(|&c| c != '"');
+        // a yank into the unnamed register also fills "0, even when
+        // `vim_clipboard` makes that the clipboard
+        if yank && named.is_none() {
+            self.regs.insert('0', (text.clone(), linewise));
+        }
+        let sel = named.or(self.clip_unnamed.then_some('*'));
+        let (text, linewise) = match sel {
+            Some('_') => return,
+            Some(c) if c.is_ascii_uppercase() => {
+                let key = c.to_ascii_lowercase();
+                let joined = match self.regs.remove(&key) {
+                    Some((old, old_lines)) if old_lines || linewise => {
+                        (format!("{old}\n{text}"), true)
+                    }
+                    Some((old, _)) => (format!("{old}{text}"), false),
+                    None => (text, linewise),
+                };
+                self.regs.insert(key, joined.clone());
+                joined
+            }
+            Some(c @ ('a'..='z' | '0')) => {
+                self.regs.insert(c, (text.clone(), linewise));
+                (text, linewise)
+            }
+            Some('+' | '*') => {
+                // a linewise register reaches the clipboard as whole lines
+                let mut out = text.clone();
+                if linewise {
+                    out.push('\n');
+                }
+                self.clip_out = Some(out);
+                (text, linewise)
+            }
+            _ => (text, linewise),
+        };
+        self.register = text;
+        self.register_linewise = linewise;
+    }
+
+    /// The register a put reads: the named one, `"0`, the system clipboard
+    /// (`"+` / `"*`; text ending in a newline is whole lines), else the
+    /// unnamed register. `None` = nothing to put (`"_`, an empty register).
+    fn fetch(&mut self) -> Option<(String, bool)> {
+        let sel = self
+            .reg_sel
+            .take()
+            .filter(|&c| c != '"')
+            .or(self.clip_unnamed.then_some('*'));
+        let got = match sel {
+            Some('_') => None,
+            Some('+' | '*') => self.clip_in.clone().map(|t| match t.strip_suffix('\n') {
+                Some(lines) => (lines.to_string(), true),
+                None => (t, false),
+            }),
+            Some(c) if c.is_ascii_alphabetic() || c == '0' => {
+                self.regs.get(&c.to_ascii_lowercase()).cloned()
+            }
+            _ => Some((self.register.clone(), self.register_linewise)),
+        };
+        got.filter(|(t, _)| !t.is_empty())
+    }
+}
+
+/// After a change: `U` puts back the line it was on as it was before the
+/// first of the latest changes on that line. A change that added or
+/// removed lines forgets it (the line numbers moved).
+fn note_line_change(v: &mut VimState, now: &str) {
+    if now.matches('\n').count() != v.before.matches('\n').count() {
+        v.uline = None;
+        return;
+    }
+    let at = v.mark_cursor.min(v.before.len());
+    let line = v.before.get(..at).unwrap_or("").matches('\n').count();
+    if v.uline.as_ref().is_some_and(|(l, _)| *l == line) {
+        return;
+    }
+    let text = v.before.split('\n').nth(line).unwrap_or("").to_string();
+    v.uline = Some((line, text));
+}
+
+/// A valid register name after `"`.
+fn register_name(c: char) -> bool {
+    c.is_ascii_alphabetic() || matches!(c, '0' | '"' | '+' | '*' | '_')
 }
 
 impl VimState {
@@ -340,6 +464,14 @@ impl Line {
             }
         }
         start
+    }
+
+    /// 0-based number of the line holding char `i`.
+    fn line_no(&self, i: usize) -> usize {
+        self.chars[..i.min(self.n())]
+            .iter()
+            .filter(|&&c| c == '\n')
+            .count()
     }
 
     /// First non-blank char of the line holding `i` (its start when blank).
@@ -521,12 +653,29 @@ fn match_bracket(l: &Line, ci: usize) -> Option<usize> {
 }
 
 /// `/` `?` `n` `N`: the count-th literal match of `pat` after (`forward`) or
-/// before the cursor, wrapping around the buffer.
-fn search(buf: &str, l: &Line, ci: usize, pat: &str, forward: bool, count: usize) -> Option<usize> {
+/// before the cursor, wrapping around the buffer. `whole`: only matches
+/// with no word char on either side (`*` / `#`).
+fn search(
+    buf: &str,
+    l: &Line,
+    ci: usize,
+    pat: &str,
+    forward: bool,
+    count: usize,
+    whole: bool,
+) -> Option<usize> {
     if pat.is_empty() {
         return None;
     }
-    let hits: Vec<usize> = buf.match_indices(pat).map(|(b, _)| l.index(b)).collect();
+    let word = |c: Option<char>| c.is_some_and(|c| class(c, false) == Class::Word);
+    let hits: Vec<usize> = buf
+        .match_indices(pat)
+        .filter(|&(b, m)| {
+            !whole
+                || !word(buf[..b].chars().next_back()) && !word(buf[b + m.len()..].chars().next())
+        })
+        .map(|(b, _)| l.index(b))
+        .collect();
     let (&first, &last) = (hits.first()?, hits.last()?);
     let mut at = ci;
     for _ in 0..count {
@@ -537,6 +686,24 @@ fn search(buf: &str, l: &Line, ci: usize, pat: &str, forward: bool, count: usize
         };
     }
     Some(at)
+}
+
+/// `*` / `#`: the word (letters, digits, `_`) under char `ci`, else the next
+/// one on its line, with its start.
+fn word_under(l: &Line, ci: usize) -> Option<(usize, String)> {
+    let is_word = |i: usize| class(l.chars[i], false) == Class::Word;
+    let end_of_line = l.line_end(ci);
+    let mut s = (ci..end_of_line).find(|&i| is_word(i))?;
+    if s == ci {
+        while s > 0 && is_word(s - 1) {
+            s -= 1;
+        }
+    }
+    let mut e = s;
+    while e < l.n() && is_word(e) {
+        e += 1;
+    }
+    Some((s, l.chars[s..e].iter().collect()))
 }
 
 /// Resolve a motion to `(target char index, inclusive)`; `None` = it failed.
@@ -683,6 +850,20 @@ fn text_object(l: &Line, ci: usize, obj: char, inner: bool) -> Option<(usize, us
             }
             Some((lead, e))
         }
+        // the cursor's line: `al` all of it (not its newline), `il`
+        // without its leading and trailing blanks
+        'l' => {
+            let (mut s, mut e) = (l.line_start(ci), l.line_end(ci));
+            if inner {
+                while s < e && l.chars[s].is_whitespace() {
+                    s += 1;
+                }
+                while e > s && l.chars[e - 1].is_whitespace() {
+                    e -= 1;
+                }
+            }
+            Some((s, e))
+        }
         '"' | '\'' | '`' => {
             // quotes pair up from the line start; a backslash escapes one
             let quotes: Vec<usize> = (0..n)
@@ -787,6 +968,50 @@ impl EditorState {
         out
     }
 
+    /// Before a key: `vim_clipboard = "unnamed"` (`unnamed`), and the system
+    /// clipboard's text when the key may read it (a put); `None` otherwise.
+    pub fn vim_set_clipboard(&mut self, unnamed: bool, text: Option<String>) {
+        if let Some(v) = self.vim.as_mut() {
+            v.clip_unnamed = unnamed;
+            v.clip_in = text;
+        }
+    }
+
+    /// After a key: text vim wrote to `"+` / `"*` (or the unnamed register
+    /// under `vim_clipboard = "unnamed"`), for the system clipboard.
+    pub fn vim_take_clipboard(&mut self) -> Option<String> {
+        let v = self.vim.as_mut()?;
+        v.clip_in = None;
+        v.clip_out.take()
+    }
+
+    /// Whether `key` may read the system clipboard, outside Insert mode: a
+    /// put (`p` `P`) from `"+` / `"*`, or from any register but a named one
+    /// under `vim_clipboard = "unnamed"` (`unnamed`), or a `.` that may
+    /// repeat such a put. A put from the unnamed register never reads it.
+    pub fn vim_key_reads_clipboard(&self, key: VimKey, unnamed: bool) -> bool {
+        let Some(v) = self.vim.as_ref().filter(|v| v.mode != VimMode::Insert) else {
+            return false;
+        };
+        let clip = |reg: Option<char>| match reg {
+            Some('+' | '*') => true,
+            None | Some('"') => unnamed,
+            _ => false,
+        };
+        match key {
+            VimKey::Char('p' | 'P') => clip(v.reg_sel),
+            VimKey::Char('.') => v.last_change.as_ref().is_some_and(|c| {
+                let put = c.keys.iter().any(|k| matches!(k, VimKey::Char('p' | 'P')));
+                let named = c.keys.windows(2).find_map(|w| match w {
+                    [VimKey::Char('"'), VimKey::Char(r)] => Some(*r),
+                    _ => None,
+                });
+                put && clip(named)
+            }),
+            _ => false,
+        }
+    }
+
     /// The open `/` or `?` search prompt as typed (`/foo`), for the mode pill.
     pub fn vim_prompt(&self) -> Option<String> {
         let (forward, text) = self.vim.as_ref()?.prompt.as_ref()?;
@@ -826,8 +1051,12 @@ impl EditorState {
             v.pending.reset();
         }
         let record = !v.replaying;
-        let at_rest =
-            |v: &VimState| v.mode == VimMode::Normal && v.pending.idle() && v.prompt.is_none();
+        let at_rest = |v: &VimState| {
+            v.mode == VimMode::Normal
+                && v.pending.idle()
+                && v.prompt.is_none()
+                && v.reg_sel.is_none()
+        };
         if record && at_rest(v) {
             v.rec.clear();
             v.before = self.buffer.clone();
@@ -839,12 +1068,20 @@ impl EditorState {
             v.rec.push(key);
         }
         let out = self.dispatch(v, key);
+        // a named register lasts until the command that uses it ends: a key
+        // that left nothing pending (and did not name it) drops it
+        if v.reg_fresh {
+            v.reg_fresh = false;
+        } else if v.pending.idle() && v.prompt.is_none() {
+            v.reg_sel = None;
+        }
         if v.mode == VimMode::Insert && v.insert_from.is_none() {
             v.insert_from = Some((self.buffer.clone(), self.cursor));
         }
         if record && at_rest(v) {
             self.squash_undo(v.mark, v.mark_cursor);
             if !v.no_record && self.buffer != v.before {
+                note_line_change(v, &self.buffer);
                 v.last_change = Some(Change {
                     keys: std::mem::take(&mut v.rec),
                     insert: String::new(),
@@ -864,6 +1101,7 @@ impl EditorState {
         {
             self.squash_undo(v.mark, v.mark_cursor);
             if self.buffer != v.before {
+                note_line_change(v, &self.buffer);
                 v.last_change = Some(Change {
                     keys: std::mem::take(&mut v.rec),
                     insert: inserted_text(&buf, at, &self.buffer),
@@ -926,6 +1164,19 @@ impl EditorState {
             }
             VimKey::Left | VimKey::Backspace => self.motion(v, Motion::Left),
             VimKey::Right => self.motion(v, Motion::Right),
+            VimKey::Redo => {
+                let count = v.pending.total();
+                v.pending.reset();
+                v.no_record = true;
+                if visual {
+                    self.leave_visual(v);
+                }
+                for _ in 0..count {
+                    self.redo();
+                }
+                self.vim_clamp();
+                VimOutcome::Consumed
+            }
             VimKey::Char(c) => self.normal_char(v, c),
         }
     }
@@ -1001,8 +1252,11 @@ impl EditorState {
     /// Run an operator over a byte range.
     fn apply_op(&mut self, v: &mut VimState, op: Op, range: Range<usize>, linewise: bool) {
         if !range.is_empty() && matches!(op, Op::Delete | Op::Change | Op::Yank) {
-            v.register = self.buffer[range.clone()].to_string();
-            v.register_linewise = linewise;
+            v.store(
+                self.buffer[range.clone()].to_string(),
+                linewise,
+                op == Op::Yank,
+            );
         }
         match op {
             Op::Yank => {
@@ -1054,8 +1308,7 @@ impl EditorState {
         let content = l.byte(s)..l.byte(e);
         match op {
             Op::Delete => {
-                v.register = self.buffer[content.clone()].to_string();
-                v.register_linewise = true;
+                v.store(self.buffer[content.clone()].to_string(), true, false);
                 // the lines leave with one newline: the one after them, else
                 // the one before
                 let range = if e < n {
@@ -1277,6 +1530,7 @@ impl EditorState {
                     return VimOutcome::Consumed;
                 };
                 v.last_search = Some((pat, forward));
+                v.search_word = false;
                 return self.search_next(v, false);
             }
             VimKey::Escape => v.pending.reset(),
@@ -1301,6 +1555,7 @@ impl EditorState {
             &pat,
             forward != reverse,
             v.pending.total(),
+            v.search_word,
         ) {
             Some(t) => self.motion(v, Motion::Jump(t, false)),
             None => {
@@ -1356,6 +1611,7 @@ impl EditorState {
             VimKey::Enter => return VimOutcome::Submit,
             VimKey::Up => return VimOutcome::HistoryUp,
             VimKey::Down => return VimOutcome::HistoryDown,
+            VimKey::Redo => {}
         }
         VimOutcome::Consumed
     }
@@ -1379,6 +1635,15 @@ impl EditorState {
                     }
                 } else if let (Some(op), Some((s, e))) = (op, obj) {
                     self.apply_op(v, op, l.byte(s)..l.byte(e), false);
+                }
+                VimOutcome::Consumed
+            }
+            Awaiting::Register => {
+                if register_name(c) {
+                    v.reg_sel = Some(c);
+                    v.reg_fresh = true;
+                } else {
+                    v.pending.reset();
                 }
                 VimOutcome::Consumed
             }
@@ -1454,6 +1719,12 @@ impl EditorState {
             }
         }
 
+        // `"x`: the register the next operator or put uses
+        if c == '"' && v.pending.op.is_none() {
+            v.pending.awaiting = Some(Awaiting::Register);
+            return VimOutcome::Consumed;
+        }
+
         let visual = is_visual(v.mode);
         if visual && let Some(out) = self.visual_char(v, c) {
             return out;
@@ -1520,6 +1791,23 @@ impl EditorState {
                 return VimOutcome::Consumed;
             }
             'n' | 'N' => return self.search_next(v, c == 'N'),
+            // the word under the cursor (else the next one on its line),
+            // as a whole word, forward / backward
+            '*' | '#' => {
+                let l = Line::new(&self.buffer);
+                let Some((start, word)) = word_under(&l, l.index(self.cursor)) else {
+                    v.pending.reset();
+                    return VimOutcome::Consumed;
+                };
+                // searched from the word's start, so `#` passes the word
+                // the cursor is in (vim)
+                if v.pending.op.is_none() {
+                    self.cursor = l.byte(start);
+                }
+                v.last_search = Some((word, c == '*'));
+                v.search_word = true;
+                return self.search_next(v, false);
+            }
             _ => {}
         }
 
@@ -1640,10 +1928,22 @@ impl EditorState {
                     self.undo();
                 }
             }
+            // line undo: the line back as it was before the latest changes
+            // on it; a change itself, so a second `U` undoes the first
             'U' => {
                 v.no_record = true;
-                for _ in 0..count {
-                    self.redo();
+                if let Some((line, text)) = v.uline.take() {
+                    let l = Line::new(&self.buffer);
+                    let s = l.nth_line_start(line);
+                    if l.line_no(s) == line {
+                        let range = l.byte(s)..l.byte(l.line_end(s));
+                        let now = self.buffer[range.clone()].to_string();
+                        if now != text {
+                            self.replace_range(range, &text);
+                        }
+                        self.cursor = l.byte(s);
+                        v.uline = Some((line, now));
+                    }
                 }
             }
             'j' => return VimOutcome::HistoryDown,
@@ -1690,11 +1990,11 @@ impl EditorState {
     /// `p` / `P`. A linewise register has no second line to land on here, so
     /// it goes at the end (`p`) or the start (`P`) of the single line.
     fn put(&mut self, v: &mut VimState, count: usize, after: bool) {
-        if v.register.is_empty() {
+        let Some((reg, linewise)) = v.fetch() else {
             return;
-        }
-        let text = v.register.repeat(count);
-        if v.register_linewise {
+        };
+        let text = reg.repeat(count);
+        if linewise {
             let at = if after { self.buffer.len() } else { 0 };
             self.replace_range(at..at, &text);
             self.cursor = at;
@@ -2215,9 +2515,222 @@ mod tests {
         keys(&mut e, "u");
         assert_eq!(e.buffer, "git commit");
         assert_eq!(e.cursor, 0);
-        keys(&mut e, "U");
+        e.vim_key(VimKey::Redo);
         assert_eq!(e.buffer, "commit");
         assert_eq!(e.cursor, 0);
+        // a count redoes that many
+        keys(&mut e, "xxuu");
+        assert_eq!(e.buffer, "commit");
+        keys(&mut e, "2");
+        e.vim_key(VimKey::Redo);
+        assert_eq!(e.buffer, "mmit");
+    }
+
+    #[test]
+    fn capital_u_undoes_the_line_and_itself() {
+        let mut e = ed("git status");
+        esc(&mut e);
+        keys(&mut e, "0xx");
+        keys(&mut e, "$x");
+        assert_eq!(e.buffer, "t statu");
+        // every change on the line, at once
+        keys(&mut e, "U");
+        assert_eq!(e.buffer, "git status");
+        // U is a change: U again redoes them, u undoes the U
+        keys(&mut e, "U");
+        assert_eq!(e.buffer, "t statu");
+        keys(&mut e, "u");
+        assert_eq!(e.buffer, "git status");
+        // a change on another line starts over there
+        let mut e = ed("ab\ncd");
+        esc(&mut e);
+        keys(&mut e, "ggx");
+        keys(&mut e, "Gx");
+        assert_eq!(e.buffer, "b\nd");
+        keys(&mut e, "U");
+        assert_eq!(e.buffer, "b\ncd");
+        // nothing changed yet: U does nothing
+        let mut e = ed("abc");
+        esc(&mut e);
+        keys(&mut e, "U");
+        assert_eq!(e.buffer, "abc");
+    }
+
+    #[test]
+    fn named_registers_set_append_and_put() {
+        let mut e = ed("one two three");
+        esc(&mut e);
+        keys(&mut e, "0\"ayw");
+        keys(&mut e, "w\"byw");
+        // the unnamed register holds the last one; "a kept its own
+        keys(&mut e, "$\"ap");
+        assert_eq!(e.buffer, "one two threeone ");
+        keys(&mut e, "\"bP");
+        assert_eq!(e.buffer, "one two threeonetwo  ");
+        // "A appends
+        let mut e = ed("ab cd");
+        esc(&mut e);
+        keys(&mut e, "0\"ayl");
+        keys(&mut e, "w\"Ayl");
+        keys(&mut e, "$\"ap");
+        assert_eq!(e.buffer, "ab cdac");
+        // a count after the register name
+        let mut e = ed("xy");
+        esc(&mut e);
+        keys(&mut e, "0\"qyl\"q3p");
+        assert_eq!(e.buffer, "xxxxy");
+        // a register name dies with a command that does not use it
+        let mut e = ed("ab");
+        esc(&mut e);
+        keys(&mut e, "0\"ayl");
+        keys(&mut e, "\"bl");
+        keys(&mut e, "x");
+        // x went to the unnamed register, not "b
+        keys(&mut e, "\"bp");
+        assert_eq!(e.buffer, "a");
+        keys(&mut e, "p");
+        assert_eq!(e.buffer, "ab");
+    }
+
+    #[test]
+    fn yank_register_and_black_hole() {
+        // "0 keeps the last yank through a delete
+        let mut e = ed("keep gone");
+        esc(&mut e);
+        keys(&mut e, "0yw");
+        keys(&mut e, "wdw");
+        assert_eq!(e.vim.as_ref().unwrap().register, "gone");
+        keys(&mut e, "\"0P");
+        assert_eq!(e.buffer, "keepkeep  ");
+        // a yank into a named register leaves "0 alone
+        let mut e = ed("one two");
+        esc(&mut e);
+        keys(&mut e, "0yw");
+        keys(&mut e, "w\"ayw");
+        keys(&mut e, "0\"0P");
+        assert_eq!(e.buffer, "one one two");
+        // "_ drops the text: the unnamed register keeps the yank
+        let mut e = ed("abc");
+        esc(&mut e);
+        keys(&mut e, "0yl");
+        keys(&mut e, "l\"_x");
+        assert_eq!(e.buffer, "ac");
+        assert_eq!(e.vim.as_ref().unwrap().register, "a");
+        // "_p puts nothing
+        keys(&mut e, "\"_p");
+        assert_eq!(e.buffer, "ac");
+    }
+
+    #[test]
+    fn clipboard_registers() {
+        // "+y writes the clipboard; plain y does not
+        let mut e = ed("hello world");
+        esc(&mut e);
+        keys(&mut e, "0\"+yw");
+        assert_eq!(e.vim_take_clipboard().as_deref(), Some("hello "));
+        keys(&mut e, "yw");
+        assert_eq!(e.vim_take_clipboard(), None);
+        // "*p reads what the app handed in; a trailing newline is linewise
+        let mut e = ed("ab");
+        esc(&mut e);
+        keys(&mut e, "0");
+        e.vim_set_clipboard(false, Some("XY".into()));
+        keys(&mut e, "\"*p");
+        assert_eq!(e.buffer, "aXYb");
+        e.vim_set_clipboard(false, Some("line\n".into()));
+        keys(&mut e, "\"+P");
+        assert_eq!(e.buffer, "lineaXYb");
+        // linewise text reaches the clipboard with its newline
+        let mut e = ed("echo hi");
+        esc(&mut e);
+        keys(&mut e, "\"+yy");
+        assert_eq!(e.vim_take_clipboard().as_deref(), Some("echo hi\n"));
+    }
+
+    /// The app reads the system clipboard only for a key that may put it:
+    /// never for a put from the unnamed register under the default setting.
+    #[test]
+    fn clipboard_read_only_for_clipboard_puts() {
+        let p = VimKey::Char('p');
+        let dot = VimKey::Char('.');
+        let mut e = ed("ab");
+        esc(&mut e);
+        assert!(!e.vim_key_reads_clipboard(p, false));
+        assert!(e.vim_key_reads_clipboard(p, true));
+        keys(&mut e, "\"+");
+        assert!(e.vim_key_reads_clipboard(p, false));
+        e.vim_set_clipboard(false, Some("Z".into()));
+        keys(&mut e, "p");
+        assert!(e.vim_key_reads_clipboard(dot, false), "repeats a \"+p");
+        keys(&mut e, "\"a");
+        assert!(!e.vim_key_reads_clipboard(p, true), "a named register");
+        esc(&mut e);
+        keys(&mut e, "xp");
+        assert!(!e.vim_key_reads_clipboard(dot, false));
+        assert!(e.vim_key_reads_clipboard(dot, true));
+        assert!(!e.vim_key_reads_clipboard(VimKey::Char('x'), true));
+        keys(&mut e, "i");
+        assert!(!e.vim_key_reads_clipboard(p, true), "insert mode");
+    }
+
+    #[test]
+    fn vim_clipboard_unnamed_setting() {
+        // unnamed: every yank/delete goes to the clipboard, p reads it
+        let mut e = ed("abc");
+        esc(&mut e);
+        e.vim_set_clipboard(true, None);
+        keys(&mut e, "0x");
+        assert_eq!(e.vim_take_clipboard().as_deref(), Some("a"));
+        e.vim_set_clipboard(true, Some("Z".into()));
+        keys(&mut e, "p");
+        assert_eq!(e.buffer, "bZc");
+        // a named register still bypasses the clipboard
+        e.vim_set_clipboard(true, None);
+        keys(&mut e, "\"ayl");
+        assert_eq!(e.vim_take_clipboard(), None);
+        // none (default): the clipboard is left alone
+        let mut e = ed("abc");
+        esc(&mut e);
+        e.vim_set_clipboard(false, Some("Z".into()));
+        keys(&mut e, "0xp");
+        assert_eq!(e.vim_take_clipboard(), None);
+        assert_eq!(e.buffer, "bac");
+    }
+
+    #[test]
+    fn star_and_hash_search_the_word_under_the_cursor() {
+        let s = "cat concat cat dog cat";
+        // * from the first "cat" skips "concat" (whole words only)
+        let e = run(s, 0, "*");
+        assert_eq!(e.cursor, 11);
+        let e = run(s, 0, "**");
+        assert_eq!(e.cursor, 19);
+        // n repeats it whole-word too, wrapping
+        let e = run(s, 0, "*nn");
+        assert_eq!(e.cursor, 0);
+        // # goes back, from inside the word
+        let e = run(s, 20, "#");
+        assert_eq!(e.cursor, 11);
+        // on a blank: the next word on the line
+        let e = run(s, 14, "*");
+        assert_eq!(e.cursor, 15);
+        // d* deletes up to the next match
+        let (buf, _, _) = after("ab x ab", 0, "d*");
+        assert_eq!(buf, "ab");
+    }
+
+    #[test]
+    fn line_text_objects() {
+        let (buf, _, reg) = after("  echo hi  ", 4, "dil");
+        assert_eq!(buf, "    ");
+        assert_eq!(reg, "echo hi");
+        let (buf, _, reg) = after("  echo hi  ", 4, "dal");
+        assert_eq!(buf, "");
+        assert_eq!(reg, "  echo hi  ");
+        // the cursor's line only
+        let (buf, _, _) = after("ab\n cd \nef", 4, "cil");
+        assert_eq!(buf, "ab\n  \nef");
+        assert_eq!(sel("ab\n cd \nef", 4, "vil").as_deref(), Some("cd"));
     }
 
     #[test]

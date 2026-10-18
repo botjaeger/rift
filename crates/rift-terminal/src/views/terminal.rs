@@ -26,6 +26,16 @@ pub struct GridLayout {
     pub cols: usize,
     pub rows: usize,
     pub ligatures: bool,
+    /// Regular and bold text weights (`font_weight`, `bold_font_weight`).
+    pub weights: (u16, u16),
+    /// `font_features` (see [`intern_features`]).
+    pub features: Features,
+    /// `minimum_contrast` (1 = off).
+    pub min_contrast: f32,
+    /// `bold_is_bright`.
+    pub bold_is_bright: bool,
+    /// The cursor as drawn: `cursor_style`, or hollow in an unfocused pane
+    /// (`cursor_hollow_unfocused`).
     pub cursor_style: CursorStyle,
     /// The owned editor draws the cursor; the grid's own cursor stays hidden
     /// (shell-prompt mode keeps the prompt rows visible without it).
@@ -49,6 +59,9 @@ pub struct GridLayout {
     /// `jump_to_bottom_button`: offer the button over a block running past
     /// the bottom of the pane.
     pub jump_button: bool,
+    /// The overlay scrollbar is on (`scrollbar` not `never`): report the
+    /// list and its marks ([`RenderOutput::scroll`]).
+    pub scrollbar: bool,
 }
 
 /// A cell background's rect with its edges on device pixels: rows are a
@@ -91,6 +104,8 @@ pub enum RowKind {
     Header(BlockId),
     /// Blank soft-`clear` padding row (no mouse targets).
     Pad,
+    /// A block filter's separator row between runs (no mouse targets).
+    Sep,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -130,6 +145,14 @@ pub struct RenderOutput {
     /// The jump-to-bottom button (`jump_to_bottom_button`): its rect and
     /// the block under the pointer that runs past the bottom of the pane.
     pub jump_bottom: Option<([f32; 4], BlockId)>,
+    /// The display list for the overlay scrollbar (with `grid.scrollbar`,
+    /// off the alternate screen).
+    pub scroll: Option<super::scrollbar::ScrollInfo>,
+    /// The grid cursor's shape, when it was drawn (dump).
+    pub cursor: Option<CursorStyle>,
+    /// Cells drawn as geometry instead of glyphs: block elements, box
+    /// drawing, Powerline and legacy-computing symbols (dump).
+    pub art_cells: usize,
 }
 
 /// Byte-scan for http(s) URLs in a line: (char col, char len, url).
@@ -321,6 +344,8 @@ pub enum DisplayLine {
     Header(usize), // index into blocks snapshot
     /// Blank viewport padding inserted by a soft `clear`.
     Pad,
+    /// A block filter's separator between runs of kept lines (context lines).
+    Sep,
 }
 
 /// Build the pane's display-line list: every kept grid line, with block
@@ -346,7 +371,7 @@ pub fn build_display_list(
         clear_pad,
         screen_lines,
         None,
-        &std::collections::HashSet::new(),
+        &Hidden::default(),
         false,
     )
 }
@@ -396,43 +421,73 @@ fn gaps_between(anchors: &[(Option<u64>, u64)]) -> Vec<(u64, u64)> {
         .collect()
 }
 
+/// What the display list leaves out (see [`filter_hidden`]).
+#[derive(Default, Debug)]
+pub struct Hidden {
+    /// Grid lines skipped.
+    pub lines: std::collections::HashSet<u64>,
+    /// Kept lines a block filter's separator row goes above.
+    pub seps: std::collections::HashSet<u64>,
+    /// Each applied filter's block: (block, shown lines, output lines).
+    pub counts: Vec<(BlockId, usize, usize)>,
+}
+
 /// Lines the display list skips: blank lines that belong to no block (between
 /// a finished block's end and the next prompt — the shell's empty prompts
-/// for Enter pressed while a command ran), and the output lines of the
-/// filtered block that do not contain the filter query (case-insensitive;
-/// Warp block filter).
+/// for Enter pressed while a command ran), and the output lines each
+/// applied block filter drops ([`crate::views::block_filter`]).
 pub fn filter_hidden(
     session: &Session,
-    filter: Option<&(BlockId, String)>,
-) -> std::collections::HashSet<u64> {
-    let mut hidden = stray_blank_lines(session);
-    let Some((id, query)) = filter else {
+    filters: Option<&crate::views::block_filter::BlockFilters>,
+) -> Hidden {
+    let mut hidden = Hidden {
+        lines: stray_blank_lines(session),
+        ..Hidden::default()
+    };
+    let Some(filters) = filters else {
         return hidden;
     };
-    if query.is_empty() {
+    let ranges: Vec<(&crate::views::block_filter::BlockFilter, (u64, u64))> = {
+        let blocks = session.blocks.lock().unwrap();
+        filters
+            .enabled()
+            .filter_map(|f| {
+                let range = blocks.iter().find(|b| b.id == f.block)?.output_range()?;
+                Some((f, range))
+            })
+            .collect()
+    };
+    if ranges.is_empty() {
         return hidden;
     }
-    let Some((start, end)) = session
-        .blocks
-        .lock()
-        .unwrap()
-        .iter()
-        .find(|b| b.id == *id)
-        .and_then(|b| b.output_range())
-    else {
-        return hidden;
-    };
-    // decomposed like the searched text (`SearchLine::push`)
-    use unicode_normalization::UnicodeNormalization as _;
-    let query = query.nfd().collect::<String>().to_lowercase();
     let scrolled = session.scrolled.load(std::sync::atomic::Ordering::Acquire);
     let term = session.term.lock();
-    for abs in start..end {
-        let keep = search_text(&term, scrolled, abs)
-            .is_some_and(|t| t.text.to_lowercase().contains(&query));
-        if !keep {
-            hidden.insert(abs);
+    for (f, (start, end)) in ranges {
+        let total = (end - start) as usize;
+        let Some(m) = f.matcher() else {
+            hidden.counts.push((f.block, total, total));
+            continue;
+        };
+        let matched: Vec<bool> = (start..end)
+            .map(|abs| {
+                search_text(&term, scrolled, abs).is_some_and(|t| !m.find_line(&t).is_empty())
+            })
+            .collect();
+        let keep = crate::views::block_filter::keep_mask(&matched, f.invert, f.context as usize);
+        let mut shown = 0;
+        for (i, k) in keep.iter().enumerate() {
+            if *k {
+                shown += 1;
+            } else {
+                hidden.lines.insert(start + i as u64);
+            }
         }
+        if f.context > 0 {
+            for i in crate::views::block_filter::separators(&keep) {
+                hidden.seps.insert(start + i as u64);
+            }
+        }
+        hidden.counts.push((f.block, shown, total));
     }
     hidden
 }
@@ -457,7 +512,7 @@ pub fn build_display_list_filtered(
     clear_pad: Option<u64>,
     view_rows: usize,
     bottom_up: Option<u64>,
-    hidden: &std::collections::HashSet<u64>,
+    hidden: &Hidden,
     spaced: bool,
 ) -> Vec<DisplayLine> {
     let mut display: Vec<DisplayLine> = Vec::new();
@@ -523,7 +578,10 @@ pub fn build_display_list_filtered(
             }
         }
         if !replaced {
-            if !hidden.contains(&abs) {
+            if !hidden.lines.contains(&abs) {
+                if hidden.seps.contains(&abs) {
+                    display.push(DisplayLine::Sep);
+                }
                 display.push(DisplayLine::Grid(abs));
             }
             abs += 1;
@@ -765,16 +823,48 @@ pub fn format_duration(d: Duration) -> String {
     }
 }
 
-fn mono_attrs(ligatures: bool) -> Attrs<'static> {
+/// OpenType features as (tag, value) pairs (`font_features`).
+pub type Features = &'static [([u8; 4], u16)];
+
+/// `font_features` as a `'static` slice for [`GridLayout`] (which stays
+/// `Copy`): each distinct list is stored once, so a config reload costs one
+/// small allocation and a frame none.
+pub fn intern_features(list: Vec<([u8; 4], u16)>) -> Features {
+    static SEEN: std::sync::Mutex<Vec<Features>> = std::sync::Mutex::new(Vec::new());
+    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(s) = seen.iter().find(|s| ***s == list[..]) {
+        return s;
+    }
+    let s: Features = Box::leak(list.into_boxed_slice());
+    seen.push(s);
+    s
+}
+
+fn mono_attrs(ligatures: bool, features: &[([u8; 4], u16)]) -> Attrs<'static> {
     let attrs = Attrs::new().family(Family::Name(mono_family()));
-    if ligatures {
-        attrs
-    } else {
-        use rift_renderer::glyphon::cosmic_text::{FeatureTag, FontFeatures};
-        let mut f = FontFeatures::new();
+    if ligatures && features.is_empty() {
+        return attrs;
+    }
+    use rift_renderer::glyphon::cosmic_text::{FeatureTag, FontFeatures};
+    let mut f = FontFeatures::new();
+    if !ligatures {
         f.set(FeatureTag::STANDARD_LIGATURES, 0);
         f.set(FeatureTag::CONTEXTUAL_ALTERNATES, 0);
-        attrs.font_features(f)
+    }
+    // the user's list after: `"calt"` turns contextual alternates back on
+    for (tag, value) in features {
+        f.set(FeatureTag::new(tag), u32::from(*value));
+    }
+    attrs.font_features(f)
+}
+
+/// Bold text's colour with `bold_is_bright`: the eight ANSI colours become
+/// their bright variants; anything else stays.
+fn bright_for_bold(c: ansi::Color) -> ansi::Color {
+    match c {
+        ansi::Color::Named(n) if (n as usize) < 8 => ansi::Color::Named(n.to_bright()),
+        ansi::Color::Indexed(i) if i < 8 => ansi::Color::Indexed(i + 8),
+        c => c,
     }
 }
 
@@ -862,7 +952,12 @@ fn make_command_text(
 pub struct SearchCtx {
     pub matcher: Matcher,
     pub current: Option<(u64, usize)>,
+    /// The rows of the kept matches (the scrollbar's ticks).
+    pub lines: Vec<u64>,
 }
+
+/// Most memory one find or filter regex may compile to (bytes).
+const REGEX_SIZE_LIMIT: usize = 1 << 20;
 
 /// Find-bar matcher: plain text (optionally case-sensitive) or a regex.
 #[derive(Clone)]
@@ -880,8 +975,12 @@ impl Matcher {
         // a regex source is syntax, never normalized: it runs on the line
         // composed (`SearchLine::composed`), so `[é]` stays one char
         if is_regex {
+            // bounded: the regex crate runs in linear time (no
+            // backtracking); these cap what one query may compile to
             return regex::RegexBuilder::new(query)
                 .case_insensitive(!case)
+                .size_limit(REGEX_SIZE_LIMIT)
+                .dfa_size_limit(REGEX_SIZE_LIMIT)
                 .build()
                 .map(|r| Some(Matcher::Regex(r)))
                 .map_err(|e| e.to_string());
@@ -1230,6 +1329,22 @@ pub fn session_read_text(session: &Session, abs: u64) -> Option<String> {
 /// included: (col, len, url) of this row's share of each, with the whole
 /// URL. Looks at most `WRAP_SPAN` rows each way.
 fn urls_on_row(g: &CellGrid, scrolled: u64, abs: u64) -> Vec<(usize, usize, String)> {
+    let cols = g.columns();
+    let (text, first) = wrapped_line(g, scrolled, abs);
+    let start = (abs - first) as usize * cols;
+    urls_in(text.trim_end_matches(' '))
+        .into_iter()
+        .filter_map(|(col, len, url)| {
+            let (s, e) = (col.max(start), (col + len).min(start + cols));
+            (s < e).then(|| (s - start, e - s, url))
+        })
+        .collect()
+}
+
+/// The soft-wrapped line around absolute row `abs`, one char per cell (so
+/// char `i` is row `first + i / cols`, column `i % cols`), and its first
+/// row. Looks at most `WRAP_SPAN` rows each way.
+fn wrapped_line(g: &CellGrid, scrolled: u64, abs: u64) -> (String, u64) {
     const WRAP_SPAN: u64 = 8;
     let cols = g.columns();
     // one char per cell, so string positions are columns
@@ -1257,14 +1372,28 @@ fn urls_on_row(g: &CellGrid, scrolled: u64, abs: u64) -> Vec<(usize, usize, Stri
             None => break,
         }
     }
-    let start = (abs - first) as usize * cols;
-    urls_in(text.trim_end_matches(' '))
-        .into_iter()
-        .filter_map(|(col, len, url)| {
-            let (s, e) = (col.max(start), (col + len).min(start + cols));
-            (s < e).then(|| (s - start, e - s, url))
-        })
-        .collect()
+    (text, first)
+}
+
+/// The smart double-click unit (`smart_select`) under column `col` of
+/// absolute row `abs`, a soft-wrapped one whole: its first and last cells
+/// as (absolute row, column).
+pub fn smart_unit_at(
+    session: &Session,
+    abs: u64,
+    col: usize,
+) -> Option<((u64, usize), (u64, usize))> {
+    let scrolled = session.scrolled.load(std::sync::atomic::Ordering::Acquire);
+    let term = session.term.lock();
+    let g = term.grid();
+    let cols = g.columns();
+    if cols == 0 {
+        return None;
+    }
+    let (text, first) = wrapped_line(g, scrolled, abs);
+    let r = crate::smart_select::unit_at(&text, (abs - first) as usize * cols + col)?;
+    let at = |i: usize| (first + (i / cols) as u64, i % cols);
+    Some((at(r.start), at(r.end - 1)))
 }
 
 /// OSC 8 hyperlink runs on one absolute line: (col, len, uri).
@@ -1352,21 +1481,105 @@ pub fn visible_text(session: &Session) -> String {
 
 /// Output text of a block (for the copy button / copy action).
 pub fn block_output_text(session: &Session, block_id: BlockId) -> Option<String> {
+    block_output_snapshot(session, block_id, usize::MAX, usize::MAX).map(|s| s.text)
+}
+
+/// A copy of a finished block's output text, at most about `max_bytes`.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct OutputSnapshot {
+    pub text: String,
+    /// Output rows gone from scrollback before the text (not in it).
+    pub trimmed_rows: u64,
+    /// Every output row, held or not.
+    pub total_rows: u64,
+    /// Cut at `max_bytes` or `max_lines`: rows after the text are left out.
+    pub truncated: bool,
+}
+
+/// [`block_output_text`] with its bounds reported: rows gone from
+/// scrollback are counted, and reading stops once `max_bytes` is passed or
+/// `max_lines` lines are read (the term lock is held only that long).
+/// Soft-wrapped rows join into one line; the line break the terminal added
+/// after unterminated output is dropped.
+pub fn block_output_snapshot(
+    session: &Session,
+    block_id: BlockId,
+    max_bytes: usize,
+    max_lines: usize,
+) -> Option<OutputSnapshot> {
+    snapshot_of(
+        &session.blocks,
+        &session.scrolled,
+        &session.term,
+        block_id,
+        max_bytes,
+        max_lines,
+    )
+}
+
+/// [`block_output_text`] from a session's parts (a search worker holds
+/// them off the UI thread), reading at most about `max_bytes`. Also says
+/// how much was there: rows that left the scrollback (or past the bound)
+/// make it partial, no row left makes it unavailable. Last: the output
+/// rows gone from scrollback before the text (each counted as one line).
+pub fn output_text(
+    blocks: &std::sync::Mutex<rift_core::BlockStore>,
+    scrolled: &std::sync::atomic::AtomicU64,
+    term: &rift_pty::alacritty_terminal::sync::FairMutex<
+        rift_pty::alacritty_terminal::term::Term<EventProxy>,
+    >,
+    block_id: BlockId,
+    max_bytes: usize,
+) -> Option<(String, rift_core::result_search::Output, u64)> {
+    use rift_core::result_search::Output;
+    let snap = snapshot_of(blocks, scrolled, term, block_id, max_bytes, usize::MAX)?;
+    let state = if snap.total_rows > 0 && snap.trimmed_rows >= snap.total_rows {
+        Output::Unavailable
+    } else if snap.trimmed_rows > 0 || snap.truncated {
+        Output::Partial
+    } else {
+        Output::Full
+    };
+    Some((snap.text, state, snap.trimmed_rows))
+}
+
+/// The one reader behind [`block_output_snapshot`] and [`output_text`].
+fn snapshot_of(
+    blocks: &std::sync::Mutex<rift_core::BlockStore>,
+    scrolled: &std::sync::atomic::AtomicU64,
+    term: &rift_pty::alacritty_terminal::sync::FairMutex<
+        rift_pty::alacritty_terminal::term::Term<EventProxy>,
+    >,
+    block_id: BlockId,
+    max_bytes: usize,
+    max_lines: usize,
+) -> Option<OutputSnapshot> {
     let (start, end, unterminated, skip) = {
-        let blocks = session.blocks.lock().unwrap();
+        let blocks = blocks.lock().unwrap();
         let block = blocks.iter().find(|b| b.id == block_id)?;
         let (start, end) = block.output_range()?;
         // a background block's first row begins after the prompt
         (start, end, block.unterminated, block.skip_cols)
     };
-    let scrolled = session.scrolled.load(std::sync::atomic::Ordering::Acquire);
-    let term = session.term.lock();
+    let scrolled = scrolled.load(std::sync::atomic::Ordering::Acquire);
+    let term = term.lock();
     // the output's rows are on the primary grid, also under a full-screen
     // program
     let g = term.primary_grid();
-    let mut out = String::new();
+    let held = start.max(oldest_row(g, scrolled)).min(end);
+    let mut snap = OutputSnapshot {
+        trimmed_rows: held - start,
+        total_rows: end - start,
+        ..OutputSnapshot::default()
+    };
+    let out = &mut snap.text;
+    let mut lines = 0;
     // rows gone from scrollback have no text
-    for abs in start.max(oldest_row(g, scrolled))..end {
+    for abs in held..end {
+        if out.len() >= max_bytes || lines >= max_lines {
+            snap.truncated = true;
+            break;
+        }
         if let Some((text, wrapped)) = copy_line(g, scrolled, abs) {
             if abs == start && skip > 0 {
                 out.extend(text.chars().skip(skip));
@@ -1376,14 +1589,90 @@ pub fn block_output_text(session: &Session, block_id: BlockId) -> Option<String>
             // a soft-wrapped row continues on the next one: no line break
             if !wrapped {
                 out.push('\n');
+                lines += 1;
             }
         }
     }
     // the last row's line break was the terminal's, not the output's
-    if unterminated && out.ends_with('\n') {
-        out.pop();
+    if unterminated && !snap.truncated && snap.text.ends_with('\n') {
+        snap.text.pop();
     }
-    Some(out)
+    Some(snap)
+}
+
+/// The whole buffer of a pane as plain text (Export buffer): every row
+/// scrollback still holds and the screen, soft-wrapped rows joined, the
+/// blank rows below the last text left out.
+pub fn buffer_text(session: &Session) -> String {
+    let scrolled = session.scrolled.load(std::sync::atomic::Ordering::Acquire);
+    let term = session.term.lock();
+    let g = term.primary_grid();
+    let mut out = String::new();
+    for abs in oldest_row(g, scrolled)..scrolled + g.screen_lines() as u64 {
+        if let Some((text, wrapped)) = copy_line(g, scrolled, abs) {
+            out.push_str(&text);
+            if !wrapped {
+                out.push('\n');
+            }
+        }
+    }
+    let kept = out.trim_end_matches(['\n', ' ']).len();
+    out.truncate(kept);
+    out.push('\n');
+    out
+}
+
+/// A block's output as styled runs per line, for "Copy as HTML": colours
+/// resolve like the renderer's (the pane's theme with the program's
+/// palette changes); soft-wrapped rows join into one line. Returns the
+/// lines and the output rows gone from scrollback before them.
+pub fn block_output_runs(
+    session: &Session,
+    theme: &Theme,
+    block_id: BlockId,
+) -> Option<(Vec<Vec<rift_remote::protocol::Run>>, u64)> {
+    let (start, end, skip) = {
+        let blocks = session.blocks.lock().unwrap();
+        let block = blocks.iter().find(|b| b.id == block_id)?;
+        let (start, end) = block.output_range()?;
+        (start, end, block.skip_cols)
+    };
+    let scrolled = session.scrolled.load(std::sync::atomic::Ordering::Acquire);
+    let term = session.term.lock();
+    let pane = term_theme(theme, &term);
+    let runs = GridRuns::new(&term, pane.as_ref().unwrap_or(theme));
+    let g = term.grid();
+    let held = start.max(oldest_row(g, scrolled)).min(end);
+    let mut lines: Vec<Vec<rift_remote::protocol::Run>> = Vec::new();
+    let mut joined = false;
+    for abs in held..end {
+        let rel = abs as i64 - scrolled as i64;
+        if rel < -(g.history_size() as i64) || rel >= g.screen_lines() as i64 {
+            continue;
+        }
+        let mut row = runs.row(Line(rel as i32), g.columns());
+        if abs == start && skip > 0 {
+            // a background block's first row begins after the prompt
+            let mut left = skip;
+            row.retain_mut(|r| {
+                let n = r.text.chars().count();
+                if left >= n {
+                    left -= n;
+                    return false;
+                }
+                r.text = r.text.chars().skip(left).collect();
+                left = 0;
+                true
+            });
+        }
+        if joined && let Some(last) = lines.last_mut() {
+            last.extend(row);
+        } else {
+            lines.push(row);
+        }
+        joined = row_wraps(g, scrolled, abs) == Some(true);
+    }
+    Some((lines, held - start))
 }
 
 /// [`block_output_text`] bounded for the remote gateway
@@ -1492,6 +1781,9 @@ fn output_tail<T>(
     if unterminated && out.ends_with('\n') {
         out.pop();
     }
+    // secrets (`mask_secrets`) never leave masked text behind: before the
+    // bound, which counts the bullets' bytes
+    let out = rift_core::secrets::mask_owned(out);
     let (out, dropped) = rift_remote::bound_output(&out);
     (out, skipped + dropped)
 }
@@ -1571,6 +1863,7 @@ fn output_range<T>(
     if unterminated && reached_end && text.ends_with('\n') {
         text.pop();
     }
+    let text = rift_core::secrets::mask_owned(text);
     rift_remote::OutputPage {
         from: first.unwrap_or(from.max(total)),
         text: rift_remote::bound_page(&text, limit as usize).to_string(),
@@ -1660,6 +1953,18 @@ impl<'a, T> GridRuns<'a, T> {
         // a run's style: (fg, bg, flags), `None` for a default colour
         type Style = (Option<[u8; 3]>, Option<[u8; 3]>, u8);
         let row = &self.term.grid()[line];
+        // secrets (`mask_secrets`) reach the phone masked, cell for cell
+        let mask = rift_core::secrets::active()
+            .map(|m| {
+                let g = self.term.grid();
+                crate::secret_mask::row_cols(
+                    g,
+                    line,
+                    &m,
+                    &crate::secret_mask::pem_body(g, line, line),
+                )
+            })
+            .unwrap_or_default();
         let mut runs: Vec<Run> = Vec::new();
         // the last run's style
         let mut style: Option<Style> = None;
@@ -1704,6 +2009,13 @@ impl<'a, T> GridRuns<'a, T> {
             // one column too wide: a space stands in for it
             if flags.contains(Flags::WIDE_CHAR) && col + 1 == cols {
                 run.text.push(' ');
+                continue;
+            }
+            if !flags.contains(Flags::HIDDEN) && mask.iter().any(|(s, e)| col >= *s && col < *e) {
+                run.text.push(rift_core::secrets::MASK);
+                if flags.contains(Flags::WIDE_CHAR) {
+                    run.text.push(rift_core::secrets::MASK);
+                }
                 continue;
             }
             run.text.push(drawn_char(cell.c, flags));
@@ -1842,7 +2154,7 @@ fn styled_screen(
     blocks: &[Block],
     clear_pad: Option<u64>,
     scrolled: u64,
-    hidden: &std::collections::HashSet<u64>,
+    hidden: &Hidden,
 ) -> Option<rift_remote::Screen> {
     if term.mode().contains(TermMode::ALT_SCREEN) {
         return screen_of(term, theme, true);
@@ -1932,7 +2244,7 @@ fn styled_rows(
         let rule = match dl {
             DisplayLine::Grid(abs) => grid_rule(*abs),
             DisplayLine::Header(bi) => state_rule(&blocks[*bi].state, theme),
-            DisplayLine::Pad => None,
+            DisplayLine::Pad | DisplayLine::Sep => None,
         };
         if let Some(c) = rule {
             rules.push(((lead + i) as u16, hex8(rgb8(c))));
@@ -1945,7 +2257,7 @@ fn styled_rows(
                 grid_row(*abs)
             }
             DisplayLine::Header(bi) => header_runs(&blocks[*bi], theme, cols),
-            DisplayLine::Pad => Vec::new(),
+            DisplayLine::Pad | DisplayLine::Sep => Vec::new(),
         });
     }
     StyledRows {
@@ -1999,7 +2311,7 @@ fn header_runs(block: &Block, theme: &Theme, cols: usize) -> Vec<rift_remote::pr
     let mut cmd = if block.command.is_empty() {
         "—".to_string()
     } else {
-        block.command.replace('\n', " ⏎ ")
+        rift_core::secrets::mask(&block.command).replace('\n', " ⏎ ")
     };
     let room = left_w.saturating_sub(n(chevron)).max(1);
     if n(&cmd) > room {
@@ -2112,7 +2424,7 @@ pub fn remote_blocks(
             };
             Remote {
                 id: b.id,
-                command: b.command,
+                command: rift_core::secrets::mask_owned(b.command),
                 state,
                 exit,
                 duration_ms: duration.as_millis() as u64,
@@ -2143,8 +2455,13 @@ pub fn render(
     view_offset: &mut usize,
     hide_prompt: bool,
     search: Option<&SearchCtx>,
-    selected: Option<BlockId>,
-    filter: Option<&(BlockId, String)>,
+    // the selected blocks (one, or a multi-block selection)
+    selected: &[BlockId],
+    filter: Option<&crate::views::block_filter::BlockFilters>,
+    secrets: Option<(
+        &rift_core::secrets::Masker,
+        &mut crate::secret_mask::PaneSecrets,
+    )>,
 ) -> RenderOutput {
     use std::sync::atomic::Ordering;
     session.dirty.store(false, Ordering::Release);
@@ -2154,15 +2471,15 @@ pub fn render(
         let store = session.blocks.lock().unwrap();
         (store.snapshot(), store.clear_pad())
     };
-    // header note for the filtered block: `filter "q" · shown/total`
-    let filter_note = filter.and_then(|(id, q)| {
-        let (s, e) = blocks.iter().find(|b| b.id == *id)?.output_range()?;
-        let total = (e - s) as usize;
-        Some((
-            *id,
-            format!("filter \"{q}\" · {}/{total} lines", total - hidden.len()),
-        ))
-    });
+    // header notes of the filtered blocks: `filter "q" · shown/total`
+    let filter_notes: Vec<(BlockId, String)> = hidden
+        .counts
+        .iter()
+        .filter_map(|(id, shown, total)| {
+            let f = filter?.get(*id)?;
+            Some((*id, f.note(*shown, *total)))
+        })
+        .collect();
     let scrolled = session.scrolled.load(Ordering::Acquire);
     let term = session.term.lock();
 
@@ -2203,6 +2520,72 @@ pub fn render(
     let start = display.len() - rows - *view_offset;
     let visible = &display[start..start + rows];
 
+    // the overlay scrollbar's list and marks
+    if grid.scrollbar && !alt_screen {
+        use super::scrollbar::TickKind;
+        let mut ticks = Vec::new();
+        for (i, dl) in display.iter().enumerate() {
+            if let DisplayLine::Header(bi) = dl {
+                let b = &blocks[*bi];
+                let failed = matches!(b.state, BlockState::Done { exit: Some(e), .. } if e != 0);
+                ticks.push((
+                    i,
+                    if failed {
+                        TickKind::Failed
+                    } else {
+                        TickKind::Prompt
+                    },
+                ));
+                if b.bookmarked {
+                    ticks.push((i, TickKind::Bookmark));
+                }
+            }
+        }
+        if let Some(ctx) = search.filter(|c| !c.lines.is_empty()) {
+            let shown: Vec<(u64, usize)> = display
+                .iter()
+                .enumerate()
+                .filter_map(|(i, d)| match d {
+                    DisplayLine::Grid(abs) => Some((*abs, i)),
+                    _ => None,
+                })
+                .collect();
+            for abs in &ctx.lines {
+                let at = shown.partition_point(|(a, _)| a < abs);
+                if let Some((a, i)) = shown.get(at)
+                    && a == abs
+                {
+                    ticks.push((*i, TickKind::Match));
+                }
+            }
+        }
+        out.scroll = Some(super::scrollbar::ScrollInfo {
+            len: display.len(),
+            rows,
+            start,
+            ticks,
+        });
+    }
+
+    // secrets on the rows shown (`mask_secrets`)
+    let mut masks = secrets.map(|(masker, state)| {
+        let (lo, hi) = visible
+            .iter()
+            .filter_map(|d| match d {
+                DisplayLine::Grid(abs) => Some(*abs),
+                _ => None,
+            })
+            .fold((u64::MAX, 0), |(lo, hi), a| (lo.min(a), hi.max(a)));
+        crate::secret_mask::FrameMasks::new(
+            masker,
+            state,
+            g,
+            scrolled,
+            (lo.min(hi), hi),
+            std::time::Instant::now(),
+        )
+    });
+
     let cursor = term.renderable_content().cursor;
     let show_cursor = term.mode().contains(TermMode::SHOW_CURSOR) && !grid.editor_owns_cursor;
     let cursor_abs = scrolled + cursor.point.line.0.max(0) as u64;
@@ -2211,23 +2594,31 @@ pub fn render(
     // the last non-blank line, not at the bottom of the blank screen tail
     let live_end = live_end(&term, scrolled);
 
-    // keyboard-selected block: abs row range for the highlight treatment
-    let selected_range = selected.and_then(|id| {
-        blocks
+    // selected blocks: abs row range and color for the highlight treatment;
+    // a selected failed block keeps its error color, any other takes the accent
+    let selected_ranges: Vec<(u64, u64, Color)> = blocks
+        .iter()
+        .filter(|b| selected.contains(&b.id))
+        .map(|b| {
+            (
+                b.prompt_start,
+                b.end.unwrap_or(live_end),
+                selection_color(theme, b),
+            )
+        })
+        .collect();
+    let sel_at = |abs: u64| {
+        selected_ranges
             .iter()
-            .find(|b| b.id == id)
-            .map(|b| (b.prompt_start, b.end.unwrap_or(live_end)))
-    });
-    let row_selected = |abs: u64| selected_range.is_some_and(|(s, e)| abs >= s && abs < e);
-    // a selected failed block keeps its error color; any other takes the accent
-    let sel_color = selected
-        .and_then(|id| blocks.iter().find(|b| b.id == id))
-        .map_or(theme.accent, |b| selection_color(theme, b));
+            .find(|(s, e, _)| abs >= *s && abs < *e)
+            .map(|r| r.2)
+    };
+    let row_selected = |abs: u64| sel_at(abs).is_some();
+    let header_sel_color = |b: &Block| selection_color(theme, b);
 
-    // only the selected block gets a wash; exit state lives on the left
+    // only selected blocks get a wash; exit state lives on the left
     // border and badge alone (design 01: unselected failed blocks are not tinted)
-    let row_bg =
-        |abs: u64| -> Option<Color> { row_selected(abs).then(|| sel_color.with_alpha(0.08)) };
+    let row_bg = |abs: u64| -> Option<Color> { sel_at(abs).map(|c| c.with_alpha(0.08)) };
 
     // block membership for border drawing: abs line → block state color
     let border_color = |abs: u64| block_rule_at(&blocks, theme, live_end, abs);
@@ -2242,12 +2633,18 @@ pub fn render(
                 .iter()
                 .find(|b| *abs >= b.prompt_start && *abs < b.end.unwrap_or(u64::MAX))
                 .map(|b| b.id),
-            DisplayLine::Pad => None,
+            DisplayLine::Pad | DisplayLine::Sep => None,
         }
     };
     let border_h = |r: usize| -> f32 {
         let this = owner(&visible[r]);
-        let next = visible.get(r + 1).and_then(owner);
+        // a filter's separator row continues the block below it
+        let after = if visible.get(r + 1) == Some(&DisplayLine::Sep) {
+            r + 2
+        } else {
+            r + 1
+        };
+        let next = visible.get(after).and_then(owner);
         if this.is_some() && next != this && visible.get(r + 1).is_some() {
             grid.line_h - BLOCK_GAP
         } else {
@@ -2278,7 +2675,8 @@ pub fn render(
                     grid.x
                 } else if let Some(color) = border_color(*abs) {
                     if is_sel {
-                        layer.rect([grid.x, y], [3.0, border_h(r)], sel_color, 0.0);
+                        let c = sel_at(*abs).unwrap_or(theme.accent);
+                        layer.rect([grid.x, y], [3.0, border_h(r)], c, 0.0);
                     } else {
                         layer.rect([grid.x, y], [2.0, border_h(r)], color, 0.0);
                     }
@@ -2314,7 +2712,23 @@ pub fn render(
                     links.push(LinkSpan { col, len, hovered });
                     out.url_hits.push((rect, uri));
                 }
-                render_grid_line(
+                let masked = masks.as_mut().map(|f| f.row(g, *abs)).unwrap_or_default();
+                if let Some(f) = masks.as_mut() {
+                    for s in &masked {
+                        let rect = [
+                            content_x + s.start as f32 * grid.cell_w,
+                            y,
+                            (s.end - s.start) as f32 * grid.cell_w,
+                            grid.line_h,
+                        ];
+                        f.drawn(rect, s.key);
+                    }
+                }
+                let cursor_here = show_cursor && *abs == cursor_abs;
+                if cursor_here {
+                    out.cursor = Some(grid.cursor_style);
+                }
+                out.art_cells += render_grid_line(
                     layer,
                     engine,
                     theme,
@@ -2324,12 +2738,13 @@ pub fn render(
                     scrolled,
                     content_x,
                     y,
-                    show_cursor && *abs == cursor_abs,
+                    cursor_here,
                     cursor.point.column.0,
                     search,
                     sel_range,
                     &links,
                     skip,
+                    &masked,
                 );
             }
             DisplayLine::Pad => {
@@ -2338,10 +2753,41 @@ pub fn render(
                     kind: RowKind::Pad,
                 });
             }
+            DisplayLine::Sep => {
+                // the block's border runs on; a dashed rule marks the gap
+                // between two runs of kept lines
+                let next = visible[r + 1..].iter().find_map(|d| match d {
+                    DisplayLine::Grid(abs) => Some(*abs),
+                    _ => None,
+                });
+                if let Some(abs) = next {
+                    if let Some(bg) = row_bg(abs) {
+                        wash_row(layer, grid, y, bg);
+                    }
+                    if let Some(color) = border_color(abs) {
+                        let (w, c) = match sel_at(abs) {
+                            Some(c) => (3.0, c),
+                            None => (2.0, color),
+                        };
+                        layer.rect([grid.x, y], [w, grid.line_h + 0.5], c, 0.0);
+                    }
+                }
+                let mid = (y + grid.line_h / 2.0).round();
+                let mut x = grid.x + BLOCK_INDENT;
+                while x + 4.0 <= grid.right {
+                    layer.rect([x, mid], [4.0, 1.0], theme.text_muted, 0.0);
+                    x += 8.0;
+                }
+                out.rows.push(RowInfo {
+                    y,
+                    kind: RowKind::Sep,
+                });
+            }
             DisplayLine::Header(bi) => {
                 let block = &blocks[*bi];
-                if selected == Some(block.id) {
-                    wash_row(layer, grid, y, sel_color.with_alpha(0.08));
+                let sel = selected.contains(&block.id);
+                if sel {
+                    wash_row(layer, grid, y, header_sel_color(block).with_alpha(0.08));
                 }
                 // block dividers: a rule above every header but the top
                 // row's, centred in the blank row of `block_spacing = "normal"`
@@ -2357,12 +2803,11 @@ pub fn render(
                     y,
                     kind: RowKind::Header(block.id),
                 });
-                let note = filter_note
-                    .as_ref()
-                    .filter(|(id, _)| *id == block.id)
+                let note = filter_notes
+                    .iter()
+                    .find(|(id, _)| *id == block.id)
                     .map(|(_, n)| n.as_str());
                 let bh = border_h(r);
-                let sel = selected == Some(block.id);
                 render_header(
                     layer, engine, theme, grid, block, y, bh, sel, note, &mut out,
                 );
@@ -2516,6 +2961,8 @@ fn link_color(theme: &Theme, hovered: bool) -> Color {
     }
 }
 
+/// Draws one grid line; returns how many of its cells were drawn as
+/// geometry ([`RenderOutput::art_cells`]).
 #[allow(clippy::too_many_arguments)]
 fn render_grid_line(
     layer: &mut Layer,
@@ -2533,11 +2980,12 @@ fn render_grid_line(
     sel_range: Option<SelectionRange>,
     links: &[LinkSpan],
     from_col: usize,
-) {
+    mask: &[crate::secret_mask::RowSpan],
+) -> usize {
     let g = term.grid();
     let rel = abs as i64 - scrolled as i64;
     if rel < -(g.history_size() as i64) || rel >= g.screen_lines() as i64 {
-        return;
+        return 0;
     }
     let line = Line(rel as i32);
     let row = &g[line];
@@ -2576,6 +3024,9 @@ fn render_grid_line(
     let mut backs: Vec<([f32; 2], [f32; 2], Color, f32)> = Vec::new();
     let mut decos: Vec<([f32; 2], [f32; 2], Color)> = Vec::new();
     let mut blocks: Vec<([f32; 2], [f32; 2], Color)> = Vec::new();
+    // box drawing's diagonals, arcs and Powerline's thin separators
+    let mut strokes: Vec<([f32; 2], [f32; 2], f32, Color)> = Vec::new();
+    let mut art_cells = 0;
 
     for col in from_col.min(cols)..cols {
         let cell = &row[Column(col)];
@@ -2592,7 +3043,12 @@ fn render_grid_line(
                 .unwrap_or_else(|| resolve_color(theme, c)),
             c => resolve_color(theme, c),
         };
-        let mut fg = palette(cell.fg);
+        let cell_fg = if grid.bold_is_bright && flags.contains(Flags::BOLD) {
+            bright_for_bold(cell.fg)
+        } else {
+            cell.fg
+        };
+        let mut fg = palette(cell_fg);
         let mut bg = palette(cell.bg);
         if flags.contains(Flags::INVERSE) {
             std::mem::swap(&mut fg, &mut bg);
@@ -2648,23 +3104,41 @@ fn render_grid_line(
             }
         }
         if is_cursor {
+            let (lh, c) = (grid.line_h, theme.cursor);
             match grid.cursor_style {
                 CursorStyle::Block => {}
-                CursorStyle::Bar => decos.push(([cx - 1.0, y], [2.0, grid.line_h], theme.cursor)),
-                CursorStyle::Underline => {
-                    decos.push(([cx, y + grid.line_h - 2.0], [cell_px, 2.0], theme.cursor))
+                CursorStyle::Bar => decos.push(([cx - 1.0, y], [2.0, lh], c)),
+                CursorStyle::Underline => decos.push(([cx, y + lh - 2.0], [cell_px, 2.0], c)),
+                CursorStyle::DoubleUnderline => {
+                    decos.push(([cx, y + lh - 1.0], [cell_px, 1.0], c));
+                    decos.push(([cx, y + lh - 3.0], [cell_px, 1.0], c));
+                }
+                // an outline; the glyph keeps its own colour
+                CursorStyle::Hollow => {
+                    decos.push(([cx, y], [cell_px, 1.0], c));
+                    decos.push(([cx, y + lh - 1.0], [cell_px, 1.0], c));
+                    decos.push(([cx, y + 1.0], [1.0, lh - 2.0], c));
+                    decos.push(([cx + cell_px - 1.0, y + 1.0], [1.0, lh - 2.0], c));
                 }
             }
         }
 
-        let fg = if block_cursor { theme.bg } else { fg };
         let weight = if flags.contains(Flags::BOLD) {
-            Weight::BOLD
+            Weight(grid.weights.1)
         } else {
-            Weight::NORMAL
+            Weight(grid.weights.0)
         };
         let italic = flags.contains(Flags::ITALIC);
         let mut ch = drawn_char(cell.c, flags);
+        // a secret (`mask_secrets`): one bullet per cell, nothing reflows
+        let masked =
+            !flags.contains(Flags::HIDDEN) && mask.iter().any(|s| col >= s.start && col < s.end);
+        if masked {
+            ch = rift_core::secrets::MASK;
+        }
+        // drawn geometry takes the glyph's colour (the ground on a block
+        // cursor)
+        let art = if block_cursor { theme.bg } else { fg };
         // block elements fill the whole cell (line height included), as
         // in Warp: the font's glyphs stop short of the line box and left
         // gaps in block art (Claude Code's logo)
@@ -2672,7 +3146,7 @@ fn render_grid_line(
             && !flags.contains(Flags::HIDDEN)
             && let Some((parts, alpha)) = block_element(ch)
         {
-            let ink = fg.with_alpha(fg.a * alpha);
+            let ink = art.with_alpha(art.a * alpha);
             // half a pixel of overlap hides the antialiased seams between
             // parts and neighbouring cells (opaque ink only: translucent
             // shades would darken where they overlap)
@@ -2685,7 +3159,37 @@ fn render_grid_line(
                 ));
             }
             ch = ' ';
+            art_cells += 1;
+        } else if attr == LineSize::Single
+            && !flags.contains(Flags::HIDDEN)
+            && let Some(shapes) = super::box_drawing::shapes(
+                ch,
+                [cx, y, cell_px, grid.line_h],
+                grid.font_size,
+                grid.scale,
+                art.a >= 1.0,
+            )
+        {
+            // box drawing and Powerline: lines on device pixels from edge
+            // to edge of the line box, so frames and segments join up
+            for shape in shapes {
+                match shape {
+                    super::box_drawing::Shape::Rect(pos, size) => blocks.push((pos, size, art)),
+                    super::box_drawing::Shape::Line(a, b, w) => strokes.push((a, b, w, art)),
+                }
+            }
+            ch = ' ';
+            art_cells += 1;
         }
+        // text keeps `minimum_contrast` against its cell (geometry above
+        // keeps its colours: Powerline segments pair fg and bg on purpose)
+        let fg = if block_cursor {
+            theme.bg
+        } else if grid.min_contrast > 1.0 && ch != ' ' {
+            fg.with_min_contrast(bg, grid.min_contrast)
+        } else {
+            fg
+        };
         let presentation = resolve_presentation(engine, ch, presentation(cell.zerowidth()));
         if flags.contains(Flags::BLINK) {
             BLINK_DRAWN.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -2736,7 +3240,10 @@ fn render_grid_line(
                 _ => segs.push((col, Vec::new())),
             }
         }
-        break_next = off_grid;
+        // a two-cell character the font draws one cell wide (an East Asian
+        // Ambiguous one with `ambiguous_width = "wide"`) would pull the
+        // text after it a cell to the left: that text starts on its column
+        break_next = off_grid || flags.contains(Flags::WIDE_CHAR);
         let Some((_, spans)) = segs.last_mut() else {
             continue;
         };
@@ -2755,8 +3262,12 @@ fn render_grid_line(
             continue;
         };
         span.text.push(ch);
+        if masked && flags.contains(Flags::WIDE_CHAR) {
+            span.text.push(rift_core::secrets::MASK);
+        }
         // combining marks shape onto their base char (zero advance)
         if !flags.contains(Flags::HIDDEN)
+            && !masked
             && let Some(zw) = cell.zerowidth()
         {
             span.text.extend(zw);
@@ -2773,6 +3284,9 @@ fn render_grid_line(
     }
     for (pos, size, color) in blocks.into_iter().chain(decos) {
         layer.rect(pos, size, color, 0.0);
+    }
+    for (a, b, width, color) in strokes {
+        layer.line(a, b, width, color);
     }
 
     let line_x = x;
@@ -2800,6 +3314,7 @@ fn render_grid_line(
         grid.font_size.to_bits().hash(&mut h);
         grid.line_h.to_bits().hash(&mut h);
         grid.ligatures.hash(&mut h);
+        grid.features.hash(&mut h);
         attr.hash(&mut h);
         grid.cell_w.to_bits().hash(&mut h);
         for s in &spans {
@@ -2831,7 +3346,7 @@ fn render_grid_line(
             let rich: Vec<(&str, Attrs)> = spans
                 .iter()
                 .map(|s| {
-                    let attrs = mono_attrs(grid.ligatures)
+                    let attrs = mono_attrs(grid.ligatures, grid.features)
                         .weight(s.weight)
                         .color(rift_renderer::text_color(s.fg));
                     // only DECDWL lines set tracking
@@ -2856,7 +3371,7 @@ fn render_grid_line(
             buf.set_rich_text(
                 fs,
                 rich,
-                &mono_attrs(grid.ligatures),
+                &mono_attrs(grid.ligatures, grid.features),
                 Shaping::Advanced,
                 None,
             );
@@ -2881,11 +3396,14 @@ fn render_grid_line(
             }
         }
     }
+    art_cells
 }
 
-/// Block element `c` (U+2580–U+259F) as filled parts of the cell, each
-/// `[x0, y0, x1, y1]` in cell fractions, and the ink's opacity (the shades
-/// ░▒▓ are the full cell at 25/50/75 %). None for any other character.
+/// Block element `c` (U+2580–U+259F, and the legacy-computing sextants and
+/// eighth blocks U+1FB00–U+1FB3B, U+1FB70–U+1FB8B) as filled parts of the
+/// cell, each `[x0, y0, x1, y1]` in cell fractions, and the ink's opacity
+/// (the shades ░▒▓ are the full cell at 25/50/75 %). None for any other
+/// character.
 fn block_element(c: char) -> Option<(Vec<[f32; 4]>, f32)> {
     const UL: [f32; 4] = [0.0, 0.0, 0.5, 0.5];
     const UR: [f32; 4] = [0.5, 0.0, 1.0, 0.5];
@@ -2914,6 +3432,60 @@ fn block_element(c: char) -> Option<(Vec<[f32; 4]>, f32)> {
         0x259D => vec![UR],
         0x259E => vec![UR, LL],
         0x259F => vec![UR, LL, LR],
+        // sextants: a 2×3 grid, bit 0 the top left, row by row; the codes
+        // skip the patterns ▌ ▐ █ (and blank) already encoded above
+        n @ 0x1FB00..=0x1FB3B => {
+            let mut bits = n - 0x1FB00 + 1;
+            if bits >= 21 {
+                bits += 1;
+            }
+            if bits >= 42 {
+                bits += 1;
+            }
+            (0..6)
+                .filter(|i| bits & (1 << i) != 0)
+                .map(|i| {
+                    let (x, y) = ((i % 2) as f32 / 2.0, (i / 2) as f32 / 3.0);
+                    [x, y, x + 0.5, y + 1.0 / 3.0]
+                })
+                .collect()
+        }
+        // one-eighth columns 2–7, then rows 2–7
+        n @ 0x1FB70..=0x1FB75 => {
+            let x = eighth(n - 0x1FB70 + 1);
+            vec![[x, 0.0, x + eighth(1), 1.0]]
+        }
+        n @ 0x1FB76..=0x1FB7B => {
+            let y = eighth(n - 0x1FB76 + 1);
+            vec![[0.0, y, 1.0, y + eighth(1)]]
+        }
+        // one-eighth frames: left and lower, left and upper, right and
+        // upper, right and lower, upper and lower; rows 1, 3, 5 and 8
+        0x1FB7C => vec![[0.0, 0.0, eighth(1), 1.0], [0.0, eighth(7), 1.0, 1.0]],
+        0x1FB7D => vec![[0.0, 0.0, eighth(1), 1.0], [0.0, 0.0, 1.0, eighth(1)]],
+        0x1FB7E => vec![[eighth(7), 0.0, 1.0, 1.0], [0.0, 0.0, 1.0, eighth(1)]],
+        0x1FB7F => vec![[eighth(7), 0.0, 1.0, 1.0], [0.0, eighth(7), 1.0, 1.0]],
+        0x1FB80 => vec![[0.0, 0.0, 1.0, eighth(1)], [0.0, eighth(7), 1.0, 1.0]],
+        0x1FB81 => [0, 2, 4, 7]
+            .map(|r| [0.0, eighth(r), 1.0, eighth(r + 1)])
+            .to_vec(),
+        // upper 2, 3, 5, 6, 7 eighths; right 2, 3, 5, 6, 7 eighths
+        n @ 0x1FB82..=0x1FB86 => {
+            vec![[
+                0.0,
+                0.0,
+                1.0,
+                eighth([2, 3, 5, 6, 7][(n - 0x1FB82) as usize]),
+            ]]
+        }
+        n @ 0x1FB87..=0x1FB8B => {
+            vec![[
+                1.0 - eighth([2, 3, 5, 6, 7][(n - 0x1FB87) as usize]),
+                0.0,
+                1.0,
+                1.0,
+            ]]
+        }
         _ => return None,
     };
     Some((parts, 1.0))
@@ -3078,7 +3650,7 @@ fn render_header(
     let cmd = if block.command.is_empty() {
         "—".to_string()
     } else {
-        block.command.replace('\n', " ⏎ ")
+        rift_core::secrets::mask(&block.command).replace('\n', " ⏎ ")
     };
     // the collapsed-output note ("4 lines hidden"), when no filter note
     let hidden_note = match block.output_range() {
@@ -3613,6 +4185,34 @@ mod tests {
         assert!(s.lines[1..].iter().all(Vec::is_empty));
     }
 
+    /// `mask_secrets`: what the gateway sends a phone (screens, output
+    /// tails and pages) carries the secrets masked, cell for cell.
+    #[test]
+    fn the_phone_gets_secrets_masked() {
+        let token = format!("ghp_{}", "FAKE0123".repeat(5));
+        let bullets = "•".repeat(token.len());
+        rift_core::secrets::set_active(Some(std::sync::Arc::new(
+            rift_core::secrets::Masker::new(&[]).unwrap(),
+        )));
+        let (t, _) = fed(80, 4, 100, format!("\x1b[?1049hkey {token} 日").as_bytes());
+        let screen = screen_of(&t, &Theme::default(), false).unwrap();
+        let (o, scrolled) = fed(80, 6, 100, format!("out {token}\r\nnext\r\n").as_bytes());
+        let (tail, _) = output_tail(&o, scrolled, (0, Some(2), false));
+        let page = output_range(&o, scrolled, (0, Some(2), false), 0, 10);
+        rift_core::secrets::set_active(None);
+        let row: String = screen.lines[0].iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(row, format!("key {bullets} 日"));
+        assert_eq!(tail, format!("out {bullets}\nnext\n"));
+        assert_eq!(page.text, tail);
+        // masking off: the text as printed
+        let (o, scrolled) = fed(80, 6, 100, format!("out {token}\r\n").as_bytes());
+        assert!(
+            output_tail(&o, scrolled, (0, Some(1), false))
+                .0
+                .contains(&token)
+        );
+    }
+
     #[test]
     fn remote_screen_uses_the_panes_theme_and_crops_big_screens() {
         let theme = Theme::default();
@@ -3989,6 +4589,7 @@ mod tests {
             cwd: None,
             cwd_remote: false,
             branch: None,
+            host: None,
             restored: false,
             replayed: false,
             finished_at: None,
@@ -4055,7 +4656,7 @@ mod tests {
                 None,
                 8,
                 None,
-                &std::collections::HashSet::new(),
+                &Hidden::default(),
                 spaced,
             )
         };
@@ -4100,7 +4701,7 @@ mod tests {
             None,
             4,
             None,
-            &std::collections::HashSet::new(),
+            &Hidden::default(),
             true,
         );
         assert_eq!(d[0], Header(0));
@@ -4165,6 +4766,82 @@ mod tests {
     }
 
     #[test]
+    fn bold_is_bright_maps_the_eight_ansi_colours() {
+        use ansi::Color as C;
+        assert_eq!(
+            bright_for_bold(C::Named(NamedColor::Red)),
+            C::Named(NamedColor::BrightRed)
+        );
+        assert_eq!(
+            bright_for_bold(C::Named(NamedColor::Black)),
+            C::Named(NamedColor::BrightBlack)
+        );
+        assert_eq!(bright_for_bold(C::Indexed(7)), C::Indexed(15));
+        // already bright, the 256-colour cube, truecolour and the default
+        // foreground stay
+        for c in [
+            C::Named(NamedColor::BrightRed),
+            C::Named(NamedColor::Foreground),
+            C::Indexed(8),
+            C::Indexed(196),
+            C::Spec(ansi::Rgb { r: 1, g: 2, b: 3 }),
+        ] {
+            assert_eq!(bright_for_bold(c), c);
+        }
+    }
+
+    #[test]
+    fn feature_lists_are_interned() {
+        let a = intern_features(vec![(*b"ss01", 1), (*b"zero", 1)]);
+        let b = intern_features(vec![(*b"ss01", 1), (*b"zero", 1)]);
+        assert!(std::ptr::eq(a, b), "one copy per distinct list");
+        assert_eq!(a, &[(*b"ss01", 1), (*b"zero", 1)]);
+        let c = intern_features(vec![(*b"ss01", 0)]);
+        assert!(!std::ptr::eq(a, c));
+    }
+
+    #[test]
+    fn legacy_computing_blocks() {
+        // sextant-1 (U+1FB00): the top-left sixth
+        assert_eq!(
+            block_element('\u{1FB00}'),
+            Some((vec![[0.0, 0.0, 0.5, 1.0 / 3.0]], 1.0))
+        );
+        // U+1FB14 is sextant-235 (pattern 21, ▌, is skipped before it)
+        let (parts, _) = block_element('\u{1FB14}').unwrap();
+        assert_eq!(
+            parts,
+            vec![
+                [0.5, 0.0, 1.0, 1.0 / 3.0],
+                [0.0, 1.0 / 3.0, 0.5, 2.0 / 3.0],
+                [0.0, 2.0 / 3.0, 0.5, 1.0]
+            ]
+        );
+        // the last, sextant-23456 (pattern 62)
+        assert_eq!(block_element('\u{1FB3B}').unwrap().0.len(), 5);
+        // eighth blocks: column 2, row 7, upper quarter, right 7/8
+        assert_eq!(
+            block_element('\u{1FB70}').unwrap().0,
+            vec![[0.125, 0.0, 0.25, 1.0]]
+        );
+        assert_eq!(
+            block_element('\u{1FB7B}').unwrap().0,
+            vec![[0.0, 0.75, 1.0, 0.875]]
+        );
+        assert_eq!(
+            block_element('\u{1FB82}').unwrap().0,
+            vec![[0.0, 0.0, 1.0, 0.25]]
+        );
+        assert_eq!(
+            block_element('\u{1FB8B}').unwrap().0,
+            vec![[0.125, 0.0, 1.0, 1.0]]
+        );
+        // smooth mosaics (U+1FB3C on) and checkers stay glyphs
+        assert!(block_element('\u{1FB3C}').is_none());
+        assert!(block_element('\u{1FB95}').is_none());
+    }
+
+    #[test]
     fn a_docked_panel_takes_rows_from_the_viewport() {
         // 20 rows of 10px from y=100 (bottom 300)
         let grid = GridLayout {
@@ -4177,6 +4854,10 @@ mod tests {
             cols: 100,
             rows: 20,
             ligatures: false,
+            weights: (400, 700),
+            features: &[],
+            min_contrast: 1.0,
+            bold_is_bright: false,
             cursor_style: CursorStyle::Block,
             editor_owns_cursor: true,
             text_blink_on: true,
@@ -4187,6 +4868,7 @@ mod tests {
             spaced_blocks: false,
             block_dividers: false,
             jump_button: false,
+            scrollbar: false,
         };
         // above a bottom editor at 310: the panel covers 245..310
         let v = beside_panel(grid, 245.0, 310.0);
@@ -4230,7 +4912,7 @@ mod tests {
             Some(4),
             3,
             None,
-            &std::collections::HashSet::new(),
+            &Hidden::default(),
             false,
         );
         assert_eq!(d.len(), 8);
@@ -4257,7 +4939,7 @@ mod tests {
                 pad,
                 6,
                 Some(u64::MAX),
-                &std::collections::HashSet::new(),
+                &Hidden::default(),
                 false,
             )
         };
@@ -4330,7 +5012,7 @@ mod tests {
             None,
             6,
             Some(4),
-            &std::collections::HashSet::new(),
+            &Hidden::default(),
             false,
         );
         let StyledRows {
@@ -4488,7 +5170,7 @@ mod tests {
             None,
             9,
             Some(8),
-            &std::collections::HashSet::new(),
+            &Hidden::default(),
             false,
         );
         let StyledRows {

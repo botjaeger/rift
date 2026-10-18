@@ -5,16 +5,20 @@
 //! Rift token is derived from those, following the ratios the builtin TOML
 //! themes use: chrome/gutter sink away from the text, the modal surface lifts
 //! toward it, the hairline border is a low-alpha overlay of the lift color.
+//!
+//! `accent` and `background` may be gradients (`{top, bottom}` or
+//! `{left, right}`): the theme keeps the gradient and derives every other
+//! token from its midpoint.
 
-use super::{BackgroundImage, Color, SyntaxColors, Theme};
+use super::{BackgroundImage, Color, Gradient, SyntaxColors, Theme};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 struct WarpTheme {
     #[serde(default)]
     name: Option<String>,
-    accent: Color,
-    background: Color,
+    accent: WarpColor,
+    background: WarpColor,
     foreground: Color,
     /// `darker` (dark theme, the default) or `lighter`.
     #[serde(default)]
@@ -22,6 +26,74 @@ struct WarpTheme {
     terminal_colors: WarpTerminalColors,
     #[serde(default)]
     background_image: Option<WarpBackgroundImage>,
+}
+
+/// A Warp colour: one hex value, or a two-stop gradient.
+#[derive(Debug, Deserialize)]
+#[serde(try_from = "RawWarpColor")]
+enum WarpColor {
+    Solid(Color),
+    Vertical { top: Color, bottom: Color },
+    Horizontal { left: Color, right: Color },
+}
+
+/// [`WarpColor`] as written, checked into one with an error that says what
+/// is wrong (an untagged enum only says "did not match any variant").
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawWarpColor {
+    Solid(String),
+    Stops(std::collections::BTreeMap<String, String>),
+}
+
+impl TryFrom<RawWarpColor> for WarpColor {
+    type Error = String;
+
+    fn try_from(raw: RawWarpColor) -> Result<Self, String> {
+        let hex = |s: &str| Color::hex(s).map_err(|_| format!("{s:?} is not a #rrggbb colour"));
+        let stops = match raw {
+            RawWarpColor::Solid(s) => return Ok(WarpColor::Solid(hex(&s)?)),
+            RawWarpColor::Stops(stops) => stops,
+        };
+        const KEYS: [&str; 4] = ["top", "bottom", "left", "right"];
+        if let Some(k) = stops.keys().find(|k| !KEYS.contains(&k.as_str())) {
+            return Err(format!(
+                "unknown gradient stop {k:?} (top/bottom or left/right)"
+            ));
+        }
+        let stop = |k: &str| stops.get(k).map(|v| hex(v)).transpose();
+        match (stop("top")?, stop("bottom")?, stop("left")?, stop("right")?) {
+            (Some(top), Some(bottom), None, None) => Ok(WarpColor::Vertical { top, bottom }),
+            (None, None, Some(left), Some(right)) => Ok(WarpColor::Horizontal { left, right }),
+            _ => Err("a gradient needs both top and bottom, or both left and right".into()),
+        }
+    }
+}
+
+impl WarpColor {
+    fn gradient(&self) -> Option<Gradient> {
+        match *self {
+            WarpColor::Solid(_) => None,
+            WarpColor::Vertical { top, bottom } => Some(Gradient {
+                from: top,
+                to: bottom,
+                vertical: true,
+            }),
+            WarpColor::Horizontal { left, right } => Some(Gradient {
+                from: left,
+                to: right,
+                vertical: false,
+            }),
+        }
+    }
+
+    /// The solid colour, or a gradient's midpoint.
+    fn solid(&self) -> Color {
+        match self {
+            WarpColor::Solid(c) => *c,
+            _ => self.gradient().map(|g| g.mid()).unwrap_or(Color::BLACK),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -89,7 +161,8 @@ pub fn parse_warp_yaml(name: &str, src: &str) -> Result<Theme, String> {
         (Color::BLACK, Color::WHITE)
     };
 
-    let bg = w.background;
+    let bg = w.background.solid();
+    let accent = w.accent.solid();
     let fg = w.foreground;
     let normal = w.terminal_colors.normal.as_array();
     let bright = w.terminal_colors.bright.as_array();
@@ -122,17 +195,17 @@ pub fn parse_warp_yaml(name: &str, src: &str) -> Result<Theme, String> {
         text_dim: fg.mix(bg, 0.38),
         text_muted,
 
-        accent: w.accent,
+        accent,
         success: n_green,
         error: n_red,
         warning: n_yellow,
-        cursor: w.accent,
-        selection: w.accent.with_alpha(0.25),
+        cursor: accent,
+        selection: accent.with_alpha(0.25),
         search_match: n_yellow.with_alpha(0.40),
         search_active: orange.with_alpha(0.65),
 
         syntax: SyntaxColors {
-            command: w.accent,
+            command: accent,
             flag: n_cyan,
             string: n_yellow.mix(n_red, 0.3),
             ghost: text_muted,
@@ -143,6 +216,8 @@ pub fn parse_warp_yaml(name: &str, src: &str) -> Result<Theme, String> {
             path: b.path,
             opacity: (b.opacity / 100.0).clamp(0.0, 1.0),
         }),
+        bg_gradient: w.background.gradient(),
+        accent_gradient: w.accent.gradient(),
         ground_alpha: 1.0,
     })
 }
@@ -259,6 +334,62 @@ terminal_colors:
         let img = t.background_image.expect("background_image parsed");
         assert_eq!(img.path, "warp.jpg");
         assert!((img.opacity - 0.5).abs() < 1e-6, "100-scale → 0..1");
+    }
+
+    #[test]
+    fn gradient_accent_and_background_are_read() {
+        let src = DRACULA
+            .replace(
+                "accent: '#bd93f9'",
+                "accent:\n  left: '#ff0000'\n  right: '#0000ff'",
+            )
+            .replace(
+                "background: '#282a36'",
+                "background:\n  top: '#000000'\n  bottom: '#202020'",
+            );
+        let t = parse_warp_yaml("grad", &src).unwrap();
+        let bg = t.bg_gradient.expect("background gradient kept");
+        assert!(bg.vertical);
+        assert_eq!(bg.from, Color::BLACK);
+        assert_eq!(bg.to, Color::hex("#202020").unwrap());
+        assert_eq!(t.bg, bg.mid(), "derived tokens use the midpoint");
+        let accent = t.accent_gradient.expect("accent gradient kept");
+        assert!(!accent.vertical);
+        assert_eq!(accent.from, Color::hex("#ff0000").unwrap());
+        assert_eq!(t.accent, accent.mid());
+        assert_eq!(t.cursor, t.accent);
+        // a solid theme has none
+        let solid = parse_warp_yaml("dracula", DRACULA).unwrap();
+        assert!(solid.bg_gradient.is_none() && solid.accent_gradient.is_none());
+        // TOML round trip keeps them
+        let back = Theme::parse_toml(&toml::to_string(&t).unwrap()).unwrap();
+        assert_eq!(back.bg_gradient, t.bg_gradient);
+        assert_eq!(back.accent_gradient, t.accent_gradient);
+    }
+
+    #[test]
+    fn a_broken_gradient_says_why() {
+        for (gradient, why) in [
+            ("\n  top: '#000000'", "both top and bottom"),
+            (
+                "\n  top: '#000000'\n  right: '#ffffff'",
+                "both top and bottom",
+            ),
+            (
+                "\n  top: '#000000'\n  bottom: '#000000'\n  left: '#000000'",
+                "both top and bottom",
+            ),
+            (
+                "\n  top: '#000000'\n  middle: '#ffffff'",
+                "unknown gradient stop",
+            ),
+            ("\n  top: '#000000'\n  bottom: 'nope'", "not a #rrggbb"),
+            (" 'nope'", "not a #rrggbb"),
+        ] {
+            let src = DRACULA.replace("background: '#282a36'", &format!("background:{gradient}"));
+            let err = parse_warp_yaml("grad", &src).unwrap_err();
+            assert!(err.contains(why), "{gradient:?}: {err}");
+        }
     }
 
     #[test]

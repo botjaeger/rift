@@ -240,6 +240,13 @@ fn read_tail(path: &Path, max: u64, format: Format) -> std::io::Result<Vec<u8>> 
     Ok(buf)
 }
 
+/// Whether a run imports the shell history: a scripted run (`--script`)
+/// does only with `RIFT_SCRIPT_HISTORY=1` (`opt_in`), so its dumps and
+/// shots never show the user's real commands.
+pub fn import_allowed(scripted: bool, opt_in: Option<&std::ffi::OsStr>) -> bool {
+    !scripted || opt_in.is_some_and(|v| v == "1")
+}
+
 /// Load `shell`'s history (see [`source_for`]), dedupe (keep most recent
 /// occurrence), cap. Oldest first.
 pub fn load_shell_history(shell: &str, cap: usize) -> Vec<String> {
@@ -284,6 +291,15 @@ fn load_from(path: &Path, format: Format, max: u64, cap: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_scripted_run_imports_only_when_asked() {
+        use std::ffi::OsStr;
+        assert!(import_allowed(false, None));
+        assert!(!import_allowed(true, None));
+        assert!(!import_allowed(true, Some(OsStr::new("0"))));
+        assert!(import_allowed(true, Some(OsStr::new("1"))));
+    }
 
     #[test]
     fn extended_format() {

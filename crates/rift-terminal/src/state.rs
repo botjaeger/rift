@@ -31,6 +31,14 @@ pub enum ClickTarget {
     WindowDrag,
     TabSelect(usize),
     TabClose(usize),
+    /// A tab group's header (strip pill, rail row): fold / open; a
+    /// double-click renames, a right-click opens its menu.
+    GroupHeader(u64),
+    /// The vertical rail's search field, its panes-view toggle, and a pane
+    /// row of that view.
+    RailSearch,
+    RailPanesToggle,
+    RailPane(PaneId),
     TabNew,
     /// The ⌄ beside +: the profile menu.
     TabProfiles,
@@ -77,10 +85,16 @@ pub enum ClickTarget {
     /// Divider `index` of the split at the path.
     HandleDrag(NodePath, usize),
     JumpToBlock(PaneId, rift_core::BlockId),
+    /// The minimized sticky command header's tab: show the header again.
+    StickyRestore(PaneId),
     /// The jump-to-bottom button over a block running past the pane.
     JumpToBlockEnd(PaneId, rift_core::BlockId),
+    /// The pane's overlay scrollbar (`views::scrollbar`).
+    Scrollbar(PaneId),
     /// The subshell offer's Enable, Don't ask again and ✕.
     Subshell(PaneId, crate::views::subshell::Part),
+    /// The Restart bar of a pane whose program exited: Restart, Close.
+    Exited(PaneId, crate::views::exited::Part),
     // settings overlay controls
     SettingsNoop,
     /// Settings › Remote access › Recent connections while it holds more
@@ -187,6 +201,12 @@ pub struct EditorState {
     /// Edits and motions act at every caret ([`Self::at_each_caret`]); Esc,
     /// a plain click, undo, history and submit go back to one.
     pub extra: Vec<(usize, Option<usize>)>,
+    /// Meta+.: how many commands back the inserted last word came from,
+    /// and where it sits in the buffer (the next Meta+. replaces it).
+    pub last_arg: Option<(usize, std::ops::Range<usize>)>,
+    /// Characters that end a word for word moves and deletes besides
+    /// blanks (`word_delimiters`).
+    pub word_delimiters: String,
 }
 
 /// The span an edit changed, from `before` to `after`: (start, end in
@@ -776,25 +796,32 @@ impl EditorState {
         self.replace_range(cut..self.cursor, "");
     }
 
-    /// Whitespace-delimited word start left of the cursor.
+    /// A blank or a `word_delimiters` character: where words end.
+    fn is_word_end(&self, c: char) -> bool {
+        c.is_whitespace() || self.word_delimiters.contains(c)
+    }
+
+    /// Start of the word left of the cursor (words end at blanks and
+    /// `word_delimiters`).
     fn word_left_target(&self) -> usize {
-        let trimmed = self.buffer[..self.cursor].trim_end();
+        let trimmed = self.buffer[..self.cursor].trim_end_matches(|c| self.is_word_end(c));
         // step past the whole whitespace char: U+3000/U+00A0 are multi-byte
         let i = trimmed
             .char_indices()
-            .rfind(|&(_, c)| c.is_whitespace())
+            .rfind(|&(_, c)| self.is_word_end(c))
             .map(|(i, c)| i + c.len_utf8())
             .unwrap_or(0);
         // a space carrying a combining mark is one cluster: never stop inside it
         grapheme_floor(&self.buffer, i)
     }
 
-    /// Whitespace-delimited word end right of the cursor.
+    /// End of the word right of the cursor (words end at blanks and
+    /// `word_delimiters`).
     fn word_right_target(&self) -> usize {
         let rest = &self.buffer[self.cursor..];
-        let skipped = rest.len() - rest.trim_start().len();
+        let skipped = rest.len() - rest.trim_start_matches(|c| self.is_word_end(c)).len();
         let word = &rest[skipped..];
-        let end = word.find(char::is_whitespace).unwrap_or(word.len());
+        let end = word.find(|c| self.is_word_end(c)).unwrap_or(word.len());
         grapheme_ceil(&self.buffer, self.cursor + skipped + end)
     }
 
@@ -1023,6 +1050,10 @@ pub struct PaneState {
     pub session: Session,
     pub view_offset: usize,
     pub last_display_len: usize,
+    /// The last frame's grid cursor shape when it drew one, and how many
+    /// cells it drew as geometry (box drawing, blocks, Powerline; dump).
+    pub drawn_cursor: Option<rift_core::CursorStyle>,
+    pub art_cells: usize,
     pub editor: EditorState,
     pub git: Option<GitInfo>,
     pub last_git_cwd: Option<String>,
@@ -1052,11 +1083,18 @@ pub struct PaneState {
     pub url_hits: Vec<([f32; 4], String)>,
     /// The sticky command header shown at the top last frame: (rect, block).
     pub sticky_hit: Option<([f32; 4], rift_core::BlockId)>,
+    /// This pane's sticky command header is minimized to a small tab at
+    /// the top right (`toggle_sticky_header`; a click on it restores).
+    pub sticky_minimized: bool,
     /// Keyboard-selected block (⌘↑/⌘↓), target of ⇧⌘C / ⌘I / ⌃M / ⌘B.
     pub selected_block: Option<rift_core::BlockId>,
-    /// Per-block output filter (Warp block filter): only output lines of
-    /// the block containing the query (case-insensitive) are shown.
-    pub filter: Option<(rift_core::BlockId, String)>,
+    /// Multi-block selection (⌘-click, ⇧-click, ⇧↑ ⇧↓, ⌘A): every selected
+    /// block, `selected_block` among them; it counts only while it holds
+    /// `selected_block` (see [`PaneState::selected_blocks`]).
+    pub block_selection: Vec<rift_core::BlockId>,
+    /// Per-block output filters (Warp block filter,
+    /// `crate::views::block_filter`).
+    pub filter: crate::views::block_filter::BlockFilters,
     /// Local fix for the last failed command (shown in the empty editor).
     pub correction: Option<String>,
     /// The offer to load Rift's hooks in the subshell its command started.
@@ -1080,6 +1118,14 @@ pub struct PaneState {
     /// What the pane was opened with (profile name, own shell and args):
     /// kept by duplicate, save-layout and restore.
     pub launch: rift_core::profiles::PaneLaunch,
+    /// The pane's own colour scheme (its launch's `theme`, else its
+    /// profile's): the theme's name and the loaded theme its terminal
+    /// content renders in. `None`: the window theme.
+    pub theme: Option<(String, Box<rift_core::Theme>)>,
+    /// The overlay scrollbar's state (`scrollbar`, `views::scrollbar`).
+    pub scrollbar: crate::views::scrollbar::PaneScrollbar,
+    /// Masked secrets on screen and the ones revealed (`mask_secrets`).
+    pub secrets: crate::secret_mask::PaneSecrets,
     /// The program the pane started (its integration, completions and
     /// labels follow its basename); empty: not known (the global shell).
     pub program: String,
@@ -1089,14 +1135,46 @@ pub struct PaneState {
     pub agent_status: Option<crate::agent_status::AgentStatus>,
     /// Rich input over the running program (`crate::composer`).
     pub composer: crate::composer::Composer,
+    /// Its program exited and the pane stays (`close_on_exit`): the exit
+    /// code, -1 when none is known. The Restart bar shows.
+    pub exited: Option<i32>,
 }
 
 impl PaneState {
+    /// The selected blocks, oldest first: the multi-block selection while it
+    /// holds `selected_block`, else `selected_block` alone.
+    pub fn selected_blocks(&self) -> Vec<rift_core::BlockId> {
+        let Some(sel) = self.selected_block else {
+            return Vec::new();
+        };
+        if self.block_selection.contains(&sel) {
+            let mut all = self.block_selection.clone();
+            all.sort_unstable();
+            all.dedup();
+            all
+        } else {
+            vec![sel]
+        }
+    }
+
+    /// Drop a multi-block selection that no longer holds `selected_block`
+    /// (the selection was cleared or moved by a single-block path).
+    pub fn settle_block_selection(&mut self) {
+        if self
+            .selected_block
+            .is_none_or(|s| !self.block_selection.contains(&s))
+        {
+            self.block_selection.clear();
+        }
+    }
+
     pub fn new(session: Session) -> Self {
         PaneState {
             session,
             view_offset: 0,
             last_display_len: 0,
+            drawn_cursor: None,
+            art_cells: 0,
             editor: EditorState::default(),
             git: None,
             last_git_cwd: None,
@@ -1112,8 +1190,10 @@ impl PaneState {
             has_selection: false,
             url_hits: Vec::new(),
             sticky_hit: None,
+            sticky_minimized: false,
             selected_block: None,
-            filter: None,
+            block_selection: Vec::new(),
+            filter: Default::default(),
             correction: None,
             subshell: None,
             correction_checked: None,
@@ -1124,10 +1204,14 @@ impl PaneState {
             fit: None,
             base_grid: None,
             launch: Default::default(),
+            theme: None,
+            scrollbar: Default::default(),
+            secrets: Default::default(),
             program: String::new(),
             agent_run: None,
             agent_status: None,
             composer: Default::default(),
+            exited: None,
         }
     }
 
@@ -1192,6 +1276,9 @@ impl PaneState {
     /// spin). A coding agent that sits at its own prompt waiting for you
     /// still runs as a command, but is not working: no spinner (Warp).
     pub fn running(&self) -> bool {
+        if self.exited.is_some() {
+            return false;
+        }
         use rift_core::notifications::{Agent, agent_idle};
         let agent = {
             let blocks = self.session.blocks.lock().unwrap();
@@ -1215,7 +1302,9 @@ impl PaneState {
     /// Any command runs in this pane, working or not (the tab's Elapsed
     /// clock counts an agent at its prompt until it exits).
     pub fn command_running(&self) -> bool {
-        self.session.blocks.lock().unwrap().any_running() || self.running()
+        // its program ended: nothing runs, whatever its last block says
+        self.exited.is_none()
+            && (self.session.blocks.lock().unwrap().any_running() || self.running())
     }
 
     /// Clear this pane's terminal selection (cheap no-op when none).
@@ -1239,8 +1328,9 @@ pub struct TabState {
     pub zoomed: Option<PaneId>,
     /// User-set name (rename); wins over the OSC title and the cwd.
     pub custom_title: Option<String>,
-    /// Tab color (index into `TAB_COLORS`).
-    pub color: Option<usize>,
+    /// The tab's own colour (a named one or any hex); a
+    /// `[[tab_color_rules]]` colour shows only while this is none.
+    pub color: Option<rift_core::tab_color::TabColor>,
     /// ⌥⌘I: editor submissions and raw keys go to every pane of the tab.
     pub sync_inputs: bool,
     /// When the tab's first command was submitted (the Elapsed chip); wall
@@ -1249,11 +1339,20 @@ pub struct TabState {
     /// Time a command ran in the tab (`elapsed_counts = "running"`); always
     /// tracked, shown only in that mode.
     pub clock: rift_core::tab_clock::TabClock,
+    /// When the tab was last the active one (a counter; 0: never), for
+    /// ⌃Tab's most-recently-used order.
+    pub last_used: u64,
+    /// Pinned: kept first in the strip and the rail, compact (`tab_groups`).
+    pub pinned: bool,
+    /// The tab group it belongs to (`TabGroup::id`).
+    pub group: Option<u64>,
+    /// Picked with ⌘-click / ⇧-click for "Group tabs".
+    pub picked: bool,
 }
 
 /// Tab color names, in menu order (Warp's palette); rendered from theme ANSI
 /// colors so they follow the theme.
-pub const TAB_COLORS: [&str; 6] = ["red", "green", "yellow", "blue", "magenta", "cyan"];
+pub const TAB_COLORS: [&str; 6] = rift_core::tab_color::NAMES;
 
 impl TabState {
     pub fn new(pane: PaneState) -> Self {
@@ -1270,6 +1369,10 @@ impl TabState {
             sync_inputs: false,
             started: None,
             clock: Default::default(),
+            last_used: 0,
+            pinned: false,
+            group: None,
+            picked: false,
         }
     }
 
@@ -1870,6 +1973,36 @@ mod tests {
         e.mv_right();
         e.mv_right();
         assert_eq!(e.cursor, 5);
+    }
+
+    #[test]
+    fn word_delimiters_end_words_for_moves_and_deletes() {
+        let mut e = EditorState::default();
+        e.insert("cd src/app/main.rs");
+        // blanks only by default: one word
+        e.word_left();
+        assert_eq!(e.cursor, 3);
+        let mut e = EditorState {
+            word_delimiters: "/.".into(),
+            ..Default::default()
+        };
+        e.insert("cd src/app/main.rs");
+        e.word_left();
+        assert_eq!(e.cursor, 16); // "rs"
+        e.word_left();
+        assert_eq!(e.cursor, 11); // "main" (the "." skipped)
+        e.word_left();
+        assert_eq!(e.cursor, 7); // "app"
+        e.word_right();
+        assert_eq!(e.cursor, 10); // end of "app"
+        e.word_right();
+        assert_eq!(e.cursor, 15); // end of "main"
+        e.end();
+        e.delete_word_back();
+        assert_eq!(e.buffer, "cd src/app/main.");
+        e.cursor = 3;
+        e.delete_word_forward();
+        assert_eq!(e.buffer, "cd /app/main.");
     }
 
     #[test]

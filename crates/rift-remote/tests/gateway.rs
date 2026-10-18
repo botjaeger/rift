@@ -498,6 +498,8 @@ fn start(tweak: impl FnOnce(&mut Config)) -> Env {
     cfg.pane_poll = Duration::from_millis(10);
     cfg.topology_poll = Duration::from_millis(50);
     cfg.devices_poll = Duration::from_millis(100);
+    // readable sequences; `a_resume_from_an_earlier_gateway_run_…` uses the real base
+    cfg.seq_base = Some(0);
     tweak(&mut cfg);
     let gw = serve(TcpListener::bind("127.0.0.1:0").unwrap(), fake.clone(), cfg).unwrap();
     let addr = gw.local_addr();
@@ -1783,6 +1785,41 @@ fn after_older_than_the_ring_gets_a_snapshot() {
         json!({"t":"subscribe","pane":12,"after":n + 50}),
     );
     assert_eq!(recv_t(&mut other, "snapshot")["seq"], n);
+}
+
+/// A phone resuming after the gateway restarted holds the seq of the earlier
+/// run. The new run's ring starts at 1 and is contiguous, so without a
+/// per-run base a small `after` was answered with updates on top of the
+/// phone's stale blocks instead of a snapshot.
+#[test]
+fn a_resume_from_an_earlier_gateway_run_gets_a_snapshot_not_a_replay() {
+    let env = start(|c| c.seq_base = None);
+    let fake = &env.fake;
+    let (key, mut watcher, _) = env.pair(Permission::View);
+    put(
+        &mut watcher,
+        json!({"t":"subscribe","pane":12,"after":null}),
+    );
+    let base = recv_t(&mut watcher, "snapshot")["seq"].as_u64().unwrap();
+    // the start time in milliseconds: far above any seq an earlier run reached
+    assert!(base > 1_000_000_000_000, "{base}");
+    for n in 1..=5 {
+        fake.edit(12, |b| b[1].output = format!("v{n}\n"));
+        await_seq(&mut watcher, base + n);
+    }
+    // the seq the phone applied in a run that is gone
+    let mut phone = env.login(&key);
+    put(&mut phone, json!({"t":"subscribe","pane":12,"after":3}));
+    let s = recv_t(&mut phone, "snapshot");
+    assert_eq!(s["seq"], base + 5);
+    assert_eq!(s["blocks"][1]["output"], "v5\n");
+    // a resume from this run still replays
+    let mut again = env.login(&key);
+    put(
+        &mut again,
+        json!({"t":"subscribe","pane":12,"after":base + 3}),
+    );
+    assert_eq!(recv_t(&mut again, "update")["seq"], base + 4);
 }
 
 #[test]

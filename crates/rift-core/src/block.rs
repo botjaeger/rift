@@ -3,9 +3,21 @@ use std::time::{Duration, Instant};
 pub type BlockId = u64;
 /// Monotone absolute line index (never reused, survives scrollback trim).
 pub type AbsLine = u64;
-/// A transcript block's (duration, directory, exact command, directory is
-/// on another host), for [`BlockStore::mark_restored`].
-pub type Restored = (Duration, Option<String>, String, bool);
+/// What a transcript kept of a block, for [`BlockStore::mark_restored`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Restored {
+    pub duration: Duration,
+    pub cwd: Option<String>,
+    /// The exact command.
+    pub command: String,
+    /// `cwd` is on another host.
+    pub remote: bool,
+    pub branch: Option<String>,
+    /// The other host's name, when it was recorded.
+    pub host: Option<String>,
+    /// When it finished, when that was recorded.
+    pub finished_at: Option<std::time::SystemTime>,
+}
 
 /// Where a block's command ran ([`BlockStore::output_dir`]).
 #[derive(Debug, Clone, PartialEq)]
@@ -54,6 +66,8 @@ pub struct Block {
     pub cwd_remote: bool,
     /// Git branch when the command ran (header context line).
     pub branch: Option<String>,
+    /// The host `cwd` is on, when it is another one (its OSC 7 host name).
+    pub host: Option<String>,
     /// Replayed from a saved transcript: the command is not running and
     /// the output is from a previous session.
     pub restored: bool,
@@ -290,6 +304,7 @@ impl BlockStore {
             cwd: None,
             cwd_remote: false,
             branch: None,
+            host: None,
             restored: false,
             replayed: false,
             finished_at: None,
@@ -387,6 +402,7 @@ impl BlockStore {
                 cwd: None,
                 cwd_remote: false,
                 branch: None,
+                host: None,
                 restored: false,
                 replayed: self.replaying,
                 finished_at: Some(wall),
@@ -413,13 +429,17 @@ impl BlockStore {
             .iter_mut()
             .rev()
             .filter(|b| matches!(b.state, BlockState::Done { .. }));
-        for (b, (d, cwd, command, remote)) in done.zip(meta.iter().rev()) {
+        for (b, m) in done.zip(meta.iter().rev()) {
             if let BlockState::Done { duration, .. } = &mut b.state {
-                *duration = *d;
+                *duration = m.duration;
             }
-            b.cwd = cwd.clone();
-            b.cwd_remote = *remote;
-            b.command = command.clone();
+            b.cwd = m.cwd.clone();
+            b.cwd_remote = m.remote;
+            b.command = m.command.clone();
+            b.branch = m.branch.clone();
+            b.host = m.host.clone().filter(|_| m.remote);
+            // the replay's own time is not when it ran: unknown unless kept
+            b.finished_at = m.finished_at;
             b.restored = true;
         }
     }
@@ -436,6 +456,17 @@ impl BlockStore {
             if b.branch.is_none() {
                 b.branch = branch;
             }
+        }
+    }
+
+    /// The other host's name for the newest block, when its directory is
+    /// remote and no name is set yet.
+    pub fn stamp_host(&mut self, host: Option<String>) {
+        if let Some(b) = self.blocks.back_mut()
+            && b.cwd_remote
+            && b.host.is_none()
+        {
+            b.host = host.filter(|h| !h.is_empty());
         }
     }
 
@@ -657,6 +688,50 @@ impl BlockStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restored_blocks_keep_their_branch_host_and_time_or_none() {
+        let mut s = BlockStore::default();
+        for (i, cmd) in ["deploy", "ls"].iter().enumerate() {
+            let at = i as AbsLine * 3;
+            s.on_prompt_start(at);
+            s.on_command_start(at, 2);
+            s.on_output_start(at + 1, cmd.to_string());
+            s.on_done(at + 2, Some(0));
+        }
+        s.on_prompt_start(6);
+        let when = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        s.mark_restored(&[
+            Restored {
+                command: "deploy".into(),
+                cwd: Some("/srv".into()),
+                remote: true,
+                branch: Some("main".into()),
+                host: Some("prod-1".into()),
+                finished_at: Some(when),
+                ..Default::default()
+            },
+            Restored {
+                command: "ls".into(),
+                // a host name without a remote directory means nothing
+                host: Some("ghost".into()),
+                ..Default::default()
+            },
+        ]);
+        let done: Vec<&Block> = s.iter().filter(|b| b.restored).collect();
+        assert_eq!(done[0].host.as_deref(), Some("prod-1"));
+        assert_eq!(done[0].branch.as_deref(), Some("main"));
+        assert_eq!(done[0].finished_at, Some(when));
+        assert_eq!(done[1].host, None);
+        // the replay's own time is not when it ran
+        assert_eq!(done[1].finished_at, None);
+        // stamping: only a remote block takes a host, once
+        s.on_command_start(6, 2);
+        s.stamp_context(Some("/srv".into()), true, None);
+        s.stamp_host(Some("db-1".into()));
+        s.stamp_host(Some("other".into()));
+        assert_eq!(s.last().unwrap().host.as_deref(), Some("db-1"));
+    }
 
     #[test]
     fn lifecycle() {

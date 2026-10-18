@@ -135,6 +135,9 @@ pub fn render(
     cell_w: f32, // still sizes the ❯ prompt offset below
     blink_on: bool,
     focused: bool,
+    // `cursor_hollow_unfocused` outside the focused pane: an outline that
+    // does not blink
+    hollow: bool,
     ghost: &str,
     shell_env: Option<&rift_core::shell_env::ShellEnv>,
     hint: Option<&str>,
@@ -489,26 +492,45 @@ pub fn render(
     // blink; vim's modal cursors never blink. Translucent when a glyph
     // sits on it so the glyph (drawn above quads) stays readable.
     let over_glyph = pane.editor.cursor < buffer.len() || ghost_on;
-    let style = vim_cursor.unwrap_or(config.cursor_style);
-    if blink_on || vim_cursor.is_some() {
-        let (rect_pos, rect_size, alpha) = match style {
-            CursorStyle::Block => (
-                [text_x + prefix_w, cursor_y + CURSOR_TOP],
+    let style = if hollow {
+        CursorStyle::Hollow
+    } else {
+        vim_cursor.unwrap_or(config.cursor_style)
+    };
+    if blink_on || vim_cursor.is_some() || hollow {
+        let at = [text_x + prefix_w, cursor_y + CURSOR_TOP];
+        let underline = |dy: f32| ([at[0], at[1] + CURSOR_H - dy], [8.0, 1.0]);
+        match style {
+            CursorStyle::Block => layer.rect(
+                at,
                 [8.0, CURSOR_H],
-                if over_glyph { 0.45 } else { 1.0 },
-            ),
-            CursorStyle::Bar => (
-                [text_x + prefix_w - 1.0, cursor_y + CURSOR_TOP],
-                [2.0, CURSOR_H],
+                theme.cursor.with_alpha(if over_glyph { 0.45 } else { 1.0 }),
                 1.0,
             ),
-            CursorStyle::Underline => (
-                [text_x + prefix_w, cursor_y + CURSOR_TOP + CURSOR_H - 2.0],
+            CursorStyle::Bar => {
+                layer.rect([at[0] - 1.0, at[1]], [2.0, CURSOR_H], theme.cursor, 1.0)
+            }
+            CursorStyle::Underline => layer.rect(
+                [at[0], at[1] + CURSOR_H - 2.0],
                 [8.0, 2.0],
+                theme.cursor,
                 1.0,
             ),
-        };
-        layer.rect(rect_pos, rect_size, theme.cursor.with_alpha(alpha), 1.0);
+            CursorStyle::DoubleUnderline => {
+                for dy in [1.0, 3.0] {
+                    let (pos, size) = underline(dy);
+                    layer.rect(pos, size, theme.cursor, 0.0);
+                }
+            }
+            CursorStyle::Hollow => layer.bordered(
+                at,
+                [8.0, CURSOR_H],
+                Color::TRANSPARENT,
+                theme.cursor,
+                1.0,
+                1.0,
+            ),
+        }
         // the other carets (multi-cursor): bars, so the text under them reads
         for &(at, _) in &pane.editor.extra {
             let at = at.min(buffer.len());

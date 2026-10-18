@@ -59,8 +59,14 @@ contrast floor is it darkened along its hue (noted in the theme files).
 | `ansi[0..16]` | Warp Dark (`#616161` `#ff8272` `#b4fa72` `#fefdc2` `#a5d5fe` `#ff8ffd` `#d0d1fe` `#f1f1f1`, bright `#8e8e8e` `#ffc4bd` `#d6fcb9` `#fefdd5` `#c1e3fe` `#ffb1fe` `#e5e6fe` `#feffff`) | Program colors |
 
 Builtin themes: `dark-default`, `light-default`, `catppuccin-mocha`,
-`tokyo-night`. A Warp YAML theme is mapped onto the full token set
-(`theme/warp.rs`). `light-default` has a contrast test; keep text tokens
+`tokyo-night`, `catppuccin-latte`, `dracula`, `gruvbox-dark`,
+`gruvbox-light`, `monokai`, `nord`, `one-dark`, `solarized-dark`,
+`solarized-light` (`theme/builtin.rs`). A Warp YAML theme is mapped onto the
+full token set (`theme/warp.rs`); a gradient `background` / `accent` stays a
+two-stop gradient (`bg_gradient`, `accent_gradient`: the ground behind the
+panes of an opaque window, the active tab's top edge), every other token
+taking its midpoint. `light-default` has a strict contrast test and every
+builtin a floor test (`every_builtin_is_readable`); keep text tokens
 readable on `bg` when adding a theme.
 
 The only literal colors in views are the spec's overlay values: black scrims
@@ -118,6 +124,7 @@ glyphon; shaped runs are cached by content.
 | Edit prompt card / chip × / chip picker width, row | 600 px, padding 24 / 18 px / 360 px, 26 px | `prompt_editor::MODAL_W`, `X_W`, `chip_menu::MENU_W` |
 | Code review gutter / hunk toolbar button / maximized file list | ≥ 72 px / 20 px / 300 px, 26 px rows (panel ≥ 760 px) | `GUTTER_MIN`, `TOOL_W`, `SIDEBAR_W` |
 | Block cursor | 8 × 17 px; bar and underline 2 px | `CURSOR_H` |
+| Terminal scrollbar width / inset from the pane edge / shortest thumb / tick | 6 px (pill) / 1 px / 16 px / 2 px | `scrollbar::WIDTH`, `INSET`, `MIN_THUMB`, `TICK_H` |
 
 ## Layers and compositing
 
@@ -317,6 +324,19 @@ No other animation. Motion never delays input.
   tables bordered in `border`, header row semibold on 4.5 % white.
 - **Keyboard focus** (Settings controls): a 2 px `accent` ring, radius 6,
   2 px outside the control; no fill.
+- **Terminal scrollbar** (Windows Terminal's marks): an overlay in the pane's
+  right padding, never over text. Thumb `text_muted` at 45 %; under the
+  pointer or dragged `text_dim` at 70 % over a 6 % `fg` track. Ticks across
+  the bar: prompts `text_dim`, find matches `search_match`, failed commands
+  `error`, bookmarks `accent` (later ones over earlier). It appears and goes
+  without a fade (Motion: no other animation).
+- **Pane colour scheme**: a pane with its own theme draws its body and
+  everything in it (blocks, command line, sticky header) from that theme;
+  its title bar, dividers and wash stay in the window theme. On a translucent
+  window its fill is the least cover that turns the window ground into the
+  pane theme's (`Theme::pane_ground`).
+- **Masked secrets** (`mask_secrets`): one `•` per cell in the cell's own
+  colour, so nothing reflows.
 - **Find highlights**: `search_match`, the current match `search_active`,
   text on a highlight `#1e1e1e` — in the terminal and the file viewer alike.
   The find field clips its query and scrolls it so the caret stays visible;

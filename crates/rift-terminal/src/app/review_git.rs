@@ -323,6 +323,9 @@ impl App {
             self.toast_error("That pane closed: nothing was sent".into());
             return;
         }
+        if self.refuse_read_only(pane) {
+            return;
+        }
         let Some((_, tab)) = self.find_tab_of_pane(pane) else {
             self.toast_error("That pane closed: nothing was sent".into());
             return;

@@ -73,7 +73,7 @@ display-line building). Rendering is verified with the script driver below.
 | `docs` | `CLAUDE.md` and `AGENTS.md` are identical; every relative link in every Markdown file resolves (the vendored crates' upstream docs excepted) |
 | `mobile` | In `mobile/`: `pnpm install --frozen-lockfile`, `pnpm typecheck`, `pnpm lint`, `pnpm test` (vitest; decodes `crates/rift-remote/fixtures/`, the files the Rust protocol tests decode too) |
 | `release` | `cargo build --release --locked` |
-| `ui` | `scripts/ui-smoke.sh`: isolated scripted input, state assertions and PNG capture; requires Python 3 and a display (or `xvfb-run`) |
+| `ui` | `scripts/ui-smoke.sh`: isolated scripted input, state assertions and PNG capture, in `RIFT_UI_SHARDS` (default 2) parallel shards; `--only NAME[,NAME]` runs single sections; requires Python 3 and a display (or `xvfb-run`) |
 | `leak` | `scripts/leak-soak.py` on the release build: a program redrawing every 20 ms, output far past the scrollback limit, one command printing lines without end, and opening and closing tabs, splits, the palette, Settings, find and the explorer, each repeated in one isolated instance; after a warm-up the memory footprint (macOS `phys_footprint`, which counts GPU buffers; Linux `VmRSS`) must not grow more than 8 MB over the measured cycles. Headless on macOS (the display-asleep path); with the window shown under Xvfb (`RIFT_LEAK_SHOWN=1`) in CI and the `linux` gate. `RIFT_LEAK_CYCLES=N` soaks longer |
 | `linux` | `clippy`, `test`, `doc` and a release build (with `examples/phone` and `rift-relay`) inside the Linux docker image, then `shell`, the scripted UI regressions and the memory soak (Xvfb, software Vulkan) in `packaging/ci-ubuntu.Dockerfile`, which installs the CI runner's packages from `packaging/ci-apt.txt` |
 
@@ -81,6 +81,7 @@ display-line building). Rendering is verified with the script driver below.
 scripts/gates.sh                 # fmt clippy test doc shell docs mobile
 scripts/gates.sh all             # + release + ui + leak + linux
 scripts/gates.sh clippy test     # a subset
+scripts/gates.sh ui --only NAME  # only these ui-smoke.py sections
 scripts/gates.sh --list
 ```
 
@@ -132,6 +133,44 @@ config/data directories with notifications disabled and retains captures, state 
 `/tmp/rift-ui-*`. Set `RIFT_TEST_BIN` to test an already built binary;
 otherwise it builds the debug binary first.
 
+`scripts/ui-smoke.py` is one file that runs top to bottom (`RIFT_UI_SHARDS=1`
+runs it that way), but its sections are independent enough to run apart:
+`scripts/ui_smoke_sections.py` parses it at run time. Everything above the
+`# === sections:` line is the preamble; after it, a top-level comment block
+that follows a blank line (or opens with `# ---`) starts a section named after
+its first line. Sections that share state join one group: a name one reads
+whose last assignment (or `del`, `+=`, `x.append`, `x[k] =`, import, `def`) is
+in another, counting what a called function's body reads and changes; a
+directory variable (`x = scratch / "name"`) and its files; the same literal
+path under `scratch`; the preamble's own profile (`cfg`, `data`). Imports,
+`def`s and pure assignments of preamble names (`env = dict(os.environ, …)`)
+run in every shard, and so does the closing epilogue.
+
+```sh
+python3 scripts/ui-smoke.py target/debug/rift-terminal --list          # groups, sections, line ranges, weights
+python3 scripts/ui-smoke.py target/debug/rift-terminal --only dec,mark-mode  # those sections' groups
+python3 scripts/ui-smoke.py target/debug/rift-terminal --shard 2/3     # one shard of three
+scripts/gates.sh ui --only multi-cursor                                # the same through the gate
+```
+
+`--only` takes section names as `--list` prints them, or any part of a
+section's name; the groups holding them run, nothing else. The gate starts
+`RIFT_UI_SHARDS` shards at once (default 2: more loads a laptop past its UI
+timeouts), each with its own scratch directory and log in
+`target/ui-shards/shard-K.log`; shards share groups out by weight (line
+counts, then the seconds each group took, kept in
+`target/ui-smoke-timings.json`), heaviest first, the same way in every
+shard. A failed group is reported with its section, line and the end of its
+traceback, and its shard goes on with the next group, so one run shows every
+failure; the gate fails when any shard failed. Every resource a section uses
+is per run, so shards never meet: a scratch directory from `mkdtemp`, its own
+XDG directories, port 0 for every listener, launchd labels and socket
+directories derived from the data directory. A section that must not run
+beside another goes in `SERIAL` in `scripts/ui_smoke_sections.py` (pinned to
+shard 1; empty today). Adding a section needs nothing but its comment block
+and its own directory (`xx = scratch / "name"`); reading another section's
+variables or files joins its group.
+
 ## Verifying UI changes
 
 `rift-terminal --script <file>` drives the real app. Each step goes through
@@ -157,6 +196,10 @@ XDG_CONFIG_HOME=/tmp/rift-t/cfg XDG_DATA_HOME=/tmp/rift-t/data RIFT_NO_NOTIFY=1 
 
 Always isolate config and data directories: otherwise the scripted instance
 uses your real config, session file, session service and control sockets.
+A scripted run does not import your shell history (`$HISTFILE`,
+`~/.zsh_history`, …) into ⌃R and the palette, so dumps and shots never show
+your real commands; a test that needs an imported history points `HOME` or
+`HISTFILE` at a fixture and sets `RIFT_SCRIPT_HISTORY=1`.
 The command list is the module comment of `crates/rift-terminal/src/script.rs`.
 
 **`--headless`** (debugging and testing only; needs `--script`). The window

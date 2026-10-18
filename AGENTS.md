@@ -28,6 +28,9 @@ blocks, ⌘P = palette).
   `XDG_DATA_HOME` to scratch directories and `RIFT_NO_NOTIFY=1`. Without
   them the scripted instance reads the user's config, writes their session
   file, and can attach to the user's live session service and control sockets.
+  Scripted runs never import the user's shell history (it would show in
+  dumps and shots); a test that needs one points `HOME`/`HISTFILE` at a
+  fixture and sets `RIFT_SCRIPT_HISTORY=1`.
 - Scripted runs keep shells local (no session service) unless
   `RIFT_PERSIST_SESSION` is set, and never check for updates unless
   `RIFT_UPDATE_URL` is set; a test that sets either must kill the
@@ -43,7 +46,8 @@ blocks, ⌘P = palette).
 
 ```sh
 scripts/gates.sh               # quality gates: fmt clippy test doc shell docs mobile
-scripts/gates.sh ui            # scripted UI regressions (scripts/ui-smoke.py)
+scripts/gates.sh ui            # scripted UI regressions (scripts/ui-smoke.py), 2 shards in parallel
+scripts/gates.sh ui --only NAME  # one section's group (python3 scripts/ui-smoke.py BIN --list)
 scripts/gates.sh leak          # memory soak: repeated work must level off (scripts/leak-soak.py)
 scripts/gates.sh all           # + release build + scripted UI + memory soak + Linux gates in docker (beside the others)
 scripts/gates.sh --list        # what each gate runs
@@ -116,7 +120,9 @@ doc): `wait`, `wait_prompt`, `key`, `keyup`, `keyrepeat`, `type`, `paste`,
 must also pass on Linux use key chords instead.
 
 Lasting UI regressions belong in `scripts/ui-smoke.py` (the `ui` gate): add
-steps and assert on the `dump` output there.
+steps and assert on the `dump` output there. A comment block after a blank line
+starts a section; give it its own scratch directory so it runs in any shard
+(docs/development.md, Gates).
 
 Config hot-reload needs no keystrokes: write the scratch `config.toml` while
 the app runs and `shot` the repaint.

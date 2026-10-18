@@ -16,8 +16,8 @@
 //! [`Cluster`] carries that state between characters `Term::input` receives.
 
 use super::width_tables::{
-    EXT_PICT, MC, REGIONAL_INDICATOR, VIRAMA, VS15_NARROWS, VS16_WIDENS, WIDE, WIDTH_BLOCKS,
-    WIDTH_INDEX, WIDTH_LIMIT, ZERO,
+    AMBIGUOUS, EXT_PICT, MC, REGIONAL_INDICATOR, VIRAMA, VS15_NARROWS, VS16_WIDENS, WIDE,
+    WIDTH_BLOCKS, WIDTH_INDEX, WIDTH_LIMIT, ZERO,
 };
 
 const ZWJ: char = '\u{200d}';
@@ -116,12 +116,28 @@ pub struct Cluster {
     /// Where the cursor was after the cluster's last character: a motion
     /// since then ends the cluster.
     pub(crate) cursor_after: Option<(i32, usize, bool)>,
+    /// East Asian Ambiguous characters take two cells (Rift's
+    /// `ambiguous_width = "wide"`); kept across [`Self::reset`].
+    ambiguous_wide: bool,
 }
 
 impl Cluster {
     /// Ends the cluster: the next character starts fresh.
     pub fn reset(&mut self) {
-        *self = Self::default();
+        *self = Self { ambiguous_wide: self.ambiguous_wide, ..Self::default() };
+    }
+
+    /// Measure East Asian Ambiguous characters (outside the Private Use
+    /// Areas) two cells wide instead of one.
+    pub fn set_ambiguous_wide(&mut self, wide: bool) {
+        self.ambiguous_wide = wide;
+    }
+
+    /// [`char_width`], with the ambiguous-width setting applied.
+    #[inline]
+    fn width_of(&self, c: char) -> Option<usize> {
+        let width = char_width(c)?;
+        Some(if width == 1 && self.ambiguous_wide && contains(AMBIGUOUS, c) { 2 } else { width })
     }
 
     /// Classifies the next character of an unbroken run of text (no cursor
@@ -146,7 +162,7 @@ impl Cluster {
         if !('\u{a0}'..'\u{1f1e6}').contains(&c) {
             return None;
         }
-        char_width(c).filter(|&w| w > 0)
+        self.width_of(c).filter(|&w| w > 0)
     }
 
     /// Records the character [`Self::starts_cluster`] accepted, and the
@@ -177,7 +193,7 @@ impl Cluster {
 
     #[inline(never)]
     fn place_other(&mut self, c: char) -> Option<Placement> {
-        let width = char_width(c)?;
+        let width = self.width_of(c)?;
         // a visible character that joins nothing: a new cluster (most
         // non-ASCII text — accents, CJK, symbols)
         if width > 0
@@ -314,6 +330,37 @@ mod tests {
         for c in ['中', '─', '→', 'a'] {
             assert!(!emoji_default(c) && !text_default_emoji(c), "{c}");
         }
+    }
+
+    #[test]
+    fn ambiguous_width() {
+        let wide = |s: &str| {
+            let mut cluster = Cluster::default();
+            cluster.set_ambiguous_wide(true);
+            let mut total = 0;
+            for c in s.chars() {
+                // a cursor motion between characters resets the cluster
+                cluster.reset();
+                total += match cluster.place(c).unwrap() {
+                    Placement::New(w) => w,
+                    _ => 0,
+                };
+            }
+            total
+        };
+        // narrow by default: ± ① α ─ Ж
+        assert_eq!(width("±①α─Ж"), 5);
+        assert_eq!(wide("±①α─Ж"), 10);
+        // the fast path agrees
+        let mut cluster = Cluster::default();
+        cluster.set_ambiguous_wide(true);
+        assert_eq!(cluster.starts_cluster('±'), Some(2));
+        assert_eq!(Cluster::default().starts_cluster('±'), Some(1));
+        // never: ASCII, wide CJK, combining marks, Powerline and Nerd Font
+        // symbols (Private Use Area), plain Latin
+        assert_eq!(wide("a漢e"), 4);
+        assert_eq!(wide("\u{301}"), 0);
+        assert_eq!(wide("\u{e0b0}\u{f015}"), 2);
     }
 
     #[test]

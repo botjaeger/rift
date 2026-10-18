@@ -65,6 +65,12 @@ impl App {
             return;
         }
         self.link_times.push(now);
+        // a pane's own link (`RIFT_PANE_URL`): wherever it is, the
+        // drop-down window included; it opens nothing
+        if let Ok(UriAction::FocusPane(target)) = rift_core::uri::parse(link) {
+            self.focus_pane_link(&target);
+            return;
+        }
         self.enter_focused_window();
         // never into the drop-down window: another ordinary one, else a new one
         let mut fresh_window = false;
@@ -146,8 +152,39 @@ impl App {
                         q.chars().filter(|c| !c.is_control()).take(200).collect();
                 }
             }
+            // taken above, before any window is chosen
+            UriAction::FocusPane(target) => self.focus_pane_link(&target),
         }
         self.save_session();
+        self.redraw_and_raise();
+    }
+
+    /// `rift://action/focus`: raise the window holding the pane and focus
+    /// its tab and pane; one that is gone (closed, or a local shell of an
+    /// earlier run) says so in a toast in the last focused window.
+    fn focus_pane_link(&mut self, target: &rift_core::uri::PaneRef) {
+        use rift_core::uri::PaneRef;
+        let found = match target {
+            PaneRef::Local { run, pane } => (run == rift_core::uri::run_token())
+                .then_some(*pane)
+                .filter(|&id| self.all_panes().any(|p| p.session.id == id)),
+            PaneRef::Service(session) => self
+                .all_panes()
+                .find(|p| p.session.service_id() == Some(*session))
+                .map(|p| p.session.id),
+        };
+        let Some(pane) = found.filter(|&id| self.enter_pane_window(id)) else {
+            self.enter_focused_window();
+            self.toast_error(match target {
+                PaneRef::Local { run, .. } if run != rift_core::uri::run_token() => {
+                    "That pane belonged to an earlier Rift run".to_string()
+                }
+                _ => "That pane is no longer open".to_string(),
+            });
+            self.redraw_and_raise();
+            return;
+        };
+        self.focus_pane_here(pane);
         self.redraw_and_raise();
     }
 

@@ -1,0 +1,38 @@
+# Rift builtin theme — One Dark (Atom One Dark, MIT).
+name = "One Dark"
+
+bg = "#282c34"
+bg_chrome = "#21252b"
+bg_gutter = "#1b1f23"
+surface = "#2c313a"
+border = "#ffffff12"
+pane_border_inactive = "#3e4451"
+
+fg = "#abb2bf"
+text_bright = "#d7dae0"
+text_ui = "#abb2bf"
+text_dim = "#8b929e"
+text_muted = "#6f7683"
+
+accent = "#61afef"
+success = "#98c379"
+error = "#e06c75"
+warning = "#e5c07b"
+cursor = "#528bff"
+selection = "#3e4451"
+search_match = "#e5c07b"
+search_active = "#d19a66"
+
+# One Dark ANSI palette
+ansi = [
+    "#1e2127", "#e06c75", "#98c379", "#e5c07b",
+    "#61afef", "#c678dd", "#56b6c2", "#abb2bf",
+    "#5c6370", "#e06c75", "#98c379", "#d19a66",
+    "#61afef", "#c678dd", "#56b6c2", "#ffffff",
+]
+
+[syntax]
+command = "#61afef"
+flag = "#56b6c2"
+string = "#98c379"
+ghost = "#5c6370"

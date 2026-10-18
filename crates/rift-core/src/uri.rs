@@ -1,6 +1,6 @@
 //! `rift://` links (Warp's `warp://` scheme): open a tab or a window in a
 //! folder, a launch configuration or Tab Config by name, a file in the
-//! editor at a line, or Settings. A link runs no command of its own (a
+//! editor at a line, or Settings; focus a pane by its `RIFT_PANE_ID`. A link runs no command of its own (a
 //! layout with commands asks first) and never runs a file: a tab's `path`
 //! that is not an existing directory is refused, and `open_file` only
 //! opens an existing regular file in the configured editor or the viewer.
@@ -34,6 +34,82 @@ pub enum UriAction {
         line: Option<u32>,
         col: Option<u32>,
     },
+    /// `rift://action/focus?pane=<RIFT_PANE_ID>`: raise the window holding
+    /// that pane and focus its tab and pane.
+    FocusPane(PaneRef),
+}
+
+/// The variable naming the pane's focus link, set in every shell Rift
+/// starts (agent hooks and notification click URLs open it).
+pub const PANE_URL_ENV: &str = "RIFT_PANE_URL";
+/// The variable naming the pane ([`PaneRef::id`]).
+pub const PANE_ID_ENV: &str = "RIFT_PANE_ID";
+
+/// Which pane a focus link names. Pane ids are per process, so a local
+/// shell's carries this run's token (the link goes stale with the run, as
+/// the shell does); a session-service shell's names its service session,
+/// which a later run reattaches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PaneRef {
+    /// `<run token>.<pane id>`: a pane of the Rift run with that token.
+    Local { run: String, pane: u64 },
+    /// `service.<session id>`: the pane showing that durable shell.
+    Service(u64),
+}
+
+impl PaneRef {
+    /// The value of [`PANE_ID_ENV`] (and the link's `pane` parameter).
+    pub fn id(&self) -> String {
+        match self {
+            PaneRef::Local { run, pane } => format!("{run}.{pane}"),
+            PaneRef::Service(session) => format!("service.{session}"),
+        }
+    }
+
+    /// Parse [`PaneRef::id`]; `None` for anything else.
+    pub fn from_id(id: &str) -> Option<PaneRef> {
+        let (head, tail) = id.split_once('.')?;
+        let number = tail
+            .bytes()
+            .all(|b| b.is_ascii_digit())
+            .then(|| tail.parse::<u64>().ok())
+            .flatten()?;
+        if head == "service" {
+            return Some(PaneRef::Service(number));
+        }
+        (!head.is_empty() && head.len() <= 32 && head.bytes().all(|b| b.is_ascii_hexdigit())).then(
+            || PaneRef::Local {
+                run: head.to_string(),
+                pane: number,
+            },
+        )
+    }
+
+    /// The link that focuses this pane.
+    pub fn link(&self) -> String {
+        format!("{SCHEME}://action/focus?pane={}", self.id())
+    }
+
+    /// The shell environment naming this pane.
+    pub fn env(&self) -> Vec<(String, String)> {
+        vec![
+            (PANE_ID_ENV.into(), self.id()),
+            (PANE_URL_ENV.into(), self.link()),
+        ]
+    }
+}
+
+/// This Rift run's token for [`PaneRef::Local`] (hex of the process id and
+/// its start time: a later run, even one reusing the pid, has another).
+pub fn run_token() -> &'static str {
+    static TOKEN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TOKEN.get_or_init(|| {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or_default();
+        format!("{:x}{nanos:016x}", std::process::id())
+    })
 }
 
 /// The link that opens `path` (absolute; a file opens its folder) in a new
@@ -144,6 +220,12 @@ pub fn parse(link: &str) -> Result<UriAction, String> {
     match path.split_once('/').unwrap_or((path, "")) {
         ("action", "new_tab") => folder().map(UriAction::NewTab),
         ("action", "new_window") => folder().map(UriAction::NewWindow),
+        ("action", "focus") => {
+            let id = param("pane").unwrap_or_default();
+            PaneRef::from_id(&id)
+                .map(UriAction::FocusPane)
+                .ok_or_else(|| format!("not a pane: {id}"))
+        }
         ("action", "open_file") => {
             let Some(p) = param("path").filter(|p| !p.is_empty()) else {
                 return Err("the link names no file".into());
@@ -386,6 +468,40 @@ mod tests {
         assert!(opened_url_link("https://example.com/").is_err());
         assert!(opened_url_link(&format!("file://{}/gone/", dir.display())).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pane_focus_links_round_trip() {
+        let local = PaneRef::Local {
+            run: run_token().to_string(),
+            pane: 7,
+        };
+        let durable = PaneRef::Service(42);
+        for r in [&local, &durable] {
+            assert_eq!(PaneRef::from_id(&r.id()).as_ref(), Some(r));
+            assert_eq!(parse(&r.link()), Ok(UriAction::FocusPane(r.clone())));
+            let env = r.env();
+            assert_eq!(env[0], (PANE_ID_ENV.to_string(), r.id()));
+            assert_eq!(env[1], (PANE_URL_ENV.to_string(), r.link()));
+        }
+        assert_eq!(durable.link(), "rift://action/focus?pane=service.42");
+        // one token per run, URL-safe without encoding
+        assert_eq!(run_token(), run_token());
+        assert!(run_token().bytes().all(|b| b.is_ascii_hexdigit()));
+        for bad in [
+            "rift://action/focus",
+            "rift://action/focus?pane=",
+            "rift://action/focus?pane=7",
+            "rift://action/focus?pane=service.",
+            "rift://action/focus?pane=service.-1",
+            "rift://action/focus?pane=service.%2B1",
+            "rift://action/focus?pane=zz.3",
+            "rift://action/focus?pane=.3",
+            "rift://action/focus?pane=ab.3x",
+            "rift://action/focus?pane=ab.99999999999999999999999",
+        ] {
+            assert!(parse(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

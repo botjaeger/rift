@@ -404,6 +404,9 @@ impl App {
             return None;
         }
         let mut tab = self.win.tabs.remove(i);
+        // it leaves its group (the window's own); pinned stays pinned
+        tab.group = None;
+        tab.picked = false;
         if tab.root.contains(VIEWER_PANE) {
             tab.root.remove(VIEWER_PANE);
             if tab.zoomed == Some(VIEWER_PANE) {
@@ -449,6 +452,7 @@ impl App {
             p.has_selection = false;
         }
         self.sync_viewer_pane();
+        self.arrange_tabs();
         Some(MovedTab {
             tab,
             toasts,
@@ -477,6 +481,9 @@ impl App {
         self.win.rename = None;
         self.win.viewer_focus = false;
         self.switch_tab(at);
+        // a pinned tab goes to the pinned ones, a tab dropped inside a
+        // group's run after it
+        self.arrange_tabs();
     }
 
     /// Terminal menu: the pane leaves for a window of its own (a split pane

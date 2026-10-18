@@ -42,13 +42,98 @@ pub enum Block {
         spans: Vec<Span>,
     },
     Quote(Vec<Span>),
-    Code(Vec<String>),
+    /// A fenced or indented code block; `lang` is the fence's info word
+    /// (`sh`, `mermaid`), lowercased, empty when it has none.
+    Code {
+        lang: String,
+        lines: Vec<String>,
+    },
     Rule,
     Table {
         align: Vec<Align>,
         header: Vec<Vec<Span>>,
         rows: Vec<Vec<Vec<Span>>>,
     },
+}
+
+/// Info words of fenced blocks a shell runs.
+const SHELL_LANGS: [&str; 7] = [
+    "sh",
+    "bash",
+    "zsh",
+    "shell",
+    "fish",
+    "console",
+    "shell-session",
+];
+
+/// A code block's command for the viewer's Run button: the block of a
+/// shell language as it stands, or for a session transcript (`console`,
+/// `shell-session`) its `$ ` lines without the prompt (the other lines are
+/// output). `None` for any other language, or nothing to run.
+pub fn shell_command(lang: &str, lines: &[String]) -> Option<String> {
+    if !SHELL_LANGS.contains(&lang) {
+        return None;
+    }
+    let lines: Vec<&str> = if matches!(lang, "console" | "shell-session") {
+        lines
+            .iter()
+            .filter_map(|l| {
+                let t = l.trim_start();
+                t.strip_prefix("$ ").or_else(|| (t == "$").then_some(""))
+            })
+            .collect()
+    } else {
+        lines.iter().map(String::as_str).collect()
+    };
+    let text = lines.join("\n");
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+/// A Mermaid diagram block (shown as its source: there is no renderer).
+pub fn is_mermaid(lang: &str) -> bool {
+    lang == "mermaid"
+}
+
+/// The Markdown file a command printed (`cat README.md`, `bat docs/x.md`,
+/// `less`, `more`, `glow`, `head`, `tail`), for the block's "Open in viewer":
+/// one file argument with a Markdown extension, no pipes, redirections or
+/// command lists. The path is as typed (relative to the block's directory).
+pub fn printed_file(command: &str) -> Option<String> {
+    const PRINTERS: [&str; 8] = [
+        "cat", "bat", "batcat", "less", "more", "glow", "head", "tail",
+    ];
+    if command.contains(['|', '>', '<', ';', '&', '`', '$', '\n']) {
+        return None;
+    }
+    // a quoted or escaped `~` is a literal one the shell did not expand,
+    // but the tokenizer drops the quoting: leave such a command alone
+    if ["'~", "\"~", "\\~"].iter().any(|q| command.contains(q)) {
+        return None;
+    }
+    let words = crate::completion_specs::tokenize(command.trim());
+    let (program, args) = words.split_first()?;
+    if !PRINTERS.contains(&program.as_str()) {
+        return None;
+    }
+    // `head -n 20 x.md`: the count is not a file
+    let mut files: Vec<&String> = Vec::new();
+    let mut skip = false;
+    for a in args {
+        if std::mem::take(&mut skip) {
+            continue;
+        }
+        if matches!(program.as_str(), "head" | "tail") && matches!(a.as_str(), "-n" | "-c") {
+            skip = true;
+        } else if !a.starts_with('-') {
+            files.push(a);
+        }
+    }
+    match files.as_slice() {
+        [f] if is_markdown(std::path::Path::new(f.as_str())) => Some((*f).clone()),
+        _ => None,
+    }
 }
 
 /// Markdown file by extension.
@@ -211,6 +296,13 @@ pub fn parse(lines: &[String]) -> Vec<Block> {
             continue;
         }
         if let Some(f) = fence(line) {
+            let lang = line
+                .trim_start()
+                .trim_start_matches(f.chars().next().unwrap_or('`'))
+                .split(|c: char| c.is_whitespace() || c == '{' || c == ',')
+                .next()
+                .unwrap_or("")
+                .to_ascii_lowercase();
             let mut code = Vec::new();
             i += 1;
             while i < lines.len() && !lines[i].trim_start().starts_with(f) {
@@ -218,7 +310,7 @@ pub fn parse(lines: &[String]) -> Vec<Block> {
                 i += 1;
             }
             i += 1; // closing fence (or end of file)
-            blocks.push(Block::Code(code));
+            blocks.push(Block::Code { lang, lines: code });
             continue;
         }
         if let Some((level, text)) = heading(line) {
@@ -244,7 +336,10 @@ pub fn parse(lines: &[String]) -> Vec<Block> {
             while code.last().is_some_and(|l| l.trim().is_empty()) {
                 code.pop();
             }
-            blocks.push(Block::Code(code));
+            blocks.push(Block::Code {
+                lang: String::new(),
+                lines: code,
+            });
             continue;
         }
         if let Some((indent, marker, text)) = list_item(line) {
@@ -493,7 +588,13 @@ mod tests {
         assert!(matches!(&b[4], Block::Item { marker, .. } if marker == "1."));
         assert!(matches!(&b[5], Block::Quote(s) if plain(s) == "quoted more"));
         assert_eq!(b[6], Block::Rule);
-        assert_eq!(b[7], Block::Code(vec!["cargo run".into()]));
+        assert_eq!(
+            b[7],
+            Block::Code {
+                lang: "sh".into(),
+                lines: vec!["cargo run".into()]
+            }
+        );
         assert_eq!(b.len(), 8);
     }
 
@@ -545,5 +646,81 @@ mod tests {
         assert!(is_markdown(std::path::Path::new("AGENTS.md")));
         assert!(is_markdown(std::path::Path::new("x.MARKDOWN")));
         assert!(!is_markdown(std::path::Path::new("main.rs")));
+    }
+
+    #[test]
+    fn code_blocks_keep_their_language() {
+        let b = doc(
+            "```Bash title=x\nls\n```\n~~~mermaid\ngraph TD\n~~~\n```\nplain\n```\n\n    indented\n",
+        );
+        let langs: Vec<&str> = b
+            .iter()
+            .map(|b| match b {
+                Block::Code { lang, .. } => lang.as_str(),
+                _ => "?",
+            })
+            .collect();
+        assert_eq!(langs, ["bash", "mermaid", "", ""]);
+        assert!(is_mermaid("mermaid") && !is_mermaid("bash"));
+    }
+
+    #[test]
+    fn shell_command_runs_shell_blocks_only() {
+        let l = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            shell_command("sh", &l(&["cd /tmp", "ls -la", ""])).as_deref(),
+            Some("cd /tmp\nls -la")
+        );
+        // a session transcript: the prompted lines, not the output
+        assert_eq!(
+            shell_command("console", &l(&["$ echo hi", "hi", "  $ pwd", "/tmp"])).as_deref(),
+            Some("echo hi\npwd")
+        );
+        assert_eq!(shell_command("console", &l(&["output only"])), None);
+        assert_eq!(shell_command("python", &l(&["print(1)"])), None);
+        assert_eq!(
+            shell_command("", &l(&["ls"])),
+            None,
+            "no info word: not runnable"
+        );
+        assert_eq!(shell_command("mermaid", &l(&["graph TD"])), None);
+        assert_eq!(shell_command("bash", &l(&["", "  "])), None);
+    }
+
+    #[test]
+    fn printed_file_finds_one_markdown_argument() {
+        assert_eq!(printed_file("cat README.md").as_deref(), Some("README.md"));
+        assert_eq!(
+            printed_file("bat --paging=never 'docs/my notes.md'").as_deref(),
+            Some("docs/my notes.md")
+        );
+        assert_eq!(
+            printed_file("glow ~/x.markdown").as_deref(),
+            Some("~/x.markdown")
+        );
+        assert_eq!(
+            printed_file("head -n 20 README.md").as_deref(),
+            Some("README.md")
+        );
+        assert_eq!(printed_file("tail -c 9 a.md").as_deref(), Some("a.md"));
+        for no in [
+            "cat a.md b.md",
+            "cat main.rs",
+            "rm README.md",
+            "cat README.md | head",
+            "cat README.md > out.md",
+            "cat $(ls *.md)",
+            "cat README.md; rm -rf x",
+            "cat",
+            // expansions name some other file
+            "cat `pick`.md",
+            "cat $DIR/x.md",
+            // the shell did not expand a quoted `~`
+            "cat '~/x.md'",
+            "cat \"~/x.md\"",
+            "cat \\~/x.md",
+        ] {
+            assert_eq!(printed_file(no), None, "{no:?}");
+        }
     }
 }

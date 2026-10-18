@@ -1,10 +1,13 @@
 //! The drop-down hotkey window's geometry and platform hooks
-//! (`hotkey_window`): its frame on a screen, the slide, and on macOS the
-//! window level and Spaces behaviour, the pointer's screen, the reduced
+//! (`hotkey_window`): its frame on a screen edge, the slide, and on macOS
+//! the window level and Spaces behaviour, the pointer's and numbered
+//! screens, the reduced
 //! motion setting and handing focus back to the app that had it. The app
 //! side lives in `app/hotkey_window.rs`.
 
 use std::time::Duration;
+
+use rift_core::HotkeyEdge;
 
 /// A rectangle in logical px, top-left origin (winit's window coordinates).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -28,29 +31,69 @@ pub const SLIDE: Duration = Duration::from_millis(150);
 /// Time between two slide steps (about 120 per second).
 pub const SLIDE_STEP: Duration = Duration::from_millis(8);
 
-/// The window's frame on `screen`: full width, at the top edge,
-/// `height_pct` of the screen's height (clamped to 20–100 %).
-pub fn frame(screen: Frame, height_pct: u8) -> Frame {
-    let pct = f64::from(height_pct.clamp(20, 100));
-    Frame {
-        x: screen.x,
-        y: screen.y,
-        w: screen.w,
-        h: (screen.h * pct / 100.0).round().max(1.0),
+/// The window's frame on `screen`, against `edge`: `depth_pct` of the
+/// screen away from the edge (its height at the top or bottom, its width
+/// at the left or right) and `along_pct` along it, centred; both clamped
+/// to 20–100 % and rounded to whole px.
+pub fn frame(screen: Frame, edge: HotkeyEdge, depth_pct: u8, along_pct: u8) -> Frame {
+    let pct = |v: u8| f64::from(v.clamp(20, 100)) / 100.0;
+    let (depth, along) = (pct(depth_pct), pct(along_pct));
+    match edge {
+        HotkeyEdge::Top | HotkeyEdge::Bottom => {
+            let w = (screen.w * along).round().max(1.0);
+            let h = (screen.h * depth).round().max(1.0);
+            Frame {
+                x: screen.x + ((screen.w - w) / 2.0).round(),
+                y: if edge == HotkeyEdge::Top {
+                    screen.y
+                } else {
+                    screen.y + screen.h - h
+                },
+                w,
+                h,
+            }
+        }
+        HotkeyEdge::Left | HotkeyEdge::Right => {
+            let w = (screen.w * depth).round().max(1.0);
+            let h = (screen.h * along).round().max(1.0);
+            Frame {
+                x: if edge == HotkeyEdge::Left {
+                    screen.x
+                } else {
+                    screen.x + screen.w - w
+                },
+                y: screen.y + ((screen.h - h) / 2.0).round(),
+                w,
+                h,
+            }
+        }
     }
 }
 
-/// The window's top edge `elapsed` into a slide toward `frame` (showing)
-/// or away from it (hiding), and whether the slide is over. Off screen is
-/// one window height above the frame; showing eases out, hiding eases in.
-pub fn slide_y(frame: Frame, elapsed: Duration, showing: bool) -> (f64, bool) {
+/// The window's top-left corner `elapsed` into a slide toward `frame`
+/// (showing) or away from it (hiding), and whether the slide is over. Off
+/// screen is one window size past `edge`; showing eases out, hiding eases
+/// in.
+pub fn slide_pos(
+    frame: Frame,
+    edge: HotkeyEdge,
+    elapsed: Duration,
+    showing: bool,
+) -> ((f64, f64), bool) {
     let t = (elapsed.as_secs_f64() / SLIDE.as_secs_f64()).clamp(0.0, 1.0);
     let shown = if showing {
         1.0 - (1.0 - t).powi(3)
     } else {
         1.0 - t.powi(3)
     };
-    (frame.y - frame.h * (1.0 - shown), t >= 1.0)
+    let off = 1.0 - shown;
+    let pos = match edge {
+        HotkeyEdge::Top => (frame.x, frame.y - frame.h * off),
+        HotkeyEdge::Bottom => (frame.x, frame.y + frame.h * off),
+        HotkeyEdge::Left => (frame.x - frame.w * off, frame.y),
+        HotkeyEdge::Right => (frame.x + frame.w * off, frame.y),
+    };
+    (pos, t >= 1.0)
 }
 
 /// A monitor's rectangle in logical px.
@@ -159,6 +202,21 @@ mod mac {
         })
     }
 
+    /// The visible part of screen `index` (0 is the one with the menu bar),
+    /// in winit's coordinates as [`pointer_screen`].
+    pub fn screen_at(index: usize) -> Option<Frame> {
+        let mtm = MainThreadMarker::new()?;
+        let screens = NSScreen::screens(mtm);
+        let primary_h = screens.firstObject()?.frame().size.height;
+        let v = screens.iter().nth(index)?.visibleFrame();
+        Some(Frame {
+            x: v.origin.x,
+            y: primary_h - (v.origin.y + v.size.height),
+            w: v.size.width,
+            h: v.size.height,
+        })
+    }
+
     /// System Settings › Accessibility › Display › Reduce motion.
     pub fn reduce_motion() -> bool {
         NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
@@ -204,7 +262,7 @@ mod tests {
 
     #[test]
     fn frame_spans_the_screen_width_at_its_top_edge() {
-        let f = frame(SCREEN, 40);
+        let f = frame(SCREEN, HotkeyEdge::Top, 40, 100);
         assert_eq!(
             f,
             Frame {
@@ -222,7 +280,7 @@ mod tests {
             h: 1080.0,
         };
         assert_eq!(
-            frame(side, 50),
+            frame(side, HotkeyEdge::Top, 50, 100),
             Frame {
                 x: -1920.0,
                 y: 300.0,
@@ -234,24 +292,58 @@ mod tests {
 
     #[test]
     fn frame_height_clamps_to_20_through_100_percent() {
-        assert_eq!(frame(SCREEN, 0).h, 175.0);
-        assert_eq!(frame(SCREEN, 19).h, 175.0);
-        assert_eq!(frame(SCREEN, 100).h, 875.0);
-        assert_eq!(frame(SCREEN, 255).h, 875.0);
+        let h = |pct| frame(SCREEN, HotkeyEdge::Top, pct, 100).h;
+        assert_eq!(h(0), 175.0);
+        assert_eq!(h(19), 175.0);
+        assert_eq!(h(100), 875.0);
+        assert_eq!(h(255), 875.0);
         // rounded to whole px
-        assert_eq!(frame(SCREEN, 33).h, 289.0);
+        assert_eq!(h(33), 289.0);
+    }
+
+    #[test]
+    fn frame_hangs_from_each_edge_centred_along_it() {
+        let f = |edge| frame(SCREEN, edge, 40, 50);
+        let at = |f: Frame| [f.x, f.y, f.w, f.h];
+        assert_eq!(at(f(HotkeyEdge::Top)), [360.0, 25.0, 720.0, 350.0]);
+        assert_eq!(at(f(HotkeyEdge::Bottom)), [360.0, 550.0, 720.0, 350.0]);
+        // at the sides the depth is a width
+        assert_eq!(at(f(HotkeyEdge::Left)), [0.0, 244.0, 576.0, 438.0]);
+        assert_eq!(at(f(HotkeyEdge::Right)), [864.0, 244.0, 576.0, 438.0]);
+        // the size along the edge clamps like the depth
+        assert_eq!(frame(SCREEN, HotkeyEdge::Top, 40, 0).w, 288.0);
+        assert_eq!(frame(SCREEN, HotkeyEdge::Top, 40, 200).w, 1440.0);
     }
 
     #[test]
     fn slide_starts_off_screen_and_ends_on_the_frame() {
-        let f = frame(SCREEN, 40);
-        assert_eq!(slide_y(f, Duration::ZERO, true), (25.0 - 350.0, false));
-        let (mid, done) = slide_y(f, SLIDE / 2, true);
+        let f = frame(SCREEN, HotkeyEdge::Top, 40, 100);
+        let y = |elapsed, showing| {
+            let ((x, y), done) = slide_pos(f, HotkeyEdge::Top, elapsed, showing);
+            assert_eq!(x, 0.0);
+            (y, done)
+        };
+        assert_eq!(y(Duration::ZERO, true), (25.0 - 350.0, false));
+        let (mid, done) = y(SLIDE / 2, true);
         assert!(!done && mid > 25.0 - 350.0 && mid < 25.0, "{mid}");
-        assert_eq!(slide_y(f, SLIDE, true), (25.0, true));
-        assert_eq!(slide_y(f, SLIDE * 3, true), (25.0, true));
+        assert_eq!(y(SLIDE, true), (25.0, true));
+        assert_eq!(y(SLIDE * 3, true), (25.0, true));
         // hiding runs the other way
-        assert_eq!(slide_y(f, Duration::ZERO, false), (25.0, false));
-        assert_eq!(slide_y(f, SLIDE, false), (25.0 - 350.0, true));
+        assert_eq!(y(Duration::ZERO, false), (25.0, false));
+        assert_eq!(y(SLIDE, false), (25.0 - 350.0, true));
+    }
+
+    #[test]
+    fn slide_comes_in_past_its_own_edge() {
+        let start = |edge| {
+            let f = frame(SCREEN, edge, 40, 50);
+            (slide_pos(f, edge, Duration::ZERO, true).0, f)
+        };
+        let ((x, y), f) = start(HotkeyEdge::Bottom);
+        assert_eq!((x, y), (f.x, f.y + f.h));
+        let ((x, y), f) = start(HotkeyEdge::Left);
+        assert_eq!((x, y), (f.x - f.w, f.y));
+        let ((x, y), f) = start(HotkeyEdge::Right);
+        assert_eq!((x, y), (f.x + f.w, f.y));
     }
 }

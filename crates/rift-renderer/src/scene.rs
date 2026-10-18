@@ -94,6 +94,27 @@ impl Layer {
         ));
     }
 
+    /// A rounded box filled with a two-stop linear gradient, `from` at the
+    /// top (or left) edge and `to` at the bottom (or right).
+    pub fn gradient(
+        &mut self,
+        pos: [f32; 2],
+        size: [f32; 2],
+        from: Color,
+        to: Color,
+        vertical: bool,
+        radius: f32,
+    ) {
+        self.push(Quad::gradient(
+            pos,
+            size,
+            to_vec4(from),
+            to_vec4(to),
+            vertical,
+            radius,
+        ));
+    }
+
     pub fn circle(&mut self, center: [f32; 2], diameter: f32, color: Color) {
         self.push(Quad::circle(center, diameter, to_vec4(color)));
     }
@@ -157,6 +178,24 @@ mod tests {
         assert_eq!(clips[1], ([1.0, 2.0, 30.0, 40.0], 9.0));
         assert_eq!(clips[2], ([1.0, 2.0, 30.0, 40.0], 9.0));
         assert_eq!(clips[3], ([0.0; 4], 0.0));
+    }
+
+    #[test]
+    fn gradient_quad_carries_both_stops_and_its_axis() {
+        let mut layer = Layer::default();
+        let (from, to) = (
+            Color::rgba(1.0, 0.0, 0.0, 1.0),
+            Color::rgba(0.0, 0.0, 1.0, 1.0),
+        );
+        layer.gradient([0.0, 0.0], [10.0, 20.0], from, to, true, 0.0);
+        layer.gradient([0.0, 0.0], [10.0, 20.0], from, to, false, 0.0);
+        let (v, h) = (layer.quads[0], layer.quads[1]);
+        assert_eq!(v.kind, 2.0, "kind 2: the shader's gradient box");
+        assert_eq!(v.color, [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(v.border_color, [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(v.border_width, 0.0, "no ring over the gradient");
+        assert_eq!(&v.line[..2], &[0.0, 1.0], "top to bottom");
+        assert_eq!(&h.line[..2], &[1.0, 0.0], "left to right");
     }
 
     #[test]

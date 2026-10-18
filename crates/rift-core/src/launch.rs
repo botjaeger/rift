@@ -715,6 +715,7 @@ fn toml_node(
                     .iter()
                     .map(|a| subst(a, params))
                     .collect::<Result<_, _>>()?,
+                theme: pane.launch.theme.clone(),
             },
         });
     };
@@ -1334,6 +1335,7 @@ active_tab_index: 1
             profile: Some("dev box".into()),
             shell: Some("/opt/my shells/fish".into()),
             args: vec!["-C".into(), "echo \"a b\" 'c'".into()],
+            theme: Some("tokyo-night".into()),
         };
         let cfg = LaunchConfig {
             name: "odd".into(),
@@ -1407,6 +1409,7 @@ args = ["--name", "{{who}} x"]
                 profile: Some("dev".into()),
                 shell: Some("/bin/devsh".into()),
                 args: vec!["--name".into(), "dev x".into()],
+                theme: None,
             }
         );
         // a placeholder without default is an error, as for commands

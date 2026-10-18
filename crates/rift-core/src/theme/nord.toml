@@ -1,0 +1,39 @@
+# Rift builtin theme — Nord (nordtheme.com, MIT). Polar Night grounds, Snow
+# Storm text, Frost accent, Aurora semantics.
+name = "Nord"
+
+bg = "#2e3440"
+bg_chrome = "#292e39"
+bg_gutter = "#242933"
+surface = "#3b4252"
+border = "#ffffff12"
+pane_border_inactive = "#4c566a"
+
+fg = "#d8dee9"
+text_bright = "#eceff4"
+text_ui = "#d8dee9"
+text_dim = "#a3abba"
+text_muted = "#7b88a1"
+
+accent = "#88c0d0"
+success = "#a3be8c"
+error = "#bf616a"
+warning = "#ebcb8b"
+cursor = "#d8dee9"
+selection = "#434c5e"
+search_match = "#ebcb8b"
+search_active = "#d08770"
+
+# Nord ANSI palette
+ansi = [
+    "#3b4252", "#bf616a", "#a3be8c", "#ebcb8b",
+    "#81a1c1", "#b48ead", "#88c0d0", "#e5e9f0",
+    "#4c566a", "#bf616a", "#a3be8c", "#ebcb8b",
+    "#81a1c1", "#b48ead", "#8fbcbb", "#eceff4",
+]
+
+[syntax]
+command = "#88c0d0"
+flag = "#81a1c1"
+string = "#a3be8c"
+ghost = "#616e88"

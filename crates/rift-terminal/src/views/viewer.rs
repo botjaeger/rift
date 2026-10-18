@@ -150,6 +150,8 @@ pub enum ViewerHit {
     Menu,
     /// Rendered | Raw segments (Markdown files).
     Mode(bool),
+    /// A rendered shell code block's Run button (index into `markdown`).
+    RunCode(usize),
 }
 
 impl ViewerState {
@@ -648,7 +650,7 @@ pub fn render(
         };
         super::markdown_view::layout(&mut state.md_layout, engine, theme, &state.markdown, w);
         state.scroll_by(0.0);
-        super::markdown_view::render(
+        let runs = super::markdown_view::render(
             layer,
             &state.md_layout,
             theme,
@@ -657,6 +659,7 @@ pub fn render(
             bounds,
             &state.code_scroll,
         );
+        hits.extend(runs.into_iter().map(|(r, i)| (r, ViewerHit::RunCode(i))));
         scrollbar(layer, state, x, w, body_top);
         return hits;
     }

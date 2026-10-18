@@ -1,0 +1,39 @@
+# Rift builtin theme — Gruvbox Dark (morhetz/gruvbox, MIT). bg0 ground, fg1
+# text, the neutral row for normal ANSI and the bright row for bright.
+name = "Gruvbox Dark"
+
+bg = "#282828"
+bg_chrome = "#1d2021"
+bg_gutter = "#181a1b"
+surface = "#32302f"
+border = "#ffffff12"
+pane_border_inactive = "#504945"
+
+fg = "#ebdbb2"
+text_bright = "#fbf1c7"
+text_ui = "#ebdbb2"
+text_dim = "#bdae93"
+text_muted = "#928374"
+
+accent = "#83a598"
+success = "#b8bb26"
+error = "#fb4934"
+warning = "#fabd2f"
+cursor = "#ebdbb2"
+selection = "#504945"
+search_match = "#fabd2f"
+search_active = "#fe8019"
+
+# Gruvbox ANSI palette
+ansi = [
+    "#282828", "#cc241d", "#98971a", "#d79921",
+    "#458588", "#b16286", "#689d6a", "#a89984",
+    "#928374", "#fb4934", "#b8bb26", "#fabd2f",
+    "#83a598", "#d3869b", "#8ec07c", "#ebdbb2",
+]
+
+[syntax]
+command = "#83a598"
+flag = "#8ec07c"
+string = "#b8bb26"
+ghost = "#7c6f64"

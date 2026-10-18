@@ -724,7 +724,32 @@ struct RemoteConfig {
 /// the app cannot load (no file, unreadable, invalid) means access off, as
 /// the windows' fallback has it.
 fn remote_config() -> RemoteConfig {
-    remote_config_from(rift_core::Config::try_load())
+    let loaded = rift_core::Config::try_load();
+    if let Ok(Some(c)) = &loaded {
+        follow_masking(c);
+    }
+    remote_config_from(loaded)
+}
+
+/// The shells phones start while no window is open send their screens
+/// masked like the windows' (`mask_secrets`): the gateway's own masker
+/// follows config.toml, compiled again only when it changes.
+fn follow_masking(c: &rift_core::Config) {
+    type Wanted = (bool, Vec<rift_core::secrets::SecretPattern>);
+    static LAST: Mutex<Option<Wanted>> = Mutex::new(None);
+    let want = (c.mask_secrets, c.secret_patterns.clone());
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if last.as_ref() == Some(&want) {
+        return;
+    }
+    let masker = want.0.then(|| {
+        rift_core::secrets::Masker::new(&want.1)
+            .or_else(|_| rift_core::secrets::Masker::new(&[]))
+            .map(std::sync::Arc::new)
+            .ok()
+    });
+    rift_core::secrets::set_active(masker.flatten());
+    *last = Some(want);
 }
 
 fn remote_config_from(loaded: Result<Option<rift_core::Config>, String>) -> RemoteConfig {

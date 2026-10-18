@@ -12,6 +12,7 @@ import subprocess
 import wcwidth
 from wcwidth.table_zero import ZERO_WIDTH
 from wcwidth.table_wide import WIDE_EASTASIAN
+from wcwidth.table_ambiguous import AMBIGUOUS_EASTASIAN
 from wcwidth.table_mc import CATEGORY_MC
 from wcwidth.table_vs15 import VS15_WIDE_TO_NARROW
 from wcwidth.table_vs16 import VS16_NARROW_TO_WIDE
@@ -28,6 +29,20 @@ def merged(*tables):
             out[-1][1] = max(out[-1][1], hi)
         else:
             out.append([lo, hi])
+    return out
+
+
+def without_private_use(ranges):
+    """`ranges` minus the Private Use Areas: Powerline and Nerd Font
+    symbols live there and prompts lay them out one cell wide."""
+    private = [(0xE000, 0xF8FF), (0xF0000, 0xFFFFD), (0x100000, 0x10FFFD)]
+    out = []
+    for lo, hi in ranges:
+        parts = [(lo, hi)]
+        for plo, phi in private:
+            parts = [piece for a, b in parts
+                     for piece in ((a, min(b, plo - 1)), (max(a, phi + 1), b)) if piece[0] <= piece[1]]
+        out.extend(parts)
     return out
 
 
@@ -75,6 +90,10 @@ with open(path, "w") as f:
     f.write(table("ZERO", "Zero-width characters (combining marks, format characters).",
                   ZERO_WIDTH[latest]))
     f.write(table("WIDE", "East Asian Wide and Fullwidth characters.", WIDE_EASTASIAN[latest]))
+    f.write(table("AMBIGUOUS",
+                  "East Asian Ambiguous characters outside the Private Use Areas "
+                  "(`ambiguous_width = \"wide\"` makes them two cells).",
+                  without_private_use(AMBIGUOUS_EASTASIAN[latest])))
     f.write(table("MC", "Spacing combining marks (General_Category Mc).", CATEGORY_MC[latest]))
     f.write(table("VS15_NARROWS", "Wide emoji that VS15 (U+FE0E) shows as text, one cell.",
                   VS15_WIDE_TO_NARROW["9.0.0"]))

@@ -260,6 +260,10 @@ card cannot answer (a password, other input, a view-only device), and from an al
   ("LAN 192.168.1.29", "Relay relay.example.com"). A LAN address that answers with
   another key than the paired one is skipped; the host stops with "key mismatch" only when the
   relay, or every path, does. A network change tries it again.
+- A command, key or answer on its way when the connection drops or the wait runs out is never sent
+  again by the app (a reconnect carries none of it; an old acknowledgement settles nothing new).
+  The error says "It may have gone through: check the pane before sending it again", and the draft
+  stays. A resumed pane view whose position belongs to an earlier gateway run gets a fresh snapshot.
 - Network changes (expo-network): every socket is dropped and reconnected at once, LAN first, so
   coming home from cellular goes back to the direct path. Without a network hosts show Offline
   and nothing is retried until it returns.

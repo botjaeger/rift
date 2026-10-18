@@ -21,7 +21,14 @@ pane, history, autocomplete, palette, settings, controls, menus, panels).
   titlebar is trimmed to the traffic lights, so a double-click on a tab only
   renames it.
 - The window reopens at its last position and size (maximized/fullscreen too)
-  when `restore_session` is on.
+  when `restore_session` is on; without a saved frame it opens
+  `window_width` × `window_height`, and `launch_mode` opens it maximized or
+  full screen. A named window ("Rename window") has its name as its title;
+  `always_on_top` and *Toggle always on top* float it above other apps.
+- **Resize overlay** (`resize_overlay`): while the window is resized, the
+  grid's `columns × rows` sits in the window's centre on a tooltip's plate
+  (12 px label, `surface` fill, hairline and shadow), gone a second after
+  the last change. `snap_to_cells` makes the window resize by whole cells.
 - Mouse pointer: a hand over anything clickable (tabs, buttons, dialog
   buttons, menu and palette rows, settings controls, ⌘-hovered links),
   resize arrows over split handles, the I-beam over terminal text.
@@ -29,8 +36,10 @@ pane, history, autocomplete, palette, settings, controls, menus, panels).
   the moment the pointer crosses into or out of a control, not on the next
   frame something else draws.
 - **Drop-down hotkey window** (`hotkey_window`): the global hotkey slides a
-  borderless window down from the top edge of the pointer's screen, full
-  width and `hotkey_window_height` percent tall, floating above other apps
+  borderless window in from the `hotkey_window_edge` (top by default) of the
+  pointer's screen (or `hotkey_window_screen`), `hotkey_window_width`
+  percent along that edge (full by default, centred) and
+  `hotkey_window_height` percent deep, floating above other apps
   (every Space and over full-screen apps on macOS). It keeps the tab strip,
   with the space the window buttons would take left empty (no buttons; the
   strip neither drags nor zooms it). It slides up when the hotkey is pressed again
@@ -48,8 +57,8 @@ Pane/Other Tabs/Window) · **Edit** (Undo, Redo, Cut, Copy, Paste, Select All,
 Find…, Filter Block Output…, Clear Blocks) · **View** (Command Palette,
 Command History, File Explorer, Code Review, Bigger/Smaller/Actual
 Size, Maximize Pane, Toggle Full Screen) · **Blocks** (select/copy/reinput/bookmark/scroll actions) ·
-**Window** (Minimize, Zoom, tab and pane navigation, Synchronize Inputs,
-Bring All to Front) · **Help** (What's New, Keyboard Shortcuts).
+**Window** (Minimize, Zoom, Rename Window…, Keep Window on Top, tab and
+pane navigation, Synchronize Inputs, Bring All to Front) · **Help** (What's New, Keyboard Shortcuts).
 
 Menu items act on the window that last had focus. New Window opens another
 window of the same process, offset from the current one; Close Window closes
@@ -180,6 +189,14 @@ removes both within a moment.
   padding: the part of a row left over goes above its first row.
 - The Settings tab (⌘,) sits after the shell tabs with a settings icon; see
   *Settings tab*.
+- Pinned tabs sit first, 44 px wide, showing only their mark (a terminal
+  icon, or the spinner, agent, sync or lock mark) with their alert or
+  activity dot at the top right, and no ×.
+- A tab group draws a 20 px pill before its first tab: the name on its
+  color at 18 % with a 1 px border (folded: the color at 85 %, dark text and
+  the tab count). Its tabs carry the group color as their top edge. Picked
+  tabs (⌘-click) are tinted in the accent at 14 %. A tab with a read-only
+  pane shows a lock.
 
 ## Vertical tab rail
 
@@ -198,6 +215,18 @@ reorder. When the tabs do not fit, the rail keeps the active tab visible: a
 bottom stand in for the hidden tabs, each marked with the most urgent alert
 among them (waiting, then failed, bell, notification, finished; else the
 activity dot). Clicking one selects the nearest hidden tab.
+
+Above the rows a 26 px search field (*Search tabs*, search icon; accent
+border and caret while it has the keyboard) filters them, with "No tabs
+match" when nothing does, and a 26 px toggle beside it (accent tint while
+on) switches to the panes view: 28 px rows indented under a split tab, one
+per pane (its title or directory, a spinner or lock, a 2 px accent mark on
+the focused one). Pinned tabs come first under a *PINNED* label as 32 px
+one-line rows (bookmark mark), the rest under *TABS*. A group's 28 px header
+row shows a chevron (open / folded), a 3 px bar in its color, its name and
+tab count; its tabs sit indented with a 2 px bar in that color. Rows end
+their second line with the repository's `+added` (success) `−removed`
+(error) and `#PR` (accent) in mono 11 px.
 
 ## File explorer (⇧⌘E)
 
@@ -226,6 +255,15 @@ pane's directory. It follows the pane when `cd` leaves the project.
   key goes to the terminal.
 - Listings and git colors reload when a command finishes, after a review
   action, and on ↻.
+- Right-click a row: Open (a folder: Expand or collapse) · Copy path · Copy
+  relative path (from the explorer's root; `.` for the root itself) · New
+  file… · Reveal in Finder (Linux: Show in file manager; a headless run only
+  toasts). New file… asks for a name in the palette's text input; the row
+  below shows the path it creates in the folder (the row's folder, or the
+  file's parent): ⏎ creates the empty file, opens its folder in the tree and
+  selects it. A name only: a path (any `/`), `.`, `..` or nothing is refused,
+  and so is a symlinked folder leading out of the explorer's root; a name
+  that exists already is refused (*… already exists*), never overwritten.
 
 ## File viewer
 
@@ -259,6 +297,19 @@ sideways (the source view as a whole, its line numbers staying put; in
 Rendered, the code block under the pointer). Esc or ✕ closes. While it is open, typing is
 swallowed (app shortcuts still work) and the terminal keeps running
 underneath.
+
+In Rendered, a fenced block of a shell language (`sh`, `bash`, `zsh`,
+`shell`, `fish`, `console`, `shell-session`) has a label row with its
+language and a **Run…** button (an accessibility button *Run sh block…*,
+the next `sh` block's *Run sh block 2…*);
+a `mermaid` block's label reads *Mermaid diagram · source (not rendered)*
+and shows its source (there is no diagram renderer). Run never runs on its
+own: it opens a dialog — *Run this code block?* with the command (masked
+while `mask_secrets` is on) — focused on Cancel, so ⏎ alone runs nothing.
+Run sends the block's own text (for `console` / `shell-session`, the `$ `
+lines without the prompt) to the tab's terminal pane as a submitted command;
+a read-only pane refuses it (toast, no dialog), and a pane running a program
+is refused until its prompt is back.
 
 ⌘F (the `search` shortcut) opens a find bar under the header for the file
 instead of the terminal search: case-insensitive plain text, the counter
@@ -380,7 +431,8 @@ Each command becomes a block via shell-integration OSC 133 markers:
     (dim; collapsed blocks show an italic `N lines hidden` here instead —
     the command gives way to it, and it is cut short before the badge; a
     block with an output filter active shows a warning-tinted pill `filter "q"
-    · shown/total lines` instead)
+    · shown/total lines` instead; a regex reads `/q/`, and `Aa`, `not` and
+    `±N` follow for match case, invert and context lines)
   - right side: status badge pill (`✓ 0` green / `✕ N` red / amber `running`
     with a spinning ring /
     `—` unknown), duration (live elapsed while running), copy-output button.
@@ -400,18 +452,26 @@ Each command becomes a block via shell-integration OSC 133 markers:
 - **Left border**, 2 px, colored by state: accent = running, green = exit 0,
   red = exit ≠ 0, muted = no exit info. Consecutive blocks' borders are 2 px
   apart (design 01 block spacing).
-- **Block wash**: only the selected block gets an accent tint + 3 px accent
-  border, from its header (sticky header too) through its output; a selected
+- **Block wash**: only selected blocks get an accent tint + 3 px accent
+  border, from the header (sticky header too) through the output; a selected
   failed block takes the error red instead. Unselected failed blocks are not
   tinted (exit state lives on the border and badge, design 01).
 - **Selected block**: selected via a click on the header or the output, or ⌘↑/⌘↓; target of
-  ⇧⌘C / ⌥⇧⌘C / ⌘I / ⌘B / ⌃M; Esc or clicking again deselects.
+  ⇧⌘C / ⌥⇧⌘C / ⌘I / ⌘B / ⌃M; Esc or clicking again deselects. ⌘-click,
+  ⇧-click, ⇧↑ / ⇧↓ and ⌘A (with a block selected) select several; each
+  gets the wash, each block node in the accessibility tree is `selected`.
+- **Filter separator**: with a block filter's context lines on, a dashed
+  `text_muted` rule (4 px dashes, 8 px apart) fills a row between runs of
+  kept lines; the block border runs through it.
 - **Sticky command header**: when a block's output scrolls but its header would
   leave the viewport, the header pins to the top edge; clicking it jumps to the
   block. Not over a command that is still running while the view follows its
   output: the program owns the whole PTY height and redraws its top row
   (vttest, progress UIs). Scrolled up, or once the command ends, it pins again.
-  `sticky_command_header = false` turns it off.
+  `sticky_command_header = false` turns it off. Per pane it minimizes
+  (`toggle_sticky_header`, the pane menu): a 28 × 16 px tab (`surface`,
+  hairline border, accent on hover, a ⌄) at the grid's top right stands in
+  for it; a click on the tab or the toggle brings the header back.
 - **Block spacing and dividers**: blocks sit flush by default (Warp's compact
   mode); `block_spacing = "normal"` puts a blank row above each block header
   that follows other rows, and `block_dividers = true` draws a 1 px `border`
@@ -460,8 +520,10 @@ Each command becomes a block via shell-integration OSC 133 markers:
   program's (⇧ still selects).
   Hold ⌘ and the hand also shows over an existing file path (absolute, `~/…`,
   or relative to the directory the command that printed it ran in, the
-  pane's for unattributed output; `file:line:col` suffixes are accepted) —
-  ⌘-click opens any of them with the system opener. Output of a command that
+  pane's for unattributed output; the line and column printed with it are
+  read from `f:12:3`, `f(12,3)`, `f(12, 3)`, `f[12, 3]`, `f, line 12, column
+  3`, `File "f", line 12` and `f line 12`) — ⌘-click opens it where
+  `link_editor` says, at that line. Output of a command that
   ran on another host (ssh, with Rift's remote hooks) names that host's
   files: none of its paths is a link or a hint, even when a local file of the
   same name exists. Hint mode (⇧⌘H) uses the same rule. Only http, https, file,
@@ -471,9 +533,16 @@ Each command becomes a block via shell-integration OSC 133 markers:
   600 ms), and underline variants (single, double, curly, dotted, dashed; SGR
   58 colored).
 - **Block elements** (U+2580–U+259F: `█ ▀ ▄ ▌ ▐`, eighths, quadrants such as
-  `▛ ▜ ▘ ▝`, shades `░ ▒ ▓`) are drawn as quads filling the whole cell and
-  line height, not from the font, so block art (Claude Code's logo) has no
-  gaps, as in Warp.
+  `▛ ▜ ▘ ▝`, shades `░ ▒ ▓`; legacy-computing sextants and eighth blocks
+  U+1FB00–U+1FB3B, U+1FB70–U+1FB8B) are drawn as quads filling the whole cell
+  and line height, not from the font, so block art (Claude Code's logo) has
+  no gaps, as in Warp.
+- **Box drawing and Powerline** (U+2500–U+257F: light, heavy and double
+  lines, dashes, rounded corners, diagonals; U+E0B0–U+E0BF: arrows, half
+  circles, triangles) are drawn as lines on device pixels from edge to edge of
+  the line box (light lines 1 px per 13 px of font at 1×, heavy twice that),
+  so frames and prompt segments join across rows and cells. They keep their
+  colours under `minimum_contrast`.
 - **Line sizes**: double-width lines (DECDWL, `ESC # 6`) draw each character
   across two cells; double-height lines (DECDHL, `ESC # 3` and `ESC # 4`) draw
   the top and bottom halves of twice-size text. Double clicks and mouse reports
@@ -581,8 +650,11 @@ integration). Sits at the bottom of the pane, or at the top with
   the editor and in raw mode.
 - **Drag and drop**: files dropped on the window are pasted as shell-quoted
   paths.
-- **Cursor**: `cursor_style` = block (8×17 px), bar (2 px) or underline
-  (2 px), 1.1 s blink; exact shaped-text positioning, translucent when a glyph
+- **Cursor**: `cursor_style` = block (8×17 px), bar (2 px), underline
+  (2 px), hollow (a 1 px outline; the glyph keeps its colour) or
+  double_underline (two 1 px lines), 1.1 s blink; with
+  `cursor_hollow_unfocused` the editor and grid cursors draw hollow, without
+  blinking, outside the focused pane of the focused window; exact shaped-text positioning, translucent when a glyph
   sits under it. Vim NORMAL and VISUAL always draw a solid, non-blinking
   block, REPLACE a non-blinking underline.
 - **Vim mode pill** at the right edge of the input line when `vim_mode` is on:
@@ -637,6 +709,9 @@ integration). Sits at the bottom of the pane, or at the top with
   theme), so the pane you are in is the dark one. `inactive_pane_dim` sets
   the veil (1–40 %, half of it on a light theme); `dim_inactive_panes =
   false` drops it (the 1 px dividers keep theirs).
+- A pane with its own colour scheme (a profile's `theme`, or *Pane theme:
+  <name>*) draws its body, blocks and command line in that theme; its title
+  bar, the dividers and the inactive wash stay in the window theme.
 - Each pane has a 28 px title bar (Warp pane header): a terminal icon, the
   program's title (OSC 0/2), else the pane's directory, centered (after a
   spinner while a command runs); while the
@@ -645,7 +720,13 @@ integration). Sits at the bottom of the pane, or at the top with
 - Pane menu (⋮, or right-click in the pane): Copy, Paste, Select all, Split
   pane right / down, Maximize pane and Move to new tab (split tabs), Move to
   new window (disabled for the only pane of a window's only tab), Clear
-  blocks, Close pane.
+  blocks, Close pane; Make read-only / Allow input and Restart pane sit
+  above Clear blocks, then (while `sticky_command_header` is on) Minimize
+  sticky command header / Show sticky command header.
+- A read-only pane's title bar shows a lock in place of the terminal icon.
+- A pane kept after its program exited (`close_on_exit`) shows a 36 px bar
+  over its bottom (`surface`, edged in the error color after a failure):
+  "Process exited with code N" and Restart ⏎ (accent) and Close ⌘W.
 - Drag a title bar to move the pane: past 4 px it fades in place and a chip
   with its title follows the pointer. Over another pane, the half nearest the
   pointer lights up with what the drop does (`Split right` …) and the pane
@@ -675,7 +756,8 @@ under it, so the newest lines stay in view. The command line is its search
 field: what you type narrows the rows (any case, anywhere in the command).
 
 - Header: `HISTORY`, scope chips **This pane** · **All shells** · **Failed**
-  (⌃R again or a click switches), `N of M`, and ×.
+  · **Results** (⌃R again or a click switches), `N of M` (Results: `N runs`,
+  `N+` when the search stopped at its bound), and ×.
 - Rows, newest first, one per distinct command: a status dot (green exit 0,
   red failed, grey unknown), the command with the match in the accent, the
   directory it ran in, and how long ago (`Just now`, `4 min ago`,
@@ -688,12 +770,30 @@ field: what you type narrows the rows (any case, anywhere in the command).
 - Keys: ↑ ↓ (PageUp/PageDown) move, ⏎ runs, ⇥ puts it on the command line to
   edit first, ⌘⏎ runs it in a new split beside the pane, Esc closes. A click
   puts a row on the command line; a double-click runs it.
+- **Results** scope (features.md, History pane): under the header a filter
+  line — the query's filter words as accent chips (`Failed`, `Last 7 days`,
+  `Host prod`, …), else the words you can type (`is:failed is:ok
+  since:today since:7d dir:… host:… branch:…`) — and at its right what was
+  searched (`Open panes and saved transcripts`, `Open panes only (saved
+  transcripts are off)`, `Searching…`, or that it stopped at its limit). Up
+  to six rows: status dot, the command (match in the accent), `host · branch
+  · directory` in muted mono, and the age or `date unknown`. Below them the
+  selected run's output preview (eight mono lines on a faint ground): a
+  heading (`Output · match on line 12`, counted from the output's first
+  line, each line gone from scrollback counting as one; `match in the command only`, `Output
+  no longer in scrollback`, `restored from a previous session`, `saved
+  transcript`) and the lines around the first match, that line tinted and
+  the match bold in the accent. The footer's ⏎ reads `rerun here`. A click
+  selects a run (the preview follows); a double-click puts it on the command
+  line; nothing runs from the preview.
 - ⏎ with no matching row runs the typed line; ⇥ with none closes the pane
   (completions show). A click outside it, focusing another pane, the viewer,
   the palette, find or Settings close it, and so does a program taking over
   the pane.
 
 ## Command palette (⌘P)
+
+Rows include "Action: <name>" for each `[[actions]]` entry, with its chord.
 
 Fuzzy-find modal (nucleo matcher), 640 px, radius 8, over a dimmed window:
 the query with a magnifier, the result count (`N results`, left of the `esc`
@@ -706,10 +806,11 @@ click on a chip switches mode. Modes:
 - **Actions** — every app action (blocks, scrolling, tabs, panes, font,
   search, history and settings) with the resolved custom shortcut;
   keyboard selection scrolls through long result sets. Also includes `Toggle
-  vim keybindings`, one
+  vim keybindings`, `Toggle secret masking`, one
   `Launch configuration: <name>` row per file in
   `~/.config/rift/launch_configs/` (re-scanned each time the palette opens),
-  `Theme: <name>` rows, plus recent commands.
+  `Theme: <name>` rows, `Pane theme: default` and one `Pane theme: <name>`
+  row per theme (the active pane's own colour scheme), plus recent commands.
 - **History** — imported shell history (zsh, bash or fish, from the
   configured shell's history file) + per-pane local history; Enter runs, or
   insert into the editor. (⌃R in the command line opens the history pane.)
@@ -733,6 +834,13 @@ click on a chip switches mode. Modes:
   (or `Not inside a Git repository`), and the footer
   `⏎ create worktree and open a tab`. A pane without a local directory
   (ssh) gets an error toast instead.
+
+- **Rename window…** — opened from that action, with no mode chips. The
+  query is the window's name, prefilled with its current one and selected;
+  the one row reads `Name this window “<name>”` (with nothing typed, `Clear
+  this window's name`), the placeholder `Name of this window…` and the
+  footer `⏎ name the window`. Control characters are dropped and the name
+  is cut at 100 characters.
 
 Other Actions rows: `SSH: <name>` and `Install Rift shell integration on
 <name>` per SSH profile, `Toggle vertical tabs`, `Clear saved block
@@ -788,6 +896,21 @@ Every visible URL, existing file path and block header gets a short letter
 label drawn over it. Typing a label opens the link or path, or selects the
 block; ⇧ + label copies it (a block copies its output). Esc cancels.
 
+## Recent tabs (⌃Tab, `tab_switch_order = "mru"`)
+
+While ⌃ is held after ⌃Tab: a 460 px card (radius 8, surface colour, the
+palette's shadow) under the tab bar, headed RECENT TABS, one 44 px row per
+tab of the window, last used first: its title, and its directory in the
+mono face below. The highlighted row (accent at 16 %) is the tab releasing
+⌃ switches to; it starts on the previous tab. No dimmed backdrop. Screen
+readers get a *Recent tabs* list dialog.
+
+## Mark mode (⇧⌘M)
+
+A cell-sized block cursor (accent border, accent at 35 % inside) over the
+terminal rows; the selection it extends is the ordinary selection colour.
+Nothing else changes on screen.
+
 ## Dialogs and toasts
 
 - **Confirm dialogs** — a 460 px card (radius 12): title, description and
@@ -799,7 +922,9 @@ block; ⇧ + label copies it (a block copies its output). Esc cancels.
   and files are plain code lines. Used for closing
   running commands ("Close window?" for one of several windows, "Quit
   Rift?" for the last one or ⌘Q, which lists every window's), pasting multi-line text into a shell without bracketed
-  paste ("Paste and run?"), installing shell integration on an SSH host, and
+  paste ("Paste and run?"), a paste over `large_paste_warning` ("Paste a
+  large amount of text?": its size and line count, its first five lines
+  masked like the screen), installing shell integration on an SSH host, and
   updating ("Update to Rift vX.Y.Z?": what the restart keeps — tabs,
   running shells, windows that cannot be reopened — with *Later* `esc` and
   *Update* `⏎`, or *Open download page* for an install that cannot update
@@ -866,7 +991,9 @@ Enter/⇧Enter or ⌘G/⇧⌘G cycle matches (viewport jumps to each), Esc close
 in the accessibility tree; an invalid regex shows `invalid regex` in red instead of the
 counter. The counter shows the current match's position among all matches
 (`n/total`; `search` while the query is empty, `0 results` when nothing
-matches); only the newest 500 matches are kept for navigation (older
+matches; `· N hidden by the filter` after it when matches lie in output
+lines a block filter hides — those are counted, not visited); only the
+newest 500 matches are kept for navigation (older
 ones are counted, not visited), so with 600 matches it runs 101/600 …
 600/600. While the pane prints, matches are recounted (at most every
 100 ms) without moving the view: the selected match stays selected, and
@@ -879,17 +1006,75 @@ highlights whole cells; hidden (SGR 8) text is not searchable. A query longer
 than the field scrolls so its end stays visible. With the file viewer open,
 ⌘F finds in the file instead (see File viewer).
 
+With a block selected, ⌘F finds in that block's output only: an accent chip
+`in block: <command> ×` sits after the magnifier (the dialog is named *Find
+in block: <command>*); matches and ⌘G / Enter wrap inside the block. A click
+on the chip (its accessibility button *Search the whole pane*) or
+deselecting the block widens find to the whole pane.
+
 With a block filter active (⌥⇧F), the same bar edits the filter: only that
-block's output lines containing the text stay visible. The bar is 340 px wide
-(400 px in find mode, which adds the toggle chips), labelled `filter`, with
-the hint `Enter keep · Esc clear` in place of the counter.
+block's output lines matching it stay visible. The bar is 340 px wide plus
+30 px per toggle chip (find: `Aa` `.*`; filter: `Aa` `.*` `!` `±N`, the
+last one wider) plus the in-block chip, labelled `filter`, with the hint
+`Enter keep · Esc clear` in place of the counter (`invalid regex` in red
+while the regex does not compile). The filter's chips are toggle buttons in
+the accessibility tree (*Match case*, *Regular expression*, *Invert match*,
+*Context lines: N*).
 
 ## Block context menu (right-click or ⌃M)
 
-Copy command · Copy output · Copy both · Copy working directory ·
+Copy command · Copy output · Copy output unmasked (only while
+`mask_secrets` is on) · Copy both · Copy working directory ·
 Copy git branch · Re-run command · Filter output…/Clear output filter · Send
 output to command… · Bookmark/Remove bookmark · Collapse/Expand · Scroll to
 top of block · Scroll to bottom of block.
+Right-clicked on a link, it starts with Open link · Copy URL; on an existing
+file path, with Open (at the printed line) · Copy path · Reveal in Finder
+(Linux: Show in file manager) — the pane menu too.
+
+Copy command · Copy output · Copy both · Copy working directory ·
+Copy git branch · Re-run command · Filter output…/Turn off output filter/Turn
+on output filter · Send output to command… · Bookmark/Remove bookmark ·
+Collapse/Expand · Scroll to top of block · Scroll to bottom of block · Copy
+as HTML · Copy as Markdown · Save output… · Compare with previous run (how
+long ago; disabled with the reason: *none found*, *not finished*, *remote
+host unknown*) · Clear output filter (when the block has one) · Open in
+viewer (only on a block that printed one local Markdown file — `cat`,
+`bat`, `less`, `more`, `glow`, `head` or `tail` with one `.md` argument and
+no pipe, redirection or expansion — that still exists: the file opens
+Rendered in the viewer).
+On a block of a multi-block selection: Copy N commands · Copy N outputs ·
+Copy commands and outputs · Insert N commands into the input · Compare
+outputs (exactly two finished) · Bookmark all/Remove bookmarks · Collapse
+all/Expand all. The pane menu (right-click outside a block) has Export
+buffer… after Select all.
+
+## Compare outputs
+
+A 960 px modal (radius 8, `surface`, layer 6 under a confirm dialog, black
+55 % scrim): title *Compare outputs* with the baseline note (*against the
+previous run of the same command (3 min ago)*) and ✕; one row per block —
+`−` (error) / `+` (success), the command in mono, then `exit N · duration ·
+~/dir · age · restored`, in `warning` with what is missing (*first N rows
+trimmed from scrollback*, *cut at 20000 lines / 4 MB*, *output unavailable
+(trimmed from scrollback)*); then the diff, 18 px rows: line number, mark,
+text (cut at 400 characters), removed rows tinted error 14 %, added success
+14 %, each with a 3 px edge; *Comparing…* while the worker runs, *No
+differences* (*… in the compared part* when a side is incomplete) when
+equal. Footer: the result (`N added, M removed`, plus *too many changes: the
+changed part is shown whole*; `warning` when incomplete) and the keys. In
+the accessibility tree a dialog *Compare outputs* whose status reads both
+blocks, the result and the first 50 changed lines, with a *Close* button.
+
+## Save prompt (Save output… / Export buffer…)
+
+The palette's text input (no mode chips) prefilled with
+`<dir>/<command>-output.txt` or `<dir>/rift-buffer.txt` (selected: typing
+replaces it); one row: *Save the output to ~/x.txt*, *Replace ~/x.txt with
+the output* when the file exists, *~/x is a directory*. Enter writes; over
+an existing file it first asks *Replace the file?* (Replace / Cancel). A
+toast says *Saved the output to …* or why it could not. With `mask_secrets`
+on, the text is written masked, as shown.
 Every menu (block, tab, pane, file viewer) is a 240 px list with an icon
 column and the row's shortcut from the live keymap at the right. Only Close
 pane and the three Close tab rows are red. Disabled items are dimmed (e.g.
@@ -898,11 +1083,18 @@ Copy output on an output-less block). In a short window the rows shrink
 
 **Tab menu** (right-click a tab): Rename tab · Duplicate tab · Synchronize
 inputs in panes / Stop synchronizing inputs (disabled for a tab with one
-pane) · color swatches Red, Green, Yellow, Blue, Magenta, Cyan · No color ·
+pane) · color swatches Red, Green, Yellow, Blue, Magenta, Cyan · Custom
+color… (the palette's text input: a name or any `#rrggbb`) · No color ·
+Pin tab / Unpin tab · Group tab / Group picked tabs (not on a pinned tab) ·
+for a grouped tab Remove from group, Collapse/Expand group, Rename group,
+Ungroup, Close group ·
 Move to new window (disabled for a window's only tab) · one *Move to window
 N: <its active tab's title>* row per other window (titles cut to 12
 characters), and *Move to hotkey window* while the drop-down window exists ·
 Close tab · Close other tabs · Close tabs to the right.
+
+**Group menu** (right-click a group's pill or rail header): Collapse group /
+Expand group · Rename group · Ungroup · Close group.
 
 **File viewer menu** (⋮): Insert path · Copy path · Find in file · Show
 raw / Show rendered (Markdown files only) · Close.
@@ -986,14 +1178,18 @@ description) left, control right; it runs to the bottom edge.
     Hack and the installed fixed-width families, each shown in itself),
     `Font size` stepper (px, 8–28), `Line height` slider (1.0–2.2, default
     1.2).
-  - Cursor: `Cursor style` segmented `Block | Bar | Underline`,
+  - Cursor: `Cursor style` segmented `Block | Bar | Underline | Hollow |
+    Double`, `Hollow when unfocused` toggle (*Outline the cursor while its
+    window or pane is not focused*; `cursor_hollow_unfocused`),
     `Cursor blink` toggle (*Pulse the cursor when the editor is focused*).
   - Window & theme: `Active theme` select (background swatch ringed in the
     theme's accent + display name), `Sync with OS appearance` toggle,
     `Light theme (OS sync)` select (same swatch style), `Window opacity`
     slider (1–100 %, value boxed right of the track), `Window blur radius`
     slider (1–64 px, macOS only),
-    `Window padding` stepper (px, ±2), `App icon` select (a picture of
+    `Window padding` stepper (px, ±2: the left and right padding in
+    effect; a step or its reset sets `window_padding` and removes
+    `window_padding_left`/`_right`), `App icon` select (a picture of
     each colourway before its name; `app_icon`), `Font ligatures` toggle (*Render -> >=
     != as combined glyphs*).
   - Tabs: `Tab position` segmented `Top | Side` (`tab_layout`), `Close
@@ -1108,7 +1304,10 @@ description) left, control right; it runs to the bottom edge.
   YAML)*: a row per available theme with four swatches (background, accent,
   success, error), its display name and an `active` tag on the current theme;
   the `light` tag marks the `theme_light` theme, and only while
-  `sync_os_theme` is on. Clicking a row sets `theme`.
+  `sync_os_theme` is on. Clicking a row sets `theme`. The palette's
+  *Theme picker (live preview)* (`theme_picker`) lists the same themes
+  (the one in use tagged *in use*) and applies the selected row live; ⏎
+  keeps it, Esc puts the previous theme back.
 - **Remote access** (open icon) — *Watch and run commands from a paired phone, at home or away.*:
   - `Allow remote access` switch (`remote_access`), then `Phones can open
     tabs while Rift is closed` (below).
@@ -1180,6 +1379,17 @@ description) left, control right; it runs to the bottom edge.
   (alternate-scroll mode, app-cursor aware).
 - PageUp/PageDown page, Home/End jump to top/bottom (at the prompt; keys pass
   through to full-screen apps).
+- **Scrollbar** (`scrollbar = "auto" | "always" | "never"`): a 6 px pill
+  thumb 1 px inside the pane's right edge, in the padding beside the text
+  (never over it; the grid does not move), as tall as the rows in view. The
+  thumb (`text_muted` at 45 %, `text_dim` at 70 % with a 6 % `fg` track while
+  under the pointer or dragged) is the view over the pane's blocks as drawn:
+  collapsed output and a block filter shrink the list. 2 px ticks across it
+  mark prompts (`text_dim`), find matches (`search_match`), failed commands
+  (`error`) and bookmarks (`accent`), drawn in that order. Drag the thumb to
+  scroll; a click above or below it pages one view. `auto` shows it for
+  1.2 s after the pane scrolls and while the pointer is over the right
+  padding; nothing shows on the alternate screen or when nothing scrolls.
 - `clear` performs a Warp-style soft clear: the viewport empties, old blocks
   stay reachable by scrolling up, and the next block starts right above the
   command line (at the top of the viewport with `blocks_start = "top"`). ⌘K is the destructive variant (blocks +

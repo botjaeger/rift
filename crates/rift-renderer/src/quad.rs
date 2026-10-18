@@ -11,7 +11,9 @@ pub struct Quad {
     pub radius: f32,
     pub border_width: f32,
     pub softness: f32,
-    /// 0 = rounded box, 1 = line segment (`line` holds its end points).
+    /// 0 = rounded box, 1 = line segment (`line` holds its end points),
+    /// 2 = rounded box filled with a two-stop gradient from `color` to
+    /// `border_color` along the axis `line.xy`.
     pub kind: f32,
     /// Segment end points `[ax, ay, bx, by]` (kind 1).
     pub line: [f32; 4],
@@ -62,6 +64,28 @@ impl Quad {
         Quad {
             softness: sigma,
             ..Quad::rect(pos, size, color, radius)
+        }
+    }
+
+    /// A rounded box filled with a linear gradient from `from` (top or
+    /// left edge) to `to` (bottom or right edge).
+    pub fn gradient(
+        pos: [f32; 2],
+        size: [f32; 2],
+        from: [f32; 4],
+        to: [f32; 4],
+        vertical: bool,
+        radius: f32,
+    ) -> Self {
+        Quad {
+            border_color: to,
+            kind: 2.0,
+            line: if vertical {
+                [0.0, 1.0, 0.0, 0.0]
+            } else {
+                [1.0, 0.0, 0.0, 0.0]
+            },
+            ..Quad::rect(pos, size, from, radius)
         }
     }
 

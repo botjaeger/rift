@@ -552,9 +552,22 @@ fn lookup<'a>(table: &'a toml::Table, id: &str) -> Option<&'a toml::Value> {
     Some(v)
 }
 
-/// The setting `id` differs from its default.
+/// Settings the control of `id` also stands for (the "Window padding"
+/// stepper shows the left and right padding in effect).
+fn covered(id: &str) -> &'static [&'static str] {
+    match id {
+        "window_padding" => &["window_padding_left", "window_padding_right"],
+        _ => &[],
+    }
+}
+
+/// The setting `id` (or one its control stands for) differs from its
+/// default.
 pub fn is_changed(current: &toml::Table, defaults: &toml::Table, id: &str) -> bool {
     lookup(current, id) != lookup(defaults, id)
+        || covered(id)
+            .iter()
+            .any(|k| lookup(current, k) != lookup(defaults, k))
 }
 
 /// `config` with setting `id` back at its default (`None` if the id is not
@@ -577,6 +590,10 @@ pub fn reset_setting(config: &Config, id: &str) -> Option<Config> {
         None => {
             target.remove(key);
         }
+    }
+    // (top-level settings only)
+    for k in covered(id) {
+        table.remove(*k);
     }
     toml::Value::Table(table).try_into().ok()
 }
@@ -3038,13 +3055,23 @@ fn appearance_page(form: &mut Form, config: &Config) {
         CursorStyle::Block => 0,
         CursorStyle::Bar => 1,
         CursorStyle::Underline => 2,
+        CursorStyle::Hollow => 3,
+        CursorStyle::DoubleUnderline => 4,
     };
     form.segment(
         y,
         "Cursor style",
-        &["Block", "Bar", "Underline"],
+        &["Block", "Bar", "Underline", "Hollow", "Double"],
         active,
         "cursor_style",
+    );
+    let y = form.y;
+    form.toggle_desc(
+        y,
+        "Hollow when unfocused",
+        "Outline the cursor while its window or pane is not focused",
+        config.cursor_hollow_unfocused,
+        "cursor_hollow_unfocused",
     );
     let y = form.y;
     form.toggle_desc(
@@ -3096,7 +3123,8 @@ fn appearance_page(form: &mut Form, config: &Config) {
     form.stepper(
         y,
         "Window padding",
-        &format!("{:.0}", config.padding()),
+        // left and right, as in effect (`window_padding_left` wins)
+        &format!("{:.0}", config.paddings(false).left),
         "px",
         "window_padding",
     );
@@ -4435,6 +4463,20 @@ mod tests {
         assert_eq!(c.font_size, rift_core::Config::default().font_size);
         let c = reset_setting(&c, "notifications.toasts").expect("loads");
         assert!(!is_changed(&config_table(&c), &d, "notifications.toasts"));
+        // per-side padding shows on the "Window padding" stepper: changed,
+        // and its reset clears the sides (top and bottom stay)
+        let c = rift_core::Config {
+            window_padding_left: Some(30.0),
+            window_padding_top: Some(20.0),
+            ..Default::default()
+        };
+        assert!(is_changed(&config_table(&c), &d, "window_padding"));
+        let c = reset_setting(&c, "window_padding").expect("loads");
+        assert_eq!(
+            (c.window_padding_left, c.window_padding_top),
+            (None, Some(20.0))
+        );
+        assert!(!is_changed(&config_table(&c), &d, "window_padding"));
     }
 
     #[test]

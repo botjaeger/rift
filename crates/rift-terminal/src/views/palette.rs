@@ -14,12 +14,17 @@ pub enum PaletteAction {
     App(AppAction),
     OpenSettings,
     SwitchTheme(usize),
+    /// The active pane's own colour scheme: a theme of the `SwitchTheme`
+    /// list, or `None` for the window theme ("Pane theme: default").
+    PaneTheme(Option<usize>),
     RunHistory(String),
     /// ⌃R history search: Enter inserts into the editor instead of running.
     InsertCommand(String),
     /// Index into the app's loaded launch configurations.
     Launch(usize),
     ToggleVim,
+    /// `mask_secrets` on or off (before sharing a screen, say).
+    ToggleMaskSecrets,
     Search,
     OpenHistory,
     /// Session switcher: activate tab `.0`.
@@ -42,10 +47,18 @@ pub enum PaletteAction {
     Profile(ProfileOpen, String),
     /// New worktree mode: create the typed branch's worktree, open a tab.
     CreateWorktree,
+    /// Save mode: write the pending text to the typed path.
+    SaveToPath,
+    /// "Rename window…": the query becomes the window's name.
+    NameWindow,
     /// Code review: compare against this base.
     ReviewBase(rift_core::review::Base),
     /// "Send to agent…": paste the pending code into this pane.
     SendToPane(rift_pty::PaneId),
+    /// Theme picker: keep this theme (config name).
+    PickTheme(String),
+    /// Tab colour prompt: this colour (none clears it).
+    SetTabColor(Option<rift_core::tab_color::TabColor>),
 }
 
 /// Where a profile opens.
@@ -76,6 +89,28 @@ pub fn profile_items(profiles: &[rift_core::profiles::Profile]) -> Vec<Item> {
         }
     }
     out
+}
+
+/// Palette rows for `[[actions]]`: "Action: NAME" with its chord.
+pub fn user_action_items(
+    actions: &[rift_core::actions::UserAction],
+    keymap: &rift_core::Keymap,
+) -> Vec<Item> {
+    actions
+        .iter()
+        .enumerate()
+        .map(|(i, a)| Item {
+            title: format!("Action: {}", a.name.trim()),
+            id: String::new(),
+            shortcut: keymap
+                .preferred(&format!("{}{i}", rift_core::actions::KEYMAP_PREFIX))
+                .map(|b| b.chips())
+                .unwrap_or_default(),
+            section: Section::Actions,
+            action: PaletteAction::App(AppAction::UserAction(i as u16)),
+            mono_title: false,
+        })
+        .collect()
 }
 
 /// Palette rows for ssh profiles: connect, and install integration.
@@ -127,6 +162,14 @@ pub enum PaletteMode {
     ReviewBase,
     /// "Send to agent…": the pane that gets the code, agents first.
     SendTarget,
+    /// "Save output…" / "Export buffer…": the query is the file's path.
+    SavePath,
+    /// "Rename window…": the query is the window's name.
+    RenameWindow,
+    /// The theme picker: every theme, the selected one previewed live.
+    Themes,
+    /// The tab's colour: a name or any `#rrggbb` typed.
+    TabColor,
 }
 
 impl PaletteMode {
@@ -139,6 +182,10 @@ impl PaletteMode {
                 | PaletteMode::NewWorktree
                 | PaletteMode::ReviewBase
                 | PaletteMode::SendTarget
+                | PaletteMode::SavePath
+                | PaletteMode::RenameWindow
+                | PaletteMode::Themes
+                | PaletteMode::TabColor
         )
     }
 }
@@ -448,6 +495,21 @@ pub fn base_items(
             PaletteAction::App(AppAction::FontReset),
         ),
         item(
+            "Increase window opacity",
+            "opacity_increase",
+            PaletteAction::App(AppAction::OpacityIncrease),
+        ),
+        item(
+            "Decrease window opacity",
+            "opacity_decrease",
+            PaletteAction::App(AppAction::OpacityDecrease),
+        ),
+        item(
+            "Reset window opacity",
+            "opacity_reset",
+            PaletteAction::App(AppAction::OpacityReset),
+        ),
+        item(
             "Filter block output",
             "filter_block",
             PaletteAction::App(AppAction::FilterBlock),
@@ -478,6 +540,31 @@ pub fn base_items(
             PaletteAction::App(AppAction::ToggleSyncInputs),
         ),
         item(
+            "Toggle read-only pane",
+            "toggle_read_only",
+            PaletteAction::App(AppAction::ToggleReadOnly),
+        ),
+        item(
+            "Restart pane",
+            "restart_pane",
+            PaletteAction::App(AppAction::RestartPane),
+        ),
+        item(
+            "Pin or unpin tab",
+            "pin_tab",
+            PaletteAction::App(AppAction::PinTab),
+        ),
+        item(
+            "Search tabs in the rail",
+            "focus_rail_search",
+            PaletteAction::App(AppAction::FocusRailSearch),
+        ),
+        item(
+            "Toggle rail rows per pane",
+            "toggle_rail_panes",
+            PaletteAction::App(AppAction::ToggleRailPanes),
+        ),
+        item(
             "Save current layout as launch configuration",
             "save_launch_config",
             PaletteAction::App(AppAction::SaveLaunchConfig),
@@ -491,6 +578,16 @@ pub fn base_items(
             "Toggle fullscreen",
             "toggle_fullscreen",
             PaletteAction::App(AppAction::ToggleFullscreen),
+        ),
+        item(
+            "Toggle always on top",
+            "toggle_always_on_top",
+            PaletteAction::App(AppAction::ToggleAlwaysOnTop),
+        ),
+        item(
+            "Rename window",
+            "rename_window",
+            PaletteAction::App(AppAction::RenameWindow),
         ),
         item(
             "Minimize window",
@@ -534,6 +631,26 @@ pub fn base_items(
             PaletteAction::App(AppAction::WhatsNew),
         ),
         item(
+            "Theme picker (live preview)",
+            "theme_picker",
+            PaletteAction::App(AppAction::ThemePicker),
+        ),
+        item(
+            "Cycle tab color",
+            "cycle_tab_color",
+            PaletteAction::App(AppAction::CycleTabColor),
+        ),
+        item(
+            "Set tab color…",
+            "set_tab_color",
+            PaletteAction::App(AppAction::SetTabColor),
+        ),
+        item(
+            "Toggle sticky command header in pane",
+            "toggle_sticky_header",
+            PaletteAction::App(AppAction::ToggleStickyHeader),
+        ),
+        item(
             "Toggle file explorer",
             "toggle_explorer",
             PaletteAction::App(AppAction::ToggleExplorer),
@@ -557,6 +674,14 @@ pub fn base_items(
         action: PaletteAction::ToggleVim,
         mono_title: false,
     });
+    items.push(Item {
+        title: "Toggle secret masking".into(),
+        id: "toggle_mask_secrets".into(),
+        shortcut: Vec::new(),
+        section: Section::Settings,
+        action: PaletteAction::ToggleMaskSecrets,
+        mono_title: false,
+    });
     for (i, name) in launch_names.iter().enumerate() {
         items.push(Item {
             title: format!("Launch configuration: {name}"),
@@ -577,6 +702,22 @@ pub fn base_items(
             mono_title: false,
         });
     }
+    let pane_themes = std::iter::once((None, "default")).chain(
+        theme_names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (Some(i), n.as_str())),
+    );
+    for (i, name) in pane_themes {
+        items.push(Item {
+            title: format!("Pane theme: {name}"),
+            id: "set_pane_theme".into(),
+            shortcut: Vec::new(),
+            section: Section::Settings,
+            action: PaletteAction::PaneTheme(i),
+            mono_title: false,
+        });
+    }
     items
 }
 
@@ -587,7 +728,8 @@ pub fn history_items(history: &[String]) -> Vec<Item> {
         .rev()
         .take(2000)
         .map(|h| Item {
-            title: h.clone(),
+            // shown masked (`mask_secrets`); the action keeps the command
+            title: rift_core::secrets::mask(h).into_owned(),
             id: String::new(),
             shortcut: Vec::new(),
             section: Section::Recent,
@@ -623,6 +765,186 @@ pub fn worktree_items(query: &str, main: Option<&std::path::Path>) -> Vec<Matche
         indices: Vec::new(),
         score: 0,
     }]
+}
+
+/// "Rename window…": one row that names the window what is typed (or,
+/// with nothing typed, clears its name).
+pub fn rename_window_items(query: &str) -> Vec<MatchedItem> {
+    let name = query.trim();
+    let title = if name.is_empty() {
+        "Clear this window's name".to_string()
+    } else {
+        format!("Name this window \u{201c}{name}\u{201d}")
+    };
+    vec![MatchedItem {
+        item: Item {
+            title,
+            id: String::new(),
+            shortcut: Vec::new(),
+            section: Section::Actions,
+            action: PaletteAction::NameWindow,
+            mono_title: false,
+        },
+        indices: Vec::new(),
+        score: 0,
+    }]
+}
+
+/// Theme picker rows: each theme by its label (`names` and `labels` are
+/// `theme::available_themes` and `theme::picker_labels`), the one in use
+/// marked, narrowed by the query.
+pub fn theme_items(
+    names: &[String],
+    labels: &[String],
+    current: &str,
+    query: &str,
+) -> Vec<MatchedItem> {
+    let items: Vec<Item> = names
+        .iter()
+        .zip(labels)
+        .map(|(name, label)| Item {
+            title: label.clone(),
+            id: if name == current {
+                "in use".into()
+            } else {
+                String::new()
+            },
+            shortcut: Vec::new(),
+            section: Section::Settings,
+            action: PaletteAction::PickTheme(name.clone()),
+            mono_title: false,
+        })
+        .collect();
+    rank(&items, &[], query)
+}
+
+/// Tab colour prompt rows: a typed `#hex` as its one row (none until it is
+/// a whole `#rgb` / `#rrggbb`, so Enter sets nothing half-typed), else the
+/// six names and "No color" narrowed by the query.
+pub fn tab_color_items(query: &str) -> Vec<MatchedItem> {
+    use rift_core::tab_color::{NAMES, TabColor};
+    let typed = query.trim();
+    if typed.starts_with('#') {
+        return TabColor::parse(typed)
+            .map(|c| MatchedItem {
+                item: Item {
+                    title: format!("Set tab color {}", c.to_config()),
+                    id: String::new(),
+                    shortcut: Vec::new(),
+                    section: Section::Actions,
+                    action: PaletteAction::SetTabColor(Some(c)),
+                    mono_title: false,
+                },
+                indices: Vec::new(),
+                score: 0,
+            })
+            .into_iter()
+            .collect();
+    }
+    let mut items: Vec<Item> = NAMES
+        .iter()
+        .enumerate()
+        .map(|(i, n)| Item {
+            title: format!("{}{}", n[..1].to_uppercase(), &n[1..]),
+            id: String::new(),
+            shortcut: Vec::new(),
+            section: Section::Actions,
+            action: PaletteAction::SetTabColor(Some(TabColor::Named(i))),
+            mono_title: false,
+        })
+        .collect();
+    items.push(Item {
+        title: "No color".into(),
+        id: String::new(),
+        shortcut: Vec::new(),
+        section: Section::Actions,
+        action: PaletteAction::SetTabColor(None),
+        mono_title: false,
+    });
+    rank(&items, &[], typed)
+}
+
+/// Save mode's row: where the text goes (`~` is the home directory), and
+/// whether a file is there already (it is replaced).
+pub fn save_items(query: &str, what: &str) -> Vec<MatchedItem> {
+    let path = query.trim();
+    let title = if path.is_empty() {
+        format!("Type a path to save {what}")
+    } else {
+        let full = expand_home(path);
+        if full.is_dir() {
+            format!(
+                "{} is a directory",
+                crate::views::editor::shorten_home(path)
+            )
+        } else if full.exists() {
+            format!(
+                "Replace {} with {what}",
+                crate::views::editor::shorten_home(path)
+            )
+        } else {
+            format!(
+                "Save {what} to {}",
+                crate::views::editor::shorten_home(path)
+            )
+        }
+    };
+    vec![MatchedItem {
+        item: Item {
+            title,
+            id: String::new(),
+            shortcut: Vec::new(),
+            section: Section::Actions,
+            action: PaletteAction::SaveToPath,
+            mono_title: false,
+        },
+        indices: Vec::new(),
+        score: 0,
+    }]
+}
+
+/// New-file prompt's row (explorer "New file…"): the file it creates
+/// (`path` is what the typed text resolves to), or why it cannot.
+pub fn new_file_items(path: Result<&std::path::Path, &str>) -> Vec<MatchedItem> {
+    let title = match path {
+        Err(why) => {
+            let mut why = why.to_string();
+            if let Some(first) = why.get_mut(..1) {
+                first.make_ascii_uppercase();
+            }
+            why
+        }
+        Ok(p) => {
+            let shown = crate::views::editor::shorten_home(&p.to_string_lossy());
+            if p.exists() {
+                format!("{shown} already exists")
+            } else {
+                format!("Create {shown}")
+            }
+        }
+    };
+    vec![MatchedItem {
+        item: Item {
+            title,
+            id: String::new(),
+            shortcut: Vec::new(),
+            section: Section::Actions,
+            action: PaletteAction::SaveToPath,
+            mono_title: false,
+        },
+        indices: Vec::new(),
+        score: 0,
+    }]
+}
+
+/// `path` with a leading `~/` (or a lone `~`) as the home directory.
+pub fn expand_home(path: &str) -> std::path::PathBuf {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    match (path.strip_prefix("~/"), home) {
+        (Some(rest), Some(home)) => home.join(rest),
+        (None, Some(home)) if path == "~" => home,
+        _ => std::path::PathBuf::from(path),
+    }
 }
 
 /// Pipe mode rows: what runs, then a preview of the stdin text.
@@ -676,7 +998,8 @@ pub fn rank(items: &[Item], history: &[String], query: &str) -> Vec<MatchedItem>
     let mut all: Vec<Item> = items.to_vec();
     for h in history.iter().rev().take(20) {
         all.push(Item {
-            title: h.clone(),
+            // shown masked (`mask_secrets`); the action keeps the command
+            title: rift_core::secrets::mask(h).into_owned(),
             id: String::new(),
             shortcut: Vec::new(),
             section: Section::Recent,
@@ -757,7 +1080,7 @@ pub(crate) fn sans(engine: &mut TextEngine, text: &str, size: f32, weight: Weigh
     buf
 }
 
-fn mono(engine: &mut TextEngine, text: &str, size: f32, weight: Weight) -> Buffer {
+pub(crate) fn mono(engine: &mut TextEngine, text: &str, size: f32, weight: Weight) -> Buffer {
     let mut buf = Buffer::new(&mut engine.font_system, Metrics::new(size, size * 1.35));
     buf.set_text(
         &mut engine.font_system,
@@ -889,6 +1212,10 @@ pub fn render(
             PaletteMode::Commands => "Search actions, or type # @ to switch…",
             PaletteMode::ReviewBase => "Compare changes against…",
             PaletteMode::SendTarget => "Send to which pane…",
+            PaletteMode::SavePath => "Path of the file to write…",
+            PaletteMode::RenameWindow => "Name of this window…",
+            PaletteMode::Themes => "Search themes: ↑ ↓ preview, ⏎ keeps, esc reverts…",
+            PaletteMode::TabColor => "Tab color: a name or #rrggbb…",
         };
         layer.text(
             sans(engine, placeholder, 15.0, Weight::NORMAL),
@@ -1148,6 +1475,10 @@ pub fn render(
         PaletteMode::NewWorktree => "create worktree and open a tab",
         PaletteMode::ReviewBase => "compare",
         PaletteMode::SendTarget => "paste (no Enter)",
+        PaletteMode::SavePath => "write the file",
+        PaletteMode::RenameWindow => "name the window",
+        PaletteMode::Themes => "keep this theme",
+        PaletteMode::TabColor => "set the color",
         _ => "run",
     };
     let hints: Vec<(&[&str], &str)> = if modes_h > 0.0 {
@@ -1211,12 +1542,13 @@ fn item_icon(item: &Item) -> Icon {
         PaletteAction::App(AppAction::ClosePane) => Icon::Close,
         PaletteAction::App(AppAction::ToggleExplorer) => Icon::Sidebar,
         PaletteAction::OpenSettings => Icon::Settings,
-        PaletteAction::SwitchTheme(_) => Icon::Themes,
+        PaletteAction::SwitchTheme(_) | PaletteAction::PaneTheme(_) => Icon::Themes,
         PaletteAction::Launch(_) => Icon::Launch,
         PaletteAction::InsertCommand(_)
         | PaletteAction::RunHistory(_)
         | PaletteAction::OpenHistory => Icon::History,
         PaletteAction::ToggleVim => Icon::Keyboard,
+        PaletteAction::ToggleMaskSecrets => Icon::Lock,
         PaletteAction::FocusTab(_)
         | PaletteAction::FocusPane(..)
         | PaletteAction::FocusWindow(..) => Icon::Terminal,
@@ -1314,5 +1646,42 @@ mod tests {
         assert_eq!(cmd, "( grep x | wc -l ) < '/tmp/rift pipe/1.txt'");
         let fish = pipe_command("wc -l", "/tmp/p.txt", "/opt/homebrew/bin/fish");
         assert_eq!(fish, "begin; wc -l; end < /tmp/p.txt");
+    }
+
+    #[test]
+    fn tab_color_rows_take_names_and_whole_hex_only() {
+        use rift_core::tab_color::TabColor;
+        let all = tab_color_items("");
+        assert_eq!(all.len(), 7, "six names and No color");
+        assert_eq!(all[6].item.action, PaletteAction::SetTabColor(None));
+        let typed = tab_color_items("#123abc");
+        assert_eq!(typed.len(), 1);
+        assert_eq!(
+            typed[0].item.action,
+            PaletteAction::SetTabColor(TabColor::parse("#123abc"))
+        );
+        // half-typed: nothing Enter could set
+        assert!(tab_color_items("#12").is_empty());
+        assert!(tab_color_items("#1234").is_empty());
+        let blue = tab_color_items("blu");
+        assert_eq!(
+            blue[0].item.action,
+            PaletteAction::SetTabColor(Some(TabColor::Named(3)))
+        );
+        assert!(PaletteMode::TabColor.takes_text() && PaletteMode::Themes.takes_text());
+    }
+
+    #[test]
+    fn theme_rows_mark_the_theme_in_use() {
+        let names = vec!["dark-default".to_string(), "nord".to_string()];
+        let labels = vec!["Dark Default".to_string(), "Nord".to_string()];
+        let rows = theme_items(&names, &labels, "nord", "");
+        let nord = rows
+            .iter()
+            .find(|m| m.item.title == "Nord")
+            .expect("nord row");
+        assert_eq!(nord.item.id, "in use");
+        assert_eq!(nord.item.action, PaletteAction::PickTheme("nord".into()));
+        assert_eq!(theme_items(&names, &labels, "nord", "dark").len(), 1);
     }
 }

@@ -103,11 +103,12 @@ impl Background {
                 "at most {MAX_SHELLS} shells while Rift is closed"
             )));
         }
-        let id = {
-            let mut next = self.next.lock().unwrap();
-            *next += 1;
-            *next
-        };
+        let id = next_id(&mut self.next.lock().unwrap(), || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or_default()
+        });
         let exited = Arc::new(AtomicBool::new(false));
         let failed = Arc::new(AtomicBool::new(false));
         let observer: rift_pty::Observer = Arc::new({
@@ -131,6 +132,7 @@ impl Background {
             replay: None,
             service: Some(rift_pty::ServiceTarget::Spawn),
             clipboard: rift_pty::ClipboardAccess::from_config(&config.clipboard_access),
+            ambiguous_wide: config.ambiguous_width == rift_core::AmbiguousWidth::Wide,
         })
         .map_err(|e| InputError::Unavailable(format!("the session service: {e}")))?;
         // the service answers on the pane's reader thread; this is the
@@ -332,9 +334,43 @@ fn key_bytes(session: &Session, keys: &[Key]) -> Vec<u8> {
     crate::input::remote_bytes(&presses, enc)
 }
 
+/// Background pane ids stay below 2^24 (`remote.rs` `LOCAL_BITS`: pid 0).
+const ID_LIMIT: u64 = 1 << 24;
+
+/// The next background pane id. Each gateway run starts at a point taken
+/// from `now_secs` (not at 1): a phone that kept `host:1` from an earlier
+/// run must not find its draft or pending input on another shell that
+/// happens to get the same id.
+fn next_id(next: &mut u64, now_secs: impl FnOnce() -> u64) -> u64 {
+    if *next == 0 {
+        // the lower half of the range, so a run has 2^23 ids to go up by
+        *next = now_secs() % (ID_LIMIT / 2);
+    }
+    *next += 1;
+    if *next >= ID_LIMIT {
+        *next = 1;
+    }
+    *next
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn background_ids_differ_between_runs_and_stay_phone_local() {
+        let mut a = 0;
+        let mut b = 0;
+        let first_a = next_id(&mut a, || 1_760_000_000);
+        let first_b = next_id(&mut b, || 1_760_000_100);
+        assert_ne!(first_a, first_b, "two runs never both start at 1");
+        assert_eq!(next_id(&mut a, || unreachable!()), first_a + 1);
+        assert!(first_a > 0 && first_a < ID_LIMIT);
+        let mut top = ID_LIMIT - 1;
+        assert_eq!(next_id(&mut top, || 0), 1, "wraps below the pid bits");
+        let mut zero = 0;
+        assert_eq!(next_id(&mut zero, || 0), 1);
+    }
 
     #[test]
     fn the_handoff_list_round_trips_and_bounds() {

@@ -133,6 +133,11 @@ pub struct Config {
     /// only when heard from this recently (20 s by default): a dropped
     /// connection stays open until `idle_timeout`.
     pub follow_fresh: Duration,
+    /// The `seq` a pane's feed starts from. `None` (the app): the gateway's
+    /// start time in milliseconds, so a `subscribe{after}` from an earlier
+    /// run of the gateway never lines up with this run's replay ring and
+    /// gets a fresh `snapshot` (tests pin 0 for readable sequences).
+    pub seq_base: Option<u64>,
 }
 
 impl Config {
@@ -156,6 +161,7 @@ impl Config {
             push_url: crate::push::EXPO_PUSH_URL.to_string(),
             ntfy_redirect: Vec::new(),
             follow_fresh: FOLLOW_FRESH,
+            seq_base: None,
         }
     }
 }
@@ -287,6 +293,11 @@ pub fn serve<S: Source>(
         registry::encode_key(&transport::public_key(&key)),
         config.dir.clone(),
     )?;
+    let seq_base = config.seq_base.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64)
+    });
     let shared = Arc::new(Shared {
         source,
         config,
@@ -306,6 +317,7 @@ pub fn serve<S: Source>(
         connections: AtomicUsize::new(0),
         relay_connections: AtomicUsize::new(0),
         next_client: AtomicU64::new(1),
+        seq_base,
     });
     // writes status.json (with the relay, if any)
     shared.set_relay(relay);
@@ -364,6 +376,8 @@ pub(crate) struct Shared<S> {
     /// knows the routing id can make the relay send `open`s).
     pub(crate) relay_connections: AtomicUsize,
     next_client: AtomicU64,
+    /// Where every pane's feed `seq` starts in this run ([`Config::seq_base`]).
+    seq_base: u64,
 }
 
 #[derive(Default)]
@@ -1148,7 +1162,9 @@ fn refresh<S: Source>(shared: &Shared<S>, pane: u64) -> Result<(), SourceError> 
             let frames = match hub.feeds.get_mut(&pane) {
                 Some(feed) => feed.apply(pane, page),
                 None => {
-                    hub.feeds.insert(pane, Feed::new(page));
+                    let mut feed = Feed::new(page);
+                    feed.seq = shared.seq_base;
+                    hub.feeds.insert(pane, feed);
                     Vec::new()
                 }
             };

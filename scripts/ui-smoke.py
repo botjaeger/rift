@@ -16,6 +16,13 @@ import tempfile
 import threading
 import time
 
+# --list, --only NAME[,NAME] and --shard K/N run the sections below in groups
+# (scripts/ui_smoke_sections.py); without them the file runs top to bottom
+if len(sys.argv) > 2:
+    sys.dont_write_bytecode = True
+    import ui_smoke_sections
+    sys.exit(ui_smoke_sections.main(__file__, sys.argv[1:]))
+
 repo = Path(__file__).resolve().parents[1]
 binary = Path(sys.argv[1]).resolve()
 scratch = Path(tempfile.mkdtemp(prefix="rift-ui-", dir="/tmp"))
@@ -108,6 +115,9 @@ def died(what, log):
     tail = "\n".join(Path(log).read_text(errors="replace").splitlines()[-20:])
     return f"{what}; {log}:\n{tail}"
 
+# === sections: the preamble above runs in every shard (scripts/ui_smoke_sections.py) ===
+
+# --- first run: palette, viewer, config reload, completion, find, paste, focus ---
 steps = [
     "wait_prompt",
     "key escape",
@@ -844,6 +854,9 @@ edge_steps = [
     *["key down"] * 9,
     "key enter",
     "wait 300",
+    # a selected block scopes find to it: clear the selection so the search
+    # covers the pane, as this check intends
+    "key escape",
     "key cmd+f",
     "type JUMP_NEEDLE",
     "wait 400",
@@ -1001,8 +1014,12 @@ assert "cmd=\"printf '\\\\033[?5h'; sleep 2; printf '\\\\033[?5l'\" exit" in off
 # to agent…": a hunk pasted into a fake `claude` that records its stdin,
 # bracketed, no Enter after; a target that closed gets nothing
 rb = scratch / "review-base"
-for d in ("repo", "bin", "cfg/rift", "data"):
+for d in ("repo", "bin", "cfg/rift", "data", "home"):
     (rb / d).mkdir(parents=True)
+# an empty home: Ubuntu's stock ~/.bashrc titles the window `user@host: cwd`
+# through PS1, which would replace the cwd-named pane labels asserted below
+for rc in (".bash_profile", ".bashrc"):
+    (rb / "home" / rc).write_text("")
 rb_git = ["git", "-C", str(rb / "repo"), "-c", "user.name=t", "-c", "user.email=t@e.x",
           "-c", "commit.gpgsign=false"]
 def rb_lines(edits):
@@ -1083,7 +1100,7 @@ rb_steps = [
 with (rb / "app.log").open("w") as log:
     rc = subprocess.run([str(binary), "--script", str(rb / "rb.rift"), "--headless"],
                         env=dict(env, XDG_CONFIG_HOME=str(rb / "cfg"),
-                                 XDG_DATA_HOME=str(rb / "data")),
+                                 XDG_DATA_HOME=str(rb / "data"), HOME=str(rb / "home")),
                         stdout=log, stderr=log, timeout=120).returncode
 assert rc == 0, died("review-base run failed", rb / "app.log")
 uncommitted = (rb / "uncommitted.txt").read_text()
@@ -1154,7 +1171,7 @@ rs_steps = [
 with (rs / "app.log").open("w") as log:
     rc = subprocess.run([str(binary), "--script", str(rs / "rs.rift"), "--headless"],
                         env=dict(env, XDG_CONFIG_HOME=str(rs / "cfg"),
-                                 XDG_DATA_HOME=str(rs / "data")),
+                                 XDG_DATA_HOME=str(rs / "data"), HOME=str(rb / "home")),
                         stdout=log, stderr=log, timeout=120).returncode
 assert rc == 0, died("review-sync run failed", rs / "app.log")
 rs_targets = (rs / "targets.txt").read_text()
@@ -1237,6 +1254,9 @@ dec_steps = [
     "dblclick 60 104",
     "wait 200",
     "key cmd+c",
+    # the click selected the block, and ⌘A with a block selected takes
+    # every block: Esc drops it so ⌘A selects the command line
+    "key escape",
     "key cmd+a",
     "key cmd+v",
     "wait 200",
@@ -1254,6 +1274,65 @@ wide = (dec / "wide.txt").read_text()
 assert 'editor="width"' in wide, wide
 tall = (dec / "tall.txt").read_text()
 assert 'editor="Double"' in tall, tall
+
+# smart double-click: a URL, path:line:col, email, IPv4/IPv6, number, SHA
+# or UUID is selected whole, trailing punctuation and brackets left out; a
+# plain word keeps word selection, which `word_chars` widens (hot reload)
+sm = scratch / "smart-click"
+for sub in ("cfg/rift", "data"):
+    (sm / sub).mkdir(parents=True, exist_ok=True)
+sm_config = 'blocks_start = "top"\nshell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
+(sm / "cfg/rift/config.toml").write_text(sm_config)
+sm_lines = ["see https://example.com/a?b=1. ok", "at src/main.rs:42:7: oops",
+            "mail <dev.ops+x@mail.example.com>", "ip 192.168.0.12: fe80::1ff:fe23:4567:890a",
+            "n 3.1415 0xFF00 4ff62eb", "id 123e4567-e89b-12d3-a456-426614174000",
+            "plain foo:bar baz",
+            # soft-wrapped over two rows: clicked on its second it is whole
+            "https://example.com/" + "w" * 150 + "/end"]
+(sm / "lines.txt").write_text("\n".join(sm_lines) + "\n")
+def sm_run(name, steps):
+    (sm / f"{name}.rift").write_text("\n".join(
+        ["resize 900 500", "wait_prompt", f"type cat {sm / 'lines.txt'}\\n", "wait 800",
+         *steps, "quit"]) + "\n")
+    with (sm / f"{name}.log").open("w") as log:
+        rc = subprocess.run([str(binary), "--script", str(sm / f"{name}.rift"), "--headless"],
+                            env=dict(env, XDG_CONFIG_HOME=str(sm / "cfg"), XDG_DATA_HOME=str(sm / "data"),
+                                     BASH_SILENCE_DEPRECATION_WARNING="1"),
+                            stdout=log, stderr=log, timeout=90).returncode
+    assert rc == 0, died(f"smart click {name} run failed", sm / f"{name}.log")
+sm_run("probe", [f"dump {sm}/probe.txt"])
+sm_probe = (sm / "probe.txt").read_text()
+sm_geo = next(l for l in sm_probe.splitlines() if l.strip().startswith("geometry "))
+sm_cell = float(re.search(r"cell_w=([\d.]+)", sm_geo)[1])
+sm_line_h = float(re.search(r"line_h=([\d.]+)", sm_geo)[1])
+sm_rows = {int(a): (float(y), float(x)) for a, y, x in re.findall(r"(\d+):([\d.]+)@([\d.]+)", sm_geo)}
+sm_start = int(re.findall(r'cmd="cat [^"]*lines.txt".*?output_start=Some\((\d+)\)', sm_probe)[-1])
+def sm_at(i, needle):
+    y, x = sm_rows[sm_start + i]
+    return f"{x + (sm_lines[i].index(needle) + 0.5) * sm_cell:.1f} {y + sm_line_h / 2:.1f}"
+sm_cases = [(0, "example", "https://example.com/a?b=1"), (1, "main", "src/main.rs:42:7"),
+            (2, "ops", "dev.ops+x@mail.example.com"), (3, "168", "192.168.0.12"),
+            (3, "1ff", "fe80::1ff:fe23:4567:890a"), (4, "1415", "3.1415"), (4, "FF0", "0xFF00"),
+            (4, "f62", "4ff62eb"), (5, "e89b", "123e4567-e89b-12d3-a456-426614174000"),
+            (6, "bar", "bar")]
+sm_steps = []
+for k, (i, needle, _) in enumerate(sm_cases):
+    sm_steps += [f"dblclick {sm_at(i, needle)}", "wait 150", "key cmd+c", "wait 100",
+                 f"dump {sm}/c{k}.txt", "click 5 480", "wait 400"]
+sm_wy, sm_wx = sm_rows[sm_start + 8]
+sm_steps += [f"dblclick {sm_wx + 5.5 * sm_cell:.1f} {sm_wy + sm_line_h / 2:.1f}", "wait 150",
+             "key cmd+c", "wait 100", f"dump {sm}/wrapped.txt", "click 5 480", "wait 400"]
+# word_chars = ":" makes the colon a word character
+sm_steps += [f"sh printf 'word_chars = \":\"\\n' >> {sm / 'cfg/rift/config.toml'}", "wait 1200",
+             f"dblclick {sm_at(6, 'bar')}", "wait 150", "key cmd+c", "wait 100", f"dump {sm}/wc.txt"]
+sm_run("clicks", sm_steps)
+def sm_clip(name):
+    line = next(l for l in (sm / f"{name}.txt").read_text().splitlines() if l.startswith("clipboard="))
+    return json.loads(line[len("clipboard="):])
+for k, (_, needle, want) in enumerate(sm_cases):
+    assert sm_clip(f"c{k}") == want, (needle, sm_clip(f"c{k}"), want)
+assert sm_clip("wc") == "foo:bar", sm_clip("wc")
+assert sm_clip("wrapped") == sm_lines[7], sm_clip("wrapped")
 
 # soft `clear`: the next command starts right above the command line
 # (blocks_start = "bottom", the default), or at the top of the viewport with
@@ -1771,6 +1850,103 @@ assert ca_state(9)[1] == "Some(0)", ca_state(9)
 assert ca_state(10)[:2] == (0, "Some(0)"), ca_state(10)
 assert ca_state(11)[:2] == (0, "Some(1)"), ca_state(11)
 
+# block tools: the block filter's toggles (case, invert, context with a
+# separator row, an invalid regex keeping the last valid filter), a filter
+# kept off and back on; ⌘F limited to the selected block and widened; a
+# multi-block selection (⇧↑, ⌘A) and its menu (copy, compare); Copy as
+# HTML (escaped, coloured) and Markdown; Save output writes the block text
+bt2 = scratch / "block-tools"
+for sub in ("cfg/rift", "data"):
+    (bt2 / sub).mkdir(parents=True, exist_ok=True)
+(bt2 / "cfg/rift/config.toml").write_text(
+    'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
+    'sync_os_theme = false\n')
+bt2_steps = [
+    "resize 1100 700", "wait_prompt",
+    "type for w in alpha 'beta ERROR one' gamma delta epsilon 'zeta error two' eta; do echo $w; done\\n",
+    "wait 600", "key alt+shift+f", "type error", f"dump {bt2}/plain.txt",
+    "key alt+c", f"dump {bt2}/case.txt", "key alt+c",
+    "key alt+i", f"dump {bt2}/invert.txt", "key alt+i",
+    "key alt+up", f"dump {bt2}/context.txt",
+    "key alt+r", "type (", f"dump {bt2}/invalid.txt", "key backspace",
+    "key enter", "key alt+shift+f", f"dump {bt2}/off.txt",
+    "key alt+shift+f", f"dump {bt2}/on.txt", "key escape", "key escape",
+    "type tput setaf 1; echo 'NEEDLE <b>&'; tput sgr0\\n", "wait 400",
+    "type echo NEEDLE two\\n", "wait 400",
+    "key cmd+up", "key cmd+f", "type NEEDLE", "wait 200", f"dump {bt2}/scoped.txt",
+    "a11y click Search the whole pane", "wait 200", f"dump {bt2}/widened.txt",
+    "key escape", "key escape",
+    "key cmd+up", "key shift+up", "wait 200", f"dump {bt2}/multi.txt",
+    "key ctrl+m", "wait 300", f"dump {bt2}/menu.txt",
+    "a11y click Copy 2 commands", "wait 200", f"dump {bt2}/copied.txt",
+    "key ctrl+m", "wait 300", "a11y click Compare outputs", "wait 1000",
+    f"dump {bt2}/compare.txt", "key escape",
+    "key cmd+a", "wait 200", f"dump {bt2}/all.txt", "key escape",
+    "key cmd+up", "key cmd+up", "key ctrl+m", "wait 300", "a11y click Copy as HTML", "wait 200",
+    f"dump {bt2}/html.txt", "key ctrl+m", "wait 300", "a11y click Copy as Markdown", "wait 200",
+    f"dump {bt2}/md.txt", "key ctrl+m", "wait 300", "a11y click Save output…", "wait 300",
+    f"type {bt2}/out.txt", "wait 200", "key enter", "wait 400", f"dump {bt2}/saved.txt",
+    # over an existing file: asked first; Esc keeps it, Replace writes
+    f"sh printf OLD > {bt2}/out.txt",
+    "key ctrl+m", "wait 300", "a11y click Save output…", "wait 300",
+    f"type {bt2}/out.txt", "wait 200", "key enter", "wait 600", f"dump {bt2}/replace.txt",
+    "key escape", "wait 300", f"sh cp {bt2}/out.txt {bt2}/kept.txt",
+    "key ctrl+m", "wait 300", "a11y click Save output…", "wait 300",
+    f"type {bt2}/out.txt", "wait 200", "key enter", "wait 700", "a11y click Replace", "wait 400",
+    # find in a filtered block: a match in the lines its filter hides is
+    # said, not silently missing
+    "key escape", "type echo keep; echo alpha\\n", "wait 400",
+    "key alt+shift+f", "type keep", "key enter", "wait 200",
+    "key cmd+f", "type alpha", "wait 300", f"dump {bt2}/hidden.txt",
+    "quit",
+]
+(bt2 / "t.rift").write_text("\n".join(bt2_steps) + "\n")
+with (bt2 / "app.log").open("w") as log:
+    rc = subprocess.run([str(binary), "--script", str(bt2 / "t.rift"), "--headless"],
+                        env=dict(env, XDG_CONFIG_HOME=str(bt2 / "cfg"), XDG_DATA_HOME=str(bt2 / "data"),
+                                 BASH_SILENCE_DEPRECATION_WARNING="1"),
+                        stdout=log, stderr=log, timeout=120).returncode
+assert rc == 0, died("block-tools run failed", bt2 / "app.log")
+def bt2_state(name):
+    return (bt2 / f"{name}.txt").read_text()
+def bt2_rows(name):
+    # from the first header: the shell's banner rows come before it
+    rows = re.search(r"row_kinds=(\S*)", bt2_state(name))[1]
+    return rows[rows.index("H"):]
+# the filtered block's header, then the kept lines (the live prompt is
+# the editor's, not a row)
+assert bt2_rows("plain") == "HGG", bt2_rows("plain")
+assert bt2_rows("case") == "HG", bt2_rows("case")
+assert bt2_rows("invert") == "HGGGGG", bt2_rows("invert")
+assert bt2_rows("context") == "HGGGSGGG", bt2_rows("context")
+inv = bt2_state("invalid")
+assert 'query="error(" ' in inv and "error=Some(" in inv and "applied=true" in inv, inv[:3000]
+assert bt2_rows("invalid") == "HGGGSGGG", "an invalid regex dropped the last valid filter"
+assert "enabled=false" in bt2_state("off") and bt2_rows("off") == "HGGGGGGG"
+on = bt2_state("on")
+assert 'query="error" ' in on and "enabled=true" in on and "context=1" in on, on[:3000]
+scoped = bt2_state("scoped")
+assert 'Dialog "Find in block: echo NEEDLE two"' in scoped and " matches=1 " in scoped, scoped[:3000]
+widened = bt2_state("widened")
+assert 'Dialog "Find"' in widened and " matches=2 " in widened, widened[:3000]
+assert "selected_blocks=[1, 2]" in bt2_state("multi"), bt2_state("multi")[:3000]
+assert '"Copy 2 commands"' in bt2_state("menu") and '"Compare outputs"' in bt2_state("menu")
+assert ('clipboard="tput setaf 1; echo \'NEEDLE <b>&\'; tput sgr0\\necho NEEDLE two"'
+        in bt2_state("copied")), bt2_state("copied")[-1500:]
+cmp_line = next(l for l in bt2_state("compare").splitlines() if l.startswith("compare="))
+assert ("compare=true blocks=(1, 2) phase=ready" in cmp_line and "added=1 removed=1" in cmp_line), cmp_line
+assert "selected_blocks=[0, 1, 2]" in bt2_state("all"), bt2_state("all")[:3000]
+html = next(l for l in bt2_state("html").splitlines() if l.startswith("clipboard_html="))
+assert "&lt;b&gt;&amp;" in html and "<b>&" not in html, html
+assert '<span style=\\"color: #' in html, "Copy as HTML lost the output's colour: " + html
+md = bt2_state("md")
+assert "clipboard=\"```sh\\ntput setaf 1;" in md and "```\\nNEEDLE <b>&\\n```" in md, md[-1500:]
+assert (bt2 / "out.txt").read_text() == "NEEDLE <b>&\n", (bt2 / "out.txt").read_text()
+assert 'AlertDialog "Replace the file?"' in bt2_state("replace"), bt2_state("replace")[-3000:]
+assert (bt2 / "kept.txt").read_text() == "OLD", "Save output replaced a file without asking"
+hidden = bt2_state("hidden")
+assert 'query="alpha"' in hidden and " hidden=1 " in hidden, hidden[:3000]
+
 # ⇧⌘T of a tab whose shell reported a directory on another host opens in
 # the configured start directory, never the app process's own cwd
 rr = scratch / "reopen-remote"
@@ -1820,6 +1996,57 @@ assert rc == 0, died("restore-focus run failed", rf / "app.log")
 restored = (rf / "restored.txt").read_text()
 first_pane = re.findall(r"^  pane (\d+) ", restored, re.M)[0]
 assert f"panes=3 active_pane={first_pane} " in restored, restored
+
+# a pane's own colour scheme: a profile's `theme` colours the pane it opens,
+# "Pane theme: <name>" the active pane only, "Pane theme: default" goes back
+# to the window theme over the profile's; the session keeps each pane's, and
+# a restart restores them (the session file copied before the quit, which
+# empties it). Restart pane keeps the pane's theme, and its colour queries
+# (OSC 11) answer with it
+pt = scratch / "pane-theme"
+for sub in ("cfg/rift", "data/rift"):
+    (pt / sub).mkdir(parents=True, exist_ok=True)
+(pt / "cfg/rift/config.toml").write_text(
+    'shell = "/bin/bash"\nrestore_session = true\ndurable_sessions = false\n'
+    'sync_os_theme = false\n\n[[profiles]]\nname = "prod"\ntheme = "light-default"\n')
+pt_env = dict(env, XDG_CONFIG_HOME=str(pt / "cfg"), XDG_DATA_HOME=str(pt / "data"),
+              RIFT_PERSIST_SESSION="1")
+def pt_run(name, steps):
+    (pt / f"{name}.rift").write_text("\n".join(["resize 1000 500", "wait_prompt", *steps, "quit"]) + "\n")
+    with (pt / f"{name}.log").open("w") as log:
+        rc = subprocess.run([str(binary), "--script", str(pt / f"{name}.rift"), "--headless"],
+                            env=pt_env, stdout=log, stderr=log, timeout=60).returncode
+    assert rc == 0, died(f"pane-theme {name} run failed", pt / f"{name}.log")
+# prints the terminal's answer to an OSC 11 (background colour) query
+(pt / "bg-query.sh").write_text(
+    "printf '\\033]11;?\\007'; IFS= read -rs -t 2 -d \"$(printf '\\007')\" r; echo \"BG=${r#*;}\"\n")
+def pt_panes(name):
+    text = (pt / f"{name}.txt").read_text()
+    return re.findall(r'pane_theme=(None|Some\("[^"]*"\)) launch_theme=(None|Some\("[^"]*"\))', text)
+pt_run("set", [
+    "key cmd+p", "type Split right: prod", "wait 200", "key enter", "wait_prompt", "wait 300",
+    f"dump {pt}/split.txt",
+    "key alt+cmd+left", "wait 200", "key cmd+p", "type Pane theme: tokyo-night", "wait 200",
+    "key enter", "wait 300", f"dump {pt}/tokyo.txt",
+    "key alt+cmd+right", "wait 200", "key cmd+p", "type Pane theme: default", "wait 200",
+    "key enter", "wait 300", f"dump {pt}/default.txt", f"shot {pt}/default.png",
+    "key cmd+p", "type Pane theme: catppuccin-mocha", "wait 200", "key enter", "wait 300",
+    f"sh cp {pt}/data/rift/session.toml {pt}/saved.toml",
+    "key cmd+p", "type Restart pane", "wait 200", "key enter", "wait_prompt", "wait 500",
+    f"type bash {pt}/bg-query.sh\\n", "wait 1000", f"dump {pt}/restarted.txt"])
+assert pt_panes("split") == [("None", "None"), ('Some("light-default")', "None")], pt_panes("split")
+assert pt_panes("tokyo")[0] == ('Some("tokyo-night")', 'Some("tokyo-night")'), pt_panes("tokyo")
+# the profile names a theme: "default" is recorded to keep the window's
+assert pt_panes("default")[1] == ("None", 'Some("default")'), pt_panes("default")
+saved = (pt / "saved.toml").read_text()
+assert 'theme = "tokyo-night"' in saved and 'theme = "catppuccin-mocha"' in saved, saved
+assert pt_panes("restarted")[1][0] == 'Some("catppuccin-mocha")', pt_panes("restarted")
+assert "BG=rgb:1e1e/1e1e/2e2e" in (pt / "restarted.txt").read_text(), (pt / "restarted.txt").read_text()[-3000:]
+(pt / "data/rift/session.toml").write_text(saved)
+pt_run("restored", ["wait 500", f"dump {pt}/restored.txt"])
+assert pt_panes("restored") == [('Some("tokyo-night")', 'Some("tokyo-night")'),
+                                ('Some("catppuccin-mocha")', 'Some("catppuccin-mocha")')], \
+    pt_panes("restored")
 
 # ⌘K Clear Blocks wipes the screen and the scrollback (not the shell's soft
 # `clear`, which keeps the history scrollable): nothing of before is left
@@ -1931,6 +2158,217 @@ finally:
 assert rc == 0, died("reattach-profile run failed", rp / "b.log")
 rp_b = (rp / "b.txt").read_text()
 assert 'No profile named \\"p\\"; this pane runs /bin/bash instead' in rp_b, rp_b[:3000]
+# a durable shell's RIFT_PANE_URL names its service session, so the link
+# still focuses its pane after the window died and a relaunch reattached it
+rf2 = scratch / "reattach-focus"
+for sub in ("cfg/rift", "data/rift"):
+    (rf2 / sub).mkdir(parents=True, exist_ok=True)
+(rf2 / "cfg/rift/config.toml").write_text(
+    'shell = "/bin/bash"\nrestore_session = true\ndurable_sessions = true\nsync_os_theme = false\n')
+rf2_env = dict(env, XDG_CONFIG_HOME=str(rf2 / "cfg"), XDG_DATA_HOME=str(rf2 / "data"),
+               RIFT_PERSIST_SESSION="1")
+(rf2 / "a.rift").write_text("\n".join([
+    "wait_prompt", "wait 1000", f'type printf %s "$RIFT_PANE_URL" > {rf2}/url\\n',
+    f"wait_file {rf2}/url 10000", "wait 500", f"sh touch {rf2}/ready", "wait 60000", "quit"]) + "\n")
+try:
+    with (rf2 / "a.log").open("w") as log:
+        first = subprocess.Popen([str(binary), "--script", str(rf2 / "a.rift"), "--headless"],
+                                 env=rf2_env, stdout=log, stderr=log)
+        for _ in range(300):
+            if (rf2 / "ready").exists() or first.poll() is not None:
+                break
+            time.sleep(0.1)
+        time.sleep(0.5)
+        first.kill()
+        first.wait()
+    assert (rf2 / "ready").exists(), died("reattach-focus first run failed", rf2 / "a.log")
+    rf2_url = (rf2 / "url").read_text()
+    assert re.fullmatch(r"rift://action/focus\?pane=service\.\d+", rf2_url), rf2_url
+    (rf2 / "b.rift").write_text("\n".join([
+        "wait_prompt", "wait 1500", "key cmd+t", "wait 1000", f"dump {rf2}/before.txt",
+        f"link {rf2_url}", "wait 500", f"dump {rf2}/after.txt", "quit"]) + "\n")
+    with (rf2 / "b.log").open("w") as log:
+        rc = subprocess.run([str(binary), "--script", str(rf2 / "b.rift"), "--headless"],
+                            env=rf2_env, stdout=log, stderr=log, timeout=90).returncode
+finally:
+    for pid in session_daemons(rf2 / "data"):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+assert rc == 0, died("reattach-focus run failed", rf2 / "b.log")
+rf2_sid = rf2_url.rsplit(".", 1)[1]
+rf2_before, rf2_after = ((rf2 / f"{n}.txt").read_text() for n in ("before", "after"))
+# the restored tab reattached that shell; the new tab is focused, then the link
+assert re.search(r"^window 0: tabs=2 active=1 ", rf2_before, re.M), rf2_before[:600]
+assert f"service=Some({rf2_sid})" in rf2_before, rf2_before[:3000]
+assert re.search(r"^window 0: tabs=2 active=0 ", rf2_after, re.M), rf2_after[:600]
+assert "toasts=[]" in rf2_after, rf2_after[:3000]
+
+# ⌃R Results: past runs by their output, across windows; a repeated command
+# stays two runs; query words filter; the preview marks the match and runs
+# nothing (⇥ puts the command on the line, ⏎ there runs it once more)
+rs = scratch / "results"
+(rs / "cfg/rift").mkdir(parents=True)
+rs_base = 'shell = "/bin/bash"\ndurable_sessions = false\nsync_os_theme = false\n'
+(rs / "cfg/rift/config.toml").write_text(rs_base + "restore_session = false\n")
+rs_steps = [
+    "resize 1100 760", "wait_prompt",
+    "type echo applying 0003; echo ERROR: relation users exists; false\\n", "wait 600", "wait_prompt",
+    f"type echo once >> {rs}/ran.log; echo RUNMARK\\n", "wait 600", "wait_prompt",
+    "new_window", "wait_prompt",
+    "type echo applying 0003; echo ok\\n", "wait 600", "wait_prompt",
+    "type echo applying 0003; echo ok\\n", "wait 600", "wait_prompt",
+    "key ctrl+r", "wait 200", "key ctrl+r", "wait 200", "key ctrl+r", "wait 800",
+    f"dump {rs}/all.txt",
+    "type relation", "wait 800", f"dump {rs}/relation.txt", f"shot {rs}/relation.png",
+    "key ctrl+u", "type applying is:ok", "wait 800", f"dump {rs}/ok.txt",
+    "key ctrl+u", "type RUNMARK", "wait 800", "key down", "key up", "wait 200",
+    f"dump {rs}/preview.txt",
+    "key tab", "wait 300", f"dump {rs}/edit.txt",
+    "key enter", "wait 800", f"dump {rs}/rerun.txt", "quit"]
+(rs / "a.rift").write_text("\n".join(rs_steps) + "\n")
+with (rs / "a.log").open("w") as log:
+    rc = subprocess.run([str(binary), "--script", str(rs / "a.rift"), "--headless"],
+                        env=dict(env, XDG_CONFIG_HOME=str(rs / "cfg"), XDG_DATA_HOME=str(rs / "data")),
+                        stdout=log, stderr=log, timeout=90).returncode
+assert rc == 0, died("results run failed", rs / "a.log")
+rst = lambda name: (rs / f"{name}.txt").read_text()
+def found(name):
+    line = re.search(r"^history_results=.*$", rst(name), re.M)
+    assert line, rst(name)[:3000]
+    return line[0]
+assert "scope=Results" in rst("all"), rst("all")[:1500]
+assert found("all").startswith("history_results=4 "), found("all")
+# the two identical runs of the second window are two results
+ids = re.search(r"found_ids=\[(.*)\]", found("all"))[1].split(", ")
+assert len(ids) == len(set(ids)) == 4, ids
+assert found("relation").startswith("history_results=1 "), found("relation")
+assert 'found_hit=Some("relation")' in found("relation"), found("relation")
+assert "found_exit=Some(1)" in found("relation") and 'found_context=Some("local · ' in found("relation")
+assert "match on line 2" in found("relation"), found("relation")
+assert found("ok").startswith("history_results=2 "), found("ok")
+assert 'found_preview=Some("once' not in found("preview")
+assert 'found_hit=Some("RUNMARK")' in found("preview"), found("preview")
+# previewing ran nothing; ⇥ put the command on the line; ⏎ ran it once more
+assert re.search(r'^\s*pane \d+ .*editor="echo once >>', rst("edit"), re.M), rst("edit")[-3000:]
+assert "history=false" in rst("edit"), rst("edit")[:1500]
+assert (rs / "ran.log").read_text() == "once\nonce\n", (rs / "ran.log").read_text()
+
+# retained results: with save_transcripts on, a relaunch finds the earlier
+# run (restored, its time kept); with saving off, or after "Clear saved
+# block transcripts", it is no longer searchable
+(rs / "cfg/rift/config.toml").write_text(rs_base + "restore_session = true\nsave_transcripts = true\n")
+rt_env = dict(env, XDG_CONFIG_HOME=str(rs / "cfg"), XDG_DATA_HOME=str(rs / "data-r"),
+              RIFT_PERSIST_SESSION="1")
+(rs / "r1.rift").write_text("\n".join([
+    "wait_prompt", "type echo SAVEDMARK-1; false\\n", "wait 800", "wait_prompt",
+    f"sh touch {rs}/r1-ready", "wait 60000", "quit"]) + "\n")
+with (rs / "r1.log").open("w") as log:
+    first = subprocess.Popen([str(binary), "--script", str(rs / "r1.rift"), "--headless"],
+                             env=rt_env, stdout=log, stderr=log)
+    for _ in range(300):
+        if (rs / "r1-ready").exists() or first.poll() is not None:
+            break
+        time.sleep(0.1)
+    time.sleep(1.5)
+    first.kill()
+    first.wait()
+assert (rs / "r1-ready").exists(), died("results first run failed", rs / "r1.log")
+# the last command before a kill is in the saved transcript: a block that
+# ended inside a coalesced wakeup is saved on the next frame (it used to be
+# missing about one run in four); five killed runs
+for k in range(5):
+    kd = rs / f"data-k{k}"
+    (rs / f"k{k}.rift").write_text("\n".join([
+        "wait_prompt", f"type cd {rs}\\n", "wait 300",
+        "type seq 1 3 | sed s/^/KILLMARK-/\\n", "wait 800", "wait_prompt",
+        f"sh touch {rs}/k{k}-ready", "wait 60000", "quit"]) + "\n")
+    with (rs / f"k{k}.log").open("w") as log:
+        first = subprocess.Popen([str(binary), "--script", str(rs / f"k{k}.rift"), "--headless"],
+                                 env=dict(rt_env, XDG_DATA_HOME=str(kd)), stdout=log, stderr=log)
+        for _ in range(300):
+            if (rs / f"k{k}-ready").exists() or first.poll() is not None:
+                break
+            time.sleep(0.1)
+        time.sleep(1.5)
+        first.kill()
+        first.wait()
+    assert (rs / f"k{k}-ready").exists(), died("killed run failed", rs / f"k{k}.log")
+    saved = "".join(p.read_text() for p in (kd / "rift/transcripts").glob("*.json"))
+    assert "KILLMARK" in saved, f"run {k}: the last command is not in the transcript"
+on_cfg = rs_base + "restore_session = true\nsave_transcripts = true\n"
+off_cfg = rs_base + "restore_session = true\nsave_transcripts = false\n"
+requery = ["key ctrl+u", "wait 300", "type SAVEDMARK", "wait 1000"]
+(rs / "on.toml").write_text(on_cfg)
+(rs / "off.toml").write_text(off_cfg)
+(rs / "r2.rift").write_text("\n".join([
+    "wait_prompt", "wait 1000", "key ctrl+r", "wait 200", "key ctrl+r", "wait 200", "key ctrl+r",
+    "type SAVEDMARK", "wait 1000", f"dump {rs}/r-found.txt",
+    cp(rs / "off.toml", rs / "cfg/rift/config.toml"), "wait 1500", *requery, f"dump {rs}/r-off.txt",
+    cp(rs / "on.toml", rs / "cfg/rift/config.toml"), "wait 1500", *requery, f"dump {rs}/r-on.txt",
+    "key escape", "key ctrl+u", "key cmd+p", "wait 300", "type Clear saved block transcripts",
+    "wait 300", "key enter", "wait 500",
+    "key ctrl+r", "wait 300", *requery, f"dump {rs}/r-cleared.txt", "quit"]) + "\n")
+with (rs / "r2.log").open("w") as log:
+    rc = subprocess.run([str(binary), "--script", str(rs / "r2.rift"), "--headless"],
+                        env=rt_env, stdout=log, stderr=log, timeout=90).returncode
+assert rc == 0, died("results relaunch failed", rs / "r2.log")
+assert found("r-found").startswith("history_results=1 "), found("r-found")
+assert "restored from a previous session" in found("r-found"), found("r-found")
+assert "found_when=Some(true)" in found("r-found") and "found_exit=Some(1)" in found("r-found")
+assert found("r-off").startswith("history_results=0 ") and " saved=false " in found("r-off"), found("r-off")
+assert found("r-on").startswith("history_results=1 "), found("r-on")
+assert found("r-cleared").startswith("history_results=0 "), found("r-cleared")
+assert "scope=Results" in rst("r-cleared"), rst("r-cleared")[:1500]
+
+# a durable pane reattached after its window died: its runs come back once
+# (the service's replay), not again from its saved transcript
+rd = scratch / "results-durable"
+(rd / "cfg/rift").mkdir(parents=True)
+(rd / "cfg/rift/config.toml").write_text(
+    'shell = "/bin/bash"\nrestore_session = true\ndurable_sessions = true\nsync_os_theme = false\n'
+    "save_transcripts = true\n")
+rd_env = dict(env, XDG_CONFIG_HOME=str(rd / "cfg"), XDG_DATA_HOME=str(rd / "data"),
+              RIFT_PERSIST_SESSION="1")
+(rd / "a.rift").write_text("\n".join([
+    "wait_prompt", "wait 1000", "type echo DURMARK\\n", "wait 800", "wait_prompt",
+    "type echo DURMARK\\n", "wait 800", "wait_prompt", "key cmd+t", "wait 1000",
+    f"sh touch {rd}/ready", "wait 60000", "quit"]) + "\n")
+try:
+    with (rd / "a.log").open("w") as log:
+        first = subprocess.Popen([str(binary), "--script", str(rd / "a.rift"), "--headless"],
+                                 env=rd_env, stdout=log, stderr=log)
+        for _ in range(300):
+            if (rd / "ready").exists() or first.poll() is not None:
+                break
+            time.sleep(0.1)
+        time.sleep(1.5)
+        first.kill()
+        first.wait()
+    assert (rd / "ready").exists(), died("results-durable first run failed", rd / "a.log")
+    (rd / "b.rift").write_text("\n".join([
+        "wait_prompt", "wait 2000", "key ctrl+r", "wait 200", "key ctrl+r", "wait 200",
+        "key ctrl+r", "type DURMARK", "wait 1000", f"dump {rd}/b.txt",
+        f"sh ls {rd}/data/rift/transcripts > {rd}/files.txt", "quit"]) + "\n")
+    with (rd / "b.log").open("w") as log:
+        rc = subprocess.run([str(binary), "--script", str(rd / "b.rift"), "--headless"],
+                            env=rd_env, stdout=log, stderr=log, timeout=90).returncode
+finally:
+    for pid in session_daemons(rd / "data"):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+assert rc == 0, died("results-durable run failed", rd / "b.log")
+rd_b = (rd / "b.txt").read_text()
+rd_line = re.search(r"^history_results=.*$", rd_b, re.M)[0]
+# the pane's saved transcript is there too (and holds both runs)
+assert ".json" in (rd / "files.txt").read_text(), (rd / "files.txt").read_text()
+# two actual runs, each once, both from the reattached service session
+assert rd_line.startswith("history_results=2 "), rd_line
+rd_ids = re.search(r"found_ids=\[(.*)\]", rd_line)[1].split(", ")
+assert all(i.startswith('"service.') for i in rd_ids) and len(set(rd_ids)) == 2, rd_ids
 
 # a session service that accepts and never answers holds no window: the
 # shell is started on the pane's reader thread, so ⌘T, typing and a split
@@ -2208,6 +2646,224 @@ assert "view_offset=0 " in down and "selection=true" in down, "a selection held 
 up_off = int(re.search(r"view_offset=(\d+)", (sb / "edge-up.txt").read_text())[1])
 assert up_off > 40, f"a selection held above the pane did not scroll up (view_offset={up_off})"
 
+# file links: ⌘-click on each compiler / traceback format opens the file at
+# its line and column, relative to the command's directory (a fake editor
+# on PATH records its arguments); a path that does not exist is no link;
+# right-click on a path or URL adds Open / Copy path / Reveal or Copy URL
+fl = scratch / "file-links"
+for sub in ("cfg/rift", "data", "bin", "w/src", "w/app"):
+    (fl / sub).mkdir(parents=True, exist_ok=True)
+(fl / "cfg/rift/config.toml").write_text(
+    'blocks_start = "top"\nshell = "/bin/bash"\nrestore_session = false\n'
+    'durable_sessions = false\nlink_editor = "windsurf"\n')
+# one write per call: editors opened by clicks 300 ms apart can run at
+# once on a loaded machine, and piecewise appends interleaved
+(fl / "bin/windsurf").write_text(
+    f'#!/bin/sh\nl=""\nfor a in "$@"; do l="$l$a|"; done\nprintf "%s\\n" "$l" >> {fl}/argv.txt\n')
+(fl / "bin/windsurf").chmod(0o755)
+for f in ("src/main.rs", "src/App.cs", "src/x.ts", "app/x.py", "app/m.py", "lib.pl"):
+    (fl / "w" / f).write_text("x\n")
+fl_lines = ["src/main.rs:42:7: error", "src/App.cs(12,3): error CS1002", "src/App.cs(13, 4): warning",
+            "src/x.ts[5, 6] oops", "app/x.py, line 7, column 2: E501",
+            '  File "app/m.py", line 9, in <module>', "died at lib.pl line 31.",
+            "see https://example.com/doc ok", "missing/nope.rs:3:1 here"]
+(fl / "w/links.txt").write_text("\n".join(fl_lines) + "\n")
+fl_env = dict(env, XDG_CONFIG_HOME=str(fl / "cfg"), XDG_DATA_HOME=str(fl / "data"),
+              BASH_SILENCE_DEPRECATION_WARNING="1", RIFT_TEST_HEADLESS_EDITOR="1",
+              PATH=f"{fl / 'bin'}:{os.environ['PATH']}")
+fl_base = ["resize 1000 520", "wait_prompt", f"type cd {fl / 'w'}\\n", "wait 500",
+           "type cat links.txt\\n", "wait 800"]
+def fl_run(name, steps):
+    (fl / f"{name}.rift").write_text("\n".join(fl_base + steps + ["quit"]) + "\n")
+    with (fl / f"{name}.log").open("w") as log:
+        rc = subprocess.run([str(binary), "--script", str(fl / f"{name}.rift"), "--headless"],
+                            env=fl_env, stdout=log, stderr=log, timeout=90).returncode
+    assert rc == 0, died(f"file link {name} run failed", fl / f"{name}.log")
+fl_run("probe", [f"dump {fl}/probe.txt"])
+fl_probe = (fl / "probe.txt").read_text()
+fl_geo = next(l for l in fl_probe.splitlines() if l.strip().startswith("geometry "))
+fl_cell = float(re.search(r"cell_w=([\d.]+)", fl_geo)[1])
+fl_line_h = float(re.search(r"line_h=([\d.]+)", fl_geo)[1])
+fl_rows = {int(a): (float(y), float(x)) for a, y, x in re.findall(r"(\d+):([\d.]+)@([\d.]+)", fl_geo)}
+fl_start = int(re.findall(r'cmd="cat links.txt".*?output_start=Some\((\d+)\)', fl_probe)[-1])
+def fl_at(i, needle):
+    y, x = fl_rows[fl_start + i]
+    return f"{x + (fl_lines[i].index(needle) + 0.5) * fl_cell:.1f} {y + fl_line_h / 2:.1f}"
+fl_steps = []
+for i, needle in [(0, "main"), (1, "App"), (2, "App"), (3, "x.ts"), (4, "x.py"), (5, "m.py"),
+                  (6, "lib"), (8, "nope")]:
+    fl_steps += ["mods cmd", f"click {fl_at(i, needle)}", "mods none", "wait 300"]
+fl_steps += [f"rclick {fl_at(1, 'App')}", "wait 200", f"dump {fl}/rpath.txt",
+             "key down", "key down", "key enter", "wait 200", f"dump {fl}/rpath-copied.txt",
+             f"rclick {fl_at(7, 'example')}", "wait 200", f"dump {fl}/rurl.txt",
+             "key down", "key down", "key enter", "wait 200", f"dump {fl}/rurl-copied.txt",
+             f"rclick {fl_at(8, 'nope')}", "wait 200", f"dump {fl}/rmissing.txt", "key escape"]
+fl_run("clicks", fl_steps)
+fl_w = fl / "w"
+# sorted: the editor processes may finish out of order
+assert sorted((fl / "argv.txt").read_text().splitlines()) == sorted([
+    f"--goto|{fl_w}/src/main.rs:42:7|", f"--goto|{fl_w}/src/App.cs:12:3|", f"--goto|{fl_w}/src/App.cs:13:4|",
+    f"--goto|{fl_w}/src/x.ts:5:6|", f"--goto|{fl_w}/app/x.py:7:2|", f"--goto|{fl_w}/app/m.py:9|",
+    f"--goto|{fl_w}/lib.pl:31|"]), (fl / "argv.txt").read_text()
+def fl_dump(name):
+    return (fl / f"{name}.txt").read_text()
+assert 'menu_items=["Open", "Copy path", ' in fl_dump("rpath"), fl_dump("rpath")[:2000]
+assert f'clipboard="{fl_w}/src/App.cs"' in fl_dump("rpath-copied"), fl_dump("rpath-copied")[:2000]
+assert 'menu_items=["Open link", "Copy URL", "Copy command"' in fl_dump("rurl"), fl_dump("rurl")[:2000]
+assert 'clipboard="https://example.com/doc"' in fl_dump("rurl-copied"), fl_dump("rurl-copied")[:2000]
+assert 'menu_items=["Copy command"' in fl_dump("rmissing"), fl_dump("rmissing")[:2000]
+
+# the overlay scrollbar (scrollbar = "always"): its thumb is the app's own
+# view over the display list (top, middle, bottom; collapsed blocks and a
+# block filter shrink the list), it sits in the pane's right padding beside
+# the text, ticks mark the prompts and the failed command; dragging the
+# thumb scrolls to the top, a click on the track pages (down below the
+# thumb, up above it). `never` hides it.
+sbar = scratch / "scrollbar"
+(sbar / "cfg/rift").mkdir(parents=True, exist_ok=True)
+sbar_cfg = ('shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
+            'sync_os_theme = false\nscrollbar = "always"\n')
+(sbar / "cfg/rift/config.toml").write_text(sbar_cfg)
+sbar_start = ["resize 1000 500", "wait_prompt", "type seq 1 200\\n", "wait 600",
+              "type false\\n", "wait 400", "type seq 1 200\\n", "wait 600"]
+def sbar_run(name, steps):
+    (sbar / f"{name}.rift").write_text("\n".join([*sbar_start, *steps, "quit"]) + "\n")
+    with (sbar / f"{name}.log").open("w") as log:
+        rc = subprocess.run([str(binary), "--script", str(sbar / f"{name}.rift"), "--headless"],
+                            env=dict(env, XDG_CONFIG_HOME=str(sbar / "cfg"),
+                                     XDG_DATA_HOME=str(sbar / f"data-{name}")),
+                            stdout=log, stderr=log, timeout=60).returncode
+    assert rc == 0, died(f"scrollbar {name} run failed", sbar / f"{name}.log")
+def sbar_state(name):
+    text = (sbar / f"{name}.txt").read_text()
+    m = re.search(r"scrollbar=(\w+) len=(\d+) rows=(\d+) start=(\d+) "
+                  r"track=([\d.]+),([\d.]+),([\d.]+),([\d.]+) thumb=([\d.]+),([\d.]+) "
+                  r"ticks=(\d+),(\d+),(\d+),(\d+)", text)
+    assert m, text[:2000]
+    shown, (n, rows, start), track, thumb, ticks = (
+        m[1], map(int, m.group(2, 3, 4)), [float(v) for v in m.group(5, 6, 7, 8)],
+        [float(v) for v in m.group(9, 10)], [int(v) for v in m.group(11, 12, 13, 14)])
+    # the thumb is the view: its share of the track, at its place
+    th = min(max(rows / n * track[3], 16.0), track[3])
+    want_y = track[1] + start / (n - rows) * (track[3] - th)
+    assert shown == "shown" and abs(thumb[0] - want_y) < 0.6 and abs(thumb[1] - th) < 0.6, \
+        (name, m[0])
+    offset = int(re.search(r"view_offset=(\d+)", text)[1])
+    assert start == n - rows - offset, (name, m[0], offset)
+    return n, rows, start, track, thumb, ticks, text
+sbar_run("probe", [f"dump {sbar}/bottom.txt", "scroll 1000", "wait 200", f"dump {sbar}/top.txt",
+                   "scroll -150", "wait 200", f"dump {sbar}/middle.txt"])
+n, rows, start, track, thumb, ticks, bottom = sbar_state("bottom")
+assert start == n - rows and ticks[0] == 2 and ticks[2] == 1, ticks  # two prompts, one failure
+# never over the text: the bar is right of every row's last column
+bgeo = next(l for l in bottom.splitlines() if l.strip().startswith("geometry "))
+cell_w, cols = float(re.search(r"cell_w=([\d.]+)", bgeo)[1]), int(re.search(r" cols=(\d+)", bgeo)[1])
+text_x = min(float(x) for x in re.findall(r"@([\d.]+)", bgeo))
+assert text_x + cols * cell_w <= track[0], (text_x, cols, cell_w, track)
+assert track[0] + track[2] <= 1000 and track[2] <= 8, track
+assert sbar_state("top")[2] == 0
+_, _, mid_start, *_ = sbar_state("middle")
+assert 0 < mid_start < n - rows
+# collapsed: the first block's output leaves the list; a filter shrinks the
+# list to the matching lines
+tips = (sbar / "bottom.txt").read_text()
+cx, cy, cw, ch = map(int, re.search(r'"Collapse output@(\d+),(\d+),(\d+),(\d+)"', tips).groups())
+sbar_run("collapsed", [f"click {cx + cw // 2} {cy + ch // 2}", "wait 300",
+                       f"dump {sbar}/collapsed.txt", "scroll 1000", "wait 200",
+                       f"dump {sbar}/collapsed-top.txt"])
+c_n, *_ = sbar_state("collapsed")
+assert c_n <= n - 200, (c_n, n)
+assert sbar_state("collapsed-top")[2] == 0
+sbar_run("filtered", ["key cmd+up", "wait 200", "key alt+shift+f", "wait 200", "type 19",
+                      "wait 400", f"dump {sbar}/filtered.txt"])
+f_n, *_ = sbar_state("filtered")
+assert "filter=BlockFilters { list: [(" in (sbar / "filtered.txt").read_text() and f_n < n - 150, (f_n, n)
+# drag the thumb from the bottom to the top; a click on the track under the
+# thumb pages down one view, above it up one
+tx = track[0] + track[2] / 2
+sbar_run("drag", [f"drag {tx} {thumb[0] + thumb[1] / 2} {tx} {track[1] - 50}", "wait 200",
+                  f"dump {sbar}/dragged.txt", f"click {tx} {track[1] + track[3] - 3}",
+                  "wait 200", f"dump {sbar}/paged.txt", f"click {tx} {track[1] + 3}",
+                  "wait 200", f"dump {sbar}/paged-up.txt"])
+assert sbar_state("dragged")[2] == 0
+assert sbar_state("paged")[2] == rows
+assert sbar_state("paged-up")[2] == 0
+# beside a split divider (its grab reaches a few px into the left pane, over
+# the bar): a click on the drawn bar pages that pane, the split stays
+sbar_split = ["key cmd+d", "wait_prompt", "type seq 1 200\\n", "wait 600"]
+sbar_run("split-probe", [*sbar_split, f"dump {sbar}/split-probe.txt"])
+lt = sbar_state("split-probe")[3]
+sbar_run("split", [*sbar_split, f"click {lt[0] + lt[2] - 2.5} {lt[1] + 3}", "wait 200",
+                   f"dump {sbar}/split.txt"])
+sb_split = (sbar / "split.txt").read_text()
+assert re.search(r"^  pane 1 .* view_offset=[1-9]", sb_split, re.M), sb_split[:3000]
+assert "children: [(1.0, Leaf(1)), (1.0, Leaf(2))]" in sb_split, sb_split[:3000]
+(sbar / "cfg/rift/config.toml").write_text(sbar_cfg.replace('"always"', '"never"'))
+sbar_run("never", [f"dump {sbar}/never.txt", "scroll 5", "wait 200", f"dump {sbar}/never-scrolled.txt"])
+assert " scrollbar=none " in (sbar / "never-scrolled.txt").read_text()
+
+# mask_secrets: a token shows as bullets (same width) and a git SHA does not;
+# copies are masked (⌘C, a selection cutting the token, the transcript) while
+# the block menu's "Copy output unmasked" copies it as printed; a click on
+# the bullets shows the token for a moment. A probe run reads the geometry.
+ms = scratch / "mask-secrets"
+(ms / "cfg/rift").mkdir(parents=True, exist_ok=True)
+(ms / "cfg/rift/config.toml").write_text(
+    'shell = "/bin/bash"\nrestore_session = true\ndurable_sessions = false\n'
+    'sync_os_theme = false\nmask_secrets = true\nsave_transcripts = true\n')
+ms_token = "ghp_" + "FAKE0123" * 5  # fake: never issued
+ms_start = ["resize 1000 500", "wait_prompt",
+            "type printf 'GH=ghp_%s%s%s%s%s\\\\nsha 3f2c9a1b7d4e5f60718293a4b5c6d7e8f9012345\\\\n'"
+            " FAKE0123 FAKE0123 FAKE0123 FAKE0123 FAKE0123\\n", "wait 800"]
+def ms_run(name, steps):
+    (ms / f"{name}.rift").write_text("\n".join([*ms_start, *steps, "quit"]) + "\n")
+    # each run its own data dir; the transcript is written with the session
+    # (durable_sessions = false starts no session service)
+    run_env = dict(env, XDG_CONFIG_HOME=str(ms / "cfg"), XDG_DATA_HOME=str(ms / f"data-{name}"),
+                   RIFT_PERSIST_SESSION="1")
+    with (ms / f"{name}.log").open("w") as log:
+        rc = subprocess.run([str(binary), "--script", str(ms / f"{name}.rift"), "--headless"],
+                            env=run_env, stdout=log, stderr=log, timeout=60).returncode
+    assert rc == 0, died(f"mask-secrets {name} run failed", ms / f"{name}.log")
+    return (ms / f"{name}.txt").read_text() if (ms / f"{name}.txt").exists() else ""
+probe = ms_run("probe", [f"dump {ms}/probe.txt"])
+assert "masked=1 revealed=0" in probe, probe[:1500]
+ms_geo = next(l for l in probe.splitlines() if l.strip().startswith("geometry "))
+ms_cell = float(re.search(r"cell_w=([\d.]+)", ms_geo)[1])
+ms_line = float(re.search(r"line_h=([\d.]+)", ms_geo)[1])
+ms_out = int(re.findall(r'cmd="printf .*?output_start=Some\((\d+)\)', probe)[-1])
+ms_y, ms_x = next((float(y), float(x)) for a, y, x in
+                  re.findall(r"(\d+):([\d.]+)@([\d.]+)", ms_geo) if int(a) == ms_out)
+ms_mid = int(ms_y + ms_line / 2)
+at = lambda col: int(ms_x + (col + 0.5) * ms_cell)
+ms_run("copies", [
+    "key cmd+c", "wait 200", f"dump {ms}/copied.txt",
+    # "GH=ghp_FAK" selected: the token's start only
+    f"drag {at(0)} {ms_mid} {at(9)} {ms_mid}", "wait 200", "key cmd+c", "wait 200",
+    f"dump {ms}/selected.txt", f"click {at(30)} {ms_mid + int(ms_line) * 3}", "wait 450",
+    f"rclick {at(20)} {ms_mid}", "wait 300", f"dump {ms}/menu.txt",
+    "key down", "key down", "key down", "key enter", "wait 200", f"dump {ms}/unmasked.txt",
+    "wait 450", f"click {at(20)} {ms_mid}", "wait 200", f"dump {ms}/revealed.txt",
+    f"shot {ms}/revealed.png",
+    # the pane's transcript as saved after the block (a quit clears it)
+    f"sh cp -R {ms}/data-copies/rift/transcripts {ms}/saved"])
+def ms_clip(name):
+    line = next(l for l in (ms / f"{name}.txt").read_text().splitlines()
+                if l.startswith("clipboard="))
+    return json.loads(line[len("clipboard="):])
+bullets = "•" * len(ms_token)
+assert ms_clip("copied") == f"GH={bullets}\nsha 3f2c9a1b7d4e5f60718293a4b5c6d7e8f9012345\n", \
+    ms_clip("copied")
+assert re.fullmatch(r"GH=•{5,8}", ms_clip("selected")), ms_clip("selected")
+menu = (ms / "menu.txt").read_text()
+assert 'menu_items=["Copy command", "Copy output", "Copy output unmasked",' in menu, menu[:1500]
+assert ms_clip("unmasked").startswith(f"GH={ms_token}\n"), ms_clip("unmasked")
+assert "masked=0 revealed=1" in (ms / "revealed.txt").read_text(), \
+    (ms / "revealed.txt").read_text()[:1500]
+# the transcript keeps the bullets only
+saved = [p.read_text() for p in (ms / "saved").glob("*.json")]
+assert saved and all(ms_token not in t for t in saved) and any(bullets in t for t in saved), saved
+
 # a link takes a plain click: "prompt" shows its tooltip at once (no hover
 # wait), "open" opens it; a drag across it selects and does neither
 lk = scratch / "link-click"
@@ -2301,7 +2957,7 @@ for sub in ("cfg/rift", "data", "home"):
 (tip / "home/.bash_history").write_text("".join(f"echo past{i}\n" for i in range(10)))
 tip_env = dict(env, XDG_CONFIG_HOME=str(tip / "cfg"), XDG_DATA_HOME=str(tip / "data"),
                HOME=str(tip / "home"), HISTFILE=str(tip / "home/.bash_history"),
-               BASH_SILENCE_DEPRECATION_WARNING="1")
+               BASH_SILENCE_DEPRECATION_WARNING="1", RIFT_SCRIPT_HISTORY="1")
 
 def tip_run(name, steps):
     (tip / f"{name}.rift").write_text("\n".join(["resize 1000 700", "wait_prompt", *steps, "quit"]) + "\n")
@@ -2445,7 +3101,8 @@ hs_conf = lambda shell: (
     "quit"]) + "\n")
 hs_env = {k: v for k, v in env.items() if k != "HISTFILE"}
 hs_env.update(XDG_CONFIG_HOME=str(hs / "cfg"), XDG_DATA_HOME=str(hs / "data"),
-              HOME=str(hs / "home"), BASH_SILENCE_DEPRECATION_WARNING="1")
+              HOME=str(hs / "home"), BASH_SILENCE_DEPRECATION_WARNING="1",
+              RIFT_SCRIPT_HISTORY="1")
 with (hs / "hist.log").open("w") as log:
     rc = subprocess.run([str(binary), "--script", str(hs / "hist.rift"), "--headless"],
                         env=hs_env, stdout=log, stderr=log, timeout=120).returncode
@@ -2640,7 +3297,9 @@ for sub in ("cfg/rift/themes", "data"):
 (sw / "sweep.rift").write_text("\n".join([
     "resize 1180 760", "wait_prompt", f"dump {sw}/first.txt",
     "key cmd+t", "wait_prompt", f"dump {sw}/second.txt",
-    "key cmd+,", "wait 300", "key end", "wait 300", f"dump {sw}/themes.txt",
+    # the theme list runs below the fold: scroll to the user's themes
+    "key cmd+,", "wait 300", "key end", "wait 300", "move 700 400", "scroll -20",
+    "wait 300", f"dump {sw}/themes.txt",
     "key home", "key down", "key down", "wait 300",
     *["key tab"] * 23, "wait 300", f"dump {sw}/tabbed.txt",
     "quit"]) + "\n")
@@ -2715,6 +3374,69 @@ assert 'editor="gi"' in vim_r and "vim=Some(Replace)" in vim_r, vim_r[:1500]
 assert "completion=false" in vim_r, vim_r[:1500]
 vim_r_esc = (sw / "vim-r-esc.txt").read_text()
 assert "vim=Some(Normal)" in vim_r_esc, vim_r_esc[:1500]
+
+# vim registers: "+ yanks to the (private headless) clipboard and "+P puts
+# it back, "a holds its own text past later yanks, ⌃R redoes what u undid
+(sw / "vim-reg.rift").write_text("\n".join([
+    "resize 1180 760", "wait_prompt", "type echo hello world", "key escape",
+    'type 0"+yiw', "wait 100", f"dump {sw}/vreg-yank.txt",
+    'type w"ayiwwyiw$"ap', "wait 100", f"dump {sw}/vreg-put.txt",
+    "type u", "wait 100", f"dump {sw}/vreg-undo.txt",
+    "key ctrl+r", "wait 100", f"dump {sw}/vreg-redo.txt",
+    'type 0"+P', "wait 100", f"dump {sw}/vreg-clip.txt",
+    "quit"]) + "\n")
+with (sw / "vim-reg.log").open("w") as log:
+    rc = subprocess.run([str(binary), "--script", str(sw / "vim-reg.rift"), "--headless"],
+                        env=dict(env, XDG_CONFIG_HOME=str(sw / "cfg"),
+                                 XDG_DATA_HOME=str(sw / "data"),
+                                 BASH_SILENCE_DEPRECATION_WARNING="1"),
+                        stdout=log, stderr=log, timeout=60).returncode
+assert rc == 0, died("vim register run failed", sw / "vim-reg.log")
+def vreg(name):
+    text = (sw / f"vreg-{name}.txt").read_text()
+    clip = next(l for l in text.splitlines() if l.startswith("clipboard="))
+    return text, json.loads(clip[len("clipboard="):])
+text, clip = vreg("yank")
+assert clip == "echo" and 'editor="echo hello world"' in text, (clip, text[:1500])
+text, _ = vreg("put")
+assert 'editor="echo hello worldhello"' in text, text[:1500]
+text, _ = vreg("undo")
+assert 'editor="echo hello world"' in text, text[:1500]
+text, _ = vreg("redo")
+assert 'editor="echo hello worldhello"' in text, text[:1500]
+text, clip = vreg("clip")
+assert clip == "echo" and 'editor="echoecho hello worldhello"' in text, text[:1500]
+
+# command corrections from a failed command's output (bash's messages): a
+# mistyped cd, a script without its execute bit, a permission denial, git's
+# own suggestion; → accepts one into the editor, never runs it
+(sw / "corr/projects").mkdir(parents=True, exist_ok=True)
+(sw / "corr/run.sh").write_text("#!/bin/sh\necho ran\n")
+(sw / "corr/run.sh").chmod(0o644)
+(sw / "corr.rift").write_text("\n".join([
+    "resize 1180 760", "wait_prompt",
+    f"type cd {sw / 'corr'}\\n", "wait 600",
+    "type cd projcts\\n", "wait 1000", f"dump {sw}/corr-cd.txt",
+    "key right", "wait 200", f"dump {sw}/corr-cd-accept.txt",
+    "key cmd+a", "key backspace",
+    "type ./run.sh\\n", "wait 1000", f"dump {sw}/corr-chmod.txt",
+    "type mkdir /etc/rift-smoke-denied\\n", "wait 1000", f"dump {sw}/corr-sudo.txt",
+    "type git stauts\\n", "wait 1500", f"dump {sw}/corr-git.txt",
+    "quit"]) + "\n")
+with (sw / "corr.log").open("w") as log:
+    rc = subprocess.run([str(binary), "--script", str(sw / "corr.rift"), "--headless"],
+                        env=dict(env, XDG_CONFIG_HOME=str(sw / "cfg"),
+                                 XDG_DATA_HOME=str(sw / "data"),
+                                 BASH_SILENCE_DEPRECATION_WARNING="1"),
+                        stdout=log, stderr=log, timeout=60).returncode
+assert rc == 0, died("corrections run failed", sw / "corr.log")
+corr = {n: (sw / f"corr-{n}.txt").read_text() for n in ("cd", "cd-accept", "chmod", "sudo", "git")}
+assert 'correction=Some("cd projects")' in corr["cd"], corr["cd"][:2000]
+assert 'editor="cd projects"' in corr["cd-accept"], corr["cd-accept"][:2000]
+assert 'correction=Some("chmod +x ./run.sh && ./run.sh")' in corr["chmod"], corr["chmod"][:2000]
+assert not os.access(sw / "corr/run.sh", os.X_OK), "a correction ran"
+assert 'correction=Some("sudo mkdir /etc/rift-smoke-denied")' in corr["sudo"], corr["sudo"][:2000]
+assert 'correction=Some("git status")' in corr["git"], corr["git"][:2000]
 
 # an agent idle at its own prompt (Claude Code's "✳" title) does not spin;
 # one working (a spinner frame in its title) does
@@ -4378,7 +5100,9 @@ switcher = (mw / "switcher.txt").read_text()
 # title where bash's default prompt sets one, as on the Linux CI image)
 assert re.search(r'ListBoxOption "(?:[^"]*[ /:])?b — window 1"', switcher), switcher[-3000:]
 both = (mw / "both.toml").read_text()
-assert both.startswith("version = 4") and both.count("[[other_windows]]") == 1, both
+# windows are saved from schema version 4 on (later versions add fields)
+both_ver = re.match(r"version = (\d+)\n", both)
+assert both_ver and int(both_ver[1]) >= 4 and both.count("[[other_windows]]") == 1, both
 closed = (mw / "closed.txt").read_text()
 assert closed.startswith("windows=1 window=0 "), closed[:400]
 assert 'cmd="echo first-window"' in closed, closed[:3000]
@@ -4413,6 +5137,204 @@ restarted = (mw / "restarted.txt").read_text()
 assert restarted.startswith("windows=3 window=2 "), restarted[:500]
 assert 'titles=["OTHER-PROCESS"]' in restarted, restarted[:500]
 assert not list(rs.glob("*.toml")), list(rs.glob("*"))
+
+# Pinned tabs and tab groups: a pinned tab moves first and ⌘W asks before
+# closing it; ⌘-click picks tabs and "Group picked tabs" groups them (never
+# the pinned one); a click on the group's pill folds it (⌘1–9 count the
+# shown tabs), a double-click renames it; the session file keeps pins and
+# groups and a launch restores them; a tab moved to another window leaves
+# its group and a pinned one stays pinned; a new tab from a grouped one
+# joins the group. The vertical rail: its search filters (a match, no match,
+# Esc), its panes view lists a split tab's panes with their repository's
+# `+added −removed` (as `git diff --shortstat` counts them) and a pane row
+# click focuses that pane; Enter in an empty search only lets go. A screen
+# reader gets the search field (focused while it has the keys), the panes
+# toggle and the pane rows, and the tab list follows the search; tab labels
+# say pinned and read-only. With mask_secrets, a secret in a pane's title is
+# masked in its row and a search does not find it.
+tg = scratch / "tabgroups"
+for sub in ("cfg/rift", "data/rift", "repo", "home"):
+    (tg / sub).mkdir(parents=True, exist_ok=True)
+# an empty home: Ubuntu's stock ~/.bashrc retitles the window `user@host: cwd`
+# at every prompt (PS1), over the title the rail's secret test sets
+for rc in (".bash_profile", ".bashrc"):
+    (tg / "home" / rc).write_text("")
+tg_config = ('shell = "/bin/bash"\nrestore_session = true\ndurable_sessions = false\n'
+             'sync_os_theme = false\n')
+(tg / "cfg/rift/config.toml").write_text(tg_config)
+tg_env = dict(env, XDG_CONFIG_HOME=str(tg / "cfg"), XDG_DATA_HOME=str(tg / "data"),
+              RIFT_PERSIST_SESSION="1", BASH_SILENCE_DEPRECATION_WARNING="1",
+              HOME=str(tg / "home"))
+def tg_run(name, steps):
+    (tg / f"{name}.rift").write_text("\n".join(steps) + "\n")
+    with (tg / f"{name}.log").open("w") as log:
+        rc = subprocess.run([str(binary), "--script", str(tg / f"{name}.rift"), "--headless"],
+                            env=tg_env, stdout=log, stderr=log, timeout=120).returncode
+    assert rc == 0, died(f"tab groups {name} run failed", tg / f"{name}.log")
+def tg_state(name):
+    return (tg / f"{name}.txt").read_text()
+def tg_marks(name):
+    return re.findall(r"^  tab_marks pinned=(\w+) group=(.*?) picked=(\w+)$", tg_state(name), re.M)
+tg_run("groups", [
+    "wait_prompt", "key cmd+t", "wait_prompt", "key cmd+t", "wait_prompt", "key cmd+t",
+    "wait_prompt", "key cmd+p", "type pin or unpin", "wait 200", "key enter", "wait 300",
+    f"dump {tg}/pinned.txt",
+    "key cmd+w", "wait 300", f"dump {tg}/pin-confirm.txt", "key escape", "wait 200",
+    # pinned 114..158, then 200 px tabs
+    "mods cmd", "click 250 17", "click 450 17", "mods none", "wait 200",
+    f"dump {tg}/picked.txt",
+    "rclick 450 17", "wait 200", "a11y click Group picked tabs", "wait 300",
+    f"dump {tg}/grouped.txt",
+    "click 190 17", "wait 300", f"dump {tg}/collapsed.txt",
+    "key cmd+2", "wait 200", f"dump {tg}/cmd2.txt",
+    "key cmd+1", "dblclick 190 17", "wait 200", "type Servers", "key enter", "wait 300",
+    f"dump {tg}/renamed.txt",
+    f"sh cp {shlex.quote(str(tg / 'data/rift/session.toml'))} {shlex.quote(str(tg / 'saved.toml'))}",
+    "quit"])
+assert tg_marks("pinned")[0] == ("true", "None", "false"), tg_state("pinned")
+assert re.search(r'^    Tab "[^"]*, pinned"', tg_state("pinned"), re.M), tg_state("pinned")[-3000:]
+assert "confirm=Some((ClosePinned(" in tg_state("pin-confirm"), tg_state("pin-confirm")
+assert [m[2] for m in tg_marks("picked")] == ["true", "true", "true", "false"], tg_state("picked")
+assert 'groups=["Group 1:red:open:2"]' in tg_state("grouped"), tg_state("grouped")
+assert [m[1] for m in tg_marks("grouped")] == ["None", 'Some("Group 1")', 'Some("Group 1")', "None"], \
+    tg_state("grouped")
+assert 'groups=["Group 1:red:collapsed:2"]' in tg_state("collapsed") \
+    and "shown_tabs=[0, 3]" in tg_state("collapsed"), tg_state("collapsed")
+# ⌘2: the second shown tab (the folded ones skipped)
+assert re.search(r"^window 0: tabs=4 active=3 ", tg_state("cmd2"), re.M), tg_state("cmd2")
+renamed = tg_state("renamed")
+assert 'groups=["Servers:red:collapsed:2"]' in renamed, renamed
+assert 'Group "Servers group, 2 tabs, collapsed" expanded=false' in renamed, renamed
+saved = (tg / "saved.toml").read_text()
+assert "pinned = true" in saved and 'name = "Servers"' in saved and "collapsed = true" in saved, saved
+(tg / "data/rift/session.toml").write_text(saved)
+tg_run("restore", ["wait_prompt", "wait 800", f"dump {tg}/restored.txt", "quit"])
+restored = tg_state("restored")
+assert 'groups=["Servers:red:collapsed:2"]' in restored and "shown_tabs=[0, 3]" in restored, restored
+assert tg_marks("restored")[0][0] == "true", restored
+(tg / "cfg/rift/config.toml").write_text(tg_config.replace("restore_session = true",
+                                                           "restore_session = false"))
+tg_run("move", [
+    "wait_prompt", "key cmd+t", "wait_prompt", "key cmd+t", "wait_prompt",
+    "rclick 450 17", "wait 200", "a11y click Group tab", "wait 200", "click 400 17",
+    "wait 300", "key cmd+t", "wait_prompt", "wait 300", f"dump {tg}/joined.txt",
+    "key cmd+1", "key cmd+p", "type pin or unpin", "wait 200", "key enter", "wait 300",
+    "drag_tab 0 0 new", "wait 600", f"dump {tg}/pin-moved.txt",
+    "window 0", "drag_tab 0 0 new", "wait 600", f"dump {tg}/group-moved.txt", "quit"])
+assert [m[1] for m in tg_marks("joined")] == ["None", 'Some("Group 1")', 'Some("Group 1")', "None"], \
+    tg_state("joined")
+assert tg_marks("pin-moved") == [("true", "None", "false")], tg_state("pin-moved")
+assert tg_marks("group-moved") == [("false", "None", "false")], tg_state("group-moved")
+# the rail: search, no match, Esc, panes view with diff stats, a pane row
+repo = tg / "repo"
+subprocess.run(["git", "init", "-q", str(repo)], check=True)
+(repo / "f.txt").write_text("a\nb\nc\n")
+subprocess.run(["git", "-C", str(repo), "add", "f.txt"], check=True)
+subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+                "commit", "-qm", "init"], check=True)
+(repo / "f.txt").write_text("a\nB\nc\nd\n")
+short = subprocess.run(["git", "-C", str(repo), "diff", "--shortstat"], capture_output=True,
+                       text=True, check=True).stdout
+added, removed = re.search(r"(\d+) insertions?\(\+\), (\d+) deletions?", short).groups()
+(tg / "cfg/rift/config.toml").write_text(
+    tg_config.replace("restore_session = true", "restore_session = false")
+    + 'tab_layout = "vertical"\nmask_secrets = true\n')
+tg_run("rail", [
+    "wait_prompt", f"type cd {shlex.quote(str(repo))}\\n", "wait 1200",
+    "key cmd+t", "wait_prompt", "type echo zebra-needle\\n", "wait 400",
+    "key cmd+d", "wait_prompt", "type cd /tmp\\n", "wait 600",
+    # a fake token (never issued) in the pane's title, built by printf
+    "type printf '\\033]2;GH=ghp_%s%s%s%s%s\\007' FAKE0123 FAKE0123 FAKE0123 FAKE0123 FAKE0123\\n",
+    "wait 400",
+    "click 80 55", "type zebra", "wait 200", f"dump {tg}/rail-match.txt",
+    *["key backspace"] * 5, "type qqqxx", "wait 200", f"dump {tg}/rail-none.txt",
+    "key escape", "wait 200", f"dump {tg}/rail-clear.txt",
+    "click 80 55", "key enter", "wait 200", f"dump {tg}/rail-empty-enter.txt",
+    "click 199 55", "wait 300", f"dump {tg}/rail-panes.txt",
+    "click 100 196", "wait 200", f"dump {tg}/rail-pane-click.txt",
+    "click 80 55", "type 0123FAKE", "wait 200", f"dump {tg}/rail-secret.txt", "quit"])
+rail_line = lambda name: re.search(r"^rail (.*)$", tg_state(name), re.M).group(1)
+assert rail_line("rail-match") == 'query="zebra" focused=true panes=false rows=["tab:1"]', \
+    rail_line("rail-match")
+assert rail_line("rail-none").endswith('rows=["nomatch"]'), rail_line("rail-none")
+assert rail_line("rail-clear") == 'query="" focused=false panes=false rows=["tab:0", "tab:1"]', \
+    rail_line("rail-clear")
+assert rail_line("rail-panes").endswith(
+    f'rows=["tab:0", "tab:1", "pane:2:+{added}-{removed}", "pane:3:active"]'), rail_line("rail-panes")
+assert re.search(r"^tab 1 .* active_pane=2 ", tg_state("rail-pane-click"), re.M), \
+    tg_state("rail-pane-click")
+assert rail_line("rail-empty-enter") == 'query="" focused=false panes=false rows=["tab:0", "tab:1"]' \
+    and re.search(r"^window 0: tabs=2 active=1 ", tg_state("rail-empty-enter"), re.M), \
+    tg_state("rail-empty-enter")[:1500]
+def tg_tablist(name):
+    text = tg_state(name)
+    return re.findall(r"^    Tab (.*)$", text.split('  TabList "Tabs"\n', 1)[1].split("\n  Group", 1)[0], re.M)
+assert len(tg_tablist("rail-match")) == 1 and 'SearchInput "Search tabs" value="zebra" [focus]' \
+    in tg_state("rail-match"), tg_state("rail-match")[-4000:]
+assert '[focus]' not in tg_state("rail-match").split('TextInput "Command"', 1)[-1].split("\n", 1)[0]
+assert len(tg_tablist("rail-clear")) == 2, tg_tablist("rail-clear")
+rp = tg_state("rail-panes")
+assert re.search(r'Button "Show panes under their tabs" toggled=True', rp), rp[-4000:]
+assert re.search(rf'ListItem ".*, pane, {added} lines added, {removed} removed"', rp), rp[-4000:]
+assert re.search(r'ListItem "GH=[^"]*, pane, active" selected', rp), rp[-4000:]
+assert re.search(r'^    Tab "GH=•+" selected', rp, re.M) and not re.search(r'(Tab|ListItem) "GH=ghp_', rp), \
+    rp[-4000:]
+assert rail_line("rail-secret").endswith('rows=["nomatch"]'), rail_line("rail-secret")
+
+# Read-only panes refuse typing, pastes, drops, `ctl send-text` and a
+# synchronized sibling's input, with a toast; toggling it off lets input in
+# again. close_on_exit = "graceful": a failed exit keeps the pane with its
+# Restart bar (exited=Some(3)), Enter restarts it in place (same pane id and
+# layout), restarting over a running job asks first, and exit 0 closes it.
+pl = scratch / "panelife"
+for sub in ("cfg/rift", "data/rift"):
+    (pl / sub).mkdir(parents=True, exist_ok=True)
+(pl / "cfg/rift/config.toml").write_text(
+    'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
+    'sync_os_theme = false\ncontrol_api = "full"\nclose_on_exit = "graceful"\n')
+pl_env = dict(env, XDG_CONFIG_HOME=str(pl / "cfg"), XDG_DATA_HOME=str(pl / "data"),
+              BASH_SILENCE_DEPRECATION_WARNING="1")
+pl_ctl = pl / "ctl.json"
+(pl / "t.rift").write_text("\n".join([
+    "wait_prompt", "key cmd+p", "type toggle read-only", "wait 200", "key enter", "wait 300",
+    "type echo typed", "paste pasted", f"drop {pl}/t.rift", "wait 300", f"dump {pl}/ro.txt",
+    f"sh ({shlex.quote(str(binary))} ctl request "
+    + shlex.quote('{"cmd":"send-text","pane":1,"text":"echo ctl\\n"}')
+    + f" > {shlex.quote(str(pl_ctl))} 2>&1; touch {shlex.quote(str(pl_ctl))}.done) &",
+    f"wait_file {pl_ctl}.done 15000", "wait 300",
+    "key cmd+d", "wait_prompt", "wait 400", "key alt+cmd+i", "type echo synced\\n", "wait 800",
+    f"dump {pl}/ro-sync.txt", "key alt+cmd+i", "key alt+cmd+left", "wait 200",
+    "key cmd+p", "type toggle read-only", "wait 200", "key enter", "wait 300",
+    "type echo free\\n", "wait 600", f"dump {pl}/ro-off.txt",
+    "key alt+cmd+right", "wait 200", "type exit 3\\n", "wait 1200", f"dump {pl}/kept.txt",
+    "type abc", "key enter", "wait_prompt", "wait 800", f"dump {pl}/restarted.txt",
+    "type sleep 30\\n", "wait 500", "key cmd+p", "type restart pane", "wait 200",
+    "key enter", "wait 600", f"dump {pl}/restart-confirm.txt", "key enter", "wait 1500",
+    "type exit 0\\n", "wait 1200", f"dump {pl}/exit0.txt", "quit"]) + "\n")
+with (pl / "app.log").open("w") as log:
+    rc = subprocess.run([str(binary), "--script", str(pl / "t.rift"), "--headless"],
+                        env=pl_env, stdout=log, stderr=log, timeout=120).returncode
+assert rc == 0, died("pane life run failed", pl / "app.log")
+def pl_state(name):
+    return (pl / f"{name}.txt").read_text()
+def pl_panes(name):
+    # (id, editor, last_exit, exited, read_only) per pane
+    return re.findall(r'^  pane (\d+) .*? editor="([^"]*)" .*? last_exit=(\S+) .*\n'
+                      r'(?:    .*\n)*?    exited=(\S+) read_only=(\w+)$', pl_state(name), re.M)
+ro = pl_state("ro")
+assert pl_panes("ro") == [("1", "", "None", "None", "true")], ro
+assert re.search(r'^    Tab "[^"]*, read-only" selected', ro, re.M), ro[-3000:]
+assert '"Pane is read-only"' in ro, ro
+assert json.loads(pl_ctl.read_text()) == {"ok": False, "error": "pane is read-only"}, pl_ctl.read_text()
+assert pl_panes("ro-sync") == [("1", "", "None", "None", "true"), ("2", "", "Some(0)", "None", "false")], \
+    pl_state("ro-sync")
+assert pl_panes("ro-off")[0] == ("1", "", "Some(0)", "None", "false"), pl_state("ro-off")
+assert pl_panes("kept")[1][3] == "Some(3)" and "running=false" in pl_state("kept"), pl_state("kept")
+assert pl_panes("restarted")[1][0] == "2" and pl_panes("restarted")[1][3] == "None" \
+    and "Leaf(1)), (1.0, Leaf(2))" in pl_state("restarted"), pl_state("restarted")
+assert 'confirm=Some((Restart(2), ["sleep 30"]))' in pl_state("restart-confirm"), \
+    pl_state("restart-confirm")
+assert [p[0] for p in pl_panes("exit0")] == ["1"], pl_state("exit0")
 
 # Tabs move between windows (`drag_tab` presses, pulls and releases a tab
 # through the mouse handlers; headless windows sit apart on a pretend
@@ -4480,10 +5402,11 @@ assert 'cmd="echo xw-first"' in into, into[:3000]
 (xw / "cfg/rift/config.toml").write_text(
     xw_config + 'tab_layout = "vertical"\nhotkey_window = true\nhotkey_window_height = 50\n'
     '[keybindings]\nrename_tab = "ctrl+cmd+y"\n')
+# (the rail's rows start under its search field: y 161 is the second tab)
 xw_run("menu", [
     "resize 1000 700", "wait_prompt", "key cmd+t", "wait_prompt", "key ctrl+cmd+y", "type mover\\n",
     "new_window", "wait_prompt", "resize 1000 700", "key ctrl+cmd+y", "type dest\\n", "wait 300",
-    "window 0", "wait 300", "rclick 100 121", "wait 200", f"dump {xw}/tab-menu.txt",
+    "window 0", "wait 300", "rclick 100 161", "wait 200", f"dump {xw}/tab-menu.txt",
     "a11y click Move to window 2: dest", "wait 500", f"dump {xw}/menu-moved.txt",
     "drag_tab 1 1 0 0", "wait 500", f"dump {xw}/rail-back.txt",
     "key cmd+d", "wait_prompt", "wait 300", "rclick 800 300", "wait 200",
@@ -4491,7 +5414,7 @@ xw_run("menu", [
     f"dump {xw}/pane-moved.txt",
     "hotkey", "wait_prompt", "wait 300", "drag_tab 3 0 0", "wait_prompt", "wait 500",
     f"dump {xw}/dropdown-out.txt",
-    "window 0", "rclick 100 121", "wait 200", "a11y click Move to hotkey window", "wait 500",
+    "window 0", "rclick 100 161", "wait 200", "a11y click Move to hotkey window", "wait 500",
     f"dump {xw}/dropdown-in.txt",
     f"sh cp {xw}/data/rift/session.toml {xw}/after-menu.toml", "quit"])
 tab_menu = (xw / "tab-menu.txt").read_text()
@@ -4879,6 +5802,32 @@ with (op / "cold-win.log").open("w") as log:
 assert rc == 0, died("cold start with --new-window failed", op / "cold-win.log")
 assert re.search(r"^windows=1 .*\nwindow 0: tabs=1 ", ot("cold-win"), re.M), ot("cold-win")[:600]
 
+# RIFT_PANE_URL: a shell's own focus link. Another process opening it (an
+# agent hook, a notification's click URL) raises the window holding the pane
+# and focuses its tab and pane; a pane of an earlier run, or one now closed,
+# says so in a toast and focuses nothing
+pf2 = scratch / "pane-focus"
+pf2.mkdir()
+run_prompt("pane-focus", [
+    f'type printf %s "$RIFT_PANE_URL" > {pf2}/url\\n', f"wait_file {pf2}/url 10000",
+    "key cmd+d", "wait 1000", "key cmd+t", "wait 1000", "new_window", "wait_prompt",
+    f"dump {pf2}/before.txt",
+    f'type {shlex.quote(str(binary))} "$(cat {pf2}/url)"; echo $? > {pf2}/rc\\n',
+    f"wait_file {pf2}/rc 15000", "wait 800", f"dump {pf2}/after.txt",
+    "link rift://action/focus?pane=abcdef.1", "wait 300", f"dump {pf2}/stale.txt",
+    "link rift://action/focus?pane=service.999999", "wait 300", f"dump {pf2}/gone.txt"])
+pft = lambda name: (pf2 / f"{name}.txt").read_text()
+pane_url = (pf2 / "url").read_text()
+assert re.fullmatch(r"rift://action/focus\?pane=[0-9a-f]+\.1", pane_url), pane_url
+assert (pf2 / "rc").read_text().strip() == "0"
+assert re.search(r"^windows=2 window=1 ", pft("before"), re.M), pft("before")[:600]
+assert re.search(r"^windows=2 window=0 focused_window=Some\(0\)", pft("after"), re.M), pft("after")[:600]
+assert re.search(r"^window 0: tabs=2 active=0 ", pft("after"), re.M), pft("after")[:600]
+assert re.search(r"^tab 0 title=.* panes=2 active_pane=1 ", pft("after"), re.M), pft("after")[:2000]
+assert "That pane belonged to an earlier Rift run" in pft("stale"), pft("stale")[:2000]
+assert "That pane is no longer open" in pft("gone"), pft("gone")[:2000]
+assert re.search(r"^window 0: tabs=2 active=0 ", pft("gone"), re.M), pft("gone")[:600]
+
 # the configurable toolbar: buttons on the side and in the order the config
 # lists, right-click → "Rearrange toolbar items" opens its Settings rows,
 # and a row's Left moves a hidden button to the end of the left side
@@ -5020,6 +5969,132 @@ assert 'editor="cp bar.txt bar.bak"' in mct("typed") and "carets=[(14, None)]" i
 assert "carets=[]" in mct("one"), mct("one")
 assert 'editor="!echo a\\n!echo b"' in mct("lines"), mct("lines")
 
+# Warp's editor keys: Meta+. inserts the last word of the previous command
+# (again: of the one before, quotes kept), ⌃⌥←/→ step camelCase and
+# snake_case parts, ⌃U copies what it clears
+ek = scratch / "editor-keys"
+run_own("editor-keys", "option_as_meta = true\n", [
+    "type ls 'my file'\\n", "wait 500", "type echo one two\\n", "wait 500",
+    "key alt+.", f"dump {ek}/1.txt", "key alt+.", f"dump {ek}/2.txt",
+    "key ctrl+u", f"dump {ek}/3.txt",
+    "type fooBar_baz", "key ctrl+alt+left", f"dump {ek}/4.txt",
+    "key ctrl+alt+left", f"dump {ek}/5.txt", "key ctrl+alt+right", f"dump {ek}/6.txt"])
+ekt = lambda name: (ek / f"{name}.txt").read_text()
+ek_line = lambda name: re.search(r'editor="((?:[^"\\]|\\.)*)" cursor=(\d+)', ekt(name)).groups()
+assert ek_line("1") == ("two", "3"), ek_line("1")
+assert ek_line("2") == ("'my file'", "9"), ek_line("2")
+assert ek_line("3") == ("", "0") and "clipboard=\"'my file'\"" in ekt("3"), ekt("3")[-2000:]
+assert [ek_line(n)[1] for n in ("4", "5", "6")] == ["7", "3", "6"], [ek_line(n) for n in "456"]
+
+# mark mode (⌃⇧M / ⇧⌘M): a cursor in the scrollback, ⇧ extends, ⏎ copies;
+# g goes to the first row (the viewport follows), Esc leaves no selection;
+# in the alternate screen too; another app shortcut (⌘T) leaves and runs
+mk = scratch / "mark-mode"
+(scratch / "mark-alt.txt").write_text("".join(f"alt line {i}\n" for i in range(1, 101)))
+run_own("mark-mode", "", [
+    "type seq 1 200\\n", "wait 1000", "key ctrl+shift+m", f"dump {mk}/on.txt",
+    "key 0", "key shift+up", "key shift+k", f"dump {mk}/sel.txt", "key enter", f"dump {mk}/copied.txt",
+    "key ctrl+shift+m", "key g", f"dump {mk}/top.txt", "key shift+l", "key escape", f"dump {mk}/esc.txt",
+    f"type less {scratch}/mark-alt.txt\\n", "wait 1500",
+    "key ctrl+shift+m", "key g", "key shift+j", "key shift+end", "key cmd+c", f"dump {mk}/alt.txt",
+    "key q", "wait 500", "key ctrl+shift+m", "key shift+up", "key cmd+t", "wait_prompt",
+    f"dump {mk}/shortcut.txt"])
+mkt = lambda name: (mk / f"{name}.txt").read_text()
+mk_clip = lambda name: json.loads(next(l for l in mkt(name).splitlines()
+                                       if l.startswith("clipboard="))[len("clipboard="):])
+assert "mark=on " in mkt("on") and "Mark mode: arrow keys move" in mkt("on"), mkt("on")[-3000:]
+assert re.search(r"^mark=on .* anchor=Some", mkt("sel"), re.M), mkt("sel")[-3000:]
+assert mk_clip("copied") == "198\n199\n2" and "mark=off" in mkt("copied"), mk_clip("copied")
+assert "selection=false" in mkt("copied"), mkt("copied")[:3000]
+assert not re.search(r"view_offset=0 ", mkt("top")), mkt("top")[:3000]
+assert "mark=off" in mkt("esc") and "selection=true" not in mkt("esc"), mkt("esc")[:3000]
+assert mk_clip("alt") == "alt line 1\nalt line 2", mk_clip("alt")
+assert "mark=off" in mkt("shortcut") and re.search(r"^tabs=2 active=1 ", mkt("shortcut"), re.M) \
+    and "selection=true" not in mkt("shortcut"), mkt("shortcut")[:3000]
+
+# [[actions]]: a send runs at the prompt; split-then-send types into the NEW
+# pane though focus moved back before its shell started; a failing step
+# stops the rest with a toast; the palette lists each with its chord. A send
+# into a read-only pane, or one kept after its shell exited, fails the step
+# (the refused line never labels the pane's next block); ⌥. and ⌃U leave a
+# read-only command line as it is, a subword move still moves
+ua = scratch / "user-actions"
+run_own("user-actions", '\n'.join([
+    'close_on_exit = "never"',
+    '[[actions]]', 'name = "Say"', 'key = "ctrl+alt+s"', 'steps = [{ send = "echo said-$((6*7))\\n" }]',
+    '[[actions]]', 'name = "Split say"', 'key = "ctrl+alt+h"',
+    'steps = [{ action = "split_vertical" }, { send = "echo in-new-pane\\n" }]',
+    '[[actions]]', 'name = "Broken"', 'key = "ctrl+alt+b"',
+    'steps = [{ open = "no such layout" }, { send = "echo never-ran\\n" }]', '']), [
+    "key ctrl+alt+s", "wait 800", f"dump {ua}/send.txt",
+    "key ctrl+alt+h", "key alt+cmd+left", "wait 4000", f"dump {ua}/split.txt",
+    "key ctrl+alt+b", "wait 800", f"dump {ua}/broken.txt",
+    "key cmd+p", "type Action:", f"dump {ua}/palette.txt", "key escape",
+    "type keep-me", "key cmd+p", "type toggle read-only", "wait 200", "key enter", "wait 300",
+    "key ctrl+alt+s", "wait 600", "key alt+.", "key ctrl+u", "key ctrl+alt+left", "wait 200",
+    f"dump {ua}/ro.txt",
+    "key cmd+p", "type toggle read-only", "wait 200", "key enter", "wait 300",
+    "key ctrl+u", "type echo after-ro\\n", "wait 800", f"dump {ua}/ro-after.txt",
+    "type exit 3\\n", "wait 1200", "key ctrl+alt+s", "wait 600", f"dump {ua}/exited.txt"])
+uat = lambda name: (ua / f"{name}.txt").read_text()
+assert re.search(r'cmd="echo said-\$\(\(6\*7\)\)" exit=Some\(0\)', uat("send")), uat("send")[-3000:]
+assert "said-42" in uat("send"), uat("send")[-3000:]
+split = uat("split")
+assert re.search(r"active_pane=1 ", split), split[:3000]
+pane2 = split.split("  pane 2 ", 1)[1]
+assert re.search(r'^    block 0 state=done .*cmd="echo in-new-pane" exit=Some\(0\)', pane2, re.M), pane2[:3000]
+assert 'stopped at step 1 (open \\"no such layout\\")' in uat("broken"), uat("broken")[-3000:]
+assert "never-ran" not in uat("broken"), uat("broken")[-3000:]
+assert 'ListBoxOption "Action: Say, ⌃ ⌥ S"' in uat("palette"), uat("palette")[-3000:]
+assert "): the pane is read-only" in uat("ro"), uat("ro")[-3000:]
+ua_pane1 = lambda name: uat(name).split("  pane 1 ", 1)[1].split("\n  pane ", 1)[0]
+assert ' editor="keep-me" cursor=5 ' in ua_pane1("ro").split("\n", 1)[0], ua_pane1("ro")[:2000]
+assert re.search(r'^    block 1 state=done .*cmd="echo after-ro" exit=Some\(0\)', ua_pane1("ro-after"), re.M), \
+    ua_pane1("ro-after")[:3000]
+assert "): the pane's program has exited" in uat("exited"), uat("exited")[-3000:]
+
+# ⌃Tab in most-recently-used order: a tap toggles the two last tabs, ⌃ held
+# shows the switcher (a11y dialog) and its release switches, Esc cancels;
+# `in_order` (the default) steps the strip. The switcher lists the shown
+# tabs only (not one folded in a collapsed group), and a tab closing while
+# it shows does not shift the pick onto another tab
+mru = scratch / "tab-mru"
+mru_steps = ["key cmd+t", "wait_prompt", "key cmd+t", "wait_prompt", "key cmd+1", "wait 200",
+             "key ctrl+tab", f"dump {{d}}/tap.txt", "mods ctrl", "key ctrl+tab", "key ctrl+tab",
+             f"dump {{d}}/held.txt", "mods none", f"dump {{d}}/released.txt",
+             "mods ctrl", "key ctrl+tab", "key escape", "mods none", f"dump {{d}}/esc.txt"]
+run_own("tab-mru", 'tab_switch_order = "mru"\n', [s.format(d=mru) for s in mru_steps])
+mrt = lambda name: (mru / f"{name}.txt").read_text()
+mr_active = lambda name: re.search(r"^tabs=3 active=(\d)", mrt(name), re.M)[1]
+assert mr_active("tap") == "2", mrt("tap")[:500]
+assert 'Dialog "Recent tabs"' in mrt("held") and "3 of 3, release Control" in mrt("held"), \
+    mrt("held")[-3000:]
+assert mr_active("held") == "2" and mr_active("released") == "1", mrt("released")[:500]
+assert mr_active("esc") == "1" and "tab_switcher=None" in mrt("esc"), mrt("esc")[:500]
+mrg = run_own("tab-mru-groups", 'tab_switch_order = "mru"\n', [
+    "key cmd+t", "wait_prompt", "key cmd+t", "wait_prompt", "rclick 450 17", "wait 200",
+    "a11y click Group tab", "wait 300", "a11y click Group 1 group, 1 tabs", "wait 300",
+    "mods ctrl", "key ctrl+tab", f"dump {scratch}/tab-mru-groups/held.txt", "key escape", "mods none"])
+mrg_held = (mrg / "held.txt").read_text()
+assert 'groups=["Group 1:red:collapsed:1"]' in mrg_held and "of 2, release Control" in mrg_held, \
+    mrg_held[-3000:]
+# tabs A B C; A's shell ends while the switcher (C, B, A) has B picked
+mrc = run_own("tab-mru-close", 'tab_switch_order = "mru"\n', [
+    "key cmd+t", "wait_prompt", "key cmd+t", "wait_prompt", "key cmd+1", "wait 200",
+    "type sleep 2; exit\\n", "key cmd+2", "wait 200", "key cmd+3", "wait 200",
+    "mods ctrl", "key ctrl+tab", "wait 3500", f"dump {scratch}/tab-mru-close/held.txt",
+    "mods none", "wait 200", f"dump {scratch}/tab-mru-close/released.txt"])
+mrc_held = (mrc / "held.txt").read_text()
+assert re.search(r"^tabs=2 active=1 ", mrc_held, re.M) and "of 2, release Control" in mrc_held, \
+    mrc_held[-3000:]
+assert re.search(r"^tabs=2 active=0 ", (mrc / "released.txt").read_text(), re.M), \
+    (mrc / "released.txt").read_text()[:1500]
+io = scratch / "tab-in-order"
+run_own("tab-in-order", "", [s.format(d=io) for s in mru_steps])
+iot = lambda name: re.search(r"^tabs=3 active=(\d)", (io / f"{name}.txt").read_text(), re.M)[1]
+assert [iot(n) for n in ("tap", "released", "esc")] == ["1", "0", "1"], \
+    [iot(n) for n in ("tap", "released", "esc")]
+
 # background blocks: `cmd &` is a block of its own (bash 3.2 never marks it
 # started), and what the job prints while the prompt waits goes into a
 # background block before the prompt, not under the next command's header
@@ -5069,7 +6144,9 @@ sst = lambda name: (ss / f"{name}.txt").read_text()
 assert 'subshell=Some(("bash --norc", true))' in sst("offer"), sst("offer")
 assert '"Use Rift\'s blocks and editor in this subshell' in sst("offer") or \
     "Use Rift's blocks and editor in this subshell" in sst("offer"), sst("offer")
-assert re.search(r"alt=true .*\n.*subshell=Some\(\(\"bash --norc\", false\)\)", sst("alt")), sst("alt")
+# (the pane's `subshell=` sits a few dump lines below its `alt=`)
+assert re.search(r"alt=true .*\n(?:.*\n){0,12}?.*subshell=Some\(\(\"bash --norc\", false\)\)",
+                 sst("alt")), sst("alt")
 assert 'subshell=Some(("bash --norc", false))' in sst("alt-enter"), sst("alt-enter")
 assert 'subshell=Some(("bash --norc", true))' in sst("back"), sst("back")
 assert "subshell=None" in sst("enabled"), sst("enabled")
@@ -5077,6 +6154,451 @@ assert re.search(r'cmd="bash --norc" exit=None collapsed=true', sst("enabled")),
 assert re.search(r"^    block \d+ state=prompt", sst("enabled"), re.M), sst("enabled")
 assert re.search(r'cmd="false" exit=Some\(1\)', sst("inner")), sst("inner")
 assert re.search(r"^    block \d+ state=prompt", sst("outer"), re.M), sst("outer")
+
+# terminal text: box drawing, Powerline and legacy-computing blocks drawn as
+# geometry (art_cells); the text options reach the grid (grid_text); the
+# double-underline cursor turns hollow while the window is unfocused; with
+# ambiguous_width = "wide" ± and α take two cells and Powerline stays one.
+# The default run is the control: options off, one-cell ±, a block cursor
+# whatever the focus.
+tr = scratch / "text-render"
+tr.mkdir()
+(tr / "art.sh").write_text(
+    "printf '┌─┬┐\\n│▀│\\n└─┴┘\\n\\356\\202\\260\\360\\237\\254\\200\\n±|α|x\\n'\n")
+tr_steps = lambda d: [
+    f"type bash {tr}/art.sh\\n", "wait 700", "type cat\\n", "wait 300",
+    "focus on", "wait 200", f"dump {d}/focused.txt",
+    "focus off", "wait 200", f"dump {d}/unfocused.txt",
+    "focus on", "key ctrl+c", "wait 200"]
+run_own("text-render/on",
+        'cursor_style = "double_underline"\ncursor_hollow_unfocused = true\n'
+        'font_weight = 500\nfont_features = ["zero", "-calt", "bogus"]\n'
+        'minimum_contrast = 4.5\nbold_is_bright = true\nambiguous_width = "wide"\n',
+        tr_steps(tr / "on"))
+run_own("text-render/off", "", tr_steps(tr / "off"))
+trs = lambda run, name: (tr / run / f"{name}.txt").read_text()
+for run in ("on", "off"):
+    # ┌─┬┐ │▀│ └─┴┘, the Powerline arrow and a sextant: 13 cells
+    assert "art_cells=13 " in trs(run, "focused"), trs(run, "focused")
+assert "grid_cursor=Some(DoubleUnderline)" in trs("on", "focused"), trs("on", "focused")
+assert "grid_cursor=Some(Hollow)" in trs("on", "unfocused"), trs("on", "unfocused")
+assert 'grid_text=Some(((500, 700), ["zero=1", "calt=0"], 4.5, true))' in trs("on", "focused"), \
+    trs("on", "focused")
+assert re.search(r"^    \| ± \|α \|x$", trs("on", "focused"), re.M), trs("on", "focused")
+for name in ("focused", "unfocused"):
+    assert "grid_cursor=Some(Block)" in trs("off", name), trs("off", name)
+assert "grid_text=Some(((400, 700), [], 1.0, false))" in trs("off", "focused"), trs("off", "focused")
+assert re.search(r"^    \| ±\|α\|x$", trs("off", "focused"), re.M), trs("off", "focused")
+
+# --- window and input options: padding per side and none around a
+# full-screen program, the drop-down window's edge and width, Dock bounce /
+# urgency on a bell while no window has focus, the large-paste question and
+# trim, word delimiters, the resize overlay and snap to cells, ⌘ + wheel
+# zoom and opacity, the opacity actions, always on top, launch mode, the
+# default window size and named windows
+def wo_run(name, config, steps, resize=True, **extra):
+    """A headless run like run_own (`scratch/wo-<name>`), optionally without
+    the first resize and with more environment; returns its directory."""
+    d = scratch / f"wo-{name}"
+    (d / "cfg/rift").mkdir(parents=True)
+    # a key the config sets is not written twice (TOML refuses the file)
+    base = [l for l in ('shell = "/bin/bash"', "restore_session = false", "durable_sessions = false")
+            if l.split(" =")[0] + " =" not in config]
+    (d / "cfg/rift/config.toml").write_text("\n".join(base) + "\n" + config)
+    first = ["resize 1200 600"] if resize else []
+    (d / "t.rift").write_text("\n".join([*first, "wait_prompt", *steps, "quit"]) + "\n")
+    with (d / "log.txt").open("w") as log:
+        rc = subprocess.run([str(binary), "--script", str(d / "t.rift"), "--headless"],
+                            env=dict(env, XDG_CONFIG_HOME=str(d / "cfg"),
+                                     XDG_DATA_HOME=str(d / "data"), **extra),
+                            stdout=log, stderr=log, timeout=90).returncode
+    assert rc == 0, died(f"wo-{name} run failed", d / "log.txt")
+    return d
+wo_dump = lambda d, name: (d / f"{name}.txt").read_text()
+def wo_grid(text):
+    rect = re.search(r"^  pane_rect 1 x=(\S+) y=(\S+) w=(\S+) h=(\S+)$", text, re.M)
+    grid = re.search(r"^    grid x=(\S+) y=(\S+) right=(\S+) cols=(\d+) rows=(\d+)$", text, re.M)
+    assert rect and grid, text[:3000]
+    return [float(v) for v in rect.groups()], [float(v) for v in grid.groups()]
+wo_line = lambda text: next(l for l in text.splitlines() if l.startswith("window_name="))
+wo_steps = lambda d, steps: [s.format(d=d) for s in steps]
+# Rust's round (half away from zero) for the non-negative sizes below
+wo_round = lambda v: int(v + 0.5)
+
+# padding per side; a full-screen program keeps it unless alt_screen_padding
+# is off (then its grid fills the pane); window_padding_bottom is the gap
+# under its last row
+alt_cmd = "type printf '\\\\033[?1049h'; sleep 3; printf '\\\\033[?1049l'\\n"
+pad_steps = ["wait 300", "dump {d}/prompt.txt", alt_cmd, "wait 1000", "dump {d}/alt.txt", "wait 2500"]
+pd = wo_run("pad-default", "", wo_steps(scratch / "wo-pad-default", pad_steps))
+ps = wo_run("pad-set", "window_padding_left = 30\nwindow_padding_right = 2\nwindow_padding_top = 40\n"
+            "window_padding_bottom = 30\n", wo_steps(scratch / "wo-pad-set", pad_steps))
+pa = wo_run("pad-alt", "alt_screen_padding = false\n", wo_steps(scratch / "wo-pad-alt", pad_steps))
+(rx, ry, rw, rh), (gx, gy, gr, _, _) = wo_grid(wo_dump(pd, "prompt"))
+assert (gx - rx, rx + rw - gr, gy - ry) == (8, 8, 14), wo_dump(pd, "prompt")[:3000]
+(rx, ry, rw, rh), (gx, gy, gr, _, _) = wo_grid(wo_dump(ps, "prompt"))
+assert (gx - rx, rx + rw - gr, gy - ry) == (30, 2, 40), wo_dump(ps, "prompt")[:3000]
+# the alternate screen: padded by default, bare with alt_screen_padding off
+for d in (pd, pa, ps):
+    assert " alt=true " in wo_dump(d, "alt"), wo_dump(d, "alt")[:3000]
+(rx, ry, rw, rh), (gx, gy, gr, _, rows_default) = wo_grid(wo_dump(pd, "alt"))
+assert (gx - rx, rx + rw - gr) == (8, 8), wo_dump(pd, "alt")[:3000]
+(rx, ry, rw, rh), (gx, gy, gr, _, rows_bare) = wo_grid(wo_dump(pa, "alt"))
+assert (gx, gr) == (rx, rx + rw) and rows_bare > rows_default, wo_dump(pa, "alt")[:3000]
+line_h = float(re.search(r"line_h=([\d.]+)", wo_dump(ps, "alt"))[1])
+(rx, ry, rw, rh), (gx, gy, gr, _, rows_set) = wo_grid(wo_dump(ps, "alt"))
+assert gy + rows_set * line_h <= ry + rh - 30 + 0.5 and rows_set < rows_default, wo_dump(ps, "alt")[:3000]
+
+# the drop-down window at the bottom edge, half the screen wide and centred;
+# at the right edge its depth is a width
+for edge, screen_cfg in (("bottom", "pointer"), ("right", "primary")):
+    hd = wo_run(f"hotkey-{edge}", f'hotkey_window = true\nhotkey_window_edge = "{edge}"\n'
+                f'hotkey_window_width = 50\nhotkey_window_height = 40\n'
+                f'hotkey_window_screen = "{screen_cfg}"\n',
+                ["hotkey", "wait_prompt", "wait 300", f"dump {scratch}/wo-hotkey-{edge}/shown.txt"],
+                resize=False)
+    line = re.search(r"^window 1: .*kind=dropdown shown=true sliding=false .*$", wo_dump(hd, "shown"), re.M)
+    assert line and line[0].endswith(f"edge={edge.capitalize()}"), wo_dump(hd, "shown")[:600]
+    nums = lambda key: [float(v) for v in re.search(key + r"=Some\(\[([^\]]+)\]\)", line[0])[1].split(",")]
+    (fx, fy, fw, fh), (sx, sy, sw, sh), size = nums("frame"), nums("screen"), nums("size")
+    if edge == "bottom":
+        want = [sx + wo_round((sw - wo_round(sw * 0.5)) / 2), sy + sh - wo_round(sh * 0.4),
+                wo_round(sw * 0.5), wo_round(sh * 0.4)]
+    else:
+        want = [sx + sw - wo_round(sw * 0.4), sy + wo_round((sh - wo_round(sh * 0.5)) / 2),
+                wo_round(sw * 0.4), wo_round(sh * 0.5)]
+    assert [fx, fy, fw, fh] == want, (line[0], want)
+    assert size == [fw, fh], line[0]
+
+# a bell while no window has focus asks for attention; a focused window is
+# never interrupted; off (the default) never asks
+bell = "type printf '\\\\a'\\n"
+at_steps = ["focus on", bell, "wait 500", "dump {d}/focused.txt", "focus off", bell, "wait 500",
+            "dump {d}/unfocused.txt"]
+ao = wo_run("attention", "request_attention = true\n", wo_steps(scratch / "wo-attention", at_steps))
+an = wo_run("attention-off", "", wo_steps(scratch / "wo-attention-off", at_steps))
+requests = lambda d, name: int(re.search(r"^attention_requests=(\d+)$", wo_dump(d, name), re.M)[1])
+assert requests(ao, "focused") == 0 and requests(ao, "unfocused") >= 1, wo_dump(ao, "unfocused")[:600]
+assert requests(an, "unfocused") == 0, wo_dump(an, "unfocused")[:600]
+
+# a paste over large_paste_warning asks first; Paste goes on; a small one
+# does not ask; a read-only pane refuses it before asking
+big = "y" * 1500
+lp = scratch / "wo-large-paste"
+wo_run("large-paste", "large_paste_warning = 1\n", [
+    f"paste {big}", f"dump {lp}/asked.txt", "a11y click Paste", "wait 200", f"dump {lp}/pasted.txt",
+    "key cmd+a", "key backspace", "paste short", f"dump {lp}/small.txt",
+    "key cmd+a", "key backspace",
+    "key cmd+p", "type toggle read-only", "wait 200", "key enter", "wait 300",
+    f"paste {big}", f"dump {lp}/read-only.txt"])
+asked = wo_dump(lp, "asked")
+assert "confirm=Some((LargePaste {" in asked and ' editor="" ' in asked, asked[:3000]
+assert "Paste a large amount of text?" in asked, asked[-3000:]
+assert f' editor="{big}" ' in wo_dump(lp, "pasted") and "confirm=None" in wo_dump(lp, "pasted"), \
+    wo_dump(lp, "pasted")[:3000]
+assert ' editor="short" ' in wo_dump(lp, "small") and "confirm=None" in wo_dump(lp, "small"), \
+    wo_dump(lp, "small")[:3000]
+ro = wo_dump(lp, "read-only")
+assert "confirm=None" in ro and ' editor="" ' in ro and "read_only=true" in ro, ro[:3000]
+
+# trim_paste drops trailing blanks (a copied line does not run); copied
+# files' quoted paths keep the space after them; off pastes as is
+tp_steps = ["paste echo trimmed  \\n\\n", "dump {d}/text.txt", "key cmd+a", "key backspace",
+            f"copyfiles {work}/hello.rs", "key cmd+v", "dump {d}/files.txt"]
+tp = wo_run("trim", "trim_paste = true\n", wo_steps(scratch / "wo-trim", tp_steps))
+tn = wo_run("trim-off", "", wo_steps(scratch / "wo-trim-off", tp_steps))
+assert ' editor="echo trimmed" ' in wo_dump(tp, "text"), wo_dump(tp, "text")[:3000]
+assert ' editor="echo trimmed" ' not in wo_dump(tn, "text"), wo_dump(tn, "text")[:3000]
+assert re.search(r' editor="[^"]*hello\.rs ', wo_dump(tp, "files")), wo_dump(tp, "files")[:3000]
+
+# word_delimiters: ⌥← stops after a delimiter and a double-click selects
+# between two; without, a blank is the only stop and the word is whole
+wd_steps = ["type echo alpha=beta=gamma\\n", "wait 500", "dump {d}/out.txt",
+            "paste cd src=app=main", "key alt+left", "dump {d}/word.txt"]
+wd_cfg = 'word_delimiters = "="\n'
+wd = wo_run("words", wd_cfg, wo_steps(scratch / "wo-words", wd_steps))
+wn = wo_run("words-off", "", wo_steps(scratch / "wo-words-off", wd_steps))
+assert ' editor="cd src=app=main" cursor=11 ' in wo_dump(wd, "word"), wo_dump(wd, "word")[:3000]
+assert ' editor="cd src=app=main" cursor=3 ' in wo_dump(wn, "word"), wo_dump(wn, "word")[:3000]
+def wo_dblclick(d, name, config):
+    """Double-click "beta" in the echo's output row (where run `d` drew it)
+    in a run of its own; what it copied."""
+    text = wo_dump(d, "out")
+    start = re.search(r'cmd="echo alpha=beta=gamma" .*?output_start=Some\((\d+)\)', text)[1]
+    geometry = next(l for l in text.splitlines() if l.strip().startswith("geometry "))
+    cw = float(re.search(r"cell_w=([\d.]+)", geometry)[1])
+    y, x = re.search(rf"[\[ ]{start}:([\d.]+)@([\d.]+)", geometry).groups()
+    point = f"{float(x) + cw * 7.5:.1f} {float(y) + 4:.1f}"
+    c = wo_run(name, config, ["type echo alpha=beta=gamma\\n", "wait 500", f"dblclick {point}",
+                              "wait 200", f"dump {scratch}/wo-{name}/clicked.txt"])
+    line = next(l for l in wo_dump(c, "clicked").splitlines() if l.startswith("clipboard="))
+    return json.loads(line[len("clipboard="):])
+assert wo_dblclick(wd, "words-click", wd_cfg) == "beta"
+assert wo_dblclick(wn, "words-off-click", "") == "alpha=beta=gamma"
+
+# the resize overlay (the grid's cols × rows) while a resize lasts, gone a
+# second later; snap_to_cells makes the window's resize step one cell; both
+# off by default
+ro_steps = ["wait 1500", "resize 900 500", "wait 300", "dump {d}/resized.txt", "wait 1500",
+            "dump {d}/later.txt"]
+rs = wo_run("resize", "resize_overlay = true\nsnap_to_cells = true\n",
+            wo_steps(scratch / "wo-resize", ro_steps))
+rn = wo_run("resize-off", "", wo_steps(scratch / "wo-resize-off", ro_steps))
+resized = wo_dump(rs, "resized")
+_, (_, _, _, cols, rows) = wo_grid(resized)
+assert f'resize_overlay=Some("{cols:.0f} × {rows:.0f}")' in wo_line(resized), wo_line(resized)
+assert "resize_overlay=None" in wo_line(wo_dump(rs, "later")), wo_line(wo_dump(rs, "later"))
+geometry = next(l for l in resized.splitlines() if l.strip().startswith("geometry "))
+cw, lh = (float(re.search(k + r"=([\d.]+)", geometry)[1]) for k in ("cell_w", "line_h"))
+step = re.search(r'resize_increments=Some\("([\d.]+)x([\d.]+)"\)', wo_line(resized))
+assert step and abs(float(step[1]) - cw) < 0.5 and abs(float(step[2]) - lh) < 0.5, (wo_line(resized), cw, lh)
+assert "resize_overlay=None" in wo_line(wo_dump(rn, "resized")), wo_line(wo_dump(rn, "resized"))
+assert "resize_increments=None" in wo_line(wo_dump(rn, "resized")), wo_line(wo_dump(rn, "resized"))
+
+# ⌘ + wheel zooms the font (Ctrl + wheel off macOS), ⇧ added steps the
+# opacity; the opacity actions by their keybinding names; off (the default)
+# the wheel only scrolls
+zoom_mod = "cmd" if sys.platform == "darwin" else "ctrl"
+wz_steps = [f"mods {zoom_mod}", "scroll 3", "mods none", "dump {d}/zoomed.txt",
+            f"mods {zoom_mod}+shift", "scroll -3", "scroll -3", "mods none", "dump {d}/dimmer.txt",
+            "key ctrl+alt+o", "dump {d}/action.txt", "key ctrl+alt+r", "dump {d}/reset.txt"]
+wz_keys = '\n[keybindings]\nopacity_increase = "ctrl+alt+o"\nopacity_reset = "ctrl+alt+r"\n'
+wz = wo_run("zoom", "wheel_zoom = true\n" + wz_keys, wo_steps(scratch / "wo-zoom", wz_steps))
+wzn = wo_run("zoom-off", wz_keys, wo_steps(scratch / "wo-zoom-off", wz_steps))
+font = lambda d, name: float(re.search(r"^font_size=([\d.]+) ", wo_dump(d, name), re.M)[1])
+opacity = lambda d, name: float(re.search(r" opacity=([\d.]+)$", wo_line(wo_dump(d, name)))[1])
+assert font(wz, "zoomed") == 14 and opacity(wz, "dimmer") == 0.4, (font(wz, "zoomed"), opacity(wz, "dimmer"))
+assert opacity(wz, "action") == 0.45 and opacity(wz, "reset") == 0.5, opacity(wz, "action")
+assert re.search(r"^font_size = 14", (wz / "cfg/rift/config.toml").read_text(), re.M)
+assert font(wzn, "zoomed") == 13 and opacity(wzn, "dimmer") == 0.5, (font(wzn, "zoomed"), opacity(wzn, "dimmer"))
+assert opacity(wzn, "action") == 0.55, opacity(wzn, "action")
+
+# always on top, launch mode and the size of a window without a saved frame;
+# the palette toggles on top for the window; "Rename window" names it (its
+# title), the session file keeps the name and a relaunch restores it
+ws = scratch / "wo-window"
+wo_run("window", 'always_on_top = true\nlaunch_mode = "maximized"\nwindow_width = 900\n'
+       'window_height = 520\nrestore_session = true\n', [
+           f"dump {ws}/opened.txt", "key cmd+p", "type toggle always on top", "wait 200", "key enter",
+           f"dump {ws}/toggled.txt",
+           "key cmd+p", "type rename window", "wait 200", "key enter", "wait 200", "type build logs",
+           f"dump {ws}/typing.txt", "key enter", "wait 300", f"dump {ws}/named.txt",
+           f"sh cp {ws}/data/rift/session.toml {ws}/session.toml"],
+       resize=False, RIFT_PERSIST_SESSION="1")
+opened = wo_line(wo_dump(ws, "opened"))
+assert 'on_top=true launch=Maximized size=Some("900x520")' in opened, opened
+assert "on_top=false" in wo_line(wo_dump(ws, "toggled")), wo_line(wo_dump(ws, "toggled"))
+assert "Name this window “build logs”" in wo_dump(ws, "typing"), wo_dump(ws, "typing")[-3000:]
+assert 'window_name=Some("build logs")' in wo_line(wo_dump(ws, "named")), wo_line(wo_dump(ws, "named"))
+assert 'window_name = "build logs"' in (ws / "session.toml").read_text(), (ws / "session.toml").read_text()
+wr = scratch / "wo-window-restore"
+(wr / "data/rift").mkdir(parents=True)
+shutil.copy(ws / "session.toml", wr / "data/rift/session.toml")
+wo_run("window-restore", "restore_session = true\n", [f"dump {wr}/restored.txt"],
+       resize=False, RIFT_PERSIST_SESSION="1")
+assert 'window_name=Some("build logs") on_top=false launch=Default' in wo_line(wo_dump(wr, "restored")), \
+    wo_line(wo_dump(wr, "restored"))
+
+# mask_secrets: a window name's secret is masked in its title; the
+# large-paste preview masks a private key's body lines (they match only
+# with its header and footer); the multiline question masks its lines
+ms = scratch / "wo-mask"
+pem = "\\n".join(["-----BEGIN PRIVATE KEY-----", *["Q" * 64] * 18, "-----END PRIVATE KEY-----"])
+wo_run("mask", "mask_secrets = true\nlarge_paste_warning = 1\n", [
+    "key cmd+p", "type rename window", "wait 200", "key enter", "wait 200", "type token=abcd1234secret",
+    "key enter", "wait 300", f"dump {ms}/named.txt",
+    f"paste {pem}", "wait 300", f"dump {ms}/large.txt", "key escape", "wait 200",
+    "type cat\\n", "wait 300", "paste password=hunter2xyz\\nls\\n", "wait 300", f"dump {ms}/multi.txt"])
+assert 'title="token=••••••••••••••"' in wo_line(wo_dump(ms, "named")), wo_line(wo_dump(ms, "named"))
+preview = re.search(r"^confirm=Some\(\(LargePaste \{.*?\}, (\[.*?\])\)\)", wo_dump(ms, "large"), re.M)
+assert preview and "QQQQ" not in preview[1] and "PRIVATE" not in preview[1], (preview and preview[1])[:400]
+assert '["password=••••••••••", "ls"]' in wo_dump(ms, "multi"), wo_dump(ms, "multi")[:3000]
+
+# --- Tier 3 appearance: the theme picker previews live and reverts; a
+# Warp gradient theme draws its ground and accent as gradients; tab colours
+# take any hex, cycle, and follow [[tab_color_rules]]; the sticky header
+# minimizes per pane and a click restores it; the explorer's right-click
+# menu; the Markdown viewer's Run (asks, masks, refuses a read-only pane)
+# and "Open in viewer" after `cat x.md` ---
+t3 = scratch / "tier3"
+def t3_run(name, config, steps, files=None):
+    d = t3 / name
+    for sub in ("cfg/rift/themes", "data", "work/sub"):
+        (d / sub).mkdir(parents=True, exist_ok=True)
+    for rel, body in (files or {}).items():
+        (d / rel).write_text(body)
+    (d / "cfg/rift/config.toml").write_text(
+        'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
+        'sync_os_theme = false\n' + f'working_directory = {json.dumps(str(d / "work"))}\n'
+        + config.replace("@WORK@", str(d / "work")))
+    (d / "t.rift").write_text("\n".join(["resize 1200 600", "wait_prompt", *steps, "quit"]) + "\n")
+    with (d / "log.txt").open("w") as log:
+        rc = subprocess.run([str(binary), "--script", str(d / "t.rift"), "--headless"],
+                            env=dict(env, XDG_CONFIG_HOME=str(d / "cfg"),
+                                     XDG_DATA_HOME=str(d / "data"),
+                                     BASH_SILENCE_DEPRECATION_WARNING="1"),
+                            stdout=log, stderr=log, timeout=90).returncode
+    assert rc == 0, died(f"tier3 {name} run failed", d / "log.txt")
+    return d
+t3_line = lambda d, name: re.search(r"^theme_preview=.*$", (d / f"{name}.txt").read_text(), re.M).group(0)
+t3_text = lambda d, name: (d / f"{name}.txt").read_text()
+t3_keys = ('\n[keybindings]\ntheme_picker = "ctrl+alt+t"\ncycle_tab_color = "ctrl+alt+c"\n'
+           'set_tab_color = "ctrl+alt+h"\ntoggle_sticky_header = "ctrl+alt+s"\n'
+           'toggle_read_only = "ctrl+alt+r"\n')
+# (1) picker, tab colours, sticky header
+d = t3 / "look"
+d = t3_run("look", 'theme = "nord"\n\n[[tab_color_rules]]\ndir = "@WORK@"\ncolor = "#ff8800"\n' + t3_keys, [
+    f"dump {d}/a0.txt",
+    "key ctrl+alt+t", "wait 300", f"dump {d}/a1.txt",
+    "type dracula", "wait 300", f"dump {d}/a2.txt",
+    "key escape", "wait 300", f"dump {d}/a3.txt",
+    "key ctrl+alt+t", "wait 200", "type gruvbox light", "key enter", "wait 300", f"dump {d}/a4.txt",
+    cp(d / "cfg/rift/config.toml", d / "a4.toml"),
+    "key ctrl+alt+c", "wait 200", f"dump {d}/a5.txt",
+    "key ctrl+alt+h", "wait 200", "type #123abc", "key enter", "wait 200", f"dump {d}/a6.txt",
+    "key ctrl+alt+h", "type no color", "key enter", "wait 200", f"dump {d}/a7.txt",
+    "type seq 1 300\\n", "wait 1000", f"dump {d}/a8.txt",
+    "key ctrl+alt+s", "wait 300", f"dump {d}/a9.txt",
+    # the minimized header's tab (top right of the 1200 px grid)
+    "click 1170 56", "wait 300", f"dump {d}/a10.txt"])
+assert 'theme="nord"' in t3_text(d, "a0") and "tab_tints=[Some(\"#ff8800\")]" in t3_line(d, "a0"), t3_line(d, "a0")
+assert "palette=true mode=Themes" in t3_text(d, "a1") and "theme_preview=true" in t3_line(d, "a1"), t3_line(d, "a1")
+# the selection previews without saving; Esc puts the old theme back
+assert 'theme="dracula"' in t3_text(d, "a2"), re.search(r"^font_size.*$", t3_text(d, "a2"), re.M)
+assert 'theme="nord"' in t3_text(d, "a3") and "theme_preview=false" in t3_line(d, "a3"), t3_line(d, "a3")
+assert 'theme="gruvbox-light"' in t3_text(d, "a4"), re.search(r"^font_size.*$", t3_text(d, "a4"), re.M)
+assert 'theme = "gruvbox-light"' in (d / "a4.toml").read_text(), "Enter keeps (saves) the theme"
+# own colours win over the directory rule; "No color" shows the rule again
+assert 'tab_tints=[Some("red")]' in t3_line(d, "a5"), t3_line(d, "a5")
+assert 'tab_tints=[Some("#123abc")]' in t3_line(d, "a6"), t3_line(d, "a6")
+assert 'tab_tints=[Some("#ff8800")]' in t3_line(d, "a7"), t3_line(d, "a7")
+assert "sticky=Some(" in t3_text(d, "a8"), "a finished long block keeps its sticky header"
+assert re.search(r"sticky_minimized=\[\d+\] sticky_tab=\[\"1156,48,28,16\"\]", t3_line(d, "a9")), t3_line(d, "a9")
+assert "sticky=None" in t3_text(d, "a9")
+assert 'Button "Show sticky command header"' in t3_text(d, "a9"), "the minimized header's tab has a label"
+assert "sticky_minimized=[]" in t3_line(d, "a10") and "sticky=Some(" in t3_text(d, "a10"), t3_line(d, "a10")
+# (2) a Warp gradient theme: its stops survive and draw top to bottom
+grad_yaml = ("accent:\n  left: '#ff0000'\n  right: '#0000ff'\nbackground:\n  top: '#101040'\n"
+             "  bottom: '#402010'\nforeground: '#e0e0e0'\ndetails: darker\nterminal_colors:\n"
+             "  normal: {black: '#000000', red: '#cc0000', green: '#00cc00', yellow: '#cccc00', "
+             "blue: '#0000cc', magenta: '#cc00cc', cyan: '#00cccc', white: '#cccccc'}\n"
+             "  bright: {black: '#555555', red: '#ff5555', green: '#55ff55', yellow: '#ffff55', "
+             "blue: '#5555ff', magenta: '#ff55ff', cyan: '#55ffff', white: '#ffffff'}\n")
+notes = ("# Notes\n\n```sh\necho md-run-ok > ran.txt\n```\n\n```mermaid\ngraph TD\n  A --> B\n```\n\n"
+         "```console\n$ echo AKIAABCDEFGHIJKLMNOP\nAKIAABCDEFGHIJKLMNOP\n```\n")
+d = t3 / "md"
+d = t3_run("md", 'theme = "grad"\nwindow_opacity = 1.0\nmask_secrets = true\n' + t3_keys, [
+    f"shot {d}/b0.png", f"dump {d}/b0.txt",
+    "type cat notes.md\\n", "wait 600", "key cmd+up", "key ctrl+m", "wait 300", f"dump {d}/b1.txt",
+    "a11y click Open in viewer", "wait 800", f"dump {d}/b2.txt",
+    "a11y click Run console block…", "wait 300", f"dump {d}/b3.txt",
+    # the dialog opens on Cancel: Enter alone runs nothing
+    "key enter", "wait 300", f"dump {d}/b4.txt",
+    "a11y click Run sh block…", "wait 300", "key right", "key enter",
+    f"wait_file {d}/work/ran.txt 8000", f"dump {d}/b5.txt",
+    "key ctrl+alt+r", "wait 200", "a11y click Run sh block…", "wait 300", f"dump {d}/b6.txt"],
+    files={"cfg/rift/themes/grad.yaml": grad_yaml, "work/notes.md": notes})
+assert "bg_gradient=true accent_gradient=true" in t3_line(d, "b0"), t3_line(d, "b0")
+png = (d / "b0.png").read_bytes()
+def png_rows(data):
+    import zlib, struct
+    i, idat, w = 8, b"", 0
+    while i < len(data):
+        n, kind = struct.unpack(">I4s", data[i:i + 8])
+        if kind == b"IHDR":
+            w = struct.unpack(">I", data[i + 8:i + 12])[0]
+        elif kind == b"IDAT":
+            idat += data[i + 8:i + 8 + n]
+        i += 12 + n
+    raw, stride, rows, prev, p = zlib.decompress(idat), w * 4, [], bytearray(w * 4), 0
+    while p < len(raw):
+        f, line = raw[p], bytearray(raw[p + 1:p + 1 + stride])
+        p += 1 + stride
+        for x in range(stride):
+            a = line[x - 4] if x >= 4 else 0
+            b, c = prev[x], (prev[x - 4] if x >= 4 else 0)
+            if f == 1: line[x] = (line[x] + a) & 255
+            elif f == 2: line[x] = (line[x] + b) & 255
+            elif f == 3: line[x] = (line[x] + (a + b) // 2) & 255
+            elif f == 4:
+                pa, pb, pc = abs(b - c), abs(a - c), abs(a + b - 2 * c)
+                line[x] = (line[x] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
+        rows.append(bytes(line))
+        prev = line
+    return rows
+rows = png_rows(png)
+scale = len(rows) // 600
+top = rows[70 * scale][4 * 750 * scale:4 * 750 * scale + 3]
+bottom = rows[590 * scale][4 * 750 * scale:4 * 750 * scale + 3]
+# the ground runs from blue-ish (#101040) at the top to brown (#402010) below
+assert top[2] > top[0] and bottom[0] > bottom[2], (tuple(top), tuple(bottom))
+assert "Open in viewer" in t3_text(d, "b1"), re.search(r"^menu_items=.*$", t3_text(d, "b1"), re.M)
+b2 = t3_text(d, "b2")
+assert re.search(r'viewer=Some\("[^"]*/md/work/notes\.md"\)', b2), b2[:800]
+assert re.search(r'viewer_runs=\["1@[\d,]+", "3@[\d,]+"\]', t3_line(d, "b2")), t3_line(d, "b2")
+assert 'Button "Run sh block…"' in b2 and 'Button "Run console block…"' in b2
+# the dialog shows the command masked (mask_secrets) and runs nothing yet
+b3 = re.search(r"^confirm=.*$", t3_text(d, "b3"), re.M).group(0)
+assert "RunCode" in b3 and '["echo ••••••••••••••••••••"]' in b3, b3
+assert "confirm=None" in t3_text(d, "b4") and 'cmd="echo AKIA' not in t3_text(d, "b4")
+assert (d / "work/ran.txt").read_text() == "md-run-ok\n"
+# a read-only pane refuses: no dialog
+b6 = t3_text(d, "b6")
+assert "confirm=None" in b6 and 'toast=Some("Pane is read-only")' in b6, re.search(r"^confirm=.*$", b6, re.M)
+# (3) the explorer's right-click menu
+d = t3 / "files"
+d = t3_run("files", "", [
+    "key shift+cmd+e", "wait 600", f"dump {d}/c0.txt",
+    "rclick 100 113", "wait 300", f"dump {d}/c1.txt",
+    "a11y click Copy relative path", "wait 300", f"dump {d}/c2.txt",
+    "rclick 100 89", "wait 300", "a11y click New file…", "wait 300", f"dump {d}/c3.txt",
+    "type new.txt", "key enter", "wait 500", f"dump {d}/c4.txt",
+    "rclick 100 89", "wait 300", "a11y click New file…", "wait 300", "type a.txt", "key enter",
+    "wait 300", f"dump {d}/c5.txt"],
+    files={"work/notes.md": "# hi\n", "work/sub/a.txt": "keep\n"})
+assert re.search(r'explorer_rows=\["sub@0,77,259,24", "notes\.md@0,101,259,24"\]', t3_line(d, "c0")), t3_line(d, "c0")
+assert 'menu_items=["Open", "Copy path", "Copy relative path", "New file…", "Reveal in Finder"]' in t3_text(d, "c1") \
+    or 'menu_items=["Open", "Copy path", "Copy relative path", "New file…", "Show in file manager"]' in t3_text(d, "c1"), \
+    re.search(r"^menu_items=.*$", t3_text(d, "c1"), re.M)
+assert 'clipboard="notes.md"' in t3_text(d, "c2")
+# it asks for a name only (empty input); the row names the file it creates
+assert re.search(r'^palette=true mode=SavePath query=""', t3_text(d, "c3"), re.M), \
+    re.search(r"^palette=.*$", t3_text(d, "c3"), re.M)
+assert (d / "work/sub/new.txt").read_text() == "" and 'selected=Some("new.txt")' in t3_text(d, "c4")
+# an existing file is never replaced by "New file…"
+assert (d / "work/sub/a.txt").read_text() == "keep\n" and "a.txt already exists" in t3_text(d, "c5")
+# a path instead of a name, `..`, or a symlinked folder leading out of the
+# explorer's root creates nothing
+d = t3 / "escape"
+(d / "work").mkdir(parents=True, exist_ok=True)
+(d / "out").mkdir(exist_ok=True)
+if not (d / "work/zlink").is_symlink():
+    os.symlink("../out", d / "work/zlink")
+new_file = lambda row, name: [f"rclick 100 {row}", "wait 300", "a11y click New file…", "wait 300",
+                              f"type {name}", "key enter", "wait 300"]
+d = t3_run("escape", "", [
+    "key shift+cmd+e", "wait 600",
+    *new_file(89, "../up.txt"), f"dump {d}/e1.txt",
+    *new_file(89, str(d / "out/abs.txt")), f"dump {d}/e2.txt",
+    *new_file(89, ".."), f"dump {d}/e3.txt",
+    *new_file(113, "esc.txt"), f"dump {d}/e4.txt"])
+assert 'toast=Some("New file: a name only, without /")' in t3_text(d, "e1"), t3_text(d, "e1")[:600]
+assert 'toast=Some("New file: a name only, without /")' in t3_text(d, "e2")
+assert 'toast=Some("New file: not a file name")' in t3_text(d, "e3")
+assert "leads out of the explorer" in t3_text(d, "e4"), re.search(r"^toast=.*$", t3_text(d, "e4"), re.M)
+assert not (d / "work/up.txt").exists() and not (d / "up.txt").exists() and list((d / "out").iterdir()) == []
+# (4) a window closed mid-preview puts the theme back; a picker opened in
+# another window reverts the first one's preview before it starts
+d = t3 / "windows"
+d = t3_run("windows", 'theme = "nord"\n' + t3_keys, [
+    "new_window", "wait 800", "window 0",
+    "key ctrl+alt+t", "wait 300", "type dracula", "wait 300",
+    "window 1", "key ctrl+alt+t", "wait 300", "type monokai", "wait 300", f"dump {d}/w1.txt",
+    "key escape", "wait 300", f"dump {d}/w2.txt",
+    "window 0", "key ctrl+alt+t", "wait 300", "type dracula", "wait 300",
+    "close_window", "wait 500", f"dump {d}/w3.txt"])
+assert 'theme="monokai"' in t3_text(d, "w1") and 'theme="nord"' in t3_text(d, "w2"), re.search(r"^font_size.*$", t3_text(d, "w2"), re.M)
+assert 'theme="nord"' in t3_text(d, "w3") and "theme_preview=false" in t3_line(d, "w3"), re.search(r"^font_size.*$", t3_text(d, "w3"), re.M)
 
 for client in clients:
     client.close()

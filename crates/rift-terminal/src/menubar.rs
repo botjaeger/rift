@@ -232,6 +232,8 @@ pub fn install(keymap: &Keymap) -> Option<MenuBar> {
         &[
             &action(keymap, "Minimize", "minimize"),
             &PredefinedMenuItem::zoom(None),
+            &action(keymap, "Rename Window…", "rename_window"),
+            &action(keymap, "Keep Window on Top", "toggle_always_on_top"),
             &sep(),
             &action(keymap, "Show Next Tab", "tab_next"),
             &action(keymap, "Show Previous Tab", "tab_prev"),

@@ -47,6 +47,7 @@ pub fn render(
         cell_w,
         blink_on,
         focused,
+        false,
         "",
         None,
         None,

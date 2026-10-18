@@ -11,8 +11,8 @@ listed alternates.
 |---|---|---|
 | ⌘↑ | `select_block_prev` | Select previous block (from newest; auto-scrolls) |
 | ⌘↓ | `select_block_next` | Select next block; past the newest → deselect + focus input |
-| ⇧⌘C | `copy_block_command` | Copy selected (else last) block's command |
-| ⌥⇧⌘C | `copy_block_output` | Copy selected (else last) block's output |
+| ⇧⌘C | `copy_block_command` | Copy selected (else last) block's command; every selected command with a multi-block selection |
+| ⌥⇧⌘C | `copy_block_output` | Copy selected (else last) block's output; every selected output with a multi-block selection |
 | ⌘I | `reinput` | Insert block's command into the editor (at a prompt) |
 | ⇧⌘I / ⌃⇧I | `inspect_command` | Command inspector: what the part of the command line at the cursor is and does (again, or any other key, puts it away) |
 | ⌃M | `block_menu` | Open context menu on selected/last block (passes through as CR in raw mode) |
@@ -23,9 +23,12 @@ listed alternates.
 | ⌃G | `add_next_occurrence` | Multi-cursor: select the word at the cursor, then add a caret at the selection's next occurrence |
 | ⌥↑ / ⌥↓ | `bookmark_closest_prev` / `_next` | Same jumps (Warp's closest-bookmark keys; editor active only, passes to the program otherwise — Codex reads them) |
 | ⌘K | `clear_blocks` | Clear blocks + scrollback (destructive; `clear` is the soft variant) |
-| ⌥⇧F | `filter_block` | Show only the selected (else newest) block's output lines that contain the typed text; Enter keeps the filter, Esc or ⌥⇧F again clears it (editor active only; passes to a running program) |
+| ⌥⇧F | `filter_block` | Show only the selected (else newest) block's output lines that match the typed text; Enter keeps the filter, Esc clears it, ⌥⇧F again turns it off (kept; ⌥⇧F once more turns it back on). In the filter bar: ⌥C match case, ⌥R regex, ⌥I invert, ⌥↑ / ⌥↓ context lines (editor active only; passes to a running program) |
 | — | `pipe_block_output` | Send the selected (else newest) block's output to a command's stdin |
-| Esc | — | Deselect block (in raw mode also still reaches the app in the PTY) |
+| Esc | — | Deselect block(s) (in raw mode also still reaches the app in the PTY) |
+| ⌘-click / ⇧-click | — | Add or remove a block in the selection / select the range from the selected block |
+| ⇧↑ / ⇧↓ | — | With a block selected: grow or shrink the block selection |
+| ⌘A | `select_all` | With a block selected: select every block (else select all text) |
 
 ## Scrolling
 
@@ -42,7 +45,7 @@ listed alternates.
 | ⌘T / ⌃⇧T | `new_tab` | New tab |
 | ⌘1 … ⌘9 | `tab_select_1..9` | Select tab by number (⌘9 = last) |
 | ⌃⇧1 … ⌃⇧9 | `new_tab_profile_1..9` | New tab with the nth profile of the + menu ([profiles](configuration.md#profiles)) |
-| ⇧⌘} / ⌃Tab | `tab_next` | Next tab |
+| ⇧⌘} / ⌃Tab | `tab_next` | Next tab (`tab_switch_order = "mru"`: ⌃Tab opens the recent-tabs switcher, see below) |
 | ⇧⌘{ / ⌃⇧Tab | `tab_prev` | Previous tab |
 | ⌃⇧← / ⌃⇧→ | `move_tab_left` / `_right` | Reorder current tab |
 | ⇧⌘T | `reopen_closed_tab` | Reopen last closed tab (restores cwd) |
@@ -50,9 +53,22 @@ listed alternates.
 | — | `new_worktree_tab` | Palette *New worktree tab…*: name a branch, add its git worktree, open a tab there |
 | — | `toggle_tab_layout` | Tabs on top ↔ vertical rail |
 | — | `rename_tab` | Rename the current tab |
+| — | `pin_tab` | Pin or unpin the current tab (pinned tabs sit first; ⌘W asks first) |
+| — | `cycle_tab_color` | The current tab's colour: none → red … cyan → none |
+| — | `set_tab_color` | Ask for the current tab's colour: a name or any `#rrggbb` |
+| ⇧⌘F | `focus_rail_search` | Search the vertical rail's tabs (without the rail: the session switcher) |
+| — | `toggle_rail_panes` | Vertical rail: a row per pane of split tabs, or per tab |
 | — | `close_other_tabs` | Close every tab except the current one |
 | — | `reset_tab_timer` | Zero the tab's "Time on this tab" chip (the card's Reset button) |
 | — | `save_launch_config` | Save the current tabs and panes as a launch configuration |
+
+With `tab_switch_order = "mru"` the ⌃ chords of `tab_next` / `tab_prev`
+follow the tabs last used first: ⌃Tab with ⌃ held opens the *Recent tabs*
+switcher on the previous tab, more ⌃Tab / ⌃⇧Tab (or ↓ / ↑) move the highlight,
+releasing ⌃ (or ⏎) switches, Esc cancels. A quick ⌃Tab toggles between the
+two most recent tabs. It lists the tabs you can see (none folded in a
+collapsed group); a tab that closes while it shows drops out of it. ⇧⌘} /
+⇧⌘{ keep the strip's order.
 
 ## Panes
 
@@ -66,6 +82,9 @@ listed alternates.
 | ⇧⌘⏎ | `maximize_pane` | Toggle pane zoom |
 | ⌘W / ⌃⇧W | `close_pane` | Close pane (last pane closes tab) |
 | ⌥⌘I | `toggle_sync_inputs` | Type and submit into every pane of the tab at once |
+| — | `toggle_read_only` | Make the pane read-only (input refused) or let input in again |
+| — | `restart_pane` | Start the pane's program again in place (asks first over a running job) |
+| — | `toggle_sticky_header` | Minimize the pane's sticky command header to a small tab, or show it again |
 
 ## Window
 
@@ -76,6 +95,8 @@ listed alternates.
 | ⌘M | `minimize` | Minimize |
 | ⌘H | `hide_app` | Hide Rift |
 | ⌃⌘F | `toggle_fullscreen` | Full screen |
+| — | `toggle_always_on_top` | The window floats above other apps' windows, or stops (`always_on_top` sets new windows) |
+| — | `rename_window` | Name the window (palette; nothing typed clears it): its title, saved with the session |
 | ⌘Q | `quit` | Quit (warns about running commands) |
 | ⌘A | `select_all` | Select the editor text, else all scrollback |
 
@@ -86,6 +107,7 @@ listed alternates.
 | ⌘P / ⌃⇧P | `palette` | Command palette |
 | ⌘F / ⌃⇧F | `search` | Scrollback search |
 | ⌘, | `open_settings` | Settings tab (again: back to the shell tab) |
+| — | `theme_picker` | Theme picker: the selected theme previews live; ⏎ keeps it, Esc reverts |
 | ⌃⌘K | `open_keybindings` | Settings → Keybindings page |
 | ⌘L | `focus_input` | Scroll to bottom, deselect, focus the editor |
 | ⇧⌘A | `attention_center` | Notifications popover: finished commands, failures, notifications and bells |
@@ -103,7 +125,13 @@ listed alternates.
 | ⌘= / ⇧⌘+ | `font_increase` | Font size +1 (persisted to config.toml) |
 | ⌘- | `font_decrease` | Font size −1 |
 | ⌘0 | `font_reset` | Font size → default (13) |
+| — | `opacity_increase` / `opacity_decrease` | Window opacity ±5 % (persisted to config.toml) |
+| — | `opacity_reset` | Window opacity → default (50 %) |
 | ⌘C / ⌃⇧C | `copy` | Copy selection, else last block's output |
+| ⇧⌘M / ⌃⇧M | `mark_mode` | Mark mode: select text in the scrollback from the keyboard (see Mark mode keys) |
+| ⌥. | `insert_last_argument` | At the prompt: insert the last word of the previous command; again: of the one before (⌥ as Meta: always on Linux, `option_as_meta` on macOS; otherwise ⌥. types its character) |
+| ⌃⌥← / ⌃⌥→ | `subword_left` / `subword_right` | At the prompt: move by word parts (`camelCase`, `snake_case`, `kebab-case`, path segments) |
+| — | `[[actions]]` | Your own step sequences, by their `key` ([user actions](configuration.md#user-actions)) |
 | ⌘V / ⌃⇧V | `paste` | Paste |
 
 ## Editor keys (fixed, not remappable)
@@ -128,13 +156,13 @@ Active only while the app owns the command line.
 | ⌘⌫ / ⌘⌦ | Kill to the start / end of the cursor's line; at the line's start / end they join it to the line above / below |
 | ⌃W / ⌃K | Cut word left / cut to the end of the cursor's line, at its end the newline (emacs) |
 | ⌃B / ⌃F | Cursor left / right (emacs) |
-| ⌃U | Clear the whole command |
+| ⌃U | Clear the whole command; the cleared text goes to the clipboard |
 | ⌘Z / ⇧⌘Z | Undo / redo |
 | ⇧← / ⇧→ | Extend the selection by one character |
 | ⌥⇧← / ⌥⇧→ | Extend the selection by one word |
 | ⇧⌘← / ⇧⌘→, ⇧Home / ⇧End | Extend the selection to line start / end |
 | ⌘X | Cut the selection (⌘C copies it, ⌘A selects all) |
-| ⌃R | History pane above the command line (again: next scope); in it ↑/↓ move (PageUp/PageDown by 8), ⏎ runs, ⇥ edits first, ⌘⏎ runs in a new split, Esc closes; with no match ⏎ runs the typed line and ⇥ only closes the pane. Where your shell binds ⌃R to its own widget (fzf, atuin), that widget runs on the command line instead (`shell_widgets`) |
+| ⌃R | History pane above the command line (again: next scope — this pane, all shells, failed, results); in it ↑/↓ move (PageUp/PageDown by 8), ⏎ runs, ⇥ edits first, ⌘⏎ runs in a new split, Esc closes; with no match ⏎ runs the typed line and ⇥ only closes the pane. Where your shell binds ⌃R to its own widget (fzf, atuin), that widget runs on the command line instead (`shell_widgets`) |
 | ⌃T / ⌥C | Where your shell binds them to its own widgets (fzf's file picker / directory jump): run them on the command line (`shell_widgets`; ⌥C with Option as Meta); otherwise nothing |
 | ⌃C | Interrupt (clears line, sends SIGINT) |
 | ⌃D | EOF (only when the line is empty) |
@@ -171,10 +199,11 @@ below are implemented.
 | `;` / `,` | Repeat the last `f` / `F` / `t` / `T` / in reverse |
 | `/` / `?` + text, Enter | Search forward / backward (literal, wrapping); Esc cancels |
 | `n` / `N` | Next match in the same / opposite direction |
+| `*` / `#` | Search the word under the cursor forward / backward (whole word) |
 | `d` `c` `y` + motion | Delete / change / yank over the motion (`cw` acts like `ce`) |
 | `gu` `gU` `g~` + motion | Lowercase / uppercase / toggle case |
 | `>` `<` + motion | Indent (two spaces) / outdent (a tab or two spaces) the lines |
-| operator + `i`/`a` + object | Text objects: `w` `W` words, `"` `'` `` ` `` quotes, `(` `b` `[` `{` `B` `<` brackets (`ciw`, `da"`, `yi(`) |
+| operator + `i`/`a` + object | Text objects: `w` `W` words, `"` `'` `` ` `` quotes, `(` `b` `[` `{` `B` `<` brackets, `l` the line (`il` without its edge blanks) — `ciw`, `da"`, `yi(`, `dil` |
 | `dd` / `cc` / `yy` / `S` | Same operators over the whole buffer |
 | `>>` `<<` `guu` `gUU` `g~~` | Same operators over the cursor's line (a count takes more) |
 | `D` / `C` | Delete / change to end of line |
@@ -182,9 +211,11 @@ below are implemented.
 | `r` + char | Replace the character under the cursor |
 | `~` | Toggle case and advance |
 | `J` | Join the next line (a count joins more) |
-| `p` / `P` | Put the unnamed register after / before the cursor |
+| `p` / `P` | Put the register after / before the cursor |
+| `"` + name | The register the next operator or put uses: `a`–`z` (`A`–`Z` append), `0` last yank, `_` black hole, `+` / `*` system clipboard (`"+yy`, `"ap`) |
 | `.` | Repeat the last change (a count replaces its count) |
-| `u` / **`U`** | Undo / **redo** one change (⌃R stays the history pane) |
+| `u` / ⌃R | Undo / redo one change (in Insert, ⌃R stays the history pane) |
+| `U` | Undo the latest changes on the last changed line (a change itself: `U` again redoes them) |
 | `k` / `j` | History previous / next (also ↑ / ↓) |
 | digits | Count, before and/or after the operator — the two multiply (`2d3w`) |
 
@@ -239,6 +270,9 @@ the chosen pane (no Enter is sent after it) · Esc cancels.
 | ⇧-click/drag | Local selection even when the program tracks the mouse |
 | ⌘-click | Open a URL, OSC 8 hyperlink or existing file path |
 | wheel | Scroll the pane under the pointer (reported to mouse-tracking programs) |
+| ⌘ + wheel / ⌘⇧ + wheel (Ctrl, Ctrl+⇧ on Linux) | With `wheel_zoom`: font size ±1 per notch / window opacity ±5 % (both saved) |
+| drag the scrollbar thumb / click its track | Scroll there / page one view toward the click (`scrollbar`) |
+| click a masked secret (`••••`) | Show it for 5 s (`mask_secrets`) |
 | drop files | Paste their shell-quoted paths |
 | drag a tab | Reorder tabs (Esc while dragging puts it back) |
 | drag a pane title bar | Move the pane: a pane's half splits, its middle swaps, a tab joins (hold 600 ms to open it), the empty strip makes a new tab; Esc cancels |
@@ -256,6 +290,24 @@ ESC-prefixed Meta for ⌥ (always on Linux; on macOS with `option_as_meta` for t
 end), as in Warp, iTerm2 and Ghostty — Claude Code, Codex, readline and zle
 honour them — in the program's kitty keyboard encoding when it asked for
 one; other ⌘ chords stay with Rift.
+
+## Mark mode keys
+
+While mark mode is on (`mark_mode`), a block cursor moves over the pane's
+rows, scrollback included, on the primary and the alternate screen; the view
+follows it.
+
+| Key | Effect |
+|---|---|
+| ← → ↑ ↓ / h l k j | Move one cell / row |
+| ⇧ + a move | Extend the selection from where it started |
+| w / b | Next / previous word |
+| 0 / $, Home / End | Start / end of the row |
+| PgUp / PgDn | One screen up / down |
+| g / G | First / last row |
+| ⏎ or ⌘C | Copy the selection and leave |
+| Esc (or `mark_mode` again) | Leave, nothing selected |
+| Any other ⌘ / ⌃ shortcut | Leave, nothing selected, and run it |
 
 ## Palette keys
 

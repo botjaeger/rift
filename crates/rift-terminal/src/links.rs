@@ -1,7 +1,7 @@
 //! macOS hands `rift://` links (`CFBundleURLTypes` in `Rift.app`) to the
 //! app as a `kAEGetURL` Apple Event, and folders (`CFBundleDocumentTypes`:
 //! dropped on the Dock icon, opened with Rift from Finder, `open -a Rift
-//! <dir>`, an editor's "external terminal") as an open-documents event,
+//! DIR`, an editor's "external terminal") as an open-documents event,
 //! which AppKit passes to the application delegate's
 //! `application:openURLs:`. Both are hooked before the event loop runs, so
 //! what launched Rift arrives too: it waits until the first window is up

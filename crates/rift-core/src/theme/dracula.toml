@@ -1,0 +1,40 @@
+# Rift builtin theme — Dracula (draculatheme.com, MIT). Base colours and the
+# ANSI palette are Dracula's own; chrome and text ramps follow its spec
+# (background, current line, selection, comment).
+name = "Dracula"
+
+bg = "#282a36"
+bg_chrome = "#21222c"
+bg_gutter = "#191a21"
+surface = "#2f3241"
+border = "#ffffff12"
+pane_border_inactive = "#44475a"
+
+fg = "#f8f8f2"
+text_bright = "#ffffff"
+text_ui = "#f8f8f2"
+text_dim = "#a4a7c1"
+text_muted = "#7c86b4"
+
+accent = "#bd93f9"
+success = "#50fa7b"
+error = "#ff5555"
+warning = "#f1fa8c"
+cursor = "#f8f8f2"
+selection = "#44475a"
+search_match = "#f1fa8c"
+search_active = "#ffb86c"
+
+# Dracula ANSI palette
+ansi = [
+    "#21222c", "#ff5555", "#50fa7b", "#f1fa8c",
+    "#bd93f9", "#ff79c6", "#8be9fd", "#f8f8f2",
+    "#6272a4", "#ff6e6e", "#69ff94", "#ffffa5",
+    "#d6acff", "#ff92df", "#a4ffff", "#ffffff",
+]
+
+[syntax]
+command = "#bd93f9"
+flag = "#8be9fd"
+string = "#f1fa8c"
+ghost = "#6272a4"

@@ -48,6 +48,99 @@ pub struct TabInfo {
     /// A coding agent runs (or just finished) in one of its panes: its mark
     /// replaces the spinner, with a state badge.
     pub agent: Option<TabAgent>,
+    /// Pinned, its group, picks and locks (`app::tab_groups`).
+    pub marks: TabMarks,
+}
+
+/// What a tab carries beyond its title: pinned (compact, first), the
+/// header of its group drawn before its group's first tab, folded away in
+/// a collapsed group, picked for "Group tabs", a read-only pane.
+#[derive(Debug, Clone, Default)]
+pub struct TabMarks {
+    pub pinned: bool,
+    pub header: Option<GroupHeader>,
+    /// Its group's colour: the tab's top edge when it has no colour of
+    /// its own.
+    pub group_color: Option<Color>,
+    pub hidden: bool,
+    pub picked: bool,
+    pub read_only: bool,
+    /// The focused pane's repository: uncommitted `(added, removed)` lines
+    /// (rail).
+    pub diff: Option<(usize, usize)>,
+    /// Its branch's pull request number (rail).
+    pub pr: Option<u64>,
+}
+
+/// A tab group's header: a pill in the strip, a row in the rail.
+#[derive(Debug, Clone)]
+pub struct GroupHeader {
+    pub id: u64,
+    pub name: String,
+    pub color: Color,
+    pub collapsed: bool,
+    /// Tabs in the group.
+    pub count: usize,
+    /// Inline rename in progress: the edited name.
+    pub editing: Option<String>,
+}
+
+/// A pinned tab's width in the strip (its mark only; the title is its
+/// tooltip).
+const PIN_W: f32 = 44.0;
+/// Height of a group pill.
+const PILL_H: f32 = 20.0;
+
+/// The pill's label: the name, and the tab count while folded.
+fn pill_label(h: &GroupHeader) -> String {
+    match &h.editing {
+        Some(e) => e.clone(),
+        None if h.collapsed => format!("{}  {}", h.name, h.count),
+        None => h.name.clone(),
+    }
+}
+
+/// Width of a group's pill (with its margins).
+fn pill_w(engine: &mut TextEngine, h: &GroupHeader) -> f32 {
+    let label = pill_label(h);
+    (engine.measure(&label, 11.5, FONT_SANS, Weight::MEDIUM) + 22.0).max(40.0) + 8.0
+}
+
+/// A group's pill at `x` in the strip; returns its rect.
+fn draw_pill(
+    layer: &mut Layer,
+    engine: &mut TextEngine,
+    theme: &Theme,
+    h: &GroupHeader,
+    x: f32,
+    w: f32,
+    blink_on: bool,
+) -> [f32; 4] {
+    let r = [x + 4.0, (TAB_BAR_H - PILL_H) / 2.0, w - 8.0, PILL_H];
+    let fill = if h.collapsed {
+        h.color.with_alpha(0.85)
+    } else {
+        h.color.with_alpha(0.18)
+    };
+    layer.bordered([r[0], r[1]], [r[2], r[3]], fill, h.color, PILL_H / 2.0, 1.0);
+    let label = pill_label(h);
+    let ink = if h.collapsed {
+        theme.bg
+    } else {
+        theme.text_bright
+    };
+    let b = make_text(engine, &label, 11.5, FONT_SANS, Weight::MEDIUM);
+    layer.text(b, r[0] + 11.0, r[1] + (PILL_H - 15.0) / 2.0, ink);
+    if h.editing.is_some() && blink_on {
+        let tw = engine.measure(&label, 11.5, FONT_SANS, Weight::MEDIUM);
+        layer.rect(
+            [r[0] + 11.0 + tw + 1.0, r[1] + 3.0],
+            [1.5, PILL_H - 6.0],
+            ink,
+            0.0,
+        );
+    }
+    r
 }
 
 /// The agent badge of a tab (`agent_status::tab_status`).
@@ -72,7 +165,7 @@ const AGENT_DISC: f32 = 16.0;
 /// a translucent window's ground is clear, so an opaque ring would read as
 /// a dark halo there. `clip` bounds the sprite.
 #[allow(clippy::too_many_arguments)]
-fn agent_mark(
+pub(crate) fn agent_mark(
     layer: &mut Layer,
     engine: &mut TextEngine,
     theme: &Theme,
@@ -181,7 +274,7 @@ pub(crate) fn make_text(
 }
 
 /// Longest prefix of `text` (plus `…`) that fits `max_w`.
-fn elide(engine: &mut TextEngine, text: &str, size: f32, max_w: f32) -> String {
+pub(crate) fn elide(engine: &mut TextEngine, text: &str, size: f32, max_w: f32) -> String {
     if engine.measure(text, size, FONT_SANS, Weight::NORMAL) <= max_w {
         return text.to_string();
     }
@@ -583,26 +676,48 @@ pub fn render(
         }
     }
 
-    // one fixed width (Warp), shrunk evenly when the tabs overflow the strip
-    let natural = vec![TAB_W; tabs.len()];
-    let avail = (w - tabs_x - 40.0 - CHEVRON_W).max(MIN_TAB_W);
-    let total: f32 = natural.iter().sum();
+    // one fixed width (Warp), shrunk evenly when the tabs overflow the
+    // strip; pinned tabs are compact, folded ones take no room, and a
+    // group's pill sits before its first tab
+    let pills: Vec<f32> = tabs
+        .iter()
+        .map(|t| t.marks.header.as_ref().map_or(0.0, |h| pill_w(engine, h)))
+        .collect();
+    let natural: Vec<f32> = tabs
+        .iter()
+        .map(|t| match (t.marks.hidden, t.marks.pinned) {
+            (true, _) => 0.0,
+            (false, true) => PIN_W,
+            (false, false) => TAB_W,
+        })
+        .collect();
+    let fixed: f32 =
+        pills.iter().sum::<f32>() + natural.iter().filter(|w| **w == PIN_W).sum::<f32>();
+    let avail = (w - tabs_x - 40.0 - CHEVRON_W - fixed).max(MIN_TAB_W);
+    let total: f32 = natural.iter().filter(|w| **w == TAB_W).sum();
+    let regular = natural.iter().filter(|w| **w == TAB_W).count();
     let n = tabs.len();
     // visible window `start..end`; everything outside it collapses into the
     // `‹N` / `N›` chips so the active tab always stays on screen
     let (mut start, mut end) = (0, n);
     let widths: Vec<f32> = if total <= avail {
         natural
-    } else if MIN_TAB_W * n as f32 <= avail {
-        let each = avail / n.max(1) as f32;
-        natural.iter().map(|x| x.min(each)).collect()
+    } else if MIN_TAB_W * regular as f32 <= avail {
+        let each = avail / regular.max(1) as f32;
+        natural
+            .iter()
+            .map(|x| if *x == TAB_W { x.min(each) } else { *x })
+            .collect()
     } else {
         let k = (((avail - 2.0 * OVERFLOW_CHIP_W) / MIN_TAB_W) as usize).clamp(1, n);
         start = active.min(n - 1).saturating_sub(k / 2).min(n - k);
         end = start + k;
         let chips = (start > 0) as u8 as f32 + (end < n) as u8 as f32;
         let each = (avail - chips * OVERFLOW_CHIP_W) / k as f32;
-        natural.iter().map(|x| x.min(each)).collect()
+        natural
+            .iter()
+            .map(|x| if *x == TAB_W { x.min(each) } else { *x })
+            .collect()
     };
 
     let mut x = tabs_x;
@@ -630,13 +745,25 @@ pub fn render(
         x += OVERFLOW_CHIP_W;
     }
     for (i, tab) in tabs.iter().enumerate().skip(start).take(end - start) {
+        if let Some(h) = &tab.marks.header {
+            let pr = draw_pill(layer, engine, theme, h, x, pills[i], blink_on);
+            hits.push(Hit {
+                rect: pr,
+                target: ClickTarget::GroupHeader(h.id),
+            });
+            x += pills[i];
+        }
+        if tab.marks.hidden {
+            continue;
+        }
         let tab_w = widths[i];
         let slot = [x, 0.0, tab_w, TAB_BAR_H];
         let lift_x = lifted
             .filter(|l| l.index == i)
             .map(|l| l.x.clamp(tabs_x, (w - tab_w).max(tabs_x)));
         let hovered = lifted.is_none() && inside(slot, mouse);
-        let shows_close = shows_close(close_button, tab, i == active, hovered);
+        // a pinned tab has no × (⌘W asks first)
+        let shows_close = !tab.marks.pinned && shows_close(close_button, tab, i == active, hovered);
         match lift_x {
             Some(lx) => {
                 // the slot it will land in: an empty well with a caret
@@ -809,10 +936,18 @@ fn draw_tab(
     } else if hovered {
         layer.rect([x, y], [tw, th - 1.0], lift(theme, 0.03), 0.0);
     }
-    // top edge: accent on the active tab, the tab color on any colored one
-    match (tab.color, is_active) {
+    if tab.marks.picked {
+        layer.rect([x, y], [tw, th - 1.0], theme.accent.with_alpha(0.14), 0.0);
+    }
+    // top edge: accent on the active tab, the tab color (else its group's)
+    // on any colored one
+    match (tab.color.or(tab.marks.group_color), is_active) {
         (Some(c), _) => layer.rect([x, y], [tw, 2.0], c, 0.0),
-        (None, true) => layer.rect([x, y], [tw, 2.0], theme.accent, 0.0),
+        // a gradient accent (Warp gradient themes) runs across the edge
+        (None, true) => match theme.accent_gradient {
+            Some(g) => layer.gradient([x, y], [tw, 2.0], g.from, g.to, g.vertical, 0.0),
+            None => layer.rect([x, y], [tw, 2.0], theme.accent, 0.0),
+        },
         _ => {}
     }
     if !floating {
@@ -861,9 +996,28 @@ fn draw_tab(
         None
     } else if tab.sync {
         Some((Icon::Sync, theme.accent))
+    } else if tab.marks.read_only {
+        Some((Icon::Lock, text_color))
+    } else if tab.marks.pinned {
+        Some((Icon::Terminal, text_color))
     } else {
         None
     };
+    if tab.marks.pinned {
+        // compact: the mark alone, centred (the title is the tooltip)
+        if let Some((icon, icon_color)) = icon {
+            icons::draw(layer, icon, [x + tw / 2.0, mid], 14.0, icon_color);
+        }
+        if let Some(kind) = tab.alert {
+            crate::views::notifications::tab_badge(layer, theme, kind, x + tw - 8.0, y + 9.0);
+        } else if tab.activity {
+            layer.circle([x + tw - 8.0, y + 9.0], 6.0, theme.accent.with_alpha(0.85));
+        }
+        if let Some(p) = tab.progress {
+            draw_progress(layer, theme, x, y + th, tw - 1.0, p);
+        }
+        return;
+    }
     if let Some((icon, icon_color)) = icon {
         icons::draw(layer, icon, [cx + 7.0, mid], 14.0, icon_color);
         cx += 14.0 + 8.0;
@@ -967,354 +1121,14 @@ fn chip_label(tab: &TabInfo) -> Option<String> {
     (tab.panes > 1).then(|| tab.panes.to_string())
 }
 
-/// Width of the vertical tab rail (`tab_layout = "vertical"`).
+/// Width of the vertical tab rail (`tab_layout = "vertical"`; drawn by
+/// `views::rail`).
 pub const RAIL_W: f32 = 220.0;
-const RAIL_ROW_H: f32 = 54.0;
-
-/// Vertical tab rail: one row per tab under the chrome strip, with the
-/// title, the directory and git branch, pane count, activity and color.
-#[allow(clippy::too_many_arguments)]
-pub fn render_rail(
-    layer: &mut Layer,
-    engine: &mut TextEngine,
-    theme: &Theme,
-    tabs: &[TabInfo],
-    active: usize,
-    h: f32,
-    blink_on: bool,
-    close_button: TabCloseButton,
-    hits: &mut Vec<Hit>,
-) {
-    layer.rect(
-        [0.0, TAB_BAR_H],
-        [RAIL_W, h - TAB_BAR_H],
-        theme.ground(theme.bg_chrome),
-        0.0,
-    );
-    layer.rect(
-        [RAIL_W - 1.0, TAB_BAR_H],
-        [1.0, h - TAB_BAR_H],
-        theme.border,
-        0.0,
-    );
-
-    let top = TAB_BAR_H + 6.0;
-    let avail = (h - 36.0 - top).max(0.0);
-    let fits = (avail / RAIL_ROW_H).floor() as usize;
-    // overflowing: the "+N above" line takes a slot of its own at the top;
-    // "+N more" sits in the bottom margin under the last row
-    let capacity = if tabs.len() <= fits {
-        fits
-    } else {
-        ((avail - RAIL_MORE_H) / RAIL_ROW_H).floor().max(1.0) as usize
-    };
-    let window = rail_window(tabs.len(), active, capacity);
-    let mut y = top;
-    if window.start > 0 {
-        rail_overflow(
-            layer,
-            engine,
-            theme,
-            &format!("+{} above", window.start),
-            &tabs[..window.start],
-            y,
-            window.start - 1,
-            hits,
-        );
-        y += RAIL_MORE_H;
-    }
-    for (i, tab) in tabs.iter().enumerate().take(window.end).skip(window.start) {
-        let is_active = i == active;
-        let row = [0.0, y, RAIL_W - 1.0, RAIL_ROW_H];
-        if is_active {
-            // square row on the pane ground, edged in the accent
-            layer.rect(
-                [row[0], row[1]],
-                [row[2], row[3]],
-                theme.ground(theme.bg),
-                0.0,
-            );
-            layer.rect(
-                [row[0], row[1]],
-                [2.0, row[3]],
-                tab.color.unwrap_or(theme.accent),
-                0.0,
-            );
-        }
-        let mut cx = row[0] + 14.0;
-        let line1 = row[1] + 9.0;
-        if let Some(kind) = rail_alert(tab) {
-            crate::views::notifications::tab_badge(layer, theme, kind, cx + 3.5, line1 + 8.0);
-            cx += 14.0;
-        } else if tab.activity && !is_active {
-            layer.circle([cx + 3.5, line1 + 8.0], 7.0, theme.success);
-            cx += 14.0;
-        } else if let Some(c) = tab.color {
-            layer.circle([cx + 3.5, line1 + 8.0], 8.0, c);
-            cx += 14.0;
-        }
-        let close_x = row[0] + row[2] - 20.0;
-        let icon = if tab.settings {
-            Some((
-                Icon::Settings,
-                if is_active {
-                    theme.text_ui
-                } else {
-                    theme.text_dim
-                },
-            ))
-        } else if let Some(a) = &tab.agent {
-            let (ring, ink) = if is_active {
-                (theme.bg, theme.text_ui)
-            } else {
-                (theme.bg_chrome, theme.text_dim)
-            };
-            agent_mark(
-                layer,
-                engine,
-                theme,
-                a,
-                [cx + 7.0, line1 + 8.5],
-                ring,
-                ink,
-                row,
-            );
-            cx += 14.0 + 8.0;
-            None
-        } else if tab.running {
-            let color = if is_active {
-                theme.text_ui
-            } else {
-                theme.text_dim
-            };
-            let c = [cx + 7.0, line1 + 8.5];
-            glyphs::draw_spinner(layer, c, 13.0, color);
-            cx += 14.0 + 8.0;
-            None
-        } else if tab.sync {
-            Some((Icon::Sync, theme.accent))
-        } else {
-            None
-        };
-        if let Some((icon, icon_color)) = icon {
-            icons::draw(layer, icon, [cx + 7.0, line1 + 8.5], 14.0, icon_color);
-            cx += 14.0 + 8.0;
-        }
-
-        let title_color = if is_active {
-            theme.text_bright
-        } else {
-            theme.text_ui
-        };
-        if let Some(edit) = &tab.editing {
-            let fw = (close_x - 4.0 - cx).max(40.0);
-            layer.bordered(
-                [cx - 4.0, line1 - 2.0],
-                [fw, 20.0],
-                theme.bg,
-                theme.accent,
-                4.0,
-                1.0,
-            );
-            let tw = engine.measure(edit, 12.5, FONT_SANS, Weight::NORMAL);
-            if tab.editing_selected && !edit.is_empty() {
-                layer.rect([cx - 1.0, line1], [tw + 2.0, 16.0], theme.selection, 2.0);
-            }
-            if !edit.is_empty() {
-                let b = make_text(engine, edit, 12.5, FONT_SANS, Weight::NORMAL);
-                layer.text(b, cx, line1, theme.text_bright);
-            }
-            if blink_on {
-                layer.rect([cx + tw + 1.0, line1 + 1.0], [1.5, 15.0], theme.accent, 0.0);
-            }
-        } else {
-            let title = elide(engine, &tab.title, 12.5, close_x - 8.0 - cx);
-            let weight = if is_active {
-                Weight::MEDIUM
-            } else {
-                Weight::NORMAL
-            };
-            let b = make_text(engine, &title, 12.5, FONT_SANS, weight);
-            layer.text(b, cx, line1, title_color);
-        }
-
-        // second line: directory · branch, pane count, sync
-        let mut sub = tab.subtitle.clone();
-        if let Some(p) = (tab.panes > 1).then(|| format!("{} panes", tab.panes)) {
-            sub = if sub.is_empty() {
-                p
-            } else {
-                format!("{sub} · {p}")
-            };
-        }
-        if tab.sync {
-            sub.push_str(" · synced");
-        }
-        let sub = elide(engine, &sub, 11.0, row[2] - 28.0);
-        if !sub.is_empty() {
-            let b = make_text(engine, &sub, 11.0, FONT_SANS, Weight::NORMAL);
-            layer.text(b, row[0] + 14.0, line1 + 20.0, theme.text_muted);
-        }
-
-        // the rail's rows always carry their × (they have room for the
-        // dots beside it); only `never` takes it away
-        if close_button != TabCloseButton::Never {
-            super::close_icon(
-                layer,
-                [close_x + 5.0, line1 + 7.0],
-                3.5,
-                theme
-                    .text_muted
-                    .with_alpha(if is_active { 1.0 } else { 0.7 }),
-            );
-            hits.push(Hit {
-                rect: [close_x - 4.0, line1 - 3.0, 18.0, 20.0],
-                target: close_target(tab, i),
-            });
-        }
-        if let Some(p) = tab.progress {
-            draw_progress(layer, theme, row[0], row[1] + row[3], row[2], p);
-        }
-        hits.push(Hit {
-            rect: row,
-            target: ClickTarget::TabSelect(i),
-        });
-        y += RAIL_ROW_H;
-    }
-    if window.end < tabs.len() {
-        let hidden = &tabs[window.end..];
-        rail_overflow(
-            layer,
-            engine,
-            theme,
-            &format!("+{} more · palette lists all", hidden.len()),
-            hidden,
-            y,
-            window.end,
-            hits,
-        );
-    }
-}
-
-/// Height of a "+N above" / "+N more" line in the rail.
-const RAIL_MORE_H: f32 = 28.0;
-
-/// The tabs the rail shows: at most `capacity` consecutive indices that
-/// always include `active`. Starts at tab 0 while `active` fits on the first
-/// page, then slides so `active` is the last visible row.
-pub fn rail_window(len: usize, active: usize, capacity: usize) -> std::ops::Range<usize> {
-    if len <= capacity {
-        return 0..len;
-    }
-    let cap = capacity.max(1);
-    let active = active.min(len - 1);
-    let start = (active + 1).saturating_sub(cap).min(len - cap);
-    start..start + cap
-}
-
-/// Severity order for the overflow marker: what most needs the user.
-fn alert_rank(kind: crate::views::notifications::Kind) -> u8 {
-    use crate::views::notifications::Kind;
-    match kind {
-        Kind::Request => 4,
-        Kind::Failed => 3,
-        Kind::Bell => 2,
-        Kind::Notify => 1,
-        // never a tab's (Rift's own notices have no pane)
-        Kind::Finished | Kind::App => 0,
-    }
-}
-
-/// The marker an overflow line carries: the worst alert among `hidden`, or
-/// activity when none has an alert.
-fn hidden_marker(hidden: &[TabInfo]) -> Option<Option<crate::views::notifications::Kind>> {
-    let worst = hidden
-        .iter()
-        .filter_map(|t| t.alert)
-        .max_by_key(|k| alert_rank(*k));
-    match worst {
-        Some(kind) => Some(Some(kind)),
-        None => hidden.iter().any(|t| t.activity).then_some(None),
-    }
-}
-
-/// The unread-alert badge of a rail row: none while the tab's agent mark
-/// already says it waits or failed (its dot sits beside it; one request,
-/// one mark).
-fn rail_alert(tab: &TabInfo) -> Option<crate::views::notifications::Kind> {
-    use crate::agent_status::AgentState;
-    let agent_says = tab
-        .agent
-        .is_some_and(|a| matches!(a.status.state, AgentState::Waiting | AgentState::Error));
-    tab.alert.filter(|_| !agent_says)
-}
-
-/// One overflow line: the hidden tabs' marker (same badge as a row), the
-/// label, and a hit that selects the nearest hidden tab so the window
-/// slides toward it.
-#[allow(clippy::too_many_arguments)]
-fn rail_overflow(
-    layer: &mut Layer,
-    engine: &mut TextEngine,
-    theme: &Theme,
-    text: &str,
-    hidden: &[TabInfo],
-    y: f32,
-    nearest: usize,
-    hits: &mut Vec<Hit>,
-) {
-    let row = [6.0, y, RAIL_W - 12.0, RAIL_MORE_H - 4.0];
-    let (mx, cy) = (row[0] + 17.5, y + 12.0);
-    let mut tx = 16.0;
-    match hidden_marker(hidden) {
-        Some(Some(kind)) => {
-            crate::views::notifications::tab_badge(layer, theme, kind, mx, cy);
-            tx += 20.0;
-        }
-        Some(None) => {
-            layer.circle([mx, cy], 7.0, theme.success);
-            tx += 20.0;
-        }
-        None => {}
-    }
-    let b = make_text(engine, text, 11.0, FONT_SANS, Weight::NORMAL);
-    layer.text(b, tx, y + 5.0, theme.text_muted);
-    hits.push(Hit {
-        rect: row,
-        target: ClickTarget::TabSelect(nearest),
-    });
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::views::notifications::Kind;
-
-    #[test]
-    fn rail_window_keeps_the_active_tab_visible() {
-        let w = rail_window(8, 7, 4);
-        assert!(w.contains(&7));
-        assert_eq!(w, 4..8);
-        assert_eq!(rail_window(8, 0, 4), 0..4);
-        assert_eq!(rail_window(8, 3, 4), 0..4);
-        assert_eq!(rail_window(8, 5, 4), 2..6);
-        for active in 0..8 {
-            let w = rail_window(8, active, 3);
-            assert!(w.contains(&active), "active {active} in {w:?}");
-            assert_eq!(w.len(), 3);
-        }
-    }
-
-    #[test]
-    fn rail_window_shows_everything_when_it_fits() {
-        assert_eq!(rail_window(3, 2, 4), 0..3);
-        assert_eq!(rail_window(4, 3, 4), 0..4);
-        assert_eq!(rail_window(0, 0, 4), 0..0);
-        // no room at all still shows the active tab
-        assert_eq!(rail_window(5, 3, 0), 3..4);
-        // stale active index past the end clamps
-        assert_eq!(rail_window(5, 9, 2), 3..5);
-    }
 
     fn tab(alert: Option<Kind>, activity: bool) -> TabInfo {
         TabInfo {
@@ -1331,6 +1145,7 @@ mod tests {
             running: false,
             progress: None,
             agent: None,
+            marks: TabMarks::default(),
         }
     }
 
@@ -1354,46 +1169,5 @@ mod tests {
         assert!(!shows_close(TabCloseButton::Never, &plain, true, true));
         assert!(!shows_close(TabCloseButton::Never, &renaming, true, false));
         assert!(shows_close(TabCloseButton::Hover, &renaming, false, false));
-    }
-
-    #[test]
-    fn a_rail_row_shows_one_mark_for_an_agents_request() {
-        use crate::agent_status::{AgentState, AgentStatus};
-        let with = |state| {
-            let mut t = tab(Some(Kind::Request), false);
-            t.agent = Some(TabAgent {
-                status: AgentStatus {
-                    agent: rift_core::notifications::Agent::ClaudeCode,
-                    state,
-                },
-                pulse: 1.0,
-                scale: 1.0,
-            });
-            t
-        };
-        // the agent's waiting / error dot says it: no badge beside it
-        assert_eq!(rail_alert(&with(AgentState::Waiting)), None);
-        assert_eq!(rail_alert(&with(AgentState::Error)), None);
-        assert_eq!(rail_alert(&with(AgentState::Working)), Some(Kind::Request));
-        assert_eq!(rail_alert(&with(AgentState::Done)), Some(Kind::Request));
-        assert_eq!(
-            rail_alert(&tab(Some(Kind::Request), false)),
-            Some(Kind::Request)
-        );
-    }
-
-    #[test]
-    fn overflow_marker_is_the_worst_hidden_alert() {
-        let hidden = [
-            tab(Some(Kind::Finished), false),
-            tab(Some(Kind::Request), false),
-            tab(Some(Kind::Failed), true),
-        ];
-        assert_eq!(hidden_marker(&hidden), Some(Some(Kind::Request)));
-        assert_eq!(
-            hidden_marker(&[tab(None, true), tab(None, false)]),
-            Some(None)
-        );
-        assert_eq!(hidden_marker(&[tab(None, false)]), None);
     }
 }

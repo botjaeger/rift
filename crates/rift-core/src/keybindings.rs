@@ -222,6 +222,7 @@ pub fn defaults() -> Vec<(&'static str, &'static str)> {
         ("block_menu", "ctrl+m"),
         ("filter_block", "alt+shift+f"),
         ("toggle_sync_inputs", "alt+cmd+i"),
+        ("focus_rail_search", "shift+cmd+f"),
         ("select_all", "cmd+a"),
         ("new_window", "cmd+n"),
         ("close_window", "shift+cmd+w"),
@@ -239,6 +240,13 @@ pub fn defaults() -> Vec<(&'static str, &'static str)> {
         // external-editor key): the composer takes ⌃⇧G / ⌘E
         ("rich_input", "ctrl+shift+g"),
         ("rich_input_alt", "cmd+e"),
+        // Windows Terminal's mark mode key (keyboard selection in scrollback)
+        ("mark_mode", "ctrl+shift+m"),
+        ("mark_mode_alt", "shift+cmd+m"),
+        // Warp's editor keys: Meta+. and subword motion
+        ("insert_last_argument", "alt+."),
+        ("subword_left", "ctrl+alt+left"),
+        ("subword_right", "ctrl+alt+right"),
     ]
 }
 
@@ -246,9 +254,28 @@ pub fn defaults() -> Vec<(&'static str, &'static str)> {
 #[derive(Debug, Clone)]
 pub struct Keymap {
     entries: Vec<(Binding, String)>,
+    /// How many entries at the front are `[keybindings]` overrides.
+    overrides: usize,
 }
 
 impl Keymap {
+    /// Defaults, overrides and the `[[actions]]` chords: an action's key
+    /// (entry `user_action_<i>`) loses to an override on the same chord and
+    /// wins over a default.
+    pub fn from_config(
+        overrides: &BTreeMap<String, String>,
+        actions: &[crate::actions::UserAction],
+    ) -> Keymap {
+        let mut km = Keymap::from_overrides(overrides);
+        let user = actions.iter().enumerate().filter_map(|(i, a)| {
+            let b = Binding::parse(a.key.as_deref()?)?;
+            Some((b, format!("{}{i}", crate::actions::KEYMAP_PREFIX)))
+        });
+        let at = km.overrides;
+        km.entries.splice(at..at, user);
+        km
+    }
+
     /// Defaults + user overrides (overrides win: they are matched first and
     /// also unbind the default for the same action).
     pub fn from_overrides(overrides: &BTreeMap<String, String>) -> Keymap {
@@ -269,6 +296,7 @@ impl Keymap {
                 log::warn!("invalid keybinding for {action}: {binding:?}");
             }
         }
+        let overrides_len = entries.len();
         for (action, binding) in defaults() {
             let base = action.strip_suffix("_alt").unwrap_or(action);
             if overrides.contains_key(base) {
@@ -278,7 +306,10 @@ impl Keymap {
                 entries.push((b, base.to_string()));
             }
         }
-        Keymap { entries }
+        Keymap {
+            entries,
+            overrides: overrides_len,
+        }
     }
 
     /// `key` must be pre-normalized: lowercase char or named key string.
@@ -350,6 +381,10 @@ pub fn all_actions() -> Vec<&'static str> {
         "reset_tab_timer",
         "save_launch_config",
         "equalize_panes",
+        "toggle_read_only",
+        "restart_pane",
+        "pin_tab",
+        "toggle_rail_panes",
         "pipe_block_output",
         "new_worktree_tab",
         "toggle_tab_layout",
@@ -359,6 +394,15 @@ pub fn all_actions() -> Vec<&'static str> {
         "check_for_updates",
         "install_cli",
         "update_rift",
+        "opacity_increase",
+        "opacity_decrease",
+        "opacity_reset",
+        "toggle_always_on_top",
+        "rename_window",
+        "theme_picker",
+        "cycle_tab_color",
+        "set_tab_color",
+        "toggle_sticky_header",
     ] {
         if !out.contains(&extra) {
             out.push(extra);
@@ -502,6 +546,56 @@ mod tests {
                 .any(|(a, c)| a == "clear_blocks" && c.is_empty())
         );
         assert!(rows.iter().any(|(a, _)| a == "rename_tab"));
+    }
+
+    #[test]
+    fn no_two_defaults_share_a_chord() {
+        let mut seen: Vec<(Binding, &str)> = Vec::new();
+        for (action, chord) in defaults() {
+            let b = Binding::parse(chord).unwrap();
+            if let Some((_, other)) = seen.iter().find(|(s, _)| *s == b) {
+                panic!("{chord:?} is both {other} and {action}");
+            }
+            seen.push((b, action));
+        }
+    }
+
+    #[test]
+    fn user_action_keys_sit_between_overrides_and_defaults() {
+        let action = |name: &str, key: &str| crate::actions::UserAction {
+            name: name.into(),
+            key: Some(key.into()),
+            steps: Vec::new(),
+        };
+        let mut o = BTreeMap::new();
+        o.insert("palette".to_string(), "ctrl+alt+p".to_string());
+        let actions = [
+            action("over default", "cmd+k"),
+            action("under override", "ctrl+alt+p"),
+            action("free", "ctrl+alt+h"),
+        ];
+        let km = Keymap::from_config(&o, &actions);
+        // an action's key beats the default ⌘K (clear_blocks)
+        assert_eq!(
+            km.lookup(false, false, false, true, "k"),
+            Some("user_action_0")
+        );
+        // a [keybindings] entry beats the action's key
+        assert_eq!(km.lookup(true, false, true, false, "p"), Some("palette"));
+        assert_eq!(
+            km.lookup(true, false, true, false, "h"),
+            Some("user_action_2")
+        );
+        // without actions nothing changes
+        let plain = Keymap::from_config(&o, &[]);
+        assert_eq!(
+            plain.lookup(false, false, false, true, "k"),
+            Some("clear_blocks")
+        );
+        assert_eq!(
+            Keymap::from_config(&BTreeMap::new(), &[]).lookup(false, true, false, true, "m"),
+            Some("mark_mode")
+        );
     }
 
     #[test]

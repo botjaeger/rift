@@ -1,0 +1,1 @@
+t.sh: line 9: /etc/riftx.conf: Permission denied

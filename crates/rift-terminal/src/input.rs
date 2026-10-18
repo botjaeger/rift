@@ -102,6 +102,14 @@ pub enum AppAction {
     FontIncrease,
     FontDecrease,
     FontReset,
+    /// Window opacity ±5 %, or back to the default (`window_opacity`).
+    OpacityIncrease,
+    OpacityDecrease,
+    OpacityReset,
+    /// The window floats above other apps' windows, or stops.
+    ToggleAlwaysOnTop,
+    /// Name the window (its title, saved with the session).
+    RenameWindow,
     FocusInput,
     ScrollPageUp,
     ScrollPageDown,
@@ -140,6 +148,16 @@ pub enum AppAction {
     BlockMenu,
     FilterBlock,
     ToggleSyncInputs,
+    /// Refuse (or allow again) typing, pastes and drops into the pane.
+    ToggleReadOnly,
+    /// Start the pane's program again in place (asks first over a job).
+    RestartPane,
+    /// Pin (or unpin) the active tab: it moves to the pinned tabs first.
+    PinTab,
+    /// Focus the vertical rail's search field.
+    FocusRailSearch,
+    /// The vertical rail: one row per pane ↔ one row per tab.
+    ToggleRailPanes,
     SelectAll,
     NewWindow,
     CloseWindow,
@@ -169,6 +187,24 @@ pub enum AppAction {
     /// Rich input: Rift's editor over the running program (a coding agent,
     /// any TUI); its text goes to the program as one paste.
     RichInput,
+    /// `[[actions]]` entry `.0`: its steps, in order.
+    UserAction(u16),
+    /// Keyboard selection in the scrollback (Windows Terminal mark mode).
+    MarkMode,
+    /// Meta+.: the last word of the previous command (again: older ones).
+    InsertLastArgument,
+    /// ⌃⌥← / ⌃⌥→: camelCase, snake_case and kebab-case word parts.
+    SubwordLeft,
+    SubwordRight,
+    /// The theme picker: the palette over every theme, previewing the
+    /// selected one live; Enter keeps it, Esc puts the old one back.
+    ThemePicker,
+    /// The active tab's colour: none, red … cyan, none again.
+    CycleTabColor,
+    /// Ask for the active tab's colour (a name or any `#rrggbb`).
+    SetTabColor,
+    /// The active pane's sticky command header: minimized ↔ shown.
+    ToggleStickyHeader,
 }
 
 impl AppAction {
@@ -188,6 +224,8 @@ impl AppAction {
                 | AppAction::ScrollBottom
                 | AppAction::FontIncrease
                 | AppAction::FontDecrease
+                | AppAction::OpacityIncrease
+                | AppAction::OpacityDecrease
                 | AppAction::TabNext
                 | AppAction::TabPrev
                 | AppAction::FocusLeft
@@ -225,6 +263,10 @@ impl AppAction {
                 | AppAction::AddCursorBelow
                 | AppAction::AddNextOccurrence
                 | AppAction::InspectCommand
+                // ⌥. and ⌃⌥←/→ are a shell's or an editor's own keys
+                | AppAction::InsertLastArgument
+                | AppAction::SubwordLeft
+                | AppAction::SubwordRight
         )
     }
 }
@@ -285,6 +327,9 @@ pub fn action_from_name(name: &str) -> Option<AppAction> {
             .filter(|n| (1..=9).contains(n))
             .map(AppAction::NewTabProfile);
     }
+    if let Some(i) = rift_core::actions::keymap_index(name) {
+        return u16::try_from(i).ok().map(AppAction::UserAction);
+    }
     Some(match name {
         "new_tab" => AppAction::NewTab,
         "close_pane" => AppAction::ClosePane,
@@ -319,6 +364,11 @@ pub fn action_from_name(name: &str) -> Option<AppAction> {
         "font_increase" => AppAction::FontIncrease,
         "font_decrease" => AppAction::FontDecrease,
         "font_reset" => AppAction::FontReset,
+        "opacity_increase" => AppAction::OpacityIncrease,
+        "opacity_decrease" => AppAction::OpacityDecrease,
+        "opacity_reset" => AppAction::OpacityReset,
+        "toggle_always_on_top" => AppAction::ToggleAlwaysOnTop,
+        "rename_window" => AppAction::RenameWindow,
         "focus_input" => AppAction::FocusInput,
         "scroll_page_up" => AppAction::ScrollPageUp,
         "scroll_page_down" => AppAction::ScrollPageDown,
@@ -347,6 +397,11 @@ pub fn action_from_name(name: &str) -> Option<AppAction> {
         "block_menu" => AppAction::BlockMenu,
         "filter_block" => AppAction::FilterBlock,
         "toggle_sync_inputs" => AppAction::ToggleSyncInputs,
+        "toggle_read_only" => AppAction::ToggleReadOnly,
+        "restart_pane" => AppAction::RestartPane,
+        "pin_tab" => AppAction::PinTab,
+        "focus_rail_search" => AppAction::FocusRailSearch,
+        "toggle_rail_panes" => AppAction::ToggleRailPanes,
         "select_all" => AppAction::SelectAll,
         "new_window" => AppAction::NewWindow,
         "close_window" => AppAction::CloseWindow,
@@ -366,6 +421,14 @@ pub fn action_from_name(name: &str) -> Option<AppAction> {
         "clear_transcripts" => AppAction::ClearTranscripts,
         "attention_center" => AppAction::AttentionCenter,
         "rich_input" => AppAction::RichInput,
+        "mark_mode" => AppAction::MarkMode,
+        "insert_last_argument" => AppAction::InsertLastArgument,
+        "subword_left" => AppAction::SubwordLeft,
+        "subword_right" => AppAction::SubwordRight,
+        "theme_picker" => AppAction::ThemePicker,
+        "cycle_tab_color" => AppAction::CycleTabColor,
+        "set_tab_color" => AppAction::SetTabColor,
+        "toggle_sticky_header" => AppAction::ToggleStickyHeader,
         _ => return None,
     })
 }
@@ -439,6 +502,32 @@ pub enum EditorKey {
     SelectWordRight,      // ⌥⇧→
     SelectHome,           // ⇧⌘← / ⇧Home
     SelectEnd,            // ⇧⌘→ / ⇧End
+    InsertLastArg,        // ⌥. (insert_last_argument)
+    SubwordLeft,          // ⌃⌥← (subword_left)
+    SubwordRight,         // ⌃⌥→ (subword_right)
+}
+
+impl EditorKey {
+    /// Moves the caret or the selection and changes nothing (what a
+    /// read-only pane's command line still takes).
+    pub fn only_moves(&self) -> bool {
+        matches!(
+            self,
+            EditorKey::Left
+                | EditorKey::Right
+                | EditorKey::Home
+                | EditorKey::End
+                | EditorKey::WordLeft
+                | EditorKey::WordRight
+                | EditorKey::Dismiss
+                | EditorKey::SelectLeft
+                | EditorKey::SelectRight
+                | EditorKey::SelectWordLeft
+                | EditorKey::SelectWordRight
+                | EditorKey::SelectHome
+                | EditorKey::SelectEnd
+        )
+    }
 }
 
 pub fn editor_key(event: &KeyPress, mods: ModifiersState) -> Option<EditorKey> {
