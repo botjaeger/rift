@@ -34,6 +34,8 @@ keyboard. The [project README](../README.md) explains what Rift is and why.
 | [terminal-landscape-roadmap.md](terminal-landscape-roadmap.md) | Terminal survey, prioritized plan and status |
 | [warp-parity.md](warp-parity.md) | Non-AI Warp parity matrix and gaps |
 | [warp-gaps.md](warp-gaps.md) | Every Warp feature Rift lacks or has only in part, what each is for, and the plan to close them |
+| [competitive-audit-2026-10-18.md](competitive-audit-2026-10-18.md) | Warp and Windows Terminal vs Rift, feature by feature: ranked gaps, what Rift leads on, recommended order |
+| [warp-windows-terminal-opportunities.md](warp-windows-terminal-opportunities.md) | Warp/Windows Terminal comparison and implementation handoff: profiles, block comparison, result search, project grouping, custom actions, and phone continuity |
 | [mobile-remote-plan.md](mobile-remote-plan.md) | Mobile companion plan and open decisions |
 | [remote-protocol.md](remote-protocol.md) | Wire format and limits between the remote gateway and the companion |
 | [mobile-threat-model.md](mobile-threat-model.md) | Trust model and threat model of the remote gateway |

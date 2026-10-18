@@ -566,7 +566,7 @@ integration). Sits at the bottom of the pane, or at the top with
   way (into another tab, not a tab of its own). A tab left without shells
   closes.
 - Drag a divider (grabbable 4 px either side) to resize; ⌃⌘arrows resize from
-  the keyboard (±5% per press).
+  the keyboard (10 px per press).
 - Zoom (⇧⌘⏎): the active pane temporarily takes the whole tab rect and renders
   like a single pane. Navigating or splitting unzooms.
 - Every pane keeps the full editor with its prompt context row.
