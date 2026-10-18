@@ -8,6 +8,66 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.15.0 — 2026-10-18
+
+Profiles and a new-tab menu, your own actions, tab groups and a searchable side rail, filtering,
+comparing and exporting block output, secret masking, and a long list of appearance and window options.
+
+### New
+
+- **Profiles and the new-tab menu** — a ⌄ next to the new-tab button lists your profiles, SSH hosts
+  and launch configurations; pick one to open it in a tab, a split or a window.
+- **Your own actions** — define named actions of several steps (keys, commands, Rift actions) in
+  `[[actions]]`; they appear in the palette and can have a shortcut.
+- **Tab groups, pinned tabs and a side rail** — group, colour and pin tabs; the rail lists every pane
+  with its folder, branch and changes, and searches them. Tab colours take any hex, can cycle, and can
+  follow the folder (`[[tab_color_rules]]`).
+- **Kept exited panes** — a pane whose shell ended stays with its output and a Restart button.
+- **Read-only panes** — mark a pane so nothing can be typed into it.
+- **Work with block output** — filter a block (regex, case, invert, context lines), find inside one
+  block, select several blocks, compare two blocks side by side, copy as HTML or Markdown, save
+  output to a file or export the whole buffer.
+- **Search past output** — the Results tab in ⌃R searches earlier output by text, status, date, host
+  and folder.
+- **Secret masking** — with `mask_secrets` on, keys and tokens are hidden in the screen, copies,
+  exports, comparisons, search results, notifications and the side rail.
+- **Review: commit and push** — stage, commit and push from the review panel.
+- **Send to an agent, composer and progress** — send a block or selection to another pane running an
+  agent, write long prompts in a composer, and see a command's progress in the tab.
+- **Install the `rift` command** — one click puts the command-line tool on your PATH.
+- **Themes** — nine more built-in themes (Dracula, Nord, Gruvbox, Solarized, One Dark, Monokai,
+  Catppuccin Latte), a theme picker that previews as you move and reverts on Escape, a colour scheme
+  per pane, and Warp gradient themes.
+- **Fonts and drawing** — font weight, OpenType features (ss01, zero), a minimum contrast ratio,
+  bold-is-bright, and box drawing, Powerline and block graphics drawn pixel-exact.
+- **Cursor shapes** — hollow block, double underline, and a hollow cursor in panes without focus.
+- **Window options** — padding per side, a drop-down window from any edge with its own width and
+  screen, Dock bounce on a bell, a warning before huge pastes, trim paste, word delimiters, a size
+  overlay while resizing, snap to cells, ⌘-wheel zoom, opacity actions, default size and launch mode,
+  always on top, and named windows.
+- **Smarter selection and editing** — double-click picks a whole URL, path, email, address or hash;
+  more file-link formats with a right-click menu; ⌥. inserts the last argument; ⌃U copies what it
+  clears; vim registers share the clipboard.
+- **Markdown viewer** — run a shell block after confirming, Mermaid blocks labelled as source, and
+  *Open in viewer* after `cat file.md`. The file explorer's right-click adds copy path, copy relative
+  path, New file and Reveal.
+- **Scroll bar and sticky header** — a scroll bar with marks for blocks and matches; the sticky
+  header can be minimised per pane.
+- **`RIFT_PANE_URL` links** — a link that brings you back to the pane that made it.
+
+### Improved
+
+- **Closing and quitting** — Rift no longer hangs on quit when a shell ignores the hang-up, and no
+  longer sends a signal to an unrelated process that reused a closed shell's number.
+- **One bad setting no longer breaks the file** — a wrong value in `config.toml` falls back by itself
+  and the rest still applies.
+- **Vim keys** — `U` undoes the line and ⌃R redoes outside insert mode.
+
+### Fixed
+
+- **Pushing to a differently named upstream**, commands typed into a read-only pane by an action, and
+  several places where masked secrets could still show are fixed.
+
 ## 0.14.0 — 2026-10-18
 
 Links that open Rift, a toolbar you arrange, app icon colours, several carets, a command inspector,

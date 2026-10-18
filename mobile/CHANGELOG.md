@@ -6,6 +6,19 @@ build (`## <version> — <YYYY-MM-DD>`) or an over-the-air update to one
 message its download carries. Items use `### New`, `### Improved` or
 `### Fixed` sections of `- **Title** — text`.
 
+## 0.3.0 · update 3 — 2026-10-18
+
+Tapping an alert opens the right pane, and a send that timed out says to check first.
+
+### Fixed
+
+- **Opening from an alert** — tapping a notification when the app was closed no longer shows "This
+  computer is not paired" before your computers have loaded.
+- **A send that timed out** — the message now says it may have gone through, so you check the pane
+  before sending it again.
+- **After your computer restarts Rift** — the app shows the pane again instead of waiting on an old
+  position.
+
 ## 0.3.0 · update 2 — 2026-10-18
 
 Text you type while a command is sent is kept, and a few safety fixes.
