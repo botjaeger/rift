@@ -21,6 +21,19 @@ pub struct Editor {
     pub mac_app: &'static str,
     /// Command on `PATH` (Linux, and macOS when the app bundle is absent).
     pub cli: &'static str,
+    /// How the CLI takes a line and column.
+    pub goto: Goto,
+}
+
+/// How an editor's command line opens a file at a line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Goto {
+    /// `--goto path:line[:col]` (VS Code and its forks).
+    Flag,
+    /// `path:line[:col]` (Zed, Sublime Text).
+    Suffix,
+    /// `--line N [--column C] path` (JetBrains IDEs).
+    JetBrains,
 }
 
 pub const EDITORS: &[Editor] = &[
@@ -29,54 +42,63 @@ pub const EDITORS: &[Editor] = &[
         label: "VS Code",
         mac_app: "Visual Studio Code",
         cli: "code",
+        goto: Goto::Flag,
     },
     Editor {
         id: "cursor",
         label: "Cursor",
         mac_app: "Cursor",
         cli: "cursor",
+        goto: Goto::Flag,
     },
     Editor {
         id: "windsurf",
         label: "Windsurf",
         mac_app: "Windsurf",
         cli: "windsurf",
+        goto: Goto::Flag,
     },
     Editor {
         id: "zed",
         label: "Zed",
         mac_app: "Zed",
         cli: "zed",
+        goto: Goto::Suffix,
     },
     Editor {
         id: "sublime",
         label: "Sublime Text",
         mac_app: "Sublime Text",
         cli: "subl",
+        goto: Goto::Suffix,
     },
     Editor {
         id: "intellij",
         label: "IntelliJ IDEA",
         mac_app: "IntelliJ IDEA",
         cli: "idea",
+        goto: Goto::JetBrains,
     },
     Editor {
         id: "phpstorm",
         label: "PhpStorm",
         mac_app: "PhpStorm",
         cli: "phpstorm",
+        goto: Goto::JetBrains,
     },
     Editor {
         id: "webstorm",
         label: "WebStorm",
         mac_app: "WebStorm",
         cli: "webstorm",
+        goto: Goto::JetBrains,
     },
     Editor {
         id: "rustrover",
         label: "RustRover",
         mac_app: "RustRover",
         cli: "rustrover",
+        goto: Goto::JetBrains,
     },
 ];
 
@@ -132,6 +154,45 @@ impl Editor {
         }
         (self.cli.into(), vec![path.into()])
     }
+
+    /// Program and argv that open `path` at `line` (1-based) and `col`:
+    /// the CLI on `PATH` (an app bundle opened with `open -a` takes no
+    /// line), else [`Editor::command`] without the line.
+    pub fn command_at(
+        &self,
+        path: &Path,
+        line: Option<u32>,
+        col: Option<u32>,
+    ) -> (String, Vec<std::ffi::OsString>) {
+        match (line, on_path(self.cli)) {
+            (Some(line), Some(cli)) => (
+                cli.to_string_lossy().into_owned(),
+                self.goto_args(path, line, col),
+            ),
+            _ => self.command(path),
+        }
+    }
+
+    /// The CLI's arguments that open `path` at `line` and `col`.
+    fn goto_args(&self, path: &Path, line: u32, col: Option<u32>) -> Vec<std::ffi::OsString> {
+        let mut at: std::ffi::OsString = path.into();
+        at.push(format!(":{line}"));
+        if let Some(c) = col {
+            at.push(format!(":{c}"));
+        }
+        match self.goto {
+            Goto::Flag => vec!["--goto".into(), at],
+            Goto::Suffix => vec![at],
+            Goto::JetBrains => {
+                let mut a: Vec<std::ffi::OsString> = vec!["--line".into(), line.to_string().into()];
+                if let Some(c) = col {
+                    a.extend(["--column".into(), c.to_string().into()]);
+                }
+                a.push(path.into());
+                a
+            }
+        }
+    }
 }
 
 /// The editors installed on this machine, in `EDITORS` order.
@@ -161,6 +222,31 @@ mod tests {
             assert_eq!(by_id(e.id), Some(e));
         }
         assert!(by_id("nano").is_none());
+    }
+
+    #[test]
+    fn goto_args_put_the_line_where_each_editor_reads_it() {
+        let path = Path::new("/tmp/a b.rs");
+        let args = |id: &str, line, col| -> Vec<String> {
+            by_id(id)
+                .unwrap()
+                .goto_args(path, line, col)
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        assert_eq!(args("vscode", 12, Some(3)), ["--goto", "/tmp/a b.rs:12:3"]);
+        assert_eq!(args("cursor", 12, None), ["--goto", "/tmp/a b.rs:12"]);
+        assert_eq!(args("zed", 12, None), ["/tmp/a b.rs:12"]);
+        assert_eq!(args("sublime", 7, Some(1)), ["/tmp/a b.rs:7:1"]);
+        assert_eq!(
+            args("intellij", 12, Some(3)),
+            ["--line", "12", "--column", "3", "/tmp/a b.rs"]
+        );
+        assert_eq!(args("rustrover", 5, None), ["--line", "5", "/tmp/a b.rs"]);
+        // no line: the plain command, the path as its last argument
+        let (_, plain) = by_id("zed").unwrap().command_at(path, None, None);
+        assert_eq!(plain.last().map(|a| a.as_os_str()), Some(path.as_os_str()));
     }
 
     #[test]

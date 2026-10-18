@@ -235,6 +235,21 @@ impl Agent {
         }
     }
 
+    /// Agent whose name a notification's title is (`Claude Code`, `Codex`,
+    /// …; case-insensitive): an agent run through a wrapper whose command
+    /// line does not name it still says who it is when it notifies.
+    pub fn from_notification_title(title: &str) -> Option<Agent> {
+        let t = title.trim();
+        [
+            Agent::ClaudeCode,
+            Agent::Codex,
+            Agent::OpenCode,
+            Agent::Gemini,
+        ]
+        .into_iter()
+        .find(|a| a.name().eq_ignore_ascii_case(t))
+    }
+
     /// Agent behind a command line: the program word of any of its
     /// `;` / `&&` / `||` / `|` parts (quotes and backslashes respected),
     /// after `VAR=value` assignments, `sudo`/`doas`/`nohup`/`env`/`nice`/
@@ -701,6 +716,21 @@ mod tests {
         assert_eq!(Agent::from_command("bash claude.sh"), None);
         assert_eq!(Agent::from_command("sh -c 'echo claude'"), None);
         assert_eq!(Agent::from_command("nice -n claude"), None);
+    }
+
+    #[test]
+    fn agents_from_notification_titles() {
+        assert_eq!(
+            Agent::from_notification_title(" claude code "),
+            Some(Agent::ClaudeCode)
+        );
+        assert_eq!(Agent::from_notification_title("Codex"), Some(Agent::Codex));
+        assert_eq!(
+            Agent::from_notification_title("Gemini CLI"),
+            Some(Agent::Gemini)
+        );
+        assert_eq!(Agent::from_notification_title("Build"), None);
+        assert_eq!(Agent::from_notification_title("Claude Code is done"), None);
     }
 
     #[test]

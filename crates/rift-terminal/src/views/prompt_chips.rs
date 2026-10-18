@@ -455,6 +455,7 @@ pub fn sample(chip: PromptChip, theme: &Theme) -> ChipView {
         files: 3,
         added: 10,
         removed: 2,
+        worktree: None,
     };
     let vars: HashMap<String, String> = [("RiftPython".to_string(), "3.12.2".to_string())].into();
     let pr = PrInfo {
@@ -540,6 +541,7 @@ mod tests {
             files: 0,
             added: 0,
             removed: 0,
+            worktree: None,
         };
         let now = LocalTime {
             year: 2023,
@@ -668,6 +670,7 @@ mod tests {
             files: 102,
             added: 2086,
             removed: 970,
+            worktree: None,
         };
         let pr = PrInfo {
             number: 42,

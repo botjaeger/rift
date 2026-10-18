@@ -38,6 +38,44 @@ pub enum PaletteAction {
     FocusWindow(u32, usize, u64),
     /// Ask to install remote shell integration on ssh profile `.0`.
     SshInstall(usize),
+    /// Open launch profile `.1` (`[[profiles]]` or a discovered shell).
+    Profile(ProfileOpen, String),
+    /// New worktree mode: create the typed branch's worktree, open a tab.
+    CreateWorktree,
+    /// Code review: compare against this base.
+    ReviewBase(rift_core::review::Base),
+    /// "Send to agent…": paste the pending code into this pane.
+    SendToPane(rift_pty::PaneId),
+}
+
+/// Where a profile opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileOpen {
+    Tab,
+    SplitRight,
+    SplitDown,
+}
+
+/// Palette rows for launch profiles: a new tab, and a split either way.
+pub fn profile_items(profiles: &[rift_core::profiles::Profile]) -> Vec<Item> {
+    let mut out = Vec::new();
+    for (how, verb) in [
+        (ProfileOpen::Tab, "New tab"),
+        (ProfileOpen::SplitRight, "Split right"),
+        (ProfileOpen::SplitDown, "Split down"),
+    ] {
+        for p in profiles {
+            out.push(Item {
+                title: format!("{verb}: {}", p.name),
+                id: p.command.clone().unwrap_or_default(),
+                shortcut: Vec::new(),
+                section: Section::Actions,
+                action: PaletteAction::Profile(how, p.name.clone()),
+                mono_title: false,
+            });
+        }
+    }
+    out
 }
 
 /// Palette rows for ssh profiles: connect, and install integration.
@@ -81,6 +119,28 @@ pub enum PaletteMode {
     /// Block action: the query is a command; the rows preview the output
     /// that will be its stdin.
     PipeOutput,
+    /// "New worktree tab…": the query is the new branch's name; the row
+    /// says where its worktree goes.
+    NewWorktree,
+    /// Code review: what the changes are compared against (Uncommitted,
+    /// the default branch, any branch).
+    ReviewBase,
+    /// "Send to agent…": the pane that gets the code, agents first.
+    SendTarget,
+}
+
+impl PaletteMode {
+    /// A one-off picker or a free-text query for one action: no
+    /// mode chips, and ⇥ and the `# @ >` prefixes do not switch modes.
+    pub fn takes_text(self) -> bool {
+        matches!(
+            self,
+            PaletteMode::PipeOutput
+                | PaletteMode::NewWorktree
+                | PaletteMode::ReviewBase
+                | PaletteMode::SendTarget
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -92,6 +152,12 @@ pub enum Section {
     Panes,
     Blocks,
     Preview,
+    /// Review base picker: Uncommitted and the default branch.
+    Base,
+    /// Review base picker: every local and remote branch.
+    Branches,
+    /// Send target picker: panes running a coding agent.
+    Agents,
 }
 
 #[derive(Clone)]
@@ -116,6 +182,28 @@ pub struct PaletteState {
     pub query: String,
     pub selected: usize,
     pub mode: PaletteMode,
+    /// The whole query is selected (a prefill such as the worktree
+    /// branch's `wt-<n>`): typing replaces it, Backspace clears it.
+    pub query_selected: bool,
+}
+
+impl PaletteState {
+    /// Text typed into the query: it replaces a selected query.
+    pub fn type_text(&mut self, text: &str) {
+        if std::mem::take(&mut self.query_selected) {
+            self.query.clear();
+        }
+        self.query.push_str(text);
+    }
+
+    /// Backspace: clears a selected query, else its last grapheme.
+    pub fn backspace(&mut self) {
+        if std::mem::take(&mut self.query_selected) {
+            self.query.clear();
+        } else {
+            crate::state::pop_grapheme(&mut self.query);
+        }
+    }
 }
 
 /// App actions, settings and dynamic launch/theme entries.
@@ -149,6 +237,11 @@ pub fn base_items(
             PaletteAction::App(AppAction::AttentionCenter),
         ),
         item(
+            "Rich input: compose for the running program",
+            "rich_input",
+            PaletteAction::App(AppAction::RichInput),
+        ),
+        item(
             "Show link and path hints",
             "hint_mode",
             PaletteAction::App(AppAction::HintMode),
@@ -169,6 +262,11 @@ pub fn base_items(
             PaletteAction::App(AppAction::ClearTranscripts),
         ),
         item("New tab", "new_tab", PaletteAction::App(AppAction::NewTab)),
+        item(
+            "New worktree tab…",
+            "new_worktree_tab",
+            PaletteAction::App(AppAction::NewWorktreeTab),
+        ),
         item(
             "Reopen closed tab",
             "reopen_closed_tab",
@@ -421,6 +519,11 @@ pub fn base_items(
             PaletteAction::App(AppAction::CheckForUpdates),
         ),
         item(
+            "Install 'rift' command",
+            "install_cli",
+            PaletteAction::App(AppAction::InstallCli),
+        ),
+        item(
             "Update Rift",
             "update_rift",
             PaletteAction::App(AppAction::UpdateRift),
@@ -492,6 +595,34 @@ pub fn history_items(history: &[String]) -> Vec<Item> {
             mono_title: true,
         })
         .collect()
+}
+
+/// New worktree mode's row: what Enter creates (`main` = the main
+/// checkout of the active pane's repository; `None` outside one).
+pub fn worktree_items(query: &str, main: Option<&std::path::Path>) -> Vec<MatchedItem> {
+    let branch = query.trim();
+    let title = match main {
+        None => "Not inside a Git repository".to_string(),
+        Some(_) if branch.is_empty() => "Type a name for the new branch".to_string(),
+        Some(main) => {
+            let dir = rift_core::git::worktree_dir(main, branch)
+                .map(|d| crate::views::editor::shorten_home(&d.to_string_lossy()))
+                .unwrap_or_default();
+            format!("Create branch {branch} from HEAD in {dir}")
+        }
+    };
+    vec![MatchedItem {
+        item: Item {
+            title,
+            id: String::new(),
+            shortcut: Vec::new(),
+            section: Section::Actions,
+            action: PaletteAction::CreateWorktree,
+            mono_title: false,
+        },
+        indices: Vec::new(),
+        score: 0,
+    }]
 }
 
 /// Pipe mode rows: what runs, then a preview of the stdin text.
@@ -670,7 +801,7 @@ pub fn render(
     let modal_w = MODAL_W.min((w - 32.0).max(160.0));
     let mx = (w - modal_w) / 2.0;
     let my = crate::views::tabbar::TAB_BAR_H + 54.0;
-    let modes_h = if state.mode == PaletteMode::PipeOutput {
+    let modes_h = if state.mode.takes_text() {
         0.0
     } else {
         MODES_H
@@ -734,6 +865,15 @@ pub fn render(
     );
     let qx = mx + 16.0 + 16.0 + 10.0;
     if !state.query.is_empty() {
+        if state.query_selected {
+            let qw = engine.measure(&state.query, 15.0, FONT_SANS, Weight::NORMAL);
+            layer.rect(
+                [qx - 1.0, cy - 10.0],
+                [qw + 2.0, 20.0],
+                theme.selection,
+                2.0,
+            );
+        }
         layer.text(
             sans(engine, &state.query, 15.0, Weight::NORMAL),
             qx,
@@ -744,8 +884,11 @@ pub fn render(
         let placeholder = match state.mode {
             PaletteMode::Sessions => "Go to tab, pane or block…",
             PaletteMode::PipeOutput => "Command that reads the output on stdin…",
+            PaletteMode::NewWorktree => "Name of the new branch…",
             PaletteMode::History => "Search command history…",
             PaletteMode::Commands => "Search actions, or type # @ to switch…",
+            PaletteMode::ReviewBase => "Compare changes against…",
+            PaletteMode::SendTarget => "Send to which pane…",
         };
         layer.text(
             sans(engine, placeholder, 15.0, Weight::NORMAL),
@@ -849,9 +992,13 @@ pub fn render(
                 Section::Settings => "SETTINGS",
                 Section::Recent => "RECENT COMMANDS",
                 Section::Tabs => "TABS",
+                Section::Panes if state.mode == PaletteMode::SendTarget => "OTHER PANES",
                 Section::Panes => "PANES",
                 Section::Blocks => "RECENT BLOCKS",
                 Section::Preview => "OUTPUT (STDIN)",
+                Section::Base => "COMPARE AGAINST",
+                Section::Branches => "BRANCHES",
+                Section::Agents => "AGENTS",
             };
             let mut lb = Buffer::new(&mut engine.font_system, Metrics::new(11.0, 14.0));
             lb.set_text(
@@ -998,6 +1145,9 @@ pub fn render(
     let enter = match state.mode {
         PaletteMode::Sessions => "go to",
         PaletteMode::PipeOutput => "run with output on stdin",
+        PaletteMode::NewWorktree => "create worktree and open a tab",
+        PaletteMode::ReviewBase => "compare",
+        PaletteMode::SendTarget => "paste (no Enter)",
         _ => "run",
     };
     let hints: Vec<(&[&str], &str)> = if modes_h > 0.0 {
@@ -1053,7 +1203,11 @@ fn item_icon(item: &Item) -> Icon {
         PaletteAction::Search => Icon::Search,
         PaletteAction::App(AppAction::SplitRight) => Icon::SplitRight,
         PaletteAction::App(AppAction::SplitDown) => Icon::SplitDown,
-        PaletteAction::App(AppAction::NewTab) => Icon::Plus,
+        PaletteAction::App(AppAction::NewTab) | PaletteAction::Profile(ProfileOpen::Tab, _) => {
+            Icon::Plus
+        }
+        PaletteAction::Profile(ProfileOpen::SplitRight, _) => Icon::SplitRight,
+        PaletteAction::Profile(ProfileOpen::SplitDown, _) => Icon::SplitDown,
         PaletteAction::App(AppAction::ClosePane) => Icon::Close,
         PaletteAction::App(AppAction::ToggleExplorer) => Icon::Sidebar,
         PaletteAction::OpenSettings => Icon::Settings,
@@ -1068,9 +1222,13 @@ fn item_icon(item: &Item) -> Icon {
         | PaletteAction::FocusWindow(..) => Icon::Terminal,
         PaletteAction::ShowBlock(..) => Icon::ChevronRight,
         PaletteAction::RunPipe => Icon::Filter,
+        PaletteAction::CreateWorktree => Icon::Terminal,
         PaletteAction::Ssh(_) | PaletteAction::SshInstall(_) | PaletteAction::AttachService(_) => {
             Icon::Open
         }
+        PaletteAction::ReviewBase(rift_core::review::Base::Uncommitted) => Icon::File,
+        PaletteAction::ReviewBase(_) => Icon::Branch,
+        PaletteAction::SendToPane(_) => Icon::Terminal,
         _ => Icon::ChevronRight,
     }
 }
@@ -1078,6 +1236,26 @@ fn item_icon(item: &Item) -> Icon {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_selected_prefill_is_replaced_by_typing() {
+        let mut s = PaletteState {
+            query: "wt-2".into(),
+            query_selected: true,
+            ..Default::default()
+        };
+        s.type_text("f");
+        s.type_text("ix");
+        assert_eq!(s.query, "fix");
+        assert!(!s.query_selected);
+        s.query = "wt-3".into();
+        s.query_selected = true;
+        s.backspace();
+        assert_eq!(s.query, "");
+        s.type_text("ab");
+        s.backspace();
+        assert_eq!(s.query, "a", "unselected: one character");
+    }
 
     #[test]
     fn command_palette_exposes_full_action_set_and_resolved_shortcuts() {
@@ -1096,6 +1274,34 @@ mod tests {
             .find(|i| i.id == "open_settings")
             .expect("settings action");
         assert_eq!(settings.shortcut, vec!["⌃", ","]);
+    }
+
+    #[test]
+    fn worktree_row_says_where_the_branch_goes() {
+        let main = std::path::Path::new("/src/rift");
+        let rows = worktree_items(" wt-2 ", Some(main));
+        assert_eq!(
+            rows[0].item.title,
+            "Create branch wt-2 from HEAD in /src/rift.worktrees/wt-2"
+        );
+        assert_eq!(rows[0].item.action, PaletteAction::CreateWorktree);
+        assert_eq!(
+            worktree_items("", Some(main))[0].item.title,
+            "Type a name for the new branch"
+        );
+        assert_eq!(
+            worktree_items("x", None)[0].item.title,
+            "Not inside a Git repository"
+        );
+        assert!(PaletteMode::NewWorktree.takes_text() && !PaletteMode::Commands.takes_text());
+        // listed among the actions under its keymap name
+        let items = base_items(
+            &[],
+            &[],
+            &rift_core::Keymap::from_overrides(&Default::default()),
+        );
+        let item = items.iter().find(|i| i.id == "new_worktree_tab").unwrap();
+        assert_eq!(item.title, "New worktree tab…");
     }
 
     #[test]

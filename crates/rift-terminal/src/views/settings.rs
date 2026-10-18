@@ -3265,6 +3265,43 @@ fn general_page(form: &mut Form, config: &Config, update: &UpdateLine) {
     let shell = rift_core::shell_integration::resolve_shell(config.shell.as_deref());
     let y = form.y;
     form.display(y, "Shell path", &shell);
+    // profiles are edited in config.toml ("Open config.toml" above); this
+    // lists them, read-only
+    let default = config
+        .default_profile
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty());
+    let y = form.y;
+    form.display(y, "Default profile", default.unwrap_or("none (Shell path)"));
+    for p in &config.profiles {
+        let mut what = p
+            .command
+            .clone()
+            .unwrap_or_else(|| "Shell path".to_string());
+        for a in &p.args {
+            what.push(' ');
+            what.push_str(a);
+        }
+        // a long name stops short of the value column
+        let name: String = if p.name.chars().count() > 40 {
+            p.name.chars().take(39).chain(['…']).collect()
+        } else {
+            p.name.clone()
+        };
+        let y = form.y;
+        form.display(y, &format!("Profile: {name}"), &what);
+    }
+    let y = form.y;
+    form.display(
+        y,
+        "Installed shells as profiles",
+        if config.discover_shells {
+            "on (/etc/shells)"
+        } else {
+            "off"
+        },
+    );
     let y = form.y;
     form.stepper_desc(
         y,
@@ -3633,6 +3670,25 @@ fn features_page(form: &mut Form, config: &Config) {
         "docker exec … bash, poetry shell; more in subshell_commands",
         config.subshell_offer,
         "subshell_offer",
+    );
+    let y = form.y;
+    form.segment(
+        y,
+        "Rich input sends with",
+        &["⏎", "⌘⏎"],
+        match config.rich_input_submit {
+            rift_core::RichInputSubmit::Enter => 0,
+            rift_core::RichInputSubmit::CmdEnter => 1,
+        },
+        "rich_input_submit",
+    );
+    let y = form.y;
+    form.toggle_desc(
+        y,
+        "Open rich input when an agent waits",
+        "Claude Code, Codex, OpenCode, Gemini CLI at their prompt",
+        config.rich_input_auto,
+        "rich_input_auto",
     );
 }
 

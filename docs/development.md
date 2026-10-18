@@ -429,7 +429,14 @@ When a change alters the session service's wire format,
 `ipc::tests::protocol_matches_the_golden_wire_format` fails: bump
 `PROTOCOL_VERSION` and update the golden. The manifest then carries the new
 protocol, and the update dialog warns that running shells cannot be
-reattached across that update.
+reattached across that update. Prefer an addition both sides tolerate
+instead: an optional field (`#[serde(default, skip_serializing_if = …)]`)
+that an older peer ignores, plus a `FEATURE_*` name the service lists in its
+hello when the window must know the service honours it (profile `args`:
+a service without `FEATURE_ARGS` is not asked to start such a shell; the
+window starts it locally). Update the golden; the version stays. Check it
+against the installed release's service with
+`docs/workstreams/evidence/tier1-2026-10-18/service-compat.py`.
 
 `scripts/release-manifest.py VERSION DIR --base-url file://DIR
 --allow-missing` writes a manifest for local files; sign it with

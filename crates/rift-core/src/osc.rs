@@ -1,8 +1,10 @@
 /// Streaming scanner for the OSC sequences Rift cares about:
-/// OSC 133 (shell-integration block markers) and OSC 7 (cwd report).
+/// OSC 133 (shell-integration block markers), OSC 7 (cwd report) and the
+/// others [`Marker`] lists.
 /// Bytes are NOT consumed — the same stream is fed to the VT parser; this
 /// scanner only spots marker positions so the caller can split the stream
 /// and record grid state at each marker boundary.
+use crate::shell_widget::WidgetMsg;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Marker {
@@ -32,6 +34,80 @@ pub enum Marker {
     /// shell's `$PATH` for command completion. Bounded, control characters
     /// dropped.
     UserVar { name: String, value: String },
+    /// OSC 6973 — Rift's shell-widget hand-off (`shell/rift.*`; see
+    /// [`crate::shell_widget`]).
+    ShellWidget(WidgetMsg),
+    /// OSC 9;4;`st`;`pr` (ConEmu / Windows Terminal) — taskbar progress.
+    /// `None` removes it (`st` 0).
+    Progress(Option<Progress>),
+}
+
+/// The kind of an OSC 9;4 progress report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgressState {
+    /// `st` 1: a percentage.
+    Normal,
+    /// `st` 2: failed (the percentage optional).
+    Error,
+    /// `st` 3: busy, no percentage.
+    Indeterminate,
+    /// `st` 4: paused / warning (the percentage optional).
+    Paused,
+}
+
+impl ProgressState {
+    /// The name `dump` and the docs use.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Error => "error",
+            Self::Indeterminate => "indeterminate",
+            Self::Paused => "paused",
+        }
+    }
+}
+
+/// One OSC 9;4 progress report. `pct` is 0–100 (clamped); `None` when the
+/// sequence gave none (always for indeterminate).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Progress {
+    pub state: ProgressState,
+    pub pct: Option<u8>,
+}
+
+/// `st[;pr]` of OSC 9;4. Anything else (an unknown state, a non-numeric or
+/// out-of-range percentage, extra fields) is malformed: `None`.
+fn parse_progress(rest: &str) -> Option<Marker> {
+    let mut parts = rest.split(';');
+    let st = parts.next()?;
+    let pr = parts.next().filter(|p| !p.is_empty());
+    if parts.next().is_some() {
+        return None;
+    }
+    // digits only (`parse` would also take a sign); the text is bounded by
+    // MAX_OSC, and a value past u32 fails to parse
+    let pct = match pr {
+        Some(p) if p.bytes().all(|b| b.is_ascii_digit()) => {
+            Some(p.parse::<u32>().ok()?.min(100) as u8)
+        }
+        Some(_) => return None,
+        None => None,
+    };
+    let state = match st {
+        "0" => return Some(Marker::Progress(None)),
+        "1" => ProgressState::Normal,
+        "2" => ProgressState::Error,
+        "3" => ProgressState::Indeterminate,
+        "4" => ProgressState::Paused,
+        _ => return None,
+    };
+    let pct = match state {
+        // a normal report without a value starts at 0 (Windows Terminal)
+        ProgressState::Normal => Some(pct.unwrap_or(0)),
+        ProgressState::Indeterminate => None,
+        _ => pct,
+    };
+    Some(Marker::Progress(Some(Progress { state, pct })))
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
@@ -65,6 +141,9 @@ pub const USER_VAR_PATH: &str = "RiftPath";
 /// Inline images and graphics commands carry base64 payloads.
 const MAX_IMAGE: usize = 48 << 20;
 const ITERM_FILE: &[u8] = b"1337;File=";
+/// A shell widget's report carries a whole command line (percent-encoded).
+const WIDGET_LINE: &[u8] = b"6973;W;";
+const MAX_WIDGET_LINE: usize = 64 << 10;
 
 /// A piece of the input chunk: bytes `range` end either at a marker boundary
 /// (marker fires AFTER those bytes are parsed) or at the chunk end.
@@ -175,6 +254,7 @@ impl OscScanner {
                         self.state = State::OscEsc;
                     } else if self.buf.len() < MAX_OSC
                         || (self.buf.starts_with(ITERM_FILE) && self.buf.len() < MAX_IMAGE)
+                        || (self.buf.starts_with(WIDGET_LINE) && self.buf.len() < MAX_WIDGET_LINE)
                         || (self.buf.starts_with(OUTPUT_START) && self.buf.len() < MAX_CMDLINE)
                     {
                         self.buf.push(b);
@@ -210,10 +290,14 @@ impl OscScanner {
 
 impl OscScanner {
     /// The marker of the OSC string just terminated. A clipped string is
-    /// dropped, except a `133;C` whose command line was too long: the
-    /// command still started.
+    /// dropped, except a `133;C` whose command line was too long (the
+    /// command still started) and a shell widget's lost report (it still
+    /// ends the hand-off waiting for it).
     fn finish_osc(&mut self) -> Option<Marker> {
         if std::mem::take(&mut self.clipped) {
+            if self.buf.starts_with(WIDGET_LINE) {
+                return Some(Marker::ShellWidget(WidgetMsg::Dropped));
+            }
             let c = self.buf.strip_prefix(OUTPUT_START)?;
             return matches!(c.first(), None | Some(b';'))
                 .then_some(Marker::OutputStart { command: None });
@@ -249,6 +333,9 @@ fn parse_osc(buf: &[u8]) -> Option<Marker> {
         });
     }
     let s = std::str::from_utf8(buf).ok()?;
+    if let Some(rest) = s.strip_prefix("6973;") {
+        return crate::shell_widget::parse(rest).map(Marker::ShellWidget);
+    }
     if let Some(rest) = s.strip_prefix("133;") {
         let mut parts = rest.split(';');
         return match parts.next()? {
@@ -267,7 +354,10 @@ fn parse_osc(buf: &[u8]) -> Option<Marker> {
     let clip = |t: &str| -> String { t.chars().filter(|c| !c.is_control()).take(256).collect() };
     if let Some(rest) = s.strip_prefix("9;") {
         // `9;4;…` is ConEmu progress, not a notification
-        if rest.starts_with("4;") || rest.is_empty() {
+        if let Some(progress) = rest.strip_prefix("4;") {
+            return parse_progress(progress);
+        }
+        if rest.is_empty() {
             return None;
         }
         return Some(Marker::Notify {
@@ -480,6 +570,44 @@ mod tests {
     }
 
     #[test]
+    fn shell_widget_messages() {
+        let mut s = OscScanner::new();
+        assert_eq!(
+            markers(
+                &mut s,
+                b"\x1b]6973;K;rt\x07\x1b]6973;L\x1b\\\x1b]6973;W;picked%20cmd;\x07"
+            ),
+            vec![
+                Marker::ShellWidget(WidgetMsg::Keys("rt".into())),
+                Marker::ShellWidget(WidgetMsg::Loaded),
+                Marker::ShellWidget(WidgetMsg::Line {
+                    before: "picked cmd".into(),
+                    after: String::new()
+                }),
+            ]
+        );
+        // a command line longer than the plain-OSC cap is kept whole
+        let long = "a%20".repeat(2000);
+        let osc = format!("\x1b]6973;W;{long};\x07");
+        assert_eq!(
+            markers(&mut s, osc.as_bytes()),
+            vec![Marker::ShellWidget(WidgetMsg::Line {
+                before: "a ".repeat(2000),
+                after: String::new()
+            })]
+        );
+        // over its own bound: not cut, but the hand-off still ends
+        let osc = format!("\x1b]6973;W;{};\x07", "a".repeat(MAX_WIDGET_LINE));
+        assert_eq!(
+            markers(&mut s, osc.as_bytes()),
+            vec![Marker::ShellWidget(WidgetMsg::Dropped)]
+        );
+        // other verbs keep the plain bound
+        let osc = format!("\x1b]6973;K;{}\x07", "r".repeat(MAX_OSC));
+        assert!(markers(&mut s, osc.as_bytes()).is_empty());
+    }
+
+    #[test]
     fn detects_st_terminated_and_exit_code() {
         let mut s = OscScanner::new();
         assert_eq!(
@@ -583,8 +711,74 @@ mod tests {
                 n("Title", "")
             ]
         );
-        // ConEmu progress and empty payloads are not notifications
-        assert!(markers(&mut s, b"\x1b]9;4;1;50\x07\x1b]99;i=1;\x07").is_empty());
+        // ConEmu progress is no notification; empty payloads are nothing
+        assert_eq!(
+            markers(&mut s, b"\x1b]9;4;1;50\x07\x1b]99;i=1;\x07"),
+            vec![Marker::Progress(Some(Progress {
+                state: ProgressState::Normal,
+                pct: Some(50)
+            }))]
+        );
+    }
+
+    #[test]
+    fn progress_states_and_terminators() {
+        let mut s = OscScanner::new();
+        let p = |state, pct| Marker::Progress(Some(Progress { state, pct }));
+        use ProgressState::*;
+        assert_eq!(
+            markers(
+                &mut s,
+                b"\x1b]9;4;1;42\x1b\\\x1b]9;4;2\x07\x1b]9;4;2;70\x07\x1b]9;4;3;55\x1b\\\x1b]9;4;4;10\x07\x1b]9;4;0;0\x07\x1b]9;4;0\x07\x1b]9;4;1\x07\x1b]9;4;1;\x07"
+            ),
+            vec![
+                p(Normal, Some(42)),
+                p(Error, None),
+                p(Error, Some(70)),
+                // indeterminate takes no value
+                p(Indeterminate, None),
+                p(Paused, Some(10)),
+                Marker::Progress(None),
+                Marker::Progress(None),
+                p(Normal, Some(0)),
+                p(Normal, Some(0)),
+            ]
+        );
+        // a value past 100 is clamped
+        assert_eq!(
+            markers(&mut s, b"\x1b]9;4;1;150\x07"),
+            vec![p(Normal, Some(100))]
+        );
+    }
+
+    #[test]
+    fn malformed_progress_is_ignored() {
+        let mut s = OscScanner::new();
+        for bad in [
+            &b"\x1b]9;4;9;999\x07"[..],
+            b"\x1b]9;4;1;abc\x07",
+            b"\x1b]9;4;1;-5\x07",
+            b"\x1b]9;4;1;+5\x07",
+            b"\x1b]9;4;1;50;x\x07",
+            b"\x1b]9;4;\x07",
+            b"\x1b]9;4;x\x07",
+            // past u32: dropped, not clamped
+            b"\x1b]9;4;1;99999999999\x07",
+        ] {
+            assert!(markers(&mut s, bad).is_empty(), "{bad:?}");
+        }
+        // 64 KiB of digits outgrows the OSC bound: dropped, and the scanner
+        // reports the next sequence again
+        let mut huge = b"\x1b]9;4;1;".to_vec();
+        huge.extend(std::iter::repeat_n(b'9', 64 << 10));
+        huge.extend(b"\x1b\\\x1b]9;4;3\x07");
+        assert_eq!(
+            markers(&mut s, &huge),
+            vec![Marker::Progress(Some(Progress {
+                state: ProgressState::Indeterminate,
+                pct: None
+            }))]
+        );
     }
 
     #[test]

@@ -42,6 +42,123 @@ pub struct TabInfo {
     /// A command runs in one of its panes: a spinner leads the title (in
     /// place of the sync icon).
     pub running: bool,
+    /// The OSC 9;4 progress its panes report (`progress::of_panes`): a bar
+    /// along the tab's bottom edge.
+    pub progress: Option<rift_core::Progress>,
+    /// A coding agent runs (or just finished) in one of its panes: its mark
+    /// replaces the spinner, with a state badge.
+    pub agent: Option<TabAgent>,
+}
+
+/// The agent badge of a tab (`agent_status::tab_status`).
+#[derive(Debug, Clone, Copy)]
+pub struct TabAgent {
+    pub status: crate::agent_status::AgentStatus,
+    /// Pulse phase of the waiting dot this frame, 0 (smallest) to 1 (full
+    /// size; always 1 under reduced motion). The dot stays opaque and pulses
+    /// by diameter, so the brand disc never shows through it.
+    pub pulse: f32,
+    /// Device scale (the Claude mark is a sprite).
+    pub scale: f32,
+}
+
+/// Diameter of an agent tab's brand disc.
+const AGENT_DISC: f32 = 16.0;
+
+/// An agent tab's mark centred on `c`: the brand disc, and its state at the
+/// lower right (working: the running spinner; waiting: a pulsing dot in
+/// the attention colour; done / error: a dot in the success / error
+/// colour), ringed in `ring` (the tab's ground) when the window is opaque;
+/// a translucent window's ground is clear, so an opaque ring would read as
+/// a dark halo there. `clip` bounds the sprite.
+#[allow(clippy::too_many_arguments)]
+fn agent_mark(
+    layer: &mut Layer,
+    engine: &mut TextEngine,
+    theme: &Theme,
+    a: &TabAgent,
+    c: [f32; 2],
+    ring: Color,
+    ink: Color,
+    clip: [f32; 4],
+) {
+    use crate::agent_status::AgentState;
+    use crate::views::notifications::{Kind, agent_disc_cut, kind_color};
+    let dot = [c[0] + 5.5, c[1] + 5.5];
+    agent_disc_cut(
+        layer,
+        engine,
+        a.status.agent,
+        c,
+        AGENT_DISC,
+        Some((dot, 5.0)),
+        a.scale,
+        clip,
+    );
+    if theme.ground_alpha >= 1.0 {
+        layer.circle(dot, 10.0, ring);
+    }
+    match a.status.state {
+        AgentState::Working => glyphs::draw_spinner(layer, dot, 9.0, ink),
+        AgentState::Waiting => layer.circle(
+            dot,
+            5.0 + 1.5 * a.pulse.clamp(0.0, 1.0),
+            kind_color(theme, Kind::Request).with_alpha(1.0),
+        ),
+        AgentState::Done => layer.circle(dot, 6.5, kind_color(theme, Kind::Finished)),
+        AgentState::Error => layer.circle(dot, 6.5, kind_color(theme, Kind::Failed)),
+    }
+}
+
+/// Height of a tab's progress bar.
+const PROGRESS_H: f32 = 2.0;
+/// One pass of the indeterminate sweep, and the share of the width it lights.
+const SWEEP_PERIOD: f32 = 1.4;
+const SWEEP_W: f32 = 0.3;
+
+/// A tab's OSC 9;4 progress: a 2 px bar along the bottom edge of the tab
+/// spanning `x..x + w`, ending at `bottom`. `accent` for normal and
+/// indeterminate, `error` for an error, `warning` when paused, on a track of
+/// the same colour at 25 %. Without a value an error or paused bar is full;
+/// indeterminate sweeps a third of the width across, or stands full at 60 %
+/// with reduced motion on.
+pub(crate) fn draw_progress(
+    layer: &mut Layer,
+    theme: &Theme,
+    x: f32,
+    bottom: f32,
+    w: f32,
+    p: rift_core::Progress,
+) {
+    use rift_core::ProgressState;
+    let y = bottom - PROGRESS_H;
+    let color = match p.state {
+        ProgressState::Error => theme.error,
+        ProgressState::Paused => theme.warning,
+        ProgressState::Normal | ProgressState::Indeterminate => theme.accent,
+    };
+    layer.rect([x, y], [w, PROGRESS_H], color.with_alpha(0.25), 0.0);
+    match (p.state, p.pct) {
+        (ProgressState::Indeterminate, _) if crate::progress::reduce_motion() => {
+            layer.rect([x, y], [w, PROGRESS_H], color.with_alpha(0.6), 0.0);
+        }
+        (ProgressState::Indeterminate, _) => {
+            let seg = w * SWEEP_W;
+            let t = (glyphs::epoch().elapsed().as_secs_f32() / SWEEP_PERIOD).fract();
+            // from just off the left edge to just off the right, clipped
+            let start = x - seg + (w + seg) * t;
+            let (l, r) = (start.max(x), (start + seg).min(x + w));
+            if r > l {
+                layer.rect([l, y], [r - l, PROGRESS_H], color, 0.0);
+            }
+        }
+        (_, pct) => {
+            let filled = w * f32::from(pct.unwrap_or(100)) / 100.0;
+            if filled > 0.0 {
+                layer.rect([x, y], [filled, PROGRESS_H], color, 0.0);
+            }
+        }
+    }
 }
 
 pub(crate) fn make_text(
@@ -468,7 +585,7 @@ pub fn render(
 
     // one fixed width (Warp), shrunk evenly when the tabs overflow the strip
     let natural = vec![TAB_W; tabs.len()];
-    let avail = (w - tabs_x - 40.0).max(MIN_TAB_W);
+    let avail = (w - tabs_x - 40.0 - CHEVRON_W).max(MIN_TAB_W);
     let total: f32 = natural.iter().sum();
     let n = tabs.len();
     // visible window `start..end`; everything outside it collapses into the
@@ -572,8 +689,19 @@ pub fn render(
         x += OVERFLOW_CHIP_W;
     }
 
-    // + new tab
+    // + new tab, joined to ⌄ (the profile menu, Windows Terminal's new-tab
+    // dropdown): one pill, a divider between the halves
     let plus = [x + 6.0, by, size, size];
+    let chevron = [plus[0] + size, by, CHEVRON_W, size];
+    let pill = [plus[0], by, size + CHEVRON_W, size];
+    if inside(pill, mouse) {
+        layer.rect(
+            [pill[0], pill[1]],
+            [pill[2], pill[3]],
+            lift(theme, 0.05),
+            4.0,
+        );
+    }
     icon_button(
         layer,
         theme,
@@ -583,18 +711,41 @@ pub fn render(
         false,
         inside(plus, mouse),
     );
+    icon_button(
+        layer,
+        theme,
+        chevron,
+        Icon::ChevronDown,
+        12.0,
+        false,
+        inside(chevron, mouse),
+    );
+    layer.rect(
+        [chevron[0], by + size * 0.25],
+        [1.0, size * 0.5],
+        lift(theme, 0.14),
+        0.0,
+    );
     hits.push(Hit {
         rect: plus,
         target: ClickTarget::TabNew,
     });
+    hits.push(Hit {
+        rect: chevron,
+        target: ClickTarget::TabProfiles,
+    });
 
     // the empty strip drags the window (macOS: the native titlebar ends at
     // the traffic lights; Linux has none)
+    let end_x = pill[0] + pill[2] + 2.0;
     hits.push(Hit {
-        rect: [x + 34.0, 0.0, (w - x - 34.0).max(0.0), TAB_BAR_H],
+        rect: [end_x, 0.0, (w - end_x).max(0.0), TAB_BAR_H],
         target: ClickTarget::WindowDrag,
     });
 }
+
+/// Width of the ⌄ half of the + button (the profile menu).
+const CHEVRON_W: f32 = 18.0;
 
 /// Left padding, the close button box and the tab width bounds.
 const TAB_PAD_L: f32 = 14.0;
@@ -686,6 +837,24 @@ fn draw_tab(
     // and one running a command spins
     let icon = if tab.settings {
         Some((Icon::Settings, text_color))
+    } else if let Some(a) = &tab.agent {
+        let ring = if floating || is_active {
+            theme.bg
+        } else {
+            theme.bg_chrome
+        };
+        agent_mark(
+            layer,
+            engine,
+            theme,
+            a,
+            [cx + 7.0, mid],
+            ring,
+            text_color,
+            r,
+        );
+        cx += 14.0 + 8.0;
+        None
     } else if tab.running {
         glyphs::draw_spinner(layer, [cx + 7.0, mid], 13.0, text_color);
         cx += 14.0 + 8.0;
@@ -777,6 +946,10 @@ fn draw_tab(
         crate::views::notifications::tab_badge(layer, theme, kind, ccx, ccy);
     } else if tab.activity {
         layer.circle([ccx, ccy], 6.0, theme.accent.with_alpha(0.85));
+    }
+    if let Some(p) = tab.progress {
+        // inside the edges drawn above
+        draw_progress(layer, theme, x, y + th, tw - 1.0, p);
     }
 }
 
@@ -870,7 +1043,7 @@ pub fn render_rail(
         }
         let mut cx = row[0] + 14.0;
         let line1 = row[1] + 9.0;
-        if let Some(kind) = tab.alert {
+        if let Some(kind) = rail_alert(tab) {
             crate::views::notifications::tab_badge(layer, theme, kind, cx + 3.5, line1 + 8.0);
             cx += 14.0;
         } else if tab.activity && !is_active {
@@ -890,6 +1063,24 @@ pub fn render_rail(
                     theme.text_dim
                 },
             ))
+        } else if let Some(a) = &tab.agent {
+            let (ring, ink) = if is_active {
+                (theme.bg, theme.text_ui)
+            } else {
+                (theme.bg_chrome, theme.text_dim)
+            };
+            agent_mark(
+                layer,
+                engine,
+                theme,
+                a,
+                [cx + 7.0, line1 + 8.5],
+                ring,
+                ink,
+                row,
+            );
+            cx += 14.0 + 8.0;
+            None
         } else if tab.running {
             let color = if is_active {
                 theme.text_ui
@@ -981,6 +1172,9 @@ pub fn render_rail(
                 target: close_target(tab, i),
             });
         }
+        if let Some(p) = tab.progress {
+            draw_progress(layer, theme, row[0], row[1] + row[3], row[2], p);
+        }
         hits.push(Hit {
             rect: row,
             target: ClickTarget::TabSelect(i),
@@ -1042,6 +1236,17 @@ fn hidden_marker(hidden: &[TabInfo]) -> Option<Option<crate::views::notification
         Some(kind) => Some(Some(kind)),
         None => hidden.iter().any(|t| t.activity).then_some(None),
     }
+}
+
+/// The unread-alert badge of a rail row: none while the tab's agent mark
+/// already says it waits or failed (its dot sits beside it; one request,
+/// one mark).
+fn rail_alert(tab: &TabInfo) -> Option<crate::views::notifications::Kind> {
+    use crate::agent_status::AgentState;
+    let agent_says = tab
+        .agent
+        .is_some_and(|a| matches!(a.status.state, AgentState::Waiting | AgentState::Error));
+    tab.alert.filter(|_| !agent_says)
 }
 
 /// One overflow line: the hidden tabs' marker (same badge as a row), the
@@ -1124,6 +1329,8 @@ mod tests {
             subtitle: String::new(),
             settings: false,
             running: false,
+            progress: None,
+            agent: None,
         }
     }
 
@@ -1147,6 +1354,32 @@ mod tests {
         assert!(!shows_close(TabCloseButton::Never, &plain, true, true));
         assert!(!shows_close(TabCloseButton::Never, &renaming, true, false));
         assert!(shows_close(TabCloseButton::Hover, &renaming, false, false));
+    }
+
+    #[test]
+    fn a_rail_row_shows_one_mark_for_an_agents_request() {
+        use crate::agent_status::{AgentState, AgentStatus};
+        let with = |state| {
+            let mut t = tab(Some(Kind::Request), false);
+            t.agent = Some(TabAgent {
+                status: AgentStatus {
+                    agent: rift_core::notifications::Agent::ClaudeCode,
+                    state,
+                },
+                pulse: 1.0,
+                scale: 1.0,
+            });
+            t
+        };
+        // the agent's waiting / error dot says it: no badge beside it
+        assert_eq!(rail_alert(&with(AgentState::Waiting)), None);
+        assert_eq!(rail_alert(&with(AgentState::Error)), None);
+        assert_eq!(rail_alert(&with(AgentState::Working)), Some(Kind::Request));
+        assert_eq!(rail_alert(&with(AgentState::Done)), Some(Kind::Request));
+        assert_eq!(
+            rail_alert(&tab(Some(Kind::Request), false)),
+            Some(Kind::Request)
+        );
     }
 
     #[test]

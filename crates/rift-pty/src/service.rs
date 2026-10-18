@@ -14,23 +14,28 @@ use crate::session::ServiceTarget;
 /// --session-daemon`, detached so it outlives the window: a launchd job on
 /// macOS, see `launchd`).
 pub fn connect() -> std::io::Result<UnixStream> {
+    connect_features().map(|(s, _)| s)
+}
+
+/// `connect`, also returning the features the service listed in its hello.
+fn connect_features() -> std::io::Result<(UnixStream, Vec<String>)> {
     let path = ipc::socket_path().ok_or_else(|| std::io::Error::other("no data dir"))?;
     if let Ok(s) = UnixStream::connect(&path) {
-        return handshake(s);
+        return handshake_features(s);
     }
     // panes connect on their own threads: one starts the service, the
     // others wait for it (two starts race launchd's bootstrap/bootout)
     static START: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _start = START.lock().unwrap_or_else(|e| e.into_inner());
     if let Ok(s) = UnixStream::connect(&path) {
-        return handshake(s);
+        return handshake_features(s);
     }
     let exe = std::env::current_exe()?;
     crate::launchd::spawn_helper("session", &exe, &["--session-daemon"], None)?;
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         match UnixStream::connect(&path) {
-            Ok(s) => return handshake(s),
+            Ok(s) => return handshake_features(s),
             // a service that never came up counts as stalled: the window
             // stays local instead of waiting here for every new pane
             Err(e) if Instant::now() > deadline => {
@@ -44,7 +49,12 @@ pub fn connect() -> std::io::Result<UnixStream> {
     }
 }
 
-fn handshake(mut s: UnixStream) -> std::io::Result<UnixStream> {
+fn handshake(s: UnixStream) -> std::io::Result<UnixStream> {
+    handshake_features(s).map(|(s, _)| s)
+}
+
+/// `handshake`, also returning the features the service listed.
+fn handshake_features(mut s: UnixStream) -> std::io::Result<(UnixStream, Vec<String>)> {
     // keystrokes go to this socket: only to a service run by this user
     if ipc::peer_uid(&s) != Some(unsafe { libc::getuid() }) {
         return Err(std::io::Error::new(
@@ -60,7 +70,9 @@ fn handshake(mut s: UnixStream) -> std::io::Result<UnixStream> {
         },
     )?;
     match next_event(&mut s)? {
-        Event::Hello { version, .. } if version == ipc::PROTOCOL_VERSION => Ok(s),
+        Event::Hello {
+            version, features, ..
+        } if version == ipc::PROTOCOL_VERSION => Ok((s, features)),
         Event::Hello { version, .. } => Err(std::io::Error::other(format!(
             "session service speaks protocol {version}, this build {}",
             ipc::PROTOCOL_VERSION
@@ -122,22 +134,39 @@ fn next_event_within(s: &mut UnixStream, limit: Duration) -> std::io::Result<Eve
     event
 }
 
+/// A service from before profiles would start the shell without its
+/// arguments: refuse a spawn there, and the window starts this one locally
+/// with them. A reattach sends no arguments (the shell runs already).
+fn refuses_args(target: ServiceTarget, args: &[String], features: &[String]) -> bool {
+    target == ServiceTarget::Spawn
+        && !args.is_empty()
+        && !features.iter().any(|f| f == ipc::FEATURE_ARGS)
+}
+
 /// Spawn or reattach; the returned stream next delivers the replay, then
 /// `ReplayDone`, then live output. Returns the service's session id.
 pub fn open(
     target: ServiceTarget,
     shell: Option<&str>,
+    args: Vec<String>,
     cwd: Option<&std::path::Path>,
     env: Vec<(String, String)>,
     ws: WindowSize,
 ) -> std::io::Result<(UnixStream, u64)> {
-    let mut s = connect()?;
+    let (mut s, features) = connect_features()?;
+    if refuses_args(target, &args, &features) {
+        return Err(std::io::Error::new(
+            ErrorKind::Unsupported,
+            "the running session service predates profile arguments",
+        ));
+    }
     let session = match target {
         ServiceTarget::Spawn => {
             ipc::send_json(
                 &mut s,
                 &Request::Spawn {
                     shell: shell.map(str::to_string),
+                    args,
                     cwd: cwd.map(|p| p.to_string_lossy().into_owned()),
                     env,
                     cols: ws.num_cols,
@@ -260,10 +289,23 @@ mod tests {
             &Event::Hello {
                 version: ipc::PROTOCOL_VERSION,
                 pid: 1,
+                features: vec![],
             },
         )
         .unwrap();
         b
+    }
+
+    #[test]
+    fn only_a_spawn_with_arguments_needs_the_args_feature() {
+        let args = vec!["-l".to_string()];
+        let old: Vec<String> = vec![];
+        let new = vec![ipc::FEATURE_ARGS.to_string()];
+        assert!(refuses_args(ServiceTarget::Spawn, &args, &old));
+        assert!(!refuses_args(ServiceTarget::Spawn, &args, &new));
+        assert!(!refuses_args(ServiceTarget::Spawn, &[], &old));
+        // a reattach sends no arguments: an old service can serve it
+        assert!(!refuses_args(ServiceTarget::Attach(7), &args, &old));
     }
 
     #[test]

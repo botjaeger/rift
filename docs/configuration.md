@@ -64,7 +64,10 @@ Files of earlier versions (one window, no `other_windows`) load as one
 window; a version-3 build reading a version-4 file reopens the first window
 only. A tab may also carry `layout` (its split tree), `color`, `transcript`
 and `service` (a durable shell to reattach), `started` and `counted` (the
-Elapsed chip). The file is rewritten when tabs or panes change, when focus
+Elapsed chip). Version 5 adds `launch` to an unsplit tab and to each pane of a
+`layout`: the [profile](#profiles) name, own `shell` and `args` the pane was
+opened with (absent: the default launch), so a restore opens the same profile
+again. The file is rewritten when tabs or panes change, when focus
 moves to another pane (so a restart focuses the pane last used), and every
 minute while a tab's time counts. A restored split never lays a pane out
 under 50 px while the window has room, whatever ratio was saved.
@@ -184,10 +187,15 @@ shell_completions = true          # also ask your shell's own completion functio
                                   # bash, fish), and the remote machine of an SSH
                                   # profile's pane; false (also on reload) stops the
                                   # warm shells; they always stop when Rift quits
+shell_widgets = "auto"            # auto | rift — ⌃R, ⌃T, ⌥C run your shell's own widgets
+                                  # (fzf, atuin) where its config binds them; rift: always
+                                  # Rift's (the history pane for ⌃R)
 autocomplete_pairs = true         # auto-close quotes/brackets; Backspace removes empty pairs
 vim_mode      = false             # modal (vim) editing in the command editor
 notify_on_completion = true       # alert when a long command finishes out of view
 notify_threshold_secs = 10        # what counts as long (stepper: 0–3600, ±5)
+show_progress = true              # programs' OSC 9;4 progress: a bar under the tab,
+                                  # the Dock badge (macOS); false hides both
 bell          = "both"            # visual | audible | both | none
 confirm_close_running = true      # warn before closing a pane/tab/window with a running job
 confirm_multiline_paste = true    # ask before a paste with newlines reaches a program
@@ -199,6 +207,10 @@ command_corrections = true        # "Did you mean …" after a failed command-no
 subshell_offer = true             # offer Rift's hooks in docker exec … bash, poetry shell…
 subshell_commands = []            # more such commands, as regular expressions
 subshell_denylist = []            # commands never to offer it for ("Don't ask again")
+rich_input_submit = "enter"       # rich input composer: "enter" sends (⇧⏎ new line) |
+                                  # "cmd_enter" (⌘⏎ sends, ⏎ new line)
+rich_input_auto = false           # open the composer by itself when a coding agent waits
+                                  # (its own notification, or 1 s of quiet after output)
 mouse_reporting = true            # forward clicks/drags/wheel to vim, tmux, htop…
                                   # (hold Shift to select locally); focus events go regardless
 option_as_meta = false            # macOS: left Option sends ESC-prefixed Meta keys instead
@@ -229,9 +241,26 @@ link_click    = "open"            # plain click on a link: open (open it at once
 file_editor   = "rift"            # explorer and code review ↗: rift | system | editor id
                                   # editors: vscode cursor windsurf zed sublime intellij
                                   # phpstorm webstorm rustrover (macOS: the .app in
-                                  # /Applications or ~/Applications, else the CLI on PATH)
+                                  # /Applications or ~/Applications, else the CLI on PATH;
+                                  # a rift://action/open_file link's line goes to the
+                                  # CLI on PATH first)
 explorer_hidden_files = true      # file explorer lists dotfiles (.git and ignored stay hidden)
 # shell        = "/bin/zsh"       # default: $SHELL
+# default_profile = "dev"         # the profile ⌘T, + and splits open (see Profiles);
+#                                 # unset: `shell` as before
+discover_shells = true            # the shells in /etc/shells are profiles too (zsh, fish…)
+
+# [[profiles]]                    # see Profiles below
+# name    = "dev"                 # required, unique
+# command = "fish"                # absolute path, ~/…, or a name on PATH; unset: `shell`
+# args    = ["--private"]         # after Rift's own integration arguments
+# cwd     = "~/code"              # start directory (a pane's own directory wins)
+# title   = "Dev"                 # tab title of a tab it opens
+# color   = "green"               # red green yellow blue magenta cyan
+# icon    = "python"              # + menu glyph: python php docker github git folder
+#                                 # user laptop; unset: a terminal
+# [profiles.env]                  # this profile's panes only
+# NODE_ENV = "development"
 
 # [[ssh_profiles]]                # palette "SSH: <name>" (hosts from ~/.ssh/config
 # name = "prod"                   # are listed automatically)
@@ -429,7 +458,7 @@ id = "server"
 type = "terminal"             # terminal | agent | cloud
 directory = "~/code/api"      # ~ and {{param}} allowed
 commands = ["make serve"]     # run in sequence
-shell = "zsh"                 # ignored by Rift
+shell = "zsh"                 # this pane's program (a path or a name on PATH)
 is_focused = true             # at most one pane
 
 [[panes]]
@@ -438,8 +467,11 @@ type = "terminal"
 ```
 
 Rift honours `name`, `title`, `color`, `directory`, `commands`, `is_focused`,
-`split`, `children` and `params.*.default`. Differences from Warp: all pane
-types open a local terminal; `shell` is ignored; a `{{param}}` with no
+`shell`, `split`, `children` and `params.*.default`, and adds per-pane
+`profile = "<name>"` (a [profile](#profiles)) and `args = [...]` (the pane's
+own arguments). YAML launch-configuration panes take the same `shell`,
+`profile` and `args` keys. Differences from Warp: all pane
+types open a local terminal; a `{{param}}` with no
 `default` (including `autogenerated_branch_name`) makes the file fail to load
 (named in a toast when the palette opens), because Rift has no fill-in dialog;
 `color = "black"` or `"white"` opens the tab with no color; unknown keys are ignored; at most 64 panes
@@ -449,7 +481,67 @@ equal-sized, as in Warp.
 **Save current layout as launch configuration** (palette) writes one Tab Config
 `.toml` per open tab to `~/.config/rift/launch_configs/` (`layout-<time>-1.toml`,
 `-2`, …), never overwriting an existing file, and never writing to Warp's
-directories.
+directories. Each pane keeps its `profile`, `shell` and `args`.
+
+## Profiles
+
+A profile is a named set of launch settings (Windows Terminal profiles):
+
+```toml
+default_profile = "dev"
+
+[[profiles]]
+name = "dev"
+command = "fish"                 # an executable: /path, ~/path or a name on PATH
+args = ["--private"]
+cwd = "~/code/app"
+title = "Dev"
+color = "green"
+
+[profiles.env]
+NODE_ENV = "development"
+
+[[profiles]]
+name = "clean bash"
+command = "/bin/bash"
+args = ["--noprofile"]
+```
+
+- **Precedence:** the global settings (`shell`, `working_directory`), then the
+  profile, then what the pane itself names (a launch configuration's
+  `directory`, `shell`, `args`). A pane `shell` replaces the profile's
+  `command` and its `args`; pane `args` replace the profile's. A pane naming
+  neither a profile nor a shell gets `default_profile`.
+- **Installed shells:** every executable listed in `/etc/shells` is a profile
+  named after it (`zsh`, `bash`, `fish`; one per name, the one `PATH` finds
+  first), unless `discover_shells = false`. A `[[profiles]]` entry with the
+  same name wins.
+- **Opening one:** the ⌄ beside the tab bar's + (or right-click +) lists the
+  profiles (the default one bold) with their shortcuts, ⌃⇧1…⌃⇧9
+  (`new_tab_profile_1`…`_9`, in menu order); the palette has
+  `New tab: <name>`, `Split right: <name>` and `Split down: <name>`; a launch
+  configuration pane names one with `profile = "<name>"`. ⌘T, + and ⌘D/⇧⌘D
+  open the default profile, as does every other new tab (the first tab, ⌘N,
+  links, `rift-terminal <path>`, `ctl open`, the phone, the drop-down
+  window): in the profile's `cwd` unless a folder was named, with its
+  `title` and `color`. Settings › General lists the profiles
+  (read-only; edit them in config.toml).
+- **Shell integration** follows the program each pane runs: zsh, bash and fish
+  load Rift's hooks, as do completions from the shell itself
+  (`shell_completions`).
+- **Environment** values reach that profile's panes only; the app and other
+  panes never see them.
+- **Identity:** a pane remembers the profile name (not its values) it was
+  opened with. Duplicate tab, save layout and session restore open that
+  profile again; a reattached durable shell keeps running as it was. Editing a
+  profile never changes a running pane.
+- **Errors:** an unknown profile name, or a `command` that is not an executable
+  file, is a toast naming the profile and the path, and nothing opens (a
+  launch configuration opens none of its tabs). Only a pane Rift must open
+  (a window's first tab, a restored tab, a link, a durable pane whose shell
+  had to be started again) runs the global `shell` instead, with that toast. An invalid `[[profiles]]` entry (no or repeated
+  `name`, an unknown `color`, an empty `command`, a NUL byte, `=` in an
+  environment name) makes config.toml not apply, like any parse error.
 
 ## Notifications & bell
 
@@ -513,6 +605,11 @@ an app bundle; `notify-send` on Linux) while it is not, plus its sound.
 - `RIFT_TEST_NO_FIRST_FRAME` (tests): a headless run does not count its
   start as a presented frame, so it confirms through the fallback timer (the
   planned wait + 20 s) like a window that never draws.
+- `RIFT_TEST_HEADLESS_EDITOR` (tests): a headless run launches the
+  `link_editor` / `file_editor` editor (a fake one first on `PATH`) instead
+  of only reporting it in a toast.
+- `RIFT_CLI_DIR`: the folder the palette's *Install 'rift' command* puts the
+  `rift` link in (default `~/.local/bin`).
 
 ## Keybinding overrides
 

@@ -123,6 +123,7 @@ impl Background {
             size: SIZE,
             cell_size: (8, 16),
             shell: config.shell.clone(),
+            args: Vec::new(),
             working_directory: std::env::var_os("HOME").map(PathBuf::from),
             env: vec![],
             scrollback: config.scrollback_lines(),

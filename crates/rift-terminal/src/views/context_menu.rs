@@ -33,6 +33,8 @@ pub enum MenuAction {
     Maximize,
     /// The pane leaves its split for a tab of its own.
     MoveToNewTab,
+    /// The pane leaves for a window of its own (shells keep running).
+    MovePaneToNewWindow,
     /// The toolbar: Settings › Appearance › Toolbar.
     RearrangeToolbar,
     // tab bar (payload: tab index)
@@ -43,30 +45,62 @@ pub enum MenuAction {
     CloseTab(usize),
     CloseOtherTabs(usize),
     CloseTabsRight(usize),
+    /// The + button's menu: open profile `.0` (index into the profiles
+    /// listed when the menu opened).
+    NewTabProfile(usize),
+    /// The + button's menu, below its divider.
+    OpenSettings,
+    OpenPalette,
+    OpenAbout,
+    /// The tab leaves for a window of its own.
+    MoveTabToNewWindow(usize),
+    /// The tab moves to another window (tab, that window's place in
+    /// opening order).
+    MoveTabToWindow(usize, usize),
     // file viewer ⋮
     ViewerInsertPath,
     ViewerCopyPath,
     ViewerFind,
     ViewerRendered(bool),
     ViewerClose,
+    /// "Send to agent…" for the code picked when the menu opened (a review
+    /// hunk or file, the viewer's lines).
+    SendToAgent,
 }
 
 pub struct MenuItem {
-    pub label: &'static str,
+    /// Fixed text, or a row built from live state ("Move to window 2: …").
+    pub label: std::borrow::Cow<'static, str>,
     pub action: MenuAction,
     pub enabled: bool,
     /// Draw a divider above this row.
     pub separator: bool,
+    /// A bold label (the default profile).
+    pub bold: bool,
+    /// A Nerd Font glyph in the icon column instead of the action's icon.
+    pub glyph: Option<char>,
 }
 
 impl MenuItem {
-    pub fn new(label: &'static str, action: MenuAction) -> Self {
+    pub fn new(label: impl Into<std::borrow::Cow<'static, str>>, action: MenuAction) -> Self {
         MenuItem {
-            label,
+            label: label.into(),
             action,
             enabled: true,
             separator: false,
+            bold: false,
+            glyph: None,
         }
+    }
+
+    pub fn bold(mut self, on: bool) -> Self {
+        self.bold = on;
+        self
+    }
+
+    pub fn glyph(mut self, glyph: Option<char>) -> Self {
+        self.glyph = glyph;
+        self
     }
 
     pub fn enabled(mut self, on: bool) -> Self {
@@ -146,11 +180,15 @@ fn icon(action: MenuAction) -> Option<Icon> {
         ScrollTopOfBlock => Icon::ChevronUp,
         ScrollBottomOfBlock => Icon::ChevronDown,
         FilterBlock => Icon::Filter,
-        PipeOutput | ViewerInsertPath => Icon::Terminal,
+        PipeOutput | ViewerInsertPath | NewTabProfile(_) | SendToAgent => Icon::Terminal,
+        OpenSettings => Icon::Settings,
+        OpenPalette => Icon::Search,
+        OpenAbout => Icon::Info,
         SplitRight => Icon::SplitRight,
         SplitDown => Icon::SplitDown,
         Maximize => Icon::Maximize,
         MoveToNewTab | DuplicateTab(_) => Icon::Plus,
+        MovePaneToNewWindow | MoveTabToNewWindow(_) | MoveTabToWindow(..) => Icon::Open,
         ToggleSync(_) => Icon::Sync,
         ViewerFind => Icon::Search,
         RearrangeToolbar => Icon::Settings,
@@ -160,6 +198,19 @@ fn icon(action: MenuAction) -> Option<Icon> {
         Paste | SelectAll | ClearBlocks | RenameTab(_) | SetTabColor(..) => return None,
     })
 }
+
+/// The keymap actions that open the first nine profiles, in menu order.
+pub const PROFILE_ACTIONS: [&str; 9] = [
+    "new_tab_profile_1",
+    "new_tab_profile_2",
+    "new_tab_profile_3",
+    "new_tab_profile_4",
+    "new_tab_profile_5",
+    "new_tab_profile_6",
+    "new_tab_profile_7",
+    "new_tab_profile_8",
+    "new_tab_profile_9",
+];
 
 /// Keymap actions whose shortcut a row shows (`Keymap::preferred`).
 fn shortcut_actions(action: MenuAction) -> &'static [&'static str] {
@@ -179,6 +230,13 @@ fn shortcut_actions(action: MenuAction) -> &'static [&'static str] {
         ClosePane | ViewerClose => &["close_pane"],
         ToggleSync(_) => &["toggle_sync_inputs"],
         ViewerFind => &["search"],
+        NewTabProfile(i) => PROFILE_ACTIONS
+            .get(i)
+            .map(std::slice::from_ref)
+            .unwrap_or(&[]),
+        OpenSettings => &["open_settings"],
+        OpenPalette => &["palette"],
+        OpenAbout => &["open_about"],
         _ => &[],
     }
 }
@@ -260,6 +318,9 @@ pub fn render(
         // icon column; tab-color rows carry a swatch there
         if let MenuAction::SetTabColor(_, Some(c)) = item.action {
             layer.circle([rect[0] + 16.0, cy], 10.0, tab_color(theme, c));
+        } else if let Some(g) = item.glyph {
+            let ic = if item.enabled { theme.text_dim } else { color };
+            crate::views::glyphs::draw(layer, engine, g, [rect[0] + 16.0, cy], 14.0, ic);
         } else if let Some(icon) = icon(item.action) {
             let ic = if !item.enabled {
                 color
@@ -270,17 +331,29 @@ pub fn render(
             };
             icons::draw(layer, icon, [rect[0] + 16.0, cy], 14.0, ic);
         }
+        let keys = shortcut_actions(item.action)
+            .iter()
+            .find_map(|a| keymap.preferred(a).map(|b| b.chips().concat()));
+        let kw = keys
+            .as_ref()
+            .map(|k| engine.measure(k, 11.5, FONT_SANS, Weight::NORMAL) + 12.0)
+            .unwrap_or(0.0);
+        // a long label (a profile's name) ends in … before the shortcut
+        let weight = if item.bold {
+            Weight::BOLD
+        } else {
+            Weight::NORMAL
+        };
+        let label =
+            super::palette::elide_to(engine, &item.label, font, FONT_SANS, rect[2] - 42.0 - kw);
         layer.text(
-            sans(engine, item.label, font, Weight::NORMAL),
+            sans(engine, &label, font, weight),
             rect[0] + 32.0,
             ry + (row_h - font * 1.35) / 2.0,
             color,
         );
-        let keys = shortcut_actions(item.action)
-            .iter()
-            .find_map(|a| keymap.preferred(a).map(|b| b.chips().concat()));
         if let Some(keys) = keys {
-            let kw = engine.measure(&keys, 11.5, FONT_SANS, Weight::NORMAL);
+            let kw = kw - 12.0;
             layer.text(
                 sans(engine, &keys, 11.5, Weight::NORMAL),
                 rect[0] + rect[2] - 10.0 - kw,

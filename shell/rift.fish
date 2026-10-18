@@ -76,6 +76,118 @@ function rift-complete
     source $__rift_complete_srv
 end
 
+# Shell widgets: ⌃R, ⌃T and ⌥C run your own bindings (fzf, fzf.fish, atuin)
+# on Rift's command line. Each prompt reports which of them your config binds
+# in the current mode (OSC 6973;K;<letters r t c>) and binds ^X^Y and the
+# key's letter to: load the line (acknowledged as OSC 6973;L), your binding's
+# commands, report. For such a key Rift types `%Z<before>%Z<after>` (its
+# command line split at the cursor, every byte but letters and digits as
+# %XX), then that sequence; the report is the line your binding left (OSC
+# 6973;W;<before>;<after>, percent-encoded), and the shell's own line is
+# emptied. A binding that runs the line itself (`commandline -f execute`,
+# atuin's enter_accept) gets no report: fish runs that queued execute only
+# after the whole binding, so the report would empty the line first. The
+# command runs, the next prompt follows, and Rift's command line keeps what
+# it held (as in zsh).
+function __rift_widget_load
+    # notice a queued execute: `commandline` is wrapped while the binding
+    # runs (unless something else already defines a function of that name)
+    set -g __rift_widget_exec
+    set -g __rift_widget_wrap
+    if not functions -q commandline
+        set -g __rift_widget_wrap 1
+        function commandline
+            if contains -- execute $argv
+                and begin
+                    contains -- -f $argv; or contains -- --function $argv
+                end
+                set -g __rift_widget_exec 1
+            end
+            builtin commandline $argv
+        end
+    end
+    set -l p (commandline | string collect)
+    string match -q -- '*%Z*%Z*' "$p"; or return 0
+    printf '\e]6973;L\a'
+    set -l parts (string split -- %Z "$p")
+    # printf decodes exactly (string's own output ends in a newline); only
+    # letters, digits and %XX arrive, so \xXX is all it expands
+    set -l left (printf '%b' (string replace -a -- % '\x' $parts[-2]) | string split0)
+    set -l right (printf '%b' (string replace -a -- % '\x' $parts[-1]) | string split0)
+    commandline -r -- "$left$right"
+    commandline -C (string length -- "$left")
+end
+
+function __rift_widget_post
+    if test -n "$__rift_widget_wrap"
+        functions -e commandline
+        set -g __rift_widget_wrap
+    end
+    # the binding queued an execute: leave the line for it (a blank line
+    # runs nothing, so it still reports)
+    if test -n "$__rift_widget_exec"
+        set -g __rift_widget_exec
+        commandline | string trim | string length -q; and return 0
+    end
+    # `commandline` and `string sub` each end their output in a newline:
+    # those are dropped once encoded, so the line's own newlines survive
+    set -l at (commandline -C)
+    set -l line (commandline | string split0)
+    set -l l (string sub -l $at -- "$line" | string split0)
+    set -l r (string sub -s (math $at + 1) -- "$line" | string split0)
+    set l (string escape --style=url -- "$l" | string replace -r -- '%0A$' '')
+    set r (string escape --style=url -- "$r" | string replace -r -- '%0A%0A$' '')
+    printf '\e]6973;W;%s;%s\a' "$l" "$r"
+    commandline -r ''
+end
+
+function __rift_widget_bind
+    set -g __rift_bound $argv
+end
+
+function __rift_report_widgets --on-event fish_prompt
+    set -l out
+    set -l key
+    for k in r t c
+        switch $k
+            case r
+                set key \cr
+            case t
+                set key \ct
+            case c
+                set key \ec
+        end
+        for line in (bind --user $key 2>/dev/null)
+            # the listing is fish code: run it with a stand-in for `bind`
+            eval (string replace -r '^bind ' '__rift_widget_bind ' -- $line)
+            set -l mode default
+            set -l cmds
+            set -l skip
+            set -l seen_key
+            for a in $__rift_bound
+                if test -n "$skip"
+                    test "$skip" = mode; and set mode $a
+                    set skip
+                else if test -n "$seen_key"
+                    set -a cmds $a
+                else if contains -- $a -M --mode
+                    set skip mode
+                else if contains -- $a -m --sets-mode
+                    set skip other
+                else if string match -qr -- '^--mode=' $a
+                    set mode (string replace -- --mode= '' $a)
+                else if not string match -q -- '-*' $a
+                    set seen_key 1
+                end
+            end
+            test (count $cmds) -gt 0; or continue
+            bind -M $mode \cx\cy$k __rift_widget_load $cmds __rift_widget_post
+            test "$mode" = "$fish_bind_mode"; and set -a out $k
+        end
+    end
+    printf '\e]6973;K;%s\a' (string join '' $out)
+end
+
 # C marker with the command line as read (kitty's cmdline_url,
 # percent-encoded): the block header keeps it exact even where the screen's
 # echo is not (a reattached shell replayed at another width).

@@ -87,9 +87,15 @@ removes both within a moment.
   dot for output since last viewed (`tab_close_side = "left"` puts that slot
   at the tab's left end, the macOS style). `tab_close_button = "always"` shows it
   on every tab whose slot holds no badge or dot; `"never"` shows it on none
-  (⌘W, the tab menu and the palette still close tabs). `+` spawns a new tab,
-  at the end of the strip or, with `new_tab_placement = "after_current"`,
-  right after the active tab.
+  (⌘W, the tab menu and the palette still close tabs). `+` spawns a new tab
+  (the default profile), at the end of the strip or, with
+  `new_tab_placement = "after_current"`, right after the active tab. A `⌄`
+  is joined to its right (one pill, a divider between; the same in the
+  vertical tab layout's strip): a click on it, or a right-click on `+`, opens
+  the **profile menu** under the button: one row per profile (its glyph or a
+  terminal, the name, the default profile in bold, its ⌃⇧1…⌃⇧9 shortcut),
+  then, below a divider, Settings, Command Palette and About Rift. ↑/↓,
+  Enter and Esc work in it; each row is a menu item for screen readers.
 - `tab_bar = "hide_fullscreen"` hides the strip while the window is full
   screen, `"on_hover"` always; the panes take its height. The pointer at the
   window's top edge (4 px) slides it in over the panes with a shadow, and it
@@ -100,7 +106,13 @@ removes both within a moment.
   stay; the vertical rail goes away and the panes take its width.
 - Drag a tab: past 4 px it lifts and follows the pointer, its neighbours
   reorder as it passes their midpoints, and its slot shows an accent caret.
-  Esc while dragging puts it back where it was pressed.
+  Esc while dragging puts it back where it was pressed. Neighbours reorder
+  only while the pointer is over the strip (or rail): pulled out of it, the
+  tab moves to another window on release — over another window it lands
+  there (before the tab under the pointer when over that window's strip,
+  else last) and that window takes focus; outside every window it opens a
+  window of its own at the pointer. Released inside its own window it stays
+  where it is.
 - When the tabs no longer fit they shrink to 120 px, then scroll around the
   active one behind `‹ N` / `N ›` chips.
 - Panel buttons (Warp layout), accent while their panel is open: a sidebar
@@ -133,6 +145,37 @@ removes both within a moment.
   A working agent (`◐` or a braille spinner leading its title) keeps the
   spinner even when its start was lost (reattached after a restart), and
   under a custom tab name.
+- A tab whose panes report progress (OSC 9;4, `show_progress`) carries a
+  2 px bar along its bottom edge on a 25 % track of the same colour:
+  `accent` filled to the percentage (normal), `error` (error), `warning`
+  (paused), and for indeterminate a third of the width sweeping across in
+  `accent` (with Reduce motion on, a still full bar at 60 %). An error or
+  paused report without a percentage fills the bar. With several reporting
+  panes the tab shows the most severe (error, then paused, then the rest),
+  the newest of equals. The tab's accessible label gains `, 42% done`,
+  `, progress error`, `, progress paused`, `, progress paused at 60%` or
+  `, in progress` (after an agent's state: *Claude Code — working, progress
+  error*). On macOS the
+  Dock tile's badge shows the percentage of the focused window's active tab
+  (`!` for an error; none for indeterminate).
+- A tab running a coding agent (its command names `claude`, `codex`,
+  `opencode` or `gemini`, after env assignments, `npx`/`bunx` and wrappers;
+  or the agent's own notification arrived) shows the agent's 16 px brand
+  disc (the Claude mark, Codex `>_`, …) in place of the spinner, with a
+  state dot at its lower right: the running spinner while it works, a dot
+  in the warning colour while it waits for you (its permission or input
+  notification is open: nothing typed since; the dot pulses unless macOS
+  *Reduce motion* is on), green when it finished with exit 0 (or sits at
+  its own prompt), the error colour after a non-zero exit. A finished
+  agent's mark stays until its pane is viewed. Several agent panes in one
+  tab show the most urgent: waiting, then error, then working, then done.
+  The tooltip and the tab's accessibility label add
+  `Claude Code — waiting for you` (`working`, `done`, `error`).
+- A tab whose focused pane is inside a linked git worktree shows
+  `<worktree dir> · <branch>` as its tooltip detail (the cwd otherwise).
+  The worktree's identity is the repository's common git directory plus its
+  path, never the branch: `git switch` changes the branch shown, not which
+  worktree the tab is. Remote (ssh) panes never inspect a local path.
 - A program that owns the screen (Claude Code, vim) sits on the bottom
   padding: the part of a row left over goes above its first row.
 - The Settings tab (⌘,) sits after the shell tabs with a settings icon; see
@@ -142,9 +185,13 @@ removes both within a moment.
 
 `tab_layout = "vertical"` (Settings → Appearance → *Tab position: Side*) replaces the
 tab strip with a 220 px rail on the left: one 54 px row per tab with the
-title (after a spinner while a command runs, else a sync icon when synced), directory, git branch, pane count, activity
-dot and tab color; the active row sits on the pane ground with a 2 px accent
-left edge. Click selects, × closes (every row carries it unless
+title (after a spinner while a command runs, a coding agent's mark and
+state dot while one runs, else a sync icon when synced), directory and git
+branch (`<worktree dir> · <branch>` inside a linked worktree), pane count,
+alert badge, activity dot and tab color (no alert badge while the agent's
+dot already shows it waiting or failed); the active row sits on the pane ground with a 2 px accent
+left edge. A progress report (OSC 9;4) draws the tab strip's bar along the
+row's bottom edge. Click selects, × closes (every row carries it unless
 `tab_close_button = "never"`); ⌘T adds a tab; drag a row up or down to
 reorder. When the tabs do not fit, the rail keeps the active tab visible: a
 `+N above` line at the top and a `+N more · palette lists all` line at the
@@ -189,7 +236,12 @@ pane (click, ⌥⌘arrows) and ⌘W, Esc or ✕ closes it. Its header is the
 pane's title bar (same height, drags the pane): the path centred (it moves
 to the left edge when the pane is too narrow to centre it), then, for
 Markdown files, a **Rendered | Raw** switch, ⋮ (Insert path, Copy path, Find
-in file, Show raw/rendered, Close) and ✕.
+in file, Send to agent…, Show raw/rendered, Close) and ✕.
+
+In the source view a click selects a line and ⇧-click or ⇧↑ ⇧↓ extend the
+selection (an `accent` wash with a 2 px bar at the left edge); Esc clears it
+before it closes the viewer. `a` or ⋮ › Send to agent… sends the selected
+lines (else the top line on screen) to a pane; see Code review below.
 
 Markdown files (`.md`, `.markdown`, `.mdx`…) open **Rendered**: headings
 (H1/H2 with a rule), paragraphs wrapped to the pane, bullet, numbered and
@@ -216,11 +268,41 @@ match (wrapping), Esc closes the bar (a second Esc closes the viewer).
 ## Code review (⇧⌘G)
 
 A 460 px panel right of the panes listing the repository's changes. The
-header shows the branch and total `+added −removed`, ⤢ maximizes and ↻
-reloads. The panel is opaque (`bg`) even with a translucent window. The title
-reads `CODE REVIEW`. An error notice (a failed action) shows as a red strip
-under the header. With nothing to list the body says `Loading changes…`,
-`Not a git repository` or `No changes — working tree clean`.
+header shows the branch, the base chip (`Uncommitted ▾` or `vs <branch> ▾`)
+and total `+added −removed`; ⤢ maximizes and ↻ reloads. The panel is opaque
+(`bg`) even with a translucent window. The title reads `CODE REVIEW`. An
+error notice (a failed action) shows as a red strip under the header. With
+nothing to list the body says `Loading changes…`, `Not a git repository`,
+`No changes — working tree clean` or (against a branch) `No changes against
+<branch>`.
+
+- **Base chip**: opens a palette picker (`COMPARE AGAINST`: Uncommitted,
+  `Branch: <default>`; `BRANCHES`: every local then remote branch, filtered
+  as you type). Against a branch a strip under the header reads `vs <branch>
+  (merge-base <7-char sha>) · read-only: stage and revert need Uncommitted`;
+  the list is one `CHANGES` section (merge base → working tree, untracked
+  files included) with no Stage all, no stage / unstage / revert buttons and a
+  copy-only hunk toolbar, and `s` `u` `r` show a toast with the reason. The
+  base is remembered per repository for the session.
+- **Commit bar** (the panel's foot): a message field (`bg_chrome`, hairline
+  border, `accent` while focused; grows to 4 lines; placeholder `Commit message
+  · ⌘⏎ commits`), then the reason Commit is off (`Nothing staged`, `Write a
+  commit message`, `Commit from Uncommitted, which shows what is staged`) or
+  a spinner with `Pushing…` / `Committing…`, and the **Push** and **Commit**
+  buttons (a disabled one is muted and takes no click). Click the field to
+  type; Enter adds a line, ⌘⏎ commits, ⌘V pastes, Esc or a click elsewhere
+  leaves it. Success shows a toast (`[branch sha] message`, `Pushed <branch>
+  to <remote>`); a failure an error toast with git's output (a hook's stderr,
+  a rejected push).
+- **Send to agent…**: `a` on a hunk or file (keyboard mode), or right-click a
+  file header, hunk band or diff line → menu `Send to agent…`. The target
+  picker (`Send to which pane…`) lists `AGENTS` (panes whose running command
+  is Claude Code, Codex, OpenCode or Gemini CLI) then `OTHER PANES`, each as
+  `<agent or title> — window N · tab N` (plus ` · pane N` in a split tab) with
+  its directory; from the review panel the active pane is marked `(this
+  pane)`. The footer reads `⏎ paste (no Enter)`. A sent paste focuses the
+  target and toasts `Sent <file> to <agent>`; into a shell's command editor,
+  `Sent <file> to the pane's command line`.
 
 - **Staged** (HEAD → index) and **Changes** (index → working tree, untracked
   files included) sections, each collapsible and titled in uppercase with the
@@ -273,7 +355,8 @@ under the header. With nothing to list the body says `Loading changes…`,
   `accent` focus ring on the section, file or hunk band it stands on. ↑ ↓ (`j`
   `k`, ⇥ ⇧⇥) move between sections, files and the hunks of expanded files,
   ← → fold and unfold, Enter / Space toggle, `s` stage, `u` unstage, `r` revert
-  (it keeps its confirm dialog), `o` open, `c` copy the hunk; on a section `s` /
+  (it keeps its confirm dialog), `o` open, `c` copy the hunk, `a` send the hunk
+  or file to an agent; on a section `s` /
   `u` act on every file. After a write the focus stays at its place (a staged
   hunk moves it to the file's next hunk). Esc returns the keys to the command
   line, as does any other plain key; a click elsewhere also leaves the panel.
@@ -348,6 +431,15 @@ Each command becomes a block via shell-integration OSC 133 markers:
   an accent **Enable ⌘⏎** button, **Don't ask again** and ✕ (each in the
   accessibility tree); it goes when the command ends or the subshell's
   prompt arrives.
+- **Rich input composer** (⌃⇧G / ⌘E over a running program, see
+  *features*): the command editor's zone at the bottom of the pane (same
+  divider, padding, chevron and input font, no fill of its own), its chip
+  row replaced by *Compose for* (12 px sans, `text_muted`) and the program's
+  name (semibold, `text_bright`), the text in `fg` without syntax colors,
+  and a hint row under the input (`⏎ send   ⇧⏎ new line   esc close`, 11 px
+  sans, `text_muted`; `⌘⏎ send   ⏎ new line` with `rich_input_submit =
+  "cmd_enter"`). The program's rows end above it; its grid cursor hides.
+  An unsent draft's toast carries a **Copy** button.
 - **Reverse screen** (DECSCNM, `CSI ? 5 h`, used by vttest and `tput flash`):
   the pane's default foreground and background trade places until the program
   resets it (or a terminal reset).
@@ -551,7 +643,8 @@ integration). Sits at the bottom of the pane, or at the top with
   pane is focused or hovered, split (a new pane to its right), ⋮ (the pane
   menu) and × (close) show at the right. Clicking the bar focuses the pane.
 - Pane menu (⋮, or right-click in the pane): Copy, Paste, Select all, Split
-  pane right / down, Maximize pane and Move to new tab (split tabs), Clear
+  pane right / down, Maximize pane and Move to new tab (split tabs), Move to
+  new window (disabled for the only pane of a window's only tab), Clear
   blocks, Close pane.
 - Drag a title bar to move the pane: past 4 px it fades in place and a chip
   with its title follows the pointer. Over another pane, the half nearest the
@@ -574,7 +667,9 @@ integration). Sits at the bottom of the pane, or at the top with
 
 ## History pane (⌃R)
 
-⌃R in the command line opens the history pane, docked above the command line
+⌃R in the command line opens the history pane (unless the shell binds ⌃R
+to a widget of its own, which then draws below the shell's prompt; see
+features.md, Shell widgets), docked above the command line
 across the pane like the completion panel; the output moves up out from
 under it, so the newest lines stay in view. The command line is its search
 field: what you type narrows the rows (any case, anywhere in the command).
@@ -629,6 +724,15 @@ click on a chip switches mode. Modes:
   placeholder reads `Command that reads the output on stdin…`; an
   `OUTPUT (STDIN)` preview lists the selected block's lines under the row that
   says what will run, and the footer reads `⏎ run with output on stdin`.
+
+- **New worktree tab…** — a fifth mode, opened from that action, with no
+  mode chips. The query is the new branch's name, prefilled with the first
+  free `wt-<n>`, selected (the selection colour behind it): the first key
+  typed replaces it, ⌫ clears it, ⏎ takes it (placeholder `Name of the new branch…`); the one row reads
+  `Create branch <name> from HEAD in <repo-parent>/<repo>.worktrees/<name>`
+  (or `Not inside a Git repository`), and the footer
+  `⏎ create worktree and open a tab`. A pane without a local directory
+  (ssh) gets an error toast instead.
 
 Other Actions rows: `SSH: <name>` and `Install Rift shell integration on
 <name>` per SSH profile, `Toggle vertical tabs`, `Clear saved block
@@ -795,6 +899,9 @@ Copy output on an output-less block). In a short window the rows shrink
 **Tab menu** (right-click a tab): Rename tab · Duplicate tab · Synchronize
 inputs in panes / Stop synchronizing inputs (disabled for a tab with one
 pane) · color swatches Red, Green, Yellow, Blue, Magenta, Cyan · No color ·
+Move to new window (disabled for a window's only tab) · one *Move to window
+N: <its active tab's title>* row per other window (titles cut to 12
+characters), and *Move to hotkey window* while the drop-down window exists ·
 Close tab · Close other tabs · Close tabs to the right.
 
 **File viewer menu** (⋮): Insert path · Copy path · Find in file · Show
@@ -928,7 +1035,10 @@ description) left, control right; it runs to the bottom edge.
     segmented `Since first command | Only while running`, `Expand aliases as you type`, `Underline unknown
     commands`, `Suggest corrections for failed commands` toggles, `Offer Rift
     in subshells` toggle (*docker exec … bash, poetry shell; more in
-    subshell_commands*; `subshell_offer`).
+    subshell_commands*; `subshell_offer`), `Rich input sends with`
+    segmented `⏎ | ⌘⏎` (`rich_input_submit`), `Open rich input when an agent
+    waits` toggle (*Claude Code, Codex, OpenCode, Gemini CLI at their
+    prompt*; `rich_input_auto`).
 - **Terminal** (clipboard icon) — *Mouse, clipboard and keys inside the
   terminal*.
   - Mouse: `Mouse reporting to programs (Shift selects)` toggle,

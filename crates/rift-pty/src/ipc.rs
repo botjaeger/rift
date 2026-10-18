@@ -18,6 +18,8 @@ use std::io::{Read, Write};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_FRAME: usize = 4 << 20;
+/// The service starts a shell with `Request::Spawn::args`.
+pub const FEATURE_ARGS: &str = "args";
 pub const FRAME_JSON: u8 = 0;
 pub const FRAME_OUTPUT: u8 = 1;
 pub const FRAME_INPUT: u8 = 2;
@@ -33,6 +35,11 @@ pub enum Request {
     /// Start a shell; the reply is `Spawned`, then output as for `Attach`.
     Spawn {
         shell: Option<String>,
+        /// Arguments after the shell-integration ones (a profile's).
+        /// Optional on the wire: a service from before profiles ignores it,
+        /// so a window only sends it to one that lists `args` in its hello.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        args: Vec<String>,
         cwd: Option<String>,
         env: Vec<(String, String)>,
         cols: u16,
@@ -83,6 +90,11 @@ pub enum Event {
     Hello {
         version: u32,
         pid: u32,
+        /// What this service supports beyond protocol `version`'s base
+        /// (`FEATURE_*`). Optional on the wire, so a running service from
+        /// an earlier release still talks to newer windows.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        features: Vec<String>,
     },
     Spawned {
         session: u64,
@@ -370,13 +382,13 @@ mod tests {
     /// release could no longer talk to the new windows (and an update could
     /// not reattach running shells).
     const GOLDEN: &str = r#"{"type":"hello","version":1,"pid":7}
-{"type":"spawn","shell":"/bin/zsh","cwd":"/tmp","env":[["K","V"]],"cols":80,"rows":24,"cell_w":8,"cell_h":16}
+{"type":"spawn","shell":"/bin/zsh","args":["-c","a b"],"cwd":"/tmp","env":[["K","V"]],"cols":80,"rows":24,"cell_w":8,"cell_h":16}
 {"type":"attach","session":3,"from_seq":99}
 {"type":"resize","session":3,"cols":100,"rows":30,"cell_w":9,"cell_h":18}
 {"type":"clear_history","session":3}
 {"type":"kill","session":3}
 {"type":"list"}
-{"type":"hello","version":1,"pid":8}
+{"type":"hello","version":1,"pid":8,"features":["args"]}
 {"type":"spawned","session":3}
 {"type":"attached","session":3,"from_seq":10,"truncated":true}
 {"type":"replay_done","session":3}
@@ -393,6 +405,7 @@ mod tests {
             Request::Hello { version: 1, pid: 7 },
             Request::Spawn {
                 shell: Some("/bin/zsh".into()),
+                args: vec!["-c".into(), "a b".into()],
                 cwd: Some("/tmp".into()),
                 env: vec![("K".into(), "V".into())],
                 cols: 80,
@@ -416,7 +429,11 @@ mod tests {
             Request::List,
         ];
         let events = [
-            Event::Hello { version: 1, pid: 8 },
+            Event::Hello {
+                version: 1,
+                pid: 8,
+                features: vec![FEATURE_ARGS.into()],
+            },
             Event::Spawned { session: 3 },
             Event::Attached {
                 session: 3,
@@ -461,9 +478,11 @@ mod tests {
         }
         assert_eq!(
             wire, GOLDEN,
-            "the session-service wire format changed: bump PROTOCOL_VERSION \
-             (running shells of the previous release then stay detached after \
-             an update, which the update dialog warns about) and update GOLDEN"
+            "the session-service wire format changed: an optional field an \
+             older peer ignores (serde default) only needs GOLDEN updated; \
+             anything else must bump PROTOCOL_VERSION (running shells of the \
+             previous release then stay detached after an update, which the \
+             update dialog warns about) and update GOLDEN"
         );
         assert_eq!(
             PROTOCOL_VERSION, 1,

@@ -115,7 +115,7 @@ impl App {
             }),
         );
         self.apply_window_config();
-        self.spawn_tab_at(cwd);
+        self.spawn_profile_tab(None, cwd);
         self.show_hotkey_window(Some(screen));
     }
 

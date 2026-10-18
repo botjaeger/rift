@@ -1,5 +1,6 @@
 pub mod block;
 pub mod changelog;
+pub mod cli_install;
 pub mod code_highlight;
 pub mod completion;
 mod completion_cache;
@@ -9,6 +10,7 @@ pub mod docker;
 pub mod editors;
 pub mod fs_tree;
 pub mod git;
+pub mod git_write;
 pub mod github;
 pub mod highlight;
 pub mod history;
@@ -18,6 +20,7 @@ pub mod launch;
 pub mod markdown;
 pub mod notifications;
 pub mod osc;
+pub mod profiles;
 pub mod prompts;
 pub mod remote_complete;
 pub mod review;
@@ -26,6 +29,7 @@ pub mod session_state;
 pub mod shell_complete;
 pub mod shell_env;
 pub mod shell_integration;
+pub mod shell_widget;
 pub mod ssh;
 pub mod tab_clock;
 pub mod theme;
@@ -37,9 +41,9 @@ pub mod watch;
 pub use block::{AbsLine, Block, BlockId, BlockState, BlockStore, Restored};
 pub use config::{
     AppIcon, Bell, BlockSpacing, BlocksStart, Config, CursorStyle, ElapsedCounts, InputPosition,
-    NewTabPlacement, PromptChip, PromptMode, TabBarVisibility, TabCloseButton, TabCloseSide,
-    TabLayout, ToolbarItem, ToolbarSide,
+    NewTabPlacement, PromptChip, PromptMode, RichInputSubmit, ShellWidgets, TabBarVisibility,
+    TabCloseButton, TabCloseSide, TabLayout, ToolbarItem, ToolbarSide,
 };
 pub use keybindings::{Binding, Keymap};
-pub use osc::{Marker, OscScanner, host_is_local};
+pub use osc::{Marker, OscScanner, Progress, ProgressState, host_is_local};
 pub use theme::{Color, Theme};

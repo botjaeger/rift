@@ -311,14 +311,33 @@ pub fn from_fd(config: &Options, window_id: u64, master: OwnedFd, slave: OwnedFd
 impl Drop for Pty {
     fn drop(&mut self) {
         // Make sure the PTY is terminated properly.
+        let pid = self.child.id() as libc::pid_t;
         unsafe {
-            libc::kill(self.child.id() as i32, libc::SIGHUP);
+            libc::kill(pid, libc::SIGHUP);
+            // Rift: the terminal's foreground job too (a program the shell
+            // waits for), as closing the terminal would.
+            let fg = libc::tcgetpgrp(self.file.as_raw_fd());
+            if fg > 0 && fg != pid {
+                libc::killpg(fg, libc::SIGHUP);
+            }
         }
 
         // Clear signal-hook handler.
         unregister_signal(self.sig_id);
 
-        let _ = self.child.wait();
+        // Rift: a bounded wait. A shell that ignores SIGHUP (or waits for a
+        // job that does) ends only when the master closes, after this body:
+        // waiting here for it would block the caller forever. It is reaped
+        // on a thread instead.
+        for _ in 0..50 {
+            match self.child.try_wait() {
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                _ => return,
+            }
+        }
+        let _ = std::thread::Builder::new().name("pty-reap".into()).spawn(move || unsafe {
+            libc::waitpid(pid, ptr::null_mut(), 0);
+        });
     }
 }
 
@@ -447,4 +466,23 @@ unsafe fn set_nonblocking(fd: c_int) {
 fn test_get_pw_entry() {
     let mut buf: [i8; 1024] = [0; 1024];
     let _pw = get_pw_entry(&mut buf).unwrap();
+}
+
+/// Rift: dropping a PTY whose shell ignores SIGHUP (and runs a job that
+/// inherited that) returns promptly instead of waiting for the shell.
+#[test]
+fn drop_does_not_wait_for_a_shell_that_ignores_sighup() {
+    let options = Options {
+        shell: Some(crate::tty::Shell::new(
+            "/bin/sh".into(),
+            vec!["-c".into(), "trap '' HUP; sleep 5".into()],
+        )),
+        ..Default::default()
+    };
+    let size = WindowSize { num_lines: 24, num_cols: 80, cell_width: 8, cell_height: 16 };
+    let pty = new(&options, size, 0).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let started = std::time::Instant::now();
+    drop(pty);
+    assert!(started.elapsed() < std::time::Duration::from_secs(2), "{:?}", started.elapsed());
 }

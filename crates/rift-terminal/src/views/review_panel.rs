@@ -16,7 +16,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use rift_core::code_highlight::{self, Kind, Lang};
-use rift_core::review::{FileDiff, HunkId, LineKind, Review};
+use rift_core::review::{Base, FileDiff, HunkId, LineKind, Review};
 use rift_core::{Color, Theme};
 use rift_renderer::glyphon::{Attrs, Buffer, Family, Metrics, Shaping, TextBounds, Weight};
 use rift_renderer::{FONT_SANS, Layer, TextEngine, mono_family};
@@ -106,7 +106,35 @@ pub struct ReviewPanelState {
     /// Where `focus` last was in `stops()`, to land near it when its row
     /// leaves the list (a staged file moves to the other section).
     focus_index: usize,
+    /// The commit message being written (the bar at the panel's foot).
+    pub commit_msg: String,
+    /// The message field has the keyboard.
+    pub commit_focus: bool,
+    /// A commit or push runs (off the UI thread): its button spins.
+    pub busy: Option<GitBusy>,
+    /// Per frame: rows a right-click offers "Send to agent…" on (file
+    /// headers, hunk bands and lines) with what they send.
+    pub send_rows: Vec<([f32; 4], ReviewHit)>,
+    /// The base asked for in this repository (the chip shows it while a
+    /// load is in flight or failed).
+    pub base: Base,
+    /// The repository of the last review that loaded.
+    pub root: Option<std::path::PathBuf>,
+    /// While the base picker is open: the default branch and every branch.
+    pub branch_list: Option<(Option<String>, Vec<String>)>,
 }
+
+/// The repository write in flight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitBusy {
+    Commit,
+    Push,
+}
+
+/// Why stage, unstage and revert are off while the panel compares against
+/// a branch.
+pub const READ_ONLY_REASON: &str =
+    "Against a branch the changes include commits: stage, unstage and revert work in Uncommitted";
 
 /// A row the keyboard can stand on: a section, a file, or a hunk of an
 /// expanded file.
@@ -125,9 +153,62 @@ pub enum StopAct {
     Revert,
     Open,
     Copy,
+    /// Send the hunk or file to an agent pane.
+    Send,
 }
 
 impl ReviewPanelState {
+    /// Comparing against a branch: the changes are read-only here.
+    pub fn read_only(&self) -> bool {
+        self.model().is_some_and(|m| m.base.is_some())
+    }
+
+    /// Why Commit is off, or `None` when it can run.
+    pub fn commit_reason(&self) -> Option<&'static str> {
+        let model = self.model()?;
+        Some(if self.busy == Some(GitBusy::Commit) {
+            "Committing…"
+        } else if model.base.is_some() {
+            "Commit from Uncommitted, which shows what is staged"
+        } else if model.staged.is_empty() {
+            "Nothing staged"
+        } else if self.commit_msg.trim().is_empty() {
+            "Write a commit message"
+        } else {
+            return None;
+        })
+    }
+
+    /// What "Send to agent…" pastes for a file (all its hunks) or one hunk.
+    pub fn send_parts(
+        &self,
+        staged: bool,
+        path: &str,
+        hunk: Option<HunkId>,
+    ) -> Option<Vec<crate::views::send_agent::SendPart>> {
+        let model = self.model()?;
+        let files = if staged {
+            &model.staged
+        } else {
+            &model.unstaged
+        };
+        let f = files.iter().find(|f| f.path == path)?;
+        let mut parts: Vec<_> = f
+            .hunks
+            .iter()
+            .filter(|h| hunk.is_none_or(|id| h.id == id))
+            .map(crate::views::send_agent::hunk_part)
+            .collect();
+        // the whole file, but the line cap dropped hunks past the last one
+        if hunk.is_none()
+            && f.truncated
+            && let Some(last) = parts.last_mut()
+        {
+            last.truncated = true;
+        }
+        (!parts.is_empty()).then_some(parts)
+    }
+
     /// Every row the keyboard visits, top to bottom.
     pub fn stops(&self) -> Vec<ReviewStop> {
         let Some(review) = self.model() else {
@@ -338,7 +419,14 @@ impl ReviewPanelState {
             };
             files.iter().find(|f| f.path == path)
         };
+        if self.read_only() && matches!(act, StopAct::Stage | StopAct::Unstage | StopAct::Revert) {
+            return None;
+        }
         match (self.focus.as_ref()?, act) {
+            (ReviewStop::File(s, p), StopAct::Send) => {
+                file(*s, p).filter(|f| !f.binary && !f.hunks.is_empty())?;
+                Some(ReviewHit::Send(*s, p.clone(), None))
+            }
             (ReviewStop::Section(false), StopAct::Stage) => Some(ReviewHit::StageAll),
             (ReviewStop::Section(true), StopAct::Unstage) => Some(ReviewHit::UnstageAll),
             (ReviewStop::File(false, p), StopAct::Stage) => Some(ReviewHit::Stage(p.clone(), None)),
@@ -362,6 +450,7 @@ impl ReviewPanelState {
                     (true, StopAct::Unstage) => Some(ReviewHit::Unstage(p.clone(), Some(*id))),
                     (false, StopAct::Revert) => Some(ReviewHit::Revert(p.clone(), Some(*id))),
                     (_, StopAct::Copy) => Some(ReviewHit::Copy(*s, p.clone(), *id)),
+                    (_, StopAct::Send) => Some(ReviewHit::Send(*s, p.clone(), Some(*id))),
                     _ => None,
                 }
             }
@@ -535,6 +624,14 @@ pub enum ReviewHit {
     Copy(bool, String, HunkId),
     /// Show a file from the maximized file list.
     Jump(bool, String),
+    /// The base chip: pick what the review compares against.
+    Base,
+    /// The commit message field.
+    CommitField,
+    Commit,
+    Push,
+    /// "Send to agent…" for (staged, path, one hunk or the whole file).
+    Send(bool, String, Option<HunkId>),
 }
 
 enum RowKind<'a> {
@@ -816,9 +913,11 @@ fn visible<'a>(all: Vec<RowKind<'a>>, top: f32, bottom: f32) -> Layout<'a> {
 }
 
 /// A small text button; returns its rect.
+#[allow(clippy::too_many_arguments)]
 fn button(
     layer: &mut Layer,
     engine: &mut TextEngine,
+    theme: &Theme,
     label: &str,
     right: f32,
     y: f32,
@@ -828,10 +927,11 @@ fn button(
     let tw = engine.measure(label, 11.0, FONT_SANS, Weight::MEDIUM);
     let bw = tw + 14.0;
     let r = [right - bw, y + (h - 20.0) / 2.0, bw, 20.0];
+    // a lift of the panel in either theme (white on light was invisible)
     layer.rect(
         [r[0], r[1]],
         [r[2], r[3]],
-        Color::WHITE.with_alpha(0.06),
+        super::palette::lift(theme, 0.06),
         4.0,
     );
     layer.text(
@@ -1104,15 +1204,18 @@ fn gap_band(
 }
 
 /// The toolbar a hovered line shows over the gutter for its hunk: stage or
-/// unstage, revert (unstaged), copy. Its actions; empty for a hunk the line
-/// cap cut (hunk operations refuse it).
-fn hunk_actions(staged: bool, f: &FileDiff, hi: usize) -> Vec<(Icon, ReviewHit)> {
+/// unstage, revert (unstaged), copy; only copy against a branch
+/// (`read_only`). Its actions; empty for a hunk the line cap cut (hunk
+/// operations refuse it).
+fn hunk_actions(staged: bool, f: &FileDiff, hi: usize, read_only: bool) -> Vec<(Icon, ReviewHit)> {
     let h = &f.hunks[hi];
     if h.partial {
         return Vec::new();
     }
     let path = f.path.clone();
-    let mut out = if staged {
+    let mut out = if read_only {
+        Vec::new()
+    } else if staged {
         vec![(Icon::Minus, ReviewHit::Unstage(path.clone(), Some(h.id)))]
     } else {
         vec![
@@ -1138,6 +1241,7 @@ pub fn render(
     state.cards_x.clear();
     state.hover_rows.clear();
     state.latent.clear();
+    state.send_rows.clear();
     state.side_rect = [0.0; 4];
     // solid: the panel never shows the window's translucency or wallpaper
     layer.rect([x, y], [w, h], theme.bg, 0.0);
@@ -1174,14 +1278,75 @@ pub fn render(
         theme.text_dim,
     );
     hits.push((maximize, ReviewHit::Maximize));
+    let title_w = engine.measure("CODE REVIEW", 11.0, FONT_SANS, Weight::SEMIBOLD);
+    // the counts' left edge: the base chip stops before it
+    let mut header_room = maximize[0] - 10.0;
     if let Some(review) = state.model().cloned() {
-        let title_w = engine.measure("CODE REVIEW", 11.0, FONT_SANS, Weight::SEMIBOLD);
+        let (add, del) = review
+            .staged
+            .iter()
+            .chain(&review.unstaged)
+            .fold((0, 0), |(a, d), f| (a + f.added, d + f.removed));
+        let both = format!("+{add}−{del}");
+        header_room -= engine.measure(&both, 11.5, mono_family(), Weight::NORMAL) + 8.0 + 12.0;
+    }
+    let mut chip_x = x + 16.0 + title_w + 12.0;
+    if let Some(review) = state.model().cloned() {
+        // the branch, cut so the chip still fits
+        let room = (header_room - chip_x - 110.0).max(40.0);
+        let branch = super::palette::elide_to(engine, &review.branch, 11.5, mono_family(), room);
         layer.text(
-            text(engine, &review.branch, 11.5, mono_family(), Weight::NORMAL),
-            x + 16.0 + title_w + 12.0,
+            text(engine, &branch, 11.5, mono_family(), Weight::NORMAL),
+            chip_x,
             y + 11.5,
             theme.success,
         );
+        chip_x += engine.measure(&branch, 11.5, mono_family(), Weight::NORMAL) + 8.0;
+    }
+    if !matches!(state.load, Load::NotARepo) {
+        // the base chip: what the review compares against (a menu)
+        let label = match (&state.base, state.model().and_then(|m| m.base.as_ref())) {
+            (_, Some(b)) => format!("vs {}", b.name),
+            (Base::Uncommitted, None) => "Uncommitted".to_string(),
+            (Base::DefaultBranch, None) => "vs default branch".to_string(),
+            (Base::Branch(n), None) => format!("vs {n}"),
+        };
+        let room = (header_room - chip_x - 26.0).max(30.0);
+        let label = super::palette::elide_to(engine, &label, 11.0, FONT_SANS, room);
+        let lw = engine.measure(&label, 11.0, FONT_SANS, Weight::MEDIUM);
+        let chip = [chip_x, y + 9.0, lw + 26.0, 20.0];
+        let lit = state.pointer.is_some_and(|(px, py)| {
+            px >= chip[0] && px < chip[0] + chip[2] && py >= chip[1] && py < chip[1] + chip[3]
+        });
+        layer.bordered(
+            [chip[0], chip[1]],
+            [chip[2], chip[3]],
+            if lit {
+                theme.fg.with_alpha(0.08)
+            } else {
+                theme.fg.with_alpha(0.04)
+            },
+            theme.border,
+            4.0,
+            1.0,
+        );
+        layer.text(
+            text(engine, &label, 11.0, FONT_SANS, Weight::MEDIUM),
+            chip[0] + 8.0,
+            chip[1] + 3.0,
+            theme.text_ui,
+        );
+        super::chevron(
+            layer,
+            [chip[0] + chip[2] - 10.0, chip[1] + 10.5],
+            3.0,
+            super::Dir::Down,
+            1.3,
+            theme.text_dim,
+        );
+        hits.push((chip, ReviewHit::Base));
+    }
+    if let Some(review) = state.model().cloned() {
         let (add, del) = review
             .staged
             .iter()
@@ -1223,16 +1388,71 @@ pub fn render(
         );
         body_top += 26.0;
     }
-    let body_bottom = y + h;
+    // against a branch: what it diffs from, and why the writes are off
+    if let Some(base) = state.model().and_then(|m| m.base.clone()) {
+        layer.rect(
+            [x + 1.0, body_top],
+            [w - 1.0, 26.0],
+            theme.fg.with_alpha(0.04),
+            0.0,
+        );
+        let head = format!("vs {} (merge-base {:.7})", base.name, base.merge_base);
+        let head = super::palette::elide_to(engine, &head, 11.5, FONT_SANS, w - 32.0);
+        let hw = engine.measure(&head, 11.5, FONT_SANS, Weight::NORMAL);
+        layer.text(
+            text(engine, &head, 11.5, FONT_SANS, Weight::NORMAL),
+            x + 16.0,
+            body_top + 6.0,
+            theme.text_ui,
+        );
+        let room = w - 32.0 - hw - 12.0;
+        if room > 60.0 {
+            let why = super::palette::elide_to(
+                engine,
+                "· read-only: stage and revert need Uncommitted",
+                11.5,
+                FONT_SANS,
+                room,
+            );
+            layer.text(
+                text(engine, &why, 11.5, FONT_SANS, Weight::NORMAL),
+                x + 16.0 + hw + 8.0,
+                body_top + 6.0,
+                theme.text_muted,
+            );
+        }
+        body_top += 26.0;
+    }
+    // maximized: the file list takes the right side when there is room
+    let side = state.maximized && w >= SIDEBAR_MIN_PANEL_W;
+    let main_w = if side { w - SIDEBAR_W } else { w };
+    // the commit bar at the foot, whenever there is a repository
+    let bar_h = if state.model().is_some() {
+        commit_bar_h(state)
+    } else {
+        0.0
+    };
+    let body_bottom = y + h - bar_h;
+    if bar_h > 0.0 {
+        commit_bar(
+            layer,
+            engine,
+            theme,
+            state,
+            [x, body_bottom, main_w, bar_h],
+            &mut hits,
+        );
+    }
     state.view_h = body_bottom - body_top;
 
     let message = match &state.load {
         Load::Idle | Load::Loading => Some("Loading changes…".to_string()),
         Load::NotARepo => Some("Not a git repository".to_string()),
         Load::Failed(e) => Some(e.clone()),
-        Load::Ready(r) if r.staged.is_empty() && r.unstaged.is_empty() => {
-            Some("No changes — working tree clean".to_string())
-        }
+        Load::Ready(r) if r.staged.is_empty() && r.unstaged.is_empty() => Some(match &r.base {
+            Some(b) => format!("No changes against {}", b.name),
+            None => "No changes — working tree clean".to_string(),
+        }),
         Load::Ready(_) => None,
     };
     if let Some(m) = message {
@@ -1249,9 +1469,7 @@ pub fn render(
     let Some(review) = state.model().cloned() else {
         return hits;
     };
-    // maximized: the file list takes the right side when there is room
-    let side = state.maximized && w >= SIDEBAR_MIN_PANEL_W;
-    let main_w = if side { w - SIDEBAR_W } else { w };
+    let read_only = review.base.is_some();
 
     let window = |s: &ReviewPanelState| (s.scroll - 4.0, s.scroll - 4.0 + s.view_h);
     let (lo, hi) = window(state);
@@ -1345,6 +1563,7 @@ pub fn render(
             .unwrap_or(0.0)
     };
     let mut hover_rows = Vec::new();
+    let mut send_rows = Vec::new();
     let mut latent = Vec::new();
     // the row the keyboard stands on gets the focus ring (DESIGN.md)
     let focus = state.keyed.then(|| state.focus.clone()).flatten();
@@ -1383,7 +1602,7 @@ pub fn render(
                     [x, ry, main_w - 150.0, rh],
                     ReviewHit::ToggleSection(*staged),
                 ));
-                if fully(ry, rh) {
+                if fully(ry, rh) && !read_only {
                     let (label, hit) = if *staged {
                         ("Unstage all", ReviewHit::UnstageAll)
                     } else {
@@ -1392,6 +1611,7 @@ pub fn render(
                     let r = button(
                         layer,
                         engine,
+                        theme,
                         label,
                         x + main_w - 12.0,
                         ry,
@@ -1435,7 +1655,9 @@ pub fn render(
                         right = r[0] - 2.0;
                         actions.push((r, hit));
                     };
-                    if *staged {
+                    if read_only {
+                        // against a branch: open only (READ_ONLY_REASON)
+                    } else if *staged {
                         add(
                             Icon::Minus,
                             ReviewHit::Unstage(f.path.clone(), None),
@@ -1519,12 +1741,22 @@ pub fn render(
                     ReviewHit::ToggleFile(*staged, f.path.clone()),
                 ));
                 hits.extend(actions);
+                if !f.binary && !f.hunks.is_empty() {
+                    send_rows.push((
+                        [cx, ry, cw, rh],
+                        ReviewHit::Send(*staged, f.path.clone(), None),
+                    ));
+                }
             }
             RowKind::Hunk(staged, f, hi, hidden) => {
                 let hunk = &f.hunks[*hi];
                 if focus == Some(ReviewStop::Hunk(*staged, f.path.clone(), hunk.id)) {
                     focus_rect = Some([cx + 2.0, ry, cw - 4.0, rh]);
                 }
+                send_rows.push((
+                    [cx, ry, cw, rh],
+                    ReviewHit::Send(*staged, f.path.clone(), Some(hunk.id)),
+                ));
                 gap_band(
                     layer,
                     engine,
@@ -1554,7 +1786,7 @@ pub fn render(
                     right -= 4.0;
                 } else if fully(ry, rh) {
                     // the hover toolbar's actions, for screen readers
-                    for (_, hit) in hunk_actions(*staged, f, *hi) {
+                    for (_, hit) in hunk_actions(*staged, f, *hi, read_only) {
                         latent.push(([cx, ry, cw, rh], hit));
                     }
                 }
@@ -1600,8 +1832,13 @@ pub fn render(
                 let line = &f.hunks[*hi].lines[*li];
                 let row_rect = [cx, ry, cw, rh];
                 hover_rows.push(row_rect);
-                let hovered =
-                    fully(ry, rh) && over(row_rect) && !hunk_actions(*staged, f, *hi).is_empty();
+                send_rows.push((
+                    row_rect,
+                    ReviewHit::Send(*staged, f.path.clone(), Some(f.hunks[*hi].id)),
+                ));
+                let hovered = fully(ry, rh)
+                    && over(row_rect)
+                    && !hunk_actions(*staged, f, *hi, read_only).is_empty();
                 if hovered {
                     toolbar = Some((ry, *staged, f, *hi));
                 }
@@ -1661,7 +1898,7 @@ pub fn render(
         );
     }
     if let Some((ry, staged, f, hi)) = toolbar {
-        let actions = hunk_actions(staged, f, hi);
+        let actions = hunk_actions(staged, f, hi, read_only);
         let bar = [
             cx + 5.0,
             ry + 1.0,
@@ -1704,13 +1941,23 @@ pub fn render(
     }
     layer.set_clip(None);
     state.hover_rows = hover_rows;
+    state.send_rows = send_rows;
     state.latent = latent;
     // hits outside the body (scrolled under the header) never fire
     // and a row half under the header only takes clicks on its visible part
     let hits: Vec<([f32; 4], ReviewHit)> = hits
         .into_iter()
         .filter_map(|(mut r, hit)| {
-            if matches!(hit, ReviewHit::Refresh | ReviewHit::Maximize) {
+            // the header and the commit bar sit outside the scrolled body
+            if matches!(
+                hit,
+                ReviewHit::Refresh
+                    | ReviewHit::Maximize
+                    | ReviewHit::Base
+                    | ReviewHit::CommitField
+                    | ReviewHit::Commit
+                    | ReviewHit::Push
+            ) {
                 return Some((r, hit));
             }
             let top = r[1].max(body_top);
@@ -1748,6 +1995,162 @@ pub fn render(
         );
     }
     hits
+}
+
+/// Message lines the commit field shows before it stops growing.
+const COMMIT_LINES: usize = 4;
+const COMMIT_LINE_H: f32 = 17.0;
+
+/// Height of the commit bar: the message field (one to four lines) and the
+/// button row.
+fn commit_bar_h(state: &ReviewPanelState) -> f32 {
+    let lines = state.commit_msg.split('\n').count().clamp(1, COMMIT_LINES);
+    8.0 + lines as f32 * COMMIT_LINE_H + 10.0 + 6.0 + 24.0 + 8.0
+}
+
+/// The commit bar at the panel's foot: the message field, Commit and Push,
+/// and why Commit is off (or what is running).
+fn commit_bar(
+    layer: &mut Layer,
+    engine: &mut TextEngine,
+    theme: &Theme,
+    state: &ReviewPanelState,
+    rect: [f32; 4],
+    hits: &mut Vec<([f32; 4], ReviewHit)>,
+) {
+    let [x, y, w, h] = rect;
+    layer.rect([x + 1.0, y], [w - 1.0, h], theme.bg, 0.0);
+    layer.hline(x + 1.0, y, w - 1.0, 1.0, theme.border);
+    let lines: Vec<&str> = state.commit_msg.split('\n').collect();
+    let shown = lines.len().clamp(1, COMMIT_LINES);
+    let field = [
+        x + 10.0,
+        y + 8.0,
+        w - 20.0,
+        shown as f32 * COMMIT_LINE_H + 10.0,
+    ];
+    layer.bordered(
+        [field[0], field[1]],
+        [field[2], field[3]],
+        theme.bg_chrome,
+        if state.commit_focus {
+            theme.accent
+        } else {
+            theme.border
+        },
+        5.0,
+        1.0,
+    );
+    hits.push((field, ReviewHit::CommitField));
+    let bounds = TextBounds {
+        left: (field[0] + 1.0) as i32,
+        top: field[1] as i32,
+        right: (field[0] + field[2] - 4.0) as i32,
+        bottom: (field[1] + field[3]) as i32,
+    };
+    if state.commit_msg.is_empty() {
+        layer.text_clipped(
+            text(
+                engine,
+                "Commit message  ·  ⌘⏎ commits",
+                12.0,
+                FONT_SANS,
+                Weight::NORMAL,
+            ),
+            field[0] + 8.0,
+            field[1] + 5.5,
+            theme.text_muted,
+            bounds,
+        );
+    }
+    // the last lines, so the caret's line is always in view
+    let first = lines.len().saturating_sub(COMMIT_LINES);
+    let mut caret = (field[0] + 8.0, field[1] + 5.0);
+    for (i, line) in lines[first..].iter().enumerate() {
+        let ly = field[1] + 5.0 + i as f32 * COMMIT_LINE_H;
+        if !line.is_empty() {
+            layer.text_clipped(
+                text(engine, line, 12.0, FONT_SANS, Weight::NORMAL),
+                field[0] + 8.0,
+                ly,
+                theme.text_bright,
+                bounds,
+            );
+        }
+        let lw = engine.measure(line, 12.0, FONT_SANS, Weight::NORMAL);
+        caret = ((field[0] + 8.0 + lw).min(field[0] + field[2] - 6.0), ly);
+    }
+    if state.commit_focus {
+        layer.rect(
+            [caret.0 + 1.0, caret.1 + 1.0],
+            [1.5, 15.0],
+            theme.accent,
+            0.0,
+        );
+    }
+
+    // buttons, right-aligned: Commit at the right edge, Push left of it
+    let by = field[1] + field[3] + 6.0;
+    let reason = state.commit_reason();
+    let commit_on = reason.is_none() && state.busy.is_none();
+    let r = button(
+        layer,
+        engine,
+        theme,
+        "Commit",
+        x + w - 10.0,
+        by,
+        24.0,
+        if commit_on {
+            theme.text_bright
+        } else {
+            theme.text_muted
+        },
+    );
+    if commit_on {
+        hits.push((r, ReviewHit::Commit));
+    }
+    let pushing = state.busy == Some(GitBusy::Push);
+    let push_on = state.busy.is_none();
+    let p = button(
+        layer,
+        engine,
+        theme,
+        if pushing { "Pushing…" } else { "Push" },
+        r[0] - 6.0,
+        by,
+        24.0,
+        if push_on {
+            theme.text_ui
+        } else {
+            theme.text_muted
+        },
+    );
+    if push_on {
+        hits.push((p, ReviewHit::Push));
+    }
+    // what runs, else why Commit is off
+    let mut tx = x + 14.0;
+    if state.busy.is_some() {
+        super::glyphs::draw_spinner(layer, [tx + 6.0, by + 12.0], 12.0, theme.text_dim);
+        tx += 18.0;
+    }
+    let note = match state.busy {
+        Some(GitBusy::Push) => Some("Pushing…"),
+        _ => reason,
+    };
+    if let Some(note) = note {
+        let room = p[0] - 10.0 - tx;
+        if room > 30.0 {
+            let note = super::palette::elide_to(engine, note, 11.5, FONT_SANS, room);
+            layer.text(
+                text(engine, &note, 11.5, FONT_SANS, Weight::NORMAL),
+                tx,
+                by + 4.5,
+                theme.text_muted,
+            );
+        }
+    }
 }
 
 /// The maximized panel's file list: every changed file (staged first) with
@@ -1985,6 +2388,61 @@ mod tests {
     }
 
     #[test]
+    fn against_a_branch_writes_are_off_and_send_stays() {
+        let mut state = keyed(vec![], vec![file(vec![hunk(5, 6)], 50)]);
+        state.expanded.insert((false, "a.rs".into()));
+        let id = hunk(5, 6).id;
+        state.take_keys();
+        state.move_focus(2);
+        assert_eq!(
+            state.focus_hit(StopAct::Stage),
+            Some(ReviewHit::Stage("a.rs".into(), Some(id)))
+        );
+        state.load = Load::Ready(Arc::new(Review {
+            unstaged: vec![file(vec![hunk(5, 6)], 50)],
+            base: Some(rift_core::review::BaseInfo {
+                name: "main".into(),
+                merge_base: "0123456789".into(),
+            }),
+            ..Review::default()
+        }));
+        assert!(state.read_only());
+        for act in [StopAct::Stage, StopAct::Unstage, StopAct::Revert] {
+            assert_eq!(state.focus_hit(act), None, "{act:?}");
+        }
+        assert_eq!(
+            state.focus_hit(StopAct::Send),
+            Some(ReviewHit::Send(false, "a.rs".into(), Some(id)))
+        );
+        let f = &state.model().unwrap().unstaged[0];
+        let kinds: Vec<Icon> = hunk_actions(false, f, 0, true)
+            .into_iter()
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(kinds, [Icon::Copy]);
+        assert_eq!(
+            state.commit_reason(),
+            Some("Commit from Uncommitted, which shows what is staged")
+        );
+    }
+
+    #[test]
+    fn commit_needs_staged_changes_and_a_message() {
+        let mut state = keyed(vec![], vec![file(vec![hunk(5, 6)], 50)]);
+        assert_eq!(state.commit_reason(), Some("Nothing staged"));
+        state.load = Load::Ready(Arc::new(Review {
+            staged: vec![file(vec![hunk(5, 6)], 50)],
+            ..Review::default()
+        }));
+        state.commit_msg = "  \n".into();
+        assert_eq!(state.commit_reason(), Some("Write a commit message"));
+        state.commit_msg = "fix".into();
+        assert_eq!(state.commit_reason(), None);
+        state.busy = Some(GitBusy::Commit);
+        assert_eq!(state.commit_reason(), Some("Committing…"));
+    }
+
+    #[test]
     fn focus_waits_out_a_reload() {
         let mut state = keyed(vec![], vec![file(vec![hunk(5, 6)], 50)]);
         state.take_keys();
@@ -2098,7 +2556,7 @@ mod tests {
         );
         // the toolbar: stage, revert, copy (unstaged); unstage, copy (staged)
         let kinds = |staged| -> Vec<Icon> {
-            hunk_actions(staged, &f, 0)
+            hunk_actions(staged, &f, 0, false)
                 .into_iter()
                 .map(|(i, _)| i)
                 .collect()

@@ -42,6 +42,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+pub use crate::profiles::PaneLaunch;
+
 /// One pane, or a split holding more layouts. Recursive, like Warp's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LaunchLayout {
@@ -53,6 +55,8 @@ pub enum LaunchLayout {
         commands: Vec<String>,
         /// Warp's `is_focused`.
         focused: bool,
+        /// The pane's profile, `shell` (Warp Tab Config) and `args`.
+        launch: PaneLaunch,
     },
     /// A split. `vertical` matches Warp's `split_direction: vertical`, i.e.
     /// the panes sit side by side (a vertical divider between them).
@@ -70,6 +74,7 @@ impl LaunchLayout {
             cwd: None,
             commands: Vec::new(),
             focused: false,
+            launch: PaneLaunch::default(),
         }
     }
 
@@ -80,6 +85,7 @@ impl LaunchLayout {
             cwd,
             commands: Vec::new(),
             focused: false,
+            launch: PaneLaunch::default(),
         }
     }
 
@@ -184,8 +190,10 @@ impl LaunchConfig {
     /// the root, leaves with `directory` / `commands` / `is_focused`, splits
     /// with `split` (`horizontal` = side by side, `vertical` = stacked, the
     /// reverse of the YAML spelling) and `children` (pane ids), and
-    /// `[params.<name>]` with a `default` substituted into `{{name}}`.
-    /// Unknown keys (`shell`, `type`, ...) are ignored. Input is bounded:
+    /// `[params.<name>]` with a `default` substituted into `{{name}}`. A leaf's
+    /// `shell` (Warp) and Rift's `profile` (a `[[profiles]]` name) and `args`
+    /// choose what it runs ([`PaneLaunch`]). Other unknown keys (`type`, ...)
+    /// are ignored. Input is bounded:
     /// [`MAX_FILE_BYTES`], [`MAX_PANES`], [`MAX_DEPTH`].
     pub fn parse_toml(fallback_name: &str, src: &str) -> Result<LaunchConfig, String> {
         if src.len() > MAX_FILE_BYTES {
@@ -381,6 +389,7 @@ fn out_layout(l: &LaunchLayout) -> OutLayout {
             cwd,
             commands,
             focused,
+            launch,
         } => OutLayout {
             cwd: cwd.as_ref().map(|p| p.to_string_lossy().into_owned()),
             commands: commands
@@ -388,6 +397,7 @@ fn out_layout(l: &LaunchLayout) -> OutLayout {
                 .map(|exec| OutCommand { exec: exec.clone() })
                 .collect(),
             is_focused: *focused,
+            launch: launch.clone(),
             split_direction: None,
             panes: None,
         },
@@ -395,6 +405,7 @@ fn out_layout(l: &LaunchLayout) -> OutLayout {
             cwd: None,
             commands: Vec::new(),
             is_focused: false,
+            launch: PaneLaunch::default(),
             split_direction: Some(if *vertical { "vertical" } else { "horizontal" }.to_string()),
             panes: Some(panes.iter().map(out_layout).collect()),
         },
@@ -422,6 +433,7 @@ fn convert_layout(raw: &RawLayout) -> Result<LaunchLayout, String> {
                 .map(expand_tilde),
             commands: raw.commands.iter().map(|c| c.exec.clone()).collect(),
             focused: raw.is_focused.unwrap_or(false),
+            launch: raw.launch.clone(),
         });
     };
 
@@ -626,6 +638,9 @@ struct TomlPane {
     split: Option<String>,
     #[serde(default)]
     children: Vec<String>,
+    /// `shell` (Warp), `profile` and `args` (Rift).
+    #[serde(flatten)]
+    launch: PaneLaunch,
 }
 
 /// Replace `{{param}}` with its default. A placeholder with no default (or a
@@ -681,6 +696,26 @@ fn toml_node(
                 .map(|c| subst(c, params))
                 .collect::<Result<_, _>>()?,
             focused: pane.is_focused.unwrap_or(false),
+            launch: PaneLaunch {
+                profile: pane
+                    .launch
+                    .profile
+                    .as_deref()
+                    .map(|p| subst(p, params))
+                    .transpose()?,
+                shell: pane
+                    .launch
+                    .shell
+                    .as_deref()
+                    .map(|s| subst(s, params))
+                    .transpose()?,
+                args: pane
+                    .launch
+                    .args
+                    .iter()
+                    .map(|a| subst(a, params))
+                    .collect::<Result<_, _>>()?,
+            },
         });
     };
     // Warp's TOML spelling: `horizontal` is left-to-right, `vertical` stacked.
@@ -721,6 +756,8 @@ struct OutTomlPane {
     commands: Vec<String>,
     #[serde(skip_serializing_if = "is_false")]
     is_focused: bool,
+    #[serde(flatten)]
+    launch: PaneLaunch,
     #[serde(skip_serializing_if = "Option::is_none")]
     split: Option<&'static str>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -737,12 +774,14 @@ fn out_toml_node(l: &LaunchLayout, out: &mut Vec<OutTomlPane>) -> String {
             cwd,
             commands,
             focused,
+            launch,
         } => out.push(OutTomlPane {
             id: id.clone(),
             kind: Some("terminal"),
             directory: cwd.as_ref().map(|p| p.to_string_lossy().into_owned()),
             commands: commands.clone(),
             is_focused: *focused,
+            launch: launch.clone(),
             split: None,
             children: Vec::new(),
         }),
@@ -753,6 +792,7 @@ fn out_toml_node(l: &LaunchLayout, out: &mut Vec<OutTomlPane>) -> String {
                 directory: None,
                 commands: Vec::new(),
                 is_focused: false,
+                launch: PaneLaunch::default(),
                 split: Some(if *vertical { "horizontal" } else { "vertical" }),
                 children: Vec::new(),
             });
@@ -798,6 +838,8 @@ struct OutLayout {
     commands: Vec<OutCommand>,
     #[serde(skip_serializing_if = "is_false")]
     is_focused: bool,
+    #[serde(flatten)]
+    launch: PaneLaunch,
     #[serde(skip_serializing_if = "Option::is_none")]
     split_direction: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -861,6 +903,9 @@ struct RawLayout {
     split_direction: Option<String>,
     #[serde(default)]
     panes: Option<Vec<RawLayout>>,
+    /// `shell`, `profile` and `args`, as in Tab Configs.
+    #[serde(flatten)]
+    launch: PaneLaunch,
 }
 
 #[derive(Debug, Deserialize)]
@@ -937,6 +982,7 @@ active_tab_index: 1
             cwd,
             commands,
             focused,
+            ..
         } = &c.tabs[0].layout
         else {
             panic!("tab 0 should be a leaf pane");
@@ -958,6 +1004,7 @@ active_tab_index: 1
                 cwd: Some(home().join("proj/web")),
                 commands: vec!["pnpm dev".to_string()],
                 focused: false,
+                launch: PaneLaunch::default(),
             }
         );
         assert_eq!(
@@ -969,11 +1016,13 @@ active_tab_index: 1
                         cwd: Some(home().join("logs")),
                         commands: vec![],
                         focused: false,
+                        launch: PaneLaunch::default(),
                     },
                     LaunchLayout::Pane {
                         cwd: Some(home()),
                         commands: vec![],
                         focused: false,
+                        launch: PaneLaunch::default(),
                     },
                 ],
             }
@@ -1041,6 +1090,7 @@ active_tab_index: 1
                 cwd: Some(PathBuf::from("/only")),
                 commands: vec![],
                 focused: true,
+                launch: PaneLaunch::default(),
             }
         );
         assert_eq!(c.pane_count(), 1);
@@ -1143,6 +1193,7 @@ active_tab_index: 1
                 cwd: None,
                 commands: vec!["htop".to_string()],
                 focused: false,
+                launch: PaneLaunch::default(),
             }
         );
         assert_eq!(
@@ -1151,6 +1202,7 @@ active_tab_index: 1
                 cwd: Some(home()),
                 commands: vec![],
                 focused: false,
+                launch: PaneLaunch::default(),
             }
         );
     }
@@ -1192,6 +1244,7 @@ active_tab_index: 1
                         cwd: Some(PathBuf::from("/work/app")),
                         commands: vec!["nvim".into()],
                         focused: true,
+                        launch: PaneLaunch::default(),
                     },
                 },
                 LaunchTab {
@@ -1265,8 +1318,99 @@ active_tab_index: 1
                 cwd: Some(home().join("code/api")),
                 commands: vec!["npm install".into(), "npm run dev".into()],
                 focused: true,
+                // Warp's per-pane shell is honoured, not ignored
+                launch: PaneLaunch {
+                    shell: Some("zsh".into()),
+                    ..Default::default()
+                },
             }
         );
+    }
+
+    #[test]
+    fn pane_shell_profile_and_args_roundtrip_with_spaces_and_quotes() {
+        let odd = |s: &str| format!("/tmp/it's a \"{s}\" dir");
+        let launch = PaneLaunch {
+            profile: Some("dev box".into()),
+            shell: Some("/opt/my shells/fish".into()),
+            args: vec!["-C".into(), "echo \"a b\" 'c'".into()],
+        };
+        let cfg = LaunchConfig {
+            name: "odd".into(),
+            tabs: vec![LaunchTab {
+                title: None,
+                color: None,
+                layout: LaunchLayout::split(
+                    true,
+                    vec![
+                        LaunchLayout::Pane {
+                            cwd: Some(PathBuf::from(odd("one"))),
+                            commands: vec![],
+                            focused: false,
+                            launch: launch.clone(),
+                        },
+                        LaunchLayout::Pane {
+                            cwd: Some(PathBuf::from(odd("two"))),
+                            commands: vec![],
+                            focused: true,
+                            launch: PaneLaunch::profile("zsh"),
+                        },
+                    ],
+                ),
+            }],
+            active_tab: 0,
+        };
+        let toml = cfg.to_toml().unwrap();
+        assert_eq!(
+            LaunchConfig::parse_toml("odd", &toml).unwrap(),
+            cfg,
+            "{toml}"
+        );
+        let yaml = cfg.to_yaml();
+        assert_eq!(
+            LaunchConfig::parse_yaml("odd", &yaml).unwrap(),
+            cfg,
+            "{yaml}"
+        );
+        // a pane without any keeps the old shape: no launch keys written
+        let plain = LaunchConfig {
+            tabs: vec![LaunchTab {
+                title: None,
+                color: None,
+                layout: LaunchLayout::pane(Some("/w".into())),
+            }],
+            ..cfg
+        };
+        let out = plain.to_toml().unwrap();
+        assert!(!out.contains("shell") && !out.contains("profile") && !out.contains("args"));
+    }
+
+    #[test]
+    fn toml_params_reach_pane_shell_profile_and_args() {
+        let src = r#"
+name = "p"
+[params.who]
+default = "dev"
+[[panes]]
+id = "a"
+profile = "{{who}}"
+shell = "/bin/{{who}}sh"
+args = ["--name", "{{who}} x"]
+"#;
+        let c = LaunchConfig::parse_toml("p", src).unwrap();
+        let LaunchLayout::Pane { launch, .. } = &c.tabs[0].layout else {
+            panic!("leaf expected");
+        };
+        assert_eq!(
+            launch,
+            &PaneLaunch {
+                profile: Some("dev".into()),
+                shell: Some("/bin/devsh".into()),
+                args: vec!["--name".into(), "dev x".into()],
+            }
+        );
+        // a placeholder without default is an error, as for commands
+        assert!(LaunchConfig::parse_toml("p", &src.replace("default = \"dev\"", "")).is_err());
     }
 
     #[test]
@@ -1366,6 +1510,7 @@ active_tab_index: 1
                             cwd: Some(PathBuf::from("/work/app")),
                             commands: vec!["nvim".into(), "echo \"hi\"".into()],
                             focused: true,
+                            launch: PaneLaunch::default(),
                         },
                         LaunchLayout::split(
                             false,

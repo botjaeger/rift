@@ -12,9 +12,10 @@ use std::path::PathBuf;
 /// Schema version stamped into freshly built sessions. `1` = the legacy
 /// `cwd`-only shape; `2` adds per-tab `title`, `color` and a nested `layout`;
 /// `3` adds optional per-pane `transcript` ids (saved block output); `4`
-/// adds `other_windows` (every window after the first).
+/// adds `other_windows` (every window after the first); `5` adds per-pane
+/// `launch` (profile name, own shell and arguments).
 /// A file with no `version` key loads as [`LEGACY_VERSION`].
-pub const CURRENT_VERSION: u32 = 4;
+pub const CURRENT_VERSION: u32 = 5;
 
 /// The version assumed for a file that predates the `version` key.
 pub const LEGACY_VERSION: u32 = 1;
@@ -142,6 +143,13 @@ pub struct SavedTab {
     /// `elapsed_counts = "running"`); absent in older files, which load as 0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub counted: Option<u64>,
+    /// What an unsplit tab's pane was opened with (split tabs keep one per
+    /// leaf in `layout`); absent in older files: the default launch.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::profiles::PaneLaunch::is_default"
+    )]
+    pub launch: crate::profiles::PaneLaunch,
 }
 
 /// A tab's pane tree: either one leaf pane or a binary split of two subtrees.
@@ -184,6 +192,12 @@ pub enum SavedLayout {
         /// Session-service shell to reattach (durable sessions).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         service: Option<u64>,
+        /// What the pane was opened with (profile name, own shell, args).
+        #[serde(
+            default,
+            skip_serializing_if = "crate::profiles::PaneLaunch::is_default"
+        )]
+        launch: crate::profiles::PaneLaunch,
     },
     /// A split of exactly two children, divided along `axis` at `ratio`.
     Split {
@@ -207,6 +221,16 @@ impl SavedLayout {
             focused: false,
             transcript: None,
             service: None,
+            launch: Default::default(),
+        }
+    }
+
+    /// What the first leaf (the pane spawned for this subtree) was opened
+    /// with.
+    pub fn first_launch(&self) -> crate::profiles::PaneLaunch {
+        match self {
+            SavedLayout::Pane { launch, .. } => launch.clone(),
+            SavedLayout::Split { first, .. } => first.first_launch(),
         }
     }
 
@@ -328,6 +352,7 @@ mod tests {
             tabs: vec![
                 SavedTab {
                     cwd: Some("/tmp".into()),
+                    launch: crate::profiles::PaneLaunch::profile("fish"),
                     ..Default::default()
                 },
                 SavedTab::default(),
@@ -358,6 +383,11 @@ mod tests {
                 focused: true,
                 transcript: Some("1-2-3".into()),
                 service: Some(9),
+                launch: crate::profiles::PaneLaunch {
+                    profile: Some("dev box".into()),
+                    shell: Some("/bin/b a\"sh".into()),
+                    args: vec!["-c".into(), "it's \"quoted\"".into()],
+                },
             },
             SavedLayout::split(
                 SavedAxis::Vertical,
@@ -370,6 +400,7 @@ mod tests {
         assert_eq!(layout.focused_cwd(), Some("/a"));
         assert_eq!(layout.first_transcript(), Some("1-2-3"));
         assert_eq!(layout.first_service(), Some(9));
+        assert_eq!(layout.first_launch().profile.as_deref(), Some("dev box"));
 
         let s = SavedSession {
             version: CURRENT_VERSION,
@@ -383,6 +414,7 @@ mod tests {
                 service: None,
                 started: Some(1_791_938_924),
                 counted: Some(7200),
+                launch: Default::default(),
             }],
             window: None,
             other_windows: Vec::new(),
@@ -458,6 +490,7 @@ mod tests {
                     focused: true,
                     transcript: None,
                     service: Some(7),
+                    launch: Default::default(),
                 },
             )),
             ..tab("/d")

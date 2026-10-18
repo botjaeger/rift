@@ -79,6 +79,19 @@ pub fn animate() -> bool {
     }
 }
 
+/// The user asked for reduced motion (macOS Accessibility setting; Linux
+/// has no such setting to read): pulsing badges hold still.
+pub fn motion_reduced() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        mac::reduce_motion()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
 #[cfg(target_os = "macos")]
 pub use mac::*;
 

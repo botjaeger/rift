@@ -45,6 +45,13 @@
 //!                          # order)
 //! close_window             # close the focused window (as its close
 //!                          # button: the last one quits)
+//! drag_tab 0 1 new         # drag tab 1 of window 0 out of every window
+//!                          # (a window of its own)
+//! drag_tab 0 1 2 0         # drag it onto window 2's tab strip, before
+//!                          # its tab 0 (no index: after the last tab);
+//!                          # a real press, motion and release, so with
+//!                          # `--headless` (windows apart on a pretend
+//!                          # desktop) the release lands where asked
 //! hotkey                   # what the global hotkey does: shows or hides
 //!                          # the drop-down window (`hotkey_window`); the
 //!                          # shown drop-down window takes focus
@@ -115,6 +122,15 @@ pub enum Step {
     Window(usize),
     /// Close the focused window.
     CloseWindow,
+    /// Drag a tab out of its window (opening order, tab index) onto
+    /// another window's strip at an index (none: last), or, with no target
+    /// window, out of every window.
+    DragTab {
+        from: usize,
+        tab: usize,
+        to: Option<usize>,
+        index: Option<usize>,
+    },
     /// The global hotkey's action (the drop-down window with
     /// `hotkey_window`, else the app's show/hide).
     Hotkey,
@@ -319,6 +335,31 @@ pub fn parse(src: &str) -> Result<Vec<Step>, String> {
             "new_window" => Step::NewWindow,
             "window" => Step::Window(rest.parse().map_err(|_| bad("expected a window number"))?),
             "close_window" => Step::CloseWindow,
+            "drag_tab" => {
+                let words: Vec<&str> = rest.split_whitespace().collect();
+                let num = |s: &str| s.parse::<usize>().map_err(|_| bad("expected numbers"));
+                match words[..] {
+                    [from, tab, "new"] => Step::DragTab {
+                        from: num(from)?,
+                        tab: num(tab)?,
+                        to: None,
+                        index: None,
+                    },
+                    [from, tab, to] => Step::DragTab {
+                        from: num(from)?,
+                        tab: num(tab)?,
+                        to: Some(num(to)?),
+                        index: None,
+                    },
+                    [from, tab, to, index] => Step::DragTab {
+                        from: num(from)?,
+                        tab: num(tab)?,
+                        to: Some(num(to)?),
+                        index: Some(num(index)?),
+                    },
+                    _ => return Err(bad("expected <window> <tab> <window|new> [index]")),
+                }
+            }
             "hotkey" => Step::Hotkey,
             "link" if !rest.is_empty() => Step::Link(rest.to_string()),
             "a11y" => {
@@ -533,6 +574,9 @@ window 2
 close_window
 hotkey
 link rift://action/new_tab?path=/tmp
+drag_tab 0 1 new
+drag_tab 1 0 0
+drag_tab 2 3 0 1
 "
             )
             .unwrap(),
@@ -542,9 +586,30 @@ link rift://action/new_tab?path=/tmp
                 Step::Window(2),
                 Step::CloseWindow,
                 Step::Hotkey,
-                Step::Link("rift://action/new_tab?path=/tmp".into())
+                Step::Link("rift://action/new_tab?path=/tmp".into()),
+                Step::DragTab {
+                    from: 0,
+                    tab: 1,
+                    to: None,
+                    index: None
+                },
+                Step::DragTab {
+                    from: 1,
+                    tab: 0,
+                    to: Some(0),
+                    index: None
+                },
+                Step::DragTab {
+                    from: 2,
+                    tab: 3,
+                    to: Some(0),
+                    index: Some(1)
+                },
             ]
         );
+        assert!(parse("drag_tab 0").is_err());
+        assert!(parse("drag_tab 0 1 elsewhere").is_err());
+        assert!(parse("drag_tab 0 1 2 3 4").is_err());
     }
 
     #[test]

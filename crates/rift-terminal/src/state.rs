@@ -32,6 +32,8 @@ pub enum ClickTarget {
     TabSelect(usize),
     TabClose(usize),
     TabNew,
+    /// The ⌄ beside +: the profile menu.
+    TabProfiles,
     /// Top-bar sidebar toggles.
     ToggleExplorer,
     ToggleReview,
@@ -1075,6 +1077,18 @@ pub struct PaneState {
     /// The window's own grid at the last layout (columns, rows, cell size
     /// in px), before any `fit`.
     pub base_grid: Option<(usize, usize, (u16, u16))>,
+    /// What the pane was opened with (profile name, own shell and args):
+    /// kept by duplicate, save-layout and restore.
+    pub launch: rift_core::profiles::PaneLaunch,
+    /// The program the pane started (its integration, completions and
+    /// labels follow its basename); empty: not known (the global shell).
+    pub program: String,
+    /// The coding agent this pane runs, or ran until its finish is seen.
+    pub agent_run: Option<crate::agent_status::AgentRun>,
+    /// Its status at the last frame (tab strip, rail, `dump`).
+    pub agent_status: Option<crate::agent_status::AgentStatus>,
+    /// Rich input over the running program (`crate::composer`).
+    pub composer: crate::composer::Composer,
 }
 
 impl PaneState {
@@ -1109,7 +1123,50 @@ impl PaneState {
             title: String::new(),
             fit: None,
             base_grid: None,
+            launch: Default::default(),
+            program: String::new(),
+            agent_run: None,
+            agent_status: None,
+            composer: Default::default(),
         }
+    }
+
+    /// Follow this pane's coding agent one frame (`agent_status::step`):
+    /// `open_request` = its request waits on you, `viewed` = on screen in
+    /// the focused window.
+    pub fn sync_agent(&mut self, open_request: bool, viewed: bool) {
+        use crate::agent_status::{BlockView, Observed, step};
+        use rift_core::notifications::{Agent, agent_title_idle};
+        let view = |b: &rift_core::Block| BlockView {
+            id: b.id,
+            running: matches!(b.state, rift_core::BlockState::Running { .. }),
+            exit: match b.state {
+                rift_core::BlockState::Done { exit, .. } => exit,
+                _ => None,
+            },
+            agent: Agent::from_command(&b.command),
+        };
+        let (last, tracked) = {
+            let blocks = self.session.blocks.lock().unwrap();
+            let last = blocks.last().map(view);
+            let tracked = self
+                .agent_run
+                .and_then(|r| r.block)
+                .and_then(|id| blocks.iter().rev().find(|b| b.id == id).map(view));
+            (last, tracked)
+        };
+        let (run, status) = step(
+            self.agent_run,
+            Observed {
+                last,
+                tracked,
+                open_request,
+                idle_title: agent_title_idle(&self.title),
+                viewed,
+            },
+        );
+        self.agent_run = run;
+        self.agent_status = status;
     }
 
     /// The shell's size: the window's own grid, or the phone's where that is

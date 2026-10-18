@@ -184,6 +184,7 @@ per 0.7 s, redrawn every output frame (≤ 120 Hz) so it moves smoothly.
 | Running badge | spinning ring, live elapsed time |
 | Background-tab activity | pulsing dot |
 | Synchronized output stall | shown after 150 ms |
+| Indeterminate tab progress (OSC 9;4) | 2 px `accent` third of the tab width sweeping across, 1.4 s; still with Reduce motion |
 
 No other animation. Motion never delays input.
 

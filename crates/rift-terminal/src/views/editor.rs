@@ -139,15 +139,39 @@ pub fn render(
     shell_env: Option<&rift_core::shell_env::ShellEnv>,
     hint: Option<&str>,
     cols: usize,
+    // the rich-input composer's header ("Compose for …") in place of the
+    // prompt chips; its text is prose, not a command (no syntax colors)
+    header: Option<(&str, &str)>,
 ) -> ((f32, f32), (f32, f32), DrawnChips) {
     let [x, y, w, _h] = area;
     let mut chips = Vec::new();
-    let shell_prompt = config.prompt == PromptMode::Shell;
+    let shell_prompt = config.prompt == PromptMode::Shell && header.is_none();
 
     // divider (full width, design: border-top on -8px margins)
     layer.hline(x - 8.0, y, w + 16.0, 1.0, theme.border);
 
-    let input_y = if shell_prompt {
+    let input_y = if let Some((lead, name)) = header {
+        let ly = y + first_row_offset(PromptMode::Rift);
+        let lw = engine.measure(lead, 12.0, rift_renderer::FONT_SANS, Weight::NORMAL);
+        let sans = |engine: &mut TextEngine, text: &str, weight: Weight| {
+            let mut b = Buffer::new(&mut engine.font_system, Metrics::new(12.0, LINE_H));
+            b.set_text(
+                &mut engine.font_system,
+                text,
+                &Attrs::new()
+                    .family(Family::Name(rift_renderer::FONT_SANS))
+                    .weight(weight),
+                Shaping::Advanced,
+                None,
+            );
+            b
+        };
+        let lead_buf = sans(engine, lead, Weight::NORMAL);
+        layer.text(lead_buf, x + PAD_X, ly, theme.text_muted);
+        let name_buf = sans(engine, name, Weight::SEMIBOLD);
+        layer.text(name_buf, x + PAD_X + lw + 4.0, ly, theme.text_bright);
+        y + input_offset(PromptMode::Rift, 1)
+    } else if shell_prompt {
         y + input_offset(config.prompt, 1)
     } else {
         // ── prompt context (design 01): ⇕ ~/cwd on ⎇ branch ↑n ──
@@ -195,7 +219,11 @@ pub fn render(
     };
 
     // syntax-highlighted spans
-    let tokens = tokenize(buffer);
+    let tokens = if header.is_some() {
+        Vec::new()
+    } else {
+        tokenize(buffer)
+    };
     let color_of = |kind: TokenKind| syntax_color(theme, kind);
 
     let mut spans: Vec<(&str, Attrs)> = Vec::new();

@@ -12,7 +12,7 @@ use alacritty_terminal::tty;
 use alacritty_terminal::vte;
 use alacritty_terminal::vte::ansi::Rgb;
 
-use rift_core::{BlockStore, Marker, OscScanner};
+use rift_core::{BlockStore, Marker, OscScanner, Progress};
 
 use crate::abs_term::AbsTerm;
 use crate::graphics::Graphics;
@@ -387,6 +387,11 @@ pub struct Session {
     pub cwd_remote: Arc<AtomicBool>,
     /// Shell state reported by OSC 1337 SetUserVar (prompt chips).
     pub user_vars: UserVars,
+    /// The shell's own ⌃R / ⌃T / ⌥C widgets and a hand-off to one in
+    /// flight (OSC 6973, `rift_core::shell_widget`).
+    pub widgets: Widgets,
+    /// The last OSC 9;4 progress report still standing (tab bar, Dock).
+    pub progress: ProgressSlot,
     /// Set by the reader thread when new output arrived; cleared by the app
     /// when it consumes a snapshot. Coalesces wakeup events.
     pub dirty: Arc<AtomicBool>,
@@ -527,9 +532,11 @@ pub enum ServiceTarget {
 }
 
 /// Start `shell` on a new PTY with Rift's environment (TERM, shell
-/// integration). The master fd is left blocking for a reader thread.
+/// integration), its integration arguments, then `extra_args`. The master
+/// fd is left blocking for a reader thread.
 pub(crate) fn open_pty(
     shell: Option<&str>,
+    extra_args: &[String],
     working_directory: Option<std::path::PathBuf>,
     env: Vec<(String, String)>,
     window_size: WindowSize,
@@ -547,7 +554,8 @@ pub(crate) fn open_pty(
     }
     // always name the shell explicitly so bash can get its --rcfile shim
     let program = rift_core::shell_integration::resolve_shell(shell);
-    let args = rift_core::shell_integration::shell_args(&program);
+    let mut args = rift_core::shell_integration::shell_args(&program);
+    args.extend(extra_args.iter().cloned());
     let tty_opts = tty::Options {
         shell: Some(tty::Shell::new(program, args)),
         working_directory,
@@ -663,7 +671,10 @@ pub struct SpawnOptions {
     pub size: GridSize,
     pub cell_size: (u16, u16),
     pub shell: Option<String>,
+    /// Arguments after the shell-integration ones (a profile's).
+    pub args: Vec<String>,
     pub working_directory: Option<std::path::PathBuf>,
+    /// Extra environment for this shell only (a profile's).
     pub env: Vec<(String, String)>,
     pub scrollback: usize,
     pub observer: Observer,
@@ -1127,6 +1138,7 @@ impl Session {
             size,
             cell_size,
             shell,
+            args,
             working_directory,
             env,
             scrollback,
@@ -1147,7 +1159,14 @@ impl Session {
         // the shell: a local PTY, or one owned by the session service
         let (backend, writer, source) = match service {
             None => {
-                let pty = open_pty(shell.as_deref(), working_directory, env, window_size, id)?;
+                let pty = open_pty(
+                    shell.as_deref(),
+                    &args,
+                    working_directory,
+                    env,
+                    window_size,
+                    id,
+                )?;
                 let writer = PtyWriter::File(Arc::new(pty.file().try_clone()?));
                 let source = Source::Pty(pty.file().try_clone()?);
                 (Backend::Local(pty), writer, source)
@@ -1162,6 +1181,7 @@ impl Session {
                     let (stream, session) = crate::service::open(
                         target,
                         shell.as_deref(),
+                        args,
                         working_directory.as_deref(),
                         env,
                         window_size,
@@ -1259,6 +1279,8 @@ impl Session {
         let cwd = Arc::new(Mutex::new(None));
         let cwd_remote = Arc::new(AtomicBool::new(false));
         let user_vars = UserVars::default();
+        let widgets = Widgets::default();
+        let progress = ProgressSlot::default();
         let graphics = Arc::new(Mutex::new(Graphics::default()));
         let ctx = FeedCtx {
             term: term.clone(),
@@ -1269,6 +1291,8 @@ impl Session {
             cwd: cwd.clone(),
             cwd_remote: cwd_remote.clone(),
             user_vars: user_vars.clone(),
+            widgets: widgets.clone(),
+            progress: progress.clone(),
             graphics: graphics.clone(),
             window_size: window_size_shared.clone(),
             reply: Some(replier),
@@ -1305,6 +1329,8 @@ impl Session {
             cwd,
             cwd_remote,
             user_vars,
+            widgets,
+            progress,
             dirty,
             saw_output,
             generation,
@@ -1752,8 +1778,43 @@ impl RowLayout {
 /// Shell variables from OSC 1337 SetUserVar, by name.
 pub type UserVars = Arc<Mutex<std::collections::HashMap<String, String>>>;
 
+/// A pane's shell-widget state (OSC 6973).
+pub type Widgets = Arc<Mutex<rift_core::shell_widget::WidgetState>>;
+
 /// Distinct user variables a session keeps.
 const MAX_USER_VARS: usize = 32;
+
+/// A pane's standing OSC 9;4 progress report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProgressReport {
+    pub progress: Progress,
+    /// Set while the alternate screen showed: leaving it clears the report
+    /// (a full-screen program's progress ends with the program).
+    pub alt: bool,
+    /// Process-wide order of reports: the newest wins a tie between panes.
+    pub seq: u64,
+}
+
+/// Where the reader thread keeps a pane's progress report.
+pub type ProgressSlot = Arc<Mutex<Option<ProgressReport>>>;
+
+static PROGRESS_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Apply one OSC 9;4 report: `None` (state 0) clears. An error or paused
+/// report without a value keeps the previous one's (ConEmu).
+fn set_progress(slot: &ProgressSlot, report: Option<Progress>, alt: bool) {
+    let mut cur = slot.lock().unwrap();
+    *cur = report.map(|mut progress| {
+        if progress.pct.is_none() && progress.state != rift_core::ProgressState::Indeterminate {
+            progress.pct = cur.and_then(|c| c.progress.pct);
+        }
+        ProgressReport {
+            progress,
+            alt,
+            seq: PROGRESS_SEQ.fetch_add(1, Ordering::Relaxed),
+        }
+    });
+}
 
 /// Everything the output parser writes to (shared with the app).
 struct FeedCtx {
@@ -1766,6 +1827,8 @@ struct FeedCtx {
     cwd: Arc<Mutex<Option<String>>>,
     cwd_remote: Arc<AtomicBool>,
     user_vars: UserVars,
+    widgets: Widgets,
+    progress: ProgressSlot,
     graphics: Arc<Mutex<Graphics>>,
     window_size: Arc<Mutex<WindowSize>>,
     /// PTY write-back for graphics protocol replies.
@@ -1822,6 +1885,10 @@ fn feed(parser: &mut vte::ansi::Processor, scanner: &mut OscScanner, bytes: &[u8
         };
         if was_alt && !term.mode().contains(TermMode::ALT_SCREEN) {
             ctx.graphics.lock().unwrap().drop_alt();
+            let mut progress = ctx.progress.lock().unwrap();
+            if progress.is_some_and(|p| p.alt) {
+                *progress = None;
+            }
         }
         if cleared {
             // `clear` ran (ED3, suppressed in AbsTerm): Warp-style soft
@@ -1859,6 +1926,11 @@ fn feed(parser: &mut vte::ansi::Processor, scanner: &mut OscScanner, bytes: &[u8
                     vars.insert(name, value);
                 }
             }
+            Some(Marker::ShellWidget(msg)) => ctx.widgets.lock().unwrap().on_msg(msg),
+            Some(Marker::Progress(report)) => {
+                let alt = term.mode().contains(TermMode::ALT_SCREEN);
+                set_progress(&ctx.progress, report, alt);
+            }
             Some(Marker::Notify { title, body }) => {
                 // replayed output already notified once
                 let replaying = matches!(&ctx.reply, Some(w) if w.muted());
@@ -1867,6 +1939,10 @@ fn feed(parser: &mut vte::ansi::Processor, scanner: &mut OscScanner, bytes: &[u8
                 }
             }
             Some(marker) => {
+                // a finished command's progress ends with it
+                if matches!(marker, Marker::Done { .. }) {
+                    *ctx.progress.lock().unwrap() = None;
+                }
                 if matches!(marker, Marker::Done { .. })
                     && ctx.blocks.lock().unwrap().any_running()
                     && end_partial_line(parser, &mut term, &mut scrolled_cur, ctx.scrollback)
@@ -1879,8 +1955,10 @@ fn feed(parser: &mut vte::ansi::Processor, scanner: &mut OscScanner, bytes: &[u8
         }
     }
     // output the shell printed below its prompt while it waited for input:
-    // a background job's (Warp background blocks)
-    if !term.mode().contains(TermMode::ALT_SCREEN) {
+    // a background job's (Warp background blocks). Not while a shell widget
+    // runs: it draws there (fzf below the prompt, the line it accepts)
+    let widget_busy = ctx.widgets.lock().unwrap().busy();
+    if !widget_busy && !term.mode().contains(TermMode::ALT_SCREEN) {
         let cursor = term.grid().cursor.point;
         let line = scrolled_cur + cursor.line.0.max(0) as u64;
         let mut blocks = ctx.blocks.lock().unwrap();
@@ -2032,6 +2110,12 @@ fn apply_marker(marker: Marker, term: &Term<EventProxy>, scrolled: u64, ctx: &Fe
         "marker {marker:?} at abs={abs_line} (cursor line {}, scrolled {scrolled})",
         cursor.line.0
     );
+    // a shell-widget hand-off ends with a new prompt or a command
+    match marker {
+        Marker::PromptStart => ctx.widgets.lock().unwrap().on_prompt_start(),
+        Marker::OutputStart { .. } => ctx.widgets.lock().unwrap().on_output_start(),
+        _ => {}
+    }
     let mut store = blocks.lock().unwrap();
     match marker {
         Marker::PromptStart => store.on_prompt_start(abs_line),
@@ -2076,7 +2160,9 @@ fn apply_marker(marker: Marker, term: &Term<EventProxy>, scrolled: u64, ctx: &Fe
         Marker::Graphics(_)
         | Marker::InlineImage(_)
         | Marker::Notify { .. }
-        | Marker::UserVar { .. } => {}
+        | Marker::UserVar { .. }
+        | Marker::Progress(_)
+        | Marker::ShellWidget(_) => {}
     }
 }
 
@@ -2247,6 +2333,8 @@ mod tests {
             cwd: Arc::new(Mutex::new(None)),
             cwd_remote: Arc::new(AtomicBool::new(false)),
             user_vars: UserVars::default(),
+            widgets: Widgets::default(),
+            progress: ProgressSlot::default(),
             graphics: Arc::new(Mutex::new(Graphics::default())),
             window_size: Arc::new(Mutex::new(WindowSize {
                 num_lines: rows as u16,
@@ -2280,6 +2368,55 @@ mod tests {
         assert!(!remote());
         feed(&mut p, &mut s, b"\x1b]7;file://localhost/tmp\x07", &c);
         assert!(!remote());
+    }
+
+    /// OSC 9;4 progress stands until state 0, the command's end (133;D), or
+    /// leaving the alternate screen it was set in.
+    #[test]
+    fn progress_reports_and_their_clearing() {
+        use rift_core::ProgressState::*;
+        let c = ctx(20, 5);
+        let mut p = vte::ansi::Processor::new();
+        let mut s = OscScanner::new();
+        let get = || {
+            c.progress
+                .lock()
+                .unwrap()
+                .map(|r| (r.progress.state, r.progress.pct))
+        };
+        feed(&mut p, &mut s, b"\x1b]9;4;1;42\x1b\\", &c);
+        assert_eq!(get(), Some((Normal, Some(42))));
+        // an error without a value keeps the last one's
+        feed(&mut p, &mut s, b"\x1b]9;4;2\x07", &c);
+        assert_eq!(get(), Some((Error, Some(42))));
+        feed(&mut p, &mut s, b"\x1b]9;4;0\x07", &c);
+        assert_eq!(get(), None);
+        // the running command finishes
+        feed(&mut p, &mut s, b"\x1b]9;4;3\x07", &c);
+        assert_eq!(get(), Some((Indeterminate, None)));
+        feed(&mut p, &mut s, b"\x1b]133;D;0\x07", &c);
+        assert_eq!(get(), None);
+        // set on the primary screen: survives an alt-screen round trip
+        feed(
+            &mut p,
+            &mut s,
+            b"\x1b]9;4;1;10\x07\x1b[?1049h\x1b[?1049l",
+            &c,
+        );
+        assert_eq!(get(), Some((Normal, Some(10))));
+        // set inside the alt screen: leaving it clears it
+        feed(&mut p, &mut s, b"\x1b[?1049h\x1b]9;4;4;60\x07", &c);
+        assert_eq!(get(), Some((Paused, Some(60))));
+        feed(&mut p, &mut s, b"\x1b[?1049l", &c);
+        assert_eq!(get(), None);
+        // malformed: nothing changes
+        feed(
+            &mut p,
+            &mut s,
+            b"\x1b]9;4;1;5\x07\x1b]9;4;9;999\x07\x1b]9;4;1;abc\x07",
+            &c,
+        );
+        assert_eq!(get(), Some((Normal, Some(5))));
     }
 
     #[test]
@@ -3343,6 +3480,8 @@ mod tests {
             cwd: c.cwd.clone(),
             cwd_remote: c.cwd_remote.clone(),
             user_vars: c.user_vars.clone(),
+            widgets: c.widgets.clone(),
+            progress: c.progress.clone(),
             dirty: Arc::new(AtomicBool::new(false)),
             saw_output: Arc::new(AtomicBool::new(false)),
             generation: c.generation.clone(),

@@ -1,7 +1,9 @@
 mod a11y;
+mod agent_status;
 mod app;
 mod background;
 mod capture;
+mod composer;
 mod control;
 mod dropdown;
 mod hotkey;
@@ -15,6 +17,7 @@ mod menubar;
 mod mouse;
 mod notify;
 mod pane;
+mod progress;
 mod quit;
 mod remote;
 mod script;
@@ -34,7 +37,14 @@ mod vim;
 
 use winit::event_loop::EventLoop;
 
-const USAGE: &str = "usage: rift-terminal [--script <file> [--headless]] [rift://LINK] [--version] [--help]\n       rift-terminal ctl <command>   (see `rift-terminal ctl help`)\n       rift-terminal remote [--listen ADDR] [--managed] | pair [--view] | devices | revoke ID | history [--limit N] | permission ID operate|view\n                                     gateway for the mobile companion (see `rift-terminal remote help`)\n       rift-terminal relay [--listen ADDR] [--trust-forwarded]\n                                     relay for phones outside the local network (see `rift-terminal relay help`)";
+const USAGE: &str = "usage: rift-terminal [--new-window] [PATH…]   a folder (or a file's folder) in a new tab\n       rift-terminal [rift://LINK] [--script <file> [--headless]] [--version] [--help]\n       rift-terminal ctl <command>   (see `rift-terminal ctl help`)\n       rift-terminal remote [--listen ADDR] [--managed] | pair [--view] | devices | revoke ID | history [--limit N] | permission ID operate|view\n                                     gateway for the mobile companion (see `rift-terminal remote help`)\n       rift-terminal relay [--listen ADDR] [--trust-forwarded]\n                                     relay for phones outside the local network (see `rift-terminal relay help`)";
+
+/// The `rift://` link that opens `path` (relative to this process's
+/// directory) in a new tab or window.
+fn open_path_link(path: &std::path::Path, new_window: bool) -> Result<String, String> {
+    let abs = std::path::absolute(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    rift_core::uri::open_path_link(&abs, new_window)
+}
 
 fn main() {
     // restart variables are read once and not passed on to shells
@@ -43,7 +53,9 @@ fn main() {
 
     let mut script = None;
     let mut headless = false;
-    let mut link = None;
+    let mut links: Vec<String> = Vec::new();
+    let mut paths: Vec<std::path::PathBuf> = Vec::new();
+    let mut new_window = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -105,12 +117,25 @@ fn main() {
                 println!("{USAGE}");
                 return;
             }
-            // a `rift://` link (Linux desktops pass it as `%u`): the running
+            // a `rift://` link (Linux desktops pass it as `%U`): the running
             // Rift opens it, else this process does once it is up
-            l if l.starts_with("rift://") => link = Some(l.to_string()),
+            l if l.starts_with("rift://") => links.push(l.to_string()),
             // LaunchServices' process serial number (older macOS, some
             // launchers): not ours to parse
             psn if psn.starts_with("-psn_") => {}
+            // the folders below open in a new window rather than a tab
+            "--new-window" => new_window = true,
+            // a desktop launcher's `%U` passes local files as file:// URLs
+            url if url.starts_with("file://") => match rift_core::uri::file_url_path(url) {
+                Some(p) => paths.push(p),
+                None => {
+                    eprintln!("rift-terminal: not a local file: {url}");
+                    std::process::exit(2);
+                }
+            },
+            // a folder or file to open (an editor's "external terminal",
+            // a script), relative to the caller's directory
+            path if !path.starts_with('-') => paths.push(path.into()),
             other => {
                 eprintln!("rift-terminal: unknown argument {other:?}\n{USAGE}");
                 std::process::exit(2);
@@ -122,11 +147,25 @@ fn main() {
         eprintln!("rift-terminal: --headless needs --script\n{USAGE}");
         std::process::exit(2);
     }
-    if let Some(l) = &link
-        && script.is_none()
-        && control::forward_link(l)
-    {
-        return;
+    if new_window && paths.is_empty() {
+        links.push(format!("{}://action/new_window", rift_core::uri::SCHEME));
+    }
+    for path in &paths {
+        match open_path_link(path, new_window) {
+            Ok(l) => links.push(l),
+            Err(e) => {
+                eprintln!("rift-terminal: {e}");
+                std::process::exit(2);
+            }
+        }
+    }
+    // the running Rift opens them; what it did not take, this process
+    // opens once it is up
+    if script.is_none() && !links.is_empty() {
+        links.retain(|l| !control::forward_link(l));
+        if links.is_empty() {
+            return;
+        }
     }
 
     // the window's process only (not `ctl`, `remote` or the services): its
@@ -148,11 +187,10 @@ fn main() {
     // (`Rift.app`), never to a bare `cargo run` or test binary
     #[cfg(target_os = "macos")]
     links::install(proxy.clone());
-    if let Some(l) = link {
-        let _ = proxy.send_event(app::UserEvent::OpenLink(l));
-    }
 
     let mut application = app::App::new(proxy, script, headless);
+    // a fresh start opens its first tab in the first link's folder
+    application.start_links = links;
     event_loop.run_app(&mut application).expect("event loop");
     quit::LOOP_RETURNED.store(true, std::sync::atomic::Ordering::SeqCst);
     // a process that does not end now is a stall too (the Dock keeps it)

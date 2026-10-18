@@ -437,10 +437,27 @@ pub fn agent_disc(
     scale: f32,
     clip: [f32; 4],
 ) {
+    agent_disc_cut(layer, engine, agent, c, d, None, scale, clip);
+}
+
+/// [`agent_disc`] with room for a status dot drawn after it (`dot`:
+/// centre and radius): the Claude sprite, which draws over quads, is cut
+/// away under it (the tab badges).
+#[allow(clippy::too_many_arguments)]
+pub fn agent_disc_cut(
+    layer: &mut Layer,
+    engine: &mut TextEngine,
+    agent: Agent,
+    c: [f32; 2],
+    d: f32,
+    dot: Option<([f32; 2], f32)>,
+    scale: f32,
+    clip: [f32; 4],
+) {
     let (disc, glyph, ink) = agent_style(agent);
     layer.circle(c, d, disc);
     if agent == Agent::ClaudeCode {
-        claude_mark(layer, c, d, None, scale, clip);
+        claude_mark(layer, c, d, dot, scale, clip);
     } else {
         let size = d * if glyph.len() > 1 { 0.42 } else { 0.62 };
         mark(layer, engine, glyph, size, c[0], c[1], ink);

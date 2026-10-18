@@ -436,6 +436,23 @@ file, one row per command, newest first; the command line filters it, ⌃R
 cycles the scope (this pane, all shells, failed), ⏎ runs, ⇥ edits first,
 ⌘⏎ runs in a new split.
 
+**Shell widgets** (Warp): where your shell config binds ⌃R, ⌃T or ⌥C to a
+widget of its own (fzf, atuin, fzf.fish: a zsh user widget, a bash
+`bind -x` or macro, a fish user binding in the current mode), that key in
+the command line runs it instead. Rift hands the command line and cursor to
+the shell, the widget's interface draws below the prompt and takes the keys,
+and the line it leaves comes back into the command line, not run; a
+cancelled widget leaves the line and cursor as they were. A widget that runs
+a command itself (fzf's ⌥C `cd`, atuin's `enter_accept`; in fish a binding
+that queues `commandline -f execute`) runs it as a block, and the command
+line keeps what it held. While a widget runs, the rich input composer does
+not open (⌃⇧G does nothing); in an open composer ⌃R, ⌃T and ⌥C are never
+handed to the shell. Each prompt reports the bound keys, so an unbound key
+keeps Rift's behaviour (⌃R the history pane). ⌥C counts only where Option is
+Meta (`option_as_meta`; elsewhere Alt always is). Needs Rift's shell
+integration (bash 4.3 or newer); a line over 4 KiB keeps Rift's behaviour.
+`shell_widgets = "rift"` always uses Rift's own.
+
 `autosuggestions = false` turns the ghost text off; `completions_menu = false`
 turns the completion panel off (the ghost text and Tab still work).
 
@@ -449,7 +466,29 @@ rebuilt, and each pane's `commands[].exec` are sent **at that pane's first
 prompt**. A launch configuration opens in the current window; the tabs of
 all `windows:` entries are appended in document order; `~` in a `cwd` is expanded and a non-existent directory is
 ignored. Warp's own files drop in unchanged. "Save current layout as launch
-configuration" writes one TOML Tab Config per open tab.
+configuration" writes one TOML Tab Config per open tab. A pane may name its
+own program (`shell`, as in Warp), a profile (`profile`) and arguments
+(`args`); a pane whose profile or program cannot open stops the whole
+configuration with a toast.
+
+## Profiles
+
+Named launch settings (`[[profiles]]` in config.toml, Windows Terminal
+profiles): program, arguments, start directory, environment, tab title and
+colour. The shells in `/etc/shells` are profiles too (`zsh`, `fish`, …;
+`discover_shells`). `default_profile` is what ⌘T, + and splits open, and
+every other new tab too (the first tab, ⌘N, links, `rift-terminal <path>`,
+`ctl open`, the phone, the drop-down window): its directory unless a folder
+was named, its title and colour. Duplicate tab keeps the source's folder,
+title and colour (the profile's where the source has none). The ⌄
+beside + (or right-click +) lists them with ⌃⇧1…⌃⇧9 shortcuts, then
+Settings, the command palette and About; the palette has `New tab: <name>`
+and `Split right/down: <name>`. Each pane runs its own program with its own
+shell integration and completions; a profile's environment reaches only its
+panes. A pane remembers its profile through duplicate, save layout and
+restore; a reattached shell is never started twice. An unknown profile or a
+missing program is a toast naming both, and nothing opens. Reference:
+[configuration.md › Profiles](configuration.md#profiles).
 
 ## Links (`rift://`)
 
@@ -462,10 +501,15 @@ links (Warp's `warp://` paths):
 | `rift://action/new_window?path=<folder>` | A window, its tab in that folder |
 | `rift://launch/<name>` or `rift://tab_config/<name>` | The launch configuration or Tab Config of that name (case ignored); `?new_window=true` opens it in a window of its own |
 | `rift://settings?q=<text>` | Settings, its search filled in |
+| `rift://action/open_file?path=<file>&line=<n>[&col=<n>]` | The file where `link_editor` says, at that line: an editor's CLI on `PATH` takes the line (`code --goto f:12:3`, `zed f:12:3`, `subl f:12:3`, JetBrains `--line 12 --column 3 f`; an app bundle without its CLI opens the file without the line), the viewer (`link_editor = "rift"`, or the editor is not installed) scrolls to it |
 
 `path` is percent-decoded (`+` is a space), `~` is expanded, and it must be
-an absolute path to an existing folder. A link runs no command of its own: a
-file (a script included) or an unknown action is refused with a toast saying
+an absolute path to an existing folder (`open_file`: an existing regular
+file; `line` and `col` are whole numbers from 1, `col` counts only with a
+`line`). A link runs no command of its own: `open_file` opens the file in an
+editor or the viewer and never runs it (`link_editor = "system"` reveals a
+program instead of running it); a file in a tab link (a script included) or
+an unknown action is refused with a toast saying
 why (control characters removed, cut at 120 characters). The link opens in the last focused window (never
 the drop-down window while another is open) and brings Rift to the front.
 macOS registers the scheme with `Rift.app` and delivers the link as an Apple
@@ -477,6 +521,43 @@ whose panes run commands asks first (*Open this layout from a link?*, its
 commands listed, Cancel focused), and more than ten links in three
 seconds are dropped. A link while only the drop-down window exists opens
 an ordinary window for it.
+
+## Opening Rift from other apps
+
+A folder opens in Rift from wherever it is named; a file opens its folder.
+Each becomes a `rift://action/new_tab` link (`new_window` with
+`--new-window`), so it reaches the running Rift the way a link does.
+
+- **Command line and scripts:** `rift-terminal <path>…` opens each folder in
+  a new tab of the running Rift (`--new-window`: a window). A relative path
+  is resolved against the caller's directory; a path that does not exist
+  prints `rift-terminal: <path>: no such file or directory` and exits 2, and
+  nothing opens. `file://` URLs are taken too (a Linux launcher's `%U`). The
+  running Rift is reached over its control socket (macOS: needs
+  `control_api` at `navigate` or `full`, the default; Linux: always); when
+  none answers, the process starts Rift itself and its first tab opens in
+  the first folder (a restored session keeps its tabs and gets a new one).
+  `--new-window` alone opens a window where a new tab starts (on a cold
+  start, that window is the first one). A folder named like a subcommand
+  (`ctl`, `remote`, `relay`) is opened by its path: `rift-terminal ./remote`.
+- **The `rift` command:** the palette's *Install 'rift' command*
+  (`install_cli`) links `~/.local/bin/rift` to the running Rift binary, so
+  `rift .` works in any shell; JetBrains IDEs and VS Code can use it as
+  their external terminal. An earlier link to a Rift binary is replaced; any
+  other file at that path is never replaced (an error toast says so). When
+  the folder is not on the shell's `PATH`, the toast says to add it.
+  `RIFT_CLI_DIR` installs into another folder (tests).
+- **macOS — Finder, the Dock, editors:** `Rift.app` declares folders
+  (`CFBundleDocumentTypes`, `public.folder`, role Shell, rank Alternate: it
+  never becomes the default for opening folders). A folder dropped on the
+  Dock icon, *Open With → Rift* in Finder, and `open -a Rift <dir>` (VS
+  Code's and JetBrains' external terminal on macOS) arrive as an
+  open-documents event and open a tab there; one that launches Rift opens
+  its first tab there.
+- **Linux — launchers:** the `.desktop` entry runs `rift-terminal %U`, so a
+  folder dropped on the launcher opens a tab there. It does not claim
+  `inode/directory`: that would let Rift replace the file manager as the
+  folder default on desktops without a set preference.
 
 ## Appearance
 
@@ -564,7 +645,7 @@ an ordinary window for it.
   `tab_bar_with_one_tab = false` hides the lone tab (and the vertical rail)
   until a second tab opens.
 - Tab menu (right-click): *Rename tab* (inline), a tab color, duplicate,
-  sync, *Close other tabs*.
+  sync, *Move to new window*, *Move to window N*, *Close other tabs*.
 - **Windows** (⌘N, File › New Window): every window runs in the one Rift
   process (it shares the GPU device, fonts, config, workers, the control
   socket and the session file), opens in about 12 ms, and costs about
@@ -576,6 +657,21 @@ an ordinary window for it.
   tab) ends its shells and leaves the others open, after the running-job
   warning (`confirm_close_running`) names its running commands; closing the
   last window quits, and ⌘Q quits every window ("Quit Rift?").
+- **Move tabs and panes between windows** (Warp, Windows Terminal): drag a
+  tab out of its strip or rail and release it over another window (it lands
+  at the slot under the pointer on that window's strip, else last) or
+  outside every window (a new window opens there); the tab menu's *Move to
+  new window* and *Move to window N: …*, and the pane menu's *Move to new
+  window*, do the same. The shells keep running with their scrollback,
+  blocks, pane ids and command-line drafts (selections clear); the
+  destination window takes focus, and notifications from a moved pane come
+  forward in its new window. A window whose last tab leaves closes without
+  ending a shell. The drop-down hotkey window gives and takes tabs: one
+  moved in drops it down; when its last tab leaves it hides and gets a fresh
+  tab, as when the hotkey first creates it. The last ordinary window's last
+  tab does not move into the drop-down window. The session file saves the
+  new layout, and a relaunch restores it (the drop-down window is not saved).
+  A window's only tab does not move to a new window of its own.
 - **New tabs start in** (`working_directory`): `previous` (the active pane's
   directory, default), `home`, or a path (`~` expands; a missing directory
   falls back to home). `confirm_close_running` (on) asks before closing a
@@ -607,7 +703,7 @@ an ordinary window for it.
   pointer), swap it with one (the middle third), into another tab (hold to
   open it and place the pane among its panes), or out into a new tab; the
   shell keeps running and keeps its scrollback. The pane menu adds Maximize
-  pane and Move to new tab.
+  pane, Move to new tab and Move to new window.
 - **Synchronized inputs** (⌥⌘I, tab context menu or Window menu): typing and
   submitting in one pane of a split tab goes to the other panes of that tab;
   the tab shows a sync marker while it is on. Input only reaches panes in the
@@ -640,6 +736,28 @@ an ordinary window for it.
   the tabs do not fit, the active one stays visible and `+N above` /
   `+N more` lines stand in for the rest, marked with the most urgent alert
   among them.
+- **Agent tabs** (Warp's vertical-tab agent badges): a tab running Claude
+  Code, Codex, OpenCode or Gemini CLI (recognized from the command line, or
+  from the agent's own notification) shows the agent's mark instead of the
+  spinner, with its state: working, waiting for you (it asked for
+  permission or input and nothing was typed since; pulses unless Reduce
+  motion is on), done (exit 0, or at its own prompt) and error (non-zero
+  exit). Done and error stay until the pane is viewed. A tab of several
+  agent panes shows the most urgent (waiting > error > working > done).
+  Tooltip and screen reader: `Claude Code — waiting for you`.
+- **Worktree identity**: a pane inside a linked git worktree shows
+  `<worktree dir> · <branch>` (rail subtitle, strip tooltip); the main
+  checkout keeps `directory · branch`. Identity is the repository's common
+  git directory plus the worktree path, so a branch switch updates the
+  label without changing the pane. Remote panes are never inspected locally.
+- **New worktree tab…** (palette, `new_worktree_tab`, unbound): asks for a
+  branch name (suggests the first free `wt-<n>`), runs `git worktree add -b
+  <branch> <repo-parent>/<repo>.worktrees/<branch> HEAD` (an argument list,
+  no shell, `GIT_TERMINAL_PROMPT=0`, off the UI thread) from the active
+  pane's checkout, then opens a tab there. A failure (branch exists, path
+  exists, not a repository, invalid name) toasts git's message; a branch git
+  created before refusing is deleted again, and anything that could not be
+  cleaned up is named in the toast.
 - **Session switcher** (⇧⌘O): one fuzzy list of tabs, panes of split tabs
   (directory and running job), the other windows' tabs (`title — window N`;
   focusing one raises that window), tabs of other Rift processes (their
@@ -677,6 +795,49 @@ are left as they are. Plain `bash` and `zsh` typed at a Rift prompt need no
 offer: they load the hooks themselves (below), and fish 4 marks its own
 prompts. Settings › Input › *Offer Rift in subshells* (`subshell_offer`)
 turns the bar off.
+
+## Rich input (composer over a running program)
+
+Warp's "rich input for CLI agents". While a program owns the keys (a
+command runs, or a full-screen program is on the alternate screen: Claude
+Code, Codex, vim, less), ⌃⇧G / ⌘E (`rich_input`, also in the palette) opens
+the **composer**: Rift's command editor docked at the bottom of that pane,
+headed *Compose for* and the agent's name (Claude Code, Codex, OpenCode,
+Gemini CLI) or the command line. The program keeps running and drawing
+above it; its newest rows move up out from under the composer (render only:
+the program keeps its size, so it never redraws for it) and its cursor
+hides. The composer is the command editor: multi-line, mouse selection,
+undo, multi-cursor, vim mode when `vim_mode` is on (Esc leaves Insert first;
+in Normal it closes), pasted and dropped files type their paths (Claude
+Code and Codex attach an image from its path), an image-only clipboard
+reaches the program as an empty paste (they read the image themselves).
+Nothing of the shell's applies: no completions, history search, syntax
+colors or corrections; ↑ / ↓ recall what was sent from this pane.
+
+- **Send**: ⏎ (⇧⏎ / ⌥⏎ insert a newline); with `rich_input_submit =
+  "cmd_enter"`, ⌘⏎ sends and ⏎ inserts a newline. The text goes to that
+  pane's program only (never to synchronized panes) as one bracketed paste
+  when the program enabled bracketed paste (an embedded end marker is
+  removed), else as typed, then Enter (CR). The composer then closes and the
+  keys go back to the program. An empty composer sends nothing.
+- **Esc** closes it and keeps the draft for that pane; ⌃⇧G again restores
+  it. ⌃C clears the draft.
+- **The program ends** (its block finishes) or **the pane closes** while
+  the composer is open, or while a draft for it waits: nothing is sent
+  anywhere; the composer closes and a toast offers the draft with **Copy**
+  (it stays until dismissed). A draft never carries over to the pane's next
+  program.
+- At a shell prompt the action does nothing: the command editor is already
+  there.
+- **Auto-open** (`rich_input_auto`, Settings › Input): over a coding agent
+  (its command names one, as for notifications) that waits for input: its
+  own "waiting for your input" notification, or one second of quiet after
+  output while its title does not say it is working. Esc suppresses it until
+  the agent asks again (its notification), works again (its title), or
+  produces new output while you typed nothing into it (the echo of your own
+  typing never reopens it).
+- `dump` shows `composer=<open|closed> draft_len=N` per pane; the
+  accessibility tree names the editor *Compose for …* while it is open.
 
 ## Shell integration
 
@@ -1285,6 +1446,30 @@ countdown and *Try again*, which retries at once).
   have a *Notifications* switch that turns its notifications off. "Notify
   me" always notifies.
 
+## Progress reports (OSC 9;4)
+
+Programs that report progress the ConEmu / Windows Terminal way
+(`ESC ] 9 ; 4 ; st ; pr` ended by ST or BEL — cargo, winget-style tools,
+systemd, Claude Code) show it on their tab (*docs/ui.md*, tab strip) and, on
+macOS, as the Dock tile's badge. `st`: 0 removes it, 1 is normal with `pr`
+0–100, 2 is an error, 3 indeterminate (no `pr`), 4 paused (`pr` optional).
+`pr` above 100 counts as 100; an error or paused report without `pr` keeps
+the pane's previous value. Anything else (another state, a non-numeric or
+signed value, extra fields, a sequence past the 4 KiB OSC bound) is ignored.
+
+- **Clearing**: a report stands until state 0, until the running command
+  finishes (OSC 133;D), until its pane closes, or — only when it was set
+  while the alternate screen showed — until the program leaves the
+  alternate screen.
+- **Several panes**: the tab shows the most severe report (error, paused,
+  then normal and indeterminate alike), the newest of equals.
+- **Dock badge** (macOS): the percentage of the focused window's active tab,
+  `!` for an error, nothing for indeterminate or without a report. Linux:
+  no taskbar progress.
+- `show_progress = false` hides the bar, the badge and the accessible
+  label's progress (hot reload); panes still track reports (`dump` lists
+  each pane's `progress=<state>:<pct>`).
+
 ## Notifications (attention center)
 
 The inbox button in the top bar (or ⇧⌘A) opens a popover listing, newest
@@ -1354,6 +1539,55 @@ diff, so a stale panel never applies the wrong hunk. A hunk cut by the
 4,000-line limit offers only file actions. The model loads on a background
 thread and reloads when a command finishes; writes run in order on a
 background writer thread. Details in [ui.md](ui.md).
+
+The header's base chip picks what the review compares against:
+**Uncommitted** (the default: staged and unstaged changes), **Branch:
+<default>** (what `origin/HEAD` points at, else `main` / `master`, else
+`origin/main` / `origin/master`) or any local or remote branch from a
+filterable list. Against a branch the diff runs from `merge-base(branch,
+HEAD)` to the working tree, so the branch's commits and the uncommitted work
+show together; a strip under the header reads `vs <branch> (merge-base
+<sha>)`, and stage, unstage and revert are hidden (`s` / `u` / `r` say why:
+reverting against a branch would discard committed work). The choice is kept
+per repository until Rift quits.
+
+The commit bar at the panel's foot commits the staged changes: a message
+field (Enter adds a line, ⌘⏎ commits), **Commit** (off with the reason when
+nothing is staged, the message is empty or the panel compares against a
+branch) and **Push**. Both run `git` (so your hooks, credential helpers and
+ssh config apply) with an argument array, never a shell string, without a
+terminal (`GIT_TERMINAL_PROMPT=0`, ssh in batch mode unless you set your own
+ssh command) and off the UI thread with a spinner. A failing hook's output
+shows in an error toast. Push sends the current branch to its upstream branch
+of the same name; with none it runs `push --set-upstream` to the only remote or
+`origin`. An upstream with another name (a branch made with `git checkout -b
+feat origin/main`) is refused, like `push.default=simple`: `Upstream is
+origin/main, not feat: push from a terminal or set the upstream`. A branch with
+no commits yet says `No commits yet: commit first`. It never forces: a
+rejected push (non-fast-forward) shows git's refusal; one that needs a password
+or passphrase fails with a note that prompts are not supported. A commit or
+push that runs past 120 s is stopped together with every process it started
+(hooks included). A result whose window closed meanwhile is dropped.
+
+**Send to agent…** pastes code into another pane — a coding agent's, usually
+(Warp's "send to CLI agent"): a review hunk (`a`, or right-click a hunk or
+line), a review file's hunks (right-click its header) or the file viewer's
+selected lines (click a line, ⇧-click or ⇧↑ ⇧↓ to extend; `a` or ⋮ › Send to
+agent…; without a selection, the top line on screen — on a rendered Markdown
+page, which maps to no source line, a toast asks to switch to Raw). The text is
+`path:start-end` (relative to the target pane's directory when the file is
+under it) and a fenced block tagged with the file's language (a hunk keeps its
+` ` / `+` / `-` marks), with no Enter after it. A hunk or file the diff line
+cap cut names its last kept line and says `(truncated)` after the range. A
+picker lists panes running a known agent (Claude Code, Codex, OpenCode, Gemini
+CLI) first, then every other pane, across windows, each with its window, tab
+(and pane number when the tab is split), title and directory; from the review
+panel, the pane that was active is marked `(this pane)`. A shell waiting at
+Rift's command editor gets the text in its editor, as a paste would (nothing
+runs). Otherwise Enter pastes it bracketed when the target turned bracketed
+paste on; a target without it would run each line, so Rift asks first, and
+the paste goes to that pane only (not its synchronized siblings). A target
+that closed meanwhile gets nothing (error toast).
 
 ## SSH profiles
 

@@ -41,11 +41,13 @@ listed alternates.
 |---|---|---|
 | ⌘T / ⌃⇧T | `new_tab` | New tab |
 | ⌘1 … ⌘9 | `tab_select_1..9` | Select tab by number (⌘9 = last) |
+| ⌃⇧1 … ⌃⇧9 | `new_tab_profile_1..9` | New tab with the nth profile of the + menu ([profiles](configuration.md#profiles)) |
 | ⇧⌘} / ⌃Tab | `tab_next` | Next tab |
 | ⇧⌘{ / ⌃⇧Tab | `tab_prev` | Previous tab |
 | ⌃⇧← / ⌃⇧→ | `move_tab_left` / `_right` | Reorder current tab |
 | ⇧⌘T | `reopen_closed_tab` | Reopen last closed tab (restores cwd) |
 | ⇧⌘O | `session_switcher` | Fuzzy switcher over tabs, panes and recent blocks |
+| — | `new_worktree_tab` | Palette *New worktree tab…*: name a branch, add its git worktree, open a tab there |
 | — | `toggle_tab_layout` | Tabs on top ↔ vertical rail |
 | — | `rename_tab` | Rename the current tab |
 | — | `close_other_tabs` | Close every tab except the current one |
@@ -87,6 +89,7 @@ listed alternates.
 | ⌃⌘K | `open_keybindings` | Settings → Keybindings page |
 | ⌘L | `focus_input` | Scroll to bottom, deselect, focus the editor |
 | ⇧⌘A | `attention_center` | Notifications popover: finished commands, failures, notifications and bells |
+| ⌘E / ⌃⇧G | `rich_input` | Rich input: open (or close) the composer over the running program; ⏎ sends, ⇧⏎ new line, Esc closes keeping the draft (Warp's ⌃G is `add_next_occurrence` here) |
 | ⇧⌘E | `toggle_explorer` | File explorer panel (left) |
 | ⇧⌘G | `toggle_review` | Code review panel (right) |
 | ⌥⌘G | `focus_review` | Open the code review panel if needed and give it the keyboard (see Code review keys) |
@@ -94,6 +97,7 @@ listed alternates.
 | — | `clear_transcripts` | Delete saved block transcripts |
 | — | `check_for_updates` | Look for a new release now; the answer toasts (also Rift → Check for Updates…) |
 | — | `update_rift` | The update dialog for an available release (else a check) |
+| — | `install_cli` | Install 'rift' command: `~/.local/bin/rift` → this Rift, so `rift .` opens a folder; refuses to replace a file that is not Rift's, and says when the folder is not on `PATH` |
 | — | `open_about` | Settings → About page: version, copy button, copyright (also Rift → About Rift) |
 | — | `whats_new` | What's New: release notes (also Help → What's New) |
 | ⌘= / ⇧⌘+ | `font_increase` | Font size +1 (persisted to config.toml) |
@@ -130,7 +134,8 @@ Active only while the app owns the command line.
 | ⌥⇧← / ⌥⇧→ | Extend the selection by one word |
 | ⇧⌘← / ⇧⌘→, ⇧Home / ⇧End | Extend the selection to line start / end |
 | ⌘X | Cut the selection (⌘C copies it, ⌘A selects all) |
-| ⌃R | History pane above the command line (again: next scope); in it ↑/↓ move (PageUp/PageDown by 8), ⏎ runs, ⇥ edits first, ⌘⏎ runs in a new split, Esc closes; with no match ⏎ runs the typed line and ⇥ only closes the pane |
+| ⌃R | History pane above the command line (again: next scope); in it ↑/↓ move (PageUp/PageDown by 8), ⏎ runs, ⇥ edits first, ⌘⏎ runs in a new split, Esc closes; with no match ⏎ runs the typed line and ⇥ only closes the pane. Where your shell binds ⌃R to its own widget (fzf, atuin), that widget runs on the command line instead (`shell_widgets`) |
+| ⌃T / ⌥C | Where your shell binds them to its own widgets (fzf's file picker / directory jump): run them on the command line (`shell_widgets`; ⌥C with Option as Meta); otherwise nothing |
 | ⌃C | Interrupt (clears line, sends SIGINT) |
 | ⌃D | EOF (only when the line is empty) |
 | ⌃L | Clear screen (shell redraw; blocks survive) |
@@ -211,6 +216,20 @@ selection, `iw` `a"` … select a text object, and:
 With the file viewer open, ⌘F finds in the file instead: type the query
 (case-insensitive), Enter / ⇧Enter next / previous match, Esc closes the bar.
 
+## File viewer and commit message keys
+
+File viewer (focused): click selects a line, ⇧-click or ⇧↑ ⇧↓ extend the
+selection · `a` sends the selected lines (else the top line on screen) to an
+agent pane through the target picker · Esc clears the selection, then closes
+the viewer.
+
+Code review commit message (click the field at the panel's foot): typing and
+⌘V go into the message · Enter adds a line · ⌘⏎ (or ⌃⏎) commits the staged
+changes · Esc leaves the field. Other ⌘ chords stay app shortcuts.
+
+Target picker ("Send to agent…"): type to filter · ↑ ↓ · Enter pastes into
+the chosen pane (no Enter is sent after it) · Esc cancels.
+
 ## Mouse
 
 | Gesture | Effect |
@@ -244,7 +263,7 @@ Esc (or the palette shortcut again) close · Enter run selected · ↑/↓ move 
 
 ## Code review keys
 
-⌥⌘G (`focus_review`) opens the review panel if needed and gives it the keyboard; a 2 px `accent` ring marks the row it stands on · ↑ ↓ / `j` `k` / ⇥ ⇧⇥ move between sections, files and the hunks of expanded files · Home / End first / last · ← / `h` folds the section or file (else steps out to the file or section) · → / `l` unfolds (else steps in) · Enter or Space folds or unfolds · `s` stages and `u` unstages the file or hunk (on a section: all) · `r` reverts an unstaged file or hunk after the confirm dialog · `o` opens the file · `c` copies the hunk · Esc gives the keys back to the command line (maximized: the first Esc, then a second restores the panel). Any other plain key leaves the panel and goes to the command line; ⌘ ⌃ ⌥ chords stay app shortcuts. Confirm dialogs: ⇥ ⇧⇥ ← → move between the buttons, Enter presses the focused one, Esc cancels.
+⌥⌘G (`focus_review`) opens the review panel if needed and gives it the keyboard; a 2 px `accent` ring marks the row it stands on · ↑ ↓ / `j` `k` / ⇥ ⇧⇥ move between sections, files and the hunks of expanded files · Home / End first / last · ← / `h` folds the section or file (else steps out to the file or section) · → / `l` unfolds (else steps in) · Enter or Space folds or unfolds · `s` stages and `u` unstages the file or hunk (on a section: all) · `r` reverts an unstaged file or hunk after the confirm dialog · `o` opens the file · `c` copies the hunk · `a` sends the hunk or file to an agent pane (a picker; Enter pastes, no Enter after it) · against a branch `s` `u` `r` only say why they are off · Esc gives the keys back to the command line (maximized: the first Esc, then a second restores the panel). Any other plain key leaves the panel and goes to the command line; ⌘ ⌃ ⌥ chords stay app shortcuts. Confirm dialogs: ⇥ ⇧⇥ ← → move between the buttons, Enter presses the focused one, Esc cancels.
 
 ## Settings keys
 

@@ -18,24 +18,32 @@ __rift_loaded=1
 
 __rift_b=$'\e]133;B\a'
 
-# OSC 7 wants a percent-encoded path: `%`, spaces and control characters
+# Percent-encode $1 into REPLY: `%`, `;`, spaces and control characters
 # (BEL/ESC would end or inject sequences) must not travel raw.
-__rift_report_cwd() {
-    local LC_ALL=C dir=$PWD out='' c i
-    if [[ $dir =~ [^A-Za-z0-9/._~-] ]]; then
-        for ((i = 0; i < ${#dir}; i++)); do
-            c=${dir:i:1}
+__rift_pct() {
+    local LC_ALL=C s=$1 out='' c i n
+    if [[ $s =~ [^A-Za-z0-9/._~-] ]]; then
+        for ((i = 0; i < ${#s}; i++)); do
+            c=${s:i:1}
             case $c in
                 [A-Za-z0-9/._~-]) out+=$c ;;
                 *)
-                    printf -v c '%%%02X' $(($(printf '%d' "'$c") & 255))
+                    printf -v n '%d' "'$c"
+                    printf -v c '%%%02X' $((n & 255))
                     out+=$c
                     ;;
             esac
         done
-        dir=$out
+        s=$out
     fi
-    printf '\e]7;file://%s%s\a' "${HOSTNAME:-localhost}" "$dir"
+    REPLY=$s
+}
+
+# OSC 7 wants a percent-encoded path.
+__rift_report_cwd() {
+    local REPLY
+    __rift_pct "$PWD"
+    printf '\e]7;file://%s%s\a' "${HOSTNAME:-localhost}" "$REPLY"
 }
 
 # Prompt chips: the active Python environment, and the php and
@@ -179,6 +187,7 @@ __rift_prompt_end() {
     # B marker: end of prompt / start of user input. Re-added whenever a
     # prompt framework (or a PROMPT_COMMAND entry) rebuilt PS1 without it.
     [[ $PS1 == *"$__rift_b"* ]] || PS1+="\\[$__rift_b\\]"
+    __rift_report_widgets
     if [[ -n "${__rift_use_ps0-}" ]]; then
         [[ ${PS0-} == *"$__rift_c"* ]] || PS0+=$__rift_c
         # PS0 runs __rift_cmdline in a subshell: only when HISTCMD moved
@@ -234,6 +243,64 @@ rift-complete() {
     # shellcheck source=complete.bash disable=SC1091
     source "$__rift_complete_srv"
 }
+
+# Shell widgets: ⌃R, ⌃T and ⌥C run your own bindings (fzf, atuin) on Rift's
+# command line. Each prompt reports which of them your config binds to a
+# shell command or macro (OSC 6973;K;<letters r t c>). For such a key Rift
+# types `%Z<before>%Z<after>` (its command line split at the cursor, every
+# byte but letters and digits as %XX), then ^X^Y and the key's letter. That
+# is a macro: load the line (acknowledged as OSC 6973;L), the key itself (your binding), report the line
+# it left (OSC 6973;W;<before>;<after>, percent-encoded) and empty it. A
+# binding that runs a command itself (fzf's ⌥C cd) accepts the line first;
+# the report then comes at the next prompt, after Rift stopped waiting.
+# Needs READLINE_LINE and `bind -X` (bash 4.3).
+__rift_report_widgets() {
+    local b='' out=''
+    if [[ -n "${__rift_widgets-}" ]]; then
+        b=$'\n'$(bind -X 2>/dev/null; bind -s 2>/dev/null)
+        [[ $b == *$'\n"\\C-r"'[:\ ]* ]] && out+=r
+        [[ $b == *$'\n"\\C-t"'[:\ ]* ]] && out+=t
+        [[ $b == *$'\n"\\ec"'[:\ ]* ]] && out+=c
+    fi
+    printf '\e]6973;K;%s\a' "$out"
+}
+
+__rift_widget_load() {
+    local p=$READLINE_LINE left right
+    [[ $p == *%Z*%Z* ]] || return 0
+    printf '\e]6973;L\a'
+    right=${p##*%Z}
+    left=${p%\%Z*}
+    left=${left##*%Z}
+    # only letters, digits and %XX arrive: nothing else for %b to expand
+    printf -v left '%b' "${left//\%/\\x}"
+    printf -v right '%b' "${right//\%/\\x}"
+    READLINE_LINE=$left$right
+    READLINE_POINT=${#left}
+}
+
+__rift_widget_post() {
+    local left REPLY
+    __rift_pct "${READLINE_LINE:0:READLINE_POINT}"
+    left=$REPLY
+    __rift_pct "${READLINE_LINE:READLINE_POINT}"
+    printf '\e]6973;W;%s;%s\a' "$left" "$REPLY"
+    READLINE_LINE=
+    READLINE_POINT=0
+}
+
+# (only with line editing: a non-interactive source has none)
+if [[ $- == *i* ]] && ((BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 3))); then
+    __rift_widgets=1
+    for __rift_m in emacs vi-insert; do
+        bind -m "$__rift_m" -x '"\C-x\C-yl": __rift_widget_load'
+        bind -m "$__rift_m" -x '"\C-x\C-yp": __rift_widget_post'
+        bind -m "$__rift_m" '"\C-x\C-yr": "\C-x\C-yl\C-r\C-x\C-yp"'
+        bind -m "$__rift_m" '"\C-x\C-yt": "\C-x\C-yl\C-t\C-x\C-yp"'
+        bind -m "$__rift_m" '"\C-x\C-yc": "\C-x\C-yl\ec\C-x\C-yp"'
+    done
+    unset __rift_m
+fi
 
 if [[ -n $__rift_child_rc && -f "${__rift_child_rc%/*}/bashrc-child" ]]; then
     printf -v __rift_child_rc '%q' "${__rift_child_rc%/*}/bashrc-child"

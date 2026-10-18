@@ -135,6 +135,12 @@ pub struct ViewerState {
     content_w: f32,
     view_w: f32,
     body_top: f32,
+    /// Source line (0-based) to scroll to once the file is loaded and laid
+    /// out (`rift://action/open_file?…&line=`).
+    pub reveal_line: Option<usize>,
+    /// Selected source lines (0-based): (anchor, cursor). A click picks a
+    /// line, ⇧-click and ⇧↑ ⇧↓ extend; "Send to agent…" sends them.
+    pub sel: Option<(usize, usize)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -187,8 +193,29 @@ impl ViewerState {
         if !self.awaits(&loaded) {
             return false;
         }
+        let reveal = self.reveal_line.take();
         *self = loaded;
+        // a line of a Markdown file is a line of its source
+        if reveal.is_some() {
+            self.rendered = false;
+        }
+        self.reveal_line = reveal;
         true
+    }
+
+    /// Scroll a pending [`ViewerState::reveal_line`] into view (centred),
+    /// once the file has lines and the viewport its height.
+    fn apply_reveal(&mut self) {
+        if self.lines.is_empty() || self.view_h <= 0.0 {
+            return;
+        }
+        let Some(line) = self.reveal_line.take() else {
+            return;
+        };
+        let line = line.min(self.lines.len() - 1);
+        let top = 12.0 + line as f32 * LINE;
+        self.scroll = top - ((self.view_h - LINE) / 2.0).max(0.0);
+        self.scroll_by(0.0);
     }
 
     fn load(&mut self, path: &Path) {
@@ -276,6 +303,62 @@ impl ViewerState {
     pub fn scroll_by(&mut self, px: f32) {
         let max = (self.content_h() - self.view_h).max(0.0);
         self.scroll = (self.scroll + px).clamp(0.0, max);
+    }
+
+    /// The source line at window `y` (the source view only).
+    pub fn line_at(&self, y: f32) -> Option<usize> {
+        if self.showing_rendered() || self.error.is_some() || y < self.body_top {
+            return None;
+        }
+        let i = ((y - self.body_top + self.scroll - 12.0) / LINE).floor();
+        (i >= 0.0 && (i as usize) < self.lines.len()).then_some(i as usize)
+    }
+
+    /// The first line fully on screen.
+    pub fn top_line(&self) -> usize {
+        (((self.scroll - 12.0) / LINE).ceil().max(0.0) as usize)
+            .min(self.lines.len().saturating_sub(1))
+    }
+
+    /// Select line `i`, or extend the selection to it.
+    pub fn select(&mut self, i: usize, extend: bool) {
+        let anchor = match self.sel {
+            Some((a, _)) if extend => a,
+            _ => i,
+        };
+        self.sel = Some((anchor, i));
+    }
+
+    /// ⇧↑ / ⇧↓: move the selection's moving end `delta` lines (starting at
+    /// the top line on screen), scrolling it into view.
+    pub fn extend_by(&mut self, delta: isize) {
+        if self.lines.is_empty() || self.showing_rendered() {
+            return;
+        }
+        let (anchor, cursor) = self.sel.unwrap_or((self.top_line(), self.top_line()));
+        let to = (cursor as isize + delta).clamp(0, self.lines.len() as isize - 1) as usize;
+        self.sel = Some((anchor, to));
+        let top = 12.0 + to as f32 * LINE;
+        if top < self.scroll {
+            self.scroll = top - 12.0;
+        } else if top + LINE > self.scroll + self.view_h {
+            self.scroll = top + LINE - self.view_h + 12.0;
+        }
+        self.scroll_by(0.0);
+    }
+
+    /// The selected lines as an inclusive range, else the top line on
+    /// screen; `None` without source lines, and on the rendered Markdown
+    /// page without a selection (its scroll maps to no source line).
+    pub fn send_range(&self) -> Option<(usize, usize)> {
+        if self.lines.is_empty() || self.error.is_some() {
+            return None;
+        }
+        match self.sel {
+            Some((a, b)) => Some((a.min(b), a.max(b).min(self.lines.len() - 1))),
+            None if self.showing_rendered() => None,
+            None => Some((self.top_line(), self.top_line())),
+        }
     }
 
     pub fn page(&self) -> f32 {
@@ -546,6 +629,7 @@ pub fn render(
     state.view_w = w;
     state.body_top = body_top;
     state.scroll_by(0.0);
+    state.apply_reveal();
     if let Some(e) = &state.error {
         layer.text(
             sans(engine, e, 13.0, Weight::NORMAL),
@@ -613,8 +697,22 @@ pub fn render(
     };
     let matches: &[(usize, usize, usize)] = state.find.as_ref().map_or(&[], |f| &f.matches);
     let current = state.find.as_ref().and_then(|f| f.current);
+    let selected = state.sel.map(|(a, b)| a.min(b)..=a.max(b));
     for i in first..(first + count).min(state.lines.len()) {
         let ly = body_top + 12.0 + i as f32 * LINE - state.scroll;
+        if selected.as_ref().is_some_and(|r| r.contains(&i)) {
+            let top = ly.max(body_top);
+            let bottom = (ly + LINE).min(y + h);
+            if bottom > top {
+                layer.rect(
+                    [x, top],
+                    [w, bottom - top],
+                    theme.accent.with_alpha(0.14),
+                    0.0,
+                );
+                layer.rect([x, top], [2.0, bottom - top], theme.accent, 0.0);
+            }
+        }
         // match highlights (terminal search tokens); quads draw under text
         let from = matches.partition_point(|m| m.0 < i);
         for (k, &(_, start, len)) in matches[from..].iter().take_while(|m| m.0 == i).enumerate() {
@@ -842,6 +940,24 @@ mod tests {
     }
 
     #[test]
+    fn rendered_markdown_sends_only_a_selection_never_its_scroll_line() {
+        let src: Vec<String> = (1..=60).map(|i| format!("## H{i}\n\ntext {i}")).collect();
+        let mut v = viewer(&[]);
+        v.lines = src.join("\n\n").lines().map(str::to_string).collect();
+        v.markdown = rift_core::markdown::parse(&v.lines);
+        v.rendered = true;
+        v.scroll = 400.0;
+        assert!(v.showing_rendered());
+        assert_eq!(v.send_range(), None, "rendered scroll is no source line");
+        v.sel = Some((4, 2));
+        assert_eq!(v.send_range(), Some((2, 4)));
+        v.sel = None;
+        v.set_rendered(false);
+        v.scroll = 400.0;
+        assert_eq!(v.send_range(), Some((v.top_line(), v.top_line())));
+    }
+
+    #[test]
     fn find_matches_case_insensitive_multi_and_unicode() {
         let lines: Vec<String> = ["Foo foo FOO", "bar", "ÄpfelÄ äpfel", "aaaa"]
             .iter()
@@ -921,6 +1037,35 @@ mod tests {
         assert!(v.find.is_none());
         v.open_find();
         assert!(v.find.is_none(), "no find without an open file");
+    }
+
+    #[test]
+    fn a_requested_line_survives_the_load_and_scrolls_into_view() {
+        // what open_viewer_at leaves: the file loading, a line pending
+        let mut v = ViewerState {
+            path: Some(PathBuf::from("/x.md")),
+            generation: 7,
+            reveal_line: Some(149),
+            ..Default::default()
+        };
+        let mut loaded = viewer(&vec!["x"; 200]);
+        loaded.generation = 7;
+        loaded.rendered = true;
+        assert!(v.accept(loaded));
+        assert_eq!(v.reveal_line, Some(149), "kept across the load");
+        assert!(!v.rendered, "a line of a Markdown file shows its source");
+        v.apply_reveal();
+        let top = 12.0 + 149.0 * LINE;
+        assert!(
+            v.scroll <= top && top + LINE <= v.scroll + v.view_h,
+            "{}",
+            v.scroll
+        );
+        assert_eq!(v.reveal_line, None, "applied once");
+        // past the end: the last line
+        v.reveal_line = Some(10_000);
+        v.apply_reveal();
+        assert!(v.scroll + v.view_h >= 12.0 + 200.0 * LINE);
     }
 
     #[test]

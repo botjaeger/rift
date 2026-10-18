@@ -185,6 +185,16 @@ pub fn defaults() -> Vec<(&'static str, &'static str)> {
         ("tab_select_7", "cmd+7"),
         ("tab_select_8", "cmd+8"),
         ("tab_select_9", "cmd+9"),
+        // the + menu's profiles, in its order (Windows Terminal ⌃⇧1…9)
+        ("new_tab_profile_1", "ctrl+shift+1"),
+        ("new_tab_profile_2", "ctrl+shift+2"),
+        ("new_tab_profile_3", "ctrl+shift+3"),
+        ("new_tab_profile_4", "ctrl+shift+4"),
+        ("new_tab_profile_5", "ctrl+shift+5"),
+        ("new_tab_profile_6", "ctrl+shift+6"),
+        ("new_tab_profile_7", "ctrl+shift+7"),
+        ("new_tab_profile_8", "ctrl+shift+8"),
+        ("new_tab_profile_9", "ctrl+shift+9"),
         ("move_tab_left", "ctrl+shift+left"),
         ("move_tab_right", "ctrl+shift+right"),
         ("reopen_closed_tab", "shift+cmd+t"),
@@ -225,6 +235,10 @@ pub fn defaults() -> Vec<(&'static str, &'static str)> {
         ("toggle_explorer", "shift+cmd+e"),
         ("toggle_review", "shift+cmd+g"),
         ("focus_review", "alt+cmd+g"),
+        // Warp's ⌃G is add_next_occurrence here (and Claude Code's own
+        // external-editor key): the composer takes ⌃⇧G / ⌘E
+        ("rich_input", "ctrl+shift+g"),
+        ("rich_input_alt", "cmd+e"),
     ]
 }
 
@@ -337,11 +351,13 @@ pub fn all_actions() -> Vec<&'static str> {
         "save_launch_config",
         "equalize_panes",
         "pipe_block_output",
+        "new_worktree_tab",
         "toggle_tab_layout",
         "clear_transcripts",
         "whats_new",
         "open_about",
         "check_for_updates",
+        "install_cli",
         "update_rift",
     ] {
         if !out.contains(&extra) {

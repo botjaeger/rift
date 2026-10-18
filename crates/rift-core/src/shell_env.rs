@@ -140,6 +140,11 @@ impl ShellEnv {
         }
     }
 
+    /// The interactive shell's `$PATH`, when the probe reported it.
+    pub fn path(&self) -> Option<&std::ffi::OsStr> {
+        self.path.as_deref()
+    }
+
     /// `$PATH` executables (sorted): the shell's when the probe reported
     /// its `$PATH`, else Rift's own.
     fn path_commands(&self) -> std::sync::Arc<Vec<String>> {

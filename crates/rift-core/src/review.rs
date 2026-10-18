@@ -98,8 +98,35 @@ pub struct Review {
     pub branch: String,
     /// HEAD → index.
     pub staged: Vec<FileDiff>,
-    /// Index → working tree, untracked files included.
+    /// Index → working tree, untracked files included. Against a branch
+    /// ([`Review::base`]): merge-base → working tree, committed and
+    /// uncommitted changes together.
     pub unstaged: Vec<FileDiff>,
+    /// Set when the review compares against a branch: then `staged` is
+    /// empty and the changes are not stage/unstage/revert material.
+    pub base: Option<BaseInfo>,
+}
+
+/// What the review compares the working tree with.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub enum Base {
+    /// HEAD and the index: staged and unstaged changes.
+    #[default]
+    Uncommitted,
+    /// The repository's default branch ([`default_branch`]).
+    DefaultBranch,
+    /// A local or remote-tracking branch by its short name (`main`,
+    /// `origin/main`).
+    Branch(String),
+}
+
+/// The branch a review compares against, and the commit it diffs from.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BaseInfo {
+    /// Short branch name (`main`, `origin/main`).
+    pub name: String,
+    /// `merge-base(name, HEAD)`, full hex.
+    pub merge_base: String,
 }
 
 impl Review {
@@ -162,9 +189,108 @@ fn unstaged_options() -> DiffOptions {
 /// Load the review of the repository containing `dir`. `None` outside a
 /// repository or in a bare one.
 pub fn load(dir: &Path) -> Option<Result<Review, String>> {
+    load_against(dir, |_| Base::Uncommitted)
+}
+
+/// [`load`] against the base `pick` chooses for the repository's working
+/// directory (called once, with it).
+pub fn load_against(
+    dir: &Path,
+    pick: impl FnOnce(&Path) -> Base,
+) -> Option<Result<Review, String>> {
     let repo = Repository::discover(dir).ok()?;
     let root = repo.workdir()?.to_path_buf();
-    Some(load_repo(&repo, root, true, usize::MAX))
+    Some(match pick(&root) {
+        Base::Uncommitted => load_repo(&repo, root, true, usize::MAX),
+        Base::DefaultBranch => match default_branch(&repo) {
+            Some(name) => load_branch(&repo, root, &name),
+            None => Err("no default branch (no origin/HEAD, main or master)".into()),
+        },
+        Base::Branch(name) => load_branch(&repo, root, &name),
+    })
+}
+
+/// The repository's default branch: what `origin/HEAD` points at, else a
+/// local `main` or `master`, else `origin/main` or `origin/master`.
+pub fn default_branch(repo: &Repository) -> Option<String> {
+    if let Ok(r) = repo.find_reference("refs/remotes/origin/HEAD")
+        && let Ok(Some(target)) = r.symbolic_target()
+        && let Some(name) = target.strip_prefix("refs/remotes/")
+        && repo.find_branch(name, git2::BranchType::Remote).is_ok()
+    {
+        return Some(name.to_string());
+    }
+    let local = ["main", "master"]
+        .into_iter()
+        .find(|n| repo.find_branch(n, git2::BranchType::Local).is_ok());
+    let remote = || {
+        ["origin/main", "origin/master"]
+            .into_iter()
+            .find(|n| repo.find_branch(n, git2::BranchType::Remote).is_ok())
+    };
+    local.or_else(remote).map(str::to_string)
+}
+
+/// The default branch of the repository containing `dir`.
+pub fn default_branch_of(dir: &Path) -> Option<String> {
+    default_branch(&Repository::discover(dir).ok()?)
+}
+
+/// Every local branch, then every remote-tracking one (no `*/HEAD`), by
+/// short name, each group sorted.
+pub fn branches(dir: &Path) -> Result<Vec<String>, String> {
+    let repo = Repository::discover(dir).map_err(err)?;
+    let mut out = Vec::new();
+    for kind in [git2::BranchType::Local, git2::BranchType::Remote] {
+        let mut names: Vec<String> = repo
+            .branches(Some(kind))
+            .map_err(err)?
+            .filter_map(|b| Some(b.ok()?.0.name().ok()??.to_string()))
+            .filter(|n| !n.ends_with("/HEAD"))
+            .collect();
+        names.sort();
+        out.extend(names);
+    }
+    Ok(out)
+}
+
+/// The commit a review against `name` diffs from: `merge-base(name, HEAD)`.
+/// `name` is a branch (local first, then remote-tracking), never a revision
+/// expression.
+pub fn merge_base(repo: &Repository, name: &str) -> Result<git2::Oid, String> {
+    let branch = repo
+        .find_branch(name, git2::BranchType::Local)
+        .or_else(|_| repo.find_branch(name, git2::BranchType::Remote))
+        .map_err(|_| format!("branch {name} not found"))?;
+    let base = branch.get().peel_to_commit().map_err(err)?.id();
+    let head = repo
+        .head()
+        .and_then(|h| h.peel_to_commit())
+        .map_err(|_| "no commits yet".to_string())?
+        .id();
+    repo.merge_base(base, head)
+        .map_err(|_| format!("{name} shares no history with HEAD"))
+}
+
+/// Merge-base of `name` and HEAD → working tree (the index's view of
+/// tracked files, untracked files included): the branch's committed and
+/// uncommitted changes as one list, in `unstaged`.
+fn load_branch(repo: &Repository, root: PathBuf, name: &str) -> Result<Review, String> {
+    let base = merge_base(repo, name)?;
+    let tree = repo.find_commit(base).and_then(|c| c.tree()).map_err(err)?;
+    let diff = repo
+        .diff_tree_to_workdir_with_index(Some(&tree), Some(&mut unstaged_options()))
+        .map_err(err)?;
+    Ok(Review {
+        root,
+        branch: branch_name(repo),
+        staged: Vec::new(),
+        unstaged: collect_as(&diff, false, Some((repo, true)), usize::MAX)?,
+        base: Some(BaseInfo {
+            name: name.to_string(),
+            merge_base: base.to_string(),
+        }),
+    })
 }
 
 /// [`load`] without the files' new sides (`source` is `None`; no file is
@@ -231,6 +357,7 @@ fn load_repo(
         branch: branch_name(repo),
         staged,
         unstaged,
+        base: None,
     })
 }
 
@@ -835,6 +962,100 @@ mod tests {
         assert_eq!(new.hunks[0].lines[0].text, "fn main() {}");
         assert_eq!(r.statuses().get("src/new.rs"), Some(&'?'));
         assert!(r.dirty_dirs().contains("src"));
+    }
+
+    #[test]
+    fn a_branch_review_diffs_the_merge_base_to_the_working_tree() {
+        let t = temp_repo("base");
+        t.repo.set_head("refs/heads/main").unwrap();
+        fs::write(t.dir.join("a.txt"), lines(&[])).unwrap();
+        commit_all(&t, "init");
+        let init = t.repo.head().unwrap().peel_to_commit().unwrap();
+        // feature: two commits, then an uncommitted edit and a new file
+        t.repo.branch("feature", &init, false).unwrap();
+        t.repo.set_head("refs/heads/feature").unwrap();
+        fs::write(t.dir.join("b.txt"), "b\n").unwrap();
+        commit_all(&t, "add b");
+        fs::write(t.dir.join("a.txt"), lines(&[(2, "two")])).unwrap();
+        commit_all(&t, "edit a");
+        // main moves on after the branch point: none of it is the branch's
+        let mut tree = t.repo.treebuilder(Some(&init.tree().unwrap())).unwrap();
+        tree.insert("main_only.txt", t.repo.blob(b"m\n").unwrap(), 0o100644)
+            .unwrap();
+        let tree = t.repo.find_tree(tree.write().unwrap()).unwrap();
+        let sig = git2::Signature::now("t", "t@example.com").unwrap();
+        t.repo
+            .commit(Some("refs/heads/main"), &sig, &sig, "main", &tree, &[&init])
+            .unwrap();
+        fs::write(
+            t.dir.join("a.txt"),
+            lines(&[(2, "two"), (28, "twenty-eight")]),
+        )
+        .unwrap();
+        fs::write(t.dir.join("c.txt"), "c\n").unwrap();
+
+        let r = load_against(&t.dir, |_| Base::Branch("main".into()))
+            .unwrap()
+            .unwrap();
+        let base = r.base.as_ref().expect("a branch review names its base");
+        assert_eq!(
+            (base.name.as_str(), base.merge_base.clone()),
+            ("main", init.id().to_string()),
+            "the merge base, not main's tip"
+        );
+        assert!(r.staged.is_empty());
+        let mut paths: Vec<String> = r
+            .unstaged
+            .iter()
+            .map(|f| format!("{}{}", f.status, f.path))
+            .collect();
+        paths.sort();
+        // main_only.txt would show as deleted against main's tip
+        assert_eq!(paths, ["?c.txt", "Ab.txt", "Ma.txt"]);
+        let a = r.unstaged.iter().find(|f| f.path == "a.txt").unwrap();
+        assert_eq!(a.hunks.len(), 2, "the committed and the uncommitted edit");
+        assert!(a.source.is_some(), "the working tree is the new side");
+
+        // the default branch is the same base; Uncommitted shows only the
+        // working tree's own changes
+        let d = load_against(&t.dir, |_| Base::DefaultBranch)
+            .unwrap()
+            .unwrap();
+        assert_eq!(d.base.map(|b| b.name), Some("main".into()));
+        let u = review(&t);
+        assert_eq!(u.base, None);
+        let paths: Vec<&str> = u.unstaged.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["a.txt", "c.txt"]);
+        assert_eq!(u.unstaged[0].hunks.len(), 1);
+
+        let e = load_against(&t.dir, |_| Base::Branch("nope".into()))
+            .unwrap()
+            .unwrap_err();
+        assert!(e.contains("not found"), "{e}");
+        // a revision expression is not a branch
+        assert!(
+            load_against(&t.dir, |_| Base::Branch("HEAD~1".into()))
+                .unwrap()
+                .is_err()
+        );
+
+        // origin/HEAD names the default branch when there is one
+        t.repo
+            .reference("refs/remotes/origin/trunk", init.id(), false, "t")
+            .unwrap();
+        t.repo
+            .reference_symbolic(
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/trunk",
+                false,
+                "t",
+            )
+            .unwrap();
+        assert_eq!(default_branch(&t.repo).as_deref(), Some("origin/trunk"));
+        assert_eq!(
+            branches(&t.dir).unwrap(),
+            ["feature", "main", "origin/trunk"]
+        );
     }
 
     #[test]

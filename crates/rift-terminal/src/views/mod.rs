@@ -1,5 +1,6 @@
 pub mod chip_menu;
 pub mod completion;
+pub mod composer;
 pub mod confirm;
 pub mod context_menu;
 pub mod editor;
@@ -16,6 +17,7 @@ pub mod prompt_chips;
 pub mod prompt_editor;
 pub mod review_panel;
 pub mod search;
+pub mod send_agent;
 pub mod settings;
 pub mod subshell;
 pub mod tabbar;

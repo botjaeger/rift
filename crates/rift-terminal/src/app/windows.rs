@@ -238,6 +238,16 @@ impl App {
             self.cell_w = text.mono_cell_width(self.config.font_size());
             self.text = Some(text);
         }
+        if self.headless {
+            // hidden windows have no real place: each gets its own stretch
+            // of a pretend desktop, far from the others (`tab_move`)
+            let last = self
+                .parked
+                .iter()
+                .map(|w| w.headless_origin.0)
+                .fold(0.0, f64::max);
+            self.win.headless_origin = (last + super::tab_move::HEADLESS_SPACING, 0.0);
+        }
         self.window_order.push(window.id());
         self.focused_window = Some(window.id());
         self.win.window = Some(window);
@@ -259,42 +269,47 @@ impl App {
         self.apply_window_config();
     }
 
+    /// The frame of a window opened from the one being served: offset from
+    /// it, the same size (none from the screen-wide drop-down window).
+    pub(super) fn cascade_frame(&self) -> Option<rift_core::session_state::SavedWindow> {
+        let w = self
+            .win
+            .window
+            .as_ref()
+            .filter(|_| self.win.dropdown.is_none())?;
+        let scale = w.scale_factor();
+        let pos = w.outer_position().ok()?.to_logical::<f64>(scale);
+        let size = w.inner_size().to_logical::<f64>(scale);
+        Some(rift_core::session_state::SavedWindow {
+            x: pos.x + CASCADE,
+            y: pos.y + CASCADE,
+            width: size.width,
+            height: size.height,
+            maximized: false,
+            fullscreen: false,
+        })
+    }
+
     /// ⌘N: a window beside this one, its first tab where a new tab of this
     /// window would start (`working_directory`).
     pub(super) fn open_new_window(&mut self, event_loop: &ActiveEventLoop) {
-        let cwd = self.start_dir();
-        self.open_new_window_at(event_loop, cwd);
+        self.open_new_window_at(event_loop, None);
     }
 
-    /// A window beside this one, its first tab in `cwd` (a `rift://` link's
-    /// folder, or where ⌘N starts).
+    /// A window beside this one, its first tab of the default profile in
+    /// `cwd` (a `rift://` link's folder), else the profile's directory, else
+    /// where ⌘N starts.
     pub(super) fn open_new_window_at(
         &mut self,
         event_loop: &ActiveEventLoop,
         cwd: Option<std::path::PathBuf>,
     ) {
-        // not cascaded from the screen-wide drop-down window
-        let from = self
-            .win
-            .window
-            .as_ref()
-            .filter(|_| self.win.dropdown.is_none());
-        let frame = from.and_then(|w| {
-            let scale = w.scale_factor();
-            let pos = w.outer_position().ok()?.to_logical::<f64>(scale);
-            let size = w.inner_size().to_logical::<f64>(scale);
-            Some(rift_core::session_state::SavedWindow {
-                x: pos.x + CASCADE,
-                y: pos.y + CASCADE,
-                width: size.width,
-                height: size.height,
-                maximized: false,
-                fullscreen: false,
-            })
-        });
+        let frame = self.cascade_frame();
         let started = Instant::now();
+        // where ⌘N starts follows this window's pane, not the new window
+        let fallback = self.start_dir();
         self.open_window(event_loop, frame);
-        self.spawn_tab_at(cwd);
+        self.spawn_profile_tab(cwd, fallback);
         log::info!(
             "new window in {} ms ({} open)",
             started.elapsed().as_millis(),
@@ -463,9 +478,13 @@ impl App {
                 self.enter_window(e.window_id);
                 return;
             }
-            // the window that opened the switcher (the handler drops an
-            // answer for a window closed meanwhile)
-            E::WindowsLoaded(asker, ..) | E::DetachedLoaded(asker, _) => {
+            // the window that asked (the handler drops a switcher or
+            // commit/push answer for a window closed meanwhile; a new
+            // worktree still opens its tab in the window served)
+            E::WindowsLoaded(asker, ..)
+            | E::DetachedLoaded(asker, _)
+            | E::WorktreeAdded(asker, _)
+            | E::ReviewGit(asker, ..) => {
                 if let Some(id) = *asker {
                     self.enter_window(id);
                 }

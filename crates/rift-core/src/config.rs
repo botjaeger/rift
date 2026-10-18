@@ -31,6 +31,17 @@ pub enum BlocksStart {
     Top,
 }
 
+/// Who answers ⌃R, ⌃T and ⌥C in the command editor: the shell's own
+/// widgets (fzf, atuin) where its config binds them, else Rift (Warp); or
+/// always Rift (its history pane for ⌃R).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ShellWidgets {
+    #[default]
+    Auto,
+    Rift,
+}
+
 /// What the "Time on this tab" chip counts: the time since the tab's first
 /// command, or only the time a command ran in it (time logging).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -39,6 +50,18 @@ pub enum ElapsedCounts {
     #[default]
     Always,
     Running,
+}
+
+/// The key that sends the rich-input composer's text to the running
+/// program (`rich_input_submit`); ⇧⏎ / ⌥⏎ always insert a newline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RichInputSubmit {
+    /// ⏎ sends (the coding agents' own convention).
+    #[default]
+    Enter,
+    /// ⌘⏎ sends, ⏎ inserts a newline.
+    CmdEnter,
 }
 
 /// One context chip of the Rift prompt (Warp "Edit prompt"). A chip with
@@ -506,6 +529,12 @@ pub struct Config {
     /// `remote_access` and `durable_sessions`. Off by default.
     pub remote_when_closed: bool,
     pub shell: Option<String>,
+    /// The `[[profiles]]` entry (or discovered shell) new tabs and panes
+    /// open with; unset: `shell` as before profiles.
+    pub default_profile: Option<String>,
+    /// The executable shells in /etc/shells appear as profiles named after
+    /// them (`zsh`, `fish`); a `[[profiles]]` entry of the same name wins.
+    pub discover_shells: bool,
     /// Theme used while the OS is in light mode when `sync_os_theme` is on.
     pub theme_light: String,
     /// Follow the OS light/dark appearance (`theme` = dark, `theme_light` = light).
@@ -588,6 +617,8 @@ pub struct Config {
     /// for completions too, and the remote shell over an SSH profile's
     /// shared connection.
     pub shell_completions: bool,
+    /// ⌃R, ⌃T and ⌥C run the shell's own widgets where it binds them.
+    pub shell_widgets: ShellWidgets,
     /// Automatically insert and remove matching quotes, brackets and braces.
     pub autocomplete_pairs: bool,
     /// Modal (vim) editing in the command editor.
@@ -597,6 +628,9 @@ pub struct Config {
     pub notify_on_completion: bool,
     /// Minimum command duration (seconds) for a completion notification.
     pub notify_threshold_secs: u64,
+    /// Show programs' OSC 9;4 progress reports: a bar under the tab and the
+    /// Dock tile badge (macOS).
+    pub show_progress: bool,
     pub bell: Bell,
     /// Warn before closing a pane, tab or window (or quitting) while a
     /// command is still running in it.
@@ -609,6 +643,12 @@ pub struct Config {
     pub working_directory: String,
     /// Expand a shell alias inline when Space is typed right after it.
     pub alias_expansion: bool,
+    /// Rich input (the composer over a running program): the key that
+    /// sends its text, `"enter"` or `"cmd_enter"`.
+    pub rich_input_submit: RichInputSubmit,
+    /// Rich input opens by itself when a coding agent in a pane waits for
+    /// input (its own notification, or a second of quiet after output).
+    pub rich_input_auto: bool,
     /// Underline an unknown command name in the editor (error highlighting).
     pub error_underline: bool,
     /// Suggest a local fix after a failed "command not found".
@@ -672,6 +712,9 @@ pub struct Config {
     /// Named ssh hosts (`[[ssh_profiles]]`); ~/.ssh/config hosts are added
     /// to the palette automatically.
     pub ssh_profiles: Vec<crate::ssh::SshProfile>,
+    /// Reusable launch settings (`[[profiles]]`): program, arguments,
+    /// directory, environment, tab title and colour. See `profiles.rs`.
+    pub profiles: Vec<crate::profiles::Profile>,
     /// Overrides: action name → binding (e.g. `new_tab = "ctrl+shift+t"`).
     pub keybindings: BTreeMap<String, String>,
 }
@@ -699,6 +742,8 @@ impl Default for Config {
             remote_tunnel: false,
             remote_when_closed: false,
             shell: None,
+            default_profile: None,
+            discover_shells: true,
             theme_light: "light-default".into(),
             sync_os_theme: false,
             window_opacity: 0.5,
@@ -731,15 +776,19 @@ impl Default for Config {
             autosuggestions: true,
             completions_menu: true,
             shell_completions: true,
+            shell_widgets: ShellWidgets::Auto,
             autocomplete_pairs: true,
             vim_mode: false,
             notify_on_completion: true,
             notify_threshold_secs: 10,
+            show_progress: true,
             bell: Bell::Both,
             confirm_close_running: true,
             confirm_multiline_paste: true,
             working_directory: "previous".into(),
             alias_expansion: false,
+            rich_input_submit: RichInputSubmit::Enter,
+            rich_input_auto: false,
             error_underline: true,
             command_corrections: true,
             global_hotkey: String::new(),
@@ -760,6 +809,7 @@ impl Default for Config {
             explorer_hidden_files: true,
             notifications: Default::default(),
             ssh_profiles: Vec::new(),
+            profiles: Vec::new(),
             keybindings: BTreeMap::new(),
         }
     }
@@ -824,7 +874,7 @@ fn relay_of(setting: &str, no_default: bool) -> Option<&str> {
 
 /// Top-level `Option` settings: absent from a serialized default, so
 /// `merge_table` cannot tell them from unknown keys without this list.
-const OPTIONAL_KEYS: &[&str] = &["shell", "right_option_as_meta"];
+const OPTIONAL_KEYS: &[&str] = &["shell", "default_profile", "right_option_as_meta"];
 
 /// Make `doc` hold `new` (see `Config::edit_toml`). `default` is the same
 /// table for a default config; an empty `default` marks a map such as
@@ -945,7 +995,13 @@ impl Config {
     pub fn try_load_from(path: &Path) -> Result<Option<Config>, String> {
         match std::fs::read_to_string(path) {
             Ok(s) => toml::from_str::<Config>(&s)
-                .map(|c| Some(c.migrated()))
+                .map_err(|e| e.to_string())
+                .and_then(|c| {
+                    // an invalid `[[profiles]]` entry rejects the file like
+                    // a parse error: the last good config stays
+                    crate::profiles::validate(&c.profiles)?;
+                    Ok(Some(c.migrated()))
+                })
                 .map_err(|e| format!("{}: {e}", path.display())),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(format!("{}: {e}", path.display())),
@@ -1555,6 +1611,9 @@ mod tests {
         assert_eq!(c.blocks_start, BlocksStart::Bottom);
         let top: Config = toml::from_str("blocks_start = \"top\"").unwrap();
         assert_eq!(top.blocks_start, BlocksStart::Top);
+        assert_eq!(c.shell_widgets, ShellWidgets::Auto);
+        let rift: Config = toml::from_str("shell_widgets = \"rift\"").unwrap();
+        assert_eq!(rift.shell_widgets, ShellWidgets::Rift);
         assert_eq!(c.prompt_chips, PromptChip::defaults());
         let chips: Config =
             toml::from_str("prompt_chips = [\"time24\", \"cwd\", \"git_diff\"]").unwrap();
@@ -1736,6 +1795,71 @@ mod tests {
         let err = Config::try_load_from(&path).unwrap_err();
         assert!(err.contains("config.toml"), "{err}");
         assert_eq!(Config::fallback().control_api, "off");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn profiles_parse_validate_and_save_back() {
+        // absent: today's behaviour
+        let c = Config::default();
+        assert!(c.profiles.is_empty() && c.default_profile.is_none() && c.discover_shells);
+        let src = r#"default_profile = "dev"
+discover_shells = false
+
+[[profiles]]
+name = "dev"
+command = "/bin/zsh"
+args = ["-c", "echo \"a b\""]
+cwd = "~/proj x"
+title = "Dev"
+color = "green"
+
+[profiles.env]
+X = "1"
+
+[[profiles]]
+name = "clean"
+"#;
+        let c: Config = toml::from_str(src).unwrap();
+        assert_eq!(c.default_profile.as_deref(), Some("dev"));
+        assert!(!c.discover_shells);
+        assert_eq!(c.profiles.len(), 2);
+        let dev = &c.profiles[0];
+        assert_eq!(dev.args, ["-c", "echo \"a b\""]);
+        assert_eq!(dev.env.get("X").map(String::as_str), Some("1"));
+        assert_eq!(c.profiles[1].command, None);
+        // saved and read back unchanged
+        let out = c.edit_toml(Some(src)).unwrap();
+        assert_eq!(toml::from_str::<Config>(&out).unwrap(), c, "{out}");
+        let out = c.edit_toml(None).unwrap();
+        assert_eq!(toml::from_str::<Config>(&out).unwrap(), c, "{out}");
+        // clearing default_profile removes its line
+        let cleared = Config {
+            default_profile: None,
+            ..c.clone()
+        };
+        assert!(
+            !cleared
+                .edit_toml(Some(src))
+                .unwrap()
+                .contains("default_profile")
+        );
+
+        // an invalid entry rejects the file like a parse error
+        let dir = scratch("profiles");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, src).unwrap();
+        assert!(Config::try_load_from(&path).unwrap().is_some());
+        let dup = format!("{src}\n[[profiles]]\nname = \"dev\"\n");
+        std::fs::write(&path, dup).unwrap();
+        let err = Config::try_load_from(&path).unwrap_err();
+        assert!(
+            err.contains("config.toml") && err.contains("used twice"),
+            "{err}"
+        );
+        std::fs::write(&path, "[[profiles]]\ncommand = \"/bin/sh\"\n").unwrap();
+        let err = Config::try_load_from(&path).unwrap_err();
+        assert!(err.contains("name"), "a profile needs a name: {err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

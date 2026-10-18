@@ -101,6 +101,17 @@ cat > "$APP/Contents/Info.plist" <<PLIST
             <key>CFBundleURLSchemes</key><array><string>rift</string></array>
         </dict>
     </array>
+    <!-- folders dropped on the Dock icon, Finder's Open With, `open -a Rift <dir>`
+         (crates/rift-terminal/src/links.rs); Alternate: never the folder default -->
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key><string>Folder</string>
+            <key>CFBundleTypeRole</key><string>Shell</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+            <key>LSItemContentTypes</key><array><string>public.folder</string></array>
+        </dict>
+    </array>
 </dict>
 </plist>
 PLIST

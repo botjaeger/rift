@@ -94,6 +94,8 @@ pub enum AppAction {
     BookmarkClosestNext,
     ClearBlocks,
     TabSelect(u8),
+    /// ⌃⇧1…⌃⇧9: a new tab with the nth profile of the + menu.
+    NewTabProfile(u8),
     MoveTabLeft,
     MoveTabRight,
     ReopenClosedTab,
@@ -110,6 +112,9 @@ pub enum AppAction {
     OpenAbout,
     /// Look for a new release now (the answer toasts).
     CheckForUpdates,
+    /// A `rift` command (`~/.local/bin/rift` → this binary) for shells and
+    /// editors: `rift .` opens a folder in Rift.
+    InstallCli,
     /// The update dialog (an available release), else a check.
     UpdateRift,
     /// What's New modal (release notes).
@@ -153,12 +158,17 @@ pub enum AppAction {
     HintMode,
     /// Send the selected block's output to a new command's stdin.
     PipeBlockOutput,
+    /// Ask for a branch name, add a git worktree for it, open a tab there.
+    NewWorktreeTab,
     /// Tabs on top ↔ vertical rail.
     ToggleTabLayout,
     /// Delete saved block transcripts.
     ClearTranscripts,
     /// Finished commands, failures, notifications and bells.
     AttentionCenter,
+    /// Rich input: Rift's editor over the running program (a coding agent,
+    /// any TUI); its text goes to the program as one paste.
+    RichInput,
 }
 
 impl AppAction {
@@ -268,6 +278,13 @@ pub fn action_from_name(name: &str) -> Option<AppAction> {
             .filter(|n| (1..=9).contains(n))
             .map(AppAction::TabSelect);
     }
+    if let Some(n) = name.strip_prefix("new_tab_profile_") {
+        return n
+            .parse::<u8>()
+            .ok()
+            .filter(|n| (1..=9).contains(n))
+            .map(AppAction::NewTabProfile);
+    }
     Some(match name {
         "new_tab" => AppAction::NewTab,
         "close_pane" => AppAction::ClosePane,
@@ -310,6 +327,7 @@ pub fn action_from_name(name: &str) -> Option<AppAction> {
         "open_keybindings" => AppAction::OpenKeybindings,
         "open_about" => AppAction::OpenAbout,
         "check_for_updates" => AppAction::CheckForUpdates,
+        "install_cli" => AppAction::InstallCli,
         "update_rift" => AppAction::UpdateRift,
         "whats_new" => AppAction::WhatsNew,
         "toggle_explorer" => AppAction::ToggleExplorer,
@@ -343,9 +361,11 @@ pub fn action_from_name(name: &str) -> Option<AppAction> {
         "session_switcher" => AppAction::SessionSwitcher,
         "hint_mode" => AppAction::HintMode,
         "pipe_block_output" => AppAction::PipeBlockOutput,
+        "new_worktree_tab" => AppAction::NewWorktreeTab,
         "toggle_tab_layout" => AppAction::ToggleTabLayout,
         "clear_transcripts" => AppAction::ClearTranscripts,
         "attention_center" => AppAction::AttentionCenter,
+        "rich_input" => AppAction::RichInput,
         _ => return None,
     })
 }
@@ -362,13 +382,23 @@ pub fn app_action(
         (Some(Key::Character(s)), Key::Character(_)) if mods.alt_key() => s.to_lowercase(),
         _ => key_string(event)?,
     };
-    let name = keymap.lookup(
-        mods.control_key(),
-        mods.shift_key(),
-        mods.alt_key(),
-        mods.super_key(),
-        &key,
-    )?;
+    let lookup = |key: &str| {
+        keymap.lookup(
+            mods.control_key(),
+            mods.shift_key(),
+            mods.alt_key(),
+            mods.super_key(),
+            key,
+        )
+    };
+    // ⌃⇧1 arrives as "!" on most layouts: bindings name the physical key,
+    // so a shifted chord that names nothing tries the unshifted key
+    let name = lookup(&key).or_else(|| match &event.unmodified {
+        Some(Key::Character(s)) if mods.shift_key() && s.to_lowercase() != key => {
+            lookup(&s.to_lowercase())
+        }
+        _ => None,
+    })?;
     action_from_name(name)
 }
 
@@ -510,6 +540,30 @@ pub fn editor_key(event: &KeyPress, mods: ModifiersState) -> Option<EditorKey> {
         return Some(EditorKey::Insert(text.to_string()));
     }
     None
+}
+
+/// The editor key a shell may bind to a widget of its own: ⌃R, ⌃T, and
+/// ⌥C where Option is Meta (macOS composes `ç` otherwise; elsewhere Alt is
+/// always Meta).
+pub fn widget_key(
+    event: &KeyPress,
+    mods: ModifiersState,
+    option_as_meta: bool,
+) -> Option<rift_core::shell_widget::WidgetKey> {
+    use rift_core::shell_widget::WidgetKey;
+    if mods.shift_key() || mods.super_key() || event.released {
+        return None;
+    }
+    let letter = match (&event.unmodified, &event.logical_key) {
+        (Some(Key::Character(s)), _) | (None, Key::Character(s)) => s.to_ascii_lowercase(),
+        _ => return None,
+    };
+    match (mods.control_key(), mods.alt_key(), letter.as_str()) {
+        (true, false, "r") => Some(WidgetKey::History),
+        (true, false, "t") => Some(WidgetKey::Files),
+        (false, true, "c") if option_as_meta || !cfg!(target_os = "macos") => Some(WidgetKey::Cd),
+        _ => None,
+    }
 }
 
 /// Terminal-input options that change the bytes a key produces.
@@ -1013,6 +1067,43 @@ mod tests {
         assert!(!AppAction::BookmarkPrev.needs_editor());
     }
 
+    /// ⌃⇧1…⌃⇧9 open the + menu's profiles, also when Shift turned the
+    /// digit into its symbol (`!` on most layouts); a shifted chord bound
+    /// as the symbol keeps its own action.
+    #[test]
+    fn ctrl_shift_digits_open_profiles_through_the_shifted_symbol() {
+        let km = rift_core::Keymap::from_overrides(&Default::default());
+        let ctrl_shift = ModifiersState::CONTROL | ModifiersState::SHIFT;
+        let press = |key: &str, unmod: &str| {
+            KeyPress::new(
+                Key::Character(key.into()),
+                None,
+                Some(Key::Character(unmod.into())),
+            )
+        };
+        assert_eq!(
+            app_action(&press("!", "1"), ctrl_shift, &km),
+            Some(AppAction::NewTabProfile(1))
+        );
+        assert_eq!(
+            app_action(&press("(", "9"), ctrl_shift, &km),
+            Some(AppAction::NewTabProfile(9))
+        );
+        assert_eq!(
+            app_action(&press("2", "2"), ctrl_shift, &km),
+            Some(AppAction::NewTabProfile(2))
+        );
+        assert_eq!(action_from_name("new_tab_profile_10"), None);
+        // a binding that names the symbol itself still wins
+        let mut over = std::collections::BTreeMap::new();
+        over.insert("open_about".to_string(), "ctrl+shift+!".to_string());
+        let km = rift_core::Keymap::from_overrides(&over);
+        assert_eq!(
+            app_action(&press("!", "1"), ctrl_shift, &km),
+            Some(AppAction::OpenAbout)
+        );
+    }
+
     #[test]
     fn remote_keys_at_a_prompt_are_the_editors_keys() {
         let editor = |name: &str| remote_editor_key(rift_remote::Key::parse(name).unwrap());
@@ -1277,6 +1368,36 @@ mod tests {
         kitty_flags: 0,
     };
     const NONE: ModifiersState = ModifiersState::empty();
+
+    #[test]
+    fn shell_widget_keys() {
+        use rift_core::shell_widget::WidgetKey;
+        let ctrl = ModifiersState::CONTROL;
+        let alt = ModifiersState::ALT;
+        assert_eq!(
+            widget_key(&ch("r", None, "r"), ctrl, false),
+            Some(WidgetKey::History)
+        );
+        assert_eq!(
+            widget_key(&ch("t", None, "t"), ctrl, false),
+            Some(WidgetKey::Files)
+        );
+        // ⌥C composes ç unless Option is Meta (macOS)
+        let opt_c = ch("ç", Some("ç"), "c");
+        assert_eq!(widget_key(&opt_c, alt, true), Some(WidgetKey::Cd));
+        assert_eq!(
+            widget_key(&opt_c, alt, false),
+            (!cfg!(target_os = "macos")).then_some(WidgetKey::Cd)
+        );
+        // other chords and plain letters are not widget keys
+        assert_eq!(widget_key(&ch("r", Some("r"), "r"), NONE, true), None);
+        assert_eq!(
+            widget_key(&ch("r", None, "r"), ctrl | ModifiersState::SHIFT, true),
+            None
+        );
+        assert_eq!(widget_key(&ch("c", None, "c"), ctrl, true), None);
+        assert_eq!(widget_key(&ch("r", None, "r"), ctrl | alt, true), None);
+    }
 
     #[test]
     fn cmd_backspace_kills_to_line_start() {

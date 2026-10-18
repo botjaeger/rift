@@ -8,6 +8,7 @@ pub mod session;
 
 pub use alacritty_terminal;
 pub use session::{
-    ClipboardAccess, ClipboardReply, ColorReply, EventProxy, GridSize, Observer, PaneId, Replay,
-    ServiceFailure, ServiceTarget, Session, SessionEvent, SpawnOptions, set_default_colors,
+    ClipboardAccess, ClipboardReply, ColorReply, EventProxy, GridSize, Observer, PaneId,
+    ProgressReport, Replay, ServiceFailure, ServiceTarget, Session, SessionEvent, SpawnOptions,
+    set_default_colors,
 };

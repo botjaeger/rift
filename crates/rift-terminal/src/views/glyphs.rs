@@ -23,9 +23,30 @@ pub const HOURGLASS: char = '\u{f252}'; // fa-hourglass_half
 pub const BELL: char = '\u{f0f3}'; // fa-bell
 pub const BELL_OUTLINE: char = '\u{f0a2}'; // fa-bell_o
 
-fn epoch() -> std::time::Instant {
+/// A glyph of this subset by name (a profile's `icon`).
+pub fn by_name(name: &str) -> Option<char> {
+    Some(match name.trim().to_ascii_lowercase().as_str() {
+        "folder" => FOLDER,
+        "git" | "branch" => BRANCH,
+        "python" => PYTHON,
+        "php" => PHP,
+        "github" => GITHUB,
+        "docker" => DOCKER,
+        "user" => USER,
+        "laptop" | "computer" => LAPTOP,
+        _ => return None,
+    })
+}
+
+pub(crate) fn epoch() -> std::time::Instant {
     static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
     *EPOCH.get_or_init(std::time::Instant::now)
+}
+
+/// Seconds on the clock every chrome animation shares (spinners, the
+/// waiting agent's pulse), so they move in step.
+pub fn anim_secs() -> f32 {
+    epoch().elapsed().as_secs_f32()
 }
 
 /// One full turn of the running spinner.

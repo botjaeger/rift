@@ -1,8 +1,10 @@
 //! `rift://` links (`rift_core::uri`): from macOS (an Apple Event, see
-//! `crate::links`), a second Linux process (the control socket) or the
-//! script driver. They open tabs, windows, saved layouts and Settings. A link
-//! runs no command of its own; a saved layout whose panes run commands asks
-//! first (any web page can open a link).
+//! `crate::links`), a second process (the control socket), the command line
+//! or the script driver. They open tabs, windows, saved layouts, a file in
+//! the editor and Settings. A link runs no command of its own; a saved
+//! layout whose panes run commands asks first (any web page can open a
+//! link). Folders opened from outside (`rift-terminal <dir>`, Finder, the
+//! Dock) arrive as `new_tab` / `new_window` links too.
 
 use super::*;
 use rift_core::uri::UriAction;
@@ -13,6 +15,44 @@ const LINK_BURST: usize = 10;
 const LINK_WINDOW: Duration = Duration::from_secs(3);
 
 impl App {
+    /// A fresh start's first tab: the first link Rift was started with when
+    /// it opens a tab or window (a folder named on the command line or
+    /// dropped on the Dock icon, or a bare `--new-window`), which is then
+    /// done; in that folder, else where a new tab starts.
+    pub(super) fn spawn_first_tab(&mut self) {
+        self.collect_start_links();
+        let first = self
+            .start_links
+            .first()
+            .and_then(|l| match rift_core::uri::parse(l) {
+                Ok(UriAction::NewTab(dir) | UriAction::NewWindow(dir)) => Some(dir),
+                _ => None,
+            });
+        let folder = match first {
+            Some(dir) => {
+                self.start_links.remove(0);
+                dir
+            }
+            None => None,
+        };
+        self.spawn_profile_tab(folder, self.start_dir());
+    }
+
+    /// The links Rift was started with that the first tab did not take
+    /// (after a restored session: each its own tab).
+    pub(super) fn open_start_links(&mut self, event_loop: &ActiveEventLoop) {
+        self.collect_start_links();
+        for link in std::mem::take(&mut self.start_links) {
+            self.open_link(&link, event_loop);
+        }
+    }
+
+    /// Add the links macOS handed over before the first window was up.
+    fn collect_start_links(&mut self) {
+        #[cfg(target_os = "macos")]
+        self.start_links.extend(crate::links::take_launch_links());
+    }
+
     /// Open a `rift://` link in the last focused ordinary window (one is
     /// opened when only the drop-down window exists); a link Rift refuses
     /// says why in a toast.
@@ -40,7 +80,7 @@ impl App {
             Err(e) => {
                 log::warn!("link refused: {e}");
                 if fresh_window {
-                    self.spawn_tab_at(self.start_dir());
+                    self.spawn_profile_tab(None, self.start_dir());
                 }
                 self.toast_error(format!("Link refused — {}", shown(&e)));
                 self.redraw_and_raise();
@@ -49,13 +89,10 @@ impl App {
         };
         log::info!("link: {action:?}");
         match action {
-            UriAction::NewTab(cwd) => {
-                let cwd = cwd.or_else(|| self.start_dir());
-                self.spawn_tab_at(cwd);
-            }
+            UriAction::NewTab(cwd) => self.spawn_profile_tab(cwd, self.start_dir()),
             // a window just opened for the link is that window
             UriAction::NewWindow(cwd) if fresh_window => {
-                self.spawn_tab_at(cwd.or_else(|| self.start_dir()))
+                self.spawn_profile_tab(cwd, self.start_dir())
             }
             UriAction::NewWindow(cwd) => self.open_new_window_at(event_loop, cwd),
             UriAction::Launch { name, new_window } => {
@@ -67,7 +104,7 @@ impl App {
                     .cloned();
                 let Some(cfg) = found else {
                     if fresh_window {
-                        self.spawn_tab_at(self.start_dir());
+                        self.spawn_profile_tab(None, self.start_dir());
                     }
                     self.toast_error(format!("No launch configuration named {}", shown(&name)));
                     self.redraw_and_raise();
@@ -79,7 +116,7 @@ impl App {
                     self.launch_from_link(&cfg, new_window && !fresh_window, event_loop);
                 } else {
                     if fresh_window {
-                        self.spawn_tab_at(self.start_dir());
+                        self.spawn_profile_tab(None, self.start_dir());
                     }
                     self.win.confirm = Some(ConfirmClose {
                         opened: Instant::now(),
@@ -92,9 +129,16 @@ impl App {
                     });
                 }
             }
+            UriAction::OpenFile { path, line, col } => {
+                if fresh_window {
+                    self.spawn_profile_tab(None, self.start_dir());
+                }
+                let choice = self.config.link_editor.clone();
+                self.open_file_at(&path, &choice, line.map(|l| (l, col)));
+            }
             UriAction::Settings(query) => {
                 if fresh_window {
-                    self.spawn_tab_at(self.start_dir());
+                    self.spawn_profile_tab(None, self.start_dir());
                 }
                 self.win.settings.open_page(self.win.settings.page);
                 if let Some(q) = query {

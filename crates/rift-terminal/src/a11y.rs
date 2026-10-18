@@ -11,7 +11,8 @@
 //! │  ├─ List "Command blocks" ─ ListItem per block (label = command,
 //! │  │                          description = status, value = output)
 //! │  ├─ Terminal                 (visible screen text)
-//! │  └─ TextInput "Command"      (owned editor, when it is live)
+//! │  └─ TextInput "Command"      (owned editor, when it is live; "Compose
+//! │                               for …" while the rich-input composer is)
 //! ├─ Dialog / AlertDialog / Menu (palette, search, settings, confirm, menu)
 //! └─ Label (live region)         (command-finished announcements)
 //! ```
@@ -84,6 +85,8 @@ pub struct BlockNode {
 }
 
 pub struct EditorNode {
+    /// "Command", or the rich-input composer's "Compose for …".
+    pub label: String,
     pub value: String,
     pub rect: Option<[f32; 4]>,
 }
@@ -267,7 +270,7 @@ pub fn build(s: &Snapshot) -> Built {
         if let Some(ed) = &pane.editor {
             let ed_id = id_of(("editor", pane.id));
             let mut node = Node::new(Role::TextInput);
-            node.set_label("Command");
+            node.set_label(ed.label.as_str());
             node.set_value(ed.value.as_str());
             t.add(ed_id, node, ed.rect, ed.rect.is_some());
             children.push(ed_id);
@@ -550,6 +553,7 @@ mod tests {
                 }],
                 screen: "a\nb".into(),
                 editor: Some(EditorNode {
+                    label: "Command".into(),
                     value: "git st".into(),
                     rect: Some([0.0, 540.0, 800.0, 40.0]),
                 }),

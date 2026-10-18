@@ -406,17 +406,19 @@ fn handle(
             reply(Event::Hello {
                 version: ipc::PROTOCOL_VERSION,
                 pid: std::process::id(),
+                features: vec![ipc::FEATURE_ARGS.into()],
             });
         }
         Request::Spawn {
             shell,
+            args,
             cwd,
             env,
             cols,
             rows,
             cell_w,
             cell_h,
-        } => match spawn(state, shell, cwd, env, cols, rows, cell_w, cell_h) {
+        } => match spawn(state, shell, args, cwd, env, cols, rows, cell_w, cell_h) {
             Ok(id) => reply(Event::Spawned { session: id }),
             Err(e) => reply(Event::Error {
                 message: format!("spawn failed: {e}"),
@@ -509,6 +511,7 @@ fn handle(
 fn spawn(
     state: &Arc<State>,
     shell: Option<String>,
+    args: Vec<String>,
     cwd: Option<String>,
     env: Vec<(String, String)>,
     cols: u16,
@@ -528,7 +531,7 @@ fn spawn(
         cell_height: cell_h,
     };
     let dir = cwd.map(std::path::PathBuf::from).filter(|p| p.is_dir());
-    let pty = crate::session::open_pty(shell.as_deref(), dir, env, ws, id)?;
+    let pty = crate::session::open_pty(shell.as_deref(), &args, dir, env, ws, id)?;
     let mut reader = pty.file().try_clone()?;
     let writer = pty.file().try_clone()?;
     let shell = Arc::new(Shell {

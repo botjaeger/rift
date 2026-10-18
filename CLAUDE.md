@@ -109,6 +109,7 @@ doc): `wait`, `wait_prompt`, `key`, `keyup`, `keyrepeat`, `type`, `paste`,
 `copyfiles`, `shot`, `dump`, `resize`, `move`, `click`, `dblclick`, `rclick`,
 `mclick`, `drag`, `press`, `release`, `mods`, `scroll`, `sh`, `focus`, `ime`,
 `preedit`, `drop`, `wait_file`, `new_window`, `window`, `close_window`, `hotkey`,
+`drag_tab` (a tab dragged to another window or out of every one),
 `link` (open a `rift://` link),
 `a11y` (a screen reader's action request on a labelled node), `fault`
 (headless: an unavailable clipboard or missing opener), `quit`. `menu` (native menu bar) works on macOS only; scripts that

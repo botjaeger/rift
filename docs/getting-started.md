@@ -133,6 +133,18 @@ blocks too. Details: [SSH profiles](features.md#ssh-profiles).
 
 ## Automation
 
+### Open a folder from another app
+
+`rift-terminal ~/src/app` (or `.`, or a file: its folder) opens a tab there
+in the running Rift; `--new-window` opens a window. Palette → *Install 'rift'
+command* adds `~/.local/bin/rift`, so `rift .` works from any shell or as an
+editor's external terminal. On macOS, drop a folder on Rift's Dock icon or
+use Finder's *Open With → Rift*. `rift://action/open_file?path=<file>&line=12`
+opens a file in your `link_editor` at line 12. Details:
+[Opening Rift from other apps](features.md#opening-rift-from-other-apps).
+
+### Control socket
+
 `rift-terminal ctl` controls running Rift (every window) over a local socket:
 
 ```sh
