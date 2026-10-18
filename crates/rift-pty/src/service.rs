@@ -18,6 +18,13 @@ pub fn connect() -> std::io::Result<UnixStream> {
     if let Ok(s) = UnixStream::connect(&path) {
         return handshake(s);
     }
+    // panes connect on their own threads: one starts the service, the
+    // others wait for it (two starts race launchd's bootstrap/bootout)
+    static START: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _start = START.lock().unwrap_or_else(|e| e.into_inner());
+    if let Ok(s) = UnixStream::connect(&path) {
+        return handshake(s);
+    }
     let exe = std::env::current_exe()?;
     crate::launchd::spawn_helper("session", &exe, &["--session-daemon"], None)?;
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -147,14 +154,29 @@ pub fn open(
         }
         ServiceTarget::Attach(id) => id,
     };
+    let attached = attach_new(&mut s, session, target, ws);
+    if attached.is_err() && target == ServiceTarget::Spawn {
+        // nobody would ever reach the shell just started
+        kill(session);
+    }
+    attached.map(|()| (s, session))
+}
+
+/// Attach to `session` just spawned or to reattach, then send the size.
+fn attach_new(
+    s: &mut UnixStream,
+    session: u64,
+    target: ServiceTarget,
+    ws: WindowSize,
+) -> std::io::Result<()> {
     ipc::send_json(
-        &mut s,
+        s,
         &Request::Attach {
             session,
             from_seq: 0,
         },
     )?;
-    match next_event(&mut s)? {
+    match next_event(s)? {
         Event::Attached { .. } => {}
         Event::Error { message } => {
             return Err(std::io::Error::new(ErrorKind::NotFound, message));
@@ -164,7 +186,7 @@ pub fn open(
     if matches!(target, ServiceTarget::Attach(_)) {
         // the window size may have changed while detached
         ipc::send_json(
-            &mut s,
+            s,
             &Request::Resize {
                 session,
                 cols: ws.num_cols,
@@ -174,7 +196,7 @@ pub fn open(
             },
         )?;
     }
-    Ok((s, session))
+    Ok(())
 }
 
 /// Reattach to `session` on a fresh connection after the service dropped

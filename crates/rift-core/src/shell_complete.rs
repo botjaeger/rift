@@ -248,13 +248,40 @@ struct Running {
 }
 
 impl Running {
-    fn stop(mut self) {
-        stop_child(&mut self.child);
+    fn stop(self) {
+        let child = self.child;
+        // the whole group now, a signal is immediate; reaping (and the
+        // `kill` fallback, a process of its own) never makes the caller wait
+        kill_group(&child);
+        let reap = std::sync::Arc::new(std::sync::Mutex::new(None::<Child>));
+        let theirs = reap.clone();
+        *reap.lock().unwrap_or_else(PoisonError::into_inner) = Some(child);
+        let spawned = std::thread::Builder::new()
+            .name("complete-stop".into())
+            .spawn(move || {
+                if let Some(mut c) = theirs.lock().unwrap_or_else(PoisonError::into_inner).take() {
+                    stop_child(&mut c);
+                }
+            });
+        if spawned.is_err() {
+            // no thread: reap here (the group is already killed)
+            if let Some(mut c) = reap.lock().unwrap_or_else(PoisonError::into_inner).take() {
+                stop_child(&mut c);
+            }
+        }
+    }
+}
+
+/// SIGKILL the server's process group (created for it: `process_group(0)`).
+fn kill_group(child: &Child) {
+    if let Ok(pid) = libc::pid_t::try_from(child.id()) {
+        // SAFETY: plain syscall on a process group this process created
+        unsafe { libc::killpg(pid, libc::SIGKILL) };
     }
 }
 
 /// Kill the server's process group (the shell and whatever its completion
-/// functions started) and reap it off this thread.
+/// functions started) and reap it.
 fn stop_child(child: &mut Child) {
     let pid = child.id();
     // the group was created for this child (`process_group(0)`)

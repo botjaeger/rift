@@ -7,6 +7,12 @@ Blocks are delimited by shell-integration OSC 133 markers
 
 - The shell's prompt echo is replaced by a synthesized header (command,
   prompt-time cwd/branch context, status badge, duration, copy button).
+  The command is the text the editor submitted, else the line the shell
+  reports in `133;C;cmdline_url=` (a reattached shell's output is replayed
+  at the new window's width, where readline's and zle's echo no longer reads
+  back as the command), else the echo read from the screen. A `C` with the
+  line right after a bare one (another integration's, same row) fills in the
+  command; one the command's own output prints later never renames its block.
 - Blocks anchor to **absolute line indices** that survive scrollback trim; a
   block whose lines fall out of scrollback is pruned.
 - **Background blocks** (Warp): output a background job prints while the
@@ -260,7 +266,7 @@ whole buffer.
   pane, until dismissed); `Copied` appears only when the clipboard took the
   text.
 - Click a block header: select the block (again: deselect). A click without a drag on its output also selects it (again: deselect); a drag selects text. Click its chevron: collapse.
-- **Copy on select** (`copy_on_select`, off by default): a drag-selection is
+- **Copy on select** (`copy_on_select`, on by default): a drag-selection is
   copied to the clipboard as soon as the mouse is released.
 
 ## Multi-cursor editing
@@ -484,7 +490,8 @@ an ordinary window for it.
 - **Themes**: four builtins (`dark-default`, `light-default`,
   `catppuccin-mocha`, `tokyo-night`) plus user themes in
   `~/.config/rift/themes/` as Rift TOML **or Warp YAML** — a Warp theme
-  file works unchanged; Rift derives its full token set from Warp's base
+  file works unchanged (solid colors only: a gradient `accent` or `background`
+  is not read yet); Rift derives its full token set from Warp's base
   colors.
 - **OS theme sync** (`sync_os_theme`): follow the system appearance —
   `theme` while dark, `theme_light` while light — switching live when the OS
@@ -873,10 +880,19 @@ while a launchd job it bootstrapped runs). They appear under System
 Settings › General › Login Items as Rift's background items. Runs with
 their own `XDG_DATA_HOME`/`XDG_CONFIG_HOME` (scripted and test runs), runs
 outside Rift.app and older macOS bootstrap launchd jobs instead
-(`<data dir>/launchd/*.plist`, run once). A service that does
+(`<data dir>/launchd/*.plist`, run once). An agent whose registration
+still names another build (after an update, or a copy of Rift elsewhere
+with the same labels) is refused by launchd (`spawn failed`, exit 78): Rift
+registers it again, which pins this build, and retries once, else starts
+the one-shot job instead; every `launchctl` call gives up after 5 s. A pane asks the service on its
+own thread, never the window's: starting the service or the gateway, and a
+slow or stalled service, never hold the window (⌘T, typing and splits go
+on; the pane shows `Starting zsh…` and keeps what is typed). A service that does
 not answer a request within 5 s (hello, spawn, attach) counts as
-unavailable: that pane starts a local shell with a notice, and the rest of
-the window's run stays local instead of waiting on it again.
+unavailable: that pane starts a local shell in its place with a notice (it
+runs what was typed meanwhile), and the rest of the window's run stays
+local instead of waiting on it again. A reattach whose shell ended while
+detached starts a fresh one in the service.
 
 **Quitting** Rift (⌘Q, Quit Rift in the menu or the palette, or closing the
 window) is intentional: every shell ends and the session file keeps only the
@@ -1487,5 +1503,5 @@ Warp's hotkey window:
 
 ## Deferred (by decision, not gaps)
 
-Multi-cursor editing, `rift://` URI scheme, Warp Drive / cloud / teams.
+Warp Drive / cloud / teams.
 Everything else on the [roadmap](terminal-landscape-roadmap.md) is planned.

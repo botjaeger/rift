@@ -1,4 +1,5 @@
 """Regression checks through Rift's real input routing, in scratch directories."""
+import atexit
 import base64
 import hashlib
 import json
@@ -6,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import signal
 import socket
 import subprocess
 import sys
@@ -16,6 +18,19 @@ import time
 repo = Path(__file__).resolve().parents[1]
 binary = Path(sys.argv[1]).resolve()
 scratch = Path(tempfile.mkdtemp(prefix="rift-ui-", dir="/tmp"))
+
+def remove_launchd_jobs():
+    # runs with their own data directory start their helpers as one-shot
+    # launchd jobs (<data>/launchd/<label>.plist) that stay loaded after
+    # they end: unload this run's, pass or fail
+    for plist in scratch.glob("**/launchd/dev.rift.*.plist"):
+        try:
+            subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{plist.stem}"],
+                           capture_output=True, timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+if sys.platform == "darwin":
+    atexit.register(remove_launchd_jobs)
 print(f"UI artifacts: {scratch}", flush=True)
 cfg = scratch / "cfg" / "rift"
 data = scratch / "data" / "rift"
@@ -65,6 +80,27 @@ threading.Thread(target=accept_stalled, daemon=True).start()
 
 def cp(source, target):
     return "sh cp " + shlex.quote(str(source)) + " " + shlex.quote(str(target))
+
+def session_daemons(data_dir):
+    """Pids of `--session-daemon`s run with XDG_DATA_HOME=data_dir (the CI
+    image has no `ps`: /proc there)."""
+    mark = f"XDG_DATA_HOME={data_dir}"
+    if Path("/proc/self/environ").exists():
+        for p in Path("/proc").glob("[0-9]*"):
+            try:
+                if b"--session-daemon" in (p / "cmdline").read_bytes() and \
+                        mark.encode() in (p / "environ").read_bytes().split(b"\0"):
+                    yield int(p.name)
+            except OSError:
+                pass
+        return
+    ps = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True).stdout
+    for line in ps.splitlines():
+        if "--session-daemon" in line:
+            pid = line.split()[0]
+            own = subprocess.run(["ps", "eww", "-p", pid], capture_output=True, text=True).stdout
+            if mark + " " in own or own.rstrip().endswith(mark):
+                yield int(pid)
 
 def died(what, log):
     # CI keeps no artifacts: the log tail is the only trace of the cause
@@ -1567,6 +1603,118 @@ assert rc == 0, died("restore-focus run failed", rf / "app.log")
 restored = (rf / "restored.txt").read_text()
 first_pane = re.findall(r"^  pane (\d+) ", restored, re.M)[0]
 assert f"panes=3 active_pane={first_pane} " in restored, restored
+
+# ⌘K Clear Blocks wipes the screen and the scrollback (not the shell's soft
+# `clear`, which keeps the history scrollable): nothing of before is left
+ck = scratch / "clear-blocks"
+for sub in ("cfg/rift", "data"):
+    (ck / sub).mkdir(parents=True, exist_ok=True)
+(ck / "cfg/rift/config.toml").write_text(
+    'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\nsync_os_theme = false\n')
+(ck / "t.rift").write_text("\n".join([
+    "wait_prompt", "type seq -f OLD%g 1 80\\n", "wait 800", "wait_prompt", "key cmd+k", "wait 400",
+    # scrolled to the top: the history is gone too
+    "move 500 300", "scroll 3000", "wait 300",
+    f"dump {ck}/cleared.txt", "type echo after\\n", "wait 800", f"dump {ck}/after.txt", "quit"]) + "\n")
+with (ck / "app.log").open("w") as log:
+    rc = subprocess.run([str(binary), "--script", str(ck / "t.rift"), "--headless"],
+                        env=dict(env, XDG_CONFIG_HOME=str(ck / "cfg"), XDG_DATA_HOME=str(ck / "data")),
+                        stdout=log, stderr=log, timeout=60).returncode
+assert rc == 0, died("clear-blocks run failed", ck / "app.log")
+ck_cleared = (ck / "cleared.txt").read_text()
+# nothing above to scroll to (the accessibility value is cut, so it cannot
+# show history lines far up)
+assert re.search(r"^  pane \d+ .*view_offset=0 ", ck_cleared, re.M), ck_cleared[:3000]
+assert "OLD" not in re.search(r'Terminal "Terminal output" value="([^"]*)"', ck_cleared)[1], ck_cleared[-2000:]
+ck_after = (ck / "after.txt").read_text()
+assert re.findall(r'^    block \d+ state=done .*? cmd="([^"]*)"', ck_after, re.M) == ["echo after"], ck_after[-2000:]
+
+# durable sessions: a window that dies (a crash) leaves its shell in the
+# session service, and the relaunch reattaches it and replays its output at
+# the new window's width; restored headers keep the exact commands (the
+# shell's copy in 133;C), not the echo readline placed for the old width
+ra = scratch / "reattach"
+for sub in ("cfg/rift", "data/rift"):
+    (ra / sub).mkdir(parents=True, exist_ok=True)
+(ra / "cfg/rift/config.toml").write_text(
+    'shell = "/bin/bash"\nrestore_session = true\ndurable_sessions = true\nsync_os_theme = false\n')
+ra_env = dict(env, XDG_CONFIG_HOME=str(ra / "cfg"), XDG_DATA_HOME=str(ra / "data"),
+              RIFT_PERSIST_SESSION="1")
+ra_long, ra_wide = "echo " + "LONG_" * 40, "echo " + "漢字" * 42
+(ra / "a.rift").write_text("\n".join([
+    "resize 1000 700", "wait_prompt", f"type {ra_long}\\n", "wait 800", "wait_prompt",
+    f"type {ra_wide}\\n", "wait 800", "wait_prompt", f"sh touch {ra}/ready", "wait 60000",
+    "quit"]) + "\n")
+with (ra / "a.log").open("w") as log:
+    first = subprocess.Popen([str(binary), "--script", str(ra / "a.rift"), "--headless"],
+                             env=ra_env, stdout=log, stderr=log)
+    for _ in range(300):
+        if (ra / "ready").exists() or first.poll() is not None:
+            break
+        time.sleep(0.1)
+    time.sleep(0.5)
+    first.kill()
+    first.wait()
+assert (ra / "ready").exists(), died("reattach first run failed", ra / "a.log")
+# the relaunch's window starts at its default size, not 1000x700
+(ra / "b.rift").write_text(f"wait_prompt\nwait 1500\ndump {ra}/restored.txt\nquit\n")
+try:
+    with (ra / "b.log").open("w") as log:
+        rc = subprocess.run([str(binary), "--script", str(ra / "b.rift"), "--headless"],
+                            env=ra_env, stdout=log, stderr=log, timeout=90).returncode
+finally:
+    # the session service this test started (matched by its data dir)
+    for pid in session_daemons(ra / "data"):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+assert rc == 0, died("reattach run failed", ra / "b.log")
+restored = (ra / "restored.txt").read_text()
+ra_cmds = re.findall(r'^    block \d+ state=done .*? cmd="([^"]*)"', restored, re.M)
+assert ra_cmds == [ra_long, ra_wide], (ra_cmds, restored[-3000:])
+
+# a session service that accepts and never answers holds no window: the
+# shell is started on the pane's reader thread, so ⌘T, typing and a split
+# come back at once (timestamped from the app's own thread); each pane then
+# falls back to a local shell, which runs what was typed meanwhile
+fz = scratch / "frozen"
+for sub in ("cfg/rift", "data/rift/sessiond", "work"):
+    (fz / sub).mkdir(parents=True, exist_ok=True)
+(fz / "data/rift/sessiond").chmod(0o700)
+(fz / "cfg/rift/config.toml").write_text(
+    'shell = "/bin/bash"\ndurable_sessions = true\nrestore_session = false\n'
+    f'sync_os_theme = false\nworking_directory = {json.dumps(str(fz / "work"))}\n')
+fz_listener = socket.socket(socket.AF_UNIX)
+fz_listener.bind(str(fz / "data/rift/sessiond/sock"))
+fz_listener.listen(16)
+fz_held = []
+def fz_accept():
+    while True:
+        try:
+            fz_held.append(fz_listener.accept()[0])
+        except OSError:
+            return
+threading.Thread(target=fz_accept, daemon=True).start()
+def fz_stamp(name):
+    return f"sh python3 -c 'import time; print(time.time())' > {fz}/{name}"
+(fz / "t.rift").write_text("\n".join([
+    "wait 300", fz_stamp("t0"), "key cmd+t", fz_stamp("t1"),
+    "type echo HELD_OK\\n", fz_stamp("t2"), "key cmd+d", fz_stamp("t3"),
+    "wait 12000", f"dump {fz}/after.txt", "quit"]) + "\n")
+with (fz / "app.log").open("w") as log:
+    rc = subprocess.run([str(binary), "--script", str(fz / "t.rift"), "--headless"],
+                        env=dict(env, XDG_CONFIG_HOME=str(fz / "cfg"), XDG_DATA_HOME=str(fz / "data"),
+                                 RIFT_PERSIST_SESSION="1"),
+                        stdout=log, stderr=log, timeout=60).returncode
+fz_listener.close()
+assert rc == 0, died("frozen-service run failed", fz / "app.log")
+fz_t = [float((fz / f"t{i}").read_text()) for i in range(4)]
+assert all(b - a < 1.5 for a, b in zip(fz_t, fz_t[1:])), ("the window waited on the service", fz_t)
+fz_after = (fz / "after.txt").read_text()
+assert re.search(r"tabs=2 .*panes=\[\d+, \d+, \d+\]", fz_after), fz_after[:600]
+assert 'cmd="echo HELD_OK"' in fz_after, fz_after[-3000:]
+assert "Session service unavailable" in (fz / "app.log").read_text() + fz_after
 
 # a focus change alone reaches the session file (no quit, no other edit):
 # a restart then focuses the pane last used

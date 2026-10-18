@@ -109,12 +109,13 @@ impl Background {
             *next
         };
         let exited = Arc::new(AtomicBool::new(false));
+        let failed = Arc::new(AtomicBool::new(false));
         let observer: rift_pty::Observer = Arc::new({
-            let exited = exited.clone();
-            move |_, event| {
-                if matches!(event, SessionEvent::Exit) {
-                    exited.store(true, Ordering::Release);
-                }
+            let (exited, failed) = (exited.clone(), failed.clone());
+            move |_, event| match event {
+                SessionEvent::Exit => exited.store(true, Ordering::Release),
+                SessionEvent::ServiceFailed(_) => failed.store(true, Ordering::Release),
+                _ => {}
             }
         });
         let session = Session::spawn(SpawnOptions {
@@ -131,7 +132,16 @@ impl Background {
             clipboard: rift_pty::ClipboardAccess::from_config(&config.clipboard_access),
         })
         .map_err(|e| InputError::Unavailable(format!("the session service: {e}")))?;
-        if session.service_id.is_none() {
+        // the service answers on the pane's reader thread; this is the
+        // gateway's, which may wait for it (bounded by the setup deadline)
+        let until = std::time::Instant::now() + rift_pty::service::SETUP_TIMEOUT * 2;
+        while session.service_id().is_none()
+            && !failed.load(Ordering::Acquire)
+            && std::time::Instant::now() < until
+        {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        if session.service_id().is_none() {
             // never a shell only this gateway holds: Rift could not adopt it
             session.terminate();
             return Err(InputError::Unavailable(
@@ -165,7 +175,7 @@ impl Background {
             .lock()
             .unwrap()
             .iter()
-            .filter_map(|s| s.session.service_id)
+            .filter_map(|s| s.session.service_id())
             .collect();
         write_handoff(ids);
     }

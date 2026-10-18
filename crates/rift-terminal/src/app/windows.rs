@@ -446,6 +446,8 @@ impl App {
             | E::PtyColorRequest(p, ..)
             | E::PtyWindowOp(p, _)
             | E::PtyNotify(p, ..)
+            | E::PtyServiceFailed(p, _)
+            | E::PtyServiceReady(p)
             | E::GitStatus(p, _)
             | E::PrStatus(p, _)
             | E::DockerStatus(p, _) => Some(*p),

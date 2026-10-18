@@ -107,9 +107,21 @@ __rift_precmd_end() {
     precmd_functions=(${precmd_functions:#__rift_precmd_end} __rift_precmd_end)
 }
 
+# C marker with the command line as read (kitty's cmdline_url): the block
+# header keeps it exact even where the screen's echo is not (a reattached
+# shell replayed at another width). `%' first, then what would end or split
+# the sequence; the rest goes as is.
 __rift_preexec() {
     __rift_cmd_ran=1
-    printf '\e]133;C\a'
+    local c=${1//\%/%25}
+    c=${c//$'\a'/%07}
+    c=${c//$'\e'/%1B}
+    c=${c//;/%3B}
+    c=${c//$'\n'/%0A}
+    c=${c//$'\r'/%0D}
+    c=${c//$'\030'/%18}
+    c=${c//$'\032'/%1A}
+    printf '\e]133;C;cmdline_url=%s\a' "$c"
 }
 
 # Children: an interactive `zsh` or `exec zsh` typed here starts with ZDOTDIR

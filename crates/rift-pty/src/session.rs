@@ -45,7 +45,31 @@ pub enum SessionEvent {
     /// Something the user should know about the pane's connection (a
     /// durable session reconnected with output or input lost).
     Notice(String),
+    /// A durable shell could not be started or reattached in the session
+    /// service (asked off the window's thread, see [`Session::spawn`]): the
+    /// window replaces this session, e.g. with a local shell.
+    ServiceFailed(ServiceFailure),
+    /// The session service answered: [`Session::service_id`] is known now
+    /// (the window saves it, so a crash still reattaches this shell).
+    ServiceReady,
     Exit,
+}
+
+/// Why a pane's session-service shell did not start, and what it had.
+#[derive(Debug, Clone)]
+pub struct ServiceFailure {
+    pub error: String,
+    /// The service accepted but did not answer in time ([`crate::service::SETUP_TIMEOUT`]):
+    /// later panes would wait the same.
+    pub stalled: bool,
+    /// It was a reattach (the shell may have ended while detached).
+    pub attach: bool,
+    /// Where the shell was to start.
+    pub cwd: Option<std::path::PathBuf>,
+    /// Input typed meanwhile, for the replacement.
+    pub held: Vec<u8>,
+    /// Input bytes that did not fit while waiting.
+    pub dropped: usize,
 }
 
 /// Formats a color into the reply escape sequence the program asked for.
@@ -115,20 +139,36 @@ const MAX_PENDING_INPUT: usize = 64 * 1024;
 
 /// The connection to the session service that input and requests go on.
 pub(crate) struct ServiceConn {
-    stream: std::os::unix::net::UnixStream,
+    /// `None` until the service answered the spawn or attach.
+    stream: Option<std::os::unix::net::UnixStream>,
     /// `Some` while the connection is down: input waits here, in order, and
     /// goes out on the replacement (see [`ServiceConn::reconnected`]).
     pending: Option<Vec<u8>>,
     /// Input bytes dropped because `pending` was full.
     dropped: usize,
+    /// ⌘K came while not connected: the reader clears the service's
+    /// history once it is.
+    clear_history: bool,
 }
 
 impl ServiceConn {
+    #[cfg(test)]
     fn new(stream: std::os::unix::net::UnixStream) -> Self {
         Self {
-            stream,
+            stream: Some(stream),
             pending: None,
             dropped: 0,
+            clear_history: false,
+        }
+    }
+
+    /// Not connected yet: input is held until [`ServiceConn::reconnected`].
+    fn connecting() -> Self {
+        Self {
+            stream: None,
+            pending: Some(Vec::new()),
+            dropped: 0,
+            clear_history: false,
         }
     }
 
@@ -137,9 +177,11 @@ impl ServiceConn {
     /// drops a partial frame with the connection), so the chunk that failed
     /// and everything after it are held, never one already sent.
     fn input(&mut self, session: u64, bytes: &[u8]) {
-        if self.pending.is_none() {
+        if self.pending.is_none()
+            && let Some(stream) = self.stream.as_mut()
+        {
             for (i, chunk) in bytes.chunks(crate::ipc::MAX_INPUT_CHUNK).enumerate() {
-                if crate::ipc::send_input(&mut self.stream, session, chunk).is_err() {
+                if crate::ipc::send_input(stream, session, chunk).is_err() {
                     self.pending = Some(Vec::new());
                     self.hold(&bytes[i * crate::ipc::MAX_INPUT_CHUNK..]);
                     return;
@@ -150,11 +192,15 @@ impl ServiceConn {
         self.hold(bytes);
     }
 
+    /// Whole or not at all: half a paste would leave the shell waiting for
+    /// its end marker.
     fn hold(&mut self, bytes: &[u8]) {
         let pending = self.pending.get_or_insert_with(Vec::new);
-        let room = MAX_PENDING_INPUT.saturating_sub(pending.len());
-        pending.extend_from_slice(&bytes[..bytes.len().min(room)]);
-        self.dropped += bytes.len().saturating_sub(room);
+        if pending.len() + bytes.len() > MAX_PENDING_INPUT {
+            self.dropped += bytes.len();
+            return;
+        }
+        pending.extend_from_slice(bytes);
     }
 
     /// The connection dropped: hold input from now on.
@@ -165,7 +211,7 @@ impl ServiceConn {
     /// Switch to `stream` and send the input held meanwhile. Returns the
     /// number of input bytes that were dropped (pending was full).
     fn reconnected(&mut self, stream: std::os::unix::net::UnixStream, session: u64) -> usize {
-        self.stream = stream;
+        self.stream = Some(stream);
         let held = self.pending.take().unwrap_or_default();
         self.input(session, &held);
         std::mem::take(&mut self.dropped)
@@ -178,7 +224,9 @@ pub(crate) enum PtyWriter {
     File(Arc<File>),
     Service {
         conn: Arc<Mutex<ServiceConn>>,
-        session: u64,
+        /// The service's id for the shell; 0 until it answered (input is
+        /// held until then).
+        session: Arc<AtomicU64>,
         /// Set while retained output is replayed after (re)attaching: the
         /// terminal's automatic replies (device attributes, graphics OKs)
         /// were answered when the output first arrived.
@@ -194,7 +242,9 @@ impl PtyWriter {
                 let _ = (&**f).write_all(bytes);
             }
             PtyWriter::Service { conn, session, .. } => {
-                conn.lock().unwrap().input(*session, bytes);
+                conn.lock()
+                    .unwrap()
+                    .input(session.load(Ordering::Acquire), bytes);
             }
         }
     }
@@ -202,8 +252,20 @@ impl PtyWriter {
     /// A request to the session service about this shell (nothing for a
     /// local PTY).
     fn request(&self, req: &crate::ipc::Request) {
+        // not connected yet: the reader sends the size, and clears the
+        // history, once it is
         if let PtyWriter::Service { conn, .. } = self {
-            let _ = crate::ipc::send_json(&mut conn.lock().unwrap().stream, req);
+            let mut c = conn.lock().unwrap();
+            match c.stream.as_mut() {
+                Some(stream) => {
+                    let _ = crate::ipc::send_json(stream, req);
+                }
+                None => {
+                    if matches!(req, crate::ipc::Request::ClearHistory { .. }) {
+                        c.clear_history = true;
+                    }
+                }
+            }
         }
     }
 
@@ -334,8 +396,6 @@ pub struct Session {
     /// chunk of output parsed, a resize, a clear. Equal values: the same
     /// screen (the remote gateway's `screen` reads skip rebuilding it).
     pub generation: Arc<AtomicU64>,
-    /// Id of the shell in the session service (durable sessions).
-    pub service_id: Option<u64>,
     /// Writes of user input so far (`write`; never the terminal's own
     /// replies): a request for input raised before the last one was answered.
     inputs: AtomicU64,
@@ -441,7 +501,15 @@ enum Backend {
     Local(tty::Pty),
     /// The session service: the shell outlives this window.
     Service {
-        session: u64,
+        /// 0 until the service answered (see `PtyWriter::Service`).
+        session: Arc<AtomicU64>,
+        /// The pane was closed: a shell the service starts after that is
+        /// ended at once.
+        closed: Arc<AtomicBool>,
+        /// Where input waits until the service answered.
+        conn: Arc<Mutex<ServiceConn>>,
+        /// The reader is done asking the service (answered or failed).
+        settled: Arc<AtomicBool>,
         /// Foreground job reported by the service.
         job: Arc<Mutex<Option<String>>>,
         /// Input hidden, reported by the service.
@@ -643,20 +711,36 @@ impl ClipboardAccess {
 enum Source {
     Pty(File),
     Service {
-        stream: std::os::unix::net::UnixStream,
+        /// Spawn or reattach (`service::open`), run first on the reader
+        /// thread: a slow or stalled service never holds the window.
+        open: Open,
+        target: ServiceTarget,
+        cwd: Option<std::path::PathBuf>,
+        session_id: Arc<AtomicU64>,
+        closed: Arc<AtomicBool>,
+        settled: Arc<AtomicBool>,
         muted: Arc<AtomicBool>,
         job: Arc<Mutex<Option<String>>>,
         hidden: Arc<AtomicBool>,
         /// The connection `PtyWriter` sends input on (replaced on resume).
         conn: Arc<Mutex<ServiceConn>>,
-        session: u64,
-        /// The reattached shell's directory as the service last saw it:
-        /// fills the pane's cwd once the replay is done when no OSC 7 in
-        /// the retained output did (a long-running job prints no prompt).
-        known_cwd: Option<String>,
-        /// Reattach after the byte `u64` (see [`crate::service::resume`]).
-        resume: Resume,
     },
+}
+
+/// Connects to the session service and spawns or reattaches the shell.
+type Open = Box<dyn FnOnce() -> std::io::Result<Opened> + Send>;
+
+/// A shell the session service started or reattached.
+struct Opened {
+    stream: std::os::unix::net::UnixStream,
+    /// The service's id for it.
+    session: u64,
+    /// The reattached shell's directory as the service last saw it:
+    /// fills the pane's cwd once the replay is done when no OSC 7 in
+    /// the retained output did (a long-running job prints no prompt).
+    known_cwd: Option<String>,
+    /// Reattach after the byte `u64` (see [`crate::service::resume`]).
+    resume: Resume,
 }
 
 /// Opens a fresh service connection streaming output after the given byte;
@@ -741,16 +825,94 @@ impl Reader {
                 }
             }
             Source::Service {
-                mut stream,
+                open,
+                target,
+                cwd,
+                session_id,
+                closed,
+                settled,
                 muted,
                 job,
                 hidden,
                 conn,
-                session,
-                mut known_cwd,
-                mut resume,
             } => {
                 use crate::ipc::{Event as Ev, Frame, read_frame};
+                let attach = matches!(target, ServiceTarget::Attach(_));
+                let opened = open().and_then(|o| Ok((o.stream.try_clone()?, o)));
+                let (
+                    writer,
+                    Opened {
+                        mut stream,
+                        session,
+                        mut known_cwd,
+                        mut resume,
+                    },
+                ) = match opened {
+                    Ok(v) => v,
+                    Err(e) => {
+                        settled.store(true, Ordering::SeqCst);
+                        let (held, dropped) = {
+                            let mut c = conn.lock().unwrap();
+                            (
+                                c.pending.take().unwrap_or_default(),
+                                std::mem::take(&mut c.dropped),
+                            )
+                        };
+                        (self.observer)(
+                            self.id,
+                            SessionEvent::ServiceFailed(ServiceFailure {
+                                error: e.to_string(),
+                                stalled: e.kind() == std::io::ErrorKind::TimedOut,
+                                attach,
+                                cwd,
+                                held,
+                                dropped,
+                            }),
+                        );
+                        return;
+                    }
+                };
+                session_id.store(session, Ordering::SeqCst);
+                if closed.load(Ordering::SeqCst) {
+                    // closed while the service was starting the shell
+                    crate::service::kill(session);
+                    settled.store(true, Ordering::SeqCst);
+                    return;
+                }
+                settled.store(true, Ordering::SeqCst);
+                (self.observer)(self.id, SessionEvent::ServiceReady);
+                let dropped = {
+                    let mut c = conn.lock().unwrap();
+                    // the window may have changed size while it waited
+                    let ws = *self.ctx.window_size.lock().unwrap();
+                    let _ = crate::ipc::send_json(
+                        &mut &writer,
+                        &crate::ipc::Request::Resize {
+                            session,
+                            cols: ws.num_cols,
+                            rows: ws.num_lines,
+                            cell_w: ws.cell_width,
+                            cell_h: ws.cell_height,
+                        },
+                    );
+                    if c.clear_history {
+                        let _ = crate::ipc::send_json(
+                            &mut &writer,
+                            &crate::ipc::Request::ClearHistory { session },
+                        );
+                    }
+                    c.reconnected(writer, session)
+                };
+                // ⌘K before the service answered: the replay it is sending
+                // is cleared too, once it is all in (the prompt stays)
+                let mut clear_after_replay =
+                    std::mem::take(&mut conn.lock().unwrap().clear_history);
+                if dropped > 0 {
+                    self.notice(&format!(
+                        "The session service was slow to start this shell; {dropped} bytes \
+                         of input typed meanwhile were dropped."
+                    ));
+                }
                 // first byte not yet fed to the parser, and resumes since
                 // the last output
                 let (mut next_seq, mut resumes) = (0u64, 0u32);
@@ -855,6 +1017,9 @@ impl Reader {
                                     blocks.set_clock(None);
                                     blocks.set_replaying(false);
                                 }
+                                if std::mem::take(&mut clear_after_replay) {
+                                    clear_all(&self.ctx);
+                                }
                                 // after the replay, so its blocks keep the
                                 // directories they ran in
                                 if let Some(dir) = known_cwd.take() {
@@ -880,6 +1045,79 @@ impl Reader {
         }
         (self.observer)(self.id, SessionEvent::Exit);
     }
+}
+
+/// ⌘K on the reader's side: a clear asked for while the service had not
+/// answered, applied once its replay is in.
+fn clear_all(ctx: &FeedCtx) {
+    clear_all_of(
+        &ctx.term,
+        &ctx.scrolled,
+        ctx.scrollback,
+        &ctx.generation,
+        &ctx.blocks,
+        &ctx.graphics,
+        |_| {},
+    );
+}
+
+/// Wipe screen, scrollback and the block list in one atomic step (no-op on
+/// the alt screen; false then). `while_locked` runs with the blocks lock
+/// held, before the prompt is re-anchored.
+fn clear_all_of(
+    term: &FairMutex<Term<EventProxy>>,
+    scrolled_at: &AtomicU64,
+    scrollback: usize,
+    generation: &AtomicU64,
+    blocks: &Mutex<BlockStore>,
+    graphics: &Mutex<Graphics>,
+    while_locked: impl FnOnce(&mut BlockStore),
+) -> bool {
+    use alacritty_terminal::term::TermMode;
+    use alacritty_terminal::vte::ansi::{ClearMode, Handler};
+
+    let mut term = term.lock();
+    if term.mode().contains(TermMode::ALT_SCREEN) {
+        return false;
+    }
+    let mut scrolled = scrolled_at.load(Ordering::Acquire);
+    {
+        let mut abs = AbsTerm {
+            term: &mut term,
+            scrolled: &mut scrolled,
+            scrollback_cap: scrollback,
+            saw_clear_saved: false,
+            on_resize: None,
+        };
+        abs.clear_screen(ClearMode::All);
+    }
+    // straight to the terminal: AbsTerm keeps the history on a Saved clear
+    // (the shell's `clear` is a soft one), ⌘K drops it. Dropping lines
+    // pushes none, so `scrolled` stays as it is.
+    term.clear_screen(ClearMode::Saved);
+    scrolled_at.store(scrolled, Ordering::Release);
+    generation.fetch_add(1, Ordering::AcqRel);
+    term.selection = None;
+
+    // Re-anchor a fresh Prompt block at the post-clear cursor: the shell
+    // still believes its prompt is on the (now cleared) row the cursor
+    // occupies, so the next submitted command echoes exactly there and
+    // header extraction stays correct.
+    let cursor = term.grid().cursor.point;
+    let abs_line = scrolled + cursor.line.0.max(0) as u64;
+    let mut blocks = blocks.lock().unwrap();
+    let was_prompt = matches!(
+        blocks.last().map(|b| &b.state),
+        Some(rift_core::BlockState::Prompt)
+    );
+    blocks.clear();
+    graphics.lock().unwrap().clear();
+    while_locked(&mut blocks);
+    if was_prompt {
+        blocks.on_prompt_start(abs_line);
+        blocks.on_command_start(abs_line, cursor.column.0);
+    }
+    true
 }
 
 impl Session {
@@ -915,46 +1153,74 @@ impl Session {
                 (Backend::Local(pty), writer, source)
             }
             Some(target) => {
-                let (stream, session) = crate::service::open(
-                    target,
-                    shell.as_deref(),
-                    working_directory.as_deref(),
-                    env,
-                    window_size,
-                )?;
-                // a reattached shell's last OSC 7 may have left the replay
-                // ring; the service still knows its directory, so a pane
-                // split from it starts there instead of at the fallback.
-                // Asked after `open` answered: a stalled service fails once.
-                let known_cwd = match target {
-                    crate::ServiceTarget::Attach(sid) => crate::service::list()
-                        .into_iter()
-                        .find(|s| s.id == sid)
-                        .and_then(|s| s.cwd),
-                    crate::ServiceTarget::Spawn => None,
-                };
-                let conn = Arc::new(Mutex::new(ServiceConn::new(stream.try_clone()?)));
+                // started (or reattached) by the reader thread, so the
+                // window never waits on the service (starting it, a stalled
+                // one); input is held until it answered, and a failure is
+                // reported as `SessionEvent::ServiceFailed`
+                let cwd = working_directory.clone();
+                let open: Open = Box::new(move || {
+                    let (stream, session) = crate::service::open(
+                        target,
+                        shell.as_deref(),
+                        working_directory.as_deref(),
+                        env,
+                        window_size,
+                    )?;
+                    // a reattached shell's last OSC 7 may have left the
+                    // replay ring; the service still knows its directory, so
+                    // a pane split from it starts there instead of at the
+                    // fallback. Asked after `open` answered: a stalled
+                    // service fails once.
+                    let known_cwd = match target {
+                        ServiceTarget::Attach(sid) => crate::service::list()
+                            .into_iter()
+                            .find(|s| s.id == sid)
+                            .and_then(|s| s.cwd),
+                        ServiceTarget::Spawn => None,
+                    };
+                    Ok(Opened {
+                        stream,
+                        session,
+                        known_cwd,
+                        resume: Box::new(move |from| crate::service::resume(session, from)),
+                    })
+                });
+                let conn = Arc::new(Mutex::new(ServiceConn::connecting()));
+                // a reattach knows its id already (the layout keeps it while
+                // the service answers); a new shell's comes with the answer
+                let session = Arc::new(AtomicU64::new(match target {
+                    ServiceTarget::Attach(id) => id,
+                    ServiceTarget::Spawn => 0,
+                }));
+                let closed = Arc::new(AtomicBool::new(false));
+                let settled = Arc::new(AtomicBool::new(false));
                 let muted = Arc::new(AtomicBool::new(true));
                 let job = Arc::new(Mutex::new(None));
                 let hidden = Arc::new(AtomicBool::new(false));
                 let writer = PtyWriter::Service {
                     conn: conn.clone(),
-                    session,
+                    session: session.clone(),
                     muted: muted.clone(),
                 };
                 let source = Source::Service {
-                    stream,
+                    open,
+                    target,
+                    cwd,
+                    session_id: session.clone(),
+                    closed: closed.clone(),
+                    settled: settled.clone(),
                     muted,
                     job: job.clone(),
                     hidden: hidden.clone(),
                     conn: conn.clone(),
-                    session,
-                    known_cwd,
-                    resume: Box::new(move |from| crate::service::resume(session, from)),
                 };
+                let conn = conn.clone();
                 (
                     Backend::Service {
                         session,
+                        closed,
+                        conn,
+                        settled,
                         job,
                         hidden,
                     },
@@ -962,10 +1228,6 @@ impl Session {
                     source,
                 )
             }
-        };
-        let service_id = match &backend {
-            Backend::Service { session, .. } => Some(*session),
-            Backend::Local(_) => None,
         };
 
         let term_config = TermConfig {
@@ -1046,7 +1308,6 @@ impl Session {
             dirty,
             saw_output,
             generation,
-            service_id,
             inputs: AtomicU64::new(0),
             writer: InputQueue::new(writer, move |m| observer(id, SessionEvent::Notice(m))),
             backend,
@@ -1058,6 +1319,47 @@ impl Session {
 
     pub fn size(&self) -> GridSize {
         self.size
+    }
+
+    /// Id of the shell in the session service (durable sessions); `None`
+    /// for a local shell, and for a new one until the service answered.
+    pub fn service_id(&self) -> Option<u64> {
+        match &self.backend {
+            Backend::Service { session, .. } => {
+                Some(session.load(Ordering::SeqCst)).filter(|&id| id != 0)
+            }
+            Backend::Local(_) => None,
+        }
+    }
+
+    /// Input held for a service that never answered (typed after the
+    /// failure was reported, before the window replaced this session).
+    pub fn take_held_input(&self) -> Vec<u8> {
+        match &self.backend {
+            Backend::Service { conn, .. } => {
+                let mut c = conn.lock().unwrap();
+                if c.stream.is_some() {
+                    return Vec::new();
+                }
+                c.pending.replace(Vec::new()).unwrap_or_default()
+            }
+            Backend::Local(_) => Vec::new(),
+        }
+    }
+
+    /// Not waiting on the session service any more (or never was): a quit
+    /// waits for this so a shell the service is just starting is ended,
+    /// not left running unseen.
+    pub fn settled(&self) -> bool {
+        match &self.backend {
+            Backend::Service { settled, .. } => settled.load(Ordering::SeqCst),
+            Backend::Local(_) => true,
+        }
+    }
+
+    /// The shell runs in the session service (or is being started there).
+    pub fn durable(&self) -> bool {
+        matches!(self.backend, Backend::Service { .. })
     }
 
     /// The working directory when it is on this machine: `None` while the
@@ -1210,10 +1512,18 @@ impl Session {
     /// local shell ends when the PTY drops). Quitting the app does not
     /// call this, which is what keeps durable sessions running.
     pub fn terminate(&self) {
-        if let Backend::Service { session, .. } = &self.backend {
+        if let Backend::Service {
+            session, closed, ..
+        } = &self.backend
+        {
+            // a shell the service is still starting is ended by the reader
+            closed.store(true, Ordering::SeqCst);
+            let session = session.load(Ordering::SeqCst);
+            if session == 0 {
+                return;
+            }
             // on a connection of its own, off this thread: the pane's own
             // may be held by input the service is not taking
-            let session = *session;
             let _ = std::thread::Builder::new()
                 .name("session-kill".into())
                 .spawn(move || crate::service::kill(session));
@@ -1227,51 +1537,21 @@ impl Session {
     /// ClearMode::Saved drops history without pushing, so `scrolled` stays
     /// monotone and `abs = scrolled + screen_row` remains valid.
     pub fn clear_screen_and_blocks(&self) {
-        use alacritty_terminal::term::TermMode;
-        use alacritty_terminal::vte::ansi::{ClearMode, Handler};
-
-        let mut term = self.term.lock();
-        if term.mode().contains(TermMode::ALT_SCREEN) {
-            return;
-        }
-        let mut scrolled = self.scrolled.load(Ordering::Acquire);
-        {
-            let mut abs = AbsTerm {
-                term: &mut term,
-                scrolled: &mut scrolled,
-                scrollback_cap: self.scrollback,
-                saw_clear_saved: false,
-                on_resize: None,
-            };
-            abs.clear_screen(ClearMode::All);
-            abs.clear_screen(ClearMode::Saved);
-        }
-        self.scrolled.store(scrolled, Ordering::Release);
-        self.generation.fetch_add(1, Ordering::AcqRel);
-        term.selection = None;
-
-        // Re-anchor a fresh Prompt block at the post-clear cursor: the shell
-        // still believes its prompt is on the (now cleared) row the cursor
-        // occupies, so the next submitted command echoes exactly there and
-        // header extraction stays correct.
-        let cursor = term.grid().cursor.point;
-        let abs_line = scrolled + cursor.line.0.max(0) as u64;
-        let mut blocks = self.blocks.lock().unwrap();
-        let was_prompt = matches!(
-            blocks.last().map(|b| &b.state),
-            Some(rift_core::BlockState::Prompt)
-        );
-        blocks.clear();
-        self.graphics.lock().unwrap().clear();
         // a reattach must not bring the cleared output back
-        if let Backend::Service { session, .. } = &self.backend {
-            self.writer
-                .request(crate::ipc::Request::ClearHistory { session: *session });
-        }
-        if was_prompt {
-            blocks.on_prompt_start(abs_line);
-            blocks.on_command_start(abs_line, cursor.column.0);
-        }
+        clear_all_of(
+            &self.term,
+            &self.scrolled,
+            self.scrollback,
+            &self.generation,
+            &self.blocks,
+            &self.graphics,
+            |_| {
+                if let Some(session) = self.service_id() {
+                    self.writer
+                        .request(crate::ipc::Request::ClearHistory { session });
+                }
+            },
+        );
     }
 
     /// Change the OSC 52 policy of the running shell.
@@ -1304,9 +1584,11 @@ impl Session {
         );
         match &mut self.backend {
             Backend::Local(pty) => pty.on_resize(ws),
+            // not answered yet: the reader sends `window_size` then
+            Backend::Service { session, .. } if session.load(Ordering::SeqCst) == 0 => {}
             Backend::Service { session, .. } => {
                 self.writer.request(crate::ipc::Request::Resize {
-                    session: *session,
+                    session: session.load(Ordering::SeqCst),
                     cols: ws.num_cols,
                     rows: ws.num_lines,
                     cell_w: ws.cell_width,
@@ -1754,12 +2036,25 @@ fn apply_marker(marker: Marker, term: &Term<EventProxy>, scrolled: u64, ctx: &Fe
     match marker {
         Marker::PromptStart => store.on_prompt_start(abs_line),
         Marker::CommandStart => store.on_command_start(abs_line, cursor.column.0),
-        Marker::OutputStart => {
-            let command = store
-                .last()
-                .and_then(|b| b.command_start)
-                .map(|(line, col)| extract_text(term, scrolled, line, col, abs_line))
-                .unwrap_or_default();
+        Marker::OutputStart { command } => {
+            // the shell's own copy of the line is exact; the screen's echo
+            // is not when replayed at another width (readline and zle place
+            // the line for the width they ran at)
+            // a second C right after the first (the user's own integration
+            // sent a bare one): never one printed later by the command's own
+            // output, which must not rename its block
+            if let Some(line) = &command
+                && store.last().and_then(|b| b.output_start) == Some(abs_line)
+            {
+                store.on_command_line(line);
+            }
+            let command = command.unwrap_or_else(|| {
+                store
+                    .last()
+                    .and_then(|b| b.command_start)
+                    .map(|(line, col)| extract_text(term, scrolled, line, col, abs_line))
+                    .unwrap_or_default()
+            });
             store.on_output_start(abs_line, command);
             // header context fallback for raw-passthrough commands (the app
             // stamps cwd+branch at submit; this only fills gaps)
@@ -1812,7 +2107,12 @@ fn extract_text(
         let mut text = String::new();
         for c in from..cols {
             let cell = &row[Column(c)];
-            if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+            // a wide character that did not fit at the row's end leaves a
+            // blank there and continues on the next row
+            if cell
+                .flags
+                .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+            {
                 continue;
             }
             text.push(cell.c);
@@ -2155,6 +2455,110 @@ mod tests {
     }
 
     #[test]
+    fn the_shells_command_line_beats_an_echo_replayed_at_another_width() {
+        // readline placed the echo for 30 columns (it moved the cursor back
+        // over its wrap); replayed into 20, the screen's text is not the
+        // command, the C marker's copy is
+        let echo = "\x1b]133;A\x07$ \x1b]133;B\x07echo LONG_LONG_LONG_LONG_LONG\r\x1b[24C_\r\n";
+        for (marker, want) in [
+            (
+                "\x1b]133;C;cmdline_url=echo%20LONG_LONG_LONG_LONG_LONG_\x07",
+                Some("echo LONG_LONG_LONG_LONG_LONG_"),
+            ),
+            // the user's own integration sent a bare C first
+            (
+                "\x1b]133;C\x07\x1b]133;C;cmdline_url=echo%20LONG_LONG_LONG_LONG_LONG_\x07",
+                Some("echo LONG_LONG_LONG_LONG_LONG_"),
+            ),
+            ("\x1b]133;C\x07", None),
+        ] {
+            let c = ctx(20, 6);
+            let mut p = vte::ansi::Processor::new();
+            let mut s = OscScanner::new();
+            let bytes = format!("{echo}{marker}out\r\n\x1b]133;D;0\x07");
+            feed(&mut p, &mut s, bytes.as_bytes(), &c);
+            let command = c.blocks.lock().unwrap().snapshot()[0].command.clone();
+            match want {
+                Some(w) => assert_eq!(command, w),
+                // without it the screen's (wrong) text stands in
+                None => assert_ne!(command, "echo LONG_LONG_LONG_LONG_LONG_"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_clear_asked_for_while_connecting_clears_the_replay() {
+        // ⌘K before the service answered: the replay it then sends is
+        // cleared once it is in, the shell's prompt row kept
+        use crate::ipc::{Event as Ev, send_json, send_output};
+        use std::os::unix::net::UnixStream;
+        let c = ctx(20, 5);
+        let term = c.term.clone();
+        let (stream, mut peer) = UnixStream::pair().unwrap();
+        send_output(&mut peer, 9, 0, 1, b"old output\r\n$ ").unwrap();
+        send_json(&mut peer, &Ev::ReplayDone { session: 9 }).unwrap();
+        send_json(&mut peer, &Ev::Exited { session: 9 }).unwrap();
+        let conn = Arc::new(Mutex::new(ServiceConn::connecting()));
+        conn.lock().unwrap().clear_history = true;
+        let reader = Reader {
+            id: 1,
+            ctx: c,
+            dirty: Arc::new(AtomicBool::new(false)),
+            saw_output: Arc::new(AtomicBool::new(false)),
+            observer: Arc::new(|_, _| {}),
+        };
+        let source = fake_service(
+            Box::new(move || {
+                Ok(Opened {
+                    stream,
+                    session: 9,
+                    known_cwd: None,
+                    resume: Box::new(|_| Err(std::io::ErrorKind::NotFound.into())),
+                })
+            }),
+            Arc::new(AtomicBool::new(true)),
+            conn,
+        );
+        reader.run(source);
+        let t = term.lock();
+        let history = t.grid().history_size() as i32;
+        let text: String = (-history..5)
+            .map(|r| {
+                let row = &t.grid()[Line(r)];
+                (0..20).map(|col| row[Column(col)].c).collect::<String>()
+            })
+            .collect();
+        assert!(!text.contains("old output"), "{text:?}");
+    }
+
+    #[test]
+    fn output_cannot_rename_its_running_block() {
+        // a command's own output printing a C with a line (a raw-mode
+        // program, a remote host) is not the shell's: the block keeps its
+        // command, so a re-run never runs text the output chose
+        let c = ctx(30, 6);
+        let mut p = vte::ansi::Processor::new();
+        let mut s = OscScanner::new();
+        let bytes = "\x1b]133;A\x07$ \x1b]133;B\x07cat x\r\n\x1b]133;C;cmdline_url=cat%20x\x07\
+                     line\r\n\x1b]133;C;cmdline_url=rm%20-rf%20~\x07more\r\n";
+        feed(&mut p, &mut s, bytes.as_bytes(), &c);
+        assert_eq!(c.blocks.lock().unwrap().snapshot()[0].command, "cat x");
+    }
+
+    #[test]
+    fn a_wide_character_pushed_to_the_next_row_adds_no_space() {
+        // 8 columns: `$ ls 漢` fills 7, 字 does not fit in the last one and
+        // goes to the next row, leaving a blank (no marker command: the
+        // screen's text stands)
+        let c = ctx(8, 4);
+        let mut p = vte::ansi::Processor::new();
+        let mut s = OscScanner::new();
+        let bytes = "\x1b]133;A\x07$ \x1b]133;B\x07ls 漢字\r\n\x1b]133;C\x07\x1b]133;D;0\x07";
+        feed(&mut p, &mut s, bytes.as_bytes(), &c);
+        assert_eq!(c.blocks.lock().unwrap().snapshot()[0].command, "ls 漢字");
+    }
+
+    #[test]
     fn a_shrink_with_a_full_history_keeps_abs_lines() {
         // the editor showing shrinks the pane; with the history at its cap the
         // shrink drops its oldest rows, and every line keeps its abs index
@@ -2259,17 +2663,71 @@ mod tests {
                 }
             }),
         };
-        let source = Source::Service {
-            stream,
-            muted: Arc::new(AtomicBool::new(false)),
+        let source = fake_service(
+            Box::new(move || {
+                Ok(Opened {
+                    stream,
+                    session: 9,
+                    known_cwd,
+                    resume,
+                })
+            }),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(ServiceConn::new(conn))),
+        );
+        (std::thread::spawn(move || reader.run(source)), exit_rx)
+    }
+
+    #[test]
+    fn a_service_that_does_not_answer_hands_the_pane_back_with_its_input() {
+        // the window never waits for the service: input typed meanwhile is
+        // held, and a stalled open reports a failure (never `Exit`, which
+        // would close the pane) carrying that input for the local shell
+        let conn = Arc::new(Mutex::new(ServiceConn::connecting()));
+        conn.lock().unwrap().input(0, b"ls\r");
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let seen = events.clone();
+        let reader = Reader {
+            id: 1,
+            ctx: ctx(20, 5),
+            dirty: Arc::new(AtomicBool::new(false)),
+            saw_output: Arc::new(AtomicBool::new(false)),
+            observer: Arc::new(move |_, ev| seen.lock().unwrap().push(ev)),
+        };
+        let mut source = fake_service(
+            Box::new(|| Err(std::io::ErrorKind::TimedOut.into())),
+            Arc::new(AtomicBool::new(true)),
+            conn,
+        );
+        if let Source::Service { cwd, .. } = &mut source {
+            *cwd = Some("/tmp".into());
+        }
+        reader.run(source);
+        let events = events.lock().unwrap();
+        match events.as_slice() {
+            [SessionEvent::ServiceFailed(f)] => {
+                assert!(f.stalled && f.attach);
+                assert_eq!(f.held, b"ls\r");
+                assert_eq!(f.cwd.as_deref(), Some(std::path::Path::new("/tmp")));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A reader's source for reattaching shell 9 through `open`.
+    fn fake_service(open: Open, muted: Arc<AtomicBool>, conn: Arc<Mutex<ServiceConn>>) -> Source {
+        Source::Service {
+            open,
+            target: ServiceTarget::Attach(9),
+            cwd: None,
+            session_id: Arc::new(AtomicU64::new(9)),
+            closed: Arc::new(AtomicBool::new(false)),
+            settled: Arc::new(AtomicBool::new(false)),
+            muted,
             job: Arc::new(Mutex::new(None)),
             hidden: Arc::new(AtomicBool::new(false)),
-            conn: Arc::new(Mutex::new(ServiceConn::new(conn))),
-            session: 9,
-            known_cwd,
-            resume,
-        };
-        (std::thread::spawn(move || reader.run(source)), exit_rx)
+            conn,
+        }
     }
 
     #[test]
@@ -2336,7 +2794,11 @@ mod tests {
         conn.input(9, b"one ");
         let old_got = std::thread::spawn(move || received_input(old_peer));
         // the service drops this client after reading what it was sent
-        conn.stream.shutdown(std::net::Shutdown::Write).unwrap();
+        conn.stream
+            .as_ref()
+            .unwrap()
+            .shutdown(std::net::Shutdown::Write)
+            .unwrap();
         assert_eq!(old_got.join().unwrap(), b"one ");
         // the write fails on the dead connection: held, not lost
         conn.input(9, b"two ");
@@ -2352,7 +2814,7 @@ mod tests {
     }
 
     #[test]
-    fn input_held_past_the_bound_is_cut_and_counted() {
+    fn input_past_the_bound_is_refused_whole_and_counted() {
         use std::os::unix::net::UnixStream;
         let (old, _old_peer) = UnixStream::pair().unwrap();
         let mut conn = ServiceConn::new(old);
@@ -2362,11 +2824,11 @@ mod tests {
         let (new, new_peer) = UnixStream::pair().unwrap();
         // more than a socket buffer: read while it is sent
         let got = std::thread::spawn(move || received_input(new_peer));
-        assert_eq!(conn.reconnected(new, 9), 2, "two bytes did not fit");
+        assert_eq!(conn.reconnected(new, 9), 3, "the write did not fit");
         drop(conn);
         let got = got.join().unwrap();
-        assert_eq!(got.len(), MAX_PENDING_INPUT);
-        assert!(got.ends_with(b"xy"));
+        assert_eq!(got.len(), MAX_PENDING_INPUT - 1);
+        assert!(got.ends_with(b"xx"));
     }
 
     #[test]
@@ -2401,19 +2863,21 @@ mod tests {
             }),
         };
         let mut second = Some(second);
-        let source = Source::Service {
-            stream: first,
-            muted: Arc::new(AtomicBool::new(false)),
-            job: Arc::new(Mutex::new(None)),
-            hidden: Arc::new(AtomicBool::new(false)),
-            conn: Arc::new(Mutex::new(ServiceConn::new(conn))),
-            session: 9,
-            known_cwd: None,
-            resume: Box::new(move |_| {
-                let s = second.take().ok_or(std::io::ErrorKind::NotFound)?;
-                Ok((s, true))
+        let source = fake_service(
+            Box::new(move || {
+                Ok(Opened {
+                    stream: first,
+                    session: 9,
+                    known_cwd: None,
+                    resume: Box::new(move |_| {
+                        let s = second.take().ok_or(std::io::ErrorKind::NotFound)?;
+                        Ok((s, true))
+                    }),
+                })
             }),
-        };
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(ServiceConn::new(conn))),
+        );
         let handle = std::thread::spawn(move || reader.run(source));
         done.recv_timeout(std::time::Duration::from_secs(10))
             .unwrap();
@@ -2441,7 +2905,7 @@ mod tests {
         let muted = Arc::new(AtomicBool::new(false));
         let replier = Replier::new(PtyWriter::Service {
             conn: conn.clone(),
-            session: 9,
+            session: Arc::new(AtomicU64::new(9)),
             muted: muted.clone(),
         });
         let mut c = ctx(20, 5);
@@ -2491,19 +2955,21 @@ mod tests {
                 }
             }),
         };
-        let source = Source::Service {
-            stream: first,
-            muted,
-            job: Arc::new(Mutex::new(None)),
-            hidden: Arc::new(AtomicBool::new(false)),
-            conn,
-            session: 9,
-            known_cwd: None,
-            resume: Box::new(move |_| {
-                let s = second.take().ok_or(std::io::ErrorKind::NotFound)?;
-                Ok((s, false))
+        let source = fake_service(
+            Box::new(move || {
+                Ok(Opened {
+                    stream: first,
+                    session: 9,
+                    known_cwd: None,
+                    resume: Box::new(move |_| {
+                        let s = second.take().ok_or(std::io::ErrorKind::NotFound)?;
+                        Ok((s, false))
+                    }),
+                })
             }),
-        };
+            muted,
+            conn,
+        );
         let handle = std::thread::spawn(move || reader.run(source));
         done.recv_timeout(std::time::Duration::from_secs(10))
             .unwrap();
@@ -2800,7 +3266,7 @@ mod tests {
         let q = InputQueue::new(
             PtyWriter::Service {
                 conn: conn.clone(),
-                session: 9,
+                session: Arc::new(AtomicU64::new(9)),
                 muted: Arc::new(AtomicBool::new(false)),
             },
             |_| {},
@@ -2880,7 +3346,6 @@ mod tests {
             dirty: Arc::new(AtomicBool::new(false)),
             saw_output: Arc::new(AtomicBool::new(false)),
             generation: c.generation.clone(),
-            service_id: None,
             inputs: AtomicU64::new(0),
             writer: InputQueue::new(writer, |_| {}),
             backend: Backend::Local(pty),

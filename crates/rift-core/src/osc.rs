@@ -10,8 +10,11 @@ pub enum Marker {
     PromptStart,
     /// OSC 133;B — end of prompt, user input begins.
     CommandStart,
-    /// OSC 133;C — command accepted, output begins.
-    OutputStart,
+    /// OSC 133;C — command accepted, output begins. `command` is the
+    /// command line the shell read (`133;C;cmdline_url=<percent-encoded>`,
+    /// kitty's form; Rift's hooks send it): exact where the screen's echo is
+    /// not, e.g. replayed at another width. `None` when absent or too long.
+    OutputStart { command: Option<String> },
     /// OSC 133;D;`<exit>` — command finished.
     Done { exit: Option<i32> },
     /// OSC 7;file://host/path — working directory changed. `host` is empty
@@ -54,6 +57,9 @@ const fn is_abort(b: u8) -> bool {
 }
 
 const MAX_OSC: usize = 4096;
+/// `133;C` may carry the command line (a long pipeline, a pasted script).
+const MAX_CMDLINE: usize = 64 << 10;
+const OUTPUT_START: &[u8] = b"133;C";
 /// The user variable carrying the shell's `$PATH` (see `shell/rift.*`).
 pub const USER_VAR_PATH: &str = "RiftPath";
 /// Inline images and graphics commands carry base64 payloads.
@@ -158,9 +164,7 @@ impl OscScanner {
                         self.buf.clear();
                     } else if b == 0x07 {
                         self.state = State::Ground;
-                        if !std::mem::take(&mut self.clipped)
-                            && let Some(marker) = parse_osc(&self.buf)
-                        {
+                        if let Some(marker) = self.finish_osc() {
                             segments.push(Segment {
                                 end: i + 1,
                                 marker: Some(marker),
@@ -171,6 +175,7 @@ impl OscScanner {
                         self.state = State::OscEsc;
                     } else if self.buf.len() < MAX_OSC
                         || (self.buf.starts_with(ITERM_FILE) && self.buf.len() < MAX_IMAGE)
+                        || (self.buf.starts_with(OUTPUT_START) && self.buf.len() < MAX_CMDLINE)
                     {
                         self.buf.push(b);
                     } else {
@@ -180,9 +185,7 @@ impl OscScanner {
                 State::OscEsc => {
                     if b == b'\\' {
                         self.state = State::Ground;
-                        if !std::mem::take(&mut self.clipped)
-                            && let Some(marker) = parse_osc(&self.buf)
-                        {
+                        if let Some(marker) = self.finish_osc() {
                             segments.push(Segment {
                                 end: i + 1,
                                 marker: Some(marker),
@@ -205,9 +208,45 @@ impl OscScanner {
     }
 }
 
+impl OscScanner {
+    /// The marker of the OSC string just terminated. A clipped string is
+    /// dropped, except a `133;C` whose command line was too long: the
+    /// command still started.
+    fn finish_osc(&mut self) -> Option<Marker> {
+        if std::mem::take(&mut self.clipped) {
+            let c = self.buf.strip_prefix(OUTPUT_START)?;
+            return matches!(c.first(), None | Some(b';'))
+                .then_some(Marker::OutputStart { command: None });
+        }
+        parse_osc(&self.buf)
+    }
+}
+
+/// The command line of a `133;C` (its parameters after `C`): `cmdline_url`,
+/// percent-decoded, without control characters other than newline and tab,
+/// and without the blanks around it (zsh hands over ` cmd` as typed).
+fn cmdline<'a>(mut params: impl Iterator<Item = &'a str>) -> Option<String> {
+    let url = params.find_map(|p| p.strip_prefix("cmdline_url="))?;
+    let text: String = percent_decode(url)
+        .chars()
+        .filter(|&c| c == '\n' || c == '\t' || !c.is_control())
+        .collect();
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
 fn parse_osc(buf: &[u8]) -> Option<Marker> {
     if let Some(rest) = buf.strip_prefix(ITERM_FILE) {
         return (buf.len() < MAX_IMAGE).then(|| Marker::InlineImage(rest.to_vec()));
+    }
+    // the command line in a C may carry any bytes: the block still starts
+    if let Some(rest) = buf.strip_prefix(b"133;C;")
+        && std::str::from_utf8(buf).is_err()
+    {
+        let lossy = String::from_utf8_lossy(rest);
+        return Some(Marker::OutputStart {
+            command: cmdline(lossy.split(';')),
+        });
     }
     let s = std::str::from_utf8(buf).ok()?;
     if let Some(rest) = s.strip_prefix("133;") {
@@ -215,7 +254,9 @@ fn parse_osc(buf: &[u8]) -> Option<Marker> {
         return match parts.next()? {
             "A" => Some(Marker::PromptStart),
             "B" => Some(Marker::CommandStart),
-            "C" => Some(Marker::OutputStart),
+            "C" => Some(Marker::OutputStart {
+                command: cmdline(parts),
+            }),
             "D" => Some(Marker::Done {
                 exit: parts.next().and_then(|p| p.parse().ok()),
             }),
@@ -451,7 +492,10 @@ mod tests {
     fn split_across_chunks() {
         let mut s = OscScanner::new();
         assert!(markers(&mut s, b"\x1b]133;").is_empty());
-        assert_eq!(markers(&mut s, b"C\x07"), vec![Marker::OutputStart]);
+        assert_eq!(
+            markers(&mut s, b"C\x07"),
+            vec![Marker::OutputStart { command: None }]
+        );
     }
 
     #[test]
@@ -577,12 +621,56 @@ mod tests {
             // the scanner is back in ground state
             assert_eq!(
                 markers(&mut s, b"\x1b]133;C\x07"),
-                vec![Marker::OutputStart]
+                vec![Marker::OutputStart { command: None }]
             );
         }
         let mut input = b"\x1b_Ga=T;".to_vec();
         input.push(0x18);
         input.extend_from_slice(b"AAAA\x1b\\");
+        assert!(markers(&mut s, &input).is_empty());
+    }
+
+    #[test]
+    fn output_start_carries_the_command_line() {
+        let mut s = OscScanner::new();
+        let cmd = |input: &[u8]| match markers(&mut OscScanner::new(), input).as_slice() {
+            [Marker::OutputStart { command }] => command.clone(),
+            other => panic!("{other:?}"),
+        };
+        // percent-encoded: the separator, the terminators, newlines, UTF-8
+        assert_eq!(
+            cmd(b"\x1b]133;C;cmdline_url=echo%20a%3Bb%0Aecho%20%E6%BC%A2%07%25\x07").as_deref(),
+            Some("echo a;b\necho 漢%")
+        );
+        // raw UTF-8 and other parameters around it
+        assert_eq!(
+            cmd("\x1b]133;C;aid=1;cmdline_url=%20ls 漢字\x1b\\".as_bytes()).as_deref(),
+            Some("ls 漢字")
+        );
+        // a byte that is not UTF-8 neither drops the marker nor the line
+        assert_eq!(
+            cmd(b"\x1b]133;C;cmdline_url=ls \xff\x07").as_deref(),
+            Some("ls \u{fffd}")
+        );
+        // escapes never reach the header or a re-run
+        assert_eq!(
+            cmd(b"\x1b]133;C;cmdline_url=a%1B[31mb\x07").as_deref(),
+            Some("a[31mb")
+        );
+        assert_eq!(cmd(b"\x1b]133;C;cmdline_url=\x07"), None);
+        // longer than any other OSC string, up to its own bound
+        let long = "x".repeat(MAX_OSC * 2);
+        let input = format!("\x1b]133;C;cmdline_url={long}\x07");
+        assert_eq!(cmd(input.as_bytes()), Some(long));
+        // past it the command still starts, without its text
+        let mut input = b"\x1b]133;C;cmdline_url=".to_vec();
+        input.extend(std::iter::repeat_n(b'x', MAX_CMDLINE));
+        input.push(0x07);
+        assert_eq!(cmd(&input), None);
+        // a clipped string of another kind stays dropped
+        let mut input = b"\x1b]133;Cx".to_vec();
+        input.extend(std::iter::repeat_n(b'x', MAX_CMDLINE));
+        input.push(0x07);
         assert!(markers(&mut s, &input).is_empty());
     }
 

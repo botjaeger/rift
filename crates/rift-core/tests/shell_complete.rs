@@ -295,8 +295,11 @@ fn a_hanging_completion_function_times_out_and_the_shell_recovers() {
         let got = c.complete(&f.query(kind, "hangcmd "), BUDGET);
         let took = t.elapsed();
         assert!(got.is_empty(), "{kind:?}: {got:?}");
+        // the function sleeps 30 s: giving up anywhere near the budget is
+        // the behaviour; 2 s of slack covers a machine busy with the other
+        // gates (0.5 s was missed by 5-35 ms while the Linux gate built)
         assert!(
-            took < BUDGET + Duration::from_millis(200),
+            took < BUDGET + Duration::from_secs(2),
             "{kind:?}: gave up after {took:?}"
         );
         assert!(!c.is_running(), "{kind:?}: the hung shell is stopped");

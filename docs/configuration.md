@@ -310,7 +310,8 @@ naming the error, keeps `dark-default`, and the picker labels the file
 
 ### Warp YAML themes
 
-`.yaml` / `.yml` files use Warp's schema unchanged — drop a Warp theme in and
+`.yaml` / `.yml` files use Warp's schema unchanged (solid colors only: a gradient
+`accent` or `background` is not read yet) — drop a Warp theme in and
 it works. Warp carries only the base colors; every other Rift token is
 derived from them (chrome/gutter sink away from the text, surfaces lift toward
 it, the hairline border is a low-alpha overlay).
@@ -526,6 +527,11 @@ leaving the action unbound, so check logs if a key stops working.
 Injected automatically at spawn; users' own rc files are always sourced.
 
 - Emits OSC 133 A/B/C/D (block boundaries + exit codes) and OSC 7 (cwd).
+  `C` carries the command line as the shell read it, percent-encoded
+  (`133;C;cmdline_url=…`, kitty's form; fish 4 sends it too). bash sends it
+  only when the command entered the history (`HISTCONTROL` or
+  `set +o history` can leave it out); then the header reads the line from
+  the screen.
 - Environment: `TERM=xterm-256color`, `COLORTERM=truecolor`,
   `TERM_PROGRAM=rift`, `TERM_PROGRAM_VERSION` (Rift's version, not the
   launching terminal's).

@@ -3065,6 +3065,7 @@ dependencies = [
  "dirs",
  "ed25519-compact",
  "git2",
+ "libc",
  "log",
  "notify",
  "serde",

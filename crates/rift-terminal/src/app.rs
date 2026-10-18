@@ -103,6 +103,10 @@ pub enum UserEvent {
     NotifyPermission,
     /// A pane's connection notice (see `SessionEvent::Notice`).
     PtyNotice(String),
+    /// A pane's durable shell did not start in the session service.
+    PtyServiceFailed(PaneId, rift_pty::ServiceFailure),
+    /// A pane's durable shell has its service id now (`SessionEvent::ServiceReady`).
+    PtyServiceReady(PaneId),
     /// Code review model for request `.0`; `None` outside a repository.
     ReviewLoaded(u64, Option<Result<rift_core::review::Review, String>>),
     /// A review-panel write finished (`Some` = why it failed).
@@ -1575,6 +1579,8 @@ struct RemoteUi {
     polled: Option<Instant>,
     /// Last time this window started a gateway (at most every 5 s).
     spawned: Option<Instant>,
+    /// A start is in flight (`spawn_managed` can wait on launchd).
+    starting: Arc<std::sync::atomic::AtomicBool>,
     /// `remote-status` notices received from the gateway.
     notices: u64,
     /// When the tab-bar chip last appeared, changed or went away.
@@ -4455,6 +4461,12 @@ impl App {
     /// A click on a desktop notification (or its Show / Rerun): Rift comes
     /// forward on the pane; Rerun runs the failed command again there.
     fn on_notification_response(&mut self, r: crate::notify::Response) {
+        log::info!(
+            "notify: response pane {} attention {} rerun {}",
+            r.pane,
+            r.attention,
+            r.rerun
+        );
         // the pane's window: a hidden drop-down window drops down first
         self.reveal_hotkey_window();
         if let Some(w) = &self.win.window {
@@ -6208,7 +6220,85 @@ impl App {
         let cwd = cwd
             .filter(|d| d.is_dir())
             .or_else(|| self.config.start_dir(None));
+        // durable sessions: reattach a restored shell, else start one in
+        // the session service (off this thread: a failure comes back as
+        // `UserEvent::PtyServiceFailed`, see `on_service_failed`)
+        let attach = self.next_attach.take();
+        let durable = self.config.durable_sessions && self.durable_allowed;
+        let service = durable.then_some(match attach {
+            Some(id) => rift_pty::ServiceTarget::Attach(id),
+            None => rift_pty::ServiceTarget::Spawn,
+        });
+        // a reattached shell replays its own output; no transcript on top
+        let replay = self
+            .next_replay
+            .take()
+            .filter(|_| self.config.save_transcripts && attach.is_none())
+            .and_then(|id| rift_core::transcript::load(&id))
+            .map(|t| (t.replay_bytes(), t.meta()));
+        self.start_session(id, GridSize { cols, rows }, cwd, service, replay)
+    }
 
+    /// A pane's durable shell did not start: a fresh one in the service when
+    /// a reattach found its shell gone, else a local shell in its place
+    /// (with the input typed meanwhile). A stalled service keeps the rest of
+    /// this run local, so later panes do not wait it out too.
+    fn on_service_failed(&mut self, pane: PaneId, failure: rift_pty::ServiceFailure) {
+        log::warn!("session service: {}", failure.error);
+        if failure.stalled {
+            self.durable_allowed = false;
+        }
+        let Some((size, transcript, late)) =
+            self.win.tabs.iter().find_map(|t| t.pane(pane)).map(|p| {
+                (
+                    p.session.size(),
+                    p.transcript_id.clone(),
+                    p.session.take_held_input(),
+                )
+            })
+        else {
+            return;
+        };
+        let service = (failure.attach
+            && !failure.stalled
+            && self.config.durable_sessions
+            && self.durable_allowed)
+            .then_some(rift_pty::ServiceTarget::Spawn);
+        let replay = (self.config.save_transcripts && !failure.attach)
+            .then(|| rift_core::transcript::load(&transcript))
+            .flatten()
+            .map(|t| (t.replay_bytes(), t.meta()));
+        let session = self.start_session(pane, size, failure.cwd, service, replay);
+        if service.is_none() {
+            let lost = match failure.dropped {
+                0 => String::new(),
+                n => format!("; {n} bytes typed meanwhile did not fit and were dropped"),
+            };
+            self.toast_error(format!(
+                "Session service unavailable ({}); this shell is local{lost}",
+                failure.error
+            ));
+        }
+        session.write(&failure.held);
+        session.write(&late);
+        if let Some(p) = self.win.tabs.iter_mut().find_map(|t| t.pane_mut(pane)) {
+            p.session = session;
+        }
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+    }
+
+    /// Start pane `id`'s shell: in the session service (`service`), else
+    /// local.
+    fn start_session(
+        &mut self,
+        id: PaneId,
+        size: GridSize,
+        cwd: Option<std::path::PathBuf>,
+        service: Option<rift_pty::ServiceTarget>,
+        replay: Option<rift_pty::Replay>,
+    ) -> Session {
         let proxy = self.proxy.clone();
         let observer: rift_pty::Observer = Arc::new(move |pane, event| {
             let _ = match event {
@@ -6233,23 +6323,12 @@ impl App {
                     proxy.send_event(UserEvent::PtyNotify(pane, title, body))
                 }
                 SessionEvent::Notice(message) => proxy.send_event(UserEvent::PtyNotice(message)),
+                SessionEvent::ServiceFailed(failure) => {
+                    proxy.send_event(UserEvent::PtyServiceFailed(pane, failure))
+                }
+                SessionEvent::ServiceReady => proxy.send_event(UserEvent::PtyServiceReady(pane)),
             };
         });
-        // durable sessions: reattach a restored shell, else start one in
-        // the session service; fall back to a local shell if it fails
-        let attach = self.next_attach.take();
-        let durable = self.config.durable_sessions && self.durable_allowed;
-        let service = durable.then_some(match attach {
-            Some(id) => rift_pty::ServiceTarget::Attach(id),
-            None => rift_pty::ServiceTarget::Spawn,
-        });
-        // a reattached shell replays its own output; no transcript on top
-        let replay = self
-            .next_replay
-            .take()
-            .filter(|_| self.config.save_transcripts && attach.is_none())
-            .and_then(|id| rift_core::transcript::load(&id))
-            .map(|t| (t.replay_bytes(), t.meta()));
         let (cell_size, shell, scrollback) = (
             self.cell_px(),
             self.config.shell.clone(),
@@ -6258,7 +6337,7 @@ impl App {
         let clipboard = rift_pty::ClipboardAccess::from_config(&self.config.clipboard_access);
         let opts = |service, replay| SpawnOptions {
             id,
-            size: GridSize { cols, rows },
+            size,
             cell_size,
             shell: shell.clone(),
             working_directory: cwd.clone(),
@@ -6273,30 +6352,11 @@ impl App {
             Ok(s) => s,
             Err(e) if service.is_some() => {
                 log::warn!("session service: {e}");
-                // a service that accepts but stalls: every later pane would
-                // wait out the same deadline, so this run stays local
-                let stalled = e.kind() == std::io::ErrorKind::TimedOut;
-                if stalled {
-                    self.durable_allowed = false;
-                }
-                // a shell that ended while detached: start a fresh one there
-                let retry = if !stalled
-                    && matches!(service, Some(rift_pty::ServiceTarget::Attach(_)))
-                {
-                    Session::spawn(opts(Some(rift_pty::ServiceTarget::Spawn), replay.clone())).ok()
-                } else {
-                    None
-                };
-                match retry {
-                    Some(s) => s,
-                    None => {
-                        let s = Session::spawn(opts(None, replay)).expect("spawn shell");
-                        self.toast_error(format!(
-                            "Session service unavailable ({e}); this shell is local"
-                        ));
-                        s
-                    }
-                }
+                let s = Session::spawn(opts(None, replay)).expect("spawn shell");
+                self.toast_error(format!(
+                    "Session service unavailable ({e}); this shell is local"
+                ));
+                s
             }
             Err(e) => panic!("spawn shell: {e}"),
         }
@@ -6494,7 +6554,7 @@ impl App {
                     .pane(id)
                     .filter(|_| transcripts)
                     .map(|p| p.transcript_id.clone()),
-                service: tab.pane(id).and_then(|p| p.session.service_id),
+                service: tab.pane(id).and_then(|p| p.session.service_id()),
             })
         }
         let tabs = win
@@ -6514,7 +6574,7 @@ impl App {
                     .then(|| t.active().map(|p| p.transcript_id.clone()))
                     .flatten(),
                 service: (!t.is_split())
-                    .then(|| t.active().and_then(|p| p.session.service_id))
+                    .then(|| t.active().and_then(|p| p.session.service_id()))
                     .flatten(),
                 started: t.started.and_then(|s| {
                     s.duration_since(std::time::UNIX_EPOCH)
@@ -6580,7 +6640,7 @@ impl App {
         let reattached = service.is_some()
             && self.win.tabs[self.win.active]
                 .pane(root)
-                .is_some_and(|p| p.session.service_id == service);
+                .is_some_and(|p| p.session.service_id() == service);
         if let Some(id) = transcript
             && let Some(p) = self.win.tabs[self.win.active].pane_mut(root)
         {
@@ -11414,6 +11474,13 @@ impl App {
                 for p in self.all_panes() {
                     p.session.terminate();
                 }
+                // a shell the service is starting right now: its pane's
+                // reader ends it once it is known (briefly; a stalled
+                // service is not waited out)
+                let until = Instant::now() + Duration::from_millis(500);
+                while Instant::now() < until && self.all_panes().any(|p| !p.session.settled()) {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
                 self.save_fresh_session();
                 if self.quit_completely {
                     // nothing of Rift stays behind: the gateway, and the
@@ -15436,7 +15503,7 @@ impl App {
                             job: p.session.foreground_job_name(),
                             last_command: last.as_ref().map(|l| l.0.clone()),
                             last_exit: last.and_then(|l| l.1),
-                            durable: p.session.service_id.is_some(),
+                            durable: p.session.durable(),
                             git: p.git.as_ref().map(|g| rift_remote::protocol::PaneGit {
                                 branch: g.branch.clone(),
                                 ahead: g.ahead as u64,
@@ -18224,11 +18291,28 @@ impl App {
                     .remote
                     .spawned
                     .is_none_or(|t| now.duration_since(t) >= REMOTE_SPAWN_EVERY)
+                && !self
+                    .remote
+                    .starting
+                    .swap(true, std::sync::atomic::Ordering::AcqRel)
             {
                 self.remote.spawned = Some(now);
-                match crate::remote::spawn_managed(&dir) {
-                    Ok(()) => log::info!("remote: started the gateway"),
-                    Err(e) => log::warn!("remote: cannot start the gateway: {e}"),
+                // off this thread: registering the launchd job can wait on
+                // Background Task Management or launchctl
+                let (dir, starting) = (dir.clone(), self.remote.starting.clone());
+                let started = std::thread::Builder::new()
+                    .name("gateway-start".into())
+                    .spawn(move || {
+                        match crate::remote::spawn_managed(&dir) {
+                            Ok(()) => log::info!("remote: started the gateway"),
+                            Err(e) => log::warn!("remote: cannot start the gateway: {e}"),
+                        }
+                        starting.store(false, std::sync::atomic::Ordering::Release);
+                    });
+                if started.is_err() {
+                    self.remote
+                        .starting
+                        .store(false, std::sync::atomic::Ordering::Release);
                 }
             }
         }
@@ -19026,11 +19110,8 @@ impl App {
         let panes: Vec<&PaneState> = self.all_panes().collect();
         let tabs = self.all_tabs().count() + survey.tabs();
         let shells = panes.len() + survey.shells();
-        let durable = panes
-            .iter()
-            .filter(|p| p.session.service_id.is_some())
-            .count()
-            + survey.durable_shells();
+        let durable =
+            panes.iter().filter(|p| p.session.durable()).count() + survey.durable_shells();
         let compatible = update::protocol_compatible(&manifest, rift_pty::ipc::PROTOCOL_VERSION);
         let tabs_text = plural(tabs, "tab");
         let (description, mut note, open_page) = match &target {
@@ -20179,6 +20260,9 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             UserEvent::PtyNotice(message) => self.toast(message),
+            UserEvent::PtyServiceFailed(pane, failure) => self.on_service_failed(pane, failure),
+            // the layout names the shell to reattach after a crash
+            UserEvent::PtyServiceReady(_) => self.save_session(),
             UserEvent::Completions(generation, items) => self.on_completions(generation, items),
             UserEvent::CompletionsPartial(generation, items) => {
                 self.on_partial_completions(generation, items)

@@ -76,9 +76,12 @@ function rift-complete
     source $__rift_complete_srv
 end
 
+# C marker with the command line as read (kitty's cmdline_url,
+# percent-encoded): the block header keeps it exact even where the screen's
+# echo is not (a reattached shell replayed at another width).
 function __rift_preexec --on-event fish_preexec
     set -g __rift_cmd_ran 1
-    printf '\e]133;C\a'
+    printf '\e]133;C;cmdline_url=%s\a' (string escape --style=url -- $argv[1])
 end
 
 function __rift_postexec --on-event fish_postexec

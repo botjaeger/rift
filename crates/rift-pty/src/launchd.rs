@@ -187,7 +187,15 @@ mod sm {
 
     /// Register agent `label` (once; it stays registered across launches
     /// and updates) and start it unless it runs (`kickstart` without `-k`).
+    /// A registration that still names another build (an update, or a copy
+    /// of Rift elsewhere with the same labels) makes launchd refuse the
+    /// spawn (`spawn failed`, exit 78, "needs LWCR update"): register again,
+    /// which pins this build, and retry once. Runs off the window's thread.
     pub fn start_agent(label: &str) -> io::Result<()> {
+        // one start at a time: a re-register boots out the agent, which
+        // must never be one another thread just started
+        static AGENT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _one = AGENT.lock().unwrap_or_else(|e| e.into_inner());
         let svc = agent(&format!("{label}.plist"))?;
         if status(&svc) != ENABLED {
             register(&svc)?;
@@ -197,7 +205,45 @@ mod sm {
             }
         }
         let target = format!("gui/{}/{label}", unsafe { libc::getuid() });
-        super::launchctl(&["kickstart", &target])
+        if kickstarted(&target)? {
+            return Ok(());
+        }
+        log::warn!("{label}: launchd did not start the agent; registering it again");
+        let _ = unregister(&svc);
+        register(&svc)?;
+        if status(&svc) != ENABLED {
+            return Err(io::Error::other("not allowed in Login Items"));
+        }
+        if kickstarted(&target)? {
+            return Ok(());
+        }
+        Err(io::Error::other("launchd did not start the agent"))
+    }
+
+    /// `kickstart`, then whether the job came up: running, or ended on its
+    /// own (a gateway that found another holding its lock exits at once).
+    /// False when launchd could not spawn it; an error when launchctl
+    /// could not tell (never read as "not started": the caller would then
+    /// boot out a service that runs).
+    fn kickstarted(target: &str) -> io::Result<bool> {
+        super::launchctl(&["kickstart", target])?;
+        let until = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+        loop {
+            let s = match super::job_state(target) {
+                super::JobState::Loaded(s) => s,
+                super::JobState::NotLoaded => return Ok(false),
+                super::JobState::Unknown(e) => return Err(e),
+            };
+            match super::spawn_outcome(&s) {
+                Some(up) => return Ok(up),
+                None if std::time::Instant::now() >= until => {
+                    // still waiting to be spawned: launchd keeps retrying a
+                    // job it cannot start
+                    return Ok(!s.contains("state = spawn scheduled"));
+                }
+                None => std::thread::sleep(std::time::Duration::from_millis(50)),
+            }
+        }
     }
 
     pub fn main_app_enabled() -> Option<bool> {
@@ -239,9 +285,13 @@ fn spawn_job(
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
     let label = job_label(name, dir);
     let target = format!("gui/{}/{label}", unsafe { libc::getuid() });
-    if job_running(&target) {
+    match job_state(&target) {
         // another window started it a moment ago; the caller waits for it
-        return Ok(());
+        JobState::Loaded(s) if s.contains("state = running") => return Ok(()),
+        // launchctl could not tell: replacing the job could end a running
+        // service
+        JobState::Unknown(e) => return Err(e),
+        _ => {}
     }
     let env: Vec<(String, String)> = std::env::vars().collect();
     let plist = job_plist(&label, program, args, &env, log);
@@ -254,24 +304,121 @@ fn spawn_job(
     launchctl(&["bootstrap", &domain, &path.to_string_lossy()])
 }
 
+/// From `launchctl print`: `Some(true)` once the job runs, `Some(false)`
+/// when launchd could not spawn it (measured 2026-10-18: an agent whose
+/// registration names another build prints `job state = spawn failed`; a
+/// program that cannot be run, `state = spawn scheduled` with `last exit
+/// code = 78: EX_CONFIG`), `None` while it is still settling.
+#[cfg(any(target_os = "macos", test))]
+fn spawn_outcome(print: &str) -> Option<bool> {
+    if print.contains("state = running") {
+        Some(true)
+    } else if print.contains("spawn failed") || print.contains("last exit code = 78") {
+        Some(false)
+    } else if print.contains("state = not running")
+        && print.contains("last exit code = ")
+        && !print.contains("(never exited)")
+    {
+        // ran and ended on its own
+        Some(true)
+    } else {
+        None
+    }
+}
+
+/// What launchd says about a job.
 #[cfg(target_os = "macos")]
-fn job_running(target: &str) -> bool {
-    Command::new("/bin/launchctl")
-        .args(["print", target])
+enum JobState {
+    /// `launchctl print`'s description of it.
+    Loaded(String),
+    /// launchd has no such job (`print` exits 113).
+    NotLoaded,
+    /// launchctl failed or did not answer: nothing is known.
+    Unknown(io::Error),
+}
+
+#[cfg(target_os = "macos")]
+fn job_state(target: &str) -> JobState {
+    match launchctl_output(&["print", target]) {
+        Ok(out) if out.status.success() => {
+            JobState::Loaded(String::from_utf8_lossy(&out.stdout).into_owned())
+        }
+        Ok(out) if out.status.code() == Some(113) => JobState::NotLoaded,
+        Ok(out) => JobState::Unknown(io::Error::other(format!(
+            "launchctl print: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))),
+        Err(e) => JobState::Unknown(e),
+    }
+}
+
+/// How long one `launchctl` call may take: it waits on launchd, which can
+/// itself wait (a job it cannot spawn left `kickstart` hanging for minutes,
+/// 2026-10-18).
+#[cfg(target_os = "macos")]
+const LAUNCHCTL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+#[cfg(target_os = "macos")]
+fn launchctl_output(args: &[&str]) -> io::Result<std::process::Output> {
+    let mut cmd = Command::new("/bin/launchctl");
+    cmd.args(args);
+    output_within(cmd, LAUNCHCTL_TIMEOUT).map_err(|e| match e.kind() {
+        io::ErrorKind::TimedOut => io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!(
+                "launchctl {} did not answer",
+                args.first().copied().unwrap_or("")
+            ),
+        ),
+        _ => e,
+    })
+}
+
+/// Run `cmd` and collect its output, giving up (and killing it) after
+/// `limit`. Both pipes are read while it runs: `launchctl print` lists the
+/// job's environment, which can outgrow a pipe and stall it until read.
+#[cfg(any(target_os = "macos", test))]
+fn output_within(mut cmd: Command, limit: std::time::Duration) -> io::Result<std::process::Output> {
+    use std::io::Read;
+    let mut child = cmd
         .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .is_ok_and(|o| {
-            o.status.success() && String::from_utf8_lossy(&o.stdout).contains("state = running")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    fn drain(pipe: Option<impl Read + Send + 'static>) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut p) = pipe {
+                let _ = p.read_to_end(&mut buf);
+            }
+            buf
         })
+    }
+    let stdout = drain(child.stdout.take());
+    let stderr = drain(child.stderr.take());
+    let until = std::time::Instant::now() + limit;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if std::time::Instant::now() >= until {
+            // killing it closes the pipes, which ends the readers
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    Ok(std::process::Output {
+        status,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    })
 }
 
 #[cfg(target_os = "macos")]
 fn launchctl(args: &[&str]) -> io::Result<()> {
-    let out = Command::new("/bin/launchctl")
-        .args(args)
-        .stdin(Stdio::null())
-        .output()?;
+    let out = launchctl_output(args)?;
     if out.status.success() {
         Ok(())
     } else {
@@ -373,6 +520,47 @@ fn xml(v: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_within_reads_large_output_and_gives_up_on_a_hang() {
+        use std::time::{Duration, Instant};
+        // more than a pipe holds, on both streams: read while it runs
+        let mut big = Command::new("/bin/sh");
+        big.args([
+            "-c",
+            "head -c 300000 /dev/zero; head -c 200000 /dev/zero >&2",
+        ]);
+        let t = Instant::now();
+        let out = output_within(big, Duration::from_secs(5)).unwrap();
+        assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+        assert_eq!((out.stdout.len(), out.stderr.len()), (300_000, 200_000));
+        // a command that does not end is killed at the limit
+        let mut hang = Command::new("/bin/sleep");
+        hang.arg("30");
+        let t = Instant::now();
+        let err = output_within(hang, Duration::from_millis(300)).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+    }
+
+    #[test]
+    fn spawn_outcome_reads_launchctl_print() {
+        // excerpts of `launchctl print` measured 2026-10-18
+        let refused = "state = not running\n\tlast exit code = 78: EX_CONFIG\n\
+                       \tjob state = spawn failed\n";
+        let unspawnable = "state = spawn scheduled\n\tlast exit code = 78: EX_CONFIG\n";
+        let running = "state = running\n\tpid = 20730\n\tlast exit code = (never exited)\n";
+        let ended = "state = not running\n\tlast exit code = 0\n";
+        let never_ran = "state = not running\n\tlast exit code = (never exited)\n";
+        assert_eq!(spawn_outcome(refused), Some(false));
+        assert_eq!(spawn_outcome(unspawnable), Some(false));
+        assert_eq!(spawn_outcome(running), Some(true));
+        // ran and ended on its own (a gateway that found another holding
+        // its lock): started, without waiting out the deadline
+        assert_eq!(spawn_outcome(ended), Some(true));
+        // not run yet: still settling
+        assert_eq!(spawn_outcome(never_ran), None);
+    }
 
     #[test]
     fn labels_are_per_helper_and_data_dir() {

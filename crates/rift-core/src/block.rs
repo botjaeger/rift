@@ -490,6 +490,18 @@ impl BlockStore {
         }
     }
 
+    /// The shell's copy of the running command's line, from a 133;C that
+    /// came after another (the user's own integration sent a bare one
+    /// first): it replaces the screen's text, never the app's submitted one.
+    pub fn on_command_line(&mut self, command: &str) {
+        if let Some(last) = self.blocks.back_mut()
+            && matches!(last.state, BlockState::Running { .. })
+            && !last.from_editor
+        {
+            last.command = command.to_string();
+        }
+    }
+
     pub fn on_done(&mut self, abs: AbsLine, exit: Option<i32>) {
         let now = self.now();
         let (wall, replaying) = (self.wall_now(), self.replaying);

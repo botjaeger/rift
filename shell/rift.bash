@@ -104,8 +104,45 @@ __rift_preexec() {
         [[ -n "${__rift_late-}" && "$__rift_late" == *"$BASH_COMMAND"* ]] && return
         __rift_at_prompt=
         __rift_cmd_ran=1
-        printf '\e]133;C\a'
+        # one fork: the newest history entry, then plain expansions
+        __rift_cmdline_of "$(HISTTIMEFORMAT='' builtin history 1 2>/dev/null)" "${__rift_hist_n-}"
+        printf '\e]133;C%s\a' "$__rift_cl"
     fi
+}
+
+# From `history 1`'s line ($1), sets __rift_hist_no (the entry's number,
+# empty with no history) and __rift_cl: `;cmdline_url=<the command line>`
+# for the C marker (kitty's form; the block header keeps it exact even where
+# the screen's echo is not, e.g. a reattached shell replayed at another
+# width), or nothing. The line is history's copy, so only when this command
+# entered the history: the entry is not number $2 (HISTCONTROL, `set +o
+# history` or a repeated line leave it out, and the newest entry is then an
+# earlier command's). Percent-encoded as in rift.zsh. No subshell: it sets
+# variables of the shell that calls it.
+__rift_cmdline_of() {
+    local c=$1
+    __rift_cl=
+    c=${c#"${c%%[![:space:]]*}"}
+    __rift_hist_no=${c%%[!0-9]*}
+    [[ -n $__rift_hist_no && $__rift_hist_no != "${2-}" ]] || return 0
+    c=${c#"$__rift_hist_no"}
+    c=${c#\*}
+    c=${c#  }
+    c=${c//\%/%25}
+    c=${c//$'\a'/%07}
+    c=${c//$'\e'/%1B}
+    c=${c//;/%3B}
+    c=${c//$'\n'/%0A}
+    c=${c//$'\r'/%0D}
+    c=${c//$'\030'/%18}
+    c=${c//$'\032'/%1A}
+    __rift_cl=";cmdline_url=$c"
+}
+
+# PS0's half (it runs in a subshell, once the command entered the history).
+__rift_cmdline() {
+    __rift_cmdline_of "$(HISTTIMEFORMAT='' builtin history 1 2>/dev/null)"
+    printf '%s' "$__rift_cl"
 }
 
 __rift_prompt_command() {
@@ -144,8 +181,16 @@ __rift_prompt_end() {
     [[ $PS1 == *"$__rift_b"* ]] || PS1+="\\[$__rift_b\\]"
     if [[ -n "${__rift_use_ps0-}" ]]; then
         [[ ${PS0-} == *"$__rift_c"* ]] || PS0+=$__rift_c
+        # PS0 runs __rift_cmdline in a subshell: only when HISTCMD moved
+        # past this, the command entered the history
+        __rift_hist_at=$HISTCMD
     else
         __rift_at_prompt=1
+        # the newest entry as the prompt shows (PROMPT_COMMAND's `history
+        # -a; history -n` may have added other sessions' lines): a command
+        # that adds none is not given one of them
+        __rift_cmdline_of "$(HISTTIMEFORMAT='' builtin history 1 2>/dev/null)"
+        __rift_hist_n=$__rift_hist_no
     fi
 }
 
@@ -204,7 +249,9 @@ unset __rift_child_rc
 # records that a command ran (a command substitution would run in a subshell).
 if ((BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4))) && shopt -q promptvars; then
     __rift_use_ps0=1
-    __rift_c=$'\e]133;C\a${__rift_nil[__rift_cmd_ran=1]-}'
+    __rift_c=$'\e]133;C$( ((HISTCMD > __rift_hist_at)) && __rift_cmdline)\a${__rift_nil[__rift_cmd_ran=1]-}'
 else
+    __rift_cmdline_of "$(HISTTIMEFORMAT='' builtin history 1 2>/dev/null)"
+    __rift_hist_n=$__rift_hist_no
     trap '__rift_preexec' DEBUG
 fi

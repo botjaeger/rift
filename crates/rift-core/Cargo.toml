@@ -10,6 +10,7 @@ toml.workspace = true
 toml_edit.workspace = true
 arc-swap.workspace = true
 log.workspace = true
+libc = "0.2"
 git2.workspace = true
 notify.workspace = true
 serde_yaml_ng.workspace = true
