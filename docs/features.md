@@ -33,6 +33,8 @@ Blocks are delimited by shell-integration OSC 133 markers
 - Prompt-time context: the app stamps cwd + git branch onto the block at
   submit; the PTY reader fills cwd for raw-passthrough commands. Old blocks
   keep the context that was true when they ran.
+- Commands receive the running viewport size before starting. Closing the
+  command editor cannot leave a full-screen program using its shorter grid.
 - The block's command is the exact text submitted from the editor (newlines
   and combining marks included), so reinput, re-run and copy-command reuse
   it unchanged. Commands typed in raw passthrough are read back from the
@@ -308,9 +310,10 @@ whole buffer.
   (`3.`).
 - Insert entry: `i` `a` `I` `A` `o` `O`.
 - Counts: digits before and/or after the operator, multiplied (`2d3w`).
-- Undo `u`, **redo `U`** (not `⌃R` — that stays the history pane). One `u`
-  undoes one change: a whole Insert or Replace session, a visual-mode
-  operator, a `.` repeat.
+- Undo `u`, redo ⌃R (outside Insert; in Insert ⌃R stays the history pane).
+  One `u` undoes one change: a whole Insert or Replace session, a
+  visual-mode operator, a `.` repeat. `U` puts back the last changed line as
+  it was before its latest changes (itself a change: `U` again undoes it).
 - History recall: `k` = previous entry, `j` = next (also ↑/↓) in Normal mode.
 
 ## Selection & mouse
@@ -649,7 +652,10 @@ session keeps it. Reference:
 `[[actions]]` in config.toml (Windows Terminal `sendInput` and
 `multipleActions`): a name, an optional chord and steps that run an action,
 type text into the pane (`\n` runs the line) or open a launch configuration,
-in order. Each is a palette row "Action: <name>" with its chord. A step that
+in order; a step may name another user action, which runs inline (at most
+32 steps once expanded). Each is a palette row "Action: <name>" with its
+chord (a `[keybindings]` entry on the same chord wins; the action's chord
+wins over a default). A step that
 opens a pane makes it the target of the next ones, and text sent to it waits
 for its first prompt, so it lands in the new pane whatever you focus
 meanwhile. The first step that fails stops the rest with a toast naming the
@@ -814,8 +820,6 @@ Each becomes a `rift://action/new_tab` link (`new_window` with
   `minimum_contrast` (text lifted to a WCAG ratio against its cell),
   `bold_is_bright` and `ambiguous_width` (`wide`: East Asian Ambiguous
   characters take two cells; set per pane from the next output on).
-
-  ligatures on, `cursor_style` and `cursor_blink` set the cursor.
 - **Padding per side**: `window_padding` is the left and right padding of
   a pane alone in its tab; `window_padding_left`, `_right`, `_top` and
   `_bottom` (0–40 px) set one side each (unset: `window_padding`, 14 at the
@@ -1382,15 +1386,16 @@ window's frame, so the next launch starts fresh with one tab where the window
 was (saved block output goes too). While a phone is connected, the quit
 dialog names it first (*iPhone is connected and loses its tabs.*), with the
 running commands when *Warn before closing running commands* is on. Shells a
-phone opens after the quit (`remote_when_closed`) still appear as tabs at the
+phone opens after the quit (`background_processes`) still appear as tabs at the
 next launch.
 
-**Menu bar icon** (macOS, `menu_bar_icon`, on by default; Settings › General
-› App › *Show menu bar icon*): the app icon as a line drawing in the menu bar
+**Menu bar icon** (macOS, with `background_processes`, off by default; Settings
+› General › App › *Allow background processes*, which also lets phones open
+tabs while Rift is closed): the app icon as a line drawing in the menu bar
 (a template image, tinted by macOS). While Rift runs its menu has *New Window*, *Settings…* and
 *Quit Rift Completely*. After the window quits, the phone gateway shows it
 for as long as it runs (`remote_access`; 30 s after the last window, or
-until stopped with `remote_when_closed`), with *Open Rift* and *Quit Rift
+until stopped with `background_processes`), with *Open Rift* and *Quit Rift
 Completely*. *Quit Rift Completely* is the usual quit (the same warnings)
 that also stops the gateway (`<data dir>/remote/stop`, seen within 0.5 s)
 and ends the shells phones started in the session service, which then
@@ -1562,10 +1567,6 @@ are bounded to 1 MiB while reading.
 
 ## Remote access (phone companion)
 
-With `mask_secrets` on, every screen, block output and block command the
-gateway sends is masked as on the desktop (also for shells a phone started
-while no window is open).
-
 Off by default. **Settings › Remote access › Allow remote access**
 (`remote_access`) starts the gateway (`rift-terminal remote --managed`, one
 per user, log in `<data dir>/remote/gateway.log`); turning it off stops it
@@ -1573,7 +1574,9 @@ within about two seconds, and it also exits 30 seconds after the last Rift
 window closes. It listens on `remote_listen` (`0.0.0.0:7878`). The page's
 *Connection* group shows *This network* (the listening addresses) and the
 *Relay* (its round trip while connected, or the whole error, a retry
-countdown and *Try again*, which retries at once).
+countdown and *Try again*, which retries at once). With `mask_secrets` on,
+every screen, block output and block command the gateway sends is masked as
+on the desktop (also for shells a phone started while no window is open).
 
 - **Pairing.** *Pair a phone* shows a QR code, the `rift-remote://pair?…`
   link with a *Copy link* button, and a 2-minute countdown (then *Expired —
@@ -1606,8 +1609,9 @@ countdown and *Try again*, which retries at once).
   A Tailscale or other private-network address of the computer works
   without a relay: it is listed in the pairing link like any other address.
   Pairing links made in Settings carry the running gateway's relay too.
-- **Tabs while Rift is closed** (`remote_when_closed`, *Phones can open
-  tabs while Rift is closed*; off by default, needs `durable_sessions`): the
+- **Tabs while Rift is closed** (`background_processes`, *Allow background
+  processes* in General; off by default, needs `remote_access` and
+  `durable_sessions`; named `remote_when_closed` in earlier versions): the
   gateway stays up after the last window closes, and a paired phone that may
   run commands can open a tab (after Face ID or the passcode on the phone).
   The shell runs in the session service; the computer shows a notification
@@ -1769,7 +1773,9 @@ countdown and *Try again*, which retries at once).
   and *Only if it ran longer than* how long a command must run (10 s – 5
   min); each computer's page (Settings › Computers) and the pane's ⋯ menu
   have a *Notifications* switch that turns its notifications off. "Notify
-  me" always notifies.
+  me" always notifies. A computer's notification preference changes only
+  after the phone saves it; a failed save shows an error and leaves the
+  control available to retry. A failed Unpair also leaves a retry path.
 
 ## Progress reports (OSC 9;4)
 
@@ -1846,7 +1852,9 @@ reachable (a folder is read no further than 100,000 entries, ignored ones
 included; past that a notice says so). A file opens in a read-only viewer pane (or the editor `file_editor` names), the leftmost column of the tab
 (line numbers, keyword/string/comment highlighting, 4 MB limit, binary
 detection, ⌘F finds in the file; Markdown opens rendered, with a Rendered |
-Raw switch, shell code blocks with a Run… button that asks first and
+Raw switch, `sh` / `bash` / `zsh` / `fish` / `console` code blocks with a
+Run… button that asks first and runs the block's text in the tab's terminal
+pane, only at a prompt and never in a read-only one, and
 `mermaid` blocks as labelled source); ⌥-click inserts its path into the
 command line; right-click a row for Copy path, Copy relative path, New
 file… and Reveal in Finder. A block that printed a Markdown file (`cat

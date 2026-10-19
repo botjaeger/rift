@@ -85,7 +85,7 @@ rewrites your settings to new defaults (only keys you left out follow them).
 font_family   = "Hack"            # embedded Hack or JetBrains Mono, or any installed
                                   # fixed-width outline font (Menlo, Monaco, SF Mono…);
                                   # unknown names fall back to JetBrains Mono
-font_size     = 13.0              # settings stepper clamps 8–28 (⌘= / ⌘- / ⌘0 also write this)
+font_size     = 13.0              # points, clamped 8–28 when applied (⌘= / ⌘- / ⌘0 also write this)
 line_height   = 1.2               # multiplier, clamped 1.0–2.2 when applied
 cursor_style  = "block"           # block | bar | underline | hollow | double_underline
 cursor_hollow_unfocused = false   # outline the cursor outside the focused pane of the
@@ -210,11 +210,19 @@ remote_relay  = "wss://rift-relay.playhaws.com"
                                   # packaging/relay.Dockerfile hosts one;
                                   # scripts/relay-local.sh runs a temporary one
                                   # on this machine and sets this key
-remote_when_closed = false        # paired phones that may run commands can open
+background_processes = false      # Rift's helpers may keep running after you quit:
+                                  # paired phones that may run commands can open
                                   # tabs while no Rift window is open: the gateway
                                   # stays up and keeps them in the session service
-                                  # (needs durable_sessions); Rift shows them as
-                                  # tabs when it opens
+                                  # (needs remote_access and durable_sessions); Rift
+                                  # shows them as tabs when it opens. macOS: a Rift
+                                  # icon in the menu bar shows while it is on
+                                  # (New Window, Settings…, Quit Rift Completely;
+                                  # with no window, Open Rift, Quit Rift
+                                  # Completely: stops the gateway and the shells
+                                  # phones opened). Earlier versions named this
+                                  # remote_when_closed (still read); menu_bar_icon
+                                  # is no longer read
 remote_tunnel = false             # Cloudflare tunnel: a relay on this computer
                                   # behind a Cloudflare quick tunnel (needs
                                   # cloudflared); replaces remote_relay while on.
@@ -298,11 +306,6 @@ hotkey_window_hide_on_blur = true # it hides when it loses keyboard focus
 launch_at_login = false           # macOS: Rift opens at login (its login item); shows
                                   # the login item as it is (System Settings › Login
                                   # Items can remove it) and only Settings changes it
-menu_bar_icon = true              # macOS: a Rift icon in the menu bar (New Window,
-                                  # Settings…, Quit Rift Completely); after the window
-                                  # quits, the phone gateway shows it while it runs
-                                  # (Open Rift, Quit Rift Completely: stops the
-                                  # gateway and the shells phones opened)
 link_editor   = "rift"            # ⌘-clicked file paths / file links: system (default
                                   # app) | rift (viewer pane) | an editor id below
 link_click    = "open"            # plain click on a link: open (open it at once)
@@ -397,7 +400,10 @@ applies external edits without restarting.
   `request_attention`, `large_paste_warning`, `trim_paste`,
   `hotkey_window_edge`, `hotkey_window_screen` or `word_delimiters` falls
   back to that setting's default with a logged warning; the rest of the file
-  applies.
+  applies. So does an unknown `app_icon` name; an unknown `toolbar_left` /
+  `toolbar_right` item is skipped. An out-of-range integer in `window_blur`,
+  `inactive_pane_dim`, `hotkey_window_height` or `hotkey_window_width` is
+  saturated, then clamped to the documented range.
 - **Saves are atomic**: Rift writes a temporary file next to `config.toml`,
   keeps the old file's permissions and renames it over, so a failed write
   never truncates the config.

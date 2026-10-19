@@ -25,6 +25,13 @@ pane, history, autocomplete, palette, settings, controls, menus, panels).
   `window_width` × `window_height`, and `launch_mode` opens it maximized or
   full screen. A named window ("Rename window") has its name as its title;
   `always_on_top` and *Toggle always on top* float it above other apps.
+  With `request_attention`, a bell or an alert (finished, failed, waiting)
+  from a pane while no Rift window has focus bounces the Dock icon once
+  (Linux: the window's urgency hint).
+- **Gradient themes**: a Warp theme whose `background` is a gradient draws
+  it behind the panes of an opaque window (a translucent window or a
+  background image keeps the solid ground); a gradient `accent` runs along
+  the active tab's top edge.
 - **Resize overlay** (`resize_overlay`): while the window is resized, the
   grid's `columns × rows` sits in the window's centre on a tooltip's plate
   (12 px label, `surface` fill, hairline and shadow), gone a second after
@@ -56,7 +63,7 @@ Right/Down, Reopen Closed Tab, Save Layout as Launch Configuration, Close
 Pane/Other Tabs/Window) · **Edit** (Undo, Redo, Cut, Copy, Paste, Select All,
 Find…, Filter Block Output…, Clear Blocks) · **View** (Command Palette,
 Command History, File Explorer, Code Review, Bigger/Smaller/Actual
-Size, Maximize Pane, Toggle Full Screen) · **Blocks** (select/copy/reinput/bookmark/scroll actions) ·
+Size, Maximize Pane, Equalize Panes, Toggle Full Screen) · **Blocks** (select/copy/reinput/bookmark/scroll actions, Block Actions…) ·
 **Window** (Minimize, Zoom, Rename Window…, Keep Window on Top, tab and
 pane navigation, Synchronize Inputs, Bring All to Front) · **Help** (What's New, Keyboard Shortcuts).
 
@@ -72,7 +79,8 @@ key routing as the keyboard (overlays, editor vs raw mode). Quit goes through
 the running-command warning. Linux has no native menu bar (the palette lists
 every action).
 
-**Menu bar icon** (`menu_bar_icon`, on by default): the app icon as a line
+**Menu bar icon** (`background_processes`, off by default; Settings › General ›
+App › *Allow background processes*): the app icon as a line
 drawing (tile outline, chevron and cursor; a template image) in the menu
 bar's status area, tooltip and
 VoiceOver name *Rift*. Its menu while Rift runs: *New Window*, *Settings…*
@@ -90,7 +98,9 @@ removes both within a moment.
   tabs that do not fit shrink evenly to 120 px, then scroll.
 - The active tab joins the pane below (same ground, no rule) with a 2 px
   accent top edge (its tab color when it has one); a hovered tab lifts. A
-  colored tab shows its color as the 2 px top edge when inactive too.
+  colored tab shows its color as the 2 px top edge when inactive too. A tab
+  without a color of its own takes the deepest `[[tab_color_rules]]` entry
+  matching its active pane's directory.
 - `×` shows on the active and the hovered tab and closes it (all its
   panes); on the others its place shows the tab's alert badge or an accent
   dot for output since last viewed (`tab_close_side = "left"` puts that slot
@@ -503,6 +513,15 @@ Each command becomes a block via shell-integration OSC 133 markers:
 - **Reverse screen** (DECSCNM, `CSI ? 5 h`, used by vttest and `tput flash`):
   the pane's default foreground and background trade places until the program
   resets it (or a terminal reset).
+- **Masked secrets** (`mask_secrets`, *Toggle secret masking*): API keys,
+  tokens and the rows of a `-----BEGIN … PRIVATE KEY-----` block draw as
+  `•`, one per character, so nothing reflows; a click on a masked span shows
+  it for 5 s. Block headers, the history pane, Results, toasts, the side
+  rail, copies, exports and comparisons show the masked text too (*Copy
+  output unmasked* in the block menu is the exception).
+- **Double-click** selects the whole unit under the pointer — a URL, a file
+  path with its `:line:col`, an email, an IPv4/IPv6 address, a number, a
+  UUID or a git SHA — else a word bounded by `word_chars`.
 - **Bookmark dots** on the right edge (position proportional to scrollback
   position); click jumps to the bookmarked block.
 - **Header overflow**: a long command is cut with `…` before the badge group;
@@ -717,14 +736,15 @@ integration). Sits at the bottom of the pane, or at the top with
   spinner while a command runs); while the
   pane is focused or hovered, split (a new pane to its right), ⋮ (the pane
   menu) and × (close) show at the right. Clicking the bar focuses the pane.
-- Pane menu (⋮, or right-click in the pane): Copy, Paste, Select all, Split
-  pane right / down, Maximize pane and Move to new tab (split tabs), Move to
-  new window (disabled for the only pane of a window's only tab), Clear
-  blocks, Close pane; Make read-only / Allow input and Restart pane sit
-  above Clear blocks, then (while `sticky_command_header` is on) Minimize
-  sticky command header / Show sticky command header.
+- Pane menu (⋮, or right-click in the pane outside a block): Copy, Paste,
+  Select all, Export buffer…, Split pane right / down, Maximize pane and
+  Move to new tab (split tabs), Move to new window (disabled for the only
+  pane of a window's only tab), Make read-only / Allow input, Restart pane,
+  Minimize sticky command header / Show sticky command header (while
+  `sticky_command_header` is on), Clear blocks, Close pane.
 - A read-only pane's title bar shows a lock in place of the terminal icon.
-- A pane kept after its program exited (`close_on_exit`) shows a 36 px bar
+- A pane kept after its program exited (`close_on_exit = "never"`, or
+  `"graceful"` after a non-zero exit; the default `"always"` closes it) shows a 36 px bar
   over its bottom (`surface`, edged in the error color after a failure):
   "Process exited with code N" and Restart ⏎ (accent) and Close ⌘W.
 - Drag a title bar to move the pane: past 4 px it fades in place and a chip
@@ -793,8 +813,6 @@ field: what you type narrows the rows (any case, anywhere in the command).
 
 ## Command palette (⌘P)
 
-Rows include "Action: <name>" for each `[[actions]]` entry, with its chord.
-
 Fuzzy-find modal (nucleo matcher), 640 px, radius 8, over a dimmed window:
 the query with a magnifier, the result count (`N results`, left of the `esc`
 cap, hidden when the query leaves no room) and `esc`, mode chips (**Actions** `>` ·
@@ -810,7 +828,10 @@ click on a chip switches mode. Modes:
   `Launch configuration: <name>` row per file in
   `~/.config/rift/launch_configs/` (re-scanned each time the palette opens),
   `Theme: <name>` rows, `Pane theme: default` and one `Pane theme: <name>`
-  row per theme (the active pane's own colour scheme), plus recent commands.
+  row per theme (the active pane's own colour scheme), `Action: <name>` per
+  `[[actions]]` entry (with its chord), `New tab: <profile>`, `Split right:
+  <profile>` and `Split down: <profile>` per profile, `Install 'rift'
+  command`, `Cycle tab color`, `Set tab color…`, plus recent commands.
 - **History** — imported shell history (zsh, bash or fish, from the
   configured shell's history file) + per-pane local history; Enter runs, or
   insert into the editor. (⌃R in the command line opens the history pane.)
@@ -841,6 +862,12 @@ click on a chip switches mode. Modes:
   this window's name`), the placeholder `Name of this window…` and the
   footer `⏎ name the window`. Control characters are dropped and the name
   is cut at 100 characters.
+
+- **Theme picker** (*Theme picker (live preview)*) and **Set tab color…**
+  (the tab menu's *Custom color…* too) — text modes with no mode chips:
+  `Search themes: ↑ ↓ preview, ⏎ keeps, esc reverts…` and `Tab color: a name
+  or #rrggbb…`. The theme rows are every theme, the one in use tagged *in
+  use*.
 
 Other Actions rows: `SSH: <name>` and `Install Rift shell integration on
 <name>` per SSH profile, `Toggle vertical tabs`, `Clear saved block
@@ -1025,14 +1052,6 @@ the accessibility tree (*Match case*, *Regular expression*, *Invert match*,
 
 Copy command · Copy output · Copy output unmasked (only while
 `mask_secrets` is on) · Copy both · Copy working directory ·
-Copy git branch · Re-run command · Filter output…/Clear output filter · Send
-output to command… · Bookmark/Remove bookmark · Collapse/Expand · Scroll to
-top of block · Scroll to bottom of block.
-Right-clicked on a link, it starts with Open link · Copy URL; on an existing
-file path, with Open (at the printed line) · Copy path · Reveal in Finder
-(Linux: Show in file manager) — the pane menu too.
-
-Copy command · Copy output · Copy both · Copy working directory ·
 Copy git branch · Re-run command · Filter output…/Turn off output filter/Turn
 on output filter · Send output to command… · Bookmark/Remove bookmark ·
 Collapse/Expand · Scroll to top of block · Scroll to bottom of block · Copy
@@ -1046,8 +1065,10 @@ Rendered in the viewer).
 On a block of a multi-block selection: Copy N commands · Copy N outputs ·
 Copy commands and outputs · Insert N commands into the input · Compare
 outputs (exactly two finished) · Bookmark all/Remove bookmarks · Collapse
-all/Expand all. The pane menu (right-click outside a block) has Export
-buffer… after Select all.
+all/Expand all.
+Right-clicked on a link, the menu starts with Open link · Copy URL; on an
+existing file path, with Open (at the printed line) · Copy path · Reveal in
+Finder (Linux: Show in file manager) — the pane menu too.
 
 ## Compare outputs
 
@@ -1075,6 +1096,9 @@ the output* when the file exists, *~/x is a directory*. Enter writes; over
 an existing file it first asks *Replace the file?* (Replace / Cancel). A
 toast says *Saved the output to …* or why it could not. With `mask_secrets`
 on, the text is written masked, as shown.
+
+## Menus
+
 Every menu (block, tab, pane, file viewer) is a 240 px list with an icon
 column and the row's shortcut from the live keymap at the right. Only Close
 pane and the three Close tab rows are red. Disabled items are dimmed (e.g.
@@ -1096,8 +1120,12 @@ Close tab · Close other tabs · Close tabs to the right.
 **Group menu** (right-click a group's pill or rail header): Collapse group /
 Expand group · Rename group · Ungroup · Close group.
 
-**File viewer menu** (⋮): Insert path · Copy path · Find in file · Show
-raw / Show rendered (Markdown files only) · Close.
+**File viewer menu** (⋮): Insert path · Copy path · Find in file · Send to
+agent… · Show raw / Show rendered (Markdown files only) · Close.
+
+**Profile menu** (the `+` button's ⌄), **pane menu**, **block menu** and
+**explorer menu**: see *Tab bar*, *Split panes*, *Block context menu* and
+*File explorer*.
 
 ## Settings tab (⌘,)
 
@@ -1108,7 +1136,7 @@ the Settings tab (its tab, ⌘, or *Open Settings* in the palette) shows the
 page it showed; once closed, it opens again on General. Other app
 shortcuts (new tab, next tab, palette…) work from it and leave it.
 
-A 232 px sidebar: a search field, the nine pages with icons (arrow keys
+A 232 px sidebar: a search field, the ten pages with icons (arrow keys
 navigate pages; PageUp/PageDown scroll the body) and *Open config.toml* at
 the foot (opens the file beside the page, in the Settings tab; ✕ closes it; for 3 s after config.toml is
 written or reloaded, a green check sits at its end, a green dot on its icon
@@ -1142,11 +1170,16 @@ description) left, control right; it runs to the bottom edge.
   the page are swallowed rather than reaching the terminal.
 
 - **General** — *Shell and session behavior*.
-  - App (macOS only): `Launch at login` toggle (`launch_at_login`: adds or
-    removes Rift's login item; shows the login item as it is), `Show menu
-    bar icon` toggle (`menu_bar_icon`; see *Menu bar icon* below).
+  - App: `Launch at login` toggle (macOS only; `launch_at_login`: adds or
+    removes Rift's login item; shows the login item as it is), `Allow
+    background processes` toggle (`background_processes`: Rift's helpers keep
+    running after you quit so paired phones can open tabs; on macOS the menu
+    bar icon shows while they do, see *Menu bar icon* above).
   - Shell: `Shell path` (read-only: `shell` override, else `$SHELL`),
-    `Scrollback` stepper (lines, ±1000 within 1,000–1,000,000, shown as
+    read-only profile rows edited in config.toml — `Default profile` (or
+    `none (Shell path)`), one `Profile: <name>` row with its command per
+    profile, `Installed shells as profiles` (`on (/etc/shells)` / `off`;
+    `discover_shells`) — then the `Scrollback` stepper (lines, ±1000 within 1,000–1,000,000, shown as
     `10,000`; described *Maximum lines kept in the buffer*).
   - Session: `Restore tabs after a crash` toggle, `New tabs start in` segmented
     `Previous | Home | Custom` (a custom path is set in config.toml),
@@ -1235,7 +1268,7 @@ description) left, control right; it runs to the bottom edge.
     segmented `⏎ | ⌘⏎` (`rich_input_submit`), `Open rich input when an agent
     waits` toggle (*Claude Code, Codex, OpenCode, Gemini CLI at their
     prompt*; `rich_input_auto`).
-- **Terminal** (clipboard icon) — *Mouse, clipboard and keys inside the
+- **Terminal** (copy icon) — *Mouse, clipboard and keys inside the
   terminal*.
   - Mouse: `Mouse reporting to programs (Shift selects)` toggle,
     `Middle-click to paste` toggle (*Pastes the clipboard into the pane under
@@ -1261,7 +1294,7 @@ description) left, control right; it runs to the bottom edge.
     (or the system opener for a folder) with a toast.
   - File explorer: `Show hidden files` toggle (dotfiles; `.git`, `.DS_Store`
     and git-ignored entries stay hidden).
-- **Notifications** (bell icon) — *Toasts, desktop notifications and sounds;
+- **Notifications** (inbox icon) — *Toasts, desktop notifications and sounds;
   everything also lands in the inbox*.
   - Alerts: `Notifications` master toggle, `In-window toasts` toggle,
     `Toast duration` stepper (s, 2–60).
@@ -1329,10 +1362,10 @@ description) left, control right; it runs to the bottom edge.
     `Copy link` button; at zero, `Expired — Pair again`. While the gateway
     has no address yet, a `Pairing` row waits for it.
   - `Phones can open tabs while Rift is closed` (with remote access on, under the switch):
-    the `remote_when_closed` switch (*Only phones that may run commands; you
-    get a notification, and the tabs appear when you open Rift*, or *Needs
-    Keep shells running through updates (General)* while `durable_sessions`
-    is off).
+    a read-only row that follows `Allow background processes` (General):
+    *Off · turn on Allow background processes (General)*, *On · only phones
+    that may run commands*, or *Needs Keep shells running through updates
+    (General)* while `durable_sessions` is off.
   - `Use a Cloudflare tunnel instead` (under `Relay settings…`, below `Relay`): the `remote_tunnel`
     switch; on, a checklist follows: `cloudflared` (`Installed · <path>` with
     a green check, or `Not installed` with an `Install` button when

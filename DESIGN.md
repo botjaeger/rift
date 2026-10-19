@@ -103,7 +103,7 @@ glyphon; shaped runs are cached by content.
 | First tab x (after traffic lights) | 78 px | `TABS_X` |
 | Tab width (fixed, Warp / squeezed minimum) | 200 px / 120 px | `TAB_W`, `MIN_TAB_W` |
 | Chrome icon button | 26 px, icon 16 px | `tabbar::icon_button` |
-| Vertical rail width / row height | 220 px / 54 px | `RAIL_W`, `RAIL_ROW_H` |
+| Vertical rail width / row height | 220 px / 54 px | `RAIL_W`, `rail::ROW_H` |
 | Split pane padding | 8 px | `PANE_PAD` |
 | Split pane title bar (and file viewer header) | 28 px | `PANE_HEADER_H`, `viewer::HEADER_H` |
 | Split divider / grab width | 1 px / +4 px each side | `HANDLE`, `HANDLE_GRAB` |
@@ -349,15 +349,17 @@ No other animation. Motion never delays input.
 
 ## App icon
 
-The prompt and the cursor: a `surface` (`#232326`) rounded tile with a white
-10 % hairline, the `❯` in `accent` (`#569cd6`) and a block cursor in `cursor`
-(`#d4d4d4`). On the 1024 grid: tile 100–924 with radius 185; chevron
+The prompt and the cursor: a `#232326` rounded tile with a white 10 %
+hairline, the `❯` in `#569cd6` and a block cursor in `#d4d4d4` (the icon's
+own colours, the dark theme's before it followed Warp; the icon is the same
+in every theme, and `app_icon` picks one of its colourways). On the 1024 grid: tile 100–924 with radius 185; chevron
 polyline (336,360)–(506,512)–(336,664), 96 wide, round caps and joins; cursor
 596,372 to 736,652, radius 16. At 48 px and below the tile grows toward the
 canvas edge and loses the hairline, so small icons stay legible.
 
-`packaging/gen-icon.py` draws every size from these numbers and the theme
-tokens into `assets/icon/`. Where each file is used:
+`packaging/gen-icon.py` draws every size from these numbers and
+colours into `assets/icon/` (each `app_icon` colourway into
+`assets/icon/variants/`). Where each file is used:
 
 | Platform | Surface | File |
 |---|---|---|

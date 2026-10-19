@@ -235,7 +235,7 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
   `topology` before the `ack`.
 - `start` (`{"t":"start","id":"n2"}`, feature `start`) starts a shell on a
   computer whose user allows it while no Rift window is open
-  (`remote_when_closed`): the gateway keeps the shell in the session
+  (`background_processes`): the gateway keeps the shell in the session
   service and lists it in a background window (`{"pid":0,"background":true,
   "tabs":[…]}`; at most 8 shells), whose panes take `subscribe`, `run`,
   `keys`, `text`, `screen`, `output` and `open` `tab` (another background
@@ -285,8 +285,8 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
   `complete` (§ Phase 3), `running` (a pane's `running` in
   `topology`, below), `fit` (§ Phase 3), `prompt_chips` (a pane's `chips`
   in `topology`, below, and the `chip` and `reset_elapsed` requests, §
-  Prompt chip menus), `open`, `close` and `start` (listed only while the computer
-  allows it, `remote_when_closed`). A
+  Prompt chip menus), `open` and `close`, and `start` (listed only while
+  the computer allows it, `background_processes`). A
   gateway that leaves
   the field out serves none of them; the app then hides what needs them.
 - A pane's `git` (gateways with the `git` feature) is the git status the

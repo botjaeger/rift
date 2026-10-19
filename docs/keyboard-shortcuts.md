@@ -28,7 +28,7 @@ listed alternates.
 | Esc | — | Deselect block(s) (in raw mode also still reaches the app in the PTY) |
 | ⌘-click / ⇧-click | — | Add or remove a block in the selection / select the range from the selected block |
 | ⇧↑ / ⇧↓ | — | With a block selected: grow or shrink the block selection |
-| ⌘A | `select_all` | With a block selected: select every block (else select all text) |
+| ⌘A | `select_all` | With a block selected: select every block; else the editor's text (when it has any), else all scrollback |
 
 ## Scrolling
 
@@ -98,7 +98,6 @@ collapsed group); a tab that closes while it shows drops out of it. ⇧⌘} /
 | — | `toggle_always_on_top` | The window floats above other apps' windows, or stops (`always_on_top` sets new windows) |
 | — | `rename_window` | Name the window (palette; nothing typed clears it): its title, saved with the session |
 | ⌘Q | `quit` | Quit (warns about running commands) |
-| ⌘A | `select_all` | Select the editor text, else all scrollback |
 
 ## App
 
@@ -150,7 +149,7 @@ Active only while the app owns the command line.
 | ⌥← / ⌥→ | Word left / right |
 | ⌘← / ⌘→, ⌃A / ⌃E | Start / end of the cursor's line (of the command, when it has one line) |
 | ⌘↑ / ⌘↓ | Start / end of a multi-line command while there are lines that way; on its first / last line they select blocks (`select_block_prev/next`) |
-| ⇧⌘↑ / ⇧⌘↓ | Extend the selection to the start / end of a multi-line command; on a one-line command, or its first / last line, they are `bookmark_prev_alt` / `bookmark_next_alt` (previous / next bookmarked block) |
+| ⇧⌘↑ / ⇧⌘↓ | Extend the selection to the start / end of a multi-line command; on a one-line command, or its first / last line, they are `bookmark_prev` / `bookmark_next` (previous / next bookmarked block) |
 | ⌫ / ⌦ (Delete) | Delete back / forward |
 | ⌥⌫ / ⌥⌦ | Delete word back / forward |
 | ⌘⌫ / ⌘⌦ | Kill to the start / end of the cursor's line; at the line's start / end they join it to the line above / below |
@@ -337,6 +336,13 @@ Chord syntax: `ctrl|control|^`, `shift|⇧`, `alt|opt|option|meta`,
 `tab left right up down pageup pagedown home end enter escape space plus
 backspace delete insert f1`–`f12`. `"none"` unbinds an action. A chord with any other key name (`cmd+foo`) is
 invalid, and an unknown action name is ignored; both are logged.
+
+No two default chords are the same. Where an override, an `[[actions]]`
+`key` and a default name one chord, the override wins, then the action, then
+the default. The fixed keys above share chords with actions only in context:
+⇧⌘↑ / ⇧⌘↓ select in a multi-line command, ⌥↑ / ⌥↓ step context lines in the
+filter bar, and while search is open ⇧⌘G (`toggle_review`) is the previous
+match and ⌘A (`select_all`) selects the query.
 
 Or record shortcuts in Settings → Keybindings (⌃⌘K): click a row, press the
 chord. A recorded chord needs ⌘, ⌃ or ⌥, or a function or navigation key; a

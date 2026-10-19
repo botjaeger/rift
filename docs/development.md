@@ -73,7 +73,7 @@ display-line building). Rendering is verified with the script driver below.
 | `docs` | `CLAUDE.md` and `AGENTS.md` are identical; every relative link in every Markdown file resolves (the vendored crates' upstream docs excepted) |
 | `mobile` | In `mobile/`: `pnpm install --frozen-lockfile`, `pnpm typecheck`, `pnpm lint`, `pnpm test` (vitest; decodes `crates/rift-remote/fixtures/`, the files the Rust protocol tests decode too) |
 | `release` | `cargo build --release --locked` |
-| `ui` | `scripts/ui-smoke.sh`: isolated scripted input, state assertions and PNG capture, in `RIFT_UI_SHARDS` (default 2) parallel shards; `--only NAME[,NAME]` runs single sections; requires Python 3 and a display (or `xvfb-run`) |
+| `ui` | `scripts/ui-smoke.sh`, which runs `scripts/ui-smoke.py`: isolated scripted input, state assertions and PNG capture, in `RIFT_UI_SHARDS` (default 2) parallel shards (`RIFT_UI_SHARDS=1`: the file serially); `--only NAME[,NAME]` (or `RIFT_UI_ONLY`) runs only the groups holding those sections, in one process; requires Python 3 and a display (or `xvfb-run`) |
 | `leak` | `scripts/leak-soak.py` on the release build: a program redrawing every 20 ms, output far past the scrollback limit, one command printing lines without end, and opening and closing tabs, splits, the palette, Settings, find and the explorer, each repeated in one isolated instance; after a warm-up the memory footprint (macOS `phys_footprint`, which counts GPU buffers; Linux `VmRSS`) must not grow more than 8 MB over the measured cycles. Headless on macOS (the display-asleep path); with the window shown under Xvfb (`RIFT_LEAK_SHOWN=1`) in CI and the `linux` gate. `RIFT_LEAK_CYCLES=N` soaks longer |
 | `linux` | `clippy`, `test`, `doc` and a release build (with `examples/phone` and `rift-relay`) inside the Linux docker image, then `shell`, the scripted UI regressions and the memory soak (Xvfb, software Vulkan) in `packaging/ci-ubuntu.Dockerfile`, which installs the CI runner's packages from `packaging/ci-apt.txt` |
 
@@ -263,7 +263,7 @@ rift-terminal     winit app, views, input routing, a11y, control socket, script 
   ├── rift-renderer   wgpu quad + sprite pipelines, glyphon text, Scene layers
   ├── rift-pty        PTY sessions, reader threads, vte, images, session service
   ├── rift-core       config, themes, keymap, OSC scanner, blocks, completions, git, update check/install
-  └── rift-remote     mobile wire protocol, Noise XX transport, device registry, WebSocket gateway (over a Source trait)
+  └── rift-remote     mobile wire protocol, Noise XX transport, device registry, WebSocket gateway (over a Source trait), relay client and relay (`rift-relay`)
 
 mobile/           Expo companion (iOS, Android): pnpm, outside the Cargo workspace
 ```
@@ -371,7 +371,10 @@ Workspace dependencies (`Cargo.toml`):
 App-only: `accesskit` / `accesskit_winit` (screen readers), `global-hotkey`,
 `regex` (find), `libc`, `unicode-segmentation` (grapheme-aware editing), `unicode-normalization` (find matches canonically equivalent text), `zeno` (rasterizes brand marks Nerd Fonts lacks,
 such as the Claude mark; already built for glyphon); on macOS `muda` (menu bar), `objc2`,
-`objc2-app-kit`, `objc2-foundation`. `rift-pty` also uses `libc` for PTY and socket calls.
+`objc2-app-kit`, `objc2-foundation`, `objc2-user-notifications` and `block2`
+(desktop notifications posted by Rift.app). `rift-pty` also uses `libc` for PTY
+and socket calls, and on macOS `objc2` / `objc2-foundation`; `rift-core` uses
+`regex` (secret masking) and `libc`; `rift-remote` uses `libc`.
 
 Before adding a dependency, check whether the standard library or an existing
 crate covers it. Keep default features off where the crate allows.
@@ -434,6 +437,37 @@ downloaded). The app's updater reads
    It builds without checking: run `scripts/gates.sh all` on the tag first.
 4. Running copies see the release within 6 hours (or at once via *Check for
    updates*).
+
+The maintainer's `/release` skill (`.claude/skills/release/`) runs this end to
+end. `.claude/skills/release/plan.sh` prints, per product, the last tag, the
+user-facing files changed since it and, for the phone app, whether its expo
+fingerprint still matches the last native build's. The terminal and the
+phone app release independently:
+
+| Product | Tag | Version | Changelog | Reaches users as |
+|---|---|---|---|---|
+| Terminal | `vX.Y.Z` | `[workspace.package]` in `Cargo.toml` | `CHANGELOG.md` | the steps above |
+| Phone app (`mobile/`) | `app-vX.Y.Z` (native build), `app-vX.Y.Z-uN` (over-the-air update N to it) | `mobile/app.json` (+ `mobile/package.json`); `APP_UPDATE` in `mobile/src/release.ts` | `mobile/CHANGELOG.md` | an EAS update (`mobile/scripts/eas.sh update`) while the native code is unchanged, else a native build installed on the devices |
+
+Each app tag is annotated with the `runtime ios=<fp> android=<fp>`
+fingerprints it targets (`runtimeVersion` policy `fingerprint`): an update
+reaches only the installed builds with the same fingerprint, so an OTA
+release keeps the version, and a change to native code, the version or
+`package.json` `scripts` needs a native build.
+
+**Native iOS build under Xcode 27.** `mobile/ios/` is generated
+(`npx expo prebuild -p ios`, git-ignored); never edit it by hand. Xcode 27
+(Swift 6.4) writes module selectors into `.swiftinterface` files
+(`extension __ObjC::expo…`), which `expo-modules-jsi`'s
+`apple/scripts/build-xcframework.sh` does not strip (`/^extension __ObjC\./`),
+so `ExpoModulesCore` fails with `cannot find type '__ObjC::expo'`. Until an
+`expo-modules-jsi` release fixes it (a dependency bump would change the
+fingerprint), patch the pattern to `/^extension __ObjC[.:]/` in that script (a
+transitive dependency: `mobile/node_modules/.pnpm/expo-modules-jsi@*/node_modules/expo-modules-jsi`;
+the fingerprint does not cover it), delete the `.build-hash` of the `ios-arm64*` slices in
+`apple/Products/ExpoModulesJSI.xcframework`, and keep
+`EXPO_USE_PRECOMPILED_MODULES` `false` (the generated
+`ios/Podfile.properties.json`). Re-apply after every `pnpm install`.
 
 ### Release signing
 
