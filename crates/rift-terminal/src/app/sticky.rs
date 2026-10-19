@@ -13,7 +13,7 @@ impl App {
     /// Minimize (or restore) pane `id`'s sticky command header.
     pub(super) fn toggle_sticky_header(&mut self, id: PaneId) {
         if !self.config.sticky_command_header {
-            self.toast("Sticky command headers are off (Settings › Appearance)".into());
+            self.toast("Sticky command headers are off (Settings › Input)".into());
             return;
         }
         let Some(pane) = self.pane_mut_ref(id) else {

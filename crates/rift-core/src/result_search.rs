@@ -336,7 +336,7 @@ pub fn search(
     let needle = text.trim().to_lowercase();
     let mut order: Vec<&Doc> = docs.iter().collect();
     // newest first; runs with no recorded time after the dated ones
-    order.sort_by_key(|d| std::cmp::Reverse(d.finished.map_or(0, |t| t + 1)));
+    order.sort_by_key(|d| std::cmp::Reverse(d.finished));
     let mut out = Outcome::default();
     for d in order {
         if out.found.len() >= limits.max_results || out.scanned_bytes >= limits.max_bytes {
@@ -492,6 +492,23 @@ mod tests {
     fn all(docs: &[Doc], q: &str) -> Outcome {
         let (text, f) = parse_query(q);
         search(docs, &text, &f, 2000, 1500, Limits::default())
+    }
+
+    #[test]
+    fn timestamps_sort_without_overflow_and_unknown_is_last() {
+        let docs: Vec<_> = [None, Some(0), Some(u64::MAX), Some(u64::MAX - 1)]
+            .into_iter()
+            .enumerate()
+            .map(|(i, finished)| Doc {
+                finished,
+                ..doc("p.1", i as u64, "echo", "")
+            })
+            .collect();
+        let found = all(&docs, "echo").found;
+        assert_eq!(
+            found.iter().map(|f| f.finished).collect::<Vec<_>>(),
+            [Some(u64::MAX), Some(u64::MAX - 1), Some(0), None]
+        );
     }
 
     #[test]

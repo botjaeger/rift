@@ -803,11 +803,15 @@ pub struct Config {
     /// and registers there instead of at `remote_relay`. The tunnel's
     /// address changes on every start, so phones pair again after one.
     pub remote_tunnel: bool,
-    /// Paired phones that may run commands can open tabs while no Rift
-    /// window is open: the gateway keeps running and starts them in the
-    /// session service, and Rift shows them as tabs when it opens. Needs
-    /// `remote_access` and `durable_sessions`. Off by default.
-    pub remote_when_closed: bool,
+    /// Rift may keep running after its last window closes (macOS: with a
+    /// Rift icon in the menu bar, so it shows): paired phones that may run
+    /// commands can open tabs meanwhile: the gateway keeps running and
+    /// starts them in the session service, and Rift shows them as tabs when
+    /// it opens. Needs `remote_access` and `durable_sessions`. Off by
+    /// default. Named `remote_when_closed` before the menu bar icon joined
+    /// it (`menu_bar_icon` is no longer read).
+    #[serde(alias = "remote_when_closed")]
+    pub background_processes: bool,
     pub shell: Option<String>,
     /// The `[[profiles]]` entry (or discovered shell) new tabs and panes
     /// open with; unset: `shell` as before profiles.
@@ -1007,10 +1011,6 @@ pub struct Config {
     pub hotkey_window_hide_on_blur: bool,
     /// macOS: Rift opens when you log in (a login item).
     pub launch_at_login: bool,
-    /// macOS: a Rift icon in the menu bar, also while only the background
-    /// helpers run (the phone gateway after the window quit); its menu
-    /// opens Rift or quits it entirely, helpers included.
-    pub menu_bar_icon: bool,
     /// macOS: the Option key sends Meta (ESC prefix, for emacs/readline
     /// word motion) instead of composing characters like `∫`. Linux Alt is
     /// always Meta.
@@ -1111,7 +1111,7 @@ impl Default for Config {
             remote_listen: "0.0.0.0:7878".into(),
             remote_relay: DEFAULT_RELAY.into(),
             remote_tunnel: false,
-            remote_when_closed: false,
+            background_processes: false,
             shell: None,
             default_profile: None,
             discover_shells: true,
@@ -1185,7 +1185,6 @@ impl Default for Config {
             hotkey_window_screen: "pointer".into(),
             hotkey_window_hide_on_blur: true,
             launch_at_login: false,
-            menu_bar_icon: true,
             option_as_meta: false,
             right_option_as_meta: None,
             middle_click_paste: true,
@@ -1824,6 +1823,19 @@ mod tests {
         );
         let neg: Config = toml::from_str("window_blur = -4\n").unwrap();
         assert_eq!(neg.blur(), 1);
+    }
+
+    #[test]
+    fn background_processes_replaces_the_menu_bar_icon_and_phone_tabs_keys() {
+        assert!(!Config::default().background_processes);
+        let on: Config = toml::from_str("background_processes = true\n").unwrap();
+        assert!(on.background_processes);
+        // the key's old name keeps working, and the removed icon key is ignored
+        let old: Config =
+            toml::from_str("remote_when_closed = true\nmenu_bar_icon = true\n").unwrap();
+        assert!(old.background_processes);
+        let icon_only: Config = toml::from_str("menu_bar_icon = true\n").unwrap();
+        assert!(!icon_only.background_processes);
     }
 
     #[test]

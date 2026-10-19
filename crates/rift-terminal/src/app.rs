@@ -816,7 +816,7 @@ pub struct App {
         crate::menubar::MenuBar,
         std::collections::BTreeMap<String, String>,
     )>,
-    /// The menu bar icon (`menu_bar_icon`) while this process runs; the
+    /// The menu bar icon (`background_processes`) while this process runs; the
     /// phone gateway shows its own once no window is left.
     #[cfg(target_os = "macos")]
     status_item: Option<crate::status_item::StatusItem>,
@@ -2145,7 +2145,8 @@ impl App {
         }
         #[cfg(target_os = "macos")]
         {
-            let want = self.config.menu_bar_icon && !self.headless && self.win.window.is_some();
+            let want =
+                self.config.background_processes && !self.headless && self.win.window.is_some();
             if want != self.status_item.is_some() {
                 self.status_item = want
                     .then(objc2::MainThreadMarker::new)
@@ -7087,15 +7088,12 @@ impl App {
         if alt || pane.session.widgets.lock().unwrap().busy() {
             return false;
         }
-        matches!(
-            pane.session
-                .blocks
-                .lock()
-                .unwrap()
-                .last()
-                .map(|b| b.state.clone()),
-            Some(BlockState::Prompt)
-        )
+        let blocks = pane.session.blocks.lock().unwrap();
+        !blocks.submit_pending()
+            && matches!(
+                blocks.last().map(|b| b.state.clone()),
+                Some(BlockState::Prompt)
+            )
     }
 
     fn spawn_session(
@@ -9389,6 +9387,16 @@ impl App {
                 let cols = (usable_w / cell_w).floor().max(2.0) as usize;
                 let rows = (usable_h / line_h).floor().max(2.0) as usize;
                 desktop_grid = (cols, rows);
+                let program_h = if bare {
+                    0.0
+                } else if split {
+                    PANE_PAD
+                } else {
+                    pad.bottom
+                };
+                let program_rows =
+                    ((ph - program_h).max(line_h) / line_h).floor().max(2.0) as usize;
+                pane.program_grid = Some((cols, program_rows, cell_px));
                 let (cols, rows) = pane.fitted(cols, rows);
                 let y = if editor_vis && input_top {
                     y + editor_h - (if split { PANE_PAD } else { pad.top - 4.0 })
@@ -12858,6 +12866,7 @@ impl App {
                 let cwd = pane.session.cwd.lock().unwrap().clone();
                 let branch = pane.git.as_ref().map(|g| g.branch.clone());
                 stamp_submit(&pane.session, cwd, branch, &cmd);
+                pane.prepare_program_grid();
                 pane.session.write(format!("{cmd}\n").as_bytes());
                 submitted = Some((pane.session.id, cmd));
                 edited = false;
@@ -14002,6 +14011,7 @@ impl App {
         let cwd = pane.session.cwd.lock().unwrap().clone();
         let branch = pane.git.as_ref().map(|g| g.branch.clone());
         stamp_submit(&pane.session, cwd, branch, cmd);
+        pane.prepare_program_grid();
         pane.session.write(format!("{cmd}\n").as_bytes());
     }
 }
@@ -15989,9 +15999,6 @@ impl App {
             Some(ClickTarget::SettingsToggle(id)) => {
                 let c = &mut self.config;
                 match *id {
-                    // this process shows or hides it in apply_config; the
-                    // gateway reads it on every check
-                    "menu_bar_icon" => c.menu_bar_icon = !c.menu_bar_icon,
                     "cursor_blink" => c.cursor_blink = !c.cursor_blink,
                     "cursor_hollow_unfocused" => {
                         c.cursor_hollow_unfocused = !c.cursor_hollow_unfocused
@@ -16031,8 +16038,9 @@ impl App {
                     "remote_access" => c.remote_access = !c.remote_access,
                     // the running gateway starts or stops the tunnel itself
                     "remote_tunnel" => c.remote_tunnel = !c.remote_tunnel,
-                    // the running gateway reads it on every check
-                    "remote_when_closed" => c.remote_when_closed = !c.remote_when_closed,
+                    // this process shows or hides the menu bar icon in
+                    // apply_config; the gateway reads it on every check
+                    "background_processes" => c.background_processes = !c.background_processes,
                     // off deletes the saved output (apply_config)
                     "save_transcripts" => c.save_transcripts = !c.save_transcripts,
                     "mouse_reporting" => c.mouse_reporting = !c.mouse_reporting,

@@ -4238,7 +4238,9 @@ remote_run("tunnel", remote_base + 'control_api = "off"\nremote_access = true\n'
     f"wait_file {tunnel_file} 20000", "wait 1500",
     *settings_remote,
     # the tunnel lives under "Relay settings…": reset, switch, tabs switch, it
-    *["key tab"] * 4, "key space", "wait 500", f"dump {tun}/settings.txt",
+    # The remote-when-closed control is a status row now, so Relay settings
+    # is one Tab earlier than the historical layout.
+    *["key tab"] * 3, "key space", "wait 500", f"dump {tun}/settings.txt",
     cp(rm / "off-config.toml", tun / "cfg/rift/config.toml"), "wait 3500"],
     extra_env={"RIFT_CLOUDFLARED": ""})
 tunnel_page = (tun / "settings.txt").read_text()
@@ -4516,8 +4518,8 @@ assert 'Quit Rift?' in asked and "Quit Phone is connected and loses its tabs." i
 assert "confirm=None" in (asked_run / "kept.txt").read_text()
 quit_run("quit-alone", False)
 
-# (f3) macOS: Settings › General opens with the App group (Launch at login,
-# Show menu bar icon), and the menu bar icon's Quit Rift Completely quits like
+# (f3) Settings › General opens with the App group (Launch at login on macOS,
+# Allow background processes); on macOS the menu bar icon's Quit Rift Completely quits like
 # ⌘Q and leaves `remote/stop` for the running gateway; a plain ⌘Q does not
 if sys.platform == "darwin":
     def full_quit_run(name, quit_step):
@@ -4535,7 +4537,7 @@ if sys.platform == "darwin":
         return run
     full = full_quit_run("quit-completely", "menu status:quit_completely")
     general = (full / "settings.txt").read_text()
-    assert "Launch at login" in general and "Show menu bar icon" in general, general[-3000:]
+    assert "Launch at login" in general and "Allow background processes" in general, general[-3000:]
     assert (full / "data/rift/remote/stop").exists(), "Quit Rift Completely left the gateway running"
     plain = full_quit_run("quit-plain", "key cmd+q")
     assert not (plain / "data/rift/remote/stop").exists(), "⌘Q stopped the gateway"
@@ -4562,9 +4564,9 @@ relay_config = (remote_base + "remote_access = true\n"
     "resize 1100 800", "wait_prompt",
     f"wait_file {rl}/go-settings 60000", *settings_remote, "wait 1200",
     f"dump {rl}/connected.txt", f"shot {rl}/relay-dark.png",
-    # reading order: ↺ and switch, the tabs-while-closed switch, Relay
+    # reading order: ↺ and switch, Relay
     # settings…, Pair a phone, View only, then the device's Operate / View only
-    *["key tab"] * 8, "wait 200", f"dump {rl}/focus.txt",
+    *["key tab"] * 7, "wait 200", f"dump {rl}/focus.txt",
     "key space", "wait 2500", f"dump {rl}/changed.txt",
     f"wait_file {rl}/go-light 60000", cp(rl / "light.toml", rl / "cfg/rift/config.toml"),
     "wait 2000", f"dump {rl}/history.txt", f"shot {rl}/relay-light.png",
@@ -4686,7 +4688,7 @@ bad = remote_run("relay-error", remote_base + "remote_access = true\n"
     "wait 7000", *settings_remote, "wait 800",
     f"shot {rm}/relay-error/error.png", f"dump {rm}/relay-error/error.txt",
     # reset, switch, tabs switch, Try again, Relay settings…
-    *["key tab"] * 5, "key space", "wait 400",
+    *["key tab"] * 4, "key space", "wait 400",
     f"shot {rm}/relay-error/error-open.png", f"dump {rm}/relay-error/open.txt"], timeout=120)
 error_page = (bad / "error.txt").read_text()
 reason = re.search(r'relay_reason=Some\("(.*?)"\) relay_open=', error_page)
@@ -5985,6 +5987,24 @@ assert ek_line("1") == ("two", "3"), ek_line("1")
 assert ek_line("2") == ("'my file'", "9"), ek_line("2")
 assert ek_line("3") == ("", "0") and "clipboard=\"'my file'\"" in ekt("3"), ekt("3")[-2000:]
 assert [ek_line(n)[1] for n in ("4", "5", "6")] == ["7", "3", "6"], [ek_line(n) for n in "456"]
+
+# program-start-size: programs see their running viewport before their first instruction, not
+# the shorter command-editor grid; every submission follows the same order
+ps = scratch / "program-start-size"
+ps_steps = []
+for i in range(10):
+    ps_steps += [
+        f"type stty size > {ps}/{i}.size; touch {ps}/{i}.ready; while [ ! -f {ps}/{i}.go ]; do sleep 0.01; done\\n",
+        f"wait_file {ps}/{i}.ready 10000", "wait 100", f"dump {ps}/{i}.txt",
+        f"sh touch {ps}/{i}.go", "wait_prompt",
+    ]
+run_own("program-start-size", "", ps_steps)
+for i in range(10):
+    captured = (ps / f"{i}.txt").read_text()
+    grid = re.search(r"grid x=.* cols=(\d+) rows=(\d+)", captured)
+    assert grid, captured
+    initial = [int(n) for n in (ps / f"{i}.size").read_text().split()]
+    assert initial == [int(grid[2]), int(grid[1])], (i, initial, grid.groups())
 
 # mark mode (⌃⇧M / ⇧⌘M): a cursor in the scrollback, ⇧ extends, ⏎ copies;
 # g goes to the first row (the viewport follows), Esc leaves no selection;

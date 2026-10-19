@@ -136,7 +136,7 @@ impl Transcript {
                 host: b.host.as_deref().map(sanitize),
                 finished_at: b
                     .finished
-                    .map(|s| std::time::UNIX_EPOCH + Duration::from_secs(s)),
+                    .and_then(|s| std::time::UNIX_EPOCH.checked_add(Duration::from_secs(s))),
             })
             .collect()
     }
@@ -396,6 +396,19 @@ mod tests {
         // the exact command survives, minus control characters
         let t = Transcript::bounded(vec![block("printf 'a\n\tb'\x1b]0;x\x07 e\u{301}", "")], 42);
         assert_eq!(t.meta()[0].command, "printf 'a\n\tb']0;x e\u{301}");
+    }
+
+    #[test]
+    fn unrepresentable_finished_time_is_unknown() {
+        let t = Transcript::bounded(
+            vec![SavedBlock {
+                finished: Some(u64::MAX),
+                ..block("echo hi", "hi")
+            }],
+            1,
+        );
+        let loaded = load_reader(serde_json::to_vec(&t).unwrap().as_slice()).unwrap();
+        assert_eq!(loaded.meta()[0].finished_at, None);
     }
 
     #[test]

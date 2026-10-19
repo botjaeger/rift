@@ -42,7 +42,7 @@ ui       isolated scripted UI regressions (display or xvfb-run required), RIFT_U
          (python3 scripts/ui-smoke.py BINARY --list names them); RIFT_UI_SHARDS=1 runs the file serially
 leak     memory soak on the release build: repeated identical work (a ticking program, output past scrollback, a command printing lines without end,
          opening and closing tabs, splits and overlays) must level off (scripts/leak-soak.py; ~5 min)
-linux    clippy + test + doc + release build in packaging/linux-verify.Dockerfile, then shell + scripted UI (xvfb, RIFT_UI_SHARDS shards) on the CI runner's packages in packaging/ci-ubuntu.Dockerfile (docker)
+linux    clippy + test + doc + release build in packaging/linux-verify.Dockerfile, then shell + scripted UI (xvfb, RIFT_UI_SHARDS shards) + leak on the CI runner's packages in packaging/ci-ubuntu.Dockerfile (docker)
 EOF
 }
 

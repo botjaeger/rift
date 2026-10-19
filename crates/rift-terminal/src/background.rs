@@ -1,5 +1,5 @@
 //! Shells a paired phone starts while no Rift window is open
-//! (`remote_when_closed`): the gateway keeps them in the session service and
+//! (`background_processes`): the gateway keeps them in the session service and
 //! serves them as one background window (pid 0) until Rift opens, which then
 //! shows them as tabs (`adopt`).
 //!
@@ -87,14 +87,14 @@ fn write_handoff(sessions: Vec<u64>) {
 
 impl Background {
     /// Start a shell in the session service, in the home folder. `Err` when
-    /// the computer refuses (`remote_when_closed` or `durable_sessions` off,
+    /// the computer refuses (`background_processes` or `durable_sessions` off,
     /// too many shells) or the service cannot start one.
     pub fn start(&self) -> Result<u64, InputError> {
         let config = rift_core::Config::try_load()
             .ok()
             .flatten()
             .unwrap_or_default();
-        if !(config.remote_access && config.remote_when_closed && config.durable_sessions) {
+        if !(config.remote_access && config.background_processes && config.durable_sessions) {
             return Err(InputError::Denied);
         }
         self.prune();

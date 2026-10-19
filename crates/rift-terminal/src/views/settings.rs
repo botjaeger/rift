@@ -2069,16 +2069,16 @@ fn remote_page(
     let on = config.remote_access;
     if on {
         let y = form.y;
-        form.toggle_desc(
+        form.display(
             y,
             "Phones can open tabs while Rift is closed",
-            if config.durable_sessions {
-                "Only phones that may run commands; you get a notification, and the tabs appear when you open Rift"
-            } else {
+            if !config.background_processes {
+                "Off · turn on Allow background processes (General)"
+            } else if !config.durable_sessions {
                 "Needs Keep shells running through updates (General)"
+            } else {
+                "On · only phones that may run commands"
             },
-            config.remote_when_closed,
-            "remote_when_closed",
         );
     }
 
@@ -3269,9 +3269,9 @@ fn appearance_page(form: &mut Form, config: &Config) {
 }
 
 fn general_page(form: &mut Form, config: &Config, update: &UpdateLine) {
-    // the login item and the menu bar icon are macOS's
+    form.group("App");
+    // the login item is macOS's
     if cfg!(target_os = "macos") {
-        form.group("App");
         let y = form.y;
         form.toggle(
             y,
@@ -3279,14 +3279,19 @@ fn general_page(form: &mut Form, config: &Config, update: &UpdateLine) {
             config.launch_at_login,
             "launch_at_login",
         );
-        let y = form.y;
-        form.toggle(
-            y,
-            "Show menu bar icon",
-            config.menu_bar_icon,
-            "menu_bar_icon",
-        );
     }
+    let y = form.y;
+    form.toggle_desc(
+        y,
+        "Allow background processes",
+        if cfg!(target_os = "macos") {
+            "Rift's helpers keep running after you quit, so paired phones can open tabs; a menu bar icon shows while they do"
+        } else {
+            "Rift's helpers keep running after you quit, so paired phones can open tabs"
+        },
+        config.background_processes,
+        "background_processes",
+    );
 
     form.group("Shell");
     // what actually runs: a configured shell that is not executable falls back

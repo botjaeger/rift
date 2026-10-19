@@ -163,8 +163,11 @@ impl App {
         };
         p.editor.submit();
         p.view_offset = 0;
-        p.session.write(&bytes);
         self.close_composer(id);
+        if let Some(p) = self.find_tab_of_pane(id).and_then(|(_, t)| t.pane_mut(id)) {
+            p.prepare_program_grid();
+            p.session.write(&bytes);
+        }
     }
 
     /// The composer's program ended (its block finished) or its pane is

@@ -168,6 +168,7 @@ impl App {
         fresh.text_area = p.text_area;
         fresh.layout_window = p.layout_window;
         fresh.base_grid = p.base_grid;
+        fresh.program_grid = p.program_grid;
         fresh.fit = p.fit;
         // the old session (and its PTY) goes with the old state
         drop(std::mem::replace(p, fresh));

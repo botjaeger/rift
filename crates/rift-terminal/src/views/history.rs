@@ -210,6 +210,13 @@ pub fn age(t: SystemTime, now: SystemTime) -> String {
     }
 }
 
+fn saved_age(finished: Option<u64>, now: SystemTime) -> String {
+    finished
+        .and_then(|t| SystemTime::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(t)))
+        .map(|t| age(t, now))
+        .unwrap_or_else(|| "date unknown".into())
+}
+
 const HEADER_H: f32 = 32.0;
 const ROW_H: f32 = 28.0;
 const FOOTER_H: f32 = 30.0;
@@ -790,13 +797,7 @@ fn render_results(
             None,
         );
         layer.text(cb, right + 16.0, rcy - 8.0, theme.text_muted);
-        let when = match f.finished {
-            Some(t) => age(
-                SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(t),
-                now,
-            ),
-            None => "date unknown".into(),
-        };
+        let when = saved_age(f.finished, now);
         let aw = engine.measure(&when, 12.0, FONT_SANS, Weight::NORMAL);
         layer.text(
             sans(engine, &when, 12.0, Weight::NORMAL),
@@ -985,5 +986,8 @@ mod tests {
         assert_eq!(age(ago(7200), now), "2 h ago");
         assert_eq!(age(ago(90_000), now), "yesterday");
         assert_eq!(age(ago(5 * 86_400), now), "5 days ago");
+        assert_eq!(saved_age(Some(u64::MAX), now), "date unknown");
+        assert_eq!(saved_age(None, now), "date unknown");
+        assert_eq!(saved_age(Some(10 * 86_400 - 240), now), "4 min ago");
     }
 }

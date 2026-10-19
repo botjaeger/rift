@@ -1115,6 +1115,8 @@ pub struct PaneState {
     /// The window's own grid at the last layout (columns, rows, cell size
     /// in px), before any `fit`.
     pub base_grid: Option<(usize, usize, (u16, u16))>,
+    /// Last layout's grid with the command editor closed, before any `fit`.
+    pub program_grid: Option<(usize, usize, (u16, u16))>,
     /// What the pane was opened with (profile name, own shell and args):
     /// kept by duplicate, save-layout and restore.
     pub launch: rift_core::profiles::PaneLaunch,
@@ -1203,6 +1205,7 @@ impl PaneState {
             title: String::new(),
             fit: None,
             base_grid: None,
+            program_grid: None,
             launch: Default::default(),
             theme: None,
             scrollbar: Default::default(),
@@ -1270,6 +1273,14 @@ impl PaneState {
         let (cols, rows) = self.fitted(cols, rows);
         self.session.resize(rift_pty::GridSize { cols, rows }, cell);
         true
+    }
+
+    /// Publish the program's size before its input can start a process.
+    pub fn prepare_program_grid(&mut self) {
+        if let Some((cols, rows, cell)) = self.program_grid {
+            let (cols, rows) = self.fitted(cols, rows);
+            self.session.resize(rift_pty::GridSize { cols, rows }, cell);
+        }
     }
 
     /// A command runs in this pane and is working (its tab and title bar

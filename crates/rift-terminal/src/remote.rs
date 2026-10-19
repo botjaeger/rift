@@ -76,7 +76,7 @@ pub struct ControlSource {
     /// The last screen read of each pane, asked for again with its
     /// generation: an unchanged pane's window builds none.
     screens: Mutex<HashMap<u64, Held>>,
-    /// Shells phones started while no window is open (`remote_when_closed`).
+    /// Shells phones started while no window is open (`background_processes`).
     background: crate::background::Background,
 }
 
@@ -712,11 +712,12 @@ struct RemoteConfig {
     /// `remote_tunnel`: run a relay here behind a Cloudflare tunnel
     /// (`tunnel.rs`) and register there instead.
     tunnel: bool,
-    /// `remote_when_closed` (with `durable_sessions`): phones start shells
+    /// `background_processes` (with `durable_sessions`): phones start shells
     /// while no window is open, and the gateway stays up for them.
     when_closed: bool,
-    /// `menu_bar_icon`: the gateway shows it while no window is open.
-    menu_icon: bool,
+    /// `background_processes`: the gateway shows the menu bar icon while no
+    /// window is open.
+    background: bool,
 }
 
 /// `remote_access` and `remote_listen` from config.toml, read with the
@@ -759,8 +760,8 @@ fn remote_config_from(loaded: Result<Option<rift_core::Config>, String>) -> Remo
             relay: c.relay().map(str::to_string),
             listen: Some(c.remote_listen),
             tunnel: c.remote_tunnel,
-            when_closed: c.remote_when_closed && c.durable_sessions,
-            menu_icon: c.menu_bar_icon,
+            when_closed: c.background_processes && c.durable_sessions,
+            background: c.background_processes,
         },
         _ => RemoteConfig::default(),
     }
@@ -922,7 +923,7 @@ pub fn cli(args: &[String]) -> i32 {
 /// `status_item::run_helper` on the main thread) tell each other.
 #[derive(Default)]
 pub struct Tray {
-    /// Show the icon: `menu_bar_icon` is on and no window is open.
+    /// Show the icon: `background_processes` is on and no window is open.
     pub want: AtomicBool,
     /// "Quit Rift Completely" was picked.
     pub quit: AtomicBool,
@@ -967,7 +968,8 @@ fn follow_managed(
                 break;
             }
             // the app shows its own while it runs
-            tray.want.store(now.menu_icon && !window, Ordering::Release);
+            tray.want
+                .store(now.background && !window, Ordering::Release);
         }
         if checked_windows.is_none_or(|t| t.elapsed() >= Duration::from_secs(2)) {
             checked_windows = Some(Instant::now());
@@ -1650,10 +1652,10 @@ mod tests {
                 relay: Some(rift_core::config::DEFAULT_RELAY.into()),
                 tunnel: false,
                 when_closed: false,
-                menu_icon: true,
+                background: false,
             }
         );
-        assert!(!from_text("menu_bar_icon = false\n").menu_icon);
+        assert!(from_text("background_processes = true\n").background);
         assert_eq!(from_text("remote_relay = \"\"\n").relay, None);
         assert_eq!(
             from_text(
@@ -1666,13 +1668,13 @@ mod tests {
                 relay: Some("wss://relay.example.com".into()),
                 tunnel: true,
                 when_closed: false,
-                menu_icon: true,
+                background: false,
             }
         );
         assert_eq!(from_text("remote_relay = \"  \"\n").relay, None);
         // shells while Rift is closed live in the session service
-        assert!(from_text("remote_when_closed = true\n").when_closed);
-        assert!(!from_text("remote_when_closed = true\ndurable_sessions = false\n").when_closed);
+        assert!(from_text("background_processes = true\n").when_closed);
+        assert!(!from_text("background_processes = true\ndurable_sessions = false\n").when_closed);
         // the tunnel replaces the configured relay; off, the relay is used
         let mut t = crate::tunnel::Tunnel::new(
             &std::env::temp_dir().join(format!("rift-relay-for-{}", std::process::id())),
