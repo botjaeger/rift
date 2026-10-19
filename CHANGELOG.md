@@ -8,6 +8,28 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.18.0 — 2026-10-19
+
+Keeping Rift running after you quit now follows Remote access, so there is one switch instead of three.
+
+### Improved
+
+- **Keep Rift running with Remote access** — with Remote access on (macOS), the first ⌘Q asks *Keep
+  running?*: your shells, the phone connection and the menu bar icon stay, and opening Rift again brings
+  back the same tabs. With Remote access off (the default), ⌘Q quits everything, as before. *Allow
+  background processes*, *Ask before keeping Rift running* and *Keep shells running through updates*
+  are gone from Settings; shells still survive updates and crashes, and the quit question can be turned
+  back on with `confirm_background_quit = true` in config.toml.
+- **After you quit** — Settings › Remote access says what a quit does.
+
+### Fixed
+
+- **Keep running only when it can be undone** — the question is offered only while the phone connection
+  is running, so a quit never leaves shells behind with no menu bar icon to reopen or end them.
+- **Menu bar icon after a normal quit** — it no longer shows for about 30 seconds after a quit that
+  ended everything.
+- **Remote access turned off while Rift is kept** — the kept shells end instead of being left running.
+
 ## 0.17.0 — 2026-10-19
 
 Opening, quitting and restarting Rift is steadier: no more empty Dock icons or "quit unexpectedly" pop-ups, and quitting can leave your shells running.
