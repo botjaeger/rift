@@ -2071,13 +2071,13 @@ fn remote_page(
         let y = form.y;
         form.display(
             y,
-            "Phones can open tabs while Rift is closed",
-            if !config.background_processes {
-                "Off · turn on Allow background processes (General)"
+            "After you quit",
+            if !cfg!(target_os = "macos") {
+                "Rift quits, phones can no longer reach it"
             } else if !config.durable_sessions {
-                "Needs Keep shells running through updates (General)"
+                "Rift quits (durable_sessions is off in config.toml)"
             } else {
-                "On · only phones that may run commands"
+                "Rift keeps running in the menu bar; phones that may run commands can open tabs"
             },
         );
     }
@@ -3280,26 +3280,6 @@ fn general_page(form: &mut Form, config: &Config, update: &UpdateLine) {
             "launch_at_login",
         );
     }
-    let y = form.y;
-    form.toggle_desc(
-        y,
-        "Allow background processes",
-        if cfg!(target_os = "macos") {
-            "Rift's helpers keep running after you quit, so paired phones can open tabs; a menu bar icon shows while they do"
-        } else {
-            "Rift's helpers keep running after you quit, so paired phones can open tabs"
-        },
-        config.background_processes,
-        "background_processes",
-    );
-    let y = form.y;
-    form.toggle_desc(
-        y,
-        "Ask before keeping Rift running",
-        "Quitting asks once whether Rift keeps running in the background",
-        config.confirm_background_quit,
-        "confirm_background_quit",
-    );
 
     form.group("Shell");
     // what actually runs: a configured shell that is not executable falls back
@@ -3388,14 +3368,6 @@ fn general_page(form: &mut Form, config: &Config, update: &UpdateLine) {
         "Output can contain secrets; turning this off deletes it",
         config.save_transcripts,
         "save_transcripts",
-    );
-    let y = form.y;
-    form.toggle_desc(
-        y,
-        "Keep shells running through updates",
-        "Session service; updates and crashes reattach (new shells)",
-        config.durable_sessions,
-        "durable_sessions",
     );
 
     // the hotkey itself (`global_hotkey`) is set in config.toml

@@ -54,7 +54,7 @@ pub struct SavedSession {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_name: Option<String>,
     /// The last quit left Rift's shells running in the background
-    /// (`background_processes`): the next launch restores these tabs and
+    /// (`remote_access`, macOS): the next launch restores these tabs and
     /// reattaches the shells, whatever `restore_session` says.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub kept: bool,

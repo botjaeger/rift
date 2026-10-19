@@ -1380,21 +1380,20 @@ runs what was typed meanwhile), and the rest of the window's run stays
 local instead of waiting on it again. A reattach whose shell ended while
 detached starts a fresh one in the service.
 
-**Quitting** Rift has two kinds, chosen by Settings › General › App ›
-*Allow background processes*:
+**Quitting** Rift has two kinds, chosen by Settings › Remote access (there is
+no separate background setting: phones are the reason Rift keeps running):
 
-- **Off (the default): a quit ends everything.** ⌘Q, Quit Rift in the menu or
+- **Remote access off (the default): a quit ends everything.** ⌘Q, Quit Rift in the menu or
   the palette, or closing the last window ends every shell, and the session
   file keeps only the window's frame, so the next launch starts fresh with one
   tab where the window was (saved block output goes too). While a phone is
   connected, the quit dialog names it first (*iPhone is connected and loses
   its tabs.*), with the running commands when *Warn before closing running
   commands* is on. The phone is told Rift quit (`closing`, below).
-- **On (macOS, with `remote_access`): a quit keeps Rift running in the background.** The first ⌘Q asks
+- **Remote access on (macOS): a quit keeps Rift running in the background.** The first ⌘Q asks
   *Keep running?* (the running commands are listed; *Cancel* or *Keep
-  running*, with a *Don't ask again* box, Space toggles it; Settings › General
-  › App › *Ask before keeping Rift running*, `confirm_background_quit`, turns
-  the question back on). Keep running closes the windows only: the shells
+  running*, with a *Don't ask again* box, Space toggles it; `config.toml`'s
+  `confirm_background_quit = true` turns the question back on). Keep running closes the windows only: the shells
   keep running in the session service, the gateway and the menu bar icon stay,
   and there is no Dock icon. The session file is saved whole and flagged
   `kept`, so opening Rift again (the icon's *Open Rift*, the Dock, Spotlight)
@@ -1407,13 +1406,12 @@ everything in either mode: every shell, the gateway and the session service,
 and the kept tabs go with them. The phone is told with `closing` (reason
 `quit`): it shows "<computer> quit Rift" instead of retrying.
 
-**Menu bar icon** (macOS, with `background_processes`, off by default; Settings
-› General › App › *Allow background processes*, which also lets phones open
+**Menu bar icon** (macOS, with Remote access on; it also lets phones open
 tabs while Rift is closed): the app icon as a line drawing in the menu bar
 (a template image, tinted by macOS). While Rift runs its menu has *New Window*, *Settings…* and
 *Quit Rift Completely*. After the window quits, the phone gateway shows it
-for as long as it runs (`remote_access`; 30 s after the last window, or
-until stopped with `background_processes`), with *Open Rift* and *Quit Rift
+for as long as it runs (`remote_access`; until *Quit Rift Completely*),
+with *Open Rift* and *Quit Rift
 Completely*. *Quit Rift Completely* is the usual quit (the same warnings)
 that also stops the gateway (`<data dir>/remote/stop`, seen within 0.5 s)
 and ends the shells phones started in the session service, which then
@@ -1499,8 +1497,8 @@ signed manifest.
   toast.
 - The chip, **Update…** and `update_rift` open a dialog that says what the
   restart keeps: with durable sessions, *Your N tabs and M shells keep running
-  and come back where they were*; without them, open shells end (turn on
-  *Keep shells running through updates* to keep them). When the new
+  and come back where they were*; without them, open shells end (set
+  `durable_sessions = true` in config.toml to keep them). When the new
   version's session service speaks another protocol, running shells keep
   running but cannot be reattached; the dialog says so. **Later** (Esc)
   hides the chip until a newer version.
@@ -1632,9 +1630,8 @@ on the desktop (also for shells a phone started while no window is open).
   A Tailscale or other private-network address of the computer works
   without a relay: it is listed in the pairing link like any other address.
   Pairing links made in Settings carry the running gateway's relay too.
-- **Tabs while Rift is closed** (`background_processes`, *Allow background
-  processes* in General; off by default, needs `remote_access` and
-  `durable_sessions`; named `remote_when_closed` in earlier versions): the
+- **Tabs while Rift is closed** (macOS; part of `remote_access`, needs
+  `durable_sessions`, on by default): the
   gateway stays up after the last window closes, and a paired phone that may
   run commands can open a tab (after Face ID or the passcode on the phone).
   The shell runs in the session service; the computer shows a notification

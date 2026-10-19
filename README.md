@@ -91,7 +91,7 @@ rebound. Full list: [keyboard shortcuts](docs/keyboard-shortcuts.md).
 | Send code to a coding agent in another pane | Review panel or file viewer → *Send to agent…* |
 | Session restore (tabs, splits, directories, window position) | On by default (`restore_session`) |
 | Saved block output across restarts | Settings → General → *Save block output for restore* |
-| Durable sessions (the main window's shells keep running through an update or a crash; quitting ends them and the next launch starts fresh) | On by default with *Restore tabs after a crash*; Settings → General → *Keep shells running through updates* |
+| Durable sessions (the main window's shells keep running through an update or a crash; quitting ends them and the next launch starts fresh, unless Remote access keeps Rift running) | On by default with *Restore tabs after a crash*; `durable_sessions` in config.toml (no Settings row) |
 | Updates — checked at launch and every 6 hours; tabs and running shells survive the restart | *Update Rift* in the tab bar; Settings → About; Settings → General → *Check for updates* |
 | Links and paths | ⌘-click URLs, OSC 8 links and file paths (`file:line:col`, `file(line,col)`, Python tracebacks too); right-click one to open, copy or reveal it; Settings → Files picks the editor they open in |
 | Links back to a pane — `RIFT_PANE_URL` in every shell focuses its pane | `open "$RIFT_PANE_URL"`, e.g. from a Claude Code hook or an ntfy click |
@@ -204,7 +204,9 @@ packaging/make-app.sh                  # macOS app bundle: target/Rift.app
 ```
 
 **Stop** — quit with ⌘Q (Linux: Super+Q) or close the last window: every
-shell ends and the next launch starts fresh. ⌃C in the terminal that ran
+shell ends and the next launch starts fresh (macOS with Remote access on: ⌘Q asks
+*Keep running?* and keeps the shells, the gateway and a menu bar icon instead;
+*Quit Rift Completely* ends everything). ⌃C in the terminal that ran
 `cargo run` (or a crash) stops only the window: with durable sessions on (the
 default; Settings → General) and *Restore tabs after a crash* on (also the
 default), the main window's shells keep running in the background session

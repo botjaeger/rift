@@ -77,7 +77,7 @@ next launch starts fresh with one tab where the first window was. An
 update's restart, a crash or a reboot instead bring every window, its tabs,
 splits and directories back
 (`restore_session`), and the shells themselves keep running and reattach
-(*Keep shells running through updates*, on by default; see [durable
+(durable sessions, on by default; see [durable
 sessions](features.md#durable-sessions)). Turn on *Save block output for
 restore* to also bring back the finished blocks. While a phone is connected,
 quitting asks first.

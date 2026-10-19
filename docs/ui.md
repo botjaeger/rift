@@ -70,8 +70,8 @@ pane navigation, Synchronize Inputs, Bring All to Front) · **Help** (What's New
 Menu items act on the window that last had focus. New Window opens another
 window of the same process, offset from the current one; Close Window closes
 only it while others are open ("Close window?" when commands run in it) and
-quits with the last one; Quit asks "Quit Rift?" for every window at once (with
-*Allow background processes* on, the question is "Keep running?": its confirm
+quits with the last one; Quit asks "Quit Rift?" for every window at once (on macOS with
+Remote access on, the question is "Keep running?": its confirm
 button reads *Keep running*, a *Don't ask again* box at the footer's left
 turns the question off, and the shells, gateway and icon stay; features.md,
 Durable sessions).
@@ -83,15 +83,15 @@ key routing as the keyboard (overlays, editor vs raw mode). Quit goes through
 the running-command warning. Linux has no native menu bar (the palette lists
 every action).
 
-**Menu bar icon** (`background_processes`, off by default; Settings › General ›
-App › *Allow background processes*): the app icon as a line
+**Menu bar icon** (macOS, while Remote access is on, which is off by default):
+the app icon as a line
 drawing (tile outline, chevron and cursor; a template image) in the menu
 bar's status area, tooltip and
 VoiceOver name *Rift*. Its menu while Rift runs: *New Window*, *Settings…*
 (both bring Rift to the front), separator, *Quit Rift Completely* (the quit
 dialog as for Quit; then the phone gateway and the shells phones opened stop
 too). Once no window is open, the phone gateway shows the same icon while it
-runs, with *Open Rift* and *Quit Rift Completely*. Turning the setting off
+runs, with *Open Rift* and *Quit Rift Completely*. Turning Remote access off
 removes both within a moment.
 
 ## Tab bar
@@ -1175,10 +1175,9 @@ description) left, control right; it runs to the bottom edge.
 
 - **General** — *Shell and session behavior*.
   - App: `Launch at login` toggle (macOS only; `launch_at_login`: adds or
-    removes Rift's login item; shows the login item as it is), `Allow
-    background processes` toggle (`background_processes`: Rift's helpers keep
-    running after you quit so paired phones can open tabs; on macOS the menu
-    bar icon shows while they do, see *Menu bar icon* above).
+    removes Rift's login item; shows the login item as it is). There is no
+    background-processes row: Remote access decides whether a quit keeps Rift
+    running (see *Menu bar icon* above).
   - Shell: `Shell path` (read-only: `shell` override, else `$SHELL`),
     read-only profile rows edited in config.toml — `Default profile` (or
     `none (Shell path)`), one `Profile: <name>` row with its command per
@@ -1189,9 +1188,8 @@ description) left, control right; it runs to the bottom edge.
     `Previous | Home | Custom` (a custom path is set in config.toml),
     `Warn before closing running commands` toggle,
     `Save block output for restore` toggle (*Output can contain secrets;
-    turning this off deletes it*; `save_transcripts`),
-    `Keep shells running through updates` toggle (*Session service;
-    updates and crashes reattach (new shells)*; `durable_sessions`).
+    turning this off deletes it*; `save_transcripts`). Durable shells
+    (`durable_sessions`, on) have no row; it is a `config.toml` key.
   - Hotkey window: `Drop-down hotkey window` toggle (*The global hotkey
     slides a window down from the top of the screen*; `hotkey_window`),
     `Hotkey window height` stepper (%, ±5 within 20–100; *Share of the
@@ -1365,11 +1363,10 @@ description) left, control right; it runs to the bottom edge.
     cameras read it in any theme), `Expires in m:ss`, the wrapped link and a
     `Copy link` button; at zero, `Expired — Pair again`. While the gateway
     has no address yet, a `Pairing` row waits for it.
-  - `Phones can open tabs while Rift is closed` (with remote access on, under the switch):
-    a read-only row that follows `Allow background processes` (General):
-    *Off · turn on Allow background processes (General)*, *On · only phones
-    that may run commands*, or *Needs Keep shells running through updates
-    (General)* while `durable_sessions` is off.
+  - `After you quit` (with remote access on, under the switch): a read-only
+    row: *Rift keeps running in the menu bar; phones that may run commands
+    can open tabs* (macOS), *Rift quits (durable_sessions is off in
+    config.toml)*, or *Rift quits, phones can no longer reach it* (Linux).
   - `Use a Cloudflare tunnel instead` (under `Relay settings…`, below `Relay`): the `remote_tunnel`
     switch; on, a checklist follows: `cloudflared` (`Installed · <path>` with
     a green check, or `Not installed` with an `Install` button when

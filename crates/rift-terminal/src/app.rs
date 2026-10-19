@@ -816,7 +816,7 @@ pub struct App {
         crate::menubar::MenuBar,
         std::collections::BTreeMap<String, String>,
     )>,
-    /// The menu bar icon (`background_processes`) while this process runs; the
+    /// The menu bar icon (`remote_access`) while this process runs; the
     /// phone gateway shows its own once no window is left.
     #[cfg(target_os = "macos")]
     status_item: Option<crate::status_item::StatusItem>,
@@ -2161,8 +2161,7 @@ impl App {
         }
         #[cfg(target_os = "macos")]
         {
-            let want =
-                self.config.background_processes && !self.headless && self.win.window.is_some();
+            let want = self.config.remote_access && !self.headless && self.win.window.is_some();
             if want != self.status_item.is_some() {
                 self.status_item = want
                     .then(objc2::MainThreadMarker::new)
@@ -13053,15 +13052,16 @@ impl App {
     }
 
     /// A quit leaves the shells running in the background (the session
-    /// service holds them; the next launch reattaches them): `background_
-    /// processes` is on, the shells are durable, and this is not "Quit Rift
-    /// Completely". macOS only: the menu bar icon is what opens Rift again and
-    /// ends everything.
+    /// service holds them; the next launch reattaches them): `remote_access`
+    /// is on and its gateway runs, the shells are durable, and this is not
+    /// "Quit Rift Completely". macOS only: the gateway's menu bar icon is what
+    /// opens Rift again and ends everything, so without a running gateway a
+    /// quit is the plain one.
     fn keeps_background(&self) -> bool {
         cfg!(target_os = "macos")
-            && self.config.background_processes
-            // the menu bar icon (the gateway's) is how the user reopens or ends it
+            // the gateway's menu bar icon is how the user reopens or ends it
             && self.config.remote_access
+            && self.remote.status.is_some()
             && self.config.durable_sessions
             && self.durable_allowed
             && self.persist_session
@@ -16158,12 +16158,6 @@ impl App {
                     "remote_access" => c.remote_access = !c.remote_access,
                     // the running gateway starts or stops the tunnel itself
                     "remote_tunnel" => c.remote_tunnel = !c.remote_tunnel,
-                    // this process shows or hides the menu bar icon in
-                    // apply_config; the gateway reads it on every check
-                    "background_processes" => c.background_processes = !c.background_processes,
-                    "confirm_background_quit" => {
-                        c.confirm_background_quit = !c.confirm_background_quit
-                    }
                     // off deletes the saved output (apply_config)
                     "save_transcripts" => c.save_transcripts = !c.save_transcripts,
                     "mouse_reporting" => c.mouse_reporting = !c.mouse_reporting,
@@ -21834,7 +21828,7 @@ impl App {
             ),
             _ => (
                 format!("Rift restarts and reopens your {tabs_text}."),
-                "Open shells will end when Rift restarts. Turn on “Keep shells running through updates” in Settings › General to keep them.".to_string(),
+                "Open shells will end when Rift restarts. Set durable_sessions = true in config.toml to keep them.".to_string(),
                 false,
             ),
         };

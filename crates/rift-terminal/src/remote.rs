@@ -83,7 +83,7 @@ pub struct ControlSource {
     /// The last screen read of each pane, asked for again with its
     /// generation: an unchanged pane's window builds none.
     screens: Mutex<HashMap<u64, Held>>,
-    /// Shells phones started while no window is open (`background_processes`).
+    /// Shells phones started while no window is open (`remote_access`).
     background: crate::background::Background,
 }
 
@@ -719,11 +719,12 @@ struct RemoteConfig {
     /// `remote_tunnel`: run a relay here behind a Cloudflare tunnel
     /// (`tunnel.rs`) and register there instead.
     tunnel: bool,
-    /// `background_processes` (with `durable_sessions`): phones start shells
-    /// while no window is open, and the gateway stays up for them.
+    /// `remote_access` with `durable_sessions` (macOS, where the menu bar icon
+    /// shows it and ends it): phones start shells while no window is open,
+    /// and the gateway stays up for them.
     when_closed: bool,
-    /// `background_processes`: the gateway shows the menu bar icon while no
-    /// window is open.
+    /// Same condition as `when_closed`: the gateway shows the menu bar icon
+    /// while no window is open (a quit that ends everything shows none).
     background: bool,
 }
 
@@ -767,8 +768,8 @@ fn remote_config_from(loaded: Result<Option<rift_core::Config>, String>) -> Remo
             relay: c.relay().map(str::to_string),
             listen: Some(c.remote_listen),
             tunnel: c.remote_tunnel,
-            when_closed: c.background_processes && c.durable_sessions,
-            background: c.background_processes,
+            when_closed: cfg!(target_os = "macos") && c.remote_access && c.durable_sessions,
+            background: cfg!(target_os = "macos") && c.remote_access && c.durable_sessions,
         },
         _ => RemoteConfig::default(),
     }
@@ -931,7 +932,7 @@ pub fn cli(args: &[String]) -> i32 {
 /// `status_item::run_helper` on the main thread) tell each other.
 #[derive(Default)]
 pub struct Tray {
-    /// Show the icon: `background_processes` is on and no window is open.
+    /// Show the icon: `remote_access` is on and no window is open.
     pub want: AtomicBool,
     /// "Quit Rift Completely" was picked.
     pub quit: AtomicBool,
@@ -962,6 +963,12 @@ fn follow_managed(
         let now = remote_config();
         if !now.access {
             log::info!("remote: remote_access is off; stopping");
+            // a kept Rift with no window and no gateway has nothing left to
+            // reopen or end its shells: they end with it
+            if tray.is_some() && !any_window() {
+                end_background_shells();
+                rift_core::session_state::forget_kept_tabs();
+            }
             break;
         }
         if std::fs::remove_file(dir.join(UPDATE_FILE)).is_ok() {
@@ -992,7 +999,9 @@ fn follow_managed(
         }
         if checked_windows.is_none_or(|t| t.elapsed() >= Duration::from_secs(2)) {
             checked_windows = Some(Instant::now());
-            if any_window() || now.when_closed {
+            // (a headless gateway has no icon to end it: it never stays on
+            // for phones)
+            if any_window() || (now.when_closed && tray.is_some()) {
                 windowless = None;
             } else if windowless.get_or_insert_with(Instant::now).elapsed() >= NO_WINDOWS_EXIT {
                 log::info!("remote: no Rift window for {NO_WINDOWS_EXIT:?}; stopping");
@@ -1688,7 +1697,12 @@ mod tests {
                 background: false,
             }
         );
-        assert!(from_text("background_processes = true\n").background);
+        assert_eq!(
+            from_text("remote_access = true\n").background,
+            cfg!(target_os = "macos")
+        );
+        assert!(!from_text("remote_access = true\ndurable_sessions = false\n").background);
+        assert!(!from_text("background_processes = true\n").background);
         assert_eq!(from_text("remote_relay = \"\"\n").relay, None);
         assert_eq!(
             from_text(
@@ -1700,14 +1714,18 @@ mod tests {
                 listen: Some("127.0.0.1:9".into()),
                 relay: Some("wss://relay.example.com".into()),
                 tunnel: true,
-                when_closed: false,
-                background: false,
+                when_closed: cfg!(target_os = "macos"),
+                background: cfg!(target_os = "macos"),
             }
         );
         assert_eq!(from_text("remote_relay = \"  \"\n").relay, None);
         // shells while Rift is closed live in the session service
-        assert!(from_text("background_processes = true\n").when_closed);
-        assert!(!from_text("background_processes = true\ndurable_sessions = false\n").when_closed);
+        assert_eq!(
+            from_text("remote_access = true\n").when_closed,
+            cfg!(target_os = "macos")
+        );
+        assert!(!from_text("remote_access = true\ndurable_sessions = false\n").when_closed);
+        assert!(!from_text("durable_sessions = true\n").when_closed);
         // the tunnel replaces the configured relay; off, the relay is used
         let mut t = crate::tunnel::Tunnel::new(
             &std::env::temp_dir().join(format!("rift-relay-for-{}", std::process::id())),

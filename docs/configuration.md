@@ -184,7 +184,8 @@ close_on_exit = "always"          # always | never | graceful: when a pane's pro
 durable_sessions = true           # shells live in the session service: they keep
                                   # running through an update's restart or a
                                   # crash and reattach on launch (a quit ends
-                                  # them; false keeps them in the window process)
+                                  # them unless remote_access keeps Rift running;
+                                  # false keeps them in the window process)
 check_for_updates = true          # look for a new release at launch and every 6 h
                                   # ("Update Rift" chip in the tab bar)
 control_api   = "navigate"        # off | navigate (list/status/focus/blocks, and an
@@ -193,7 +194,14 @@ control_api   = "navigate"        # off | navigate (list/status/focus/blocks, an
                                   # Linux, off: the socket still takes rift://
                                   # links from a second rift-terminal process
 remote_access = false             # phone companion (off by default, never turned
-                                  # on for you): windows start the gateway
+                                  # on for you). macOS: on (with durable_sessions),
+                                  # a quit keeps Rift running (the gateway, the shells in the session
+                                  # service, a menu bar icon with Open Rift and
+                                  # Quit Rift Completely) so phones can open tabs
+                                  # while no window is open; the old
+                                  # background_processes, remote_when_closed and
+                                  # menu_bar_icon keys are no longer read.
+                                  # Windows start the gateway
                                   # (`rift-terminal remote --managed`; log in
                                   # <data dir>/remote/gateway.log); with
                                   # control_api = "off" the socket then answers
@@ -210,19 +218,6 @@ remote_relay  = "wss://rift-relay.playhaws.com"
                                   # packaging/relay.Dockerfile hosts one;
                                   # scripts/relay-local.sh runs a temporary one
                                   # on this machine and sets this key
-background_processes = false      # Rift's helpers may keep running after you quit:
-                                  # paired phones that may run commands can open
-                                  # tabs while no Rift window is open: the gateway
-                                  # stays up and keeps them in the session service
-                                  # (needs remote_access and durable_sessions); Rift
-                                  # shows them as tabs when it opens. macOS: a Rift
-                                  # icon in the menu bar shows while it is on
-                                  # (New Window, Settings…, Quit Rift Completely;
-                                  # with no window, Open Rift, Quit Rift
-                                  # Completely: stops the gateway and the shells
-                                  # phones opened). Earlier versions named this
-                                  # remote_when_closed (still read); menu_bar_icon
-                                  # is no longer read
 remote_tunnel = false             # Cloudflare tunnel: a relay on this computer
                                   # behind a Cloudflare quick tunnel (needs
                                   # cloudflared); replaces remote_relay while on.
@@ -260,7 +255,7 @@ bell          = "both"            # visual | audible | both | none
 request_attention = false         # a bell or alert while no Rift window has focus:
                                   # bounce the Dock icon once (macOS) / urgency hint (Linux)
 confirm_close_running = true      # warn before closing a pane/tab/window with a running job
-confirm_background_quit = true    # with background_processes on, quitting asks once
+confirm_background_quit = true    # with remote_access on (macOS), quitting asks once
                                   # whether Rift keeps running ("Don't ask again" in
                                   # the dialog turns this off: it keeps running unasked)
 confirm_multiline_paste = true    # ask before a paste with newlines reaches a program

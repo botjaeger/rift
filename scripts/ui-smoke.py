@@ -4518,8 +4518,8 @@ assert 'Quit Rift?' in asked and "Quit Phone is connected and loses its tabs." i
 assert "confirm=None" in (asked_run / "kept.txt").read_text()
 quit_run("quit-alone", False)
 
-# (f3) Settings › General opens with the App group (Launch at login on macOS,
-# Allow background processes); on macOS the menu bar icon's Quit Rift Completely quits like
+# (f3) Settings › General opens with the App group (Launch at login on macOS;
+# no background setting: remote access decides); on macOS the menu bar icon's Quit Rift Completely quits like
 # ⌘Q and leaves `remote/stop` for the running gateway; a plain ⌘Q does not
 if sys.platform == "darwin":
     def full_quit_run(name, quit_step):
@@ -4537,12 +4537,12 @@ if sys.platform == "darwin":
         return run
     full = full_quit_run("quit-completely", "menu status:quit_completely")
     general = (full / "settings.txt").read_text()
-    assert "Launch at login" in general and "Allow background processes" in general, general[-3000:]
+    assert "Launch at login" in general and "Allow background processes" not in general, general[-3000:]
     assert (full / "data/rift/remote/stop").exists(), "Quit Rift Completely left the gateway running"
     plain = full_quit_run("quit-plain", "key cmd+q")
     assert not (plain / "data/rift/remote/stop").exists(), "⌘Q stopped the gateway"
 
-# (f4) Allow background processes: a quit keeps Rift running. ⌘Q asks "Keep
+# (f4) Remote access on (macOS): a quit keeps Rift running. ⌘Q asks "Keep
 # running?" (with a Don't-ask-again box: Space ticks it, Keep running stores
 # it in config.toml), the shells stay in the session service, the session file
 # is saved whole and flagged `kept`, the next launch restores the tab and
@@ -4554,7 +4554,7 @@ if sys.platform == "darwin":  # the kept background is macOS only (the menu bar 
     for sub in ("cfg/rift", "data/rift"):
         (kq / sub).mkdir(parents=True, exist_ok=True)
     (kq / "cfg/rift/config.toml").write_text(
-        'background_processes = true\nremote_access = true\ndurable_sessions = true\nrestore_session = false\n'
+        'remote_access = true\ndurable_sessions = true\nrestore_session = false\n'
         'check_for_updates = false\nshell = "/bin/bash"\n')
     kq_env = dict(env, XDG_CONFIG_HOME=str(kq / "cfg"), XDG_DATA_HOME=str(kq / "data"),
                   RIFT_PERSIST_SESSION="1")
@@ -4598,8 +4598,27 @@ if sys.platform == "darwin":  # the kept background is macOS only (the menu bar 
             assert not (kq / "not-quit4.txt").exists(), "Quit Rift Completely did not quit"
             after = (kq / "data/rift/session.toml").read_text()
             assert "kept = true" not in after and "[[tabs]]" not in after, after
+        # remote access off: nothing shows or ends a kept Rift, so ⌘Q is the plain quit
+        off = scratch / "keep-quit-off"
+        for sub in ("cfg/rift", "data/rift"):
+            (off / sub).mkdir(parents=True, exist_ok=True)
+        (off / "cfg/rift/config.toml").write_text(
+            'remote_access = false\ndurable_sessions = true\nrestore_session = false\n'
+            'check_for_updates = false\nshell = "/bin/bash"\n')
+        (off / "q.rift").write_text("\n".join([
+            "wait_prompt", "type sleep 600\\n", "wait 800", "key cmd+q", "wait 600",
+            f"dump {off}/dialog.txt", "key enter", "wait 2500", f"dump {off}/not-quit.txt"]) + "\n")
+        with (off / "q.log").open("w") as log:
+            subprocess.run([str(binary), "--script", str(off / "q.rift"), "--headless"],
+                           env=dict(kq_env, XDG_CONFIG_HOME=str(off / "cfg"),
+                                    XDG_DATA_HOME=str(off / "data")),
+                           stdout=log, stderr=log, timeout=90)
+        plain_q = (off / "dialog.txt").read_text() if (off / "dialog.txt").exists() else ""
+        assert "Keep running" not in plain_q and "terminated" in plain_q, plain_q[-1500:]
+        assert not (off / "not-quit.txt").exists(), "the plain quit did not quit"
+        assert "kept = true" not in (off / "data/rift/session.toml").read_text()
     finally:
-        for pid in session_daemons(kq / "data"):
+        for pid in list(session_daemons(kq / "data")) + list(session_daemons(scratch / "keep-quit-off/data")):
             try:
                 os.kill(pid, signal.SIGTERM)
             except ProcessLookupError:

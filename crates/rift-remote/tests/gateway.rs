@@ -54,7 +54,7 @@ struct State {
     opens: Vec<(u64, String, OpenKind)>,
     /// What `close` was asked: (pane, device name, kind).
     closes: Vec<(u64, String, CloseKind)>,
-    /// `start` allowed (the computer's `background_processes`).
+    /// `start` allowed (the computer's `remote_access` with durable shells).
     can_start: bool,
     /// Devices that started a shell.
     starts: Vec<String>,

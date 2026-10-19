@@ -803,15 +803,6 @@ pub struct Config {
     /// and registers there instead of at `remote_relay`. The tunnel's
     /// address changes on every start, so phones pair again after one.
     pub remote_tunnel: bool,
-    /// Rift may keep running after its last window closes (macOS: with a
-    /// Rift icon in the menu bar, so it shows): paired phones that may run
-    /// commands can open tabs meanwhile: the gateway keeps running and
-    /// starts them in the session service, and Rift shows them as tabs when
-    /// it opens. Needs `remote_access` and `durable_sessions`. Off by
-    /// default. Named `remote_when_closed` before the menu bar icon joined
-    /// it (`menu_bar_icon` is no longer read).
-    #[serde(alias = "remote_when_closed")]
-    pub background_processes: bool,
     pub shell: Option<String>,
     /// The `[[profiles]]` entry (or discovered shell) new tabs and panes
     /// open with; unset: `shell` as before profiles.
@@ -961,7 +952,7 @@ pub struct Config {
     /// Warn before closing a pane, tab or window (or quitting) while a
     /// command is still running in it.
     pub confirm_close_running: bool,
-    /// With `background_processes` on, ⌘Q (or closing the last window) asks
+    /// With `remote_access` on (macOS), ⌘Q (or closing the last window) asks
     /// once whether Rift keeps running in the background ("Keep running"),
     /// with a "Don't ask again" box that turns this off. Off: it keeps
     /// running without asking.
@@ -1116,7 +1107,6 @@ impl Default for Config {
             remote_listen: "0.0.0.0:7878".into(),
             remote_relay: DEFAULT_RELAY.into(),
             remote_tunnel: false,
-            background_processes: false,
             shell: None,
             default_profile: None,
             discover_shells: true,
@@ -1832,16 +1822,15 @@ mod tests {
     }
 
     #[test]
-    fn background_processes_replaces_the_menu_bar_icon_and_phone_tabs_keys() {
-        assert!(!Config::default().background_processes);
-        let on: Config = toml::from_str("background_processes = true\n").unwrap();
-        assert!(on.background_processes);
-        // the key's old name keeps working, and the removed icon key is ignored
-        let old: Config =
-            toml::from_str("remote_when_closed = true\nmenu_bar_icon = true\n").unwrap();
-        assert!(old.background_processes);
-        let icon_only: Config = toml::from_str("menu_bar_icon = true\n").unwrap();
-        assert!(!icon_only.background_processes);
+    fn the_removed_background_keys_load_and_change_nothing() {
+        // background_processes (and its older names) no longer exist: remote
+        // access is what keeps Rift running after a quit
+        let old: Config = toml::from_str(
+            "background_processes = true\nremote_when_closed = true\nmenu_bar_icon = true\n",
+        )
+        .unwrap();
+        assert!(!old.remote_access);
+        assert_eq!(old.durable_sessions, Config::default().durable_sessions);
     }
 
     #[test]

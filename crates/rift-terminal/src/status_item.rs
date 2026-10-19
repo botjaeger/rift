@@ -1,4 +1,4 @@
-//! The menu bar icon (`background_processes`, macOS). The app shows it while it
+//! The menu bar icon (`remote_access`, macOS). The app shows it while it
 //! runs; once no window is left, the phone gateway (`remote --managed`, a
 //! background helper) shows it for as long as it runs, so Rift can still be
 //! opened, or quit entirely, after its window quit. Its menu is a muda menu:
