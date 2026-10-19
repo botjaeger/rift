@@ -8,6 +8,28 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.17.0 — 2026-10-19
+
+Opening, quitting and restarting Rift is steadier: no more empty Dock icons or "quit unexpectedly" pop-ups, and quitting can leave your shells running.
+
+### New
+
+- **Keep Rift running when you quit** — with *Allow background processes* and *Remote access* on (macOS),
+  the first ⌘Q asks *Keep running?* with a *Don't ask again* box. Your shells keep going, the menu bar
+  icon stays, and opening Rift again brings back the same tabs. *Quit Rift Completely* in the menu bar
+  icon ends everything.
+- **Tabs come back after a crash** — if Rift did not quit normally, the next launch restores your tabs
+  and says so.
+- **Phones are told why Rift closed** — a quit shows "Rift quit on this computer"; an update shows
+  "Updating Rift, back in about a minute" instead of an error.
+
+### Fixed
+
+- **Empty Dock icon** — opening Rift after quitting it always shows a window; Rift's background helpers
+  are now a separate app (*Rift Helper*), so a launch can no longer reach one with no window.
+- **"rift-terminal quit unexpectedly"** — the pop-ups that appeared the first time Rift started after an
+  update no longer happen.
+
 ## 0.16.0 — 2026-10-19
 
 Rift's helpers can keep running after you quit, with a menu bar icon to show it, and two bugs fixed.

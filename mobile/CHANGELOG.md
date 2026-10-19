@@ -6,6 +6,23 @@ build (`## <version> — <YYYY-MM-DD>`) or an over-the-air update to one
 message its download carries. Items use `### New`, `### Improved` or
 `### Fixed` sections of `- **Title** — text`.
 
+## 0.3.0 · update 5 — 2026-10-19
+
+Reconnecting stops after 5 tries, panes have a Cancel button, and you can swipe a computer to unpair it.
+
+### New
+
+- **Swipe to unpair** — swipe a computer left on Portals to unpair it.
+- **Cancel** — a pane that is reconnecting has a Cancel button that stops trying and goes back to Portals.
+- **Rift quit / Updating Rift** — when the computer quits Rift the app says so and waits for you; when
+  Rift is updating it says "back in about a minute" and reconnects by itself.
+
+### Improved
+
+- **Reconnecting** — the app tries 5 times, then stops and waits for Try again (coming back to the app
+  or the network also tries again).
+- **Swiping across results** — side-scrolling a result no longer switches panes; pick a pane from the list.
+
 ## 0.3.0 · update 4 — 2026-10-19
 
 Settings and paired computers no longer get overwritten, and a failed save or Unpair tells you and lets you retry.
