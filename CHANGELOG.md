@@ -8,6 +8,34 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.19.0 — 2026-10-19
+
+config.toml is now the one place your settings live: change something in Settings and it shows in the
+file at once, edit the file and Settings follows.
+
+### New
+
+- **Your shells as profiles** — the shells installed on your computer are added to config.toml as
+  profiles, and new ones are added when you install them. Hide one to keep it out of the new-tab menu;
+  delete one and it stays deleted. A shell you uninstall stays in the file but leaves the menu. On a
+  first start, new tabs open your login shell.
+- **Settings › Profiles** — add, edit, duplicate, hide, delete and reorder profiles, and pick the
+  default one, without opening the file.
+- **Edit config.toml beside Settings** — type in the file pane next to Settings. Mistakes are marked as
+  you type (unknown settings, with a suggestion for a misspelt one, wrong values, broken lines), and
+  Save turns on only when the file is valid; ⌘S saves, Dismiss puts the file back. If the file changes
+  while you are editing, you choose to reload it or keep your edits, and Rift asks before closing or
+  quitting with unsaved changes.
+
+### Improved
+
+- **Every setting in Settings** — about forty settings that were only in config.toml now have a row in
+  Settings, among them *Keep shells running through updates*, *Ask before keeping Rift running*, the
+  shell path, font weights, window size and padding, paste trimming and word characters.
+- **Your comments stay** — saving from Settings keeps comments inside profiles and other lists, and
+  whole numbers you wrote stay whole numbers. Before Rift first rewrites a file you wrote, it keeps a
+  copy as `config.toml.bak`.
+
 ## 0.18.0 — 2026-10-19
 
 Keeping Rift running after you quit now follows Remote access, so there is one switch instead of three.
