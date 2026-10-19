@@ -48,12 +48,14 @@ mod md_run;
 mod pane_life;
 mod pane_theme;
 mod profiles;
+mod profiles_page;
 mod progress;
 mod rail;
 mod results;
 mod review_git;
 mod scroll_bar;
 mod secrets;
+mod settings_text;
 mod shell_widgets;
 mod sticky;
 mod strip;
@@ -1652,6 +1654,15 @@ enum ConfirmAction {
         id: String,
         name: String,
     },
+    /// Delete profile `index` (Settings › Profiles), while it is still
+    /// `name`. `detected`: generated from the installed shells (it never
+    /// comes back); `default`: it is `default_profile`.
+    DeleteProfile {
+        index: usize,
+        name: String,
+        detected: bool,
+        default: bool,
+    },
     /// Restart a pane while a job runs in it (`restart_pane`).
     Restart(PaneId),
     /// Close a pinned tab (⌘W, its ×, its menu): asked first; the close
@@ -1673,6 +1684,56 @@ enum ConfirmAction {
         pane: PaneId,
         command: String,
     },
+    /// The config.toml pane has unsaved edits: Save (disabled while they
+    /// have errors), Discard or Cancel, then `ConfigLeave` goes on.
+    ConfigUnsaved(ConfigLeave),
+}
+
+/// What waits on the config.toml pane's "Save changes?" question.
+#[derive(Debug, Clone, PartialEq)]
+enum ConfigLeave {
+    /// Its ✕, Esc, ⌘W.
+    Pane,
+    /// The Settings tab closing (its ×, Esc, ⌘W).
+    SettingsTab,
+    /// A window close or quit (`request_close`).
+    Close(CloseScope),
+    /// Another file opening in the viewer (at a 1-based line).
+    Open(std::path::PathBuf, Option<u32>),
+    /// Update and restart (the update dialog's Update).
+    Update(Box<UpdatePlan>),
+}
+
+/// A profile's delete confirmation: title, description and note. A
+/// detected one never comes back (the seen list), and Hide keeps it.
+fn delete_profile_text(
+    name: &str,
+    detected: bool,
+    default: bool,
+) -> (String, String, &'static str) {
+    let mut description = if detected {
+        "Rift found this shell installed and won't add it again.".to_string()
+    } else {
+        "It is removed from config.toml.".to_string()
+    };
+    if default {
+        description.push_str(" New tabs then run the Shell path.");
+    }
+    let note = if detected {
+        "Hide keeps it in the file instead."
+    } else {
+        "Hide keeps it in the file but out of the + menu."
+    };
+    (format!("Delete {name}?"), description, note)
+}
+
+/// Why Save is disabled: "Fix 2 errors to save" (empty without errors).
+fn config_errors_note(errors: usize) -> String {
+    match errors {
+        0 => String::new(),
+        1 => "Fix 1 error to save".into(),
+        n => format!("Fix {n} errors to save"),
+    }
 }
 
 /// Lines of a large paste the confirmation shows.
@@ -2329,7 +2390,10 @@ impl App {
         }
         // a theme picker's preview is not saved: its original is
         match self.config_to_save().save() {
-            Ok(()) => self.win.settings.saved_at = Some(Instant::now()),
+            Ok(()) => {
+                self.win.settings.saved_at = Some(Instant::now());
+                self.refresh_config_panes();
+            }
             Err(e) => {
                 log::warn!("config save failed: {e}");
                 self.toast_error(format!("Could not save settings: {e}"));
@@ -2364,13 +2428,39 @@ impl App {
             .ok();
     }
 
+    /// The installed-shells list config.toml's generated profiles follow:
+    /// `/etc/shells`; in a scripted run only `RIFT_SHELLS_FILE` (a fixture),
+    /// else none, so a test never depends on the machine's shells.
+    fn shells_file(&self) -> Option<std::path::PathBuf> {
+        if self.script.is_some() {
+            std::env::var_os("RIFT_SHELLS_FILE").map(std::path::PathBuf::from)
+        } else {
+            Some(rift_core::profiles::SHELLS_FILE.into())
+        }
+    }
+
     /// Read config.toml. A file that cannot be read or parsed keeps the
     /// current config (at startup: defaults with automation off) and says
     /// why, instead of silently resetting every setting.
     fn load_config(&mut self, startup: bool) {
+        // installed shells not offered before become [[profiles]] entries
+        // (at startup, and once a file that did not load is fixed)
+        let shells_file = self.shells_file();
+        if (startup || self.config_error.is_some())
+            && let Some(file) = &shells_file
+            && let Err(e) = rift_core::generated::sync_default(file)
+        {
+            log::warn!("installed shells not added to config.toml: {e}");
+        }
         match Config::try_load() {
             Ok(c) => {
+                let before = std::mem::take(&mut self.config.profiles);
                 self.config = c.unwrap_or_default();
+                if let Some(file) = &shells_file {
+                    rift_core::generated::mark_orphans_default(&mut self.config.profiles, file);
+                }
+                // open Settings › Profiles forms follow their profile
+                self.follow_profiles(&before, true);
                 self.rebase_theme_preview();
                 self.config_error = None;
                 // fixed: its "not applied" / "not saved" errors are moot
@@ -4214,9 +4304,18 @@ impl App {
                     | ClickTarget::SettingsSlider(_)
                     | ClickTarget::SettingsTheme(_)
                     | ClickTarget::SettingsKeybind(_)
-                    | ClickTarget::SettingsKeybindReset(_),
+                    | ClickTarget::SettingsKeybindReset(_)
+                    | ClickTarget::Profile(..)
+                    | ClickTarget::ProfileAdd,
                 ) => Some(CursorIcon::Pointer),
-                Some(ClickTarget::RemoteRelay) => Some(CursorIcon::Text),
+                // a profile row moves under the hand that holds it
+                Some(ClickTarget::ProfileRow(_)) if self.win.settings.profile_drag.is_some() => {
+                    Some(CursorIcon::Grabbing)
+                }
+                Some(ClickTarget::ProfileRow(_)) => Some(CursorIcon::Grab),
+                Some(ClickTarget::RemoteRelay | ClickTarget::SettingsText(_)) => {
+                    Some(CursorIcon::Text)
+                }
                 _ => None,
             }
         };
@@ -4396,8 +4495,9 @@ impl App {
         };
         if text.is_empty() {
             // only a program reading bracketed pastes sees an empty one
-            let relay_edit =
-                self.win.settings.open && self.win.settings.remote.relay_edit.is_some();
+            let relay_edit = self.win.settings.open
+                && (self.win.settings.remote.relay_edit.is_some()
+                    || self.win.settings.text_edit.is_some());
             // (the composer's program too: Claude Code and Codex read an
             // image on the clipboard when an empty paste arrives)
             if !relay_edit
@@ -4420,6 +4520,10 @@ impl App {
             if let Some(w) = &self.win.window {
                 w.request_redraw();
             }
+            return;
+        }
+        // a Settings text field while it is edited
+        if self.paste_into_text_edit(text) {
             return;
         }
         // the relay field while it is edited (one line, no controls)
@@ -5494,7 +5598,64 @@ impl App {
     fn select_options(&self, id: &str) -> (Vec<(String, String)>, String) {
         use rift_core::notifications::{available_sounds, sound_dirs};
         let n = &self.config.notifications;
+        let open = self.form_profile();
         match id {
+            // "": none (the Shell path)
+            "default_profile" => {
+                let none = crate::views::settings::NO_DEFAULT_PROFILE.to_string();
+                let options = std::iter::once((String::new(), none))
+                    .chain(
+                        self.config
+                            .profiles
+                            .iter()
+                            .map(|p| (p.name.trim().to_string(), p.name.clone())),
+                    )
+                    .collect();
+                let current = self.config.default_profile.as_deref().unwrap_or("");
+                (options, current.trim().to_string())
+            }
+            "profile.color" => {
+                use crate::views::settings::profile_color_label;
+                let mut options: Vec<(String, String)> = std::iter::once("")
+                    .chain(rift_core::profiles::TAB_COLOR_NAMES)
+                    .map(|c| (c.to_string(), profile_color_label(Some(c))))
+                    .collect();
+                let current = open
+                    .and_then(|p| p.color.as_deref())
+                    .unwrap_or("")
+                    .trim()
+                    .to_ascii_lowercase();
+                // a #rrggbb from config.toml stays listed
+                if !options.iter().any(|(v, _)| *v == current) {
+                    options.push((current.clone(), current.clone()));
+                }
+                (options, current)
+            }
+            "profile.icon" => {
+                use crate::views::settings::profile_icon_label;
+                let mut options: Vec<(String, String)> = std::iter::once("")
+                    .chain(crate::views::glyphs::NAMES)
+                    .map(|i| (i.to_string(), profile_icon_label(Some(i))))
+                    .collect();
+                let current = open
+                    .and_then(|p| p.icon.as_deref())
+                    .unwrap_or("")
+                    .trim()
+                    .to_ascii_lowercase();
+                if !options.iter().any(|(v, _)| *v == current) {
+                    options.push((current.clone(), profile_icon_label(Some(&current))));
+                }
+                (options, current)
+            }
+            "profile.theme" => {
+                let names = rift_core::theme::available_themes();
+                let labels = rift_core::theme::picker_labels(&names);
+                let options = std::iter::once((String::new(), "Window theme".to_string()))
+                    .chain(names.into_iter().zip(labels))
+                    .collect();
+                let current = open.and_then(|p| p.theme.clone()).unwrap_or_default();
+                (options, current)
+            }
             "theme" | "theme_light" => {
                 let current = if id == "theme" {
                     &self.config.theme
@@ -5588,8 +5749,27 @@ impl App {
 
     /// Set select `id` to `value`; a sound plays so it can be heard.
     fn set_select(&mut self, id: &str, value: String) {
+        // a profile's: checked and saved (or refused) by `edit_profile`
+        if let Some(field) = id.strip_prefix("profile.")
+            && let Some(i) = self.win.settings.profile_open
+        {
+            let v = (!value.is_empty()).then_some(value);
+            let edited = self.edit_profile(i, |p| match field {
+                "color" => p.color = v,
+                "icon" => p.icon = v,
+                "theme" => p.theme = v,
+                _ => {}
+            });
+            if let Err(e) = edited {
+                self.win.settings.profile_error = Some(e);
+            }
+            return;
+        }
         let n = &mut self.config.notifications;
         match id {
+            "default_profile" => {
+                self.config.default_profile = (!value.is_empty()).then_some(value);
+            }
             "theme" => self.config.theme = value,
             "theme_light" => self.config.theme_light = value,
             "font_family" => self.config.font_family = value,
@@ -6131,6 +6311,15 @@ impl App {
     /// Settings › Open config.toml: the file beside the Settings page, in
     /// the Settings tab (no terminal tab's split changes).
     fn open_config_viewer(&mut self, path: &std::path::Path) {
+        // already open: focus it (reloading would drop unsaved edits); a
+        // read-only one loads again (the file may be text by now)
+        if self.win.config_viewer
+            && self.win.viewer.path.as_deref() == Some(path)
+            && self.win.viewer.read_only.is_none()
+        {
+            self.win.viewer_focus = true;
+            return;
+        }
         for tab in &mut self.win.tabs {
             if tab.root.contains(VIEWER_PANE) {
                 tab.root.remove(VIEWER_PANE);
@@ -6144,7 +6333,175 @@ impl App {
         });
     }
 
+    /// The config.toml pane holds unsaved edits: ask "Save changes?"
+    /// before `leave` (true: asked, the caller stops). Its window's
+    /// Settings tab comes forward so the pane shows under the question.
+    fn config_leave_asks(&mut self, leave: ConfigLeave) -> bool {
+        if !(self.win.config_viewer && self.win.viewer.dirty()) {
+            return false;
+        }
+        self.win.settings.open = true;
+        // a lint pending from the last keystroke decides whether Save is open
+        if let Some(e) = self.win.viewer.edit.as_mut()
+            && e.lint_due.is_some()
+        {
+            e.lint();
+        }
+        let shut = self
+            .win
+            .viewer
+            .edit
+            .as_ref()
+            .is_some_and(|e| e.errors() > 0);
+        self.win.confirm = Some(ConfirmClose {
+            opened: Instant::now(),
+            // the keyboard starts on Cancel while Save is shut
+            focus_cancel: shut,
+            action: ConfirmAction::ConfigUnsaved(leave),
+            commands: Vec::new(),
+        });
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+        true
+    }
+
+    /// ✕, Esc, ⌘W on the viewer pane (asks first over unsaved config edits).
+    fn close_viewer_pane(&mut self) {
+        if !self.config_leave_asks(ConfigLeave::Pane) {
+            self.win.viewer.close();
+        }
+    }
+
+    /// Close the Settings tab (asks first over unsaved config edits beside it).
+    fn close_settings_tab(&mut self) {
+        if !self.config_leave_asks(ConfigLeave::SettingsTab) {
+            self.win.settings.close_tab();
+        }
+    }
+
+    /// The config.toml pane's Save (and ⌘S): lint a pending edit first,
+    /// then write the text as typed. Refused while it has errors. The file
+    /// watcher's reload then applies it. True when written.
+    fn save_config_pane(&mut self) -> bool {
+        let Some(path) = self
+            .win
+            .viewer
+            .path
+            .clone()
+            .filter(|_| self.win.config_viewer)
+        else {
+            return false;
+        };
+        let Some(edit) = self.win.viewer.edit.as_mut() else {
+            return false;
+        };
+        if edit.lint_due.is_some() {
+            edit.lint();
+        }
+        if !edit.can_save() {
+            return false;
+        }
+        match Config::save_text(&path, &edit.buffer.buffer) {
+            Ok(()) => {
+                edit.saved(Instant::now());
+                // applied now, not when the watcher sees it (a second late
+                // for a symlinked file): a Settings change meanwhile would
+                // write the old values back over the saved text
+                self.reload_config();
+                true
+            }
+            Err(e) => {
+                self.toast_error(format!("config.toml not saved: {e}"));
+                false
+            }
+        }
+    }
+
+    /// config.toml (or a theme file) changed: read it again and apply it.
+    fn reload_config(&mut self) {
+        // Theme files can change without any change to config.toml.
+        let shells = (self.config.shell_completions, self.config.shell.clone());
+        self.load_config(false);
+        // shell completions turned off, or another shell: the warm
+        // completion shells are not needed any more
+        if shells != (self.config.shell_completions, self.config.shell.clone()) {
+            std::thread::spawn(rift_core::shell_complete::stop_all);
+        }
+        self.apply_config();
+        self.import_shell_history();
+        self.refresh_config_panes();
+    }
+
+    /// config.toml changed on disk (Settings saved it, a reload saw it): each
+    /// window's config pane follows it while clean, or flags the conflict.
+    fn refresh_config_panes(&mut self) {
+        self.each_window(|app| {
+            // a read-only pane (the file was not UTF-8 text): read it again
+            if app.win.config_viewer
+                && app.win.viewer.read_only.is_some()
+                && let Some(path) = app.win.viewer.path.clone()
+            {
+                let focus = app.win.viewer_focus;
+                app.open_config_viewer(&path);
+                app.win.viewer_focus = focus;
+                return;
+            }
+            if !app.win.config_viewer || app.win.viewer.edit.is_none() {
+                return;
+            }
+            let Some(path) = app.win.viewer.path.clone() else {
+                return;
+            };
+            let text = match std::fs::read_to_string(&path) {
+                Ok(t) => t,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+                Err(e) => {
+                    log::warn!("config pane: {}: {e}", path.display());
+                    return;
+                }
+            };
+            if app.win.viewer.disk_changed(text)
+                && let Some(w) = &app.win.window
+            {
+                w.request_redraw();
+            }
+        });
+    }
+
+    /// The generated-profiles list config lint reads (Rift's own shell stubs).
+    fn generated_seen() -> Option<std::collections::BTreeSet<String>> {
+        let data = rift_core::shell_integration::data_dir()?;
+        rift_core::generated::load_seen(&data.join(rift_core::generated::SEEN_FILE)).ok()
+    }
+
+    /// Save, Discard or Cancel answered "Save changes to config.toml?".
+    fn answer_config_unsaved(
+        &mut self,
+        save: bool,
+        leave: ConfigLeave,
+        event_loop: &ActiveEventLoop,
+    ) {
+        if save {
+            if !self.save_config_pane() {
+                return;
+            }
+        } else {
+            self.win.viewer.revert();
+        }
+        match leave {
+            ConfigLeave::Pane => self.win.viewer.close(),
+            ConfigLeave::SettingsTab => self.win.settings.close_tab(),
+            ConfigLeave::Close(scope) => self.request_close(scope, event_loop),
+            ConfigLeave::Open(path, line) => self.open_viewer_at(&path, line),
+            ConfigLeave::Update(plan) => self.confirm_update(*plan),
+        }
+    }
+
     fn open_viewer(&mut self, path: &std::path::Path) {
+        if self.config_leave_asks(ConfigLeave::Open(path.to_path_buf(), None)) {
+            return;
+        }
         self.win.config_viewer = false;
         for (i, tab) in self.win.tabs.iter_mut().enumerate() {
             if i != self.win.active && tab.root.contains(VIEWER_PANE) {
@@ -6173,6 +6530,9 @@ impl App {
 
     /// The viewer on `path`, scrolled to `line` (1-based) once it loads.
     fn open_viewer_at(&mut self, path: &std::path::Path, line: Option<u32>) {
+        if self.config_leave_asks(ConfigLeave::Open(path.to_path_buf(), line)) {
+            return;
+        }
         self.open_viewer(path);
         self.win.viewer.reveal_line = line.map(|l| l.saturating_sub(1) as usize);
     }
@@ -8643,7 +9003,19 @@ impl App {
             {
                 self.win.viewer_focus = true;
                 match hit {
-                    ViewerHit::Close => self.win.viewer.close(),
+                    ViewerHit::Close => self.close_viewer_pane(),
+                    ViewerHit::Save => {
+                        self.save_config_pane();
+                    }
+                    ViewerHit::Dismiss | ViewerHit::Reload => self.win.viewer.revert(),
+                    ViewerHit::KeepMine => {
+                        if let Some(e) = self.win.viewer.edit.as_mut() {
+                            e.conflict = false;
+                        }
+                    }
+                    ViewerHit::Status => self.win.viewer.jump_next_problem(),
+                    // a gutter dot: the caret to its line
+                    ViewerHit::Lint(line) => self.win.viewer.caret_to_line(line),
                     ViewerHit::Mode(rendered) => self.win.viewer.set_rendered(rendered),
                     ViewerHit::Menu => {
                         // drops down from the ⋮ button
@@ -8661,6 +9033,14 @@ impl App {
             }
             if inside(&self.win.viewer_rect) {
                 self.win.viewer_focus = true;
+                // config.toml: the caret where it was pressed (⇧ extends;
+                // a drag selects)
+                let (mx, my) = self.win.mouse;
+                if self.win.viewer.edit.is_some() {
+                    let extend = self.win.modifiers.shift_key();
+                    self.win.viewer.edit_press(mx, my, extend);
+                    return true;
+                }
                 // a source line: select it (⇧ extends)
                 if let Some(line) = self.win.viewer.line_at(self.win.mouse.1) {
                     let extend = self.win.modifiers.shift_key();
@@ -9080,6 +9460,9 @@ impl App {
         // ... and it leaves the shells running: the question is "Keep running?"
         let keeps = quits && self.keeps_background();
         let dont_ask = self.win.confirm_dont_ask;
+        // "Save changes to config.toml?": the errors that disable Save
+        let config_errors = self.win.viewer.edit.as_ref().map_or(0, |e| e.errors());
+        let config_note = config_errors_note(config_errors);
         let filter_editing = self.win.filter_editing;
         let shell_env = self.shell_env.clone();
         let error_underline = self.config.error_underline;
@@ -10528,6 +10911,13 @@ impl App {
         {
             use crate::views::confirm::{ToastView, toasts};
             let shown_panes = &toast_panes;
+            // the viewer at the window's right edge: its status bar stays clear
+            let vr = self.win.viewer_rect;
+            let toast_lift = if vr[2] > 0.0 && vr[0] + vr[2] >= w - 1.0 {
+                self.win.viewer.status_bar_h()
+            } else {
+                0.0
+            };
             let mut groups: Vec<(Option<PaneId>, Vec<&Toast>)> = Vec::new();
             for t in &self.win.toasts {
                 // its pane out of view (or none): the pane you are in; the
@@ -10550,7 +10940,8 @@ impl App {
                             (r[0] + r[2] - 14.0, g + 47.0, r[2] - 124.0)
                         }
                         Some((_, r, _)) => (r[0] + r[2] - 14.0, r[1] + r[3] - 12.0, r[2] - 28.0),
-                        None => (w - 16.0, h - 16.0, (w - 32.0).min(560.0)),
+                        // (above the config.toml pane's status bar)
+                        None => (w - 16.0, h - 16.0 - toast_lift, (w - 32.0).min(560.0)),
                     };
                 // one line: a multi-line message (a parse error) runs on
                 let lines: Vec<String> = list
@@ -10615,6 +11006,8 @@ impl App {
                     destructive: false,
                     processes: true,
                     focus_cancel: *focus_cancel,
+                    extra_label: None,
+                    confirm_disabled: false,
                 },
                 ConfirmAction::Close(scope) => {
                     let quit = quits;
@@ -10644,6 +11037,8 @@ impl App {
                         destructive: true,
                         processes: true,
                         focus_cancel: *focus_cancel,
+                        extra_label: None,
+                        confirm_disabled: false,
                     }
                 }
                 ConfirmAction::Paste { .. } => {
@@ -10662,6 +11057,8 @@ impl App {
                         destructive: false,
                         processes: false,
                         focus_cancel: *focus_cancel,
+                        extra_label: None,
+                        confirm_disabled: false,
                     }
                 }
                 ConfirmAction::LargePaste { text, .. } => Dialog {
@@ -10675,6 +11072,8 @@ impl App {
                     destructive: false,
                     processes: false,
                     focus_cancel: *focus_cancel,
+                    extra_label: None,
+                    confirm_disabled: false,
                 },
                 ConfirmAction::LaunchLink { .. } => Dialog {
                     title: "Open this layout from a link?",
@@ -10687,6 +11086,8 @@ impl App {
                     destructive: false,
                     processes: false,
                     focus_cancel: *focus_cancel,
+                    extra_label: None,
+                    confirm_disabled: false,
                 },
                 ConfirmAction::InstallRemote(p) => Dialog {
                     title: "Install shell integration?",
@@ -10699,6 +11100,8 @@ impl App {
                     destructive: false,
                     processes: false,
                     focus_cancel: *focus_cancel,
+                    extra_label: None,
+                    confirm_disabled: false,
                 },
                 ConfirmAction::Revert { hunk, .. } => Dialog {
                     title: if hunk.is_some() {
@@ -10715,6 +11118,8 @@ impl App {
                     destructive: true,
                     processes: false,
                     focus_cancel: *focus_cancel,
+                    extra_label: None,
+                    confirm_disabled: false,
                 },
                 ConfirmAction::RevokeDevice { name, .. } => {
                     update_title = format!("Revoke {name}?");
@@ -10730,6 +11135,8 @@ impl App {
                         destructive: true,
                         processes: false,
                         focus_cancel: *focus_cancel,
+                        extra_label: None,
+                        confirm_disabled: false,
                     }
                 }
                 ConfirmAction::Restart(_) => Dialog {
@@ -10743,6 +11150,8 @@ impl App {
                     destructive: true,
                     processes: true,
                     focus_cancel: *focus_cancel,
+                    extra_label: None,
+                    confirm_disabled: false,
                 },
                 ConfirmAction::ClosePinned(_) => Dialog {
                     title: "Close pinned tab?",
@@ -10755,6 +11164,8 @@ impl App {
                     destructive: true,
                     processes: false,
                     focus_cancel: *focus_cancel,
+                    extra_label: None,
+                    confirm_disabled: false,
                 },
                 ConfirmAction::RunCode { .. } => Dialog {
                     title: "Run this code block?",
@@ -10767,6 +11178,8 @@ impl App {
                     destructive: false,
                     processes: false,
                     focus_cancel: *focus_cancel,
+                    extra_label: None,
+                    confirm_disabled: false,
                 },
                 ConfirmAction::Overwrite { .. } => Dialog {
                     title: "Replace the file?",
@@ -10779,7 +11192,32 @@ impl App {
                     destructive: true,
                     processes: false,
                     focus_cancel: *focus_cancel,
+                    extra_label: None,
+                    confirm_disabled: false,
                 },
+                ConfirmAction::DeleteProfile {
+                    name,
+                    detected,
+                    default,
+                    ..
+                } => {
+                    let (title, description, note) = delete_profile_text(name, *detected, *default);
+                    update_title = title;
+                    Dialog {
+                        title: &update_title,
+                        description,
+                        note,
+                        lines: commands,
+                        empty_line: "",
+                        confirm_label: "Delete",
+                        cancel_label: "Cancel",
+                        destructive: true,
+                        processes: false,
+                        focus_cancel: *focus_cancel,
+                        extra_label: None,
+                        confirm_disabled: false,
+                    }
+                }
                 ConfirmAction::AllowOperate { name, .. } => {
                     update_title = format!("Let {name} run commands?");
                     Dialog {
@@ -10793,8 +11231,28 @@ impl App {
                         destructive: false,
                         processes: false,
                         focus_cancel: *focus_cancel,
+                        extra_label: None,
+                        confirm_disabled: false,
                     }
                 }
+                ConfirmAction::ConfigUnsaved(_) => Dialog {
+                    title: "Save changes to config.toml?",
+                    description: "Your edits in the config.toml pane are not saved.".into(),
+                    note: if config_errors > 0 {
+                        &config_note
+                    } else {
+                        "Discard drops them; Cancel keeps editing."
+                    },
+                    lines: commands,
+                    empty_line: "",
+                    confirm_label: "Save",
+                    cancel_label: "Cancel",
+                    destructive: false,
+                    processes: false,
+                    focus_cancel: *focus_cancel,
+                    extra_label: Some("Discard"),
+                    confirm_disabled: config_errors > 0,
+                },
                 ConfirmAction::Update(plan) => {
                     update_title = format!("Update to Rift v{}?", plan.manifest.version);
                     Dialog {
@@ -10812,6 +11270,8 @@ impl App {
                         destructive: false,
                         processes: false,
                         focus_cancel: *focus_cancel,
+                        extra_label: None,
+                        confirm_disabled: false,
                     }
                 }
             };
@@ -11083,12 +11543,44 @@ impl App {
             tips.push(Tip::new(self.win.prompt_editor_layout.card, "", None));
             return tips;
         }
+        let edit = self.win.viewer.edit.as_ref();
         for (rect, hit) in &self.win.viewer_hits {
+            let save_keys = Some(
+                if cfg!(target_os = "macos") {
+                    "⌘S"
+                } else {
+                    "Ctrl+S"
+                }
+                .into(),
+            );
             let (text, keys) = match hit {
-                ViewerHit::Close => ("Close file", self.tip_keys("close_pane")),
-                ViewerHit::Menu => ("More actions", None),
-                ViewerHit::RunCode(_) => ("Run in the terminal pane (asks first)", None),
-                _ => ("", None),
+                ViewerHit::Close => ("Close file".into(), self.tip_keys("close_pane")),
+                ViewerHit::Menu => ("More actions".into(), None),
+                ViewerHit::RunCode(_) => ("Run in the terminal pane (asks first)".into(), None),
+                ViewerHit::Save => match edit.map_or(0, |e| e.errors()) {
+                    0 => ("Save config.toml".into(), save_keys),
+                    n => (config_errors_note(n), None),
+                },
+                ViewerHit::Dismiss => ("Drop your edits: the file as saved".into(), None),
+                ViewerHit::Reload => ("Load the file's new text over your edits".into(), None),
+                ViewerHit::KeepMine => ("Keep your edits; Save overwrites the file".into(), None),
+                ViewerHit::Status => ("Go to the next problem".into(), None),
+                // a card: the problems on that line, wrapped
+                ViewerHit::Lint(line) => {
+                    let messages: Vec<&str> = edit
+                        .iter()
+                        .flat_map(|e| &e.diagnostics)
+                        .filter(|d| d.line == *line)
+                        .map(|d| d.message.as_str())
+                        .collect();
+                    tips.push(Tip::card(
+                        *rect,
+                        format!("Line {}", line + 1),
+                        messages.join("\n"),
+                    ));
+                    continue;
+                }
+                _ => (String::new(), None),
             };
             tips.push(Tip::new(*rect, text, keys));
         }
@@ -11566,7 +12058,7 @@ impl App {
             AppAction::ClosePane => {
                 // ⌘W on the viewer pane closes the viewer
                 if self.viewer_focused() {
-                    self.win.viewer.close();
+                    self.close_viewer_pane();
                 } else if let Some(tab) = self.win.tabs.get(self.win.active) {
                     self.request_close(CloseScope::Pane(tab.active_pane), event_loop);
                 }
@@ -12220,6 +12712,23 @@ impl App {
         if self.relay_edit_key(event) {
             return true;
         }
+        // so does a text field
+        if self.text_edit_key(event) {
+            return true;
+        }
+        // ⌥↑ / ⌥↓ move a focused profile row
+        {
+            let m = self.win.modifiers;
+            if m.alt_key()
+                && !m.super_key()
+                && !m.control_key()
+                && let Key::Named(k @ (NamedKey::ArrowUp | NamedKey::ArrowDown)) =
+                    &event.logical_key
+                && self.move_focused_profile(*k == NamedKey::ArrowUp)
+            {
+                return true;
+            }
+        }
         let recording = self.win.settings.recording.is_some();
         if !recording && self.handle_settings_focus_key(event, event_loop, window) {
             return true;
@@ -12234,7 +12743,7 @@ impl App {
         // Esc clears the search first, then closes the Settings tab
         if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
             if self.win.settings.query.is_empty() {
-                self.win.settings.close_tab();
+                self.close_settings_tab();
             } else {
                 self.win.settings.query.clear();
                 self.win.settings.scroll = 0.0;
@@ -12249,7 +12758,7 @@ impl App {
             }
             // ⌘W in the Settings tab closes it
             Some(AppAction::ClosePane) => {
-                self.win.settings.close_tab();
+                self.close_settings_tab();
                 return true;
             }
             // the terminal's scroll keys (plain Home / End / PageUp /
@@ -13072,6 +13581,23 @@ impl App {
     /// something is still running, and before a quit while a phone is
     /// connected.
     fn request_close(&mut self, scope: CloseScope, event_loop: &ActiveEventLoop) {
+        // unsaved config.toml edits first: in this window, or (a quit) any
+        if matches!(scope, CloseScope::Window | CloseScope::App) {
+            if scope == CloseScope::App {
+                self.enter_where(|w| w.config_viewer && w.viewer.dirty());
+            }
+            if self.config_leave_asks(ConfigLeave::Close(scope)) {
+                // the question shows in the window holding the edits (a
+                // hidden drop-down window slides in to ask it)
+                self.reveal_hotkey_window();
+                if !self.headless
+                    && let Some(w) = &self.win.window
+                {
+                    w.focus_window();
+                }
+                return;
+            }
+        }
         if self.closes_pinned_tab(scope) {
             self.win.confirm = Some(ConfirmClose {
                 opened: Instant::now(),
@@ -13251,13 +13777,30 @@ impl App {
     /// swallowed while the modal is up.
     fn handle_confirm_key(&mut self, event: &input::KeyPress, event_loop: &ActiveEventLoop) {
         use winit::keyboard::{Key, NamedKey};
+        let config_errors = self.win.viewer.edit.as_ref().map_or(0, |e| e.errors());
         let Some(c) = self.win.confirm.as_mut() else {
             return;
         };
+        let unsaved = matches!(c.action, ConfirmAction::ConfigUnsaved(_));
+        // ⌘ (Super), and Ctrl too off macOS
+        let primary = self.win.modifiers.super_key()
+            || (self.win.modifiers.control_key() && !cfg!(target_os = "macos"));
         match event.logical_key {
             Key::Named(NamedKey::Escape) => self.cancel_confirm(),
+            // "Save changes?": ⌘⌫ discards (macOS's Don't Save)
+            Key::Named(NamedKey::Backspace) if unsaved && primary && !event.repeat => {
+                if let Some(ConfirmClose {
+                    action: ConfirmAction::ConfigUnsaved(leave),
+                    ..
+                }) = self.win.confirm.take()
+                {
+                    self.answer_config_unsaved(false, leave, event_loop);
+                }
+            }
+            // Save stays shut while the text has errors
+            Key::Named(NamedKey::Enter) if unsaved && !c.focus_cancel && config_errors > 0 => {}
             // the "Don't ask again" box, when the dialog has one
-            Key::Named(NamedKey::Space) if self.win.confirm_rects[2][2] > 0.0 => {
+            Key::Named(NamedKey::Space) if !unsaved && self.win.confirm_rects[2][2] > 0.0 => {
                 if !event.repeat {
                     self.win.confirm_dont_ask = !self.win.confirm_dont_ask;
                 }
@@ -13282,6 +13825,62 @@ impl App {
         }
     }
 
+    /// A key in the config.toml pane while it edits (`ViewerState::edit_key`):
+    /// typing, moves and selection there; ⌘S saves, ⌘C / ⌘X / ⌘V use the
+    /// clipboard (the keymap's Copy / Paste / Select all chords too), Esc
+    /// closes (asking over unsaved edits). False: not an edit key.
+    fn config_edit_key(&mut self, event: &input::KeyPress) -> bool {
+        use crate::views::viewer::{EditMods, EditOutcome};
+        if self.win.viewer.edit.is_none() {
+            return false;
+        }
+        let mods = self.win.modifiers;
+        let m = EditMods {
+            shift: mods.shift_key(),
+            alt: mods.alt_key(),
+            ctrl: mods.control_key(),
+            cmd: mods.super_key(),
+        };
+        let now = Instant::now();
+        let mut outcome = self.win.viewer.edit_key(event, m, now);
+        if outcome == EditOutcome::Ignored && !event.released {
+            outcome = match input::app_action(event, mods, &self.keymap) {
+                Some(AppAction::Copy) => self
+                    .win
+                    .viewer
+                    .edit
+                    .as_ref()
+                    .and_then(|e| e.buffer.selected_text())
+                    .map_or(EditOutcome::Handled, |t| EditOutcome::Copy(t.to_string())),
+                Some(AppAction::Paste) => EditOutcome::Paste,
+                Some(AppAction::SelectAll) => {
+                    if let Some(e) = self.win.viewer.edit.as_mut() {
+                        e.buffer.select_all();
+                    }
+                    EditOutcome::Handled
+                }
+                _ => EditOutcome::Ignored,
+            };
+        }
+        match outcome {
+            EditOutcome::Ignored => return false,
+            EditOutcome::Handled => {}
+            EditOutcome::Save => {
+                self.save_config_pane();
+            }
+            EditOutcome::Copy(text) => {
+                self.copy_to_clipboard(text);
+            }
+            EditOutcome::Paste => {
+                if let Some(text) = self.clipboard_text() {
+                    self.win.viewer.edit_insert(&text, now);
+                }
+            }
+            EditOutcome::Close => self.close_viewer_pane(),
+        }
+        true
+    }
+
     /// Viewer keys: Esc closes; arrows, Page Up/Down, Space, Home/End
     /// scroll. False for anything else.
     fn handle_viewer_key(&mut self, event: &input::KeyPress) -> bool {
@@ -13294,7 +13893,7 @@ impl App {
             Key::Named(NamedKey::Escape) if self.win.viewer.sel.is_some() => {
                 self.win.viewer.sel = None;
             }
-            Key::Named(NamedKey::Escape) => self.win.viewer.close(),
+            Key::Named(NamedKey::Escape) => self.close_viewer_pane(),
             Key::Named(NamedKey::ArrowDown) if plain && mods.shift_key() => {
                 self.win.viewer.extend_by(1)
             }
@@ -13775,6 +14374,9 @@ impl App {
 
     fn perform_confirmed(&mut self, action: ConfirmAction, event_loop: &ActiveEventLoop) {
         match action {
+            ConfirmAction::ConfigUnsaved(leave) => {
+                self.answer_config_unsaved(true, leave, event_loop)
+            }
             ConfirmAction::Close(scope) => {
                 // "Keep running" with "Don't ask again" ticked: it keeps running unasked
                 if self.win.confirm_dont_ask && self.quits(scope) && self.keeps_background() {
@@ -13829,11 +14431,12 @@ impl App {
             ConfirmAction::Revert { root, path, hunk } => {
                 self.queue_review_write(root, vec![(rift_core::review::Op::Revert, path, hunk)]);
             }
-            ConfirmAction::Update(plan) => self.install_update(*plan),
+            ConfirmAction::Update(plan) => self.confirm_update(*plan),
             ConfirmAction::RevokeDevice { id, name } => self.revoke_device(&id, &name),
             ConfirmAction::AllowOperate { id, name } => {
                 self.set_device_permission(&id, &name, false)
             }
+            ConfirmAction::DeleteProfile { index, name, .. } => self.delete_profile(index, &name),
         }
     }
 
@@ -14380,6 +14983,11 @@ impl App {
                 window.request_redraw();
                 return;
             }
+            // config.toml beside Settings is edited in place
+            if self.win.config_viewer && self.config_edit_key(event) {
+                window.request_redraw();
+                return;
+            }
             if !self.handle_viewer_key(event) {
                 // app shortcuts still work; typing is swallowed (the command
                 // line is under the viewer)
@@ -14829,6 +15437,10 @@ impl App {
 
     pub(crate) fn on_cursor_moved(&mut self, pos: (f32, f32), window: &Window) {
         self.win.mouse = pos;
+        // a press in the config.toml pane's text selects as it drags
+        if self.win.viewer.edit_drag(pos.0, pos.1) {
+            window.request_redraw();
+        }
         // a hidden tab strip slides in at the top edge (`tab_bar`)
         if self.track_strip(Some(pos)) {
             window.request_redraw();
@@ -15016,6 +15628,9 @@ impl App {
         if let Some((id, rect)) = self.win.slider_drag {
             let t = ((self.win.mouse.0 - rect[0] - 8.0) / (rect[2] - 16.0)).clamp(0.0, 1.0);
             self.set_slider(id, t);
+            window.request_redraw();
+        }
+        if self.drag_profile_row() {
             window.request_redraw();
         }
     }
@@ -15253,6 +15868,15 @@ impl App {
             return;
         }
         if state == ElementState::Released {
+            // a drag selecting in the config.toml pane ends
+            if let Some(e) = self.win.viewer.edit.as_mut() {
+                e.dragging = false;
+            }
+            // a held Settings › Profiles row: dropped, or clicked
+            if self.release_profile_row() {
+                window.request_redraw();
+                return;
+            }
             if self.report_button(crate::mouse::LEFT, false) {
                 window.request_redraw();
                 return;
@@ -15318,12 +15942,32 @@ impl App {
         let inside =
             |r: &[f32; 4]| mx >= r[0] && mx < r[0] + r[2] && my >= r[1] && my < r[1] + r[3];
         if self.win.confirm.is_some() {
+            let unsaved = match &self.win.confirm {
+                Some(ConfirmClose {
+                    action: ConfirmAction::ConfigUnsaved(leave),
+                    ..
+                }) => Some(leave.clone()),
+                _ => None,
+            };
+            let save_shut = self
+                .win
+                .viewer
+                .edit
+                .as_ref()
+                .is_some_and(|e| e.errors() > 0);
             if inside(&self.win.confirm_rects[1]) {
-                if let Some(c) = self.win.confirm.take() {
+                // Save stays shut while the text has errors
+                if !(unsaved.is_some() && save_shut)
+                    && let Some(c) = self.win.confirm.take()
+                {
                     self.perform_confirmed(c.action, event_loop);
                 }
             } else if inside(&self.win.confirm_rects[0]) {
                 self.cancel_confirm();
+            } else if let Some(leave) = unsaved.filter(|_| inside(&self.win.confirm_rects[2])) {
+                // Discard
+                self.win.confirm = None;
+                self.answer_config_unsaved(false, leave, event_loop);
             } else if inside(&self.win.confirm_rects[2]) {
                 self.win.confirm_dont_ask = !self.win.confirm_dont_ask;
             }
@@ -15570,6 +16214,13 @@ impl App {
             && !matches!(target, Some(ClickTarget::RemoteRelay))
         {
             self.commit_relay_edit();
+        }
+        // a click outside the edited text field ends its edit (saved when
+        // valid; else dropped, and the reason shows)
+        if let Some((editing, _)) = &self.win.settings.text_edit
+            && target != Some(ClickTarget::SettingsText(editing))
+        {
+            self.commit_text_edit(false);
         }
         // a click outside the history pane (and its command line) closes it
         if self.win.history.open
@@ -15955,7 +16606,7 @@ impl App {
                 let page = Page::ALL.get(*i as usize).copied().unwrap_or(Page::General);
                 self.win.settings.open_page(page);
             }
-            Some(ClickTarget::SettingsClose) => self.win.settings.close_tab(),
+            Some(ClickTarget::SettingsClose) => self.close_settings_tab(),
             Some(ClickTarget::SettingsOption(i)) => {
                 if let Some(dd) = self.win.settings.dropdown.take()
                     && let Some((value, _)) = dd.options.get(*i)
@@ -16050,6 +16701,10 @@ impl App {
                 let v = &mut self.win.settings.remote;
                 v.relay_open = !v.relay_open;
             }
+            Some(ClickTarget::SettingsText(id)) => self.start_text_edit(id),
+            Some(ClickTarget::ProfileRow(i)) => self.press_profile_row(*i),
+            Some(ClickTarget::Profile(i, op)) => self.profile_op(*i, *op),
+            Some(ClickTarget::ProfileAdd) => self.add_profile(),
             Some(ClickTarget::RemotePermission(id, view)) => {
                 let name = self
                     .win
@@ -16193,9 +16848,38 @@ impl App {
                     "notifications.play_sound" => {
                         c.notifications.play_sound = !c.notifications.play_sound
                     }
+                    "alt_screen_padding" => c.alt_screen_padding = !c.alt_screen_padding,
+                    "bold_is_bright" => c.bold_is_bright = !c.bold_is_bright,
+                    "always_on_top" => c.always_on_top = !c.always_on_top,
+                    "snap_to_cells" => c.snap_to_cells = !c.snap_to_cells,
+                    "resize_overlay" => c.resize_overlay = !c.resize_overlay,
+                    "wheel_zoom" => c.wheel_zoom = !c.wheel_zoom,
+                    "mask_secrets" => c.mask_secrets = !c.mask_secrets,
+                    "show_progress" => c.show_progress = !c.show_progress,
+                    "request_attention" => c.request_attention = !c.request_attention,
+                    "confirm_background_quit" => {
+                        c.confirm_background_quit = !c.confirm_background_quit
+                    }
+                    "trim_paste" => c.trim_paste = !c.trim_paste,
+                    "discover_shells" => c.discover_shells = !c.discover_shells,
                     _ => {}
                 }
                 self.save_config();
+                // turned on: the installed shells not offered yet become
+                // profiles now, not at the next launch
+                if *id == "discover_shells"
+                    && self.config.discover_shells
+                    && let Some(file) = self.shells_file()
+                {
+                    match rift_core::generated::sync_default(&file) {
+                        Ok(Some(_)) => {
+                            self.load_config(false);
+                            self.refresh_config_panes();
+                        }
+                        Ok(None) => {}
+                        Err(e) => self.toast_error(format!("Installed shells not added: {e}")),
+                    }
+                }
                 self.apply_config();
             }
             Some(ClickTarget::SettingsStep(id, dir)) => {
@@ -16237,6 +16921,51 @@ impl App {
                     "notifications.toast_secs" => {
                         let secs = c.notifications.toast_duration().as_secs() as i64;
                         c.notifications.toast_secs = (secs + d).clamp(2, 60) as u64;
+                    }
+                    "font_weight" | "bold_font_weight" => {
+                        let (regular, bold) = c.font_weights();
+                        let now = if *id == "font_weight" { regular } else { bold };
+                        let next = (i64::from(now) + d * 100).clamp(100, 900) as u16;
+                        if *id == "font_weight" {
+                            c.font_weight = next;
+                        } else {
+                            c.bold_font_weight = next;
+                        }
+                    }
+                    "minimum_contrast" => {
+                        c.minimum_contrast = (c.min_contrast() + d as f32 * 0.5).clamp(1.0, 21.0);
+                    }
+                    "window_width" | "window_height" => {
+                        let (w, h) = c.window_size();
+                        if *id == "window_width" {
+                            c.window_width = (w as f32 + d as f32 * 20.0).clamp(320.0, 16384.0);
+                        } else {
+                            c.window_height = (h as f32 + d as f32 * 20.0).clamp(200.0, 16384.0);
+                        }
+                    }
+                    "window_padding_top" | "window_padding_bottom" => {
+                        let pad = c.paddings(false);
+                        if *id == "window_padding_top" {
+                            c.window_padding_top =
+                                Some((pad.top + d as f32 * 2.0).clamp(0.0, 40.0));
+                        } else {
+                            c.window_padding_bottom =
+                                Some((pad.bottom + d as f32 * 2.0).clamp(0.0, 40.0));
+                        }
+                    }
+                    // off, then doubling from 16 KiB
+                    "large_paste_warning" => {
+                        let now = c.large_paste_warning;
+                        c.large_paste_warning = match (d > 0, now) {
+                            (true, 0) => 16,
+                            (true, n) => n.saturating_mul(2).min(1 << 20),
+                            (false, n) if n <= 16 => 0,
+                            (false, n) => n / 2,
+                        };
+                    }
+                    "hotkey_window_width" => {
+                        c.hotkey_window_width =
+                            (i64::from(c.hotkey_window_width()) + d * 5).clamp(20, 100) as u8;
                     }
                     _ => {}
                 }
@@ -16381,6 +17110,59 @@ impl App {
                             1 => Bell::Audible,
                             2 => Bell::Both,
                             _ => Bell::None,
+                        }
+                    }
+                    "ambiguous_width" => {
+                        c.ambiguous_width = if *v == 1 {
+                            rift_core::AmbiguousWidth::Wide
+                        } else {
+                            rift_core::AmbiguousWidth::Narrow
+                        }
+                    }
+                    "launch_mode" => {
+                        c.launch_mode = match v {
+                            0 => rift_core::LaunchMode::Default,
+                            1 => rift_core::LaunchMode::Maximized,
+                            _ => rift_core::LaunchMode::Fullscreen,
+                        }
+                    }
+                    "tab_switch_order" => {
+                        c.tab_switch_order = if *v == 1 {
+                            rift_core::TabSwitchOrder::Mru
+                        } else {
+                            rift_core::TabSwitchOrder::InOrder
+                        }
+                    }
+                    "scrollbar" => {
+                        c.scrollbar = match v {
+                            0 => rift_core::ScrollbarMode::Auto,
+                            1 => rift_core::ScrollbarMode::Always,
+                            _ => rift_core::ScrollbarMode::Never,
+                        }
+                    }
+                    "close_on_exit" => {
+                        c.close_on_exit = match v {
+                            0 => rift_core::CloseOnExit::Always,
+                            1 => rift_core::CloseOnExit::Graceful,
+                            _ => rift_core::CloseOnExit::Never,
+                        }
+                    }
+                    "vim_clipboard" => {
+                        c.vim_clipboard = if *v == 1 { "unnamed" } else { "none" }.into();
+                    }
+                    "shell_widgets" => {
+                        c.shell_widgets = if *v == 1 {
+                            rift_core::ShellWidgets::Rift
+                        } else {
+                            rift_core::ShellWidgets::Auto
+                        }
+                    }
+                    "hotkey_window_edge" => {
+                        c.hotkey_window_edge = match v {
+                            0 => rift_core::HotkeyEdge::Top,
+                            1 => rift_core::HotkeyEdge::Bottom,
+                            2 => rift_core::HotkeyEdge::Left,
+                            _ => rift_core::HotkeyEdge::Right,
                         }
                     }
                     _ => {}
@@ -17641,6 +18423,15 @@ impl App {
                     let _ = s.rearm_wait(Duration::from_millis(50), Duration::from_secs(15));
                 }
             }
+            Step::WaitWidget(key) => {
+                let bound = self
+                    .active_pane_id()
+                    .and_then(|id| self.find_tab_of_pane(id).and_then(|(_, tab)| tab.pane(id)))
+                    .is_some_and(|pane| pane.session.widgets.lock().unwrap().bound(key));
+                if !bound && let Some(s) = self.script.as_mut() {
+                    let _ = s.rearm_wait(Duration::from_millis(50), Duration::from_secs(60));
+                }
+            }
             Step::NewWindow => self.open_new_window(event_loop),
             Step::Link(link) => self.open_link(&link, event_loop),
             Step::Window(n) => {
@@ -18571,7 +19362,17 @@ impl App {
             // the quit that keeps the shells running asks "Keep running?"
             let keeps = matches!(&c.action, ConfirmAction::Close(s) if self.quits(*s))
                 && self.keeps_background();
+            let config_errors = self.win.viewer.edit.as_ref().map_or(0, |e| e.errors());
             let (title, description) = match &c.action {
+                ConfirmAction::ConfigUnsaved(_) => (
+                    "Save changes to config.toml?".to_string(),
+                    format!(
+                        "Your edits in the config.toml pane are not saved. {}",
+                        config_errors_note(config_errors)
+                    )
+                    .trim()
+                    .to_string(),
+                ),
                 ConfirmAction::Close(_) if keeps => {
                     let mut d = keep_description(c.commands.len());
                     if !c.commands.is_empty() {
@@ -18627,6 +19428,15 @@ impl App {
                 ConfirmAction::AllowOperate { name, .. } => {
                     (format!("Let {name} run commands?"), ALLOW_OPERATE.into())
                 }
+                ConfirmAction::DeleteProfile {
+                    name,
+                    detected,
+                    default,
+                    ..
+                } => {
+                    let (title, description, note) = delete_profile_text(name, *detected, *default);
+                    (title, format!("{description} {note}"))
+                }
                 ConfirmAction::Restart(_) => (
                     "Restart pane?".to_string(),
                     format!("Running: {}", c.commands.join(", ")),
@@ -18658,10 +19468,13 @@ impl App {
                 ConfirmAction::Update(_) => "Update",
                 ConfirmAction::RevokeDevice { .. } => "Revoke",
                 ConfirmAction::AllowOperate { .. } => "Allow",
+                ConfirmAction::DeleteProfile { .. } => "Delete",
                 ConfirmAction::Restart(_) => "Restart",
                 ConfirmAction::ClosePinned(_) => "Close tab",
                 ConfirmAction::Overwrite { .. } => "Replace",
                 ConfirmAction::RunCode { .. } => "Run",
+                ConfirmAction::ConfigUnsaved(_) if config_errors > 0 => "Save, unavailable",
+                ConfirmAction::ConfigUnsaved(_) => "Save",
             };
             let cancel = match &c.action {
                 ConfirmAction::Update(_) => "Later",
@@ -18687,6 +19500,9 @@ impl App {
                     selected: false,
                     rect: Some(self.win.confirm_rects[2]),
                 });
+            }
+            if matches!(c.action, ConfirmAction::ConfigUnsaved(_)) {
+                buttons.push(button("Discard", self.win.confirm_rects[2], false));
             }
             Some(Overlay::Alert {
                 title,
@@ -18996,7 +19812,19 @@ impl App {
                             false,
                         ),
                         // the name carries the URL (or "editing: …")
-                        ClickTarget::RemoteRelay => (Role::TextInput, None, false),
+                        ClickTarget::RemoteRelay | ClickTarget::SettingsText(_) => {
+                            (Role::TextInput, None, false)
+                        }
+                        // a profile's row opens its form (its name says how
+                        // to move it)
+                        ClickTarget::ProfileRow(i) => (
+                            Role::Button,
+                            None,
+                            self.win.settings.profile_open == Some(*i),
+                        ),
+                        ClickTarget::Profile(..) | ClickTarget::ProfileAdd => {
+                            (Role::Button, None, false)
+                        }
                         ClickTarget::RemotePermission(id, view) => (
                             Role::RadioButton,
                             None,
@@ -19218,6 +20046,8 @@ impl App {
                     text: None,
                     controls: toolbar,
                     focused: false,
+                    editable: false,
+                    status: None,
                 },
             );
         }
@@ -19292,6 +20122,8 @@ impl App {
                 text: (!notices.is_empty()).then(|| notices.join("\n")),
                 controls,
                 focused: self.win.explorer.focused,
+                editable: false,
+                status: None,
             });
         }
         if rv_rect[2] > 0.0 {
@@ -19366,6 +20198,8 @@ impl App {
                 text: None,
                 controls,
                 focused: false,
+                editable: false,
+                status: None,
             });
         }
         if let Some(path) = &self.win.viewer.path {
@@ -19383,6 +20217,7 @@ impl App {
                 text.truncate(cut);
                 text.push('…');
             }
+            let edit = self.win.viewer.edit.as_ref();
             let controls = self
                 .win
                 .viewer_hits
@@ -19421,15 +20256,59 @@ impl App {
                         };
                         control(label, Role::Button, false, *r)
                     }
+                    ViewerHit::Save => {
+                        let errors = edit.map_or(0, |e| e.errors());
+                        let label = if errors > 0 {
+                            format!("Save, unavailable: {}", config_errors_note(errors))
+                        } else {
+                            "Save".into()
+                        };
+                        control(label, Role::Button, false, *r)
+                    }
+                    ViewerHit::Dismiss => control("Dismiss".into(), Role::Button, false, *r),
+                    ViewerHit::Reload => control("Reload".into(), Role::Button, false, *r),
+                    ViewerHit::KeepMine => control("Keep mine".into(), Role::Button, false, *r),
+                    ViewerHit::Status => {
+                        control("Go to the next problem".into(), Role::Button, false, *r)
+                    }
+                    ViewerHit::Lint(line) => {
+                        let messages: Vec<&str> = edit
+                            .iter()
+                            .flat_map(|e| &e.diagnostics)
+                            .filter(|d| d.line == *line)
+                            .map(|d| d.message.as_str())
+                            .collect();
+                        let label = format!("Line {}: {}", line + 1, messages.join("; "));
+                        control(label, Role::Button, false, *r)
+                    }
                 })
                 .collect();
+            let (label, text) = match edit {
+                // the text being edited, whole (the editor's own value)
+                Some(e) => (
+                    format!("Editor, {}", path.display()),
+                    e.buffer.buffer.clone(),
+                ),
+                None => (format!("File viewer, {}", path.display()), text),
+            };
+            let status = edit
+                .map(|e| {
+                    let mut s = e.summary().unwrap_or_else(|| "No problems".into());
+                    if e.conflict {
+                        s = format!("config.toml changed outside this pane. {s}");
+                    }
+                    s
+                })
+                .or_else(|| self.win.viewer.read_only.clone());
             out.push(PanelNode {
-                label: format!("File viewer, {}", path.display()),
+                label,
                 rect: Some(self.win.viewer_rect),
                 text: Some(text),
                 controls,
                 // it takes the keys while open
                 focused: true,
+                editable: edit.is_some(),
+                status,
             });
         }
         // the tab bar's remote chip (a phone is connected)
@@ -19451,6 +20330,8 @@ impl App {
                     h.rect,
                 )],
                 focused: false,
+                editable: false,
+                status: None,
             });
         }
         // the tab bar's "Update Rift" chip
@@ -19472,6 +20353,8 @@ impl App {
                     h.rect,
                 )],
                 focused: false,
+                editable: false,
+                status: None,
             });
         }
         // status toasts: the message, its button and ✕
@@ -19500,6 +20383,8 @@ impl App {
                 text: Some(t.text.clone()),
                 controls,
                 focused: false,
+                editable: false,
+                status: None,
             });
         }
         // notification cards (inbox entries, Rift's own notices): the card
@@ -19527,6 +20412,8 @@ impl App {
                     control(format!("Dismiss: {title}"), Role::Button, false, h.close),
                 ],
                 focused: false,
+                editable: false,
+                status: None,
             });
         }
         out
@@ -19927,6 +20814,39 @@ impl App {
             "settings_focus={:?} config_error={:?} hints={hint_targets:?}",
             self.win.settings.focus, self.config_error
         );
+        // Settings › Profiles: the list in file order, what is open, edited,
+        // refused or held
+        let s = &self.win.settings;
+        let _ = writeln!(
+            out,
+            "settings_profiles={:?} default_profile={:?} profile_open={:?} text_edit={:?} \
+             profile_error={:?} profile_drag={:?} profile_rows={:?}",
+            self.config
+                .profiles
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            self.config.default_profile,
+            s.profile_open,
+            s.text_edit,
+            s.profile_error,
+            s.profile_drag,
+            // on screen: (index, x, y, w, h), whole px
+            self.win
+                .hits
+                .iter()
+                .filter_map(|h| match h.target {
+                    ClickTarget::ProfileRow(i) => Some((
+                        i,
+                        h.rect[0].round(),
+                        h.rect[1].round(),
+                        h.rect[2].round(),
+                        h.rect[3].round()
+                    )),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+        );
         let _ = writeln!(
             out,
             "explorer={} focused={} root={:?} rows={} selected={:?} scroll={:.0}",
@@ -20151,6 +21071,37 @@ impl App {
             self.win.viewer.scroll,
             self.win.viewer.find.as_ref().map(|f| f.counter())
         );
+        // the config.toml pane's editing state (`edit=false`: read-only)
+        match &self.win.viewer.edit {
+            Some(e) => {
+                let diagnostics: Vec<String> = e
+                    .diagnostics
+                    .iter()
+                    .map(|d| format!("{}:{:?}:{}", d.line + 1, d.severity, d.message))
+                    .collect();
+                let _ = writeln!(
+                    out,
+                    "config_edit=true dirty={} conflict={} save_enabled={} saved={} cursor={} selection={:?} lint_pending={} text_at={:?} diagnostics={diagnostics:?} status={:?}",
+                    e.dirty(),
+                    e.conflict,
+                    e.can_save(),
+                    e.saved_at.is_some(),
+                    e.buffer.cursor,
+                    e.buffer.selection(),
+                    e.lint_due.is_some(),
+                    self.win.viewer.text_origin(),
+                    e.summary(),
+                );
+                let _ = writeln!(out, "config_buffer={:?}", e.buffer.buffer);
+            }
+            None => {
+                let _ = writeln!(
+                    out,
+                    "config_edit=false read_only={:?}",
+                    self.win.viewer.read_only
+                );
+            }
+        }
         let _ = writeln!(
             out,
             "whats_new={} scroll={:.0}/{:.0}",
@@ -21904,6 +22855,23 @@ impl App {
     /// Update: take the install lock (one window at a time), then download,
     /// verify and install off the UI thread; Open download page: the
     /// release page in the browser.
+    /// The update dialog's Update: unsaved config.toml edits (in any
+    /// window) are asked about first, since the restart would drop them.
+    fn confirm_update(&mut self, plan: UpdatePlan) {
+        if !plan.open_page {
+            self.enter_where(|w| w.config_viewer && w.viewer.dirty());
+            if self.config_leave_asks(ConfigLeave::Update(Box::new(plan.clone()))) {
+                if !self.headless
+                    && let Some(w) = &self.win.window
+                {
+                    w.focus_window();
+                }
+                return;
+            }
+        }
+        self.install_update(plan);
+    }
+
     fn install_update(&mut self, plan: UpdatePlan) {
         use rift_core::update;
         if plan.open_page {
@@ -22389,7 +23357,16 @@ impl App {
         if offers && let Some(w) = &self.win.window {
             w.request_redraw();
         }
-        (output_frame, tip_due, earliest(select_due, offer_due))
+        // the config.toml pane: its lint once typing pauses, "Saved" going
+        let (linted, edit_due) = self.win.viewer.tick(Instant::now());
+        if linted && let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+        (
+            output_frame,
+            tip_due,
+            earliest(earliest(select_due, offer_due), edit_due),
+        )
     }
 
     /// The window's timed repaints (boot grace, toasts, cursor blink): a
@@ -23140,23 +24117,16 @@ impl ApplicationHandler<UserEvent> for App {
                     self.shell_history = Arc::new(history);
                 }
             }
-            UserEvent::ConfigReloaded => {
-                // Theme files can change without any change to config.toml.
-                let shells = (self.config.shell_completions, self.config.shell.clone());
-                self.load_config(false);
-                // shell completions turned off, or another shell: the warm
-                // completion shells are not needed any more
-                if shells != (self.config.shell_completions, self.config.shell.clone()) {
-                    std::thread::spawn(rift_core::shell_complete::stop_all);
-                }
-                self.apply_config();
-                self.import_shell_history();
-            }
+            UserEvent::ConfigReloaded => self.reload_config(),
             UserEvent::ViewerLoaded(loaded) => {
-                if self.win.viewer.accept(*loaded)
-                    && let Some(w) = &self.win.window
-                {
-                    w.request_redraw();
+                if self.win.viewer.accept(*loaded) {
+                    // config.toml beside Settings opens editable
+                    if self.win.config_viewer {
+                        self.win.viewer.start_edit(Self::generated_seen());
+                    }
+                    if let Some(w) = &self.win.window {
+                        w.request_redraw();
+                    }
                 }
             }
             UserEvent::CompareReady(generation, result) => {

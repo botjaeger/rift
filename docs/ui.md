@@ -51,8 +51,8 @@ pane, history, autocomplete, palette, settings, controls, menus, panels).
   with the space the window buttons would take left empty (no buttons; the
   strip neither drags nor zooms it). It slides up when the hotkey is pressed again
   or, with `hotkey_window_hide_on_blur`, when it loses focus. Settings ›
-  General › Hotkey window has the three settings; the hotkey itself is
-  `global_hotkey` in `config.toml`. The session switcher (⇧⌘O) lists its
+  General › Hotkey window has its settings, the hotkey itself
+  (`global_hotkey`) among them. The session switcher (⇧⌘O) lists its
   tabs as "… — hotkey window". See [features](features.md#global-hotkey).
 
 ## Menu bar (macOS)
@@ -329,6 +329,49 @@ is refused until its prompt is back.
 instead of the terminal search: case-insensitive plain text, the counter
 shows `n/total` or `No matches`, Enter / ⇧Enter step to the next / previous
 match (wrapping), Esc closes the bar (a second Esc closes the viewer).
+
+### config.toml editor
+
+Settings › *Open config.toml* opens the same pane beside the Settings page,
+and only there is the file editable (every other file stays read-only). A
+config.toml that is not UTF-8 text, too large or binary stays read-only too,
+and the bar under the text says why; once the file is fixed elsewhere the
+pane loads it again, editable. A caret (`cursor` token, 2 px) follows typing;
+Enter adds a line, Tab two spaces; ← → ↑ ↓ (↑ ↓ keep the column), ⌥← ⌥→ by
+word, Home/End and ⌘← ⌘→ the line's ends, ⌘↑ ⌘↓ the file's ends, Page
+Up/Down a page; ⇧ with any of them selects (`selection` token), as does a
+drag; a click places the caret. ⌘A, ⌘C, ⌘X, ⌘V, ⌘Z / ⇧⌘Z, ⌫ / ⌥⌫ / ⌘⌫ and
+⌦ work as in the command line. Highlighting follows the edits. ⌘F still
+finds in the text.
+
+- **Clean** (the text is the file's): the pane follows the file — a Settings
+  change, a hot reload or another editor's save shows at once, scroll and
+  caret kept.
+- **Dirty**: the header shows **Dismiss** (back to the file's text) and
+  **Save** (accent; ⌘S). Save writes the text exactly as typed and applies
+  it at once (a Settings change right after never writes the old values
+  back); *Saved* with a green check shows for 1.5 s. While the
+  text has an error Save is dimmed and does nothing; its tooltip says
+  `Fix N error(s) to save`.
+- **Lint** runs 150 ms after the last keystroke: a 6 px dot left of the line
+  number (`error` red, `warning` amber; hover: a card with the line's
+  problems) and a 1.5 px underline under the span. A 28 px bar under the
+  text reads `2 errors · 1 warning — line 4: …` (the first problem); a click
+  moves the caret to the next problem, wrapping. Screen readers hear it as a
+  polite live region; the text is a multi-line text input. Toasts in the
+  window's corner sit above the bar.
+- **Conflict**: the file changes on disk while the text is dirty — the edits
+  are never replaced; a 28 px bar under the header says *config.toml changed
+  outside this pane* with **Keep mine** (the bar goes; Save then overwrites
+  the file) and **Reload** (the file's text replaces yours, one ⌘Z away).
+- **Leaving with unsaved edits** — ✕, Esc, ⌘W, closing the Settings tab,
+  opening another file in the viewer, closing the window, ⌘Q or the update
+  dialog's Update (its restart) — asks *Save
+  changes to config.toml?*: **Discard** (⌘⌫) at the left, **Cancel** (esc)
+  and **Save** (⏎; shut while the text has errors, and the keyboard then
+  starts on Cancel). Save or Discard goes on with what was asked. ⌘Q from
+  another window asks in the window holding the edits, which comes to the
+  front (a hidden drop-down window slides in); Cancel keeps every window.
 
 ## Code review (⇧⌘G)
 
@@ -1140,8 +1183,9 @@ the Settings tab (its tab, ⌘, or *Open Settings* in the palette) shows the
 page it showed; once closed, it opens again on General. Other app
 shortcuts (new tab, next tab, palette…) work from it and leave it.
 
-A 232 px sidebar: a search field, the ten pages with icons (arrow keys
-navigate pages; PageUp/PageDown scroll the body) and *Open config.toml* at
+A 232 px sidebar: a search field, the eleven pages with icons (arrow keys
+navigate pages; PageUp/PageDown scroll the body; in a short window the page
+rows close their 2 px gaps so the foot keeps its room) and *Open config.toml* at
 the foot (opens the file beside the page, in the Settings tab; ✕ closes it; for 3 s after config.toml is
 written or reloaded, a green check sits at its end, a green dot on its icon
 in the icon-only sidebar). When the settings area is
@@ -1151,8 +1195,9 @@ has the page title and description, group labels, and flat rows: label (and
 description) left, control right; it runs to the bottom edge.
 
 - **Search**: typing anywhere outside Keybindings fills the search field and
-  lists the matching settings of General, Appearance, Input, Terminal, Files
-  and Notifications (by name or description; not Keybindings or Themes), each
+  lists the matching settings of General, Profiles (its two settings, not
+  the list), Appearance, Input, Terminal, Files, Notifications and Remote
+  access's switch (by name or description; not Keybindings or Themes), each
   with its `Page › Group`, under the title `Results for “q”` and the subtitle
   `Settings on every page whose name or description match.`; no match shows
   `No settings match`. ⌫ edits, Esc clears it (the next Esc closes the tab).
@@ -1172,30 +1217,47 @@ description) left, control right; it runs to the bottom edge.
   to fix it first; the wheel scrolls the page body (24 px per line, clamped
   to the content) and switching pages resets the scroll. Clicks elsewhere in
   the page are swallowed rather than reaching the terminal.
+- **Text fields** (the relay's, `Shell path`, `Global hotkey`, a profile's
+  fields, …): a click edits one (accent border, caret at the end); typing
+  and ⌘V fill it, ⌫ deletes (⌘⌫ / ⌥⌫ clear it), ⏎ saves, Esc cancels, Tab
+  or a click elsewhere saves. A value that is not valid is never written:
+  ⏎ keeps it in the field to fix, a click away drops it; a toast (a
+  profile's: a red line in its form) says why. Lists (`Font features`,
+  `More subshell commands`, a profile's arguments and environment) are
+  words separated by spaces, quoted as in a shell when one has spaces.
+- Every config.toml key has a row here except the lists of tables
+  (`[[ssh_profiles]]`, `[[actions]]`, `[[secret_patterns]]`,
+  `[[tab_color_rules]]`, edited in the config.toml pane) and the pages of
+  their own (Profiles, Keybindings); `settings::ROWS` lists them and a unit
+  test fails for a new key without one.
 
 - **General** — *Shell and session behavior*.
   - App: `Launch at login` toggle (macOS only; `launch_at_login`: adds or
     removes Rift's login item; shows the login item as it is). There is no
     background-processes row: Remote access decides whether a quit keeps Rift
     running (see *Menu bar icon* above).
-  - Shell: `Shell path` (read-only: `shell` override, else `$SHELL`),
-    read-only profile rows edited in config.toml — `Default profile` (or
-    `none (Shell path)`), one `Profile: <name>` row with its command per
-    profile, `Installed shells as profiles` (`on (/etc/shells)` / `off`;
-    `discover_shells`) — then the `Scrollback` stepper (lines, ±1000 within 1,000–1,000,000, shown as
-    `10,000`; described *Maximum lines kept in the buffer*).
+  - Shell: `Shell path` text field (`shell`; empty shows the login shell
+    as its placeholder; a bare name is looked up on PATH and saved as its
+    path; not an executable: refused), then the `Scrollback` stepper (lines,
+    ±1000 within 1,000–1,000,000, shown as `10,000`; described *Maximum
+    lines kept in the buffer*). Profiles have a page of their own.
   - Session: `Restore tabs after a crash` toggle, `New tabs start in` segmented
     `Previous | Home | Custom` (a custom path is set in config.toml),
     `Warn before closing running commands` toggle,
     `Save block output for restore` toggle (*Output can contain secrets;
-    turning this off deletes it*; `save_transcripts`). Durable shells
-    (`durable_sessions`, on) have no row; it is a `config.toml` key.
-  - Hotkey window: `Drop-down hotkey window` toggle (*The global hotkey
+    turning this off deletes it*; `save_transcripts`), `Keep shells running
+    through updates` toggle (*An update or a crash leaves them running*;
+    `durable_sessions`).
+  - Hotkey window: `Global hotkey` text field (`global_hotkey`, e.g.
+    `alt+space`; placeholder `Off`; a chord that does not parse is refused),
+    `Drop-down hotkey window` toggle (*The global hotkey
     slides a window down from the top of the screen*; `hotkey_window`),
     `Hotkey window height` stepper (%, ±5 within 20–100; *Share of the
-    screen it covers*), `Hide it when it loses focus` toggle
-    (`hotkey_window_hide_on_blur`). The hotkey (`global_hotkey`) is set in
-    config.toml.
+    screen it covers*), `Screen edge` segmented `Top | Bottom | Left |
+    Right` (`hotkey_window_edge`), `Hotkey window width` stepper (%, ±5
+    within 20–100; `hotkey_window_width`), `Screen` text field (`pointer`,
+    `primary` or a screen's number; `hotkey_window_screen`), `Hide it when
+    it loses focus` toggle (`hotkey_window_hide_on_blur`).
   - Updates: `Check for updates` toggle (*At launch and every 6 hours;
     the update downloads, then Update Rift appears in the tab bar*; `check_for_updates`), then a
     `Rift <version>` row whose description is the update status (`Not
@@ -1208,11 +1270,57 @@ description) left, control right; it runs to the bottom edge.
   - Automation: `Control socket` segmented `Off | Navigate | Full`
     (*Lets scripts control Rift (rift-terminal ctl); Full also lets them
     type*; `control_api`).
+- **Profiles** (launch icon) — *The shells and programs tabs open with. Drag
+  a row (or ⌥↑ ⌥↓) to reorder.*
+  - New tabs: `Default profile` select (`Shell path`, then every profile;
+    `default_profile`), `Add installed shells as profiles` toggle (*Each
+    shell in /etc/shells, once; a deleted one stays deleted*;
+    `discover_shells`; turned on, the shells not offered yet are added at
+    once).
+  - Your profiles: one row per `[[profiles]]` entry in file order — a grip,
+    the name over what it runs (command and arguments, or `Shell path`),
+    tags left of the button (`Default` in accent, `Detected` for a shell
+    from /etc/shells, `Hidden`, `Not found` in error for a detected shell
+    that is gone) and `Edit` (`Done` while open). A click on the row (or
+    Edit) opens its form under it; a drag moves it (a 2 px accent caret
+    shows where it lands); ⌥↑ / ⌥↓ move the focused row or Edit button.
+  - The form: `Name`, `Command` (a detected profile's is shown, not
+    editable: *Duplicate to change the command*), `Arguments`, `Directory`,
+    `Environment` (`NAME=value …`) and `Tab title` text fields; `Tab color`
+    (`None` and the six tab colours), `Icon` (`Terminal` and the Nerd Font
+    marks: folder, git, python, php, github, docker, user, laptop) and
+    `Colour scheme` (`Window theme` and every theme) selects; then `Set as
+    default` (disabled on the default one), `Duplicate` (`<name> copy`,
+    the user's own: no `source`), `Hide` / `Show` and a destructive
+    `Delete`. A change that `profiles::validate` refuses (a name used
+    twice, an empty command) is not written and says why in red above the
+    buttons. Renaming the default profile keeps it the default.
+  - `Delete` asks first: *Delete <name>?* with what it runs; a detected
+    profile *Rift found this shell installed and won't add it again. Hide
+    keeps it in the file instead.* (its shell joins the seen list), any
+    other *It is removed from config.toml.*; deleting the default one adds
+    *New tabs then run the Shell path.* and clears `default_profile`.
+  - `New profile` → `Add`: `New profile` (then `New profile 2`, …) running
+    the login shell, its form open.
+  - Every change writes config.toml in place: every entry keeps its
+    comments, which move with it through a reorder or a rename.
+  - Another window's Settings, or the file changing on disk, reorders or
+    removes profiles: an open form follows its profile (closed, draft
+    dropped, when it is gone).
+  - While config.toml does not load, the list is not the file's: Add, the
+    form's buttons, a field and a move are refused (*Settings not saved:
+    fix config.toml first*).
 - **Appearance** — *Fonts, cursor, window and theme*.
   - Font: `Font family` select (JetBrains Mono first, then the embedded
     Hack and the installed fixed-width families, each shown in itself),
     `Font size` stepper (px, 8–28), `Line height` slider (1.0–2.2, default
-    1.2).
+    1.2), `Font weight` and `Bold font weight` steppers (±100 within
+    100–900), `Bold text in bright colors` toggle (`bold_is_bright`),
+    `Minimum contrast` stepper (±0.5 within 1–21, `Off` at 1;
+    `minimum_contrast`), `Font features` text field (`font_features`, e.g.
+    `ss01 zero -calt`; an unknown feature is refused),
+    `Ambiguous-width characters` segmented `Narrow | Wide`
+    (`ambiguous_width`).
   - Cursor: `Cursor style` segmented `Block | Bar | Underline | Hollow |
     Double`, `Hollow when unfocused` toggle (*Outline the cursor while its
     window or pane is not focused*; `cursor_hollow_unfocused`),
@@ -1224,9 +1332,16 @@ description) left, control right; it runs to the bottom edge.
     slider (1–64 px, macOS only),
     `Window padding` stepper (px, ±2: the left and right padding in
     effect; a step or its reset sets `window_padding` and removes
-    `window_padding_left`/`_right`), `App icon` select (a picture of
+    `window_padding_left`/`_right`), `Top padding` and `Bottom padding`
+    steppers (px, ±2 within 0–40; `window_padding_top` / `_bottom`), `Pad
+    full-screen programs` toggle (`alt_screen_padding`), `App icon` select (a picture of
     each colourway before its name; `app_icon`), `Font ligatures` toggle (*Render -> >=
     != as combined glyphs*).
+  - New windows: `Open new windows` segmented `As saved | Maximized | Full
+    screen` (`launch_mode`), `Window width` / `Window height` steppers (px,
+    ±20; *Without a saved size*), `Keep windows on top`
+    (`always_on_top`), `Resize in whole cells` (`snap_to_cells`) and `Show
+    the size while resizing` (`resize_overlay`) toggles.
   - Tabs: `Tab position` segmented `Top | Side` (`tab_layout`), `Close
     buttons` segmented `On hover | Always | Never` (*Always keeps a tab's
     alert dot until you hover it*; `tab_close_button`), `Close button side`
@@ -1234,6 +1349,8 @@ description) left, control right; it runs to the bottom edge.
     `Always | When windowed | Only on hover` (*Out of sight, it slides in at the
     window's top edge*; `tab_bar`), `New tabs open`
     segmented `At the end | After the current tab` (`new_tab_placement`),
+    `⌃Tab switches` segmented `In order | Last used first`
+    (`tab_switch_order`),
     `Show tabs with only one tab open` toggle (*Off hides the lone tab; the
     bar's buttons stay*; `tab_bar_with_one_tab`).
   - Toolbar: one row per button (File explorer, Code review, Notifications,
@@ -1250,7 +1367,10 @@ description) left, control right; it runs to the bottom edge.
     toasts why and Dark Default is used; themes sharing a display name carry
     their file name.
 - **Input** — *The command line and blocks*.
-  - Input: `Vim keybindings` toggle, `Autosuggestions (ghost text)` toggle,
+  - Input: `Vim keybindings` toggle, `Vim's unnamed register` segmented
+    `Rift only | System clipboard` (`vim_clipboard`), `⌃R, ⌃T and ⌥C run`
+    segmented `The shell's | Rift's` (`shell_widgets`),
+    `Autosuggestions (ghost text)` toggle,
     `Completions menu` toggle, `Completions from your shell` toggle
     (`shell_completions`), `Autocomplete quotes and brackets` toggle,
     `Input position` segmented `Bottom | Top`, `Blocks start` segmented
@@ -1265,8 +1385,11 @@ description) left, control right; it runs to the bottom edge.
     sample values; a click opens **Edit prompt**), `Time on this tab counts`
     segmented `Since first command | Only while running`, `Expand aliases as you type`, `Underline unknown
     commands`, `Suggest corrections for failed commands` toggles, `Offer Rift
-    in subshells` toggle (*docker exec … bash, poetry shell; more in
-    subshell_commands*; `subshell_offer`), `Rich input sends with`
+    in subshells` toggle (*docker exec … bash, poetry shell, and the
+    commands below*; `subshell_offer`), `More subshell commands` text field
+    (regular expressions; one that does not compile is refused;
+    `subshell_commands`), `Never offer it for` text field
+    (`subshell_denylist`), `Rich input sends with`
     segmented `⏎ | ⌘⏎` (`rich_input_submit`), `Open rich input when an agent
     waits` toggle (*Claude Code, Codex, OpenCode, Gemini CLI at their
     prompt*; `rich_input_auto`).
@@ -1277,11 +1400,19 @@ description) left, control right; it runs to the bottom edge.
     the pointer*; `middle_click_paste`), `Clicking a link` segmented
     `Show it | Open it` (*Show where it goes first, or open it at once
     (⌘-click always opens)*; `link_click`), `Lines per wheel notch` stepper
-    (1–20, ±1; `wheel_scroll_lines`).
+    (1–20, ±1; `wheel_scroll_lines`), `⌘-scroll zooms the font` (Linux:
+    `Ctrl-scroll`; `wheel_zoom`) toggle, `Word characters` and `Word
+    delimiters` text fields (`word_chars`, `word_delimiters`; kept as typed).
   - Clipboard: `Copy on select` toggle, `Ask before pasting lines that would
     run` toggle, `Programs' clipboard access (OSC 52)` segmented
     `Off | Copy | Copy and read` (*Read lets any program or ssh host see your
-    clipboard*; `clipboard_access`).
+    clipboard*; `clipboard_access`), `Ask before pasting more than` stepper
+    (`Off`, then 16 KiB doubling; `large_paste_warning`), `Trim trailing
+    blanks from pastes` toggle (`trim_paste`).
+  - Panes: `Scrollbar` segmented `Auto | Always | Never` (`scrollbar`),
+    `When its program exits` segmented `Close | Close on success | Keep`
+    (`close_on_exit`), `Mask secrets` (`mask_secrets`) and `Show programs'
+    progress` (`show_progress`) toggles.
   - Keys (macOS only): `Left Option key is Meta` (`option_as_meta`) and
     `Right Option key is Meta` (`right_option_as_meta`; shows the left one's
     value until set) toggles. Turning the left one changes only the left key.
@@ -1299,7 +1430,8 @@ description) left, control right; it runs to the bottom edge.
 - **Notifications** (inbox icon) — *Toasts, desktop notifications and sounds;
   everything also lands in the inbox*.
   - Alerts: `Notifications` master toggle, `In-window toasts` toggle,
-    `Toast duration` stepper (s, 2–60).
+    `Toast duration` stepper (s, 2–60), `Bounce the Dock icon` (Linux: `Mark
+    the window urgent`; `request_attention`) toggle.
   - Desktop notifications: Rift's icon beside `macOS permission` with a
     status pill (`Allowed`, `Off`, `Not asked yet`) and `Allow…` (not asked
     yet: macOS asks) or `Open System Settings` (its Notifications page for
@@ -1365,8 +1497,12 @@ description) left, control right; it runs to the bottom edge.
     has no address yet, a `Pairing` row waits for it.
   - `After you quit` (with remote access on, under the switch): a read-only
     row: *Rift keeps running in the menu bar; phones that may run commands
-    can open tabs* (macOS), *Rift quits (durable_sessions is off in
-    config.toml)*, or *Rift quits, phones can no longer reach it* (Linux).
+    can open tabs* (macOS), *Rift quits (Keep shells running through
+    updates is off in General)*, or *Rift quits, phones can no longer reach
+    it* (Linux). Under it (macOS) the `Ask before keeping Rift running`
+    toggle (`confirm_background_quit`).
+  - `Listen address` (under `Relay settings…`, first): a text field for
+    `remote_listen` (`IP:PORT`; anything else is refused).
   - `Use a Cloudflare tunnel instead` (under `Relay settings…`, below `Relay`): the `remote_tunnel`
     switch; on, a checklist follows: `cloudflared` (`Installed · <path>` with
     a green check, or `Not installed` with an `Install` button when

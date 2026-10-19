@@ -14,6 +14,7 @@ pub enum Page {
     /// Where Settings opens (and opens again once closed).
     #[default]
     General,
+    Profiles,
     Appearance,
     Features,
     Terminal,
@@ -26,8 +27,9 @@ pub enum Page {
 }
 
 impl Page {
-    pub const ALL: [Page; 10] = [
+    pub const ALL: [Page; 11] = [
         Page::General,
+        Page::Profiles,
         Page::Appearance,
         Page::Features,
         Page::Terminal,
@@ -42,6 +44,7 @@ impl Page {
     pub fn label(self) -> &'static str {
         match self {
             Page::General => "General",
+            Page::Profiles => "Profiles",
             Page::Appearance => "Appearance",
             Page::Features => "Input",
             Page::Terminal => "Terminal",
@@ -57,6 +60,9 @@ impl Page {
     fn subtitle(self) -> &'static str {
         match self {
             Page::General => "Shell and session behavior.",
+            Page::Profiles => {
+                "The shells and programs tabs open with. Drag a row (or ⌥↑ ⌥↓) to reorder."
+            }
             Page::Appearance => "Fonts, cursor, window and theme. Changes apply as you make them.",
             Page::Features => "The command line and blocks.",
             Page::Terminal => "Mouse, clipboard and keys inside the terminal.",
@@ -80,6 +86,8 @@ impl Page {
     fn icon(self) -> Icon {
         match self {
             Page::General => Icon::Settings,
+            // what a tab is launched with
+            Page::Profiles => Icon::Launch,
             Page::Appearance => Icon::Appearance,
             Page::Features => Icon::Terminal,
             // Input already shows the terminal mark; this page is mostly
@@ -391,7 +399,31 @@ pub struct SettingsState {
     /// When config.toml was last written or reloaded: "Open config.toml"
     /// shows a check for `SAVED_SHOWN` after it.
     pub saved_at: Option<std::time::Instant>,
+    /// The text field being edited (`ClickTarget::SettingsText`): its id
+    /// and draft. ⏎ or a click away saves it, Esc cancels.
+    pub text_edit: Option<(&'static str, String)>,
+    /// Settings › Profiles: the profile whose edit form is open.
+    pub profile_open: Option<usize>,
+    /// Settings › Profiles: why the last change was not saved (shown in the
+    /// open form until the next edit).
+    pub profile_error: Option<String>,
+    /// Settings › Profiles: a row pressed for a drag.
+    pub profile_drag: Option<ProfileDrag>,
 }
+
+/// A Settings › Profiles row held by the pointer: past a few pixels it moves
+/// with it; released, it lands at `to`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProfileDrag {
+    pub from: usize,
+    pub press_y: f32,
+    pub live: bool,
+    /// Where it would land (an index into the list without it moved yet).
+    pub to: usize,
+}
+
+/// Pointer travel (logical px) before a pressed profile row drags.
+pub const PROFILE_DRAG_SLOP: f32 = 4.0;
 
 /// How long the "updated" check stays beside "Open config.toml".
 pub const SAVED_SHOWN: std::time::Duration = std::time::Duration::from_secs(3);
@@ -430,6 +462,10 @@ impl SettingsState {
         self.dropdown = None;
         self.recording = None;
         self.remote.relay_edit = None;
+        self.text_edit = None;
+        self.profile_open = None;
+        self.profile_error = None;
+        self.profile_drag = None;
     }
 
     /// Keyboard sidebar navigation, clamped at the first/last page.
@@ -495,6 +531,10 @@ fn focusable(target: &ClickTarget) -> bool {
             | ClickTarget::RemoteRelayRetry
             | ClickTarget::RemoteRelaySettings
             | ClickTarget::RemotePermission(..)
+            | ClickTarget::SettingsText(_)
+            | ClickTarget::ProfileRow(_)
+            | ClickTarget::Profile(..)
+            | ClickTarget::ProfileAdd
     )
 }
 
@@ -551,6 +591,150 @@ fn lookup<'a>(table: &'a toml::Table, id: &str) -> Option<&'a toml::Value> {
     }
     Some(v)
 }
+
+/// Every config.toml key (dotted inside a table) a Settings row controls,
+/// page by page. `every_config_key_has_a_settings_row` holds config.toml to
+/// it: a new key needs a row here, or a reason in that test's allow-list.
+pub const ROWS: &[&str] = &[
+    // General
+    "launch_at_login",
+    "shell",
+    "scrollback",
+    "restore_session",
+    "working_directory",
+    "confirm_close_running",
+    "save_transcripts",
+    "durable_sessions",
+    "global_hotkey",
+    "hotkey_window",
+    "hotkey_window_height",
+    "hotkey_window_edge",
+    "hotkey_window_width",
+    "hotkey_window_screen",
+    "hotkey_window_hide_on_blur",
+    "check_for_updates",
+    "control_api",
+    // Profiles (the list itself is the page)
+    "default_profile",
+    "discover_shells",
+    // Appearance
+    "font_family",
+    "font_size",
+    "line_height",
+    "font_weight",
+    "bold_font_weight",
+    "bold_is_bright",
+    "minimum_contrast",
+    "font_features",
+    "ambiguous_width",
+    "cursor_style",
+    "cursor_hollow_unfocused",
+    "cursor_blink",
+    "theme",
+    "sync_os_theme",
+    "theme_light",
+    "window_opacity",
+    "window_blur",
+    "window_padding",
+    "window_padding_left",
+    "window_padding_right",
+    "window_padding_top",
+    "window_padding_bottom",
+    "alt_screen_padding",
+    "app_icon",
+    "ligatures",
+    "launch_mode",
+    "window_width",
+    "window_height",
+    "always_on_top",
+    "snap_to_cells",
+    "resize_overlay",
+    "tab_layout",
+    "tab_close_button",
+    "tab_close_side",
+    "tab_bar",
+    "new_tab_placement",
+    "tab_switch_order",
+    "tab_bar_with_one_tab",
+    // the Toolbar rows: each button's side and place
+    "toolbar_left",
+    "toolbar_right",
+    "dim_inactive_panes",
+    "inactive_pane_dim",
+    "focus_follows_mouse",
+    // Input
+    "vim_mode",
+    "vim_clipboard",
+    "shell_widgets",
+    "autosuggestions",
+    "completions_menu",
+    "shell_completions",
+    "autocomplete_pairs",
+    "input_position",
+    "blocks_start",
+    "sticky_command_header",
+    "block_spacing",
+    "block_dividers",
+    "jump_to_bottom_button",
+    "prompt",
+    // the Prompt chips preview opens Edit prompt
+    "prompt_chips",
+    "elapsed_counts",
+    "alias_expansion",
+    "error_underline",
+    "command_corrections",
+    "subshell_offer",
+    "subshell_commands",
+    "subshell_denylist",
+    "rich_input_submit",
+    "rich_input_auto",
+    // Terminal
+    "mouse_reporting",
+    "middle_click_paste",
+    "link_click",
+    "wheel_scroll_lines",
+    "wheel_zoom",
+    "word_chars",
+    "word_delimiters",
+    "copy_on_select",
+    "confirm_multiline_paste",
+    "clipboard_access",
+    "large_paste_warning",
+    "trim_paste",
+    "scrollbar",
+    "close_on_exit",
+    "mask_secrets",
+    "show_progress",
+    "option_as_meta",
+    "right_option_as_meta",
+    // Files
+    "link_editor",
+    "file_editor",
+    "explorer_hidden_files",
+    // Notifications
+    "notifications.enabled",
+    "notifications.toasts",
+    "notifications.toast_secs",
+    "request_attention",
+    "notify_on_completion",
+    "notify_threshold_secs",
+    "notifications.command_failed",
+    "notifications.agent_task_completed",
+    "notifications.needs_attention",
+    "notifications.password_prompt",
+    "notifications.play_sound",
+    "notifications.sound",
+    "notifications.sound_finished",
+    "notifications.sound_failed",
+    "notifications.sound_attention",
+    "bell",
+    // Remote access
+    "remote_access",
+    "confirm_background_quit",
+    "remote_listen",
+    "remote_relay",
+    "remote_tunnel",
+];
 
 /// Settings the control of `id` also stands for (the "Window padding"
 /// stepper shows the left and right padding in effect).
@@ -765,6 +949,14 @@ pub fn render(
         ny += 30.0 + 10.0;
     }
 
+    // a short window closes the 2 px gaps between the page rows before the
+    // foot (Open config.toml) runs out of room
+    let foot_room = 8.0 + 40.0;
+    let pitch = if ny + Page::ALL.len() as f32 * 34.0 + foot_room > bottom {
+        32.0
+    } else {
+        34.0
+    };
     for (i, page) in Page::ALL.iter().enumerate() {
         let selected = state.page == *page && state.query.is_empty();
         let row = [x0 + 8.0, ny, sidebar_w - 16.0, 32.0];
@@ -804,7 +996,7 @@ pub fn render(
                 if selected { ", current page" } else { "" }
             ),
         ));
-        ny += 34.0;
+        ny += pitch;
     }
 
     // sidebar foot: open config.toml in the reading pane
@@ -949,10 +1141,13 @@ pub fn render(
         pushed: false,
         stops,
         scroll: state.scroll,
+        edit: state.text_edit.as_ref().map(|(id, t)| (*id, t.as_str())),
+        blink_on,
     };
     if searching {
         for page in [
             Page::General,
+            Page::Profiles,
             Page::Appearance,
             Page::Features,
             Page::Terminal,
@@ -963,6 +1158,8 @@ pub fn render(
             form.page = page.label();
             match page {
                 Page::General => general_page(&mut form, config, &state.update),
+                // its settings only: the list and its forms need the page
+                Page::Profiles => profile_settings(&mut form, config),
                 Page::Appearance => appearance_page(&mut form, config),
                 Page::Features => features_page(&mut form, config),
                 Page::Terminal => terminal_page(&mut form, config),
@@ -985,6 +1182,7 @@ pub fn render(
         match state.page {
             Page::Appearance => appearance_page(&mut form, config),
             Page::General => general_page(&mut form, config, &state.update),
+            Page::Profiles => profiles_page(&mut form, config, state),
             Page::Features => features_page(&mut form, config),
             Page::Terminal => terminal_page(&mut form, config),
             Page::Files => files_page(&mut form, config),
@@ -1154,8 +1352,9 @@ fn dropdown(
             icon_swatch(layer, icon, [tx, cy - 8.0], 16.0);
             tx += 24.0;
         }
-        // themes: their ground ringed in their accent
-        if dd.id.starts_with("theme") {
+        // themes: their ground ringed in their accent (a profile's "Window
+        // theme" has none of its own)
+        if dd.id.starts_with("theme") || (dd.id == "profile.theme" && !value.is_empty()) {
             let t = rift_core::theme::load_by_name(value);
             layer.bordered([tx, cy - 7.0], [14.0, 14.0], t.bg, t.accent, 3.0, 2.0);
             tx += 22.0;
@@ -1260,6 +1459,20 @@ struct Form<'a> {
     /// Every focusable control in page coordinates (see `push_hit`).
     stops: &'a mut Vec<(ClickTarget, [f32; 4])>,
     scroll: f32,
+    /// The text field being edited and its draft.
+    edit: Option<(&'static str, &'a str)>,
+    blink_on: bool,
+}
+
+/// A text setting's row (`Form::text_row`).
+struct TextRow<'a> {
+    label: &'a str,
+    desc: &'a str,
+    value: &'a str,
+    placeholder: &'a str,
+    id: &'static str,
+    /// Shown, not editable (a detected profile's command).
+    read_only: bool,
 }
 
 impl Form<'_> {
@@ -1400,6 +1613,12 @@ impl Form<'_> {
     /// A setting changed from its default: an accent dot after the label
     /// and ↺ (reset) left of the control at `control_x`.
     fn changed(&mut self, id: &'static str, y: f32, control_x: f32) {
+        // a row's key is listed (the toolbar's per-button ids stand for
+        // toolbar_left / toolbar_right; a profile's fields for the list)
+        debug_assert!(
+            ROWS.contains(&id) || id.starts_with("toolbar") || id.starts_with("profile."),
+            "Settings row {id} is missing from settings::ROWS"
+        );
         if self.hidden || !is_changed(self.current, self.defaults, id) {
             return;
         }
@@ -2032,6 +2251,109 @@ impl Form<'_> {
         );
         self.name_last(format!("{label}: {value}"));
     }
+
+    /// A text setting: label (and description) left, a field right (the
+    /// relay field's) that a click edits; ⏎ or a click away saves it.
+    fn text_row(&mut self, y: f32, t: &TextRow) {
+        let fw = (self.card_w * 0.45).clamp(160.0, 280.0);
+        self.reserve = fw + 40.0;
+        // a description too long beside the field wraps (never cut): the
+        // row grows by its extra lines
+        let beside = (self.card_w - self.reserve - 8.0).max(60.0);
+        let lines = if self.filter.is_empty()
+            && self.engine.measure(t.desc, 12.0, FONT_SANS, Weight::NORMAL) > beside
+        {
+            wrap_lines(self.engine, t.desc, 12.0, FONT_SANS, beside)
+        } else {
+            Vec::new()
+        };
+        let extra = lines.len().saturating_sub(1) as f32 * NOTE_LH;
+        self.extra_h = extra;
+        // (a blank description keeps the label on the two-line row's top line)
+        self.label_desc(t.label, if lines.is_empty() { t.desc } else { " " }, y);
+        if self.hidden {
+            return;
+        }
+        if self.visible(y, ROW_H + extra) {
+            for (k, l) in lines.iter().enumerate() {
+                self.layer.text(
+                    sans(self.engine, l, 12.0, Weight::NORMAL),
+                    self.x,
+                    y + 28.0 + k as f32 * NOTE_LH,
+                    self.theme.text_muted,
+                );
+            }
+        }
+        let fx = self.right() - fw;
+        let r = [fx, y + (ROW_H - CONTROL_H) / 2.0, fw, CONTROL_H];
+        self.changed(t.id, y, fx);
+        if t.read_only {
+            if self.visible(r[1], r[3]) {
+                // a disabled control (DESIGN.md › Buttons): 3 % fill, 8 % hairline
+                self.layer.bordered(
+                    [r[0], r[1]],
+                    [r[2], r[3]],
+                    lift(self.theme, 0.03),
+                    lift(self.theme, 0.08),
+                    4.0,
+                    1.0,
+                );
+                let shown =
+                    super::palette::elide_to(self.engine, t.value, 13.0, FONT_SANS, r[2] - 20.0);
+                self.layer.text(
+                    sans(self.engine, &shown, 13.0, Weight::NORMAL),
+                    r[0] + 10.0,
+                    r[1] + 5.2,
+                    self.theme.text_muted,
+                );
+            }
+            self.push_hit(r, ClickTarget::SettingsNoop);
+            self.name_last(format!("{}: {}, read-only", t.label, t.value));
+            return;
+        }
+        let editing = self.edit.filter(|(id, _)| *id == t.id).map(|(_, d)| d);
+        let name = match editing {
+            Some(d) => format!("{}, editing: {d}", t.label),
+            None if t.value.is_empty() && t.placeholder.is_empty() => format!("{}: none", t.label),
+            None if t.value.is_empty() => format!("{}: {}", t.label, t.placeholder),
+            None => format!("{}: {}", t.label, t.value),
+        };
+        let blink = self.blink_on;
+        self.text_field(
+            r,
+            t.value,
+            t.placeholder,
+            editing,
+            blink,
+            ClickTarget::SettingsText(t.id),
+            name,
+        );
+    }
+
+    /// Width of a [`Form::badge`] reading `text`.
+    fn badge_width(&mut self, text: &str) -> f32 {
+        (self.engine.measure(text, 11.5, FONT_SANS, Weight::MEDIUM) + 18.0).round()
+    }
+
+    /// A tag (the Themes page's "active" chip) at `x` on the row at `y`:
+    /// `ink` text on `ink` at 16 % (`None`: muted on a lift).
+    fn badge(&mut self, x: f32, y: f32, text: &str, ink: Option<Color>) {
+        if !self.visible(y, ROW_H) {
+            return;
+        }
+        let w = self.badge_width(text);
+        let (fill, ink) = match ink {
+            Some(c) => (c.with_alpha(0.16), c),
+            None => (lift(self.theme, 0.08), self.theme.text_dim),
+        };
+        self.layer.rect([x, y + 15.0], [w, 22.0], fill, 4.0);
+        self.layer.text(
+            sans(self.engine, text, 11.5, Weight::MEDIUM),
+            x + 9.0,
+            y + 18.5,
+            ink,
+        );
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2075,11 +2397,22 @@ fn remote_page(
             if !cfg!(target_os = "macos") {
                 "Rift quits, phones can no longer reach it"
             } else if !config.durable_sessions {
-                "Rift quits (durable_sessions is off in config.toml)"
+                "Rift quits (Keep shells running through updates is off in General)"
             } else {
                 "Rift keeps running in the menu bar; phones that may run commands can open tabs"
             },
         );
+        // the question a quit asks while Rift keeps running (macOS)
+        if cfg!(target_os = "macos") {
+            let y = form.y;
+            form.toggle_desc(
+                y,
+                "Ask before keeping Rift running",
+                "⌘Q asks once; off keeps it running unasked",
+                config.confirm_background_quit,
+                "confirm_background_quit",
+            );
+        }
     }
 
     connection_rows(form, config, view);
@@ -2702,6 +3035,18 @@ fn relay_settings(form: &mut Form, config: &Config, view: &RemoteView, blink_on:
     if !view.relay_open {
         return;
     }
+    let y = form.y;
+    form.text_row(
+        y,
+        &TextRow {
+            label: "Listen address",
+            desc: "IP:PORT phones on this network reach; 0.0.0.0 is every network",
+            value: &config.remote_listen,
+            placeholder: "0.0.0.0:7878",
+            id: "remote_listen",
+            read_only: false,
+        },
+    );
     // the tunnel's relay has no address to edit
     if !(config.remote_access && config.remote_tunnel) {
         relay_row(form, config, view, blink_on);
@@ -3028,6 +3373,460 @@ fn thousands(n: usize) -> String {
     out
 }
 
+/// Words as a text field shows them, each quoted when it needs it (a
+/// profile's arguments and environment).
+pub fn join_words<S: AsRef<str>>(words: &[S]) -> String {
+    words
+        .iter()
+        .map(|w| rift_core::ssh::quote(w.as_ref()))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A text field's words: split at blanks, quotes and backslashes as in a
+/// shell.
+pub fn split_words(text: &str) -> Vec<String> {
+    rift_core::completion_specs::tokenize(text)
+}
+
+/// A profile's environment as its field shows it: `NAME=value …`.
+pub fn env_text(env: &std::collections::BTreeMap<String, String>) -> String {
+    let pairs: Vec<String> = env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    join_words(&pairs)
+}
+
+/// What a profile runs, as its row describes it: the program and its
+/// arguments, or "Shell path" (the global `shell`).
+pub fn profile_command(p: &rift_core::profiles::Profile) -> String {
+    let mut what = p
+        .command
+        .clone()
+        .unwrap_or_else(|| "Shell path".to_string());
+    if !p.args.is_empty() {
+        what.push(' ');
+        what.push_str(&join_words(&p.args));
+    }
+    what
+}
+
+/// A profile's tab colour as its select shows it (`None`: no colour).
+pub fn profile_color_label(color: Option<&str>) -> String {
+    match color.map(str::trim).filter(|c| !c.is_empty()) {
+        None => "None".into(),
+        Some(c) if c.starts_with('#') => c.to_string(),
+        Some(c) => {
+            let mut chars = c.chars();
+            chars
+                .next()
+                .map(|f| f.to_uppercase().chain(chars).collect())
+                .unwrap_or_default()
+        }
+    }
+}
+
+/// The Default profile select's value for no default profile.
+pub const NO_DEFAULT_PROFILE: &str = "Shell path";
+
+/// Settings › Profiles' own settings (also what the search finds): the
+/// default profile and the installed shells.
+fn profile_settings(form: &mut Form, config: &Config) {
+    form.group("New tabs");
+    let default = config
+        .default_profile
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty());
+    let y = form.y;
+    form.select(
+        y,
+        "Default profile",
+        default.unwrap_or(NO_DEFAULT_PROFILE),
+        "default_profile",
+    );
+    let y = form.y;
+    form.toggle_desc(
+        y,
+        "Add installed shells as profiles",
+        "Each shell in /etc/shells, once; a deleted one stays deleted",
+        config.discover_shells,
+        "discover_shells",
+    );
+}
+
+/// Settings › Profiles: the default profile, the installed shells, then
+/// every `[[profiles]]` entry in file order (badges, Edit, drag to move),
+/// the open one's form under it, and Add.
+fn profiles_page(form: &mut Form, config: &Config, state: &SettingsState) {
+    profile_settings(form, config);
+    let default = config
+        .default_profile
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty());
+    form.group("Your profiles");
+    let drag = state.profile_drag.filter(|d| d.live);
+    let n = config.profiles.len();
+    // the dragged row's landing place: a caret at its top edge (or the
+    // last row's bottom)
+    let mut caret = None;
+    for (i, p) in config.profiles.iter().enumerate() {
+        // (just above or below itself it would not move)
+        if drag.is_some_and(|d| d.to == i && d.to != d.from && d.to != d.from + 1) {
+            caret = Some(form.y);
+        }
+        let open = state.profile_open == Some(i);
+        profile_row(
+            form,
+            i,
+            n,
+            p,
+            default == Some(p.name.trim()),
+            open,
+            drag.is_some_and(|d| d.from == i),
+        );
+        if open {
+            profile_form(
+                form,
+                i,
+                p,
+                default == Some(p.name.trim()),
+                state.profile_error.as_deref(),
+            );
+        }
+    }
+    if drag.is_some_and(|d| d.to >= n && d.from + 1 < n) {
+        caret = Some(form.y);
+    }
+    if let Some(cy) = caret
+        && form.visible_band(cy - 1.0, 2.0)
+    {
+        form.layer.rect(
+            [form.x, cy - 1.0],
+            [form.card_w, 2.0],
+            form.theme.accent,
+            0.0,
+        );
+    }
+    if config.profiles.is_empty() {
+        let y = form.y;
+        form.label_desc(
+            "No profiles",
+            "New tabs run the Shell path; add a profile for another shell or program",
+            y,
+        );
+    }
+    let y = form.y;
+    let label = "Add";
+    let bw = form.engine.measure(label, 12.5, FONT_SANS, Weight::MEDIUM) + 24.0;
+    form.reserve = bw + 40.0;
+    form.label_desc(
+        "New profile",
+        "Runs your login shell until you change it",
+        y,
+    );
+    if !form.hidden {
+        let by = y + (ROW_H - CONTROL_H) / 2.0;
+        let bx = form.right() - bw.round();
+        form.button(
+            bx,
+            by,
+            label,
+            ButtonKind::Secondary,
+            ClickTarget::ProfileAdd,
+            "Add a profile".into(),
+        );
+    }
+}
+
+/// Width of the drag grip column left of a profile's name.
+const GRIP_W: f32 = 24.0;
+
+/// One profile's row: grip, name over what it runs, its badges (Default,
+/// Detected, Hidden, Not found) and Edit (Done while its form is open).
+#[allow(clippy::too_many_arguments)]
+fn profile_row(
+    form: &mut Form,
+    i: usize,
+    n: usize,
+    p: &rift_core::profiles::Profile,
+    is_default: bool,
+    open: bool,
+    dragged: bool,
+) {
+    let y = form.y;
+    let theme = form.theme;
+    let mut badges: Vec<(&str, Option<Color>)> = Vec::new();
+    if is_default {
+        badges.push(("Default", Some(theme.accent)));
+    }
+    if p.is_generated() {
+        badges.push(("Detected", None));
+    }
+    if p.hidden {
+        badges.push(("Hidden", None));
+    }
+    if p.orphaned {
+        badges.push(("Not found", Some(theme.error)));
+    }
+    let edit = if open { "Done" } else { "Edit" };
+    let bw = (form.engine.measure(edit, 12.5, FONT_SANS, Weight::MEDIUM) + 24.0).round();
+    let widths: Vec<f32> = badges.iter().map(|(t, _)| form.badge_width(t)).collect();
+    let tags_w: f32 = widths.iter().map(|w| w + 8.0).sum();
+    form.reserve = bw + tags_w + 40.0;
+    let what = profile_command(p);
+    // the name sits right of the grip
+    form.x += GRIP_W;
+    form.card_w -= GRIP_W;
+    form.label_desc(&p.name, &what, y);
+    form.x -= GRIP_W;
+    form.card_w += GRIP_W;
+    if form.hidden {
+        return;
+    }
+    let row = [form.x, y, form.card_w, ROW_H];
+    if form.visible(y, ROW_H) {
+        if dragged {
+            form.layer.rect(
+                [row[0], row[1]],
+                [row[2], row[3] - 1.0],
+                lift(theme, 0.07),
+                0.0,
+            );
+        } else if form.hot(row) {
+            form.layer.rect(
+                [row[0], row[1]],
+                [row[2], row[3] - 1.0],
+                lift(theme, 0.03),
+                0.0,
+            );
+        }
+        icons::draw(
+            form.layer,
+            Icon::Grip,
+            [form.x + 8.0, y + ROW_H / 2.0],
+            14.0,
+            theme.text_muted,
+        );
+        form.layer
+            .hline(form.x, y + ROW_H - 1.0, GRIP_W, 1.0, lift(theme, 0.06));
+    }
+    let bx = form.right() - bw;
+    let mut tx = bx - tags_w;
+    for ((text, ink), w) in badges.iter().zip(&widths) {
+        form.badge(tx, y, text, *ink);
+        tx += w + 8.0;
+    }
+    form.button(
+        bx,
+        y + (ROW_H - CONTROL_H) / 2.0,
+        edit,
+        ButtonKind::Secondary,
+        ClickTarget::Profile(i, crate::state::ProfileOp::Edit),
+        format!("{edit} {}", p.name),
+    );
+    // after the button, so a click finds the button first
+    let tags: Vec<&str> = badges.iter().map(|(t, _)| *t).collect();
+    form.push_hit(row, ClickTarget::ProfileRow(i));
+    form.name_last(format!(
+        "Profile {}, {} of {n}{}{}: {what}. Drag, or Option up and down arrows, to move it",
+        p.name,
+        i + 1,
+        if tags.is_empty() { "" } else { ", " },
+        tags.join(", ").to_lowercase(),
+    ));
+}
+
+/// The open profile's form: its fields (a detected one's command shown, not
+/// editable), why the last change was refused, and Set as default,
+/// Duplicate, Hide / Show, Delete.
+fn profile_form(
+    form: &mut Form,
+    i: usize,
+    p: &rift_core::profiles::Profile,
+    is_default: bool,
+    error: Option<&str>,
+) {
+    form.x += GRIP_W;
+    form.card_w -= GRIP_W;
+    let detected = p.is_generated();
+    let args = join_words(&p.args);
+    let env = env_text(&p.env);
+    let command = p.command.clone().unwrap_or_default();
+    let fields = [
+        TextRow {
+            label: "Name",
+            desc: "Shown in the + menu and the palette",
+            value: &p.name,
+            placeholder: "",
+            id: "profile.name",
+            read_only: false,
+        },
+        TextRow {
+            label: "Command",
+            desc: if detected {
+                "Duplicate to change the command"
+            } else {
+                "A path, ~/…, or a program on PATH"
+            },
+            value: &command,
+            placeholder: NO_DEFAULT_PROFILE,
+            id: "profile.command",
+            read_only: detected,
+        },
+        TextRow {
+            label: "Arguments",
+            desc: "Separated by spaces; quote one that has spaces",
+            value: &args,
+            placeholder: "None",
+            id: "profile.args",
+            read_only: false,
+        },
+        TextRow {
+            label: "Directory",
+            desc: "Where its tabs start (~ expands)",
+            value: p.cwd.as_deref().unwrap_or(""),
+            placeholder: "As New tabs start in",
+            id: "profile.cwd",
+            read_only: false,
+        },
+        TextRow {
+            label: "Environment",
+            desc: "NAME=value pairs, separated by spaces",
+            value: &env,
+            placeholder: "None",
+            id: "profile.env",
+            read_only: false,
+        },
+        TextRow {
+            label: "Tab title",
+            desc: "",
+            value: p.title.as_deref().unwrap_or(""),
+            placeholder: "The program's own",
+            id: "profile.title",
+            read_only: false,
+        },
+    ];
+    for f in &fields {
+        let y = form.y;
+        form.text_row(y, f);
+    }
+    let y = form.y;
+    form.select(
+        y,
+        "Tab color",
+        &profile_color_label(p.color.as_deref()),
+        "profile.color",
+    );
+    let y = form.y;
+    form.select(
+        y,
+        "Icon",
+        &profile_icon_label(p.icon.as_deref()),
+        "profile.icon",
+    );
+    let y = form.y;
+    match p.theme.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        Some(t) => form.theme_select(y, "Colour scheme", t, "profile.theme"),
+        None => form.select(y, "Colour scheme", "Window theme", "profile.theme"),
+    }
+    if let Some(e) = error {
+        let lines = wrap_lines(form.engine, e, 12.0, FONT_SANS, form.card_w);
+        let y = form.y + 8.0;
+        for (k, l) in lines.iter().enumerate() {
+            let ly = y + k as f32 * NOTE_LH;
+            if form.visible_band(ly, NOTE_LH) {
+                form.layer.text(
+                    sans(form.engine, l, 12.0, Weight::NORMAL),
+                    form.x,
+                    ly,
+                    form.theme.error,
+                );
+            }
+        }
+        let h = lines.len() as f32 * NOTE_LH;
+        form.hidden = false;
+        form.row_label = "Not saved".into();
+        form.push_hit([form.x, y, form.card_w, h], ClickTarget::SettingsNoop);
+        form.name_last(format!("Not saved: {e}"));
+        form.y = y + h;
+    }
+    // the actions, left to right; a row too narrow wraps them
+    use crate::state::ProfileOp;
+    let name = p.name.clone();
+    let buttons = [
+        if is_default {
+            (
+                "Set as default",
+                ButtonKind::Disabled,
+                ProfileOp::SetDefault,
+                format!("Set as default, unavailable: {name} is the default profile"),
+            )
+        } else {
+            (
+                "Set as default",
+                ButtonKind::Secondary,
+                ProfileOp::SetDefault,
+                format!("Make {name} the default profile"),
+            )
+        },
+        (
+            "Duplicate",
+            ButtonKind::Secondary,
+            ProfileOp::Duplicate,
+            format!("Duplicate {name}"),
+        ),
+        (
+            if p.hidden { "Show" } else { "Hide" },
+            ButtonKind::Secondary,
+            ProfileOp::ToggleHidden,
+            if p.hidden {
+                format!("Show {name} in the + menu and the palette")
+            } else {
+                format!("Hide {name} from the + menu and the palette")
+            },
+        ),
+        (
+            "Delete",
+            ButtonKind::Destructive,
+            ProfileOp::Delete,
+            format!("Delete {name}"),
+        ),
+    ];
+    let mut bx = form.x;
+    let mut by = form.y + 12.0;
+    for (label, kind, op, a11y) in buttons {
+        let w = (form.engine.measure(label, 12.5, FONT_SANS, Weight::MEDIUM) + 24.0).round();
+        if bx > form.x && bx + w > form.right() {
+            bx = form.x;
+            by += CONTROL_H + 8.0;
+        }
+        form.hidden = false;
+        form.row_label = label.into();
+        form.button(bx, by, label, kind, ClickTarget::Profile(i, op), a11y);
+        bx += w + 8.0;
+    }
+    form.y = by + CONTROL_H + 16.0;
+    if form.visible_band(form.y - 1.0, 1.0) {
+        form.layer.hline(
+            form.x - GRIP_W,
+            form.y - 1.0,
+            form.card_w + GRIP_W,
+            1.0,
+            lift(form.theme, 0.06),
+        );
+    }
+    form.x -= GRIP_W;
+    form.card_w += GRIP_W;
+}
+
+/// A profile's icon as its select shows it (`None`: the terminal).
+pub fn profile_icon_label(icon: Option<&str>) -> String {
+    match icon.map(str::trim).filter(|i| !i.is_empty()) {
+        None => "Terminal".into(),
+        Some(i) => profile_color_label(Some(i)),
+    }
+}
+
 fn appearance_page(form: &mut Form, config: &Config) {
     form.group("Font");
     let y = form.y;
@@ -3047,6 +3846,68 @@ fn appearance_page(form: &mut Form, config: &Config) {
         (config.line_height() - 1.0) / 1.2,
         &format!("{:.2}", config.line_height()),
         "line_height",
+    );
+    let (regular, bold) = config.font_weights();
+    let y = form.y;
+    form.stepper_desc(
+        y,
+        "Font weight",
+        "The font draws the nearest weight it has",
+        &regular.to_string(),
+        "",
+        "font_weight",
+    );
+    let y = form.y;
+    form.stepper(
+        y,
+        "Bold font weight",
+        &bold.to_string(),
+        "",
+        "bold_font_weight",
+    );
+    let y = form.y;
+    form.toggle_desc(
+        y,
+        "Bold text in bright colors",
+        "Bold text in one of the eight ANSI colors uses its bright variant",
+        config.bold_is_bright,
+        "bold_is_bright",
+    );
+    let y = form.y;
+    let contrast = config.min_contrast();
+    form.stepper_desc(
+        y,
+        "Minimum contrast",
+        "Against its background; WCAG AA asks 4.5",
+        &if contrast <= 1.0 {
+            "Off".to_string()
+        } else {
+            format!("{contrast:.1}")
+        },
+        "",
+        "minimum_contrast",
+    );
+    let y = form.y;
+    let features = join_words(&config.font_features);
+    form.text_row(
+        y,
+        &TextRow {
+            label: "Font features",
+            desc: "OpenType features, e.g. ss01 zero -calt",
+            value: &features,
+            placeholder: "None",
+            id: "font_features",
+            read_only: false,
+        },
+    );
+    let y = form.y;
+    form.segment_desc(
+        y,
+        "Ambiguous-width characters",
+        "East Asian Ambiguous characters",
+        &["Narrow", "Wide"],
+        usize::from(config.ambiguous_width == rift_core::AmbiguousWidth::Wide),
+        "ambiguous_width",
     );
 
     form.group("Cursor");
@@ -3128,6 +3989,31 @@ fn appearance_page(form: &mut Form, config: &Config) {
         "px",
         "window_padding",
     );
+    let pad = config.paddings(false);
+    let y = form.y;
+    form.stepper(
+        y,
+        "Top padding",
+        &format!("{:.0}", pad.top),
+        "px",
+        "window_padding_top",
+    );
+    let y = form.y;
+    form.stepper(
+        y,
+        "Bottom padding",
+        &format!("{:.0}", pad.bottom),
+        "px",
+        "window_padding_bottom",
+    );
+    let y = form.y;
+    form.toggle_desc(
+        y,
+        "Pad full-screen programs",
+        "Off: vim, htop and the like fill the pane edge to edge",
+        config.alt_screen_padding,
+        "alt_screen_padding",
+    );
     let y = form.y;
     form.icon_select(y, config.app_icon);
     let y = form.y;
@@ -3137,6 +4023,63 @@ fn appearance_page(form: &mut Form, config: &Config) {
         "Render -> >= != as combined glyphs",
         config.ligatures,
         "ligatures",
+    );
+
+    form.group("New windows");
+    let y = form.y;
+    form.segment(
+        y,
+        "Open new windows",
+        &["As saved", "Maximized", "Full screen"],
+        match config.launch_mode {
+            rift_core::LaunchMode::Default => 0,
+            rift_core::LaunchMode::Maximized => 1,
+            rift_core::LaunchMode::Fullscreen => 2,
+        },
+        "launch_mode",
+    );
+    let (w, h) = config.window_size();
+    let y = form.y;
+    form.stepper_desc(
+        y,
+        "Window width",
+        "Without a saved size",
+        &format!("{w:.0}"),
+        "px",
+        "window_width",
+    );
+    let y = form.y;
+    form.stepper_desc(
+        y,
+        "Window height",
+        "Without a saved size",
+        &format!("{h:.0}"),
+        "px",
+        "window_height",
+    );
+    let y = form.y;
+    form.toggle_desc(
+        y,
+        "Keep windows on top",
+        "New windows float above other apps' windows",
+        config.always_on_top,
+        "always_on_top",
+    );
+    let y = form.y;
+    form.toggle_desc(
+        y,
+        "Resize in whole cells",
+        "A window's size snaps to the terminal grid",
+        config.snap_to_cells,
+        "snap_to_cells",
+    );
+    let y = form.y;
+    form.toggle_desc(
+        y,
+        "Show the size while resizing",
+        "Columns × rows over the window as it resizes",
+        config.resize_overlay,
+        "resize_overlay",
     );
 
     form.group("Tabs");
@@ -3198,6 +4141,14 @@ fn appearance_page(form: &mut Form, config: &Config) {
             NewTabPlacement::AfterCurrent => 1,
         },
         "new_tab_placement",
+    );
+    let y = form.y;
+    form.segment(
+        y,
+        "⌃Tab switches",
+        &["In order", "Last used first"],
+        usize::from(config.tab_switch_order == rift_core::TabSwitchOrder::Mru),
+        "tab_switch_order",
     );
     let y = form.y;
     form.toggle_desc(
@@ -3282,45 +4233,19 @@ fn general_page(form: &mut Form, config: &Config, update: &UpdateLine) {
     }
 
     form.group("Shell");
-    // what actually runs: a configured shell that is not executable falls back
-    let shell = rift_core::shell_integration::resolve_shell(config.shell.as_deref());
+    // unset: what runs (a configured shell that is not executable falls
+    // back); profiles are on their own page
+    let resolved = rift_core::shell_integration::resolve_shell(None);
     let y = form.y;
-    form.display(y, "Shell path", &shell);
-    // profiles are edited in config.toml ("Open config.toml" above); this
-    // lists them, read-only
-    let default = config
-        .default_profile
-        .as_deref()
-        .map(str::trim)
-        .filter(|n| !n.is_empty());
-    let y = form.y;
-    form.display(y, "Default profile", default.unwrap_or("none (Shell path)"));
-    for p in &config.profiles {
-        let mut what = p
-            .command
-            .clone()
-            .unwrap_or_else(|| "Shell path".to_string());
-        for a in &p.args {
-            what.push(' ');
-            what.push_str(a);
-        }
-        // a long name stops short of the value column
-        let name: String = if p.name.chars().count() > 40 {
-            p.name.chars().take(39).chain(['…']).collect()
-        } else {
-            p.name.clone()
-        };
-        let y = form.y;
-        form.display(y, &format!("Profile: {name}"), &what);
-    }
-    let y = form.y;
-    form.display(
+    form.text_row(
         y,
-        "Installed shells as profiles",
-        if config.discover_shells {
-            "on (/etc/shells)"
-        } else {
-            "off"
+        &TextRow {
+            label: "Shell path",
+            desc: "What tabs run without a profile; empty: your login shell",
+            value: config.shell.as_deref().unwrap_or(""),
+            placeholder: &resolved,
+            id: "shell",
+            read_only: false,
         },
     );
     let y = form.y;
@@ -3369,9 +4294,28 @@ fn general_page(form: &mut Form, config: &Config, update: &UpdateLine) {
         config.save_transcripts,
         "save_transcripts",
     );
+    let y = form.y;
+    form.toggle_desc(
+        y,
+        "Keep shells running through updates",
+        "An update or a crash leaves them running",
+        config.durable_sessions,
+        "durable_sessions",
+    );
 
-    // the hotkey itself (`global_hotkey`) is set in config.toml
     form.group("Hotkey window");
+    let y = form.y;
+    form.text_row(
+        y,
+        &TextRow {
+            label: "Global hotkey",
+            desc: "Shows and hides Rift from any app, e.g. alt+space",
+            value: &config.global_hotkey,
+            placeholder: "Off",
+            id: "global_hotkey",
+            read_only: false,
+        },
+    );
     let y = form.y;
     form.toggle_desc(
         y,
@@ -3388,6 +4332,40 @@ fn general_page(form: &mut Form, config: &Config, update: &UpdateLine) {
         &config.hotkey_window_height().to_string(),
         "%",
         "hotkey_window_height",
+    );
+    let y = form.y;
+    form.segment(
+        y,
+        "Screen edge",
+        &["Top", "Bottom", "Left", "Right"],
+        match config.hotkey_window_edge {
+            rift_core::HotkeyEdge::Top => 0,
+            rift_core::HotkeyEdge::Bottom => 1,
+            rift_core::HotkeyEdge::Left => 2,
+            rift_core::HotkeyEdge::Right => 3,
+        },
+        "hotkey_window_edge",
+    );
+    let y = form.y;
+    form.stepper_desc(
+        y,
+        "Hotkey window width",
+        "Share of the edge it covers, centred",
+        &config.hotkey_window_width().to_string(),
+        "%",
+        "hotkey_window_width",
+    );
+    let y = form.y;
+    form.text_row(
+        y,
+        &TextRow {
+            label: "Screen",
+            desc: "pointer (the one with the mouse), primary, or a screen's number",
+            value: &config.hotkey_window_screen,
+            placeholder: "pointer",
+            id: "hotkey_window_screen",
+            read_only: false,
+        },
     );
     let y = form.y;
     form.toggle(
@@ -3498,6 +4476,42 @@ fn terminal_page(form: &mut Form, config: &Config) {
         "lines",
         "wheel_scroll_lines",
     );
+    let y = form.y;
+    form.toggle_desc(
+        y,
+        if cfg!(target_os = "macos") {
+            "⌘-scroll zooms the font"
+        } else {
+            "Ctrl-scroll zooms the font"
+        },
+        "With ⇧ it changes the window opacity",
+        config.wheel_zoom,
+        "wheel_zoom",
+    );
+    let y = form.y;
+    form.text_row(
+        y,
+        &TextRow {
+            label: "Word characters",
+            desc: "Extra characters a double-click keeps in a word, e.g. -./",
+            value: &config.word_chars,
+            placeholder: "None",
+            id: "word_chars",
+            read_only: false,
+        },
+    );
+    let y = form.y;
+    form.text_row(
+        y,
+        &TextRow {
+            label: "Word delimiters",
+            desc: "Characters that also end a word, for double-click and ⌥← ⌥→",
+            value: &config.word_delimiters,
+            placeholder: "None",
+            id: "word_delimiters",
+            read_only: false,
+        },
+    );
 
     form.group("Clipboard");
     let y = form.y;
@@ -3521,6 +4535,75 @@ fn terminal_page(form: &mut Form, config: &Config) {
             _ => 1,
         },
         "clipboard_access",
+    );
+    let y = form.y;
+    form.stepper_desc(
+        y,
+        "Ask before pasting more than",
+        "Off never asks",
+        &if config.large_paste_warning == 0 {
+            "Off".to_string()
+        } else {
+            thousands(config.large_paste_warning as usize)
+        },
+        if config.large_paste_warning == 0 {
+            ""
+        } else {
+            "KiB"
+        },
+        "large_paste_warning",
+    );
+    let y = form.y;
+    form.toggle_desc(
+        y,
+        "Trim trailing blanks from pastes",
+        "A copied line then no longer runs when pasted",
+        config.trim_paste,
+        "trim_paste",
+    );
+
+    form.group("Panes");
+    let y = form.y;
+    form.segment_desc(
+        y,
+        "Scrollbar",
+        "Auto: while scrolling or hovered",
+        &["Auto", "Always", "Never"],
+        match config.scrollbar {
+            rift_core::ScrollbarMode::Auto => 0,
+            rift_core::ScrollbarMode::Always => 1,
+            rift_core::ScrollbarMode::Never => 2,
+        },
+        "scrollbar",
+    );
+    let y = form.y;
+    form.segment_desc(
+        y,
+        "When its program exits",
+        "Keep: its output and Restart",
+        &["Close", "Close on success", "Keep"],
+        match config.close_on_exit {
+            rift_core::CloseOnExit::Always => 0,
+            rift_core::CloseOnExit::Graceful => 1,
+            rift_core::CloseOnExit::Never => 2,
+        },
+        "close_on_exit",
+    );
+    let y = form.y;
+    form.toggle_desc(
+        y,
+        "Mask secrets",
+        "Tokens and keys show as ••••",
+        config.mask_secrets,
+        "mask_secrets",
+    );
+    let y = form.y;
+    form.toggle_desc(
+        y,
+        "Show programs' progress",
+        "A bar under the tab (OSC 9;4)",
+        config.show_progress,
+        "show_progress",
     );
 
     if cfg!(target_os = "macos") {
@@ -3546,6 +4629,24 @@ fn features_page(form: &mut Form, config: &Config) {
     form.group("Input");
     let y = form.y;
     form.toggle(y, "Vim keybindings", config.vim_mode, "vim_mode");
+    let y = form.y;
+    form.segment_desc(
+        y,
+        "Vim's unnamed register",
+        "Where y and p go",
+        &["Rift only", "System clipboard"],
+        usize::from(config.vim_clipboard.trim() == "unnamed"),
+        "vim_clipboard",
+    );
+    let y = form.y;
+    form.segment_desc(
+        y,
+        "⌃R, ⌃T and ⌥C run",
+        "fzf or atuin, where the shell binds them",
+        &["The shell's", "Rift's"],
+        usize::from(config.shell_widgets == rift_core::ShellWidgets::Rift),
+        "shell_widgets",
+    );
     let y = form.y;
     form.toggle(
         y,
@@ -3680,9 +4781,35 @@ fn features_page(form: &mut Form, config: &Config) {
     form.toggle_desc(
         y,
         "Offer Rift in subshells",
-        "docker exec … bash, poetry shell; more in subshell_commands",
+        "docker exec … bash, poetry shell, and the commands below",
         config.subshell_offer,
         "subshell_offer",
+    );
+    let more = join_words(&config.subshell_commands);
+    let y = form.y;
+    form.text_row(
+        y,
+        &TextRow {
+            label: "More subshell commands",
+            desc: "Regular expressions, separated by spaces",
+            value: &more,
+            placeholder: "None",
+            id: "subshell_commands",
+            read_only: false,
+        },
+    );
+    let never = join_words(&config.subshell_denylist);
+    let y = form.y;
+    form.text_row(
+        y,
+        &TextRow {
+            label: "Never offer it for",
+            desc: "Commands, separated by spaces (Don't ask again adds one)",
+            value: &never,
+            placeholder: "None",
+            id: "subshell_denylist",
+            read_only: false,
+        },
     );
     let y = form.y;
     form.segment(
@@ -3874,6 +5001,18 @@ fn notifications_page(form: &mut Form, config: &Config) {
         &format!("{}", n.toast_duration().as_secs()),
         "s",
         "notifications.toast_secs",
+    );
+    let y = form.y;
+    form.toggle_desc(
+        y,
+        if cfg!(target_os = "macos") {
+            "Bounce the Dock icon"
+        } else {
+            "Mark the window urgent"
+        },
+        "For a bell or alert while Rift is in the back",
+        config.request_attention,
+        "request_attention",
     );
 
     desktop_notifications(form);
@@ -4462,6 +5601,57 @@ mod tests {
             (None, Some(20.0))
         );
         assert!(!is_changed(&config_table(&c), &d, "window_padding"));
+    }
+
+    /// config.toml keys of `config` (dotted inside a table), nested tables
+    /// walked, lists of tables kept whole.
+    fn config_keys(table: &toml::Table, prefix: &str, out: &mut Vec<String>) {
+        for (k, v) in table {
+            let id = format!("{prefix}{k}");
+            match v {
+                // (an empty one is a map: `keybindings`)
+                toml::Value::Table(t) if !t.is_empty() => config_keys(t, &format!("{id}."), out),
+                _ => out.push(id),
+            }
+        }
+    }
+
+    #[test]
+    fn every_config_key_has_a_settings_row() {
+        // keys a Settings row does not control, each with why
+        const ELSEWHERE: &[(&str, &str)] = &[
+            // the Profiles page lists, edits and orders them
+            ("profiles", "Settings › Profiles"),
+            // the Keybindings page records and resets them
+            ("keybindings", "Settings › Keybindings"),
+            // lists of tables: edited in the config.toml pane beside Settings
+            ("ssh_profiles", "config.toml pane"),
+            ("actions", "config.toml pane"),
+            ("secret_patterns", "config.toml pane"),
+            ("tab_color_rules", "config.toml pane"),
+        ];
+        let mut keys = Vec::new();
+        config_keys(&config_table(&rift_core::Config::default()), "", &mut keys);
+        // unset by default, so absent from the default's table
+        keys.extend(
+            rift_core::config::OPTIONAL_KEYS
+                .iter()
+                .map(|k| k.to_string()),
+        );
+        let missing: Vec<&String> = keys
+            .iter()
+            .filter(|k| !super::ROWS.contains(&k.as_str()))
+            .filter(|k| !ELSEWHERE.iter().any(|(e, _)| e == k))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "config.toml keys without a Settings row: {missing:?} (add a row and \
+             list it in settings::ROWS, or give a reason in ELSEWHERE)"
+        );
+        // and every row names a real key (an optional one, or the default's)
+        for row in super::ROWS.iter().chain(ELSEWHERE.iter().map(|(k, _)| k)) {
+            assert!(keys.iter().any(|k| k == row), "{row} is not a config key");
+        }
     }
 
     #[test]

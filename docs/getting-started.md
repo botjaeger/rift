@@ -67,7 +67,7 @@ If commands do not become blocks, the shell is not loading the hooks (see
 | Type into every pane of the tab at once | ⌥⌘I |
 | Reopen a closed tab | ⇧⌘T |
 | Open another window | ⌘N (same app; closing it ends its shells only) |
-| Open a tab with a profile | Click the ⌄ beside +, or ⌃⇧1…⌃⇧9 (`[[profiles]]` in config.toml) |
+| Open a tab with a profile | Click the ⌄ beside +, or ⌃⇧1…⌃⇧9 (Settings › Profiles) |
 | Rename, color, pin, group or close tabs | Right-click the tab; ⌘-click tabs first to group several |
 | Tabs in a side rail | Settings → Appearance → *Tab position: Side*; ⇧⌘F searches it |
 | Lock a pane against typing, or restart it | Right-click the terminal → *Make read-only* / *Restart pane* |
@@ -140,8 +140,9 @@ applies the same way. Reference: [configuration](configuration.md).
   `~/.config/rift/launch_configs/` (Warp format) open a set of tabs, splits,
   directories and startup commands from the palette. File → *Save Layout as
   Launch Configuration* writes the current layout.
-- **Profiles**: `[[profiles]]` in config.toml name a program, arguments,
-  folder, environment, title, colour and theme; open one from the ⌄ beside +.
+- **Profiles**: Settings › Profiles (or `[[profiles]]` in config.toml) name
+  a program, arguments, folder, environment, title, colour and theme; add,
+  edit, reorder and pick the default there; open one from the ⌄ beside +.
 - **Actions**: `[[actions]]` in config.toml chain Rift actions, typed text
   and launch configurations under one name and chord; palette → *Action: name* runs one.
   Reference: [configuration](configuration.md#user-actions).

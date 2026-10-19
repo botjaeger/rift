@@ -38,6 +38,7 @@
 //! menu action:new_tab       # choose a menu bar item by id (macOS)
 //! mods alt                  # hold modifiers for mouse steps (`mods none`)
 //! wait_prompt              # block until the shell shows its first prompt
+//! wait_widget r             # block until the shell reports its ⌃R widget
 //! wait_file /tmp/done 600000  # until a file exists (or the ms timeout);
 //!                          # unlike `sh`, the app keeps running meanwhile
 //! new_window               # open a window (as ⌘N); it takes focus
@@ -114,6 +115,8 @@ pub enum Step {
     Menu(String),
     Mods(String),
     WaitPrompt,
+    /// Until the shell reports its binding for a widget key.
+    WaitWidget(rift_core::shell_widget::WidgetKey),
     /// Until the path exists, or the timeout (ms) passes.
     WaitFile(PathBuf, u64),
     /// Open a window (it takes focus).
@@ -202,7 +205,10 @@ impl Script {
         }
         let step = self.steps[self.idx].clone();
         self.idx += 1;
-        if !matches!(step, Step::WaitPrompt | Step::WaitFile(..)) {
+        if !matches!(
+            step,
+            Step::WaitPrompt | Step::WaitWidget(..) | Step::WaitFile(..)
+        ) {
             self.waiting_since = None;
         }
         self.due = now
@@ -322,6 +328,12 @@ pub fn parse(src: &str) -> Result<Vec<Step>, String> {
             "menu" => Step::Menu(rest.to_string()),
             "mods" => Step::Mods(rest.to_string()),
             "wait_prompt" => Step::WaitPrompt,
+            "wait_widget" => Step::WaitWidget(match rest {
+                "r" => rift_core::shell_widget::WidgetKey::History,
+                "t" => rift_core::shell_widget::WidgetKey::Files,
+                "c" => rift_core::shell_widget::WidgetKey::Cd,
+                _ => return Err(bad("expected r, t or c")),
+            }),
             "wait_file" => {
                 let (path, ms) = match rest.rsplit_once(char::is_whitespace) {
                     Some((p, ms)) if ms.parse::<u64>().is_ok() => (p, ms.parse().unwrap()),

@@ -200,6 +200,10 @@ A scripted run does not import your shell history (`$HISTFILE`,
 `~/.zsh_history`, …) into ⌃R and the palette, so dumps and shots never show
 your real commands; a test that needs an imported history points `HOME` or
 `HISTFILE` at a fixture and sets `RIFT_SCRIPT_HISTORY=1`.
+Nor does it read `/etc/shells`: config.toml gets no generated shell profiles
+and none is marked orphaned, unless `RIFT_SHELLS_FILE` names a fixture shells
+file, which then stands in for `/etc/shells` (the startup sync and the orphan
+check on every load).
 The command list is the module comment of `crates/rift-terminal/src/script.rs`.
 
 **`--headless`** (debugging and testing only; needs `--script`). The window

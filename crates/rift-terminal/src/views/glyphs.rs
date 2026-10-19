@@ -23,6 +23,12 @@ pub const HOURGLASS: char = '\u{f252}'; // fa-hourglass_half
 pub const BELL: char = '\u{f0f3}'; // fa-bell
 pub const BELL_OUTLINE: char = '\u{f0a2}'; // fa-bell_o
 
+/// The names [`by_name`] knows, one per glyph (Settings › Profiles' Icon
+/// select).
+pub const NAMES: [&str; 8] = [
+    "folder", "git", "python", "php", "github", "docker", "user", "laptop",
+];
+
 /// A glyph of this subset by name (a profile's `icon`).
 pub fn by_name(name: &str) -> Option<char> {
     Some(match name.trim().to_ascii_lowercase().as_str() {
@@ -93,4 +99,19 @@ pub fn draw(
         None,
     );
     layer.text(buf, c[0] - w / 2.0, c[1] - size / 2.0, color);
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn every_listed_name_is_a_distinct_glyph() {
+        let glyphs: Vec<char> = super::NAMES
+            .iter()
+            .map(|n| super::by_name(n).unwrap_or_else(|| panic!("{n} has no glyph")))
+            .collect();
+        let mut unique = glyphs.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), glyphs.len(), "one name per glyph");
+    }
 }

@@ -72,6 +72,10 @@ pub struct PanelNode {
     pub controls: Vec<Control>,
     /// Keyboard focus is in the panel: its selected control gets focus.
     pub focused: bool,
+    /// `text` is being edited (config.toml): a multi-line text input.
+    pub editable: bool,
+    /// A polite live region under it (the config lint summary).
+    pub status: Option<String>,
 }
 
 pub struct TabNode {
@@ -383,10 +387,16 @@ pub fn build(s: &Snapshot) -> Built {
         let mut children = Vec::new();
         if let Some(text) = &panel.text {
             let id = id_of(("panel-text", pi));
-            let mut node = Node::new(Role::Document);
+            let mut node = Node::new(if panel.editable {
+                Role::MultilineTextInput
+            } else {
+                Role::Document
+            });
             node.set_label(panel.label.as_str());
             node.set_value(text.as_str());
-            node.set_read_only();
+            if !panel.editable {
+                node.set_read_only();
+            }
             t.nodes.push((id, node));
             children.push(id);
             if panel.focused {
@@ -398,6 +408,14 @@ pub fn build(s: &Snapshot) -> Built {
             if panel.focused && c.selected {
                 focus = id;
             }
+            children.push(id);
+        }
+        if let Some(status) = &panel.status {
+            let id = id_of(("panel-status", pi));
+            let mut node = Node::new(Role::Status);
+            node.set_live(Live::Polite);
+            node.set_value(status.as_str());
+            t.nodes.push((id, node));
             children.push(id);
         }
         let id = id_of(("panel", pi));

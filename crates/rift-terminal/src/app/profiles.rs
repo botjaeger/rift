@@ -10,16 +10,17 @@ use crate::views::palette::ProfileOpen;
 use rift_core::profiles::{LaunchError, PaneLaunch, Profile, Resolved};
 
 impl App {
-    /// The user's profiles, then the discovered shells.
+    /// The profiles offered (config.toml's, minus hidden and orphaned ones).
     pub(super) fn profiles(&self) -> Vec<Profile> {
-        rift_core::profiles::effective(&self.config.profiles, self.config.discover_shells)
+        rift_core::profiles::effective(&self.config.profiles)
     }
 
+    /// Every profile resolves by name, a hidden one too (`default_profile`).
     pub(super) fn resolve_launch(&self, launch: &PaneLaunch) -> Result<Resolved, LaunchError> {
         let path = std::env::var_os("PATH");
         let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
         rift_core::profiles::resolve(
-            &self.profiles(),
+            &self.config.profiles,
             self.config.default_profile.as_deref(),
             launch,
             path.as_deref(),

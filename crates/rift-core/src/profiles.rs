@@ -1,6 +1,7 @@
 //! Reusable launch profiles (`[[profiles]]` in config.toml) and the shells
-//! installed on this machine (`/etc/shells`), which appear as implicit
-//! profiles named after their executable (`zsh`, `bash`, `fish`, …).
+//! installed on this machine (`/etc/shells`), which `generated.rs` writes
+//! into config.toml as profiles named after their executable (`zsh`,
+//! `bash`, `fish`, …).
 //!
 //! A pane's launch resolves in layers: the global settings (`shell`,
 //! `working_directory`), then the pane's profile (or `default_profile`),
@@ -52,16 +53,29 @@ pub struct Profile {
     /// name, as `theme`); the window's chrome keeps the window theme.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<String>,
-    /// Found in the shells file rather than written by the user.
+    /// What wrote the entry: [`SHELLS_SOURCE`] for a stub Rift generated
+    /// from the shells file (`generated.rs`); absent: the user's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Kept in the file but offered nowhere (the palette, the + menu); a
+    /// hidden profile still resolves by name (`default_profile`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
+    /// A generated profile whose shell is no longer installed (see
+    /// `generated::mark_orphans`): kept in the file, offered nowhere.
     #[serde(skip)]
-    pub discovered: bool,
+    pub orphaned: bool,
 }
 
+/// `source` of a profile generated from the shells file.
+pub const SHELLS_SOURCE: &str = "shells";
+
 impl Profile {
-    fn shell(name: &str, path: &Path) -> Profile {
+    /// A profile named `name` with every other field unset.
+    pub fn named(name: &str) -> Profile {
         Profile {
             name: name.to_string(),
-            command: Some(path.to_string_lossy().into_owned()),
+            command: None,
             args: Vec::new(),
             cwd: None,
             env: BTreeMap::new(),
@@ -69,8 +83,23 @@ impl Profile {
             color: None,
             icon: None,
             theme: None,
-            discovered: true,
+            source: None,
+            hidden: false,
+            orphaned: false,
         }
+    }
+
+    fn shell(name: &str, path: &Path) -> Profile {
+        Profile {
+            command: Some(path.to_string_lossy().into_owned()),
+            source: Some(SHELLS_SOURCE.to_string()),
+            ..Profile::named(name)
+        }
+    }
+
+    /// Generated from the shells file (and not since claimed by the user).
+    pub fn is_generated(&self) -> bool {
+        self.source.as_deref() == Some(SHELLS_SOURCE)
     }
 }
 
@@ -170,19 +199,15 @@ pub fn discover(shells_file: &Path, path_var: Option<&OsStr>) -> Vec<Profile> {
         .collect()
 }
 
-/// The profiles to offer: the user's, then each discovered shell whose name
-/// no user profile takes (none with `discover_shells = false`).
-pub fn effective(user: &[Profile], discover_shells: bool) -> Vec<Profile> {
-    let mut out = user.to_vec();
-    if discover_shells {
-        let path = std::env::var_os("PATH");
-        for p in discover(Path::new(SHELLS_FILE), path.as_deref()) {
-            if !out.iter().any(|u| u.name.trim() == p.name) {
-                out.push(p);
-            }
-        }
-    }
-    out
+/// The profiles to offer: config.toml's, minus the `hidden` and the
+/// orphaned ones. Installed shells reach this list only as entries written
+/// into the file (`generated::sync`).
+pub fn effective(profiles: &[Profile]) -> Vec<Profile> {
+    profiles
+        .iter()
+        .filter(|p| !p.hidden && !p.orphaned)
+        .cloned()
+        .collect()
 }
 
 /// What a pane was opened with, as a launch configuration, duplicate or the
@@ -415,18 +440,7 @@ mod tests {
     }
 
     fn profile(name: &str) -> Profile {
-        Profile {
-            name: name.into(),
-            command: None,
-            args: Vec::new(),
-            cwd: None,
-            env: BTreeMap::new(),
-            title: None,
-            color: None,
-            icon: None,
-            theme: None,
-            discovered: false,
-        }
+        Profile::named(name)
     }
 
     #[test]
@@ -464,7 +478,7 @@ mod tests {
                 ("bash", bash.to_str().unwrap())
             ]
         );
-        assert!(got.iter().all(|p| p.discovered));
+        assert!(got.iter().all(Profile::is_generated));
         // without PATH the first listed wins
         let got = discover(&shells, None);
         assert_eq!(got[0].command.as_deref(), bin_zsh.to_str());
@@ -473,13 +487,28 @@ mod tests {
     }
 
     #[test]
-    fn effective_lets_a_user_profile_shadow_a_discovered_one() {
-        let mut mine = profile("zsh");
-        mine.args = vec!["-f".into()];
-        let all = effective(std::slice::from_ref(&mine), true);
-        assert_eq!(all.iter().filter(|p| p.name == "zsh").count(), 1);
-        assert_eq!(all[0], mine);
-        assert_eq!(effective(std::slice::from_ref(&mine), false), vec![mine]);
+    fn effective_drops_hidden_and_orphaned_profiles() {
+        let mut hidden = profile("hidden");
+        hidden.hidden = true;
+        let mut orphan = profile("orphan");
+        orphan.orphaned = true;
+        let all = [profile("a"), hidden, orphan, profile("b")];
+        let names: Vec<String> = effective(&all).into_iter().map(|p| p.name).collect();
+        assert_eq!(names, ["a", "b"]);
+        // a hidden profile still resolves by name (default_profile)
+        let r = resolve(&all, Some("hidden"), &PaneLaunch::default(), None, None);
+        assert_eq!(r.unwrap().profile.as_deref(), Some("hidden"));
+    }
+
+    #[test]
+    fn source_and_hidden_round_trip_and_stay_out_of_a_users_entry() {
+        let src = "name = \"zsh\"\ncommand = \"/bin/zsh\"\nsource = \"shells\"\nhidden = true\n";
+        let p: Profile = toml::from_str(src).unwrap();
+        assert!(p.is_generated() && p.hidden && !p.orphaned);
+        assert_eq!(toml::to_string(&p).unwrap(), src);
+        let mine = toml::to_string(&profile("mine")).unwrap();
+        assert_eq!(mine, "name = \"mine\"\n");
+        assert!(validate(&[p]).is_ok());
     }
 
     #[test]

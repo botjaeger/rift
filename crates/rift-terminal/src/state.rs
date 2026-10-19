@@ -160,6 +160,29 @@ pub enum ClickTarget {
     /// Settings › Remote access: set the device with this id to Operate
     /// (`false`, confirmed first) or View only (`true`).
     RemotePermission(String, bool),
+    /// A Settings text field (`shell`, `global_hotkey`, a profile's
+    /// `profile.name`, …): a click edits it, ⏎ or a click away saves it.
+    SettingsText(&'static str),
+    /// Settings › Profiles: profile `i`'s row (config.toml order). A click
+    /// opens or closes its edit form; a drag moves it.
+    ProfileRow(usize),
+    /// Settings › Profiles: a button acting on profile `i`.
+    Profile(usize, ProfileOp),
+    /// Settings › Profiles: "Add" (a new profile running the login shell).
+    ProfileAdd,
+}
+
+/// What a Settings › Profiles button does to its profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileOp {
+    /// Open or close its edit form.
+    Edit,
+    SetDefault,
+    Duplicate,
+    /// Hide it (or show it again): kept in the file, offered nowhere.
+    ToggleHidden,
+    /// Asked first (`ConfirmAction::DeleteProfile`).
+    Delete,
 }
 
 pub struct Hit {

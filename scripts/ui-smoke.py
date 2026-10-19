@@ -242,10 +242,11 @@ steps = [
     "key escape",
     "key ctrl+c",
     "wait 300",
-    # Settings controls work from the keyboard (it opens on General; ↓ to
-    # Appearance)
+    # Settings controls work from the keyboard (it opens on General; ↓ ↓ to
+    # Appearance, past Profiles)
     "key cmd+,",
     "wait 200",
+    "key down",
     "key down",
     "wait 100",
     # font size, not font family: a machine with one monospace font has
@@ -558,7 +559,7 @@ geo_steps = [
     "key ctrl+r",
     "type nomatchqq",
     "key enter",
-    "wait 500",
+    "wait_prompt",
     f"dump {geo}/history-fallthrough.txt",
     "key ctrl+r",
     "wait 100",
@@ -815,7 +816,7 @@ edge_steps = [
     "key tab",
     "wait 300",
     "key enter",
-    "wait 500",
+    "wait_prompt",
     f"dump {edge}/completion.txt",
     # combining marks: searchable, and reinput runs the exact command
     "paste echo café",
@@ -3218,7 +3219,7 @@ for sw_name, (sw_rc, sw_body) in sw_fixtures.items():
         f'shell = {json.dumps(sw_shell)}\nrestore_session = false\ndurable_sessions = false\n'
         f'option_as_meta = true\nworking_directory = {json.dumps(str(swn / "work"))}\n')
     (swn / "w.rift").write_text("\n".join([
-        "wait_prompt", "wait 1000",
+        "wait_prompt", "wait_widget r",
         "type abc", "key ctrl+r", "wait 1000", f"dump {swn}/r.txt",
         "key ctrl+u", "type a b", "key left", "key left", "key ctrl+t", "wait 1000",
         f"dump {swn}/t.txt",
@@ -3300,8 +3301,9 @@ for sub in ("cfg/rift/themes", "data"):
     # the theme list runs below the fold: scroll to the user's themes
     "key cmd+,", "wait 300", "key end", "wait 300", "move 700 400", "scroll -20",
     "wait 300", f"dump {sw}/themes.txt",
-    "key home", "key down", "key down", "wait 300",
-    *["key tab"] * 23, "wait 300", f"dump {sw}/tabbed.txt",
+    "key home", "key down", "key down", "key down", "wait 300",
+    # (the vim register and shell widgets segments come first: 2 stops each)
+    *["key tab"] * 27, "wait 300", f"dump {sw}/tabbed.txt",
     "quit"]) + "\n")
 with (sw / "sweep.log").open("w") as log:
     rc = subprocess.run([str(binary), "--script", str(sw / "sweep.rift"), "--headless"],
@@ -4086,7 +4088,7 @@ text_cmd = '{"cmd":"remote-input","pane":PANE,"device":"Test Phone","text":"type
 def keys_cmd(*keys):
     return json.dumps({"cmd": "remote-input", "pane": 0, "device": "Test Phone",
                        "keys": list(keys)}).replace('"pane": 0', '"pane":PANE')
-settings_remote = ["key cmd+,", "wait 300", *["key down"] * 8, "wait 600"]
+settings_remote = ["key cmd+,", "wait 300", *["key down"] * 9, "wait 600"]
 
 # (a) remote_access off: refused, though the socket serves navigate requests
 off = remote_run("off", remote_base, [
@@ -4239,8 +4241,9 @@ remote_run("tunnel", remote_base + 'control_api = "off"\nremote_access = true\n'
     *settings_remote,
     # the tunnel lives under "Relay settings…": reset, switch, tabs switch, it
     # The remote-when-closed control is a status row now, so Relay settings
-    # is one Tab earlier than the historical layout.
-    *["key tab"] * 3, "key space", "wait 500", f"dump {tun}/settings.txt",
+    # is one Tab earlier than the historical layout; on macOS the "Ask
+    # before keeping Rift running" switch comes before it
+    *["key tab"] * (3 + (sys.platform == "darwin")), "key space", "wait 500", f"dump {tun}/settings.txt",
     cp(rm / "off-config.toml", tun / "cfg/rift/config.toml"), "wait 3500"],
     extra_env={"RIFT_CLOUDFLARED": ""})
 tunnel_page = (tun / "settings.txt").read_text()
@@ -4555,7 +4558,8 @@ if sys.platform == "darwin":  # the kept background is macOS only (the menu bar 
         (kq / sub).mkdir(parents=True, exist_ok=True)
     (kq / "cfg/rift/config.toml").write_text(
         'remote_access = true\ndurable_sessions = true\nrestore_session = false\n'
-        'check_for_updates = false\nshell = "/bin/bash"\n')
+        'check_for_updates = false\nshell = "/bin/bash"\n'
+        'remote_listen = "127.0.0.1:0"\n')
     kq_env = dict(env, XDG_CONFIG_HOME=str(kq / "cfg"), XDG_DATA_HOME=str(kq / "data"),
                   RIFT_PERSIST_SESSION="1")
     def kq_run(name, steps):
@@ -4698,7 +4702,8 @@ relay_config = (remote_base + "remote_access = true\n"
     f"dump {rl}/connected.txt", f"shot {rl}/relay-dark.png",
     # reading order: ↺ and switch, Relay
     # settings…, Pair a phone, View only, then the device's Operate / View only
-    *["key tab"] * 7, "wait 200", f"dump {rl}/focus.txt",
+    # (on macOS the Ask before keeping Rift running switch after the switch)
+    *["key tab"] * (7 + (sys.platform == "darwin")), "wait 200", f"dump {rl}/focus.txt",
     "key space", "wait 2500", f"dump {rl}/changed.txt",
     f"wait_file {rl}/go-light 60000", cp(rl / "light.toml", rl / "cfg/rift/config.toml"),
     "wait 2000", f"dump {rl}/history.txt", f"shot {rl}/relay-light.png",
@@ -4819,8 +4824,9 @@ bad = remote_run("relay-error", remote_base + "remote_access = true\n"
                  'remote_relay = "wss://relay.invalid"\ncontrol_api = "off"\n', [
     "wait 7000", *settings_remote, "wait 800",
     f"shot {rm}/relay-error/error.png", f"dump {rm}/relay-error/error.txt",
-    # reset, switch, tabs switch, Try again, Relay settings…
-    *["key tab"] * 4, "key space", "wait 400",
+    # reset, switch, tabs switch, Try again, Relay settings… (and on macOS
+    # the Ask before keeping Rift running switch)
+    *["key tab"] * (4 + (sys.platform == "darwin")), "key space", "wait 400",
     f"shot {rm}/relay-error/error-open.png", f"dump {rm}/relay-error/open.txt"], timeout=120)
 error_page = (bad / "error.txt").read_text()
 reason = re.search(r'relay_reason=Some\("(.*?)"\) relay_open=', error_page)
@@ -4942,7 +4948,8 @@ assert bt_active_pane("ffm-back", 0) == right, "focus did not follow back"
 
 # Settings rows: Appearance › Tabs and Panes, Input › Sticky command header
 bt_shots = [
-    "resize 1200 900", "wait_prompt", "key cmd+,", "wait 300", "key down", "wait 400",
+    # (tall: Appearance runs to its Tabs group well below 900 px)
+    "resize 1200 2400", "wait_prompt", "key cmd+,", "wait 300", "key down", "key down", "wait 400",
     f"dump {bt}/appearance-top.txt", "move 700 500", "scroll -12", "wait 300",
     f"dump {bt}/appearance-mid.txt",
     "move 700 500", "scroll -200", "wait 400", f"shot {bt}/appearance.png",
@@ -6283,7 +6290,7 @@ ss = scratch / "subshell"
 enable_chord = "cmd+enter" if sys.platform == "darwin" else "ctrl+shift+enter"
 run_own("subshell", 'subshell_commands = ["^bash --norc$"]\n', [
     "type echo before\\n", "wait 500",
-    "type bash --norc\\n", "wait 1500", f"dump {ss}/offer.txt",
+    "type bash --norc\\n", "wait 3000", f"dump {ss}/offer.txt",
     # a full-screen program in the subshell hides the bar, and ⌘⏎ there
     # types nothing into it
     "type printf '\\\\033[?1049h'; sleep 2; printf '\\\\033[?1049l'\\n", "wait 700",
@@ -6751,6 +6758,464 @@ d = t3_run("windows", 'theme = "nord"\n' + t3_keys, [
     "close_window", "wait 500", f"dump {d}/w3.txt"])
 assert 'theme="monokai"' in t3_text(d, "w1") and 'theme="nord"' in t3_text(d, "w2"), re.search(r"^font_size.*$", t3_text(d, "w2"), re.M)
 assert 'theme="nord"' in t3_text(d, "w3") and "theme_preview=false" in t3_line(d, "w3"), re.search(r"^font_size.*$", t3_text(d, "w3"), re.M)
+
+# config-edit: config.toml beside Settings is an editor. Typing and undo,
+# a drag that selects, copy and paste; a Settings change shows in the clean
+# pane without reopening it; another file in the viewer stays read-only. A
+# scripted run reads no /etc/shells: generated profiles come only from a
+# RIFT_SHELLS_FILE fixture
+import urllib.parse
+ce = scratch / "config-edit"
+CE_CFG = ('shell = "/bin/bash"\nrestore_session = false\nsync_os_theme = false\n'
+          'check_for_updates = false\n')
+def ce_run(d, steps, extra_env=None):
+    """Settings › Open config.toml in a run of its own (config `CE_CFG`), then
+    `steps` ("{d}" in them: the run's directory)."""
+    for sub in ("cfg/rift", "data"):
+        (d / sub).mkdir(parents=True, exist_ok=True)
+    (d / "cfg/rift/config.toml").write_text(CE_CFG)
+    (d / "t.rift").write_text("\n".join([
+        "resize 1300 800", "wait_prompt", "key cmd+,", "wait 500", "a11y click Open config.toml",
+        "wait 800", *(s.replace("{d}", str(d)) for s in steps), "quit"]) + "\n")
+    with (d / "log.txt").open("w") as log:
+        rc = subprocess.run([str(binary), "--script", str(d / "t.rift"), "--headless"],
+                            env=dict(env, XDG_CONFIG_HOME=str(d / "cfg"), XDG_DATA_HOME=str(d / "data"),
+                                     BASH_SILENCE_DEPRECATION_WARNING="1", **(extra_env or {})),
+                            stdout=log, stderr=log, timeout=90).returncode
+    assert rc == 0, died(f"config edit {d.name} run failed", d / "log.txt")
+    return d
+ce_text = lambda d, name: (d / f"{name}.txt").read_text()
+ce_line = lambda d, name: re.search(r"^config_edit=.*$", ce_text(d, name), re.M)[0]
+ce_buf = lambda d, name: json.loads(re.search(r"^config_buffer=(.*)$", ce_text(d, name), re.M)[1])
+def ce_at(d, name):
+    """(x, y) of the first line's text and a cell's width, as `dump` reports them."""
+    x, y, cw = re.search(r"text_at=\(([\d.]+), ([\d.]+), ([\d.]+)\)", ce_line(d, name)).groups()
+    return float(x), float(y), float(cw)
+d = ce_run(ce / "edit", [
+    "focus on", "dump {d}/0.txt", "type x", "wait 300", "dump {d}/1.txt",
+    "key cmd+z", "wait 300", "dump {d}/2.txt"])
+assert "dirty=false" in ce_line(d, "0") and ce_buf(d, "0") == CE_CFG, ce_line(d, "0")
+assert ce_buf(d, "1") == "x" + CE_CFG and "dirty=true" in ce_line(d, "1"), ce_line(d, "1")
+assert ce_buf(d, "2") == CE_CFG and "dirty=false" in ce_line(d, "2"), ce_line(d, "2")
+# the run's file has no generated profile: /etc/shells was not read
+assert 'source = "shells"' not in (d / "cfg/rift/config.toml").read_text()
+# a drag across "shell" on line 1 selects it; ⌘C then ⌘V at the end pastes it
+x0, y0, cw = ce_at(d, "0")
+d2 = ce_run(ce / "drag", [
+    "focus on", f"drag {x0 + 1:.0f} {y0 + 10:.0f} {x0 + cw * 5 + 1:.0f} {y0 + 10:.0f}", "wait 200",
+    "dump {d}/sel.txt", "key cmd+c", "key cmd+down", "key cmd+v", "wait 300", "dump {d}/pasted.txt",
+    "shot {d}/pasted.png"])
+assert "selection=Some(0..5)" in ce_line(d2, "sel"), ce_line(d2, "sel")
+assert ce_buf(d2, "pasted") == CE_CFG + "shell", ce_buf(d2, "pasted")
+# a Settings change while clean: the pane shows the new line, not reopened
+d3 = ce_run(ce / "follow", [
+    "a11y click Warn before closing running commands", "wait 1000", "dump {d}/after.txt"])
+assert "confirm_close_running = false" in ce_buf(d3, "after"), ce_buf(d3, "after")
+line = ce_line(d3, "after")
+assert "dirty=false" in line and "conflict=false" in line, line
+assert ce_buf(d3, "after") == (d3 / "cfg/rift/config.toml").read_text()
+# another file in the viewer is read-only: typing changes nothing
+(ce / "other.txt").write_text("plain\n")
+d4 = ce_run(ce / "other", [
+    "key escape", "wait 300", "key cmd+1", "wait 300",
+    "link rift://action/open_file?path=" + urllib.parse.quote(str(ce / "other.txt")), "wait 800",
+    "type zz", "wait 200", "dump {d}/other.txt"])
+other = ce_text(d4, "other")
+assert re.search(r'^viewer=Some\("[^"]*/config-edit/other\.txt"\)', other, re.M), other[:2000]
+assert "config_edit=false" in other and (ce / "other.txt").read_text() == "plain\n", other[:2000]
+# RIFT_SHELLS_FILE: its shells become generated [[profiles]] at startup
+(ce / "shells").write_text("/bin/sh\n")
+d5 = ce_run(ce / "shells-file", ["dump {d}/s.txt"], {"RIFT_SHELLS_FILE": str(ce / "shells")})
+assert 'source = "shells"' in (d5 / "cfg/rift/config.toml").read_text(), \
+    (d5 / "cfg/rift/config.toml").read_text()
+
+# config-edit-lint: a lint error (with its did-you-mean) shuts Save and ⌘S
+# writes nothing; fixed, ⌘S writes the text byte for byte and it applies;
+# a removed key only warns; a syntax error points at its line; the file
+# changing under unsaved edits asks Reload / Keep mine; closing or quitting
+# with unsaved edits asks Save / Discard / Cancel
+cl = scratch / "config-edit-lint"
+d = ce_run(cl / "lint", [
+    "focus on", "key cmd+down", "type font_sise = 14", "wait 400", "dump {d}/err.txt",
+    "shot {d}/err.png", "key cmd+s", "wait 600", "dump {d}/err-save.txt", "sh cp {d}/cfg/rift/config.toml {d}/err-save.toml",
+    "key shift+cmd+left", "type font_size = 14", "wait 400", "dump {d}/fixed.txt",
+    "key cmd+s", "wait 1500", "dump {d}/saved.txt", "shot {d}/saved.png",
+    "key enter", "type background_processes = true", "wait 400", "dump {d}/warn.txt",
+    "shot {d}/warn.png",
+    "key cmd+a", "type a = 1\\nb = 2\\nc = = 3\\n", "wait 400", "dump {d}/syntax.txt",
+    "a11y click Dismiss", "wait 300", "dump {d}/dismissed.txt"])
+err = ce_line(d, "err")
+assert "save_enabled=false" in err and "5:Error:unknown key `font_sise`" in err, err
+assert "did you mean `font_size`" in err, err
+assert "save_enabled=false" in ce_line(d, "err-save"), ce_line(d, "err-save")
+assert (d / "err-save.toml").read_text() == CE_CFG, "⌘S wrote a file with an error"
+assert "save_enabled=true" in ce_line(d, "fixed") and "diagnostics=[]" in ce_line(d, "fixed")
+saved = ce_text(d, "saved")
+assert (d / "cfg/rift/config.toml").read_text() == CE_CFG + "font_size = 14", "not byte for byte"
+assert re.search(r"^font_size=14 ", saved, re.M) and "dirty=false" in ce_line(d, "saved"), \
+    re.search(r"^font_size.*$", saved, re.M)
+warn = ce_line(d, "warn")
+assert "6:Warning:" in warn and "background_processes" in warn and "save_enabled=true" in warn, warn
+assert "3:Error:" in ce_line(d, "syntax"), ce_line(d, "syntax")
+assert re.search(r"diagnostics=\[\"3:Error:", ce_line(d, "syntax")), ce_line(d, "syntax")
+assert ce_buf(d, "dismissed") == CE_CFG + "font_size = 14" and "dirty=false" in ce_line(d, "dismissed")
+# the file changes under unsaved edits: a conflict, the edits kept; Keep
+# mine then ⌘S overwrites; Reload takes the file's text
+d = ce_run(cl / "conflict", [
+    "focus on", "type # mine\\n", "a11y click Warn before closing running commands", "wait 1000",
+    "dump {d}/c1.txt", "shot {d}/conflict.png",
+    "a11y click Keep mine", "wait 200", "dump {d}/c2.txt", "key cmd+s", "wait 1500",
+    "dump {d}/c3.txt", "sh cp {d}/cfg/rift/config.toml {d}/c3.toml",
+    "focus on", "type # again\\n", "a11y click Warn before closing running commands", "wait 1000",
+    "a11y click Reload", "wait 300", "dump {d}/c4.txt"])
+c1 = ce_line(d, "c1")
+assert "conflict=true" in c1 and "dirty=true" in c1 and ce_buf(d, "c1") == "# mine\n" + CE_CFG, c1
+assert "conflict=false" in ce_line(d, "c2") and "dirty=true" in ce_line(d, "c2")
+assert (d / "c3.toml").read_text() == "# mine\n" + CE_CFG, "Keep mine + Save did not overwrite"
+c4 = ce_line(d, "c4")
+assert "conflict=false" in c4 and "dirty=false" in c4, c4
+assert ce_buf(d, "c4") == (d / "cfg/rift/config.toml").read_text() and "# again" not in ce_buf(d, "c4")
+# closing with unsaved edits asks; Save is shut while they have errors;
+# Cancel keeps them, ⌘Q asks too, Discard closes the pane, the file as it was
+d = ce_run(cl / "close", [
+    "focus on", "type font_sise = 1\\n", "wait 400", "key escape", "wait 300", "dump {d}/q1.txt",
+    "shot {d}/dialog.png", "a11y click Save, unavailable", "wait 200", "dump {d}/q2.txt",
+    "a11y click Cancel", "wait 200", "dump {d}/q3.txt",
+    "key cmd+q", "wait 300", "dump {d}/q4.txt", "a11y click Cancel", "wait 200",
+    "key escape", "wait 300", "a11y click Discard", "wait 300", "dump {d}/q5.txt"])
+q1 = ce_text(d, "q1")
+assert "confirm=Some((ConfigUnsaved(Pane), [])" in q1, re.search(r"^confirm=.*$", q1, re.M)
+assert 'Button "Save, unavailable"' in q1 and "Fix 1 error to save" in q1, q1[-3000:]
+assert "confirm=Some((ConfigUnsaved(Pane)" in ce_text(d, "q2"), "a shut Save answered"
+q3 = ce_text(d, "q3")
+assert "confirm=None" in q3 and ce_buf(d, "q3") == "font_sise = 1\n" + CE_CFG, ce_line(d, "q3")
+assert "confirm=Some((ConfigUnsaved(Close(App)), [])" in ce_text(d, "q4"), \
+    re.search(r"^confirm=.*$", ce_text(d, "q4"), re.M)
+q5 = ce_text(d, "q5")
+assert "config_edit=false" in q5 and re.search(r"^viewer=None ", q5, re.M), q5[:2000]
+assert (d / "cfg/rift/config.toml").read_text() == CE_CFG
+
+# settings-profiles: Settings › Profiles edits config.toml's [[profiles]] in
+# place (comments kept). Add, a name and arguments, environment and colour,
+# Duplicate (a detected one's copy is the user's own), Hide, Set as default,
+# Delete (a detected default one: the default goes, the shell never comes
+# back), the Default profile select, ⌥↑ and a drag reorder; a duplicate name
+# or an empty command is refused under the form and nothing is written.
+# Relaunched: the order, the default and the hidden profile hold, the deleted
+# shell stays gone, the hidden one is out of the + menu
+sp = scratch / "settings-profiles"
+for sub in ("cfg/rift", "data", "bin"):
+    (sp / sub).mkdir(parents=True, exist_ok=True)
+sp_bin = {}
+for name in ("zsh", "fish", "nu"):
+    sp_bin[name] = sp / "bin" / name
+    sp_bin[name].write_text('#!/bin/sh\nexec /bin/sh "$@"\n')
+    sp_bin[name].chmod(0o755)
+(sp / "shells").write_text("".join(f"{p}\n" for p in sp_bin.values()))
+SP_CFG = ('# my settings\nshell = "/bin/bash"\nrestore_session = false\n'
+          'durable_sessions = false\nsync_os_theme = false\ncheck_for_updates = false\n\n'
+          '# my profile\n[[profiles]]\nname = "mine"\ncommand = "/bin/bash"\nargs = ["-l"]\n')
+(sp / "cfg/rift/config.toml").write_text(SP_CFG)
+sp_env = dict(env, XDG_CONFIG_HOME=str(sp / "cfg"), XDG_DATA_HOME=str(sp / "data"),
+              RIFT_SHELLS_FILE=str(sp / "shells"), SHELL=str(sp_bin["zsh"]))
+def sp_run(name, steps):
+    (sp / f"{name}.rift").write_text("\n".join(
+        ["resize 1300 1500", "wait_prompt", "key cmd+,", "wait 500", "a11y click Profiles",
+         "wait 300", *steps, "quit"]) + "\n")
+    with (sp / f"{name}.log").open("w") as log:
+        rc = subprocess.run([str(binary), "--script", str(sp / f"{name}.rift"), "--headless"],
+                            env=sp_env, stdout=log, stderr=log, timeout=120).returncode
+    assert rc == 0, died(f"settings-profiles {name} run failed", sp / f"{name}.log")
+def sp_save(step):
+    """Steps that keep config.toml as it is after `step`."""
+    return ["wait 300", cp(sp / "cfg/rift/config.toml", sp / f"{step}.toml"), f"dump {sp}/{step}.txt"]
+sp_toml = lambda step: (sp / f"{step}.toml").read_text()
+sp_dump = lambda step: (sp / f"{step}.txt").read_text()
+def sp_line(step):
+    return re.search(r"^settings_profiles=.*$", sp_dump(step), re.M)[0]
+def sp_profiles(step):
+    """config.toml after `step`, from its first [[profiles]] (the user's comment above it)."""
+    text = sp_toml(step)
+    return text[text.index("# my profile"):]
+stub = lambda name: f'[[profiles]]\nname = "{name}"\ncommand = "{sp_bin[name]}"\nsource = "shells"\n'
+MINE = '# my profile\n[[profiles]]\nname = "mine"\ncommand = "/bin/bash"\nargs = ["-l"]\n'
+zsh_path = str(sp_bin["zsh"])
+sp_run("one", [
+    *sp_save("s0"),
+    "a11y click Add a profile", *sp_save("add"),
+    "a11y click Name: New profile", "key cmd+backspace", "type work", "key enter", *sp_save("name"),
+    # a name already taken: refused under the form, nothing written
+    "a11y click Name: work", "key cmd+backspace", "type mine", "key enter", *sp_save("taken"),
+    "shot {sp}/taken.png".format(sp=sp), "key escape",
+    # an empty command: refused too
+    f"a11y click Command: {zsh_path}", "key cmd+backspace", "key enter", *sp_save("empty"),
+    "key escape",
+    "a11y click Arguments: None", "type -c 'echo hi'", "key enter", *sp_save("args"),
+    "a11y click Environment: None", "type A=1 B='x y'", "key enter", *sp_save("env"),
+    "a11y click Tab color: None", "wait 200", "a11y click Green", *sp_save("color"),
+    "a11y click Edit zsh", "wait 200", "a11y click Duplicate zsh", *sp_save("dup"),
+    "a11y click Hide zsh copy from the + menu and the palette", *sp_save("hide"),
+    "a11y click Edit fish", "wait 200", "a11y click Make fish the default profile",
+    *sp_save("default"),
+    "a11y click Delete fish", "wait 300", f"dump {sp}/confirm.txt", f"shot {sp}/confirm.png",
+    "key enter", *sp_save("delete"),
+    # (the relaunches' first tab runs it: a real bash, which reports prompts)
+    "a11y click Default profile: Shell path", "wait 200", "a11y click mine", *sp_save("select"),
+    # ⌥↑ moves the focused profile (its Edit button) up one place
+    "a11y click Edit work", "wait 200", "key alt+up", *sp_save("up"),
+])
+s0 = sp_profiles("s0")
+assert sp_toml("s0").startswith("# my settings\n"), sp_toml("s0")
+assert s0 == MINE + "\n" + stub("zsh") + "\n" + stub("fish") + "\n" + stub("nu"), s0
+NEW = f'\n[[profiles]]\nname = "New profile"\ncommand = "{zsh_path}"\n'
+assert sp_profiles("add") == s0 + NEW, sp_profiles("add")
+assert 'profile_open=Some(4)' in sp_line("add"), sp_line("add")
+work = NEW.replace('"New profile"', '"work"')
+assert sp_profiles("name") == s0 + work, sp_profiles("name")
+assert sp_toml("taken") == sp_toml("name"), "a taken name was written"
+assert 'profile_error=Some("profile \\"mine\\": the name is used twice")' in sp_line("taken"), sp_line("taken")
+assert 'Label "Not saved: profile \\"mine\\": the name is used twice"' in sp_dump("taken"), sp_dump("taken")[-3000:]
+assert sp_toml("empty") == sp_toml("name"), "an empty command was written"
+assert 'profile_error=Some("profile \\"work\\": command is empty")' in sp_line("empty"), sp_line("empty")
+work += 'args = [\n    "-c",\n    "echo hi",\n]\n'
+assert sp_profiles("args") == s0 + work, sp_profiles("args")
+work_env = work + '\n[profiles.env]\nA = "1"\nB = "x y"\n'
+assert sp_profiles("env").replace('color = "green"\n', "") == s0 + work_env, sp_profiles("env")
+assert 'color = "green"' in sp_profiles("color"), sp_profiles("color")
+dup = sp_profiles("dup")
+assert f'[[profiles]]\nname = "zsh copy"\ncommand = "{zsh_path}"\n\n[[profiles]]\nname = "fish"' in dup, dup
+assert dup.count('source = "shells"') == 3, "the copy kept source"
+assert '"zsh", "zsh copy", "fish"' in sp_line("dup") and "profile_open=Some(2)" in sp_line("dup")
+assert 'name = "zsh copy"\ncommand = "' + zsh_path + '"\nhidden = true\n' in sp_profiles("hide"), sp_profiles("hide")
+assert sp_toml("default").count('default_profile = "fish"') == 1, sp_toml("default")
+confirm = sp_dump("confirm")
+assert "DeleteProfile { index: 3, name: \"fish\", detected: true, default: true }" in confirm, \
+    re.search(r"^confirm=.*$", confirm, re.M)
+assert "won't add it again" in confirm and "Hide keeps it in the file instead" in confirm, confirm[-2000:]
+deleted = sp_toml("delete")
+assert 'name = "fish"' not in deleted and "default_profile" not in deleted, deleted
+assert str(sp_bin["fish"]) in (sp / "data/rift/generated-profiles").read_text()
+assert sp_toml("select").count('default_profile = "mine"') == 1, sp_toml("select")
+up = sp_line("up")
+assert 'settings_profiles=["mine", "zsh", "zsh copy", "work", "nu"]' in up, up
+assert sp_profiles("up").index('name = "work"') < sp_profiles("up").index('name = "nu"')
+assert sp_toml("up").startswith("# my settings\n") and "# my profile\n" in sp_toml("up")
+# relaunched: the probe finds the rows; a drag moves "mine" past the last
+sp_run("probe", [*sp_save("relaunch")])
+assert sp_toml("relaunch") == sp_toml("up"), "the relaunch's sync changed the file (fish came back?)"
+rows = dict((int(i), (x, y, w, h)) for i, x, y, w, h in re.findall(
+    r"\((\d+), ([\d.]+), ([\d.]+), ([\d.]+), ([\d.]+)\)", re.search(r"profile_rows=(.*)$", sp_line("relaunch"))[1]))
+assert sorted(rows) == [0, 1, 2, 3, 4], rows
+mx = lambda r: float(r[0]) + 200
+my = lambda r: float(r[1]) + float(r[3]) / 2
+last = rows[4]
+sp_run("drag", [f"drag {mx(rows[0]):.0f} {my(rows[0]):.0f} {mx(last):.0f} {float(last[1]) + float(last[3]) - 4:.0f}",
+                *sp_save("dragged")])
+assert 'settings_profiles=["zsh", "zsh copy", "work", "nu", "mine"]' in sp_line("dragged"), sp_line("dragged")
+assert "# my profile\n" in sp_toml("dragged") and sp_toml("dragged").count("[[profiles]]") == 5
+# the + menu: the hidden copy is not offered; the default stays
+sp_run("menu", ["key escape", "wait 300", "a11y click Open a profile", "wait 300", f"dump {sp}/menu.txt"])
+menu = sp_dump("menu")
+assert 'menu_items=["zsh", "work", "nu", "mine", "Settings", "Command Palette", "About Rift"]' in menu, \
+    re.search(r"menu_items=.*$", menu, re.M)
+assert 'default_profile=Some("mine")' in sp_line("menu"), sp_line("menu")
+assert sp_toml("dragged").count('default_profile = "mine"') == 1
+
+# settings-parity: every row added so each config.toml key has one writes
+# its key: a toggle, a stepper step, a segment, a text field (⏎ saves)
+import tomllib
+sr = scratch / "settings-parity"
+for sub in ("cfg/rift", "data"):
+    (sr / sub).mkdir(parents=True, exist_ok=True)
+SR_CFG = ('shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
+          'sync_os_theme = false\ncheck_for_updates = false\n')
+mac = sys.platform == "darwin"
+def sr_run(name, page, steps, cfg=SR_CFG):
+    """`steps` on Settings › `page` (a window tall enough for every row);
+    the config.toml it leaves, parsed."""
+    (sr / "cfg/rift/config.toml").write_text(cfg)
+    (sr / f"{name}.rift").write_text("\n".join(
+        ["resize 1300 3000", "wait_prompt", "key cmd+,", "wait 500", f"a11y click {page}", "wait 300",
+         *steps, "wait 300", f"dump {sr}/{name}.txt", "quit"]) + "\n")
+    with (sr / f"{name}.log").open("w") as log:
+        rc = subprocess.run([str(binary), "--script", str(sr / f"{name}.rift"), "--headless"],
+                            env=dict(env, XDG_CONFIG_HOME=str(sr / "cfg"), XDG_DATA_HOME=str(sr / "data")),
+                            stdout=log, stderr=log, timeout=120).returncode
+    assert rc == 0, died(f"settings-parity {name} run failed", sr / f"{name}.log")
+    return tomllib.loads((sr / "cfg/rift/config.toml").read_text())
+def text_step(label, value):
+    return [f"a11y click {label}", "key cmd+backspace", f"type {value}", "key enter", "wait 200"]
+got = sr_run("general", "General", [
+    *text_step("Shell path: /bin/bash", "/bin/sh"),
+    "a11y click Keep shells running through updates",
+    *text_step("Global hotkey: Off", "alt+space"),
+    "a11y click Screen edge: Left",
+    "a11y click Decrease Hotkey window width, 100 %",
+    *text_step("Screen: pointer", "2"),
+])
+want = {"shell": "/bin/sh", "durable_sessions": True, "global_hotkey": "alt+space",
+        "hotkey_window_edge": "left", "hotkey_window_width": 95, "hotkey_window_screen": "2"}
+assert {k: got.get(k) for k in want} == want, {k: got.get(k) for k in want}
+got = sr_run("appearance", "Appearance", [
+    "a11y click Increase Font weight, 400", "a11y click Decrease Bold font weight, 700",
+    "a11y click Bold text in bright colors", "a11y click Increase Minimum contrast, Off",
+    *text_step("Font features: None", "ss01 -calt"),
+    "a11y click Ambiguous-width characters: Wide",
+    "a11y click Increase Top padding, 14 px", "a11y click Decrease Bottom padding, 8 px",
+    "a11y click Pad full-screen programs",
+    "a11y click Open new windows: Maximized",
+    "a11y click Increase Window width, 1180 px", "a11y click Decrease Window height, 760 px",
+    "a11y click Keep windows on top", "a11y click Resize in whole cells",
+    "a11y click Show the size while resizing", "a11y click ⌃Tab switches: Last used first",
+])
+want = {"font_weight": 500, "bold_font_weight": 600, "bold_is_bright": True, "minimum_contrast": 1.5,
+        "font_features": ["ss01", "-calt"], "ambiguous_width": "wide", "window_padding_top": 16,
+        "window_padding_bottom": 6, "alt_screen_padding": False, "launch_mode": "maximized",
+        "window_width": 1200, "window_height": 740, "always_on_top": True, "snap_to_cells": True,
+        "resize_overlay": True, "tab_switch_order": "mru"}
+assert {k: got.get(k) for k in want} == want, {k: got.get(k) for k in want}
+got = sr_run("input", "Input", [
+    "a11y click Vim's unnamed register: System clipboard", "a11y click ⌃R, ⌃T and ⌥C run: Rift's",
+    *text_step("More subshell commands: None", "'^nix shell'"),
+    *text_step("Never offer it for: None", "bash"),
+])
+want = {"vim_clipboard": "unnamed", "shell_widgets": "rift", "subshell_commands": ["^nix shell"],
+        "subshell_denylist": ["bash"]}
+assert {k: got.get(k) for k in want} == want, {k: got.get(k) for k in want}
+got = sr_run("terminal", "Terminal", [
+    f"a11y click {'⌘' if mac else 'Ctrl'}-scroll zooms the font",
+    *text_step("Word characters: None", "-./"), *text_step("Word delimiters: None", "/:"),
+    "a11y click Increase Ask before pasting more than, Off", "a11y click Trim trailing blanks from pastes",
+    "a11y click Scrollbar: Always", "a11y click When its program exits: Keep",
+    "a11y click Mask secrets", "a11y click Show programs' progress",
+])
+want = {"wheel_zoom": True, "word_chars": "-./", "word_delimiters": "/:", "large_paste_warning": 16,
+        "trim_paste": True, "scrollbar": "always", "close_on_exit": "never", "mask_secrets": True,
+        "show_progress": False}
+assert {k: got.get(k) for k in want} == want, {k: got.get(k) for k in want}
+got = sr_run("notifications", "Notifications", [
+    f"a11y click {'Bounce the Dock icon' if mac else 'Mark the window urgent'}"])
+assert got.get("request_attention") is True, got
+# a value that is not valid is refused with a toast and never written
+got = sr_run("invalid", "General", [*text_step("Screen: pointer", "left"), "wait 200"])
+assert "hotkey_window_screen" not in got, got
+assert 'toast=Some("Screen not saved: \\"left\\" is not pointer, primary or a screen number")' in \
+    (sr / "invalid.txt").read_text(), re.search(r"^confirm=.*$", (sr / "invalid.txt").read_text(), re.M)
+got = sr_run("remote", "Remote access", [
+    "a11y click Relay settings…, collapsed", "wait 200",
+    *text_step("Listen address: 127.0.0.1:0", "127.0.0.1:7999"),
+    *(["a11y click Ask before keeping Rift running"] if mac else []),
+], SR_CFG + 'remote_access = true\nremote_listen = "127.0.0.1:0"\n')
+assert got.get("remote_listen") == "127.0.0.1:7999", got
+if mac:
+    assert got.get("confirm_background_quit") is False, got
+
+# config-edit-windows: ⌘Q in another window asks "Save changes?" in the
+# window whose config.toml pane holds unsaved edits, and Cancel keeps every
+# window; edits in the hidden drop-down window slide it in to ask
+cw = scratch / "config-edit-windows"
+def cw_run(name, cfg, steps):
+    d = cw / name
+    for sub in ("cfg/rift", "data"):
+        (d / sub).mkdir(parents=True, exist_ok=True)
+    (d / "cfg/rift/config.toml").write_text(
+        cfg + 'shell = "/bin/bash"\nrestore_session = false\nsync_os_theme = false\n'
+        'check_for_updates = false\n')
+    (d / "t.rift").write_text("\n".join([
+        "resize 1300 800", "wait_prompt", *steps, "key cmd+,", "wait 500", "a11y click Open config.toml",
+        "wait 800", "focus on", "type x", "wait 300", *(s.replace("{d}", str(d)) for s in steps2[name]),
+        "quit"]) + "\n")
+    with (d / "log.txt").open("w") as log:
+        rc = subprocess.run([str(binary), "--script", str(d / "t.rift"), "--headless"],
+                            env=dict(env, XDG_CONFIG_HOME=str(d / "cfg"), XDG_DATA_HOME=str(d / "data")),
+                            stdout=log, stderr=log, timeout=90).returncode
+    assert rc == 0, died(f"config-edit-windows {name} run failed", d / "log.txt")
+    return lambda step: (d / f"{step}.txt").read_text()
+steps2 = {
+    # the pane in window 0; ⌘Q from window 1
+    "window": ["new_window", "wait 800", "key cmd+q", "wait 500", "window 0", "wait 300", "dump {d}/q.txt",
+               "a11y click Cancel", "wait 300", "dump {d}/c.txt"],
+    # the pane in the drop-down window, hidden again; ⌘Q from window 0
+    "dropdown": ["hotkey", "wait 800", "window 0", "wait 300", "key cmd+q", "wait 500", "dump {d}/q.txt",
+                 "a11y click Cancel", "wait 300", "dump {d}/c.txt"],
+}
+t = cw_run("window", "", [])
+assert "confirm=Some((ConfigUnsaved(Close(App)), [])" in t("q"), re.search(r"^confirm=.*$", t("q"), re.M)
+assert re.search(r"^windows=2 ", t("c"), re.M) and "confirm=None" in t("c") and "dirty=true" in t("c")
+t = cw_run("dropdown", "hotkey_window = true\nhotkey_window_height = 100\n", ["hotkey", "wait 800", "wait_prompt"])
+q = t("q")
+assert re.search(r"^windows=2 window=1 focused_window=Some\(1\)", q, re.M), q[:400]
+assert re.search(r"^window 1: .*kind=dropdown shown=true", q, re.M), q[:400]
+assert "confirm=Some((ConfigUnsaved(Close(App)), [])" in q, re.search(r"^confirm=.*$", q, re.M)
+assert re.search(r"^windows=2 ", t("c"), re.M) and "confirm=None" in t("c") and "dirty=true" in t("c")
+
+
+# config-edge: a pane Save then a Settings click at once keeps the saved
+# text (a symlinked config.toml, seen by the watcher a second late); a file
+# that does not load at startup is never rewritten, Add is refused, and a
+# fix saved in the pane applies and brings the installed shells in; a file
+# that is not UTF-8 opens read-only saying why, then editable once fixed;
+# a profile form open in one window follows its profile when another
+# window deletes the one above it
+cx = scratch / "config-edge"
+CX_BASE = 'shell = "/bin/bash"\nrestore_session = false\nsync_os_theme = false\ncheck_for_updates = false\n'
+def cx_run(name, steps, cfg=None, extra_env=None, link=False):
+    d = cx / name
+    for sub in ("cfg/rift", "data", "dot"):
+        (d / sub).mkdir(parents=True, exist_ok=True)
+    target = d / "dot/config.toml" if link else d / "cfg/rift/config.toml"
+    target.write_bytes(cfg if isinstance(cfg, bytes) else (cfg or CX_BASE).encode())
+    if link:
+        (d / "cfg/rift/config.toml").symlink_to(target)
+    (d / "t.rift").write_text("\n".join(
+        ["resize 1300 1200", "wait_prompt", *(s.replace("{d}", str(d)) for s in steps), "quit"]) + "\n")
+    with (d / "log.txt").open("w") as log:
+        rc = subprocess.run([str(binary), "--script", str(d / "t.rift"), "--headless"],
+                            env=dict(env, XDG_CONFIG_HOME=str(d / "cfg"), XDG_DATA_HOME=str(d / "data"),
+                                     **(extra_env or {})),
+                            stdout=log, stderr=log, timeout=120).returncode
+    assert rc == 0, died(f"config-edge {name} run failed", d / "log.txt")
+    return d
+cx_dump = lambda d, name: (d / f"{name}.txt").read_text()
+cx_edit = lambda d, name: re.search(r"^config_edit=.*$", cx_dump(d, name), re.M)[0]
+OPEN = ["key cmd+,", "wait 500", "a11y click Open config.toml", "wait 800", "focus on"]
+d = cx_run("race", [*OPEN, "type font_size = 20\\n", "wait 300", "key cmd+s",
+                    "a11y click Warn before closing running commands", "wait 2500", "dump {d}/a.txt"],
+           link=True)
+saved = (d / "dot/config.toml").read_text()
+assert saved.startswith("font_size = 20\n") and "confirm_close_running = false" in saved, saved
+assert (d / "cfg/rift/config.toml").is_symlink(), "the link was replaced"
+assert re.search(r"^font_size=20 ", cx_dump(d, "a"), re.M), re.search(r"^font_size.*$", cx_dump(d, "a"), re.M)
+(cx / "shells").write_text("/bin/sh\n")
+BROKEN = "# broken\n" + CX_BASE + "font_size = [\n"
+d = cx_run("broken", [
+    "key cmd+,", "wait 500", "a11y click Profiles", "wait 300", "a11y click Add a profile", "wait 300",
+    "dump {d}/a.txt", "sh cp {d}/cfg/rift/config.toml {d}/a.toml",
+    "a11y click Open config.toml", "wait 800", "focus on", "key cmd+down", "key shift+cmd+up",
+    "type " + ("# fixed\n" + CX_BASE + "font_size = 15\n").replace("\n", "\\n"), "wait 400",
+    "key cmd+s", "wait 1000", "dump {d}/b.txt"], BROKEN, {"RIFT_SHELLS_FILE": str(cx / "shells")})
+assert (d / "a.toml").read_text() == BROKEN, "a file that does not load was rewritten"
+assert "settings_profiles=[] " in cx_dump(d, "a") and "fix config.toml first" in cx_dump(d, "a")
+fixed = (d / "cfg/rift/config.toml").read_text()
+assert fixed.startswith("# fixed\n") and 'command = "/bin/sh"\nsource = "shells"' in fixed, fixed
+assert "config_error=None" in cx_dump(d, "b") and "dirty=false" in cx_edit(d, "b"), cx_edit(d, "b")
+(cx / "latin1").mkdir(parents=True, exist_ok=True)
+(cx / "latin1/good.toml").write_text("# cafe\n" + CX_BASE)
+d = cx_run("latin1", [*OPEN, "type zz", "wait 300", "dump {d}/a.txt", "shot {d}/a.png",
+                      "sh cp {d}/good.toml {d}/cfg/rift/config.toml", "wait 2500", "dump {d}/b.txt"],
+           b"# caf\xe9\n" + CX_BASE.encode())
+assert 'read_only=Some("Read-only: it is not UTF-8 text' in cx_edit(d, "a"), cx_edit(d, "a")
+assert "config_edit=true dirty=false" in cx_edit(d, "b"), cx_edit(d, "b")
+PROFS = CX_BASE + "discover_shells = false\n" + "".join(
+    f'\n[[profiles]]\nname = "{n}"\ncommand = "/bin/sh"\n' for n in "abc")
+d = cx_run("windows", [
+    "key cmd+,", "wait 500", "a11y click Profiles", "wait 300", "a11y click Edit b", "wait 300",
+    "new_window", "wait 800", "key cmd+,", "wait 500", "a11y click Profiles", "wait 300",
+    "a11y click Edit a", "wait 300", "a11y click Delete a", "wait 300", "key enter", "wait 500",
+    "window 0", "wait 500", "a11y click Name: b", "key cmd+backspace", "type bee", "key enter",
+    "wait 500", "dump {d}/a.txt"], PROFS)
+assert 'settings_profiles=["bee", "c"] default_profile=None profile_open=Some(0)' in cx_dump(d, "a"), \
+    re.search(r"^settings_profiles=.*$", cx_dump(d, "a"), re.M)
 
 for client in clients:
     client.close()

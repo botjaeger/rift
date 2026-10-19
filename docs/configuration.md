@@ -9,7 +9,9 @@
 | `~/.config/rift/themes/*.yaml` · `*.yml` | User themes, Warp YAML (same directory, same naming) |
 | `~/.config/rift/launch_configs/*.yaml` · `*.yml` · `*.toml` | Launch configurations (Warp-compatible YAML) and Tab Configs (Warp TOML) |
 | `~/.warp/tab_configs/*.toml`, `~/.warp-preview/tab_configs/*.toml` (macOS); `${XDG_DATA_HOME:-~/.local/share}/warp-terminal[-preview]/tab_configs/*.toml` (Linux) | Warp's own Tab Configs, read-only (see [Tab Configs](#tab-configs-toml)) |
+| `~/.config/rift/config.toml.bak` | config.toml as it was before Rift first rewrote it (written once) |
 | `~/.local/share/rift/` | Materialized shell-integration files |
+| `~/.local/share/rift/generated-profiles` | Shells already written into config.toml as profiles, one path per line (see [Profiles](#profiles)) |
 | `~/.local/share/rift/session.toml` | Saved session (every window's tabs, cwds and frame), written atomically; see [Session file](#session-file) |
 | `~/.local/share/rift/last-seen-version` | Version whose What's New was last shown (opens it once after an update) |
 | `~/.local/share/rift/update.json` | Last update check: when, the newest release's manifest, the version *Later* dismissed |
@@ -80,6 +82,34 @@ under 50 px while the window has room, whatever ratio was saved.
 All keys optional; omitted keys use the defaults shown. A key written in
 your file keeps its value when a release changes that default: Rift never
 rewrites your settings to new defaults (only keys you left out follow them).
+A Settings change rewrites only the key it changed; a whole number you wrote
+(`font_size = 14`) stays as written.
+
+### Editing in the config.toml pane
+
+Settings › *Open config.toml* opens the file beside the page as an editor
+(keys and states: [ui.md › config.toml editor](ui.md#configtoml-editor)).
+While your text is unchanged the pane follows the file; once you type, it is
+yours until you Save or Dismiss, and a change on disk under it asks Reload or
+Keep mine. Save writes the text exactly as typed (comments, order and
+spacing kept) and applies it at once. A file that is not UTF-8 text (or too
+large, or binary) opens read-only, and the status bar says why. Lint runs
+150 ms after you stop typing and marks each problem at its line and columns:
+
+| Problem | Severity |
+|---|---|
+| TOML that does not parse (at the line and column the parser names) | error |
+| A value of the wrong type (`font_size = "big"`) | error |
+| An unknown key, with the closest known one (`font_sise` — did you mean `font_size`?) | error |
+| A top-level setting typed under a table (the generated profiles end the file: a line added at the end belongs to the last `[[profiles]]`) | error |
+| `default_profile` naming no profile (new tabs then run the Shell path) | warning |
+| An invalid `[[profiles]]`, `[[actions]]` or `[[secret_patterns]]` entry | error |
+| An unknown action or a chord that does not parse in `[keybindings]` | error |
+| A key Rift no longer reads (`background_processes`, `remote_when_closed`, `menu_bar_icon`) | warning |
+| A `source = "shells"` profile Rift did not write (it is now yours) | warning |
+
+An error shuts Save: text Rift would reject is never written, so the
+running settings always come from a file that loads. Warnings do not block.
 
 ```toml
 font_family   = "Hack"            # embedded Hack or JetBrains Mono, or any installed
@@ -318,7 +348,7 @@ explorer_hidden_files = true      # file explorer lists dotfiles (.git and ignor
 # shell        = "/bin/zsh"       # default: $SHELL
 # default_profile = "dev"         # the profile ⌘T, + and splits open (see Profiles);
 #                                 # unset: `shell` as before
-discover_shells = true            # the shells in /etc/shells are profiles too (zsh, fish…)
+discover_shells = true            # write new shells from /etc/shells in as [[profiles]]
 
 # [[profiles]]                    # see Profiles below
 # name    = "dev"                 # required, unique
@@ -331,6 +361,8 @@ discover_shells = true            # the shells in /etc/shells are profiles too (
 #                                 # user laptop; unset: a terminal
 # theme   = "tokyo-night"         # its panes' colour scheme (any theme name); the
 #                                 # window's chrome keeps the window theme
+# hidden  = true                  # kept, but offered nowhere (still resolvable)
+# source  = "shells"              # written by Rift for an installed shell
 # [profiles.env]                  # this profile's panes only
 # NODE_ENV = "development"
 
@@ -636,7 +668,11 @@ to local directories only (not a remote ssh cwd). None by default.
 
 ## Profiles
 
-A profile is a named set of launch settings (Windows Terminal profiles):
+A profile is a named set of launch settings (Windows Terminal profiles).
+**Settings › Profiles** lists, adds, edits, duplicates, hides, deletes,
+orders and picks the default of them, writing config.toml in place (each
+entry keeps its comments, also through a reorder); every change is checked
+like the file is, and one that would not load is not written. By hand:
 
 ```toml
 default_profile = "dev"
@@ -664,10 +700,27 @@ args = ["--noprofile"]
   `directory`, `shell`, `args`). A pane `shell` replaces the profile's
   `command` and its `args`; pane `args` replace the profile's. A pane naming
   neither a profile nor a shell gets `default_profile`.
-- **Installed shells:** every executable listed in `/etc/shells` is a profile
-  named after it (`zsh`, `bash`, `fish`; one per name, the one `PATH` finds
-  first), unless `discover_shells = false`. A `[[profiles]]` entry with the
-  same name wins.
+- **Installed shells:** config.toml is the only list of profiles. At launch,
+  each executable in `/etc/shells` (one per name, the one `PATH` finds first)
+  that Rift has not offered before is written into the file as a
+  `[[profiles]]` entry named after it (`zsh`, `bash`, `fish`; `zsh (2)` when
+  the name is taken) with `source = "shells"`, unless `discover_shells =
+  false` or one of your profiles already runs that program. The shells
+  offered are remembered in `~/.local/share/rift/generated-profiles`, so a
+  generated entry you delete (in the file or with Settings › Profiles ›
+  Delete) stays deleted and one you edit keeps your edits; Settings shows
+  such an entry as *Detected*, its command not editable (Duplicate makes a
+  copy of your own). A config.toml that does not load is never touched; the
+  shells are added once it is fixed. Turning `discover_shells` on in
+  Settings adds the shells not offered yet at once. On the very first launch (no config.toml yet) `default_profile` is
+  set to the entry running your login shell (`$SHELL`). A generated entry
+  whose shell is no longer installed (gone from `/etc/shells`, or its file
+  gone) stays in the file but is offered nowhere.
+- **Hiding one:** `hidden = true` keeps a profile in the file but out of the
+  + menu and the palette; `default_profile` may still name it.
+- **Backup:** the first time Rift rewrites a config.toml it did not just
+  create (adding a shell, a Settings change), the file as it was is kept as
+  `config.toml.bak` beside it; later rewrites leave that backup alone.
 - **Opening one:** the ⌄ beside the tab bar's + (or right-click +) lists the
   profiles (the default one bold) with their shortcuts, ⌃⇧1…⌃⇧9
   (`new_tab_profile_1`…`_9`, in menu order); the palette has
@@ -676,8 +729,8 @@ args = ["--noprofile"]
   open the default profile, as does every other new tab (the first tab, ⌘N,
   links, `rift-terminal <path>`, `ctl open`, the phone, the drop-down
   window): in the profile's `cwd` unless a folder was named, with its
-  `title` and `color`. Settings › General lists the profiles
-  (read-only; edit them in config.toml).
+  `title` and `color`. The menu, the shortcuts and the palette follow the
+  order Settings › Profiles (or the file) gives them.
 - **Shell integration** follows the program each pane runs: zsh, bash and fish
   load Rift's hooks, as do completions from the shell itself
   (`shell_completions`).

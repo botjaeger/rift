@@ -804,11 +804,13 @@ pub struct Config {
     /// address changes on every start, so phones pair again after one.
     pub remote_tunnel: bool,
     pub shell: Option<String>,
-    /// The `[[profiles]]` entry (or discovered shell) new tabs and panes
-    /// open with; unset: `shell` as before profiles.
+    /// The `[[profiles]]` entry new tabs and panes open with; unset: `shell`
+    /// as before profiles.
     pub default_profile: Option<String>,
-    /// The executable shells in /etc/shells appear as profiles named after
-    /// them (`zsh`, `fish`); a `[[profiles]]` entry of the same name wins.
+    /// Each executable shell in /etc/shells not yet offered is written into
+    /// this file as a `[[profiles]]` entry named after it (`zsh`, `fish`;
+    /// `source = "shells"`), once: a deleted one stays deleted. See
+    /// `generated.rs`.
     pub discover_shells: bool,
     /// Theme used while the OS is in light mode when `sync_os_theme` is on.
     pub theme_light: String,
@@ -1263,7 +1265,7 @@ fn relay_of(setting: &str, no_default: bool) -> Option<&str> {
 
 /// Top-level `Option` settings: absent from a serialized default, so
 /// `merge_table` cannot tell them from unknown keys without this list.
-const OPTIONAL_KEYS: &[&str] = &[
+pub const OPTIONAL_KEYS: &[&str] = &[
     "shell",
     "default_profile",
     "right_option_as_meta",
@@ -1281,6 +1283,7 @@ fn merge_table(
     new: &toml::Table,
     default: &toml::Table,
     optional: &[&str],
+    ordered: Option<&toml_edit::Table>,
 ) {
     let is_map = default.is_empty();
     let stale: Vec<String> = doc
@@ -1301,12 +1304,27 @@ fn merge_table(
         match (doc.get_mut(k), v) {
             (Some(item), toml::Value::Table(nt)) if item.is_table_like() => {
                 if let Some(t) = item.as_table_like_mut() {
-                    merge_table(t, nt, sub_default, &[]);
+                    merge_table(t, nt, sub_default, &[], None);
+                }
+            }
+            // a list of tables (`[[profiles]]`): each entry the file already
+            // has (found by its `name`) is edited in place, so its comments
+            // move with it through a reorder; new ones are written fresh
+            (Some(item), toml::Value::Array(arr))
+                if item.is_array_of_tables() && arr.iter().all(toml::Value::is_table) =>
+            {
+                // unchanged: left exactly as written (entries without a
+                // `name`, `[[tab_color_rules]]`, could not be matched up)
+                if plain_value(k, item).as_ref() != Some(v) {
+                    let fresh = ordered
+                        .and_then(|o| o.get(k))
+                        .and_then(toml_edit::Item::as_array_of_tables);
+                    merge_tables(item, arr, fresh);
                 }
             }
             (Some(item), _) => {
-                if plain_value(k, item).as_ref() != Some(v)
-                    && let Some(mut fresh) = edit_item(k, v)
+                if !plain_value(k, item).is_some_and(|old| same_number_or_value(&old, v))
+                    && let Some(mut fresh) = fresh_item(k, v, ordered)
                 {
                     // keep the value's trailing comment and spacing
                     if let (Some(old), Some(fresh_v)) = (item.as_value(), fresh.as_value_mut()) {
@@ -1317,19 +1335,115 @@ fn merge_table(
             }
             (None, toml::Value::Table(nt)) => {
                 let mut t = toml_edit::Table::new();
-                merge_table(&mut t, nt, sub_default, &[]);
+                merge_table(&mut t, nt, sub_default, &[], None);
                 if !t.is_empty() {
                     doc.insert(k, toml_edit::Item::Table(t));
                 }
             }
             (None, _) => {
                 if dv != Some(v)
-                    && let Some(fresh) = edit_item(k, v)
+                    && let Some(fresh) = fresh_item(k, v, ordered)
                 {
                     doc.insert(k, fresh);
                 }
             }
         }
+    }
+}
+
+/// Make the array of tables `item` hold `new` (see `merge_table`): an
+/// entry whose `name` the file has keeps that table (its comments and
+/// spacing), edited; another is `fresh`'s entry at its index (the struct's
+/// field order). The list stays where it was in the file, in `new`'s order.
+fn merge_tables(
+    item: &mut toml_edit::Item,
+    new: &[toml::Value],
+    fresh: Option<&toml_edit::ArrayOfTables>,
+) {
+    let Some(old) = item.as_array_of_tables() else {
+        return;
+    };
+    let start = old.iter().filter_map(toml_edit::Table::position).min();
+    // (each with its index in the file)
+    let mut pool: Vec<(usize, toml_edit::Table)> = old.iter().cloned().enumerate().collect();
+    let name = |t: &toml_edit::Table| t.get("name").and_then(|v| v.as_str()).map(str::to_string);
+    let new_names: Vec<&str> = new
+        .iter()
+        .filter_map(|v| v.get("name").and_then(|n| n.as_str()))
+        .collect();
+    let empty = toml::Table::new();
+    let mut out = toml_edit::ArrayOfTables::new();
+    for (i, value) in new.iter().enumerate() {
+        let Some(nt) = value.as_table() else {
+            continue;
+        };
+        let wanted = nt.get("name").and_then(|v| v.as_str());
+        let kept = wanted
+            .and_then(|w| pool.iter().position(|(_, t)| name(t).as_deref() == Some(w)))
+            // renamed: the entry at its place whose name went away
+            .or_else(|| {
+                pool.iter().position(|(at, t)| {
+                    *at == i && name(t).is_none_or(|n| !new_names.contains(&n.as_str()))
+                })
+            })
+            .map(|p| pool.remove(p).1);
+        let mut t = match (kept, fresh.and_then(|f| f.get(i))) {
+            (Some(mut t), _) => {
+                // an empty list or table the entry does not have is not
+                // added to it (`args = []` on an `[[ssh_profiles]]` entry)
+                let nt: toml::Table = nt
+                    .iter()
+                    .filter(|(k, v)| {
+                        t.contains_key(k)
+                            || !match v {
+                                toml::Value::Array(a) => a.is_empty(),
+                                toml::Value::Table(t) => t.is_empty(),
+                                _ => false,
+                            }
+                    })
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                // (an empty default: its entries are exactly `nt`'s)
+                merge_table(&mut t, &nt, &empty, &[], None);
+                t
+            }
+            (None, Some(f)) => f.clone(),
+            (None, None) => {
+                let mut t = toml_edit::Table::new();
+                merge_table(&mut t, nt, &empty, &[], None);
+                t
+            }
+        };
+        // in list order, from where the list started (its nested tables
+        // follow their entry)
+        unposition(&mut t);
+        if i == 0 {
+            t.set_position(start);
+        }
+        out.push(t);
+    }
+    *item = toml_edit::Item::ArrayOfTables(out);
+}
+
+/// `t` and the tables in it lose their file positions: they print where
+/// the table before them does, in the order they are visited.
+fn unposition(t: &mut toml_edit::Table) {
+    t.set_position(None);
+    for (_, item) in t.iter_mut() {
+        match item {
+            toml_edit::Item::Table(sub) => unposition(sub),
+            toml_edit::Item::ArrayOfTables(a) => a.iter_mut().for_each(unposition),
+            _ => {}
+        }
+    }
+}
+
+/// Equal values, an integer the user wrote equal to the float a setting
+/// holds too (`font_size = 14` stays `14`, not `14.0`).
+fn same_number_or_value(old: &toml::Value, new: &toml::Value) -> bool {
+    match (old, new) {
+        (toml::Value::Integer(i), toml::Value::Float(f)) => *i as f64 == *f,
+        _ => old == new,
     }
 }
 
@@ -1342,12 +1456,79 @@ fn plain_value(key: &str, item: &toml_edit::Item) -> Option<toml::Value> {
         .remove(key)
 }
 
+/// The item to write for `key`: `ordered`'s (the config written by its
+/// struct, so a `[[profiles]]` entry keeps its fields in declaration order,
+/// `name` first), else `value` as an editable item.
+fn fresh_item(
+    key: &str,
+    value: &toml::Value,
+    ordered: Option<&toml_edit::Table>,
+) -> Option<toml_edit::Item> {
+    ordered
+        .and_then(|o| o.get(key))
+        .filter(|item| plain_value(key, item).as_ref() == Some(value))
+        .cloned()
+        .or_else(|| edit_item(key, value))
+}
+
 /// `value` as an editable item, formatted like `toml::to_string_pretty`.
 fn edit_item(key: &str, value: &toml::Value) -> Option<toml_edit::Item> {
     let mut t = toml::Table::new();
     t.insert(key.to_string(), value.clone());
     let mut d: toml_edit::DocumentMut = toml::to_string_pretty(&t).ok()?.parse().ok()?;
     d.remove(key)
+}
+
+/// `path`, or the file a symlink at `path` points to: a symlinked
+/// config.toml (dotfiles, stow) is edited through the link, since a rename
+/// onto the link itself would replace it with a file.
+fn resolve_link(path: &Path) -> std::io::Result<PathBuf> {
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => std::fs::canonicalize(path),
+        _ => Ok(path.to_path_buf()),
+    }
+}
+
+/// Keep `old` (the bytes of `path` before Rift first rewrites it) as
+/// `<name>.bak` beside it, unless one is already there.
+fn backup_once(path: &Path, old: &str) -> std::io::Result<()> {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".bak");
+    let bak = path.with_file_name(name);
+    match std::fs::symlink_metadata(&bak) {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => write_atomic(&bak, old),
+        Err(e) => Err(e),
+    }
+}
+
+/// Replace `path` with `body` atomically: write a sibling temp file, flush
+/// it, keep the old file's permissions, rename over the target (a symlink
+/// is written through). A failed write never truncates the existing file
+/// and removes its temp file, and the hot-reload watcher never reads a
+/// half-written one.
+pub fn write_atomic(path: &Path, body: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let path = resolve_link(path)?;
+    let dir = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("path has no parent"))?;
+    std::fs::create_dir_all(dir)?;
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let tmp = dir.join(format!(".{name}.tmp-{}", std::process::id()));
+    let result = (|| {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(body.as_bytes())?;
+        f.sync_all()?;
+        if let Ok(meta) = std::fs::metadata(&path) {
+            std::fs::set_permissions(&tmp, meta.permissions())?;
+        }
+        std::fs::rename(&tmp, &path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 pub fn config_path() -> Option<PathBuf> {
@@ -1435,28 +1616,13 @@ impl Config {
         self.save_to(&path)
     }
 
-    /// Edit the file in place (see `edit_toml`), then replace it atomically:
-    /// write a sibling temp file, flush it, keep the old file's
-    /// permissions, rename over the target. A failed write never truncates
-    /// the existing config, and the hot-reload watcher never reads a
-    /// half-written file.
+    /// Edit the file in place (see `edit_toml`), then replace it atomically
+    /// (`write_atomic`). The first time Rift rewrites a file that already
+    /// exists, the file as it was is kept beside it as `config.toml.bak`
+    /// (never overwritten after that).
     pub fn save_to(&self, path: &Path) -> std::io::Result<()> {
-        use std::io::Write;
-        // a symlinked config.toml (dotfiles, stow) is edited through the
-        // link: rename onto the link itself would replace it with a file
-        let resolved;
-        let path = match std::fs::symlink_metadata(path) {
-            Ok(m) if m.file_type().is_symlink() => {
-                resolved = std::fs::canonicalize(path)?;
-                resolved.as_path()
-            }
-            _ => path,
-        };
-        let dir = path
-            .parent()
-            .ok_or_else(|| std::io::Error::other("config path has no parent"))?;
-        std::fs::create_dir_all(dir)?;
-        let existing = match std::fs::read_to_string(path) {
+        let target = resolve_link(path)?;
+        let existing = match std::fs::read_to_string(&target) {
             Ok(s) => Some(s),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(e),
@@ -1464,20 +1630,26 @@ impl Config {
         let body = self
             .edit_toml(existing.as_deref())
             .map_err(std::io::Error::other)?;
-        let tmp = dir.join(format!(".config.toml.tmp-{}", std::process::id()));
-        let result = (|| {
-            let mut f = std::fs::File::create(&tmp)?;
-            f.write_all(body.as_bytes())?;
-            f.sync_all()?;
-            if let Ok(meta) = std::fs::metadata(path) {
-                std::fs::set_permissions(&tmp, meta.permissions())?;
-            }
-            std::fs::rename(&tmp, path)
-        })();
-        if result.is_err() {
-            let _ = std::fs::remove_file(&tmp);
+        if let Some(old) = &existing
+            && *old != body
+        {
+            backup_once(&target, old)?;
         }
-        result
+        write_atomic(&target, &body)
+    }
+
+    /// Write `text` to `path` exactly as typed (the config editor): refused
+    /// when `config_lint::lint` finds an error in it, so a file Rift would
+    /// reject is never saved; warnings do not block.
+    pub fn save_text(path: &Path, text: &str) -> Result<(), String> {
+        let diagnostics = crate::config_lint::lint(text);
+        if let Some(d) = diagnostics
+            .iter()
+            .find(|d| d.severity == crate::config_lint::Severity::Error)
+        {
+            return Err(format!("line {}: {}", d.line + 1, d.message));
+        }
+        write_atomic(path, text).map_err(|e| format!("{}: {e}", path.display()))
     }
 
     /// The user's file (`existing`) changed to hold this config. A changed
@@ -1499,6 +1671,9 @@ impl Config {
         } else {
             String::new()
         };
+        let ordered: Option<toml_edit::DocumentMut> = toml::to_string_pretty(self)
+            .ok()
+            .and_then(|t| t.parse().ok());
         let table = |c: &Config| match toml::Value::try_from(c) {
             Ok(toml::Value::Table(t)) => Ok(t),
             Ok(_) => Err("config is not a table".to_string()),
@@ -1509,6 +1684,7 @@ impl Config {
             &table(self)?,
             &table(&Config::default())?,
             OPTIONAL_KEYS,
+            ordered.as_ref().map(|d| d.as_table()),
         );
         let out = format!("{header}{doc}");
         // compared as TOML text: an accepted `nan` never equals itself as
@@ -2081,6 +2257,22 @@ mod tests {
     }
 
     #[test]
+    fn a_whole_number_the_user_wrote_stays_an_integer_on_save() {
+        let text = "font_size = 14\nline_height = 2\n";
+        let mut c: Config = toml::from_str(text).unwrap();
+        c.remote_access = true;
+        let out = c.edit_toml(Some(text)).unwrap();
+        assert_eq!(
+            out,
+            "font_size = 14\nline_height = 2\nremote_access = true\n"
+        );
+        // a changed value is still rewritten
+        c.font_size = 15.5;
+        let out = c.edit_toml(Some(text)).unwrap();
+        assert!(out.starts_with("font_size = 15.5\n"), "{out}");
+    }
+
+    #[test]
     fn remote_relay_defaults_to_the_public_relay_and_is_saved_in_place() {
         let c = Config::default();
         assert_eq!(c.remote_relay, DEFAULT_RELAY);
@@ -2481,6 +2673,73 @@ mod tests {
     }
 
     #[test]
+    fn save_text_writes_the_text_byte_for_byte() {
+        let dir = scratch("save-text");
+        let path = dir.join("config.toml");
+        let text = "# mine\r\nfont_size   =  15.0 # big\n\n\n[keybindings]\nnew_tab = \"cmd+t\"";
+        Config::save_text(&path, text).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        // a warning (a removed key) does not block
+        Config::save_text(&path, "menu_bar_icon = true\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "menu_bar_icon = true\n"
+        );
+        let leftovers = std::fs::read_dir(&dir).unwrap().count();
+        assert_eq!(leftovers, 1, "only config.toml: no temp file, no backup");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_text_edits_a_symlinked_config_through_the_link() {
+        let dir = scratch("save-text-link");
+        let real_dir = dir.join("dotfiles");
+        std::fs::create_dir_all(&real_dir).unwrap();
+        let real = real_dir.join("config.toml");
+        std::fs::write(&real, "font_size = 15.0\n").unwrap();
+        let link = dir.join("config.toml");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        Config::save_text(&link, "font_size = 17.0\n").unwrap();
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&real).unwrap(),
+            "font_size = 17.0\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_text_refuses_text_with_errors_and_leaves_the_file() {
+        let dir = scratch("save-text-bad");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "font_size = 15.0\n").unwrap();
+        for bad in [
+            "font_size = [\n",
+            "theme = \"x\"\nfont_sise = 14\n",
+            "input_position = \"middle\"\n",
+        ] {
+            let e = Config::save_text(&path, bad).unwrap_err();
+            assert!(e.starts_with("line "), "{e}");
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                "font_size = 15.0\n"
+            );
+        }
+        let e = Config::save_text(&path, "theme = \"x\"\nfont_sise = 14\n").unwrap_err();
+        assert_eq!(
+            e,
+            "line 2: unknown key `font_sise` — did you mean `font_size`?"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn scrollback_lines_is_bounded() {
         let c = Config {
             scrollback: usize::MAX,
@@ -2727,6 +2986,55 @@ name = "clean"
         assert_eq!(
             out,
             "# my setup\nfont_size = 15.0 # big\ntheme = \"dark-default\"\nfuture_option = 1\n\n# bindings\n[keybindings]\nnew_tab = \"cmd+t\"\n"
+        );
+        assert_eq!(toml::from_str::<Config>(&out).unwrap(), c);
+    }
+
+    #[test]
+    fn a_list_of_tables_keeps_its_text_unless_an_entry_changes() {
+        // `args` is serialized even when empty: an entry without it stays so
+        let file = "[[ssh_profiles]]\nname = \"box\"\nhost = \"me@box\" # mine\n";
+        let mut c: Config = toml::from_str(file).unwrap();
+        c.font_size = 15.0;
+        let out = c.edit_toml(Some(file)).unwrap();
+        assert_eq!(out, format!("font_size = 15.0\n{file}"));
+        // a list without names, unchanged, keeps its comments
+        let rules = "[[tab_color_rules]]\n# work\ndir = \"~/work\" # mine\ncolor = \"red\"\n";
+        let mut c: Config = toml::from_str(rules).unwrap();
+        c.font_size = 15.0;
+        assert_eq!(
+            c.edit_toml(Some(rules)).unwrap(),
+            format!("font_size = 15.0\n{rules}")
+        );
+        // a renamed profile keeps its comments
+        let file = "# work things\n[[profiles]]\nname = \"work\" # renamed soon\ncommand = \"/bin/zsh\" # mine\n";
+        let mut c: Config = toml::from_str(file).unwrap();
+        c.profiles[0].name = "job".into();
+        assert_eq!(
+            c.edit_toml(Some(file)).unwrap(),
+            file.replace("\"work\"", "\"job\"")
+        );
+        // one it has is still changed, emptied included
+        let file = "[[ssh_profiles]]\nname = \"box\"\nhost = \"me@box\"\nargs = [\"-A\"]\n";
+        let mut c: Config = toml::from_str(file).unwrap();
+        c.ssh_profiles[0].args.clear();
+        let out = c.edit_toml(Some(file)).unwrap();
+        assert_eq!(toml::from_str::<Config>(&out).unwrap(), c);
+        assert!(out.contains("args = []"), "{out}");
+    }
+
+    #[test]
+    fn save_keeps_each_profiles_comments_through_edits_and_moves() {
+        let file = "theme = \"nord\"\n\n# work things\n[[profiles]]\nname = \"work\"\ncommand = \"/bin/zsh\" # mine\n\n# old\n[[profiles]]\nname = \"old\"\n\n# keep me last\n[notifications]\ntoasts = false\n";
+        let mut c: Config = toml::from_str(file).unwrap();
+        // hide one, delete the other, add one, then put the new one first
+        c.profiles[0].hidden = true;
+        c.profiles.remove(1);
+        c.profiles.insert(0, crate::profiles::Profile::named("new"));
+        let out = c.edit_toml(Some(file)).unwrap();
+        assert_eq!(
+            out,
+            "theme = \"nord\"\n\n[[profiles]]\nname = \"new\"\n\n# work things\n[[profiles]]\nname = \"work\"\ncommand = \"/bin/zsh\" # mine\nhidden = true\n\n# keep me last\n[notifications]\ntoasts = false\n"
         );
         assert_eq!(toml::from_str::<Config>(&out).unwrap(), c);
     }

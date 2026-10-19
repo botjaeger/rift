@@ -43,7 +43,7 @@ pub enum PaletteAction {
     FocusWindow(u32, usize, u64),
     /// Ask to install remote shell integration on ssh profile `.0`.
     SshInstall(usize),
-    /// Open launch profile `.1` (`[[profiles]]` or a discovered shell).
+    /// Open launch profile `.1` (a `[[profiles]]` entry).
     Profile(ProfileOpen, String),
     /// New worktree mode: create the typed branch's worktree, open a tab.
     CreateWorktree,

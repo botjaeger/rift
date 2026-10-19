@@ -644,7 +644,12 @@ missing program is a toast naming both, and nothing opens. A profile's
 `theme` gives its panes their own colour scheme (terminal content only; the
 chrome keeps the window theme); the palette's `Pane theme: <name>` sets the
 active pane's, `Pane theme: default` restores the window theme, and the
-session keeps it. Reference:
+session keeps it. **Settings › Profiles** manages them: the default
+profile, the installed-shells switch, and a row per profile (Default,
+Detected, Hidden and Not found tags) with an edit form, Duplicate, Hide /
+Show, Delete (asked; a deleted detected shell never comes back) and Set as
+default; drag a row or press ⌥↑ / ⌥↓ to reorder. Changes are validated
+and written into config.toml in place, comments kept. Reference:
 [configuration.md › Profiles](configuration.md#profiles).
 
 ## User actions
@@ -1893,6 +1898,11 @@ file… and Reveal in Finder. A block that printed a Markdown file (`cat
 README.md`) offers *Open in viewer* in its menu. Preview reads and
 highlighting run in the background. Only regular files are accepted, and
 the byte limit is enforced during reading, including when a file grows.
+config.toml opened from Settings is the one file the pane edits: Save
+(⌘S, shut while lint finds an error) / Dismiss, lint marks 150 ms after
+typing stops, a Reload / Keep mine bar when the file changes under unsaved
+edits, and a Save / Discard / Cancel question before they are lost
+([ui.md › config.toml editor](ui.md#configtoml-editor)).
 
 ⇧⌘G opens code review: staged and unstaged changes (untracked included) as
 file cards of hunks: line numbers, syntax colors, the changed characters of

@@ -5,11 +5,20 @@
 //! switch in the header.
 //! Esc or ✕ closes it; the terminal underneath keeps running. ⌘F opens a
 //! find bar scoped to the open file (case-insensitive plain text).
+//!
+//! config.toml beside Settings is the one file it edits ([`ConfigEdit`]):
+//! a caret, selection and undo, Save / Dismiss in the header while the text
+//! differs from the file, lint marks 150 ms after the last keystroke, and a
+//! bar when the file changes on disk under unsaved edits.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
+use crate::state::EditorState;
 use crate::views::icons::{self, Icon};
 use rift_core::code_highlight::{self, Kind, Lang, State};
+use rift_core::config_lint::{Diagnostic, Severity};
 use rift_core::{Color, Theme};
 use rift_renderer::glyphon::{Attrs, Buffer, Family, Metrics, Shaping, TextBounds, Weight};
 use rift_renderer::{FONT_SANS, Layer, TextEngine, mono_family, text_color};
@@ -22,7 +31,280 @@ const FONT: f32 = 13.0;
 const LINE: f32 = 20.0;
 /// Height of the find strip under the header while find is open.
 const FIND_H: f32 = 40.0;
+/// Height of the conflict strip under the header and of the lint status
+/// bar under the text (the pane title bar's height).
+const BAR_H: f32 = HEADER_H;
+/// Lint runs this long after the last keystroke.
+pub const LINT_DELAY: Duration = Duration::from_millis(150);
+/// How long "Saved" shows in the header after a save.
+pub const SAVED_SHOWN: Duration = Duration::from_millis(1500);
+/// Extra gutter width while editing: the lint dots' column, left of the
+/// line numbers.
+const LINT_GUTTER: f32 = 10.0;
+/// Spaces Tab inserts.
+const TAB: &str = "  ";
 
+/// The config.toml pane's editing state. Its buffer is the command line's
+/// `EditorState`: the same undo stack, selection, grapheme-aware moves and
+/// `replace_range` as the one mutation point (its history, vim mode and
+/// extra carets stay unused here).
+#[derive(Default)]
+pub struct ConfigEdit {
+    pub buffer: EditorState,
+    /// The file's text as last read or written.
+    pub disk: String,
+    /// The last lint of `buffer` (line order).
+    pub diagnostics: Vec<Diagnostic>,
+    /// The file changed on disk while the buffer had unsaved edits.
+    pub conflict: bool,
+    /// When the pending lint runs (debounce after a keystroke).
+    pub lint_due: Option<Instant>,
+    /// When the last save landed ("Saved" in the header).
+    pub saved_at: Option<Instant>,
+    /// The generated-profiles list (`lint_with`): Rift's own shell stubs.
+    pub seen: Option<BTreeSet<String>>,
+    /// A press in the text is selecting: a drag extends to the pointer.
+    pub dragging: bool,
+    /// The column ↑ / ↓ keep across shorter lines (chars).
+    goal: Option<usize>,
+    /// The diagnostic the status bar jumped to last.
+    next_diag: usize,
+}
+
+impl std::fmt::Debug for ConfigEdit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConfigEdit")
+            .field("dirty", &self.dirty())
+            .field("conflict", &self.conflict)
+            .field("cursor", &self.buffer.cursor)
+            .field("diagnostics", &self.diagnostics.len())
+            .finish()
+    }
+}
+
+impl ConfigEdit {
+    pub fn new(text: String, seen: Option<BTreeSet<String>>) -> Self {
+        let mut buffer = EditorState::default();
+        buffer.buffer = text.clone();
+        let mut e = ConfigEdit {
+            buffer,
+            disk: text,
+            seen,
+            ..Default::default()
+        };
+        e.lint();
+        e
+    }
+
+    /// The text differs from the file.
+    pub fn dirty(&self) -> bool {
+        self.buffer.buffer != self.disk
+    }
+
+    pub fn errors(&self) -> usize {
+        self.count(Severity::Error)
+    }
+
+    pub fn warnings(&self) -> usize {
+        self.count(Severity::Warning)
+    }
+
+    fn count(&self, s: Severity) -> usize {
+        self.diagnostics.iter().filter(|d| d.severity == s).count()
+    }
+
+    /// Save is offered (dirty) and allowed (no error in the last lint; a
+    /// save lints a pending edit first).
+    pub fn can_save(&self) -> bool {
+        self.dirty() && self.errors() == 0
+    }
+
+    /// Lint the buffer now.
+    pub fn lint(&mut self) {
+        self.lint_due = None;
+        self.diagnostics =
+            rift_core::config_lint::lint_with(&self.buffer.buffer, self.seen.as_ref());
+    }
+
+    /// "2 errors · 1 warning — line 4: …" (the first problem), or `None`.
+    pub fn summary(&self) -> Option<String> {
+        let first = self.diagnostics.first()?;
+        let plural = |n: usize, w: &str| format!("{n} {w}{}", if n == 1 { "" } else { "s" });
+        let mut counts = Vec::new();
+        if self.errors() > 0 {
+            counts.push(plural(self.errors(), "error"));
+        }
+        if self.warnings() > 0 {
+            counts.push(plural(self.warnings(), "warning"));
+        }
+        Some(format!(
+            "{} — line {}: {}",
+            counts.join(" · "),
+            first.line + 1,
+            first.message
+        ))
+    }
+
+    /// Byte offset of char column `col` on 0-based line `line` (clamped to
+    /// the line's end; past the last line: the end of the text).
+    pub fn offset_of(&self, line: usize, col: usize) -> usize {
+        let text = &self.buffer.buffer;
+        let Some(start) = line_start(text, line) else {
+            return text.len();
+        };
+        let end = text[start..].find('\n').map_or(text.len(), |i| start + i);
+        text[start..end]
+            .char_indices()
+            .nth(col)
+            .map_or(end, |(i, _)| start + i)
+    }
+
+    /// The caret's (line, char column).
+    pub fn caret(&self) -> (usize, usize) {
+        line_col(&self.buffer.buffer, self.buffer.cursor)
+    }
+
+    /// The file on disk now reads `text`. A clean buffer follows it (the
+    /// caret stays where it was, clamped); a dirty one is never replaced:
+    /// unless the file now holds exactly the buffer (our own save), the
+    /// change is a conflict to resolve. True when anything changed.
+    pub fn disk_changed(&mut self, text: String) -> bool {
+        if text == self.disk {
+            return false;
+        }
+        if !self.dirty() {
+            let cursor = self.buffer.cursor;
+            self.set_text(&text);
+            self.buffer.cursor = floor_boundary(&self.buffer.buffer, cursor);
+            self.disk = text;
+            self.lint();
+        } else {
+            self.conflict = text != self.buffer.buffer;
+            self.disk = text;
+        }
+        true
+    }
+
+    /// Conflict › Reload, and Dismiss: the file's text replaces the
+    /// buffer (one undo step).
+    pub fn revert(&mut self) {
+        let disk = self.disk.clone();
+        self.set_text(&disk);
+        self.buffer.cursor = floor_boundary(&self.buffer.buffer, self.buffer.cursor);
+        self.conflict = false;
+        self.lint();
+    }
+
+    /// The whole text replaced through the buffer's one mutation point.
+    fn set_text(&mut self, text: &str) {
+        if self.buffer.buffer != text {
+            let cursor = self.buffer.cursor;
+            let all = 0..self.buffer.buffer.len();
+            self.buffer.replace_range(all, text);
+            self.buffer.cursor = floor_boundary(text, cursor);
+        }
+    }
+
+    /// The buffer was written to the file.
+    pub fn saved(&mut self, now: Instant) {
+        self.disk = self.buffer.buffer.clone();
+        self.conflict = false;
+        self.saved_at = Some(now);
+    }
+
+    /// Move the caret `delta` lines, keeping its column (`goal`).
+    fn vertical(&mut self, delta: isize) {
+        let (line, col) = self.caret();
+        let goal = *self.goal.get_or_insert(col);
+        let lines = self.buffer.buffer.split('\n').count() as isize;
+        let to = line as isize + delta;
+        self.buffer.cursor = if to < 0 {
+            0
+        } else if to >= lines {
+            self.buffer.buffer.len()
+        } else {
+            self.offset_of(to as usize, goal)
+        };
+    }
+
+    /// The next diagnostic after the last one jumped to (wrapping): the
+    /// caret goes to its start.
+    pub fn jump_next(&mut self) -> bool {
+        if self.diagnostics.is_empty() {
+            return false;
+        }
+        let i = self.next_diag % self.diagnostics.len();
+        self.next_diag = i + 1;
+        let d = &self.diagnostics[i];
+        let at = self.offset_of(d.line, d.cols.start);
+        self.buffer.click_to(at, false);
+        self.goal = None;
+        true
+    }
+}
+
+/// Byte offset where 0-based `line` starts, if the text has it.
+fn line_start(text: &str, line: usize) -> Option<usize> {
+    if line == 0 {
+        return Some(0);
+    }
+    text.match_indices('\n').nth(line - 1).map(|(i, _)| i + 1)
+}
+
+/// (line, char column) of byte offset `at`.
+fn line_col(text: &str, at: usize) -> (usize, usize) {
+    let at = at.min(text.len());
+    let before = &text[..at];
+    let line = before.matches('\n').count();
+    let start = before.rfind('\n').map_or(0, |i| i + 1);
+    (line, text[start..at].chars().count())
+}
+
+fn floor_boundary(text: &str, at: usize) -> usize {
+    let mut at = at.min(text.len());
+    while !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    at
+}
+
+/// Display width in columns of `s` as drawn (a tab: 4).
+fn display_cols(s: &str) -> usize {
+    s.chars().map(|c| if c == '\t' { 4 } else { 1 }).sum()
+}
+
+/// The modifiers an edit key reads.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EditMods {
+    pub shift: bool,
+    pub alt: bool,
+    pub ctrl: bool,
+    /// ⌘ on macOS.
+    pub cmd: bool,
+}
+
+impl EditMods {
+    /// The command modifier: ⌘ (Super), and Ctrl too off macOS.
+    fn primary(&self) -> bool {
+        self.cmd || (self.ctrl && !cfg!(target_os = "macos"))
+    }
+}
+
+/// What an edit key asks of the app.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EditOutcome {
+    /// Not an edit key: app shortcuts may take it.
+    Ignored,
+    Handled,
+    /// ⌘S.
+    Save,
+    /// ⌘C / ⌘X: this text to the clipboard.
+    Copy(String),
+    /// ⌘V.
+    Paste,
+    /// Esc without a selection: close the pane (asks while dirty).
+    Close,
+}
 /// Color runs covering a line, with the byte ranges in `over` repainted
 /// `color` (runs split at their edges). Both inputs are ascending.
 fn recolor(
@@ -141,6 +423,19 @@ pub struct ViewerState {
     /// Selected source lines (0-based): (anchor, cursor). A click picks a
     /// line, ⇧-click and ⇧↑ ⇧↓ extend; "Send to agent…" sends them.
     pub sel: Option<(usize, usize)>,
+    /// The file's exact text (valid UTF-8 only): what an edit starts from.
+    raw: Option<String>,
+    /// Editing config.toml (Settings › Open config.toml only).
+    pub edit: Option<ConfigEdit>,
+    /// Where the source text starts (window x, before `scroll_x`) and one
+    /// monospace cell's width, last frame: clicks map to a caret with them.
+    text_x: f32,
+    char_w: f32,
+    /// The line-number gutter's width, last frame.
+    gutter: f32,
+    /// config.toml that cannot be edited here (not UTF-8 text, too large,
+    /// binary): why, shown in the status bar.
+    pub read_only: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -152,6 +447,18 @@ pub enum ViewerHit {
     Mode(bool),
     /// A rendered shell code block's Run button (index into `markdown`).
     RunCode(usize),
+    /// config.toml: write the buffer (disabled while lint finds an error).
+    Save,
+    /// config.toml: drop the edits (the file's text again).
+    Dismiss,
+    /// The conflict bar: the file's new text replaces the buffer.
+    Reload,
+    /// The conflict bar: keep the buffer (a save then overwrites the file).
+    KeepMine,
+    /// The lint status bar: the caret to the next problem.
+    Status,
+    /// A gutter dot: the problems on this 0-based line (hover tooltip).
+    Lint(usize),
 }
 
 impl ViewerState {
@@ -239,6 +546,9 @@ impl ViewerState {
                 }
                 Ok(bytes) => {
                     let text = String::from_utf8_lossy(&bytes);
+                    if let std::borrow::Cow::Borrowed(exact) = &text {
+                        self.raw = Some(exact.to_string());
+                    }
                     self.lines = text
                         .split('\n')
                         .map(|l| l.trim_end_matches('\r').replace('\t', "    "))
@@ -469,6 +779,384 @@ impl ViewerState {
     }
 }
 
+/// Editing (config.toml beside Settings).
+impl ViewerState {
+    /// Make the loaded file editable: its exact text, or an empty buffer
+    /// when it does not exist yet (Save creates it). A binary, unreadable
+    /// or non-UTF-8 file stays read-only.
+    pub fn start_edit(&mut self, seen: Option<BTreeSet<String>>) {
+        if self.edit.is_some() || self.path.is_none() {
+            return;
+        }
+        if self.raw.is_none() && self.path.as_ref().is_some_and(|p| !p.exists()) {
+            self.raw = Some(String::new());
+            self.error = None;
+        }
+        let Some(text) = self.raw.take() else {
+            // say why typing does nothing
+            let why = match &self.error {
+                Some(e) => e.trim_end_matches('.').to_string(),
+                None => "it is not UTF-8 text".to_string(),
+            };
+            self.read_only = Some(format!(
+                "Read-only: {why}. Fix config.toml in another editor"
+            ));
+            return;
+        };
+        self.rendered = false;
+        self.sel = None;
+        self.edit = Some(ConfigEdit::new(text, seen));
+        self.sync_lines();
+    }
+
+    /// Height of the status bar under the text (lint summary or why it is
+    /// read-only), 0 without one: toasts at the window's foot sit above it.
+    pub fn status_bar_h(&self) -> f32 {
+        let shown = self
+            .edit
+            .as_ref()
+            .is_some_and(|e| !e.diagnostics.is_empty())
+            || self.read_only.is_some();
+        if self.path.is_some() && shown {
+            BAR_H
+        } else {
+            0.0
+        }
+    }
+
+    /// Unsaved edits.
+    pub fn dirty(&self) -> bool {
+        self.edit.as_ref().is_some_and(ConfigEdit::dirty)
+    }
+
+    /// The file on disk now reads `text` (Settings saved it, the watcher
+    /// saw it change, an external editor wrote it): see
+    /// [`ConfigEdit::disk_changed`]. The scroll position stays.
+    pub fn disk_changed(&mut self, text: String) -> bool {
+        let Some(edit) = self.edit.as_mut() else {
+            return false;
+        };
+        let changed = edit.disk_changed(text);
+        if changed {
+            self.sync_lines();
+        }
+        changed
+    }
+
+    /// Dismiss / Reload: the file's text replaces the buffer.
+    pub fn revert(&mut self) {
+        if let Some(edit) = self.edit.as_mut() {
+            edit.revert();
+            self.sync_lines();
+        }
+    }
+
+    /// Run a lint that is due; returns (repaint now, next deadline).
+    pub fn tick(&mut self, now: Instant) -> (bool, Option<Instant>) {
+        let Some(edit) = self.edit.as_mut() else {
+            return (false, None);
+        };
+        let mut repaint = false;
+        if edit.lint_due.is_some_and(|due| now >= due) {
+            edit.lint();
+            repaint = true;
+        }
+        if let Some(at) = edit.saved_at
+            && now >= at + SAVED_SHOWN
+        {
+            edit.saved_at = None;
+            repaint = true;
+        }
+        let next = [edit.lint_due, edit.saved_at.map(|at| at + SAVED_SHOWN)]
+            .into_iter()
+            .flatten()
+            .min();
+        (repaint, next)
+    }
+
+    /// `lines` (display: a tab as 4 spaces) and their highlighter states
+    /// from the buffer; the last line stays even when empty (the caret can
+    /// stand on it).
+    fn sync_lines(&mut self) {
+        let Some(edit) = &self.edit else {
+            return;
+        };
+        self.lines = edit
+            .buffer
+            .buffer
+            .split('\n')
+            .map(|l| l.trim_end_matches('\r').replace('\t', "    "))
+            .collect();
+        let lang = self.lang.unwrap_or(Lang::Plain);
+        let mut state = State::default();
+        self.states = self
+            .lines
+            .iter()
+            .map(|l| {
+                let at = state;
+                code_highlight::line(lang, &mut state, l);
+                at
+            })
+            .collect();
+        self.max_line_w = None;
+        if let Some(find) = self.find.as_mut() {
+            find.matches = find_matches(&self.lines, &find.query);
+            find.current = find
+                .current
+                .filter(|_| !find.matches.is_empty())
+                .map(|i| i.min(find.matches.len() - 1));
+        }
+        self.scroll_by(0.0);
+    }
+
+    /// After an edit: the lines again, a lint scheduled, the caret shown.
+    fn edited(&mut self, now: Instant) {
+        if let Some(edit) = self.edit.as_mut() {
+            edit.lint_due = Some(now + LINT_DELAY);
+        }
+        self.sync_lines();
+        self.reveal_caret();
+    }
+
+    /// Scroll so the caret's line and column are on screen.
+    pub fn reveal_caret(&mut self) {
+        let Some(edit) = &self.edit else {
+            return;
+        };
+        let (line, col) = edit.caret();
+        let text = &edit.buffer.buffer;
+        let start = line_start(text, line).unwrap_or(0);
+        let prefix: String = text[start..].chars().take(col).collect();
+        let cols = display_cols(&prefix);
+        let top = 12.0 + line as f32 * LINE;
+        if top < self.scroll {
+            self.scroll = (top - 12.0).max(0.0);
+        } else if top + LINE > self.scroll + self.view_h {
+            self.scroll = top + LINE + 12.0 - self.view_h;
+        }
+        self.scroll_by(0.0);
+        if self.char_w > 0.0 {
+            let cx = cols as f32 * self.char_w;
+            let room = (self.view_w - self.gutter - 24.0).max(self.char_w);
+            if cx < self.scroll_x {
+                self.scroll_x = (cx - 24.0).max(0.0);
+            } else if cx > self.scroll_x + room {
+                self.scroll_x = cx - room;
+            }
+        }
+    }
+
+    /// The buffer offset under window point (x, y), in the text area.
+    pub fn edit_offset_at(&self, x: f32, y: f32) -> Option<usize> {
+        let edit = self.edit.as_ref()?;
+        if y < self.body_top || self.char_w <= 0.0 {
+            return None;
+        }
+        let line = ((y - self.body_top + self.scroll - 12.0) / LINE)
+            .floor()
+            .max(0.0) as usize;
+        let text = &edit.buffer.buffer;
+        let Some(start) = line_start(text, line) else {
+            return Some(text.len());
+        };
+        let end = text[start..].find('\n').map_or(text.len(), |i| start + i);
+        let want = ((x - self.text_x + self.scroll_x) / self.char_w).max(0.0);
+        // the nearest boundary between cells (a tab spans 4)
+        let mut at_col = 0.0;
+        for (i, c) in text[start..end].char_indices() {
+            let w = if c == '\t' { 4.0 } else { 1.0 };
+            if want < at_col + w / 2.0 {
+                return Some(start + i);
+            }
+            at_col += w;
+        }
+        Some(end)
+    }
+
+    /// A press in the text: the caret there (⇧ extends), and a drag
+    /// selects from it.
+    pub fn edit_press(&mut self, x: f32, y: f32, extend: bool) -> bool {
+        let Some(at) = self.edit_offset_at(x, y) else {
+            return false;
+        };
+        if let Some(edit) = self.edit.as_mut() {
+            edit.buffer.click_to(at, extend);
+            edit.dragging = true;
+            edit.goal = None;
+        }
+        true
+    }
+
+    /// The pointer moved with the button down: extend to it.
+    pub fn edit_drag(&mut self, x: f32, y: f32) -> bool {
+        if !self.edit.as_ref().is_some_and(|e| e.dragging) {
+            return false;
+        }
+        let Some(at) = self.edit_offset_at(x, y) else {
+            return false;
+        };
+        if let Some(edit) = self.edit.as_mut() {
+            edit.buffer.click_to(at, true);
+        }
+        self.reveal_caret();
+        true
+    }
+
+    /// Insert `text` at the caret (a paste; CRLF as LF).
+    pub fn edit_insert(&mut self, text: &str, now: Instant) {
+        let Some(edit) = self.edit.as_mut() else {
+            return;
+        };
+        let text = text.replace("\r\n", "\n");
+        edit.buffer.insert(&text);
+        edit.goal = None;
+        self.edited(now);
+    }
+
+    /// Where the first line's text starts on screen (x, y of its top) and a
+    /// cell's width, last frame (`dump`: scripts click and drag by them).
+    pub fn text_origin(&self) -> (f32, f32, f32) {
+        (
+            self.text_x - self.scroll_x,
+            self.body_top + 12.0 - self.scroll,
+            self.char_w,
+        )
+    }
+
+    /// A gutter dot: the caret to the start of its 0-based line.
+    pub fn caret_to_line(&mut self, line: usize) {
+        if let Some(edit) = self.edit.as_mut() {
+            let at = edit.offset_of(line, 0);
+            edit.buffer.click_to(at, false);
+            edit.goal = None;
+            self.reveal_caret();
+        }
+    }
+
+    /// Status bar: the caret to the next problem, scrolled into view.
+    pub fn jump_next_problem(&mut self) {
+        if self.edit.as_mut().is_some_and(ConfigEdit::jump_next) {
+            self.reveal_caret();
+        }
+    }
+
+    /// A key while the config pane edits (and its find bar is closed).
+    pub fn edit_key(
+        &mut self,
+        event: &crate::input::KeyPress,
+        m: EditMods,
+        now: Instant,
+    ) -> EditOutcome {
+        use winit::keyboard::{Key, NamedKey};
+        let page_lines = (self.page() / LINE).floor().max(1.0) as isize;
+        let Some(edit) = self.edit.as_mut() else {
+            return EditOutcome::Ignored;
+        };
+        if event.released {
+            return EditOutcome::Ignored;
+        }
+        let b = &mut edit.buffer;
+        // a motion: with ⇧ it extends the selection from where it stood
+        let mv = |b: &mut EditorState, shift: bool, f: fn(&mut EditorState)| {
+            if shift {
+                b.extend(f);
+            } else {
+                b.anchor = None;
+                f(b);
+            }
+        };
+        let mut vertical = None;
+        let before = b.buffer.clone();
+        match &event.logical_key {
+            Key::Character(c) if m.primary() && !m.alt => {
+                match (c.to_lowercase().as_str(), m.shift) {
+                    ("s", false) => return EditOutcome::Save,
+                    ("a", false) => b.select_all(),
+                    ("z", false) => b.undo(),
+                    ("z", true) => b.redo(),
+                    ("c", false) => {
+                        return match b.selected_text() {
+                            Some(t) => EditOutcome::Copy(t.to_string()),
+                            None => EditOutcome::Handled,
+                        };
+                    }
+                    ("x", false) => {
+                        let Some(t) = b.cut_selection() else {
+                            return EditOutcome::Handled;
+                        };
+                        self.edited(now);
+                        return EditOutcome::Copy(t);
+                    }
+                    ("v", false) => return EditOutcome::Paste,
+                    _ => return EditOutcome::Ignored,
+                }
+            }
+            Key::Named(NamedKey::Escape) => {
+                if b.selection().is_some() {
+                    b.anchor = None;
+                } else {
+                    return EditOutcome::Close;
+                }
+            }
+            Key::Named(NamedKey::ArrowLeft) if m.cmd => mv(b, m.shift, EditorState::mv_home),
+            Key::Named(NamedKey::ArrowRight) if m.cmd => mv(b, m.shift, EditorState::mv_end),
+            Key::Named(NamedKey::ArrowLeft) if m.alt => mv(b, m.shift, EditorState::mv_word_left),
+            Key::Named(NamedKey::ArrowRight) if m.alt => mv(b, m.shift, EditorState::mv_word_right),
+            Key::Named(NamedKey::ArrowLeft) if m.shift => b.extend(EditorState::mv_left),
+            Key::Named(NamedKey::ArrowRight) if m.shift => b.extend(EditorState::mv_right),
+            Key::Named(NamedKey::ArrowLeft) => b.left(),
+            Key::Named(NamedKey::ArrowRight) => b.right(),
+            Key::Named(NamedKey::ArrowUp) if m.cmd => mv(b, m.shift, EditorState::mv_doc_start),
+            Key::Named(NamedKey::ArrowDown) if m.cmd => mv(b, m.shift, EditorState::mv_doc_end),
+            Key::Named(NamedKey::ArrowUp) => vertical = Some(-1),
+            Key::Named(NamedKey::ArrowDown) => vertical = Some(1),
+            Key::Named(NamedKey::PageUp) => vertical = Some(-page_lines),
+            Key::Named(NamedKey::PageDown) => vertical = Some(page_lines),
+            Key::Named(NamedKey::Home) if m.ctrl || m.cmd => {
+                mv(b, m.shift, EditorState::mv_doc_start)
+            }
+            Key::Named(NamedKey::End) if m.ctrl || m.cmd => mv(b, m.shift, EditorState::mv_doc_end),
+            Key::Named(NamedKey::Home) => mv(b, m.shift, EditorState::mv_home),
+            Key::Named(NamedKey::End) => mv(b, m.shift, EditorState::mv_end),
+            Key::Named(NamedKey::Backspace) if m.cmd => b.kill_to_start(),
+            Key::Named(NamedKey::Backspace) if m.alt => b.delete_word_back(),
+            Key::Named(NamedKey::Backspace) => b.backspace(),
+            Key::Named(NamedKey::Delete) if m.alt => b.delete_word_forward(),
+            Key::Named(NamedKey::Delete) => b.delete(),
+            Key::Named(NamedKey::Enter) if !m.cmd && !m.ctrl => b.insert("\n"),
+            Key::Named(NamedKey::Tab) if !m.cmd && !m.ctrl && !m.alt && !m.shift => b.insert(TAB),
+            Key::Named(NamedKey::Space) if !m.cmd && !m.ctrl => b.insert(" "),
+            _ if m.cmd || m.ctrl => return EditOutcome::Ignored,
+            _ => {
+                let typed: String = event
+                    .text
+                    .as_deref()
+                    .unwrap_or("")
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .collect();
+                if typed.is_empty() {
+                    return EditOutcome::Ignored;
+                }
+                b.insert(&typed);
+            }
+        }
+        if let Some(delta) = vertical {
+            let anchor = edit.buffer.anchor.or(Some(edit.buffer.cursor));
+            edit.vertical(delta);
+            edit.buffer.anchor = if m.shift { anchor } else { None };
+        } else {
+            edit.goal = None;
+        }
+        if edit.buffer.buffer != before {
+            self.edited(now);
+        } else {
+            self.reveal_caret();
+        }
+        EditOutcome::Handled
+    }
+}
+
 fn read_preview(path: &Path) -> std::io::Result<Vec<u8>> {
     use std::io::Read;
     use std::os::unix::fs::OpenOptionsExt;
@@ -553,6 +1241,16 @@ pub fn render(
     hits.push((close, ViewerHit::Close));
     hits.push((menu, ViewerHit::Menu));
     let mut controls_left = menu[0] - 6.0;
+    if let Some(edit) = &state.edit {
+        controls_left = edit_controls(
+            layer,
+            engine,
+            theme,
+            edit,
+            [title_left, controls_left, cy],
+            &mut hits,
+        );
+    }
     if !state.markdown.is_empty() {
         // segmented control: the selected segment raised, the other dim
         let labels = [("Rendered", true), ("Raw", false)];
@@ -627,6 +1325,31 @@ pub fn render(
         render_find_bar(layer, engine, theme, find, [x, body_top, w]);
         body_top += FIND_H + 1.0;
     }
+    if state.edit.as_ref().is_some_and(|e| e.conflict) {
+        conflict_bar(layer, engine, theme, [x, body_top, w], &mut hits);
+        body_top += BAR_H + 1.0;
+    }
+    // the lint summary under the text
+    let mut bottom = y + h;
+    let summary = state
+        .edit
+        .as_ref()
+        .and_then(ConfigEdit::summary)
+        .or_else(|| state.read_only.clone());
+    if let Some(summary) = summary {
+        let errors = state.edit.as_ref().is_some_and(|e| e.errors() > 0);
+        bottom -= BAR_H;
+        status_bar(
+            layer,
+            engine,
+            theme,
+            &summary,
+            errors,
+            [x, bottom, w],
+            &mut hits,
+        );
+    }
+    let h = bottom - y;
     state.view_h = (y + h - body_top).max(0.0);
     state.view_w = w;
     state.body_top = body_top;
@@ -666,7 +1389,9 @@ pub fn render(
 
     let mono = mono_family();
     let digits = state.lines.len().max(1).to_string().len();
-    let gutter = engine.measure(&"0".repeat(digits), 12.0, mono, Weight::NORMAL) + 28.0;
+    let gutter = engine.measure(&"0".repeat(digits), 12.0, mono, Weight::NORMAL)
+        + 28.0
+        + state.edit.as_ref().map_or(0.0, |_| LINT_GUTTER);
     let bounds = TextBounds {
         left: x as i32,
         top: body_top as i32,
@@ -684,6 +1409,9 @@ pub fn render(
     }
     state.content_w = gutter + state.max_line_w.unwrap_or(0.0) + 24.0;
     state.scroll_x_by(0.0, body_top);
+    state.text_x = x + gutter;
+    state.gutter = gutter;
+    state.char_w = engine.measure("0", FONT, mono, Weight::NORMAL);
     let sx = state.scroll_x;
     let text_bounds = TextBounds {
         left: (x + gutter - 2.0) as i32,
@@ -701,8 +1429,90 @@ pub fn render(
     let matches: &[(usize, usize, usize)] = state.find.as_ref().map_or(&[], |f| &f.matches);
     let current = state.find.as_ref().and_then(|f| f.current);
     let selected = state.sel.map(|(a, b)| a.min(b)..=a.max(b));
+    let edit = state.edit.as_ref();
+    // editing: each line's start in the buffer, the selection, the caret
+    let starts: Vec<usize> = edit.map_or_else(Vec::new, |e| {
+        std::iter::once(0)
+            .chain(e.buffer.buffer.match_indices('\n').map(|(i, _)| i + 1))
+            .collect()
+    });
+    let text_sel = edit.and_then(|e| e.buffer.selection());
+    let caret = edit.filter(|_| focused).map(|e| e.buffer.cursor);
+    let text_left = x + gutter - 2.0;
     for i in first..(first + count).min(state.lines.len()) {
         let ly = body_top + 12.0 + i as f32 * LINE - state.scroll;
+        if let Some(e) = edit {
+            let buf = &e.buffer.buffer;
+            let ls = starts.get(i).copied().unwrap_or(buf.len());
+            let le = starts.get(i + 1).map_or(buf.len(), |s| s - 1);
+            let raw = &buf[ls..le];
+            let x_at = |engine: &mut TextEngine, byte: usize| {
+                let prefix = raw[..byte.min(raw.len())].replace('\t', "    ");
+                x + gutter - sx + engine.measure(&prefix, FONT, mono, Weight::NORMAL)
+            };
+            let (top, bot) = (ly.max(body_top), (ly + LINE).min(y + h));
+            // the selection: its part of this line (the newline as a cell)
+            if let Some(r) = &text_sel
+                && r.start <= le
+                && r.end > ls
+                && bot > top
+            {
+                let left = x_at(engine, r.start.max(ls) - ls);
+                let right = if r.end > le {
+                    x_at(engine, le - ls) + state.char_w
+                } else {
+                    x_at(engine, r.end - ls)
+                };
+                let (l, rr) = (left.max(text_left), right.min(x + w));
+                if rr > l {
+                    layer.rect([l, top], [rr - l, bot - top], theme.selection, 0.0);
+                }
+            }
+            // lint: a dot in the gutter, the span underlined
+            let mut worst: Option<Severity> = None;
+            for d in e
+                .diagnostics
+                .iter()
+                .filter(|d| d.line.min(starts.len().saturating_sub(1)) == i)
+            {
+                let color = severity_color(theme, d.severity);
+                let byte = |col: usize| raw.char_indices().nth(col).map_or(raw.len(), |(b, _)| b);
+                let left = x_at(engine, byte(d.cols.start));
+                let right = if d.cols.end > d.cols.start {
+                    x_at(engine, byte(d.cols.end))
+                } else {
+                    left + state.char_w
+                }
+                .max(left + state.char_w);
+                let (l, rr) = (left.max(text_left), right.min(x + w));
+                let uy = ly + LINE - 3.0;
+                if rr > l && uy > body_top && uy < y + h {
+                    layer.hline(l, uy, rr - l, 1.5, color);
+                }
+                if worst != Some(Severity::Error) {
+                    worst = Some(d.severity);
+                }
+            }
+            if let Some(s) = worst
+                && bot > top
+            {
+                if ly >= body_top - 1.0 && ly + LINE <= y + h + 1.0 {
+                    layer.circle([x + 9.0, ly + LINE / 2.0], 6.0, severity_color(theme, s));
+                }
+                hits.push(([x, top, 16.0, bot - top], ViewerHit::Lint(i)));
+            }
+            // the caret
+            if let Some(c) = caret
+                && c >= ls
+                && c <= le
+            {
+                let cx = x_at(engine, c - ls);
+                if cx >= text_left && cx < x + w && ly + 2.0 >= body_top && ly + LINE - 2.0 <= y + h
+                {
+                    layer.rect([cx, ly + 2.0], [2.0, LINE - 4.0], theme.cursor, 0.0);
+                }
+            }
+        }
         if selected.as_ref().is_some_and(|r| r.contains(&i)) {
             let top = ly.max(body_top);
             let bottom = (ly + LINE).min(y + h);
@@ -818,6 +1628,171 @@ fn scrollbar(layer: &mut Layer, state: &ViewerState, x: f32, w: f32, body_top: f
     }
 }
 
+fn severity_color(theme: &Theme, s: Severity) -> Color {
+    match s {
+        Severity::Error => theme.error,
+        Severity::Warning => theme.warning,
+    }
+}
+
+/// A 22 px header button (the Rendered | Raw control's metrics): filled
+/// (`primary`) or outlined; `enabled` false dims it.
+#[allow(clippy::too_many_arguments)]
+fn header_button(
+    layer: &mut Layer,
+    engine: &mut TextEngine,
+    theme: &Theme,
+    label: &str,
+    right: f32,
+    cy: f32,
+    primary: bool,
+    enabled: bool,
+) -> [f32; 4] {
+    let tw = engine.measure(label, 11.5, FONT_SANS, Weight::MEDIUM);
+    let bw = tw + 22.0;
+    let r = [right - bw, cy - 11.0, bw, 22.0];
+    let ink = if primary && enabled {
+        layer.rect([r[0], r[1]], [r[2], r[3]], theme.accent, 4.0);
+        theme.bg
+    } else {
+        layer.bordered(
+            [r[0], r[1]],
+            [r[2], r[3]],
+            Color::WHITE.with_alpha(0.03),
+            Color::WHITE.with_alpha(0.10),
+            4.0,
+            1.0,
+        );
+        if enabled {
+            theme.text_bright
+        } else {
+            theme.text_muted
+        }
+    };
+    layer.text(
+        sans(engine, label, 11.5, Weight::MEDIUM),
+        (r[0] + (bw - tw) / 2.0).round(),
+        (cy - 7.75).round(),
+        ink,
+    );
+    r
+}
+
+/// config.toml's header controls left of ⋮: Save and Dismiss while the
+/// text differs from the file, "Saved" briefly after a save. Returns the
+/// new right edge for the path. `at` = [title_left, right, cy].
+fn edit_controls(
+    layer: &mut Layer,
+    engine: &mut TextEngine,
+    theme: &Theme,
+    edit: &ConfigEdit,
+    [title_left, right, cy]: [f32; 3],
+    hits: &mut Vec<([f32; 4], ViewerHit)>,
+) -> f32 {
+    let mut right = right;
+    if edit.dirty() {
+        let enabled = edit.can_save();
+        let need =
+            engine.measure("SaveDismiss", 11.5, FONT_SANS, Weight::MEDIUM) + 22.0 * 2.0 + 6.0;
+        if right - need < title_left {
+            return right;
+        }
+        let save = header_button(layer, engine, theme, "Save", right, cy, true, enabled);
+        hits.push((save, ViewerHit::Save));
+        right = save[0] - 6.0;
+        let dismiss = header_button(layer, engine, theme, "Dismiss", right, cy, false, true);
+        hits.push((dismiss, ViewerHit::Dismiss));
+        right = dismiss[0] - 8.0;
+    } else if edit.saved_at.is_some() {
+        let tw = engine.measure("Saved", 11.5, FONT_SANS, Weight::MEDIUM);
+        if right - tw - 20.0 >= title_left {
+            let tx = right - tw - 2.0;
+            layer.text(
+                sans(engine, "Saved", 11.5, Weight::MEDIUM),
+                tx.round(),
+                (cy - 7.75).round(),
+                theme.text_dim,
+            );
+            icons::draw(layer, Icon::Check, [tx - 9.0, cy], 11.0, theme.success);
+            right = tx - 18.0;
+        }
+    }
+    right
+}
+
+/// The strip under the header while the file changed on disk under
+/// unsaved edits: what happened, Keep mine and Reload.
+fn conflict_bar(
+    layer: &mut Layer,
+    engine: &mut TextEngine,
+    theme: &Theme,
+    [x, y, w]: [f32; 3],
+    hits: &mut Vec<([f32; 4], ViewerHit)>,
+) {
+    layer.rect([x, y], [w, BAR_H], theme.bg_chrome, 0.0);
+    let cy = y + BAR_H / 2.0;
+    let reload = header_button(layer, engine, theme, "Reload", x + w - 10.0, cy, true, true);
+    let keep = header_button(
+        layer,
+        engine,
+        theme,
+        "Keep mine",
+        reload[0] - 6.0,
+        cy,
+        false,
+        true,
+    );
+    hits.push((reload, ViewerHit::Reload));
+    hits.push((keep, ViewerHit::KeepMine));
+    layer.circle([x + 14.0, cy], 6.0, theme.warning);
+    let room = keep[0] - 8.0 - (x + 24.0);
+    let text = super::tabbar::elide(
+        engine,
+        "config.toml changed outside this pane",
+        12.0,
+        room.max(0.0),
+    );
+    if room > 0.0 {
+        layer.text(
+            sans(engine, &text, 12.0, Weight::NORMAL),
+            x + 24.0,
+            (cy - 8.0).round(),
+            theme.text_ui,
+        );
+    }
+    layer.hline(x, y + BAR_H, w, 1.0, theme.border);
+}
+
+/// The lint summary under the text: a dot of the worst severity and
+/// "2 errors · 1 warning — line 4: …"; a click goes to the next problem.
+fn status_bar(
+    layer: &mut Layer,
+    engine: &mut TextEngine,
+    theme: &Theme,
+    summary: &str,
+    errors: bool,
+    [x, y, w]: [f32; 3],
+    hits: &mut Vec<([f32; 4], ViewerHit)>,
+) {
+    layer.rect([x, y], [w, BAR_H], theme.bg_chrome, 0.0);
+    layer.hline(x, y, w, 1.0, theme.border);
+    let cy = y + BAR_H / 2.0;
+    layer.circle(
+        [x + 14.0, cy],
+        6.0,
+        if errors { theme.error } else { theme.warning },
+    );
+    let room = (w - 24.0 - 12.0).max(0.0);
+    let text = super::tabbar::elide(engine, summary, 12.0, room);
+    layer.text(
+        sans(engine, &text, 12.0, Weight::NORMAL),
+        x + 24.0,
+        (cy - 8.0).round(),
+        theme.text_ui,
+    );
+    hits.push(([x, y, w, BAR_H], ViewerHit::Status));
+}
+
 /// Find strip under the header: field with magnifier, query + caret, counter
 /// (same tokens as the terminal search bar).
 fn render_find_bar(
@@ -902,6 +1877,258 @@ mod tests {
     use super::*;
     use crate::input::KeyPress;
     use winit::keyboard::{Key, NamedKey};
+
+    fn editing(text: &str) -> ViewerState {
+        let mut v = ViewerState {
+            path: Some(PathBuf::from("/cfg/config.toml")),
+            raw: Some(text.to_string()),
+            view_h: 200.0,
+            view_w: 400.0,
+            ..Default::default()
+        };
+        v.start_edit(None);
+        v
+    }
+
+    fn buf(v: &ViewerState) -> &str {
+        &v.edit.as_ref().unwrap().buffer.buffer
+    }
+
+    fn key(v: &mut ViewerState, k: KeyPress, m: EditMods) -> EditOutcome {
+        v.edit_key(&k, m, Instant::now())
+    }
+
+    const PLAIN: EditMods = EditMods {
+        shift: false,
+        alt: false,
+        ctrl: false,
+        cmd: false,
+    };
+    const SHIFT: EditMods = EditMods {
+        shift: true,
+        ..PLAIN
+    };
+    const ALT: EditMods = EditMods { alt: true, ..PLAIN };
+
+    /// The platform's ⌘ (Ctrl off macOS).
+    fn primary(shift: bool) -> EditMods {
+        EditMods {
+            shift,
+            cmd: cfg!(target_os = "macos"),
+            ctrl: !cfg!(target_os = "macos"),
+            ..PLAIN
+        }
+    }
+
+    #[test]
+    fn config_edit_keys_type_move_select_and_undo() {
+        let mut v = editing("a = 1\nlong_key = 2\n");
+        assert_eq!(
+            v.lines,
+            ["a = 1", "long_key = 2", ""],
+            "the empty last line stays"
+        );
+        assert!(!v.dirty());
+        // typing at the start, Backspace, Enter, Tab
+        assert_eq!(key(&mut v, text("x"), PLAIN), EditOutcome::Handled);
+        assert_eq!(buf(&v), "xa = 1\nlong_key = 2\n");
+        assert!(v.dirty());
+        key(&mut v, named(NamedKey::Backspace), PLAIN);
+        assert!(!v.dirty(), "back to the file's text: clean");
+        key(&mut v, named(NamedKey::Enter), PLAIN);
+        key(&mut v, named(NamedKey::Tab), PLAIN);
+        assert_eq!(buf(&v), "\n  a = 1\nlong_key = 2\n");
+        assert_eq!(v.lines[1], "  a = 1");
+        // ↑ / ↓ keep the column across a shorter line
+        key(&mut v, named(NamedKey::End), PLAIN);
+        key(&mut v, named(NamedKey::ArrowDown), PLAIN);
+        assert_eq!(v.edit.as_ref().unwrap().caret(), (2, 7));
+        key(&mut v, named(NamedKey::ArrowDown), PLAIN);
+        assert_eq!(
+            v.edit.as_ref().unwrap().caret(),
+            (3, 0),
+            "the empty last line"
+        );
+        key(&mut v, named(NamedKey::ArrowUp), PLAIN);
+        assert_eq!(
+            v.edit.as_ref().unwrap().caret(),
+            (2, 7),
+            "the goal column again"
+        );
+        // ⇧ selects; ⌥← moves by word; ⌘C copies, ⌘X cuts
+        key(&mut v, named(NamedKey::Home), PLAIN);
+        key(&mut v, named(NamedKey::ArrowRight), ALT);
+        assert_eq!(v.edit.as_ref().unwrap().caret(), (2, 8));
+        key(&mut v, named(NamedKey::Home), SHIFT);
+        assert_eq!(
+            key(&mut v, text("c"), primary(false)),
+            EditOutcome::Copy("long_key".into())
+        );
+        assert_eq!(
+            key(&mut v, text("x"), primary(false)),
+            EditOutcome::Copy("long_key".into())
+        );
+        assert_eq!(buf(&v), "\n  a = 1\n = 2\n");
+        // ⌘Z undoes the cut, ⇧⌘Z does it again
+        key(&mut v, text("z"), primary(false));
+        assert_eq!(buf(&v), "\n  a = 1\nlong_key = 2\n");
+        key(&mut v, text("z"), primary(true));
+        assert_eq!(buf(&v), "\n  a = 1\n = 2\n");
+        // ⌘A, then a key replaces it all
+        key(&mut v, text("a"), primary(false));
+        key(&mut v, text("q"), PLAIN);
+        assert_eq!(buf(&v), "q");
+        assert_eq!(v.lines, ["q"]);
+        // ⌘S and ⌘V go to the app; Esc drops a selection, then closes
+        assert_eq!(key(&mut v, text("s"), primary(false)), EditOutcome::Save);
+        assert_eq!(key(&mut v, text("v"), primary(false)), EditOutcome::Paste);
+        key(&mut v, named(NamedKey::Home), SHIFT);
+        assert_eq!(
+            key(&mut v, named(NamedKey::Escape), PLAIN),
+            EditOutcome::Handled
+        );
+        assert_eq!(v.edit.as_ref().unwrap().buffer.selection(), None);
+        assert_eq!(
+            key(&mut v, named(NamedKey::Escape), PLAIN),
+            EditOutcome::Close
+        );
+        // other chords stay app shortcuts
+        assert_eq!(key(&mut v, text("t"), primary(false)), EditOutcome::Ignored);
+        // a paste: CRLF as LF
+        key(&mut v, named(NamedKey::End), PLAIN);
+        v.edit_insert("\r\nb = 3", Instant::now());
+        assert_eq!(buf(&v), "q\nb = 3");
+    }
+
+    #[test]
+    fn a_clean_config_pane_follows_the_file_a_dirty_one_flags_a_conflict() {
+        let mut v = editing("a = 1\n");
+        v.scroll = 0.0;
+        // clean: the file's new text replaces the buffer, caret kept
+        v.edit.as_mut().unwrap().buffer.cursor = 3;
+        assert!(v.disk_changed("a = 1\nb = 2\n".into()));
+        assert_eq!(buf(&v), "a = 1\nb = 2\n");
+        assert_eq!(v.lines.len(), 3);
+        assert_eq!(v.edit.as_ref().unwrap().buffer.cursor, 3);
+        assert!(!v.dirty() && !v.edit.as_ref().unwrap().conflict);
+        assert!(
+            !v.disk_changed("a = 1\nb = 2\n".into()),
+            "the same text: nothing"
+        );
+        // dirty: never replaced; a conflict
+        v.edit_insert("# mine\n", Instant::now());
+        let mine = buf(&v).to_string();
+        assert!(v.disk_changed("a = 9\n".into()));
+        assert_eq!(buf(&v), mine, "unsaved edits are never replaced");
+        let e = v.edit.as_ref().unwrap();
+        assert!(e.conflict && e.dirty());
+        // Keep mine, then a save makes the file the buffer: clean
+        v.edit.as_mut().unwrap().conflict = false;
+        v.edit.as_mut().unwrap().saved(Instant::now());
+        assert!(!v.dirty());
+        // our own write read back by the watcher: no conflict
+        v.edit_insert("c = 3\n", Instant::now());
+        let text = buf(&v).to_string();
+        assert!(v.disk_changed(text));
+        assert!(!v.edit.as_ref().unwrap().conflict && !v.dirty());
+        // Reload / Dismiss: the file's text again
+        v.edit_insert("junk", Instant::now());
+        assert!(v.disk_changed("z = 1\n".into()));
+        v.revert();
+        assert_eq!(buf(&v), "z = 1\n");
+        let e = v.edit.as_ref().unwrap();
+        assert!(!e.conflict && !e.dirty());
+    }
+
+    #[test]
+    fn save_is_shut_while_lint_finds_an_error_and_lint_waits_for_a_pause() {
+        let mut v = editing("font_size = 13\n");
+        assert!(
+            !v.edit.as_ref().unwrap().can_save(),
+            "clean: nothing to save"
+        );
+        let t0 = Instant::now();
+        v.edit.as_mut().unwrap().buffer.cursor = 4;
+        v.edit_key(&text("s"), PLAIN, t0);
+        let e = v.edit.as_ref().unwrap();
+        assert_eq!(e.buffer.buffer, "fonts_size = 13\n");
+        assert!(e.diagnostics.is_empty() && e.lint_due == Some(t0 + LINT_DELAY));
+        // not yet due: no lint; then the error, Save shut
+        assert_eq!(v.tick(t0 + LINT_DELAY / 2), (false, Some(t0 + LINT_DELAY)));
+        assert!(v.tick(t0 + LINT_DELAY).0, "due: it lints");
+        let e = v.edit.as_ref().unwrap();
+        assert_eq!(e.errors(), 1);
+        assert_eq!(e.diagnostics[0].line, 0);
+        assert!(!e.can_save());
+        assert!(
+            e.summary().unwrap().starts_with("1 error — line 1: "),
+            "{:?}",
+            e.summary()
+        );
+        // a removed key only warns: Save stays open
+        v.edit_insert("\nbackground_processes = true", Instant::now());
+        let e = v.edit.as_mut().unwrap();
+        e.buffer.buffer = "font_size = 13\nbackground_processes = true\n".into();
+        e.lint();
+        assert_eq!((e.errors(), e.warnings()), (0, 1));
+        assert!(e.can_save());
+        assert_eq!(
+            e.summary().unwrap(),
+            format!("1 warning — line 2: {}", e.diagnostics[0].message)
+        );
+        // the status bar walks the problems, wrapping
+        e.buffer.buffer = "a = [\nfont_sise = 1\n".into();
+        e.lint();
+        assert!(e.jump_next());
+        let first = e.caret();
+        e.jump_next();
+        e.jump_next();
+        assert_eq!(e.caret(), first, "wraps to the first");
+    }
+
+    #[test]
+    fn a_click_places_the_caret_by_cell_and_a_missing_file_edits_empty() {
+        let mut v = editing("a\tb\nxyz\n");
+        v.body_top = 100.0;
+        v.text_x = 50.0;
+        v.char_w = 10.0;
+        let y0 = 100.0 + 12.0 + 5.0;
+        // a tab spans four cells: its far half lands after it
+        assert_eq!(v.edit_offset_at(50.0 + 14.0, y0), Some(1));
+        assert_eq!(v.edit_offset_at(50.0 + 34.0, y0), Some(2));
+        assert_eq!(v.edit_offset_at(50.0 + 500.0, y0), Some(3), "past the end");
+        assert_eq!(
+            v.edit_offset_at(0.0, y0 + LINE),
+            Some(4),
+            "left of the text"
+        );
+        assert_eq!(
+            v.edit_offset_at(60.0, y0 + 9.0 * LINE),
+            Some(8),
+            "below: the end"
+        );
+        assert_eq!(v.edit_offset_at(60.0, 90.0), None, "above the text");
+        // a press and a drag select
+        assert!(v.edit_press(50.0 + 11.0, y0 + LINE, false));
+        assert!(v.edit_drag(50.0 + 30.0, y0 + LINE));
+        assert_eq!(v.edit.as_ref().unwrap().buffer.selected_text(), Some("yz"));
+        v.edit.as_mut().unwrap().dragging = false;
+        assert!(!v.edit_drag(50.0, y0), "no drag after the release");
+        // config.toml not there yet: an empty buffer (Save creates it)
+        let mut v = ViewerState {
+            path: Some(PathBuf::from("/nonexistent-rift-test/config.toml")),
+            error: Some("No such file or directory".into()),
+            ..Default::default()
+        };
+        v.start_edit(None);
+        assert!(v.error.is_none());
+        assert_eq!(buf(&v), "");
+        // a file that is not UTF-8 (no exact text) stays read-only
+        let mut v = viewer(&["x"]);
+        v.path = Some(std::env::temp_dir());
+        v.start_edit(None);
+        assert!(v.edit.is_none());
+    }
 
     #[test]
     fn recolor_splits_runs_at_matches() {

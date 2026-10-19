@@ -217,6 +217,12 @@ pub struct Dialog<'a> {
     /// The keyboard stands on the dismiss button (Tab / ←) instead of the
     /// confirm one: it gets the focus ring.
     pub focus_cancel: bool,
+    /// A third button at the footer's left (Discard; ⌘⌫), in place of a
+    /// checkbox.
+    pub extra_label: Option<&'a str>,
+    /// The confirm button is shown but does nothing (Save while the text
+    /// has errors).
+    pub confirm_disabled: bool,
 }
 
 const ROW_PROCESS: f32 = 36.0;
@@ -451,7 +457,9 @@ pub fn render(
     );
 
     // red for discarding work (darkened so white text reads), else accent
-    let (fill, ink) = if dialog.destructive {
+    let (fill, ink) = if dialog.confirm_disabled {
+        (lift(theme, 0.05), theme.text_muted)
+    } else if dialog.destructive {
         (theme.error.mix(Color::BLACK, 0.18), Color::WHITE)
     } else {
         (theme.accent, theme.bg)
@@ -492,9 +500,38 @@ pub fn render(
         2.0,
     );
 
-    // "Don't ask again" at the footer's left
+    // "Don't ask again" (or the third button) at the footer's left
     let mut check = [0.0; 4];
-    if let Some((label, ticked)) = checkbox {
+    if let Some(label) = dialog.extra_label {
+        let lw = engine.measure(label, 13.0, FONT_SANS, Weight::MEDIUM);
+        let hint = if cfg!(target_os = "macos") {
+            "⌘⌫"
+        } else {
+            "Ctrl+⌫"
+        };
+        let ew = 14.0 + lw + 8.0 + hint_w(engine, hint) + 14.0;
+        check = [x + pad, by, ew, BUTTON_H];
+        layer.bordered(
+            [check[0], check[1]],
+            [check[2], check[3]],
+            lift(theme, 0.05),
+            lift(theme, 0.12),
+            6.0,
+            1.0,
+        );
+        layer.text(
+            text(engine, label, 13.0, FONT_SANS, Weight::MEDIUM),
+            check[0] + 14.0,
+            label_y,
+            theme.text_ui,
+        );
+        layer.text(
+            text(engine, hint, 11.5, FONT_SANS, Weight::NORMAL),
+            check[0] + 14.0 + lw + 8.0,
+            label_y + 1.5,
+            theme.text_muted,
+        );
+    } else if let Some((label, ticked)) = checkbox {
         const BOX: f32 = 14.0;
         let lw = engine.measure(label, 12.5, FONT_SANS, Weight::NORMAL);
         let kw = hint_w(engine, "space");
