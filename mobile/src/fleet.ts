@@ -248,6 +248,7 @@ const initialConn: ConnState = {
   paths: [],
   since: null,
   retryAt: null,
+  closing: null,
 };
 
 /** Short, human error text for an `ack` or `error` code. */
@@ -335,6 +336,10 @@ export function describePairFailure(failure: PairFailure, name: string, viaRelay
       return `The computer that answered is not ${name}: its key differs from the pairing code. Nothing was sent.`;
     case "version":
       return `${name} runs a Rift version this app cannot talk to. Update both.`;
+    case "gave_up":
+      return `Could not reach ${name}.`;
+    case "host_quit":
+      return `Rift quit on ${name}. Open Rift there and try again.`;
     case "invalid":
       return "This is not a Rift pairing link.";
     case "storage":
@@ -682,7 +687,10 @@ export class Fleet {
     this.paused = null;
     for (const c of this.clients.values()) {
       const st = c.connState.status;
-      if (st === "failed" && !(opts.force && c.connState.failure === "key_mismatch")) continue;
+      // a host that gave up, or where Rift quit, tries again whenever the phone is back online or the app opens
+      const f = c.connState.failure;
+      const again = f === "gave_up" || f === "host_quit" || (opts.force && f === "key_mismatch");
+      if (st === "failed" && !again) continue;
       if (!opts.force && (st === "open" || st === "connecting")) continue;
       if (!opts.force && st === "closed" && c.connState.retryInMs !== null) c.reconnectNow();
       else c.restart({ lanFirst: opts.lanFirst });
@@ -720,6 +728,11 @@ export class Fleet {
     this.store.update((s) => ({ ...s, asked }));
     this.store.flush();
     this.askedListener?.();
+  }
+
+  /** Stops retrying a computer that cannot be reached (Cancel on its pane): it waits for Try again. */
+  cancelRetry(key: string): void {
+    this.clients.get(key)?.giveUp();
   }
 
   /**

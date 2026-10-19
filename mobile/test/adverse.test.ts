@@ -9,6 +9,7 @@ import { utf8Encode } from "../src/noise/bytes";
 import { generateKeyPair } from "../src/noise/noise";
 import {
   BACKOFF_CAP_MS,
+  MAX_RETRIES,
   IDLE_TIMEOUT_MS,
   LAN_HANDSHAKE_TIMEOUT_MS,
   RELAY_HANDSHAKE_TIMEOUT_MS,
@@ -210,22 +211,27 @@ describe("adverse network: bounds", () => {
     expect(t.client.connState.error).toBe("message too large");
   });
 
-  it("backoff stays at or under the cap through any number of failed rounds, LAN and relay", () => {
+  it("backoff stays at or under the cap, and the client gives up after MAX_RETRIES failed rounds, LAN and relay", () => {
     const t = setup({ addresses: ["192.168.1.29:7878", "10.0.0.5:7878"], relay: "wss://relay.example.com", random: () => 1 });
     t.client.start();
     const delays: number[] = [];
-    for (let round = 0; round < 12; round++) {
+    for (let round = 0; round < MAX_RETRIES; round++) {
       for (let i = 0; i < 3; i++) t.last().drop();
       const st = t.client.connState;
       expect(st.status).toBe("closed");
+      expect(st.attempt).toBe(round);
       delays.push(st.retryInMs!);
       vi.advanceTimersByTime(st.retryInMs!);
     }
-    expect(Math.max(...delays)).toBe(BACKOFF_CAP_MS);
     expect(delays.every((d) => d <= BACKOFF_CAP_MS)).toBe(true);
-    expect(delays.slice(0, 3)).toEqual([backoffDelay(0, () => 1), backoffDelay(1, () => 1), backoffDelay(2, () => 1)]);
-    // Three paths per round, one socket each.
-    expect(t.sockets).toHaveLength(12 * 3 + 1);
+    expect(delays).toEqual([0, 1, 2, 3, 4].map((n) => backoffDelay(n, () => 1)));
+    // the round after the last retry ends the client: nothing is scheduled
+    for (let i = 0; i < 3; i++) t.last().drop();
+    expect(t.client.connState).toMatchObject({ status: "failed", failure: "gave_up", retryInMs: null, retryAt: null });
+    // Three paths per round, one socket each, the first round and each retry.
+    expect(t.sockets).toHaveLength((MAX_RETRIES + 1) * 3);
+    vi.advanceTimersByTime(60_000);
+    expect(t.sockets).toHaveLength((MAX_RETRIES + 1) * 3);
   });
 
   it("a stalled handshake on every LAN address hands over to the relay at the deadline", () => {

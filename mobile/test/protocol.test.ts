@@ -36,6 +36,7 @@ describe("server fixtures", () => {
       "branches",
       "changes",
       "chip",
+      "closing",
       "complete",
       "diff",
       "dirs",
@@ -51,7 +52,7 @@ describe("server fixtures", () => {
       "update",
       "welcome",
     ]);
-    expect(server).toHaveLength(28);
+    expect(server).toHaveLength(30);
   });
 
   it.each(server.map((f) => [f.name, f.json] as const))("decodes %s", (_name, json) => {
@@ -435,6 +436,12 @@ describe("decodeServer rejects", () => {
     ["failed ack without error", { t: "ack", id: "r1", ok: false }],
     ["ack without id", { t: "ack", ok: true }],
     ["done with string exit", { t: "done", pane: 1, block: 2, command: "x", exit: "0", duration_ms: 1 }],
+    ["closing without a reason", { t: "closing" }],
+    ["closing with an unknown reason", { t: "closing", reason: "crash" }],
+    ["closing with a negative back_in_s", { t: "closing", reason: "update", back_in_s: -1 }],
+    ["closing with a fractional back_in_s", { t: "closing", reason: "update", back_in_s: 1.5 }],
+    ["closing with a null back_in_s", { t: "closing", reason: "update", back_in_s: null }],
+    ["closing with a string back_in_s", { t: "closing", reason: "update", back_in_s: "60" }],
   ])("%s", (_name, json) => {
     expect(decodeServer(json)).toBeNull();
   });

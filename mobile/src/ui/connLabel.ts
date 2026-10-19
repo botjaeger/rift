@@ -15,6 +15,10 @@ export function failureLabel(conn: ConnState): string {
       return "This computer runs a Rift version this app cannot talk to.";
     case "unreachable":
       return "Could not reach the computer.";
+    case "gave_up":
+      return "Rift stopped trying to reach the computer. Check that it is on and Rift is running there.";
+    case "host_quit":
+      return "Rift quit on this computer. Open Rift there, then tap Try again.";
     default:
       return conn.error ?? "Stopped";
   }
@@ -23,6 +27,8 @@ export function failureLabel(conn: ConnState): string {
 /** The status text and dot color; the dot is decoration, the text carries the meaning. */
 export function describeConn(conn: ConnState): { label: string; color: string } {
   const via = conn.path ? ` · ${pathLabel(conn.path)}` : "";
+  if (conn.closing?.reason === "update" && (conn.status === "connecting" || (conn.status === "closed" && conn.retryInMs !== null)))
+    return { label: "Rift is updating on the computer · reconnecting by itself", color: colors.accent };
   switch (conn.status) {
     case "open":
       return { label: `Connected${via}`, color: colors.success };

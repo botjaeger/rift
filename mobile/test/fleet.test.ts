@@ -10,7 +10,7 @@ import { MAX_TEXT_BYTES, type Block, type Waiting } from "../src/protocol/types"
 import { HostsStore, MemoryStore, loadLastView, loadPaneTitles, restoreTarget, type HostRecord } from "../src/stores";
 import { terminalInput, textToActions } from "../src/keyboard";
 import { showsTerminal } from "../src/terminal";
-import { SCREEN_RESUME_MS } from "../src/protocol/client";
+import { MAX_RETRIES, SCREEN_RESUME_MS } from "../src/protocol/client";
 import { FakeGatewaySocket, gatewayKey } from "./helpers/gateway";
 import { rng } from "./helpers/gateway";
 
@@ -663,6 +663,67 @@ describe("Fleet connectivity hooks", () => {
     expect(t.sockets).toHaveLength(2);
   });
 
+  it("a host that gave up tries again when the phone is back online or the app opens; Cancel stops the retrying", async () => {
+    const t = await withHost();
+    for (let i = 0; i < MAX_RETRIES; i++) {
+      t.last().drop();
+      vi.advanceTimersByTime(t.fleet.host(GW_KEY)!.conn.retryInMs!);
+    }
+    t.last().drop();
+    expect(t.fleet.host(GW_KEY)!.conn).toMatchObject({ status: "failed", failure: "gave_up" });
+    const used = t.sockets.length;
+    vi.advanceTimersByTime(120_000);
+    expect(t.sockets).toHaveLength(used);
+    // a foreground resume (no force) starts it again; so does a network change
+    t.fleet.resumeConnections({ lanFirst: false, force: false });
+    expect(t.sockets).toHaveLength(used + 1);
+    t.last().drop();
+    expect(t.fleet.host(GW_KEY)!.conn.status).toBe("closed");
+    // Cancel on the pane: no further attempt until Try again
+    t.fleet.cancelRetry(GW_KEY);
+    expect(t.fleet.host(GW_KEY)!.conn).toMatchObject({ status: "failed", failure: "gave_up" });
+    vi.advanceTimersByTime(120_000);
+    expect(t.sockets).toHaveLength(used + 1);
+    t.fleet.retry(GW_KEY);
+    expect(t.sockets).toHaveLength(used + 2);
+  });
+
+  it("a host where Rift quit waits, then tries again on resume and on Try again", async () => {
+    const t = await withHost();
+    t.last().recv({ t: "closing", reason: "quit" });
+    t.last().drop();
+    expect(t.fleet.host(GW_KEY)!.conn).toMatchObject({ status: "failed", failure: "host_quit" });
+    vi.advanceTimersByTime(120_000);
+    expect(t.sockets).toHaveLength(1);
+    // a foreground resume (no force) starts it again
+    t.fleet.resumeConnections({ lanFirst: false, force: false });
+    expect(t.sockets).toHaveLength(2);
+    t.last().connect();
+    t.last().recv(welcome());
+    t.last().recv({ t: "closing", reason: "quit" });
+    t.last().drop();
+    expect(t.fleet.host(GW_KEY)!.conn).toMatchObject({ status: "failed", failure: "host_quit" });
+    // and so does Try again
+    t.fleet.retry(GW_KEY);
+    expect(t.sockets).toHaveLength(3);
+  });
+
+  it("an update's wait keeps retrying past MAX_RETRIES; Cancel stops it", async () => {
+    const t = await withHost();
+    t.last().recv({ t: "closing", reason: "update", back_in_s: 60 });
+    t.last().drop();
+    for (let i = 0; i < MAX_RETRIES + 3; i++) {
+      expect(t.fleet.host(GW_KEY)!.conn).toMatchObject({ status: "closed", attempt: 0, closing: { reason: "update" } });
+      vi.advanceTimersByTime(t.fleet.host(GW_KEY)!.conn.retryInMs!);
+      t.last().drop();
+    }
+    expect(t.sockets).toHaveLength(MAX_RETRIES + 4);
+    t.fleet.cancelRetry(GW_KEY);
+    expect(t.fleet.host(GW_KEY)!.conn).toMatchObject({ status: "failed", failure: "gave_up" });
+    vi.advanceTimersByTime(120_000);
+    expect(t.sockets).toHaveLength(MAX_RETRIES + 4);
+  });
+
   it("hasPendingNotify follows 'Notify me' and tells the listener", async () => {
     const t = await withHost();
     let calls = 0;
@@ -906,6 +967,7 @@ const t0 = {
   paths: [] as never[],
   since: null,
   retryAt: null,
+  closing: null,
 } as const;
 
 describe("Fleet Phase 3", () => {

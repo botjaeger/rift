@@ -7,12 +7,6 @@ import { formatDuration } from "./format";
 import { colors, mono, ui } from "./theme";
 
 /**
- * Whether a touch is on output that scrolls sideways: the pane's swipe between panes leaves that
- * drag to the scroll (the native scroll moves whatever the responders decide).
- */
-export const sideways = { touching: false };
-
-/**
  * Output text: wrapped to the width, or (wrap off) as printed, scrolling sideways with a fade
  * at the right edge and a thin position bar under it (the PaneNoWrap board).
  */
@@ -43,14 +37,7 @@ export function Output({
   const at = scrolls ? Math.min(1, view.x / (view.content - view.width)) : 0;
   return (
     <View style={styles.sideways}>
-      <View
-        accessible
-        accessibilityLabel={text}
-        accessibilityHint="Scrolls sideways"
-        onTouchStart={() => (sideways.touching = scrolls)}
-        onTouchEnd={() => (sideways.touching = false)}
-        onTouchCancel={() => (sideways.touching = false)}
-      >
+      <View accessible accessibilityLabel={text} accessibilityHint="Scrolls sideways">
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}

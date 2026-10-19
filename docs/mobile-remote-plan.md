@@ -45,7 +45,7 @@ proposal (boards P1–P6) is built on top: tabs Now / Portals / Settings;
 *Now* lists what needs the user (a pane's `waiting`: a password read
 without echo, a coding agent's menu, an unread request for input), what runs
 (`running`: start time and last line) and what finished; an answer page
-answers a menu or a password from the phone; panes swipe within a tab and
+answers a menu or a password from the phone; a pane picker switches panes within a tab and
 fold successes; a Run sheet uses the desktop's completion and the pane's
 history (`complete`); "Needs you" alerts with Yes / No / Open and a Live
 Activity per "Notify me" on the lock screen (`mobile/README.md` › Needs you

@@ -8,7 +8,6 @@ import {
   agoShort,
   foldBlocks,
   nowSections,
-  pagerModel,
   programName,
   quickChoices,
   swipeTarget,
@@ -221,11 +220,8 @@ describe("the pane", () => {
     expect(foldBlocks([])).toEqual([]);
   });
 
-  it("pages between a tab's panes", () => {
+  it("steps between a tab's panes", () => {
     const t = tab([pane(1, { last_command: "cargo test" }), pane(2, { job: "2.1.9", last_command: "claude" }), pane(3)]);
-    expect(pagerModel(t, 1)).toEqual({ text: "Pane 1 of 3 · swipe for claude", index: 0, count: 3 });
-    expect(pagerModel(t, 3)).toEqual({ text: "Pane 3 of 3 · swipe for claude", index: 2, count: 3 });
-    expect(pagerModel(tab([pane(1)]), 1)).toBeNull();
     expect([swipeTarget(t, 1, 1), swipeTarget(t, 1, -1), swipeTarget(t, 3, 1), swipeTarget(t, 3, -1)]).toEqual([2, null, null, 2]);
   });
 

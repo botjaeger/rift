@@ -2,9 +2,9 @@
 // card, and whether the blocks held in memory are shown dimmed. Free of React Native imports
 // (tested in node). The wording is the board's.
 
-import type { ConnState } from "../protocol/client";
+import { MAX_RETRIES, type ConnState } from "../protocol/client";
 import { failureLabel } from "./connLabel";
-import { agoText, elapsedText, failNote, retrySeconds, retryText } from "./connStatus";
+import { agoText, backInText, elapsedText, failNote, QUIT_HINT, retryRound, stoppedText, UPDATE_HINT, updating } from "./connStatus";
 
 /** After this long without the pane the card says "Taking longer than usual". */
 export const SLOW_MS = 15_000;
@@ -27,6 +27,8 @@ export interface PaneLoad {
     actions: boolean;
     /** Details only: another try cannot help (the computer refused this device). */
     noRetry?: boolean;
+    /** The way out to Portals: "Cancel" stops the retrying first, "Back to Portals" only leaves. */
+    leave?: "Cancel" | "Back to Portals";
   } | null;
   /** Show what is held in memory dimmed (the pane reconnects). */
   held: boolean;
@@ -84,6 +86,12 @@ function reachNote(conn: ConnState): string {
   return "Looking on this network";
 }
 
+/** A reason as a sentence: a capital first letter and one full stop ("connection error" → "Connection error."). */
+export function asSentence(reason: string): string {
+  const text = reason.trim().replace(/[.\s]+$/, "");
+  return text === "" ? "" : `${text[0]!.toUpperCase()}${text.slice(1)}.`;
+}
+
 /** Why the computer cannot be reached, in full: the client's failure, else what the paths reported. */
 export function reachFailure(conn: ConnState): string {
   if (conn.status === "failed") return failureLabel(conn);
@@ -123,6 +131,24 @@ export function paneLoad(i: PaneLoadInput): PaneLoad {
   }
 
   const heldAgo = hasHeld ? agoText(i.now - i.heldSince!) : "";
+  if (updating(conn) && conn.closing) {
+    // Rift restarts on the computer: expected, so no retry counter and no "Can’t reach"
+    const strip = { text: `${i.hostName} is updating Rift`, tone: "busy" as const, busy: true, elapsed: "" };
+    if (hasHeld) return { strip, card: null, held: true };
+    const back = backInText(conn.closing, i.now);
+    return {
+      strip,
+      card: {
+        title: `${i.hostName} is updating Rift`,
+        steps: [step("now", reach, `${back[0]!.toUpperCase()}${back.slice(1)}`), ...todo],
+        hint: UPDATE_HINT,
+        actions: true,
+        noRetry: true,
+        leave: "Cancel",
+      },
+      held: false,
+    };
+  }
   switch (conn.status) {
     case "connecting": {
       const via = conn.path?.kind === "relay" ? " through the relay" : conn.path ? " on this network" : "";
@@ -149,12 +175,59 @@ export function paneLoad(i: PaneLoadInput): PaneLoad {
     case "closed":
     case "failed": {
       if (conn.status === "closed" && conn.retryAt === null && conn.retryInMs === null) break;
-      const text =
-        conn.status === "failed"
-          ? "Can’t reach your computer"
-          : `Can’t reach your computer · ${retryText(retrySeconds(conn, i.now))}`;
-      const strip = { text, tone: "bad" as const, busy: false, elapsed: "" };
+      const retrying = conn.status === "closed";
+      const gaveUp = conn.status === "failed" && conn.failure === "gave_up";
+      const quit = conn.status === "failed" && conn.failure === "host_quit";
+      const text = retrying
+        ? `Can’t reach your computer · ${retryRound(conn, i.now)}`
+        : gaveUp
+          ? `Can’t reach your computer · ${stoppedText(conn)}`
+          : quit
+            ? `Rift quit on ${i.hostName}`
+            : "Can’t reach your computer";
+      const strip = { text, tone: quit ? ("quiet" as const) : ("bad" as const), busy: false, elapsed: "" };
       if (hasHeld) return { strip, card: null, held: true };
+      if (quit) {
+        return {
+          strip,
+          card: {
+            title: `Rift quit on ${i.hostName}`,
+            steps: [step("bad", reach, "Rift quit on this computer")],
+            hint: QUIT_HINT,
+            actions: true,
+            leave: "Back to Portals",
+          },
+          held: false,
+        };
+      }
+      if (retrying) {
+        const round = retryRound(conn, i.now);
+        return {
+          strip,
+          card: {
+            title: `Reconnecting to ${i.hostName}`,
+            steps: [step("now", reach, `${round[0]!.toUpperCase()}${round.slice(1)}`), ...todo],
+            hint: [asSentence(reachFailure(conn)), `Rift retries ${MAX_RETRIES} times, then stops and waits for you.`].filter(Boolean).join(" "),
+            actions: true,
+            noRetry: true,
+            leave: "Cancel",
+          },
+          held: false,
+        };
+      }
+      if (gaveUp) {
+        return {
+          strip,
+          card: {
+            title: `Can’t reach ${i.hostName}`,
+            steps: [step("bad", reach, conn.attempt >= MAX_RETRIES ? `No answer after ${MAX_RETRIES} retries` : "Stopped")],
+            hint: `Rift stopped trying. Check that ${i.hostName} is on and Rift is running there, then try again.`,
+            actions: true,
+            leave: "Back to Portals",
+          },
+          held: false,
+        };
+      }
       return {
         strip,
         card: {
@@ -163,6 +236,7 @@ export function paneLoad(i: PaneLoadInput): PaneLoad {
           hint: `Open Rift on your computer and check Settings › Remote access. ${loadHint} come${i.view === "blocks" ? "" : "s"} back when it answers.`,
           actions: true,
           noRetry: conn.failure === "auth",
+          leave: "Back to Portals",
         },
         held: false,
       };

@@ -10,12 +10,14 @@ import { authenticate, fleet, useApp } from "@/runtime";
 import { restoreTarget } from "@/stores";
 import { Tile } from "@/ui/Avatar";
 import { LINE_COLOR } from "@/ui/ConnectionSheet";
-import { hostLine } from "@/ui/connStatus";
+import { hostLine, updating } from "@/ui/connStatus";
 import { FirstRun } from "@/ui/FirstRun";
 import { Icon } from "@/ui/Icon";
+import { confirmDestructive } from "@/ui/confirm";
 import { canNewTab, openNewTab } from "@/ui/newTab";
 import { ErrorText } from "@/ui/Notice";
 import { ProgressBar } from "@/ui/ProgressBar";
+import { SwipeAction } from "@/ui/SwipeAction";
 import { tabBottom, titleTop } from "@/ui/Screen";
 import { toggleA11y } from "@/ui/toggle";
 import { colors, mono, tint, ui } from "@/ui/theme";
@@ -42,6 +44,9 @@ const openPane = (router: ReturnType<typeof useRouter>, host: string, pane: numb
 
 /** The status dot: green while connected, the accent while trying, red when it cannot be reached. */
 function dotColor(host: HostView): string {
+  // an update restart is not a fault, and a quit is the user's own doing
+  if (updating(host.conn)) return colors.accent;
+  if (host.conn.failure === "host_quit") return colors.textDim;
   switch (host.conn.status) {
     case "open":
       return colors.success;
@@ -186,6 +191,32 @@ function HostCard({ host, rows, now, answerHere }: { host: HostView; rows: TabRo
   const line = hostLine(host.conn, now, online ? tabs : null);
   // the permission of this connection, else the one stored at pairing
   const viewOnly = !canOperate(host);
+  // Swipe left, Unpair: asks first; the computer leaves the list once this phone has forgotten it
+  const unpairing = useRef(false);
+  const unpair = async () => {
+    // one question at a time: a second tap while the first is open asks nothing more
+    if (unpairing.current) return;
+    unpairing.current = true;
+    try {
+      await unpairAfterAsking();
+    } finally {
+      unpairing.current = false;
+    }
+  };
+  const unpairAfterAsking = async () => {
+    setError(null);
+    const ok = await confirmDestructive(
+      `Unpair ${name}?`,
+      "This phone forgets it. To use it again, scan a new pairing code from that computer’s Rift settings.",
+      "Unpair",
+    );
+    if (!ok) return;
+    try {
+      await fleet.unpair(host.record.key);
+    } catch {
+      setError("This phone could not remove the computer. Try Unpair again.");
+    }
+  };
   const newTab = async () => {
     if (out.current) return;
     out.current = true;
@@ -200,71 +231,73 @@ function HostCard({ host, rows, now, answerHere }: { host: HostView; rows: TabRo
     }
   };
   return (
-    <View style={styles.card} accessibilityLabel={name}>
-      <View style={[styles.head, rows.length > 0 && styles.headRule]}>
-        <View style={[styles.dot, { backgroundColor: dotColor(host) }]} />
-        <View style={styles.headText}>
-          <View style={styles.nameLine}>
-            <Text style={styles.name} numberOfLines={1}>
-              {name}
-            </Text>
-            {viewOnly ? <Text style={styles.viewOnly}>view only</Text> : null}
+    <SwipeAction label={`Unpair ${name}`} text="Unpair" radius={16} onAction={() => void unpair()}>
+      <View style={styles.card} accessibilityLabel={name}>
+        <View style={[styles.head, rows.length > 0 && styles.headRule]}>
+          <View style={[styles.dot, { backgroundColor: dotColor(host) }]} />
+          <View style={styles.headText}>
+            <View style={styles.nameLine}>
+              <Text style={styles.name} numberOfLines={1}>
+                {name}
+              </Text>
+              {viewOnly ? <Text style={styles.viewOnly}>view only</Text> : null}
+            </View>
+            {/* the line is a button: it opens the Connection sheet (every path, with why it is used or not) */}
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`${line.text}. Connection details`}
+              hitSlop={{ top: 13, bottom: 13, right: 16 }}
+              onPress={() => router.push({ pathname: "/connection", params: { key: host.record.key } })}
+              style={({ pressed }) => [styles.connButton, pressed && styles.pressed]}
+            >
+              <Text style={[styles.conn, { color: LINE_COLOR[line.tone] }]}>{line.text}</Text>
+              <Icon name="forward" size={12} color={LINE_COLOR[line.tone]} />
+            </Pressable>
           </View>
-          {/* the line is a button: it opens the Connection sheet (every path, with why it is used or not) */}
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={`${line.text}. Connection details`}
-            hitSlop={{ top: 13, bottom: 13, right: 16 }}
-            onPress={() => router.push({ pathname: "/connection", params: { key: host.record.key } })}
-            style={({ pressed }) => [styles.connButton, pressed && styles.pressed]}
-          >
-            <Text style={[styles.conn, { color: LINE_COLOR[line.tone] }]}>{line.text}</Text>
-            <Icon name="forward" size={12} color={LINE_COLOR[line.tone]} />
-          </Pressable>
+          {online && canNewTab(host) ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`New tab on ${name}`}
+              onPress={() => void newTab()}
+              style={({ pressed }) => [styles.headIcon, pressed && styles.pressed]}
+            >
+              <Icon name="newTab" size={20} color={colors.textMuted} />
+            </Pressable>
+          ) : null}
+          {failed && host.conn.failure === "auth" ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Pair ${name} again`}
+              onPress={() => router.push("/scan")}
+              style={({ pressed }) => [styles.headText2, pressed && styles.pressed]}
+            >
+              <Text style={styles.headAction}>Pair again</Text>
+            </Pressable>
+          ) : line.retry ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Try again to reach ${name}`}
+              onPress={() => fleet.retry(host.record.key)}
+              hitSlop={{ top: 4, bottom: 4 }}
+              style={({ pressed }) => [styles.tryAgain, pressed && styles.pressed]}
+            >
+              <Text style={styles.tryAgainText}>Try again</Text>
+            </Pressable>
+          ) : null}
         </View>
-        {online && canNewTab(host) ? (
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={`New tab on ${name}`}
-            onPress={() => void newTab()}
-            style={({ pressed }) => [styles.headIcon, pressed && styles.pressed]}
-          >
-            <Icon name="newTab" size={20} color={colors.textMuted} />
-          </Pressable>
+        {line.progress ? (
+          <View style={styles.progress}>
+            <ProgressBar />
+          </View>
         ) : null}
-        {failed && host.conn.failure === "auth" ? (
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={`Pair ${name} again`}
-            onPress={() => router.push("/scan")}
-            style={({ pressed }) => [styles.headText2, pressed && styles.pressed]}
-          >
-            <Text style={styles.headAction}>Pair again</Text>
-          </Pressable>
-        ) : line.retry ? (
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={`Try again to reach ${name}`}
-            onPress={() => fleet.retry(host.record.key)}
-            hitSlop={{ top: 4, bottom: 4 }}
-            style={({ pressed }) => [styles.tryAgain, pressed && styles.pressed]}
-          >
-            <Text style={styles.tryAgainText}>Try again</Text>
-          </Pressable>
-        ) : null}
+        {line.hint ? <Text style={styles.why}>{line.hint}</Text> : null}
+        {host.notice ? <ErrorText style={styles.inset}>{host.notice}</ErrorText> : null}
+        {error ? <ErrorText style={styles.inset}>{error}</ErrorText> : null}
+        {online
+          ? rows.map((r, i) => <TabRowView key={r.key} row={r} host={host} last={i === rows.length - 1} answerHere={answerHere} />)
+          : null}
       </View>
-      {line.progress ? (
-        <View style={styles.progress}>
-          <ProgressBar />
-        </View>
-      ) : null}
-      {line.hint ? <Text style={styles.why}>{line.hint}</Text> : null}
-      {host.notice ? <ErrorText style={styles.inset}>{host.notice}</ErrorText> : null}
-      {error ? <ErrorText style={styles.inset}>{error}</ErrorText> : null}
-      {online
-        ? rows.map((r, i) => <TabRowView key={r.key} row={r} host={host} last={i === rows.length - 1} answerHere={answerHere} />)
-        : null}
-    </View>
+    </SwipeAction>
   );
 }
 

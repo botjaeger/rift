@@ -235,19 +235,7 @@ export function paneName(p: Pane, index: number): string {
   return programName(p) ?? `pane ${index + 1}`;
 }
 
-/**
- * The pager line under the tabs ("Pane 1 of 2 · swipe for claude") and its dots; null for a
- * tab with one pane. The swipe goes to the next pane, from the last one to the one before it.
- */
-export function pagerModel(tab: Tab, paneId: number): { text: string; index: number; count: number } | null {
-  const count = tab.panes.length;
-  if (count < 2) return null;
-  const index = Math.max(0, tab.panes.findIndex((p) => p.id === paneId));
-  const other = index < count - 1 ? index + 1 : index - 1;
-  return { text: `Pane ${index + 1} of ${count} · swipe for ${paneName(tab.panes[other]!, other)}`, index, count };
-}
-
-/** The pane a swipe lands on (`dir` 1: the next, -1: the one before), or null at either end. */
+/** The pane `dir` steps away (1: the next, -1: the one before), or null at either end. */
 export function swipeTarget(tab: Tab, paneId: number, dir: 1 | -1): number | null {
   const i = tab.panes.findIndex((p) => p.id === paneId);
   const next = tab.panes[i + dir];

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { NO_ANSWER, type ConnState, type PathStatus } from "../src/protocol/client";
 import type { Endpoint } from "../src/protocol/relay";
-import { agoText, elapsedText, failNote, hostLine, pathRows, retrySeconds } from "../src/ui/connStatus";
+import { agoText, backInText, elapsedText, failNote, hostLine, pathRows, retrySeconds } from "../src/ui/connStatus";
 
 const LAN: Endpoint = { kind: "lan", address: "192.168.0.149:7878" };
 const RELAY: Endpoint = { kind: "relay", url: "wss://rift-relay.playhaws.com" };
@@ -27,6 +27,7 @@ const conn = (extra: Partial<ConnState> = {}): ConnState => ({
   paths: [path(LAN), path(RELAY)],
   since: null,
   retryAt: null,
+  closing: null,
   ...extra,
 });
 
@@ -65,15 +66,72 @@ describe("hostLine: the status line of a computer's card", () => {
   });
   it("Relay down: counts down, offers Try again, explains", () => {
     expect(hostLine(failing, NOW, null)).toMatchObject({
-      text: "Can’t reach it · retrying in 8 s",
+      text: "Can’t reach it · retry 1 of 5 in 8 s",
       tone: "bad",
       retry: true,
       progress: false,
       hint: "Rift on your computer may be closed, asleep, or not connected to the relay. Your tabs come back when it answers.",
     });
-    expect(hostLine(failing, NOW + 5_200, null).text).toBe("Can’t reach it · retrying in 3 s");
-    expect(hostLine(failing, NOW + 9_000, null).text).toBe("Can’t reach it · retrying now");
+    expect(hostLine(failing, NOW + 5_200, null).text).toBe("Can’t reach it · retry 1 of 5 in 3 s");
+    expect(hostLine(failing, NOW + 9_000, null).text).toBe("Can’t reach it · retry 1 of 5 now");
+    // the round that is waiting, never past the limit
+    expect(hostLine({ ...failing, attempt: 3 }, NOW, null).text).toBe("Can’t reach it · retry 4 of 5 in 8 s");
+    expect(hostLine({ ...failing, attempt: 5 }, NOW, null).text).toBe("Can’t reach it · retry 5 of 5 in 8 s");
   });
+  it("Gave up after the retries: says so, offers Try again, explains what starts it again", () => {
+    expect(hostLine(conn({ status: "failed", failure: "gave_up", attempt: 5 }), NOW, null)).toMatchObject({
+      text: "Can’t reach it · stopped after 5 retries",
+      tone: "bad",
+      retry: true,
+      progress: false,
+    });
+    expect(hostLine(conn({ status: "failed", failure: "gave_up", attempt: 5 }), NOW, null).hint).toMatch(/tries again when you tap Try again/);
+    // cancelled sooner
+    expect(hostLine(conn({ status: "failed", failure: "gave_up", attempt: 2 }), NOW, null).text).toBe("Can’t reach it · stopped");
+  });
+  it("Updating: expected, so busy, no retry counter, Try again kept", () => {
+    const closing = { reason: "update" as const, backInS: 60, at: NOW };
+    const waiting = conn({ status: "closed", retryInMs: 3000, retryAt: NOW + 3000, closing });
+    expect(hostLine(waiting, NOW + 1000, 3)).toEqual({
+      text: "Updating Rift · back in about a minute",
+      tone: "busy",
+      progress: false,
+      retry: true,
+      hint: "Nothing is wrong. Your tabs come back by themselves.",
+    });
+    expect(hostLine(conn({ status: "connecting", path: LAN, since: NOW, closing }), NOW + 1000, null)).toMatchObject({
+      text: "Updating Rift · back in about a minute",
+      tone: "busy",
+      progress: true,
+      retry: true,
+    });
+    expect(hostLine(waiting, NOW + 61_000, null).text).toBe("Updating Rift · taking a little longer than expected");
+    // held in the background (nothing scheduled): not trying now
+    expect(hostLine(conn({ status: "closed", closing }), NOW, null).text).toBe("Not connected");
+  });
+
+  it("backInText rounds what is left, and never counts down past the promise", () => {
+    const c = (backInS: number | null) => ({ reason: "update" as const, backInS, at: NOW });
+    expect(backInText(c(60), NOW)).toBe("back in about a minute");
+    expect(backInText(c(60), NOW + 31_000)).toBe("back in a moment");
+    expect(backInText(c(300), NOW)).toBe("back in about 5 minutes");
+    expect(backInText(c(120), NOW + 10_000)).toBe("back in about 2 minutes");
+    expect(backInText(c(60), NOW + 60_000)).toBe("taking a little longer than expected");
+    expect(backInText(c(60), NOW + 600_000)).toBe("taking a little longer than expected");
+    // no promise: about a minute, as the desktop sends
+    expect(backInText(c(null), NOW)).toBe("back in about a minute");
+  });
+
+  it("Rift quit: dim, Try again, and what to do", () => {
+    expect(hostLine(conn({ status: "failed", failure: "host_quit" }), NOW, null)).toEqual({
+      text: "Rift quit on this computer",
+      tone: "dim",
+      progress: false,
+      retry: true,
+      hint: "Open Rift on the computer, then tap Try again.",
+    });
+  });
+
   it("No network", () => {
     expect(hostLine(offline, NOW, null)).toMatchObject({
       text: "Offline · this phone has no network",

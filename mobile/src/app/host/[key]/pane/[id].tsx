@@ -5,7 +5,6 @@ import {
   AccessibilityInfo,
   Keyboard,
   KeyboardAvoidingView,
-  PanResponder,
   Platform,
   Pressable,
   StyleSheet,
@@ -28,7 +27,7 @@ import { screenProgram, showsTerminal } from "@/terminal";
 import { findPane, paneTitle, runningCommand, tabTitle } from "@/topology";
 import { AskCard } from "@/ui/AskCard";
 import { FailedCard, FoldRow, RunningCard } from "@/ui/BlockCards";
-import { BlockView, sideways } from "@/ui/BlockView";
+import { BlockView } from "@/ui/BlockView";
 import { Composer } from "@/ui/Composer";
 import { Button } from "@/ui/Button";
 import { Icon } from "@/ui/Icon";
@@ -48,8 +47,6 @@ import { colors, mono, radius, TOUCH, tints, ui } from "@/ui/theme";
 const BOTTOM_SLOP = 48;
 /** The wall clock, for effects (reads of it in render are flagged as impure). */
 const wallClock = () => Date.now();
-/** A horizontal drag this long (and mostly sideways) switches to the next or previous pane. */
-const SWIPE_PX = 60;
 
 /** Blocks whose command or output holds `query` (any case); all of them for an empty query. */
 function matching(blocks: Block[], query: string): Block[] {
@@ -62,7 +59,7 @@ const itemKey = (it: PaneItem) => (it.kind === "fold" ? `fold:${it.ids[0]}` : St
 
 /**
  * A pane (the Pane board): the tab and its panes as two buttons that open their sheets, search and
- * the ⋯ menu; a swipe between the tab's panes; its blocks as cards with the earlier successes
+ * the ⋯ menu; the pane picker between the tab's panes; its blocks as cards with the earlier successes
  * folded; an agent's question docked at the bottom (the PaneAsking board); or, while a
  * full-screen program runs (vim, htop, less: the alternate screen) or the Terminal view is on,
  * the pane's screen (the FullScreen board).
@@ -212,6 +209,11 @@ export default function PaneScreen() {
     heldSince: loaded ? (host.lastSeen ?? waitingSince) : null,
   }) : null;
   const details = () => router.push({ pathname: "/connection", params: { key } });
+  // Cancel stops the retrying; both ways lead to Portals
+  const leave = () => {
+    if (load?.card?.leave === "Cancel") fleet.cancelRetry(key);
+    router.dismissTo("/");
+  };
   const tryAgain = () => {
     setWaitingSince(Date.now());
     if (status === "open") fleet.refreshPane(key, paneId);
@@ -284,26 +286,14 @@ export default function PaneScreen() {
     if (atBottom.current) list.current?.scrollToEnd({ animated: false });
   }, []);
 
-  // the tab's panes, and a swipe across the blocks between them
+  // the tab's panes: the picker below the header switches between them
   const tab = loc?.tab ?? null;
   // another pane takes this one's place: Back still leads where it led
   const goPane = useCallback(
     (next: number | null) => next !== null && router.replace({ pathname: "/host/[key]/pane/[id]", params: { key, id: String(next) } }),
     [router, key],
   );
-  const swipe = useMemo(
-    () =>
-      PanResponder.create({
-        // not while a sideways-scrolling block (Wrap long lines off) has the touch: that drag scrolls it
-        onMoveShouldSetPanResponder: (_, g) => !sideways.touching && Math.abs(g.dx) > 24 && Math.abs(g.dx) > 2 * Math.abs(g.dy),
-        onPanResponderRelease: (_, g) => {
-          if (!tab || Math.abs(g.dx) < SWIPE_PX) return;
-          goPane(swipeTarget(tab, paneId, g.dx < 0 ? 1 : -1));
-        },
-      }),
-    [tab, paneId, goPane],
-  );
-  // a screen reader swipes through elements, so the swipe is also two actions on the pane button
+  // a screen reader's actions on the pane picker: the next and the previous pane
   const pagerActions = tab
     ? [
         ...(swipeTarget(tab, paneId, 1) !== null ? [{ name: "next", label: "Next pane" }] : []),
@@ -527,7 +517,7 @@ export default function PaneScreen() {
       {error ? <ErrorText style={styles.notice}>{error}</ErrorText> : null}
       {host && fullScreen && !closed ? (
         <>
-          <View style={[styles.fill, { paddingBottom: bareScreen ? 0 : bottomInset }, load?.held && styles.held]} {...swipe.panHandlers}>
+          <View style={[styles.fill, { paddingBottom: bareScreen ? 0 : bottomInset }, load?.held && styles.held]}>
             <TerminalView
               hostKey={key}
               paneId={paneId}
@@ -539,7 +529,7 @@ export default function PaneScreen() {
               bare={bareScreen}
               canFit={hasFeature(host, "fit")}
             />
-            {load?.card ? <PaneCard card={load.card} onRetry={tryAgain} onDetails={details} /> : null}
+            {load?.card ? <PaneCard card={load.card} onRetry={tryAgain} onDetails={details} onLeave={leave} /> : null}
           </View>
           {bareScreen ? footer : null}
         </>
@@ -579,7 +569,7 @@ export default function PaneScreen() {
           ) : searching !== null && searching.trim() !== "" && shownBlocks === 0 ? (
             <Text style={styles.empty}>No block holds “{searching.trim()}”.</Text>
           ) : null}
-          <View style={[styles.fill, load?.held && styles.held]} {...swipe.panHandlers}>
+          <View style={[styles.fill, load?.held && styles.held]}>
             {!state && host && !closed ? <BlockSkeleton /> : null}
             {/* Not inverted: oldest first, so the reading order (and swiping through with a
                 screen reader) ends at the newest block, which the list starts scrolled to. */}
@@ -628,7 +618,7 @@ export default function PaneScreen() {
               contentContainerStyle={styles.listContent}
               accessibilityLabel="Command blocks, newest at the bottom"
             />
-            {load?.card ? <PaneCard card={load.card} onRetry={tryAgain} onDetails={details} /> : null}
+            {load?.card ? <PaneCard card={load.card} onRetry={tryAgain} onDetails={details} onLeave={leave} /> : null}
           </View>
           {footer}
         </>

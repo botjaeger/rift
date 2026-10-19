@@ -50,10 +50,13 @@ export function PaneCard({
   card,
   onRetry,
   onDetails,
+  onLeave,
 }: {
   card: NonNullable<PaneLoad["card"]>;
   onRetry: () => void;
   onDetails: () => void;
+  /** Cancel or Back to Portals (`card.leave`). */
+  onLeave: () => void;
 }) {
   return (
     <View style={styles.cardLayer} pointerEvents="box-none">
@@ -78,8 +81,17 @@ export function PaneCard({
           })}
         </View>
         {card.hint ? <Text style={styles.hint}>{card.hint}</Text> : null}
-        {card.actions ? (
+        {card.actions && card.leave && !card.noRetry ? (
+          <>
+            <View style={styles.actions}>
+              <Button label="Try again" variant="primary" onPress={onRetry} style={styles.action} />
+              <Button label={card.leave} onPress={onLeave} style={styles.action} />
+            </View>
+            <Button label="Details" variant="link" size="small" onPress={onDetails} />
+          </>
+        ) : card.actions ? (
           <View style={styles.actions}>
+            {card.leave ? <Button label={card.leave} onPress={onLeave} style={styles.action} /> : null}
             {card.noRetry ? null : <Button label="Try again" variant="primary" onPress={onRetry} style={styles.action} />}
             <Button label="Details" onPress={onDetails} style={styles.action} />
           </View>

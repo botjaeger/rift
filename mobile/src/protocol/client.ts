@@ -66,6 +66,15 @@ export const LAN_HANDSHAKE_TIMEOUT_MS = 1_500;
 export const RELAY_HANDSHAKE_TIMEOUT_MS = 12_000;
 export const BACKOFF_BASE_MS = 500;
 export const BACKOFF_CAP_MS = 10_000;
+/** Reconnect rounds after a failed one, before the client stops and waits for the user. */
+export const MAX_RETRIES = 5;
+/**
+ * After a `closing` for an update (Rift restarts on the computer), how long the client keeps
+ * reconnecting at UPDATE_RETRY_MS without counting the rounds against MAX_RETRIES.
+ */
+export const UPDATE_GRACE_MS = 180_000;
+/** The fixed wait between reconnect rounds during UPDATE_GRACE_MS. */
+export const UPDATE_RETRY_MS = 3_000;
 /**
  * `keys` and `text` messages per second per connection: the gateway's KEYS_RATE (20 within any
  * second; `text` counts against it). Sends past it wait in order, never dropped.
@@ -104,7 +113,11 @@ export type Failure =
   /** The gateway speaks another protocol version. */
   | "version"
   /** No address answered (only when retrying is off, i.e. pairing). */
-  | "unreachable";
+  | "unreachable"
+  /** [MAX_RETRIES] reconnect rounds in a row found no answer, or the user cancelled the retrying. */
+  | "gave_up"
+  /** Rift quit on the computer (its gateway said `closing` with `quit`, then went away). */
+  | "host_quit";
 
 /** `trying`: connecting now; `failed`: this path ended the last round without a welcome. */
 export type PathState = "idle" | "trying" | "ok" | "failed";
@@ -145,6 +158,12 @@ export interface ConnState {
   since: number | null;
   /** Epoch ms of the next attempt while `closed` and retrying, else null (`retryInMs` is the delay when it was scheduled). */
   retryAt: number | null;
+  /**
+   * The gateway said it is about to stop (`closing`): why, about when it is back (seconds, null
+   * when it did not say), and when it said so (epoch ms). Cleared by the next `welcome`, by a
+   * failure, and when an update's UPDATE_GRACE_MS is over.
+   */
+  closing: { reason: "quit" | "update"; backInS: number | null; at: number } | null;
 }
 
 export interface ClientEvents {
@@ -251,6 +270,7 @@ export class RiftClient {
     paths: [],
     since: null,
     retryAt: null,
+    closing: null,
   };
   /** When the current attempt began (epoch ms), and its error so far (a socket error, the relay's close reason). */
   private attemptAt = 0;
@@ -397,6 +417,15 @@ export class RiftClient {
     if (this.state.status !== "failed") this.setState({ status, retryInMs: null, retryAt: null, since: null });
   }
 
+  /**
+   * Stops retrying now (the user cancelled): the client ends as `failed` with `gave_up`, which the
+   * user, or the phone coming back online, starts again. Does nothing once open or failed.
+   */
+  giveUp(): void {
+    if (this.state.status === "open" || this.state.status === "failed") return;
+    this.fail("gave_up", this.state.error ?? NO_ANSWER);
+  }
+
   /** While waiting to retry, tries again now with the backoff reset (the app came to the foreground). */
   reconnectNow(): void {
     if (this.stopped || this.ws || !this.retryTimer) return;
@@ -412,10 +441,12 @@ export class RiftClient {
    * starts at the first LAN address instead of the last path that worked, so a phone that
    * moves from cellular (relay) to the home Wi-Fi goes back to the direct path. Does nothing
    * once the client has `failed` with auth or version, which need the user; a key mismatch is
-   * tried again, since on another network the addresses may reach the right computer.
+   * tried again, since on another network the addresses may reach the right computer, and so is
+   * a computer where Rift quit (it may be open again). An update's wait goes on.
    */
   restart(opts: { lanFirst?: boolean } = {}): void {
-    if (this.state.status === "failed" && this.state.failure !== "key_mismatch") return;
+    const f = this.state.failure;
+    if (this.state.status === "failed" && f !== "key_mismatch" && f !== "gave_up" && f !== "host_quit") return;
     this.teardown();
     this.stopped = false;
     this.setState({ attempt: 0, error: null, failure: null, retryInMs: null, retryAt: null, since: null });
@@ -878,6 +909,7 @@ export class RiftClient {
           failure: null,
           since: null,
           retryAt: null,
+          closing: null,
           paths: this.state.paths.map((p, i) =>
             i === this.current
               ? { ...p, state: "ok", error: null, waitedMs: null, latencyMs: null, reached: true }
@@ -946,6 +978,9 @@ export class RiftClient {
         return;
       case "done":
         this.events.onDone?.(msg);
+        return;
+      case "closing":
+        this.setState({ closing: { reason: msg.reason, backInS: msg.back_in_s ?? null, at: Date.now() } });
         return;
       case "pong": {
         const sent = this.pingSent;
@@ -1051,6 +1086,11 @@ export class RiftClient {
       if (this.state.status !== "failed") this.setState({ status: "closed", retryInMs: null, retryAt: null });
       return;
     }
+    if (wasOpen && this.state.closing?.reason === "quit") {
+      // Rift quit on the computer: nothing answers until it is opened again
+      this.fail("host_quit", "Rift quit on the computer");
+      return;
+    }
     if (wasOpen) {
       // A working connection broke: a fresh round, from the address that worked.
       this.scheduleReconnect();
@@ -1092,11 +1132,29 @@ export class RiftClient {
     this.stopped = true;
     this.teardown();
     this.failPath(error);
-    this.setState({ status: "failed", failure, error, retryInMs: null, retryAt: null });
+    this.setState({ status: "failed", failure, error, retryInMs: null, retryAt: null, closing: null });
   }
 
   private scheduleReconnect(): void {
     if (this.stopped) return;
+    const closing = this.state.closing;
+    if (closing?.reason === "update") {
+      if (Date.now() - closing.at < UPDATE_GRACE_MS) {
+        // Rift is restarting on the computer: a steady cadence, not counted as a retry
+        this.setState({ status: "closed", retryInMs: UPDATE_RETRY_MS, retryAt: Date.now() + UPDATE_RETRY_MS });
+        this.retryTimer = setTimeout(() => {
+          this.retryTimer = null;
+          this.startRound();
+        }, UPDATE_RETRY_MS);
+        return;
+      }
+      // it has not come back: the usual backoff and retry limit from here
+      this.setState({ closing: null, attempt: 0 });
+    }
+    if (this.state.attempt >= MAX_RETRIES) {
+      this.fail("gave_up", this.state.error ?? NO_ANSWER);
+      return;
+    }
     const delay = backoffDelay(this.state.attempt, this.random);
     this.setState({ status: "closed", retryInMs: delay, retryAt: Date.now() + delay });
     this.retryTimer = setTimeout(() => {

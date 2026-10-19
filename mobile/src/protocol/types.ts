@@ -465,6 +465,15 @@ export interface PongMsg {
   t: "pong";
   n: number;
 }
+/**
+ * The gateway is about to stop (feature `closing`): `quit` when Rift quit on the computer (gone for
+ * good), `update` when Rift is updating and restarting (back in about `back_in_s` seconds).
+ */
+export interface ClosingMsg {
+  t: "closing";
+  reason: "quit" | "update";
+  back_in_s?: number;
+}
 export interface ErrorMsg {
   t: "error";
   code: ErrorCode | (string & {});
@@ -625,6 +634,7 @@ export type ServerMsg =
   | AckMsg
   | DoneMsg
   | PongMsg
+  | ClosingMsg
   | ErrorMsg
   | ScreenMsg
   | ScreenEndMsg
@@ -850,6 +860,10 @@ export function decodeServer(json: unknown): ServerMsg | null {
         : null;
     case "pong":
       return isUint(m.n) ? (m as unknown as PongMsg) : null;
+    case "closing":
+      return (m.reason === "quit" || m.reason === "update") && (m.back_in_s === undefined || isUint(m.back_in_s))
+        ? (m as unknown as ClosingMsg)
+        : null;
     case "error":
       return isStr(m.code) && isStr(m.message) ? (m as unknown as ErrorMsg) : null;
     case "screen":

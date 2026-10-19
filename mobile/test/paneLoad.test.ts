@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { NO_ANSWER, type ConnState, type PathStatus } from "../src/protocol/client";
 import type { Endpoint } from "../src/protocol/relay";
-import { openingTitle, paneLoad, SLOW_MS, type PaneLoadInput } from "../src/ui/paneLoad";
+import { asSentence, openingTitle, paneLoad, SLOW_MS, type PaneLoadInput } from "../src/ui/paneLoad";
 
 const LAN: Endpoint = { kind: "lan", address: "192.168.0.149:7878" };
 const RELAY: Endpoint = { kind: "relay", url: "wss://rift-relay.playhaws.com" };
@@ -25,6 +25,7 @@ const conn = (extra: Partial<ConnState> = {}): ConnState => ({
   paths: [path(LAN), path(RELAY)],
   since: null,
   retryAt: null,
+  closing: null,
   ...extra,
 });
 
@@ -126,17 +127,80 @@ describe("paneLoad: the PaneLoading board's states", () => {
 
   it("Can’t reach: the real reason in full, the hint, Try again and Details", () => {
     const l = paneLoad(input({ conn: unregistered }));
-    expect(l.strip).toEqual({ text: "Can’t reach your computer · retrying in 8 s", tone: "bad", busy: false, elapsed: "" });
+    expect(l.strip).toEqual({ text: "Can’t reach your computer · retry 1 of 5 in 8 s", tone: "bad", busy: false, elapsed: "" });
     expect(l.card).toMatchObject({
-      title: "Can’t open this pane",
+      title: "Reconnecting to Sam’s MacBook Pro",
       actions: true,
-      hint: "Open Rift on your computer and check Settings › Remote access. Your blocks come back when it answers.",
+      noRetry: true,
+      leave: "Cancel",
+      hint: "The relay answered, but your computer is not registered there. Rift retries 5 times, then stops and waits for you.",
     });
-    expect(l.card!.steps[0]).toEqual({
-      tone: "bad",
-      mark: "✕",
-      label: "Reach Sam’s MacBook Pro",
-      note: "The relay answered, but your computer is not registered there",
+    expect(l.card!.steps[0]).toEqual({ tone: "now", mark: "…", label: "Reach Sam’s MacBook Pro", note: "Retry 1 of 5 in 8 s" });
+  });
+
+  it("the Reconnecting hint states the reason as a sentence, whatever its shape", () => {
+    const hint = (error: string | null) => paneLoad(input({ conn: conn({ status: "closed", retryInMs: 4000, retryAt: T0 + 4000, error, paths: [] }) })).card!.hint;
+    expect(hint("connection error")).toBe("Connection error. Rift retries 5 times, then stops and waits for you.");
+    expect(hint("Could not reach the computer.")).toBe("Could not reach the computer. Rift retries 5 times, then stops and waits for you.");
+    expect(hint(null)).toBe("Could not reach the computer. Rift retries 5 times, then stops and waits for you.");
+    expect(asSentence("  ")).toBe("");
+  });
+
+  it("Gave up: Try again, Back to Portals and Details, and no more retrying is promised", () => {
+    const l = paneLoad(input({ conn: conn({ status: "failed", failure: "gave_up", attempt: 5 }) }));
+    expect(l.strip).toEqual({ text: "Can’t reach your computer · stopped after 5 retries", tone: "bad", busy: false, elapsed: "" });
+    expect(l.card).toMatchObject({
+      title: "Can’t reach Sam’s MacBook Pro",
+      actions: true,
+      leave: "Back to Portals",
+      hint: "Rift stopped trying. Check that Sam’s MacBook Pro is on and Rift is running there, then try again.",
+    });
+    expect(l.card!.noRetry).toBeUndefined();
+    expect(l.card!.steps).toEqual([{ tone: "bad", mark: "✕", label: "Reach Sam’s MacBook Pro", note: "No answer after 5 retries" }]);
+    // Cancel sooner: just "Stopped"
+    expect(paneLoad(input({ conn: conn({ status: "failed", failure: "gave_up", attempt: 1 }) })).card!.steps[0]!.note).toBe("Stopped");
+  });
+
+  it("Updating: the computer restarts Rift, so the card says when it is back, with Cancel and Details", () => {
+    const closing = { reason: "update" as const, backInS: 60, at: T0 };
+    const waiting = conn({ status: "closed", retryInMs: 3000, retryAt: T0 + 6000, attempt: 0, closing });
+    const l = paneLoad(input({ conn: waiting }));
+    expect(l.strip).toEqual({ text: "Sam’s MacBook Pro is updating Rift", tone: "busy", busy: true, elapsed: "" });
+    expect(l.card).toEqual({
+      title: "Sam’s MacBook Pro is updating Rift",
+      steps: [
+        { tone: "now", mark: "…", label: "Reach Sam’s MacBook Pro", note: "Back in about a minute" },
+        { tone: "todo", mark: "", label: "Open this pane", note: "" },
+        { tone: "todo", mark: "", label: "Load its blocks", note: "" },
+      ],
+      hint: "Nothing is wrong. Your tabs come back by themselves.",
+      actions: true,
+      noRetry: true,
+      leave: "Cancel",
+    });
+    // the same while a round is being tried, never a retry counter
+    const trying = paneLoad(input({ conn: conn({ status: "connecting", path: LAN, since: T0, closing }) }));
+    expect(trying.card!.title).toBe("Sam’s MacBook Pro is updating Rift");
+    expect(JSON.stringify(trying)).not.toMatch(/retry|Can’t/);
+    // later: a moment, then longer than expected (never a countdown at 0)
+    expect(paneLoad(input({ conn: waiting, now: T0 + 45_000 })).card!.steps[0]!.note).toBe("Back in a moment");
+    expect(paneLoad(input({ conn: waiting, now: T0 + 60_000 })).card!.steps[0]!.note).toBe("Taking a little longer than expected");
+    expect(paneLoad(input({ conn: waiting, now: T0 + 170_000 })).card!.steps[0]!.note).toBe("Taking a little longer than expected");
+    // blocks in memory stay shown under the strip
+    expect(paneLoad(input({ conn: waiting, heldSince: T0 }))).toMatchObject({ card: null, held: true, strip: { text: "Sam’s MacBook Pro is updating Rift" } });
+    // the update's wait is over: the usual wording again
+    expect(paneLoad(input({ conn: conn({ ...waiting, closing: null }) })).card!.title).toBe("Reconnecting to Sam’s MacBook Pro");
+  });
+
+  it("Rift quit: says so, with Try again, Back to Portals and Details", () => {
+    const l = paneLoad(input({ conn: conn({ status: "failed", failure: "host_quit", error: "Rift quit on the computer" }) }));
+    expect(l.strip).toEqual({ text: "Rift quit on Sam’s MacBook Pro", tone: "quiet", busy: false, elapsed: "" });
+    expect(l.card).toEqual({
+      title: "Rift quit on Sam’s MacBook Pro",
+      steps: [{ tone: "bad", mark: "✕", label: "Reach Sam’s MacBook Pro", note: "Rift quit on this computer" }],
+      hint: "Open Rift on the computer, then tap Try again.",
+      actions: true,
+      leave: "Back to Portals",
     });
   });
 
@@ -144,6 +208,7 @@ describe("paneLoad: the PaneLoading board's states", () => {
     const l = paneLoad(input({ conn: conn({ status: "failed", failure: "key_mismatch", error: "ignored" }) }));
     expect(l.strip!.text).toBe("Can’t reach your computer");
     expect(l.card!.steps[0]!.note).toBe("A different computer answered at this address (its key does not match). Not connected.");
+    expect(l.card!.leave).toBe("Back to Portals");
   });
 
   it("a computer that refused this device offers Details only: trying again cannot help", () => {
@@ -160,7 +225,7 @@ describe("paneLoad: the PaneLoading board's states", () => {
 
   it("held blocks stay shown when the computer cannot be reached or the phone is offline, with the reason in the strip", () => {
     const failed = paneLoad(input({ conn: unregistered, heldSince: T0 }));
-    expect(failed).toMatchObject({ card: null, held: true, strip: { tone: "bad", text: "Can’t reach your computer · retrying in 8 s" } });
+    expect(failed).toMatchObject({ card: null, held: true, strip: { tone: "bad", text: "Can’t reach your computer · retry 1 of 5 in 8 s" } });
     const off = paneLoad(input({ conn: conn({ status: "offline" }), heldSince: T0 }));
     expect(off).toMatchObject({ card: null, held: true, strip: { text: "Offline · this phone has no network" } });
   });

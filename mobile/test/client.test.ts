@@ -11,6 +11,9 @@ import {
   RiftClient,
   backoffDelay,
   type ConnState,
+  MAX_RETRIES,
+  UPDATE_GRACE_MS,
+  UPDATE_RETRY_MS,
 } from "../src/protocol/client";
 import type { Block } from "../src/protocol/types";
 import { FakeGatewaySocket, gatewayKey, rng } from "./helpers/gateway";
@@ -322,13 +325,46 @@ describe("RiftClient session", () => {
     const { client, sockets, last, states } = setup();
     client.start();
     const delays: number[] = [];
-    for (let i = 0; i < 8; i++) {
+    for (let i = 0; i < MAX_RETRIES; i++) {
       last().drop();
       delays.push(states.at(-1)!.retryInMs!);
       vi.advanceTimersByTime(states.at(-1)!.retryInMs!);
     }
-    expect(sockets).toHaveLength(9);
-    expect(delays).toEqual([375, 750, 1500, 3000, 6000, 7500, 7500, 7500]);
+    expect(sockets).toHaveLength(MAX_RETRIES + 1);
+    expect(delays).toEqual([375, 750, 1500, 3000, 6000]);
+  });
+
+  it("stops after MAX_RETRIES failed retries, and starts again at once on a restart", () => {
+    const { client, sockets, last, states } = setup();
+    client.start();
+    for (let i = 0; i < MAX_RETRIES; i++) {
+      last().drop();
+      vi.advanceTimersByTime(states.at(-1)!.retryInMs!);
+    }
+    last().drop();
+    expect(client.connState).toMatchObject({ status: "failed", failure: "gave_up", retryInMs: null, attempt: MAX_RETRIES });
+    const used = sockets.length;
+    vi.advanceTimersByTime(120_000);
+    expect(sockets).toHaveLength(used);
+    // the phone is back online, or the user taps Try again
+    client.restart();
+    expect(client.connState).toMatchObject({ status: "connecting", failure: null, attempt: 0 });
+    expect(sockets).toHaveLength(used + 1);
+  });
+
+  it("giveUp ends the retrying at once and is a no-op once open", () => {
+    const { client, sockets, last } = setup();
+    client.start();
+    last().drop();
+    expect(client.connState.status).toBe("closed");
+    client.giveUp();
+    expect(client.connState).toMatchObject({ status: "failed", failure: "gave_up", retryInMs: null, retryAt: null, attempt: 0 });
+    const used = sockets.length;
+    vi.advanceTimersByTime(120_000);
+    expect(sockets).toHaveLength(used);
+    const open = connected();
+    open.client.giveUp();
+    expect(open.client.connState.status).toBe("open");
   });
 
   it("a non-auth error keeps the connection", () => {
@@ -789,5 +825,93 @@ describe("RiftClient path status (the Connection sheet)", () => {
     expect(s).toMatchObject({ status: "failed", failure: "key_mismatch" });
     expect(s.paths[1]!.state).toBe("failed");
     expect(s.paths[1]!.error).toBeTruthy();
+  });
+});
+
+describe("RiftClient closing (the computer said it stops)", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("remembers the closing until the next welcome", () => {
+    const { client, last } = connected();
+    const at = Date.now();
+    last().recv({ t: "closing", reason: "update", back_in_s: 60 });
+    expect(client.connState).toMatchObject({ status: "open", closing: { reason: "update", backInS: 60, at } });
+    last().drop();
+    vi.advanceTimersByTime(UPDATE_RETRY_MS);
+    last().connect();
+    last().recv(welcome);
+    expect(client.connState).toMatchObject({ status: "open", attempt: 0, closing: null });
+  });
+
+  it("an update reconnects every 3 s for the grace without counting retries, then backs off as usual", () => {
+    const { client, last, sockets } = connected();
+    last().recv({ t: "closing", reason: "update", back_in_s: 60 });
+    const at = Date.now();
+    last().drop();
+    let rounds = 0;
+    while (client.connState.closing) {
+      expect(client.connState).toMatchObject({ status: "closed", attempt: 0, retryInMs: UPDATE_RETRY_MS, failure: null });
+      expect(client.connState.retryAt).toBe(Date.now() + UPDATE_RETRY_MS);
+      vi.advanceTimersByTime(UPDATE_RETRY_MS);
+      expect(client.connState.status).toBe("connecting");
+      last().drop(); // Rift is not back yet
+      rounds++;
+    }
+    // every round of the grace was tried, far more than MAX_RETRIES, none counted
+    expect(Date.now() - at).toBeGreaterThanOrEqual(UPDATE_GRACE_MS);
+    expect(rounds).toBe(UPDATE_GRACE_MS / UPDATE_RETRY_MS);
+    expect(sockets).toHaveLength(rounds + 1);
+    // after it: the usual backoff and the usual MAX_RETRIES from attempt 0
+    expect(client.connState).toMatchObject({ status: "closed", attempt: 0, retryInMs: 375 });
+    const delays: number[] = [];
+    for (let i = 0; i < MAX_RETRIES; i++) {
+      delays.push(client.connState.retryInMs!);
+      vi.advanceTimersByTime(client.connState.retryInMs!);
+      last().drop();
+    }
+    expect(delays).toEqual([375, 750, 1500, 3000, 6000]);
+    expect(client.connState).toMatchObject({ status: "failed", failure: "gave_up", attempt: MAX_RETRIES, closing: null });
+  });
+
+  it("Cancel during an update's wait stops it as gave_up; Try again resumes the wait", () => {
+    const { client, last, sockets } = connected();
+    last().recv({ t: "closing", reason: "update", back_in_s: 60 });
+    last().drop();
+    client.restart(); // Try again: at once, still the update's cadence
+    expect(sockets).toHaveLength(2);
+    last().drop();
+    expect(client.connState).toMatchObject({ status: "closed", attempt: 0, retryInMs: UPDATE_RETRY_MS });
+    client.giveUp();
+    expect(client.connState).toMatchObject({ status: "failed", failure: "gave_up", closing: null });
+    vi.advanceTimersByTime(60_000);
+    expect(sockets).toHaveLength(2);
+  });
+
+  it("a quit ends as host_quit without retrying; Try again starts over", () => {
+    const { client, last, sockets } = connected();
+    last().recv({ t: "closing", reason: "quit" });
+    expect(client.connState).toMatchObject({ status: "open", closing: { reason: "quit", backInS: null } });
+    last().drop();
+    expect(client.connState).toMatchObject({ status: "failed", failure: "host_quit", retryInMs: null, retryAt: null, closing: null });
+    vi.advanceTimersByTime(120_000);
+    expect(sockets).toHaveLength(1);
+    // the user taps Try again, the phone is back online, or the app opens
+    client.restart();
+    expect(client.connState).toMatchObject({ status: "connecting", failure: null, attempt: 0 });
+    expect(sockets).toHaveLength(2);
+    // still not there: the usual backoff
+    last().drop();
+    expect(client.connState).toMatchObject({ status: "closed", attempt: 0, retryInMs: 375 });
+  });
+
+  it("ignores an unknown message type and a malformed closing", () => {
+    const { client, last } = connected();
+    last().recv({ t: "closing_soon", reason: "quit" });
+    last().recv({ t: "closing", reason: "crash" });
+    last().recv({ t: "closing", reason: "update", back_in_s: -5 });
+    expect(client.connState).toMatchObject({ status: "open", closing: null });
+    last().drop();
+    expect(client.connState).toMatchObject({ status: "closed", attempt: 0, retryInMs: 375, failure: null });
   });
 });
