@@ -29,6 +29,61 @@ const host = (n: number, extra: Partial<HostRecord> = {}): HostRecord => ({
 });
 
 describe("HostsStore", () => {
+  it("keeps every host when saves overlap", async () => {
+    const kv = new MemoryStore();
+    const store = new HostsStore(kv);
+    await Promise.all([store.save(host(1)), store.save(host(2)), store.save(host(3))]);
+    expect((await store.load()).map((h) => h.key)).toEqual([host(1).key, host(2).key, host(3).key]);
+  });
+
+  it("does not resurrect a removed host when another host is saved concurrently", async () => {
+    const kv = new MemoryStore();
+    const store = new HostsStore(kv);
+    await store.save(host(1));
+    await Promise.all([store.save(host(2)), store.remove(host(1).key)]);
+    expect(await store.load()).toEqual([host(2)]);
+    expect(JSON.parse(kv.data.get("rift.hosts")!)).toEqual([host(2).key]);
+  });
+
+  it("continues queued host mutations after a write fails", async () => {
+    const kv = new MemoryStore();
+    const store = new HostsStore(kv);
+    const set = kv.set.bind(kv);
+    let fail = true;
+    kv.set = async (k, v) => {
+      if (k === "rift.hosts" && fail) {
+        fail = false;
+        throw new Error("keychain unavailable");
+      }
+      return set(k, v);
+    };
+    const failed = expect(store.save(host(1))).rejects.toThrow("keychain unavailable");
+    const saved = store.save(host(2));
+    await failed;
+    await saved;
+    expect(await store.load()).toEqual([host(2)]);
+    await store.save(host(1));
+    expect(await store.load()).toEqual([host(2), host(1)]);
+  });
+
+  it("refreshes metadata without overwriting the saved notification preference", async () => {
+    const kv = new MemoryStore();
+    const store = new HostsStore(kv);
+    await store.save(host(1, { notifications: false }));
+    await store.refresh(host(1, { name: "Renamed computer" }));
+    expect(await store.load()).toEqual([host(1, { name: "Renamed computer", notifications: false })]);
+  });
+
+  it("a late metadata refresh never recreates an unpaired computer", async () => {
+    const kv = new MemoryStore();
+    const store = new HostsStore(kv);
+    await store.save(host(1));
+    await Promise.all([store.remove(host(1).key), store.refresh(host(1, { name: "Late welcome" }))]);
+    expect(await store.load()).toEqual([]);
+    expect(kv.data.has(`rift.host.${host(1).key}`)).toBe(false);
+    expect(JSON.parse(kv.data.get("rift.hosts")!)).toEqual([]);
+  });
+
   it("adds hosts in order, replaces by key, removes", async () => {
     const kv = new MemoryStore();
     const store = new HostsStore(kv);

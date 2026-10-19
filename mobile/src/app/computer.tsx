@@ -4,9 +4,11 @@ import { Pressable, StyleSheet, Text } from "react-native";
 import { canOperate } from "@/fleet";
 import { fleet, useApp } from "@/runtime";
 import { osName } from "@/ui/format";
+import { ErrorText } from "@/ui/Notice";
 import { CardBox, Group, SettingsPage, SwitchRow, ValueRow } from "@/ui/Rows";
 import { connWord, unpairFooter } from "@/ui/settingsText";
 import { colors, ui } from "@/ui/theme";
+import { useHostNotifications } from "@/ui/useHostNotifications";
 
 /** Settings › a computer (the Settings board): how it connects, what this phone may do, its alerts, unpair. */
 export default function ComputerScreen() {
@@ -17,6 +19,8 @@ export default function ComputerScreen() {
   // the first tap arms Unpair, the second runs it
   const [armed, setArmed] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const notifications = useHostNotifications(key, setError);
 
   if (!host) {
     return (
@@ -36,12 +40,19 @@ export default function ComputerScreen() {
       return;
     }
     setBusy(true);
-    await fleet.unpair(host.record.key);
-    if (router.canGoBack()) router.back();
-    else router.replace("/");
+    setError(null);
+    try {
+      await fleet.unpair(host.record.key);
+      if (router.canGoBack()) router.back();
+      else router.replace("/");
+    } catch {
+      setError("This phone could not remove the computer. Try Unpair again.");
+    } finally {
+      setBusy(false);
+    }
   };
   return (
-    <SettingsPage title={name}>
+    <SettingsPage title={name} notice={error ? <ErrorText style={styles.error}>{error}</ErrorText> : undefined}>
       <Group>
         <CardBox>
           <ValueRow first label="Connection" value={connWord(host.conn)} />
@@ -51,7 +62,8 @@ export default function ComputerScreen() {
             label="Notifications"
             detail="From this computer"
             value={host.record.notifications !== false}
-            onChange={(v) => void fleet.setHostNotifications(host.record.key, v)}
+            disabled={notifications.saving || busy}
+            onChange={notifications.change}
           />
         </CardBox>
       </Group>
@@ -77,6 +89,7 @@ export default function ComputerScreen() {
 }
 
 const styles = StyleSheet.create({
+  error: { marginHorizontal: 16, marginBottom: 8 },
   empty: { fontFamily: ui(400), color: colors.textMuted, fontSize: 15 },
   pressed: { opacity: 0.7 },
   unpair: { minHeight: 52, alignItems: "center", justifyContent: "center", paddingHorizontal: 14, paddingVertical: 8 },

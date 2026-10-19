@@ -23,7 +23,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-async function setup(kv: MemoryStore = new MemoryStore()) {
+async function setup(kv: MemoryStore = new MemoryStore(), requestPermission: () => Promise<boolean> = async () => true) {
   const key = gatewayKey();
   const host = toBase64Url(key.publicKey);
   const sockets: FakeGatewaySocket[] = [];
@@ -32,7 +32,7 @@ async function setup(kv: MemoryStore = new MemoryStore()) {
     randomBytes: rng,
     platform: "ios",
     systemDeviceName: "Test phone",
-    notifier: { requestPermission: async () => true, notify: async () => {} },
+    notifier: { requestPermission, notify: async () => {} },
     socket: (url) => {
       const s = new FakeGatewaySocket(url, { key });
       sockets.push(s);
@@ -171,6 +171,112 @@ describe("draft ownership: the other paths", () => {
 });
 
 describe("settings writes: shown agrees with saved", () => {
+  it("a failed notification change and concurrent welcome keep the saved preference and fresh metadata", async () => {
+    const { fleet, kv, host, ws } = await setup();
+    const set = kv.set.bind(kv);
+    let fail!: () => void;
+    let first = true;
+    kv.set = async (k, v) => {
+      if (first && k === `rift.host.${host}` && JSON.parse(v).notifications === false) {
+        first = false;
+        await new Promise<void>((_, reject) => { fail = () => reject(new Error("keychain unavailable")); });
+      }
+      return set(k, v);
+    };
+    const changing = fleet.setHostNotifications(host, false);
+    const refused = expect(changing).rejects.toThrow("keychain unavailable");
+    await vi.advanceTimersByTimeAsync(0);
+    ws.recv({ t: "welcome", v: 2, host: "Renamed host", os: "macos", version: "0.13.1", device: "test", permission: "operate", features: ["text"] });
+    fail();
+    await refused;
+    await vi.advanceTimersByTimeAsync(0);
+    const saved = (await new HostsStore(kv).load())[0]!;
+    expect(saved.notifications).not.toBe(false);
+    expect(saved.name).toBe("Renamed host");
+    expect(fleet.state.hosts[0]!.record.notifications).not.toBe(false);
+  });
+
+  it("an explicit same-value choice survives an earlier failed settings write", async () => {
+    const { fleet, kv } = await setup();
+    const set = kv.set.bind(kv);
+    let fail!: () => void;
+    let first = true;
+    kv.set = async (k, v) => {
+      if (first && k === "rift.settings") {
+        first = false;
+        await new Promise<void>((_, reject) => { fail = () => reject(new Error("keychain unavailable")); });
+      }
+      return set(k, v);
+    };
+    const older = fleet.updateSettings({ biometricLock: true });
+    await vi.advanceTimersByTimeAsync(0);
+    const newer = fleet.updateSettings({ biometricLock: true });
+    fail();
+    await older;
+    expect(await newer).toBe(true);
+    expect(fleet.state.settings.biometricLock).toBe(true);
+    expect((await loadSettings(kv)).biometricLock).toBe(true);
+  });
+
+  it("keeps a host's notification preference when storage refuses the change", async () => {
+    const { fleet, kv, host } = await setup();
+    const set = kv.set.bind(kv);
+    kv.set = async (k, v) => {
+      if (k === `rift.host.${host}` && JSON.parse(v).notifications === false) throw new Error("keychain unavailable");
+      return set(k, v);
+    };
+    await expect(fleet.setHostNotifications(host, false)).rejects.toThrow("keychain unavailable");
+    expect(fleet.state.hosts[0]!.record.notifications).not.toBe(false);
+    expect((await new HostsStore(kv).load())[0]!.notifications).not.toBe(false);
+    kv.set = set;
+    await fleet.setHostNotifications(host, false);
+    expect(fleet.state.hosts[0]!.record.notifications).toBe(false);
+    expect((await new HostsStore(kv).load())[0]!.notifications).toBe(false);
+  });
+
+  it("a pending notification permission preserves settings changed while it was open", async () => {
+    let grant!: (allowed: boolean) => void;
+    const { fleet, kv } = await setup(new MemoryStore(), () => new Promise<boolean>((resolve) => { grant = resolve; }));
+    await fleet.updateSettings({ notifyPolicy: "off" });
+    const enabling = fleet.updateSettings({ notifyPolicy: "all" });
+    expect(await fleet.updateSettings({ biometricLock: true, wrapLines: false })).toBe(true);
+    grant(true);
+    expect(await enabling).toBe(true);
+    expect(fleet.state.settings.biometricLock).toBe(true);
+    expect(fleet.state.settings.wrapLines).toBe(false);
+    const saved = await loadSettings(kv);
+    expect(saved.biometricLock).toBe(true);
+    expect(saved.wrapLines).toBe(false);
+    expect(saved.notifyPolicy).toBe("all");
+  });
+
+  it("a newer notification choice wins over a pending permission response", async () => {
+    let grant!: (allowed: boolean) => void;
+    const { fleet, kv } = await setup(new MemoryStore(), () => new Promise<boolean>((resolve) => { grant = resolve; }));
+    await fleet.updateSettings({ notifyPolicy: "off" });
+    const enabling = fleet.updateSettings({ notifyPolicy: "all" });
+    expect(await fleet.updateSettings({ notifyPolicy: "off" })).toBe(true);
+    grant(true);
+    expect(await enabling).toBe(true);
+    expect(fleet.state.settings.notifyPolicy).toBe("off");
+    expect((await loadSettings(kv)).notifyPolicy).toBe("off");
+  });
+
+  it("a late permission response does not claim rollback ownership of a newer setting", async () => {
+    let grant!: (allowed: boolean) => void;
+    const kv = new FlakyStore();
+    const { fleet } = await setup(kv, () => new Promise<boolean>((resolve) => { grant = resolve; }));
+    await fleet.updateSettings({ notifyPolicy: "off" });
+    const enabling = fleet.updateSettings({ notifyPolicy: "all", biometricLock: true });
+    expect(await fleet.updateSettings({ biometricLock: true })).toBe(true);
+    kv.failing = 1;
+    grant(true);
+    expect(await enabling).toBe(false);
+    expect(fleet.state.settings.biometricLock).toBe(true);
+    expect(fleet.state.settings.notifyPolicy).toBe("off");
+    expect((await loadSettings(kv)).biometricLock).toBe(true);
+  });
+
   it("a write that saved a later change wins over that change's own failed write", async () => {
     const kv = new FlakyStore();
     const { fleet } = await setup(kv);

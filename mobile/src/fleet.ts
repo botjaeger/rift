@@ -389,6 +389,9 @@ export class Fleet {
   /** Which settings change last set each setting (a failed write puts back only its own). */
   private readonly settingsBy = new Map<keyof Settings, number>();
   private settingsChanges = 0;
+  /** Newer choices win even while an earlier change waits for the OS permission prompt. */
+  private readonly settingsIntents = new Map<keyof Settings, number>();
+  private settingsIntent = 0;
 
   constructor(deps: FleetDeps) {
     this.deps = deps;
@@ -616,8 +619,8 @@ export class Fleet {
     };
     this.patchHost(key, { record });
     try {
-      await this.hostsStore.save(record);
-      // Unpaired while the save was in flight: the save may have written the host back.
+      await this.hostsStore.refresh(record);
+      // Finish an unpair that started while the metadata refresh was in flight.
       if (this.unpaired.has(key)) await this.hostsStore.remove(key);
     } catch {
       // Kept in memory; the next welcome tries again.
@@ -1448,16 +1451,21 @@ export class Fleet {
    * as the app lock, that a restart would lose.
    */
   async updateSettings(patch: Partial<Settings>): Promise<boolean> {
+    const intent = ++this.settingsIntent;
+    const keys = Object.keys(patch) as (keyof Settings)[];
+    for (const k of keys) this.settingsIntents.set(k, intent);
+    if (patch.notifyPolicy && patch.notifyPolicy !== "off" && this.store.peek().settings.notifyPolicy === "off") {
+      // Asked lazily, on first enable; the setting stays off when the OS refuses.
+      const granted = await this.deps.notifier.requestPermission();
+      if (!granted) patch = { ...patch, notifyPolicy: "off" };
+    }
+    // Read after the await, and apply only choices that have not since been replaced.
+    const currentPatch = Object.fromEntries(keys.filter((k) => this.settingsIntents.get(k) === intent).map((k) => [k, patch[k]]));
     const cur = this.store.peek().settings;
-    const next: Settings = { ...cur, ...patch };
+    const next: Settings = { ...cur, ...currentPatch };
     if (next.deviceName !== null) {
       const name = next.deviceName.trim().slice(0, MAX_DEVICE_NAME);
       next.deviceName = name === "" ? null : name;
-    }
-    if (patch.notifyPolicy && patch.notifyPolicy !== "off" && cur.notifyPolicy === "off") {
-      // Asked lazily, on first enable; the setting stays off when the OS refuses.
-      const granted = await this.deps.notifier.requestPermission();
-      if (!granted) next.notifyPolicy = "off";
     }
     this.store.update((s) => ({
       ...s,
@@ -1467,7 +1475,7 @@ export class Fleet {
     this.store.flush();
     if (pushChanged(cur, next)) for (const [key, c] of this.clients) this.sendPush(key, c);
     const change = ++this.settingsChanges;
-    for (const k of Object.keys(next) as (keyof Settings)[]) if (next[k] !== cur[k]) this.settingsBy.set(k, change);
+    for (const k of Object.keys(currentPatch) as (keyof Settings)[]) this.settingsBy.set(k, change);
     // One write at a time, each of the settings as they are then: a write finishing late cannot
     // replace a newer one, and a failed one is put back before the next write reads them.
     const write = this.settingsWrite.then(async () => {
@@ -1524,12 +1532,18 @@ export class Fleet {
     if (!view || (view.record.notifications !== false) === on) return;
     const { notifications: _, ...rest } = view.record;
     const record: HostRecord = on ? rest : { ...rest, notifications: false };
-    this.patchHost(key, { record });
+    await this.hostsStore.save(record);
+    if (this.unpaired.has(key)) {
+      await this.hostsStore.remove(key);
+      return;
+    }
+    const current = this.host(key);
+    if (!current) return;
+    const { notifications: _current, ...latest } = current.record;
+    this.patchHost(key, { record: on ? latest : { ...latest, notifications: false } });
     this.store.flush();
     const c = this.clients.get(key);
     if (c) this.sendPush(key, c);
-    await this.hostsStore.save(record);
-    if (this.unpaired.has(key)) await this.hostsStore.remove(key);
   }
 
   // --- push --------------------------------------------------------------------------------------

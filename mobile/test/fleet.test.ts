@@ -761,21 +761,28 @@ describe("Fleet audit fixes", () => {
     expect(t.sockets).toHaveLength(2);
   });
 
-  it("an unpair while a record save is in flight is not undone by that save", async () => {
+  it.each([false, true])("an unpair while a record save is in flight is not undone by that save (write fails: %s)", async (fails) => {
     const t = await withHost();
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
     const set = t.kv.set.bind(t.kv);
     t.kv.set = async (k, v) => {
-      if (v.includes("renamed-mac")) await gate;
+      if (v.includes("renamed-mac")) {
+        await gate;
+        if (fails) throw new Error("keychain unavailable");
+      }
       return set(k, v);
     };
     reconnect(t, { ...welcome(), host: "renamed-mac" }); // the rename starts a save, held back
-    await t.fleet.unpair(GW_KEY);
+    await settle();
+    // Unpair waits behind the metadata write: start it now, release the write, then await both.
+    const unpairing = t.fleet.unpair(GW_KEY);
     release();
+    await unpairing;
     await settle();
     expect(await new HostsStore(t.kv).load()).toEqual([]);
     expect(t.fleet.state.hosts).toEqual([]);
+    expect(t.kv.data.has(`rift.host.${GW_KEY}`)).toBe(false);
   });
 
   it("a keychain that refuses the new host fails the pairing instead of reporting it paired", async () => {

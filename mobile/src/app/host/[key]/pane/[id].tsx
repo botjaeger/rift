@@ -33,6 +33,7 @@ import { Composer } from "@/ui/Composer";
 import { Button } from "@/ui/Button";
 import { Icon } from "@/ui/Icon";
 import { ErrorText } from "@/ui/Notice";
+import { useHostNotifications } from "@/ui/useHostNotifications";
 import { BlockSkeleton, PaneCard, PaneStrip } from "@/ui/PaneLoading";
 import { openingTitle, paneLoad } from "@/ui/paneLoad";
 import { headerTop } from "@/ui/Screen";
@@ -99,6 +100,10 @@ export default function PaneScreen() {
   const [unfolded, setUnfolded] = useState(() => blockParam !== undefined);
   const [search, setSearch] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const alerts = useHostNotifications(key, (message) => {
+    setError(message);
+    if (message) setMenu(false);
+  }, (on) => say(on ? "Notifications on for this computer" : "Notifications off for this computer"));
   // this screen, as the pane's holder (the same pane may be pushed twice)
   const [holder] = useState(() => ({}));
   // the keyboard covers the bottom inset: no gap between it and the command line
@@ -654,11 +659,9 @@ export default function PaneScreen() {
               title="Notifications"
               hint="Finished, failed and questions here"
               on={notifOn}
+              disabled={alerts.saving}
               last={!closeable}
-              onPress={() => {
-                void fleet.setHostNotifications(key, !notifOn);
-                say(notifOn ? "Notifications off for this computer" : "Notifications on for this computer");
-              }}
+              onPress={() => alerts.change(!notifOn)}
             />
             {closeable ? (
               <>
@@ -701,6 +704,7 @@ function MenuSwitch({
   hint,
   on,
   last,
+  disabled,
   onPress,
 }: {
   icon: "wrapOn" | "bell";
@@ -708,6 +712,7 @@ function MenuSwitch({
   hint: string;
   on: boolean;
   last?: boolean;
+  disabled?: boolean;
   onPress: () => void;
 }) {
   return (
@@ -715,7 +720,8 @@ function MenuSwitch({
       accessibilityRole="switch"
       accessibilityLabel={title}
       accessibilityHint={hint}
-      accessibilityState={{ checked: on }}
+      accessibilityState={{ checked: on, disabled: !!disabled }}
+      disabled={disabled}
       onPress={onPress}
       style={({ pressed }) => [styles.menuRow, !last && styles.menuRule, pressed && styles.pressed]}
     >

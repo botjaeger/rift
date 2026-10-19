@@ -1,5 +1,5 @@
 import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
-import { useCallback } from "react";
+import { useCallback, useState } from "react";
 import { ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { ntfyUnsupported } from "@/fleet";
@@ -11,6 +11,7 @@ import { StartTab, canStartTab } from "@/ui/StartTab";
 import { ErrorText } from "@/ui/Notice";
 import { IconButton, PageHeader } from "@/ui/Screen";
 import { colors, ui } from "@/ui/theme";
+import { useHostNotifications } from "@/ui/useHostNotifications";
 
 /** A computer's tabs (the Host board): each tab a card of its panes. */
 export default function HostScreen() {
@@ -19,6 +20,8 @@ export default function HostScreen() {
   const { key } = useLocalSearchParams<{ key: string }>();
   const s = useApp();
   const host = s.hosts.find((h) => h.record.key === key);
+  const [error, setError] = useState<string | null>(null);
+  const alerts = useHostNotifications(key, setError);
 
   // on screen: a cold start comes back here
   useFocusEffect(
@@ -69,13 +72,15 @@ export default function HostScreen() {
                 : "Off: only commands you asked about notify, here and while the app is closed."
             }
             pressed={notifications}
-            onPress={() => void fleet.setHostNotifications(host.record.key, !notifications)}
+            disabled={alerts.saving}
+            onPress={() => alerts.change(!notifications)}
           />
         }
       />
       <ScrollView style={styles.fill} contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + 24 }]}>
-        {host.notice || failed || host.conn.status === "closed" || notes.length > 0 ? (
+        {error || host.notice || failed || host.conn.status === "closed" || notes.length > 0 ? (
           <View style={styles.status}>
+            {error ? <ErrorText>{error}</ErrorText> : null}
             {host.notice ? <ErrorText>{host.notice}</ErrorText> : null}
             {notes.map((n) => (
               <Text key={n} style={styles.note}>

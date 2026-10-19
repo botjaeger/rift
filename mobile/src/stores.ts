@@ -113,6 +113,15 @@ export function isHostRecord(v: unknown): v is HostRecord {
 export class HostsStore {
   constructor(private readonly kv: KeyValueStore) {}
 
+  private writing: Promise<void> = Promise.resolve();
+
+  /** The index is shared by every host: each mutation must finish before the next reads it. */
+  private write(change: () => Promise<void>): Promise<void> {
+    const result = this.writing.then(change);
+    this.writing = result.catch(() => undefined);
+    return result;
+  }
+
   private async index(): Promise<string[]> {
     const raw = await this.kv.get(HOSTS_INDEX);
     if (raw === null) return [];
@@ -143,15 +152,33 @@ export class HostsStore {
   /** Adds or replaces (same key) a host; a new host goes last. */
   async save(host: HostRecord): Promise<void> {
     if (!isHostRecord(host)) throw new Error("invalid host record");
-    await this.kv.set(hostEntry(host.key), JSON.stringify(host));
-    const index = await this.index();
-    if (!index.includes(host.key)) await this.kv.set(HOSTS_INDEX, JSON.stringify([...index, host.key]));
+    return this.write(async () => {
+      await this.kv.set(hostEntry(host.key), JSON.stringify(host));
+      const index = await this.index();
+      if (!index.includes(host.key)) await this.kv.set(HOSTS_INDEX, JSON.stringify([...index, host.key]));
+    });
+  }
+
+  /** Refreshes an existing computer's metadata without changing its saved notification preference or re-pairing it. */
+  async refresh(host: HostRecord): Promise<void> {
+    if (!isHostRecord(host)) throw new Error("invalid host record");
+    return this.write(async () => {
+      const raw = await this.kv.get(hostEntry(host.key));
+      if (raw === null) return;
+      const current: unknown = JSON.parse(raw);
+      if (!isHostRecord(current) || current.key !== host.key) return;
+      const { notifications: _, ...metadata } = host;
+      const record = current.notifications === false ? { ...metadata, notifications: false } : metadata;
+      await this.kv.set(hostEntry(host.key), JSON.stringify(record));
+    });
   }
 
   async remove(key: string): Promise<void> {
-    const index = await this.index();
-    await this.kv.set(HOSTS_INDEX, JSON.stringify(index.filter((k) => k !== key)));
-    await this.kv.delete(hostEntry(key));
+    return this.write(async () => {
+      const index = await this.index();
+      await this.kv.set(HOSTS_INDEX, JSON.stringify(index.filter((k) => k !== key)));
+      await this.kv.delete(hostEntry(key));
+    });
   }
 }
 
