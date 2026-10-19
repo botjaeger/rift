@@ -38,6 +38,7 @@ pub fn exit(event_loop: &ActiveEventLoop) {
         .spawn(|| {
             watch(DEADLINE, &LOOP_RETURNED, || {
                 log::warn!("quit: the event loop did not stop in {DEADLINE:?}; exiting");
+                rift_core::session_state::mark_clean_exit();
                 rift_core::shell_complete::stop_all();
                 std::process::exit(0)
             })
@@ -86,6 +87,7 @@ pub fn route_app_quit(ask: impl Fn() + Send + Sync + 'static) {
     ) -> usize {
         // the app's own quit is under way, or the system is logging out
         if ARMED.load(Ordering::SeqCst) || system_quit() {
+            rift_core::session_state::mark_clean_exit();
             return NOW;
         }
         match ASK.get() {

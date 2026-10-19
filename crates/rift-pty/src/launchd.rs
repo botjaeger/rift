@@ -3,19 +3,27 @@
 //!
 //! On macOS a process the app starts stays in the app's coalition: after
 //! the window quits, the Dock keeps Rift as "Running in Background" for as
-//! long as a helper runs. macOS 27 does the same for a launchd job the app
-//! bootstraps itself (measured 2026-10-17), but not for an agent registered
-//! through `SMAppService`: Rift.app carries one property list per helper in
-//! `Contents/Library/LaunchAgents` (`dev.rift.<name>.plist`), registered and
-//! then started on demand. Those lists are fixed, so a run with its own data
-//! or config directory (`XDG_DATA_HOME`, `XDG_CONFIG_HOME`: scripted and
-//! test runs), a run outside the bundle and macOS before 13 bootstrap a
-//! one-shot job per data directory instead (no keep-alive, gone from
-//! launchd's care when it exits). Elsewhere, or when launchd refuses, the
-//! helper is a plain detached child as before.
+//! long as a helper runs (macOS 27 does the same for a launchd job the app
+//! bootstraps itself, measured 2026-10-17). A helper that is a process of
+//! Rift.app itself has two more problems: macOS counts it as the running
+//! Rift and hands it every launch of the app (the Dock, Spotlight, `open -a
+//! Rift`: a Dock icon and no window), and an agent registered through
+//! `SMAppService` is pinned to one build, so launchd kills the helper of any
+//! other build ("rift-terminal quit unexpectedly", 2026-10-19). So Rift.app
+//! carries `Rift Helper.app` (`Contents/Library/LoginItems`, its own bundle
+//! identifier, no Dock icon) and LaunchServices starts each helper as that
+//! app (`open -n -g -j`): outside Rift's coalition, not the running Rift,
+//! nothing registered and nothing pinned. A run with its own data or config
+//! directory (`XDG_DATA_HOME`, `XDG_CONFIG_HOME`: scripted and test runs),
+//! a run outside the bundle and a failed `open` bootstrap a one-shot job per
+//! data directory instead (no keep-alive, gone from launchd's care when it
+//! exits). Elsewhere, or when launchd refuses, the helper is a plain
+//! detached child as before.
 
 use std::io;
 use std::path::Path;
+#[cfg(any(target_os = "macos", test))]
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 /// Start `program args…` detached from this process, its output appended
@@ -28,10 +36,10 @@ pub fn spawn_helper(
     log: Option<&Path>,
 ) -> io::Result<()> {
     #[cfg(target_os = "macos")]
-    if let Some(plist) = bundled_agent(name, program) {
-        match sm::start_agent(&plist) {
+    if let Some(app) = bundled_helper(program) {
+        match open_helper(&app, name, args) {
             Ok(()) => return Ok(()),
-            Err(e) => log::warn!("{name}: SMAppService refused the agent ({e}); bootstrapping it"),
+            Err(e) => log::warn!("{name}: could not open the helper app ({e}); bootstrapping it"),
         }
     }
     #[cfg(target_os = "macos")]
@@ -72,21 +80,22 @@ fn spawn_child(program: &Path, args: &[&str], log: Option<&Path>) -> io::Result<
     Ok(())
 }
 
-/// The label of `name`'s agent in the bundle that holds `program`, when
-/// this run may use it: `program` sits in `<bundle>/Contents/MacOS`, the
-/// bundle carries `Contents/Library/LaunchAgents/dev.rift.<name>.plist`,
-/// and no data or config directory of its own is set (the agent's list
-/// is fixed and runs with launchd's environment).
+/// The helper app inside the bundle `program` belongs to, when this run may
+/// use it: `program` sits in `<bundle>/Contents/MacOS` of Rift.app (or of
+/// the helper app itself, whose own helpers are its siblings), the bundle
+/// carries `Contents/Library/LoginItems/Rift Helper.app`, and no data or
+/// config directory of its own is set (a helper app is launched by
+/// LaunchServices, with no environment of ours).
 #[cfg(target_os = "macos")]
-fn bundled_agent(name: &str, program: &Path) -> Option<String> {
+fn bundled_helper(program: &Path) -> Option<PathBuf> {
     let isolated = ["XDG_DATA_HOME", "XDG_CONFIG_HOME"]
         .iter()
         .any(|k| std::env::var_os(k).is_some_and(|v| !v.is_empty()));
-    bundled_agent_in(name, program, isolated)
+    bundled_helper_in(program, isolated)
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn bundled_agent_in(name: &str, program: &Path, isolated: bool) -> Option<String> {
+fn bundled_helper_in(program: &Path, isolated: bool) -> Option<PathBuf> {
     if isolated {
         return None;
     }
@@ -94,12 +103,52 @@ fn bundled_agent_in(name: &str, program: &Path, isolated: bool) -> Option<String
     if program.parent()?.file_name()? != "MacOS" || contents.file_name()? != "Contents" {
         return None;
     }
-    let label = format!("dev.rift.{name}");
-    contents
-        .join("Library/LaunchAgents")
-        .join(format!("{label}.plist"))
-        .is_file()
-        .then_some(label)
+    let bundle = contents.parent()?;
+    // a helper's own helpers: the app it runs from
+    if bundle.file_name()? == HELPER_APP {
+        return Some(bundle.to_path_buf());
+    }
+    let app = contents.join("Library/LoginItems").join(HELPER_APP);
+    app.is_dir().then_some(app)
+}
+
+/// The helper app's folder name in `Contents/Library/LoginItems`.
+#[cfg(any(target_os = "macos", test))]
+const HELPER_APP: &str = "Rift Helper.app";
+
+/// How long `open` may take to hand the helper to LaunchServices.
+#[cfg(target_os = "macos")]
+const OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Start `args` in a new instance of the helper app (`-n`: another helper of
+/// the same app may run; `-g -j`: no focus, hidden).
+#[cfg(target_os = "macos")]
+fn open_helper(app: &Path, name: &str, args: &[&str]) -> io::Result<()> {
+    let mut cmd = Command::new("/usr/bin/open");
+    cmd.args(open_args(app, name, args));
+    let out = output_within(cmd, OPEN_TIMEOUT)?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "open: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )))
+    }
+}
+
+/// The arguments of `open` that start `args` in a new instance of the helper
+/// app at `app`. The gateway writes `<data dir>/remote/gateway.log` itself
+/// (`RIFT_GATEWAY_LOG`): no path fits a fixed list.
+#[cfg(any(target_os = "macos", test))]
+fn open_args(app: &Path, name: &str, args: &[&str]) -> Vec<std::ffi::OsString> {
+    let mut out: Vec<std::ffi::OsString> = vec!["-n".into(), "-g".into(), "-j".into(), app.into()];
+    if name == "gateway" {
+        out.extend(["--env".into(), "RIFT_GATEWAY_LOG=1".into()]);
+    }
+    out.push("--args".into());
+    out.extend(args.iter().map(std::ffi::OsString::from));
+    out
 }
 
 /// Whether Rift opens at login (its login item, `SMAppService`); `None`
@@ -130,8 +179,8 @@ pub fn set_launch_at_login(on: bool) -> io::Result<()> {
 }
 
 /// `SMAppService` (ServiceManagement, macOS 13+), looked up at run time:
-/// the app still starts on macOS 11 and 12, where helpers bootstrap and
-/// there is no login item.
+/// the login item. The app still starts on macOS 11 and 12, where there is
+/// none.
 #[cfg(target_os = "macos")]
 mod sm {
     use std::io;
@@ -139,7 +188,7 @@ mod sm {
     use objc2::msg_send;
     use objc2::rc::Retained;
     use objc2::runtime::{AnyClass, AnyObject};
-    use objc2_foundation::{NSError, NSString};
+    use objc2_foundation::NSError;
 
     #[link(name = "ServiceManagement", kind = "framework")]
     unsafe extern "C" {}
@@ -150,15 +199,6 @@ mod sm {
 
     fn class() -> io::Result<&'static AnyClass> {
         AnyClass::get(c"SMAppService").ok_or_else(|| io::Error::other("needs macOS 13"))
-    }
-
-    fn agent(plist: &str) -> io::Result<Retained<AnyObject>> {
-        let name = NSString::from_str(plist);
-        // SAFETY: `+agentServiceWithPlistName:` takes an NSString and
-        // returns an autoreleased SMAppService (never nil per the header)
-        let svc: Option<Retained<AnyObject>> =
-            unsafe { msg_send![class()?, agentServiceWithPlistName: &*name] };
-        svc.ok_or_else(|| io::Error::other("no SMAppService for the agent"))
     }
 
     fn main_app() -> io::Result<Retained<AnyObject>> {
@@ -183,67 +223,6 @@ mod sm {
         let r: Result<(), Retained<NSError>> =
             unsafe { msg_send![svc, unregisterAndReturnError: _] };
         r.map_err(|e| io::Error::other(e.localizedDescription().to_string()))
-    }
-
-    /// Register agent `label` (once; it stays registered across launches
-    /// and updates) and start it unless it runs (`kickstart` without `-k`).
-    /// A registration that still names another build (an update, or a copy
-    /// of Rift elsewhere with the same labels) makes launchd refuse the
-    /// spawn (`spawn failed`, exit 78, "needs LWCR update"): register again,
-    /// which pins this build, and retry once. Runs off the window's thread.
-    pub fn start_agent(label: &str) -> io::Result<()> {
-        // one start at a time: a re-register boots out the agent, which
-        // must never be one another thread just started
-        static AGENT: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _one = AGENT.lock().unwrap_or_else(|e| e.into_inner());
-        let svc = agent(&format!("{label}.plist"))?;
-        if status(&svc) != ENABLED {
-            register(&svc)?;
-            if status(&svc) != ENABLED {
-                // turned off in System Settings › Login Items
-                return Err(io::Error::other("not allowed in Login Items"));
-            }
-        }
-        let target = format!("gui/{}/{label}", unsafe { libc::getuid() });
-        if kickstarted(&target)? {
-            return Ok(());
-        }
-        log::warn!("{label}: launchd did not start the agent; registering it again");
-        let _ = unregister(&svc);
-        register(&svc)?;
-        if status(&svc) != ENABLED {
-            return Err(io::Error::other("not allowed in Login Items"));
-        }
-        if kickstarted(&target)? {
-            return Ok(());
-        }
-        Err(io::Error::other("launchd did not start the agent"))
-    }
-
-    /// `kickstart`, then whether the job came up: running, or ended on its
-    /// own (a gateway that found another holding its lock exits at once).
-    /// False when launchd could not spawn it; an error when launchctl
-    /// could not tell (never read as "not started": the caller would then
-    /// boot out a service that runs).
-    fn kickstarted(target: &str) -> io::Result<bool> {
-        super::launchctl(&["kickstart", target])?;
-        let until = std::time::Instant::now() + std::time::Duration::from_millis(1500);
-        loop {
-            let s = match super::job_state(target) {
-                super::JobState::Loaded(s) => s,
-                super::JobState::NotLoaded => return Ok(false),
-                super::JobState::Unknown(e) => return Err(e),
-            };
-            match super::spawn_outcome(&s) {
-                Some(up) => return Ok(up),
-                None if std::time::Instant::now() >= until => {
-                    // still waiting to be spawned: launchd keeps retrying a
-                    // job it cannot start
-                    return Ok(!s.contains("state = spawn scheduled"));
-                }
-                None => std::thread::sleep(std::time::Duration::from_millis(50)),
-            }
-        }
     }
 
     pub fn main_app_enabled() -> Option<bool> {
@@ -302,28 +281,6 @@ fn spawn_job(
     let _ = launchctl(&["bootout", &target]);
     let domain = format!("gui/{}", unsafe { libc::getuid() });
     launchctl(&["bootstrap", &domain, &path.to_string_lossy()])
-}
-
-/// From `launchctl print`: `Some(true)` once the job runs, `Some(false)`
-/// when launchd could not spawn it (measured 2026-10-18: an agent whose
-/// registration names another build prints `job state = spawn failed`; a
-/// program that cannot be run, `state = spawn scheduled` with `last exit
-/// code = 78: EX_CONFIG`), `None` while it is still settling.
-#[cfg(any(target_os = "macos", test))]
-fn spawn_outcome(print: &str) -> Option<bool> {
-    if print.contains("state = running") {
-        Some(true)
-    } else if print.contains("spawn failed") || print.contains("last exit code = 78") {
-        Some(false)
-    } else if print.contains("state = not running")
-        && print.contains("last exit code = ")
-        && !print.contains("(never exited)")
-    {
-        // ran and ended on its own
-        Some(true)
-    } else {
-        None
-    }
 }
 
 /// What launchd says about a job.
@@ -544,25 +501,6 @@ mod tests {
     }
 
     #[test]
-    fn spawn_outcome_reads_launchctl_print() {
-        // excerpts of `launchctl print` measured 2026-10-18
-        let refused = "state = not running\n\tlast exit code = 78: EX_CONFIG\n\
-                       \tjob state = spawn failed\n";
-        let unspawnable = "state = spawn scheduled\n\tlast exit code = 78: EX_CONFIG\n";
-        let running = "state = running\n\tpid = 20730\n\tlast exit code = (never exited)\n";
-        let ended = "state = not running\n\tlast exit code = 0\n";
-        let never_ran = "state = not running\n\tlast exit code = (never exited)\n";
-        assert_eq!(spawn_outcome(refused), Some(false));
-        assert_eq!(spawn_outcome(unspawnable), Some(false));
-        assert_eq!(spawn_outcome(running), Some(true));
-        // ran and ended on its own (a gateway that found another holding
-        // its lock): started, without waiting out the deadline
-        assert_eq!(spawn_outcome(ended), Some(true));
-        // not run yet: still settling
-        assert_eq!(spawn_outcome(never_ran), None);
-    }
-
-    #[test]
     fn labels_are_per_helper_and_data_dir() {
         let a = job_label("session", Path::new("/Users/a/.local/share/rift/launchd"));
         assert!(a.starts_with("dev.rift.session."), "{a}");
@@ -581,27 +519,59 @@ mod tests {
     }
 
     #[test]
-    fn bundled_agents_only_for_a_shared_run_inside_the_bundle() {
-        let scratch = std::env::temp_dir().join(format!("rift-agents-{}", std::process::id()));
+    fn the_helper_app_only_for_a_shared_run_inside_the_bundle() {
+        let scratch = std::env::temp_dir().join(format!("rift-helper-app-{}", std::process::id()));
         let contents = scratch.join("Rift.app/Contents");
+        let helper = contents.join("Library/LoginItems/Rift Helper.app");
         std::fs::create_dir_all(contents.join("MacOS")).unwrap();
-        std::fs::create_dir_all(contents.join("Library/LaunchAgents")).unwrap();
-        std::fs::write(
-            contents.join("Library/LaunchAgents/dev.rift.session.plist"),
-            "",
-        )
-        .unwrap();
+        std::fs::create_dir_all(helper.join("Contents/MacOS")).unwrap();
         let exe = contents.join("MacOS/rift-terminal");
-        assert_eq!(
-            bundled_agent_in("session", &exe, false).as_deref(),
-            Some("dev.rift.session")
-        );
-        // no list for it, its own data dir, or not in a bundle: bootstrap
-        assert_eq!(bundled_agent_in("gateway", &exe, false), None);
-        assert_eq!(bundled_agent_in("session", &exe, true), None);
+        assert_eq!(bundled_helper_in(&exe, false), Some(helper.clone()));
+        // a helper's own helpers run from the same app
+        let from_helper = helper.join("Contents/MacOS/rift-terminal");
+        assert_eq!(bundled_helper_in(&from_helper, false), Some(helper));
+        // its own data dir, or not in a bundle: bootstrap
+        assert_eq!(bundled_helper_in(&exe, true), None);
         let loose = scratch.join("target/release/rift-terminal");
-        assert_eq!(bundled_agent_in("session", &loose, false), None);
+        assert_eq!(bundled_helper_in(&loose, false), None);
+        // a bundle without the helper app (an older Rift.app)
+        let old = scratch.join("Old.app/Contents/MacOS/rift-terminal");
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        assert_eq!(bundled_helper_in(&old, false), None);
         let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn a_helper_is_a_new_hidden_instance_of_its_app() {
+        let app = Path::new("/Applications/Rift.app/Contents/Library/LoginItems/Rift Helper.app");
+        let args = |name, a: &[&str]| -> Vec<String> {
+            open_args(app, name, a)
+                .iter()
+                .map(|s| s.to_string_lossy().into_owned())
+                .collect()
+        };
+        assert_eq!(
+            args("session", &["--session-daemon"]),
+            [
+                "-n",
+                "-g",
+                "-j",
+                "/Applications/Rift.app/Contents/Library/LoginItems/Rift Helper.app",
+                "--args",
+                "--session-daemon"
+            ]
+        );
+        // the gateway keeps its own log
+        assert_eq!(
+            args("gateway", &["remote", "--managed"])[4..],
+            [
+                "--env",
+                "RIFT_GATEWAY_LOG=1",
+                "--args",
+                "remote",
+                "--managed"
+            ]
+        );
     }
 
     #[test]

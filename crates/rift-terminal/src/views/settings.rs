@@ -3292,6 +3292,14 @@ fn general_page(form: &mut Form, config: &Config, update: &UpdateLine) {
         config.background_processes,
         "background_processes",
     );
+    let y = form.y;
+    form.toggle_desc(
+        y,
+        "Ask before keeping Rift running",
+        "Quitting asks once whether Rift keeps running in the background",
+        config.confirm_background_quit,
+        "confirm_background_quit",
+    );
 
     form.group("Shell");
     // what actually runs: a configured shell that is not executable falls back

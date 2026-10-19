@@ -961,6 +961,11 @@ pub struct Config {
     /// Warn before closing a pane, tab or window (or quitting) while a
     /// command is still running in it.
     pub confirm_close_running: bool,
+    /// With `background_processes` on, ⌘Q (or closing the last window) asks
+    /// once whether Rift keeps running in the background ("Keep running"),
+    /// with a "Don't ask again" box that turns this off. Off: it keeps
+    /// running without asking.
+    pub confirm_background_quit: bool,
     /// Ask before pasting text containing a newline into a raw program that
     /// has not enabled bracketed paste (each newline would press Enter).
     pub confirm_multiline_paste: bool,
@@ -1168,6 +1173,7 @@ impl Default for Config {
             bell: Bell::Both,
             request_attention: false,
             confirm_close_running: true,
+            confirm_background_quit: true,
             confirm_multiline_paste: true,
             large_paste_warning: 0,
             trim_paste: false,

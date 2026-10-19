@@ -116,44 +116,36 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# The background helpers as SMAppService agents (crates/rift-pty/src/launchd.rs):
-# registered and started by the app on demand, so the Dock does not count them
-# as Rift running. Never started at load: the app kickstarts them.
-mkdir -p "$APP/Contents/Library/LaunchAgents"
-agent() { # <name> <env key or ""> <args…>
-    local name="$1" env="$2"
-    shift 2
-    {
-        cat <<HEAD
+# The background helpers' own app (crates/rift-pty/src/launchd.rs): the session
+# service, the phone gateway and the menu bar icon after the window quit run as
+# `Rift Helper.app`, started by LaunchServices (`open -n -g -j`). Its own bundle
+# identifier keeps macOS from handing a launch of Rift to a helper (a Dock icon
+# and no window), LSUIElement keeps it out of the Dock, and nothing is registered
+# with launchd, so no build is pinned (an update killed the helper of the old
+# one: "rift-terminal quit unexpectedly"). It is the same binary.
+HELPER="$APP/Contents/Library/LoginItems/Rift Helper.app"
+mkdir -p "$HELPER/Contents/MacOS" "$HELPER/Contents/Resources"
+cp "$BIN" "$HELPER/Contents/MacOS/rift-terminal"
+cp "$ICNS" "$HELPER/Contents/Resources/rift.icns"
+cat > "$HELPER/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>Label</key><string>dev.rift.${name}</string>
-    <key>BundleProgram</key><string>Contents/MacOS/rift-terminal</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>Contents/MacOS/rift-terminal</string>
-HEAD
-        for a in "$@"; do echo "        <string>${a}</string>"; done
-        echo "    </array>"
-        if [ -n "$env" ]; then
-            echo "    <key>EnvironmentVariables</key><dict><key>${env}</key><string>1</string></dict>"
-        fi
-        cat <<TAIL
-    <key>RunAtLoad</key><false/>
-    <key>KeepAlive</key><false/>
-    <key>AbandonProcessGroup</key><true/>
-    <key>ProcessType</key><string>Interactive</string>
+    <key>CFBundleName</key><string>Rift Helper</string>
+    <key>CFBundleDisplayName</key><string>Rift Helper</string>
+    <key>CFBundleIdentifier</key><string>dev.rift.terminal.helper</string>
+    <key>CFBundleVersion</key><string>${VERSION}</string>
+    <key>CFBundleShortVersionString</key><string>${VERSION}</string>
+    <key>CFBundleExecutable</key><string>rift-terminal</string>
+    <key>CFBundleIconFile</key><string>rift</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>LSMinimumSystemVersion</key><string>11.0</string>
+    <key>LSUIElement</key><true/>
 </dict>
 </plist>
-TAIL
-    } > "$APP/Contents/Library/LaunchAgents/dev.rift.${name}.plist"
-}
-agent session "" --session-daemon
-# the gateway writes <data dir>/remote/gateway.log itself (no path fits here)
-agent gateway RIFT_GATEWAY_LOG remote --managed
-plutil -lint "$APP"/Contents/Library/LaunchAgents/*.plist >/dev/null
+PLIST
+plutil -lint "$HELPER/Contents/Info.plist" >/dev/null
 
 # Ad-hoc signature. Without any signature at all Gatekeeper refuses to launch
 # the bundle even locally; "-" is the ad-hoc identity and needs no certificate.

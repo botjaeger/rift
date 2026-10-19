@@ -10,6 +10,7 @@
 //! `remote_access` is on.
 
 use crate::control::{self, Request, Response};
+use rift_remote::protocol::ClosingReason;
 use rift_remote::protocol::{CloseKind, OpenKind, Pane, Tab, Window};
 use rift_remote::registry::{self, Permission};
 use rift_remote::{
@@ -31,13 +32,19 @@ const NO_WINDOWS_EXIT: Duration = Duration::from_secs(30);
 /// Set (to anything) by `--headless` runs and inherited by the gateway they
 /// start: it shows no menu bar icon.
 pub const HEADLESS_ENV: &str = "RIFT_HEADLESS";
-/// Set by the gateway's SMAppService agent (`packaging/make-app.sh`), whose
-/// fixed property list cannot name the log: the gateway appends its output
+/// Set by `open --env` when the helper app starts the gateway, which cannot
+/// redirect its own output: the gateway appends its output
 /// to `<data dir>/remote/gateway.log` itself.
 const LOG_ENV: &str = "RIFT_GATEWAY_LOG";
 /// `<data dir>/remote/stop`: a managed gateway that sees it removes it and
 /// exits ("Quit Rift Completely").
 const STOP_FILE: &str = "stop";
+/// Empty file an update's window writes into the registry directory: the
+/// gateway tells the phones Rift is updating (`closing`, reason `update`) and
+/// stops, and the new version starts its own.
+const UPDATE_FILE: &str = "closing-update";
+/// How long the phones are told an update takes.
+const UPDATE_BACK_IN_S: u32 = 60;
 
 const HELP: &str = "usage: rift-terminal remote [--listen ADDR] [--managed]
        rift-terminal remote pair [--view]
@@ -897,6 +904,7 @@ pub fn cli(args: &[String]) -> i32 {
     }
     // a stop left from before this gateway started is not for it
     let _ = std::fs::remove_file(dir.join(STOP_FILE));
+    let _ = std::fs::remove_file(dir.join(UPDATE_FILE));
     // managed, on macOS: the loop on a thread, the menu bar icon on the
     // main thread (AppKit's)
     #[cfg(target_os = "macos")]
@@ -946,11 +954,20 @@ fn follow_managed(
     // gateway started with no window also ends)
     let mut windowless: Option<Instant> = Some(Instant::now());
     let mut checked_windows: Option<Instant> = None;
+    // what the phones are told as the gateway goes (`closing`)
+    let mut closing = ClosingReason::Quit;
+    let mut back_in_s = None;
     loop {
         std::thread::sleep(MANAGED_CHECK);
         let now = remote_config();
         if !now.access {
             log::info!("remote: remote_access is off; stopping");
+            break;
+        }
+        if std::fs::remove_file(dir.join(UPDATE_FILE)).is_ok() {
+            log::info!("remote: Rift is updating; stopping");
+            closing = ClosingReason::Update;
+            back_in_s = Some(UPDATE_BACK_IN_S);
             break;
         }
         if std::fs::remove_file(dir.join(STOP_FILE)).is_ok() {
@@ -964,6 +981,8 @@ fn follow_managed(
                 log::info!("remote: Quit Rift Completely");
                 if !window {
                     end_background_shells();
+                    // a quit that kept the shells left their tabs to restore
+                    rift_core::session_state::forget_kept_tabs();
                 }
                 break;
             }
@@ -981,8 +1000,22 @@ fn follow_managed(
             }
         }
     }
+    // the phones hear why before the connections close
+    gateway.announce_closing(closing, back_in_s);
+    gateway.flush(Duration::from_millis(500));
     drop(gateway);
     drop(tunnel);
+}
+
+/// An update is restarting Rift: the gateway tells the phones (`closing`,
+/// reason `update`: nothing is wrong, back in about a minute) and stops, and
+/// the new version starts its own. Nothing to do when no gateway runs.
+pub fn announce_update() {
+    if let Some(dir) = registry_dir()
+        && registry::read_status(&dir).is_some()
+    {
+        let _ = std::fs::write(dir.join(UPDATE_FILE), b"");
+    }
 }
 
 /// "Quit Rift Completely" in the app: the gateway stops (within

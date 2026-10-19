@@ -256,7 +256,7 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
 ## Gateway → client
 
 ```json
-{"t":"welcome","v":2,"host":"studio-mac","os":"macos","version":"0.1.0","device":"d3f1","permission":"operate","features":["screen","text","output","push_failures","push_ntfy","git","notify_off","chips","waiting","complete","running","open","close","fit","prompt_chips"]}
+{"t":"welcome","v":2,"host":"studio-mac","os":"macos","version":"0.1.0","device":"d3f1","permission":"operate","features":["screen","text","output","push_failures","push_ntfy","git","notify_off","chips","waiting","complete","running","open","close","fit","prompt_chips","closing"]}
 {"t":"topology","windows":[{"pid":4242,"tabs":[{"index":0,"title":"rift","active":true,"panes":[{"id":12,"active":true,"cwd":"/Users/me/rift","job":null,"last_command":"cargo test","last_exit":0,"git":{"branch":"main","ahead":1,"behind":0,"dirty":true,"files":3,"added":42,"removed":7}}]}]}]}
 {"t":"snapshot","pane":12,"seq":41,"blocks":[Block],"has_older":true}
 {"t":"update","pane":12,"seq":42,"blocks":[Block],"removed":[80]}
@@ -266,6 +266,8 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
 {"t":"ack","id":"n1","ok":true,"pane":14}
 {"t":"done","pane":12,"block":87,"command":"cargo test","exit":0,"duration_ms":260500}
 {"t":"pong","n":3}
+{"t":"closing","reason":"update","back_in_s":60}
+{"t":"closing","reason":"quit"}
 {"t":"error","code":"auth","message":"this device is not paired"}
 {"t":"screen","pane":12,"cols":80,"rows":24,"alt":true,"cursor":[23,1],"full":false,"lines":[[0,[["top - 10:02:11 up 3 days",null,null,1]]],[7,[]]]}
 {"t":"screen","pane":12,"cols":80,"rows":24,"alt":false,"cursor":null,"full":true,"fg":"d4d4d4","bg":"1e1e1e","rules":[[0,"3fb950"],[1,"3fb950"]],"lines":[[0,[["▾ ls",null,null,1],["✓ 0","3fb950","1a3a22",0]]],[1,[["a.txt",null,null,0]]]]}
@@ -285,7 +287,7 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
   `complete` (§ Phase 3), `running` (a pane's `running` in
   `topology`, below), `fit` (§ Phase 3), `prompt_chips` (a pane's `chips`
   in `topology`, below, and the `chip` and `reset_elapsed` requests, §
-  Prompt chip menus), `open` and `close`, and `start` (listed only while
+  Prompt chip menus), `open` and `close`, `closing` (below), and `start` (listed only while
   the computer allows it, `background_processes`). A
   gateway that leaves
   the field out serves none of them; the app then hides what needs them.
@@ -376,6 +378,28 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
   notifications), whether or not the client follows that pane.
 - A pane that closes is reported by `topology` and by `error` `no_pane` for
   its subscription.
+- `closing` (gateways with the `closing` feature) is sent to every
+  connected, authenticated device just before the gateway stops, after
+  what was queued for it before (also to a full queue), and to a device
+  that connects after it right after its `topology`. `reason` is `quit`
+  (Rift quit on the computer; the gateway is gone for good) or `update`
+  (Rift is updating and restarting; nothing is wrong); `back_in_s` is about
+  when the gateway is back, in seconds (the desktop sends 60 with
+  `update`), left out when unknown. The desktop calls
+  `Gateway::announce_closing`, then `Gateway::flush` to wait briefly until
+  every connection has written it, then stops. An app that does not know
+  the type ignores it (every app ignores an unknown `t`), so it needs no
+  negotiation. The app remembers it until the next `welcome`, and when the
+  connection then drops:
+  - `update`: it reconnects every 3 s for up to 180 s after the message,
+    without counting those rounds against its 5 retries; the computer's
+    card says "Updating Rift · back in about a minute" (the time left of
+    `back_in_s`, then "taking a little longer than expected") and the pane
+    "*host* is updating Rift", with no retry counter. After the 180 s it
+    falls back to its usual backoff and its 5 retries, counted from the
+    first. Cancel stops it like any reconnect; Try again tries at once.
+  - `quit`: it does not retry; it stops with "Rift quit on this computer"
+    until Try again, the phone coming back online, or the app opening.
 - Error codes: `auth`, `version`, `bad_request`, `busy`, `forbidden`,
   `no_pane`, `no_block`, `too_large`, `rate`. `ack.error` uses the same
   codes.

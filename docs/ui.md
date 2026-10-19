@@ -70,7 +70,11 @@ pane navigation, Synchronize Inputs, Bring All to Front) · **Help** (What's New
 Menu items act on the window that last had focus. New Window opens another
 window of the same process, offset from the current one; Close Window closes
 only it while others are open ("Close window?" when commands run in it) and
-quits with the last one; Quit asks "Quit Rift?" for every window at once.
+quits with the last one; Quit asks "Quit Rift?" for every window at once (with
+*Allow background processes* on, the question is "Keep running?": its confirm
+button reads *Keep running*, a *Don't ask again* box at the footer's left
+turns the question off, and the shells, gateway and icon stay; features.md,
+Durable sessions).
 
 Shortcut labels come from the live keymap (`[keybindings]` overrides show up
 after the reload); only ⌘ chords become menu key equivalents so ctrl chords

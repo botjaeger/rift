@@ -150,17 +150,22 @@ pub fn run_helper(shared: &crate::remote::Tray) {
     }
 }
 
-/// Open the Rift.app this helper runs from (the binary itself outside a
-/// bundle).
+/// The Rift.app a binary belongs to: the outermost app bundle it sits in (the
+/// helper app lives inside Rift.app, so its own bundle is not it).
+fn rift_bundle(exe: &std::path::Path) -> Option<&std::path::Path> {
+    exe.ancestors()
+        .filter(|a| a.extension().is_some_and(|e| e == "app"))
+        .last()
+}
+
+/// Open Rift: the app this helper is part of (the binary itself outside a
+/// bundle). The helper app has its own bundle identifier, so macOS hands the
+/// launch to the window process, or starts one.
 fn open_rift() {
     let Ok(exe) = std::env::current_exe() else {
         return;
     };
-    let bundle = exe
-        .ancestors()
-        .nth(3)
-        .filter(|b| b.extension().is_some_and(|e| e == "app"));
-    let spawned = match bundle {
+    let spawned = match rift_bundle(&exe) {
         Some(b) => std::process::Command::new("/usr/bin/open").arg(b).spawn(),
         None => std::process::Command::new(&exe).spawn(),
     };
@@ -170,5 +175,29 @@ fn open_rift() {
             std::thread::spawn(move || child.wait());
         }
         Err(e) => log::warn!("menu bar icon: could not open Rift: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rift_bundle;
+    use std::path::Path;
+
+    #[test]
+    fn open_rift_opens_the_main_app_not_the_helper_app_inside_it() {
+        let helper = Path::new(
+            "/Applications/Rift.app/Contents/Library/LoginItems/Rift Helper.app/Contents/MacOS/rift-terminal",
+        );
+        let main = Path::new("/Applications/Rift.app/Contents/MacOS/rift-terminal");
+        assert_eq!(
+            rift_bundle(helper),
+            Some(Path::new("/Applications/Rift.app"))
+        );
+        assert_eq!(rift_bundle(main), Some(Path::new("/Applications/Rift.app")));
+        // outside a bundle: the binary itself
+        assert_eq!(
+            rift_bundle(Path::new("/src/target/release/rift-terminal")),
+            None
+        );
     }
 }

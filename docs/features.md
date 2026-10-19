@@ -1356,21 +1356,21 @@ it.
 With `durable_sessions = true` (the default; Settings → General → *Keep
 shells running through updates*), new shells run in a
 per-user **session service** (`rift-terminal --session-daemon`, started on
-demand) instead of the window process. On macOS 13+ it and the phone
-gateway are `SMAppService` agents that Rift.app carries
-(`Contents/Library/LaunchAgents/dev.rift.session.plist`,
-`dev.rift.gateway.plist`: registered once, started on demand, never kept
-alive), not children of the window, so a quit Rift leaves the Dock instead
-of staying there as "Running in Background" (macOS 27 keeps an app there
-while a launchd job it bootstrapped runs). They appear under System
-Settings › General › Login Items as Rift's background items. Runs with
-their own `XDG_DATA_HOME`/`XDG_CONFIG_HOME` (scripted and test runs), runs
-outside Rift.app and older macOS bootstrap launchd jobs instead
-(`<data dir>/launchd/*.plist`, run once). An agent whose registration
-still names another build (after an update, or a copy of Rift elsewhere
-with the same labels) is refused by launchd (`spawn failed`, exit 78): Rift
-registers it again, which pins this build, and retries once, else starts
-the one-shot job instead; every `launchctl` call gives up after 5 s. A pane asks the service on its
+demand) instead of the window process. On macOS the service and the phone
+gateway run as **Rift Helper.app**, an app of its own inside Rift.app
+(`Contents/Library/LoginItems`, its own bundle identifier, no Dock icon):
+the window asks LaunchServices to start each as a new instance of it (`open
+-n -g -j`), so they are not children of the window and a quit Rift leaves the
+Dock instead of staying there as "Running in Background" (macOS 27 keeps an
+app there while a launchd job it bootstrapped runs). Because it is a
+separate app, macOS never takes a helper for the running Rift (a launch of
+Rift from the Dock, Spotlight or `open -a` always reaches a window process),
+and nothing is registered with launchd, so no build is pinned (a registered
+helper of an older build was killed on the first launch after an update:
+"rift-terminal quit unexpectedly"). Runs with their own
+`XDG_DATA_HOME`/`XDG_CONFIG_HOME` (scripted and test runs), runs outside
+Rift.app and a failed `open` bootstrap launchd jobs instead
+(`<data dir>/launchd/*.plist`, run once). A pane asks the service on its
 own thread, never the window's: starting the service or the gateway, and a
 slow or stalled service, never hold the window (⌘T, typing and splits go
 on; the pane shows `Starting zsh…` and keeps what is typed). A service that does
@@ -1380,14 +1380,32 @@ runs what was typed meanwhile), and the rest of the window's run stays
 local instead of waiting on it again. A reattach whose shell ended while
 detached starts a fresh one in the service.
 
-**Quitting** Rift (⌘Q, Quit Rift in the menu or the palette, or closing the
-window) is intentional: every shell ends and the session file keeps only the
-window's frame, so the next launch starts fresh with one tab where the window
-was (saved block output goes too). While a phone is connected, the quit
-dialog names it first (*iPhone is connected and loses its tabs.*), with the
-running commands when *Warn before closing running commands* is on. Shells a
-phone opens after the quit (`background_processes`) still appear as tabs at the
-next launch.
+**Quitting** Rift has two kinds, chosen by Settings › General › App ›
+*Allow background processes*:
+
+- **Off (the default): a quit ends everything.** ⌘Q, Quit Rift in the menu or
+  the palette, or closing the last window ends every shell, and the session
+  file keeps only the window's frame, so the next launch starts fresh with one
+  tab where the window was (saved block output goes too). While a phone is
+  connected, the quit dialog names it first (*iPhone is connected and loses
+  its tabs.*), with the running commands when *Warn before closing running
+  commands* is on. The phone is told Rift quit (`closing`, below).
+- **On (macOS, with `remote_access`): a quit keeps Rift running in the background.** The first ⌘Q asks
+  *Keep running?* (the running commands are listed; *Cancel* or *Keep
+  running*, with a *Don't ask again* box, Space toggles it; Settings › General
+  › App › *Ask before keeping Rift running*, `confirm_background_quit`, turns
+  the question back on). Keep running closes the windows only: the shells
+  keep running in the session service, the gateway and the menu bar icon stay,
+  and there is no Dock icon. The session file is saved whole and flagged
+  `kept`, so opening Rift again (the icon's *Open Rift*, the Dock, Spotlight)
+  restores the same tabs and reattaches their shells, whatever *Reopen tabs*
+  (`restore_session`) says. Shells a phone opens while Rift is closed appear
+  as tabs too.
+
+*Quit Rift Completely* (the icon's menu, or the quit dialog's note) ends
+everything in either mode: every shell, the gateway and the session service,
+and the kept tabs go with them. The phone is told with `closing` (reason
+`quit`): it shows "<computer> quit Rift" instead of retrying.
 
 **Menu bar icon** (macOS, with `background_processes`, off by default; Settings
 › General › App › *Allow background processes*, which also lets phones open
@@ -1401,11 +1419,16 @@ that also stops the gateway (`<data dir>/remote/stop`, seen within 0.5 s)
 and ends the shells phones started in the session service, which then
 exits; nothing of Rift keeps running. ⌘Q leaves the gateway as before.
 *Launch at login* (`launch_at_login`, beside it) adds or removes Rift's
-login item.
+login item. Opening Rift again while only its helpers run (the Dock icon,
+Spotlight, Finder or the icon's *Open Rift*) starts a window: the helpers
+are a separate app (`Rift Helper`), so the launch always reaches Rift itself.
 
 An update's restart, a crash, a killed process or a reboot of the window
 only (the service survives) leave the shells running; the next launch
-restores the layout and **reattaches** each pane: the service replays the output it kept (the newest 8 MiB per
+restores the layout and **reattaches** each pane (after a crash whatever
+`restore_session` says, with a toast: *Rift didn't quit normally last time.
+Your tabs are back.*; every ordinary way out removes `<data dir>/running`,
+and a leftover one whose process is gone is what says it crashed): the service replays the output it kept (the newest 8 MiB per
 shell) into a fresh terminal, with the original timing so block durations
 stay right, then continues live. Nothing is shown twice, and automatic
 terminal replies (device attributes, image OKs) are not re-sent during the
@@ -1693,13 +1716,15 @@ on the desktop (also for shells a phone started while no window is open).
   with a toast naming the phone), and the phone goes to the new pane.
 - **Phone-first app.** *Portals* is the home page (no tab bar); its gear
   opens *Settings* and its **+** pairs a computer. *Portals* lists each
-  computer in a card (connection line, *New tab*, *Retry* or *Pair again*)
-  with its tabs, each with its state and time (*Needs you · 2m*, *Working
+  computer in a card (connection line, *New tab*, *Try again* or *Pair again*;
+  swipe the card left for *Unpair*, which asks first) with its tabs, each with its state and time (*Needs you · 2m*, *Working
   3:56*, *Idle 12m*); chips (*needs you*, *working*, *idle*) filter the tabs. With
   one computer paired, an agent's question answers in place on its tab. A cold
   start reopens the pane shown last. A pane's header title opens the *Tabs*
   sheet (every tab of the computer, filtered by state) and its pane picker
-  the *Panes* sheet; a sideways swipe also moves between the tab's panes.
+  the *Panes* sheet, the one way to move between the tab's panes (a swipe
+  would fight with output that scrolls sideways; a screen reader has *Next
+  pane* and *Previous pane* on the picker).
   Successes before the newest failure fold away; blocks are cards with a thin
   border in their state's colour (a table as a list, with *Raw*), failed ones
   with *Run again* and *Copy error*, running ones with *Stop* and *Notify when
@@ -1757,7 +1782,17 @@ on the desktop (also for shells a phone started while no window is open).
   (`0.0.0.0:8790`; `--trust-forwarded` behind a proxy).
 - **The app** (`mobile/`): tries the computer's own addresses first and the
   relay second, reconnects at once when the phone changes networks (moving
-  home upgrades to the direct path), shows *Offline* without retrying while
+  home upgrades to the direct path), retries an unreachable computer 5 times
+  (0.5 s doubling to 10 s; the card counts *retry 2 of 5*) and then stops
+  (*Can't reach it · stopped after 5 retries*, with *Try again*): it tries
+  again when you tap *Try again*, when the phone is back online and when the
+  app opens, and *Cancel* on a pane that is reconnecting stops it at once and
+  goes to Portals. When the computer quits Rift it says so first (`closing`,
+  `docs/remote-protocol.md`): the card reads *Rift quit on this computer*
+  with *Try again*, and nothing retries; when an update restarts Rift it
+  reads *Updating Rift · back in about a minute* ("Nothing is wrong"), and
+  the app reconnects every 3 s for up to 3 minutes without counting those
+  tries against the 5. It shows *Offline* without retrying while
   there is no network, closes its connections 30 seconds after going to the
   background (3 minutes while a "notify me" command runs; Android 15+ and iOS
   may cut them sooner, and it reconnects on return), and can require

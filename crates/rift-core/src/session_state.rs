@@ -15,9 +15,9 @@ use std::path::PathBuf;
 /// adds `other_windows` (every window after the first); `5` adds per-pane
 /// `launch` (profile name, own shell and arguments); `6` adds pinned tabs,
 /// tab groups (`groups`, per-tab `group`) and read-only panes; `7` adds
-/// window names (`window_name`, per other window `name`).
+/// window names (`window_name`, per other window `name`); `8` adds `kept`.
 /// A file with no `version` key loads as [`LEGACY_VERSION`].
-pub const CURRENT_VERSION: u32 = 7;
+pub const CURRENT_VERSION: u32 = 8;
 
 /// The version assumed for a file that predates the `version` key.
 pub const LEGACY_VERSION: u32 = 1;
@@ -53,6 +53,11 @@ pub struct SavedSession {
     /// The first window's name (version 7; "Rename window…").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_name: Option<String>,
+    /// The last quit left Rift's shells running in the background
+    /// (`background_processes`): the next launch restores these tabs and
+    /// reattaches the shells, whatever `restore_session` says.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub kept: bool,
 }
 
 /// A named, coloured tab group; its tabs name it by index.
@@ -140,6 +145,7 @@ impl Default for SavedSession {
             other_windows: Vec::new(),
             groups: Vec::new(),
             window_name: None,
+            kept: false,
         }
     }
 }
@@ -363,6 +369,79 @@ pub fn load_from(path: &std::path::Path) -> Option<SavedSession> {
     toml::from_str(&body).ok()
 }
 
+// --- crash recovery: was the last run ended on purpose? ------------------------------------
+
+/// `<data dir>/running`: written at launch with the window process's pid and
+/// removed by every ordinary way out (a quit, an update's restart). A marker
+/// whose process is gone means the last run ended in a crash, a kill or a
+/// power loss.
+fn running_marker() -> Option<PathBuf> {
+    crate::shell_integration::data_dir().map(|d| d.join("running"))
+}
+
+/// Record that this process is running.
+pub fn mark_running() {
+    let Some(path) = running_marker() else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, std::process::id().to_string());
+}
+
+/// This process is ending on purpose: forget that it ran. Another process's
+/// marker is left alone.
+pub fn mark_clean_exit() {
+    let Some(path) = running_marker() else {
+        return;
+    };
+    if std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        == Some(std::process::id())
+    {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// The last run left its marker and its process is gone: it did not end on
+/// purpose. False when there is no marker, or the process in it still runs
+/// (another Rift, or this one).
+pub fn previous_run_crashed() -> bool {
+    let Some(pid) = running_marker()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| s.trim().parse::<u32>().ok())
+    else {
+        return false;
+    };
+    pid != std::process::id() && !process_alive(pid)
+}
+
+fn process_alive(pid: u32) -> bool {
+    // SAFETY: signal 0 only checks that the process exists
+    let r = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    r == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// "Quit Rift Completely" after a quit that kept the shells: their tabs go
+/// with them, so the next launch starts fresh with one tab where the window
+/// was (the same as a quit that ends the shells). A session that was not kept
+/// is left alone.
+pub fn forget_kept_tabs() {
+    let Some(mut kept) = load().filter(|s| s.kept) else {
+        return;
+    };
+    kept.tabs.clear();
+    kept.active = 0;
+    kept.other_windows.clear();
+    kept.groups.clear();
+    kept.window_name = None;
+    kept.kept = false;
+    save(&kept);
+    crate::transcript::remove_except(&[]);
+}
+
 /// Atomic write (tmp + rename) — this file is written frequently.
 pub fn save(session: &SavedSession) {
     if let Some(path) = session_path() {
@@ -389,6 +468,58 @@ pub fn restart_dir() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    /// `data_dir()` follows XDG_DATA_HOME: a scratch one per test, one test at a time.
+    fn with_data_dir(f: impl FnOnce()) {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _one = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("rift-running-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // SAFETY: serialised by LOCK; no other test reads the variable meanwhile
+        unsafe { std::env::set_var("XDG_DATA_HOME", &dir) };
+        f();
+        unsafe { std::env::remove_var("XDG_DATA_HOME") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_run_that_ended_on_purpose_leaves_no_marker() {
+        with_data_dir(|| {
+            assert!(!previous_run_crashed(), "no marker: nothing crashed");
+            mark_running();
+            // this very process runs: not a crash
+            assert!(!previous_run_crashed());
+            mark_clean_exit();
+            assert!(!running_marker().unwrap().exists());
+            assert!(!previous_run_crashed());
+        });
+    }
+
+    #[test]
+    fn a_marker_of_a_gone_process_means_the_last_run_crashed() {
+        with_data_dir(|| {
+            let mut child = std::process::Command::new("/bin/sleep")
+                .arg("30")
+                .spawn()
+                .unwrap();
+            let pid = child.id();
+            let marker = running_marker().unwrap();
+            std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+            std::fs::write(&marker, pid.to_string()).unwrap();
+            // the process lives: another Rift is running, not a crash
+            assert!(!previous_run_crashed());
+            child.kill().unwrap();
+            child.wait().unwrap();
+            assert!(previous_run_crashed());
+            // a clean exit of ANOTHER process leaves its marker alone
+            mark_clean_exit();
+            assert!(running_marker().unwrap().exists());
+            // the next launch marks itself running: no longer a crash
+            mark_running();
+            assert!(!previous_run_crashed());
+        });
+    }
+
     use super::*;
 
     #[test]
@@ -414,6 +545,7 @@ mod tests {
             }),
             other_windows: Vec::new(),
             window_name: None,
+            kept: false,
             groups: Vec::new(),
         };
         let body = toml::to_string(&s).unwrap();
@@ -472,6 +604,7 @@ mod tests {
             window: None,
             other_windows: Vec::new(),
             window_name: Some("main".into()),
+            kept: false,
             groups: vec![SavedGroup {
                 name: "Servers".into(),
                 color: Some("green".into()),

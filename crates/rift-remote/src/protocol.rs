@@ -502,6 +502,24 @@ pub enum ServerMsg {
         history: Vec<HistoryEntry>,
         more: bool,
     },
+    /// The gateway is about to stop (feature `closing`; sent to every
+    /// connection just before). `back_in_s`: about when it is back
+    /// (`update`); absent when unknown.
+    Closing {
+        reason: ClosingReason,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        back_in_s: Option<u32>,
+    },
+}
+
+/// Why the gateway stops ([`ServerMsg::Closing`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClosingReason {
+    /// Rift quit on the computer: the gateway is gone for good.
+    Quit,
+    /// Rift is updating and restarting: the gateway comes back.
+    Update,
 }
 
 impl ServerMsg {
@@ -899,7 +917,7 @@ mod tests {
     #[test]
     fn every_server_fixture_round_trips() {
         let all = fixtures("server");
-        assert_eq!(all.len(), 28, "server fixtures");
+        assert_eq!(all.len(), 30, "server fixtures");
         for (name, value) in all {
             let msg: ServerMsg =
                 serde_json::from_value(value.clone()).unwrap_or_else(|e| panic!("{name}: {e}"));
@@ -986,6 +1004,36 @@ mod tests {
                 after: None
             }
         );
+    }
+
+    #[test]
+    fn closing_says_why_and_when_it_is_back() {
+        assert_eq!(
+            serde_json::to_string(&ServerMsg::Closing {
+                reason: ClosingReason::Quit,
+                back_in_s: None
+            })
+            .unwrap(),
+            r#"{"t":"closing","reason":"quit"}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<ServerMsg>(
+                r#"{"t":"closing","reason":"update","back_in_s":60}"#
+            )
+            .unwrap(),
+            ServerMsg::Closing {
+                reason: ClosingReason::Update,
+                back_in_s: Some(60)
+            }
+        );
+        for bad in [
+            r#"{"t":"closing"}"#,
+            r#"{"t":"closing","reason":"crash"}"#,
+            r#"{"t":"closing","reason":"update","back_in_s":-1}"#,
+            r#"{"t":"closing","reason":"update","back_in_s":1.5}"#,
+        ] {
+            assert!(serde_json::from_str::<ServerMsg>(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

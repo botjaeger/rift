@@ -4542,6 +4542,119 @@ if sys.platform == "darwin":
     plain = full_quit_run("quit-plain", "key cmd+q")
     assert not (plain / "data/rift/remote/stop").exists(), "⌘Q stopped the gateway"
 
+# (f4) Allow background processes: a quit keeps Rift running. ⌘Q asks "Keep
+# running?" (with a Don't-ask-again box: Space ticks it, Keep running stores
+# it in config.toml), the shells stay in the session service, the session file
+# is saved whole and flagged `kept`, the next launch restores the tab and
+# reattaches the same running shell (restore_session is off: a kept session
+# restores anyway) and a second ⌘Q asks nothing; Quit Rift Completely ends the
+# shells and the kept tabs go with them. Without the setting a quit ends them.
+if sys.platform == "darwin":  # the kept background is macOS only (the menu bar icon ends it)
+    kq = scratch / "keep-quit"
+    for sub in ("cfg/rift", "data/rift"):
+        (kq / sub).mkdir(parents=True, exist_ok=True)
+    (kq / "cfg/rift/config.toml").write_text(
+        'background_processes = true\nremote_access = true\ndurable_sessions = true\nrestore_session = false\n'
+        'check_for_updates = false\nshell = "/bin/bash"\n')
+    kq_env = dict(env, XDG_CONFIG_HOME=str(kq / "cfg"), XDG_DATA_HOME=str(kq / "data"),
+                  RIFT_PERSIST_SESSION="1")
+    def kq_run(name, steps):
+        (kq / f"{name}.rift").write_text("\n".join(steps) + "\n")
+        with (kq / f"{name}.log").open("w") as log:
+            rc = subprocess.run([str(binary), "--script", str(kq / f"{name}.rift"), "--headless"],
+                                env=kq_env, stdout=log, stderr=log, timeout=90).returncode
+        assert rc == 0, died(f"keep-quit {name} run failed", kq / f"{name}.log")
+    def kq_text(name):
+        path = kq / f"{name}.txt"
+        return path.read_text() if path.exists() else ""
+    try:
+        kq_run("one", [
+            "wait_prompt", "type sleep 600\\n", "wait 800", "key cmd+q", "wait 600",
+            f"dump {kq}/dialog.txt", "key space", "wait 300", "key enter", "wait 2500",
+            f"dump {kq}/not-quit.txt"])
+        dialog = kq_text("dialog")
+        assert 'AlertDialog "Quit Rift?"' in dialog and "keeps running in the menu bar" in dialog \
+            and 'Button "Keep running"' in dialog and "Don’t ask again" in dialog, dialog[-1500:]
+        assert "terminated" not in dialog, dialog[-1500:]
+        assert not (kq / "not-quit.txt").exists(), "Keep running did not quit"
+        saved = (kq / "data/rift/session.toml").read_text()
+        assert "kept = true" in saved and "[[tabs]]" in saved, saved
+        assert "confirm_background_quit = false" in (kq / "cfg/rift/config.toml").read_text()
+        assert len(list(session_daemons(kq / "data"))) == 1, "the shell did not stay in the session service"
+        kq_run("two", ["wait 2500", f"dump {kq}/restored.txt", "quit"])
+        restored = kq_text("restored")
+        assert "sleep 600" in restored and re.search(r"service=Some\(\d+\)", restored), restored[-1500:]
+        # "Don't ask again" was ticked: this quit asks nothing, and keeps running again
+        kq_run("three", ["wait 1500", "key cmd+q", "wait 2500", f"dump {kq}/not-quit3.txt"])
+        assert not (kq / "not-quit3.txt").exists(), "the second quit asked a question"
+        assert "kept = true" in (kq / "data/rift/session.toml").read_text()
+        # Quit Rift Completely (macOS menu): ends the shells; nothing is kept
+        if sys.platform == "darwin":
+            kq_run("four", [
+                "wait 2500", "menu status:quit_completely", "wait 900", f"dump {kq}/qc.txt",
+                "key enter", "wait 3000", f"dump {kq}/not-quit4.txt"])
+            qc = kq_text("qc")
+            assert "Keep running" not in qc and "terminated" in qc, qc[-1500:]
+            assert not (kq / "not-quit4.txt").exists(), "Quit Rift Completely did not quit"
+            after = (kq / "data/rift/session.toml").read_text()
+            assert "kept = true" not in after and "[[tabs]]" not in after, after
+    finally:
+        for pid in session_daemons(kq / "data"):
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+
+# (f5) crash recovery: every ordinary way out removes <data dir>/running; a
+# leftover one whose process is gone says the last run crashed, and the next
+# launch restores the tabs and reattaches their shells (restore_session is off)
+# with a notice. RIFT_CRASH_CHECK asks a scripted run to do it.
+cr = scratch / "crash-recovery"
+for sub in ("cfg/rift", "data/rift"):
+    (cr / sub).mkdir(parents=True, exist_ok=True)
+(cr / "cfg/rift/config.toml").write_text(
+    'durable_sessions = true\nrestore_session = false\nremote_access = false\n'
+    'check_for_updates = false\nshell = "/bin/bash"\n')
+cr_env = dict(env, XDG_CONFIG_HOME=str(cr / "cfg"), XDG_DATA_HOME=str(cr / "data"),
+              RIFT_PERSIST_SESSION="1", RIFT_CRASH_CHECK="1")
+def cr_run(name, steps, wait=True):
+    (cr / f"{name}.rift").write_text("\n".join(steps) + "\n")
+    log = (cr / f"{name}.log").open("w")
+    proc = subprocess.Popen([str(binary), "--script", str(cr / f"{name}.rift"), "--headless"],
+                            env=cr_env, stdout=log, stderr=log)
+    if wait:
+        assert proc.wait(timeout=90) == 0, died(f"crash-recovery {name} run failed", cr / f"{name}.log")
+    return proc
+try:
+    proc = cr_run("a", ["wait_prompt", "type sleep 600\\n", "wait 600", f"dump {cr}/a.txt", "wait 60000"], wait=False)
+    deadline = time.monotonic() + 30
+    while not (cr / "a.txt").exists() and time.monotonic() < deadline:
+        time.sleep(0.2)
+    marker = cr / "data/rift/running"
+    assert marker.read_text().strip() == str(proc.pid), "the run did not mark itself running"
+    proc.kill()  # SIGKILL: no exit hook runs
+    proc.wait()
+    time.sleep(1)
+    assert marker.exists() and len(list(session_daemons(cr / "data"))) == 1
+    cr_run("b", ["wait 2500", f"dump {cr}/b.txt", "quit"])
+    b = (cr / "b.txt").read_text()
+    assert "sleep 600" in b and re.search(r"service=Some\(\d+\)", b), b[-1500:]
+    assert "quit normally" in b, b[-1500:]
+    assert not marker.exists(), "a clean quit left the marker"
+    for pid in session_daemons(cr / "data"):
+        os.kill(pid, signal.SIGTERM)
+    time.sleep(1)
+    cr_run("c", ["wait_prompt", "type echo hi\\n", "wait 500", "quit"])
+    cr_run("d", ["wait_prompt", f"dump {cr}/d.txt", "quit"])
+    d = (cr / "d.txt").read_text()
+    assert "quit normally" not in d and "echo hi" not in d, d[-800:]
+finally:
+    for pid in session_daemons(cr / "data"):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
 # (g) a relay (Phase 2): the managed gateway registers at a local relay
 # (rift-relay) and Settings shows it connected; a phone forced through the
 # relay shows "via relay"; Operate -> View only on the page closes it within

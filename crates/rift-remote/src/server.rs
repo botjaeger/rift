@@ -28,8 +28,8 @@
 //! `busy`.
 
 use crate::protocol::{
-    Block, BlockState, ClientHello, ClientMsg, CloseKind, ErrorCode, GatewayHello, OpenKind,
-    Permission, Run, ScreenMode, ServerMsg, VERSION,
+    Block, BlockState, ClientHello, ClientMsg, CloseKind, ClosingReason, ErrorCode, GatewayHello,
+    OpenKind, Permission, Run, ScreenMode, ServerMsg, VERSION,
 };
 use crate::registry::{self, Device, RelayState, RelayStatus, Via};
 use crate::transport::{self, Channel, KEY_LEN, Recv, Socket};
@@ -76,7 +76,7 @@ const DONE_RUNNING: usize = 64;
 /// after the 45 s idle timeout.
 pub const FOLLOW_FRESH: Duration = Duration::from_secs(20);
 /// What this gateway serves beyond Phase 2 (`welcome.features`).
-const FEATURES: [&str; 15] = [
+const FEATURES: [&str; 16] = [
     "screen",
     "text",
     "output",
@@ -92,6 +92,7 @@ const FEATURES: [&str; 15] = [
     "close",
     "fit",
     "prompt_chips",
+    "closing",
 ];
 
 /// Gateway settings. [`Config::new`] takes the limits from the protocol;
@@ -200,6 +201,33 @@ impl Gateway {
     pub fn set_relay(&self, relay: Option<String>) {
         self.shared.set_relay(relay);
     }
+
+    /// Tell every connected device the gateway is about to stop
+    /// (`closing`): `Quit` for good, `Update` back in about `back_in_s`
+    /// seconds. Returns at once; each connection writes it on its next loop
+    /// turn, after what was queued before it and even when its queue is
+    /// full. A device that connects afterwards gets it right after its
+    /// `topology`. [`Gateway::flush`] waits until it is written.
+    pub fn announce_closing(&self, reason: ClosingReason, back_in_s: Option<u32>) {
+        self.shared
+            .announce_closing(frame(&ServerMsg::Closing { reason, back_in_s }));
+    }
+
+    /// Wait up to `timeout` until every connection has written the
+    /// `closing` of [`Gateway::announce_closing`] (or ended). True when none
+    /// is left to write.
+    pub fn flush(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self.shared.closing_unsent() == 0 {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
 }
 
 impl Drop for Gateway {
@@ -218,6 +246,10 @@ trait Stop: Send + Sync {
     /// After the threads ended: remove `status.json`.
     fn finish(&self);
     fn set_relay(&self, relay: Option<String>);
+    /// Owe every connection (and every later one) `frame`.
+    fn announce_closing(&self, frame: Arc<str>);
+    /// Connections that still owe their `closing`.
+    fn closing_unsent(&self) -> usize;
 }
 
 impl<S: Source> Stop for Shared<S> {
@@ -228,6 +260,23 @@ impl<S: Source> Stop for Shared<S> {
     fn finish(&self) {
         let _g = self.status_lock.lock().unwrap();
         registry::remove_status(&self.config.dir);
+    }
+
+    fn announce_closing(&self, frame: Arc<str>) {
+        *self.closing.lock().unwrap() = Some(frame);
+        for c in self.hub.lock().unwrap().clients.values() {
+            c.closing.store(true, Ordering::Release);
+        }
+    }
+
+    fn closing_unsent(&self) -> usize {
+        self.hub
+            .lock()
+            .unwrap()
+            .clients
+            .values()
+            .filter(|c| c.closing.load(Ordering::Acquire))
+            .count()
     }
 
     fn set_relay(&self, relay: Option<String>) {
@@ -318,6 +367,7 @@ pub fn serve<S: Source>(
         relay_connections: AtomicUsize::new(0),
         next_client: AtomicU64::new(1),
         seq_base,
+        closing: Mutex::new(None),
     });
     // writes status.json (with the relay, if any)
     shared.set_relay(relay);
@@ -378,6 +428,8 @@ pub(crate) struct Shared<S> {
     next_client: AtomicU64,
     /// Where every pane's feed `seq` starts in this run ([`Config::seq_base`]).
     seq_base: u64,
+    /// The `closing` frame once announced ([`Gateway::announce_closing`]).
+    closing: Mutex<Option<Arc<str>>>,
 }
 
 #[derive(Default)]
@@ -459,6 +511,9 @@ struct Slot {
     /// Its screen frames, written by its own loop ([`flush_screen`]).
     out: ScreenOut,
     end: Arc<AtomicU8>,
+    /// It owes the announced `closing` (written by its own loop, outside
+    /// its queue).
+    closing: Arc<AtomicBool>,
     /// When its app was last heard from (any Noise message).
     seen: Arc<Heard>,
     /// The device's static key and registry entry.
@@ -1680,8 +1735,11 @@ fn serve_device<S: Source, T: Socket>(
     let (tx, rx) = sync_channel(CLIENT_QUEUE);
     let end = Arc::new(AtomicU8::new(LIVE));
     let seen = Arc::new(Heard::new());
+    let closing = Arc::new(AtomicBool::new(false));
     {
         let mut hub = shared.hub.lock().unwrap();
+        // connected after the announcement: it owes one too
+        closing.store(shared.closing.lock().unwrap().is_some(), Ordering::Release);
         hub.clients.insert(
             id,
             Slot {
@@ -1692,6 +1750,7 @@ fn serve_device<S: Source, T: Socket>(
                 screen: ScreenMode::Off,
                 out: ScreenOut::default(),
                 end: end.clone(),
+                closing: closing.clone(),
                 seen: seen.clone(),
                 key: ch.remote_static(),
                 device: device.id.clone(),
@@ -1745,15 +1804,17 @@ fn session<S: Source, T: Socket>(
     via: Via,
 ) -> &'static str {
     let cfg = &shared.config;
-    // when this client was last heard from, for [`alert`]
-    let seen = shared
+    // when this client was last heard from, for [`alert`], and whether it
+    // owes a `closing`
+    let (seen, closing) = shared
         .hub
         .lock()
         .unwrap()
         .clients
         .get(&id)
-        .map(|c| c.seen.clone())
-        .unwrap_or_else(|| Arc::new(Heard::new()));
+        .map(|c| (c.seen.clone(), c.closing.clone()))
+        .unwrap_or_else(|| (Arc::new(Heard::new()), Arc::new(AtomicBool::new(false))));
+    let closing = &*closing;
     // the phone's last sign of life: through a relay WebSocket pongs come
     // from the relay, so only Noise messages count (the app pings in them)
     let mut heard = Instant::now();
@@ -1791,6 +1852,8 @@ fn session<S: Source, T: Socket>(
             }
         }
         if shared.stop.load(Ordering::Acquire) {
+            // a `closing` announced just before the stop still goes out
+            send_closing(shared, &mut ch, closing);
             ch.close();
             return "stopped";
         }
@@ -1798,6 +1861,9 @@ fn session<S: Source, T: Socket>(
             if !send(&mut ch, &f) {
                 return "error";
             }
+        }
+        if !send_closing(shared, &mut ch, closing) {
+            return "error";
         }
         if !flush_screen(shared, id, &mut ch) {
             return "error";
@@ -2011,6 +2077,20 @@ fn session<S: Source, T: Socket>(
             return "error";
         }
     }
+}
+
+/// Write the `closing` this connection owes, if any. False when the write
+/// failed.
+fn send_closing<S, T: Socket>(shared: &Shared<S>, ch: &mut Conn<T>, owed: &AtomicBool) -> bool {
+    if !owed.load(Ordering::Acquire) {
+        return true;
+    }
+    let Some(f) = shared.closing.lock().unwrap().clone() else {
+        return true;
+    };
+    let ok = send(ch, &f);
+    owed.store(false, Ordering::Release);
+    ok
 }
 
 /// `reply` as a frame; an answer over [`MAX_GATEWAY_MESSAGE`] (JSON escapes

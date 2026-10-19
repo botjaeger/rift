@@ -260,6 +260,9 @@ bell          = "both"            # visual | audible | both | none
 request_attention = false         # a bell or alert while no Rift window has focus:
                                   # bounce the Dock icon once (macOS) / urgency hint (Linux)
 confirm_close_running = true      # warn before closing a pane/tab/window with a running job
+confirm_background_quit = true    # with background_processes on, quitting asks once
+                                  # whether Rift keeps running ("Don't ask again" in
+                                  # the dialog turns this off: it keeps running unasked)
 confirm_multiline_paste = true    # ask before a paste with newlines reaches a program
                                   # without bracketed paste (each newline presses Enter)
 large_paste_warning = 0           # ask before a paste over this many KiB (0 = never)

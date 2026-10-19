@@ -198,6 +198,8 @@ fn main() {
     application.start_links = links;
     event_loop.run_app(&mut application).expect("event loop");
     quit::LOOP_RETURNED.store(true, std::sync::atomic::Ordering::SeqCst);
+    // ended on purpose: the next launch does not take it for a crash
+    rift_core::session_state::mark_clean_exit();
     // a process that does not end now is a stall too (the Dock keeps it)
     stall::busy(stall::Phase::Quitting);
     // the warm completion shells (and what their functions started) end

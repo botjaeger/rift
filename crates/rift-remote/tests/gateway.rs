@@ -7,7 +7,9 @@ use rift_remote::protocol::{
 use rift_remote::protocol::{
     ChangedFile, Completion, CompletionKind, DiffLine, HistoryEntry, Waiting, WaitingKind,
 };
-use rift_remote::protocol::{ChipDetail, ChipKind, ComposeContainer, PaneChip, Part, Tone};
+use rift_remote::protocol::{
+    ChipDetail, ChipKind, ClosingReason, ComposeContainer, PaneChip, Part, Tone,
+};
 use rift_remote::registry::{self, PairingLink};
 use rift_remote::transport::{self, Channel, HandshakeError, Recv};
 use rift_remote::{
@@ -695,7 +697,7 @@ fn pairing_then_reconnecting_gets_welcome_and_topology() {
     assert_eq!(
         welcome,
         json!({"t":"welcome","v":2,"host":"test-host","os":"linux","version":"9.9.9",
-               "device":d.id,"permission":"operate","features":["screen","text","output","push_failures","push_ntfy","git","notify_off","chips","waiting","complete","running","open","close","fit","prompt_chips"]})
+               "device":d.id,"permission":"operate","features":["screen","text","output","push_failures","push_ntfy","git","notify_off","chips","waiting","complete","running","open","close","fit","prompt_chips","closing"]})
     );
     assert_eq!(
         (d.name.as_str(), d.platform.as_str()),
@@ -1099,6 +1101,49 @@ fn one_gateway_per_registry_and_status_is_removed_on_exit() {
     drop(env.gw.take());
     assert!(registry::read_status(&env.dir).is_none());
     assert!(!env.dir.join("status.json").exists());
+}
+
+/// The next message that is not a topology refresh or a `done`.
+fn next_real(ch: &mut Ch) -> Value {
+    loop {
+        let v = recv(ch);
+        if v["t"] != "topology" && v["t"] != "done" {
+            return v;
+        }
+    }
+}
+
+#[test]
+fn closing_reaches_every_device_and_flush_waits_for_it() {
+    let env = start(|_| {});
+    let gw = env.gw.as_ref().unwrap();
+    // nobody connected: nothing to wait for
+    assert!(gw.flush(Duration::ZERO));
+    let (_k1, mut one, _) = env.pair(Permission::Operate);
+    let (_k2, mut two, _) = env.pair(Permission::View);
+    gw.announce_closing(ClosingReason::Update, Some(60));
+    assert!(gw.flush(Duration::from_secs(5)), "closing not written");
+    let update = json!({"t":"closing","reason":"update","back_in_s":60});
+    assert_eq!(next_real(&mut one), update);
+    assert_eq!(next_real(&mut two), update);
+    // a device connecting after the announcement gets it too
+    let (_k3, mut three, _) = env.pair(Permission::Operate);
+    assert_eq!(next_real(&mut three), update);
+    // written once: a ping is answered next, not by another `closing`
+    put(&mut one, json!({"t":"ping","n":7}));
+    assert_eq!(next_real(&mut one), json!({"t":"pong","n":7}));
+}
+
+#[test]
+fn a_closing_announced_right_before_the_stop_is_written_before_the_close() {
+    let mut env = start(|_| {});
+    let (_k, mut ch, _) = env.pair(Permission::Operate);
+    let gw = env.gw.take().unwrap();
+    gw.announce_closing(ClosingReason::Quit, None);
+    // stopped at once, without waiting for the connection's next turn
+    drop(gw);
+    assert_eq!(next_real(&mut ch), json!({"t":"closing","reason":"quit"}));
+    assert_closed(&mut ch);
 }
 
 // --- messages, framing ------------------------------------------------------
