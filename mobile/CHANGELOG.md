@@ -6,6 +6,19 @@ build (`## <version> — <YYYY-MM-DD>`) or an over-the-air update to one
 message its download carries. Items use `### New`, `### Improved` or
 `### Fixed` sections of `- **Title** — text`.
 
+## 0.3.0 · update 4 — 2026-10-19
+
+Settings and paired computers no longer get overwritten, and a failed save or Unpair tells you and lets you retry.
+
+### Fixed
+
+- **Turning on the app lock** — an answer to the notification prompt arriving afterwards no longer
+  turns the lock back off, and a failed older save no longer cancels a newer choice.
+- **Paired computers** — saving or removing computers at the same moment no longer loses one.
+- **Notification choices that could not be saved** — the app shows the error and keeps the old choice
+  instead of showing one that was not saved; the same control can be tried again.
+- **Unpair** — when it fails, the button works again and says what to do.
+
 ## 0.3.0 · update 3 — 2026-10-18
 
 Tapping an alert opens the right pane, and a send that timed out says to check first.

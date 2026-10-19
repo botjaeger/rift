@@ -8,6 +8,25 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.16.0 — 2026-10-19
+
+Rift's helpers can keep running after you quit, with a menu bar icon to show it, and two bugs fixed.
+
+### New
+
+- **Allow background processes** — Settings › General › App. On, Rift's helpers keep running after you
+  quit, so paired phones can open tabs, and (macOS) a Rift icon shows in the menu bar while they do.
+  It replaces *Show menu bar icon* and *Phones can open tabs while Rift is closed*, and is off by
+  default: turn it on to keep the icon. A `remote_when_closed = true` you already had still counts.
+
+### Fixed
+
+- **Programs start at the right size** — a program started from the command line, such as `less`,
+  now reads the size it will run at, so its first screen no longer leaves blank rows at the top and
+  copying in mark mode no longer selects blanks.
+- **A damaged saved date** — a transcript with a corrupt date no longer crashes the history list or
+  the search over past results.
+
 ## 0.15.0 — 2026-10-18
 
 Profiles and a new-tab menu, your own actions, tab groups and a searchable side rail, filtering,
