@@ -8,6 +8,51 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.20.0 — 2026-10-20
+
+Tabs now say where you are and what needs you, in the style you pick, and the toolbar, Remote access
+and Themes settings are easier to use.
+
+### New
+
+- **Tab styles** — choose how tabs show what their panes are doing in Settings › Appearance › Tabs:
+  *Dot* (a small dot by the title, the default), *Underline* (the title underlined in the state's
+  colour) or *Detailed* (a second line that says it in words, on a taller tab bar).
+- **⌘ shows tab numbers** — hold ⌘ for a moment and every tab shows the shortcut that opens it.
+- **Edit toolbar** — click the toolbar preview in Settings › Appearance to arrange its buttons: drag
+  them between Left and Right, add hidden ones, remove one with × or by dropping it outside, then
+  Save. Right-click the toolbar and choose *Rearrange toolbar items* to open it from there.
+
+### Improved
+
+- **Tab titles** — a tab is named after the folder of the pane you are in (or the name you gave it).
+  Two tabs on folders with the same name show their parent folder too, and hovering a tab lists every
+  pane's full path and what it is doing.
+- **One status per tab** — a tab shows the most urgent thing in any of its panes: needs you, failed,
+  working, done, or new output. When it comes from a pane you are not looking at, the mark is hollow
+  or faded, and opening the tab clears done, failed and new output. Agents no longer show twice (their
+  icon plus their own spinner in the title).
+- **Close buttons** — × shows on the tab under the pointer only.
+- **Edit prompt** — laid out like Edit toolbar: chips you are not using on top, your prompt below,
+  a bar showing where a dragged chip will land, arrow keys and Delete to move and remove, Restore
+  default and Save.
+- **Remote access** — when it is off, the page shows only the switch (and your paired phones, so you
+  can revoke one). When it is on: whether phones can reach you on this Wi-Fi and away from home, the
+  pairing code right on the page with a countdown, a choice to let the new phone only watch, and each
+  phone's access and Revoke. Cancelling a code now withdraws it at once.
+- **Themes** — every theme is a small picture of Rift in its colours. Filter Dark or Light, pick one
+  with the keyboard, find it by name in the search, or open the themes folder to add your own.
+- **Dialogs** — while a dialog is open, nothing behind it lights up, shows a tooltip or changes the
+  pointer.
+
+### Fixed
+
+- **Code review on the Settings tab** — it no longer shows the changes of the tab you came from.
+- **⌃R and ⌃T in fish** — they no longer do nothing when your computer is busy.
+- **Subshell offer** — no longer lost when a slow `docker exec … bash` took a moment to start.
+- **New tabs** — no longer marked as having new output by their first prompt.
+- **Paired phones** — no longer appear a second late when you open Remote access.
+
 ## 0.19.0 — 2026-10-19
 
 config.toml is now the one place your settings live: change something in Settings and it shows in the
