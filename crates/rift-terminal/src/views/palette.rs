@@ -1123,7 +1123,7 @@ pub fn render(
     // the modal narrows with the window (16px margin each side)
     let modal_w = MODAL_W.min((w - 32.0).max(160.0));
     let mx = (w - modal_w) / 2.0;
-    let my = crate::views::tabbar::TAB_BAR_H + 54.0;
+    let my = crate::views::tabbar::bar_h() + 54.0;
     let modes_h = if state.mode.takes_text() {
         0.0
     } else {

@@ -183,7 +183,8 @@ is replaced only after *Replace the file?* is confirmed. RTF is not offered.
 - **Blocks start** (`blocks_start`): with the editor at the bottom, blocks
   fill up from right above it (default, Warp's "Pin to the bottom"; after
   `clear` the next command sits there again) or start at the top of the pane.
-- **Prompt chips** (`prompt_chips`, Warp's "Edit prompt"): the context row
+- **Prompt chips** (`prompt_chips`, Warp's "Edit prompt", by mouse or
+  keyboard: Tab, ← →, Delete): the context row
   shows the chosen chips in order — working directory, git branch (↑↓ and
   dirty dot), git diff stats (`3 • +10 −2`: changed files incl. untracked,
   added and removed lines, untracked files' lines as added), the branch's
@@ -868,7 +869,7 @@ Each becomes a `rift://action/new_tab` link (`new_window` with
   2–60).
 - **Bell** (`bell`): `visual` (120 ms full-window flash), `audible`
   (`afplay` / `paplay` / `canberra-gtk-play`), `both`, or `none`. A bell in a
-  background tab also raises its activity dot.
+  background tab also gives it the new-output status.
 - **Dock bounce / urgency** (`request_attention`, off): a bell, or an alert
   for a pane out of view, while no Rift window has keyboard focus bounces
   the Dock icon once (macOS) or sets the window's urgency hint (Linux; the
@@ -879,13 +880,30 @@ Each becomes a `rift://action/new_tab` link (`new_window` with
 ## Tabs, panes, session
 
 - Tabs: create, close, reorder (⌃⇧←/→ or drag: the tab lifts and follows the
-  pointer; Esc puts it back), select by number (⌘1–9, ⌘9 = last), reopen
+  pointer; Esc puts it back), select by number (⌘1–9, ⌘9 = last; hold ⌘
+  alone for 300 ms and each tab shows its number in the ×'s place), reopen
   closed (⇧⌘T restores the tab's cwd, stack of 10).
+- Tab titles and status: a tab is named for its focused pane's folder
+  (`parent/name` when two tabs share the folder name), or the name it was
+  given; the program's own title is its tooltip's. It shows one status, the
+  most urgent of its panes (needs you › failed › working › done › new
+  output), as a ring or dashed when it is another pane's; `tab_style`
+  (Settings › Appearance › Tabs › *Tab style*, picture cards) draws it as a
+  dot, an underline, or a second line in words. The tooltip card lists
+  every pane's path and state.
 - Tab settings (Settings › Appearance › Tabs): ⌘T and + open the new tab at
   the end or right after the active tab (`new_tab_placement`); the × shows
-  on hover (active and hovered tab), always, or never (`tab_close_button`);
+  on the hovered tab, always, or never (`tab_close_button`);
   `tab_bar_with_one_tab = false` hides the lone tab (and the vertical rail)
   until a second tab opens.
+- Toolbar (Warp's configurable toolbar; `toolbar_left` / `toolbar_right`):
+  the file explorer, code review, notifications, command palette and
+  Settings buttons go left of the tabs, at the strip's right end, or off.
+  *Edit toolbar* arranges them (right-click a toolbar button or the empty
+  strip → *Rearrange toolbar items*, or Settings › Appearance › Toolbar
+  buttons): drag between the Left and Right buckets, click a hidden one to
+  add it at the right end, × or drag out to hide one, Tab / ← → / Delete
+  by keyboard; Save writes the config.
 - ⌃Tab order (`tab_switch_order`): the strip's order (default), or `mru`:
   the tabs last used first, per window, with a *Recent tabs* switcher while
   ⌃ is held (release switches, Esc cancels; a quick ⌃Tab toggles the two
@@ -1041,10 +1059,10 @@ Each becomes a `rift://action/new_tab` link (`new_window` with
   JSON read. Oversized or malformed saved transcripts are ignored.
 - **Vertical tabs** (`tab_layout = "vertical"`, Settings → Appearance, or
   "Toggle vertical tabs"): a 220px rail lists every tab with its icon,
-  title, directory and git branch, pane count, sync state, activity dot and
+  title, directory and git branch, pane count, sync state, status and
   color; click selects, × closes, dragging a row up or down reorders. When
   the tabs do not fit, the active one stays visible and `+N above` /
-  `+N more` lines stand in for the rest, marked with the most urgent alert
+  `+N more` lines stand in for the rest, marked with the most urgent status
   among them. A search field at its top (click, or ⇧⌘F `focus_rail_search`)
   filters the rows by title, directory, branch, the command a pane runs or
   last ran, and coding agent (Esc clears it, Enter opens the first match,
@@ -1057,13 +1075,12 @@ Each becomes a `rift://action/new_tab` link (`new_window` with
   git work of its own.
 - **Agent tabs** (Warp's vertical-tab agent badges): a tab running Claude
   Code, Codex, OpenCode or Gemini CLI (recognized from the command line, or
-  from the agent's own notification) shows the agent's mark instead of the
-  spinner, with its state: working, waiting for you (it asked for
-  permission or input and nothing was typed since; pulses unless Reduce
-  motion is on), done (exit 0, or at its own prompt) and error (non-zero
-  exit). Done and error stay until the pane is viewed. A tab of several
-  agent panes shows the most urgent (waiting > error > working > done).
-  Tooltip and screen reader: `Claude Code — waiting for you`.
+  from the agent's own notification) shows its state as the tab's status:
+  working, needs you (it asked for permission or input and nothing was
+  typed since; pulses unless Reduce motion is on), done (exit 0, or at its
+  own prompt) and failed (non-zero exit). Done and failed stay until the
+  pane is viewed. No brand mark: the tooltip names the agent (`Claude Code —
+  waiting for you`), and the screen reader hears the status and the agent.
 - **Worktree identity**: a pane inside a linked git worktree shows
   `<worktree dir> · <branch>` (rail subtitle, strip tooltip); the main
   checkout keeps `directory · branch`. Identity is the repository's common
@@ -1597,26 +1614,30 @@ Off by default. **Settings › Remote access › Allow remote access**
 (`remote_access`) starts the gateway (`rift-terminal remote --managed`, one
 per user, log in `<data dir>/remote/gateway.log`); turning it off stops it
 within about two seconds, and it also exits 30 seconds after the last Rift
-window closes. It listens on `remote_listen` (`0.0.0.0:7878`). The page's
-*Connection* group shows *This network* (the listening addresses) and the
-*Relay* (its round trip while connected, or the whole error, a retry
-countdown and *Try again*, which retries at once). With `mask_secrets` on,
+window closes. It listens on `remote_listen` (`0.0.0.0:7878`). The page
+opens on one card with the switch; while on, it shows *On this Wi-Fi* (the
+listening addresses) and *Away from home* (the relay: its round trip while
+connected, or the whole error, a retry countdown and *Try again*, which
+retries at once). While off, the page shows only the card and the paired
+phones (to revoke one). With `mask_secrets` on,
 every screen, block output and block command the gateway sends is masked as
 on the desktop (also for shells a phone started while no window is open).
 
-- **Pairing.** *Pair a phone* shows a QR code, the `rift-remote://pair?…`
-  link with a *Copy link* button, and a 2-minute countdown (then *Expired —
-  Pair again*). The link works once. *View only* makes the next link pair a
-  device that can watch but not run commands or send keys.
-- **Paired devices** lists each phone with how it is connected (*Connected
+- **Pairing.** *Pair a phone* shows the code on the page: a QR code, the
+  `rift-remote://pair?…` link with *Copy link*, *Cancel* (the code stops
+  working at once), and a 2-minute countdown (then *The code expired* ›
+  *Show a new code*). The link works once. *The new phone can only watch*
+  makes the next link pair a device that can watch but not run commands or
+  send keys (changing it withdraws a shown code).
+- **Paired phones** lists each phone with how it is connected (*Connected
   on this network*, *Connected through the relay*, or *Not connected* with
-  when it was last seen), its platform and pairing date, an *Operate* / *View
-  only* choice (raising a phone to *Operate* asks first; its connections close
+  when it was last seen), its platform and pairing date, a *Can run
+  commands* / *View only* choice (raising a phone to run commands asks first; its connections close
   and reconnect with the new permission within a second, and a lowered
   permission applies at once), and *Revoke*, which asks first ("Revoke
   <name>? It disconnects now and cannot reconnect without pairing again."),
   then closes its connections within a second.
-- **Recent connections** lists the newest 20 connections and failed
+- **Recent connections** (folded away until opened) lists the newest 20 connections and failed
   attempts: device (or *Unknown device*), via LAN or Relay, address, start,
   duration or *connected*, and why it ended (`remote history` shows the
   newest 500). Five show at once; the list scrolls through the rest.
@@ -1628,8 +1649,8 @@ on the desktop (also for shells a phone started while no window is open).
   network). The gateway contacts the relay only while remote access is on,
   and scripted runs (`--script`) skip the default relay
   (`RIFT_NO_DEFAULT_RELAY`, inherited by the gateway they start).
-  Its address and the Cloudflare tunnel sit under *Relay settings…*; its
-  state shows in *Connection*.
+  Its address and the Cloudflare tunnel sit under *Connection settings*;
+  its state shows in the card's *Away from home* tile.
   The relay only forwards encrypted traffic; host one with `rift-terminal
   relay` or `packaging/relay.Dockerfile` (behind a TLS proxy such as Caddy).
   A Tailscale or other private-network address of the computer works

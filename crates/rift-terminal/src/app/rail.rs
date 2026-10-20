@@ -106,8 +106,8 @@ impl App {
     /// A pane row's title: its program's title (masked while
     /// `mask_secrets` is on), else its directory.
     fn pane_row_title(p: &PaneState) -> String {
-        if !p.title.is_empty() {
-            return rift_core::secrets::mask_owned(p.title.clone());
+        if !p.program_title().is_empty() {
+            return rift_core::secrets::mask_owned(p.program_title().to_string());
         }
         p.session
             .cwd
@@ -300,6 +300,7 @@ impl App {
             toggled: Some(self.win.rail.panes),
             selected: false,
             rect: hit(&ClickTarget::RailPanesToggle),
+            disabled: false,
         }];
         for row in &self.win.rail.rows {
             let RailRow::Pane(p) = row else { continue };
@@ -325,6 +326,7 @@ impl App {
                 toggled: None,
                 selected: p.active,
                 rect: hit(&ClickTarget::RailPane(p.id)),
+                disabled: false,
             });
         }
         Some(crate::a11y::RailNode {

@@ -43,7 +43,7 @@ listed alternates.
 | Shortcut | Action name | Effect |
 |---|---|---|
 | ⌘T / ⌃⇧T | `new_tab` | New tab |
-| ⌘1 … ⌘9 | `tab_select_1..9` | Select tab by number (⌘9 = last) |
+| ⌘1 … ⌘9 | `tab_select_1..9` | Select tab by number (⌘9 = last). Hold ⌘ alone for 300 ms and every tab shows its number (its bound chord) in the ×'s place; any key or releasing ⌘ hides them |
 | ⌃⇧1 … ⌃⇧9 | `new_tab_profile_1..9` | New tab with the nth profile of the + menu ([profiles](configuration.md#profiles)) |
 | ⇧⌘} / ⌃Tab | `tab_next` | Next tab (`tab_switch_order = "mru"`: ⌃Tab opens the recent-tabs switcher, see below) |
 | ⇧⌘{ / ⌃⇧Tab | `tab_prev` | Previous tab |

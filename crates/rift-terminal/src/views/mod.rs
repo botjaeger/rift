@@ -1,3 +1,4 @@
+pub mod arranger;
 pub mod block_filter;
 pub mod box_drawing;
 pub mod chip_menu;
@@ -29,6 +30,7 @@ pub mod subshell;
 pub mod tab_switcher;
 pub mod tabbar;
 pub mod terminal;
+pub mod toolbar_editor;
 pub mod tooltip;
 pub mod viewer;
 pub mod welcome;

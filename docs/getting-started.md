@@ -189,14 +189,16 @@ send-text.
 
 1. Settings → *Remote access* → turn on *Allow remote access*.
 2. *Pair a phone*, then scan the QR code with the Rift app (or the phone's
-   camera). The code works once, for 2 minutes.
+   camera). The code works once, for 2 minutes; *Cancel* withdraws it. Tick
+   *The new phone can only watch* first for a phone that should not run
+   commands.
 3. On the phone, pick a host, a tab and a pane: its blocks follow live. Type a
    command and confirm to run it at the prompt, or use the key row (^C, esc,
    tab, arrows) to talk to a running program.
 
 On the same network the phone connects directly. Away from it, it connects
 through Rift's relay, with nothing to set up. To use your own relay instead,
-put its `wss://` address under *Relay settings…* › *Relay* (host one with `rift-terminal relay` or
+put its `wss://` address under *Connection settings* › *Relay address* (host one with `rift-terminal relay` or
 `packaging/relay.Dockerfile`) and pair again so the link includes it; to keep
 phones on your network only, clear the field. *Use a Cloudflare tunnel
 instead* replaces the relay with a free tunnel from this computer (Settings
@@ -204,7 +206,7 @@ offers to install `cloudflared`; phones pair again after each restart), and a
 private network such as Tailscale works too. A relay never sees your
 terminal: it only forwards encrypted traffic. While a phone is connected, the tab bar
 shows a *Remote* chip. Set a phone to *View only*, check *Recent
-connections*, or revoke a phone under *Paired devices*; turning remote
+connections*, or revoke a phone under *Paired phones*; turning remote
 access off disconnects every phone. In the app, Settings › Security can
 require Face ID or a fingerprint.
 

@@ -133,6 +133,11 @@ pub struct WidgetState {
     keys: String,
     phase: Phase,
     result: Option<(String, String)>,
+    /// A prompt ended the last hand-off before its wrapper answered. The
+    /// shell can repaint its prompt on the trigger's bytes before its
+    /// wrapper loads (fish does, and under load the repaint wins), so that
+    /// wrapper's own `Loaded` still resumes the hand-off.
+    unanswered: bool,
 }
 
 impl WidgetState {
@@ -150,12 +155,16 @@ impl WidgetState {
     pub fn begin(&mut self) {
         self.phase = Phase::Sent;
         self.result = None;
+        self.unanswered = false;
     }
 
     pub fn on_msg(&mut self, msg: WidgetMsg) {
         match msg {
             WidgetMsg::Keys(keys) => self.keys = keys,
-            WidgetMsg::Loaded if self.phase == Phase::Sent => self.phase = Phase::Running,
+            WidgetMsg::Loaded if self.phase == Phase::Sent || self.unanswered => {
+                self.phase = Phase::Running;
+                self.unanswered = false;
+            }
             WidgetMsg::Loaded => {}
             // only the answer to a hand-off: a stale report (one that
             // comes after its command started) or another program's
@@ -169,18 +178,21 @@ impl WidgetState {
         }
     }
 
-    /// OSC 133;A. Before the wrapper answered, a new prompt means it never
-    /// will (no hook, or ⌃C); a widget's own prompt repaint may emit one
-    /// while it runs.
+    /// OSC 133;A. Before the wrapper answered, a new prompt may mean it
+    /// never will (no hook, or ⌃C): the keys go back to the editor, but the
+    /// wrapper's own `Loaded` still resumes it (`unanswered`). A widget's
+    /// own prompt repaint may emit one while it runs.
     pub fn on_prompt_start(&mut self) {
         if self.phase == Phase::Sent {
             self.phase = Phase::Idle;
+            self.unanswered = true;
         }
     }
 
     /// OSC 133;C: the widget ran a command itself.
     pub fn on_output_start(&mut self) {
         self.phase = Phase::Idle;
+        self.unanswered = false;
     }
 
     /// The line a finished hand-off left, split at its cursor.
@@ -251,6 +263,30 @@ mod tests {
         // never answered: the next prompt ends it
         s.begin();
         s.on_prompt_start();
+        assert!(!s.busy());
+        // the shell repainted its prompt on the trigger before its wrapper
+        // loaded (fish, under load): the wrapper's answer still lands
+        s.begin();
+        s.on_prompt_start();
+        s.on_msg(WidgetMsg::Loaded);
+        assert!(s.busy());
+        s.on_prompt_start(); // the widget's own repaint
+        s.on_msg(WidgetMsg::Line {
+            before: "aFILE".into(),
+            after: " b".into(),
+        });
+        assert_eq!(s.take_result(), Some(("aFILE".into(), " b".into())));
+        // but a stray line after an unanswered hand-off is still dropped
+        s.begin();
+        s.on_prompt_start();
+        s.on_msg(WidgetMsg::Line {
+            before: "rm -rf".into(),
+            after: String::new(),
+        });
+        assert_eq!(s.take_result(), None);
+        // and a command that started since ends what was left of it
+        s.on_output_start();
+        s.on_msg(WidgetMsg::Loaded);
         assert!(!s.busy());
         // the widget ran a command: its late report is dropped
         s.begin();

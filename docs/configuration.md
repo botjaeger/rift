@@ -171,10 +171,14 @@ save_transcripts = false          # also save finished blocks' output and replay
                                   # (marked "restored") on relaunch; off = deleted
                                   # (with mask_secrets on, saved masked)
 tab_layout    = "horizontal"      # horizontal (tabs on top) | vertical (side rail)
-tab_close_button = "hover"        # hover (× on the active and hovered tab) | always
-                                  # (every tab without an alert/activity dot) | never
-                                  # (⌘W, tab menu, palette still close); the vertical
-                                  # rail always shows it unless never
+tab_style     = "dot"             # dot | underline | detailed: how a tab on top shows
+                                  # its status — a dot before the title, the title
+                                  # underlined in the status colour, or a second line
+                                  # in words (a 44 px strip). The title is the tab's
+                                  # name, else its focused pane's folder
+tab_close_button = "hover"        # hover (× on the hovered tab only) | always (every
+                                  # tab) | never (⌘W, tab menu, palette still close);
+                                  # the vertical rail always shows it unless never
 tab_close_side = "right"          # right | left (macOS style): the × end of a tab on
                                   # top (the vertical rail keeps it right)
 tab_bar       = "always"          # always | hide_fullscreen | on_hover: a hidden strip

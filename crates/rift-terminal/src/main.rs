@@ -31,6 +31,7 @@ mod state;
 #[cfg(target_os = "macos")]
 mod status_item;
 mod subshell;
+mod tab_status;
 #[cfg(target_os = "macos")]
 mod traffic_lights;
 #[cfg(target_os = "macos")]

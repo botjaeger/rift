@@ -31,7 +31,7 @@ use crate::views::palette::{self, MatchedItem, PaletteAction, PaletteState};
 use crate::views::review_panel::{ReviewHit, ReviewPanelState};
 use crate::views::search::{self, SearchState};
 use crate::views::settings::{self, SettingsState};
-use crate::views::tabbar::{self, TAB_BAR_H};
+use crate::views::tabbar;
 use crate::views::terminal::{self, GridLayout};
 use crate::views::viewer::{ViewerHit, ViewerState};
 use crate::views::whats_new::{WhatsNewHits, WhatsNewState};
@@ -532,6 +532,9 @@ const OUTPUT_FRAME: Duration = Duration::from_micros(8333);
 /// Find recounts a pane's matches at most this often while it prints.
 const SEARCH_LIVE: Duration = Duration::from_millis(100);
 const BLINK_INTERVAL: Duration = Duration::from_millis(550);
+/// ⌘ held alone this long shows the tabs' numbers (a quick ⌘C never
+/// flashes them).
+const HINT_DELAY: Duration = Duration::from_millis(300);
 const BELL_FLASH: Duration = Duration::from_millis(120);
 /// The audible bell plays at most once per this gap.
 const BELL_SOUND_GAP: Duration = Duration::from_millis(150);
@@ -892,6 +895,10 @@ struct WindowState {
     /// "Edit prompt" (Settings › prompt chips) and its last layout.
     prompt_editor: Option<crate::views::prompt_editor::PromptEditor>,
     prompt_editor_layout: crate::views::prompt_editor::Layout,
+    /// "Edit toolbar" (Settings › Toolbar buttons, the strip's "Rearrange
+    /// toolbar items") and its last layout.
+    toolbar_editor: Option<crate::views::toolbar_editor::ToolbarEditor>,
+    toolbar_editor_layout: crate::views::toolbar_editor::Layout,
     scroll_accum: f32,
     /// cwds of recently closed tabs (⇧⌘T reopens, newest last).
     closed_tabs: Vec<Option<std::path::PathBuf>>,
@@ -1051,6 +1058,15 @@ struct WindowState {
     rail: rail::RailUi,
     /// The rail's rows last frame, described for `dump`.
     rail_dump: Vec<String>,
+    /// The strip's tabs last frame (title, status, hint), for `dump`.
+    strip_dump: Vec<String>,
+    /// Since when the modifiers of `tab_select_1` (⌘) are held alone with no
+    /// key pressed: after `HINT_DELAY` the tabs show their numbers.
+    hint_hold: Option<Instant>,
+    /// A key was pressed while they are held: no numbers until released.
+    hint_spoiled: bool,
+    /// The last frame drew the numbers.
+    hints_drawn: bool,
     /// Rename text still fully selected (first keystroke replaces it).
     rename_fresh: bool,
     /// Search overlay edits a per-block output filter instead of find.
@@ -1189,7 +1205,7 @@ fn welcome_entries(keymap: &rift_core::Keymap) -> Vec<crate::views::welcome::Ent
 fn place_traffic_lights(window: &Window) {
     crate::traffic_lights::place(
         window,
-        TAB_BAR_H as f64,
+        tabbar::bar_h() as f64,
         tabbar::TRAFFIC_X as f64,
         tabbar::TRAFFIC_GAP as f64,
     );
@@ -1915,6 +1931,8 @@ impl WindowState {
             chip_menu_rows: Vec::new(),
             prompt_editor: None,
             prompt_editor_layout: Default::default(),
+            toolbar_editor: None,
+            toolbar_editor_layout: Default::default(),
             scroll_accum: 0.0,
             closed_tabs: Vec::new(),
             copied: None,
@@ -1998,6 +2016,10 @@ impl WindowState {
             groups: Default::default(),
             rail: Default::default(),
             rail_dump: Vec::new(),
+            strip_dump: Vec::new(),
+            hint_hold: None,
+            hint_spoiled: false,
+            hints_drawn: false,
             filter_editing: false,
             tab_drag: None,
             history: Default::default(),
@@ -2159,6 +2181,18 @@ impl App {
             }
         }
         rift_pty::set_default_colors(colors);
+        // the detailed tab style's strip is taller: the traffic lights stay
+        // centred on it and every window lays out again
+        let horizontal = self.config.tab_layout == rift_core::TabLayout::Horizontal;
+        if tabbar::set_style(self.config.tab_style, horizontal) {
+            self.each_window(|app| {
+                if let Some(w) = &app.win.window {
+                    #[cfg(target_os = "macos")]
+                    place_traffic_lights(w);
+                    w.request_redraw();
+                }
+            });
+        }
         self.apply_secret_masking();
         let icon = self.config.app_icon;
         if self
@@ -3448,12 +3482,7 @@ impl App {
                 return;
             }
             MenuAction::SendToAgent => return self.pick_send_target(),
-            MenuAction::RearrangeToolbar => {
-                self.win
-                    .settings
-                    .open_page(crate::views::settings::Page::Appearance);
-                self.win.settings.query = "toolbar".into();
-            }
+            MenuAction::RearrangeToolbar => self.open_toolbar_editor(),
             MenuAction::RenameTab(i) => {
                 self.start_rename(i);
                 return;
@@ -4209,6 +4238,18 @@ impl App {
                         .any(|(r, _)| inside(r)),
                 )
             })
+        } else if let Some(ed) = &self.win.toolbar_editor {
+            Some(if ed.drag.as_ref().is_some_and(|d| d.live) {
+                CursorIcon::Grabbing
+            } else {
+                hand(
+                    self.win
+                        .toolbar_editor_layout
+                        .hits
+                        .iter()
+                        .any(|(r, _)| inside(r)),
+                )
+            })
         } else if self.win.chip_menu.is_some() {
             Some(hand(self.win.chip_menu_rows.iter().any(|(r, _)| inside(r))))
         } else if self.win.context_menu.open {
@@ -4256,6 +4297,7 @@ impl App {
                     | ClickTarget::TabProfiles
                     | ClickTarget::Chip(..)
                     | ClickTarget::SettingsEditPrompt
+                    | ClickTarget::SettingsEditToolbar
                     | ClickTarget::PaneMenu(_)
                     | ClickTarget::PaneSplit(_)
                     | ClickTarget::Welcome(_)
@@ -4279,6 +4321,8 @@ impl App {
                     | ClickTarget::RemoteChip
                     | ClickTarget::RemotePair
                     | ClickTarget::RemoteViewOnly
+                    | ClickTarget::RemotePairCancel
+                    | ClickTarget::RemoteHistory
                     | ClickTarget::RemoteCopyLink
                     | ClickTarget::RemoteInstallTunnel
                     | ClickTarget::RemoteRelayRetry
@@ -4303,6 +4347,8 @@ impl App {
                     | ClickTarget::SettingsCycle(_)
                     | ClickTarget::SettingsSlider(_)
                     | ClickTarget::SettingsTheme(_)
+                    | ClickTarget::SettingsThemeFilter(_)
+                    | ClickTarget::SettingsOpenThemes
                     | ClickTarget::SettingsKeybind(_)
                     | ClickTarget::SettingsKeybindReset(_)
                     | ClickTarget::Profile(..)
@@ -5238,6 +5284,194 @@ impl App {
         crate::agent_status::tab_status(t.panes.iter().map(|p| p.agent_status))
     }
 
+    /// Tab `t`'s one status (`tab_status`): its panes' agents, running
+    /// commands, unread notifications and output, the focused pane winning
+    /// a tie.
+    fn tab_status(&self, t: &TabState) -> Option<crate::tab_status::TabStatus> {
+        let focused = t
+            .panes
+            .iter()
+            .position(|p| p.session.id == t.active_pane)
+            .unwrap_or(0);
+        crate::tab_status::tab_status(&self.pane_statuses(t), focused)
+    }
+
+    /// What each pane of tab `t` reports (`tab_status::pane_status`), in
+    /// `t.panes` order.
+    fn pane_statuses(&self, t: &TabState) -> Vec<Option<crate::tab_status::Status>> {
+        use crate::tab_status::{PaneSignals, pane_status};
+        let unread = |id: PaneId, kinds: &[AttentionKind]| {
+            self.attention
+                .iter()
+                .any(|a| !a.read && a.pane == id && kinds.contains(&a.kind))
+        };
+        t.panes
+            .iter()
+            .map(|p| {
+                let id = p.session.id;
+                pane_status(&PaneSignals {
+                    agent: p.agent_status.map(|s| s.state),
+                    running: p.running(),
+                    request: unread(id, &[AttentionKind::Request]),
+                    failed: unread(id, &[AttentionKind::Failed]),
+                    finished: unread(id, &[AttentionKind::Finished]),
+                    notified: unread(
+                        id,
+                        &[
+                            AttentionKind::Notify,
+                            AttentionKind::Bell,
+                            AttentionKind::App,
+                        ],
+                    ),
+                    activity: p.activity,
+                    viewed: self.pane_in_view(id),
+                })
+            })
+            .collect()
+    }
+
+    /// Tab `i`'s tooltip card: its shown title over every pane's full path
+    /// and state (`· focused` on a split tab), the program's own title (an
+    /// agent's session name, without its status glyph), a linked worktree,
+    /// and the shortcut.
+    fn tab_card(&self, i: usize, titles: &[String]) -> Option<(String, String)> {
+        let tab = self.win.tabs.get(i)?;
+        let title = titles.get(i).cloned()?;
+        let states = self.pane_statuses(tab);
+        let split = tab.panes.len() > 1;
+        let mut lines = Vec::new();
+        for (p, st) in tab.panes.iter().zip(&states) {
+            let path = p
+                .session
+                .cwd
+                .lock()
+                .unwrap()
+                .as_deref()
+                .map(editor::shorten_home)
+                .unwrap_or_else(|| "shell".into());
+            let mut line = path;
+            if let Some(st) = st {
+                line.push_str(&format!(" · {}", st.words()));
+            }
+            if split && p.session.id == tab.active_pane {
+                line.push_str(" · focused");
+            }
+            lines.push(line);
+            let program = rift_core::notifications::agent_session_title(&p.title);
+            match (p.agent_status, program.is_empty()) {
+                (Some(a), true) => lines.push(format!("  {}", a.describe())),
+                (Some(a), false) => lines.push(format!("  {}: {program}", a.describe())),
+                (None, false) => lines.push(format!("  {program}")),
+                (None, true) => {}
+            }
+        }
+        if let Some(wt) = Self::tab_worktree(tab)
+            && let Some(branch) = tab.active().and_then(|p| Some(&p.git.as_ref()?.branch))
+        {
+            lines.push(format!("Worktree {} · {branch}", wt.name));
+        }
+        let shown = self.visible_tabs();
+        let place = shown.iter().position(|&j| j == i);
+        let number = place.and_then(|k| {
+            crate::tab_status::hint_numbers(shown.len())
+                .get(k)
+                .copied()
+                .flatten()
+        });
+        if let Some(keys) = number.and_then(|n| self.tip_keys(&format!("tab_select_{n}"))) {
+            lines.push(keys);
+        }
+        let body = rift_core::secrets::mask_owned(lines.join("\n"));
+        Some((rift_core::secrets::mask_owned(title), body))
+    }
+
+    /// Every tab's shown title (`tab_status::titles`): its name, or its
+    /// focused pane's folder with the parent when two share the name.
+    fn tab_titles(&self) -> Vec<String> {
+        let cwds: Vec<Option<String>> = self.win.tabs.iter().map(TabState::focused_cwd).collect();
+        let inputs: Vec<crate::tab_status::TitleInput> = self
+            .win
+            .tabs
+            .iter()
+            .zip(&cwds)
+            .map(|(t, cwd)| crate::tab_status::TitleInput {
+                custom: t.custom_name(),
+                cwd: cwd.as_deref(),
+                fallback: if t.title.is_empty() {
+                    "shell"
+                } else {
+                    t.title.as_str()
+                },
+            })
+            .collect();
+        crate::tab_status::titles(&inputs)
+    }
+
+    /// The ⌘-numbers the tabs show this frame (none until the modifiers of
+    /// `tab_select_1` have been held alone for `HINT_DELAY`): tabs 1–8 by
+    /// place among the shown tabs, the last one `tab_select_9`'s, each as
+    /// its chord's key caps; an unbound action shows nothing.
+    fn tab_hints(&self) -> Vec<Option<String>> {
+        let mut out = vec![None; self.win.tabs.len()];
+        if !self.hints_due() {
+            return out;
+        }
+        let shown = self.visible_tabs();
+        let numbers = crate::tab_status::hint_numbers(shown.len());
+        for (&i, n) in shown.iter().zip(numbers) {
+            if let Some(n) = n
+                && let Some(b) = self.keymap.preferred(&format!("tab_select_{n}"))
+                && let Some(slot) = out.get_mut(i)
+            {
+                *slot = Some(b.chips().concat());
+            }
+        }
+        out
+    }
+
+    /// The tab numbers show: the modifiers held long enough, in the focused
+    /// window.
+    fn hints_due(&self) -> bool {
+        self.win.focused
+            && self
+                .win
+                .hint_hold
+                .is_some_and(|since| since.elapsed() >= HINT_DELAY)
+    }
+
+    /// Follow the held modifiers for the tab numbers: exactly those of
+    /// `tab_select_1` start the wait; any other set ends it and lifts a
+    /// pressed key's veto.
+    fn track_hint_hold(&mut self) {
+        let m = self.win.modifiers;
+        let held = (m.control_key(), m.shift_key(), m.alt_key(), m.super_key());
+        let wanted = self
+            .keymap
+            .preferred("tab_select_1")
+            .map(|b| (b.ctrl, b.shift, b.alt, b.cmd));
+        let on = held != (false, false, false, false) && wanted == Some(held);
+        if !on {
+            self.win.hint_spoiled = false;
+            self.win.hint_hold = None;
+        } else if !self.win.hint_spoiled && self.win.hint_hold.is_none() {
+            self.win.hint_hold = Some(Instant::now());
+        }
+    }
+
+    /// A key (or chord) was pressed: no tab numbers until the modifiers are
+    /// released.
+    fn spoil_hints(&mut self) {
+        if self.win.hint_hold.is_some() || self.win.hints_drawn {
+            self.win.hint_hold = None;
+            self.win.hint_spoiled = true;
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
+        } else if self.win.modifiers != ModifiersState::empty() {
+            self.win.hint_spoiled = true;
+        }
+    }
+
     /// The linked worktree of tab `t`'s focused pane (local panes only: a
     /// remote pane's git state is cleared).
     fn tab_worktree(t: &TabState) -> Option<&rift_core::git::Worktree> {
@@ -6118,7 +6352,7 @@ impl App {
         };
         self.win.active = ti;
         let tab = &mut self.win.tabs[ti];
-        tab.activity = false;
+        tab.clear_activity();
         tab.active_pane = a.pane;
         if tab.zoomed.is_some() {
             tab.zoomed = Some(a.pane);
@@ -6856,14 +7090,14 @@ impl App {
                 self.win.settings.open = false;
                 if i < self.win.tabs.len() {
                     self.win.active = i;
-                    self.win.tabs[i].activity = false;
+                    self.win.tabs[i].clear_activity();
                 }
             }
             PaletteAction::FocusPane(ti, pane) => {
                 self.win.settings.open = false;
                 if let Some(tab) = self.win.tabs.get_mut(ti) {
                     self.win.active = ti;
-                    tab.activity = false;
+                    tab.clear_activity();
                     if tab.pane(pane).is_some() {
                         tab.active_pane = pane;
                         if tab.zoomed.is_some() {
@@ -6878,7 +7112,7 @@ impl App {
                     && tab.pane(pane).is_some()
                 {
                     self.win.active = ti;
-                    tab.activity = false;
+                    tab.clear_activity();
                     tab.active_pane = pane;
                     if let Some(p) = tab.pane_mut(pane) {
                         p.selected_block = Some(block);
@@ -9177,7 +9411,6 @@ impl App {
         // the focused window
         let hollow_unfocused = self.config.cursor_hollow_unfocused;
         let window_focused = self.win.focused;
-        let mouse = self.win.mouse;
         let prompt_mode = self.config.prompt;
         let input_top = self.config.input_position == rift_core::InputPosition::Top;
         let autosuggest = self.config.autosuggestions && !self.win.history.open;
@@ -9195,15 +9428,20 @@ impl App {
         let (toolbar_left, toolbar_right) = self.config.toolbar();
         let panel_buttons = tabbar::PanelButtons {
             explorer_open: self.win.explorer.open,
-            // lit only while the panel is actually on screen
-            review_open: self.review_maximized()
-                || self.win.review.open && self.panel_widths(self.logical_size().0).1 > 0.0,
-            diff: self.win.review.model().map(|m| {
+            // lit only while the panel is actually on screen (never on the
+            // Settings tab, which hides it)
+            review_open: !settings_open
+                && (self.review_maximized()
+                    || self.win.review.open && self.panel_widths(self.logical_size().0).1 > 0.0),
+            // the Settings tab has no repository: no counts carried over
+            // from the tab before it
+            diff: self.win.review.model().filter(|_| !settings_open).map(|m| {
                 m.staged
                     .iter()
                     .chain(&m.unstaged)
                     .fold((0, 0), |(a, d), f| (a + f.added, d + f.removed))
             }),
+            review_unavailable: settings_open,
             notifications_open: self.win.notifications.open,
             unread: self.unread_attention(),
             update: self.update_chip().is_some(),
@@ -9305,97 +9543,98 @@ impl App {
         // the active tab is never folded away; refused input says so once
         self.reveal_active_tab();
         self.poll_refused_input();
-        // a waiting agent's dot pulses, unless the system reduces motion; a
-        // working one's badge spins
-        let agent_states: Vec<_> = self
-            .win
-            .tabs
-            .iter()
-            .filter_map(|t| Self::tab_agent(t).map(|a| a.state))
-            .collect();
-        use crate::agent_status::AgentState;
-        let pulsing =
-            agent_states.contains(&AgentState::Waiting) && !crate::dropdown::motion_reduced();
-        let agents_animate = pulsing || agent_states.contains(&AgentState::Working);
+        // every tab's one status (`tab_status`): a needs-you dot pulses,
+        // unless the system reduces motion; working spins or sweeps
+        let statuses: Vec<Option<crate::tab_status::TabStatus>> =
+            self.win.tabs.iter().map(|t| self.tab_status(t)).collect();
+        use crate::tab_status::Status;
+        let has = |s: Status| statuses.iter().flatten().any(|t| t.status == s);
+        let pulsing = has(Status::NeedsYou) && !crate::dropdown::motion_reduced();
+        let agents_animate = pulsing || has(Status::Working);
         let pulse = if pulsing {
             let t = crate::views::glyphs::anim_secs();
             0.5 + 0.5 * (t * std::f32::consts::TAU / 1.4).cos()
         } else {
             1.0
         };
+        let titles = self.tab_titles();
+        let hints = self.tab_hints();
+        self.win.hints_drawn = self.hints_due();
         let tab_infos: Vec<tabbar::TabInfo> = self
             .win
             .tabs
             .iter()
             .enumerate()
-            .map(|(i, t)| tabbar::TabInfo {
-                // the strip's and the rail's titles: secrets masked
-                title: rift_core::secrets::mask_owned(t.display_title()),
-                panes: t.root.leaves().len(),
-                activity: t.activity,
-                alert: self
-                    .attention
-                    .iter()
-                    .rev()
-                    .find(|a| !a.read && t.pane(a.pane).is_some())
-                    .map(|a| a.kind),
-                color: self.shown_tab_color(t).map(|c| c.resolve(&theme)),
-                sync: t.sync_inputs && t.is_split(),
-                editing: self
-                    .win
-                    .rename
-                    .as_ref()
-                    .filter(|(ri, _)| *ri == i)
-                    .map(|(_, s)| s.clone()),
-                editing_selected: self.win.rename_fresh,
-                subtitle: t
-                    .active()
-                    .map(|p| {
-                        let cwd = p
-                            .session
-                            .cwd
-                            .lock()
-                            .unwrap()
-                            .as_deref()
-                            .map(editor::shorten_home)
-                            .unwrap_or_default();
-                        match &p.git {
-                            // a linked worktree: which one, and its branch
-                            Some(g) => match &g.worktree {
-                                Some(wt) => format!("{} · {}", wt.name, g.branch),
-                                None => format!("{cwd} · {}", g.branch),
-                            },
-                            None => cwd,
-                        }
-                    })
-                    .unwrap_or_default(),
-                settings: false,
-                running: t.panes.iter().any(PaneState::running),
-                progress: crate::progress::of_panes(&t.panes, self.config.show_progress),
-                agent: Self::tab_agent(t).map(|status| tabbar::TabAgent {
+            .map(|(i, t)| {
+                let status = statuses[i];
+                let title = titles[i].clone();
+                let cwd = t.focused_cwd();
+                // the detailed style's idle line: where the folder lives (the
+                // whole path under a name the tab was given)
+                let idle_line = match (t.custom_name(), cwd.as_deref()) {
+                    (Some(_), Some(c)) => c.to_string(),
+                    (None, Some(c)) => crate::tab_status::rest_of_path(c, &title),
+                    _ => String::new(),
+                };
+                let status_pane = status
+                    .filter(|s| !s.own)
+                    .and_then(|s| t.panes.get(s.pane))
+                    .and_then(|p| p.session.cwd.lock().unwrap().clone())
+                    .map(|c| crate::tab_status::folder(&editor::shorten_home(&c)).to_string())
+                    .unwrap_or_default();
+                tabbar::TabInfo {
+                    // the strip's and the rail's titles: secrets masked
+                    title: rift_core::secrets::mask_owned(title),
+                    panes: t.root.leaves().len(),
                     status,
                     pulse,
-                    scale,
-                }),
-                marks: self.tab_marks(i, &theme),
+                    idle_line: rift_core::secrets::mask_owned(idle_line),
+                    status_pane: rift_core::secrets::mask_owned(status_pane),
+                    hint: hints[i].clone(),
+                    color: self.shown_tab_color(t).map(|c| c.resolve(&theme)),
+                    sync: t.sync_inputs && t.is_split(),
+                    editing: self
+                        .win
+                        .rename
+                        .as_ref()
+                        .filter(|(ri, _)| *ri == i)
+                        .map(|(_, s)| s.clone()),
+                    editing_selected: self.win.rename_fresh,
+                    subtitle: t
+                        .active()
+                        .map(|p| {
+                            let cwd = p
+                                .session
+                                .cwd
+                                .lock()
+                                .unwrap()
+                                .as_deref()
+                                .map(editor::shorten_home)
+                                .unwrap_or_default();
+                            match &p.git {
+                                // a linked worktree: which one, and its branch
+                                Some(g) => match &g.worktree {
+                                    Some(wt) => format!("{} · {}", wt.name, g.branch),
+                                    None => format!("{cwd} · {}", g.branch),
+                                },
+                                None => cwd,
+                            }
+                        })
+                        .unwrap_or_default(),
+                    settings: false,
+                    progress: crate::progress::of_panes(&t.panes, self.config.show_progress),
+                    marks: self.tab_marks(i, &theme),
+                }
             })
             .chain(self.win.settings.tab.then(|| tabbar::TabInfo {
-                title: "Settings".into(),
                 panes: 0,
-                activity: false,
-                alert: None,
-                color: None,
-                sync: false,
-                editing: None,
-                editing_selected: false,
+                idle_line: self.win.settings.page.label().into(),
                 subtitle: self.win.settings.page.label().into(),
                 settings: true,
-                running: false,
-                progress: None,
-                agent: None,
-                marks: Default::default(),
+                ..tabbar::TabInfo::plain("Settings")
             }))
             .collect();
+        self.win.strip_dump = tab_infos.iter().map(tabbar::describe).collect();
         // the strip's lit tab: the Settings tab (last) while it shows
         let strip_active = if self.win.settings.open && self.win.settings.tab {
             self.win.tabs.len()
@@ -9423,6 +9662,7 @@ impl App {
         let (bar, strip_h, strip_overlay) = (self.bar_h(), self.strip_h(), self.strip_overlay());
         let close_button = self.config.tab_close_button;
         let close_left = self.config.tab_close_side == rift_core::TabCloseSide::Left;
+        let tab_style = self.config.tab_style;
         let pane_dim = self.config.inactive_pane_dim();
         let sticky_headers = self.config.sticky_command_header;
         let spaced_blocks = self.config.block_spacing == rift_core::BlockSpacing::Normal;
@@ -9432,12 +9672,11 @@ impl App {
         // `mask_secrets`: the patterns in force this frame
         let masker = rift_core::secrets::active();
         self.win.dimmed_panes = 0;
-        // chrome hover follows the pointer unless a modal surface covers it
-        let chrome_mouse = (!self.win.palette.open
-            && self.win.confirm.is_none()
-            && !self.win.whats_new.open
-            && !self.win.compare.open)
-            .then_some(self.win.mouse);
+        // chrome and pane hover follow the pointer unless a modal surface
+        // covers them (`modal_open`)
+        let chrome_mouse = (!self.modal_open()).then_some(self.win.mouse);
+        // the same for views that take a position: off every rect
+        let pane_mouse = chrome_mouse.unwrap_or((f32::NAN, f32::NAN));
         // a tab dragged past the slop floats under the pointer
         let lifted_tab = self
             .win
@@ -9560,6 +9799,7 @@ impl App {
                 None,
                 close_button,
                 close_left,
+                tab_style,
                 &mut hits,
             );
             crate::views::rail::render(
@@ -9598,18 +9838,19 @@ impl App {
                 lifted_tab,
                 close_button,
                 close_left,
+                tab_style,
                 &mut hits,
             );
             let l4 = scene.layer(4);
             l4.shadow(
                 [0.0, 0.0],
-                [w, TAB_BAR_H],
+                [w, tabbar::bar_h()],
                 rift_core::Color::BLACK.with_alpha(0.45),
                 0.0,
                 12.0,
             );
             // opaque under a translucent window: the panes never show through
-            l4.rect([0.0, 0.0], [w, TAB_BAR_H], theme.bg_chrome, 0.0);
+            l4.rect([0.0, 0.0], [w, tabbar::bar_h()], theme.bg_chrome, 0.0);
             l4.quads.extend(bar_layer.quads);
             l4.texts.extend(bar_layer.texts);
         } else if bar > 0.0 {
@@ -9627,6 +9868,7 @@ impl App {
                 lifted_tab,
                 close_button,
                 close_left,
+                tab_style,
                 &mut hits,
             );
         }
@@ -9837,7 +10079,7 @@ impl App {
                     text_blink_on,
                     // with the input at the top, blocks start under it
                     bottom_up,
-                    mouse: Some(mouse),
+                    mouse: chrome_mouse,
                     copied: self
                         .win
                         .copied
@@ -9901,7 +10143,7 @@ impl App {
                     0.0,
                 );
                 // title bar: the program's title, else the directory
-                let title = if pane.title.is_empty() {
+                let title = if pane.program_title().is_empty() {
                     pane.session
                         .cwd
                         .lock()
@@ -9910,7 +10152,7 @@ impl App {
                         .map(editor::shorten_home)
                         .unwrap_or_else(|| profiles::program_name(pane, &shell_label))
                 } else {
-                    pane.title.clone()
+                    pane.program_title().to_string()
                 };
                 crate::views::pane_header::render(
                     scene.layer(1),
@@ -9998,7 +10240,7 @@ impl App {
                 ],
                 pane.view_offset,
                 scrollbar_mode,
-                mouse,
+                pane_mouse,
             ) {
                 scroll_bar::push_hit(&mut hits, hit, pane.scrollbar.track, pr.id);
             }
@@ -10368,7 +10610,7 @@ impl App {
                     pr.rect,
                     code,
                     &close_keys,
-                    Some(mouse),
+                    chrome_mouse,
                 );
                 let front: Vec<Hit> = parts
                     .into_iter()
@@ -10387,7 +10629,7 @@ impl App {
                     &theme,
                     pr.rect,
                     subshell::enable_keys(),
-                    Some(mouse),
+                    chrome_mouse,
                 );
                 // above the rows' own targets
                 let front: Vec<Hit> = parts
@@ -10402,10 +10644,10 @@ impl App {
             if let Some((rect, _)) = jump_bottom {
                 // over the rows' text (layer 2), like the sticky header
                 let l2 = scene.layer(2);
-                let hover = mouse.0 >= rect[0]
-                    && mouse.0 < rect[0] + rect[2]
-                    && mouse.1 >= rect[1]
-                    && mouse.1 < rect[1] + rect[3];
+                let hover = pane_mouse.0 >= rect[0]
+                    && pane_mouse.0 < rect[0] + rect[2]
+                    && pane_mouse.1 >= rect[1]
+                    && pane_mouse.1 < rect[1] + rect[3];
                 let c = [rect[0] + rect[2] / 2.0, rect[1] + rect[3] / 2.0];
                 // a hover rings it in the accent
                 l2.circle(
@@ -10437,8 +10679,13 @@ impl App {
                 sticky_block.filter(|_| is_active_pane && sticky_headers && !followed_live);
             if sticky_shown.is_some() && pane.sticky_minimized {
                 // minimized (`toggle_sticky_header`): a small tab restores it
-                let rect =
-                    sticky::render_minimized(scene.layer(2), &theme, view.right, view.y, mouse);
+                let rect = sticky::render_minimized(
+                    scene.layer(2),
+                    &theme,
+                    view.right,
+                    view.y,
+                    pane_mouse,
+                );
                 hits.push(Hit {
                     rect,
                     target: ClickTarget::StickyRestore(pr.id),
@@ -10505,6 +10752,11 @@ impl App {
         } else {
             Vec::new()
         };
+        // under a modal the review panel lights no row or hunk toolbar
+        let review_pointer = self.win.review.pointer;
+        if chrome_mouse.is_none() {
+            self.win.review.pointer = None;
+        }
         self.win.review_hits =
             if self.win.review.open && self.win.review.maximized && !settings_open {
                 // over the panes and their overlays (layer 2), under the palette
@@ -10526,6 +10778,7 @@ impl App {
             } else {
                 Vec::new()
             };
+        self.win.review.pointer = review_pointer;
         // ── layer 2: the file viewer in its own pane of the split ──
         self.win.viewer_hits.clear();
         self.win.viewer_rect = [0.0; 4];
@@ -11287,9 +11540,18 @@ impl App {
                 scale,
             );
         }
+        // Edit prompt and Edit toolbar are modal like the dialogs above:
+        // nothing under them keeps a hit (hover repaints, tooltips, the hand)
+        if self.win.prompt_editor.is_some() || self.win.toolbar_editor.is_some() {
+            hits.clear();
+            focus_hits.clear();
+        }
+        // the item being dragged in either goes over the dialog (layer 7)
+        let mut dragged = rift_renderer::Layer::default();
         self.win.prompt_editor_layout = match &self.win.prompt_editor {
             Some(ed) => crate::views::prompt_editor::render(
                 scene.layer(6),
+                &mut dragged,
                 engine,
                 &theme,
                 ed,
@@ -11298,6 +11560,21 @@ impl App {
             ),
             None => Default::default(),
         };
+        self.win.toolbar_editor_layout = match &self.win.toolbar_editor {
+            Some(ed) => crate::views::toolbar_editor::render(
+                scene.layer(6),
+                &mut dragged,
+                engine,
+                &theme,
+                ed,
+                [w, h],
+                self.win.mouse,
+            ),
+            None => Default::default(),
+        };
+        let l7 = scene.layer(7);
+        l7.quads.extend(dragged.quads);
+        l7.texts.extend(dragged.texts);
 
         // pane drag: the drop zone under the pointer (the half of a pane, a
         // tab, or the empty strip for a new tab)
@@ -11324,14 +11601,15 @@ impl App {
                     .iter()
                     .find(|h| h.target == ClickTarget::TabSelect(j))
                     .map(|h| (h.rect, "")),
-                PaneDrop::NewTab if rail_w > 0.0 => {
-                    Some(([0.0, TAB_BAR_H, rail_w, h - TAB_BAR_H], "New tab"))
-                }
+                PaneDrop::NewTab if rail_w > 0.0 => Some((
+                    [0.0, tabbar::bar_h(), rail_w, h - tabbar::bar_h()],
+                    "New tab",
+                )),
                 // a tab-sized slot where the new tab will appear
                 PaneDrop::NewTab => hits
                     .iter()
                     .find(|h| h.target == ClickTarget::TabNew)
-                    .map(|h| ([h.rect[0], 0.0, 160.0, TAB_BAR_H], "")),
+                    .map(|h| ([h.rect[0], 0.0, 160.0, tabbar::bar_h()], "")),
             });
             let layer = scene.layer(5);
             if let Some((zone, label)) = zone {
@@ -11344,7 +11622,7 @@ impl App {
                 tabs.get(d.from_tab)
                     .and_then(|t| t.pane(d.pane))
                     .map(|p| {
-                        if p.title.is_empty() {
+                        if p.program_title().is_empty() {
                             p.session
                                 .cwd
                                 .lock()
@@ -11353,7 +11631,7 @@ impl App {
                                 .map(editor::shorten_home)
                                 .unwrap_or_default()
                         } else {
-                            p.title.clone()
+                            p.program_title().to_string()
                         }
                     })
                     .unwrap_or_default()
@@ -11405,27 +11683,8 @@ impl App {
         let pane_of = |id: PaneId| self.win.tabs.iter().find_map(|t| t.pane(id));
         let s = |t: &str| Some(t.to_string());
         Some(match target {
-            ClickTarget::TabSelect(i) => {
-                let tab = self.win.tabs.get(*i)?;
-                // "build · Claude Code — waiting for you"
-                let title = match Self::tab_agent(tab) {
-                    Some(a) => format!("{} · {}", tab.display_title(), a.describe()),
-                    None => tab.display_title(),
-                };
-                // a linked worktree names itself and its branch
-                let worktree = Self::tab_worktree(tab).and_then(|wt| {
-                    let branch = &tab.active()?.git.as_ref()?.branch;
-                    Some(format!("{} · {branch}", wt.name))
-                });
-                let cwd = tab
-                    .active()
-                    .and_then(|p| p.session.cwd.lock().unwrap().clone())
-                    .map(|c| editor::shorten_home(&c));
-                let keys = (*i < 8)
-                    .then(|| self.tip_keys(&format!("tab_select_{}", i + 1)))
-                    .flatten();
-                (title, worktree.or(cwd).or(keys))
-            }
+            // a tab's tooltip is its card (`tab_card`)
+            ClickTarget::TabSelect(i) => (self.win.tabs.get(*i)?.display_title(), None),
             // ⌘W closes the active pane, and the tab with its last one: the
             // shortcut is true only for the active, unsplit tab
             ClickTarget::TabClose(i) => (
@@ -11439,11 +11698,13 @@ impl App {
             ClickTarget::TabNew => ("New tab".into(), self.tip_keys("new_tab")),
             ClickTarget::TabProfiles => ("Open a profile".into(), None),
             ClickTarget::SettingsEditPrompt => ("Edit prompt".into(), None),
+            ClickTarget::SettingsEditToolbar => ("Edit toolbar".into(), None),
             ClickTarget::SettingsPlaySound(_) => ("Play this sound".into(), None),
             ClickTarget::ToggleExplorer => {
                 ("File explorer".into(), self.tip_keys("toggle_explorer"))
             }
             ClickTarget::ToggleReview => ("Review changes".into(), self.tip_keys("toggle_review")),
+            ClickTarget::ReviewUnavailable => ("No repository on the Settings tab".into(), None),
             ClickTarget::ToggleNotifications => {
                 ("Notifications".into(), self.tip_keys("attention_center"))
             }
@@ -11532,7 +11793,7 @@ impl App {
             for (rect, target) in &self.win.prompt_editor_layout.hits {
                 let chip = match target {
                     Target::Palette(chip) => Some(*chip),
-                    Target::Chip(i) => ed.draft.get(*i).copied(),
+                    Target::Item(b, i) => ed.buckets.get(*b).and_then(|bk| bk.get(*i)).copied(),
                     _ => None,
                 };
                 tips.push(match chip {
@@ -11542,6 +11803,10 @@ impl App {
             }
             tips.push(Tip::new(self.win.prompt_editor_layout.card, "", None));
             return tips;
+        }
+        // Edit toolbar names its buttons on them: nothing explains itself
+        if self.win.toolbar_editor.is_some() {
+            return vec![Tip::new(self.win.toolbar_editor_layout.card, "", None)];
         }
         let edit = self.win.viewer.edit.as_ref();
         for (rect, hit) in &self.win.viewer_hits {
@@ -11663,10 +11928,18 @@ impl App {
                 tip
             });
         }
+        let titles = self.tab_titles();
         for hit in &self.win.hits {
             // a prompt chip's card: what it shows and what a click does
             if let ClickTarget::Chip(_, chip) = hit.target {
                 tips.push(Tip::card(hit.rect, chip.label(), chip.about()));
+                continue;
+            }
+            // a tab's card: every pane's path and state, the program's title
+            if let ClickTarget::TabSelect(i) = hit.target
+                && let Some((title, body)) = self.tab_card(i, &titles)
+            {
+                tips.push(Tip::card(hit.rect, title, body));
                 continue;
             }
             let (text, detail) = self.tip_for(&hit.target).unwrap_or_default();
@@ -11675,20 +11948,29 @@ impl App {
         tips
     }
 
+    /// A modal surface covers the window: everything under it stops
+    /// reacting to the pointer (hover, tooltips, the hand), as its clicks
+    /// already do. A new modal dialog belongs here.
+    pub(crate) fn modal_open(&self) -> bool {
+        self.win.palette.open
+            || self.win.confirm.is_some()
+            || self.win.whats_new.open
+            || self.win.compare.open
+            || self.win.prompt_editor.is_some()
+            || self.win.toolbar_editor.is_some()
+    }
+
     /// No tooltip while a modal, a menu or a drag owns the pointer.
     fn tooltip_blocked(&self) -> bool {
         !self.win.pointer_in
-            || self.win.palette.open
-            || self.win.confirm.is_some()
+            || match &self.win.prompt_editor {
+                // the prompt editor's chips have cards (`collect_tips` keeps
+                // only its own), until one is dragged
+                Some(e) => e.drag.as_ref().is_some_and(|d| d.live),
+                None => self.modal_open(),
+            }
             || self.win.context_menu.open
             || self.win.chip_menu.is_some()
-            // the prompt editor's chips have cards, until one is dragged
-            || self
-                .win.prompt_editor
-                .as_ref()
-                .is_some_and(|e| e.drag.as_ref().is_some_and(|d| d.live))
-            || self.win.whats_new.open
-            || self.win.compare.open
             || self.win.rename.is_some()
             || self.win.drag.is_some()
             || self.win.pending_sel.is_some()
@@ -11866,6 +12148,14 @@ impl App {
         self.sync_theme_preview();
         self.win.last_frame = Instant::now();
         self.win.output_frame_due = None;
+        // Settings › Remote access just opened: read the gateway's files
+        // now, so this frame already has the phones (the 1 s poll would
+        // add them up to a second later)
+        let remote_page = self.remote_page_open();
+        if remote_page && !self.win.settings.remote.page_read {
+            self.poll_remote(true);
+        }
+        self.win.settings.remote.page_read = remote_page;
         if self.win.search.open && self.win.search_stale {
             let due = self.win.search_counted + SEARCH_LIVE;
             if self.win.last_frame >= due {
@@ -12502,6 +12792,12 @@ impl App {
                 };
                 // open but auto-hidden: closing it would change nothing
                 // visible, so say why it is not showing instead
+                // from the Settings tab (the menu bar), as its keys do: leave
+                // it for the shell tab, whose repository the panel shows
+                if self.win.settings.open {
+                    self.win.settings.open = false;
+                    self.win.settings.focus = None;
+                }
                 if too_narrow(self) {
                     self.toast("Window too narrow for the review panel: widen it".into());
                 } else {
@@ -12677,7 +12973,7 @@ impl App {
             pane.selected_block = None;
         }
         self.win.active = idx;
-        self.win.tabs[idx].activity = false;
+        self.win.tabs[idx].clear_activity();
         self.save_session();
     }
 
@@ -12914,6 +13210,37 @@ impl App {
                     -1
                 };
                 self.win.settings.scroll_history(rows);
+            }
+            // the theme grid: the arrows walk the cards (← → in reading
+            // order, ↑ ↓ to the nearest card in the row above or below)
+            (
+                Key::Named(
+                    NamedKey::ArrowLeft
+                    | NamedKey::ArrowRight
+                    | NamedKey::ArrowUp
+                    | NamedKey::ArrowDown,
+                ),
+                Some((ClickTarget::SettingsTheme(_), _)),
+            ) => {
+                let cards: Vec<(ClickTarget, [f32; 4])> = stops[..scrolled]
+                    .iter()
+                    .filter(|(t, _)| matches!(t, ClickTarget::SettingsTheme(_)))
+                    .cloned()
+                    .collect();
+                let step = match &event.logical_key {
+                    Key::Named(NamedKey::ArrowLeft) => settings::GridStep::Left,
+                    Key::Named(NamedKey::ArrowRight) => settings::GridStep::Right,
+                    Key::Named(NamedKey::ArrowUp) => settings::GridStep::Up,
+                    _ => settings::GridStep::Down,
+                };
+                if let Some(next) =
+                    settings::grid_step(&cards, self.win.settings.focus.as_ref(), step)
+                {
+                    if let Some((_, rect)) = cards.iter().find(|(t, _)| *t == next) {
+                        self.scroll_settings_into_view(*rect);
+                    }
+                    self.win.settings.focus = Some(next);
+                }
             }
             (
                 Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowRight),
@@ -13926,70 +14253,57 @@ impl App {
         true
     }
 
-    /// A press in "Edit prompt": buttons act at once; a chip arms a drag
-    /// (a release without travel is a click).
-    fn prompt_editor_press(&mut self) {
-        use crate::views::prompt_editor::{Drag, Target};
-        let (mx, my) = self.win.mouse;
-        let hit = self
-            .win
-            .prompt_editor_layout
-            .hits
-            .iter()
-            .find(|(r, _)| mx >= r[0] && mx < r[0] + r[2] && my >= r[1] && my < r[1] + r[3])
-            .map(|(_, t)| *t);
-        let Some(ed) = &mut self.win.prompt_editor else {
+    /// A press in Edit prompt or Edit toolbar (whichever is open): buttons
+    /// act at once; an item arms a drag (a release without travel is a
+    /// click).
+    fn arranger_press(&mut self) {
+        let mouse = self.win.mouse;
+        let outcome = if let Some(ed) = &mut self.win.prompt_editor {
+            ed.press(&self.win.prompt_editor_layout, mouse)
+        } else if let Some(ed) = &mut self.win.toolbar_editor {
+            ed.press(&self.win.toolbar_editor_layout, mouse)
+        } else {
             return;
         };
-        match hit {
-            Some(Target::Palette(chip)) => {
-                ed.drag = Some(Drag {
-                    chip,
-                    from: None,
-                    press: self.win.mouse,
-                    live: false,
-                })
-            }
-            Some(Target::Chip(i)) => {
-                if let Some(&chip) = ed.draft.get(i) {
-                    ed.drag = Some(Drag {
-                        chip,
-                        from: Some(i),
-                        press: self.win.mouse,
-                        live: false,
-                    });
-                }
-            }
-            Some(Target::Remove(i)) => ed.remove(i),
-            Some(Target::Restore) => ed.restore_default(),
-            Some(Target::Cancel) => self.win.prompt_editor = None,
-            Some(Target::Save) => self.save_prompt_editor(),
-            None => {}
+        self.arranger_outcome(outcome);
+    }
+
+    /// A release in Edit prompt or Edit toolbar: a drag drops into the
+    /// bucket under the pointer (or, from a bucket, out of every one to
+    /// remove the item); a palette item clicked is added (a toolbar button
+    /// at the right end).
+    fn arranger_release(&mut self) {
+        let mouse = self.win.mouse;
+        if let Some(ed) = &mut self.win.prompt_editor {
+            ed.release(&self.win.prompt_editor_layout, mouse, 0);
+        } else if let Some(ed) = &mut self.win.toolbar_editor {
+            ed.release(
+                &self.win.toolbar_editor_layout,
+                mouse,
+                crate::views::toolbar_editor::RIGHT,
+            );
         }
     }
 
-    /// A release in "Edit prompt": a drag drops into the box (or, from the
-    /// box, out of it to remove the chip); a palette chip clicked is added.
-    fn prompt_editor_release(&mut self) {
-        let layout = &self.win.prompt_editor_layout;
-        let (mx, my) = self.win.mouse;
-        let b = layout.drop_box;
-        let in_box = mx >= b[0] && mx < b[0] + b[2] && my >= b[1] && my < b[1] + b[3];
-        let Some(ed) = &mut self.win.prompt_editor else {
-            return;
-        };
-        let Some(d) = ed.drag.take() else {
-            return;
-        };
-        if !d.live {
-            if d.from.is_none() {
-                ed.add(d.chip);
+    /// Open "Edit toolbar" on the toolbar as config.toml has it.
+    fn open_toolbar_editor(&mut self) {
+        self.win.toolbar_editor = Some(crate::views::toolbar_editor::new(&self.config));
+    }
+
+    /// What a press or a key decided for the open arranger dialog: Cancel
+    /// drops its draft, Save keeps it; both close it.
+    fn arranger_outcome(&mut self, outcome: crate::views::arranger::Outcome) {
+        use crate::views::arranger::Outcome;
+        match outcome {
+            Outcome::Stay => {}
+            Outcome::Cancel => {
+                self.win.prompt_editor = None;
+                self.win.toolbar_editor = None;
             }
-        } else if in_box {
-            let at = crate::views::prompt_editor::drop_index(&layout.slots, d.from, self.win.mouse);
-            ed.place(d.chip, at);
-        } else if let Some(i) = d.from {
-            ed.remove(i);
+            Outcome::Save => {
+                self.save_prompt_editor();
+                self.save_toolbar_editor();
+            }
         }
     }
 
@@ -13999,9 +14313,24 @@ impl App {
             return;
         };
         if ed.changed() {
-            self.config.prompt_chips = ed.draft;
+            self.config.prompt_chips = crate::views::prompt_editor::chips(&ed).to_vec();
             self.save_config();
             self.refresh_chip_sources();
+        }
+    }
+
+    /// Keep "Edit toolbar"'s sides (`toolbar_left` / `toolbar_right`) and
+    /// close it.
+    fn save_toolbar_editor(&mut self) {
+        let Some(ed) = self.win.toolbar_editor.take() else {
+            return;
+        };
+        if ed.changed() {
+            let (left, right) = crate::views::toolbar_editor::sides(&ed);
+            self.config.toolbar_left = left;
+            self.config.toolbar_right = right;
+            self.save_config();
+            self.apply_config();
         }
     }
 
@@ -14801,6 +15130,10 @@ impl App {
             if !inspect && !modifier {
                 self.win.inspect_pinned = false;
             }
+            // a chord (⌘C) is not a hold: no tab numbers until released
+            if !modifier {
+                self.spoil_hints();
+            }
         }
         // Esc while dragging: a tab springs back to where it was pressed, a
         // pane stays where it is
@@ -14838,16 +15171,30 @@ impl App {
             window.request_redraw();
             return;
         }
-        if self.win.prompt_editor.is_some() {
-            // Esc cancels, Enter saves; the dialog owns the keyboard
-            match event.logical_key {
-                winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape) => {
-                    self.win.prompt_editor = None;
-                }
-                winit::keyboard::Key::Named(winit::keyboard::NamedKey::Enter) => {
-                    self.save_prompt_editor();
-                }
-                _ => {}
+        if self.win.prompt_editor.is_some() || self.win.toolbar_editor.is_some() {
+            // the dialog owns the keyboard: Esc cancels, Enter saves, Tab
+            // walks the bucket items, ← → move the focused one, Delete
+            // removes it
+            use crate::views::arranger::Key as K;
+            use winit::keyboard::{Key, NamedKey};
+            let key = match &event.logical_key {
+                Key::Named(NamedKey::Escape) => Some(K::Escape),
+                Key::Named(NamedKey::Enter) => Some(K::Enter),
+                Key::Named(NamedKey::Tab) => Some(K::Tab {
+                    back: self.win.modifiers.shift_key(),
+                }),
+                Key::Named(NamedKey::ArrowLeft) => Some(K::Left),
+                Key::Named(NamedKey::ArrowRight) => Some(K::Right),
+                Key::Named(NamedKey::Delete | NamedKey::Backspace) => Some(K::Delete),
+                _ => None,
+            };
+            if let Some(key) = key {
+                let outcome = match (&mut self.win.prompt_editor, &mut self.win.toolbar_editor) {
+                    (Some(ed), _) => ed.key(key),
+                    (None, Some(ed)) => ed.key(key),
+                    (None, None) => crate::views::arranger::Outcome::Stay,
+                };
+                self.arranger_outcome(outcome);
             }
             window.request_redraw();
             return;
@@ -15464,15 +15811,13 @@ impl App {
             window.request_redraw();
         }
         self.win.pointer_in = true;
+        // Edit prompt / Edit toolbar: a press that travels starts a drag;
+        // hover marks repaint
         if let Some(ed) = &mut self.win.prompt_editor {
-            // a press that travels starts a drag; hover marks repaint
-            if let Some(d) = &mut ed.drag
-                && !d.live
-                && ((pos.0 - d.press.0).abs() > crate::views::prompt_editor::DRAG_SLOP
-                    || (pos.1 - d.press.1).abs() > crate::views::prompt_editor::DRAG_SLOP)
-            {
-                d.live = true;
-            }
+            ed.moved(pos);
+            window.request_redraw();
+        } else if let Some(ed) = &mut self.win.toolbar_editor {
+            ed.moved(pos);
             window.request_redraw();
         }
         // a hovered diff line shows its hunk's toolbar; a file-list row lights
@@ -15496,14 +15841,10 @@ impl App {
             self.report_motion();
             return;
         }
-        let idle = !self.win.palette.open
+        let idle = !self.modal_open()
             && !self.win.settings.open
             && !self.win.context_menu.open
             && self.win.chip_menu.is_none()
-            && self.win.prompt_editor.is_none()
-            && self.win.confirm.is_none()
-            && !self.win.whats_new.open
-            && !self.win.compare.open
             && self.win.drag.is_none()
             && self.win.pending_sel.is_none()
             && self.win.editor_drag.is_none()
@@ -15675,14 +16016,7 @@ impl App {
             window.request_redraw();
             return;
         }
-        if self.win.prompt_editor.is_some() {
-            return;
-        }
-        if self.win.palette.open
-            || self.win.confirm.is_some()
-            || self.win.whats_new.open
-            || self.win.compare.open
-        {
+        if self.modal_open() {
             return;
         }
         if self.win.notifications.open {
@@ -15772,6 +16106,7 @@ impl App {
                         h.target,
                         ClickTarget::ToggleExplorer
                             | ClickTarget::ToggleReview
+                            | ClickTarget::ReviewUnavailable
                             | ClickTarget::ToggleNotifications
                             | ClickTarget::TogglePalette
                             | ClickTarget::ToggleSettings
@@ -15862,8 +16197,10 @@ impl App {
         if state == ElementState::Pressed {
             self.hide_tooltip(window);
         }
-        if state == ElementState::Released && self.win.prompt_editor.is_some() {
-            self.prompt_editor_release();
+        if state == ElementState::Released
+            && (self.win.prompt_editor.is_some() || self.win.toolbar_editor.is_some())
+        {
+            self.arranger_release();
             window.request_redraw();
             return;
         }
@@ -15974,8 +16311,8 @@ impl App {
             window.request_redraw();
             return;
         }
-        if self.win.prompt_editor.is_some() {
-            self.prompt_editor_press();
+        if self.win.prompt_editor.is_some() || self.win.toolbar_editor.is_some() {
+            self.arranger_press();
             window.request_redraw();
             return;
         }
@@ -16362,6 +16699,8 @@ impl App {
             Some(ClickTarget::ToggleReview) => {
                 self.handle_action(AppAction::ToggleReview, event_loop)
             }
+            // dimmed on the Settings tab: its tooltip says why
+            Some(ClickTarget::ReviewUnavailable) => {}
             Some(ClickTarget::ToggleNotifications) => {
                 self.handle_action(AppAction::AttentionCenter, event_loop)
             }
@@ -16657,11 +16996,16 @@ impl App {
                 self.start_pairing();
             }
             Some(ClickTarget::RemoteViewOnly) => {
+                // a shown code was made with the other permission: it stops
+                // working, and the next one carries the new one
+                self.cancel_pairing();
                 let v = &mut self.win.settings.remote;
                 v.view_only = !v.view_only;
-                // a shown link keeps the permission it was made with
-                v.pairing = None;
-                v.pairing_wait = false;
+            }
+            Some(ClickTarget::RemotePairCancel) => self.cancel_pairing(),
+            Some(ClickTarget::RemoteHistory) => {
+                let v = &mut self.win.settings.remote;
+                v.history_open = !v.history_open;
             }
             Some(ClickTarget::RemoteInstallTunnel) => self.install_cloudflared(),
             Some(ClickTarget::RemoteCopyLink) => {
@@ -16886,11 +17230,6 @@ impl App {
                 let c = &mut self.config;
                 let d = *dir as i64;
                 match *id {
-                    id if id.starts_with("toolbar_order.") => {
-                        if let Some(item) = rift_core::ToolbarItem::from_order_id(id) {
-                            c.move_toolbar_item(item, d);
-                        }
-                    }
                     "font_size" => {
                         // from the applied size: a NaN or out-of-range value still steps
                         c.font_size = (c.font_size() + d as f32).clamp(8.0, 28.0);
@@ -16973,10 +17312,10 @@ impl App {
                 self.apply_config();
             }
             Some(ClickTarget::SettingsEditPrompt) => {
-                self.win.prompt_editor = Some(crate::views::prompt_editor::PromptEditor::new(
-                    &self.config.prompt_chips,
-                ));
+                self.win.prompt_editor =
+                    Some(crate::views::prompt_editor::new(&self.config.prompt_chips));
             }
+            Some(ClickTarget::SettingsEditToolbar) => self.open_toolbar_editor(),
             Some(ClickTarget::SettingsSegment(id, v)) => {
                 use rift_core::{Bell, CursorStyle, InputPosition, PromptMode};
                 let c = &mut self.config;
@@ -16988,16 +17327,6 @@ impl App {
                             2 => CursorStyle::Underline,
                             3 => CursorStyle::Hollow,
                             _ => CursorStyle::DoubleUnderline,
-                        }
-                    }
-                    id if id.starts_with("toolbar.") => {
-                        if let Some(item) = rift_core::ToolbarItem::from_setting_id(id) {
-                            let side = match v {
-                                0 => rift_core::ToolbarSide::Left,
-                                1 => rift_core::ToolbarSide::Right,
-                                _ => rift_core::ToolbarSide::Hidden,
-                            };
-                            c.set_toolbar_side(item, side);
                         }
                     }
                     "input_position" => {
@@ -17034,6 +17363,13 @@ impl App {
                             rift_core::TabLayout::Vertical
                         } else {
                             rift_core::TabLayout::Horizontal
+                        }
+                    }
+                    "tab_style" => {
+                        c.tab_style = match v {
+                            0 => rift_core::TabStyle::Dot,
+                            1 => rift_core::TabStyle::Underline,
+                            _ => rift_core::TabStyle::Detailed,
                         }
                     }
                     "tab_close_button" => {
@@ -17194,6 +17530,20 @@ impl App {
                 self.apply_config();
                 self.toast_done(format!("{action} restored to its default shortcut"));
             }
+            Some(ClickTarget::SettingsThemeFilter(i)) => {
+                if let Some(f) = settings::ThemeFilter::ALL.get(*i as usize) {
+                    self.win.settings.theme_filter = *f;
+                }
+            }
+            Some(ClickTarget::SettingsOpenThemes) => match rift_core::config::themes_dir() {
+                Some(dir) => match std::fs::create_dir_all(&dir) {
+                    Ok(()) => self.open_target_external(&dir.to_string_lossy()),
+                    Err(e) => {
+                        self.toast_error(format!("Could not make {}: {e}", dir.display()));
+                    }
+                },
+                None => self.toast_error("No themes folder: the config folder is unknown".into()),
+            },
             Some(ClickTarget::SettingsTheme(i)) => {
                 let names = rift_core::theme::available_themes();
                 if let Some(name) = names.into_iter().nth(*i as usize) {
@@ -17227,7 +17577,7 @@ impl App {
     pub(crate) fn on_wheel(&mut self, delta: MouseScrollDelta, window: &Window) {
         self.hide_tooltip(window);
         // the modal holds still; nothing scrolls under it
-        if self.win.prompt_editor.is_some() {
+        if self.win.prompt_editor.is_some() || self.win.toolbar_editor.is_some() {
             return;
         }
         // ⌘ + wheel zooms (`wheel_zoom`)
@@ -17612,12 +17962,7 @@ impl App {
 
     /// Right/middle button release (press routing lives in on_right_press).
     pub(crate) fn on_other_button(&mut self, button: u8, pressed: bool, window: &Window) {
-        let overlay = self.win.palette.open
-            || self.win.settings.open
-            || self.win.confirm.is_some()
-            || self.win.whats_new.open
-            || self.win.compare.open
-            || self.win.context_menu.open;
+        let overlay = self.modal_open() || self.win.settings.open || self.win.context_menu.open;
         if pressed && overlay {
             return;
         }
@@ -18042,7 +18387,7 @@ impl App {
         if let Some((idx, tab)) = self.find_tab_of_pane(pane)
             && idx != active
         {
-            tab.activity = true;
+            tab.mark_activity(pane);
         }
     }
 
@@ -18403,6 +18748,7 @@ impl App {
                 }
                 self.win.modifiers = m;
                 self.tab_switcher_modifiers();
+                self.track_hint_hold();
             }
             #[cfg(target_os = "macos")]
             Step::Menu(id) => self.run_menu_command(&id, event_loop),
@@ -18957,7 +19303,7 @@ impl App {
                     return Response::error("no such tab or pane");
                 };
                 self.win.active = ti;
-                self.win.tabs[ti].activity = false;
+                self.win.tabs[ti].clear_activity();
                 if let Some(p) = pane {
                     self.win.tabs[ti].active_pane = p;
                 }
@@ -19097,19 +19443,30 @@ impl App {
         };
         let settings_shown = self.win.settings.open && self.win.settings.tab;
         let n = self.win.tabs.len();
+        let titles = self.tab_titles();
         let tabs = self
             .win
             .tabs
             .iter()
             .enumerate()
             .map(|(i, t)| TabNode {
-                // a screen reader hears the agent's state and the progress
-                // with the title
+                // a screen reader hears the title as shown, the tab's status
+                // (whose, on a split tab), its agent and the progress
                 title: format!(
-                    "{}{}{}",
-                    t.display_title(),
+                    "{}{}{}{}",
+                    titles.get(i).cloned().unwrap_or_else(|| t.display_title()),
+                    self.tab_status(t)
+                        .map(|s| {
+                            let whose = if s.own || t.panes.len() < 2 {
+                                ""
+                            } else {
+                                " in another pane"
+                            };
+                            format!(", {}{whose}", s.status.words().to_lowercase())
+                        })
+                        .unwrap_or_default(),
                     Self::tab_agent(t)
-                        .map(|a| format!(", {}", a.describe()))
+                        .map(|a| format!(", {}", a.agent.name()))
                         .unwrap_or_default(),
                     crate::progress::a11y_suffix(crate::progress::of_panes(
                         &t.panes,
@@ -19174,7 +19531,7 @@ impl App {
                 let reported = p.session.cwd.lock().unwrap().clone();
                 let cwd = reported
                     .filter(|c| !c.is_empty())
-                    .or_else(|| Some(p.title.clone()).filter(|t| !t.is_empty()))
+                    .or_else(|| Some(p.program_title().to_string()).filter(|t| !t.is_empty()))
                     .unwrap_or_else(|| tab.display_title());
                 let running = p.session.foreground_job_name();
                 let snapshot = p.session.blocks.lock().unwrap().snapshot();
@@ -19268,6 +19625,7 @@ impl App {
                         toggled: None,
                         selected: false,
                         rect: Some(*rect),
+                        disabled: false,
                     });
                     if let Some(button) = self
                         .win
@@ -19282,6 +19640,7 @@ impl App {
                             toggled: None,
                             selected: false,
                             rect: Some(button),
+                            disabled: false,
                         });
                     }
                 }
@@ -19331,6 +19690,7 @@ impl App {
                             toggled: None,
                             selected: false,
                             rect: Some(h.rect),
+                            disabled: false,
                         })
                     })
                     .chain(chip_controls)
@@ -19486,6 +19846,7 @@ impl App {
                 toggled: None,
                 selected,
                 rect: Some(r),
+                disabled: false,
             };
             let mut buttons = vec![
                 button(cancel, self.win.confirm_rects[0], c.focus_cancel),
@@ -19499,6 +19860,7 @@ impl App {
                     toggled: Some(self.win.confirm_dont_ask),
                     selected: false,
                     rect: Some(self.win.confirm_rects[2]),
+                    disabled: false,
                 });
             }
             if matches!(c.action, ConfirmAction::ConfigUnsaved(_)) {
@@ -19510,45 +19872,25 @@ impl App {
                 buttons,
             })
         } else if let Some(ed) = &self.win.prompt_editor {
-            use crate::views::prompt_editor::Target;
-            let controls = self
-                .win
-                .prompt_editor_layout
-                .hits
-                .iter()
-                .map(|(r, t)| {
-                    let name = |i: &usize| ed.draft.get(*i).map_or("", |c| c.label());
-                    let label = match t {
-                        Target::Palette(c) => format!("Add {}", c.label()),
-                        Target::Chip(i) => format!("{}, in the prompt", name(i)),
-                        Target::Remove(i) => format!("Remove {}", name(i)),
-                        Target::Restore => "Restore default".into(),
-                        Target::Cancel => "Cancel".into(),
-                        Target::Save => "Save changes".into(),
-                    };
-                    Control {
-                        label,
-                        role: Role::Button,
-                        toggled: None,
-                        selected: false,
-                        rect: Some(*r),
-                    }
-                })
-                .collect();
-            Some(Overlay::Dialog {
-                label: "Edit prompt".into(),
-                input: None,
-                status: Some(format!(
-                    "Prompt: {}",
-                    ed.draft
-                        .iter()
-                        .map(|c| c.label())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )),
-                controls,
-                rect: Some(self.win.prompt_editor_layout.card),
-            })
+            let name = |c: &rift_core::PromptChip| c.label().to_string();
+            Some(crate::views::arranger::a11y_overlay(
+                ed,
+                &self.win.prompt_editor_layout,
+                "Edit prompt",
+                "Prompt",
+                &["the prompt"],
+                &name,
+            ))
+        } else if let Some(ed) = &self.win.toolbar_editor {
+            let name = |i: &rift_core::ToolbarItem| i.label().to_string();
+            Some(crate::views::arranger::a11y_overlay(
+                ed,
+                &self.win.toolbar_editor_layout,
+                "Edit toolbar",
+                "Toolbar",
+                &["the left side", "the right side"],
+                &name,
+            ))
         } else if let Some(menu) = &self.win.chip_menu {
             let results = menu.results();
             let controls = self
@@ -19562,6 +19904,7 @@ impl App {
                         toggled: None,
                         selected: *i == menu.selected,
                         rect: Some(*r),
+                        disabled: false,
                     })
                 })
                 .collect();
@@ -19586,6 +19929,7 @@ impl App {
                     toggled: None,
                     selected: false,
                     rect: Some(self.win.compare_hits.close),
+                    disabled: false,
                 }],
                 rect: Some(self.win.compare_hits.card),
             })
@@ -19610,6 +19954,7 @@ impl App {
                 toggled: None,
                 selected: false,
                 rect: Some(r),
+                disabled: false,
             };
             Some(Overlay::Dialog {
                 label: "What's new".into(),
@@ -19637,6 +19982,7 @@ impl App {
                 toggled: None,
                 selected,
                 rect: Some(r),
+                disabled: false,
             };
             let mut controls = vec![button("Close".into(), h.close, false)];
             if h.mark_read[2] > 0.0 {
@@ -19695,6 +20041,7 @@ impl App {
                         toggled: None,
                         selected: self.win.context_menu.selected == Some(i),
                         rect: Some(*r),
+                        disabled: false,
                     })
                     .collect(),
             })
@@ -19718,6 +20065,7 @@ impl App {
                                 toggled: None,
                                 selected: *mode == self.win.palette.mode,
                                 rect: Some(h.rect),
+                                disabled: false,
                             })
                         }
                         _ => None,
@@ -19734,6 +20082,7 @@ impl App {
                             toggled: None,
                             selected: *i == self.win.palette.selected,
                             rect: Some(*r),
+                            disabled: false,
                         })
                     }))
                     .collect(),
@@ -19766,9 +20115,9 @@ impl App {
                                 .and_then(|v| v.as_bool()),
                             false,
                         ),
-                        ClickTarget::SettingsSegment(..) | ClickTarget::SettingsTheme(_) => {
-                            (Role::RadioButton, None, false)
-                        }
+                        ClickTarget::SettingsSegment(..)
+                        | ClickTarget::SettingsTheme(_)
+                        | ClickTarget::SettingsThemeFilter(_) => (Role::RadioButton, None, false),
                         // read-only rows (Shell path); unnamed Noop hits
                         // (the page body) find no name below and drop out
                         ClickTarget::SettingsNoop => (Role::Label, None, false),
@@ -19798,6 +20147,7 @@ impl App {
                         | ClickTarget::SettingsRingBell
                         | ClickTarget::SettingsNotifyPermission
                         | ClickTarget::SettingsEditPrompt
+                        | ClickTarget::SettingsEditToolbar
                         | ClickTarget::SettingsKeybind(_)
                         | ClickTarget::SettingsKeybindReset(_)
                         | ClickTarget::RemotePair
@@ -19805,9 +20155,12 @@ impl App {
                         | ClickTarget::RemoteInstallTunnel
                         | ClickTarget::RemoteRelayRetry
                         | ClickTarget::RemoteRelaySettings
+                        | ClickTarget::RemoteHistory
+                        | ClickTarget::RemotePairCancel
+                        | ClickTarget::SettingsOpenThemes
                         | ClickTarget::RemoteRevoke(_) => (Role::Button, None, false),
                         ClickTarget::RemoteViewOnly => (
-                            Role::Switch,
+                            Role::CheckBox,
                             Some(self.win.settings.remote.view_only),
                             false,
                         ),
@@ -19849,6 +20202,7 @@ impl App {
                         toggled,
                         selected,
                         rect: Some(h.rect),
+                        disabled: false,
                     })
                 })
                 .collect();
@@ -19905,6 +20259,7 @@ impl App {
                         toggled: None,
                         selected,
                         rect: Some(h.rect),
+                        disabled: false,
                     })
                 })
                 .collect();
@@ -19956,6 +20311,7 @@ impl App {
                 toggled: on,
                 selected: false,
                 rect: Some(*rect),
+                disabled: false,
             };
             let toggles: Vec<Control> = if let Some(f) = &editing {
                 [
@@ -20008,6 +20364,7 @@ impl App {
                         | ClickTarget::TabProfiles
                         | ClickTarget::ToggleExplorer
                         | ClickTarget::ToggleReview
+                        | ClickTarget::ReviewUnavailable
                         | ClickTarget::ToggleNotifications
                         | ClickTarget::TogglePalette
                         | ClickTarget::ToggleSettings
@@ -20034,6 +20391,7 @@ impl App {
                     toggled,
                     selected: false,
                     rect: Some(h.rect),
+                    disabled: h.target == ClickTarget::ReviewUnavailable,
                 })
             })
             .collect();
@@ -20075,6 +20433,7 @@ impl App {
             toggled: None,
             selected,
             rect: Some(rect),
+            disabled: false,
         };
         let mut out = Vec::new();
         let (ex_rect, rv_rect) = self.panel_rects();
@@ -20887,7 +21246,8 @@ impl App {
             self.win.review.revealed.values().sum::<u32>(),
             self.win.review.notice,
             self.win.review.scroll,
-            self.panel_widths(self.logical_size().0).1 > 0.0,
+            // on screen: the Settings tab hides the panel
+            self.panel_widths(self.logical_size().0).1 > 0.0 && !self.win.settings.open,
             self.win.hover_repaints
         );
         let _ = writeln!(
@@ -20988,15 +21348,48 @@ impl App {
             out,
             "prompt_chips={:?} prompt_editor={:?} prompt_editor_hits={:?}",
             self.config.prompt_chips,
-            self.win
-                .prompt_editor
-                .as_ref()
-                .map(|e| (&e.draft, e.drag.as_ref().map(|d| (d.chip, d.live)))),
+            self.win.prompt_editor.as_ref().map(|e| (
+                crate::views::prompt_editor::chips(e),
+                e.drag.as_ref().map(|d| (d.item, d.live))
+            )),
             self.win
                 .prompt_editor_layout
                 .hits
                 .iter()
                 .map(|(r, t)| format!("{t:?}@{:.0},{:.0},{:.0},{:.0}", r[0], r[1], r[2], r[3]))
+                .collect::<Vec<_>>(),
+        );
+        // Edit toolbar: the toolbar config.toml holds, the draft's two
+        // sides, the drag, the keyboard's item, Restore / Save usable, and
+        // its click targets
+        let _ = writeln!(
+            out,
+            "toolbar={:?}|{:?} toolbar_editor={:?} toolbar_editor_hits={:?}",
+            self.config.toolbar_left,
+            self.config.toolbar_right,
+            self.win.toolbar_editor.as_ref().map(|e| (
+                crate::views::toolbar_editor::sides(e),
+                e.drag.as_ref().map(|d| (d.item, d.live)),
+                e.focus,
+                !e.is_default(),
+                e.changed(),
+            )),
+            self.win
+                .toolbar_editor_layout
+                .hits
+                .iter()
+                .map(|(r, t)| format!("{t:?}@{:.0},{:.0},{:.0},{:.0}", r[0], r[1], r[2], r[3]))
+                .chain(
+                    self.win
+                        .toolbar_editor_layout
+                        .buckets
+                        .iter()
+                        .enumerate()
+                        .map(|(b, r)| format!(
+                            "Bucket({b})@{:.0},{:.0},{:.0},{:.0}",
+                            r[0], r[1], r[2], r[3]
+                        ))
+                )
                 .collect::<Vec<_>>(),
         );
         // the active pane's prompt chips as drawn (their texts)
@@ -21250,11 +21643,24 @@ impl App {
             "rail query={:?} focused={} panes={} rows={:?}",
             self.win.rail.query, self.win.rail.focused, self.win.rail.panes, self.win.rail_dump
         );
+        // what the strip drew last frame: each tab's shown title, status
+        // (whose), ⌘ number and the detailed style's lines
+        let _ = writeln!(
+            out,
+            "strip style={:?} h={} hints={} hint_hold={} hint_spoiled={} tabs={:?}",
+            self.config.tab_style,
+            tabbar::bar_h(),
+            self.win.hints_drawn,
+            self.win.hint_hold.is_some(),
+            self.win.hint_spoiled,
+            self.win.strip_dump
+        );
         for (i, tab) in self.win.tabs.iter().enumerate() {
             let _ = writeln!(
                 out,
-                "tab {i} title={:?} panes={} active_pane={} zoomed={:?} activity={} color={:?} sync={} custom_title={:?} running={} progress={} agent={} agent_state={} worktree={}",
+                "tab {i} title={:?} osc_title={:?} panes={} active_pane={} zoomed={:?} activity={} color={:?} sync={} custom_title={:?} running={} progress={} agent={} agent_state={} worktree={}",
                 tab.display_title(),
+                tab.title,
                 tab.panes.len(),
                 tab.active_pane,
                 tab.zoomed,
@@ -22039,13 +22445,13 @@ impl App {
                         } else {
                             path.text().to_string()
                         };
+                        let about =
+                            format!("{} · paired {paired}", settings::platform_name(&d.platform));
                         DeviceRow {
                             id: d.id,
                             name: d.name,
-                            detail: format!(
-                                "{seen} · {} · paired {paired}",
-                                settings::platform_name(&d.platform)
-                            ),
+                            detail: format!("{seen} · {about}"),
+                            about,
                             path,
                             view_only: d.permission == rift_remote::registry::Permission::View,
                         }
@@ -22081,6 +22487,21 @@ impl App {
 
     /// "Pair a phone": a one-time link for the gateway's addresses (waits
     /// for them when the gateway is still starting).
+    /// Settings › Remote access: withdraw the shown pairing code (its secret
+    /// stops working) and stop waiting to show one.
+    fn cancel_pairing(&mut self) {
+        let view = &mut self.win.settings.remote;
+        view.pairing_wait = false;
+        let Some(p) = view.pairing.take() else {
+            return;
+        };
+        if let Some(dir) = crate::remote::registry_dir()
+            && let Err(e) = rift_remote::registry::cancel_pairing(&dir, &p.url)
+        {
+            self.toast_error(format!("Could not withdraw the pairing code: {e}"));
+        }
+    }
+
     fn start_pairing(&mut self) {
         use rift_remote::registry::{self, Permission};
         if !self.config.remote_access {
@@ -22261,9 +22682,15 @@ impl App {
     fn relay_line(&self) -> crate::views::settings::RelayLine {
         use crate::views::settings::RelayLine;
         use rift_remote::registry::RelayState;
-        if !self.config.remote_access
-            || (self.config.relay().is_none() && !self.config.remote_tunnel)
-        {
+        if !self.config.remote_access {
+            // a relay that is set says so, rather than "No relay"
+            return if self.config.relay().is_some() || self.config.remote_tunnel {
+                RelayLine::Stopped
+            } else {
+                RelayLine::Off
+            };
+        }
+        if self.config.relay().is_none() && !self.config.remote_tunnel {
             if self.config.remote_access && !self.config.remote_relay.trim().is_empty() {
                 // only the default relay under RIFT_NO_DEFAULT_RELAY
                 return RelayLine::Scripted;
@@ -23362,10 +23789,26 @@ impl App {
         if linted && let Some(w) = &self.win.window {
             w.request_redraw();
         }
+        // ⌘ held alone: the tabs' numbers appear once `HINT_DELAY` is up
+        let mut hint_due = None;
+        if let Some(since) = self.win.hint_hold {
+            let due = since + HINT_DELAY;
+            if Instant::now() < due {
+                hint_due = Some(due);
+            } else if !self.win.hints_drawn
+                && self.win.focused
+                && let Some(w) = &self.win.window
+            {
+                w.request_redraw();
+            }
+        }
         (
             output_frame,
             tip_due,
-            earliest(earliest(select_due, offer_due), edit_due),
+            earliest(
+                earliest(earliest(select_due, offer_due), edit_due),
+                hint_due,
+            ),
         )
     }
 
@@ -23731,6 +24174,8 @@ impl ApplicationHandler<UserEvent> for App {
                 // in progress ends here, keeping what it selected, or it
                 // would follow (and edge-scroll) the bare pointer
                 self.hotkey_window_focus(f);
+                // ⌘Tab away: the hold ends with the focus
+                self.win.hint_hold = None;
                 if !f {
                     self.win.pending_sel = None;
                 } else if self.win.settings.open {
@@ -23764,6 +24209,8 @@ impl ApplicationHandler<UserEvent> for App {
                 self.win.alt_sides = (m.lalt_state() == Pressed, m.ralt_state() == Pressed);
                 // ⌃ released: ⌃Tab's switcher switches
                 self.tab_switcher_modifiers();
+                // ⌘ held alone: the tabs' numbers after a moment
+                self.track_hint_hold();
                 self.update_cursor_icon(&window);
                 window.request_redraw();
             }
@@ -23881,7 +24328,19 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                         self.request_output_frame();
                     } else {
-                        tab.activity = true;
+                        // a fresh shell's startup (its first prompt) is no
+                        // news: only output after a command counts
+                        let ran = tab.pane(pane).is_some_and(|p| {
+                            p.session
+                                .blocks
+                                .lock()
+                                .unwrap()
+                                .iter()
+                                .any(|b| !b.command.trim().is_empty())
+                        });
+                        if ran {
+                            tab.mark_activity(pane);
+                        }
                         if let Some(p) = tab.pane(pane) {
                             p.session
                                 .dirty

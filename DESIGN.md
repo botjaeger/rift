@@ -98,7 +98,8 @@ glyphon; shaped runs are cached by content.
 
 | Element | Value | Constant |
 |---|---|---|
-| Tab bar height (Warp) | 34 px | `TAB_BAR_H` |
+| Tab bar height (Warp) / detailed tab style | 34 px / 44 px | `TAB_BAR_H`, `DETAILED_BAR_H` (`tabbar::bar_h()`) |
+| Tab end slots (status, × / ⌘ number), inset | 22 px, 6 px from the tab's edge | `SLOT`, `SLOT_INSET` |
 | Traffic light centres (x; y = strip middle) | 20 / 40 / 60 px | `TRAFFIC_X`, `TRAFFIC_GAP` |
 | First tab x (after traffic lights) | 78 px | `TABS_X` |
 | Tab width (fixed, Warp / squeezed minimum) | 200 px / 120 px | `TAB_W`, `MIN_TAB_W` |
@@ -121,7 +122,7 @@ glyphon; shaped runs are cached by content.
 | Welcome list width / row | 560 px / 36 px | `welcome::WIDTH`, `ROW_H` |
 | File explorer width / row | 260 px / 24 px | `EXPLORER_W`, `ROW_H` |
 | Code review width / diff line / file card | 460 px / 22 px / inset 10, radius 6 | `REVIEW_W`, `CARD_X` |
-| Edit prompt card / chip × / chip picker width, row | 600 px, padding 24 / 18 px / 360 px, 26 px | `prompt_editor::MODAL_W`, `X_W`, `chip_menu::MENU_W` |
+| Arranger card (Edit prompt, Edit toolbar) / item × / bucket gap, padding / toolbar item / chip picker width, row | 600 px, padding 24 / 18 px / 10 px, 12 px / 28 px / 360 px, 26 px | `arranger::MODAL_W`, `X_W`, `BUCKET_GAP`, `BUCKET_PAD`, `toolbar_editor::ITEM_H`, `chip_menu::MENU_W` |
 | Code review gutter / hunk toolbar button / maximized file list | ≥ 72 px / 20 px / 300 px, 26 px rows (panel ≥ 760 px) | `GUTTER_MIN`, `TOOL_W`, `SIDEBAR_W` |
 | Block cursor | 8 × 17 px; bar and underline 2 px | `CURSOR_H` |
 | Terminal scrollbar width / inset from the pane edge / shortest thumb / tick | 6 px (pill) / 1 px / 16 px / 2 px | `scrollbar::WIDTH`, `INSET`, `MIN_THUMB`, `TICK_H` |
@@ -138,8 +139,8 @@ glyphon; shaped runs are cached by content.
 | 3 | The Settings tab's page; the maximized code review; the file viewer's inactive-pane dim |
 | 4 | Palette and its modes (history, switcher); an open Settings select list |
 | 5 | Block context menu, prompt chip pickers, hint labels, notification toasts and popover, pane drop zone, a lifted tab |
-| 6 | Toasts, confirm dialogs, What's New, Edit prompt, the dragged pane's chip |
-| 7 | Tooltips and chip hover cards (alone on top: text of a shared layer would draw over their plate) |
+| 6 | Toasts, confirm dialogs, What's New, Edit prompt, Edit toolbar, the dragged pane's chip |
+| 7 | Tooltips and chip hover cards, the item dragged in Edit prompt or Edit toolbar (alone on top: text of a shared layer would draw over their plate) |
 
 A theme's background image draws before layer 0. Inline images draw under
 or over text by their z-index. Blending happens in sRGB
@@ -174,7 +175,7 @@ and title bars, 11–12 px for × and steppers. Colors: `text_dim` at rest,
 terminal, sidebar, split right/down, plus, minus, close, more (⋮), grip,
 search, history, revert, refresh, folder, file, inbox, settings, branch,
 copy, check, open (↗), chevrons, sync, maximize, restore, keyboard,
-bookmark, filter, appearance, themes, launch, info, lock. Prompt chips and their menu
+bookmark, filter, appearance, themes, launch, info, lock, pencil. Prompt chips and their menu
 rows carry Nerd Font glyphs instead (`glyphs.rs`): folder, git branch,
 diff, user, laptop, Python, PHP, GitHub, Docker,
 calendar, clock; notification badges use its bell and bell outline. A glyph added there must be added to the embedded subset
@@ -189,7 +190,8 @@ per 0.7 s, redrawn every output frame (≤ 120 Hz) so it moves smoothly.
 | Cursor blink | 1.1 s period |
 | Visual bell flash | 120 ms, full window |
 | Running badge | spinning ring, live elapsed time |
-| Background-tab activity | pulsing dot |
+| A tab that needs you | its dot pulses, 1.4 s (steady with Reduce motion) |
+| A working tab, underline style | an accent third sweeps its underline, 1.4 s; still with Reduce motion |
 | Synchronized output stall | shown after 150 ms |
 | Indeterminate tab progress (OSC 9;4) | 2 px `accent` third of the tab width sweeping across, 1.4 s; still with Reduce motion |
 
@@ -210,22 +212,39 @@ No other animation. Motion never delays input.
   tall, centred on the block cursor, the logo's proportions with a 2.2 px
   stroke) in `accent`, the logo's blue (`error` after a failure, muted when unfocused).
   Shell-prompt mode shows a 9 px muted chevron.
-- **Tabs**: no icon on a shell tab (the sync icon in `accent` when its
-  inputs are synced, the settings icon on the Settings tab), the title in
-  Inter 12.5, a pane count
-  chip (`3`) when split. The active tab sits on the pane ground (no rule
-  under it) with a 2 px `accent` top edge (a tab color wins); a hovered tab
-  lifts 3 %; tabs are divided by 1 px `border`. × shows on the active and
-  hovered tab, else the alert badge or a 6 px `accent` activity dot sits in
-  its place. A dragged tab lifts onto the pane ground with a shadow and
-  follows the pointer; its slot shows a 2 px `accent` caret.
+- **Tabs**: the title in Inter 12.5, centred between two 22 px end slots:
+  the × slot (`tab_close_side`) and the status slot. One status per tab,
+  coloured by meaning: `warning` needs you, `error` failed, `success` done,
+  `accent` working and new output; another pane's status is a 1.5 px ring
+  (a dot otherwise), a spinner at 45 %, a dashed underline (4 on, 3 off)
+  or a second line naming the pane. `tab_style`: **dot** — an 8 px dot or
+  the 13 px running spinner in the status slot (needs-you pulses 6.5–8 px);
+  **underline** — a 2 px rounded line the title's width 5 px under it,
+  working an accent third sweeping a 20 % track; **detailed** — a 44 px
+  strip, the title and its slots on the first line (middle − 5.5), an
+  11 px second line of words after a 6 px dot or 10 px spinner, the
+  words in the status colour (working and new output `text_muted`), the
+  idle line `text_muted`. The sync icon (`accent`), lock and Settings icon
+  sit in the status slot when it holds no status. The active tab sits on
+  the pane ground (no rule under it) with a 2 px `accent` top edge (a tab
+  color wins); a hovered tab lifts 3 %; tabs are divided by 1 px `border`.
+  × shows on the hovered tab only (`tab_close_button = "hover"`). While ⌘
+  is held, every tab's number sits in the × slot: Inter 11 medium on a
+  16 px pill at 9 % white, radius 3, `text_ui` on the active tab and
+  `text_dim` on the others. A dragged tab lifts onto the pane ground with a
+  shadow and follows the pointer; its slot shows a 2 px `accent` caret.
+  Settings › *Tab style* draws three picture cards (radius 8, 1 px 12 %
+  hairline, the chosen one a 1.5 px `accent` border and a filled radio),
+  each a 58 px picture of two tabs on `bg_chrome`.
 - **Update chip** (Warp's "Update Warp"): a 22 px pill (radius 11) left of
   the inbox, 1 px `warning` outline and `warning` text (Inter 12 medium, 10
   px padding), no fill; hover lifts 8 %. The **remote chip** (a phone is
   connected) is the same pill in `accent`.
 - **Buttons**: 28 px, radius 4, Inter 12.5 medium. Primary `accent` fill
   with `bg` text; secondary 6 % white with a 12 % hairline; ghost text only;
-  destructive `error` darkened 18 % with white text; disabled 3 % white with
+  destructive `error` darkened 18 % with white text; outline (a quiet
+  destructive action beside a row's other controls: Revoke) an `error` label
+  and a 55 % `error` hairline, no fill, 10 % `error` on hover; disabled 3 % white with
   an 8 % hairline and a `text_muted` label. Icon buttons are 24–26
   px with a 8 % hover lift. Key caps (`⏎`, `esc`) sit inside buttons that
   have a key.
@@ -237,6 +256,28 @@ No other animation. Motion never delays input.
 - **Segmented controls, steppers, toggles** (Settings): 28 px bordered
   groups (radius 4), the selected segment on 11 % white in `text_bright`;
   steppers are − value + with hairline dividers; toggles 34 × 20, knob 14.
+  Check boxes 16 px, radius 3: a 1.5 px `text_muted` edge, checked an
+  `accent` fill with a `bg` check; the label and its line sit 10 px right.
+  A folded section is a 40 px row: a 12 px chevron (› shut, ⌄ open), the
+  title in Inter 13 medium and a count tag.
+- **Settings status card** (Remote access): the body's width, radius 8,
+  2.5 % white over a hairline, 18 px padding: a 40 px icon tile (radius 8;
+  `accent` 14 % with an `accent` phone while on, 6 % white and `text_muted`
+  off), the title (Inter 15 semibold) and a wrapped 12.5 px line, the switch
+  level with the title. While on, two tiles share a row (stacked under 220
+  px each): radius 6, 55 % `bg`, an 8 % hairline, 12 px padding; a 20 px
+  state badge (check `success`, … `accent`, × `error`, – muted), the label,
+  an optional tag (the round trip), a mono value, a wrapped note and the
+  whole error in a mono block with Try again. The pairing code sits in an
+  `accent`-edged panel (5 % fill, 35 % edge, radius 8).
+- **Theme cards** (Settings › Themes): three per row (at least 190 px each,
+  14 px apart), 150 px tall, radius 8, 2 % white with a 10 % hairline (28 %
+  hovered; the active one a 2 px `accent` ring and an `accent` check): a 104
+  px small window in the theme's own tokens (`bg`, an 18 px `bg_chrome`
+  strip with three dots, an active tab with a 1.5 px `accent` edge, success
+  and error blocks with 2 px edges, the prompt's `accent` chevron and a
+  `cursor` block), then the name (Inter 13 medium) and a `Dark` / `Light`
+  tag. The last card is dashed: Add your own with Open themes folder.
 - **Modals** (palette and its modes): `surface` ground, hairline border,
   soft shadow, 40 % black backdrop, radius 8. Rows show a fuzzy match
   highlight and right-aligned key caps resolved from the live keymap.
@@ -247,6 +288,25 @@ No other animation. Motion never delays input.
   terminal mark) and the agent's name, other lines as mono code; a sunken
   footer bar under a hairline with Cancel `esc` and the confirm button `⏎`
   (30 px, radius 6; red for discarding work).
+- **Arranger dialog** (Edit prompt, Edit toolbar; `views/arranger.rs`): a
+  600 px `surface` card, radius 8, over a 40 % black backdrop. Title Inter
+  16 semibold with `Restore default` in `accent` on its row (`text_muted`
+  and inert at the default). Section labels Inter 11.5 semibold
+  `text_dim`. The items in use sit in dashed buckets (1.5 px dashes of 6 /
+  4 px, white 38 %; `accent` with a 6 % accent wash while a drag is over
+  it), 12 px inside, side by side with 10 px between (Edit toolbar's
+  *Left* / *Right*, labelled in 10.5 px caps `text_muted`). Toolbar items
+  are 28 px framed buttons (6 % lift, 14 % hairline, radius 5; icon 16 px
+  `text_dim`, name Inter 12.5 `text_ui`); prompt chips keep their own chip
+  look. Each bucket item carries a × (`text_muted`, `error` on hover); the
+  keyboard's item has a 1.5 px `accent` ring. While dragging, a 2 px
+  `accent` bar marks the drop place and the item follows the pointer on
+  layer 7 with a soft shadow. Footer: `Cancel` with an `esc` key cap and
+  `Save changes` with `⏎` (accent fill once something changed, else a 3 %
+  lift with a hairline and `text_muted`). The settings rows that open it
+  are previews in a hairline box (accent border and 6 % lift on hover) with
+  `✎ Edit` (pencil icon, Inter 12, `text_muted`, `text_ui` on hover) at
+  the right end.
 - **Docked panels** (completion, history): opaque `bg`, pane width, square,
   a hairline on the edge toward the output. Header 32 px (source tabs or
   scope chips in small caps), rows 28 px with a 7 % selection (history adds a
@@ -283,8 +343,8 @@ No other animation. Motion never delays input.
   inbox button, 8 px apart, no stripe (the badge's kind dot carries the
   kind); badge and text centred on the card's height, title semibold 13
   (two lines), detail 12.5. A notification without an agent gets a bell
-  badge (Nerd Font `fa-bell`; a terminal bell `fa-bell_o`). Tab markers: a 7 px kind
-  dot with a 12 px halo at 25 %.
+  badge (Nerd Font `fa-bell`; a terminal bell `fa-bell_o`). Tabs show it as their
+  status (see **Tabs**).
 - **Split panes** (Warp style): flush, square-cornered panes divided by a
   1 px `pane_border_inactive` line; the focused pane's title bar carries a
   2 px `accent` top edge; the others wash lighter under 10 % white

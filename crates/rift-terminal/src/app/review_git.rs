@@ -267,7 +267,7 @@ impl App {
                     };
                     let name = match agent {
                         Some(a) => a.name().to_string(),
-                        None if !p.title.is_empty() => p.title.clone(),
+                        None if !p.program_title().is_empty() => p.program_title().to_string(),
                         None => tab.display_title(),
                     };
                     let this = if from == Some(p.session.id) {

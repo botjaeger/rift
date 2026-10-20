@@ -1,7 +1,7 @@
 use rift_core::{
     Bell, BlockSpacing, Color, Config, CursorStyle, InputPosition, Keymap, NewTabPlacement,
-    PromptMode, TabBarVisibility, TabCloseButton, TabCloseSide, TabLayout, Theme, ToolbarItem,
-    ToolbarSide,
+    PromptMode, TabBarVisibility, TabCloseButton, TabCloseSide, TabLayout, TabStyle, Theme,
+    ToolbarItem,
 };
 use rift_renderer::glyphon::{Attrs, Buffer, Family, Metrics, Shaping, TextBounds, Weight};
 use rift_renderer::{FONT_SANS, Layer, TextEngine, mono_family};
@@ -188,9 +188,11 @@ impl GatewayLine {
 /// Settings › Remote access's relay line (from `status.json`).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum RelayLine {
-    /// No relay set (or remote access is off).
+    /// No relay set.
     #[default]
     Off,
+    /// A relay is set, but remote access is off: nothing dials it.
+    Stopped,
     /// Only the default relay is configured and the run is scripted
     /// (`RIFT_NO_DEFAULT_RELAY`).
     Scripted,
@@ -214,7 +216,8 @@ impl RelayLine {
     /// The state in a sentence (under the label).
     pub fn text(&self) -> String {
         match self {
-            RelayLine::Off => "No relay: phones connect only on this network".into(),
+            RelayLine::Off => "No relay set: phones connect only on this Wi-Fi".into(),
+            RelayLine::Stopped => "Off while remote access is off".into(),
             RelayLine::Scripted => "Not used in scripted runs".into(),
             RelayLine::Connecting(_) => "Registering this computer at the relay…".into(),
             RelayLine::Connected {
@@ -239,7 +242,7 @@ impl RelayLine {
             RelayLine::Connecting(host)
             | RelayLine::Connected { host, .. }
             | RelayLine::Error { host, .. } => Some(host),
-            RelayLine::Off | RelayLine::Scripted => None,
+            RelayLine::Off | RelayLine::Stopped | RelayLine::Scripted => None,
         }
     }
 
@@ -292,6 +295,9 @@ pub struct DeviceRow {
     pub name: String,
     /// `Connected through the relay · iOS · paired October 12, 2026`
     pub detail: String,
+    /// `iOS · paired October 12, 2026` (how it is connected left out: the
+    /// page says that itself while remote access is off).
+    pub about: String,
     pub path: DevicePath,
     /// It may only watch (else operate).
     pub view_only: bool,
@@ -329,6 +335,9 @@ pub struct RemoteView {
     /// `devices.json` was read at least once (before that the list is not
     /// known: "No paired devices" would be a guess).
     pub devices_loaded: bool,
+    /// The page has been read since it opened (`App::redraw` reads it on
+    /// its first frame, so the phones never pop in a second later).
+    pub page_read: bool,
     /// The next pairing link grants `view` only.
     pub view_only: bool,
     /// "Pair a phone" was pressed and waits for the gateway's addresses.
@@ -337,8 +346,11 @@ pub struct RemoteView {
     pub relay: RelayLine,
     /// The relay field is being edited: its text (⏎ saves, Esc cancels).
     pub relay_edit: Option<String>,
-    /// "Relay settings…" is open (the relay address, the Cloudflare tunnel).
+    /// "Connection settings" is open (the listen address, the relay
+    /// address, the Cloudflare tunnel).
     pub relay_open: bool,
+    /// "Recent connections" is open.
+    pub history_open: bool,
     /// `remote_tunnel`: the gateway's `tunnel.json` (None: not running yet).
     pub tunnel: Option<crate::tunnel::TunnelState>,
     /// Where cloudflared is installed (checked while the page shows).
@@ -409,6 +421,158 @@ pub struct SettingsState {
     pub profile_error: Option<String>,
     /// Settings › Profiles: a row pressed for a drag.
     pub profile_drag: Option<ProfileDrag>,
+    /// Settings › Themes: which themes the grid shows.
+    pub theme_filter: ThemeFilter,
+}
+
+/// Settings › Themes' All / Dark / Light filter.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ThemeFilter {
+    #[default]
+    All,
+    Dark,
+    Light,
+}
+
+impl ThemeFilter {
+    pub const ALL: [ThemeFilter; 3] = [ThemeFilter::All, ThemeFilter::Dark, ThemeFilter::Light];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ThemeFilter::All => "All",
+            ThemeFilter::Dark => "Dark",
+            ThemeFilter::Light => "Light",
+        }
+    }
+
+    /// A theme with a light (`Some(true)`) or dark ground shows under this
+    /// filter; one whose file does not load (`None`) only under All.
+    pub fn shows(self, light: Option<bool>) -> bool {
+        match self {
+            ThemeFilter::All => true,
+            ThemeFilter::Dark => light == Some(false),
+            ThemeFilter::Light => light == Some(true),
+        }
+    }
+
+    /// How many of `lights` (one per theme, as [`ThemeFilter::shows`] takes
+    /// it) show.
+    pub fn count(self, lights: &[Option<bool>]) -> usize {
+        lights.iter().filter(|l| self.shows(**l)).count()
+    }
+}
+
+/// Columns of the theme grid in a body `width` wide: cards at least
+/// [`THEME_CARD_MIN_W`] wide with [`THEME_GAP`] between them, at most three.
+pub fn theme_columns(width: f32) -> usize {
+    (((width + THEME_GAP) / (THEME_CARD_MIN_W + THEME_GAP)).floor() as usize).clamp(1, 3)
+}
+
+/// An arrow key over a grid of cards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GridStep {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+/// The card an arrow key moves to from `from` among `cards` (in reading
+/// order, with their rects): ← → the previous / next one; ↑ ↓ the nearest
+/// in the row above / below (the closest column). `None`: nowhere to go.
+pub fn grid_step(
+    cards: &[(ClickTarget, [f32; 4])],
+    from: Option<&ClickTarget>,
+    step: GridStep,
+) -> Option<ClickTarget> {
+    let i = cards.iter().position(|(t, _)| Some(t) == from)?;
+    let r = cards[i].1;
+    match step {
+        GridStep::Left => i.checked_sub(1).map(|j| cards[j].0.clone()),
+        GridStep::Right => cards.get(i + 1).map(|c| c.0.clone()),
+        GridStep::Up | GridStep::Down => {
+            let row_y = |c: &[f32; 4]| c[1];
+            let ahead = |c: &[f32; 4]| {
+                if step == GridStep::Up {
+                    row_y(c) < r[1] - 1.0
+                } else {
+                    row_y(c) > r[1] + 1.0
+                }
+            };
+            // the nearest row in that direction, then the closest column
+            let row = cards
+                .iter()
+                .filter(|(_, c)| ahead(c))
+                .map(|(_, c)| (row_y(c) - r[1]).abs())
+                .fold(f32::INFINITY, f32::min);
+            cards
+                .iter()
+                .filter(|(_, c)| ahead(c) && ((row_y(c) - r[1]).abs() - row).abs() < 1.0)
+                .min_by(|a, b| {
+                    let d = |c: &[f32; 4]| (c[0] - r[0]).abs();
+                    d(&a.1).total_cmp(&d(&b.1))
+                })
+                .map(|c| c.0.clone())
+        }
+    }
+}
+
+/// Narrowest theme card, and the gap between cards.
+pub const THEME_CARD_MIN_W: f32 = 190.0;
+pub const THEME_GAP: f32 = 14.0;
+
+/// What Settings › Remote access › Pair a phone shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PairStage {
+    /// Remote access is off: no pairing at all.
+    Hidden,
+    /// The Pair a phone button.
+    Idle,
+    /// Pair a phone was pressed; the gateway (or the tunnel) has no address
+    /// to put in the link yet.
+    Waiting,
+    /// The code, its countdown, Copy link and Cancel.
+    Showing,
+    /// The code ran out: "Expired" and Show a new code.
+    Expired,
+}
+
+/// The stage of the pairing section at `now`.
+pub fn pair_stage(
+    on: bool,
+    wait: bool,
+    pairing: Option<&PairingView>,
+    now: std::time::SystemTime,
+) -> PairStage {
+    match pairing {
+        _ if !on => PairStage::Hidden,
+        Some(p) if p.expires_at > now => PairStage::Showing,
+        Some(_) => PairStage::Expired,
+        None if wait => PairStage::Waiting,
+        None => PairStage::Idle,
+    }
+}
+
+/// The status card's title and line on Settings › Remote access.
+pub fn remote_heading(on: bool, gateway: &GatewayLine) -> (String, &'static str) {
+    if !on {
+        return (
+            "Remote access is off".into(),
+            "Turn it on to watch and run commands from your phone. Until then nothing listens and no phone can reach this computer.",
+        );
+    }
+    let line =
+        "Paired phones can see your tabs and run commands in them, on this Wi-Fi or from away.";
+    match gateway {
+        GatewayLine::Off | GatewayLine::Starting => ("Starting remote access…".into(), line),
+        GatewayLine::Listening(a) if a.is_empty() => (
+            "Not on a network".into(),
+            "Remote access is on, but this computer has no network address phones could reach.",
+        ),
+        GatewayLine::Listening(_) => ("Ready for your phone".into(), line),
+        GatewayLine::Connected(1) => ("1 phone connected".into(), line),
+        GatewayLine::Connected(n) => (format!("{n} phones connected"), line),
+    }
 }
 
 /// A Settings › Profiles row held by the pointer: past a few pixels it moves
@@ -513,6 +677,7 @@ fn focusable(target: &ClickTarget) -> bool {
             | ClickTarget::SettingsKeybindReset(_)
             | ClickTarget::SettingsReset(_)
             | ClickTarget::SettingsEditPrompt
+            | ClickTarget::SettingsEditToolbar
             | ClickTarget::SettingsOpenConfig
             | ClickTarget::SettingsCopyVersion
             | ClickTarget::RemoteHistoryList
@@ -523,8 +688,12 @@ fn focusable(target: &ClickTarget) -> bool {
             | ClickTarget::SettingsTestAlert(_)
             | ClickTarget::SettingsRingBell
             | ClickTarget::SettingsNotifyPermission
+            | ClickTarget::SettingsThemeFilter(_)
+            | ClickTarget::SettingsOpenThemes
             | ClickTarget::RemotePair
             | ClickTarget::RemoteViewOnly
+            | ClickTarget::RemotePairCancel
+            | ClickTarget::RemoteHistory
             | ClickTarget::RemoteCopyLink
             | ClickTarget::RemoteRevoke(_)
             | ClickTarget::RemoteRelay
@@ -650,13 +819,14 @@ pub const ROWS: &[&str] = &[
     "snap_to_cells",
     "resize_overlay",
     "tab_layout",
+    "tab_style",
     "tab_close_button",
     "tab_close_side",
     "tab_bar",
     "new_tab_placement",
     "tab_switch_order",
     "tab_bar_with_one_tab",
-    // the Toolbar rows: each button's side and place
+    // the Toolbar buttons preview opens Edit toolbar
     "toolbar_left",
     "toolbar_right",
     "dim_inactive_panes",
@@ -741,6 +911,8 @@ pub const ROWS: &[&str] = &[
 fn covered(id: &str) -> &'static [&'static str] {
     match id {
         "window_padding" => &["window_padding_left", "window_padding_right"],
+        // the Toolbar buttons preview stands for both sides
+        "toolbar_left" => &["toolbar_right"],
         _ => &[],
     }
 }
@@ -1154,9 +1326,12 @@ pub fn render(
             Page::Files,
             Page::Notifications,
             Page::Remote,
+            Page::Themes,
         ] {
             form.page = page.label();
             match page {
+                // by name: a match applies that theme
+                Page::Themes => themes_search(&mut form, config),
                 Page::General => general_page(&mut form, config, &state.update),
                 // its settings only: the list and its forms need the page
                 Page::Profiles => profile_settings(&mut form, config),
@@ -1188,7 +1363,7 @@ pub fn render(
             Page::Files => files_page(&mut form, config),
             Page::Notifications => notifications_page(&mut form, config),
             Page::Keybindings => keybindings_page(&mut form, keymap, config, state, blink_on),
-            Page::Themes => themes_page(&mut form, config),
+            Page::Themes => themes_page(&mut form, config, state.theme_filter),
             Page::Remote => remote_page(
                 &mut form,
                 config,
@@ -1495,7 +1670,12 @@ impl Form<'_> {
     }
 
     fn group(&mut self, label: &str) {
-        self.crumb = format!("{} › {label}", self.page);
+        // a group named like its page (Input › Input) says it once
+        self.crumb = if label.eq_ignore_ascii_case(self.page) {
+            self.page.to_string()
+        } else {
+            format!("{} › {label}", self.page)
+        };
         if !self.filter.is_empty() {
             return;
         }
@@ -1613,10 +1793,9 @@ impl Form<'_> {
     /// A setting changed from its default: an accent dot after the label
     /// and ↺ (reset) left of the control at `control_x`.
     fn changed(&mut self, id: &'static str, y: f32, control_x: f32) {
-        // a row's key is listed (the toolbar's per-button ids stand for
-        // toolbar_left / toolbar_right; a profile's fields for the list)
+        // a row's key is listed (a profile's fields stand for the list)
         debug_assert!(
-            ROWS.contains(&id) || id.starts_with("toolbar") || id.starts_with("profile."),
+            ROWS.contains(&id) || id.starts_with("profile."),
             "Settings row {id} is missing from settings::ROWS"
         );
         if self.hidden || !is_changed(self.current, self.defaults, id) {
@@ -1726,6 +1905,15 @@ impl Form<'_> {
                     theme.error.mix(Color::BLACK, 0.18),
                     Color::TRANSPARENT,
                     Color::WHITE,
+                ),
+                ButtonKind::Outline => (
+                    if hot {
+                        theme.error.with_alpha(0.10)
+                    } else {
+                        Color::TRANSPARENT
+                    },
+                    theme.error.with_alpha(0.55),
+                    theme.error,
                 ),
                 ButtonKind::Disabled => (lift(theme, 0.03), lift(theme, 0.08), theme.text_muted),
             };
@@ -1842,25 +2030,14 @@ impl Form<'_> {
     /// that opens "Edit prompt".
     fn prompt_preview(&mut self, y: f32, chips: &[rift_core::PromptChip]) {
         self.label_desc("Prompt chips", "Click to choose and order them", y);
+        self.changed("prompt_chips", y, self.right());
         if self.hidden {
             return;
         }
         let r = [self.x, self.y + 4.0, self.card_w, 40.0];
         self.y = r[1] + r[3] + 8.0;
         if self.visible(r[1], r[3]) {
-            let hot = self.hot(r);
-            self.layer.bordered(
-                [r[0], r[1]],
-                [r[2], r[3]],
-                lift(self.theme, if hot { 0.06 } else { 0.03 }),
-                if hot {
-                    self.theme.accent
-                } else {
-                    lift(self.theme, 0.1)
-                },
-                6.0,
-                1.0,
-            );
+            let edit_w = self.preview_box(r);
             let views: Vec<_> = chips
                 .iter()
                 .map(|c| super::prompt_chips::sample(*c, self.theme))
@@ -1877,13 +2054,334 @@ impl Form<'_> {
                 self.layer,
                 self.engine,
                 self.theme,
-                [r[0] + 12.0, r[0] + r[2] - 12.0],
+                [r[0] + 12.0, r[0] + r[2] - 12.0 - edit_w],
                 r[1] + 13.0,
                 &views,
             );
         }
         self.push_hit(r, ClickTarget::SettingsEditPrompt);
         self.name_last("Edit prompt chips".into());
+    }
+
+    /// The frame of a preview that opens its editor (prompt chips,
+    /// toolbar): a hairline box that lifts with an accent border on hover,
+    /// and "✎ Edit" at its right end, brighter on hover. Returns the width
+    /// the hint takes (the preview keeps clear of it).
+    fn preview_box(&mut self, r: [f32; 4]) -> f32 {
+        let hot = self.hot(r);
+        self.layer.bordered(
+            [r[0], r[1]],
+            [r[2], r[3]],
+            lift(self.theme, if hot { 0.06 } else { 0.03 }),
+            if hot {
+                self.theme.accent
+            } else {
+                lift(self.theme, 0.1)
+            },
+            6.0,
+            1.0,
+        );
+        let ink = if hot {
+            self.theme.text_ui
+        } else {
+            self.theme.text_muted
+        };
+        let tw = self.engine.measure("Edit", 12.0, FONT_SANS, Weight::NORMAL);
+        let w = 13.0 + 5.0 + tw;
+        let x = r[0] + r[2] - 12.0 - w;
+        let mid = r[1] + r[3] / 2.0;
+        icons::draw(self.layer, Icon::Pencil, [x + 6.5, mid], 13.0, ink);
+        self.layer.text(
+            sans(self.engine, "Edit", 12.0, Weight::NORMAL),
+            x + 18.0,
+            mid - 8.0,
+            ink,
+        );
+        w + 12.0
+    }
+
+    /// The toolbar as the strip shows it (traffic lights, the left
+    /// buttons, two sample tabs, the right buttons) in a preview that opens
+    /// "Edit toolbar".
+    fn toolbar_preview(&mut self, y: f32, left: &[ToolbarItem], right: &[ToolbarItem]) {
+        self.label_desc("Toolbar buttons", "Click to choose and arrange them", y);
+        self.changed("toolbar_left", y, self.right());
+        if self.hidden {
+            return;
+        }
+        let r = [self.x, self.y + 4.0, self.card_w, 46.0];
+        self.y = r[1] + r[3] + 8.0;
+        if self.visible(r[1], r[3]) {
+            let edit_w = self.preview_box(r);
+            let theme = self.theme;
+            let strip = [r[0] + 8.0, r[1] + 8.0, r[2] - 16.0 - edit_w, 30.0];
+            self.layer.rect(
+                [strip[0], strip[1]],
+                [strip[2], strip[3]],
+                theme.ground(theme.bg_chrome),
+                4.0,
+            );
+            let mid = strip[1] + strip[3] / 2.0;
+            let mut x = strip[0] + 10.0;
+            for _ in 0..3 {
+                self.layer.circle([x + 5.0, mid], 10.0, lift(theme, 0.2));
+                x += 17.0;
+            }
+            x += 4.0;
+            for item in left {
+                super::toolbar_editor::draw_mark(
+                    self.layer,
+                    *item,
+                    [x + 12.0, mid],
+                    theme.text_dim,
+                );
+                x += 26.0;
+            }
+            // the right buttons from the strip's right end
+            let mut rx = strip[0] + strip[2] - 6.0 - 26.0 * right.len() as f32;
+            let tabs_end = rx - 6.0;
+            for item in right {
+                super::toolbar_editor::draw_mark(
+                    self.layer,
+                    *item,
+                    [rx + 13.0, mid],
+                    theme.text_dim,
+                );
+                rx += 26.0;
+            }
+            // two sample tabs between, the first active
+            let tw = ((tabs_end - x - 6.0) / 2.0).clamp(0.0, 120.0);
+            for (k, title) in ["project1", "~"].iter().enumerate() {
+                let tx = x + 6.0 + k as f32 * tw;
+                if tw < 40.0 {
+                    break;
+                }
+                if k == 0 {
+                    self.layer
+                        .rect([tx, strip[1]], [tw, strip[3]], theme.ground(theme.bg), 0.0);
+                    self.layer
+                        .rect([tx, strip[1]], [tw, 1.5], theme.accent, 0.0);
+                }
+                self.layer.rect(
+                    [tx + tw - 1.0, strip[1]],
+                    [1.0, strip[3]],
+                    theme.border,
+                    0.0,
+                );
+                let w = self.engine.measure(title, 11.0, FONT_SANS, Weight::NORMAL);
+                self.layer.text(
+                    sans(self.engine, title, 11.0, Weight::NORMAL),
+                    tx + (tw - w) / 2.0,
+                    mid - 7.5,
+                    if k == 0 {
+                        theme.text_ui
+                    } else {
+                        theme.text_dim
+                    },
+                );
+            }
+        }
+        self.push_hit(r, ClickTarget::SettingsEditToolbar);
+        let names = |items: &[ToolbarItem]| {
+            if items.is_empty() {
+                "none".to_string()
+            } else {
+                items
+                    .iter()
+                    .map(|i| i.label())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        };
+        self.name_last(format!(
+            "Edit toolbar buttons: left {}; right {}",
+            names(left),
+            names(right)
+        ));
+    }
+
+    /// `tab_style`: one picture card per style (two small tabs drawn in it,
+    /// a radio and its name, Dot tagged Default); a card picks its style
+    /// (`SettingsSegment("tab_style", i)`).
+    fn tab_style_cards(&mut self, y: f32, active: usize) {
+        const NAMES: [&str; 3] = ["Dot", "Underline", "Detailed"];
+        const ABOUT: [&str; 3] = [
+            "A dot by the title",
+            "The title underlined",
+            "The state in words",
+        ];
+        const ILLUS_H: f32 = 58.0;
+        const CARD_H: f32 = ILLUS_H + 46.0;
+        const GAP: f32 = 12.0;
+        self.label_desc("Tab style", "How a tab shows what its panes are doing", y);
+        self.changed("tab_style", y, self.right());
+        if self.hidden {
+            return;
+        }
+        let top = self.y + 4.0;
+        self.y = top + CARD_H + 10.0;
+        let w = ((self.card_w - 2.0 * GAP) / 3.0).floor();
+        for (i, name) in NAMES.iter().enumerate() {
+            let r = [self.x + i as f32 * (w + GAP), top, w, CARD_H];
+            let on = i == active;
+            if self.visible(r[1], r[3]) {
+                let hot = self.hot(r);
+                let border = if on {
+                    self.theme.accent
+                } else if hot {
+                    lift(self.theme, 0.28)
+                } else {
+                    lift(self.theme, 0.12)
+                };
+                self.layer.bordered(
+                    [r[0], r[1]],
+                    [r[2], r[3]],
+                    lift(self.theme, 0.02),
+                    border,
+                    8.0,
+                    if on { 1.5 } else { 1.0 },
+                );
+                let illus = [r[0] + 6.0, r[1] + 6.0, r[2] - 12.0, ILLUS_H - 6.0];
+                self.mini_tabs(illus, i);
+                // radio, name, Default
+                let cy = r[1] + ILLUS_H + 16.0;
+                let rx = r[0] + 12.0;
+                self.layer.bordered(
+                    [rx, cy - 7.0],
+                    [14.0, 14.0],
+                    Color::TRANSPARENT,
+                    if on {
+                        self.theme.accent
+                    } else {
+                        self.theme.text_muted
+                    },
+                    7.0,
+                    1.5,
+                );
+                if on {
+                    self.layer.circle([rx + 7.0, cy], 6.0, self.theme.accent);
+                }
+                self.layer.text(
+                    sans(self.engine, name, 13.0, Weight::SEMIBOLD),
+                    rx + 22.0,
+                    cy - 8.5,
+                    self.theme.text_bright,
+                );
+                if i == 0 {
+                    let nw = self.engine.measure(name, 13.0, FONT_SANS, Weight::SEMIBOLD);
+                    let tag = "Default";
+                    let tw = self.engine.measure(tag, 10.5, FONT_SANS, Weight::MEDIUM) + 12.0;
+                    let tx = rx + 22.0 + nw + 8.0;
+                    self.layer
+                        .rect([tx, cy - 8.0], [tw, 16.0], lift(self.theme, 0.08), 3.0);
+                    self.layer.text(
+                        sans(self.engine, tag, 10.5, Weight::MEDIUM),
+                        tx + 6.0,
+                        cy - 7.0,
+                        self.theme.text_dim,
+                    );
+                }
+                let about =
+                    super::palette::elide_to(self.engine, ABOUT[i], 12.0, FONT_SANS, w - 24.0);
+                self.layer.text(
+                    sans(self.engine, &about, 12.0, Weight::NORMAL),
+                    rx,
+                    cy + 11.0,
+                    self.theme.text_muted,
+                );
+            }
+            self.push_hit(r, ClickTarget::SettingsSegment("tab_style", i as u8));
+            self.name_last(format!(
+                "Tab style: {name}, {}{}",
+                ABOUT[i].to_lowercase(),
+                if on { ", selected" } else { "" }
+            ));
+        }
+    }
+
+    /// The picture on tab style card `style` (0 dot, 1 underline, 2
+    /// detailed): two small tabs in the strip's colours, one needing you
+    /// (active) and one done.
+    fn mini_tabs(&mut self, r: [f32; 4], style: usize) {
+        let theme = self.theme;
+        self.layer.rect(
+            [r[0], r[1]],
+            [r[2], r[3]],
+            theme.ground(theme.bg_chrome),
+            5.0,
+        );
+        let th = if style == 2 { 36.0 } else { 28.0 };
+        let ty = r[1] + (r[3] - th) / 2.0;
+        let tw = ((r[2] - 16.0) / 2.0).floor();
+        let samples = [
+            ("project2", theme.warning, "Needs you"),
+            ("project1", theme.success, "Done"),
+        ];
+        for (k, (title, color, words)) in samples.iter().enumerate() {
+            let x = r[0] + 8.0 + k as f32 * tw;
+            let active = k == 0;
+            if active {
+                self.layer
+                    .rect([x, ty], [tw, th], theme.ground(theme.bg), 0.0);
+                self.layer.rect([x, ty], [tw, 1.5], theme.accent, 0.0);
+            }
+            self.layer
+                .rect([x + tw - 1.0, ty], [1.0, th], theme.border, 0.0);
+            let ink = if active {
+                theme.text_ui
+            } else {
+                theme.text_dim
+            };
+            // a narrow card shrinks the sample text to fit its tab (the dot
+            // style also fits the dot)
+            let room = tw - if style == 0 { 24.0 } else { 10.0 };
+            let full = self.engine.measure(title, 11.0, FONT_SANS, Weight::NORMAL);
+            let size = (11.0 * (room / full).min(1.0)).max(8.0);
+            let w = self.engine.measure(title, size, FONT_SANS, Weight::NORMAL);
+            let mid = ty + th / 2.0;
+            match style {
+                0 => {
+                    self.layer.circle([x + 9.0, mid], 6.0, *color);
+                    let tx = x + 16.0 + (tw - 16.0 - w) / 2.0;
+                    self.layer.text(
+                        sans(self.engine, title, size, Weight::NORMAL),
+                        tx,
+                        mid - 7.5,
+                        ink,
+                    );
+                }
+                1 => {
+                    let tx = x + (tw - w) / 2.0;
+                    self.layer.text(
+                        sans(self.engine, title, size, Weight::NORMAL),
+                        tx,
+                        mid - 8.5,
+                        ink,
+                    );
+                    self.layer.rect([tx, mid + 6.0], [w, 2.0], *color, 1.0);
+                }
+                _ => {
+                    let tx = x + (tw - w) / 2.0;
+                    self.layer.text(
+                        sans(self.engine, title, size, Weight::NORMAL),
+                        tx,
+                        mid - 14.0,
+                        ink,
+                    );
+                    let wfull = self.engine.measure(words, 9.5, FONT_SANS, Weight::NORMAL);
+                    let ws = (9.5 * ((tw - 20.0) / wfull).min(1.0)).max(7.5);
+                    let ww = self.engine.measure(words, ws, FONT_SANS, Weight::NORMAL);
+                    let lx = x + (tw - ww - 9.0) / 2.0;
+                    self.layer.circle([lx + 2.5, mid + 6.5], 5.0, *color);
+                    self.layer.text(
+                        sans(self.engine, words, ws, Weight::NORMAL),
+                        lx + 9.0,
+                        mid + 0.5,
+                        *color,
+                    );
+                }
+            }
+        }
     }
 
     fn segment(&mut self, y: f32, label: &str, options: &[&str], active: usize, id: &'static str) {
@@ -2252,6 +2750,182 @@ impl Form<'_> {
         self.name_last(format!("{label}: {value}"));
     }
 
+    /// A check box row: the box, then the label and a muted line under it;
+    /// the whole row presses `target`.
+    fn checkbox(&mut self, y: f32, label: &str, desc: &str, on: bool, target: ClickTarget) {
+        const BOX: f32 = 16.0;
+        let f = &self.filter;
+        self.row_label = label.to_string();
+        self.hidden =
+            !(f.is_empty() || label.to_lowercase().contains(f) || desc.to_lowercase().contains(f));
+        if self.hidden {
+            return;
+        }
+        self.rows += 1;
+        self.y = y + ROW_H;
+        let tx = self.x + BOX + 10.0;
+        let lw = self.engine.measure(label, 13.0, FONT_SANS, Weight::NORMAL);
+        let dw = self.engine.measure(desc, 12.0, FONT_SANS, Weight::NORMAL);
+        let hit = [
+            self.x - 4.0,
+            y + 4.0,
+            BOX + 10.0 + lw.max(dw) + 8.0,
+            ROW_H - 8.0,
+        ];
+        if self.visible(y, ROW_H) {
+            let theme = self.theme;
+            let by = y + 9.0 + 8.8 - BOX / 2.0;
+            if on {
+                self.layer.rect([self.x, by], [BOX, BOX], theme.accent, 3.0);
+                icons::draw(
+                    self.layer,
+                    Icon::Check,
+                    [self.x + BOX / 2.0, by + BOX / 2.0],
+                    12.0,
+                    theme.bg,
+                );
+            } else {
+                let hot = self.hot(hit);
+                self.layer.bordered(
+                    [self.x, by],
+                    [BOX, BOX],
+                    if hot {
+                        lift(theme, 0.06)
+                    } else {
+                        Color::TRANSPARENT
+                    },
+                    theme.text_muted,
+                    3.0,
+                    1.5,
+                );
+            }
+            self.layer.text(
+                sans(self.engine, label, 13.0, Weight::NORMAL),
+                tx,
+                y + 9.0,
+                theme.text_ui,
+            );
+            if !desc.is_empty() {
+                self.layer.text(
+                    sans(self.engine, desc, 12.0, Weight::NORMAL),
+                    tx,
+                    y + 28.0,
+                    theme.text_muted,
+                );
+            }
+            self.layer
+                .hline(self.x, y + ROW_H - 1.0, self.card_w, 1.0, lift(theme, 0.06));
+        }
+        self.push_hit(hit, target);
+    }
+
+    /// A row of plain words: a label (may be empty) over a wrapped muted
+    /// line; nothing to press, but named for assistive tech.
+    fn note_row(&mut self, label: &str, text: &str) {
+        let f = &self.filter;
+        self.row_label = if label.is_empty() {
+            text.to_string()
+        } else {
+            label.to_string()
+        };
+        self.hidden =
+            !(f.is_empty() || label.to_lowercase().contains(f) || text.to_lowercase().contains(f));
+        if self.hidden {
+            return;
+        }
+        self.rows += 1;
+        let y = self.y;
+        let lines = wrap_lines(self.engine, text, 12.0, FONT_SANS, self.card_w);
+        let label_h = if label.is_empty() { 0.0 } else { 19.0 };
+        let h = (12.0 + label_h + lines.len() as f32 * NOTE_LH + 12.0).round();
+        if self.visible(y, h) {
+            let theme = self.theme;
+            if !label.is_empty() {
+                self.layer.text(
+                    sans(self.engine, label, 13.0, Weight::NORMAL),
+                    self.x,
+                    y + 12.0,
+                    theme.text_ui,
+                );
+            }
+            for (i, l) in lines.iter().enumerate() {
+                self.layer.text(
+                    sans(self.engine, l, 12.0, Weight::NORMAL),
+                    self.x,
+                    y + 12.0 + label_h + i as f32 * NOTE_LH,
+                    theme.text_muted,
+                );
+            }
+            self.layer
+                .hline(self.x, y + h - 1.0, self.card_w, 1.0, lift(theme, 0.06));
+        }
+        self.push_hit([self.x, y, self.card_w, h], ClickTarget::SettingsNoop);
+        self.name_last(if label.is_empty() {
+            text.to_string()
+        } else {
+            format!("{label}. {text}")
+        });
+        self.y = y + h;
+    }
+
+    /// A row that folds a section open and shut: a chevron (› shut, ⌄ open),
+    /// the title and an optional count tag.
+    fn disclosure(&mut self, title: &str, count: Option<String>, open: bool, target: ClickTarget) {
+        self.hidden = false;
+        self.rows += 1;
+        self.row_label = title.to_string();
+        let y = self.y;
+        let r = [self.x - 6.0, y, self.card_w + 12.0, 40.0];
+        if self.visible(y, 40.0) {
+            let theme = self.theme;
+            let hot = self.hot(r);
+            if hot {
+                self.layer
+                    .rect([r[0], r[1]], [r[2], r[3]], lift(theme, 0.03), 4.0);
+            }
+            let ink = if hot { theme.text_ui } else { theme.text_dim };
+            icons::draw(
+                self.layer,
+                if open {
+                    Icon::ChevronDown
+                } else {
+                    Icon::ChevronRight
+                },
+                [self.x + 6.0, y + 20.0],
+                12.0,
+                ink,
+            );
+            self.layer.text(
+                sans(self.engine, title, 13.0, Weight::MEDIUM),
+                self.x + 20.0,
+                y + 11.0,
+                ink,
+            );
+            if let Some(count) = &count {
+                let tw = self.engine.measure(title, 13.0, FONT_SANS, Weight::MEDIUM);
+                let cw = self.engine.measure(count, 11.0, FONT_SANS, Weight::MEDIUM);
+                let cx = self.x + 20.0 + tw + 8.0;
+                self.layer
+                    .rect([cx, y + 11.5], [cw + 12.0, 17.0], lift(theme, 0.08), 3.0);
+                self.layer.text(
+                    sans(self.engine, count, 11.0, Weight::MEDIUM),
+                    cx + 6.0,
+                    y + 13.0,
+                    theme.text_dim,
+                );
+            }
+            self.layer
+                .hline(self.x, y + 40.0 - 1.0, self.card_w, 1.0, lift(theme, 0.06));
+        }
+        self.push_hit(r, target);
+        self.name_last(format!(
+            "{title}{}, {}",
+            count.map(|c| format!(" ({c})")).unwrap_or_default(),
+            if open { "expanded" } else { "collapsed" }
+        ));
+        self.y = y + 40.0;
+    }
+
     /// A text setting: label (and description) left, a field right (the
     /// relay field's) that a click edits; ⏎ or a click away saves it.
     fn text_row(&mut self, y: f32, t: &TextRow) {
@@ -2361,6 +3035,9 @@ enum ButtonKind {
     Primary,
     Secondary,
     Destructive,
+    /// Destructive but quiet: an `error` outline and label, no fill (Revoke
+    /// beside each paired phone).
+    Outline,
     Disabled,
 }
 
@@ -2377,9 +3054,10 @@ fn remote_switch(form: &mut Form, config: &Config) {
     );
 }
 
-/// Settings › Remote access: the switch and the gateway's state, the relay,
-/// pairing (QR code, link, expiry), the paired devices (Operate / View
-/// only, Revoke) and the recent connections.
+/// Settings › Remote access: one card with the switch and, while on, how
+/// phones reach this computer; then (on) pairing, the paired phones, what a
+/// quit does, and the recent connections and connection settings folded
+/// away. Off, only the paired phones follow, so one can still be revoked.
 fn remote_page(
     form: &mut Form,
     config: &Config,
@@ -2387,133 +3065,650 @@ fn remote_page(
     history_top: usize,
     blink_on: bool,
 ) {
-    remote_switch(form, config);
     let on = config.remote_access;
-    if on {
-        let y = form.y;
-        form.display(
-            y,
-            "After you quit",
-            if !cfg!(target_os = "macos") {
-                "Rift quits, phones can no longer reach it"
-            } else if !config.durable_sessions {
-                "Rift quits (Keep shells running through updates is off in General)"
-            } else {
-                "Rift keeps running in the menu bar; phones that may run commands can open tabs"
-            },
-        );
-        // the question a quit asks while Rift keeps running (macOS)
-        if cfg!(target_os = "macos") {
+    form.crumb = format!("{} › Remote access", form.page);
+    remote_card(form, config, view);
+    if !on {
+        paired_phones(form, view, false);
+        return;
+    }
+
+    form.group("Pair a phone");
+    let stage = pair_stage(
+        on,
+        view.pairing_wait,
+        view.pairing.as_ref(),
+        std::time::SystemTime::now(),
+    );
+    match stage {
+        PairStage::Showing => {
+            if let Some(p) = &view.pairing {
+                pairing_panel(form, p, view.view_only);
+            }
+        }
+        PairStage::Expired => {
+            let label = "Show a new code";
+            let bw = form.engine.measure(label, 12.5, FONT_SANS, Weight::MEDIUM) + 24.0;
+            form.reserve = bw + 40.0;
             let y = form.y;
-            form.toggle_desc(
+            form.label_desc("The code expired", "Each code works once, for 2 minutes", y);
+            if !form.hidden {
+                let by = y + (ROW_H - CONTROL_H) / 2.0;
+                form.button(
+                    form.right() - bw.round(),
+                    by,
+                    label,
+                    ButtonKind::Primary,
+                    ClickTarget::RemotePair,
+                    "The code expired: show a new code".into(),
+                );
+            }
+        }
+        PairStage::Idle | PairStage::Waiting | PairStage::Hidden => {
+            let label = "Pair a phone";
+            let bw = form.engine.measure(label, 12.5, FONT_SANS, Weight::MEDIUM) + 24.0;
+            form.reserve = bw + 40.0;
+            let y = form.y;
+            form.label_desc(
+                "Add a phone",
+                "Show a code to scan with the Rift app · one use, valid 2 minutes",
                 y,
-                "Ask before keeping Rift running",
-                "⌘Q asks once; off keeps it running unasked",
-                config.confirm_background_quit,
-                "confirm_background_quit",
+            );
+            if !form.hidden {
+                let by = y + (ROW_H - CONTROL_H) / 2.0;
+                form.button(
+                    form.right() - bw.round(),
+                    by,
+                    label,
+                    ButtonKind::Primary,
+                    ClickTarget::RemotePair,
+                    label.into(),
+                );
+            }
+            if stage == PairStage::Waiting {
+                let y = form.y;
+                let text = match &view.gateway {
+                    GatewayLine::Listening(a) if a.is_empty() => "No network address to pair over",
+                    GatewayLine::Listening(_) | GatewayLine::Connected(_)
+                        if config.remote_tunnel && view.cloudflared.is_none() =>
+                    {
+                        "Install cloudflared first"
+                    }
+                    GatewayLine::Listening(_) | GatewayLine::Connected(_)
+                        if config.remote_tunnel =>
+                    {
+                        "Waiting for the tunnel…"
+                    }
+                    _ => "Waiting for the gateway to start…",
+                };
+                form.display(y, "Pairing", text);
+            }
+        }
+    }
+    let y = form.y;
+    form.checkbox(
+        y,
+        "The new phone can only watch",
+        "It sees your tabs but can't run commands or send keys",
+        view.view_only,
+        ClickTarget::RemoteViewOnly,
+    );
+
+    paired_phones(form, view, true);
+
+    form.group("When you quit");
+    let (title, line) = if !cfg!(target_os = "macos") {
+        (
+            "Rift quits",
+            "Phones can no longer reach it until you open Rift again.",
+        )
+    } else if !config.durable_sessions {
+        (
+            "Rift quits",
+            "Keep shells running through updates is off in General, so nothing stays behind.",
+        )
+    } else {
+        (
+            "Rift keeps running in the menu bar",
+            "Your shells stay and phones that can run commands can open tabs. Quit Rift completely from the menu bar icon.",
+        )
+    };
+    form.note_row(title, line);
+    // the question a quit asks while Rift keeps running (macOS)
+    if cfg!(target_os = "macos") {
+        let y = form.y;
+        form.toggle_desc(
+            y,
+            "Ask before keeping Rift running",
+            "⌘Q asks once; off keeps it running unasked",
+            config.confirm_background_quit,
+            "confirm_background_quit",
+        );
+    }
+
+    form.y += 16.0;
+    let n = view.history.len();
+    form.disclosure(
+        "Recent connections",
+        (n > 0).then(|| n.to_string()),
+        view.history_open,
+        ClickTarget::RemoteHistory,
+    );
+    if view.history_open {
+        recent_connections(form, view, history_top);
+    }
+    form.disclosure(
+        "Connection settings",
+        None,
+        view.relay_open,
+        ClickTarget::RemoteRelaySettings,
+    );
+    if view.relay_open {
+        connection_settings(form, config, view, blink_on);
+    }
+}
+
+/// Settings › Remote access's top card: a phone icon, what remote access
+/// is doing (title and a line), the switch, and while on how phones reach
+/// this computer (On this Wi-Fi, Away from home) with the encryption line.
+fn remote_card(form: &mut Form, config: &Config, view: &RemoteView) {
+    const PAD: f32 = 18.0;
+    const ICON: f32 = 40.0;
+    const DESC_LH: f32 = 12.5 * 1.4;
+    let on = config.remote_access;
+    let theme = form.theme;
+    form.hidden = false;
+    form.rows += 1;
+    form.groups += 1;
+    let (x, w) = (form.x, form.card_w);
+    let top = form.y + 4.0;
+    let switch_x = x + w - PAD - 34.0;
+    let changed = is_changed(form.current, form.defaults, "remote_access");
+    let text_x = x + PAD + ICON + 16.0;
+    let text_w = (switch_x - 16.0 - if changed { 32.0 } else { 0.0 } - text_x).max(120.0);
+    let (title, line) = remote_heading(on, &view.gateway);
+    let desc = wrap_lines(form.engine, line, 12.5, FONT_SANS, text_w);
+    let head_h = (24.0 + desc.len() as f32 * DESC_LH).max(ICON);
+    let inner = [x + PAD, top + PAD + head_h + 16.0, w - 2.0 * PAD];
+    let tiles = on.then(|| remote_tiles(config, view));
+    let layout = tiles
+        .as_ref()
+        .map(|t| tile_layout(form.engine, t, inner[2]));
+    let tiles_h = layout.as_ref().map_or(0.0, |l| l.height);
+    // the lock line under the tiles
+    let lock_h = if on { 12.0 + 18.0 } else { 0.0 };
+    let h = (PAD + head_h + if on { 16.0 + tiles_h + lock_h } else { 0.0 } + PAD).round();
+    if form.visible_band(top, h) {
+        form.layer
+            .bordered([x, top], [w, h], lift(theme, 0.025), theme.border, 8.0, 1.0);
+        let (fill, ink) = if on {
+            (theme.accent.with_alpha(0.14), theme.accent)
+        } else {
+            (lift(theme, 0.06), theme.text_muted)
+        };
+        let ic = [x + PAD, top + PAD];
+        form.layer.rect(ic, [ICON, ICON], fill, 8.0);
+        icons::draw(
+            form.layer,
+            Icon::Phone,
+            [ic[0] + ICON / 2.0, ic[1] + ICON / 2.0],
+            20.0,
+            ink,
+        );
+        form.layer.text(
+            sans(form.engine, &title, 15.0, Weight::SEMIBOLD),
+            text_x,
+            top + PAD,
+            theme.text_bright,
+        );
+        for (i, l) in desc.iter().enumerate() {
+            form.layer.text(
+                sans(form.engine, l, 12.5, Weight::NORMAL),
+                text_x,
+                top + PAD + 24.0 + i as f32 * DESC_LH,
+                theme.text_dim,
             );
         }
     }
-
-    connection_rows(form, config, view);
-    relay_settings(form, config, view, blink_on);
-
-    form.group("Pair a phone");
-    let label = "Pair a phone";
-    let bw = form.engine.measure(label, 12.5, FONT_SANS, Weight::MEDIUM) + 24.0;
-    form.reserve = bw + 40.0;
-    let y = form.y;
-    form.label_desc(
-        "Pairing code",
-        if on {
-            "Scan the code with the Rift app · one use, valid 2 minutes"
-        } else {
-            "Allow remote access first"
-        },
-        y,
+    // the card's words, for assistive tech
+    form.row_label = title.clone();
+    form.push_hit(
+        [text_x, top + PAD, text_w, head_h],
+        ClickTarget::SettingsNoop,
     );
-    if !form.hidden {
-        let (kind, name) = if on {
-            (ButtonKind::Primary, label.to_string())
+    form.name_last(format!("{title}. {line}"));
+    // the switch, level with the title
+    let ty = top + PAD;
+    if form.visible(ty, 20.0) {
+        let bg = if on { theme.accent } else { lift(theme, 0.14) };
+        form.layer.rect([switch_x, ty], [34.0, 20.0], bg, 10.0);
+        let knob_x = if on { switch_x + 17.0 } else { switch_x + 3.0 };
+        let knob = if on || theme.is_light() {
+            Color::WHITE
         } else {
-            (
-                ButtonKind::Disabled,
-                format!("{label}, unavailable while remote access is off"),
+            theme.text_ui
+        };
+        form.layer.circle([knob_x + 7.0, ty + 10.0], 14.0, knob);
+    }
+    form.row_label = "Allow remote access".into();
+    form.label_end = text_x
+        + form
+            .engine
+            .measure(&title, 15.0, FONT_SANS, Weight::SEMIBOLD);
+    form.label_mid = top + PAD + 10.0;
+    // ↺ and the changed dot use a row's geometry: centre them on the switch
+    form.changed("remote_access", ty + 10.0 - ROW_H / 2.0, switch_x);
+    form.row_label = "Allow remote access".into();
+    form.push_hit(
+        [switch_x - 4.0, ty - 4.0, 42.0, 28.0],
+        ClickTarget::SettingsToggle("remote_access"),
+    );
+    if let (Some(tiles), Some(layout)) = (&tiles, &layout) {
+        draw_tiles(form, tiles, layout, [inner[0], inner[1]]);
+        let y = inner[1] + tiles_h + 12.0;
+        let text = "End-to-end encrypted: the relay passes bytes it cannot read.";
+        if form.visible(y, 18.0) {
+            icons::draw(
+                form.layer,
+                Icon::Lock,
+                [inner[0] + 6.0, y + 8.0],
+                12.0,
+                theme.text_muted,
+            );
+            form.layer.text(
+                sans(form.engine, text, 12.0, Weight::NORMAL),
+                inner[0] + 20.0,
+                y,
+                theme.text_muted,
+            );
+        }
+        form.row_label = "Encryption".into();
+        form.push_hit([inner[0], y, inner[2], 18.0], ClickTarget::SettingsNoop);
+        form.name_last(text.into());
+    }
+    form.y = top + h + 4.0;
+}
+
+/// One tile of the Remote access card: how phones reach this computer one
+/// way, and how that is going.
+struct Tile {
+    mark: Mark,
+    label: &'static str,
+    /// After the label (the relay's round trip).
+    tag: Option<String>,
+    /// An address or host, monospace (empty: none).
+    value: String,
+    note: String,
+    error: bool,
+    /// The whole error, in a block under the note.
+    detail: Option<String>,
+    /// A "Try again" button at the tile's foot.
+    retry: bool,
+}
+
+/// The two tiles while remote access is on: On this Wi-Fi (the listening
+/// addresses) and Away from home (the relay, or the tunnel's relay).
+fn remote_tiles(config: &Config, view: &RemoteView) -> [Tile; 2] {
+    let (mark, note, value) = match &view.gateway {
+        GatewayLine::Off | GatewayLine::Starting => (Mark::Wait, "Starting…", String::new()),
+        _ if view.addresses.is_empty() => {
+            (Mark::Off, "Listening, but on no network", String::new())
+        }
+        _ => (
+            Mark::Ok,
+            "Phones on the same Wi-Fi connect directly",
+            view.addresses.join(", "),
+        ),
+    };
+    let lan = Tile {
+        mark,
+        label: "On this Wi-Fi",
+        tag: None,
+        value,
+        note: note.into(),
+        error: false,
+        detail: None,
+        retry: false,
+    };
+    // the tunnel replaces the relay: its state is the relay's
+    let tunnel = config.remote_tunnel;
+    let tunnel_ready = matches!(view.tunnel, Some(crate::tunnel::TunnelState::Ready { .. }));
+    let line = &view.relay;
+    let away = if tunnel && !tunnel_ready {
+        Tile {
+            mark: Mark::Wait,
+            label: "Away from home",
+            tag: None,
+            value: String::new(),
+            note: "Waiting for the tunnel".into(),
+            error: false,
+            detail: None,
+            retry: false,
+        }
+    } else {
+        let mark = match line {
+            RelayLine::Off | RelayLine::Stopped | RelayLine::Scripted => Mark::Off,
+            RelayLine::Connecting(_) => Mark::Wait,
+            RelayLine::Connected { .. } => Mark::Ok,
+            RelayLine::Error { .. } => Mark::Failed,
+        };
+        // the round trip is the tile's tag, not part of the sentence
+        let (note, tag) = match line {
+            RelayLine::Connected { latency_ms, .. } => (
+                "Phones away from home connect through it".to_string(),
+                latency_ms.map(|ms| format!("{ms}\u{a0}ms")),
+            ),
+            _ => (line.text(), None),
+        };
+        let note = if tunnel {
+            format!("{note} · the tunnel's relay")
+        } else {
+            note
+        };
+        let error = matches!(line, RelayLine::Error { .. });
+        Tile {
+            mark,
+            label: "Away from home",
+            tag,
+            value: line.host().map_or_else(|| "—".to_string(), str::to_string),
+            note,
+            error,
+            detail: line.reason().map(str::to_string),
+            retry: error,
+        }
+    };
+    [lan, away]
+}
+
+/// Where each tile goes in a row `width` wide (side by side when both fit,
+/// else one under the other) and what each holds, wrapped.
+struct TileLayout {
+    /// `[x offset, y offset, width, height]` per tile.
+    rects: [[f32; 4]; 2],
+    notes: [Vec<String>; 2],
+    details: [Vec<String>; 2],
+    height: f32,
+}
+
+const TILE_PAD: f32 = 12.0;
+const TILE_GAP: f32 = 10.0;
+/// Narrowest tile before the two stack.
+const TILE_MIN_W: f32 = 220.0;
+
+fn tile_height(note: usize, detail: usize, value: bool, retry: bool) -> f32 {
+    let mut h = TILE_PAD + 18.0;
+    if value {
+        h += 18.0;
+    }
+    h += note as f32 * NOTE_LH;
+    if detail > 0 {
+        h += 6.0 + detail as f32 * DETAIL_LH + 16.0;
+    }
+    if retry {
+        h += 8.0 + CONTROL_H;
+    }
+    h + TILE_PAD
+}
+
+fn tile_layout(engine: &mut TextEngine, tiles: &[Tile; 2], width: f32) -> TileLayout {
+    let side = (width - TILE_GAP) / 2.0 >= TILE_MIN_W;
+    let tw = if side {
+        ((width - TILE_GAP) / 2.0).floor()
+    } else {
+        width
+    };
+    let text_w = tw - 2.0 * TILE_PAD - BADGE_W - BADGE_GAP;
+    let notes = [
+        wrap_lines(engine, &tiles[0].note, 12.0, FONT_SANS, text_w),
+        wrap_lines(engine, &tiles[1].note, 12.0, FONT_SANS, text_w),
+    ];
+    let detail = |t: &Tile, engine: &mut TextEngine| {
+        t.detail
+            .as_deref()
+            .map(|d| wrap_lines(engine, d, 11.5, mono_family(), text_w - 20.0))
+            .unwrap_or_default()
+    };
+    let details = [detail(&tiles[0], engine), detail(&tiles[1], engine)];
+    let hs: Vec<f32> = (0..2)
+        .map(|i| {
+            tile_height(
+                notes[i].len(),
+                details[i].len(),
+                !tiles[i].value.is_empty(),
+                tiles[i].retry,
             )
-        };
-        let by = y + (ROW_H - CONTROL_H) / 2.0;
-        let bx = form.right() - bw.round();
-        form.button(bx, by, label, kind, ClickTarget::RemotePair, name);
+            .round()
+        })
+        .collect();
+    let (rects, height) = if side {
+        let h = hs[0].max(hs[1]);
+        (
+            [
+                [0.0, 0.0, tw, h],
+                [tw + TILE_GAP, 0.0, width - tw - TILE_GAP, h],
+            ],
+            h,
+        )
+    } else {
+        (
+            [[0.0, 0.0, tw, hs[0]], [0.0, hs[0] + TILE_GAP, tw, hs[1]]],
+            hs[0] + TILE_GAP + hs[1],
+        )
+    };
+    TileLayout {
+        rects,
+        notes,
+        details,
+        height,
     }
-    let y = form.y;
-    form.switch(
-        y,
-        "View only",
-        "The phone can watch, but not run commands or send keys",
-        view.view_only,
-        ClickTarget::RemoteViewOnly,
-        None,
-    );
-    if on && view.pairing_wait && view.pairing.is_none() {
-        let y = form.y;
-        let text = match &view.gateway {
-            GatewayLine::Listening(a) if a.is_empty() => "No network address to pair over",
-            GatewayLine::Listening(_) | GatewayLine::Connected(_)
-                if config.remote_tunnel && view.cloudflared.is_none() =>
-            {
-                "Install cloudflared first"
-            }
-            GatewayLine::Listening(_) | GatewayLine::Connected(_) if config.remote_tunnel => {
-                "Waiting for the tunnel…"
-            }
-            _ => "Waiting for the gateway to start…",
-        };
-        form.display(y, "Pairing", text);
-    }
-    if let Some(p) = view.pairing.as_ref().filter(|_| on) {
-        pairing_block(form, p);
-    }
+}
 
-    form.group("Paired devices");
+fn draw_tiles(form: &mut Form, tiles: &[Tile; 2], layout: &TileLayout, origin: [f32; 2]) {
+    let theme = form.theme;
+    for (i, t) in tiles.iter().enumerate() {
+        let r = layout.rects[i];
+        let (x, y) = (origin[0] + r[0], origin[1] + r[1]);
+        let text_x = x + TILE_PAD + BADGE_W + BADGE_GAP;
+        let text_w = r[2] - 2.0 * TILE_PAD - BADGE_W - BADGE_GAP;
+        let mut ty = y + TILE_PAD;
+        if form.visible(y, r[3]) {
+            form.layer.bordered(
+                [x, y],
+                [r[2], r[3]],
+                theme.ground(theme.bg).with_alpha(0.55),
+                lift(theme, 0.08),
+                6.0,
+                1.0,
+            );
+            let (fill, ink) = match t.mark {
+                Mark::Ok => (theme.success.with_alpha(0.15), theme.success),
+                Mark::Wait => (theme.accent.with_alpha(0.15), theme.accent),
+                Mark::Failed => (theme.error.with_alpha(0.15), theme.error),
+                Mark::Off => (lift(theme, 0.08), theme.text_dim),
+            };
+            let c = [x + TILE_PAD + BADGE_W / 2.0, ty + 9.0];
+            form.layer.circle(c, BADGE_W, fill);
+            match t.mark {
+                Mark::Ok => icons::draw(form.layer, Icon::Check, c, 12.0, ink),
+                Mark::Failed => icons::draw(form.layer, Icon::Close, c, 10.0, ink),
+                Mark::Wait | Mark::Off => {
+                    let glyph = if t.mark == Mark::Wait { "…" } else { "–" };
+                    let gw = form.engine.measure(glyph, 12.0, FONT_SANS, Weight::NORMAL);
+                    form.layer.text(
+                        sans(form.engine, glyph, 12.0, Weight::NORMAL),
+                        c[0] - gw / 2.0,
+                        c[1] - 8.0,
+                        ink,
+                    );
+                }
+            }
+            form.layer.text(
+                sans(form.engine, t.label, 13.0, Weight::NORMAL),
+                text_x,
+                ty + 1.0,
+                theme.text_ui,
+            );
+            if let Some(tag) = &t.tag {
+                let lw = form
+                    .engine
+                    .measure(t.label, 13.0, FONT_SANS, Weight::NORMAL);
+                let tw = form.engine.measure(tag, 11.0, FONT_SANS, Weight::MEDIUM);
+                let tx = text_x + lw + 8.0;
+                form.layer
+                    .rect([tx, ty + 1.0], [tw + 12.0, 17.0], lift(theme, 0.08), 3.0);
+                form.layer.text(
+                    sans(form.engine, tag, 11.0, Weight::MEDIUM),
+                    tx + 6.0,
+                    ty + 2.5,
+                    theme.text_dim,
+                );
+            }
+        }
+        ty += 18.0;
+        if !t.value.is_empty() {
+            if form.visible(ty, 18.0) {
+                let v =
+                    super::palette::elide_to(form.engine, &t.value, 12.0, mono_family(), text_w);
+                form.layer.text(
+                    mono(form.engine, &v, 12.0, Weight::NORMAL),
+                    text_x,
+                    ty + 1.0,
+                    theme.text_ui,
+                );
+            }
+            ty += 18.0;
+        }
+        let note_ink = match (t.error, t.mark) {
+            (true, _) => theme.error,
+            (_, Mark::Wait) => theme.accent,
+            _ => theme.text_muted,
+        };
+        for l in &layout.notes[i] {
+            if form.visible(ty, NOTE_LH) {
+                form.layer.text(
+                    sans(form.engine, l, 12.0, Weight::NORMAL),
+                    text_x,
+                    ty,
+                    note_ink,
+                );
+            }
+            ty += NOTE_LH;
+        }
+        let lines = &layout.details[i];
+        if !lines.is_empty() {
+            let top = ty + 6.0;
+            let bh = lines.len() as f32 * DETAIL_LH + 16.0;
+            if form.visible(top, bh) {
+                form.layer.rect([text_x, top], [text_w, bh], theme.bg, 4.0);
+                for (j, l) in lines.iter().enumerate() {
+                    form.layer.text(
+                        mono(form.engine, l, 11.5, Weight::NORMAL),
+                        text_x + 10.0,
+                        top + 8.0 + j as f32 * DETAIL_LH,
+                        theme.error,
+                    );
+                }
+            }
+            ty = top + bh;
+        }
+        // read-only, but named for assistive tech: the whole text
+        let mut name = t.label.to_string();
+        if !t.value.is_empty() && t.value != "—" {
+            name.push_str(&format!(" ({})", t.value));
+        }
+        name.push_str(&format!(": {}", t.note));
+        if let Some(tag) = &t.tag {
+            name.push_str(&format!(" · {tag}"));
+        }
+        if let Some(d) = &t.detail {
+            name.push_str(&format!(
+                "{} {d}",
+                if name.ends_with('.') { "" } else { "." }
+            ));
+        }
+        form.row_label = t.label.into();
+        form.push_hit([x, y, r[2], r[3]], ClickTarget::SettingsNoop);
+        form.name_last(name);
+        if t.retry {
+            form.button(
+                text_x,
+                ty + 8.0,
+                "Try again",
+                ButtonKind::Secondary,
+                ClickTarget::RemoteRelayRetry,
+                "Try again: retry the relay now".into(),
+            );
+        }
+    }
+}
+
+/// Settings › Remote access › Paired phones: each phone's dot (green while
+/// connected), name and line, its access (on) and Revoke. Off, the list
+/// shows only when there is one, and says why they cannot connect.
+fn paired_phones(form: &mut Form, view: &RemoteView, on: bool) {
+    let n = view.devices.len();
+    if !on && n == 0 && view.devices_error.is_none() {
+        return;
+    }
+    form.group(&if n > 0 {
+        format!("Paired phones ({n})")
+    } else {
+        "Paired phones".to_string()
+    });
+    if !on && n > 0 {
+        form.note_row(
+            "",
+            "They can't connect while remote access is off. Revoke one to remove it for good.",
+        );
+    }
     if let Some(e) = &view.devices_error {
         let y = form.y;
-        form.display(y, "Paired devices", e);
-    } else if view.devices.is_empty() && view.devices_loaded {
+        form.display(y, "Paired phones", e);
+    } else if n == 0 && view.devices_loaded {
         let y = form.y;
         form.label_desc(
-            "No paired devices",
-            "Pair a phone above; it shows here until you revoke it",
+            "No phones yet",
+            "Pair one above; it shows here until you revoke it",
             y,
         );
     }
-    const ACCESS: [&str; 2] = ["Operate", "View only"];
+    const ACCESS: [&str; 2] = ["Can run commands", "View only"];
     for d in &view.devices {
         let y = form.y;
+        let detail = if on {
+            d.detail.clone()
+        } else {
+            format!("Can’t connect while off · {}", d.about)
+        };
         let bw = form
             .engine
             .measure("Revoke", 12.5, FONT_SANS, Weight::MEDIUM)
             + 24.0;
-        let sw = form.segmented_width(&ACCESS);
-        form.reserve = bw + 8.0 + sw + 40.0;
+        let sw = if on {
+            form.segmented_width(&ACCESS)
+        } else {
+            0.0
+        };
+        form.reserve = bw + if on { 8.0 + sw } else { 0.0 } + 40.0;
         // how it is connected must never be cut: when the line does not fit
         // beside the controls, it wraps under them
         let beside = form.card_w - form.reserve - 8.0;
         let fits = !form.filter.is_empty()
             || form
                 .engine
-                .measure(&d.detail, 12.0, FONT_SANS, Weight::NORMAL)
+                .measure(&detail, 12.0, FONT_SANS, Weight::NORMAL)
                 <= beside;
         let below = if fits {
             Vec::new()
         } else {
-            wrap_lines(form.engine, &d.detail, 12.0, FONT_SANS, form.card_w)
+            wrap_lines(form.engine, &detail, 12.0, FONT_SANS, form.card_w)
         };
         form.extra_h = if below.is_empty() {
             0.0
         } else {
             below.len() as f32 * NOTE_LH + 2.0
         };
-        form.label_desc(&d.name, if fits { &d.detail } else { "" }, y);
+        form.label_desc(&d.name, if fits { &detail } else { "" }, y);
         if !form.hidden && form.visible(y, ROW_H) {
             for (i, l) in below.iter().enumerate() {
                 form.layer.text(
@@ -2527,8 +3722,8 @@ fn remote_page(
         if form.visible(y, ROW_H) {
             // how it is connected: green when it is, grey when not
             let color = match d.path {
-                DevicePath::None => form.theme.text_muted,
-                DevicePath::Lan | DevicePath::Relay => form.theme.success,
+                DevicePath::Lan | DevicePath::Relay if on => form.theme.success,
+                _ => form.theme.text_muted,
             };
             form.layer
                 .circle([form.label_end + 12.0, form.label_mid], 8.0, color);
@@ -2536,31 +3731,37 @@ fn remote_page(
         if !form.hidden {
             let by = y + (ROW_H - CONTROL_H) / 2.0;
             let bx = form.right() - bw.round();
-            let targets = [
-                ClickTarget::RemotePermission(d.id.clone(), false),
-                ClickTarget::RemotePermission(d.id.clone(), true),
-            ];
-            let label = format!("{} access", d.name);
-            form.segmented(
-                (bx - 8.0 - sw).round(),
-                by,
-                &label,
-                &ACCESS,
-                usize::from(d.view_only),
-                &targets,
-            );
+            if on {
+                let targets = [
+                    ClickTarget::RemotePermission(d.id.clone(), false),
+                    ClickTarget::RemotePermission(d.id.clone(), true),
+                ];
+                let label = format!("{} access", d.name);
+                form.segmented(
+                    (bx - 8.0 - sw).round(),
+                    by,
+                    &label,
+                    &ACCESS,
+                    usize::from(d.view_only),
+                    &targets,
+                );
+            }
             form.button(
                 bx,
                 by,
                 "Revoke",
-                ButtonKind::Destructive,
+                ButtonKind::Outline,
                 ClickTarget::RemoteRevoke(d.id.clone()),
                 format!("Revoke {}", d.name),
             );
         }
     }
+}
 
-    form.group("Recent connections");
+/// Settings › Remote access › Recent connections (open): at most
+/// HISTORY_SHOWN rows at once; more scroll inside the list by whole rows,
+/// with a thumb at its right edge.
+fn recent_connections(form: &mut Form, view: &RemoteView, history_top: usize) {
     if view.history.is_empty() && view.devices_loaded {
         let y = form.y;
         form.label_desc(
@@ -2569,8 +3770,6 @@ fn remote_page(
             y,
         );
     }
-    // at most HISTORY_SHOWN rows at once; more scroll inside the list by
-    // whole rows, with a thumb at its right edge
     let n = view.history.len();
     let scrolls = n > HISTORY_SHOWN;
     let top = history_top.min(n.saturating_sub(HISTORY_SHOWN));
@@ -2707,21 +3906,6 @@ enum Mark {
     Off,
 }
 
-/// One row of Settings › Remote access › Connection.
-struct StatusRow<'a> {
-    mark: Mark,
-    label: &'a str,
-    /// Under the label, wrapped; `error` colours it.
-    note: &'a str,
-    error: bool,
-    /// Right of the label (an address, a host), monospace.
-    right: &'a str,
-    /// The whole error text in a block under the note, wrapped.
-    detail: Option<&'a str>,
-    /// A "Try again" button under `right`.
-    retry: bool,
-}
-
 /// Badge width and its gap to the text.
 const BADGE_W: f32 = 20.0;
 const BADGE_GAP: f32 = 12.0;
@@ -2770,271 +3954,10 @@ fn wrap_lines(
     lines
 }
 
-/// A Connection row: badge, label, wrapped note (and the whole error in a
-/// block), the address or host on the right and, after a failure, Try
-/// again. Taller than a plain row when the text needs it.
-fn status_row(form: &mut Form, s: &StatusRow) {
-    let y = form.y;
-    form.hidden = false;
-    form.rows += 1;
-    form.row_label = s.label.to_string();
-    let theme = form.theme;
-    let text_x = form.x + BADGE_W + BADGE_GAP;
-    let right = super::palette::elide_to(form.engine, s.right, 12.5, mono_family(), 240.0);
-    let right_w = form
-        .engine
-        .measure(&right, 12.5, mono_family(), Weight::NORMAL);
-    let retry = "Try again";
-    let retry_w = (form.engine.measure(retry, 12.5, FONT_SANS, Weight::MEDIUM) + 24.0).round();
-    let side = right_w.max(if s.retry { retry_w } else { 0.0 });
-    let col_w = (form.right() - text_x - side - 16.0).max(120.0);
-    let note = wrap_lines(form.engine, s.note, 12.0, FONT_SANS, col_w);
-    let note_h = note.len() as f32 * NOTE_LH;
-    let detail = s
-        .detail
-        .map(|d| wrap_lines(form.engine, d, 11.5, mono_family(), col_w - 20.0));
-    let detail_h = detail
-        .as_ref()
-        .map_or(0.0, |l| l.len() as f32 * DETAIL_LH + 16.0 + 6.0);
-    let mut h = (28.0 + note_h + detail_h + 8.0).round().max(ROW_H);
-    if s.retry {
-        // label line, the host, then the button under it
-        h = h.max(38.0 + CONTROL_H + 10.0);
-    }
-    if form.visible(y, h) {
-        let (fill, ink) = match s.mark {
-            Mark::Ok => (theme.success.with_alpha(0.15), theme.success),
-            Mark::Wait => (theme.accent.with_alpha(0.15), theme.accent),
-            Mark::Failed => (theme.error.with_alpha(0.15), theme.error),
-            Mark::Off => (lift(theme, 0.08), theme.text_dim),
-        };
-        let c = [form.x + BADGE_W / 2.0, y + 9.0 + 8.8];
-        form.layer.circle(c, BADGE_W, fill);
-        match s.mark {
-            Mark::Ok => icons::draw(form.layer, Icon::Check, c, 12.0, ink),
-            Mark::Failed => icons::draw(form.layer, Icon::Close, c, 10.0, ink),
-            Mark::Wait | Mark::Off => {
-                let glyph = if s.mark == Mark::Wait { "…" } else { "–" };
-                let gw = form.engine.measure(glyph, 12.0, FONT_SANS, Weight::NORMAL);
-                form.layer.text(
-                    sans(form.engine, glyph, 12.0, Weight::NORMAL),
-                    c[0] - gw / 2.0,
-                    c[1] - 8.0,
-                    ink,
-                );
-            }
-        }
-        form.layer.text(
-            sans(form.engine, s.label, 13.0, Weight::NORMAL),
-            text_x,
-            y + 9.0,
-            theme.text_ui,
-        );
-        let note_ink = match (s.error, s.mark) {
-            (true, _) => theme.error,
-            (_, Mark::Wait) => theme.accent,
-            _ => theme.text_muted,
-        };
-        for (i, l) in note.iter().enumerate() {
-            form.layer.text(
-                sans(form.engine, l, 12.0, Weight::NORMAL),
-                text_x,
-                y + 28.0 + i as f32 * NOTE_LH,
-                note_ink,
-            );
-        }
-        if let Some(lines) = &detail {
-            let top = y + 28.0 + note_h + 6.0;
-            let bh = lines.len() as f32 * DETAIL_LH + 16.0;
-            form.layer.rect([text_x, top], [col_w, bh], theme.bg, 4.0);
-            for (i, l) in lines.iter().enumerate() {
-                form.layer.text(
-                    mono(form.engine, l, 11.5, Weight::NORMAL),
-                    text_x + 10.0,
-                    top + 8.0 + i as f32 * DETAIL_LH,
-                    theme.error,
-                );
-            }
-        }
-        if !right.is_empty() {
-            form.layer.text(
-                mono(form.engine, &right, 12.5, Weight::NORMAL),
-                form.right() - right_w,
-                y + 9.0,
-                theme.text_ui,
-            );
-        }
-        form.layer
-            .hline(form.x, y + h - 1.0, form.card_w, 1.0, lift(theme, 0.06));
-    }
-    if s.retry {
-        form.button(
-            form.right() - retry_w,
-            y + 38.0,
-            retry,
-            ButtonKind::Secondary,
-            ClickTarget::RemoteRelayRetry,
-            "Try again: retry the relay now".into(),
-        );
-    }
-    // read-only, but named for assistive tech: the whole text
-    let mut name = s.label.to_string();
-    if !s.right.is_empty() {
-        name.push_str(&format!(" ({})", s.right));
-    }
-    name.push_str(&format!(": {}", s.note));
-    if let Some(d) = s.detail {
-        name.push_str(&format!(
-            "{} {d}",
-            if name.ends_with('.') { "" } else { "." }
-        ));
-    }
-    form.push_hit(
-        [form.x, y, form.right() - side - 8.0 - form.x, h],
-        ClickTarget::SettingsNoop,
-    );
-    form.name_last(name);
-    form.y = y + h;
-}
-
-/// Settings › Remote access › Connection: how phones reach this computer.
-/// "This network" (the listening address), "Relay" (connected, connecting,
-/// off or failing, with the whole error and Try again), and a line on
-/// encryption.
-fn connection_rows(form: &mut Form, config: &Config, view: &RemoteView) {
-    let on = config.remote_access;
-    form.group("Connection");
-    let addresses = view.addresses.join(", ");
-    let (mark, note, right) = match (&view.gateway, on) {
-        (_, false) | (GatewayLine::Off, _) => (Mark::Off, "Off".to_string(), ""),
-        (GatewayLine::Starting, _) => (Mark::Wait, "Starting…".to_string(), ""),
-        _ if view.addresses.is_empty() => {
-            (Mark::Off, "Listening, but on no network".to_string(), "")
-        }
-        _ => (
-            Mark::Ok,
-            "Phones on the same Wi-Fi connect directly".to_string(),
-            addresses.as_str(),
-        ),
-    };
-    status_row(
-        form,
-        &StatusRow {
-            mark,
-            label: "This network",
-            note: &note,
-            error: false,
-            right,
-            detail: None,
-            retry: false,
-        },
-    );
-
-    // the tunnel replaces the relay: its state is the relay's
-    let tunnel_relay = on && config.remote_tunnel;
-    let tunnel_ready = matches!(view.tunnel, Some(crate::tunnel::TunnelState::Ready { .. }));
-    let line = &view.relay;
-    let (mark, note, error) = if !on {
-        let note = if config.relay().is_none() {
-            RelayLine::Off.text()
-        } else {
-            "Off while remote access is off".to_string()
-        };
-        (Mark::Off, note, false)
-    } else if tunnel_relay && !tunnel_ready {
-        (Mark::Wait, "Waiting for the tunnel".to_string(), false)
-    } else {
-        let mark = match line {
-            RelayLine::Off | RelayLine::Scripted => Mark::Off,
-            RelayLine::Connecting(_) => Mark::Wait,
-            RelayLine::Connected { .. } => Mark::Ok,
-            RelayLine::Error { .. } => Mark::Failed,
-        };
-        let note = if tunnel_relay {
-            format!("{} · the tunnel's relay", line.text())
-        } else {
-            line.text()
-        };
-        (mark, note, matches!(line, RelayLine::Error { .. }))
-    };
-    let shown = on && !(tunnel_relay && !tunnel_ready);
-    let host = line.host().filter(|_| shown).unwrap_or("");
-    status_row(
-        form,
-        &StatusRow {
-            mark,
-            label: "Relay",
-            note: &note,
-            error,
-            right: match (host.is_empty(), mark) {
-                (false, _) => host,
-                (true, Mark::Off) => "—",
-                (true, _) => "",
-            },
-            detail: line.reason().filter(|_| shown),
-            retry: shown && error,
-        },
-    );
-
-    let y = form.y + 10.0;
-    let text = "End-to-end encrypted: the relay passes bytes it cannot read.";
-    if form.visible(y, 20.0) {
-        icons::draw(
-            form.layer,
-            Icon::Lock,
-            [form.x + 6.0, y + 8.0],
-            12.0,
-            form.theme.text_muted,
-        );
-        form.layer.text(
-            sans(form.engine, text, 12.0, Weight::NORMAL),
-            form.x + 20.0,
-            y,
-            form.theme.text_muted,
-        );
-    }
-    form.hidden = false;
-    form.row_label = "Encryption".into();
-    form.push_hit([form.x, y, form.card_w, 20.0], ClickTarget::SettingsNoop);
-    form.name_last(text.into());
-    form.y = y + 20.0;
-}
-
-/// "Relay settings…" (or "Hide relay settings") and, open, the relay
-/// address and the Cloudflare tunnel.
-fn relay_settings(form: &mut Form, config: &Config, view: &RemoteView, blink_on: bool) {
-    let y = form.y + 8.0;
-    let label = if view.relay_open {
-        "Hide relay settings"
-    } else {
-        "Relay settings…"
-    };
-    let w = form.engine.measure(label, 13.0, FONT_SANS, Weight::NORMAL);
-    // padded, so the focus ring clears the text
-    let r = [form.x - 6.0, y, w.round() + 12.0, CONTROL_H];
-    form.hidden = false;
-    form.row_label = "Relay settings".into();
-    if form.visible(y, CONTROL_H) {
-        form.layer.text(
-            sans(form.engine, label, 13.0, Weight::NORMAL),
-            form.x,
-            y + (CONTROL_H - 13.0 * 1.35) / 2.0,
-            form.theme.accent,
-        );
-    }
-    form.push_hit(r, ClickTarget::RemoteRelaySettings);
-    form.name_last(format!(
-        "{label}, {}",
-        if view.relay_open {
-            "expanded"
-        } else {
-            "collapsed"
-        }
-    ));
-    form.y = y + CONTROL_H + 4.0;
-    if !view.relay_open {
-        return;
-    }
+/// Settings › Remote access › Connection settings (open): the listen
+/// address, the relay address (not while the tunnel replaces it) and the
+/// Cloudflare tunnel.
+fn connection_settings(form: &mut Form, config: &Config, view: &RemoteView, blink_on: bool) {
     let y = form.y;
     form.text_row(
         y,
@@ -3048,12 +3971,10 @@ fn relay_settings(form: &mut Form, config: &Config, view: &RemoteView, blink_on:
         },
     );
     // the tunnel's relay has no address to edit
-    if !(config.remote_access && config.remote_tunnel) {
+    if !config.remote_tunnel {
         relay_row(form, config, view, blink_on);
     }
-    if config.remote_access {
-        tunnel_rows(form, config, view);
-    }
+    tunnel_rows(form, config, view);
 }
 
 /// The relay address field (`remote_relay`).
@@ -3096,44 +4017,73 @@ fn relay_row(form: &mut Form, config: &Config, view: &RemoteView, blink_on: bool
     );
 }
 
-/// The live pairing: the QR code (black modules on a white plate with its
-/// quiet zone, so it scans in dark themes too), the expiry countdown and
-/// the link with a Copy button; once expired, "Expired — Pair again".
-fn pairing_block(form: &mut Form, p: &PairingView) {
+/// The live pairing code, in a panel: the QR code (black modules on a
+/// white plate with its quiet zone, so it scans in dark themes too), how to
+/// scan it, what the phone may do, the countdown, Copy link and Cancel, and
+/// the link itself.
+fn pairing_panel(form: &mut Form, p: &PairingView, view_only: bool) {
+    const PAD: f32 = 16.0;
     let left = p
         .expires_at
         .duration_since(std::time::SystemTime::now())
         .unwrap_or_default();
     let theme = form.theme;
+    form.hidden = false;
+    form.rows += 1;
+    form.row_label = "Pairing".into();
     let top = form.y + 12.0;
-    if left.is_zero() {
-        let r = [form.x, top, form.card_w, ROW_H];
-        if form.visible(r[1], r[3]) {
-            form.layer.text(
-                sans(form.engine, "Expired — Pair again", 13.0, Weight::NORMAL),
-                r[0],
-                r[1] + 6.0,
-                theme.warning,
-            );
-        }
-        let w = form
-            .engine
-            .measure("Expired — Pair again", 13.0, FONT_SANS, Weight::NORMAL);
-        form.button(
-            (r[0] + w + 12.0).round(),
-            r[1],
-            "Pair again",
-            ButtonKind::Secondary,
-            ClickTarget::RemotePair,
-            "Expired, pair again".into(),
-        );
-        form.y = top + CONTROL_H + 12.0;
-        return;
-    }
     let n = p.qr.len();
     let plate = ((n + 2 * QR_QUIET) as f32 * QR_MODULE).round();
-    let (px, py) = (form.x.round(), top.round());
-    if form.visible(py, plate) && n > 0 {
+    let (x, w) = (form.x, form.card_w);
+    let (px, py) = ((x + PAD).round(), (top + PAD).round());
+    // the words beside the code when there is room, else under it
+    let side = w - 2.0 * PAD - plate - 20.0 >= 240.0;
+    let (tx, ty0, tw) = if side {
+        (px + plate + 20.0, py, w - 2.0 * PAD - plate - 20.0)
+    } else {
+        (px, py + plate + 16.0, w - 2.0 * PAD)
+    };
+    let how = if view_only {
+        "Open Rift on your phone, add a computer, and point the camera here. It will only be able to watch."
+    } else {
+        "Open Rift on your phone, add a computer, and point the camera here. It will be able to run commands."
+    };
+    let how_lines = wrap_lines(form.engine, how, 12.5, FONT_SANS, tw);
+    let how_lh = 12.5 * 1.4;
+    // the link, wrapped by characters (it has no spaces)
+    let cw = form
+        .engine
+        .measure("0000000000", 11.5, mono_family(), Weight::NORMAL)
+        / 10.0;
+    let per = ((tw / cw).floor() as usize).max(8);
+    let chars: Vec<char> = p.url.chars().collect();
+    let link: Vec<String> = chars.chunks(per).map(|c| c.iter().collect()).collect();
+    let link_lh = 11.5 * 1.35;
+    let words_h = 22.0
+        + how_lines.len() as f32 * how_lh
+        + 8.0
+        + 20.0
+        + 10.0
+        + CONTROL_H
+        + 12.0
+        + link.len() as f32 * link_lh;
+    let body_h = if side {
+        plate.max(words_h)
+    } else {
+        plate + 16.0 + words_h
+    };
+    let h = (PAD + body_h + PAD).round();
+    if form.visible_band(top, h) {
+        form.layer.bordered(
+            [x, top],
+            [w, h],
+            theme.accent.with_alpha(0.05),
+            theme.accent.with_alpha(0.35),
+            8.0,
+            1.0,
+        );
+    }
+    if form.visible_band(py, plate) && n > 0 {
         form.layer.rect([px, py], [plate, plate], Color::WHITE, 4.0);
         let o = QR_QUIET as f32 * QR_MODULE;
         for (r, row) in p.qr.iter().enumerate() {
@@ -3163,56 +4113,47 @@ fn pairing_block(form: &mut Form, p: &PairingView) {
     // read-only, but named for assistive tech
     form.push_hit([px, py, plate, plate], ClickTarget::SettingsNoop);
     form.name_last("Pairing QR code".into());
-    // beside the code when there is room, else under it
-    let side = form.card_w - plate - 24.0 >= 240.0;
-    let (tx, mut ty, tw) = if side {
-        (px + plate + 24.0, py, form.card_w - plate - 24.0)
-    } else {
-        (form.x, py + plate + 16.0, form.card_w)
-    };
+    let mut ty = ty0;
     let expires = format!("Expires in {}", countdown(left));
-    if form.visible(ty, 20.0) {
+    if form.visible_band(ty, words_h) {
         form.layer.text(
-            sans(form.engine, "Scan with the Rift app", 13.0, Weight::NORMAL),
+            sans(
+                form.engine,
+                "Scan with the Rift app",
+                15.0,
+                Weight::SEMIBOLD,
+            ),
             tx,
             ty,
-            theme.text_ui,
+            theme.text_bright,
         );
-        form.layer.text(
-            sans(form.engine, &expires, 12.5, Weight::NORMAL),
-            tx,
-            ty + 22.0,
-            theme.text_dim,
-        );
-    }
-    form.push_hit([tx, ty, tw, 40.0], ClickTarget::SettingsNoop);
-    form.name_last(expires);
-    ty += 52.0;
-    // the link, wrapped by characters (it has no spaces)
-    let cw = form
-        .engine
-        .measure("0000000000", 11.5, mono_family(), Weight::NORMAL)
-        / 10.0;
-    let per = ((tw / cw).floor() as usize).max(8);
-    let chars: Vec<char> = p.url.chars().collect();
-    let lines: Vec<String> = chars.chunks(per).map(|c| c.iter().collect()).collect();
-    let lh = 11.5 * 1.35;
-    for (i, l) in lines.iter().enumerate() {
-        let ly = ty + i as f32 * lh;
-        if form.visible(ly, lh) {
+        for (i, l) in how_lines.iter().enumerate() {
             form.layer.text(
-                mono(form.engine, l, 11.5, Weight::NORMAL),
+                sans(form.engine, l, 12.5, Weight::NORMAL),
                 tx,
-                ly,
+                ty + 26.0 + i as f32 * how_lh,
                 theme.text_dim,
             );
         }
     }
-    let link_h = lines.len() as f32 * lh;
-    form.push_hit([tx, ty, tw, link_h], ClickTarget::SettingsNoop);
-    form.name_last(format!("Pairing link: {}", p.url));
-    ty += link_h + 12.0;
-    form.button(
+    form.push_hit(
+        [tx, ty, tw, 22.0 + how_lines.len() as f32 * how_lh],
+        ClickTarget::SettingsNoop,
+    );
+    form.name_last(format!("Scan with the Rift app. {how}"));
+    ty += 22.0 + how_lines.len() as f32 * how_lh + 8.0;
+    if form.visible_band(ty, 20.0) {
+        form.layer.text(
+            sans(form.engine, &expires, 13.0, Weight::NORMAL),
+            tx,
+            ty,
+            theme.text_ui,
+        );
+    }
+    form.push_hit([tx, ty, tw, 20.0], ClickTarget::SettingsNoop);
+    form.name_last(expires);
+    ty += 20.0 + 10.0;
+    let copy_w = form.button(
         tx,
         ty,
         "Copy link",
@@ -3220,8 +4161,30 @@ fn pairing_block(form: &mut Form, p: &PairingView) {
         ClickTarget::RemoteCopyLink,
         "Copy pairing link".into(),
     );
-    ty += CONTROL_H;
-    form.y = (py + plate).max(ty) + 12.0;
+    form.button(
+        tx + copy_w + 8.0,
+        ty,
+        "Cancel",
+        ButtonKind::Secondary,
+        ClickTarget::RemotePairCancel,
+        "Cancel pairing: the code stops working".into(),
+    );
+    ty += CONTROL_H + 12.0;
+    for (i, l) in link.iter().enumerate() {
+        let ly = ty + i as f32 * link_lh;
+        if form.visible_band(ly, link_lh) {
+            form.layer.text(
+                mono(form.engine, l, 11.5, Weight::NORMAL),
+                tx,
+                ly,
+                theme.text_muted,
+            );
+        }
+    }
+    let link_h = link.len() as f32 * link_lh;
+    form.push_hit([tx, ty, tw, link_h], ClickTarget::SettingsNoop);
+    form.name_last(format!("Pairing link: {}", p.url));
+    form.y = top + h + 6.0;
 }
 
 /// `10000` → `10,000` (design 05 scrollback field).
@@ -4095,10 +5058,19 @@ fn appearance_page(form: &mut Form, config: &Config) {
         "tab_layout",
     );
     let y = form.y;
+    form.tab_style_cards(
+        y,
+        match config.tab_style {
+            TabStyle::Dot => 0,
+            TabStyle::Underline => 1,
+            TabStyle::Detailed => 2,
+        },
+    );
+    let y = form.y;
     form.segment_desc(
         y,
         "Close buttons",
-        "Always keeps a tab's alert dot until you hover it",
+        "On hover shows × only on the tab under the pointer",
         &["On hover", "Always", "Never"],
         match config.tab_close_button {
             TabCloseButton::Hover => 0,
@@ -4159,37 +5131,13 @@ fn appearance_page(form: &mut Form, config: &Config) {
         "tab_bar_with_one_tab",
     );
 
-    // Warp's configurable toolbar: each button left of the tabs, at the
-    // strip's right end, or hidden (moved to a side, it goes last there;
-    // `toolbar_left` / `toolbar_right` in config.toml set the order)
+    // Warp's configurable toolbar: a preview of the strip's buttons that
+    // opens "Edit toolbar" (left of the tabs, at the right end, or off;
+    // `toolbar_left` / `toolbar_right` in config.toml)
     form.group("Toolbar");
-    for item in ToolbarItem::ALL {
-        let y = form.y;
-        form.segment_desc(
-            y,
-            item.label(),
-            "Toolbar button",
-            &["Left", "Right", "Hidden"],
-            match config.toolbar_side(item) {
-                ToolbarSide::Left => 0,
-                ToolbarSide::Right => 1,
-                ToolbarSide::Hidden => 2,
-            },
-            item.setting_id(),
-        );
-        // its place on its side (Warp drags the chips; here − and +)
-        if let Some(at) = config.toolbar_position(item) {
-            let y = form.y;
-            form.stepper_desc(
-                y,
-                &format!("{} position", item.label()),
-                "Toolbar button",
-                &at.to_string(),
-                "",
-                item.order_id(),
-            );
-        }
-    }
+    let y = form.y;
+    let (left, right) = config.toolbar();
+    form.toolbar_preview(y, &left, &right);
 
     form.group("Panes");
     let y = form.y;
@@ -5398,56 +6346,84 @@ fn keybindings_page(
     form.y = fy + rows.len().max(1) as f32 * row_h + 16.0;
 }
 
-fn themes_page(form: &mut Form, config: &Config) {
-    form.group("Available themes");
+/// Settings › Themes: an All / Dark / Light filter, then a grid of cards,
+/// each a small Rift window in that theme's own colours (tab strip, a
+/// passing and a failing block, the prompt and the cursor); the active one
+/// ringed in the accent with a check. A click applies it. Last, a card for
+/// adding your own (Open themes folder).
+fn themes_page(form: &mut Form, config: &Config, filter: ThemeFilter) {
     let names = rift_core::theme::available_themes();
     let labels = rift_core::theme::picker_labels(&names);
-    for (i, name) in names.iter().enumerate() {
-        let ry = form.y;
-        form.y += ROW_H;
-        if !form.visible_band(ry, ROW_H) {
-            // not drawn, but Tab still reaches it (push_hit records the stop)
-            form.push_hit(
-                [form.x, ry, form.card_w, ROW_H],
-                ClickTarget::SettingsTheme(i as u8),
-            );
-            continue;
-        }
-        let t = rift_core::theme::load_by_name(name);
-        let r = [form.x, ry, form.card_w, ROW_H];
-        if form.hot(r) {
-            form.layer.rect(
-                [r[0], r[1]],
-                [r[2], r[3] - 1.0],
-                lift(form.theme, 0.03),
-                0.0,
-            );
-        }
-        // swatches
-        let mut sx = form.x + 8.0;
-        for c in [t.bg, t.accent, t.success, t.error] {
-            form.layer.bordered(
-                [sx, ry + 18.0],
-                [16.0, 16.0],
-                c,
-                lift(form.theme, 0.2),
-                3.0,
-                1.0,
-            );
-            sx += 22.0;
-        }
-        // the name stops before the "active" chip
-        let name_w = (form.x + form.card_w - 100.0 - (sx + 12.0)).max(30.0);
-        let shown = super::palette::elide_to(form.engine, &labels[i], 13.0, FONT_SANS, name_w);
+    let themes: Vec<(Result<Theme, String>, &String)> = names
+        .iter()
+        .map(|n| (rift_core::theme::try_load_by_name(n), n))
+        .collect();
+    let lights: Vec<Option<bool>> = themes
+        .iter()
+        .map(|(t, _)| t.as_ref().ok().map(Theme::is_light))
+        .collect();
+    let theme = form.theme;
+
+    // the filter, and which theme is active, on one line
+    let y = form.y;
+    form.hidden = false;
+    form.row_label = "Show".into();
+    let options: Vec<String> = ThemeFilter::ALL
+        .iter()
+        .map(|f| format!("{}  {}", f.label(), f.count(&lights)))
+        .collect();
+    let opts: Vec<&str> = options.iter().map(String::as_str).collect();
+    let targets: Vec<ClickTarget> = (0..ThemeFilter::ALL.len())
+        .map(|i| ClickTarget::SettingsThemeFilter(i as u8))
+        .collect();
+    let current = ThemeFilter::ALL
+        .iter()
+        .position(|f| *f == filter)
+        .unwrap_or(0);
+    form.segmented(form.x, y + 4.0, "Show", &opts, current, &targets);
+    let active = labels
+        .iter()
+        .zip(&names)
+        .find(|(_, n)| **n == config.theme)
+        .map_or(config.theme.as_str(), |(l, _)| l.as_str());
+    let text = format!("Active: {active}");
+    let tw = form.engine.measure(&text, 12.5, FONT_SANS, Weight::NORMAL);
+    if form.visible(y, ROW_H) {
         form.layer.text(
-            sans(form.engine, &shown, 13.0, Weight::MEDIUM),
-            sx + 10.0,
-            ry + 17.0,
-            form.theme.text_bright,
+            sans(form.engine, &text, 12.5, Weight::NORMAL),
+            form.right() - tw,
+            y + 4.0 + (CONTROL_H - 12.5 * 1.35) / 2.0,
+            theme.text_dim,
         );
-        let tag = if config.theme == *name {
+    }
+    form.y = y + CONTROL_H + 18.0;
+
+    let cols = theme_columns(form.card_w);
+    let cw = ((form.card_w - (cols - 1) as f32 * THEME_GAP) / cols as f32).floor();
+    let ch = THEME_CARD_H;
+    let shown: Vec<usize> = (0..names.len())
+        .filter(|i| filter.shows(lights[*i]))
+        .collect();
+    let top = form.y;
+    let cells = shown.len() + 1;
+    for cell in 0..cells {
+        let (row, col) = (cell / cols, cell % cols);
+        let r = [
+            form.x + col as f32 * (cw + THEME_GAP),
+            top + row as f32 * (ch + THEME_GAP),
+            cw,
+            ch,
+        ];
+        let Some(&i) = shown.get(cell) else {
+            add_theme_card(form, r);
+            continue;
+        };
+        let (loaded, name) = &themes[i];
+        let is_active = config.theme == **name;
+        let light_tag = config.sync_os_theme && config.theme_light == **name && !is_active;
+        let tag = if is_active {
             Some("active")
-        } else if config.sync_os_theme && config.theme_light == *name {
+        } else if light_tag {
             Some("light")
         } else {
             None
@@ -5456,30 +6432,307 @@ fn themes_page(form: &mut Form, config: &Config) {
             Some(tag) => format!("{}, {tag}", labels[i]),
             None => labels[i].clone(),
         };
-        if let Some(tag) = tag {
+        if form.visible_band(r[1], r[3]) {
+            // a file that does not load: its name (the card says the rest)
+            let shown = if loaded.is_ok() {
+                labels[i].as_str()
+            } else {
+                name.as_str()
+            };
+            theme_card(
+                form,
+                r,
+                loaded.as_ref().ok(),
+                shown,
+                lights[i] == Some(true),
+                is_active,
+                light_tag,
+            );
+        }
+        form.push_hit(r, ClickTarget::SettingsTheme(i as u8));
+    }
+    let rows = cells.div_ceil(cols);
+    form.y = top + rows as f32 * (ch + THEME_GAP) - THEME_GAP;
+}
+
+/// Settings search over the themes: a row per theme whose name matches,
+/// which applies it like its card.
+fn themes_search(form: &mut Form, config: &Config) {
+    form.group("Themes");
+    let names = rift_core::theme::available_themes();
+    let labels = rift_core::theme::picker_labels(&names);
+    for (i, (name, label)) in names.iter().zip(&labels).enumerate() {
+        let y = form.y;
+        let active = config.theme == *name;
+        form.reserve = if active { 90.0 } else { 0.0 };
+        form.label_desc(label, "Theme", y);
+        if form.hidden {
+            continue;
+        }
+        if active && form.visible(y, ROW_H) {
+            let tag = "active";
             let aw = form.engine.measure(tag, 11.5, FONT_SANS, Weight::MEDIUM);
             form.layer.rect(
-                [form.right() - aw - 18.0 - 8.0, ry + 15.0],
+                [form.right() - aw - 18.0, y + 15.0],
                 [aw + 18.0, 22.0],
                 form.theme.accent.with_alpha(0.16),
                 4.0,
             );
             form.layer.text(
                 sans(form.engine, tag, 11.5, Weight::MEDIUM),
-                form.right() - aw - 9.0 - 8.0,
-                ry + 18.5,
+                form.right() - aw - 9.0,
+                y + 18.5,
                 form.theme.accent,
             );
         }
-        form.layer.hline(
-            form.x,
-            ry + ROW_H - 1.0,
-            form.card_w,
-            1.0,
-            lift(form.theme, 0.06),
+        form.row_label = if active {
+            format!("{label} theme, active")
+        } else {
+            format!("{label} theme")
+        };
+        form.push_hit(
+            [form.x, y, form.card_w, ROW_H],
+            ClickTarget::SettingsTheme(i as u8),
         );
-        form.push_hit(r, ClickTarget::SettingsTheme(i as u8));
     }
+}
+
+/// Height of a theme card: the small window and the name under it.
+pub const THEME_CARD_H: f32 = 8.0 + THEME_MINI_H + 10.0 + 18.0 + 10.0;
+/// Height of the small window in a theme card.
+const THEME_MINI_H: f32 = 104.0;
+
+/// One theme's card at `r`: the small window drawn in `t`'s tokens (an
+/// invalid file draws an empty ground with the error colour), its name, a
+/// Dark / Light tag, and the active ring and check.
+fn theme_card(
+    form: &mut Form,
+    r: [f32; 4],
+    t: Option<&Theme>,
+    label: &str,
+    light: bool,
+    active: bool,
+    light_tag: bool,
+) {
+    let ui = form.theme;
+    let hot = form.hot(r);
+    let edge = if active {
+        ui.accent
+    } else if hot {
+        lift(ui, 0.28)
+    } else {
+        lift(ui, 0.1)
+    };
+    form.layer.bordered(
+        [r[0], r[1]],
+        [r[2], r[3]],
+        lift(ui, 0.02),
+        edge,
+        8.0,
+        if active { 2.0 } else { 1.0 },
+    );
+    let m = [r[0] + 8.0, r[1] + 8.0, r[2] - 16.0, THEME_MINI_H];
+    match t {
+        Some(t) => mini_window(form, m, t),
+        None => {
+            form.layer.bordered(
+                [m[0], m[1]],
+                [m[2], m[3]],
+                ui.ground(ui.bg),
+                ui.error.with_alpha(0.6),
+                5.0,
+                1.0,
+            );
+            let text = "This file does not load";
+            let w = form.engine.measure(text, 12.0, FONT_SANS, Weight::NORMAL);
+            form.layer.text(
+                sans(form.engine, text, 12.0, Weight::NORMAL),
+                m[0] + (m[2] - w) / 2.0,
+                m[1] + m[3] / 2.0 - 8.0,
+                ui.error,
+            );
+        }
+    }
+    // the name, its kind and (active) a check
+    let ny = m[1] + m[3] + 10.0;
+    let kind = if t.is_none() {
+        "Invalid"
+    } else if light {
+        "Light"
+    } else {
+        "Dark"
+    };
+    let kw = form.engine.measure(kind, 10.5, FONT_SANS, Weight::MEDIUM) + 12.0;
+    let check_w = if active { 22.0 } else { 0.0 };
+    let tag_w = if light_tag {
+        form.engine
+            .measure("light mode", 10.5, FONT_SANS, Weight::MEDIUM)
+            + 12.0
+            + 6.0
+    } else {
+        0.0
+    };
+    let name_w = (r[2] - 20.0 - kw - 8.0 - check_w - tag_w).max(30.0);
+    let shown = super::palette::elide_to(form.engine, label, 13.0, FONT_SANS, name_w);
+    form.layer.text(
+        sans(form.engine, &shown, 13.0, Weight::MEDIUM),
+        r[0] + 10.0,
+        ny,
+        ui.text_ui,
+    );
+    let mut x = r[0] + r[2] - 10.0 - check_w;
+    if active {
+        form.layer
+            .circle([x + 8.0 + 4.0, ny + 9.0], 16.0, ui.accent);
+        icons::draw(form.layer, Icon::Check, [x + 12.0, ny + 9.0], 11.0, ui.bg);
+    }
+    x -= kw;
+    form.layer
+        .rect([x, ny + 1.0], [kw, 17.0], lift(ui, 0.07), 3.0);
+    form.layer.text(
+        sans(form.engine, kind, 10.5, Weight::MEDIUM),
+        x + 6.0,
+        ny + 2.5,
+        ui.text_dim,
+    );
+    if light_tag {
+        let w = tag_w - 6.0;
+        x -= tag_w;
+        form.layer
+            .rect([x, ny + 1.0], [w, 17.0], ui.accent.with_alpha(0.16), 3.0);
+        form.layer.text(
+            sans(form.engine, "light mode", 10.5, Weight::MEDIUM),
+            x + 6.0,
+            ny + 2.5,
+            ui.accent,
+        );
+    }
+}
+
+/// A small Rift window in `t`'s colours at `m`: the chrome strip with its
+/// three dots, an active tab (accent edge) and an inactive one; a passing
+/// block (success edge, accent command), a failing one, and the prompt with
+/// its chevron and cursor.
+fn mini_window(form: &mut Form, m: [f32; 4], t: &Theme) {
+    let ground = t.bg.with_alpha(1.0);
+    let chrome = t.bg_chrome.with_alpha(1.0);
+    form.layer
+        .bordered([m[0], m[1]], [m[2], m[3]], ground, t.border, 5.0, 1.0);
+    // the strip
+    let sh = 18.0;
+    form.layer
+        .rect([m[0] + 1.0, m[1] + 1.0], [m[2] - 2.0, sh], chrome, 4.0);
+    form.layer
+        .rect([m[0] + 1.0, m[1] + sh], [m[2] - 2.0, 1.0], t.border, 0.0);
+    for i in 0..3 {
+        form.layer.circle(
+            [m[0] + 9.0 + i as f32 * 7.0, m[1] + 1.0 + sh / 2.0],
+            4.5,
+            t.text_muted.with_alpha(0.7),
+        );
+    }
+    let tab_w = ((m[2] - 34.0) / 2.6).min(64.0);
+    let tx = m[0] + 31.0;
+    form.layer.rect([tx, m[1] + 1.0], [tab_w, sh], ground, 0.0);
+    form.layer
+        .rect([tx, m[1] + 1.0], [tab_w, 1.5], t.accent, 0.0);
+    form.layer
+        .rect([tx + tab_w, m[1] + 1.0], [1.0, sh], t.border, 0.0);
+    let label = |form: &mut Form, text: &str, x: f32, w: f32, color: Color| {
+        let tw = form.engine.measure(text, 7.5, FONT_SANS, Weight::NORMAL);
+        form.layer.text(
+            sans(form.engine, text, 7.5, Weight::NORMAL),
+            x + (w - tw) / 2.0,
+            m[1] + 1.0 + (sh - 7.5 * 1.35) / 2.0,
+            color,
+        );
+    };
+    label(form, "project1", tx, tab_w, t.text_ui);
+    label(form, "~", tx + tab_w, tab_w, t.text_dim);
+    // the blocks and the prompt, monospace
+    let x = m[0] + 9.0;
+    let mut y = m[1] + sh + 8.0;
+    let lh = 11.0;
+    let line = |form: &mut Form, text: &str, x: f32, y: f32, color: Color| {
+        form.layer
+            .text(mono(form.engine, text, 8.0, Weight::NORMAL), x, y, color);
+    };
+    form.layer
+        .rect([x, y], [2.0, 3.0 * lh - 2.0], t.success, 0.0);
+    line(form, "cargo test", x + 7.0, y, t.accent);
+    line(form, "running 42 tests", x + 7.0, y + lh, t.fg);
+    line(form, "test result: ok", x + 7.0, y + 2.0 * lh, t.success);
+    y += 3.0 * lh + 5.0;
+    form.layer.rect([x, y], [2.0, 2.0 * lh - 2.0], t.error, 0.0);
+    line(form, "git push", x + 7.0, y, t.accent);
+    line(form, "rejected: fetch first", x + 7.0, y + lh, t.error);
+    y += 2.0 * lh + 5.0;
+    line(form, "❯", x, y, t.accent);
+    line(form, "npm run", x + 10.0, y, t.text_dim);
+    let cw = form
+        .engine
+        .measure("npm run", 8.0, mono_family(), Weight::NORMAL);
+    form.layer
+        .rect([x + 10.0 + cw + 2.0, y + 1.0], [4.5, 9.0], t.cursor, 0.0);
+}
+
+/// The last card of the grid: how to add a theme of your own, and a button
+/// that opens the themes folder (made when missing).
+fn add_theme_card(form: &mut Form, r: [f32; 4]) {
+    let ui = form.theme;
+    let label = "Open themes folder";
+    let bw = (form.engine.measure(label, 12.5, FONT_SANS, Weight::MEDIUM) + 24.0).round();
+    let lines = wrap_lines(
+        form.engine,
+        "Drop a .toml or a Warp .yaml theme into the folder; it shows here at once.",
+        12.0,
+        FONT_SANS,
+        r[2] - 28.0,
+    );
+    let body_h = 22.0 + 20.0 + lines.len() as f32 * NOTE_LH + 10.0 + CONTROL_H;
+    let mut y = r[1] + ((r[3] - body_h) / 2.0).max(10.0);
+    if form.visible_band(r[1], r[3]) {
+        super::arranger::dashed(form.layer, r, lift(ui, 0.22), 1.5);
+        icons::draw(
+            form.layer,
+            Icon::Plus,
+            [r[0] + r[2] / 2.0, y + 11.0],
+            18.0,
+            ui.text_muted,
+        );
+        y += 22.0;
+        let t = "Add your own";
+        let tw = form.engine.measure(t, 13.0, FONT_SANS, Weight::NORMAL);
+        form.layer.text(
+            sans(form.engine, t, 13.0, Weight::NORMAL),
+            r[0] + (r[2] - tw) / 2.0,
+            y + 2.0,
+            ui.text_ui,
+        );
+        y += 20.0;
+        for l in &lines {
+            let lw = form.engine.measure(l, 12.0, FONT_SANS, Weight::NORMAL);
+            form.layer.text(
+                sans(form.engine, l, 12.0, Weight::NORMAL),
+                r[0] + (r[2] - lw) / 2.0,
+                y,
+                ui.text_muted,
+            );
+            y += NOTE_LH;
+        }
+        y += 10.0;
+    } else {
+        y += 42.0 + lines.len() as f32 * NOTE_LH + 10.0;
+    }
+    form.row_label = "Add your own theme".into();
+    form.button(
+        (r[0] + (r[2] - bw) / 2.0).round(),
+        y.round(),
+        label,
+        ButtonKind::Secondary,
+        ClickTarget::SettingsOpenThemes,
+        "Open themes folder: drop a .toml or a Warp .yaml theme into it".into(),
+    );
 }
 
 /// `window_opacity` (0.01–1.0) as a slider position.
@@ -5681,6 +6934,88 @@ mod tests {
         assert_eq!(countdown(Duration::from_secs(61)), "1:01");
         assert_eq!(countdown(Duration::from_millis(300)), "0:01");
         assert_eq!(countdown(Duration::ZERO), "0:00");
+    }
+
+    #[test]
+    fn the_remote_page_shows_what_its_state_needs() {
+        use super::{PairStage, PairingView, RelayLine, pair_stage, remote_heading};
+        use std::time::{Duration, SystemTime};
+        let now = SystemTime::now();
+        let link = |expires_at| PairingView {
+            url: "rift-remote://pair?s=x".into(),
+            qr: Vec::new(),
+            expires_at,
+        };
+        let live = link(now + Duration::from_secs(90));
+        let old = link(now - Duration::from_secs(1));
+        // off: nothing to pair, whatever is left over
+        assert_eq!(pair_stage(false, true, Some(&live), now), PairStage::Hidden);
+        assert_eq!(pair_stage(true, false, None, now), PairStage::Idle);
+        assert_eq!(pair_stage(true, true, None, now), PairStage::Waiting);
+        assert_eq!(
+            pair_stage(true, false, Some(&live), now),
+            PairStage::Showing
+        );
+        assert_eq!(pair_stage(true, false, Some(&old), now), PairStage::Expired);
+        assert_eq!(
+            remote_heading(false, &GatewayLine::Off).0,
+            "Remote access is off"
+        );
+        assert_eq!(
+            remote_heading(true, &GatewayLine::Starting).0,
+            "Starting remote access…"
+        );
+        assert_eq!(
+            remote_heading(true, &GatewayLine::Listening(vec!["a".into()])).0,
+            "Ready for your phone"
+        );
+        assert_eq!(
+            remote_heading(true, &GatewayLine::Listening(vec![])).0,
+            "Not on a network"
+        );
+        assert_eq!(
+            remote_heading(true, &GatewayLine::Connected(2)).0,
+            "2 phones connected"
+        );
+        // a relay that is set but stopped never reads "No relay"
+        assert_eq!(RelayLine::Stopped.text(), "Off while remote access is off");
+        assert!(RelayLine::Off.text().starts_with("No relay set"));
+        assert_eq!(RelayLine::Stopped.host(), None);
+    }
+
+    #[test]
+    fn the_theme_grid_filters_counts_and_walks() {
+        use super::{GridStep, ThemeFilter, grid_step, theme_columns};
+        // 2 dark, 1 light, 1 file that does not load
+        let kinds = [Some(false), Some(true), Some(false), None];
+        assert_eq!(ThemeFilter::All.count(&kinds), 4);
+        assert_eq!(ThemeFilter::Dark.count(&kinds), 2);
+        assert_eq!(ThemeFilter::Light.count(&kinds), 1);
+        assert!(!ThemeFilter::Dark.shows(None) && ThemeFilter::All.shows(None));
+        assert_eq!(theme_columns(720.0), 3);
+        assert_eq!(theme_columns(420.0), 2);
+        assert_eq!(theme_columns(150.0), 1);
+        // three per row: 0 1 2 / 3 4
+        let cards: Vec<(ClickTarget, [f32; 4])> = (0..5u8)
+            .map(|i| {
+                let (r, c) = (f32::from(i / 3), f32::from(i % 3));
+                (
+                    ClickTarget::SettingsTheme(i),
+                    [c * 200.0, r * 150.0, 190.0, 140.0],
+                )
+            })
+            .collect();
+        let at = |i: u8| ClickTarget::SettingsTheme(i);
+        let go = |from: u8, step| grid_step(&cards, Some(&at(from)), step);
+        assert_eq!(go(1, GridStep::Down), Some(at(4)));
+        assert_eq!(go(4, GridStep::Up), Some(at(1)));
+        // the row below is short: the closest column
+        assert_eq!(go(2, GridStep::Down), Some(at(4)));
+        assert_eq!(go(2, GridStep::Right), Some(at(3)));
+        assert_eq!(go(3, GridStep::Left), Some(at(2)));
+        assert_eq!(go(0, GridStep::Up), None);
+        assert_eq!(go(0, GridStep::Left), None);
+        assert_eq!(go(4, GridStep::Right), None);
     }
 
     #[test]

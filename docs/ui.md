@@ -4,7 +4,8 @@ Every visual element in Rift, top to bottom. Layer order for compositing:
 0 chrome → 1 terminal + editor → 2 completion, history, search, file viewer →
 3 settings page, maximized review → 4 palette, settings select lists →
 5 context and chip menus, hints, notifications popover → 6 toasts, confirm
-dialogs, What's New, Edit prompt → 7 tooltips. Visual
+dialogs, What's New, Edit prompt, Edit toolbar → 7 tooltips (and the item
+dragged in Edit prompt or Edit toolbar). Visual
 tokens, metrics, radii and the icon set: [DESIGN.md](../DESIGN.md). The
 design source for the current look is the *Rift Terminal Redesign* canvas
 (Claude Design artifact: start session, tabs, panes, moving panes, reading
@@ -42,6 +43,10 @@ pane, history, autocomplete, palette, settings, controls, menus, panels).
 - Hover highlights (tabs, welcome rows, pane controls, settings rows) repaint
   the moment the pointer crosses into or out of a control, not on the next
   frame something else draws.
+- While a modal dialog is open (the command palette, a confirm dialog,
+  What's New, the block comparison, Edit prompt, Edit toolbar), nothing under it reacts to
+  the pointer: no hover highlight, tooltip or hand cursor. Only the
+  dialog's own controls respond.
 - **Drop-down hotkey window** (`hotkey_window`): the global hotkey slides a
   borderless window in from the `hotkey_window_edge` (top by default) of the
   pointer's screen (or `hotkey_window_screen`), `hotkey_window_width`
@@ -96,21 +101,77 @@ removes both within a moment.
 
 ## Tab bar
 
-- One tab per shell session group: the tab title (OSC 0/2 title, else cwd
-  basename) and, when split, a pane count chip (`3`) at its right end. As in Warp, the strip
-  is 34 px tall and every tab 200 px wide (a longer title is cut short);
-  tabs that do not fit shrink evenly to 120 px, then scroll.
+- One tab per shell session group. Its **title** is the name it was given
+  (*Rename tab*), else the folder of its focused pane (`~` for home; before
+  any directory is known, the program's OSC 0/2 title): two tabs on folders
+  of the same name both show `parent/name` (`rift/src`, `flow/src`); a
+  renamed tab does not count. The title follows the focused pane of a split
+  tab, as code review does. A program's own title (an agent's session name,
+  `vim main.rs`) is never the tab's: it is in the tab's tooltip, without an
+  agent's status glyph (`◑`, `✳`), which would repeat the tab's status. As
+  in Warp, the strip is 34 px tall (44 px under the detailed style) and
+  every tab 200 px wide (a longer title is cut short); tabs that do not fit
+  shrink evenly to 120 px, then scroll.
+- **One status per tab**, the most urgent of its panes: *needs you* (an
+  agent waits for your input or permission, or a password prompt out of
+  view), *failed* (a command or agent failed out of view, not yet seen),
+  *working* (a command runs, or an agent works), *done* (one finished out of
+  view, not yet seen), *new output* (output, a bell or a notification since
+  the tab was last viewed; a fresh shell's startup before its first command
+  does not count). A tie goes to the focused pane. Viewing a pane
+  clears its done, failed and new output; needs-you stays until answered. A
+  renamed tab keeps its status. `tab_style` (Settings › Appearance › Tabs ›
+  *Tab style*, three picture cards) says how:
+  - **Dot** (default): a 22 px slot at the tab's left end holds the running
+    spinner (accent) or an 8 px dot — `warning` needs you (it pulses unless
+    macOS *Reduce motion* is on), `error` failed, `success` done, `accent`
+    new output. The title is centred between it and the ×'s slot.
+  - **Underline**: the title is underlined in the status colour (2 px,
+    rounded, its width — at least 24 px, centred, under a one-letter title
+    like `~` — 5 px below it, clear of every border); working is
+    an accent third sweeping along a faint track (standing with Reduce
+    motion).
+  - **Detailed**: a 44 px strip; under the title a second line says it in
+    words (`Needs you`, `Failed`, `Working`, `Done`, `New output`) after a
+    small spinner or dot, in the status colour (working and new output
+    muted); with no status it shows where the folder lives (`~/zzz` under
+    `rift`, keeping its end when cut: `…/zzz`; the whole path under a given
+    name); a tab with nothing for it (home, idle) centres its title. The ×
+    and the tab's icon sit on the title's line, so the second line runs the
+    tab's whole width.
+
+  A status that comes from another pane than the focused one shows as a
+  ring instead of a dot, a faded spinner, a dashed underline, or a second
+  line naming that pane (`atlas · Needs you`). Agents are known by their
+  command (`claude`, `codex`, `opencode`, `gemini`, after env assignments,
+  `npx`/`bunx` and wrappers) or their own notification; a working agent
+  (`◐` or a braille spinner leading its title) counts as running even when
+  its start was lost (reattached after a restart). Tabs carry no agent
+  brand marks; notification toasts and the popover do.
 - The active tab joins the pane below (same ground, no rule) with a 2 px
   accent top edge (its tab color when it has one); a hovered tab lifts. A
   colored tab shows its color as the 2 px top edge when inactive too. A tab
   without a color of its own takes the deepest `[[tab_color_rules]]` entry
   matching its active pane's directory.
-- `×` shows on the active and the hovered tab and closes it (all its
-  panes); on the others its place shows the tab's alert badge or an accent
-  dot for output since last viewed (`tab_close_side = "left"` puts that slot
-  at the tab's left end, the macOS style). `tab_close_button = "always"` shows it
-  on every tab whose slot holds no badge or dot; `"never"` shows it on none
-  (⌘W, the tab menu and the palette still close tabs). `+` spawns a new tab
+- `×` shows on the hovered tab (the active one too only while hovered) and
+  closes it (all its panes); `tab_close_side = "left"` puts the ×'s slot at
+  the tab's left end (the macOS style) and the status slot at its right.
+  `tab_close_button = "always"` shows it on every tab; `"never"` on none
+  (⌘W, the tab menu and the palette still close tabs).
+- **Tab numbers**: hold ⌘ alone (the modifiers of `tab_select_1`) for
+  300 ms and every tab shows its shortcut in the ×'s place, on active and
+  inactive tabs: `⌘1`…`⌘8` by place among the shown tabs, `⌘9` on the last
+  (`tab_select_9` is the last tab; tabs 9…n−1 show none). Releasing ⌘ or
+  pressing any key (a chord such as ⌘C never flashes them) takes them away;
+  a rebound `tab_select_N` shows its own chord, an unbound one none. The
+  vertical rail shows them in the same place on its rows.
+- The tab's tooltip is a card: its title over every pane's full path
+  (`~`-shortened) with its state words (`· focused` on a split tab), the
+  program's own title or the agent's (`Claude Code — waiting for you:
+  Classic template sweep`), a linked worktree (`Worktree <dir> · <branch>`)
+  and its shortcut. Its accessible label adds the status (`, needs you in
+  another pane` when it is another pane's), the agent and the progress.
+- `+` spawns a new tab
   (the default profile), at the end of the strip or, with
   `new_tab_placement = "after_current"`, right after the active tab. A `⌄`
   is joined to its right (one pill, a divider between; the same in the
@@ -142,15 +203,19 @@ removes both within a moment.
   icon right after the traffic lights toggles the file explorer; at the far
   right, `+added −removed` for the active pane's repository (reloaded on
   `cd`, tab or pane switch and after each command) toggles code review — a
-  bare `±` outside a repository or with no changes. Left of it, an inbox
+  bare `±` outside a repository or with no changes. The Settings tab has no
+  repository: there the button is a dimmed `±` with no counts that does
+  nothing (tooltip `No repository on the Settings tab`), and an open review
+  panel hides until a shell tab is shown again, as it was. Left of it, an inbox
   (bell) icon opens the notifications popover; an accent dot marks unread
   entries. The vertical-tab layout's top strip has the same buttons.
 - **Configurable toolbar** (Warp): those buttons, plus *Command palette*
   (search icon) and *Settings*, can go left of the tabs or at the strip's
   right end, in the order `toolbar_left` / `toolbar_right` list them, or be
   hidden. Right-click a toolbar button or the empty strip → *Rearrange
-  toolbar items* opens their Settings rows (Appearance › Toolbar). The chips
-  below sit left of the leftmost right-side button.
+  toolbar items* opens **Edit toolbar** (also Settings › Appearance ›
+  Toolbar buttons). The chips below sit left of the leftmost right-side
+  button.
 - **Update Rift** — while a newer release is downloaded and ready (and not
   dismissed with *Later*), a 22 px pill left of the right-side buttons: 1 px `warning` outline,
   `warning` text (12 px medium), no fill, a hover lift. Tooltip `vX.Y.Z
@@ -160,14 +225,9 @@ removes both within a moment.
   `Remote · <device name>` or `Remote · N devices` (label cut at 200 px).
   Tooltip `Connected: <names>` (`<name> via relay` for a relayed phone); a
   click opens Settings › Remote access.
-- A tab with synchronized inputs on shows the sync icon in the accent.
-- A tab where a command runs (in any of its panes) shows a spinner before
-  its title, in place of the sync icon; it turns in background tabs too. A
-  coding agent waiting at its own prompt (Claude Code's `✳` title, Gemini
-  CLI's `◇ Ready`) is not working, so it shows none (Warp).
-  A working agent (`◐` or a braille spinner leading its title) keeps the
-  spinner even when its start was lost (reattached after a restart), and
-  under a custom tab name.
+- A tab with synchronized inputs on shows the sync icon in the accent, and
+  a read-only one a lock, in the status slot's place (dot style: when it
+  has no status).
 - A tab whose panes report progress (OSC 9;4, `show_progress`) carries a
   2 px bar along its bottom edge on a 25 % track of the same colour:
   `accent` filled to the percentage (normal), `error` (error), `warning`
@@ -177,35 +237,21 @@ removes both within a moment.
   panes the tab shows the most severe (error, then paused, then the rest),
   the newest of equals. The tab's accessible label gains `, 42% done`,
   `, progress error`, `, progress paused`, `, progress paused at 60%` or
-  `, in progress` (after an agent's state: *Claude Code — working, progress
-  error*). On macOS the
+  `, in progress` (after its status and agent: *flow, working, Claude Code,
+  progress error*). On macOS the
   Dock tile's badge shows the percentage of the focused window's active tab
   (`!` for an error; none for indeterminate).
-- A tab running a coding agent (its command names `claude`, `codex`,
-  `opencode` or `gemini`, after env assignments, `npx`/`bunx` and wrappers;
-  or the agent's own notification arrived) shows the agent's 16 px brand
-  disc (the Claude mark, Codex `>_`, …) in place of the spinner, with a
-  state dot at its lower right: the running spinner while it works, a dot
-  in the warning colour while it waits for you (its permission or input
-  notification is open: nothing typed since; the dot pulses unless macOS
-  *Reduce motion* is on), green when it finished with exit 0 (or sits at
-  its own prompt), the error colour after a non-zero exit. A finished
-  agent's mark stays until its pane is viewed. Several agent panes in one
-  tab show the most urgent: waiting, then error, then working, then done.
-  The tooltip and the tab's accessibility label add
-  `Claude Code — waiting for you` (`working`, `done`, `error`).
-- A tab whose focused pane is inside a linked git worktree shows
-  `<worktree dir> · <branch>` as its tooltip detail (the cwd otherwise).
-  The worktree's identity is the repository's common git directory plus its
-  path, never the branch: `git switch` changes the branch shown, not which
-  worktree the tab is. Remote (ssh) panes never inspect a local path.
+- The worktree a tab's tooltip names is the repository's common git
+  directory plus its path, never the branch: `git switch` changes the
+  branch shown, not which worktree the tab is. Remote (ssh) panes never
+  inspect a local path.
 - A program that owns the screen (Claude Code, vim) sits on the bottom
   padding: the part of a row left over goes above its first row.
 - The Settings tab (⌘,) sits after the shell tabs with a settings icon; see
   *Settings tab*.
-- Pinned tabs sit first, 44 px wide, showing only their mark (a terminal
-  icon, or the spinner, agent, sync or lock mark) with their alert or
-  activity dot at the top right, and no ×.
+- Pinned tabs sit first, 44 px wide, showing only one mark: a held ⌘'s
+  number, else the status (dot style's mark in every style), else what the
+  tab is (a terminal icon, or the sync or lock mark); no ×.
 - A tab group draws a 20 px pill before its first tab: the name on its
   color at 18 % with a 1 px border (folded: the color at 85 %, dark text and
   the tab count). Its tabs carry the group color as their top edge. Picked
@@ -216,25 +262,27 @@ removes both within a moment.
 
 `tab_layout = "vertical"` (Settings → Appearance → *Tab position: Side*) replaces the
 tab strip with a 220 px rail on the left: one 54 px row per tab with the
-title (after a spinner while a command runs, a coding agent's mark and
-state dot while one runs, else a sync icon when synced), directory and git
-branch (`<worktree dir> · <branch>` inside a linked worktree), pane count,
-alert badge, activity dot and tab color (no alert badge while the agent's
-dot already shows it waiting or failed); the active row sits on the pane ground with a 2 px accent
-left edge. A progress report (OSC 9;4) draws the tab strip's bar along the
-row's bottom edge. Click selects, × closes (every row carries it unless
-`tab_close_button = "never"`); ⌘T adds a tab; drag a row up or down to
+title (as the strip names it), after the tab's status as the dot style
+draws it (a spinner, a dot, or a ring for another pane's; else its color
+dot), a sync icon when synced, then the directory and git branch
+(`<worktree dir> · <branch>` inside a linked worktree) and pane count; the
+active row sits on the pane ground with a 2 px accent left edge. The rail
+keeps a 34 px top strip under every `tab_style`. A progress report (OSC
+9;4) draws the tab strip's bar along the row's bottom edge. Click selects,
+× closes (as on the strip: the hovered row's, every row's with
+`tab_close_button = "always"`, none with `"never"`; a held ⌘'s number takes
+its place); the directory line keeps its end (`…/zzz/rift · main`); ⌘T adds a tab; drag a row up or down to
 reorder. When the tabs do not fit, the rail keeps the active tab visible: a
 `+N above` line at the top and a `+N more · palette lists all` line at the
-bottom stand in for the hidden tabs, each marked with the most urgent alert
-among them (waiting, then failed, bell, notification, finished; else the
-activity dot). Clicking one selects the nearest hidden tab.
+bottom stand in for the hidden tabs, each marked with the most urgent
+status among them. Clicking one selects the nearest hidden tab.
 
 Above the rows a 26 px search field (*Search tabs*, search icon; accent
 border and caret while it has the keyboard) filters them, with "No tabs
 match" when nothing does, and a 26 px toggle beside it (accent tint while
 on) switches to the panes view: 28 px rows indented under a split tab, one
-per pane (its title or directory, a spinner or lock, a 2 px accent mark on
+per pane (its program's title without a coding agent's status mark — `✳`,
+`◑`, a braille frame — or its directory, a spinner or lock, a 2 px accent mark on
 the focused one). Pinned tabs come first under a *PINNED* label as 32 px
 one-line rows (bookmark mark), the rest under *TABS*. A group's 28 px header
 row shows a chevron (open / folded), a 3 px bar in its color, its name and
@@ -673,17 +721,32 @@ integration). Sits at the bottom of the pane, or at the top with
   dot per folded chip with `attention`: a Docker container down or
   unhealthy) opening the *This pane* sheet (glyph, name, full value, chevron
   per chip). While typing, completions replace the row.
-- **Edit prompt** (Warp; layer 6, 600 px card over a 40 % black backdrop,
-  `surface`, radius 8): `Rift prompt` with `Restore default`, a palette of
-  the chips not in the prompt (sample values; the Python, PHP and Docker
-  chips read `python`, `php`, `docker`), then the prompt itself in a
-  dashed box, each chip with ×. Every chip there has the same hover card
-  as in the prompt (none while one is dragged). A click on a palette chip appends it;
-  dragging a chip (from the palette or the box) shows an accent insertion
-  bar and drops it there, and a box chip dropped outside the box is
-  removed. An empty palette says `Every chip is in your prompt.`, an empty
-  box `Drag chips here, or click one above`. `Cancel` (Esc) and `Save changes` (Enter; enabled once something
-  changed) close it. Screen readers get one button per chip and action.
+- **Edit prompt** (Warp) and **Edit toolbar** share one arranger dialog
+  (layer 6, 600 px `surface` card, radius 8, over a 40 % black backdrop):
+  the title with `Restore default` on its row (accent; muted and inert
+  while the draft is the default), a palette of the items not in use under
+  *Not in your prompt* / *Not in the toolbar*, then the items in use in
+  dashed buckets (1.5 px) under *Your prompt* / *Your toolbar*, each item
+  with ×. Edit prompt has one bucket of chips (sample values; the Python,
+  PHP and Docker chips read `python`, `php`, `docker`); every chip there
+  has the same hover card as in the prompt (none while one is dragged).
+  Edit toolbar has two equal buckets side by side, *Left* and *Right*, of
+  framed buttons (icon and name). A click on a palette item adds it (a
+  chip at the prompt's end, a button at the right end); dragging an item
+  (from the palette or a bucket) lights the bucket under the pointer and
+  shows an accent `|` where it lands — before the first item past the
+  pointer on its row, or before the first item of a lower row — and the
+  dragged item follows the pointer above the dialog; an item dropped
+  outside every bucket is removed. Tab / ⇧Tab walk the bucket items (an
+  accent ring; a click on one focuses it too), ← → move the focused one a
+  place in reading order (across into the next or previous bucket), Delete
+  or ⌫ removes it. An empty palette says `Every chip is in your prompt.` /
+  `Every button is in your toolbar.`, an empty bucket `Drag chips here, or
+  click one above` / `Drop a button here`. `Cancel` (key cap `esc`) and
+  `Save changes` (`⏎`; enabled once something changed) close it; nothing
+  is written before Save. Screen readers get one button per item and
+  action, with Restore default and Save changes listed disabled while they
+  do nothing, and the draft read out bucket by bucket.
 - **Chip pickers** (Warp): the cwd chip ("Change directory") and the branch
   chip ("Change git branch") open a 360 px searchable list over the chip
   (under it when there is no room above; layer 5, `surface`, radius 8). The
@@ -811,7 +874,7 @@ integration). Sits at the bottom of the pane, or at the top with
 - Zoom (⇧⌘⏎): the active pane temporarily takes the whole tab rect and renders
   like a single pane. Navigating or splitting unzooms.
 - Every pane keeps the full editor with its prompt context row.
-- The tab shows its pane count chip.
+- The tab's tooltip lists its panes; its title follows the focused one.
 
 ## History pane (⌃R)
 
@@ -960,9 +1023,9 @@ At most two show, newest on top. Each stays `toast_secs` (default 8);
 hovering keeps it. A click jumps to the pane; ✕ dismisses. Toasts hide while
 the popover or Settings is open.
 
-**Tab markers** — a tab with unread entries shows a dot in the newest one's
-kind color (green finished, red failed, yellow waiting, accent notification,
-grey `text_dim` bell) in place of the activity dot.
+**Tab markers** — a tab with unread entries in a pane shows them as its
+status (failed, done; a request is needs you; a notification or bell is
+new output), see *Tab bar*.
 
 ## Hint mode (⇧⌘H)
 
@@ -1030,7 +1093,7 @@ Nothing else changes on screen.
   review and inbox buttons, a block's chevron and copy button, a split
   pane's split, ⋮ and ✕, the sticky header ("Scroll to this command"), a
   block's duration (the full time), the history pane's scope chips
-  and ✕, Settings' ↺, "Edit prompt" and "Open config.toml" (with its path),
+  and ✕, Settings' ↺, "Edit prompt", "Edit toolbar" and "Open config.toml" (with its path),
   the explorer's and review panel's buttons, the file viewer's ✕ and ⋮, and
   on Linux the drawn traffic lights ("Close window", "Minimize", "Zoom"), the
   toolbar's palette and Settings buttons, and the jump-to-bottom button. A
@@ -1196,8 +1259,9 @@ description) left, control right; it runs to the bottom edge.
 
 - **Search**: typing anywhere outside Keybindings fills the search field and
   lists the matching settings of General, Profiles (its two settings, not
-  the list), Appearance, Input, Terminal, Files, Notifications and Remote
-  access's switch (by name or description; not Keybindings or Themes), each
+  the list), Appearance, Input, Terminal, Files, Notifications, Remote
+  access's switch (by name or description; not Keybindings) and the themes
+  by name (a theme's row applies it, `active` on the one in use), each
   with its `Page › Group`, under the title `Results for “q”` and the subtitle
   `Settings on every page whose name or description match.`; no match shows
   `No settings match`. ⌫ edits, Esc clears it (the next Esc closes the tab).
@@ -1342,9 +1406,15 @@ description) left, control right; it runs to the bottom edge.
     ±20; *Without a saved size*), `Keep windows on top`
     (`always_on_top`), `Resize in whole cells` (`snap_to_cells`) and `Show
     the size while resizing` (`resize_overlay`) toggles.
-  - Tabs: `Tab position` segmented `Top | Side` (`tab_layout`), `Close
-    buttons` segmented `On hover | Always | Never` (*Always keeps a tab's
-    alert dot until you hover it*; `tab_close_button`), `Close button side`
+  - Tabs: `Tab position` segmented `Top | Side` (`tab_layout`), `Tab style`
+    (*How a tab shows what its panes are doing*; three picture
+    cards in a row, each two small tabs drawn in that style — one needing
+    you, one done — over a radio, its name and a line: **Dot** (tagged
+    *Default*) *A dot by the title*, **Underline** *The title
+    underlined*, **Detailed** *The state in words*; a click or Space/Enter
+    on a focused card picks it; `tab_style`), `Close
+    buttons` segmented `On hover | Always | Never` (*On hover shows × only on
+    the tab under the pointer*; `tab_close_button`), `Close button side`
     segmented `Right | Left` (`tab_close_side`), `Show the tab bar` segmented
     `Always | When windowed | Only on hover` (*Out of sight, it slides in at the
     window's top edge*; `tab_bar`), `New tabs open`
@@ -1353,11 +1423,11 @@ description) left, control right; it runs to the bottom edge.
     (`tab_switch_order`),
     `Show tabs with only one tab open` toggle (*Off hides the lone tab; the
     bar's buttons stay*; `tab_bar_with_one_tab`).
-  - Toolbar: one row per button (File explorer, Code review, Notifications,
-    Command palette, Settings; *Toolbar button*) with a segmented `Left |
-    Right | Hidden`; a button moved to a side goes last there
-    (`toolbar_left` / `toolbar_right`). A shown button also has a `<name>
-    position` stepper (−/+ moves it along its side).
+  - Toolbar: `Toolbar buttons` (*Click to choose and arrange them*;
+    `toolbar_left` / `toolbar_right`, one changed dot and ↺ for both): a
+    preview of the strip — traffic lights, the left buttons, two sample
+    tabs, the right buttons — with `✎ Edit` at its right end (brighter on
+    hover, like the box's accent border); a click opens **Edit toolbar**.
   - Panes: `Dim inactive panes` toggle (`dim_inactive_panes`), `Dimming
     strength` slider (1–40 %, shown while dimming is on;
     `inactive_pane_dim`), `Focus follows mouse` toggle (*The split pane under
@@ -1382,7 +1452,8 @@ description) left, control right; it runs to the bottom edge.
     button` toggle (*Over a block that runs past the bottom of the pane*;
     `jump_to_bottom_button`), `Prompt` segmented
     `Rift | Shell (PS1)`, `Prompt chips` (a preview of the chips with
-    sample values; a click opens **Edit prompt**), `Time on this tab counts`
+    sample values and `✎ Edit` at its right end; a click opens **Edit
+    prompt**; changed dot and ↺ like other rows), `Time on this tab counts`
     segmented `Since first command | Only while running`, `Expand aliases as you type`, `Underline unknown
     commands`, `Suggest corrections for failed commands` toggles, `Offer Rift
     in subshells` toggle (*docker exec … bash, poetry shell, and the
@@ -1468,67 +1539,92 @@ description) left, control right; it runs to the bottom edge.
   it. While recording, the row reads `Press a shortcut · Esc cancels · ⌫
   unbinds`. ⌃⌘K jumps straight here.
 - **Themes** — *Built-in themes plus `~/.config/rift/themes` (TOML or Warp
-  YAML)*: a row per available theme with four swatches (background, accent,
-  success, error), its display name and an `active` tag on the current theme;
-  the `light` tag marks the `theme_light` theme, and only while
-  `sync_os_theme` is on. Clicking a row sets `theme`. The palette's
-  *Theme picker (live preview)* (`theme_picker`) lists the same themes
-  (the one in use tagged *in use*) and applies the selected row live; ⏎
-  keeps it, Esc puts the previous theme back.
+  YAML)*: an `All N | Dark N | Light N` filter (a theme file that does not
+  load counts under All only) with `Active: <name>` at its right, then a
+  grid of cards (three across, two or one in a narrow body), one per theme:
+  a small Rift window in that theme's own colours — the chrome strip with
+  three dots, an active tab (accent top edge) and an inactive one, a passing
+  block (`cargo test`, success edge, accent command), a failing one (`git
+  push`, error edge) and the prompt's chevron with a cursor in the theme's
+  cursor colour — then its name and a `Dark` / `Light` tag. The active theme
+  has an accent ring and a check; a file that does not load draws `This file
+  does not load` in the error colour and an `Invalid` tag (its accessible
+  name says `(invalid theme file)`); the `theme_light` theme carries a `light
+  mode` tag while `sync_os_theme` is on. Clicking a card sets `theme`; with
+  a card focused (Tab), ← → move to the previous / next card, ↑ ↓ to the
+  nearest card in the row above / below, and Space or Enter applies it. The
+  last card, dashed, is `Add your own`: *Drop a .toml or a Warp .yaml theme
+  into the folder; it shows here at once.* and `Open themes folder`, which
+  makes the folder when it is missing and opens it with the system opener.
+  The palette's *Theme picker (live preview)* (`theme_picker`) lists the
+  same themes (the one in use tagged *in use*) and applies the selected row
+  live; ⏎ keeps it, Esc puts the previous theme back.
 - **Remote access** (open icon) — *Watch and run commands from a paired phone, at home or away.*:
-  - `Allow remote access` switch (`remote_access`), then `Phones can open
-    tabs while Rift is closed` (below).
-  - `Connection` (with remote access on): `This network` — `Listening on
-    <addresses>` (`Starting…`, or `Listening, but on no network`); `Relay` —
-    its host and state: `Registering this computer at the relay…`, `Phones
-    away from home connect through it · N ms` (the uplink's ping round
-    trip), `No relay: phones connect only on this network`, or `Can’t reach
-    the relay, so phones away from home can’t connect. Retrying in N s.`
-    with the whole error wrapped under it (never cut off) and a `Try again`
-    button that ends the retry wait at once. A lock line follows:
-    `End-to-end encrypted: the relay passes bytes it cannot read.`
-  - `Relay settings…` / `Hide relay settings` (collapsed by default): the
-    `Relay` address field and the Cloudflare tunnel rows below.
-  - `Pair a phone` (primary button; disabled while off) and a `View only`
-    switch (changing it clears a shown link). Pairing shows the QR code
+  - A card at the top: a phone icon, a title and a line, and the `Allow
+    remote access` switch (`remote_access`; changed dot and ↺ beside it).
+    Off: *Remote access is off — Turn it on to watch and run commands from
+    your phone. Until then nothing listens and no phone can reach this
+    computer.* On: *Ready for your phone* (or *Starting remote access…*,
+    *Not on a network*, *N phones connected*), then two tiles — `On this
+    Wi-Fi` (the listening addresses; `Starting…`, or `Listening, but on no
+    network`) and `Away from home` (the relay's host and its ping round trip
+    as a tag: `Registering this computer at the relay…`, `Phones away from
+    home connect through it`, `No relay set: phones connect only on this
+    Wi-Fi`, or `Can’t reach the relay, so phones away from home can’t
+    connect. Retrying in N s.` with the whole error wrapped under it, never
+    cut off, and a `Try again` button that ends the retry wait at once;
+    with the Cloudflare tunnel, `Waiting for the tunnel` until it is ready
+    and then the tunnel relay's state) — and a lock line: `End-to-end
+    encrypted: the relay passes bytes it cannot read.`
+  - Off, nothing else shows but `Paired phones (N)` when there are any: *They
+    can't connect while remote access is off. Revoke one to remove it for
+    good.*, each phone's name, `Can’t connect while off · <platform> ·
+    paired <date>` and `Revoke`.
+  - `Pair a phone` (on): `Add a phone` — *Show a code to scan with the Rift
+    app · one use, valid 2 minutes* — with the `Pair a phone` button, and
+    the check box `The new phone can only watch` (*It sees your tabs but
+    can't run commands or send keys*; changing it withdraws a shown code).
+    Pairing shows the code inline in an accent-edged panel: the QR code
     (black 4 px modules on a white plate with a 4-module quiet zone, so phone
-    cameras read it in any theme), `Expires in m:ss`, the wrapped link and a
-    `Copy link` button; at zero, `Expired — Pair again`. While the gateway
-    has no address yet, a `Pairing` row waits for it.
-  - `After you quit` (with remote access on, under the switch): a read-only
-    row: *Rift keeps running in the menu bar; phones that may run commands
-    can open tabs* (macOS), *Rift quits (Keep shells running through
-    updates is off in General)*, or *Rift quits, phones can no longer reach
-    it* (Linux). Under it (macOS) the `Ask before keeping Rift running`
-    toggle (`confirm_background_quit`).
-  - `Listen address` (under `Relay settings…`, first): a text field for
-    `remote_listen` (`IP:PORT`; anything else is refused).
-  - `Use a Cloudflare tunnel instead` (under `Relay settings…`, below `Relay`): the `remote_tunnel`
-    switch; on, a checklist follows: `cloudflared` (`Installed · <path>` with
-    a green check, or `Not installed` with an `Install` button when
-    Homebrew is present, else `Download`) and `Tunnel` (`Starting…`,
-    `Waiting for cloudflared`, `Ready · <host> · pair phones again after a
-    restart` or `Failed, retrying: <reason>`). The `Relay` row then shows
-    the tunnel relay's state (`Waiting for the tunnel` until it is ready)
-    without the URL field, and `Pairing` waits with `Waiting for the
-    tunnel…`.
-  - `Relay` (under `Relay settings…`): a text field for `remote_relay` (click or Enter edits; typing
-    and ⌘V fill it; Enter saves a valid `ws://`/`wss://` URL, an invalid one
-    stays with a toast; Esc cancels; Tab or a click elsewhere saves). It
-    holds Rift's public relay by default; its state shows in `Connection`.
-  - `Paired devices`: per device its name with a dot (green while
+    cameras read it in any theme), `Scan with the Rift app` and how (*It will
+    be able to run commands.* / *It will only be able to watch.*), `Expires
+    in m:ss`, `Copy link` and `Cancel` (which withdraws the code: it stops
+    working at once), and the wrapped link. At zero, `The code expired` with
+    `Show a new code`. While the gateway has no address yet (or the tunnel
+    is not ready), a `Pairing` row waits for it.
+  - `Paired phones (N)` (on): per phone its name with a dot (green while
     connected) and `Connected on this network|Connected through the
     relay|Not connected · last seen … · platform (iOS, Android) · paired
-    <date>`, an `Operate` / `View only`
-    segmented control (raising to Operate asks first), and a destructive
-    `Revoke` button, which opens the confirm dialog `Revoke <name>? It
-    disconnects now and cannot reconnect without pairing again.`; an empty
-    state when none.
-  - `Recent connections`: the newest 20, each with the device (or `Unknown
-    device`), `LAN` or `Relay`, the address, the start time, the duration or
-    `connected`, and why it ended. Five rows show at once; with more, the
-    wheel over the list scrolls it a row at a time (a thumb at its right
-    edge shows where), and past either end the page scrolls on.
+    <date>`, a `Can run commands` / `View only` segmented control (raising
+    a phone to run commands asks first), and an outlined `Revoke` (error
+    outline and label), which opens the confirm dialog `Revoke <name>? It
+    disconnects now and cannot reconnect without pairing again.`; `No phones
+    yet` when none.
+  - `When you quit` (on): what a quit does, in full: *Rift keeps running in
+    the menu bar — Your shells stay and phones that can run commands can open
+    tabs. Quit Rift completely from the menu bar icon.* (macOS), *Rift quits —
+    Keep shells running through updates is off in General, so nothing stays
+    behind.*, or *Rift quits — Phones can no longer reach it until you open
+    Rift again.* (Linux). Under it (macOS) the `Ask before keeping Rift
+    running` toggle (`confirm_background_quit`).
+  - `Recent connections (N)` (on; folded away, a click opens it): the newest
+    20, each with the device (or `Unknown device`), `LAN` or `Relay`, the
+    address, the start time, the duration or `connected`, and why it ended.
+    Five rows show at once; with more, the wheel over the list scrolls it a
+    row at a time (a thumb at its right edge shows where), and past either
+    end the page scrolls on.
+  - `Connection settings` (on; folded away): `Listen address` — a text field
+    for `remote_listen` (`IP:PORT`; anything else is refused); `Relay
+    address` — a text field for `remote_relay` (click or Enter edits; typing
+    and ⌘V fill it; Enter saves a valid `ws://`/`wss://` URL, an invalid one
+    stays with a toast; Esc cancels; Tab or a click elsewhere saves; Rift's
+    public relay by default; not shown while the tunnel replaces it); `Use a
+    Cloudflare tunnel instead` — the `remote_tunnel` switch; on, a checklist
+    follows: `cloudflared` (`Installed · <path>` with a green check, or `Not
+    installed` with an `Install` button when Homebrew is present, else
+    `Download`) and `Tunnel` (`Starting…`, `Waiting for cloudflared`, `Ready
+    · <host> · pair phones again after a restart` or `Failed, retrying:
+    <reason>`).
   - The page refreshes its data at most once a second.
 - **About** — no title: the app icon (64 px) beside the `Rift` wordmark,
   centred a little above the middle of the body; under it the version

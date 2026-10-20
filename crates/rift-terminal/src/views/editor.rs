@@ -838,8 +838,10 @@ fn make_mono(engine: &mut TextEngine, text: &str, size: f32, weight: Weight) -> 
 }
 
 pub(crate) fn shorten_home(path: &str) -> String {
+    // `/Users/ann2` is not under `/Users/ann`
     if let Ok(home) = std::env::var("HOME")
         && let Some(rest) = path.strip_prefix(&home)
+        && (rest.is_empty() || rest.starts_with('/'))
     {
         return format!("~{rest}");
     }

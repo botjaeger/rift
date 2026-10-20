@@ -231,9 +231,21 @@ pub enum TabLayout {
     Vertical,
 }
 
+/// How a tab in the top strip shows its status: a dot before the title,
+/// the title underlined in the status colour, or a second line that says
+/// it in words (a 44 px strip).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TabStyle {
+    #[default]
+    Dot,
+    Underline,
+    Detailed,
+}
+
 /// When a horizontal tab shows its × (Warp has only a position setting):
-/// on the active and the hovered tab, on every tab, or never (⌘W, the tab
-/// menu and the palette still close tabs).
+/// on the hovered tab, on every tab, or never (⌘W, the tab menu and the
+/// palette still close tabs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum TabCloseButton {
@@ -349,17 +361,6 @@ impl ToolbarItem {
         ToolbarItem::Settings,
     ];
 
-    /// Its Settings control id (`toolbar.<name>`).
-    pub fn setting_id(self) -> &'static str {
-        match self {
-            ToolbarItem::Explorer => "toolbar.explorer",
-            ToolbarItem::Review => "toolbar.review",
-            ToolbarItem::Notifications => "toolbar.notifications",
-            ToolbarItem::Palette => "toolbar.palette",
-            ToolbarItem::Settings => "toolbar.settings",
-        }
-    }
-
     /// From its config name (`explorer`, …).
     pub fn from_name(name: &str) -> Option<ToolbarItem> {
         Self::ALL.into_iter().find(|i| {
@@ -367,25 +368,6 @@ impl ToolbarItem {
                 .ok()
                 .is_some_and(|v| v.as_str() == Some(name.trim()))
         })
-    }
-
-    pub fn from_setting_id(id: &str) -> Option<ToolbarItem> {
-        Self::ALL.into_iter().find(|i| i.setting_id() == id)
-    }
-
-    /// Its position stepper's Settings id (`toolbar_order.<name>`).
-    pub fn order_id(self) -> &'static str {
-        match self {
-            ToolbarItem::Explorer => "toolbar_order.explorer",
-            ToolbarItem::Review => "toolbar_order.review",
-            ToolbarItem::Notifications => "toolbar_order.notifications",
-            ToolbarItem::Palette => "toolbar_order.palette",
-            ToolbarItem::Settings => "toolbar_order.settings",
-        }
-    }
-
-    pub fn from_order_id(id: &str) -> Option<ToolbarItem> {
-        Self::ALL.into_iter().find(|i| i.order_id() == id)
     }
 
     pub fn label(self) -> &'static str {
@@ -467,14 +449,6 @@ impl AppIcon {
             AppIcon::Neon => "Neon",
         }
     }
-}
-
-/// Which side of the toolbar an item is on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToolbarSide {
-    Left,
-    Right,
-    Hidden,
 }
 
 /// What renders above the editor: Rift's context chips, or the shell's
@@ -850,6 +824,8 @@ pub struct Config {
     pub input_position: InputPosition,
     pub blocks_start: BlocksStart,
     pub tab_layout: TabLayout,
+    /// How a tab in the top strip shows its status.
+    pub tab_style: TabStyle,
     /// When a tab in the top strip shows its close button.
     pub tab_close_button: TabCloseButton,
     /// Which end of a tab the close button is at.
@@ -1126,6 +1102,7 @@ impl Default for Config {
             input_position: InputPosition::Bottom,
             blocks_start: BlocksStart::Bottom,
             tab_layout: TabLayout::Horizontal,
+            tab_style: TabStyle::Dot,
             tab_close_button: TabCloseButton::Hover,
             tab_close_side: TabCloseSide::Right,
             tab_bar: TabBarVisibility::Always,
@@ -1905,65 +1882,6 @@ impl Config {
         let left = side(&self.toolbar_left);
         (left, side(&self.toolbar_right))
     }
-
-    /// The side `item` shows on.
-    pub fn toolbar_side(&self, item: ToolbarItem) -> ToolbarSide {
-        let (left, right) = self.toolbar();
-        if left.contains(&item) {
-            ToolbarSide::Left
-        } else if right.contains(&item) {
-            ToolbarSide::Right
-        } else {
-            ToolbarSide::Hidden
-        }
-    }
-
-    /// `item`'s place on its side (1 = leftmost), `None` while hidden.
-    pub fn toolbar_position(&self, item: ToolbarItem) -> Option<usize> {
-        let (left, right) = self.toolbar();
-        left.iter()
-            .chain(right.iter())
-            .position(|i| *i == item)
-            .map(|p| {
-                if p < left.len() {
-                    p + 1
-                } else {
-                    p - left.len() + 1
-                }
-            })
-    }
-
-    /// Move `item` `by` places along its side (negative: left), within it.
-    pub fn move_toolbar_item(&mut self, item: ToolbarItem, by: i64) {
-        let (mut left, mut right) = self.toolbar();
-        for side in [&mut left, &mut right] {
-            if let Some(at) = side.iter().position(|i| *i == item) {
-                let to = (at as i64 + by).clamp(0, side.len() as i64 - 1) as usize;
-                let it = side.remove(at);
-                side.insert(to, it);
-            }
-        }
-        self.toolbar_left = left;
-        self.toolbar_right = right;
-    }
-
-    /// Move `item` to the end of `side` (its order on the other side is
-    /// kept for the rest).
-    pub fn set_toolbar_side(&mut self, item: ToolbarItem, side: ToolbarSide) {
-        if self.toolbar_side(item) == side {
-            return;
-        }
-        let (mut left, mut right) = self.toolbar();
-        left.retain(|i| *i != item);
-        right.retain(|i| *i != item);
-        match side {
-            ToolbarSide::Left => left.push(item),
-            ToolbarSide::Right => right.push(item),
-            ToolbarSide::Hidden => {}
-        }
-        self.toolbar_left = left;
-        self.toolbar_right = right;
-    }
 }
 
 #[cfg(test)]
@@ -2335,24 +2253,12 @@ mod tests {
     }
 
     #[test]
-    fn toolbar_keeps_the_old_layout_and_moves_items() {
+    fn toolbar_keeps_the_old_layout_and_reads_back() {
         use ToolbarItem::*;
         let mut c: Config = toml::from_str("font_size = 14").unwrap();
         assert_eq!(c.toolbar(), (vec![Explorer], vec![Notifications, Review]));
-        assert_eq!(c.toolbar_side(Palette), ToolbarSide::Hidden);
-        c.set_toolbar_side(Palette, ToolbarSide::Left);
-        c.set_toolbar_side(Review, ToolbarSide::Left);
-        c.set_toolbar_side(Explorer, ToolbarSide::Hidden);
-        assert_eq!(c.toolbar(), (vec![Palette, Review], vec![Notifications]));
-        // reordered within a side, clamped at its ends
-        assert_eq!(c.toolbar_position(Review), Some(2));
-        c.move_toolbar_item(Review, -1);
-        assert_eq!(c.toolbar(), (vec![Review, Palette], vec![Notifications]));
-        c.move_toolbar_item(Review, -1);
-        c.move_toolbar_item(Notifications, 3);
-        assert_eq!(c.toolbar(), (vec![Review, Palette], vec![Notifications]));
-        c.move_toolbar_item(Review, 1);
-        assert_eq!(c.toolbar_position(Explorer), None);
+        c.toolbar_left = vec![Review, Palette];
+        c.toolbar_right = vec![Notifications];
         // a saved config reads back the same
         let back: Config = toml::from_str(&toml::to_string(&c).unwrap()).unwrap();
         assert_eq!(back.toolbar(), c.toolbar());
@@ -2378,6 +2284,7 @@ mod tests {
         // an existing config without the keys keeps what Rift did before
         let c: Config = toml::from_str("font_size = 14").unwrap();
         assert_eq!(c.tab_close_button, TabCloseButton::Hover);
+        assert_eq!(c.tab_style, TabStyle::Dot);
         assert_eq!(c.new_tab_placement, NewTabPlacement::End);
         assert!(c.tab_bar_with_one_tab);
         assert!(c.sticky_command_header);
@@ -2442,6 +2349,15 @@ mod tests {
         assert_eq!(fs.tab_bar, TabBarVisibility::HideFullscreen);
         assert!(toml::from_str::<Config>("tab_bar = \"never\"").is_err());
         assert!(toml::from_str::<Config>("block_spacing = \"wide\"").is_err());
+        for (raw, style) in [
+            ("dot", TabStyle::Dot),
+            ("underline", TabStyle::Underline),
+            ("detailed", TabStyle::Detailed),
+        ] {
+            let s: Config = toml::from_str(&format!("tab_style = \"{raw}\"")).unwrap();
+            assert_eq!(s.tab_style, style);
+        }
+        assert!(toml::from_str::<Config>("tab_style = \"pill\"").is_err());
         let never: Config = toml::from_str("tab_close_button = \"never\"").unwrap();
         assert_eq!(never.tab_close_button, TabCloseButton::Never);
         assert!(toml::from_str::<Config>("tab_close_button = \"left\"").is_err());

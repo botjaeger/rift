@@ -150,6 +150,8 @@ pub struct Control {
     pub toggled: Option<bool>,
     pub selected: bool,
     pub rect: Option<[f32; 4]>,
+    /// Shown but not usable (the review button on the Settings tab).
+    pub disabled: bool,
 }
 
 pub enum Overlay {
@@ -241,7 +243,10 @@ impl Tree {
         if c.selected {
             node.set_selected(true);
         }
-        self.add(id, node, c.rect, true);
+        if c.disabled {
+            node.set_disabled();
+        }
+        self.add(id, node, c.rect, !c.disabled);
         id
     }
 }
@@ -615,6 +620,9 @@ pub fn describe(update: &TreeUpdate) -> String {
         if n.is_selected() == Some(true) {
             out.push_str(" selected");
         }
+        if n.is_disabled() {
+            out.push_str(" disabled");
+        }
         if id == focus {
             out.push_str(" [focus]");
         }
@@ -681,6 +689,7 @@ mod tests {
                     toggled: None,
                     selected: false,
                     rect: Some([780.0, 40.0, 20.0, 20.0]),
+                    disabled: false,
                 }],
             }],
             overlay: None,
@@ -711,6 +720,7 @@ mod tests {
                 toggled: None,
                 selected: true,
                 rect: Some([0.0, 80.0, 200.0, 28.0]),
+                disabled: false,
             }],
         });
         let built = build(&s);
@@ -765,6 +775,7 @@ mod tests {
                 toggled: None,
                 selected: true,
                 rect: Some([100.0, 100.0, 300.0, 30.0]),
+                disabled: false,
             }],
             rect: None,
         });
@@ -800,6 +811,7 @@ mod tests {
                     toggled: None,
                     selected: false,
                     rect: Some([0.0; 4]),
+                    disabled: false,
                 },
                 Control {
                     label: "Paste".into(),
@@ -807,12 +819,40 @@ mod tests {
                     toggled: None,
                     selected: false,
                     rect: Some([0.0; 4]),
+                    disabled: false,
                 },
             ],
         });
         let text = describe(&build(&s).update);
         assert!(text.contains("AlertDialog \"Paste and run?\" desc=\"2 lines\""));
         assert!(text.contains("Button \"Paste\" [focus]"));
+    }
+
+    #[test]
+    fn a_disabled_control_says_so_and_takes_no_click() {
+        let mut s = snapshot();
+        s.overlay = Some(Overlay::Alert {
+            title: "t".into(),
+            description: String::new(),
+            buttons: vec![Control {
+                label: "No repository on the Settings tab".into(),
+                role: Role::Button,
+                toggled: None,
+                selected: false,
+                rect: Some([1.0, 1.0, 10.0, 10.0]),
+                disabled: true,
+            }],
+        });
+        let built = build(&s);
+        let text = describe(&built.update);
+        assert!(
+            text.contains("Button \"No repository on the Settings tab\" disabled"),
+            "{text}"
+        );
+        assert!(
+            !built.targets.values().any(|r| *r == [1.0, 1.0, 10.0, 10.0]),
+            "a disabled control takes no click"
+        );
     }
 
     #[test]

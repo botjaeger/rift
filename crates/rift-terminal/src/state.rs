@@ -45,6 +45,9 @@ pub enum ClickTarget {
     /// Top-bar sidebar toggles.
     ToggleExplorer,
     ToggleReview,
+    /// The code review button while the Settings tab is shown: dimmed, a
+    /// tooltip only (Settings has no repository).
+    ReviewUnavailable,
     /// Top-bar inbox: the notifications popover.
     ToggleNotifications,
     /// Toolbar buttons (`toolbar_left` / `toolbar_right`): the command
@@ -107,6 +110,8 @@ pub enum ClickTarget {
     SettingsSegment(&'static str, u8),
     /// The prompt chips preview: opens "Edit prompt".
     SettingsEditPrompt,
+    /// The toolbar preview: opens "Edit toolbar".
+    SettingsEditToolbar,
     /// A select: opens its option list.
     SettingsCycle(&'static str),
     /// Option `i` of the open select's list.
@@ -134,6 +139,11 @@ pub enum ClickTarget {
     SettingsNotifyPermission,
     SettingsSlider(&'static str),
     SettingsTheme(u8),
+    /// Settings › Themes: show all themes (0), the dark (1) or the light
+    /// ones (2).
+    SettingsThemeFilter(u8),
+    /// Settings › Themes › "Open themes folder" (created when missing).
+    SettingsOpenThemes,
     /// Keybindings page row: record a new shortcut for the action.
     SettingsKeybind(String),
     /// Keybindings page ↺: drop the override (back to the default).
@@ -142,6 +152,11 @@ pub enum ClickTarget {
     RemotePair,
     /// Settings › Remote access: pair the next phone view-only.
     RemoteViewOnly,
+    /// Settings › Remote access: "Cancel" under a shown pairing code (the
+    /// code stops working).
+    RemotePairCancel,
+    /// Settings › Remote access: "Recent connections" opens or closes.
+    RemoteHistory,
     /// Settings › Remote access: copy the pairing link.
     RemoteCopyLink,
     /// Settings › Remote access: install cloudflared (Homebrew in a new
@@ -154,8 +169,8 @@ pub enum ClickTarget {
     /// Settings › Remote access › Connection: "Try again" (retry the relay
     /// now).
     RemoteRelayRetry,
-    /// Settings › Remote access: "Relay settings…" opens or closes the
-    /// relay address and the Cloudflare tunnel.
+    /// Settings › Remote access: "Connection settings" opens or closes the
+    /// listen address, the relay address and the Cloudflare tunnel.
     RemoteRelaySettings,
     /// Settings › Remote access: set the device with this id to Operate
     /// (`false`, confirmed first) or View only (`true`).
@@ -1158,6 +1173,8 @@ pub struct PaneState {
     pub agent_run: Option<crate::agent_status::AgentRun>,
     /// Its status at the last frame (tab strip, rail, `dump`).
     pub agent_status: Option<crate::agent_status::AgentStatus>,
+    /// Output arrived while its tab was not viewed (`TabState::mark_activity`).
+    pub activity: bool,
     /// Rich input over the running program (`crate::composer`).
     pub composer: crate::composer::Composer,
     /// Its program exited and the pane stays (`close_on_exit`): the exit
@@ -1166,6 +1183,13 @@ pub struct PaneState {
 }
 
 impl PaneState {
+    /// The program's title as a name: a coding agent's status mark (`✳`,
+    /// `◑`, a braille spinner frame) is the tab's status, not part of it.
+    /// Empty when the program set no title.
+    pub fn program_title(&self) -> &str {
+        rift_core::notifications::agent_session_title(&self.title)
+    }
+
     /// The selected blocks, oldest first: the multi-block selection while it
     /// holds `selected_block`, else `selected_block` alone.
     pub fn selected_blocks(&self) -> Vec<rift_core::BlockId> {
@@ -1236,6 +1260,7 @@ impl PaneState {
             program: String::new(),
             agent_run: None,
             agent_status: None,
+            activity: false,
             composer: Default::default(),
             exited: None,
         }
@@ -1489,22 +1514,50 @@ impl TabState {
         self.root.is_split() && !(self.is_split() && self.zoomed.is_some())
     }
 
+    /// The tab's name: the one it was given (rename), else its focused
+    /// pane's folder (`~` for home), else the program's title until a
+    /// directory is known. The strip and the rail add the parent when two
+    /// tabs share a folder name (`tab_status::titles`).
     pub fn display_title(&self) -> String {
-        if let Some(t) = self.custom_title.as_ref().filter(|t| !t.is_empty()) {
-            return t.clone();
+        if let Some(t) = self.custom_name() {
+            return t.to_string();
         }
-        if !self.title.is_empty() {
-            return self.title.clone();
+        match self.focused_cwd() {
+            Some(cwd) => crate::tab_status::folder(&cwd).to_string(),
+            None if !rift_core::notifications::agent_session_title(&self.title).is_empty() => {
+                rift_core::notifications::agent_session_title(&self.title).to_string()
+            }
+            None => "shell".into(),
         }
+    }
+
+    /// The name the tab was given (rename), if any.
+    pub fn custom_name(&self) -> Option<&str> {
+        self.custom_title.as_deref().filter(|t| !t.is_empty())
+    }
+
+    /// The focused pane's directory, `~`-shortened.
+    pub fn focused_cwd(&self) -> Option<String> {
         self.active()
             .and_then(|p| p.session.cwd.lock().unwrap().clone())
-            .map(|p| {
-                std::path::Path::new(&p)
-                    .file_name()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or(p)
-            })
-            .unwrap_or_else(|| "shell".into())
+            .map(|p| crate::views::editor::shorten_home(&p))
+    }
+
+    /// Output since last viewed: the tab's and each pane's flag (the strip,
+    /// the rail and the status ranking read them).
+    pub fn mark_activity(&mut self, pane: PaneId) {
+        self.activity = true;
+        if let Some(p) = self.pane_mut(pane) {
+            p.activity = true;
+        }
+    }
+
+    /// The tab was viewed: its output is seen.
+    pub fn clear_activity(&mut self) {
+        self.activity = false;
+        for p in &mut self.panes {
+            p.activity = false;
+        }
     }
 }
 

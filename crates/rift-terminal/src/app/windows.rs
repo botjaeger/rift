@@ -400,7 +400,7 @@ impl App {
         self.win.settings.open = false;
         self.win.active = ti;
         let tab = &mut self.win.tabs[ti];
-        tab.activity = false;
+        tab.clear_activity();
         tab.active_pane = pane;
         if tab.zoomed.is_some() {
             tab.zoomed = Some(pane);

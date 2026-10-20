@@ -18,6 +18,19 @@ pub struct SubshellOffer {
     pub shown: bool,
     /// The block of the command that started the subshell, once running.
     pub block: Option<rift_core::BlockId>,
+    /// The prompt block the command was submitted in: it turns into the
+    /// command's block once the shell says the command started (OSC 133;C),
+    /// which can come several frames after the submit.
+    pub submitted_in: Option<rift_core::BlockId>,
+}
+
+/// Where the command that may start a subshell is.
+enum Started {
+    /// Submitted; the shell has not said it started yet.
+    Waiting,
+    Running,
+    /// It ran and ended (or its block is gone): the offer is over.
+    Over,
 }
 
 /// The running block of `p`, when its command still runs on the primary
@@ -54,11 +67,20 @@ impl App {
             .find_tab_of_pane(pane)
             .and_then(|(_, t)| t.pane_mut(pane))
         {
+            let submitted_in = p
+                .session
+                .blocks
+                .lock()
+                .unwrap()
+                .last()
+                .filter(|b| matches!(b.state, rift_core::BlockState::Prompt))
+                .map(|b| b.id);
             p.subshell = Some(SubshellOffer {
                 command: command.trim().to_string(),
                 since: Instant::now(),
                 shown: false,
                 block: None,
+                submitted_in,
             });
         }
     }
@@ -74,10 +96,31 @@ impl App {
                 let Some(offer) = &mut p.subshell else {
                     continue;
                 };
-                if !p.session.blocks.lock().unwrap().any_running() {
-                    repaint |= offer.shown;
-                    p.subshell = None;
-                    continue;
+                let started = {
+                    let blocks = p.session.blocks.lock().unwrap();
+                    match offer.submitted_in {
+                        // its own block: still a prompt until the shell
+                        // starts the command, so a slow start never ends it
+                        Some(id) => {
+                            match blocks.iter().rev().find(|b| b.id == id).map(|b| &b.state) {
+                                Some(rift_core::BlockState::Prompt) => Started::Waiting,
+                                Some(rift_core::BlockState::Running { .. }) => Started::Running,
+                                _ => Started::Over,
+                            }
+                        }
+                        None if blocks.any_running() => Started::Running,
+                        None => Started::Over,
+                    }
+                };
+                match started {
+                    Started::Over => {
+                        repaint |= offer.shown;
+                        p.subshell = None;
+                        continue;
+                    }
+                    // output (the start marker) wakes the next frame
+                    Started::Waiting => continue,
+                    Started::Running => {}
                 }
                 let at = offer.since + SHOW_AFTER;
                 if now < at {

@@ -51,7 +51,7 @@ pub use config::{
     AmbiguousWidth, AppIcon, Bell, BlockSpacing, BlocksStart, CloseOnExit, Config, CursorStyle,
     ElapsedCounts, HotkeyEdge, InputPosition, LaunchMode, NewTabPlacement, Padding, PromptChip,
     PromptMode, RichInputSubmit, ScrollbarMode, ShellWidgets, TabBarVisibility, TabCloseButton,
-    TabCloseSide, TabLayout, TabSwitchOrder, ToolbarItem, ToolbarSide,
+    TabCloseSide, TabLayout, TabStyle, TabSwitchOrder, ToolbarItem,
 };
 pub use keybindings::{Binding, Keymap};
 pub use osc::{Marker, OscScanner, Progress, ProgressState, host_is_local};

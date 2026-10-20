@@ -11,10 +11,11 @@ use rift_renderer::glyphon::Weight;
 use rift_renderer::{FONT_SANS, Layer, TextEngine, mono_family};
 
 use crate::state::{ClickTarget, Hit};
+use crate::tab_status::{Status, TabStatus};
 use crate::views::glyphs;
 use crate::views::icons::{self, Icon};
 use crate::views::tabbar::{
-    GroupHeader, RAIL_W, TAB_BAR_H, TabInfo, agent_mark, draw_progress, elide, make_text,
+    GroupHeader, RAIL_W, TabInfo, bar_h, draw_progress, elide, elide_start, make_text, status_mark,
 };
 
 /// One row of the rail.
@@ -104,40 +105,14 @@ pub fn window(heights: &[f32], active: usize, avail: f32, more_h: f32) -> std::o
     start.min(active)..active + 1
 }
 
-/// Severity order for an overflow line's marker: what most needs the user.
-fn alert_rank(kind: crate::views::notifications::Kind) -> u8 {
-    use crate::views::notifications::Kind;
-    match kind {
-        Kind::Request => 4,
-        Kind::Failed => 3,
-        Kind::Bell => 2,
-        Kind::Notify => 1,
-        // never a tab's (Rift's own notices have no pane)
-        Kind::Finished | Kind::App => 0,
-    }
-}
-
-/// The marker an overflow line carries: the worst alert among `hidden`, or
-/// activity when none has an alert.
-fn hidden_marker(hidden: &[&TabInfo]) -> Option<Option<crate::views::notifications::Kind>> {
-    let worst = hidden
+/// The marker an overflow line carries: the most urgent status among the
+/// `hidden` tabs (as their own, so it reads as a dot, not a ring).
+fn hidden_marker(hidden: &[&TabInfo]) -> Option<Status> {
+    hidden
         .iter()
-        .filter_map(|t| t.alert)
-        .max_by_key(|k| alert_rank(*k));
-    match worst {
-        Some(kind) => Some(Some(kind)),
-        None => hidden.iter().any(|t| t.activity).then_some(None),
-    }
-}
-
-/// The unread-alert badge of a row: none while the tab's agent mark
-/// already says it waits or failed (one request, one mark).
-fn rail_alert(tab: &TabInfo) -> Option<crate::views::notifications::Kind> {
-    use crate::agent_status::AgentState;
-    let agent_says = tab
-        .agent
-        .is_some_and(|a| matches!(a.status.state, AgentState::Waiting | AgentState::Error));
-    tab.alert.filter(|_| !agent_says)
+        .filter_map(|t| t.status)
+        .map(|s| s.status)
+        .max()
 }
 
 fn inside(r: [f32; 4], p: Option<(f32, f32)>) -> bool {
@@ -191,21 +166,21 @@ pub fn render(
     hits: &mut Vec<Hit>,
 ) {
     layer.rect(
-        [0.0, TAB_BAR_H],
-        [RAIL_W, h - TAB_BAR_H],
+        [0.0, bar_h()],
+        [RAIL_W, h - bar_h()],
         theme.ground(theme.bg_chrome),
         0.0,
     );
     layer.rect(
-        [RAIL_W - 1.0, TAB_BAR_H],
-        [1.0, h - TAB_BAR_H],
+        [RAIL_W - 1.0, bar_h()],
+        [1.0, h - bar_h()],
         theme.border,
         0.0,
     );
 
     // the search field, and the panes-view toggle beside it
-    let toggle = [RAIL_W - 8.0 - SEARCH_H, TAB_BAR_H + 8.0, SEARCH_H, SEARCH_H];
-    let field = [8.0, TAB_BAR_H + 8.0, toggle[0] - 4.0 - 8.0, SEARCH_H];
+    let toggle = [RAIL_W - 8.0 - SEARCH_H, bar_h() + 8.0, SEARCH_H, SEARCH_H];
+    let field = [8.0, bar_h() + 8.0, toggle[0] - 4.0 - 8.0, SEARCH_H];
     layer.bordered(
         [field[0], field[1]],
         [field[2], field[3]],
@@ -282,7 +257,7 @@ pub fn render(
         target: ClickTarget::RailPanesToggle,
     });
 
-    let top = TAB_BAR_H + 8.0 + SEARCH_H + 6.0;
+    let top = bar_h() + 8.0 + SEARCH_H + 6.0;
     let avail = (h - 36.0 - top).max(0.0);
     let heights: Vec<f32> = rows.iter().map(|r| row_h(r, tabs)).collect();
     let active_row = rows
@@ -340,6 +315,9 @@ pub fn render(
                         [0.0, y, RAIL_W - 1.0, rh],
                         blink_on,
                         close_button,
+                        mouse.is_some_and(|(mx, my)| {
+                            (0.0..RAIL_W - 1.0).contains(&mx) && (y..y + rh).contains(&my)
+                        }),
                         hits,
                     );
                 }
@@ -485,6 +463,7 @@ fn tab_row(
     row: [f32; 4],
     blink_on: bool,
     close_button: TabCloseButton,
+    hovered: bool,
     hits: &mut Vec<Hit>,
 ) {
     let compact = tab.marks.pinned;
@@ -525,12 +504,10 @@ fn tab_row(
     } else {
         row[1] + 9.0
     };
-    if let Some(kind) = rail_alert(tab) {
-        crate::views::notifications::tab_badge(layer, theme, kind, cx + 3.5, line1 + 8.0);
-        cx += 14.0;
-    } else if tab.activity && !is_active {
-        layer.circle([cx + 3.5, line1 + 8.0], 7.0, theme.success);
-        cx += 14.0;
+    // its status (the dot style's mark), else its colour
+    if let Some(st) = tab.status {
+        status_mark(layer, theme, st, tab.pulse, [cx + 7.0, line1 + 8.5]);
+        cx += 14.0 + 8.0;
     } else if let Some(c) = tab.color {
         layer.circle([cx + 3.5, line1 + 8.0], 8.0, c);
         cx += 14.0;
@@ -543,24 +520,6 @@ fn tab_row(
     };
     let icon = if tab.settings {
         Some((Icon::Settings, ink))
-    } else if let Some(a) = &tab.agent {
-        let ring = if is_active { theme.bg } else { theme.bg_chrome };
-        agent_mark(
-            layer,
-            engine,
-            theme,
-            a,
-            [cx + 7.0, line1 + 8.5],
-            ring,
-            ink,
-            row,
-        );
-        cx += 14.0 + 8.0;
-        None
-    } else if tab.running {
-        glyphs::draw_spinner(layer, [cx + 7.0, line1 + 8.5], 13.0, ink);
-        cx += 14.0 + 8.0;
-        None
     } else if tab.sync {
         Some((Icon::Sync, theme.accent))
     } else if tab.marks.read_only {
@@ -636,16 +595,29 @@ fn tab_row(
             line2,
         );
         let sx = row[0] + 14.0 + indent;
-        let sub = elide(engine, &sub, 11.0, stats_x - 6.0 - sx);
+        let sub = elide_start(engine, &sub, 11.0, stats_x - 6.0 - sx);
         if !sub.is_empty() {
             let b = make_text(engine, &sub, 11.0, FONT_SANS, Weight::NORMAL);
             layer.text(b, sx, line2, theme.text_muted);
         }
     }
 
-    // the rows carry their × (a pinned one asks first); only `never` takes
-    // it away
-    if close_button != TabCloseButton::Never {
+    // the × as on the strip (`tab_close_button`): the hovered row's, every
+    // row's with `always` (a pinned one asks first); a held ⌘'s number
+    // takes its place
+    let shows_close = super::tabbar::shows_close(close_button, tab, hovered);
+    if let Some(h) = &tab.hint {
+        let w = engine.measure(h, 11.0, FONT_SANS, Weight::MEDIUM) + 8.0;
+        let right = row[0] + row[2] - 8.0;
+        layer.rect(
+            [right - w, line1],
+            [w, 16.0],
+            theme.text_ui.with_alpha(0.09),
+            3.0,
+        );
+        let b = make_text(engine, h, 11.0, FONT_SANS, Weight::MEDIUM);
+        layer.text(b, right - w + 4.0, line1 + 0.8, ink);
+    } else if shows_close {
         super::close_icon(
             layer,
             [close_x + 5.0, line1 + 7.0],
@@ -689,16 +661,14 @@ fn overflow(
     let row = [6.0, y, RAIL_W - 12.0, MORE_H - 4.0];
     let (mx, cy) = (row[0] + 17.5, y + 12.0);
     let mut tx = 16.0;
-    match hidden_marker(hidden) {
-        Some(Some(kind)) => {
-            crate::views::notifications::tab_badge(layer, theme, kind, mx, cy);
-            tx += 20.0;
-        }
-        Some(None) => {
-            layer.circle([mx, cy], 7.0, theme.success);
-            tx += 20.0;
-        }
-        None => {}
+    if let Some(status) = hidden_marker(hidden) {
+        let st = TabStatus {
+            status,
+            own: true,
+            pane: 0,
+        };
+        status_mark(layer, theme, st, 1.0, [mx, cy]);
+        tx += 20.0;
     }
     let b = make_text(engine, text, 11.0, FONT_SANS, Weight::NORMAL);
     layer.text(b, tx, y + 5.0, theme.text_muted);
@@ -711,8 +681,6 @@ fn overflow(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::views::notifications::Kind;
-    use crate::views::tabbar::TabMarks;
 
     fn uniform(n: usize, active: usize, fits: usize) -> std::ops::Range<usize> {
         // `fits` rows of 10 px fit, with room for the overflow lines (4 px)
@@ -744,61 +712,26 @@ mod tests {
         assert!(w.contains(&4), "{w:?}");
     }
 
-    fn tab(alert: Option<Kind>, activity: bool) -> TabInfo {
-        TabInfo {
-            title: String::new(),
-            panes: 1,
-            activity,
-            alert,
-            color: None,
-            sync: false,
-            editing: None,
-            editing_selected: false,
-            subtitle: String::new(),
-            settings: false,
-            running: false,
-            progress: None,
-            agent: None,
-            marks: TabMarks::default(),
-        }
+    fn tab(status: Option<Status>) -> TabInfo {
+        let mut t = TabInfo::plain("");
+        t.status = status.map(|status| TabStatus {
+            status,
+            own: false,
+            pane: 1,
+        });
+        t
     }
 
     #[test]
-    fn a_row_shows_one_mark_for_an_agents_request() {
-        use crate::agent_status::{AgentState, AgentStatus};
-        use crate::views::tabbar::TabAgent;
-        let with = |state| {
-            let mut t = tab(Some(Kind::Request), false);
-            t.agent = Some(TabAgent {
-                status: AgentStatus {
-                    agent: rift_core::notifications::Agent::ClaudeCode,
-                    state,
-                },
-                pulse: 1.0,
-                scale: 1.0,
-            });
-            t
-        };
-        assert_eq!(rail_alert(&with(AgentState::Waiting)), None);
-        assert_eq!(rail_alert(&with(AgentState::Error)), None);
-        assert_eq!(rail_alert(&with(AgentState::Working)), Some(Kind::Request));
-        assert_eq!(rail_alert(&with(AgentState::Done)), Some(Kind::Request));
-        assert_eq!(
-            rail_alert(&tab(Some(Kind::Request), false)),
-            Some(Kind::Request)
-        );
-    }
-
-    #[test]
-    fn overflow_marker_is_the_worst_hidden_alert() {
+    fn overflow_marker_is_the_most_urgent_hidden_status() {
         let (a, b, c) = (
-            tab(Some(Kind::Finished), false),
-            tab(Some(Kind::Request), false),
-            tab(Some(Kind::Failed), true),
+            tab(Some(Status::Done)),
+            tab(Some(Status::NeedsYou)),
+            tab(Some(Status::Failed)),
         );
-        assert_eq!(hidden_marker(&[&a, &b, &c]), Some(Some(Kind::Request)));
-        let (d, e) = (tab(None, true), tab(None, false));
-        assert_eq!(hidden_marker(&[&d, &e]), Some(None));
+        assert_eq!(hidden_marker(&[&a, &b, &c]), Some(Status::NeedsYou));
+        let (d, e) = (tab(Some(Status::Activity)), tab(None));
+        assert_eq!(hidden_marker(&[&d, &e]), Some(Status::Activity));
         assert_eq!(hidden_marker(&[&e]), None);
     }
 }

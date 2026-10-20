@@ -77,7 +77,9 @@ and when pairing (first connection with a pairing secret):
 
 `rift-terminal remote pair` and Settings › Remote access › *Pair a phone*
 create a one-time secret (16 random bytes, valid 2 minutes, one use) and
-show it as a QR code and as text:
+show it as a QR code and as text. Settings' *Cancel* (and changing *The new
+phone can only watch* while a code shows) removes the secret from
+`pairing.json` at once:
 
 ```
 rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public key, base64url>&s=<secret, base64url>&n=studio-mac&p=operate

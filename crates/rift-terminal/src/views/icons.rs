@@ -49,6 +49,8 @@ pub enum Icon {
     Phone,
     /// ▷ (play a sound).
     Play,
+    /// ✎ (a preview that opens its editor).
+    Pencil,
 }
 
 /// Draws `icon` centred on `c` at `size` px (the 16-unit box scaled).
@@ -292,6 +294,22 @@ pub fn draw(layer: &mut Layer, icon: Icon, c: [f32; 2], size: f32, color: Color)
             poly(layer, &[(7.0, 11.5), (9.0, 11.5)]);
         }
         Icon::Play => poly(layer, &[(5.0, 3.5), (12.5, 8.0), (5.0, 12.5), (5.0, 3.5)]),
+        Icon::Pencil => {
+            // the body from the tip (bottom left) to its top, then the
+            // rubber's line across it
+            poly(
+                layer,
+                &[
+                    (3.0, 13.0),
+                    (3.5, 10.0),
+                    (11.0, 2.5),
+                    (13.5, 5.0),
+                    (6.0, 12.5),
+                    (3.0, 13.0),
+                ],
+            );
+            poly(layer, &[(9.5, 4.0), (12.0, 6.5)]);
+        }
         Icon::Lock => {
             rect(layer, 3.0, 7.0, 10.0, 7.0, 1.5);
             poly(

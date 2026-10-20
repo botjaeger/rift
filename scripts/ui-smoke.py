@@ -16,6 +16,13 @@ import tempfile
 import threading
 import time
 
+# A run started from a Rift pane inherits that pane's shell integration
+# (ZDOTDIR points the scripted zsh at the real ~/.zshrc instead of the
+# fixture HOME's); scripted shells must start from the fixtures alone
+for inherited in ("ZDOTDIR", "RIFT_ORIG_ZDOTDIR", "RIFT_INTEGRATION_BASH",
+                  "RIFT_INTEGRATION_ZSH", "RIFT_PANE_ID", "RIFT_PANE_URL"):
+    os.environ.pop(inherited, None)
+
 # --list, --only NAME[,NAME] and --shard K/N run the sections below in groups
 # (scripts/ui_smoke_sections.py); without them the file runs top to bottom
 if len(sys.argv) > 2:
@@ -1675,12 +1682,22 @@ assert "prompt_editor=Some(([Python, Cwd, GitBranch, Time24], None))" in editor_
 host = rect_center(editor_dump, "Palette(Host)")
 # the editor's chips explain themselves too: palette and prompt box alike
 run_prompt("cards", [*open_editor, f"move {host}", "wait 900", f"dump {pc}/card-palette.txt",
-                     f"move {rect_center(editor_dump, 'Chip(0)')}", "wait 900",
+                     f"move {rect_center(editor_dump, 'Item(0, 0)')}", "wait 900",
                      f"dump {pc}/card-box.txt"])
 assert 'tooltip=Some("Host | This machine\'s host name.")' in (pc / "card-palette.txt").read_text()
 assert 'tooltip=Some("Python environment | The active virtualenv' in (pc / "card-box.txt").read_text()
-first = rect_center(editor_dump, "Chip(0)")
-last = re.search(r"Chip\(3\)@(\d+),(\d+),(\d+),(\d+)", editor_dump).groups()
+# the keyboard: Tab focuses the first chip, → moves it a place, Delete
+# removes it; Esc leaves the saved chips alone
+run_prompt("keys", [*open_editor, "key tab", "key right", f"dump {pc}/keys-moved.txt",
+                    "key delete", f"dump {pc}/keys-deleted.txt", "key escape", "wait 200",
+                    f"dump {pc}/keys-cancelled.txt"])
+assert "prompt_editor=Some(([Cwd, Python, GitBranch, Time24], None))" in \
+    (pc / "keys-moved.txt").read_text(), (pc / "keys-moved.txt").read_text()[:400]
+assert "prompt_editor=Some(([Cwd, GitBranch, Time24], None))" in (pc / "keys-deleted.txt").read_text()
+assert "prompt_chips=[Python, Cwd, GitBranch, Time24] prompt_editor=None" in \
+    (pc / "keys-cancelled.txt").read_text()
+first = rect_center(editor_dump, "Item(0, 0)")
+last = re.search(r"Item\(0, 3\)@(\d+),(\d+),(\d+),(\d+)", editor_dump).groups()
 past_last = f"{int(last[0]) + int(last[2]) + 4} {int(last[1]) + int(last[3]) // 2}"
 # drag first: adding a chip can reflow the palette and move the box
 run_prompt("edit", [*open_editor, f"drag {first} {past_last}", "wait 100", f"click {host}",
@@ -2967,8 +2984,9 @@ def tip_run(name, steps):
                             env=tip_env, stdout=log, stderr=log, timeout=60).returncode
     assert rc == 0, died(f"tooltip {name} run failed", tip / f"{name}.log")
 
-tip_run("probe", ["wait 300", f"dump {tip}/probe-bar.txt", "key ctrl+r", "wait 300",
-                  f"dump {tip}/probe-history.txt"])
+# (over the tab: its × shows only while it is hovered)
+tip_run("probe", ["wait 300", "move 150 17", "wait 300", f"dump {tip}/probe-bar.txt",
+                  "key ctrl+r", "wait 300", f"dump {tip}/probe-history.txt"])
 
 def centre(name, label):
     tips = re.search(r"^tips=(\[.*\])$", (tip / f"{name}.txt").read_text(), re.M)[1]
@@ -3863,8 +3881,12 @@ assert 'app_notes=["Rift is up to date · v' in same_check and "toast=None" in s
 # its page; closing it (⌘W) and opening it again starts on General
 rh = scratch / "recent"
 (rh / "cfg/rift").mkdir(parents=True)
-(rh / "cfg/rift/config.toml").write_text(
-    'shell = "/bin/bash"\nrestore_session = false\nsync_os_theme = false\n')
+# Recent connections is folded away at the end of the page while remote
+# access is on (the gateway this starts stops again before the quit)
+recent_base = ('shell = "/bin/bash"\nrestore_session = false\nsync_os_theme = false\n'
+               'durable_sessions = false\nremote_listen = "127.0.0.1:0"\ncontrol_api = "off"\n')
+(rh / "cfg/rift/config.toml").write_text(recent_base + "remote_access = true\n")
+(rh / "off.toml").write_text(recent_base)
 (rh / "data/rift/remote").mkdir(parents=True, mode=0o700)
 (rh / "data/rift/remote/history.jsonl").write_text("".join(
     json.dumps({"device": f"d{i}", "name": f"Phone {i}", "via": "lan",
@@ -3872,12 +3894,18 @@ rh = scratch / "recent"
                 "end": f"2026-10-16T10:0{i}:30Z", "reason": "closed"}) + "\n"
     for i in range(1, 9)))
 (rh / "t.rift").write_text("\n".join([
-    "resize 1100 700", "wait_prompt", "key cmd+,", "wait 300", "key end", "key down",
-    "wait 1500", "move 550 300", "scroll -40", "wait 300", f"dump {rh}/top.txt",
+    "resize 1100 700", "wait_prompt",
+    f"wait_file {rh}/data/rift/remote/status.json 20000",
+    "key cmd+,", "wait 300", "key end", "key down", "wait 1500",
+    f"dump {rh}/folded.txt",
+    "move 550 300", "scroll -40", "wait 300", "a11y click Recent connections (8), collapsed",
+    "wait 300", "scroll -40", "wait 300", f"dump {rh}/top.txt",
     "move 600 550", *["scroll -1", "wait 100"] * 2, f"dump {rh}/two.txt",
     *["scroll -1", "wait 100"] * 2, f"dump {rh}/end.txt",
     "key cmd+,", "wait 200", "key cmd+,", "wait 300", f"dump {rh}/back.txt",
-    "key cmd+w", "wait 200", "key cmd+,", "wait 300", f"dump {rh}/reopen.txt", "quit"]) + "\n")
+    "key cmd+w", "wait 200", "key cmd+,", "wait 300", f"dump {rh}/reopen.txt",
+    f"sh cp {shlex.quote(str(rh / 'off.toml'))} {shlex.quote(str(rh / 'cfg/rift/config.toml'))}",
+    "wait 3500", "quit"]) + "\n")
 with (rh / "log.txt").open("w") as log:
     rc = subprocess.run([str(binary), "--script", str(rh / "t.rift"), "--headless"],
                         env=dict(env, XDG_CONFIG_HOME=str(rh / "cfg"),
@@ -3889,6 +3917,7 @@ assert rc == 0, died("recent connections run failed", rh / "log.txt")
 def shown_phones(name):
     return re.findall(r'Label "Phone (\d), ', (rh / f"{name}.txt").read_text())
 
+assert shown_phones("folded") == [], shown_phones("folded")
 assert shown_phones("top") == ["8", "7", "6", "5", "4"], shown_phones("top")
 assert shown_phones("two") == ["6", "5", "4", "3", "2"], shown_phones("two")
 # three rows down is the end: the fourth notch scrolled the page instead
@@ -4089,6 +4118,8 @@ def keys_cmd(*keys):
     return json.dumps({"cmd": "remote-input", "pane": 0, "device": "Test Phone",
                        "keys": list(keys)}).replace('"pane": 0', '"pane":PANE')
 settings_remote = ["key cmd+,", "wait 300", *["key down"] * 9, "wait 600"]
+# the page scrolled to its end (the pointer over the page, not a list)
+page_bottom = ["move 700 300", "scroll -80", "wait 300"]
 
 # (a) remote_access off: refused, though the socket serves navigate requests
 off = remote_run("off", remote_base, [
@@ -4238,18 +4269,18 @@ tunnel_file = tun / "data/rift/remote/tunnel.json"
 remote_run("tunnel", remote_base + 'control_api = "off"\nremote_access = true\n'
            'remote_tunnel = true\n', [
     f"wait_file {tunnel_file} 20000", "wait 1500",
-    *settings_remote,
-    # the tunnel lives under "Relay settings…": reset, switch, tabs switch, it
-    # The remote-when-closed control is a status row now, so Relay settings
-    # is one Tab earlier than the historical layout; on macOS the "Ask
-    # before keeping Rift running" switch comes before it
-    *["key tab"] * (3 + (sys.platform == "darwin")), "key space", "wait 500", f"dump {tun}/settings.txt",
+    *settings_remote, f"dump {tun}/top.txt",
+    # the tunnel lives under "Connection settings" at the page's end
+    *page_bottom, "a11y click Connection settings, collapsed", "wait 300", *page_bottom,
+    "wait 500", f"dump {tun}/settings.txt",
     cp(rm / "off-config.toml", tun / "cfg/rift/config.toml"), "wait 3500"],
     extra_env={"RIFT_CLOUDFLARED": ""})
 tunnel_page = (tun / "settings.txt").read_text()
 for row in ['Switch "Use a Cloudflare tunnel instead" toggled=True', 'cloudflared"',
-            'Label "Tunnel: Waiting for cloudflared"', 'Label "Relay: Waiting for the tunnel"']:
+            'Label "Tunnel: Waiting for cloudflared"']:
     assert row in tunnel_page, (row, tunnel_page)
+assert 'Label "Away from home: Waiting for the tunnel"' in (tun / "top.txt").read_text(), \
+    (tun / "top.txt").read_text()[-3000:]
 assert re.search(r'Button "(Install|Download) cloudflared"', tunnel_page), tunnel_page
 assert not tunnel_file.exists(), tunnel_file.read_text()
 
@@ -4697,13 +4728,12 @@ relay_config = (remote_base + "remote_access = true\n"
 (rl / "light.toml").write_text(relay_config + 'theme = "light-default"\n')
 (rl / "off.toml").write_text(remote_base)
 (rl / "t.rift").write_text("\n".join([
-    "resize 1100 800", "wait_prompt",
+    "resize 1100 1400", "wait_prompt",
     f"wait_file {rl}/go-settings 60000", *settings_remote, "wait 1200",
     f"dump {rl}/connected.txt", f"shot {rl}/relay-dark.png",
-    # reading order: ↺ and switch, Relay
-    # settings…, Pair a phone, View only, then the device's Operate / View only
-    # (on macOS the Ask before keeping Rift running switch after the switch)
-    *["key tab"] * (7 + (sys.platform == "darwin")), "wait 200", f"dump {rl}/focus.txt",
+    # reading order: ↺ and switch, Pair a phone, The new phone can only
+    # watch, then the device's Can run commands / View only
+    *["key tab"] * 6, "wait 200", f"dump {rl}/focus.txt",
     "key space", "wait 2500", f"dump {rl}/changed.txt",
     f"wait_file {rl}/go-light 60000", cp(rl / "light.toml", rl / "cfg/rift/config.toml"),
     "wait 2000", f"dump {rl}/history.txt", f"shot {rl}/relay-light.png",
@@ -4792,13 +4822,15 @@ assert 'clients_via=["Live Check Phone:relay"]' in line, line
 assert 'chip_tip=Some("Connected: Live Check Phone via relay")' in line, line
 assert 'device_access=["Live Check Phone=operate"]' in line, line
 assert "Connected through the relay" in remote_line(text), remote_line(text)
-# Connection: the relay row (host on its right) and the relay field, which
-# sits under the collapsed "Relay settings…"
-assert 'Label "Relay (127.0.0.1): Phones away from home connect through it' in text, text[-4000:]
-assert 'Label "This network (127.0.0.1:' in text, text[-4000:]
-assert 'Button "Relay settings…, collapsed"' in text, text[-4000:]
+# the card's tiles: Away from home (the relay's host, its round trip) and
+# On this Wi-Fi; the relay field sits under the collapsed "Connection
+# settings"
+assert re.search(r'Label "Away from home \(127\.0\.0\.1\): Phones away from home connect '
+                 r'through it( · \d+[^"]*ms)?"', text), text[-4000:]
+assert 'Label "On this Wi-Fi (127.0.0.1:' in text, text[-4000:]
+assert 'Button "Connection settings, collapsed"' in text, text[-4000:]
 assert "TextInput" not in text, text[-4000:]
-assert 'RadioButton "Live Check Phone access: Operate, selected"' in text, text[-4000:]
+assert 'RadioButton "Live Check Phone access: Can run commands, selected"' in text, text[-4000:]
 focus = (rl / "focus.txt").read_text()
 assert 'settings_focus=Some(RemotePermission(' in focus and ', true))' in focus, \
     re.search(r"settings_focus=.*", focus)[0]
@@ -4822,24 +4854,22 @@ assert not re.search(r'cmd="echo must-not-run"', (rl / "history.txt").read_text(
 # address field
 bad = remote_run("relay-error", remote_base + "remote_access = true\n"
                  'remote_relay = "wss://relay.invalid"\ncontrol_api = "off"\n', [
-    "wait 7000", *settings_remote, "wait 800",
+    "resize 1100 1500", "wait 7000", *settings_remote, "wait 800",
     f"shot {rm}/relay-error/error.png", f"dump {rm}/relay-error/error.txt",
-    # reset, switch, tabs switch, Try again, Relay settings… (and on macOS
-    # the Ask before keeping Rift running switch)
-    *["key tab"] * (4 + (sys.platform == "darwin")), "key space", "wait 400",
+    "a11y click Connection settings, collapsed", "wait 400",
     f"shot {rm}/relay-error/error-open.png", f"dump {rm}/relay-error/open.txt"], timeout=120)
 error_page = (bad / "error.txt").read_text()
 reason = re.search(r'relay_reason=Some\("(.*?)"\) relay_open=', error_page)
 assert reason and len(reason[1]) > 20, error_page[:1500]
 assert f'. {reason[1]}"' in error_page, ("the error text is cut", reason[1], error_page[-3000:])
-assert 'Label "Relay (relay.invalid): Can’t reach the relay, so phones away from home can’t connect.' \
-    in error_page, error_page[-3000:]
+assert 'Label "Away from home (relay.invalid): Can’t reach the relay, so phones away from home ' \
+    'can’t connect.' in error_page, error_page[-3000:]
 assert 'Button "Try again: retry the relay now"' in error_page, error_page[-3000:]
-assert 'Button "Relay settings…, collapsed"' in error_page, error_page[-3000:]
+assert 'Button "Connection settings, collapsed"' in error_page, error_page[-3000:]
 open_page = (bad / "open.txt").read_text()
 assert "relay_open=true" in open_page and 'TextInput "Relay URL: wss://relay.invalid.' in open_page, \
     open_page[-3000:]
-assert 'Button "Hide relay settings, expanded"' in open_page, open_page[-3000:]
+assert 'Button "Connection settings, expanded"' in open_page, open_page[-3000:]
 for shot in ("error.png", "error-open.png"):
     assert (bad / shot).read_bytes().startswith(b"\x89PNG\r\n\x1a\n"), shot
 
@@ -4923,11 +4953,13 @@ def bt_active_pane(name, tab):
     return re.search(rf"^tab {tab} .*active_pane=(\d+)", bt_state(name), re.M)[1]
 
 assert re.search(r"sticky=Some\(", bt_state("sticky-on")), bt_state("sticky-on")[-2000:]
-assert bt_line("default").startswith("tab_slots=1 tab_close=[\"0\"]"), bt_line("default")
+# hover (the default): × only on the tab under the pointer, which is over
+# the pane here, so on none, the active one included
+assert bt_line("default").startswith("tab_slots=1 tab_close=[]"), bt_line("default")
 # one tab, tab_bar_with_one_tab off: no tab in the strip
 one = bt_polled("one-tab", lambda d: bt_slots(d).startswith("tab_slots=0 "))
 assert one.startswith("tab_slots=0 tab_close=[]"), one
-assert bt_line("two-tabs").startswith('tab_slots=2 tab_close=["1"]'), bt_line("two-tabs")
+assert bt_line("two-tabs").startswith('tab_slots=2 tab_close=[]'), bt_line("two-tabs")
 always = bt_polled("placement", lambda d: 'tab_close=["0", "1"]' in bt_slots(d))
 assert 'tab_slots=2 tab_close=["0", "1"]' in always, always
 after = bt_state("after-current")
@@ -5418,7 +5450,9 @@ rp = tg_state("rail-panes")
 assert re.search(r'Button "Show panes under their tabs" toggled=True', rp), rp[-4000:]
 assert re.search(rf'ListItem ".*, pane, {added} lines added, {removed} removed"', rp), rp[-4000:]
 assert re.search(r'ListItem "GH=[^"]*, pane, active" selected', rp), rp[-4000:]
-assert re.search(r'^    Tab "GH=•+" selected', rp, re.M) and not re.search(r'(Tab|ListItem) "GH=ghp_', rp), \
+# the tab is named for the focused pane's folder, never the program's title
+# (that is the tooltip's, masked there too)
+assert re.search(r'^    Tab "tmp(, [^"]*)?" selected', rp, re.M) and not re.search(r'(Tab|ListItem) "GH=ghp_', rp), \
     rp[-4000:]
 assert rail_line("rail-secret").endswith('rows=["nomatch"]'), rail_line("rail-secret")
 
@@ -5970,34 +6004,91 @@ assert "That pane is no longer open" in pft("gone"), pft("gone")[:2000]
 assert re.search(r"^window 0: tabs=2 active=0 ", pft("gone"), re.M), pft("gone")[:600]
 
 # the configurable toolbar: buttons on the side and in the order the config
-# lists, right-click → "Rearrange toolbar items" opens its Settings rows,
-# and a row's Left moves a hidden button to the end of the left side
+# lists. Its editor is "Edit toolbar" (right-click a toolbar button or the
+# empty strip → "Rearrange toolbar items", or Settings › Toolbar buttons): a
+# palette of the hidden buttons and two dashed buckets, Left and Right. A
+# palette click adds at the right end, a drag moves between the buckets, ×
+# and a drop outside the buckets remove, Restore default puts the defaults
+# back; Esc / Cancel leave config.toml alone, Enter / Save write it.
 tb = scratch / "toolbar"
-(tb / "cfg/rift").mkdir(parents=True)
-(tb / "cfg/rift/config.toml").write_text(
-    'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
-    'toolbar_left = ["palette", "review"]\ntoolbar_right = ["settings"]\n')
-(tb / "t.rift").write_text("\n".join([
-    "resize 1200 600", "wait_prompt", f"dump {tb}/a.txt",
-    "rclick 1150 17", "wait 200", "key down", "key enter", "wait 300", f"dump {tb}/b.txt",
-    # File explorer's Left (the first row of the search results)
-    "click 931 158", "wait 300", f"dump {tb}/c.txt", "quit"]) + "\n")
-with (tb / "log.txt").open("w") as log:
-    rc = subprocess.run([str(binary), "--script", str(tb / "t.rift"), "--headless"],
-                        env=dict(env, XDG_CONFIG_HOME=str(tb / "cfg"),
-                                 XDG_DATA_HOME=str(tb / "data")),
-                        stdout=log, stderr=log, timeout=60).returncode
-assert rc == 0, died("toolbar run failed", tb / "log.txt")
-tt = lambda name: (tb / f"{name}.txt").read_text()
-tips = lambda name: re.findall(r'"(Command palette|Review changes|File explorer|Notifications'
-                               r'|Settings)@(\d+),', tt(name))
-assert tips("a") == [("Command palette", "80"), ("Review changes", "110"), ("Settings", "1164")], tips("a")
+TB_CONFIG = ('shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
+             'sync_os_theme = false\ncheck_for_updates = false\n'
+             'toolbar_left = ["palette", "review"]\ntoolbar_right = ["settings"]\n')
+TB_MENU = ["rclick 1150 17", "wait 200", "key down", "key enter", "wait 300"]
+def tb_run(name, steps):
+    d = tb / name
+    for sub in ("cfg/rift", "data"):
+        (d / sub).mkdir(parents=True, exist_ok=True)
+    (d / "cfg/rift/config.toml").write_text(TB_CONFIG)
+    (d / "t.rift").write_text("\n".join(
+        ["resize 1200 600", "wait_prompt", *(s.replace("{d}", str(d)) for s in steps), "quit"]) + "\n")
+    with (d / "log.txt").open("w") as log:
+        rc = subprocess.run([str(binary), "--script", str(d / "t.rift"), "--headless"],
+                            env=dict(env, XDG_CONFIG_HOME=str(d / "cfg"), XDG_DATA_HOME=str(d / "data")),
+                            stdout=log, stderr=log, timeout=120).returncode
+    assert rc == 0, died(f"toolbar {name} run failed", d / "log.txt")
+    return d
+def tb_line(d, name="a"):
+    return re.search(r"^toolbar=.*$", (d / f"{name}.txt").read_text(), re.M).group(0)
+probe = tb_run("probe", ["dump {d}/a.txt", *TB_MENU, "dump {d}/b.txt"])
+tips = lambda text: re.findall(r'"(Command palette|Review changes|File explorer|Notifications'
+                               r'|Settings)@(\d+),', text)
+assert tips((probe / "a.txt").read_text()) == [("Command palette", "80"), ("Review changes", "110"),
+                                               ("Settings", "1164")], tips((probe / "a.txt").read_text())
 # a screen reader reaches the buttons, named as their tooltips
-assert re.search(r'Group "Toolbar"\n    Button "Command palette', tt("a")), tt("a")
-assert 'settings_tab=true settings_query="toolbar"' in tt("b"), tt("b")
-assert ("File explorer", "140") in tips("c"), tips("c")
-assert re.search(r'toolbar_left = \[\s*"palette",\s*"review",\s*"explorer",?\s*\]',
-                 (tb / "cfg/rift/config.toml").read_text())
+assert re.search(r'Group "Toolbar"\n    Button "Command palette', (probe / "a.txt").read_text())
+opened = tb_line(probe, "b")
+assert opened.startswith("toolbar=[Palette, Review]|[Settings] toolbar_editor=Some(((["
+                         "Palette, Review], [Settings]), None, None, true, false))"), opened
+def tb_center(text, label):
+    x, y, w, h = map(int, re.search(re.escape(label) + r"@(\d+),(\d+),(\d+),(\d+)", text).groups())
+    return f"{x + w // 2} {y + h // 2}"
+center = lambda label: tb_center(opened, label)
+# the dialog for a screen reader: one button per item and action, Save
+# changes listed but disabled while nothing changed
+b_text = (probe / "b.txt").read_text()
+assert 'Dialog "Edit toolbar"' in b_text and 'Button "Add File explorer"' in b_text, b_text[-3000:]
+assert 'Button "Code review, 2 in the left side"\n      Button "Remove Code review"' in b_text, b_text[-3000:]
+assert re.search(r'Button "Save changes"[^\n]*disabled', b_text), b_text[-3000:]
+# a palette click: the button joins the right end
+d = tb_run("add", [*TB_MENU, f"click {center('Palette(Explorer)')}", "wait 200", "dump {d}/a.txt"])
+assert "toolbar_editor=Some((([Palette, Review], [Settings, Explorer]), None, None, true, true))" in tb_line(d)
+# a drag from Right into Left, before its first button (the left half of it)
+px, py, pw, ph = map(int, re.search(r"Item\(0, 0\)@(\d+),(\d+),(\d+),(\d+)", opened).groups())
+d = tb_run("drag", [*TB_MENU, f"drag {center('Item(1, 0)')} {px + 6} {py + ph // 2}", "wait 200",
+                    "dump {d}/a.txt"])
+assert "toolbar_editor=Some((([Settings, Palette, Review], []), None, Some((0, 0)), true, true))" in tb_line(d), tb_line(d)
+# × removes; a bucket button dropped outside every bucket leaves too
+d = tb_run("remove", [*TB_MENU, f"click {center('Remove(0, 1)')}", "wait 200", "dump {d}/a.txt"])
+assert "toolbar_editor=Some((([Palette], [Settings]), None, None, true, true))" in tb_line(d), tb_line(d)
+bx, by = map(int, re.search(r"Bucket\(0\)@(\d+),(\d+),", opened).groups())
+d = tb_run("out", [*TB_MENU, f"drag {center('Item(0, 0)')} {bx + 10} {by - 14}", "wait 200",
+                   "dump {d}/a.txt"])
+assert "toolbar_editor=Some((([Review], [Settings]), None, None, true, true))" in tb_line(d), tb_line(d)
+# Restore default puts the defaults back (and goes inert)
+d = tb_run("restore", [*TB_MENU, f"click {center('Restore')}", "wait 200", "dump {d}/a.txt"])
+assert "toolbar_editor=Some((([Explorer], [Notifications, Review]), None, None, false, true))" in tb_line(d), tb_line(d)
+assert "Restore@" not in tb_line(d)
+# Esc and Cancel leave config.toml alone
+d = tb_run("esc", [*TB_MENU, f"click {center('Palette(Explorer)')}", "key escape", "wait 200",
+                   "dump {d}/a.txt"])
+assert tb_line(d).startswith("toolbar=[Palette, Review]|[Settings] toolbar_editor=None"), tb_line(d)
+assert (d / "cfg/rift/config.toml").read_text() == TB_CONFIG
+d = tb_run("cancel", [*TB_MENU, f"click {center('Palette(Explorer)')}", f"click {center('Cancel')}",
+                      "wait 200", "dump {d}/a.txt"])
+assert tb_line(d).startswith("toolbar=[Palette, Review]|[Settings] toolbar_editor=None"), tb_line(d)
+assert (d / "cfg/rift/config.toml").read_text() == TB_CONFIG
+# opened from Settings › Toolbar buttons; Enter saves, and the strip shows it
+found = tb_run("find", ["key cmd+,", "wait 400", "type toolbar", "wait 300", "dump {d}/a.txt"])
+preview = tb_center((found / "a.txt").read_text(), "Edit toolbar")
+d = tb_run("save", ["key cmd+,", "wait 400", "type toolbar", "wait 300", f"click {preview}", "wait 300",
+                    f"click {center('Palette(Explorer)')}", "key enter", "wait 400", "key cmd+,",
+                    "wait 400", "dump {d}/a.txt"])
+assert tb_line(d).startswith("toolbar=[Palette, Review]|[Settings, Explorer] toolbar_editor=None"), tb_line(d)
+assert re.search(r'toolbar_right = \[\s*"settings",\s*"explorer",?\s*\]',
+                 (d / "cfg/rift/config.toml").read_text()), (d / "cfg/rift/config.toml").read_text()
+saved_tips = dict(tips((d / "a.txt").read_text()))
+assert int(saved_tips["Settings"]) < int(saved_tips["File explorer"]) > 1000, saved_tips
 
 
 def run_own(name, config, steps):
@@ -6043,7 +6134,9 @@ run_own("gap7", 'block_spacing = "normal"\nblock_dividers = true\n'
         'tab_close_side = "left"\n', [
     "type echo one\\n", "wait 400", "type seq 1 80\\n", "wait 600", "type false\\n", "wait 400",
     f"dump {g7}/spaced.txt",
-    "move 450 300", "scroll 8", "wait 200", "move 450 330", "wait 200", f"dump {g7}/over.txt"])
+    "move 450 300", "scroll 8", "wait 200", "move 450 330", "wait 200", f"dump {g7}/over.txt",
+    # the × shows on the hovered tab, at its left end
+    "move 200 17", "wait 200", f"dump {g7}/tab-hover.txt"])
 btt = lambda name: (g7 / f"{name}.txt").read_text()
 kinds = re.search(r"row_kinds=(\S*)", btt("spaced")).group(1)
 # the blocks below the first: a pad right above each header
@@ -6053,7 +6146,7 @@ assert all(kinds[i - 1] == "_" for i, k in enumerate(kinds) if k == "H" and i > 
 jump = re.search(r'"Jump to the bottom of this block@(\d+),(\d+),(\d+),(\d+)"', btt("over"))
 assert jump, btt("over")
 jx, jy, jw, jh = map(int, jump.groups())
-assert re.search(r'"Close tab@1\d\d,', btt("over")), btt("over")
+assert re.search(r'"Close tab@1\d\d,', btt("tab-hover")), btt("tab-hover")
 # the same run again, pressing the button where the first one drew it
 run_own("gap7-1", 'block_spacing = "normal"\nblock_dividers = true\n'
         'tab_close_side = "left"\n', [
@@ -7102,7 +7195,7 @@ assert "hotkey_window_screen" not in got, got
 assert 'toast=Some("Screen not saved: \\"left\\" is not pointer, primary or a screen number")' in \
     (sr / "invalid.txt").read_text(), re.search(r"^confirm=.*$", (sr / "invalid.txt").read_text(), re.M)
 got = sr_run("remote", "Remote access", [
-    "a11y click Relay settings…, collapsed", "wait 200",
+    "a11y click Connection settings, collapsed", "wait 200",
     *text_step("Listen address: 127.0.0.1:0", "127.0.0.1:7999"),
     *(["a11y click Ask before keeping Rift running"] if mac else []),
 ], SR_CFG + 'remote_access = true\nremote_listen = "127.0.0.1:0"\n')
@@ -7216,6 +7309,382 @@ d = cx_run("windows", [
     "wait 500", "dump {d}/a.txt"], PROFS)
 assert 'settings_profiles=["bee", "c"] default_profile=None profile_open=Some(0)' in cx_dump(d, "a"), \
     re.search(r"^settings_profiles=.*$", cx_dump(d, "a"), re.M)
+
+
+# modal-pointer: a modal dialog covers the window, so nothing under it
+# reacts to the pointer: the Prompt chips preview beside Edit prompt (and
+# the Toolbar buttons preview beside Edit toolbar) draws no accent hover
+# border and shows no tooltip (it does both without the dialog), and a link
+# beside What's New gives no tooltip
+mp = scratch / "modal-pointer"
+MP_BASE = 'shell = "/bin/bash"\nrestore_session = false\nsync_os_theme = false\ncheck_for_updates = false\n'
+def mp_run(name, steps):
+    d = mp / name
+    for sub in ("cfg/rift", "data"):
+        (d / sub).mkdir(parents=True, exist_ok=True)
+    (d / "cfg/rift/config.toml").write_text(MP_BASE)
+    (d / "t.rift").write_text("\n".join(
+        ["resize 1300 900", "wait_prompt", *(s.replace("{d}", str(d)) for s in steps), "quit"]) + "\n")
+    with (d / "log.txt").open("w") as log:
+        rc = subprocess.run([str(binary), "--script", str(d / "t.rift"), "--headless"],
+                            env=dict(env, XDG_CONFIG_HOME=str(d / "cfg"), XDG_DATA_HOME=str(d / "data")),
+                            stdout=log, stderr=log, timeout=120).returncode
+    assert rc == 0, died(f"modal-pointer {name} run failed", d / "log.txt")
+    return (d / "a.txt").read_text()
+def mp_pixel(path, x, y, logical_w=1300):
+    # the RGB at logical (x, y) of a shot, read from the PNG's own rows
+    import zlib, struct
+    data, i, idat, w = path.read_bytes(), 8, b"", 0
+    while i < len(data):
+        n, kind = struct.unpack(">I4s", data[i:i + 8])
+        if kind == b"IHDR":
+            w = struct.unpack(">I", data[i + 8:i + 12])[0]
+        elif kind == b"IDAT":
+            idat += data[i + 8:i + 8 + n]
+        i += 12 + n
+    raw, stride, prev, p, scale = zlib.decompress(idat), w * 4, bytearray(w * 4), 0, w // logical_w
+    for row in range(y * scale + 1):
+        f, line = raw[p], bytearray(raw[p + 1:p + 1 + stride])
+        p += 1 + stride
+        for k in range(stride):
+            a = line[k - 4] if k >= 4 else 0
+            b, c = prev[k], (prev[k - 4] if k >= 4 else 0)
+            if f == 1: line[k] = (line[k] + a) & 255
+            elif f == 2: line[k] = (line[k] + b) & 255
+            elif f == 3: line[k] = (line[k] + (a + b) // 2) & 255
+            elif f == 4:
+                pa, pb, pc = abs(b - c), abs(a - c), abs(a + b - 2 * c)
+                line[k] = (line[k] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
+        prev = line
+    return tuple(prev[4 * x * scale:4 * x * scale + 3])
+MP_SETTINGS = ["key cmd+,", "wait 500", "type chips", "wait 300"]
+found_rect = re.search(r"Edit prompt@(\d+),(\d+),(\d+),(\d+)", mp_run("find", [*MP_SETTINGS, "dump {d}/a.txt"]))
+px, py, pw, ph = map(int, found_rect.groups())
+# a spot on the preview right of the 600 px Edit prompt card
+sx, sy = px + pw - 30, py + ph // 2
+assert sx > 1300 // 2 + 300, (px, pw)
+bare = mp_run("bare", [*MP_SETTINGS, f"move {sx} {sy}", "wait 900", "dump {d}/a.txt", "shot {d}/a.png"])
+under = mp_run("under", [*MP_SETTINGS, f"click {px + pw // 2} {sy}", "wait 400", f"move {sx} {sy}",
+                         "wait 900", "dump {d}/a.txt", "shot {d}/a.png"])
+assert 'tooltip=Some("Edit prompt")' in bare, re.search(r"tooltip=\S*", bare)
+assert "prompt_editor=Some(" in under and "tooltip=None" in under, re.search(r"tooltip=\S*", under)
+lit, dim = mp_pixel(mp / "bare/a.png", sx, py), mp_pixel(mp / "under/a.png", sx, py)
+# the hovered border is the accent (blue well above red); under the dialog
+# it stays the plain hairline, dimmed by the backdrop
+assert lit[2] > lit[0] + 80, lit
+assert abs(dim[2] - dim[0]) < 20, dim
+# the same beside Edit toolbar, over the Toolbar buttons preview
+MP_TOOLBAR = ["key cmd+,", "wait 500", "type toolbar", "wait 300"]
+tb_rect = re.search(r"Edit toolbar@(\d+),(\d+),(\d+),(\d+)", mp_run("tb-find", [*MP_TOOLBAR, "dump {d}/a.txt"]))
+tx, ty, tw, th = map(int, tb_rect.groups())
+tsx, tsy = tx + tw - 30, ty + th // 2
+assert tsx > 1300 // 2 + 300, (tx, tw)
+tb_bare = mp_run("tb-bare", [*MP_TOOLBAR, f"move {tsx} {tsy}", "wait 900", "dump {d}/a.txt", "shot {d}/a.png"])
+tb_under = mp_run("tb-under", [*MP_TOOLBAR, f"click {tx + tw // 2} {tsy}", "wait 400", f"move {tsx} {tsy}",
+                               "wait 900", "dump {d}/a.txt", "shot {d}/a.png"])
+assert 'tooltip=Some("Edit toolbar")' in tb_bare, re.search(r"tooltip=\S*", tb_bare)
+assert "toolbar_editor=Some(" in tb_under and "tooltip=None" in tb_under, re.search(r"tooltip=\S*", tb_under)
+lit, dim = mp_pixel(mp / "tb-bare/a.png", tsx, ty), mp_pixel(mp / "tb-under/a.png", tsx, ty)
+assert lit[2] > lit[0] + 80, lit
+assert abs(dim[2] - dim[0]) < 20, dim
+# a link printed in the pane, left of the What's New card: its tooltip
+# shows without the dialog and not beside it
+MP_LINK = "https://example.com/rift-modal"
+link = mp_run("link", [f"type echo {MP_LINK}\\n", "wait 800", "dump {d}/a.txt"])
+lx, ly, lw, lh = map(int, re.search(re.escape(MP_LINK) + r"@(\d+),(\d+),(\d+),(\d+)", link).groups())
+assert lx + lw < 1300 // 2 - 300, (lx, lw)
+spot = f"move {lx + lw // 2} {ly + lh // 2}"
+shown = mp_run("link-bare", [f"type echo {MP_LINK}\\n", "wait 800", spot, "wait 900", "dump {d}/a.txt"])
+assert f'tooltip=Some("{MP_LINK}' in shown, re.search(r"tooltip=\S*", shown)
+news = mp_run("whatsnew", [f"type echo {MP_LINK}\\n", "wait 800", "key cmd+p", "wait 300",
+                           "type What's New", "wait 300", "key enter", "wait 800", spot, "wait 900",
+                           "dump {d}/a.txt"])
+assert "whats_new=true" in news and "tooltip=None" in news, re.search(r"tooltip=\S*", news)
+
+
+# settings-review: the Settings tab has no repository, so the code review
+# button there is a dimmed ± with no counts that does nothing, and the
+# panel (open on the shell tab) hides; back on the shell tab it shows again
+# with its changes
+sr = scratch / "settings-review"
+(sr / "cfg/rift").mkdir(parents=True, exist_ok=True)
+(sr / "data").mkdir(parents=True, exist_ok=True)
+sr_repo = sr / "repo"
+sr_repo.mkdir(parents=True, exist_ok=True)
+for args in (["init", "-q"], ["config", "user.email", "t@t"], ["config", "user.name", "t"]):
+    subprocess.run(["git", *args], cwd=sr_repo, check=True)
+(sr_repo / "f.txt").write_text("a\n")
+subprocess.run(["git", "add", "f.txt"], cwd=sr_repo, check=True)
+subprocess.run(["git", "commit", "-qm", "init"], cwd=sr_repo, check=True)
+(sr_repo / "f.txt").write_text("a\nb\nc\n")
+(sr / "cfg/rift/config.toml").write_text(
+    'shell = "/bin/bash"\nrestore_session = false\nsync_os_theme = false\ncheck_for_updates = false\n'
+    + f"working_directory = {json.dumps(str(sr_repo))}\n")
+(sr / "t.rift").write_text("\n".join([
+    "resize 1300 900", "wait_prompt", "key shift+cmd+g", "wait 2000", f"dump {sr}/a.txt",
+    "key cmd+,", "wait 600", "move 1277 17", "wait 900", f"dump {sr}/b.txt",
+    "a11y click No repository on the Settings tab", "wait 300", f"dump {sr}/c.txt",
+    "key cmd+,", "wait 800", f"dump {sr}/d.txt", "quit"]) + "\n")
+with (sr / "log.txt").open("w") as log:
+    rc = subprocess.run([str(binary), "--script", str(sr / "t.rift"), "--headless"],
+                        env=dict(env, XDG_CONFIG_HOME=str(sr / "cfg"), XDG_DATA_HOME=str(sr / "data")),
+                        stdout=log, stderr=log, timeout=120).returncode
+assert rc == 0, died("settings-review run failed", sr / "log.txt")
+sr_dump = lambda name: (sr / f"{name}.txt").read_text()
+sr_review = lambda name: re.search(r"^review=.*$", sr_dump(name), re.M)[0]
+# the shell tab: counts widen the button, the panel is on screen
+assert re.search(r'"Review changes@\d+,4,(\d+),26"', sr_dump("a"))[1] != "26", sr_dump("a")[:600]
+assert sr_review("a").startswith("review=true load=ready") and " shown=true " in sr_review("a"), sr_review("a")
+# the Settings tab: a 26 px ± that explains itself, the panel hidden
+b = sr_dump("b")
+assert re.search(r'"No repository on the Settings tab@\d+,4,26,26"', b) and "Review changes@" not in b, b[:600]
+assert 'tooltip=Some("No repository on the Settings tab")' in b, re.search(r"tooltip=\S*", b)
+assert re.search(r"^settings=true ", b, re.M) and " shown=false " in sr_review("b"), sr_review("b")
+# a click does nothing: still Settings, the panel still open for later
+assert re.search(r"^settings=true ", sr_dump("c"), re.M) and sr_review("c").startswith("review=true "), sr_review("c")
+d = sr_dump("d")
+assert re.search(r"^settings=false ", d, re.M) and '"Review changes@' in d, d[:600]
+assert " shown=true " in sr_review("d") and 'unstaged=Some(["Mf.txt"])' in sr_review("d"), sr_review("d")
+
+
+# tab-status: a tab shows its focused pane's folder (two on folders of the
+# same name add the parent; a renamed tab keeps its name) and one status,
+# the most urgent of its panes: failed and done from commands that ended
+# out of view, working, and an agent in the other pane of a split tab
+# that needs you (not the focused pane's: a ring). Focusing that pane
+# makes it the tab's own. Holding ⌘ numbers the tabs ⌘1… in the ×'s place;
+# releasing it takes the numbers away
+ts = scratch / "tab-status"
+TS_BASE = ('shell = "/bin/bash"\nrestore_session = false\nsync_os_theme = false\n'
+           'check_for_updates = false\n')
+def ts_run(name, style, steps):
+    d = ts / name
+    for sub in ("cfg/rift", "data", "bin", "w/a/src", "w/b/src", "w/run", "w/flow", "w/atlas"):
+        (d / sub).mkdir(parents=True, exist_ok=True)
+    (d / "cfg/rift/config.toml").write_text(
+        TS_BASE + f'tab_style = "{style}"\n[keybindings]\nrename_tab = "ctrl+alt+r"\n')
+    # a coding agent (by its command's name) that asks for permission
+    (d / "bin/claude").write_text("#!/bin/sh\nprintf '\\033]9;Claude needs your permission\\007'\nsleep 60\n")
+    (d / "bin/claude").chmod(0o755)
+    (d / "t.rift").write_text("\n".join(
+        ["resize 1240 600", "focus on", "wait_prompt",
+         *(s.replace("{d}", str(d)) for s in steps), "quit"]) + "\n")
+    with (d / "log.txt").open("w") as log:
+        rc = subprocess.run([str(binary), "--script", str(d / "t.rift"), "--headless"],
+                            env=dict(env, XDG_CONFIG_HOME=str(d / "cfg"), XDG_DATA_HOME=str(d / "data")),
+                            stdout=log, stderr=log, timeout=120).returncode
+    assert rc == 0, died(f"tab-status {name} run failed", d / "log.txt")
+    return lambda dump: (d / f"{dump}.txt").read_text()
+def ts_strip(text):
+    # the strip's tabs as {title: (status, hint, status_pane)}
+    line = re.search(r"^strip style=(\w+) h=(\d+) hints=(\w+) .* tabs=(\[.*\])$", text, re.M)
+    tabs = {}
+    for t in json.loads(line[4]):
+        m = re.match(r'"(.*?)" status=(\S+) hint=(\S+) idle_line=".*?" status_pane="(.*?)"', t)
+        tabs[m[1]] = (m[2], m[3], m[4])
+    return line[1], int(line[2]), line[3] == "true", tabs
+TS_PATH = "export PATH={d}/bin:$PATH"
+TS_TABS = [
+    # failed and done: commands that end while their tab is out of view
+    f"type {TS_PATH}; cd {{d}}/w/a/src; sleep 2; false\\n", "key cmd+t", "wait_prompt",
+    "type cd {d}/w/b/src; sleep 2; true\\n", "key cmd+t", "wait_prompt",
+    "type cd {d}/w/run\\n", "wait 300", "type sleep 60\\n", "key cmd+t", "wait_prompt",
+    # a renamed tab on the same folder as b/src
+    "type cd {d}/w/b/src\\n", "wait 300", "key ctrl+alt+r", "type build\\n", "key cmd+t", "wait_prompt",
+    # a split tab: the agent in the second pane, the first focused
+    f"type {TS_PATH}; cd {{d}}/w/flow\\n", "wait 400", "key cmd+d", "wait_prompt",
+    f"type {TS_PATH}; cd {{d}}/w/atlas\\n", "wait 400", "type claude\\n", "wait 900",
+    "key alt+cmd+left", "wait 4000",
+]
+ts_dot = ts_run("dot", "dot", [
+    *TS_TABS, "dump {d}/a.txt", "shot {d}/a.png",
+    "mods none", "mods cmd", "wait 150", "dump {d}/early.txt", "wait 400", "dump {d}/b.txt",
+    "mods none", "wait 200", "dump {d}/c.txt",
+    "key alt+cmd+right", "wait 400", "dump {d}/d.txt"])
+style, h, hints, tabs = ts_strip(ts_dot("a"))
+assert (style, h, hints) == ("Dot", 34, False), (style, h, hints)
+assert tabs["a/src"][0] == "failed/own" and tabs["b/src"][0] == "done/own", tabs
+assert tabs["run"][0] == "working/own" and tabs["build"][0] == "-", tabs
+assert tabs["flow"] == ("needs_you/other", "-", "atlas"), tabs
+assert 'Tab "flow, needs you in another pane' in ts_dot("a"), ts_dot("a")[-3000:]
+# ⌘ held: nothing for the first moment, then every tab's number
+assert ts_strip(ts_dot("early"))[2] is False, ts_strip(ts_dot("early"))
+_, _, hints, tabs = ts_strip(ts_dot("b"))
+assert hints and [t[1] for t in tabs.values()] == ["⌘1", "⌘2", "⌘3", "⌘4", "⌘5"], tabs
+_, _, hints, tabs = ts_strip(ts_dot("c"))
+assert not hints and {t[1] for t in tabs.values()} == {"-"}, tabs
+# the agent's pane focused: the tab is named for it, the status its own
+assert ts_strip(ts_dot("d"))[3]["atlas"][0] == "needs_you/own", ts_strip(ts_dot("d"))
+# the underline style: the failed tab's title is underlined in the error
+# colour; the detailed style: a 44 px strip whose second line says it
+def ts_tab_rect(text, title):
+    return tuple(map(int, re.search(re.escape(title) + r"@(\d+),(\d+),(\d+),(\d+)", text).groups()))
+TS_SHORT = [f"type cd {{d}}/w/a/src; sleep 2; false\\n", "key cmd+t", "wait_prompt",
+            "type cd {d}/w/flow\\n", "wait 3500", "dump {d}/a.txt", "shot {d}/a.png"]
+for name in ("underline", "detailed"):
+    dump = ts_run(name, name, TS_SHORT)("a")
+    style, h, _, tabs = ts_strip(dump)
+    assert style.lower() == name and tabs["src"][0] == "failed/own", (style, tabs)
+    assert h == (44 if name == "detailed" else 34), h
+    x, y, w, th = ts_tab_rect(dump, "src")
+    assert th == h, (th, h)
+    # a red mark under the title (the underline) / on the second line
+    row = y + th // 2 + (10 if name == "underline" else 9)
+    marks = [mp_pixel(ts / name / "a.png", px, row, 1240) for px in range(x + 20, x + w - 20)]
+    assert any(r > b + 60 and r > 150 for r, g, b in marks), (name, row, marks[::12])
+# new output: a background tab's late output counts once it ran a command;
+# fresh tabs left before their first prompt (startup only) stay quiet
+quiet = ts_run("quiet", "dot", [
+    "type cd {d}/w/run; (sleep 3; echo late) &\\n", "wait 500",
+    "key cmd+t", "key cmd+t", "key cmd+t", "wait 4000", "dump {d}/a.txt"])
+quiet_states = re.findall(r'status=(\S+)', re.search(r"^strip .*$", quiet("a"), re.M)[0])
+assert quiet_states == ["activity/own", "-", "-", "-"], quiet_states
+
+# remote-page: off, Settings › Remote access is one card (the switch) and
+# the paired phones with Revoke only: no connection tiles, pairing, check
+# box or empty headings (none of the phones list either without phones).
+# On, the card says it is ready, Pair a phone shows the code inline with
+# Copy link and Cancel, and Cancel withdraws the code (pairing.json loses
+# it); the check box makes the next code view only
+rp = scratch / "remote-page"
+rp_base = ('shell = "/bin/bash"\nrestore_session = false\nsync_os_theme = false\n'
+           'durable_sessions = false\nremote_listen = "127.0.0.1:0"\ncontrol_api = "off"\n')
+rp_devices = [
+    {"id": "a1b2", "name": "Test iPhone", "platform": "ios",
+     "key": "3q2-7wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "permission": "operate",
+     "paired_at": "2026-10-19T07:00:00Z", "last_seen": "2026-10-19T07:09:00Z"},
+    {"id": "c3d4", "name": "Test Tablet", "platform": "android",
+     "key": "3q2-7wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB", "permission": "view",
+     "paired_at": "2026-10-12T07:00:00Z", "last_seen": "2026-10-18T13:40:00Z"}]
+
+def rp_run(name, cfg, steps, devices=True):
+    d = rp / name
+    for sub in ("cfg/rift", "data/rift/remote"):
+        (d / sub).mkdir(parents=True, exist_ok=True)
+    os.chmod(d / "data/rift/remote", 0o700)
+    if devices:
+        (d / "data/rift/remote/devices.json").write_text(json.dumps(rp_devices))
+    (d / "cfg/rift/config.toml").write_text(cfg)
+    (d / "off.toml").write_text(rp_base)
+    (d / "t.rift").write_text("\n".join(
+        ["resize 1180 1400", "wait_prompt", *(s.replace("{d}", str(d)) for s in steps), "quit"]) + "\n")
+    with (d / "log.txt").open("w") as log:
+        rc = subprocess.run([str(binary), "--script", str(d / "t.rift"), "--headless"],
+                            env=dict(env, XDG_CONFIG_HOME=str(d / "cfg"), XDG_DATA_HOME=str(d / "data"),
+                                     BASH_SILENCE_DEPRECATION_WARNING="1"),
+                            stdout=log, stderr=log, timeout=120).returncode
+    assert rc == 0, died(f"remote-page {name} run failed", d / "log.txt")
+    return d
+
+off = (rp_run("off", rp_base, [*settings_remote, "wait 600", "dump {d}/off.txt"]) / "off.txt").read_text()
+assert 'Label "Remote access is off. Turn it on to watch' in off, off[-3000:]
+assert 'Switch "Allow remote access" toggled=False' in off, off[-3000:]
+assert 'Label "They can\'t connect while remote access is off.' in off, off[-3000:]
+assert 'Button "Revoke Test iPhone"' in off and 'Button "Revoke Test Tablet"' in off, off[-3000:]
+for gone in ("On this Wi-Fi", "Pair a phone", "The new phone can only watch", "access: ",
+             "Connection settings", "Recent connections", "Ask before keeping"):
+    assert gone not in off, (gone, off[-3000:])
+alone = (rp_run("off-alone", rp_base, [*settings_remote, "wait 600", "dump {d}/off.txt"],
+                devices=False) / "off.txt").read_text()
+assert 'Switch "Allow remote access" toggled=False' in alone, alone[-3000:]
+assert "They can" not in alone and "Revoke" not in alone and "No phones yet" not in alone, \
+    alone[-3000:]
+
+on = rp_run("on", rp_base + "remote_access = true\n", [
+    "wait_file {d}/data/rift/remote/status.json 20000", "wait 1500", *settings_remote,
+    "wait 600", "dump {d}/on.txt",
+    "a11y click Pair a phone", "wait 800", "dump {d}/pair.txt",
+    "sh cp {d}/data/rift/remote/pairing.json {d}/pairing-shown.json",
+    "a11y click Cancel pairing: the code stops working", "wait 300", "dump {d}/cancel.txt",
+    "sh cp {d}/data/rift/remote/pairing.json {d}/pairing-cancelled.json",
+    "a11y click The new phone can only watch", "a11y click Pair a phone", "wait 800",
+    "dump {d}/view.txt",
+    "sh cp {d}/off.toml {d}/cfg/rift/config.toml", "wait 3500"])
+text = (on / "on.txt").read_text()
+assert 'Label "Ready for your phone. Paired phones can see your tabs' in text, text[-3000:]
+assert 'Label "On this Wi-Fi (127.0.0.1:' in text, text[-3000:]
+assert 'CheckBox "The new phone can only watch" toggled=False' in text, text[-3000:]
+assert 'RadioButton "Test iPhone access: Can run commands, selected"' in text, text[-3000:]
+assert 'RadioButton "Test Tablet access: View only, selected"' in text, text[-3000:]
+pair = (on / "pair.txt").read_text()
+assert 'pairing=Some("rift-remote://pair?' in pair and "&p=operate" in pair, remote_line(pair)
+assert re.search(r'Label "Expires in [12]:\d\d"', pair), pair[-3000:]
+for row in ('Button "Copy pairing link"', 'Button "Cancel pairing: the code stops working"',
+            'Label "Pairing QR code"', "It will be able to run commands."):
+    assert row in pair, (row, pair[-3000:])
+assert len(json.loads((on / "pairing-shown.json").read_text())) == 1
+assert json.loads((on / "pairing-cancelled.json").read_text()) == [], \
+    (on / "pairing-cancelled.json").read_text()
+assert "pairing=None pairing_wait=false" in (on / "cancel.txt").read_text()
+view = (on / "view.txt").read_text()
+assert "view_only=true" in remote_line(view) and "&p=view" in remote_line(view), remote_line(view)
+assert 'CheckBox "The new phone can only watch" toggled=True' in view, view[-3000:]
+# Revoke works while off (it asks first), and a phone's access changes
+# with its segment while on: both write devices.json
+gone = rp_run("revoke", rp_base, [*settings_remote, "wait 600",
+                                  "a11y click Revoke Test iPhone", "wait 300", "key enter",
+                                  "wait 600", "dump {d}/a.txt"])
+left = json.loads((gone / "data/rift/remote/devices.json").read_text())
+assert [x["id"] for x in left] == ["c3d4"], left
+assert 'Button "Revoke Test iPhone"' not in (gone / "a.txt").read_text()
+access = rp_run("access", rp_base + "remote_access = true\n", [
+    "wait_file {d}/data/rift/remote/status.json 20000", "wait 1500", *settings_remote,
+    # raising a phone to run commands asks first; lowering does not
+    "wait 600", "a11y click Test Tablet access: Can run commands", "wait 300", "key enter",
+    "wait 300", "a11y click Test iPhone access: View only", "wait 600",
+    "sh cp {d}/off.toml {d}/cfg/rift/config.toml", "wait 3500"])
+perms = {x["id"]: x["permission"]
+         for x in json.loads((access / "data/rift/remote/devices.json").read_text())}
+assert perms == {"a1b2": "view", "c3d4": "operate"}, perms
+
+# themes-grid: Settings › Themes is a grid of cards, one per theme, under
+# All / Dark / Light filters with their counts; a click on a card applies
+# it; ← → ↑ ↓ walk the cards and Space applies the focused one; "Open
+# themes folder" makes the folder (headless: never opened); the settings
+# search finds a theme by name, and its row applies it
+tg = scratch / "themes-grid"
+for sub in ("cfg/rift", "data"):
+    (tg / sub).mkdir(parents=True, exist_ok=True)
+(tg / "cfg/rift/config.toml").write_text(
+    'shell = "/bin/bash"\nrestore_session = false\nsync_os_theme = false\n')
+(tg / "t.rift").write_text("\n".join([
+    "resize 1180 900", "wait_prompt", "key cmd+,", "wait 300", "key end", "wait 600",
+    f"dump {tg}/all.txt",
+    "a11y click Show: Light  4", "wait 300", f"dump {tg}/light.txt",
+    "a11y click Show: All  13", "wait 300",
+    "a11y click Dracula", "wait 600", f"dump {tg}/dracula.txt",
+    "focus on", *["key tab"] * 4, "wait 200", f"dump {tg}/first.txt",
+    "key right", "key down", "wait 200", f"dump {tg}/walked.txt",
+    "key space", "wait 600", f"sh cp {tg}/cfg/rift/config.toml {tg}/walked.toml",
+    "key escape", "type nord", "wait 400", f"dump {tg}/search.txt",
+    "a11y click Nord theme", "wait 600", f"sh cp {tg}/cfg/rift/config.toml {tg}/searched.toml",
+    "key escape", "wait 200", "key escape", "wait 200", "key cmd+,", "wait 300", "key end",
+    "wait 300", "move 700 400", "scroll -40", "wait 300",
+    "a11y click Open themes folder: drop a .toml or a Warp .yaml theme into it", "wait 300",
+    f"dump {tg}/opened.txt", "quit"]) + "\n")
+with (tg / "log.txt").open("w") as log:
+    rc = subprocess.run([str(binary), "--script", str(tg / "t.rift"), "--headless"],
+                        env=dict(env, XDG_CONFIG_HOME=str(tg / "cfg"), XDG_DATA_HOME=str(tg / "data"),
+                                 BASH_SILENCE_DEPRECATION_WARNING="1"),
+                        stdout=log, stderr=log, timeout=90).returncode
+assert rc == 0, died("themes-grid run failed", tg / "log.txt")
+grid = (tg / "all.txt").read_text()
+for row in ('RadioButton "Show: All  13, selected"', 'RadioButton "Show: Dark  9"',
+            'RadioButton "Show: Light  4"', 'RadioButton "Dark Default, active"',
+            'RadioButton "Solarized Light"'):
+    assert row in grid, (row, grid[-3000:])
+light = (tg / "light.txt").read_text()
+assert 'RadioButton "Light Default"' in light and 'RadioButton "Dracula"' not in light, light[-3000:]
+assert 'RadioButton "Dracula, active"' in (tg / "dracula.txt").read_text()
+assert 'settings_focus=Some(SettingsTheme(0))' in (tg / "first.txt").read_text()
+# 0 1 2 / 3 4 5 …: → from 0 is 1, ↓ from 1 is 4 (Catppuccin Latte)
+assert 'settings_focus=Some(SettingsTheme(4))' in (tg / "walked.txt").read_text()
+assert tomllib.loads((tg / "walked.toml").read_text())["theme"] == "catppuccin-latte"
+assert 'Nord theme"' in (tg / "search.txt").read_text(), (tg / "search.txt").read_text()[-2000:]
+assert tomllib.loads((tg / "searched.toml").read_text())["theme"] == "nord"
+assert (tg / "cfg/rift/themes").is_dir(), "Open themes folder made no folder"
+assert f'toast=Some("Headless: not opening {tg / "cfg/rift/themes"}' in (tg / "opened.txt").read_text(), \
+    re.search(r"toast=.*", (tg / "opened.txt").read_text())
 
 for client in clients:
     client.close()

@@ -500,6 +500,36 @@ pub fn start_pairing_via(
     })
 }
 
+/// Withdraw the pairing link `url` (made by [`start_pairing_via`]): its
+/// secret stops working at once. `Ok(false)`: nothing to withdraw (used,
+/// expired, or not a pairing link).
+pub fn cancel_pairing(dir: &Path, url: &str) -> io::Result<bool> {
+    let Some(secret) = url
+        .split_once('?')
+        .map(|(_, q)| q)
+        .into_iter()
+        .flat_map(|q| q.split('&'))
+        .find_map(|kv| kv.strip_prefix("s="))
+    else {
+        return Ok(false);
+    };
+    let Ok(bytes) = B64.decode(secret.as_bytes()) else {
+        return Ok(false);
+    };
+    let hash = hash_secret(&bytes);
+    locked(dir, || {
+        let path = dir.join(PAIRING_FILE);
+        let mut live: Vec<Secret> = read_list(&path).unwrap_or_default();
+        let before = live.len();
+        live.retain(|s| !ct_eq(s.hash.as_bytes(), hash.as_bytes()));
+        if live.len() == before {
+            return Ok(false);
+        }
+        write_json(dir, PAIRING_FILE, &live)?;
+        Ok(true)
+    })
+}
+
 /// Every paired device (none when the file does not exist yet).
 pub fn devices(dir: &Path) -> io::Result<Vec<Device>> {
     read_list(&dir.join(DEVICES_FILE))
@@ -1223,6 +1253,31 @@ mod tests {
         }
         assert_eq!(devices(&dir).unwrap().len(), 16);
         assert_eq!(read_list::<Secret>(&dir.join(PAIRING_FILE)).unwrap(), []);
+        std::fs::remove_dir_all(dir.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_cancelled_link_no_longer_pairs() {
+        let dir = scratch("cancel");
+        let keep = start_pairing(&dir, &[], "h", Permission::Operate).unwrap();
+        let gone = start_pairing(&dir, &[], "h", Permission::View).unwrap();
+        assert!(cancel_pairing(&dir, &gone.url).unwrap());
+        // once only; and anything that is not a link withdraws nothing
+        assert!(!cancel_pairing(&dir, &gone.url).unwrap());
+        assert!(!cancel_pairing(&dir, "rift-remote://pair?a=1").unwrap());
+        let now = SystemTime::now();
+        let secret = |l: &PairingLink| query(&l.url)[2].1.clone();
+        assert!(
+            pair_device(&dir, &secret(&gone), "n", "ios", &[1; 32], now)
+                .unwrap()
+                .is_none()
+        );
+        // the other live link still works
+        assert!(
+            pair_device(&dir, &secret(&keep), "n", "ios", &[2; 32], now)
+                .unwrap()
+                .is_some()
+        );
         std::fs::remove_dir_all(dir.parent().unwrap()).ok();
     }
 

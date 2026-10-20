@@ -554,14 +554,6 @@ fn badge(
     }
 }
 
-/// Tab-strip marker for a tab's newest unread entry: a dot in the kind's
-/// color with a soft halo (replaces the activity dot).
-pub fn tab_badge(layer: &mut Layer, theme: &Theme, kind: Kind, cx: f32, cy: f32) {
-    let c = kind_color(theme, kind);
-    layer.circle([cx, cy], 12.0, c.with_alpha(0.25));
-    layer.circle([cx, cy], 7.0, c);
-}
-
 #[allow(clippy::too_many_arguments)]
 pub fn render(
     layer: &mut Layer,

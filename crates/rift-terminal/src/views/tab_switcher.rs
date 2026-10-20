@@ -32,7 +32,7 @@ pub fn render(
 ) -> Vec<(usize, [f32; 4])> {
     let card_w = CARD_W.min((w - 32.0).max(160.0));
     // as many rows as fit; the highlighted one stays in view
-    let room = h - crate::views::tabbar::TAB_BAR_H - 54.0 - HEAD_H - PAD * 2.0 - 16.0;
+    let room = h - crate::views::tabbar::bar_h() - 54.0 - HEAD_H - PAD * 2.0 - 16.0;
     let max_rows = ((room / ROW_H).max(1.0) as usize).max(1);
     let shown = rows.len().min(max_rows);
     let start = (highlight + 1)
@@ -40,7 +40,7 @@ pub fn render(
         .min(rows.len().saturating_sub(shown));
     let card_h = HEAD_H + PAD * 2.0 + ROW_H * shown as f32;
     let x = (w - card_w) / 2.0;
-    let y = crate::views::tabbar::TAB_BAR_H + 54.0;
+    let y = crate::views::tabbar::bar_h() + 54.0;
     layer.shadow(
         [x, y + 12.0],
         [card_w, card_h],

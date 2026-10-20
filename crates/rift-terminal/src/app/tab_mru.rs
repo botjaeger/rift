@@ -218,6 +218,7 @@ impl App {
                     .iter()
                     .find(|(j, _)| *j == i)
                     .map(|(_, r)| *r),
+                disabled: false,
             })
             .collect();
         Some(crate::a11y::Overlay::Dialog {

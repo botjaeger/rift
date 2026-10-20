@@ -34,7 +34,11 @@ impl App {
 
     /// Height the strip takes from the top of the window.
     pub(super) fn bar_h(&self) -> f32 {
-        if self.strip_shown() { TAB_BAR_H } else { 0.0 }
+        if self.strip_shown() {
+            tabbar::bar_h()
+        } else {
+            0.0
+        }
     }
 
     /// The hidden strip is slid in over the panes.
@@ -57,7 +61,7 @@ impl App {
         } else {
             match pointer {
                 Some((_, y)) if y <= REVEAL_EDGE => true,
-                Some((_, y)) if self.win.bar_revealed && y < TAB_BAR_H => true,
+                Some((_, y)) if self.win.bar_revealed && y < tabbar::bar_h() => true,
                 // a menu opened from it, or a tab dragged from it, keeps it
                 _ => {
                     self.win.bar_revealed
@@ -89,7 +93,11 @@ impl App {
     /// Height of the strip's band while it is on screen (taking its height
     /// or slid in), else 0: the pointer above it is over the strip.
     pub(super) fn strip_h(&self) -> f32 {
-        if self.strip_visible() { TAB_BAR_H } else { 0.0 }
+        if self.strip_visible() {
+            tabbar::bar_h()
+        } else {
+            0.0
+        }
     }
 }
 
