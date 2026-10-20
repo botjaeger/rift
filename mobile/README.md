@@ -442,8 +442,11 @@ A self-hosted server delivers to iPhones promptly only with `upstream-base-url` 
 
 A build needs, once (free, except Apple's developer program for iOS):
 
-1. An Expo account: `npx expo login`, then `npx eas-cli init` here (writes
-   `extra.eas.projectId` to `app.json`).
+1. An Expo account and an EAS project (`npx expo login`, then create the project on
+   expo.dev). Put `EXPO_OWNER=<account>` and `EAS_PROJECT_ID=<id>` in
+   `~/.config/rift-release/expo.env` (or the environment): `app.config.js` adds the owner,
+   the update URL and `extra.eas.projectId` from them. Without them a build has no
+   over-the-air updates and no Expo push.
 2. Android: a Firebase project with an Android app `dev.botjaeger.rift`; put its
    `google-services.json` here, set `"googleServicesFile": "./google-services.json"` under
    `android` in `app.json`, and upload the project's FCM V1 service-account key with

@@ -23,8 +23,8 @@ export default defineConfig(
     rules: reactHooks.configs.recommended.rules,
   },
   {
-    // Expo config plugins are read as CommonJS.
-    files: ["plugins/**/*.js"],
+    // Expo config plugins and the dynamic config are read as CommonJS.
+    files: ["plugins/**/*.js", "app.config.js"],
     languageOptions: {
       sourceType: "commonjs",
       globals: { require: "readonly", module: "writable", process: "readonly" },

@@ -11,7 +11,6 @@
       "policy": "fingerprint"
     },
     "updates": {
-      "url": "https://u.expo.dev/00000000-0000-0000-0000-000000000000",
       "checkAutomatically": "ON_ERROR_RECOVERY",
       "fallbackToCacheTimeout": 0,
       "requestHeaders": {
@@ -99,11 +98,7 @@
       ]
     ],
     "extra": {
-      "router": {},
-      "eas": {
-        "projectId": "00000000-0000-0000-0000-000000000000"
-      }
-    },
-    "owner": "rift-owner"
+      "router": {}
+    }
   }
 }
