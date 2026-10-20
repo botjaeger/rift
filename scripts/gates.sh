@@ -141,6 +141,8 @@ gate_docs() {
     while IFS= read -r md; do
         while IFS= read -r link; do
             target="${link%%#*}"
+            # a space in a path is written %20 (GitHub resolves it)
+            target="${target//%20/ }"
             [[ -z $target ]] && continue
             # GitHub page routes (../../releases from the README) are not files.
             [[ $target =~ ^(\.\./)+(releases|issues|pulls|actions|wiki)(/|$) ]] && continue

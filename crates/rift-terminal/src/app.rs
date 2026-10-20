@@ -10016,9 +10016,13 @@ impl App {
                         rect[3] - pad.top,
                     )
                 };
+                // a shell-widget hand-off keeps the editor's room: growing
+                // the grid would resize the shell (SIGWINCH) while it reads
+                // the trigger, which breaks the key sequence or the reply
+                let handing_off = pane.session.widgets.lock().unwrap().busy();
                 let editor_h = if bare {
                     0.0
-                } else if !editor_vis {
+                } else if !editor_vis && !handing_off {
                     if split { PANE_PAD } else { pad.bottom }
                 } else {
                     editor::editor_height(&pane.editor.buffer, prompt_mode, ed_cols, chip_rows)

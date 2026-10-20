@@ -823,6 +823,18 @@ impl Reader {
         }
     }
 
+    /// After a chunk is fed. A chunk with a shell marker always wakes: the
+    /// app acts on what a marker changed (a shell widget's line, a prompt
+    /// for queued commands) in its wakeup handler, and the coalesced wakeup
+    /// it would otherwise ride on may already have been handled (the flag
+    /// stays set until the next frame).
+    fn wake_after(&self, marked: bool) {
+        if self.dirty.swap(true, Ordering::AcqRel) && !marked {
+            return;
+        }
+        (self.observer)(self.id, SessionEvent::Wakeup);
+    }
+
     /// Before blocking on input: a synchronized update (DECSET 2026) holds
     /// output until its end marker; if the program stalls, show what it
     /// drew once vte's timeout expires. Returns true when it flushed.
@@ -873,8 +885,8 @@ impl Reader {
                         Ok(0) => break,
                         Ok(n) => {
                             self.saw_output.store(true, Ordering::Release);
-                            feed(&mut parser, &mut scanner, &buf[..n], &self.ctx);
-                            self.wake();
+                            let marked = feed(&mut parser, &mut scanner, &buf[..n], &self.ctx);
+                            self.wake_after(marked);
                         }
                         Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                         Err(_) => break,
@@ -1062,9 +1074,9 @@ impl Reader {
                                 // this window: no notifications for them
                                 blocks.set_replaying(first);
                             }
-                            feed(&mut parser, &mut scanner, &bytes, &self.ctx);
+                            let marked = feed(&mut parser, &mut scanner, &bytes, &self.ctx);
                             if !replaying {
-                                self.wake();
+                                self.wake_after(marked);
                             }
                         }
                         Frame::Json(body) => match serde_json::from_slice::<Ev>(&body) {
@@ -1979,8 +1991,13 @@ struct FeedCtx {
 
 /// Parse one chunk of terminal output: split it at shell markers, feed each
 /// piece to the VT parser, apply the markers to the block and image models,
-/// then prune what left the scrollback.
-fn feed(parser: &mut vte::ansi::Processor, scanner: &mut OscScanner, bytes: &[u8], ctx: &FeedCtx) {
+/// then prune what left the scrollback. True when the chunk held a marker.
+fn feed(
+    parser: &mut vte::ansi::Processor,
+    scanner: &mut OscScanner,
+    bytes: &[u8],
+    ctx: &FeedCtx,
+) -> bool {
     use alacritty_terminal::term::TermMode;
     let segments = scanner.scan(bytes);
     let mut term = ctx.term.lock();
@@ -1988,6 +2005,7 @@ fn feed(parser: &mut vte::ansi::Processor, scanner: &mut OscScanner, bytes: &[u8
     // between chunks
     let mut scrolled_cur = ctx.scrolled.load(Ordering::Acquire);
     let mut start = 0usize;
+    let mut marked = false;
     // a program's resize request (XTWINOPS 8, DECCOLM, DECSLPP) applies to
     // the grid at once, with the anchor bookkeeping of any resize; the app
     // resizes the window (and the PTY) to match after
@@ -2006,6 +2024,7 @@ fn feed(parser: &mut vte::ansi::Processor, scanner: &mut OscScanner, bytes: &[u8
         ws.num_cols = cols as u16;
     };
     for seg in segments {
+        marked |= seg.marker.is_some();
         let was_alt = term.mode().contains(TermMode::ALT_SCREEN);
         let cleared = {
             let mut abs = AbsTerm {
@@ -2131,6 +2150,7 @@ fn feed(parser: &mut vte::ansi::Processor, scanner: &mut OscScanner, bytes: &[u8
     ctx.scrolled.store(scrolled_cur, Ordering::Release);
     // under the term lock: a reader of the screen sees the new value with it
     ctx.generation.fetch_add(1, Ordering::AcqRel);
+    marked
 }
 
 /// Output that ended without a newline leaves the cursor mid-row when the
@@ -2486,6 +2506,21 @@ mod tests {
             reply: None,
             notify: None,
         }
+    }
+
+    /// A chunk with a shell marker (a widget's line, a prompt) reports it, so
+    /// its reader wakes the app even while a coalesced wakeup is pending.
+    #[test]
+    fn feed_reports_chunks_with_markers() {
+        let c = ctx(20, 5);
+        let mut p = vte::ansi::Processor::new();
+        let mut s = OscScanner::new();
+        assert!(!feed(&mut p, &mut s, b"plain output\r\n", &c));
+        assert!(feed(&mut p, &mut s, b"x\x1b]6973;W;aFILE;%20b\x07", &c));
+        assert!(feed(&mut p, &mut s, b"\x1b]133;A\x07", &c));
+        // a marker split across chunks counts where it ends
+        assert!(!feed(&mut p, &mut s, b"\x1b]133;", &c));
+        assert!(feed(&mut p, &mut s, b"B\x07", &c));
     }
 
     /// An OSC 7 from an ssh session names another host: its path is never

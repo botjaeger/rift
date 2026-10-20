@@ -242,6 +242,16 @@ fn git(
                     // SAFETY: plain syscall; the group is the child's own
                     // (process_group(0) above), never Rift's
                     unsafe { libc::killpg(pid, libc::SIGKILL) };
+                    // a hook git was forking just then can miss that signal
+                    // (macOS): again until the group is gone. git is not
+                    // reaped yet, so its pid (the group's id) is not reused
+                    for _ in 0..5 {
+                        std::thread::sleep(Duration::from_millis(10));
+                        // SAFETY: as above
+                        if unsafe { libc::killpg(pid, libc::SIGKILL) } != 0 {
+                            break;
+                        }
+                    }
                 }
                 let _ = child.kill();
                 let _ = child.wait();
