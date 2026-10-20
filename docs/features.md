@@ -2143,4 +2143,3 @@ Warp's hotkey window:
 ## Deferred (by decision, not gaps)
 
 Warp Drive / cloud / teams.
-Everything else on the [roadmap](terminal-landscape-roadmap.md) is planned.

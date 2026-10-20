@@ -517,7 +517,7 @@ hello when the window must know the service honours it (profile `args`:
 a service without `FEATURE_ARGS` is not asked to start such a shell; the
 window starts it locally). Update the golden; the version stays. Check it
 against the installed release's service with
-`docs/workstreams/evidence/tier1-2026-10-18/service-compat.py`.
+`scripts/service-compat.py`.
 
 `scripts/release-manifest.py VERSION DIR --base-url file://DIR
 --allow-missing` writes a manifest for local files; sign it with

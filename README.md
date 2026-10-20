@@ -257,7 +257,6 @@ Start at the [documentation index](docs/README.md).
 | [Development](docs/development.md) | Build, test, gates, dependencies, architecture, releases |
 | [Design](DESIGN.md) | Design tokens, metrics and visual rules |
 | [Performance](docs/performance.md) | Benchmark harness and baseline |
-| [Roadmap](docs/terminal-landscape-roadmap.md) | What is done and what is next |
 | [Agent guide](CLAUDE.md) | For coding agents (`CLAUDE.md` = `AGENTS.md`): commands, invariants, safety |
 | [Changelog](CHANGELOG.md) | Release notes |
 

@@ -270,6 +270,9 @@ sources the user's real config first.
 | `docs/configuration.md` | `config.toml` reference, themes, launch configs, file locations |
 | `docs/development.md` | Build, test, gates, dependencies, architecture, releases |
 | `docs/performance.md` | Benchmark harness and recorded baseline |
-| `docs/warp-parity.md`, `docs/warp-gaps.md`, `docs/terminal-landscape-roadmap.md`, `docs/mobile-remote-plan.md` | Plans and parity status |
+| `docs/mobile-remote-plan.md` | Mobile companion plan and open decisions |
 | `docs/remote-protocol.md`, `docs/mobile-threat-model.md` | Mobile gateway wire format, limits, trust and threat model |
-| `docs/project-audit-2026-10-07.md`, `docs/audits/`, `docs/workstreams/` | Dated audit records and their evidence (historical; not updated with behavior) |
+
+Audits, sweeps, competitor comparisons and their evidence are local only:
+write them under `docs/audit/` (git-ignored, as are `docs/workstreams/`,
+`reports/` and `research_notes/`), never into the committed docs.

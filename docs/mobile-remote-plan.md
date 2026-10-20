@@ -299,8 +299,7 @@ list; the screen of full-screen programs rendered by the phone (Phase 3).
 
 1. Discovery on the local network (mDNS); pairing works without it.
 2. Finish alerts while the app is closed on real devices: needs the Expo,
-   APNs and FCM accounts (the open item of
-   [the Phase 2 audit](workstreams/mobile-phase2-audit-2026-10-13.md)).
+   APNs and FCM accounts.
 3. Snapshot, live streaming, disconnect and reconnect on physical iOS and
    Android devices.
 4. A security review before an internet-facing release.

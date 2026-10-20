@@ -24,3 +24,10 @@ assets/icon/rift.iconset/
 
 # vendored crates build into target/vendor; never commit their own target dirs
 /vendor/*/target
+
+# audits, competitor research and their evidence: local only
+/docs/audit/
+/docs/workstreams/
+/docs/audits/
+/reports/
+/research_notes/
