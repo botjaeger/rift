@@ -8,6 +8,48 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.21.0 — 2026-10-23
+
+↑ opens a history menu that puts what you ran in this folder first, your phone can scroll and paste
+screenshots into Claude Code and other full-screen programs, and a Mac short of memory no longer
+closes your panes.
+
+### New
+
+- **History menu** — press ↑ on the command line to see the commands you ran that start with what you
+  typed. ↑ and ↓ walk through them, each shown in the line; ↓ past the newest or Esc puts back what you
+  typed, ⏎ runs the one shown, ⇥ or → keeps it to edit. Secrets in the list are masked.
+- **History per folder** — Rift remembers the commands you run and the folder they ran in, across
+  restarts. Suggestions, the history menu and ⌃R show what you ran in this folder first, then in this
+  project, then anywhere: `pnpm de` here suggests `pnpm dev`, not another project's `pnpm dev:web`.
+- **Phone: scroll full-screen programs** — swipe on Claude Code, Codex, vim or less on your phone to
+  scroll them. The phone keeps its own place and no longer moves the view on your Mac.
+- **Phone: paste screenshots** — Paste with an image on your phone's clipboard sends it to the
+  computer and pastes its path into the program, so Claude Code and Codex attach it.
+
+### Improved
+
+- **Lost session service** — when the background service that keeps your shells running stops
+  answering (a Mac short of memory), Rift keeps trying for 30 seconds, then keeps the pane with
+  *Reconnect* instead of closing it and ending what ran in it.
+- **Closing a pane** — a pane with a long scrollback closes without freezing the window.
+- **Your zsh history** — commands you type in Rift go to your own `~/.zsh_history` again, so other
+  terminals and Rift after a restart see them; commands an earlier version kept apart move there once.
+- **⌃R Failed** — a command that failed recently is listed under Failed even when it once passed here.
+- **Slow background tools** — git, Docker and GitHub checks that hang no longer hold anything up, and
+  a git hook that times out is always stopped.
+
+### Fixed
+
+- **Missing output** — with iTerm2's shell integration in your zsh setup, a command's output (such as
+  `cargo clean`'s "Removed …") showed as an empty block under a stray grey line. It shows again.
+- **`9;5:3u` before a command** — a program that quit without restoring the keyboard (Codex, Claude
+  Code) could leave key codes that ended up in front of your next command.
+- **Completion lines in your history** — the hidden shell Rift asks for completions no longer writes
+  `source …rift-complete…` lines into your zsh history.
+- **Shell widgets** — fish's widgets (⌃R, ⌃T) no longer lose their key or their answer while the
+  command line resizes.
+
 ## 0.20.0 — 2026-10-20
 
 Tabs now say where you are and what needs you, in the style you pick, and the toolbar, Remote access

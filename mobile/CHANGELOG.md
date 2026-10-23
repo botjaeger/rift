@@ -6,6 +6,33 @@ build (`## <version> — <YYYY-MM-DD>`) or an over-the-air update to one
 message its download carries. Items use `### New`, `### Improved` or
 `### Fixed` sections of `- **Title** — text`.
 
+## 0.4.0 — 2026-10-23
+
+Scroll and paste screenshots into Claude Code and other full-screen programs, and agents keep their message box.
+
+### New
+
+- **Scroll full-screen programs** — swipe on Claude Code, Codex, vim or less to scroll them. Your phone
+  keeps its own place: scrolling here no longer moves the view on the computer.
+- **Paste screenshots** — Paste with an image on the clipboard sends it to the computer, which pastes
+  its path into the program, so Claude Code and Codex attach it. Paste is on the key row wherever images
+  can go, and a second Paste while one is sending says so.
+
+### Improved
+
+- **Agents keep the message box** — Claude Code, Codex and other agents get the message input even in
+  full-screen mode; vim and less keep the key row.
+- **Blocks | Terminal** — the switch shows Terminal while a full-screen program fills the pane.
+- **Leaving a screen** — something you started on a screen you then left (a run, a save, Unpair) no
+  longer finishes on the screen you are on now.
+
+### Fixed
+
+- **Android: denying notifications** — no longer closes the app during a confirmed run.
+- **Confirmations** — closing a confirmation goes back to the pane it came from.
+- **Settings and phone name** — an edit you were making is no longer lost or overwritten by an older save.
+- **Sent text** — text the computer already took no longer stays in the message box.
+
 ## 0.3.0 · update 5 — 2026-10-19
 
 Reconnecting stops after 5 tries, panes have a Cancel button, and you can swipe a computer to unpair it.
