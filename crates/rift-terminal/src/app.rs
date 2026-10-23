@@ -24575,21 +24575,7 @@ impl App {
                 .and_then(|t| t.elapsed().ok())
                 .unwrap_or_default();
             if update::same_version(&p.to, current) {
-                let target = update::install_target();
-                if update::pending_matches_target(&p, &target) {
-                    if p.old_path.is_dir() {
-                        let _ = std::fs::remove_dir_all(&p.old_path);
-                    } else {
-                        let _ = std::fs::remove_file(&p.old_path);
-                    }
-                } else {
-                    log::warn!(
-                        "update marker names {} / {}, not this install: left alone",
-                        p.new_path.display(),
-                        p.old_path.display()
-                    );
-                }
-                let _ = std::fs::remove_file(&marker);
+                keep_install(&p, &marker);
                 self.app_note(
                     format!("Updated to Rift v{current}"),
                     "See what's new".into(),
@@ -24655,6 +24641,48 @@ impl App {
             quiet_relaunch_output();
         }
     }
+
+    /// This process exits on purpose (a quit, its last window closed, a
+    /// restart) before its start was confirmed: keep the version an update
+    /// just installed. The helper otherwise reads the exit as a failed
+    /// launch and rolls back. The restart files stay for the next launch.
+    pub(super) fn keep_install_on_exit(&self) {
+        use rift_core::update;
+        if self.update.start_confirmed || !self.handles_update_marker() {
+            return;
+        }
+        if let Some(marker) = update::pending_path()
+            && let Some(p) = update::read_pending(&marker)
+            && update::same_version(&p.to, rift_core::changelog::VERSION)
+        {
+            log::info!(
+                "update: quit before the start was confirmed; v{} kept",
+                p.to
+            );
+            keep_install(&p, &marker);
+        }
+    }
+}
+
+/// The installed version stays: delete the old copy (only this install's)
+/// and the marker, so the update helper does not roll back.
+fn keep_install(p: &rift_core::update::Pending, marker: &std::path::Path) {
+    use rift_core::update;
+    let target = update::install_target();
+    if update::pending_matches_target(p, &target) {
+        if p.old_path.is_dir() {
+            let _ = std::fs::remove_dir_all(&p.old_path);
+        } else {
+            let _ = std::fs::remove_file(&p.old_path);
+        }
+    } else {
+        log::warn!(
+            "update marker names {} / {}, not this install: left alone",
+            p.new_path.display(),
+            p.old_path.display()
+        );
+    }
+    let _ = std::fs::remove_file(marker);
 }
 
 /// A process the update helper started writes to `updates/relaunch.log`;

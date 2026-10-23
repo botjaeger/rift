@@ -4407,6 +4407,43 @@ same_check = up_state("same-check")
 assert 'app_notes=["Rift is up to date · v' in same_check and "toast=None" in same_check, \
     same_check[:3000]
 
+# An update's relaunch that is quit before its start is confirmed
+# (CONFIRM_AFTER) keeps the new version: the real relaunch helper (HELPER in
+# update.rs) starts this binary as the version it installed, which quits 2 s
+# in; it must not roll back to the old copy nor report "Couldn't update"
+uq = scratch / "update-quit"
+(uq / "cfg/rift").mkdir(parents=True)
+(uq / "data/rift/updates").mkdir(parents=True)
+(uq / "cfg/rift/config.toml").write_text(
+    'shell = "/bin/bash"\nrestore_session = false\nsync_os_theme = false\n')
+uq_helper = re.search(r'pub const HELPER: &str = r#"(.*?)"#;',
+                      (Path(__file__).resolve().parents[1] / "crates/rift-core/src/update.rs").read_text(), re.S)[1]
+for side in ("app", "app.old"):
+    (uq / side).mkdir()
+    (uq / side / "which").write_text(side)
+uq_version = subprocess.run([str(binary), "--version"], capture_output=True,
+                            text=True, check=True).stdout.split()[-1]
+uq_marker = uq / "data/rift/update-pending.json"
+uq_failed = uq / "data/rift/update-failed.json"
+uq_marker.write_text(json.dumps({"from": "0.0.1", "to": uq_version,
+                                 "old_path": str(uq / "app.old"), "new_path": str(uq / "app")}))
+(uq / "t.rift").write_text("wait_prompt\nwait 2000\nquit\n")
+uq_gone = subprocess.Popen(["true"])
+uq_gone.wait()
+rc = subprocess.run(
+    ["/bin/sh", "-c", uq_helper, "sh", str(uq_gone.pid), str(uq / "app"), str(uq / "app.old"),
+     str(binary), str(uq_marker), str(uq_failed), str(uq / "relaunch.log"),
+     "--script", str(uq / "t.rift"), "--headless"],
+    env=dict(env, XDG_CONFIG_HOME=str(uq / "cfg"), XDG_DATA_HOME=str(uq / "data"),
+             RIFT_UPDATE_RELAUNCH="1", BASH_SILENCE_DEPRECATION_WARNING="1"),
+    timeout=90).returncode
+uq_log = (uq / "relaunch.log").read_text()
+assert rc == 0, uq_log[-3000:]
+assert (uq / "app/which").read_text() == "app", "a quit before confirming rolled back: " + uq_log[-3000:]
+assert not uq_marker.exists() and not uq_failed.exists(), uq_log[-3000:]
+assert "quit before the start was confirmed" in uq_log and "Couldn't update" not in uq_log, \
+    uq_log[-3000:]
+
 # Settings › Remote access › Recent connections shows five rows; the wheel
 # over it scrolls a row at a time and past its end the page scrolls on.
 # leaving the Settings tab for a shell tab and coming back (⌘, twice) keeps

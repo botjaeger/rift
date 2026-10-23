@@ -120,6 +120,7 @@ impl App {
     /// may end the process before `main`'s flush runs.
     pub(super) fn exit_app(&self, event_loop: &ActiveEventLoop) {
         self.flush_command_history();
+        self.keep_install_on_exit();
         crate::quit::exit(event_loop);
     }
 

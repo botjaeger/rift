@@ -1686,9 +1686,11 @@ signed manifest.
 - The new version counts as started 10 s after its first frame: it then
   deletes the old copy, shows the card *Updated to Rift vX.Y.Z* (a click
   opens What's New) and opens the other
-  processes' windows beside its own. If it exits or crashes before that,
-  the helper puts the old version back and starts it (*Couldn't update to
-  Rift vX.Y.Z*), and that one reopens the windows. A crash mid-update
+  processes' windows beside its own. If it crashes before that, the
+  helper puts the old version back and starts it (*Couldn't update to
+  Rift vX.Y.Z*), and that one reopens the windows. Quitting it (or closing
+  its last window) before then keeps the new version; the other windows'
+  layouts reopen at the next launch. A crash mid-update
   leaves the layouts in `restart/` (files of older versions, one per
   window, included); the next plain launch reopens them as its windows.
 - Updating in place needs Rift.app in a writable folder (macOS) or an
