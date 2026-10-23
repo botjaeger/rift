@@ -8,6 +8,17 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.22.1 — 2026-10-23
+
+### Fixed
+
+- **Shells survive an update again** — after an update, panes outside the first tab could say
+  "Session service unavailable (timed out); this shell is local" and start a fresh shell, leaving
+  the one you had running out of sight. A pane with a long history no longer holds up the others
+  while it reconnects.
+- **Detached shells show in the session switcher** — a shell that printed nothing since its
+  window closed was hidden from ⇧⌘O; it now shows there, ready to reopen.
+
 ## 0.22.0 — 2026-10-23
 
 Suggestions, Tab and → now work like Warp's: Rift suggests what you usually run next, Tab opens the
