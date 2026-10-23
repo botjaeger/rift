@@ -8,6 +8,13 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.22.3 — 2026-10-24
+
+### Fixed
+
+- **Codex's tab stops spinning when it waits for you** — a tab running Codex kept its spinner after
+  Codex had finished and sat at its own prompt. It now shows Codex as done, like Claude Code.
+
 ## 0.22.2 — 2026-10-23
 
 ### Fixed
