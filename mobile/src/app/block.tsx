@@ -1,3 +1,4 @@
+import { useActionScope } from "@/ui/useActionScope";
 import * as Clipboard from "expo-clipboard";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useEffect, useState } from "react";
@@ -44,14 +45,15 @@ export default function BlockActionsScreen() {
   } = useLocalSearchParams<{ key: string; pane: string; block: string }>();
   const paneId = Number(paneParam);
   const blockId = Number(blockParam);
+  const scope = useActionScope(`${key}:${paneId}:${blockId}`);
   const s = useApp();
   const lock = useLock();
   const [error, setError] = useState<string | null>(null);
 
   // Presented natively above the app's lock screen: when the app locks, close it.
   useEffect(() => {
-    if (lock.locked) router.back();
-  }, [lock.locked, router]);
+    if (lock.locked && scope.leave()) router.back();
+  }, [lock.locked, router, scope]);
 
   const host = s.hosts.find((h) => h.record.key === key);
   const pane = s.pane?.host === key && s.pane.paneId === paneId ? s.pane : null;
@@ -80,24 +82,26 @@ export default function BlockActionsScreen() {
 
   const done = (message: string) => {
     AccessibilityInfo.announceForAccessibility(message);
-    router.back();
+    if (scope.leave()) router.back();
   };
 
   const copy = async (text: string, what: string) => {
+    const current = scope.capture();
     try {
       await Clipboard.setStringAsync(text);
-      done(`${what} copied`);
+      if (current()) done(`${what} copied`);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
   };
 
   const edit = async () => {
+    const current = scope.capture();
     // the command line holds other text: replacing it loses that, so ask
     const draft = s.drafts[draftKey(key, paneId)] ?? "";
     if (draft !== "" && draft !== command) {
       const ok = await confirmDestructive("Replace the text in the command line?", `It holds: ${draft}`, "Replace");
-      if (!ok) return;
+      if (!ok || !current()) return;
     }
     fleet.setDraft(key, paneId, command);
     done("Command put in the command line");
@@ -107,18 +111,22 @@ export default function BlockActionsScreen() {
   const once = useSingleFlight();
   const runAgain = () =>
     once(async () => {
+      const current = scope.capture();
       if (s.settings.askBeforeRun) {
         // the same path as Run: the Confirm sheet, with this block's command instead of the draft
-        router.replace({ pathname: "/confirm", params: { key, pane: String(paneId), block: String(blockId) } });
+        router.push({ pathname: "/confirm", params: { key, pane: String(paneId), block: String(blockId), parent: "1" } });
         return;
       }
       const r = await fleet.run(key, paneId, command, { fromDraft: false });
+      if (!current()) return;
       if (r.ok) done("Command sent");
       else setError(r.message);
     });
 
   const stop = async () => {
+    const current = scope.capture();
     const r = await fleet.sendKeys(key, paneId, ["ctrl+c"]);
+    if (!current()) return;
     if (r.ok) done("Control C sent");
     else setError(r.message);
   };
@@ -164,7 +172,7 @@ export default function BlockActionsScreen() {
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="Close"
-          onPress={() => router.back()}
+          onPress={() => { if (scope.leave()) router.back(); }}
           hitSlop={4}
           style={({ pressed }) => [styles.close, pressed && styles.pressed]}
         >

@@ -1084,58 +1084,21 @@ pub fn pid_alive(pid: u32) -> bool {
 /// Run `cmd` to completion within `limit` (killed after it), returning its
 /// stdout, or its stderr as the error.
 fn run_for(cmd: &mut std::process::Command, limit: Duration) -> Result<String, String> {
-    use std::process::Stdio;
     let name = cmd.get_program().to_string_lossy().into_owned();
-    let mut child = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("{name}: {e}"))?;
-    let drain = |pipe: Option<Box<dyn Read + Send>>| {
-        std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            if let Some(p) = pipe {
-                let _ = p.take(1 << 20).read_to_end(&mut buf);
-            }
-            buf
-        })
-    };
-    let out = drain(
-        child
-            .stdout
-            .take()
-            .map(|p| Box::new(p) as Box<dyn Read + Send>),
-    );
-    let err = drain(
-        child
-            .stderr
-            .take()
-            .map(|p| Box::new(p) as Box<dyn Read + Send>),
-    );
-    let end = std::time::Instant::now() + limit;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if std::time::Instant::now() < end => {
-                std::thread::sleep(Duration::from_millis(20))
-            }
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                // the readers end with the pipes (not joined: a grandchild
-                // could hold them open)
-                return Err(format!("{name}: timed out after {} s", limit.as_secs()));
-            }
-            Err(e) => return Err(format!("{name}: {e}")),
+    let output = crate::process::output(cmd, None, limit, 1 << 20).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::TimedOut {
+            format!("{name}: timed out after {} s", limit.as_secs())
+        } else {
+            format!("{name}: {e}")
         }
-    };
-    let out = out.join().unwrap_or_default();
-    let err = err.join().unwrap_or_default();
-    if status.success() {
-        Ok(String::from_utf8_lossy(&out).into_owned())
+    })?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     } else {
-        Err(format!("{name}: {}", String::from_utf8_lossy(&err).trim()))
+        Err(format!(
+            "{name}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
     }
 }
 
@@ -1158,11 +1121,27 @@ fn staged_version(exe: &Path) -> Result<String, String> {
 /// exits or the install fails: two windows must never stage, swap or
 /// delete the backup at the same time.
 #[derive(Debug)]
-pub struct InstallLock(PathBuf);
+pub struct InstallLock {
+    path: PathBuf,
+    // Never unlink this file: all contenders must lock the same inode,
+    // including while a stale PID file is replaced or removed on drop.
+    _guard: InstallGuard,
+}
+
+#[derive(Debug)]
+struct InstallGuard(std::fs::File);
+
+impl Drop for InstallGuard {
+    fn drop(&mut self) {
+        // A concurrently forked child can inherit this open description
+        // until exec. Explicit unlock releases it without waiting for that fd.
+        let _ = self.0.unlock();
+    }
+}
 
 impl Drop for InstallLock {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        let _ = std::fs::remove_file(&self.path);
     }
 }
 
@@ -1180,6 +1159,25 @@ pub fn try_lock(dir: &Path) -> Result<InstallLock, LockError> {
     use std::os::unix::fs::OpenOptionsExt;
     std::fs::create_dir_all(dir).map_err(|e| LockError::Io(format!("{}: {e}", dir.display())))?;
     let path = dir.join("install.lock");
+    let guard = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(dir.join("install.guard"))
+        .map_err(|e| LockError::Io(format!("{}: {e}", dir.display())))?;
+    match guard.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => {
+            let pid = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(0);
+            return Err(LockError::Held(pid));
+        }
+        Err(std::fs::TryLockError::Error(e)) => return Err(LockError::Io(e.to_string())),
+    }
+    let guard = InstallGuard(guard);
     for _ in 0..2 {
         match std::fs::OpenOptions::new()
             .write(true)
@@ -1188,8 +1186,14 @@ pub fn try_lock(dir: &Path) -> Result<InstallLock, LockError> {
             .open(&path)
         {
             Ok(mut f) => {
-                let _ = write!(f, "{}", std::process::id());
-                return Ok(InstallLock(path));
+                if let Err(e) = write!(f, "{}", std::process::id()) {
+                    let _ = std::fs::remove_file(&path);
+                    return Err(LockError::Io(e.to_string()));
+                }
+                return Ok(InstallLock {
+                    path,
+                    _guard: guard,
+                });
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 let holder = std::fs::read_to_string(&path)
@@ -1199,7 +1203,7 @@ pub fn try_lock(dir: &Path) -> Result<InstallLock, LockError> {
                     .and_then(|m| m.modified())
                     .is_ok_and(|t| t.elapsed().is_ok_and(|a| a < Duration::from_secs(5)));
                 match holder {
-                    Some(pid) if pid != std::process::id() && pid_alive(pid) => {
+                    Some(pid) if pid_alive(pid) => {
                         return Err(LockError::Held(pid));
                     }
                     // being written right now
@@ -2201,6 +2205,17 @@ mod tests {
     }
 
     #[test]
+    fn inherited_tool_pipes_time_out() {
+        let start = std::time::Instant::now();
+        let result = run_for(
+            std::process::Command::new("/bin/sh").args(["-c", "sleep 2 & exit 0"]),
+            Duration::from_millis(100),
+        );
+        assert!(result.unwrap_err().contains("timed out"));
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
     fn slow_tools_time_out() {
         let t = std::time::Instant::now();
         let e = run_for(
@@ -2228,9 +2243,76 @@ mod tests {
     }
 
     #[test]
+    fn install_guard_is_released_when_a_fork_inherits_the_handle() {
+        let dir = scratch("lock-fork");
+        let lock = try_lock(&dir).unwrap();
+        // SAFETY: the child only calls async-signal-safe libc functions and
+        // exits without touching Rust state inherited from the test threads.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            unsafe {
+                libc::sleep(1);
+                libc::_exit(0);
+            }
+        }
+        drop(lock);
+        let again = try_lock(&dir);
+        // Reap this test's child before asserting, including on failure.
+        loop {
+            // SAFETY: pid is the child created above; no user process is used.
+            if unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) } >= 0
+                || std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
+            {
+                break;
+            }
+        }
+        drop(again.expect("a forked child must not retain the released guard"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stale_install_lock_has_only_one_concurrent_successor() {
+        let dir = scratch("lock-race");
+        std::fs::create_dir_all(&dir).unwrap();
+        for round in 0..32 {
+            // Other parallel tests fork: a child can briefly inherit the
+            // previous round's guard before exec closes it. Use a fresh inode.
+            let dir = dir.join(round.to_string());
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("install.lock"), "999999999").unwrap();
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(16));
+            let threads: Vec<_> = (0..16)
+                .map(|_| {
+                    let dir = dir.clone();
+                    let barrier = barrier.clone();
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        let lock = try_lock(&dir).ok();
+                        // Every winner stays alive until all contenders have tried.
+                        barrier.wait();
+                        lock.is_some()
+                    })
+                })
+                .collect();
+            let winners = threads
+                .into_iter()
+                .map(|thread| thread.join().unwrap())
+                .filter(|won| *won)
+                .count();
+            assert_eq!(winners, 1, "stale takeover must have exactly one owner");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn one_install_at_a_time() {
         let dir = scratch("lock");
         let lock = try_lock(&dir).unwrap();
+        assert_eq!(
+            try_lock(&dir).unwrap_err(),
+            LockError::Held(std::process::id())
+        );
         // another process (pid 1 is always alive) holding it blocks
         std::fs::write(dir.join("install.lock"), "1").unwrap();
         assert_eq!(try_lock(&dir).unwrap_err(), LockError::Held(1));

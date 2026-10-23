@@ -2,7 +2,7 @@ import * as Clipboard from "expo-clipboard";
 import { useState } from "react";
 import { AccessibilityInfo, Linking, Platform, StyleSheet, Text, TextInput, View } from "react-native";
 import { ntfyUnsupported } from "@/fleet";
-import { NTFY_ROTATED, ntfyFooter, ntfyServerChanged, ntfySubscribeFallback, ntfySubscribeLink, pushFooter } from "@/notify";
+import { NTFY_ROTATED, normalizeNtfyServer, ntfyFooter, ntfyServerChanged, ntfySubscribeFallback, ntfySubscribeLink, pushFooter } from "@/notify";
 import { fleet, useApp } from "@/runtime";
 import { confirmDestructive } from "@/ui/confirm";
 import { ErrorText } from "@/ui/Notice";
@@ -30,11 +30,15 @@ export default function NtfyScreen() {
   };
   const saveServer = async () => {
     if (draft === null) return;
+    if (normalizeNtfyServer(draft) === null) {
+      setServerError("Enter an https server address, like ntfy.example.com. localhost and loopback addresses are not allowed.");
+      return;
+    }
+    setServerError(null);
     const before = server;
     const ok = await fleet.setNtfyServer(draft);
-    setServerError(ok ? null : "Enter an https server address, like ntfy.example.com. localhost and loopback addresses are not allowed.");
     if (!ok) return;
-    setDraft(null);
+    setDraft((current) => current === draft ? null : current);
     const now = fleet.state.settings.ntfyServer;
     if (now !== before) tell(ntfyServerChanged(now));
   };

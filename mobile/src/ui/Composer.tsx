@@ -1,3 +1,4 @@
+import { useActionScope } from "@/ui/useActionScope";
 import * as Clipboard from "expo-clipboard";
 import { useRouter } from "expo-router";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -82,6 +83,7 @@ export function Composer({
 }) {
   const router = useRouter();
   const s = useApp();
+  const scope = useActionScope(`${hostKey}:${paneId}`);
   const draft = s.drafts[draftKey(hostKey, paneId)] ?? "";
   const [sticky, setSticky] = useState<Sticky>(NO_STICKY);
   const [error, setError] = useState<string | null>(null);
@@ -124,17 +126,19 @@ export function Composer({
   }, [complete, online, hostKey, paneId, draft, recentKey]);
 
   const sendKeys = async (k: string[]) => {
+    const current = scope.capture();
     setError(null);
     // A key that submits the line runs a command like Run: it asks the same way (lock.ts).
     if (keysNeedAuth(k, s.settings)) {
       const auth = await authenticate(`Send ${k.join(" ")}`);
+      if (!current()) return;
       if (!auth.ok) {
         if (auth.message !== "Cancelled.") setError(auth.message);
         return;
       }
     }
     const r = await fleet.sendKeys(hostKey, paneId, k);
-    if (!r.ok) setError(r.message);
+    if (current() && !r.ok) setError(r.message);
   };
 
   const onChange = (typed: string) => {
@@ -163,12 +167,13 @@ export function Composer({
   // the row's Paste: the phone's clipboard into the command line at the prompt, else typed
   // into the running program (the computer takes no text at its prompt)
   const onPaste = async () => {
+    const current = scope.capture();
     const text = await Clipboard.getStringAsync();
-    if (!text) return;
+    if (!current() || !text) return;
     setError(null);
     if (running === null) return fleet.setDraft(hostKey, paneId, plainPunctuation(draft + text));
     const r = await fleet.sendText(hostKey, paneId, text);
-    if (!r.ok) setError(r.message);
+    if (current() && !r.ok) setError(r.message);
   };
 
   // hardware shortcuts taken from the command line (modules/rift-keys, shortcuts mode)
@@ -181,6 +186,7 @@ export function Composer({
   // A program is running: the line goes to it as text, then Return as its own request (a program
   // such as Claude Code reads text with a Return in the same write as a paste, not a send).
   const sendToProgram = async () => {
+    const current = scope.capture();
     const p = programSend(draft, canType);
     if (!p.ok) {
       if (p.message) setError(p.message);
@@ -192,16 +198,20 @@ export function Composer({
       // the Return submits the line: it asks like Run does, before any text goes out
       if (keysNeedAuth(["enter"], s.settings)) {
         const auth = await authenticate("Send enter");
+        if (!current()) return;
         if (!auth.ok) {
           if (auth.message !== "Cancelled.") setError(auth.message);
           return;
         }
       }
       const t = await fleet.sendText(hostKey, paneId, p.text);
+      // Accepted text is spent even if this visit ended while its acknowledgement waited.
+      // clearDraft only removes that exact draft, preserving anything typed since sending.
+      if (t.ok) fleet.clearDraft(hostKey, paneId, draft);
+      if (!current()) return;
       if (!t.ok) return setError(t.message);
-      // the program has the text: the line is spent even if the Return fails
-      fleet.clearDraft(hostKey, paneId, draft);
       const k = await fleet.sendKeys(hostKey, paneId, ["enter"]);
+      if (!current()) return;
       if (!k.ok) return setError(k.message);
       AccessibilityInfo.announceForAccessibility("Sent");
     } finally {
@@ -232,8 +242,10 @@ export function Composer({
     }
     sending.current = true;
     setError(null);
+    const current = scope.capture();
     const r = await fleet.run(hostKey, paneId, draft);
     sending.current = false;
+    if (!current()) return;
     if (!r.ok) setError(r.message);
     else AccessibilityInfo.announceForAccessibility("Command sent");
   };

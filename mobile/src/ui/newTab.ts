@@ -20,10 +20,11 @@ export function canNewTab(host: HostView): boolean {
  * StartTab); else a tab in its window. `pane`: the new pane to go to; `message`: why not (null:
  * the user cancelled).
  */
-export async function openNewTab(host: HostView): Promise<{ ok: true; pane: number | undefined } | { ok: false; message: string | null }> {
+export async function openNewTab(host: HostView, current: () => boolean = () => true): Promise<{ ok: true; pane: number | undefined } | { ok: false; message: string | null }> {
   const key = host.record.key;
   if (canStartTab(host)) {
     const auth = await authenticate(`Open a tab on ${host.record.name}`);
+    if (!current()) return { ok: false, message: null };
     if (!auth.ok) return { ok: false, message: auth.message === "Cancelled." ? null : auth.message };
     const r = await fleet.startShell(key);
     return r.ok ? { ok: true, pane: r.pane } : { ok: false, message: r.message };

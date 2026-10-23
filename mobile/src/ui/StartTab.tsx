@@ -1,3 +1,4 @@
+import { useActionScope } from "@/ui/useActionScope";
 import { useRouter } from "expo-router";
 import { useRef, useState } from "react";
 import { AccessibilityInfo, StyleSheet, Text, View } from "react-native";
@@ -23,6 +24,7 @@ export function canStartTab(host: HostView): boolean {
  */
 export function StartTab({ host }: { host: HostView }) {
   const router = useRouter();
+  const scope = useActionScope(host.record.key);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   // one at a time: a second tap while the first is out would open two
@@ -30,16 +32,19 @@ export function StartTab({ host }: { host: HostView }) {
   const name = host.record.name;
   const start = async () => {
     if (out.current) return;
+    const current = scope.capture();
     out.current = true;
     setBusy(true);
     setError(null);
     try {
       const auth = await authenticate(`Open a tab on ${name}`);
+      if (!current()) return;
       if (!auth.ok) {
         if (auth.message !== "Cancelled.") setError(auth.message);
         return;
       }
       const r = await fleet.startShell(host.record.key);
+      if (!current()) return;
       if (!r.ok) return setError(r.message);
       AccessibilityInfo.announceForAccessibility("New tab opened");
       if (r.pane !== undefined)

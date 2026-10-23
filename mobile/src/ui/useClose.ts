@@ -1,3 +1,4 @@
+import { useActionScope } from "@/ui/useActionScope";
 import { useRouter } from "expo-router";
 import { useRef } from "react";
 import { AccessibilityInfo } from "react-native";
@@ -21,6 +22,7 @@ export function useClose(
   afterSheet?: boolean,
 ): (paneId: number, kind: CloseKind) => void {
   const router = useRouter();
+  const scope = useActionScope(`${hostKey}:${current}`);
   // one at a time: a second tap while the first is out would close two
   const busy = useRef(false);
   return (paneId, kind) => {
@@ -30,12 +32,15 @@ export function useClose(
     if (!loc) return;
     const title = kind === "tab" ? tabTitle(loc.tab) : `${tabTitle(loc.tab)} · pane ${loc.paneIndex + 1}`;
     const ask = closeConfirm(kind, title, runningCount(loc.tab, paneId, kind));
+    const isCurrent = scope.capture();
     busy.current = true;
     void (async () => {
       try {
         if (ask && !(await confirmDestructive(ask.title, ask.message, ask.action))) return;
+        if (!isCurrent()) return;
         onError(null);
         const r = await fleet.closeShell(hostKey, paneId, kind);
+        if (!isCurrent()) return;
         if (!r.ok) return onError(r.message);
         const text = closedText(kind, title);
         if (!closesCurrent(loc.tab, current, paneId, kind)) {

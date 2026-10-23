@@ -25,6 +25,7 @@ pub mod launch;
 pub mod markdown;
 pub mod notifications;
 pub mod osc;
+mod process;
 pub mod profiles;
 pub mod prompts;
 pub mod remote_complete;

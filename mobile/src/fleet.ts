@@ -397,6 +397,14 @@ export class Fleet {
   /** Newer choices win even while an earlier change waits for the OS permission prompt. */
   private readonly settingsIntents = new Map<keyof Settings, number>();
   private settingsIntent = 0;
+  /** Navigation snapshots share keys: keep their saves in arrival order, including removals. */
+  private navigationWrite: Promise<void> = Promise.resolve();
+
+  private saveNavigation(save: () => Promise<void>): Promise<void> {
+    const writing = this.navigationWrite.then(save);
+    this.navigationWrite = writing.catch(() => undefined);
+    return writing;
+  }
 
   constructor(deps: FleetDeps) {
     this.deps = deps;
@@ -581,7 +589,7 @@ export class Fleet {
     if (old.length === Object.keys(mine).length && old.every((k) => cur[k] === mine[k])) return;
     const next: PaneTitles = { ...Object.fromEntries(Object.entries(cur).filter(([k]) => !k.startsWith(prefix))), ...mine };
     this.store.update((s) => ({ ...s, paneTitles: next }));
-    void savePaneTitles(this.deps.kv, next).catch(() => undefined);
+    void this.saveNavigation(() => savePaneTitles(this.deps.kv, next)).catch(() => undefined);
   }
 
   /**
@@ -886,7 +894,8 @@ export class Fleet {
       drafts: Object.fromEntries(Object.entries(s.drafts).filter(([k]) => !k.startsWith(`${key}:`))),
       paneTitles: Object.fromEntries(Object.entries(s.paneTitles).filter(([k]) => !k.startsWith(`${key}:`))),
     }));
-    void savePaneTitles(this.deps.kv, this.store.peek().paneTitles).catch(() => undefined);
+    const titles = this.store.peek().paneTitles;
+    void this.saveNavigation(() => savePaneTitles(this.deps.kv, titles)).catch(() => undefined);
     if (this.viewing?.host === key) this.viewing = null;
     if (this.store.peek().lastView?.host === key) await this.setLastView(null);
     this.store.flush();
@@ -901,7 +910,7 @@ export class Fleet {
     if (cur?.host === view?.host && cur?.pane === view?.pane) return;
     this.store.update((s) => ({ ...s, lastView: view }));
     try {
-      await saveLastView(this.deps.kv, view);
+      await this.saveNavigation(() => saveLastView(this.deps.kv, view));
     } catch {
       // kept in memory; the app opens Hosts next time
     }
@@ -1061,7 +1070,8 @@ export class Fleet {
   // --- operate ---------------------------------------------------------------------------------
 
   /**
-   * Runs `command` at the pane's prompt; resolves with the gateway's `ack`. On success the
+   * Runs `command` at the pane's prompt; resolves with the gateway's `ack` after any notification
+   * permission dialog closes, so the caller can safely dismiss its native sheet. On success the
    * pane's draft is cleared if it still holds `command`, unless `fromDraft` is false (Run again
    * of a block's command).
    */
@@ -1076,11 +1086,12 @@ export class Fleet {
     // "Notify me when my commands finish": every command run from this phone asks by default
     const notify = opts.notify ?? this.store.peek().settings.notifyMyCommands;
     const result = this.request(host, (c) => c.run(pane, command));
-    if (notify) this.notifyWhenDone(host, pane, command);
-    return result.then((r) => {
+    const permission = notify ? this.notifyWhenDone(host, pane, command) : Promise.resolve();
+    return result.then(async (r) => {
       if (r.ok && opts.fromDraft !== false) this.clearDraft(host, pane, command);
       else if (!r.ok && notify)
         this.setAsked(this.asked.filter((a) => !(a.host === host && a.pane === pane && a.command === command)));
+      await permission;
       return r;
     });
   }
@@ -1109,11 +1120,11 @@ export class Fleet {
    * "Notify me when it finishes": one notification when `command` in `pane` finishes, whatever
    * the settings say (also from the computer through push when the app is closed by then).
    */
-  notifyWhenDone(host: string, pane: number, command: string): void {
+  notifyWhenDone(host: string, pane: number, command: string): Promise<void> {
     const pid = findPane(this.host(host)?.windows ?? [], pane)?.window.pid ?? null;
     const sent = this.pushHosts.has(host) && (this.clients.get(host)?.notify(pane) ?? false);
     this.setAsked([...this.asked, { host, pane, command, pid, at: this.now(), sent }].slice(-MAX_ASKED));
-    void this.deps.notifier.requestPermission();
+    return this.deps.notifier.requestPermission().then(() => undefined, () => undefined);
   }
 
   /** Sends the "Notify me" requests a push host has not received yet (asked while disconnected). */
@@ -1583,12 +1594,11 @@ export class Fleet {
     return this.updateSettings({ ntfyTopic: newNtfyTopic(this.deps.randomBytes) });
   }
 
-  /** The ntfy server (self-hosted, or ntfy.sh); false when it is not an https server address. */
+  /** The ntfy server (self-hosted, or ntfy.sh); false when invalid or not saved. */
   async setNtfyServer(input: string): Promise<boolean> {
     const server = normalizeNtfyServer(input);
     if (server === null) return false;
-    await this.updateSettings({ ntfyServer: server });
-    return true;
+    return this.updateSettings({ ntfyServer: server });
   }
 
   /** This device's push token (null: none) and, without one, why (shown in Settings). */

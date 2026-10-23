@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Sender, channel};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Compose file names, in Compose's own lookup order.
 const FILES: [&str; 4] = [
@@ -223,42 +223,27 @@ fn query(file: &Path) -> Option<ComposeInfo> {
             cmd.env("PATH", p);
         }
     }
-    let child = cmd
-        .args(["compose", "-f"])
+    cmd.args(["compose", "-f"])
         .arg(file)
         .args(["ps", "--all", "--format", "json"])
-        .current_dir(&dir)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn();
-    let Ok(mut child) = child else {
-        return Some(info(Vec::new(), Some("docker could not run")));
-    };
-    let start = Instant::now();
-    let ok = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status.success(),
-            Err(_) => break false,
-            Ok(None) if start.elapsed() > TIMEOUT => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break false;
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+        .current_dir(&dir);
+    let output = match crate::process::output(&mut cmd, None, TIMEOUT, 1 << 20) {
+        Ok(output) => output,
+        Err(e) => {
+            return Some(info(
+                Vec::new(),
+                Some(if e.kind() == std::io::ErrorKind::TimedOut {
+                    "Docker is not running"
+                } else {
+                    "docker could not run"
+                }),
+            ));
         }
     };
-    if !ok {
+    if !output.status.success() {
         return Some(info(Vec::new(), Some("Docker is not running")));
     }
-    let mut out = String::new();
-    use std::io::Read as _;
-    child
-        .stdout
-        .take()?
-        .take(1 << 20)
-        .read_to_string(&mut out)
-        .ok()?;
+    let out = String::from_utf8(output.stdout).ok()?;
     Some(info(parse_ps(&out), None))
 }
 

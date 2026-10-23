@@ -18,9 +18,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
-use std::process::{Command, Stdio};
-use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::process::Command;
+use std::time::Duration;
 
 /// Which shell family a [`ShellEnv`] was loaded for. Chooses the probe command,
 /// the alias-output grammar, and the static builtin/reserved-word list.
@@ -157,11 +156,10 @@ impl ShellEnv {
     /// Run `shell_program` once, interactively, to enumerate its aliases and
     /// function names, then merge in the static builtin list.
     ///
-    /// The child gets a null stdin, a piped stdout, a null stderr, and
-    /// `RIFT_ENV_PROBE=1` in its environment (so a user's rc file can special
-    /// case us). A reader thread drains stdout while the caller polls
-    /// [`std::process::Child::try_wait`]; if the shell has not exited within
-    /// `timeout`, it is killed. This never blocks forever and never panics — a
+    /// The child gets a null stdin and `RIFT_ENV_PROBE=1` (so a user's rc
+    /// file can special case us). Output is drained with a bounded capture;
+    /// the deadline covers inherited pipes too and stops the process group.
+    /// This never blocks forever and never panics — a
     /// spawn failure or timeout simply yields an env with no aliases/functions.
     ///
     /// Intended to be called off the UI thread.
@@ -365,67 +363,21 @@ fn probe_script(shell: ShellKind) -> &'static str {
 }
 
 /// Spawn the shell, run the probe script, and return its stdout — or `None` on
-/// spawn failure. Kills the child on timeout; never blocks past `timeout` plus a
-/// short drain grace period.
+/// spawn failure or timeout. The deadline covers descendant-held pipes too.
 fn run_probe(shell_program: &str, shell: ShellKind, timeout: Duration) -> Option<String> {
     let mut cmd = Command::new(shell_program);
-    // a login shell on macOS, as the panes run (shell_integration::shell_args):
-    // PATH setup lives in `/etc/zprofile` (path_helper: /usr/local/bin) and
-    // `.zprofile` (`brew shellenv`), and Rift started from the Dock has only
-    // launchd's PATH, so a non-login probe missed docker and brew's tools
+    // Match panes' login-shell PATH setup on macOS.
     if cfg!(target_os = "macos") {
         cmd.arg("-l");
     }
-    match shell {
-        // Interactive (`-i`) so rc files defining aliases/functions are sourced;
-        // `-c` runs our script. fish takes no `-i` with `-c`.
-        ShellKind::Fish => {
-            cmd.arg("-c").arg(probe_script(shell));
-        }
-        _ => {
-            cmd.arg("-i").arg("-c").arg(probe_script(shell));
-        }
+    if shell != ShellKind::Fish {
+        cmd.arg("-i");
     }
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+    cmd.arg("-c")
+        .arg(probe_script(shell))
         .env("RIFT_ENV_PROBE", "1");
-
-    let mut child = cmd.spawn().ok()?;
-    let mut stdout = child.stdout.take()?;
-
-    // Drain stdout on a thread so a full pipe buffer cannot deadlock the poll.
-    let (tx, rx) = mpsc::channel();
-    let reader = std::thread::spawn(move || {
-        use std::io::Read;
-        let mut buf = String::new();
-        let _ = stdout.read_to_string(&mut buf);
-        let _ = tx.send(buf);
-    });
-
-    let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            Err(_) => {
-                let _ = child.kill();
-                break;
-            }
-        }
-    }
-    let _ = child.wait();
-
-    // The reader returns promptly once the pipe closes (exit or kill).
-    let out = rx.recv_timeout(Duration::from_secs(1)).ok();
-    let _ = reader.join();
-    out
+    let output = crate::process::output(&mut cmd, None, timeout, 1 << 20).ok()?;
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// Parse alias-listing text for `shell` into `(name, expansion)` pairs.

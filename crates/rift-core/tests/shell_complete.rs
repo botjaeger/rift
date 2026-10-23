@@ -466,13 +466,15 @@ fn the_zsh_server_ends_when_its_parent_is_gone_mid_request() {
     let f = Fixture::new("orphan");
     let home = f.root.join("home");
     let pidfile = f.root.join("server.pid");
+    let childfile = f.root.join("children.pid");
     // a parent that hands the server a hanging request (`hangcmd`'s
     // function sleeps 30 s), then exits as a crashed Rift would
     let request = format!("1\n{}\nhangcmd \n1\nhangcmd\n\n", f.cwd());
     let script = format!(
         "printf '%s' \"$REQ\" | (exec \"$ZSH\" -f -c \"$SRV\" rift-complete \"$ZSH\" >/dev/null) & p=$!; echo $p > '{}'; \
-         i=0; while [ -z \"$(pgrep -P $p)\" ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done; sleep 1",
-        pidfile.display()
+         i=0; while ! pgrep -P $p > '{}'; do [ $i -lt 300 ] || break; sleep 0.1; i=$((i+1)); done; sleep 1",
+        pidfile.display(),
+        childfile.display()
     );
     let path = format!("{}:/usr/bin:/bin", f.root.join("bin").display());
     let status = std::process::Command::new("/bin/sh")
@@ -491,12 +493,10 @@ fn the_zsh_server_ends_when_its_parent_is_gone_mid_request() {
         .unwrap()
         .trim()
         .to_string();
-    // the inner shell (and its sleeping function) hang off the zpty child
-    let children = std::process::Command::new("pgrep")
-        .args(["-P", &pid])
-        .output()
-        .unwrap();
-    let children: Vec<String> = String::from_utf8_lossy(&children.stdout)
+    // Capture while the parent is alive: by now a correctly fast cleanup
+    // may already have removed the inner shell and its sleeping function.
+    let children: Vec<String> = std::fs::read_to_string(&childfile)
+        .unwrap()
         .split_whitespace()
         .map(str::to_string)
         .collect();

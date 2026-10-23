@@ -16,6 +16,7 @@ import { SaveError } from "@/ui/SaveError";
 import { hostMeta, notifyExample, ntfySummary, shortAfter, updateLine } from "@/ui/settingsText";
 import { colors, ui } from "@/ui/theme";
 import { useNow } from "@/ui/useNow";
+import { useActionScope } from "@/ui/useActionScope";
 
 const POLICIES: { value: NotifyPolicy; label: string }[] = [
   { value: "off", label: "Nothing" },
@@ -27,9 +28,11 @@ const POLICIES: { value: NotifyPolicy; label: string }[] = [
 function DeviceName({ name }: { name: string }) {
   // The text being edited; null shows the saved name (which a load or another rename may change).
   const [draft, setDraft] = useState<string | null>(null);
-  const save = () => {
-    if (draft !== null) void fleet.updateSettings({ deviceName: draft });
-    setDraft(null);
+  const save = async () => {
+    if (draft === null) return;
+    if (await fleet.updateSettings({ deviceName: draft })) {
+      setDraft((current) => current === draft ? null : current);
+    }
   };
   return (
     <Row first>
@@ -40,7 +43,7 @@ function DeviceName({ name }: { name: string }) {
       <TextInput
         value={draft ?? name}
         onChangeText={setDraft}
-        onFocus={() => setDraft(name)}
+        onFocus={() => setDraft((current) => current ?? name)}
         onBlur={save}
         onSubmitEditing={save}
         maxLength={MAX_DEVICE_NAME}
@@ -89,6 +92,7 @@ function LongerThan({ value, onChange }: { value: number; onChange: (ms: number)
 /** Security: the app lock (hidden without biometrics while off, with the reason) and "Confirm commands". */
 function Security() {
   const s = useApp();
+  const scope = useActionScope();
   const st = s.settings;
   const [support, setSupport] = useState<BiometricSupport | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -101,10 +105,12 @@ function Security() {
   }, []);
 
   const setLock = async (on: boolean) => {
+    const current = scope.capture();
     setError(null);
     if (on) {
       // Prove it works before relying on it, so the lock can never shut the owner out.
       const r = await authenticate("Turn on the app lock");
+      if (!current()) return;
       if (!r.ok) {
         if (r.message !== "Cancelled.") setError(r.message);
         return;

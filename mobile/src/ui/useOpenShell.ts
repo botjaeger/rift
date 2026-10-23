@@ -1,3 +1,4 @@
+import { useActionScope } from "@/ui/useActionScope";
 import { useRouter } from "expo-router";
 import { useRef } from "react";
 import { AccessibilityInfo } from "react-native";
@@ -16,6 +17,7 @@ export function useOpenShell(
   onError: (message: string | null) => void,
 ): ((kind: OpenKind) => void) | undefined {
   const router = useRouter();
+  const scope = useActionScope(`${hostKey}:${paneId}`);
   const s = useApp();
   // one at a time: a second tap while the first is out would open two
   const busy = useRef(false);
@@ -23,10 +25,12 @@ export function useOpenShell(
   if (!hasFeature(host, "open")) return undefined;
   return (kind) => {
     if (busy.current) return;
+    const current = scope.capture();
     busy.current = true;
     onError(null);
     void fleet.openShell(hostKey, paneId, kind).then((r) => {
       busy.current = false;
+      if (!current()) return;
       if (!r.ok) return onError(r.message);
       AccessibilityInfo.announceForAccessibility(kind === "tab" ? "New tab opened" : "New pane opened");
       if (r.pane !== undefined)

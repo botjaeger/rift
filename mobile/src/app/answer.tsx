@@ -1,3 +1,4 @@
+import { useActionScope } from "@/ui/useActionScope";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { useRef, useState } from "react";
 import {
@@ -62,6 +63,7 @@ export default function AnswerScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const s = useApp();
+  const scope = useActionScope(`${key}:${paneId}`);
   const host = s.hosts.find((h) => h.record.key === key);
   const loc = host ? findPane(host.windows, paneId) : null;
   const live = loc?.pane.waiting;
@@ -77,10 +79,10 @@ export default function AnswerScreen() {
   const sending = useRef(false);
   const [error, setError] = useState<string | null>(null);
 
-  const back = () => (router.canGoBack() ? router.back() : router.replace("/"));
+  const back = () => { if (scope.leave()) { if (router.canGoBack()) router.back(); else router.replace("/"); } };
   // opened from the pane: back to it, not a second copy of it (whose Back would lead to the first)
   const openPane = () =>
-    from === "pane" ? back() : router.replace({ pathname: "/host/[key]/pane/[id]", params: { key, id: String(paneId) } });
+    from === "pane" ? back() : scope.leave() && router.replace({ pathname: "/host/[key]/pane/[id]", params: { key, id: String(paneId) } });
   const program = loc ? programName(loc.pane) : null;
   const where = [host?.record.name, loc ? tabTitle(loc.tab) : null, loc ? `pane ${loc.paneIndex + 1}` : null].filter(Boolean).join(" · ");
   const operate = host ? canOperate(host) : false;
@@ -88,10 +90,12 @@ export default function AnswerScreen() {
 
   const send = async (pick: Pick) => {
     if (!w || sending.current) return;
+    const current = scope.capture();
     sending.current = true;
     setError(null);
     if (needsAuthBeforeRun(s.settings)) {
       const auth = await authenticate(`Answer ${program ?? "the program"} on ${host?.record.name ?? "the computer"}`);
+      if (!current()) { sending.current = false; return; }
       if (!auth.ok) {
         sending.current = false;
         if (auth.message !== "Cancelled.") setError(auth.message);
@@ -100,8 +104,9 @@ export default function AnswerScreen() {
     }
     setBusy(true);
     const r = await fleet.answer(key, paneId, w, pick);
-    setBusy(false);
     sending.current = false;
+    setBusy(false);
+    if (!current()) return;
     if (!r.ok) {
       setError(r.message);
       return;

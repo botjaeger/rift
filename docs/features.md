@@ -1757,7 +1757,14 @@ on the desktop (also for shells a phone started while no window is open).
   sticky ⌃ ⌥ ⇧, Paste) and a round field with a run button; commands run from
   there, there is no separate Run page. *Run* sends at once; Settings ›
   Running commands › *Ask before running* (off by default) shows the
-  confirmation first. *Wrap long lines* (Settings › Panes, and the pane's ⋯
+  confirmation first. Repeated taps while authentication or a send is pending
+  send the command only once. Leaving a command or answer screen while
+  authentication is pending prevents the send, even after returning to that
+  screen. A command already sent keeps running; its late acknowledgement
+  preserves the screen you returned to. Pending tab, pane and pairing actions
+  also leave your subsequent navigation alone. Cancelling confirmation opened
+  from a block or chip returns to that sheet; a successful run returns to the
+  pane. *Wrap long lines* (Settings › Panes, and the pane's ⋯
   menu for one pane) off lets each block's output scroll sideways. The
   header's search filters the blocks. The folder chip opens what the
   desktop's chips do (feature `chips`): folders (`cd`), local branches
@@ -1825,8 +1832,12 @@ on the desktop (also for shells a phone started while no window is open).
   Settings › Notifications › *While the app is closed* › *Alerts through
   ntfy* also posts them to a random ntfy topic (ntfy.sh
   or self-hosted), which the free ntfy app shows: no push setup needed.
+  If saving its server address fails, the typed address stays available to
+  correct or retry; the previous saved server remains in use.
   Settings › Notifications › *My commands* (on by default) asks to be
-  told about every command run from the phone; for other commands, *Other
+  told about every command run from the phone. On the first request, the
+  notification permission dialog finishes before confirmation closes;
+  declining notifications does not cancel the command. For other commands, *Other
   commands on your computers* chooses *Nothing*, *Failures* or *Everything*
   and *Only if it ran longer than* how long a command must run (10 s – 5
   min); each computer's page (Settings › Computers) and the pane's ⋯ menu
@@ -1834,6 +1845,8 @@ on the desktop (also for shells a phone started while no window is open).
   me" always notifies. A computer's notification preference changes only
   after the phone saves it; a failed save shows an error and leaves the
   control available to retry. A failed Unpair also leaves a retry path.
+  Settings keeps an unsaved phone name available after a failed save, and a
+  completed save never replaces a newer edit still being typed.
 
 ## Progress reports (OSC 9;4)
 

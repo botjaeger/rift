@@ -1,3 +1,4 @@
+import { useActionScope } from "@/ui/useActionScope";
 import { useRef, useState } from "react";
 import { AccessibilityInfo, Keyboard, Pressable, ScrollView, StyleSheet, Text, TextInput, View, useWindowDimensions } from "react-native";
 import { primaryChoice, questionKey, replyChoice, type Pick } from "@/answer";
@@ -71,6 +72,7 @@ export function AskCard({
   onSay: (text: string) => void;
 }) {
   const s = useApp();
+  const scope = useActionScope(`${hostKey}:${paneId}:${questionKey(w)}`);
   const { height } = useWindowDimensions();
   const [min, setMin] = useState(false);
   const [full, setFull] = useState(false);
@@ -101,10 +103,12 @@ export function AskCard({
 
   const send = async (pick: Pick, said: string) => {
     if (sending.current) return;
+    const current = scope.capture();
     sending.current = true;
     setError(null);
     if (needsAuthBeforeRun(s.settings)) {
       const auth = await authenticate(`Answer ${program ?? "the program"}`);
+      if (!current()) { sending.current = false; return; }
       if (!auth.ok) {
         sending.current = false;
         if (auth.message !== "Cancelled.") setError(auth.message);
@@ -113,8 +117,9 @@ export function AskCard({
     }
     setBusy(true);
     const r = await fleet.answer(hostKey, paneId, w, pick);
-    setBusy(false);
     sending.current = false;
+    setBusy(false);
+    if (!current()) return;
     if (!r.ok) {
       setError(r.message);
       return;

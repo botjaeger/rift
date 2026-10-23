@@ -1,3 +1,4 @@
+import { useActionScope } from "@/ui/useActionScope";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useEffect, useRef, useState } from "react";
 import { AccessibilityInfo, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
@@ -52,12 +53,13 @@ export default function TabsSheet() {
   const insets = useSafeAreaInsets();
   const s = useApp();
   const { key, pane } = useLocalSearchParams<{ key: string; pane?: string }>();
+  const scope = useActionScope(`${key}:${pane}`);
   const lock = useLock();
 
   // Presented natively above the app's lock screen: when the app locks, close it.
   useEffect(() => {
-    if (lock.locked) router.back();
-  }, [lock.locked, router]);
+    if (lock.locked && scope.leave()) router.back();
+  }, [lock.locked, router, scope]);
   const hidden = lock.covered || lock.locked;
   const host = s.hosts.find((h) => h.record.key === key);
   const [filter, setFilter] = useState<SheetFilter>("all");
@@ -76,9 +78,10 @@ export default function TabsSheet() {
   const here = Number(pane);
   const path = host?.conn.path?.kind === "relay" ? "Relay" : "LAN";
 
-  const close = () => (router.canGoBack() ? router.back() : router.replace("/"));
+  const close = () => { if (scope.leave()) { if (router.canGoBack()) router.back(); else router.replace("/"); } };
   const go = (r: TabRow) => {
     if (r.pane === null) return;
+    scope.leave();
     router.dismiss();
     // the pane already open stays; another replaces it, so Back leads where it did
     if (r.tab.panes.some((p) => p.id === here)) return;
@@ -89,9 +92,12 @@ export default function TabsSheet() {
     out.current = true;
     setError(null);
     try {
-      const r = await openNewTab(host);
+      const current = scope.capture();
+      const r = await openNewTab(host, current);
+      if (!current()) return;
       if (!r.ok) return r.message ? setError(r.message) : undefined;
       AccessibilityInfo.announceForAccessibility(`Opened a tab on ${host.record.name}`);
+      scope.leave();
       router.dismiss();
       if (r.pane !== undefined) router.replace({ pathname: "/host/[key]/pane/[id]", params: { key, id: String(r.pane) } });
     } finally {

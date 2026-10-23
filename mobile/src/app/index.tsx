@@ -1,3 +1,4 @@
+import { useActionScope } from "@/ui/useActionScope";
 import { useIsFocused, usePathname, useRouter } from "expo-router";
 import { useEffect, useRef, useState } from "react";
 import { AccessibilityInfo, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
@@ -70,14 +71,17 @@ function AnswerPills({ row, host }: { row: TabRow; host: HostView }) {
   // a second tap before the re-render that disables the buttons sends nothing
   const sending = useRef(false);
   const ask = row.ask!;
+  const scope = useActionScope(`${row.host}:${ask.pane}`);
   const quick = quickChoices(ask.waiting) ?? [];
   const primary = primaryChoice(ask.waiting);
   const send = async (index: number) => {
     if (sending.current) return;
+    const current = scope.capture();
     sending.current = true;
     setError(null);
     if (needsAuthBeforeRun(s.settings)) {
       const auth = await authenticate(`Answer ${ask.program ?? "the program"} on ${host.record.name}`);
+      if (!current()) { sending.current = false; return; }
       if (!auth.ok) {
         sending.current = false;
         if (auth.message !== "Cancelled.") setError(auth.message);
@@ -86,8 +90,9 @@ function AnswerPills({ row, host }: { row: TabRow; host: HostView }) {
     }
     setBusy(true);
     const r = await fleet.answer(row.host, ask.pane, ask.waiting, { choice: index });
-    setBusy(false);
     sending.current = false;
+    setBusy(false);
+    if (!current()) return;
     if (!r.ok) setError(r.message);
     else AccessibilityInfo.announceForAccessibility("Answer sent");
   };
@@ -184,6 +189,7 @@ function HostCard({ host, rows, now, answerHere }: { host: HostView; rows: TabRo
   const [error, setError] = useState<string | null>(null);
   // one at a time: a second tap while the first is out would open two
   const out = useRef(false);
+  const scope = useActionScope(host.record.key);
   const name = host.record.name;
   const online = host.conn.status === "open";
   const failed = host.conn.status === "failed";
@@ -205,12 +211,13 @@ function HostCard({ host, rows, now, answerHere }: { host: HostView; rows: TabRo
   };
   const unpairAfterAsking = async () => {
     setError(null);
+    const current = scope.capture();
     const ok = await confirmDestructive(
       `Unpair ${name}?`,
       "This phone forgets it. To use it again, scan a new pairing code from that computer’s Rift settings.",
       "Unpair",
     );
-    if (!ok) return;
+    if (!ok || !current()) return;
     try {
       await fleet.unpair(host.record.key);
     } catch {
@@ -222,7 +229,9 @@ function HostCard({ host, rows, now, answerHere }: { host: HostView; rows: TabRo
     out.current = true;
     setError(null);
     try {
-      const r = await openNewTab(host);
+      const current = scope.capture();
+      const r = await openNewTab(host, current);
+      if (!current()) return;
       if (!r.ok) return r.message ? setError(r.message) : undefined;
       AccessibilityInfo.announceForAccessibility("New tab opened");
       if (r.pane !== undefined) openPane(router, host.record.key, r.pane);

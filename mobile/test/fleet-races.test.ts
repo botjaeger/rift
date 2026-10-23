@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Fleet } from "../src/fleet";
 import { toBase64Url } from "../src/noise/bytes";
-import { HostsStore, MemoryStore, loadSettings } from "../src/stores";
+import { HostsStore, MemoryStore, loadLastView, loadPaneTitles, loadSettings } from "../src/stores";
 import { FakeGatewaySocket, gatewayKey, rng } from "./helpers/gateway";
 
 /** Settings writes fail while `failing` is above zero (one failure each). */
@@ -21,6 +21,95 @@ beforeEach(() => vi.useFakeTimers());
 afterEach(() => {
   for (const f of fleets.splice(0)) f.shutdown();
   vi.useRealTimers();
+});
+
+describe("navigation writes keep their arrival order", () => {
+  it.each([13, null])("an older pane cannot replace the newest last view (%s) after its slower save finishes", async (pane) => {
+    const { fleet, kv, host } = await setup();
+    const set = kv.set.bind(kv);
+    let release!: () => void;
+    let first = true;
+    kv.set = async (k, v) => {
+      if (k === "rift.last" && first) {
+        first = false;
+        await new Promise<void>((r) => { release = r; });
+      }
+      return set(k, v);
+    };
+    const older = fleet.setLastView({ host, pane: 12 });
+    await vi.advanceTimersByTimeAsync(0);
+    const next = pane === null ? null : { host, pane };
+    const newer = fleet.setLastView(next);
+    await vi.advanceTimersByTimeAsync(0);
+    release();
+    await Promise.all([older, newer]);
+    expect(fleet.state.lastView).toEqual(next);
+    expect(await loadLastView(kv)).toEqual(next);
+  });
+
+  it("a failed last-view save does not block the next navigation", async () => {
+    const { fleet, kv, host } = await setup();
+    const set = kv.set.bind(kv);
+    let first = true;
+    kv.set = async (k, v) => {
+      if (k === "rift.last" && first) {
+        first = false;
+        throw new Error("keychain unavailable");
+      }
+      return set(k, v);
+    };
+    const older = fleet.setLastView({ host, pane: 12 });
+    const newer = fleet.setLastView({ host, pane: 13 });
+    await Promise.all([older, newer]);
+    expect(await loadLastView(kv)).toEqual({ host, pane: 13 });
+  });
+
+  it("an older topology cannot replace the title saved by a newer one", async () => {
+    const { fleet, kv, host, ws } = await setup();
+    const set = kv.set.bind(kv);
+    let release!: () => void;
+    let first = true;
+    kv.set = async (k, v) => {
+      if (k === "rift.paneTitles" && first) {
+        first = false;
+        await new Promise<void>((r) => { release = r; });
+      }
+      return set(k, v);
+    };
+    const topology = (title: string) => ({
+      t: "topology" as const,
+      windows: [{ pid: 1, tabs: [{ index: 0, title, active: true, panes: [
+        { id: 12, active: true, cwd: "/fixture", job: null, last_command: null, last_exit: null },
+      ] }] }],
+    });
+    ws.recv(topology("older title"));
+    await vi.advanceTimersByTimeAsync(0);
+    ws.recv(topology("newer title"));
+    await vi.advanceTimersByTimeAsync(0);
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fleet.state.paneTitles[`${host}:12`]).toBe("newer title");
+    expect((await loadPaneTitles(kv))[`${host}:12`]).toBe("newer title");
+  });
+});
+
+it("an unpair whose local removal fails revokes remotely and can finish on retry", async () => {
+  const { fleet, kv, host, ws } = await setup();
+  const set = kv.set.bind(kv);
+  let first = true;
+  kv.set = async (k, v) => {
+    if (k === "rift.hosts" && first) {
+      first = false;
+      throw new Error("keychain unavailable");
+    }
+    return set(k, v);
+  };
+  await expect(fleet.unpair(host)).rejects.toThrow("keychain unavailable");
+  expect(ws.sent.filter((m) => m.t === "forget")).toHaveLength(1);
+  await fleet.unpair(host);
+  expect(fleet.state.hosts).toEqual([]);
+  expect(await new HostsStore(kv).load()).toEqual([]);
+  expect(kv.data.has(`rift.host.${host}`)).toBe(false);
 });
 
 async function setup(kv: MemoryStore = new MemoryStore(), requestPermission: () => Promise<boolean> = async () => true) {
@@ -47,6 +136,35 @@ async function setup(kv: MemoryStore = new MemoryStore(), requestPermission: () 
   ws.recv({ t: "welcome", v: 2, host: "Host", os: "macos", version: "0.13.0", device: "test", permission: "operate", features: ["text"] });
   return { fleet, ws, host, kv };
 }
+
+describe("Run navigation waits for notification permission UI", () => {
+  for (const outcome of ["granted", "denied", "error"] as const) {
+    it(`keeps the acknowledged draft spent while permission is ${outcome}`, async () => {
+      let finish!: (value: boolean) => void;
+      let fail!: (error: Error) => void;
+      const permission = new Promise<boolean>((resolve, reject) => { finish = resolve; fail = reject; });
+      const { fleet, ws, host } = await setup(new MemoryStore(), () => permission);
+      if (process.env.RIFT_RUN_PERMISSION_NEGATIVE_CONTROL) {
+        const original = fleet.notifyWhenDone.bind(fleet);
+        vi.spyOn(fleet, "notifyWhenDone").mockImplementation((...args) => { void original(...args); return Promise.resolve(); });
+      }
+      fleet.setDraft(host, 12, "echo accepted");
+      let settled = false;
+      const result = fleet.run(host, 12, "echo accepted", { notify: true }).then((r) => { settled = true; return r; });
+      const sent = ws.sent.find((m) => m.t === "run")!;
+      expect(sent).toBeDefined(); // The OS prompt does not delay executing the command.
+      ws.recv({ t: "ack", id: sent.id, ok: true });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fleet.state.drafts[`${host}:12`]).toBe("");
+      expect(settled).toBe(false); // A caller cannot dismiss its modal over the OS prompt.
+      fleet.setDraft(host, 12, "echo next");
+      if (outcome === "error") fail(new Error("permission controller unavailable"));
+      else finish(outcome === "granted");
+      expect(await result).toEqual({ ok: true });
+      expect(fleet.state.drafts[`${host}:12`]).toBe("echo next");
+    });
+  }
+});
 
 describe("a Run's acknowledgement clears only the draft it sent", () => {
   it("keeps text typed while the run was on its way", async () => {
@@ -86,6 +204,22 @@ describe("a Run's acknowledgement clears only the draft it sent", () => {
 });
 
 describe("a settings change that cannot be saved is put back and said", () => {
+  it("reports a refused ntfy server save, preserves the saved server, and permits retry", async () => {
+    const kv = new FlakyStore();
+    const { fleet } = await setup(kv);
+    const before = fleet.state.settings.ntfyServer;
+    kv.failing = 1;
+    expect(await fleet.setNtfyServer("ntfy.example.com")).toBe(false);
+    expect(fleet.state.settings.ntfyServer).toBe(before);
+    expect((await loadSettings(kv)).ntfyServer).toBe(before);
+    expect(fleet.state.settingsError).toMatch(/could not save/);
+
+    expect(await fleet.setNtfyServer("ntfy.example.com")).toBe(true);
+    expect(fleet.state.settings.ntfyServer).toBe("https://ntfy.example.com");
+    expect((await loadSettings(kv)).ntfyServer).toBe("https://ntfy.example.com");
+    expect(fleet.state.settingsError).toBeNull();
+  });
+
   it("never shows the app lock on when storage refused it; a retry saves", async () => {
     const kv = new FlakyStore();
     const { fleet } = await setup(kv);

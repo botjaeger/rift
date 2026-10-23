@@ -59,38 +59,21 @@ fn find_gh() -> Option<PathBuf> {
 }
 
 fn query(dir: &Path) -> Option<PrInfo> {
-    let mut child = std::process::Command::new(find_gh()?)
-        .args(["pr", "view", "--json", "number,url,state,isDraft"])
-        .current_dir(dir)
-        .env("GH_PROMPT_DISABLED", "1")
-        .env("NO_COLOR", "1")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()?;
-    let start = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() => break,
-            Ok(Some(_)) | Err(_) => return None,
-            Ok(None) if start.elapsed() > TIMEOUT => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-        }
+    let output = crate::process::output(
+        std::process::Command::new(find_gh()?)
+            .args(["pr", "view", "--json", "number,url,state,isDraft"])
+            .current_dir(dir)
+            .env("GH_PROMPT_DISABLED", "1")
+            .env("NO_COLOR", "1"),
+        None,
+        TIMEOUT,
+        64 * 1024,
+    )
+    .ok()?;
+    if !output.status.success() {
+        return None;
     }
-    let mut out = String::new();
-    use std::io::Read as _;
-    child
-        .stdout
-        .take()?
-        .take(64 * 1024)
-        .read_to_string(&mut out)
-        .ok()?;
-    parse(&out)
+    parse(std::str::from_utf8(&output.stdout).ok()?)
 }
 
 pub type PrCallback = Arc<dyn Fn(u64, Option<PrInfo>) + Send + Sync>;

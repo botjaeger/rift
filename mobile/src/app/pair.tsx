@@ -1,3 +1,4 @@
+import { useActionScope } from "@/ui/useActionScope";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useEffect, useRef, useState } from "react";
 import { ActivityIndicator, ScrollView, StyleSheet, Text, View } from "react-native";
@@ -36,6 +37,7 @@ export default function PairScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const params = useLocalSearchParams<{ link?: string }>();
+  const scope = useActionScope(params.link);
   const s = useApp();
   const link = typeof params.link === "string" ? parsePairLink(params.link) : null;
   // The phase belongs to the link it was reached with: a new link opened while this screen
@@ -64,6 +66,7 @@ export default function PairScreen() {
   }, [spent, link?.key, router]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const cancel = () => {
+    if (!scope.leave()) return;
     cancelRef.current?.();
     if (router.canGoBack()) router.back();
     else router.replace("/");
@@ -89,10 +92,12 @@ export default function PairScreen() {
   const already = s.hosts.some((h) => h.record.key === link.key);
 
   const pair = async () => {
+    const current = scope.capture();
     setPhase({ t: "pairing" });
     const attempt = fleet.pair(link);
     cancelRef.current = attempt.cancel;
     const r = await attempt.result;
+    if (!current()) return;
     cancelRef.current = null;
     if (r.ok) {
       // A deep link can make this the only screen: return to the tabs first so the host

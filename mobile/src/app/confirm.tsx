@@ -12,6 +12,8 @@ import { findPane, paneBranch, paneTitle, runningCommand } from "@/topology";
 import { Button } from "@/ui/Button";
 import { ErrorText, WarningText } from "@/ui/Notice";
 import { colors, mono, radius, ui } from "@/ui/theme";
+import { useSingleFlight } from "@/ui/useSingleFlight";
+import { useActionScope } from "@/ui/useActionScope";
 
 /** A `run` pick's command is at most the gateway's 2 KiB. */
 const MAX_COMMAND_CHARS = 2048;
@@ -39,17 +41,28 @@ export default function ConfirmScreen() {
     block: blockParam,
     chip: chipParam,
     arg: argParam,
-  } = useLocalSearchParams<{ key: string; pane: string; block?: string; chip?: string; arg?: string }>();
+    parent,
+  } = useLocalSearchParams<{ key: string; pane: string; block?: string; chip?: string; arg?: string; parent?: string }>();
   const paneId = Number(paneParam);
   const s = useApp();
   const lock = useLock();
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const scope = useActionScope(`${key}:${paneId}:${blockParam}:${chipParam}:${argParam}:${parent}`);
+  const close = () => {
+    if (scope.leave()) router.back();
+  };
+  const finish = () => {
+    if (!scope.leave()) return;
+    if (parent === "1") router.dismissTo({ pathname: "/host/[key]/pane/[id]", params: { key, id: String(paneId) } });
+    else router.back();
+  };
 
   // The sheet is presented natively above the app's lock screen: when the app locks, close it.
   useEffect(() => {
-    if (lock.locked) router.back();
-  }, [lock.locked, router]);
+    // Remove the parent sheet too: it must not remain above the lock cover.
+    if (lock.locked) finish();
+  });
 
   const host = s.hosts.find((h) => h.record.key === key);
   const loc = host ? findPane(host.windows, paneId) : null;
@@ -75,11 +88,14 @@ export default function ConfirmScreen() {
     .filter(Boolean)
     .join(" · ");
 
-  const run = async () => {
-    if (!canRun) return;
+  const once = useSingleFlight();
+  const run = () => once(async () => {
+    const current = scope.capture();
+    if (!current() || !canRun) return;
     setError(null);
     if (askFirst) {
       const auth = await authenticate(`Run on ${hostName}`);
+      if (!current()) return;
       if (!auth.ok) {
         if (auth.message !== "Cancelled.") setError(auth.message);
         return;
@@ -88,13 +104,14 @@ export default function ConfirmScreen() {
     setSending(true);
     const r = await fleet.run(key, paneId, command, chip ? { fromDraft: false, notify: false } : { fromDraft: again === undefined });
     setSending(false);
+    if (!current()) return;
     if (r.ok) {
       AccessibilityInfo.announceForAccessibility(`Command sent to ${hostName}`);
-      router.back();
+      finish();
     } else {
       setError(r.message);
     }
-  };
+  });
 
   // Hidden while the app is in the app switcher, locked, or under a Face ID prompt (the sheet
   // sits above the lock cover). Kept laid out: a sheet sized to its content must not collapse.
@@ -134,7 +151,7 @@ export default function ConfirmScreen() {
       {error ? <ErrorText>{error}</ErrorText> : null}
 
       <View style={styles.buttons}>
-        <Button label="Cancel" size="large" onPress={() => router.back()} style={styles.cancel} />
+        <Button label="Cancel" size="large" onPress={close} style={styles.cancel} />
         <Button
           label={sending ? "Running…" : "Run"}
           variant="primary"

@@ -40,6 +40,7 @@ import {
 import type { ScreenState } from "@/protocol/store";
 import { RUN_BOLD, RUN_ITALIC, RUN_STRIKE, RUN_UNDERLINE, type ScreenRun } from "@/protocol/types";
 import { authenticate, fleet, useApp } from "@/runtime";
+import { useActionScope } from "./useActionScope";
 import { CELL_RATIO, fitFont, LINE_RATIO, rowPieces, rowSegments, screenDefaults, segmentColors, showsKeyRow, type Piece } from "@/terminal";
 import { ControlRow, NO_STICKY, type Sticky } from "./ControlRow";
 import { ScreenSkeleton } from "./PaneLoading";
@@ -228,6 +229,7 @@ export function TerminalView({
   canFit?: boolean;
 }) {
   const s = useApp();
+  const scope = useActionScope(`${hostKey}:${paneId}`);
   const capture = useRef<KeyCaptureHandle>(null);
   const [focused, setFocused] = useState(false);
   const [sticky, setSticky] = useState<Sticky>(NO_STICKY);
@@ -251,9 +253,11 @@ export function TerminalView({
       online: () => live.current.online,
       delay: () => fleet.inputDelay(live.current.hostKey),
       authorize: (keys) => {
+        const current = scope.capture();
         const { settings, running: busy } = live.current;
         if (!hold.needs(keys, settings, busy)) return null;
         return authenticate(`Send ${keys.join(" ")}`).then((auth) => {
+          if (!current()) return false;
           if (!auth.ok) {
             if (auth.message !== "Cancelled.") setError(auth.message);
             return false;
@@ -283,7 +287,7 @@ export function TerminalView({
       batcher.current = null;
       b.flush(true);
     };
-  }, [hold]);
+  }, [hold, scope]);
   const push = (...actions: InputAction[]) => batcher.current?.push(...actions);
 
   // The authentication holds until the view closes or the app leaves the foreground.

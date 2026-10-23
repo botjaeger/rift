@@ -1,8 +1,9 @@
 """Memory soak: drive Rift through repeated work and fail when memory keeps growing.
 
 Each scenario runs one isolated scripted instance. The script touches a
-marker file after every cycle of identical work; at each marker this harness
-reads the process's memory (macOS: phys_footprint, which counts GPU buffers
+marker file after every cycle of identical work and waits for the sampler's
+acknowledgment; at each marker this harness reads the process's memory
+(macOS: phys_footprint, which counts GPU buffers
 and compressed pages; Linux: VmRSS). After the warm-up cycles every cycle
 repeats the same work, so the footprint must level off: growth from the end
 of warm-up to the last cycle over the scenario's budget is a leak.
@@ -119,7 +120,10 @@ def run(name, steps, warm, measured, budget):
     cycles = warm + measured
     lines = ["wait_prompt", "resize 1200 800", *setup]
     for i in range(cycles):
-        lines += cycle + [f"sh touch {shlex.quote(str(scratch / f'mark-{i}'))}"]
+        lines += cycle + [
+            f"sh touch {shlex.quote(str(scratch / f'mark-{i}'))}",
+            f"wait_file {scratch}/sampled-{i} 10000",
+        ]
     # the pause lets the last sample land before the closing tab allocates
     lines += ["wait 1500", "key cmd+t", "wait 300", f"dump {scratch}/end.txt", "quit"]
     (scratch / "soak.rift").write_text("\n".join(lines) + "\n")
@@ -141,6 +145,9 @@ def run(name, steps, warm, measured, budget):
                     return f"{name}: stopped before cycle {i + 1}/{cycles} ({scratch}/rift.log):\n{tail}"
                 time.sleep(0.05)
             samples.append(footprint(app.pid))
+            # Hold the app at the cycle boundary until it has been sampled.
+            # Otherwise the 50ms poll can catch the next cycle's allocations.
+            (scratch / f"sampled-{i}").touch()
         app.wait(timeout=30)
     finally:
         if app.poll() is None:

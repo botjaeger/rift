@@ -1,3 +1,4 @@
+import { useActionScope } from "@/ui/useActionScope";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useEffect, useState } from "react";
 import { AccessibilityInfo, ActivityIndicator, Linking, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
@@ -97,6 +98,7 @@ export default function ChipsScreen() {
   const { key, pane: paneParam, menu: menuParam } = useLocalSearchParams<{ key: string; pane: string; menu: string }>();
   const menu: Menu = MENUS.find((m) => m === menuParam) ?? "dirs";
   const paneId = Number(paneParam);
+  const scope = useActionScope(`${key}:${paneId}:${menu}`);
   const s = useApp();
   const lock = useLock();
   const [answer, setAnswer] = useState<Answer | null>(null);
@@ -106,8 +108,8 @@ export default function ChipsScreen() {
 
   // Presented natively above the app's lock screen: when the app locks, close it.
   useEffect(() => {
-    if (lock.locked) router.back();
-  }, [lock.locked, router]);
+    if (lock.locked && scope.leave()) router.back();
+  }, [lock.locked, router, scope]);
 
   useEffect(() => {
     let live = true;
@@ -130,13 +132,15 @@ export default function ChipsScreen() {
   const hidden = lock.covered || lock.locked;
 
   const act = async (action: ChipAction) => {
+    const current = scope.capture();
     if (s.settings.askBeforeRun) {
       // the same path as Run: the Confirm sheet, which builds the command from the action
-      router.replace({
+      router.push({
         pathname: "/confirm",
         params: {
           key,
           pane: String(paneId),
+          parent: "1",
           chip: action.kind,
           arg: action.kind === "cd" ? action.name : action.kind === "run" ? action.command : action.branch,
         },
@@ -148,9 +152,10 @@ export default function ChipsScreen() {
     // a cd or checkout finishes at once (a version switch too, logs follow forever): no "Notify me" for it
     const r = await fleet.run(key, paneId, chipCommand(action), { fromDraft: false, notify: false });
     setSending(false);
+    if (!current()) return;
     if (r.ok) {
       AccessibilityInfo.announceForAccessibility(`Ran ${chipCommand(action)}`);
-      router.back();
+      if (scope.leave()) router.back();
     } else setError(r.message);
   };
 
@@ -202,13 +207,15 @@ export default function ChipsScreen() {
                   : null;
 
   const reset = async () => {
+    const current = scope.capture();
     setSending(true);
     setError(null);
     const r = await fleet.resetElapsed(key, paneId);
     setSending(false);
+    if (!current()) return;
     if (r.ok) {
       AccessibilityInfo.announceForAccessibility("Time on this tab reset");
-      router.back();
+      if (scope.leave()) router.back();
     } else setError(r.message);
   };
 
@@ -411,7 +418,7 @@ export default function ChipsScreen() {
       accessibilityElementsHidden={hidden}
       importantForAccessibility={hidden ? "no-hide-descendants" : "auto"}
     >
-      <SheetClose />
+      <SheetClose onClose={() => { if (scope.leave()) router.back(); }} />
       <View style={styles.head}>
         <Text
           style={menu === "dirs" || menu === "branches" ? styles.monoTitle : styles.title}

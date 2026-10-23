@@ -7,11 +7,11 @@
 //! unless the user configured their own ssh command, stdin closed, its own
 //! process group. A push never forces.
 
-use std::io::{Read, Write};
-use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::process::Command;
+use std::time::Duration;
+#[cfg(test)]
+use std::time::Instant;
 
 /// Longest a commit (hooks included) or a push may take.
 pub const TIMEOUT: Duration = Duration::from_secs(120);
@@ -186,89 +186,27 @@ fn git(
     cmd.args(args)
         .current_dir(root)
         .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GCM_INTERACTIVE", "never")
-        .stdin(if stdin.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        // its own group: nothing it starts can read the terminal Rift was
-        // launched from
-        .process_group(0);
+        .env("GCM_INTERACTIVE", "never");
     let own_ssh = std::env::var_os("GIT_SSH_COMMAND").is_some()
         || std::env::var_os("GIT_SSH").is_some()
         || git2::Repository::open(root)
             .and_then(|r| r.config())
             .is_ok_and(|c| c.get_string("core.sshCommand").is_ok());
     if !own_ssh {
-        // ssh asks for passphrases and host keys on the terminal: fail instead
         cmd.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
     }
-    let mut child = cmd.spawn().map_err(|e| format!("could not run git: {e}"))?;
-    if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
-        let _ = pipe.write_all(text.as_bytes());
-    }
-    let read = |pipe: Option<Box<dyn Read + Send>>| {
-        std::thread::spawn(move || {
-            let mut s = String::new();
-            if let Some(mut p) = pipe {
-                let _ = p.read_to_string(&mut s);
+    let output = crate::process::output(&mut cmd, stdin.map(str::as_bytes), limit, 1 << 20)
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::TimedOut {
+                format!("git {} took over {}s; stopped", args[0], limit.as_secs())
+            } else {
+                format!("could not run git: {e}")
             }
-            s
-        })
-    };
-    let out = read(
-        child
-            .stdout
-            .take()
-            .map(|p| Box::new(p) as Box<dyn Read + Send>),
-    );
-    let err = read(
-        child
-            .stderr
-            .take()
-            .map(|p| Box::new(p) as Box<dyn Read + Send>),
-    );
-    let start = Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if start.elapsed() > limit => {
-                // the whole group (hooks, ssh, credential helpers), not only
-                // git: a hook left running keeps the output pipes open
-                if let Ok(pid) = libc::pid_t::try_from(child.id()) {
-                    // SAFETY: plain syscall; the group is the child's own
-                    // (process_group(0) above), never Rift's
-                    unsafe { libc::killpg(pid, libc::SIGKILL) };
-                    // a hook git was forking just then can miss that signal
-                    // (macOS): again until the group is gone. git is not
-                    // reaped yet, so its pid (the group's id) is not reused
-                    for _ in 0..5 {
-                        std::thread::sleep(Duration::from_millis(10));
-                        // SAFETY: as above
-                        if unsafe { libc::killpg(pid, libc::SIGKILL) } != 0 {
-                            break;
-                        }
-                    }
-                }
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!(
-                    "git {} took over {}s; stopped",
-                    args[0],
-                    limit.as_secs()
-                ));
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            Err(e) => return Err(e.to_string()),
-        }
-    };
-    let out = out.join().unwrap_or_default();
-    let err = err.join().unwrap_or_default();
-    if status.success() {
-        Ok(out)
+        })?;
+    let out = String::from_utf8_lossy(&output.stdout);
+    let err = String::from_utf8_lossy(&output.stderr);
+    if output.status.success() {
+        Ok(out.into_owned())
     } else {
         let text = if err.trim().is_empty() { &out } else { &err };
         Err(text.trim().to_string())
