@@ -1362,7 +1362,7 @@ impl PaneState {
     /// the focused window.
     pub fn sync_agent(&mut self, open_request: bool, viewed: bool) {
         use crate::agent_status::{BlockView, Observed, step};
-        use rift_core::notifications::{Agent, agent_title_idle};
+        use rift_core::notifications::{Agent, agent_idle};
         let view = |b: &rift_core::Block| BlockView {
             id: b.id,
             running: matches!(b.state, rift_core::BlockState::Running { .. }),
@@ -1381,13 +1381,19 @@ impl PaneState {
                 .and_then(|id| blocks.iter().rev().find(|b| b.id == id).map(view));
             (last, tracked)
         };
+        // the agent `step` follows: a new agent command, else the run's
+        // (Codex's idle title is its bare project name, `agent_idle`)
+        let agent = last
+            .filter(|b| b.running)
+            .and_then(|b| b.agent)
+            .or(self.agent_run.map(|r| r.agent));
         let (run, status) = step(
             self.agent_run,
             Observed {
                 last,
                 tracked,
                 open_request,
-                idle_title: agent_title_idle(&self.title),
+                idle_title: agent_idle(agent, &self.title),
                 viewed,
             },
         );

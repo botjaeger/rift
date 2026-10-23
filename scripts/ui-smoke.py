@@ -4019,8 +4019,11 @@ fake_codex.write_text("#!/bin/sh\nprintf \"\\033]0;$1\\007\"\nsleep 3\n")
 fake_codex.chmod(0o755)
 codex_idle = agent_run("codex-idle", "", f"{fake_codex} shift")
 assert 'title="shift"' in codex_idle and "running=false" in codex_idle, codex_idle[:2000]
+# the tab's agent state agrees (it kept spinning on "working")
+assert "agent=Codex agent_state=done" in codex_idle, codex_idle[:2000]
 codex_busy = agent_run("codex-busy", "", f"{fake_codex} '\\\\342\\\\240\\\\213 shift'")
 assert 'title="⠋ shift"' in codex_busy and "running=true" in codex_busy, codex_busy[:2000]
+assert "agent=Codex agent_state=working" in codex_busy, codex_busy[:2000]
 
 # agent tabs: a (fake) `claude` on PATH works, then sends Claude Code's
 # permission notification (OSC 777) and waits; it finishes in a background
