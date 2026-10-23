@@ -137,6 +137,9 @@ struct Shell {
     pty: Mutex<tty::Pty>,
     writer: Mutex<std::fs::File>,
     ring: Mutex<Ring>,
+    /// `ring`'s size, readable while an attach holds the ring to replay
+    /// it (as long as that window takes to read it).
+    retained: AtomicUsize,
     clients: Mutex<Vec<Client>>,
     cwd: Mutex<Option<String>>,
     job: Mutex<Option<String>>,
@@ -156,7 +159,7 @@ impl Shell {
         let cwd = self.cwd.lock().unwrap().clone();
         let job = self.job.lock().unwrap().clone().filter(|j| !j.is_empty());
         let clients = self.clients.lock().unwrap().iter().map(|c| c.pid).collect();
-        let retained_bytes = self.ring.lock().unwrap().bytes as u64;
+        let retained_bytes = self.retained.load(Ordering::Relaxed) as u64;
         SessionInfo {
             id: self.id,
             pid: self.pid,
@@ -358,6 +361,16 @@ fn serve(state: Arc<State>, stream: UnixStream) {
     }
     alive.store(false, Ordering::Release);
     drop(tx);
+    // a shell that prints nothing would list this window as attached
+    // forever (only a failed send drops a client), and the session
+    // switcher offers only shells without one
+    let shells: Vec<Arc<Shell>> = state.shells.lock().unwrap().values().cloned().collect();
+    for sh in shells {
+        sh.clients
+            .lock()
+            .unwrap()
+            .retain(|c| !Arc::ptr_eq(&c.alive, &alive));
+    }
     let _ = read_half.shutdown(std::net::Shutdown::Both);
     let _ = writer.join();
     state.clients.fetch_sub(1, Ordering::AcqRel);
@@ -494,13 +507,10 @@ fn handle(
             }
         }
         Request::List => {
-            let mut sessions: Vec<SessionInfo> = state
-                .shells
-                .lock()
-                .unwrap()
-                .values()
-                .map(|s| s.info())
-                .collect();
+            // not under the shell table: `info` waits on each shell's own
+            // locks, and spawn and attach need the table meanwhile
+            let shells: Vec<Arc<Shell>> = state.shells.lock().unwrap().values().cloned().collect();
+            let mut sessions: Vec<SessionInfo> = shells.iter().map(|s| s.info()).collect();
             sessions.sort_by_key(|s| s.id);
             reply(Event::Sessions { sessions });
         }
@@ -542,6 +552,7 @@ fn spawn(
         pty: Mutex::new(pty),
         writer: Mutex::new(writer),
         ring: Mutex::new(Ring::default()),
+        retained: AtomicUsize::new(0),
         clients: Mutex::new(Vec::new()),
         cwd: Mutex::new(None),
         job: Mutex::new(None),
@@ -567,6 +578,7 @@ fn spawn(
                         let at = ipc::now_ms();
                         let mut ring = shell.ring.lock().unwrap();
                         let (seq, bytes) = ring.push(at, bytes);
+                        shell.retained.store(ring.bytes, Ordering::Relaxed);
                         shell.broadcast(|| Out::Output {
                             session: id,
                             seq,
@@ -648,6 +660,7 @@ mod tests {
             pty: Mutex::new(pty),
             writer: Mutex::new(writer),
             ring: Mutex::new(Ring::default()),
+            retained: AtomicUsize::new(0),
             clients: Mutex::new(Vec::new()),
             cwd: Mutex::new(None),
             job: Mutex::new(None),
@@ -686,6 +699,105 @@ mod tests {
         }
         reader.join().unwrap();
         lister.join().unwrap();
+    }
+
+    #[test]
+    fn a_list_answers_while_a_window_has_not_read_its_replay() {
+        // a replay longer than the client queue: the attach holds the ring
+        // until the window reads it (restored windows asked for the list
+        // first, and every other pane's spawn and attach timed out behind it)
+        let sh = Arc::new(test_shell());
+        {
+            let mut ring = sh.ring.lock().unwrap();
+            for i in 0..(CLIENT_QUEUE as u64 * 3) {
+                ring.push(i * (REPLAY_MERGE_MS + 1), vec![b'x'; 64]);
+            }
+            sh.retained.store(ring.bytes, Ordering::Relaxed);
+        }
+        let state = Arc::new(State::default());
+        state.shells.lock().unwrap().insert(1, sh.clone());
+        let connect = || {
+            let (ours, theirs) = UnixStream::pair().unwrap();
+            let state = state.clone();
+            std::thread::spawn(move || serve(state, theirs));
+            ours
+        };
+        let mut stuck = connect();
+        ipc::send_json(
+            &mut stuck,
+            &Request::Attach {
+                session: 1,
+                from_seq: 0,
+            },
+        )
+        .unwrap();
+        // the attach is replaying (and blocked) once it holds the ring
+        let t = Instant::now();
+        while sh.ring.try_lock().is_ok() {
+            assert!(
+                t.elapsed() < Duration::from_secs(5),
+                "the attach never started"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(sh.ring.try_lock().is_err(), "the replay did not block");
+        let mut other = connect();
+        ipc::send_json(&mut other, &Request::List).unwrap();
+        let t = Instant::now();
+        let answer = crate::service::next_event(&mut other);
+        // the replay's write timeout frees the ring after 5 s, exactly when
+        // a window's setup request gives up
+        assert!(
+            t.elapsed() < Duration::from_secs(2),
+            "list stalled behind the replay: {:?}",
+            t.elapsed()
+        );
+        assert!(
+            sh.ring.try_lock().is_err(),
+            "the replay ended before the list"
+        );
+        match answer.unwrap() {
+            Event::Sessions { sessions } => {
+                assert_eq!(sessions.len(), 1);
+                assert_eq!(
+                    sessions[0].retained_bytes,
+                    sh.retained.load(Ordering::Relaxed) as u64
+                );
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        drop(stuck);
+    }
+
+    #[test]
+    fn a_window_that_disconnects_leaves_an_idle_shell() {
+        let sh = Arc::new(test_shell());
+        let state = Arc::new(State::default());
+        state.shells.lock().unwrap().insert(1, sh.clone());
+        let (mut ours, theirs) = UnixStream::pair().unwrap();
+        let server = {
+            let state = state.clone();
+            std::thread::spawn(move || serve(state, theirs))
+        };
+        ipc::send_json(
+            &mut ours,
+            &Request::Attach {
+                session: 1,
+                from_seq: 0,
+            },
+        )
+        .unwrap();
+        let t = Instant::now();
+        while sh.clients.lock().unwrap().is_empty() {
+            assert!(t.elapsed() < Duration::from_secs(5), "never attached");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // the shell prints nothing: no failed send ever drops the window
+        drop(ours);
+        server.join().unwrap();
+        assert!(sh.clients.lock().unwrap().is_empty());
+        assert!(sh.info().clients.is_empty());
     }
 
     fn scratch(name: &str) -> std::path::PathBuf {

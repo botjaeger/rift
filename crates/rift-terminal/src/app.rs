@@ -7055,9 +7055,15 @@ impl App {
             let proxy = self.proxy.clone();
             let asker = self.win_id();
             std::thread::spawn(move || {
+                // a service from before 0.23 keeps windows that quit listed
+                // on a shell that printed nothing since
                 let detached = rift_pty::service::list()
                     .into_iter()
-                    .filter(|s| s.clients.is_empty())
+                    .filter(|s| {
+                        !s.clients
+                            .iter()
+                            .any(|&pid| rift_core::update::pid_alive(pid))
+                    })
                     .collect();
                 let _ = proxy.send_event(UserEvent::DetachedLoaded(asker, detached));
             });

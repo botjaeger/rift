@@ -144,7 +144,8 @@ fn refuses_args(target: ServiceTarget, args: &[String], features: &[String]) -> 
 }
 
 /// Spawn or reattach; the returned stream next delivers the replay, then
-/// `ReplayDone`, then live output. Returns the service's session id.
+/// `ReplayDone`, then live output. Returns the service's session id and,
+/// for a reattach, the directory the service last saw the shell in.
 pub fn open(
     target: ServiceTarget,
     shell: Option<&str>,
@@ -152,7 +153,7 @@ pub fn open(
     cwd: Option<&std::path::Path>,
     env: Vec<(String, String)>,
     ws: WindowSize,
-) -> std::io::Result<(UnixStream, u64)> {
+) -> std::io::Result<(UnixStream, u64, Option<String>)> {
     let (mut s, features) = connect_features()?;
     if refuses_args(target, &args, &features) {
         return Err(std::io::Error::new(
@@ -183,12 +184,30 @@ pub fn open(
         }
         ServiceTarget::Attach(id) => id,
     };
+    // a reattached shell's last OSC 7 may have left the replay ring; the
+    // service still knows its directory. Asked before attaching: once the
+    // replay is queued to this window, a list waits on that shell's replay
+    // lock, and a service that also holds its shell table meanwhile (every
+    // release up to 0.22) stalls every other pane's spawn and attach
+    let known_cwd = match target {
+        ServiceTarget::Attach(id) => {
+            ipc::send_json(&mut s, &Request::List)?;
+            match next_event(&mut s)? {
+                Event::Sessions { sessions } => sessions
+                    .into_iter()
+                    .find(|i| i.id == id)
+                    .and_then(|i| i.cwd),
+                other => return Err(std::io::Error::other(format!("unexpected {other:?}"))),
+            }
+        }
+        ServiceTarget::Spawn => None,
+    };
     let attached = attach_new(&mut s, session, target, ws);
     if attached.is_err() && target == ServiceTarget::Spawn {
         // nobody would ever reach the shell just started
         kill(session);
     }
-    attached.map(|()| (s, session))
+    attached.map(|()| (s, session, known_cwd))
 }
 
 /// Attach to `session` just spawned or to reattach, then send the size.

@@ -136,7 +136,8 @@ pub fn survey(deadline: Duration) -> Survey {
     let mut silent: Vec<u32> = rift_pty::service::list()
         .into_iter()
         .flat_map(|s| s.clients)
-        .filter(|pid| !reached.contains(pid))
+        // a service from before 0.23 keeps windows that quit listed
+        .filter(|&pid| !reached.contains(&pid) && rift_core::update::pid_alive(pid))
         .collect();
     silent.sort_unstable();
     silent.dedup();

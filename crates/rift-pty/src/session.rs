@@ -1346,7 +1346,10 @@ impl Session {
                 // reported as `SessionEvent::ServiceFailed`
                 let cwd = working_directory.clone();
                 let open: Open = Box::new(move || {
-                    let (stream, session) = crate::service::open(
+                    // a pane split from a reattached shell starts in the
+                    // directory the service knows (`known_cwd`) instead of
+                    // at the fallback
+                    let (stream, session, known_cwd) = crate::service::open(
                         target,
                         shell.as_deref(),
                         args,
@@ -1354,18 +1357,6 @@ impl Session {
                         env,
                         window_size,
                     )?;
-                    // a reattached shell's last OSC 7 may have left the
-                    // replay ring; the service still knows its directory, so
-                    // a pane split from it starts there instead of at the
-                    // fallback. Asked after `open` answered: a stalled
-                    // service fails once.
-                    let known_cwd = match target {
-                        ServiceTarget::Attach(sid) => crate::service::list()
-                            .into_iter()
-                            .find(|s| s.id == sid)
-                            .and_then(|s| s.cwd),
-                        ServiceTarget::Spawn => None,
-                    };
                     Ok(Opened {
                         stream,
                         session,
