@@ -19,6 +19,8 @@ import { draftKey } from "@/fleet";
 import { applySticky, keyEventToAction, stickyKey } from "@/keyboard";
 import { keysNeedAuth } from "@/lock";
 import { authenticate, fleet, useApp } from "@/runtime";
+import { clipboardImage, ImagePaste } from "@/upload";
+import { rowWithPaste } from "@/controlKeys";
 import { chipRowMode, completionRows, NO_COMPLETIONS, NO_COMPLETIONS_PROGRAM } from "@/chips";
 import { programSend } from "@/paneView";
 import type { ChipItem, ChipOpen } from "@/promptChips";
@@ -60,6 +62,7 @@ export function Composer({
   recent,
   label,
   canType,
+  canUpload = false,
   waiting = false,
 }: {
   hostKey: string;
@@ -78,6 +81,8 @@ export function Composer({
   label: string;
   /** The computer takes typed text (feature `text`): the row's Paste works. */
   canType: boolean;
+  /** The computer takes pasted images (feature `upload`): Paste sends the clipboard's image. */
+  canUpload?: boolean;
   /** The computer is not connected (PaneLoading board): the field is off and says it waits. */
   waiting?: boolean;
 }) {
@@ -165,9 +170,26 @@ export function Composer({
   };
 
   // the row's Paste: the phone's clipboard into the command line at the prompt, else typed
-  // into the running program (the computer takes no text at its prompt)
+  // into the running program (the computer takes no text at its prompt). An image (a screenshot)
+  // goes to the computer, which pastes its saved file's path into the program, so Claude Code or
+  // Codex attach it; at a prompt there is no program to take it. One image at a time: a Paste
+  // while one goes out says so.
+  const [sendingImage, setSendingImage] = useState(false);
+  const [images] = useState(() => new ImagePaste(setSendingImage));
   const onPaste = async () => {
     const current = scope.capture();
+    if (canUpload) {
+      const out = await images.paste(
+        () => clipboardImage(Clipboard),
+        (b64) => fleet.uploadImage(hostKey, paneId, b64),
+        () => (running === null ? "An image goes to a running program, such as Claude Code; this pane is at its prompt." : null),
+      );
+      if (!current()) return;
+      if (out.kind === "sending") return setError("An image is still going to the computer.");
+      if (out.kind === "error") return setError(out.message);
+      if (out.kind === "sent") return setError(null);
+    }
+    if (!canType && running !== null) return;
     const text = await Clipboard.getStringAsync();
     if (!current() || !text) return;
     setError(null);
@@ -322,6 +344,11 @@ export function Composer({
         <ChipRow items={chips} onOpen={(c) => c.opens && openMenu(c.opens)} onMore={openAll} />
       ) : null}
       {shownError ? <ErrorText>{shownError}</ErrorText> : null}
+      {sendingImage ? (
+        <Text style={styles.none} accessibilityLiveRegion="polite">
+          Sending the image to the computer…
+        </Text>
+      ) : null}
       <View style={[styles.inputRow, waiting && styles.waiting]}>
         <Pressable
           {...toggleA11y(keys, waiting)}
@@ -376,13 +403,15 @@ export function Composer({
       </View>
       {keys ? (
         <ControlRow
-          ids={s.settings.controlKeys}
+          // a screenshot for a running program (an agent) needs Paste: on the row whatever
+          // Settings › Keys holds
+          ids={rowWithPaste(s.settings.controlKeys, !!canUpload && running !== null)}
           sticky={sticky}
           disabled={!online}
           onSticky={setSticky}
           onKey={onRowKey}
           onOpen={onOpen}
-          onPaste={canType || running === null ? () => void onPaste() : undefined}
+          onPaste={canType || canUpload || running === null ? () => void onPaste() : undefined}
           onEdit={() => router.push("/control-keys")}
           onHideKeyboard={keyboardUp ? () => Keyboard.dismiss() : undefined}
         />

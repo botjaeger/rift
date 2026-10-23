@@ -382,6 +382,28 @@ fn zsh() -> Option<PathBuf> {
 }
 
 #[test]
+fn the_zsh_completer_never_writes_the_users_history() {
+    let Some(program) = zsh() else { return };
+    let f = Fixture::new("histfile");
+    // history written as each line is entered, the common rc setup
+    zshrc_append(
+        &f,
+        "HISTFILE=$HOME/.zsh_history\nSAVEHIST=1000 HISTSIZE=1000\n\
+         setopt INC_APPEND_HISTORY SHARE_HISTORY\n",
+    );
+    let mut c = f.completer(&program);
+    warm(&mut c, &f, ShellKind::Zsh);
+    let _ = ask(&mut c, &f.query(ShellKind::Zsh, "mycmd de"));
+    drop(c);
+    std::thread::sleep(Duration::from_millis(300));
+    let written = std::fs::read_to_string(f.root.join("home/.zsh_history")).unwrap_or_default();
+    assert!(
+        !written.contains("rift-complete") && !written.contains("source"),
+        "the completer's setup reached the user's history: {written:?}"
+    );
+}
+
+#[test]
 fn a_pasted_zsh_glob_qualifier_never_runs_with_expand_in_the_completer() {
     let Some(program) = zsh() else { return };
     let f = Fixture::new("expand");

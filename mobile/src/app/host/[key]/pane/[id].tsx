@@ -19,7 +19,7 @@ import { askingTitle, questionKey } from "@/answer";
 import { chipItems } from "@/promptChips";
 import { canClose, canOperate, draftKey, hasFeature, isAsked, wrapsLines } from "@/fleet";
 import { foldBlocks, paneName, programName, swipeTarget, type PaneItem } from "@/now";
-import { CLAUDE_COLOR, paneMark, runsAgent, showsViewSwitch, terminalViewOn, waitingOthers } from "@/paneView";
+import { bareScreen as screenIsBare, CLAUDE_COLOR, paneMark, runsAgent, showsViewSwitch, terminalViewOn, viewSwitch, waitingOthers } from "@/paneView";
 import { canLoadOlder, MAX_BLOCKS } from "@/protocol/store";
 import type { Block } from "@/protocol/types";
 import { fleet, useApp } from "@/runtime";
@@ -168,8 +168,8 @@ export default function PaneScreen() {
   const screenFeature = hasFeature(host, "screen");
   const screen = pane?.screen ?? null;
   // the header's Terminal view: the pane's screen whatever runs (gateway mode `on`). On by default
-  // for an agent (Claude Code never uses the alternate screen), off at a shell; a tap overrides
-  // the default while this screen is open.
+  // for an agent (on either screen: Claude Code picks its renderer per launch), off at a shell; a
+  // tap overrides the default while this screen is open.
   const [termChoice, setTermChoice] = useState<boolean | null>(null);
   const agent = !!loc && runsAgent(loc.pane);
   const termView = terminalViewOn(termChoice, agent);
@@ -345,9 +345,9 @@ export default function PaneScreen() {
   const waiting = loc?.pane.waiting;
   // an agent's menu is answered on the pane, from a card at the bottom
   const asking = !!waiting && waiting.kind === "choice" && waiting.choices.length > 0 && status === "open" && operate && !closed;
-  // the Terminal view at a prompt, or a question to answer: the screen without its own keys, the
-  // pane's command line (or the question) under it
-  const bareScreen = fullScreen && (asking || (pinned && !screen?.alt));
+  // a question to answer, a coding agent on either screen, or the Terminal view at a prompt: the
+  // screen without its own keys, the pane's message input (or the question) under it
+  const bareScreen = screenIsBare({ fullScreen, asking, agent, pinned, alt: !!screen?.alt });
   const bottomInset = keyboard ? 0 : Math.max(0, insets.bottom - 12);
   const composer =
     closed || !host ? null : operate ? (
@@ -369,6 +369,7 @@ export default function PaneScreen() {
           recent={recent}
           label={title}
           canType={hasFeature(host, "text")}
+          canUpload={hasFeature(host, "upload")}
           waiting={status !== "open"}
         />
       </View>
@@ -476,17 +477,27 @@ export default function PaneScreen() {
             {showsViewSwitch(screenFeature, agent) ? (
               <View style={styles.segments} accessibilityRole="tablist" accessibilityLabel="View">
                 {(["Blocks", "Terminal"] as const).map((name) => {
-                  const on = (name === "Terminal") === pinned;
+                  // selected by what shows: a full-screen program shows its screen whatever was chosen
+                  const view = viewSwitch(pinned, showsTerminal(screen, screenFeature));
+                  const on = (name === "Terminal") === view.terminal;
+                  const off = name === "Blocks" && view.blocksDisabled;
                   return (
                     <Pressable
                       key={name}
                       accessibilityRole="tab"
                       accessibilityLabel={name}
-                      accessibilityHint={name === "Blocks" ? "Shows the pane's commands as blocks" : "Shows the pane's screen as the program draws it"}
-                      accessibilityState={{ selected: on }}
+                      accessibilityHint={
+                        off
+                          ? "A full-screen program is running: its screen shows until it ends"
+                          : name === "Blocks"
+                            ? "Shows the pane's commands as blocks"
+                            : "Shows the pane's screen as the program draws it"
+                      }
+                      accessibilityState={{ selected: on, disabled: off }}
+                      disabled={off}
                       hitSlop={{ top: 4, bottom: 4 }}
                       onPress={() => setTermChoice(name === "Terminal")}
-                      style={({ pressed }) => [styles.segment, on && styles.segmentOn, pressed && styles.pressed]}
+                      style={({ pressed }) => [styles.segment, on && styles.segmentOn, off && styles.segmentOff, pressed && styles.pressed]}
                     >
                       <Text style={[styles.segmentText, on && styles.segmentTextOn]}>{name}</Text>
                     </Pressable>
@@ -528,6 +539,8 @@ export default function PaneScreen() {
               running={running !== null}
               bare={bareScreen}
               canFit={hasFeature(host, "fit")}
+              canScroll={hasFeature(host, "scroll")}
+              canUpload={hasFeature(host, "upload") && operate}
             />
             {load?.card ? <PaneCard card={load.card} onRetry={tryAgain} onDetails={details} onLeave={leave} /> : null}
           </View>
@@ -788,6 +801,8 @@ const styles = StyleSheet.create({
   segments: { height: 36, flexDirection: "row", padding: 2, borderRadius: 18, borderWidth: 1, borderColor: colors.glassRim },
   segment: { minWidth: 68, paddingHorizontal: 10, borderRadius: 16, alignItems: "center", justifyContent: "center" },
   segmentOn: { backgroundColor: tints.accentBadge },
+  // Blocks while a full-screen program holds the view: not a choice now
+  segmentOff: { opacity: 0.45 },
   segmentText: { fontFamily: ui(500), color: colors.textMuted, fontSize: 13 },
   segmentTextOn: { color: colors.accent },
   // blocks held in memory while the pane reconnects (PaneLoading board)

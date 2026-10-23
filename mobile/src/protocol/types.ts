@@ -79,6 +79,8 @@ export interface PaneRunning {
   title?: string;
   /** A coding agent waits at its own prompt: it runs, but is not working. */
   idle?: boolean;
+  /** The desktop identifies the program as a coding agent (Claude Code, Codex), title or not. */
+  agent?: boolean;
 }
 /** Characters of `running.line`. */
 export const MAX_RUNNING_LINE = 200;
@@ -158,7 +160,9 @@ export type Feature =
   | "open"
   | "close"
   | "prompt_chips"
-  | "start";
+  | "start"
+  | "scroll"
+  | "upload";
 
 /** `complete` bounds: line bytes, entries per list, bytes per entry. */
 export const MAX_COMPLETE_LINE = 1024;
@@ -214,8 +218,16 @@ export const MAX_OUTPUT_LINES = 500;
 /** The largest screen a gateway sends (a larger one is cut to its top-left part). */
 export const MAX_SCREEN_COLS = 300;
 export const MAX_SCREEN_ROWS = 120;
-/** Client messages larger than this close the connection. */
+/** Client messages larger than this close the connection (an `upload` chunk excepted). */
 export const MAX_CLIENT_MESSAGE_BYTES = 4096;
+/** Lines one `scroll` moves at most (the gateway clamps a larger one). */
+export const MAX_SCROLL_LINES = 50;
+/** The largest image an `upload` carries, in bytes. */
+export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+/** Bytes per `upload` chunk: 60 000 characters of base64 (a multiple of 3 bytes, so no chunk splits a quantum). */
+export const MAX_UPLOAD_CHUNK = 45_000;
+/** The largest `upload` chunk message. */
+export const MAX_UPLOAD_MESSAGE_BYTES = 62 * 1024;
 export const MAX_ID_CHARS = 64;
 
 // Handshake payloads.
@@ -332,6 +344,31 @@ export interface FitMsg {
   cols: number | null;
   rows: number | null;
 }
+/**
+ * Scrolls the pane as the desktop's wheel over it would (feature `scroll`): `lines` up (negative:
+ * down), at most 50 either way. A view device moves the pane's own view only; a wheel that reaches
+ * the program (one that tracks the mouse, or arrows under alternate scroll) is `forbidden` for it.
+ */
+export interface ScrollMsg {
+  t: "scroll";
+  id: string;
+  pane: number;
+  lines: number;
+}
+/**
+ * One chunk of an image pasted into the pane's program (feature `upload`, operate only): `size`
+ * bytes in all, `data` (standard base64) from byte `offset`, chunks in order. The last chunk is
+ * answered with an `ack` once the desktop saved it and pasted its path; the first failing chunk
+ * with its error.
+ */
+export interface UploadMsg {
+  t: "upload";
+  id: string;
+  pane: number;
+  size: number;
+  offset: number;
+  data: string;
+}
 export type ScreenMode = "off" | "auto" | "on";
 /** What the gateway sends of the subscribed pane's screen. */
 export interface ScreenModeMsg {
@@ -405,6 +442,8 @@ export type ClientMsg =
   | NotifyMsg
   | TextMsg
   | FitMsg
+  | ScrollMsg
+  | UploadMsg
   | ScreenModeMsg
   | OutputRequestMsg;
 
@@ -721,7 +760,8 @@ function isPane(v: unknown): v is Pane {
         (v.running.started === null || isUint(v.running.started)) &&
         lineWithin(MAX_RUNNING_LINE)(v.running.line) &&
         (v.running.title === undefined || lineWithin(MAX_RUNNING_LINE)(v.running.title)) &&
-        (v.running.idle === undefined || isBool(v.running.idle))))
+        (v.running.idle === undefined || isBool(v.running.idle)) &&
+        (v.running.agent === undefined || isBool(v.running.agent))))
   );
 }
 
@@ -1064,6 +1104,29 @@ export function isClientMsg(v: unknown): v is ClientMsg {
       );
     case "screen":
       return isUint(v.pane) && (v.mode === "off" || v.mode === "auto" || v.mode === "on");
+    case "scroll":
+      return (
+        isId(v.id) &&
+        isUint(v.pane) &&
+        typeof v.lines === "number" &&
+        Number.isInteger(v.lines) &&
+        v.lines !== 0 &&
+        Math.abs(v.lines) <= MAX_SCROLL_LINES
+      );
+    case "upload":
+      return (
+        isId(v.id) &&
+        isUint(v.pane) &&
+        isUint(v.size) &&
+        v.size > 0 &&
+        v.size <= MAX_UPLOAD_BYTES &&
+        isUint(v.offset) &&
+        v.offset < v.size &&
+        isStr(v.data) &&
+        v.data.length > 0 &&
+        v.data.length <= (MAX_UPLOAD_CHUNK / 3) * 4 &&
+        /^[A-Za-z0-9+/]*={0,2}$/.test(v.data)
+      );
     case "output":
       return (
         isId(v.id) &&

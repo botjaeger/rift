@@ -14,6 +14,9 @@ import {
   MAX_RETRIES,
   UPDATE_GRACE_MS,
   UPDATE_RETRY_MS,
+  UPLOAD_HIGH_WATER_BYTES,
+  UPLOAD_LIVE_MS,
+  UPLOAD_POLL_MS,
 } from "../src/protocol/client";
 import type { Block } from "../src/protocol/types";
 import { FakeGatewaySocket, gatewayKey, rng } from "./helpers/gateway";
@@ -537,6 +540,63 @@ describe("RiftClient Phase 3", () => {
     lines: full ? [[0, [["top", null, null, 0]]], [1, []]] : [[1, [["x", null, null, 0]]]],
   });
   const sentOf = (t: ReturnType<typeof setup>, type: string) => t.last().sent.filter((m) => m.t === type);
+
+  /** `n` upload chunks for request `id` (a few bytes each: the pacing is by count and the socket's backlog). */
+  const chunks = (n: number) => (id: string) =>
+    Array.from({ length: n }, (_, i) => ({ t: "upload" as const, id, pane: 12, size: 3 * n, offset: 3 * i, data: "AAAA" }));
+
+  it("paces an image's chunks: one per turn, waiting while the socket holds too much", () => {
+    const t = connected();
+    const id = t.client.upload(chunks(4));
+    expect(id).toBe("u1");
+    // the first at once, the rest on later turns: the app is never blocked for the whole image
+    expect(sentOf(t, "upload")).toHaveLength(1);
+    vi.advanceTimersByTime(0);
+    expect(sentOf(t, "upload")).toHaveLength(2);
+    // a slow link: the socket holds more than the high-water mark, so nothing more goes
+    t.last().bufferedAmount = UPLOAD_HIGH_WATER_BYTES + 1;
+    vi.advanceTimersByTime(0);
+    vi.advanceTimersByTime(UPLOAD_POLL_MS * 10);
+    expect(sentOf(t, "upload")).toHaveLength(2);
+    vi.advanceTimersByTime(UPLOAD_POLL_MS * 10);
+    expect(sentOf(t, "upload")).toHaveLength(2);
+    // it drains: the rest follows, in order
+    t.last().bufferedAmount = 0;
+    vi.advanceTimersByTime(UPLOAD_POLL_MS);
+    vi.advanceTimersByTime(0);
+    expect(sentOf(t, "upload").map((m) => (m.t === "upload" ? m.offset : -1))).toEqual([0, 3, 6, 9]);
+  });
+
+  it("stops sending an image the gateway answered part-way (a refusal)", () => {
+    const t = connected();
+    t.client.upload(chunks(5));
+    vi.advanceTimersByTime(0);
+    t.last().recv({ t: "ack", id: "u1", ok: false, error: "busy", message: "pane 12 is at its prompt" });
+    vi.advanceTimersByTime(1000);
+    expect(sentOf(t, "upload")).toHaveLength(2);
+  });
+
+  it("an image going out keeps the connection alive past the silence timeout, until its ack", () => {
+    const t = connected();
+    t.client.upload(chunks(2));
+    vi.advanceTimersByTime(0);
+    // the gateway's pong waits behind the image on a slow link: no message for 50 s
+    vi.advanceTimersByTime(IDLE_TIMEOUT_MS + 5_000);
+    expect(t.sockets).toHaveLength(1);
+    expect(t.sockets[0]!.closed).toBe(false);
+    expect(t.client.connState.status).toBe("open");
+    // its ack: the ordinary silence rule applies again
+    t.last().recv({ t: "ack", id: "u1", ok: true });
+    vi.advanceTimersByTime(IDLE_TIMEOUT_MS);
+    expect(t.sockets[0]!.closed).toBe(true);
+  });
+
+  it("an image never keeps a dead connection past the upload's own limit", () => {
+    const t = connected();
+    t.client.upload(chunks(2));
+    vi.advanceTimersByTime(UPLOAD_LIVE_MS + 1);
+    expect(t.sockets[0]!.closed).toBe(true);
+  });
 
   it("sends the screen mode for the subscribed pane, once per change", () => {
     const t = connected();

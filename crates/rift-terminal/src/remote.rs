@@ -7,7 +7,10 @@
 //! diffs and completions its `menu`, `diff` and `complete`; `run` /
 //! `keys` / `text` from operate devices become the owning window's
 //! `remote-input` request, which the window accepts only while
-//! `remote_access` is on.
+//! `remote_access` is on. A `scroll` becomes `remote-scroll` (any device:
+//! the window refuses a view device's wheel into a program); an `upload`
+//! is saved here under `uploads/` with a name made here, then becomes
+//! `remote-upload`, which pastes its path.
 
 use crate::control::{self, Request, Response};
 use rift_remote::protocol::ClosingReason;
@@ -143,6 +146,18 @@ fn local_pane(pane: u64) -> u64 {
 impl ControlSource {
     fn owner_of(&self, pane: u64) -> Option<PathBuf> {
         self.owner.lock().unwrap().get(&pane).cloned()
+    }
+
+    /// [`Self::ask`] for a request that acts on `pane` (input, scroll,
+    /// upload, fit, open, close): the window's answer when it took it, else
+    /// its refusal as the gateway's [`InputError`].
+    fn act(&self, pane: u64, req: &Request) -> Result<Response, InputError> {
+        match self.ask(pane, req) {
+            Ok(Some(r)) if r.ok => Ok(r),
+            Ok(Some(r)) => Err(input_error(r.error.as_deref().unwrap_or_default())),
+            Ok(None) => Err(InputError::NoPane),
+            Err(e) => Err(InputError::Unavailable(e.to_string())),
+        }
     }
 
     /// `req` to the window owning `pane`: the cached owner first, after a
@@ -330,12 +345,76 @@ impl Source for ControlSource {
             keys,
             text,
         };
-        match self.ask(pane, &req) {
-            Ok(Some(r)) if r.ok => Ok(()),
-            Ok(Some(r)) => Err(input_error(r.error.as_deref().unwrap_or_default())),
-            Ok(None) => Err(InputError::NoPane),
-            Err(e) => Err(InputError::Unavailable(e.to_string())),
+        self.act(pane, &req).map(|_| ())
+    }
+
+    fn scroll(&self, pane: u64, lines: i32, operate: bool) -> Result<(), InputError> {
+        if is_background(pane) {
+            return Err(InputError::Unavailable(
+                "a shell kept while Rift is closed has no view to scroll".into(),
+            ));
         }
+        let req = Request::RemoteScroll {
+            pane: local_pane(pane),
+            lines,
+            operate,
+        };
+        self.act(pane, &req).map(|_| ())
+    }
+
+    /// Saved in the uploads folder under a name made here, then the owning
+    /// window pastes its path; a refused paste takes the file away again.
+    fn upload(
+        &self,
+        pane: u64,
+        device: &str,
+        kind: rift_remote::ImageKind,
+        bytes: &[u8],
+    ) -> Result<(), InputError> {
+        if is_background(pane) {
+            return Err(InputError::Unavailable(
+                "images go to a shell in a Rift window".into(),
+            ));
+        }
+        let Some(dir) = registry_dir().map(|d| uploads_dir(&d)) else {
+            return Err(InputError::Unavailable("no data directory".into()));
+        };
+        let now = SystemTime::now();
+        prune_uploads(&dir, now);
+        let path = save_upload(&dir, kind, bytes, now)
+            .map_err(|e| InputError::Unavailable(format!("cannot save the image: {e}")))?;
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let req = Request::RemoteUpload {
+            pane: local_pane(pane),
+            device: device.to_string(),
+            name,
+            check: false,
+        };
+        let result = self.act(pane, &req).map(|_| ());
+        if result.is_err() {
+            let _ = std::fs::remove_file(&path);
+        }
+        result
+    }
+
+    /// The window says whether `pane` takes an image now (`busy` at its
+    /// prompt), before the rest of the upload arrives.
+    fn upload_ready(&self, pane: u64) -> Result<(), InputError> {
+        if is_background(pane) {
+            return Err(InputError::Unavailable(
+                "images go to a shell in a Rift window".into(),
+            ));
+        }
+        let req = Request::RemoteUpload {
+            pane: local_pane(pane),
+            device: String::new(),
+            name: String::new(),
+            check: true,
+        };
+        self.act(pane, &req).map(|_| ())
     }
 
     fn fit(&self, pane: u64, size: Option<(u16, u16)>) -> Result<(), InputError> {
@@ -348,12 +427,7 @@ impl Source for ControlSource {
             cols: size.map(|s| s.0),
             rows: size.map(|s| s.1),
         };
-        match self.ask(pane, &req) {
-            Ok(Some(r)) if r.ok => Ok(()),
-            Ok(Some(r)) => Err(input_error(r.error.as_deref().unwrap_or_default())),
-            Ok(None) => Err(InputError::NoPane),
-            Err(e) => Err(InputError::Unavailable(e.to_string())),
-        }
+        self.act(pane, &req).map(|_| ())
     }
 
     fn reset_elapsed(&self, pane: u64, device: &str) -> Result<(), InputError> {
@@ -365,12 +439,7 @@ impl Source for ControlSource {
             pane: local_pane(pane),
             device: device.to_string(),
         };
-        match self.ask(pane, &req) {
-            Ok(Some(r)) if r.ok => Ok(()),
-            Ok(Some(r)) => Err(input_error(r.error.as_deref().unwrap_or_default())),
-            Ok(None) => Err(InputError::NoPane),
-            Err(e) => Err(InputError::Unavailable(e.to_string())),
-        }
+        self.act(pane, &req).map(|_| ())
     }
 
     fn open(&self, pane: u64, device: &str, kind: OpenKind) -> Result<u64, InputError> {
@@ -384,17 +453,13 @@ impl Source for ControlSource {
             device: device.to_string(),
             kind,
         };
-        match self.ask(pane, &req) {
-            // the new pane is in the same window as `pane`
-            Ok(Some(r)) if r.ok => match (r.pane, u32::try_from(pane >> LOCAL_BITS)) {
-                (Some(local), Ok(pid)) if local < 1 << LOCAL_BITS => Ok(remote_pane(pid, local)),
-                _ => Err(InputError::Unavailable(
-                    "the window did not name the new pane".into(),
-                )),
-            },
-            Ok(Some(r)) => Err(input_error(r.error.as_deref().unwrap_or_default())),
-            Ok(None) => Err(InputError::NoPane),
-            Err(e) => Err(InputError::Unavailable(e.to_string())),
+        let r = self.act(pane, &req)?;
+        // the new pane is in the same window as `pane`
+        match (r.pane, u32::try_from(pane >> LOCAL_BITS)) {
+            (Some(local), Ok(pid)) if local < 1 << LOCAL_BITS => Ok(remote_pane(pid, local)),
+            _ => Err(InputError::Unavailable(
+                "the window did not name the new pane".into(),
+            )),
         }
     }
 
@@ -413,12 +478,7 @@ impl Source for ControlSource {
             device: device.to_string(),
             kind,
         };
-        match self.ask(pane, &req) {
-            Ok(Some(r)) if r.ok => Ok(()),
-            Ok(Some(r)) => Err(input_error(r.error.as_deref().unwrap_or_default())),
-            Ok(None) => Err(InputError::NoPane),
-            Err(e) => Err(InputError::Unavailable(e.to_string())),
-        }
+        self.act(pane, &req).map(|_| ())
     }
 
     /// The pane's screen; the window is told the generation of the one held
@@ -430,7 +490,9 @@ impl Source for ControlSource {
             return self
                 .background
                 .with(pane, |s| {
-                    crate::views::terminal::remote_screen(s, &theme, force, None)
+                    // no window holds it: no scrolled view
+                    let mut view = crate::views::terminal::RemoteView::default();
+                    crate::views::terminal::remote_screen(s, &theme, force, None, &mut view)
                         .1
                         .flatten()
                 })
@@ -697,12 +759,17 @@ fn meta_request(pane: u64, limit: usize) -> Request {
 /// command line (the gateway's `busy` with this message).
 pub const LINE_HAS_TEXT: &str = "the command line has text; send the command with run";
 
+/// A window's `remote-scroll` error when the wheel would reach the program
+/// and the device may only view (the gateway's `forbidden`).
+pub const SCROLL_VIEW_ONLY: &str = "view only: the wheel goes to the program";
+
 /// A window's `remote-input` error as the gateway's.
 fn input_error(msg: &str) -> InputError {
     match msg {
         "busy" => InputError::Busy,
         "no such pane" => InputError::NoPane,
         "remote access is off" => InputError::Denied,
+        SCROLL_VIEW_ONLY => InputError::ViewOnly,
         // control_api changed under the gateway
         m if m.starts_with("not allowed") => InputError::Denied,
         m => InputError::Unavailable(m.to_string()),
@@ -778,6 +845,129 @@ fn remote_config_from(loaded: Result<Option<rift_core::Config>, String>) -> Remo
 /// This user's registry directory (`<data dir>/remote`).
 pub(crate) fn registry_dir() -> Option<PathBuf> {
     rift_core::shell_integration::data_dir().map(|d| registry::remote_dir(&d))
+}
+
+/// Images pasted from phones (`upload`): `<registry dir>/uploads`, 0700,
+/// each file 0600 and named by the gateway ([`save_upload`]).
+pub(crate) fn uploads_dir(registry_dir: &Path) -> PathBuf {
+    registry_dir.join("uploads")
+}
+
+/// How long a pasted image is kept: the program it was pasted into reads
+/// it when the path arrives; the next upload, or the gateway's next start,
+/// removes older ones.
+const UPLOAD_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// What every uploaded file's name starts with.
+const UPLOAD_PREFIX: &str = "rift-paste-";
+
+/// A name [`save_upload`] makes: `rift-paste-<unix ms>-<8 hex>.png|jpg`, and
+/// nothing else (no path, no other characters).
+fn valid_upload_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix(UPLOAD_PREFIX) else {
+        return false;
+    };
+    let Some(stem) = rest
+        .strip_suffix(".png")
+        .or_else(|| rest.strip_suffix(".jpg"))
+    else {
+        return false;
+    };
+    let Some((ms, tag)) = stem.split_once('-') else {
+        return false;
+    };
+    !ms.is_empty()
+        && ms.len() <= 20
+        && ms.bytes().all(|b| b.is_ascii_digit())
+        && tag.len() == 8
+        && tag.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Write `bytes` (validated by the gateway) as a new file in `dir` (made
+/// 0700 when missing), 0600, under a name made here: never one a phone
+/// chose. Returns its path. `dir` must be a folder itself, never a link to
+/// one (an image is never written, nor a mode changed, through a link).
+fn save_upload(
+    dir: &Path,
+    kind: rift_remote::ImageKind,
+    bytes: &[u8],
+    now: SystemTime,
+) -> std::io::Result<PathBuf> {
+    use std::io::Write as _;
+    use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
+    if !std::fs::symlink_metadata(dir)?.file_type().is_dir() {
+        return Err(std::io::Error::other(format!(
+            "{} is not a folder",
+            dir.display()
+        )));
+    }
+    // an existing folder too: nobody else lists or reads it
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    let ms = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis());
+    let tag: [u8; 4] = rift_remote::transport::random_bytes()?;
+    let tag: String = tag.iter().map(|b| format!("{b:02x}")).collect();
+    let path = dir.join(format!("{UPLOAD_PREFIX}{ms}-{tag}.{}", kind.extension()));
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)?;
+    if let Err(e) = f.write_all(bytes).and_then(|()| f.sync_all()) {
+        let _ = std::fs::remove_file(&path);
+        return Err(e);
+    }
+    Ok(path)
+}
+
+/// Remove the uploads in `dir` older than [`UPLOAD_MAX_AGE`] (only files
+/// with an upload's name).
+fn prune_uploads(dir: &Path, now: SystemTime) {
+    // never through a link to another folder
+    if !std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_dir()) {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let name = e.file_name();
+        if !valid_upload_name(&name.to_string_lossy()) {
+            continue;
+        }
+        let old = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| now.duration_since(t).ok())
+            .is_some_and(|age| age > UPLOAD_MAX_AGE);
+        if old {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
+/// The window's side of `remote-upload`: the uploaded file `name` in this
+/// user's uploads folder, when `name` is one the gateway makes and a plain
+/// file (not a link) there has it.
+pub fn upload_path(name: &str) -> Option<PathBuf> {
+    upload_path_in(&uploads_dir(&registry_dir()?), name)
+}
+
+fn upload_path_in(dir: &Path, name: &str) -> Option<PathBuf> {
+    if !valid_upload_name(name) {
+        return None;
+    }
+    let path = dir.join(name);
+    std::fs::symlink_metadata(&path)
+        .ok()
+        .filter(|m| m.file_type().is_file())
+        .map(|_| path)
 }
 
 /// `rift-terminal remote …`. Returns the process exit code.
@@ -870,6 +1060,8 @@ pub fn cli(args: &[String]) -> i32 {
     // with the tunnel, the relay is set once its address is known; it starts
     // only after this gateway holds the lock
     gw_config.relay = config.relay.clone().filter(|_| !config.tunnel);
+    // images phones pasted in an earlier run, past their age
+    prune_uploads(&uploads_dir(&dir), SystemTime::now());
     let gateway = match rift_remote::serve(listener, ControlSource::default(), gw_config) {
         Ok(g) => g,
         // another gateway holds the lock
@@ -1377,16 +1569,22 @@ impl Route {
 }
 
 /// [`Route`] of a pane: `alt_screen` (a full-screen program), the state of
-/// its last block (`None`: no shell integration) and whether a submitted
-/// command is still waiting for the shell to start it.
+/// its last block (`None`: no shell integration), whether a submitted
+/// command is still waiting for the shell to start it, and whether a
+/// program other than the shell holds the terminal (`job`). A prompt with
+/// such a program is one whose markers lied: a reattached agent whose
+/// replay lost its command's start, a program that printed a prompt marker.
+/// The program gets the input there, as the topology's `running` (the
+/// phone's agent composer) says.
 pub fn route(
     alt_screen: bool,
     last: Option<&rift_core::BlockState>,
     submit_pending: bool,
+    job: bool,
 ) -> Route {
     match last {
         Some(rift_core::BlockState::Prompt) if !alt_screen && submit_pending => Route::Pending,
-        Some(rift_core::BlockState::Prompt) if !alt_screen => Route::Editor,
+        Some(rift_core::BlockState::Prompt) if !alt_screen && !job => Route::Editor,
         _ => Route::Raw,
     }
 }
@@ -1450,6 +1648,12 @@ pub fn closed_toast(device: &str, kind: CloseKind) -> String {
 /// Never the text itself: it may be a password.
 pub fn typed_toast(device: &str) -> String {
     format!("{} typed into a program", shown(device, TOAST_DEVICE))
+}
+
+/// The desktop's toast for a phone's pasted image: `<device> pasted an
+/// image`.
+pub fn pasted_toast(device: &str) -> String {
+    format!("{} pasted an image", shown(device, TOAST_DEVICE))
 }
 
 /// Start a managed gateway for this user (`<this exe> remote --managed`,
@@ -1581,23 +1785,30 @@ mod tests {
             exit: Some(0),
             duration: Duration::ZERO,
         };
-        assert_eq!(route(false, Some(&B::Prompt), false), Route::Editor);
+        assert_eq!(route(false, Some(&B::Prompt), false, false), Route::Editor);
         // a full-screen program, a running command, a command the shell has
         // not started yet, no shell integration: busy for commands
-        assert_eq!(route(true, Some(&B::Prompt), false), Route::Raw);
-        assert_eq!(route(false, Some(&running), false), Route::Raw);
-        assert_eq!(route(false, Some(&B::Prompt), true), Route::Pending);
-        assert_eq!(route(false, Some(&done), false), Route::Raw);
-        assert_eq!(route(false, None, false), Route::Raw);
+        assert_eq!(route(true, Some(&B::Prompt), false, false), Route::Raw);
+        assert_eq!(route(false, Some(&running), false, false), Route::Raw);
+        assert_eq!(route(false, Some(&B::Prompt), true, false), Route::Pending);
+        assert_eq!(route(false, Some(&done), false, false), Route::Raw);
+        assert_eq!(route(false, None, false, false), Route::Raw);
         // text: only into a program; never into the shell's line while the
         // command submitted last waits for it, nor into the editor; the
         // alternate screen and a shell without integration take it (the
         // gateway cannot tell their prompts from programs)
-        assert!(!route(false, Some(&B::Prompt), true).takes_text());
-        assert!(!route(false, Some(&B::Prompt), false).takes_text());
-        assert!(route(false, Some(&running), false).takes_text());
-        assert!(route(true, Some(&B::Prompt), true).takes_text());
-        assert!(route(false, None, false).takes_text());
+        assert!(!route(false, Some(&B::Prompt), true, false).takes_text());
+        assert!(!route(false, Some(&B::Prompt), false, false).takes_text());
+        assert!(route(false, Some(&running), false, false).takes_text());
+        assert!(route(true, Some(&B::Prompt), true, false).takes_text());
+        assert!(route(false, None, false, false).takes_text());
+        // a prompt while a program holds the terminal (a reattached agent
+        // whose replay lost its start, a program printing a prompt marker):
+        // the program's, as the phone's agent composer assumes
+        assert_eq!(route(false, Some(&B::Prompt), false, true), Route::Raw);
+        assert!(route(false, Some(&B::Prompt), false, true).takes_text());
+        // a command the shell has not started yet still waits for it
+        assert_eq!(route(false, Some(&B::Prompt), true, true), Route::Pending);
     }
 
     #[test]
@@ -1633,6 +1844,83 @@ mod tests {
         assert_eq!(opened_toast("phone", OpenKind::Tab), "phone opened a tab");
         assert_eq!(opened_toast("phone", OpenKind::Pane), "phone opened a pane");
         assert_eq!(closed_toast("phone", CloseKind::Tab), "phone closed a tab");
+        assert_eq!(pasted_toast("phone\n"), "phone pasted an image");
+    }
+
+    #[test]
+    fn uploads_are_saved_privately_under_a_name_made_here_and_pruned() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = std::env::temp_dir().join(format!("rift-uploads-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = uploads_dir(&root);
+        let now = SystemTime::now();
+        let png = b"\x89PNG\r\n\x1a\nrest";
+        let a = save_upload(&dir, rift_remote::ImageKind::Png, png, now).unwrap();
+        let b = save_upload(&dir, rift_remote::ImageKind::Jpeg, b"\xff\xd8\xff", now).unwrap();
+        assert_ne!(a, b, "two uploads in one millisecond get two names");
+        assert_eq!(std::fs::read(&a).unwrap(), png);
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&a), 0o600);
+        let name = a.file_name().unwrap().to_str().unwrap();
+        assert!(
+            name.starts_with(UPLOAD_PREFIX) && name.ends_with(".png"),
+            "{name}"
+        );
+        assert!(b.to_str().unwrap().ends_with(".jpg"));
+        // the window takes only a name the gateway makes, and only a file
+        assert_eq!(upload_path_in(&dir, name), Some(a.clone()));
+        for bad in [
+            "../remote/gateway.key",
+            "rift-paste-1-0000000g.png",
+            "rift-paste-1-00000000.svg",
+            "rift-paste--00000000.png",
+            "rift-paste-1-00000000.png/../x",
+            "rift-paste-1-00000000.png\n",
+            "x.png",
+        ] {
+            assert!(!valid_upload_name(bad), "{bad}");
+            assert_eq!(upload_path_in(&dir, bad), None, "{bad}");
+        }
+        assert!(valid_upload_name("rift-paste-1760364000123-0a1b2c3d.jpg"));
+        // a link with an upload's name is not a file the gateway saved
+        let link = dir.join("rift-paste-1-00000000.png");
+        std::os::unix::fs::symlink(root.join("elsewhere"), &link).unwrap();
+        assert_eq!(upload_path_in(&dir, "rift-paste-1-00000000.png"), None);
+        // past the age limit they go, and only uploads go
+        let other = dir.join("notes.txt");
+        std::fs::write(&other, "keep").unwrap();
+        prune_uploads(&dir, now + UPLOAD_MAX_AGE / 2);
+        assert!(a.exists() && b.exists());
+        prune_uploads(&dir, now + UPLOAD_MAX_AGE + Duration::from_secs(60));
+        assert!(!a.exists() && !b.exists());
+        assert!(other.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_uploads_folder_that_is_a_link_is_never_written_through() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = std::env::temp_dir().join(format!("rift-uplink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let target = root.join("elsewhere");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let dir = uploads_dir(&root);
+        std::os::unix::fs::symlink(&target, &dir).unwrap();
+        let now = SystemTime::now();
+        let png = b"\x89PNG\r\n\x1a\nrest";
+        assert!(save_upload(&dir, rift_remote::ImageKind::Png, png, now).is_err());
+        // nothing written there, its mode untouched
+        assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755);
+        // nor pruned through it
+        let old = target.join("rift-paste-1-00000000.png");
+        std::fs::write(&old, "x").unwrap();
+        prune_uploads(&dir, now + UPLOAD_MAX_AGE * 100);
+        assert!(old.exists());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

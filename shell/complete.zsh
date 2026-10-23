@@ -37,6 +37,9 @@ local line got
 umask 077
 cat >| $setup <<'EOF'
 PROMPT= RPROMPT= PS2= PS4=
+# this hidden shell keeps no history of its own: nothing it does reaches
+# the user's $HISTFILE
+unset HISTFILE
 unset zle_bracketed_paste
 [[ -n $RIFT_COMPLETE_FPATH ]] && fpath=(${(s.:.)RIFT_COMPLETE_FPATH})
 unsetopt beep
@@ -128,7 +131,10 @@ compadd() {
 print -r -- $'\x1e'rdy
 EOF
 
-RIFT_COMPLETE_SHELL=1 zpty rift ${(q)prog} ${(q)args[@]} -i || exit 1
+# HIST_IGNORE_SPACE from the start, so the line that loads the setup (typed
+# with a leading space, before the setup can unset HISTFILE) is never saved
+# to the user's history, even by INC_APPEND_HISTORY or SHARE_HISTORY
+RIFT_COMPLETE_SHELL=1 zpty rift ${(q)prog} -o histignorespace ${(q)args[@]} -i || exit 1
 integer pty=$REPLY
 # Wait until the inner shell wrote something; false once the parent that
 # asks is gone (Rift quit or crashed while a completion function hangs).
@@ -139,7 +145,7 @@ __rift_wait() {
     (( ${sysparams[ppid]:-$parent} == parent )) && kill -0 $parent 2>/dev/null || return 1
   done
 }
-zpty -w rift "source ${(q)setup}"
+zpty -w rift " source ${(q)setup}"
 # the rc files print what they like; the setup's marker ends it
 while __rift_wait && zpty -r rift got; do
   [[ $got == *$'\x1e'rdy* ]] && break

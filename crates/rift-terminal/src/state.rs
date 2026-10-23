@@ -461,16 +461,26 @@ impl EditorState {
         } else {
             *all.iter().min().unwrap_or(&self.cursor)
         };
+        let Some(at) = self.vertical_from(from, down) else {
+            return;
+        };
+        let mut all: Vec<_> = std::iter::once((self.cursor, self.anchor, true))
+            .chain(self.extra.iter().map(|&(c, a)| (c, a, false)))
+            .collect();
+        all.push((at, None, false));
+        self.set_carets(all);
+    }
+
+    /// The offset one line above (or below) `from`, at the same column or
+    /// that line's end; `None` on the first (last) line.
+    fn vertical_from(&self, from: usize, down: bool) -> Option<usize> {
         let line_start = self.buffer[..from].rfind('\n').map_or(0, |i| i + 1);
         let col = self.buffer[line_start..from].chars().count();
         let target_start = if down {
-            match self.buffer[from..].find('\n') {
-                Some(i) => from + i + 1,
-                None => return,
-            }
+            from + self.buffer[from..].find('\n')? + 1
         } else {
             if line_start == 0 {
-                return;
+                return None;
             }
             self.buffer[..line_start - 1]
                 .rfind('\n')
@@ -479,15 +489,26 @@ impl EditorState {
         let target_end = self.buffer[target_start..]
             .find('\n')
             .map_or(self.buffer.len(), |i| target_start + i);
-        let at = self.buffer[target_start..target_end]
-            .char_indices()
-            .nth(col)
-            .map_or(target_end, |(i, _)| target_start + i);
-        let mut all: Vec<_> = std::iter::once((self.cursor, self.anchor, true))
-            .chain(self.extra.iter().map(|&(c, a)| (c, a, false)))
-            .collect();
-        all.push((at, None, false));
-        self.set_carets(all);
+        Some(
+            self.buffer[target_start..target_end]
+                .char_indices()
+                .nth(col)
+                .map_or(target_end, |(i, _)| target_start + i),
+        )
+    }
+
+    /// ↑ / ↓ inside a multi-line command: the cursor one line up (down);
+    /// `false` on the first (last) line, where the keys walk history.
+    pub fn line_vertical(&mut self, down: bool) -> bool {
+        match self.vertical_from(self.cursor, down) {
+            Some(at) => {
+                self.anchor = None;
+                self.extra.clear();
+                self.cursor = at;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Ctrl-G: select the word at the cursor, or with a selection, add a
@@ -587,6 +608,29 @@ impl EditorState {
         }
         self.undo_stack.push((self.buffer.clone(), self.cursor));
         self.redo_stack.clear();
+    }
+
+    /// Show `line` in place of the buffer without an undo snapshot: the
+    /// history menu's previews, and its way back to what was typed.
+    pub fn preview_line(&mut self, line: &str, cursor: usize) {
+        self.extra.clear();
+        self.anchor = None;
+        self.buffer.clear();
+        self.buffer.push_str(line);
+        self.cursor = cursor.min(self.buffer.len());
+        self.hist_idx = None;
+    }
+
+    /// The previewed line stays: one undo step leads back to `typed`.
+    pub fn keep_preview(&mut self, typed: &str, cursor: usize) {
+        if self.buffer == typed {
+            return;
+        }
+        let line = std::mem::replace(&mut self.buffer, typed.to_string());
+        let at = std::mem::replace(&mut self.cursor, cursor.min(typed.len()));
+        self.push_undo();
+        self.buffer = line;
+        self.cursor = at;
     }
 
     pub fn undo(&mut self) {
@@ -1087,6 +1131,10 @@ pub fn fitted_grid(
 pub struct PaneState {
     pub session: Session,
     pub view_offset: usize,
+    /// Paired phones' own scrolled view of the pane (their `scroll`, their
+    /// styled `screen`), apart from `view_offset`: the desktop's view never
+    /// moves for a phone.
+    pub remote_view: crate::views::terminal::RemoteView,
     pub last_display_len: usize,
     /// The last frame's grid cursor shape when it drew one, and how many
     /// cells it drew as geometry (box drawing, blocks, Powerline; dump).
@@ -1221,6 +1269,7 @@ impl PaneState {
         PaneState {
             session,
             view_offset: 0,
+            remote_view: Default::default(),
             last_display_len: 0,
             drawn_cursor: None,
             art_cells: 0,
@@ -1847,6 +1896,26 @@ mod tests {
         assert_eq!(e.buffer, "a1- b2- c3-");
         e.collapse_carets();
         assert!(!e.has_extra());
+    }
+
+    #[test]
+    fn up_and_down_move_between_lines_until_the_ends() {
+        let mut e = EditorState {
+            buffer: "echo one\nab\necho three".into(),
+            cursor: 15, // "ech|o three"
+            ..Default::default()
+        };
+        assert!(e.line_vertical(false));
+        assert_eq!(e.cursor, 11, "the shorter line's end");
+        assert!(e.line_vertical(false));
+        assert_eq!(e.cursor, 2, "back at column 2 of the first line");
+        // the first line: the key walks history instead
+        assert!(!e.line_vertical(false));
+        assert_eq!(e.cursor, 2);
+        assert!(e.line_vertical(true));
+        assert!(e.line_vertical(true));
+        assert_eq!(e.cursor, 14);
+        assert!(!e.line_vertical(true));
     }
 
     #[test]

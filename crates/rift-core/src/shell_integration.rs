@@ -253,6 +253,60 @@ mod tests {
         }
     }
 
+    /// The system rc sets HISTFILE from ZDOTDIR (macOS /etc/zshrc), which is
+    /// the shim in a Rift pane: the history still goes to the user's file,
+    /// lines an earlier version left in the shim's file move there once, and
+    /// an rc that names its own HISTFILE keeps it.
+    #[test]
+    fn zsh_history_goes_to_the_users_file_not_the_shim() {
+        if std::process::Command::new("zsh")
+            .arg("-fc")
+            .arg("true")
+            .status()
+            .is_err()
+        {
+            eprintln!("BLOCKED: zsh is not installed");
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("rift-histfile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (shim, home) = (root.join("shim"), root.join("home"));
+        std::fs::create_dir_all(&shim).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(shim.join(".zshenv"), ZSHENV).unwrap();
+        std::fs::write(shim.join(".zshrc"), ZSHRC).unwrap();
+        // as the system rc does, from the user's .zshenv (sourced while
+        // ZDOTDIR is still the shim) so it holds where /etc/zshrc does not
+        std::fs::write(home.join(".zshenv"), "HISTFILE=${ZDOTDIR}/.zsh_history\n").unwrap();
+        std::fs::write(shim.join(".zsh_history"), "stranded cmd\n").unwrap();
+        std::fs::write(home.join(".zsh_history"), "earlier cmd\n").unwrap();
+        let histfile = |rc: &str| {
+            std::fs::write(home.join(".zshrc"), rc).unwrap();
+            let out = std::process::Command::new("zsh")
+                .args(["-i", "-c", "print -r -- $HISTFILE"])
+                .env("ZDOTDIR", &shim)
+                .env("HOME", &home)
+                .env_remove("RIFT_ORIG_ZDOTDIR")
+                .env_remove("RIFT_INTEGRATION_ZSH")
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let users = home.join(".zsh_history");
+        assert_eq!(histfile(""), users.to_string_lossy());
+        assert_eq!(
+            std::fs::read_to_string(&users).unwrap(),
+            "earlier cmd\nstranded cmd\n"
+        );
+        assert!(!shim.join(".zsh_history").exists(), "moved once");
+        // the user's own choice wins
+        assert_eq!(
+            histfile("HISTFILE=$HOME/mine\n"),
+            home.join("mine").to_string_lossy()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn shell_name_prefers_config() {
         assert_eq!(shell_name(Some("/bin/sh")), "sh");

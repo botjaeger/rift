@@ -685,6 +685,19 @@ impl Gathered {
         history: &[String],
         shell_history: &[String],
     ) -> Vec<Completion> {
+        self.finish_ranked(buffer, &[], history, shell_history)
+    }
+
+    /// [`finish`](Self::finish) with `ranked` history lines first: matches
+    /// of Rift's own history ranked by directory
+    /// (`command_history::ranked_matches`), best first.
+    pub fn finish_ranked(
+        self,
+        buffer: &str,
+        ranked: &[&str],
+        history: &[String],
+        shell_history: &[String],
+    ) -> Vec<Completion> {
         let mut words = self.words;
         rank(&mut words, history, shell_history);
         let mut seen = std::collections::HashSet::new();
@@ -694,7 +707,7 @@ impl Gathered {
             .filter(|c| seen.insert(c.insert.clone()))
             .take(MAX_WORDS)
             .collect();
-        with_history(out, seen, buffer, history, shell_history)
+        with_history(out, seen, buffer, ranked, history, shell_history)
     }
 }
 
@@ -703,22 +716,30 @@ fn with_history(
     mut out: Vec<Completion>,
     mut seen: std::collections::HashSet<String>,
     buffer: &str,
+    ranked: &[&str],
     history: &[String],
     shell_history: &[String],
 ) -> Vec<Completion> {
-    // history: whole-buffer prefix matches (drives ghost text); the pane's
-    // own entries first, then the imported shell history (newest first)
+    // history: whole-buffer prefix matches (drives ghost text); Rift's own
+    // history ranked by directory first, then the pane's own entries, then
+    // the imported shell history (newest first)
     if !buffer.trim().is_empty() {
         let mut n = 0;
-        for h in history
-            .iter()
-            .rev()
-            .take(200)
-            .chain(shell_history.iter().rev().take(3000))
-        {
-            if h.starts_with(buffer) && h != buffer && !h.contains('\n') && seen.insert(h.clone()) {
+        for h in ranked.iter().copied().chain(
+            history
+                .iter()
+                .rev()
+                .take(200)
+                .chain(shell_history.iter().rev().take(3000))
+                .map(String::as_str),
+        ) {
+            if h.starts_with(buffer)
+                && h != buffer
+                && !h.contains('\n')
+                && seen.insert(h.to_string())
+            {
                 out.push(Completion {
-                    insert: h.clone(),
+                    insert: h.to_string(),
                     description: String::new(),
                     source: "history",
                 });
@@ -1459,6 +1480,28 @@ mod tests {
         let shell = vec!["git pu\nll".to_string()];
         let out = complete("git pu", 6, &[], &shell, None);
         assert!(out.iter().all(|c| c.source != "history"));
+    }
+
+    #[test]
+    fn ranked_history_comes_before_pane_and_shell_history() {
+        use crate::command_history::{Entry, ranked_matches};
+        let at = |cmd: &str, cwd: &str, finished| Entry {
+            command: cmd.into(),
+            cwd: Some(cwd.into()),
+            repo: Some(cwd.into()),
+            finished,
+            exit: Some(0),
+        };
+        // the newer command ran in another directory: the one run here wins
+        let store = vec![at("pnpm dev", "/a", 1), at("pnpm dev:web", "/b", 2)];
+        let ranked = ranked_matches(&store, "pnpm de", Some("/a"), Some("/a"));
+        let pane = vec!["pnpm dev:web".to_string(), "pnpm deploy".to_string()];
+        let shell = vec!["pnpm dev".to_string(), "pnpm dedupe".to_string()];
+        let out = gather("pnpm de", 7, None, None).finish_ranked("pnpm de", &ranked, &pane, &shell);
+        assert_eq!(
+            inserts_of(&out, "history"),
+            ["pnpm dev", "pnpm dev:web", "pnpm deploy", "pnpm dedupe"]
+        );
     }
 
     #[test]

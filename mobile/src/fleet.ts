@@ -22,7 +22,8 @@ import {
 } from "./notify";
 import type { PairLink } from "./pairing";
 import { BatchedStore } from "./protocol/batch";
-import { MAX_OUTPUT_LINES, MAX_TEXT_BYTES, textProblem } from "./protocol/types";
+import { MAX_OUTPUT_LINES, MAX_TEXT_BYTES, MAX_UPLOAD_BYTES, textProblem } from "./protocol/types";
+import { UPLOAD_TIMEOUT_MS, uploadChunks, uploadRefusal } from "./upload";
 import { RiftClient, type ConnState, type Failure, type SocketFactory } from "./protocol/client";
 import { canLoadOlder, reducePane, reduceScreen, staleScreen, type PaneState, type ScreenState } from "./protocol/store";
 import { findPane, tabTitle } from "./topology";
@@ -351,6 +352,8 @@ interface Pending {
   host: string;
   resolve: (r: ActionResult) => void;
   timer: ReturnType<typeof setTimeout>;
+  /** A refusal resolves with the gateway's own message (the caller words it by its reason). */
+  raw?: boolean;
 }
 
 export class Fleet {
@@ -1289,6 +1292,50 @@ export class Fleet {
   }
 
   /**
+   * Scrolls the pane on the computer `lines` up (negative: down), as its wheel would (feature
+   * `scroll`). Any device: a view-only one moves the pane's view, and is refused (`forbidden`)
+   * where the wheel would go to the program.
+   */
+  async sendScroll(host: string, pane: number, lines: number): Promise<ActionResult> {
+    const h = this.host(host);
+    const name = h?.record.name ?? "the computer";
+    if (!hasFeature(h, "scroll"))
+      return { ok: false, code: "unsupported", message: `Rift on ${name} cannot scroll from the phone. Update it.` };
+    const r = await this.request(host, (c) => c.scroll(pane, lines));
+    if (!r.ok && r.code === "forbidden" && h && !canOperate(h))
+      return { ...r, message: "View only: scrolling this program sends it input." };
+    return r;
+  }
+
+  /**
+   * Pastes the image `b64` (PNG or JPEG, base64) into the program running in the pane (feature
+   * `upload`, operate only): the computer saves it and pastes its path, as a dropped file's.
+   */
+  async uploadImage(host: string, pane: number, b64: string): Promise<ActionResult> {
+    const h = this.host(host);
+    const name = h?.record.name ?? "the computer";
+    if (!hasFeature(h, "upload"))
+      return { ok: false, code: "unsupported", message: `Rift on ${name} cannot take images from the phone. Update it.` };
+    const refused = this.operating(host);
+    if (refused) return refused;
+    // built once: the client gives the id, which only replaces the placeholder
+    const built = uploadChunks("", pane, b64);
+    if (!built.ok)
+      return built.code === "too_large"
+        ? { ok: false, code: "too_large", message: `The image is larger than ${MAX_UPLOAD_BYTES >> 20} MB.` }
+        : { ok: false, code: "bad_request", message: "The clipboard's image is empty." };
+    const r = await this.request(
+      host,
+      (c) => c.upload((id) => built.msgs.map((m) => ({ ...m, id }))),
+      UPLOAD_TIMEOUT_MS,
+      true,
+    );
+    if (r.ok) return r;
+    // worded by the gateway's reason, not only its code (a pane at its prompt, a slow link, …)
+    return { ...r, message: uploadRefusal(r.code, r.message) ?? describeCode(r.code, name, r.message) };
+  }
+
+  /**
    * Opens a new tab in the pane's window, or a split of the pane (feature `open`); the result's
    * `pane` is the new pane, already in the host's topology (the gateway sends it before the ack).
    */
@@ -1341,7 +1388,12 @@ export class Fleet {
     return Promise.resolve({ ok: false, code: "forbidden", message: describeCode("forbidden", h.record.name, "") });
   }
 
-  private request(host: string, send: (c: RiftClient) => string | null): Promise<ActionResult> {
+  private request(
+    host: string,
+    send: (c: RiftClient) => string | null,
+    timeoutMs = ACK_TIMEOUT_MS,
+    raw = false,
+  ): Promise<ActionResult> {
     const name = this.host(host)?.record.name ?? "the computer";
     const client = this.clients.get(host);
     const id = client ? send(client) : null;
@@ -1360,8 +1412,8 @@ export class Fleet {
           code: "timeout",
           message: `${describeCode("timeout", name, "")} ${CHECK_BEFORE_RESENDING}`,
         });
-      }, ACK_TIMEOUT_MS);
-      this.pending.set(this.pendingKey(host, id), { host, resolve, timer });
+      }, timeoutMs);
+      this.pending.set(this.pendingKey(host, id), { host, resolve, timer, raw });
     });
   }
 
@@ -1384,7 +1436,7 @@ export class Fleet {
         : {
             ok: false,
             code,
-            message: describeCode(code, name, msg.message ?? ""),
+            message: p.raw ? (msg.message ?? "") : describeCode(code, name, msg.message ?? ""),
           },
     );
   }

@@ -37,6 +37,7 @@ use crate::views::viewer::{ViewerHit, ViewerState};
 use crate::views::whats_new::{WhatsNewHits, WhatsNewState};
 
 mod block_tools;
+mod command_history;
 mod composer;
 mod explorer_menu;
 mod hotkey_window;
@@ -195,6 +196,9 @@ struct CompletionRequest {
     /// The pane's own history (shared with its editor, not copied).
     history: Arc<Vec<String>>,
     shell_history: Arc<Vec<String>>,
+    /// Rift's own command history, ranked against `cwd` (a pane without a
+    /// local directory, e.g. on another machine, gets none of it).
+    command_history: Arc<Vec<rift_core::command_history::Entry>>,
     cwd: Option<String>,
     /// The pane shell's `$PATH` as its hooks last reported it (`rift-use`
     /// changes it); `None`: the probed shell's.
@@ -238,7 +242,9 @@ enum SlowSource {
 
 impl CompletionRequest {
     fn finish(&self, g: rift_core::completion::Gathered) -> Vec<rift_core::completion::Completion> {
-        g.finish(&self.buffer, &self.history, &self.shell_history)
+        let ranked =
+            command_history::ranked(&self.command_history, &self.buffer, self.cwd.as_deref());
+        g.finish_ranked(&self.buffer, &ranked, &self.history, &self.shell_history)
     }
 
     /// Rift's own candidates: the whole answer, or the first part while the
@@ -694,6 +700,8 @@ pub struct App {
     shell_history: Arc<Vec<String>>,
     /// The shell `shell_history` was (or is being) imported for.
     history_shell: String,
+    /// Rift's own command history (`app/command_history.rs`).
+    command_history: rift_core::command_history::Store,
     font_size: f32,
     line_h: f32,
     _watcher: Option<rift_core::watch::ConfigWatcher>,
@@ -797,6 +805,9 @@ pub struct App {
     /// Key that read the menu or ghost while `completion_pending` was in
     /// flight: applied once, when that request's answer arrives.
     completion_intent: Option<CompletionIntent>,
+    /// The pending request follows a Tab: its panel counts as asked for
+    /// (`CompletionUi::asked`), so ↑ / ↓ navigate it.
+    completion_after_tab: bool,
     /// Counter identifying completion requests.
     completion_gen: u64,
     /// The pending request whose partial answer (Rift's own candidates) is
@@ -2093,6 +2104,7 @@ impl App {
             clipboard: None,
             shell_history: Arc::default(),
             history_shell: String::new(),
+            command_history: command_history::open(script.is_some()),
             font_size: DEFAULT_FONT_SIZE,
             line_h: DEFAULT_FONT_SIZE * 1.2,
             _watcher: None,
@@ -2143,6 +2155,7 @@ impl App {
             completion_worker: CompletionWorker::default(),
             completion_pending: None,
             completion_intent: None,
+            completion_after_tab: false,
             completion_gen: 0,
             completion_partial: None,
             completion_pane: None,
@@ -6223,13 +6236,10 @@ impl App {
             return;
         };
         let seen = self.attention_seen.get(&pane).copied();
-        let fresh: Vec<(rift_core::BlockId, String, Option<i32>, Duration, bool)> = p
-            .session
-            .blocks
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|b| seen.is_none_or(|s| b.id > s))
+        let blocks = p.session.blocks.lock().unwrap();
+        let fresh_blocks = || blocks.iter().filter(|b| seen.is_none_or(|s| b.id > s));
+        self.record_command_history(fresh_blocks());
+        let fresh: Vec<(rift_core::BlockId, String, Option<i32>, Duration, bool)> = fresh_blocks()
             .filter_map(|b| match b.state {
                 BlockState::Done { exit, duration } => Some((
                     b.id,
@@ -6241,6 +6251,7 @@ impl App {
                 _ => None,
             })
             .collect();
+        drop(blocks);
         let Some(newest) = fresh.last().map(|f| f.0) else {
             return;
         };
@@ -6783,26 +6794,9 @@ impl App {
             return;
         }
         let active = self.active_pane_id();
-        let mut entries: Vec<Entry> = Vec::new();
-        for tab in &self.win.tabs {
-            for p in &tab.panes {
-                let here = Some(p.session.id) == active;
-                let blocks = p.session.blocks.lock().unwrap();
-                for b in blocks.iter() {
-                    if matches!(b.state, rift_core::BlockState::Done { .. }) {
-                        entries.push(Entry {
-                            command: b.command.clone(),
-                            cwd: b.cwd.as_deref().map(editor::shorten_home),
-                            exit: b.exit_code(),
-                            finished: b.finished_at,
-                            here,
-                        });
-                    }
-                }
-            }
-        }
-        // newest first: finish time, unknown (replayed) last
-        entries.sort_by_key(|e| std::cmp::Reverse(e.finished));
+        // this window's finished commands and Rift's saved history, ranked
+        // by directory (`app/command_history.rs`)
+        let mut entries: Vec<Entry> = self.ranked_history_rows(active);
         // the pane's own typed history, then the shell's, newest first
         if let Some(p) = self.win.tabs.get(self.win.active).and_then(|t| t.active()) {
             entries.extend(p.editor.history.iter().rev().map(|c| Entry {
@@ -6852,6 +6846,7 @@ impl App {
                 Key::Named(NamedKey::Tab) => {
                     self.win.history.close();
                     self.update_completions();
+                    self.completion_after_tab = true;
                     return true;
                 }
                 _ => {}
@@ -6860,7 +6855,13 @@ impl App {
         match &event.logical_key {
             Key::Named(NamedKey::Escape) => self.win.history.close(),
             Key::Named(NamedKey::ArrowUp) => self.win.history.move_by(-1),
-            Key::Named(NamedKey::ArrowDown) => self.win.history.move_by(1),
+            // ↓ past the last row closes it, as ↓ past the end of the
+            // history menu does
+            Key::Named(NamedKey::ArrowDown) => {
+                if !self.win.history.step_down() {
+                    self.win.history.close();
+                }
+            }
             Key::Named(NamedKey::PageUp) => self.win.history.move_by(-8),
             Key::Named(NamedKey::PageDown) => self.win.history.move_by(8),
             Key::Named(NamedKey::Tab) => self.take_history(HistoryUse::Edit),
@@ -7290,6 +7291,28 @@ impl App {
     fn update_completions(&mut self) {
         // a deferred Tab / ⌃→ belonged to the editor state being replaced
         self.completion_intent = None;
+        self.completion_after_tab = false;
+        // the history menu owns its pane's line while it shows the preview;
+        // another pane's focus gives that pane its typed text back, and an
+        // edit that bypassed the menu (a paste, ⌘A, the palette, ⌘I) makes
+        // the line the user's: the menu goes, the edit stays
+        self.drop_stray_history_menu();
+        if self.win.completion.history_menu.is_some() {
+            let previewed = self.win.completion.history_line();
+            let line = self
+                .win
+                .tabs
+                .get(self.win.active)
+                .and_then(|t| t.active())
+                .map(|p| p.editor.buffer.as_str());
+            if previewed.is_some() && previewed == line {
+                self.completion_pending = None;
+                return;
+            }
+            self.win.completion.close();
+        }
+        // the panel for the new line is not asked for yet
+        self.win.completion.asked = false;
         // the rich-input composer is prose for a program, not a command
         let Some(pane) = self
             .win
@@ -7355,6 +7378,7 @@ impl App {
             cursor,
             history,
             shell_history: self.shell_history.clone(),
+            command_history: self.command_history.snapshot(),
             cwd,
             path,
             shell,
@@ -7516,6 +7540,10 @@ impl App {
         cursor: usize,
         items: Vec<rift_core::completion::Completion>,
     ) {
+        // the history menu owns the line while it is open
+        if self.win.completion.history_menu.is_some() {
+            return;
+        }
         self.win.completion_buffer = buffer.to_string();
         // the history pane owns the line while it is open
         if self.win.history.open {
@@ -7573,6 +7601,9 @@ impl App {
         self.win
             .completion
             .set(if show { dropdown } else { Vec::new() });
+        // a ↓ into Rift's own answer still counts once the full one lands
+        self.win.completion.asked =
+            (self.win.completion.asked || self.completion_after_tab) && self.win.completion.open;
     }
 
     /// ⌃→: accept one word of the ghost suggestion.
@@ -7664,6 +7695,8 @@ impl App {
         }
         self.win.completion.close();
         self.update_completions();
+        // the next level's panel (a folder's entries) answers this Tab
+        self.completion_after_tab = true;
     }
 
     fn logical_size(&self) -> (f32, f32) {
@@ -8495,7 +8528,55 @@ impl App {
         };
         self.open_profile(None, how);
     }
+}
 
+/// Lets go of what it holds on a thread of its own when dropped: a closed
+/// pane's terminal grid (its whole scrollback) is freed there, never on the
+/// event loop — on a machine short of memory, freeing swapped-out rows took
+/// the window's main thread 42 s.
+pub(crate) struct FreeLater<T: Send + 'static>(pub(crate) Option<T>);
+
+impl<T: Send + 'static> Drop for FreeLater<T> {
+    fn drop(&mut self) {
+        if let Some(held) = self.0.take() {
+            let _ = std::thread::Builder::new()
+                .name("free-grid".into())
+                .spawn(move || drop(held));
+        }
+    }
+}
+
+#[cfg(test)]
+mod free_later_tests {
+    use super::FreeLater;
+
+    /// Says on which thread it was dropped.
+    struct Probe(std::sync::mpsc::Sender<Option<String>>);
+
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            let _ = self
+                .0
+                .send(std::thread::current().name().map(str::to_string));
+        }
+    }
+
+    #[test]
+    fn the_last_reference_goes_on_a_thread_of_its_own() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let grid = std::sync::Arc::new(Probe(tx));
+        {
+            // as `close_pane`: the guard first, the pane's own reference
+            // let go of on this thread before it
+            let _later = FreeLater(Some(grid.clone()));
+            drop(grid);
+        }
+        let on = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(on.as_deref(), Some("free-grid"));
+    }
+}
+
+impl App {
     fn split_active_at(&mut self, axis: Axis, dir: Option<std::path::PathBuf>) {
         if self.win.tabs.is_empty() {
             self.next_launch = None;
@@ -8526,8 +8607,11 @@ impl App {
         // an open composer's draft is offered, never sent anywhere
         self.end_composer(pane, true);
         // closing a pane ends its shell even when the session service owns it
+        // (declared first, so it is let go last: after the pane below)
+        let mut _grid = FreeLater(None);
         if let Some(p) = self.win.tabs[tab_idx].pane(pane) {
             p.session.terminate();
+            _grid.0 = Some(p.session.term.clone());
         }
         let tab = &mut self.win.tabs[tab_idx];
         if tab.panes.len() <= 1 {
@@ -8552,7 +8636,7 @@ impl App {
                     p.session.terminate();
                 }
                 self.save_session();
-                crate::quit::exit(event_loop);
+                self.exit_app(event_loop);
                 return;
             }
             if self.win.active > tab_idx {
@@ -9543,6 +9627,7 @@ impl App {
         // the active tab is never folded away; refused input says so once
         self.reveal_active_tab();
         self.poll_refused_input();
+        self.drop_stray_history_menu();
         // every tab's one status (`tab_status`): a needs-you dot pulses,
         // unless the system reduces motion; working spins or sweeps
         let statuses: Vec<Option<crate::tab_status::TabStatus>> =
@@ -13440,6 +13525,9 @@ impl App {
             self.composer_editor_key(id, key);
             return;
         }
+        if self.history_menu_key(&key) {
+            return;
+        }
         // an offered correction is accepted with → / Tab / End in an empty editor
         if matches!(key, EditorKey::Right | EditorKey::Complete | EditorKey::End)
             && let Some(pane) = self
@@ -13557,6 +13645,181 @@ impl App {
             return;
         };
         self.editor_key_on(id, key, true);
+    }
+
+    /// ↑ / ↓ and the inline history menu (Warp): ↑ on the command line's
+    /// first line opens it on the history lines that start with what is
+    /// typed, the newest selected and previewed in the line; ↑ goes older,
+    /// ↓ newer, and ↓ past the newest or Esc put the typed text back. ⏎
+    /// runs the previewed line, ⇥ and → keep it to edit, any other key
+    /// closes the menu and then acts on the line. Inside a multi-line
+    /// command ↑ / ↓ move between its lines. `true` when the key was used
+    /// up here.
+    fn history_menu_key(&mut self, key: &EditorKey) -> bool {
+        let active = self.active_pane_id();
+        self.drop_stray_history_menu();
+        if self.win.completion.history_menu.is_some() {
+            match key {
+                EditorKey::HistoryUp => {
+                    self.win.completion.history_older();
+                    self.preview_history_line();
+                }
+                EditorKey::HistoryDown => {
+                    if self.win.completion.history_newer() {
+                        self.preview_history_line();
+                    } else {
+                        // back to typing: the ghost and the panel return
+                        // (Esc dismisses them too)
+                        self.restore_typed_line();
+                        self.update_completions();
+                    }
+                }
+                EditorKey::Dismiss => self.restore_typed_line(),
+                EditorKey::Complete | EditorKey::Right => {
+                    self.keep_history_preview();
+                    self.update_completions();
+                }
+                // ⏎ runs the previewed line; typing edits it
+                _ => {
+                    self.keep_history_preview();
+                    return false;
+                }
+            }
+            self.blink_epoch = Instant::now();
+            return true;
+        }
+        let up = match key {
+            EditorKey::HistoryUp => true,
+            EditorKey::HistoryDown => false,
+            _ => return false,
+        };
+        // a panel asked for (Tab) keeps ↑ / ↓; ↓ into one opened as you type
+        // makes it asked for, so ↑ walks it back
+        if self.win.completion.open && (self.win.completion.asked || !up) {
+            self.win.completion.asked = true;
+            return false;
+        }
+        let Some(pane) = self
+            .win
+            .tabs
+            .get_mut(self.win.active)
+            .and_then(|t| t.active_mut())
+        else {
+            return false;
+        };
+        if pane.editor.line_vertical(!up) {
+            self.win.completion.close();
+            self.blink_epoch = Instant::now();
+            return true;
+        }
+        if !up {
+            return false;
+        }
+        let typed = pane.editor.buffer.clone();
+        let cursor = pane.editor.cursor;
+        // Rift's saved history first, ranked by this pane's directory
+        let saved = self.command_history.snapshot();
+        let ranked = pane
+            .session
+            .local_cwd()
+            .map(|cwd| {
+                let repo = rift_core::command_history::repo_of(&cwd);
+                rift_core::command_history::ranked_matches(&saved, &typed, Some(&cwd), Some(&repo))
+            })
+            .unwrap_or_default();
+        let lines = completion_view::history_matches(
+            &ranked,
+            &pane.editor.history,
+            &self.shell_history,
+            &typed,
+        );
+        if lines.is_empty() {
+            return true;
+        }
+        // no completion answer in flight may reopen the panel over it
+        self.completion_pending = None;
+        self.completion_intent = None;
+        self.win.completion.open_history_menu(lines, &typed, cursor);
+        self.completion_pane = active;
+        self.preview_history_line();
+        self.blink_epoch = Instant::now();
+        true
+    }
+
+    /// The history menu's selected line, previewed in the command line.
+    fn preview_history_line(&mut self) {
+        let Some(line) = self.win.completion.history_line().map(str::to_string) else {
+            return;
+        };
+        if let Some(pane) = self
+            .win
+            .tabs
+            .get_mut(self.win.active)
+            .and_then(|t| t.active_mut())
+        {
+            // a preview is no edit: undo never walks through them
+            pane.editor.preview_line(&line, line.len());
+        }
+    }
+
+    /// Close the history menu and put back what was typed, the cursor where
+    /// it was.
+    fn restore_typed_line(&mut self) {
+        let Some((typed, cursor)) = self.win.completion.take_typed() else {
+            return;
+        };
+        if let Some(pane) = self
+            .win
+            .tabs
+            .get_mut(self.win.active)
+            .and_then(|t| t.active_mut())
+        {
+            pane.editor.preview_line(&typed, cursor);
+        }
+    }
+
+    /// Close the history menu keeping the previewed line: ⌘Z then goes back
+    /// to what was typed.
+    fn keep_history_preview(&mut self) {
+        let Some((typed, cursor)) = self.win.completion.take_typed() else {
+            return;
+        };
+        if let Some(pane) = self
+            .win
+            .tabs
+            .get_mut(self.win.active)
+            .and_then(|t| t.active_mut())
+        {
+            pane.editor.keep_preview(&typed, cursor);
+        }
+    }
+
+    /// A history menu whose pane lost the command line (another tab, pane
+    /// or window took focus, a program took the pane over, or the composer
+    /// opened) closes, and that pane gets back what was typed.
+    fn drop_stray_history_menu(&mut self) {
+        let composing = self
+            .win
+            .tabs
+            .get(self.win.active)
+            .and_then(|t| t.active())
+            .is_some_and(|p| p.composer.open);
+        if self.win.completion.history_menu.is_none()
+            || (self.win.editor_active
+                && !composing
+                && self.completion_pane == self.active_pane_id())
+        {
+            return;
+        }
+        let owner = self.completion_pane;
+        let Some((typed, cursor)) = self.win.completion.take_typed() else {
+            return;
+        };
+        if let Some(pane) =
+            owner.and_then(|id| self.win.tabs.iter_mut().find_map(|t| t.pane_mut(id)))
+        {
+            pane.editor.preview_line(&typed, cursor);
+        }
     }
 
     /// Add a caret (Ctrl-⇧-↑ / ↓, Ctrl-G) in the active pane's command line;
@@ -14073,7 +14336,7 @@ impl App {
                         p.session.terminate();
                     }
                 }
-                crate::quit::exit(event_loop);
+                self.exit_app(event_loop);
             }
             CloseScope::Window | CloseScope::App => {
                 // a quit is intentional: every shell ends and the next launch
@@ -14095,7 +14358,7 @@ impl App {
                     // shells phones started in the session service
                     crate::remote::stop_background();
                 }
-                crate::quit::exit(event_loop);
+                self.exit_app(event_loop);
             }
         }
         if let Some(w) = &self.win.window {
@@ -17740,52 +18003,95 @@ impl App {
             return;
         };
         // mouse-tracking app: wheel reports at the pointer
-        if let Some(mode) = self.mouse_tracking(target)
-            && let Some(cell) = self.mouse_cell(target)
-        {
-            let button = if lines > 0 {
-                crate::mouse::WHEEL_UP
-            } else {
-                crate::mouse::WHEEL_DOWN
-            };
-            for _ in 0..lines.unsigned_abs().min(20) {
-                self.send_mouse(target, mode, button, true, false, cell);
-            }
-            return;
-        }
-        let Some(pane) = self
+        let cell = self
+            .mouse_tracking(target)
+            .and_then(|_| self.mouse_cell(target));
+        let Some(mode) = self
             .win
             .tabs
-            .get_mut(self.win.active)
-            .and_then(|t| t.pane_mut(target))
+            .get(self.win.active)
+            .and_then(|t| t.pane(target))
+            .map(|p| *p.session.term.lock().mode())
         else {
             return;
         };
-        let mode = *pane.session.term.lock().mode();
-        if mode.contains(TermMode::ALT_SCREEN) {
-            // alternate scroll (DECSET 1007): the wheel becomes arrow keys
-            // for full-screen apps without mouse tracking (less, man)
-            if mode.contains(TermMode::ALTERNATE_SCROLL) {
-                let app = mode.contains(TermMode::APP_CURSOR);
-                let seq: &[u8] = match (lines > 0, app) {
-                    (true, false) => b"\x1b[A",
-                    (true, true) => b"\x1bOA",
-                    (false, false) => b"\x1b[B",
-                    (false, true) => b"\x1bOB",
-                };
-                // scrolling, not typing: a read-only pane still scrolls
-                for _ in 0..lines.unsigned_abs().min(20) {
-                    pane.session.write_scroll(seq);
-                }
-            }
-        } else {
-            pane.view_offset = if lines > 0 {
-                pane.view_offset.saturating_add(lines as usize)
-            } else {
-                pane.view_offset
-                    .saturating_sub(lines.unsigned_abs() as usize)
-            };
+        let wheel = crate::mouse::wheel(
+            lines,
+            cell.is_some(),
+            mode.contains(TermMode::ALT_SCREEN),
+            mode.contains(TermMode::ALTERNATE_SCROLL),
+            mode.contains(TermMode::APP_CURSOR),
+        );
+        if self.apply_wheel(target, wheel, cell.unwrap_or_default(), self.win.modifiers) {
             window.request_redraw();
+        }
+    }
+
+    /// Carry out `wheel` ([`crate::mouse::wheel`]) on pane `target`: wheel
+    /// reports at `cell` with `mods` held, arrow keys, or its view. Shared by
+    /// the desktop's wheel and a paired phone's `scroll`. True when the view
+    /// moved (it wants a redraw).
+    fn apply_wheel(
+        &mut self,
+        target: PaneId,
+        wheel: crate::mouse::Wheel,
+        cell: (usize, usize),
+        mods: ModifiersState,
+    ) -> bool {
+        use crate::mouse::Wheel;
+        use rift_pty::alacritty_terminal::term::TermMode;
+        match wheel {
+            Wheel::Report { button, count } => {
+                let Some(mode) = self
+                    .find_tab_of_pane(target)
+                    .and_then(|(_, t)| t.pane(target))
+                    .map(|p| *p.session.term.lock().mode())
+                    .filter(|m| m.intersects(TermMode::MOUSE_MODE))
+                else {
+                    return false;
+                };
+                for _ in 0..count {
+                    self.send_mouse_with(target, mode, button, true, false, cell, mods);
+                }
+                false
+            }
+            Wheel::Arrows { seq, count } => {
+                if let Some(p) = self
+                    .find_tab_of_pane(target)
+                    .and_then(|(_, t)| t.pane(target))
+                {
+                    // scrolling, not typing: a read-only pane still scrolls
+                    for _ in 0..count {
+                        p.session.write_scroll(seq);
+                    }
+                }
+                false
+            }
+            Wheel::View(lines) => {
+                let Some(pane) = self
+                    .find_tab_of_pane(target)
+                    .and_then(|(_, t)| t.pane_mut(target))
+                else {
+                    return false;
+                };
+                let moved = if lines > 0 {
+                    pane.view_offset.saturating_add(lines as usize)
+                } else {
+                    pane.view_offset
+                        .saturating_sub(lines.unsigned_abs() as usize)
+                };
+                // within what the last frame drew (as drawing clamps it), so
+                // a pane drawn in no window (another tab) never scrolls past
+                // its top
+                pane.view_offset = match pane.last_grid {
+                    Some(g) if pane.last_display_len > 0 => {
+                        moved.min(pane.last_display_len.saturating_sub(g.rows))
+                    }
+                    _ => moved,
+                };
+                true
+            }
+            Wheel::Nothing => false,
         }
     }
 
@@ -17843,24 +18149,38 @@ impl App {
         motion: bool,
         cell: (usize, usize),
     ) {
+        self.send_mouse_with(
+            pane,
+            mode,
+            button,
+            pressed,
+            motion,
+            cell,
+            self.win.modifiers,
+        );
+    }
+
+    /// [`Self::send_mouse`] with `mods` held instead of the keyboard's (a
+    /// phone's wheel holds none), to `pane` in any tab of this window.
+    #[allow(clippy::too_many_arguments)]
+    fn send_mouse_with(
+        &self,
+        pane: PaneId,
+        mode: rift_pty::alacritty_terminal::term::TermMode,
+        button: u8,
+        pressed: bool,
+        motion: bool,
+        cell: (usize, usize),
+        mods: ModifiersState,
+    ) {
         use rift_pty::alacritty_terminal::term::TermMode;
         let enc = crate::mouse::Encoding {
             sgr: mode.contains(TermMode::SGR_MOUSE),
             utf8: mode.contains(TermMode::UTF8_MOUSE),
         };
-        if let Some(bytes) = crate::mouse::report(
-            button,
-            pressed,
-            motion,
-            self.win.modifiers,
-            cell.0,
-            cell.1,
-            enc,
-        ) && let Some(p) = self
-            .win
-            .tabs
-            .get(self.win.active)
-            .and_then(|t| t.pane(pane))
+        if let Some(bytes) =
+            crate::mouse::report(button, pressed, motion, mods, cell.0, cell.1, enc)
+            && let Some(p) = self.win.tabs.iter().find_map(|t| t.pane(pane))
         {
             p.session.write_report(&bytes);
         }
@@ -18896,6 +19216,8 @@ impl App {
             let title = rift_core::notifications::agent_session_title(&p.title);
             r.title = (!title.is_empty()).then(|| title.to_string());
             r.idle = !p.running();
+            // said even without a title: the phone's message input
+            r.agent = true;
         }
         Some(r)
     }
@@ -19256,12 +19578,22 @@ impl App {
             },
             Request::Screen { pane, force, since } => {
                 let theme = self.theme.clone();
-                match self.find_tab_of_pane(pane).and_then(|(_, t)| t.pane(pane)) {
+                match self
+                    .find_tab_of_pane(pane)
+                    .and_then(|(_, t)| t.pane_mut(pane))
+                {
                     Some(p) => {
                         // the pane's own colour scheme, as on the desktop
                         let theme = p.theme.as_ref().map_or(&theme, |(_, t)| t);
-                        let (generation, screen) =
-                            terminal::remote_screen(&p.session, theme, force, since);
+                        // the phones' own view as their `scroll` left it,
+                        // never the desktop's
+                        let (generation, screen) = terminal::remote_screen(
+                            &p.session,
+                            theme,
+                            force,
+                            since,
+                            &mut p.remote_view,
+                        );
                         Response {
                             ok: true,
                             pane: Some(pane),
@@ -19378,6 +19710,17 @@ impl App {
                 keys,
                 text,
             } => self.remote_input(pane, &device, command, keys, text),
+            Request::RemoteScroll {
+                pane,
+                lines,
+                operate,
+            } => self.remote_scroll(pane, lines, operate),
+            Request::RemoteUpload {
+                pane,
+                device,
+                name,
+                check,
+            } => self.remote_upload(pane, &device, &name, check),
             Request::RemoteOpen { pane, device, kind } => self.remote_open(pane, &device, kind),
             // needs the event loop (closing the last tab quits): answered in `user_event`
             Request::RemoteClose { .. } => Response::error("remote-close needs the event loop"),
@@ -19679,7 +20022,10 @@ impl App {
                                 }
                             },
                             ClickTarget::Exited(p, part) if p == id => match part {
-                                crate::views::exited::Part::Restart => "Restart".into(),
+                                crate::views::exited::Part::Restart => {
+                                    let code = tab.pane(p).and_then(|x| x.exited).unwrap_or(0);
+                                    crate::views::exited::restart_label(code).into()
+                                }
                                 crate::views::exited::Part::Close => "Close pane".into(),
                             },
                             ClickTarget::Welcome(i) if active => {
@@ -21135,6 +21481,15 @@ impl App {
                 .collect::<Vec<_>>()
                 .join(" ")
         );
+        // the inline history menu (↑): the previewed row and what was typed
+        let _ = writeln!(
+            out,
+            "history_menu={} history_menu_selected={} history_menu_typed={:?} completion_asked={}",
+            self.win.completion.history_menu.is_some(),
+            self.win.completion.selected,
+            self.win.completion.history_menu.as_ref().map(|(t, _)| t),
+            self.win.completion.asked,
+        );
         // every control with a tooltip: `text@x,y,w,h` (a script hovers one
         // by these, whatever the platform's layout)
         let tips: Vec<String> = self
@@ -21924,11 +22279,15 @@ impl App {
             .lock()
             .mode()
             .contains(TermMode::ALT_SCREEN);
+        // a program holding the terminal under a prompt whose markers lied
+        // (`remote::route`) gets the input, as `pane_running` tells phones
+        let job = pane.session.has_foreground_job();
         let blocks = pane.session.blocks.lock().unwrap();
         crate::remote::route(
             alt,
             blocks.last().map(|b| &b.state),
             blocks.submit_pending(),
+            job,
         )
     }
 
@@ -22071,6 +22430,119 @@ impl App {
             }
             _ => return Response::error("bad request: send one of a command, keys or text"),
         }
+        // the phone typed: its own view follows the end again, as the
+        // desktop's does when typed into
+        if let Some(p) = self
+            .find_tab_of_pane(pane)
+            .and_then(|(_, t)| t.pane_mut(pane))
+        {
+            p.remote_view.offset = 0;
+        }
+        Response {
+            ok: true,
+            pane: Some(pane),
+            ..Default::default()
+        }
+    }
+
+    /// A phone's `scroll` of `pane` by `lines` (positive: up), as the
+    /// desktop's wheel over it ([`Self::apply_wheel`]): wheel reports to a
+    /// mouse-tracking program at the middle of its screen (a phone has no
+    /// pointer, and holds no modifiers), arrows under alternate scroll, else
+    /// the phones' own view of the pane (`remote_view`, clamped to the list
+    /// their screen draws), never the desktop's. `operate`: the device may
+    /// send the program input; without it only the view moves.
+    fn remote_scroll(&mut self, pane: u64, lines: i32, operate: bool) -> crate::control::Response {
+        use crate::control::Response;
+        use rift_pty::alacritty_terminal::grid::Dimensions;
+        use rift_pty::alacritty_terminal::term::TermMode;
+        if !self.config.remote_access {
+            return Response::error("remote access is off");
+        }
+        if lines == 0 || lines.unsigned_abs() > rift_remote::MAX_SCROLL_LINES.unsigned_abs() {
+            return Response::error("bad request: 1 to 50 lines either way");
+        }
+        let reporting = self.config.mouse_reporting;
+        let Some((mode, cell)) = self
+            .find_tab_of_pane(pane)
+            .and_then(|(_, t)| t.pane(pane))
+            .map(|p| {
+                let term = p.session.term.lock();
+                (*term.mode(), (term.columns() / 2, term.screen_lines() / 2))
+            })
+        else {
+            return Response::error("no such pane");
+        };
+        let wheel = crate::mouse::wheel(
+            lines,
+            reporting && mode.intersects(TermMode::MOUSE_MODE),
+            mode.contains(TermMode::ALT_SCREEN),
+            mode.contains(TermMode::ALTERNATE_SCROLL),
+            mode.contains(TermMode::APP_CURSOR),
+        );
+        if wheel.reaches_program() && !operate {
+            return Response::error(crate::remote::SCROLL_VIEW_ONLY);
+        }
+        if let crate::mouse::Wheel::View(lines) = wheel {
+            // the phone's view: the desktop's stays where its user left it
+            if let Some(p) = self
+                .find_tab_of_pane(pane)
+                .and_then(|(_, t)| t.pane_mut(pane))
+            {
+                let max = terminal::remote_scroll_max(&p.session);
+                p.remote_view.scroll(lines, max);
+            }
+        } else if self.apply_wheel(pane, wheel, cell, ModifiersState::empty())
+            && let Some(w) = &self.win.window
+        {
+            w.request_redraw();
+        }
+        Response {
+            ok: true,
+            pane: Some(pane),
+            ..Default::default()
+        }
+    }
+
+    /// A phone's pasted image, which the gateway saved as `name` in the
+    /// uploads folder (`remote::upload_path`): its path is pasted into the
+    /// program running in `pane` as a file dropped on the window is
+    /// (shell-quoted, a space after), so Claude Code or Codex attach it.
+    /// Never at a prompt (`busy`): a command line arrives only through `run`.
+    /// `check`: only whether it would be taken now (no `name` read).
+    fn remote_upload(
+        &mut self,
+        pane: u64,
+        device: &str,
+        name: &str,
+        check: bool,
+    ) -> crate::control::Response {
+        use crate::control::Response;
+        if !self.config.remote_access {
+            return Response::error("remote access is off");
+        }
+        let route = match self.find_tab_of_pane(pane).and_then(|(_, t)| t.pane(pane)) {
+            Some(p) if p.session.read_only() => {
+                return Response::error(pane_life::READ_ONLY_TOAST.to_lowercase());
+            }
+            Some(p) => Self::remote_route(p),
+            None => return Response::error("no such pane"),
+        };
+        if !route.takes_text() {
+            return Response::error("busy");
+        }
+        if check {
+            return Response {
+                ok: true,
+                pane: Some(pane),
+                ..Default::default()
+            };
+        }
+        let Some(path) = crate::remote::upload_path(name) else {
+            return Response::error("bad request: not an image the gateway saved");
+        };
+        self.paste_raw(pane, &input::paths_text(&[path]));
+        self.toast_phone(Some(pane), crate::remote::pasted_toast(device));
         Response {
             ok: true,
             pane: Some(pane),
@@ -23493,7 +23965,7 @@ impl App {
             // windows stay open on the current version
             log::warn!("update: could not ask the other windows to restart");
             self.end_hotkey_window_shells();
-            crate::quit::exit(event_loop);
+            self.exit_app(event_loop);
         }
     }
 
@@ -23548,7 +24020,7 @@ impl App {
         }
         self.save_session();
         self.end_hotkey_window_shells();
-        crate::quit::exit(event_loop);
+        self.exit_app(event_loop);
     }
 
     /// At start: what waits for the first frame (`confirm_start`), and how
@@ -24556,7 +25028,7 @@ impl ApplicationHandler<UserEvent> for App {
                     // saved; durable shells keep running for the new version
                     log::info!("restarting for an update");
                     self.end_hotkey_window_shells();
-                    crate::quit::exit(event_loop);
+                    self.exit_app(event_loop);
                     return;
                 }
                 if let Some(w) = &self.win.window {

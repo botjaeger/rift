@@ -41,6 +41,10 @@ use crate::{
     OPEN_RATE, OUTPUT_RATE, OutputError, PANE_POLL, PING_INTERVAL, Page, REFUSAL, REPLAY_RING,
     RUN_RATE, Screen, Source, SourceError, TOPOLOGY_POLL,
 };
+use crate::{
+    ImageKind, MAX_SCROLL_LINES, MAX_UPLOAD_BYTES, MAX_UPLOAD_CHUNK, MAX_UPLOAD_MESSAGE,
+    MAX_UPLOADS, UPLOAD_RATE,
+};
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::io::ErrorKind;
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
@@ -76,7 +80,7 @@ const DONE_RUNNING: usize = 64;
 /// after the 45 s idle timeout.
 pub const FOLLOW_FRESH: Duration = Duration::from_secs(20);
 /// What this gateway serves beyond Phase 2 (`welcome.features`).
-const FEATURES: [&str; 16] = [
+const FEATURES: [&str; 18] = [
     "screen",
     "text",
     "output",
@@ -93,6 +97,8 @@ const FEATURES: [&str; 16] = [
     "fit",
     "prompt_chips",
     "closing",
+    "scroll",
+    "upload",
 ];
 
 /// Gateway settings. [`Config::new`] takes the limits from the protocol;
@@ -117,6 +123,9 @@ pub struct Config {
     pub devices_poll: Duration,
     pub failure_window: Duration,
     pub refusal: Duration,
+    /// How long one `upload` may take from its first chunk to its last
+    /// ([`crate::UPLOAD_DEADLINE`]).
+    pub upload_deadline: Duration,
     /// The relay to register at (`remote_relay`; `ws://` or `wss://`), or
     /// none. [`Gateway::set_relay`] changes it while running.
     pub relay: Option<String>,
@@ -157,6 +166,7 @@ impl Config {
             devices_poll: crate::DEVICES_POLL,
             failure_window: FAILURE_WINDOW,
             refusal: REFUSAL,
+            upload_deadline: crate::UPLOAD_DEADLINE,
             relay: None,
             relay_backoff: (crate::RELAY_BACKOFF_MIN, crate::RELAY_BACKOFF_MAX),
             push_url: crate::push::EXPO_PUSH_URL.to_string(),
@@ -359,6 +369,8 @@ pub fn serve<S: Source>(
         poll_lock: Mutex::new(()),
         status_lock: Mutex::new(()),
         devices: Mutex::new(devices),
+        permissions: Mutex::new(None),
+        uploads: AtomicUsize::new(0),
         failures: Mutex::new(Failures::default()),
         done: Mutex::new(DoneTracker::default()),
         watches: Mutex::new(crate::push::Watches::default()),
@@ -415,6 +427,11 @@ pub(crate) struct Shared<S> {
     status_lock: Mutex<()>,
     /// The paired devices as last read.
     devices: Mutex<Vec<Device>>,
+    /// `devices.json` as [`operates`] last read it, by its stamp: re-read
+    /// only when the file changed, so a scroll does not parse it each time.
+    permissions: Mutex<Option<(registry::DevicesStamp, Vec<Device>)>>,
+    /// Images being received across every connection ([`MAX_UPLOADS`]).
+    uploads: AtomicUsize,
     failures: Mutex<Failures>,
     done: Mutex<DoneTracker>,
     /// The panes devices asked about (`notify`).
@@ -1560,12 +1577,28 @@ fn client<S: Source>(
     connection(shared, ws, peer, opened, busy);
 }
 
-/// The WebSocket limits of a client connection (direct or through a relay).
+/// The WebSocket limits of a client connection (direct or through a relay)
+/// until it authenticates: every frame within [`MAX_CLIENT_MESSAGE`]
+/// (the handshake's are smaller still). An operate device's are raised
+/// for `upload` chunks once it has ([`allow_uploads`]).
 pub(crate) fn client_ws_config() -> WebSocketConfig {
     let max_frame = transport::max_client_frame(MAX_CLIENT_MESSAGE);
     WebSocketConfig::default()
         .max_frame_size(Some(max_frame))
         .max_message_size(Some(max_frame))
+}
+
+/// Raise an authenticated operate device's limits to an `upload` chunk's:
+/// its frames and the messages they assemble ([`MAX_UPLOAD_MESSAGE`]).
+/// Every other message is still held to [`MAX_CLIENT_MESSAGE`] in
+/// [`session`] before it is parsed.
+fn allow_uploads<T: Socket>(ch: &mut Conn<T>) {
+    let max_frame = transport::max_client_frame(MAX_UPLOAD_MESSAGE);
+    ch.ws.set_config(|c| {
+        c.max_frame_size = Some(max_frame);
+        c.max_message_size = Some(max_frame);
+    });
+    ch.set_limit(MAX_UPLOAD_MESSAGE);
 }
 
 /// One connection once its WebSocket is open (accepted here, or dialed at
@@ -1604,6 +1637,7 @@ pub(crate) fn connection<S: Source, T: Socket>(
             return;
         }
     };
+    // only an authenticated operate device may send more (`allow_uploads`)
     let ch = Channel::new(ws, noise, MAX_CLIENT_MESSAGE);
     if busy {
         refuse(
@@ -1613,13 +1647,17 @@ pub(crate) fn connection<S: Source, T: Socket>(
         shared.record(None, &peer, start, "busy");
         return;
     }
-    let (device, ch) = match authenticate(shared, ch, &payload, &peer.address) {
+    let (device, mut ch) = match authenticate(shared, ch, &payload, &peer.address) {
         Ok(r) => r,
         Err(reason) => {
             shared.failed(&peer, start, reason);
             return;
         }
     };
+    // a permission change ends the connection: a view device never uploads
+    if device.permission == Permission::Operate {
+        allow_uploads(&mut ch);
+    }
     serve_device(shared, ch, device, peer);
 }
 
@@ -1825,6 +1863,9 @@ fn session<S: Source, T: Socket>(
     let mut fits = Rate::new(FIT_RATE);
     let mut opens = Rate::new(OPEN_RATE);
     let mut outputs = Rate::new(OUTPUT_RATE);
+    let mut scrolls = Rate::new(KEYS_RATE);
+    let mut uploads = Rate::new(UPLOAD_RATE);
+    let mut upload = Uploads::default();
     loop {
         match end.load(Ordering::Acquire) {
             LIVE => {}
@@ -1873,6 +1914,11 @@ fn session<S: Source, T: Socket>(
             ch.close();
             return "idle";
         }
+        if let Some(r) = upload.expire(shared, Instant::now())
+            && !send(&mut ch, &fit_reply(&r))
+        {
+            return "error";
+        }
         if pinged.elapsed() >= cfg.ping_interval {
             pinged = Instant::now();
             if ch.ws.send(Message::Ping(Vec::new().into())).is_err() {
@@ -1909,7 +1955,27 @@ fn session<S: Source, T: Socket>(
         };
         heard = Instant::now();
         seen.mark();
-        let reply = match serde_json::from_slice::<ClientMsg>(&text) {
+        // only an `upload` chunk may pass MAX_CLIENT_MESSAGE, told by its
+        // type alone before the message is built (`MsgType` skips the rest
+        // without keeping any of it)
+        if text.len() > MAX_CLIENT_MESSAGE
+            && !serde_json::from_slice::<MsgType>(&text).is_ok_and(|m| m.t == "upload")
+        {
+            refuse(
+                ch,
+                ServerMsg::error(ErrorCode::TooLarge, "message too large"),
+            );
+            return "too_large";
+        }
+        let msg = serde_json::from_slice::<ClientMsg>(&text);
+        if text.len() > MAX_CLIENT_MESSAGE && !matches!(msg, Ok(ClientMsg::Upload { .. })) {
+            refuse(
+                ch,
+                ServerMsg::error(ErrorCode::TooLarge, "message too large"),
+            );
+            return "too_large";
+        }
+        let reply = match msg {
             Err(e) => Some(ServerMsg::error(ErrorCode::BadRequest, e.to_string())),
             Ok(ClientMsg::Ping { n }) => Some(ServerMsg::Pong { n }),
             Ok(ClientMsg::Visible { on }) => {
@@ -2063,6 +2129,29 @@ fn session<S: Source, T: Socket>(
                 kind,
             }) => Some(close(shared, device, &mut opens, rid, pane, kind)),
             Ok(ClientMsg::Start { id: rid }) => Some(start(shared, device, &mut opens, rid)),
+            Ok(ClientMsg::Scroll {
+                id: rid,
+                pane,
+                lines,
+            }) => Some(scroll(shared, device, &mut scrolls, rid, pane, lines)),
+            Ok(ClientMsg::Upload {
+                id: rid,
+                pane,
+                size,
+                offset,
+                data,
+            }) => upload.chunk(
+                shared,
+                device,
+                &mut uploads,
+                Chunk {
+                    rid,
+                    pane,
+                    size,
+                    offset,
+                    data,
+                },
+            ),
         };
         // what was queued meanwhile goes first (`open` queues the topology
         // with its new pane before its ack)
@@ -2200,17 +2289,286 @@ fn input<S: Source>(
     };
     match shared.source.input(pane, &device.name, input) {
         Ok(()) => ServerMsg::ack_ok(rid),
-        Err(InputError::Busy) => ServerMsg::ack_err(rid, ErrorCode::Busy, busy),
-        Err(InputError::NoPane) => {
-            ServerMsg::ack_err(rid, ErrorCode::NoPane, format!("no pane {pane}"))
-        }
-        Err(InputError::Denied) => ServerMsg::ack_err(
+        Err(e) => refused_ack(rid, e, busy, format!("no pane {pane}")),
+    }
+}
+
+/// The ack of a request the source refused with `e`: `busy` says why a busy
+/// pane (or desktop) refused it, `no_pane` what was missing.
+fn refused_ack(rid: String, e: InputError, busy: String, no_pane: String) -> ServerMsg {
+    match e {
+        InputError::Busy => ServerMsg::ack_err(rid, ErrorCode::Busy, busy),
+        InputError::NoPane => ServerMsg::ack_err(rid, ErrorCode::NoPane, no_pane),
+        InputError::Denied => ServerMsg::ack_err(
             rid,
             ErrorCode::Forbidden,
             "remote access is off on the desktop",
         ),
-        Err(InputError::Unavailable(why)) => ServerMsg::ack_err(rid, ErrorCode::Busy, why),
+        InputError::ViewOnly => ServerMsg::ack_err(rid, ErrorCode::Forbidden, VIEW_ONLY),
+        InputError::Unavailable(why) => ServerMsg::ack_err(rid, ErrorCode::Busy, why),
     }
+}
+
+/// `scroll`: rate (`keys`' limit, counted apart), the clamp, then the
+/// source, which knows what the wheel does in the pane: any device may move
+/// a pane's own view, only an `operate` device reach its program.
+fn scroll<S: Source>(
+    shared: &Shared<S>,
+    device: &Device,
+    rate: &mut Rate,
+    rid: String,
+    pane: u64,
+    lines: i32,
+) -> ServerMsg {
+    if rid.chars().count() > MAX_REQUEST_ID {
+        return ServerMsg::error(
+            ErrorCode::BadRequest,
+            format!("id is longer than {MAX_REQUEST_ID} characters"),
+        );
+    }
+    if !rate.allow(Instant::now()) {
+        return ServerMsg::ack_err(rid, ErrorCode::Rate, "too many requests; slow down");
+    }
+    let lines = lines.clamp(-MAX_SCROLL_LINES, MAX_SCROLL_LINES);
+    if lines == 0 {
+        return ServerMsg::ack_ok(rid);
+    }
+    match shared.source.scroll(pane, lines, operates(shared, device)) {
+        Ok(()) => ServerMsg::ack_ok(rid),
+        Err(e) => refused_ack(rid, e, "pane is busy".into(), format!("no pane {pane}")),
+    }
+}
+
+/// One `upload` message's fields.
+struct Chunk {
+    rid: String,
+    pane: u64,
+    size: u64,
+    offset: u64,
+    data: String,
+}
+
+/// The image one connection is receiving (`upload`), at most one at a
+/// time: a chunk at offset 0 starts a new one. Across the gateway at most
+/// [`MAX_UPLOADS`] are received at once, each within
+/// [`Config::upload_deadline`] of its first chunk.
+#[derive(Default)]
+struct Uploads<'a> {
+    current: Option<Receiving<'a>>,
+    /// An upload refused part-way: its later chunks are dropped unanswered
+    /// (the client has its error).
+    refused: Option<String>,
+}
+
+struct Receiving<'a> {
+    rid: String,
+    pane: u64,
+    size: u64,
+    /// Reserved for `size` at once (at most [`MAX_UPLOAD_BYTES`]): never
+    /// grown by doubling as chunks arrive.
+    bytes: Vec<u8>,
+    kind: Option<ImageKind>,
+    /// Past it what arrived is dropped ([`Uploads::expire`]).
+    deadline: Instant,
+    /// Its place among the gateway's [`MAX_UPLOADS`], given back on drop.
+    _slot: ConnGuard<'a>,
+}
+
+/// The `busy` message of an upload past its deadline.
+fn upload_too_slow(deadline: Duration) -> String {
+    format!(
+        "the image took longer than {} s to arrive; try again",
+        deadline.as_secs()
+    )
+}
+
+/// The `busy` message of an image for a pane at its prompt.
+fn upload_at_prompt(pane: u64) -> String {
+    format!("pane {pane} is at its prompt; an image goes to a running program")
+}
+
+impl<'a> Uploads<'a> {
+    /// Take one chunk: an ack once the last one is pasted (or at the first
+    /// that fails), nothing in between.
+    fn chunk<S: Source>(
+        &mut self,
+        shared: &'a Shared<S>,
+        device: &Device,
+        rate: &mut Rate,
+        c: Chunk,
+    ) -> Option<ServerMsg> {
+        if c.rid.chars().count() > MAX_REQUEST_ID {
+            return Some(ServerMsg::error(
+                ErrorCode::BadRequest,
+                format!("id is longer than {MAX_REQUEST_ID} characters"),
+            ));
+        }
+        let now = Instant::now();
+        if c.offset == 0 {
+            self.current = None;
+            self.refused = None;
+            if !operates(shared, device) {
+                return Some(self.refuse(c.rid, ErrorCode::Forbidden, VIEW_ONLY));
+            }
+            if !rate.allow(now) {
+                return Some(self.refuse(c.rid, ErrorCode::Rate, "too many requests; slow down"));
+            }
+            if c.size == 0 {
+                return Some(self.refuse(c.rid, ErrorCode::BadRequest, "the image is empty"));
+            }
+            if c.size > MAX_UPLOAD_BYTES {
+                return Some(self.refuse(
+                    c.rid,
+                    ErrorCode::TooLarge,
+                    format!("the image is larger than {} MiB", MAX_UPLOAD_BYTES >> 20),
+                ));
+            }
+            // a pane at its prompt is refused now, not after every chunk
+            if let Err(e) = shared.source.upload_ready(c.pane) {
+                let msg = refused_ack(
+                    c.rid.clone(),
+                    e,
+                    upload_at_prompt(c.pane),
+                    format!("no pane {}", c.pane),
+                );
+                return Some(self.refuse_with(c.rid, msg));
+            }
+            let Some(slot) = upload_slot(&shared.uploads) else {
+                return Some(self.refuse(
+                    c.rid,
+                    ErrorCode::Busy,
+                    "other images are arriving; try again in a moment",
+                ));
+            };
+            let mut bytes = Vec::new();
+            // within MAX_UPLOAD_BYTES, checked above
+            if bytes.try_reserve_exact(c.size as usize).is_err() {
+                return Some(self.refuse(
+                    c.rid,
+                    ErrorCode::Busy,
+                    "the desktop cannot hold the image now",
+                ));
+            }
+            self.current = Some(Receiving {
+                rid: c.rid.clone(),
+                pane: c.pane,
+                size: c.size,
+                bytes,
+                kind: None,
+                deadline: now + shared.config.upload_deadline,
+                _slot: slot,
+            });
+        } else if self.refused.as_deref() == Some(c.rid.as_str()) {
+            return None;
+        }
+        if let Some(msg) = self.expire(shared, now) {
+            return Some(msg);
+        }
+        let fits = self.current.as_ref().is_some_and(|r| {
+            r.rid == c.rid
+                && r.pane == c.pane
+                && r.size == c.size
+                && r.bytes.len() as u64 == c.offset
+        });
+        if !fits {
+            return Some(self.refuse(c.rid, ErrorCode::BadRequest, "an upload chunk out of order"));
+        }
+        use base64::Engine as _;
+        let data = match base64::engine::general_purpose::STANDARD.decode(c.data.as_bytes()) {
+            Ok(d) if !d.is_empty() && d.len() <= MAX_UPLOAD_CHUNK => d,
+            Ok(_) => {
+                return Some(self.refuse(
+                    c.rid,
+                    ErrorCode::BadRequest,
+                    format!("a chunk holds 1 to {MAX_UPLOAD_CHUNK} bytes"),
+                ));
+            }
+            Err(_) => {
+                return Some(self.refuse(c.rid, ErrorCode::BadRequest, "data is not base64"));
+            }
+        };
+        let r = self.current.as_mut().expect("checked above");
+        if r.bytes.len() as u64 + data.len() as u64 > r.size {
+            return Some(self.refuse(
+                c.rid,
+                ErrorCode::BadRequest,
+                "more bytes than the upload's size",
+            ));
+        }
+        r.bytes.extend_from_slice(&data);
+        let done = r.bytes.len() as u64 == r.size;
+        // the type from the signature as soon as it has arrived (8 bytes,
+        // or the whole of a smaller file)
+        if r.kind.is_none() && (r.bytes.len() >= 8 || done) {
+            match ImageKind::sniff(&r.bytes) {
+                Some(k) => r.kind = Some(k),
+                None => {
+                    return Some(self.refuse(
+                        c.rid,
+                        ErrorCode::BadRequest,
+                        "not a PNG or JPEG image",
+                    ));
+                }
+            }
+        }
+        if !done {
+            return None;
+        }
+        let r = self.current.take().expect("checked above");
+        // a permission lowered while it arrived
+        if !operates(shared, device) {
+            return Some(self.refuse(c.rid, ErrorCode::Forbidden, VIEW_ONLY));
+        }
+        let kind = r.kind.expect("sniffed when done");
+        Some(
+            match shared.source.upload(r.pane, &device.name, kind, &r.bytes) {
+                Ok(()) => ServerMsg::ack_ok(c.rid),
+                Err(e) => refused_ack(
+                    c.rid,
+                    e,
+                    upload_at_prompt(r.pane),
+                    format!("no pane {}", r.pane),
+                ),
+            },
+        )
+    }
+
+    /// The image being received, dropped and answered `busy` once past its
+    /// deadline (also between chunks: the session calls it every slice, so
+    /// a trickle of chunks holds no memory past it).
+    fn expire<S>(&mut self, shared: &Shared<S>, now: Instant) -> Option<ServerMsg> {
+        let r = self.current.as_ref().filter(|r| now >= r.deadline)?;
+        let rid = r.rid.clone();
+        Some(self.refuse(
+            rid,
+            ErrorCode::Busy,
+            upload_too_slow(shared.config.upload_deadline),
+        ))
+    }
+
+    /// Drop what arrived of `rid` and answer `code`; its later chunks go
+    /// unanswered.
+    fn refuse(&mut self, rid: String, code: ErrorCode, msg: impl Into<String>) -> ServerMsg {
+        let ack = ServerMsg::ack_err(rid.clone(), code, msg);
+        self.refuse_with(rid, ack)
+    }
+
+    /// [`Uploads::refuse`] with the ack made already.
+    fn refuse_with(&mut self, rid: String, ack: ServerMsg) -> ServerMsg {
+        self.current = None;
+        self.refused = Some(rid);
+        ack
+    }
+}
+
+/// One of the gateway's [`MAX_UPLOADS`] places, or none while they are all
+/// taken.
+fn upload_slot(n: &AtomicUsize) -> Option<ConnGuard<'_>> {
+    n.fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {
+        (v < MAX_UPLOADS).then_some(v + 1)
+    })
+    .ok()
+    .map(|_| ConnGuard(n))
 }
 
 /// `fit`: permission and rate like `keys`, then the smallest size of the
@@ -2273,16 +2631,7 @@ fn fit<S: Source>(
     }
     match sync_fits(shared, Some(pane)) {
         Ok(()) => ServerMsg::ack_ok(rid),
-        Err(InputError::Busy) => ServerMsg::ack_err(rid, ErrorCode::Busy, "pane is busy"),
-        Err(InputError::NoPane) => {
-            ServerMsg::ack_err(rid, ErrorCode::NoPane, format!("no pane {pane}"))
-        }
-        Err(InputError::Denied) => ServerMsg::ack_err(
-            rid,
-            ErrorCode::Forbidden,
-            "remote access is off on the desktop",
-        ),
-        Err(InputError::Unavailable(why)) => ServerMsg::ack_err(rid, ErrorCode::Busy, why),
+        Err(e) => refused_ack(rid, e, "pane is busy".into(), format!("no pane {pane}")),
     }
 }
 
@@ -2447,14 +2796,14 @@ fn opened<S: Source>(
             push_topology(shared);
             ServerMsg::ack_opened(rid, new)
         }
-        Err(InputError::NoPane) => ServerMsg::ack_err(rid, ErrorCode::NoPane, no_pane()),
-        Err(InputError::Denied) => ServerMsg::ack_err(
-            rid,
-            ErrorCode::Forbidden,
-            "remote access is off on the desktop",
-        ),
-        Err(InputError::Busy) => ServerMsg::ack_err(rid, ErrorCode::Busy, "the desktop is busy"),
-        Err(InputError::Unavailable(why)) => ServerMsg::ack_err(rid, ErrorCode::Busy, why),
+        Err(e) => {
+            let no_pane = if matches!(e, InputError::NoPane) {
+                no_pane()
+            } else {
+                String::new()
+            };
+            refused_ack(rid, e, "the desktop is busy".into(), no_pane)
+        }
     }
 }
 
@@ -2475,15 +2824,35 @@ fn push_topology<S: Source>(shared: &Shared<S>) {
 /// The `forbidden` ack's message for a view device.
 const VIEW_ONLY: &str = "this device may only view";
 
+/// A client message's type alone: what tells an `upload` chunk, the only
+/// message that may pass [`MAX_CLIENT_MESSAGE`], before it is parsed.
+#[derive(serde::Deserialize)]
+struct MsgType<'a> {
+    t: &'a str,
+}
+
 /// `device` may operate, by the permission it connected with and the one
 /// as of now (the connection closes within a second of a change, but
-/// nothing runs in between on the old one).
+/// nothing runs in between on the old one). The file is read again only
+/// when its stamp changed (every write replaces it).
 fn operates<S>(shared: &Shared<S>, device: &Device) -> bool {
-    let now = registry::devices(&shared.config.dir)
-        .ok()
-        .and_then(|all| all.into_iter().find(|d| d.id == device.id))
-        .map(|d| d.permission);
-    device.permission == Permission::Operate && now == Some(Permission::Operate)
+    if device.permission != Permission::Operate {
+        return false;
+    }
+    let dir = &shared.config.dir;
+    let Some(stamp) = registry::devices_stamp(dir) else {
+        return false;
+    };
+    let mut cache = shared.permissions.lock().unwrap();
+    if cache.as_ref().is_none_or(|(s, _)| *s != stamp) {
+        // read, then stamped as of before the read: a write in between
+        // only makes the next call read again
+        *cache = registry::devices(dir).ok().map(|all| (stamp, all));
+    }
+    cache
+        .as_ref()
+        .and_then(|(_, all)| all.iter().find(|d| d.id == device.id))
+        .is_some_and(|d| d.permission == Permission::Operate)
 }
 
 /// A `run` command: one line, no control characters, at most

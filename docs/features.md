@@ -29,7 +29,10 @@ Blocks are delimited by shell-integration OSC 133 markers
   with no exit status.
 - A missing `D` (e.g. `ssh` hijacking the terminal) is closed off by the next
   `A`; duplicated markers (iTerm2 integration in the user's rc alongside ours)
-  are tolerated — handlers are idempotent.
+  are tolerated — handlers are idempotent. A prompt whose PS1 carries `A`
+  (iTerm2's does) is drawn again on its row when a line is accepted; that
+  redraw keeps the submitted command waiting for its `C`, so the command's
+  output stays in its block.
 - Prompt-time context: the app stamps cwd + git branch onto the block at
   submit; the PTY reader fills cwd for raw-passthrough commands. Old blocks
   keep the context that was true when they ran.
@@ -146,11 +149,24 @@ is replaced only after *Replace the file?* is confirmed. RTF is not offered.
 - Cursor motion and deletion step over whole grapheme clusters (an emoji
   with modifiers, a letter with combining accents), never part of one.
 - Editor niceties: word motion & kills (whitespace-delimited), undo/redo
-  (snapshot stack, cap 100, cleared on submit), history walk (↑/↓ preserving
-  the in-progress line), ⌃R history pane, multi-source completion with
+  (snapshot stack, cap 100, cleared on submit), the history menu (↑, below),
+  ⌃R history pane, multi-source completion with
   ghost text, and configurable quote/bracket
   auto-pairing (typing a closer steps over it; Backspace removes an empty pair;
   inside a quoted string nothing pairs, so `'[a'` stays `'[a'`).
+- **History menu** (↑, Warp): ↑ with the cursor on the command line's first
+  line, empty or not, opens a menu docked to it: the lines that start with
+  what is typed from Rift's own history (ranked by directory, below), then
+  the pane's history, then the imported shell history, each once, the best
+  nearest the command line. The selected line
+  previews in the command line; more ↑ goes older, ↓ newer, and ↓ past the
+  newest closes the menu and puts back what was typed (with its completions
+  and ghost text); Esc does too. ⏎ runs the previewed line, ⇥ or → keep it
+  to edit, and typing anything else keeps it and applies the key. A
+  completion panel opened as you type gives ↑ to the menu; one asked for (by
+  the Tab that completed the word before it, or by ↓ into it) keeps ↑ / ↓.
+  Inside a multi-line command ↑ / ↓ move between its lines. In vim mode `k`
+  / `j` in Normal mode are the same keys.
 - Cmd-chords never insert text into the editor nor leak bytes to the PTY,
   except ⌘⌫ in raw mode, which sends ⌃U (kitty-encoded when the program
   asked for it).
@@ -315,7 +331,10 @@ whole buffer.
   One `u` undoes one change: a whole Insert or Replace session, a
   visual-mode operator, a `.` repeat. `U` puts back the last changed line as
   it was before its latest changes (itself a change: `U` again undoes it).
-- History recall: `k` = previous entry, `j` = next (also ↑/↓) in Normal mode.
+- History recall: `k` and `j` (also ↑/↓) in Normal mode are ↑ / ↓ of the
+  command line: `k` opens the history menu and goes older, `j` newer (past
+  the newest it puts back what was typed); in a multi-line command they
+  move between its lines.
 
 ## Selection & mouse
 
@@ -550,21 +569,49 @@ request, so a late answer cannot reopen the menu. If that thread cannot start
 or has died, completion pauses (no menu or ghost text; editing is unaffected)
 and the first edit after 5 seconds starts a new one.
 
-History matches drive the ghost text: whole-buffer prefix matches, the pane's
-own history first (last 200) then the imported shell history (newest 3000),
-max 5. A request shares the pane's history with the editor instead of
-copying it. Inline ghost text shows the top suggestion; Tab accepts, ⌃→
-accepts one word.
+History matches drive the ghost text: whole-buffer prefix matches, max 5,
+one per command. Rift's own command history comes first, ranked by
+directory: commands run in the pane's directory, then in the same git
+repository (its working tree; outside a repository only the directory
+counts), then anywhere, newest first within each, so `pnpm de` in a project
+where `pnpm dev` ran suggests that even when another project ran
+`pnpm dev:web` later. Then the pane's own history (last 200), then the
+imported shell history (newest 3000), which has no directories. A pane on
+another machine (ssh) has no local directory and skips Rift's history. A
+request shares the pane's history with the editor instead of copying it.
+Inline ghost text shows the top suggestion; Tab accepts, ⌃→ accepts one word.
+
+**Rift's command history** survives restarts: every command a local pane
+runs from the command line is recorded when it finishes, with its
+directory, that directory's repository, the finish time and the exit code,
+in `history.json` in the data directory (configuration.md, File locations).
+Not recorded: a command typed with a leading space (the shells'
+`HIST_IGNORE_SPACE` / `ignorespace` convention), one run over ssh (its
+directory is on the other host), one the secret patterns match (the user's
+`secret_patterns` while `mask_secrets` is on, else the built-in ones), and
+command text a program printed with OSC 133 rather than the editor
+submitting it. It keeps the newest 10,000 commands within 2 MiB of command
+and directory text (a single command or directory over 4 KiB is not kept);
+the file is written atomically, readable by the user only, and merged with
+what other Rift processes wrote (they take turns through a lock file). A
+file that is corrupt, too large or of another version is not read, and the
+next write moves it aside to `history.json.bad` rather than replacing it. A
+scripted run (`--script`) reads it only with `RIFT_SCRIPT_HISTORY=1` and
+writes it only with `RIFT_SCRIPT_RECORD_HISTORY=1` under its own
+`XDG_DATA_HOME`.
 
 The completion panel lists the word candidates, then the history lines; its
 header has a tab per source with counts (⇧⇥ or a click narrows to one), and
 accepting a history line replaces the whole command line.
 
-**History pane** (⌃R): this window's finished commands (exit status,
-directory, finish time), the pane's typed history and the shell's history
-file, one row per command, newest first; the command line filters it, ⌃R
-cycles the scope (this pane, all shells, failed, results), ⏎ runs, ⇥ edits first,
-⌘⏎ runs in a new split.
+**History pane** (⌃R): this window's finished commands and Rift's command
+history (exit status, directory, finish time), ranked like the ghost text
+(the active pane's directory, then its repository, then anywhere; newest
+first within each), then the pane's typed history and the shell's history
+file, one row per command; the command line filters it, ⌃R cycles the scope
+(this pane, all shells, failed, results), ⏎ runs, ⇥ edits first, ⌘⏎ runs in
+a new split; Esc, or ↓ past the last row, closes it. After a restart it
+lists the previous sessions' commands with their directories.
 
 **Results** (the history pane's fourth scope): past runs found by their
 command *or output*, across every window's open panes (restored blocks
@@ -1182,6 +1229,10 @@ automatically:
 
 - **zsh** — ZDOTDIR shim that sources the user's real config first (a
   `ZDOTDIR` set in the user's `~/.zshenv` is honoured for their other files).
+  The history goes to the user's own `~/.zsh_history` (macOS `/etc/zshrc`
+  names it after `ZDOTDIR`, the shim; a `HISTFILE` the user's rc sets wins),
+  and lines earlier versions left in the shim's `.zsh_history` move there
+  once. The completion server's hidden zsh keeps no history.
   An interactive `zsh` or `exec zsh` typed at a Rift prompt gets the shim
   too (for that command only; the shell keeps the user's `ZDOTDIR`).
 - **bash** — spawned with `--rcfile <data dir>/bashrc`, a shim that replays
@@ -1264,7 +1315,10 @@ it.
   (Neovim, Helix, fish, kakoune) get unambiguous `CSI u` keys —
   disambiguation, repeat/release events, shifted alternates, every key as an
   escape code, and associated text. `CSI ? u` queries are answered; programs
-  that never opt in keep the legacy xterm bytes.
+  that never opt in keep the legacy xterm bytes. Flags a command set on the
+  main screen end with it (its `133;D`): one killed before popping them
+  (Codex, Claude Code) no longer leaves the shell receiving `CSI u` codes —
+  key releases such as `9;5:3u` — that its line editor kept as text.
 - **Synchronized output** (DECSET 2026): a frame drawn between begin/end
   markers appears at once. A program that stalls mid-update is shown after
   150 ms rather than freezing the pane; a shell marker inside an update
@@ -1465,7 +1519,11 @@ time and do not appear again in Notifications.
   directory; other users' connections are refused) and exits 10 s after its
   last shell and window are gone. A slow window is disconnected rather than
   buffering without bound; the pane reattaches on its own and replays only
-  what it missed (it closes only when the shell is really gone). Input typed
+  what it missed (it closes only when the service says the shell is gone). A
+  service that does not answer is retried for 30 s; after that the pane
+  stays with "Lost the session service; the shell may still be running" and
+  *Reconnect* (⏎), which reattaches the same shell — it is never closed or
+  hung up for it. Input typed
   meanwhile is held (up to 64 KiB) and sent, in order, once reconnected; a
   toast says so if some of it did not fit, or if output produced meanwhile
   had already left the 8 MiB the service keeps. A lock file
@@ -1726,6 +1784,22 @@ on the desktop (also for shells a phone started while no window is open).
   refresh. With a hardware
   keyboard, ctrl/alt combinations, Esc, Tab and F-keys pressed in the
   command field go to the pane too.
+- **Scrolling and pasted images from the phone.** A drag on the pane's
+  screen scrolls it as the desktop's mouse wheel over it would: wheel
+  reports to a program that tracks the mouse (Claude Code's fullscreen
+  renderer, htop), arrow keys under alternate scroll (less), else the
+  phone's own view of the pane: the desktop's view stays where its user
+  left it, and the desktop's scrolling never moves the phone's. A
+  view-only phone scrolls a view, never a program. *Paste* (on the key row
+  wherever images can go, whatever Settings › Keys holds) with an image on
+  the phone's clipboard (an operate phone, a running program, at most
+  10 MB; PNG, or JPEG for a photo too large as PNG) saves it under
+  `<data dir>/remote/uploads/` (kept 24 hours) and pastes its path into
+  the program as dropping the file does, so Claude Code and Codex attach
+  it; the desktop toasts "<device> pasted an image". One image goes at a
+  time (the phone says while it is sending). A coding
+  agent's pane always has the phone's message input, whichever screen it
+  draws on.
 - **Block actions, earlier output, control keys (Phase 3).** A tap on a
   block opens its sheet: it runs the command again, puts it in the command
   field (*Edit*), or copies the command or its output; a running block's

@@ -13,8 +13,8 @@ use rift_remote::protocol::{
 use rift_remote::registry::{self, PairingLink};
 use rift_remote::transport::{self, Channel, HandshakeError, Recv};
 use rift_remote::{
-    CompletePage, Config, DiffPage, Gateway, Input, InputError, Key, KeyBase, Menu, MenuKind,
-    OutputError, OutputPage, Page, Screen, Source, SourceError, serve,
+    CompletePage, Config, DiffPage, Gateway, ImageKind, Input, InputError, Key, KeyBase, Menu,
+    MenuKind, OutputError, OutputPage, Page, Screen, Source, SourceError, serve,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -62,6 +62,14 @@ struct State {
     fits: Vec<(u64, Option<(u16, u16)>)>,
     /// Panes whose clock was reset: (pane, device name).
     resets: Vec<(u64, String)>,
+    /// Panes whose program tracks the mouse: a wheel there is input.
+    tracking: Vec<u64>,
+    /// What `scroll` was told: (pane, lines, operate).
+    scrolls: Vec<(u64, i32, bool)>,
+    /// What `upload` received: (pane, device name, kind, bytes).
+    uploads: Vec<(u64, String, ImageKind, Vec<u8>)>,
+    /// What `upload_ready` answers (a pane at its prompt: `Busy`).
+    ready_error: Option<InputError>,
 }
 
 #[derive(Clone, Default)]
@@ -237,6 +245,47 @@ impl Source for Fake {
         }
         st.screen_reads.push((pane, force));
         Ok(st.screens.get(&pane).filter(|s| s.alt || force).cloned())
+    }
+
+    /// A wheel over a mouse-tracking pane is input (operate only); any
+    /// other pane's view moves for every device.
+    fn scroll(&self, pane: u64, lines: i32, operate: bool) -> Result<(), InputError> {
+        let mut st = self.0.lock().unwrap();
+        if !st.panes.contains_key(&pane) {
+            return Err(InputError::NoPane);
+        }
+        if st.tracking.contains(&pane) && !operate {
+            return Err(InputError::ViewOnly);
+        }
+        st.scrolls.push((pane, lines, operate));
+        Ok(())
+    }
+
+    fn upload(
+        &self,
+        pane: u64,
+        device: &str,
+        kind: ImageKind,
+        bytes: &[u8],
+    ) -> Result<(), InputError> {
+        let mut st = self.0.lock().unwrap();
+        if let Some(e) = st.input_error.clone() {
+            return Err(e);
+        }
+        if !st.panes.contains_key(&pane) {
+            return Err(InputError::NoPane);
+        }
+        st.uploads
+            .push((pane, device.to_string(), kind, bytes.to_vec()));
+        Ok(())
+    }
+
+    fn upload_ready(&self, pane: u64) -> Result<(), InputError> {
+        let st = self.0.lock().unwrap();
+        if !st.panes.contains_key(&pane) {
+            return Err(InputError::NoPane);
+        }
+        st.ready_error.clone().map_or(Ok(()), Err)
     }
 
     fn reset_elapsed(&self, pane: u64, device: &str) -> Result<(), InputError> {
@@ -697,7 +746,7 @@ fn pairing_then_reconnecting_gets_welcome_and_topology() {
     assert_eq!(
         welcome,
         json!({"t":"welcome","v":2,"host":"test-host","os":"linux","version":"9.9.9",
-               "device":d.id,"permission":"operate","features":["screen","text","output","push_failures","push_ntfy","git","notify_off","chips","waiting","complete","running","open","close","fit","prompt_chips","closing"]})
+               "device":d.id,"permission":"operate","features":["screen","text","output","push_failures","push_ntfy","git","notify_off","chips","waiting","complete","running","open","close","fit","prompt_chips","closing","scroll","upload"]})
     );
     assert_eq!(
         (d.name.as_str(), d.platform.as_str()),
@@ -985,17 +1034,20 @@ fn a_permission_change_applies_at_once_not_at_the_next_devices_poll() {
     let env = start(|c| c.devices_poll = Duration::from_secs(30));
     let (key, mut ch, welcome) = env.pair(Permission::Operate);
     let id = welcome["device"].as_str().unwrap().to_string();
+    // the permission is read (and kept) while it operates ...
+    put(
+        &mut ch,
+        json!({"t":"keys","id":"k0","pane":12,"keys":["esc"]}),
+    );
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (true, ""));
     assert!(registry::set_permission(&env.dir, &id, Permission::View).unwrap());
-    // the open connection may not run any more ...
+    // ... and the open connection may not run any more once it changed
     put(
         &mut ch,
         json!({"t":"run","id":"r1","pane":12,"command":"echo late"}),
     );
     assert_eq!(ack(&recv_t(&mut ch, "ack")), (false, "forbidden"));
-    assert!(
-        env.fake.inputs().is_empty(),
-        "a command ran after the change"
-    );
+    assert_eq!(env.fake.inputs().len(), 1, "a command ran after the change");
     // ... and a new handshake gets the new permission
     let mut again = env.handshake(&key, &hello(None)).unwrap();
     assert_eq!(recv(&mut again)["permission"], "view");
@@ -3777,4 +3829,374 @@ fn output_is_rate_limited_per_connection() {
     );
     assert_eq!(got[..10], vec!["output".to_string(); 10]);
     assert_eq!(got[10], "ackrate");
+}
+
+// --- scroll -----------------------------------------------------------------
+
+#[test]
+fn scroll_reaches_the_source_clamped() {
+    let env = start(|_| {});
+    let (_k, mut ch, _) = env.pair(Permission::Operate);
+    for (rid, lines) in [("s1", 3), ("s2", -500), ("s3", 0)] {
+        put(
+            &mut ch,
+            json!({"t":"scroll","id":rid,"pane":12,"lines":lines}),
+        );
+        let v = recv_t(&mut ch, "ack");
+        assert_eq!((ack(&v), v["id"].as_str()), ((true, ""), Some(rid)));
+    }
+    // 0 moves nothing and never reaches the source
+    assert_eq!(
+        env.fake.0.lock().unwrap().scrolls,
+        [(12, 3, true), (12, -rift_remote::MAX_SCROLL_LINES, true)]
+    );
+    put(&mut ch, json!({"t":"scroll","id":"s4","pane":99,"lines":1}));
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (false, "no_pane"));
+}
+
+#[test]
+fn view_devices_scroll_a_view_but_never_send_the_wheel_to_a_program() {
+    let env = start(|_| {});
+    env.fake.set(13, vec![block(3, "vim\n")]);
+    env.fake.0.lock().unwrap().tracking.push(13);
+    let (_k, mut ch, _) = env.pair(Permission::View);
+    put(
+        &mut ch,
+        json!({"t":"scroll","id":"s1","pane":12,"lines":-4}),
+    );
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (true, ""));
+    put(&mut ch, json!({"t":"scroll","id":"s2","pane":13,"lines":2}));
+    let v = recv_t(&mut ch, "ack");
+    assert_eq!(
+        (ack(&v), v["id"].as_str()),
+        ((false, "forbidden"), Some("s2"))
+    );
+    // the source was told the device may not operate
+    assert_eq!(env.fake.0.lock().unwrap().scrolls, [(12, -4, false)]);
+    // an operate device reaches the program
+    let (_k2, mut op, _) = env.pair(Permission::Operate);
+    put(&mut op, json!({"t":"scroll","id":"s3","pane":13,"lines":2}));
+    assert_eq!(ack(&recv_t(&mut op, "ack")), (true, ""));
+    assert_eq!(env.fake.0.lock().unwrap().scrolls[1], (13, 2, true));
+}
+
+#[test]
+fn scroll_has_its_own_rate_apart_from_keys() {
+    let env = start(|_| {});
+    let (_k, mut ch, _) = env.pair(Permission::Operate);
+    let mut got = Vec::new();
+    for i in 0..=rift_remote::KEYS_RATE {
+        put(
+            &mut ch,
+            json!({"t":"scroll","id":format!("s{i}"),"pane":12,"lines":1}),
+        );
+        got.push(ack(&recv_t(&mut ch, "ack")).1.to_string());
+    }
+    assert_eq!(got[..rift_remote::KEYS_RATE], vec![String::new(); 20]);
+    assert_eq!(got[rift_remote::KEYS_RATE], "rate");
+    // keys still go: scrolling never spends typing's budget
+    put(
+        &mut ch,
+        json!({"t":"keys","id":"k1","pane":12,"keys":["ctrl+c"]}),
+    );
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (true, ""));
+}
+
+// --- upload -----------------------------------------------------------------
+
+/// A PNG-signed blob of `len` bytes.
+fn png(len: usize) -> Vec<u8> {
+    let mut b = b"\x89PNG\r\n\x1a\n".to_vec();
+    b.extend((0..len - 8).map(|i| (i % 251) as u8));
+    b
+}
+
+/// `bytes` as `upload` chunks of at most `MAX_UPLOAD_CHUNK` bytes.
+fn upload_msgs(rid: &str, pane: u64, bytes: &[u8]) -> Vec<Value> {
+    use base64::Engine as _;
+    bytes
+        .chunks(rift_remote::MAX_UPLOAD_CHUNK)
+        .enumerate()
+        .map(|(i, c)| {
+            json!({"t":"upload","id":rid,"pane":pane,"size":bytes.len(),
+                   "offset":i * rift_remote::MAX_UPLOAD_CHUNK,
+                   "data":base64::engine::general_purpose::STANDARD.encode(c)})
+        })
+        .collect()
+}
+
+#[test]
+fn an_upload_in_chunks_reaches_the_source_once_with_one_ack() {
+    let env = start(|_| {});
+    let (_k, mut ch, _) = env.pair(Permission::Operate);
+    let image = png(100_000);
+    let msgs = upload_msgs("u1", 12, &image);
+    assert_eq!(msgs.len(), 3);
+    for m in &msgs {
+        // every chunk fits the upload limit, over the ordinary one
+        let n = m.to_string().len();
+        assert!(n <= rift_remote::MAX_UPLOAD_MESSAGE, "{n}");
+    }
+    assert!(msgs[0].to_string().len() > rift_remote::MAX_CLIENT_MESSAGE);
+    for m in &msgs[..2] {
+        put(&mut ch, m.clone());
+    }
+    // nothing answers a chunk in between (a pong comes first)
+    put(&mut ch, json!({"t":"ping","n":5}));
+    assert_eq!(recv_t(&mut ch, "pong")["n"], 5);
+    assert!(env.fake.0.lock().unwrap().uploads.is_empty());
+    put(&mut ch, msgs[2].clone());
+    assert_eq!(
+        recv_t(&mut ch, "ack"),
+        json!({"t":"ack","id":"u1","ok":true})
+    );
+    let uploads = env.fake.0.lock().unwrap().uploads.clone();
+    assert_eq!(uploads.len(), 1);
+    assert_eq!(
+        (uploads[0].0, uploads[0].1.as_str(), uploads[0].2),
+        (12, "Test Phone", ImageKind::Png)
+    );
+    assert_eq!(uploads[0].3, image);
+    // a JPEG in one chunk (past the rate of one upload a second)
+    std::thread::sleep(Duration::from_millis(1050));
+    let jpeg = [b"\xff\xd8\xff\xe0".as_slice(), &[7u8; 300]].concat();
+    put(&mut ch, upload_msgs("u2", 12, &jpeg)[0].clone());
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (true, ""));
+    assert_eq!(env.fake.0.lock().unwrap().uploads[1].2, ImageKind::Jpeg);
+}
+
+#[test]
+fn view_devices_are_forbidden_to_upload_and_never_send_an_uploads_size() {
+    let env = start(|_| {});
+    let (_k, mut ch, _) = env.pair(Permission::View);
+    // small chunks (within the ordinary message limit)
+    let image = png(5_000);
+    use base64::Engine as _;
+    let msgs: Vec<Value> = image
+        .chunks(1_500)
+        .enumerate()
+        .map(|(i, c)| {
+            json!({"t":"upload","id":"u1","pane":12,"size":image.len(),"offset":i * 1_500,
+                   "data":base64::engine::general_purpose::STANDARD.encode(c)})
+        })
+        .collect();
+    for m in &msgs {
+        put(&mut ch, m.clone());
+    }
+    let v = recv_t(&mut ch, "ack");
+    assert_eq!(
+        (ack(&v), v["id"].as_str()),
+        ((false, "forbidden"), Some("u1"))
+    );
+    // one answer for the whole upload: the next message is the pong
+    put(&mut ch, json!({"t":"ping","n":6}));
+    assert_eq!(recv_t(&mut ch, "pong")["n"], 6);
+    assert!(env.fake.0.lock().unwrap().uploads.is_empty());
+    // an upload-sized chunk passes a view device's frame limit: closed
+    // before anything decrypts or parses it
+    let big = upload_msgs("u2", 12, &png(60_000))[0].clone();
+    assert!(ch.send(&big.to_string()));
+    assert_closed(&mut ch);
+}
+
+#[test]
+fn a_frame_before_authentication_is_held_to_the_ordinary_limit() {
+    let env = start(|_| {});
+    let mut w = ws(env.addr);
+    // a handshake message never comes near MAX_CLIENT_MESSAGE
+    w.send(tungstenite::Message::binary(vec![
+        0u8;
+        rift_remote::MAX_CLIENT_MESSAGE
+            + 512
+    ]))
+    .unwrap();
+    let t = Instant::now();
+    loop {
+        match w.read() {
+            Ok(tungstenite::Message::Close(_)) | Err(tungstenite::Error::ConnectionClosed) => break,
+            Err(tungstenite::Error::Io(e))
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                assert!(t.elapsed() < Duration::from_secs(5), "still open");
+            }
+            Err(_) => break,
+            Ok(m) => panic!("answered a too-large handshake frame: {m:?}"),
+        }
+    }
+}
+
+#[test]
+fn an_upload_to_a_pane_at_its_prompt_is_refused_at_its_first_chunk() {
+    let env = start(|_| {});
+    let (_k, mut ch, _) = env.pair(Permission::Operate);
+    env.fake.0.lock().unwrap().ready_error = Some(InputError::Busy);
+    let msgs = upload_msgs("u1", 12, &png(100_000));
+    put(&mut ch, msgs[0].clone());
+    let v = recv_t(&mut ch, "ack");
+    assert_eq!(ack(&v), (false, "busy"), "{v}");
+    assert!(
+        v["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("at its prompt"),
+        "{v}"
+    );
+    // the rest goes unanswered and never reaches the source
+    for m in &msgs[1..] {
+        put(&mut ch, m.clone());
+    }
+    put(&mut ch, json!({"t":"ping","n":3}));
+    assert_eq!(recv_t(&mut ch, "pong")["n"], 3);
+    assert!(env.fake.0.lock().unwrap().uploads.is_empty());
+}
+
+#[test]
+fn an_upload_past_its_deadline_is_dropped_and_answered_busy() {
+    let env = start(|c| c.upload_deadline = Duration::from_millis(400));
+    let (_k, mut ch, _) = env.pair(Permission::Operate);
+    let msgs = upload_msgs("u1", 12, &png(100_000));
+    put(&mut ch, msgs[0].clone());
+    // nothing more arrives: the gateway answers once the deadline passes
+    let t = Instant::now();
+    let v = recv_t(&mut ch, "ack");
+    assert!(
+        t.elapsed() >= Duration::from_millis(300),
+        "{:?}",
+        t.elapsed()
+    );
+    assert_eq!((ack(&v), v["id"].as_str()), ((false, "busy"), Some("u1")));
+    // its late chunks are dropped unanswered
+    for m in &msgs[1..] {
+        put(&mut ch, m.clone());
+    }
+    put(&mut ch, json!({"t":"ping","n":4}));
+    assert_eq!(recv_t(&mut ch, "pong")["n"], 4);
+    assert!(env.fake.0.lock().unwrap().uploads.is_empty());
+}
+
+#[test]
+fn at_most_two_images_arrive_at_once_across_the_gateway() {
+    let env = start(|_| {});
+    let image = png(100_000);
+    let mut phones: Vec<Ch> = (0..3).map(|_| env.pair(Permission::Operate).1).collect();
+    // two phones start an image each and stop part-way
+    for (i, ch) in phones.iter_mut().take(2).enumerate() {
+        put(ch, upload_msgs(&format!("u{i}"), 12, &image)[0].clone());
+        put(ch, json!({"t":"ping","n":i}));
+        assert_eq!(recv_t(ch, "pong")["n"], i);
+    }
+    // a third is busy meanwhile
+    let third = &mut phones[2];
+    put(third, upload_msgs("u2", 12, &image)[0].clone());
+    assert_eq!(ack(&recv_t(third, "ack")), (false, "busy"));
+    // one finishes: its place is free again
+    for m in &upload_msgs("u0", 12, &image)[1..] {
+        put(&mut phones[0], m.clone());
+    }
+    assert_eq!(ack(&recv_t(&mut phones[0], "ack")), (true, ""));
+    std::thread::sleep(Duration::from_millis(1050));
+    let third = &mut phones[2];
+    for m in upload_msgs("u3", 12, &image) {
+        put(third, m);
+    }
+    assert_eq!(ack(&recv_t(third, "ack")), (true, ""));
+}
+
+#[test]
+fn uploads_over_the_cap_not_images_or_out_of_order_are_refused() {
+    let env = start(|_| {});
+    let (_k, mut ch, _) = env.pair(Permission::Operate);
+    use base64::Engine as _;
+    let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+    let cases = [
+        // claims more than the cap
+        (
+            json!({"t":"upload","id":"a","pane":12,"size":rift_remote::MAX_UPLOAD_BYTES + 1,
+                   "offset":0,"data":b64(&png(100))}),
+            "too_large",
+        ),
+        // a GIF, a text file: the signature decides, never a name
+        (
+            json!({"t":"upload","id":"b","pane":12,"size":100,"offset":0,
+                   "data":b64(&[b"GIF89a".as_slice(), &[0u8; 94]].concat())}),
+            "bad_request",
+        ),
+        (
+            json!({"t":"upload","id":"c","pane":12,"size":12,"offset":0,
+                   "data":b64(b"#!/bin/sh\nrm")}),
+            "bad_request",
+        ),
+        // a chunk with no start
+        (
+            json!({"t":"upload","id":"d","pane":12,"size":200,"offset":100,
+                   "data":b64(&[0u8; 100])}),
+            "bad_request",
+        ),
+        // not base64
+        (
+            json!({"t":"upload","id":"e","pane":12,"size":100,"offset":0,"data":"%%%%"}),
+            "bad_request",
+        ),
+        // more bytes than the size
+        (
+            json!({"t":"upload","id":"f","pane":12,"size":20,"offset":0,"data":b64(&png(40))}),
+            "bad_request",
+        ),
+        (
+            json!({"t":"upload","id":"g","pane":12,"size":0,"offset":0,"data":""}),
+            "bad_request",
+        ),
+    ];
+    for (m, want) in cases {
+        put(&mut ch, m.clone());
+        let v = recv_t(&mut ch, "ack");
+        assert_eq!(ack(&v), (false, want), "{m}");
+        // past the rate of one upload a second
+        std::thread::sleep(Duration::from_millis(1050));
+    }
+    // a gap after a good start: refused, its later chunks dropped
+    let image = png(140_000);
+    let msgs = upload_msgs("h", 12, &image);
+    put(&mut ch, msgs[0].clone());
+    put(&mut ch, msgs[2].clone());
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (false, "bad_request"));
+    put(&mut ch, msgs[3].clone());
+    put(&mut ch, json!({"t":"ping","n":9}));
+    assert_eq!(recv_t(&mut ch, "pong")["n"], 9);
+    assert!(env.fake.0.lock().unwrap().uploads.is_empty());
+}
+
+#[test]
+fn an_upload_to_a_pane_at_its_prompt_is_busy_and_starts_are_rate_limited() {
+    let env = start(|_| {});
+    let (_k, mut ch, _) = env.pair(Permission::Operate);
+    env.fake.fail_input(Some(InputError::Busy));
+    put(&mut ch, upload_msgs("u1", 12, &png(500))[0].clone());
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (false, "busy"));
+    env.fake.fail_input(None);
+    // a second start within the second
+    put(&mut ch, upload_msgs("u2", 12, &png(500))[0].clone());
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (false, "rate"));
+}
+
+#[test]
+fn an_upload_chunk_over_its_limit_and_a_large_non_upload_close_the_connection() {
+    let env = start(|_| {});
+    let (_k, mut ch, _) = env.pair(Permission::Operate);
+    // an `upload` padded past MAX_UPLOAD_MESSAGE
+    let big = json!({"t":"upload","id":"u","pane":12,"size":10,"offset":0,
+                     "data":"A".repeat(rift_remote::MAX_UPLOAD_MESSAGE)});
+    assert!(ch.send(&big.to_string()));
+    assert_eq!(code(&recv_t(&mut ch, "error")), ("error", "too_large"));
+    assert_closed(&mut ch);
+    // any other type past MAX_CLIENT_MESSAGE, though under the upload limit
+    let (_k, mut ch, _) = env.pair(Permission::Operate);
+    let text = json!({"t":"text","id":"x","pane":12,"text":"y".repeat(10_000)});
+    assert!(ch.send(&text.to_string()));
+    assert_eq!(code(&recv_t(&mut ch, "error")), ("error", "too_large"));
+    assert_closed(&mut ch);
+    assert!(env.fake.inputs().is_empty());
 }

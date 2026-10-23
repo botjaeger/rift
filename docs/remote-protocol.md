@@ -92,12 +92,16 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
 
 ## Devices and permissions
 
-- `operate`: everything below. `view`: no `run`, `keys`, `text`, `fit`, `open`, `close`, `start` or
+- `operate`: everything below. `view`: no `run`, `keys`, `text`, `fit`, `open`, `close`, `start`,
+  `upload` or
   `complete` (its history can hold secrets typed on a command line, and
   path completion lists any folder), and no `diff` of an untracked file
   (its whole content: a `.env`, a key); they get `ack` with `error`
   `forbidden`. `changes` still lists untracked files to `view` devices
-  (path, status and line counts, no content).
+  (path, status and line counts, no content). A `view` device may `scroll`
+  a pane's own view (the primary screen), not send its program the wheel
+  (wheel reports, or arrow keys under alternate scroll): that `scroll` is
+  `forbidden`.
 - The desktop lists, renames nothing, and revokes devices (Settings ›
   Remote access, or `rift-terminal remote devices` / `revoke ID`). A revoked
   device's open connections close within 1 second, and its key is refused
@@ -108,7 +112,7 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
 
 | Limit | Value |
 |---|---|
-| Client message | 4 KiB of JSON; larger closes the connection |
+| Client message | 4 KiB of JSON (an `upload` chunk 62 KiB); larger closes the connection. The larger limit holds only for an authenticated `operate` device and only for a message whose `t` is `upload` (told before the rest is parsed); handshake frames and a `view` device's frames stay within the 4 KiB message's frame |
 | Gateway message | 1 MiB of JSON (in ≤ 65 000-byte chunks); an answer to a request with an `id` that would be larger (JSON escapes can grow a bounded page several times) is an `ack` `too_large` instead |
 | Concurrent connections | 8; the ninth is refused with `error` `busy` after the handshake |
 | Handshake deadline | 5 s after the socket opens |
@@ -124,6 +128,8 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
 | `text` | 1 KiB per message, one line without control characters; counts against the `keys` rate |
 | `open`, `close`, `start` | 2 per second per connection, together |
 | `fit` | 4 per second per connection; `cols` 20 to 300, `rows` 5 to 120 (clamped) |
+| `scroll` | at most 50 lines either way (clamped), 20 per second per connection (apart from `keys`); at most 20 wheel reports or arrow keys reach the program per `scroll` |
+| `upload` | an image of at most 10 MiB, PNG or JPEG by its first bytes; chunks of 1 to 45 000 bytes (60 000 base64 characters); one upload in flight and 1 started per second per connection; at most 2 in flight across the gateway; 60 s from the first chunk to the last |
 | `output` | 1 to 500 lines and at most 64 KiB per answer, 10 requests per second per connection |
 | `screen` | at most 300 columns and 120 rows (the top-left part of a larger screen), one per 100 ms |
 | `complete` | the line at most 1 KiB; at most 50 `items` and 50 `history` entries of 1 KiB each; shares `output`'s rate |
@@ -155,6 +161,8 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
 {"t":"close","id":"c2","pane":12,"kind":"tab"}
 {"t":"chip","id":"m5","pane":12,"kind":"docker"}
 {"t":"reset_elapsed","id":"r7","pane":12}
+{"t":"scroll","id":"s1","pane":12,"lines":3}
+{"t":"upload","id":"u1","pane":12,"size":68,"offset":0,"data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="}
 ```
 
 - `subscribe` follows one pane (a new `subscribe` replaces the old one).
@@ -194,8 +202,12 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
   confirmed as one. Two exceptions, where the gateway cannot tell a
   prompt from a program, take text: a shell without Rift's shell
   integration, and a prompt drawn on the alternate screen (tmux, screen,
-  an ssh session running one). The desktop's toast names the device, never
-  the text (it may be a password).
+  an ssh session running one). A pane whose last block reads as a prompt
+  while a program other than the shell holds its terminal (a reattached
+  agent whose replay lost its command's start, a program printing a prompt
+  marker) is running that program: it takes text and images, as the
+  topology's `running` says, and `run` is `busy` there. The desktop's
+  toast names the device, never the text (it may be a password).
 - `screen` sets what the gateway sends of the subscribed pane's terminal
   screen (§ Phase 3): `off` (the default after every `subscribe`), `auto`
   (while the pane shows the alternate screen: vim, less, htop) or `on`
@@ -247,6 +259,65 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
   it shows the background shells as tabs, and the background window leaves
   the `topology`. A computer that does not allow it answers `ack` with
   `error` `forbidden`.
+- `scroll` (feature `scroll`) scrolls `pane` as the desktop's mouse wheel
+  over it would: `lines` up (negative: down, toward the newest), at most 50
+  either way (clamped; 0 does nothing). The desktop decides what that is
+  from the pane's terminal modes, exactly as for its own wheel: a program
+  that tracks the mouse (Claude Code's fullscreen renderer, vim with
+  `mouse=a`, htop) gets that many wheel reports (at most 20) at the middle of
+  its screen, with no modifiers; a full-screen program without mouse
+  tracking under alternate scroll (DECSET 1007: less, man) gets arrow keys
+  in its cursor mode; any other alternate screen nothing; on the primary
+  screen the phones' own view of the pane moves: the styled screen that
+  `screen` `on` sends, scrolled within that screen's own list of lines
+  (clamped to its top, so scrolling back down starts at once). The
+  desktop's view never moves for a phone, and the desktop's scrolling never
+  moves the phones'. The phones' view stays on what it shows as new output
+  arrives (as the desktop's does), and follows the end again once it is
+  scrolled back down or a phone sends `run`, `keys` or `text` to the pane.
+  Answered with `ack`. A `view` device may move the view; where the wheel
+  would reach the program it gets `forbidden`. A pane in the background
+  window (`start`) has no view: `busy`. No toast: scrolling is not typing.
+- `upload` (feature `upload`) pastes an image into the program running in
+  `pane`, as a file dropped on the desktop window is: the desktop saves it
+  and pastes its path (shell-quoted, a space after), which Claude Code and
+  Codex read as an attached image. The image goes in chunks: `size` is its
+  length in bytes (1 to 10 MiB), every chunk carries the same `id`, `pane`
+  and `size`, `offset` is the chunk's first byte (0, then the bytes sent
+  so far: in order, no gaps) and `data` 1 to 45 000 bytes in standard
+  base64 (with padding; a chunk of whole 3-byte groups decodes on its own).
+  A chunk at offset 0 starts a new upload and drops one still arriving.
+  The gateway answers once: `ack` after the last chunk once the path is
+  pasted, or an error `ack` at the first chunk that fails, whose later
+  chunks it then drops unanswered. The first chunk is checked against the
+  pane before any more arrive (a pane at its prompt is `busy` at once).
+  The gateway holds `size` bytes for the image from its first chunk, at
+  most 2 images across all connections at once, and drops one that has not
+  arrived whole within 60 s of its first chunk. The type comes from the
+  first bytes only, PNG (`89 50 4E 47 0D 0A 1A 0A`) or JPEG (`FF D8 FF`),
+  else `bad_request`; nothing the client sends names the file. Errors, by
+  `message`:
+  - `forbidden`: `this device may only view` (`view` devices),
+    `remote access is off on the desktop`.
+  - `rate`: more than one upload started a second.
+  - `too_large`: `size` over 10 MiB.
+  - `bad_request`: `the image is empty`, `not a PNG or JPEG image`, `an
+    upload chunk out of order` (a gap, another `id`, `pane` or `size`),
+    `data is not base64`, `a chunk holds 1 to 45000 bytes`, `more bytes than
+    the upload's size`.
+  - `busy`: `pane N is at its prompt; an image goes to a running program`
+    (also while a submitted command has not started yet, as for `text`),
+    `the image took longer than 60 s to arrive; try again` (past the
+    deadline, answered without waiting for another chunk), `other images are
+    arriving; try again in a moment` (2 already), `the desktop cannot hold
+    the image now` (its memory refused `size`), `images go to a shell in a
+    Rift window` (a background shell), `cannot save the image: …` (the
+    uploads folder is not writable, or is not a folder: a link there is
+    refused), or the window's own reason when it did not answer.
+  - `no_pane`: `no pane N`.
+
+  The desktop shows a toast naming the device ("<device> pasted an
+  image").
 - `id` is chosen by the client (at most 64 characters) and returned in `ack`
   (or, for `output`, in the `output` answer).
 - `forget` removes this device from the desktop's paired devices and closes
@@ -258,7 +329,7 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
 ## Gateway → client
 
 ```json
-{"t":"welcome","v":2,"host":"studio-mac","os":"macos","version":"0.1.0","device":"d3f1","permission":"operate","features":["screen","text","output","push_failures","push_ntfy","git","notify_off","chips","waiting","complete","running","open","close","fit","prompt_chips","closing"]}
+{"t":"welcome","v":2,"host":"studio-mac","os":"macos","version":"0.1.0","device":"d3f1","permission":"operate","features":["screen","text","output","push_failures","push_ntfy","git","notify_off","chips","waiting","complete","running","open","close","fit","prompt_chips","closing","scroll","upload"]}
 {"t":"topology","windows":[{"pid":4242,"tabs":[{"index":0,"title":"rift","active":true,"panes":[{"id":12,"active":true,"cwd":"/Users/me/rift","job":null,"last_command":"cargo test","last_exit":0,"git":{"branch":"main","ahead":1,"behind":0,"dirty":true,"files":3,"added":42,"removed":7}}]}]}]}
 {"t":"snapshot","pane":12,"seq":41,"blocks":[Block],"has_older":true}
 {"t":"update","pane":12,"seq":42,"blocks":[Block],"removed":[80]}
@@ -289,7 +360,8 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
   `complete` (§ Phase 3), `running` (a pane's `running` in
   `topology`, below), `fit` (§ Phase 3), `prompt_chips` (a pane's `chips`
   in `topology`, below, and the `chip` and `reset_elapsed` requests, §
-  Prompt chip menus), `open` and `close`, `closing` (below), and `start` (listed only while
+  Prompt chip menus), `open` and `close`, `closing` (below), `scroll` and
+  `upload` (above), and `start` (listed only while
   the computer allows it: macOS, `remote_access`, durable sessions). A
   gateway that leaves
   the field out serves none of them; the app then hides what needs them.
@@ -359,8 +431,12 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
   (Claude Code, Codex) adds `title`, its name for the session (the pane's
   own title without the agent's status mark, at most 200 characters), and
   `"idle":true` while it waits at its own prompt (it runs, but is not
-  working); both are absent for any other program, and an app reads a
-  missing `idle` as working. The topology is sent again when `line`
+  working), and `"agent":true` (with or without a `title`: an agent whose
+  title is empty has none); all three are absent for any other program,
+  and an app reads a missing `idle` as working. An agent may draw on
+  either screen (Claude Code picks its renderer per launch: the classic one
+  on the primary screen, the fullscreen one on the alternate screen), so
+  the app gives every `agent` pane its message input. The topology is sent again when `line`
   changes, at most once per topology poll.
 - `seq` is per pane and per gateway run: `update` N+1 follows `update` (or
   `snapshot`) N. A client that sees a gap re-subscribes with its last `seq`.
@@ -619,7 +695,8 @@ subscribed pane's visible screen as text runs:
   screen.
 - On the alternate screen the rows are the program's grid. On the primary
   screen (`on`) they are Rift's own view of the pane, as the desktop draws
-  it, bottom-anchored with the last `rows` lines: each command's echoed
+  it, bottom-anchored with the last `rows` lines, or as far up as the pane
+  is scrolled (the desktop's wheel, a phone's `scroll`): each command's echoed
   prompt is one header row (`▾ cargo test  ~/rift git:(main)` at the left, the
   state badge `running`, `✓ 0` or `✕ 2` and the duration right-aligned; the
   command bold in the bright colour, the context dim; `▸` and `N lines
@@ -873,6 +950,7 @@ before, for the phone's Run sheet and the pane's suggestions:
 | `relay-retry` | Empty file a window writes (Settings › Remote access › Try again); the relay connection removes it and retries at once instead of after its backoff |
 | `relay.json` | `{"secret":"<32 bytes, base64url>"}`: the gateway's `/accept` secret at the relay |
 | `history.jsonl` | Connection history (see above) |
+| `uploads/` | Images phones pasted (`upload`), as `rift-paste-<unix ms>-<8 random hex>.png` or `.jpg`, each 0600; a name the gateway makes, never one the phone sent. Files older than 24 hours are removed at the next upload and when the gateway starts |
 | `gateway.lock` | Held (flock) by the running gateway; one gateway per user |
 
 - `remote_access = false` (config, default) keeps the gateway stopped. When
@@ -925,6 +1003,25 @@ before, for the phone's Run sheet and the pane's suggestions:
   (`{"cmd":"remote-close","pane":12,"device":"Sam's iPhone","kind":"pane"}`,
   `kind` `pane` or `tab`; no confirmation, answering `ok`) has the same gate
   and the errors `remote access is off` and `no such pane`.
+  `remote-scroll`
+  (`{"cmd":"remote-scroll","pane":12,"lines":-3,"operate":false}`; `operate`
+  whether the device may send the program input, false when left out) has
+  the same gate and the errors `remote access is off`, `no such pane`,
+  `bad request: …` (`lines` 0 or past 50) and `view only: the wheel goes to
+  the program` (the gateway's `forbidden`). A view move changes the
+  phones' own view of the pane (the one `screen` builds), never the
+  desktop's `view_offset`. `remote-upload`
+  (`{"cmd":"remote-upload","pane":12,"device":"Sam's iPhone","name":"rift-paste-1760364000123-0a1b2c3d.png"}`)
+  pastes the path of `uploads/<name>`, a file the gateway saved: the window
+  takes only a name of that form (`rift-paste-<ms>-<8 hex>.png|jpg`) and a
+  plain file (not a link) there, else `bad request: …`; the same gate, and
+  `busy` where `text` is busy. The gateway removes the file again when the
+  window refuses it. With `"check":true` (no `name`) it only answers
+  whether the pane takes an image now; the gateway asks so at an upload's
+  first chunk.
+- A request whose caller stopped waiting (the socket answers `window did
+  not answer` after 5 s) is dropped when the window reaches it, never
+  carried out late.
 - Every window shows a tab-bar chip while at least one device is connected
   (from `status.json`); clicking it opens Settings › Remote access. After
   every `status.json` change the gateway sends `{"cmd":"remote-status"}`

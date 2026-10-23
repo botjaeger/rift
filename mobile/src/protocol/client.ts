@@ -15,6 +15,7 @@ import { FramingError, Reassembler, frameMessage } from "./framing";
 import { endpointsFor, relayConnectUrl, type Endpoint } from "./relay";
 import {
   MAX_CLIENT_MESSAGE_BYTES,
+  MAX_UPLOAD_MESSAGE_BYTES,
   PROLOGUE,
   PROTOCOL_VERSION,
   isGatewayHello,
@@ -87,10 +88,25 @@ export const INPUT_WINDOW_MS = 1_100;
  * the next one; when none comes by then, the program has left the screen meanwhile.
  */
 export const SCREEN_RESUME_MS = 5_000;
+/**
+ * An image's `upload` chunks go out one per turn of the event loop (the app stays responsive),
+ * and wait while the socket holds more than this unsent.
+ */
+export const UPLOAD_HIGH_WATER_BYTES = 256 * 1024;
+/** How often a waiting upload looks at the socket's unsent bytes again. */
+export const UPLOAD_POLL_MS = 50;
+/**
+ * While an image goes out (until its ack, at most the gateway's 60 s for one upload) the
+ * connection counts as alive: the gateway's pong to a ping waits behind the chunks on a slow
+ * link, and the silence timeout would otherwise drop the connection mid-upload.
+ */
+export const UPLOAD_LIVE_MS = 60_000;
 
 /** The subset of the WebSocket API the client uses (the React Native global, or a fake). */
 export interface SocketLike {
   binaryType?: string;
+  /** Bytes queued but not yet sent (where the platform reports it). */
+  readonly bufferedAmount?: number;
   onopen: ((ev: unknown) => void) | null;
   onmessage: ((ev: { data: unknown }) => void) | null;
   onerror: ((ev: unknown) => void) | null;
@@ -506,6 +522,73 @@ export class RiftClient {
     if (!this.authed) return null;
     const id = `f${++this.idN}`;
     return this.send({ t: "fit", id, pane, cols: size?.cols ?? null, rows: size?.rows ?? null }) ? id : null;
+  }
+
+  /**
+   * Scrolls the pane as the desktop's wheel would, `lines` up (negative: down; feature `scroll`);
+   * returns the `ack` id, or null when not connected. Not paced here: the caller coalesces
+   * (scroll.ts), within the gateway's own rate for scrolls.
+   */
+  scroll(pane: number, lines: number): string | null {
+    if (!this.authed) return null;
+    const id = `s${++this.idN}`;
+    return this.send({ t: "scroll", id, pane, lines }) ? id : null;
+  }
+
+  /**
+   * Sends an image's `upload` chunks, which `chunks` builds for the request id it is given
+   * (upload.ts `uploadChunks`), in order; returns that id, which the `ack` carries, or null when
+   * not connected or the first chunk could not be sent. The first goes at once, the rest paced:
+   * one per turn of the event loop, waiting while the socket holds more than
+   * UPLOAD_HIGH_WATER_BYTES unsent. Until its ack the connection counts as alive
+   * (UPLOAD_LIVE_MS). One image at a time: a new one replaces what is left of the last.
+   */
+  upload(chunks: (id: string) => ClientMsg[]): string | null {
+    if (!this.authed || !this.ws) return null;
+    const id = `u${++this.idN}`;
+    const msgs = chunks(id);
+    if (msgs.length === 0) return null;
+    this.stopUpload();
+    if (!this.send(msgs[0]!, MAX_UPLOAD_MESSAGE_BYTES)) return null;
+    this.upload_ = { id, until: Date.now() + UPLOAD_LIVE_MS, buffered: this.ws.bufferedAmount ?? 0 };
+    this.uploadTimer = setTimeout(() => this.pumpUpload(msgs, 1), 0);
+    return id;
+  }
+
+  /** The image going out: its id, until when it keeps the connection alive, the unsent bytes last seen. */
+  private upload_: { id: string; until: number; buffered: number } | null = null;
+  private uploadTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Sends chunk `next` of `msgs` when the socket has room, then the rest on later turns. */
+  private pumpUpload(msgs: ClientMsg[], next: number): void {
+    this.uploadTimer = null;
+    const ws = this.ws;
+    const up = this.upload_;
+    if (!ws || !this.authed || !up) return;
+    const buffered = ws.bufferedAmount ?? 0;
+    // bytes left the phone since the last look: the connection carries the image
+    if (buffered < up.buffered) this.touch();
+    up.buffered = buffered;
+    const again = (ms: number) => {
+      this.uploadTimer = setTimeout(() => this.pumpUpload(msgs, next), ms);
+    };
+    if (next >= msgs.length) {
+      // all sent: watch it drain (each drop is a sign of life)
+      if (buffered > 0) again(UPLOAD_POLL_MS);
+      return;
+    }
+    if (buffered > UPLOAD_HIGH_WATER_BYTES) return again(UPLOAD_POLL_MS);
+    // a failed send is a closing socket: onclose follows
+    if (!this.send(msgs[next]!, MAX_UPLOAD_MESSAGE_BYTES)) return;
+    up.buffered = ws.bufferedAmount ?? 0;
+    next += 1;
+    again(0);
+  }
+
+  private stopUpload(): void {
+    if (this.uploadTimer) clearTimeout(this.uploadTimer);
+    this.uploadTimer = null;
+    this.upload_ = null;
   }
 
   /**
@@ -938,6 +1021,8 @@ export class RiftClient {
         if (msg.pane === this.pane) this.events.onPane?.(msg);
         return;
       case "ack":
+        // an image's answer (its last chunk, or a refusal part-way): nothing more of it goes out
+        if (this.upload_?.id === msg.id) this.stopUpload();
         // an `output` request is refused with an `ack` carrying its id
         if (!msg.ok && this.settleOutput(msg.id, { ok: false, code: msg.error ?? "error", message: msg.message ?? "" }))
           return;
@@ -1044,11 +1129,14 @@ export class RiftClient {
     this.screenResumeTimer = null;
   }
 
-  /** Encrypts and sends one protocol message. False when there is no channel or it is too large. */
-  private send(msg: ClientMsg): boolean {
+  /**
+   * Encrypts and sends one protocol message. False when there is no channel or it is larger than
+   * `maxBytes` (MAX_CLIENT_MESSAGE_BYTES; an `upload` chunk may be MAX_UPLOAD_MESSAGE_BYTES).
+   */
+  private send(msg: ClientMsg, maxBytes = MAX_CLIENT_MESSAGE_BYTES): boolean {
     if (!this.sendCipher) return false;
     const bytes = utf8Encode(JSON.stringify(msg));
-    if (bytes.length > MAX_CLIENT_MESSAGE_BYTES) return false;
+    if (bytes.length > maxBytes) return false;
     try {
       for (const chunk of frameMessage(bytes)) this.sendRaw(this.sendCipher.encrypt(chunk));
       return true;
@@ -1062,12 +1150,15 @@ export class RiftClient {
     this.ws?.send(exactBuffer(bytes));
   }
 
-  private touch(): void {
+  private touch(ms: number = IDLE_TIMEOUT_MS): void {
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = setTimeout(() => {
+      // an image still going out: the gateway's answers wait behind it
+      const left = (this.upload_?.until ?? 0) - Date.now();
+      if (left > 0) return this.touch(left);
       // A silent gateway: drop this socket and reconnect.
       this.dropAttempt("gateway stopped responding");
-    }, IDLE_TIMEOUT_MS);
+    }, ms);
   }
 
   /** The current socket is done (closed, broken or timed out): try the next address or back off. */
@@ -1181,6 +1272,8 @@ export class RiftClient {
     // input waiting for the rate belonged to this connection: its requests fail as disconnected
     this.inputQueue = [];
     this.inputTimes = [];
+    // what is left of an image goes nowhere now
+    this.stopUpload();
     this.stopScreenResume();
     // answers to requests on this socket never come
     for (const id of [...this.outputs.keys()])

@@ -145,10 +145,11 @@ describe("Now", () => {
       JSON.parse(readFileSync(fileURLToPath(new URL("../../crates/rift-remote/fixtures/server/topology.json", import.meta.url)), "utf8")),
     ) as TopologyMsg;
     const p16 = t.windows[0]!.tabs[0]!.panes.find((p) => p.id === 16)!;
-    expect(p16.running).toEqual({ started: 1760363000, line: "> ", title: "Code changes overview", idle: true });
+    expect(p16.running).toEqual({ started: 1760363000, line: "> ", title: "Code changes overview", idle: true, agent: true });
     const bad = (running: unknown) =>
       decodeServer({ t: "topology", windows: [{ pid: 1, tabs: [{ index: 0, title: "", active: true, panes: [{ ...p16, running }] }] }] });
     expect(bad({ started: 1, line: "", idle: "yes" })).toBeNull();
+    expect(bad({ started: 1, line: "", agent: 1 })).toBeNull();
     expect(bad({ started: 1, line: "", title: "x".repeat(201) })).toBeNull();
     expect(bad({ started: 1, line: "", title: "x", idle: false })).not.toBeNull();
   });

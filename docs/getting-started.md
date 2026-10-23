@@ -28,8 +28,9 @@ If commands do not become blocks, the shell is not loading the hooks (see
 - ⇧⏎ adds a second line; ⏎ runs the whole command.
 - Gray text after the cursor is a suggestion from your history: Tab or → accepts
   it, ⌃→ accepts one word. The completion panel above the editor lists commands, subcommands, flags
-  and paths; ↑/↓ choose, Tab inserts.
-- ⌃R opens the history pane above the command line: type to narrow it, ⏎ runs, ⇥ edits first, ⌘⏎ runs in a new split. ↑/↓ walk history without it. ⌃R again cycles its scopes; **Results** finds past runs by their output too (`is:failed`, `since:7d`, `host:prod` filter), with a preview before you rerun.
+  and paths; ↓ then ↑/↓ choose, Tab inserts.
+- ↑ opens the history menu: your earlier commands that start with what you typed, previewed on the line as you move (↑ older, ↓ newer). ⏎ runs one, ⇥ keeps it to edit, and ↓ past the newest or Esc puts back what you typed.
+- ⌃R opens the history pane above the command line: type to narrow it, ⏎ runs, ⇥ edits first, ⌘⏎ runs in a new split. ⌃R again cycles its scopes; **Results** finds past runs by their output too (`is:failed`, `since:7d`, `host:prod` filter), with a preview before you rerun.
 - ⌃C interrupts, ⌃D sends end-of-file, ⌃L redraws.
 - When a program takes over the terminal (vim, less, htop, ssh, a password
   prompt), keys go straight to it. The editor comes back at the next prompt.

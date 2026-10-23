@@ -535,6 +535,27 @@ pub fn devices(dir: &Path) -> io::Result<Vec<Device>> {
     read_list(&dir.join(DEVICES_FILE))
 }
 
+/// What tells one `devices.json` from the next: every write replaces the
+/// file (a new inode, a new modification time), so an unchanged stamp
+/// means an unchanged list. `None` when there is no file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DevicesStamp {
+    inode: u64,
+    len: u64,
+    modified: Option<SystemTime>,
+}
+
+/// The stamp of `devices.json` as it is now (a `stat`, no read).
+pub fn devices_stamp(dir: &Path) -> Option<DevicesStamp> {
+    use std::os::unix::fs::MetadataExt as _;
+    let m = std::fs::metadata(dir.join(DEVICES_FILE)).ok()?;
+    Some(DevicesStamp {
+        inode: m.ino(),
+        len: m.len(),
+        modified: m.modified().ok(),
+    })
+}
+
 /// Remove the device `id`; false when there is none. Its open connections
 /// close within a second (the gateway watches `devices.json`).
 pub fn revoke(dir: &Path, id: &str) -> io::Result<bool> {

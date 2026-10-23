@@ -68,7 +68,7 @@ export const CONTROL_KEYS: readonly ControlKey[] = [
   { id: "ctrl+e", tip: "Sends Ctrl+E: jumps to the end of the line", label: "⌃E", spoken: "Control E", short: "Line end" },
   { id: "ctrl+u", tip: "Sends Ctrl+U: deletes from the cursor to the start of the line", label: "⌃U", spoken: "Control U", short: "Clear line" },
   { id: "ctrl+w", tip: "Sends Ctrl+W: deletes the word before the cursor", label: "⌃W", spoken: "Control W", short: "Delete word" },
-  { id: "paste", tip: "Types the phone's clipboard into the pane", label: "Paste", icon: "paste", spoken: "Paste the clipboard", name: "Paste", paste: true },
+  { id: "paste", tip: "Pastes the phone's clipboard: text as typed, an image (a screenshot) as a file the program attaches", label: "Paste", icon: "paste", spoken: "Paste the clipboard", name: "Paste", paste: true },
   { id: "new_tab", tip: "Opens a new tab on your computer", label: "+Tab", icon: "newTab", spoken: "New tab", name: "New tab on the computer", short: "New tab", open: "tab" },
   { id: "new_pane", tip: "Splits this pane: a new pane beside it on your computer", label: "+Pane", icon: "newPane", spoken: "New pane", name: "New pane beside this one", short: "New pane", open: "pane" },
   ...fkeys,
@@ -89,6 +89,16 @@ export const DEFAULT_CONTROL_KEYS: readonly string[] = ["esc", "tab", "ctrl+c", 
 export const OLD_DEFAULT_CONTROL_KEYS: readonly string[] = ["ctrl+c", "esc", "tab", "ctrl", "up", "down"];
 /** Keys the row holds at most (the hide-keyboard key comes besides). */
 export const MAX_ROW_KEYS = 8;
+
+/**
+ * The row as shown: `ids`, with Paste at the end where an image can be pasted (`images`: the
+ * computer takes uploads and this device operates) and the row lacks it. A screenshot for Claude
+ * Code or vim goes through Paste, so it is never left to Settings › Keys to add (the stored row
+ * stays as the user set it).
+ */
+export function rowWithPaste(ids: readonly string[], images: boolean): readonly string[] {
+  return images && !ids.includes("paste") ? [...ids, "paste"] : ids;
+}
 
 /** Whether the row has room for another key. */
 export const canAddKey = (ids: readonly string[]) => ids.length < MAX_ROW_KEYS;

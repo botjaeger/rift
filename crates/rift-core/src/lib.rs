@@ -3,6 +3,7 @@ pub mod block;
 pub mod changelog;
 pub mod cli_install;
 pub mod code_highlight;
+pub mod command_history;
 pub mod completion;
 mod completion_cache;
 pub mod completion_specs;

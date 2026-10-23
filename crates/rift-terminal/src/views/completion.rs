@@ -22,6 +22,16 @@ pub struct CompletionUi {
     /// The word the candidates replace, as typed: a row starting with it
     /// shows that part bold.
     pub token: String,
+    /// The user asked for the panel: Tab opened it (the answer after a Tab)
+    /// or ↓ moved into it, so ↑ / ↓ navigate it. A panel opened as you type
+    /// gives ↑ to the history menu instead.
+    pub asked: bool,
+    /// Open as the inline history menu (↑ on the command line's first
+    /// line, Warp): the rows are history lines, newest first, and the
+    /// selected one previews in the command line. Holds what was typed and
+    /// the cursor, put back when the menu closes past the newest line or on
+    /// Esc.
+    pub history_menu: Option<(String, usize)>,
 }
 
 impl CompletionUi {
@@ -32,6 +42,63 @@ impl CompletionUi {
         self.filter = None;
         self.ghost.clear();
         self.selected = 0;
+        self.asked = false;
+        self.history_menu = None;
+    }
+
+    /// Open as the history menu on `lines` (newest first) for the typed
+    /// `typed` with the cursor at `cursor`; the newest is selected.
+    /// `false` (and nothing opens) when there are none.
+    pub fn open_history_menu(&mut self, lines: Vec<String>, typed: &str, cursor: usize) -> bool {
+        self.close();
+        if lines.is_empty() {
+            return false;
+        }
+        self.set(
+            lines
+                .into_iter()
+                .map(|insert| Completion {
+                    insert,
+                    description: String::new(),
+                    source: "history",
+                })
+                .collect(),
+        );
+        self.token = typed.to_string();
+        self.history_menu = Some((typed.to_string(), cursor));
+        true
+    }
+
+    /// The line the history menu previews.
+    pub fn history_line(&self) -> Option<&str> {
+        self.history_menu.as_ref()?;
+        self.items.get(self.selected).map(|c| c.insert.as_str())
+    }
+
+    /// ↑ in the history menu: an older line (the oldest stays).
+    pub fn history_older(&mut self) {
+        if self.selected + 1 < self.items.len() {
+            self.selected += 1;
+        }
+    }
+
+    /// ↓ in the history menu: a newer line; `false` past the newest, where
+    /// the menu closes and the typed text comes back.
+    pub fn history_newer(&mut self) -> bool {
+        match self.selected.checked_sub(1) {
+            Some(i) => {
+                self.selected = i;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Close the history menu, handing back what was typed and the cursor.
+    pub fn take_typed(&mut self) -> Option<(String, usize)> {
+        let typed = self.history_menu.take();
+        self.close();
+        typed
     }
 
     /// New candidates; the picked source tab stays while it still has rows.
@@ -93,6 +160,34 @@ impl CompletionUi {
         self.refilter();
     }
 }
+
+/// The history menu's lines for the typed `typed`: those starting with it,
+/// Rift's saved history ranked by directory (`ranked`, best first) first,
+/// then the pane's own history, then the shell's (both oldest first, as
+/// kept), newest first and each line once; never the typed text itself (a
+/// preview that changes nothing), at most [`MAX_HISTORY_MENU`] lines.
+pub fn history_matches(
+    ranked: &[&str],
+    pane: &[String],
+    shell: &[String],
+    typed: &str,
+) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    ranked
+        .iter()
+        .copied()
+        .chain(pane.iter().rev().map(String::as_str))
+        .chain(shell.iter().rev().map(String::as_str))
+        .filter(|l| !l.trim().is_empty() && *l != typed && l.starts_with(typed))
+        .filter(|l| seen.insert(*l))
+        .take(MAX_HISTORY_MENU)
+        .map(str::to_string)
+        .collect()
+}
+
+/// Lines the history menu walks through with ↑ (the shell history alone can
+/// hold tens of thousands).
+pub const MAX_HISTORY_MENU: usize = 500;
 
 const HEADER_H: f32 = 32.0;
 const ROW_H: f32 = 28.0;
@@ -338,9 +433,15 @@ pub fn render(
         .measure("0", 12.5, mono_family(), Weight::NORMAL)
         .max(1.0);
     let rows_top = y + HEADER_H + 1.0;
+    // the history menu keeps the newest line nearest the command line:
+    // above it, the rows run bottom up
+    let menu = ui.history_menu.as_ref();
+    let line_len = menu.map_or(line_len, |(typed, _)| typed.len());
+    let bottom_up = menu.is_some() && at_bottom;
     for (row, item) in ui.items.iter().skip(scroll).take(shown).enumerate() {
         let idx = row + scroll;
-        let ry = rows_top + row as f32 * ROW_H;
+        let slot = if bottom_up { shown - 1 - row } else { row };
+        let ry = rows_top + slot as f32 * ROW_H;
         let rect = [x, ry, w, ROW_H];
         let selected = idx == ui.selected;
         let hot = mouse.is_some_and(|(mx, my)| {
@@ -375,8 +476,15 @@ pub fn render(
         let desc_x = x + w - PAD_X - desc_w;
         let name_room = (desc_x - 16.0 - name_x).max(cell * 4.0);
         let fits = (name_room / cell).floor().max(1.0) as usize;
+        // a history line is drawn like ⌃R draws it: on one line, secrets
+        // masked while `mask_secrets` is on (accepting keeps the real one)
+        let shown_history;
         let name = if hint {
             &item.description
+        } else if item.source == "history" {
+            shown_history =
+                super::history::masked_line(&item.insert, rift_core::secrets::active().as_deref());
+            &shown_history
         } else {
             &item.insert
         };
@@ -453,7 +561,11 @@ pub fn render(
     // footer: key caps and what they do
     let fy = y + panel_h - FOOTER_H;
     layer.hline(x, fy, w, 1.0, theme.border);
-    let mut hints: Vec<(&[&str], &str)> = vec![(&["↑", "↓"], "navigate"), (&["⇥"], "accept")];
+    let mut hints: Vec<(&[&str], &str)> = if menu.is_some() {
+        vec![(&["↑", "↓"], "navigate"), (&["⏎"], "run"), (&["⇥"], "edit")]
+    } else {
+        vec![(&["↑", "↓"], "navigate"), (&["⇥"], "accept")]
+    };
     if !ui.ghost.is_empty() {
         hints.push((&["→"], "accept ghost"));
     }
@@ -489,6 +601,83 @@ mod tests {
         assert_eq!(bold_len(&c("git-checkout", "command"), "gco", 3, 3), 0);
         assert_eq!(bold_len(&c("git che", "history"), "che", 3, 7), 7);
         assert_eq!(bold_len(&c("", "hint"), "", 0, 3), 0);
+    }
+
+    fn lines(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn history_matches_are_prefixed_newest_first_and_deduped() {
+        let pane = lines(&["pnpm dev", "ls", "pnpm build", "pnpm dev"]);
+        let shell = lines(&["pnpm install", "pnpm build", "  ", "pnpm d"]);
+        // the typed text itself is no match: its preview would change nothing
+        assert_eq!(
+            history_matches(&[], &pane, &shell, "pnpm d"),
+            lines(&["pnpm dev"])
+        );
+        let many: Vec<String> = (0..MAX_HISTORY_MENU + 50)
+            .map(|i| format!("c{i}"))
+            .collect();
+        assert_eq!(
+            history_matches(&[], &[], &many, "c").len(),
+            MAX_HISTORY_MENU
+        );
+        // empty: every line, the pane's first
+        assert_eq!(
+            history_matches(&[], &pane, &shell, ""),
+            lines(&["pnpm dev", "pnpm build", "ls", "pnpm d", "pnpm install"])
+        );
+        assert!(history_matches(&[], &pane, &shell, "git").is_empty());
+    }
+
+    #[test]
+    fn history_matches_put_the_directory_ranked_lines_first() {
+        let pane = lines(&["pnpm dev:web"]);
+        let shell = lines(&["pnpm dev"]);
+        assert_eq!(
+            history_matches(&["pnpm dev", "git log"], &pane, &shell, "pnpm d"),
+            lines(&["pnpm dev", "pnpm dev:web"])
+        );
+    }
+
+    #[test]
+    fn history_menu_walks_older_and_newer_and_hands_back_the_typed_text() {
+        let mut ui = CompletionUi::default();
+        assert!(!ui.open_history_menu(Vec::new(), "x", 1));
+        assert!(!ui.open && ui.history_menu.is_none());
+
+        assert!(ui.open_history_menu(lines(&["new", "mid", "old"]), "pn", 1));
+        assert!(ui.open && !ui.asked);
+        assert_eq!(ui.history_line(), Some("new"));
+        ui.history_older();
+        ui.history_older();
+        assert_eq!(ui.history_line(), Some("old"));
+        // the oldest stays
+        ui.history_older();
+        assert_eq!(ui.history_line(), Some("old"));
+        assert!(ui.history_newer());
+        assert!(ui.history_newer());
+        assert_eq!(ui.history_line(), Some("new"));
+        // past the newest: the caller restores
+        assert!(!ui.history_newer());
+        assert_eq!(ui.take_typed(), Some(("pn".to_string(), 1)));
+        assert!(!ui.open && ui.items.is_empty() && ui.history_line().is_none());
+        assert_eq!(ui.take_typed(), None);
+    }
+
+    #[test]
+    fn a_completion_panel_is_no_history_menu() {
+        let mut ui = CompletionUi::default();
+        ui.set(vec![c("checkout", "shell")]);
+        assert!(ui.open);
+        assert_eq!(ui.history_line(), None);
+        // opening the menu replaces the panel; closing forgets both
+        ui.asked = true;
+        assert!(ui.open_history_menu(lines(&["git checkout"]), "git", 3));
+        assert!(!ui.asked && ui.items.len() == 1);
+        ui.close();
+        assert!(ui.history_menu.is_none());
     }
 
     #[test]

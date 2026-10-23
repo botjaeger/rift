@@ -187,15 +187,45 @@ impl HistoryPane {
             self.selected = (self.selected as isize + delta).clamp(0, n - 1) as usize;
         }
     }
+
+    /// ↓: the next row; `false` past the last one, where the pane closes.
+    pub fn step_down(&mut self) -> bool {
+        if self.selected + 1 >= self.len() {
+            return false;
+        }
+        self.selected += 1;
+        true
+    }
 }
 
-/// Newest first, keeping the first (newest) occurrence of each command.
+/// Keep the first occurrence of each command, in order; it counts as run in
+/// the active pane (`here`) when any occurrence was, and shows the latest
+/// run (exit, time, directory), so Failed sees a newer failure ranked below
+/// an older success.
 pub fn dedupe(entries: Vec<Entry>) -> Vec<Entry> {
-    let mut seen = std::collections::HashSet::new();
-    entries
-        .into_iter()
-        .filter(|e| !e.command.trim().is_empty() && seen.insert(e.command.clone()))
-        .collect()
+    let mut at = std::collections::HashMap::new();
+    let mut out: Vec<Entry> = Vec::new();
+    for e in entries {
+        if e.command.trim().is_empty() {
+            continue;
+        }
+        match at.get(&e.command) {
+            Some(&i) => {
+                let kept: &mut Entry = &mut out[i];
+                kept.here |= e.here;
+                if e.finished > kept.finished {
+                    kept.exit = e.exit;
+                    kept.finished = e.finished;
+                    kept.cwd = e.cwd;
+                }
+            }
+            None => {
+                at.insert(e.command.clone(), out.len());
+                out.push(e);
+            }
+        }
+    }
+    out
 }
 
 /// `Just now`, `4 min ago`, `2 h ago`, `yesterday`, `5 days ago`.
@@ -303,7 +333,7 @@ fn shown_command(command: &str) -> String {
     masked_line(command, rift_core::secrets::active().as_deref())
 }
 
-fn masked_line(command: &str, masker: Option<&rift_core::secrets::Masker>) -> String {
+pub(crate) fn masked_line(command: &str, masker: Option<&rift_core::secrets::Masker>) -> String {
     match masker {
         Some(m) => m.mask(command).replace('\n', " ⏎ "),
         None => command.replace('\n', " ⏎ "),
@@ -896,6 +926,47 @@ mod tests {
             masked_line(&cmd, None),
             format!("export GH={token} ⏎ echo ok")
         );
+    }
+
+    #[test]
+    fn down_past_the_last_row_asks_to_close() {
+        let mut hp = HistoryPane::default();
+        hp.open(vec![e("new", None, true), e("old", None, true)], "");
+        assert!(hp.step_down());
+        assert_eq!(hp.current_command(), Some("old"));
+        assert!(!hp.step_down());
+        assert_eq!(hp.current_command(), Some("old"));
+        // nothing matches: ↓ closes at once
+        hp.filter("zzz");
+        assert!(!hp.step_down());
+    }
+
+    #[test]
+    fn a_kept_row_shows_its_latest_run() {
+        let at = |s| Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(s));
+        // ranked first: passed here yesterday; later: failed elsewhere a
+        // minute ago
+        let rows = dedupe(vec![
+            Entry {
+                finished: at(1_000),
+                ..e("cargo test", Some(0), true)
+            },
+            Entry {
+                finished: at(90_000),
+                cwd: Some("~/other".into()),
+                ..e("cargo test", Some(101), false)
+            },
+        ]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            (rows[0].exit, rows[0].finished, rows[0].here),
+            (Some(101), at(90_000), true)
+        );
+        assert_eq!(rows[0].cwd.as_deref(), Some("~/other"));
+        let mut hp = HistoryPane::default();
+        hp.open(rows, "");
+        hp.set_scope(Scope::Failed);
+        assert_eq!(hp.results, vec![0]);
     }
 
     #[test]

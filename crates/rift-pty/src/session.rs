@@ -802,8 +802,39 @@ struct Opened {
 /// true when output before it was no longer retained.
 type Resume = Box<dyn FnMut(u64) -> std::io::Result<(std::os::unix::net::UnixStream, bool)> + Send>;
 
-/// Consecutive failed resumes (no output in between) before the pane gives up.
+/// Consecutive resumes (no output in between) before the pane gives up.
 const MAX_RESUMES: u32 = 5;
+
+/// How long a resume keeps trying a service that does not answer (a
+/// machine swapping hard, a service restarting) before the pane counts the
+/// service as lost.
+const RESUME_WINDOW: std::time::Duration = if cfg!(test) {
+    std::time::Duration::from_millis(600)
+} else {
+    std::time::Duration::from_secs(30)
+};
+
+/// `resume` until it answers, backing off up to 2 s between tries, for at
+/// most [`RESUME_WINDOW`]. A service that answers that the session is gone
+/// (`NotFound`) is final at once.
+fn resume_patiently(
+    resume: &mut Resume,
+    from: u64,
+) -> std::io::Result<(std::os::unix::net::UnixStream, bool)> {
+    let until = std::time::Instant::now() + RESUME_WINDOW;
+    let mut wait = std::time::Duration::from_millis(100);
+    loop {
+        match resume(from) {
+            Ok(v) => return Ok(v),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(e),
+            Err(e) if std::time::Instant::now() + wait > until => return Err(e),
+            Err(_) => {
+                std::thread::sleep(wait);
+                wait = (wait * 2).min(std::time::Duration::from_secs(2));
+            }
+        }
+    }
+}
 
 /// The pane's reader thread: parses output into the Term and block model.
 struct Reader {
@@ -874,6 +905,8 @@ impl Reader {
     fn run(self, source: Source) {
         let mut parser: vte::ansi::Processor = vte::ansi::Processor::new();
         let mut scanner = OscScanner::new();
+        // the session service stopped answering: the shell may well run on
+        let mut lost = false;
         match source {
             Source::Pty(mut file, pid) => {
                 let mut buf = [0u8; 65536];
@@ -1000,11 +1033,14 @@ impl Reader {
                         // The socket ended without an `Exited` frame: the
                         // service dropped this (slow) client, or it died.
                         // The shell may well be running: reattach after the
-                        // last byte seen; only a session that is really gone
-                        // closes the pane.
+                        // last byte seen; only a session the service says is
+                        // gone ends the pane. A service that never answers
+                        // leaves it lost, never ended: closing it would hang
+                        // up a shell that may still run.
                         _ => {
                             resumes += 1;
                             if resumes > MAX_RESUMES {
+                                lost = true;
                                 break;
                             }
                             resumed = true;
@@ -1013,10 +1049,17 @@ impl Reader {
                             std::thread::sleep(std::time::Duration::from_millis(
                                 100 * u64::from(resumes),
                             ));
-                            let Ok((fresh, truncated)) = resume(next_seq) else {
+                            let (fresh, truncated) = match resume_patiently(&mut resume, next_seq) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    lost = e.kind() != std::io::ErrorKind::NotFound;
+                                    break;
+                                }
+                            };
+                            let Ok(writer) = fresh.try_clone() else {
+                                lost = true;
                                 break;
                             };
-                            let Ok(writer) = fresh.try_clone() else { break };
                             let dropped = {
                                 let mut c = conn.lock().unwrap();
                                 // the window may have changed while down
@@ -1116,9 +1159,13 @@ impl Reader {
                 }
             }
         }
-        // ended without a code (the service connection lost, an older
-        // service): exited all the same
-        self.exit.set_if_unset(None);
+        // ended without a code (an older service): exited all the same; a
+        // lost service is told apart, as its shell may still be running
+        if lost {
+            self.exit.set_lost();
+        } else {
+            self.exit.set_if_unset(None);
+        }
         (self.observer)(self.id, SessionEvent::Exit);
     }
 }
@@ -1130,6 +1177,24 @@ pub struct ExitCell(Arc<AtomicI64>);
 impl ExitCell {
     const RUNNING: i64 = i64::MIN;
     const UNKNOWN: i64 = i64::MIN + 1;
+    /// The session service stopped answering: no exit seen, the shell may
+    /// still be running there.
+    const LOST: i64 = i64::MIN + 2;
+
+    fn set_lost(&self) {
+        let _ = self.0.compare_exchange(
+            Self::RUNNING,
+            Self::LOST,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+
+    /// The pane ended because the session service stopped answering, not
+    /// because its shell exited.
+    pub fn lost(&self) -> bool {
+        self.0.load(Ordering::Acquire) == Self::LOST
+    }
 
     fn set(&self, code: Option<i32>) {
         self.0
@@ -1148,7 +1213,7 @@ impl ExitCell {
     pub fn get(&self) -> Option<Option<i32>> {
         match self.0.load(Ordering::Acquire) {
             Self::RUNNING => None,
-            Self::UNKNOWN => Some(None),
+            Self::UNKNOWN | Self::LOST => Some(None),
             v => Some(Some(v as i32)),
         }
     }
@@ -1554,6 +1619,12 @@ impl Session {
     /// inside: no code known).
     pub fn exit_status(&self) -> Option<Option<i32>> {
         self.exit.get()
+    }
+
+    /// The pane stopped because the session service stopped answering: its
+    /// shell may still run there (reattach it; never hang it up).
+    pub fn service_lost(&self) -> bool {
+        self.exit.lost()
     }
 
     /// Write a report the terminal sends on its own (focus in/out, mouse
@@ -2098,9 +2169,18 @@ fn feed(
                 }
             }
             Some(marker) => {
-                // a finished command's progress ends with it
+                // a finished command's progress ends with it, and so do the
+                // kitty keyboard flags it set on the main screen: one killed
+                // before popping them left the shell getting CSI u codes (key
+                // releases too), which its line editor keeps as text
                 if matches!(marker, Marker::Done { .. }) {
                     *ctx.progress.lock().unwrap() = None;
+                    if !term
+                        .mode()
+                        .contains(alacritty_terminal::term::TermMode::ALT_SCREEN)
+                    {
+                        vte::ansi::Handler::pop_keyboard_modes(&mut *term, u16::MAX);
+                    }
                 }
                 if matches!(marker, Marker::Done { .. })
                     && ctx.blocks.lock().unwrap().any_running()
@@ -2506,6 +2586,47 @@ mod tests {
             reply: None,
             notify: None,
         }
+    }
+
+    /// A program that turned on kitty key reporting (`CSI > 11 u`: event
+    /// types, so releases too) and died without popping it: its command's
+    /// 133;D gives the shell plain keys again. A full-screen program's flags
+    /// (alternate screen) are its own.
+    #[test]
+    fn a_finished_command_takes_its_kitty_keyboard_flags_with_it() {
+        use alacritty_terminal::term::TermMode;
+        let kitty = || TermConfig {
+            kitty_keyboard: true,
+            ..TermConfig::default()
+        };
+        let c = FeedCtx {
+            term: Arc::new(FairMutex::new(term_with(20, 5, kitty()))),
+            ..ctx(20, 5)
+        };
+        let mut p = vte::ansi::Processor::new();
+        let mut s = OscScanner::new();
+        let flags = |c: &FeedCtx| {
+            c.term
+                .lock()
+                .mode()
+                .intersection(TermMode::KITTY_KEYBOARD_PROTOCOL)
+        };
+        feed(&mut p, &mut s, b"\x1b]133;A\x07$ \x1b]133;B\x07", &c);
+        feed(&mut p, &mut s, b"\r\n\x1b]133;C\x07\x1b[>11u", &c);
+        assert!(
+            flags(&c).contains(TermMode::REPORT_EVENT_TYPES),
+            "the program's flags apply"
+        );
+        feed(&mut p, &mut s, b"\x1b]133;D;137\x07", &c);
+        assert!(flags(&c).is_empty(), "gone with the command");
+        // on the alternate screen they stay the program's
+        feed(
+            &mut p,
+            &mut s,
+            b"\x1b]133;C\x07\x1b[?1049h\x1b[>11u\x1b]133;D;0\x07",
+            &c,
+        );
+        assert!(flags(&c).contains(TermMode::REPORT_EVENT_TYPES));
     }
 
     /// A chunk with a shell marker (a widget's line, a prompt) reports it, so
@@ -3000,13 +3121,29 @@ mod tests {
         resume: Resume,
         known_cwd: Option<String>,
     ) -> (std::thread::JoinHandle<()>, std::sync::mpsc::Receiver<()>) {
+        let (reader, exited, _) = service_reader_exit(c, stream, resume, known_cwd);
+        (reader, exited)
+    }
+
+    /// [`service_reader`], also handing back how the pane ended.
+    fn service_reader_exit(
+        c: FeedCtx,
+        stream: std::os::unix::net::UnixStream,
+        resume: Resume,
+        known_cwd: Option<String>,
+    ) -> (
+        std::thread::JoinHandle<()>,
+        std::sync::mpsc::Receiver<()>,
+        ExitCell,
+    ) {
         let (conn, _conn_peer) = std::os::unix::net::UnixStream::pair().unwrap();
         std::mem::forget(_conn_peer);
         let (exit_tx, exit_rx) = std::sync::mpsc::channel();
         let exit_tx = Mutex::new(exit_tx);
+        let exit = ExitCell::default();
         let reader = Reader {
             id: 1,
-            exit: Default::default(),
+            exit: exit.clone(),
             ctx: c,
             dirty: Arc::new(AtomicBool::new(false)),
             saw_output: Arc::new(AtomicBool::new(false)),
@@ -3028,7 +3165,11 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(Mutex::new(ServiceConn::new(conn))),
         );
-        (std::thread::spawn(move || reader.run(source)), exit_rx)
+        (
+            std::thread::spawn(move || reader.run(source)),
+            exit_rx,
+            exit,
+        )
     }
 
     #[test]
@@ -3371,7 +3512,7 @@ mod tests {
         let (first, mut first_peer) = UnixStream::pair().unwrap();
         send_output(&mut first_peer, 9, 0, 1, b"ab").unwrap();
         drop(first_peer);
-        let (reader, exited) = service_reader(
+        let (reader, exited, exit) = service_reader_exit(
             ctx(20, 5),
             first,
             Box::new(|_| Err(std::io::Error::from(std::io::ErrorKind::NotFound))),
@@ -3381,6 +3522,89 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(10))
             .unwrap();
         reader.join().unwrap();
+        // the service answered that the shell is gone: ended, not lost
+        assert!(!exit.lost());
+        assert_eq!(exit.get(), Some(None));
+    }
+
+    /// A service that stops answering (refused, timing out) leaves the pane
+    /// lost, not ended: the app must neither close it nor hang up a shell
+    /// that may still run.
+    #[test]
+    fn a_service_that_never_answers_leaves_the_pane_lost_not_ended() {
+        use crate::ipc::send_output;
+        use std::os::unix::net::UnixStream;
+        let (first, mut first_peer) = UnixStream::pair().unwrap();
+        send_output(&mut first_peer, 9, 0, 1, b"ab").unwrap();
+        drop(first_peer);
+        let tries = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let counted = tries.clone();
+        let (reader, exited, exit) = service_reader_exit(
+            ctx(20, 5),
+            first,
+            Box::new(move |_| {
+                counted.fetch_add(1, Ordering::AcqRel);
+                Err(std::io::Error::from(std::io::ErrorKind::TimedOut))
+            }),
+            None,
+        );
+        exited
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+        reader.join().unwrap();
+        assert!(exit.lost(), "lost, not ended");
+        assert_eq!(exit.get(), Some(None));
+        assert!(tries.load(Ordering::Acquire) > 1, "kept trying");
+    }
+
+    /// A service that is slow to answer the reconnect (refused twice, then
+    /// back) keeps the pane: its output goes on.
+    #[test]
+    fn a_service_back_after_a_few_refusals_keeps_the_pane() {
+        use crate::ipc::{Event as Ev, send_json, send_output};
+        use std::os::unix::net::UnixStream;
+        let c = ctx(20, 5);
+        let term = c.term.clone();
+        let (first, mut first_peer) = UnixStream::pair().unwrap();
+        send_output(&mut first_peer, 9, 0, 1, b"ab").unwrap();
+        drop(first_peer);
+        let (second, mut second_peer) = UnixStream::pair().unwrap();
+        send_output(&mut second_peer, 9, 2, 1, b"cd").unwrap();
+        send_json(&mut second_peer, &Ev::ReplayDone { session: 9 }).unwrap();
+        send_json(
+            &mut second_peer,
+            &Ev::Exited {
+                session: 9,
+                code: Some(0),
+            },
+        )
+        .unwrap();
+        let mut refusals = 2;
+        let mut second = Some(second);
+        let (reader, exited, exit) = service_reader_exit(
+            c,
+            first,
+            Box::new(move |_| {
+                if refusals > 0 {
+                    refusals -= 1;
+                    return Err(std::io::ErrorKind::ConnectionRefused.into());
+                }
+                let s = second.take().ok_or_else(|| std::io::Error::other("gone"))?;
+                Ok((s, false))
+            }),
+            None,
+        );
+        exited
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+        reader.join().unwrap();
+        assert!(!exit.lost());
+        assert_eq!(exit.get(), Some(Some(0)), "the shell's own exit");
+        let row: String = {
+            let t = term.lock();
+            (0..4).map(|i| t.grid()[Line(0)][Column(i)].c).collect()
+        };
+        assert_eq!(row, "abcd");
     }
 
     /// A reattached shell whose last OSC 7 left the service's ring: the

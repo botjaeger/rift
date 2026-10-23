@@ -2047,13 +2047,17 @@ impl<'a, T> GridRuns<'a, T> {
 /// video swapped); the theme's default foreground and background are `None`.
 /// Returns the screen's generation with it: the session's output generation,
 /// which for the styled screen is mixed with what else changes its rows
-/// (collapsed blocks, a block's exit, cwd and branch). While that is still
-/// `since`, no screen is built (`None`: the caller's is current).
+/// (collapsed blocks, a block's exit, cwd and branch, and `view`, the
+/// phone's own scrolled view, which the styled screen follows). While that
+/// is still `since`, no screen is built (`None`: the caller's is current).
+/// Building one keeps `view` where it was as output arrives (as the
+/// desktop's view is kept) and within the list it draws.
 pub fn remote_screen(
     session: &Session,
     theme: &Theme,
     force: bool,
     since: Option<u64>,
+    view: &mut RemoteView,
 ) -> (u64, Option<Option<rift_remote::Screen>>) {
     use std::sync::atomic::Ordering;
     let alt = session.term.lock().mode().contains(TermMode::ALT_SCREEN);
@@ -2067,11 +2071,71 @@ pub fn remote_screen(
         return (generation, Some(screen_of(&term, theme, force)));
     }
     let generation = session.generation.load(Ordering::Acquire);
-    let key = screen_key(session, generation);
+    let key = screen_key(session, generation, view.offset);
     if since == Some(key) {
         return (key, None);
     }
-    // the blocks lock is released before the term lock is taken
+    let before = view.offset;
+    let screen = {
+        // the blocks lock is released before the term lock is taken
+        let hidden = filter_hidden(session, None);
+        let (blocks, clear_pad) = {
+            let store = session.blocks.lock().unwrap();
+            (store.snapshot(), store.clear_pad())
+        };
+        let scrolled = session.scrolled.load(Ordering::Acquire);
+        let term = session.term.lock();
+        styled_screen(&term, theme, &blocks, clear_pad, scrolled, &hidden, view)
+    };
+    // the view moved with new output: the screen answers to the new one
+    let key = if view.offset == before {
+        key
+    } else {
+        screen_key(session, generation, view.offset)
+    };
+    (key, Some(screen))
+}
+
+/// A paired phone's own view of a pane's styled screen, apart from the
+/// desktop's `view_offset`: display lines scrolled up from the end
+/// (`offset`, 0: following the end) and the length of the list it last
+/// drew (`len`), which keeps the view in place as output arrives.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RemoteView {
+    pub offset: usize,
+    pub len: usize,
+}
+
+impl RemoteView {
+    /// Settle the view on a display list of `len` lines shown `rows` at a
+    /// time: lines added below a scrolled view push it up by as many (it
+    /// stays on what it showed), and it never passes the list's top.
+    fn settle(&mut self, len: usize, rows: usize) {
+        if self.offset > 0 && self.len > 0 && len > self.len {
+            self.offset += len - self.len;
+        }
+        self.offset = self.offset.min(len.saturating_sub(rows));
+        self.len = len;
+    }
+
+    /// Scroll by `lines` (positive: up), within `max` (the list's length
+    /// less the rows shown: [`remote_scroll_max`]).
+    pub fn scroll(&mut self, lines: i32, max: usize) {
+        let moved = if lines > 0 {
+            self.offset.saturating_add(lines as usize)
+        } else {
+            self.offset.saturating_sub(lines.unsigned_abs() as usize)
+        };
+        self.offset = moved.min(max);
+    }
+}
+
+/// How far a phone's view of `session`'s styled screen scrolls up: its
+/// display list's length less the rows it shows (0 on the alternate
+/// screen, which has no such list). The list [`remote_screen`] draws, not
+/// the desktop's (whose editor, filter and sticky headers differ).
+pub fn remote_scroll_max(session: &Session) -> usize {
+    use std::sync::atomic::Ordering;
     let hidden = filter_hidden(session, None);
     let (blocks, clear_pad) = {
         let store = session.blocks.lock().unwrap();
@@ -2079,20 +2143,47 @@ pub fn remote_screen(
     };
     let scrolled = session.scrolled.load(Ordering::Acquire);
     let term = session.term.lock();
-    (
-        key,
-        Some(styled_screen(
-            &term, theme, &blocks, clear_pad, scrolled, &hidden,
-        )),
-    )
+    if term.mode().contains(TermMode::ALT_SCREEN) {
+        return 0;
+    }
+    let (display, rows) = styled_display(&term, &blocks, clear_pad, scrolled, &hidden);
+    display.len().saturating_sub(rows)
+}
+
+/// The display list a styled screen draws and the rows it shows of it.
+fn styled_display(
+    term: &rift_pty::alacritty_terminal::term::Term<EventProxy>,
+    blocks: &[Block],
+    clear_pad: Option<u64>,
+    scrolled: u64,
+    hidden: &Hidden,
+) -> (Vec<DisplayLine>, usize) {
+    let g = term.grid();
+    let rows = g.screen_lines().min(rift_remote::MAX_SCREEN_ROWS as usize);
+    let display = build_display_list_filtered(
+        blocks,
+        scrolled,
+        g.screen_lines(),
+        g.history_size() as u64,
+        false,
+        true,
+        clear_pad,
+        rows,
+        Some(live_end(term, scrolled)),
+        hidden,
+        false,
+    );
+    (display, rows)
 }
 
 /// What a styled screen depends on besides the grid: `generation` (output,
-/// resizes) mixed with the blocks' headers (collapse, exit, cwd, branch).
-fn screen_key(session: &Session, generation: u64) -> u64 {
+/// resizes) mixed with the blocks' headers (collapse, exit, cwd, branch)
+/// and the pane's scrolled view.
+fn screen_key(session: &Session, generation: u64, view_offset: usize) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     generation.hash(&mut h);
+    view_offset.hash(&mut h);
     let store = session.blocks.lock().unwrap();
     store.clear_pad().hash(&mut h);
     for b in store.iter() {
@@ -2146,8 +2237,9 @@ fn screen_of<T>(
 /// desktop renders (`build_display_list_filtered`: prompt echoes replaced
 /// by a header row, collapsed output skipped, stray blank lines left out,
 /// the live prompt hidden as while the editor owns the line, soft-`clear`
-/// padding), its last `rows` lines, bottom-anchored. The alternate screen
-/// stays the raw grid.
+/// padding), `rows` lines of it bottom-anchored, `view.offset` lines up
+/// from its end where the phone scrolled it (settled on this list first:
+/// [`RemoteView::settle`]). The alternate screen stays the raw grid.
 fn styled_screen(
     term: &rift_pty::alacritty_terminal::term::Term<EventProxy>,
     theme: &Theme,
@@ -2155,6 +2247,7 @@ fn styled_screen(
     clear_pad: Option<u64>,
     scrolled: u64,
     hidden: &Hidden,
+    view: &mut RemoteView,
 ) -> Option<rift_remote::Screen> {
     if term.mode().contains(TermMode::ALT_SCREEN) {
         return screen_of(term, theme, true);
@@ -2163,21 +2256,10 @@ fn styled_screen(
     let theme = pane.as_ref().unwrap_or(theme);
     let g = term.grid();
     let cols = g.columns().min(rift_remote::MAX_SCREEN_COLS as usize);
-    let rows = g.screen_lines().min(rift_remote::MAX_SCREEN_ROWS as usize);
     let history = g.history_size() as u64;
-    let display = build_display_list_filtered(
-        blocks,
-        scrolled,
-        g.screen_lines(),
-        history,
-        false,
-        true,
-        clear_pad,
-        rows,
-        Some(live_end(term, scrolled)),
-        hidden,
-        false,
-    );
+    let (display, rows) = styled_display(term, blocks, clear_pad, scrolled, hidden);
+    view.settle(display.len(), rows);
+    let view_offset = view.offset;
     // the editor owns the cursor at a prompt, which the phone does not show
     let at_prompt = matches!(blocks.last().map(|b| &b.state), Some(BlockState::Prompt));
     let cursor = term.grid().cursor.point;
@@ -2204,6 +2286,7 @@ fn styled_screen(
             }
         },
         cursor_abs,
+        view_offset,
     );
     Some(rift_remote::Screen {
         cols: cols as u16,
@@ -2219,12 +2302,14 @@ fn styled_screen(
     })
 }
 
-/// The last `rows` lines of `display` as screen rows (a header for each
+/// The `rows` lines of `display` that end `view_offset` lines above its end
+/// (the pane's scrolled view; 0: its last lines) as screen rows (a header for each
 /// block, `grid_row` for a grid line, blank for padding), and the row of
 /// `cursor_abs` among them. Pure: the part of [`styled_screen`] that does
 /// not read a term. Also the rows that carry a block rule and its colour
 /// (`"rrggbb"`): a header's by its block's state, a grid line's by
 /// `grid_rule`.
+#[allow(clippy::too_many_arguments)]
 fn styled_rows(
     display: &[DisplayLine],
     (rows, cols): (usize, usize),
@@ -2233,14 +2318,18 @@ fn styled_rows(
     grid_rule: impl Fn(u64) -> Option<Color>,
     mut grid_row: impl FnMut(u64) -> Vec<rift_remote::protocol::Run>,
     cursor_abs: Option<u64>,
+    view_offset: usize,
 ) -> StyledRows {
-    let start = display.len().saturating_sub(rows);
+    // the pane's view: `view_offset` lines above the end, as the desktop
+    // clamps it (never above the first line)
+    let end = display.len() - view_offset.min(display.len().saturating_sub(rows));
+    let start = end.saturating_sub(rows);
     // fewer lines than rows: blank ones above
-    let mut lines = vec![Vec::new(); rows.saturating_sub(display.len())];
+    let mut lines = vec![Vec::new(); rows - (end - start)];
     let lead = lines.len();
     let mut cursor = None;
     let mut rules = Vec::new();
-    for (i, dl) in display[start..].iter().enumerate() {
+    for (i, dl) in display[start..end].iter().enumerate() {
         let rule = match dl {
             DisplayLine::Grid(abs) => grid_rule(*abs),
             DisplayLine::Header(bi) => state_rule(&blocks[*bi].state, theme),
@@ -3916,6 +4005,7 @@ pub fn remote_running(session: &Session) -> Option<rift_remote::protocol::PaneRu
         line,
         title: None,
         idle: false,
+        agent: false,
     })
 }
 
@@ -4362,6 +4452,58 @@ mod tests {
         assert_eq!((page.from, page.total), (gone, gone + 3));
         assert_eq!((page.text.as_str(), tail.as_str()), ("a\nb\n", "a\nb\n"));
         assert_eq!(dropped, gone);
+    }
+
+    #[test]
+    fn a_phones_view_scrolls_within_its_own_list_and_stays_put_on_new_output() {
+        let mut v = RemoteView::default();
+        // 100 display lines, 20 rows: 80 lines above the first screen
+        v.settle(100, 20);
+        assert_eq!(
+            v,
+            RemoteView {
+                offset: 0,
+                len: 100
+            }
+        );
+        v.scroll(50, 80);
+        v.scroll(50, 80);
+        // never past the top of the list the phone draws, so the way back
+        // down starts at once
+        assert_eq!(v.offset, 80);
+        v.scroll(-30, 80);
+        assert_eq!(v.offset, 50);
+        // 7 lines of new output: the view keeps showing what it showed
+        v.settle(107, 20);
+        assert_eq!(
+            v,
+            RemoteView {
+                offset: 57,
+                len: 107
+            }
+        );
+        // following the end: new output scrolls it along
+        v.scroll(-50, 87);
+        v.scroll(-50, 87);
+        assert_eq!(v.offset, 0);
+        v.settle(110, 20);
+        assert_eq!(
+            v,
+            RemoteView {
+                offset: 0,
+                len: 110
+            }
+        );
+        // a shorter list (cleared): clamped to its top
+        v.scroll(50, 90);
+        v.settle(30, 20);
+        assert_eq!(
+            v,
+            RemoteView {
+                offset: 10,
+                len: 30
+            }
+        );
     }
 
     #[test]
@@ -5034,8 +5176,48 @@ mod tests {
                 )]
             },
             cursor_abs,
+            0,
         );
         (rows.iter().map(|r| row_text(r)).collect(), cursor, rows)
+    }
+
+    #[test]
+    fn a_styled_screen_follows_the_panes_scrolled_view() {
+        let display: Vec<DisplayLine> = (0..10).map(DisplayLine::Grid).collect();
+        let shown = |d: &[DisplayLine], offset: usize| {
+            let StyledRows { lines, cursor, .. } = styled_rows(
+                d,
+                (4, 20),
+                &[],
+                &Theme::default(),
+                |_| None,
+                |abs| vec![run(&format!("g{abs}"), None, None, 0)],
+                Some(9),
+                offset,
+            );
+            let text: Vec<String> = lines.iter().map(|r| row_text(r)).collect();
+            (text, cursor)
+        };
+        // at the end: the last rows, the cursor on the last
+        assert_eq!(
+            shown(&display, 0),
+            (
+                vec!["g6".into(), "g7".into(), "g8".into(), "g9".into()],
+                Some(3)
+            )
+        );
+        // scrolled up 3: the rows above, the cursor out of sight
+        assert_eq!(
+            shown(&display, 3),
+            (
+                vec!["g3".into(), "g4".into(), "g5".into(), "g6".into()],
+                None
+            )
+        );
+        // never above the first line
+        assert_eq!(shown(&display, 100).0, ["g0", "g1", "g2", "g3"]);
+        // fewer lines than rows: nothing to scroll, blank rows above
+        assert_eq!(shown(&display[..2], 5).0, ["", "", "g0", "g1"]);
     }
 
     #[test]
@@ -5183,6 +5365,7 @@ mod tests {
             |abs| block_rule_at(&blocks, &theme, 8, abs),
             |abs| vec![run(&format!("g{abs}"), None, None, 0)],
             None,
+            0,
         );
         let colour = |row: usize| {
             rules

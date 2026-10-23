@@ -71,10 +71,25 @@ export function fitSize(width: number, height: number, fontSize: number): { cols
 
 // --- the Terminal view's default ------------------------------------------------------------
 
-/** Whether the pane runs a coding agent (Claude Code, Codex, …): a TUI that never uses the alternate screen. */
+/**
+ * Whether the pane runs a coding agent (Claude Code, Codex, …): what the desktop says
+ * (`running.agent`, or the session title only an agent's pane carries), else the program's name.
+ * Such a TUI may draw on either screen: Claude Code picks its renderer per launch (the classic one
+ * on the primary screen, the fullscreen one on the alternate screen).
+ */
 export function runsAgent(p: Pane): boolean {
   if (!p.running && !p.job) return false;
-  return p.running?.title !== undefined || programName(p) === "claude";
+  return p.running?.agent === true || p.running?.title !== undefined || programName(p) === "claude";
+}
+
+/**
+ * Whether the pane's screen shows without its own key bar and keyboard, the pane's message input
+ * (or the question to answer) under it: a question to answer; a coding agent, on either screen
+ * (it is talked to in messages; the message input's ⌃ still opens the key row); and the Terminal
+ * view at a shell's prompt. Any other full-screen program (vim, less, htop) keeps the key bar.
+ */
+export function bareScreen(o: { fullScreen: boolean; asking: boolean; agent: boolean; pinned: boolean; alt: boolean }): boolean {
+  return o.fullScreen && (o.asking || o.agent || (o.pinned && !o.alt));
 }
 
 /**
@@ -83,6 +98,15 @@ export function runsAgent(p: Pane): boolean {
  * open (null: none), off at a plain shell.
  */
 export const terminalViewOn = (choice: boolean | null, agent: boolean) => agent || (choice ?? false);
+
+/**
+ * The Blocks | Terminal switch as the pane shows: Terminal is selected whenever the screen shows,
+ * by the user's choice (`pinned`) or because a full-screen program holds it (`alt`: vim, htop, a
+ * TUI on the alternate screen, which has no blocks to show); Blocks cannot be chosen then.
+ */
+export function viewSwitch(pinned: boolean, alt: boolean): { terminal: boolean; blocksDisabled: boolean } {
+  return { terminal: pinned || alt, blocksDisabled: alt };
+}
 
 /** Whether the Blocks | Terminal switch shows: the gateway sends screens and the pane is not an agent's. */
 export const showsViewSwitch = (screenFeature: boolean, agent: boolean) => screenFeature && !agent;

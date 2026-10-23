@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   answerLabel,
   askContext,
+  bareScreen,
   cardKind,
   clampZoom,
   failureMessage,
@@ -276,6 +277,29 @@ describe("the Terminal view's default", () => {
     expect(showsViewSwitch(true, true)).toBe(false);
     expect(showsViewSwitch(false, false)).toBe(false);
   });
+  it("the desktop's agent flag names an agent whatever its job or title", () => {
+    // Codex untitled, or an agent reattached with its version as the job
+    expect(runsAgent(pane(1, { job: "2.1.308", last_command: "x", running: { started: null, line: "", agent: true } }))).toBe(true);
+    expect(runsAgent(pane(1, { job: "node", running: { started: null, line: "", agent: false } }))).toBe(false);
+  });
+});
+
+describe("the message input or the key bar", () => {
+  const base = { fullScreen: true, asking: false, agent: false, pinned: true, alt: false };
+  it("an agent gets the message input on either screen", () => {
+    // Claude Code's fullscreen renderer is on the alternate screen, its classic one is not
+    expect(bareScreen({ ...base, agent: true, alt: true })).toBe(true);
+    expect(bareScreen({ ...base, agent: true, alt: false })).toBe(true);
+  });
+  it("vim, less and htop keep the key bar", () => {
+    expect(bareScreen({ ...base, alt: true })).toBe(false);
+    expect(bareScreen({ ...base, pinned: false, alt: true })).toBe(false);
+  });
+  it("a question, and the Terminal view at a prompt, show the input too; the blocks view never", () => {
+    expect(bareScreen({ ...base, asking: true, alt: true })).toBe(true);
+    expect(bareScreen({ ...base, alt: false })).toBe(true);
+    expect(bareScreen({ ...base, fullScreen: false, agent: true })).toBe(false);
+  });
 });
 
 describe("the command line while a program runs", () => {
@@ -293,5 +317,17 @@ describe("the command line while a program runs", () => {
   it("a line the gateway would refuse is refused here", () => {
     expect(programSend("a\tb", true)).toMatchObject({ ok: false });
     expect(programSend("é".repeat(513), true)).toMatchObject({ ok: false, message: expect.stringMatching(/too long/) });
+  });
+});
+
+describe("the Blocks | Terminal switch", () => {
+  it("selects what shows: a full-screen program's screen shows Terminal, Blocks unavailable", async () => {
+    const { viewSwitch } = await import("../src/paneView");
+    // a shell: the user's choice
+    expect(viewSwitch(false, false)).toEqual({ terminal: false, blocksDisabled: false });
+    expect(viewSwitch(true, false)).toEqual({ terminal: true, blocksDisabled: false });
+    // a TUI on the alternate screen shows its screen whatever was chosen
+    expect(viewSwitch(false, true)).toEqual({ terminal: true, blocksDisabled: true });
+    expect(viewSwitch(true, true)).toEqual({ terminal: true, blocksDisabled: true });
   });
 });

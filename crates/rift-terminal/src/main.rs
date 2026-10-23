@@ -199,6 +199,8 @@ fn main() {
     application.start_links = links;
     event_loop.run_app(&mut application).expect("event loop");
     quit::LOOP_RETURNED.store(true, std::sync::atomic::Ordering::SeqCst);
+    // the last commands' history entries land before the process ends
+    application.flush_command_history();
     // ended on purpose: the next launch does not take it for a crash
     rift_core::session_state::mark_clean_exit();
     // a process that does not end now is a stall too (the Dock keeps it)

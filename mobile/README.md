@@ -166,9 +166,20 @@ card cannot answer (a password, other input, a view-only device), and from an al
   shows its screen ("Keys go straight to htop. When it quits, the pane shows blocks again."),
   the keys wrapped under it and "Show keyboard"; when it quits the blocks come back. **Terminal
   view** shows the pane's screen whatever runs (at a prompt the command line stays under the
-  screen). It is on to start with for a pane that runs a coding agent (Claude Code, Codex), which
-  never uses the alternate screen, and off for a plain shell; the button turns it on or off for
-  that pane until the screen closes. Both screens have **Pinch to zoom · double-tap to reset**
+  screen). It is on to start with for a pane that runs a coding agent (Claude Code, Codex: the
+  desktop's `running.agent`, its session title, or the program's name), and off for a plain
+  shell; the button turns it on or off for that pane until the screen closes. A coding agent's
+  pane always has the message input ("Message for claude") under its screen, on either screen
+  (Claude Code picks its renderer per launch: the fullscreen one draws on the alternate screen,
+  the classic one does not); its **⌃** opens the key row. Other full-screen programs keep the
+  keys. A vertical drag on the screen scrolls the pane on the computer (feature `scroll`, as the
+  desktop's wheel: the agent's or vim's own scrolling, less's lines, or the shell's scrollback),
+  counted in rows and sent at most every 80 ms (`src/scroll.ts`); zoomed in, the view scrolls
+  itself first and the computer's pane past its edges. A view-only device scrolls a pane's view
+  but not a program. **Paste** with an image on the clipboard (a screenshot) sends it to the
+  computer (feature `upload`, operate only, at most 10 MB, `src/upload.ts`), which saves it and
+  pastes its path into the running program, as dropping the file on the window does: Claude
+  Code and Codex attach it. Both screens have **Pinch to zoom · double-tap to reset**
   with **−** and **+** and the percentage (60 to 200 %, kept until the app closes). With a
   computer whose Rift has `fit` and a device that may operate, the zoom also reflows the
   program: the view tells the computer how many columns and rows fit at 11 pt times the zoom

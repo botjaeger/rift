@@ -13,6 +13,7 @@
 | `~/.local/share/rift/` | Materialized shell-integration files |
 | `~/.local/share/rift/generated-profiles` | Shells already written into config.toml as profiles, one path per line (see [Profiles](#profiles)) |
 | `~/.local/share/rift/session.toml` | Saved session (every window's tabs, cwds and frame), written atomically; see [Session file](#session-file) |
+| `~/.local/share/rift/history.json` | Rift's command history (JSON, version 1, written atomically, readable by you only): each local command finished at the command line with its directory, repository root, finish time and exit code, the newest 10,000 within 2 MiB; it ranks the ghost text, the ↑ history menu, the completion panel's history rows and ⌃R by directory (see features.md, Completions). Delete it to forget them. Beside it: `history.json.lock` (Rift processes take turns writing) and, if a file could not be read, `history.json.bad` (moved aside, never written over) |
 | `~/.local/share/rift/last-seen-version` | Version whose What's New was last shown (opens it once after an update) |
 | `~/.local/share/rift/update.json` | Last update check: when, the newest release's manifest, the version *Later* dismissed |
 | `~/.local/share/rift/updates/` | Update downloads (deleted after installing; an interrupted install's leftovers go at the next one), `install.lock` and persistent `install.guard` (one window installs at a time, including after an interrupted install) and `relaunch.log` (the restarted app's output until it is confirmed; emptied past 1 MB) |

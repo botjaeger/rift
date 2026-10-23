@@ -144,7 +144,7 @@ Active only while the app owns the command line.
 | Tab | Accept completion |
 | ⇧Tab | Next completion source tab (All · Path · History …) while the panel is open |
 | Esc | Close completion (after deselecting any block) |
-| ↑ / ↓ | History up / down (or move completion selection while the completion panel is open) |
+| ↑ / ↓ | History menu (Warp): ↑ on the first line opens it on the history lines that start with the typed text and previews the newest; ↑ older, ↓ newer; ↓ past the newest or Esc closes it and puts back the typed text; ⏎ runs the preview, ⇥ / → keep it to edit, typing keeps it and types. A completion panel opened as you type gives ↑ to the menu; one asked for (Tab, or ↓ into it) keeps ↑ / ↓ moving its selection. Inside a multi-line command: the line above / below |
 | ← / → | Move cursor; → at the end of the line accepts the ghost text, ⌃→ one word of it |
 | ⌥← / ⌥→ | Word left / right |
 | ⌘← / ⌘→, ⌃A / ⌃E | Start / end of the cursor's line (of the command, when it has one line) |
@@ -161,7 +161,7 @@ Active only while the app owns the command line.
 | ⌥⇧← / ⌥⇧→ | Extend the selection by one word |
 | ⇧⌘← / ⇧⌘→, ⇧Home / ⇧End | Extend the selection to line start / end |
 | ⌘X | Cut the selection (⌘C copies it, ⌘A selects all) |
-| ⌃R | History pane above the command line (again: next scope — this pane, all shells, failed, results); in it ↑/↓ move (PageUp/PageDown by 8), ⏎ runs, ⇥ edits first, ⌘⏎ runs in a new split, Esc closes; with no match ⏎ runs the typed line and ⇥ only closes the pane. Where your shell binds ⌃R to its own widget (fzf, atuin), that widget runs on the command line instead (`shell_widgets`) |
+| ⌃R | History pane above the command line (again: next scope — this pane, all shells, failed, results); in it ↑/↓ move (PageUp/PageDown by 8), ⏎ runs, ⇥ edits first, ⌘⏎ runs in a new split, Esc or ↓ past the last row closes; with no match ⏎ runs the typed line and ⇥ only closes the pane. Where your shell binds ⌃R to its own widget (fzf, atuin), that widget runs on the command line instead (`shell_widgets`) |
 | ⌃T / ⌥C | Where your shell binds them to its own widgets (fzf's file picker / directory jump): run them on the command line (`shell_widgets`; ⌥C with Option as Meta); otherwise nothing |
 | ⌃C | Interrupt (clears line, sends SIGINT) |
 | ⌃D | EOF (only when the line is empty) |
@@ -215,7 +215,7 @@ below are implemented.
 | `.` | Repeat the last change (a count replaces its count) |
 | `u` / ⌃R | Undo / redo one change (in Insert, ⌃R stays the history pane) |
 | `U` | Undo the latest changes on the last changed line (a change itself: `U` again redoes them) |
-| `k` / `j` | History previous / next (also ↑ / ↓) |
+| `k` / `j` | The command line's ↑ / ↓ (also ↑ / ↓): `k` opens the history menu and goes older, `j` newer; in a multi-line command, the line above / below |
 | digits | Count, before and/or after the operator — the two multiply (`2d3w`) |
 
 In Visual / Visual Line mode motions, searches and `j` `k` (↑ ↓) extend the

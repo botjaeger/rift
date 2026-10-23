@@ -237,7 +237,7 @@ export function ControlRow({
           fill={fill}
           def={def}
           spoken={def.spoken}
-          hint={onPaste ? "Types it into the program" : "Update Rift on the computer to paste here"}
+          hint={onPaste ? "Pastes the clipboard into the program" : "Update Rift on the computer to paste here"}
           color={color}
           tall={tall}
           disabled={disabled || !onPaste}

@@ -10,12 +10,13 @@
 //!
 //! | level | commands |
 //! |---|---|
-//! | `"off"` | no socket, unless `remote_access` is on: then only the remote gateway's requests: `status`, `blocks`, `screen`, `output`, `menu`, `diff`, `complete`, `remote-status`, `remote-input`, `remote-open` and `remote-close` |
+//! | `"off"` | no socket, unless `remote_access` is on: then only the remote gateway's requests: `status`, `blocks`, `screen`, `output`, `menu`, `diff`, `complete`, `remote-status`, `remote-input`, `remote-scroll`, `remote-upload`, `remote-open` and `remote-close` |
 //! | `"navigate"` (default) | the gateway's requests, `list`, `focus`, `prepare-restart` |
 //! | `"full"` | also `split`, `open`, `send-text` (types into a shell) |
 //!
-//! `remote-input`, `remote-open` and `remote-close` are accepted only while `remote_access`
-//! is on, whatever the level.
+//! `remote-input`, `remote-scroll`, `remote-upload`, `remote-open` and
+//! `remote-close` are accepted only while `remote_access` is on, whatever
+//! the level.
 //!
 //! `prepare-restart` is sent by a process that installs an update: the
 //! receiver saves every window's layout to `<data dir>/restart/<pid>.toml`,
@@ -201,6 +202,34 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         text: Option<String>,
     },
+    /// A paired phone's `scroll`, sent by the remote gateway: `lines`
+    /// (positive: up, 1 to 50 either way) of the desktop's wheel over
+    /// `pane`. `operate`: the device may send the program input (wheel
+    /// reports, arrow keys); without it only the pane's view moves, and a
+    /// wheel that would reach the program answers `view only: …`. Accepted
+    /// only while `remote_access` is on, like `remote-input`.
+    RemoteScroll {
+        pane: u64,
+        lines: i32,
+        #[serde(default)]
+        operate: bool,
+    },
+    /// A paired phone's pasted image, which the gateway saved in the
+    /// uploads folder as `name` (a name it made; `remote::upload_path`
+    /// takes nothing else): its path is pasted into the program running in
+    /// `pane` as a dropped file's is. `device` names the phone for the
+    /// toast. Answers `busy` at a prompt; accepted only while
+    /// `remote_access` is on, like `remote-input`. `check`: only answer
+    /// whether `pane` would take an image now (`name` is not read; the
+    /// gateway asks at an upload's first chunk).
+    RemoteUpload {
+        pane: u64,
+        device: String,
+        #[serde(default)]
+        name: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        check: bool,
+    },
     /// A paired phone's `open`, sent by the remote gateway: a new tab in
     /// this window, or a new pane split right from `pane`, starting in
     /// `pane`'s folder; answers the new pane. Accepted only while
@@ -275,6 +304,8 @@ impl Request {
             | Request::Complete { .. }
             | Request::RemoteStatus
             | Request::RemoteInput { .. }
+            | Request::RemoteScroll { .. }
+            | Request::RemoteUpload { .. }
             | Request::RemoteFit { .. }
             | Request::RemoteResetElapsed { .. }
             | Request::RemoteOpen { .. }
@@ -414,12 +445,39 @@ pub struct Pending {
     pub request: Request,
     pub reply: mpsc::Sender<Response>,
     active: Arc<AtomicBool>,
+    /// The caller stopped waiting ([`REPLY_TIMEOUT`]): the request is
+    /// dropped, never carried out late (a phone's keys or command arriving
+    /// after it was told the window did not answer).
+    abandoned: Arc<AtomicBool>,
 }
 
 impl Pending {
+    /// Whether the window may carry it out: the socket still serves this
+    /// level and the caller still waits for the answer.
     pub fn allowed(&self, level: Level) -> bool {
-        self.active.load(Ordering::Acquire) && self.request.level() <= level
+        self.active.load(Ordering::Acquire)
+            && !self.abandoned.load(Ordering::Acquire)
+            && self.request.level() <= level
     }
+}
+
+/// How long a connection waits for the window's answer to one request.
+const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The window's answer on `rx` within `timeout`; past it the request is
+/// marked `abandoned` (the window then drops it) and answered "window did
+/// not answer".
+fn await_reply(
+    rx: &mpsc::Receiver<Response>,
+    abandoned: &AtomicBool,
+    timeout: Duration,
+) -> Response {
+    rx.recv_timeout(timeout).unwrap_or_else(|_| {
+        abandoned.store(true, Ordering::Release);
+        // answered in the moment between: that answer stands
+        rx.try_recv()
+            .unwrap_or_else(|_| Response::error("window did not answer"))
+    })
 }
 
 pub fn dir() -> Option<PathBuf> {
@@ -617,13 +675,14 @@ fn handle_conn(
                 if !active.load(Ordering::Acquire) {
                     break;
                 }
+                let abandoned = Arc::new(AtomicBool::new(false));
                 deliver(Pending {
                     request,
                     reply: tx,
                     active: active.clone(),
+                    abandoned: abandoned.clone(),
                 });
-                rx.recv_timeout(Duration::from_secs(5))
-                    .unwrap_or_else(|_| Response::error("window did not answer"))
+                await_reply(&rx, &abandoned, REPLY_TIMEOUT)
             }
         };
         let Ok(mut body) = serde_json::to_string(&response) else {
@@ -854,6 +913,31 @@ pub fn cli(args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_request_whose_caller_stopped_waiting_is_not_carried_out() {
+        let (tx, rx) = mpsc::channel();
+        let abandoned = Arc::new(AtomicBool::new(false));
+        let pending = Pending {
+            request: Request::RemoteStatus,
+            reply: tx,
+            active: Arc::new(AtomicBool::new(true)),
+            abandoned: abandoned.clone(),
+        };
+        assert!(pending.allowed(Level::Remote));
+        // the window was too slow: the caller gives up ...
+        let r = await_reply(&rx, &abandoned, Duration::from_millis(20));
+        assert_eq!(r.error.as_deref(), Some("window did not answer"));
+        // ... and the window, reaching it late, drops it
+        assert!(!pending.allowed(Level::Remote));
+        // an answer in time stands, and the request stays the window's
+        let (tx, rx) = mpsc::channel();
+        let abandoned = AtomicBool::new(false);
+        tx.send(Response::error("from the window")).unwrap();
+        let r = await_reply(&rx, &abandoned, Duration::from_millis(20));
+        assert_eq!(r.error.as_deref(), Some("from the window"));
+        assert!(!abandoned.load(Ordering::Acquire));
+    }
 
     #[test]
     fn unterminated_requests_stop_at_the_limit() {
@@ -1162,9 +1246,20 @@ mod tests {
             r#"{"cmd":"remote-open","pane":1,"device":"d","kind":"pane"}"#,
             r#"{"cmd":"remote-close","pane":1,"device":"d","kind":"pane"}"#,
             r#"{"cmd":"remote-close","pane":1,"device":"d","kind":"tab"}"#,
+            r#"{"cmd":"remote-scroll","pane":1,"lines":-3,"operate":false}"#,
+            r#"{"cmd":"remote-upload","pane":1,"device":"d","name":"rift-paste-1-00.png"}"#,
         ] {
             assert!(parse(ok).level() <= Level::Remote, "{ok}");
         }
+        // a scroll that does not say may not operate
+        assert_eq!(
+            parse(r#"{"cmd":"remote-scroll","pane":1,"lines":2}"#),
+            Request::RemoteScroll {
+                pane: 1,
+                lines: 2,
+                operate: false
+            }
+        );
         for denied in [
             r#"{"cmd":"list"}"#,
             r#"{"cmd":"focus","pane":1}"#,

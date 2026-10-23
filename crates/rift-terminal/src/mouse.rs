@@ -67,6 +67,63 @@ pub fn report(
     Some(out)
 }
 
+/// Most wheel reports or arrow keys one wheel event (or one phone `scroll`)
+/// sends a program.
+pub const MAX_WHEEL_EVENTS: u32 = 20;
+
+/// What a wheel of `lines` over a pane does (positive: up): the one rule the
+/// desktop's mouse wheel and a paired phone's `scroll` share.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wheel {
+    /// `count` wheel reports of `button` to a program that tracks the mouse.
+    Report { button: u8, count: u32 },
+    /// `count` times the arrow key `seq`: a full-screen program without
+    /// mouse tracking under alternate scroll (DECSET 1007: less, man).
+    Arrows { seq: &'static [u8], count: u32 },
+    /// The pane's own view moves this many lines (positive: up).
+    View(i32),
+    /// Nothing: the alternate screen without either.
+    Nothing,
+}
+
+impl Wheel {
+    /// It sends the program input (which a view-only phone may not).
+    pub fn reaches_program(self) -> bool {
+        matches!(self, Wheel::Report { .. } | Wheel::Arrows { .. })
+    }
+}
+
+/// [`Wheel`] for `lines` (not 0) over a pane: `report` when its program
+/// tracks the mouse and reporting applies (mouse reporting on, Shift not
+/// held, a cell to report at), then by its alternate screen, alternate
+/// scroll (DECSET 1007) and application cursor (DECCKM) modes.
+pub fn wheel(
+    lines: i32,
+    report: bool,
+    alt_screen: bool,
+    alternate_scroll: bool,
+    app_cursor: bool,
+) -> Wheel {
+    let count = lines.unsigned_abs().min(MAX_WHEEL_EVENTS);
+    if report {
+        let button = if lines > 0 { WHEEL_UP } else { WHEEL_DOWN };
+        return Wheel::Report { button, count };
+    }
+    if !alt_screen {
+        return Wheel::View(lines);
+    }
+    if !alternate_scroll {
+        return Wheel::Nothing;
+    }
+    let seq: &'static [u8] = match (lines > 0, app_cursor) {
+        (true, false) => b"\x1b[A",
+        (true, true) => b"\x1bOA",
+        (false, false) => b"\x1b[B",
+        (false, true) => b"\x1bOB",
+    };
+    Wheel::Arrows { seq, count }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,5 +192,49 @@ mod tests {
         let r = report(LEFT, true, false, E, 300, 0, utf8).unwrap();
         assert_eq!(&r[..4], b"\x1b[M ");
         assert_eq!(std::str::from_utf8(&r[4..]).unwrap().chars().count(), 2);
+    }
+
+    #[test]
+    fn the_wheel_reports_to_a_tracking_program_else_scrolls_or_sends_arrows() {
+        // mouse tracking wins on either screen, capped per event
+        assert_eq!(
+            wheel(3, true, true, true, false),
+            Wheel::Report {
+                button: WHEEL_UP,
+                count: 3
+            }
+        );
+        assert_eq!(
+            wheel(-50, true, false, false, false),
+            Wheel::Report {
+                button: WHEEL_DOWN,
+                count: MAX_WHEEL_EVENTS
+            }
+        );
+        // the primary screen: Rift's own view, every line
+        assert_eq!(wheel(-50, false, false, true, true), Wheel::View(-50));
+        assert_eq!(wheel(7, false, false, false, false), Wheel::View(7));
+        // alternate scroll: arrows in the cursor mode the program set
+        assert_eq!(
+            wheel(2, false, true, true, false),
+            Wheel::Arrows {
+                seq: b"\x1b[A",
+                count: 2
+            }
+        );
+        assert_eq!(
+            wheel(-1, false, true, true, true),
+            Wheel::Arrows {
+                seq: b"\x1bOB",
+                count: 1
+            }
+        );
+        // the alternate screen without either does nothing
+        assert_eq!(wheel(4, false, true, false, false), Wheel::Nothing);
+        // only reports and arrows are input to the program
+        assert!(wheel(1, true, false, false, false).reaches_program());
+        assert!(wheel(1, false, true, true, false).reaches_program());
+        assert!(!wheel(1, false, false, false, false).reaches_program());
+        assert!(!wheel(1, false, true, false, false).reaches_program());
     }
 }

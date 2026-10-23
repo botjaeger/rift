@@ -336,6 +336,20 @@ describe("Fleet operate", () => {
     expect(canClose(v.fleet.state.hosts[0])).toBe(false);
   });
 
+  it("a view device scrolls (the gateway decides what reaches a program) but never uploads", async () => {
+    const v = await withHost("view");
+    v.last().recv(welcome("view", ["scroll", "upload"]));
+    const p = v.fleet.sendScroll(GW_KEY, 12, 4);
+    const sent = v.last().sent.at(-1) as { id: string };
+    expect(sent).toEqual({ t: "scroll", id: sent.id, pane: 12, lines: 4 });
+    // a mouse-tracking program on the computer: the wheel would be input
+    v.last().recv({ t: "ack", id: sent.id, ok: false, error: "forbidden", message: "this device may only view" });
+    expect(await p).toMatchObject({ ok: false, code: "forbidden", message: "View only: scrolling this program sends it input." });
+    const before = v.last().sent.length;
+    expect(await v.fleet.uploadImage(GW_KEY, 12, "iVBORw0KGgo=")).toMatchObject({ ok: false, code: "forbidden" });
+    expect(v.last().sent.length).toBe(before);
+  });
+
   it("a closed pane's no_pane error is not shown as a notice; other errors are", async () => {
     const t = await withHost();
     t.last().recv({ t: "error", code: "no_pane", message: "no pane 999999" });
@@ -1064,6 +1078,53 @@ describe("Fleet Phase 3", () => {
     expect(await p).toMatchObject({ ok: true });
     void t.fleet.sendFit(GW_KEY, 12, null);
     expect(t.last().sent.at(-1)).toEqual({ t: "fit", id: "f2", pane: 12, cols: null, rows: null });
+  });
+
+  it("scroll goes out with its lines and resolves on ack; without the feature nothing goes out", async () => {
+    const old = await phase3();
+    expect(await old.fleet.sendScroll(GW_KEY, 12, 2)).toMatchObject({ ok: false, code: "unsupported" });
+    expect(old.last().sent.some((m) => m.t === "scroll")).toBe(false);
+    const t = await phase3([...ALL, "scroll"]);
+    const p = t.fleet.sendScroll(GW_KEY, 12, -3);
+    expect(t.last().sent.at(-1)).toEqual({ t: "scroll", id: "s1", pane: 12, lines: -3 });
+    t.last().recv({ t: "ack", id: "s1", ok: true });
+    expect(await p).toEqual({ ok: true });
+  });
+
+  it("an image goes out in upload chunks under one id and resolves on its one ack", async () => {
+    const t = await phase3([...ALL, "upload"]);
+    const image = new Uint8Array(100_000);
+    image.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const b64 = Buffer.from(image).toString("base64");
+    const p = t.fleet.uploadImage(GW_KEY, 12, b64);
+    // paced: one chunk per turn of the event loop
+    vi.advanceTimersByTime(1);
+    vi.advanceTimersByTime(1);
+    const chunks = t.last().sent.filter((m) => m.t === "upload");
+    expect(chunks.map((m) => [m.id, m.offset, m.size])).toEqual([
+      ["u1", 0, 100_000],
+      ["u1", 45_000, 100_000],
+      ["u1", 90_000, 100_000],
+    ]);
+    expect(chunks.map((m) => (m.t === "upload" ? m.data : "")).join("")).toBe(b64);
+    t.last().recv({ t: "ack", id: "u1", ok: false, error: "busy", message: "pane 12 is at its prompt; an image goes to a running program" });
+    expect(await p).toMatchObject({ ok: false, code: "busy", message: expect.stringContaining("running program") });
+  });
+
+  it("says why an image was refused by the gateway's reason, not its code alone", async () => {
+    const t = await phase3([...ALL, "upload"]);
+    const cases: [string, string, RegExp][] = [
+      ["bad_request", "an upload chunk out of order", /did not reach the computer whole/],
+      ["bad_request", "not a PNG or JPEG image", /not a PNG or JPEG/],
+      ["busy", "the image took longer than 60 s to arrive; try again", /took too long/],
+      ["busy", "other images are arriving; try again in a moment", /other images/],
+      ["forbidden", "this device may only view", /may only view/],
+    ];
+    for (const [i, [error, message, want]] of cases.entries()) {
+      const p = t.fleet.uploadImage(GW_KEY, 12, "iVBORw0KGgo=");
+      t.last().recv({ t: "ack", id: `u${i + 1}`, ok: false, error, message });
+      expect(await p, message).toMatchObject({ ok: false, code: error, message: expect.stringMatching(want) });
+    }
   });
 
   it("loads earlier output 500 lines at a time, before the tail", async () => {

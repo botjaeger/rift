@@ -7,7 +7,15 @@ import { utf8Decode, utf8Encode } from "../../src/noise/bytes";
 import { XXHandshake, generateKeyPair, type CipherState, type KeyPair } from "../../src/noise/noise";
 import type { SocketLike } from "../../src/protocol/client";
 import { Reassembler, frameMessage } from "../../src/protocol/framing";
-import { PROLOGUE, isClientHello, isClientMsg, type ClientHello, type ClientMsg } from "../../src/protocol/types";
+import {
+  MAX_CLIENT_MESSAGE_BYTES,
+  MAX_UPLOAD_MESSAGE_BYTES,
+  PROLOGUE,
+  isClientHello,
+  isClientMsg,
+  type ClientHello,
+  type ClientMsg,
+} from "../../src/protocol/types";
 
 export const rng = (n: number) => new Uint8Array(nodeRandomBytes(n));
 
@@ -22,6 +30,8 @@ export class FakeGatewaySocket implements SocketLike {
   onmessage: ((ev: { data: unknown }) => void) | null = null;
   onerror: ((ev: unknown) => void) | null = null;
   onclose: ((ev: unknown) => void) | null = null;
+  /** Bytes the fake holds unsent (a test sets it to model a slow link; 0: all sent). */
+  bufferedAmount = 0;
 
   /** Decrypted, decoded client messages. */
   sent: ClientMsg[] = [];
@@ -32,7 +42,8 @@ export class FakeGatewaySocket implements SocketLike {
   private readonly hs: XXHandshake;
   private send_: CipherState | null = null;
   private recv_: CipherState | null = null;
-  private readonly reasm = new Reassembler(4096);
+  // as the gateway: an `upload` chunk may be larger than every other message
+  private readonly reasm = new Reassembler(MAX_UPLOAD_MESSAGE_BYTES);
   private readonly queue: Uint8Array[] = [];
 
   constructor(
@@ -64,6 +75,7 @@ export class FakeGatewaySocket implements SocketLike {
     if (!msg) return;
     const json: unknown = JSON.parse(utf8Decode(msg));
     if (!isClientMsg(json)) throw new Error(`client sent a malformed message: ${utf8Decode(msg)}`);
+    if (json.t !== "upload" && msg.length > MAX_CLIENT_MESSAGE_BYTES) throw new Error(`client sent a ${msg.length} byte ${json.t}`);
     this.sent.push(json);
   }
 

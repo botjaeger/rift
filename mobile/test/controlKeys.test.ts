@@ -125,3 +125,17 @@ describe("control keys", () => {
     expect(toggleKey(["esc"], "rm", true)).toEqual(["esc"]);
   });
 });
+
+describe("Paste where images go", () => {
+  it("is on the row wherever an image can be pasted, whatever the stored row holds", async () => {
+    const { rowWithPaste } = await import("../src/controlKeys");
+    // the default row has no Paste: a screenshot needs it, so it is added where uploads work
+    expect(DEFAULT_CONTROL_KEYS).not.toContain("paste");
+    expect(rowWithPaste(DEFAULT_CONTROL_KEYS, true)).toEqual([...DEFAULT_CONTROL_KEYS, "paste"]);
+    // never twice, and where the user put it
+    expect(rowWithPaste(["paste", "esc"], true)).toEqual(["paste", "esc"]);
+    // without uploads (an old Rift) or on a view-only device the row is as stored
+    expect(rowWithPaste(DEFAULT_CONTROL_KEYS, false)).toBe(DEFAULT_CONTROL_KEYS);
+    expect(rowWithPaste([], true)).toEqual(["paste"]);
+  });
+});

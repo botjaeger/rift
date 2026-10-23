@@ -75,6 +75,56 @@ pub const KEYS_RATE: usize = 20;
 pub const MAX_REQUEST_ID: usize = 64;
 /// Longest `text`, in bytes (it counts against [`KEYS_RATE`]).
 pub const MAX_TEXT: usize = 1024;
+/// Most lines one `scroll` moves (a larger one is clamped); `scroll`
+/// messages per second per connection are [`KEYS_RATE`], counted apart
+/// from `keys`.
+pub const MAX_SCROLL_LINES: i32 = 50;
+/// Largest image an `upload` carries, in bytes.
+pub const MAX_UPLOAD_BYTES: u64 = 10 * 1024 * 1024;
+/// Most bytes in one `upload` chunk (60 000 characters of base64, which a
+/// chunk boundary never splits: a multiple of 3 bytes).
+pub const MAX_UPLOAD_CHUNK: usize = 45_000;
+/// Largest JSON message of an `upload` chunk; every other client message
+/// stays within [`MAX_CLIENT_MESSAGE`].
+pub const MAX_UPLOAD_MESSAGE: usize = 62 * 1024;
+/// `upload`s started per second per connection.
+pub const UPLOAD_RATE: usize = 1;
+/// Images being received at once across the gateway (each holds up to
+/// [`MAX_UPLOAD_BYTES`] until it is pasted); another one is `busy`.
+pub const MAX_UPLOADS: usize = 2;
+/// How long one `upload` may take from its first chunk to its last; past
+/// it what arrived is dropped and the upload answered `busy`.
+pub const UPLOAD_DEADLINE: Duration = Duration::from_secs(60);
+
+/// An image type an `upload` may carry, told by its first bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageKind {
+    Png,
+    Jpeg,
+}
+
+impl ImageKind {
+    /// The kind whose signature `head` starts with: PNG's 8 bytes or
+    /// JPEG's SOI marker and the next marker's `FF`.
+    pub fn sniff(head: &[u8]) -> Option<ImageKind> {
+        const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
+        if head.starts_with(PNG) {
+            Some(ImageKind::Png)
+        } else if head.starts_with(b"\xff\xd8\xff") {
+            Some(ImageKind::Jpeg)
+        } else {
+            None
+        }
+    }
+
+    /// The file name extension the desktop saves it with.
+    pub fn extension(self) -> &'static str {
+        match self {
+            ImageKind::Png => "png",
+            ImageKind::Jpeg => "jpg",
+        }
+    }
+}
 /// `output` requests per second per connection.
 pub const OUTPUT_RATE: usize = 10;
 /// `fit` requests per second per connection (the app re-sends its fit every
@@ -480,6 +530,7 @@ mod chip_bounds {
                 line,
                 title: None,
                 idle: false,
+                agent: false,
             }),
         };
         let windows = vec![Window {
@@ -795,6 +846,9 @@ pub enum InputError {
     NoPane,
     /// The window refused remote input (`remote_access` is off).
     Denied,
+    /// `scroll`: what the wheel does there sends the program input (a
+    /// wheel report, arrow keys), which a `view` device may not.
+    ViewOnly,
     /// The window did not answer, or cannot take input now.
     Unavailable(String),
 }
@@ -902,6 +956,42 @@ pub trait Source: Send + Sync + 'static {
         Err(InputError::Unavailable(
             "this computer does not open shells while Rift is closed".into(),
         ))
+    }
+    /// Scroll `pane` by `lines` (positive: up; already within
+    /// ±[`MAX_SCROLL_LINES`], not 0) as the desktop's wheel over it would.
+    /// `operate`: the device may send the program input; without it only
+    /// the pane's own view moves, and a wheel that would reach the program
+    /// is [`InputError::ViewOnly`]. Defaults to `Unavailable`.
+    fn scroll(&self, pane: u64, lines: i32, operate: bool) -> Result<(), InputError> {
+        let _ = (pane, lines, operate);
+        Err(InputError::Unavailable(
+            "this computer cannot scroll from the phone".into(),
+        ))
+    }
+    /// Paste the image `bytes` (validated: [`ImageKind::sniff`] says
+    /// `kind`, at most [`MAX_UPLOAD_BYTES`]) from the device named `device`
+    /// into the program running in `pane`, as a file dropped on the desktop
+    /// is: saved under a name the desktop makes, its path pasted.
+    /// `Busy` when `pane` is at its prompt. Defaults to `Unavailable`.
+    fn upload(
+        &self,
+        pane: u64,
+        device: &str,
+        kind: ImageKind,
+        bytes: &[u8],
+    ) -> Result<(), InputError> {
+        let _ = (pane, device, kind, bytes);
+        Err(InputError::Unavailable(
+            "this computer cannot take images from the phone".into(),
+        ))
+    }
+    /// Whether `pane` would take an image now ([`Source::upload`]'s
+    /// errors, without one), asked at an `upload`'s first chunk so a pane
+    /// at its prompt is refused before the rest arrives. Defaults to `Ok`
+    /// (the last chunk's [`Source::upload`] still decides).
+    fn upload_ready(&self, pane: u64) -> Result<(), InputError> {
+        let _ = pane;
+        Ok(())
     }
     /// `status.json` was just rewritten (the gateway started, a client
     /// connected or left): tell whoever shows it. Called on the gateway's
@@ -1014,6 +1104,33 @@ mod tests {
         // without a final newline the last partial line counts too
         let (out, dropped) = bound_output(text.trim_end());
         assert_eq!((out.lines().count(), dropped), (500, 199_500));
+    }
+
+    #[test]
+    fn images_are_told_by_their_signature_only() {
+        assert_eq!(
+            ImageKind::sniff(b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR"),
+            Some(ImageKind::Png)
+        );
+        assert_eq!(
+            ImageKind::sniff(b"\xff\xd8\xff\xe0\0\x10JFIF"),
+            Some(ImageKind::Jpeg)
+        );
+        for bad in [
+            b"GIF89a\0\0".as_slice(),
+            b"\x89PNG\r\n\x1a",
+            b"\xff\xd8",
+            b"<svg xmlns",
+            b"#!/bin/sh\n",
+            b"",
+        ] {
+            assert_eq!(ImageKind::sniff(bad), None, "{bad:?}");
+        }
+        // a chunk is whole base64 quanta: no chunk boundary splits one
+        assert_eq!(MAX_UPLOAD_CHUNK % 3, 0);
+        // and a chunk's message is one Noise chunk
+        const { assert!(MAX_UPLOAD_MESSAGE <= transport::MAX_CHUNK) };
+        const { assert!(MAX_UPLOAD_CHUNK / 3 * 4 + 1024 <= MAX_UPLOAD_MESSAGE) };
     }
 
     #[test]

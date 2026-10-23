@@ -1,5 +1,5 @@
 import * as Clipboard from "expo-clipboard";
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import {
   AppState,
   Pressable,
@@ -41,6 +41,9 @@ import type { ScreenState } from "@/protocol/store";
 import { RUN_BOLD, RUN_ITALIC, RUN_STRIKE, RUN_UNDERLINE, type ScreenRun } from "@/protocol/types";
 import { authenticate, fleet, useApp } from "@/runtime";
 import { useActionScope } from "./useActionScope";
+import { DRAG_SLOP, dragLines, dragScrollsPane, ScrollCoalescer } from "@/scroll";
+import { clipboardImage, ImagePaste } from "@/upload";
+import { rowWithPaste } from "@/controlKeys";
 import { CELL_RATIO, fitFont, LINE_RATIO, rowPieces, rowSegments, screenDefaults, segmentColors, showsKeyRow, type Piece } from "@/terminal";
 import { ControlRow, NO_STICKY, type Sticky } from "./ControlRow";
 import { ScreenSkeleton } from "./PaneLoading";
@@ -156,11 +159,26 @@ const Row = memo(function Row({
  * (60 to 200 %), scrolling sideways when wider. `fitted`: the computer sizes the program to the
  * view (feature `fit`), so the font is the zoomed base size, not shrunk to the program's columns.
  */
-function Grid({ screen, zoom, fitted }: { screen: ScreenState; zoom: number; fitted: boolean }) {
+function Grid({
+  screen,
+  zoom,
+  fitted,
+  onRowHeight,
+}: {
+  screen: ScreenState;
+  zoom: number;
+  fitted: boolean;
+  /** Told each row's height in points (a drag's lines are counted in it). */
+  onRowHeight?: (height: number) => void;
+}) {
   const [width, setWidth] = useState(0);
   const onLayout = (e: LayoutChangeEvent) => setWidth(e.nativeEvent.layout.width);
   const fit = fitted ? { fontSize: fitFontSize(1), scroll: false } : fitFont(width - PADDING_X * 2, screen.cols);
   const fontSize = fitted ? fitFontSize(zoom) : Math.round(fit.fontSize * zoom * 10) / 10;
+  const rowHeight = Math.round(fontSize * LINE_RATIO);
+  useEffect(() => {
+    onRowHeight?.(rowHeight);
+  }, [onRowHeight, rowHeight]);
   const rowWidth = Math.ceil(screen.cols * fontSize * CELL_RATIO) + 2;
   const defaults = screenDefaults(screen, DEFAULTS);
   const scroll = fit.scroll || rowWidth > width - PADDING_X * 2;
@@ -213,6 +231,8 @@ export function TerminalView({
   running,
   bare,
   canFit,
+  canScroll,
+  canUpload,
 }: {
   hostKey: string;
   paneId: number;
@@ -227,6 +247,10 @@ export function TerminalView({
   bare?: boolean;
   /** The gateway sizes programs to the view (feature `fit`). */
   canFit?: boolean;
+  /** A drag scrolls the pane on the computer (feature `scroll`). */
+  canScroll?: boolean;
+  /** Paste sends the clipboard's image (feature `upload`). */
+  canUpload?: boolean;
 }) {
   const s = useApp();
   const scope = useActionScope(`${hostKey}:${paneId}`);
@@ -326,11 +350,27 @@ export function TerminalView({
   };
 
   const onRowKey = (id: string) => push({ keys: [applySticky(id, takeSticky())] });
-  // the row's Paste: the phone's clipboard, typed into the program as the keyboard would
-  const onPaste = () =>
-    void Clipboard.getStringAsync().then((text) => {
-      if (text) push(...textToActions(text));
-    });
+  // the row's Paste: an image on the clipboard (a screenshot) goes to the computer, which pastes
+  // its saved file's path into the program (Claude Code and Codex attach it); text is typed into
+  // the program as the keyboard would. One image at a time: a Paste while one goes out says so.
+  const [sendingImage, setSendingImage] = useState(false);
+  const [images] = useState(() => new ImagePaste(setSendingImage));
+  const onPaste = async () => {
+    const current = scope.capture();
+    if (canUpload) {
+      const out = await images.paste(
+        () => clipboardImage(Clipboard),
+        (b64) => fleet.uploadImage(hostKey, paneId, b64),
+      );
+      if (!current()) return;
+      if (out.kind === "sending") return setError("An image is still going to the computer.");
+      if (out.kind === "error") return setError(out.message);
+      if (out.kind === "sent") return setError(null);
+    }
+    if (!canType) return;
+    const text = await Clipboard.getStringAsync();
+    if (current() && text) push(...textToActions(text));
+  };
   const onOpen = useOpenShell(hostKey, paneId, setError);
 
   const typing = operate && canType && !bare;
@@ -351,6 +391,59 @@ export function TerminalView({
   const onScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
     stick.current = contentOffset.y + layoutMeasurement.height >= contentSize.height - BOTTOM_SLOP;
+    trackLocal(e);
+  };
+
+  // A vertical drag scrolls the pane on the computer (feature `scroll`: Claude Code, vim, less,
+  // a shell's scrollback), its lines counted in rows and coalesced (scroll.ts); while the view
+  // itself scrolls (zoomed in), it does first, the computer's pane past its edges.
+  const local = useRef({ y: 0, viewH: 0, contentH: 0 });
+  const [overflow, setOverflow] = useState(false);
+  const measureLocal = () => {
+    const { viewH, contentH } = local.current;
+    setOverflow(contentH - viewH > 1);
+  };
+  const trackLocal = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    local.current.y = e.nativeEvent.contentOffset.y;
+  };
+  const rowHeight = useRef(16);
+  const onRowHeight = useCallback((h: number) => {
+    rowHeight.current = h;
+  }, []);
+  const remote = useRef<ScrollCoalescer | null>(null);
+  useEffect(() => {
+    const c = new ScrollCoalescer({
+      send: (lines) =>
+        void fleet.sendScroll(live.current.hostKey, live.current.paneId, lines).then((r) => {
+          // a refused one says why once; the rate only slows it
+          if (!r.ok && r.code !== "rate") setError(r.message);
+        }),
+      now: () => Date.now(),
+      schedule: (fn, ms) => setTimeout(fn, ms),
+      unschedule: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
+    });
+    remote.current = c;
+    return () => {
+      remote.current = null;
+      c.cancel();
+    };
+  }, []);
+  const drag = useRef<{ x: number; y: number; lastY: number; vertical: boolean | null } | null>(null);
+  const dragMove = (x: number, y: number) => {
+    const d = drag.current;
+    if (!d) return;
+    if (d.vertical === null) {
+      if (Math.hypot(x - d.x, y - d.y) <= DRAG_SLOP) return;
+      d.vertical = Math.abs(y - d.y) > Math.abs(x - d.x);
+      d.lastY = y;
+      return;
+    }
+    const dy = y - d.lastY;
+    d.lastY = y;
+    if (!d.vertical || !canScroll || !online || dy === 0) return;
+    const { y: at, viewH, contentH } = local.current;
+    const edges = { overflow: contentH - viewH > 1, atTop: at <= 1, atBottom: at + viewH >= contentH - 1 };
+    if (dragScrollsPane(dy, edges)) remote.current?.add(dragLines(dy, rowHeight.current));
   };
 
   // Pinch to zoom, double-tap to reset (the Pane board); kept for the app's run
@@ -369,16 +462,28 @@ export function TerminalView({
     if (t.length === 2) {
       pinch.current = { distance: touchDistance(t[0]!, t[1]!), zoom };
       tap.current = null;
+      drag.current = null;
+      remote.current?.cancel();
       setPinching(true);
-    } else if (t.length === 1) tap.current = { x: t[0]!.pageX, y: t[0]!.pageY, moved: false };
+    } else if (t.length === 1) {
+      tap.current = { x: t[0]!.pageX, y: t[0]!.pageY, moved: false };
+      drag.current = { x: t[0]!.pageX, y: t[0]!.pageY, lastY: t[0]!.pageY, vertical: null };
+    }
   };
   const onTouchMove = (e: GestureResponderEvent) => {
     const t = e.nativeEvent.touches;
     if (t.length === 2 && pinch.current) setZoom(pinchZoom(pinch.current, touchDistance(t[0]!, t[1]!)));
-    else if (t.length === 1 && tap.current && Math.hypot(t[0]!.pageX - tap.current.x, t[0]!.pageY - tap.current.y) > 10) tap.current.moved = true;
+    else if (t.length === 1) {
+      if (tap.current && Math.hypot(t[0]!.pageX - tap.current.x, t[0]!.pageY - tap.current.y) > DRAG_SLOP) tap.current.moved = true;
+      dragMove(t[0]!.pageX, t[0]!.pageY);
+    }
   };
   const onTouchEnd = (e: GestureResponderEvent) => {
     const left = e.nativeEvent.touches.length;
+    if (left === 0) {
+      drag.current = null;
+      remote.current?.flush();
+    }
     if (pinch.current && left < 2) {
       pinch.current = null;
       lastTap.current = null;
@@ -398,8 +503,17 @@ export function TerminalView({
   const onArea = (e: LayoutChangeEvent) => {
     const { width, height } = e.nativeEvent.layout;
     setArea((a) => (a.width === width && a.height === height ? a : { width, height }));
+    local.current.viewH = height;
+    measureLocal();
     toEnd();
   };
+  const onContent = (_w: number, h: number) => {
+    local.current.contentH = h;
+    measureLocal();
+    toEnd();
+  };
+  // with the computer's pane taking the drag, the view moves only when it has more to show
+  const localScroll = !pinching && (!canScroll || overflow);
   const fitting = !!canFit && operate && online;
   const size = fitting ? fitSize(area.width - PADDING_X * 2, area.height - zoomHeight - PADDING * 2, fitFontSize(zoom)) : null;
   const cols = size?.cols;
@@ -457,7 +571,7 @@ export function TerminalView({
     : "Terminal screen";
 
   const grid = screen ? (
-    <Grid screen={screen} zoom={zoom} fitted={held} />
+    <Grid screen={screen} zoom={zoom} fitted={held} onRowHeight={onRowHeight} />
   ) : (
     // the pane's steps card (PaneLoading) says what is awaited; these are the rows to come
     <ScreenSkeleton />
@@ -476,7 +590,7 @@ export function TerminalView({
           onFocusChange={setFocused}
           style={styles.fill}
         >
-          <ScrollView ref={scroller} style={styles.fill} accessibilityLabel={label} scrollEnabled={!pinching} onLayout={onArea} onScrollEndDrag={onScroll} onMomentumScrollEnd={onScroll} onContentSizeChange={toEnd}>
+          <ScrollView ref={scroller} style={styles.fill} accessibilityLabel={label} scrollEnabled={localScroll} bounces={!canScroll} onLayout={onArea} onScroll={trackLocal} scrollEventThrottle={16} onScrollEndDrag={onScroll} onMomentumScrollEnd={onScroll} onContentSizeChange={onContent}>
             {screen ? zoomRow : null}
             {/* not one element for screen readers: they read the rows */}
             <Pressable onPress={() => capture.current?.focus()} accessible={false}>
@@ -485,30 +599,38 @@ export function TerminalView({
           </ScrollView>
         </KeyCaptureView>
       ) : (
-        <ScrollView ref={scroller} style={styles.fill} accessibilityLabel={label} scrollEnabled={!pinching} onLayout={onArea} onScrollEndDrag={onScroll} onMomentumScrollEnd={onScroll} onContentSizeChange={toEnd}>
+        <ScrollView ref={scroller} style={styles.fill} accessibilityLabel={label} scrollEnabled={localScroll} bounces={!canScroll} onLayout={onArea} onScroll={trackLocal} scrollEventThrottle={16} onScrollEndDrag={onScroll} onMomentumScrollEnd={onScroll} onContentSizeChange={onContent}>
           {screen ? zoomRow : null}
           {grid}
         </ScrollView>
       )}
+      {/* without the key bar (the message input below, or view only), a refused scroll or paste says why here */}
+      {error && (bare || !operate) ? <ErrorText style={styles.bareError}>{error}</ErrorText> : null}
       {bare ? null : operate ? (
         <View style={styles.bar} accessibilityLabel="Keys">
           {atPrompt ? (
             <WarningText>This pane is at its prompt: typed text goes to programs only.</WarningText>
           ) : null}
           {error ? <ErrorText>{error}</ErrorText> : null}
+          {sendingImage ? (
+            <Text style={styles.oldRift} accessibilityLiveRegion="polite">
+              Sending the image to the computer…
+            </Text>
+          ) : null}
           {!canType ? (
             <Text style={styles.oldRift}>This computer's Rift takes keys from the row only; update it to type here.</Text>
           ) : null}
           {/* a full-screen program needs its keys: the row shows here whatever Settings says */}
           {showsKeyRow(s.settings.showKeys, true) ? (
             <ControlRow
-              ids={s.settings.controlKeys}
+              // a screenshot for the program needs Paste: on the row whatever Settings › Keys holds
+              ids={rowWithPaste(s.settings.controlKeys, !!canUpload)}
               sticky={sticky}
               disabled={!online}
               onSticky={setSticky}
               onKey={onRowKey}
               onOpen={onOpen}
-              onPaste={canType ? onPaste : undefined}
+              onPaste={canType || canUpload ? () => void onPaste() : undefined}
               // the last key: hide the keyboard, or open it (a tap on the screen opens it too)
               onHideKeyboard={typing && focused ? () => capture.current?.blur() : undefined}
               onShowKeyboard={typing && !focused ? () => capture.current?.focus() : undefined}
@@ -556,6 +678,7 @@ const styles = StyleSheet.create({
   zoomGlyph: { fontFamily: ui(400), color: colors.text, fontSize: 16 },
   zoomValue: { fontFamily: mono, color: colors.text, fontSize: 12, minWidth: 44, textAlign: "center" },
   oldRift: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12 },
+  bareError: { paddingHorizontal: 12, paddingVertical: 6, backgroundColor: colors.chrome },
   // a block's rule: 2 px in the 6 pt gutter left of the row
   rule: { position: "absolute", left: -4, top: 0, width: 2 },
   disabled: { opacity: 0.45 },

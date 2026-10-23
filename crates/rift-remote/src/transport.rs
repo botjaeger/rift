@@ -281,6 +281,12 @@ impl<S: Read + Write> Channel<S> {
         self.remote
     }
 
+    /// Accept JSON messages up to `limit` bytes from now on (a message
+    /// being assembled is held to the new limit too).
+    pub fn set_limit(&mut self, limit: usize) {
+        self.rx.limit = limit;
+    }
+
     /// Send one JSON message (chunked, encrypted). False when the socket or
     /// the cipher failed.
     pub fn send(&mut self, json: &str) -> bool {

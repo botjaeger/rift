@@ -2241,7 +2241,8 @@ rs_steps = [
     f"dump {rs}/all.txt",
     "type relation", "wait 800", f"dump {rs}/relation.txt", f"shot {rs}/relation.png",
     "key ctrl+u", "type applying is:ok", "wait 800", f"dump {rs}/ok.txt",
-    "key ctrl+u", "type RUNMARK", "wait 800", "key down", "key up", "wait 200",
+    # (one row: ↓ past it would close the pane)
+    "key ctrl+u", "type RUNMARK", "wait 800", "key up", "wait 200",
     f"dump {rs}/preview.txt",
     "key tab", "wait 300", f"dump {rs}/edit.txt",
     "key enter", "wait 800", f"dump {rs}/rerun.txt", "quit"]
@@ -3130,6 +3131,179 @@ assert 'history_selected=Some("for i in 1 2; do\\necho $i\\ndone")' in (hs / "ba
 assert 'history_selected=Some("fishonly_one")' in (hs / "fish.txt").read_text()
 assert "history_rows=0" in (hs / "fish-bash.txt").read_text()
 
+# History menu (↑, Warp): prefix matches of the typed text, the pane's lines
+# then the shell's, newest first and once; the selection previews in the
+# line, ↓ past the newest and Esc restore what was typed, ⏎ runs the
+# preview, typing keeps it; ↓ past the ⌃R pane's last row closes the pane
+hm = scratch / "history-menu"
+for sub in ("cfg/rift", "data", "home", "work"):
+    (hm / sub).mkdir(parents=True, exist_ok=True)
+(hm / "home/.bash_history").write_text("echo old-shell\necho beta\nls d1/x\n")
+for name in ("d1/f1", "d1/f2", "d2/f3"):
+    (hm / "work" / name).parent.mkdir(parents=True, exist_ok=True)
+    (hm / "work" / name).write_text("")
+(hm / "cfg/rift/config.toml").write_text(
+    'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
+    f'working_directory = {json.dumps(str(hm / "work"))}\n')
+(hm / "m.rift").write_text("\n".join([
+    "wait_prompt",
+    *[s for w in ("alpha", "beta", "gamma")
+      for s in (f"type echo {w}\\n", "wait 300", "wait_prompt")],
+    "type echo", "wait 300",
+    "key up", "wait 100", f"dump {hm}/up1.txt",
+    "key up", "wait 100", f"dump {hm}/up2.txt",
+    "key down", "key down", "wait 100", f"dump {hm}/restored.txt",
+    "key down", "wait 100", f"dump {hm}/down3.txt",
+    "key up", "key up", "key up", "key escape", "wait 100", f"dump {hm}/esc.txt",
+    "key ctrl+u", "type echo a", "key up", "type !", "wait 100", f"dump {hm}/typed.txt",
+    "key ctrl+u", "type echo o", "key up", "wait 100", f"dump {hm}/shell.txt",
+    "key ctrl+u", "type echo gam", "key ctrl+r", "wait 300", f"dump {hm}/pane.txt",
+    "key down", "wait 100", f"dump {hm}/pane-closed.txt",
+    # the panel opened as you type gives ↑ to the menu; one opened by a Tab
+    # keeps ↑ / ↓
+    "key ctrl+u", "type ls d", "wait 800", f"dump {hm}/as-typed.txt",
+    "key up", "wait 100", f"dump {hm}/as-typed-up.txt", "key down", "wait 800",
+    f"dump {hm}/as-typed-back.txt", "key tab", "wait 800", "key down", "key up", "wait 100", f"dump {hm}/tabbed.txt",
+    # previews are no edits: ⌘Z after a kept preview goes back to the typed
+    # text, and after Esc it never brings a preview back; leaving the tab
+    # closes the menu and puts the typed text back
+    "key ctrl+u", "type echo", "key up", "key up", "wait 100", "key cmd+z", "wait 100",
+    f"dump {hm}/undo-preview.txt",
+    "key up", "key escape", "key cmd+z", "wait 100", f"dump {hm}/undo-esc.txt",
+    "key ctrl+u", "type echo", "key up", "key cmd+t", "wait_prompt", "wait 300",
+    f"dump {hm}/newtab.txt", "key cmd+1", "wait 300",
+    # a paste under the menu makes the line the user's: the menu goes and
+    # Esc no longer throws the paste away
+    "key ctrl+u", "type echo", "key up", "paste  --x", "wait 100", "key escape", "wait 100",
+    f"dump {hm}/pasted.txt",
+    "key ctrl+u", "type echo", "key up", "key up", "key enter", "wait 500", "wait_prompt",
+    f"dump {hm}/ran.txt",
+    "quit"]) + "\n")
+hm_env = {k: v for k, v in env.items() if k != "HISTFILE"}
+hm_env.update(XDG_CONFIG_HOME=str(hm / "cfg"), XDG_DATA_HOME=str(hm / "data"),
+              HOME=str(hm / "home"), BASH_SILENCE_DEPRECATION_WARNING="1",
+              RIFT_SCRIPT_HISTORY="1")
+with (hm / "m.log").open("w") as log:
+    rc = subprocess.run([str(binary), "--script", str(hm / "m.rift"), "--headless"],
+                        env=hm_env, stdout=log, stderr=log, timeout=120).returncode
+assert rc == 0, died("history menu run failed", hm / "m.log")
+hmt = lambda name: (hm / f"{name}.txt").read_text()
+assert 'history_menu=true history_menu_selected=0 history_menu_typed=Some("echo")' \
+    in hmt("up1") and 'editor="echo gamma"' in hmt("up1"), hmt("up1")[:3000]
+assert 'completion_items="echo gamma"(history) "echo beta"(history) "echo alpha"(history) ' \
+    '"echo old-shell"(history)' in hmt("up1"), hmt("up1")[:3000]
+assert 'editor="echo beta" cursor=9' in hmt("up2"), hmt("up2")[:3000]
+for name in ("restored", "down3", "esc"):
+    assert "history_menu=false" in hmt(name) and 'editor="echo" cursor=4' in hmt(name), \
+        (name, hmt(name)[:3000])
+assert "history_menu=false" in hmt("typed") and 'editor="echo alpha!"' in hmt("typed"), \
+    hmt("typed")[:3000]
+assert 'editor="echo old-shell"' in hmt("shell"), hmt("shell")[:3000]
+assert "history=true" in hmt("pane") and "history_rows=1" in hmt("pane"), hmt("pane")[:3000]
+assert "history=false" in hmt("pane-closed"), hmt("pane-closed")[:3000]
+assert 'completion_items="d1/"(path) "d2/"(path)' in hmt("as-typed") \
+    and "completion_asked=false" in hmt("as-typed"), hmt("as-typed")[:3000]
+assert "history_menu=true" in hmt("as-typed-up") and 'editor="ls d1/x"' in hmt("as-typed-up"), \
+    hmt("as-typed-up")[:3000]
+# ↓ past the newest is back to typing: the panel returns
+assert 'completion_items="d1/"(path) "d2/"(path)' in hmt("as-typed-back") \
+    and 'editor="ls d" cursor=4' in hmt("as-typed-back"), hmt("as-typed-back")[:3000]
+assert 'completion_items="d1/f1"(path) "d1/f2"(path)' in hmt("tabbed") \
+    and "history_menu=false history_menu_selected=0" in hmt("tabbed") \
+    and "completion_asked=true" in hmt("tabbed") and 'editor="ls d1/"' in hmt("tabbed"), \
+    hmt("tabbed")[:3000]
+assert "history_menu=false" in hmt("undo-preview") \
+    and re.search(r'pane 1 .*editor="echo" cursor=4', hmt("undo-preview")), hmt("undo-preview")[:3000]
+assert "history_menu=false" in hmt("undo-esc") \
+    and not re.search(r'pane 1 .*editor="echo (alpha|beta|gamma)"', hmt("undo-esc")), \
+    hmt("undo-esc")[:3000]
+assert "history_menu=false" in hmt("newtab") \
+    and re.search(r'pane 1 .*editor="echo" cursor=4', hmt("newtab")), hmt("newtab")[:3000]
+assert "history_menu=false" in hmt("pasted") \
+    and re.search(r'pane 1 .*editor="echo gamma ?--x"', hmt("pasted")), hmt("pasted")[:3000]
+# a scripted run that did not opt in (RIFT_SCRIPT_RECORD_HISTORY) records
+# nothing, even under its own XDG_DATA_HOME
+assert not (hm / "data/rift/history.json").exists()
+hm_ran = hmt("ran")
+assert hm_ran.count('cmd="echo beta" exit=Some(0)') == 2 and 'editor="" ' in hm_ran, \
+    hm_ran[:3000]
+
+# Rift's own history ranks by directory across restarts: run 1 runs
+# `pnpm dev` in a, then the colliding (newer) `pnpm dev:web` in b, plus a
+# leading-space command and a secret, which are never saved; run 2, a fresh
+# session over the same data dir, types `pnpm de`: in a the ghost text and
+# the first history row are a's command, in b b's. Run 1 does not read the
+# store (no RIFT_SCRIPT_HISTORY); run 2 opts in.
+dh = scratch / "dir-history"
+for sub in ("cfg/rift", "data", "home", "a", "b"):
+    (dh / sub).mkdir(parents=True, exist_ok=True)
+for rc_file in (".bash_profile", ".bashrc"):  # macOS login / Linux shim
+    (dh / "home" / rc_file).write_text("PS1='$ '\npnpm() { :; }\n")
+(dh / "home/.bash_history").write_text("pnpm dedupe\n")
+(dh / "cfg/rift/config.toml").write_text(
+    'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
+    f'working_directory = {json.dumps(str(dh / "a"))}\n')
+dh_env = dict(env, XDG_CONFIG_HOME=str(dh / "cfg"), XDG_DATA_HOME=str(dh / "data"),
+              HOME=str(dh / "home"), HISTFILE=str(dh / "home/.bash_history"),
+              BASH_SILENCE_DEPRECATION_WARNING="1", RIFT_SCRIPT_RECORD_HISTORY="1")
+dh_env.pop("RIFT_SCRIPT_HISTORY", None)
+# `cat ./deploy.txt…` collides the same way; its file argument gives the
+# completion panel a word candidate, so the panel opens and lists the
+# history rows (`pnpm de` alone shows only the ghost text)
+for where in ("a", "b"):
+    (dh / where / "deploy.txt").write_text("")
+def dh_run(name, steps, extra=None):
+    (dh / f"{name}.rift").write_text("\n".join(["wait_prompt", "wait 500", *steps, "quit"]) + "\n")
+    with (dh / f"{name}.log").open("w") as log:
+        rc = subprocess.run([str(binary), "--script", str(dh / f"{name}.rift"), "--headless"],
+                            env=dict(dh_env, **(extra or {})), stdout=log, stderr=log,
+                            timeout=120).returncode
+    assert rc == 0, died(f"directory history {name} run failed", dh / f"{name}.log")
+dh_run("record", [
+    "type pnpm dev\\n", "wait 800",
+    "type cat ./deploy.txt\\n", "wait 500",
+    f"type cd {dh / 'b'}\\n", "wait 500",
+    "type pnpm dev:web\\n", "wait 800",
+    "type cat ./deploy.txt ./deploy.txt\\n", "wait 500",
+    "key space", "type pnpm dev:hidden\\n", "wait 500",
+    "type export TOKEN=abcd1234efgh\\n", "wait 800",
+])
+saved = json.loads((dh / "data/rift/history.json").read_text())
+commands = [e["command"] for e in saved["entries"]]
+assert "pnpm dev" in commands and "pnpm dev:web" in commands, commands
+assert not any("hidden" in c or "TOKEN" in c for c in commands), commands
+# each place: the ghost text as typed, the ↑ menu's first line, the ⌃R
+# pane's first row for that query, and the panel's history rows for
+# `cat ./de`
+dh_probe = lambda where: [
+    "type pnpm de", "wait 500", f"dump {dh}/{where}-typed.txt",
+    "key up", "wait 100", f"dump {dh}/{where}-up.txt", "key escape",
+    "key ctrl+r", "wait 300", f"dump {dh}/{where}-search.txt", "key escape",
+    "key cmd+a", "key backspace",
+    "type cat ./de", "wait 500", f"dump {dh}/{where}-panel.txt", "key escape",
+    "key cmd+a", "key backspace"]
+dh_run("rank", [
+    *dh_probe("a"),
+    f"type cd {dh / 'b'}\\n", "wait 500",
+    *dh_probe("b"),
+], {"RIFT_SCRIPT_HISTORY": "1"})
+
+def dh_first(where):
+    read = lambda kind: (dh / f"{where}-{kind}.txt").read_text()
+    ghost = re.search(r" ghost=(\"[^\"]*\")", read("typed"))[1]
+    picked = re.search(r"history_selected=Some\(\"([^\"]*)\"\)", read("search"))
+    rows = re.findall(r'"([^"]*)"\(history\)', re.search(r"^completion_items=(.*)$",
+                                                        read("panel"), re.M)[1])
+    return ghost, picked and picked[1], rows
+
+assert dh_first("a") == ('"v"', "pnpm dev", ["cat ./deploy.txt", "cat ./deploy.txt ./deploy.txt"]), \
+    dh_first("a")
+assert dh_first("b") == ('"v:web"', "pnpm dev:web", ["cat ./deploy.txt ./deploy.txt",
+                                                     "cat ./deploy.txt"]), dh_first("b")
+for where, line in (("a", "pnpm dev"), ("b", "pnpm dev:web")):
+    dh_up = (dh / f"{where}-up.txt").read_text()
+    assert "history_menu=true" in dh_up and f'editor="{line}"' in dh_up, (where, dh_up[:3000])
+
 # Shell widgets: ⌃R runs the shell's own binding (a fake widget, no UI)
 # on the command line, which then holds its pick, nothing run; with
 # `shell_widgets = "rift"`, or once the shell unbinds ⌃R, the history pane
@@ -3257,6 +3431,45 @@ for sw_name, (sw_rc, sw_body) in sw_fixtures.items():
     sw_c = (swn / "c.txt").read_text()
     assert 'cmd="echo ran-by-widget" exit=Some(0)' in sw_c, (sw_name, sw_c[:3000])
     assert 'editor="keep" cursor=4' in sw_c, (sw_name, sw_c[:3000])
+
+# The user's own iTerm2 integration next to ours: its PS1 carries 133;A and
+# 133;B, so accepting a line redraws the prompt on its row before the echo's
+# line break. The command keeps its block and its output (no grey ghost line
+# of the command above an empty block)
+it_zsh = shutil.which("zsh")
+if it_zsh is None:
+    print("SKIP iTerm2 markers: no zsh", flush=True)
+else:
+    it = scratch / "iterm2-markers"
+    for sub in ("cfg/rift", "data", "home", "work"):
+        (it / sub).mkdir(parents=True, exist_ok=True)
+    (it / "home/.zshrc").write_text(
+        "PS1=$'%{\\e]133;A\\a%}$ %{\\e]133;B\\a%}'\n"
+        "it_precmd() { printf '\\e]133;D;%s\\a' $?; }\n"
+        "it_preexec() { printf '\\e]133;C;\\a'; }\n"
+        "precmd_functions+=(it_precmd); preexec_functions+=(it_preexec)\n")
+    (it / "cfg/rift/config.toml").write_text(
+        f'shell = {json.dumps(it_zsh)}\nrestore_session = false\ndurable_sessions = false\n'
+        f'working_directory = {json.dumps(str(it / "work"))}\n')
+    (it / "m.rift").write_text("\n".join([
+        "wait_prompt", "wait 500",
+        "type echo one-out\\n", "wait 500", "wait_prompt",
+        "type echo two-out\\n", "wait 500", "wait_prompt",
+        f"dump {it}/m.txt", "quit"]) + "\n")
+    with (it / "m.log").open("w") as log:
+        rc = subprocess.run([str(binary), "--script", str(it / "m.rift"), "--headless"],
+                            env=dict(env, XDG_CONFIG_HOME=str(it / "cfg"),
+                                     XDG_DATA_HOME=str(it / "data"), HOME=str(it / "home")),
+                            stdout=log, stderr=log, timeout=120).returncode
+    assert rc == 0, died("iTerm2 markers run failed", it / "m.log")
+    it_dump = (it / "m.txt").read_text()
+    it_blocks = [l for l in it_dump.splitlines() if l.startswith("    block ")]
+    assert not any("background=true" in l for l in it_blocks), it_dump[:4000]
+    for cmd in ("echo one-out", "echo two-out"):
+        row = next((l for l in it_blocks if f'cmd="{cmd}"' in l), "")
+        m = re.search(r"prompt_start=(\d+) output_start=Some\((\d+)\) end=Some\((\d+)\)", row)
+        # its output row is its own: after the prompt row, before the end
+        assert m and int(m[1]) < int(m[2]) < int(m[3]), (cmd, it_dump[:4000])
 
 # Settings › Terminal: an OSC 52 read is answered only with "read_write";
 # middle-click pastes the clipboard (an OSC 52 copy) into the pane
@@ -4478,6 +4691,131 @@ assert re.search(r'← \{"id":"c1","ok":true,"t":"ack"\}', transcript), transcri
 assert "tabs=2 " in (closer / "ready.txt").read_text()
 closed_dump = (closer / "after.txt").read_text()
 assert "tabs=1 " in closed_dump and 'closed a pane")' in closed_dump, closed_dump[:600]
+
+# phone scroll and image paste: a real phone (examples/phone) through the
+# window's own gateway. Tab 1 holds 400 lines at a prompt, tab 2 a program
+# on the alternate screen with SGR mouse tracking that records what it
+# reads. The phone's `scroll` of tab 1 moves the phone's own view of it (the
+# styled screen it is sent), never the desktop's (view_offset stays 0); its
+# `scroll` of tab 2 reaches the program as SGR wheel reports (the wheel's
+# rule, mouse::wheel); its `upload` is saved by the gateway (0600, a name it
+# made) and the path pasted into the program
+pin = scratch / "phone-input"
+for sub in ("cfg/rift", "data/rift"):
+    (pin / sub).mkdir(parents=True)
+(pin / "cfg/rift/config.toml").write_text(
+    'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
+    'remote_listen = "127.0.0.1:0"\nremote_relay = ""\nremote_access = true\n')
+(pin / "scr.sh").write_text(
+    "#!/bin/sh\n"
+    "# scr.sh BIN OUT: the styled screen a phone is sent of the first tab's pane\n"
+    "pane=$(\"$1\" ctl request '{\"cmd\":\"status\"}' | python3 -I -c "
+    "'import json,sys; print(json.load(sys.stdin)[\"tabs\"][0][\"panes\"][0][\"id\"])')\n"
+    "\"$1\" ctl request \"{\\\"cmd\\\":\\\"screen\\\",\\\"pane\\\":$pane,\\\"force\\\":true}\""
+    " > \"$2\" 2>&1\n"
+    "touch \"$2.done\"\n")
+def pin_screen(out):
+    return [f"sh sh {shlex.quote(str(pin / 'scr.sh'))} {shlex.quote(str(binary))} "
+            f"{shlex.quote(str(pin / out))} >/dev/null 2>&1 &",
+            f"wait_file {pin / out}.done 15000"]
+(pin / "wheel.py").write_text(
+    "import os, select, sys, termios, time, tty\n"
+    "out, ready = sys.argv[1], sys.argv[2]\n"
+    "fd = sys.stdin.fileno()\n"
+    "old = termios.tcgetattr(fd)\n"
+    "tty.setraw(fd)\n"
+    "# the alternate screen, button tracking, SGR reports\n"
+    "sys.stdout.write('\\x1b[?1049h\\x1b[?1000h\\x1b[?1006hwheel'); sys.stdout.flush()\n"
+    "open(ready, 'w').close()\n"
+    "got = b''\n"
+    "end = time.time() + 40\n"
+    "while time.time() < end and b'.png' not in got:\n"
+    "    if select.select([fd], [], [], 0.2)[0]:\n"
+    "        got += os.read(fd, 4096)\n"
+    "        open(out, 'wb').write(got)\n"
+    "sys.stdout.write('\\x1b[?1006l\\x1b[?1000l\\x1b[?1049l'); sys.stdout.flush()\n"
+    "termios.tcsetattr(fd, termios.TCSADRAIN, old)\n")
+(pin / "t.rift").write_text("\n".join([
+    "resize 1100 800", "wait_prompt", "type seq 1 400\\n", "wait 1500", "key cmd+t", "wait_prompt",
+    f"type python3 -I {pin}/wheel.py {pin}/read.bin {pin}/tracking\\n",
+    f"wait_file {pin}/tracking 20000", "wait 500", *pin_screen("before.json"),
+    f"dump {pin}/ready.txt", f"wait_file {pin}/phone-acked 60000", "wait 1000",
+    *pin_screen("after.json"), f"dump {pin}/after.txt", "quit"]) + "\n")
+pin_env = dict(env, XDG_CONFIG_HOME=str(pin / "cfg"), XDG_DATA_HOME=str(pin / "data"),
+               BASH_SILENCE_DEPRECATION_WARNING="1", RIFT_NO_DEFAULT_RELAY="1")
+pin_phone = os.environ.get("RIFT_PHONE_BIN")
+assert pin_phone, "RIFT_PHONE_BIN is unset (scripts/ui-smoke.sh builds examples/phone)"
+pin_png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=")
+pin_send = "\n".join(json.dumps(m) for m in [
+    {"t": "scroll", "id": "s1", "pane": "FIRST", "lines": 10},
+    {"t": "scroll", "id": "s2", "pane": "LAST", "lines": 2},
+    {"t": "scroll", "id": "s3", "pane": "LAST", "lines": -1},
+    {"t": "upload", "id": "u1", "pane": "LAST", "size": len(pin_png), "offset": 0,
+     "data": base64.b64encode(pin_png).decode()},
+]).replace('"FIRST"', "FIRST").replace('"LAST"', "LAST")
+with (pin / "log.txt").open("w") as log, (pin / "phone.txt").open("w") as plog:
+    window = subprocess.Popen([str(binary), "--script", str(pin / "t.rift"), "--headless"],
+                              env=pin_env, stdout=log, stderr=log)
+    try:
+        deadline = time.monotonic() + 60
+        while not (pin / "ready.txt").exists():
+            assert window.poll() is None, died("phone-input window exited", pin / "log.txt")
+            assert time.monotonic() < deadline, "phone-input window never got ready"
+            time.sleep(0.05)
+        while not (pin / "data/rift/remote/status.json").exists():
+            assert window.poll() is None, died("phone-input window exited", pin / "log.txt")
+            time.sleep(0.05)
+        link = next(l for l in subprocess.run(
+            [str(binary), "remote", "pair"], env=pin_env, capture_output=True, text=True,
+            timeout=20).stdout.splitlines() if l.startswith("rift-remote://"))
+        assert "&r=" not in link, f"a relay in a local test's link: {link}"
+        phone = subprocess.run(
+            [pin_phone, str(pin / "phone.key"), link, "true", "3", str(pin / "phone-acked")],
+            env=dict(os.environ, PHONE_SEND=pin_send), stdout=plog, stderr=plog, timeout=90)
+        assert phone.returncode == 0, died("the scrolling phone", pin / "phone.txt")
+        assert window.wait(timeout=60) == 0, died("phone-input window failed", pin / "log.txt")
+    finally:
+        if window.poll() is None:
+            window.kill()
+transcript = (pin / "phone.txt").read_text()
+welcome_line = next(l for l in transcript.splitlines() if '"t":"welcome"' in l)
+assert '"scroll"' in welcome_line and '"upload"' in welcome_line, welcome_line
+for rid in ("s1", "s2", "s3", "u1"):
+    assert re.search(rf'← \{{"id":"{rid}","ok":true,"t":"ack"\}}', transcript), (rid, transcript[-3000:])
+def pane_lines(dump):
+    return [l for l in dump.splitlines() if l.startswith("  pane ") and " view_offset=" in l]
+ready_panes = pane_lines((pin / "ready.txt").read_text())
+after_dump = (pin / "after.txt").read_text()
+after_panes = pane_lines(after_dump)
+assert len(ready_panes) == 2 and len(after_panes) == 2, (ready_panes, after_panes)
+# tab 1 (a prompt over 400 lines): the phone's view moved 10 lines up, the
+# desktop's not at all; tab 2's (the program's alternate screen) never did
+assert " view_offset=0 " in ready_panes[0] and " alt=true " in ready_panes[1], ready_panes
+assert " view_offset=0 " in after_panes[0] and " alt=false " in after_panes[0], after_panes
+def pin_rows(name):
+    reply = json.loads((pin / name).read_text())
+    assert reply.get("ok"), reply
+    return ["".join(r[0] if isinstance(r, list) else r["text"] for r in line).strip()
+            for line in reply["screen"]["lines"]]
+before_rows, after_rows = pin_rows("before.json"), pin_rows("after.json")
+# the phone's screen ends 10 lines further up (the output's last line, 400,
+# ends the unscrolled one)
+last_number = lambda rows: next(l for l in reversed(rows) if l.isdigit())
+assert (last_number(before_rows), last_number(after_rows)) == ("400", "390"), (
+    before_rows[-12:], after_rows[-12:])
+# (the program left the alternate screen once the pasted path arrived)
+assert " view_offset=0 " in after_panes[1], after_panes
+read = (pin / "read.bin").read_bytes()
+# two reports up, one down, at the middle of the screen, no modifiers
+ups, downs = re.findall(rb"\x1b\[<64;\d+;\d+M", read), re.findall(rb"\x1b\[<65;\d+;\d+M", read)
+assert (len(ups), len(downs)) == (2, 1), read
+pasted = re.search(rb"(/[^\s'\x1b]*/rift-paste-\d+-[0-9a-f]{8}\.png)'? $", read)
+assert pasted, read
+saved = Path(pasted[1].decode())
+assert saved.parent == pin / "data/rift/remote/uploads", saved
+assert saved.read_bytes() == pin_png
+assert saved.stat().st_mode & 0o777 == 0o600 and saved.parent.stat().st_mode & 0o777 == 0o700
+assert "Live Check Phone pasted an image" in after_dump, after_dump[:3000]
 
 # (f) the chip on every window comes from status.json of a gateway holding
 # gateway.lock; a stale status (lock not held) shows none

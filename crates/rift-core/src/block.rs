@@ -240,10 +240,17 @@ impl BlockStore {
     pub fn on_prompt_start(&mut self, abs: AbsLine) {
         let now = self.now();
         let (wall, replaying) = (self.wall_now(), self.replaying);
+        // the prompt redrawn on its own row: a PS1 that carries 133;A (the
+        // user's iTerm2 integration's) is drawn again when the line is
+        // accepted; the submission still waits for its 133;C, and the
+        // echo's line break is not a background job's output
+        let redrawn = self.blocks.back().is_some_and(|b| {
+            b.state == BlockState::Prompt && b.command_start.is_some_and(|(line, _)| abs <= line)
+        });
         // a new prompt without 133;C after a submission: the shell never
         // said it started (bash 3.2's DEBUG trap misses `cmd &`; a syntax
         // error): it is a block of what it printed, with no exit status
-        let submitted = self.submitted.take();
+        let submitted = if redrawn { None } else { self.submitted.take() };
         self.background_open = false;
         self.answer_pending = false;
         let after_resize = std::mem::take(&mut self.resized_at_prompt);
@@ -874,6 +881,32 @@ mod tests {
         s.on_prompt_start(8);
         s.on_output_start(9, "date".into());
         assert_eq!(s.last().unwrap().command, "date");
+    }
+
+    #[test]
+    fn a_prompt_redrawn_on_its_row_keeps_the_submission() {
+        // iTerm2's integration puts 133;A in PS1: accepting the line redraws
+        // the prompt (A, B again on its row) before the echo's line break
+        // and 133;C. Neither the redraw nor that break may take the
+        // submission or make a background block of the echo.
+        let mut s = BlockStore::default();
+        s.on_prompt_start(4);
+        s.on_command_start(4, 20);
+        s.stamp_submit(None, false, None, "cargo clean");
+        s.on_prompt_start(4);
+        s.on_command_start(4, 20);
+        assert!(s.submit_pending(), "the redraw keeps it");
+        s.on_background_output(5, 0, true);
+        s.on_output_start(5, String::new());
+        s.on_done(6, Some(0));
+        assert_eq!(s.blocks.len(), 1, "no background block");
+        let b = &s.blocks[0];
+        assert_eq!(b.command, "cargo clean");
+        assert!(b.from_editor);
+        assert_eq!(
+            (b.prompt_start, b.output_start, b.end),
+            (4, Some(5), Some(6))
+        );
     }
 
     #[test]

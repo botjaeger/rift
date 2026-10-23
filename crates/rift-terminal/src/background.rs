@@ -258,11 +258,13 @@ impl Background {
             let route = {
                 use rift_pty::alacritty_terminal::term::TermMode;
                 let alt = s.term.lock().mode().contains(TermMode::ALT_SCREEN);
+                let job = s.has_foreground_job();
                 let blocks = s.blocks.lock().unwrap();
                 crate::remote::route(
                     alt,
                     blocks.last().map(|b| &b.state),
                     blocks.submit_pending(),
+                    job,
                 )
             };
             match input {

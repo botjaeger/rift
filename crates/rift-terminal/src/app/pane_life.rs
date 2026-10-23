@@ -79,6 +79,13 @@ impl App {
         let Some(code) = p.session.exit_status() else {
             return;
         };
+        if p.session.service_lost() {
+            // no exit was seen: closing would hang up a shell that may
+            // still run in the service; the bar offers to reconnect
+            p.exited = Some(crate::views::exited::LOST);
+            p.view_offset = 0;
+            return;
+        }
         if close_on_exit.closes(code) {
             self.close_pane(pane, event_loop);
             return;
@@ -134,9 +141,18 @@ impl App {
             .local_cwd()
             .or_else(|| p.last_git_cwd.clone())
             .map(std::path::PathBuf::from);
+        // a pane whose service stopped answering reconnects to its shell,
+        // which may still be running there
+        let reattach = p
+            .session
+            .service_lost()
+            .then(|| p.session.service_id())
+            .flatten();
         // closing ends a service-owned shell; a local one ends as its PTY
         // drops with the old session below
-        p.session.terminate();
+        if reattach.is_none() {
+            p.session.terminate();
+        }
         let (resolved, program) = match self.resolve_launch(&launch) {
             Ok(r) => (r, program),
             Err(e) => {
@@ -150,8 +166,11 @@ impl App {
             .filter(|d| d.is_dir())
             .or_else(|| resolved.cwd.clone().filter(|d| d.is_dir()))
             .or_else(|| self.config.start_dir(None));
-        let service = (self.config.durable_sessions && self.durable_allowed)
-            .then_some(rift_pty::ServiceTarget::Spawn);
+        let service = match reattach {
+            Some(id) => Some(rift_pty::ServiceTarget::Attach(id)),
+            None => (self.config.durable_sessions && self.durable_allowed)
+                .then_some(rift_pty::ServiceTarget::Spawn),
+        };
         let session = self.start_session(pane, size, cwd, service, None, (&program, &resolved));
         session.set_read_only(read_only);
         let vim = self.config.vim_mode;
@@ -170,8 +189,11 @@ impl App {
         fresh.base_grid = p.base_grid;
         fresh.program_grid = p.program_grid;
         fresh.fit = p.fit;
-        // the old session (and its PTY) goes with the old state
-        drop(std::mem::replace(p, fresh));
+        // the old session (and its PTY) goes with the old state; its grid is
+        // freed off the event loop
+        let old = std::mem::replace(p, fresh);
+        let _grid = super::FreeLater(Some(old.session.term.clone()));
+        drop(old);
         // the old session's drop cleared this pane id's query colours
         pane_theme::sync_query_colors(p);
         self.save_session();

@@ -144,7 +144,8 @@ lives outside the workspace in `mobile/` (pnpm; the `mobile` gate).
   themes (`theme/`), config + hot-reload watcher, keymap (`[keybindings]`
   overrides win and unbind the default), OSC/APC byte scanner (`osc.rs`),
   block model (`block.rs`), shell tokenizer, completion providers, git2
-  worker, shell-integration materializer, transcripts (`transcript.rs`), SSH
+  worker, shell-integration materializer, transcripts (`transcript.rs`), Rift's
+  own command history ranked by directory (`command_history.rs`), SSH
   profiles (`ssh.rs`), session state, update check and install (`update.rs`).
 - **rift-pty** — one `Session` per pane. Spawns through
   `alacritty_terminal::tty`, or, with `durable_sessions`, through the per-user
@@ -221,9 +222,10 @@ lives outside the workspace in `mobile/` (pnpm; the `mobile` gate).
 - **Locks.** `std::sync::Mutex` is not re-entrant: never call a function that
   locks `blocks` while holding the `blocks` lock — take a snapshot first.
 - **Untrusted input.** Terminal output, image payloads, control-socket
-  requests and restored transcripts are untrusted: keep the size bounds in
-  `graphics.rs`, `ipc.rs` and `transcript.rs`, only direct image transmission
-  (`t=d`), and never interpolate block output into a command line.
+  requests, restored transcripts and the saved command history are untrusted:
+  keep the size bounds in `graphics.rs`, `ipc.rs`, `transcript.rs` and
+  `command_history.rs`, only direct image transmission (`t=d`), and never
+  interpolate block output into a command line.
 
 ### Version pins
 

@@ -18,7 +18,8 @@
 //! The environment variable `PHONE_SEND` holds more messages, one JSON
 //! object per line, sent (each waiting for its `ack`) after the `run` and
 //! before TOUCH_FILE; `LAST` in a line stands for the last pane of the
-//! first window's topology (`{"t":"close","id":"c1","pane":LAST,"kind":"pane"}`).
+//! first window's topology (`{"t":"close","id":"c1","pane":LAST,"kind":"pane"}`)
+//! and `FIRST` for its first pane (the one the phone follows and runs in).
 //! A refused one exits 3 as well.
 
 use rift_remote::protocol::ClientHello;
@@ -152,8 +153,10 @@ fn main() {
             .and_then(|t| t["panes"].as_array()?.last()?["id"].as_u64())
             .expect("a last pane in the topology");
         for line in extra.lines().filter(|l| !l.trim().is_empty()) {
-            let msg: Value =
-                serde_json::from_str(&line.replace("LAST", &last.to_string())).expect("JSON");
+            let line = line
+                .replace("LAST", &last.to_string())
+                .replace("FIRST", &pane.to_string());
+            let msg: Value = serde_json::from_str(&line).expect("JSON");
             send(&mut ch, msg);
             let until = soon();
             while let Some(v) = recv(&mut ch, until) {

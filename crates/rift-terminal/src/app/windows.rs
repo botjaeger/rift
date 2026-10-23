@@ -555,6 +555,8 @@ impl App {
             | R::Complete { pane, .. }
             | R::SendText { pane, .. }
             | R::RemoteInput { pane, .. }
+            | R::RemoteScroll { pane, .. }
+            | R::RemoteUpload { pane, .. }
             | R::RemoteOpen { pane, .. }
             | R::RemoteClose { pane, .. }
             | R::RemoteFit { pane, .. }

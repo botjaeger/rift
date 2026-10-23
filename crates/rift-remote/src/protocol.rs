@@ -220,6 +220,29 @@ pub enum ClientMsg {
     Start {
         id: String,
     },
+    /// Scroll `pane` by `lines` (positive: up, toward older output) as the
+    /// desktop's mouse wheel over it would (feature `scroll`): wheel reports
+    /// to a program that tracks the mouse, arrow keys to a full-screen
+    /// program under alternate scroll, else the pane's own view. Clamped to
+    /// ±[`crate::MAX_SCROLL_LINES`]. A `view` device may move the view, not
+    /// send the program anything.
+    Scroll {
+        id: String,
+        pane: u64,
+        lines: i32,
+    },
+    /// One chunk of an image pasted into the program running in `pane`
+    /// (feature `upload`): `size` bytes in all, this chunk's `data`
+    /// (standard base64) starting at byte `offset`. Chunks come in order;
+    /// the last one is answered with `ack` once the desktop saved the image
+    /// and pasted its path, an error at the first chunk that fails.
+    Upload {
+        id: String,
+        pane: u64,
+        size: u64,
+        offset: u64,
+        data: String,
+    },
 }
 
 /// What `open` makes.
@@ -677,6 +700,11 @@ pub struct PaneRunning {
     /// working.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub idle: bool,
+    /// The desktop identifies the program as a coding agent (Claude Code,
+    /// Codex), with or without a `title`: the phone gives it a message
+    /// input, whichever screen it draws on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub agent: bool,
 }
 
 /// What a pane's running command waits for, and how it is answered.
@@ -906,7 +934,7 @@ mod tests {
     #[test]
     fn every_client_fixture_round_trips() {
         let all = fixtures("client");
-        assert_eq!(all.len(), 33, "client fixtures");
+        assert_eq!(all.len(), 35, "client fixtures");
         for (name, value) in all {
             let msg: ClientMsg =
                 serde_json::from_value(value.clone()).unwrap_or_else(|e| panic!("{name}: {e}"));
@@ -977,6 +1005,11 @@ mod tests {
             r#"{"t":"screen","pane":1}"#,
             r#"{"t":"output","id":"o","pane":1,"block":2,"from":0}"#,
             r#"{"t":"output","id":"o","pane":1,"block":2,"from":-1,"limit":5}"#,
+            r#"{"t":"scroll","pane":1,"lines":1}"#,
+            r#"{"t":"scroll","id":"s","pane":1,"lines":1.5}"#,
+            r#"{"t":"scroll","id":"s","pane":1,"lines":3000000000}"#,
+            r#"{"t":"upload","id":"u","pane":1,"offset":0,"data":"AA=="}"#,
+            r#"{"t":"upload","id":"u","pane":1,"size":-1,"offset":0,"data":"AA=="}"#,
             "not json",
         ] {
             assert!(serde_json::from_str::<ClientMsg>(bad).is_err(), "{bad}");

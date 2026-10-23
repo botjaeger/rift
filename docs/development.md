@@ -126,7 +126,9 @@ across a relaunch, Settings › About for an up-to-date and a malformed
 manifest), and remote access (`remote-input` refused while off; a command
 and Ctrl-C from a device with `control_api = "off"`; *busy* while a command
 runs; the managed gateway starting and stopping with the setting; the
-tab-bar chip appearing on an idle window within 2 s of a phone connecting,
+tab-bar chip appearing on an idle window within 2 s of a phone connecting;
+a phone's `scroll` moving a prompt's view and reaching a mouse-tracking
+program as SGR wheel reports, and its `upload` saved and its path pasted;
 driven by `examples/phone`, which `scripts/ui-smoke.sh` builds unless
 `RIFT_PHONE_BIN` names one). It uses scratch XDG
 config/data directories with notifications disabled and retains captures, state dumps and logs under
@@ -199,7 +201,9 @@ uses your real config, session file, session service and control sockets.
 A scripted run does not import your shell history (`$HISTFILE`,
 `~/.zsh_history`, …) into ⌃R and the palette, so dumps and shots never show
 your real commands; a test that needs an imported history points `HOME` or
-`HISTFILE` at a fixture and sets `RIFT_SCRIPT_HISTORY=1`.
+`HISTFILE` at a fixture and sets `RIFT_SCRIPT_HISTORY=1`. It records nothing
+in Rift's own command history (`history.json`) unless it sets
+`RIFT_SCRIPT_RECORD_HISTORY=1` with its own `XDG_DATA_HOME`.
 Nor does it read `/etc/shells`: config.toml gets no generated shell profiles
 and none is marked orphaned, unless `RIFT_SHELLS_FILE` names a fixture shells
 file, which then stands in for `/etc/shells` (the startup sync and the orphan
