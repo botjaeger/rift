@@ -1891,7 +1891,9 @@ bt2_steps = [
     "key alt+r", "type (", f"dump {bt2}/invalid.txt", "key backspace",
     "key enter", "key alt+shift+f", f"dump {bt2}/off.txt",
     "key alt+shift+f", f"dump {bt2}/on.txt", "key escape", "key escape",
-    "type tput setaf 1; echo 'NEEDLE <b>&'; tput sgr0\\n", "wait 400",
+    # coloured by the printf builtin: a forked tput sometimes adds bash
+    # 3.2's "child setpgid ... Operation not permitted" to the output
+    "type printf '\\033[31m'; echo 'NEEDLE <b>&'; printf '\\033[0m'\\n", "wait 400",
     "type echo NEEDLE two\\n", "wait 400",
     "key cmd+up", "key cmd+f", "type NEEDLE", "wait 200", f"dump {bt2}/scoped.txt",
     "a11y click Search the whole pane", "wait 200", f"dump {bt2}/widened.txt",
@@ -1951,7 +1953,7 @@ widened = bt2_state("widened")
 assert 'Dialog "Find"' in widened and " matches=2 " in widened, widened[:3000]
 assert "selected_blocks=[1, 2]" in bt2_state("multi"), bt2_state("multi")[:3000]
 assert '"Copy 2 commands"' in bt2_state("menu") and '"Compare outputs"' in bt2_state("menu")
-assert ('clipboard="tput setaf 1; echo \'NEEDLE <b>&\'; tput sgr0\\necho NEEDLE two"'
+assert ('clipboard="printf \'\\\\033[31m\'; echo \'NEEDLE <b>&\'; printf \'\\\\033[0m\'\\necho NEEDLE two"'
         in bt2_state("copied")), bt2_state("copied")[-1500:]
 cmp_line = next(l for l in bt2_state("compare").splitlines() if l.startswith("compare="))
 assert ("compare=true blocks=(1, 2) phase=ready" in cmp_line and "added=1 removed=1" in cmp_line), cmp_line
@@ -1960,7 +1962,7 @@ html = next(l for l in bt2_state("html").splitlines() if l.startswith("clipboard
 assert "&lt;b&gt;&amp;" in html and "<b>&" not in html, html
 assert '<span style=\\"color: #' in html, "Copy as HTML lost the output's colour: " + html
 md = bt2_state("md")
-assert "clipboard=\"```sh\\ntput setaf 1;" in md and "```\\nNEEDLE <b>&\\n```" in md, md[-1500:]
+assert "clipboard=\"```sh\\nprintf '\\\\033[31m';" in md and "```\\nNEEDLE <b>&\\n```" in md, md[-1500:]
 assert (bt2 / "out.txt").read_text() == "NEEDLE <b>&\n", (bt2 / "out.txt").read_text()
 assert 'AlertDialog "Replace the file?"' in bt2_state("replace"), bt2_state("replace")[-3000:]
 assert (bt2 / "kept.txt").read_text() == "OLD", "Save output replaced a file without asking"

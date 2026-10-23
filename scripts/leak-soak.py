@@ -179,6 +179,12 @@ for name, (steps, warm, measured, budget) in SCENARIOS.items():
         continue
     print(f"leak soak: {name} ({mode})", flush=True)
     err = run(name, steps, warm, longer or measured, budget)
+    if err and " grew " in err:
+        # one sample against one: churn's footprint swings ~20 MB between
+        # cycles on macOS (a 43-cycle run held a 166 MB floor, 2026-10-23),
+        # so a spike on the last sample reads as growth. A leak grows again.
+        print(f"  {name}: over budget once; measuring again", flush=True)
+        err = run(name, steps, warm, longer or measured, budget)
     if err:
         failures.append(err)
 for f in failures:
