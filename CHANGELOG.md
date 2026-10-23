@@ -8,6 +8,37 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.22.0 — 2026-10-23
+
+Suggestions, Tab and → now work like Warp's: Rift suggests what you usually run next, Tab opens the
+completions, and → takes the suggestion.
+
+### New
+
+- **Suggests what comes next** — the grey suggestion now prefers the command you usually run after the
+  one you just ran in this folder. If you always back up before you restore, typing the script's name
+  after your usual first command suggests the backup, not the newest run.
+- **Pick the accept key** — click the → chip next to a suggestion to take it with →, Tab, ⇧→ or a key
+  of your own.
+- **Ignore a suggestion** — turn on *Show the ignore button* in Settings › Input, and an ✕ next to a
+  suggestion hides it for good. Running the command again, or *Clear ignored suggestions* in the
+  palette, brings it back.
+
+### Improved
+
+- **Tab opens the completions** — one match goes straight in; when the matches share a longer start,
+  that part goes in and the menu opens. In the menu Tab and ⇧Tab move through the list, ⏎ takes the
+  one selected and Esc closes it. Matching ignores case and finds `cko` in `checkout`. Prefer Tab to
+  take the suggestion? Settings › Input › Tab key › Ghost text (⌃Space then opens the completions).
+- **Taking a suggestion** — →, ⌃F, ⌃E, ⌘→ and End take all of it at the end of the line, ⌥→ one word
+  and ⌃⌥→ part of a word; Esc clears it. In vim mode `l` and `$` take it all, `w` and `e` one word.
+- **A space after a completion** — a completed word gets its space, a folder doesn't.
+- **No stale suggestions** — a command whose file or script no longer exists here is not suggested.
+- **The menu opens when you ask** — the completions no longer open on every keystroke; *Open
+  completions as you type* in Settings › Input brings that back. Past commands stay in the suggestion,
+  the ↑ history menu and ⌃R instead of in this menu.
+- **Vim mode** — the suggestion also shows in Normal mode, after the cursor.
+
 ## 0.21.0 — 2026-10-23
 
 ↑ opens a history menu that puts what you ran in this folder first, your phone can scroll and paste
