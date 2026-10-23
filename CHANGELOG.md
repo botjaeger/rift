@@ -8,6 +8,14 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.22.2 — 2026-10-23
+
+### Fixed
+
+- **Quitting right after an update keeps the new version** — quitting Rift in the first seconds
+  after it updated put the previous version back and said "Couldn't update". The update now stays
+  installed.
+
 ## 0.22.1 — 2026-10-23
 
 ### Fixed
