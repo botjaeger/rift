@@ -308,8 +308,8 @@ No other animation. Motion never delays input.
   `✎ Edit` (pencil icon, Inter 12, `text_muted`, `text_ui` on hover) at
   the right end.
 - **Docked panels** (completion, history): opaque `bg`, pane width, square,
-  a hairline on the edge toward the output. Header 32 px (source tabs or
-  scope chips in small caps), rows 28 px with a 7 % selection (history adds a
+  a hairline on the edge toward the output. Header 32 px (the panel's name
+  and count, or scope chips, in small caps), rows 28 px with a 7 % selection (history adds a
   2 px `accent` edge), a key-hint footer of caps and labels.
 - **Context menus**: 240 px `surface`, radius 4, 28 px rows: icon column,
   label, the shortcut in `text_muted` at the right; rows that close

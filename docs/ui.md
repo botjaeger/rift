@@ -792,29 +792,39 @@ integration). Sits at the bottom of the pane, or at the top with
   shows there instead (`/text`, its last 10 chars), in bright text. The
   visual selection draws with the editor's selection highlight.
 - **Ghost text**: inline dimmed completion preview continuing the line at
-  the cursor (Warp), followed by a small `→` key chip; → at the end of the
-  line or Tab accepts it all, ⌃→ one word at a time.
-- **Completion panel**: git subcommands with descriptions, path completions
-  (with `~/` expansion), then — when there are word candidates — the
-  history lines that start with what you typed (alone they stay ghost text).
+  the cursor (Warp), followed by a small chip naming its accept key (`→`,
+  `Tab`, `⇧→` or the `accept_autosuggestion` binding; `autosuggestion_hint`;
+  16 px, 4 px radius, hairline border, inverted while hovered or its menu is
+  open; tooltip *Change keybinding*). A click opens a context menu above it
+  (below with the input on top): `→`, `Tab`, `⇧→`, `Custom…`, the current one
+  checked; a screen reader reads the chip as *Accept suggestion key: →* and
+  the menu as *Accept suggestion key* with radio items. With
+  `autosuggestion_ignore_button` a 16 px `✕` chip follows (tooltip and label
+  *Ignore this suggestion*): a click ignores the suggested line. At the end of the
+  line → (⌃F, ⌃E, ⌘→, End) accepts it all, ⌥→ one word, ⌃⌥→ one word part,
+  ⌃→ one word anywhere; Esc clears it. Tab takes it only with
+  `tab_behavior = "autosuggestion"`. Hidden while the menu Tab opened shows.
+- **Completion panel** (the menu): opened by Tab (or as you type with
+  `completions_open_while_typing`): the word candidates only — commands,
+  git subcommands with descriptions, path completions (with `~/` expansion);
+  history lines stay the ghost text, the ↑ menu and ⌃R.
   Docked to the editor across the full pane width (Warp's completion pane):
   directly above the editor when it sits at the bottom, below it with
   `input_position = "top"`. The output moves out from under it, as in Warp:
   the newest lines stay in view right above it (below it with the input at
-  the top), and the program keeps its rows. The header holds source
-  tabs with counts (`ALL 7 · PATH 4 · HISTORY 3`; just the source when there
-  is one): ⇧⇥ or a click switches the source. Rows show an icon (folder,
-  file, history, branch, terminal), the name with the typed part in the
-  accent, and the description at the right; a click accepts a row (a history
-  row replaces the whole line). Your shell's own completions join the
-  rows (source `SHELL`) within 300 ms of Rift's, keeping the picked row
-  picked. A pane on another host that cannot complete there (an `ssh` typed
-  without a shared connection) ends the rows with a muted hint row (info
-  icon) "Remote completions need an SSH profile" (alone, it opens no
-  panel); Tab on it accepts the ghost text, or closes the panel when there
-  is none. Only rows starting with the typed word show it bold. The footer shows `↑ ↓ navigate`, `⇥ accept`,
-  `→ accept ghost`, `esc dismiss`. Square corners, hairline edge, up to 8
-  rows.
+  the top), and the program keeps its rows. The header names it with its
+  count (`COMPLETIONS 7`, an `accent` underline; the ↑ menu's reads
+  `HISTORY`). Rows show an icon (folder, file, branch, terminal), the name
+  with its matched characters bold in the accent (the typed prefix, or each
+  character of a fuzzy match), and the description at the right; ⇥ / ⇧⇥
+  (wrapping) or ↑ / ↓ select, ⏎ or a click accepts a row. Your shell's own
+  completions join the rows (as you type: within 300 ms of Rift's, keeping
+  the picked row picked; a Tab waits for them). A pane on another host that
+  cannot complete there (an `ssh` typed without a shared connection) ends the
+  rows with a muted hint row (info icon) "Remote completions need an SSH
+  profile" (alone, it opens no panel); accepting it only closes the panel.
+  The footer shows `↑ ↓ navigate`, `⏎ accept`, `→ accept ghost` (with ghost
+  text), `esc dismiss`. Square corners, hairline edge, up to 8 rows.
 - **Welcome list**: a fresh session (no command run yet, single pane with
   room) shows *New session* with the shell, directory and branch, then five
   rows with their shortcuts: Split pane, Command palette, Command history,
@@ -916,8 +926,7 @@ field: what you type narrows the rows (any case, anywhere in the command).
   the match bold in the accent. The footer's ⏎ reads `rerun here`. A click
   selects a run (the preview follows); a double-click puts it on the command
   line; nothing runs from the preview.
-- ⏎ with no matching row runs the typed line; ⇥ with none closes the pane
-  (completions show). A click outside it, focusing another pane, the viewer,
+- ⏎ with no matching row runs the typed line; ⇥ with none closes the pane. A click outside it, focusing another pane, the viewer,
   the palette, find or Settings close it, and so does a program taking over
   the pane.
 
@@ -1440,8 +1449,12 @@ description) left, control right; it runs to the bottom edge.
   - Input: `Vim keybindings` toggle, `Vim's unnamed register` segmented
     `Rift only | System clipboard` (`vim_clipboard`), `⌃R, ⌃T and ⌥C run`
     segmented `The shell's | Rift's` (`shell_widgets`),
-    `Autosuggestions (ghost text)` toggle,
-    `Completions menu` toggle, `Completions from your shell` toggle
+    `Autosuggestions (ghost text)` toggle, `Tab key` segmented
+    `Completions | Ghost text` (`tab_behavior`), `Show the accept-key hint`
+    toggle (`autosuggestion_hint`), `Show the ignore button` toggle
+    (`autosuggestion_ignore_button`), `Open completions as you
+    type` toggle (`completions_open_while_typing`), `Completions from your
+    shell` toggle
     (`shell_completions`), `Autocomplete quotes and brackets` toggle,
     `Input position` segmented `Bottom | Top`, `Blocks start` segmented
     `Bottom | Top`, `Sticky command header` toggle (*Pins a long block's

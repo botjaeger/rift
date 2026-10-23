@@ -40,6 +40,7 @@ mod block_tools;
 mod command_history;
 mod composer;
 mod explorer_menu;
+mod ghost_chips;
 mod hotkey_window;
 mod inspector;
 mod install_cli;
@@ -199,6 +200,10 @@ struct CompletionRequest {
     /// Rift's own command history, ranked against `cwd` (a pane without a
     /// local directory, e.g. on another machine, gets none of it).
     command_history: Arc<Vec<rift_core::command_history::Entry>>,
+    /// The pane's previous command: what usually follows it ranks first.
+    last_command: Option<command_history::LastCommand>,
+    /// Lines the ghost text's ✕ ignored: never a history row.
+    ignored: Arc<rift_core::ignored_suggestions::Ignored>,
     cwd: Option<String>,
     /// The pane shell's `$PATH` as its hooks last reported it (`rift-use`
     /// changes it); `None`: the probed shell's.
@@ -242,9 +247,22 @@ enum SlowSource {
 
 impl CompletionRequest {
     fn finish(&self, g: rift_core::completion::Gathered) -> Vec<rift_core::completion::Completion> {
-        let ranked =
-            command_history::ranked(&self.command_history, &self.buffer, self.cwd.as_deref());
-        g.finish_ranked(&self.buffer, &ranked, &self.history, &self.shell_history)
+        let ranked = command_history::ranked(
+            &self.command_history,
+            self.last_command.as_ref(),
+            &self.buffer,
+            self.cwd.as_deref(),
+        );
+        // history lines naming a path that is not there are left out, and
+        // those the ✕ ignored
+        g.finish_checked_except(
+            &self.buffer,
+            &ranked,
+            &self.history,
+            &self.shell_history,
+            self.cwd.as_deref(),
+            &|line| self.ignored.contains(line),
+        )
     }
 
     /// Rift's own candidates: the whole answer, or the first part while the
@@ -435,10 +453,21 @@ impl<T> CompletionWorker<T> {
 /// A completion key deferred until the pending request is answered.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum CompletionIntent {
-    /// Tab
-    Accept,
+    /// Tab (or ⌃Space): complete the word, or open the menu
+    Tab,
     /// ⌃→
     AcceptGhostWord,
+}
+
+/// How much of the ghost text a key accepts.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum GhostPart {
+    /// → ⌃F ⌃E ⌘→ End at the end of the line
+    All,
+    /// ⌥→ at the end of the line, ⌃→
+    Word,
+    /// ⌃⌥→ at the end of the line
+    Subword,
 }
 
 /// Review-panel writes, applied in order: (operation, path, hunk).
@@ -702,6 +731,8 @@ pub struct App {
     history_shell: String,
     /// Rift's own command history (`app/command_history.rs`).
     command_history: rift_core::command_history::Store,
+    /// Command lines the ghost text's ✕ ignored (`ignored_suggestions`).
+    ignored: rift_core::ignored_suggestions::Store,
     font_size: f32,
     line_h: f32,
     _watcher: Option<rift_core::watch::ConfigWatcher>,
@@ -805,9 +836,12 @@ pub struct App {
     /// Key that read the menu or ghost while `completion_pending` was in
     /// flight: applied once, when that request's answer arrives.
     completion_intent: Option<CompletionIntent>,
-    /// The pending request follows a Tab: its panel counts as asked for
-    /// (`CompletionUi::asked`), so ↑ / ↓ navigate it.
-    completion_after_tab: bool,
+    /// The pending request follows a typed edit: a menu set to open as
+    /// you type (`completions_open_while_typing`) may open on its answer.
+    completion_typed: bool,
+    /// The next `update_completions` follows a typed edit (set by the
+    /// editor keys that type or delete).
+    edit_typed: bool,
     /// Counter identifying completion requests.
     completion_gen: u64,
     /// The pending request whose partial answer (Rift's own candidates) is
@@ -1096,6 +1130,8 @@ struct WindowState {
     toast_hits: Vec<crate::views::confirm::ToastHit>,
     /// Editor buffer the shown completions and ghost belong to.
     completion_buffer: String,
+    /// The cursor in it.
+    completion_cursor: usize,
     /// Mouse button held down while reporting to a mouse-tracking app:
     /// (pane, button code, last reported cell).
     mouse_report: Option<(PaneId, u8, (usize, usize))>,
@@ -2039,6 +2075,7 @@ impl WindowState {
             toasts: Vec::new(),
             toast_hits: Vec::new(),
             completion_buffer: String::new(),
+            completion_cursor: 0,
             mouse_report: None,
             mouse_hover_cell: None,
             preedit: String::new(),
@@ -2105,6 +2142,7 @@ impl App {
             shell_history: Arc::default(),
             history_shell: String::new(),
             command_history: command_history::open(script.is_some()),
+            ignored: command_history::open_ignored(script.is_some()),
             font_size: DEFAULT_FONT_SIZE,
             line_h: DEFAULT_FONT_SIZE * 1.2,
             _watcher: None,
@@ -2155,7 +2193,8 @@ impl App {
             completion_worker: CompletionWorker::default(),
             completion_pending: None,
             completion_intent: None,
-            completion_after_tab: false,
+            completion_typed: false,
+            edit_typed: false,
             completion_gen: 0,
             completion_partial: None,
             completion_pane: None,
@@ -3408,6 +3447,7 @@ impl App {
                 return self.handle_action(AppAction::TogglePalette, event_loop);
             }
             MenuAction::OpenAbout => return self.handle_action(AppAction::OpenAbout, event_loop),
+            MenuAction::AcceptKey(key) => return self.pick_accept_key(key),
             MenuAction::SplitRight => return self.handle_action(AppAction::SplitRight, event_loop),
             MenuAction::SplitDown => return self.handle_action(AppAction::SplitDown, event_loop),
             MenuAction::ClearBlocks => {
@@ -4309,12 +4349,13 @@ impl App {
                     | ClickTarget::TabNew
                     | ClickTarget::TabProfiles
                     | ClickTarget::Chip(..)
+                    | ClickTarget::GhostKey(_)
+                    | ClickTarget::GhostIgnore(_)
                     | ClickTarget::SettingsEditPrompt
                     | ClickTarget::SettingsEditToolbar
                     | ClickTarget::PaneMenu(_)
                     | ClickTarget::PaneSplit(_)
                     | ClickTarget::Welcome(_)
-                    | ClickTarget::CompletionSource(_)
                     | ClickTarget::CompletionRow(_)
                     | ClickTarget::HistoryScope(_)
                     | ClickTarget::HistoryRow(_)
@@ -6236,9 +6277,10 @@ impl App {
             return;
         };
         let seen = self.attention_seen.get(&pane).copied();
+        let mut history = p.history.clone();
         let blocks = p.session.blocks.lock().unwrap();
         let fresh_blocks = || blocks.iter().filter(|b| seen.is_none_or(|s| b.id > s));
-        self.record_command_history(fresh_blocks());
+        self.record_command_history(&mut history, fresh_blocks());
         let fresh: Vec<(rift_core::BlockId, String, Option<i32>, Duration, bool)> = fresh_blocks()
             .filter_map(|b| match b.state {
                 BlockState::Done { exit, duration } => Some((
@@ -6252,6 +6294,9 @@ impl App {
             })
             .collect();
         drop(blocks);
+        if let Some(p) = self.win.tabs.iter_mut().find_map(|t| t.pane_mut(pane)) {
+            p.history = history;
+        }
         let Some(newest) = fresh.last().map(|f| f.0) else {
             return;
         };
@@ -6846,7 +6891,6 @@ impl App {
                 Key::Named(NamedKey::Tab) => {
                     self.win.history.close();
                     self.update_completions();
-                    self.completion_after_tab = true;
                     return true;
                 }
                 _ => {}
@@ -7291,7 +7335,7 @@ impl App {
     fn update_completions(&mut self) {
         // a deferred Tab / ⌃→ belonged to the editor state being replaced
         self.completion_intent = None;
-        self.completion_after_tab = false;
+        self.completion_typed = std::mem::take(&mut self.edit_typed);
         // the history menu owns its pane's line while it shows the preview;
         // another pane's focus gives that pane its typed text back, and an
         // edit that bypassed the menu (a paste, ⌘A, the palette, ⌘I) makes
@@ -7311,8 +7355,11 @@ impl App {
             }
             self.win.completion.close();
         }
-        // the panel for the new line is not asked for yet
-        self.win.completion.asked = false;
+        // the panel for the new line is not asked for yet (the menu Tab
+        // opened stays asked for while it follows the edit)
+        if self.win.completion.tab.is_none() {
+            self.win.completion.asked = false;
+        }
         // the rich-input composer is prose for a program, not a command
         let Some(pane) = self
             .win
@@ -7343,6 +7390,7 @@ impl App {
             .filter(|p| !p.is_empty())
             .cloned();
         let cwd = pane.session.local_cwd();
+        let last_command = pane.history.last.clone();
         let pane_id = pane.session.id;
         let asks_shell = self.config.shell_completions;
         let shell = (asks_shell && cwd.is_some()).then(|| self.pane_program(pane));
@@ -7360,6 +7408,24 @@ impl App {
         if self.completion_pane != Some(pane_id) {
             self.win.completion.close();
             self.win.completion_buffer.clear();
+        }
+        // the menu Tab opened follows the edit: its results narrowed to the
+        // word, or closed once the cursor left the word or the line no
+        // longer starts with what it was opened on (Warp)
+        if let Some(tab) = &self.win.completion.tab {
+            let start = tab.start;
+            let kept = cursor >= start
+                && buffer
+                    .get(..cursor)
+                    .is_some_and(|b| b.starts_with(tab.typed.as_str()));
+            let end = rift_core::completion::token_end(&buffer, cursor);
+            match buffer.get(start..end) {
+                Some(word) if kept => {
+                    let word = word.to_string();
+                    self.win.completion.refilter(&word);
+                }
+                _ => self.win.completion.close_menu(),
+            }
         }
         let typed = buffer
             .strip_prefix(self.win.completion_buffer.as_str())
@@ -7379,6 +7445,8 @@ impl App {
             history,
             shell_history: self.shell_history.clone(),
             command_history: self.command_history.snapshot(),
+            last_command,
+            ignored: self.ignored.snapshot(),
             cwd,
             path,
             shell,
@@ -7499,7 +7567,7 @@ impl App {
             self.win.completion.selected = i;
         }
         match intent {
-            Some(CompletionIntent::Accept) => self.accept_completion(),
+            Some(CompletionIntent::Tab) => self.open_completions(),
             Some(CompletionIntent::AcceptGhostWord) => self.accept_ghost_word(),
             None => {}
         }
@@ -7545,65 +7613,76 @@ impl App {
             return;
         }
         self.win.completion_buffer = buffer.to_string();
+        self.win.completion_cursor = cursor;
         // the history pane owns the line while it is open
         if self.win.history.open {
             self.win.completion.close();
             return;
         }
-        // ghost: best history match remainder, else the single completion
-        self.win.completion.ghost = items
-            .iter()
-            .find(|c| c.source == "history")
-            .and_then(|c| c.insert.strip_prefix(buffer).map(str::to_string))
-            .unwrap_or_default();
-
-        // the panel lists the token candidates, then the history lines (the
-        // best history line also drives the ghost text)
-        let (mut dropdown, history): (Vec<_>, Vec<_>) =
+        // the menu lists the word candidates; the history lines drive the
+        // ghost text only
+        let (words, history): (Vec<_>, Vec<_>) =
             items.into_iter().partition(|c| c.source != "history");
         // the whole word around the cursor is what a candidate replaces
         let (start, _) = rift_core::completion::current_token(buffer, cursor);
         let end = rift_core::completion::token_end(buffer, cursor);
-        let word = buffer.get(start..end).unwrap_or_default();
-        self.win.completion.token = word.to_string();
-        let candidates =
-            |rows: &[rift_core::completion::Completion]| rows.iter().any(|c| c.source != "hint");
+        let word = buffer.get(start..end).unwrap_or_default().to_string();
         // the remote hint is a note that rides along real candidates: alone
-        // it never opens the menu
-        if !candidates(&dropdown) {
-            dropdown.clear();
-        }
-        let prefixed = dropdown
+        // it is no candidate
+        let words = if words.iter().any(|c| c.source != "hint") {
+            words
+        } else {
+            Vec::new()
+        };
+        // ghost: best history match remainder, else the rest of the first
+        // candidate going on from the word as typed; never a line the ✕
+        // ignored (the whole line, exactly: Warp)
+        let ignored = self.ignored.snapshot();
+        let mut ghost = history
             .iter()
-            .any(|c| c.source != "hint" && c.insert.starts_with(word));
-        if self.win.completion.ghost.is_empty()
-            && let Some(first) = dropdown.first()
+            .filter(|c| !ignored.contains(&c.insert))
+            .find_map(|c| c.insert.strip_prefix(buffer))
+            .map(str::to_string)
+            .unwrap_or_default();
+        if ghost.is_empty()
+            && cursor == buffer.len()
+            && let Some(c) = words.iter().find(|c| {
+                c.source != "hint"
+                    && c.insert.len() > word.len()
+                    && c.insert.starts_with(&word)
+                    && !ignored.contains(&format!("{buffer}{}", &c.insert[word.len()..]))
+            })
         {
-            let (_, token) = rift_core::completion::current_token(buffer, cursor);
-            if cursor == buffer.len() {
-                self.win.completion.ghost = first
-                    .insert
-                    .strip_prefix(token)
-                    .unwrap_or_default()
-                    .to_string();
-            }
+            ghost = c.insert[word.len()..].to_string();
         }
         if !self.config.autosuggestions {
-            self.win.completion.ghost.clear();
+            ghost.clear();
         }
-        // history lines join a panel the word candidates open; alone they
-        // stay the ghost text (no panel on every keystroke). Fuzzy rows
-        // alone (none starts with the word) give way to a history ghost:
-        // they neither open the panel nor take Tab from it
-        let fuzzy_only = !prefixed && !self.win.completion.ghost.is_empty();
-        let show = self.config.completions_menu && !dropdown.is_empty() && !fuzzy_only;
-        dropdown.extend(history);
-        self.win
-            .completion
-            .set(if show { dropdown } else { Vec::new() });
-        // a ↓ into Rift's own answer still counts once the full one lands
-        self.win.completion.asked =
-            (self.win.completion.asked || self.completion_after_tab) && self.win.completion.open;
+        self.win.completion.token = word.clone();
+        self.win.completion.cands = words;
+        // the menu Tab opened keeps its own results (typing filters them),
+        // and no ghost text shows beside it (Warp)
+        if self.win.completion.tab.is_some() {
+            self.win.completion.ghost.clear();
+            return;
+        }
+        self.win.completion.ghost = ghost;
+        // as you type (`completions_open_while_typing`): the menu opens on a
+        // typed edit with the cursor at the end of a line of two characters
+        // or more, and follows every edit while it is open
+        let as_you_type = self.config.completions_open_while_typing
+            && (self.completion_typed || self.win.completion.open)
+            && cursor == buffer.len()
+            && buffer.chars().count() >= 2;
+        if as_you_type {
+            let asked = self.win.completion.asked;
+            let rows = CompletionUi::rows_for(&self.win.completion.cands, &word);
+            self.win.completion.show(rows);
+            // a ↓ into Rift's own answer still counts once the full one lands
+            self.win.completion.asked = asked && self.win.completion.open;
+        } else {
+            self.win.completion.close_menu();
+        }
     }
 
     /// ⌃→: accept one word of the ghost suggestion.
@@ -7635,38 +7714,61 @@ impl App {
         self.update_completions();
     }
 
-    /// Accept the selected completion (Tab).
-    fn accept_completion(&mut self) {
-        if self.defer_completion_key(CompletionIntent::Accept) {
+    /// Tab in the command editor: the menu's Tab when it is open; else the
+    /// whole ghost text where `tab_behavior = "autosuggestion"`; else (and
+    /// with no ghost text) the completions (Warp).
+    fn tab_key(&mut self) {
+        if self.win.completion.open && self.win.completion.history_menu.is_none() {
+            self.menu_tab();
             return;
         }
-        let on_hint = self.win.completion.open
-            && self
-                .win
-                .completion
-                .items
-                .get(self.win.completion.selected)
-                .is_some_and(|c| c.source == "hint");
-        if on_hint && self.win.completion.ghost.is_empty() {
-            // a note, not a candidate: nothing to insert
-            self.win.completion.close();
+        if self.config.tab_behavior == rift_core::TabBehavior::Autosuggestion
+            && self.accept_ghost(GhostPart::All)
+        {
             return;
         }
-        // on the hint, Tab takes the ghost text
-        let (replacement, ghost) = if self.win.completion.open && !on_hint {
-            (
-                self.win
-                    .completion
-                    .items
-                    .get(self.win.completion.selected)
-                    .map(|c| (c.insert.clone(), c.source == "history")),
-                None,
-            )
-        } else if !self.win.completion.ghost.is_empty() {
-            (None, Some(self.win.completion.ghost.clone()))
-        } else {
+        // a selection keeps Tab as it was: the ghost text goes on the end
+        let ghost = self.win.completion.ghost.clone();
+        if let Some(pane) = self
+            .win
+            .tabs
+            .get_mut(self.win.active)
+            .and_then(|t| t.active_mut())
+            && !pane.composer.open
+            && !pane.editor.has_extra()
+            && pane.editor.selection().is_some()
+        {
+            if !ghost.is_empty() {
+                pane.editor.end();
+                pane.editor.insert(&ghost);
+                self.win.completion.close();
+                self.update_completions();
+            }
             return;
+        }
+        self.open_completions();
+    }
+
+    /// The span of the word the menu completes on the active command
+    /// line: from where the menu Tab opened says it starts (else the word
+    /// at the cursor) to the word's end.
+    fn menu_span(&self) -> Option<(usize, usize)> {
+        let p = self.win.tabs.get(self.win.active)?.active()?;
+        let (buffer, cursor) = (&p.editor.buffer, p.editor.cursor);
+        let start = match &self.win.completion.tab {
+            Some(t) => t.start,
+            None => rift_core::completion::current_token(buffer, cursor).0,
         };
+        let end = rift_core::completion::token_end(buffer, cursor);
+        (start <= end && buffer.is_char_boundary(start)).then_some((start, end))
+    }
+
+    /// Put `text` in place of `start..end` on the active command line,
+    /// followed by a space where Warp adds one (`space`:
+    /// [`rift_core::completion::space_after`]), then close the menu and
+    /// complete the new line.
+    fn insert_completion(&mut self, start: usize, end: usize, text: &str, space: bool) {
+        let as_you_type = self.config.completions_open_while_typing;
         let Some(pane) = self
             .win
             .tabs
@@ -7675,28 +7777,220 @@ impl App {
         else {
             return;
         };
-        if let Some(ghost) = ghost {
-            pane.editor.end();
-            pane.editor.insert(&ghost);
-        } else if let Some((line, true)) = replacement {
-            // a history line replaces the whole command line
-            let len = pane.editor.buffer.len();
-            pane.editor.replace_range(0..len, &line);
-        } else if let Some((insert, false)) = replacement {
-            let buffer = pane.editor.buffer.clone();
-            let cursor = pane.editor.cursor;
-            let (start, _) = rift_core::completion::current_token(&buffer, cursor);
-            // the whole word: a closing quote or the suffix right of a
-            // mid-word cursor would otherwise survive next to `insert`
-            let end = rift_core::completion::token_end(&buffer, cursor);
-            // through the single mutation point: makes the completion
-            // undoable
-            pane.editor.replace_range(start..end, &insert);
+        let at_end = end == pane.editor.buffer.len();
+        let mut text = text.to_string();
+        if space && rift_core::completion::space_after(&text, at_end, as_you_type) {
+            text.push(' ');
         }
-        self.win.completion.close();
+        // through the single mutation point: makes the completion undoable
+        pane.editor.replace_range(start..end, &text);
+        self.win.completion.close_menu();
         self.update_completions();
-        // the next level's panel (a folder's entries) answers this Tab
-        self.completion_after_tab = true;
+    }
+
+    /// ⏎ or a click: the selected row replaces the word (a hint row, a
+    /// note, only closes the menu).
+    fn accept_selected(&mut self) {
+        let Some(item) = self
+            .win
+            .completion
+            .items
+            .get(self.win.completion.selected)
+            .cloned()
+        else {
+            return;
+        };
+        if item.source == "hint" {
+            self.win.completion.close_menu();
+            return;
+        }
+        let Some((start, end)) = self.menu_span() else {
+            return;
+        };
+        self.insert_completion(start, end, &item.insert, true);
+    }
+
+    /// Tab (or ⌃Space) with the menu closed (Warp): the word at the cursor
+    /// is completed from its candidates. One is inserted (no menu); several
+    /// insert their common prefix and open the menu; else the menu opens,
+    /// the first row selected. Only on a line with text and one caret
+    /// without a selection.
+    fn open_completions(&mut self) {
+        let Some(pane) = self
+            .win
+            .tabs
+            .get(self.win.active)
+            .and_then(|t| t.active())
+            .filter(|p| !p.composer.open)
+        else {
+            return;
+        };
+        let ed = &pane.editor;
+        if ed.buffer.trim_start().is_empty() || ed.has_extra() || ed.selection().is_some() {
+            return;
+        }
+        let (buffer, cursor, id) = (ed.buffer.clone(), ed.cursor, pane.session.id);
+        // the candidates must answer this line and cursor
+        if self.completion_pending.is_none()
+            && (self.win.completion_buffer != buffer
+                || self.win.completion_cursor != cursor
+                || self.completion_pane != Some(id))
+        {
+            self.update_completions();
+        }
+        if self.defer_completion_key(CompletionIntent::Tab) {
+            return;
+        }
+        // nothing could be asked (completion paused)
+        if self.win.completion_buffer != buffer || self.win.completion_cursor != cursor {
+            return;
+        }
+        let (start, _) = rift_core::completion::current_token(&buffer, cursor);
+        let end = rift_core::completion::token_end(&buffer, cursor);
+        let Some(word) = buffer.get(start..end).map(str::to_string) else {
+            return;
+        };
+        let cands = self.win.completion.cands.clone();
+        use rift_core::completion::TabAction;
+        match rift_core::completion::tab_action(&cands, &word) {
+            TabAction::Nothing => {}
+            TabAction::Insert(i) => self.insert_completion(start, end, &cands[i].insert, true),
+            TabAction::CommonPrefix(prefix) => {
+                if let Some(pane) = self
+                    .win
+                    .tabs
+                    .get_mut(self.win.active)
+                    .and_then(|t| t.active_mut())
+                {
+                    pane.editor.replace_range(start..end, &prefix);
+                }
+                self.open_completion_menu(start, buffer[..cursor].to_string(), cands, &prefix);
+                // the ghost for the new line; the menu narrows to the prefix
+                self.update_completions();
+            }
+            TabAction::Open => {
+                self.open_completion_menu(start, buffer[..cursor].to_string(), cands, &word)
+            }
+        }
+    }
+
+    /// Open the menu Tab asked for on `all`'s rows for `word` (starting at
+    /// `start`; `typed`: the line up to the cursor it was asked on).
+    fn open_completion_menu(
+        &mut self,
+        start: usize,
+        typed: String,
+        all: Vec<rift_core::completion::Completion>,
+        word: &str,
+    ) {
+        let ui = &mut self.win.completion;
+        ui.show(CompletionUi::rows_for(&all, word));
+        if !ui.open {
+            return;
+        }
+        ui.tab = Some(crate::views::completion::TabMenu { start, typed, all });
+        ui.token = word.to_string();
+        ui.asked = true;
+        // no ghost text beside the menu (Warp)
+        ui.ghost.clear();
+    }
+
+    /// Tab with the menu open (Warp): the rows matching as typed complete
+    /// their common prefix when it is longer than the word (the menu closes
+    /// when one such row is left), else the next row is selected.
+    fn menu_tab(&mut self) {
+        let Some((start, end)) = self.menu_span() else {
+            return;
+        };
+        let Some(word) = self
+            .win
+            .tabs
+            .get(self.win.active)
+            .and_then(|t| t.active())
+            .and_then(|p| p.editor.buffer.get(start..end))
+            .map(str::to_string)
+        else {
+            return;
+        };
+        match rift_core::completion::menu_tab(&self.win.completion.typed_rows(), &word) {
+            Some((prefix, close)) => {
+                if let Some(pane) = self
+                    .win
+                    .tabs
+                    .get_mut(self.win.active)
+                    .and_then(|t| t.active_mut())
+                {
+                    pane.editor.replace_range(start..end, &prefix);
+                }
+                if close {
+                    self.win.completion.close_menu();
+                }
+                self.update_completions();
+            }
+            None => self.win.completion.select_next(),
+        }
+    }
+
+    /// Accept `part` of the ghost text when the one caret stands at the end
+    /// of the command line (in vim's Normal mode: on its last character),
+    /// without a selection. The rest of a partial accept stays the ghost.
+    /// `true` when something was accepted.
+    fn accept_ghost(&mut self, part: GhostPart) -> bool {
+        if self.win.completion.ghost.is_empty() {
+            return false;
+        }
+        let Some(pane) = self
+            .win
+            .tabs
+            .get_mut(self.win.active)
+            .and_then(|t| t.active_mut())
+            .filter(|p| !p.composer.open)
+        else {
+            return false;
+        };
+        let ed = &mut pane.editor;
+        // outside Insert no completion runs: the rest of the ghost stays
+        let normal = ed
+            .vim_mode()
+            .is_some_and(|m| m != crate::vim::VimMode::Insert);
+        if !ed.ghost_at_end() || ed.has_extra() || ed.selection().is_some() {
+            return false;
+        }
+        let ghost = self.win.completion.ghost.clone();
+        let take = match part {
+            GhostPart::All => ghost.len(),
+            GhostPart::Word => {
+                // leading whitespace + the next non-space run
+                let trimmed = ghost.trim_start();
+                let lead = ghost.len() - trimmed.len();
+                trimmed
+                    .find(char::is_whitespace)
+                    .map_or(ghost.len(), |i| lead + i)
+            }
+            GhostPart::Subword => match rift_core::editing::subword_right(&ghost, 0) {
+                0 => ghost.len(),
+                n => n,
+            },
+        };
+        let text = &ghost[..take];
+        ed.anchor = None;
+        ed.cursor = ed.buffer.len();
+        ed.insert(text);
+        if normal {
+            // Normal mode rests on the last character
+            ed.cursor = ed.buffer.char_indices().last().map_or(0, |(i, _)| i);
+            // no completion runs outside Insert: the rest stays as it is
+            let buffer = ed.buffer.clone();
+            self.win.completion.ghost.drain(..take);
+            self.win.completion_buffer = buffer;
+            self.win.completion.close_menu();
+        } else {
+            self.win.completion.close_menu();
+            // the rest stays the ghost until the answer for the new line
+            self.update_completions();
+        }
+        self.blink_epoch = Instant::now();
+        true
     }
 
     fn logical_size(&self) -> (f32, f32) {
@@ -7855,6 +8149,8 @@ impl App {
         session.write(&late);
         if let Some(p) = self.win.tabs.iter_mut().find_map(|t| t.pane_mut(pane)) {
             p.session = session;
+            // another shell: another history session
+            p.history = Default::default();
         }
         if let Some(w) = &self.win.window {
             w.request_redraw();
@@ -9810,6 +10106,10 @@ impl App {
         let mark_cursor = self.win.mark.as_ref().map(|m| m.cursor());
         // find limited to a block widens once that block is deselected
         self.settle_find_scope();
+        let ghost_ui = editor::GhostUi {
+            mouse: self.win.mouse,
+            menu_open: self.accept_key_menu_open(),
+        };
         let Self {
             text,
             config: config_ref,
@@ -10507,7 +10807,21 @@ impl App {
                     },
                     ed_cols,
                     None,
+                    ghost_ui,
                 );
+                // the ghost text's chips: the accept-key menu and the ✕
+                if let Some(rect) = anchor.3.key {
+                    hits.push(Hit {
+                        rect,
+                        target: ClickTarget::GhostKey(pr.id),
+                    });
+                }
+                if let Some(rect) = anchor.3.ignore {
+                    hits.push(Hit {
+                        rect,
+                        target: ClickTarget::GhostIgnore(pr.id),
+                    });
+                }
                 if is_active_pane {
                     editor_anchor = anchor.0;
                     editor_zone = area;
@@ -10927,16 +11241,6 @@ impl App {
         }
         // ── layer 2: completion popup (above editor) ──
         if editor_active && completion.open && !palette.open && !self.win.history.open {
-            let (prefix_len, line_len) = tabs
-                .get(active_tab_idx)
-                .and_then(|t| t.active())
-                .map(|p| {
-                    // the whole word is the completed prefix (see `CompletionRequest::run`)
-                    let (b, c) = (&p.editor.buffer, p.editor.cursor);
-                    let (start, _) = rift_core::completion::current_token(b, c);
-                    (rift_core::completion::token_end(b, c) - start, b.len())
-                })
-                .unwrap_or((0, 0));
             let mut panel_hits = Vec::new();
             completion_view::render(
                 scene.layer(2),
@@ -10945,8 +11249,6 @@ impl App {
                 completion,
                 editor_zone,
                 editor_pane,
-                prefix_len,
-                line_len,
                 chrome_mouse,
                 &mut panel_hits,
             );
@@ -11786,6 +12088,8 @@ impl App {
             ),
             ClickTarget::TabNew => ("New tab".into(), self.tip_keys("new_tab")),
             ClickTarget::TabProfiles => ("Open a profile".into(), None),
+            ClickTarget::GhostKey(_) => ("Change keybinding".into(), None),
+            ClickTarget::GhostIgnore(_) => ("Ignore this suggestion".into(), None),
             ClickTarget::SettingsEditPrompt => ("Edit prompt".into(), None),
             ClickTarget::SettingsEditToolbar => ("Edit toolbar".into(), None),
             ClickTarget::SettingsPlaySound(_) => ("Play this sound".into(), None),
@@ -12573,6 +12877,16 @@ impl App {
                 }
             }
             AppAction::ClearTranscripts => self.clear_transcripts(),
+            AppAction::ClearIgnoredSuggestions => {
+                let n = self.ignored.clear();
+                self.toast_done(format!(
+                    "{n} ignored suggestion{} will show again",
+                    if n == 1 { "" } else { "s" }
+                ));
+                if self.win.editor_active {
+                    self.update_completions();
+                }
+            }
             AppAction::TabNext | AppAction::TabPrev
                 if self.tab_switch_mru(action == AppAction::TabNext) => {}
             AppAction::UserAction(i) => self.run_user_action(i as usize, event_loop),
@@ -12808,6 +13122,24 @@ impl App {
                     pane.selected_block = None;
                 }
                 self.blink_epoch = Instant::now();
+            }
+            // End at the end of the command line takes the ghost text too
+            AppAction::ScrollBottom
+                if self.win.editor_active && self.accept_ghost(GhostPart::All) =>
+            {
+                if let Some(pane) = self
+                    .win
+                    .tabs
+                    .get_mut(self.win.active)
+                    .and_then(|t| t.active_mut())
+                {
+                    pane.view_offset = 0;
+                }
+            }
+            AppAction::AcceptAutosuggestion => {
+                if self.win.editor_active {
+                    self.accept_ghost(GhostPart::All);
+                }
             }
             AppAction::ScrollPageUp
             | AppAction::ScrollPageDown
@@ -13580,15 +13912,70 @@ impl App {
                     self.blink_epoch = Instant::now();
                     return;
                 }
-                EditorKey::Dismiss => {
-                    self.win.completion.close();
+                // ⏎ accepts the selected row (as you type: unless the line
+                // already holds it, then it runs)
+                EditorKey::Submit => {
+                    let selected = self
+                        .win
+                        .completion
+                        .items
+                        .get(self.win.completion.selected)
+                        .filter(|c| c.source != "hint")
+                        .map(|c| c.insert.clone());
+                    let typed = self.menu_span().and_then(|(start, _)| {
+                        let p = self.win.tabs.get(self.win.active)?.active()?;
+                        p.editor.buffer.get(start..).map(str::to_string)
+                    });
+                    if rift_core::completion::enter_accepts(
+                        self.config.completions_open_while_typing,
+                        typed.as_deref().unwrap_or_default(),
+                        selected.as_deref(),
+                    ) {
+                        self.accept_selected();
+                        self.blink_epoch = Instant::now();
+                        return;
+                    }
+                    self.win.completion.close_menu();
+                }
+                EditorKey::PrevCompletion => {
+                    self.win.completion.select_prev();
+                    self.blink_epoch = Instant::now();
                     return;
                 }
                 _ => {}
             }
         }
+        // Esc closes the menu and clears the ghost text (vim: the ghost only
+        // in Normal mode; Insert's Esc goes to Normal first)
+        if key == EditorKey::Dismiss {
+            let insert = self
+                .win
+                .tabs
+                .get(self.win.active)
+                .and_then(|t| t.active())
+                .is_some_and(|p| p.editor.vim_mode() == Some(crate::vim::VimMode::Insert));
+            let was_open = self.win.completion.open;
+            self.win.completion.close_menu();
+            if !insert {
+                self.win.completion.ghost.clear();
+                // an answer still in flight for this line would bring them
+                // back: the line is dismissed until the next edit
+            }
+            if was_open {
+                return;
+            }
+        }
         if key == EditorKey::Complete {
-            self.accept_completion();
+            self.tab_key();
+            self.blink_epoch = Instant::now();
+            return;
+        }
+        if key == EditorKey::OpenCompletions {
+            // ⌃Space opens the completions, also where Tab takes the ghost
+            // text
+            if !self.win.completion.open {
+                self.open_completions();
+            }
             self.blink_epoch = Instant::now();
             return;
         }
@@ -13596,10 +13983,7 @@ impl App {
             self.open_history();
             return;
         }
-        if key == EditorKey::NextCompletionSource {
-            if self.win.completion.open {
-                self.win.completion.cycle_source();
-            }
+        if key == EditorKey::PrevCompletion {
             return;
         }
         if key == EditorKey::AcceptGhostWord {
@@ -13607,31 +13991,17 @@ impl App {
             self.blink_epoch = Instant::now();
             return;
         }
-        // → at the end of the line takes the whole ghost (Warp; the → chip)
-        if key == EditorKey::Right
-            && !self.win.completion.ghost.is_empty()
-            && self.completion_pending.is_none()
-            && self
-                .win
-                .tabs
-                .get(self.win.active)
-                .and_then(|t| t.active())
-                .is_some_and(|p| {
-                    p.editor.cursor == p.editor.buffer.len() && p.editor.selection().is_none()
-                })
+        // at the end of the line (Warp): → ⌃F ⌃E ⌘→ take the whole ghost,
+        // ⌥→ one word of it, ⌃⌥→ one subword; elsewhere they move
+        let part = match key {
+            EditorKey::Right | EditorKey::End => Some(GhostPart::All),
+            EditorKey::WordRight => Some(GhostPart::Word),
+            EditorKey::SubwordRight => Some(GhostPart::Subword),
+            _ => None,
+        };
+        if let Some(part) = part
+            && self.accept_ghost(part)
         {
-            let ghost = self.win.completion.ghost.clone();
-            if let Some(pane) = self
-                .win
-                .tabs
-                .get_mut(self.win.active)
-                .and_then(|t| t.active_mut())
-            {
-                pane.editor.insert(&ghost);
-            }
-            self.win.completion.close();
-            self.update_completions();
-            self.blink_epoch = Instant::now();
             return;
         }
 
@@ -13644,7 +14014,17 @@ impl App {
         else {
             return;
         };
+        // typing (an as-you-type menu opens on these edits only)
+        self.edit_typed = matches!(
+            key,
+            EditorKey::Insert(_)
+                | EditorKey::Backspace
+                | EditorKey::Delete
+                | EditorKey::DeleteWordBack
+                | EditorKey::DeleteWordForward
+        );
         self.editor_key_on(id, key, true);
+        self.edit_typed = false;
     }
 
     /// ↑ / ↓ and the inline history menu (Warp): ↑ on the command line's
@@ -13669,8 +14049,10 @@ impl App {
                         self.preview_history_line();
                     } else {
                         // back to typing: the ghost and the panel return
-                        // (Esc dismisses them too)
+                        // (Esc dismisses them too); a panel opened as you
+                        // type opens again
                         self.restore_typed_line();
+                        self.edit_typed = true;
                         self.update_completions();
                     }
                 }
@@ -13727,12 +14109,15 @@ impl App {
                 rift_core::command_history::ranked_matches(&saved, &typed, Some(&cwd), Some(&repo))
             })
             .unwrap_or_default();
-        let lines = completion_view::history_matches(
+        let mut lines = completion_view::history_matches(
             &ranked,
             &pane.editor.history,
             &self.shell_history,
             &typed,
         );
+        // lines the ghost text's ✕ ignored are not offered here either (Warp)
+        let ignored = self.ignored.snapshot();
+        lines.retain(|l| !ignored.contains(l));
         if lines.is_empty() {
             return true;
         }
@@ -13992,7 +14377,8 @@ impl App {
             EditorKey::HistoryDown => pane.editor.history_down(),
             EditorKey::Dismiss
             | EditorKey::Complete
-            | EditorKey::NextCompletionSource
+            | EditorKey::PrevCompletion
+            | EditorKey::OpenCompletions
             | EditorKey::HistorySearch
             | EditorKey::AcceptGhostWord => edited = false,
             // nothing to run (Warp): no empty block, and no bare shell
@@ -14041,6 +14427,8 @@ impl App {
             self.write_synced(id, bytes, true);
         }
         if let Some((id, cmd)) = submitted {
+            // a command run again is suggested again (Warp)
+            self.ignored.remove(&cmd);
             self.note_subshell(id, &cmd);
             self.submit_synced(id, &cmd);
         }
@@ -15733,7 +16121,14 @@ impl App {
             // plain terminal keys (PageUp, Home, ⌃M…) bound to app
             // actions still belong to vim/less when the editor isn't
             // active — fall through to raw byte passthrough
-            if !action.needs_editor() || self.win.editor_active {
+            if action == AppAction::AcceptAutosuggestion {
+                if self.win.editor_active && self.accept_ghost(GhostPart::All) {
+                    window.request_redraw();
+                    return;
+                }
+                // no ghost text to take: the key does what it does unbound
+                // (⇧→ selects)
+            } else if !action.needs_editor() || self.win.editor_active {
                 if event.repeat && !action.repeatable() {
                     return;
                 }
@@ -17009,6 +17404,8 @@ impl App {
                     self.open_chip_menu(*pane, kind);
                 }
             }
+            Some(ClickTarget::GhostKey(pane)) => self.open_accept_key_menu(*pane),
+            Some(ClickTarget::GhostIgnore(pane)) => self.ignore_ghost(*pane),
             Some(ClickTarget::Editor(pane)) => {
                 let pane = *pane;
                 let clicks = self.click_count();
@@ -17106,12 +17503,9 @@ impl App {
                     self.take_history(HistoryUse::Edit);
                 }
             }
-            Some(ClickTarget::CompletionSource(i)) => {
-                self.win.completion.pick_source(*i as usize);
-            }
             Some(ClickTarget::CompletionRow(i)) => {
                 self.win.completion.selected = *i;
-                self.accept_completion();
+                self.accept_selected();
                 self.blink_epoch = Instant::now();
             }
             Some(ClickTarget::Welcome(i)) => match i {
@@ -17394,7 +17788,13 @@ impl App {
                     "restore_session" => c.restore_session = !c.restore_session,
                     "vim_mode" => c.vim_mode = !c.vim_mode,
                     "autosuggestions" => c.autosuggestions = !c.autosuggestions,
-                    "completions_menu" => c.completions_menu = !c.completions_menu,
+                    "autosuggestion_hint" => c.autosuggestion_hint = !c.autosuggestion_hint,
+                    "autosuggestion_ignore_button" => {
+                        c.autosuggestion_ignore_button = !c.autosuggestion_ignore_button
+                    }
+                    "completions_open_while_typing" => {
+                        c.completions_open_while_typing = !c.completions_open_while_typing
+                    }
                     "shell_completions" => {
                         c.shell_completions = !c.shell_completions;
                         if !c.shell_completions {
@@ -17752,6 +18152,13 @@ impl App {
                     }
                     "vim_clipboard" => {
                         c.vim_clipboard = if *v == 1 { "unnamed" } else { "none" }.into();
+                    }
+                    "tab_behavior" => {
+                        c.tab_behavior = if *v == 1 {
+                            rift_core::TabBehavior::Autosuggestion
+                        } else {
+                            rift_core::TabBehavior::Completions
+                        }
                     }
                     "shell_widgets" => {
                         c.shell_widgets = if *v == 1 {
@@ -18603,6 +19010,28 @@ impl App {
         if pane.editor.vim_mode() == Some(VimMode::Insert) && !is_escape {
             return false;
         }
+        // Normal mode on the last character: `l` and `$` take the whole
+        // ghost text, `w` and `e` one word of it (Warp)
+        if pane.editor.vim.as_ref().is_some_and(|v| v.normal_idle())
+            && let Key::Character(c) = &event.logical_key
+            && let Some(part) = match c.as_str() {
+                "l" | "$" => Some(GhostPart::All),
+                "w" | "e" => Some(GhostPart::Word),
+                _ => None,
+            }
+            && self.accept_ghost(part)
+        {
+            return true;
+        }
+        let Some(pane) = self
+            .win
+            .tabs
+            .get_mut(self.win.active)
+            .and_then(|t| t.active_mut())
+        else {
+            return false;
+        };
+        let before = (pane.editor.vim_mode(), pane.editor.buffer.clone());
         let key = match &event.logical_key {
             _ if ctrl_r => VimKey::Redo,
             Key::Named(NamedKey::Escape) => VimKey::Escape,
@@ -18657,7 +19086,15 @@ impl App {
                 if pane.editor.vim_mode() == Some(VimMode::Insert) {
                     self.update_completions();
                 } else {
-                    self.win.completion.close();
+                    // the ghost text stays while the line does (Insert's Esc
+                    // to Normal keeps it); Esc in Normal clears it (Warp)
+                    let cleared = before.1 != pane.editor.buffer
+                        || (is_escape && before.0 != Some(VimMode::Insert));
+                    if cleared {
+                        self.win.completion.close();
+                    } else {
+                        self.win.completion.close_menu();
+                    }
                     self.completion_pending = None;
                     self.completion_intent = None;
                 }
@@ -19357,10 +19794,11 @@ impl App {
                 .cloned()
         };
         let reply = p.reply;
+        let ignored = self.ignored.snapshot();
         let spawned = std::thread::Builder::new()
             .name("remote-complete".into())
             .spawn(move || {
-                let page = crate::remote::complete_page(
+                let mut page = crate::remote::complete_page(
                     &line,
                     cursor,
                     &blocks,
@@ -19369,6 +19807,7 @@ impl App {
                     cwd.as_deref(),
                     path.as_deref().map(std::ffi::OsStr::new),
                 );
+                crate::remote::without_ignored(&mut page, &ignored);
                 let _ = reply.send(Response {
                     ok: true,
                     pane: Some(pane),
@@ -20006,6 +20445,13 @@ impl App {
                             ClickTarget::PaneSplit(p) if p == id => "Split pane right".into(),
                             ClickTarget::PaneMenu(p) if p == id => "Pane menu".into(),
                             ClickTarget::PaneClose(p) if p == id => "Close pane".into(),
+                            ClickTarget::GhostKey(p) if p == id => format!(
+                                "Accept suggestion key: {}",
+                                crate::views::editor::accept_key_text(&self.config)
+                            ),
+                            ClickTarget::GhostIgnore(p) if p == id => {
+                                "Ignore this suggestion".into()
+                            }
                             // the minimized sticky command header's tab
                             ClickTarget::StickyRestore(p) if p == id => {
                                 "Show sticky command header".into()
@@ -20377,6 +20823,12 @@ impl App {
             })
         } else if self.win.context_menu.open {
             Some(Overlay::Menu {
+                label: if self.accept_key_menu_open() {
+                    "Accept suggestion key"
+                } else {
+                    "Block actions"
+                }
+                .into(),
                 items: self
                     .win
                     .context_menu
@@ -20387,8 +20839,12 @@ impl App {
                     .filter(|(_, (item, _))| item.enabled)
                     .map(|(i, (item, r))| Control {
                         label: item.label.to_string(),
-                        role: Role::MenuItem,
-                        toggled: None,
+                        role: if item.radio.is_some() {
+                            Role::MenuItemRadio
+                        } else {
+                            Role::MenuItem
+                        },
+                        toggled: item.radio,
                         selected: self.win.context_menu.selected == Some(i),
                         rect: Some(*r),
                         disabled: false,
@@ -21505,11 +21961,12 @@ impl App {
         let _ = writeln!(out, "tips={tips:?}");
         let _ = writeln!(
             out,
-            "settings_tab={} settings_query={:?} settings_select={:?} completion_source={:?} history={} scope={:?} history_rows={} history_selected={:?}",
+            "settings_tab={} settings_query={:?} settings_select={:?} completion_tab={} completion_selected={} history={} scope={:?} history_rows={} history_selected={:?}",
             self.win.settings.tab,
             self.win.settings.query,
             self.win.settings.dropdown.as_ref().map(|d| d.id),
-            self.win.completion.filter,
+            self.win.completion.tab.is_some(),
+            self.win.completion.selected,
             self.win.history.open,
             self.win.history.scope,
             self.win.history.results.len(),
@@ -22666,7 +23123,7 @@ impl App {
                     return;
                 };
                 let active = self.active_pane_id() == Some(id);
-                if active && matches!(ek, EditorKey::Dismiss | EditorKey::NextCompletionSource) {
+                if active && matches!(ek, EditorKey::Dismiss | EditorKey::PrevCompletion) {
                     self.handle_editor_key(ek);
                 } else {
                     self.editor_key_on(id, ek, active);

@@ -20,6 +20,7 @@ pub mod git_write;
 pub mod github;
 pub mod highlight;
 pub mod history;
+pub mod ignored_suggestions;
 pub mod inspect;
 pub mod keybindings;
 pub mod launch;
@@ -48,12 +49,17 @@ pub mod update;
 pub mod uri;
 pub mod watch;
 
+/// Tests that change the process environment (`XDG_DATA_HOME`) and those
+/// that read it hold this, one at a time.
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub use block::{AbsLine, Block, BlockId, BlockState, BlockStore, Restored};
 pub use config::{
     AmbiguousWidth, AppIcon, Bell, BlockSpacing, BlocksStart, CloseOnExit, Config, CursorStyle,
     ElapsedCounts, HotkeyEdge, InputPosition, LaunchMode, NewTabPlacement, Padding, PromptChip,
-    PromptMode, RichInputSubmit, ScrollbarMode, ShellWidgets, TabBarVisibility, TabCloseButton,
-    TabCloseSide, TabLayout, TabStyle, TabSwitchOrder, ToolbarItem,
+    PromptMode, RichInputSubmit, ScrollbarMode, ShellWidgets, TabBarVisibility, TabBehavior,
+    TabCloseButton, TabCloseSide, TabLayout, TabStyle, TabSwitchOrder, ToolbarItem,
 };
 pub use keybindings::{Binding, Keymap};
 pub use osc::{Marker, OscScanner, Progress, ProgressState, host_is_local};

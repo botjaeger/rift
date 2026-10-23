@@ -203,7 +203,10 @@ A scripted run does not import your shell history (`$HISTFILE`,
 your real commands; a test that needs an imported history points `HOME` or
 `HISTFILE` at a fixture and sets `RIFT_SCRIPT_HISTORY=1`. It records nothing
 in Rift's own command history (`history.json`) unless it sets
-`RIFT_SCRIPT_RECORD_HISTORY=1` with its own `XDG_DATA_HOME`.
+`RIFT_SCRIPT_RECORD_HISTORY=1` with its own `XDG_DATA_HOME`, and neither
+reads nor writes the ignored suggestions (`ignored-suggestions.json`, the
+ghost text's ✕) unless it sets `RIFT_SCRIPT_RECORD_IGNORED=1` with its own
+`XDG_DATA_HOME` (its ignores otherwise last for the run).
 Nor does it read `/etc/shells`: config.toml gets no generated shell profiles
 and none is marked orphaned, unless `RIFT_SHELLS_FILE` names a fixture shells
 file, which then stands in for `/etc/shells` (the startup sync and the orphan

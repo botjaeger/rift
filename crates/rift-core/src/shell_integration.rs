@@ -182,6 +182,10 @@ mod tests {
 
     #[test]
     fn bash_gets_rcfile_zsh_fish_login_on_macos() {
+        // session_state's tests point XDG_DATA_HOME elsewhere meanwhile
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if data_dir().is_none() {
             return;
         }

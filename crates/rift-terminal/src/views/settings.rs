@@ -837,7 +837,10 @@ pub const ROWS: &[&str] = &[
     "vim_clipboard",
     "shell_widgets",
     "autosuggestions",
-    "completions_menu",
+    "tab_behavior",
+    "autosuggestion_hint",
+    "autosuggestion_ignore_button",
+    "completions_open_while_typing",
     "shell_completions",
     "autocomplete_pairs",
     "input_position",
@@ -5603,11 +5606,36 @@ fn features_page(form: &mut Form, config: &Config) {
         "autosuggestions",
     );
     let y = form.y;
+    form.segment_desc(
+        y,
+        "Tab key",
+        "the completions, or the ghost text (⌃Space then completes)",
+        &["Completions", "Ghost text"],
+        usize::from(config.tab_behavior == rift_core::TabBehavior::Autosuggestion),
+        "tab_behavior",
+    );
+    let y = form.y;
+    form.toggle_desc(
+        y,
+        "Show the accept-key hint",
+        "a chip after the ghost text; click it to change the key",
+        config.autosuggestion_hint,
+        "autosuggestion_hint",
+    );
+    let y = form.y;
+    form.toggle_desc(
+        y,
+        "Show the ignore button",
+        "a ✕ after the ghost text: never suggest that command again",
+        config.autosuggestion_ignore_button,
+        "autosuggestion_ignore_button",
+    );
+    let y = form.y;
     form.toggle(
         y,
-        "Completions menu",
-        config.completions_menu,
-        "completions_menu",
+        "Open completions as you type",
+        config.completions_open_while_typing,
+        "completions_open_while_typing",
     );
     let y = form.y;
     form.toggle(

@@ -5,7 +5,9 @@
 //! history has no directory).
 //!
 //! Ranking ([`tier`]): commands run in the same directory first, then in the
-//! same repository, then everywhere else; newest first within each.
+//! same repository, then everywhere else; newest first within each. Each
+//! entry also names its shell session and place in it, so [`next_after`]
+//! can tell what usually follows a command (Warp's next-command history).
 //!
 //! Bounded like transcripts: the newest [`MAX_ENTRIES`] entries and
 //! [`MAX_BYTES`] of text; a field over [`MAX_FIELD_BYTES`] is not kept. The
@@ -46,6 +48,15 @@ pub struct Entry {
     /// When it finished (seconds since the epoch).
     pub finished: u64,
     pub exit: Option<i32>,
+    /// The shell session it ran in: a new id for every shell a pane starts
+    /// (a restarted or restored pane gets a new one). Entries written
+    /// before sessions were kept have none and give no next command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    /// Its place in `session`: commands of one session in the order they
+    /// finished.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -56,7 +67,7 @@ struct File {
 
 fn fits(e: &Entry) -> bool {
     e.command.len() <= MAX_FIELD_BYTES
-        && [&e.cwd, &e.repo]
+        && [&e.cwd, &e.repo, &e.session]
             .into_iter()
             .flatten()
             .all(|s| s.len() <= MAX_FIELD_BYTES)
@@ -64,7 +75,7 @@ fn fits(e: &Entry) -> bool {
 
 fn size(e: &Entry) -> usize {
     e.command.len()
-        + [&e.cwd, &e.repo]
+        + [&e.cwd, &e.repo, &e.session]
             .into_iter()
             .flatten()
             .map(String::len)
@@ -184,6 +195,82 @@ pub fn ranked_matches<'a>(
         .collect()
 }
 
+/// How many earlier runs of the previous command [`next_after`] looks at.
+pub const NEXT_CONTEXTS: usize = 25;
+/// How many next commands [`next_after`] gives at most.
+pub const NEXT_MAX: usize = 5;
+
+/// What usually follows the command a pane just finished (`last`: its
+/// command line, directory and exit code), for a line starting with
+/// `prefix`: the [`NEXT_CONTEXTS`] newest entries of that same command, in
+/// that same directory with that same exit code, each followed by the next
+/// non-empty command of its own session; those starting with `prefix`
+/// (case-sensitive, single-line, not equal to it), most frequent first
+/// (ties: the newer), at most [`NEXT_MAX`]. No directory: nothing.
+pub fn next_after<'a>(
+    entries: &'a [Entry],
+    last: (&str, Option<&str>, Option<i32>),
+    prefix: &str,
+) -> Vec<&'a str> {
+    let (command, cwd, exit) = last;
+    if cwd.is_none() {
+        return Vec::new();
+    }
+    // (command, count, newest position)
+    let mut found: Vec<(&str, usize, usize)> = Vec::new();
+    let runs = entries
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, e)| e.command == command && e.cwd.as_deref() == cwd && e.exit == exit)
+        .take(NEXT_CONTEXTS);
+    for (i, run) in runs {
+        let Some(session) = run.session.as_deref() else {
+            continue;
+        };
+        let next = entries[i + 1..].iter().enumerate().find(|(_, e)| {
+            e.session.as_deref() == Some(session)
+                && !e.command.trim().is_empty()
+                && e.seq.zip(run.seq).is_none_or(|(a, b)| a > b)
+        });
+        let Some((j, next)) = next else { continue };
+        let c = next.command.as_str();
+        if !c.starts_with(prefix) || c == prefix || c.contains('\n') {
+            continue;
+        }
+        let at = i + 1 + j;
+        match found.iter_mut().find(|f| f.0 == c) {
+            Some(f) => {
+                f.1 += 1;
+                f.2 = f.2.max(at);
+            }
+            None => found.push((c, 1, at)),
+        }
+    }
+    found.sort_by_key(|&(_, n, at)| std::cmp::Reverse((n, at)));
+    found.into_iter().take(NEXT_MAX).map(|f| f.0).collect()
+}
+
+/// The history lines for a line starting with `prefix`, best first: what
+/// usually follows `last` ([`next_after`]), then [`ranked_matches`].
+pub fn suggestions<'a>(
+    entries: &'a [Entry],
+    last: Option<(&str, Option<&str>, Option<i32>)>,
+    prefix: &str,
+    here: Option<&str>,
+    here_repo: Option<&str>,
+) -> Vec<&'a str> {
+    let mut out = last.map_or_else(Vec::new, |l| next_after(entries, l, prefix));
+    // at most NEXT_MAX: a scan per ranked line stays cheap
+    let next = out.len();
+    for c in ranked_matches(entries, prefix, here, here_repo) {
+        if !out[..next].contains(&c) {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// `$XDG_DATA_HOME/rift/history.json` (default `~/.local/share/rift`).
 pub fn path() -> Option<PathBuf> {
     crate::shell_integration::data_dir().map(|d| d.join("history.json"))
@@ -250,10 +337,11 @@ pub fn append_to(path: &Path, batch: Vec<Entry>) -> bool {
     save_to(path, all)
 }
 
-/// The writers' lock (`history.json.lock`), held while the returned file
-/// is open. `None` when it cannot be taken: the write goes ahead unlocked.
+/// The writers' lock (`history.json.lock`, or beside another `.json` file
+/// `path`), held while the returned file is open. `None` when it cannot be
+/// taken: the write goes ahead unlocked.
 #[cfg(unix)]
-fn lock(path: &Path) -> Option<std::fs::File> {
+pub(crate) fn lock(path: &Path) -> Option<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::io::AsRawFd;
     let f = std::fs::OpenOptions::new()
@@ -267,7 +355,7 @@ fn lock(path: &Path) -> Option<std::fs::File> {
 }
 
 #[cfg(not(unix))]
-fn lock(_: &Path) -> Option<()> {
+pub(crate) fn lock(_: &Path) -> Option<()> {
     None
 }
 
@@ -299,6 +387,12 @@ pub fn save_to(path: &Path, entries: Vec<Entry>) -> bool {
     let Ok(body) = serde_json::to_vec(&f) else {
         return false;
     };
+    write_private(path, &body)
+}
+
+/// Write `body` to the `.json` file `path` (its directory exists):
+/// atomic (a per-process temporary file renamed over it) and private (0600).
+pub(crate) fn write_private(path: &Path, body: &[u8]) -> bool {
     // one per process: two writers never share a half-written file
     let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
     let mut opts = std::fs::OpenOptions::new();
@@ -311,7 +405,7 @@ pub fn save_to(path: &Path, entries: Vec<Entry>) -> bool {
     let written = opts
         .open(&tmp)
         .and_then(|mut f| {
-            std::io::Write::write_all(&mut f, &body)?;
+            std::io::Write::write_all(&mut f, body)?;
             // on disk before the rename publishes it (a power loss leaves
             // the old file, not an empty one)
             f.sync_all()
@@ -395,15 +489,26 @@ impl Store {
     }
 
     /// Record a finished command (repository resolved and written off this
-    /// thread). Callers check [`should_record`] first.
-    pub fn record(&self, command: String, cwd: Option<String>, finished: u64, exit: Option<i32>) {
+    /// thread); `session`: its shell session and place in it. Callers check
+    /// [`should_record`] first.
+    pub fn record(
+        &self,
+        command: String,
+        cwd: Option<String>,
+        finished: u64,
+        exit: Option<i32>,
+        session: Option<(String, u64)>,
+    ) {
         if let Some(tx) = &self.tx {
+            let (session, seq) = session.unzip();
             let _ = tx.send(Msg::Record(Entry {
                 command,
                 cwd,
                 repo: None,
                 finished,
                 exit,
+                session,
+                seq,
             }));
         }
     }
@@ -436,6 +541,8 @@ mod tests {
             repo: Some(repo.into()),
             finished,
             exit: Some(0),
+            session: None,
+            seq: None,
         }
     }
 
@@ -444,6 +551,169 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// An entry of shell session `session`, at `seq` in it.
+    fn run(cmd: &str, cwd: &str, session: &str, seq: u64, exit: i32) -> Entry {
+        Entry {
+            command: cmd.into(),
+            cwd: Some(cwd.into()),
+            repo: Some(cwd.into()),
+            finished: seq,
+            exit: Some(exit),
+            session: Some(session.into()),
+            seq: Some(seq),
+        }
+    }
+
+    const PREV: &str = "cd project1";
+    const BACKUP: &str = "bash scripts/db.sh backup";
+    const RESTORE: &str = "bash scripts/db.sh restore --local --force";
+    const PREFIX: &str = "bash scripts/db.sh";
+
+    /// Three shell sessions, each: `cd project1` in /x, then backup, then
+    /// restore in /x/project1 (the user's daily routine).
+    fn routine() -> Vec<Entry> {
+        (0..3)
+            .flat_map(|s| {
+                let id = format!("s{s}");
+                let t = s * 10;
+                [
+                    run(PREV, "/x", &id, t, 0),
+                    run(BACKUP, "/x/project1", &id, t + 1, 0),
+                    run(RESTORE, "/x/project1", &id, t + 2, 0),
+                ]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn next_command_follows_what_usually_comes_after_the_previous_one() {
+        let entries = routine();
+        let here = Some("/x/project1");
+        let last = (PREV, Some("/x"), Some(0));
+        assert_eq!(next_after(&entries, last, PREFIX), [BACKUP]);
+        assert_eq!(
+            suggestions(&entries, Some(last), PREFIX, here, here),
+            [BACKUP, RESTORE]
+        );
+        // no previous command: the newest in the directory
+        assert_eq!(
+            suggestions(&entries, None, PREFIX, here, here),
+            [RESTORE, BACKUP]
+        );
+        // after backup, restore
+        let after = (BACKUP, Some("/x/project1"), Some(0));
+        assert_eq!(
+            suggestions(&entries, Some(after), PREFIX, here, here)[0],
+            RESTORE
+        );
+        // a prefix the next command does not start with: the ranked lines
+        assert_eq!(
+            suggestions(&entries, Some(last), "bash scripts/db.sh r", here, here),
+            [RESTORE]
+        );
+    }
+
+    #[test]
+    fn next_command_needs_the_same_directory_and_exit_code() {
+        let entries = routine();
+        let here = Some("/x/project1");
+        for last in [
+            (PREV, Some("/x"), Some(1)),
+            (PREV, Some("/y"), Some(0)),
+            (PREV, None, Some(0)),
+            ("cd other", Some("/x"), Some(0)),
+        ] {
+            assert!(next_after(&entries, last, PREFIX).is_empty(), "{last:?}");
+            assert_eq!(
+                suggestions(&entries, Some(last), PREFIX, here, here)[0],
+                RESTORE,
+                "{last:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn next_command_comes_from_the_same_session_only() {
+        // two panes writing alternately: b's restore lands between a's
+        // `cd project1` and a's backup
+        let entries = vec![
+            run(PREV, "/x", "a", 1, 0),
+            run(RESTORE, "/x/project1", "b", 1, 0),
+            run(PREV, "/x", "b", 2, 0),
+            run(BACKUP, "/x/project1", "a", 2, 0),
+            run("ls", "/x/project1", "a", 3, 0),
+            run(BACKUP, "/x/project1", "b", 3, 0),
+        ];
+        let last = (PREV, Some("/x"), Some(0));
+        assert_eq!(next_after(&entries, last, PREFIX), [BACKUP]);
+        // the most frequent first, then the newer
+        let mut entries = entries;
+        entries.extend([
+            run(PREV, "/x", "c", 1, 0),
+            run(RESTORE, "/x/project1", "c", 2, 0),
+        ]);
+        assert_eq!(next_after(&entries, last, PREFIX), [BACKUP, RESTORE]);
+        // an entry without a session (an older Rift's) gives no next command
+        let old: Vec<Entry> = routine()
+            .into_iter()
+            .map(|mut e| {
+                e.session = None;
+                e.seq = None;
+                e
+            })
+            .collect();
+        assert!(next_after(&old, last, PREFIX).is_empty());
+    }
+
+    #[test]
+    fn files_with_and_without_sessions_read_both_ways() {
+        // a file an older Rift wrote: no session or seq; still ranked by
+        // directory
+        let dir = scratch("compat");
+        let p = dir.join("history.json");
+        let old = r#"{"version":1,"entries":[
+            {"command":"pnpm dev","cwd":"/p/a","repo":"/p/a","finished":1,"exit":0},
+            {"command":"pnpm dev:web","cwd":"/p/b","repo":"/p/b","finished":2,"exit":0}]}"#;
+        std::fs::write(&p, old).unwrap();
+        let entries = load_from(&p);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].session, None);
+        let here = Some("/p/a");
+        assert_eq!(
+            suggestions(&entries, Some(("ls", here, Some(0))), "pnpm de", here, here),
+            ["pnpm dev", "pnpm dev:web"]
+        );
+        // a file this one writes: the same version, and the shape an older
+        // Rift (0.21.0) reads — its Entry ignores unknown fields
+        assert!(save_to(&p, routine()));
+        assert_eq!(load_from(&p), routine());
+        #[derive(Deserialize)]
+        struct OldEntry {
+            command: String,
+            #[allow(dead_code)]
+            cwd: Option<String>,
+            #[serde(default)]
+            #[allow(dead_code)]
+            repo: Option<String>,
+            #[allow(dead_code)]
+            finished: u64,
+            #[allow(dead_code)]
+            exit: Option<i32>,
+        }
+        #[derive(Deserialize)]
+        struct OldFile {
+            version: u32,
+            entries: Vec<OldEntry>,
+        }
+        let body = std::fs::read(&p).unwrap();
+        assert!(body.len() <= MAX_FILE_BYTES);
+        let back: OldFile = serde_json::from_slice(&body).unwrap();
+        assert_eq!(back.version, 1);
+        assert_eq!(back.entries.len(), 9);
+        assert_eq!(back.entries[1].command, BACKUP);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -575,6 +845,7 @@ mod tests {
             Some(dir.display().to_string()),
             5,
             Some(0),
+            None,
         );
         assert!(s.flush(wait));
         assert_eq!(s.snapshot().len(), 1);
@@ -586,7 +857,7 @@ mod tests {
         assert!(reader.flush(wait));
         assert_eq!(reader.snapshot()[0].command, "pnpm dev");
         let blind = Store::start(Some(p.clone()), false);
-        blind.record("ls".into(), None, 6, None);
+        blind.record("ls".into(), None, 6, None, None);
         assert!(blind.flush(wait));
         let commands = |v: &[Entry]| v.iter().map(|e| e.command.clone()).collect::<Vec<_>>();
         assert_eq!(commands(&blind.snapshot()), ["ls"]);
@@ -594,7 +865,7 @@ mod tests {
         assert_eq!(commands(&load_from(&p)), ["pnpm dev", "ls"]);
         // nowhere to write: kept in memory only
         let memory = Store::start(None, true);
-        memory.record("pwd".into(), None, 7, None);
+        memory.record("pwd".into(), None, 7, None, None);
         assert!(memory.flush(wait));
         assert_eq!(commands(&memory.snapshot()), ["pwd"]);
         assert_eq!(load_from(&p).len(), 2);

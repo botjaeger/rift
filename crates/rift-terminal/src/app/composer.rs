@@ -273,7 +273,8 @@ impl App {
                 }
             }
             EditorKey::Complete
-            | EditorKey::NextCompletionSource
+            | EditorKey::PrevCompletion
+            | EditorKey::OpenCompletions
             | EditorKey::HistorySearch
             | EditorKey::AcceptGhostWord
             | EditorKey::ClearScreen

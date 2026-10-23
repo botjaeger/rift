@@ -177,8 +177,8 @@ pub enum Overlay {
         description: String,
         buttons: Vec<Control>,
     },
-    /// Block context menu.
-    Menu { items: Vec<Control> },
+    /// A context menu (a block's, a tab's, the ghost text's accept key).
+    Menu { label: String, items: Vec<Control> },
 }
 
 /// A tree plus the on-screen rect behind each actionable node.
@@ -529,7 +529,7 @@ pub fn build(s: &Snapshot) -> Built {
                 node.set_children(ids);
                 t.nodes.push((OVERLAY, node));
             }
-            Overlay::Menu { items } => {
+            Overlay::Menu { label, items } => {
                 let mut ids = Vec::new();
                 for (i, c) in items.iter().enumerate() {
                     let id = t.control("menu", i, c);
@@ -542,7 +542,7 @@ pub fn build(s: &Snapshot) -> Built {
                     focus = ids.first().copied().unwrap_or(focus);
                 }
                 let mut node = Node::new(Role::Menu);
-                node.set_label("Block actions");
+                node.set_label(label.as_str());
                 node.set_children(ids);
                 t.nodes.push((OVERLAY, node));
             }

@@ -41,6 +41,9 @@ pub const REMOVED_KEYS: &[&str] = &[
     "menu_bar_icon",
 ];
 
+/// Top-level keys read under a new name: (old, new).
+pub const RENAMED_KEYS: &[(&str, &str)] = &[("completions_menu", "completions_open_while_typing")];
+
 /// The problems in `text`, in line order.
 pub fn lint(text: &str) -> Vec<Diagnostic> {
     lint_with(text, None)
@@ -173,6 +176,17 @@ impl Linter<'_> {
                     Severity::Warning,
                     format!("`{key}` is no longer used and is ignored"),
                 ),
+                None if header.is_none() && RENAMED_KEYS.iter().any(|(old, _)| *old == key) => {
+                    let new = RENAMED_KEYS
+                        .iter()
+                        .find(|(old, _)| *old == key)
+                        .map_or("", |(_, new)| *new);
+                    self.push(
+                        span,
+                        Severity::Warning,
+                        format!("`{key}` is now `{new}` (still read)"),
+                    )
+                }
                 // a setting typed below a table (the generated profiles end
                 // the file) belongs to that table
                 None if header.is_some() && self.top_keys.iter().any(|k| k == key) => {
@@ -408,6 +422,17 @@ mod tests {
         let got = lint(text);
         assert_eq!(got.len(), 1, "{got:?}");
         got.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn a_renamed_key_is_a_warning_naming_the_new_one() {
+        let d = one("completions_menu = false\n");
+        assert_eq!(d.severity, Severity::Warning);
+        assert!(
+            d.message.contains("`completions_open_while_typing`"),
+            "{}",
+            d.message
+        );
     }
 
     #[test]

@@ -36,7 +36,7 @@ pub fn render(
     let [x, y, w, h] = area;
     // no fill: the pane's own ground, as under the command editor (the
     // program's rows moved out from under it, `terminal::beside_panel`)
-    let (anchor, cursor, _) = editor::render(
+    let (anchor, cursor, _, _) = editor::render(
         layer,
         engine,
         theme,
@@ -53,6 +53,7 @@ pub fn render(
         None,
         cols,
         Some(("Compose for", pane.composer.label.as_str())),
+        editor::GhostUi::default(),
     );
     let hint = crate::composer::hint(config.rich_input_submit);
     let mut b = Buffer::new(&mut engine.font_system, Metrics::new(11.0, HINT_H));

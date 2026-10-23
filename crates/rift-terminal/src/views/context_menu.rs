@@ -119,6 +119,8 @@ pub enum MenuAction {
     ExplorerCopyRelativePath,
     ExplorerNewFile,
     ExplorerReveal,
+    /// The ghost text's hint chip: the key that accepts it.
+    AcceptKey(crate::views::editor::AcceptKey),
 }
 
 pub struct MenuItem {
@@ -132,6 +134,9 @@ pub struct MenuItem {
     pub bold: bool,
     /// A Nerd Font glyph in the icon column instead of the action's icon.
     pub glyph: Option<char>,
+    /// One of a choice (a radio item): `Some(true)` is the current one, a
+    /// check in the icon column.
+    pub radio: Option<bool>,
 }
 
 impl MenuItem {
@@ -143,7 +148,13 @@ impl MenuItem {
             separator: false,
             bold: false,
             glyph: None,
+            radio: None,
         }
+    }
+
+    pub fn radio(mut self, checked: bool) -> Self {
+        self.radio = Some(checked);
+        self
     }
 
     pub fn bold(mut self, on: bool) -> Self {
@@ -271,7 +282,7 @@ fn icon(action: MenuAction) -> Option<Icon> {
         PinTab(_) => Icon::Bookmark,
         GroupTabs(_) | LeaveGroup(_) | Ungroup(_) => Icon::Folder,
         ToggleGroup(_) => Icon::ChevronDown,
-        RenameGroup(_) => return None,
+        RenameGroup(_) | AcceptKey(_) => return None,
         CloseTabsRight(_) => Icon::ChevronRight,
         Paste | SelectAll | ClearBlocks | RenameTab(_) | SetTabColor(..) => return None,
     })
@@ -399,6 +410,14 @@ pub fn render(
         // icon column; tab-color rows carry a swatch there
         if let MenuAction::SetTabColor(_, Some(c)) = item.action {
             layer.circle([rect[0] + 16.0, cy], 10.0, tab_color(theme, c));
+        } else if item.radio == Some(true) {
+            icons::draw(
+                layer,
+                Icon::Check,
+                [rect[0] + 16.0, cy],
+                14.0,
+                theme.text_dim,
+            );
         } else if let Some(g) = item.glyph {
             let ic = if item.enabled { theme.text_dim } else { color };
             crate::views::glyphs::draw(layer, engine, g, [rect[0] + 16.0, cy], 14.0, ic);

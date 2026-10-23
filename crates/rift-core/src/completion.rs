@@ -262,55 +262,52 @@ pub fn scan_path_commands(path: &std::ffi::OsStr) -> Vec<String> {
     names
 }
 
-/// How a candidate matches the typed word; lower sorts first.
+/// How a candidate matches the typed word; lower sorts first (Warp's
+/// completion matcher).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Match {
-    /// Starts with it, exactly as typed.
+    /// Starts with it, ignoring ASCII case (the whole candidate too).
     Prefix,
-    /// A word inside it starts with it, ignoring ASCII case: the whole
-    /// candidate, or after `-_./:@` or a space, or at a lower→upper case
-    /// change (`pick` → `cherry-pick`, `Rs` → `fooRs`).
-    WordStart,
-    /// Holds its characters in order, ignoring ASCII case (`gco` →
-    /// `git-checkout`).
+    /// Holds its characters in order, ignoring case (`gco` →
+    /// `git-checkout`); only for a typed word with a letter or digit
+    /// (punctuation alone matches too much).
     Subsequence,
 }
 
-/// Typed characters needed before a candidate may match other than by
-/// prefix (shorter words match too much).
-const FUZZY_MIN: usize = 3;
-
 /// How `cand` matches `typed`, if at all ([`Match`]).
 pub fn match_kind(cand: &str, typed: &str) -> Option<Match> {
-    if cand.starts_with(typed) {
+    if prefix_case(cand, typed).is_some() {
         return Some(Match::Prefix);
     }
-    if typed.chars().count() < FUZZY_MIN {
+    if !typed.chars().any(char::is_alphanumeric) {
         return None;
-    }
-    let (c, t) = (cand.as_bytes(), typed.as_bytes());
-    let mut prev: Option<char> = None;
-    for (i, ch) in cand.char_indices() {
-        let boundary = match prev {
-            None => true,
-            Some(p) => "-_./:@ ".contains(p) || (p.is_lowercase() && ch.is_uppercase()),
-        };
-        if boundary && c.len() - i >= t.len() && c[i..i + t.len()].eq_ignore_ascii_case(t) {
-            return Some(Match::WordStart);
-        }
-        prev = Some(ch);
     }
     let mut rest = cand.chars();
     typed
         .chars()
-        .all(|tc| rest.any(|cc| cc.eq_ignore_ascii_case(&tc)))
+        .all(|tc| rest.any(|cc| same_char(cc, tc)))
         .then_some(Match::Subsequence)
 }
 
+/// Equal ignoring case.
+fn same_char(a: char, b: char) -> bool {
+    a == b || a.to_lowercase().eq(b.to_lowercase())
+}
+
+/// `Some(case_sensitive)` when `cand` starts with `typed` ignoring ASCII
+/// case: `true` when exactly as typed.
+fn prefix_case(cand: &str, typed: &str) -> Option<bool> {
+    if cand.starts_with(typed) {
+        return Some(true);
+    }
+    let head = cand.get(..typed.len())?;
+    head.eq_ignore_ascii_case(typed).then_some(false)
+}
+
 /// Indices of the `items` whose name (`None`: skipped) matches `typed`,
-/// best first ([`Match`], then index), at most `cap`. The fuzzy kinds are
-/// only tried when the prefix matches leave room, so a large list costs
-/// one `starts_with` per item for a common prefix.
+/// best first ([`Match`], then index), at most `cap`. Subsequence matches
+/// are only tried when the prefix matches leave room, so a large list
+/// costs one prefix check per item for a common prefix.
 fn best_matches<T>(
     items: &[T],
     name: impl Fn(&T) -> Option<&str>,
@@ -320,27 +317,328 @@ fn best_matches<T>(
     let mut found: Vec<(usize, Match)> = items
         .iter()
         .enumerate()
-        .filter(|(_, it)| name(it).is_some_and(|n| n.starts_with(typed)))
+        .filter(|(_, it)| name(it).is_some_and(|n| prefix_case(n, typed).is_some()))
         .map(|(i, _)| (i, Match::Prefix))
         .take(cap)
         .collect();
-    if found.len() < cap && typed.chars().count() >= FUZZY_MIN {
-        let mut fuzzy: Vec<(usize, Match)> = items
-            .iter()
-            .enumerate()
-            .filter_map(|(i, it)| {
-                let n = name(it)?;
-                match match_kind(n, typed)? {
-                    Match::Prefix => None, // already taken
-                    m => Some((i, m)),
-                }
-            })
-            .collect();
-        fuzzy.sort_by_key(|&(i, m)| (m, i));
-        fuzzy.truncate(cap - found.len());
-        found.extend(fuzzy);
+    if found.len() < cap && typed.chars().any(char::is_alphanumeric) {
+        let fuzzy = items.iter().enumerate().filter_map(|(i, it)| {
+            let n = name(it)?;
+            match match_kind(n, typed)? {
+                Match::Prefix => None, // already taken
+                m => Some((i, m)),
+            }
+        });
+        let room = cap - found.len();
+        found.extend(fuzzy.take(room));
     }
     found
+}
+
+/// How a menu row matches the word being completed (Warp's completion
+/// menu): exactly, as its start, or fuzzily (a subsequence, with a score).
+/// `cs`: exactly as typed (not only ignoring case).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuMatch {
+    Exact { cs: bool },
+    Prefix { cs: bool },
+    Fuzzy { score: i32 },
+}
+
+impl MenuMatch {
+    /// An exact or prefix match exactly as typed: what Tab's single-match
+    /// and common-prefix rules count.
+    pub fn case_sensitive(self) -> bool {
+        matches!(
+            self,
+            MenuMatch::Exact { cs: true } | MenuMatch::Prefix { cs: true }
+        )
+    }
+}
+
+/// How `cand` matches `query` for the menu, and the matched characters
+/// (char indices, for highlighting): an exact or prefix match ignoring
+/// ASCII case, else a subsequence when `query` has a letter or digit.
+pub fn menu_match(cand: &str, query: &str) -> Option<(MenuMatch, Vec<usize>)> {
+    if let Some(found) = menu_match_raw(cand, query) {
+        return Some(found);
+    }
+    // a word typed with quotes or backslashes (`"./my`, `My\ Dir`) against
+    // the backslash-escaped insert: both as literal text, the matched
+    // characters mapped back onto the insert
+    let typed = unescape_word(query);
+    let mut literal = String::with_capacity(cand.len());
+    let mut at = Vec::with_capacity(cand.len());
+    let mut chars = cand.chars().enumerate();
+    while let Some((i, c)) = chars.next() {
+        if c == '\\' {
+            if let Some((j, n)) = chars.next() {
+                literal.push(n);
+                at.push(j);
+            }
+        } else {
+            literal.push(c);
+            at.push(i);
+        }
+    }
+    if typed == query && literal == cand {
+        return None;
+    }
+    menu_match_raw(&literal, &typed).map(|(kind, hits)| {
+        (
+            kind,
+            hits.into_iter()
+                .filter_map(|h| at.get(h).copied())
+                .collect(),
+        )
+    })
+}
+
+fn menu_match_raw(cand: &str, query: &str) -> Option<(MenuMatch, Vec<usize>)> {
+    if let Some(cs) = prefix_case(cand, query) {
+        let n = query.chars().count();
+        let kind = if cand.len() == query.len() {
+            MenuMatch::Exact { cs }
+        } else {
+            MenuMatch::Prefix { cs }
+        };
+        return Some((kind, (0..n).collect()));
+    }
+    if !query.chars().any(char::is_alphanumeric) {
+        return None;
+    }
+    fuzzy_score(cand, query).map(|(score, at)| (MenuMatch::Fuzzy { score }, at))
+}
+
+/// A subsequence match of `query` in `text`, ignoring case: the best
+/// alignment's score and the matched char indices. Scored like fzf / skim:
+/// each matched character counts, more at a word start (after `-_./:@`,
+/// a space or a lower→upper change) and doubly so for the first one, a run
+/// of consecutive characters gains, a gap costs.
+pub fn fuzzy_score(text: &str, query: &str) -> Option<(i32, Vec<usize>)> {
+    const HIT: i32 = 16;
+    const BOUNDARY: i32 = 8;
+    const CAMEL: i32 = 7;
+    const RUN: i32 = 4;
+    const GAP_START: i32 = -3;
+    const GAP_MORE: i32 = -1;
+    const NONE: i32 = i32::MIN / 2;
+    let t: Vec<char> = text.chars().collect();
+    let q: Vec<char> = query.chars().collect();
+    if q.is_empty() {
+        return Some((0, Vec::new()));
+    }
+    // a cheap no first: most candidates are not subsequences
+    let mut rest = t.iter();
+    if q.len() > t.len() || !q.iter().all(|&qc| rest.any(|&tc| same_char(tc, qc))) {
+        return None;
+    }
+    let bonus = |j: usize| -> i32 {
+        let Some(&p) = j.checked_sub(1).and_then(|k| t.get(k)) else {
+            return BOUNDARY;
+        };
+        let c = t[j];
+        if !p.is_alphanumeric() {
+            BOUNDARY
+        } else if (p.is_lowercase() && c.is_uppercase()) || (p.is_alphabetic() && c.is_numeric()) {
+            CAMEL
+        } else {
+            0
+        }
+    };
+    let (n, m) = (t.len(), q.len());
+    // score[i][j]: the best with q[..=i] matched and q[i] at t[j]; from:
+    // where q[i - 1] sat; chunk: the bonus of the run's first character,
+    // which the rest of a run keeps (fzf)
+    let mut score = vec![vec![NONE; n]; m];
+    let mut from = vec![vec![usize::MAX; n]; m];
+    let mut chunk = vec![vec![0; n]; m];
+    for i in 0..m {
+        // the best earlier row entry two or more back, gap cost included
+        let (mut gap_best, mut gap_at) = (NONE, usize::MAX);
+        for j in i..n {
+            if i > 0 && j >= 2 {
+                if gap_best > NONE {
+                    gap_best += GAP_MORE;
+                }
+                let c = score[i - 1][j - 2];
+                if c > NONE && c + GAP_START > gap_best {
+                    (gap_best, gap_at) = (c + GAP_START, j - 2);
+                }
+            }
+            if !same_char(t[j], q[i]) {
+                continue;
+            }
+            let b = bonus(j);
+            if i == 0 {
+                (score[0][j], chunk[0][j]) = (HIT + 2 * b, b);
+                continue;
+            }
+            let (run, run_bonus) = match score[i - 1][j - 1] {
+                s if s > NONE => {
+                    let k = chunk[i - 1][j - 1].max(RUN);
+                    (s + HIT + b.max(k), k)
+                }
+                _ => (NONE, 0),
+            };
+            let gap = if gap_best > NONE {
+                gap_best + HIT + b
+            } else {
+                NONE
+            };
+            if run > NONE && run >= gap {
+                (score[i][j], from[i][j], chunk[i][j]) = (run, j - 1, run_bonus);
+            } else if gap > NONE {
+                (score[i][j], from[i][j], chunk[i][j]) = (gap, gap_at, b);
+            }
+        }
+    }
+    let (end, &best) = score[m - 1]
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| **s > NONE)
+        .max_by_key(|(j, s)| (**s, std::cmp::Reverse(*j)))?;
+    let mut at = vec![end];
+    let mut j = end;
+    for i in (1..m).rev() {
+        j = from[i][j];
+        at.push(j);
+    }
+    at.reverse();
+    Some((best, at))
+}
+
+/// The menu rows for `query` among `items` (Warp's order): the exact match
+/// as typed, then one ignoring case, then the prefix matches in `items`'
+/// order, then the subsequence matches by score; each with its matched
+/// characters (char indices). Rows not matching are left out; a second
+/// exact match is a duplicate and left out too.
+pub fn filter_by_query(items: &[Completion], query: &str) -> Vec<(usize, MenuMatch, Vec<usize>)> {
+    let mut exact: Option<(usize, MenuMatch, Vec<usize>)> = None;
+    let mut exact_ci: Option<(usize, MenuMatch, Vec<usize>)> = None;
+    let mut prefix = Vec::new();
+    let mut fuzzy = Vec::new();
+    for (i, c) in items.iter().enumerate() {
+        let Some((kind, at)) = menu_match(&c.insert, query) else {
+            continue;
+        };
+        match kind {
+            MenuMatch::Exact { cs: true } if exact.is_none() => exact = Some((i, kind, at)),
+            MenuMatch::Exact { cs: false } if exact_ci.is_none() => exact_ci = Some((i, kind, at)),
+            MenuMatch::Prefix { .. } => prefix.push((i, kind, at)),
+            MenuMatch::Fuzzy { .. } => fuzzy.push((i, kind, at)),
+            _ => {}
+        }
+    }
+    let score = |k: &MenuMatch| match k {
+        MenuMatch::Fuzzy { score } => *score,
+        _ => 0,
+    };
+    // best score first; equal scores keep their order
+    fuzzy.sort_by_key(|(_, k, _)| std::cmp::Reverse(score(k)));
+    exact
+        .into_iter()
+        .chain(exact_ci)
+        .chain(prefix)
+        .chain(fuzzy)
+        .collect()
+}
+
+/// The longest common prefix of `words` (on character boundaries).
+pub fn common_prefix<'a>(mut words: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    let first = words.next()?;
+    let mut len = first.len();
+    for w in words {
+        len = first
+            .char_indices()
+            .zip(w.chars())
+            .take_while(|((_, a), b)| a == b)
+            .last()
+            .map_or(0, |((i, a), _)| i + a.len_utf8())
+            .min(len);
+    }
+    Some(&first[..len])
+}
+
+/// What Tab does with the menu closed (Warp's explicit Tab completion),
+/// for the candidates `items` of the word `query`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TabAction {
+    /// No candidate.
+    Nothing,
+    /// Exactly one prefix match as typed (or none such and exactly one
+    /// ignoring case): insert `items[.0]`, no menu.
+    Insert(usize),
+    /// Insert the candidates' common prefix (longer than the word), then
+    /// open the menu.
+    CommonPrefix(String),
+    /// Open the menu, the first row selected.
+    Open,
+}
+
+/// [`TabAction`] for `items` (the word candidates, best first) of `query`.
+pub fn tab_action(items: &[Completion], query: &str) -> TabAction {
+    if filter_by_query(items, query).is_empty() {
+        return TabAction::Nothing;
+    }
+    let kinds: Vec<Option<MenuMatch>> = items
+        .iter()
+        .map(|c| menu_match(&c.insert, query).map(|(k, _)| k))
+        .collect();
+    let cs: Vec<usize> = (0..items.len())
+        .filter(|&i| kinds[i].is_some_and(MenuMatch::case_sensitive))
+        .collect();
+    let ci: Vec<usize> = (0..items.len())
+        .filter(|&i| {
+            matches!(
+                kinds[i],
+                Some(MenuMatch::Exact { cs: false } | MenuMatch::Prefix { cs: false })
+            )
+        })
+        .collect();
+    match (cs.as_slice(), ci.as_slice()) {
+        ([one], _) | ([], [one]) => return TabAction::Insert(*one),
+        _ => {}
+    }
+    if let Some(p) = common_prefix(cs.iter().map(|&i| items[i].insert.as_str()))
+        && p.len() > query.len()
+        && p.starts_with(query)
+    {
+        return TabAction::CommonPrefix(p.to_string());
+    }
+    TabAction::Open
+}
+
+/// What Tab does in the open menu: the common prefix of the rows matching
+/// as typed (`rows`, with their match), when longer than the word `query`
+/// (`close`: it was the only such row), else `None` (the next row).
+pub fn menu_tab(rows: &[(&str, MenuMatch)], query: &str) -> Option<(String, bool)> {
+    let cs: Vec<&str> = rows
+        .iter()
+        .filter(|(_, k)| k.case_sensitive())
+        .map(|(s, _)| *s)
+        .collect();
+    let p = common_prefix(cs.iter().copied())?;
+    (p.len() > query.len() && p.starts_with(query)).then(|| (p.to_string(), cs.len() == 1))
+}
+
+/// Whether an accepted completion `result` gets a space after it (Warp):
+/// only when it ends the command line (`at_end`), does not end in `/` (a
+/// path goes on) or `=` (a value follows), and the menu does not open as
+/// you type.
+pub fn space_after(result: &str, at_end: bool, as_you_type: bool) -> bool {
+    at_end && !as_you_type && !result.ends_with('/') && !result.ends_with('=')
+}
+
+/// Whether ⏎ accepts the selected row (`selected`) instead of running the
+/// line: always with the menu opened by Tab; as you type, unless what
+/// stands from the word's start to the end of the line (`typed`) already
+/// is it (a trailing `/` aside).
+pub fn enter_accepts(as_you_type: bool, typed: &str, selected: Option<&str>) -> bool {
+    if !as_you_type {
+        return selected.is_some();
+    }
+    selected.is_none_or(|s| typed != s && s.strip_suffix('/').is_none_or(|bare| typed != bare))
 }
 
 /// Order of the sources at equal [`Match`]: command names, subcommands,
@@ -381,9 +679,15 @@ fn recency<'a>(history: &'a [String], shell_history: &'a [String]) -> HashMap<&'
     map
 }
 
-/// Sort word candidates: match kind, source, recency, then each provider's
-/// own order (the sort is stable).
-fn rank(words: &mut [(Completion, Match)], history: &[String], shell_history: &[String]) {
+/// Sort word candidates: match kind (a subsequence by its score against
+/// `typed`, best first), source, recency, then each provider's own order
+/// (the sort is stable).
+fn rank(
+    words: &mut [(Completion, Match)],
+    typed: &str,
+    history: &[String],
+    shell_history: &[String],
+) {
     if words.len() < 2 {
         return;
     }
@@ -394,7 +698,18 @@ fn rank(words: &mut [(Completion, Match)], history: &[String], shell_history: &[
             .copied()
             .unwrap_or(usize::MAX)
     };
-    words.sort_by_cached_key(|(c, m)| (*m, source_rank(c.source), age(c)));
+    let score = |c: &Completion, m: Match| match m {
+        Match::Prefix => 0,
+        Match::Subsequence => fuzzy_score(&c.insert, typed).map_or(0, |(s, _)| s),
+    };
+    words.sort_by_cached_key(|(c, m)| {
+        (
+            *m,
+            std::cmp::Reverse(score(c, *m)),
+            source_rank(c.source),
+            age(c),
+        )
+    });
 }
 
 /// Gather completions for the token at `cursor`. `history` is the pane's
@@ -500,9 +815,6 @@ fn gather_with(
             } else {
                 if res.offer_subcommands {
                     for s in res.subcommands {
-                        if s.name == token {
-                            continue;
-                        }
                         if let Some(m) = match_kind(s.name, token) {
                             words.push((
                                 Completion {
@@ -541,8 +853,7 @@ impl Gathered {
     /// the user's shell's own completions): each is escaped as one word; a
     /// word Rift already offers keeps Rift's entry (a directory with or
     /// without its trailing `/`: bash's `complete -d` lists `src`, Rift
-    /// `src/`), and one with a control character or equal to the typed word
-    /// is skipped.
+    /// `src/`), and one with a control character is skipped.
     pub fn add(&mut self, items: &[(String, String)], source: &'static str) {
         let have: std::collections::HashSet<String> = self
             .words
@@ -551,7 +862,7 @@ impl Gathered {
             .collect();
         let mut added = std::collections::HashSet::new();
         for (value, desc) in items {
-            if value.is_empty() || *value == self.typed {
+            if value.is_empty() {
                 continue;
             }
             let Some(insert) = escape_word(value) else {
@@ -591,9 +902,6 @@ impl Gathered {
         );
         for (i, m) in found {
             let (v, desc) = &items[i];
-            if *v == self.typed {
-                continue;
-            }
             if let Some(insert) = escape_word(v) {
                 self.words.push((
                     Completion {
@@ -698,8 +1006,75 @@ impl Gathered {
         history: &[String],
         shell_history: &[String],
     ) -> Vec<Completion> {
+        self.finish_with(buffer, ranked, history, shell_history, &mut |_| true)
+    }
+
+    /// [`finish_ranked`](Self::finish_ranked), leaving out the history lines
+    /// whose spec path arguments do not exist in `cwd` (the pane's local
+    /// directory; `None`: no check), [`command_valid`]. The checks share
+    /// [`VALIDATE_BUDGET`]; lines past it are kept unchecked.
+    pub fn finish_checked(
+        self,
+        buffer: &str,
+        ranked: &[&str],
+        history: &[String],
+        shell_history: &[String],
+        cwd: Option<&str>,
+    ) -> Vec<Completion> {
+        self.finish_checked_except(buffer, ranked, history, shell_history, cwd, &|_| false)
+    }
+
+    /// [`finish_checked`](Self::finish_checked), leaving out too the
+    /// history lines `ignored` names (`ignored_suggestions`: the ghost
+    /// text's ✕), so they hold no place of a line to suggest.
+    pub fn finish_checked_except(
+        self,
+        buffer: &str,
+        ranked: &[&str],
+        history: &[String],
+        shell_history: &[String],
+        cwd: Option<&str>,
+        ignored: &dyn Fn(&str) -> bool,
+    ) -> Vec<Completion> {
+        let deadline = Instant::now() + VALIDATE_BUDGET;
+        self.finish_checked_until(
+            buffer,
+            ranked,
+            history,
+            shell_history,
+            cwd,
+            deadline,
+            ignored,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_checked_until(
+        self,
+        buffer: &str,
+        ranked: &[&str],
+        history: &[String],
+        shell_history: &[String],
+        cwd: Option<&str>,
+        deadline: Instant,
+        ignored: &dyn Fn(&str) -> bool,
+    ) -> Vec<Completion> {
+        self.finish_with(buffer, ranked, history, shell_history, &mut |line| {
+            !ignored(line)
+                && cwd.is_none_or(|cwd| Instant::now() >= deadline || command_valid(line, cwd))
+        })
+    }
+
+    fn finish_with(
+        self,
+        buffer: &str,
+        ranked: &[&str],
+        history: &[String],
+        shell_history: &[String],
+        valid: &mut dyn FnMut(&str) -> bool,
+    ) -> Vec<Completion> {
         let mut words = self.words;
-        rank(&mut words, history, shell_history);
+        rank(&mut words, &self.token, history, shell_history);
         let mut seen = std::collections::HashSet::new();
         let out: Vec<Completion> = words
             .into_iter()
@@ -707,11 +1082,226 @@ impl Gathered {
             .filter(|c| seen.insert(c.insert.clone()))
             .take(MAX_WORDS)
             .collect();
-        with_history(out, seen, buffer, ranked, history, shell_history)
+        with_history(out, seen, buffer, ranked, history, shell_history, valid)
     }
 }
 
-/// `out` followed by the history lines for `buffer`.
+/// The time [`Gathered::finish_checked`] spends checking history lines.
+pub const VALIDATE_BUDGET: Duration = Duration::from_millis(150);
+
+/// How many words of a command [`command_valid`] reads.
+const VALIDATE_WORDS: usize = 64;
+
+/// The commands with a Rift spec whose path argument must already exist.
+/// Others with a path spec are left out: `grep`/`rg` take a pattern first,
+/// `tar` a mode, `scp` a destination, `git add`/`rm`/`restore` name deleted
+/// files, `cargo new` a directory to create.
+const READS_EXISTING: &[&str] = &["cat", "cd", "ls", "python", "python3"];
+
+/// Script runners: their first argument that is not an option is the
+/// script they read, which must exist.
+const SCRIPT_RUNNERS: &[&str] = &[
+    "bash", "sh", "zsh", "fish", "node", "ruby", "perl", "source", ".",
+];
+
+/// Whether `command` may be suggested in directory `cwd` (Warp's
+/// autosuggestion validation): in each of its commands whose spec path
+/// argument must exist (`READS_EXISTING`), the first positional argument
+/// must name a path there (a directory for `cd`), and a script runner's
+/// (`SCRIPT_RUNNERS`) script must be a file there. Any other command, an
+/// option the spec does not know (a parse it cannot follow), code given
+/// inline (`bash -c`, `node -e`), a word with a variable, glob or `~user`,
+/// a remote `host:path` or a redirection is taken as valid.
+pub fn command_valid(command: &str, cwd: &str) -> bool {
+    let mut end = command.len();
+    loop {
+        let start = completion_specs::segment_start(&command[..end]);
+        if !segment_valid(&command[start..end], cwd) {
+            return false;
+        }
+        if start == 0 {
+            return true;
+        }
+        // drop the separator (`|`, `||`, `&&`, `;`, a newline) before it
+        end = command[..start]
+            .trim_end_matches(['|', '&', ';', '\n', ' ', '\t'])
+            .len();
+        if end == 0 {
+            return true;
+        }
+    }
+}
+
+fn segment_valid(segment: &str, cwd: &str) -> bool {
+    let words = completion_specs::tokenize(segment);
+    let Some((cmd, args)) = words.split_first() else {
+        return true;
+    };
+    if SCRIPT_RUNNERS.contains(&cmd.as_str()) {
+        return script_valid(cmd, &args[..args.len().min(VALIDATE_WORDS)], cwd);
+    }
+    let Some(spec) =
+        completion_specs::lookup(cmd).filter(|_| READS_EXISTING.contains(&cmd.as_str()))
+    else {
+        return true;
+    };
+    let args = &args[..args.len().min(VALIDATE_WORDS)];
+    let mut i = 0;
+    while i < args.len() {
+        let w = &args[i];
+        let res = completion_specs::resolve(spec, &args[..i]);
+        if w.trim_start_matches(|c: char| c.is_ascii_digit())
+            .starts_with(['<', '>', '&'])
+        {
+            // a redirection: its target is not an argument
+            return true;
+        }
+        if w.starts_with('-') && w != "-" && w != "--" {
+            let Some(o) = completion_specs::find_option(&res.options, w) else {
+                return true;
+            };
+            i += if o.takes_arg && !w.contains('=') {
+                2
+            } else {
+                1
+            };
+            continue;
+        }
+        if w == "-" || w == "--" {
+            i += 1;
+            continue;
+        }
+        if res.offer_subcommands && res.subcommands.iter().any(|s| s.name == *w) {
+            i += 1;
+            continue;
+        }
+        // the first positional at this level decides
+        return match res.args {
+            ArgKind::Path => path_exists(w, cwd, false),
+            ArgKind::Dir => path_exists(w, cwd, true),
+            _ => true,
+        };
+    }
+    true
+}
+
+/// A script runner `cmd`'s arguments `args`: the first one that is not an
+/// option (nor an option's value) must be a file in `cwd`. Code given
+/// inline or read from stdin (`bash -c`, `sh -s`, `node -e`, `-`), a help
+/// or version flag, or no script at all is valid.
+fn script_valid(cmd: &str, args: &[String], cwd: &str) -> bool {
+    let shell = matches!(cmd, "bash" | "sh" | "zsh");
+    // options whose value is the next word, and those giving inline code
+    let (takes_value, inline): (&[&str], &[&str]) = match cmd {
+        "bash" | "sh" | "zsh" => (&["-o", "+o", "-O", "+O", "--rcfile", "--init-file"], &[]),
+        "fish" => (
+            &[
+                "-C",
+                "--init-command",
+                "-d",
+                "--debug",
+                "-o",
+                "--debug-output",
+                "-f",
+                "--features",
+            ],
+            &["-c", "--command"],
+        ),
+        "node" => (
+            &[
+                "-r",
+                "--require",
+                "--import",
+                "--loader",
+                "--experimental-loader",
+                "-C",
+                "--conditions",
+                "--input-type",
+                "--title",
+                "--env-file",
+            ],
+            &[
+                "-e",
+                "--eval",
+                "-p",
+                "--print",
+                "-i",
+                "--interactive",
+                "--test",
+            ],
+        ),
+        "ruby" => (&["-I", "-r", "-C", "-E", "-F"], &["-e"]),
+        "perl" => (&["-I", "-M", "-m"], &["-e", "-E"]),
+        _ => (&[], &[]),
+    };
+    let mut i = 0;
+    while i < args.len() {
+        let w = args[i].as_str();
+        if w.trim_start_matches(|c: char| c.is_ascii_digit())
+            .starts_with(['<', '>', '&'])
+        {
+            // a redirection (`bash < script`): no script argument
+            return true;
+        }
+        let version = matches!(w, "-h" | "-v" | "-V") && !shell;
+        if w == "-" || version || matches!(w, "--help" | "--version") {
+            return true;
+        }
+        if w == "--" {
+            return args.get(i + 1).is_none_or(|s| script_exists(s, cwd));
+        }
+        let option = w.starts_with('-') || (shell && w.starts_with('+'));
+        if !option {
+            return script_exists(w, cwd);
+        }
+        if inline.contains(&w)
+            || inline
+                .iter()
+                .any(|o| o.starts_with("--") && w.starts_with(&format!("{o}=")))
+        {
+            return true;
+        }
+        // a shell's short options together (`-xc`): `c` or `s` read no file
+        if shell && !w.starts_with("--") && w[1..].contains(['c', 's']) {
+            return true;
+        }
+        i += if takes_value.contains(&w) { 2 } else { 1 };
+    }
+    true
+}
+
+/// Whether the path argument `word` names something in `cwd` (a directory
+/// when `dir`); a word Rift cannot resolve without the shell counts.
+fn path_exists(word: &str, cwd: &str, dir: bool) -> bool {
+    match resolve(word, cwd) {
+        Some(path) if dir => path.is_dir(),
+        Some(path) => path.exists(),
+        None => true,
+    }
+}
+
+/// Whether the script argument `word` is a file in `cwd` (see
+/// [`path_exists`]).
+fn script_exists(word: &str, cwd: &str) -> bool {
+    resolve(word, cwd).is_none_or(|p| p.is_file())
+}
+
+/// The path a path argument names in `cwd`; `None` for a word Rift cannot
+/// resolve without the shell (a variable, glob, `~user`, `host:path`).
+fn resolve(word: &str, cwd: &str) -> Option<PathBuf> {
+    if word.is_empty()
+        || word.contains(['$', '*', '?', '[', '{', '`', ':', '<', '>', '&'])
+        || (word.starts_with('~') && word != "~" && !word.starts_with("~/"))
+    {
+        return None;
+    }
+    Some(match word.strip_prefix('~') {
+        Some(rest) => PathBuf::from(std::env::var_os("HOME")?).join(rest.trim_start_matches('/')),
+        None => PathBuf::from(cwd).join(word),
+    })
+}
+
+/// `out` followed by the history lines for `buffer` that are `valid`.
 fn with_history(
     mut out: Vec<Completion>,
     mut seen: std::collections::HashSet<String>,
@@ -719,6 +1309,7 @@ fn with_history(
     ranked: &[&str],
     history: &[String],
     shell_history: &[String],
+    valid: &mut dyn FnMut(&str) -> bool,
 ) -> Vec<Completion> {
     // history: whole-buffer prefix matches (drives ghost text); Rift's own
     // history ranked by directory first, then the pane's own entries, then
@@ -736,7 +1327,9 @@ fn with_history(
             if h.starts_with(buffer)
                 && h != buffer
                 && !h.contains('\n')
+                // a line left out is not checked again
                 && seen.insert(h.to_string())
+                && valid(h)
             {
                 out.push(Completion {
                     insert: h.to_string(),
@@ -753,53 +1346,33 @@ fn with_history(
     out
 }
 
-/// Typed characters needed before a command name may match as a
-/// subsequence (`gco` would match too many names).
-const COMMAND_SUBSEQUENCE_MIN: usize = 4;
-
 /// Command-name completions for `token` (as typed) from the sorted `cmds`,
-/// at most 12, prefix matches first. A name that does not start with the
-/// typed word matches only when it starts with the same character (any
-/// case), by word start from 3 typed characters or as a subsequence from 4
-/// (`tfa` never finds `convertformat`). Inserts are
-/// [`escape_word`]-escaped.
+/// at most 12: the names starting with it as typed, then those starting
+/// with it in another case, then those holding it as a subsequence (see
+/// [`match_kind`]). An empty word (nothing typed yet) lists none. Inserts
+/// are [`escape_word`]-escaped.
 fn command_completions(cmds: &[String], token: &str) -> Vec<(Completion, Match)> {
     const MAX: usize = 12;
     let typed = unescape_word(token);
-    if typed.chars().count() < 2
-        || typed.contains('/')
-        || typed.starts_with('.')
-        || typed.starts_with('~')
-    {
+    if typed.is_empty() || typed.contains('/') || typed.starts_with('.') || typed.starts_with('~') {
         return Vec::new();
     }
     let start = cmds.partition_point(|c| c.as_str() < typed.as_str());
     let mut found: Vec<(&String, Match)> = cmds[start..]
         .iter()
         .take_while(|c| c.starts_with(&typed))
-        .filter(|c| **c != typed)
         .map(|c| (c, Match::Prefix))
         .take(MAX)
         .collect();
-    let len = typed.chars().count();
-    if found.len() < MAX && len >= FUZZY_MIN {
-        let first = typed.chars().next();
-        let mut fuzzy: Vec<(&String, Match)> = cmds
+    if found.len() < MAX {
+        let mut other: Vec<(&String, Match)> = cmds
             .iter()
             .filter(|c| !c.starts_with(&typed))
-            .filter(|c| {
-                c.chars()
-                    .next()
-                    .zip(first)
-                    .is_some_and(|(a, b)| a.eq_ignore_ascii_case(&b))
-            })
-            .filter_map(|c| match match_kind(c, &typed)? {
-                Match::Subsequence if len < COMMAND_SUBSEQUENCE_MIN => None,
-                m => Some((c, m)),
-            })
+            .filter_map(|c| Some((c, match_kind(c, &typed)?)))
             .collect();
-        fuzzy.sort_by_key(|(_, m)| *m);
-        found.extend(fuzzy.into_iter().take(MAX - found.len()));
+        // the other case's prefixes first (stable: name order within)
+        other.sort_by_key(|(_, m)| *m);
+        found.extend(other.into_iter().take(MAX - found.len()));
     }
     found
         .into_iter()
@@ -845,9 +1418,6 @@ fn option_completions(res: &completion_specs::Resolved, token: &str) -> Vec<(Com
             (!o.short.is_empty() && o.short.starts_with(token)).then_some((o.short, Match::Prefix))
         };
         let Some((form, m)) = found else { continue };
-        if form == token {
-            continue;
-        }
         // skip a non-repeatable flag already present in the command
         if !o.repeatable
             && res.used_options.iter().any(|u| {
@@ -1070,7 +1640,8 @@ mod tests {
         assert!(names.contains(&"chlorine"), "{names:?}");
         assert!(names.contains(&"my\\ file"), "inserted escaped: {names:?}");
         assert!(!names.iter().any(|n| n.contains('\x07')));
-        assert!(!names.contains(&"ch"));
+        // the typed word itself is a row too (Warp's exact match)
+        assert!(names.contains(&"ch"));
         // control: merged in first, the shell's row would be the one kept
         let mut g = gather("git ch", 6, None, None);
         let rift_row = g
@@ -1184,8 +1755,8 @@ mod tests {
     }
 
     #[test]
-    fn command_names_match_fuzzily_only_from_their_first_character() {
-        let cmds: Vec<String> = ["convertformat", "terraform", "tf-apply", "tofu-apply"]
+    fn command_names_match_as_typed_then_any_case_then_fuzzily() {
+        let cmds: Vec<String> = ["Gimp", "convertformat", "gi", "git", "git-lfs", "tf-apply"]
             .iter()
             .map(|s| s.to_string())
             .collect();
@@ -1195,19 +1766,13 @@ mod tests {
                 .map(|(c, _)| c.insert)
                 .collect()
         };
-        // a subsequence elsewhere in the name, or from 3 characters: no
-        assert!(names("tfa").is_empty(), "{:?}", names("tfa"));
-        // from 4, anchored on the first character
-        assert_eq!(names("tfap"), ["tf-apply", "tofu-apply"]);
-        // control: matched freely, `tfa` finds `convertformat`
-        assert_eq!(match_kind("convertformat", "tfa"), Some(Match::Subsequence));
-        // word start needs the first character too
-        let cmds: Vec<String> = vec!["git-pick".into(), "pick-me".into()];
-        let got: Vec<String> = command_completions(&cmds, "Pick")
-            .into_iter()
-            .map(|(c, _)| c.insert)
-            .collect();
-        assert_eq!(got, ["pick-me"]);
+        // one typed character is enough; the exact name is a row too
+        assert_eq!(names("gi"), ["gi", "git", "git-lfs", "Gimp"]);
+        assert_eq!(names("git"), ["git", "git-lfs"]);
+        // a subsequence anywhere in the name (Warp's fuzzy match)
+        assert_eq!(names("tfa"), ["convertformat", "tf-apply"]);
+        // nothing typed: none listed (an empty word would list them all)
+        assert!(names("").is_empty());
     }
 
     #[test]
@@ -1339,7 +1904,8 @@ mod tests {
         assert_eq!(paths(r#"cat "./a\b""#), [r"./a\\b.txt"]);
         assert_eq!(paths(r#"cat "./a\b"#), [r"./a\\b.txt"]);
         assert_eq!(paths(r"cat ./a\\b"), [r"./a\\b.txt"]);
-        assert_eq!(paths(r"cat ./ab"), ["./ab.txt"]);
+        // the prefix first; `a\b.txt` holds `ab` as a subsequence
+        assert_eq!(paths(r"cat ./ab"), ["./ab.txt", r"./a\\b.txt"]);
         assert_eq!(paths(r#"cat "./d\x/i"#), [r"./d\\x/in.txt"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1449,14 +2015,16 @@ mod tests {
 
     #[test]
     fn path_commands_complete_first_word_only() {
-        // `ls` exists on every unix PATH; completing "l" needs 2 chars
-        assert!(complete("l", 1, &[], &[], None).is_empty());
-        let out = complete("ls", 2, &[], &[], None);
+        // `ls` exists on every unix PATH; one typed character completes
+        let out = complete("l", 1, &[], &[], None);
         assert!(
             out.iter()
-                .all(|c| c.source == "command" && c.insert.starts_with("ls"))
+                .any(|c| c.source == "command" && c.insert.starts_with('l'))
         );
-        assert!(out.iter().all(|c| c.insert != "ls"));
+        let out = complete("ls", 2, &[], &[], None);
+        assert!(out.iter().all(|c| c.source == "command"));
+        // the exact name first (Warp's exact match), the longer names after
+        assert_eq!(out[0].insert, "ls");
         // not the first word: no command completion
         let out = complete("echo ls", 7, &[], &[], None);
         assert!(out.iter().all(|c| c.source != "command"));
@@ -1491,6 +2059,8 @@ mod tests {
             repo: Some(cwd.into()),
             finished,
             exit: Some(0),
+            session: None,
+            seq: None,
         };
         // the newer command ran in another directory: the one run here wins
         let store = vec![at("pnpm dev", "/a", 1), at("pnpm dev:web", "/b", 2)];
@@ -1501,6 +2071,186 @@ mod tests {
         assert_eq!(
             inserts_of(&out, "history"),
             ["pnpm dev", "pnpm dev:web", "pnpm deploy", "pnpm dedupe"]
+        );
+    }
+
+    #[test]
+    fn history_lines_naming_a_missing_file_are_skipped() {
+        let dir = scratch("valid");
+        std::fs::write(dir.join("here.txt"), "").unwrap();
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        let cwd = dir.to_str().unwrap();
+        let ranked = ["cat gone.txt", "cat here.txt"];
+        let out =
+            gather("cat ", 4, None, None).finish_checked("cat ", &ranked, &[], &[], Some(cwd));
+        assert_eq!(inserts_of(&out, "history"), ["cat here.txt"]);
+        // the ghost is the first history line: the next match
+        assert_eq!(
+            out.iter().find(|c| c.source == "history").unwrap().insert,
+            "cat here.txt"
+        );
+        // pane and shell history are checked too
+        let pane = vec!["cat here.txt".to_string(), "cat gone.txt".to_string()];
+        let out = gather("cat ", 4, None, None).finish_checked("cat ", &[], &pane, &[], Some(cwd));
+        assert_eq!(inserts_of(&out, "history"), ["cat here.txt"]);
+        // a remote pane (no local directory) checks nothing
+        let out = gather("cat ", 4, None, None).finish_checked("cat ", &ranked, &[], &[], None);
+        assert_eq!(inserts_of(&out, "history"), ranked);
+        for (line, valid) in [
+            ("cat gone.txt", false),
+            ("cat here.txt", true),
+            ("cat sub/../here.txt", true),
+            ("cd sub", true),
+            ("cd here.txt", false),
+            ("cd gone", false),
+            ("cd", true),
+            ("cd -", true),
+            ("ls -la gone", true), // an option the spec does not know
+            ("ls --all gone", false),
+            ("ls here.txt gone", true), // only the first positional
+            ("git add gone.txt", true), // stages a deletion
+            ("cargo new gone", true),
+            ("grep x here.txt", true),
+            ("echo hi && cat gone.txt", false),
+            ("cat gone.txt; ls", false),
+            ("cat here.txt | grep x gone", true),
+            ("cat $HOME/x", true),
+            ("cat *.md", true),
+            ("cat ~nobody/x", true),
+            ("scp host:gone.txt .", true),
+            ("cat > gone.txt", true),
+            ("python3 -m http.server", true),
+            ("frobnicate gone.txt", true), // no Rift spec: kept
+            ("bash scripts/db.sh backup", false),
+        ] {
+            assert_eq!(command_valid(line, cwd), valid, "{line}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_script_runners_script_must_be_a_file_here() {
+        let dir = scratch("scripts");
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        std::fs::write(dir.join("scripts/prisma-admin.sh"), "").unwrap();
+        std::fs::write(dir.join("app.js"), "").unwrap();
+        let cwd = dir.to_str().unwrap();
+        for (line, valid) in [
+            ("bash scripts/prisma-admin.sh reset --force", true),
+            ("bash scripts/gone.sh reset", false),
+            ("bash scripts", false), // a directory is no script
+            ("sh -x scripts/prisma-admin.sh", true),
+            ("sh -x scripts/gone.sh", false),
+            ("zsh -o errexit scripts/gone.sh", false),
+            ("zsh -o errexit scripts/prisma-admin.sh", true),
+            ("bash -c 'rm gone.sh'", true), // inline code
+            ("bash -xc 'echo'", true),
+            ("bash -s arg", true), // the script comes on stdin
+            ("bash < gone.sh", true),
+            ("bash", true),
+            ("bash -- gone.sh", false),
+            ("fish -c 'ls gone'", true),
+            ("fish gone.fish", false),
+            ("node app.js", true),
+            ("node -r dotenv/config app.js", true),
+            ("node -r dotenv/config gone.js", false),
+            ("node -e 'require(\"gone\")'", true),
+            ("node --version", true),
+            ("ruby gone.rb", false),
+            ("ruby -e 'p 1'", true),
+            ("perl -I lib gone.pl", false),
+            ("source gone.env", false),
+            (". ./scripts/prisma-admin.sh", true),
+            (". gone/activate", false),
+            ("bash $SCRIPT", true),
+            ("bash ~nobody/x.sh", true),
+            ("echo hi && bash scripts/gone.sh", false),
+        ] {
+            assert_eq!(command_valid(line, cwd), valid, "{line}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn history_checks_stop_at_the_budget() {
+        // past the budget every line is kept unchecked
+        let dir = scratch("budget");
+        let cwd = dir.to_str().unwrap();
+        let lines: Vec<String> = (0..5).map(|i| format!("cat gone{i}.txt")).collect();
+        let ranked: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let finish = |deadline| {
+            let out = gather("cat ", 4, None, None).finish_checked_until(
+                "cat ",
+                &ranked,
+                &[],
+                &[],
+                Some(cwd),
+                deadline,
+                &|_| false,
+            );
+            inserts_of(&out, "history").len()
+        };
+        assert_eq!(finish(Instant::now() + VALIDATE_BUDGET), 0);
+        assert_eq!(finish(Instant::now()), 5);
+        assert_eq!(VALIDATE_BUDGET, Duration::from_millis(150));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ignored_lines_leave_every_history_source_and_free_their_place() {
+        // Rift's ranked history, the pane's own, the imported shell's: an
+        // ignored line is no history row from any of them (exact lines:
+        // another line starting with it stays)
+        let ignored = ["git push --force", "git pull", "git status"];
+        let is_ignored = |l: &str| ignored.contains(&l);
+        let ranked = ["git push --force", "git push"];
+        let pane = vec!["git pull".to_string(), "git pull --rebase".to_string()];
+        // (newest last, as imported)
+        let shell = vec!["git stash".to_string(), "git status".to_string()];
+        let out = gather("git ", 4, None, None).finish_checked_except(
+            "git ",
+            &ranked,
+            &pane,
+            &shell,
+            None,
+            &is_ignored,
+        );
+        let rows = inserts_of(&out, "history");
+        assert_eq!(
+            rows,
+            ["git push", "git pull --rebase", "git stash"],
+            "{rows:?}"
+        );
+        // unfiltered, they all show
+        let all =
+            gather("git ", 4, None, None).finish_checked("git ", &ranked, &pane, &shell, None);
+        assert!(
+            ignored
+                .iter()
+                .all(|l| inserts_of(&all, "history").contains(&l.to_string())),
+            "{all:?}"
+        );
+        // ignored lines hold no place: older lines fill the rows
+        let many: Vec<String> = (0..MAX_HISTORY * 2).map(|i| format!("echo {i}")).collect();
+        let first: Vec<&str> = many
+            .iter()
+            .rev()
+            .take(MAX_HISTORY)
+            .map(String::as_str)
+            .collect();
+        let out = gather("echo ", 5, None, None).finish_checked_except(
+            "echo ",
+            &[],
+            &many,
+            &[],
+            None,
+            &|l| first.contains(&l),
+        );
+        let rows = inserts_of(&out, "history");
+        assert_eq!(rows.len(), MAX_HISTORY);
+        assert!(
+            rows.iter().all(|r| !first.contains(&r.as_str())),
+            "{rows:?}"
         );
     }
 
@@ -1537,15 +2287,21 @@ mod tests {
                 && c.insert == "--message"
                 && !c.description.is_empty())
         );
-        // "--a" matches long forms by prefix
+        // "--a" matches long forms by prefix first, then as a subsequence
         let out = complete("git commit --a", 14, &[], &[], None);
         assert!(
             out.iter()
                 .any(|c| c.source == "option" && c.insert == "--amend")
         );
+        let opts: Vec<&str> = out
+            .iter()
+            .filter(|c| c.source == "option")
+            .map(|c| c.insert.as_str())
+            .collect();
+        let prefixed = opts.iter().take_while(|o| o.starts_with("--a")).count();
         assert!(
-            out.iter()
-                .all(|c| c.source != "option" || c.insert.starts_with("--a"))
+            prefixed > 0 && opts[prefixed..].iter().all(|o| !o.starts_with("--a")),
+            "{opts:?}"
         );
         // a non-repeatable flag already present is not offered again
         let out = complete("git commit --amend --a", 22, &[], &[], None);
@@ -1716,21 +2472,181 @@ mod tests {
     fn match_kinds() {
         assert_eq!(match_kind("checkout", "che"), Some(Match::Prefix));
         assert_eq!(match_kind("checkout", ""), Some(Match::Prefix));
-        assert_eq!(match_kind("cherry-pick", "pick"), Some(Match::WordStart));
-        assert_eq!(match_kind("Build.md", "bui"), Some(Match::WordStart));
-        assert_eq!(match_kind("fooBar", "bar"), Some(Match::WordStart));
+        assert_eq!(match_kind("checkout", "checkout"), Some(Match::Prefix));
+        // any case is a prefix
+        assert_eq!(match_kind("Makefile", "mak"), Some(Match::Prefix));
+        assert_eq!(match_kind("cherry-pick", "pick"), Some(Match::Subsequence));
         assert_eq!(match_kind("b_u_i.md", "bui"), Some(Match::Subsequence));
-        assert_eq!(match_kind("checkout", "cko"), Some(Match::Subsequence));
+        // one character is enough for a subsequence
+        assert_eq!(match_kind("cherry-pick", "k"), Some(Match::Subsequence));
         assert_eq!(match_kind("checkout", "xyz"), None);
-        // fewer than 3 typed characters: prefix only
-        assert_eq!(match_kind("cherry-pick", "pi"), None);
-        assert_eq!(match_kind("checkout", "co"), None);
-        // a prefix match is case-sensitive; any case still matches a word
-        assert_eq!(match_kind("Makefile", "mak"), Some(Match::WordStart));
+        // punctuation alone matches by prefix only
+        assert_eq!(match_kind("a-b", "-"), None);
+        assert_eq!(match_kind("-b", "-"), Some(Match::Prefix));
+    }
+
+    fn row(insert: &str) -> Completion {
+        Completion {
+            insert: insert.into(),
+            description: String::new(),
+            source: "shell",
+        }
+    }
+
+    fn rows(inserts: &[&str]) -> Vec<Completion> {
+        inserts.iter().map(|s| row(s)).collect()
     }
 
     #[test]
-    fn ranking_is_prefix_then_word_start_then_subsequence() {
+    fn menu_rows_are_exact_then_prefix_then_fuzzy_by_score() {
+        let items = rows(&["stash", "Status", "st", "ST", "staged", "list-tags", "sort"]);
+        let order: Vec<&str> = filter_by_query(&items, "st")
+            .into_iter()
+            .map(|(i, _, _)| items[i].insert.as_str())
+            .collect();
+        // exact as typed, exact in another case, prefixes in their order,
+        // then subsequences by score (a run at a word start beats a gap)
+        assert_eq!(
+            order,
+            ["st", "ST", "stash", "Status", "staged", "sort", "list-tags"]
+        );
+        // the matched characters: the prefix, or where the subsequence sat
+        let got = filter_by_query(&items, "st");
+        assert_eq!(got[2].2, vec![0, 1]);
+        let lt = got
+            .iter()
+            .find(|(i, _, _)| items[*i].insert == "list-tags")
+            .unwrap();
+        assert!(matches!(lt.1, MenuMatch::Fuzzy { .. }));
+        assert_eq!(lt.2, vec![2, 3]);
+        // no letter or digit: prefixes only
+        let dashes = rows(&["--all", "-a", "x-y"]);
+        let got: Vec<usize> = filter_by_query(&dashes, "-")
+            .into_iter()
+            .map(|r| r.0)
+            .collect();
+        assert_eq!(got, [0, 1]);
+    }
+
+    #[test]
+    fn a_quoted_or_escaped_word_matches_the_escaped_insert() {
+        // `cat "./my` against `./my\ file.txt`: a prefix of the literal text
+        let (kind, at) = menu_match(r"./my\ file.txt", "\"./my\"").unwrap();
+        assert_eq!(kind, MenuMatch::Prefix { cs: true });
+        assert_eq!(at, vec![0, 1, 2, 3]);
+        let (kind, at) = menu_match(r"./my\ file.txt", r"./my\ f").unwrap();
+        assert_eq!(kind, MenuMatch::Prefix { cs: true });
+        assert_eq!(at, (0..7).collect::<Vec<_>>());
+        // the space typed quoted maps onto the escaped one (index 5)
+        let (_, at) = menu_match(r"./my\ file.txt", "'./my f'").unwrap();
+        assert_eq!(at, vec![0, 1, 2, 3, 5, 6]);
+        assert_eq!(
+            tab_action(&rows(&[r"./my\ file.txt"]), "\"./my\""),
+            TabAction::Insert(0)
+        );
+        assert!(menu_match("abc", "\"x\"").is_none());
+    }
+
+    #[test]
+    fn fuzzy_scores_prefer_word_starts_and_runs() {
+        let (word_start, at) = fuzzy_score("git-checkout", "gco").unwrap();
+        assert_eq!(at, vec![0, 4, 9]);
+        let (middle, _) = fuzzy_score("ago-cto", "gco").unwrap();
+        assert!(word_start > middle, "{word_start} {middle}");
+        let (run, _) = fuzzy_score("xabcx", "abc").unwrap();
+        let (spread, _) = fuzzy_score("xaxbxc", "abc").unwrap();
+        assert!(run > spread, "{run} {spread}");
+        assert_eq!(fuzzy_score("abc", "acb"), None);
+        assert_eq!(fuzzy_score("ÄBC", "äc").map(|r| r.1), Some(vec![0, 2]));
+    }
+
+    #[test]
+    fn tab_inserts_one_match_a_common_prefix_or_opens_the_menu() {
+        // none
+        assert_eq!(tab_action(&rows(&["main"]), "x"), TabAction::Nothing);
+        // one as typed (a fuzzy row besides does not count)
+        assert_eq!(
+            tab_action(&rows(&["checkout", "xchx"]), "ch"),
+            TabAction::Insert(0)
+        );
+        // none as typed, one in another case
+        assert_eq!(
+            tab_action(&rows(&["Makefile", "zmak"]), "mak"),
+            TabAction::Insert(0)
+        );
+        // two as typed beat one in another case
+        assert_eq!(
+            tab_action(&rows(&["checkout", "cherry-pick", "Check"]), "ch"),
+            TabAction::CommonPrefix("che".into())
+        );
+        // the common prefix is no longer than the word: the menu
+        assert_eq!(
+            tab_action(&rows(&["stash", "status"]), "sta"),
+            TabAction::Open
+        );
+        // an exact match counts: `git` + `gitk` opens the menu
+        assert_eq!(tab_action(&rows(&["git", "gitk"]), "git"), TabAction::Open);
+        // only fuzzy rows: the menu
+        assert_eq!(
+            tab_action(&rows(&["cherry-pick", "pick"]), "pk"),
+            TabAction::Open
+        );
+    }
+
+    #[test]
+    fn tab_in_the_menu_completes_the_common_prefix_or_moves_on() {
+        let p = |cs| MenuMatch::Prefix { cs };
+        let fz = MenuMatch::Fuzzy { score: 1 };
+        assert_eq!(
+            menu_tab(
+                &[("checkout", p(true)), ("cherry", p(true)), ("xch", fz)],
+                "ch"
+            ),
+            Some(("che".into(), false))
+        );
+        // one row as typed left: it is inserted and the menu closes
+        assert_eq!(
+            menu_tab(&[("checkout", p(true)), ("Chx", p(false))], "ch"),
+            Some(("checkout".into(), true))
+        );
+        // nothing longer than the word: the next row
+        assert_eq!(
+            menu_tab(&[("stash", p(true)), ("status", p(true))], "sta"),
+            None
+        );
+        assert_eq!(menu_tab(&[("Stash", p(false))], "st"), None);
+    }
+
+    #[test]
+    fn a_space_follows_an_accepted_completion_at_the_end_only() {
+        assert!(space_after("checkout", true, false));
+        assert!(!space_after("src/", true, false));
+        assert!(!space_after("--color=", true, false));
+        assert!(!space_after("checkout", false, false));
+        assert!(!space_after("checkout", true, true));
+    }
+
+    #[test]
+    fn enter_accepts_unless_as_you_type_already_has_it() {
+        assert!(enter_accepts(false, "che", Some("checkout")));
+        assert!(enter_accepts(false, "checkout", Some("checkout")));
+        assert!(!enter_accepts(false, "che", None));
+        assert!(enter_accepts(true, "che", Some("checkout")));
+        assert!(!enter_accepts(true, "checkout", Some("checkout")));
+        assert!(!enter_accepts(true, "src", Some("src/")));
+        assert!(enter_accepts(true, "sr", Some("src/")));
+    }
+
+    #[test]
+    fn common_prefix_stays_on_character_boundaries() {
+        assert_eq!(common_prefix(["añb", "añc"].into_iter()), Some("añ"));
+        assert_eq!(common_prefix(["aé", "aè"].into_iter()), Some("a"));
+        assert_eq!(common_prefix(["x"].into_iter()), Some("x"));
+        assert_eq!(common_prefix(std::iter::empty()), None);
+    }
+
+    #[test]
+    fn ranking_is_prefix_then_subsequence() {
         let dir = scratch("rank");
         for f in [
             "b_u_i_l_d.md",
@@ -1742,18 +2658,20 @@ mod tests {
             std::fs::write(dir.join(f), "").unwrap();
         }
         let out = complete("cat ./bui", 9, &[], &[], dir.to_str());
+        // prefixes in any case (name order), then subsequences by score: a
+        // run from a word start first
         assert_eq!(
             inserts_of(&out, "path"),
             [
-                "./build.rs",
                 "./Build.md",
+                "./build.rs",
                 "./my-build.txt",
                 "./b_u_i_l_d.md"
             ]
         );
         // the same request gives the same order
         assert_eq!(out, complete("cat ./bui", 9, &[], &[], dir.to_str()));
-        // subcommands too: prefix before word start
+        // subcommands too: the best subsequence first
         let out = complete("git pick", 8, &[], &[], None);
         assert_eq!(
             inserts_of(&out, "shell").first().map(String::as_str),
@@ -1789,11 +2707,11 @@ mod tests {
         };
         let mut words = vec![
             word("./x", "path", Match::Prefix),
-            word("xs", "shell", Match::WordStart),
+            word("xs", "shell", Match::Subsequence),
             word("xb", "branch", Match::Prefix),
             word("xa", "branch", Match::Prefix),
         ];
-        rank(&mut words, &["git checkout ./x".to_string()], &[]);
+        rank(&mut words, "x", &["git checkout ./x".to_string()], &[]);
         let order: Vec<&str> = words.iter().map(|(c, _)| c.insert.as_str()).collect();
         // xb before xa: generator order kept (stable) when neither was used
         assert_eq!(order, ["xb", "xa", "./x", "xs"]);

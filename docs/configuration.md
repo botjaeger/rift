@@ -13,7 +13,8 @@
 | `~/.local/share/rift/` | Materialized shell-integration files |
 | `~/.local/share/rift/generated-profiles` | Shells already written into config.toml as profiles, one path per line (see [Profiles](#profiles)) |
 | `~/.local/share/rift/session.toml` | Saved session (every window's tabs, cwds and frame), written atomically; see [Session file](#session-file) |
-| `~/.local/share/rift/history.json` | Rift's command history (JSON, version 1, written atomically, readable by you only): each local command finished at the command line with its directory, repository root, finish time and exit code, the newest 10,000 within 2 MiB; it ranks the ghost text, the ↑ history menu, the completion panel's history rows and ⌃R by directory (see features.md, Completions). Delete it to forget them. Beside it: `history.json.lock` (Rift processes take turns writing) and, if a file could not be read, `history.json.bad` (moved aside, never written over) |
+| `~/.local/share/rift/history.json` | Rift's command history (JSON, version 1, written atomically, readable by you only): each local command finished at the command line with its directory, repository root, finish time, exit code and shell session (an id per shell and its place in it; files without them still read), the newest 10,000 within 2 MiB; it ranks the ghost text, the ↑ history menu and ⌃R by directory, and the ghost text first by what usually follows the pane's previous command (see features.md, Completions). Delete it to forget them. Beside it: `history.json.lock` (Rift processes take turns writing) and, if a file could not be read, `history.json.bad` (moved aside, never written over) |
+| `~/.local/share/rift/ignored-suggestions.json` | The command lines the ghost text's ✕ ignored (`autosuggestion_ignore_button`; JSON, version 1, written atomically, readable by you only): never suggested again by the ghost text, the ↑ history menu or the phone's history rows; running one, or the palette's *Clear ignored suggestions*, suggests it again. The newest 1,000 within 256 KiB (a line over 4 KiB is ignored for that run only). Beside it: `ignored-suggestions.json.lock` and, if the file could not be read, `ignored-suggestions.json.bad` (moved aside, never written over) |
 | `~/.local/share/rift/last-seen-version` | Version whose What's New was last shown (opens it once after an update) |
 | `~/.local/share/rift/update.json` | Last update check: when, the newest release's manifest, the version *Later* dismissed |
 | `~/.local/share/rift/updates/` | Update downloads (deleted after installing; an interrupted install's leftovers go at the next one), `install.lock` and persistent `install.guard` (one window installs at a time, including after an interrupted install) and `relaunch.log` (the restarted app's output until it is confirmed; emptied past 1 MB) |
@@ -270,7 +271,17 @@ elapsed_counts = "always"         # always | running — what the elapsed chip c
                                   # across an update's restart (a quit starts fresh); Settings › Input › Time on this tab counts)
 copy_on_select = true             # copy the selection on mouse release
 autosuggestions = true            # inline ghost text after the cursor
-completions_menu = true           # completion panel (Tab still accepts the ghost text)
+tab_behavior = "completions"      # completions | autosuggestion — Tab completes the word (Warp);
+                                  # autosuggestion: Tab takes the ghost text (completes when
+                                  # there is none) and ⌃Space opens the completions
+autosuggestion_hint = true        # the chip after the ghost text naming its accept key
+                                  # (→, Tab, ⇧→ or your accept_autosuggestion binding);
+                                  # click it to pick another (writes tab_behavior /
+                                  # [keybindings] accept_autosuggestion)
+autosuggestion_ignore_button = false  # a ✕ after the ghost text: never suggest that whole
+                                  # command line again (ignored-suggestions.json)
+completions_open_while_typing = false  # open the completion menu as you type (formerly
+                                  # `completions_menu`, still read; off: Tab opens it)
 shell_completions = true          # also ask your shell's own completion functions (zsh,
                                   # bash, fish), and the remote machine of an SSH
                                   # profile's pane; false (also on reload) stops the

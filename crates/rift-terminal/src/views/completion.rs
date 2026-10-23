@@ -1,4 +1,4 @@
-use rift_core::completion::Completion;
+use rift_core::completion::{Completion, MenuMatch};
 use rift_core::{Color, Theme};
 use rift_renderer::glyphon::{Attrs, Buffer, Family, Metrics, Shaping, TextBounds, Weight};
 use rift_renderer::{FONT_SANS, Layer, TextEngine, mono_family, text_color};
@@ -6,25 +6,26 @@ use rift_renderer::{FONT_SANS, Layer, TextEngine, mono_family, text_color};
 use crate::state::{ClickTarget, Hit};
 use crate::views::icons::{self, Icon};
 
+/// How a row matches the word being completed, and its matched
+/// characters (char indices, drawn bold); `None` for a history line.
+pub type RowMatch = (Option<MenuMatch>, Vec<usize>);
+
 /// Live completion panel state for the active editor.
 #[derive(Default)]
 pub struct CompletionUi {
-    /// The rows shown: `all`, narrowed to `filter`'s source.
+    /// The rows shown.
     pub items: Vec<Completion>,
-    /// Every candidate of the last query.
-    pub all: Vec<Completion>,
-    /// Source tab picked with ⇧⇥ or a click (`None` = all sources).
-    pub filter: Option<&'static str>,
+    /// Per row of `items`: how it matches the word.
+    pub marks: Vec<RowMatch>,
     pub selected: usize,
     pub open: bool,
     /// Remainder previewed inline after the cursor.
     pub ghost: String,
-    /// The word the candidates replace, as typed: a row starting with it
-    /// shows that part bold.
+    /// The word the candidates replace, as typed.
     pub token: String,
-    /// The user asked for the panel: Tab opened it (the answer after a Tab)
-    /// or ↓ moved into it, so ↑ / ↓ navigate it. A panel opened as you type
-    /// gives ↑ to the history menu instead.
+    /// The user asked for the panel: Tab opened it or ↓ moved into it, so
+    /// ↑ / ↓ navigate it. A panel opened as you type gives ↑ to the history
+    /// menu instead.
     pub asked: bool,
     /// Open as the inline history menu (↑ on the command line's first
     /// line, Warp): the rows are history lines, newest first, and the
@@ -32,18 +33,39 @@ pub struct CompletionUi {
     /// the cursor, put back when the menu closes past the newest line or on
     /// Esc.
     pub history_menu: Option<(String, usize)>,
+    /// The word candidates of the last answer, best first (no history
+    /// lines): what Tab completes from.
+    pub cands: Vec<Completion>,
+    /// The menu Tab opened: typing filters its result set (Warp).
+    pub tab: Option<TabMenu>,
+}
+
+/// A menu Tab opened: where its word starts, the line up to the cursor
+/// when it opened (an edit that no longer starts with it closes the menu),
+/// and the candidates it filters.
+#[derive(Clone, Debug, Default)]
+pub struct TabMenu {
+    pub start: usize,
+    pub typed: String,
+    pub all: Vec<Completion>,
 }
 
 impl CompletionUi {
     pub fn close(&mut self) {
+        self.close_menu();
+        self.ghost.clear();
+        self.cands.clear();
+        self.history_menu = None;
+    }
+
+    /// Close the menu, keeping the ghost text and the candidates.
+    pub fn close_menu(&mut self) {
         self.open = false;
         self.items.clear();
-        self.all.clear();
-        self.filter = None;
-        self.ghost.clear();
+        self.marks.clear();
         self.selected = 0;
         self.asked = false;
-        self.history_menu = None;
+        self.tab = None;
     }
 
     /// Open as the history menu on `lines` (newest first) for the typed
@@ -54,13 +76,18 @@ impl CompletionUi {
         if lines.is_empty() {
             return false;
         }
-        self.set(
+        self.show(
             lines
                 .into_iter()
-                .map(|insert| Completion {
-                    insert,
-                    description: String::new(),
-                    source: "history",
+                .map(|insert| {
+                    (
+                        Completion {
+                            insert,
+                            description: String::new(),
+                            source: "history",
+                        },
+                        (None, Vec::new()),
+                    )
                 })
                 .collect(),
         );
@@ -101,63 +128,74 @@ impl CompletionUi {
         typed
     }
 
-    /// New candidates; the picked source tab stays while it still has rows.
-    pub fn set(&mut self, items: Vec<Completion>) {
-        self.all = items;
-        self.refilter();
-    }
-
-    fn refilter(&mut self) {
-        if self
-            .filter
-            .is_some_and(|s| !self.all.iter().any(|c| c.source == s))
-        {
-            self.filter = None;
-        }
-        self.items = match self.filter {
-            Some(s) => self.all.iter().filter(|c| c.source == s).cloned().collect(),
-            None => self.all.clone(),
-        };
+    /// Show `rows` (the first selected); the menu opens when there are any.
+    pub fn show(&mut self, rows: Vec<(Completion, RowMatch)>) {
+        (self.items, self.marks) = rows.into_iter().unzip();
         self.selected = 0;
         self.open = !self.items.is_empty();
     }
 
-    /// The source tabs: every source among the candidates with its count,
-    /// in order of first appearance.
-    pub fn sources(&self) -> Vec<(&'static str, usize)> {
-        let mut out: Vec<(&'static str, usize)> = Vec::new();
-        for c in &self.all {
-            match out.iter_mut().find(|(s, _)| *s == c.source) {
-                Some(entry) => entry.1 += 1,
-                None => out.push((c.source, 1)),
-            }
+    /// The rows of `all` matching `word` (Warp's order, see
+    /// [`rift_core::completion::filter_by_query`]); a hint row (a note,
+    /// not a candidate) rides along at the end when any matches.
+    pub fn rows_for(all: &[Completion], word: &str) -> Vec<(Completion, RowMatch)> {
+        let mut rows: Vec<(Completion, RowMatch)> =
+            rift_core::completion::filter_by_query(all, word)
+                .into_iter()
+                .filter(|(i, _, _)| all[*i].source != "hint")
+                .map(|(i, kind, at)| (all[i].clone(), (Some(kind), at)))
+                .collect();
+        if !rows.is_empty() {
+            rows.extend(
+                all.iter()
+                    .filter(|c| c.source == "hint")
+                    .map(|c| (c.clone(), (None, Vec::new()))),
+            );
         }
-        out
+        rows
     }
 
-    /// ⇧⇥: the next source tab (All, then each source, wrapping).
-    pub fn cycle_source(&mut self) {
-        let sources = self.sources();
-        if sources.len() < 2 {
-            return;
-        }
-        self.filter = match self.filter {
-            None => Some(sources[0].0),
-            Some(s) => sources
-                .iter()
-                .position(|(x, _)| *x == s)
-                .and_then(|i| sources.get(i + 1))
-                .map(|(x, _)| *x),
+    /// Typing with the Tab menu open: its result set narrowed to `word`,
+    /// the selection kept where it can be. `false` (the menu closes) when
+    /// nothing matches.
+    pub fn refilter(&mut self, word: &str) -> bool {
+        let Some(tab) = self.tab.take() else {
+            return false;
         };
-        self.refilter();
+        let keep = self.selected;
+        let rows = Self::rows_for(&tab.all, word);
+        if rows.iter().all(|(c, _)| c.source == "hint") {
+            self.close_menu();
+            return false;
+        }
+        self.show(rows);
+        self.selected = keep.min(self.items.len().saturating_sub(1));
+        self.token = word.to_string();
+        self.tab = Some(tab);
+        true
     }
 
-    /// A click on source tab `i` (0 = All).
-    pub fn pick_source(&mut self, i: usize) {
-        self.filter = i
-            .checked_sub(1)
-            .and_then(|k| self.sources().get(k).map(|(s, _)| *s));
-        self.refilter();
+    /// The next row, wrapping (Tab, ↓ in a menu Tab opened).
+    pub fn select_next(&mut self) {
+        if !self.items.is_empty() {
+            self.selected = (self.selected + 1) % self.items.len();
+        }
+    }
+
+    /// The previous row, wrapping (⇧Tab).
+    pub fn select_prev(&mut self) {
+        if !self.items.is_empty() {
+            self.selected = (self.selected + self.items.len() - 1) % self.items.len();
+        }
+    }
+
+    /// The rows matching the word as typed, for Tab's common prefix.
+    pub fn typed_rows(&self) -> Vec<(&str, MenuMatch)> {
+        self.items
+            .iter()
+            .zip(&self.marks)
+            .filter_map(|(c, (k, _))| Some((c.insert.as_str(), (*k)?)))
+            .collect()
     }
 }
 
@@ -289,30 +327,36 @@ fn kind_icon(item: &Completion) -> Icon {
     }
 }
 
-/// Draw the completion list as a panel docked to the editor, full pane
-/// width (Warp's completion pane): source tabs with counts, the rows, and a
-/// key-hint footer. It sits on the editor zone's top edge (input at the
-/// bottom) or under it (input at the top); the output moves out from under
-/// it (`terminal::beside_panel`). `zone` =
-/// the editor rect, `pane` = the active pane's body; `prefix_len` is the
-/// typed part of a token candidate, `line_len` of a history line.
 /// Height of the open panel: the terminal output moves out from under it.
 pub fn panel_height(ui: &CompletionUi) -> f32 {
     HEADER_H + ui.items.len().min(MAX_ROWS) as f32 * ROW_H + FOOTER_H
 }
 
-/// Bytes of `item`'s text shown bold as typed: a history line's typed
-/// line, a candidate's typed word when it starts with it (a word-start or
-/// subsequence match does not), a hint's none.
-fn bold_len(item: &Completion, token: &str, prefix_len: usize, line_len: usize) -> usize {
+/// Which characters of a row's text `name` (`chars` of them) show bold:
+/// a history line's typed part (`line_len` bytes), a candidate's matched
+/// characters (`mark`), a hint's none.
+fn bold_chars(
+    item: &Completion,
+    name: &str,
+    mark: Option<&RowMatch>,
+    line_len: usize,
+) -> Vec<bool> {
     match item.source {
-        "history" => line_len,
-        "hint" => 0,
-        _ if item.insert.starts_with(token) => prefix_len,
-        _ => 0,
+        "hint" => vec![false; name.chars().count()],
+        "history" => name.char_indices().map(|(i, _)| i < line_len).collect(),
+        _ => {
+            let at = mark.map(|(_, at)| at.as_slice()).unwrap_or_default();
+            (0..name.chars().count()).map(|i| at.contains(&i)).collect()
+        }
     }
 }
 
+/// Draw the completion list as a panel docked to the editor, full pane
+/// width (Warp's completion pane): a header naming it with its count, the
+/// rows (matched characters bold), and a key-hint footer. It sits on the
+/// editor zone's top edge (input at the bottom) or under it (input at the
+/// top); the output moves out from under it (`terminal::beside_panel`).
+/// `zone` = the editor rect, `pane` = the active pane's body.
 #[allow(clippy::too_many_arguments)]
 pub fn render(
     layer: &mut Layer,
@@ -321,8 +365,6 @@ pub fn render(
     ui: &CompletionUi,
     zone: [f32; 4],
     pane: [f32; 4],
-    prefix_len: usize,
-    line_len: usize,
     mouse: Option<(f32, f32)>,
     hits: &mut Vec<Hit>,
 ) {
@@ -347,84 +389,51 @@ pub fn render(
     }
     layer.set_clip(Some(([x, y, w, panel_h], 0.0)));
 
-    // header: source tabs (All, then each source) with their counts
-    // (one source: just its name, nothing to switch)
-    let sources = ui.sources();
-    let mut tabs: Vec<(String, usize, bool)> = if sources.len() > 1 {
-        vec![("ALL".into(), ui.all.len(), ui.filter.is_none())]
+    // header: what the panel lists, with its count
+    let label = if ui.history_menu.is_some() {
+        "HISTORY"
     } else {
-        Vec::new()
+        "COMPLETIONS"
     };
-    for (s, n) in sources {
-        tabs.push((s.to_uppercase(), n, ui.filter == Some(s) || tabs.is_empty()));
-    }
-    let mut tx = x + 8.0;
-    for (i, (label, n, on)) in tabs.iter().enumerate() {
-        let count = n.to_string();
-        let lw =
-            engine.measure(label, 11.0, FONT_SANS, Weight::SEMIBOLD) + 0.66 * label.len() as f32;
-        let cw = engine.measure(&count, 11.0, FONT_SANS, Weight::MEDIUM);
-        let tab_w = 10.0 + lw + 5.0 + cw + 10.0;
-        let r = [tx, y, tab_w, HEADER_H];
-        if *on {
-            layer.rect(
-                [tx + 8.0, y + HEADER_H - 2.0],
-                [tab_w - 16.0, 2.0],
-                theme.accent,
-                0.0,
-            );
-        }
-        let mut lb = Buffer::new(&mut engine.font_system, Metrics::new(11.0, 14.0));
-        lb.set_text(
-            &mut engine.font_system,
-            label,
-            &Attrs::new()
-                .family(Family::Name(FONT_SANS))
-                .weight(Weight::SEMIBOLD)
-                .letter_spacing(0.06),
-            Shaping::Advanced,
-            None,
-        );
-        layer.text(
-            lb,
-            tx + 10.0,
-            y + (HEADER_H - 14.0) / 2.0,
-            if *on {
-                theme.text_bright
-            } else {
-                theme.text_dim
-            },
-        );
-        layer.text(
-            sans(engine, &count, 11.0, Weight::MEDIUM),
-            tx + 10.0 + lw + 5.0,
-            y + (HEADER_H - 14.85) / 2.0,
-            theme.text_muted,
-        );
-        if tabs.len() > 1 {
-            hits.push(Hit {
-                rect: r,
-                target: ClickTarget::CompletionSource(i as u8),
-            });
-        }
-        tx += tab_w;
-    }
-    if tabs.len() > 2 {
-        let hint = "switch source";
-        let hw = engine.measure(hint, 11.5, FONT_SANS, Weight::NORMAL);
-        let caps_x = x + w - PAD_X - hw - 4.0 - 2.0 * 22.0;
-        if caps_x > tx + 12.0 {
-            key_hints(
-                layer,
-                engine,
-                theme,
-                &[(&["⇧", "⇥"], hint)],
-                caps_x,
-                y + HEADER_H / 2.0,
-                x + w,
-            );
-        }
-    }
+    let count = ui
+        .items
+        .iter()
+        .filter(|c| c.source != "hint")
+        .count()
+        .to_string();
+    let tx = x + 8.0;
+    let lw = engine.measure(label, 11.0, FONT_SANS, Weight::SEMIBOLD) + 0.66 * label.len() as f32;
+    let cw = engine.measure(&count, 11.0, FONT_SANS, Weight::MEDIUM);
+    let tab_w = 10.0 + lw + 5.0 + cw + 10.0;
+    layer.rect(
+        [tx + 8.0, y + HEADER_H - 2.0],
+        [tab_w - 16.0, 2.0],
+        theme.accent,
+        0.0,
+    );
+    let mut lb = Buffer::new(&mut engine.font_system, Metrics::new(11.0, 14.0));
+    lb.set_text(
+        &mut engine.font_system,
+        label,
+        &Attrs::new()
+            .family(Family::Name(FONT_SANS))
+            .weight(Weight::SEMIBOLD)
+            .letter_spacing(0.06),
+        Shaping::Advanced,
+        None,
+    );
+    layer.text(
+        lb,
+        tx + 10.0,
+        y + (HEADER_H - 14.0) / 2.0,
+        theme.text_bright,
+    );
+    layer.text(
+        sans(engine, &count, 11.0, Weight::MEDIUM),
+        tx + 10.0 + lw + 5.0,
+        y + (HEADER_H - 14.85) / 2.0,
+        theme.text_muted,
+    );
     layer.hline(x, y + HEADER_H, w, 1.0, theme.border);
 
     // rows
@@ -436,7 +445,7 @@ pub fn render(
     // the history menu keeps the newest line nearest the command line:
     // above it, the rows run bottom up
     let menu = ui.history_menu.as_ref();
-    let line_len = menu.map_or(line_len, |(typed, _)| typed.len());
+    let line_len = menu.map_or(0, |(typed, _)| typed.len());
     let bottom_up = menu.is_some() && at_bottom;
     for (row, item) in ui.items.iter().skip(scroll).take(shown).enumerate() {
         let idx = row + scroll;
@@ -489,41 +498,40 @@ pub fn render(
             &item.insert
         };
         let chars = name.chars().count();
-        let typed = bold_len(item, &ui.token, prefix_len, line_len);
-        // too long (a deep path): keep the tail, which tells candidates apart
-        let (matched, rest): (String, String) = if chars > fits {
+        // too long (a deep path): keep the tail, which tells candidates
+        // apart (its matched characters are not marked then)
+        let runs: Vec<(String, bool)> = if chars > fits {
             let tail: String = name.chars().skip(chars - fits.saturating_sub(1)).collect();
-            (String::new(), format!("…{tail}"))
+            vec![(format!("…{tail}"), false)]
         } else {
-            let split = typed.min(name.len());
-            let split = (0..=split)
-                .rev()
-                .find(|&i| name.is_char_boundary(i))
-                .unwrap_or(0);
-            (name[..split].to_string(), name[split..].to_string())
+            let bold = bold_chars(item, name, ui.marks.get(idx), line_len);
+            let mut runs: Vec<(String, bool)> = Vec::new();
+            for (c, b) in name.chars().zip(bold) {
+                match runs.last_mut() {
+                    Some((text, on)) if *on == b => text.push(c),
+                    _ => runs.push((c.to_string(), b)),
+                }
+            }
+            runs
         };
+        let plain = Attrs::new()
+            .family(Family::Name(mono_family()))
+            .color(text_color(if hint {
+                theme.text_muted
+            } else if selected {
+                theme.text_bright
+            } else {
+                theme.text_ui
+            }));
+        let strong = Attrs::new()
+            .family(Family::Name(mono_family()))
+            .weight(Weight::BOLD)
+            .color(text_color(theme.accent));
         let mut buf = Buffer::new(&mut engine.font_system, Metrics::new(12.5, 16.0));
-        let rich = vec![
-            (
-                matched.as_str(),
-                Attrs::new()
-                    .family(Family::Name(mono_family()))
-                    .weight(Weight::BOLD)
-                    .color(text_color(theme.accent)),
-            ),
-            (
-                rest.as_str(),
-                Attrs::new()
-                    .family(Family::Name(mono_family()))
-                    .color(text_color(if hint {
-                        theme.text_muted
-                    } else if selected {
-                        theme.text_bright
-                    } else {
-                        theme.text_ui
-                    })),
-            ),
-        ];
+        let rich: Vec<(&str, Attrs)> = runs
+            .iter()
+            .map(|(t, b)| (t.as_str(), if *b { strong.clone() } else { plain.clone() }))
+            .collect();
         buf.set_rich_text(
             &mut engine.font_system,
             rich,
@@ -564,7 +572,7 @@ pub fn render(
     let mut hints: Vec<(&[&str], &str)> = if menu.is_some() {
         vec![(&["↑", "↓"], "navigate"), (&["⏎"], "run"), (&["⇥"], "edit")]
     } else {
-        vec![(&["↑", "↓"], "navigate"), (&["⇥"], "accept")]
+        vec![(&["↑", "↓"], "navigate"), (&["⏎"], "accept")]
     };
     if !ui.ghost.is_empty() {
         hints.push((&["→"], "accept ghost"));
@@ -594,13 +602,36 @@ mod tests {
         }
     }
 
+    fn bold_at(item: &Completion, mark: Option<&RowMatch>, line_len: usize) -> Vec<usize> {
+        let name = if item.source == "hint" {
+            &item.description
+        } else {
+            &item.insert
+        };
+        bold_chars(item, name, mark, line_len)
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, b)| b.then_some(i))
+            .collect()
+    }
+
     #[test]
-    fn only_a_prefix_match_shows_the_typed_part_bold() {
-        assert_eq!(bold_len(&c("checkout", "shell"), "che", 3, 7), 3);
-        assert_eq!(bold_len(&c("cherry-pick", "shell"), "pick", 4, 8), 0);
-        assert_eq!(bold_len(&c("git-checkout", "command"), "gco", 3, 3), 0);
-        assert_eq!(bold_len(&c("git che", "history"), "che", 3, 7), 7);
-        assert_eq!(bold_len(&c("", "hint"), "", 0, 3), 0);
+    fn the_matched_characters_show_bold() {
+        let row = |cand: &str, word: &str| {
+            let item = c(cand, "shell");
+            let (k, at) = rift_core::completion::menu_match(cand, word).unwrap();
+            bold_at(&item, Some(&(Some(k), at)), 0)
+        };
+        assert_eq!(row("checkout", "che"), [0, 1, 2]);
+        assert_eq!(row("Checkout", "che"), [0, 1, 2]);
+        assert_eq!(row("git-checkout", "gco"), [0, 4, 9]);
+        // a history line: what was typed
+        assert_eq!(bold_at(&c("git che", "history"), None, 3), [0, 1, 2]);
+        let hint = Completion {
+            description: "note".into(),
+            ..c("", "hint")
+        };
+        assert!(bold_at(&hint, None, 3).is_empty());
     }
 
     fn lines(v: &[&str]) -> Vec<String> {
@@ -666,10 +697,14 @@ mod tests {
         assert_eq!(ui.take_typed(), None);
     }
 
+    fn rows(inserts: &[&str]) -> Vec<Completion> {
+        inserts.iter().map(|i| c(i, "shell")).collect()
+    }
+
     #[test]
     fn a_completion_panel_is_no_history_menu() {
         let mut ui = CompletionUi::default();
-        ui.set(vec![c("checkout", "shell")]);
+        ui.show(CompletionUi::rows_for(&rows(&["checkout"]), "ch"));
         assert!(ui.open);
         assert_eq!(ui.history_line(), None);
         // opening the menu replaces the panel; closing forgets both
@@ -681,29 +716,43 @@ mod tests {
     }
 
     #[test]
-    fn source_tabs_filter_and_cycle() {
+    fn the_tab_menu_filters_its_results_as_you_type_and_wraps() {
         let mut ui = CompletionUi::default();
-        ui.set(vec![
-            c("a/", "path"),
-            c("b/", "path"),
-            c("cd a/x", "history"),
-        ]);
-        assert_eq!(ui.sources(), vec![("path", 2), ("history", 1)]);
-        assert_eq!(ui.items.len(), 3);
-        ui.cycle_source();
-        assert_eq!(ui.filter, Some("path"));
-        assert_eq!(ui.items.len(), 2);
-        ui.cycle_source();
-        assert_eq!(ui.items.len(), 1);
-        ui.cycle_source();
-        assert_eq!(ui.filter, None);
-        ui.pick_source(2);
-        assert_eq!(ui.filter, Some("history"));
-        // the picked source survives new candidates while it still has rows
-        ui.set(vec![c("a/", "path"), c("cd a/y", "history")]);
-        assert_eq!(ui.filter, Some("history"));
-        ui.set(vec![c("a/", "path")]);
-        assert_eq!(ui.filter, None);
-        assert!(ui.open);
+        let all = rows(&["checkout", "cherry-pick", "clean", "xcx"]);
+        ui.show(CompletionUi::rows_for(&all, "c"));
+        ui.tab = Some(TabMenu {
+            start: 4,
+            typed: "git c".into(),
+            all,
+        });
+        assert_eq!(ui.items.len(), 4);
+        // ⇧Tab from the first row wraps to the last, Tab back to the first
+        ui.select_prev();
+        assert_eq!(ui.selected, 3);
+        ui.select_next();
+        assert_eq!(ui.selected, 0);
+        ui.select_next();
+        assert!(ui.refilter("che"));
+        let names: Vec<&str> = ui.items.iter().map(|c| c.insert.as_str()).collect();
+        assert_eq!(names, ["checkout", "cherry-pick"]);
+        // the selection stays where it can
+        assert_eq!(ui.selected, 1);
+        assert!(ui.refilter("checko"));
+        assert_eq!(ui.selected, 0);
+        assert_eq!(ui.typed_rows().len(), 1);
+        // nothing matches: the menu closes
+        assert!(!ui.refilter("zzz"));
+        assert!(!ui.open && ui.tab.is_none());
+        // a hint alone opens nothing
+        let hint = vec![Completion {
+            description: "Remote completions need an SSH profile".into(),
+            ..c("", "hint")
+        }];
+        assert!(CompletionUi::rows_for(&hint, "x").is_empty());
+        let mut with_hint = rows(&["main"]);
+        with_hint.extend(hint);
+        let got = CompletionUi::rows_for(&with_hint, "ma");
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[1].0.source, "hint");
     }
 }

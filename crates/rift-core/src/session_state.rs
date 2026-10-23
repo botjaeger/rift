@@ -470,12 +470,14 @@ pub fn restart_dir() -> Option<PathBuf> {
 mod tests {
     /// `data_dir()` follows XDG_DATA_HOME: a scratch one per test, one test at a time.
     fn with_data_dir(f: impl FnOnce()) {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _one = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _one = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("rift-running-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        // SAFETY: serialised by LOCK; no other test reads the variable meanwhile
+        // SAFETY: serialised by TEST_ENV_LOCK, which the tests reading the
+        // variable hold too
         unsafe { std::env::set_var("XDG_DATA_HOME", &dir) };
         f();
         unsafe { std::env::remove_var("XDG_DATA_HOME") };

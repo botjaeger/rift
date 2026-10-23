@@ -680,6 +680,10 @@ pub fn complete_page(
         let end = token_end(line, cursor);
         // the whole word around the cursor, as the desktop's Tab completes it
         for c in complete_on_path(line, end, editor_history, shell_history, cwd, path) {
+            // the word as typed (the desktop menu's exact row) changes nothing
+            if c.insert == line[start..end] {
+                continue;
+            }
             let kind = match c.source {
                 "history" => continue,
                 "command" => CompletionKind::Command,
@@ -721,6 +725,14 @@ pub fn complete_page(
         }
     }
     CompletePage { items, history }
+}
+
+/// The phone's history rows leave out the lines the ghost text's ✕
+/// ignored (they read as suggestions there: the typed part bright, the rest
+/// dim), as the desktop's ghost text and ↑ menu do (Warp). Completions are
+/// words, not suggested lines: they stay.
+pub fn without_ignored(page: &mut CompletePage, ignored: &rift_core::ignored_suggestions::Ignored) {
+    page.history.retain(|h| !ignored.contains(&h.text));
 }
 
 /// A window's `diff` error for a path that is not among the changes.
@@ -1723,10 +1735,27 @@ mod tests {
             "{:?}",
             page.items
         );
-        // a cursor inside the word completes the whole word (`sr`, not `s`)
+        // a cursor inside the word completes the whole word (`sr`, not
+        // `s`): its prefix first, then what holds it as a subsequence
         let page = complete_page("ls sr | wc", 4, &[], &[], &[], cwd, None);
         let texts: Vec<&str> = page.items.iter().map(|i| i.text.as_str()).collect();
-        assert_eq!(texts, ["ls src/ | wc"]);
+        assert_eq!(texts, ["ls src/ | wc", "ls scripts/ | wc"]);
+        // the word as typed is no row (it would change nothing)
+        let raw = rift_core::completion::complete("git commit", 10, &[], &[], cwd);
+        assert!(raw.iter().any(|c| c.insert == "commit"));
+        let page = complete_page("git commit", 10, &[], &[], &[], cwd, None);
+        assert!(
+            page.items.iter().all(|i| i.text != "git commit"),
+            "{:?}",
+            page.items
+        );
+        // a line the ghost text's ✕ ignored is no history row; the rest stay
+        let mut page = complete_page("cargo t", 7, &blocks, &editor, &shell, cwd, None);
+        let before: Vec<String> = page.history.iter().map(|h| h.text.clone()).collect();
+        let ignored = rift_core::ignored_suggestions::Ignored::from_lines(vec![before[0].clone()]);
+        without_ignored(&mut page, &ignored);
+        let after: Vec<String> = page.history.iter().map(|h| h.text.clone()).collect();
+        assert_eq!(after, before[1..], "{before:?}");
         // an empty line: no completions, every command ran before
         let page = complete_page("", 0, &blocks, &[], &[], cwd, None);
         assert!(page.items.is_empty());

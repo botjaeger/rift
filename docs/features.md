@@ -163,8 +163,8 @@ is replaced only after *Replace the file?* is confirmed. RTF is not offered.
   newest closes the menu and puts back what was typed (with its completions
   and ghost text); Esc does too. ⏎ runs the previewed line, ⇥ or → keep it
   to edit, and typing anything else keeps it and applies the key. A
-  completion panel opened as you type gives ↑ to the menu; one asked for (by
-  the Tab that completed the word before it, or by ↓ into it) keeps ↑ / ↓.
+  completion panel opened as you type (`completions_open_while_typing`)
+  gives ↑ to the menu; one asked for (by Tab, or by ↓ into it) keeps ↑ / ↓.
   Inside a multi-line command ↑ / ↓ move between its lines. In vim mode `k`
   / `j` in Normal mode are the same keys.
 - Cmd-chords never insert text into the editor nor leak bytes to the PTY,
@@ -449,7 +449,7 @@ hears it.
 ## Completions
 
 Sources merged, deduped, capped at 50: **`$PATH` command names** (first word
-only, ≥ 2 chars, max 12 — every executable on the pane shell's `$PATH`), command specs (subcommands and flags with descriptions for common tools — git, cargo, docker, npm and more; `completion_specs.rs`) with argument generators (git refs, branches and remotes; ssh hosts from the ssh config and `known_hosts`; Makefile targets; `package.json` scripts; up to 50 each), filesystem paths (`~/` expanded;
+only, from 1 typed char, max 12 — every executable on the pane shell's `$PATH`), command specs (subcommands and flags with descriptions for common tools — git, cargo, docker, npm and more; `completion_specs.rs`) with argument generators (git refs, branches and remotes; ssh hosts from the ssh config and `known_hosts`; Makefile targets; `package.json` scripts; up to 50 each), filesystem paths (`~/` expanded;
 hidden files only when the typed name starts with `.`; max 30), and command
 history. A pane whose shell is on another host (or never reported a
 directory) gets no path, file-based argument or command-name completions
@@ -506,26 +506,23 @@ joins Rift's `dir/` row; bash's file-name specs (`-d`, `-o filenames`,
 turns it off or names another `shell`). The shells, and whatever their
 completion functions started, stop when Rift quits.
 
-**Ranking.** A word candidate matches the typed word by prefix (exactly as
-typed), else by word start (a word inside it starts with what was typed,
-any case: after `-` `_` `.` `/` `:` `@` or a space, or at a lower→upper case
-change — `pick` finds `cherry-pick`), else as a subsequence (its characters
-in order, any case — `cko` finds `checkout`). Word start and subsequence need
-at least 3 typed characters. A command name matches other than by prefix
-only when it starts with the same character as the typed word (any case),
-and as a subsequence only from 4 typed characters (`tfa` never offers
-`convertformat`). Candidates sort by that match kind, then by
-source (command names, subcommands, options, generator values, paths), then
-by how recently the word appears in the history (the pane's last 200 lines,
-then the shell's newest 500), then in the provider's own order (paths and
-values by name; git refs branches, remote branches, tags). The order is
-deterministic. At most 45 word candidates are kept, so the history lines
-(at most 5) always fit in the 50. A prefix match always ranks first, so the
-ghost text and Tab on a unique prefix behave as with prefix-only matching.
-When no candidate starts with the typed word and a history line drives the
-ghost text, the word-start and subsequence candidates do not open the menu,
-and Tab accepts the ghost text. Only a candidate that starts with the typed
-word shows that part bold in the menu.
+**Ranking** (Warp's matcher). A word candidate matches the typed word by
+prefix, in any case (the word itself too: `git` lists `git` before `gitk`),
+else as a subsequence when the word has a letter or digit (its characters in
+order, any case — `cko` finds `checkout`, `tfa` `convertformat`; from one
+typed character). Candidates sort by that match kind — subsequences by score:
+each matched character counts, more at a word start (after `-` `_` `.` `/`
+`:` `@` or a space, or at a lower→upper case change), runs gain, gaps cost —
+then by source (command names, subcommands, options, generator values,
+paths), then by how recently the word appears in the history (the pane's
+last 200 lines, then the shell's newest 500), then in the provider's own
+order (paths and values by name; git refs branches, remote branches, tags).
+The order is deterministic. At most 45 word candidates are kept, so the
+history lines (at most 5) always fit in the 50. The menu orders its rows as
+Warp does: the word exactly as typed, then exactly in another case, then the
+prefix matches in that order, then the subsequence matches by score; the
+matched characters show bold (the prefix, or each character of a
+subsequence).
 
 **Caching.** Providers run on every keystroke, so what they read is cached
 and checked, not re-read: directory listings (16 kept; entry types from the
@@ -562,15 +559,24 @@ character; inside `"…"` it escapes only `$`, `` ` ``, `"`, `\` and newline and
 otherwise literal (`"./a\b"` completes `a\b.txt`, not `ab.txt`); inside `'…'`
 everything is literal.
 
-Providers run on a background thread, never on the UI thread. Tab or ⌃→
-pressed while an answer is still in flight is applied once, when it arrives,
-and only if the pane, buffer and cursor are unchanged; Escape cancels the
+Providers run on a background thread, never on the UI thread. Tab, ⌃Space or
+⌃→ pressed while an answer is still in flight is applied once, when it
+arrives, and only if the pane, buffer and cursor are unchanged; Escape cancels the
 request, so a late answer cannot reopen the menu. If that thread cannot start
 or has died, completion pauses (no menu or ghost text; editing is unaffected)
 and the first edit after 5 seconds starts a new one.
 
 History matches drive the ghost text: whole-buffer prefix matches, max 5,
-one per command. Rift's own command history comes first, ranked by
+one per command. First comes what usually follows the pane's previous
+command (Warp's next-command history): the last command the pane finished
+from the command line in this run (a restored block never counts) is looked
+up in Rift's command history — its 25 newest runs with the same command
+line, directory and exit code — and the command each was followed by in its
+own shell session; those starting with the typed text, most frequent first
+(ties: the newer), at most 5. So in a project where every new shell runs
+`cd project1`, then `bash scripts/db.sh backup`, then `… restore`,
+typing `bash scripts/db.sh` after `cd project1` suggests the backup,
+not the newer restore. Then Rift's own command history, ranked by
 directory: commands run in the pane's directory, then in the same git
 repository (its working tree; outside a repository only the directory
 counts), then anywhere, newest first within each, so `pnpm de` in a project
@@ -579,12 +585,61 @@ where `pnpm dev` ran suggests that even when another project ran
 imported shell history (newest 3000), which has no directories. A pane on
 another machine (ssh) has no local directory and skips Rift's history. A
 request shares the pane's history with the editor instead of copying it.
-Inline ghost text shows the top suggestion; Tab accepts, ⌃→ accepts one word.
+History lines that name a missing path are left out (Warp's autosuggestion
+validation): in `cat`, `cd`, `ls`, `python` and `python3` (the commands
+whose path argument must already exist) the first path argument must exist
+in the pane's directory (a directory for `cd`), and the script of a script
+runner (`bash`, `sh`, `zsh`, `fish`, `node`, `ruby`, `perl`, `source`, `.`:
+its first argument that is not an option) must be a file there, so
+`cat gone.txt` and `bash scripts/gone.sh` are skipped and the next match is
+suggested. Commands without that spec, options the spec does not know, code
+given inline (`bash -c`, `sh -s`, `node -e`, `ruby -e`, `perl -e`), words
+with a variable, glob or `~user`, a remote `host:path` and redirections
+count as valid; a pane on another machine checks nothing, and the checks stop
+after 150 ms (the rest count as valid).
+
+**Ghost text** shows the top suggestion after the cursor: the best history
+line, else the rest of the first candidate going on from the word as typed.
+At the end of the command line (Warp) → , ⌃F, ⌃E, ⌘→ and End take all of
+it, ⌥→ one word, ⌃⌥→ one subword (camelCase, `_`, `-` parts), ⌃→ one word
+wherever the cursor is; a partial accept leaves the rest as the ghost, and
+typing what it shows shrinks it. Elsewhere on the line those keys only move.
+Esc clears it (and closes the menu). In vim mode the ghost text (and its
+chips) goes on after Normal's block cursor on the last character, where
+Normal's `l` and `$` take all of it, `w` and `e` one word; Insert's Esc keeps it
+(Normal mode starts), Normal's Esc clears it.
+
+**The accept-key chip** (`autosuggestion_hint`, on by default; Warp's
+keybinding hint) follows the ghost text and names the key that takes it all:
+→, Tab (`tab_behavior = "autosuggestion"`), ⇧→ or the `accept_autosuggestion`
+binding. Hover says *Change keybinding*; a click opens a menu of →, Tab, ⇧→
+and Custom…, the current one checked (↑ ↓ ⏎ or a click pick, Esc closes).
+→ is the default (Tab completes, no binding); Tab sets `tab_behavior =
+"autosuggestion"`; ⇧→ binds `accept_autosuggestion = "shift+right"` (with no
+ghost text to take, ⇧→ still extends the selection); each writes config.toml
+like a Settings change. Custom… opens Settings › Keybindings filtered to
+`accept_autosuggestion`. → always takes the ghost text at the end of the
+line, whichever is picked.
+
+**Ignoring a suggestion** (`autosuggestion_ignore_button`, off by default;
+Warp's ignore button): a ✕ after the ghost text (*Ignore this suggestion*)
+ignores the whole suggested command line — exactly that line, from every
+source: what usually follows the previous command, Rift's history, the pane's
+and the shell's history, and the first completion candidate. The next
+suggestion takes its place at once. Ignored lines are not offered by the ↑
+history menu or the phone's history rows either. Running an ignored line
+suggests it again (Warp), as does the palette's *Clear ignored suggestions*
+(`clear_ignored_suggestions`). They are kept in `ignored-suggestions.json` in
+the data directory, bounded, private and merged across Rift processes like
+`history.json` (configuration.md, File locations). A scripted run reads and
+writes it only with `RIFT_SCRIPT_RECORD_IGNORED=1` under its own
+`XDG_DATA_HOME`; otherwise its ignores last for the run.
 
 **Rift's command history** survives restarts: every command a local pane
 runs from the command line is recorded when it finishes, with its
-directory, that directory's repository, the finish time and the exit code,
-in `history.json` in the data directory (configuration.md, File locations).
+directory, that directory's repository, the finish time, the exit code and
+its shell session (a new id for every shell a pane starts, and its place in
+it), in `history.json` in the data directory (configuration.md, File locations).
 Not recorded: a command typed with a leading space (the shells'
 `HIST_IGNORE_SPACE` / `ignorespace` convention), one run over ssh (its
 directory is on the other host), one the secret patterns match (the user's
@@ -600,9 +655,34 @@ scripted run (`--script`) reads it only with `RIFT_SCRIPT_HISTORY=1` and
 writes it only with `RIFT_SCRIPT_RECORD_HISTORY=1` under its own
 `XDG_DATA_HOME`.
 
-The completion panel lists the word candidates, then the history lines; its
-header has a tab per source with counts (⇧⇥ or a click narrows to one), and
-accepting a history line replaces the whole command line.
+**Tab** (Warp's default, `tab_behavior = "completions"`) completes the word
+at the cursor on a line with text, one caret and no selection; it never
+takes the ghost text there. One candidate starting with the word as typed
+(or, with none such, one in another case) is inserted with no menu; several
+insert their common prefix when it is longer than the word and open the
+menu; otherwise the menu opens with the first row selected; no candidate:
+nothing. In the open menu, Tab inserts the common prefix of the rows
+matching as typed when it is longer than the word (one such row left: the
+menu closes), else selects the next row; ⇧Tab the previous (both wrap); ↑ / ↓
+move; ⏎ or a click accepts the selected row; Esc closes it. Typing with the
+menu open narrows its rows to the word; it closes when none matches, when the
+cursor moves before the word, or when the line no longer starts with what it
+was opened on. An accepted completion that ends the command line gets a space
+after it, unless it ends in `/` (a path goes on) or `=` (a value follows). A
+selection keeps Tab as it was (the ghost text goes on the end).
+`tab_behavior = "autosuggestion"`: Tab takes the whole ghost text, and with
+none completes as above; ⌃Space then opens the completions.
+
+The completion panel (the menu) lists the word candidates only — history
+lines drive the ghost text, ↑ and ⌃R list them — under a header naming it
+with its count.
+
+**As you type** (`completions_open_while_typing = true`, off by default; it
+was `completions_menu`, still read): the menu opens on a typed edit (typing
+or deleting) with the cursor at the end of a line of two characters or more,
+and follows every edit while open; ⏎ accepts the selected row unless the
+word already is it (a trailing `/` aside), then runs the line; accepting adds
+no space.
 
 **History pane** (⌃R): this window's finished commands and Rift's command
 history (exit status, directory, finish time), ranked like the ghost text
@@ -654,8 +734,7 @@ Meta (`option_as_meta`; elsewhere Alt always is). Needs Rift's shell
 integration (bash 4.3 or newer); a line over 4 KiB keeps Rift's behaviour.
 `shell_widgets = "rift"` always uses Rift's own.
 
-`autosuggestions = false` turns the ghost text off; `completions_menu = false`
-turns the completion panel off (the ghost text and Tab still work).
+`autosuggestions = false` turns the ghost text off.
 
 ## Launch configurations
 

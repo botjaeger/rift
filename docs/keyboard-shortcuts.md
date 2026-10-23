@@ -35,7 +35,7 @@ listed alternates.
 | Shortcut | Action name | Effect |
 |---|---|---|
 | PageUp / PageDown | `scroll_page_up` / `_down` | Page (editor active only; passes to vim/less otherwise) |
-| Home / End | `scroll_top` / `scroll_bottom` | Jump to scrollback top / bottom (same gating; they never move the command line's cursor, ⌘← / ⌘→ do) |
+| Home / End | `scroll_top` / `scroll_bottom` | Jump to scrollback top / bottom (same gating; they never move the command line's cursor, ⌘← / ⌘→ do); End at the end of the command line also accepts the ghost text |
 | ⇧PageUp / ⇧PageDown | `scroll_up` / `scroll_down` | Scroll 10 lines |
 
 ## Tabs
@@ -129,7 +129,9 @@ collapsed group); a tab that closes while it shows drops out of it. ⇧⌘} /
 | ⌘C / ⌃⇧C | `copy` | Copy selection, else last block's output |
 | ⇧⌘M / ⌃⇧M | `mark_mode` | Mark mode: select text in the scrollback from the keyboard (see Mark mode keys) |
 | ⌥. | `insert_last_argument` | At the prompt: insert the last word of the previous command; again: of the one before (⌥ as Meta: always on Linux, `option_as_meta` on macOS; otherwise ⌥. types its character) |
-| ⌃⌥← / ⌃⌥→ | `subword_left` / `subword_right` | At the prompt: move by word parts (`camelCase`, `snake_case`, `kebab-case`, path segments) |
+| ⌃⌥← / ⌃⌥→ | `subword_left` / `subword_right` | At the prompt: move by word parts (`camelCase`, `snake_case`, `kebab-case`, path segments); ⌃⌥→ at the end of the line accepts one word part of the ghost text |
+| — | `accept_autosuggestion` | At the prompt, at the end of the line: accept the whole ghost text (unbound; Warp's "Accept autosuggestion"); with no ghost text to take the key does what it does unbound. The ghost text's accept-key chip binds it to ⇧→ or opens this row (Custom…) |
+| — | `clear_ignored_suggestions` | Suggest again every command line the ghost text's ✕ ignored |
 | — | `[[actions]]` | Your own step sequences, by their `key` ([user actions](configuration.md#user-actions)) |
 | ⌘V / ⌃⇧V | `paste` | Paste |
 
@@ -139,15 +141,16 @@ Active only while the app owns the command line.
 
 | Key | Effect |
 |---|---|
-| Enter | Submit command (an empty or blank line does nothing) |
+| Enter | Submit command (an empty or blank line does nothing); with the completion menu open, accept its selected row (as you type: unless the word already is it, then submit) |
 | ⇧⏎ / ⌥⏎ | Insert a newline (multi-line command; Enter still submits) |
-| Tab | Accept completion |
-| ⇧Tab | Next completion source tab (All · Path · History …) while the panel is open |
-| Esc | Close completion (after deselecting any block) |
+| Tab | Complete the word (Warp): one match is inserted, several insert their common prefix and open the completion menu, else the menu opens; never takes the ghost text (`tab_behavior = "autosuggestion"`: takes it, and completes with none). In the open menu: the common prefix of the rows matching as typed when longer than the word, else the next row (wrapping) |
+| ⇧Tab | Previous completion row (wrapping) while the menu is open |
+| ⌃Space | Open the completions (the way to open them where `tab_behavior = "autosuggestion"`) |
+| Esc | Close the completion menu and clear the ghost text (after deselecting any block; vim: the ghost text in Normal mode only) |
 | ↑ / ↓ | History menu (Warp): ↑ on the first line opens it on the history lines that start with the typed text and previews the newest; ↑ older, ↓ newer; ↓ past the newest or Esc closes it and puts back the typed text; ⏎ runs the preview, ⇥ / → keep it to edit, typing keeps it and types. A completion panel opened as you type gives ↑ to the menu; one asked for (Tab, or ↓ into it) keeps ↑ / ↓ moving its selection. Inside a multi-line command: the line above / below |
-| ← / → | Move cursor; → at the end of the line accepts the ghost text, ⌃→ one word of it |
-| ⌥← / ⌥→ | Word left / right |
-| ⌘← / ⌘→, ⌃A / ⌃E | Start / end of the cursor's line (of the command, when it has one line) |
+| ← / → | Move cursor; → at the end of the line accepts the ghost text, ⌃→ one word of it (anywhere) |
+| ⌥← / ⌥→ | Word left / right; ⌥→ at the end of the line accepts one word of the ghost text |
+| ⌘← / ⌘→, ⌃A / ⌃E | Start / end of the cursor's line (of the command, when it has one line); ⌘→ / ⌃E at the end of the line accept the ghost text |
 | ⌘↑ / ⌘↓ | Start / end of a multi-line command while there are lines that way; on its first / last line they select blocks (`select_block_prev/next`) |
 | ⇧⌘↑ / ⇧⌘↓ | Extend the selection to the start / end of a multi-line command; on a one-line command, or its first / last line, they are `bookmark_prev` / `bookmark_next` (previous / next bookmarked block) |
 | ⌫ / ⌦ (Delete) | Delete back / forward |
@@ -183,15 +186,15 @@ below are implemented.
 
 | Key | Effect |
 |---|---|
-| Esc | Insert / Replace → Normal (cursor steps left); leaves Visual; in Normal cancels a pending operator/count |
+| Esc | Insert / Replace → Normal (cursor steps left; the ghost text stays); leaves Visual; in Normal cancels a pending operator/count and clears the ghost text |
 | `i` / `a` / `I` / `A` | Insert here / after cursor / at first non-blank / at line end |
 | `o` / `O` | Open a line below / above and insert |
 | `v` / `V` | Visual (charwise) / Visual Line mode; again to leave |
 | `R` | Replace mode: typed chars overwrite, ⌫ restores |
 | Enter | Submit the command (any mode); submitting returns to Insert |
-| `h` `l` (or Space) | Left / right (also ← → and ⌫) |
-| `0` / `$` / `^` / `_` | Line start / last char / first non-blank / first non-blank (linewise for operators) |
-| `w` `b` `e` `ge` | Word forward / back / end / previous end (`W` `B` `E` `gE` = whitespace-delimited) |
+| `h` `l` (or Space) | Left / right (also ← → and ⌫); `l` on the last character accepts the ghost text |
+| `0` / `$` / `^` / `_` | Line start / last char / first non-blank / first non-blank (linewise for operators); `$` on the last character accepts the ghost text |
+| `w` `b` `e` `ge` | Word forward / back / end / previous end (`W` `B` `E` `gE` = whitespace-delimited); `w` / `e` on the last character accept one word of the ghost text |
 | `gg` / `G` | First / last line (`3G` = line 3) |
 | `%` | Matching bracket |
 | `f` `F` `t` `T` + char | Find forward/back, on/before the char |

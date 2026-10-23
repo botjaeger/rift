@@ -6,6 +6,7 @@ use rift_renderer::{Layer, TextEngine, mono_family};
 
 use crate::state::PaneState;
 use crate::views::glyphs;
+use crate::views::icons::{self, Icon};
 use crate::views::prompt_chips::{self, ChipView};
 use crate::vim::VimMode;
 
@@ -29,6 +30,102 @@ pub fn syntax_color(theme: &Theme, kind: TokenKind) -> Color {
         TokenKind::Op => theme.text_muted,
         TokenKind::Plain => theme.fg,
     }
+}
+
+/// The keys that can accept the whole ghost text, as the hint chip's menu
+/// offers them (Warp's "accept autosuggestion" keybinding menu).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcceptKey {
+    /// → (always works at the end of the line; the default).
+    Right,
+    /// Tab (`tab_behavior = "autosuggestion"`).
+    Tab,
+    /// ⇧→ (`[keybindings] accept_autosuggestion = "shift+right"`).
+    ShiftRight,
+    /// Another `accept_autosuggestion` binding (Settings › Keybindings).
+    Custom,
+}
+
+impl AcceptKey {
+    pub const ALL: [AcceptKey; 4] = [
+        AcceptKey::Right,
+        AcceptKey::Tab,
+        AcceptKey::ShiftRight,
+        AcceptKey::Custom,
+    ];
+
+    /// Its row in the chip's menu.
+    pub fn label(self) -> &'static str {
+        match self {
+            AcceptKey::Right => "→",
+            AcceptKey::Tab => "Tab",
+            AcceptKey::ShiftRight => "⇧→",
+            AcceptKey::Custom => "Custom…",
+        }
+    }
+
+    /// The key that accepts the ghost text under `config`: a valid
+    /// `accept_autosuggestion` binding first, else Tab when
+    /// `tab_behavior = "autosuggestion"`, else →.
+    pub fn current(config: &Config) -> AcceptKey {
+        match accept_binding(config) {
+            Some(b)
+                if Some(&b) == rift_core::keybindings::Binding::parse("shift+right").as_ref() =>
+            {
+                AcceptKey::ShiftRight
+            }
+            Some(b) if Some(&b) == rift_core::keybindings::Binding::parse("tab").as_ref() => {
+                AcceptKey::Tab
+            }
+            Some(_) => AcceptKey::Custom,
+            None if config.tab_behavior == rift_core::TabBehavior::Autosuggestion => AcceptKey::Tab,
+            None => AcceptKey::Right,
+        }
+    }
+}
+
+/// The user's `accept_autosuggestion` binding, when it is one (`none`, an
+/// empty or an invalid value binds nothing, as in the keymap).
+fn accept_binding(config: &Config) -> Option<rift_core::keybindings::Binding> {
+    // `none` and "" parse as no binding
+    rift_core::keybindings::Binding::parse(config.keybindings.get("accept_autosuggestion")?)
+}
+
+/// The hint chip's text: the key that accepts the ghost text now.
+pub fn accept_key_text(config: &Config) -> String {
+    match AcceptKey::current(config) {
+        AcceptKey::Custom => accept_binding(config)
+            .map(|b| b.chips().concat())
+            .unwrap_or_else(|| "→".into()),
+        k => k.label().into(),
+    }
+}
+
+/// What the app tells the editor about the ghost text's chips.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct GhostUi {
+    /// The pointer (hovered chips invert, as Warp's).
+    pub mouse: (f32, f32),
+    /// The hint chip's menu is open.
+    pub menu_open: bool,
+}
+
+/// The ghost text's chips as drawn: the accept-key hint and the ✕.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct GhostRects {
+    pub key: Option<[f32; 4]>,
+    pub ignore: Option<[f32; 4]>,
+}
+
+/// Which of the ghost text's chips show: the hint
+/// (`autosuggestion_hint`) and the ✕ (`autosuggestion_ignore_button`),
+/// only while ghost text shows after a cursor at the end of the line.
+pub fn ghost_chips(config: &Config, ghost: &str, cursor_at_end: bool) -> (bool, bool) {
+    let on = !ghost.is_empty() && cursor_at_end && config.autosuggestions;
+    (
+        on && config.autosuggestion_hint,
+        on && config.autosuggestion_ignore_button,
+    )
 }
 
 /// Visual rows of the buffer: logical lines (split at `\n`) soft-wrapped
@@ -145,7 +242,9 @@ pub fn render(
     // the rich-input composer's header ("Compose for …") in place of the
     // prompt chips; its text is prose, not a command (no syntax colors)
     header: Option<(&str, &str)>,
-) -> ((f32, f32), (f32, f32), DrawnChips) {
+    ghost_ui: GhostUi,
+) -> ((f32, f32), (f32, f32), DrawnChips, GhostRects) {
+    let mut ghost_rects = GhostRects::default();
     let [x, y, w, _h] = area;
     let mut chips = Vec::new();
     let shell_prompt = config.prompt == PromptMode::Shell && header.is_none();
@@ -389,11 +488,27 @@ pub fn render(
 
     // inline ghost text (Warp): the dimmed completion continues the line
     // right at the cursor (its first glyph shows through the cursor), then
-    // a small → chip names the accept key
-    let ghost_on =
-        !ghost.is_empty() && pane.editor.cursor == buffer.len() && config.autosuggestions;
+    // a small chip names the accept key (a click changes it), then the ✕
+    // that ignores the suggestion (`autosuggestion_ignore_button`)
+    // (vim's Normal mode rests on the last character: the ghost text goes on
+    // after it, as the accept keys take it there)
+    let at_end = pane.editor.ghost_at_end();
+    let ghost_on = !ghost.is_empty() && at_end && config.autosuggestions;
+    let (show_key, show_ignore) = ghost_chips(config, ghost, at_end);
     if ghost_on {
-        let gx = text_x + prefix_w;
+        let end_row = row_of(&rows, buffer.len());
+        let cursor_y = input_y + end_row as f32 * line_h;
+        let gx = if pane.editor.cursor == buffer.len() {
+            text_x + prefix_w
+        } else {
+            text_x
+                + engine.measure(
+                    &buffer[rows[end_row].start..],
+                    font_size,
+                    mono_family(),
+                    Weight::NORMAL,
+                )
+        };
         let gw = engine.measure(ghost, font_size, mono_family(), Weight::NORMAL);
         let mut gbuf = Buffer::new(&mut engine.font_system, Metrics::new(font_size, line_h));
         gbuf.set_text(
@@ -404,31 +519,64 @@ pub fn render(
             None,
         );
         layer.text(gbuf, gx, cursor_y, theme.ghost_text());
-        let key = "→";
-        let kw = engine.measure(key, 11.0, rift_renderer::FONT_SANS, Weight::NORMAL);
-        let chip = [
-            gx + gw + 8.0,
-            cursor_y + CURSOR_TOP + (CURSOR_H - 16.0) / 2.0,
-            kw + 10.0,
-            16.0,
-        ];
-        layer.bordered(
-            [chip[0], chip[1]],
-            [chip[2], chip[3]],
-            Color::TRANSPARENT,
-            theme.text_muted.with_alpha(0.6),
-            4.0,
-            1.0,
-        );
-        let mut kb = Buffer::new(&mut engine.font_system, Metrics::new(11.0, 16.0));
-        kb.set_text(
-            &mut engine.font_system,
-            key,
-            &Attrs::new().family(Family::Name(rift_renderer::FONT_SANS)),
-            Shaping::Advanced,
-            None,
-        );
-        layer.text(kb, (chip[0] + 5.0).round(), chip[1] - 0.5, theme.text_dim);
+        let edge = theme.text_muted.with_alpha(0.6);
+        let chip_y = cursor_y + CURSOR_TOP + (CURSOR_H - 16.0) / 2.0;
+        let hot = |r: [f32; 4]| {
+            let (mx, my) = ghost_ui.mouse;
+            mx >= r[0] && mx < r[0] + r[2] && my >= r[1] && my < r[1] + r[3]
+        };
+        let mut next_x = gx + gw + 8.0;
+        if show_key {
+            let key = accept_key_text(config);
+            let kw = engine.measure(&key, 11.0, rift_renderer::FONT_SANS, Weight::NORMAL);
+            let chip = [next_x, chip_y, kw + 10.0, 16.0];
+            // inverted while hovered or its menu is open (Warp)
+            let inverted = ghost_ui.menu_open || hot(chip);
+            layer.bordered(
+                [chip[0], chip[1]],
+                [chip[2], chip[3]],
+                if inverted { edge } else { Color::TRANSPARENT },
+                edge,
+                4.0,
+                1.0,
+            );
+            let mut kb = Buffer::new(&mut engine.font_system, Metrics::new(11.0, 16.0));
+            kb.set_text(
+                &mut engine.font_system,
+                &key,
+                &Attrs::new().family(Family::Name(rift_renderer::FONT_SANS)),
+                Shaping::Advanced,
+                None,
+            );
+            layer.text(
+                kb,
+                (chip[0] + 5.0).round(),
+                chip[1] - 0.5,
+                if inverted { theme.bg } else { theme.text_dim },
+            );
+            ghost_rects.key = Some(chip);
+            next_x = chip[0] + chip[2] + 8.0;
+        }
+        if show_ignore {
+            let chip = [next_x, chip_y, 16.0, 16.0];
+            let inverted = hot(chip);
+            layer.bordered(
+                [chip[0], chip[1]],
+                [chip[2], chip[3]],
+                if inverted { edge } else { Color::TRANSPARENT },
+                edge,
+                4.0,
+                1.0,
+            );
+            icons::draw(
+                layer,
+                Icon::Close,
+                [chip[0] + 8.0, chip[1] + 8.0],
+                10.0,
+                if inverted { theme.bg } else { theme.text_dim },
+            );
+            ghost_rects.ignore = Some(chip);
+        }
     }
 
     // correction / hint shown in an empty editor (Warp command corrections)
@@ -595,7 +743,12 @@ pub fn render(
         layer.text(b, px + 7.0, cursor_y + 2.0, color);
     }
 
-    ((text_x, input_y), (text_x + prefix_w, cursor_y), chips)
+    (
+        (text_x, input_y),
+        (text_x + prefix_w, cursor_y),
+        chips,
+        ghost_rects,
+    )
 }
 
 /// Each drawn prompt chip and its rect.
@@ -851,6 +1004,48 @@ pub(crate) fn shorten_home(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ghost_chips_follow_their_settings_and_the_ghost() {
+        let mut c = Config::default();
+        // defaults (Warp): the hint shows, the ✕ does not
+        assert_eq!(ghost_chips(&c, "tatus", true), (true, false));
+        c.autosuggestion_ignore_button = true;
+        assert_eq!(ghost_chips(&c, "tatus", true), (true, true));
+        c.autosuggestion_hint = false;
+        assert_eq!(ghost_chips(&c, "tatus", true), (false, true));
+        // no ghost text, the cursor inside the line, ghost text off: none
+        c.autosuggestion_hint = true;
+        assert_eq!(ghost_chips(&c, "", true), (false, false));
+        assert_eq!(ghost_chips(&c, "tatus", false), (false, false));
+        c.autosuggestions = false;
+        assert_eq!(ghost_chips(&c, "tatus", true), (false, false));
+    }
+
+    #[test]
+    fn the_accept_key_follows_tab_behavior_and_the_binding() {
+        let mut c = Config::default();
+        assert_eq!(AcceptKey::current(&c), AcceptKey::Right);
+        assert_eq!(accept_key_text(&c), "→");
+        c.tab_behavior = rift_core::TabBehavior::Autosuggestion;
+        assert_eq!(AcceptKey::current(&c), AcceptKey::Tab);
+        assert_eq!(accept_key_text(&c), "Tab");
+        // a binding wins over tab_behavior
+        c.keybindings
+            .insert("accept_autosuggestion".into(), "shift+right".into());
+        assert_eq!(AcceptKey::current(&c), AcceptKey::ShiftRight);
+        assert_eq!(accept_key_text(&c), "⇧→");
+        c.keybindings
+            .insert("accept_autosuggestion".into(), "ctrl+alt+l".into());
+        assert_eq!(AcceptKey::current(&c), AcceptKey::Custom);
+        assert_eq!(accept_key_text(&c), "⌃⌥L");
+        // `none` or a value that is no key binds nothing
+        for v in ["none", "", "ctrl+nokey"] {
+            c.keybindings
+                .insert("accept_autosuggestion".into(), v.into());
+            assert_eq!(AcceptKey::current(&c), AcceptKey::Tab, "{v:?}");
+        }
+    }
 
     #[test]
     fn elide_head_keeps_the_path_tail() {

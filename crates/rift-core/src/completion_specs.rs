@@ -1160,6 +1160,12 @@ const SPECS: &[CommandSpec] = &[
         args: ArgKind::SshHost,
     },
     CommandSpec {
+        name: "cat",
+        options: &[],
+        subcommands: &[],
+        args: ArgKind::Path,
+    },
+    CommandSpec {
         name: "scp",
         options: &[],
         subcommands: &[],
@@ -1245,7 +1251,7 @@ pub struct Resolved {
     pub used_options: Vec<String>,
 }
 
-fn find_option<'a>(opts: &'a [OptionSpec], word: &str) -> Option<&'a OptionSpec> {
+pub(crate) fn find_option<'a>(opts: &'a [OptionSpec], word: &str) -> Option<&'a OptionSpec> {
     let key = word.split('=').next().unwrap_or(word);
     opts.iter()
         .find(|o| (!o.short.is_empty() && o.short == key) || (!o.long.is_empty() && o.long == key))

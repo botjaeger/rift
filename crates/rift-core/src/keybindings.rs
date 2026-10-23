@@ -389,6 +389,7 @@ pub fn all_actions() -> Vec<&'static str> {
         "new_worktree_tab",
         "toggle_tab_layout",
         "clear_transcripts",
+        "clear_ignored_suggestions",
         "whats_new",
         "open_about",
         "check_for_updates",
@@ -403,6 +404,7 @@ pub fn all_actions() -> Vec<&'static str> {
         "cycle_tab_color",
         "set_tab_color",
         "toggle_sticky_header",
+        "accept_autosuggestion",
     ] {
         if !out.contains(&extra) {
             out.push(extra);

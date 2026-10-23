@@ -907,7 +907,8 @@ before, for the phone's Run sheet and the pane's suggestions:
 - `history`: commands starting with `line`, newest first and each once:
   the pane's blocks (`at`: when it finished, Unix seconds; null while it
   runs), then the pane's command-line history and the shell history the
-  desktop imported (`at` null).
+  desktop imported (`at` null). Lines the desktop's ghost-text ✕ ignored
+  (`ignored-suggestions.json`) are left out, as from its own suggestions.
 - Bounds: `line` at most 1,024 bytes; at most 50 `items` and 50
   `history` entries (`more`: some were left out), each `text` at most
   1,024 bytes. It shares `output`'s rate. An unknown pane answers `ack`

@@ -381,6 +381,12 @@ fn register_name(c: char) -> bool {
 }
 
 impl VimState {
+    /// In Normal mode with nothing half typed (no count, operator, pending
+    /// argument or `/` prompt): the next key is a command of its own.
+    pub fn normal_idle(&self) -> bool {
+        self.mode == VimMode::Normal && self.pending.idle() && self.prompt.is_none()
+    }
+
     /// Back to Insert with no half-typed command — what users expect right
     /// after running a command (matches Warp).
     pub fn reset_insert(&mut self) {

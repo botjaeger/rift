@@ -73,6 +73,18 @@ pub enum ShellWidgets {
     Rift,
 }
 
+/// What Tab does in the command editor (Warp's "Tab key behavior"): open
+/// the completions (Tab accepts no ghost text there), or accept the ghost
+/// text (with none, Tab completes as `completions` does; ⌃Space opens the
+/// completions).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TabBehavior {
+    #[default]
+    Completions,
+    Autosuggestion,
+}
+
 /// What the "Time on this tab" chip counts: the time since the tab's first
 /// command, or only the time a command ran in it (time logging).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -899,8 +911,19 @@ pub struct Config {
     pub copy_on_select: bool,
     /// Inline ghost-text suggestion after the cursor.
     pub autosuggestions: bool,
-    /// Completion dropdown (Tab still accepts the ghost suggestion).
-    pub completions_menu: bool,
+    /// Open the completion menu as you type (Warp "Open completions menu
+    /// as you type"); off, Tab opens it. Formerly `completions_menu`.
+    #[serde(alias = "completions_menu")]
+    pub completions_open_while_typing: bool,
+    /// What Tab does: open the completions, or accept the ghost text.
+    pub tab_behavior: TabBehavior,
+    /// The chip after the ghost text naming its accept key (→, Tab, ⇧→ or
+    /// the `accept_autosuggestion` binding); a click changes the key (Warp
+    /// "Show autosuggestion keybinding hint").
+    pub autosuggestion_hint: bool,
+    /// A ✕ after the ghost text: never suggest that command line again
+    /// (Warp "Show autosuggestion ignore button").
+    pub autosuggestion_ignore_button: bool,
     /// Ask the user's own shell (zsh, bash or fish completion functions)
     /// for completions too, and the remote shell over an SSH profile's
     /// shared connection.
@@ -1130,7 +1153,10 @@ impl Default for Config {
             elapsed_counts: ElapsedCounts::Always,
             copy_on_select: true,
             autosuggestions: true,
-            completions_menu: true,
+            completions_open_while_typing: false,
+            tab_behavior: TabBehavior::Completions,
+            autosuggestion_hint: true,
+            autosuggestion_ignore_button: false,
             shell_completions: true,
             shell_widgets: ShellWidgets::Auto,
             autocomplete_pairs: true,
@@ -1648,6 +1674,11 @@ impl Config {
         } else {
             String::new()
         };
+        // a renamed key goes: its value is written under the new name (both
+        // in one file would be a duplicate setting)
+        for (old, _) in crate::config_lint::RENAMED_KEYS {
+            doc.as_table_mut().remove(old);
+        }
         let ordered: Option<toml_edit::DocumentMut> = toml::to_string_pretty(self)
             .ok()
             .and_then(|t| t.parse().ok());
@@ -1887,6 +1918,25 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completions_menu_is_read_as_completions_open_while_typing() {
+        assert!(!Config::default().completions_open_while_typing);
+        assert_eq!(Config::default().tab_behavior, TabBehavior::Completions);
+        let text = "# mine\nfont_size = 15.0\ncompletions_menu = true\n";
+        let c: Config = toml::from_str(text).unwrap();
+        assert!(c.completions_open_while_typing);
+        // saving writes the new name only (both would be a duplicate)
+        let out = c.edit_toml(Some(text)).unwrap();
+        assert!(
+            out.contains("completions_open_while_typing = true")
+                && !out.contains("completions_menu")
+                && out.contains("# mine"),
+            "{out}"
+        );
+        let c: Config = toml::from_str("tab_behavior = \"autosuggestion\"\n").unwrap();
+        assert_eq!(c.tab_behavior, TabBehavior::Autosuggestion);
+    }
 
     #[test]
     fn unsetting_an_optional_key_edits_only_that_line() {

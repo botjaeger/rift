@@ -182,6 +182,8 @@ pub enum AppAction {
     ToggleTabLayout,
     /// Delete saved block transcripts.
     ClearTranscripts,
+    /// Suggest again every command line the ghost text's ✕ ignored.
+    ClearIgnoredSuggestions,
     /// Finished commands, failures, notifications and bells.
     AttentionCenter,
     /// Rich input: Rift's editor over the running program (a coding agent,
@@ -205,6 +207,9 @@ pub enum AppAction {
     SetTabColor,
     /// The active pane's sticky command header: minimized ↔ shown.
     ToggleStickyHeader,
+    /// Accept the whole ghost text (unbound by default; Warp's "Accept
+    /// autosuggestion").
+    AcceptAutosuggestion,
 }
 
 impl AppAction {
@@ -267,6 +272,7 @@ impl AppAction {
                 | AppAction::InsertLastArgument
                 | AppAction::SubwordLeft
                 | AppAction::SubwordRight
+                | AppAction::AcceptAutosuggestion
         )
     }
 }
@@ -419,6 +425,7 @@ pub fn action_from_name(name: &str) -> Option<AppAction> {
         "new_worktree_tab" => AppAction::NewWorktreeTab,
         "toggle_tab_layout" => AppAction::ToggleTabLayout,
         "clear_transcripts" => AppAction::ClearTranscripts,
+        "clear_ignored_suggestions" => AppAction::ClearIgnoredSuggestions,
         "attention_center" => AppAction::AttentionCenter,
         "rich_input" => AppAction::RichInput,
         "mark_mode" => AppAction::MarkMode,
@@ -429,6 +436,7 @@ pub fn action_from_name(name: &str) -> Option<AppAction> {
         "cycle_tab_color" => AppAction::CycleTabColor,
         "set_tab_color" => AppAction::SetTabColor,
         "toggle_sticky_header" => AppAction::ToggleStickyHeader,
+        "accept_autosuggestion" => AppAction::AcceptAutosuggestion,
         _ => return None,
     })
 }
@@ -485,26 +493,27 @@ pub enum EditorKey {
     HistoryUp,
     HistoryDown,
     Submit,
-    Interrupt,            // ⌃C
-    Eof,                  // ⌃D on empty line
-    Complete,             // ⇥
-    NextCompletionSource, // ⇧⇥ (completion panel source tabs)
-    Dismiss,              // esc
-    HistorySearch,        // ⌃R (editor mode only — passthrough keeps raw 0x12)
-    AcceptGhostWord,      // ⌃→
-    ClearScreen,          // ⌃L (passes \x0c to the shell)
-    Undo,                 // ⌘Z
-    Redo,                 // ⇧⌘Z
-    Cut,                  // ⌘X (editor selection)
-    SelectLeft,           // ⇧←
-    SelectRight,          // ⇧→
-    SelectWordLeft,       // ⌥⇧←
-    SelectWordRight,      // ⌥⇧→
-    SelectHome,           // ⇧⌘← / ⇧Home
-    SelectEnd,            // ⇧⌘→ / ⇧End
-    InsertLastArg,        // ⌥. (insert_last_argument)
-    SubwordLeft,          // ⌃⌥← (subword_left)
-    SubwordRight,         // ⌃⌥→ (subword_right)
+    Interrupt,       // ⌃C
+    Eof,             // ⌃D on empty line
+    Complete,        // ⇥
+    PrevCompletion,  // ⇧⇥ (the completion menu's previous row)
+    OpenCompletions, // ⌃Space (opens the completion menu)
+    Dismiss,         // esc
+    HistorySearch,   // ⌃R (editor mode only — passthrough keeps raw 0x12)
+    AcceptGhostWord, // ⌃→
+    ClearScreen,     // ⌃L (passes \x0c to the shell)
+    Undo,            // ⌘Z
+    Redo,            // ⇧⌘Z
+    Cut,             // ⌘X (editor selection)
+    SelectLeft,      // ⇧←
+    SelectRight,     // ⇧→
+    SelectWordLeft,  // ⌥⇧←
+    SelectWordRight, // ⌥⇧→
+    SelectHome,      // ⇧⌘← / ⇧Home
+    SelectEnd,       // ⇧⌘→ / ⇧End
+    InsertLastArg,   // ⌥. (insert_last_argument)
+    SubwordLeft,     // ⌃⌥← (subword_left)
+    SubwordRight,    // ⌃⌥→ (subword_right)
 }
 
 impl EditorKey {
@@ -560,7 +569,7 @@ pub fn editor_key(event: &KeyPress, mods: ModifiersState) -> Option<EditorKey> {
             // ⇧⏎ / ⌥⏎: newline inside the command (multi-line editing)
             NamedKey::Enter if mods.shift_key() || alt => Some(EditorKey::Insert("\n".into())),
             NamedKey::Enter => Some(EditorKey::Submit),
-            NamedKey::Tab if mods.shift_key() => Some(EditorKey::NextCompletionSource),
+            NamedKey::Tab if mods.shift_key() => Some(EditorKey::PrevCompletion),
             NamedKey::Tab => Some(EditorKey::Complete),
             NamedKey::Escape => Some(EditorKey::Dismiss),
             NamedKey::Backspace if cmd => Some(EditorKey::KillToStart),
@@ -581,6 +590,7 @@ pub fn editor_key(event: &KeyPress, mods: ModifiersState) -> Option<EditorKey> {
             NamedKey::Home => Some(EditorKey::Home),
             NamedKey::End => Some(EditorKey::End),
             NamedKey::Space if !ctrl => Some(EditorKey::Insert(" ".into())),
+            NamedKey::Space if !alt && !mods.shift_key() => Some(EditorKey::OpenCompletions),
             _ => None,
         };
         if key.is_some() {
@@ -1068,6 +1078,7 @@ pub fn remote_editor_key(key: rift_remote::Key) -> Option<EditorKey> {
                 | EditorKey::HistoryDown
                 | EditorKey::HistorySearch
                 | EditorKey::Complete
+                | EditorKey::OpenCompletions
                 | EditorKey::AcceptGhostWord
                 | EditorKey::Undo
                 | EditorKey::Redo
@@ -1206,7 +1217,7 @@ mod tests {
             ("ctrl+w", Some(EditorKey::DeleteWordBack)),
             ("ctrl+l", Some(EditorKey::ClearScreen)),
             ("enter", Some(EditorKey::Submit)),
-            ("shift+tab", Some(EditorKey::NextCompletionSource)),
+            ("shift+tab", Some(EditorKey::PrevCompletion)),
             ("esc", Some(EditorKey::Dismiss)),
             ("backspace", Some(EditorKey::Backspace)),
             ("left", Some(EditorKey::Left)),
@@ -1254,6 +1265,7 @@ mod tests {
                             | EditorKey::HistoryDown
                             | EditorKey::HistorySearch
                             | EditorKey::Complete
+                            | EditorKey::OpenCompletions
                             | EditorKey::AcceptGhostWord
                             | EditorKey::Undo
                             | EditorKey::Redo
@@ -1623,10 +1635,11 @@ mod tests {
             key_to_bytes(&one, ModifiersState::ALT | ModifiersState::SHIFT, meta).unwrap(),
             b"\x1b!"
         );
-        // ctrl+space must not type a space into the editor
+        // ctrl+space must not type a space into the editor: it opens the
+        // completions (`tab_behavior = "autosuggestion"`)
         assert_eq!(
             editor_key(&named(NamedKey::Space), ModifiersState::CONTROL),
-            None
+            Some(EditorKey::OpenCompletions)
         );
         assert_eq!(
             editor_key(&named(NamedKey::Space), NONE),

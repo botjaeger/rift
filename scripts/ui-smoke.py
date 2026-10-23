@@ -376,9 +376,11 @@ assert "control_api=off" in state("invalid"), state("invalid")
 assert 'toast=Some("config.toml not applied' in state("invalid"), state("invalid")
 assert 'toast=Some("Settings not saved' in state("invalid-save"), state("invalid-save")
 assert (scratch / "after-save.toml").read_text() == "font_size = [\n", "Settings overwrote an invalid config"
-assert 'editor="cat ./my\\\\ file.txt"' in state("complete"), state("complete")
+assert 'editor="cat ./my\\\\ file.txt "' in state("complete"), state("complete")
 assert "one-arg-ok" in state("complete-run"), state("complete-run")
-assert 'editor="cat ./my\\\\ file.txt" cursor=18' in state("complete-quoted"), state("complete-quoted")
+# the closing quote belongs to the word, which ends the line: the one match
+# gets a space after it (Warp); mid-line it does not
+assert 'editor="cat ./my\\\\ file.txt " cursor=19' in state("complete-quoted"), state("complete-quoted")
 assert 'editor="cat ./my\\\\ file.txt --other" cursor=18' in state("complete-mid"), state("complete-mid")
 assert 'editor="a\\u{3000}b" cursor=4' in state("word-left"), state("word-left")
 assert f'{scratch}/a/src/only_a.rs"' in state("hints"), state("hints")
@@ -3144,6 +3146,7 @@ for name in ("d1/f1", "d1/f2", "d2/f3"):
     (hm / "work" / name).write_text("")
 (hm / "cfg/rift/config.toml").write_text(
     'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
+    'completions_open_while_typing = true\n'
     f'working_directory = {json.dumps(str(hm / "work"))}\n')
 (hm / "m.rift").write_text("\n".join([
     "wait_prompt",
@@ -3163,7 +3166,8 @@ for name in ("d1/f1", "d1/f2", "d2/f3"):
     # keeps ↑ / ↓
     "key ctrl+u", "type ls d", "wait 800", f"dump {hm}/as-typed.txt",
     "key up", "wait 100", f"dump {hm}/as-typed-up.txt", "key down", "wait 800",
-    f"dump {hm}/as-typed-back.txt", "key tab", "wait 800", "key down", "key up", "wait 100", f"dump {hm}/tabbed.txt",
+    f"dump {hm}/as-typed-back.txt", "key escape", "key tab", "wait 800", "key down", "key up",
+    "wait 100", f"dump {hm}/tabbed.txt",
     # previews are no edits: ⌘Z after a kept preview goes back to the typed
     # text, and after Esc it never brings a preview back; leaving the tab
     # closes the menu and puts the typed text back
@@ -3208,10 +3212,10 @@ assert "history_menu=true" in hmt("as-typed-up") and 'editor="ls d1/x"' in hmt("
 # ↓ past the newest is back to typing: the panel returns
 assert 'completion_items="d1/"(path) "d2/"(path)' in hmt("as-typed-back") \
     and 'editor="ls d" cursor=4' in hmt("as-typed-back"), hmt("as-typed-back")[:3000]
-assert 'completion_items="d1/f1"(path) "d1/f2"(path)' in hmt("tabbed") \
+assert 'completion_items="d1/"(path) "d2/"(path)' in hmt("tabbed") \
     and "history_menu=false history_menu_selected=0" in hmt("tabbed") \
-    and "completion_asked=true" in hmt("tabbed") and 'editor="ls d1/"' in hmt("tabbed"), \
-    hmt("tabbed")[:3000]
+    and "completion_asked=true" in hmt("tabbed") and "completion_tab=true" in hmt("tabbed") \
+    and 'editor="ls d" cursor=4' in hmt("tabbed"), hmt("tabbed")[:3000]
 assert "history_menu=false" in hmt("undo-preview") \
     and re.search(r'pane 1 .*editor="echo" cursor=4', hmt("undo-preview")), hmt("undo-preview")[:3000]
 assert "history_menu=false" in hmt("undo-esc") \
@@ -3247,9 +3251,9 @@ dh_env = dict(env, XDG_CONFIG_HOME=str(dh / "cfg"), XDG_DATA_HOME=str(dh / "data
               HOME=str(dh / "home"), HISTFILE=str(dh / "home/.bash_history"),
               BASH_SILENCE_DEPRECATION_WARNING="1", RIFT_SCRIPT_RECORD_HISTORY="1")
 dh_env.pop("RIFT_SCRIPT_HISTORY", None)
-# `cat ./deploy.txt…` collides the same way; its file argument gives the
-# completion panel a word candidate, so the panel opens and lists the
-# history rows (`pnpm de` alone shows only the ghost text)
+# `cat ./deploy.txt…` collides the same way: the ↑ menu for `cat ./de`
+# lists its lines in the same order (the completion menu lists word
+# candidates only)
 for where in ("a", "b"):
     (dh / where / "deploy.txt").write_text("")
 def dh_run(name, steps, extra=None):
@@ -3273,14 +3277,14 @@ commands = [e["command"] for e in saved["entries"]]
 assert "pnpm dev" in commands and "pnpm dev:web" in commands, commands
 assert not any("hidden" in c or "TOKEN" in c for c in commands), commands
 # each place: the ghost text as typed, the ↑ menu's first line, the ⌃R
-# pane's first row for that query, and the panel's history rows for
-# `cat ./de`
+# pane's first row for that query, and the ↑ menu's lines for `cat ./de`
 dh_probe = lambda where: [
     "type pnpm de", "wait 500", f"dump {dh}/{where}-typed.txt",
     "key up", "wait 100", f"dump {dh}/{where}-up.txt", "key escape",
     "key ctrl+r", "wait 300", f"dump {dh}/{where}-search.txt", "key escape",
     "key cmd+a", "key backspace",
-    "type cat ./de", "wait 500", f"dump {dh}/{where}-panel.txt", "key escape",
+    "type cat ./de", "wait 500", "key up", "wait 100", f"dump {dh}/{where}-panel.txt",
+    "key escape",
     "key cmd+a", "key backspace"]
 dh_run("rank", [
     *dh_probe("a"),
@@ -3303,6 +3307,318 @@ assert dh_first("b") == ('"v:web"', "pnpm dev:web", ["cat ./deploy.txt ./deploy.
 for where, line in (("a", "pnpm dev"), ("b", "pnpm dev:web")):
     dh_up = (dh / f"{where}-up.txt").read_text()
     assert "history_menu=true" in dh_up and f'editor="{line}"' in dh_up, (where, dh_up[:3000])
+
+# Next-command history: the ghost text suggests what usually follows the
+# pane's previous command (Warp). Tab 1 runs `cd project1`, the backup, then
+# the restore; tab 2 (another shell session) types the script's prefix:
+# after another command the newest in the directory (the restore), after
+# `cd project1` in the same directory with the same exit code the backup.
+nc = scratch / "next-command"
+for sub in ("cfg/rift", "data", "home", "x/project1/scripts"):
+    (nc / sub).mkdir(parents=True, exist_ok=True)
+for rc_file in (".bash_profile", ".bashrc"):  # macOS login / Linux shim
+    (nc / "home" / rc_file).write_text("PS1='$ '\n")
+(nc / "x/project1/scripts/db.sh").write_text("exit 0\n")
+(nc / "cfg/rift/config.toml").write_text(
+    'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
+    f'working_directory = {json.dumps(str(nc / "x"))}\n')
+nc_env = dict(env, XDG_CONFIG_HOME=str(nc / "cfg"), XDG_DATA_HOME=str(nc / "data"),
+              HOME=str(nc / "home"), HISTFILE=str(nc / "home/.bash_history"),
+              BASH_SILENCE_DEPRECATION_WARNING="1", RIFT_SCRIPT_RECORD_HISTORY="1")
+nc_env.pop("RIFT_SCRIPT_HISTORY", None)
+# the directory as the first tab's shell has it (/tmp is /private/tmp on
+# macOS): the previous command matches by its directory string
+nc_x = (nc / "x").resolve()
+nc_steps = [
+    "wait_prompt", "wait 500",
+    "type cd project1\\n", "wait 500",
+    "type bash scripts/db.sh backup\\n", "wait 800",
+    "type bash scripts/db.sh restore --local --force\\n", "wait 800",
+    "key cmd+t", "wait_prompt", "wait 800",
+    f"type cd {nc_x}\\n", "wait 500",
+    "type true\\n", "wait 500",
+    f"type cd {nc_x / 'project1'}\\n", "wait 500",
+    "type bash scripts/db.sh", "wait 800", f"dump {nc}/other.txt",
+    "key cmd+a", "key backspace",
+    f"type cd {nc_x}\\n", "wait 500",
+    "type cd project1\\n", "wait 500",
+    "type bash scripts/db.sh", "wait 800", f"dump {nc}/after-prev.txt",
+    "quit",
+]
+(nc / "t.rift").write_text("\n".join(nc_steps) + "\n")
+with (nc / "run.log").open("w") as log:
+    rc = subprocess.run([str(binary), "--script", str(nc / "t.rift"), "--headless"],
+                        env=nc_env, stdout=log, stderr=log, timeout=120).returncode
+assert rc == 0, died("next-command run failed", nc / "run.log")
+nc_saved = json.loads((nc / "data/rift/history.json").read_text())["entries"]
+assert len({e.get("session") for e in nc_saved}) == 2 and all("seq" in e for e in nc_saved), \
+    nc_saved
+nc_ghost = lambda name: re.search(r" ghost=(\"[^\"]*\")", (nc / f"{name}.txt").read_text())[1]
+assert nc_ghost("other") == '" restore --local --force"', nc_ghost("other")
+assert nc_ghost("after-prev") == '" backup"', nc_ghost("after-prev")
+
+# Tab and the ghost text (Warp): Tab completes the word — one match goes in
+# with a space after it (a directory: none), several insert their common
+# prefix and open the menu, Tab / ⇧Tab cycle it (wrapping), typing narrows
+# it, ⏎ accepts; Tab never takes the ghost text; → ⌃F ⌃E ⌘→ End take it at
+# the end of the line and only move elsewhere, ⌥→ / ⌃⌥→ one word / word
+# part; Esc closes the menu and clears it. The menu opens as you type only
+# with completions_open_while_typing (or the old completions_menu): ⏎ then
+# accepts unless the word already is the row, then runs it, no space added.
+# tab_behavior = "autosuggestion" gives Tab the ghost text and ⌃Space the
+# completions; vim Normal's l $ take it, w e one word, its Esc clears it
+wt = scratch / "warp-tab"
+for sub in ("cfg/rift", "data", "home", "work/src/lib"):
+    (wt / sub).mkdir(parents=True, exist_ok=True)
+for name in ("alpha.txt", "alpine.txt", "beta.txt"):
+    (wt / "work" / name).write_text("")
+for rc_file in (".bash_profile", ".bashrc"):  # macOS login / Linux shim
+    (wt / "home" / rc_file).write_text("PS1='$ '\n")
+(wt / "home/.bash_history").write_text("echo hello world\ngit checkout main\n")
+wt_config = ('shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
+             f'working_directory = {json.dumps(str(wt / "work"))}\n')
+wt_env = dict(env, XDG_CONFIG_HOME=str(wt / "cfg"), XDG_DATA_HOME=str(wt / "data"),
+              HOME=str(wt / "home"), HISTFILE=str(wt / "home/.bash_history"),
+              BASH_SILENCE_DEPRECATION_WARNING="1", RIFT_SCRIPT_HISTORY="1")
+def wt_run(name, steps, extra=""):
+    (wt / "cfg/rift/config.toml").write_text(wt_config + extra)
+    (wt / f"{name}.rift").write_text("\n".join(["wait_prompt", "wait 500", *steps, "quit"]) + "\n")
+    with (wt / f"{name}.log").open("w") as log:
+        rc = subprocess.run([str(binary), "--script", str(wt / f"{name}.rift"), "--headless"],
+                            env=wt_env, stdout=log, stderr=log, timeout=120).returncode
+    assert rc == 0, died(f"warp tab {name} run failed", wt / f"{name}.log")
+wt_fresh = lambda line: ["key ctrl+u", f"type {line}", "wait 500"]
+wt_run("tab", [
+    "type cat al", "wait 500", f"dump {wt}/typed.txt",
+    "key tab", "wait 500", f"dump {wt}/lcp.txt",
+    "key tab", "wait 100", f"dump {wt}/next.txt",
+    "key tab", "wait 100", f"dump {wt}/wrap.txt",
+    "key shift+tab", "wait 100", f"dump {wt}/prev.txt",
+    "type i", "wait 300", f"dump {wt}/narrowed.txt",
+    "key enter", "wait 300", f"dump {wt}/accepted.txt",
+    *wt_fresh("cat be"), "key tab", "wait 400", f"dump {wt}/single.txt",
+    *wt_fresh("cat sr"), "key tab", "wait 400", f"dump {wt}/dir.txt",
+    *wt_fresh("git ch"), f"dump {wt}/ghost.txt",
+    "key tab", "wait 500", f"dump {wt}/tab-ghost.txt",
+    "key escape", "wait 100", f"dump {wt}/esc-menu.txt",
+    *wt_fresh("echo h"), "key escape", "wait 100", f"dump {wt}/esc-ghost.txt",
+    *[s for key in ("right", "ctrl+f", "ctrl+e", "cmd+right", "end")
+      for s in (*wt_fresh("echo h"), f"key {key}", "wait 200", f"dump {wt}/at-end-{key}.txt")],
+    *[s for key in ("right", "ctrl+e", "cmd+right", "end")
+      for s in (*wt_fresh("echo h"), "key left", f"key {key}", "wait 200",
+                f"dump {wt}/mid-{key}.txt")],
+    *wt_fresh("echo h"), "key alt+right", "wait 200", f"dump {wt}/word.txt",
+    *wt_fresh("echo h"), "key ctrl+alt+right", "wait 200", f"dump {wt}/subword.txt",
+    # ⌃Space opens the completions with the default Tab too
+    *wt_fresh("cat al"), "key escape", "key ctrl+space", "wait 400",
+    f"dump {wt}/ctrl-space.txt",
+])
+wt_run("ayt", ["type cat al", "wait 600", f"dump {wt}/ayt-open.txt",
+               "key enter", "wait 300", f"dump {wt}/ayt-enter.txt",
+               *wt_fresh("cat alpha.txt"), "wait 200", f"dump {wt}/ayt-full.txt",
+               "key enter", "wait 600", f"dump {wt}/ayt-ran.txt"],
+       "completions_open_while_typing = true\n")
+wt_run("legacy", ["type cat al", "wait 600", f"dump {wt}/legacy-open.txt"],
+       "completions_menu = true\n")
+wt_run("auto", ["type echo h", "wait 500", "key tab", "wait 200", f"dump {wt}/auto-tab.txt",
+                *wt_fresh("cat be"), "key escape", "key tab", "wait 400", f"dump {wt}/auto-none.txt",
+                *wt_fresh("cat al"), "key tab", "wait 400", f"dump {wt}/auto-ghost-al.txt",
+                *wt_fresh("cat al"), "key escape", "key ctrl+space", "wait 400",
+                f"dump {wt}/auto-ctrl-space.txt"],
+       'tab_behavior = "autosuggestion"\n')
+wt_run("vim", ["type echo h", "wait 500", "key escape", "wait 100", f"dump {wt}/vim-normal.txt",
+               "type w", "wait 100", f"dump {wt}/vim-w.txt",
+               "type l", "wait 100", f"dump {wt}/vim-l.txt",
+               *wt_fresh("echo h"), "key escape", "type 0", "type l", "wait 100",
+               f"dump {wt}/vim-mid.txt",
+               "type $", "type $", "wait 100", f"dump {wt}/vim-dollar.txt",
+               *wt_fresh("echo h"), "key escape", "type e", "wait 100", f"dump {wt}/vim-e.txt",
+               *wt_fresh("echo h"), "key escape", "key escape", "wait 100",
+               f"dump {wt}/vim-esc.txt"],
+       "vim_mode = true\n")
+wtt = lambda name: (wt / f"{name}.txt").read_text()
+def wt_state(name):
+    text = wtt(name)
+    editor = re.search(r'editor="((?:[^"\\]|\\.)*)" cursor=(\d+)', text)
+    menu = re.search(r' completion=(\w+) ghost="((?:[^"\\]|\\.)*)" items=(\d+)', text)
+    rows = re.findall(r'"([^"]*)"\(\w+\)', re.search(r"^completion_items=(.*)$", text, re.M)[1])
+    tab = re.search(r"completion_tab=(\w+) completion_selected=(\d+)", text)
+    return (editor[1], int(editor[2]), menu[1] == "true", menu[2], rows,
+            tab[1] == "true", int(tab[2]))
+# typing opens no menu (completions_open_while_typing is off by default)
+assert wt_state("typed")[:4] == ("cat al", 6, False, "pha.txt"), wt_state("typed")
+# two matches: their common prefix, the menu, the first row; no ghost beside it
+assert wt_state("lcp") == ("cat alp", 7, True, "", ["alpha.txt", "alpine.txt"], True, 0), \
+    wt_state("lcp")
+assert wt_state("next")[6] == 1 and wt_state("wrap")[6] == 0 and wt_state("prev")[6] == 1, \
+    (wt_state("next"), wt_state("wrap"), wt_state("prev"))
+assert wt_state("narrowed")[:5] == ("cat alpi", 8, True, "", ["alpine.txt"]), wt_state("narrowed")
+assert wt_state("accepted")[:3] == ("cat alpine.txt ", 15, False), wt_state("accepted")
+# one match: inserted, a space after a file, none after a directory
+assert wt_state("single")[:3] == ("cat beta.txt ", 13, False), wt_state("single")
+assert wt_state("dir")[:3] == ("cat src/", 8, False), wt_state("dir")
+# Tab with ghost text completes the word, never takes the ghost
+assert wt_state("ghost")[3] == "eckout main", wt_state("ghost")
+assert wt_state("tab-ghost")[:4] == ("git che", 7, True, ""), wt_state("tab-ghost")
+assert "checkout" in wt_state("tab-ghost")[4], wt_state("tab-ghost")
+assert wt_state("esc-menu")[:3] == ("git che", 7, False), wt_state("esc-menu")
+assert wt_state("esc-ghost")[:4] == ("echo h", 6, False, ""), wt_state("esc-ghost")
+for key in ("right", "ctrl+f", "ctrl+e", "cmd+right", "end"):
+    assert wt_state(f"at-end-{key}")[:4] == ("echo hello world", 16, False, ""), \
+        (key, wt_state(f"at-end-{key}"))
+# mid-line they only move (End scrolls and never moves the cursor)
+for key, cursor in (("right", 6), ("ctrl+e", 6), ("cmd+right", 6), ("end", 5)):
+    assert wt_state(f"mid-{key}")[:4] == ("echo h", cursor, False, "ello world"), \
+        (key, wt_state(f"mid-{key}"))
+assert wt_state("word")[:4] == ("echo hello", 10, False, " world"), wt_state("word")
+assert wt_state("subword")[:4] == ("echo hello", 10, False, " world"), wt_state("subword")
+# as you type: the menu opens; ⏎ accepts (no space), then runs what already is the row
+for name in ("ayt-open", "legacy-open"):
+    assert wt_state(name)[:5] == ("cat al", 6, True, "pha.txt", ["alpha.txt", "alpine.txt"]), \
+        (name, wt_state(name))
+assert wt_state("ayt-enter")[:3] == ("cat alpha.txt", 13, False), wt_state("ayt-enter")
+assert wt_state("ayt-full")[:3] == ("cat alpha.txt", 13, True), wt_state("ayt-full")
+assert wt_state("ayt-ran")[:2] == ("", 0) and 'cmd="cat alpha.txt"' in wtt("ayt-ran"), \
+    wtt("ayt-ran")[:2000]
+# autosuggestion: Tab takes the ghost; with none it completes; ⌃Space opens the menu
+assert wt_state("auto-tab")[:2] == ("echo hello world", 16), wt_state("auto-tab")
+assert wt_state("auto-none")[:3] == ("cat beta.txt ", 13, False), wt_state("auto-none")
+assert wt_state("auto-ghost-al")[:2] == ("cat alpha.txt", 13), wt_state("auto-ghost-al")
+assert wt_state("auto-ctrl-space")[:3] == ("cat alp", 7, True), wt_state("auto-ctrl-space")
+assert wt_state("ctrl-space")[:3] == ("cat alp", 7, True), wt_state("ctrl-space")
+# vim: Insert's Esc keeps the ghost; Normal's w / e take a word, l / $ the
+# rest, on the last character only; Normal's Esc clears it
+assert wt_state("vim-normal")[:4] == ("echo h", 5, False, "ello world") \
+    and "vim=Some(Normal)" in wtt("vim-normal"), wtt("vim-normal")[:1500]
+# ... and shows it after the block cursor on the last character, its chip too
+# (`l` takes what is on screen)
+assert 'Button "Accept suggestion key: →"' in wtt("vim-normal"), wtt("vim-normal")[-3000:]
+assert wt_state("vim-w")[:4] == ("echo hello", 9, False, " world"), wt_state("vim-w")
+assert wt_state("vim-l")[:4] == ("echo hello world", 15, False, ""), wt_state("vim-l")
+assert wt_state("vim-mid")[:4] == ("echo h", 1, False, "ello world"), wt_state("vim-mid")
+assert wt_state("vim-dollar")[:2] == ("echo hello world", 15), wt_state("vim-dollar")
+assert wt_state("vim-e")[:4] == ("echo hello", 9, False, " world"), wt_state("vim-e")
+assert wt_state("vim-esc")[:4] == ("echo h", 5, False, "") \
+    and "vim=Some(Normal)" in wtt("vim-esc"), wtt("vim-esc")[:1500]
+
+# Ghost text chips (Warp): the accept-key chip shows by default
+# (autosuggestion_hint) and names the key; a click opens its menu (→, Tab,
+# ⇧→, Custom…, the current one checked; Esc closes it). Picking Tab writes
+# tab_behavior = "autosuggestion" (Tab then takes the ghost), ⇧→ binds
+# accept_autosuggestion (⇧→ still selects with no ghost to take). The ✕
+# shows only with autosuggestion_ignore_button: a click ignores the whole
+# suggested line, the next suggestion takes its place, and it stays ignored
+# after a relaunch over the same data dir (RIFT_SCRIPT_RECORD_IGNORED);
+# running the line or the palette's "Clear ignored suggestions" suggests it
+# again.
+import tomllib
+gc = scratch / "ghost-chips"
+for sub in ("cfg/rift", "data", "home", "work"):
+    (gc / sub).mkdir(parents=True, exist_ok=True)
+for rc_file in (".bash_profile", ".bashrc"):  # macOS login / Linux shim
+    (gc / "home" / rc_file).write_text("PS1='$ '\n")
+gc_config = ('shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
+             f'working_directory = {json.dumps(str(gc / "work"))}\n')
+gc_env = dict(env, XDG_CONFIG_HOME=str(gc / "cfg"), XDG_DATA_HOME=str(gc / "data"),
+              HOME=str(gc / "home"), HISTFILE=str(gc / "home/.bash_history"),
+              BASH_SILENCE_DEPRECATION_WARNING="1", RIFT_SCRIPT_HISTORY="1",
+              RIFT_SCRIPT_RECORD_IGNORED="1")
+def gc_run(name, steps, extra=""):
+    # the shell history is the fixture again each run (a run appends to it)
+    (gc / "home/.bash_history").write_text("git status --short\ngit status\n")
+    if extra is not None:
+        (gc / "cfg/rift/config.toml").write_text(gc_config + extra)
+    (gc / f"{name}.rift").write_text("\n".join(["wait_prompt", "wait 500", *steps, "quit"]) + "\n")
+    with (gc / f"{name}.log").open("w") as log:
+        rc = subprocess.run([str(binary), "--script", str(gc / f"{name}.rift"), "--headless"],
+                            env=gc_env, stdout=log, stderr=log, timeout=120).returncode
+    assert rc == 0, died(f"ghost chips {name} run failed", gc / f"{name}.log")
+gct = lambda name: (gc / f"{name}.txt").read_text()
+gc_ghost = lambda name: re.search(r' ghost="((?:[^"\\]|\\.)*)"', gct(name))[1]
+gc_editor = lambda name: re.search(r' editor="((?:[^"\\]|\\.)*)" cursor=', gct(name))[1]
+gc_toml = lambda: tomllib.loads((gc / "cfg/rift/config.toml").read_text())
+gc_run("hint", [
+    "type git st", "wait 600", f"dump {gc}/hint-typed.txt",
+    "a11y click Accept suggestion key: →", "wait 200", f"dump {gc}/hint-menu.txt",
+    "key escape", "wait 100", f"dump {gc}/hint-esc.txt",
+    "a11y click Accept suggestion key: →", "wait 200", "a11y click Tab", "wait 600",
+    f"dump {gc}/hint-picked-tab.txt",
+    "key tab", "wait 300", f"dump {gc}/hint-tab-accepts.txt",
+])
+assert gc_ghost("hint-typed") == "atus", gc_ghost("hint-typed")
+assert 'Button "Accept suggestion key: →"' in gct("hint-typed"), gct("hint-typed")[-3000:]
+# the ✕ is off by default
+assert "Ignore this suggestion" not in gct("hint-typed")
+assert 'menu_items=["→", "Tab", "⇧→", "Custom…"] menu_selected=Some(0)' in gct("hint-menu"), \
+    re.search(r"^menu_items=.*$", gct("hint-menu"), re.M)
+assert 'Menu "Accept suggestion key"' in gct("hint-menu") \
+    and 'MenuItemRadio "→" toggled=True' in gct("hint-menu") \
+    and 'MenuItemRadio "Tab" toggled=False' in gct("hint-menu"), gct("hint-menu")[-2000:]
+assert " menu=false " in gct("hint-esc") and gc_ghost("hint-esc") == "atus", gct("hint-esc")[:3000]
+assert gc_toml().get("tab_behavior") == "autosuggestion", gc_toml()
+assert 'Button "Accept suggestion key: Tab"' in gct("hint-picked-tab"), gct("hint-picked-tab")[-3000:]
+assert gc_editor("hint-tab-accepts") == "git status", gc_editor("hint-tab-accepts")
+# ⇧→: written as the binding; it takes the ghost, and selects with none to take
+gc_run("shift", [
+    "type git st", "wait 600",
+    "a11y click Accept suggestion key: →", "wait 200", "a11y click ⇧→", "wait 600",
+    f"dump {gc}/shift-picked.txt",
+    "key shift+right", "wait 300", f"dump {gc}/shift-accepts.txt",
+    "key ctrl+u", "type abc", "wait 300", "key left", "key left", "key shift+right", "type X",
+    "wait 200", f"dump {gc}/shift-selects.txt",
+])
+assert gc_toml().get("keybindings", {}).get("accept_autosuggestion") == "shift+right", gc_toml()
+assert gc_toml().get("tab_behavior", "completions") == "completions", gc_toml()
+assert 'Button "Accept suggestion key: ⇧→"' in gct("shift-picked"), gct("shift-picked")[-3000:]
+assert gc_editor("shift-accepts") == "git status", gc_editor("shift-accepts")
+assert gc_editor("shift-selects") == "aXc", gc_editor("shift-selects")
+# the hint off: no chip
+gc_run("nohint", ["type git st", "wait 600", f"dump {gc}/nohint.txt"],
+       "autosuggestion_hint = false\n")
+assert gc_ghost("nohint") == "atus" and "Accept suggestion key" not in gct("nohint"), \
+    gct("nohint")[-3000:]
+# the ✕: ignore, the next suggestion; still ignored after a relaunch
+ig_file = gc / "data/rift/ignored-suggestions.json"
+gc_run("ignore", [
+    "type git st", "wait 600", f"dump {gc}/ignore-typed.txt",
+    "a11y click Ignore this suggestion", "wait 600", f"dump {gc}/ignore-next.txt",
+], "autosuggestion_ignore_button = true\n")
+assert 'Button "Ignore this suggestion"' in gct("ignore-typed"), gct("ignore-typed")[-3000:]
+# their tooltips (Warp's words)
+assert '"Change keybinding@' in gct("ignore-typed") and '"Ignore this suggestion@' in gct("ignore-typed"), \
+    re.search(r"^tips=.*$", gct("ignore-typed"), re.M)
+assert gc_ghost("ignore-typed") == "atus", gc_ghost("ignore-typed")
+assert gc_ghost("ignore-next") == "atus --short", gc_ghost("ignore-next")
+assert json.loads(ig_file.read_text()) == {"version": 1, "commands": ["git status"]}, \
+    ig_file.read_text()
+if sys.platform != "win32":
+    assert ig_file.stat().st_mode & 0o777 == 0o600, oct(ig_file.stat().st_mode)
+gc_run("relaunch", [
+    "type git st", "wait 600", f"dump {gc}/relaunch.txt",
+    # the palette's action suggests it again
+    "key ctrl+u", "key ctrl+shift+p", "wait 200", "type Clear ignored suggestions", "wait 200",
+    "key enter", "wait 300", "type git st", "wait 600", f"dump {gc}/cleared.txt",
+], None)
+assert gc_ghost("relaunch") == "atus --short", gc_ghost("relaunch")
+assert gc_ghost("cleared") == "atus", gc_ghost("cleared")
+assert json.loads(ig_file.read_text())["commands"] == [], ig_file.read_text()
+# running an ignored line suggests it again (Warp)
+gc_run("rerun", [
+    "type git st", "wait 600", "a11y click Ignore this suggestion", "wait 600",
+    "key ctrl+u", "type git status\\n", "wait 800",
+    "type git st", "wait 600", f"dump {gc}/rerun.txt",
+], None)
+assert gc_ghost("rerun") == "atus", gc_ghost("rerun")
+assert json.loads(ig_file.read_text())["commands"] == [], ig_file.read_text()
+# a scripted run that did not opt in neither reads nor writes the file
+ig_file.write_text('{"version":1,"commands":["git status"]}')
+gc_env.pop("RIFT_SCRIPT_RECORD_IGNORED")
+gc_run("blind", [
+    "type git st", "wait 600", f"dump {gc}/blind.txt",
+    "a11y click Ignore this suggestion", "wait 600",
+], None)
+assert gc_ghost("blind") == "atus", gc_ghost("blind")
+assert json.loads(ig_file.read_text())["commands"] == ["git status"], ig_file.read_text()
 
 # Shell widgets: ⌃R runs the shell's own binding (a fake widget, no UI)
 # on the command line, which then holds its pick, nothing run; with
@@ -3533,8 +3849,9 @@ for sub in ("cfg/rift/themes", "data"):
     "key cmd+,", "wait 300", "key end", "wait 300", "move 700 400", "scroll -20",
     "wait 300", f"dump {sw}/themes.txt",
     "key home", "key down", "key down", "key down", "wait 300",
-    # (the vim register and shell widgets segments come first: 2 stops each)
-    *["key tab"] * 27, "wait 300", f"dump {sw}/tabbed.txt",
+    # (the vim register, shell widgets and Tab key segments come first: 2
+    # stops each; then the accept-key hint and ignore button toggles)
+    *["key tab"] * 31, "wait 300", f"dump {sw}/tabbed.txt",
     "quit"]) + "\n")
 with (sw / "sweep.log").open("w") as log:
     rc = subprocess.run([str(binary), "--script", str(sw / "sweep.rift"), "--headless"],
@@ -5523,8 +5840,9 @@ assert pfd_tabs("window")[-1][:2] == smoke_tab and pfd_tabs("window")[-1][2].end
 # completions from the user's own shell (`shell_completions`): a completion
 # function in a scratch ~/.bashrc answers for a tool Rift has no spec for;
 # one that hangs (for git) times out and Rift's own git candidates still
-# show, first while the shell is asked and after it gave up; with the
-# setting off the shell is never asked
+# show, first while the shell is asked and after it gave up (the menu opens
+# as you type here, so the first answer shows); with the setting off the
+# shell is never asked
 sc = scratch / "shell-completions"
 (sc / "home").mkdir(parents=True, exist_ok=True)
 (sc / "home/.bashrc").write_text(
@@ -5537,6 +5855,7 @@ def run_shell_completions(name, extra):
     (sc / name / "cfg/rift").mkdir(parents=True, exist_ok=True)
     (sc / name / "cfg/rift/config.toml").write_text(
         'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
+        'completions_open_while_typing = true\n'
         f'working_directory = {json.dumps(str(work))}\n' + extra)
     out = sc / name
     (out / "t.rift").write_text("\n".join([
@@ -6727,7 +7046,9 @@ run_own("subshell", 'subshell_commands = ["^bash --norc$"]\n', [
     "type printf '\\\\033[?1049h'; sleep 2; printf '\\\\033[?1049l'\\n", "wait 700",
     f"dump {ss}/alt.txt", f"key {enable_chord}", "wait 300", f"dump {ss}/alt-enter.txt", "wait 2000",
     f"dump {ss}/back.txt",
-    f"key {enable_chord}", "wait 3000", f"dump {ss}/enabled.txt",
+    # the hooks are typed in, then the subshell's first prompt (a fixed wait
+    # dumped mid-injection under the gates' parallel load)
+    f"key {enable_chord}", "wait_prompt", "wait 300", f"dump {ss}/enabled.txt",
     "type false\\n", "wait 800", f"dump {ss}/inner.txt",
     "type exit\\n", "wait 1000", f"dump {ss}/outer.txt"])
 sst = lambda name: (ss / f"{name}.txt").read_text()
@@ -7507,11 +7828,15 @@ want = {"font_weight": 500, "bold_font_weight": 600, "bold_is_bright": True, "mi
 assert {k: got.get(k) for k in want} == want, {k: got.get(k) for k in want}
 got = sr_run("input", "Input", [
     "a11y click Vim's unnamed register: System clipboard", "a11y click ⌃R, ⌃T and ⌥C run: Rift's",
+    "a11y click Tab key: Ghost text", "a11y click Open completions as you type",
+    "a11y click Show the accept-key hint", "a11y click Show the ignore button",
     *text_step("More subshell commands: None", "'^nix shell'"),
     *text_step("Never offer it for: None", "bash"),
 ])
 want = {"vim_clipboard": "unnamed", "shell_widgets": "rift", "subshell_commands": ["^nix shell"],
-        "subshell_denylist": ["bash"]}
+        "subshell_denylist": ["bash"], "tab_behavior": "autosuggestion",
+        "completions_open_while_typing": True, "autosuggestion_hint": False,
+        "autosuggestion_ignore_button": True}
 assert {k: got.get(k) for k in want} == want, {k: got.get(k) for k in want}
 got = sr_run("terminal", "Terminal", [
     f"a11y click {'⌘' if mac else 'Ctrl'}-scroll zooms the font",

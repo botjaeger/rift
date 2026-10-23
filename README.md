@@ -60,7 +60,7 @@ rebound. Full list: [keyboard shortcuts](docs/keyboard-shortcuts.md).
 | Save output or the whole buffer to a file | Block menu → *Save output…*; right-click the terminal → *Export buffer…* |
 | Send block output to a command | Block menu → *Send output to command…*: runs `cmd < output` without pasting it |
 | Clear | `clear` hides old output but keeps it; ⌘K wipes blocks and scrollback |
-| **Command editor** — highlighting, ghost suggestions, completion menu | Type at the prompt; Tab accepts, ⌃→ accepts one word |
+| **Command editor** — highlighting, ghost suggestions, completion menu | Type at the prompt; Tab completes, → accepts the suggestion, ⌃→ one word |
 | Multi-line commands | ⇧⏎ adds a line, ⏎ runs |
 | History search; its Results tab searches past output (`is:failed`, `since:7d`, `host:`, `dir:`) | ⌃R |
 | Vim keys in the editor, with registers | Settings → Input → *Vim keybindings*; `vim_clipboard = "unnamed"` shares the clipboard |

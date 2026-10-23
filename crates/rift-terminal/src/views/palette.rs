@@ -308,6 +308,11 @@ pub fn base_items(
             "clear_transcripts",
             PaletteAction::App(AppAction::ClearTranscripts),
         ),
+        item(
+            "Clear ignored suggestions",
+            "clear_ignored_suggestions",
+            PaletteAction::App(AppAction::ClearIgnoredSuggestions),
+        ),
         item("New tab", "new_tab", PaletteAction::App(AppAction::NewTab)),
         item(
             "New worktree tab…",

@@ -65,6 +65,12 @@ pub enum ClickTarget {
     /// Docker chips open their menus, the diff chip the code review panel,
     /// the PR chip the pull request in the browser.
     Chip(PaneId, rift_core::PromptChip),
+    /// The chip after the ghost text naming its accept key: a menu of the
+    /// keys (`views::editor::AcceptKey`).
+    GhostKey(PaneId),
+    /// The ✕ after the ghost text (`autosuggestion_ignore_button`): never
+    /// suggest that command line again.
+    GhostIgnore(PaneId),
     PaneFocus(PaneId),
     /// A split pane's title bar: a press focuses the pane and arms
     /// drag-to-move (Warp pane header).
@@ -75,8 +81,7 @@ pub enum ClickTarget {
     HistoryScope(crate::views::history::Scope),
     HistoryRow(usize),
     HistoryClose,
-    /// The completion panel's source tab `i` (0 = all) and row `i`.
-    CompletionSource(u8),
+    /// The completion panel's row `i`.
     CompletionRow(usize),
     /// A row of the welcome list on a fresh session (`app::welcome_entries`).
     Welcome(u8),
@@ -301,6 +306,16 @@ impl EditorState {
             VimMode::Visual | VimMode::VisualLine if self.anchor.is_none() => VimMode::Normal,
             m => m,
         })
+    }
+
+    /// The one caret stands where the ghost text continues the line: at its
+    /// end, or in vim's Normal mode on its last character (the block
+    /// cursor rests there). The ghost text and its chips show then, and the
+    /// accept keys take it.
+    pub fn ghost_at_end(&self) -> bool {
+        let last_char = self.buffer.char_indices().last().map_or(0, |(i, _)| i);
+        self.cursor == self.buffer.len()
+            || (self.vim_mode() == Some(VimMode::Normal) && self.cursor == last_char)
     }
 
     /// vim: the undo-stack depth, marking where a change begins.
@@ -1228,6 +1243,32 @@ pub struct PaneState {
     /// Its program exited and the pane stays (`close_on_exit`): the exit
     /// code, -1 when none is known. The Restart bar shows.
     pub exited: Option<i32>,
+    /// Its shell session in Rift's command history (next-command ghost text).
+    pub history: HistorySession,
+}
+
+/// A pane's shell session in Rift's command history: what the next command
+/// it finishes is recorded under, and the last one it finished.
+#[derive(Debug, Clone)]
+pub struct HistorySession {
+    /// New for every shell the pane starts (a restarted or restored pane
+    /// gets a new one), so commands follow each other only within one shell.
+    pub id: String,
+    /// The place of the next command recorded.
+    pub seq: u64,
+    /// The last command finished in this run from the editor: its command
+    /// line, directory and exit code. A restored block never counts.
+    pub last: Option<(String, Option<String>, Option<i32>)>,
+}
+
+impl Default for HistorySession {
+    fn default() -> Self {
+        HistorySession {
+            id: rift_core::transcript::new_id(),
+            seq: 0,
+            last: None,
+        }
+    }
 }
 
 impl PaneState {
@@ -1312,6 +1353,7 @@ impl PaneState {
             activity: false,
             composer: Default::default(),
             exited: None,
+            history: Default::default(),
         }
     }
 
@@ -1801,6 +1843,26 @@ mod tests {
         e.undo();
         assert_eq!(e.buffer, "a a a");
         assert!(!e.has_extra());
+    }
+
+    #[test]
+    fn the_ghost_text_follows_the_end_or_vims_normal_block_on_the_last_character() {
+        let mut e = EditorState {
+            buffer: "echo é".into(),
+            cursor: 7,
+            ..Default::default()
+        };
+        assert!(e.ghost_at_end());
+        // mid-line: no
+        e.cursor = 5;
+        assert!(!e.ghost_at_end());
+        // vim Insert on the last character: no; Normal rests there: yes
+        e.set_vim_enabled(true);
+        assert!(!e.ghost_at_end());
+        e.vim.as_mut().unwrap().mode = crate::vim::VimMode::Normal;
+        assert!(e.ghost_at_end());
+        e.cursor = 4;
+        assert!(!e.ghost_at_end());
     }
 
     #[test]
