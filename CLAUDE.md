@@ -48,8 +48,9 @@ blocks, ⌘P = palette).
 scripts/gates.sh               # quality gates: fmt clippy test doc shell docs mobile
 scripts/gates.sh ui            # scripted UI regressions (scripts/ui-smoke.py), 2 shards in parallel
 scripts/gates.sh ui --only NAME  # one section's group (python3 scripts/ui-smoke.py BIN --list)
+scripts/gates.sh ssh           # palette/profile/install/completion against a disposable Docker SSH server
 scripts/gates.sh leak          # memory soak: repeated work must level off (scripts/leak-soak.py)
-scripts/gates.sh all           # + release build + scripted UI + memory soak + Linux gates in docker (beside the others)
+scripts/gates.sh all           # + release build + scripted UI + SSH journey + memory soak + Linux gates in docker (beside the others)
 scripts/gates.sh --list        # what each gate runs
 cargo run                      # dev build + launch (binary: rift-terminal)
 cargo test -p rift-core osc   # one module's tests

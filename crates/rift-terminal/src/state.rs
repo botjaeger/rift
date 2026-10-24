@@ -1,6 +1,6 @@
 use rift_core::git::GitInfo;
 use rift_pty::{PaneId, Session};
-use unicode_segmentation::GraphemeCursor;
+use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation};
 
 use crate::pane::{NodePath, PaneNode};
 use crate::vim::{VimMode, VimState};
@@ -428,14 +428,8 @@ impl EditorState {
     /// Store carets (one of them the primary), sorted, without duplicates
     /// or overlapping selections.
     fn set_carets(&mut self, mut all: Vec<(usize, Option<usize>, bool)>) {
-        // on a character of the buffer, never inside one
-        let snap = |v: usize| {
-            let mut v = v.min(self.buffer.len());
-            while !self.buffer.is_char_boundary(v) {
-                v -= 1;
-            }
-            v
-        };
+        // A caret or selection endpoint never splits a grapheme cluster.
+        let snap = |v: usize| grapheme_floor(&self.buffer, v);
         for c in &mut all {
             c.0 = snap(c.0);
             c.1 = c.1.map(snap).filter(|a| *a != c.0);
@@ -490,7 +484,7 @@ impl EditorState {
     /// that line's end; `None` on the first (last) line.
     fn vertical_from(&self, from: usize, down: bool) -> Option<usize> {
         let line_start = self.buffer[..from].rfind('\n').map_or(0, |i| i + 1);
-        let col = self.buffer[line_start..from].chars().count();
+        let col = self.buffer[line_start..from].graphemes(true).count();
         let target_start = if down {
             from + self.buffer[from..].find('\n')? + 1
         } else {
@@ -506,7 +500,7 @@ impl EditorState {
             .map_or(self.buffer.len(), |i| target_start + i);
         Some(
             self.buffer[target_start..target_end]
-                .char_indices()
+                .grapheme_indices(true)
                 .nth(col)
                 .map_or(target_end, |(i, _)| target_start + i),
         )
@@ -530,15 +524,19 @@ impl EditorState {
     /// caret selecting its next occurrence (after the last caret, wrapping).
     pub fn add_next_occurrence(&mut self) {
         let Some(sel) = self.selection() else {
-            let word = |c: char| c.is_alphanumeric() || c == '_' || c == '-';
+            let word = |g: &str| {
+                g.chars()
+                    .next()
+                    .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '-')
+            };
             let start = self.buffer[..self.cursor]
-                .char_indices()
+                .grapheme_indices(true)
                 .rev()
                 .take_while(|&(_, c)| word(c))
                 .last()
                 .map_or(self.cursor, |(i, _)| i);
             let end = self.buffer[self.cursor..]
-                .char_indices()
+                .grapheme_indices(true)
                 .find(|&(_, c)| !word(c))
                 .map_or(self.buffer.len(), |(i, _)| self.cursor + i);
             if start < end {
@@ -555,7 +553,11 @@ impl EditorState {
             .collect();
         let last_end = taken.iter().map(|t| t.1).max().unwrap_or(0);
         // the first free one after the last caret, wrapping to the start
-        let free = |s: &usize| !taken.contains(&(*s, *s + needle.len()));
+        let free = |s: &usize| {
+            is_grapheme_boundary(&self.buffer, *s)
+                && is_grapheme_boundary(&self.buffer, *s + needle.len())
+                && !taken.contains(&(*s, *s + needle.len()))
+        };
         let found = self
             .buffer
             .match_indices(&needle)
@@ -580,7 +582,7 @@ impl EditorState {
     /// ⌘-click (⌥-click on Linux): one more caret at `offset`.
     /// One on a caret takes that caret away (while another stays).
     pub fn add_caret_at(&mut self, offset: usize) {
-        let offset = offset.min(self.buffer.len());
+        let offset = grapheme_floor(&self.buffer, offset);
         let mut all: Vec<_> = std::iter::once((self.cursor, self.anchor, true))
             .chain(self.extra.iter().map(|&(c, a)| (c, a, false)))
             .collect();
@@ -730,7 +732,7 @@ impl EditorState {
 
     /// Mouse: place the cursor (optionally extending the selection).
     pub fn click_to(&mut self, offset: usize, extend: bool) {
-        let offset = offset.min(self.buffer.len());
+        let offset = grapheme_floor(&self.buffer, offset);
         self.extra.clear();
         if extend {
             let anchor = self.anchor.unwrap_or(self.cursor);
@@ -1709,7 +1711,7 @@ fn quote_open_at(before: &str) -> bool {
 }
 
 /// Start of the extended grapheme cluster ending at or before byte `i`.
-fn grapheme_prev(s: &str, i: usize) -> usize {
+pub(crate) fn grapheme_prev(s: &str, i: usize) -> usize {
     // GraphemeCursor panics on an offset inside a char
     let i = s.floor_char_boundary(i);
     let mut c = GraphemeCursor::new(i, s.len(), true);
@@ -1956,6 +1958,56 @@ mod tests {
     }
 
     #[test]
+    fn next_occurrence_keeps_combining_marks_with_the_word() {
+        let mut e = EditorState {
+            buffer: "cafe\u{301} cafe\u{301}".into(),
+            cursor: 0,
+            ..Default::default()
+        };
+        e.add_next_occurrence();
+        assert_eq!(e.selected_text(), Some("cafe\u{301}"));
+        e.add_next_occurrence();
+        assert_eq!(e.selections().len(), 2);
+        e.at_each_caret(|e| e.insert("tea"));
+        assert_eq!(e.buffer, "tea tea");
+    }
+
+    #[test]
+    fn pointer_carets_and_selections_never_split_a_grapheme() {
+        for cluster in ["a\u{301}", "👩‍💻", "🇵🇭"] {
+            let inside = cluster.char_indices().nth(1).unwrap().0;
+            let mut e = EditorState {
+                buffer: format!("{cluster}z"),
+                cursor: cluster.len() + 1,
+                ..Default::default()
+            };
+            e.click_to(inside, false);
+            assert_eq!(e.cursor, 0, "click in {cluster}");
+            e.click_to(cluster.len(), true);
+            assert_eq!(e.selected_text(), Some(cluster));
+            e.click_to(e.buffer.len(), false);
+            e.add_caret_at(inside);
+            assert_eq!(e.extra, vec![(0, None)], "extra caret in {cluster}");
+        }
+    }
+
+    #[test]
+    fn next_occurrence_skips_partial_grapheme_matches() {
+        let mut e = EditorState {
+            buffer: "a a\u{301} a".into(),
+            cursor: 0,
+            ..Default::default()
+        };
+        e.add_next_occurrence();
+        e.add_next_occurrence();
+        assert_eq!(e.selections(), vec![0..1, 6..7]);
+        e.add_next_occurrence();
+        assert_eq!(e.selections(), vec![0..1, 6..7]);
+        e.at_each_caret(|e| e.insert("X"));
+        assert_eq!(e.buffer, "X a\u{301} X");
+    }
+
+    #[test]
     fn carets_above_and_below_keep_the_column_and_merge() {
         let mut e = EditorState {
             buffer: "echo one\nls\necho three".into(),
@@ -2012,6 +2064,26 @@ mod tests {
         assert!(e.line_vertical(true));
         assert_eq!(e.cursor, 14);
         assert!(!e.line_vertical(true));
+    }
+
+    #[test]
+    fn vertical_moves_and_carets_keep_grapheme_clusters_whole() {
+        for cluster in ["a\u{301}", "👩‍💻", "🇵🇭"] {
+            let mut e = EditorState {
+                buffer: format!("xy\n{cluster}z"),
+                cursor: 1,
+                ..Default::default()
+            };
+            let after_cluster = 3 + cluster.len();
+            assert!(e.line_vertical(true));
+            assert_eq!(e.cursor, after_cluster, "after {cluster}");
+            assert!(e.line_vertical(false));
+            assert_eq!(e.cursor, 1, "back at the first column");
+            e.add_caret_vertical(true);
+            assert_eq!(e.extra, vec![(after_cluster, None)]);
+            e.at_each_caret(|e| e.backspace());
+            assert_eq!(e.buffer, "y\nz", "delete whole {cluster}");
+        }
     }
 
     #[test]

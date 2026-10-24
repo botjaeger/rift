@@ -937,8 +937,11 @@ before, for the phone's Run sheet and the pane's suggestions:
   access, or `rift-terminal remote permission ID operate|view`); open
   connections of that device close within a second so the next handshake
   carries the new permission. The gateway reads `devices.json` at every
-  handshake and every `run` / `keys`, so a lowered permission applies at
-  once, even before the open connections close.
+  handshake and checks its file stamp before each operation requiring `operate`
+  (including `run`, `keys`, `text`, uploads, shell actions and completions),
+  re-reading it when it changed. A lowered permission applies at once, even
+  before the open connections close; missing or unreadable permission data
+  refuses the operation.
 
 ## Desktop side
 
@@ -957,8 +960,10 @@ before, for the phone's Run sheet and the pane's suggestions:
 - `remote_access = false` (config, default) keeps the gateway stopped. When
   it is `true`, every Rift window makes sure a gateway runs
   (`rift-terminal remote --managed`, detached); the gateway exits within 2
-  seconds after `remote_access` becomes `false`, and 30 seconds after the
-  last Rift window is gone.
+  seconds after `remote_access` becomes `false`. On macOS with durable
+  sessions it stays running after the last window closes, with a menu bar
+  icon, until *Quit Rift Completely* or Remote access is turned off.
+  Otherwise it exits 30 seconds after the last Rift window is gone.
 - A gateway counts as running only while `gateway.lock` is held; a stale
   `status.json` is ignored. A window starts one at most every 5 seconds.
 - The gateway reads windows through their control sockets: `status`,

@@ -116,8 +116,7 @@ impl App {
                     self.redraw_and_raise();
                     return;
                 };
-                let commands: Vec<String> =
-                    cfg.tabs.iter().flat_map(|t| t.layout.commands()).collect();
+                let commands = self.launch_link_commands(&cfg);
                 if commands.is_empty() {
                     self.launch_from_link(&cfg, new_window && !fresh_window, event_loop);
                 } else {
@@ -157,6 +156,48 @@ impl App {
         }
         self.save_session();
         self.redraw_and_raise();
+    }
+
+    /// Preview every saved startup action, including executable/argv and
+    /// environment overrides resolved through the same profile rules as spawn.
+    /// A plain default shell needs no extra confirmation, as with a tab link.
+    fn launch_link_commands(&self, cfg: &rift_core::launch::LaunchConfig) -> Vec<String> {
+        fn collect(app: &App, layout: &rift_core::launch::LaunchLayout, out: &mut Vec<String>) {
+            match layout {
+                rift_core::launch::LaunchLayout::Pane {
+                    commands, launch, ..
+                } => {
+                    if let Ok(resolved) = app.resolve_launch(launch)
+                        && (resolved.program.is_some()
+                            || !resolved.args.is_empty()
+                            || !resolved.env.is_empty())
+                    {
+                        let program = resolved.program.unwrap_or_else(|| {
+                            rift_core::shell_integration::resolve_shell(app.config.shell.as_deref())
+                        });
+                        let mut argv = std::iter::once(program)
+                            .chain(resolved.args)
+                            .map(|s| input::shell_quote(&s))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        if !resolved.env.is_empty() {
+                            // Do not put profile secrets into the confirmation.
+                            argv.push_str(" (custom environment)");
+                        }
+                        out.push(argv);
+                    }
+                    out.extend(commands.iter().cloned());
+                }
+                rift_core::launch::LaunchLayout::Split { panes, .. } => {
+                    panes.iter().for_each(|p| collect(app, p, out));
+                }
+            }
+        }
+        let mut commands = Vec::new();
+        cfg.tabs
+            .iter()
+            .for_each(|t| collect(self, &t.layout, &mut commands));
+        commands
     }
 
     /// `rift://action/focus`: raise the window holding the pane and focus

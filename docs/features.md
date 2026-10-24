@@ -148,6 +148,8 @@ is replaced only after *Replace the file?* is confirmed. RTF is not offered.
   the PTY when the editor is inactive.
 - Cursor motion and deletion step over whole grapheme clusters (an emoji
   with modifiers, a letter with combining accents), never part of one.
+  Mouse carets, selections and Vim operations use the same boundaries;
+  Ctrl-G skips occurrences that would match only part of a cluster.
 - Editor niceties: word motion & kills (whitespace-delimited), undo/redo
   (snapshot stack, cap 100, cleared on submit), the history menu (↑, below),
   ⌃R history pane, multi-source completion with
@@ -855,8 +857,10 @@ Event (also to a Rift it launches); on Linux the `.desktop` file registers
 `x-scheme-handler/rift`, and `rift-terminal rift://…` hands the link to the
 running Rift over the control socket (with `control_api = "off"` it takes
 links and nothing else) or opens it itself when none answers. A layout
-whose panes run commands asks first (*Open this layout from a link?*, its
-commands listed, Cancel focused), and more than ten links in three
+whose panes run commands or customize the startup program, arguments or
+environment asks first (*Open this layout from a link?*, its commands and
+startup arguments listed, custom environment values kept private, Cancel
+focused), and more than ten links in three
 seconds are dropped. A link while only the drop-down window exists opens
 an ordinary window for it.
 
@@ -1132,7 +1136,9 @@ Each becomes a `rift://action/new_tab` link (`new_window` with
   refuses typing (editor and raw mode, the rich-input composer), pastes,
   dropped files, a synchronized sibling's input, *Send to agent…*,
   `ctl send-text` and a paired phone's input (`pane is read-only`), with a
-  brief "Pane is read-only" toast; moving the caret, selecting, scrolling
+  brief "Pane is read-only" toast. Recalling commands from blocks or the
+  history palette also preserves the locked draft;
+  moving the caret, selecting blocks (including ⇧↑ / ⇧↓), scrolling
   (the wheel as arrow keys on the alternate screen) and mouse reporting still
   work. Its title bar and tab show a lock; it is kept in the session file.
 - **Kept panes and restart** (`close_on_exit`): `always` (default) closes a
@@ -1234,7 +1240,9 @@ Each becomes a `rift://action/new_tab` link (`new_window` with
 - **Send output to a command** (block menu, palette): the block's output is
   previewed, then written to a private temporary file and run as
   `( command ) < file` (fish: `begin; …; end < file`) in the pane. The output
-  is never interpolated into the command line.
+  is never interpolated into the command line. This requires a local,
+  writable shell prompt; a running program, remote prompt, closed or
+  read-only pane refuses it before any temporary output is written.
 
 ## Subshells
 
@@ -1417,6 +1425,8 @@ it.
   per image, 320 MiB decoded and 512 placements per pane, 256 MiB of GPU
   textures (least recently drawn evicted). Placements span at most 1,000 cells
   in each dimension; percentage height uses the terminal's screen rows.
+  Kitty image numbers expire with their image on replacement, deletion or
+  eviction, so a stale number cannot target a new image reusing its ID.
   Invalid or non-finite iTerm dimensions are rejected. Kitty animation frames
   and Unicode placeholders are not implemented. Sixel is not implemented: the
   kitty and iTerm2 protocols cover the TUIs that draw images (yazi, timg,
@@ -1545,7 +1555,9 @@ no separate background setting: phones are the reason Rift keeps running):
   connected, the quit dialog names it first (*iPhone is connected and loses
   its tabs.*), with the running commands when *Warn before closing running
   commands* is on. The phone is told Rift quit (`closing`, below).
-- **Remote access on (macOS): a quit keeps Rift running in the background.** The first ⌘Q asks
+- **Remote access on (macOS), with its gateway running and durable sessions
+  available: a quit keeps Rift running in the background.** Otherwise it is
+  the ordinary quit above. The first ⌘Q asks
   *Keep running?* (the running commands are listed; *Cancel* or *Keep
   running*, with a *Don't ask again* box, Space toggles it; `config.toml`'s
   `confirm_background_quit = true` turns the question back on). Keep running closes the windows only: the shells
@@ -1576,8 +1588,8 @@ login item. Opening Rift again while only its helpers run (the Dock icon,
 Spotlight, Finder or the icon's *Open Rift*) starts a window: the helpers
 are a separate app (`Rift Helper`), so the launch always reaches Rift itself.
 
-An update's restart, a crash, a killed process or a reboot of the window
-only (the service survives) leave the shells running; the next launch
+An update's restart, a crash or a killed window process leave the shells
+running while the session service survives; the next launch
 restores the layout and **reattaches** each pane (after a crash whatever
 `restore_session` says, with a toast: *Rift didn't quit normally last time.
 Your tabs are back.*; every ordinary way out removes `<data dir>/running`,
@@ -1587,11 +1599,14 @@ stay right, then continues live. Nothing is shown twice, and automatic
 terminal replies (device attributes, image OKs) are not re-sent during the
 replay. Commands that finished before the reattach keep their own finish
 time and do not appear again in Notifications.
+A computer reboot ends the service and its shells: the saved layout starts
+fresh shells, with saved block output when enabled.
 
 - Closing a pane (⌘W) ends its shell, as without the service. ⌘K also drops
   the retained output, so a reattach does not bring it back.
-- With `restore_session = false`, Rift ends its shells however it exits
-  when it can, instead of orphaning them.
+- Turning off `restore_session` does not prevent an update restart, crash
+  recovery or *Keep running* from bringing the tabs back. An ordinary quit
+  ends the shells and clears the tabs either way.
 - Palette → "Attach detached session: …" opens a tab on any shell the
   service keeps that no window shows.
 - The service listens on `~/.local/share/rift/sessiond/sock` (a 0700
@@ -1652,8 +1667,7 @@ signed manifest.
   *Couldn't check for updates*. The palette has *Check for updates*
   (`check_for_updates`; the answer is a card: *Rift is up to date*,
   *Couldn't check for updates*, or the ready card once it downloaded) and
-  *Update Rift* (`update_rift`). Update messages are cards, never a status
-  toast.
+  *Update Rift* (`update_rift`).
 - The chip, **Update…** and `update_rift` open a dialog that says what the
   restart keeps: with durable sessions, *Your N tabs and M shells keep running
   and come back where they were*; without them, open shells end (set
@@ -1683,7 +1697,8 @@ signed manifest.
   directories included, and reattaches the shells. Processes whose control
   socket is off cannot be asked; the dialog counts them and they stay open
   on the old version.
-- The new version counts as started 10 s after its first frame: it then
+- The new version counts as started 10 s after its first frame (30 s after
+  startup if no frame is presented): it then
   deletes the old copy, shows the card *Updated to Rift vX.Y.Z* (a click
   opens What's New) and opens the other
   processes' windows beside its own. If it crashes before that, the

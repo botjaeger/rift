@@ -70,16 +70,17 @@ display-line building). Rendering is verified with the script driver below.
 | `test` | `cargo test --workspace --locked`, and each vendored crate (all features; built into `target/vendor`); `scripts/release-manifest.py --self-test`. Locally on macOS the workspace tests run once, throttled (`taskpolicy -c background`, 32 threads, after a full-speed build), which reproduces the timing of CI's few slow cores; CI and Linux run them plainly |
 | `doc` | `cargo doc --workspace --no-deps --locked` with rustdoc warnings denied |
 | `shell` | `shellcheck` on packaging, scripts, git hooks and the bash hooks; `zsh -n` and `fish --no-execute` on the zsh and fish hooks |
-| `docs` | `CLAUDE.md` and `AGENTS.md` are identical; every relative link in every Markdown file resolves (the vendored crates' upstream docs excepted) |
+| `docs` | `CLAUDE.md` and `AGENTS.md` are identical; relative Markdown link targets exist (heading anchors are not checked; the vendored crates' upstream docs excepted) |
 | `mobile` | In `mobile/`: `pnpm install --frozen-lockfile`, `pnpm typecheck`, `pnpm lint`, `pnpm test` (vitest; decodes `crates/rift-remote/fixtures/`, the files the Rust protocol tests decode too) |
 | `release` | `cargo build --release --locked` |
 | `ui` | `scripts/ui-smoke.sh`, which runs `scripts/ui-smoke.py`: isolated scripted input, state assertions and PNG capture, in `RIFT_UI_SHARDS` (default 2) parallel shards (`RIFT_UI_SHARDS=1`: the file serially); `--only NAME[,NAME]` (or `RIFT_UI_ONLY`) runs only the groups holding those sections, in one process; requires Python 3 and a display (or `xvfb-run`) |
-| `leak` | `scripts/leak-soak.py` on the release build: a program redrawing every 20 ms, output far past the scrollback limit, one command printing lines without end, and opening and closing tabs, splits, the palette, Settings, find and the explorer, each repeated in one isolated instance; after a warm-up the memory footprint (macOS `phys_footprint`, which counts GPU buffers; Linux `VmRSS`) must not grow more than 8 MB over the measured cycles. Headless on macOS (the display-asleep path); with the window shown under Xvfb (`RIFT_LEAK_SHOWN=1`) in CI and the `linux` gate. `RIFT_LEAK_CYCLES=N` soaks longer |
+| `ssh` | `scripts/ssh-ui-smoke.py`: actual palette install/cancel, SSH profile timeout/retry, remote blocks and path/shell completions against a disposable Docker SSH server. Scratch keys, HOME and XDG roots; requires Docker and OpenSSH clients. Captures remain in `target/ssh-ui-*`; fixture keys, control masters and container are removed |
+| `leak` | `scripts/leak-soak.py` on the release build: a program redrawing every 20 ms, output far past the scrollback limit, one command printing lines without end, and opening and closing windows, tabs, splits, the palette, Settings, find and the explorer, each repeated in one isolated instance; after a warm-up the memory footprint (macOS `phys_footprint`, which counts GPU buffers; Linux `VmRSS`) must not grow more than 8 MB over the measured cycles. An over-budget result is measured once more in a fresh instance and fails if it repeats. Headless on macOS (the display-asleep path); with the window shown under Xvfb (`RIFT_LEAK_SHOWN=1`) in CI and the `linux` gate. `RIFT_LEAK_CYCLES=N` soaks longer |
 | `linux` | `clippy`, `test`, `doc` and a release build (with `examples/phone` and `rift-relay`) inside the Linux docker image, then `shell`, the scripted UI regressions and the memory soak (Xvfb, software Vulkan) in `packaging/ci-ubuntu.Dockerfile`, which installs the CI runner's packages from `packaging/ci-apt.txt` |
 
 ```sh
 scripts/gates.sh                 # fmt clippy test doc shell docs mobile
-scripts/gates.sh all             # + release + ui + leak + linux
+scripts/gates.sh all             # + release + ui + ssh + leak + linux
 scripts/gates.sh clippy test     # a subset
 scripts/gates.sh ui --only NAME  # only these ui-smoke.py sections
 scripts/gates.sh --list
@@ -92,7 +93,7 @@ gate prints one line (`-- test pass 212s`); its output goes to
 every failed gate's log. `RIFT_GATES_VERBOSE=1` (and CI) streams every
 gate's output too. Every gate has a wall-clock limit (`limit_for` in the
 script: 5 min for fmt/shell/docs, 15 for test, 20 for clippy/doc/mobile/leak,
-30 for release/ui, 90 for linux; `RIFT_GATE_TIMEOUT=<seconds>` overrides
+30 for release/ui/ssh, 90 for linux; `RIFT_GATE_TIMEOUT=<seconds>` overrides
 them): past it, the processes still running are listed in the log (naming
 the hung test binary), stopped, and the gate fails. Interrupting the run
 stops the running gate and the background `linux` run with everything
@@ -422,11 +423,12 @@ downloaded). The app's updater reads
 1. Bump `[workspace.package] version`, add the `CHANGELOG.md` section, run
    `scripts/gates.sh all`, commit, and push a tag `vX.Y.Z` (the tag must
    equal the Cargo.toml version).
-2. The tag runs `.github/workflows/release.yml`: the validation workflow,
-   then Rift.app/DMG/tarball for Apple silicon and Intel (both on
-   `macos-14`; Intel is cross-compiled), the `.deb`, AppImage and tarball
-   for Linux, and finally `latest.json`, written by
-   `scripts/release-manifest.py` from the downloaded artifacts (version,
+2. The tag runs `.github/workflows/release.yml`: the validation workflow
+   alongside the package builds — Rift.app/DMG/tarball for Apple silicon and
+   Intel (both on `macos-14`; Intel is cross-compiled), the `.deb`, AppImage
+   and tarball for Linux. Once validation and all package builds pass,
+   `latest.json` is written by `scripts/release-manifest.py` from the
+   downloaded artifacts (version,
    date and summary from `CHANGELOG.md`, `protocol` =
    `ipc::PROTOCOL_VERSION`, each asset's URL in the public release and its
    SHA-256) and checked with `--verify`. Everything is uploaded as workflow
@@ -441,8 +443,9 @@ downloaded). The app's updater reads
 
    When GitHub Actions cannot run (billing, an outage), build the same
    packages on a Mac instead: `scripts/release-local.sh vX.Y.Z` checks out
-   the tag in a temporary worktree, builds both macOS targets natively and
-   Linux x86_64 in docker (`linux/amd64`, emulated on Apple silicon), and
+   the tag in a temporary worktree, builds both macOS targets on the Mac
+   (cross-compiling the other architecture) and Linux x86_64 in docker
+   (`linux/amd64`, emulated on Apple silicon), and
    writes `latest.json` into `target/release-local/vX.Y.Z`; then
    `scripts/publish-release.sh vX.Y.Z --dist target/release-local/vX.Y.Z`.
    It builds without checking: run `scripts/gates.sh all` on the tag first.

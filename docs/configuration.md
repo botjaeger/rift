@@ -18,7 +18,7 @@
 | `~/.local/share/rift/last-seen-version` | Version whose What's New was last shown (opens it once after an update) |
 | `~/.local/share/rift/update.json` | Last update check: when, the newest release's manifest, the version *Later* dismissed |
 | `~/.local/share/rift/updates/` | Update downloads (deleted after installing; an interrupted install's leftovers go at the next one), `install.lock` and persistent `install.guard` (one window installs at a time, including after an interrupted install) and `relaunch.log` (the restarted app's output until it is confirmed; emptied past 1 MB) |
-| `~/.local/share/rift/update-pending.json` | An update in progress (readable by you only; holds the token other windows' `prepare-restart` needs); the new version removes it 10 s after its first frame, and if it dies before that the old app is put back (`update-failed.json`) |
+| `~/.local/share/rift/update-pending.json` | An update in progress (readable by you only; holds the token other windows' `prepare-restart` needs); the new version removes it 10 s after its first frame (30 s after startup if no frame is presented). A crash before confirmation puts the old app back (`update-failed.json`); an intentional quit or restart keeps the new version |
 | `~/.local/share/rift/remote/` | Remote access (directory 0700, files 0600): `gateway.key` (the desktop's key phones pin), `devices.json` (paired phones), `pairing.json` (live pairing secrets, hashed), `status.json` and `gateway.lock` (the running gateway), `gateway.log`, `relay.json` (the gateway's secret at the relay), `tunnel.json` (the Cloudflare tunnel's state), `history.jsonl` (the newest 500 connections) |
 | `~/.local/share/rift/ssh/` | SSH profiles' shared-connection sockets (`ControlPath=…/%C`, directory 0700) |
 | `~/.local/share/rift/stalls/` | Stall reports: the window's main thread blocked over 2 s (no repaint, a Quit that does nothing), or the process not ending after a quit; each `stall-<unix time>-<pid>.txt` says what was under way, how long it lasted and, on macOS, every thread's stack (`/usr/bin/sample`; if Rift ended before `sample` finished, in the `stall-<unix time>-<pid>.sample.txt` beside it); the newest 10 are kept |
@@ -26,10 +26,15 @@
 
 `XDG_CONFIG_HOME` and `XDG_DATA_HOME` are honored. When the `rift` config or data directory does not exist, an existing one from an earlier name of the app (`shift`, then `runway`) stays active; move it to `rift` when you want the new paths.
 
+Command history and ignored suggestions merge disk changes while holding
+their writers' locks. If a lock cannot be opened or acquired, the disk file
+is left unchanged; the current process still keeps its in-memory entries.
+
 ### Session file
 
 `session.toml` (and each restart file) is TOML written by Rift; you do not
-edit it. Version 4 holds every window: the first window's `active` tab,
+edit it. The current format is version 8. Version 4 added every window:
+the first window's `active` tab,
 `[[tabs]]` and `[window]` frame (logical px, `maximized`, `fullscreen`) stay
 at the top level, where versions up to 3 read them, and each further window
 is an `[[other_windows]]` table with the same three keys:
@@ -71,9 +76,14 @@ and `service` (a durable shell to reattach), `started` and `counted` (the
 Elapsed chip). Version 5 adds `launch` to an unsplit tab and to each pane of a
 `layout`: the [profile](#profiles) name, own `shell` and `args` the pane was
 opened with (absent: the default launch), so a restore opens the same profile
-again. Version 7 adds the window names ("Rename window"): `window_name` at
+again. Version 6 adds pinned tabs (`pinned`), tab groups (`groups` and each
+tab's `group` index), and read-only panes (`read_only`). Version 7 adds the
+window names ("Rename window"): `window_name` at
 the top level for the first window, `name` in an `[[other_windows]]` table;
-a quit clears the first one's with its tabs. The file is rewritten when tabs
+a quit clears the first one's with its tabs. Version 8 adds `kept`: when
+Remote access keeps Rift running after a quit on macOS, the next launch
+restores the saved tabs and reattaches their shells even with
+`restore_session = false`. The file is rewritten when tabs
 or panes change, when focus
 moves to another pane (so a restart focuses the pane last used), and every
 minute while a tab's time counts. A restored split never lays a pane out
@@ -167,8 +177,9 @@ ambiguous_width = "narrow"        # narrow | wide: East Asian Ambiguous characte
 app_icon      = "default"         # default | light | mono | ocean | ember | forest | neon:
                                   # the Dock icon (macOS, also while Rift is not running)
                                   # and the window icon (Linux); unknown = default
-restore_session = true            # reopen tabs + cwds after a crash or reboot
-                                  # (a quit starts fresh; an update restores anyway)
+restore_session = true            # reopen saved tabs + cwds on launch (e.g. after reboot)
+                                  # (a quit starts fresh; crash recovery, an update and
+                                  # Remote access's Keep running restore even when false)
 save_transcripts = false          # also save finished blocks' output and replay it
                                   # (marked "restored") on relaunch; off = deleted
                                   # (with mask_secrets on, saved masked)

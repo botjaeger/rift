@@ -5213,7 +5213,7 @@ fn general_page(form: &mut Form, config: &Config, update: &UpdateLine) {
     let y = form.y;
     form.toggle(
         y,
-        "Restore tabs after a crash",
+        "Restore saved sessions on normal launches",
         config.restore_session,
         "restore_session",
     );

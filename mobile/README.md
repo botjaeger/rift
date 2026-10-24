@@ -20,6 +20,18 @@ pnpm install
 pnpm start          # Expo dev server; development build (expo run:ios / run:android) or web
 ```
 
+`pnpm install` applies `patches/decode-uri-component@0.2.2.patch` to the
+router's query decoder. It bounds malformed percent decoding while retaining
+the CommonJS API and `+` handling required by `query-string` 7; the upstream
+0.5 fix uses ESM. `test/deep-link-security.test.ts` checks the router's resolved
+dependency, including forgiving Unicode behavior and bounded decoding work.
+The `node-forge@1.4.0` patch requires the RSA DigestInfo algorithm sequence
+to contain exactly its validated OID and optional NULL parameters. This
+backs up Expo's signing tools until an upstream release includes the fix;
+`test/signature-security.test.ts` accepts valid encodings and rejects extra
+nested elements with disposable RSA fixtures. Neither patch changes the
+phone's native update verifier.
+
 Pair from Portals (the first-run page, or **+**): scan the QR code that Rift shows (Settings › Remote access › Pair a
 phone, or `rift-terminal remote pair`), paste the `rift-remote://pair?…` link, or open the link
 on the device. The app asks before pairing.
@@ -275,6 +287,11 @@ card cannot answer (a password, other input, a view-only device), and from an al
   again by the app (a reconnect carries none of it; an old acknowledgement settles nothing new).
   The error says "It may have gone through: check the pane before sending it again", and the draft
   stays. A resumed pane view whose position belongs to an earlier gateway run gets a fresh snapshot.
+- After the first failed connection round, the app tries up to five reconnect rounds,
+  with jittered exponential backoff (0.5 s base, capped at 10 s).
+  **Cancel** stops the attempts early; **Try again** starts them again. Coming back online also
+  restarts a host that gave up. A desktop update's announced restart has its own retry window
+  (see `closing` in [the protocol](../docs/remote-protocol.md)).
 - Network changes (expo-network): every socket is dropped and reconnected at once, LAN first, so
   coming home from cellular goes back to the direct path. Without a network hosts show Offline
   and nothing is retried until it returns.
@@ -329,7 +346,9 @@ against an older Rift the app hides what needs them.
 - **Keys** (Settings › Panes › Choose keys, or Edit keys at the end of the row): a preview, the row
   (drag the ≡ handle to reorder; screen readers get Move up / Move down), and Add chips from a
   catalogue (`src/controlKeys.ts`), each key a round cap with its icon or label; the default row
-  is Interrupt, Esc, Tab, ⌃, ↑, ↓. ⌃, ⌥ and ⇧ (Shift) are sticky for the
+  is Esc, Tab, Interrupt, ⌃, ←, ↑, ↓, →. A saved row matching the old default
+  (Interrupt, Esc, Tab, ⌃, ↑, ↓) moves to this default; other custom rows stay as set.
+  ⌃, ⌥ and ⇧ (Shift) are sticky for the
   next key, whatever it is (`ctrl+enter`, `alt+left`, `ctrl+[` is esc, `ctrl+@` is ctrl+space);
   on a key the protocol has no name for the modifier is dropped and the plain key sent.
   **Paste** types the phone's clipboard: into the command line at the prompt, into the running

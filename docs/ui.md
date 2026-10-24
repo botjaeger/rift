@@ -1072,7 +1072,10 @@ Nothing else changes on screen.
   Rift?" for the last one or ⌘Q, which lists every window's), pasting multi-line text into a shell without bracketed
   paste ("Paste and run?"), a paste over `large_paste_warning` ("Paste a
   large amount of text?": its size and line count, its first five lines
-  masked like the screen), installing shell integration on an SSH host, and
+  masked like the screen), installing shell integration on an SSH host,
+  opening a saved layout from a link when it has startup commands or a
+  custom program, arguments or environment (Cancel focused; environment
+  values stay private), and
   updating ("Update to Rift vX.Y.Z?": what the restart keeps — tabs,
   running shells, windows that cannot be reopened — with *Later* `esc` and
   *Update* `⏎`, or *Open download page* for an install that cannot update
@@ -1316,7 +1319,8 @@ description) left, control right; it runs to the bottom edge.
     path; not an executable: refused), then the `Scrollback` stepper (lines,
     ±1000 within 1,000–1,000,000, shown as `10,000`; described *Maximum
     lines kept in the buffer*). Profiles have a page of their own.
-  - Session: `Restore tabs after a crash` toggle, `New tabs start in` segmented
+  - Session: `Restore saved sessions on normal launches` toggle (crash
+    recovery, updates and *Keep running* restore regardless), `New tabs start in` segmented
     `Previous | Home | Custom` (a custom path is set in config.toml),
     `Warn before closing running commands` toggle,
     `Save block output for restore` toggle (*Output can contain secrets;

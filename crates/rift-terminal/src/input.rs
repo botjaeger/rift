@@ -18,6 +18,9 @@ pub struct KeyPress {
     pub released: bool,
     /// Left/right/numpad variant of the key.
     pub location: KeyLocation,
+    /// Text committed by an input method, with no physical press or release.
+    /// Programs in kitty mode receive synthesized text keys and releases.
+    pub committed: bool,
 }
 
 impl KeyPress {
@@ -30,6 +33,7 @@ impl KeyPress {
             repeat: false,
             released: false,
             location: KeyLocation::Standard,
+            committed: false,
         }
     }
 }
@@ -55,6 +59,7 @@ impl From<&KeyEvent> for KeyPress {
             repeat: e.repeat,
             released: e.state == winit::event::ElementState::Released,
             location: e.location,
+            committed: false,
         }
     }
 }

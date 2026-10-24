@@ -3,7 +3,7 @@
 # Rift quality gates: one runner for local checks and CI.
 #
 #   scripts/gates.sh                 # default set: fmt clippy test doc shell docs mobile
-#   scripts/gates.sh all             # default set + release + ui + linux
+#   scripts/gates.sh all             # default set + release + ui + ssh + leak + linux
 #   scripts/gates.sh fmt clippy      # only the named gates
 #   scripts/gates.sh ui --only NAME  # only these ui-smoke.py sections (scripts/ui-smoke.sh)
 #   scripts/gates.sh --list          # describe every gate
@@ -24,7 +24,7 @@ set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
 DEFAULT=(fmt clippy test doc shell docs mobile)
-ALL=(fmt clippy test doc shell docs mobile release ui leak linux)
+ALL=(fmt clippy test doc shell docs mobile release ui ssh leak linux)
 
 describe() {
     cat <<'EOF'
@@ -40,6 +40,7 @@ release  cargo build --release --locked
 ui       isolated scripted UI regressions (display or xvfb-run required), RIFT_UI_SHARDS (default 2) parallel shards
          of scripts/ui-smoke.py's independent section groups; --only NAME[,NAME] runs only those sections' groups
          (python3 scripts/ui-smoke.py BINARY --list names them); RIFT_UI_SHARDS=1 runs the file serially
+ssh      real palette/profile/install/completion journey against a disposable SSH server in Docker (scripts/ssh-ui-smoke.py)
 leak     memory soak on the release build: repeated identical work (a ticking program, output past scrollback, a command printing lines without end,
          opening and closing tabs, splits and overlays) must level off (scripts/leak-soak.py; ~5 min)
 linux    clippy + test + doc + release build in packaging/linux-verify.Dockerfile, then shell + scripted UI (xvfb, RIFT_UI_SHARDS shards) + leak on the CI runner's packages in packaging/ci-ubuntu.Dockerfile (docker)
@@ -98,6 +99,16 @@ workspace_test() {
 gate_doc() { RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked; }
 gate_release() { cargo build --release --locked; }
 gate_ui() { scripts/ui-smoke.sh; }
+gate_ssh() {
+    local tool bin=${RIFT_TEST_BIN:-${CARGO_TARGET_DIR:-$PWD/target}/debug/rift-terminal}
+    for tool in python3 docker ssh ssh-keygen; do
+        have "$tool" || { echo "$tool is required for the SSH UI fixture" >&2; return 1; }
+    done
+    if [[ -z ${RIFT_TEST_BIN:-} ]]; then
+        cargo build -p rift-terminal --locked || return 1
+    fi
+    python3 scripts/ssh-ui-smoke.py "$bin"
+}
 gate_leak() {
     if [[ -z ${RIFT_TEST_BIN:-} ]]; then
         cargo build --release -p rift-terminal --locked || return 1

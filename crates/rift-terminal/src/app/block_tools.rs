@@ -313,7 +313,7 @@ impl App {
 
     /// The selected blocks' commands into the input, one per line (not run).
     fn reinput_commands(&mut self, pane_id: PaneId, targets: &[BlockId]) {
-        if !self.win.editor_active {
+        if !self.win.editor_active || self.refuse_read_only(pane_id) {
             return;
         }
         let Some(pane) = self.pane_mut_ref(pane_id) else {

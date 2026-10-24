@@ -373,7 +373,7 @@ fn locked<T>(dir: &Path, f: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
     ensure_dir(dir)?;
     let handle = File::open(dir)?;
     loop {
-        // SAFETY: flock on a descriptor we own; released when it closes
+        // SAFETY: flock on a descriptor we own.
         if unsafe { libc::flock(handle.as_raw_fd(), libc::LOCK_EX) } == 0 {
             break;
         }
@@ -382,9 +382,18 @@ fn locked<T>(dir: &Path, f: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
             return Err(e);
         }
     }
-    let out = f();
-    drop(handle);
-    out
+    let _guard = RegistryLock(handle);
+    f()
+}
+
+struct RegistryLock(File);
+
+impl Drop for RegistryLock {
+    fn drop(&mut self) {
+        // A concurrently forked shell can retain this open description
+        // until exec. Release the lock without waiting for its descriptor.
+        let _ = self.0.unlock();
+    }
 }
 
 /// A JSON list file; missing = empty, unreadable or corrupt = error.
@@ -1090,7 +1099,12 @@ pub fn format_rfc3339(t: SystemTime) -> String {
 /// An RFC 3339 time (`Z` or a `±HH:MM` offset; fractions ignored).
 pub fn parse_rfc3339(s: &str) -> Option<SystemTime> {
     let b = s.as_bytes();
-    if b.len() < 20 || b[4] != b'-' || b[7] != b'-' || !matches!(b[10], b'T' | b't' | b' ') {
+    if !s.is_ascii()
+        || b.len() < 20
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || !matches!(b[10], b'T' | b't' | b' ')
+    {
         return None;
     }
     let num = |r: std::ops::Range<usize>| -> Option<i64> {
@@ -1102,6 +1116,14 @@ pub fn parse_rfc3339(s: &str) -> Option<SystemTime> {
     let (y, mo, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
     let (h, mi, sec) = (num(11..13)?, num(14..16)?, num(17..19)?);
     if b[13] != b':' || b[16] != b':' || !(1..=12).contains(&mo) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let month_days = match mo {
+        2 => 28 + i64::from(y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)),
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    if d > month_days {
         return None;
     }
     if h > 23 || mi > 59 || sec > 60 {
@@ -1118,8 +1140,16 @@ pub fn parse_rfc3339(s: &str) -> Option<SystemTime> {
     let offset = match rest {
         "Z" | "z" => 0,
         o if o.len() == 6 && matches!(&o[..1], "+" | "-") && &o[3..4] == ":" => {
+            if !o[1..3].bytes().all(|c| c.is_ascii_digit())
+                || !o[4..6].bytes().all(|c| c.is_ascii_digit())
+            {
+                return None;
+            }
             let oh: i64 = o[1..3].parse().ok()?;
             let om: i64 = o[4..6].parse().ok()?;
+            if oh > 23 || om > 59 {
+                return None;
+            }
             let v = oh * 3600 + om * 60;
             if &o[..1] == "-" { -v } else { v }
         }
@@ -1852,6 +1882,58 @@ mod tests {
         ] {
             assert_eq!(parse_rfc3339(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn registry_lock_releases_a_retained_open_description() {
+        let dir = scratch("retained-lock");
+        ensure_dir(&dir).unwrap();
+        let handle = File::open(&dir).unwrap();
+        handle.lock().unwrap();
+        let guard = RegistryLock(handle);
+        let retained = guard.0.try_clone().unwrap();
+        let contender = File::open(&dir).unwrap();
+        assert!(contender.try_lock().is_err());
+        drop(guard);
+        contender.try_lock().unwrap();
+        contender.unlock().unwrap();
+        drop(retained);
+        std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn malformed_registry_times_are_errors_not_panics() {
+        for bad in [
+            "2026-10-12T00:00:00é0000",
+            "2026-10-12T00:00:00+0é00",
+            "2026-10-12T00:00:00+00:é",
+        ] {
+            assert_eq!(parse_rfc3339(bad), None);
+            let body = format!(
+                r#"[{{"id":"a","name":"phone","platform":"ios","key":"k","permission":"view","paired_at":"{bad}","last_seen":"2026-10-12T00:00:00Z"}}]"#
+            );
+            assert!(serde_json::from_str::<Vec<Device>>(&body).is_err());
+        }
+    }
+
+    #[test]
+    fn registry_times_reject_invalid_offsets() {
+        for offset in ["+24:00", "-24:00", "+00:60", "-00:60", "+-1:00", "+00:-1"] {
+            assert_eq!(parse_rfc3339(&format!("2026-10-12T00:00:00{offset}")), None);
+        }
+        assert_eq!(
+            parse_rfc3339("2026-10-12T00:00:00+01:30"),
+            parse_rfc3339("2026-10-11T22:30:00Z")
+        );
+    }
+
+    #[test]
+    fn registry_times_reject_impossible_calendar_dates() {
+        for date in ["2026-02-29", "2026-02-31", "2026-04-31", "2100-02-29"] {
+            assert_eq!(parse_rfc3339(&format!("{date}T00:00:00Z")), None);
+        }
+        assert!(parse_rfc3339("2024-02-29T00:00:00Z").is_some());
+        assert!(parse_rfc3339("2000-02-29T00:00:00Z").is_some());
     }
 
     #[test]

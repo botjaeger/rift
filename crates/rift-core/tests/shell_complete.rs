@@ -41,6 +41,7 @@ impl Fixture {
             "home/fn",
             "home/.config/fish/completions",
             "cwd/sub dir",
+            "tmp",
         ] {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }
@@ -119,6 +120,7 @@ impl Fixture {
                 &home.join(".local/share").to_string_lossy(),
             ),
             ("PATH", &path),
+            ("TMPDIR", &self.root.join("tmp").to_string_lossy()),
         ])
     }
 
@@ -400,6 +402,93 @@ fn the_zsh_completer_never_writes_the_users_history() {
     assert!(
         !written.contains("rift-complete") && !written.contains("source"),
         "the completer's setup reached the user's history: {written:?}"
+    );
+}
+
+#[test]
+fn the_zsh_completer_does_not_source_a_shared_temporary_dump() {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    let Some(program) = zsh() else { return };
+    let f = Fixture::new("hostile-dump");
+    let home = f.root.join("home");
+    let temp = f.root.join("tmp");
+    std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o1777)).unwrap();
+    // No compinit in the user's rc: Rift itself initializes completion.
+    std::fs::write(home.join(".zshrc"), "fpath=($ZDOTDIR/fn $fpath)\n").unwrap();
+    let dump = temp.join(format!("rift-zcompdump-{}", unsafe { libc::geteuid() }));
+    // Another account can generate the public fpath/version header and
+    // precreate this predictable file in a shared TMPDIR.
+    let status = std::process::Command::new(&program)
+        .args([
+            "-f",
+            "-c",
+            "fpath=($ZDOTDIR/fn $fpath); autoload -Uz compinit; compinit -u -d \"$1\"",
+            "seed-dump",
+        ])
+        .arg(&dump)
+        .env("HOME", &home)
+        .env("ZDOTDIR", &home)
+        .env("TMPDIR", &temp)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let marker = temp.join("dump-executed");
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&dump)
+        .unwrap();
+    writeln!(
+        file,
+        "\nprint -r -- compromised > {}",
+        rift_core::ssh::quote(&marker.to_string_lossy())
+    )
+    .unwrap();
+    drop(file);
+    std::fs::set_permissions(&dump, std::fs::Permissions::from_mode(0o666)).unwrap();
+    let mut c = f.completer(&program);
+    warm(&mut c, &f, ShellKind::Zsh);
+    assert!(!marker.exists(), "the shared completion dump executed code");
+    drop(c);
+    assert_eq!(
+        std::fs::read_dir(&temp).unwrap().flatten().count(),
+        1,
+        "the server leaves only the fixture's hostile dump"
+    );
+}
+
+#[test]
+fn the_zsh_completer_does_not_follow_a_precreated_setup_symlink() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(program) = zsh() else { return };
+    let f = Fixture::new("hostile-setup");
+    let temp = f.root.join("tmp");
+    std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o1777)).unwrap();
+    let victim = f.root.join("victim");
+    std::fs::write(&victim, "keep this file").unwrap();
+    let wrapper = f.root.join("bin/zsh");
+    // Deterministically plant the shared-directory link before exec. The
+    // exec preserves its pid, avoiding a timing-dependent symlink race.
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nln -s {} \"$TMPDIR/rift-complete-$$.zsh\"\nexec {} \"$@\"\n",
+            rift_core::ssh::quote(&victim.to_string_lossy()),
+            rift_core::ssh::quote(&program.to_string_lossy()),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut c = f.completer(&wrapper);
+    warm(&mut c, &f, ShellKind::Zsh);
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep this file");
+    assert!(
+        std::fs::read_dir(&temp).unwrap().flatten().all(|e| {
+            !e.file_name()
+                .to_string_lossy()
+                .starts_with("rift-complete.")
+        }),
+        "private setup directories are removed after startup"
     );
 }
 

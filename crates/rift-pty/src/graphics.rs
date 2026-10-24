@@ -69,7 +69,8 @@ pub struct Graphics {
     pending: Option<(Control, Vec<u8>)>,
     /// Ids for images sent without one (`a=T` with no `i`, iTerm2).
     next_anon_id: u32,
-    /// kitty image number (`I=`) -> id of the newest image sent with it.
+    /// kitty image number (`I=`) -> id of the newest live image sent with it.
+    /// Removed with the image, including replacement and budget eviction.
     numbers: HashMap<u32, u32>,
 }
 
@@ -230,6 +231,7 @@ impl Graphics {
         if let Some(old) = self.images.remove(&id) {
             self.stored_bytes -= old.rgba.len();
             self.order.retain(|i| *i != id);
+            self.numbers.retain(|_, image| *image != id);
         }
         self.stored_bytes += rgba.len();
         self.images.insert(
@@ -248,6 +250,7 @@ impl Graphics {
             if let Some(img) = self.images.remove(&oldest) {
                 self.stored_bytes -= img.rgba.len();
                 self.placements.retain(|p| p.image != img.key);
+                self.numbers.retain(|_, image| *image != oldest);
             }
         }
         key
@@ -412,6 +415,7 @@ impl Graphics {
                     self.stored_bytes -= img.rgba.len();
                 }
                 self.order.retain(|i| *i != id);
+                self.numbers.retain(|_, image| *image != id);
             }
         }
     }
@@ -701,6 +705,56 @@ mod tests {
         g.kitty(b"a=d,d=I,i=7", (10, 20));
         assert!(g.placements.is_empty());
         assert_eq!(g.stored_bytes(), 0);
+    }
+
+    #[test]
+    fn image_numbers_follow_image_lifetimes() {
+        let mut g = Graphics::default();
+        for number in 1..=100 {
+            let command = format!("a=t,f=24,s=1,v=1,i=7,I={number};AAAA");
+            g.kitty(command.as_bytes(), (10, 20));
+            assert_eq!(
+                g.numbers.len(),
+                1,
+                "replacing an image forgets its old number"
+            );
+            assert_eq!(g.numbers.get(&number), Some(&7));
+        }
+        g.kitty(b"a=d,d=I,i=7", (10, 20));
+        assert!(g.numbers.is_empty(), "freeing an image forgets its number");
+        assert_eq!(g.stored_bytes(), 0);
+        g.kitty(b"a=t,f=24,s=1,v=1,i=7;AAAA", (10, 20));
+        g.kitty(b"a=d,d=N,I=100", (10, 20));
+        assert!(
+            g.images.contains_key(&7),
+            "an old number cannot delete a reused id"
+        );
+    }
+
+    #[test]
+    fn deleting_numbered_images_keeps_no_aliases() {
+        let mut g = Graphics::default();
+        for number in 1..=100 {
+            let command = format!("a=t,f=24,s=1,v=1,i=7,I={number};AAAA");
+            g.kitty(command.as_bytes(), (10, 20));
+            g.kitty(b"a=d,d=I,i=7", (10, 20));
+            assert!(g.numbers.is_empty());
+            assert!(g.images.is_empty());
+            assert_eq!(g.stored_bytes(), 0);
+        }
+    }
+
+    #[test]
+    fn evicting_images_forgets_their_numbers() {
+        let mut g = Graphics::default();
+        g.kitty(b"a=t,f=24,s=1,v=1,i=7,I=100;AAAA", (10, 20));
+        // Put accounting just over the eviction boundary without allocating
+        // hundreds of MiB: store still performs the real eviction path.
+        g.stored_bytes = MAX_STORED_BYTES;
+        g.store(8, 1, 1, vec![0; 4]);
+        assert!(!g.images.contains_key(&7));
+        assert!(g.numbers.is_empty());
+        assert!(g.images.contains_key(&8));
     }
 
     #[test]

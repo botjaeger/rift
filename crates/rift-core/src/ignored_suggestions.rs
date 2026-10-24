@@ -163,7 +163,9 @@ pub fn update(path: &Path, changes: &[Change]) -> bool {
     if std::fs::create_dir_all(dir).is_err() {
         return false;
     }
-    let _lock = crate::command_history::lock(path);
+    let Some(_lock) = crate::command_history::lock(path) else {
+        return false;
+    };
     let mut all = match read_file(path) {
         Loaded::Missing => Vec::new(),
         Loaded::Commands(c) => c,
@@ -470,6 +472,18 @@ mod tests {
         }
         assert_eq!(load_from(&p).len(), 200);
         assert!(!p.with_extension("json.bad").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_writer_lock_leaves_ignored_suggestions_untouched() {
+        let dir = scratch("lock-unavailable");
+        let p = dir.join("ignored-suggestions.json");
+        assert!(save_to(&p, lines(&["keep me"])));
+        std::fs::create_dir(p.with_extension("json.lock")).unwrap();
+        assert!(!update(&p, &[Change::Add("new".into())]));
+        assert_eq!(load_from(&p), lines(&["keep me"]));
         let _ = std::fs::remove_dir_all(dir);
     }
 

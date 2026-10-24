@@ -6,6 +6,7 @@ use rift_core::{BlockState, Config, Keymap, Theme};
 use rift_pty::{GridSize, PaneId, Session, SessionEvent, SpawnOptions};
 use rift_renderer::glyphon::{TextArea, TextBounds};
 use rift_renderer::{Gpu, QuadPipeline, Scene, TextEngine};
+use unicode_segmentation::UnicodeSegmentation;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
@@ -6454,6 +6455,12 @@ impl App {
     /// Show the block output → command modal for the selected block (or
     /// the newest finished one).
     fn open_pipe(&mut self) {
+        let Some(id) = self.active_pane_id() else {
+            return;
+        };
+        if !self.pipe_target_ready(id) {
+            return;
+        }
         let Some(pane) = self.win.tabs.get(self.win.active).and_then(|t| t.active()) else {
             return;
         };
@@ -6530,6 +6537,11 @@ impl App {
         if command.is_empty() {
             return;
         }
+        // The pane may have closed, started a program or become read-only
+        // while the command prompt was open. Refuse before writing output.
+        if !self.pipe_target_ready(pane) {
+            return;
+        }
         let Some(file) = write_pipe_file(&output) else {
             self.toast_error("Could not write the output to a temporary file".into());
             return;
@@ -6547,6 +6559,24 @@ impl App {
         let shell = rift_core::profiles::basename(&program).to_string();
         let line = palette::pipe_command(&command, &file.to_string_lossy(), &shell);
         self.submit_to(pane, &line);
+    }
+
+    /// Pipe input lives on this computer, so only a local writable prompt
+    /// can consume it; never type its shell wrapper into a running program.
+    fn pipe_target_ready(&mut self, pane: PaneId) -> bool {
+        let Some(p) = self.win.tabs.iter().find_map(|t| t.pane(pane)) else {
+            self.toast_error("The pane closed: nothing ran".into());
+            return false;
+        };
+        if !Self::editor_visible(p) {
+            self.toast("Wait for the shell prompt before sending block output".into());
+            return false;
+        }
+        if p.session.remote_cwd().is_some() {
+            self.toast("Sending block output requires a local shell prompt".into());
+            return false;
+        }
+        !self.refuse_read_only(pane)
     }
 
     /// Keys go to the viewer: it is open in this tab and focused.
@@ -6936,6 +6966,11 @@ impl App {
     /// Use the selected history row: run it, put it on the command line, or
     /// run it in a new split beside the pane.
     fn take_history(&mut self, how: HistoryUse) {
+        if let Some(id) = self.active_pane_id()
+            && self.refuse_read_only(id)
+        {
+            return;
+        }
         let Some(command) = self.win.history.current_command().map(str::to_string) else {
             return;
         };
@@ -7126,6 +7161,11 @@ impl App {
                 }
             }
             PaletteAction::InsertCommand(cmd) => {
+                if let Some(id) = self.active_pane_id()
+                    && self.refuse_read_only(id)
+                {
+                    return;
+                }
                 if let Some(pane) = self
                     .win
                     .tabs
@@ -7257,9 +7297,15 @@ impl App {
             PaletteAction::RunHistory(cmd) => {
                 // same path as Enter: prompt-time context, synced panes
                 if let Some(id) = self.win.tabs.get(self.win.active).map(|t| t.active_pane) {
-                    for target in self.input_targets(id) {
-                        self.submit_to(target, &cmd);
+                    if !self.pane_at_prompt(id) {
+                        self.toast("Wait for the shell prompt before running history".into());
+                        return;
                     }
+                    if self.refuse_read_only(id) {
+                        return;
+                    }
+                    self.submit_to(id, &cmd);
+                    self.submit_synced(id, &cmd);
                 }
             }
         }
@@ -7366,13 +7412,14 @@ impl App {
         if self.win.completion.tab.is_none() {
             self.win.completion.asked = false;
         }
-        // the rich-input composer is prose for a program, not a command
+        // The rich-input composer is prose for a program, not a command;
+        // a read-only pane cannot take a suggestion or completion.
         let Some(pane) = self
             .win
             .tabs
             .get(self.win.active)
             .and_then(|t| t.active())
-            .filter(|p| !p.composer.open)
+            .filter(|p| !p.composer.open && !p.session.read_only())
         else {
             self.completion_pending = None;
             self.win.completion.close();
@@ -7532,6 +7579,7 @@ impl App {
             .and_then(|t| t.active())
             .is_some_and(|p| {
                 p.session.id == request.pane
+                    && !p.session.read_only()
                     && p.editor.cursor == request.cursor
                     && p.editor.buffer == request.buffer
             })
@@ -7774,6 +7822,11 @@ impl App {
     /// [`rift_core::completion::space_after`]), then close the menu and
     /// complete the new line.
     fn insert_completion(&mut self, start: usize, end: usize, text: &str, space: bool) {
+        if let Some(id) = self.active_pane_id()
+            && self.refuse_read_only(id)
+        {
+            return;
+        }
         let as_you_type = self.config.completions_open_while_typing;
         let Some(pane) = self
             .win
@@ -7945,6 +7998,11 @@ impl App {
         if self.win.completion.ghost.is_empty() {
             return false;
         }
+        if let Some(id) = self.active_pane_id()
+            && self.refuse_read_only(id)
+        {
+            return false;
+        }
         let Some(pane) = self
             .win
             .tabs
@@ -7984,7 +8042,7 @@ impl App {
         ed.insert(text);
         if normal {
             // Normal mode rests on the last character
-            ed.cursor = ed.buffer.char_indices().last().map_or(0, |(i, _)| i);
+            ed.cursor = crate::state::grapheme_prev(&ed.buffer, ed.buffer.len());
             // no completion runs outside Insert: the rest stays as it is
             let buffer = ed.buffer.clone();
             self.win.completion.ghost.drain(..take);
@@ -13329,6 +13387,11 @@ impl App {
                 }
             }
             AppAction::Reinput => {
+                if let Some(id) = self.active_pane_id()
+                    && self.refuse_read_only(id)
+                {
+                    return;
+                }
                 if self.win.editor_active
                     && let Some((pane_id, block)) = self.selected_or_last_block()
                     && let Some(cmd) = self.block_command(pane_id, block)
@@ -15517,11 +15580,11 @@ impl App {
         let row_start = rows[row].start;
         let line = &buffer[rows[row].clone()];
         let engine = self.text.as_mut()?;
-        let mut col = line.chars().count();
+        let mut col = line.graphemes(true).count();
         let mut prev = 0.0f32;
-        for (i, (bi, ch)) in line.char_indices().enumerate() {
+        for (i, (bi, cluster)) in line.grapheme_indices(true).enumerate() {
             let w = engine.measure(
-                &line[..bi + ch.len_utf8()],
+                &line[..bi + cluster.len()],
                 editor::FONT_SIZE,
                 rift_renderer::mono_family(),
                 rift_renderer::glyphon::Weight::NORMAL,
@@ -15533,7 +15596,7 @@ impl App {
             prev = w;
         }
         let within = line
-            .char_indices()
+            .grapheme_indices(true)
             .nth(col)
             .map(|(i, _)| i)
             .unwrap_or(line.len());
@@ -15581,17 +15644,17 @@ impl App {
         }
         match clicks {
             2 => {
-                let is_word = |c: char| !c.is_whitespace();
+                let is_word = |g: &str| g.chars().next().is_some_and(|c| !c.is_whitespace());
                 let start = e.buffer[..offset]
-                    .char_indices()
+                    .grapheme_indices(true)
                     .rev()
-                    .take_while(|(_, c)| is_word(*c))
+                    .take_while(|(_, g)| is_word(g))
                     .last()
                     .map(|(i, _)| i)
                     .unwrap_or(offset);
                 let end = e.buffer[offset..]
-                    .char_indices()
-                    .find(|(_, c)| !is_word(*c))
+                    .grapheme_indices(true)
+                    .find(|(_, g)| !is_word(g))
                     .map(|(i, _)| offset + i)
                     .unwrap_or(e.buffer.len());
                 e.click_to(start, false);
@@ -16048,6 +16111,11 @@ impl App {
             window.request_redraw();
             return;
         }
+        // Block selection changes no input, including in a read-only pane.
+        if self.block_selection_key(event) {
+            window.request_redraw();
+            return;
+        }
         // a read-only pane's command line and composer: only moves and
         // selections (shortcuts still work below)
         if (self.win.editor_active || self.composing_pane().is_some())
@@ -16059,11 +16127,6 @@ impl App {
             if !event.released {
                 self.refuse_read_only(id);
             }
-            window.request_redraw();
-            return;
-        }
-        // ⇧↑ ⇧↓ grow the block selection, ⌘A selects every block
-        if self.block_selection_key(event) {
             window.request_redraw();
             return;
         }
@@ -16179,8 +16242,14 @@ impl App {
                 continue;
             };
             let enc = key_encoding(p, option_as_meta);
-            let Some(bytes) = input::key_to_bytes(event, mods, enc) else {
-                continue;
+            let bytes = if event.committed {
+                let text = event.text.as_deref().unwrap_or_default();
+                input::remote_bytes(&input::remote_text_presses(text, enc), enc)
+            } else {
+                let Some(bytes) = input::key_to_bytes(event, mods, enc) else {
+                    continue;
+                };
+                bytes
             };
             // typing into a program scrolls back to it and drops the selection
             p.view_offset = 0;
@@ -16188,7 +16257,7 @@ impl App {
                 p.clear_selection();
             }
             p.session.write(&bytes);
-            if enc.kitty_flags & crate::keyboard::EVENT_TYPES != 0 {
+            if !event.committed && enc.kitty_flags & crate::keyboard::EVENT_TYPES != 0 {
                 self.keys_down.insert((target, identity.clone()));
             }
             if target == id && self.latency_log {
@@ -16440,8 +16509,7 @@ impl App {
             if Some(target) == active && self.win.editor_active {
                 continue;
             }
-            if let Some((_, tab)) = self.find_tab_of_pane(target)
-                && let Some(p) = tab.pane_mut(target)
+            if let Some(p) = self.all_panes().find(|p| p.session.id == target)
                 && let Some(bytes) =
                     input::key_to_bytes(event, mods, key_encoding(p, option_as_meta))
             {
@@ -18740,11 +18808,12 @@ impl App {
         if text.is_empty() {
             return;
         }
-        let press = input::KeyPress::new(
+        let mut press = input::KeyPress::new(
             winit::keyboard::Key::Character(text.into()),
             Some(text.to_string()),
             None,
         );
+        press.committed = true;
         let saved = self.win.modifiers;
         self.win.modifiers = ModifiersState::empty();
         self.on_key(&press, event_loop, window);
@@ -21717,6 +21786,7 @@ impl App {
                 Self::window_kind_dump(w)
             );
         }
+        let _ = writeln!(out, "editor_anchor={:?}", self.win.editor_anchor);
         let _ = writeln!(
             out,
             "theme_bg={:?} control_api={}",

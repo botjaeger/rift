@@ -6,11 +6,11 @@
 //! one run of characters (a newline is a blank to them), and `dd` / `cc` /
 //! `yy` act on the whole buffer. `j` / `k` recall history in Normal mode and
 //! move between lines only in the visual modes. In Normal mode the cursor sits
-//! *on* a character — it is the byte offset of that char and is clamped to the
-//! last char whenever the buffer is non-empty (0 when it is empty).
+//! *on* a grapheme cluster — its starting byte offset, clamped to the
+//! last cluster whenever the buffer is non-empty (0 when it is empty).
 //!
 //! The visual modes reuse the editor's selection (`anchor`): the selection is
-//! the inclusive char range between the anchor and the cursor (whole lines in
+//! the inclusive grapheme range between the anchor and the cursor (whole lines in
 //! visual-line mode), so drawing and ⌘C see exactly what vim operates on.
 //!
 //! Every mutation goes through [`EditorState::replace_range`], the single
@@ -26,6 +26,7 @@
 
 use std::collections::HashMap;
 use std::ops::Range;
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::state::EditorState;
 
@@ -264,7 +265,7 @@ pub struct VimState {
     no_record: bool,
     /// `R`: the char each typed char overwrote (`None` = appended), so
     /// Backspace can put it back.
-    replaced: Vec<Option<char>>,
+    replaced: Vec<Option<String>>,
     /// Named registers `"a`–`"z` and the yank register `"0`: text, linewise.
     regs: HashMap<char, (String, bool)>,
     /// The register the command being typed named (`"a`), until it is used.
@@ -402,20 +403,31 @@ fn is_visual(m: VimMode) -> bool {
     matches!(m, VimMode::Visual | VimMode::VisualLine)
 }
 
-/// Char-indexed view of the buffer: vim motions count characters, the editor
-/// stores byte offsets.
+/// Grapheme-indexed view: motions and operators keep user-perceived
+/// characters whole; leading scalars classify words, whitespace and brackets.
 struct Line {
     chars: Vec<char>,
     offs: Vec<usize>,
     len: usize,
+    text: String,
 }
 
 impl Line {
     fn new(s: &str) -> Line {
         Line {
-            chars: s.chars().collect(),
-            offs: s.char_indices().map(|(i, _)| i).collect(),
+            chars: s
+                .graphemes(true)
+                .filter_map(|g| {
+                    if g == "\r\n" {
+                        Some('\n')
+                    } else {
+                        g.chars().next()
+                    }
+                })
+                .collect(),
+            offs: s.grapheme_indices(true).map(|(i, _)| i).collect(),
             len: s.len(),
+            text: s.to_string(),
         }
     }
 
@@ -428,9 +440,13 @@ impl Line {
         self.offs.get(i).copied().unwrap_or(self.len)
     }
 
-    /// Char index of a byte offset (which must be on a char boundary).
+    /// Grapheme index of a byte offset; interior offsets snap to its start.
     fn index(&self, byte: usize) -> usize {
-        self.offs.partition_point(|&o| o < byte)
+        if byte >= self.len {
+            self.n()
+        } else {
+            self.offs.partition_point(|&o| o <= byte).saturating_sub(1)
+        }
     }
 
     fn last(&self) -> usize {
@@ -709,7 +725,7 @@ fn word_under(l: &Line, ci: usize) -> Option<(usize, String)> {
     while e < l.n() && is_word(e) {
         e += 1;
     }
-    Some((s, l.chars[s..e].iter().collect()))
+    Some((s, l.text[l.byte(s)..l.byte(e)].to_string()))
 }
 
 /// Resolve a motion to `(target char index, inclusive)`; `None` = it failed.
@@ -1580,7 +1596,8 @@ impl EditorState {
             VimKey::Char(c) => {
                 let s = c.to_string();
                 if ci < l.n() && l.chars[ci] != '\n' {
-                    v.replaced.push(Some(l.chars[ci]));
+                    v.replaced
+                        .push(Some(l.text[l.byte(ci)..l.byte(ci + 1)].to_string()));
                     self.replace_range(l.byte(ci)..l.byte(ci + 1), &s);
                 } else {
                     v.replaced.push(None);
@@ -1592,7 +1609,7 @@ impl EditorState {
                     let at = l.byte(ci - 1)..l.byte(ci);
                     match v.replaced.pop() {
                         Some(Some(orig)) => {
-                            self.replace_range(at.clone(), &orig.to_string());
+                            self.replace_range(at.clone(), &orig);
                             self.cursor = at.start;
                         }
                         Some(None) => self.replace_range(at, ""),
@@ -1923,7 +1940,10 @@ impl EditorState {
             '~' => {
                 let e = (ci + count).min(n);
                 if e > ci {
-                    let rep: String = l.chars[ci..e].iter().map(|&ch| toggle_case(ch)).collect();
+                    let rep: String = l.text[l.byte(ci)..l.byte(e)]
+                        .chars()
+                        .map(toggle_case)
+                        .collect();
                     self.replace_range(l.byte(ci)..l.byte(e), &rep);
                 }
             }
@@ -2049,6 +2069,44 @@ mod tests {
     }
 
     const GIT: &str = "git  commit -m \"msg\" --amend";
+
+    #[test]
+    fn vim_edits_whole_graphemes() {
+        for cluster in ["a\u{301}", "👩‍💻", "🇵🇭"] {
+            let mut e = ed(cluster);
+            esc(&mut e);
+            assert_eq!(e.cursor, 0, "Normal cursor on {cluster}");
+            keys(&mut e, "x");
+            assert_eq!(e.buffer, "", "delete {cluster}");
+            e.undo();
+            keys(&mut e, "0rX");
+            assert_eq!(e.buffer, "X", "replace {cluster}");
+            let mut e = ed(&format!("{cluster}b"));
+            esc(&mut e);
+            keys(&mut e, "0l");
+            assert_eq!(e.cursor, cluster.len());
+            keys(&mut e, "0v");
+            assert_eq!(e.selected_text(), Some(cluster));
+        }
+    }
+
+    #[test]
+    fn vim_replace_backspace_and_case_keep_combining_marks() {
+        let mut e = ed("a\u{301}b");
+        esc(&mut e);
+        keys(&mut e, "0RX");
+        assert_eq!(e.buffer, "Xb");
+        e.vim_key(VimKey::Backspace);
+        assert_eq!(e.buffer, "a\u{301}b");
+        esc(&mut e);
+        keys(&mut e, "0~");
+        assert_eq!(e.buffer, "A\u{301}b");
+        keys(&mut e, "0*");
+        assert_eq!(
+            e.vim.as_ref().unwrap().last_search.as_ref().unwrap().0,
+            "A\u{301}b"
+        );
+    }
 
     /// `s` in Normal mode with the cursor on char `at`, then `cmd` typed.
     fn after(s: &str, at: usize, cmd: &str) -> (String, Option<VimMode>, String) {

@@ -30,11 +30,13 @@ integer parent=$PPID
 local prog=$1
 shift
 local -a args=("$@")
-local setup=${TMPDIR:-/tmp}/rift-complete-$$.zsh
 local line got
 
 # sourced inside the user's shell after its rc files
 umask 077
+local setup_dir=$(mktemp -d "${TMPDIR:-/tmp}/rift-complete.XXXXXXXX") || exit 1
+local setup=$setup_dir/setup.zsh
+trap 'rm -f -- "$setup"; rmdir -- "$setup_dir" 2>/dev/null || true' EXIT
 cat >| $setup <<'EOF'
 PROMPT= RPROMPT= PS2= PS4=
 # this hidden shell keeps no history of its own: nothing it does reaches
@@ -45,7 +47,8 @@ unset zle_bracketed_paste
 unsetopt beep
 # compsys, if the rc files did not load it
 (( $+functions[compdef] )) || {
-  autoload -Uz compinit && compinit -u -d "${TMPDIR:-/tmp}/rift-zcompdump-$UID"
+  # This warm server needs no shared dump: it is executable shell code.
+  autoload -Uz compinit && compinit -u -D -d /dev/null
 }
 bindkey -e
 bindkey '^M' undefined-key
@@ -151,6 +154,7 @@ while __rift_wait && zpty -r rift got; do
   [[ $got == *$'\x1e'rdy* ]] && break
 done
 rm -f -- $setup
+rmdir -- $setup_dir
 print -r -- $'\x1e'ready
 
 while IFS= read -r id && IFS= read -r cwd && IFS= read -r line && IFS= read -r n; do

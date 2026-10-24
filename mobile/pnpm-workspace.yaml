@@ -15,3 +15,6 @@ minimumReleaseAgeExclude:
   - expo-modules-autolinking@57.0.15
   - expo-modules-core@57.0.22
   - expo-modules-jsi@57.1.2
+patchedDependencies:
+  decode-uri-component@0.2.2: patches/decode-uri-component@0.2.2.patch
+  node-forge@1.4.0: patches/node-forge@1.4.0.patch

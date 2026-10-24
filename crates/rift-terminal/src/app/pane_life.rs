@@ -23,6 +23,11 @@ impl App {
         };
         let on = !p.session.read_only();
         p.session.set_read_only(on);
+        if self.active_pane_id() == Some(pane) {
+            // Cancel pending acceptance when locking; ask for the preserved
+            // draft's completions again when it becomes writable.
+            self.update_completions();
+        }
         self.toast(
             if on {
                 READ_ONLY_TOAST

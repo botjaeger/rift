@@ -76,15 +76,20 @@ If commands do not become blocks, the shell is not loading the hooks (see
 | Tabs in a side rail | Settings → Appearance → *Tab position: Side*; ⇧⌘F searches it |
 | Lock a pane against typing, or restart it | Right-click the terminal → *Make read-only* / *Restart pane* |
 
-Quitting Rift (⌘Q, or closing its last window) ends every tab and shell: the
-next launch starts fresh with one tab where the first window was. An
-update's restart, a crash or a reboot instead bring every window, its tabs,
-splits and directories back
-(`restore_session`), and the shells themselves keep running and reattach
-(durable sessions, on by default; see [durable
-sessions](features.md#durable-sessions)). Turn on *Save block output for
-restore* to also bring back the finished blocks. While a phone is connected,
-quitting asks first.
+By default, quitting Rift (⌘Q, or closing its last window) ends every tab
+and shell: the next launch starts fresh with one tab where the first window
+was. On macOS, with Remote access on and its gateway running, durable
+sessions let Quit instead ask *Keep running?*: the windows close, and the
+shells and phone connection stay. The menu bar icon's *Open Rift* brings
+them back; *Quit Rift Completely* ends them.
+
+An update's restart or a crash brings every window, its tabs, splits and
+directories back, even with *Restore saved sessions on normal launches* (`restore_session`)
+off. Durable shells keep running and reattach while their session service survives. A
+computer reboot ends the processes; the saved layout opens fresh shells.
+Turn on *Save block output for restore* to also bring back finished blocks
+when a fresh shell is needed. See [durable
+sessions](features.md#durable-sessions) for recovery and quit behavior.
 
 When a new release is out, **Update Rift** appears in the tab bar: it
 installs the update and restarts Rift with your tabs and running shells (see

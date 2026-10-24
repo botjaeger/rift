@@ -318,7 +318,9 @@ pub fn append_to(path: &Path, batch: Vec<Entry>) -> bool {
     if std::fs::create_dir_all(dir).is_err() {
         return false;
     }
-    let _lock = lock(path);
+    let Some(_lock) = lock(path) else {
+        return false;
+    };
     let mut all = match read_file(path) {
         Loaded::Missing => Vec::new(),
         Loaded::Entries(entries) => entries,
@@ -338,10 +340,10 @@ pub fn append_to(path: &Path, batch: Vec<Entry>) -> bool {
 }
 
 /// The writers' lock (`history.json.lock`, or beside another `.json` file
-/// `path`), held while the returned file is open. `None` when it cannot be
-/// taken: the write goes ahead unlocked.
+/// `path`), held until the returned guard is dropped. `None` when it cannot
+/// be taken: the caller must leave the file alone.
 #[cfg(unix)]
-pub(crate) fn lock(path: &Path) -> Option<std::fs::File> {
+pub(crate) fn lock(path: &Path) -> Option<WriteLock> {
     use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::io::AsRawFd;
     let f = std::fs::OpenOptions::new()
@@ -351,12 +353,24 @@ pub(crate) fn lock(path: &Path) -> Option<std::fs::File> {
         .mode(0o600)
         .open(path.with_extension("json.lock"))
         .ok()?;
-    (unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } == 0).then_some(f)
+    (unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } == 0).then_some(WriteLock(f))
+}
+
+#[cfg(unix)]
+pub(crate) struct WriteLock(std::fs::File);
+
+#[cfg(unix)]
+impl Drop for WriteLock {
+    fn drop(&mut self) {
+        // A concurrently forked child may retain the open description until
+        // exec: closing only our descriptor would leave the writer locked.
+        let _ = self.0.unlock();
+    }
 }
 
 #[cfg(not(unix))]
 pub(crate) fn lock(_: &Path) -> Option<()> {
-    None
+    Some(())
 }
 
 fn load_reader(reader: impl Read) -> Option<Vec<Entry>> {
@@ -831,6 +845,43 @@ mod tests {
         }
         assert_eq!(load_from(&p).len(), 200);
         assert!(!p.with_extension("json.bad").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_writer_lock_leaves_history_untouched() {
+        let dir = scratch("lock-unavailable");
+        let p = dir.join("history.json");
+        let entries = vec![e("keep me", "/", "/", 1)];
+        assert!(save_to(&p, entries.clone()));
+        std::fs::create_dir(p.with_extension("json.lock")).unwrap();
+        assert!(!append_to(&p, vec![e("new", "/", "/", 2)]));
+        assert_eq!(load_from(&p), entries);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn releasing_writer_lock_unlocks_a_retained_description() {
+        let dir = scratch("lock-retained");
+        let p = dir.join("history.json");
+        let guard = lock(&p).unwrap();
+        // As with a descriptor inherited by fork, the duplicate keeps the
+        // same open description alive after the parent's guard is dropped.
+        let retained = guard.0.try_clone().unwrap();
+        let contender = std::fs::OpenOptions::new()
+            .write(true)
+            .open(p.with_extension("json.lock"))
+            .unwrap();
+        assert!(
+            contender.try_lock().is_err(),
+            "the live guard excludes writers"
+        );
+        drop(guard);
+        contender.try_lock().unwrap();
+        contender.unlock().unwrap();
+        drop(retained);
         let _ = std::fs::remove_dir_all(dir);
     }
 

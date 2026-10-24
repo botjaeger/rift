@@ -4,6 +4,10 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  decode-uri-component@0.2.2: 30ab8c4da1227538896b82b8342e8324035edaf08b60f09eee8ee5488ce22747
+  node-forge@1.4.0: f85b31eb7127ba3872c2a2dd9a93721c6436596a557f247d7a15b99f886f25aa
+
 importers:
 
   .:
@@ -4179,7 +4183,7 @@ snapshots:
       glob: 13.0.6
       lan-network: 0.2.1
       multitars: 1.0.2
-      node-forge: 1.4.0
+      node-forge: 1.4.0(patch_hash=f85b31eb7127ba3872c2a2dd9a93721c6436596a557f247d7a15b99f886f25aa)
       npm-package-arg: 11.0.3
       ora: 3.4.0
       picomatch: 4.0.7
@@ -4216,7 +4220,7 @@ snapshots:
 
   '@expo/code-signing-certificates@0.0.6':
     dependencies:
-      node-forge: 1.4.0
+      node-forge: 1.4.0(patch_hash=f85b31eb7127ba3872c2a2dd9a93721c6436596a557f247d7a15b99f886f25aa)
 
   '@expo/config-plugins@57.0.10(typescript@6.0.3)':
     dependencies:
@@ -5512,7 +5516,7 @@ snapshots:
     dependencies:
       ms: 2.1.3
 
-  decode-uri-component@0.2.2: {}
+  decode-uri-component@0.2.2(patch_hash=30ab8c4da1227538896b82b8342e8324035edaf08b60f09eee8ee5488ce22747): {}
 
   deep-is@0.1.4: {}
 
@@ -6715,7 +6719,7 @@ snapshots:
     dependencies:
       whatwg-url: 5.0.0
 
-  node-forge@1.4.0: {}
+  node-forge@1.4.0(patch_hash=f85b31eb7127ba3872c2a2dd9a93721c6436596a557f247d7a15b99f886f25aa): {}
 
   node-int64@0.4.0: {}
 
@@ -6859,7 +6863,7 @@ snapshots:
 
   query-string@7.1.3:
     dependencies:
-      decode-uri-component: 0.2.2
+      decode-uri-component: 0.2.2(patch_hash=30ab8c4da1227538896b82b8342e8324035edaf08b60f09eee8ee5488ce22747)
       filter-obj: 1.1.0
       split-on-first: 1.1.0
       strict-uri-encode: 2.0.0

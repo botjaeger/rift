@@ -122,6 +122,35 @@ def died(what, log):
     tail = "\n".join(Path(log).read_text(errors="replace").splitlines()[-20:])
     return f"{what}; {log}:\n{tail}"
 
+def unicode_dump(path):
+    # Rust Debug escapes combining marks; compare the actual fixture text.
+    return re.sub(r"\\u\{([0-9a-fA-F]+)\}", lambda m: chr(int(m[1], 16)), Path(path).read_text())
+
+def raw_input_fixture(base):
+    """A real PTY program recording input bytes until its scratch stop file."""
+    (base / "cfg/rift").mkdir(parents=True)
+    (base / "data").mkdir()
+    (base / "cfg/rift/config.toml").write_text(
+        'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
+        'shell_completions = false\nsync_os_theme = false\n')
+    (base / "record.py").write_text(
+        "import os, pathlib, select, sys, termios, time, tty\n"
+        "base = pathlib.Path(sys.argv[1]); flags = int(sys.argv[2])\n"
+        "old = termios.tcgetattr(0); tty.setraw(0)\n"
+        "try:\n"
+        "  if flags: os.write(1, f'\\x1b[>{flags}u'.encode())\n"
+        "  (base / 'bytes').write_bytes(b''); (base / 'ready').touch()\n"
+        "  until = time.monotonic() + 30\n"
+        "  while not (base / 'stop').exists() and time.monotonic() < until:\n"
+        "    if select.select([0], [], [], 0.05)[0]:\n"
+        "      chunk = os.read(0, 4096)\n"
+        "      if not chunk: break\n"
+        "      with (base / 'bytes').open('ab') as out: out.write(chunk)\n"
+        "finally:\n"
+        "  if flags: os.write(1, b'\\x1b[<u')\n"
+        "  termios.tcsetattr(0, termios.TCSANOW, old)\n")
+    return dict(env, XDG_CONFIG_HOME=str(base / "cfg"), XDG_DATA_HOME=str(base / "data"))
+
 # === sections: the preamble above runs in every shard (scripts/ui_smoke_sections.py) ===
 
 # --- first run: palette, viewer, config reload, completion, find, paste, focus ---
@@ -6226,6 +6255,277 @@ assert 'confirm=Some((Restart(2), ["sleep 30"]))' in pl_state("restart-confirm")
     pl_state("restart-confirm")
 assert [p[0] for p in pl_panes("exit0")] == ["1"], pl_state("exit0")
 
+# Read-only command recall refuses every insertion path without replacing
+# the draft: the shortcut, the history palette and a multi-block menu.
+ro_recall = scratch / "read-only-recall"
+(ro_recall / "cfg/rift").mkdir(parents=True)
+(ro_recall / "data").mkdir()
+(ro_recall / "cfg/rift/config.toml").write_text(
+    'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
+    'shell_completions = false\nsync_os_theme = false\n')
+(ro_recall / "t.rift").write_text("\n".join([
+    "wait_prompt", "type echo recall-one\\n", "wait_prompt",
+    "type echo recall-two\\n", "wait_prompt", "type keep draft",
+    "key cmd+p", "type toggle read-only", "key enter", "wait 200",
+    "key cmd+up", "key cmd+i", f"dump {ro_recall}/shortcut.txt",
+    "key cmd+p", "type #echo recall-one", "key enter", "wait 200",
+    f"dump {ro_recall}/palette.txt",
+    "key escape", "key cmd+up", "key cmd+a", "key ctrl+m", "wait 200",
+    "a11y click Insert 2 commands into the input", f"dump {ro_recall}/multi.txt",
+    "key escape", "key cmd+up", "key shift+up", f"dump {ro_recall}/selected.txt",
+    "key escape", "key cmd+p", "type toggle read-only", "key enter", "wait 200",
+    "key cmd+up", "key cmd+i", f"dump {ro_recall}/unlocked.txt", "quit",
+]) + "\n")
+with (ro_recall / "app.log").open("w") as log:
+    ro_recall_rc = subprocess.run(
+        [str(binary), "--script", str(ro_recall / "t.rift"), "--headless"],
+        env=dict(env, XDG_CONFIG_HOME=str(ro_recall / "cfg"),
+                 XDG_DATA_HOME=str(ro_recall / "data")),
+        stdout=log, stderr=log, timeout=90).returncode
+assert ro_recall_rc == 0, died("read-only recall run failed", ro_recall / "app.log")
+ro_recall_bad = []
+for ro_recall_path in ("shortcut", "palette", "multi"):
+    ro_recall_state = (ro_recall / f"{ro_recall_path}.txt").read_text()
+    if 'editor="keep draft"' not in ro_recall_state:
+        ro_recall_bad.append(ro_recall_path + ": " + next(
+            line for line in ro_recall_state.splitlines() if line.startswith("  pane ")))
+assert not ro_recall_bad, "read-only command recall replaced the draft: " + repr(ro_recall_bad)
+assert 'editor="echo recall-two"' in (ro_recall / "unlocked.txt").read_text()
+assert "selected_blocks=[0, 1]" in (ro_recall / "selected.txt").read_text(), \
+    (ro_recall / "selected.txt").read_text()[-4000:]
+
+# A read-only prompt keeps its draft when End or a rebound accept key
+# would take ghost text. Unlocking permits the same suggestion again.
+ro_ghost = scratch / "read-only-ghost"
+ro_ghost_env = raw_input_fixture(ro_ghost)
+with (ro_ghost / "cfg/rift/config.toml").open("a") as ro_ghost_config:
+    ro_ghost_config.write('[keybindings]\naccept_autosuggestion = "shift+right"\n')
+(ro_ghost / "t.rift").write_text("\n".join([
+    "wait_prompt", "type echo locked-ghost\\n", "wait_prompt", "type echo locked",
+    "wait 700", f"dump {ro_ghost}/before.txt",
+    "key cmd+p", "type toggle read-only", "key enter", "wait 200",
+    "key end", f"dump {ro_ghost}/end.txt", "key shift+right", f"dump {ro_ghost}/bound.txt",
+    "key cmd+p", "type toggle read-only", "key enter", "wait 300",
+    "key end", f"dump {ro_ghost}/unlocked.txt", "quit",
+]) + "\n")
+with (ro_ghost / "app.log").open("w") as log:
+    ro_ghost_rc = subprocess.run(
+        [str(binary), "--script", str(ro_ghost / "t.rift"), "--headless"],
+        env=ro_ghost_env, stdout=log, stderr=log, timeout=60).returncode
+assert ro_ghost_rc == 0, died("read-only ghost run failed", ro_ghost / "app.log")
+assert 'ghost="-ghost"' in (ro_ghost / "before.txt").read_text()
+for ro_ghost_stage in ("end", "bound"):
+    assert 'editor="echo locked"' in (ro_ghost / f"{ro_ghost_stage}.txt").read_text(), \
+        ro_ghost_stage + ": " + (ro_ghost / f"{ro_ghost_stage}.txt").read_text()[-3000:]
+assert 'editor="echo locked-ghost"' in (ro_ghost / "unlocked.txt").read_text()
+
+# Mouse placement measures whole graphemes: either half of a combining
+# character chooses a boundary, and Backspace removes the complete cluster.
+mouse_grapheme = scratch / "mouse-grapheme"
+mouse_grapheme_env = raw_input_fixture(mouse_grapheme)
+def mouse_grapheme_run(name, steps):
+    (mouse_grapheme / f"{name}.rift").write_text("\n".join(steps + ["quit"]) + "\n")
+    with (mouse_grapheme / f"{name}.log").open("w") as log:
+        rc = subprocess.run(
+            [str(binary), "--script", str(mouse_grapheme / f"{name}.rift"), "--headless"],
+            env=mouse_grapheme_env, stdout=log, stderr=log, timeout=60).returncode
+    assert rc == 0, died("mouse grapheme run failed", mouse_grapheme / f"{name}.log")
+mouse_grapheme_run("geometry", ["resize 1000 700", "wait_prompt", "paste áb",
+                                f"dump {mouse_grapheme}/geometry.txt"])
+mouse_geometry = unicode_dump(mouse_grapheme / "geometry.txt")
+mouse_anchor = re.search(r"editor_anchor=\(([^,]+), ([^)]+)\)", mouse_geometry)
+assert mouse_anchor, mouse_geometry[:2000]
+mouse_x, mouse_y = map(float, mouse_anchor.groups())
+mouse_cell = float(re.search(r"geometry cell_w=([\d.]+)", mouse_geometry)[1])
+mouse_steps = ["resize 1000 700", "wait_prompt", "paste áb"]
+for mouse_i, mouse_frac in enumerate((0.25, 0.75, 1.25, 1.75)):
+    mouse_steps += ["wait 600", f"click {mouse_x + mouse_cell * mouse_frac} {mouse_y + 5}",
+                    f"dump {mouse_grapheme}/{mouse_i}.txt"]
+mouse_steps += ["wait 600", f"click {mouse_x + mouse_cell * 0.75} {mouse_y + 5}",
+                "key backspace", f"dump {mouse_grapheme}/deleted.txt",
+                f"shot {mouse_grapheme}/deleted.png"]
+mouse_grapheme_run("pointer", mouse_steps)
+mouse_cursors = [int(re.search(r'editor="áb" cursor=(\d+)',
+                              unicode_dump(mouse_grapheme / f"{i}.txt"))[1]) for i in range(4)]
+assert mouse_cursors == [0, 3, 3, 4], (mouse_cursors, mouse_x, mouse_y, mouse_cell)
+assert 'editor="b"' in (mouse_grapheme / "deleted.txt").read_text()
+
+# Accepting ghost text in Vim Normal mode rests on the final whole
+# grapheme, with a block cursor there instead of inside its combining marks.
+vim_ghost = scratch / "vim-ghost-grapheme"
+vim_ghost_env = raw_input_fixture(vim_ghost)
+with (vim_ghost / "cfg/rift/config.toml").open("a") as vim_ghost_config:
+    vim_ghost_config.write('vim_mode = true\n[keybindings]\naccept_autosuggestion = "shift+right"\n')
+(vim_ghost / "t.rift").write_text("\n".join([
+    "wait_prompt", "paste echo á", "key enter", "wait_prompt", "paste echo ",
+    "wait 700", f"dump {vim_ghost}/before.txt", "key escape", "key shift+right",
+    f"dump {vim_ghost}/accepted.txt", "quit",
+]) + "\n")
+with (vim_ghost / "app.log").open("w") as log:
+    vim_ghost_rc = subprocess.run(
+        [str(binary), "--script", str(vim_ghost / "t.rift"), "--headless"],
+        env=vim_ghost_env, stdout=log, stderr=log, timeout=60).returncode
+assert vim_ghost_rc == 0, died("Vim ghost run failed", vim_ghost / "app.log")
+assert 'ghost=" á"' in unicode_dump(vim_ghost / "before.txt")
+assert 'editor="echo á" cursor=5' in unicode_dump(vim_ghost / "accepted.txt"), \
+    (vim_ghost / "accepted.txt").read_text()[-4000:]
+
+# IME commits reach raw legacy and kitty programs in full, including
+# multi-character text, cancelled composition and synthetic key releases.
+ime_checks = []
+for ime_flags in (0, 9, 11, 25):
+    ime_base = scratch / f"ime-{ime_flags}"
+    ime_env = raw_input_fixture(ime_base)
+    (ime_base / "t.rift").write_text("\n".join([
+        "wait_prompt", f"type python3 {ime_base}/record.py {ime_base} {ime_flags}\\n",
+        f"wait_file {ime_base}/ready 10000", "wait 200",
+        "preedit cancelled", "preedit", "preedit にほんご", "ime 日本語", "ime A",
+        "wait 300", f"sh touch {ime_base}/stop", "wait_prompt", "quit",
+    ]) + "\n")
+    with (ime_base / "app.log").open("w") as log:
+        ime_rc = subprocess.run([str(binary), "--script", str(ime_base / "t.rift"), "--headless"],
+                                env=ime_env, stdout=log, stderr=log, timeout=60).returncode
+    assert ime_rc == 0, died("IME routing run failed", ime_base / "app.log")
+    if ime_flags == 0:
+        ime_want = "日本語A".encode()
+    else:
+        ime_want = b""
+        for ime_code, ime_mods, ime_text in ((26085, 1, 26085), (26412, 1, 26412),
+                                               (35486, 1, 35486), (97, 2, 65)):
+            ime_params = f";{ime_mods};{ime_text}" if ime_flags & 16 else (
+                f";{ime_mods}" if ime_mods != 1 else "")
+            ime_want += f"\x1b[{ime_code}{ime_params}u".encode()
+            if ime_flags & 2:
+                ime_want += f"\x1b[{ime_code};{ime_mods}:3u".encode()
+    ime_got = (ime_base / "bytes").read_bytes()
+    if ime_got != ime_want:
+        ime_checks.append((ime_flags, ime_got, ime_want))
+assert not ime_checks, f"committed text lost or misencoded: {ime_checks!r}"
+
+# Kitty key releases go back to the pane that received the press, even
+# after another window takes focus (never to its shell's editor).
+release_base = scratch / "key-release-window"
+release_env = raw_input_fixture(release_base)
+(release_base / "t.rift").write_text("\n".join([
+    "wait_prompt", "new_window", "wait_prompt", "window 0",
+    f"type python3 {release_base}/record.py {release_base} 11\\n",
+    f"wait_file {release_base}/ready 10000", "wait 200", "key a", "window 1", "keyup a",
+    "wait 300", f"dump {release_base}/other.txt", f"sh touch {release_base}/stop",
+    "window 0", "wait_prompt", "quit",
+]) + "\n")
+with (release_base / "app.log").open("w") as log:
+    release_rc = subprocess.run(
+        [str(binary), "--script", str(release_base / "t.rift"), "--headless"],
+        env=release_env, stdout=log, stderr=log, timeout=60).returncode
+assert release_rc == 0, died("key-release routing run failed", release_base / "app.log")
+assert (release_base / "bytes").read_bytes() == b"\x1b[97u\x1b[97;1:3u", \
+    (release_base / "bytes").read_bytes()
+assert 'editor=""' in (release_base / "other.txt").read_text()
+
+# Pipe output only enters a local writable shell prompt: a program owning
+# raw input must never receive the shell wrapper, and remote paths cannot
+# consume a local temporary file. Cancellation creates no output file.
+pipe_base = scratch / "pipe-output-guard"
+pipe_env = raw_input_fixture(pipe_base)
+(pipe_base / "t.rift").write_text("\n".join([
+    "wait_prompt", "type echo PIPE_SOURCE\\n", "wait_prompt",
+    "key cmd+p", "type Send block output to a command", "key enter", "key escape",
+    f"sh ls {pipe_base}/data/rift/pipe > {pipe_base}/cancel-files 2>/dev/null || true",
+    "key cmd+p", "type Send block output to a command", "key enter",
+    f"type cat > {pipe_base}/result", "key enter", "wait_prompt",
+    f"type python3 {pipe_base}/record.py {pipe_base} 0\\n",
+    f"wait_file {pipe_base}/ready 10000", "wait 200",
+    "key cmd+p", "type Send block output to a command", "key enter", "wait 200",
+    f"dump {pipe_base}/busy.txt", "wait 300",
+    f"sh touch {pipe_base}/stop", "wait_prompt", "quit",
+]) + "\n")
+with (pipe_base / "app.log").open("w") as log:
+    pipe_rc = subprocess.run([str(binary), "--script", str(pipe_base / "t.rift"), "--headless"],
+                             env=pipe_env, stdout=log, stderr=log, timeout=60).returncode
+assert pipe_rc == 0, died("pipe output run failed", pipe_base / "app.log")
+assert (pipe_base / "cancel-files").read_text() == ""
+assert (pipe_base / "result").read_text().strip() == "PIPE_SOURCE"
+assert (pipe_base / "bytes").read_bytes() == b"", (pipe_base / "bytes").read_bytes()
+assert "palette=true mode=PipeOutput" not in (pipe_base / "busy.txt").read_text(), \
+    (pipe_base / "busy.txt").read_text()[-3000:]
+
+# Pipe output rechecks a prompt that changed while its dialog was open,
+# and never creates a local output file for remote or read-only prompts.
+pipe_recheck_bad = []
+for pipe_case in ("changed", "remote", "locked"):
+    pipe_check = scratch / f"pipe-check-{pipe_case}"
+    pipe_check_env = raw_input_fixture(pipe_check)
+    pipe_check_steps = ["wait_prompt", "type echo PIPE_RECHECK\\n", "wait_prompt"]
+    if pipe_case == "changed":
+        (pipe_check / "alternate.sh").write_text(
+            f"sleep 1\nprintf '\\033[?1049h'\ntouch {pipe_check}/alternate\nsleep 5\n")
+        pipe_check_steps += [f"type sh {pipe_check}/alternate.sh &\\n", "wait_prompt"]
+    elif pipe_case == "remote":
+        (pipe_check / "remote.sh").write_text(
+            "__rift_report_cwd() { printf '\\033]7;file://remote.invalid/tmp\\007'; }\n")
+        pipe_check_steps += [f"type source {pipe_check}/remote.sh\\n", "wait_prompt",
+                             "type echo REMOTE_READY\\n", "wait_prompt"]
+    else:
+        pipe_check_steps += ["key cmd+p", "type toggle read-only", "key enter"]
+    pipe_check_steps += ["key cmd+p", "type Send block output to a command", "key enter",
+                         f"dump {pipe_check}/opened.txt"]
+    if pipe_case == "changed":
+        pipe_check_steps += [f"type cat > {pipe_check}/unexpected",
+                             f"wait_file {pipe_check}/alternate 5000", "wait 200",
+                             f"dump {pipe_check}/alternate.txt", "key enter"]
+    pipe_check_steps += ["wait 300", f"dump {pipe_check}/after.txt", "quit"]
+    (pipe_check / "t.rift").write_text("\n".join(pipe_check_steps) + "\n")
+    with (pipe_check / "app.log").open("w") as log:
+        pipe_check_rc = subprocess.run(
+            [str(binary), "--script", str(pipe_check / "t.rift"), "--headless"],
+            env=pipe_check_env, stdout=log, stderr=log, timeout=60).returncode
+    assert pipe_check_rc == 0, died("pipe recheck run failed", pipe_check / "app.log")
+    pipe_opened = (pipe_check / "opened.txt").read_text()
+    if pipe_case == "changed":
+        assert "palette=true mode=PipeOutput" in pipe_opened, pipe_opened[-3000:]
+        assert "alt=true" in (pipe_check / "alternate.txt").read_text()
+    else:
+        if "palette=true mode=PipeOutput" in pipe_opened:
+            pipe_recheck_bad.append(pipe_case)
+        if pipe_case == "remote":
+            assert "cwd_remote=true" in pipe_opened, pipe_opened[-3000:]
+    if list((pipe_check / "data/rift/pipe").glob("*")) or (pipe_check / "unexpected").exists():
+        pipe_recheck_bad.append(pipe_case + " wrote output")
+assert not pipe_recheck_bad, f"pipe prompt checks failed: {pipe_recheck_bad}"
+
+# Palette history runs only at shell prompts, including synchronized
+# siblings: a running program must receive none of the recalled command.
+history_run_bad = []
+for history_synced in (False, True):
+    history_run_base = scratch / f"history-run-{history_synced}"
+    history_run_env = raw_input_fixture(history_run_base)
+    history_run_steps = ["wait_prompt", "type echo HISTORY_SAFE\\n", "wait_prompt"]
+    if history_synced:
+        history_run_steps += ["key cmd+d", "wait_prompt"]
+    history_run_steps += [
+        f"type python3 {history_run_base}/record.py {history_run_base} 0\\n",
+        f"wait_file {history_run_base}/ready 10000", "wait 200"]
+    if history_synced:
+        history_run_steps += ["key alt+cmd+left", "key alt+cmd+i"]
+    history_run_steps += [
+        "key cmd+p", "type echo HISTORY_SAFE", "key enter", "wait 300",
+        f"dump {history_run_base}/after.txt", f"sh touch {history_run_base}/stop",
+        "wait 300", "quit"]
+    (history_run_base / "t.rift").write_text("\n".join(history_run_steps) + "\n")
+    with (history_run_base / "app.log").open("w") as log:
+        history_run_rc = subprocess.run(
+            [str(binary), "--script", str(history_run_base / "t.rift"), "--headless"],
+            env=history_run_env, stdout=log, stderr=log, timeout=60).returncode
+    assert history_run_rc == 0, died("history run failed", history_run_base / "app.log")
+    history_run_bytes = (history_run_base / "bytes").read_bytes()
+    if history_run_bytes:
+        history_run_bad.append((history_synced, history_run_bytes))
+    if history_synced:
+        history_run_state = (history_run_base / "after.txt").read_text()
+        assert len(re.findall(r'block \d+ state=done .*?cmd="echo HISTORY_SAFE"', history_run_state)) == 2, \
+            history_run_state[-4000:]
+assert not history_run_bad, f"palette history sent a shell command to raw input: {history_run_bad!r}"
+
 # Tabs move between windows (`drag_tab` presses, pulls and releases a tab
 # through the mouse handlers; headless windows sit apart on a pretend
 # desktop). Out of every window: a new window holds it, with the same shell
@@ -6632,6 +6932,50 @@ assert 'settings_tab=true settings_query="font size"' in lt("settings"), lt("set
 assert re.search(r"confirm=Some\(.*LaunchLink", lt("asks")), lt("asks")
 assert "confirm=None" in lt("cancelled") and '"RunTab"' not in lt("cancelled"), lt("cancelled")
 assert not (lk / "ran-from-link").exists()
+
+# Launch links must ask before per-pane or saved-profile arguments execute,
+# even when the layout has no commands[]. Cancel preserves the empty marker;
+# explicit approval starts exactly the saved fixture program.
+link_launch_issues = []
+for link_launch_kind in ("pane", "profile"):
+    ll = scratch / f"link-launch-{link_launch_kind}"
+    (ll / "cfg/rift/launch_configs").mkdir(parents=True)
+    (ll / "home").mkdir()
+    marker = ll / "approved-only"
+    ll_config = ('shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
+                 'discover_shells = false\nsync_os_theme = false\n')
+    if link_launch_kind == "profile":
+        ll_config += ('[[profiles]]\nname = "fixture"\ncommand = "/bin/bash"\n'
+                      f'args = ["-c", "touch {marker}"]\n')
+        ll_launch = 'profile: fixture\n'
+    else:
+        ll_launch = f'shell: /bin/bash\n          args: ["-c", "touch {marker}"]\n'
+    (ll / "cfg/rift/config.toml").write_text(ll_config)
+    (ll / "cfg/rift/launch_configs/probe.yaml").write_text(
+        'name: fixture\nwindows:\n  - tabs:\n      - title: fixture\n        layout:\n          ' + ll_launch)
+    (ll / "t.rift").write_text("\n".join([
+        "wait_prompt", "link rift://launch/fixture", "wait 300", f"dump {ll}/asks.txt",
+        f"shot {ll}/asks.png",
+        "key escape", "wait 300", f"sh test ! -e {marker} && touch {ll}/cancel-safe",
+        "link rift://launch/fixture", "wait 300", "a11y click Open and run", "wait 600",
+        f"dump {ll}/approved.txt", "quit",
+    ]) + "\n")
+    ll_env = {k: v for k, v in env.items() if not k.startswith("RIFT_")}
+    ll_env.update(HOME=str(ll / "home"), HISTFILE=str(ll / "home/history"),
+                  XDG_CONFIG_HOME=str(ll / "cfg"), XDG_DATA_HOME=str(ll / "data"),
+                  RIFT_NO_NOTIFY="1")
+    with (ll / "app.log").open("w") as log:
+        ll_rc = subprocess.run([str(binary), "--script", str(ll / "t.rift"), "--headless"],
+                               env=ll_env, stdout=log, stderr=log, timeout=60).returncode
+    assert ll_rc == 0, died("launch-link arguments run failed", ll / "app.log")
+    ll_asks = (ll / "asks.txt").read_text()
+    if "confirm=Some" not in ll_asks or "LaunchLink" not in ll_asks:
+        link_launch_issues.append(f"{link_launch_kind}: no launch confirmation")
+    if not (ll / "cancel-safe").exists():
+        link_launch_issues.append(f"{link_launch_kind}: link ran before approval")
+    if not marker.exists():
+        link_launch_issues.append(f"{link_launch_kind}: approved launch did not run")
+assert not link_launch_issues, link_launch_issues
 
 # `rift-terminal <path>` from another process (an editor's "external
 # terminal", a script): the running Rift opens a tab in the folder, relative
