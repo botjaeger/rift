@@ -6,6 +6,14 @@ build (`## <version> — <YYYY-MM-DD>`) or an over-the-air update to one
 message its download carries. Items use `### New`, `### Improved` or
 `### Fixed` sections of `- **Title** — text`.
 
+## 0.4.1 — 2026-10-24
+
+Safer handling of links that open the app.
+
+### Fixed
+
+- **Links that open the app** — a malformed link can no longer stall the app while it is read.
+
 ## 0.4.0 — 2026-10-23
 
 Scroll and paste screenshots into Claude Code and other full-screen programs, and agents keep their message box.

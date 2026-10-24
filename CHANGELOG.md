@@ -8,6 +8,26 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.22.4 — 2026-10-24
+
+### Fixed
+
+- **Full-screen programs and idle agents stop spinning** — OpenCode, vim, htop and other programs
+  left open no longer keep their tab spinning. An agent or a full-screen program spins only while
+  it says it is working; ordinary commands spin while they run.
+- **Read-only panes stay read-only** — history, the palette, completions and suggestions can no
+  longer type into a locked pane.
+- **Sending block output to a command** — it only goes into a local shell prompt, never into a
+  running program or an ssh session, and is checked again if the prompt changed meanwhile.
+- **Running history from the palette** — waits for a shell prompt; synchronized panes busy in a
+  program no longer receive the command.
+- **Accented letters and emoji** — the cursor, clicks, extra carets and vim treat them as one
+  character instead of splitting them.
+- **Input-method text in full-screen programs** — composed text now reaches programs that use the
+  kitty keyboard protocol.
+- **History and ignored suggestions** — never written without their lock, so two windows cannot
+  overwrite each other's changes.
+
 ## 0.22.3 — 2026-10-24
 
 ### Fixed
