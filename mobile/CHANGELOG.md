@@ -6,6 +6,16 @@ build (`## <version> — <YYYY-MM-DD>`) or an over-the-air update to one
 message its download carries. Items use `### New`, `### Improved` or
 `### Fixed` sections of `- **Title** — text`.
 
+## 0.4.1 · update 2 — 2026-10-25
+
+Scrolling starts the moment you drag and stops when you leave.
+
+### Fixed
+
+- **Scrolling full-screen programs** — a drag moves the program as soon as it starts, and a quick
+  drag no longer flicks on its own. Leaving the screen or switching apps stops a flick, and
+  dragging or catching a flick no longer opens the keyboard.
+
 ## 0.4.1 · update 1 — 2026-10-24
 
 Smoother scrolling in Claude Code and other full-screen programs.

@@ -8,6 +8,13 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.22.6 — 2026-10-25
+
+### Fixed
+
+- **Welcome list stays away** — the New session list no longer comes back after you clear the
+  pane with ⌘K. It now also goes away when a background job prints into a new pane.
+
 ## 0.22.5 — 2026-10-24
 
 ### Improved
