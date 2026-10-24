@@ -8,6 +8,13 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.22.5 — 2026-10-24
+
+### Improved
+
+- **Smoother scrolling from the phone** — scrolling Claude Code, vim, less or any full-screen
+  program from the phone app now follows your finger instead of stepping about ten times a second.
+
 ## 0.22.4 — 2026-10-24
 
 ### Fixed

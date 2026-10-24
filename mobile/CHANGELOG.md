@@ -6,6 +6,15 @@ build (`## <version> — <YYYY-MM-DD>`) or an over-the-air update to one
 message its download carries. Items use `### New`, `### Improved` or
 `### Fixed` sections of `- **Title** — text`.
 
+## 0.4.1 · update 1 — 2026-10-24
+
+Smoother scrolling in Claude Code and other full-screen programs.
+
+### Improved
+
+- **Scrolling full-screen programs** — dragging follows your finger, a flick keeps scrolling and
+  slows down like any list, and a touch stops it. Smoothest with Rift 0.22.5 on the computer.
+
 ## 0.4.1 — 2026-10-24
 
 Safer handling of links that open the app.
