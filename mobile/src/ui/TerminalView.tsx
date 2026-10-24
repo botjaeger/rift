@@ -1,4 +1,5 @@
 import * as Clipboard from "expo-clipboard";
+import { useFocusEffect } from "expo-router";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import {
   AppState,
@@ -96,7 +97,7 @@ function PieceView({
   return (
     <View style={{ position: "absolute", left, top: 0, width, height: lineHeight, backgroundColor }}>
       <Text
-        style={[styles.cell, text, piece.wide ? { width, textAlign: "center" } : { width: width + 4 }]}
+        style={[styles.cell, text, piece.wide ? { width, textAlign: "center" } : { width: width + 4, maxWidth: width + 4 }]}
         numberOfLines={1}
         ellipsizeMode="clip"
         allowFontScaling={false}
@@ -411,44 +412,61 @@ export function TerminalView({
     rowHeight.current = h;
   }, []);
   const remote = useRef<ScrollCoalescer | null>(null);
+  const scrollGeneration = useRef(0);
   // a flick carries on after the finger lifts (scroll.ts Fling)
   const velocity = useRef(new DragVelocity());
   const fling = useRef<Fling | null>(null);
-  useEffect(() => {
+  const drag = useRef<{ x: number; y: number; lastY: number; vertical: boolean | null } | null>(null);
+  const focusOnTap = useRef(true);
+  useFocusEffect(useCallback(() => {
+    if (!online || !canScroll) return;
+    let active = true;
     const timers = {
       now: () => Date.now(),
       schedule: (fn: () => void, ms: number) => setTimeout(fn, ms),
       unschedule: (h: unknown) => clearTimeout(h as ReturnType<typeof setTimeout>),
     };
     const c = new ScrollCoalescer({
-      send: (lines) =>
-        void fleet.sendScroll(live.current.hostKey, live.current.paneId, lines).then((r) => {
+      send: (lines) => {
+        const generation = scrollGeneration.current;
+        void fleet.sendScroll(hostKey, paneId, lines).then((r) => {
+          if (!active || generation !== scrollGeneration.current) return;
           // the rate only slows it (an older desktop allows fewer): sent again, slower
           if (!r.ok && r.code === "rate") c.refused(lines);
           // any other refusal says why once
           else if (!r.ok) setError(r.message);
-        }),
+        });
+      },
       ...timers,
     });
     const f = new Fling({ add: (lines) => c.add(lines), done: () => c.flush(), ...timers });
     remote.current = c;
     fling.current = f;
-    return () => {
-      remote.current = null;
-      fling.current = null;
+    const stop = () => {
+      scrollGeneration.current++;
       f.stop();
       c.cancel();
+      velocity.current.clear();
+      drag.current = null;
     };
-  }, []);
-  const drag = useRef<{ x: number; y: number; lastY: number; vertical: boolean | null } | null>(null);
+    const sub = AppState.addEventListener("change", (state) => {
+      if (state !== "active") stop();
+    });
+    return () => {
+      active = false;
+      sub.remove();
+      remote.current = null;
+      fling.current = null;
+      stop();
+    };
+  }, [hostKey, paneId, online, canScroll]));
   const dragMove = (x: number, y: number) => {
     const d = drag.current;
     if (!d) return;
     if (d.vertical === null) {
       if (Math.hypot(x - d.x, y - d.y) <= DRAG_SLOP) return;
+      focusOnTap.current = false;
       d.vertical = Math.abs(y - d.y) > Math.abs(x - d.x);
-      d.lastY = y;
-      return;
     }
     const dy = y - d.lastY;
     d.lastY = y;
@@ -475,9 +493,16 @@ export function TerminalView({
   const lastTap = useRef<number | null>(null);
   const onTouchStart = (e: GestureResponderEvent) => {
     const t = e.nativeEvent.touches;
-    // a touch stops a fling where it is
-    fling.current?.stop();
+    // a touch stops a fling where it is; what a plain drag left waiting still goes out
+    const flinging = !!fling.current?.running;
+    focusOnTap.current = !flinging;
+    if (flinging) {
+      scrollGeneration.current++;
+      fling.current?.stop();
+      remote.current?.cancel();
+    }
     velocity.current.clear();
+    velocity.current.add(0, Date.now());
     if (t.length === 2) {
       pinch.current = { distance: touchDistance(t[0]!, t[1]!), zoom };
       tap.current = null;
@@ -518,6 +543,17 @@ export function TerminalView({
       } else lastTap.current = now;
     }
     if (left === 0) tap.current = null;
+  };
+  const onTouchCancel = () => {
+    scrollGeneration.current++;
+    fling.current?.stop();
+    remote.current?.cancel();
+    velocity.current.clear();
+    drag.current = null;
+    pinch.current = null;
+    tap.current = null;
+    lastTap.current = null;
+    setPinching(false);
   };
   // The scrolling area's size, less the zoom row, is what a fitted program may fill.
   const [area, setArea] = useState({ width: 0, height: 0 });
@@ -600,32 +636,34 @@ export function TerminalView({
   );
 
   return (
-    <View style={[styles.fill, { backgroundColor: screenDefaults(screen, DEFAULTS).bg }]} onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd} onTouchCancel={onTouchEnd}>
-      {typing ? (
-        // the label stays on the ScrollView: on the capture view TalkBack would read the
-        // screen as one element instead of its rows
-        <KeyCaptureView
-          ref={capture}
-          mode="terminal"
-          onText={(e) => typed(e.text)}
-          onKey={onKey}
-          onFocusChange={setFocused}
-          style={styles.fill}
-        >
+    <View style={[styles.fill, { backgroundColor: screenDefaults(screen, DEFAULTS).bg }]}>
+      <View style={styles.fill} onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd} onTouchCancel={onTouchCancel}>
+        {typing ? (
+          // the label stays on the ScrollView: on the capture view TalkBack would read the
+          // screen as one element instead of its rows
+          <KeyCaptureView
+            ref={capture}
+            mode="terminal"
+            onText={(e) => typed(e.text)}
+            onKey={onKey}
+            onFocusChange={setFocused}
+            style={styles.fill}
+          >
+            <ScrollView ref={scroller} style={styles.fill} accessibilityLabel={label} scrollEnabled={localScroll} bounces={!canScroll} onLayout={onArea} onScroll={trackLocal} scrollEventThrottle={16} onScrollEndDrag={onScroll} onMomentumScrollEnd={onScroll} onContentSizeChange={onContent}>
+              {screen ? zoomRow : null}
+              {/* not one element for screen readers: they read the rows */}
+              <Pressable onPress={() => { if (focusOnTap.current) capture.current?.focus(); }} accessible={false}>
+                {grid}
+              </Pressable>
+            </ScrollView>
+          </KeyCaptureView>
+        ) : (
           <ScrollView ref={scroller} style={styles.fill} accessibilityLabel={label} scrollEnabled={localScroll} bounces={!canScroll} onLayout={onArea} onScroll={trackLocal} scrollEventThrottle={16} onScrollEndDrag={onScroll} onMomentumScrollEnd={onScroll} onContentSizeChange={onContent}>
             {screen ? zoomRow : null}
-            {/* not one element for screen readers: they read the rows */}
-            <Pressable onPress={() => capture.current?.focus()} accessible={false}>
-              {grid}
-            </Pressable>
+            {grid}
           </ScrollView>
-        </KeyCaptureView>
-      ) : (
-        <ScrollView ref={scroller} style={styles.fill} accessibilityLabel={label} scrollEnabled={localScroll} bounces={!canScroll} onLayout={onArea} onScroll={trackLocal} scrollEventThrottle={16} onScrollEndDrag={onScroll} onMomentumScrollEnd={onScroll} onContentSizeChange={onContent}>
-          {screen ? zoomRow : null}
-          {grid}
-        </ScrollView>
-      )}
+        )}
+      </View>
       {/* without the key bar (the message input below, or view only), a refused scroll or paste says why here */}
       {error && (bare || !operate) ? <ErrorText style={styles.bareError}>{error}</ErrorText> : null}
       {bare ? null : operate ? (

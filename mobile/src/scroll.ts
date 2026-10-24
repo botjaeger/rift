@@ -145,6 +145,9 @@ export class DragVelocity {
   private samples: { at: number; lines: number }[] = [];
 
   add(lines: number, at: number): void {
+    const last = this.samples.at(-1);
+    // A reversal brakes the old flick; only movement in the new direction sets its speed.
+    if (last && last.lines * lines < 0) this.samples = [{ at: last.at, lines: 0 }];
     this.samples.push({ at, lines });
     this.samples = this.samples.filter((s) => at - s.at <= FLING_WINDOW_MS);
   }
@@ -155,7 +158,8 @@ export class DragVelocity {
     if (recent.length < 2) return 0;
     const span = at - recent[0]!.at;
     if (span <= 0) return 0;
-    return (recent.reduce((sum, s) => sum + s.lines, 0) * 1000) / span;
+    // The first sample's movement happened before this interval, not within it.
+    return (recent.slice(1).reduce((sum, s) => sum + s.lines, 0) * 1000) / span;
   }
 
   clear(): void {

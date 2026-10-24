@@ -228,9 +228,30 @@ describe("fling", () => {
     v.add(1, 0);
     v.add(1, 20);
     v.add(1, 40);
-    expect(v.speed(40)).toBe(75);
+    expect(v.speed(40)).toBe(50);
     // a finger held still before lifting: no fling
     expect(v.speed(300)).toBe(0);
+  });
+
+  it("uses elapsed travel without exaggerating a short flick or a rolling window", () => {
+    const v = new DragVelocity();
+    v.add(0, 0);
+    v.add(1, 20);
+    expect(v.speed(20)).toBe(50);
+    for (let at = 40; at <= 160; at += 20) v.add(1, at);
+    expect(v.speed(160)).toBe(50);
+    expect(v.speed(180)).toBe(40);
+  });
+
+  it("a direction change brakes the old flick before measuring the new one", () => {
+    const v = new DragVelocity();
+    v.add(0, 0);
+    v.add(4, 20);
+    v.add(4, 40);
+    v.add(-1, 60);
+    expect(v.speed(60)).toBe(-50);
+    v.add(-1, 80);
+    expect(v.speed(80)).toBe(-50);
   });
 
   it("carries on with a decaying speed, then flushes; slow or stopped, it does not start", () => {

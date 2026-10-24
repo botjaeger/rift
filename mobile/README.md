@@ -187,8 +187,12 @@ card cannot answer (a password, other input, a view-only device), and from an al
   keys. A vertical drag on the screen scrolls the pane on the computer (feature `scroll`, as the
   desktop's wheel: the agent's or vim's own scrolling, less's lines, or the shell's scrollback),
   counted in rows and sent at most every 30 ms (every 80 ms to a desktop that refuses that pace
-  with `rate`, before 0.22.5; `src/scroll.ts`). A flick carries on after the finger lifts,
-  slowing as a native list does, until a touch stops it. The computer sends the program's redraws
+  with `rate`, before 0.22.5; `src/scroll.ts`). A drag starts moving as soon as it clears the tap
+  threshold. A flick carries on after the finger lifts, slowing as a native list does. Touching
+  again stops a flick (a plain drag's last lines still go out); cancelling the gesture, leaving
+  the pane or backgrounding the app stops pending motion;
+  reversing direction brakes the old flick. A drag or a tap that stops a flick does not open the
+  keyboard; a plain tap still does. The computer sends the program's redraws
   every 16 ms while it scrolls, and the app shows each within a frame. Zoomed in, the view scrolls
   itself first and the computer's pane past its edges. A view-only device scrolls a pane's view
   but not a program. **Paste** with an image on the clipboard (a screenshot) sends it to the
