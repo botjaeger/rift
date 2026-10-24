@@ -1393,7 +1393,7 @@ impl PaneState {
                 last,
                 tracked,
                 open_request,
-                idle_title: agent_idle(agent, &self.title),
+                idle_title: agent_idle(agent, &self.title) && !self.signals_work(),
                 viewed,
             },
         );
@@ -1431,11 +1431,15 @@ impl PaneState {
     /// A command runs in this pane and is working (its tab and title bar
     /// spin). A coding agent that sits at its own prompt waiting for you
     /// still runs as a command, but is not working: no spinner (Warp).
+    /// No standard says a program is busy, so a coding agent or a
+    /// full-screen program (vim, htop, OpenCode) works only while it says
+    /// so ([`Self::signals_work`]).
     pub fn running(&self) -> bool {
         if self.exited.is_some() {
             return false;
         }
-        use rift_core::notifications::{Agent, agent_idle};
+        use rift_core::notifications::{Agent, agent_title_idle};
+        use rift_pty::alacritty_terminal::term::TermMode;
         let agent = {
             let blocks = self.session.blocks.lock().unwrap();
             if !blocks.any_running() {
@@ -1452,7 +1456,31 @@ impl PaneState {
                 .filter(|b| matches!(b.state, rift_core::BlockState::Running { .. }))
                 .and_then(|b| Agent::from_command(&b.command))
         };
-        !agent_idle(agent, &self.title)
+        // the blocks lock is released: the reader takes the terminal first
+        let full_screen = self
+            .session
+            .term
+            .lock()
+            .mode()
+            .contains(TermMode::ALT_SCREEN);
+        if agent.is_some() || full_screen {
+            return self.signals_work();
+        }
+        !agent_title_idle(&self.title)
+    }
+
+    /// The program says it works: a coding agent's working title
+    /// (`agent_title_working`) or an OSC 9;4 progress report that runs
+    /// (normal or indeterminate; not paused or failed).
+    fn signals_work(&self) -> bool {
+        use rift_core::ProgressState;
+        rift_core::notifications::agent_title_working(&self.title)
+            || self.session.progress.lock().unwrap().is_some_and(|r| {
+                matches!(
+                    r.progress.state,
+                    ProgressState::Normal | ProgressState::Indeterminate
+                )
+            })
     }
 
     /// Any command runs in this pane, working or not (the tab's Elapsed

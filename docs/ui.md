@@ -144,9 +144,11 @@ removes both within a moment.
   ring instead of a dot, a faded spinner, a dashed underline, or a second
   line naming that pane (`atlas · Needs you`). Agents are known by their
   command (`claude`, `codex`, `opencode`, `gemini`, after env assignments,
-  `npx`/`bunx` and wrappers) or their own notification; a working agent
-  (`◐` or a braille spinner leading its title) counts as running even when
-  its start was lost (reattached after a restart). Tabs carry no agent
+  `npx`/`bunx` and wrappers) or their own notification. An agent or a
+  full-screen program spins only while it says it works (`◐`, a braille
+  spinner or `✦` leading its title, or OSC 9;4 progress); OpenCode never
+  does, and vim or htop left open show no spinner. A working agent counts
+  as running even when its start was lost (reattached after a restart). Tabs carry no agent
   brand marks; notification toasts and the popover do.
 - The active tab joins the pane below (same ground, no rule) with a 2 px
   accent top edge (its tab color when it has one); a hovered tab lifts. A

@@ -2050,10 +2050,14 @@ selects the block. The list keeps the newest 200.
   each kind as a toast or a desktop notification.
 - **Coding agents**: Claude Code, Codex, OpenCode and Gemini CLI are
   recognized from the running command; their notifications show the agent's
-  badge (the Claude mark for Claude Code). An agent waiting at its own prompt
-  is idle and its tab does not spin: Claude Code titles itself `✳ …`, Gemini
-  CLI `◇ …`, and Codex is idle unless its title leads with a braille
-  spinner. The wording sorts notifications into waiting (permission, approval,
+  badge (the Claude mark for Claude Code). No standard says a program is
+  busy, so an agent works (its tab spins) only while it says so: its title
+  leads with `◐ ◓ ◑ ◒` (Claude Code), a braille spinner frame (Codex) or `✦`
+  (Gemini CLI), or it reports OSC 9;4 progress (normal or indeterminate).
+  Otherwise it is idle at its own prompt: Claude Code's `✳ …`, Gemini CLI's
+  `◇ …`, Codex's bare project name, OpenCode's `OC | …` (which never says it
+  works). A full-screen program (vim, htop, less) spins only on the same
+  signals; a plain command spins while it runs. The wording sorts notifications into waiting (permission, approval,
   input), error, or task completed. Words match whole (`incomplete` is not
   `complete`); an explicit request (`needs your permission`) wins, then
   error words (`permission denied`, `failed`) beat a bare `permission`, and

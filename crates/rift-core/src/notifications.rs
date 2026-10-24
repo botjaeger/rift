@@ -184,36 +184,33 @@ pub fn agent_title_idle(title: &str) -> bool {
 }
 
 /// A coding agent's title while it works: Claude Code leads with a
-/// half-filled circle (◐ ◓ ◑ ◒), Codex with a braille spinner frame.
+/// half-filled circle (◐ ◓ ◑ ◒), Codex with a braille spinner frame, Gemini
+/// CLI with `✦`.
 pub fn agent_title_working(title: &str) -> bool {
     title.trim_start().starts_with(|c: char| {
-        matches!(c, '◐' | '◓' | '◑' | '◒') || ('\u{2800}'..='\u{28FF}').contains(&c)
+        matches!(c, '◐' | '◓' | '◑' | '◒' | '✦') || ('\u{2800}'..='\u{28FF}').contains(&c)
     })
 }
 
 /// A coding agent's name for its session: its title without the leading
-/// status mark (`✳`, `◇`, a half-filled circle or a braille spinner frame).
+/// status mark (`✳`, `◇`, `✦`, a half-filled circle or a braille spinner
+/// frame).
 pub fn agent_session_title(title: &str) -> &str {
     let t = title.trim_start();
     t.strip_prefix(|c: char| {
-        matches!(c, '✳' | '◇' | '◐' | '◓' | '◑' | '◒') || ('\u{2800}'..='\u{28FF}').contains(&c)
+        matches!(c, '✳' | '◇' | '✦' | '◐' | '◓' | '◑' | '◒')
+            || ('\u{2800}'..='\u{28FF}').contains(&c)
     })
     .unwrap_or(t)
     .trim()
 }
 
 /// `agent`, running in a pane titled `title`, is idle at its own prompt.
-/// Beyond the markers of `agent_title_idle`: Codex titles itself with the
-/// bare project name while waiting and leads with a braille spinner frame
-/// (`⠋ project`) only while it works.
+/// No standard says a program is busy: a coding agent works only while its
+/// title says so (`agent_title_working`). Codex titles itself with the bare
+/// project name while waiting, OpenCode always `OC | session`.
 pub fn agent_idle(agent: Option<Agent>, title: &str) -> bool {
-    if agent_title_idle(title) {
-        return true;
-    }
-    let spinning = title
-        .trim_start()
-        .starts_with(|c: char| ('\u{2800}'..='\u{28FF}').contains(&c));
-    agent == Some(Agent::Codex) && !spinning
+    agent_title_idle(title) || (agent.is_some() && !agent_title_working(title))
 }
 
 /// A coding agent running in a pane.
@@ -585,6 +582,10 @@ mod tests {
         assert!(!agent_idle(codex, "⠋ shift"));
         // other programs keep spinning whatever their title says
         assert!(!agent_idle(None, "shift"));
+        // an agent without a working mark is idle: OpenCode never shows one
+        assert!(agent_idle(Some(Agent::OpenCode), "OC | Project opinion"));
+        assert!(agent_idle(Some(Agent::ClaudeCode), "Claude Code"));
+        assert!(!agent_idle(Some(Agent::Gemini), "✦ Thinking"));
         assert!(!agent_idle(Some(Agent::ClaudeCode), "⠐ Claude Code"));
         assert!(agent_idle(Some(Agent::ClaudeCode), "✳ Claude Code"));
     }

@@ -4024,6 +4024,21 @@ assert "agent=Codex agent_state=done" in codex_idle, codex_idle[:2000]
 codex_busy = agent_run("codex-busy", "", f"{fake_codex} '\\\\342\\\\240\\\\213 shift'")
 assert 'title="⠋ shift"' in codex_busy and "running=true" in codex_busy, codex_busy[:2000]
 assert "agent=Codex agent_state=working" in codex_busy, codex_busy[:2000]
+# no standard says a program is busy: OpenCode (its title never says it
+# works) and a full-screen program spin only on a working signal (a working
+# title or OSC 9;4 progress); a plain command spins
+fake_opencode = sw / "agent-bin" / "opencode"
+fake_opencode.write_text("#!/bin/sh\nprintf \"\\033]0;OC | Project\\007\"\nsleep 3\n")
+fake_opencode.chmod(0o755)
+oc_idle = agent_run("opencode-idle", "", str(fake_opencode))
+assert ("running=false" in oc_idle and "agent=OpenCode agent_state=done" in oc_idle), oc_idle[:2000]
+full = agent_run("fullscreen-idle", "", "printf '\\\\033[?1049h'; sleep 3; printf '\\\\033[?1049l'")
+assert "alt=true" in full and "running=false" in full, full[:2000]
+full_busy = agent_run("fullscreen-busy", "",
+                      "printf '\\\\033[?1049h\\\\033]9;4;3\\\\007'; sleep 3; printf '\\\\033[?1049l'")
+assert "alt=true" in full_busy and "running=true" in full_busy, full_busy[:2000]
+plain = agent_run("plain-busy", "", "sleep 3")
+assert "running=true" in plain, plain[:2000]
 
 # agent tabs: a (fake) `claude` on PATH works, then sends Claude Code's
 # permission notification (OSC 777) and waits; it finishes in a background
@@ -4040,7 +4055,8 @@ for sub in ("cfg/rift", "data", "bin", "work"):
     + f'working_directory = {json.dumps(str(at / "work"))}\n')
 fake_claude = at / "bin" / "claude"
 fake_claude.write_text(
-    "#!/bin/sh\necho working\nsleep 2\n"
+    # Claude Code's working title (◐): an agent works only while it says so
+    "#!/bin/sh\nprintf '\\033]0;\\342\\227\\220 work\\007'\necho working\nsleep 2\n"
     "printf '\\033]777;notify;Claude Code;Claude needs your permission to use Bash\\007'\n"
     "sleep \"$2\"\nexit \"$1\"\n")
 fake_claude.chmod(0o755)
