@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { BatchedStore, PUBLISH_INTERVAL_MS } from "../src/protocol/batch";
+import { BatchedStore, FRAME_MS, PUBLISH_INTERVAL_MS } from "../src/protocol/batch";
 
 describe("BatchedStore", () => {
   beforeEach(() => vi.useFakeTimers());
@@ -46,5 +46,31 @@ describe("BatchedStore", () => {
     vi.runAllTimers();
     expect(listener).toHaveBeenCalledTimes(1);
     expect(store.getSnapshot()).toBe(2);
+  });
+
+  it("a frame-bound write publishes within a frame and brings a pending publish forward", () => {
+    const store = new BatchedStore(0, PUBLISH_INTERVAL_MS, () => Date.now());
+    const seen: number[] = [];
+    store.subscribe(() => seen.push(store.getSnapshot()));
+    store.update(() => 1);
+    vi.advanceTimersByTime(0);
+    expect(seen).toEqual([1]);
+    // an ordinary write waits for the interval; a screen frame right after it does not
+    store.update(() => 2);
+    vi.advanceTimersByTime(5);
+    store.update(() => 3, FRAME_MS);
+    vi.advanceTimersByTime(FRAME_MS - 5);
+    expect(seen).toEqual([1, 3]);
+    // screens arriving every frame publish every frame (60 a second, not 10)
+    for (let i = 0; i < 60; i++) {
+      store.update((n) => n + 1, FRAME_MS);
+      vi.advanceTimersByTime(FRAME_MS);
+    }
+    expect(seen.length).toBeGreaterThanOrEqual(55);
+    // an ordinary write never delays a sooner one already pending
+    store.update((n) => n + 1, FRAME_MS);
+    store.update((n) => n + 1);
+    vi.advanceTimersByTime(FRAME_MS);
+    expect(seen.at(-1)).toBe(store.peek());
   });
 });

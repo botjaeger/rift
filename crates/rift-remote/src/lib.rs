@@ -57,6 +57,12 @@ pub const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 pub const REPLAY_RING: usize = 256;
 /// Poll interval of subscribed panes.
 pub const PANE_POLL: Duration = Duration::from_millis(100);
+/// After a device scrolls or types into a pane, its screen is read this
+/// often ([`KICK_WINDOW`] long): the program's redraw reaches the phone in a
+/// frame or two instead of at the next [`PANE_POLL`].
+pub const KICK_POLL: Duration = Duration::from_millis(16);
+/// How long a scroll or keystroke keeps its pane's screen on [`KICK_POLL`].
+pub const KICK_WINDOW: Duration = Duration::from_millis(600);
 /// Poll interval of the topology (and of the `done` probe of the panes no
 /// client follows).
 pub const TOPOLOGY_POLL: Duration = Duration::from_secs(1);
@@ -75,10 +81,12 @@ pub const KEYS_RATE: usize = 20;
 pub const MAX_REQUEST_ID: usize = 64;
 /// Longest `text`, in bytes (it counts against [`KEYS_RATE`]).
 pub const MAX_TEXT: usize = 1024;
-/// Most lines one `scroll` moves (a larger one is clamped); `scroll`
-/// messages per second per connection are [`KEYS_RATE`], counted apart
-/// from `keys`.
+/// Most lines one `scroll` moves (a larger one is clamped).
 pub const MAX_SCROLL_LINES: i32 = 50;
+/// `scroll` messages per second per connection, counted apart from `keys`:
+/// a finger's drag goes out in small steps (one per 30 ms) so the program
+/// moves smoothly.
+pub const SCROLL_RATE: usize = 40;
 /// Largest image an `upload` carries, in bytes.
 pub const MAX_UPLOAD_BYTES: u64 = 10 * 1024 * 1024;
 /// Most bytes in one `upload` chunk (60 000 characters of base64, which a

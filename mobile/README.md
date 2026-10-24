@@ -186,7 +186,10 @@ card cannot answer (a password, other input, a view-only device), and from an al
   the classic one does not); its **⌃** opens the key row. Other full-screen programs keep the
   keys. A vertical drag on the screen scrolls the pane on the computer (feature `scroll`, as the
   desktop's wheel: the agent's or vim's own scrolling, less's lines, or the shell's scrollback),
-  counted in rows and sent at most every 80 ms (`src/scroll.ts`); zoomed in, the view scrolls
+  counted in rows and sent at most every 30 ms (every 80 ms to a desktop that refuses that pace
+  with `rate`, before 0.22.5; `src/scroll.ts`). A flick carries on after the finger lifts,
+  slowing as a native list does, until a touch stops it. The computer sends the program's redraws
+  every 16 ms while it scrolls, and the app shows each within a frame. Zoomed in, the view scrolls
   itself first and the computer's pane past its edges. A view-only device scrolls a pane's view
   but not a program. **Paste** with an image on the clipboard (a screenshot) sends it to the
   computer (feature `upload`, operate only, at most 10 MB, `src/upload.ts`), which saves it and
@@ -513,7 +516,7 @@ one-day minimum release age by exact version only.
 - `src/protocol/` — wire types (`types.ts`), chunk framing (`framing.ts`), paths and the relay
   routing id (`relay.ts`), one gateway connection with handshake, LAN/relay failover,
   reconnect, resume, gap detection, screen mode and output requests (`client.ts`), the bounded
-  pane reducer and the screen reducer (`store.ts`), 100 ms batched store (`batch.ts`).
+  pane reducer and the screen reducer (`store.ts`), 100 ms batched store (`batch.ts`; a screen frame publishes within 16 ms).
 - `src/keyboard.ts`, `src/terminal.ts`, `src/earlier.ts`, `src/controlKeys.ts` — key events to
   `keys` / `text`, the terminal grid's layout, earlier-output paging, the control-key catalogue.
 - `modules/rift-keys/` — local Expo module (autolinked from `modules/`): `KeyCaptureView` for

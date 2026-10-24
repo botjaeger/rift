@@ -51,7 +51,7 @@ use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 use tungstenite::protocol::WebSocketConfig;
@@ -367,6 +367,7 @@ pub fn serve<S: Source>(
         hub: Mutex::new(Hub::default()),
         fit_lock: Mutex::new(()),
         poll_lock: Mutex::new(()),
+        kicks: (Mutex::new(HashMap::new()), Condvar::new()),
         status_lock: Mutex::new(()),
         devices: Mutex::new(devices),
         permissions: Mutex::new(None),
@@ -423,6 +424,9 @@ pub(crate) struct Shared<S> {
     fit_lock: Mutex<()>,
     /// One fetch-and-diff at a time, so updates apply in fetch order.
     poll_lock: Mutex<()>,
+    /// Panes a device just scrolled or typed into, until when their screen
+    /// is read every [`crate::KICK_POLL`]; the condvar wakes the poll loop.
+    kicks: (Mutex<HashMap<u64, Instant>>, Condvar),
     /// Orders `status.json` writes (and the final removal).
     status_lock: Mutex<()>,
     /// The paired devices as last read.
@@ -1043,12 +1047,70 @@ impl Drop for ConnGuard<'_> {
     }
 }
 
+/// A device scrolled or typed into `pane`: read its screen every
+/// [`crate::KICK_POLL`] for a while, starting now.
+fn kick<S>(shared: &Shared<S>, pane: u64) {
+    let (kicks, wake) = &shared.kicks;
+    kicks
+        .lock()
+        .unwrap()
+        .insert(pane, Instant::now() + crate::KICK_WINDOW);
+    wake.notify_one();
+}
+
+/// Wait until the next full poll is due (`next`), refreshing the screens of
+/// kicked panes every [`crate::KICK_POLL`] meanwhile.
+fn wait_polling_kicks<S: Source>(shared: &Shared<S>, next: Instant) {
+    let (kicks, wake) = &shared.kicks;
+    loop {
+        if shared.stop.load(Ordering::Acquire) {
+            return;
+        }
+        let now = Instant::now();
+        let hot: Vec<u64> = {
+            let mut k = kicks.lock().unwrap();
+            k.retain(|_, until| *until > now);
+            k.keys().copied().collect()
+        };
+        if !hot.is_empty() {
+            let screens = {
+                let hub = shared.hub.lock().unwrap();
+                let mut screens: HashMap<u64, bool> = HashMap::new();
+                for c in hub.clients.values().filter(|c| c.screen != ScreenMode::Off) {
+                    if let Some(p) = c.pane.filter(|p| hot.contains(p)) {
+                        *screens.entry(p).or_default() |= c.screen == ScreenMode::On;
+                    }
+                }
+                screens
+            };
+            for (pane, force) in screens {
+                refresh_screen(shared, pane, force);
+            }
+        }
+        let now = Instant::now();
+        if now >= next {
+            return;
+        }
+        let until = if hot.is_empty() {
+            next
+        } else {
+            (now + crate::KICK_POLL).min(next)
+        };
+        let k = kicks.lock().unwrap();
+        // a kick that came meanwhile is served at once
+        if hot.is_empty() && !k.is_empty() {
+            continue;
+        }
+        let _ = wake.wait_timeout(k, until.saturating_duration_since(now));
+    }
+}
+
 fn poll_loop<S: Source>(shared: &Shared<S>) {
     let cfg = &shared.config;
     let mut last_topology: Option<Instant> = None;
     let mut last_devices = Instant::now();
     while !shared.stop.load(Ordering::Acquire) {
-        std::thread::sleep(cfg.pane_poll.min(cfg.devices_poll));
+        wait_polling_kicks(shared, Instant::now() + cfg.pane_poll.min(cfg.devices_poll));
         if last_devices.elapsed() >= cfg.devices_poll {
             last_devices = Instant::now();
             reload_devices(shared);
@@ -1863,7 +1925,7 @@ fn session<S: Source, T: Socket>(
     let mut fits = Rate::new(FIT_RATE);
     let mut opens = Rate::new(OPEN_RATE);
     let mut outputs = Rate::new(OUTPUT_RATE);
-    let mut scrolls = Rate::new(KEYS_RATE);
+    let mut scrolls = Rate::new(crate::SCROLL_RATE);
     let mut uploads = Rate::new(UPLOAD_RATE);
     let mut upload = Uploads::default();
     loop {
@@ -2288,7 +2350,10 @@ fn input<S: Source>(
         _ => format!("pane {pane} is running a command"),
     };
     match shared.source.input(pane, &device.name, input) {
-        Ok(()) => ServerMsg::ack_ok(rid),
+        Ok(()) => {
+            kick(shared, pane);
+            ServerMsg::ack_ok(rid)
+        }
         Err(e) => refused_ack(rid, e, busy, format!("no pane {pane}")),
     }
 }
@@ -2334,7 +2399,10 @@ fn scroll<S: Source>(
         return ServerMsg::ack_ok(rid);
     }
     match shared.source.scroll(pane, lines, operates(shared, device)) {
-        Ok(()) => ServerMsg::ack_ok(rid),
+        Ok(()) => {
+            kick(shared, pane);
+            ServerMsg::ack_ok(rid)
+        }
         Err(e) => refused_ack(rid, e, "pane is busy".into(), format!("no pane {pane}")),
     }
 }

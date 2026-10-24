@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { MAX_SCROLL_LINES } from "../src/protocol/types";
-import { dragLines, dragScrollsPane, ScrollCoalescer, SCROLL_INTERVAL_MS } from "../src/scroll";
+import {
+  DragVelocity,
+  dragLines,
+  dragScrollsPane,
+  Fling,
+  FLING_MIN_SPEED,
+  ScrollCoalescer,
+  SCROLL_INTERVAL_MS,
+  SLOW_SCROLL_INTERVAL_MS,
+} from "../src/scroll";
 
 /** A coalescer on a fake clock: what it sent, and a way to move time. */
 function rig() {
@@ -154,3 +163,103 @@ describe("scroll coalescer", () => {
     expect(counts).toEqual([1, 2, 2, 3, 3, 4]);
   });
 });
+
+describe("pace", () => {
+  it("sends about 33 steps a second, and keeps to an older desktop's 20 after a rate refusal", () => {
+    const { c, sent, advance } = rig();
+    for (let i = 0; i < 100; i++) {
+      c.add(0.5);
+      advance(10);
+    }
+    expect(sent.length).toBeGreaterThanOrEqual(30);
+    expect(sent.length).toBeLessThanOrEqual(34);
+    advance(1000);
+    expect(SCROLL_INTERVAL_MS).toBeGreaterThanOrEqual(1000 / 40);
+    // the desktop said `rate`: those lines go again, and no faster than the slow pace
+    sent.length = 0;
+    c.refused(3);
+    for (let i = 0; i < 100; i++) {
+      c.add(0.5);
+      advance(10);
+    }
+    expect(sent.length).toBeLessThanOrEqual(Math.ceil(1000 / SLOW_SCROLL_INTERVAL_MS) + 1);
+    advance(1000);
+    expect(sent.reduce((a, b) => a + b, 0)).toBe(53);
+  });
+});
+
+describe("fling", () => {
+  function flingRig() {
+    let now = 0;
+    const timers: { at: number; fn: () => void; id: number }[] = [];
+    let id = 0;
+    const added: number[] = [];
+    let done = 0;
+    const f = new Fling({
+      add: (n) => added.push(n),
+      done: () => done++,
+      now: () => now,
+      schedule: (fn, ms) => {
+        timers.push({ at: now + ms, fn, id: ++id });
+        return id;
+      },
+      unschedule: (h) => {
+        const i = timers.findIndex((t) => t.id === h);
+        if (i >= 0) timers.splice(i, 1);
+      },
+    });
+    const run = (ms: number) => {
+      const end = now + ms;
+      for (;;) {
+        timers.sort((a, b) => a.at - b.at);
+        const t = timers[0];
+        if (!t || t.at > end) break;
+        timers.shift();
+        now = t.at;
+        t.fn();
+      }
+      now = end;
+    };
+    return { f, added, run, done: () => done };
+  }
+
+  it("measures a flick's speed from its last movement only", () => {
+    const v = new DragVelocity();
+    v.add(1, 0);
+    v.add(1, 20);
+    v.add(1, 40);
+    expect(v.speed(40)).toBe(75);
+    // a finger held still before lifting: no fling
+    expect(v.speed(300)).toBe(0);
+  });
+
+  it("carries on with a decaying speed, then flushes; slow or stopped, it does not start", () => {
+    const { f, added, run, done } = flingRig();
+    expect(f.start(FLING_MIN_SPEED / 2)).toBe(false);
+    expect(added).toEqual([]);
+    expect(done()).toBe(1);
+    expect(f.start(-300)).toBe(true);
+    run(5000);
+    expect(f.running).toBe(false);
+    expect(done()).toBe(2);
+    const total = added.reduce((a, b) => a + b, 0);
+    // speed × decay time, less the tail under the minimum
+    expect(total).toBeLessThan(0);
+    expect(Math.abs(total)).toBeGreaterThan(80);
+    expect(Math.abs(total)).toBeLessThan(300 * 0.325 + 1);
+    // each frame moves less than the one before
+    for (let i = 1; i < added.length; i++) expect(Math.abs(added[i]!)).toBeLessThan(Math.abs(added[i - 1]!));
+  });
+
+  it("a new touch stops it where it is, without flushing", () => {
+    const { f, added, run, done } = flingRig();
+    f.start(400);
+    run(50);
+    const before = added.length;
+    f.stop();
+    run(1000);
+    expect(added.length).toBe(before);
+    expect(done()).toBe(0);
+  });
+});
+

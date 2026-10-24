@@ -21,7 +21,7 @@ import {
   type PushRegistration,
 } from "./notify";
 import type { PairLink } from "./pairing";
-import { BatchedStore } from "./protocol/batch";
+import { BatchedStore, FRAME_MS } from "./protocol/batch";
 import { MAX_OUTPUT_LINES, MAX_TEXT_BYTES, MAX_UPLOAD_BYTES, textProblem } from "./protocol/types";
 import { UPLOAD_TIMEOUT_MS, uploadChunks, uploadRefusal } from "./upload";
 import { RiftClient, type ConnState, type Failure, type SocketFactory } from "./protocol/client";
@@ -548,11 +548,15 @@ export class Fleet {
               },
             };
           }),
+        // a screen shows within a frame: the gateway already paces it (a scrolled program's
+        // redraws every 16 ms, else every 100 ms)
         onScreen: (msg, synthetic) =>
-          this.store.update((s) =>
-            s.pane?.host === key && s.pane.paneId === msg.pane
-              ? { ...s, pane: { ...s.pane, screen: reduceScreen(s.pane.screen, msg), screenExpired: !!synthetic } }
-              : s,
+          this.store.update(
+            (s) =>
+              s.pane?.host === key && s.pane.paneId === msg.pane
+                ? { ...s, pane: { ...s.pane, screen: reduceScreen(s.pane.screen, msg), screenExpired: !!synthetic } }
+                : s,
+            FRAME_MS,
           ),
         onScreenStale: (pane) =>
           this.store.update((s) =>

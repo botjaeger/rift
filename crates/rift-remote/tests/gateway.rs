@@ -3885,15 +3885,15 @@ fn scroll_has_its_own_rate_apart_from_keys() {
     let env = start(|_| {});
     let (_k, mut ch, _) = env.pair(Permission::Operate);
     let mut got = Vec::new();
-    for i in 0..=rift_remote::KEYS_RATE {
+    for i in 0..=rift_remote::SCROLL_RATE {
         put(
             &mut ch,
             json!({"t":"scroll","id":format!("s{i}"),"pane":12,"lines":1}),
         );
         got.push(ack(&recv_t(&mut ch, "ack")).1.to_string());
     }
-    assert_eq!(got[..rift_remote::KEYS_RATE], vec![String::new(); 20]);
-    assert_eq!(got[rift_remote::KEYS_RATE], "rate");
+    assert_eq!(got[..rift_remote::SCROLL_RATE], vec![String::new(); 40]);
+    assert_eq!(got[rift_remote::SCROLL_RATE], "rate");
     // keys still go: scrolling never spends typing's budget
     put(
         &mut ch,
@@ -4199,4 +4199,37 @@ fn an_upload_chunk_over_its_limit_and_a_large_non_upload_close_the_connection() 
     assert_eq!(code(&recv_t(&mut ch, "error")), ("error", "too_large"));
     assert_closed(&mut ch);
     assert!(env.fake.inputs().is_empty());
+}
+
+#[test]
+fn a_scroll_brings_the_redrawn_screen_before_the_next_poll() {
+    // the regular poll is far off: only the kick can deliver in time
+    let env = start(|c| {
+        c.pane_poll = Duration::from_secs(2);
+        c.devices_poll = Duration::from_secs(2);
+    });
+    env.fake.set_screen(12, screen(&["less", "1"], true, None));
+    let (_k, mut ch, _) = env.pair(Permission::Operate);
+    put(&mut ch, json!({"t":"subscribe","pane":12,"after":null}));
+    recv_t(&mut ch, "snapshot");
+    put(&mut ch, json!({"t":"screen","pane":12,"mode":"auto"}));
+    recv_screen(&mut ch);
+    // a redraw nobody asked for waits for the poll
+    env.fake
+        .edit_screen(12, |s| s.lines[1] = vec![Run::plain("2")]);
+    assert!(screens_in(&drain(&mut ch, 300)).is_empty());
+    // a scroll reads the screen at once, and again while the program redraws
+    let at = Instant::now();
+    put(&mut ch, json!({"t":"scroll","id":"s","pane":12,"lines":-3}));
+    let first = recv_screen(&mut ch);
+    assert_eq!(first["lines"][0][0], 1, "{first}");
+    env.fake
+        .edit_screen(12, |s| s.lines[1] = vec![Run::plain("5")]);
+    let second = recv_screen(&mut ch);
+    assert!(
+        at.elapsed() < Duration::from_millis(400),
+        "{:?}",
+        at.elapsed()
+    );
+    assert_eq!(second["lines"][0][1][0][0], "5", "{second}");
 }

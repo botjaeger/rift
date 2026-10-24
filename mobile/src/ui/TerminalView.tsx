@@ -41,7 +41,7 @@ import type { ScreenState } from "@/protocol/store";
 import { RUN_BOLD, RUN_ITALIC, RUN_STRIKE, RUN_UNDERLINE, type ScreenRun } from "@/protocol/types";
 import { authenticate, fleet, useApp } from "@/runtime";
 import { useActionScope } from "./useActionScope";
-import { DRAG_SLOP, dragLines, dragScrollsPane, ScrollCoalescer } from "@/scroll";
+import { DRAG_SLOP, DragVelocity, dragLines, dragScrollsPane, Fling, ScrollCoalescer } from "@/scroll";
 import { clipboardImage, ImagePaste } from "@/upload";
 import { rowWithPaste } from "@/controlKeys";
 import { CELL_RATIO, fitFont, LINE_RATIO, rowPieces, rowSegments, screenDefaults, segmentColors, showsKeyRow, type Piece } from "@/terminal";
@@ -411,20 +411,32 @@ export function TerminalView({
     rowHeight.current = h;
   }, []);
   const remote = useRef<ScrollCoalescer | null>(null);
+  // a flick carries on after the finger lifts (scroll.ts Fling)
+  const velocity = useRef(new DragVelocity());
+  const fling = useRef<Fling | null>(null);
   useEffect(() => {
+    const timers = {
+      now: () => Date.now(),
+      schedule: (fn: () => void, ms: number) => setTimeout(fn, ms),
+      unschedule: (h: unknown) => clearTimeout(h as ReturnType<typeof setTimeout>),
+    };
     const c = new ScrollCoalescer({
       send: (lines) =>
         void fleet.sendScroll(live.current.hostKey, live.current.paneId, lines).then((r) => {
-          // a refused one says why once; the rate only slows it
-          if (!r.ok && r.code !== "rate") setError(r.message);
+          // the rate only slows it (an older desktop allows fewer): sent again, slower
+          if (!r.ok && r.code === "rate") c.refused(lines);
+          // any other refusal says why once
+          else if (!r.ok) setError(r.message);
         }),
-      now: () => Date.now(),
-      schedule: (fn, ms) => setTimeout(fn, ms),
-      unschedule: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
+      ...timers,
     });
+    const f = new Fling({ add: (lines) => c.add(lines), done: () => c.flush(), ...timers });
     remote.current = c;
+    fling.current = f;
     return () => {
       remote.current = null;
+      fling.current = null;
+      f.stop();
       c.cancel();
     };
   }, []);
@@ -443,7 +455,11 @@ export function TerminalView({
     if (!d.vertical || !canScroll || !online || dy === 0) return;
     const { y: at, viewH, contentH } = local.current;
     const edges = { overflow: contentH - viewH > 1, atTop: at <= 1, atBottom: at + viewH >= contentH - 1 };
-    if (dragScrollsPane(dy, edges)) remote.current?.add(dragLines(dy, rowHeight.current));
+    if (dragScrollsPane(dy, edges)) {
+      const lines = dragLines(dy, rowHeight.current);
+      velocity.current.add(lines, Date.now());
+      remote.current?.add(lines);
+    }
   };
 
   // Pinch to zoom, double-tap to reset (the Pane board); kept for the app's run
@@ -459,6 +475,9 @@ export function TerminalView({
   const lastTap = useRef<number | null>(null);
   const onTouchStart = (e: GestureResponderEvent) => {
     const t = e.nativeEvent.touches;
+    // a touch stops a fling where it is
+    fling.current?.stop();
+    velocity.current.clear();
     if (t.length === 2) {
       pinch.current = { distance: touchDistance(t[0]!, t[1]!), zoom };
       tap.current = null;
@@ -481,8 +500,11 @@ export function TerminalView({
   const onTouchEnd = (e: GestureResponderEvent) => {
     const left = e.nativeEvent.touches.length;
     if (left === 0) {
+      const flicked = drag.current?.vertical === true && !pinch.current;
       drag.current = null;
-      remote.current?.flush();
+      // a flick goes on (and flushes when it stops); otherwise what waits goes out now
+      if (!(flicked && fling.current?.start(velocity.current.speed(Date.now())))) remote.current?.flush();
+      velocity.current.clear();
     }
     if (pinch.current && left < 2) {
       pinch.current = null;

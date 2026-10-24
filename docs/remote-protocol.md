@@ -122,16 +122,16 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
 | A block's `command` | at most 16 KiB (cut on a character boundary) |
 | Output per block | the last 500 lines and at most 64 KiB; `dropped` counts the lines before them (a row the scrollback limit already discarded counts as one line) |
 | Replay ring | the last 256 `update`s per pane |
-| Poll interval | 100 ms for subscribed panes, 1 s for the topology |
+| Poll interval | 100 ms for subscribed panes (a pane's screen every 16 ms for 600 ms after a `scroll`, `keys` or `text` to it), 1 s for the topology |
 | `run` | 4 per second per connection; the command at most 2 KiB, one line |
 | `keys` | 20 keys per message, 20 messages per second per connection |
 | `text` | 1 KiB per message, one line without control characters; counts against the `keys` rate |
 | `open`, `close`, `start` | 2 per second per connection, together |
 | `fit` | 4 per second per connection; `cols` 20 to 300, `rows` 5 to 120 (clamped) |
-| `scroll` | at most 50 lines either way (clamped), 20 per second per connection (apart from `keys`); at most 20 wheel reports or arrow keys reach the program per `scroll` |
+| `scroll` | at most 50 lines either way (clamped), 40 per second per connection (apart from `keys`); at most 20 wheel reports or arrow keys reach the program per `scroll` |
 | `upload` | an image of at most 10 MiB, PNG or JPEG by its first bytes; chunks of 1 to 45 000 bytes (60 000 base64 characters); one upload in flight and 1 started per second per connection; at most 2 in flight across the gateway; 60 s from the first chunk to the last |
 | `output` | 1 to 500 lines and at most 64 KiB per answer, 10 requests per second per connection |
-| `screen` | at most 300 columns and 120 rows (the top-left part of a larger screen), one per 100 ms |
+| `screen` | at most 300 columns and 120 rows (the top-left part of a larger screen), one per 100 ms (per 16 ms for 600 ms after a `scroll`, `keys` or `text`) |
 | `complete` | the line at most 1 KiB; at most 50 `items` and 50 `history` entries of 1 KiB each; shares `output`'s rate |
 | A pane's `waiting` / `running` | prompt 300 characters, 9 choices of 200, 12 context lines of 200; `running.line` 200 characters |
 | `topology` text | a tab's `title`, a pane's `job` and `last_command` at most 1024 characters each (cut) |
@@ -744,7 +744,9 @@ subscribed pane's visible screen as text runs:
   fits. Later diffs are against that unstyled screen: rows that differ
   from it come again with their styles.
 - Screens come at most every 100 ms, only when something changed (a
-  cursor move is a change). Each diff is against the screen the phone was
+  cursor move is a change). For 600 ms after a `scroll`, `keys` or `text`
+  to the pane they come up to every 16 ms, so the program's redraw shows
+  in a frame or two. Each diff is against the screen the phone was
   last sent; a phone that reads slower than the screen changes gets fewer
   screens (the newest, diffed against what it has), never a backlog.
 - `screen_end` says screens stopped: mode `auto` and the pane left the
