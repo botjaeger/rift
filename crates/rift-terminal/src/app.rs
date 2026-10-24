@@ -10919,14 +10919,7 @@ impl App {
                 });
                 // a fresh session: the welcome list above the command line,
                 // until its first command
-                let fresh = !booting
-                    && pane
-                        .session
-                        .blocks
-                        .lock()
-                        .unwrap()
-                        .iter()
-                        .all(|b| b.command.trim().is_empty());
+                let fresh = !booting && pane.session.blocks.lock().unwrap().is_fresh();
                 let above = if input_top {
                     [
                         pr.rect[0],
@@ -21869,6 +21862,15 @@ impl App {
             self.win.mouse.0,
             self.win.mouse.1,
             self.win.cursor_icon
+        );
+        let _ = writeln!(
+            out,
+            "welcome_rows={}",
+            self.win
+                .hits
+                .iter()
+                .filter(|h| matches!(h.target, ClickTarget::Welcome(_)))
+                .count()
         );
         // the tabs drawn last frame (strip or rail), which carry a ×, the
         // rail's width and the unfocused panes washed

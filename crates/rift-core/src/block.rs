@@ -129,6 +129,8 @@ impl Block {
 /// All blocks of one pane, oldest first.
 #[derive(Debug, Default)]
 pub struct BlockStore {
+    /// Lifetime activity, retained when blocks are cleared or pruned.
+    has_activity: bool,
     blocks: std::collections::VecDeque<Block>,
     next_id: BlockId,
     /// Soft `clear` marker: the first post-clear row. The display list
@@ -378,6 +380,7 @@ impl BlockStore {
         };
         // a cursor mid-row: that row is the block's too
         let end = line + AbsLine::from(col > 0);
+        self.has_activity = true;
         let n = self.blocks.len();
         let open = self.background_open && n >= 2 && self.blocks[n - 2].background;
         if open {
@@ -486,6 +489,7 @@ impl BlockStore {
         branch: Option<String>,
         command: &str,
     ) {
+        self.has_activity |= !command.trim().is_empty();
         self.stamp_context(cwd, remote, branch);
         if self
             .blocks
@@ -515,6 +519,7 @@ impl BlockStore {
     /// `command` is the text read back from the screen; a submission from
     /// the app's editor ([`BlockStore::stamp_submit`]) replaces it.
     pub fn on_output_start(&mut self, abs: AbsLine, command: String) {
+        self.has_activity = true;
         let now = self.now();
         self.typed_ahead = false;
         let submitted = self.submitted.take();
@@ -599,6 +604,11 @@ impl BlockStore {
     pub fn clear(&mut self) {
         self.blocks.clear();
         self.clear_pad = None;
+    }
+
+    /// Whether this pane has never submitted a command or received output.
+    pub fn is_fresh(&self) -> bool {
+        !self.has_activity
     }
 
     /// Record a soft `clear` whose first post-clear row is `line`.
@@ -695,6 +705,33 @@ impl BlockStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn freshness_survives_clear_and_unlabelled_output() {
+        let mut s = BlockStore::default();
+        s.on_prompt_start(0);
+        s.on_command_start(0, 2);
+        assert!(s.is_fresh());
+        s.on_output_start(1, String::new());
+        s.on_done(3, Some(0));
+        s.clear();
+        s.on_prompt_start(3);
+        assert!(!s.is_fresh());
+    }
+
+    #[test]
+    fn submission_and_background_output_end_freshness() {
+        let mut s = BlockStore::default();
+        s.on_prompt_start(0);
+        s.on_command_start(0, 2);
+        s.stamp_submit(None, false, None, "echo hi");
+        assert!(!s.is_fresh());
+        let mut s = BlockStore::default();
+        s.on_prompt_start(0);
+        s.on_command_start(0, 2);
+        s.on_background_output(2, 0, false);
+        assert!(!s.is_fresh());
+    }
 
     #[test]
     fn restored_blocks_keep_their_branch_host_and_time_or_none() {

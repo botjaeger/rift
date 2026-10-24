@@ -1096,7 +1096,8 @@ Each becomes a `rift://action/new_tab` link (`new_window` with
   pane, tab or window with a running job; the dialog lists each running
   process with its agent badge.
 - A fresh session shows a welcome list (split, palette, history, explorer,
-  settings, with their shortcuts) until its first command.
+  settings, with their shortcuts) until its first command or background
+  output; clearing blocks does not bring it back.
 - Panes: split right/down, directional focus (⌥⌘arrows), keyboard resize
   (⌃⌘arrows), drag resize, zoom toggle (⇧⌘⏎), close (⌃⇧W/⌘W or the title
   bar's × — last pane closes the tab, last tab exits).

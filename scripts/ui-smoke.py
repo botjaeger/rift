@@ -939,6 +939,32 @@ assert needle_row and drawn and any(r.startswith(f"{needle_row[1]}:") for r in d
 child = estate("child")
 assert 'cmd="echo INNER_OK" exit=Some(0)' in child and "editor_active=true" in child, child
 
+# welcome lifetime: clearing command blocks must not revive onboarding
+wl = scratch / "welcome-lifetime"
+for directory in (wl / "cfg/rift", wl / "data"):
+    directory.mkdir(parents=True)
+(wl / "cfg/rift/config.toml").write_text(config.replace('theme = "audit"', 'theme = "dark-default"'))
+(wl / "test.rift").write_text("\n".join([
+    "resize 1000 700", "wait_prompt", "wait 300",
+    f"dump {wl}/fresh.txt",
+    "type echo WELCOME_LIFETIME\\n", "wait_prompt", "wait 500",
+    f"dump {wl}/used.txt",
+    "key cmd+k", "wait 300",
+    f"dump {wl}/cleared.txt",
+    "type printf AFTER_CLEAR\\n", "wait_prompt", "wait 500",
+    f"dump {wl}/after.txt", "quit",
+]) + "\n")
+with (wl / "app.log").open("w") as log:
+    rc = subprocess.run([str(binary), "--script", str(wl / "test.rift"), "--headless"],
+                        env=dict(env, XDG_CONFIG_HOME=str(wl / "cfg"),
+                                 XDG_DATA_HOME=str(wl / "data")),
+                        stdout=log, stderr=log, timeout=120).returncode
+assert rc == 0, died("welcome run failed", wl / "app.log")
+for name, count in (("fresh", 5), ("used", 0), ("cleared", 0), ("after", 0)):
+    snapshot = (wl / f"{name}.txt").read_text()
+    assert f"welcome_rows={count}" in snapshot, snapshot
+assert "AFTER_CLEAR" in (wl / "after.txt").read_text()
+
 # review diff: a file card expands into hunks; a gap row opens the
 # unmodified lines between hunks (all of a short gap at once)
 rv = scratch / "review"
