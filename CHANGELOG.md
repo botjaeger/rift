@@ -8,6 +8,15 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.22.7 — 2026-10-25
+
+### Fixed
+
+- **Welcome list after an update** — the New session list no longer appears over a pane that was
+  in use before Rift restarted (an update or a crash), however long its last program ran.
+- **Welcome list over text** — the list is not shown while the pane shows any text, such as a
+  shell's startup message, so it never draws on top of output.
+
 ## 0.22.6 — 2026-10-25
 
 ### Fixed

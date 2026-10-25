@@ -12,7 +12,7 @@ exclude = ["vendor"]
 default-members = ["crates/rift-terminal"]
 
 [workspace.package]
-version = "0.22.6"
+version = "0.22.7"
 edition = "2024"
 license = "MIT"
 
