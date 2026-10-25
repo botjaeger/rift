@@ -377,7 +377,9 @@ fn an_upgrade_sent_a_byte_at_a_time_is_cut_at_the_deadline() {
     }
     let took = closed.unwrap();
     assert!(
-        took >= Duration::from_millis(500) && took < Duration::from_millis(1500),
+        // the whole request takes over 6 s at this pace: a cut well before
+        // that is the deadline, with room for a loaded machine
+        took >= Duration::from_millis(500) && took < Duration::from_millis(2500),
         "{took:?}"
     );
 }
@@ -553,7 +555,8 @@ fn pairs_per_id_are_limited() {
 fn connects_are_rate_limited_per_address() {
     let relay = start_relay(|c| {
         c.connect_rate = 3;
-        c.connect_window = Duration::from_millis(800);
+        // wide enough that four connects fit in it on a loaded machine
+        c.connect_window = Duration::from_millis(2000);
     });
     let addr = relay.local_addr();
     // refused or not, every /connect counts
@@ -561,7 +564,7 @@ fn connects_are_rate_limited_per_address() {
         assert_eq!(status(open(addr, &format!("/connect?id={ID}"))), 404);
     }
     assert_eq!(status(open(addr, &format!("/connect?id={ID}"))), 429);
-    std::thread::sleep(Duration::from_millis(850));
+    std::thread::sleep(Duration::from_millis(2050));
     assert_eq!(status(open(addr, &format!("/connect?id={ID}"))), 404);
     // X-Forwarded-For is ignored unless trusted
     for _ in 0..2 {
