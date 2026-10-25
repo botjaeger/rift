@@ -831,7 +831,8 @@ integration). Sits at the bottom of the pane, or at the top with
   room) shows *New session* with the shell, directory and branch, then five
   rows with their shortcuts: Split pane, Command palette, Command history,
   File explorer, Settings. Clicking a row does it; the list goes away after
-  the first command or background output and stays hidden after clearing blocks.
+  the first command or background output and stays hidden after clearing blocks;
+  a shell reattached after a restart or update never shows it.
 - **Boot placeholder**: `Starting zsh…` (shell name from config) shown on the
   chip row of the input zone (bottom, or top with `input_position = "top"`;
   the input line in shell-prompt mode), as in Warp, under the input divider

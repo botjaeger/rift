@@ -1323,6 +1323,9 @@ impl Session {
             cell_height: cell_size.1,
         };
         let window_size_shared = Arc::new(Mutex::new(window_size));
+        // a shell from before this window: used, even when the markers of
+        // its commands have left the service's ring
+        let reattached = matches!(service, Some(ServiceTarget::Attach(_)));
 
         // the shell: a local PTY, or one owned by the session service
         let (backend, writer, source) = match service {
@@ -1433,7 +1436,11 @@ impl Session {
         let term = Arc::new(FairMutex::new(term));
         let dirty = Arc::new(AtomicBool::new(false));
         let saw_output = Arc::new(AtomicBool::new(false));
-        let blocks = Arc::new(Mutex::new(BlockStore::default()));
+        let mut store = BlockStore::default();
+        if reattached {
+            store.note_activity();
+        }
+        let blocks = Arc::new(Mutex::new(store));
         let scrolled = Arc::new(AtomicU64::new(0));
         let generation = Arc::new(AtomicU64::new(0));
         let cwd = Arc::new(Mutex::new(None));

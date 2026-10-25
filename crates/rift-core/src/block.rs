@@ -611,6 +611,12 @@ impl BlockStore {
         !self.has_activity
     }
 
+    /// Counts the pane as used without a block (a reattached shell whose
+    /// commands' markers are no longer retained).
+    pub fn note_activity(&mut self) {
+        self.has_activity = true;
+    }
+
     /// Record a soft `clear` whose first post-clear row is `line`.
     pub fn set_clear_pad(&mut self, line: AbsLine) {
         self.clear_pad = Some(line);

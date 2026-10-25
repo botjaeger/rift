@@ -965,6 +965,45 @@ for name, count in (("fresh", 5), ("used", 0), ("cleared", 0), ("after", 0)):
     assert f"welcome_rows={count}" in snapshot, snapshot
 assert "AFTER_CLEAR" in (wl / "after.txt").read_text()
 
+# welcome after a reattach: a durable shell whose command's start marker
+# left the session service's 8 MB ring (a long agent run) is still a used
+# pane when a new window (an update restart) reattaches it
+wr = scratch / "welcome-reattach"
+for sub in ("cfg/rift", "data/rift"):
+    (wr / sub).mkdir(parents=True, exist_ok=True)
+(wr / "cfg/rift/config.toml").write_text(
+    'shell = "/bin/bash"\nrestore_session = true\ndurable_sessions = true\nsync_os_theme = false\n')
+wr_env = dict(env, XDG_CONFIG_HOME=str(wr / "cfg"), XDG_DATA_HOME=str(wr / "data"),
+              RIFT_PERSIST_SESSION="1")
+(wr / "a.rift").write_text("\n".join([
+    "resize 1000 700", "wait_prompt",
+    "type head -c 12000000 /dev/zero | tr '\\\\0' x | fold -w 200\\n", "wait 4000",
+    "wait_prompt", "wait 800", f"sh touch {wr}/ready", "wait 60000", "quit"]) + "\n")
+with (wr / "a.log").open("w") as log:
+    first = subprocess.Popen([str(binary), "--script", str(wr / "a.rift"), "--headless"],
+                             env=wr_env, stdout=log, stderr=log)
+    for _ in range(600):
+        if (wr / "ready").exists() or first.poll() is not None:
+            break
+        time.sleep(0.1)
+    time.sleep(0.5)
+    first.kill()
+    first.wait()
+assert (wr / "ready").exists(), died("welcome-reattach first run failed", wr / "a.log")
+(wr / "b.rift").write_text(f"wait_prompt\nwait 2500\ndump {wr}/restored.txt\nquit\n")
+try:
+    with (wr / "b.log").open("w") as log:
+        rc = subprocess.run([str(binary), "--script", str(wr / "b.rift"), "--headless"],
+                            env=wr_env, stdout=log, stderr=log, timeout=120).returncode
+finally:
+    for pid in session_daemons(wr / "data"):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+assert rc == 0, died("welcome-reattach run failed", wr / "b.log")
+assert "welcome_rows=0" in (wr / "restored.txt").read_text(), (wr / "restored.txt").read_text()[-3000:]
+
 # review diff: a file card expands into hunks; a gap row opens the
 # unmodified lines between hunks (all of a short gap at once)
 rv = scratch / "review"
