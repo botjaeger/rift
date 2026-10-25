@@ -957,13 +957,32 @@ for directory in (wl / "cfg/rift", wl / "data"):
 with (wl / "app.log").open("w") as log:
     rc = subprocess.run([str(binary), "--script", str(wl / "test.rift"), "--headless"],
                         env=dict(env, XDG_CONFIG_HOME=str(wl / "cfg"),
-                                 XDG_DATA_HOME=str(wl / "data")),
+                                 XDG_DATA_HOME=str(wl / "data"),
+                                 # macOS bash's zsh notice is startup text
+                                 BASH_SILENCE_DEPRECATION_WARNING="1"),
                         stdout=log, stderr=log, timeout=120).returncode
 assert rc == 0, died("welcome run failed", wl / "app.log")
 for name, count in (("fresh", 5), ("used", 0), ("cleared", 0), ("after", 0)):
     snapshot = (wl / f"{name}.txt").read_text()
     assert f"welcome_rows={count}" in snapshot, snapshot
 assert "AFTER_CLEAR" in (wl / "after.txt").read_text()
+# a shell that prints at startup: the list never covers that text
+wb = wl / "banner"
+for directory in (wb / "cfg/rift", wb / "data", wb / "home"):
+    directory.mkdir(parents=True)
+(wb / "cfg/rift/config.toml").write_text(
+    'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n')
+for rc_file in (".bashrc", ".bash_profile", ".profile"):
+    (wb / "home" / rc_file).write_text("echo STARTUP_BANNER\n")
+(wb / "test.rift").write_text(f"resize 1000 700\nwait_prompt\nwait 600\ndump {wb}/a.txt\nquit\n")
+with (wb / "app.log").open("w") as log:
+    rc = subprocess.run([str(binary), "--script", str(wb / "test.rift"), "--headless"],
+                        env=dict(env, XDG_CONFIG_HOME=str(wb / "cfg"), XDG_DATA_HOME=str(wb / "data"),
+                                 HOME=str(wb / "home")),
+                        stdout=log, stderr=log, timeout=120).returncode
+assert rc == 0, died("welcome banner run failed", wb / "app.log")
+wb_dump = (wb / "a.txt").read_text()
+assert "STARTUP_BANNER" in wb_dump and "welcome_rows=0" in wb_dump, wb_dump[-3000:]
 
 # welcome after a reattach: a durable shell whose command's start marker
 # left the session service's 8 MB ring (a long agent run) is still a used

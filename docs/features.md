@@ -1097,8 +1097,9 @@ Each becomes a `rift://action/new_tab` link (`new_window` with
   process with its agent badge.
 - A fresh session shows a welcome list (split, palette, history, explorer,
   settings, with their shortcuts) until its first command or background
-  output; clearing blocks does not bring it back, and a shell reattached
-  after a restart or update never shows it.
+  output; clearing blocks does not bring it back, a shell reattached after a
+  restart or update never shows it, and it never covers text the pane shows
+  (a shell's startup output).
 - Panes: split right/down, directional focus (⌥⌘arrows), keyboard resize
   (⌃⌘arrows), drag resize, zoom toggle (⇧⌘⏎), close (⌃⇧W/⌘W or the title
   bar's × — last pane closes the tab, last tab exits).

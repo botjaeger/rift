@@ -1067,7 +1067,7 @@ fn fold(c: char) -> char {
 
 /// Line text of one absolute grid line (trailing spaces trimmed). One char
 /// per cell, so a char index is a grid column.
-fn line_text(
+pub(crate) fn line_text(
     term: &rift_pty::alacritty_terminal::term::Term<EventProxy>,
     scrolled: u64,
     abs: u64,

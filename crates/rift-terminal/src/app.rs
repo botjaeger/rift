@@ -1203,6 +1203,24 @@ fn inactive_dim(theme: &rift_core::Theme, lift: f32) -> rift_core::Color {
     }
 }
 
+/// Whether a row the pane drew last frame holds text: a block header, or a
+/// grid line with a character on it.
+fn pane_shows_text(pane: &crate::state::PaneState) -> bool {
+    let scrolled = pane
+        .session
+        .scrolled
+        .load(std::sync::atomic::Ordering::Acquire);
+    let term = pane.session.term.lock();
+    pane.rows.iter().any(|r| match r.kind {
+        crate::views::terminal::RowKind::Header(_) => true,
+        crate::views::terminal::RowKind::Grid { abs, .. } => {
+            crate::views::terminal::line_text(&term, scrolled, abs)
+                .is_some_and(|t| !t.trim().is_empty())
+        }
+        _ => false,
+    })
+}
+
 /// The welcome list's rows, with shortcuts from the live keymap (row `i`
 /// runs `welcome_action(i)`).
 fn welcome_entries(keymap: &rift_core::Keymap) -> Vec<crate::views::welcome::Entry> {
@@ -10918,8 +10936,11 @@ impl App {
                     target: ClickTarget::Editor(pr.id),
                 });
                 // a fresh session: the welcome list above the command line,
-                // until its first command
-                let fresh = !booting && pane.session.blocks.lock().unwrap().is_fresh();
+                // until its first command; never over text the pane shows
+                // (startup output), which it would cover
+                let fresh = !booting
+                    && pane.session.blocks.lock().unwrap().is_fresh()
+                    && !pane_shows_text(pane);
                 let above = if input_top {
                     [
                         pr.rect[0],
