@@ -8,6 +8,36 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.23.0 — 2026-10-27
+
+Structured settings are now edited in Settings instead of config.toml, and Tab on a
+ghost suggestion takes it a word at a time.
+
+### New
+
+- **SSH profiles in Settings** — Profiles lists your SSH hosts with Edit, Add and Connect. Save
+  checks the host before it is written; the palette shows the change at once.
+- **Custom actions in Settings** — Actions lists your named actions: a shortcut (recorded, not
+  typed), ordered steps that run an action, send text or open a launch configuration, and move,
+  remove or reorder steps. Saving never runs an action; a shortcut that is already used is
+  reported before it is saved.
+- **Secret patterns in Settings** — Terminal lists your masking rules. A sample text previews what
+  a pattern masks as you type; the sample is never saved.
+- **Tab color rules in Settings** — Appearance lists your directory colors, with named colors,
+  #rgb or #rrggbb input, RGB sliders and a preview. For one directory, the last rule wins.
+
+### Improved
+
+- **Tab on the ghost text** — with Tab set to take the autosuggestion, Tab takes one word at a
+  time, and a path one folder at a time (`scripts/`, then `prisma-admin.sh`). → still takes all of it.
+- **Other windows** — a palette open in another window no longer lists an SSH profile you
+  deleted, and a symlinked directory matches its color rule.
+
+### Fixed
+
+- **Save path prompt** — Save no longer replaces a file that appeared after the prompt opened;
+  a pipe or device is refused, and the captured output stays in the prompt after an error.
+
 ## 0.22.7 — 2026-10-25
 
 ### Fixed
