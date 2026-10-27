@@ -97,6 +97,47 @@ rewrites your settings to new defaults (only keys you left out follow them).
 A Settings change rewrites only the key it changed; a whole number you wrote
 (`font_size = 14`) stays as written.
 
+### Settings UI exposure policy
+
+User-facing configuration should have dedicated UI controls, including advanced
+options. A config editor is a fallback, not a reason to hide a setting.
+
+| Kind | UI policy | Reason |
+|---|---|---|
+| User preferences, profiles and shortcuts | Expose through Settings or a dedicated editor. | These express choices the user owns. |
+| `profiles.source` | Do not expose as an editable setting. | Rift records who generated a profile; changing provenance can change how discovery manages it. |
+| `profiles.orphaned` | Do not expose as an editable setting; show status when useful. | Derived from whether a discovered shell still exists; not serialized to config.toml. |
+| Generated session state, history, update bookkeeping and connection status | Do not expose raw storage fields as settings. Provide relevant actions and status instead. | These record application state rather than preferences. |
+
+`profiles.hidden` is a user choice, not internal metadata: hiding or restoring
+a profile belongs in profile management even when the raw field is not shown.
+Platform-specific controls may be absent on unsupported platforms.
+
+**Structured editors:** `[[ssh_profiles]]` lives in Settings › Profiles,
+`[[actions]]` in Settings › Actions, `[[secret_patterns]]` in Settings › Terminal,
+and `[[tab_color_rules]]` in Settings › Appearance. Each has an explicit Save/Cancel
+draft, validation, deletion confirmation and ordering controls. Saving keeps
+unrelated configuration and comments; if the list changed elsewhere, the draft
+is retained and saving asks you to cancel and reopen it. The config.toml pane
+remains available. The coverage test's `ELSEWHERE` list names these dedicated
+editors; it checks top-level coverage, not every field inside profile tables.
+
+SSH profiles edit name, host or SSH alias, and quoted arguments. **Connect** saves
+valid edits and uses the normal SSH connection flow; Save alone never connects.
+Actions edit name, shortcut (typed or recorded), and ordered Run action, Send
+text or Open layout steps. Send text preserves whitespace and newlines;
+Shift+Enter inserts a newline. Save never executes steps. Conflicting shortcuts,
+missing layouts and invalid or cyclic action references are rejected. Renaming
+an action updates its callers; deleting a referenced action is refused.
+
+Secret patterns edit name and expression and preview matching against temporary
+sample text, as you type: the preview applies that pattern alone, so a built-in
+match never hides whether it works. The first capture group is masked when
+present, otherwise the whole match; built-in patterns are read-only. Sample text is never saved. Tab color
+rules edit directory and color, with named colors, RGB sliders, a preview and
+hex input. Existing deepest-directory matching, last-rule tie breaking and
+manual tab-color priority remain in effect.
+
 ### Editing in the config.toml pane
 
 Settings › *Open config.toml* opens the file beside the page as an editor
@@ -283,7 +324,7 @@ elapsed_counts = "always"         # always | running — what the elapsed chip c
 copy_on_select = true             # copy the selection on mouse release
 autosuggestions = true            # inline ghost text after the cursor
 tab_behavior = "completions"      # completions | autosuggestion — Tab completes the word (Warp);
-                                  # autosuggestion: Tab takes the ghost text (completes when
+                                  # autosuggestion: Tab takes one word or path part (to its /) of the ghost text (→ takes all; completes when
                                   # there is none) and ⌃Space opens the completions
 autosuggestion_hint = true        # the chip after the ghost text naming its accept key
                                   # (→, Tab, ⇧→ or your accept_autosuggestion binding);

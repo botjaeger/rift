@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { generateKeyPair, XXHandshake } from "../src/noise/noise";
 import { utf8Encode } from "../src/noise/bytes";
 import { CHUNK_MAX, FLAG_LAST, FLAG_MORE, FramingError, MAX_GATEWAY_MESSAGE_BYTES, Reassembler, frameMessage } from "../src/protocol/framing";
-import { rng } from "./helpers/gateway";
+import { rng, sameBytes } from "./helpers/gateway";
 
 const bytes = (n: number) => {
   const b = new Uint8Array(n);
@@ -51,7 +51,7 @@ describe("Reassembler", () => {
     const r = new Reassembler();
     const outs = frameMessage(message).map((c) => r.push(ini.transport.recv.decrypt(res.transport.send.encrypt(c))));
     expect(outs.slice(0, -1).every((o) => o === null)).toBe(true);
-    expect(outs.at(-1)).toEqual(message);
+    expect(sameBytes(outs.at(-1), message)).toBe(true);
   });
 
   it("handles messages back to back and returns each whole", () => {

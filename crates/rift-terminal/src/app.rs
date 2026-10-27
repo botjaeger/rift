@@ -58,6 +58,7 @@ mod results;
 mod review_git;
 mod scroll_bar;
 mod secrets;
+mod settings_collections;
 mod settings_text;
 mod shell_widgets;
 mod sticky;
@@ -149,8 +150,12 @@ pub enum UserEvent {
     PtyServiceReady(PaneId),
     /// Code review model for request `.0`; `None` outside a repository.
     ReviewLoaded(u64, Option<Result<rift_core::review::Review, String>>),
-    /// A review-panel write finished (`Some` = why it failed).
-    ReviewWritten(Option<String>),
+    /// A review-panel write finished in its requesting window/repository.
+    ReviewWritten(
+        Option<winit::window::WindowId>,
+        std::path::PathBuf,
+        Option<String>,
+    ),
     /// The review panel's commit or push finished, for the window that
     /// started it: git's summary, or what it printed on failure.
     ReviewGit(
@@ -467,6 +472,9 @@ enum GhostPart {
     All,
     /// ⌥→ at the end of the line, ⌃→
     Word,
+    /// Tab with `tab_behavior = "autosuggestion"`: a word, or a path a
+    /// folder at a time
+    Segment,
     /// ⌃⌥→ at the end of the line
     Subword,
 }
@@ -478,8 +486,12 @@ type ReviewOps = Vec<(
     Option<rift_core::review::HunkId>,
 )>;
 
-/// One queued review-panel write: the repository and its operations.
-type ReviewWrite = (std::path::PathBuf, ReviewOps);
+/// One queued review-panel write: the requesting window, repository and operations.
+type ReviewWrite = (
+    Option<winit::window::WindowId>,
+    std::path::PathBuf,
+    ReviewOps,
+);
 
 /// One entry of the attention center (⇧⌘A, the notifications popover):
 /// something that happened in a pane while you were looking elsewhere, or
@@ -4425,7 +4437,8 @@ impl App {
                     | ClickTarget::SettingsKeybind(_)
                     | ClickTarget::SettingsKeybindReset(_)
                     | ClickTarget::Profile(..)
-                    | ClickTarget::ProfileAdd,
+                    | ClickTarget::ProfileAdd
+                    | ClickTarget::Collection(..),
                 ) => Some(CursorIcon::Pointer),
                 // a profile row moves under the hand that holds it
                 Some(ClickTarget::ProfileRow(_)) if self.win.settings.profile_drag.is_some() => {
@@ -7766,14 +7779,7 @@ impl App {
             return;
         }
         let ghost = self.win.completion.ghost.clone();
-        // word = leading whitespace + next non-space run
-        let trimmed = ghost.trim_start();
-        let lead = ghost.len() - trimmed.len();
-        let word_end = trimmed
-            .find(char::is_whitespace)
-            .map(|i| lead + i)
-            .unwrap_or(ghost.len());
-        let word = &ghost[..word_end];
+        let word = &ghost[..rift_core::editing::ghost_word(&ghost)];
         if let Some(pane) = self
             .win
             .tabs
@@ -7782,20 +7788,22 @@ impl App {
         {
             pane.editor.end();
             pane.editor.insert(word);
+            self.win.completion.ghost.drain(..word.len());
         }
         self.update_completions();
     }
 
-    /// Tab in the command editor: the menu's Tab when it is open; else the
-    /// whole ghost text where `tab_behavior = "autosuggestion"`; else (and
-    /// with no ghost text) the completions (Warp).
+    /// Tab in the command editor: the menu's Tab when it is open; else one
+    /// word or path part of the ghost text where `tab_behavior =
+    /// "autosuggestion"` (→ takes the whole of it); else (and with no ghost
+    /// text) the completions (Warp).
     fn tab_key(&mut self) {
         if self.win.completion.open && self.win.completion.history_menu.is_none() {
             self.menu_tab();
             return;
         }
         if self.config.tab_behavior == rift_core::TabBehavior::Autosuggestion
-            && self.accept_ghost(GhostPart::All)
+            && self.accept_ghost(GhostPart::Segment)
         {
             return;
         }
@@ -8041,14 +8049,8 @@ impl App {
         let ghost = self.win.completion.ghost.clone();
         let take = match part {
             GhostPart::All => ghost.len(),
-            GhostPart::Word => {
-                // leading whitespace + the next non-space run
-                let trimmed = ghost.trim_start();
-                let lead = ghost.len() - trimmed.len();
-                trimmed
-                    .find(char::is_whitespace)
-                    .map_or(ghost.len(), |i| lead + i)
-            }
+            GhostPart::Word => rift_core::editing::ghost_word(&ghost),
+            GhostPart::Segment => rift_core::editing::ghost_segment(&ghost),
             GhostPart::Subword => match rift_core::editing::subword_right(&ghost, 0) {
                 0 => ghost.len(),
                 n => n,
@@ -8058,12 +8060,14 @@ impl App {
         ed.anchor = None;
         ed.cursor = ed.buffer.len();
         ed.insert(text);
+        // what went in leaves the ghost: neither the next frame nor a key
+        // before the answer for the new line takes it again
+        self.win.completion.ghost.drain(..take);
         if normal {
             // Normal mode rests on the last character
             ed.cursor = crate::state::grapheme_prev(&ed.buffer, ed.buffer.len());
             // no completion runs outside Insert: the rest stays as it is
             let buffer = ed.buffer.clone();
-            self.win.completion.ghost.drain(..take);
             self.win.completion_buffer = buffer;
             self.win.completion.close_menu();
         } else {
@@ -9604,11 +9608,12 @@ impl App {
             let spawned = std::thread::Builder::new()
                 .name("review-write".into())
                 .spawn(move || {
-                    for (root, ops) in rx {
+                    for (asker, root, ops) in rx {
                         let result = ops.into_iter().try_for_each(|(op, path, hunk)| {
                             rift_core::review::apply(&root, op, &path, hunk)
                         });
-                        let _ = proxy.send_event(UserEvent::ReviewWritten(result.err()));
+                        let _ =
+                            proxy.send_event(UserEvent::ReviewWritten(asker, root, result.err()));
                     }
                 });
             if let Err(e) = spawned {
@@ -9618,7 +9623,7 @@ impl App {
             self.review_writer = Some(tx);
         }
         if let Some(tx) = &self.review_writer
-            && tx.send((root, ops)).is_err()
+            && tx.send((self.win_id(), root, ops)).is_err()
         {
             self.review_writer = None;
             self.win.review.notice = Some("the review writer stopped; try again".into());
@@ -13513,6 +13518,9 @@ impl App {
             return true;
         }
         // so does a text field
+        if self.collection_record_key(event) {
+            return true;
+        }
         if self.text_edit_key(event) {
             return true;
         }
@@ -13760,10 +13768,13 @@ impl App {
                     "window_opacity" => settings::opacity_slider(self.config.opacity()),
                     "window_blur" => settings::blur_slider(self.config.blur()),
                     "inactive_pane_dim" => settings::dim_slider(self.config.inactive_pane_dim),
+                    id if id.starts_with("collection.") => self.collection_color_value(id),
                     _ => return true,
                 };
                 self.set_slider(id, (t + step).clamp(0.0, 1.0));
-                self.save_config();
+                if !id.starts_with("collection.") {
+                    self.save_config();
+                }
             }
             (key, Some((target, rect)))
                 if press_key(key) && !matches!(target, ClickTarget::SettingsSlider(_)) =>
@@ -15480,7 +15491,9 @@ impl App {
                 self.launch_from_link(&config, new_window, event_loop);
             }
             ConfirmAction::Restart(pane) => self.restart_pane(pane),
-            ConfirmAction::Overwrite { path, what, text } => self.write_saved(&path, &what, &text),
+            ConfirmAction::Overwrite { path, what, text } => {
+                self.write_saved(&path, &what, &text, true)
+            }
             ConfirmAction::RunCode { pane, command } => self.run_code_block(pane, command),
             ConfirmAction::ClosePinned(scope) => self.request_close_unpinned(scope, event_loop),
             ConfirmAction::InstallRemote(profile) => {
@@ -17020,7 +17033,12 @@ impl App {
             {
                 self.copy_to_clipboard(text);
             }
-            if self.win.slider_drag.take().is_some() {
+            if self
+                .win
+                .slider_drag
+                .take()
+                .is_some_and(|(id, _)| !id.starts_with("collection."))
+            {
                 self.save_config();
             }
             return;
@@ -17798,6 +17816,9 @@ impl App {
             Some(ClickTarget::ProfileRow(i)) => self.press_profile_row(*i),
             Some(ClickTarget::Profile(i, op)) => self.profile_op(*i, *op),
             Some(ClickTarget::ProfileAdd) => self.add_profile(),
+            Some(ClickTarget::Collection(kind, i, op)) => {
+                self.collection_op(*kind, *i, *op, event_loop)
+            }
             Some(ClickTarget::RemotePermission(id, view)) => {
                 let name = self
                     .win
@@ -19052,6 +19073,10 @@ impl App {
 
     /// Settings slider value (0..1) → config field.
     fn set_slider(&mut self, id: &str, t: f32) {
+        if id.starts_with("collection.") {
+            self.collection_color_slider(id, t);
+            return;
+        }
         match id {
             "line_height" => self.config.line_height = ((1.0 + 1.2 * t) * 100.0).round() / 100.0,
             // whole percents and pixels, as Warp's sliders
@@ -21070,9 +21095,9 @@ impl App {
                             None,
                             self.win.settings.profile_open == Some(*i),
                         ),
-                        ClickTarget::Profile(..) | ClickTarget::ProfileAdd => {
-                            (Role::Button, None, false)
-                        }
+                        ClickTarget::Profile(..)
+                        | ClickTarget::ProfileAdd
+                        | ClickTarget::Collection(..) => (Role::Button, None, false),
                         ClickTarget::RemotePermission(id, view) => (
                             Role::RadioButton,
                             None,
@@ -22091,6 +22116,19 @@ impl App {
         // Settings › Profiles: the list in file order, what is open, edited,
         // refused or held
         let s = &self.win.settings;
+        if s.open {
+            let _ = writeln!(
+                out,
+                "settings_controls={}",
+                serde_json::to_string(&self.win.settings_names).unwrap_or_default()
+            );
+        }
+        let _ = writeln!(
+            out,
+            "settings_collection={:?} collection_error={:?}",
+            s.collection.as_ref().map(|d| (d.kind, d.index, d.step)),
+            s.collection.as_ref().and_then(|d| d.error.as_ref())
+        );
         let _ = writeln!(
             out,
             "settings_profiles={:?} default_profile={:?} profile_open={:?} text_edit={:?} \
@@ -24298,15 +24336,17 @@ impl App {
         // a later plain quit leaves the helpers running again
         self.quit_completely = false;
         self.win.confirm_dont_ask = false;
-        if let Some(ConfirmClose {
-            action: ConfirmAction::Update(plan),
-            ..
-        }) = self.win.confirm.take()
-        {
-            let version = plan.manifest.version.clone();
-            self.update.dismissed = Some(version.clone());
-            if self.update_checks_allowed() {
-                rift_core::update::update_cache(|c| c.dismissed = Some(version));
+        if let Some(confirm) = self.win.confirm.take() {
+            match confirm.action {
+                ConfirmAction::Update(plan) => {
+                    let version = plan.manifest.version.clone();
+                    self.update.dismissed = Some(version.clone());
+                    if self.update_checks_allowed() {
+                        rift_core::update::update_cache(|c| c.dismissed = Some(version));
+                    }
+                }
+                ConfirmAction::Overwrite { what, text, .. } => self.restore_save_prompt(what, text),
+                _ => {}
             }
         }
     }
@@ -25534,12 +25574,16 @@ impl ApplicationHandler<UserEvent> for App {
                     self.flush_pending_commands(pane);
                 }
             }
-            UserEvent::ReviewWritten(error) => {
-                self.win.review.notice = error;
-                self.win.explorer.refresh();
-                self.request_review();
-                if let Some(w) = &self.win.window {
-                    w.request_redraw();
+            UserEvent::ReviewWritten(asker, ..) if asker != self.win_id() => {}
+            UserEvent::ReviewWritten(_, root, error) => {
+                // The user may have moved to another repository while the write ran.
+                if self.win.review.root.as_ref() == Some(&root) {
+                    self.win.review.notice = error;
+                    self.win.explorer.refresh();
+                    self.request_review();
+                    if let Some(w) = &self.win.window {
+                        w.request_redraw();
+                    }
                 }
             }
             // the asking window's panel; one closed meanwhile drops the

@@ -499,6 +499,7 @@ impl App {
             | E::DetachedLoaded(asker, _)
             | E::ResultsFound(asker, ..)
             | E::WorktreeAdded(asker, _)
+            | E::ReviewWritten(asker, ..)
             | E::ReviewGit(asker, ..) => {
                 if let Some(id) = *asker {
                     self.enter_window(id);

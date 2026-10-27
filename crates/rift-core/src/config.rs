@@ -1310,19 +1310,23 @@ fn merge_table(
                     merge_table(t, nt, sub_default, &[], None);
                 }
             }
-            // a list of tables (`[[profiles]]`): each entry the file already
-            // has (found by its `name`) is edited in place, so its comments
-            // move with it through a reorder; new ones are written fresh
+            // a list of tables: each entry the file already has (found by
+            // its name, or directory for tab colour rules) is edited in place.
+            // Comments move with it through a reorder; new ones are written fresh.
             (Some(item), toml::Value::Array(arr))
                 if item.is_array_of_tables() && arr.iter().all(toml::Value::is_table) =>
             {
-                // unchanged: left exactly as written (entries without a
-                // `name`, `[[tab_color_rules]]`, could not be matched up)
+                // unchanged: left exactly as written
                 if plain_value(k, item).as_ref() != Some(v) {
                     let fresh = ordered
                         .and_then(|o| o.get(k))
                         .and_then(toml_edit::Item::as_array_of_tables);
-                    merge_tables(item, arr, fresh);
+                    let identity = if k == "tab_color_rules" {
+                        "dir"
+                    } else {
+                        "name"
+                    };
+                    merge_tables(item, arr, fresh, identity);
                 }
             }
             (Some(item), _) => {
@@ -1355,13 +1359,14 @@ fn merge_table(
 }
 
 /// Make the array of tables `item` hold `new` (see `merge_table`): an
-/// entry whose `name` the file has keeps that table (its comments and
+/// entry whose identity the file has keeps that table (its comments and
 /// spacing), edited; another is `fresh`'s entry at its index (the struct's
 /// field order). The list stays where it was in the file, in `new`'s order.
 fn merge_tables(
     item: &mut toml_edit::Item,
     new: &[toml::Value],
     fresh: Option<&toml_edit::ArrayOfTables>,
+    identity: &str,
 ) {
     let Some(old) = item.as_array_of_tables() else {
         return;
@@ -1369,10 +1374,10 @@ fn merge_tables(
     let start = old.iter().filter_map(toml_edit::Table::position).min();
     // (each with its index in the file)
     let mut pool: Vec<(usize, toml_edit::Table)> = old.iter().cloned().enumerate().collect();
-    let name = |t: &toml_edit::Table| t.get("name").and_then(|v| v.as_str()).map(str::to_string);
+    let name = |t: &toml_edit::Table| t.get(identity).and_then(|v| v.as_str()).map(str::to_string);
     let new_names: Vec<&str> = new
         .iter()
-        .filter_map(|v| v.get("name").and_then(|n| n.as_str()))
+        .filter_map(|v| v.get(identity).and_then(|n| n.as_str()))
         .collect();
     let empty = toml::Table::new();
     let mut out = toml_edit::ArrayOfTables::new();
@@ -1380,9 +1385,22 @@ fn merge_tables(
         let Some(nt) = value.as_table() else {
             continue;
         };
-        let wanted = nt.get("name").and_then(|v| v.as_str());
+        let wanted = nt.get(identity).and_then(|v| v.as_str());
         let kept = wanted
-            .and_then(|w| pool.iter().position(|(_, t)| name(t).as_deref() == Some(w)))
+            .and_then(|w| {
+                // Equal directories are valid (last rule wins). Prefer the
+                // matching color too so their comments survive a reorder.
+                let exact = (identity == "dir")
+                    .then(|| {
+                        pool.iter().position(|(_, t)| {
+                            name(t).as_deref() == Some(w)
+                                && t.get("color").and_then(|v| v.as_str())
+                                    == nt.get("color").and_then(|v| v.as_str())
+                        })
+                    })
+                    .flatten();
+                exact.or_else(|| pool.iter().position(|(_, t)| name(t).as_deref() == Some(w)))
+            })
             // renamed: the entry at its place whose name went away
             .or_else(|| {
                 pool.iter().position(|(at, t)| {
@@ -3003,6 +3021,87 @@ name = "clean"
             "theme = \"nord\"\n\n[[profiles]]\nname = \"new\"\n\n# work things\n[[profiles]]\nname = \"work\"\ncommand = \"/bin/zsh\" # mine\nhidden = true\n\n# keep me last\n[notifications]\ntoasts = false\n"
         );
         assert_eq!(toml::from_str::<Config>(&out).unwrap(), c);
+    }
+
+    #[test]
+    fn collection_edits_keep_comments_with_their_entries() {
+        for (key, identity, body) in [
+            ("ssh_profiles", "name", "host = 'fixture' # host\n"),
+            (
+                "actions",
+                "name",
+                "steps = [{ send = 'echo fixture' }] # steps\n",
+            ),
+            ("secret_patterns", "name", "regex = 'token=(.+)' # regex\n"),
+            ("tab_color_rules", "dir", "color = 'red' # color\n"),
+        ] {
+            let entries: Vec<_> = ["a", "b", "c"]
+                .into_iter()
+                .map(|id| {
+                    format!(
+                        "\n# entry {id}\n[[{key}]]\n{identity} = '{id}' # identity {id}\n{body}"
+                    )
+                })
+                .collect();
+            let prefix = "# unrelated\nfont_size = 14 # integer\n";
+            let suffix = "\n# profile stays\n[[profiles]]\nname = 'shell'\n[profiles.env]\nKEEP = 'yes' # environment\n\n[notifications]\ntoasts = false # toast\n";
+            let file = format!("{prefix}{}{suffix}", entries.concat());
+            let config: Config = toml::from_str(&file).unwrap();
+            let mut table = toml::Value::try_from(config).unwrap();
+            // Three entries, not just a swap: each comment follows its identity.
+            table[key].as_array_mut().unwrap().rotate_right(1);
+            let config: Config = table.clone().try_into().unwrap();
+            let reordered = config.edit_toml(Some(&file)).unwrap();
+            assert_eq!(
+                reordered,
+                format!("{prefix}{}{}{}{suffix}", entries[2], entries[0], entries[1]),
+                "{key} reordered"
+            );
+            // A rename (or directory edit) retains the entry's decoration.
+            table[key][0][identity] = toml::Value::String("renamed".into());
+            let config: Config = table.clone().try_into().unwrap();
+            let renamed = config.edit_toml(Some(&reordered)).unwrap();
+            assert!(
+                renamed.contains(&format!("{identity} = \"renamed\" # identity c")),
+                "{key}: {renamed}"
+            );
+            assert!(renamed.contains("# entry c"), "{key}: {renamed}");
+            // Deleting the middle entry drops only its own comments.
+            table[key].as_array_mut().unwrap().remove(1);
+            let config: Config = table.try_into().unwrap();
+            let removed = config.edit_toml(Some(&renamed)).unwrap();
+            assert!(!removed.contains("# entry a"), "{key}: {removed}");
+            assert!(!removed.contains("# identity a"), "{key}: {removed}");
+            assert!(removed.starts_with(prefix), "{key}: {removed}");
+            assert!(removed.ends_with(suffix), "{key}: {removed}");
+            assert_eq!(toml::from_str::<Config>(&removed).unwrap(), config);
+        }
+    }
+
+    #[test]
+    fn action_reorder_keeps_nested_steps_and_profile_environment() {
+        let first = "\n# first action\n[[actions]]\nname = 'first'\n[[actions.steps]]\nsend = 'echo one' # literal text\n[[actions.steps]]\naction = 'new_window' # built-in\n";
+        let second = "\n# second action\n[[actions]]\nname = 'second'\n[[actions.steps]]\nopen = 'dev' # launch name\n";
+        let profile = "\n# shell profile\n[[profiles]]\nname = 'dev'\n[profiles.env]\nKEEP = 'literal' # leave alone\n";
+        let file = format!("{first}{second}{profile}");
+        let mut config: Config = toml::from_str(&file).unwrap();
+        config.actions.swap(0, 1);
+        let out = config.edit_toml(Some(&file)).unwrap();
+        assert_eq!(out, format!("{second}{first}{profile}"));
+        assert_eq!(toml::from_str::<Config>(&out).unwrap(), config);
+    }
+
+    #[test]
+    fn equal_directory_rule_comments_follow_colors_when_reordered() {
+        let red = "\n# red rule\n[[tab_color_rules]]\ndir='~/work'\ncolor='red'\n";
+        let blue = "\n# blue rule\n[[tab_color_rules]]\ndir='~/work'\ncolor='blue'\n";
+        let file = format!("{red}{blue}");
+        let mut config: Config = toml::from_str(&file).unwrap();
+        config.tab_color_rules.swap(0, 1);
+        assert_eq!(
+            config.edit_toml(Some(&file)).unwrap(),
+            format!("{blue}{red}")
+        );
     }
 
     #[test]

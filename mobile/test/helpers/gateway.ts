@@ -19,6 +19,11 @@ import {
 
 export const rng = (n: number) => new Uint8Array(nodeRandomBytes(n));
 
+/** Byte equality for large arrays: `toEqual` walks a 1 MiB array element by
+ *  element for seconds, past the test timeout on a loaded machine. */
+export const sameBytes = (a: Uint8Array | null | undefined, b: Uint8Array) =>
+  a != null && Buffer.from(a.buffer, a.byteOffset, a.byteLength).equals(b);
+
 export interface GatewayOptions {
   key: KeyPair;
   hello?: Record<string, unknown>;

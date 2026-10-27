@@ -93,6 +93,14 @@ pub fn validate(user: &[SecretPattern]) -> Result<(), String> {
     Masker::new(user).map(|_| ())
 }
 
+/// What `pattern` alone masks in `sample` (Settings' preview: the built-in
+/// patterns would hide whether this one matches).
+pub fn preview(pattern: &SecretPattern, sample: &str) -> Result<String, String> {
+    let name = pattern.name.trim().to_string();
+    let patterns = vec![(name.clone(), compile(&name, &pattern.regex)?)];
+    Ok(Masker { patterns }.mask(sample).into_owned())
+}
+
 impl Masker {
     /// The built-in patterns, then `user`'s.
     pub fn new(user: &[SecretPattern]) -> Result<Masker, String> {
@@ -352,5 +360,24 @@ mod tests {
             "{:?}",
             t.elapsed()
         );
+    }
+
+    #[test]
+    fn preview_masks_with_the_one_pattern_only() {
+        let p = |regex: &str| SecretPattern {
+            name: "fixture".into(),
+            regex: regex.into(),
+        };
+        // a built-in would mask `token=…`; the preview shows this pattern's effect
+        assert_eq!(
+            preview(&p("nomatch"), "token=abcdef123456").as_deref(),
+            Ok("token=abcdef123456")
+        );
+        assert_eq!(
+            preview(&p("id=(\\d+)"), "id=42 token=abc").as_deref(),
+            Ok("id=•• token=abc")
+        );
+        assert_eq!(preview(&p("x+"), "axxb").as_deref(), Ok("a••b"));
+        assert!(preview(&p("["), "x").is_err());
     }
 }

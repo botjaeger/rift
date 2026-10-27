@@ -14,7 +14,7 @@ import {
   type TransportCiphers,
 } from "../src/noise/noise";
 import { frameMessage, Reassembler } from "../src/protocol/framing";
-import { rng } from "./helpers/gateway";
+import { rng, sameBytes } from "./helpers/gateway";
 
 interface Vector {
   protocol_name: string;
@@ -279,7 +279,7 @@ describe("throughput", () => {
     let out: Uint8Array | null = null;
     for (let r = 0; r < rounds; r++) out = run();
     const ms = (performance.now() - t0) / rounds;
-    expect(out).toEqual(message);
+    expect(sameBytes(out, message)).toBe(true);
     const mbps = 1 / (ms / 1000);
     console.info(`noise throughput (node ${process.version}): 1 MiB encrypt+decrypt+reassemble in ${ms.toFixed(1)} ms = ${mbps.toFixed(1)} MiB/s`);
     expect(ms).toBeLessThan(2000);

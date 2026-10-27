@@ -30,6 +30,7 @@ fn opens_pane(action: AppAction) -> bool {
     matches!(
         action,
         AppAction::NewTab
+            | AppAction::NewWindow
             | AppAction::SplitRight
             | AppAction::SplitDown
             | AppAction::NewTabProfile(_)

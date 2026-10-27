@@ -414,6 +414,7 @@ impl App {
         }
         let typed = self.win.palette.query.trim().to_string();
         if typed.is_empty() {
+            self.restore_save_prompt(what, text);
             self.toast_error("Save: no path given".into());
             return;
         }
@@ -429,7 +430,13 @@ impl App {
             path = std::path::Path::new(&cwd).join(path);
         }
         if path.is_dir() {
+            self.restore_save_prompt(what, text);
             self.toast_error(format!("Save: {} is a directory", path.display()));
+            return;
+        }
+        if path.metadata().is_ok_and(|m| !m.is_file()) {
+            self.restore_save_prompt(what, text);
+            self.toast_error(format!("Save: {} is not a regular file", path.display()));
             return;
         }
         // a file there already: replace it only when asked
@@ -443,17 +450,35 @@ impl App {
             });
             return;
         }
-        self.write_saved(&path, &what, &text);
+        self.write_saved(&path, &what, &text, false);
+    }
+
+    /// Keep the captured output and path after an error or overwrite cancel.
+    pub(super) fn restore_save_prompt(&mut self, what: String, text: String) {
+        self.win.save_target = Some((what, text));
+        self.win.palette.mode = crate::views::palette::PaletteMode::SavePath;
+        self.win.palette.open = true;
+        self.win.palette.query_selected = true;
+        self.refresh_palette();
     }
 
     /// Write a Save output / Export buffer text to `path`.
-    pub(super) fn write_saved(&mut self, path: &std::path::Path, what: &str, text: &str) {
-        match std::fs::write(path, text.as_bytes()) {
+    pub(super) fn write_saved(
+        &mut self,
+        path: &std::path::Path,
+        what: &str,
+        text: &str,
+        replace: bool,
+    ) {
+        match write_regular_file(path, text.as_bytes(), replace) {
             Ok(()) => self.toast(format!(
                 "Saved {what} to {}",
                 crate::views::editor::shorten_home(&path.to_string_lossy())
             )),
-            Err(e) => self.toast_error(format!("Could not save to {}: {e}", path.display())),
+            Err(e) => {
+                self.restore_save_prompt(what.to_string(), text.to_string());
+                self.toast_error(format!("Could not save to {}: {e}", path.display()));
+            }
         }
     }
 
@@ -698,6 +723,26 @@ impl App {
     }
 }
 
+/// Open without truncating first: a path can change while Replace is open.
+/// NONBLOCK prevents a FIFO substituted for a file from hanging the UI.
+fn write_regular_file(path: &std::path::Path, text: &[u8], replace: bool) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).custom_flags(libc::O_NONBLOCK);
+    if replace {
+        options.create(true);
+    } else {
+        options.create_new(true);
+    }
+    let mut file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::other("destination is not a regular file"));
+    }
+    file.set_len(0)?;
+    file.write_all(text)
+}
+
 /// Blocks a selection can hold (those shown with a header), oldest first.
 fn selectable_blocks(pane: &PaneState) -> Vec<BlockId> {
     pane.session
@@ -754,7 +799,49 @@ fn file_stem(command: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{file_stem, place_of};
+    use super::{file_stem, place_of, write_regular_file};
+
+    #[test]
+    fn save_never_replaces_a_file_without_confirmation() {
+        let path = std::env::temp_dir().join(format!("rift-save-race-{}", std::process::id()));
+        std::fs::write(&path, b"keep").unwrap();
+        assert!(write_regular_file(&path, b"new", false).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"keep");
+        write_regular_file(&path, b"new", true).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        std::fs::remove_file(&path).unwrap();
+        write_regular_file(&path, b"created", false).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"created");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn save_rechecks_special_files_and_accepts_regular_symlinks() {
+        use std::os::unix::fs::OpenOptionsExt;
+        let dir = std::env::temp_dir().join(format!("rift-save-special-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("target");
+        let link = dir.join("link");
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, b"old text").unwrap();
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        write_regular_file(&link, b"new", true).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        std::fs::remove_file(&path).unwrap();
+        let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        // A reader keeps a broken implementation from hanging the test.
+        let _reader = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&path)
+            .unwrap();
+        assert!(write_regular_file(&link, b"must not enter the pipe", true).is_err());
+        std::fs::remove_file(&link).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(dir).unwrap();
+    }
 
     /// "Compare with previous run" matches a directory through a symlink
     /// (`/tmp` and `/private/tmp` after a relaunch) and a remote one only

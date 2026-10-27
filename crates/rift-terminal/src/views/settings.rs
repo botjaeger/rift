@@ -8,6 +8,7 @@ use rift_renderer::{FONT_SANS, Layer, TextEngine, mono_family};
 
 use crate::state::{ClickTarget, Hit};
 use crate::views::icons::{self, Icon};
+pub mod collections;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Page {
@@ -15,6 +16,7 @@ pub enum Page {
     #[default]
     General,
     Profiles,
+    Actions,
     Appearance,
     Features,
     Terminal,
@@ -27,9 +29,10 @@ pub enum Page {
 }
 
 impl Page {
-    pub const ALL: [Page; 11] = [
+    pub const ALL: [Page; 12] = [
         Page::General,
         Page::Profiles,
+        Page::Actions,
         Page::Appearance,
         Page::Features,
         Page::Terminal,
@@ -45,6 +48,7 @@ impl Page {
         match self {
             Page::General => "General",
             Page::Profiles => "Profiles",
+            Page::Actions => "Actions",
             Page::Appearance => "Appearance",
             Page::Features => "Input",
             Page::Terminal => "Terminal",
@@ -60,6 +64,7 @@ impl Page {
     fn subtitle(self) -> &'static str {
         match self {
             Page::General => "Shell and session behavior.",
+            Page::Actions => "Named command sequences and shortcuts. Saving never runs an action.",
             Page::Profiles => {
                 "The shells and programs tabs open with. Drag a row (or ⌥↑ ⌥↓) to reorder."
             }
@@ -88,6 +93,8 @@ impl Page {
             Page::General => Icon::Settings,
             // what a tab is launched with
             Page::Profiles => Icon::Launch,
+            // what an action does: runs its steps
+            Page::Actions => Icon::Play,
             Page::Appearance => Icon::Appearance,
             Page::Features => Icon::Terminal,
             // Input already shows the terminal mark; this page is mostly
@@ -380,6 +387,7 @@ pub fn countdown(left: std::time::Duration) -> String {
 
 #[derive(Default)]
 pub struct SettingsState {
+    pub collection: Option<collections::Draft>,
     /// The Settings tab is shown (it stays in the tab strip while `tab`).
     pub open: bool,
     /// Settings has a tab in the strip.
@@ -628,6 +636,7 @@ impl SettingsState {
         self.remote.relay_edit = None;
         self.text_edit = None;
         self.profile_open = None;
+        self.collection = None;
         self.profile_error = None;
         self.profile_drag = None;
     }
@@ -704,6 +713,7 @@ fn focusable(target: &ClickTarget) -> bool {
             | ClickTarget::ProfileRow(_)
             | ClickTarget::Profile(..)
             | ClickTarget::ProfileAdd
+            | ClickTarget::Collection(..)
     )
 }
 
@@ -764,6 +774,9 @@ fn lookup<'a>(table: &'a toml::Table, id: &str) -> Option<&'a toml::Value> {
 /// Every config.toml key (dotted inside a table) a Settings row controls,
 /// page by page. `every_config_key_has_a_settings_row` holds config.toml to
 /// it: a new key needs a row here, or a reason in that test's allow-list.
+/// User-facing configuration belongs in dedicated controls. Internal provenance
+/// and generated runtime state do not; see docs/configuration.md, Settings UI
+/// exposure policy. A config-editor fallback is a UI gap, not a hidden-setting policy.
 pub const ROWS: &[&str] = &[
     // General
     "launch_at_login",
@@ -1106,8 +1119,10 @@ pub fn render(
             color,
         );
         // typing searches from every page but Keybindings (its own filter
-        // takes it): the caret shows there, before the placeholder if empty
-        if blink_on && (searching || state.page != Page::Keybindings) {
+        // takes it): the caret shows there, before the placeholder if empty;
+        // a field being typed in has the only caret
+        let typing_elsewhere = state.text_edit.is_some() || state.remote.relay_edit.is_some();
+        if blink_on && !typing_elsewhere && (searching || state.page != Page::Keybindings) {
             let tw = if searching {
                 engine.measure(&shown, 12.5, FONT_SANS, Weight::NORMAL)
             } else {
@@ -1323,6 +1338,7 @@ pub fn render(
         for page in [
             Page::General,
             Page::Profiles,
+            Page::Actions,
             Page::Appearance,
             Page::Features,
             Page::Terminal,
@@ -1338,6 +1354,7 @@ pub fn render(
                 Page::General => general_page(&mut form, config, &state.update),
                 // its settings only: the list and its forms need the page
                 Page::Profiles => profile_settings(&mut form, config),
+                Page::Actions => {}
                 Page::Appearance => appearance_page(&mut form, config),
                 Page::Features => features_page(&mut form, config),
                 Page::Terminal => terminal_page(&mut form, config),
@@ -1346,6 +1363,7 @@ pub fn render(
                 Page::Remote => remote_switch(&mut form, config),
                 _ => notifications_page(&mut form, config),
             }
+            collections::page(&mut form, config, state, page);
         }
         if form.rows == 0 && form.visible_band(form.y, ROW_H) {
             form.layer.text(
@@ -1357,10 +1375,12 @@ pub fn render(
             form.y += ROW_H;
         }
     } else {
+        collections::page(&mut form, config, state, state.page);
         match state.page {
             Page::Appearance => appearance_page(&mut form, config),
             Page::General => general_page(&mut form, config, &state.update),
             Page::Profiles => profiles_page(&mut form, config, state),
+            Page::Actions => {}
             Page::Features => features_page(&mut form, config),
             Page::Terminal => terminal_page(&mut form, config),
             Page::Files => files_page(&mut form, config),
@@ -1798,7 +1818,7 @@ impl Form<'_> {
     fn changed(&mut self, id: &'static str, y: f32, control_x: f32) {
         // a row's key is listed (a profile's fields stand for the list)
         debug_assert!(
-            ROWS.contains(&id) || id.starts_with("profile."),
+            ROWS.contains(&id) || id.starts_with("profile.") || id.starts_with("collection."),
             "Settings row {id} is missing from settings::ROWS"
         );
         if self.hidden || !is_changed(self.current, self.defaults, id) {
@@ -1919,6 +1939,7 @@ impl Form<'_> {
                     theme.error,
                 ),
                 ButtonKind::Disabled => (lift(theme, 0.03), lift(theme, 0.08), theme.text_muted),
+                ButtonKind::Selected => (lift(theme, 0.11), theme.accent, theme.text_bright),
             };
             self.layer
                 .bordered([r[0], r[1]], [r[2], r[3]], fill, edge, 4.0, 1.0);
@@ -3042,6 +3063,9 @@ enum ButtonKind {
     /// beside each paired phone).
     Outline,
     Disabled,
+    /// The picked one of a row of choices: a segmented control's active
+    /// fill, an accent edge.
+    Selected,
 }
 
 /// Settings › Remote access's switch (also what the search finds).
@@ -5609,7 +5633,7 @@ fn features_page(form: &mut Form, config: &Config) {
     form.segment_desc(
         y,
         "Tab key",
-        "the completions, or the ghost text (⌃Space then completes)",
+        "ghost text goes word by word; ⌃Space completes",
         &["Completions", "Ghost text"],
         usize::from(config.tab_behavior == rift_core::TabBehavior::Autosuggestion),
         "tab_behavior",
@@ -6899,17 +6923,20 @@ mod tests {
 
     #[test]
     fn every_config_key_has_a_settings_row() {
-        // keys a Settings row does not control, each with why
+        // Keys not represented in scalar ROWS have dedicated collection editors.
+        // Internal metadata (profiles.source) and derived state (profiles.orphaned)
+        // must not become editable controls; profiles.hidden is user intent, not
+        // internal metadata. See docs/configuration.md, Settings UI exposure policy.
         const ELSEWHERE: &[(&str, &str)] = &[
             // the Profiles page lists, edits and orders them
             ("profiles", "Settings › Profiles"),
             // the Keybindings page records and resets them
             ("keybindings", "Settings › Keybindings"),
-            // lists of tables: edited in the config.toml pane beside Settings
-            ("ssh_profiles", "config.toml pane"),
-            ("actions", "config.toml pane"),
-            ("secret_patterns", "config.toml pane"),
-            ("tab_color_rules", "config.toml pane"),
+            // Structured lists have draft editors, rather than scalar rows.
+            ("ssh_profiles", "Settings › Profiles › SSH profiles"),
+            ("actions", "Settings › Actions"),
+            ("secret_patterns", "Settings › Terminal › Secret patterns"),
+            ("tab_color_rules", "Settings › Appearance › Tab color rules"),
         ];
         let mut keys = Vec::new();
         config_keys(&config_table(&rift_core::Config::default()), "", &mut keys);

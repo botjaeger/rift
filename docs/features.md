@@ -121,7 +121,10 @@ dropped its start. *Save output…* (block menu) and *Export buffer…* (pane
 menu: everything scrollback still holds and the screen) ask for a path in
 the palette, prefilled in the pane's directory (`~` is home; a relative path
 is from the pane's directory); Enter writes the plain text; an existing file
-is replaced only after *Replace the file?* is confirmed. RTF is not offered.
+is replaced only after *Replace the file?* is confirmed. A failed save or
+cancelled replacement returns to the path prompt with the captured output
+kept for retry. Destinations must be regular files (or links to them), not
+pipes or devices. RTF is not offered.
 
 ## Clear semantics
 
@@ -672,8 +675,8 @@ cursor moves before the word, or when the line no longer starts with what it
 was opened on. An accepted completion that ends the command line gets a space
 after it, unless it ends in `/` (a path goes on) or `=` (a value follows). A
 selection keeps Tab as it was (the ghost text goes on the end).
-`tab_behavior = "autosuggestion"`: Tab takes the whole ghost text, and with
-none completes as above; ⌃Space then opens the completions.
+`tab_behavior = "autosuggestion"`: Tab takes one word of the ghost text, or a path
+part up to and including its `/` (→ takes the whole of it), and with none completes as above; ⌃Space then opens the completions.
 
 The completion panel (the menu) lists the word candidates only — history
 lines drive the ghost text, ↑ and ⌃R list them — under a header naming it
@@ -791,7 +794,7 @@ in order; a step may name another user action, which runs inline (at most
 chord (a `[keybindings]` entry on the same chord wins; the action's chord
 wins over a default). A step that
 opens a pane makes it the target of the next ones, and text sent to it waits
-for its first prompt, so it lands in the new pane whatever you focus
+for its first prompt (including a new window), so it lands in the new pane whatever you focus
 meanwhile. The first step that fails stops the rest with a toast naming the
 action and the step; earlier steps stay done. Invalid or cyclic actions make
 config.toml not apply. Reference: [configuration.md › User actions](configuration.md#user-actions).

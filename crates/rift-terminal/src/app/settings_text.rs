@@ -13,6 +13,9 @@ const MAX_TEXT: usize = 4096;
 impl App {
     /// What text field `id` shows now (its setting as text).
     pub(super) fn settings_text(&self, id: &str) -> String {
+        if let Some(field) = id.strip_prefix("collection.") {
+            return self.collection_text(field);
+        }
         let c = &self.config;
         match id {
             "shell" => c.shell.clone().unwrap_or_default(),
@@ -75,7 +78,11 @@ impl App {
                 true
             }
             Err(e) => {
-                if id.starts_with("profile.") {
+                if id.starts_with("collection.") {
+                    if let Some(d) = &mut self.win.settings.collection {
+                        d.error = Some(e);
+                    }
+                } else if id.starts_with("profile.") {
                     self.win.settings.profile_error = Some(e);
                 } else {
                     self.toast_error(format!("{} not saved: {e}", text_label(id)));
@@ -91,6 +98,9 @@ impl App {
     /// Set the setting behind field `id` from `text`: `Ok(true)` when it
     /// changed (the caller saves), an error naming why it is not valid.
     fn set_settings_text(&mut self, id: &str, text: &str) -> Result<bool, String> {
+        if let Some(field) = id.strip_prefix("collection.") {
+            return self.set_collection_text(field, text);
+        }
         let t = text.trim();
         if t.chars().any(char::is_control) {
             return Err("it holds a control character".into());
@@ -180,6 +190,15 @@ impl App {
                 self.win.settings.profile_error = None;
             }
             Key::Named(NamedKey::Enter) => {
+                if mods.shift_key()
+                    && let Some(("collection.send" | "collection.sample", draft)) =
+                        self.win.settings.text_edit.as_mut()
+                {
+                    if draft.len() < MAX_TEXT {
+                        draft.push('\n');
+                    }
+                    return true;
+                }
                 self.commit_text_edit(true);
             }
             Key::Named(NamedKey::Backspace) => {
@@ -224,10 +243,15 @@ impl App {
         if !self.win.settings.open {
             return false;
         }
-        let Some((_, draft)) = self.win.settings.text_edit.as_mut() else {
+        let Some((id, draft)) = self.win.settings.text_edit.as_mut() else {
             return false;
         };
-        let clean: String = text.trim().chars().filter(|c| !c.is_control()).collect();
+        let multiline = matches!(*id, "collection.send" | "collection.sample");
+        let text = if multiline { text } else { text.trim() };
+        let clean: String = text
+            .chars()
+            .filter(|c| !c.is_control() || (multiline && matches!(c, '\n' | '\t')))
+            .collect();
         if draft.len() + clean.len() <= MAX_TEXT {
             draft.push_str(&clean);
         }

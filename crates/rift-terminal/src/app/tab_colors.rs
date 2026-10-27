@@ -14,9 +14,20 @@ impl App {
             if self.tab_rules.is_empty() {
                 return None;
             }
-            let cwd = t.active()?.session.local_cwd()?;
-            // resolved at config load: `~` expanded, real paths added
-            tab_color::for_dir(&self.tab_rules, &cwd, None)
+            let pane = t.active()?;
+            let cwd = pane.session.local_cwd()?;
+            // Shells can report a logical symlink path outside the rule's
+            // spelling. Cache its real path per pane, not once per frame.
+            let mut cached = pane.color_cwd.borrow_mut();
+            if cached.as_ref().is_none_or(|(old, _)| old != &cwd) {
+                let real = std::fs::canonicalize(&cwd)
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| cwd.clone());
+                *cached = Some((cwd.clone(), real));
+            }
+            let real = &cached.as_ref()?.1;
+            tab_color::for_dir(&self.tab_rules, real, None)
+                .or_else(|| tab_color::for_dir(&self.tab_rules, &cwd, None))
         })
     }
 

@@ -245,7 +245,10 @@ No other animation. Motion never delays input.
   destructive `error` darkened 18 % with white text; outline (a quiet
   destructive action beside a row's other controls: Revoke) an `error` label
   and a 55 % `error` hairline, no fill, 10 % `error` on hover; disabled 3 % white with
-  an 8 % hairline and a `text_muted` label. Icon buttons are 24–26
+  an 8 % hairline and a `text_muted` label; selected (the picked one of a
+  row of choices: a tab color rule's named color) 11 % white, as a segmented
+  control's active option, with an `accent` hairline and a `text_bright`
+  label. Icon buttons are 24–26
   px with a 8 % hover lift. Key caps (`⏎`, `esc`) sit inside buttons that
   have a key.
 - **Selects** (Settings): 220 × 28 px field, value and a chevron; a click

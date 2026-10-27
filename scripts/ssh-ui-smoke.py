@@ -104,7 +104,9 @@ def main():
         # A hung fixture fails through the normal SSH profile, then the same
         # profile succeeds once its disposable server resumes.
         run(["docker", "pause", container])
-        ui("remote", [*palette("SSH: fixture"), "wait 4000", "wait_prompt",
+        ui("remote", ["resize 1300 1500", "key cmd+,", "wait 300",
+            "a11y click Profiles", "wait 200", "a11y click Edit SSH profile fixture",
+            "wait 200", "a11y click Connect SSH profile fixture", "wait 4000", "wait_prompt",
             f"dump {evidence}/offline.txt", f"sh docker unpause {container}",
             *palette("SSH: fixture"), "wait 1500", "wait_prompt",
             "type cd ~/proj; echo GUI_REMOTE_OK > gui-result.txt; pwd; cat gui-result.txt; false\\n",
@@ -131,6 +133,21 @@ def main():
         assert '"deploy"(shell)' in shell and '"destroy"(shell)' in shell, shell[-5000:]
         returned = (evidence / "returned.txt").read_text()
         assert "editor_active=true" in returned, returned[-3000:]
+        # The Settings editor feeds the same real SSH flow as the palette.
+        # Opening its editor must leave the local shell connected locally.
+        ui("settings", ["resize 1300 1500", "key cmd+,", "wait 300",
+            "a11y click Profiles", "wait 300", "a11y click Edit SSH profile fixture",
+            "wait 200", f"dump {evidence}/settings-before.txt",
+            f"shot {evidence}/settings-before.png",
+            "a11y click Connect SSH profile fixture", "wait 1500", "wait_prompt",
+            "type echo SETTINGS_SSH_OK > ~/settings-result.txt; cat ~/settings-result.txt\\n",
+            "wait 400", "wait_prompt", f"dump {evidence}/settings-connected.txt",
+            "type exit\\n", "wait 400", "wait_prompt"])
+        before = (evidence / "settings-before.txt").read_text()
+        assert "cwd_remote=true" not in before, before[-5000:]
+        connected = (evidence / "settings-connected.txt").read_text()
+        assert "cwd_remote=true" in connected and "SETTINGS_SSH_OK" in connected, connected[-5000:]
+        assert remote('cat "$HOME/settings-result.txt"') == "SETTINGS_SSH_OK"
         print(f"SSH UI pass: cancel, install, timeout/retry, actual profile/PTY/output/exit, remote path/shell completion; {evidence}")
     finally:
         # Only this run's control masters; never discover or signal user sessions.

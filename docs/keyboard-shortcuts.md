@@ -143,7 +143,7 @@ Active only while the app owns the command line.
 |---|---|
 | Enter | Submit command (an empty or blank line does nothing); with the completion menu open, accept its selected row (as you type: unless the word already is it, then submit) |
 | ⇧⏎ / ⌥⏎ | Insert a newline (multi-line command; Enter still submits) |
-| Tab | Complete the word (Warp): one match is inserted, several insert their common prefix and open the completion menu, else the menu opens; never takes the ghost text (`tab_behavior = "autosuggestion"`: takes it, and completes with none). In the open menu: the common prefix of the rows matching as typed when longer than the word, else the next row (wrapping) |
+| Tab | Complete the word (Warp): one match is inserted, several insert their common prefix and open the completion menu, else the menu opens; never takes the ghost text (`tab_behavior = "autosuggestion"`: takes its next word, a path a folder at a time — `scripts/`, then `prisma-admin.sh` — and completes with none; → takes it all). In the open menu: the common prefix of the rows matching as typed when longer than the word, else the next row (wrapping) |
 | ⇧Tab | Previous completion row (wrapping) while the menu is open |
 | ⌃Space | Open the completions (the way to open them where `tab_behavior = "autosuggestion"`) |
 | Esc | Close the completion menu and clear the ghost text (after deselecting any block; vim: the ghost text in Normal mode only) |

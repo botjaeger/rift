@@ -1,5 +1,6 @@
 //! Command-line editing helpers for the owned editor's Warp keys: the last
-//! word of a command (Meta+.) and subword motion (⌃⌥← / ⌃⌥→).
+//! word of a command (Meta+.), subword motion (⌃⌥← / ⌃⌥→) and how much of
+//! the ghost text a partial accept takes (⌥→, Tab).
 
 use std::ops::Range;
 
@@ -136,6 +137,32 @@ pub fn subword_right(s: &str, at: usize) -> usize {
     end(i)
 }
 
+/// Byte length of the ghost text's next word: its leading whitespace and
+/// the next run of non-space characters (⌥→, ⌃→).
+pub fn ghost_word(ghost: &str) -> usize {
+    let lead = ghost.len() - ghost.trim_start().len();
+    ghost[lead..]
+        .find(char::is_whitespace)
+        .map_or(ghost.len(), |i| lead + i)
+}
+
+/// Byte length of the ghost text's next part (Tab): [`ghost_word`], cut
+/// after the first run of `/` that follows a name, so a path goes a folder
+/// at a time (`scripts/`, `/usr/`, `~/`, `https://`).
+pub fn ghost_segment(ghost: &str) -> usize {
+    let lead = ghost.len() - ghost.trim_start().len();
+    let word = &ghost[lead..ghost_word(ghost)];
+    // a leading `/` stays with the name after it
+    let name = word.len() - word.trim_start_matches('/').len();
+    match word[name..].find('/') {
+        Some(i) => {
+            let rest = &word[name + i..];
+            lead + name + i + rest.len() - rest.trim_start_matches('/').len()
+        }
+        None => lead + word.len(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,5 +220,43 @@ mod tests {
         assert_eq!(walk_right("çaVa"), [3, 5]);
         assert_eq!(subword_left("", 0), 0);
         assert_eq!(subword_right("a ", 1), 2);
+    }
+
+    /// The pieces successive accepts of `ghost` take with `take`.
+    fn accepts(mut ghost: &str, take: fn(&str) -> usize) -> Vec<&str> {
+        let mut out = Vec::new();
+        while !ghost.is_empty() {
+            let (part, rest) = ghost.split_at(take(ghost));
+            out.push(part);
+            ghost = rest;
+        }
+        out
+    }
+
+    #[test]
+    fn ghost_words_and_segments() {
+        let line = "bash scripts/prisma-admin.sh backup";
+        assert_eq!(
+            accepts(line, ghost_word),
+            ["bash", " scripts/prisma-admin.sh", " backup"]
+        );
+        assert_eq!(
+            accepts(line, ghost_segment),
+            ["bash", " scripts/", "prisma-admin.sh", " backup"]
+        );
+        // a leading `/` stays with its name; a run of them stays together
+        assert_eq!(accepts(" /usr/bin", ghost_segment), [" /usr/", "bin"]);
+        assert_eq!(accepts("~/code/x", ghost_segment), ["~/", "code/", "x"]);
+        assert_eq!(accepts("../src", ghost_segment), ["../", "src"]);
+        assert_eq!(
+            accepts("curl https://x.io/a", ghost_segment),
+            ["curl", " https://", "x.io/", "a"]
+        );
+        assert_eq!(accepts("cd src/", ghost_segment), ["cd", " src/"]);
+        assert_eq!(accepts("cat é/ü", ghost_segment), ["cat", " é/", "ü"]);
+        // whitespace alone goes in one piece
+        assert_eq!(ghost_segment("  "), 2);
+        assert_eq!(ghost_word("  "), 2);
+        assert_eq!(ghost_segment(""), 0);
     }
 }

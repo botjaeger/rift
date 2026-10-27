@@ -190,6 +190,37 @@ pub enum ClickTarget {
     Profile(usize, ProfileOp),
     /// Settings › Profiles: "Add" (a new profile running the login shell).
     ProfileAdd,
+    /// Structured Settings editors, using the same forms as Profiles.
+    Collection(CollectionKind, usize, CollectionOp),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CollectionKind {
+    Ssh,
+    Actions,
+    Secrets,
+    Colors,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CollectionOp {
+    Add,
+    Edit,
+    Save,
+    Cancel,
+    Delete,
+    ConfirmDelete,
+    Up,
+    Down,
+    Connect,
+    AddStep,
+    SelectStep(usize),
+    RemoveStep,
+    StepUp,
+    StepDown,
+    StepType(u8),
+    RecordKey,
+    Color(u8),
 }
 
 /// What a Settings › Profiles button does to its profile.
@@ -1160,6 +1191,8 @@ pub struct PaneState {
     pub editor: EditorState,
     pub git: Option<GitInfo>,
     pub last_git_cwd: Option<String>,
+    /// Canonical directory for color rules, resolved only when the cwd changes.
+    pub color_cwd: std::cell::RefCell<Option<(String, String)>>,
     /// The last block when git was last asked: the next prompt after a
     /// command (a new block) asks again.
     pub last_git_block: rift_core::BlockId,
@@ -1319,6 +1352,7 @@ impl PaneState {
             editor: EditorState::default(),
             git: None,
             last_git_cwd: None,
+            color_cwd: Default::default(),
             last_git_block: 0,
             pr: None,
             docker: None,

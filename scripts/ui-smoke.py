@@ -50,7 +50,7 @@ print(f"UI artifacts: {scratch}", flush=True)
 cfg = scratch / "cfg" / "rift"
 data = scratch / "data" / "rift"
 work = scratch / "work"
-for directory in (cfg / "themes", data / "control", work):
+for directory in (cfg / "themes", data / "control", work, scratch / "home"):
     directory.mkdir(parents=True, exist_ok=True)
 (work / "hello.rs").write_text("fn main() {}\n")
 theme = (repo / "crates/rift-core/src/theme/dark-default.toml").read_text()
@@ -278,15 +278,15 @@ steps = [
     "key escape",
     "key ctrl+c",
     "wait 300",
-    # Settings controls work from the keyboard (it opens on General; ↓ ↓ to
-    # Appearance, past Profiles)
+    # Settings controls work from the keyboard; select Appearance by name
+    # so adding another page does not change this control's test.
     "key cmd+,",
     "wait 200",
-    "key down",
-    "key down",
+    "a11y click Appearance",
     "wait 100",
     # font size, not font family: a machine with one monospace font has
     # nothing to cycle to
+    "key tab",
     "key tab",
     "key tab",
     f"dump {scratch}/settings-focus.txt",
@@ -353,7 +353,9 @@ steps = [
 ]
 script = scratch / "smoke.rift"
 script.write_text("\n".join(steps) + "\n")
-env = dict(os.environ, XDG_CONFIG_HOME=str(scratch / "cfg"),
+# A default-shell fixture must not source the user's rc files: those may
+# run external tools or wait for input before Rift's integration can load.
+env = dict(os.environ, HOME=str(scratch / "home"), XDG_CONFIG_HOME=str(scratch / "cfg"),
            XDG_DATA_HOME=str(scratch / "data"), RIFT_NO_NOTIFY="1")
 started = time.monotonic()
 with (scratch / "app.log").open("w") as log:
@@ -2026,7 +2028,7 @@ bt2_steps = [
     "key ctrl+m", "wait 300", "a11y click Save output…", "wait 300",
     f"type {bt2}/out.txt", "wait 200", "key enter", "wait 600", f"dump {bt2}/replace.txt",
     "key escape", "wait 300", f"sh cp {bt2}/out.txt {bt2}/kept.txt",
-    "key ctrl+m", "wait 300", "a11y click Save output…", "wait 300",
+    f"dump {bt2}/save-return.txt",
     f"type {bt2}/out.txt", "wait 200", "key enter", "wait 700", "a11y click Replace", "wait 400",
     # find in a filtered block: a match in the lines its filter hides is
     # said, not silently missing
@@ -2079,6 +2081,7 @@ assert "clipboard=\"```sh\\nprintf '\\\\033[31m';" in md and "```\\nNEEDLE <b>&\
 assert (bt2 / "out.txt").read_text() == "NEEDLE <b>&\n", (bt2 / "out.txt").read_text()
 assert 'AlertDialog "Replace the file?"' in bt2_state("replace"), bt2_state("replace")[-3000:]
 assert (bt2 / "kept.txt").read_text() == "OLD", "Save output replaced a file without asking"
+assert 'palette=true mode=SavePath' in bt2_state("save-return"), "Cancel lost the save prompt"
 hidden = bt2_state("hidden")
 assert 'query="alpha"' in hidden and " hidden=1 " in hidden, hidden[:3000]
 
@@ -2976,7 +2979,8 @@ ms_run("copies", [
     "key cmd+c", "wait 200", f"dump {ms}/copied.txt",
     # "GH=ghp_FAK" selected: the token's start only
     f"drag {at(0)} {ms_mid} {at(9)} {ms_mid}", "wait 200", "key cmd+c", "wait 200",
-    f"dump {ms}/selected.txt", f"click {at(30)} {ms_mid + int(ms_line) * 3}", "wait 450",
+    # Clear the selection in output, not on a prompt chip below the block.
+    f"dump {ms}/selected.txt", f"click {at(60)} {ms_mid + int(ms_line)}", "wait 450",
     f"rclick {at(20)} {ms_mid}", "wait 300", f"dump {ms}/menu.txt",
     "key down", "key down", "key down", "key enter", "wait 200", f"dump {ms}/unmasked.txt",
     "wait 450", f"click {at(20)} {ms_mid}", "wait 200", f"dump {ms}/revealed.txt",
@@ -3480,7 +3484,8 @@ assert nc_ghost("after-prev") == '" backup"', nc_ghost("after-prev")
 # part; Esc closes the menu and clears it. The menu opens as you type only
 # with completions_open_while_typing (or the old completions_menu): ⏎ then
 # accepts unless the word already is the row, then runs it, no space added.
-# tab_behavior = "autosuggestion" gives Tab the ghost text and ⌃Space the
+# tab_behavior = "autosuggestion" gives Tab the ghost text word by word (a
+# path a folder at a time, also two Tabs back to back) and ⌃Space the
 # completions; vim Normal's l $ take it, w e one word, its Esc clears it
 wt = scratch / "warp-tab"
 for sub in ("cfg/rift", "data", "home", "work/src/lib"):
@@ -3489,7 +3494,7 @@ for name in ("alpha.txt", "alpine.txt", "beta.txt"):
     (wt / "work" / name).write_text("")
 for rc_file in (".bash_profile", ".bashrc"):  # macOS login / Linux shim
     (wt / "home" / rc_file).write_text("PS1='$ '\n")
-(wt / "home/.bash_history").write_text("echo hello world\ngit checkout main\n")
+(wt / "home/.bash_history").write_text("echo hello world\ngit checkout main\nls src/lib\n")
 wt_config = ('shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
              f'working_directory = {json.dumps(str(wt / "work"))}\n')
 wt_env = dict(env, XDG_CONFIG_HOME=str(wt / "cfg"), XDG_DATA_HOME=str(wt / "data"),
@@ -3539,7 +3544,10 @@ wt_run("auto", ["type echo h", "wait 500", "key tab", "wait 200", f"dump {wt}/au
                 *wt_fresh("cat be"), "key escape", "key tab", "wait 400", f"dump {wt}/auto-none.txt",
                 *wt_fresh("cat al"), "key tab", "wait 400", f"dump {wt}/auto-ghost-al.txt",
                 *wt_fresh("cat al"), "key escape", "key ctrl+space", "wait 400",
-                f"dump {wt}/auto-ctrl-space.txt"],
+                f"dump {wt}/auto-ctrl-space.txt",
+                *wt_fresh("ls s"), "key tab", "wait 300", f"dump {wt}/auto-dir.txt",
+                "key tab", "wait 300", f"dump {wt}/auto-dir-name.txt",
+                *wt_fresh("ls s"), "key tab", "key tab", "wait 300", f"dump {wt}/auto-dir-fast.txt"],
        'tab_behavior = "autosuggestion"\n')
 wt_run("vim", ["type echo h", "wait 500", "key escape", "wait 100", f"dump {wt}/vim-normal.txt",
                "type w", "wait 100", f"dump {wt}/vim-w.txt",
@@ -3595,11 +3603,14 @@ assert wt_state("ayt-enter")[:3] == ("cat alpha.txt", 13, False), wt_state("ayt-
 assert wt_state("ayt-full")[:3] == ("cat alpha.txt", 13, True), wt_state("ayt-full")
 assert wt_state("ayt-ran")[:2] == ("", 0) and 'cmd="cat alpha.txt"' in wtt("ayt-ran"), \
     wtt("ayt-ran")[:2000]
-# autosuggestion: Tab takes the ghost; with none it completes; ⌃Space opens the menu
-assert wt_state("auto-tab")[:2] == ("echo hello world", 16), wt_state("auto-tab")
+# autosuggestion: Tab takes one word; with none it completes; ⌃Space opens the menu
+assert wt_state("auto-tab")[:4] == ("echo hello", 10, False, " world"), wt_state("auto-tab")
 assert wt_state("auto-none")[:3] == ("cat beta.txt ", 13, False), wt_state("auto-none")
 assert wt_state("auto-ghost-al")[:2] == ("cat alpha.txt", 13), wt_state("auto-ghost-al")
 assert wt_state("auto-ctrl-space")[:3] == ("cat alp", 7, True), wt_state("auto-ctrl-space")
+assert wt_state("auto-dir")[:4] == ("ls src/", 7, False, "lib"), wt_state("auto-dir")
+for name in ("auto-dir-name", "auto-dir-fast"):
+    assert wt_state(name)[:2] == ("ls src/lib", 10), (name, wt_state(name))
 assert wt_state("ctrl-space")[:3] == ("cat alp", 7, True), wt_state("ctrl-space")
 # vim: Insert's Esc keeps the ghost; Normal's w / e take a word, l / $ the
 # rest, on the last character only; Normal's Esc clears it
@@ -3963,7 +3974,7 @@ for sub in ("cfg/rift/themes", "data"):
     # the theme list runs below the fold: scroll to the user's themes
     "key cmd+,", "wait 300", "key end", "wait 300", "move 700 400", "scroll -20",
     "wait 300", f"dump {sw}/themes.txt",
-    "key home", "key down", "key down", "key down", "wait 300",
+    "a11y click Input", "wait 300",
     # (the vim register, shell widgets and Tab key segments come first: 2
     # stops each; then the accept-key hint and ignore button toggles)
     *["key tab"] * 31, "wait 300", f"dump {sw}/tabbed.txt",
@@ -4651,7 +4662,9 @@ assert "the main thread is blocked: one pass of the event loop" in stall, stall[
 lasted = int(re.search(r"^lasted about (\d+) ms$", stall, re.M)[1])
 assert 4500 <= lasted <= 7000, lasted
 if sys.platform == "darwin":
-    assert "drive_script" in stall and "wait4" in stall, stall[:3000]
+    # Optimized builds inline drive_script into the event-loop callback.
+    main_stack = stall.split("com.apple.main-thread", 1)[1].split("Thread_", 1)[0]
+    assert "about_to_wait" in main_stack and "wait4" in main_stack, stall[:3000]
 
 # Status toasts are chips in the pane they are about: a config.toml that
 # was not applied shows in the focused (right) pane with "Open config.toml"
@@ -4818,7 +4831,7 @@ text_cmd = '{"cmd":"remote-input","pane":PANE,"device":"Test Phone","text":"type
 def keys_cmd(*keys):
     return json.dumps({"cmd": "remote-input", "pane": 0, "device": "Test Phone",
                        "keys": list(keys)}).replace('"pane": 0', '"pane":PANE')
-settings_remote = ["key cmd+,", "wait 300", *["key down"] * 9, "wait 600"]
+settings_remote = ["key cmd+,", "wait 300", "a11y click Remote access", "wait 600"]
 # the page scrolled to its end (the pointer over the page, not a list)
 page_bottom = ["move 700 300", "scroll -80", "wait 300"]
 
@@ -5807,7 +5820,7 @@ assert bt_active_pane("ffm-back", 0) == right, "focus did not follow back"
 # Settings rows: Appearance › Tabs and Panes, Input › Sticky command header
 bt_shots = [
     # (tall: Appearance runs to its Tabs group well below 900 px)
-    "resize 1200 2400", "wait_prompt", "key cmd+,", "wait 300", "key down", "key down", "wait 400",
+    "resize 1200 2400", "wait_prompt", "key cmd+,", "wait 300", "a11y click Appearance", "wait 400",
     f"dump {bt}/appearance-top.txt", "move 700 500", "scroll -12", "wait 300",
     f"dump {bt}/appearance-mid.txt",
     "move 700 500", "scroll -200", "wait 400", f"shot {bt}/appearance.png",
@@ -8834,6 +8847,227 @@ assert tomllib.loads((tg / "searched.toml").read_text())["theme"] == "nord"
 assert (tg / "cfg/rift/themes").is_dir(), "Open themes folder made no folder"
 assert f'toast=Some("Headless: not opening {tg / "cfg/rift/themes"}' in (tg / "opened.txt").read_text(), \
     re.search(r"toast=.*", (tg / "opened.txt").read_text())
+
+# review-push: the real Push button sets an upstream on a disposable bare
+# remote, refuses a non-fast-forward without changing it, then works again
+# after the fixture integrates the other writer's commit. No network or
+# user git config/credentials are used.
+rp = scratch / "review-push"
+for sub in ("cfg/rift", "data", "home", "work", "other"):
+    (rp / sub).mkdir(parents=True)
+rp_env = dict(env, HOME=str(rp / "home"), XDG_CONFIG_HOME=str(rp / "cfg"),
+              XDG_DATA_HOME=str(rp / "data"), GIT_CONFIG_NOSYSTEM="1",
+              GIT_CONFIG_GLOBAL=os.devnull)
+def rp_git(where, *args):
+    return subprocess.run(["git", "-C", str(where), "-c", "user.name=Fixture",
+                           "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false",
+                           *args], env=rp_env, check=True, capture_output=True, text=True).stdout.strip()
+rp_git(rp, "init", "--bare", "-q", "remote.git")
+rp_git(rp / "work", "init", "-q", "-b", "main")
+(rp / "work/base.txt").write_text("base\n")
+rp_git(rp / "work", "add", "base.txt")
+rp_git(rp / "work", "commit", "-qm", "base")
+rp_git(rp / "work", "remote", "add", "origin", str(rp / "remote.git"))
+rp_git(rp, "clone", "-q", str(rp / "work"), "other")
+(rp / "other/other.txt").write_text("other writer\n")
+rp_git(rp / "other", "add", "other.txt")
+rp_git(rp / "other", "commit", "-qm", "other writer")
+rp_other = rp_git(rp / "other", "rev-parse", "HEAD")
+rp_git(rp / "remote.git", "fetch", "-q", str(rp / "other"), "main:refs/heads/other")
+(rp / "work/local.txt").write_text("local writer\n")
+rp_git(rp / "work", "add", "local.txt")
+rp_git(rp / "work", "commit", "-qm", "local writer")
+rp_first = rp_git(rp / "work", "rev-parse", "HEAD")
+(rp / "remote.git/hooks/post-receive").write_text(
+    f"#!/bin/sh\ntouch {shlex.quote(str(rp / 'received'))}\n")
+(rp / "remote.git/hooks/post-receive").chmod(0o755)
+(rp / "cfg/rift/config.toml").write_text(
+    'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
+    f'working_directory = {json.dumps(str(rp / "work"))}\n')
+(rp / "t.rift").write_text("\n".join([
+    "resize 1400 900", "wait_prompt", "key shift+cmd+g", "wait 1200",
+    "a11y click Push", f"wait_file {rp}/received 8000", "wait 500", f"dump {rp}/first.txt",
+    f"sh git -C {rp}/remote.git rev-parse main > {rp}/first-head.txt",
+    f"sh git -C {rp}/work rev-parse --abbrev-ref --symbolic-full-name '@{{u}}' > {rp}/upstream.txt",
+    f"sh git -C {rp}/remote.git update-ref refs/heads/main {rp_other}",
+    "a11y click Push", "wait 1500", f"dump {rp}/rejected.txt",
+    f"sh git -C {rp}/remote.git rev-parse main > {rp}/rejected-head.txt",
+    f"sh git -C {rp}/work fetch -q origin && git -C {rp}/work -c user.name=Fixture "
+    "-c user.email=fixture@example.invalid -c commit.gpgsign=false merge -q --no-edit origin/main",
+    f"sh rm {rp}/received", "a11y click Push", f"wait_file {rp}/received 8000",
+    "wait 500", f"dump {rp}/recovered.txt", f"shot {rp}/recovered.png", "quit"]) + "\n")
+with (rp / "app.log").open("w") as log:
+    rc = subprocess.run([str(binary), "--script", str(rp / "t.rift"), "--headless"],
+                        env=rp_env, stdout=log, stderr=log, timeout=90).returncode
+assert rc == 0, died("review-push run failed", rp / "app.log")
+assert (rp / "first-head.txt").read_text().strip() == rp_first
+assert (rp / "upstream.txt").read_text().strip() == "origin/main"
+assert 'Pushed main to origin and set it as upstream' in (rp / "first.txt").read_text()
+assert 'Push failed:' in (rp / "rejected.txt").read_text(), (rp / "rejected.txt").read_text()[-3000:]
+assert (rp / "rejected-head.txt").read_text().strip() == rp_other
+assert rp_git(rp / "remote.git", "rev-parse", "main") == rp_git(rp / "work", "rev-parse", "HEAD")
+assert rp_git(rp / "remote.git", "show", "main:local.txt") == "local writer"
+assert rp_git(rp / "remote.git", "show", "main:other.txt") == "other writer"
+assert 'Pushed main to origin' in (rp / "recovered.txt").read_text()
+
+# compare-previous: the menu finds the previous identical command in this
+# directory, skips a newer run elsewhere, and handles equal and changed
+# output without executing the command again.
+bc = scratch / "compare-previous"
+for sub in ("cfg/rift", "data", "a", "b"):
+    (bc / sub).mkdir(parents=True)
+(bc / "a/value.txt").write_text("same\n")
+(bc / "b/value.txt").write_text("different directory\n")
+(bc / "next.txt").write_text("changed\n")
+(bc / "cfg/rift/config.toml").write_text(
+    'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
+    f'working_directory = {json.dumps(str(bc / "a"))}\n')
+bc_compare = ["key cmd+up", "key ctrl+m", "wait 200",
+              "a11y click Compare with previous run (just now)", "wait 800"]
+(bc / "t.rift").write_text("\n".join([
+    "resize 1100 700", "wait_prompt", "type cat value.txt\\n", "wait 400",
+    f"type cd {bc}/b\\n", "wait 400", "type cat value.txt\\n", "wait 400",
+    f"type cd {bc}/a\\n", "wait 400", "type cat value.txt\\n", "wait 400",
+    *bc_compare, f"dump {bc}/equal.txt", f"shot {bc}/equal.png", "key escape", "key escape",
+    f"sh cp {bc}/next.txt {bc}/a/value.txt", "type cat value.txt\\n", "wait 400",
+    *bc_compare, f"dump {bc}/changed.txt", "key escape", "key escape",
+    "type cat value.txt\\n", "wait 400", *bc_compare, f"dump {bc}/latest.txt", "quit"]) + "\n")
+with (bc / "app.log").open("w") as log:
+    rc = subprocess.run([str(binary), "--script", str(bc / "t.rift"), "--headless"],
+                        env=dict(env, XDG_CONFIG_HOME=str(bc / "cfg"), XDG_DATA_HOME=str(bc / "data")),
+                        stdout=log, stderr=log, timeout=90).returncode
+assert rc == 0, died("compare-previous run failed", bc / "app.log")
+bc_dumps = {name: (bc / f"{name}.txt").read_text() for name in ("equal", "changed", "latest")}
+assert re.search(r'compare=true blocks=\(0, 4\) phase=ready .*summary="No differences"', bc_dumps["equal"]), bc_dumps["equal"]
+assert 'baseline=Some("against the previous run of the same command' in bc_dumps["equal"]
+assert 'compare=true blocks=(4, 5) phase=ready' in bc_dumps["changed"] and \
+    'added=1 removed=1' in bc_dumps["changed"], bc_dumps["changed"]
+assert re.search(r'compare=true blocks=\(5, 6\) phase=ready .*summary="No differences"', bc_dumps["latest"]), bc_dumps["latest"]
+assert len(re.findall(r'^    block \d+ ', bc_dumps["latest"], re.M)) == 8, "comparison ran an extra command"
+
+# export-buffer: the pane menu exports screen and scrollback even after a
+# soft clear; a relative destination is rooted at the pane's directory.
+# Cancel leaves an existing file intact; a directory error permits retry.
+eb = scratch / "export-buffer"
+for sub in ("cfg/rift", "data", "work"):
+    (eb / sub).mkdir(parents=True)
+(eb / "work/keep.txt").write_text("keep original\n")
+(eb / "cfg/rift/config.toml").write_text(
+    'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
+    f'working_directory = {json.dumps(str(eb / "work"))}\n')
+eb_open = ["rclick 800 300", "wait 200", "a11y click Export buffer…", "wait 200"]
+(eb / "t.rift").write_text("\n".join([
+    "resize 1100 700", "wait_prompt",
+    "type for i in $(seq 1 100); do printf 'EXPORT-%03d\\\\n' $i; done\\n", "wait 800",
+    "type clear\\n", "wait 500", *eb_open, "type all.txt", "key enter", "wait 300",
+    f"dump {eb}/saved.txt", *eb_open, "type keep.txt", "key enter", "wait 400",
+    f"dump {eb}/confirm.txt", "key escape", f"dump {eb}/cancel.txt",
+    "type .", "key enter", "wait 300", f"dump {eb}/directory.txt",
+    "type absent/out.txt", "key enter", "wait 300", f"dump {eb}/missing-parent.txt",
+    f"sh mkfifo {eb}/work/pipe", "type pipe", "key enter", "wait 300", f"dump {eb}/pipe.txt",
+    "type retry.txt", "key enter", "wait 300",
+    f"dump {eb}/retry.txt", f"shot {eb}/retry.png", "quit"]) + "\n")
+with (eb / "app.log").open("w") as log:
+    rc = subprocess.run([str(binary), "--script", str(eb / "t.rift"), "--headless"],
+                        env=dict(env, XDG_CONFIG_HOME=str(eb / "cfg"), XDG_DATA_HOME=str(eb / "data")),
+                        stdout=log, stderr=log, timeout=90).returncode
+assert rc == 0, died("export-buffer run failed", eb / "app.log")
+eb_expected = [f"EXPORT-{i:03d}" for i in range(1, 101)]
+for eb_name in ("all.txt", "retry.txt"):
+    eb_text = (eb / "work" / eb_name).read_text()
+    assert re.findall(r'^EXPORT-\d{3}$', eb_text, re.M) == eb_expected, eb_text
+assert (eb / "work/keep.txt").read_text() == "keep original\n"
+assert 'AlertDialog "Replace the file?"' in (eb / "confirm.txt").read_text()
+assert 'is a directory' in (eb / "directory.txt").read_text()
+for eb_state in ("cancel", "directory", "missing-parent", "pipe"):
+    assert 'palette=true mode=SavePath' in (eb / f"{eb_state}.txt").read_text(), eb_state
+assert 'Could not save' in (eb / "missing-parent.txt").read_text()
+assert 'not a regular file' in (eb / "pipe.txt").read_text()
+assert 'Saved the buffer to' in (eb / "retry.txt").read_text()
+
+# new-window-actions: chained windows each wait for their first prompt;
+# startup code reading stdin must not consume the command. Moving focus to
+# the original window while startup waits never redirects either send.
+nw = scratch / "new-window-actions"
+for sub in ("cfg/rift", "data", "home"):
+    (nw / sub).mkdir(parents=True)
+(nw / "home/.bashrc").write_text(
+    "read -t 1 startup_input\nprintf 'startup-read:<%s>\\n' \"$startup_input\"\n")
+(nw / "home/.bash_profile").write_text('. "$HOME/.bashrc"\n')
+nw_commands = [f"printf 'window-{i}\\n' > {nw}/result-{i}.txt\n" for i in (1, 2)]
+nw_steps = ", ".join('{ action = "new_window" }, { send = ' + json.dumps(command) + ' }'
+                     for command in nw_commands)
+(nw / "cfg/rift/config.toml").write_text(
+    'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
+    '[[actions]]\nname = "Two windows"\nkey = "ctrl+alt+w"\n'
+    f'steps = [{nw_steps}]\n')
+(nw / "t.rift").write_text("\n".join([
+    "wait_prompt", "key ctrl+alt+w", "window 0",
+    f"wait_file {nw}/result-1.txt 8000", f"wait_file {nw}/result-2.txt 8000", "wait 400",
+    f"dump {nw}/original.txt", "window 1", "wait 200", f"dump {nw}/first.txt",
+    "window 2", "wait 200", f"dump {nw}/second.txt", f"shot {nw}/second.png", "quit"]) + "\n")
+with (nw / "app.log").open("w") as log:
+    rc = subprocess.run([str(binary), "--script", str(nw / "t.rift"), "--headless"],
+                        env=dict(env, HOME=str(nw / "home"), XDG_CONFIG_HOME=str(nw / "cfg"),
+                                 XDG_DATA_HOME=str(nw / "data")),
+                        stdout=log, stderr=log, timeout=60).returncode
+assert rc == 0, died("new-window-actions run failed", nw / "app.log")
+for nw_i, nw_name in enumerate(("first", "second"), 1):
+    assert (nw / f"result-{nw_i}.txt").read_text() == f"window-{nw_i}\n"
+    nw_dump = (nw / f"{nw_name}.txt").read_text()
+    assert 'startup-read:<>' in nw_dump and 'startup-read:<printf' not in nw_dump, nw_dump
+    assert re.search(r'^    block 0 state=done .*exit=Some\(0\)', nw_dump, re.M), nw_dump
+    assert f'result-{nw_i}.txt' in nw_dump, nw_dump
+
+# review-write-window: staging completes in the window that requested it,
+# even while another window is focused. Verify both the actual index and
+# the original panel; a disk-only assertion misses a stale review model.
+rw = scratch / "review-write-window"
+for rw_sub in ("cfg/rift", "data", "home", "repo", "other"):
+    (rw / rw_sub).mkdir(parents=True)
+rw_env = dict(env, HOME=str(rw / "home"), XDG_CONFIG_HOME=str(rw / "cfg"),
+              XDG_DATA_HOME=str(rw / "data"), GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+rw_git = ["git", "-C", str(rw / "repo"), "-c", "user.name=Fixture",
+          "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"]
+subprocess.run([*rw_git, "init", "-q"], env=rw_env, check=True)
+(rw / "repo/.gitattributes").write_text("big.bin -diff\n")
+subprocess.run([*rw_git, "add", ".gitattributes"], env=rw_env, check=True)
+subprocess.run([*rw_git, "commit", "-qm", "base"], env=rw_env, check=True)
+# Real hashing/compression keeps the background writer occupied across the
+# focus switch, without adding a sleep or fake result to production code.
+(rw / "repo/big.bin").write_bytes(os.urandom(32 * 1024 * 1024))
+(rw / "cfg/rift/config.toml").write_text(
+    'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
+    f'working_directory = {json.dumps(str(rw / "repo"))}\n')
+(rw / "await-index.py").write_text(
+    "import subprocess, time\nfrom pathlib import Path\n"
+    f"root = Path({str(rw)!r})\n"
+    "for _ in range(200):\n"
+    "    staged = subprocess.check_output(['git', '-C', str(root / 'repo'), 'diff', '--cached', '--name-only'])\n"
+    "    if b'big.bin' in staged:\n"
+    "        (root / 'staged').touch()\n        break\n"
+    "    time.sleep(.05)\n")
+(rw / "t.rift").write_text("\n".join([
+    "resize 1400 900", "wait_prompt", "new_window", "wait_prompt",
+    f"type cd {rw}/other\\n", "wait 300", "key shift+cmd+g", "wait 700",
+    "window 0", "key shift+cmd+g", "wait 1200", f"dump {rw}/before.txt",
+    "click 1371 123", "window 1", f"sh python3 {rw}/await-index.py",
+    f"wait_file {rw}/staged 1000", "wait 600", f"dump {rw}/other.txt",
+    "window 0", "wait 300", f"dump {rw}/origin.txt", f"shot {rw}/origin.png", "quit"]) + "\n")
+with (rw / "app.log").open("w") as log:
+    rc = subprocess.run([str(binary), "--script", str(rw / "t.rift"), "--headless"],
+                        env=rw_env, stdout=log, stderr=log, timeout=45).returncode
+assert rc == 0, died("review-write-window failed", rw / "app.log")
+assert 'staged=Some([]) unstaged=Some(["?big.bin"])' in (rw / "before.txt").read_text()
+assert 'staged=Some(["Abig.bin"]) unstaged=Some([])' in (rw / "origin.txt").read_text(), \
+    next(line for line in (rw / "origin.txt").read_text().splitlines() if line.startswith("review="))
+assert 'review=true load=not-a-repo' in (rw / "other.txt").read_text()
+assert subprocess.check_output([*rw_git, "show", ":big.bin"], env=rw_env) == (rw / "repo/big.bin").read_bytes()
+
+# settings-collections: the four structured editors save real TOML, validate
+# on their UI, and feed actual action, masking and tab-color consumers.
+subprocess.run([sys.executable, str(Path(__file__).resolve().with_name("settings-editors-smoke.py")), str(binary)],
+               check=True, timeout=240)
 
 for client in clients:
     client.close()

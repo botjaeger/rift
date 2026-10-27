@@ -804,7 +804,7 @@ integration). Sits at the bottom of the pane, or at the top with
   `autosuggestion_ignore_button` a 16 px `✕` chip follows (tooltip and label
   *Ignore this suggestion*): a click ignores the suggested line. At the end of the
   line → (⌃F, ⌃E, ⌘→, End) accepts it all, ⌥→ one word, ⌃⌥→ one word part,
-  ⌃→ one word anywhere; Esc clears it. Tab takes it only with
+  ⌃→ one word anywhere; Esc clears it. Tab takes one word or path part of it only with
   `tab_behavior = "autosuggestion"`. Hidden while the menu Tab opened shows.
 - **Completion panel** (the menu): opened by Tab (or as you type with
   `completions_open_while_typing`): the word candidates only — commands,
@@ -1221,7 +1221,9 @@ replaces it); one row: *Save the output to ~/x.txt*, *Replace ~/x.txt with
 the output* when the file exists, *~/x is a directory*. Enter writes; over
 an existing file it first asks *Replace the file?* (Replace / Cancel). A
 toast says *Saved the output to …* or why it could not. With `mask_secrets`
-on, the text is written masked, as shown.
+on, the text is written masked, as shown. Cancel returns from replacement
+confirmation to the path prompt. Errors keep the captured output and select
+the path for correction; pipes and devices are refused.
 
 ## Menus
 
@@ -1262,7 +1264,7 @@ the Settings tab (its tab, ⌘, or *Open Settings* in the palette) shows the
 page it showed; once closed, it opens again on General. Other app
 shortcuts (new tab, next tab, palette…) work from it and leave it.
 
-A 232 px sidebar: a search field, the eleven pages with icons (arrow keys
+A 232 px sidebar: a search field, the twelve pages with icons (arrow keys
 navigate pages; PageUp/PageDown scroll the body; in a short window the page
 rows close their 2 px gaps so the foot keeps its room) and *Open config.toml* at
 the foot (opens the file beside the page, in the Settings tab; ✕ closes it; for 3 s after config.toml is
@@ -1291,7 +1293,7 @@ description) left, control right; it runs to the bottom edge.
   config.toml comes last), Space or Enter presses the focused control (a
   pressed ↺ hands the focus to its row's control), ← / → adjust a focused slider, and Esc
   drops the focus. The arrow keys change page unless a slider is focused;
-  Home / End jump to the first / last page. Every control writes that file
+  Home opens General; End opens Themes. Scalar controls write that file
   live (the hot-reload watcher applies changes < 300 ms, including external
   edits); while config.toml is invalid, controls do not save and a toast says
   to fix it first; the wheel scrolls the page body (24 px per line, clamped
@@ -1305,11 +1307,31 @@ description) left, control right; it runs to the bottom edge.
   profile's: a red line in its form) says why. Lists (`Font features`,
   `More subshell commands`, a profile's arguments and environment) are
   words separated by spaces, quoted as in a shell when one has spaces.
-- Every config.toml key has a row here except the lists of tables
-  (`[[ssh_profiles]]`, `[[actions]]`, `[[secret_patterns]]`,
-  `[[tab_color_rules]]`, edited in the config.toml pane) and the pages of
-  their own (Profiles, Keybindings); `settings::ROWS` lists them and a unit
-  test fails for a new key without one.
+- Scalar config.toml keys have rows; structured collections have dedicated
+  editors: SSH profiles on Profiles, custom actions on Actions, secret patterns
+  on Terminal, and tab color rules on Appearance. Profiles and Keybindings have
+  their own pages. `settings::ROWS` and the dedicated-editor coverage list guard
+  new keys. Internal metadata and generated state follow the
+  [Settings UI exposure policy](configuration.md#settings-ui-exposure-policy).
+- Structured editors use the same fields, buttons, separators and focus order
+  as Settings: each entry is a row with **Edit** at its right, and a
+  **New …** row ends the list with **Add**, as on Profiles. **Add/Edit** opens a draft; **Save** validates and persists it,
+  **Cancel** discards it, and **Delete** asks for confirmation. **Move up/down**
+  saves valid edits and changes order. Stale drafts remain visible with an error
+  after another window or external editor changes their list. Search finds each
+  collection. The Actions page includes shortcut recording and ordered step
+  editing: each step's row has **Edit step** (**Editing** on the one the fields
+  below edit) and a **Step type** segmented control picks Run action, Send text
+  or Open layout; Send text is multiline (Shift+Enter for a newline). Secret
+  patterns have a temporary sample and a preview of what that pattern alone
+  masks, updated as you type either field. Tab color rules have RGB sliders,
+  named colors (the picked one drawn selected), hex input and a color preview. SSH's **Connect** saves valid edits
+  before opening the normal SSH connection.
+
+- **Actions** — named command sequences with an optional shortcut. Add, edit,
+  reorder or delete an action; its ordered steps run an existing action, send
+  multiline terminal input, or open a saved launch configuration. Save reports
+  shortcut conflicts, missing references and cycles without executing the steps.
 
 - **General** — *Shell and session behavior*.
   - App: `Launch at login` toggle (macOS only; `launch_at_login`: adds or
