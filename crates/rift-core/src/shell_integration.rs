@@ -130,9 +130,12 @@ pub(crate) fn is_executable(path: &std::path::Path) -> bool {
 pub fn resolve_shell(configured: Option<&str>) -> String {
     // an executable regular file: spawning anything else aborts the app
     let exists = |s: &String| !s.trim().is_empty() && is_executable(std::path::Path::new(s.trim()));
-    if let Some(c) = configured.map(str::to_string) {
-        if exists(&c) {
-            return c.trim().to_string();
+    if let Some(c) = configured {
+        // a path as is, `~/…` and a bare name (`fish`) as Settings saves them
+        let path = std::env::var_os("PATH");
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        if let Some(found) = crate::profiles::find_program(c, path.as_deref(), home.as_deref()) {
+            return found;
         }
         log::warn!("shell {c:?} is not an executable file, falling back");
     }
@@ -316,6 +319,9 @@ mod tests {
         assert_eq!(shell_name(Some("/bin/sh")), "sh");
         assert_eq!(resolve_shell(Some("/bin/sh")), "/bin/sh");
         assert!(!shell_name(None).is_empty());
+        // a bare name, as a hand-written config.toml has it, runs from PATH
+        let sh = resolve_shell(Some("sh"));
+        assert!(sh.starts_with('/') && sh.ends_with("/sh"), "{sh}");
     }
 
     #[test]

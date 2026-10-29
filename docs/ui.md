@@ -1224,7 +1224,7 @@ the path for correction; pipes and devices are refused.
 
 ## Menus
 
-Every menu (block, tab, pane, file viewer) is a 240 px list with an icon
+Every menu (block, tab, pane, file viewer) is a 240 px list (up to 320 px when a label and its shortcut need it) with an icon
 column and the row's shortcut from the live keymap at the right. Only Close
 pane and the three Close tab rows are red. Disabled items are dimmed (e.g.
 Copy output on an output-less block). In a short window the rows shrink
@@ -1263,7 +1263,7 @@ shortcuts (new tab, next tab, palette…) work from it and leave it.
 
 A 232 px sidebar: a search field, the twelve pages with icons (arrow keys
 navigate pages; PageUp/PageDown scroll the body; in a short window the page
-rows close their 2 px gaps so the foot keeps its room) and *Open config.toml* at
+rows close their 2 px gaps, then shorten to as little as 22 px, so the foot keeps its room) and *Open config.toml* at
 the foot (opens the file beside the page, in the Settings tab; ✕ closes it; for 3 s after config.toml is
 written or reloaded, a green check sits at its end, a green dot on its icon
 in the icon-only sidebar). When the settings area is

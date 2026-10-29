@@ -149,6 +149,12 @@ pipes or devices. RTF is not offered.
   password prompts, integration-less shells). Bound keys that would shadow
   terminal keys (PageUp/PageDown/Home/End/⌃M) automatically fall through to
   the PTY when the editor is inactive.
+- **A program that died on the alternate screen** (a crash, `kill -9`) never
+  switched back: when the shell prompts again after that command finished,
+  Rift returns to the main screen and turns off the mouse reporting, hidden
+  cursor, application keys and keyboard flags it left on, so the blocks and
+  the editor come back without `reset`. A program still running (tmux, vim,
+  one suspended with ⌃Z that switched back) is never touched.
 - Cursor motion and deletion step over whole grapheme clusters (an emoji
   with modifiers, a letter with combining accents), never part of one.
   Mouse carets, selections and Vim operations use the same boundaries;
@@ -363,7 +369,7 @@ whole buffer.
 - Typing clears the selection.
 - **Mouse reporting** (`mouse_reporting`, on): programs that enable xterm
   mouse tracking (vim, tmux, htop, fzf) receive presses, releases, drags
-  (1002), motion (1003) and the wheel in SGR (1006), UTF-8 (1005) or legacy
+  (1002), motion (1003) and the wheel, sideways too (buttons 66/67), in SGR (1006), UTF-8 (1005) or legacy
   encoding; ⇧ forces local selection. Focus in/out (1004) is reported when
   the window gains or loses focus.
 - Links draw in the accent color, lighter and underlined under the pointer,
@@ -1015,7 +1021,7 @@ Each becomes a `rift://action/new_tab` link (`new_window` with
 - Tabs: create, close, reorder (⌃⇧←/→ or drag: the tab lifts and follows the
   pointer; Esc puts it back), select by number (⌘1–9, ⌘9 = last; hold ⌘
   alone for 300 ms and each tab shows its number in the ×'s place), reopen
-  closed (⇧⌘T restores the tab's cwd, stack of 10).
+  closed (⇧⌘T restores the tab's cwd, its name, colour, pin and group (while the group still has tabs) and its place in the strip, with a fresh shell; stack of 10).
 - Tab titles and status: a tab is named for its focused pane's folder
   (`parent/name` when two tabs share the folder name), or the name it was
   given; the program's own title is its tooltip's. It shows one status, the

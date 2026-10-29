@@ -125,6 +125,31 @@ impl App {
         self.style_active_tab(&resolved);
     }
 
+    /// ⇧⌘T: tab `closed` again, as the user left it: its name, colour, pin,
+    /// group (while that group still has tabs) and place in the strip. The
+    /// shell starts fresh in its directory.
+    pub(super) fn reopen_closed_tab(&mut self, closed: ClosedTab) {
+        self.spawn_profile_tab(closed.cwd, None);
+        let new = self.win.active;
+        let alive = |g: u64| self.win.tabs.iter().any(|t| t.group == Some(g));
+        let group = closed.group.filter(|g| alive(*g));
+        if let Some(tab) = self.win.tabs.get_mut(new) {
+            tab.custom_title = closed.title.or(tab.custom_title.take());
+            tab.color = closed.color.or(tab.color);
+            tab.pinned = closed.pinned;
+            tab.group = if closed.pinned { None } else { group };
+        }
+        let at = closed.index.min(self.win.tabs.len() - 1);
+        if at != new {
+            let tab = self.win.tabs.remove(new);
+            self.win.tabs.insert(at, tab);
+            self.win.active = at;
+        }
+        // pinned tabs first, a group's tabs together
+        self.arrange_tabs();
+        self.save_session();
+    }
+
     /// Every pane of `cfg` resolves; else the first error, and nothing of
     /// the configuration opens.
     pub(super) fn check_launch_config(

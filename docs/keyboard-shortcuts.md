@@ -48,7 +48,7 @@ listed alternates.
 | ⇧⌘} / ⌃Tab | `tab_next` | Next tab (`tab_switch_order = "mru"`: ⌃Tab opens the recent-tabs switcher, see below) |
 | ⇧⌘{ / ⌃⇧Tab | `tab_prev` | Previous tab |
 | ⌃⇧← / ⌃⇧→ | `move_tab_left` / `_right` | Reorder current tab |
-| ⇧⌘T | `reopen_closed_tab` | Reopen last closed tab (restores cwd) |
+| ⇧⌘T | `reopen_closed_tab` | Reopen last closed tab (its cwd, name, colour and place) |
 | ⇧⌘O | `session_switcher` | Fuzzy switcher over tabs, panes and recent blocks |
 | — | `new_worktree_tab` | Palette *New worktree tab…*: name a branch, add its git worktree, open a tab there |
 | — | `toggle_tab_layout` | Tabs on top ↔ vertical rail |

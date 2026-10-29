@@ -968,9 +968,16 @@ pub fn pipe_items(query: &str, output: &str) -> Vec<MatchedItem> {
         score: 0,
     };
     let head = if query.trim().is_empty() {
-        format!("Type a command to receive {} lines on stdin", lines.len())
+        format!(
+            "Type a command to receive {} on stdin",
+            counted(lines.len(), "line")
+        )
     } else {
-        format!("Run `{}` with {} lines on stdin", query.trim(), lines.len())
+        format!(
+            "Run `{}` with {} on stdin",
+            query.trim(),
+            counted(lines.len(), "line")
+        )
     };
     let mut out = vec![row(head, Section::Actions, false)];
     for l in lines.iter().take(6) {
@@ -1209,19 +1216,7 @@ pub fn render(
             theme.text_bright,
         );
     } else {
-        let placeholder = match state.mode {
-            PaletteMode::Sessions => "Go to tab, pane or block…",
-            PaletteMode::PipeOutput => "Command that reads the output on stdin…",
-            PaletteMode::NewWorktree => "Name of the new branch…",
-            PaletteMode::History => "Search command history…",
-            PaletteMode::Commands => "Search actions, or type # @ to switch…",
-            PaletteMode::ReviewBase => "Compare changes against…",
-            PaletteMode::SendTarget => "Send to which pane…",
-            PaletteMode::SavePath => "Path of the file to write…",
-            PaletteMode::RenameWindow => "Name of this window…",
-            PaletteMode::Themes => "Search themes: ↑ ↓ preview, ⏎ keeps, esc reverts…",
-            PaletteMode::TabColor => "Tab color: a name or #rrggbb…",
-        };
+        let placeholder = placeholder(state.mode);
         layer.text(
             sans(engine, placeholder, 15.0, Weight::NORMAL),
             qx + 4.0,
@@ -1237,7 +1232,7 @@ pub fn render(
     let esc_w = (engine.measure("esc", 10.5, FONT_SANS, Weight::MEDIUM) + 10.0).max(18.0);
     let esc_x = mx + modal_w - 16.0 - esc_w;
     super::completion::key_cap(layer, engine, theme, "esc", esc_x, cy);
-    let count = format!("{} results", results.len());
+    let count = counted(results.len(), "result");
     let cw = engine.measure(&count, 11.5, FONT_SANS, Weight::NORMAL);
     let qw_now = engine.measure(&state.query, 15.0, FONT_SANS, Weight::NORMAL);
     if qx + qw_now + 24.0 < esc_x - 12.0 - cw {
@@ -1507,6 +1502,28 @@ pub fn render(
     layer.set_clip(None);
 }
 
+/// The query field's hint in `mode` (also its accessible name, without `…`).
+pub(crate) fn placeholder(mode: PaletteMode) -> &'static str {
+    match mode {
+        PaletteMode::Sessions => "Go to tab, pane or block…",
+        PaletteMode::PipeOutput => "Command that reads the output on stdin…",
+        PaletteMode::NewWorktree => "Name of the new branch…",
+        PaletteMode::History => "Search command history…",
+        PaletteMode::Commands => "Search actions, or type # @ to switch…",
+        PaletteMode::ReviewBase => "Compare changes against…",
+        PaletteMode::SendTarget => "Send to which pane…",
+        PaletteMode::SavePath => "Path of the file to write…",
+        PaletteMode::RenameWindow => "Name of this window…",
+        PaletteMode::Themes => "Search themes: ↑ ↓ preview, ⏎ keeps, esc reverts…",
+        PaletteMode::TabColor => "Tab color: a name or #rrggbb…",
+    }
+}
+
+/// `n` and the noun, plural unless one: "1 result", "3 results".
+pub(crate) fn counted(n: usize, noun: &str) -> String {
+    format!("{n} {noun}{}", if n == 1 { "" } else { "s" })
+}
+
 /// Longest prefix of `text` (plus `…`) that fits `max_w`.
 pub(crate) fn elide_to(
     engine: &mut TextEngine,
@@ -1645,6 +1662,10 @@ mod tests {
     fn pipe_rows_preview_output_and_never_embed_it() {
         let rows = pipe_items("wc -l", "a\nb\n$(rm -rf ~)\n");
         assert_eq!(rows[0].item.title, "Run `wc -l` with 3 lines on stdin");
+        assert_eq!(
+            pipe_items("", "one\n")[0].item.title,
+            "Type a command to receive 1 line on stdin"
+        );
         assert_eq!(rows[3].item.title, "$(rm -rf ~)");
         assert!(rows.iter().all(|r| r.item.action == PaletteAction::RunPipe));
         let cmd = pipe_command("grep x | wc -l", "/tmp/rift pipe/1.txt", "/bin/zsh");

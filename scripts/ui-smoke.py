@@ -2105,8 +2105,10 @@ with (rr / "app.log").open("w") as log:
                         cwd=str(scratch), stdout=log, stderr=log, timeout=60).returncode
 assert rc == 0, died("reopen-remote run failed", rr / "app.log")
 reopened = (rr / "reopened.txt").read_text()
-assert "tabs=2 active=1 " in reopened, reopened[:1500]
-assert re.findall(r"^  pane \d+ cwd=(\S+)", reopened, re.M)[-1].endswith(
+# back in its own place (the first tab), so the second one keeps its slot
+assert "tabs=2 active=0 " in reopened, reopened[:1500]
+rr_pane = re.search(r"^window 0: .* panes=\[(\d+),", reopened, re.M)[1]
+assert re.search(rf"^  pane {rr_pane} cwd=(\S+)", reopened, re.M)[1].endswith(
     f'{scratch.name}/work")'), reopened[:2000]
 
 # a restored split keeps its focused pane even when a later subtree splits
@@ -2210,6 +2212,136 @@ assert re.search(r"^  pane \d+ .*view_offset=0 ", ck_cleared, re.M), ck_cleared[
 assert "OLD" not in re.search(r'Terminal "Terminal output" value="([^"]*)"', ck_cleared)[1], ck_cleared[-2000:]
 ck_after = (ck / "after.txt").read_text()
 assert re.findall(r'^    block \d+ state=done .*? cmd="([^"]*)"', ck_after, re.M) == ["echo after"], ck_after[-2000:]
+
+# one command, one block: lines joined with ⇧⏎ reach the shell as one
+# buffer (not a block per line plus an empty one), and a line typed while a
+# command runs is the next prompt's command (its echo there is no
+# background job's output, so no empty block before it)
+ml = scratch / "multi-line"
+for sub in ("cfg/rift", "data"):
+    (ml / sub).mkdir(parents=True, exist_ok=True)
+(ml / "cfg/rift/config.toml").write_text(
+    f'shell = "{shutil.which("zsh")}"\nrestore_session = false\ndurable_sessions = false\nsync_os_theme = false\n')
+(ml / "t.rift").write_text("\n".join([
+    "wait_prompt", "type echo one", "key shift+enter", "type echo two", "key enter", "wait 1000",
+    "wait_prompt", "type sleep 2\\n", "wait 400", "type echo typed-ahead\\n", "wait 3000",
+    f"dump {ml}/a.txt",
+    # hint mode: a file path soft-wrapped onto the next row is one target
+    f"type echo {'pad ' * 40}{ml}/t.rift\\n", "wait 800", "key cmd+shift+h", "wait 300",
+    f"dump {ml}/hints.txt", "key escape", "quit"]) + "\n")
+with (ml / "app.log").open("w") as log:
+    rc = subprocess.run([str(binary), "--script", str(ml / "t.rift"), "--headless"],
+                        env=dict(env, XDG_CONFIG_HOME=str(ml / "cfg"), XDG_DATA_HOME=str(ml / "data")),
+                        stdout=log, stderr=log, timeout=60).returncode
+assert rc == 0, died("multi-line run failed", ml / "app.log")
+ml_dump = (ml / "a.txt").read_text()
+assert re.findall(r'^    block \d+ state=done .*? cmd="([^"]*)"', ml_dump, re.M) == [
+    "echo one\\necho two", "sleep 2", "echo typed-ahead"], ml_dump[-3000:]
+ml_hints = re.search(r"hints=(\[.*?\])", (ml / "hints.txt").read_text())[1]
+assert ml_hints.count(f'"{ml}/t.rift"') == 1, ml_hints
+
+# the palette's own mode prefix (`>` in Actions, as its chip shows) is not
+# query text, and the query field is named for the mode it searches
+pp = scratch / "palette-prefix"
+for sub in ("cfg/rift", "data"):
+    (pp / sub).mkdir(parents=True, exist_ok=True)
+(pp / "t.rift").write_text("\n".join([
+    "wait_prompt", "key cmd+p", "type >", "type new tab", "wait 300", f"dump {pp}/actions.txt",
+    "key escape", "key cmd+p", "type #", "wait 300", f"dump {pp}/history.txt", "key escape",
+    # a short window keeps the Settings sidebar's foot: the page rows shorten
+    "key cmd+,",
+    # a slider is a slider to a screen reader, and its swipe steps it
+    "a11y click Appearance", "wait 300", f"dump {pp}/appearance.txt",
+    "a11y increment Line height: 1.20", "wait 300",
+    "resize 1180 420", "wait 400", f"dump {pp}/short.txt", "quit"]) + "\n")
+with (pp / "app.log").open("w") as log:
+    rc = subprocess.run([str(binary), "--script", str(pp / "t.rift"), "--headless"],
+                        env=dict(env, XDG_CONFIG_HOME=str(pp / "cfg"), XDG_DATA_HOME=str(pp / "data")),
+                        stdout=log, stderr=log, timeout=60).returncode
+assert rc == 0, died("palette-prefix run failed", pp / "app.log")
+pp_actions = (pp / "actions.txt").read_text()
+assert 'mode=Commands query="new tab"' in pp_actions, pp_actions[:3000]
+assert not re.search(r'mode=Commands query="new tab" selected=\d+ results=0 ', pp_actions), pp_actions[:3000]
+assert 'SearchInput "Search actions, or type # @ to switch"' in pp_actions, pp_actions[-3000:]
+assert 'SearchInput "Search command history"' in (pp / "history.txt").read_text()
+pp_short = (pp / "short.txt").read_text()
+assert '"About"' in pp_short and '"Open config.toml' in pp_short, pp_short[-3000:]
+assert 'Slider "Line height: 1.20"' in (pp / "appearance.txt").read_text()
+assert "line_height = 1.26" in (pp / "cfg/rift/config.toml").read_text()
+
+# a sideways wheel (a trackpad's x, a tilt wheel) reaches a program that
+# tracks the mouse as xterm's buttons 66 (left) and 67 (right), like up/down
+sw = scratch / "sideways-wheel"
+for sub in ("cfg/rift", "data"):
+    (sw / sub).mkdir(parents=True, exist_ok=True)
+(sw / "track.py").write_text(
+    "import os, sys, termios, tty\n"
+    "old = termios.tcgetattr(0); tty.setraw(0)\n"
+    "sys.stdout.write('\\x1b[?1049h\\x1b[?1000h\\x1b[?1006hREADY\\r\\n'); sys.stdout.flush()\n"
+    f"out = open({str(sw / 'read.bin')!r}, 'wb')\n"
+    "try:\n"
+    "    while True:\n"
+    "        b = os.read(0, 64); out.write(b); out.flush()\n"
+    "        if b'q' in b: break\n"
+    "finally:\n"
+    "    sys.stdout.write('\\x1b[?1000l\\x1b[?1006l\\x1b[?1049l'); termios.tcsetattr(0, termios.TCSADRAIN, old)\n")
+(sw / "t.rift").write_text("\n".join([
+    "wait_prompt", f"type python3 {sw}/track.py\\n", "wait 1500", "move 300 300",
+    # `scroll 0 N` is N/3 sideways notches: two left, then one right
+    "scroll 0 6", "wait 150", "scroll 0 -3", "wait 300", "type q", "wait 500", "quit"]) + "\n")
+with (sw / "app.log").open("w") as log:
+    rc = subprocess.run([str(binary), "--script", str(sw / "t.rift"), "--headless"],
+                        env=dict(env, XDG_CONFIG_HOME=str(sw / "cfg"), XDG_DATA_HOME=str(sw / "data")),
+                        stdout=log, stderr=log, timeout=60).returncode
+assert rc == 0, died("sideways-wheel run failed", sw / "app.log")
+sw_read = (sw / "read.bin").read_bytes()
+assert (len(re.findall(rb"\x1b\[<66;\d+;\d+M", sw_read)),
+        len(re.findall(rb"\x1b\[<67;\d+;\d+M", sw_read))) == (2, 1), sw_read
+
+# ⇧⌘T brings a closed tab back as it was: its name and colour, in its own
+# place in the strip (not last, not named for its folder)
+rc_ = scratch / "reopen-closed"
+for sub in ("cfg/rift", "data"):
+    (rc_ / sub).mkdir(parents=True, exist_ok=True)
+(rc_ / "t.rift").write_text("\n".join([
+    "wait_prompt", "key cmd+t", "wait_prompt", "key cmd+t", "wait_prompt",
+    # the middle tab (each 200 wide from x 114): renamed, then coloured
+    "dblclick 414 17", "wait 300", "type Zed", "key enter", "wait 300",
+    "rclick 414 17", "wait 300", "a11y click Red", "wait 300",
+    "key cmd+2", "wait 300", "key cmd+w", "wait 600", f"dump {rc_}/closed.txt",
+    "key cmd+shift+t", "wait_prompt", "wait 500", f"dump {rc_}/reopened.txt", "quit"]) + "\n")
+with (rc_ / "app.log").open("w") as log:
+    rc = subprocess.run([str(binary), "--script", str(rc_ / "t.rift"), "--headless"],
+                        env=dict(env, XDG_CONFIG_HOME=str(rc_ / "cfg"), XDG_DATA_HOME=str(rc_ / "data")),
+                        stdout=log, stderr=log, timeout=60).returncode
+assert rc == 0, died("reopen-closed run failed", rc_ / "app.log")
+rc_closed = (rc_ / "closed.txt").read_text()
+assert re.search(r'^window 0: tabs=2 ', rc_closed, re.M), rc_closed[:600]
+rc_dump = (rc_ / "reopened.txt").read_text()
+assert re.search(r'^window 0: tabs=3 active=1 .*titles=\["[^"]*", "Zed", "[^"]*"\]', rc_dump, re.M), rc_dump[:600]
+assert 'tab_tints=[None, Some("red"), None]' in rc_dump, rc_dump[:3000]
+
+# a program that died on the alternate screen (it never switched back): the
+# shell's next prompt puts the pane back on the main screen, with its blocks
+# and the command editor, instead of raw typing until `reset`
+sa = scratch / "stranded-alt"
+for sub in ("cfg/rift", "data"):
+    (sa / sub).mkdir(parents=True, exist_ok=True)
+(sa / "cfg/rift/config.toml").write_text(
+    f'shell = "{shutil.which("zsh")}"\nrestore_session = false\ndurable_sessions = false\nsync_os_theme = false\n')
+(sa / "t.rift").write_text("\n".join([
+    "wait_prompt", "type printf '\\\\033[?1049h\\\\033[?1000hSTRANDED\\\\n'\\n", "wait 1000",
+    f"dump {sa}/a.txt", "type echo after\\n", "wait 800", f"dump {sa}/b.txt", "quit"]) + "\n")
+with (sa / "app.log").open("w") as log:
+    rc = subprocess.run([str(binary), "--script", str(sa / "t.rift"), "--headless"],
+                        env=dict(env, XDG_CONFIG_HOME=str(sa / "cfg"), XDG_DATA_HOME=str(sa / "data")),
+                        stdout=log, stderr=log, timeout=60).returncode
+assert rc == 0, died("stranded-alt run failed", sa / "app.log")
+for name in ("a", "b"):
+    sa_dump = (sa / f"{name}.txt").read_text()
+    assert "editor_active=true" in sa_dump and re.search(r"^  pane \d+ .* alt=false ", sa_dump, re.M), \
+        (name, sa_dump[:3000])
+assert re.findall(r'^    block \d+ state=done .*? cmd="([^"]*)"', sa_dump, re.M)[-1] == "echo after", sa_dump[-3000:]
 
 # durable sessions: a window that dies (a crash) leaves its shell in the
 # session service, and the relaunch reattaches it and replays its output at
@@ -4647,7 +4779,9 @@ sl = scratch / "stall"
 (sl / "cfg/rift").mkdir(parents=True)
 (sl / "cfg/rift/config.toml").write_text(
     'shell = "/bin/bash"\nrestore_session = false\nsync_os_theme = false\n')
-(sl / "t.rift").write_text("wait_prompt\nsh sleep 5\nwait 6000\nquit\n")
+# 10 s: `sample` starts once the stall passes 2 s, and on a loaded machine
+# (the full gate set) it started over 3 s late, catching an idle main thread
+(sl / "t.rift").write_text("wait_prompt\nsh sleep 10\nwait 11000\nquit\n")
 with (sl / "log.txt").open("w") as log:
     rc = subprocess.run([str(binary), "--script", str(sl / "t.rift"), "--headless"],
                         env=dict(env, XDG_CONFIG_HOME=str(sl / "cfg"),
@@ -4660,7 +4794,7 @@ assert len(stalls) == 1, stalls
 stall = stalls[0].read_text()
 assert "the main thread is blocked: one pass of the event loop" in stall, stall[:500]
 lasted = int(re.search(r"^lasted about (\d+) ms$", stall, re.M)[1])
-assert 4500 <= lasted <= 7000, lasted
+assert 9500 <= lasted <= 12000, lasted
 if sys.platform == "darwin":
     # Optimized builds inline drive_script into the event-loop callback.
     main_stack = stall.split("com.apple.main-thread", 1)[1].split("Thread_", 1)[0]

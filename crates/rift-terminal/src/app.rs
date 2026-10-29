@@ -955,8 +955,10 @@ struct WindowState {
     toolbar_editor: Option<crate::views::toolbar_editor::ToolbarEditor>,
     toolbar_editor_layout: crate::views::toolbar_editor::Layout,
     scroll_accum: f32,
-    /// cwds of recently closed tabs (⇧⌘T reopens, newest last).
-    closed_tabs: Vec<Option<std::path::PathBuf>>,
+    /// [`Self::scroll_accum`] sideways (wheel reports 66/67).
+    scroll_accum_x: f32,
+    /// Recently closed tabs (⇧⌘T reopens, newest last).
+    closed_tabs: Vec<ClosedTab>,
     /// A block header's copy button just copied (pane, block, when): its
     /// icon shows a check for [`COPIED_SHOWN`].
     copied: Option<(PaneId, rift_core::BlockId, Instant)>,
@@ -1379,6 +1381,32 @@ fn bracketed_paste_on(pane: &PaneState) -> bool {
         .lock()
         .mode()
         .contains(TermMode::BRACKETED_PASTE)
+}
+
+/// What ⇧⌘T brings back of a closed tab: its directory (a local one), the
+/// user's name and colour for it, its pin and group, and its place in the
+/// strip. The shell starts fresh.
+#[derive(Debug, Clone)]
+struct ClosedTab {
+    cwd: Option<std::path::PathBuf>,
+    title: Option<String>,
+    color: Option<rift_core::tab_color::TabColor>,
+    pinned: bool,
+    group: Option<u64>,
+    index: usize,
+}
+
+/// The bytes that run `cmd` at `pane`'s prompt. Several lines go as one
+/// bracketed paste the shell accepts as one buffer (one command, one block);
+/// typed line by line the shell would run each alone, a block apiece.
+fn command_bytes(pane: &PaneState, cmd: &str) -> Vec<u8> {
+    if cmd.contains('\n') && bracketed_paste_on(pane) {
+        let mut b = input::bracketed_paste(cmd);
+        b.push(b'\n');
+        b
+    } else {
+        format!("{cmd}\n").into_bytes()
+    }
 }
 
 /// A link target's URL scheme (RFC 3986: a letter, then letters, digits,
@@ -1816,6 +1844,30 @@ fn config_errors_note(errors: usize) -> String {
     }
 }
 
+/// A config.toml error as a toast line: the cause first, without the file's
+/// path (the toast already names config.toml and opens it) or the TOML
+/// parser's source excerpt, so the reason survives the toast's ellipsis.
+fn config_error_summary(error: &str) -> String {
+    let error = rift_core::config::config_path()
+        .and_then(|p| {
+            error
+                .strip_prefix(&format!("{}: ", p.display()))
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| error.to_string());
+    let lines: Vec<&str> = error
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    match lines.as_slice() {
+        [first, .., last] if first.starts_with("TOML parse error at ") => {
+            format!("{}: {last}", &first["TOML parse error at ".len()..])
+        }
+        _ => lines.join(" "),
+    }
+}
+
 /// Lines of a large paste the confirmation shows.
 const LARGE_PASTE_PREVIEW: usize = 5;
 
@@ -1998,6 +2050,7 @@ impl WindowState {
             toolbar_editor: None,
             toolbar_editor_layout: Default::default(),
             scroll_accum: 0.0,
+            scroll_accum_x: 0.0,
             closed_tabs: Vec::new(),
             copied: None,
             capture: None,
@@ -2480,7 +2533,10 @@ impl App {
 
     fn save_config(&mut self) {
         if let Some(e) = &self.config_error {
-            let msg = format!("Settings not saved: fix config.toml first — {e}");
+            let msg = format!(
+                "Settings not saved: fix config.toml first — {}",
+                config_error_summary(e)
+            );
             self.toast_as(
                 crate::views::confirm::ToastKind::Error,
                 msg,
@@ -2568,6 +2624,27 @@ impl App {
                 self.win
                     .toasts
                     .retain(|t| t.action != Some(ToastAction::OpenConfig));
+                // a `shell` that runs nothing: say which one runs instead
+                if let Some(shell) = self
+                    .config
+                    .shell
+                    .as_deref()
+                    .filter(|s| !s.trim().is_empty())
+                {
+                    let path = std::env::var_os("PATH");
+                    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+                    if rift_core::profiles::find_program(shell, path.as_deref(), home.as_deref())
+                        .is_none()
+                    {
+                        let global = rift_core::shell_integration::resolve_shell(Some(shell));
+                        self.toast_as(
+                            crate::views::confirm::ToastKind::Error,
+                            format!("shell {shell:?} is not an executable; new panes run {global}"),
+                            None,
+                            Some(ToastAction::OpenConfig),
+                        );
+                    }
+                }
                 if !startup {
                     self.win.settings.saved_at = Some(Instant::now());
                 }
@@ -2579,7 +2656,7 @@ impl App {
                 }
                 self.toast_as(
                     crate::views::confirm::ToastKind::Error,
-                    format!("config.toml not applied: {e}"),
+                    format!("config.toml not applied: {}", config_error_summary(&e)),
                     None,
                     Some(ToastAction::OpenConfig),
                 );
@@ -4102,10 +4179,9 @@ impl App {
                     let RowKind::Grid { abs, content_x } = row.kind else {
                         continue;
                     };
-                    let Some(text) = terminal::session_line_text(&pane.session, abs) else {
-                        continue;
-                    };
-                    for (col, len, token) in terminal::path_tokens(&text) {
+                    // a path soft-wrapped onto the next rows: one hint where
+                    // it starts
+                    for (col, len, token) in terminal::session_path_tokens(&pane.session, abs) {
                         if let Some(path) = Self::resolve_path(pane, abs, &token) {
                             let rect = [
                                 content_x + col as f32 * g.cell_w,
@@ -7379,14 +7455,17 @@ impl App {
                                 && text.chars().count() == 1
                                 && !self.win.palette.mode.takes_text()
                         })
-                        .and_then(crate::views::palette::mode_for_prefix)
-                        .filter(|m| *m != self.win.palette.mode);
-                    if let Some(mode) = prefix {
-                        self.open_palette(mode);
-                    } else {
-                        self.win.palette.type_text(text);
-                        self.win.palette.selected = 0;
-                        self.refresh_palette();
+                        .and_then(crate::views::palette::mode_for_prefix);
+                    // the prefix of the mode already shown (`>` in Actions)
+                    // stays out of the query: it would match nothing
+                    match prefix {
+                        Some(mode) if mode == self.win.palette.mode => {}
+                        Some(mode) => self.open_palette(mode),
+                        None => {
+                            self.win.palette.type_text(text);
+                            self.win.palette.selected = 0;
+                            self.refresh_palette();
+                        }
                     }
                 }
             }
@@ -8984,7 +9063,14 @@ impl App {
             let cwd = tab
                 .active()
                 .and_then(|p| p.session.local_cwd().or_else(|| p.last_git_cwd.clone()));
-            self.win.closed_tabs.push(cwd.map(std::path::PathBuf::from));
+            self.win.closed_tabs.push(ClosedTab {
+                cwd: cwd.map(std::path::PathBuf::from),
+                title: tab.custom_title.clone(),
+                color: tab.color,
+                pinned: tab.pinned,
+                group: tab.group,
+                index: tab_idx,
+            });
             if self.win.closed_tabs.len() > 10 {
                 self.win.closed_tabs.remove(0);
             }
@@ -10874,6 +10960,7 @@ impl App {
                     ed_cols,
                     None,
                     ghost_ui,
+                    area[1] + editor::CHIPS_TOP >= body[1],
                 );
                 // the ghost text's chips: the accept-key menu and the ✕
                 if let Some(rect) = anchor.3.key {
@@ -12975,8 +13062,8 @@ impl App {
                 }
             }
             AppAction::ReopenClosedTab => {
-                if let Some(cwd) = self.win.closed_tabs.pop() {
-                    self.spawn_profile_tab(cwd, None);
+                if let Some(closed) = self.win.closed_tabs.pop() {
+                    self.reopen_closed_tab(closed);
                 }
             }
             AppAction::ScrollUp | AppAction::ScrollDown => {
@@ -13715,22 +13802,11 @@ impl App {
                 Some((ClickTarget::SettingsSlider(id), _)),
             ) => {
                 let step = if matches!(event.logical_key, Key::Named(NamedKey::ArrowLeft)) {
-                    -0.05
+                    -1.0
                 } else {
-                    0.05
+                    1.0
                 };
-                let t = match id {
-                    "line_height" => (self.config.line_height() - 1.0) / 1.2,
-                    "window_opacity" => settings::opacity_slider(self.config.opacity()),
-                    "window_blur" => settings::blur_slider(self.config.blur()),
-                    "inactive_pane_dim" => settings::dim_slider(self.config.inactive_pane_dim),
-                    id if id.starts_with("collection.") => self.collection_color_value(id),
-                    _ => return true,
-                };
-                self.set_slider(id, (t + step).clamp(0.0, 1.0));
-                if !id.starts_with("collection.") {
-                    self.save_config();
-                }
+                self.step_slider(id, step);
             }
             (key, Some((target, rect)))
                 if press_key(key) && !matches!(target, ClickTarget::SettingsSlider(_)) =>
@@ -14447,7 +14523,7 @@ impl App {
                 let branch = pane.git.as_ref().map(|g| g.branch.clone());
                 stamp_submit(&pane.session, cwd, branch, &cmd);
                 pane.prepare_program_grid();
-                pane.session.write(format!("{cmd}\n").as_bytes());
+                pane.session.write(&command_bytes(pane, &cmd));
                 submitted = Some((pane.session.id, cmd));
                 edited = false;
             }
@@ -15692,7 +15768,7 @@ impl App {
         let branch = pane.git.as_ref().map(|g| g.branch.clone());
         stamp_submit(&pane.session, cwd, branch, cmd);
         pane.prepare_program_grid();
-        pane.session.write(format!("{cmd}\n").as_bytes());
+        pane.session.write(&command_bytes(pane, cmd));
     }
 }
 
@@ -18364,6 +18440,35 @@ impl App {
         };
         let lines = self.win.scroll_accum as i32;
         self.win.scroll_accum -= lines as f32;
+        // sideways goes only to a program that tracks the mouse (xterm's
+        // buttons 66/67); positive: left
+        self.win.scroll_accum_x += match delta {
+            MouseScrollDelta::LineDelta(x, _) => x,
+            MouseScrollDelta::PixelDelta(p) => p.x as f32 / self.line_h,
+        };
+        let cols = self.win.scroll_accum_x as i32;
+        self.win.scroll_accum_x -= cols as f32;
+        if cols != 0
+            && !self.win.settings.open
+            && !self.win.palette.open
+            && self.win.confirm.is_none()
+            && !self.win.context_menu.open
+            && let Some(target) = self
+                .pane_under_mouse()
+                .or_else(|| self.win.tabs.get(self.win.active).map(|t| t.active_pane))
+            && let Some(cell) = self
+                .mouse_tracking(target)
+                .and_then(|_| self.mouse_cell(target))
+        {
+            let button = if cols > 0 {
+                crate::mouse::WHEEL_LEFT
+            } else {
+                crate::mouse::WHEEL_RIGHT
+            };
+            let count = cols.unsigned_abs().min(crate::mouse::MAX_WHEEL_EVENTS);
+            let report = crate::mouse::Wheel::Report { button, count };
+            self.apply_wheel(target, report, cell, self.win.modifiers);
+        }
         if lines == 0 {
             return;
         }
@@ -18942,6 +19047,23 @@ impl App {
         };
         for cmd in cmds {
             self.submit_to(pane, &cmd);
+        }
+    }
+
+    /// One keyboard (or assistive-technology) step of Settings slider `id`:
+    /// `dir` +1 right, −1 left, 5 % of its track; saved like a drag.
+    fn step_slider(&mut self, id: &str, dir: f32) {
+        let t = match id {
+            "line_height" => (self.config.line_height() - 1.0) / 1.2,
+            "window_opacity" => settings::opacity_slider(self.config.opacity()),
+            "window_blur" => settings::blur_slider(self.config.blur()),
+            "inactive_pane_dim" => settings::dim_slider(self.config.inactive_pane_dim),
+            id if id.starts_with("collection.") => self.collection_color_value(id),
+            _ => return,
+        };
+        self.set_slider(id, (t + 0.05 * dir).clamp(0.0, 1.0));
+        if !id.starts_with("collection.") {
+            self.save_config();
         }
     }
 
@@ -20673,7 +20795,7 @@ impl App {
             Some(Overlay::Dialog {
                 label: menu.kind.title().into(),
                 input: Some(("Search".into(), menu.query.clone())),
-                status: Some(format!("{} results", results.len())),
+                status: Some(crate::views::palette::counted(results.len(), "result")),
                 controls,
                 rect: Some(self.win.chip_menu_card),
             })
@@ -20820,8 +20942,16 @@ impl App {
         } else if self.win.palette.open {
             Some(Overlay::Dialog {
                 label: "Command palette".into(),
-                input: Some(("Search commands".into(), self.win.palette.query.clone())),
-                status: Some(format!("{} results", self.win.palette_results.len())),
+                input: Some((
+                    crate::views::palette::placeholder(self.win.palette.mode)
+                        .trim_end_matches('…')
+                        .into(),
+                    self.win.palette.query.clone(),
+                )),
+                status: Some(crate::views::palette::counted(
+                    self.win.palette_results.len(),
+                    "result",
+                )),
                 // the mode chips, then the rows
                 controls: self
                     .win
@@ -20904,10 +21034,10 @@ impl App {
                                 .as_ref()
                                 .is_some_and(|d| d.current == Some(*i)),
                         ),
+                        ClickTarget::SettingsSlider(_) => (Role::Slider, None, false),
                         ClickTarget::SettingsClose
                         | ClickTarget::SettingsStep(..)
                         | ClickTarget::SettingsCycle(_)
-                        | ClickTarget::SettingsSlider(_)
                         | ClickTarget::SettingsReset(_)
                         | ClickTarget::SettingsOpenConfig
                         | ClickTarget::SettingsCopyVersion
@@ -21631,12 +21761,25 @@ impl App {
                 self.update_a11y(&window);
             }
             A::ActionRequested(req) => {
-                if !crate::a11y::activates(req.action) {
-                    return;
-                }
                 let Some(r) = self.win.a11y_targets.get(&req.target_node).copied() else {
                     return;
                 };
+                // a Settings slider's step (VoiceOver's swipe up / down)
+                if let Some(dir) = crate::a11y::slider_step(req.action) {
+                    let (cx, cy) = (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
+                    let id = self.win.hits.iter().find_map(|h| match h.target {
+                        ClickTarget::SettingsSlider(id) if h.contains(cx, cy) => Some(id),
+                        _ => None,
+                    });
+                    if let Some(id) = id {
+                        self.step_slider(id, dir);
+                        window.request_redraw();
+                    }
+                    return;
+                }
+                if !crate::a11y::activates(req.action) {
+                    return;
+                }
                 // act exactly like a pointer click on the node
                 let saved = self.win.mouse;
                 self.win.mouse = (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
@@ -25805,6 +25948,22 @@ fn caret_key(key: &EditorKey, pairs: bool) -> Option<CaretOp> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_config_error_toast_leads_with_the_cause() {
+        let parse = toml::from_str::<Config>("font_size = \"big\"\n")
+            .unwrap_err()
+            .to_string();
+        let path = rift_core::config::config_path().unwrap();
+        assert_eq!(
+            config_error_summary(&format!("{}: {parse}", path.display())),
+            "line 1, column 13: invalid type: string \"big\", expected f32"
+        );
+        assert_eq!(
+            config_error_summary(&format!("{}: an action calls itself", path.display())),
+            "an action calls itself"
+        );
+    }
 
     #[test]
     fn a_large_paste_is_described_by_size_and_lines() {

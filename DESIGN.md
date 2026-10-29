@@ -116,7 +116,7 @@ glyphon; shaped runs are cached by content.
 | Palette width / search / mode chips / row | 640 px / 48 px / 40 px / 36 px | `MODAL_W`, `SEARCH_H`, `MODES_H`, `ROW_H` |
 | Completion panel header / row / footer | 32 px / 28 px / 30 px (pane width, ≤ 8 rows) | `HEADER_H`, `ROW_H`, `FOOTER_H` |
 | History pane header / row / footer | 32 px / 28 px / 30 px (pane width, ≤ 8 rows) | `history::HEADER_H`, `ROW_H`, `FOOTER_H` |
-| Context menu width / row | 240 px / 28 px | `MENU_W`, `ROW_H` |
+| Context menu width / row | 240 px (up to 320 px for a long label) / 28 px | `MENU_W`, `MENU_MAX_W`, `ROW_H` |
 | Settings sidebar width / row / body | 232 px / 52 px / ≤ 720 px | `SIDEBAR_W`, `ROW_H`, `BODY_MAX_W` |
 | Settings controls | 28 px tall; toggle 34 × 20; select 220 px | `CONTROL_H` |
 | Welcome list width / row | 560 px / 36 px | `welcome::WIDTH`, `ROW_H` |
@@ -314,7 +314,7 @@ No other animation. Motion never delays input.
   a hairline on the edge toward the output. Header 32 px (the panel's name
   and count, or scope chips, in small caps), rows 28 px with a 7 % selection (history adds a
   2 px `accent` edge), a key-hint footer of caps and labels.
-- **Context menus**: 240 px `surface`, radius 4, 28 px rows: icon column,
+- **Context menus**: 240 px `surface` (wider, up to 320 px, when a label and its shortcut need it), radius 4, 28 px rows: icon column,
   label, the shortcut in `text_muted` at the right; rows that close
   something are `error`; separators are hairlines.
 - **Tooltips**: 24 px `surface` card, radius 4, hairline edge and a soft

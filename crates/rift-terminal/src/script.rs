@@ -60,7 +60,8 @@
 //!                          # macOS or a second process hands it over
 //! a11y click Match case    # an assistive-technology action request
 //!                          # (click, focus, blur, expand, collapse,
-//!                          # scroll_into_view, show_context_menu) on the
+//!                          # scroll_into_view, show_context_menu,
+//!                          # increment, decrement) on the
 //!                          # accessibility node with that label, as
 //!                          # VoiceOver or Orca sends it
 //! fault clipboard          # headless only: the clipboard backend is
@@ -387,6 +388,8 @@ pub fn parse(src: &str) -> Result<Vec<Step>, String> {
                     "collapse" => A::Collapse,
                     "scroll_into_view" => A::ScrollIntoView,
                     "show_context_menu" => A::ShowContextMenu,
+                    "increment" => A::Increment,
+                    "decrement" => A::Decrement,
                     other => return Err(bad(&format!("unknown a11y action {other:?}"))),
                 };
                 Step::A11y(action, label.trim().to_string())

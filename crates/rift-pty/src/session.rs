@@ -1589,6 +1589,13 @@ impl Session {
             }
             return;
         }
+        // keys typed into a running command are read by the shell's next
+        // prompt: its echo there is not a background job's output. A lock
+        // held by this thread (or the reader for a moment) skips the note;
+        // the next key makes it.
+        if let Ok(mut blocks) = self.blocks.try_lock() {
+            blocks.note_input();
+        }
         self.write_scroll(bytes);
     }
 
@@ -2186,6 +2193,22 @@ fn feed(
                 {
                     ctx.blocks.lock().unwrap().mark_unterminated();
                 }
+                // the shell prompts again after its command finished, still on
+                // the alternate screen: that program died without leaving it
+                // (a crash, kill -9). The prompt belongs on the main screen,
+                // under the blocks; a program still running (tmux, vim) has no
+                // finished block, so it is never touched
+                if matches!(marker, Marker::PromptStart)
+                    && term.mode().contains(TermMode::ALT_SCREEN)
+                    && ctx
+                        .blocks
+                        .lock()
+                        .unwrap()
+                        .last()
+                        .is_some_and(|b| matches!(b.state, rift_core::BlockState::Done { .. }))
+                {
+                    leave_stranded_alt(parser, &mut term, &mut scrolled_cur, ctx);
+                }
                 apply_marker(marker, &term, scrolled_cur, ctx)
             }
             None => {}
@@ -2258,6 +2281,36 @@ fn end_partial_line(
     };
     parser.advance(&mut abs, b"\r\n");
     true
+}
+
+/// Undo what a full-screen program that died left on: the alternate screen
+/// (back to the main one and its cursor), mouse reporting, a hidden cursor,
+/// application cursor keys and keypad, and kitty keyboard flags, as `reset`
+/// would for these. Through the parser, so the line count stays right.
+fn leave_stranded_alt(
+    parser: &mut vte::ansi::Processor,
+    term: &mut Term<EventProxy>,
+    scrolled: &mut u64,
+    ctx: &FeedCtx,
+) {
+    vte::ansi::Handler::pop_keyboard_modes(&mut *term, u16::MAX);
+    let mut abs = AbsTerm {
+        term,
+        scrolled,
+        scrollback_cap: ctx.scrollback,
+        saw_clear_saved: false,
+        on_resize: None,
+    };
+    parser.advance(
+        &mut abs,
+        b"\x1b[?1049l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\
+          \x1b[?1015l\x1b[?1004l\x1b[?1l\x1b>\x1b[?25h",
+    );
+    ctx.graphics.lock().unwrap().drop_alt();
+    let mut progress = ctx.progress.lock().unwrap();
+    if progress.is_some_and(|p| p.alt) {
+        *progress = None;
+    }
 }
 
 fn cell_px(ws: &Mutex<WindowSize>) -> (u32, u32) {

@@ -217,6 +217,9 @@ impl ContextMenuState {
 }
 
 pub const MENU_W: f32 = 240.0;
+/// The widest a menu grows for a long label and its shortcut; past it a
+/// label (a profile's name) ends in … before the shortcut.
+const MENU_MAX_W: f32 = 320.0;
 pub const ROW_H: f32 = 28.0;
 const SEP_H: f32 = 9.0;
 
@@ -362,12 +365,43 @@ pub fn render(
     let scale = ((h - 16.0 - 8.0) / natural_h.max(1.0)).clamp(0.5, 1.0);
     let (row_h, sep_h) = (ROW_H * scale, SEP_H * scale);
     let menu_h = state.items.len() as f32 * row_h + seps * sep_h + 8.0;
-    let x = state.pos.0.min(w - MENU_W - 8.0).max(8.0);
+    let font = if row_h < 24.0 { 12.0 } else { 13.0 };
+    // each row's shortcut from the live keymap, and its column's width
+    let shortcuts: Vec<(Option<String>, f32)> = state
+        .items
+        .iter()
+        .map(|item| {
+            let keys = shortcut_actions(item.action)
+                .iter()
+                .find_map(|a| keymap.preferred(a).map(|b| b.chips().concat()));
+            let kw = keys
+                .as_ref()
+                .map(|k| engine.measure(k, 11.5, FONT_SANS, Weight::NORMAL) + 12.0)
+                .unwrap_or(0.0);
+            (keys, kw)
+        })
+        .collect();
+    // wide enough for every label beside its shortcut, within the cap
+    let natural_w = state
+        .items
+        .iter()
+        .zip(&shortcuts)
+        .map(|(item, (_, kw))| {
+            let weight = if item.bold {
+                Weight::BOLD
+            } else {
+                Weight::NORMAL
+            };
+            engine.measure(&item.label, font, FONT_SANS, weight) + 42.0 + kw + 8.0
+        })
+        .fold(MENU_W, f32::max);
+    let menu_w = natural_w.min(MENU_MAX_W).min((w - 16.0).max(MENU_W));
+    let x = state.pos.0.min(w - menu_w - 8.0).max(8.0);
     let y = state.pos.1.min(h - menu_h - 8.0).max(8.0);
 
     layer.shadow(
         [x, y + 6.0],
-        [MENU_W, menu_h],
+        [menu_w, menu_h],
         Color::BLACK.with_alpha(if theme.is_light() { 0.25 } else { 0.5 }),
         4.0,
         14.0,
@@ -377,17 +411,16 @@ pub fn render(
     } else {
         Color::WHITE.with_alpha(0.1)
     };
-    layer.bordered([x, y], [MENU_W, menu_h], theme.surface, edge, 4.0, 1.0);
+    layer.bordered([x, y], [menu_w, menu_h], theme.surface, edge, 4.0, 1.0);
 
-    let font = if row_h < 24.0 { 12.0 } else { 13.0 };
     let mut rects = Vec::new();
     let mut ry = y + 4.0;
     for (i, item) in state.items.iter().enumerate() {
         if item.separator {
-            layer.hline(x + 8.0, ry + sep_h / 2.0, MENU_W - 16.0, 1.0, edge);
+            layer.hline(x + 8.0, ry + sep_h / 2.0, menu_w - 16.0, 1.0, edge);
             ry += sep_h;
         }
-        let rect = [x + 4.0, ry, MENU_W - 8.0, row_h];
+        let rect = [x + 4.0, ry, menu_w - 8.0, row_h];
         if state.selected == Some(i) && item.enabled {
             layer.rect(
                 [rect[0], rect[1]],
@@ -431,13 +464,7 @@ pub fn render(
             };
             icons::draw(layer, icon, [rect[0] + 16.0, cy], 14.0, ic);
         }
-        let keys = shortcut_actions(item.action)
-            .iter()
-            .find_map(|a| keymap.preferred(a).map(|b| b.chips().concat()));
-        let kw = keys
-            .as_ref()
-            .map(|k| engine.measure(k, 11.5, FONT_SANS, Weight::NORMAL) + 12.0)
-            .unwrap_or(0.0);
+        let (keys, kw) = shortcuts[i].clone();
         // a long label (a profile's name) ends in … before the shortcut
         let weight = if item.bold {
             Weight::BOLD

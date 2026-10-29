@@ -1341,6 +1341,26 @@ fn urls_on_row(g: &CellGrid, scrolled: u64, abs: u64) -> Vec<(usize, usize, Stri
         .collect()
 }
 
+/// Path-like tokens ([`path_tokens`]) that start on absolute row `abs` of
+/// `session`, one soft-wrapped onto the rows below included whole: (col,
+/// cells on this row, token).
+pub fn session_path_tokens(session: &Session, abs: u64) -> Vec<(usize, usize, String)> {
+    let scrolled = session.scrolled.load(std::sync::atomic::Ordering::Acquire);
+    let term = session.term.lock();
+    let g = term.grid();
+    let cols = g.columns();
+    if cols == 0 {
+        return Vec::new();
+    }
+    let (text, first) = wrapped_line(g, scrolled, abs);
+    let start = (abs - first) as usize * cols;
+    path_tokens(text.trim_end_matches(' '))
+        .into_iter()
+        .filter(|(col, _, _)| (start..start + cols).contains(col))
+        .map(|(col, len, token)| (col - start, len.min(start + cols - col), token))
+        .collect()
+}
+
 /// The soft-wrapped line around absolute row `abs`, one char per cell (so
 /// char `i` is row `first + i / cols`, column `i % cols`), and its first
 /// row. Looks at most `WRAP_SPAN` rows each way.
@@ -3732,7 +3752,15 @@ fn render_header(
     // running: a 9px spinner + 6px gap lead the label (design 02)
     let spin_w = if running { 15.0 } else { 0.0 };
     let badge_w = badge_text.chars().count() as f32 * 6.8 + 16.0 + spin_w;
-    let left_limit = grid.right - 13.0 - 6.0 - 10.0 - duration_w - badge_w - 12.0;
+    // right side, from the edge: menu (⋮), copy icon, duration, badge pill
+    let right = grid.right;
+    let icon_w = 13.0;
+    let menu_w = 9.0;
+    let menu_x = right - menu_w - 4.0;
+    let icon_x = menu_x - icon_w - 9.0;
+    let badge_left = icon_x - 10.0 - duration_w - badge_w;
+    // a gap before the pill, so "comm…" never touches it
+    let left_limit = badge_left - 10.0;
 
     // command (bright), one line, ellipsized to the space it has
     let cmd_x = content_x + 10.0 + 11.0;
@@ -3847,12 +3875,7 @@ fn render_header(
         layer.text(xbuf, after_cmd_x + 3.0, y, theme.text_dim);
     }
 
-    // right side: badge pill, duration, copy icon, menu (⋮)
-    let right = grid.right;
-    let icon_w = 13.0;
-    let menu_w = 9.0;
-    let menu_x = right - menu_w - 4.0;
-    let icon_x = menu_x - icon_w - 9.0;
+    // right side: badge pill, duration, copy icon, menu (⋮), laid out above
 
     // the copy icon (two overlapping rounded-rect outlines, a check for a
     // moment after a copy) and the menu's three stacked dots: only while

@@ -1191,6 +1191,8 @@ fn draw_tab(
             3.0,
             1.0,
         );
+        // a name wider than the field shows its end, where the caret is
+        let edit = &elide_start(engine, edit, 12.5, fw - 4.0);
         let ew = engine.measure(edit, 12.5, FONT_SANS, Weight::NORMAL);
         if tab.editing_selected && !edit.is_empty() {
             layer.rect(

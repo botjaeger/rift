@@ -11,6 +11,9 @@ pub const RIGHT: u8 = 2;
 pub const NONE: u8 = 3;
 pub const WHEEL_UP: u8 = 64;
 pub const WHEEL_DOWN: u8 = 65;
+/// Sideways wheel (a trackpad's x, a tilt wheel): left, right.
+pub const WHEEL_LEFT: u8 = 66;
+pub const WHEEL_RIGHT: u8 = 67;
 
 /// Encoding flags taken from the terminal mode.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]

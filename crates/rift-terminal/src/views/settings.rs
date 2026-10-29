@@ -1138,17 +1138,21 @@ pub fn render(
         ny += 30.0 + 10.0;
     }
 
-    // a short window closes the 2 px gaps between the page rows before the
-    // foot (Open config.toml) runs out of room
+    // a short window closes the 2 px gaps between the page rows, then
+    // shortens the rows (down to 22 px), before the foot (Open config.toml)
+    // runs out of room
     let foot_room = 8.0 + 40.0;
-    let pitch = if ny + Page::ALL.len() as f32 * 34.0 + foot_room > bottom {
-        32.0
-    } else {
+    let fit = (bottom - foot_room - ny) / Page::ALL.len() as f32;
+    let pitch = if fit >= 34.0 {
         34.0
+    } else {
+        fit.clamp(22.0, 32.0)
     };
+    let row_h = pitch.min(32.0);
+    let mid = row_h / 2.0;
     for (i, page) in Page::ALL.iter().enumerate() {
         let selected = state.page == *page && state.query.is_empty();
-        let row = [x0 + 8.0, ny, sidebar_w - 16.0, 32.0];
+        let row = [x0 + 8.0, ny, sidebar_w - 16.0, row_h];
         if selected {
             layer.rect([row[0], row[1]], [row[2], row[3]], lift(theme, 0.07), 4.0);
         } else if hot(row) {
@@ -1164,12 +1168,12 @@ pub fn render(
         } else {
             row[0] + 10.0 + 8.0
         };
-        icons::draw(layer, page.icon(), [icon_x, ny + 16.0], 16.0, color);
+        icons::draw(layer, page.icon(), [icon_x, ny + mid], 16.0, color);
         if !compact {
             layer.text(
                 sans(engine, page.label(), 13.0, Weight::NORMAL),
                 row[0] + 36.0,
-                ny + 7.5,
+                ny + mid - 8.5,
                 color,
             );
         }
@@ -1190,7 +1194,7 @@ pub fn render(
 
     // sidebar foot: open config.toml in the reading pane
     let foot = [x0 + 8.0, bottom - 40.0, sidebar_w - 16.0, 32.0];
-    if foot[1] > ny + 8.0 {
+    if foot[1] + 0.5 >= ny + 8.0 {
         if hot(foot) {
             layer.rect(
                 [foot[0], foot[1]],

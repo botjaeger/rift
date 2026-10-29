@@ -243,6 +243,9 @@ pub fn render(
     // prompt chips; its text is prose, not a command (no syntax colors)
     header: Option<(&str, &str)>,
     ghost_ui: GhostUi,
+    // the chip row is in view: a pane shorter than the zone puts it under
+    // its header, where only the chips' frames would show
+    chips_visible: bool,
 ) -> ((f32, f32), (f32, f32), DrawnChips, GhostRects) {
     let mut ghost_rects = GhostRects::default();
     let [x, y, w, _h] = area;
@@ -278,14 +281,16 @@ pub fn render(
     } else {
         // ── prompt context (design 01): ⇕ ~/cwd on ⎇ branch ↑n ──
         let views = pane_chip_views(config, theme, pane, elapsed);
-        chips = draw_chips(
-            layer,
-            engine,
-            theme,
-            [x + PAD_X, x + w - PAD_X],
-            y + CHIPS_TOP,
-            &views,
-        );
+        if chips_visible {
+            chips = draw_chips(
+                layer,
+                engine,
+                theme,
+                [x + PAD_X, x + w - PAD_X],
+                y + CHIPS_TOP,
+                &views,
+            );
+        }
         let rows = chip_rows(engine, &views, w);
         y + input_offset(config.prompt, rows)
     };

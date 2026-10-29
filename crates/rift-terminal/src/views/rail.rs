@@ -377,7 +377,12 @@ fn group_row(
         theme.text_dim,
     );
     layer.rect([24.0, mid - 6.0], [3.0, 12.0], g.color, 1.5);
-    let label = g.editing.clone().unwrap_or_else(|| g.name.clone());
+    // up to the count; a name being typed shows its end, where the caret is
+    let room = row[2] - 12.0 - 30.0 - 34.0;
+    let label = match &g.editing {
+        Some(e) => elide_start(engine, e, 12.0, room - 12.0),
+        None => elide(engine, &g.name, 12.0, room),
+    };
     let b = make_text(engine, &label, 12.0, FONT_SANS, Weight::MEDIUM);
     layer.text(b, 34.0, mid - 8.0, theme.text_bright);
     if g.editing.is_some() {
@@ -549,6 +554,8 @@ fn tab_row(
             4.0,
             1.0,
         );
+        // a name wider than the field shows its end, where the caret is
+        let edit = &elide_start(engine, edit, 12.5, fw - 12.0);
         let tw = engine.measure(edit, 12.5, FONT_SANS, Weight::NORMAL);
         if tab.editing_selected && !edit.is_empty() {
             layer.rect([cx - 1.0, line1], [tw + 2.0, 16.0], theme.selection, 2.0);

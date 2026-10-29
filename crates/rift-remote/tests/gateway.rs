@@ -3336,12 +3336,16 @@ fn a_slow_client_gets_the_newest_screen_not_a_queue_of_them() {
         .iter()
         .map(|l| l[1].clone())
         .collect();
-    // 60 changes over 3 s while the client reads nothing
+    // 60 changes over 3 s while the client reads nothing. The screens are
+    // built first: building them on the way stretched the stall past the
+    // gateway's write timeout on a loaded runner, which then (rightly)
+    // dropped the client
     const CHANGES: usize = 60;
+    let screens: Vec<Screen> = (1..=CHANGES).map(screen_n).collect();
     let fake = env.fake.clone();
     let writer = std::thread::spawn(move || {
-        for n in 1..=CHANGES {
-            fake.set_screen(12, screen_n(n));
+        for screen in screens {
+            fake.set_screen(12, screen);
             std::thread::sleep(Duration::from_millis(50));
         }
     });

@@ -54,6 +54,7 @@ pub fn render(
         cols,
         Some(("Compose for", pane.composer.label.as_str())),
         editor::GhostUi::default(),
+        true,
     );
     let hint = crate::composer::hint(config.rich_input_submit);
     let mut b = Buffer::new(&mut engine.font_system, Metrics::new(11.0, HINT_H));

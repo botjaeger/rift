@@ -216,6 +216,16 @@ pub fn activates(action: Action) -> bool {
     action == Action::Click
 }
 
+/// A slider's step for an assistive-technology request: +1 Increment, −1
+/// Decrement, else none.
+pub fn slider_step(action: Action) -> Option<f32> {
+    match action {
+        Action::Increment => Some(1.0),
+        Action::Decrement => Some(-1.0),
+        _ => None,
+    }
+}
+
 struct Tree {
     nodes: Vec<(NodeId, Node)>,
     targets: HashMap<NodeId, [f32; 4]>,
@@ -245,6 +255,10 @@ impl Tree {
         }
         if c.disabled {
             node.set_disabled();
+        } else if c.role == Role::Slider {
+            // a step either way, as ← and → take it
+            node.add_action(Action::Increment);
+            node.add_action(Action::Decrement);
         }
         self.add(id, node, c.rect, !c.disabled);
         id
