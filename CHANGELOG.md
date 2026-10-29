@@ -8,6 +8,15 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.23.1 — 2026-10-29
+
+### Fixed
+
+- **Quitting starts fresh again** — With Remote access on, ⌘Q kept your shells running and
+  reopened the old tabs on the next launch, without asking once "Don't ask again" was ticked.
+  A quit now always ends the shells, and Rift opens with one new tab. The menu bar icon still
+  stays so your phone can open shells; Quit Rift Completely ends that too.
+
 ## 0.23.0 — 2026-10-27
 
 Structured settings are now edited in Settings instead of config.toml, and Tab on a
