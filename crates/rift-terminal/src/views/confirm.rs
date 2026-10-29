@@ -217,8 +217,7 @@ pub struct Dialog<'a> {
     /// The keyboard stands on the dismiss button (Tab / ←) instead of the
     /// confirm one: it gets the focus ring.
     pub focus_cancel: bool,
-    /// A third button at the footer's left (Discard; ⌘⌫), in place of a
-    /// checkbox.
+    /// A third button at the footer's left (Discard; ⌘⌫).
     pub extra_label: Option<&'a str>,
     /// The confirm button is shown but does nothing (Save while the text
     /// has errors).
@@ -233,16 +232,13 @@ const BUTTON_H: f32 = 30.0;
 /// Confirmation modal (close with running processes, multiline paste,
 /// revert, remote install, update): title and description, the affected lines in
 /// an inset list, then a footer bar with Cancel (esc) and the confirm
-/// button (⏎). `checkbox`: a box at the footer's left (its label and whether
-/// it is ticked; Space toggles it). Returns [cancel, confirm, checkbox] hit
-/// rects (the box's is empty without one).
-#[allow(clippy::too_many_arguments)]
+/// button (⏎). Returns [cancel, confirm, extra button] hit rects (the extra
+/// button's is empty without one).
 pub fn render(
     layer: &mut Layer,
     engine: &mut TextEngine,
     theme: &Theme,
     dialog: &Dialog,
-    checkbox: Option<(&str, bool)>,
     w: f32,
     h: f32,
     scale: f32,
@@ -500,7 +496,7 @@ pub fn render(
         2.0,
     );
 
-    // "Don't ask again" (or the third button) at the footer's left
+    // the third button (Discard) at the footer's left
     let mut check = [0.0; 4];
     if let Some(label) = dialog.extra_label {
         let lw = engine.measure(label, 13.0, FONT_SANS, Weight::MEDIUM);
@@ -531,53 +527,6 @@ pub fn render(
             label_y + 1.5,
             theme.text_muted,
         );
-    } else if let Some((label, ticked)) = checkbox {
-        const BOX: f32 = 14.0;
-        let lw = engine.measure(label, 12.5, FONT_SANS, Weight::NORMAL);
-        let kw = hint_w(engine, "space");
-        // a narrow window drops the key hint rather than run under Cancel
-        let room = cancel[0] - 8.0 - (x + pad);
-        let hint = BOX + 8.0 + lw + 8.0 + kw <= room;
-        let cw = if hint {
-            BOX + 8.0 + lw + 8.0 + kw
-        } else {
-            (BOX + 8.0 + lw).min(room.max(BOX))
-        };
-        check = [x + pad, by, cw, BUTTON_H];
-        let by0 = by + (BUTTON_H - BOX) / 2.0;
-        if ticked {
-            layer.rect([check[0], by0], [BOX, BOX], theme.accent, 3.0);
-            icons::draw(
-                layer,
-                Icon::Check,
-                [check[0] + BOX / 2.0, by0 + BOX / 2.0],
-                10.0,
-                theme.bg,
-            );
-        } else {
-            layer.bordered(
-                [check[0], by0],
-                [BOX, BOX],
-                lift(theme, 0.04),
-                lift(theme, 0.3),
-                3.0,
-                1.0,
-            );
-        }
-        layer.text(
-            text(engine, label, 12.5, FONT_SANS, Weight::NORMAL),
-            check[0] + BOX + 8.0,
-            by + (BUTTON_H - 12.5 * 1.35) / 2.0,
-            theme.text_ui,
-        );
-        if hint {
-            layer.text(
-                text(engine, "space", 11.5, FONT_SANS, Weight::NORMAL),
-                check[0] + BOX + 8.0 + lw + 8.0,
-                label_y + 1.5,
-                theme.text_muted,
-            );
-        }
     }
 
     [cancel, confirm, check]

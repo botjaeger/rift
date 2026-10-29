@@ -80,10 +80,9 @@ again. Version 6 adds pinned tabs (`pinned`), tab groups (`groups` and each
 tab's `group` index), and read-only panes (`read_only`). Version 7 adds the
 window names ("Rename window"): `window_name` at
 the top level for the first window, `name` in an `[[other_windows]]` table;
-a quit clears the first one's with its tabs. Version 8 adds `kept`: when
-Remote access keeps Rift running after a quit on macOS, the next launch
-restores the saved tabs and reattaches their shells even with
-`restore_session = false`. The file is rewritten when tabs
+a quit clears the first one's with its tabs. Version 8 added `kept` (Rift
+0.17–0.23 kept the shells running after a quit with Remote access on); it is
+now ignored. The file is rewritten when tabs
 or panes change, when focus
 moves to another pane (so a restart focuses the pane last used), and every
 minute while a tab's time counts. A restored split never lays a pane out
@@ -219,8 +218,8 @@ app_icon      = "default"         # default | light | mono | ocean | ember | for
                                   # the Dock icon (macOS, also while Rift is not running)
                                   # and the window icon (Linux); unknown = default
 restore_session = true            # reopen saved tabs + cwds on launch (e.g. after reboot)
-                                  # (a quit starts fresh; crash recovery, an update and
-                                  # Remote access's Keep running restore even when false)
+                                  # (a quit starts fresh; crash recovery and an update
+                                  # restore even when false)
 save_transcripts = false          # also save finished blocks' output and replay it
                                   # (marked "restored") on relaunch; off = deleted
                                   # (with mask_secrets on, saved masked)
@@ -353,9 +352,6 @@ bell          = "both"            # visual | audible | both | none
 request_attention = false         # a bell or alert while no Rift window has focus:
                                   # bounce the Dock icon once (macOS) / urgency hint (Linux)
 confirm_close_running = true      # warn before closing a pane/tab/window with a running job
-confirm_background_quit = true    # with remote_access on (macOS), quitting asks once
-                                  # whether Rift keeps running ("Don't ask again" in
-                                  # the dialog turns this off: it keeps running unasked)
 confirm_multiline_paste = true    # ask before a paste with newlines reaches a program
                                   # without bracketed paste (each newline presses Enter)
 large_paste_warning = 0           # ask before a paste over this many KiB (0 = never)

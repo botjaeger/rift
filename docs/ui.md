@@ -75,11 +75,8 @@ pane navigation, Synchronize Inputs, Bring All to Front) · **Help** (What's New
 Menu items act on the window that last had focus. New Window opens another
 window of the same process, offset from the current one; Close Window closes
 only it while others are open ("Close window?" when commands run in it) and
-quits with the last one; Quit asks "Quit Rift?" for every window at once (on macOS with
-Remote access on, the question is "Keep running?": its confirm
-button reads *Keep running*, a *Don't ask again* box at the footer's left
-turns the question off, and the shells, gateway and icon stay; features.md,
-Durable sessions).
+quits with the last one; Quit asks "Quit Rift?" for every window at once
+(features.md, Durable sessions).
 
 Shortcut labels come from the live keymap (`[keybindings]` overrides show up
 after the reload); only ⌘ chords become menu key equivalents so ctrl chords
@@ -1344,7 +1341,7 @@ description) left, control right; it runs to the bottom edge.
     ±1000 within 1,000–1,000,000, shown as `10,000`; described *Maximum
     lines kept in the buffer*). Profiles have a page of their own.
   - Session: `Restore saved sessions on normal launches` toggle (crash
-    recovery, updates and *Keep running* restore regardless), `New tabs start in` segmented
+    recovery and updates restore regardless), `New tabs start in` segmented
     `Previous | Home | Custom` (a custom path is set in config.toml),
     `Warn before closing running commands` toggle,
     `Save block output for restore` toggle (*Output can contain secrets;
@@ -1643,13 +1640,12 @@ description) left, control right; it runs to the bottom edge.
     outline and label), which opens the confirm dialog `Revoke <name>? It
     disconnects now and cannot reconnect without pairing again.`; `No phones
     yet` when none.
-  - `When you quit` (on): what a quit does, in full: *Rift keeps running in
-    the menu bar — Your shells stay and phones that can run commands can open
-    tabs. Quit Rift completely from the menu bar icon.* (macOS), *Rift quits —
+  - `When you quit` (on): what a quit does, in full: *Your shells end; the
+    menu bar icon stays — Phones that can run commands can still open tabs.
+    Quit Rift completely from the menu bar icon.* (macOS), *Rift quits —
     Keep shells running through updates is off in General, so nothing stays
     behind.*, or *Rift quits — Phones can no longer reach it until you open
-    Rift again.* (Linux). Under it (macOS) the `Ask before keeping Rift
-    running` toggle (`confirm_background_quit`).
+    Rift again.* (Linux).
   - `Recent connections (N)` (on; folded away, a click opens it): the newest
     20, each with the device (or `Unknown device`), `LAN` or `Relay`, the
     address, the start time, the duration or `connected`, and why it ended.

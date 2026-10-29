@@ -916,7 +916,6 @@ pub const ROWS: &[&str] = &[
     "bell",
     // Remote access
     "remote_access",
-    "confirm_background_quit",
     "remote_listen",
     "remote_relay",
     "remote_tunnel",
@@ -3196,22 +3195,11 @@ fn remote_page(
         )
     } else {
         (
-            "Rift keeps running in the menu bar",
-            "Your shells stay and phones that can run commands can open tabs. Quit Rift completely from the menu bar icon.",
+            "Your shells end; the menu bar icon stays",
+            "Phones that can run commands can still open tabs. Quit Rift completely from the menu bar icon.",
         )
     };
     form.note_row(title, line);
-    // the question a quit asks while Rift keeps running (macOS)
-    if cfg!(target_os = "macos") {
-        let y = form.y;
-        form.toggle_desc(
-            y,
-            "Ask before keeping Rift running",
-            "⌘Q asks once; off keeps it running unasked",
-            config.confirm_background_quit,
-            "confirm_background_quit",
-        );
-    }
 
     form.y += 16.0;
     let n = view.history.len();

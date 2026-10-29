@@ -5415,19 +5415,17 @@ if sys.platform == "darwin":
     plain = full_quit_run("quit-plain", "key cmd+q")
     assert not (plain / "data/rift/remote/stop").exists(), "⌘Q stopped the gateway"
 
-# (f4) Remote access on (macOS): a quit keeps Rift running. ⌘Q asks "Keep
-# running?" (with a Don't-ask-again box: Space ticks it, Keep running stores
-# it in config.toml), the shells stay in the session service, the session file
-# is saved whole and flagged `kept`, the next launch restores the tab and
-# reattaches the same running shell (restore_session is off: a kept session
-# restores anyway) and a second ⌘Q asks nothing; Quit Rift Completely ends the
-# shells and the kept tabs go with them. Without the setting a quit ends them.
-if sys.platform == "darwin":  # the kept background is macOS only (the menu bar icon ends it)
+# (f4) Remote access on (macOS), with its gateway running: ⌘Q is the
+# ordinary quit. It asks "Quit Rift?" over a running command (never "Keep
+# running?", even with the old confirm_background_quit = false), the shells
+# end, the session file keeps no tabs, and the next launch (restore_session
+# at its default, on) opens one fresh tab instead of the old ones.
+if sys.platform == "darwin":  # remote access keeps a gateway only on macOS
     kq = scratch / "keep-quit"
     for sub in ("cfg/rift", "data/rift"):
         (kq / sub).mkdir(parents=True, exist_ok=True)
     (kq / "cfg/rift/config.toml").write_text(
-        'remote_access = true\ndurable_sessions = true\nrestore_session = false\n'
+        'remote_access = true\ndurable_sessions = true\nconfirm_background_quit = false\n'
         'check_for_updates = false\nshell = "/bin/bash"\n'
         'remote_listen = "127.0.0.1:0"\n')
     kq_env = dict(env, XDG_CONFIG_HOME=str(kq / "cfg"), XDG_DATA_HOME=str(kq / "data"),
@@ -5444,55 +5442,21 @@ if sys.platform == "darwin":  # the kept background is macOS only (the menu bar 
     try:
         kq_run("one", [
             "wait_prompt", "type sleep 600\\n", "wait 800", "key cmd+q", "wait 600",
-            f"dump {kq}/dialog.txt", "key space", "wait 300", "key enter", "wait 2500",
-            f"dump {kq}/not-quit.txt"])
+            f"dump {kq}/dialog.txt", "key enter", "wait 2500", f"dump {kq}/not-quit.txt"])
         dialog = kq_text("dialog")
-        assert 'AlertDialog "Quit Rift?"' in dialog and "keeps running in the menu bar" in dialog \
-            and 'Button "Keep running"' in dialog and "Don’t ask again" in dialog, dialog[-1500:]
-        assert "terminated" not in dialog, dialog[-1500:]
-        assert not (kq / "not-quit.txt").exists(), "Keep running did not quit"
+        assert 'AlertDialog "Quit Rift?"' in dialog and "terminated" in dialog, dialog[-1500:]
+        assert "Keep running" not in dialog and "Don’t ask again" not in dialog, dialog[-1500:]
+        assert not (kq / "not-quit.txt").exists(), "⌘Q did not quit"
         saved = (kq / "data/rift/session.toml").read_text()
-        assert "kept = true" in saved and "[[tabs]]" in saved, saved
-        assert "confirm_background_quit = false" in (kq / "cfg/rift/config.toml").read_text()
-        assert len(list(session_daemons(kq / "data"))) == 1, "the shell did not stay in the session service"
-        kq_run("two", ["wait 2500", f"dump {kq}/restored.txt", "quit"])
-        restored = kq_text("restored")
-        assert "sleep 600" in restored and re.search(r"service=Some\(\d+\)", restored), restored[-1500:]
-        # "Don't ask again" was ticked: this quit asks nothing, and keeps running again
-        kq_run("three", ["wait 1500", "key cmd+q", "wait 2500", f"dump {kq}/not-quit3.txt"])
-        assert not (kq / "not-quit3.txt").exists(), "the second quit asked a question"
-        assert "kept = true" in (kq / "data/rift/session.toml").read_text()
-        # Quit Rift Completely (macOS menu): ends the shells; nothing is kept
-        if sys.platform == "darwin":
-            kq_run("four", [
-                "wait 2500", "menu status:quit_completely", "wait 900", f"dump {kq}/qc.txt",
-                "key enter", "wait 3000", f"dump {kq}/not-quit4.txt"])
-            qc = kq_text("qc")
-            assert "Keep running" not in qc and "terminated" in qc, qc[-1500:]
-            assert not (kq / "not-quit4.txt").exists(), "Quit Rift Completely did not quit"
-            after = (kq / "data/rift/session.toml").read_text()
-            assert "kept = true" not in after and "[[tabs]]" not in after, after
-        # remote access off: nothing shows or ends a kept Rift, so ⌘Q is the plain quit
-        off = scratch / "keep-quit-off"
-        for sub in ("cfg/rift", "data/rift"):
-            (off / sub).mkdir(parents=True, exist_ok=True)
-        (off / "cfg/rift/config.toml").write_text(
-            'remote_access = false\ndurable_sessions = true\nrestore_session = false\n'
-            'check_for_updates = false\nshell = "/bin/bash"\n')
-        (off / "q.rift").write_text("\n".join([
-            "wait_prompt", "type sleep 600\\n", "wait 800", "key cmd+q", "wait 600",
-            f"dump {off}/dialog.txt", "key enter", "wait 2500", f"dump {off}/not-quit.txt"]) + "\n")
-        with (off / "q.log").open("w") as log:
-            subprocess.run([str(binary), "--script", str(off / "q.rift"), "--headless"],
-                           env=dict(kq_env, XDG_CONFIG_HOME=str(off / "cfg"),
-                                    XDG_DATA_HOME=str(off / "data")),
-                           stdout=log, stderr=log, timeout=90)
-        plain_q = (off / "dialog.txt").read_text() if (off / "dialog.txt").exists() else ""
-        assert "Keep running" not in plain_q and "terminated" in plain_q, plain_q[-1500:]
-        assert not (off / "not-quit.txt").exists(), "the plain quit did not quit"
-        assert "kept = true" not in (off / "data/rift/session.toml").read_text()
+        assert "[[tabs]]" not in saved and "kept" not in saved, saved
+        kq_run("two", ["wait_prompt", "wait 1000", f"dump {kq}/reopened.txt", "quit"])
+        reopened = kq_text("reopened")
+        assert reopened and "sleep 600" not in reopened, reopened[-1500:]
     finally:
-        for pid in list(session_daemons(kq / "data")) + list(session_daemons(scratch / "keep-quit-off/data")):
+        # the gateway outlives the window: ask it to stop
+        (kq / "data/rift/remote").mkdir(parents=True, exist_ok=True)
+        (kq / "data/rift/remote/stop").write_text("")
+        for pid in session_daemons(kq / "data"):
             try:
                 os.kill(pid, signal.SIGTERM)
             except ProcessLookupError:
@@ -8359,11 +8323,8 @@ assert 'toast=Some("Screen not saved: \\"left\\" is not pointer, primary or a sc
 got = sr_run("remote", "Remote access", [
     "a11y click Connection settings, collapsed", "wait 200",
     *text_step("Listen address: 127.0.0.1:0", "127.0.0.1:7999"),
-    *(["a11y click Ask before keeping Rift running"] if mac else []),
 ], SR_CFG + 'remote_access = true\nremote_listen = "127.0.0.1:0"\n')
 assert got.get("remote_listen") == "127.0.0.1:7999", got
-if mac:
-    assert got.get("confirm_background_quit") is False, got
 
 # config-edit-windows: ⌘Q in another window asks "Save changes?" in the
 # window whose config.toml pane holds unsaved edits, and Cancel keeps every
@@ -8744,7 +8705,7 @@ assert 'Switch "Allow remote access" toggled=False' in off, off[-3000:]
 assert 'Label "They can\'t connect while remote access is off.' in off, off[-3000:]
 assert 'Button "Revoke Test iPhone"' in off and 'Button "Revoke Test Tablet"' in off, off[-3000:]
 for gone in ("On this Wi-Fi", "Pair a phone", "The new phone can only watch", "access: ",
-             "Connection settings", "Recent connections", "Ask before keeping"):
+             "Connection settings", "Recent connections"):
     assert gone not in off, (gone, off[-3000:])
 alone = (rp_run("off-alone", rp_base, [*settings_remote, "wait 600", "dump {d}/off.txt"],
                 devices=False) / "off.txt").read_text()

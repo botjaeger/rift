@@ -76,12 +76,10 @@ If commands do not become blocks, the shell is not loading the hooks (see
 | Tabs in a side rail | Settings → Appearance → *Tab position: Side*; ⇧⌘F searches it |
 | Lock a pane against typing, or restart it | Right-click the terminal → *Make read-only* / *Restart pane* |
 
-By default, quitting Rift (⌘Q, or closing its last window) ends every tab
-and shell: the next launch starts fresh with one tab where the first window
-was. On macOS, with Remote access on and its gateway running, durable
-sessions let Quit instead ask *Keep running?*: the windows close, and the
-shells and phone connection stay. The menu bar icon's *Open Rift* brings
-them back; *Quit Rift Completely* ends them.
+Quitting Rift (⌘Q, or closing its last window) ends every tab and shell:
+the next launch starts fresh with one tab where the first window was. On
+macOS with Remote access on, the menu bar icon stays so phones can still
+open shells; its *Quit Rift Completely* ends that too.
 
 An update's restart or a crash brings every window, its tabs, splits and
 directories back, even with *Restore saved sessions on normal launches* (`restore_session`)

@@ -1551,32 +1551,22 @@ runs what was typed meanwhile), and the rest of the window's run stays
 local instead of waiting on it again. A reattach whose shell ended while
 detached starts a fresh one in the service.
 
-**Quitting** Rift has two kinds, chosen by Settings › Remote access (there is
-no separate background setting: phones are the reason Rift keeps running):
-
-- **Remote access off (the default): a quit ends everything.** ⌘Q, Quit Rift in the menu or
-  the palette, or closing the last window ends every shell, and the session
-  file keeps only the window's frame, so the next launch starts fresh with one
-  tab where the window was (saved block output goes too). While a phone is
-  connected, the quit dialog names it first (*iPhone is connected and loses
-  its tabs.*), with the running commands when *Warn before closing running
-  commands* is on. The phone is told Rift quit (`closing`, below).
-- **Remote access on (macOS), with its gateway running and durable sessions
-  available: a quit keeps Rift running in the background.** Otherwise it is
-  the ordinary quit above. The first ⌘Q asks
-  *Keep running?* (the running commands are listed; *Cancel* or *Keep
-  running*, with a *Don't ask again* box, Space toggles it; `config.toml`'s
-  `confirm_background_quit = true` turns the question back on). Keep running closes the windows only: the shells
-  keep running in the session service, the gateway and the menu bar icon stay,
-  and there is no Dock icon. The session file is saved whole and flagged
-  `kept`, so opening Rift again (the icon's *Open Rift*, the Dock, Spotlight)
-  restores the same tabs and reattaches their shells, whatever *Reopen tabs*
-  (`restore_session`) says. Shells a phone opens while Rift is closed appear
-  as tabs too.
+**Quitting** ends every tab. ⌘Q, Quit Rift in the menu or the palette, or
+closing the last window ends every shell, and the session file keeps only the
+window's frame, so the next launch starts fresh with one tab where the window
+was (saved block output goes too), whatever *Restore saved sessions on normal
+launches* (`restore_session`) says. While a phone is connected, the quit
+dialog names it first (*iPhone is connected and loses its tabs.*), with the
+running commands when *Warn before closing running commands* is on. The phone
+is told Rift quit (`closing`, below). On macOS with Remote access on (and
+durable sessions), the gateway and the menu bar icon stay after a quit, so a
+phone that can run commands can still open shells; they appear as tabs when
+Rift opens again. (Rift 0.17–0.23 kept the shells running after ⌘Q here and
+restored the tabs; `confirm_background_quit` and the session file's `kept`
+are now ignored.)
 
 *Quit Rift Completely* (the icon's menu, or the quit dialog's note) ends
-everything in either mode: every shell, the gateway and the session service,
-and the kept tabs go with them. The phone is told with `closing` (reason
+everything: every shell, the gateway and the session service. The phone is told with `closing` (reason
 `quit`): it shows "<computer> quit Rift" instead of retrying.
 
 **Menu bar icon** (macOS, with Remote access on; it also lets phones open
@@ -1610,9 +1600,9 @@ fresh shells, with saved block output when enabled.
 
 - Closing a pane (⌘W) ends its shell, as without the service. ⌘K also drops
   the retained output, so a reattach does not bring it back.
-- Turning off `restore_session` does not prevent an update restart, crash
-  recovery or *Keep running* from bringing the tabs back. An ordinary quit
-  ends the shells and clears the tabs either way.
+- Turning off `restore_session` does not prevent an update restart or crash
+  recovery from bringing the tabs back. A quit ends the shells and clears the
+  tabs either way.
 - Palette → "Attach detached session: …" opens a tab on any shell the
   service keeps that no window shows.
 - The service listens on `~/.local/share/rift/sessiond/sock` (a 0700

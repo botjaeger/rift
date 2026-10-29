@@ -15,7 +15,8 @@ use std::path::PathBuf;
 /// adds `other_windows` (every window after the first); `5` adds per-pane
 /// `launch` (profile name, own shell and arguments); `6` adds pinned tabs,
 /// tab groups (`groups`, per-tab `group`) and read-only panes; `7` adds
-/// window names (`window_name`, per other window `name`); `8` adds `kept`.
+/// window names (`window_name`, per other window `name`); `8` added `kept`
+/// (Rift 0.17–0.23 kept the shells running after a quit; now ignored).
 /// A file with no `version` key loads as [`LEGACY_VERSION`].
 pub const CURRENT_VERSION: u32 = 8;
 
@@ -53,11 +54,6 @@ pub struct SavedSession {
     /// The first window's name (version 7; "Rename window…").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_name: Option<String>,
-    /// The last quit left Rift's shells running in the background
-    /// (`remote_access`, macOS): the next launch restores these tabs and
-    /// reattaches the shells, whatever `restore_session` says.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub kept: bool,
 }
 
 /// A named, coloured tab group; its tabs name it by index.
@@ -145,7 +141,6 @@ impl Default for SavedSession {
             other_windows: Vec::new(),
             groups: Vec::new(),
             window_name: None,
-            kept: false,
         }
     }
 }
@@ -424,24 +419,6 @@ fn process_alive(pid: u32) -> bool {
     r == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
-/// "Quit Rift Completely" after a quit that kept the shells: their tabs go
-/// with them, so the next launch starts fresh with one tab where the window
-/// was (the same as a quit that ends the shells). A session that was not kept
-/// is left alone.
-pub fn forget_kept_tabs() {
-    let Some(mut kept) = load().filter(|s| s.kept) else {
-        return;
-    };
-    kept.tabs.clear();
-    kept.active = 0;
-    kept.other_windows.clear();
-    kept.groups.clear();
-    kept.window_name = None;
-    kept.kept = false;
-    save(&kept);
-    crate::transcript::remove_except(&[]);
-}
-
 /// Atomic write (tmp + rename) — this file is written frequently.
 pub fn save(session: &SavedSession) {
     if let Some(path) = session_path() {
@@ -547,7 +524,6 @@ mod tests {
             }),
             other_windows: Vec::new(),
             window_name: None,
-            kept: false,
             groups: Vec::new(),
         };
         let body = toml::to_string(&s).unwrap();
@@ -606,7 +582,6 @@ mod tests {
             window: None,
             other_windows: Vec::new(),
             window_name: Some("main".into()),
-            kept: false,
             groups: vec![SavedGroup {
                 name: "Servers".into(),
                 color: Some("green".into()),

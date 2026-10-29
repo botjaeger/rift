@@ -1167,11 +1167,10 @@ fn follow_managed(
         let now = remote_config();
         if !now.access {
             log::info!("remote: remote_access is off; stopping");
-            // a kept Rift with no window and no gateway has nothing left to
-            // reopen or end its shells: they end with it
+            // with no window and no gateway, nothing is left to reopen or
+            // end the shells phones started: they end with it
             if tray.is_some() && !any_window() {
                 end_background_shells();
-                rift_core::session_state::forget_kept_tabs();
             }
             break;
         }
@@ -1192,8 +1191,6 @@ fn follow_managed(
                 log::info!("remote: Quit Rift Completely");
                 if !window {
                     end_background_shells();
-                    // a quit that kept the shells left their tabs to restore
-                    rift_core::session_state::forget_kept_tabs();
                 }
                 break;
             }

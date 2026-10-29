@@ -886,9 +886,6 @@ pub struct App {
     /// This quit came from "Quit Rift Completely": the phone gateway and
     /// the session service's remaining shells end with the app.
     quit_completely: bool,
-    /// The quit under way keeps the shells running in the background
-    /// (`keeps_background`): the session file it writes says so.
-    keeping: bool,
 }
 
 /// Everything one window owns: its winit window and GPU surface, tabs and
@@ -1019,8 +1016,6 @@ struct WindowState {
     a11y_announcement: Option<String>,
     /// [cancel, destructive] button rects of the confirm modal.
     confirm_rects: [[f32; 4]; 3],
-    /// The confirm dialog's "Don't ask again" box is ticked.
-    confirm_dont_ask: bool,
     /// What's New modal (views/whats_new.rs) and the releases it lists.
     whats_new: WhatsNewState,
     whats_new_hits: WhatsNewHits,
@@ -1319,15 +1314,6 @@ const CONFIRM_ARM: Duration = Duration::from_millis(300);
 
 /// The close/quit warning's description: the connected phones (a quit
 /// only), then the running processes.
-/// What the "Keep running" question says: nothing ends, so there is no warning.
-fn keep_description(running: usize) -> String {
-    match running {
-        0 => "Rift keeps running in the menu bar. Your tabs and shells stay, and come back when you open Rift again.".into(),
-        1 => "Rift keeps running in the menu bar. This command keeps going, and your tabs come back when you open Rift again.".into(),
-        n => format!("Rift keeps running in the menu bar. These {n} commands keep going, and your tabs come back when you open Rift again."),
-    }
-}
-
 fn close_description(running: usize, phones: &[String]) -> String {
     let processes = match running {
         0 => String::new(),
@@ -2042,7 +2028,6 @@ impl WindowState {
             a11y_done: Default::default(),
             a11y_announcement: None,
             confirm_rects: [[0.0; 4]; 3],
-            confirm_dont_ask: false,
             whats_new: if first {
                 WhatsNewState::on_launch()
             } else {
@@ -2235,7 +2220,6 @@ impl App {
             #[cfg(target_os = "macos")]
             status_item: None,
             quit_completely: false,
-            keeping: false,
         }
     }
 
@@ -8524,9 +8508,7 @@ impl App {
     /// Every window's tabs, layouts and frame, as the session file stores
     /// them.
     fn saved_session(&self) -> rift_core::session_state::SavedSession {
-        let mut session = rift_core::session_state::SavedSession::of_windows(self.saved_windows());
-        session.kept = self.keeping;
-        session
+        rift_core::session_state::SavedSession::of_windows(self.saved_windows())
     }
 
     /// One window's tabs, layouts and frame, as the session file stores
@@ -10164,9 +10146,6 @@ impl App {
         let quits = confirm
             .as_ref()
             .is_some_and(|(a, _, _)| matches!(a, ConfirmAction::Close(s) if self.quits(*s)));
-        // ... and it leaves the shells running: the question is "Keep running?"
-        let keeps = quits && self.keeps_background();
-        let dont_ask = self.win.confirm_dont_ask;
         // "Save changes to config.toml?": the errors that disable Save
         let config_errors = self.win.viewer.edit.as_ref().map_or(0, |e| e.errors());
         let config_note = config_errors_note(config_errors);
@@ -11722,20 +11701,6 @@ impl App {
             use crate::views::confirm::Dialog;
             let update_title;
             let dialog = match action {
-                ConfirmAction::Close(_) if keeps => Dialog {
-                    title: "Quit Rift?",
-                    description: keep_description(commands.len()),
-                    note: "Choose Quit Rift Completely in the menu bar icon to end everything.",
-                    lines: commands,
-                    empty_line: "<running shell process>",
-                    confirm_label: "Keep running",
-                    cancel_label: "Cancel",
-                    destructive: false,
-                    processes: true,
-                    focus_cancel: *focus_cancel,
-                    extra_label: None,
-                    confirm_disabled: false,
-                },
                 ConfirmAction::Close(scope) => {
                     let quit = quits;
                     let (title, label) = match scope {
@@ -12002,17 +11967,8 @@ impl App {
                     }
                 }
             };
-            let checkbox = keeps.then_some(("Don\u{2019}t ask again", dont_ask));
-            self.win.confirm_rects = crate::views::confirm::render(
-                scene.layer(6),
-                engine,
-                &theme,
-                &dialog,
-                checkbox,
-                w,
-                h,
-                scale,
-            );
+            self.win.confirm_rects =
+                crate::views::confirm::render(scene.layer(6), engine, &theme, &dialog, w, h, scale);
         }
         // Edit prompt and Edit toolbar are modal like the dialogs above:
         // nothing under them keeps a hit (hover repaints, tooltips, the hand)
@@ -14636,23 +14592,6 @@ impl App {
         }
     }
 
-    /// A quit leaves the shells running in the background (the session
-    /// service holds them; the next launch reattaches them): `remote_access`
-    /// is on and its gateway runs, the shells are durable, and this is not
-    /// "Quit Rift Completely". macOS only: the gateway's menu bar icon is what
-    /// opens Rift again and ends everything, so without a running gateway a
-    /// quit is the plain one.
-    fn keeps_background(&self) -> bool {
-        cfg!(target_os = "macos")
-            // the gateway's menu bar icon is how the user reopens or ends it
-            && self.config.remote_access
-            && self.remote.status.is_some()
-            && self.config.durable_sessions
-            && self.durable_allowed
-            && self.persist_session
-            && !self.quit_completely
-    }
-
     /// Close/quit entry point: asks before closing a pinned tab, warns when
     /// something is still running, and before a quit while a phone is
     /// connected.
@@ -14700,33 +14639,6 @@ impl App {
                 AppNoteAction::None,
                 false,
             );
-            return;
-        }
-        // a quit that keeps the shells running loses the phone nothing: the one
-        // question is whether to keep running, once
-        if matches!(scope, CloseScope::Window | CloseScope::App)
-            && self.quits(scope)
-            && self.keeps_background()
-        {
-            if self.config.confirm_background_quit {
-                self.win.confirm_dont_ask = false;
-                let commands = if self.config.confirm_close_running {
-                    self.running_in(CloseScope::App)
-                } else {
-                    Vec::new()
-                };
-                self.win.confirm = Some(ConfirmClose {
-                    opened: Instant::now(),
-                    focus_cancel: false,
-                    action: ConfirmAction::Close(scope),
-                    commands,
-                });
-                if let Some(w) = &self.win.window {
-                    w.request_redraw();
-                }
-                return;
-            }
-            self.perform_close(scope, event_loop);
             return;
         }
         // a quit ends every shell, so the phone loses what it shows
@@ -14801,25 +14713,6 @@ impl App {
             }
             // one of several windows: it closes, its shells end
             CloseScope::Window if self.close_window() => {}
-            CloseScope::Window | CloseScope::App if self.keeps_background() => {
-                // the shells keep running in the session service: the layout
-                // is saved as it is, flagged, so the next launch restores the
-                // tabs and reattaches them
-                self.keeping = true;
-                self.save_session();
-                // the drop-down window is neither saved nor restored: its
-                // shells end with it
-                for tab in std::iter::once(&*self.win)
-                    .chain(self.parked.iter().map(|w| &**w))
-                    .filter(|w| w.dropdown.is_some())
-                    .flat_map(|w| w.tabs.iter())
-                {
-                    for p in &tab.panes {
-                        p.session.terminate();
-                    }
-                }
-                self.exit_app(event_loop);
-            }
             CloseScope::Window | CloseScope::App => {
                 // a quit is intentional: every shell ends and the next launch
                 // starts fresh (an update's restart, a crash or a reboot
@@ -14875,12 +14768,6 @@ impl App {
             }
             // Save stays shut while the text has errors
             Key::Named(NamedKey::Enter) if unsaved && !c.focus_cancel && config_errors > 0 => {}
-            // the "Don't ask again" box, when the dialog has one
-            Key::Named(NamedKey::Space) if !unsaved && self.win.confirm_rects[2][2] > 0.0 => {
-                if !event.repeat {
-                    self.win.confirm_dont_ask = !self.win.confirm_dont_ask;
-                }
-            }
             Key::Named(NamedKey::Tab) => c.focus_cancel = !c.focus_cancel,
             Key::Named(NamedKey::ArrowLeft) => c.focus_cancel = true,
             Key::Named(NamedKey::ArrowRight) => c.focus_cancel = false,
@@ -15455,15 +15342,7 @@ impl App {
             ConfirmAction::ConfigUnsaved(leave) => {
                 self.answer_config_unsaved(true, leave, event_loop)
             }
-            ConfirmAction::Close(scope) => {
-                // "Keep running" with "Don't ask again" ticked: it keeps running unasked
-                if self.win.confirm_dont_ask && self.quits(scope) && self.keeps_background() {
-                    self.config.confirm_background_quit = false;
-                    self.save_config();
-                }
-                self.win.confirm_dont_ask = false;
-                self.perform_close(scope, event_loop);
-            }
+            ConfirmAction::Close(scope) => self.perform_close(scope, event_loop),
             ConfirmAction::Paste { pane, text, synced } => {
                 if synced {
                     self.paste_raw(pane, &text);
@@ -17073,8 +16952,6 @@ impl App {
                 // Discard
                 self.win.confirm = None;
                 self.answer_config_unsaved(false, leave, event_loop);
-            } else if inside(&self.win.confirm_rects[2]) {
-                self.win.confirm_dont_ask = !self.win.confirm_dont_ask;
             }
             window.request_redraw();
             return;
@@ -17977,9 +17854,6 @@ impl App {
                     "mask_secrets" => c.mask_secrets = !c.mask_secrets,
                     "show_progress" => c.show_progress = !c.show_progress,
                     "request_attention" => c.request_attention = !c.request_attention,
-                    "confirm_background_quit" => {
-                        c.confirm_background_quit = !c.confirm_background_quit
-                    }
                     "trim_paste" => c.trim_paste = !c.trim_paste,
                     "discover_shells" => c.discover_shells = !c.discover_shells,
                     _ => {}
@@ -20629,9 +20503,6 @@ impl App {
         }
 
         let overlay = if let Some(c) = &self.win.confirm {
-            // the quit that keeps the shells running asks "Keep running?"
-            let keeps = matches!(&c.action, ConfirmAction::Close(s) if self.quits(*s))
-                && self.keeps_background();
             let config_errors = self.win.viewer.edit.as_ref().map_or(0, |e| e.errors());
             let (title, description) = match &c.action {
                 ConfirmAction::ConfigUnsaved(_) => (
@@ -20643,13 +20514,6 @@ impl App {
                     .trim()
                     .to_string(),
                 ),
-                ConfirmAction::Close(_) if keeps => {
-                    let mut d = keep_description(c.commands.len());
-                    if !c.commands.is_empty() {
-                        d.push_str(&format!(" Running: {}", c.commands.join(", ")));
-                    }
-                    ("Quit Rift?".to_string(), d)
-                }
                 ConfirmAction::Close(scope) if self.quits(*scope) => ("Quit Rift?".to_string(), {
                     let mut d = close_description(c.commands.len(), &self.connected_phones());
                     if !c.commands.is_empty() {
@@ -20728,7 +20592,6 @@ impl App {
                 ),
             };
             let label = match &c.action {
-                ConfirmAction::Close(_) if keeps => "Keep running",
                 ConfirmAction::Close(_) => "Close",
                 ConfirmAction::Paste { .. } | ConfirmAction::LargePaste { .. } => "Paste",
                 ConfirmAction::InstallRemote(_) => "Install",
@@ -20762,17 +20625,6 @@ impl App {
                 button(cancel, self.win.confirm_rects[0], c.focus_cancel),
                 button(label, self.win.confirm_rects[1], !c.focus_cancel),
             ];
-            if keeps {
-                // Space toggles it, as the dialog says
-                buttons.push(Control {
-                    label: "Don\u{2019}t ask again".into(),
-                    role: Role::CheckBox,
-                    toggled: Some(self.win.confirm_dont_ask),
-                    selected: false,
-                    rect: Some(self.win.confirm_rects[2]),
-                    disabled: false,
-                });
-            }
             if matches!(c.action, ConfirmAction::ConfigUnsaved(_)) {
                 buttons.push(button("Discard", self.win.confirm_rects[2], false));
             }
@@ -24335,7 +24187,6 @@ impl App {
     fn cancel_confirm(&mut self) {
         // a later plain quit leaves the helpers running again
         self.quit_completely = false;
-        self.win.confirm_dont_ask = false;
         if let Some(confirm) = self.win.confirm.take() {
             match confirm.action {
                 ConfirmAction::Update(plan) => {
@@ -25095,10 +24946,9 @@ impl ApplicationHandler<UserEvent> for App {
         let restored = if let Some(file) = &crate::updater::launch().restore {
             rift_core::session_state::load_from(file)
         } else if self.persist_session {
-            // a quit that kept the shells running, and a crash, restore their
-            // tabs (and reattach the shells) whatever restore_session says
-            rift_core::session_state::load()
-                .filter(|s| s.kept || crashed || self.config.restore_session)
+            // a crash restores its tabs (and reattaches the shells) whatever
+            // restore_session says
+            rift_core::session_state::load().filter(|_| crashed || self.config.restore_session)
         } else {
             None
         };

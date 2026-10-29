@@ -953,11 +953,6 @@ pub struct Config {
     /// Warn before closing a pane, tab or window (or quitting) while a
     /// command is still running in it.
     pub confirm_close_running: bool,
-    /// With `remote_access` on (macOS), ⌘Q (or closing the last window) asks
-    /// once whether Rift keeps running in the background ("Keep running"),
-    /// with a "Don't ask again" box that turns this off. Off: it keeps
-    /// running without asking.
-    pub confirm_background_quit: bool,
     /// Ask before pasting text containing a newline into a raw program that
     /// has not enabled bracketed paste (each newline would press Enter).
     pub confirm_multiline_paste: bool,
@@ -1168,7 +1163,6 @@ impl Default for Config {
             bell: Bell::Both,
             request_attention: false,
             confirm_close_running: true,
-            confirm_background_quit: true,
             confirm_multiline_paste: true,
             large_paste_warning: 0,
             trim_paste: false,
@@ -1985,10 +1979,12 @@ mod tests {
 
     #[test]
     fn the_removed_background_keys_load_and_change_nothing() {
-        // background_processes (and its older names) no longer exist: remote
-        // access is what keeps Rift running after a quit
+        // background_processes (and its older names) and
+        // confirm_background_quit no longer exist: a quit always ends the
+        // shells
         let old: Config = toml::from_str(
-            "background_processes = true\nremote_when_closed = true\nmenu_bar_icon = true\n",
+            "background_processes = true\nremote_when_closed = true\nmenu_bar_icon = true\n\
+             confirm_background_quit = false\n",
         )
         .unwrap();
         assert!(!old.remote_access);
