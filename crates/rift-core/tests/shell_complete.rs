@@ -208,9 +208,11 @@ fn user_completion_functions_answer_for_tools_rift_has_no_spec_for() {
             line: "cat ".into(),
             words: vec!["cat".into(), String::new()],
         };
-        let got = c.complete(&q, BUDGET);
         if kind != ShellKind::Bash {
-            // bash completes only commands with a `complete` spec
+            // bash completes only commands with a `complete` spec. The first
+            // `cat` completion autoloads its function: a loaded machine can
+            // miss the warm budget once (the timing is asserted above)
+            let got = ask(&mut c, &q);
             assert!(
                 words(&got).contains(&"file one"),
                 "{kind:?}: files of the request's directory: {got:?}"
