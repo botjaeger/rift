@@ -8,6 +8,44 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.23.2 — 2026-10-29
+
+### Improved
+
+- **Reopened tabs come back as they were** — ⇧⌘T now restores a closed tab's name, color, pin
+  and group, in its own place in the tab bar, instead of adding it at the end under its folder
+  name. Its shell starts fresh.
+- **A crashed full-screen program no longer leaves the pane stuck** — When a program like vim or
+  top dies without restoring the screen, the next prompt brings back your blocks and the command
+  editor. You no longer have to type `reset`.
+- **Settings in a short window** — the sidebar's page rows shrink so About and Open config.toml
+  stay visible.
+- **Screen readers** — Settings sliders are announced as sliders, and the swipe up or down adjusts
+  them. The command palette's search field is named for the mode it searches.
+
+### Fixed
+
+- **Multi-line commands are one block** — A command written over several lines with ⇧⏎ runs as
+  one command with one block. It used to split into a block per line plus an empty one.
+- **Typing while a command runs** — Text typed during a running command no longer leaves an empty
+  block before the next one, or shows twice.
+- **`shell` setting accepts a name** — `shell = "bash"` in config.toml now finds bash on your
+  PATH instead of quietly using your login shell. If the shell can't be run, a notice says which
+  one runs instead.
+- **Clearer config errors** — The notice for a config.toml that could not be applied starts with
+  the line and the problem, not the file's path.
+- **Long tab names while renaming** — the text stays inside the field, in the tab bar and the
+  vertical tabs.
+- **Menus fit their labels** — menus widen for a long item with its shortcut, so
+  "Synchronize inputs in panes" is no longer cut off.
+- **Block headers** — a long command stops short of the exit status badge instead of touching it.
+- **Small split panes** — no more empty boxes where the prompt chips would not fit.
+- **Hint mode** — a file path that wraps onto the next line gets a hint.
+- **Sideways scrolling** — trackpad or tilt-wheel sideways scrolling now reaches programs that use
+  the mouse.
+- **Command palette** — typing `>` in Actions no longer hides every result. Counts read "1 result"
+  and "1 line".
+
 ## 0.23.1 — 2026-10-29
 
 ### Fixed
