@@ -221,7 +221,6 @@ limit_for() {
     local s
     case $1 in
         fmt | shell | docs) s=300 ;;
-        test) s=900 ;;
         clippy | doc | mobile | leak) s=1200 ;;
         linux) s=5400 ;;
         *) s=1800 ;;
