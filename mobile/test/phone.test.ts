@@ -247,8 +247,8 @@ describe("the pane", () => {
 });
 
 describe("answering", () => {
-  it("plans a numbered pick as its digit, an unnumbered one as arrows and Enter", () => {
-    expect(answerPlan(menu, { choice: 1 })).toEqual([{ text: "2" }]);
+  it("plans any pick as arrows from the selected entry and Enter", () => {
+    expect(answerPlan(menu, { choice: 1 })).toEqual([{ keys: ["down", "enter"] }]);
     expect(answerPlan(trust, { choice: 1 })).toEqual([{ keys: ["down", "enter"] }]);
     expect(answerPlan({ ...trust, selected: 1 }, { choice: 0 })).toEqual([{ keys: ["up", "enter"] }]);
     expect(answerPlan({ ...trust, selected: 1 }, { choice: 1 })).toEqual([{ keys: ["enter"] }]);
@@ -256,12 +256,12 @@ describe("answering", () => {
 
   it("plans a reply after No with a pause, the text and Enter; a blank reply is the bare No", () => {
     expect(answerPlan(menu, { choice: 2, reply: "  use lowercase " })).toEqual([
-      { text: "3" },
+      { keys: ["down", "down", "enter"] },
       { pauseMs: 600 },
       { text: "use lowercase" },
       { keys: ["enter"] },
     ]);
-    expect(answerPlan(menu, { choice: 2, reply: "  " })).toEqual([{ text: "3" }]);
+    expect(answerPlan(menu, { choice: 2, reply: "  " })).toEqual([{ keys: ["down", "down", "enter"] }]);
   });
 
   it("types a password or other text with Enter, and refuses picks that do not fit", () => {

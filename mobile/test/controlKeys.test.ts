@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   CONTROL_KEYS,
+  messageBoxRow,
   DEFAULT_CONTROL_KEYS,
+  fullScreenRow,
   MAX_ROW_KEYS,
   OLD_DEFAULT_CONTROL_KEYS,
   PressGate,
@@ -42,24 +44,27 @@ describe("control keys", () => {
 
   it("the Add chips: every unused key (the row holds 8, so the F-keys are not a group)", () => {
     const add = addChoices(DEFAULT_CONTROL_KEYS);
-    expect(add.map((c) => c.label).slice(0, 4)).toEqual(["⇧Tab", "⌥", "⇧", "Home"]);
+    expect(add.map((c) => c.label).slice(0, 4)).toEqual(["⇧Tab", "New line", "⌥", "⇧"]);
     expect(add.some((c) => c.label === "F1")).toBe(true);
     expect(add.some((c) => c.label === "F1–F12")).toBe(false);
     expect(addChoices([...DEFAULT_CONTROL_KEYS, "f5"]).filter((c) => /^F\d+$/.test(c.label))).toHaveLength(11);
     expect(addChoices(CONTROL_KEYS.map((k) => k.id))).toEqual([]);
   });
 
-  it("the default row: Esc Tab ⌃C ⌃ ← ↑ ↓ →, at most 8 keys", () => {
-    expect(DEFAULT_CONTROL_KEYS).toEqual(["esc", "tab", "ctrl+c", "ctrl", "left", "up", "down", "right"]);
-    expect(DEFAULT_CONTROL_KEYS.map((id) => controlKey(id)!.label)).toEqual(["Esc", "Tab", "⌃C", "⌃", "←", "↑", "↓", "→"]);
-    expect(DEFAULT_CONTROL_KEYS).toHaveLength(MAX_ROW_KEYS);
+  it("the default row: Esc Tab ⌃C ⌃ ↑ ↓ Return, no New line (the phone keyboard's Return is one), at most 8 keys", () => {
+    expect(DEFAULT_CONTROL_KEYS).toEqual(["esc", "tab", "ctrl+c", "ctrl", "up", "down", "enter"]);
+    expect(DEFAULT_CONTROL_KEYS.map((id) => controlKey(id)!.label)).toEqual(["Esc", "Tab", "⌃C", "⌃", "↑", "↓", "↵"]);
+    expect(DEFAULT_CONTROL_KEYS.length).toBeLessThanOrEqual(MAX_ROW_KEYS);
+    // New line stays in Choose keys
+    expect(addChoices(DEFAULT_CONTROL_KEYS).some((c) => c.label === "New line")).toBe(true);
   });
 
   it("a full row takes no more keys", () => {
-    expect(canAddKey(DEFAULT_CONTROL_KEYS)).toBe(false);
-    expect(toggleKey(DEFAULT_CONTROL_KEYS, "f5", true)).toEqual([...DEFAULT_CONTROL_KEYS]);
-    expect(toggleKey(DEFAULT_CONTROL_KEYS, "esc", false)).toHaveLength(7);
-    expect(canAddKey(toggleKey(DEFAULT_CONTROL_KEYS, "esc", false))).toBe(true);
+    const full = [...DEFAULT_CONTROL_KEYS, "ctrl+j"];
+    expect(canAddKey(full)).toBe(false);
+    expect(toggleKey(full, "f5", true)).toEqual(full);
+    expect(toggleKey(full, "esc", false)).toHaveLength(7);
+    expect(canAddKey(toggleKey(full, "esc", false))).toBe(true);
   });
 
   it("migrates a stored row equal to the old default; a customised row is kept", () => {
@@ -67,6 +72,12 @@ describe("control keys", () => {
     expect(validControlKeys([...OLD_DEFAULT_CONTROL_KEYS])).toEqual([...DEFAULT_CONTROL_KEYS]);
     // junk around the old default is dropped first, so it is still the old default
     expect(validControlKeys(["ctrl+c", "esc", "nope", "tab", "ctrl", "up", "down"])).toEqual([...DEFAULT_CONTROL_KEYS]);
+    // the default with the arrows moves too; the same keys in another order stay
+    expect(validControlKeys(["esc", "tab", "ctrl+c", "ctrl", "left", "up", "down", "right"])).toEqual([...DEFAULT_CONTROL_KEYS]);
+    expect(validControlKeys(["tab", "esc", "ctrl+c", "ctrl", "left", "up", "down", "right"])).toEqual(["tab", "esc", "ctrl+c", "ctrl", "left", "up", "down", "right"]);
+    // the default that held New line moves too; Return and New line kept by choice stay
+    expect(validControlKeys(["esc", "tab", "ctrl+c", "ctrl", "up", "down", "enter", "ctrl+j"])).toEqual([...DEFAULT_CONTROL_KEYS]);
+    expect(validControlKeys(["esc", "tab", "ctrl+c", "ctrl", "up", "down", "ctrl+j", "enter"])).toEqual(["esc", "tab", "ctrl+c", "ctrl", "up", "down", "ctrl+j", "enter"]);
     // customised: one key more, one fewer, another order
     expect(validControlKeys([...OLD_DEFAULT_CONTROL_KEYS, "left"])).toEqual([...OLD_DEFAULT_CONTROL_KEYS, "left"]);
     expect(validControlKeys(["ctrl+c", "esc", "tab", "ctrl", "up"])).toEqual(["ctrl+c", "esc", "tab", "ctrl", "up"]);
@@ -137,5 +148,22 @@ describe("Paste where images go", () => {
     // without uploads (an old Rift) or on a view-only device the row is as stored
     expect(rowWithPaste(DEFAULT_CONTROL_KEYS, false)).toBe(DEFAULT_CONTROL_KEYS);
     expect(rowWithPaste([], true)).toEqual(["paste"]);
+  });
+});
+
+describe("the row under a full-screen program", () => {
+  it("the default row gains the sideways arrows; a chosen row stays", () => {
+    expect(fullScreenRow(DEFAULT_CONTROL_KEYS)).toEqual(["esc", "tab", "ctrl+c", "ctrl", "up", "down", "left", "right", "enter"]);
+    expect(fullScreenRow(["esc", "up"])).toEqual(["esc", "up"]);
+  });
+});
+
+describe("messageBoxRow", () => {
+  it("leads with Paste where an image can go: the row scrolls, and its end starts out of sight", () => {
+    expect(messageBoxRow(["esc", "tab"], true)).toEqual(["paste", "esc", "tab"]);
+  });
+  it("leaves a row without images alone, and one that holds Paste where the user put it", () => {
+    expect(messageBoxRow(["esc", "tab"], false)).toEqual(["esc", "tab"]);
+    expect(messageBoxRow(["esc", "paste"], true)).toEqual(["esc", "paste"]);
   });
 });

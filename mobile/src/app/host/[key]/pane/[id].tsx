@@ -3,6 +3,7 @@ import { Stack, useFocusEffect, useIsFocused, useLocalSearchParams, useRouter } 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AccessibilityInfo,
+  BackHandler,
   Keyboard,
   KeyboardAvoidingView,
   Platform,
@@ -11,6 +12,7 @@ import {
   Text,
   TextInput,
   View,
+  useWindowDimensions,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
 } from "react-native";
@@ -19,16 +21,18 @@ import { askingTitle, questionKey } from "@/answer";
 import { chipItems } from "@/promptChips";
 import { canClose, canOperate, draftKey, hasFeature, isAsked, wrapsLines } from "@/fleet";
 import { foldBlocks, paneName, programName, swipeTarget, type PaneItem } from "@/now";
-import { bareScreen as screenIsBare, CLAUDE_COLOR, paneMark, runsAgent, showsViewSwitch, terminalViewOn, viewSwitch, waitingOthers } from "@/paneView";
+import { bareScreen as screenIsBare, CLAUDE_COLOR, paneMark, runsAgent, screenView, waitingOthers } from "@/paneView";
 import { canLoadOlder, MAX_BLOCKS } from "@/protocol/store";
 import type { Block } from "@/protocol/types";
 import { fleet, useApp } from "@/runtime";
+import { pending } from "@/pending";
 import { screenProgram, showsTerminal } from "@/terminal";
 import { findPane, paneTitle, runningCommand, tabTitle } from "@/topology";
 import { AskCard } from "@/ui/AskCard";
 import { FailedCard, FoldRow, RunningCard } from "@/ui/BlockCards";
 import { BlockView } from "@/ui/BlockView";
 import { Composer } from "@/ui/Composer";
+import { usePending } from "@/ui/usePending";
 import { Button } from "@/ui/Button";
 import { Icon } from "@/ui/Icon";
 import { ErrorText } from "@/ui/Notice";
@@ -41,7 +45,7 @@ import { toggleA11y } from "@/ui/toggle";
 import { useClose } from "@/ui/useClose";
 import { useNow } from "@/ui/useNow";
 import { useSingleFlight } from "@/ui/useSingleFlight";
-import { colors, mono, radius, TOUCH, tints, ui } from "@/ui/theme";
+import { colors, mono, radius, TOUCH, ui } from "@/ui/theme";
 
 /** Within this many points of the end counts as "at the bottom" (stick to new output). */
 const BOTTOM_SLOP = 48;
@@ -61,7 +65,7 @@ const itemKey = (it: PaneItem) => (it.kind === "fold" ? `fold:${it.ids[0]}` : St
  * A pane (the Pane board): the tab and its panes as two buttons that open their sheets, search and
  * the ⋯ menu; the pane picker between the tab's panes; its blocks as cards with the earlier successes
  * folded; an agent's question docked at the bottom (the PaneAsking board); or, while a
- * full-screen program runs (vim, htop, less: the alternate screen) or the Terminal view is on,
+ * full-screen program runs (vim, htop, less: the alternate screen) or the pane runs an agent or a program no block holds,
  * the pane's screen (the FullScreen board).
  */
 export default function PaneScreen() {
@@ -79,6 +83,15 @@ export default function PaneScreen() {
   const list = useRef<FlashListRef<PaneItem>>(null);
   const atBottom = useRef(true);
   const [menu, setMenu] = useState(false);
+  // Android's Back closes the open menu, not the pane under it
+  useEffect(() => {
+    if (!menu) return;
+    const sub = BackHandler.addEventListener("hardwareBackPress", () => {
+      setMenu(false);
+      return true;
+    });
+    return () => sub.remove();
+  }, [menu]);
   // a close that brought us here says so (useClose), then the toast goes as any other
   const [toast, setToast] = useState(toastParam ?? "");
   const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -167,14 +180,15 @@ export default function PaneScreen() {
   // The view follows the pane: its screen while a full-screen program runs, blocks otherwise.
   const screenFeature = hasFeature(host, "screen");
   const screen = pane?.screen ?? null;
-  // the header's Terminal view: the pane's screen whatever runs (gateway mode `on`). On by default
-  // for an agent (on either screen: Claude Code picks its renderer per launch), off at a shell; a
-  // tap overrides the default while this screen is open.
-  const [termChoice, setTermChoice] = useState<boolean | null>(null);
+  // TUI or blocks by one rule, no switch (screenView): the alternate screen, an agent (on either
+  // screen: Claude Code picks its renderer per launch) or a program no block holds show the
+  // screen (gateway mode `on` unless only the alternate screen asks); everything else, blocks.
   const agent = !!loc && runsAgent(loc.pane);
-  const termView = terminalViewOn(termChoice, agent);
-  const pinned = termView && screenFeature;
-  const fullScreen = pinned || showsTerminal(screen, screenFeature);
+  const view = screenFeature && loc
+    ? screenView(loc.pane, !!screen?.alt, state === null || state.blocks.at(-1)?.state === "running", state !== null && state.blocks.length === 0)
+    : { tui: showsTerminal(screen, screenFeature), pinned: false };
+  const pinned = view.pinned;
+  const fullScreen = view.tui;
   const program = (loc && programName(loc.pane)) || screenProgram(running, loc?.pane.job ?? null);
   const following = pane !== null;
   useEffect(() => {
@@ -335,7 +349,10 @@ export default function PaneScreen() {
   const back = () => (router.canGoBack() ? router.back() : router.replace("/"));
   const lastBlock = blocks.at(-1);
   const notifOn = host?.record.notifications !== false;
-  const headerPad = headerTop(insets.top) + 2;
+  // on its side the screen needs every row: one header line, no picker
+  const { width: winWidth, height: winHeight } = useWindowDimensions();
+  const compact = fullScreen && winWidth > winHeight;
+  const headerPad = compact ? Math.max(insets.top, 6) : headerTop(insets.top) + 2;
   const tabNumber = loc ? loc.window.tabs.indexOf(loc.tab) + 1 : 0;
   const tabCount = loc ? loc.window.tabs.length : 0;
   const paneNumber = loc ? loc.paneIndex + 1 : 0;
@@ -345,9 +362,27 @@ export default function PaneScreen() {
   const waiting = loc?.pane.waiting;
   // an agent's menu is answered on the pane, from a card at the bottom
   const asking = !!waiting && waiting.kind === "choice" && waiting.choices.length > 0 && status === "open" && operate && !closed;
-  // a question to answer, a coding agent on either screen, or the Terminal view at a prompt: the
+  // a question to answer, a coding agent on either screen, or the TUI of a program no block holds: the
   // screen without its own keys, the pane's message input (or the question) under it
-  const bareScreen = screenIsBare({ fullScreen, asking, agent, pinned, alt: !!screen?.alt });
+  const box = draftKey(key, paneId);
+  // a screen with its own keys (vim, htop) shows the message box while something pasted is in it
+  const [pastedPane, setPastedPane] = useState<number | null>(null);
+  useEffect(() => {
+    if (pastedPane === null) return;
+    // a turn later: the box takes what was handed to it and fills the draft in two steps
+    const check = () => setTimeout(() => {
+      const v = pending.view(box);
+      if (v.items.length === 0 && v.text === "" && !v.walking && !fleet.store.peek().drafts[box]) setPastedPane(null);
+    }, 0);
+    const offDrafts = fleet.store.subscribe(check);
+    const offBox = pending.subscribe(check);
+    return () => {
+      offDrafts();
+      offBox();
+    };
+  }, [pastedPane, box]);
+  const held = usePending(box);
+  const bareScreen = screenIsBare({ fullScreen, asking, agent, pinned, alt: !!screen?.alt }) || (fullScreen && (pastedPane === paneId || held.items.length > 0));
   const bottomInset = keyboard ? 0 : Math.max(0, insets.bottom - 12);
   const composer =
     closed || !host ? null : operate ? (
@@ -370,6 +405,10 @@ export default function PaneScreen() {
           label={title}
           canType={hasFeature(host, "text")}
           canUpload={hasFeature(host, "upload")}
+          canUploadFiles={hasFeature(host, "upload_files")}
+          canPaste={hasFeature(host, "paste")}
+          agent={agent}
+          compact={compact}
           waiting={status !== "open"}
         />
       </View>
@@ -415,7 +454,7 @@ export default function PaneScreen() {
               {loc && !closed ? <Icon name="chevronDown" size={16} color={colors.textMuted} /> : null}
             </View>
             {host && (loc || cachedTitle) ? (
-              <Text style={styles.subtitle} numberOfLines={1}>
+              <Text style={[styles.subtitle, compact && styles.hidden]} numberOfLines={1}>
                 {loc ? hostName + " · tab " + tabNumber + " of " + tabCount : hostName}
               </Text>
             ) : null}
@@ -444,7 +483,7 @@ export default function PaneScreen() {
             </View>
           )}
         </View>
-        {loc && tab && !closed ? (
+        {loc && tab && !closed && !compact ? (
           <View style={styles.pickRow}>
             <Pressable
               accessibilityRole="button"
@@ -474,37 +513,6 @@ export default function PaneScreen() {
               ) : null}
               <Icon name="chevronDown" size={14} color={colors.textMuted} />
             </Pressable>
-            {showsViewSwitch(screenFeature, agent) ? (
-              <View style={styles.segments} accessibilityRole="tablist" accessibilityLabel="View">
-                {(["Blocks", "Terminal"] as const).map((name) => {
-                  // selected by what shows: a full-screen program shows its screen whatever was chosen
-                  const view = viewSwitch(pinned, showsTerminal(screen, screenFeature));
-                  const on = (name === "Terminal") === view.terminal;
-                  const off = name === "Blocks" && view.blocksDisabled;
-                  return (
-                    <Pressable
-                      key={name}
-                      accessibilityRole="tab"
-                      accessibilityLabel={name}
-                      accessibilityHint={
-                        off
-                          ? "A full-screen program is running: its screen shows until it ends"
-                          : name === "Blocks"
-                            ? "Shows the pane's commands as blocks"
-                            : "Shows the pane's screen as the program draws it"
-                      }
-                      accessibilityState={{ selected: on, disabled: off }}
-                      disabled={off}
-                      hitSlop={{ top: 4, bottom: 4 }}
-                      onPress={() => setTermChoice(name === "Terminal")}
-                      style={({ pressed }) => [styles.segment, on && styles.segmentOn, off && styles.segmentOff, pressed && styles.pressed]}
-                    >
-                      <Text style={[styles.segmentText, on && styles.segmentTextOn]}>{name}</Text>
-                    </Pressable>
-                  );
-                })}
-              </View>
-            ) : null}
           </View>
         ) : null}
       </View>
@@ -541,6 +549,11 @@ export default function PaneScreen() {
               canFit={hasFeature(host, "fit")}
               canScroll={hasFeature(host, "scroll")}
               canUpload={hasFeature(host, "upload") && operate}
+              canUploadFiles={hasFeature(host, "upload_files") && operate}
+              onPasted={() => setPastedPane(paneId)}
+              canPaste={hasFeature(host, "paste") && operate}
+              canMouse={hasFeature(host, "mouse") && operate}
+              keepHeight={asking}
             />
             {load?.card ? <PaneCard card={load.card} onRetry={tryAgain} onDetails={details} onLeave={leave} /> : null}
           </View>
@@ -741,6 +754,7 @@ function MenuSwitch({
 }
 
 const styles = StyleSheet.create({
+  hidden: { display: "none" },
   fill: { flex: 1, backgroundColor: colors.bg },
   flex: { flex: 1 },
   pressed: { opacity: 0.7 },
@@ -797,14 +811,6 @@ const styles = StyleSheet.create({
   pickWait: { flexDirection: "row", alignItems: "center", gap: 5 },
   pickDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: colors.warning },
   pickWaitText: { fontFamily: ui(400), color: colors.warning, fontSize: 12 },
-  // the Blocks | Terminal switch: two segments in a 36 pt capsule, the chosen one on the accent tint
-  segments: { height: 36, flexDirection: "row", padding: 2, borderRadius: 18, borderWidth: 1, borderColor: colors.glassRim },
-  segment: { minWidth: 68, paddingHorizontal: 10, borderRadius: 16, alignItems: "center", justifyContent: "center" },
-  segmentOn: { backgroundColor: tints.accentBadge },
-  // Blocks while a full-screen program holds the view: not a choice now
-  segmentOff: { opacity: 0.45 },
-  segmentText: { fontFamily: ui(500), color: colors.textMuted, fontSize: 13 },
-  segmentTextOn: { color: colors.accent },
   // blocks held in memory while the pane reconnects (PaneLoading board)
   held: { opacity: 0.55 },
   // the ⋯ menu: 280 wide under the button, 14 pt radius, #2c2c30 with a soft shadow

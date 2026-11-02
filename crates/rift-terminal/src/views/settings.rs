@@ -919,6 +919,7 @@ pub const ROWS: &[&str] = &[
     "remote_listen",
     "remote_relay",
     "remote_tunnel",
+    "remote_clipboard",
 ];
 
 /// Settings the control of `id` also stands for (the "Window padding"
@@ -3994,6 +3995,14 @@ fn connection_settings(form: &mut Form, config: &Config, view: &RemoteView, blin
         relay_row(form, config, view, blink_on);
     }
     tunnel_rows(form, config, view);
+    let y = form.y;
+    form.toggle_desc(
+        y,
+        "Copy to phones too",
+        "What a program copies also reaches the phones that may operate; a program could write to their clipboard unasked",
+        config.remote_clipboard,
+        "remote_clipboard",
+    );
 }
 
 /// The relay address field (`remote_relay`).

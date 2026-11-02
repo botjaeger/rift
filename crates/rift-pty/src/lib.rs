@@ -9,7 +9,8 @@ pub mod session;
 pub use alacritty_terminal;
 pub use session::{
     ClipboardAccess, ClipboardReply, ColorReply, EventProxy, GridSize, Observer, PaneId,
-    ProgressReport, Replay, ServiceFailure, ServiceTarget, Session, SessionEvent, SpawnOptions,
+    ProgressReport, Replay, SHADOW_BLOCKED, SHADOW_EVERY, SHADOW_QUIET, ServiceFailure,
+    ServiceTarget, Session, SessionEvent, ShadowDue, ShadowListener, ShadowStats, SpawnOptions,
     set_default_colors, set_pane_colors,
 };
 

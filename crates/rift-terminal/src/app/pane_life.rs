@@ -194,6 +194,7 @@ impl App {
         fresh.base_grid = p.base_grid;
         fresh.program_grid = p.program_grid;
         fresh.fit = p.fit;
+        fresh.fit_paused = p.fit_paused;
         // the old session (and its PTY) goes with the old state; its grid is
         // freed off the event loop
         let old = std::mem::replace(p, fresh);

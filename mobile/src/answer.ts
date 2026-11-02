@@ -13,8 +13,9 @@ export type Pick = { choice: number } | { choice: number; reply: string } | { te
 export const REPLY_PAUSE_MS = 600;
 
 /**
- * The steps that answer `w` with `pick`: a numbered entry is its digit (the agents pick it at
- * once), an unnumbered one is arrow keys from the selected entry, then Enter; a reply follows
+ * The steps that answer `w` with `pick`: arrow keys from the selected entry, then Enter, numbered
+ * or not (a digit picks at once in Claude Code, but only moves the selector in Codex's "enter
+ * continue" menus, where the answer then did nothing); a reply follows
  * its "No" after a pause and ends with Enter; a password or other text is typed, then Enter.
  * Null when the pick does not fit the menu.
  */
@@ -25,12 +26,8 @@ export function answerPlan(w: Waiting, pick: Pick): AnswerStep[] | null {
   }
   if (w.kind !== "choice" || !Number.isInteger(pick.choice) || pick.choice < 0 || pick.choice >= w.choices.length) return null;
   const steps: AnswerStep[] = [];
-  if (w.numbered) steps.push({ text: String(pick.choice + 1) });
-  else {
-    const d = pick.choice - w.selected;
-    const keys = Array<string>(Math.abs(d)).fill(d > 0 ? "down" : "up");
-    steps.push({ keys: [...keys, "enter"] });
-  }
+  const d = pick.choice - w.selected;
+  steps.push({ keys: [...Array<string>(Math.abs(d)).fill(d > 0 ? "down" : "up"), "enter"] });
   if ("reply" in pick && pick.reply.trim() !== "") steps.push({ pauseMs: REPLY_PAUSE_MS }, { text: pick.reply.trim() }, { keys: ["enter"] });
   return steps;
 }

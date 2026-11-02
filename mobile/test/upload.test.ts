@@ -3,9 +3,14 @@ import { isClientMsg, MAX_UPLOAD_BYTES, MAX_UPLOAD_CHUNK, MAX_UPLOAD_MESSAGE_BYT
 import {
   base64Bytes,
   clipboardImage,
+  clipboardAttachment,
   clipboardImageProblem,
-  ImagePaste,
+  clipboardText,
+  dataUrlBase64,
+  fileAttachment,
+  fileExt,
   imageBase64,
+  pickedAttachment,
   UPLOAD_CHUNK_CHARS,
   uploadChunks,
   uploadRefusal,
@@ -130,51 +135,6 @@ describe("clipboard image", () => {
   });
 });
 
-describe("image paste", () => {
-  const sent = (b64: string) => ({ ok: true as const, b64 });
-
-  it("ignores a second paste while an image goes out, and says it is sending", async () => {
-    const states: boolean[] = [];
-    const paste = new ImagePaste((on) => states.push(on));
-    let finish!: (r: { ok: true }) => void;
-    const sends: string[] = [];
-    const send = (b64: string) => {
-      sends.push(b64);
-      return new Promise<{ ok: true }>((r) => (finish = r));
-    };
-    const first = paste.paste(async () => sent("AAAA"), send);
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(paste.sending).toBe(true);
-    expect(states).toEqual([true]);
-    expect(await paste.paste(async () => sent("BBBB"), send)).toEqual({ kind: "sending" });
-    finish({ ok: true });
-    expect(await first).toEqual({ kind: "sent" });
-    expect(sends).toEqual(["AAAA"]);
-    expect(states).toEqual([true, false]);
-    // free again afterwards
-    const again = paste.paste(async () => sent("CCCC"), async () => ({ ok: true as const }));
-    expect(await again).toEqual({ kind: "sent" });
-  });
-
-  it("text when there is no image; the reason when it cannot go; nothing sent then", async () => {
-    const states: boolean[] = [];
-    const paste = new ImagePaste((on) => states.push(on));
-    const send = async () => {
-      throw new Error("must not send");
-    };
-    expect(await paste.paste(async () => null, send)).toEqual({ kind: "text" });
-    expect(await paste.paste(async () => ({ ok: false, reason: "unreadable" }), send)).toEqual({
-      kind: "error",
-      message: clipboardImageProblem("unreadable"),
-    });
-    expect(await paste.paste(async () => sent("AAAA"), send, () => "at its prompt")).toEqual({ kind: "error", message: "at its prompt" });
-    // no "sending" shown for any of them
-    expect(states).toEqual([]);
-    expect(await paste.paste(async () => sent("AAAA"), async () => ({ ok: false as const, message: "no" }))).toEqual({ kind: "error", message: "no" });
-  });
-});
-
 describe("upload refusals", () => {
   it("are worded by the gateway's reason, not only its code", () => {
     expect(uploadRefusal("busy", "pane 12 is at its prompt; an image goes to a running program")).toContain("at its prompt");
@@ -189,5 +149,101 @@ describe("upload refusals", () => {
     }
     expect(uploadRefusal("too_large", "the image is larger than 10 MiB")).toBe("The image is larger than 10 MB.");
     expect(uploadRefusal("forbidden", "this device may only view")).toBeNull();
+  });
+});
+
+describe("clipboardText", () => {
+  const cb = (text: string, has: boolean) => ({ getStringAsync: async () => text, hasStringAsync: async () => has });
+
+  it("reads text", async () => {
+    expect(await clipboardText(cb("a\nb", true))).toEqual({ kind: "text", text: "a\nb" });
+  });
+  it("says refused when the phone holds text and gave none", async () => {
+    expect(await clipboardText(cb("", true))).toEqual({ kind: "refused" });
+    expect(await clipboardText({ getStringAsync: () => Promise.reject(new Error("no")), hasStringAsync: async () => true })).toEqual({ kind: "refused" });
+  });
+  it("stays silent on a truly empty clipboard", async () => {
+    expect(await clipboardText(cb("", false))).toEqual({ kind: "empty" });
+  });
+});
+
+describe("files", () => {
+  const over = "A".repeat(4 * Math.ceil((MAX_UPLOAD_BYTES + 1) / 3));
+
+  it("takes only a plain extension from a name, lower case; the rest of the name stays on the phone", () => {
+    expect(fileExt("notes.txt")).toBe("txt");
+    expect(fileExt("Archive.TAR.GZ")).toBe("gz");
+    expect(fileExt("a.abcdefgh")).toBe("abcdefgh");
+    for (const bad of ["", "Makefile", ".bashrc", "a.", "a.abcdefghi", "a.t t", "a.t/x", "../x", "a.é"]) {
+      expect(fileExt(bad), bad).toBeNull();
+    }
+  });
+
+  it("chunks carry the extension, every one, and hold to the protocol's bounds", () => {
+    const r = uploadChunks("f1", 3, b64(png(100_000)), "txt");
+    if (!r.ok) throw new Error(r.code);
+    expect(r.msgs.length).toBe(3);
+    for (const m of r.msgs) {
+      expect(m.ext).toBe("txt");
+      expect(isClientMsg(m)).toBe(true);
+    }
+    // an image's have none
+    const image = uploadChunks("i", 3, b64(png(10)));
+    expect(image.ok && "ext" in image.msgs[0]!).toBe(false);
+    for (const ext of ["PNG", "../x", "abcdefghi", "", 7]) {
+      expect(isClientMsg({ t: "upload", id: "u", pane: 1, size: 3, offset: 0, data: "AAAA", ext }), String(ext)).toBe(false);
+    }
+  });
+
+  it("turns what the native side read into something to send, or why not", () => {
+    expect(fileAttachment({ status: "none" })).toBeNull();
+    expect(fileAttachment({ status: "ok", name: "a.TXT", data: "aGk=" })).toEqual({ ok: true, b64: "aGk=", ext: "txt", name: "a.TXT" });
+    expect(fileAttachment({ status: "too_large" })).toEqual({ ok: false, reason: "too_large", file: true });
+    expect(fileAttachment({ status: "unreadable" })).toEqual({ ok: false, reason: "unreadable", file: true });
+    expect(fileAttachment({ status: "ok", name: "Makefile", data: "aGk=" })).toEqual({ ok: false, reason: "extension", file: true });
+    expect(fileAttachment({ status: "ok", name: "a.txt", data: "" })).toEqual({ ok: false, reason: "empty", file: true });
+    expect(fileAttachment({ status: "ok", name: "a.txt", data: "not base64!" })).toEqual({ ok: false, reason: "unreadable", file: true });
+    expect(fileAttachment({ status: "ok", name: "a.txt", data: over })).toEqual({ ok: false, reason: "too_large", file: true });
+    for (const reason of ["too_large", "unreadable"] as const) expect(clipboardImageProblem(reason, true)).toMatch(/file/i);
+    expect(clipboardImageProblem("extension")).toMatch(/extension/);
+  });
+
+  const noImage: ImageClipboard = { hasImageAsync: async () => false, getImageAsync: async () => null };
+
+  it("a Paste takes the image first, then the clip's file, else leaves it to the text", async () => {
+    const file = { clipFile: async () => ({ status: "ok" as const, name: "a.pdf", data: "aGk=" }) };
+    expect(await clipboardAttachment(noImage, file)).toEqual({ ok: true, b64: "aGk=", ext: "pdf", name: "a.pdf" });
+    expect(await clipboardAttachment(noImage, { clipFile: async () => ({ status: "none" as const }) })).toBeNull();
+    expect(await clipboardAttachment(noImage, null)).toBeNull();
+    expect(await clipboardAttachment(noImage, { clipFile: () => Promise.reject(new Error("no")) })).toEqual({ ok: false, reason: "unreadable", file: true });
+    const image: ImageClipboard = { hasImageAsync: async () => true, getImageAsync: async () => ({ data: "data:image/png;base64,iVBORw0KGgo=" }) };
+    expect(await clipboardAttachment(image, { clipFile: () => Promise.reject(new Error("must not ask")) })).toEqual({ ok: true, b64: "iVBORw0KGgo=" });
+  });
+
+  it("a picked file is read only after its name and size pass", async () => {
+    const reads: string[] = [];
+    const read = async (uri: string) => {
+      reads.push(uri);
+      return "aGk=";
+    };
+    const one = (name: string, size?: number) => async () => ({ canceled: false, assets: [{ name, uri: `file:///${name}`, ...(size === undefined ? {} : { size }) }] });
+    expect(await pickedAttachment(async () => ({ canceled: true, assets: null }), read)).toBeNull();
+    expect(await pickedAttachment(one("Makefile"), read)).toEqual({ ok: false, reason: "extension", file: true });
+    expect(await pickedAttachment(one("a.bin", MAX_UPLOAD_BYTES + 1), read)).toEqual({ ok: false, reason: "too_large", file: true });
+    expect(reads).toEqual([]);
+    expect(await pickedAttachment(one("a.txt", 2), read)).toEqual({ ok: true, b64: "aGk=", ext: "txt", name: "a.txt" });
+    expect(reads).toEqual(["file:///a.txt"]);
+    expect(await pickedAttachment(one("a.txt"), () => Promise.reject(new Error("no")))).toEqual({ ok: false, reason: "unreadable", file: true });
+    expect(await pickedAttachment(() => Promise.reject(new Error("no")), read)).toEqual({ ok: false, reason: "unreadable", file: true });
+    expect(dataUrlBase64("data:application/pdf;base64,aGk=")).toBe("aGk=");
+    expect(dataUrlBase64("nonsense")).toBe("");
+  });
+
+  it("refusals name a file, and a bad extension says so", () => {
+    expect(uploadRefusal("too_large", "the file is larger than 10 MiB", undefined, "file")).toBe("The file is larger than 10 MB.");
+    expect(uploadRefusal("busy", "pane 1 is at its prompt; a file goes to a running program", undefined, "file")).toContain("at its prompt");
+    expect(uploadRefusal("busy", "other files are arriving; try again in a moment", undefined, "file")).toContain("other files");
+    expect(uploadRefusal("bad_request", "ext holds 1 to 8 of a-z and 0-9", undefined, "file")).toContain("extension");
+    expect(uploadRefusal("bad_request", "the file is empty", undefined, "file")).toBe("The file is empty.");
   });
 });

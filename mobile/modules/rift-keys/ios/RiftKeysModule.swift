@@ -5,7 +5,7 @@ public class RiftKeysModule: Module {
     Name("RiftKeys")
 
     View(KeyCaptureView.self) {
-      Events("onText", "onKey", "onFocusChange")
+      Events("onText", "onKey", "onFocusChange", "onPaste")
 
       Prop("mode") { (view: KeyCaptureView, mode: String) in
         view.mode = mode == "terminal" ? .terminal : .shortcuts

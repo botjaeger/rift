@@ -236,7 +236,7 @@ describe("settings", () => {
 
   it("control keys: the board's row by default; unknown and repeated ids dropped, order kept", async () => {
     const kv = new MemoryStore();
-    expect(DEFAULT_SETTINGS.controlKeys).toEqual(["esc", "tab", "ctrl+c", "ctrl", "left", "up", "down", "right"]);
+    expect(DEFAULT_SETTINGS.controlKeys).toEqual(["esc", "tab", "ctrl+c", "ctrl", "up", "down", "enter"]);
     // a row stored as the old default moves to the new one
     kv.data.set("rift.settings", JSON.stringify({ controlKeys: ["ctrl+c", "esc", "tab", "ctrl", "up", "down"] }));
     expect((await loadSettings(kv)).controlKeys).toEqual(DEFAULT_SETTINGS.controlKeys);

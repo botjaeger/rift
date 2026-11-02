@@ -1,5 +1,6 @@
 import { StyleSheet, Text, View } from "react-native";
 import type { Avatar as AvatarModel } from "@/avatar";
+import { programMark } from "@/paneView";
 import { colors, monoBold, monoMedium, tint, tints, ui } from "./theme";
 
 /**
@@ -50,21 +51,24 @@ const styles = StyleSheet.create({
  * 12 % tint of it for a coding agent, `>_` in the accent on its tint for a shell. Decorative: the
  * row around it is labelled.
  */
-export function Tile({ agent, size = 40, radius = 12, promptSize = 14 }: { agent: boolean; size?: number; radius?: number; promptSize?: number }) {
+export function Tile({ agent, program = null, size = 40, radius = 12, promptSize = 14 }: { agent: boolean; program?: string | null; size?: number; radius?: number; promptSize?: number }) {
+  // an agent the app has no mark for (a session title says it is one) keeps the ✳
+  const mark = programMark(program);
+  const claude = agent && (mark.claude || mark.mark === ">_");
   return (
     <View
       style={[
         styles.tile,
-        { width: size, height: size, borderRadius: radius, backgroundColor: agent ? `${AGENT_COLOR}1f` : tints.accentBadge },
+        { width: size, height: size, borderRadius: radius, backgroundColor: claude ? `${AGENT_COLOR}1f` : tints.accentBadge },
       ]}
       accessibilityElementsHidden
       importantForAccessibility="no-hide-descendants"
     >
       <Text
-        style={agent ? styles.tileGlyph : [styles.tilePrompt, { fontSize: promptSize }]}
+        style={claude ? styles.tileGlyph : [styles.tilePrompt, { fontSize: promptSize }]}
         allowFontScaling={false}
       >
-        {agent ? "\u2733\uFE0E" : ">_"}
+        {claude ? "\u2733\uFE0E" : mark.mark}
       </Text>
     </View>
   );

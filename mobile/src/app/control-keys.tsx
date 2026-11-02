@@ -162,7 +162,6 @@ export default function ControlKeysScreen() {
                     tip={tipOf(k)}
                     onTip={setTip}
                     color={k.danger ? colors.warning : colors.text}
-                    tall={false}
                     disabled={false}
                     onPress={() => undefined}
                   />
@@ -175,7 +174,6 @@ export default function ControlKeysScreen() {
                 tip={{ title: "Hide keyboard", text: "Closes the keyboard; tap the command field to bring it back" }}
                 onTip={setTip}
                 color={colors.textMuted}
-                tall={false}
                 disabled={false}
                 onPress={() => undefined}
               />

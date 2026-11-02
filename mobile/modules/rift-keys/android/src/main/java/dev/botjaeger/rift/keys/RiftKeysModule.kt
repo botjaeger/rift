@@ -9,7 +9,7 @@ class RiftKeysModule : Module() {
     Name("RiftKeys")
 
     View(KeyCaptureView::class) {
-      Events("onText", "onKey", "onFocusChange")
+      Events("onText", "onKey", "onFocusChange", "onPaste")
 
       Prop("mode") { view: KeyCaptureView, mode: String ->
         view.setMode(mode == "terminal")

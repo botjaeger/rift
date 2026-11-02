@@ -541,9 +541,22 @@ pub fn looks_like_password_prompt(line: &str) -> bool {
         })
 }
 
+/// Whether a pane's foreground job can be an agent reattached under its
+/// version number ("2.1.296"), or is not known; a named program is itself.
+pub fn job_may_be_reattached_agent(job: Option<&str>) -> bool {
+    job.is_none_or(|j| j.starts_with(|c: char| c.is_ascii_digit()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_named_job_is_never_a_reattached_agent() {
+        assert!(job_may_be_reattached_agent(None));
+        assert!(job_may_be_reattached_agent(Some("2.1.296")));
+        assert!(!job_may_be_reattached_agent(Some("bash")));
+    }
 
     #[test]
     fn agent_titles_tell_idle_from_working() {

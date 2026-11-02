@@ -68,6 +68,10 @@ struct State {
     scrolls: Vec<(u64, i32, bool)>,
     /// What `upload` received: (pane, device name, kind, bytes).
     uploads: Vec<(u64, String, ImageKind, Vec<u8>)>,
+    /// The newest copy a program made: (number, text).
+    copy: Option<(u64, String)>,
+    /// What `upload_file` received: (pane, device name, ext, bytes).
+    files: Vec<(u64, String, String, Vec<u8>)>,
     /// What `upload_ready` answers (a pane at its prompt: `Busy`).
     ready_error: Option<InputError>,
 }
@@ -170,6 +174,15 @@ impl Source for Fake {
     fn blocks(&self, pane: u64, before: Option<u64>, limit: usize) -> Result<Page, SourceError> {
         self.0.lock().unwrap().full_reads.push(pane);
         self.page(pane, before, limit)
+    }
+
+    fn clipboard(&self, since: u64) -> Option<(u64, String)> {
+        self.0
+            .lock()
+            .unwrap()
+            .copy
+            .clone()
+            .filter(|(seq, _)| *seq > since)
     }
 
     fn input(&self, pane: u64, device: &str, input: Input) -> Result<(), InputError> {
@@ -277,6 +290,25 @@ impl Source for Fake {
         }
         st.uploads
             .push((pane, device.to_string(), kind, bytes.to_vec()));
+        Ok(())
+    }
+
+    fn upload_file(
+        &self,
+        pane: u64,
+        device: &str,
+        ext: &str,
+        bytes: &[u8],
+    ) -> Result<(), InputError> {
+        let mut st = self.0.lock().unwrap();
+        if let Some(e) = st.input_error.clone() {
+            return Err(e);
+        }
+        if !st.panes.contains_key(&pane) {
+            return Err(InputError::NoPane);
+        }
+        st.files
+            .push((pane, device.to_string(), ext.to_string(), bytes.to_vec()));
         Ok(())
     }
 
@@ -746,7 +778,7 @@ fn pairing_then_reconnecting_gets_welcome_and_topology() {
     assert_eq!(
         welcome,
         json!({"t":"welcome","v":2,"host":"test-host","os":"linux","version":"9.9.9",
-               "device":d.id,"permission":"operate","features":["screen","text","output","push_failures","push_ntfy","git","notify_off","chips","waiting","complete","running","open","close","fit","prompt_chips","closing","scroll","upload"]})
+               "device":d.id,"permission":"operate","features":["screen","text","output","push_failures","push_ntfy","git","notify_off","chips","waiting","complete","running","open","close","fit","prompt_chips","closing","scroll","upload","upload_files","paste","mouse","clipboard"]})
     );
     assert_eq!(
         (d.name.as_str(), d.platform.as_str()),
@@ -968,12 +1000,30 @@ fn failed_handshakes_are_rate_limited_per_address() {
 }
 
 #[test]
+fn a_device_connecting_again_with_every_slot_taken_ends_only_its_silent_connections() {
+    let env = start(|c| c.idle_timeout = Duration::from_secs(8));
+    let (key, first, _) = env.pair(Permission::Operate);
+    let mut stale: Vec<Ch> = vec![first];
+    stale.extend((0..7).map(|_| env.login(&key)));
+    // still heard (a phone paired twice): nothing ends, and the ninth waits
+    let v = env.refused(&key, &hello(None));
+    assert_eq!(code(&v), ("error", "busy"));
+    // what a dropped network leaves: past half the idle timeout, unheard
+    std::thread::sleep(Duration::from_millis(4200));
+    let again = env.login(&key);
+    for ch in &mut stale {
+        assert_closed(ch);
+    }
+    drop(again);
+}
+
+#[test]
 fn the_ninth_connection_is_busy() {
     let env = start(|_| {});
     let (key, first, _) = env.pair(Permission::Operate);
     let mut open: Vec<Ch> = vec![first];
     open.extend((0..7).map(|_| env.login(&key)));
-    let v = env.refused(&key, &hello(None));
+    let v = env.refused(&new_key(), &hello(None));
     assert_eq!(code(&v), ("error", "busy"));
     // a slot frees when a client leaves
     open.pop().unwrap().close();
@@ -2887,6 +2937,111 @@ fn text_with_control_characters_or_over_a_kib_is_rejected() {
     assert_eq!(env.fake.inputs().len(), 2);
 }
 
+/// What a program copies goes to the phones that may operate, only while
+/// they are here: nothing older reaches one that connects later.
+#[test]
+fn copies_reach_operating_phones_and_never_an_older_one() {
+    let settle = std::time::Duration::from_millis(1200);
+    let env = start(|_| {});
+    let copy = |seq: u64, text: &str| {
+        env.fake.0.lock().unwrap().copy = Some((seq, text.to_string()));
+    };
+    copy(1, "before anyone came");
+    let (_k, mut phone, _) = env.pair(Permission::Operate);
+    let (_v, mut viewer, _) = env.pair(Permission::View);
+    std::thread::sleep(settle);
+    copy(2, "seen");
+    assert_eq!(recv_t(&mut phone, "clipboard")["text"], "seen");
+    // the view device hears nothing of it before the answer to its ping
+    put(&mut viewer, json!({"t":"ping","n":7}));
+    loop {
+        let m = recv(&mut viewer);
+        assert_ne!(m["t"], "clipboard");
+        if m["t"] == "pong" {
+            break;
+        }
+    }
+    drop((phone, viewer));
+    std::thread::sleep(settle);
+    copy(3, "while nobody was here");
+    std::thread::sleep(settle);
+    let (_k2, mut back, _) = env.pair(Permission::Operate);
+    std::thread::sleep(settle);
+    copy(4, "after coming back");
+    assert_eq!(recv_t(&mut back, "clipboard")["text"], "after coming back");
+}
+
+#[test]
+fn paste_keeps_its_lines_and_refuses_escapes() {
+    let env = start(|_| {});
+    let (_k, mut ch, _) = env.pair(Permission::Operate);
+    let lines = "one\ntwo\r\n\tthree";
+    put(
+        &mut ch,
+        json!({"t":"paste","id":"p1","pane":12,"text":lines}),
+    );
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (true, ""));
+    assert_eq!(
+        env.fake.inputs(),
+        [(
+            12,
+            "Test Phone".to_string(),
+            Input::Paste(lines.to_string())
+        )]
+    );
+    for (text, want) in [
+        ("\u{1b}[201~rm".to_string(), "bad_request"),
+        ("del\u{7f}".into(), "bad_request"),
+        ("csi\u{9b}2J".into(), "bad_request"),
+        (String::new(), "bad_request"),
+        ("x".repeat(48 * 1024 + 1), "too_large"),
+    ] {
+        put(&mut ch, json!({"t":"paste","id":"p","pane":12,"text":text}));
+        assert_eq!(ack(&recv_t(&mut ch, "ack")), (false, want));
+    }
+    assert_eq!(env.fake.inputs().len(), 1);
+    // past the usual message limit: a whole paste, not a closed connection
+    put(
+        &mut ch,
+        json!({"t":"paste","id":"big","pane":12,"text":"x".repeat(48 * 1024)}),
+    );
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (true, ""));
+}
+
+#[test]
+fn a_tap_reaches_the_source_as_a_click() {
+    let env = start(|_| {});
+    let (_k, mut ch, _) = env.pair(Permission::Operate);
+    put(
+        &mut ch,
+        json!({"t":"mouse","id":"m1","pane":12,"col":4,"row":7}),
+    );
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (true, ""));
+    assert_eq!(
+        env.fake.inputs(),
+        [(
+            12,
+            "Test Phone".to_string(),
+            Input::Mouse { col: 4, row: 7 }
+        )]
+    );
+    let (_k, mut view, _) = env.pair(Permission::View);
+    put(
+        &mut view,
+        json!({"t":"mouse","id":"m2","pane":12,"col":0,"row":0}),
+    );
+    assert_eq!(ack(&recv_t(&mut view, "ack")), (false, "forbidden"));
+}
+
+#[test]
+fn a_view_device_may_not_paste() {
+    let env = start(|_| {});
+    let (_k, mut ch, _) = env.pair(Permission::View);
+    put(&mut ch, json!({"t":"paste","id":"p","pane":12,"text":"a"}));
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (false, "forbidden"));
+    assert!(env.fake.inputs().is_empty());
+}
+
 #[test]
 fn text_counts_against_the_keys_rate() {
     let env = start(|_| {});
@@ -2917,6 +3072,7 @@ fn screen(rows: &[&str], alt: bool, cursor: Option<[u16; 2]>) -> Screen {
         fg: None,
         bg: None,
         rules: Vec::new(),
+        age_ms: None,
         lines: rows
             .iter()
             .map(|r| {
@@ -3026,6 +3182,19 @@ fn auto_sends_a_full_screen_then_only_what_changed_and_ends_off_alt() {
     );
     // unchanged: nothing more
     assert!(screens_in(&drain(&mut ch, 300)).is_empty());
+    // a capture falling behind says by how much, with no row in it; caught up: gone
+    env.fake.edit_screen(12, |s| s.age_ms = Some(4000));
+    assert_eq!(
+        recv_screen(&mut ch),
+        json!({"t":"screen","pane":12,"cols":20,"rows":4,"alt":true,"cursor":[3,1],"full":false,
+               "age_ms":4000,"lines":[]})
+    );
+    env.fake.edit_screen(12, |s| s.age_ms = None);
+    assert_eq!(
+        recv_screen(&mut ch),
+        json!({"t":"screen","pane":12,"cols":20,"rows":4,"alt":true,"cursor":[3,1],"full":false,
+               "lines":[]})
+    );
     // one row changes (styled): only that row
     env.fake.edit_screen(12, |s| {
         s.lines[1] = vec![
@@ -3155,6 +3324,7 @@ fn a_full_screen_over_a_mib_goes_out_without_styles() {
             fg: None,
             bg: None,
             rules: Vec::new(),
+            age_ms: None,
             lines: vec![row; 120],
         },
     );
@@ -3179,6 +3349,7 @@ fn a_full_screen_over_a_mib_goes_out_without_styles() {
             fg: None,
             bg: None,
             rules: Vec::new(),
+            age_ms: None,
             lines: vec![vec![Run::plain("x")]; 200],
         },
     );
@@ -3211,6 +3382,7 @@ fn after_an_unstyled_screen_diffs_restyle_only_the_rows_that_differ() {
             fg: None,
             bg: None,
             rules: Vec::new(),
+            age_ms: None,
             lines: vec![row; 120],
         },
     );
@@ -3310,6 +3482,7 @@ fn a_slow_client_gets_the_newest_screen_not_a_queue_of_them() {
         fg: None,
         bg: None,
         rules: Vec::new(),
+        age_ms: None,
         lines: (0..120)
             .map(|r| {
                 (0..300)
@@ -4030,6 +4203,138 @@ fn a_frame_before_authentication_is_held_to_the_ordinary_limit() {
             Ok(m) => panic!("answered a too-large handshake frame: {m:?}"),
         }
     }
+}
+
+/// `bytes` as `upload` chunks carrying the extension `ext`.
+fn file_msgs(rid: &str, pane: u64, ext: &str, bytes: &[u8]) -> Vec<Value> {
+    upload_msgs(rid, pane, bytes)
+        .into_iter()
+        .map(|mut m| {
+            m["ext"] = json!(ext);
+            m
+        })
+        .collect()
+}
+
+#[test]
+fn a_file_with_an_extension_reaches_the_source_once_as_it_is() {
+    let env = start(|_| {});
+    let (_k, mut ch, _) = env.pair(Permission::Operate);
+    // no image signature, several chunks: any bytes go
+    let bytes: Vec<u8> = (0..100_000).map(|i| (i % 253) as u8).collect();
+    let msgs = file_msgs("f1", 12, "txt", &bytes);
+    assert!(msgs.len() > 1);
+    for m in &msgs {
+        put(&mut ch, m.clone());
+    }
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (true, ""));
+    put(&mut ch, json!({"t":"ping","n":1}));
+    assert_eq!(recv_t(&mut ch, "pong")["n"], 1);
+    let st = env.fake.0.lock().unwrap();
+    assert!(st.uploads.is_empty(), "a file is not an image");
+    assert_eq!(st.files.len(), 1, "once");
+    assert_eq!((st.files[0].0, st.files[0].2.as_str()), (12, "txt"));
+    assert_eq!(st.files[0].3, bytes);
+}
+
+#[test]
+fn a_bad_extension_is_refused_and_a_gif_without_one_stays_refused() {
+    let env = start(|_| {});
+    let (_k, mut ch, _) = env.pair(Permission::Operate);
+    for bad in ["PNG", "../x", "abcdefghi", "", "a b", "a.b", "é"] {
+        put(&mut ch, file_msgs("f", 12, bad, b"hello")[0].clone());
+        let v = recv_t(&mut ch, "ack");
+        assert_eq!(ack(&v), (false, "bad_request"), "{bad}: {v}");
+        assert!(v["message"].as_str().unwrap().starts_with("ext "), "{v}");
+        std::thread::sleep(Duration::from_millis(1050));
+    }
+    // the longest extension goes, and the same bytes without one do not
+    put(
+        &mut ch,
+        file_msgs("ok", 12, "abcdefg8", b"GIF89a-whatever")[0].clone(),
+    );
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (true, ""));
+    std::thread::sleep(Duration::from_millis(1050));
+    put(
+        &mut ch,
+        upload_msgs("gif", 12, b"GIF89a-whatever")[0].clone(),
+    );
+    let v = recv_t(&mut ch, "ack");
+    assert_eq!(ack(&v), (false, "bad_request"), "{v}");
+    assert!(
+        v["message"].as_str().unwrap().contains("PNG or JPEG"),
+        "{v}"
+    );
+    let st = env.fake.0.lock().unwrap();
+    assert!(st.uploads.is_empty());
+    assert_eq!(st.files.len(), 1);
+    assert_eq!(st.files[0].2, "abcdefg8");
+}
+
+#[test]
+fn a_file_keeps_its_extension_its_cap_and_its_own_refusals() {
+    let env = start(|_| {});
+    let (_k, mut ch, _) = env.pair(Permission::Operate);
+    // a later chunk naming another extension (or none) is out of order
+    let bytes = vec![7u8; 100_000];
+    let msgs = file_msgs("f1", 12, "txt", &bytes);
+    put(&mut ch, msgs[0].clone());
+    let mut other = msgs[1].clone();
+    other["ext"] = json!("sh");
+    put(&mut ch, other);
+    let v = recv_t(&mut ch, "ack");
+    assert_eq!(ack(&v), (false, "bad_request"), "{v}");
+    assert!(
+        v["message"].as_str().unwrap().contains("out of order"),
+        "{v}"
+    );
+    std::thread::sleep(Duration::from_millis(1050));
+    // over the cap, whatever it says it is
+    put(
+        &mut ch,
+        json!({"t":"upload","id":"f2","pane":12,"size":rift_remote::MAX_UPLOAD_BYTES + 1,
+               "offset":0,"data":"AAAA","ext":"txt"}),
+    );
+    let v = recv_t(&mut ch, "ack");
+    assert_eq!(ack(&v), (false, "too_large"), "{v}");
+    assert!(
+        v["message"]
+            .as_str()
+            .unwrap()
+            .contains("the file is larger"),
+        "{v}"
+    );
+    std::thread::sleep(Duration::from_millis(1050));
+    // at a prompt: refused at the first chunk, naming a file
+    env.fake.0.lock().unwrap().ready_error = Some(InputError::Busy);
+    put(&mut ch, msgs[0].clone());
+    let v = recv_t(&mut ch, "ack");
+    assert_eq!(ack(&v), (false, "busy"), "{v}");
+    assert!(
+        v["message"]
+            .as_str()
+            .unwrap()
+            .contains("at its prompt; a file goes"),
+        "{v}"
+    );
+    assert!(env.fake.0.lock().unwrap().files.is_empty());
+}
+
+#[test]
+fn a_view_device_may_not_upload_a_file() {
+    let env = start(|_| {});
+    let (_k, mut ch, _) = env.pair(Permission::View);
+    // the first chunk of more, within a view device's 4 KiB frames: refused
+    // at once, not when the last chunk would arrive
+    use base64::Engine as _;
+    let data = base64::engine::general_purpose::STANDARD.encode([7u8; 1_500]);
+    put(
+        &mut ch,
+        json!({"t":"upload","id":"f1","pane":12,"size":3_000,"offset":0,"data":data,"ext":"txt"}),
+    );
+    let v = recv_t(&mut ch, "ack");
+    assert_eq!(ack(&v), (false, "forbidden"), "{v}");
+    assert!(env.fake.0.lock().unwrap().files.is_empty());
 }
 
 #[test]

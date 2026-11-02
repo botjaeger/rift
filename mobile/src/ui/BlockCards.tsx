@@ -5,6 +5,7 @@ import { failureMessage, lastLines, parseLogLines } from "@/paneView";
 import type { Block } from "@/protocol/types";
 import { formatClock } from "./format";
 import { Icon } from "./Icon";
+import { SelectableText } from "./SelectableText";
 import { colors, mono, radius, tints, ui } from "./theme";
 import { toggleA11y } from "./toggle";
 
@@ -107,8 +108,8 @@ export function Elapsed({ ms }: { ms: number }) {
 
 /**
  * A block's card (the Pane board): surface, a 1 pt border in the state's colour at 33 %, no
- * left edge. The top (command, status, one or two lines) opens the block sheet; the pills under
- * it are their own buttons.
+ * left edge. The head (command and status) opens the block sheet; the output under it is selectable text
+ * (selecting copies, SelectableText) and the pills are their own buttons.
  */
 export function CardFrame({
   ground,
@@ -138,8 +139,8 @@ export function CardFrame({
         style={({ pressed }) => pressed && styles.pressed}
       >
         <View style={styles.head}>{head}</View>
-        {children ? <View style={styles.body}>{children}</View> : <View style={styles.bodyEmpty} />}
       </Pressable>
+      {children ? <View style={styles.body}>{children}</View> : <View style={styles.bodyEmpty} />}
       {pills ? <View style={styles.pills}>{pills}</View> : null}
     </View>
   );
@@ -198,8 +199,8 @@ export const FailedCard = memo(function FailedCard({ block, onActions, onRunAgai
         </>
       }
     >
-      {fail ? <Text style={styles.failText}>{fail.text}</Text> : null}
-      {fail?.path ? <Text style={styles.sub}>{fail.path}</Text> : null}
+      {fail ? <SelectableText text={fail.text} style={styles.failText} lineHeight={19} /> : null}
+      {fail?.path ? <SelectableText text={fail.path} style={styles.sub} lineHeight={16} /> : null}
     </CardFrame>
   );
 });
@@ -261,18 +262,16 @@ export const RunningCard = memo(function RunningCard({
               <Text style={[styles.logLevel, { color: r.level === "WARN" || r.level === "ERROR" || r.level === "FATAL" ? colors.textBright : colors.accent }]}>
                 {r.level}
               </Text>
-              <Text style={styles.logMessage} numberOfLines={1}>
-                {r.message}
-              </Text>
+              <View style={styles.logMessage}>
+                <SelectableText text={r.message} style={styles.logMessageText} lineHeight={18} lines={1} />
+              </View>
               {r.time ? <Text style={styles.logTime}>{r.time}</Text> : null}
             </View>
           ))}
         </>
       ) : (
         latest.map((l, i) => (
-          <Text key={i} style={styles.latest} numberOfLines={1}>
-            {l}
-          </Text>
+          <SelectableText key={i} text={l} style={styles.latest} lineHeight={18} lines={1} />
         ))
       )}
     </CardFrame>
@@ -310,14 +309,15 @@ const styles = StyleSheet.create({
   },
   command: { flex: 1, minWidth: 0, fontFamily: mono, color: colors.textBright, fontSize: 13, lineHeight: 18 },
   status: { fontFamily: mono, fontSize: 12, lineHeight: 18, paddingHorizontal: 6, borderRadius: 4, overflow: "hidden", fontVariant: ["tabular-nums"] },
-  failText: { fontFamily: ui(400), color: colors.textBright, fontSize: 14, lineHeight: 19 },
+  failText: { fontFamily: ui(400), color: colors.textBright, fontSize: 14 },
   sub: { fontFamily: mono, color: colors.textMuted, fontSize: 12 },
-  latest: { fontFamily: mono, color: colors.fg, fontSize: 13, lineHeight: 18 },
+  latest: { fontFamily: mono, color: colors.fg, fontSize: 13 },
   // the Pane board's log lines: source, then level · message · time
   logSource: { fontFamily: ui(400), color: colors.fg, fontSize: 11 },
   logRow: { flexDirection: "row", alignItems: "baseline", gap: 8 },
   logLevel: { width: 38, fontFamily: ui(600), fontSize: 11 },
-  logMessage: { flex: 1, minWidth: 0, fontFamily: mono, color: colors.textBright, fontSize: 13, lineHeight: 18 },
+  logMessage: { flex: 1, minWidth: 0 },
+  logMessageText: { fontFamily: mono, color: colors.textBright, fontSize: 13 },
   logTime: { fontFamily: mono, color: colors.fg, fontSize: 12 },
   pill: {
     height: 32,

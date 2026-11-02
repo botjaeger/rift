@@ -217,6 +217,11 @@ lives outside the workspace in `mobile/` (pnpm; the `mobile` gate).
   `PaneState.rows` cache filled by `terminal::render`; it never recomputes
   layout. `EditorState::replace_range` is the single buffer-mutation point
   (undo snapshots, selection reset).
+- **Phone captures.** A window in use never resizes a pane for a phone:
+  `Session::shadow_capture` tells an alternate-screen program the phone's size
+  (TIOCSWINSZ only), diverts the redraw to an empty `Term` and signals back.
+  The real `Term` is never resized by it. Only the alternate screen: on the
+  primary screen diverted output would be lost history.
 - **Marker idempotence.** Users' own iTerm2 integration emits OSC 133 next to
   ours; `BlockStore` handlers tolerate duplicated A/B/C/D markers. Keep new
   handlers idempotent.

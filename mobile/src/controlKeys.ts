@@ -46,6 +46,8 @@ export const CONTROL_KEYS: readonly ControlKey[] = [
   { id: "esc", tip: "Sends Escape: leaves a mode, cancels a prompt, closes a menu", label: "Esc", spoken: "Escape" },
   { id: "tab", tip: "Sends Tab: completes what you typed, or moves to the next field", label: "Tab", spoken: "Tab" },
   { id: "shift+tab", tip: "Sends Shift+Tab: moves back, or to the previous option", label: "⇧Tab", spoken: "Shift Tab", short: "Shift Tab" },
+  { id: "enter", tip: "Sends Return: confirms a menu or a picker in the program. With text in the message box, a new line there", label: "↵", icon: "enter", spoken: "Return", name: "Return", short: "Return" },
+  { id: "ctrl+j", tip: "Starts a new line in the message, without sending it", label: "New line", icon: "newLine", spoken: "New line", name: "New line", short: "New line" },
   { id: "ctrl", tip: "Holds Control for the next key you type or press: Ctrl, then R is Ctrl+R", label: "⌃", spoken: "Control, applies to the next key", name: "Control the next key", short: "Control", sticky: true },
   { id: "alt", tip: "Holds Alt for the next key you type or press: Alt, then B moves back a word", label: "⌥", spoken: "Alt, applies to the next key", name: "Alt the next key", short: "Alt", sticky: true },
   { id: "shift", tip: "Holds Shift for the next key you type or press", label: "⇧", spoken: "Shift, applies to the next key", name: "Shift the next key", short: "Shift", sticky: true },
@@ -68,7 +70,7 @@ export const CONTROL_KEYS: readonly ControlKey[] = [
   { id: "ctrl+e", tip: "Sends Ctrl+E: jumps to the end of the line", label: "⌃E", spoken: "Control E", short: "Line end" },
   { id: "ctrl+u", tip: "Sends Ctrl+U: deletes from the cursor to the start of the line", label: "⌃U", spoken: "Control U", short: "Clear line" },
   { id: "ctrl+w", tip: "Sends Ctrl+W: deletes the word before the cursor", label: "⌃W", spoken: "Control W", short: "Delete word" },
-  { id: "paste", tip: "Pastes the phone's clipboard: text as typed, an image (a screenshot) as a file the program attaches", label: "Paste", icon: "paste", spoken: "Paste the clipboard", name: "Paste", paste: true },
+  { id: "paste", tip: "Puts the phone's clipboard in the message box: text, or an image or file (a screenshot) the program attaches on Send", label: "Paste", icon: "paste", spoken: "Paste the clipboard", name: "Paste", paste: true },
   { id: "new_tab", tip: "Opens a new tab on your computer", label: "+Tab", icon: "newTab", spoken: "New tab", name: "New tab on the computer", short: "New tab", open: "tab" },
   { id: "new_pane", tip: "Splits this pane: a new pane beside it on your computer", label: "+Pane", icon: "newPane", spoken: "New pane", name: "New pane beside this one", short: "New pane", open: "pane" },
   ...fkeys,
@@ -83,21 +85,43 @@ export function controlKey(id: string): ControlKey | undefined {
   return BY_ID.get(id);
 }
 
-/** The default row: Esc Tab ⌃C ⌃ ← ↑ ↓ → (Settings › Keys). */
-export const DEFAULT_CONTROL_KEYS: readonly string[] = ["esc", "tab", "ctrl+c", "ctrl", "left", "up", "down", "right"];
+/** The default row: Esc Tab ⌃C ⌃ ↑ ↓ Return (Settings › Keys). New line is in Choose keys, not here: the phone keyboard's Return is a new line. */
+export const DEFAULT_CONTROL_KEYS: readonly string[] = ["esc", "tab", "ctrl+c", "ctrl", "up", "down", "enter"];
 /** The default before the arrows joined: a row stored as exactly this moves to the new default. */
 export const OLD_DEFAULT_CONTROL_KEYS: readonly string[] = ["ctrl+c", "esc", "tab", "ctrl", "up", "down"];
+/** The default before Return and New line joined: a row stored as exactly this moves too. */
+const ARROWS_DEFAULT_CONTROL_KEYS: readonly string[] = ["esc", "tab", "ctrl+c", "ctrl", "left", "up", "down", "right"];
+/** The default with New line after Return: a row stored as exactly this moves too. */
+const NEWLINE_DEFAULT_CONTROL_KEYS: readonly string[] = ["esc", "tab", "ctrl+c", "ctrl", "up", "down", "enter", "ctrl+j"];
 /** Keys the row holds at most (the hide-keyboard key comes besides). */
 export const MAX_ROW_KEYS = 8;
 
 /**
  * The row as shown: `ids`, with Paste at the end where an image can be pasted (`images`: the
  * computer takes uploads and this device operates) and the row lacks it. A screenshot for Claude
- * Code or vim goes through Paste, so it is never left to Settings › Keys to add (the stored row
+ * Code or vim starts with Paste, so it is never left to Settings › Keys to add (the stored row
  * stays as the user set it).
  */
 export function rowWithPaste(ids: readonly string[], images: boolean): readonly string[] {
   return images && !ids.includes("paste") ? [...ids, "paste"] : ids;
+}
+
+/**
+ * The row over a message box: Paste first where an image can be pasted and the row lacks it. The row
+ * scrolls, and a key at its end starts out of sight on a phone (the stored row stays as the user set it).
+ */
+export function messageBoxRow(ids: readonly string[], images: boolean): readonly string[] {
+  return images && !ids.includes("paste") ? ["paste", ...ids] : ids;
+}
+
+/**
+ * The row under a full-screen program: the default row gains ← and → (vim, lazygit and a phone
+ * keyboard without arrows have no other way sideways); a row the user chose stays theirs.
+ */
+export function fullScreenRow(ids: readonly string[]): readonly string[] {
+  if (!sameIds(ids, DEFAULT_CONTROL_KEYS)) return ids;
+  const at = ids.indexOf("down") + 1;
+  return [...ids.slice(0, at), "left", "right", ...ids.slice(at)];
 }
 
 /** Whether the row has room for another key. */
@@ -118,7 +142,7 @@ export function validControlKeys(v: unknown): string[] {
     seen.add(id);
     out.push(id);
   }
-  return sameIds(out, OLD_DEFAULT_CONTROL_KEYS) ? [...DEFAULT_CONTROL_KEYS] : out;
+  return sameIds(out, OLD_DEFAULT_CONTROL_KEYS) || sameIds(out, ARROWS_DEFAULT_CONTROL_KEYS) || sameIds(out, NEWLINE_DEFAULT_CONTROL_KEYS) ? [...DEFAULT_CONTROL_KEYS] : out;
 }
 
 /** `ids` with the key at `index` moved one place up (-1) or down (+1); unchanged at an end. */

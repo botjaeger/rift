@@ -11,6 +11,41 @@ export const CELL_RATIO = 0.6;
 export const LINE_RATIO = 1.25;
 
 /**
+ * The width a run's Text gets for `width` points of cells. A font's hinted advance can pass the
+ * cell ratio by a fraction per character, and past its width Android wraps the run's last word out
+ * of its one line, losing it (47 columns on a 320 pt phone lost "using" and "deploy.yml"). What
+ * spills is covered by the next run's ground.
+ */
+export const textRoom = (width: number) => Math.ceil(width * 1.1) + 4;
+
+/** The last row with any text on it (-1: none). */
+export function lastTextRow(lines: readonly (readonly { 0: string }[])[]): number {
+  for (let i = lines.length - 1; i >= 0; i--) if (lines[i]!.some((r) => r[0].trim() !== "")) return i;
+  return -1;
+}
+
+/**
+ * Where a screen taller than its view stops so the keyboard never covers the cursor: its row and
+ * the one under it in sight, or the top when the cursor fits there (a program drawing at the top of
+ * a tall screen); `null` without a cursor (the caller goes to the end).
+ */
+export function cursorScrollY(cursorRow: number | undefined, rowHeight: number, padding: number, viewHeight: number): number | null {
+  if (cursorRow === undefined) return null;
+  return Math.max(0, (cursorRow + 2) * rowHeight + padding - viewHeight);
+}
+
+/**
+ * The area a program is sized to after a layout. A new width is a rotation and always counts; with
+ * `keepHeight` (the keyboard or a question card covers the view) the height is not the program's to
+ * follow: a question card that shrank the program pushed its own question off the screen, the card
+ * went, the program grew, the question came back, about once a second.
+ */
+export function fitArea<A extends { width: number; height: number }>(area: A, next: A, keepHeight: boolean): A {
+  if (area.width === next.width && area.height === next.height) return area;
+  return keepHeight && area.width === next.width ? area : next;
+}
+
+/**
  * The font size (7 to 14 pt, in half points) at which `cols` cells fit `width`; `scroll` when
  * even 7 pt is too wide and the screen scrolls sideways.
  */
@@ -168,6 +203,93 @@ export function rowPieces(segments: readonly Segment[]): Piece[] {
   }
   return out;
 }
+
+/** A cell of the screen, counted from the top left. */
+export interface Cell {
+  row: number;
+  col: number;
+}
+
+/** The cell under a point in the rows' own coordinates, kept on the screen. */
+export function cellAt(x: number, y: number, cell: number, rowHeight: number, cols: number, rows: number): Cell {
+  const clamp = (v: number, max: number) => Math.max(0, Math.min(max, Math.floor(v)));
+  return { row: clamp(y / rowHeight, rows - 1), col: clamp(x / cell, cols - 1) };
+}
+
+/** Whether `a` comes before `b` in reading order. */
+const before = (a: Cell, b: Cell) => a.row < b.row || (a.row === b.row && a.col <= b.col);
+
+/** A selection's ends in reading order. */
+export const ordered = (a: Cell, b: Cell): [Cell, Cell] => (before(a, b) ? [a, b] : [b, a]);
+
+/** A row as one entry per cell a character starts at; the second cell of a wide character holds none. */
+function rowCells(runs: readonly ScreenRun[]): { col: number; text: string; cells: number }[] {
+  const out: { col: number; text: string; cells: number }[] = [];
+  let col = 0;
+  for (const [text] of runs) {
+    for (const ch of text) {
+      const w = charWidth(ch.codePointAt(0)!);
+      if (w === 0) {
+        const prev = out.at(-1);
+        if (prev) prev.text += ch;
+        continue;
+      }
+      out.push({ col, text: ch, cells: w });
+      col += w;
+    }
+  }
+  return out;
+}
+
+/**
+ * The text between two cells, both included, in reading order: a wide character touched by the
+ * selection comes whole, each row's trailing blanks are left out.
+ */
+export function selectionText(lines: readonly (readonly ScreenRun[])[], a: Cell, b: Cell): string {
+  const [from, to] = ordered(a, b);
+  const out: string[] = [];
+  for (let r = from.row; r <= to.row && r < lines.length; r++) {
+    const start = r === from.row ? from.col : 0;
+    const end = r === to.row ? to.col : Number.POSITIVE_INFINITY;
+    let line = "";
+    let next = start;
+    for (const c of rowCells(lines[r] ?? [])) {
+      if (c.col + c.cells <= start || c.col > end) continue;
+      // blank cells between runs are not sent as text only where a row ends: keep columns
+      if (c.col > next) line += " ".repeat(c.col - next);
+      line += c.text;
+      next = c.col + c.cells;
+    }
+    out.push(line.trimEnd());
+  }
+  return out.join("\n");
+}
+
+/** The word under a cell (a path or a URL is one word); the cell alone over a blank. */
+export function wordAt(lines: readonly (readonly ScreenRun[])[], at: Cell): [Cell, Cell] {
+  const cells = rowCells(lines[at.row] ?? []);
+  const i = cells.findIndex((c) => at.col >= c.col && at.col < c.col + c.cells);
+  const isWord = (c: { text: string } | undefined) => !!c && !/^[\s|│┃]$/.test(c.text);
+  if (i < 0 || !isWord(cells[i])) return [at, at];
+  let first = i;
+  let last = i;
+  while (isWord(cells[first - 1])) first--;
+  while (isWord(cells[last + 1])) last++;
+  const end = cells[last]!;
+  return [
+    { row: at.row, col: cells[first]!.col },
+    { row: at.row, col: end.col + end.cells - 1 },
+  ];
+}
+
+/**
+ * The media-control symbols agents draw (⏵⏵ auto mode, ⏺ a reply): the app's fonts lack them, and
+ * a phone may draw them as wide emoji that clip the text after them. These have their shape in one cell.
+ */
+const DRAWN: Record<string, string> = { "\u23F4": "\u25C2", "\u23F5": "\u25B8", "\u23F6": "\u25B4", "\u23F7": "\u25BE", "\u23FA": "\u25CF" };
+
+/** A piece's text as drawn: only what the fonts cannot draw changes, never what is copied or spoken. */
+export const drawnText = (text: string) => text.replace(/[\u23F4-\u23F7\u23FA]/g, (c) => DRAWN[c]!);
 
 /** `#rrggbb` halfway between `fg` and `bg` (dim text). */
 export function mix(fg: string, bg: string, t = 0.5): string {

@@ -189,6 +189,13 @@ describe("sticky modifiers", () => {
     expect(stickyKey("b", { ctrl: false, alt: false })).toBeNull();
   });
 
+  it("sticky shift then Return is a new line, not a submit", () => {
+    expect(stickyKey("\n", { ctrl: false, alt: false, shift: true })).toBe("ctrl+j");
+    expect(stickyKey("\r", { ctrl: false, alt: false, shift: true })).toBe("ctrl+j");
+    expect(stickyKey("\n", { ctrl: false, alt: false })).toBeNull();
+    expect(stickyKey("a", { ctrl: false, alt: false, shift: true })).toBeNull();
+  });
+
   it("whatever the next key is: line breaks, tab, escape, ctrl+[ and ctrl+@", () => {
     expect(stickyKey("\n", { ctrl: true, alt: false })).toBe("ctrl+enter"); // the soft keyboard's Return
     expect(stickyKey("\r", { ctrl: false, alt: true })).toBe("alt+enter");

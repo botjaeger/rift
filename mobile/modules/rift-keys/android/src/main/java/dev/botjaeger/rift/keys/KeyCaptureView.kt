@@ -19,7 +19,8 @@ import expo.modules.kotlin.views.ExpoView
  * handling (hardware keys with their meta state and the character the layout composes, for
  * AltGr). Shortcuts mode: the view wraps the command field and takes from it, in
  * dispatchKeyEvent, only ctrl/alt combinations that are keys (an AltGr / Alt character such as
- * "@" or "|" is typed into the field), Escape, F-keys and, with captureTab, Tab / Shift+Tab.
+ * "@" or "|" is typed into the field), Escape, F-keys, a hardware keyboard's Return and
+ * Shift+Return, and, with captureTab, Tab / Shift+Tab.
  * Meta (Cmd / Search) combinations are left to the system in both.
  *
  * The soft keyboard gets a visible-password text field (no suggestions, no autocorrect, no
@@ -31,6 +32,7 @@ class KeyCaptureView(context: Context, appContext: AppContext) : ExpoView(contex
   private val onText by EventDispatcher()
   private val onKey by EventDispatcher()
   private val onFocusChange by EventDispatcher()
+  private val onPaste by EventDispatcher()
 
   private var terminal = false
 
@@ -149,7 +151,13 @@ class KeyCaptureView(context: Context, appContext: AppContext) : ExpoView(contex
 
   /** Terminal mode: every key but Meta combinations; printable keys are text. */
   private fun terminalKey(e: KeyEvent): Boolean {
+    // the keyboard's Paste key, and Ctrl+Shift+V as in a desktop terminal (Ctrl+V stays the program's)
     if (e.isMetaPressed) return false
+    if (e.keyCode == KeyEvent.KEYCODE_PASTE || (e.keyCode == KeyEvent.KEYCODE_V && e.isCtrlPressed && e.isShiftPressed)) {
+      // a key held down pastes once
+      if (e.repeatCount == 0) onPaste(emptyMap<String, Any>())
+      return true
+    }
     NAMED[e.keyCode]?.let {
       emitKey(it, e.metaState)
       return true
@@ -175,6 +183,16 @@ class KeyCaptureView(context: Context, appContext: AppContext) : ExpoView(contex
   private fun shortcutKey(e: KeyEvent): Boolean {
     if (e.isMetaPressed) return false
     val code = e.keyCode
+    // Shift+Return in the field: a new line in the message. Plain Return from a physical keyboard
+    // sends it; the on-screen keyboard's Return (a virtual device) is left to the field, a new line.
+    if (code == KeyEvent.KEYCODE_ENTER || code == KeyEvent.KEYCODE_NUMPAD_ENTER) {
+      val plain = !e.isCtrlPressed && !e.isAltPressed
+      val physical = e.deviceId != KeyCharacterMap.VIRTUAL_KEYBOARD && e.device?.isVirtual == false
+      if (e.isShiftPressed || (plain && physical)) {
+        emitKey("Enter", e.metaState)
+        return true
+      }
+    }
     if (code == KeyEvent.KEYCODE_TAB && !captureTab) return false
     if (code == KeyEvent.KEYCODE_ESCAPE || code == KeyEvent.KEYCODE_TAB ||
       (code >= KeyEvent.KEYCODE_F1 && code <= KeyEvent.KEYCODE_F12)

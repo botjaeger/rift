@@ -16,6 +16,7 @@ class KeyCaptureView: ExpoView, UIKeyInput {
   let onText = EventDispatcher()
   let onKey = EventDispatcher()
   let onFocusChange = EventDispatcher()
+  let onPaste = EventDispatcher()
 
   var mode: CaptureMode = .shortcuts {
     didSet {
@@ -72,6 +73,19 @@ class KeyCaptureView: ExpoView, UIKeyInput {
       onFocusChange(["focused": false])
     }
     return ok
+  }
+
+  // MARK: - System paste (terminal mode): ⌘V and the system's Paste commands
+
+  override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+    if action == #selector(UIResponderStandardEditActions.paste(_:)) {
+      return mode == .terminal
+    }
+    return super.canPerformAction(action, withSender: sender)
+  }
+
+  override func paste(_ sender: Any?) {
+    onPaste([:])
   }
 
   func focusCapture() {
@@ -239,7 +253,7 @@ class KeyCaptureView: ExpoView, UIKeyInput {
     guard mode == .shortcuts else {
       return nil
     }
-    return captureTab ? Self.shortcutCommands + Self.tabCommands : Self.shortcutCommands
+    return (captureTab ? Self.shortcutCommands + Self.tabCommands : Self.shortcutCommands) + [Self.newLineCommand, Self.returnCommand]
   }
 
   private static func command(_ input: String, _ flags: UIKeyModifierFlags) -> UIKeyCommand {
@@ -249,6 +263,13 @@ class KeyCaptureView: ExpoView, UIKeyInput {
   }
 
   private static let tabCommands: [UIKeyCommand] = [command("\t", []), command("\t", .shift)]
+
+  /// Shift+Return in the field: a new line in the message.
+  private static let newLineCommand = command("\r", .shift)
+
+  /// Return on a hardware keyboard sends the message. A key command never fires for the on-screen
+  /// keyboard, whose Return types a new line into the field: the two are told apart by the event.
+  private static let returnCommand = command("\r", [])
 
   private static let shortcutCommands: [UIKeyCommand] = {
     var list: [UIKeyCommand] = []
@@ -285,6 +306,8 @@ class KeyCaptureView: ExpoView, UIKeyInput {
       name = "Escape"
     } else if input == "\t" {
       name = "Tab"
+    } else if input == "\r" {
+      name = "Enter"
     } else if let i = fkeys.firstIndex(of: input) {
       name = "F\(i + 1)"
     } else {

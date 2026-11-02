@@ -162,7 +162,11 @@ export type Feature =
   | "prompt_chips"
   | "start"
   | "scroll"
-  | "upload";
+  | "upload"
+  | "upload_files"
+  | "paste"
+  | "mouse"
+  | "clipboard";
 
 /** `complete` bounds: line bytes, entries per list, bytes per entry. */
 export const MAX_COMPLETE_LINE = 1024;
@@ -222,12 +226,16 @@ export const MAX_SCREEN_ROWS = 120;
 export const MAX_CLIENT_MESSAGE_BYTES = 4096;
 /** Lines one `scroll` moves at most (the gateway clamps a larger one). */
 export const MAX_SCROLL_LINES = 50;
-/** The largest image an `upload` carries, in bytes. */
+/** The largest image or file an `upload` carries, in bytes. */
 export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+/** An `upload`'s `ext`: the extension a file is saved with (feature `upload_files`). */
+export const UPLOAD_EXT = /^[a-z0-9]{1,8}$/;
 /** Bytes per `upload` chunk: 60 000 characters of base64 (a multiple of 3 bytes, so no chunk splits a quantum). */
 export const MAX_UPLOAD_CHUNK = 45_000;
 /** The largest `upload` chunk message. */
 export const MAX_UPLOAD_MESSAGE_BYTES = 62 * 1024;
+/** The largest `paste`, in UTF-8 bytes; its message may be as large as an `upload` chunk's. */
+export const MAX_PASTE_BYTES = 48 * 1024;
 export const MAX_ID_CHARS = 64;
 
 // Handshake payloads.
@@ -332,6 +340,21 @@ export interface TextMsg {
   pane: number;
   text: string;
 }
+/** Text pasted into the pane's program as one paste (feature `paste`): line breaks and tabs stay. */
+export interface PasteMsg {
+  t: "paste";
+  id: string;
+  pane: number;
+  text: string;
+}
+/** A left click at a cell of the pane's screen, 0-based (feature `mouse`), for a program that tracks the mouse. */
+export interface MouseMsg {
+  t: "mouse";
+  id: string;
+  pane: number;
+  col: number;
+  row: number;
+}
 /**
  * Sizes the pane's program to the phone's view (feature `fit`, operate only): `cols` x `rows`
  * (the desktop clamps to 20..300 x 5..120), or both null to release. The desktop drops a fit that
@@ -356,7 +379,7 @@ export interface ScrollMsg {
   lines: number;
 }
 /**
- * One chunk of an image pasted into the pane's program (feature `upload`, operate only): `size`
+ * One chunk of an image, or with `ext` of a file (feature `upload_files`), pasted into the pane's program (feature `upload`, operate only): `size`
  * bytes in all, `data` (standard base64) from byte `offset`, chunks in order. The last chunk is
  * answered with an `ack` once the desktop saved it and pasted its path; the first failing chunk
  * with its error.
@@ -368,6 +391,8 @@ export interface UploadMsg {
   size: number;
   offset: number;
   data: string;
+  /** A file's extension, the same on every chunk; without it an image, told by its first bytes. */
+  ext?: string;
 }
 export type ScreenMode = "off" | "auto" | "on";
 /** What the gateway sends of the subscribed pane's screen. */
@@ -441,6 +466,8 @@ export type ClientMsg =
   | PushMsg
   | NotifyMsg
   | TextMsg
+  | PasteMsg
+  | MouseMsg
   | FitMsg
   | ScrollMsg
   | UploadMsg
@@ -500,6 +527,11 @@ export interface DoneMsg {
   exit: number | null;
   duration_ms: number;
 }
+/** What a program copied, with the desktop's `remote_clipboard` on (feature `clipboard`). */
+export interface ClipboardMsg {
+  t: "clipboard";
+  text: string;
+}
 export interface PongMsg {
   t: "pong";
   n: number;
@@ -541,6 +573,8 @@ export interface ScreenMsg {
   /** `[row, colour]`: rows beside which the desktop draws a block's 2 px left rule; absent from older desktops. */
   rules?: [number, string][];
   lines: [number, ScreenRun[]][];
+  /** A capture the pane's output has moved on from, this long ago; absent from a live frame and from older desktops. */
+  age_ms?: number;
 }
 /** Screens stopped (mode `auto` and the pane left the alternate screen, or mode `off`). */
 export interface ScreenEndMsg {
@@ -673,6 +707,7 @@ export type ServerMsg =
   | AckMsg
   | DoneMsg
   | PongMsg
+  | ClipboardMsg
   | ClosingMsg
   | ErrorMsg
   | ScreenMsg
@@ -837,6 +872,7 @@ function isScreen(m: Obj): boolean {
   const colour = (v: unknown) => isStr(v) && /^[0-9a-f]{6}$/.test(v);
   if (m.fg !== undefined && !colour(m.fg)) return false;
   if (m.bg !== undefined && !colour(m.bg)) return false;
+  if (m.age_ms !== undefined && !isUint(m.age_ms)) return false;
   if (
     m.rules !== undefined &&
     !(
@@ -900,6 +936,8 @@ export function decodeServer(json: unknown): ServerMsg | null {
         : null;
     case "pong":
       return isUint(m.n) ? (m as unknown as PongMsg) : null;
+    case "clipboard":
+      return isStr(m.text) ? (m as unknown as ClipboardMsg) : null;
     case "closing":
       return (m.reason === "quit" || m.reason === "update") && (m.back_in_s === undefined || isUint(m.back_in_s))
         ? (m as unknown as ClosingMsg)
@@ -1096,6 +1134,10 @@ export function isClientMsg(v: unknown): v is ClientMsg {
       return isUint(v.pane) && (v.off === undefined || v.off === true);
     case "text":
       return isId(v.id) && isUint(v.pane) && isStr(v.text) && textProblem(v.text) === null;
+    case "paste":
+      return isId(v.id) && isUint(v.pane) && isStr(v.text) && pasteProblem(v.text) === null;
+    case "mouse":
+      return isId(v.id) && isUint(v.pane) && isUint(v.col) && isUint(v.row);
     case "fit":
       return (
         isId(v.id) &&
@@ -1125,7 +1167,8 @@ export function isClientMsg(v: unknown): v is ClientMsg {
         isStr(v.data) &&
         v.data.length > 0 &&
         v.data.length <= (MAX_UPLOAD_CHUNK / 3) * 4 &&
-        /^[A-Za-z0-9+/]*={0,2}$/.test(v.data)
+        /^[A-Za-z0-9+/]*={0,2}$/.test(v.data) &&
+        (v.ext === undefined || (isStr(v.ext) && UPLOAD_EXT.test(v.ext)))
       );
     case "output":
       return (
@@ -1221,6 +1264,14 @@ export function textProblem(text: string): "empty" | "too_long" | "control" | nu
   if (text === "") return "empty";
   if (CONTROL_CHARS.test(text)) return "control";
   if (utf8Length(text) > MAX_TEXT_BYTES) return "too_long";
+  return null;
+}
+
+/** Why `text` cannot go as a `paste`, or null when it can: line breaks and tabs are its only control characters. */
+export function pasteProblem(text: string): "empty" | "too_long" | "control" | null {
+  if (text === "") return "empty";
+  if (CONTROL_CHARS.test(text.replace(/[\n\r\t]/g, ""))) return "control";
+  if (utf8Length(text) > MAX_PASTE_BYTES) return "too_long";
   return null;
 }
 

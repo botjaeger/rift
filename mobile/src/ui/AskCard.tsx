@@ -6,6 +6,7 @@ import { needsAuthBeforeRun } from "@/lock";
 import {
   agoText,
   answerLabel,
+  choiceCommand,
   askContext,
   askerName,
   hasMoreRows,
@@ -173,7 +174,7 @@ export function AskCard({
           <Icon name="chevronDown" size={16} color={colors.text} />
         </Pressable>
       </View>
-      <ScrollView style={{ maxHeight: height * 0.55 }} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled" bounces={false}>
+      <ScrollView style={{ maxHeight: height * (others.length > MANY_ANSWERS ? 0.3 : 0.55) }} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled" bounces={false}>
         <PromptText text={w.prompt} style={styles.title} monoSize={14} />
         {ctx.file || rows.length > 0 || ctx.meta.length > 0 ? (
           <View style={styles.context} accessible={false}>
@@ -219,6 +220,14 @@ export function AskCard({
         ) : null}
       </ScrollView>
       {error ? <ErrorText>{error}</ErrorText> : null}
+      {w.choices.map((c, i) => {
+        const command = choiceCommand(c);
+        return command ? (
+          <Text key={i} style={styles.runs} accessibilityLabel={`${answerLabel(w, i)} runs ${command}`}>
+            {answerLabel(w, i)} runs: <Text style={styles.runsCommand}>{command}</Text>
+          </Text>
+        ) : null;
+      })}
       {replying && replyAt !== null ? (
         <View style={styles.answers}>
           <View style={styles.replyField}>
@@ -258,7 +267,8 @@ export function AskCard({
           </Pressable>
         </View>
       ) : (
-        <View style={styles.answers}>
+        // a long menu scrolls here, so its last entries and the Keys (Esc leaves it) stay on the screen
+        <ScrollView style={{ maxHeight: height * 0.34 }} contentContainerStyle={styles.answers} keyboardShouldPersistTaps="handled" nestedScrollEnabled>
           <Pressable
             accessibilityRole="button"
             accessibilityLabel={w.choices[primary]}
@@ -288,7 +298,7 @@ export function AskCard({
               </Pressable>
             ))}
           </View>
-        </View>
+        </ScrollView>
       )}
       <View style={styles.keys} accessibilityRole="toolbar" accessibilityLabel="Keys">
         <Text style={styles.keysCaption}>Keys</Text>
@@ -308,6 +318,9 @@ export function AskCard({
     </View>
   );
 }
+
+/** Past this many answers under the primary one, the question gives up room to them. */
+const MANY_ANSWERS = 4;
 
 const styles = StyleSheet.create({
   pressed: { opacity: 0.7 },
@@ -348,6 +361,8 @@ const styles = StyleSheet.create({
   context: { borderRadius: 12, backgroundColor: colors.chrome, overflow: "hidden" },
   fileRow: { flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: 8, paddingLeft: 12, paddingRight: 6 },
   fileRule: { borderBottomWidth: 1, borderBottomColor: colors.hairline },
+  runs: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12, lineHeight: 17 },
+  runsCommand: { fontFamily: mono, color: colors.textBright, fontSize: 12 },
   file: { flex: 1, minWidth: 0, fontFamily: mono, color: colors.textBright, fontSize: 13 },
   count: { fontFamily: mono, fontSize: 12 },
   diffToggle: { height: 28, paddingHorizontal: 10, borderRadius: 14, borderWidth: 1, borderColor: colors.borderStrong, justifyContent: "center" },

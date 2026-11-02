@@ -337,6 +337,35 @@ describe("RiftClient session", () => {
     expect(delays).toEqual([375, 750, 1500, 3000, 6000]);
   });
 
+  it("a probe after giving up tries one round: no answer stops it again, an answer connects", () => {
+    const { client, sockets, last, states } = setup();
+    client.start();
+    for (let i = 0; i < MAX_RETRIES; i++) {
+      last().drop();
+      vi.advanceTimersByTime(states.at(-1)!.retryInMs!);
+    }
+    last().drop();
+    expect(states.at(-1)).toMatchObject({ status: "failed", failure: "gave_up" });
+    const before = sockets.length;
+    const heard = states.length;
+    client.probe();
+    expect(sockets).toHaveLength(before + 1);
+    // the card keeps saying it stopped while the probe is out
+    expect(states).toHaveLength(heard);
+    last().drop();
+    expect(states.at(-1)).toMatchObject({ status: "failed", failure: "gave_up", retryInMs: null });
+    vi.advanceTimersByTime(60_000);
+    expect(sockets).toHaveLength(before + 1);
+  });
+
+  it("a probe leaves a client alone unless it gave up: never an auth failure", () => {
+    const { client, sockets } = setup();
+    client.start();
+    const before = sockets.length;
+    client.probe();
+    expect(sockets).toHaveLength(before);
+  });
+
   it("stops after MAX_RETRIES failed retries, and starts again at once on a restart", () => {
     const { client, sockets, last, states } = setup();
     client.start();

@@ -3,6 +3,8 @@
 // (expo-network), the app state, and the app lock (expo-local-authentication; on Android also
 // FLAG_SECURE through expo-screen-capture).
 
+import * as Clipboard from "expo-clipboard";
+import { boxAlive, pending } from "./pending";
 import Constants from "expo-constants";
 import { getRandomBytes } from "expo-crypto";
 import * as Device from "expo-device";
@@ -59,6 +61,9 @@ if (notificationsSupported) {
     },
   });
 }
+
+/** How often a computer that stopped answering is tried again while the app is open. */
+const STOPPED_PROBE_MS = 30_000;
 
 /** The EAS project push tokens belong to (app.json `extra.eas.projectId`); null in a build without one. */
 const pushProjectId: string | null =
@@ -142,6 +147,13 @@ export const fleet = new Fleet({
   platform: Platform.OS,
   systemDeviceName: Device.deviceName ?? Device.modelName ?? "Phone",
   notifier,
+  clipboard: (text) => Clipboard.setStringAsync(text),
+});
+
+// what waits in a message box goes with its pane or its computer
+fleet.store.subscribe(() => {
+  const { hosts, ready } = fleet.store.getSnapshot();
+  if (ready) pending.keep((box) => boxAlive(hosts, box));
 });
 
 /** The app state, re-rendering at most once per publish interval. */
@@ -216,6 +228,8 @@ export function startPlatformWatchers(): () => void {
     if (s.ready && s.settings.autoUpdate) void updateChecks.run();
   };
   const otaTimer = updateChecks.enabled ? setInterval(autoCheck, OTA_CHECK_INTERVAL_MS) : null;
+  // a computer back while the app stays open: nothing else would notice (paused in the background)
+  const probeTimer = setInterval(() => fleet.probeStopped(), STOPPED_PROBE_MS);
   const appSub = RNAppState.addEventListener("change", (s) => {
     onAppState(s);
     // Notifications may have been allowed or blocked in the system settings meanwhile.
@@ -266,6 +280,7 @@ export function startPlatformWatchers(): () => void {
     appSub.remove();
     tokenSub?.remove();
     if (otaTimer) clearInterval(otaTimer);
+    clearInterval(probeTimer);
     unsubLaunch();
     unsubStore();
     unsubLive();

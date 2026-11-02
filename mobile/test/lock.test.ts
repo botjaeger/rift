@@ -171,6 +171,13 @@ describe("keysNeedAuth", () => {
     expect(keysNeedAuth(["up", "ctrl+m"], on)).toBe(true);
   });
 
+  it("ctrl+j starts a line in a coding agent, and still submits anywhere else", () => {
+    expect(keysNeedAuth(["ctrl+j"], on, true)).toBe(false);
+    expect(keysNeedAuth(["ctrl+j"], on, false)).toBe(true);
+    expect(keysNeedAuth(["enter"], on, true)).toBe(true);
+    expect(keysNeedAuth(["ctrl+m"], on, true)).toBe(true);
+  });
+
   it("never for other keys, nor when Run would not ask", () => {
     for (const k of ["ctrl+c", "esc", "tab", "up", "ctrl+d", "alt+m", "f5", "ctrl+space"])
       expect(keysNeedAuth([k], on)).toBe(false);

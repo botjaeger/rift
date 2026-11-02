@@ -1759,7 +1759,10 @@ fn output_tail<T>(
     (start, end, unterminated): (u64, Option<u64>, bool),
 ) -> (String, u64) {
     let g = term.primary_grid();
-    let end = output_end(g, scrolled, end);
+    // a running block's end comes from the cursor, which a program that
+    // clears its screen (Claude Code answering a folder prompt) can put above
+    // the block's start
+    let end = output_end(g, scrolled, end).max(start);
     let wrapped = |abs: u64| row_wraps(g, scrolled, abs);
     // read rows backwards up to the start of the line that makes the tail
     // longer than the bound (in lines or bytes); the bound cuts the rest
@@ -2116,6 +2119,55 @@ pub fn remote_screen(
     (key, Some(screen))
 }
 
+/// A capture behind the pane's output is said to be from this long on, and
+/// replaced by the live frame past [`CAPTURE_STALE`]: phones are told, never
+/// left on an old picture of a program that is working.
+const CAPTURE_LATE: std::time::Duration = std::time::Duration::from_secs(3);
+const CAPTURE_STALE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// What a phone is shown of a pane whose window is in use, at the phone's
+/// `size`: the pane's capture ([`Session::shadow_capture`]), while it has one
+/// and the program is still on the alternate screen; `None`: the live frame.
+/// The key differs from every generation [`remote_screen`] answers with, and
+/// changes with the capture and the seconds it is behind by.
+pub fn captured_screen(
+    session: &Session,
+    theme: &Theme,
+    size: rift_pty::GridSize,
+    since: Option<u64>,
+) -> Option<(u64, Option<Option<rift_remote::Screen>>)> {
+    if !session.term.lock().mode().contains(TermMode::ALT_SCREEN) {
+        return None;
+    }
+    session
+        .shadow_frame(size, |term, seq, behind| {
+            if behind.is_some_and(|b| b >= CAPTURE_STALE) {
+                return None;
+            }
+            let late = behind.filter(|b| *b >= CAPTURE_LATE).map(|b| b.as_secs());
+            let key = (1 << 63) | (seq << 8) | late.unwrap_or(0);
+            if since == Some(key) {
+                return Some((key, None));
+            }
+            let screen = screen_of(term, theme, true).map(|mut s| {
+                s.age_ms = late.map(|secs| secs * 1000);
+                s
+            });
+            Some((key, Some(screen)))
+        })
+        .flatten()
+}
+
+/// Whether a phone is shown a capture at `size` now ([`captured_screen`]): its
+/// cells are not the pane's, so a tap has nowhere to land. Past
+/// [`CAPTURE_STALE`] it sees the live frame, whose cells are.
+pub fn capture_shown(session: &Session, size: rift_pty::GridSize) -> bool {
+    session.term.lock().mode().contains(TermMode::ALT_SCREEN)
+        && session.shadow_frame(size, |_, _, behind| {
+            !behind.is_some_and(|b| b >= CAPTURE_STALE)
+        }) == Some(true)
+}
+
 /// A paired phone's own view of a pane's styled screen, apart from the
 /// desktop's `view_offset`: display lines scrolled up from the end
 /// (`offset`, 0: following the end) and the length of the list it last
@@ -2250,6 +2302,7 @@ fn screen_of<T>(
         bg: Some(hex8(rgb8(theme.bg))),
         rules: Vec::new(),
         lines,
+        age_ms: None,
     })
 }
 
@@ -2319,6 +2372,7 @@ fn styled_screen(
         bg: Some(hex8(rgb8(theme.bg))),
         rules,
         lines,
+        age_ms: None,
     })
 }
 
@@ -4406,6 +4460,16 @@ mod tests {
             let page = output_range(&t, scrolled, rows, 0, 10_000);
             assert_eq!(page.text.lines().count(), 500);
         }
+    }
+
+    #[test]
+    fn a_running_block_above_its_start_has_no_output() {
+        // the program cleared its screen: the cursor sits above the block's start
+        let (t, scrolled) = fed(20, 5, 50, b"hi");
+        assert_eq!(
+            output_tail(&t, scrolled, (10, None, true)),
+            (String::new(), 0)
+        );
     }
 
     #[test]

@@ -9,6 +9,7 @@ interface NativeProps {
   onText?: (e: NativeSyntheticEvent<TextEvent>) => void;
   onKey?: (e: NativeSyntheticEvent<KeyEvent>) => void;
   onFocusChange?: (e: NativeSyntheticEvent<{ focused: boolean }>) => void;
+  onPaste?: () => void;
   style?: StyleProp<ViewStyle>;
   children?: ReactNode;
   accessibilityLabel?: string;
@@ -23,7 +24,7 @@ interface NativeHandle {
 
 const NativeView = requireNativeView<NativeProps & { ref?: Ref<NativeHandle> }>("RiftKeys");
 
-export function KeyCaptureView({ mode, onText, onKey, onFocusChange, ref, ...rest }: KeyCaptureViewProps) {
+export function KeyCaptureView({ mode, onText, onKey, onFocusChange, onPaste, ref, ...rest }: KeyCaptureViewProps) {
   const native = useRef<NativeHandle>(null);
   useImperativeHandle(
     ref,
@@ -40,6 +41,7 @@ export function KeyCaptureView({ mode, onText, onKey, onFocusChange, ref, ...res
       onText={onText ? (e) => onText(e.nativeEvent) : undefined}
       onKey={onKey ? (e) => onKey(e.nativeEvent) : undefined}
       onFocusChange={onFocusChange ? (e) => onFocusChange(e.nativeEvent.focused) : undefined}
+      onPaste={onPaste}
       {...rest}
     />
   );

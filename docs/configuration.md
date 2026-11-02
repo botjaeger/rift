@@ -383,6 +383,7 @@ middle_click_paste = true         # middle-click pastes the clipboard into the p
 wheel_scroll_lines = 3            # terminal lines per mouse-wheel notch (1–20)
 clipboard_access = "write"        # OSC 52: off | write (programs may copy) | read_write
                                   # (also read: any program or ssh host can see your clipboard)
+remote_clipboard = false          # also hand what programs copy to paired phones that may operate
 global_hotkey = ""                # system-wide show/hide chord, e.g. "alt+space";
                                   # empty = off (X11 on Linux)
 hotkey_window = false             # the hotkey slides a drop-down window from the top of

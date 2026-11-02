@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { reduceScreen, type ScreenState } from "../src/protocol/store";
 import { decodeServer, type ScreenMsg, type ScreenRun } from "../src/protocol/types";
-import { charWidth, fitFont, isWide, mix, rowPieces, rowSegments, screenDefaults, segmentColors } from "../src/terminal";
+import { textRoom, charWidth, cursorScrollY, fitArea, fitFont, lastTextRow, isWide, mix, rowPieces, rowSegments, screenDefaults, segmentColors } from "../src/terminal";
 import { colors, contrast } from "../src/ui/palette";
 
 const fixture = (name: string) =>
@@ -62,12 +62,42 @@ describe("reduceScreen", () => {
     expect(reduceScreen(reduceScreen(null, screen({})), { t: "screen_end", pane: 12 })).toBeNull();
   });
 
+  it("a capture behind the program keeps its rows and says how far", () => {
+    const first = reduceScreen(null, screen({})) as ScreenState;
+    expect(first.ageMs).toBeNull();
+    const msg = decodeServer(fixture("screen-behind.json")) as ScreenMsg;
+    const behind = reduceScreen(first, { ...msg, cols: first.cols, rows: first.rows }) as ScreenState;
+    expect(behind.ageMs).toBe(4000);
+    expect(behind.lines).toEqual(first.lines);
+    expect(decodeServer({ ...msg, age_ms: -1 })).toBeNull();
+  });
+
   it("applies the fixture", () => {
     const msg = decodeServer(fixture("screen.json")) as ScreenMsg;
     const s = reduceScreen(null, msg) as ScreenState;
     expect(s.lines).toHaveLength(24);
     expect(s.lines[6]).toEqual([run("  PID USER"), run("      CPU%", "1e1e1e", "e5c07b")]);
     expect(s.cursor).toEqual([23, 1]);
+  });
+});
+
+describe("lastTextRow", () => {
+  it("skips rows of nothing and of spaces", () => {
+    expect(lastTextRow([[["a"]], [], [["   "]]])).toBe(0);
+    expect(lastTextRow([[], []])).toBe(-1);
+  });
+});
+
+describe("fitArea", () => {
+  const tall = { width: 390, height: 700 };
+  const short = { width: 390, height: 200 };
+  it("keeps the program's height under a question card or the keyboard", () => {
+    expect(fitArea(tall, short, true)).toBe(tall);
+  });
+  it("follows the height otherwise, and a new width (rotation) always", () => {
+    expect(fitArea(tall, short, false)).toBe(short);
+    const wide = { width: 800, height: 200 };
+    expect(fitArea(tall, wide, true)).toBe(wide);
   });
 });
 
@@ -281,5 +311,67 @@ describe("the screen's own colours and block rules (optional: older desktops omi
     expect(decodeServer({ ...base, rules: [[0, "zzzzzz"]] })).toBeNull();
     expect(decodeServer({ ...base, rules: "x" })).toBeNull();
     expect(decodeServer({ ...base, rules: [[0, "3fb950"]] })).not.toBeNull();
+  });
+});
+
+describe("selection", () => {
+  const run = (text: string): ScreenRun => [text, null, null, 0];
+  const lines = [[run("hello "), run("world")], [run("/usr/local/bin  x")], [], [run("日本 ok")]];
+
+  it("takes the cells between both ends, in reading order", async () => {
+    const { selectionText } = await import("../src/terminal");
+    expect(selectionText(lines, { row: 0, col: 6 }, { row: 0, col: 10 })).toBe("world");
+    // either end may be first
+    expect(selectionText(lines, { row: 0, col: 10 }, { row: 0, col: 6 })).toBe("world");
+    expect(selectionText(lines, { row: 0, col: 6 }, { row: 1, col: 3 })).toBe("world\n/usr");
+  });
+  it("keeps a row's inner blanks, leaves its trailing ones", async () => {
+    const { selectionText } = await import("../src/terminal");
+    expect(selectionText(lines, { row: 1, col: 0 }, { row: 1, col: 40 })).toBe("/usr/local/bin  x");
+    expect(selectionText(lines, { row: 0, col: 5 }, { row: 0, col: 5 })).toBe("");
+    expect(selectionText(lines, { row: 1, col: 14 }, { row: 2, col: 3 })).toBe("  x\n");
+  });
+  it("a wide character touched by either of its cells comes whole", async () => {
+    const { selectionText } = await import("../src/terminal");
+    expect(selectionText(lines, { row: 3, col: 1 }, { row: 3, col: 2 })).toBe("日本");
+    expect(selectionText(lines, { row: 3, col: 5 }, { row: 3, col: 6 })).toBe("ok");
+  });
+  it("a hold takes a word, a path as one, a blank alone", async () => {
+    const { selectionText, wordAt } = await import("../src/terminal");
+    const word = (row: number, col: number) => {
+      const [a, b] = wordAt(lines, { row, col });
+      return selectionText(lines, a, b);
+    };
+    expect(word(0, 7)).toBe("world");
+    expect(word(1, 5)).toBe("/usr/local/bin");
+    expect(word(1, 14)).toBe("");
+    expect(word(2, 3)).toBe("");
+  });
+  it("a touch maps to a cell on the screen, never off it", async () => {
+    const { cellAt } = await import("../src/terminal");
+    expect(cellAt(13, 31, 6, 15, 80, 24)).toEqual({ row: 2, col: 2 });
+    expect(cellAt(-5, -5, 6, 15, 80, 24)).toEqual({ row: 0, col: 0 });
+    expect(cellAt(9999, 9999, 6, 15, 80, 24)).toEqual({ row: 23, col: 79 });
+  });
+  it("draws the triangles the fonts lack, without changing the text copied", async () => {
+    const { drawnText, selectionText } = await import("../src/terminal");
+    expect(drawnText("\u23F5\u23F5 auto")).toBe("\u25B8\u25B8 auto");
+    const r = [[run("\u23F5 x")]];
+    expect(selectionText(r, { row: 0, col: 0 }, { row: 0, col: 2 })).toBe("\u23F5 x");
+  });
+});
+
+describe("cursorScrollY", () => {
+  it("keeps the cursor and the row under it in sight", () => {
+    // 16 pt rows, 8 pt padding, a 160 pt view: 9 rows and a bit
+    expect(cursorScrollY(6, 16, 8, 160)).toBe(0);
+    expect(cursorScrollY(39, 16, 8, 160)).toBe(41 * 16 + 8 - 160);
+    expect(cursorScrollY(undefined, 16, 8, 160)).toBeNull();
+  });
+});
+
+describe("a run's text room", () => {
+  it("leaves room for a font 8% wider than its cells, on any length", () => {
+    for (const w of [10, 100, 400]) expect(textRoom(w)).toBeGreaterThanOrEqual(w * 1.08);
   });
 });

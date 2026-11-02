@@ -1,9 +1,10 @@
 import { useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
-import { controlKey, keyTipTitle, MAX_ROW_KEYS, PressGate, type ControlKey } from "@/controlKeys";
+import { hasSystemPasteButton, SystemPasteButton, type PastedFile } from "../../modules/rift-keys";
+import { controlKey, keyTipTitle, PressGate, type ControlKey } from "@/controlKeys";
 import type { OpenKind } from "@/protocol/types";
 import { Icon, type IconName } from "./Icon";
-import { colors, ui } from "./theme";
+import { colors, TOUCH, ui } from "./theme";
 import { toggleA11y } from "./toggle";
 
 /** Sticky modifiers from the row, applied to the next key or letter. */
@@ -19,38 +20,27 @@ export const NO_STICKY: Sticky = { ctrl: false, alt: false, shift: false };
 const modOf = (id: string): keyof Sticky => (id === "alt" ? "alt" : id === "shift" ? "shift" : "ctrl");
 
 /**
- * The boards' round key: 36 pt (40 under a full-screen program), its icon, or its label in
- * Inter; a word ("Esc", "Paste") makes a pill. The accent ground marks a sticky key that is on.
+ * The boards' key: 44 pt wide, 36 high with a 10 pt radius (its touch target is 44 high, see `Key`),
+ * its icon, or its label in Inter; a word ("Esc", "Paste") is as wide as it needs. The accent
+ * ground marks a sticky key that is on.
  */
 export function KeyCap({
   def,
   color = colors.text,
-  tall,
   active,
   ground = colors.surface,
-  fill,
 }: {
   def: Pick<ControlKey, "label" | "icon">;
   color?: string;
-  tall?: boolean;
   active?: boolean;
   /** The key's ground (Settings › Keys draws its rows' keys on the page). */
   ground?: string;
-  /** An equal share of the row's width (the row above the command line fits its keys). */
-  fill?: boolean;
 }) {
   const fg = active ? colors.bg : color;
   const word = !def.icon && [...def.label].length > 2;
   return (
     <View
-      style={[
-        styles.key,
-        { backgroundColor: ground },
-        tall && styles.keyTall,
-        word && styles.keyWord,
-        fill && styles.keyFill,
-        active && styles.keyActive,
-      ]}
+      style={[styles.key, { backgroundColor: ground }, word && styles.keyWord, active && styles.keyActive]}
     >
       {def.icon ? (
         <Icon name={def.icon} size={17} color={fg} />
@@ -95,11 +85,9 @@ export function Key({
   active,
   disabled,
   color,
-  tall,
   hint,
   tip,
   onTip,
-  fill,
 }: {
   def: Pick<ControlKey, "label" | "icon">;
   spoken: string;
@@ -107,11 +95,9 @@ export function Key({
   active?: boolean;
   disabled: boolean;
   color?: string;
-  tall: boolean;
   hint?: string;
   tip?: Tip;
   onTip?: (tip: Tip | null) => void;
-  fill?: boolean;
 }) {
   const [gate] = useState(() => new PressGate());
   return (
@@ -135,11 +121,9 @@ export function Key({
       onPress={() => {
         if (gate.release() === "send") onPress();
       }}
-      // 36 / 40 pt keys (the boards) reach 44 pt with the slop
-      hitSlop={{ top: tall ? 2 : 4, bottom: tall ? 2 : 4 }}
-      style={({ pressed }) => [fill && styles.fillSlot, disabled && styles.disabled, pressed && styles.pressed]}
+      style={({ pressed }) => [styles.slot, disabled && styles.disabled, pressed && styles.pressed]}
     >
-      <KeyCap def={def} color={color} tall={tall} active={active} fill={fill} />
+      <KeyCap def={def} color={color} active={active} />
     </Pressable>
   );
 }
@@ -152,8 +136,9 @@ const icon = (name: IconName, label: string) => ({ icon: name, label });
  * computer's Rift cannot open them), Paste `onPaste` (disabled without it: the computer's Rift
  * takes no text). Above the command line it is one line that scrolls, led by Hide keyboard
  * (`onHideKeyboard`, while the keyboard is up) and ending in Edit keys (`onEdit`, Settings ›
- * Keys); under a full-screen program it wraps (`wrap`) with taller keys. Nothing when the row
- * is empty and there is no edit key.
+ * Keys); under a full-screen program it wraps (`wrap`). Its keys are 44 pt wide in 44 pt
+ * touch targets, so the row scrolls sideways; that scroll never moves the screen (one
+ * direction only, no bounce). Nothing when the row is empty and there is no edit key.
  */
 export function ControlRow({
   ids,
@@ -163,6 +148,7 @@ export function ControlRow({
   onKey,
   onOpen,
   onPaste,
+  systemPaste,
   onEdit,
   onHideKeyboard,
   onShowKeyboard,
@@ -175,6 +161,8 @@ export function ControlRow({
   onKey: (key: string) => void;
   onOpen?: (kind: OpenKind) => void;
   onPaste?: () => void;
+  /** Where iOS's own paste button takes the key's place: it reads with no prompt. */
+  systemPaste?: { onText: (text: string) => void; onImage: (b64: string) => void; onFile: (file: PastedFile) => void };
   onEdit?: () => void;
   onHideKeyboard?: () => void;
   /** The keyboard is down: the last key opens it (the terminal view; the command line has its own field). */
@@ -183,10 +171,6 @@ export function ControlRow({
 }) {
   const [tip, setTip] = useState<Tip | null>(null);
   if (ids.length === 0 && !onEdit && !onHideKeyboard && !onShowKeyboard) return null;
-  const tall = !!wrap;
-  // a row the width can hold shares it out evenly; a longer (customised) one scrolls; under a
-  // full-screen program the 40 pt keys wrap onto a second line instead
-  const fill = !wrap && ids.length <= MAX_ROW_KEYS;
   const keys = ids.map((id) => {
     const def: ControlKey | undefined = controlKey(id);
     if (!def) return null;
@@ -199,11 +183,9 @@ export function ControlRow({
           key={id}
           tip={tipOf(def)}
           onTip={setTip}
-          fill={fill}
           def={def}
           spoken={def.spoken}
           color={color}
-          tall={tall}
           disabled={disabled}
           active={sticky[mod]}
           onPress={() => onSticky({ ...sticky, [mod]: !sticky[mod] })}
@@ -217,43 +199,42 @@ export function ControlRow({
           key={id}
           tip={tipOf(def)}
           onTip={setTip}
-          fill={fill}
           def={def}
           spoken={def.spoken}
           hint={onOpen ? undefined : "Update Rift on the computer to open tabs and panes from here"}
           color={color}
-          tall={tall}
           disabled={disabled || !onOpen}
           onPress={() => onOpen?.(kind)}
         />
       );
     }
     if (def.paste) {
+      if (hasSystemPasteButton && systemPaste && onPaste && !disabled) {
+        return <SystemPasteButton key={id} {...systemPaste} style={[styles.key, styles.slot, { backgroundColor: colors.surface }]} />;
+      }
       return (
         <Key
           key={id}
           tip={tipOf(def)}
           onTip={setTip}
-          fill={fill}
           def={def}
           spoken={def.spoken}
           hint={onPaste ? "Pastes the clipboard into the program" : "Update Rift on the computer to paste here"}
           color={color}
-          tall={tall}
           disabled={disabled || !onPaste}
           onPress={() => onPaste?.()}
         />
       );
     }
     return (
-      <Key key={id} def={def} spoken={def.spoken} tip={tipOf(def)} onTip={setTip} fill={fill} color={color} tall={tall} disabled={disabled} onPress={() => onKey(id)} />
+      <Key key={id} def={def} spoken={def.spoken} tip={tipOf(def)} onTip={setTip} color={color} disabled={disabled} onPress={() => onKey(id)} />
     );
   });
-  // the last key, outside the scrolling keys so it never scrolls away: 36 pt, muted
+  // the last key, outside the scrolling keys so it never scrolls away: muted
   const hide = onHideKeyboard ? (
-    <Key key="hide" def={icon("hideKeyboard", "⌨")} spoken="Hide keyboard" tip={HIDE_TIP} onTip={setTip} color={colors.textMuted} tall={false} disabled={false} onPress={onHideKeyboard} />
+    <Key key="hide" def={icon("hideKeyboard", "⌨")} spoken="Hide keyboard" tip={HIDE_TIP} onTip={setTip} color={colors.textMuted} disabled={false} onPress={onHideKeyboard} />
   ) : onShowKeyboard ? (
-    <Key key="show" def={icon("keyboard", "⌨")} spoken="Show keyboard" tip={SHOW_TIP} onTip={setTip} color={colors.textMuted} tall={false} disabled={disabled} onPress={onShowKeyboard} />
+    <Key key="show" def={icon("keyboard", "⌨")} spoken="Show keyboard" tip={SHOW_TIP} onTip={setTip} color={colors.textMuted} disabled={disabled} onPress={onShowKeyboard} />
   ) : null;
   const edit = onEdit ? (
     <Key
@@ -262,7 +243,6 @@ export function ControlRow({
       spoken="Edit keys"
       hint="Settings › Keys: choose and order these keys"
       color={colors.textMuted}
-      tall={tall}
       disabled={false}
       onPress={onEdit}
       tip={{ title: "Edit keys", text: "Settings › Keys: choose and order these keys" }}
@@ -270,18 +250,6 @@ export function ControlRow({
     />
   ) : null;
   const card = tip ? <KeyTip tip={tip} /> : null;
-  if (fill) {
-    return (
-      <View style={styles.host}>
-        {card}
-        <View style={styles.line} accessibilityRole="toolbar" accessibilityLabel="Keys">
-          {keys}
-          {edit}
-          {hide}
-        </View>
-      </View>
-    );
-  }
   if (wrap) {
     return (
       <View style={styles.host}>
@@ -303,6 +271,12 @@ export function ControlRow({
           showsHorizontalScrollIndicator={false}
           style={styles.scroll}
           contentContainerStyle={styles.keys}
+          // sideways only: a swipe on the keys never drags the page or the keyboard with it
+          directionalLockEnabled
+          alwaysBounceVertical={false}
+          bounces={false}
+          overScrollMode="never"
+          nestedScrollEnabled
           keyboardShouldPersistTaps="always"
           accessibilityRole="toolbar"
           accessibilityLabel="Keys"
@@ -316,11 +290,12 @@ export function ControlRow({
   );
 }
 
-// The Keys and Pane boards' keys: 36 pt circles (40 under a full-screen program), a word key a
-// pill 14 pt in, on the surface with a hairline; the accent ground for a modifier that is on.
+// The Keys and Pane boards' keys: 44 x 36 with a 10 pt radius in a 44 pt slot (the row takes
+// 4 pt back above and below, as the boards do), a word key as wide as its word, on the surface
+// with a hairline; the accent ground for a modifier that is on.
 const styles = StyleSheet.create({
   host: { zIndex: 2 },
-  line: { flexDirection: "row", alignItems: "center", gap: 6 },
+  line: { flexDirection: "row", alignItems: "center", gap: 6, marginVertical: -4 },
   scroll: { flex: 1, flexGrow: 1 },
   // the tip floats above the row, over what is there: a card on the raised ground
   tip: {
@@ -344,21 +319,19 @@ const styles = StyleSheet.create({
   tipTitle: { fontFamily: ui(600), color: colors.textBright, fontSize: 14 },
   tipText: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12, lineHeight: 17 },
   keys: { gap: 6 },
-  wrap: { flexDirection: "row", flexWrap: "wrap" },
+  wrap: { flexDirection: "row", flexWrap: "wrap", marginVertical: -4 },
+  // the 44 x 44 touch target around a key
+  slot: { minWidth: TOUCH, minHeight: TOUCH, alignItems: "center", justifyContent: "center" },
   key: {
-    width: 36,
+    width: TOUCH,
     height: 36,
-    borderRadius: 18,
+    borderRadius: 10,
     alignItems: "center",
     justifyContent: "center",
     borderWidth: 1,
     borderColor: colors.hairline,
   },
-  keyTall: { width: 40, height: 40, borderRadius: 20 },
-  keyWord: { width: undefined, minWidth: 36, paddingHorizontal: 14 },
-  // an even share of the row: a rounded key as wide as its slot
-  fillSlot: { flex: 1, minWidth: 0 },
-  keyFill: { width: undefined, alignSelf: "stretch", paddingHorizontal: 0, borderRadius: 10 },
+  keyWord: { width: undefined, minWidth: TOUCH, paddingHorizontal: 14 },
   keyActive: { backgroundColor: colors.accent, borderColor: colors.accent },
   glyphLabel: { fontFamily: ui(400), fontSize: 16 },
   wordLabel: { fontFamily: ui(500), fontSize: 14 },

@@ -131,6 +131,8 @@ export interface ScreenState {
   rules: ReadonlyMap<number, string>;
   /** Shown from before a re-subscribe or reconnect: out of date until the next full screen. */
   stale: boolean;
+  /** A capture this far behind the program (ms), while the computer is in use; null: current. */
+  ageMs: number | null;
 }
 
 const EMPTY_ROW: ScreenRun[] = [];
@@ -161,6 +163,7 @@ export function reduceScreen(prev: ScreenState | null, msg: ScreenMsg | ScreenEn
     bg: msg.bg ?? null,
     rules,
     stale,
+    ageMs: msg.age_ms ?? null,
   };
 }
 

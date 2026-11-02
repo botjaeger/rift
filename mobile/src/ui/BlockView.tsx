@@ -4,6 +4,7 @@ import { firstLine, parseTable } from "@/paneView";
 import type { Block } from "@/protocol/types";
 import { CardFrame, CardHead, Pill } from "./BlockCards";
 import { formatDuration } from "./format";
+import { SelectableText } from "./SelectableText";
 import { colors, mono, ui } from "./theme";
 
 /**
@@ -24,12 +25,9 @@ export function Output({
   lineHeight?: number;
 }) {
   const [view, setView] = useState({ width: 0, content: 0, x: 0 });
-  const look = { fontSize: size, lineHeight };
   if (wrap) {
     return (
-      <Text style={[styles.output, look]} selectable>
-        {text}
-      </Text>
+      <SelectableText text={text} style={{ ...styles.output, fontSize: size }} lineHeight={lineHeight} />
     );
   }
   const scrolls = view.content > view.width + 1;
@@ -52,9 +50,7 @@ export function Output({
           }}
           scrollEventThrottle={32}
         >
-          <Text style={[styles.output, look]} selectable>
-            {text}
-          </Text>
+          <SelectableText text={text} style={{ ...styles.output, fontSize: size }} lineHeight={lineHeight} />
         </ScrollView>
         {scrolls && at < 1 ? (
           <View pointerEvents="none" style={styles.fade}>
@@ -118,9 +114,7 @@ export const BlockView = memo(function BlockView({ block, onActions, wrap }: Pro
       ) : rows ? (
         <Output text={block.output.trimEnd()} wrap={wrap} ground={colors.surface} size={11.5} lineHeight={17} />
       ) : line ? (
-        <Text style={styles.line} numberOfLines={2}>
-          {line}
-        </Text>
+        <SelectableText text={line} style={styles.line} lineHeight={19} lines={2} />
       ) : null}
     </CardFrame>
   );
@@ -133,7 +127,7 @@ const styles = StyleSheet.create({
   fadeStep: { flex: 1 },
   track: { height: 3, borderRadius: 2, backgroundColor: colors.hairline },
   thumb: { position: "absolute", top: 0, bottom: 0, borderRadius: 2, backgroundColor: colors.textMuted },
-  line: { fontFamily: ui(400), color: colors.textMuted, fontSize: 14, lineHeight: 19 },
+  line: { fontFamily: ui(400), color: colors.textMuted, fontSize: 14 },
   // the list runs edge to edge in the card: its rows carry the card's 12 pt gutter
   list: { marginHorizontal: -12 },
   row: {

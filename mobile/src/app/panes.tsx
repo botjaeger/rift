@@ -2,11 +2,12 @@ import { useLocalSearchParams, useRouter } from "expo-router";
 import { useEffect, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { canClose } from "@/fleet";
+import { canClose, canOperate } from "@/fleet";
 import { CLAUDE_COLOR, panesText, paneRows, type StateTone } from "@/paneView";
 import { useApp, useLock } from "@/runtime";
 import { findPane, tabTitle } from "@/topology";
 import { Icon } from "@/ui/Icon";
+import { canNewPane } from "@/ui/newTab";
 import { ErrorText } from "@/ui/Notice";
 import { colors, mono, monoMedium, tints, ui } from "@/ui/theme";
 import { useClose } from "@/ui/useClose";
@@ -51,6 +52,10 @@ export default function PanesScreen() {
     router.dismiss();
     if (id !== paneId) router.replace({ pathname: "/host/[key]/pane/[id]", params: { key, id: String(id) } });
   };
+
+  // the New pane sheet chooses what the pane starts with and opens it; both sheets close back here
+  const newPane = () => router.push({ pathname: "/new-pane", params: { key, pane: String(paneId) } });
+  const canOpen = !!host && canNewPane(host, paneId);
 
   return (
     // The sheet's own ScrollView, as its root: iOS lays out a form sheet's first scroll view as the sheet's
@@ -113,6 +118,20 @@ export default function PanesScreen() {
       ) : (
         <Text style={styles.gone}>This pane has closed.</Text>
       )}
+      {/* a view-only device has no way to open a pane */}
+      {host && loc && canOperate(host) ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={`New pane in ${tabTitle(loc.tab)}`}
+          accessibilityState={{ disabled: !canOpen }}
+          disabled={!canOpen}
+          onPress={newPane}
+          style={({ pressed }) => [styles.newPane, pressed && styles.pressed, !canOpen && styles.disabled]}
+        >
+          <Icon name="add" size={17} color={colors.text} />
+          <Text style={styles.newPaneText}>New pane</Text>
+        </Pressable>
+      ) : null}
     </ScrollView>
   );
 }
@@ -138,5 +157,17 @@ const styles = StyleSheet.create({
   name: { fontFamily: ui(600), color: colors.textBright, fontSize: 15 },
   line: { fontFamily: mono, color: colors.textDim, fontSize: 12 },
   state: { fontFamily: ui(500), fontSize: 12 },
+  disabled: { opacity: 0.45 },
+  newPane: {
+    height: 50,
+    borderRadius: 25,
+    borderWidth: 1,
+    borderColor: colors.borderStrong,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+  },
+  newPaneText: { fontFamily: ui(500), color: colors.text, fontSize: 15 },
   gone: { fontFamily: ui(400), color: colors.textMuted, fontSize: 14 },
 });

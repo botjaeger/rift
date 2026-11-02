@@ -197,6 +197,42 @@ export default function RootLayout() {
                 contentStyle: { backgroundColor: colors.surface },
               }}
             />
+            <Stack.Screen
+              name="new-tab"
+              options={{
+                title: "New tab",
+                presentation: "formSheet",
+                sheetAllowedDetents: [0.85],
+                sheetGrabberVisible: true,
+                sheetCornerRadius: 20,
+                headerShown: false,
+                contentStyle: { backgroundColor: colors.surface },
+              }}
+            />
+            <Stack.Screen
+              name="new-pane"
+              options={{
+                title: "New pane",
+                presentation: "formSheet",
+                sheetAllowedDetents: [0.7],
+                sheetGrabberVisible: true,
+                sheetCornerRadius: 20,
+                headerShown: false,
+                contentStyle: { backgroundColor: colors.surface },
+              }}
+            />
+            <Stack.Screen
+              name="attach"
+              options={{
+                title: "Attach",
+                presentation: "formSheet",
+                sheetAllowedDetents: [0.66],
+                sheetGrabberVisible: true,
+                sheetCornerRadius: 20,
+                headerShown: false,
+                contentStyle: { backgroundColor: colors.surface },
+              }}
+            />
             <Stack.Screen name="add" options={{ headerShown: false, title: "Paste a pairing link" }} />
             <Stack.Screen name="scan" options={{ headerShown: false, title: "Pair a computer", contentStyle: { backgroundColor: colors.camera } }} />
             <Stack.Screen name="pair" options={{ headerShown: false, title: "Pair" }} />

@@ -36,6 +36,7 @@ describe("server fixtures", () => {
       "branches",
       "changes",
       "chip",
+      "clipboard",
       "closing",
       "complete",
       "diff",
@@ -52,7 +53,7 @@ describe("server fixtures", () => {
       "update",
       "welcome",
     ]);
-    expect(server).toHaveLength(30);
+    expect(server).toHaveLength(32);
   });
 
   it.each(server.map((f) => [f.name, f.json] as const))("decodes %s", (_name, json) => {
@@ -76,10 +77,12 @@ describe("client fixtures", () => {
       "fit",
       "forget",
       "keys",
+      "mouse",
       "notify",
       "older",
       "open",
       "output",
+      "paste",
       "ping",
       "push",
       "reset_elapsed",
@@ -93,7 +96,7 @@ describe("client fixtures", () => {
       "upload",
       "visible",
     ]);
-    expect(client).toHaveLength(35);
+    expect(client).toHaveLength(38);
   });
 
   it.each(client.map((f) => [f.name, f.json] as const))("%s is a ClientMsg", (_name, json) => {

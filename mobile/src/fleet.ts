@@ -108,6 +108,8 @@ export interface FleetDeps {
   /** The system device name, used until the user sets one. */
   systemDeviceName: string;
   notifier: Notifier;
+  /** Puts what a program on the computer copied on the phone's clipboard. */
+  clipboard?: (text: string) => Promise<unknown>;
   socket?: SocketFactory;
   random?: () => number;
   now?: () => number;
@@ -123,6 +125,8 @@ export interface HostView {
   topology: boolean;
   /** Last gateway error other than auth (busy, no_pane, …). */
   notice: string | null;
+  /** When a program on the computer last copied to this phone (`clipboard`). */
+  copiedAt?: number;
   /** Epoch milliseconds the connection was last open, this app run (null: not yet). */
   lastSeen: number | null;
 }
@@ -264,7 +268,11 @@ const CHECK_BEFORE_RESENDING = "It may have gone through: check the pane before 
 export function describeCode(code: string, hostName: string, fallback: string): string {
   switch (code) {
     case "busy":
-      return "This pane is running a command. Commands only run at a prompt; the command line sends text to the program.";
+      // "busy" also carries a refusal with its own reason (a program taking one line at a time, a tap
+      // on a capture): only "pane N is running a command", or none, is this sentence
+      if (fallback === "" || /^pane \d+ is running/.test(fallback))
+        return "This pane is running a command. Commands only run at a prompt; the command line sends text to the program.";
+      return `${fallback.replace(/^pane \d+/, "This pane").replace(/^./, (c) => c.toUpperCase())}.`;
     case "forbidden":
       // the gateway's words when the desktop turned remote access off (server.rs)
       return fallback === "remote access is off on the desktop"
@@ -566,6 +574,13 @@ export class Fleet {
           ),
         onAck: (msg) => this.onAck(key, msg),
         onDone: (msg) => this.onDone(key, msg),
+        onClipboard: (text) => {
+          // only what reached the clipboard is said to have
+          void Promise.resolve(this.deps.clipboard?.(text)).then(
+            () => this.patchHost(key, { copiedAt: this.now() }),
+            () => undefined,
+          );
+        },
         onError: (msg) => {
           if (msg.code === "auth" || msg.code === "version") return;
           // An older gateway refuses a view device's run/keys with a top-level error instead of
@@ -710,6 +725,12 @@ export class Fleet {
       if (!opts.force && st === "closed" && c.connState.retryInMs !== null) c.reconnectNow();
       else c.restart({ lanFirst: opts.lanFirst });
     }
+  }
+
+  /** One quiet round for each computer that stopped answering: called now and then while the app is open. */
+  probeStopped(): void {
+    if (this.paused) return;
+    for (const c of this.clients.values()) c.probe();
   }
 
   /** A "Notify me" is waiting for its command to finish (keeps the socket up in the background). */
@@ -1290,6 +1311,16 @@ export class Fleet {
     return this.operating(host) ?? this.request(host, (c) => c.text(pane, text));
   }
 
+  /** Pastes text into the program running in the pane as one paste (only a gateway with `paste`). */
+  sendPaste(host: string, pane: number, text: string): Promise<ActionResult> {
+    return this.operating(host) ?? this.request(host, (c) => c.paste(pane, text));
+  }
+
+  /** A tap on the pane's screen as a click, for a program that tracks the mouse (only a gateway with `mouse`). */
+  sendMouse(host: string, pane: number, col: number, row: number): Promise<ActionResult> {
+    return this.operating(host) ?? this.request(host, (c) => c.mouse(pane, col, row));
+  }
+
   /** Sizes the pane's program to the phone's view, or releases it with null (only a gateway with `fit`). */
   sendFit(host: string, pane: number, size: { cols: number; rows: number } | null): Promise<ActionResult> {
     return this.operating(host) ?? this.request(host, (c) => c.fit(pane, size));
@@ -1312,22 +1343,24 @@ export class Fleet {
   }
 
   /**
-   * Pastes the image `b64` (PNG or JPEG, base64) into the program running in the pane (feature
-   * `upload`, operate only): the computer saves it and pastes its path, as a dropped file's.
+   * Pastes the image `b64` (PNG or JPEG, base64), or with `ext` a file of any bytes (feature
+   * `upload_files`), into the program running in the pane (feature `upload`, operate only): the
+   * computer saves it and pastes its path, as a dropped file's.
    */
-  async uploadImage(host: string, pane: number, b64: string): Promise<ActionResult> {
+  async uploadImage(host: string, pane: number, b64: string, ext?: string): Promise<ActionResult> {
     const h = this.host(host);
     const name = h?.record.name ?? "the computer";
-    if (!hasFeature(h, "upload"))
-      return { ok: false, code: "unsupported", message: `Rift on ${name} cannot take images from the phone. Update it.` };
+    const what = ext ? "file" : "image";
+    if (!hasFeature(h, ext ? "upload_files" : "upload"))
+      return { ok: false, code: "unsupported", message: `Rift on ${name} cannot take ${what}s from the phone. Update it.` };
     const refused = this.operating(host);
     if (refused) return refused;
     // built once: the client gives the id, which only replaces the placeholder
-    const built = uploadChunks("", pane, b64);
+    const built = uploadChunks("", pane, b64, ext);
     if (!built.ok)
       return built.code === "too_large"
-        ? { ok: false, code: "too_large", message: `The image is larger than ${MAX_UPLOAD_BYTES >> 20} MB.` }
-        : { ok: false, code: "bad_request", message: "The clipboard's image is empty." };
+        ? { ok: false, code: "too_large", message: `The ${what} is larger than ${MAX_UPLOAD_BYTES >> 20} MB.` }
+        : { ok: false, code: "bad_request", message: ext ? "The file is empty." : "The clipboard's image is empty." };
     const r = await this.request(
       host,
       (c) => c.upload((id) => built.msgs.map((m) => ({ ...m, id }))),
@@ -1336,7 +1369,7 @@ export class Fleet {
     );
     if (r.ok) return r;
     // worded by the gateway's reason, not only its code (a pane at its prompt, a slow link, …)
-    return { ...r, message: uploadRefusal(r.code, r.message) ?? describeCode(r.code, name, r.message) };
+    return { ...r, message: uploadRefusal(r.code, r.message, undefined, what) ?? describeCode(r.code, name, r.message) };
   }
 
   /**

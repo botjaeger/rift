@@ -112,7 +112,7 @@ export function hostLine(conn: ConnState, now: number, tabs: number | null): Hos
       if (conn.failure === "gave_up") {
         return line(`Can’t reach it · ${stoppedText(conn)}`, "bad", {
           retry: true,
-          hint: "Check that your computer is on and Rift is running there. Rift tries again when you tap Try again, when this phone is back online, and when you open the app.",
+          hint: "Check that your computer is on and Rift is running there. Rift tries again every 30 seconds while the app is open, when you tap Try again, when this phone is back online, and when you open the app.",
         });
       }
       if (conn.failure === "host_quit") return line("Rift quit on this computer", "dim", { retry: true, hint: QUIT_HINT });

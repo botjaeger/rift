@@ -18,6 +18,7 @@ const SELECTORS: [char; 5] = ['❯', '›', '▶', '➤', '>'];
 /// Frame characters drawn around a menu or between its parts.
 const FRAME: &[char] = &[
     '│', '┃', '║', '▌', '▐', '╭', '╮', '╰', '╯', '─', '━', '═', '╌', '┄', '┈', '┊', '┆', '╎', '|',
+    '▔', '▁',
 ];
 
 /// A menu waiting for the user to pick an entry.
@@ -65,7 +66,7 @@ fn unframed(row: &str) -> &str {
 /// A solid separator (`───`) between parts of an agent's screen; dashed
 /// ones (`╌╌╌`) frame a diff inside a part.
 fn is_solid_rule(row: &str) -> bool {
-    is_rule(row) && row.contains(['─', '━', '═'])
+    is_rule(row) && row.contains(['─', '━', '═', '▔', '▁'])
 }
 
 /// A row that is only frame (a separator line) or blank.
@@ -84,6 +85,28 @@ fn numbered(text: &str) -> Option<(usize, &str)> {
     let rest = text[digits.len()..].strip_prefix(". ")?;
     let n = digits.parse().ok()?;
     Some((n, rest.trim_start()))
+}
+
+/// A row with a link: its `?` starts a query, it asks nothing.
+fn has_link(row: &str) -> bool {
+    row.contains("://")
+}
+
+/// A row inside a drawn input box (`│ ⌕ Search… │`): for typing into, it says nothing.
+fn is_field(row: &str) -> bool {
+    row.trim_start().starts_with(['│', '┃', '|'])
+}
+
+/// A row that asks: a `?` ending a word, outside a link.
+fn asks(row: &str) -> bool {
+    !has_link(row)
+        && row.char_indices().any(|(i, c)| {
+            c == '?'
+                && row[i + 1..]
+                    .chars()
+                    .next()
+                    .is_none_or(|n| !n.is_alphanumeric())
+        })
 }
 
 /// A menu entry row: `(selected, text column, text)`; the selector, when
@@ -209,8 +232,9 @@ fn menu_at(rows: &[&str], sel: usize, col: usize) -> Option<Choices> {
             cut(text, MAX_CHOICE_CHARS)
         })
         .collect();
-    // the question: the nearest row above with a `?`, within a few rows,
-    // else the nearest text row
+    // the question: the nearest row above that asks, within a few rows, else
+    // the nearest row that is no link or label ("Release notes:"), else the
+    // nearest text row
     let above: Vec<(usize, &str)> = rows[..first]
         .iter()
         .enumerate()
@@ -219,24 +243,59 @@ fn menu_at(rows: &[&str], sel: usize, col: usize) -> Option<Choices> {
         .take(8)
         .map(|(i, r)| (i, *r))
         .collect();
+    // a row that asks above a solid rule belongs to what came before the menu's own box
+    let boxed = rows[..first].iter().rposition(|r| is_solid_rule(r));
     let (q_at, question) = above
         .iter()
-        .find(|(_, r)| r.contains('?'))
+        .find(|(i, r)| asks(r) && boxed.is_none_or(|b| *i > b))
+        .or_else(|| {
+            above.iter().find(|(_, r)| {
+                !has_link(r) && !is_field(r) && !r.trim_end().ends_with(':') && !r.trim().is_empty()
+            })
+        })
         .or(above.first())
         .copied()?;
+    // a question wrapped over several rows (a pane sized to a phone): the
+    // rows around it at its indent, up to where a sentence ends
+    // a row was wrapped when the next one's first word would not fit after it:
+    // no pane is under 40 columns
+    let runs_on = |r: &str, next: &str| {
+        let word = next
+            .split_whitespace()
+            .next()
+            .map_or(0, |w| w.chars().count());
+        indent(r) + r.trim().chars().count() + 1 + word >= 40
+            && !r.trim_end().ends_with(['.', '?', '!', ':'])
+    };
+    let same_text = |r: &str| !is_rule(r) && !has_link(r) && indent(r) == indent(question);
+    let mut q_top = q_at;
+    while q_top > 0 && same_text(rows[q_top - 1]) && runs_on(rows[q_top - 1], rows[q_top]) {
+        q_top -= 1;
+    }
+    let mut q_end = q_at;
+    while q_end + 1 < first && same_text(rows[q_end + 1]) && runs_on(rows[q_end], rows[q_end + 1]) {
+        q_end += 1;
+    }
+    let whole = rows[q_top..=q_end]
+        .iter()
+        .map(|r| r.trim())
+        .collect::<Vec<_>>()
+        .join(" ");
     // context: the rows between the last rule above the question and it
-    let top = rows[..q_at]
+    let top = rows[..q_top]
         .iter()
         .rposition(|r| is_solid_rule(r))
         .map_or(0, |i| i + 1);
-    let context: Vec<String> = rows[top..q_at]
+    // and the rows between it and the menu (a link under the question)
+    let context: Vec<String> = rows[top..q_top]
         .iter()
+        .chain(&rows[q_end + 1..first])
         .filter(|r| !is_rule(r))
         .map(|r| cut(r.trim_end(), MAX_CHOICE_CHARS))
         .collect();
     let skip = context.len().saturating_sub(MAX_CONTEXT_LINES);
     Some(Choices {
-        prompt: cut(question.trim(), MAX_PROMPT_CHARS),
+        prompt: cut(&whole, MAX_PROMPT_CHARS),
         choices,
         selected,
         numbered: is_numbered,
@@ -266,6 +325,23 @@ mod tests {
 
     fn rows(text: &str) -> Vec<String> {
         text.lines().map(str::to_string).collect()
+    }
+
+    #[test]
+    fn a_question_above_the_menus_box_is_not_its_question() {
+        let rows: Vec<String> = [
+            "Want me to treat that file as plain text?",
+            "────────────────────────────────",
+            "  Permissions  Allow  Ask  Deny",
+            "  Search rules",
+            " ❯ 1. Add a new rule",
+            "   2. Bash(aws:*)",
+            "  Enter to select · Esc to cancel",
+        ]
+        .map(String::from)
+        .to_vec();
+        let c = parse_choices(&rows).unwrap();
+        assert_eq!(c.prompt, "Search rules");
     }
 
     #[test]
@@ -302,6 +378,72 @@ mod tests {
     }
 
     #[test]
+    fn a_search_box_above_the_menu_is_not_its_question() {
+        // Claude Code's /permissions at a phone's width
+        let rows: Vec<String> = [
+            "  Permissions  Recently blocked  Allow  Ask  Deny",
+            "",
+            "  Claude Code won't ask before using allowed tools.",
+            "  ╭──────────────────────╮",
+            "  │ ⌕ Search…            │",
+            "  ╰──────────────────────╯",
+            "",
+            " ❯ 1.  Add a new rule…",
+            "   2.  Bash(aws:*)",
+            "",
+            " Enter to select · Esc to cancel",
+        ]
+        .map(String::from)
+        .to_vec();
+        let c = parse_choices(&rows).unwrap();
+        assert_eq!(
+            c.prompt,
+            "Claude Code won't ask before using allowed tools."
+        );
+        // wrapped at 47 columns under a heavy rule: the sentence whole, nothing from above the rule
+        let rows: Vec<String> = [
+            " Claude Code v2",
+            "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔",
+            "   Claude Code won't ask before using",
+            "   allowed tools.",
+            "   ╭──────────────╮",
+            "   │ ⌕ Search…    │",
+            "   ╰──────────────╯",
+            " ❯ 1.  Add a new rule…",
+            "   2.  Bash(aws:*)",
+            " Esc to cancel",
+        ]
+        .map(String::from)
+        .to_vec();
+        let c = parse_choices(&rows).unwrap();
+        assert_eq!(
+            c.prompt,
+            "Claude Code won't ask before using allowed tools."
+        );
+        assert!(
+            c.context.iter().all(|l| !l.contains("v2")),
+            "{:?}",
+            c.context
+        );
+    }
+
+    #[test]
+    fn a_question_wrapped_at_a_phones_width_is_whole() {
+        let screen = rows(
+            " Accessing workspace:\n\n /private/tmp/x\n\n Quick safety check: Is this a project you created or one\n you trust? (Like your own code, a well-known open source\n project, or work from your team). If not, take a moment to\n review what's in this folder first.\n\n Security guide\n\n ❯ No, exit\n   Yes, I trust this folder\n\n Enter to confirm · Esc to cancel",
+        );
+        let c = parse_choices(&screen).expect("a menu");
+        assert!(
+            c.prompt
+                .starts_with("Quick safety check: Is this a project you created or one you trust?"),
+            "{}",
+            c.prompt
+        );
+        assert!(c.prompt.ends_with("in this folder first."), "{}", c.prompt);
+        assert!(c.context.iter().all(|l| !l.contains("you trust")));
+    }
+
+    #[test]
     fn codex_style_menus_and_wrapped_entries() {
         let screen = rows(
             "  Would you like to run the following command?\n\n  $ rm -rf target\n\n\
@@ -328,6 +470,25 @@ mod tests {
                 "No"
             ]
         );
+    }
+
+    #[test]
+    fn a_link_under_the_headline_is_not_the_question() {
+        let screen = rows(
+            "  Update available 0.1 -> 0.2\n  Release notes:\n  https://example.com/releases?tab=latest\n\n\
+             › 1. Update now\n  2. Skip\n\n  enter continue",
+        );
+        let c = parse_choices(&screen).unwrap();
+        assert_eq!(c.prompt, "Update available 0.1 -> 0.2");
+        assert!(c.context.iter().any(|l| l.contains("https://example.com")));
+        // a real question above a link still wins, and a `?` inside a word asks nothing
+        let asked = rows(
+            "  Open this page?\n  https://example.com/?a=1\n\n› 1. Yes\n  2. No\n\n Esc to cancel",
+        );
+        assert_eq!(parse_choices(&asked).unwrap().prompt, "Open this page?");
+        assert!(!asks("https://example.com/?a=1"));
+        assert!(!asks("where?now"));
+        assert!(asks("Proceed? (y/n)"));
     }
 
     #[test]

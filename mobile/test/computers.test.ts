@@ -146,6 +146,9 @@ describe("Computers chips", () => {
     expect(filterHome(all, "idle").map((r) => r.id)).toEqual(["c", "flow", "zsh"]);
     expect(filterHome(all, "needs").map((r) => r.id)).toEqual(["RIFT"]);
     expect(filterHome(all, null)).toHaveLength(5);
+    // no filter: what needs an answer on top, the rest in tab order
+    const order = filterHome([{ id: "a", kind: "idle" }, { id: "b", kind: "working" }, { id: "c", kind: "needs" }, { id: "d", kind: "idle" }] as const, null);
+    expect(order.map((r) => r.id)).toEqual(["c", "a", "b", "d"]);
   });
 });
 

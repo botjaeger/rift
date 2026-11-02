@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { questionKey } from "../src/answer";
 import { toBase64Url } from "../src/noise/bytes";
-import { ACK_TIMEOUT_MS, ASKED_TTL_MS, Fleet, MAX_ACTIVITY, canClose, canOperate, hasFeature, isAsked, ntfyUnsupported, wrapsLines, type Notifier } from "../src/fleet";
+import { ACK_TIMEOUT_MS, ASKED_TTL_MS, Fleet, describeCode, MAX_ACTIVITY, canClose, canOperate, hasFeature, isAsked, ntfyUnsupported, wrapsLines, type Notifier } from "../src/fleet";
 import { routingId } from "../src/protocol/relay";
 import { LONG_COMMAND_MS } from "../src/notify";
 import { parsePairLink, type PairLink } from "../src/pairing";
@@ -272,7 +272,7 @@ describe("Fleet operate", () => {
     const t = await withHost();
     t.fleet.setDraft(GW_KEY, 12, "ls");
     const p = t.fleet.run(GW_KEY, 12, "ls");
-    t.last().recv({ t: "ack", id: "r1", ok: false, error: code, message: "gateway text" });
+    t.last().recv({ t: "ack", id: "r1", ok: false, error: code, message: code === "busy" ? "pane 12 is running a command" : "gateway text" });
     const r = await p;
     expect(r).toMatchObject({ ok: false, code });
     expect(r.ok ? "" : r.message).toContain(text);
@@ -1111,6 +1111,19 @@ describe("Fleet Phase 3", () => {
     expect(await p).toMatchObject({ ok: false, code: "busy", message: expect.stringContaining("running program") });
   });
 
+  it("a file goes with its extension to a computer that takes files; an older one says update", async () => {
+    const old = await phase3([...ALL, "upload"]);
+    const before = old.last().sent.length;
+    expect(await old.fleet.uploadImage(GW_KEY, 12, "aGk=", "txt")).toMatchObject({ ok: false, code: "unsupported", message: expect.stringMatching(/cannot take files.*Update/) });
+    expect(old.last().sent.length).toBe(before);
+    const t = await phase3([...ALL, "upload", "upload_files"]);
+    const p = t.fleet.uploadImage(GW_KEY, 12, "aGk=", "txt");
+    const sent = t.last().sent.filter((m) => m.t === "upload");
+    expect(sent).toMatchObject([{ t: "upload", pane: 12, ext: "txt", data: "aGk=" }]);
+    t.last().recv({ t: "ack", id: sent[0]!.t === "upload" ? sent[0]!.id : "", ok: false, error: "too_large", message: "the file is larger than 10 MiB" });
+    expect(await p).toMatchObject({ ok: false, code: "too_large", message: "The file is larger than 10 MB." });
+  });
+
   it("says why an image was refused by the gateway's reason, not its code alone", async () => {
     const t = await phase3([...ALL, "upload"]);
     const cases: [string, string, RegExp][] = [
@@ -1770,12 +1783,12 @@ describe("Fleet answering a pane that waits (phone-first)", () => {
     return t;
   }
 
-  it("answers a numbered menu with the digit, then a reply after a pause and Enter", async () => {
+  it("answers a numbered menu with arrows and Enter, then a reply after a pause and Enter", async () => {
     const t = await connected();
     t.last().recv(asking(menu));
     const p = t.fleet.answer(GW_KEY, 13, menu, { choice: 2, reply: "use lowercase" });
-    expect(t.last().sent.at(-1)).toEqual({ t: "text", id: "x1", pane: 13, text: "3" });
-    t.last().recv({ t: "ack", id: "x1", ok: true });
+    expect(t.last().sent.at(-1)).toEqual({ t: "keys", id: "k1", pane: 13, keys: ["down", "down", "enter"] });
+    t.last().recv({ t: "ack", id: "k1", ok: true });
     await vi.advanceTimersByTimeAsync(600);
     expect(t.last().sent.at(-1)).toEqual({ t: "text", id: "x2", pane: 13, text: "use lowercase" });
     t.last().recv({ t: "ack", id: "x2", ok: true });
@@ -1808,7 +1821,7 @@ describe("Fleet answering a pane that waits (phone-first)", () => {
 
     const old = await connected("operate", ["waiting"]);
     old.last().recv(asking(menu));
-    expect(await old.fleet.answer(GW_KEY, 13, menu, { choice: 0 })).toMatchObject({ ok: false, code: "unsupported" });
+    expect(await old.fleet.answer(GW_KEY, 13, menu, { choice: 2, reply: "do this" })).toMatchObject({ ok: false, code: "unsupported" });
   });
 
   it("asks for completions only from a device that may operate; too large reads as too large to show", async () => {
@@ -1877,8 +1890,8 @@ describe("Fleet answering a pane that waits (phone-first)", () => {
     t.last().recv(asking(menu));
     const p = t.fleet.answerFromAlert(GW_KEY, 13, questionKey(menu), "no");
     await vi.advanceTimersByTimeAsync(0);
-    expect(t.last().sent.at(-1)).toEqual({ t: "text", id: "x1", pane: 13, text: "3" });
-    t.last().recv({ t: "ack", id: "x1", ok: true });
+    expect(t.last().sent.at(-1)).toEqual({ t: "keys", id: "k1", pane: 13, keys: ["down", "down", "enter"] });
+    t.last().recv({ t: "ack", id: "k1", ok: true });
     expect(await p).toEqual({ ok: true });
     // moved on meanwhile: nothing sent, after the wait
     const sent = t.last().sent.length;
@@ -1944,12 +1957,12 @@ describe("Fleet answering a pane that waits (phone-first)", () => {
     const sent = t.last().sent.length;
     expect(await t.fleet.answer(GW_KEY, 13, menu, { choice: 0 })).toMatchObject({ ok: false, code: "busy" });
     expect(t.last().sent.length).toBe(sent);
-    t.last().recv({ t: "ack", id: "x1", ok: true });
+    t.last().recv({ t: "ack", id: "k1", ok: true });
     expect(await p).toEqual({ ok: true });
     // done: the pane takes an answer again
     const q = t.fleet.answer(GW_KEY, 13, menu, { choice: 0 });
-    expect(t.last().sent.at(-1)).toMatchObject({ t: "text", text: "1" });
-    t.last().recv({ t: "ack", id: "x2", ok: true });
+    expect(t.last().sent.at(-1)).toMatchObject({ t: "keys", keys: ["enter"] });
+    t.last().recv({ t: "ack", id: "k2", ok: true });
     expect(await q).toEqual({ ok: true });
   });
 
@@ -1980,5 +1993,15 @@ describe("Fleet answering a pane that waits (phone-first)", () => {
     expect(await p).toMatchObject({ ok: true, msg: { items: [{ text: "ls éa" }] } });
     const old = await connected("operate", ["text"]);
     expect(await old.fleet.complete(GW_KEY, 12, "ls")).toMatchObject({ ok: false });
+  });
+});
+
+describe("describeCode busy", () => {
+  it("keeps a refusal's own reason; only a running pane gets the running sentence", () => {
+    const running = "This pane is running a command. Commands only run at a prompt; the command line sends text to the program.";
+    expect(describeCode("busy", "Mac", "pane 12 is running a command")).toBe(running);
+    expect(describeCode("busy", "Mac", "")).toBe(running);
+    expect(describeCode("busy", "Mac", "the program takes one line at a time")).toBe("The program takes one line at a time.");
+    expect(describeCode("busy", "Mac", "pane 3 is at its prompt; send the command with run")).toBe("This pane is at its prompt; send the command with run.");
   });
 });

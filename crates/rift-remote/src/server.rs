@@ -36,14 +36,14 @@ use crate::transport::{self, Channel, KEY_LEN, Recv, Socket};
 use crate::{
     FAILURE_WINDOW, FIT_COLS, FIT_RATE, FIT_ROWS, HANDSHAKE_DEADLINE, IDLE_TIMEOUT, Input,
     InputError, KEYS_RATE, Key, MAX_BLOCKS, MAX_CLIENT_MESSAGE, MAX_COMMAND, MAX_CONNECTIONS,
-    MAX_DIFF_PATH, MAX_FAILURES, MAX_GATEWAY_MESSAGE, MAX_KEYS, MAX_OUTPUT_PAGE_LINES,
+    MAX_DIFF_PATH, MAX_FAILURES, MAX_GATEWAY_MESSAGE, MAX_KEYS, MAX_OUTPUT_PAGE_LINES, MAX_PASTE,
     MAX_REQUEST_ID, MAX_SCREEN_COLS, MAX_SCREEN_ROWS, MAX_TEXT, MAX_TRACKED, Menu, MenuKind,
     OPEN_RATE, OUTPUT_RATE, OutputError, PANE_POLL, PING_INTERVAL, Page, REFUSAL, REPLAY_RING,
     RUN_RATE, Screen, Source, SourceError, TOPOLOGY_POLL,
 };
 use crate::{
-    ImageKind, MAX_SCROLL_LINES, MAX_UPLOAD_BYTES, MAX_UPLOAD_CHUNK, MAX_UPLOAD_MESSAGE,
-    MAX_UPLOADS, UPLOAD_RATE,
+    ImageKind, MAX_SCROLL_LINES, MAX_UPLOAD_BYTES, MAX_UPLOAD_CHUNK, MAX_UPLOAD_EXT,
+    MAX_UPLOAD_MESSAGE, MAX_UPLOADS, UPLOAD_RATE, valid_upload_ext,
 };
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::io::ErrorKind;
@@ -80,7 +80,7 @@ const DONE_RUNNING: usize = 64;
 /// after the 45 s idle timeout.
 pub const FOLLOW_FRESH: Duration = Duration::from_secs(20);
 /// What this gateway serves beyond Phase 2 (`welcome.features`).
-const FEATURES: [&str; 18] = [
+const FEATURES: [&str; 22] = [
     "screen",
     "text",
     "output",
@@ -99,6 +99,10 @@ const FEATURES: [&str; 18] = [
     "closing",
     "scroll",
     "upload",
+    "upload_files",
+    "paste",
+    "mouse",
+    "clipboard",
 ];
 
 /// Gateway settings. [`Config::new`] takes the limits from the protocol;
@@ -483,6 +487,8 @@ const TOO_SLOW: u8 = 1;
 const REVOKED: u8 = 2;
 /// Its device's permission changed: it reconnects with the new one.
 const PERMISSION: u8 = 3;
+/// Its device connected again with every slot taken ([`Shared::displace`]).
+const DISPLACED: u8 = 4;
 
 /// When a client was last heard from, readable from other threads.
 struct Heard {
@@ -999,6 +1005,31 @@ pub(crate) fn admit(connections: &AtomicUsize) -> Option<(bool, ConnGuard<'_>)> 
     (open < MAX_SOCKETS).then_some((open >= MAX_CONNECTIONS, guard))
 }
 
+impl<S> Shared<S> {
+    /// With every slot taken, a device connecting again ends those of its
+    /// connections gone silent for half the idle timeout (the app pings every
+    /// 15 s): what a dropped network left behind, each otherwise taking a slot
+    /// until the idle timeout. Never one still heard: a phone paired twice
+    /// holds two live ones, and ending them brings both straight back. The
+    /// key is proven by the handshake. False when it holds none: `busy`.
+    fn displace(&self, key: &[u8; KEY_LEN]) -> bool {
+        let silent = self.config.idle_timeout / 2;
+        let hub = self.hub.lock().unwrap();
+        let mut any = false;
+        for c in hub
+            .clients
+            .values()
+            .filter(|c| &c.key == key && !c.seen.within(silent))
+        {
+            let _ = c
+                .end
+                .compare_exchange(LIVE, DISPLACED, Ordering::AcqRel, Ordering::Acquire);
+            any = true;
+        }
+        any
+    }
+}
+
 fn accept_loop<S: Source>(listener: TcpListener, shared: Arc<Shared<S>>) {
     while !shared.stop.load(Ordering::Acquire) {
         let (stream, peer) = match listener.accept() {
@@ -1109,8 +1140,14 @@ fn poll_loop<S: Source>(shared: &Shared<S>) {
     let cfg = &shared.config;
     let mut last_topology: Option<Instant> = None;
     let mut last_devices = Instant::now();
+    let mut copies = None;
+    let mut last_copy = Instant::now();
     while !shared.stop.load(Ordering::Acquire) {
         wait_polling_kicks(shared, Instant::now() + cfg.pane_poll.min(cfg.devices_poll));
+        if last_copy.elapsed() >= crate::COPY_POLL {
+            last_copy = Instant::now();
+            forward_copy(shared, &mut copies);
+        }
         if last_devices.elapsed() >= cfg.devices_poll {
             last_devices = Instant::now();
             reload_devices(shared);
@@ -1235,6 +1272,33 @@ fn alert<S>(shared: &Shared<S>, msgs: &[ServerMsg]) {
 }
 
 /// Queue `msgs` to every connection.
+/// What a program copied since the last look goes to the phones that may
+/// operate; a phone connecting later does not get an older copy.
+fn forward_copy<S: Source>(shared: &Shared<S>, copies: &mut Option<u64>) {
+    if shared.hub.lock().unwrap().clients.is_empty() {
+        // what is copied with nobody here is old by the time a phone connects
+        *copies = None;
+        return;
+    }
+    let found = shared.source.clipboard(copies.unwrap_or(0));
+    // the first look only finds where things stand: a gateway starting anew
+    // sends nobody an old copy
+    let first = copies.is_none();
+    *copies = Some(found.as_ref().map_or(copies.unwrap_or(0), |(seq, _)| *seq));
+    let Some((_, text)) = found else {
+        return;
+    };
+    if first {
+        return;
+    }
+    let f = frame(&ServerMsg::Clipboard { text });
+    for c in shared.hub.lock().unwrap().clients.values() {
+        if c.permission == Permission::Operate {
+            c.push(f.clone());
+        }
+    }
+}
+
 fn broadcast<S>(shared: &Shared<S>, msgs: &[ServerMsg]) {
     if msgs.is_empty() {
         return;
@@ -1431,7 +1495,8 @@ fn screen_frame(
     if !full
         && lines.is_empty()
         && prev.is_some_and(|p| {
-            (p.alt, p.cursor, &p.fg, &p.bg, &p.rules) == (s.alt, s.cursor, &s.fg, &s.bg, &s.rules)
+            (p.alt, p.cursor, &p.fg, &p.bg, &p.rules, p.age_ms)
+                == (s.alt, s.cursor, &s.fg, &s.bg, &s.rules, s.age_ms)
         })
     {
         return None;
@@ -1448,6 +1513,7 @@ fn screen_frame(
             bg: s.bg.clone(),
             rules: s.rules.clone(),
             lines,
+            age_ms: s.age_ms,
         })
     };
     let f = msg(full, lines);
@@ -1475,6 +1541,7 @@ fn screen_frame(
         fg: s.fg.clone(),
         bg: s.bg.clone(),
         rules: s.rules.clone(),
+        age_ms: s.age_ms,
     };
     // the client has it already (an unstyled screen went out before)
     if prev == Some(&plain) {
@@ -1701,7 +1768,7 @@ pub(crate) fn connection<S: Source, T: Socket>(
     };
     // only an authenticated operate device may send more (`allow_uploads`)
     let ch = Channel::new(ws, noise, MAX_CLIENT_MESSAGE);
-    if busy {
+    if busy && !shared.displace(&ch.remote_static()) {
         refuse(
             ch,
             ServerMsg::error(ErrorCode::Busy, "too many connections"),
@@ -1939,6 +2006,11 @@ fn session<S: Source, T: Socket>(
                 );
                 return "revoked";
             }
+            DISPLACED => {
+                log::info!("remote: {:?} ({}) reconnected", device.name, device.id);
+                ch.close();
+                return "displaced";
+            }
             PERMISSION => {
                 // the next handshake carries the new permission
                 log::info!(
@@ -2017,11 +2089,12 @@ fn session<S: Source, T: Socket>(
         };
         heard = Instant::now();
         seen.mark();
-        // only an `upload` chunk may pass MAX_CLIENT_MESSAGE, told by its
-        // type alone before the message is built (`MsgType` skips the rest
-        // without keeping any of it)
+        // only an `upload` chunk or a `paste` may pass MAX_CLIENT_MESSAGE,
+        // told by its type alone before the message is built (`MsgType`
+        // skips the rest without keeping any of it)
         if text.len() > MAX_CLIENT_MESSAGE
-            && !serde_json::from_slice::<MsgType>(&text).is_ok_and(|m| m.t == "upload")
+            && !serde_json::from_slice::<MsgType>(&text)
+                .is_ok_and(|m| m.t == "upload" || m.t == "paste")
         {
             refuse(
                 ch,
@@ -2030,7 +2103,9 @@ fn session<S: Source, T: Socket>(
             return "too_large";
         }
         let msg = serde_json::from_slice::<ClientMsg>(&text);
-        if text.len() > MAX_CLIENT_MESSAGE && !matches!(msg, Ok(ClientMsg::Upload { .. })) {
+        if text.len() > MAX_CLIENT_MESSAGE
+            && !matches!(msg, Ok(ClientMsg::Upload { .. } | ClientMsg::Paste { .. }))
+        {
             refuse(
                 ch,
                 ServerMsg::error(ErrorCode::TooLarge, "message too large"),
@@ -2174,6 +2249,21 @@ fn session<S: Source, T: Socket>(
             }) => Some(input(shared, device, &mut keys, rid, pane, || {
                 check_text(&text).map(|()| Input::Text(text.clone()))
             })),
+            Ok(ClientMsg::Paste {
+                id: rid,
+                pane,
+                text,
+            }) => Some(input(shared, device, &mut keys, rid, pane, || {
+                check_paste(&text).map(|()| Input::Paste(text.clone()))
+            })),
+            Ok(ClientMsg::Mouse {
+                id: rid,
+                pane,
+                col,
+                row,
+            }) => Some(input(shared, device, &mut keys, rid, pane, || {
+                Ok(Input::Mouse { col, row })
+            })),
             Ok(ClientMsg::Fit {
                 id: rid,
                 pane,
@@ -2202,6 +2292,7 @@ fn session<S: Source, T: Socket>(
                 size,
                 offset,
                 data,
+                ext,
             }) => upload.chunk(
                 shared,
                 device,
@@ -2212,6 +2303,7 @@ fn session<S: Source, T: Socket>(
                     size,
                     offset,
                     data,
+                    ext,
                 },
             ),
         };
@@ -2346,7 +2438,9 @@ fn input<S: Source>(
         Err((code, msg)) => return ServerMsg::ack_err(rid, code, msg),
     };
     let busy = match input {
-        Input::Text(_) => format!("pane {pane} is at its prompt; send the command with run"),
+        Input::Text(_) | Input::Paste(_) => {
+            format!("pane {pane} is at its prompt; send the command with run")
+        }
         _ => format!("pane {pane} is running a command"),
     };
     match shared.source.input(pane, &device.name, input) {
@@ -2414,9 +2508,10 @@ struct Chunk {
     size: u64,
     offset: u64,
     data: String,
+    ext: Option<String>,
 }
 
-/// The image one connection is receiving (`upload`), at most one at a
+/// The image or file one connection is receiving (`upload`), at most one at a
 /// time: a chunk at offset 0 starts a new one. Across the gateway at most
 /// [`MAX_UPLOADS`] are received at once, each within
 /// [`Config::upload_deadline`] of its first chunk.
@@ -2435,7 +2530,10 @@ struct Receiving<'a> {
     /// Reserved for `size` at once (at most [`MAX_UPLOAD_BYTES`]): never
     /// grown by doubling as chunks arrive.
     bytes: Vec<u8>,
+    /// Told by the first bytes; never asked of a file (`ext`).
     kind: Option<ImageKind>,
+    /// A file's extension ([`crate::valid_upload_ext`]); `None`: an image.
+    ext: Option<String>,
     /// Past it what arrived is dropped ([`Uploads::expire`]).
     deadline: Instant,
     /// Its place among the gateway's [`MAX_UPLOADS`], given back on drop.
@@ -2443,16 +2541,22 @@ struct Receiving<'a> {
 }
 
 /// The `busy` message of an upload past its deadline.
-fn upload_too_slow(deadline: Duration) -> String {
+fn upload_too_slow(noun: &str, deadline: Duration) -> String {
     format!(
-        "the image took longer than {} s to arrive; try again",
+        "the {noun} took longer than {} s to arrive; try again",
         deadline.as_secs()
     )
 }
 
-/// The `busy` message of an image for a pane at its prompt.
-fn upload_at_prompt(pane: u64) -> String {
-    format!("pane {pane} is at its prompt; an image goes to a running program")
+/// What an upload carrying `ext` is called in its refusals.
+fn upload_noun(ext: Option<&str>) -> &'static str {
+    if ext.is_some() { "file" } else { "image" }
+}
+
+/// The `busy` message of an image or file for a pane at its prompt.
+fn upload_at_prompt(pane: u64, ext: Option<&str>) -> String {
+    let what = if ext.is_some() { "a file" } else { "an image" };
+    format!("pane {pane} is at its prompt; {what} goes to a running program")
 }
 
 impl<'a> Uploads<'a> {
@@ -2481,14 +2585,26 @@ impl<'a> Uploads<'a> {
             if !rate.allow(now) {
                 return Some(self.refuse(c.rid, ErrorCode::Rate, "too many requests; slow down"));
             }
+            let noun = upload_noun(c.ext.as_deref());
+            if c.ext.as_deref().is_some_and(|e| !valid_upload_ext(e)) {
+                return Some(self.refuse(
+                    c.rid,
+                    ErrorCode::BadRequest,
+                    format!("ext holds 1 to {MAX_UPLOAD_EXT} of a-z and 0-9"),
+                ));
+            }
             if c.size == 0 {
-                return Some(self.refuse(c.rid, ErrorCode::BadRequest, "the image is empty"));
+                return Some(self.refuse(
+                    c.rid,
+                    ErrorCode::BadRequest,
+                    format!("the {noun} is empty"),
+                ));
             }
             if c.size > MAX_UPLOAD_BYTES {
                 return Some(self.refuse(
                     c.rid,
                     ErrorCode::TooLarge,
-                    format!("the image is larger than {} MiB", MAX_UPLOAD_BYTES >> 20),
+                    format!("the {noun} is larger than {} MiB", MAX_UPLOAD_BYTES >> 20),
                 ));
             }
             // a pane at its prompt is refused now, not after every chunk
@@ -2496,7 +2612,7 @@ impl<'a> Uploads<'a> {
                 let msg = refused_ack(
                     c.rid.clone(),
                     e,
-                    upload_at_prompt(c.pane),
+                    upload_at_prompt(c.pane, c.ext.as_deref()),
                     format!("no pane {}", c.pane),
                 );
                 return Some(self.refuse_with(c.rid, msg));
@@ -2505,7 +2621,7 @@ impl<'a> Uploads<'a> {
                 return Some(self.refuse(
                     c.rid,
                     ErrorCode::Busy,
-                    "other images are arriving; try again in a moment",
+                    format!("other {noun}s are arriving; try again in a moment"),
                 ));
             };
             let mut bytes = Vec::new();
@@ -2514,7 +2630,7 @@ impl<'a> Uploads<'a> {
                 return Some(self.refuse(
                     c.rid,
                     ErrorCode::Busy,
-                    "the desktop cannot hold the image now",
+                    format!("the desktop cannot hold the {noun} now"),
                 ));
             }
             self.current = Some(Receiving {
@@ -2523,6 +2639,7 @@ impl<'a> Uploads<'a> {
                 size: c.size,
                 bytes,
                 kind: None,
+                ext: c.ext.clone(),
                 deadline: now + shared.config.upload_deadline,
                 _slot: slot,
             });
@@ -2536,6 +2653,7 @@ impl<'a> Uploads<'a> {
             r.rid == c.rid
                 && r.pane == c.pane
                 && r.size == c.size
+                && r.ext == c.ext
                 && r.bytes.len() as u64 == c.offset
         });
         if !fits {
@@ -2565,9 +2683,9 @@ impl<'a> Uploads<'a> {
         }
         r.bytes.extend_from_slice(&data);
         let done = r.bytes.len() as u64 == r.size;
-        // the type from the signature as soon as it has arrived (8 bytes,
-        // or the whole of a smaller file)
-        if r.kind.is_none() && (r.bytes.len() >= 8 || done) {
+        // an image's type from the signature as soon as it has arrived (8
+        // bytes, or the whole of a smaller file); a file's bytes are its own
+        if r.ext.is_none() && r.kind.is_none() && (r.bytes.len() >= 8 || done) {
             match ImageKind::sniff(&r.bytes) {
                 Some(k) => r.kind = Some(k),
                 None => {
@@ -2587,18 +2705,22 @@ impl<'a> Uploads<'a> {
         if !operates(shared, device) {
             return Some(self.refuse(c.rid, ErrorCode::Forbidden, VIEW_ONLY));
         }
-        let kind = r.kind.expect("sniffed when done");
-        Some(
-            match shared.source.upload(r.pane, &device.name, kind, &r.bytes) {
-                Ok(()) => ServerMsg::ack_ok(c.rid),
-                Err(e) => refused_ack(
-                    c.rid,
-                    e,
-                    upload_at_prompt(r.pane),
-                    format!("no pane {}", r.pane),
-                ),
-            },
-        )
+        let delivered = match (r.ext.as_deref(), r.kind) {
+            (Some(ext), _) => shared
+                .source
+                .upload_file(r.pane, &device.name, ext, &r.bytes),
+            (None, Some(kind)) => shared.source.upload(r.pane, &device.name, kind, &r.bytes),
+            (None, None) => unreachable!("an image is sniffed when done"),
+        };
+        Some(match delivered {
+            Ok(()) => ServerMsg::ack_ok(c.rid),
+            Err(e) => refused_ack(
+                c.rid,
+                e,
+                upload_at_prompt(r.pane, r.ext.as_deref()),
+                format!("no pane {}", r.pane),
+            ),
+        })
     }
 
     /// The image being received, dropped and answered `busy` once past its
@@ -2607,10 +2729,11 @@ impl<'a> Uploads<'a> {
     fn expire<S>(&mut self, shared: &Shared<S>, now: Instant) -> Option<ServerMsg> {
         let r = self.current.as_ref().filter(|r| now >= r.deadline)?;
         let rid = r.rid.clone();
+        let noun = upload_noun(r.ext.as_deref());
         Some(self.refuse(
             rid,
             ErrorCode::Busy,
-            upload_too_slow(shared.config.upload_deadline),
+            upload_too_slow(noun, shared.config.upload_deadline),
         ))
     }
 
@@ -2957,6 +3080,30 @@ fn check_text(text: &str) -> Result<(), (ErrorCode, String)> {
         return Err((
             ErrorCode::BadRequest,
             "the text may not contain a control character (send enter, tab, … as keys)".into(),
+        ));
+    }
+    if text.is_empty() {
+        return Err((ErrorCode::BadRequest, "the text is empty".into()));
+    }
+    Ok(())
+}
+
+/// A `paste`: 1 to [`MAX_PASTE`] bytes, with line breaks and tabs the only
+/// control characters (no escape sequence can leave the paste).
+fn check_paste(text: &str) -> Result<(), (ErrorCode, String)> {
+    if text.len() > MAX_PASTE {
+        return Err((
+            ErrorCode::TooLarge,
+            format!("the text is longer than {MAX_PASTE} bytes"),
+        ));
+    }
+    if text
+        .chars()
+        .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+    {
+        return Err((
+            ErrorCode::BadRequest,
+            "a paste may hold only line breaks and tabs as control characters".into(),
         ));
     }
     if text.is_empty() {
@@ -3630,6 +3777,7 @@ mod tests {
             bg: None,
             rules: Vec::new(),
             lines: vec![vec![Run::plain(big.clone())], vec![Run::plain(big)]],
+            age_ms: None,
         };
         let (f, plain) = screen_frame(1, None, &s).unwrap();
         assert!(f.len() <= MAX_GATEWAY_MESSAGE, "{} bytes", f.len());

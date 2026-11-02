@@ -81,13 +81,18 @@ pub const KEYS_RATE: usize = 20;
 pub const MAX_REQUEST_ID: usize = 64;
 /// Longest `text`, in bytes (it counts against [`KEYS_RATE`]).
 pub const MAX_TEXT: usize = 1024;
+/// How often the gateway asks whether a program copied something for phones.
+pub const COPY_POLL: std::time::Duration = std::time::Duration::from_millis(500);
+/// Longest `paste`, in bytes (it counts against [`KEYS_RATE`]). Its message
+/// may reach [`MAX_UPLOAD_MESSAGE`], which leaves room for JSON escapes.
+pub const MAX_PASTE: usize = 48 * 1024;
 /// Most lines one `scroll` moves (a larger one is clamped).
 pub const MAX_SCROLL_LINES: i32 = 50;
 /// `scroll` messages per second per connection, counted apart from `keys`:
 /// a finger's drag goes out in small steps (one per 30 ms) so the program
 /// moves smoothly.
 pub const SCROLL_RATE: usize = 40;
-/// Largest image an `upload` carries, in bytes.
+/// Largest image or file an `upload` carries, in bytes.
 pub const MAX_UPLOAD_BYTES: u64 = 10 * 1024 * 1024;
 /// Most bytes in one `upload` chunk (60 000 characters of base64, which a
 /// chunk boundary never splits: a multiple of 3 bytes).
@@ -103,6 +108,18 @@ pub const MAX_UPLOADS: usize = 2;
 /// How long one `upload` may take from its first chunk to its last; past
 /// it what arrived is dropped and the upload answered `busy`.
 pub const UPLOAD_DEADLINE: Duration = Duration::from_secs(60);
+
+/// Most characters in an `upload`'s `ext`.
+pub const MAX_UPLOAD_EXT: usize = 8;
+
+/// Whether `ext` may end a saved upload's name: 1 to [`MAX_UPLOAD_EXT`] of
+/// `a-z0-9`, so nothing a phone sends can be a path or need quoting.
+pub fn valid_upload_ext(ext: &str) -> bool {
+    (1..=MAX_UPLOAD_EXT).contains(&ext.len())
+        && ext
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+}
 
 /// An image type an `upload` may carry, told by its first bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -238,6 +255,10 @@ pub struct Screen {
     pub rules: Vec<(u16, String)>,
     /// Row 0 first, one entry per row (trailing default blanks left out).
     pub lines: Vec<Vec<protocol::Run>>,
+    /// A capture the pane's output has moved on from, this long ago in whole
+    /// seconds ([`Screen`]s of a window in use; `docs/remote-protocol.md`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub age_ms: Option<u64>,
 }
 
 /// Lines of a block's output ([`Source::output`]).
@@ -842,6 +863,12 @@ pub enum Input {
     /// Text typed into the program running in the pane (validated: one
     /// line, no control characters, 1 to [`MAX_TEXT`] bytes).
     Text(String),
+    /// Text pasted into the program as one paste (validated: 1 to
+    /// [`MAX_PASTE`] bytes, line breaks and tabs the only control
+    /// characters).
+    Paste(String),
+    /// A left click at a cell of the pane's screen, 0-based.
+    Mouse { col: u16, row: u16 },
 }
 
 /// Why [`Source::input`] did not deliver.
@@ -878,6 +905,12 @@ pub trait Source: Send + Sync + 'static {
     }
     /// Deliver `input` from the device named `device` to `pane`.
     fn input(&self, pane: u64, device: &str, input: Input) -> Result<(), InputError>;
+    /// What a program copied (OSC 52) after copy number `since`, for phones
+    /// (`remote_clipboard`): the copy's number and its text. Defaults to none.
+    fn clipboard(&self, since: u64) -> Option<(u64, String)> {
+        let _ = since;
+        None
+    }
     /// `pane`'s visible screen while it shows the alternate screen, or
     /// always when `force`; `Ok(None)` otherwise. Defaults to none.
     fn screen(&self, pane: u64, force: bool) -> Result<Option<Screen>, SourceError> {
@@ -993,7 +1026,23 @@ pub trait Source: Send + Sync + 'static {
             "this computer cannot take images from the phone".into(),
         ))
     }
-    /// Whether `pane` would take an image now ([`Source::upload`]'s
+    /// [`Source::upload`] for a file of any bytes (at most
+    /// [`MAX_UPLOAD_BYTES`]), saved with the extension `ext`
+    /// ([`valid_upload_ext`]) under a name the desktop makes; nothing runs
+    /// it. Defaults to `Unavailable`.
+    fn upload_file(
+        &self,
+        pane: u64,
+        device: &str,
+        ext: &str,
+        bytes: &[u8],
+    ) -> Result<(), InputError> {
+        let _ = (pane, device, ext, bytes);
+        Err(InputError::Unavailable(
+            "this computer cannot take files from the phone".into(),
+        ))
+    }
+    /// Whether `pane` would take an image or file now ([`Source::upload`]'s
     /// errors, without one), asked at an `upload`'s first chunk so a pane
     /// at its prompt is refused before the rest arrives. Defaults to `Ok`
     /// (the last chunk's [`Source::upload`] still decides).

@@ -1,7 +1,7 @@
 import { useActionScope } from "@/ui/useActionScope";
 import { useLocalSearchParams, useRouter } from "expo-router";
-import { useEffect, useRef, useState } from "react";
-import { AccessibilityInfo, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { useEffect, useState } from "react";
+import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import {
   EMPTY_WHAT,
@@ -18,11 +18,11 @@ import {
   type SheetFilter,
   type TabRow,
 } from "@/now";
-import { canClose } from "@/fleet";
+import { canClose, canOperate } from "@/fleet";
 import { fleet, useApp, useLock } from "@/runtime";
 import { Tile } from "@/ui/Avatar";
 import { Icon } from "@/ui/Icon";
-import { canNewTab, openNewTab } from "@/ui/newTab";
+import { canNewTab } from "@/ui/newTab";
 import { ErrorText } from "@/ui/Notice";
 import { toggleA11y } from "@/ui/toggle";
 import { colors, mono, tint, tints, ui } from "@/ui/theme";
@@ -64,8 +64,6 @@ export default function TabsSheet() {
   const host = s.hosts.find((h) => h.record.key === key);
   const [filter, setFilter] = useState<SheetFilter>("all");
   const [error, setError] = useState<string | null>(null);
-  // one at a time: a second tap while the first is out would open two
-  const out = useRef(false);
   const online = host?.conn.status === "open";
   const tabs = host && online ? host.windows.flatMap((w) => w.tabs) : [];
   const now = useNow(tabs.some((t) => tabKind(t) === "working") ? 1000 : 30_000);
@@ -87,22 +85,10 @@ export default function TabsSheet() {
     if (r.tab.panes.some((p) => p.id === here)) return;
     router.replace({ pathname: "/host/[key]/pane/[id]", params: { key, id: String(r.pane) } });
   };
-  const newTab = async () => {
-    if (!host || out.current) return;
-    out.current = true;
-    setError(null);
-    try {
-      const current = scope.capture();
-      const r = await openNewTab(host, current);
-      if (!current()) return;
-      if (!r.ok) return r.message ? setError(r.message) : undefined;
-      AccessibilityInfo.announceForAccessibility(`Opened a tab on ${host.record.name}`);
-      scope.leave();
-      router.dismiss();
-      if (r.pane !== undefined) router.replace({ pathname: "/host/[key]/pane/[id]", params: { key, id: String(r.pane) } });
-    } finally {
-      out.current = false;
-    }
+  // the New tab sheet chooses what the tab starts with and opens it; both sheets close back here
+  const newTab = () => {
+    if (!host) return;
+    router.push({ pathname: "/new-tab", params: { key } });
   };
   const canOpen = !!host && canNewTab(host);
   const { say, toast } = useToast();
@@ -183,7 +169,7 @@ export default function TabsSheet() {
               onPress={() => go(r)}
               style={({ pressed }) => [styles.cardPress, pressed && styles.pressed]}
             >
-              <Tile agent={r.agent} size={38} radius={11} promptSize={13} />
+              <Tile agent={r.agent} program={r.program} size={38} radius={11} promptSize={13} />
               <View style={styles.cardText}>
                 <View style={styles.cardTitleLine}>
                   <Text style={styles.cardTitle} numberOfLines={1}>
@@ -223,17 +209,20 @@ export default function TabsSheet() {
       </View>
 
       {error ? <ErrorText>{error}</ErrorText> : null}
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel="New tab"
-        accessibilityState={{ disabled: !canOpen }}
-        disabled={!canOpen}
-        onPress={() => void newTab()}
-        style={({ pressed }) => [styles.newTab, pressed && styles.pressed, !canOpen && styles.disabled]}
-      >
-        <Icon name="add" size={17} color={colors.text} />
-        <Text style={styles.newTabText}>New tab</Text>
-      </Pressable>
+      {/* a view-only device has no way to open a tab */}
+      {host && canOperate(host) ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="New tab"
+          accessibilityState={{ disabled: !canOpen }}
+          disabled={!canOpen}
+          onPress={newTab}
+          style={({ pressed }) => [styles.newTab, pressed && styles.pressed, !canOpen && styles.disabled]}
+        >
+          <Icon name="add" size={17} color={colors.text} />
+          <Text style={styles.newTabText}>New tab</Text>
+        </Pressable>
+      ) : null}
     </ScrollView>
   );
 }

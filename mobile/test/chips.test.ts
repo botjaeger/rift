@@ -223,6 +223,6 @@ describe("the chip row: prompt chips while the field is empty, completions while
 
   it("no match: no rows, and the row says what Return does", () => {
     expect(completionRows("zzz", [], [], ["ls", "git status"], 6)).toEqual([]);
-    expect(NO_COMPLETIONS).toBe("No completions · Return runs it as typed");
+    expect(NO_COMPLETIONS).toBe("No completions · Run runs it as typed");
   });
 });

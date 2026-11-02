@@ -1,9 +1,10 @@
 import { canOperate, hasFeature, type HostView } from "@/fleet";
+import { findPane } from "@/topology";
 import { authenticate, fleet } from "@/runtime";
 import { canStartTab } from "./StartTab";
 
 /** The pane a new tab is opened from while Rift shows windows: the active tab's active pane, else any. */
-function basePane(host: HostView): number | null {
+export function basePane(host: HostView): number | null {
   const tabs = host.windows.filter((w) => !w.background).flatMap((w) => w.tabs);
   const tab = tabs.find((t) => t.active) ?? tabs[0];
   return (tab?.panes.find((p) => p.active) ?? tab?.panes[0])?.id ?? null;
@@ -13,6 +14,18 @@ function basePane(host: HostView): number | null {
 export function canNewTab(host: HostView): boolean {
   if (host.conn.status !== "open" || !canOperate(host)) return false;
   return canStartTab(host) || (hasFeature(host, "open") && basePane(host) !== null);
+}
+
+/** Whether "New pane" can work beside `pane` on `host` now (feature `open`). */
+export function canNewPane(host: HostView, pane: number): boolean {
+  const loc = findPane(host.windows, pane);
+  return host.conn.status === "open" && canOperate(host) && hasFeature(host, "open") && !!loc && !loc.window.background;
+}
+
+/** The folder a new tab starts in: the one `basePane` is in; null when it is not known. */
+export function newTabCwd(host: HostView): string | null {
+  const base = basePane(host);
+  return (base === null ? null : findPane(host.windows, base)?.pane.cwd) ?? null;
 }
 
 /**

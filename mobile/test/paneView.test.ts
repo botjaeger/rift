@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   answerLabel,
+  messagePlaceholder,
   askContext,
   bareScreen,
   cardKind,
@@ -25,8 +26,9 @@ import {
   fitSize,
   programSend,
   runsAgent,
-  showsViewSwitch,
-  terminalViewOn,
+  screenView,
+  boxImages,
+  partSend,
 } from "../src/paneView";
 import type { Block, Pane, Tab, Waiting } from "../src/protocol/types";
 
@@ -200,6 +202,7 @@ describe("the agent's question card", () => {
   it("labels the answers as the board does", () => {
     expect(w.choices.map((_, i) => answerLabel(w, i))).toEqual(["Yes", "Yes, this session", "No…"]);
     expect(answerLabel(waiting(["Allow once", "Yes, and don't ask again for npm", "No"]), 1)).toBe("Yes, always");
+    expect(answerLabel(waiting(["Bash(aws:*)", "Bash(curl:*)"]), 1)).toBe("Bash(curl:*)");
     expect(answerLabel(waiting(["Apply the migration to the production database now"]), 0)).toBe("Apply the migration to…");
   });
   it("lists the entries under the primary one", () => {
@@ -265,17 +268,30 @@ describe("the Terminal view's default", () => {
     expect(runsAgent(pane(1, { job: "htop" }))).toBe(false);
     expect(runsAgent(pane(1, { last_command: "claude" }))).toBe(false);
   });
-  it("an agent's pane is always the terminal; a shell's follows the choice (off by default)", () => {
-    expect(terminalViewOn(null, true)).toBe(true);
-    expect(terminalViewOn(false, true)).toBe(true);
-    expect(terminalViewOn(null, false)).toBe(false);
-    expect(terminalViewOn(true, false)).toBe(true);
-    expect(terminalViewOn(false, false)).toBe(false);
+  it("TUI for the alternate screen, an agent, or a program no block holds; no switch to choose", () => {
+    const running = { running: { started: null, line: "" } };
+    // vim, htop, Claude fullscreen: alt wins whatever blocks say
+    expect(screenView(pane(1, { job: "vim", ...running }), true, true).tui).toBe(true);
+    // Claude classic on the primary screen
+    expect(screenView(pane(1, { job: "claude", ...running }), false, true)).toEqual({ tui: true, pinned: true });
+    // reattached program or shell without integration: running, but the last block is not it
+    expect(screenView(pane(1, { job: "node", ...running }), false, false)).toEqual({ tui: true, pinned: true });
+    expect(screenView(pane(1, running), false, false).tui).toBe(true);
+    // a shell without integration: no blocks, no folder, no job; only its screen shows anything
+    expect(screenView(pane(1), false, false, true)).toEqual({ tui: true, pinned: true });
+    expect(screenView(pane(1, { cwd: "/x" }), false, false, true).tui).toBe(false);
+    expect(screenView(pane(1), false, false).tui).toBe(false);
   });
-  it("the Blocks | Terminal switch: with screens, not on an agent's pane", () => {
-    expect(showsViewSwitch(true, false)).toBe(true);
-    expect(showsViewSwitch(true, true)).toBe(false);
-    expect(showsViewSwitch(false, false)).toBe(false);
+  it("blocks for a shell at a prompt and for any program a block holds", () => {
+    const running = { running: { started: null, line: "" } };
+    expect(screenView(pane(1), false, false)).toEqual({ tui: false, pinned: false });
+    expect(screenView(pane(1, { last_command: "ls" }), false, true).tui).toBe(false);
+    // cargo build, tail -f, sleep 30: running, held by a running block
+    expect(screenView(pane(1, { job: "cargo", ...running }), false, true)).toEqual({ tui: false, pinned: false });
+    expect(screenView(pane(1, { job: "sleep", ...running }), false, true).tui).toBe(false);
+  });
+  it("alt on the alternate screen needs no pin: the gateway's auto mode sends it", () => {
+    expect(screenView(pane(1, { job: "vim", running: { started: null, line: "" } }), true, true)).toEqual({ tui: true, pinned: false });
   });
   it("the desktop's agent flag names an agent whatever its job or title", () => {
     // Codex untitled, or an agent reattached with its version as the job
@@ -314,20 +330,47 @@ describe("the command line while a program runs", () => {
     expect(r.ok).toBe(false);
     expect(r.ok === false && r.message).toMatch(/too old/);
   });
-  it("a line the gateway would refuse is refused here", () => {
-    expect(programSend("a\tb", true)).toMatchObject({ ok: false });
-    expect(programSend("é".repeat(513), true)).toMatchObject({ ok: false, message: expect.stringMatching(/too long/) });
+  it("several lines, tabs and long text go as one paste", () => {
+    expect(programSend("a\r\nb", true, true)).toEqual({ ok: true, paste: "a\nb" });
+    expect(programSend("a\tb", true, true)).toEqual({ ok: true, paste: "a\tb" });
+    const long = "é".repeat(513);
+    expect(programSend(long, true, true)).toEqual({ ok: true, paste: long });
+  });
+  it("without paste they go line by line, a tab never reaching a program that would complete it", () => {
+    expect(programSend("a\n\tb", true, false)).toEqual({ ok: true, lines: ["a", "    b"] });
+  });
+  it("what no message can carry is refused here", () => {
+    expect(programSend("a\u001b[2Jb", true, true)).toMatchObject({ ok: false });
+    expect(programSend("x".repeat(48 * 1024 + 1), true, true)).toMatchObject({ ok: false, message: expect.stringMatching(/too long/) });
+  });
+  it("names each program's mark, Claude's ✳ only for Claude", async () => {
+    const { programMark } = await import("../src/paneView");
+    expect(programMark("claude").claude).toBe(true);
+    for (const p of ["codex", "opencode", "vim", null]) expect(programMark(p).claude).toBe(false);
+    expect(new Set(["claude", "codex", "opencode", "vim"].map((p) => programMark(p).mark)).size).toBe(4);
   });
 });
 
-describe("the Blocks | Terminal switch", () => {
-  it("selects what shows: a full-screen program's screen shows Terminal, Blocks unavailable", async () => {
-    const { viewSwitch } = await import("../src/paneView");
-    // a shell: the user's choice
-    expect(viewSwitch(false, false)).toEqual({ terminal: false, blocksDisabled: false });
-    expect(viewSwitch(true, false)).toEqual({ terminal: true, blocksDisabled: false });
-    // a TUI on the alternate screen shows its screen whatever was chosen
-    expect(viewSwitch(false, true)).toEqual({ terminal: true, blocksDisabled: true });
-    expect(viewSwitch(true, true)).toEqual({ terminal: true, blocksDisabled: true });
+describe("messagePlaceholder", () => {
+  it("names the program only where it fits on one line", () => {
+    expect(messagePlaceholder("claude", 390)).toBe("Message for claude");
+    expect(messagePlaceholder("claude", 320)).toBe("Message");
+    expect(messagePlaceholder("a-program-with-a-long-name", 402)).toBe("Message");
+  });
+});
+
+describe("boxImages", () => {
+  const rows = (...t: string[]) => t.map((s) => [[s, null, null, 0] as const]);
+  it("counts the box below the last prompt, not the transcript", () => {
+    expect(boxImages(rows("❯ [Image #1] old", "  ⎿ [Image #1]", "──", "❯ [Image #2] x [Image #3]", "──"))).toBe(2);
+    expect(boxImages(rows("❯ [Image #1] old", "❯ "))).toBe(0);
+    expect(boxImages(rows("no prompt [Image #1]"))).toBe(0);
+  });
+});
+
+describe("partSend", () => {
+  it("blanks between tokens go, and with no typing at all it says why rather than nothing", () => {
+    expect(partSend(" ", true)).toEqual({ ok: true, lines: [" "] });
+    expect(partSend(" ", false)).toEqual({ ok: false, message: expect.stringContaining("too old") });
   });
 });

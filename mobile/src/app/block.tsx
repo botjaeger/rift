@@ -13,6 +13,7 @@ import { fleet, useApp, useLock } from "@/runtime";
 import { findPane, runningCommand } from "@/topology";
 import { Output } from "@/ui/BlockView";
 import { Icon } from "@/ui/Icon";
+import { SelectableText } from "@/ui/SelectableText";
 import { confirmDestructive } from "@/ui/confirm";
 import { formatDuration } from "@/ui/format";
 import { ErrorText } from "@/ui/Notice";
@@ -197,9 +198,9 @@ export default function BlockActionsScreen() {
             ) : null}
             <View style={styles.code}>
               <Text style={styles.prompt}>$</Text>
-              <Text style={styles.command} selectable>
-                {command || "(no command)"}
-              </Text>
+              <View style={styles.commandBox}>
+                <SelectableText text={command || "(no command)"} style={styles.command} lineHeight={21} />
+              </View>
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel="Copy command"
@@ -335,7 +336,8 @@ const styles = StyleSheet.create({
   branch: { fontFamily: mono, color: colors.success, fontSize: 12 },
   code: { flexDirection: "row", alignItems: "flex-start", gap: 8, borderRadius: 12, backgroundColor: colors.chrome, paddingTop: 10, paddingBottom: 10, paddingLeft: 12, paddingRight: 6 },
   prompt: { fontFamily: mono, color: colors.accent, fontSize: 14, lineHeight: 21 },
-  command: { flex: 1, minWidth: 0, fontFamily: mono, color: colors.textBright, fontSize: 14, lineHeight: 21 },
+  commandBox: { flex: 1, minWidth: 0 },
+  command: { fontFamily: mono, color: colors.textBright, fontSize: 14 },
   copyIcon: { width: 32, height: 32, borderRadius: 8, alignItems: "center", justifyContent: "center", marginVertical: -4 },
   outHead: { flexDirection: "row", alignItems: "center", gap: 8 },
   outTitle: { flex: 1, fontFamily: ui(500), color: colors.textMuted, fontSize: 12 },

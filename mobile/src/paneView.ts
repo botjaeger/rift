@@ -4,7 +4,7 @@
 
 import { replyChoice } from "./answer";
 import { agoShort, paneName, programName } from "./now";
-import { textProblem, type Block, type Pane, type Tab, type Waiting } from "./protocol/types";
+import { pasteProblem, textProblem, type Block, type Pane, type Tab, type Waiting } from "./protocol/types";
 import { tildePath } from "./chips";
 import { CELL_RATIO, LINE_RATIO } from "./terminal";
 import { formatClock } from "./ui/format";
@@ -93,38 +93,98 @@ export function bareScreen(o: { fullScreen: boolean; asking: boolean; agent: boo
 }
 
 /**
- * Whether the Terminal view is on: always for a pane that runs an agent (its blocks and its screen
- * look the same, so it has no switch), else the user's choice for this pane while the screen is
- * open (null: none), off at a plain shell.
+ * What the pane shows, by one rule and no switch: the TUI (the program's screen) for the
+ * alternate screen (`alt`: vim, htop, Claude Code's fullscreen renderer), a coding agent (Claude
+ * Code's classic renderer draws on the primary screen), or a program no block holds (reattached,
+ * or a shell without integration); blocks for everything else, `cargo build` and `tail -f`
+ * included. `blocksHoldRunning`: the pane's last block is the running program, or the blocks are
+ * not loaded yet (unknown counts as held, so the view does not flash). `pinned`: the rule, not the
+ * alternate screen, asks for the screen, so the gateway must send it whatever runs (mode `on`).
+ * The caller passes `alt` false and expects blocks on a gateway without `screen`. `noBlocks`: the
+ * pane's blocks are loaded and empty; with no working folder either, the shell has no integration
+ * (it reports neither), runs nothing the gateway can name, and only its screen shows anything.
  */
-export const terminalViewOn = (choice: boolean | null, agent: boolean) => agent || (choice ?? false);
-
-/**
- * The Blocks | Terminal switch as the pane shows: Terminal is selected whenever the screen shows,
- * by the user's choice (`pinned`) or because a full-screen program holds it (`alt`: vim, htop, a
- * TUI on the alternate screen, which has no blocks to show); Blocks cannot be chosen then.
- */
-export function viewSwitch(pinned: boolean, alt: boolean): { terminal: boolean; blocksDisabled: boolean } {
-  return { terminal: pinned || alt, blocksDisabled: alt };
+export function screenView(p: Pane, alt: boolean, blocksHoldRunning: boolean, noBlocks = false): { tui: boolean; pinned: boolean } {
+  const pinned = runsAgent(p) || ((!!p.running || !!p.job) && !blocksHoldRunning) || (noBlocks && !p.cwd);
+  return { tui: alt || pinned, pinned };
 }
-
-/** Whether the Blocks | Terminal switch shows: the gateway sends screens and the pane is not an agent's. */
-export const showsViewSwitch = (screenFeature: boolean, agent: boolean) => screenFeature && !agent;
 
 // --- the command line while a program runs -------------------------------------------------------
 
 /**
- * What Return does in the command line of a pane that runs a program: the draft goes to the
- * program as text, then Return as its own key. `message` null: nothing to send (an empty line).
+ * What a hardware keyboard's key does in the command line (the phone keyboard's Return is a new line
+ * and never reaches here): Return sends, Shift+Return starts a new line; null for any other key.
  */
-export function programSend(draft: string, canType: boolean): { ok: true; text: string } | { ok: false; message: string | null } {
-  if (draft.trim() === "") return { ok: false, message: null };
-  if (!canType) return { ok: false, message: "Rift on this computer is too old to type into programs. Update it." };
-  const problem = textProblem(draft);
-  if (problem === "too_long") return { ok: false, message: "That is too long to send at once." };
-  if (problem) return { ok: false, message: "The message must be one line." };
-  return { ok: true, text: draft };
+export const fieldKey = (name: string): "send" | "newline" | null => (name === "enter" ? "send" : name === "shift+enter" ? "newline" : null);
+
+/**
+ * The message box's placeholder for `program` in a screen `width` wide: the program's name only when
+ * it fits on the box's one line (14 pt mono; the box leaves about 184 pt for the +, ⌃, Send and gutters).
+ */
+export function messagePlaceholder(program: string, width: number): string {
+  const full = `Message for ${program}`;
+  return full.length * 8.4 <= width - 184 ? full : "Message";
 }
+
+/**
+ * What the command line says about a draft at a shell prompt: Rift runs one line (the gateway
+ * refuses a `run` with a line break, nothing runs), so a draft with line breaks cannot be run and
+ * Run stays off. Null when it can, and always for a message to a running program.
+ */
+export function commandNote(draft: string, running: boolean): string | null {
+  return !running && /[\r\n]/.test(draft) ? "A command runs as one line. Take out the line breaks to run it." : null;
+}
+
+/** How a message goes to a running program: typed, as one paste, or line by line. */
+export type ProgramSend =
+  | { ok: true; text: string; paste?: undefined; lines?: undefined }
+  | { ok: true; paste: string; text?: undefined; lines?: undefined }
+  | { ok: true; lines: string[]; text?: undefined; paste?: undefined }
+  | { ok: false; message: string | null };
+
+const TOO_OLD_TO_TYPE = "Rift on this computer is too old to type into programs. Update it.";
+
+/** A tab where a program takes one line at a time (it would complete there). */
+const TAB_AS_SPACES = "    ";
+
+/**
+ * What Return does in the command line of a pane that runs a program: a line goes as text, then
+ * Return as its own key. Several lines, tabs or a long message go as one paste (`canPaste`), else
+ * line by line with the newline key between them. `message` null: nothing to send (an empty line).
+ */
+export function programSend(draft: string, canType: boolean, canPaste = false): ProgramSend {
+  if (draft.trim() === "") return { ok: false, message: null };
+  if (!canType) return { ok: false, message: TOO_OLD_TO_TYPE };
+  if (textProblem(draft) === null) return { ok: true, text: draft };
+  const text = draft.replace(/\r\n?/g, "\n");
+  const problem = pasteProblem(text);
+  if (problem === "too_long") return { ok: false, message: "That is too long to send at once." };
+  if (problem) return { ok: false, message: "The message holds characters a program cannot be sent." };
+  return canPaste ? { ok: true, paste: text } : { ok: true, lines: messageLines(text) };
+}
+
+/** How a draft's text between two tokens goes: as `programSend`, and blanks count (`[Image 1] [Image 2]`). */
+export function partSend(text: string, canType: boolean, canPaste = false): ProgramSend {
+  if (!canType) return { ok: false, message: TOO_OLD_TO_TYPE };
+  return text.trim() !== "" ? programSend(text, canType, canPaste) : { ok: true, lines: messageLines(text) };
+}
+
+/** The `[Image #N]`s in Claude Code's input box on a pane's screen: below its last `❯`. */
+export function boxImages(lines: readonly (readonly (readonly [string, ...unknown[]])[])[]): number {
+  const rows = lines.map((runs) => runs.map((r) => r[0]).join(""));
+  let at = rows.length - 1;
+  while (at >= 0 && !rows[at]!.startsWith("❯")) at--;
+  return at < 0 ? 0 : (rows.slice(at).join("\n").match(/\[Image #\d+\]/g) ?? []).length;
+}
+
+/** A message as the lines of a program that takes one at a time. */
+export const messageLines = (text: string): string[] => text.replace(/\r\n?/g, "\n").replace(/\t/g, TAB_AS_SPACES).split("\n");
+
+/** The gateway's refusal of several lines to a program without bracketed paste (they go line by line instead). */
+export const isOneLineRefusal = (message: string) => message.includes("one line at a time");
+
+/** A clipboard text longer than this (or over three lines) waits in the box as a token rather than as text. */
+export const MAX_FIELD_PASTE_BYTES = 4096;
 
 // --- the picker and the Panes sheet ---------------------------------------------------------
 
@@ -141,11 +201,16 @@ export function paneState(p: Pane): { text: string; tone: StateTone } {
   return { text: "Idle", tone: "idle" };
 }
 
-/** The pane's mark: Claude Code's ✳ in its orange, else the prompt mark `>_`. */
-export function paneMark(p: Pane): { mark: string; claude: boolean } {
-  const claude = programName(p) === "claude";
-  return { mark: claude ? "\u2733\uFE0E" : ">_", claude };
+/** A program's mark: Claude Code's ✳ in its orange, Codex and OpenCode their own, else the prompt mark `>_`. */
+export function programMark(program: string | null): { mark: string; claude: boolean } {
+  if (program === "claude") return { mark: "\u2733\uFE0E", claude: true };
+  if (program === "codex") return { mark: "\u25C6", claude: false };
+  if (program === "opencode") return { mark: "\u25A0", claude: false };
+  return { mark: ">_", claude: false };
 }
+
+/** The pane's mark. */
+export const paneMark = (p: Pane) => programMark(programName(p));
 
 /** The pane's last line in the Panes sheet: the question, the latest output line, the folder, or the last command. */
 export function paneLine(p: Pane): string {
@@ -327,8 +392,16 @@ export function answerLabel(w: Waiting, i: number): string {
     if (/\bsession\b/i.test(c)) return "Yes, this session";
     if (/\b(always|don't ask|do not ask|accept edits|all edits)\b/i.test(c)) return "Yes, always";
   }
-  const short = c.split(/[,(]/)[0]!.trim() || c;
+  const first = (t: string) => t.trim().split(/[,(]/)[0]!.trim() || t.trim();
+  // entries alike up to their comma or bracket (`Bash(aws:*)`, `Bash(curl:*)`) keep the rest: it tells them apart
+  const alike = w.choices.some((o, j) => j !== i && first(o) === first(c));
+  const short = alike ? c : first(c);
   return short.length > 24 ? `${short.slice(0, 23).trimEnd()}…` : short;
+}
+
+/** The command an entry says it runs (`Update now (runs \u0060curl … | sh\u0060)`), which its short label leaves out; null without one. */
+export function choiceCommand(choice: string): string | null {
+  return /`([^`]+)`/.exec(choice)?.[1] ?? null;
 }
 
 /** The entries under the primary one, in menu order, without the reply entry (it opens the field). */

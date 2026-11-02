@@ -170,8 +170,9 @@ export function applySticky(key: string, mods: { ctrl: boolean; alt: boolean; sh
  * the protocol has the name, else the plain key; `ctrl+[` is esc and `ctrl+@` is `ctrl+space`.
  * Null when the character takes no modifier (it is typed as text, the sticky dropped).
  */
-export function stickyKey(ch: string, mods: { ctrl: boolean; alt: boolean }): string | null {
-  if (!mods.ctrl && !mods.alt) return null;
+export function stickyKey(ch: string, mods: { ctrl: boolean; alt: boolean; shift?: boolean }): string | null {
+  // Shift+Return is a new line: ctrl+j reaches every agent, where Return with shift can submit
+  if (!mods.ctrl && !mods.alt) return mods.shift && (ch === "\n" || ch === "\r") ? "ctrl+j" : null;
   const [a, ...rest] = textToActions(ch);
   if (a && "keys" in a && rest.length === 0 && a.keys.length === 1) return applySticky(a.keys[0]!, mods);
   const c = ch.toLowerCase();

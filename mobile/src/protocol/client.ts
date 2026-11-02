@@ -191,6 +191,8 @@ export interface ClientEvents {
   onPane?(msg: SnapshotMsg | UpdateMsg | OlderMsg): void;
   onAck?(msg: AckMsg): void;
   onDone?(msg: DoneMsg): void;
+  /** A program on the computer copied this (feature `clipboard`). */
+  onClipboard?(text: string): void;
   onError?(msg: ErrorMsg): void;
   /**
    * The subscribed pane's screen, or its end. A `screen_end` is also reported (with nothing
@@ -244,6 +246,9 @@ export function wsUrl(address: string): string {
 }
 
 const defaultSocket: SocketFactory = (url) => new WebSocket(url) as unknown as SocketLike;
+
+/** The largest input message of its kind: a `paste` may pass the usual limit, as an `upload` chunk does. */
+const inputLimit = (msg: ClientMsg) => (msg.t === "paste" ? MAX_UPLOAD_MESSAGE_BYTES : MAX_CLIENT_MESSAGE_BYTES);
 
 function toBytes(data: unknown): Uint8Array | null {
   if (data instanceof ArrayBuffer) return new Uint8Array(data);
@@ -465,8 +470,23 @@ export class RiftClient {
     if (this.state.status === "failed" && f !== "key_mismatch" && f !== "gave_up" && f !== "host_quit") return;
     this.teardown();
     this.stopped = false;
+    this.probing = false;
     this.setState({ attempt: 0, error: null, failure: null, retryInMs: null, retryAt: null, since: null });
     this.startRound(opts.lanFirst ? 0 : this.preferred);
+  }
+
+  /**
+   * One more round for a client that stopped because nothing answered: the computer may be back while
+   * the app stays open. No answer ends it as `gave_up` again, with no run of retries.
+   */
+  probe(): void {
+    const f = this.state.failure;
+    if (this.state.status !== "failed" || (f !== "gave_up" && f !== "host_quit")) return;
+    this.probing = true;
+    this.teardown();
+    this.stopped = false;
+    this.setState({ attempt: MAX_RETRIES, failure: null, retryInMs: null, retryAt: null, since: null });
+    this.startRound();
   }
 
   /** Follows `pane` (replacing the previous subscription). Resumes when it is the same pane. */
@@ -512,6 +532,23 @@ export class RiftClient {
     if (!this.authed) return null;
     const id = `x${++this.idN}`;
     return this.sendInput({ t: "text", id, pane, text }) ? id : null;
+  }
+
+  /** A click at a cell of the pane's screen; returns the `ack` id, or null when not sent. Paced with `keys`. */
+  mouse(pane: number, col: number, row: number): string | null {
+    if (!this.authed) return null;
+    const id = `x${++this.idN}`;
+    return this.sendInput({ t: "mouse", id, pane, col, row }) ? id : null;
+  }
+
+  /**
+   * Pastes text into the pane's program as one paste (feature `paste`); returns the `ack` id, or
+   * null when not sent. Paced with `keys`, in order with them.
+   */
+  paste(pane: number, text: string): string | null {
+    if (!this.authed) return null;
+    const id = `x${++this.idN}`;
+    return this.sendInput({ t: "paste", id, pane, text }) ? id : null;
   }
 
   /**
@@ -608,7 +645,7 @@ export class RiftClient {
 
   /** Queues a `keys` / `text` message and sends what the rate allows; false when it cannot be sent. */
   private sendInput(msg: ClientMsg): boolean {
-    if (!this.sendCipher || utf8Encode(JSON.stringify(msg)).length > MAX_CLIENT_MESSAGE_BYTES) return false;
+    if (!this.sendCipher || utf8Encode(JSON.stringify(msg)).length > inputLimit(msg)) return false;
     this.inputQueue.push(msg);
     this.drainInput();
     return true;
@@ -625,7 +662,8 @@ export class RiftClient {
         return;
       }
       this.inputTimes.push(Date.now());
-      this.send(this.inputQueue.shift()!);
+      const msg = this.inputQueue.shift()!;
+      this.send(msg, inputLimit(msg));
     }
   }
 
@@ -1064,6 +1102,9 @@ export class RiftClient {
       case "done":
         this.events.onDone?.(msg);
         return;
+      case "clipboard":
+        this.events.onClipboard?.(msg.text);
+        return;
       case "closing":
         this.setState({ closing: { reason: msg.reason, backInS: msg.back_in_s ?? null, at: Date.now() } });
         return;
@@ -1290,8 +1331,16 @@ export class RiftClient {
     }
   }
 
+  /** A `probe` is on its way: the views hear only how it ends. */
+  private probing = false;
+
   private setState(patch: Partial<ConnState>): void {
     this.state = { ...this.state, ...patch };
+    if (this.probing) {
+      // the card keeps saying it stopped: its rows must not jump under a finger every 30 s
+      if (patch.status !== "open" && patch.status !== "failed") return;
+      this.probing = false;
+    }
     this.events.onState?.(this.state);
   }
 }

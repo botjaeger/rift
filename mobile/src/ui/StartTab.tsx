@@ -20,9 +20,11 @@ export function canStartTab(host: HostView): boolean {
 
 /**
  * "Open a tab" on a computer where Rift is closed: Face ID (or the passcode) first, then a shell
- * the computer keeps until Rift opens and shows it as a tab; goes to the new pane.
+ * the computer keeps until Rift opens and shows it as a tab; goes to the new pane. In the New tab
+ * sheet (`onOpened`) the sheet closes and takes the phone there, and the Face ID step is written
+ * out under the button.
  */
-export function StartTab({ host }: { host: HostView }) {
+export function StartTab({ host, onOpened }: { host: HostView; onOpened?: (pane: number | undefined) => void }) {
   const router = useRouter();
   const scope = useActionScope(host.record.key);
   const [error, setError] = useState<string | null>(null);
@@ -47,6 +49,7 @@ export function StartTab({ host }: { host: HostView }) {
       if (!current()) return;
       if (!r.ok) return setError(r.message);
       AccessibilityInfo.announceForAccessibility("New tab opened");
+      if (onOpened) return onOpened(r.pane);
       if (r.pane !== undefined)
         router.push({ pathname: "/host/[key]/pane/[id]", params: { key: host.record.key, id: String(r.pane) } });
     } finally {
@@ -69,6 +72,7 @@ export function StartTab({ host }: { host: HostView }) {
         accessibilityHint={`Asks for Face ID, then starts a shell on ${name}`}
         onPress={() => void start()}
       />
+      {onOpened ? <Text style={styles.note}>{`Asks for Face ID first, then starts a shell on ${name}. It keeps running until Rift opens.`}</Text> : null}
       {error ? <ErrorText>{error}</ErrorText> : null}
     </View>
   );

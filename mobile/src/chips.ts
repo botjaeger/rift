@@ -171,9 +171,9 @@ export function agoText(ms: number): string {
 export const chipRowMode = (draft: string): "chips" | "completions" => (draft === "" ? "chips" : "completions");
 
 /** The completions row when nothing matches. */
-export const NO_COMPLETIONS = "No completions · Return runs it as typed";
+export const NO_COMPLETIONS = "No completions · Run runs it as typed";
 /** The same while a program runs: the line goes to it, not to the shell. */
-export const NO_COMPLETIONS_PROGRAM = "No completions · Return sends it as typed";
+export const NO_COMPLETIONS_PROGRAM = "No completions · Send sends it as typed";
 
 /** The changed-files chip's text: `3 files +42 −7` (the counts the gateway sent for the diff). */
 export function diffChipText(d: { files: number; added: number; removed: number }): string {

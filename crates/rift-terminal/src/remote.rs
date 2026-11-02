@@ -194,6 +194,47 @@ impl ControlSource {
     }
 }
 
+impl ControlSource {
+    /// An upload saved in the uploads folder with the extension `ext`, then
+    /// the owning window pastes its path; a refused paste takes the file away
+    /// again.
+    fn deliver_upload(
+        &self,
+        pane: u64,
+        device: &str,
+        ext: &str,
+        bytes: &[u8],
+    ) -> Result<(), InputError> {
+        if is_background(pane) {
+            return Err(InputError::Unavailable(
+                "images and files go to a shell in a Rift window".into(),
+            ));
+        }
+        let Some(dir) = registry_dir().map(|d| uploads_dir(&d)) else {
+            return Err(InputError::Unavailable("no data directory".into()));
+        };
+        let now = SystemTime::now();
+        prune_uploads(&dir, now);
+        let path = save_upload(&dir, ext, bytes, now)
+            .map_err(|e| InputError::Unavailable(format!("cannot save the upload: {e}")))?;
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let req = Request::RemoteUpload {
+            pane: local_pane(pane),
+            device: device.to_string(),
+            name,
+            check: false,
+        };
+        let result = self.act(pane, &req).map(|_| ());
+        if result.is_err() {
+            let _ = std::fs::remove_file(&path);
+        }
+        result
+    }
+}
+
 impl Source for ControlSource {
     fn topology(&self) -> Vec<Window> {
         let mut owner = HashMap::new();
@@ -337,6 +378,22 @@ impl Source for ControlSource {
             Input::Command(c) => command = Some(c),
             Input::Keys(k) => keys = Some(k.into_iter().map(|k| k.name()).collect()),
             Input::Text(t) => text = Some(t),
+            Input::Paste(text) => {
+                let req = Request::RemotePaste {
+                    pane: local_pane(pane),
+                    device: device.to_string(),
+                    text,
+                };
+                return self.act(pane, &req).map(|_| ());
+            }
+            Input::Mouse { col, row } => {
+                let req = Request::RemoteMouse {
+                    pane: local_pane(pane),
+                    col,
+                    row,
+                };
+                return self.act(pane, &req).map(|_| ());
+            }
         }
         let req = Request::RemoteInput {
             pane: local_pane(pane),
@@ -346,6 +403,13 @@ impl Source for ControlSource {
             text,
         };
         self.act(pane, &req).map(|_| ())
+    }
+
+    fn clipboard(&self, since: u64) -> Option<(u64, String)> {
+        control::sockets().into_iter().find_map(|path| {
+            let r = control::request(&path, &Request::RemoteClipboard { since }).ok()?;
+            Some((r.clipboard_seq?, r.clipboard?))
+        })
     }
 
     fn scroll(&self, pane: u64, lines: i32, operate: bool) -> Result<(), InputError> {
@@ -362,8 +426,7 @@ impl Source for ControlSource {
         self.act(pane, &req).map(|_| ())
     }
 
-    /// Saved in the uploads folder under a name made here, then the owning
-    /// window pastes its path; a refused paste takes the file away again.
+    /// [`ControlSource::deliver_upload`] with the image's own extension.
     fn upload(
         &self,
         pane: u64,
@@ -371,41 +434,26 @@ impl Source for ControlSource {
         kind: rift_remote::ImageKind,
         bytes: &[u8],
     ) -> Result<(), InputError> {
-        if is_background(pane) {
-            return Err(InputError::Unavailable(
-                "images go to a shell in a Rift window".into(),
-            ));
-        }
-        let Some(dir) = registry_dir().map(|d| uploads_dir(&d)) else {
-            return Err(InputError::Unavailable("no data directory".into()));
-        };
-        let now = SystemTime::now();
-        prune_uploads(&dir, now);
-        let path = save_upload(&dir, kind, bytes, now)
-            .map_err(|e| InputError::Unavailable(format!("cannot save the image: {e}")))?;
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let req = Request::RemoteUpload {
-            pane: local_pane(pane),
-            device: device.to_string(),
-            name,
-            check: false,
-        };
-        let result = self.act(pane, &req).map(|_| ());
-        if result.is_err() {
-            let _ = std::fs::remove_file(&path);
-        }
-        result
+        self.deliver_upload(pane, device, kind.extension(), bytes)
     }
 
-    /// The window says whether `pane` takes an image now (`busy` at its
-    /// prompt), before the rest of the upload arrives.
+    /// As [`Source::upload`]; nothing runs the file, only its path is pasted.
+    fn upload_file(
+        &self,
+        pane: u64,
+        device: &str,
+        ext: &str,
+        bytes: &[u8],
+    ) -> Result<(), InputError> {
+        self.deliver_upload(pane, device, ext, bytes)
+    }
+
+    /// The window says whether `pane` takes an image or file now (`busy` at
+    /// its prompt), before the rest of the upload arrives.
     fn upload_ready(&self, pane: u64) -> Result<(), InputError> {
         if is_background(pane) {
             return Err(InputError::Unavailable(
-                "images go to a shell in a Rift window".into(),
+                "images and files go to a shell in a Rift window".into(),
             ));
         }
         let req = Request::RemoteUpload {
@@ -774,6 +822,23 @@ pub const LINE_HAS_TEXT: &str = "the command line has text; send the command wit
 /// A window's `remote-scroll` error when the wheel would reach the program
 /// and the device may only view (the gateway's `forbidden`).
 pub const SCROLL_VIEW_ONLY: &str = "view only: the wheel goes to the program";
+/// `remote-paste` of several lines to a program without bracketed paste:
+/// each line break would press Enter. The phone sends the lines another way.
+pub const PASTE_ONE_LINE: &str = "the program takes one line at a time";
+/// A focused window untouched this long counts as left alone: a phone may size
+/// its panes (someone may have walked off with Rift in front).
+pub const WINDOW_IN_USE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Whether someone is at the window: it has focus and was touched lately.
+pub fn window_in_use(focused: bool, untouched: std::time::Duration) -> bool {
+    focused && untouched < WINDOW_IN_USE
+}
+
+/// `remote-mouse` to a program that does not track the mouse.
+pub const NOT_TRACKING: &str = "the program does not track the mouse";
+
+/// `remote-mouse` to a pane whose phone is shown a capture at its own size.
+pub const TAP_ON_CAPTURE: &str = "the window in use keeps its size: a tap has no cell to land on";
 
 /// A window's `remote-input` error as the gateway's.
 fn input_error(msg: &str) -> InputError {
@@ -859,13 +924,13 @@ pub(crate) fn registry_dir() -> Option<PathBuf> {
     rift_core::shell_integration::data_dir().map(|d| registry::remote_dir(&d))
 }
 
-/// Images pasted from phones (`upload`): `<registry dir>/uploads`, 0700,
+/// Images and files pasted from phones (`upload`): `<registry dir>/uploads`, 0700,
 /// each file 0600 and named by the gateway ([`save_upload`]).
 pub(crate) fn uploads_dir(registry_dir: &Path) -> PathBuf {
     registry_dir.join("uploads")
 }
 
-/// How long a pasted image is kept: the program it was pasted into reads
+/// How long a pasted image or file is kept: the program it was pasted into reads
 /// it when the path arrives; the next upload, or the gateway's next start,
 /// removes older ones.
 const UPLOAD_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
@@ -873,18 +938,19 @@ const UPLOAD_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 /// What every uploaded file's name starts with.
 const UPLOAD_PREFIX: &str = "rift-paste-";
 
-/// A name [`save_upload`] makes: `rift-paste-<unix ms>-<8 hex>.png|jpg`, and
-/// nothing else (no path, no other characters).
+/// A name [`save_upload`] makes: `rift-paste-<unix ms>-<8 hex>.<ext>`
+/// ([`rift_remote::valid_upload_ext`]), and nothing else (no path, no other
+/// characters).
 fn valid_upload_name(name: &str) -> bool {
     let Some(rest) = name.strip_prefix(UPLOAD_PREFIX) else {
         return false;
     };
-    let Some(stem) = rest
-        .strip_suffix(".png")
-        .or_else(|| rest.strip_suffix(".jpg"))
-    else {
+    let Some((stem, ext)) = rest.rsplit_once('.') else {
         return false;
     };
+    if !rift_remote::valid_upload_ext(ext) {
+        return false;
+    }
     let Some((ms, tag)) = stem.split_once('-') else {
         return false;
     };
@@ -897,16 +963,15 @@ fn valid_upload_name(name: &str) -> bool {
 
 /// Write `bytes` (validated by the gateway) as a new file in `dir` (made
 /// 0700 when missing), 0600, under a name made here: never one a phone
-/// chose. Returns its path. `dir` must be a folder itself, never a link to
-/// one (an image is never written, nor a mode changed, through a link).
-fn save_upload(
-    dir: &Path,
-    kind: rift_remote::ImageKind,
-    bytes: &[u8],
-    now: SystemTime,
-) -> std::io::Result<PathBuf> {
+/// chose, never executable. Returns its path. `dir` must be a folder itself,
+/// never a link to one (nothing is written, nor a mode changed, through a
+/// link).
+fn save_upload(dir: &Path, ext: &str, bytes: &[u8], now: SystemTime) -> std::io::Result<PathBuf> {
     use std::io::Write as _;
     use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
+    if !rift_remote::valid_upload_ext(ext) {
+        return Err(std::io::Error::other("not an extension Rift saves"));
+    }
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
@@ -924,7 +989,7 @@ fn save_upload(
         .map_or(0, |d| d.as_millis());
     let tag: [u8; 4] = rift_remote::transport::random_bytes()?;
     let tag: String = tag.iter().map(|b| format!("{b:02x}")).collect();
-    let path = dir.join(format!("{UPLOAD_PREFIX}{ms}-{tag}.{}", kind.extension()));
+    let path = dir.join(format!("{UPLOAD_PREFIX}{ms}-{tag}.{ext}"));
     let mut f = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -1661,8 +1726,13 @@ pub fn typed_toast(device: &str) -> String {
 
 /// The desktop's toast for a phone's pasted image: `<device> pasted an
 /// image`.
-pub fn pasted_toast(device: &str) -> String {
-    format!("{} pasted an image", shown(device, TOAST_DEVICE))
+pub fn pasted_toast(device: &str, name: &str) -> String {
+    let what = if name.ends_with(".png") || name.ends_with(".jpg") {
+        "an image"
+    } else {
+        "a file"
+    };
+    format!("{} pasted {what}", shown(device, TOAST_DEVICE))
 }
 
 /// Start a managed gateway for this user (`<this exe> remote --managed`,
@@ -1688,6 +1758,14 @@ pub fn spawn_managed(dir: &Path) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_window_is_in_use_only_with_focus_and_a_recent_touch() {
+        use std::time::Duration;
+        assert!(window_in_use(true, Duration::from_secs(5)));
+        assert!(!window_in_use(true, WINDOW_IN_USE));
+        assert!(!window_in_use(false, Duration::ZERO));
+    }
+
     use super::*;
 
     #[test]
@@ -1870,7 +1948,9 @@ mod tests {
         assert_eq!(opened_toast("phone", OpenKind::Tab), "phone opened a tab");
         assert_eq!(opened_toast("phone", OpenKind::Pane), "phone opened a pane");
         assert_eq!(closed_toast("phone", CloseKind::Tab), "phone closed a tab");
-        assert_eq!(pasted_toast("phone\n"), "phone pasted an image");
+        assert_eq!(pasted_toast("phone\n", "a.png"), "phone pasted an image");
+        assert_eq!(pasted_toast("phone", "a.jpg"), "phone pasted an image");
+        assert_eq!(pasted_toast("phone", "a.txt"), "phone pasted a file");
     }
 
     #[test]
@@ -1881,8 +1961,14 @@ mod tests {
         let dir = uploads_dir(&root);
         let now = SystemTime::now();
         let png = b"\x89PNG\r\n\x1a\nrest";
-        let a = save_upload(&dir, rift_remote::ImageKind::Png, png, now).unwrap();
-        let b = save_upload(&dir, rift_remote::ImageKind::Jpeg, b"\xff\xd8\xff", now).unwrap();
+        let a = save_upload(&dir, rift_remote::ImageKind::Png.extension(), png, now).unwrap();
+        let b = save_upload(
+            &dir,
+            rift_remote::ImageKind::Jpeg.extension(),
+            b"\xff\xd8\xff",
+            now,
+        )
+        .unwrap();
         assert_ne!(a, b, "two uploads in one millisecond get two names");
         assert_eq!(std::fs::read(&a).unwrap(), png);
         let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
@@ -1899,7 +1985,11 @@ mod tests {
         for bad in [
             "../remote/gateway.key",
             "rift-paste-1-0000000g.png",
-            "rift-paste-1-00000000.svg",
+            "rift-paste-1-00000000",
+            "rift-paste-1-00000000.",
+            "rift-paste-1-00000000.PNG",
+            "rift-paste-1-00000000.abcdefghi",
+            "rift-paste-1-00000000.a b",
             "rift-paste--00000000.png",
             "rift-paste-1-00000000.png/../x",
             "rift-paste-1-00000000.png\n",
@@ -1909,6 +1999,25 @@ mod tests {
             assert_eq!(upload_path_in(&dir, bad), None, "{bad}");
         }
         assert!(valid_upload_name("rift-paste-1760364000123-0a1b2c3d.jpg"));
+        assert!(valid_upload_name("rift-paste-1760364000123-0a1b2c3d.tar7"));
+        assert!(valid_upload_name(
+            "rift-paste-1760364000123-0a1b2c3d.abcdefgh"
+        ));
+        // a file: any bytes, 0600 and not executable whatever it is called
+        let script = save_upload(&dir, "sh", b"#!/bin/sh\nexit 7\n", now).unwrap();
+        assert_eq!(mode(&script), 0o600);
+        assert!(script.to_str().unwrap().ends_with(".sh"));
+        assert_eq!(
+            upload_path_in(&dir, script.file_name().unwrap().to_str().unwrap()),
+            Some(script.clone())
+        );
+        std::fs::remove_file(&script).unwrap();
+        // an extension that is a path never reaches the folder
+        let before = std::fs::read_dir(&dir).unwrap().count();
+        for bad in ["../x", "", "PNG", "abcdefghi", "a/b", "a b", "a.b", "é"] {
+            assert!(save_upload(&dir, bad, b"x", now).is_err(), "{bad}");
+        }
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), before);
         // a link with an upload's name is not a file the gateway saved
         let link = dir.join("rift-paste-1-00000000.png");
         std::os::unix::fs::symlink(root.join("elsewhere"), &link).unwrap();
@@ -1936,7 +2045,7 @@ mod tests {
         std::os::unix::fs::symlink(&target, &dir).unwrap();
         let now = SystemTime::now();
         let png = b"\x89PNG\r\n\x1a\nrest";
-        assert!(save_upload(&dir, rift_remote::ImageKind::Png, png, now).is_err());
+        assert!(save_upload(&dir, rift_remote::ImageKind::Png.extension(), png, now).is_err());
         // nothing written there, its mode untouched
         assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
         let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;

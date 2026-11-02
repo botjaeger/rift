@@ -1,8 +1,11 @@
 import * as Clipboard from "expo-clipboard";
 import { useFocusEffect } from "expo-router";
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import {
+  AccessibilityInfo,
   AppState,
+  Keyboard,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -14,7 +17,7 @@ import {
   type NativeSyntheticEvent,
   type TextStyle,
 } from "react-native";
-import { KeyCaptureView, type KeyCaptureHandle, type KeyEvent } from "../../modules/rift-keys";
+import { clipboardFiles, KeyCaptureView, type KeyCaptureHandle, type KeyEvent, type PastedFile } from "../../modules/rift-keys";
 import {
   applySticky,
   keyEventToAction,
@@ -43,12 +46,16 @@ import { RUN_BOLD, RUN_ITALIC, RUN_STRIKE, RUN_UNDERLINE, type ScreenRun } from 
 import { authenticate, fleet, useApp } from "@/runtime";
 import { useActionScope } from "./useActionScope";
 import { DRAG_SLOP, DragVelocity, dragLines, dragScrollsPane, Fling, ScrollCoalescer } from "@/scroll";
-import { clipboardImage, ImagePaste } from "@/upload";
-import { rowWithPaste } from "@/controlKeys";
-import { CELL_RATIO, fitFont, LINE_RATIO, rowPieces, rowSegments, screenDefaults, segmentColors, showsKeyRow, type Piece } from "@/terminal";
+import { draftKey } from "@/fleet";
+import { nativeAttached, pending, PENDING_FULL, readClipboard, type AttachRules, type Attached } from "@/pending";
+import { programSend } from "@/paneView";
+import { showsOwnCopied, textToCopy } from "@/selection";
+import { fullScreenRow, rowWithPaste } from "@/controlKeys";
+import { CELL_RATIO, textRoom, cellAt, cursorScrollY, drawnText, fitArea, fitFont, lastTextRow, ordered, selectionText, wordAt, type Cell, LINE_RATIO, rowPieces, rowSegments, screenDefaults, segmentColors, showsKeyRow, type Piece } from "@/terminal";
 import { ControlRow, NO_STICKY, type Sticky } from "./ControlRow";
 import { ScreenSkeleton } from "./PaneLoading";
 import { useOpenShell } from "./useOpenShell";
+import { Icon } from "./Icon";
 import { ErrorText, WarningText } from "./Notice";
 import { colors, mono, monoBold, ui } from "./theme";
 
@@ -62,6 +69,14 @@ function decoration(flags: number): TextStyle["textDecorationLine"] {
   const s = (flags & RUN_STRIKE) !== 0;
   return u && s ? "underline line-through" : u ? "underline" : s ? "line-through" : undefined;
 }
+
+/** A selection handle's diameter, and how close a finger must come to take it. */
+const HANDLE = 14;
+const HANDLE_REACH = 32;
+/** Hold this long, still, and a touch starts a selection. */
+const SELECT_HOLD_MS = 450;
+/** How long the zoom controls stay after a pinch. */
+const ZOOM_SHOWN_MS = 2500;
 
 /** Within this many points of the end counts as "at the bottom": the screen follows its end. */
 const BOTTOM_SLOP = 24;
@@ -97,12 +112,12 @@ function PieceView({
   return (
     <View style={{ position: "absolute", left, top: 0, width, height: lineHeight, backgroundColor }}>
       <Text
-        style={[styles.cell, text, piece.wide ? { width, textAlign: "center" } : { width: width + 4, maxWidth: width + 4 }]}
+        style={[styles.cell, text, piece.wide ? { width, textAlign: "center" } : { width: textRoom(width), maxWidth: textRoom(width) }]}
         numberOfLines={1}
         ellipsizeMode="clip"
         allowFontScaling={false}
       >
-        {piece.text}
+        {drawnText(piece.text)}
       </Text>
     </View>
   );
@@ -155,6 +170,24 @@ const Row = memo(function Row({
   );
 });
 
+/** The selected cells' ground and a handle at each end: drawn only, the view's touches move them. */
+function SelectionMarks({ a, b, cols, cell, rowHeight }: { a: Cell; b: Cell; cols: number; cell: number; rowHeight: number }) {
+  const [from, to] = ordered(a, b);
+  const bands = [];
+  for (let r = from.row; r <= to.row; r++) {
+    const left = r === from.row ? from.col : 0;
+    const right = r === to.row ? to.col : cols - 1;
+    bands.push(<View key={r} style={[styles.band, { top: r * rowHeight, height: rowHeight, left: left * cell, width: (right - left + 1) * cell }]} />);
+  }
+  return (
+    <View pointerEvents="none" style={StyleSheet.absoluteFill} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
+      {bands}
+      <View style={[styles.handle, { left: from.col * cell - HANDLE / 2, top: from.row * rowHeight - HANDLE / 2 }]} />
+      <View style={[styles.handle, { left: (to.col + 1) * cell - HANDLE / 2, top: (to.row + 1) * rowHeight - HANDLE / 2 }]} />
+    </View>
+  );
+}
+
 /**
  * The screen as monospace rows, fitted to the width (7 to 14 pt) and scaled by the pinch zoom
  * (60 to 200 %), scrolling sideways when wider. `fitted`: the computer sizes the program to the
@@ -165,12 +198,18 @@ function Grid({
   zoom,
   fitted,
   onRowHeight,
+  rowsRef,
+  selection,
 }: {
   screen: ScreenState;
   zoom: number;
   fitted: boolean;
-  /** Told each row's height in points (a drag's lines are counted in it). */
-  onRowHeight?: (height: number) => void;
+  /** Told each row's height and each cell's width in points (a drag's lines, a touch's cell). */
+  onRowHeight?: (height: number, cell: number) => void;
+  /** The rows' view, to turn a touch into a cell. */
+  rowsRef?: RefObject<View | null>;
+  /** The cells selected, in any order; drawn over the rows with a handle at each end. */
+  selection?: { a: Cell; b: Cell } | null;
 }) {
   const [width, setWidth] = useState(0);
   const onLayout = (e: LayoutChangeEvent) => setWidth(e.nativeEvent.layout.width);
@@ -178,14 +217,14 @@ function Grid({
   const fontSize = fitted ? fitFontSize(zoom) : Math.round(fit.fontSize * zoom * 10) / 10;
   const rowHeight = Math.round(fontSize * LINE_RATIO);
   useEffect(() => {
-    onRowHeight?.(rowHeight);
-  }, [onRowHeight, rowHeight]);
+    onRowHeight?.(rowHeight, fontSize * CELL_RATIO);
+  }, [onRowHeight, rowHeight, fontSize]);
   const rowWidth = Math.ceil(screen.cols * fontSize * CELL_RATIO) + 2;
   const defaults = screenDefaults(screen, DEFAULTS);
   const scroll = fit.scroll || rowWidth > width - PADDING_X * 2;
   const [cursorRow, cursorCol] = screen.cursor ?? [-1, -1];
   const rows = (
-    <View>
+    <View ref={rowsRef} collapsable={false}>
       {screen.lines.map((runs, r) => (
         <Row
           key={r}
@@ -198,6 +237,7 @@ function Grid({
           bg={defaults.bg}
         />
       ))}
+      {selection ? <SelectionMarks a={selection.a} b={selection.b} cols={screen.cols} cell={fontSize * CELL_RATIO} rowHeight={rowHeight} /> : null}
     </View>
   );
   return (
@@ -234,6 +274,11 @@ export function TerminalView({
   canFit,
   canScroll,
   canUpload,
+  canUploadFiles,
+  canPaste,
+  canMouse,
+  keepHeight,
+  onPasted,
 }: {
   hostKey: string;
   paneId: number;
@@ -250,8 +295,18 @@ export function TerminalView({
   canFit?: boolean;
   /** A drag scrolls the pane on the computer (feature `scroll`). */
   canScroll?: boolean;
-  /** Paste sends the clipboard's image (feature `upload`). */
+  /** Paste takes the clipboard's image (feature `upload`). */
   canUpload?: boolean;
+  /** Paste takes the clipboard's file (feature `upload_files`). */
+  canUploadFiles?: boolean;
+  /** Several lines can go as one paste (feature `paste`). */
+  canPaste?: boolean;
+  /** A tap goes to a program that tracks the mouse as a click (feature `mouse`). */
+  canMouse?: boolean;
+  /** Something docked over the view (a question card): the program keeps its height, as under the keyboard. */
+  keepHeight?: boolean;
+  /** Something pasted waits in the pane's message box: show it. */
+  onPasted?: () => void;
 }) {
   const s = useApp();
   const scope = useActionScope(`${hostKey}:${paneId}`);
@@ -351,26 +406,37 @@ export function TerminalView({
   };
 
   const onRowKey = (id: string) => push({ keys: [applySticky(id, takeSticky())] });
-  // the row's Paste: an image on the clipboard (a screenshot) goes to the computer, which pastes
-  // its saved file's path into the program (Claude Code and Codex attach it); text is typed into
-  // the program as the keyboard would. One image at a time: a Paste while one goes out says so.
-  const [sendingImage, setSendingImage] = useState(false);
-  const [images] = useState(() => new ImagePaste(setSendingImage));
+  // the row's Paste, a hardware keyboard's and iOS's own paste button: nothing pasted reaches the program
+  // before Send. This screen has no message box of its own (vim, htop): what was pasted goes to the
+  // pane's, which shows under the screen until it is sent or emptied.
+  const box = draftKey(hostKey, paneId);
+  const rules: AttachRules = { atPrompt: !running, image: !!canUpload, file: !!canUploadFiles };
+  const deliver = (a: Attached) => {
+    if (a.kind === "none") return;
+    if (a.kind === "error") return setError(a.message);
+    if (a.kind === "text") {
+      if (!canType && running) return;
+      // refused here while no box is open to say why
+      const p = running ? programSend(a.text, canType, canPaste) : null;
+      if (p && !p.ok) {
+        if (p.message) setError(p.message);
+        return;
+      }
+      pending.giveText(box, a.text);
+    } else if (!pending.add(box, a.item)) return setError(PENDING_FULL);
+    setError(null);
+    onPasted?.();
+  };
   const onPaste = async () => {
     const current = scope.capture();
-    if (canUpload) {
-      const out = await images.paste(
-        () => clipboardImage(Clipboard),
-        (b64) => fleet.uploadImage(hostKey, paneId, b64),
-      );
-      if (!current()) return;
-      if (out.kind === "sending") return setError("An image is still going to the computer.");
-      if (out.kind === "error") return setError(out.message);
-      if (out.kind === "sent") return setError(null);
-    }
-    if (!canType) return;
-    const text = await Clipboard.getStringAsync();
-    if (current() && text) push(...textToActions(text));
+    const a = await readClipboard(Clipboard, clipboardFiles, rules);
+    if (current()) deliver(a);
+  };
+  // what iOS's own paste button read, with no prompt: no reading here
+  const systemPaste = {
+    onText: (text: string) => deliver(nativeAttached({ text }, rules)),
+    onImage: (image: string) => deliver(nativeAttached({ image }, rules)),
+    onFile: (file: PastedFile) => deliver(nativeAttached({ file }, rules)),
   };
   const onOpen = useOpenShell(hostKey, paneId, setError);
 
@@ -382,12 +448,22 @@ export function TerminalView({
   const scroller = useRef<ScrollView>(null);
   const stick = useRef(true);
   const toEnd = () => {
-    if (!stick.current) return;
-    scroller.current?.scrollToEnd({ animated: false });
+    const go = () => {
+      if (!stick.current) return;
+      // under a question card: the program kept its height, so its last text, not its blank rows
+      if (keepHeight && screen) {
+        const y = (lastTextRow(screen.lines) + 1) * rowHeight.current + PADDING - local.current.viewH;
+        scroller.current?.scrollTo({ y: Math.max(0, y), animated: false });
+      } else {
+        // the keyboard is up over a tall screen: the cursor stays in sight, not the blank rows at the end
+        const y = keepHeight ? null : cursorScrollY(screen?.cursor?.[0], rowHeight.current, PADDING, local.current.viewH);
+        if (y !== null) scroller.current?.scrollTo({ y, animated: false });
+        else scroller.current?.scrollToEnd({ animated: false });
+      }
+    };
+    go();
     // again once the layout (and the keyboard's animation) has settled
-    setTimeout(() => {
-      if (stick.current) scroller.current?.scrollToEnd({ animated: false });
-    }, 350);
+    setTimeout(go, 350);
   };
   const onScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
@@ -408,8 +484,10 @@ export function TerminalView({
     local.current.y = e.nativeEvent.contentOffset.y;
   };
   const rowHeight = useRef(16);
-  const onRowHeight = useCallback((h: number) => {
+  const cellWidth = useRef(16 / LINE_RATIO * CELL_RATIO);
+  const onRowHeight = useCallback((h: number, cell: number) => {
     rowHeight.current = h;
+    cellWidth.current = cell;
   }, []);
   const remote = useRef<ScrollCoalescer | null>(null);
   const scrollGeneration = useRef(0);
@@ -460,6 +538,105 @@ export function TerminalView({
       stop();
     };
   }, [hostKey, paneId, online, canScroll]));
+  // Hold a finger still on the screen to select: the screen stands still while a selection is up
+  // (what the program draws meanwhile waits), a handle follows the finger. Selecting copies: the hold
+  // copies the word, lifting a handle copies the range, All copies the screen; a tap copies nothing.
+  const [frozen, setFrozen] = useState<ScreenState | null>(null);
+  const [selection, setSelection] = useState<{ a: Cell; b: Cell } | null>(null);
+  const [copied, setCopied] = useState(false);
+  // what the selection last put on the clipboard (null: nothing since it began)
+  const [copiedText, setCopiedText] = useState<string | null>(null);
+  const selecting = selection !== null;
+  // a program on the computer copied to this phone: the same word for it
+  const programCopy = s.hosts.find((h) => h.record.key === hostKey)?.copiedAt;
+  const seenCopy = useRef(programCopy);
+  useEffect(() => {
+    if (programCopy === seenCopy.current) return;
+    seenCopy.current = programCopy;
+    setCopied(true);
+    AccessibilityInfo.announceForAccessibility("Copied from the computer");
+    const t = setTimeout(() => setCopied(false), 1200);
+    return () => clearTimeout(t);
+  }, [programCopy]);
+  const rowsView = useRef<View | null>(null);
+  const metrics = useRef({ x: 0, y: 0 });
+  const holdTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const movingHandle = useRef<"a" | "b" | null>(null);
+  const shown = frozen ?? screen;
+  const cancelHold = () => {
+    clearTimeout(holdTimer.current);
+    holdTimer.current = undefined;
+  };
+  const endSelection = useCallback(() => {
+    setSelection(null);
+    setFrozen(null);
+    setCopiedText(null);
+    movingHandle.current = null;
+  }, []);
+  useEffect(() => () => clearTimeout(holdTimer.current), []);
+  const cellSize = () => cellWidth.current;
+  const cellOf = (pageX: number, pageY: number, s: ScreenState): Cell =>
+    cellAt(pageX - metrics.current.x, pageY - metrics.current.y, cellSize(), rowHeight.current, s.cols, s.lines.length);
+  // where the rows are on screen, then what the touch means there
+  const atRows = (then: () => void) => {
+    const view = rowsView.current;
+    if (!view) return;
+    view.measure((_x, _y, _w, _h, pageX, pageY) => {
+      metrics.current = { x: pageX, y: pageY };
+      then();
+    });
+  };
+  // where the hold selected: a finger that stays within the slop of it keeps the whole word
+  const holdAt = useRef<{ x: number; y: number } | null>(null);
+  const startSelection = (pageX: number, pageY: number) => {
+    const s = screen;
+    if (!s) return;
+    atRows(() => {
+      const [a, b] = wordAt(s.lines, cellOf(pageX, pageY, s));
+      focusOnTap.current = false;
+      tap.current = null;
+      drag.current = null;
+      setFrozen(s);
+      setSelection({ a, b });
+      movingHandle.current = "b";
+      holdAt.current = { x: pageX, y: pageY };
+      setCopied(false);
+      // the hold copies the word
+      copyRange(s, a, b, null);
+    });
+  };
+  // Selecting copies. Nothing is written for a blank range or text already on the clipboard.
+  const copyRange = (from: ScreenState, a: Cell, b: Cell, already: string | null) => {
+    const text = textToCopy(selectionText(from.lines, a, b), already);
+    if (text === null) return;
+    void Clipboard.setStringAsync(text).then(
+      () => {
+        setCopiedText(text);
+        AccessibilityInfo.announceForAccessibility("Selected and copied");
+      },
+      () => AccessibilityInfo.announceForAccessibility("Could not copy"),
+    );
+  };
+  const selectAll = () => {
+    if (!shown) return;
+    const a = { row: 0, col: 0 };
+    const b = { row: shown.lines.length - 1, col: shown.cols - 1 };
+    setSelection({ a, b });
+    copyRange(shown, a, b, copiedText);
+  };
+  // a screen reader has no hold: it copies the whole screen
+  const copyScreen = () => {
+    if (!screen) return;
+    const last = { row: screen.lines.length - 1, col: screen.cols - 1 };
+    void Clipboard.setStringAsync(selectionText(screen.lines, { row: 0, col: 0 }, last)).then(
+      () => AccessibilityInfo.announceForAccessibility("Copied"),
+      () => AccessibilityInfo.announceForAccessibility("Could not copy"),
+    );
+  };
+  const a11yCopy = {
+    accessibilityActions: [{ name: "copy", label: "Copy the screen" }],
+    onAccessibilityAction: () => copyScreen(),
+  };
   const dragMove = (x: number, y: number) => {
     const d = drag.current;
     if (!d) return;
@@ -482,10 +659,26 @@ export function TerminalView({
 
   // Pinch to zoom, double-tap to reset (the Pane board); kept for the app's run
   const [zoom, setZoomState] = useState(keptZoom.value);
+  // the controls float over the screen while a pinch changes it, and always for a screen reader
+  // (it has no pinch): they never take rows from the program
+  const [zoomShown, setZoomShown] = useState(false);
+  const [readerOn, setReaderOn] = useState(false);
+  const zoomTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => {
+    void AccessibilityInfo.isScreenReaderEnabled().then(setReaderOn);
+    const sub = AccessibilityInfo.addEventListener("screenReaderChanged", setReaderOn);
+    return () => {
+      sub.remove();
+      clearTimeout(zoomTimer.current);
+    };
+  }, []);
   const setZoom = (z: number) => {
     const c = clampZoom(z);
     keptZoom.value = c;
     setZoomState(c);
+    setZoomShown(true);
+    clearTimeout(zoomTimer.current);
+    zoomTimer.current = setTimeout(() => setZoomShown(false), ZOOM_SHOWN_MS);
   };
   const pinch = useRef<{ distance: number; zoom: number } | null>(null);
   const [pinching, setPinching] = useState(false);
@@ -493,6 +686,27 @@ export function TerminalView({
   const lastTap = useRef<number | null>(null);
   const onTouchStart = (e: GestureResponderEvent) => {
     const t = e.nativeEvent.touches;
+    cancelHold();
+    if (selecting) {
+      // a second finger or a touch away from both handles ends it; neither zooms nor scrolls
+      focusOnTap.current = false;
+      if (t.length !== 1 || !shown) return endSelection();
+      const { pageX, pageY } = t[0]!;
+      const cell = cellSize();
+      const place = (c: Cell, end: boolean) => ({
+        x: metrics.current.x + (c.col + (end ? 1 : 0)) * cell,
+        y: metrics.current.y + (c.row + (end ? 1 : 0)) * rowHeight.current,
+      });
+      const [from, to] = ordered(selection.a, selection.b);
+      const dist = (p: { x: number; y: number }) => Math.hypot(pageX - p.x, pageY - p.y);
+      const toFirst = dist(place(from, false));
+      const toLast = dist(place(to, true));
+      if (Math.min(toFirst, toLast) > HANDLE_REACH) return endSelection();
+      // the end the finger took keeps moving, the other stays
+      setSelection({ a: toFirst <= toLast ? to : from, b: toFirst <= toLast ? from : to });
+      movingHandle.current = "b";
+      return;
+    }
     // a touch stops a fling where it is; what a plain drag left waiting still goes out
     const flinging = !!fling.current?.running;
     focusOnTap.current = !flinging;
@@ -510,20 +724,46 @@ export function TerminalView({
       remote.current?.cancel();
       setPinching(true);
     } else if (t.length === 1) {
-      tap.current = { x: t[0]!.pageX, y: t[0]!.pageY, moved: false };
-      drag.current = { x: t[0]!.pageX, y: t[0]!.pageY, lastY: t[0]!.pageY, vertical: null };
+      const { pageX, pageY } = t[0]!;
+      tap.current = { x: pageX, y: pageY, moved: false };
+      drag.current = { x: pageX, y: pageY, lastY: pageY, vertical: null };
+      holdTimer.current = setTimeout(() => {
+        holdTimer.current = undefined;
+        if (tap.current && !tap.current.moved) startSelection(pageX, pageY);
+      }, SELECT_HOLD_MS);
     }
   };
   const onTouchMove = (e: GestureResponderEvent) => {
     const t = e.nativeEvent.touches;
+    if (selecting) {
+      if (movingHandle.current && t.length === 1 && shown) {
+        const at = holdAt.current;
+        if (at && Math.hypot(t[0]!.pageX - at.x, t[0]!.pageY - at.y) <= DRAG_SLOP) return;
+        holdAt.current = null;
+        const b = cellOf(t[0]!.pageX, t[0]!.pageY, shown);
+        setSelection((sel) => (sel ? { a: sel.a, b } : sel));
+      }
+      return;
+    }
     if (t.length === 2 && pinch.current) setZoom(pinchZoom(pinch.current, touchDistance(t[0]!, t[1]!)));
     else if (t.length === 1) {
-      if (tap.current && Math.hypot(t[0]!.pageX - tap.current.x, t[0]!.pageY - tap.current.y) > DRAG_SLOP) tap.current.moved = true;
+      if (tap.current && Math.hypot(t[0]!.pageX - tap.current.x, t[0]!.pageY - tap.current.y) > DRAG_SLOP) {
+        tap.current.moved = true;
+        cancelHold();
+      }
       dragMove(t[0]!.pageX, t[0]!.pageY);
     }
   };
   const onTouchEnd = (e: GestureResponderEvent) => {
     const left = e.nativeEvent.touches.length;
+    cancelHold();
+    if (selecting) {
+      // lifting a handle copies the range it left (a drag copies nothing on the way)
+      if (left === 0 && movingHandle.current && shown) copyRange(shown, selection.a, selection.b, copiedText);
+      movingHandle.current = null;
+      holdAt.current = null;
+      return;
+    }
     if (left === 0) {
       const flicked = drag.current?.vertical === true && !pinch.current;
       drag.current = null;
@@ -540,11 +780,24 @@ export function TerminalView({
       if (isDoubleTap(lastTap.current, now)) {
         lastTap.current = null;
         setZoom(1);
-      } else lastTap.current = now;
+      } else {
+        lastTap.current = now;
+        // a program that tracks the mouse takes the tap as a click; any other says no, silently.
+        // A touch that only caught a flick clicks nothing
+        if (canMouse && screen && focusOnTap.current) {
+          const { x, y } = tap.current;
+          atRows(() => {
+            const c = cellOf(x, y, screen);
+            void fleet.sendMouse(hostKey, paneId, c.col, c.row);
+          });
+        }
+      }
     }
     if (left === 0) tap.current = null;
   };
   const onTouchCancel = () => {
+    cancelHold();
+    movingHandle.current = null;
     scrollGeneration.current++;
     fling.current?.stop();
     remote.current?.cancel();
@@ -557,10 +810,25 @@ export function TerminalView({
   };
   // The scrolling area's size, less the zoom row, is what a fitted program may fill.
   const [area, setArea] = useState({ width: 0, height: 0 });
-  const [zoomHeight, setZoomHeight] = useState(0);
+  // the keyboard only covers the program: its last rows scroll into sight, its size stays
+  const keyboardUp = useRef(false);
+  useEffect(() => {
+    const ios = Platform.OS === "ios";
+    const show = Keyboard.addListener(ios ? "keyboardWillShow" : "keyboardDidShow", () => {
+      keyboardUp.current = true;
+    });
+    const hide = Keyboard.addListener("keyboardDidHide", () => {
+      keyboardUp.current = false;
+      setArea((a) => ({ ...a }));
+    });
+    return () => {
+      show.remove();
+      hide.remove();
+    };
+  }, []);
   const onArea = (e: LayoutChangeEvent) => {
     const { width, height } = e.nativeEvent.layout;
-    setArea((a) => (a.width === width && a.height === height ? a : { width, height }));
+    setArea((a) => fitArea(a, { width, height }, keyboardUp.current || !!keepHeight || screen?.ageMs != null));
     local.current.viewH = height;
     measureLocal();
     toEnd();
@@ -573,7 +841,7 @@ export function TerminalView({
   // with the computer's pane taking the drag, the view moves only when it has more to show
   const localScroll = !pinching && (!canScroll || overflow);
   const fitting = !!canFit && operate && online;
-  const size = fitting ? fitSize(area.width - PADDING_X * 2, area.height - zoomHeight - PADDING * 2, fitFontSize(zoom)) : null;
+  const size = fitting ? fitSize(area.width - PADDING_X * 2, area.height - PADDING * 2, fitFontSize(zoom)) : null;
   const cols = size?.cols;
   const rows = size?.rows;
   // sent once the size has settled, and again while held: the computer drops a fit not refreshed
@@ -597,8 +865,7 @@ export function TerminalView({
     return () => void fleet.sendFit(hostKey, paneId, null);
   }, [held, hostKey, paneId]);
   const zoomRow = (
-    <View style={styles.zoomRow} onLayout={(e) => setZoomHeight(e.nativeEvent.layout.height)}>
-      <Text style={styles.zoomHint}>Pinch to zoom · double-tap to reset</Text>
+    <View style={styles.zoomRow}>
       <Pressable
         accessibilityRole="button"
         accessibilityLabel="Smaller text"
@@ -628,8 +895,10 @@ export function TerminalView({
     ? `Terminal screen, ${screen.cols} columns by ${screen.rows} rows${screen.alt ? ", full-screen program" : ""}${screen.stale ? ", not up to date" : ""}`
     : "Terminal screen";
 
-  const grid = screen ? (
-    <Grid screen={screen} zoom={zoom} fitted={held} onRowHeight={onRowHeight} />
+  // a desktop in use keeps its size: then the phone fits what comes to its width
+  const fittedHere = held && (shown?.cols ?? 0) <= (cols ?? 0);
+  const grid = shown ? (
+    <Grid screen={shown} zoom={zoom} fitted={fittedHere} onRowHeight={onRowHeight} rowsRef={rowsView} selection={selection} />
   ) : (
     // the pane's steps card (PaneLoading) says what is awaited; these are the rows to come
     <ScreenSkeleton />
@@ -637,6 +906,14 @@ export function TerminalView({
 
   return (
     <View style={[styles.fill, { backgroundColor: screenDefaults(screen, DEFAULTS).bg }]}>
+      {/* above the screen, not over its first row; the program keeps its size meanwhile (onArea) */}
+      {screen?.ageMs != null ? (
+        <View style={styles.age} accessibilityLiveRegion="polite">
+          <Text style={styles.ageText}>{`Updated ${Math.round(screen.ageMs / 1000)} s ago`}</Text>
+        </View>
+      ) : null}
+      {/* the floating controls belong to the screen: over it, never under the key bar */}
+      <View style={styles.fill}>
       <View style={styles.fill} onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd} onTouchCancel={onTouchCancel}>
         {typing ? (
           // the label stays on the ScrollView: on the capture view TalkBack would read the
@@ -647,10 +924,10 @@ export function TerminalView({
             onText={(e) => typed(e.text)}
             onKey={onKey}
             onFocusChange={setFocused}
+            onPaste={() => void onPaste()}
             style={styles.fill}
           >
-            <ScrollView ref={scroller} style={styles.fill} accessibilityLabel={label} scrollEnabled={localScroll} bounces={!canScroll} onLayout={onArea} onScroll={trackLocal} scrollEventThrottle={16} onScrollEndDrag={onScroll} onMomentumScrollEnd={onScroll} onContentSizeChange={onContent}>
-              {screen ? zoomRow : null}
+            <ScrollView ref={scroller} style={styles.fill} accessibilityLabel={label} {...a11yCopy} scrollEnabled={localScroll && !selecting} bounces={!canScroll} onLayout={onArea} onScroll={trackLocal} scrollEventThrottle={16} onScrollEndDrag={onScroll} onMomentumScrollEnd={onScroll} onContentSizeChange={onContent}>
               {/* not one element for screen readers: they read the rows */}
               <Pressable onPress={() => { if (focusOnTap.current) capture.current?.focus(); }} accessible={false}>
                 {grid}
@@ -658,11 +935,29 @@ export function TerminalView({
             </ScrollView>
           </KeyCaptureView>
         ) : (
-          <ScrollView ref={scroller} style={styles.fill} accessibilityLabel={label} scrollEnabled={localScroll} bounces={!canScroll} onLayout={onArea} onScroll={trackLocal} scrollEventThrottle={16} onScrollEndDrag={onScroll} onMomentumScrollEnd={onScroll} onContentSizeChange={onContent}>
-            {screen ? zoomRow : null}
+          <ScrollView ref={scroller} style={styles.fill} accessibilityLabel={label} {...a11yCopy} scrollEnabled={localScroll && !selecting} bounces={!canScroll} onLayout={onArea} onScroll={trackLocal} scrollEventThrottle={16} onScrollEndDrag={onScroll} onMomentumScrollEnd={onScroll} onContentSizeChange={onContent}>
             {grid}
           </ScrollView>
         )}
+      </View>
+      {screen && (zoomShown || readerOn) && !selecting ? zoomRow : null}
+      {selecting ? (
+        <View style={[styles.selectBar, selection.a.row < shown!.lines.length / 2 && selection.b.row < shown!.lines.length / 2 && styles.selectBarLow]} accessibilityRole="toolbar" accessibilityLabel="Selection">
+          {copiedText !== null && copiedText === selectionText(shown!.lines, selection.a, selection.b) && showsOwnCopied(Platform.OS, Platform.Version) ? (
+            <Text style={styles.selectKeyText} accessibilityLiveRegion="polite">Copied</Text>
+          ) : null}
+          <Pressable accessibilityRole="button" accessibilityLabel="Select the whole screen" onPress={selectAll} hitSlop={6} style={({ pressed }) => [styles.selectKey, pressed && styles.pressed]}>
+            <Text style={styles.selectKeyText}>All</Text>
+          </Pressable>
+          <Pressable accessibilityRole="button" accessibilityLabel="Cancel the selection" onPress={endSelection} hitSlop={6} style={({ pressed }) => [styles.selectKey, pressed && styles.pressed]}>
+            <Icon name="close" size={16} color={colors.text} />
+          </Pressable>
+        </View>
+      ) : copied ? (
+        <View style={styles.selectBar} pointerEvents="none">
+          <Text style={styles.selectKeyText}>Copied</Text>
+        </View>
+      ) : null}
       </View>
       {/* without the key bar (the message input below, or view only), a refused scroll or paste says why here */}
       {error && (bare || !operate) ? <ErrorText style={styles.bareError}>{error}</ErrorText> : null}
@@ -672,11 +967,6 @@ export function TerminalView({
             <WarningText>This pane is at its prompt: typed text goes to programs only.</WarningText>
           ) : null}
           {error ? <ErrorText>{error}</ErrorText> : null}
-          {sendingImage ? (
-            <Text style={styles.oldRift} accessibilityLiveRegion="polite">
-              Sending the image to the computer…
-            </Text>
-          ) : null}
           {!canType ? (
             <Text style={styles.oldRift}>This computer's Rift takes keys from the row only; update it to type here.</Text>
           ) : null}
@@ -684,13 +974,14 @@ export function TerminalView({
           {showsKeyRow(s.settings.showKeys, true) ? (
             <ControlRow
               // a screenshot for the program needs Paste: on the row whatever Settings › Keys holds
-              ids={rowWithPaste(s.settings.controlKeys, !!canUpload)}
+              ids={rowWithPaste(fullScreenRow(s.settings.controlKeys), !!canUpload)}
               sticky={sticky}
               disabled={!online}
               onSticky={setSticky}
               onKey={onRowKey}
               onOpen={onOpen}
               onPaste={canType || canUpload ? () => void onPaste() : undefined}
+              systemPaste={canUpload ? systemPaste : undefined}
               // the last key: hide the keyboard, or open it (a tap on the screen opens it too)
               onHideKeyboard={typing && focused ? () => capture.current?.blur() : undefined}
               onShowKeyboard={typing && !focused ? () => capture.current?.focus() : undefined}
@@ -732,12 +1023,21 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   // the Pane board's zoom row: the hint, − and + 32 pt, the percentage between
-  zoomRow: { flexDirection: "row", alignItems: "center", gap: 8, paddingTop: 10, paddingHorizontal: 12, paddingBottom: 2 },
-  zoomHint: { flex: 1, fontFamily: ui(400), color: colors.textMuted, fontSize: 12 },
+  zoomRow: { position: "absolute", top: 8, right: 8, flexDirection: "row", alignItems: "center", gap: 8, padding: 6, borderRadius: 22, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.glassRim, elevation: 8 },
   zoomButton: { width: 32, height: 32, borderRadius: 16, borderWidth: 1, borderColor: colors.borderStrong, alignItems: "center", justifyContent: "center" },
   zoomGlyph: { fontFamily: ui(400), color: colors.text, fontSize: 16 },
   zoomValue: { fontFamily: mono, color: colors.text, fontSize: 12, minWidth: 44, textAlign: "center" },
-  oldRift: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12 },
+  oldRift: { fontFamily: ui(400), color: colors.textDim, fontSize: 12 },
+  // a selection's ground and its handles; the bar floats over the top of the screen
+  age: { paddingHorizontal: 12, paddingVertical: 4, backgroundColor: colors.chrome },
+  ageText: { fontFamily: ui(500), color: colors.textMuted, fontSize: 12 },
+  band: { position: "absolute", backgroundColor: `${colors.accent}55` },
+  handle: { position: "absolute", width: HANDLE, height: HANDLE, borderRadius: HANDLE / 2, backgroundColor: colors.accent, borderWidth: 2, borderColor: colors.bg },
+  selectBar: { position: "absolute", top: 8, alignSelf: "center", flexDirection: "row", alignItems: "center", gap: 8, padding: 6, borderRadius: 22, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.glassRim, elevation: 8 },
+  // a selection in the top half keeps its text in sight: the bar goes to the bottom
+  selectBarLow: { top: undefined, bottom: 8 },
+  selectKey: { minWidth: 36, height: 36, paddingHorizontal: 10, borderRadius: 18, alignItems: "center", justifyContent: "center" },
+  selectKeyText: { fontFamily: ui(500), color: colors.text, fontSize: 14 },
   bareError: { paddingHorizontal: 12, paddingVertical: 6, backgroundColor: colors.chrome },
   // a block's rule: 2 px in the 6 pt gutter left of the row
   rule: { position: "absolute", left: -4, top: 0, width: 2 },

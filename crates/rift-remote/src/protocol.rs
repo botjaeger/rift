@@ -242,6 +242,29 @@ pub enum ClientMsg {
         size: u64,
         offset: u64,
         data: String,
+        /// With it (feature `upload_files`): a file of any bytes, saved with
+        /// this extension (1 to 8 of `a-z0-9`; the same on every chunk).
+        /// Without it: an image, its type told by its first bytes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ext: Option<String>,
+    },
+    /// Text pasted into the program running in `pane` as one paste (feature
+    /// `paste`): bracketed when the program asked for that, so its line
+    /// breaks submit nothing. Refused when the text has line breaks and the
+    /// program takes no bracketed paste.
+    Paste {
+        id: String,
+        pane: u64,
+        text: String,
+    },
+    /// A left click at a cell of `pane`'s screen, 0-based (feature `mouse`):
+    /// a press and a release to a program that tracks the mouse; refused for
+    /// any other.
+    Mouse {
+        id: String,
+        pane: u64,
+        col: u16,
+        row: u16,
     },
 }
 
@@ -431,6 +454,11 @@ pub enum ServerMsg {
     Pong {
         n: u64,
     },
+    /// A program in a pane copied this (OSC 52), with the desktop's
+    /// `remote_clipboard` on (feature `clipboard`). `operate` devices only.
+    Clipboard {
+        text: String,
+    },
     Error {
         code: ErrorCode,
         message: String,
@@ -456,6 +484,9 @@ pub enum ServerMsg {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         rules: Vec<(u16, String)>,
         lines: Vec<(u16, Vec<Run>)>,
+        /// A capture the pane's output has moved on from, by this much.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        age_ms: Option<u64>,
     },
     /// Screens of `pane` stopped (left the alternate screen in `auto`, or
     /// `off`).
@@ -934,7 +965,7 @@ mod tests {
     #[test]
     fn every_client_fixture_round_trips() {
         let all = fixtures("client");
-        assert_eq!(all.len(), 35, "client fixtures");
+        assert_eq!(all.len(), 38, "client fixtures");
         for (name, value) in all {
             let msg: ClientMsg =
                 serde_json::from_value(value.clone()).unwrap_or_else(|e| panic!("{name}: {e}"));
@@ -945,7 +976,7 @@ mod tests {
     #[test]
     fn every_server_fixture_round_trips() {
         let all = fixtures("server");
-        assert_eq!(all.len(), 30, "server fixtures");
+        assert_eq!(all.len(), 32, "server fixtures");
         for (name, value) in all {
             let msg: ServerMsg =
                 serde_json::from_value(value.clone()).unwrap_or_else(|e| panic!("{name}: {e}"));

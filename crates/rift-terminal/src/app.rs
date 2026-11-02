@@ -686,6 +686,9 @@ pub struct App {
     /// The window being served: events, drawing and commands act on it.
     /// The others wait in `parked` (`App::enter_window` swaps one in).
     win: Box<WindowState>,
+    /// The newest thing a program copied (OSC 52) for phones, numbered
+    /// (`remote_clipboard`).
+    phone_copy: Option<(u64, String)>,
     /// Every other window (in-process, one per ⌘N or restored window).
     parked: Vec<Box<WindowState>>,
     /// Every window's id in the order they were opened (the session file
@@ -1118,6 +1121,8 @@ struct WindowState {
     /// Since when the modifiers of `tab_select_1` (⌘) are held alone with no
     /// key pressed: after `HINT_DELAY` the tabs show their numbers.
     hint_hold: Option<Instant>,
+    /// When someone last typed, clicked or scrolled here.
+    used_at: Instant,
     /// A key was pressed while they are held: no numbers until released.
     hint_spoiled: bool,
     /// The last frame drew the numbers.
@@ -2134,6 +2139,7 @@ impl WindowState {
             rail_dump: Vec::new(),
             strip_dump: Vec::new(),
             hint_hold: None,
+            used_at: Instant::now(),
             hint_spoiled: false,
             hints_drawn: false,
             filter_editing: false,
@@ -2237,6 +2243,7 @@ impl App {
             results_worker: Default::default(),
             control_server: None,
             attention: Vec::new(),
+            phone_copy: None,
             next_attention_id: 0,
             test_alerts: Default::default(),
             attention_seen: Default::default(),
@@ -15818,6 +15825,7 @@ impl App {
         window: &Window,
     ) {
         if !event.released {
+            self.note_window_used();
             self.hide_tooltip(window);
             // any key but ⇧⌘I itself puts the inspector's card away
             let inspect = input::app_action(event, self.win.modifiers, &self.keymap)
@@ -16729,6 +16737,7 @@ impl App {
     }
 
     pub(crate) fn on_right_press(&mut self, window: &Window) {
+        self.note_window_used();
         self.hide_tooltip(window);
         if self.win.chip_menu.take().is_some() {
             window.request_redraw();
@@ -16909,6 +16918,9 @@ impl App {
         event_loop: &ActiveEventLoop,
         window: &Window,
     ) {
+        if state == ElementState::Pressed {
+            self.note_window_used();
+        }
         if state == ElementState::Pressed && self.press_tip_card(window) {
             return;
         }
@@ -18308,6 +18320,7 @@ impl App {
     }
 
     pub(crate) fn on_wheel(&mut self, delta: MouseScrollDelta, window: &Window) {
+        self.note_window_used();
         self.hide_tooltip(window);
         // the modal holds still; nothing scrolls under it
         if self.win.prompt_editor.is_some() || self.win.toolbar_editor.is_some() {
@@ -18781,6 +18794,9 @@ impl App {
 
     /// Right/middle button release (press routing lives in on_right_press).
     pub(crate) fn on_other_button(&mut self, button: u8, pressed: bool, window: &Window) {
+        if pressed {
+            self.note_window_used();
+        }
         let overlay = self.modal_open() || self.win.settings.open || self.win.context_menu.open;
         if pressed && overlay {
             return;
@@ -19586,6 +19602,10 @@ impl App {
             }
             Step::Focus(f) => {
                 self.win.focused = f;
+                if f {
+                    self.win.used_at = Instant::now();
+                }
+                self.pause_fits();
                 self.hotkey_window_focus(f);
                 self.sync_focus();
             }
@@ -19758,7 +19778,12 @@ impl App {
         let mut r = terminal::remote_running(&p.session)?;
         // a reattached agent's job is its version ("2.1.296"): its title
         // still carries the agent's mark
-        let marked = agent_title_idle(&p.title) || agent_title_working(&p.title);
+        // (and only then: an agent that quit leaves its title behind for the
+        // next command, which must not read as the agent)
+        let marked = (agent_title_idle(&p.title) || agent_title_working(&p.title))
+            && rift_core::notifications::job_may_be_reattached_agent(
+                p.session.foreground_job_name().as_deref(),
+            );
         if Self::pane_agent(p).is_some() || marked {
             let title = rift_core::notifications::agent_session_title(&p.title);
             r.title = (!title.is_empty()).then(|| title.to_string());
@@ -20136,13 +20161,18 @@ impl App {
                         let theme = p.theme.as_ref().map_or(&theme, |(_, t)| t);
                         // the phones' own view as their `scroll` left it,
                         // never the desktop's
-                        let (generation, screen) = terminal::remote_screen(
-                            &p.session,
-                            theme,
-                            force,
-                            since,
-                            &mut p.remote_view,
-                        );
+                        let captured = p.capture_size().and_then(|size| {
+                            terminal::captured_screen(&p.session, theme, size, since)
+                        });
+                        let (generation, screen) = captured.unwrap_or_else(|| {
+                            terminal::remote_screen(
+                                &p.session,
+                                theme,
+                                force,
+                                since,
+                                &mut p.remote_view,
+                            )
+                        });
                         Response {
                             ok: true,
                             pane: Some(pane),
@@ -20259,6 +20289,20 @@ impl App {
                 keys,
                 text,
             } => self.remote_input(pane, &device, command, keys, text),
+            Request::RemotePaste { pane, device, text } => self.remote_paste(pane, &device, &text),
+            Request::RemoteMouse { pane, col, row } => self.remote_mouse(pane, col, row),
+            Request::RemoteClipboard { since } => {
+                let copy = self
+                    .phone_copy
+                    .as_ref()
+                    .filter(|(seq, _)| self.config.remote_clipboard && *seq > since);
+                Response {
+                    ok: true,
+                    clipboard_seq: copy.map(|(seq, _)| *seq),
+                    clipboard: copy.map(|(_, text)| text.clone()),
+                    ..Default::default()
+                }
+            }
             Request::RemoteScroll {
                 pane,
                 lines,
@@ -22828,6 +22872,28 @@ impl App {
         let used: Vec<u64> = self.win.tabs.iter().map(|t| t.last_used).collect();
         let _ = writeln!(out, "tab_switcher={switcher:?} tab_last_used={used:?}");
         let _ = writeln!(out, "action_runs={}", self.win.action_runs.len());
+        for tab in &self.win.tabs {
+            for p in &tab.panes {
+                if p.fit.is_some() || p.session.shadow_stats().started > 0 {
+                    let st = p.session.shadow_stats();
+                    let grid = p.session.size();
+                    let _ = writeln!(
+                        out,
+                        "capture pane={} grid={}x{} fit={:?} paused={} started={} framed={} aborted={} no_answer={} signals={}",
+                        p.session.id,
+                        grid.cols,
+                        grid.rows,
+                        p.fit.map(|(c, r, _)| (c, r)),
+                        p.fit_paused,
+                        st.started,
+                        st.framed,
+                        st.aborted,
+                        st.no_answer,
+                        st.signals,
+                    );
+                }
+            }
+        }
         if self.headless {
             let _ = writeln!(out, "clipboard_html={:?}", self.headless_clipboard_html);
         }
@@ -22917,6 +22983,11 @@ impl App {
         };
         if let Some(p) = self.win.tabs[i].pane_mut(pane) {
             p.fit = size.map(|(c, r)| (c, r, Instant::now()));
+            p.fit_paused =
+                crate::remote::window_in_use(self.win.focused, self.win.used_at.elapsed());
+            if p.fit.is_none() {
+                p.session.shadow_clear();
+            }
             // layout sizes the panes it draws; one in another tab is sized now
             if i != active {
                 p.apply_fit();
@@ -23034,6 +23105,133 @@ impl App {
         }
     }
 
+    /// Keys, clicks or the wheel reached this window: someone is at it.
+    fn note_window_used(&mut self) {
+        self.win.used_at = Instant::now();
+        self.pause_fits();
+    }
+
+    /// A window in use keeps its own size: a phone's fit waits while it has
+    /// focus and was touched lately, and applies once it is not.
+    fn pause_fits(&mut self) {
+        let in_use = crate::remote::window_in_use(self.win.focused, self.win.used_at.elapsed());
+        for tab in &mut self.win.tabs {
+            for p in &mut tab.panes {
+                if p.fit.is_some() && p.fit_paused != in_use {
+                    p.fit_paused = in_use;
+                    p.apply_fit();
+                }
+            }
+        }
+    }
+
+    /// A phone's tap: a left click at a cell of `pane`'s screen, for a
+    /// program that tracks the mouse. Any other program is refused, so the
+    /// tap does nothing there.
+    fn remote_mouse(&mut self, pane: u64, col: u16, row: u16) -> crate::control::Response {
+        use crate::control::Response;
+        use rift_pty::alacritty_terminal::grid::Dimensions;
+        use rift_pty::alacritty_terminal::term::TermMode;
+        if !self.config.remote_access {
+            return Response::error("remote access is off");
+        }
+        let Some((mode, cols, rows)) = self
+            .find_tab_of_pane(pane)
+            .and_then(|(_, t)| t.pane(pane))
+            .filter(|p| !p.session.read_only())
+            .map(|p| {
+                let term = p.session.term.lock();
+                (*term.mode(), term.columns(), term.screen_lines())
+            })
+        else {
+            return Response::error("no such pane");
+        };
+        if !self.config.mouse_reporting || !mode.intersects(TermMode::MOUSE_MODE) {
+            return Response::error(crate::remote::NOT_TRACKING);
+        }
+        // the phone sees a capture at its own size: its cells are not the
+        // program's, which runs at the window's
+        if self
+            .find_tab_of_pane(pane)
+            .and_then(|(_, t)| t.pane(pane))
+            .and_then(|p| {
+                p.capture_size()
+                    .map(|size| terminal::capture_shown(&p.session, size))
+            })
+            == Some(true)
+        {
+            return Response::error(crate::remote::TAP_ON_CAPTURE);
+        }
+        if col as usize >= cols || row as usize >= rows {
+            return Response::error("bad request: the cell is off the screen");
+        }
+        let cell = (col as usize, row as usize);
+        for pressed in [true, false] {
+            self.send_mouse_with(pane, mode, 0, pressed, false, cell, ModifiersState::empty());
+        }
+        Response {
+            ok: true,
+            pane: Some(pane),
+            ..Default::default()
+        }
+    }
+
+    /// A phone's `paste`: `text` reaches the running program as one paste,
+    /// bracketed when the program asked for that. Line breaks to a program
+    /// without bracketed paste would press Enter, so that is refused.
+    fn remote_paste(&mut self, pane: u64, device: &str, text: &str) -> crate::control::Response {
+        use crate::control::Response;
+        if !self.config.remote_access {
+            return Response::error("remote access is off");
+        }
+        let (route, bracketed) = match self.find_tab_of_pane(pane).and_then(|(_, t)| t.pane(pane)) {
+            Some(p) if p.session.read_only() => {
+                return Response::error(pane_life::READ_ONLY_TOAST.to_lowercase());
+            }
+            Some(p) => (
+                Self::remote_route(p),
+                // synced panes get it too: each must take it as a paste
+                self.raw_targets(pane).into_iter().all(|t| {
+                    self.find_tab_of_pane(t)
+                        .and_then(|(_, tab)| tab.pane(t))
+                        .is_some_and(bracketed_paste_on)
+                }),
+            ),
+            None => return Response::error("no such pane"),
+        };
+        // the gateway checked it too
+        if text.is_empty()
+            || text.len() > rift_remote::MAX_PASTE
+            || text
+                .chars()
+                .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+        {
+            return Response::error("bad request: a paste is text, line breaks and tabs");
+        }
+        if !route.takes_text() {
+            return Response::error("busy");
+        }
+        if !bracketed && input::paste_submits_lines(text) {
+            return Response::error(crate::remote::PASTE_ONE_LINE);
+        }
+        self.paste_raw(pane, text);
+        self.toast_phone(Some(pane), crate::remote::typed_toast(device));
+        if let Some(p) = self
+            .find_tab_of_pane(pane)
+            .and_then(|(_, t)| t.pane_mut(pane))
+        {
+            p.remote_view.offset = 0;
+        }
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+        Response {
+            ok: true,
+            pane: Some(pane),
+            ..Default::default()
+        }
+    }
+
     /// A phone's `scroll` of `pane` by `lines` (positive: up), as the
     /// desktop's wheel over it ([`Self::apply_wheel`]): wheel reports to a
     /// mouse-tracking program at the middle of its screen (a phone has no
@@ -23093,7 +23291,7 @@ impl App {
         }
     }
 
-    /// A phone's pasted image, which the gateway saved as `name` in the
+    /// A phone's pasted image or file, which the gateway saved as `name` in the
     /// uploads folder (`remote::upload_path`): its path is pasted into the
     /// program running in `pane` as a file dropped on the window is
     /// (shell-quoted, a space after), so Claude Code or Codex attach it.
@@ -23128,10 +23326,10 @@ impl App {
             };
         }
         let Some(path) = crate::remote::upload_path(name) else {
-            return Response::error("bad request: not an image the gateway saved");
+            return Response::error("bad request: not a file the gateway saved");
         };
         self.paste_raw(pane, &input::paths_text(&[path]));
-        self.toast_phone(Some(pane), crate::remote::pasted_toast(device));
+        self.toast_phone(Some(pane), crate::remote::pasted_toast(device, name));
         Response {
             ok: true,
             pane: Some(pane),
@@ -24906,6 +25104,38 @@ impl App {
         )
     }
 
+    /// A window in use keeps its size, so a phone's pane gets captures: the
+    /// ones due start here (each ends on its own thread). The next one due.
+    fn tick_captures(&mut self, now: Instant) -> Option<Instant> {
+        // a window left alone gives way to the phone's size
+        self.pause_fits();
+        let mut next = None;
+        if self.win.focused
+            && self
+                .win
+                .tabs
+                .iter()
+                .any(|t| t.panes.iter().any(|p| p.fit.is_some()))
+        {
+            next = Some(self.win.used_at + crate::remote::WINDOW_IN_USE).filter(|at| *at > now);
+        }
+        for tab in &self.win.tabs {
+            for p in &tab.panes {
+                let Some(size) = p.capture_size() else {
+                    continue;
+                };
+                match p.session.shadow_due(size, now) {
+                    rift_pty::ShadowDue::Now => {
+                        p.session.shadow_capture(size);
+                    }
+                    rift_pty::ShadowDue::At(due) => next = earliest(next, Some(due)),
+                    rift_pty::ShadowDue::No => {}
+                }
+            }
+        }
+        next
+    }
+
     /// The window's timed repaints (boot grace, toasts, cursor blink): a
     /// repaint when one is due, and when the others are.
     fn window_deadlines(&mut self, now: Instant) -> Vec<Instant> {
@@ -24928,6 +25158,7 @@ impl App {
                 let due = at + rift_remote::FIT_LEASE;
                 if now >= due {
                     p.fit = None;
+                    p.session.shadow_clear();
                     p.apply_fit();
                     repaint = true;
                 } else {
@@ -25262,7 +25493,9 @@ impl ApplicationHandler<UserEvent> for App {
                 self.win.focused = f;
                 if f {
                     self.note_window_focus(window_id);
+                    self.win.used_at = Instant::now();
                 }
+                self.pause_fits();
                 // the button's release goes to whatever took focus: a drag
                 // in progress ends here, keeping what it selected, or it
                 // would follow (and edge-scroll) the bare pointer
@@ -25496,6 +25729,17 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::PtyClipboard(text) => {
                 // a copy queued before clipboard_access turned off is dropped
                 if self.config.clipboard_access.trim() != "off" {
+                    if self.config.remote_clipboard && text.len() <= rift_remote::MAX_PASTE {
+                        // numbered by the clock too: a restarted Rift never reuses one
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |d| d.as_millis() as u64);
+                        let seq = self
+                            .phone_copy
+                            .as_ref()
+                            .map_or(now, |(seq, _)| now.max(seq + 1));
+                        self.phone_copy = Some((seq, text.clone()));
+                    }
                     self.copy_to_clipboard(text);
                 }
             }
@@ -25875,6 +26119,7 @@ impl ApplicationHandler<UserEvent> for App {
         // `[[actions]]` runs waiting for a new pane's prompt; ⌃Tab's order
         self.each_window(|app| {
             composer_due = earliest(composer_due, app.tick_user_actions(event_loop));
+            composer_due = earliest(composer_due, app.tick_captures(composer_now));
             app.touch_tab_mru();
         });
         select_due = earliest(select_due, composer_due);

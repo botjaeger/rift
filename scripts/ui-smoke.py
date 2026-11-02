@@ -5092,13 +5092,22 @@ on_run = remote_run("on", on_config, [
     f"wait_file {on / 'since.json'}.done 15000",
     *rin("on", "noscreen.json", '{"cmd":"screen","pane":PANE}'),
     # a phone's fit: the shell is sized to the smaller of the window's grid
-    # and the phone's; half a size is refused; the release gives it back
+    # and the phone's; half a size is refused; the release gives it back. A
+    # window in use keeps its own size until it loses focus, and takes it
+    # back on focus
+    "focus on", "wait 300",
     *rin("on", "fit.json", '{"cmd":"remote-fit","pane":PANE,"cols":40,"rows":12}'), "wait 700",
+    *rin("on", "fit-used.json", '{"cmd":"screen","pane":PANE,"force":true}'),
+    "focus off", "wait 700",
     *rin("on", "fit-screen.json", '{"cmd":"screen","pane":PANE,"force":true}'),
+    "focus on", "wait 700",
+    *rin("on", "fit-refocused.json", '{"cmd":"screen","pane":PANE,"force":true}'),
+    "focus off", "wait 300",
     *rin("on", "fit-bad.json", '{"cmd":"remote-fit","pane":PANE,"cols":40}'),
     *rin("on", "fit-off.json", '{"cmd":"remote-fit","pane":PANE,"cols":null,"rows":null}'),
     "wait 700",
     *rin("on", "fit-back.json", '{"cmd":"screen","pane":PANE,"force":true}'),
+    "focus on",
     *rin("on", "noblock.json", '{"cmd":"output","pane":PANE,"block":999999,"from":0,"limit":5}'),
     *rin("on", "keys.json",
          '{"cmd":"remote-input","pane":PANE,"device":"Test Phone","keys":["ctrl+c"]}'),
@@ -5108,6 +5117,178 @@ on_run = remote_run("on", on_config, [
     *settings_remote, f"shot {on}/settings.png", f"dump {on}/settings.txt",
     cp(rm / "off-config.toml", on / "cfg/rift/config.toml"), "wait 3500",
     f"dump {on}/stopped.txt"], timeout=120)
+
+# Two screens. While the window is in use a phone's fit never resizes the pane:
+# a full-screen program is told the phone's size for a moment and what it draws
+# goes to the phone only. draw.sh logs every size it was told. A program that
+# ignores SIGWINCH, one that never pauses and one on the primary screen get no
+# capture, and the phone gets the live frame
+cp2 = rm / "capture"
+cp2.mkdir(parents=True, exist_ok=True)
+(cp2 / "draw.sh").write_text(
+    "exec 2>/dev/null\n"
+    "trap 'printf \"\\033[?1049l\"; exit' INT\n"
+    "printf '\\033[?1049h'\n"
+    "draw() { s=$(stty size </dev/tty); echo \"$s\" >> \"$1\"; "
+    "printf '\\033[2J\\033[HSIZE %s' \"$s\"; }\n"
+    "trap 'draw \"$1\"' WINCH; draw \"$1\"\n"
+    "while :; do sleep 0.02 & wait $!; done\n")
+(cp2 / "deaf.sh").write_text(
+    "trap 'printf \"\\033[?1049l\"; exit' INT\n"
+    "trap '' WINCH\n"
+    "printf '\\033[?1049hDEAF'\n"
+    "while :; do sleep 0.05; done\n")
+(cp2 / "flood.sh").write_text(
+    "trap 'printf \"\\033[?1049l\"; exit' INT\n"
+    "printf '\\033[?1049h'\n"
+    "i=0; while :; do i=$((i+1)); printf '\\033[HFLOOD %s' $i; sleep 0.05; done\n")
+(cp2 / "plain.sh").write_text(
+    "exec 2>/dev/null\n"
+    "trap 'echo winch >> \"$1\"' WINCH\n"
+    "trap 'exit' INT\n"
+    "echo PLAIN; stty size </dev/tty\n"
+    "while :; do sleep 0.02 & wait $!; done\n")
+(cp2 / "late.sh").write_text(
+    "exec 2>/dev/null\n"
+    "trap 'printf \"\\033[?1049l\"; exit' INT\n"
+    "printf '\\033[?1049h'\n"
+    "draw() { s=$(stty size </dev/tty); printf '\\033[2J\\033[HSIZE %s' \"$s\"; }\n"
+    "trap draw WINCH; draw\n"
+    "while [ ! -e \"$1\" ]; do sleep 0.02 & wait $!; done\n"
+    "i=0; while :; do i=$((i+1)); printf '\\033[3;1HLATE %s' $i; sleep 0.05 & wait $!; done\n")
+cap_config = remote_base + "remote_access = true\n"
+cap_sizes = cp2 / "sizes.txt"
+cap_plain = cp2 / "plain-winch.txt"
+def cap_shot(name):
+    return rin("capture", name, '{"cmd":"screen","pane":PANE,"force":true}')
+def cap_line(name):
+    return next(l for l in (cp2 / name).read_text().splitlines() if l.startswith("capture pane="))
+def cap_stat(name, key):
+    return re.search(rf"\b{key}=(\S+)", cap_line(name)).group(1)
+remote_run("capture", cap_config, [
+    "focus on", "wait 200",
+    f"type sh {shlex.quote(str(cp2 / 'draw.sh'))} {shlex.quote(str(cap_sizes))}\\n", "wait 900",
+    *rin("capture", "fit.json", '{"cmd":"remote-fit","pane":PANE,"cols":40,"rows":12}'), "wait 1800",
+    *cap_shot("frame.json"), f"dump {cp2}/frame.txt",
+    # idle: no further capture, and the phone's frame stays
+    "wait 2600", f"dump {cp2}/idle.txt", *cap_shot("frame2.json"),
+    # the window's own view
+    "shot " + str(cp2 / "window.png"),
+    # a tap has no cell to land on
+    *rin("capture", "tap.json", '{"cmd":"remote-mouse","pane":PANE,"col":1,"row":1}'),
+    "key ctrl+c", "wait 500",
+    f"type sh {shlex.quote(str(cp2 / 'deaf.sh'))}\\n", "wait 900",
+    "focus on", *rin("capture", "fit2.json", '{"cmd":"remote-fit","pane":PANE,"cols":40,"rows":12}'),
+    f"dump {cp2}/deaf0.txt", "wait 3000", "focus on", f"dump {cp2}/deaf1.txt", *cap_shot("deaf.json"),
+    "wait 2500", "focus on", f"dump {cp2}/deaf2.txt",
+    "key ctrl+c", "wait 500",
+    f"dump {cp2}/flood0.txt",
+    f"type sh {shlex.quote(str(cp2 / 'flood.sh'))}\\n", "wait 300",
+    *rin("capture", "fit3.json", '{"cmd":"remote-fit","pane":PANE,"cols":40,"rows":12}'),
+    "wait 3000", "focus on", f"dump {cp2}/flood1.txt", *cap_shot("flood.json"),
+    "key ctrl+c", "wait 500",
+    f"dump {cp2}/plain0.txt",
+    f"type sh {shlex.quote(str(cp2 / 'plain.sh'))} {shlex.quote(str(cap_plain))}\\n", "wait 500",
+    *rin("capture", "fit4.json", '{"cmd":"remote-fit","pane":PANE,"cols":40,"rows":12}'),
+    "wait 2800", "focus on", f"dump {cp2}/plain1.txt", *cap_shot("plain.json"),
+    "key ctrl+c", "wait 400",
+    # a capture the output has moved on from says how far behind it is, then
+    # gives way to the live frame; meanwhile no capture is tried
+    f"type sh {shlex.quote(str(cp2 / 'late.sh'))} {shlex.quote(str(cp2 / 'go'))}\\n", "wait 900",
+    *rin("capture", "fit6.json", '{"cmd":"remote-fit","pane":PANE,"cols":40,"rows":12}'),
+    "wait 1800", f"dump {cp2}/late0.txt", *cap_shot("late0.json"),
+    f"sh touch {shlex.quote(str(cp2 / 'go'))}", "focus on", "wait 1000", *cap_shot("late1.json"),
+    "wait 3500", "focus on", *cap_shot("late2.json"),
+    "wait 7000", "focus on", *cap_shot("late3.json"), f"dump {cp2}/late3.txt",
+    "key ctrl+c", "wait 400",
+    # the window left alone: the phone's size, live; touched again: its own
+    f"type sh {shlex.quote(str(cp2 / 'draw.sh'))} {shlex.quote(str(cap_sizes))}\\n", "wait 900",
+    "focus off", *rin("capture", "fit5.json", '{"cmd":"remote-fit","pane":PANE,"cols":40,"rows":12}'),
+    "wait 700", f"dump {cp2}/away.txt", *cap_shot("away.json"),
+    "focus on", "wait 700", f"dump {cp2}/back.txt",
+])
+frame = answer(cp2, "frame.json")["screen"]
+frame_text = json.dumps(frame["lines"])
+own_grid = cap_stat("frame.txt", "grid")
+assert (frame["cols"], frame["rows"], frame["alt"]) == (40, 12, True), frame
+assert "SIZE 12 40" in frame_text, frame
+assert "age_ms" not in frame, frame
+assert cap_stat("frame.txt", "framed") == "1" and cap_stat("frame.txt", "started") == "1", cap_line("frame.txt")
+assert cap_stat("frame.txt", "signals") == "2", cap_line("frame.txt")
+assert cap_stat("frame.txt", "paused") == "true", cap_line("frame.txt")
+own_rows, own_cols = own_grid.split("x")[1], own_grid.split("x")[0]
+told = cap_sizes.read_text().split("\n")
+assert told[:3] == [f"{own_rows} {own_cols}", "12 40", f"{own_rows} {own_cols}"], told
+assert cap_stat("idle.txt", "started") == "1", cap_line("idle.txt")
+assert answer(cp2, "frame2.json")["screen"]["cols"] == 40, answer(cp2, "frame2.json")
+assert answer(cp2, "tap.json")["ok"] is False, answer(cp2, "tap.json")
+# a program that ignores SIGWINCH: tried once, the live frame, blocked
+deaf = answer(cp2, "deaf.json")["screen"]
+assert str(deaf["cols"]) == own_cols and "DEAF" in json.dumps(deaf["lines"]), deaf
+assert cap_stat("deaf1.txt", "no_answer") == "1", cap_line("deaf1.txt")
+assert cap_stat("deaf2.txt", "started") == cap_stat("deaf1.txt", "started"), cap_line("deaf2.txt")
+# constant output: no capture, the live frame or the last capture with its age
+flood_started = int(cap_stat("flood0.txt", "started"))
+assert int(cap_stat("flood1.txt", "started")) == flood_started, cap_line("flood1.txt")
+assert str(answer(cp2, "flood.json")["screen"]["cols"]) == own_cols, answer(cp2, "flood.json")
+# the primary screen: no capture, no SIGWINCH
+assert cap_stat("plain1.txt", "signals") == cap_stat("plain0.txt", "signals"), cap_line("plain1.txt")
+assert not cap_plain.exists(), cap_plain.read_text()
+plain = answer(cp2, "plain.json")["screen"]
+assert str(plain["cols"]) == own_cols and f"{own_rows} {own_cols}" in json.dumps(plain["lines"]), plain
+# a capture falling behind: said, then the live frame, with no capture meanwhile
+assert answer(cp2, "late0.json")["screen"]["cols"] == 40, answer(cp2, "late0.json")
+late2 = answer(cp2, "late2.json")["screen"]
+assert late2["cols"] == 40 and late2["age_ms"] >= 3000, late2
+late3 = answer(cp2, "late3.json")["screen"]
+assert str(late3["cols"]) == own_cols and "age_ms" not in late3, late3
+assert cap_stat("late3.txt", "started") == cap_stat("late0.txt", "started"), cap_line("late3.txt")
+# a window not in use: fits the phone, live; in use again: its own
+assert cap_stat("away.txt", "grid") == "40x12" and cap_stat("away.txt", "paused") == "false", cap_line("away.txt")
+assert answer(cp2, "away.json")["screen"]["cols"] == 40, answer(cp2, "away.json")
+assert cap_stat("back.txt", "grid") == own_grid and cap_stat("back.txt", "paused") == "true", cap_line("back.txt")
+
+# A phone's paste and tap. `cat -v` shows what reaches a program. Several lines
+# go whole to one with bracketed paste and are refused for one without, so no
+# line is submitted; a tap is a click only where the program tracks the mouse
+pm = rm / "paste-mouse"
+remote_run("paste-mouse", on_config, [
+    f"wait_file {pm / 'data/rift/remote/status.json'} 20000", "wait 1500",
+    "type cat -v\\n", "wait 600",
+    *rin("paste-mouse", "plain-lines.json",
+         '{"cmd":"remote-paste","pane":PANE,"device":"Test Phone","text":"a\\nb"}'),
+    *rin("paste-mouse", "plain-line.json",
+         '{"cmd":"remote-paste","pane":PANE,"device":"Test Phone","text":"one-line"}'),
+    *rin("paste-mouse", "plain-tap.json", '{"cmd":"remote-mouse","pane":PANE,"col":2,"row":3}'),
+    *rin("paste-mouse", "escape.json",
+         '{"cmd":"remote-paste","pane":PANE,"device":"Test Phone","text":"\\u001b[2J"}'),
+    "key ctrl+c", "wait 500",
+    "type printf '\\\\033[?2004h\\\\033[?1000;1006h'; cat -v\\n", "wait 800",
+    *rin("paste-mouse", "lines.json",
+         '{"cmd":"remote-paste","pane":PANE,"device":"Test Phone","text":"first\\nsecond"}'),
+    *rin("paste-mouse", "tap.json", '{"cmd":"remote-mouse","pane":PANE,"col":4,"row":7}'),
+    *rin("paste-mouse", "off-grid.json", '{"cmd":"remote-mouse","pane":PANE,"col":9999,"row":0}'),
+    "wait 400",
+    *rin("paste-mouse", "return.json",
+         '{"cmd":"remote-input","pane":PANE,"device":"Test Phone","keys":["enter"]}'),
+    "wait 800",
+    *rin("paste-mouse", "screen.json", '{"cmd":"screen","pane":PANE,"force":true}'),
+], timeout=60)
+assert answer(pm, "plain-lines.json") == {"ok": False, "error": "the program takes one line at a time"}, \
+    answer(pm, "plain-lines.json")
+assert answer(pm, "plain-line.json")["ok"] is True, answer(pm, "plain-line.json")
+assert answer(pm, "plain-tap.json") == {"ok": False, "error": "the program does not track the mouse"}, \
+    answer(pm, "plain-tap.json")
+assert answer(pm, "escape.json")["ok"] is False, answer(pm, "escape.json")
+assert answer(pm, "lines.json")["ok"] is True, answer(pm, "lines.json")
+assert answer(pm, "tap.json")["ok"] is True, answer(pm, "tap.json")
+assert answer(pm, "off-grid.json")["ok"] is False, answer(pm, "off-grid.json")
+pm_rows = ["".join(r[0] for r in row) for row in answer(pm, "screen.json")["screen"]["lines"]]
+pm_text = "\n".join(pm_rows)
+# one paste: both lines inside the markers, and only the later Return ends it
+assert "^[[200~first" in pm_text and "second^[[201~" in pm_text, pm_text
+# press then release at column 5, row 8 (1-based SGR)
+assert "^[[<0;5;8M^[[<0;5;8m" in pm_text, pm_text
 
 # The Cloudflare tunnel (remote_tunnel) without cloudflared: the checklist
 # offers the install, the tunnel and relay wait, and the gateway says so in
@@ -5175,6 +5356,10 @@ shown_rows = ["".join(r[0] for r in row) for row in shown["screen"]["lines"]]
 header_rows = [t for t in shown_rows if t.startswith("▾ sleep 30")]
 assert len(header_rows) == 1 and header_rows[0].rstrip().endswith("running"), shown_rows
 assert sum("sleep 30" in t for t in shown_rows) == 1, shown_rows
+fit_used = answer(on, "fit-used.json")["screen"]
+assert fit_used["cols"] > 40 and fit_used["rows"] > 12, fit_used
+fit_refocused = answer(on, "fit-refocused.json")["screen"]
+assert fit_refocused["cols"] > 40 and fit_refocused["rows"] > 12, fit_refocused
 fit_screen = answer(on, "fit-screen.json")["screen"]
 assert (fit_screen["cols"], fit_screen["rows"]) == (40, 12), fit_screen
 assert all(len("".join(r[0] for r in row)) <= 40 for row in fit_screen["lines"]), fit_screen
@@ -5451,6 +5636,98 @@ assert saved.parent == pin / "data/rift/remote/uploads", saved
 assert saved.read_bytes() == pin_png
 assert saved.stat().st_mode & 0o777 == 0o600 and saved.parent.stat().st_mode & 0o777 == 0o700
 assert "Live Check Phone pasted an image" in after_dump, after_dump[:3000]
+
+# a phone's file (feature `upload_files`): a real phone through the window's
+# gateway, under a data folder whose path needs quoting. A bad extension and a
+# pane at its prompt are refused and save nothing; a script's bytes are saved
+# 0600 under a name the gateway made, its quoted path pasted with no Return,
+# and nothing runs it
+pfile = scratch / "phone-file"
+pf_data = pfile / "it's data"
+for sub_dir in (pfile / "cfg/rift", pf_data / "rift"):
+    sub_dir.mkdir(parents=True)
+(pfile / "cfg/rift/config.toml").write_text(
+    'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
+    'remote_listen = "127.0.0.1:0"\nremote_relay = ""\nremote_access = true\n')
+(pfile / "reader.py").write_text(
+    "import os, select, sys, termios, time, tty\n"
+    "out, ready = sys.argv[1], sys.argv[2]\n"
+    "fd = sys.stdin.fileno()\n"
+    "old = termios.tcgetattr(fd)\n"
+    "tty.setraw(fd)\n"
+    "sys.stdout.write('reader'); sys.stdout.flush()\n"
+    "open(ready, 'w').close()\n"
+    "got = b''\n"
+    "end = time.time() + 60\n"
+    "while time.time() < end and b'.sh' not in got:\n"
+    "    if select.select([fd], [], [], 0.2)[0]:\n"
+    "        got += os.read(fd, 4096)\n"
+    "time.sleep(0.5)\n"
+    "while select.select([fd], [], [], 0)[0]:\n"
+    "    got += os.read(fd, 4096)\n"
+    "open(out, 'wb').write(got)\n"
+    "termios.tcsetattr(fd, termios.TCSADRAIN, old)\n")
+(pfile / "t.rift").write_text("\n".join([
+    "resize 1100 800", "wait_prompt", "key cmd+t", "wait_prompt",
+    f"type python3 -I {pfile}/reader.py {pfile}/read.bin {pfile}/tracking\\n",
+    f"wait_file {pfile}/tracking 20000", "wait 500", f"dump {pfile}/ready.txt",
+    f"wait_file {pfile}/phone-acked 60000", "wait 1000", f"dump {pfile}/after.txt",
+    "quit"]) + "\n")
+pf_env = dict(env, XDG_CONFIG_HOME=str(pfile / "cfg"), XDG_DATA_HOME=str(pf_data),
+              BASH_SILENCE_DEPRECATION_WARNING="1", RIFT_NO_DEFAULT_RELAY="1")
+pf_phone = os.environ.get("RIFT_PHONE_BIN")
+assert pf_phone, "RIFT_PHONE_BIN is unset (scripts/ui-smoke.sh builds examples/phone)"
+pf_marker = pfile / "ran"
+pf_bytes = f"#!/bin/sh\ntouch {pf_marker}\n".encode() + b"\x00\xff"
+def pf_upload(rid, pane, ext):
+    return json.dumps({"t": "upload", "id": rid, "pane": pane, "size": len(pf_bytes), "offset": 0,
+                       "data": base64.b64encode(pf_bytes).decode(), "ext": ext}
+                      ).replace('"FIRST"', "FIRST").replace('"LAST"', "LAST")
+pf_uploads = pf_data / "rift/remote/uploads"
+with (pfile / "log.txt").open("w") as log:
+    window = subprocess.Popen([str(binary), "--script", str(pfile / "t.rift"), "--headless"],
+                              env=pf_env, stdout=log, stderr=log)
+    try:
+        deadline = time.monotonic() + 60
+        while not (pfile / "ready.txt").exists() or not (pf_data / "rift/remote/status.json").exists():
+            assert window.poll() is None, died("phone-file window exited", pfile / "log.txt")
+            assert time.monotonic() < deadline, "phone-file window never got ready"
+            time.sleep(0.05)
+        link = next(l for l in subprocess.run(
+            [str(binary), "remote", "pair"], env=pf_env, capture_output=True, text=True,
+            timeout=20).stdout.splitlines() if l.startswith("rift-remote://"))
+        # a connection each: one upload starts per second per connection
+        pf_runs = {}
+        for name, send, touch in (("bad", pf_upload("f1", "LAST", "../x"), []),
+                                  ("prompt", pf_upload("f2", "FIRST", "sh"), []),
+                                  ("good", pf_upload("f3", "LAST", "sh"), [str(pfile / "phone-acked")])):
+            out = pfile / f"phone-{name}.txt"
+            with out.open("w") as plog:
+                pf_runs[name] = subprocess.run(
+                    [pf_phone, str(pfile / "phone.key"), link, "true", "1", *touch],
+                    env=dict(os.environ, PHONE_SEND=send), stdout=plog, stderr=plog, timeout=90)
+        assert window.wait(timeout=60) == 0, died("phone-file window failed", pfile / "log.txt")
+    finally:
+        if window.poll() is None:
+            window.kill()
+pf_text = {n: (pfile / f"phone-{n}.txt").read_text() for n in pf_runs}
+assert '"upload_files"' in pf_text["good"], pf_text["good"][:2000]
+assert pf_runs["bad"].returncode == 3 and "ext holds 1 to 8" in pf_text["bad"], pf_text["bad"][-2000:]
+assert pf_runs["prompt"].returncode == 3 and "at its prompt; a file goes" in pf_text["prompt"], pf_text["prompt"][-2000:]
+assert pf_runs["good"].returncode == 0, died("the phone with a file", pfile / "phone-good.txt")
+assert re.search(r'← \{"id":"f3","ok":true,"t":"ack"\}', pf_text["good"]), pf_text["good"][-2000:]
+pf_saved = list(pf_uploads.iterdir())
+assert len(pf_saved) == 1, pf_saved
+assert re.fullmatch(r"rift-paste-\d+-[0-9a-f]{8}\.sh", pf_saved[0].name), pf_saved
+assert pf_saved[0].read_bytes() == pf_bytes
+assert pf_saved[0].stat().st_mode & 0o777 == 0o600 and pf_uploads.stat().st_mode & 0o777 == 0o700
+# the path, quoted so a shell reads it as one word, a space after, no Return
+pf_read = (pfile / "read.bin").read_bytes()
+assert pf_read.endswith(b" ") and b"\r" not in pf_read and b"\n" not in pf_read, pf_read
+assert b"'\\''" in pf_read, pf_read
+assert shlex.split(pf_read.decode()) == [str(pf_saved[0])], pf_read
+assert not pf_marker.exists(), "something ran the phone's file"
+assert "Live Check Phone pasted a file" in (pfile / "after.txt").read_text()
 
 # (f) the chip on every window comes from status.json of a gateway holding
 # gateway.lock; a stale status (lock not held) shows none

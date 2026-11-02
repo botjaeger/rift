@@ -85,7 +85,7 @@ describe("hostLine: the status line of a computer's card", () => {
       retry: true,
       progress: false,
     });
-    expect(hostLine(conn({ status: "failed", failure: "gave_up", attempt: 5 }), NOW, null).hint).toMatch(/tries again when you tap Try again/);
+    expect(hostLine(conn({ status: "failed", failure: "gave_up", attempt: 5 }), NOW, null).hint).toMatch(/every 30 seconds while the app is open, when you tap Try again/);
     // cancelled sooner
     expect(hostLine(conn({ status: "failed", failure: "gave_up", attempt: 2 }), NOW, null).text).toBe("Can’t reach it · stopped");
   });

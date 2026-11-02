@@ -1021,6 +1021,10 @@ pub struct Config {
     /// or `"read_write"` (also read it back: any program or remote host can
     /// then read your clipboard).
     pub clipboard_access: String,
+    /// Also hand what programs copy (OSC 52) to paired phones that may
+    /// operate. Off by default: a program could otherwise write to the
+    /// phone's clipboard without anyone asking.
+    pub remote_clipboard: bool,
     /// Forward mouse clicks, drags and the wheel to apps that enable mouse
     /// reporting (vim, tmux, htop). Hold Shift to select text instead.
     /// Focus in/out reports (mode 1004) do not depend on it.
@@ -1185,6 +1189,7 @@ impl Default for Config {
             middle_click_paste: true,
             wheel_scroll_lines: 3,
             clipboard_access: "write".into(),
+            remote_clipboard: false,
             mouse_reporting: true,
             word_chars: String::new(),
             word_delimiters: String::new(),

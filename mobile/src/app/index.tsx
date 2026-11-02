@@ -15,7 +15,7 @@ import { hostLine, updating } from "@/ui/connStatus";
 import { FirstRun } from "@/ui/FirstRun";
 import { Icon } from "@/ui/Icon";
 import { confirmDestructive } from "@/ui/confirm";
-import { canNewTab, openNewTab } from "@/ui/newTab";
+import { canNewTab } from "@/ui/newTab";
 import { ErrorText } from "@/ui/Notice";
 import { ProgressBar } from "@/ui/ProgressBar";
 import { SwipeAction } from "@/ui/SwipeAction";
@@ -158,7 +158,7 @@ function TabRowView({ row, host, last, answerHere }: { row: TabRow; host: HostVi
         style={({ pressed }) => [styles.rowMain, inline ? styles.rowMainInline : styles.rowMainCompact, pressed && styles.pressed]}
       >
         <View style={styles.tileBox}>
-          <Tile agent={row.agent} />
+          <Tile agent={row.agent} program={row.program} />
         </View>
         <View style={styles.rowText}>
           <View style={styles.titleLine}>
@@ -187,8 +187,6 @@ function TabRowView({ row, host, last, answerHere }: { row: TabRow; host: HostVi
 function HostCard({ host, rows, now, answerHere }: { host: HostView; rows: TabRow[]; now: number; answerHere: boolean }) {
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
-  // one at a time: a second tap while the first is out would open two
-  const out = useRef(false);
   const scope = useActionScope(host.record.key);
   const name = host.record.name;
   const online = host.conn.status === "open";
@@ -224,21 +222,8 @@ function HostCard({ host, rows, now, answerHere }: { host: HostView; rows: TabRo
       setError("This phone could not remove the computer. Try Unpair again.");
     }
   };
-  const newTab = async () => {
-    if (out.current) return;
-    out.current = true;
-    setError(null);
-    try {
-      const current = scope.capture();
-      const r = await openNewTab(host, current);
-      if (!current()) return;
-      if (!r.ok) return r.message ? setError(r.message) : undefined;
-      AccessibilityInfo.announceForAccessibility("New tab opened");
-      if (r.pane !== undefined) openPane(router, host.record.key, r.pane);
-    } finally {
-      out.current = false;
-    }
-  };
+  // the New tab sheet chooses what the tab starts with and opens it
+  const newTab = () => router.push({ pathname: "/new-tab", params: { key: host.record.key, from: "home" } });
   return (
     <SwipeAction label={`Unpair ${name}`} text="Unpair" radius={16} onAction={() => void unpair()}>
       <View style={styles.card} accessibilityLabel={name}>
@@ -267,7 +252,7 @@ function HostCard({ host, rows, now, answerHere }: { host: HostView; rows: TabRo
             <Pressable
               accessibilityRole="button"
               accessibilityLabel={`New tab on ${name}`}
-              onPress={() => void newTab()}
+              onPress={newTab}
               style={({ pressed }) => [styles.headIcon, pressed && styles.pressed]}
             >
               <Icon name="newTab" size={20} color={colors.textMuted} />

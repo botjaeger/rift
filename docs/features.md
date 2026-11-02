@@ -1820,6 +1820,7 @@ on the desktop (also for shells a phone started while no window is open).
   naming the device. The phone follows and drives it like any pane. The next
   Rift window shows these shells as tabs (with a toast) and the gateway lets
   go of them. At most 8 at a time.
+- **Copy to phones** (`remote_clipboard`, *Copy to phones too*, off by default): what a program copies with OSC 52 also reaches the phones that may operate. A phone's tap is a click for a program that tracks the mouse, its several lines reach the program as one paste, and a window in use keeps its size, focused and touched within the last minute (`fit`): a full-screen program is captured at the phone's size for the phone alone, about every 2 s at most once it pauses, and the live frame shows otherwise. A window left alone fits the phone live until it is touched again.
 - **Cloudflare tunnel** (`remote_tunnel`, *Use a Cloudflare tunnel instead*; no server needed): the gateway
   runs a relay on a loopback port of this computer and gives it a public
   address with a Cloudflare quick tunnel (`cloudflared tunnel --url`,
@@ -1874,7 +1875,7 @@ on the desktop (also for shells a phone started while no window is open).
   text never reaches a pane at its prompt (nor one whose command was just
   submitted), and keys at a prompt never recall history, complete or submit
   a line that has text: commands still go through *Run*. A shell without Rift's integration, and a prompt drawn on
-  the alternate screen (tmux), look like programs and take typed text. Its Terminal view shows the pane
+  the alternate screen (tmux), look like programs and take typed text. Their TUI shows the pane
   the way Rift draws it (a header row per command, not the shell's prompt
   echo), and the phone can size the pane to its width while it follows it:
   the shell is the smaller of the two sizes, so programs reflow, until the
@@ -1889,13 +1890,27 @@ on the desktop (also for shells a phone started while no window is open).
   phone's own view of the pane: the desktop's view stays where its user
   left it, and the desktop's scrolling never moves the phone's. A
   view-only phone scrolls a view, never a program. *Paste* (on the key row
-  wherever images can go, whatever Settings › Keys holds) with an image on
-  the phone's clipboard (an operate phone, a running program, at most
+  wherever images can go, whatever Settings › Keys holds) puts it in the
+  phone's message box; *Send* sends an image from the phone's clipboard (an operate phone, a running program, at most
   10 MB; PNG, or JPEG for a photo too large as PNG) saves it under
   `<data dir>/remote/uploads/` (kept 24 hours) and pastes its path into
   the program as dropping the file does, so Claude Code and Codex attach
   it; the desktop toasts "<device> pasted an image". One image goes at a
-  time (the phone says while it is sending). A coding
+  time (the phone says while it is sending). A file on the phone's clipboard
+  (a Files copy on iOS, a content URI on Android; feature `upload_files`)
+  goes the same way with any bytes up to 10 MB, saved under a name the
+  computer makes with the file's extension (1 to 8 letters or digits; other
+  names are refused, and the rest of the name stays on the phone), 0600 and
+  never run; the toast says "pasted a file". At a shell prompt an image or
+  file is refused with a message. Nothing pasted reaches the program before
+  *Send*: *Attach* (the message box's +) or *Paste* puts an image, a file or a
+  long text (more than 3 lines or over 4 KB) in the box as a token at the cursor,
+  `[Image 1]`, `[File note.pdf]`, `[Text 12 lines]`, and the user types around
+  it. Deleting part of a token deletes all of it. *Send* sends the box in order,
+  then Return, one image or file at a time as above, waiting for Claude Code to
+  show each image before what follows it; once begun it finishes even if the
+  screen is left, and a failure keeps what did not go in the box and names it. *Paste* under a full-screen program that has its own
+  keys (vim, htop) opens the message box under the screen. A coding
   agent's pane always has the phone's message input, whichever screen it
   draws on.
 - **Block actions, earlier output, control keys (Phase 3).** A tap on a
@@ -1909,6 +1924,13 @@ on the desktop (also for shells a phone started while no window is open).
   Panes › Choose keys; its *+tab* and *+pane* keys open a new tab in the pane's
   window or split the pane on the desktop (starting in the pane's folder,
   with a toast naming the phone), and the phone goes to the new pane.
+  *New tab* (the Tabs sheet, a computer's card on Portals) and *New pane* (the
+  Panes sheet) open sheets that choose what the new tab or pane starts with: a
+  shell, or Claude Code, Codex or OpenCode. A program is an `open`, then a
+  `run` of its name in the new pane, once its shell shows a prompt (the
+  computer answers `busy` until then; the phone tries again for a few seconds);
+  *Ask before running* and Face ID apply as to any run. View-only phones get
+  neither button.
 - **Phone-first app.** *Portals* is the home page (no tab bar); its gear
   opens *Settings* and its **+** pairs a computer. *Portals* lists each
   computer in a card (connection line, *New tab*, *Try again* or *Pair again*;
@@ -1923,11 +1945,15 @@ on the desktop (also for shells a phone started while no window is open).
   Successes before the newest failure fold away; blocks are cards with a thin
   border in their state's colour (a table as a list, with *Raw*), failed ones
   with *Run again* and *Copy error*, running ones with *Stop* and *Notify when
-  done*; a tap opens the block sheet. The header's *Terminal view* shows the
-  pane's screen whatever runs, with pinch-to-zoom. Above the command line: the
+  done*; a tap on a card's header opens the block sheet, and selecting its output copies the selection (a read-only field; the system menu still shows). There is no view switch: the pane
+  shows its screen (the TUI, with pinch-to-zoom) for the alternate screen, a coding agent or a program no
+  block holds, and blocks for everything else. Above the command line: the
   folder and branch chips opening the chip menus, suggestions, the key row (⌃;
   sticky ⌃ ⌥ ⇧, Paste) and a round field with a run button; commands run from
-  there, there is no separate Run page. *Run* sends at once; Settings ›
+  there, there is no separate Run page. The phone keyboard's Return is a new line in the
+  field and only the round *Run* (or *Send*, to a program) button sends; with a hardware
+  keyboard Return sends and Shift+Return is a new line. A command is one line, so a field with
+  line breaks says so and *Run* stays off. *Run* sends at once; Settings ›
   Running commands › *Ask before running* (off by default) shows the
   confirmation first. Repeated taps while authentication or a send is pending
   send the command only once. Leaving a command or answer screen while
@@ -1952,8 +1978,8 @@ on the desktop (also for shells a phone started while no window is open).
   question, the entries under the `❯` / `›` selector, numbered or not, and
   up to 12 lines above the question), or an unread "needs your input" for
   the pane in the attention center (until anything is typed into the pane).
-  An `operate` phone answers: a numbered entry is typed as its digit, an
-  unnumbered one as arrow keys and Enter, "No" can carry what to do
+  An `operate` phone answers with arrow keys from the selected entry and
+  Enter, "No" can carry what to do
   instead, and a password is typed (never shown, logged or kept on either
   side). Each answer is ordinary input: the desktop shows its toast and the
   pane goes on. The phone alerts when a question starts (Yes / No / Open on
@@ -1987,11 +2013,11 @@ on the desktop (also for shells a phone started while no window is open).
   home upgrades to the direct path), retries an unreachable computer 5 times
   (0.5 s doubling to 10 s; the card counts *retry 2 of 5*) and then stops
   (*Can't reach it · stopped after 5 retries*, with *Try again*): it tries
-  again when you tap *Try again*, when the phone is back online and when the
-  app opens, and *Cancel* on a pane that is reconnecting stops it at once and
+  again every 30 seconds while the app is open, when you tap *Try again*, when
+  the phone is back online and when the app opens, and *Cancel* on a pane that is reconnecting stops it at once and
   goes to Portals. When the computer quits Rift it says so first (`closing`,
   `docs/remote-protocol.md`): the card reads *Rift quit on this computer*
-  with *Try again*, and nothing retries; when an update restarts Rift it
+  with *Try again*, and it tries every 30 seconds while the app is open; when an update restarts Rift it
   reads *Updating Rift · back in about a minute* ("Nothing is wrong"), and
   the app reconnects every 3 s for up to 3 minutes without counting those
   tries against the 5. It shows *Offline* without retrying while

@@ -1248,6 +1248,9 @@ pub struct PaneState {
     /// The size a paired phone holds this pane to (columns, rows) and when
     /// it last said so: a lease of [`rift_remote::FIT_LEASE`].
     pub fit: Option<(u16, u16, std::time::Instant)>,
+    /// The window has focus: someone is using it, so it keeps its own size
+    /// and the fit waits until they leave.
+    pub fit_paused: bool,
     /// The window's own grid at the last layout (columns, rows, cell size
     /// in px), before any `fit`.
     pub base_grid: Option<(usize, usize, (u16, u16))>,
@@ -1377,6 +1380,7 @@ impl PaneState {
             password_block: None,
             title: String::new(),
             fit: None,
+            fit_paused: false,
             base_grid: None,
             program_grid: None,
             launch: Default::default(),
@@ -1440,7 +1444,21 @@ impl PaneState {
     /// The shell's size: the window's own grid, or the phone's where that is
     /// smaller. The one place the two meet (layout calls it every frame).
     pub fn fitted(&self, cols: usize, rows: usize) -> (usize, usize) {
+        if self.fit_paused {
+            return (cols, rows);
+        }
         fitted_grid(self.fit, cols, rows)
+    }
+
+    /// The size a capture for the phone is taken at: while the window in use
+    /// holds off the phone's fit and that fit would be smaller than the pane.
+    pub fn capture_size(&self) -> Option<rift_pty::GridSize> {
+        if !self.fit_paused {
+            return None;
+        }
+        let (own_cols, own_rows, _) = self.base_grid?;
+        let (cols, rows) = fitted_grid(self.fit, own_cols, own_rows);
+        ((cols, rows) != (own_cols, own_rows)).then_some(rift_pty::GridSize { cols, rows })
     }
 
     /// Size the shell now from the last layout's grid and the phone's fit:

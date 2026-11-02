@@ -10,11 +10,12 @@
 //!
 //! | level | commands |
 //! |---|---|
-//! | `"off"` | no socket, unless `remote_access` is on: then only the remote gateway's requests: `status`, `blocks`, `screen`, `output`, `menu`, `diff`, `complete`, `remote-status`, `remote-input`, `remote-scroll`, `remote-upload`, `remote-open` and `remote-close` |
+//! | `"off"` | no socket, unless `remote_access` is on: then only the remote gateway's requests: `status`, `blocks`, `screen`, `output`, `menu`, `diff`, `complete`, `remote-status`, `remote-input`, `remote-paste`, `remote-mouse`, `remote-clipboard`, `remote-scroll`, `remote-upload`, `remote-open` and `remote-close` |
 //! | `"navigate"` (default) | the gateway's requests, `list`, `focus`, `prepare-restart` |
 //! | `"full"` | also `split`, `open`, `send-text` (types into a shell) |
 //!
-//! `remote-input`, `remote-scroll`, `remote-upload`, `remote-open` and
+//! `remote-input`, `remote-paste`, `remote-mouse`, `remote-clipboard`,
+//! `remote-scroll`, `remote-upload`, `remote-open` and
 //! `remote-close` are accepted only while `remote_access` is on, whatever
 //! the level.
 //!
@@ -202,6 +203,27 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         text: Option<String>,
     },
+    /// A paired phone's `paste`, sent by the remote gateway: `text` goes to
+    /// the program running in `pane` as one paste. Accepted only while
+    /// `remote_access` is on, like `remote-input`.
+    RemotePaste {
+        pane: u64,
+        device: String,
+        text: String,
+    },
+    /// A paired phone's tap, sent by the remote gateway: a left click at a
+    /// cell of `pane`'s screen, to a program that tracks the mouse. Accepted
+    /// only while `remote_access` is on, like `remote-input`.
+    RemoteMouse {
+        pane: u64,
+        col: u16,
+        row: u16,
+    },
+    /// What a program copied (OSC 52) after copy number `since`, when
+    /// `remote_clipboard` lets phones have it.
+    RemoteClipboard {
+        since: u64,
+    },
     /// A paired phone's `scroll`, sent by the remote gateway: `lines`
     /// (positive: up, 1 to 50 either way) of the desktop's wheel over
     /// `pane`. `operate`: the device may send the program input (wheel
@@ -304,6 +326,9 @@ impl Request {
             | Request::Complete { .. }
             | Request::RemoteStatus
             | Request::RemoteInput { .. }
+            | Request::RemotePaste { .. }
+            | Request::RemoteMouse { .. }
+            | Request::RemoteClipboard { .. }
             | Request::RemoteScroll { .. }
             | Request::RemoteUpload { .. }
             | Request::RemoteFit { .. }
@@ -405,6 +430,11 @@ pub struct Response {
     /// `blocks`: the pane's oldest block id (any page); lower ids are gone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oldest: Option<u64>,
+    /// `remote-clipboard`: the newest copy's number, with its text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clipboard_seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clipboard: Option<String>,
     /// `screen`: the pane's screen, when it has one to show.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen: Option<rift_remote::Screen>,
@@ -1172,6 +1202,7 @@ mod tests {
                 bg: Some("1e1e1e".into()),
                 rules: vec![(0, "3fb950".into())],
                 lines: vec![vec![rift_remote::protocol::Run::plain("vim")]],
+                age_ms: Some(4000),
             }),
             generation: Some(7),
             output: Some(rift_remote::OutputPage {

@@ -443,12 +443,20 @@ pub struct Session {
     size: GridSize,
     window_size: Arc<Mutex<WindowSize>>,
     scrollback: usize,
+    /// Captures at another size than this pane's ([`Session::shadow_capture`]).
+    shadow: Arc<Shadow>,
+    /// What a capture's driver needs to give held output back to the Term.
+    feed_ctx: Arc<FeedCtx>,
+    observer: Observer,
+    /// The Term's setting, for a capture's own.
+    ambiguous_wide: AtomicBool,
 }
 
 impl Drop for Session {
-    /// A closed pane's own colors go with it.
+    /// A closed pane's own colors go with it, and any capture of it ends.
     fn drop(&mut self) {
         set_pane_colors(self.id, None);
+        self.shadow.close();
     }
 }
 
@@ -841,7 +849,9 @@ struct Reader {
     id: PaneId,
     /// How the shell ended, set before `SessionEvent::Exit` is sent.
     exit: ExitCell,
-    ctx: FeedCtx,
+    ctx: Arc<FeedCtx>,
+    /// A capture in progress takes the program's output ([`Shadow`]).
+    shadow: Arc<Shadow>,
     dirty: Arc<AtomicBool>,
     saw_output: Arc<AtomicBool>,
     observer: Observer,
@@ -902,6 +912,22 @@ impl Reader {
         (self.observer)(self.id, SessionEvent::Notice(message.into()));
     }
 
+    /// One read's worth of output: to the shadow while a capture takes it,
+    /// else parsed. A capture given up here hands over all it held, in order.
+    /// `None`: the Term did not change. Else true when it held a marker.
+    fn take_output(
+        &self,
+        parser: &mut vte::ansi::Processor,
+        scanner: &mut OscScanner,
+        bytes: &[u8],
+    ) -> Option<bool> {
+        match self.shadow.on_output(bytes) {
+            Output::Diverted => None,
+            Output::Real => Some(feed(parser, scanner, bytes, &self.ctx)),
+            Output::Flush(held) => Some(feed(parser, scanner, &held, &self.ctx)),
+        }
+    }
+
     fn run(self, source: Source) {
         let mut parser: vte::ansi::Processor = vte::ansi::Processor::new();
         let mut scanner = OscScanner::new();
@@ -918,8 +944,11 @@ impl Reader {
                         Ok(0) => break,
                         Ok(n) => {
                             self.saw_output.store(true, Ordering::Release);
-                            let marked = feed(&mut parser, &mut scanner, &buf[..n], &self.ctx);
-                            self.wake_after(marked);
+                            if let Some(marked) =
+                                self.take_output(&mut parser, &mut scanner, &buf[..n])
+                            {
+                                self.wake_after(marked);
+                            }
                         }
                         Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                         Err(_) => break,
@@ -1117,8 +1146,8 @@ impl Reader {
                                 // this window: no notifications for them
                                 blocks.set_replaying(first);
                             }
-                            let marked = feed(&mut parser, &mut scanner, &bytes, &self.ctx);
-                            if !replaying {
+                            let marked = self.take_output(&mut parser, &mut scanner, &bytes);
+                            if let (false, Some(marked)) = (replaying, marked) {
                                 self.wake_after(marked);
                             }
                         }
@@ -1158,6 +1187,10 @@ impl Reader {
                     }
                 }
             }
+        }
+        // the program's last words may be in a capture's hands
+        if let Some(held) = self.shadow.close() {
+            feed(&mut parser, &mut scanner, &held, &self.ctx);
         }
         // ended without a code (an older service): exited all the same; a
         // lost service is told apart, as its shell may still be running
@@ -1477,10 +1510,20 @@ impl Session {
         }
 
         let exit = ExitCell::default();
+        let ctx = Arc::new(ctx);
+        let writer = InputQueue::new(writer, {
+            let observer = observer.clone();
+            move |m| observer(id, SessionEvent::Notice(m))
+        });
+        let shadow = Arc::new(Shadow::new(
+            shadow_signal(&backend, &writer),
+            window_size_shared.clone(),
+        ));
         let reader = Reader {
             id,
             exit: exit.clone(),
-            ctx,
+            ctx: ctx.clone(),
+            shadow: shadow.clone(),
             dirty: dirty.clone(),
             saw_output: saw_output.clone(),
             observer: observer.clone(),
@@ -1508,11 +1551,15 @@ impl Session {
             read_only: AtomicBool::new(false),
             refused: AtomicBool::new(false),
             exit,
-            writer: InputQueue::new(writer, move |m| observer(id, SessionEvent::Notice(m))),
+            writer,
             backend,
             size,
             window_size: window_size_shared,
             scrollback,
+            shadow,
+            feed_ctx: ctx,
+            observer,
+            ambiguous_wide: AtomicBool::new(ambiguous_wide),
         })
     }
 
@@ -1602,6 +1649,8 @@ impl Session {
     /// Input that only scrolls (the wheel as arrow keys on the alternate
     /// screen): goes even to a read-only pane.
     pub fn write_scroll(&self, bytes: &[u8]) {
+        // what the program answers belongs on the Term, at once
+        self.shadow.on_input();
         self.inputs.fetch_add(1, Ordering::AcqRel);
         self.writer.write(bytes);
     }
@@ -1807,6 +1856,7 @@ impl Session {
     /// Measure East Asian Ambiguous characters two cells wide (or one) from
     /// the shell's next output on.
     pub fn set_ambiguous_wide(&self, wide: bool) {
+        self.ambiguous_wide.store(wide, Ordering::Relaxed);
         self.term.lock().set_ambiguous_wide(wide);
     }
 
@@ -1821,6 +1871,15 @@ impl Session {
             cell_width: cell_size.0,
             cell_height: cell_size.1,
         };
+        // a capture under way ends here: this signal is its way back. Held to
+        // the end, so its driver cannot signal a size this one replaced
+        let mut shadow = self.shadow.state.lock().unwrap();
+        if let Some(c) = shadow.capture.as_mut()
+            && matches!(c.phase, Phase::Diverting)
+        {
+            c.usable = false;
+            c.return_now();
+        }
         *self.window_size.lock().unwrap() = ws;
         // Resize the Term first and signal the PTY while still holding the
         // term lock: the program's redraw after SIGWINCH is then parsed by the
@@ -1849,6 +1908,531 @@ impl Session {
         }
         self.generation.fetch_add(1, Ordering::AcqRel);
         drop(term);
+        drop(shadow);
+    }
+
+    /// Whether a capture at `size` is wanted, and when. Only a program on the
+    /// alternate screen is ever signalled: it repaints everything when told
+    /// its own size back, so what it drew meanwhile is not lost. On the
+    /// primary screen output is history, and a line that went to the shadow
+    /// is gone (measured: docs/audit/two-screens-spike).
+    pub fn shadow_due(&self, size: GridSize, now: std::time::Instant) -> ShadowDue {
+        use alacritty_terminal::term::TermMode;
+        if size == self.size || size.cols < 2 || size.rows < 2 || !self.settled() {
+            return ShadowDue::No;
+        }
+        if self.feed_ctx.reply.as_ref().is_some_and(Replier::muted) {
+            return ShadowDue::No;
+        }
+        if !self.term.lock().mode().contains(TermMode::ALT_SCREEN) {
+            // the program left: its picture and its refusal go with it
+            let mut s = self.shadow.state.lock().unwrap();
+            s.frame = None;
+            s.blocked_until = None;
+            return ShadowDue::No;
+        }
+        let generation = self.generation.load(Ordering::Acquire);
+        let s = self.shadow.state.lock().unwrap();
+        if s.capture.is_some() {
+            return ShadowDue::No;
+        }
+        if s.frame
+            .as_ref()
+            .is_some_and(|f| f.size == size && f.generation == generation)
+        {
+            return ShadowDue::No;
+        }
+        let mut due = s.last_output + SHADOW_QUIET;
+        if let Some(at) = s.last_start {
+            due = due.max(at + SHADOW_EVERY);
+        }
+        if let Some(until) = s.blocked_until {
+            due = due.max(until);
+        }
+        if now >= due {
+            ShadowDue::Now
+        } else {
+            ShadowDue::At(due)
+        }
+    }
+
+    /// Ask the program to draw at `size` and keep what it draws: one PTY has
+    /// one size, so this signals `size` with TIOCSWINSZ only, sends the
+    /// redraw to an empty [`Term`] of that size, and signals the pane's own
+    /// size back, whose redraw lands on the real Term as any output does. The
+    /// real Term and its scrollback are never touched. Returns at once; false
+    /// when [`Self::shadow_due`] would not say `Now`.
+    pub fn shadow_capture(&self, size: GridSize) -> bool {
+        let now = std::time::Instant::now();
+        if !matches!(self.shadow_due(size, now), ShadowDue::Now) {
+            return false;
+        }
+        let ambiguous_wide = self.ambiguous_wide.load(Ordering::Relaxed);
+        let (wrap, cursor, colors) = {
+            use alacritty_terminal::term::TermMode;
+            let term = self.term.lock();
+            let mode = term.mode();
+            (
+                mode.contains(TermMode::LINE_WRAP),
+                mode.contains(TermMode::SHOW_CURSOR),
+                *term.colors(),
+            )
+        };
+        let Some(reply) = self.feed_ctx.reply.clone() else {
+            return false;
+        };
+        let ws = {
+            let mut ws = *self.window_size.lock().unwrap();
+            ws.num_cols = size.cols as u16;
+            ws.num_lines = size.rows as u16;
+            ws
+        };
+        let mut term = Term::new(
+            TermConfig {
+                scrolling_history: 0,
+                kitty_keyboard: true,
+                xtversion: format!("Rift({})", env!("CARGO_PKG_VERSION")),
+                ambiguous_wide,
+                ..TermConfig::default()
+            },
+            &size,
+            ShadowListener {
+                pane: self.id,
+                writer: reply,
+                window_size: ws,
+            },
+        );
+        let mut parser: vte::ansi::Processor = vte::ansi::Processor::new();
+        // the modes a redraw takes for granted: an empty alternate screen,
+        // a cursor the program hid long ago stays hidden, its palette
+        parser.advance(&mut term, b"\x1b[?1049h");
+        if !cursor {
+            parser.advance(&mut term, b"\x1b[?25l");
+        }
+        if !wrap {
+            parser.advance(&mut term, b"\x1b[?7l");
+        }
+        for i in 0..alacritty_terminal::term::color::COUNT {
+            if let Some(rgb) = colors[i] {
+                vte::ansi::Handler::set_color(&mut term, i, rgb);
+            }
+        }
+        {
+            let mut s = self.shadow.state.lock().unwrap();
+            if s.capture.is_some() || s.closed {
+                return false;
+            }
+            s.last_start = Some(now);
+            s.stats.started += 1;
+            s.capture = Some(Capture {
+                size,
+                term,
+                parser,
+                scanner: OscScanner::new(),
+                held: Vec::new(),
+                started: now,
+                last_byte: None,
+                phase: Phase::Diverting,
+                usable: true,
+                back_generation: 0,
+            });
+            self.shadow.signal(&mut s, ws);
+        }
+        let shadow = self.shadow.clone();
+        let ctx = self.feed_ctx.clone();
+        let observer = self.observer.clone();
+        let dirty = self.dirty.clone();
+        let id = self.id;
+        let spawned = std::thread::Builder::new()
+            .name(format!("pty-shadow-{id}"))
+            .spawn(move || shadow.drive(id, &ctx, &observer, &dirty));
+        if spawned.is_err() {
+            // nothing will end it: back to the pane's own size now
+            let mut s = self.shadow.state.lock().unwrap();
+            s.capture = None;
+            let own = *self.window_size.lock().unwrap();
+            self.shadow.signal(&mut s, own);
+            return false;
+        }
+        true
+    }
+
+    /// Read the capture at `size`, if one is held, with how long the pane's
+    /// output has moved on from it (`None`: it is the program's latest).
+    pub fn shadow_frame<R>(
+        &self,
+        size: GridSize,
+        read: impl FnOnce(&Term<ShadowListener>, u64, Option<std::time::Duration>) -> R,
+    ) -> Option<R> {
+        let generation = self.generation.load(Ordering::Acquire);
+        let mut s = self.shadow.state.lock().unwrap();
+        let f = s.frame.as_mut().filter(|f| f.size == size)?;
+        let behind = if f.generation == generation {
+            f.behind_since = None;
+            None
+        } else {
+            let since = *f.behind_since.get_or_insert_with(std::time::Instant::now);
+            Some(since.elapsed())
+        };
+        Some(read(&f.term, f.seq, behind))
+    }
+
+    /// No phone wants a capture any more: let go of the one held.
+    pub fn shadow_clear(&self) {
+        self.shadow.state.lock().unwrap().frame = None;
+    }
+
+    /// How this pane's captures went.
+    pub fn shadow_stats(&self) -> ShadowStats {
+        self.shadow.state.lock().unwrap().stats
+    }
+}
+
+/// Output quiet this long before a capture: a program in mid-redraw is left alone.
+pub const SHADOW_QUIET: std::time::Duration = std::time::Duration::from_millis(250);
+/// At most one capture per pane this often.
+pub const SHADOW_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+/// A program that does not redraw when told its size is not asked again for this long.
+pub const SHADOW_BLOCKED: std::time::Duration = std::time::Duration::from_secs(60);
+/// A redraw is over once no byte came for this long.
+const SHADOW_SETTLED: std::time::Duration = std::time::Duration::from_millis(100);
+/// No redraw in this long: the program ignores SIGWINCH. Also the longest a
+/// capture holds the program at the other size.
+const SHADOW_NO_ANSWER: std::time::Duration = std::time::Duration::from_secs(1);
+/// More than this is no redraw: the capture ends and all of it goes on the Term.
+const SHADOW_MAX_BYTES: usize = 4 << 20;
+const SHADOW_TICK: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// Whether and when a capture is wanted ([`Session::shadow_due`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShadowDue {
+    No,
+    At(std::time::Instant),
+    Now,
+}
+
+/// What a pane's captures came to.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ShadowStats {
+    /// Started: each one signals the program twice.
+    pub started: u64,
+    /// Ended with a frame.
+    pub framed: u64,
+    /// Given up because of a shell marker, leaving the alternate screen or too
+    /// much output.
+    pub aborted: u64,
+    /// The program did not answer: it is blocked for [`SHADOW_BLOCKED`].
+    pub no_answer: u64,
+    /// TIOCSWINSZ signals sent by captures.
+    pub signals: u64,
+}
+
+/// The shadow Term's events: only what the program waits for is answered.
+pub struct ShadowListener {
+    pane: PaneId,
+    writer: Replier,
+    window_size: WindowSize,
+}
+
+impl EventListener for ShadowListener {
+    fn send_event(&self, event: Event) {
+        match event {
+            Event::PtyWrite(s) => self.writer.reply(s.as_bytes()),
+            Event::ColorRequest(index, format) => {
+                if let Some(rgb) = default_color(self.pane, index) {
+                    self.writer.reply(format(rgb).as_bytes());
+                }
+            }
+            Event::TextAreaSizeRequest(format) => {
+                self.writer.reply(format(self.window_size).as_bytes());
+            }
+            _ => {}
+        }
+    }
+}
+
+enum Phase {
+    /// The program was told the other size: its output comes here.
+    Diverting,
+    /// It was told its own size back: its output is the Term's again.
+    Returning {
+        since: std::time::Instant,
+        answered: bool,
+    },
+}
+
+struct Capture {
+    size: GridSize,
+    term: Term<ShadowListener>,
+    parser: vte::ansi::Processor,
+    scanner: OscScanner,
+    /// Everything diverted, for the Term if this turns out to be no redraw.
+    held: Vec<u8>,
+    started: std::time::Instant,
+    last_byte: Option<std::time::Instant>,
+    phase: Phase,
+    /// A frame may come of it.
+    usable: bool,
+    /// The pane's generation when the program was told its size back.
+    back_generation: u64,
+}
+
+impl Capture {
+    fn return_now(&mut self) {
+        self.phase = Phase::Returning {
+            since: std::time::Instant::now(),
+            answered: false,
+        };
+    }
+
+    /// The program ended the screen this capture is about.
+    fn left_alt_screen(&self, new: usize) -> bool {
+        let from = self.held.len().saturating_sub(new + 16);
+        let tail = &self.held[from..];
+        [&b"\x1b[?1049l"[..], b"\x1b[?1047l", b"\x1b[?47l", b"\x1bc"]
+            .iter()
+            .any(|seq| tail.windows(seq.len()).any(|w| w == *seq))
+    }
+}
+
+struct ShadowFrame {
+    size: GridSize,
+    term: Term<ShadowListener>,
+    /// Numbers the captures of this pane.
+    seq: u64,
+    /// The pane's generation when it was taken.
+    generation: u64,
+    /// When a reader first found the pane's output past it.
+    behind_since: Option<std::time::Instant>,
+}
+
+struct ShadowState {
+    capture: Option<Capture>,
+    frame: Option<ShadowFrame>,
+    last_output: std::time::Instant,
+    last_start: Option<std::time::Instant>,
+    blocked_until: Option<std::time::Instant>,
+    closed: bool,
+    stats: ShadowStats,
+}
+
+/// How a capture reaches the program.
+enum ShadowSignal {
+    Local(Arc<std::fs::File>),
+    Service {
+        session: Arc<AtomicU64>,
+        queue: std::sync::mpsc::Sender<Queued>,
+    },
+}
+
+fn shadow_signal(backend: &Backend, writer: &InputQueue) -> Option<ShadowSignal> {
+    Some(match backend {
+        Backend::Local(pty) => ShadowSignal::Local(Arc::new(pty.file().try_clone().ok()?)),
+        Backend::Service { session, .. } => ShadowSignal::Service {
+            session: session.clone(),
+            queue: writer.tx.clone(),
+        },
+    })
+}
+
+/// A pane's captures: the state the reader, the app and the capture's own
+/// thread share. Lock order: this, then the term lock; never the other way.
+struct Shadow {
+    state: Mutex<ShadowState>,
+    signal: Option<ShadowSignal>,
+    window_size: Arc<Mutex<WindowSize>>,
+}
+
+/// What became of a chunk of output ([`Shadow::on_output`]).
+enum Output {
+    Real,
+    Diverted,
+    Flush(Vec<u8>),
+}
+
+impl Shadow {
+    fn new(signal: Option<ShadowSignal>, window_size: Arc<Mutex<WindowSize>>) -> Self {
+        Self {
+            state: Mutex::new(ShadowState {
+                capture: None,
+                frame: None,
+                last_output: std::time::Instant::now(),
+                last_start: None,
+                blocked_until: None,
+                closed: false,
+                stats: ShadowStats::default(),
+            }),
+            signal,
+            window_size,
+        }
+    }
+
+    /// Tell the program a size; nothing else changes. The caller holds the
+    /// state, so two signals never cross.
+    fn signal(&self, state: &mut ShadowState, ws: WindowSize) {
+        state.stats.signals += 1;
+        match &self.signal {
+            Some(ShadowSignal::Local(file)) => {
+                use alacritty_terminal::tty::ToWinsize;
+                use std::os::fd::AsRawFd;
+                let win = ws.to_winsize();
+                // never `Pty::on_resize`: it ends the process when this fails,
+                // and a pane may be closing
+                unsafe { libc::ioctl(file.as_raw_fd(), libc::TIOCSWINSZ, &win as *const _) };
+            }
+            Some(ShadowSignal::Service { session, queue }) => {
+                let _ = queue.send(Queued::Request(crate::ipc::Request::Resize {
+                    session: session.load(Ordering::SeqCst),
+                    cols: ws.num_cols,
+                    rows: ws.num_lines,
+                    cell_w: ws.cell_width,
+                    cell_h: ws.cell_height,
+                }));
+            }
+            None => {}
+        }
+    }
+
+    fn signal_back(&self, state: &mut ShadowState) {
+        let own = *self.window_size.lock().unwrap();
+        self.signal(state, own);
+    }
+
+    /// A chunk of the program's output, on the reader thread.
+    fn on_output(&self, bytes: &[u8]) -> Output {
+        let mut guard = self.state.lock().unwrap();
+        let s = &mut *guard;
+        let now = std::time::Instant::now();
+        let Some(c) = s.capture.as_mut() else {
+            s.last_output = now;
+            return Output::Real;
+        };
+        if let Phase::Returning { answered, .. } = &mut c.phase {
+            *answered = true;
+            s.last_output = now;
+            return Output::Real;
+        }
+        c.last_byte = Some(now);
+        c.held.extend_from_slice(bytes);
+        let marked = c.scanner.scan(bytes).iter().any(|seg| seg.marker.is_some());
+        if marked || c.left_alt_screen(bytes.len()) || c.held.len() > SHADOW_MAX_BYTES {
+            let held = std::mem::take(&mut c.held);
+            s.capture = None;
+            s.stats.aborted += 1;
+            s.last_output = now;
+            self.signal_back(s);
+            return Output::Flush(held);
+        }
+        let Capture { parser, term, .. } = c;
+        parser.advance(term, bytes);
+        Output::Diverted
+    }
+
+    /// Someone typed: the capture ends and the answer goes on the Term.
+    fn on_input(&self) {
+        let mut guard = self.state.lock().unwrap();
+        let s = &mut *guard;
+        if let Some(c) = s.capture.as_mut()
+            && matches!(c.phase, Phase::Diverting)
+        {
+            c.usable = false;
+            c.back_generation = 0;
+            c.return_now();
+            self.signal_back(s);
+        }
+    }
+
+    /// The pane is gone (or its program ended): what a capture held.
+    fn close(&self) -> Option<Vec<u8>> {
+        let mut s = self.state.lock().unwrap();
+        s.closed = true;
+        s.frame = None;
+        s.capture.take().map(|c| c.held)
+    }
+
+    /// A capture's thread: ends the redraw, signals the size back, watches
+    /// that redraw land, publishes the frame.
+    fn drive(&self, id: PaneId, ctx: &FeedCtx, observer: &Observer, dirty: &AtomicBool) {
+        loop {
+            std::thread::sleep(SHADOW_TICK);
+            let now = std::time::Instant::now();
+            let mut guard = self.state.lock().unwrap();
+            let s = &mut *guard;
+            if s.closed {
+                return;
+            }
+            // given up on the reader thread
+            let Some(c) = s.capture.as_mut() else { return };
+            match c.phase {
+                Phase::Diverting => {
+                    let settled = c
+                        .last_byte
+                        .is_some_and(|at| now.duration_since(at) >= SHADOW_SETTLED);
+                    let out_of_time = now.duration_since(c.started) >= SHADOW_NO_ANSWER;
+                    if !settled && !out_of_time {
+                        continue;
+                    }
+                    c.usable = settled;
+                    c.back_generation = ctx.generation.load(Ordering::Acquire);
+                    c.return_now();
+                    let silent = c.last_byte.is_none();
+                    self.signal_back(s);
+                    if silent {
+                        // no redraw, so none to wait for
+                        s.capture = None;
+                        s.blocked_until = Some(now + SHADOW_BLOCKED);
+                        s.stats.no_answer += 1;
+                        return;
+                    }
+                }
+                Phase::Returning { since, answered } => {
+                    let waited = now.duration_since(since);
+                    if !answered {
+                        if waited < SHADOW_NO_ANSWER {
+                            continue;
+                        }
+                        // no redraw for the Term: what the program printed
+                        // meanwhile was never one either, and the Term needs it
+                        let held = std::mem::take(&mut c.held);
+                        s.capture = None;
+                        s.blocked_until = Some(now + SHADOW_BLOCKED);
+                        s.stats.no_answer += 1;
+                        drop(guard);
+                        let mut parser = vte::ansi::Processor::new();
+                        let mut scanner = OscScanner::new();
+                        feed(&mut parser, &mut scanner, &held, ctx);
+                        dirty.store(true, Ordering::Release);
+                        observer(id, SessionEvent::Wakeup);
+                        return;
+                    }
+                    let quiet = now.duration_since(s.last_output) >= SHADOW_SETTLED;
+                    if !quiet && waited < SHADOW_NO_ANSWER {
+                        continue;
+                    }
+                    let mut c = s.capture.take().expect("matched above");
+                    if !c.usable {
+                        return;
+                    }
+                    if c.parser.sync_bytes_count() > 0 {
+                        c.parser.stop_sync(&mut c.term);
+                    }
+                    s.stats.framed += 1;
+                    s.frame = Some(ShadowFrame {
+                        size: c.size,
+                        term: c.term,
+                        seq: s.stats.framed,
+                        // still talking: the frame is behind already
+                        generation: if quiet {
+                            ctx.generation.load(Ordering::Acquire)
+                        } else {
+                            c.back_generation
+                        },
+                        behind_since: None,
+                    });
+                    return;
+                }
+            }
+        }
     }
 }
 
@@ -2613,6 +3197,18 @@ mod tests {
         assert_eq!(old.map(&new, 10, 10, 3, 0), (3, 0));
     }
 
+    fn test_shadow() -> Arc<Shadow> {
+        Arc::new(Shadow::new(
+            None,
+            Arc::new(Mutex::new(WindowSize {
+                num_lines: 5,
+                num_cols: 20,
+                cell_width: 8,
+                cell_height: 16,
+            })),
+        ))
+    }
+
     fn ctx(cols: usize, rows: usize) -> FeedCtx {
         FeedCtx {
             term: Arc::new(FairMutex::new(term(cols, rows))),
@@ -3026,7 +3622,8 @@ mod tests {
         let reader = Reader {
             id: 1,
             exit: Default::default(),
-            ctx: c,
+            ctx: Arc::new(c),
+            shadow: test_shadow(),
             dirty: Arc::new(AtomicBool::new(false)),
             saw_output: Arc::new(AtomicBool::new(false)),
             observer: Arc::new(|_, _| {}),
@@ -3195,7 +3792,8 @@ mod tests {
         let reader = Reader {
             id: 1,
             exit: exit.clone(),
-            ctx: c,
+            ctx: Arc::new(c),
+            shadow: test_shadow(),
             dirty: Arc::new(AtomicBool::new(false)),
             saw_output: Arc::new(AtomicBool::new(false)),
             observer: Arc::new(move |_, ev| {
@@ -3235,7 +3833,8 @@ mod tests {
         let reader = Reader {
             id: 1,
             exit: Default::default(),
-            ctx: ctx(20, 5),
+            ctx: Arc::new(ctx(20, 5)),
+            shadow: test_shadow(),
             dirty: Arc::new(AtomicBool::new(false)),
             saw_output: Arc::new(AtomicBool::new(false)),
             observer: Arc::new(move |_, ev| seen.lock().unwrap().push(ev)),
@@ -3412,7 +4011,8 @@ mod tests {
         let reader = Reader {
             id: 1,
             exit: Default::default(),
-            ctx: c,
+            ctx: Arc::new(c),
+            shadow: test_shadow(),
             dirty: Arc::new(AtomicBool::new(false)),
             saw_output: Arc::new(AtomicBool::new(false)),
             observer: Arc::new(move |_, ev| match ev {
@@ -3515,7 +4115,8 @@ mod tests {
         let reader = Reader {
             id: 1,
             exit: Default::default(),
-            ctx: c,
+            ctx: Arc::new(c),
+            shadow: test_shadow(),
             dirty: Arc::new(AtomicBool::new(false)),
             saw_output: Arc::new(AtomicBool::new(false)),
             observer: Arc::new(move |_, ev| {
@@ -4063,6 +4664,10 @@ mod tests {
             size: GridSize { cols: 80, rows: 24 },
             window_size: c.window_size.clone(),
             scrollback: 100,
+            shadow: test_shadow(),
+            feed_ctx: Arc::new(ctx(80, 24)),
+            observer: Arc::new(|_, _| {}),
+            ambiguous_wide: AtomicBool::new(false),
         };
         assert_eq!(rows(), 24);
         // the reader is mid-parse (holds the term lock) while the window resizes
@@ -4181,5 +4786,361 @@ mod tests {
             (0..14).map(|i| row[Column(i)].c).collect()
         };
         assert_eq!(text, "text continues");
+    }
+
+    // Captures against a real program on a real pty; with RIFT_PERSIST_SESSION
+    // the shell runs under the session service at XDG_DATA_HOME (started by
+    // whoever runs the test: this binary is not the service).
+    mod shadow {
+        use super::*;
+        use std::time::{Duration, Instant};
+
+        const PHONE: GridSize = GridSize { cols: 44, rows: 30 };
+        const OWN: GridSize = GridSize {
+            cols: 136,
+            rows: 43,
+        };
+
+        /// `draw` is a shell function run at start and on every SIGWINCH; a
+        /// line of `size_log` per draw, as `stty` read it.
+        fn program(dir: &std::path::Path, setup: &str, on_winch: &str) -> String {
+            format!(
+                "exec 2>/dev/null; {setup}\n\
+                 draw() {{ s=$(stty size </dev/tty); echo \"$s\" >> {log}; \
+                 printf '\\033[2J\\033[HSIZE %s' \"$s\"; {on_winch} }}\n\
+                 trap draw WINCH; draw\n\
+                 while :; do sleep 0.02 & wait $!; done\n",
+                log = dir.join("sizes").display(),
+            )
+        }
+
+        fn test_dir(name: &str) -> std::path::PathBuf {
+            let dir =
+                std::env::temp_dir().join(format!("rift-shadow-{}-{name}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            dir
+        }
+
+        fn spawn(name: &str, script: &str) -> (Session, std::path::PathBuf) {
+            let dir = test_dir(name);
+            let session = Session::spawn(SpawnOptions {
+                id: 900_000 + u64::from(std::process::id()) % 1000,
+                size: OWN,
+                cell_size: (8, 16),
+                shell: Some("/bin/sh".into()),
+                args: vec!["-c".into(), script.to_string()],
+                working_directory: None,
+                env: Default::default(),
+                scrollback: 1000,
+                observer: Arc::new(|_, _| {}),
+                replay: None,
+                service: std::env::var_os("RIFT_PERSIST_SESSION").map(|_| ServiceTarget::Spawn),
+                clipboard: ClipboardAccess::Off,
+                ambiguous_wide: false,
+            })
+            .unwrap();
+            (session, dir)
+        }
+
+        fn until(what: &str, secs: u64, mut ok: impl FnMut() -> bool) {
+            let end = Instant::now() + Duration::from_secs(secs);
+            while !ok() {
+                assert!(Instant::now() < end, "timed out: {what}");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        fn real_text(s: &Session) -> String {
+            s.screen_rows().join("\n")
+        }
+
+        /// Up on the alternate screen, drawn, quiet long enough to capture.
+        fn ready(s: &Session) {
+            until("program up", 10, || {
+                real_text(s).contains("SIZE 43 136")
+                    && matches!(s.shadow_due(PHONE, Instant::now()), ShadowDue::Now)
+            });
+        }
+
+        fn frame_text(s: &Session) -> Option<String> {
+            s.shadow_frame(PHONE, |t, _, _| {
+                let g = t.grid();
+                (0..g.screen_lines())
+                    .map(|l| {
+                        (0..g.columns())
+                            .map(|c| g[Line(l as i32)][Column(c)].c)
+                            .collect::<String>()
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+        }
+
+        fn sizes(dir: &std::path::Path) -> Vec<String> {
+            std::fs::read_to_string(dir.join("sizes"))
+                .unwrap_or_default()
+                .lines()
+                .map(String::from)
+                .collect()
+        }
+
+        fn stats_after(s: &Session, what: &str, ok: impl Fn(&ShadowStats) -> bool) -> ShadowStats {
+            until(what, 5, || ok(&s.shadow_stats()));
+            s.shadow_stats()
+        }
+
+        const ALT: &str = "printf '\\033[?1049h';";
+
+        /// The frame is the phone's size and its redraw; the Term never left
+        /// its own, was repainted, and the program ends at its own size.
+        #[test]
+        fn shadow_frame_is_phone_size_and_the_term_stays() {
+            let dir = test_dir("frame");
+            let (s, dir) = spawn("frame", &program(&dir, ALT, ""));
+            ready(&s);
+            let generation = s.generation.load(Ordering::Acquire);
+            assert!(s.shadow_capture(PHONE));
+            let st = stats_after(&s, "framed", |st| st.framed == 1);
+            assert_eq!(
+                (st.started, st.signals, st.aborted, st.no_answer),
+                (1, 2, 0, 0)
+            );
+            let text = frame_text(&s).unwrap();
+            assert!(text.contains("SIZE 30 44"), "{text}");
+            {
+                let term = s.term.lock();
+                assert_eq!(term.grid().columns(), 136);
+                assert_eq!(term.grid().screen_lines(), 43);
+            }
+            assert!(real_text(&s).contains("SIZE 43 136"));
+            assert!(
+                s.generation.load(Ordering::Acquire) > generation,
+                "repainted"
+            );
+            assert_eq!(
+                sizes(&dir),
+                ["43 136", "30 44", "43 136"],
+                "told the phone's size once and its own back"
+            );
+            assert_eq!(s.size(), OWN);
+            // nothing moved since: no second capture
+            assert_eq!(s.shadow_due(PHONE, Instant::now()), ShadowDue::No);
+            assert!(!s.shadow_capture(PHONE));
+            s.terminate();
+        }
+
+        /// A program that ignores SIGWINCH: no hang, no frame, blocked a minute.
+        #[test]
+        fn shadow_program_ignoring_winch_is_blocked() {
+            let (s, _dir) = spawn(
+                "ignore",
+                "trap '' WINCH; printf '\\033[?1049hSIZE 43 136'; sleep 60",
+            );
+            ready(&s);
+            let at = Instant::now();
+            assert!(s.shadow_capture(PHONE));
+            let st = stats_after(&s, "gave up", |st| st.no_answer == 1);
+            assert!(at.elapsed() < Duration::from_secs(2), "{:?}", at.elapsed());
+            assert_eq!((st.framed, st.signals), (0, 2));
+            assert!(frame_text(&s).is_none());
+            match s.shadow_due(PHONE, Instant::now()) {
+                ShadowDue::At(when) => {
+                    assert!(when > Instant::now() + Duration::from_secs(55));
+                }
+                other => panic!("{other:?}"),
+            }
+            assert!(!s.shadow_capture(PHONE));
+            s.terminate();
+        }
+
+        /// Ignoring SIGWINCH but printing: what it printed in the window is
+        /// no redraw and reaches the Term, in order, none lost.
+        #[test]
+        fn shadow_held_output_reaches_the_term_without_an_answer() {
+            // One write, released by the test once the capture is open: on a
+            // busy machine a timed program printed across the signal back,
+            // which reads as an answer.
+            let go = test_dir("print").join("go");
+            let (s, _dir) = spawn(
+                "print",
+                &format!(
+                    "trap '' WINCH; printf '\\033[?1049hSIZE 43 136'; \
+                     while [ ! -e {go} ]; do sleep 0.01; done; \
+                     printf '\\r\\nLINE1\\r\\nLINE2\\r\\nLINE3'; sleep 60",
+                    go = go.display()
+                ),
+            );
+            until("up", 10, || real_text(&s).contains("SIZE 43 136"));
+            std::thread::sleep(Duration::from_millis(300));
+            assert!(s.shadow_capture(PHONE));
+            std::fs::write(&go, "").unwrap();
+            let st = stats_after(&s, "gave up", |st| st.no_answer == 1);
+            assert_eq!(st.framed, 0);
+            until("held lines on the term", 3, || {
+                let t = real_text(&s);
+                t.contains("LINE1") && t.contains("LINE2") && t.contains("LINE3")
+            });
+            s.terminate();
+        }
+
+        /// The primary screen is never signalled.
+        #[test]
+        fn shadow_primary_screen_is_never_signalled() {
+            let (s, dir) = spawn(
+                "primary",
+                &format!(
+                    "trap 'echo x >> {}/winch' WINCH; printf 'PLAIN\\n'; \
+                     while :; do sleep 0.02 & wait $!; done",
+                    test_dir("primary").display()
+                ),
+            );
+            until("up", 10, || real_text(&s).contains("PLAIN"));
+            std::thread::sleep(Duration::from_millis(400));
+            assert_eq!(s.shadow_due(PHONE, Instant::now()), ShadowDue::No);
+            assert!(!s.shadow_capture(PHONE));
+            std::thread::sleep(Duration::from_millis(200));
+            assert_eq!(s.shadow_stats(), ShadowStats::default());
+            assert!(!dir.join("winch").exists());
+            s.terminate();
+        }
+
+        /// A shell marker in the window: the capture ends and everything
+        /// goes on the Term, the marker's block too.
+        #[test]
+        fn shadow_marker_aborts_and_feeds_the_term() {
+            let dir = test_dir("marker");
+            let (s, _dir) = spawn(
+                "marker",
+                &program(
+                    &dir,
+                    ALT,
+                    "case $s in 30*) printf 'BEFORE\\033]133;A\\007AFTER';; esac;",
+                ),
+            );
+            ready(&s);
+            assert!(s.shadow_capture(PHONE));
+            let st = stats_after(&s, "aborted", |st| st.aborted == 1);
+            assert_eq!((st.framed, st.signals), (0, 2));
+            assert!(frame_text(&s).is_none());
+            // told its own size back: it repaints; the marker reached the store
+            until("repainted", 3, || real_text(&s).contains("SIZE 43 136"));
+            assert!(
+                s.blocks.lock().unwrap().last().is_some(),
+                "the marker's block"
+            );
+            s.terminate();
+        }
+
+        /// The program leaves the alternate screen in the window: the Term
+        /// leaves it too, with no shell marker at all.
+        #[test]
+        fn shadow_leaving_the_alt_screen_reaches_the_term() {
+            use alacritty_terminal::term::TermMode;
+            let dir = test_dir("leave");
+            let (s, _dir) = spawn(
+                "leave",
+                &program(
+                    &dir,
+                    ALT,
+                    "case $s in 30*) printf '\\033[?1049lBYE';; esac;",
+                ),
+            );
+            ready(&s);
+            assert!(s.shadow_capture(PHONE));
+            stats_after(&s, "aborted", |st| st.aborted == 1);
+            until("left", 3, || {
+                !s.term.lock().mode().contains(TermMode::ALT_SCREEN)
+            });
+            s.terminate();
+        }
+
+        /// The Mac window resizes in the window: the program ends at the new
+        /// size, not at one a late signal brought back.
+        #[test]
+        fn shadow_resize_during_a_capture_wins() {
+            let dir = test_dir("resize");
+            let (mut s, dir) = spawn("resize", &program(&dir, ALT, ""));
+            ready(&s);
+            assert!(s.shadow_capture(PHONE));
+            s.resize(
+                GridSize {
+                    cols: 100,
+                    rows: 40,
+                },
+                (8, 16),
+            );
+            until("redrew at the new size", 3, || {
+                real_text(&s).contains("SIZE 40 100")
+            });
+            until("capture over", 3, || {
+                s.shadow.state.lock().unwrap().capture.is_none()
+            });
+            std::thread::sleep(Duration::from_millis(100));
+            assert_eq!(sizes(&dir).last().unwrap(), "40 100", "{:?}", sizes(&dir));
+            assert_eq!(s.shadow_stats().framed, 0);
+            // the resize's own redraw went to the Term: nothing to give back
+            assert_eq!(s.shadow_stats().no_answer, 0);
+            s.terminate();
+        }
+
+        /// The pane closes in the window: no panic, no thread left holding it.
+        #[test]
+        fn shadow_pane_closed_during_a_capture() {
+            let dir = test_dir("close");
+            let (s, _dir) = spawn("close", &program(&dir, ALT, ""));
+            ready(&s);
+            assert!(s.shadow_capture(PHONE));
+            let shadow = s.shadow.clone();
+            s.terminate();
+            drop(s);
+            until("driver gone", 3, || Arc::strong_count(&shadow) == 1);
+            // given up, not finished: no frame for a pane that is gone
+            let state = shadow.state.lock().unwrap();
+            assert!(state.closed && state.frame.is_none() && state.capture.is_none());
+        }
+
+        /// Input in the window: no frame, the answer lands on the Term.
+        #[test]
+        fn shadow_input_ends_a_capture() {
+            let dir = test_dir("input");
+            let (s, dir) = spawn("input", &program(&dir, ALT, ""));
+            ready(&s);
+            assert!(s.shadow_capture(PHONE));
+            s.write(b"x");
+            until("capture over", 3, || {
+                s.shadow.state.lock().unwrap().capture.is_none()
+            });
+            assert_eq!(s.shadow_stats().framed, 0);
+            until("repainted", 3, || real_text(&s).contains("SIZE 43 136"));
+            assert_eq!(sizes(&dir).last().unwrap(), "43 136");
+            s.terminate();
+        }
+
+        /// Output moved on: the frame says how far behind, and a new one is due.
+        #[test]
+        fn shadow_frame_falls_behind_output() {
+            let (s, _d) = spawn(
+                "behind",
+                &format!(
+                    "exec 2>/dev/null; {ALT}\n\
+                     draw() {{ s=$(stty size </dev/tty); printf '\\033[2J\\033[HSIZE %s' \"$s\"; }}\n\
+                     trap draw WINCH; draw\n\
+                     while :; do read -r l && printf '\\r\\nGOT%s' \"$l\"; done\n"
+                ),
+            );
+            ready(&s);
+            assert!(s.shadow_capture(PHONE));
+            stats_after(&s, "framed", |st| st.framed == 1);
+            assert_eq!(s.shadow_frame(PHONE, |_, _, b| b), Some(None));
+            s.write(b"1\n");
+            until("output", 3, || real_text(&s).contains("GOT1"));
+            let behind = s.shadow_frame(PHONE, |_, _, b| b).unwrap();
+            assert!(behind.is_some());
+            match s.shadow_due(PHONE, Instant::now()) {
+                ShadowDue::At(_) | ShadowDue::Now => {}
+                ShadowDue::No => panic!("no new capture due"),
+            }
+            s.terminate();
+        }
     }
 }

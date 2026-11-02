@@ -44,6 +44,8 @@ export interface KeyCaptureViewProps {
   mode: KeyCaptureMode;
   onText?: (e: TextEvent) => void;
   onKey?: (e: KeyEvent) => void;
+  /** Terminal mode: the system asked to paste (⌘V, the keyboard's Paste key). */
+  onPaste?: () => void;
   /** Terminal mode: the view took or lost the focus. */
   onFocusChange?: (focused: boolean) => void;
   /** Shortcuts mode: take Tab / Shift+Tab from the field (else they move the focus). */

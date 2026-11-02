@@ -50,9 +50,17 @@
       "expo-router",
       "expo-secure-store",
       [
+        "expo-image-picker",
+        {
+          "photosPermission": "Rift sends the photo or screenshot you pick to the program on your computer.",
+          "cameraPermission": "Rift uses the camera to scan the pairing code on your computer's screen, and to take a photo you send to the program.",
+          "microphonePermission": false
+        }
+      ],
+      [
         "expo-camera",
         {
-          "cameraPermission": "Rift uses the camera to scan the pairing code on your computer's screen.",
+          "cameraPermission": "Rift uses the camera to scan the pairing code on your computer's screen, and to take a photo you send to the program.",
           "microphonePermission": false,
           "recordAudioAndroid": false
         }

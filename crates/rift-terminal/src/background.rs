@@ -283,6 +283,22 @@ impl Background {
                     }
                     s.write(text.as_bytes());
                 }
+                rift_remote::Input::Paste(text) => {
+                    use rift_pty::alacritty_terminal::term::TermMode;
+                    if !route.takes_text() {
+                        return Err(InputError::Busy);
+                    }
+                    let bracketed = s.term.lock().mode().contains(TermMode::BRACKETED_PASTE);
+                    if !bracketed && crate::input::paste_submits_lines(&text) {
+                        return Err(InputError::Unavailable(
+                            crate::remote::PASTE_ONE_LINE.into(),
+                        ));
+                    }
+                    s.write(&crate::input::paste_bytes(&text, bracketed));
+                }
+                rift_remote::Input::Mouse { .. } => {
+                    return Err(InputError::Unavailable(crate::remote::NOT_TRACKING.into()));
+                }
             }
             Ok(())
         })

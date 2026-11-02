@@ -174,7 +174,8 @@ export function trackIdle(
  * buttons would read the same (the answer screen shows the whole entries).
  */
 export function quickChoices(w: Waiting): { label: string; index: number; opens: boolean }[] | null {
-  if (w.kind !== "choice" || w.choices.length > 3) return null;
+  // a button's short label would hide the command an entry runs: those are answered where it shows
+  if (w.kind !== "choice" || w.choices.length > 3 || w.choices.some((c) => /`[^`]+`/.test(c))) return null;
   const reply = replyChoice(w);
   const quick = w.choices.map((c, index) => {
     const t = c.trim();
@@ -315,7 +316,7 @@ export function focusPane(tab: Tab): Pane | undefined {
 }
 
 /** Coding agents get the ✳ tile, everything else the `>_` one. */
-export const isAgentProgram = (program: string | null) => program === "claude" || program === "codex";
+export const isAgentProgram = (program: string | null) => program === "claude" || program === "codex" || program === "opencode";
 
 /** "now", "2m", "3h", "4d": a short age for the state texts. */
 export function agoCompact(ms: number): string {
@@ -359,6 +360,8 @@ export interface TabRow {
   title: string;
   kind: TabKind;
   agent: boolean;
+  /** The program in the row's pane, for its mark. */
+  program: string | null;
   state: string;
   line: string;
   /** The question of the asking pane, with the pane it was asked in. */
@@ -420,6 +423,7 @@ export function tabRow(h: HostView, tab: Tab, ctx: RowContext, idle: ReadonlyMap
     title: p?.running?.title || tabTitle(tab),
     kind,
     agent,
+    program,
     state,
     line,
     ask: waiting && p ? { pane: p.id, waiting, program } : null,
@@ -445,7 +449,8 @@ export function homeCounts(rows: readonly { kind: TabKind }[]): Record<HomeFilte
 
 /** Rows in the chip's state, or all of them without one. */
 export function filterHome<T extends { kind: TabKind }>(rows: readonly T[], f: HomeFilter | null): T[] {
-  return f === null ? [...rows] : rows.filter((r) => homeFilterOf(r.kind) === f);
+  // no filter: tab order, with what needs an answer on top of its computer
+  return f === null ? [...rows.filter((r) => r.kind === "needs"), ...rows.filter((r) => r.kind !== "needs")] : rows.filter((r) => homeFilterOf(r.kind) === f);
 }
 
 /** The Tabs sheet's filter. */

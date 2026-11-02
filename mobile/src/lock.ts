@@ -51,9 +51,12 @@ export function isSubmitKey(key: string): boolean {
   return /^(ctrl\+)?(alt\+)?(shift\+)?enter$/.test(key) || /^ctrl\+(alt\+)?[mj]$/.test(key);
 }
 
-/** Authenticate before sending `keys`: one of them submits, and Run would ask too. */
-export function keysNeedAuth(keys: readonly string[], settings: Settings): boolean {
-  return needsAuthBeforeRun(settings) && keys.some(isSubmitKey);
+/**
+ * Authenticate before sending `keys`: one of them submits, and Run would ask too. `agent`: the pane
+ * runs a coding agent, where ctrl+j starts a new line and submits nothing.
+ */
+export function keysNeedAuth(keys: readonly string[], settings: Settings, agent = false): boolean {
+  return needsAuthBeforeRun(settings) && keys.some((k) => isSubmitKey(k) && !(agent && k === "ctrl+j"));
 }
 
 /**

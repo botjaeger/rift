@@ -6,6 +6,7 @@ import * as scroll from "../src/scroll";
 import * as terminal from "../src/terminal";
 import * as paneView from "../src/paneView";
 import * as controlKeys from "../src/controlKeys";
+import * as selection from "../src/selection";
 
 type Node = { type: unknown; props: Record<string, unknown> & { children: unknown[] } };
 type Touch = (event: { nativeEvent: { touches: { pageX: number; pageY: number }[] } }) => void;
@@ -32,18 +33,23 @@ function harness(typing = false) {
       AppState: { addEventListener: (_: string, fn: (state: string) => void) => {
         appListeners.add(fn); return { remove: () => appListeners.delete(fn) };
       } },
-      StyleSheet: { create: (s: unknown) => s },
+      AccessibilityInfo: { isScreenReaderEnabled: () => Promise.resolve(false), addEventListener: () => ({ remove() {} }), announceForAccessibility() {} },
+      Keyboard: { addListener: () => ({ remove() {} }) },
+      Platform: { OS: "ios" },
+      StyleSheet: { create: (s: unknown) => s, absoluteFill: {} },
       View: "View", ScrollView: "ScrollView", Pressable: "Pressable", Text: "Text",
     },
-    "@/runtime": { useApp: () => ({ settings: {} }), fleet: { sendScroll: send } },
+    "@/runtime": { useApp: () => ({ settings: { controlKeys: [] }, hosts: [] }), fleet: { sendScroll: send } },
     "@/scroll": scroll,
     "@/terminal": terminal,
     "@/paneView": paneView,
+    "@/selection": selection,
     "@/keyboard": { terminalInput: () => ({ flush() {} }) },
     "@/lock": { SubmitAuthHold: class { end() {} } },
-    "@/upload": { ImagePaste: class {} },
+    "@/pending": {}, "@/fleet": { draftKey: (h: string, p: number) => `${h}:${p}` },
     "./useActionScope": { useActionScope: () => ({ capture: () => () => true }) },
     "./useOpenShell": { useOpenShell: () => () => {} },
+    "./Icon": { Icon: "Icon" },
     "./ControlRow": { NO_STICKY: {}, ControlRow: "ControlRow" },
     "./theme": { colors: {}, ui: () => "ui" },
     "../../modules/rift-keys": { KeyCaptureView: "KeyCaptureView" },

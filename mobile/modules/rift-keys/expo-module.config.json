@@ -1,9 +1,9 @@
 {
   "platforms": ["apple", "android", "web"],
   "apple": {
-    "modules": ["RiftKeysModule"]
+    "modules": ["RiftKeysModule", "RiftPasteModule"]
   },
   "android": {
-    "modules": ["dev.botjaeger.rift.keys.RiftKeysModule"]
+    "modules": ["dev.botjaeger.rift.keys.RiftKeysModule", "dev.botjaeger.rift.keys.RiftClipboardModule"]
   }
 }

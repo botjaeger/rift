@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import { TEXT_ON, TINTED_TEXT, colors, contrast, over, tints } from "../src/ui/palette";
 
 describe("text contrast (WCAG AA, 4.5:1)", () => {
@@ -14,6 +15,15 @@ describe("text contrast (WCAG AA, 4.5:1)", () => {
 
   it("lays a tint over its ground", () => {
     expect(over("#ffffff80", "#000000")).toBe("#808080");
+  });
+
+  it("the Updated pill's text reads on its ground", () => {
+    const view = readFileSync(new URL("../src/ui/TerminalView.tsx", import.meta.url), "utf8");
+    const fg = /ageText: \{[^}]*color: colors\.(\w+)/.exec(view)![1] as keyof typeof colors;
+    expect(/\bage: \{[^}]*backgroundColor: colors\.chrome/.test(view)).toBe(true);
+    // a strip above the screen: floating, it covered the start of the program's first row
+    expect(/\bage: \{[^}]*position: "absolute"/.test(view)).toBe(false);
+    expect(contrast(colors[fg], colors.chrome)).toBeGreaterThanOrEqual(4.5);
   });
 
   it("computes WCAG ratios (black/white 21, equal colors 1)", () => {

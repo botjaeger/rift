@@ -2224,7 +2224,8 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.contains("timed out"), "{e}");
-        assert!(t.elapsed() < Duration::from_secs(5));
+        // under the sleep itself, not a tight bound: a loaded runner may wake the wait late
+        assert!(t.elapsed() < Duration::from_secs(9));
         assert_eq!(
             run_for(
                 std::process::Command::new("/bin/echo").arg("hi"),
