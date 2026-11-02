@@ -137,8 +137,9 @@ EOF
 # The inner shell starts through a ZDOTDIR shim: each file sources the user's
 # own, then the last one unsets HISTFILE, so no line typed into this shell can
 # reach the user's history, whatever INC_APPEND_HISTORY or SHARE_HISTORY say
-# (HIST_IGNORE_SPACE alone let the setup line through on the CI runner). The
-# sourcing stays inline: inside a function the rc's `typeset`s would be local.
+# (HIST_IGNORE_SPACE alone is not enough: a compinit in the rc files asking
+# about insecure directories eats the line's leading space). The sourcing
+# stays inline: inside a function the rc's `typeset`s would be local.
 local load='if [[ -n $__rift_zd ]]; then ZDOTDIR=$__rift_zd; else unset ZDOTDIR; fi
 [[ -r ${ZDOTDIR:-$HOME}/NAME ]] && source ${ZDOTDIR:-$HOME}/NAME
 __rift_zd=${ZDOTDIR-}

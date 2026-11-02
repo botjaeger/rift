@@ -7,5 +7,9 @@ COPY ci-apt.txt /tmp/ci-apt.txt
 RUN apt-get update \
     && xargs -a /tmp/ci-apt.txt env DEBIAN_FRONTEND=noninteractive apt-get install -y python3 git \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd -m runner
+    && useradd -m runner \
+    && mkdir -p /usr/local/share/zsh/site-functions \
+    && chmod o+w /usr/local/share/zsh/site-functions
+# The runner's fpath has an insecure directory, so the compinit in Ubuntu's
+# /etc/zsh/zshrc stops and asks; the first key typed answers it.
 USER runner

@@ -355,8 +355,10 @@ script = scratch / "smoke.rift"
 script.write_text("\n".join(steps) + "\n")
 # A default-shell fixture must not source the user's rc files: those may
 # run external tools or wait for input before Rift's integration can load.
+# Nor may Ubuntu's /etc/zsh/zshrc: its compinit asks about an insecure fpath
+# directory (the CI runner has one) and eats the first key a test types.
 env = dict(os.environ, HOME=str(scratch / "home"), XDG_CONFIG_HOME=str(scratch / "cfg"),
-           XDG_DATA_HOME=str(scratch / "data"), RIFT_NO_NOTIFY="1")
+           XDG_DATA_HOME=str(scratch / "data"), RIFT_NO_NOTIFY="1", skip_global_compinit="1")
 started = time.monotonic()
 with (scratch / "app.log").open("w") as log:
     # headless: never shown or focused, so typing elsewhere cannot leak in
