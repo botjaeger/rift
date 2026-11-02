@@ -475,7 +475,7 @@ fn drop_does_not_wait_for_a_shell_that_ignores_sighup() {
     let options = Options {
         shell: Some(crate::tty::Shell::new(
             "/bin/sh".into(),
-            vec!["-c".into(), "trap '' HUP; sleep 5".into()],
+            vec!["-c".into(), "trap '' HUP; sleep 30".into()],
         )),
         ..Default::default()
     };
@@ -484,5 +484,6 @@ fn drop_does_not_wait_for_a_shell_that_ignores_sighup() {
     std::thread::sleep(std::time::Duration::from_millis(300));
     let started = std::time::Instant::now();
     drop(pty);
-    assert!(started.elapsed() < std::time::Duration::from_secs(2), "{:?}", started.elapsed());
+    // a stalled runner took 2.5 s over the 0.5 s wait; a blocking drop takes the full 30 s
+    assert!(started.elapsed() < std::time::Duration::from_secs(15), "{:?}", started.elapsed());
 }
