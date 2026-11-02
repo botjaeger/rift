@@ -8,6 +8,30 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.24.0 — 2026-11-02
+
+Using Rift from your phone no longer changes the window on your Mac.
+
+### New
+
+- **Phone and desktop keep their own screens** — While you use a window, a phone never resizes
+  its pane. A full-screen program such as Claude Code, Codex, OpenCode or vim is shown to the phone
+  at the phone's size, and your window stays as it is. A window left alone for a minute fits the
+  phone live until you come back.
+- **Copy to phones** — A new Remote access setting, off by default, also hands what a program
+  copies to paired phones that may operate.
+
+### Improved
+
+- **Paste from the phone** — Images and files of up to 10 MB reach the program on your computer,
+  and several pasted lines arrive as one paste. A tap on the phone is a click for a program that
+  tracks the mouse.
+
+### Fixed
+
+- **"Too many connections" on a flaky network** — A phone connecting again now ends its own
+  connections that went silent, so it is no longer locked out of a computer.
+
 ## 0.23.2 — 2026-10-29
 
 ### Improved

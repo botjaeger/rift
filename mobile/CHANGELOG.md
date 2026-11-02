@@ -6,6 +6,35 @@ build (`## <version> — <YYYY-MM-DD>`) or an over-the-air update to one
 message its download carries. Items use `### New`, `### Improved` or
 `### Fixed` sections of `- **Title** — text`.
 
+## 0.5.0 — 2026-11-02
+
+Your phone gets its own screen, and pasted things wait for you to press Send. Needs Rift 0.24.0 on your computer for all of it.
+
+### New
+
+- **Your own screen** — Using the phone no longer resizes the window on your computer. Full-screen
+  programs are drawn at the phone's size, and the pane says how old a picture is when it falls behind.
+- **Paste, then write** — A pasted image, file or long text goes in the message box as `[Image 1]`,
+  `[File note.pdf]` or `[Text 12 lines]`, and you type around it. Nothing reaches the program until
+  you press Send. Deleting part of one removes all of it.
+- **Attach** — The + beside the message box takes a photo from your library or camera, or a file.
+- **Select to copy** — Selecting text in a terminal screen or a block copies it by itself.
+- **New tab and New pane** — Open a shell, Claude Code, Codex or OpenCode from the Tabs and Panes sheets.
+
+### Improved
+
+- **Just the terminal** — A pane shows the program's screen or terminal blocks, with no switch between views.
+- **Return is a new line** — Only the send button sends. With a hardware keyboard Return sends and
+  Shift+Return is a new line.
+- **Paste is one tap away** — Paste leads the keys above the keyboard while a program runs.
+- **A computer coming back** — One that stopped answering gets a quiet try every 30 seconds while the app is open.
+
+### Fixed
+
+- **Hardware keyboards** — Ctrl+V pastes into the message box, and Ctrl+Z no longer suspends the
+  program while you are writing.
+- **Taps in programs** — A tap is a click for a program that tracks the mouse.
+
 ## 0.4.1 · update 2 — 2026-10-25
 
 Scrolling starts the moment you drag and stops when you leave.
