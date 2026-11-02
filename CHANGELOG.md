@@ -8,6 +8,14 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.24.1 — 2026-11-02
+
+### Fixed
+
+- **Completion never touches your zsh history** — When your zsh setup asks a question at startup
+  (such as compinit warning about insecure directories), the hidden shell that finds completions
+  could leave one line of its own setup in your history. It now keeps no history at all.
+
 ## 0.24.0 — 2026-11-02
 
 Using Rift from your phone no longer changes the window on your Mac.
