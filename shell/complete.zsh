@@ -36,7 +36,7 @@ local line got
 umask 077
 local setup_dir=$(mktemp -d "${TMPDIR:-/tmp}/rift-complete.XXXXXXXX") || exit 1
 local setup=$setup_dir/setup.zsh
-trap 'rm -f -- "$setup"; rmdir -- "$setup_dir" 2>/dev/null || true' EXIT
+trap 'rm -rf -- "$setup_dir"' EXIT
 cat >| $setup <<'EOF'
 PROMPT= RPROMPT= PS2= PS4=
 # this hidden shell keeps no history of its own: nothing it does reaches
@@ -134,9 +134,31 @@ compadd() {
 print -r -- $'\x1e'rdy
 EOF
 
-# HIST_IGNORE_SPACE from the start, so the line that loads the setup (typed
-# with a leading space, before the setup can unset HISTFILE) is never saved
-# to the user's history, even by INC_APPEND_HISTORY or SHARE_HISTORY
+# The inner shell starts through a ZDOTDIR shim: each file sources the user's
+# own, then the last one unsets HISTFILE, so no line typed into this shell can
+# reach the user's history, whatever INC_APPEND_HISTORY or SHARE_HISTORY say
+# (HIST_IGNORE_SPACE alone let the setup line through on the CI runner). The
+# sourcing stays inline: inside a function the rc's `typeset`s would be local.
+local load='if [[ -n $__rift_zd ]]; then ZDOTDIR=$__rift_zd; else unset ZDOTDIR; fi
+[[ -r ${ZDOTDIR:-$HOME}/NAME ]] && source ${ZDOTDIR:-$HOME}/NAME
+__rift_zd=${ZDOTDIR-}
+'
+local finish='if [[ -n $__rift_zd ]]; then ZDOTDIR=$__rift_zd; else unset ZDOTDIR; fi
+unset __rift_zd __rift_shim
+'
+print -r -- '__rift_shim=$ZDOTDIR __rift_zd=$RIFT_COMPLETE_ZDOTDIR
+unset RIFT_COMPLETE_ZDOTDIR
+'"${load//NAME/.zshenv}"'ZDOTDIR=$__rift_shim' >| $setup_dir/.zshenv
+print -r -- "${load//NAME/.zprofile}"'ZDOTDIR=$__rift_shim' >| $setup_dir/.zprofile
+print -r -- "${load//NAME/.zshrc}"'unset HISTFILE
+if [[ -o login ]]; then ZDOTDIR=$__rift_shim; else
+'"$finish"'fi' >| $setup_dir/.zshrc
+print -r -- "${load//NAME/.zlogin}"'unset HISTFILE
+'"$finish" >| $setup_dir/.zlogin
+export RIFT_COMPLETE_ZDOTDIR=${ZDOTDIR-} ZDOTDIR=$setup_dir
+
+# HIST_IGNORE_SPACE too, for a shell that skips the rc files (-f, the remote
+# `rift-complete`): the line that loads the setup has a leading space
 RIFT_COMPLETE_SHELL=1 zpty rift ${(q)prog} -o histignorespace ${(q)args[@]} -i || exit 1
 integer pty=$REPLY
 # Wait until the inner shell wrote something; false once the parent that
@@ -153,8 +175,7 @@ zpty -w rift " source ${(q)setup}"
 while __rift_wait && zpty -r rift got; do
   [[ $got == *$'\x1e'rdy* ]] && break
 done
-rm -f -- $setup
-rmdir -- $setup_dir
+rm -rf -- $setup_dir
 print -r -- $'\x1e'ready
 
 while IFS= read -r id && IFS= read -r cwd && IFS= read -r line && IFS= read -r n; do
