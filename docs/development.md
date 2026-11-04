@@ -450,8 +450,10 @@ downloaded). The app's updater reads
    `latest.json.sig`, and the CHANGELOG section as notes (`--draft` to
    review first; `--run ID` to pick a workflow run).
 
-   When GitHub Actions cannot run (billing, an outage), build the same
-   packages on a Mac instead: `scripts/release-local.sh vX.Y.Z` checks out
+   `publish-release.sh` also mounts every DMG and refuses one whose
+   Rift.app is not signed by a certificate. The workflow signs ad hoc (the
+   certificate never reaches CI), so releases are built on the maintainer's
+   Mac instead: `scripts/release-local.sh vX.Y.Z` checks out
    the tag in a temporary worktree, builds both macOS targets on the Mac
    (cross-compiling the other architecture) and Linux x86_64 in docker
    (`linux/amd64`, emulated on Apple silicon), and

@@ -88,6 +88,27 @@ MANIFEST="$(find "$DIST" -type f -name latest.json | head -n 1)"
 python3 scripts/release-manifest.py --verify "$MANIFEST" "$DIST"
 GOT="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["version"])' "$MANIFEST")"
 [ "$GOT" = "$VERSION" ] || rift_die "latest.json is for $GOT, not $TAG"
+# every DMG's Rift.app is signed by a certificate, never ad hoc: macOS ties
+# users' privacy grants (Full Disk Access) to the signature, and an ad hoc one
+# (CI has no certificate) drops them on that update
+DMGS=()
+while IFS= read -r -d '' f; do
+    DMGS+=("$f")
+done < <(find "$DIST" -type f -name '*.dmg' -print0)
+if [ "${#DMGS[@]}" -gt 0 ]; then
+    command -v hdiutil >/dev/null || rift_die "checking the DMGs' signatures needs macOS (hdiutil)"
+    for dmg in "${DMGS[@]}"; do
+        MNT="$(mktemp -d)"
+        hdiutil attach -quiet -nobrowse -readonly -mountpoint "$MNT" "$dmg"
+        REQ="$(codesign -d -r- "$MNT/Rift.app" 2>&1 || true)"
+        hdiutil detach -quiet "$MNT"
+        rmdir "$MNT"
+        case "$REQ" in
+            *"designated => "*"certificate leaf"*) ;;
+            *) rift_die "${dmg##*/} is not signed with the release identity (build it with scripts/release-local.sh): $REQ" ;;
+        esac
+    done
+fi
 # the updater refuses a manifest without a valid signature: sign it here
 # (the key never reaches CI), check it, and publish latest.json.sig with it
 [ ! -e "$MANIFEST.sig" ] || rift_die "$SOURCE already carries a latest.json.sig"
