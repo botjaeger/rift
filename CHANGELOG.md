@@ -8,6 +8,15 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.25.1 — 2026-11-05
+
+### Fixed
+
+- **Rift Helper stuck on "Unknown · restart Rift"** — After an update, Settings › Permissions
+  could keep showing Rift Helper's Full Disk Access as unknown even after you restarted Rift.
+  The part of Rift that runs your shells now updates to the new version as soon as it runs no
+  shell, so the status shows after one restart.
+
 ## 0.25.0 — 2026-11-05
 
 No more "Operation not permitted" in Downloads or Documents, once and for all.
