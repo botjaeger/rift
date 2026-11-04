@@ -1686,7 +1686,8 @@ description) left, control right; it runs to the bottom edge.
     `Rift.app/Contents/Library/LoginItems`) to drag into the list, since
     macOS lists an app there only once it was added. Pill words: `Checking…`, `Granted`, `Not
     granted`, `Unknown` (the app could not tell), `Unknown · restart Rift` (the
-    running session service is older than this Rift and cannot be asked) and
+    running session service is older than this Rift and cannot be asked; once
+    it runs no shell, the next shell replaces it with this release's) and
     `Not running` (no session service).
   - `Optional` › `Notifications` — *Banners when a command finishes or an agent
     needs you*; the pill follows the system's notification permission

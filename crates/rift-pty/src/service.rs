@@ -21,14 +21,23 @@ pub fn connect() -> std::io::Result<UnixStream> {
 fn connect_features() -> std::io::Result<(UnixStream, Vec<String>)> {
     let path = ipc::socket_path().ok_or_else(|| std::io::Error::other("no data dir"))?;
     if let Ok(s) = UnixStream::connect(&path) {
-        return handshake_features(s);
+        let (s, features) = handshake_features(s)?;
+        if !outdated(&features) {
+            return Ok((s, features));
+        }
     }
     // panes connect on their own threads: one starts the service, the
     // others wait for it (two starts race launchd's bootstrap/bootout)
     static START: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _start = START.lock().unwrap_or_else(|e| e.into_inner());
     if let Ok(s) = UnixStream::connect(&path) {
-        return handshake_features(s);
+        let (mut s, features) = handshake_features(s)?;
+        // a service from an earlier release that runs no shell (an update
+        // kept it, then the shells ended) is replaced by this release's;
+        // one with shells stays: ending it would end them
+        if !outdated(&features) || !retire_if_empty(&mut s, &path) {
+            return Ok((s, features));
+        }
     }
     let exe = std::env::current_exe()?;
     crate::launchd::spawn_helper("session", &exe, &["--session-daemon"], None)?;
@@ -47,6 +56,46 @@ fn connect_features() -> std::io::Result<(UnixStream, Vec<String>)> {
             Err(_) => std::thread::sleep(Duration::from_millis(30)),
         }
     }
+}
+
+/// The service lacks a feature this build's would list: an earlier release.
+fn outdated(features: &[String]) -> bool {
+    ipc::FEATURES
+        .iter()
+        .any(|want| !features.iter().any(|f| f == want))
+}
+
+/// How long a retired service may take to exit.
+const RETIRE_WAIT: Duration = Duration::from_secs(2);
+
+/// End the service on `s` (serving `path`) when it runs no shell; true once
+/// it no longer accepts there.
+fn retire_if_empty(s: &mut UnixStream, path: &std::path::Path) -> bool {
+    if ipc::send_json(s, &Request::List).is_err() {
+        return false;
+    }
+    match next_event(s) {
+        Ok(Event::Sessions { sessions }) if sessions.is_empty() => {}
+        _ => return false,
+    }
+    // the kernel's word for who serves the socket, not the hello's
+    let Some(pid) = ipc::peer_pid(s).and_then(|p| libc::pid_t::try_from(p).ok()) else {
+        return false;
+    };
+    log::info!("session service {pid} is from an earlier release and runs no shell: replacing it");
+    if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
+        return false;
+    }
+    // its socket, not its pid: an exited process its parent has not reaped
+    // yet still answers kill(pid, 0)
+    let deadline = Instant::now() + RETIRE_WAIT;
+    while UnixStream::connect(path).is_ok() {
+        if Instant::now() > deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    true
 }
 
 fn handshake(s: UnixStream) -> std::io::Result<UnixStream> {
@@ -345,6 +394,49 @@ fn ask_privacy(s: &mut UnixStream, features: &[String]) -> ServicePrivacy {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn a_service_missing_any_feature_is_outdated() {
+        let all: Vec<String> = ipc::FEATURES.iter().map(|f| f.to_string()).collect();
+        assert!(!outdated(&all));
+        assert!(outdated(&[]));
+        // v0.24: profile arguments, no privacy answer
+        assert!(outdated(&[ipc::FEATURE_ARGS.to_string()]));
+    }
+
+    #[test]
+    fn a_service_running_shells_is_not_retired() {
+        let (mut ours, mut theirs) = UnixStream::pair().unwrap();
+        let shell = ipc::SessionInfo {
+            id: 1,
+            pid: 1,
+            cwd: None,
+            job: None,
+            started: 0,
+            clients: Vec::new(),
+            retained_bytes: 0,
+        };
+        ipc::send_json(
+            &mut theirs,
+            &Event::Sessions {
+                sessions: vec![shell],
+            },
+        )
+        .unwrap();
+        // the pair's peer is this process: a retirement would signal it
+        let path = std::path::Path::new("/nonexistent/sock");
+        assert!(!retire_if_empty(&mut ours, path));
+        // a service that does not answer the list is kept too
+        let (mut ours, theirs) = UnixStream::pair().unwrap();
+        drop(theirs);
+        assert!(!retire_if_empty(&mut ours, path));
+    }
+
+    #[test]
+    fn the_peer_pid_is_the_kernels() {
+        let (ours, _theirs) = UnixStream::pair().unwrap();
+        assert_eq!(ipc::peer_pid(&ours), Some(std::process::id()));
+    }
 
     #[test]
     fn a_service_without_the_feature_is_outdated_and_is_not_asked() {

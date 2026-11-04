@@ -22,6 +22,9 @@ pub const MAX_FRAME: usize = 4 << 20;
 pub const FEATURE_ARGS: &str = "args";
 /// The service answers `Request::Privacy`.
 pub const FEATURE_PRIVACY: &str = "privacy";
+/// Every feature this build's service lists in its hello. A running service
+/// missing one is from an earlier release.
+pub const FEATURES: &[&str] = &[FEATURE_ARGS, FEATURE_PRIVACY];
 pub const FRAME_JSON: u8 = 0;
 pub const FRAME_OUTPUT: u8 = 1;
 pub const FRAME_INPUT: u8 = 2;
@@ -325,6 +328,47 @@ pub fn peer_uid(s: &std::os::unix::net::UnixStream) -> Option<u32> {
         target_os = "openbsd",
         target_os = "linux"
     )))]
+    {
+        let _ = fd;
+        None
+    }
+}
+
+/// Process id at the other end of a Unix socket, as the kernel knows it.
+pub fn peer_pid(s: &std::os::unix::net::UnixStream) -> Option<u32> {
+    use std::os::fd::AsRawFd;
+    let fd = s.as_raw_fd();
+    #[cfg(target_os = "macos")]
+    {
+        let mut pid: libc::pid_t = 0;
+        let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+        let ok = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_LOCAL,
+                libc::LOCAL_PEERPID,
+                (&mut pid as *mut libc::pid_t).cast(),
+                &mut len,
+            )
+        } == 0;
+        (ok && pid > 0).then_some(pid as u32)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        let ok = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                (&mut cred as *mut libc::ucred).cast(),
+                &mut len,
+            )
+        } == 0;
+        (ok && cred.pid > 0).then_some(cred.pid as u32)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = fd;
         None

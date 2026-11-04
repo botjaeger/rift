@@ -1565,7 +1565,8 @@ Helper* (granting only *Rift* helps the window, not the shells). Settings ›
 Permissions lists the switches with their live status and a button into the
 right System Settings pane: Full Disk Access per app that runs shells (the
 helper's status is read inside the service, over its socket; a service older
-than this Rift reads `Unknown · restart Rift`; while it is off, `Show in Finder`
+than this Rift reads `Unknown · restart Rift`, and once it runs no shell the
+next shell replaces it with this release's; while it is off, `Show in Finder`
 reveals Rift Helper.app to drag into the list) and Notifications. The page
 exists on macOS only. Releases are signed with one fixed identity, so a grant
 survives updates.

@@ -419,7 +419,7 @@ fn handle(
             reply(Event::Hello {
                 version: ipc::PROTOCOL_VERSION,
                 pid: std::process::id(),
-                features: vec![ipc::FEATURE_ARGS.into(), ipc::FEATURE_PRIVACY.into()],
+                features: ipc::FEATURES.iter().map(|f| f.to_string()).collect(),
             });
         }
         Request::Privacy => reply(Event::Privacy {
